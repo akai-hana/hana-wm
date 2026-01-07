@@ -2,11 +2,8 @@
 
 const std = @import("std");
 
-// hana version
-const VERSION = "0.1.1";
-
 // core/
-const config = @import("config.zig");
+const config = @import("config");
 const defs = @import("defs");
 
 // modules/
@@ -32,15 +29,18 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Connect to X11
-    const conn = xcb.xcb_connect(null, null);
+    // 1. Connect to X11
+    const conn = xcb.xcb_connect(null, null) orelse {
+        std.debug.print("Failed to connect to X11 display server (null connection)\n", .{});
+        return error.X11ConnectionFailed;
+    };
     if (xcb.xcb_connection_has_error(conn) != 0) {
-        std.debug.print("Failed to connect to X11 display server\n", .{});
+        std.debug.print("Failed to connect to X11 display server (connection error)\n", .{});
         return error.X11ConnectionFailed;
     }
     defer xcb.xcb_disconnect(conn);
 
-    // Get screen
+    // 2. Get screen
     const setup = xcb.xcb_get_setup(conn);
     const screen_iter = xcb.xcb_setup_roots_iterator(setup);
     const screen = screen_iter.data;
@@ -50,7 +50,7 @@ pub fn main() !void {
     }
     const root = screen.*.root;
 
-    // Try to become window manager
+    // 3. Try to become window manager
     const mask = xcb.XCB_CW_EVENT_MASK;
     const values = [_]u32{
         xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
@@ -70,15 +70,15 @@ pub fn main() !void {
         return error.AnotherWMRunning;
     }
 
-    std.debug.print("hana window manager v{s} started\n", .{VERSION});
+    std.debug.print("hana window manager started\n", .{});
 
-    // Load config
+    // 4. Load config
     const user_config = config.loadConfig(allocator, "config.toml") catch blk: {
         std.debug.print("Failed to load config, using defaults\n", .{});
         break :blk defaultConfig();
     };
 
-    // Initialize WM
+    // 5. Initialize WM
     var wm = WM{
         .conn = conn,
         .screen = screen,
@@ -87,7 +87,7 @@ pub fn main() !void {
         .allocator = allocator,
     };
 
-    // Initialize modules
+    // 6. Initialize modules
     var modules = std.ArrayList(defs.Module).init(allocator);
     defer modules.deinit();
 
@@ -98,7 +98,7 @@ pub fn main() !void {
         module.init(&wm);
     }
 
-    // Main event loop
+    // 7. Main event loop
     _ = xcb.xcb_flush(conn);
 
     while (true) {
@@ -109,7 +109,7 @@ pub fn main() !void {
         const event_type = @as(*u8, @ptrCast(event)).*;
         const response_type = event_type & ~defs.X11_SYNTHETIC_EVENT_FLAG;
 
-        // Dispatch to modules (only call modules that handle this event, for optimization purposes)
+        // Dispatch to modules (optimized: only call modules that handle this event)
         for (modules.items) |*module| {
             // Check if this module handles this event type
             var handles = false;

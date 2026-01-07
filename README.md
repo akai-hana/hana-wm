@@ -26,7 +26,7 @@ They bring simplicity and quality of life to a graphical desktop experience. The
 
 All of this might sound overly personal or dramatic, but that's just how I feel about window managers.
 
-Now... *Why make one from scratch?* I mean, it's not like there aren't any window managers available to download and use right now, so then _why_?
+Now... *Why make one from scratch?* I mean, it's not like there aren't any window managers available to download and use right now, so then _why?_
 
 ---
 

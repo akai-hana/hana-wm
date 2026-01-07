@@ -36,4 +36,4 @@ pub const Module = struct {
     pub fn handleEvent(self: *Module, event_type: u8, event: *anyopaque, wm: *WM) void {
         self.handle_fn(event_type, event, wm);
     }
-};;
+};
