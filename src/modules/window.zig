@@ -1,9 +1,9 @@
-// Basic window management
+// Window management
 // This is the minimum code needed to make windows appear inside the WM.
 
 // It handles the following events:
 // - When an app wants to create a window (`MAP_REQUEST`)
-// - When a windodw is closed (`DESTROY_NOTIFY`)
+// - When a window is closed (`DESTROY_NOTIFY`)
 
 const std = @import("std");
 const defs = @import("defs");
@@ -15,22 +15,27 @@ const xcb = @cImport({
 const WM = defs.WM;
 const Module = defs.Module;
 
-fn init(wm: *WM) void {
-    std.debug.print("[basic] Module initialized\n", .{});
-    _ = wm;
+// Events this module handles
+const HANDLED_EVENTS = [_]u8{
+    xcb.XCB_MAP_REQUEST,
+    xcb.XCB_DESTROY_NOTIFY,
+};
+
+fn init(_: *WM) void {
+    std.debug.print("[window] Module initialized\n", .{});
 }
 
 fn handleEvent(event_type: u8, event: *anyopaque, wm: *WM) void {
-    const response_type = event_type & ~@as(u8, 0x80);
+    const response_type = event_type & ~defs.X11_SYNTHETIC_EVENT_FLAG;
 
     switch (response_type) {
-        // 
         xcb.XCB_MAP_REQUEST => {
             const ev = @as(*xcb.xcb_map_request_event_t, @alignCast(@ptrCast(event)));
             handleMapRequest(ev, wm);
         },
         xcb.XCB_DESTROY_NOTIFY => {
-            std.debug.print("[basic] Window destroyed\n", .{});
+            std.debug.print("[window] Window destroyed\n", .{});
+            // TODO: Future cleanup logic here
         },
         else => {},
     }
@@ -38,8 +43,8 @@ fn handleEvent(event_type: u8, event: *anyopaque, wm: *WM) void {
 
 fn handleMapRequest(event: *xcb.xcb_map_request_event_t, wm: *WM) void {
     const window = event.window;
-    
-    std.debug.print("[basic] Map request for window {}\n", .{window});
+
+    std.debug.print("[window] Map request for window {}\n", .{window});
 
     // Set border width
     const border_mask = xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH;
@@ -57,7 +62,8 @@ fn handleMapRequest(event: *xcb.xcb_map_request_event_t, wm: *WM) void {
 
 pub fn createModule() Module {
     return Module{
-        .name = "basic",
+        .name = "window",
+        .events = &HANDLED_EVENTS,
         .init_fn = init,
         .handle_fn = handleEvent,
     };

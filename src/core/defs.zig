@@ -1,10 +1,13 @@
-// Key definitions
+// Core type definitions
 
 const std = @import("std");
 
 const xcb = @cImport({
     @cInclude("xcb/xcb.h");
 });
+
+// X11 uses bit 7 to mark synthetic events
+pub const X11_SYNTHETIC_EVENT_FLAG: u8 = 0x80;
 
 pub const Config = struct {
     border_width: u32,
@@ -21,6 +24,8 @@ pub const WM = struct {
 
 pub const Module = struct {
     name: []const u8,
+    // Explicitly declare which events this module handles (performance optimization)
+    events: []const u8,
     init_fn: *const fn (*WM) void,
     handle_fn: *const fn (u8, *anyopaque, *WM) void,
 
@@ -31,4 +36,4 @@ pub const Module = struct {
     pub fn handleEvent(self: *Module, event_type: u8, event: *anyopaque, wm: *WM) void {
         self.handle_fn(event_type, event, wm);
     }
-};
+};;
