@@ -1,0 +1,18 @@
+# hana configuration
+# Full TOML support - [sections], integers, colors, strings, arrays
+
+[appearance]
+border_width = 4
+border_focused = 0x00ff00       # Border color for focused window
+border_unfocused = 0xff0000     # Border color for unfocused window
+
+[gaps]
+inner = 10                      # Gap between windows (pixels)
+outer = 20                      # Gap between windows and screen edge (pixels)
+
+[keybindings.exec]
+# Execute commands
+# Format: "Modifier+Key" = "command"
+# Modifiers: Mod4 (Super/Windows), Mod1 (Alt), Shift, Control
+"Mod4+Return" = "alacritty"
+"Mod4+Shift+q" = "kill"  # This will be handled specially to close window
