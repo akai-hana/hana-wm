@@ -21,6 +21,9 @@ in here ill write down some stuff i want to include on installation, to not forg
 
 ---
 
+Dependencies:
+- xkbcommon (keyboard input handling library)
+
 Compiling optimized release:
 ```sh
 zig build -Doptimize=ReleaseFast
@@ -136,7 +139,6 @@ But it works! After so much time investigating and trying things only to be met 
 ... Pretty much everything else.
 
 ---
-FINITIONS #
 
 <div align="center">
 

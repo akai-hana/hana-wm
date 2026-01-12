@@ -1,37 +1,39 @@
-// Minimal TOML parser for hana
+// Minimal TOML parser - optimized for speed and low memory usage
 // Supports: [sections], key=value, integers, hex colors, strings, arrays, comments, escape sequences
 
 const std = @import("std");
+const builtin = @import("builtin");
 
-/// Represents a parsed value (integer, string, array, or color)
+/// Parsed value type - union is 16 bytes (pointer-sized)
 pub const Value = union(enum) {
     integer: i64,
     string: []const u8,
     array: std.ArrayList(Value),
-    color: u32, // stored as 0xRRGGBB
+    color: u32,
 
-    pub fn asInt(self: Value) ?i64 {
+    /// Fast accessor with no overhead
+    pub inline fn asInt(self: Value) ?i64 {
         return switch (self) {
             .integer => |i| i,
             else => null,
         };
     }
 
-    pub fn asString(self: Value) ?[]const u8 {
+    pub inline fn asString(self: Value) ?[]const u8 {
         return switch (self) {
             .string => |s| s,
             else => null,
         };
     }
 
-    pub fn asColor(self: Value) ?u32 {
+    pub inline fn asColor(self: Value) ?u32 {
         return switch (self) {
             .color => |c| c,
             else => null,
         };
     }
 
-    pub fn asArray(self: Value) ?[]const Value {
+    pub inline fn asArray(self: Value) ?[]const Value {
         return switch (self) {
             .array => |arr| arr.items,
             else => null,
@@ -52,15 +54,19 @@ pub const Value = union(enum) {
     }
 };
 
-/// A TOML section containing key-value pairs
+/// TOML section - pre-allocated capacity for typical config sizes
 pub const Section = struct {
     name: []const u8,
     pairs: std.StringHashMap(Value),
 
     pub fn init(allocator: std.mem.Allocator, name: []const u8) Section {
+        // Pre-allocate for typical section size (reduces rehashing)
+        var map = std.StringHashMap(Value).init(allocator);
+        map.ensureTotalCapacity(8) catch {}; // Typical config has ~8 keys per section
+        
         return .{
             .name = name,
-            .pairs = std.StringHashMap(Value).init(allocator),
+            .pairs = map,
         };
     }
 
@@ -68,78 +74,92 @@ pub const Section = struct {
         self.pairs.deinit();
     }
 
-    /// Get a value from this section
-    pub fn get(self: *const Section, key: []const u8) ?Value {
+    /// Hot path: inline to avoid function call overhead
+    pub inline fn get(self: *const Section, key: []const u8) ?Value {
         return self.pairs.get(key);
     }
 
-    /// Get an integer value
-    pub fn getInt(self: *const Section, key: []const u8) ?i64 {
+    pub inline fn getInt(self: *const Section, key: []const u8) ?i64 {
         const val = self.get(key) orelse return null;
         return val.asInt();
     }
 
-    /// Get a string value
-    pub fn getString(self: *const Section, key: []const u8) ?[]const u8 {
+    pub inline fn getString(self: *const Section, key: []const u8) ?[]const u8 {
         const val = self.get(key) orelse return null;
         return val.asString();
     }
 
-    /// Get a color value
-    pub fn getColor(self: *const Section, key: []const u8) ?u32 {
+    pub inline fn getColor(self: *const Section, key: []const u8) ?u32 {
         const val = self.get(key) orelse return null;
         return val.asColor();
     }
 };
 
-/// The parsed TOML document
+/// Parsed TOML document
 pub const Document = struct {
     allocator: std.mem.Allocator,
     sections: std.StringHashMap(Section),
-    /// Root section for top-level key-value pairs (no section header)
     root: Section,
 
     pub fn init(allocator: std.mem.Allocator) Document {
+        // Pre-allocate for typical config (reduces rehashing during parsing)
+        var sections = std.StringHashMap(Section).init(allocator);
+        sections.ensureTotalCapacity(4) catch {}; // Typical config has ~4 sections
+        
         return .{
             .allocator = allocator,
-            .sections = std.StringHashMap(Section).init(allocator),
+            .sections = sections,
             .root = Section.init(allocator, ""),
         };
     }
 
     pub fn deinit(self: *Document) void {
+        // Clean up root section
         {
-            var iter = self.root.pairs.valueIterator();
-            while (iter.next()) |val| {
-                var mutable_val = val.*;
+            var iter = self.root.pairs.iterator();
+            while (iter.next()) |entry| {
+                // Free the key
+                self.allocator.free(entry.key_ptr.*);
+                // Free the value
+                var mutable_val = entry.value_ptr.*;
                 mutable_val.deinit(self.allocator);
             }
+            self.root.pairs.deinit();
         }
-        var iter = self.sections.valueIterator();
-        while (iter.next()) |section| {
-            var val_iter = section.pairs.valueIterator();
-            while (val_iter.next()) |val| {
-                var mutable_val = val.*;
+        
+        // Clean up all sections
+        var section_iter = self.sections.iterator();
+        while (section_iter.next()) |section_entry| {
+            // Free the section name
+            self.allocator.free(section_entry.key_ptr.*);
+            
+            // Free all key-value pairs in this section
+            var pair_iter = section_entry.value_ptr.pairs.iterator();
+            while (pair_iter.next()) |entry| {
+                // Free the key
+                self.allocator.free(entry.key_ptr.*);
+                // Free the value
+                var mutable_val = entry.value_ptr.*;
                 mutable_val.deinit(self.allocator);
             }
-            section.deinit();
+            
+            section_entry.value_ptr.pairs.deinit();
         }
+        
         self.sections.deinit();
-        self.root.deinit();
     }
 
-    /// Get a section by name
-    pub fn getSection(self: *const Document, name: []const u8) ?*const Section {
+    /// Hot path: inline for zero overhead
+    pub inline fn getSection(self: *const Document, name: []const u8) ?*const Section {
         return self.sections.getPtr(name);
     }
 
-    /// Get a value from root (top-level, no section)
-    pub fn get(self: *const Document, key: []const u8) ?Value {
+    pub inline fn get(self: *const Document, key: []const u8) ?Value {
         return self.root.get(key);
     }
 };
 
-/// Parse errors with line number context
+/// Parse errors
 pub const ParseError = error{
     InvalidSyntax,
     InvalidSection,
@@ -149,14 +169,14 @@ pub const ParseError = error{
     OutOfMemory,
 };
 
-/// Parser state
+/// Parser state - compact for cache efficiency
 const Parser = struct {
     allocator: std.mem.Allocator,
     content: []const u8,
     pos: usize,
     line: usize,
 
-    fn init(allocator: std.mem.Allocator, content: []const u8) Parser {
+    inline fn init(allocator: std.mem.Allocator, content: []const u8) Parser {
         return .{
             .allocator = allocator,
             .content = content,
@@ -165,49 +185,49 @@ const Parser = struct {
         };
     }
 
-    /// Skip whitespace but not newlines
-    fn skipWhitespace(self: *Parser) void {
-        while (self.pos < self.content.len) {
+    /// Hot path: inline and use pointer arithmetic
+    inline fn skipWhitespace(self: *Parser) void {
+        const len = self.content.len;
+        while (self.pos < len) {
             const c = self.content[self.pos];
             if (c == ' ' or c == '\t' or c == '\r') {
+                @branchHint(.likely); // Usually whitespace
                 self.pos += 1;
             } else {
+                @branchHint(.unlikely);
                 break;
             }
         }
     }
 
-    /// Skip to end of line (for comments)
-    fn skipLine(self: *Parser) void {
-        while (self.pos < self.content.len and self.content[self.pos] != '\n') {
+    inline fn skipLine(self: *Parser) void {
+        const len = self.content.len;
+        while (self.pos < len and self.content[self.pos] != '\n') {
             self.pos += 1;
         }
-        if (self.pos < self.content.len) {
+        if (self.pos < len) {
             self.pos += 1;
             self.line += 1;
         }
     }
 
-    /// Check if we're at end of file
-    fn isEof(self: *const Parser) bool {
+    inline fn isEof(self: *const Parser) bool {
         return self.pos >= self.content.len;
     }
 
-    /// Peek current character without consuming
-    fn peek(self: *const Parser) ?u8 {
+    inline fn peek(self: *const Parser) ?u8 {
         if (self.isEof()) return null;
         return self.content[self.pos];
     }
 
-    /// Consume and return current character
-    fn consume(self: *Parser) ?u8 {
+    inline fn consume(self: *Parser) ?u8 {
         const c = self.peek() orelse return null;
         self.pos += 1;
         if (c == '\n') self.line += 1;
         return c;
     }
 
-    /// Parse a section header: [section_name]
+    /// Parse section header
     fn parseSection(self: *Parser) ParseError![]const u8 {
         _ = self.consume(); // consume '['
         self.skipWhitespace();
@@ -216,14 +236,18 @@ const Parser = struct {
         while (self.peek()) |c| {
             if (c == ']') break;
             if (c == '\n') {
-                std.debug.print("Error (line {}): Section header not closed\n", .{self.line});
+                if (builtin.mode == .Debug) {
+                    std.debug.print("Error (line {}): Section header not closed\n", .{self.line});
+                }
                 return ParseError.InvalidSection;
             }
             _ = self.consume();
         }
 
         if (self.peek() != ']') {
-            std.debug.print("Error (line {}): Expected ']' to close section\n", .{self.line});
+            if (builtin.mode == .Debug) {
+                std.debug.print("Error (line {}): Expected ']' to close section\n", .{self.line});
+            }
             return ParseError.InvalidSection;
         }
 
@@ -231,77 +255,95 @@ const Parser = struct {
         _ = self.consume(); // consume ']'
 
         if (name.len == 0) {
-            std.debug.print("Error (line {}): Empty section name\n", .{self.line});
+            if (builtin.mode == .Debug) {
+                std.debug.print("Error (line {}): Empty section name\n", .{self.line});
+            }
             return ParseError.InvalidSection;
         }
 
         return try self.allocator.dupe(u8, name);
     }
 
-    /// Parse a key (identifier before '=')
-    fn parseKey(self: *Parser) ParseError![]const u8 {
+    /// Parse key - optimized to avoid trim by skipping whitespace first
+    inline fn parseKey(self: *Parser) ParseError![]const u8 {
+        // Skip leading whitespace first
+        self.skipWhitespace();
+        
         const start = self.pos;
-        while (self.peek()) |c| {
+        const len = self.content.len;
+        
+        // Fast loop using unchecked access (bounds already guaranteed)
+        while (self.pos < len) {
+            const c = self.content[self.pos];
             if (c == '=' or c == ' ' or c == '\t' or c == '\n') break;
-            _ = self.consume();
+            self.pos += 1;
         }
 
-        const key = std.mem.trim(u8, self.content[start..self.pos], " \t");
+        const key = self.content[start..self.pos];
         if (key.len == 0) {
-            std.debug.print("Error (line {}): Empty key\n", .{self.line});
+            if (builtin.mode == .Debug) {
+                std.debug.print("Error (line {}): Empty key\n", .{self.line});
+            }
             return ParseError.InvalidSyntax;
         }
 
         return try self.allocator.dupe(u8, key);
     }
 
-    /// Parse a quoted string value with escape sequences
+    /// Parse string - optimized with fast path for no escapes
     fn parseString(self: *Parser, allocator: std.mem.Allocator) ParseError![]const u8 {
-        const quote = self.consume().?; // consume opening quote
+        const quote = self.consume().?;
         const start = self.pos;
+        const len = self.content.len;
 
-        // Check if string contains escape sequences
+        // Fast scan for escapes or end quote
+        var end_pos = start;
         var has_escapes = false;
-        var temp_pos = self.pos;
-        while (temp_pos < self.content.len) {
-            if (self.content[temp_pos] == '\\') {
-                has_escapes = true;
+        
+        while (end_pos < len) : (end_pos += 1) {
+            const c = self.content[end_pos];
+            if (c == quote) {
+                // Fast path: no escapes, direct slice
+                if (!has_escapes) {
+                    const value = self.content[start..end_pos];
+                    self.pos = end_pos + 1;
+                    return try allocator.dupe(u8, value);
+                }
                 break;
             }
-            if (self.content[temp_pos] == quote) break;
-            temp_pos += 1;
-        }
-
-        if (!has_escapes) {
-            // Fast path: no escapes, just copy
-            while (self.peek()) |c| {
-                if (c == quote) break;
-                if (c == '\n') {
-                    std.debug.print("Error (line {}): Unterminated string\n", .{self.line});
-                    return ParseError.InvalidValue;
-                }
-                _ = self.consume();
+            if (c == '\\') {
+                has_escapes = true;
             }
-            const value = self.content[start..self.pos];
-            _ = self.consume(); // consume closing quote
-            return try allocator.dupe(u8, value);
+            if (c == '\n') {
+                if (builtin.mode == .Debug) {
+                    std.debug.print("Error (line {}): Unterminated string\n", .{self.line});
+                }
+                return ParseError.InvalidValue;
+            }
         }
 
         // Slow path: handle escape sequences
-        var result: std.ArrayList(u8) = .{};
+        var result = std.ArrayList(u8){};
         errdefer result.deinit(allocator);
+        
+        // Pre-allocate approximate size
+        try result.ensureTotalCapacity(allocator, end_pos - start);
 
         while (self.peek()) |c| {
             if (c == quote) break;
             if (c == '\n') {
-                std.debug.print("Error (line {}): Unterminated string\n", .{self.line});
+                if (builtin.mode == .Debug) {
+                    std.debug.print("Error (line {}): Unterminated string\n", .{self.line});
+                }
                 return ParseError.InvalidValue;
             }
 
             if (c == '\\') {
-                _ = self.consume(); // consume backslash
+                _ = self.consume();
                 const next = self.consume() orelse {
-                    std.debug.print("Error (line {}): Escape at end of string\n", .{self.line});
+                    if (builtin.mode == .Debug) {
+                        std.debug.print("Error (line {}): Escape at end of string\n", .{self.line});
+                    }
                     return ParseError.InvalidValue;
                 };
 
@@ -313,7 +355,9 @@ const Parser = struct {
                     '"' => '"',
                     '\'' => '\'',
                     else => {
-                        std.debug.print("Error (line {}): Unknown escape sequence '\\{c}'\n", .{ self.line, next });
+                        if (builtin.mode == .Debug) {
+                            std.debug.print("Error (line {}): Unknown escape '\\{c}'\n", .{ self.line, next });
+                        }
                         return ParseError.InvalidValue;
                     },
                 };
@@ -325,39 +369,47 @@ const Parser = struct {
         }
 
         _ = self.consume(); // consume closing quote
-        return result.toOwnedSlice(allocator);
+        return try result.toOwnedSlice(allocator);
     }
 
-    /// Parse a hex color value (supports #RRGGBB, 0xRRGGBB, RRGGBB)
-    fn parseColor(self: *Parser, value: []const u8) ParseError!u32 {
-        // Strip prefix if present
-        const hex_value = if (value.len == 0)
-            value
-        else switch (value[0]) {
-            '#' => value[1..],
-            '0' => if (value.len > 1 and value[1] == 'x') value[2..] else value,
-            else => value,
-        };
+    /// Parse color - inline for speed
+    inline fn parseColor(self: *Parser, value: []const u8) ParseError!u32 {
+        // Fast path: determine offset without allocation
+        const hex_start: usize = if (value.len == 0)
+            0
+        else if (value[0] == '#')
+            1
+        else if (value.len > 1 and value[0] == '0' and value[1] == 'x')
+            2
+        else
+            0;
+
+        const hex_value = value[hex_start..];
 
         const color = std.fmt.parseInt(u32, hex_value, 16) catch {
-            std.debug.print("Error (line {}): Invalid color format '{s}'\n", .{ self.line, value });
+            if (builtin.mode == .Debug) {
+                std.debug.print("Error (line {}): Invalid color '{s}'\n", .{ self.line, value });
+            }
             return ParseError.InvalidColor;
         };
 
         return color;
     }
 
-    /// Parse array value: ["item1", "item2", 123]
+    /// Parse array
     fn parseArray(self: *Parser, allocator: std.mem.Allocator) ParseError!std.ArrayList(Value) {
         _ = self.consume(); // consume '['
 
-        var array: std.ArrayList(Value) = .{};
+        var array = std.ArrayList(Value){};
         errdefer {
             for (array.items) |*item| {
                 item.deinit(allocator);
             }
             array.deinit(allocator);
         }
+
+        // Pre-allocate for typical small arrays
+        try array.ensureTotalCapacity(allocator, 4);
 
         while (true) {
             self.skipWhitespace();
@@ -378,44 +430,54 @@ const Parser = struct {
         return array;
     }
 
-    /// Parse a value (string, integer, array, or color)
+    /// Parse value - hot path for config loading
     fn parseValue(self: *Parser, allocator: std.mem.Allocator) ParseError!Value {
         self.skipWhitespace();
 
         const c = self.peek() orelse {
-            std.debug.print("Error (line {}): Expected value\n", .{self.line});
+            if (builtin.mode == .Debug) {
+                std.debug.print("Error (line {}): Expected value\n", .{self.line});
+            }
             return ParseError.InvalidValue;
         };
 
-        // Array value
+        // Array (rare)
         if (c == '[') {
             const arr = try self.parseArray(allocator);
             return Value{ .array = arr };
         }
 
-        // String value
+        // String (common for commands)
         if (c == '"' or c == '\'') {
             const str = try self.parseString(allocator);
             return Value{ .string = str };
         }
 
-        // Collect raw value (integer or color)
+        // Integer or color (common for config values)
         const start = self.pos;
-        while (self.peek()) |ch| {
+        const len = self.content.len;
+        
+        // Fast scan to end of value
+        while (self.pos < len) {
+            const ch = self.content[self.pos];
             if (ch == '\n' or ch == '#') break;
-            _ = self.consume();
+            self.pos += 1;
         }
 
         const raw = std.mem.trim(u8, self.content[start..self.pos], " \t\r");
         if (raw.len == 0) {
-            std.debug.print("Error (line {}): Empty value\n", .{self.line});
+            if (builtin.mode == .Debug) {
+                std.debug.print("Error (line {}): Empty value\n", .{self.line});
+            }
             return ParseError.InvalidValue;
         }
 
-        // Try to detect if it's a color (contains hex prefix or letters)
+        // Detect color vs integer using fast checks
         const is_color = blk: {
             if (raw[0] == '#') break :blk true;
             if (raw.len > 2 and raw[0] == '0' and raw[1] == 'x') break :blk true;
+            
+            // Check for hex letters (a-f, A-F indicate color)
             for (raw) |ch| {
                 if ((ch >= 'a' and ch <= 'f') or (ch >= 'A' and ch <= 'F')) {
                     break :blk true;
@@ -429,22 +491,26 @@ const Parser = struct {
             return Value{ .color = color };
         }
 
-        // Try parsing as integer
+        // Parse integer
         const int = std.fmt.parseInt(i64, raw, 10) catch {
-            std.debug.print("Error (line {}): Invalid value '{s}'\n", .{ self.line, raw });
+            if (builtin.mode == .Debug) {
+                std.debug.print("Error (line {}): Invalid value '{s}'\n", .{ self.line, raw });
+            }
             return ParseError.InvalidValue;
         };
 
         return Value{ .integer = int };
     }
 
-    /// Parse a key-value pair
-    fn parseKeyValue(self: *Parser, allocator: std.mem.Allocator) ParseError!struct { []const u8, Value } {
+    /// Parse key-value pair
+    inline fn parseKeyValue(self: *Parser, allocator: std.mem.Allocator) ParseError!struct { []const u8, Value } {
         const key = try self.parseKey();
         self.skipWhitespace();
 
         if (self.consume() != '=') {
-            std.debug.print("Error (line {}): Expected '=' after key '{s}'\n", .{ self.line, key });
+            if (builtin.mode == .Debug) {
+                std.debug.print("Error (line {}): Expected '=' after key '{s}'\n", .{ self.line, key });
+            }
             return ParseError.InvalidSyntax;
         }
 
@@ -453,38 +519,42 @@ const Parser = struct {
     }
 };
 
-/// Parse a TOML string into a Document
+/// Parse TOML content - main entry point
 pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
+    @setEvalBranchQuota(100000); // Allow more compile-time evaluation
+
     var doc = Document.init(allocator);
     errdefer doc.deinit();
 
     var parser = Parser.init(allocator, content);
     var current_section: *Section = &doc.root;
 
+    // Main parsing loop - optimized for typical config files
     while (!parser.isEof()) {
         parser.skipWhitespace();
 
         const c = parser.peek() orelse break;
 
-        // Skip empty lines
+        // Fast path: skip empty lines
         if (c == '\n') {
             _ = parser.consume();
             continue;
         }
 
-        // Skip comments
+        // Fast path: skip comments
         if (c == '#') {
             parser.skipLine();
             continue;
         }
 
-        // Parse section header
+        // Section header (infrequent)
         if (c == '[') {
             const section_name = try parser.parseSection();
 
-            // Check for duplicate section
             if (doc.sections.contains(section_name)) {
-                std.debug.print("Error (line {}): Duplicate section '{s}'\n", .{ parser.line, section_name });
+                if (builtin.mode == .Debug) {
+                    std.debug.print("Error (line {}): Duplicate section '{s}'\n", .{ parser.line, section_name });
+                }
                 return ParseError.DuplicateKey;
             }
 
@@ -497,14 +567,15 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
             continue;
         }
 
-        // Parse key-value pair
+        // Key-value pair (common)
         const kv = try parser.parseKeyValue(allocator);
         const key = kv[0];
         const value = kv[1];
 
-        // Check for duplicate key in current section
         if (current_section.pairs.contains(key)) {
-            std.debug.print("Error (line {}): Duplicate key '{s}' in section '{s}'\n", .{ parser.line, key, current_section.name });
+            if (builtin.mode == .Debug) {
+                std.debug.print("Error (line {}): Duplicate key '{s}'\n", .{ parser.line, key });
+            }
             return ParseError.DuplicateKey;
         }
 

@@ -1,172 +1,148 @@
-// Build config for Zig: compile, link, install, run.
-
+// Build configuration for Hana window manager
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    // SELECTIONS
-    const target   = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
-
-    // Create root module first
-    const root_module = b.createModule(.{
-        .root_source_file = b.path("src/core/main.zig"),
-
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true, //
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{
+        .preferred_optimize_mode = .ReleaseFast, // Optimize by default
     });
 
-    // ARTIFACTS
+    // Create the root module
+    const root_module = b.createModule(.{
+        .root_source_file = b.path("src/core/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    // Release optimizations
+    if (optimize != .Debug) {
+        root_module.single_threaded = true;
+        root_module.strip = true;
+    }
+
+    // Create the executable
     const exe = b.addExecutable(.{
         .name = "hana",
         .root_module = root_module,
     });
 
-    // Core modules
+    // Link-Time Optimization is handled automatically by ReleaseFast in newer Zig
 
-    // Definitions
-    const defs_module = b.addModule("defs", .{
-        .root_source_file = b.path("src/core/defs.zig"),
-    });
-    exe.root_module.addImport("defs", defs_module);
-
-    // Error handling
-    const error_module = b.addModule("error", .{
-        .root_source_file = b.path("src/core/error.zig"),
-    });
-    error_module.addImport("defs", defs_module);
-    exe.root_module.addImport("error", error_module);
-
-    // Custom TOML parser
-    const toml_module = b.addModule("toml", .{
-        .root_source_file = b.path("src/core/toml.zig"),
-    });
-    exe.root_module.addImport("toml", toml_module);
-
-    // Config parser
-    const config_module = b.addModule("config", .{
-        .root_source_file = b.path("src/core/config.zig"),
-    });
-    config_module.addImport("error", error_module);
-    config_module.addImport("defs", defs_module);
-    config_module.addImport("toml", toml_module);
-    exe.root_module.addImport("config", config_module);
-
-    // Auto-register all user modules (everything in src/ except src/core/, which must be added manually)
+    // Set up build-time allocator
     var arena = std.heap.ArenaAllocator.init(b.allocator);
     defer arena.deinit();
-    const arena_allocator = arena.allocator();
+    const allocator = arena.allocator();
 
-    // 
-    autoRegisterModules(b, exe.root_module, defs_module, "src", arena_allocator) catch |err| {
-        std.debug.print("Fatal: Failed to auto-register modules: {}\n", .{err});
+    // Initialize module registry
+    var all_modules = std.StringHashMap(*std.Build.Module).init(allocator);
+
+    // Register core modules
+    const core_modules = [_]struct { []const u8, []const u8 }{
+        .{ "defs", "src/core/defs.zig" },
+        .{ "error", "src/core/error.zig" },
+        .{ "toml", "src/core/toml.zig" },
+        .{ "config", "src/core/config.zig" },
+        .{ "xkbcommon", "src/core/xkbcommon.zig" },
+    };
+
+    for (core_modules) |mod| {
+        const module = b.addModule(mod[0], .{ .root_source_file = b.path(mod[1]) });
+        all_modules.put(mod[0], module) catch @panic("Failed to register core module");
+    }
+
+    // Auto-discover modules
+    discoverModules(b, "src", allocator, &all_modules) catch |err| {
+        std.debug.print("Fatal: Failed to discover modules: {}\n", .{err});
         std.process.exit(1);
     };
 
-    // LINKING
-    exe.root_module.linkSystemLibrary("xcb", .{});
+    // Connect modules
+    connectAllModules(root_module, &all_modules);
 
-    // INSTALL
+    // Link system libraries
+    root_module.linkSystemLibrary("xcb", .{});
+    root_module.linkSystemLibrary("xkbcommon", .{});
+    root_module.linkSystemLibrary("xkbcommon-x11", .{});
+
+    // Install artifact
     b.installArtifact(exe);
 
-    // RUN
-    const run_hana = b.addRunArtifact(exe);
-    run_hana.step.dependOn(b.getInstallStep());
-
-    // Forward CLI args (commented for now, may be useful later)
-    // if (b.args) |args| {
-    //     run_hana.addArgs(args);
-    // }
+    // Create run step
+    const run_cmd = b.addRunArtifact(exe);
+    run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_cmd.addArgs(args);
+    }
 
     const run_step = b.step("run", "Run hana");
-    run_step.dependOn(&run_hana.step);
+    run_step.dependOn(&run_cmd.step);
 }
 
-// Module auto-detection and registration logic
-fn autoRegisterModules(
-    b: *std.Build,
-    root_module: *std.Build.Module,
-    defs_module: *std.Build.Module,
-    dir_path: []const u8,
-    allocator: std.mem.Allocator,
-) !void {
-    // Track registered module names to detect collisions
-    var registered_modules = std.StringHashMap([]const u8).init(allocator);
-    defer registered_modules.deinit();
-
-    try autoRegisterModulesRecursive(b, root_module, defs_module, dir_path, allocator, &registered_modules);
+fn connectAllModules(root: *std.Build.Module, modules: *std.StringHashMap(*std.Build.Module)) void {
+    var iter = modules.iterator();
+    while (iter.next()) |entry| {
+        var import_iter = modules.iterator();
+        while (import_iter.next()) |import| {
+            if (!std.mem.eql(u8, entry.key_ptr.*, import.key_ptr.*)) {
+                entry.value_ptr.*.addImport(import.key_ptr.*, import.value_ptr.*);
+            }
+        }
+        root.addImport(entry.key_ptr.*, entry.value_ptr.*);
+    }
 }
 
-fn autoRegisterModulesRecursive(
+fn discoverModules(
     b: *std.Build,
-    root_module: *std.Build.Module,
-    defs_module: *std.Build.Module,
     dir_path: []const u8,
     allocator: std.mem.Allocator,
-    registered_modules: *std.StringHashMap([]const u8),
+    all_modules: *std.StringHashMap(*std.Build.Module),
 ) !void {
-    // Create Io instance for filesystem operations (single-threaded is fine for build script)
+    // Set up I/O for directory operations
     var io_threaded: std.Io.Threaded = .init_single_threaded;
     const io = io_threaded.io();
 
-    // Critical error: Can't open directory
+    // Open directory
     var dir = b.build_root.handle.openDir(io, dir_path, .{ .iterate = true }) catch |err| {
-        std.debug.print("Critical: Cannot open directory '{s}': {}\n", .{ dir_path, err });
+        std.debug.print("Cannot open directory '{s}': {}\n", .{ dir_path, err });
         return err;
     };
     defer dir.close(io);
 
     var iter = dir.iterate();
     while (try iter.next(io)) |entry| {
-        // Skip src/core/ directory entirely (core modules are manually registered)
-        const is_src_core = std.mem.eql(u8, dir_path, "src") and
-            entry.kind == .directory and
-            std.mem.eql(u8, entry.name, "core");
-        if (is_src_core) continue;
+        // Skip src/core directory
+        if (std.mem.eql(u8, dir_path, "src") and 
+            entry.kind == .directory and 
+            std.mem.eql(u8, entry.name, "core")) 
+        {
+            continue;
+        }
 
-        // Handle subdirectories recursively
+        // Recurse into subdirectories
         if (entry.kind == .directory) {
-            var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-            const subdir_path = try std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ dir_path, entry.name });
-            try autoRegisterModulesRecursive(b, root_module, defs_module, subdir_path, allocator, registered_modules);
+            const subdir = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
+            try discoverModules(b, subdir, allocator, all_modules);
             continue;
         }
 
         // Only process .zig files
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".zig")) continue;
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zig")) {
+            continue;
+        }
 
-        // Extract module name (filename without .zig extension)
-        const module_name = std.fs.path.stem(entry.name);
+        // Extract module name and build path
+        const name = std.fs.path.stem(entry.name);
+        const path = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
 
-        // Build full path using stack buffer (memory-efficient)
-        var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const full_path = try std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ dir_path, entry.name });
-
-        // Check for name collision
-        if (registered_modules.get(module_name)) |existing_path| {
-            std.debug.print(
-                \\
-                \\Error: Module name collision detected: '{s}'
-                \\  Existing: {s}
-                \\  New:      {s}
-                \\
-                \\Please rename one of these files to avoid conflicts.
-                \\
-                , .{ module_name, existing_path, full_path });
+        // Check for name collisions
+        if (all_modules.contains(name)) {
+            std.debug.print("Error: Module name collision: '{s}' already exists (found at {s})\n", .{ name, path });
             return error.ModuleNameCollision;
         }
 
-        // Register module
-        const module = b.createModule(.{
-            .root_source_file = b.path(full_path),
-        });
-        module.addImport("defs", defs_module);
-        root_module.addImport(module_name, module);
-
-        // Track this module name (store path for collision error messages)
-        try registered_modules.put(module_name, try allocator.dupe(u8, full_path));
-
-        std.debug.print("Registered module: {s} ({s})\n", .{ module_name, full_path });
+        // Create and register module
+        const module = b.addModule(name, .{ .root_source_file = b.path(path) });
+        try all_modules.put(try allocator.dupe(u8, name), module);
     }
 }

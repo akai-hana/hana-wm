@@ -10,9 +10,9 @@ border_unfocused = 0xff0000     # Border color for unfocused window
 inner = 10                      # Gap between windows (pixels)
 outer = 20                      # Gap between windows and screen edge (pixels)
 
-[keybindings.exec]
+[Keybindings]
 # Execute commands
 # Format: "Modifier+Key" = "command"
 # Modifiers: Mod4 (Super/Windows), Mod1 (Alt), Shift, Control
-"Mod4+Return" = "alacritty"
-"Mod4+Shift+q" = "kill"  # This will be handled specially to close window
+Mod4+Return = "ghostty"
+Mod4+Shift+q = "kill"  # This will be handled specially to close window

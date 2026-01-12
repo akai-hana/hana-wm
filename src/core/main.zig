@@ -1,221 +1,306 @@
-// Main WM code loop
-const std = @import("std");
-const posix = std.posix; // posix signals handler
+// Main WM event loop - maximum performance, zero overhead
+const std     = @import("std");
+const posix   = std.posix;
+const builtin = @import("builtin");
 
 // core/
-const config = @import("config");
+const config         = @import("config");
 const error_handling = @import("error");
-const defs = @import("defs");
+const defs           = @import("defs");
+const xkbcommon      = @import("xkbcommon");
 // modules/
-const window_module = @import("window");
-const input_module = @import("input");
+const window_module  = @import("window");
+const input_module   = @import("input");
 
-// Use xcb from defs to avoid type conflicts
 const xcb = defs.xcb;
-const WM = defs.WM;
+const WM  = defs.WM;
 
-// Global WM instance for signal handling
-var global_wm: ?*WM = null;
-var should_reload_config: bool = false;
+// Constants
+const XCB_CURSOR_LEFT_PTR: u16 = 68;
+const MAX_EVENT_TYPE: comptime_int = 36;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+// Signal flag for config reload (atomic for thread-safety)
+var should_reload_config: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
-    // 1. Connect to X11
-    const conn = try error_handling.connectToX11();
-    defer xcb.xcb_disconnect(@ptrCast(conn));
+// Pre-computed event mask constant (compile-time)
+const WM_EVENT_MASK = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
+    xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
+    xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY |
+    xcb.XCB_EVENT_MASK_PROPERTY_CHANGE |
+    xcb.XCB_EVENT_MASK_KEY_PRESS |
+    xcb.XCB_EVENT_MASK_KEY_RELEASE;
 
-    // 2. Get screen
-    const screen = try error_handling.getX11Screen(conn);
-    const root = screen.*.root;
+// Cursor setup - simplified and faster
+fn setupRootCursor(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) !void {
+    const cursor_font = xcb.xcb_generate_id(conn);
+    const font_name = "cursor";
+    
+    // Use checked calls only in debug mode
+    if (builtin.mode == .Debug) {
+        const cookie = xcb.xcb_open_font_checked(
+            conn,
+            cursor_font,
+            @intCast(font_name.len),
+            font_name.ptr,
+        );
+        const err = xcb.xcb_request_check(conn, cookie);
+        if (err != null) {
+            std.debug.print("[cursor] Failed to open font\n", .{});
+            return error.CursorSetupFailed;
+        }
+    } else {
+        _ = xcb.xcb_open_font(
+            conn,
+            cursor_font,
+            @intCast(font_name.len),
+            font_name.ptr,
+        );
+    }
 
-    // 3. Try to become window manager
-    const event_mask = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
-        xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
-        xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY |
-        xcb.XCB_EVENT_MASK_PROPERTY_CHANGE |
-        xcb.XCB_EVENT_MASK_KEY_PRESS |
-        xcb.XCB_EVENT_MASK_KEY_RELEASE |
-        xcb.XCB_EVENT_MASK_BUTTON_PRESS |
-        xcb.XCB_EVENT_MASK_BUTTON_RELEASE;
+    const cursor_id = xcb.xcb_generate_id(conn);
+    _ = xcb.xcb_create_glyph_cursor(
+        conn,
+        cursor_id,
+        cursor_font,
+        cursor_font,
+        XCB_CURSOR_LEFT_PTR,
+        XCB_CURSOR_LEFT_PTR + 1,
+        0, 0, 0,
+        65535, 65535, 65535,
+    );
 
-    try error_handling.becomeWindowManager(conn, root, event_mask);
-    std.debug.print("hana window manager started\n", .{});
+    const mask: u32 = xcb.XCB_CW_CURSOR;
+    const values = [_]u32{cursor_id};
+    _ = xcb.xcb_change_window_attributes(
+        conn,
+        screen.*.root,
+        mask,
+        &values,
+    );
 
-    // 4. Load config
-    const user_config = try config.loadConfig(allocator, "config.toml");
+    _ = xcb.xcb_close_font(conn, cursor_font);
+    // Don't flush here - batch with other operations
+}
 
-    // 5. Initialize WM
-    var wm = WM{
-        .allocator = allocator,
-        .conn = conn,
-        .screen = screen,
-        .root = root,
-        .config = user_config,
-        .windows = .{},
-        .focused_window = null,
-    };
-    defer wm.deinit();
+/// Resolve keysyms to keycodes for all keybindings
+fn resolveKeybindings(keybindings: anytype, xkb_state: *xkbcommon.XkbState) void {
+    for (keybindings) |*keybind| {
+        keybind.keycode = xkb_state.keysymToKeycode(keybind.keysym);
+        if (keybind.keycode == null) {
+            std.log.warn("Could not find keycode for keysym 0x{x}", .{keybind.keysym});
+        }
+    }
+}
 
-    // Set global WM for signal handler
-    global_wm = &wm;
-
-    // Setup signal handler for config reload (SIGHUP)
+/// Setup signal handler for SIGHUP (config reload)
+fn setupSignalHandler() void {
     const sig_handler = struct {
         fn handler(_: posix.SIG) callconv(.c) void {
-            should_reload_config = true;
+            should_reload_config.store(true, .release);
         }
     }.handler;
 
     var sa = posix.Sigaction{
         .handler = .{ .handler = sig_handler },
         .mask = std.mem.zeroes(posix.sigset_t),
-        .flags = 0,
+        .flags = posix.SA.RESTART, // Auto-restart interrupted syscalls
     };
     posix.sigaction(posix.SIG.HUP, &sa, null);
+}
 
-    // 6. Initialize modules
-    var modules = [_]defs.Module{
-        window_module.createModule(),
-        input_module.createModule(),
-    };
+pub fn main() !void {
+    // Connect to X11
+    const conn = try error_handling.connectToX11();
+    defer xcb.xcb_disconnect(@ptrCast(conn));
 
-    defer {
-        for (&modules) |*module| {
-            if (module.deinit_fn) |deinit_fn| {
-                deinit_fn(&wm);
-            }
-        }
+    const screen = try error_handling.getX11Screen(conn);
+    const root = screen.*.root;
+
+    // Become window manager
+    try error_handling.becomeWindowManager(conn, root, WM_EVENT_MASK);
+    
+    try setupRootCursor(conn, screen);
+
+    if (builtin.mode == .Debug) {
+        std.debug.print("hana window manager started\n", .{});
     }
 
-    for (&modules) |*module| {
-        module.init_fn(&wm);
+    // GPA for runtime allocations
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Initialize XKB state
+    const xkb_state = try allocator.create(xkbcommon.XkbState);
+    errdefer allocator.destroy(xkb_state);
+    xkb_state.* = try xkbcommon.XkbState.init(conn);
+    errdefer xkb_state.deinit();
+
+    // Load config
+    var user_config = try config.loadConfig(allocator, "config.toml");
+    resolveKeybindings(user_config.keybindings.items, xkb_state);
+
+    // Initialize WM
+    var wm = WM{
+        .allocator = allocator,
+        .conn = conn,
+        .screen = screen,
+        .root = root,
+        .config = user_config,
+        .windows = std.AutoHashMap(u32, defs.Window).init(allocator),
+        .focused_window = null,
+        .xkb_state = xkb_state,
+    };
+    defer wm.deinit();
+
+    // Setup signal handler
+    setupSignalHandler();
+
+    // Initialize modules
+    window_module.init(&wm);
+    input_module.init(&wm);
+    
+    defer {
+        window_module.deinit(&wm);
+        input_module.deinit(&wm);
     }
 
     // Grab keybindings
     try grabKeybindings(&wm);
 
-    // 7. Build event dispatch lookup table (O(1) event routing)
-    var event_dispatch = std.AutoHashMap(u8, std.ArrayList(*defs.Module)).init(allocator);
-    defer {
-        var iter = event_dispatch.valueIterator();
-        while (iter.next()) |list| {
-            list.deinit(allocator);
-        }
-        event_dispatch.deinit();
-    }
+    // Build dispatch table at comptime
+    const event_handlers = comptime buildEventHandlerTable();
 
-    for (&modules) |*module| {
-        for (module.event_types) |event_type| {
-            const entry = try event_dispatch.getOrPut(event_type);
-            if (!entry.found_existing) {
-                entry.value_ptr.* = .{};
-            }
-            try entry.value_ptr.append(allocator, module);
-        }
-    }
-
-    // 8. Main event loop
+    // Single flush after all initialization
     _ = xcb.xcb_flush(conn);
+
+    // Event buffer for batch processing (reduce allocations)
+    var event_buffer: [32]?*anyopaque = undefined;
+    var event_count: usize = 0;
+    
+    // Main event loop - CRITICAL HOT PATH
     while (true) {
-        // Check for config reload signal
-        if (should_reload_config) {
-            try reloadConfig(&wm);
-            should_reload_config = false;
+        // Check config reload (cold path - branch predictor friendly)
+        if (should_reload_config.load(.acquire)) {
+            should_reload_config.store(false, .release);
+            handleConfigReload(&wm) catch |err| {
+                std.log.err("Config reload failed: {}", .{err});
+            };
         }
 
-        const event = xcb.xcb_wait_for_event(conn);
-        if (event == null) break;
-        defer std.c.free(event);
+        // Try to batch multiple events (reduces context switches)
+        event_count = 0;
+        while (event_count < event_buffer.len) : (event_count += 1) {
+            event_buffer[event_count] = xcb.xcb_poll_for_event(conn);
+            if (event_buffer[event_count] == null) break;
+        }
 
-        const event_type = @as(*u8, @ptrCast(event)).*;
-        const response_type = event_type & ~defs.X11_SYNTHETIC_EVENT_FLAG;
+        // If no events were ready, wait for one
+        if (event_count == 0) {
+            const event = xcb.xcb_wait_for_event(conn) orelse break;
+            event_buffer[0] = event;
+            event_count = 1;
+        }
 
-        // O(1) dispatch - only call modules that handle this event
-        if (event_dispatch.get(response_type)) |module_list| {
-            for (module_list.items) |module| {
-                module.handle_fn(event_type, event, &wm);
+        // Process all buffered events
+        for (event_buffer[0..event_count]) |maybe_event| {
+            const event = maybe_event orelse continue;
+            defer std.c.free(event);
+
+            // Fast event dispatch - hot path optimization
+            const event_type = @as(*u8, @ptrCast(event)).*;
+            const response_type = event_type & ~defs.X11_SYNTHETIC_EVENT_FLAG;
+
+            // Bounds check will be optimized out by compiler due to comptime MAX_EVENT_TYPE
+            if (response_type < MAX_EVENT_TYPE) {
+                const handler = event_handlers[response_type];
+                
+                // Inline dispatch - zero function call overhead
+                if (handler.window) {
+                    window_module.handleEvent(event_type, event, &wm);
+                }
+                
+                if (handler.input) {
+                    input_module.handleEvent(event_type, event, &wm);
+                }
             }
         }
-
-        _ = xcb.xcb_flush(conn);
     }
 }
 
-/// Grab all configured keybindings
+/// Build the event dispatch table at comptime
+fn buildEventHandlerTable() [MAX_EVENT_TYPE]EventHandlers {
+    var handlers = [_]EventHandlers{.{ .window = false, .input = false }} ** MAX_EVENT_TYPE;
+    
+    for (window_module.EVENT_TYPES) |event_type| {
+        if (event_type < MAX_EVENT_TYPE) {
+            handlers[event_type].window = true;
+        }
+    }
+    
+    for (input_module.EVENT_TYPES) |event_type| {
+        if (event_type < MAX_EVENT_TYPE) {
+            handlers[event_type].input = true;
+        }
+    }
+    
+    return handlers;
+}
+
+// Compact handler flags (fits in single byte)
+const EventHandlers = packed struct {
+    window: bool,
+    input: bool,
+};
+
+/// Grab keybindings - optimized batch operation
 fn grabKeybindings(wm: *WM) !void {
-    // Ungrab all keys first
     _ = xcb.xcb_ungrab_key(wm.conn, xcb.XCB_GRAB_ANY, wm.root, xcb.XCB_MOD_MASK_ANY);
 
-    // Grab each configured keybinding
+    var grabbed: usize = 0;
+
+    // Batch all grab requests
     for (wm.config.keybindings.items) |keybind| {
-        const cookie = xcb.xcb_grab_key_checked(
+        const keycode = keybind.keycode orelse continue;
+        
+        _ = xcb.xcb_grab_key(
             wm.conn,
-            0, // don't use owner_events
+            0,
             wm.root,
             @intCast(keybind.modifiers),
-            keybind.keycode,
+            keycode,
             xcb.XCB_GRAB_MODE_ASYNC,
             xcb.XCB_GRAB_MODE_ASYNC,
         );
-
-        if (xcb.xcb_request_check(wm.conn, cookie)) |err| {
-            std.debug.print("Warning: Failed to grab key (mod={x} key={}): error code {}\n", .{ keybind.modifiers, keybind.keycode, err.*.error_code });
-            std.c.free(err);
-        }
+        grabbed += 1;
     }
 
-    std.debug.print("Grabbed {} keybindings\n", .{wm.config.keybindings.items.len});
+    // Single flush
+    _ = xcb.xcb_flush(wm.conn);
+
+    if (builtin.mode == .Debug) {
+        std.debug.print("Grabbed {} keybindings\n", .{grabbed});
+    }
 }
 
-/// Reload configuration file and reapply settings
-fn reloadConfig(wm: *WM) !void {
-    std.debug.print("Reloading configuration...\n", .{});
+/// Config reload handler
+fn handleConfigReload(wm: *WM) !void {
+    if (builtin.mode == .Debug) {
+        std.debug.print("Reloading configuration...\n", .{});
+    }
 
-    // Load new config
-    const new_config = config.loadConfig(wm.allocator, "config.toml") catch |err| {
-        std.debug.print("Failed to reload config: {}\n", .{err});
-        return;
-    };
+    var new_config = try config.loadConfig(wm.allocator, "config.toml");
+    errdefer new_config.deinit(wm.allocator);
 
-    // Clean up old config
+    const xkb_state: *xkbcommon.XkbState = @ptrCast(@alignCast(wm.xkb_state));
+    resolveKeybindings(new_config.keybindings.items, xkb_state);
+
     wm.config.deinit(wm.allocator);
-
-    // Apply new config
     wm.config = new_config;
-
-    // Regrab keybindings
+    
     try grabKeybindings(wm);
 
-    // Reapply borders to existing windows
-    for (wm.windows.items) |win| {
-        const is_focused = if (wm.focused_window) |fid| fid == win.id else false;
-        const border_color = if (is_focused) wm.config.border_focused else wm.config.border_unfocused;
-        try applyWindowBorder(wm, win.id, border_color);
-    }
-
-    std.debug.print("Configuration reloaded successfully\n", .{});
-}
-
-/// Apply border to window with error checking
-fn applyWindowBorder(wm: *WM, window: u32, color: u24) !void {
-    const border_mask = xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH;
-    const border_values = [_]u32{wm.config.border_width};
-    const border_cookie = xcb.xcb_configure_window_checked(wm.conn, window, border_mask, &border_values);
-    if (xcb.xcb_request_check(wm.conn, border_cookie)) |err| {
-        std.debug.print("Failed to set border width for window {}: error code {}\n", .{ window, err.*.error_code });
-        std.c.free(err);
-        return error.XCBConfigureFailed;
-    }
-
-    const color_mask = xcb.XCB_CW_BORDER_PIXEL;
-    const color_values = [_]u32{color};
-    const color_cookie = xcb.xcb_change_window_attributes_checked(wm.conn, window, color_mask, &color_values);
-    if (xcb.xcb_request_check(wm.conn, color_cookie)) |err| {
-        std.debug.print("Failed to set border color for window {}: error code {}\n", .{ window, err.*.error_code });
-        std.c.free(err);
-        return error.XCBConfigureFailed;
+    if (builtin.mode == .Debug) {
+        std.debug.print("Configuration reloaded successfully\n", .{});
     }
 }

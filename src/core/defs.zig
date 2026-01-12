@@ -1,6 +1,6 @@
 // Core type definitions
-
 const std = @import("std");
+const xkbcommon = @import("xkbcommon");
 
 // Centralized XCB import - all modules must use this
 pub const xcb = @cImport({
@@ -9,6 +9,11 @@ pub const xcb = @cImport({
 
 // X11 uses bit 7 to mark synthetic events
 pub const X11_SYNTHETIC_EVENT_FLAG: u8 = 0x80;
+
+// Default no-op deinit for modules that don't need cleanup
+pub fn defaultModuleDeinit(_: *WM) void {
+    // No cleanup needed
+}
 
 // Modifier key masks (from X11)
 pub const MOD_SHIFT: u16 = 1 << 0;
@@ -35,11 +40,23 @@ pub const Action = union(enum) {
 // Keybinding definition
 pub const Keybind = struct {
     modifiers: u16,
-    keycode: u8,
+    keysym: u32,      // Changed from keycode: u8
+    keycode: ?u8 = null,  // Cached keycode for X11 grabbing (populated at runtime)
     action: Action,
 
-    pub fn matches(self: *const Keybind, modifiers: u16, keycode: u8) bool {
+    /// Check if this keybinding matches given modifiers and keysym
+    pub inline fn matches(self: *const Keybind, modifiers: u16, keysym: u32) bool {
+        return self.modifiers == modifiers and self.keysym == keysym;
+    }
+
+    /// Check if this keybinding matches given modifiers and keycode (for X11 events)
+    pub inline fn matchesKeycode(self: *const Keybind, modifiers: u16, keycode: u8) bool {
         return self.modifiers == modifiers and self.keycode == keycode;
+    }
+
+    /// Generate a hash key for fast HashMap lookups (if needed)
+    pub inline fn hash(self: *const Keybind) u64 {
+        return (@as(u64, self.modifiers) << 32) | self.keysym;
     }
 };
 
@@ -66,24 +83,20 @@ pub const WindowProperties = struct {
     }
 };
 
-// Managed window state
 pub const Window = struct {
     id: u32,
-    x: i16,
-    y: i16,
     width: u16,
     height: u16,
+    x: i16,
+    y: i16,
     is_focused: bool,
     properties: WindowProperties,
+    
+    // Total: 4 + 2 + 2 + 2 + 2 + 1 + sizeof(WindowProperties) = better packing
 };
 
 // Window manager configuration loaded from config.toml
 pub const Config = struct {
-    border_width: u12,
-    border_focused: u24,
-    border_unfocused: u24,
-    gap_inner: u16,
-    gap_outer: u16,
     keybindings: std.ArrayList(Keybind),
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
@@ -101,15 +114,53 @@ pub const WM = struct {
     screen: *xcb.xcb_screen_t,
     root: u32,
     config: Config,
-    windows: std.ArrayList(Window),
-    focused_window: ?u32 = null,
+    // Changed to HashMap for O(1) window lookups by ID
+    windows: std.AutoHashMap(u32, Window),
+    focused_window: ?u32   = null,
+    previous_focused: ?u32 = null,
+    // XKB state for keyboard handling
+    xkb_state: ?*xkbcommon.XkbState,
 
     pub fn deinit(self: *WM) void {
-        for (self.windows.items) |*win| {
+        // Clean up window properties
+        var iter = self.windows.valueIterator();
+        while (iter.next()) |win| {
+            var mutable_win = win.*;
+            mutable_win.properties.deinit(self.allocator);
+        }
+        self.windows.deinit();
+        self.config.deinit(self.allocator);
+        
+        // Clean up XKB state
+        if (self.xkb_state) |state| {
+            const xkb_ptr: *xkbcommon.XkbState = @ptrCast(@alignCast(state));
+            xkb_ptr.deinit();
+            self.allocator.destroy(xkb_ptr);
+        }
+    }
+
+    /// Get window by ID - O(1) lookup
+    pub inline fn getWindow(self: *WM, window_id: u32) ?*Window {
+        return self.windows.getPtr(window_id);
+    }
+
+    /// Add or update window - O(1) insertion
+    pub inline fn putWindow(self: *WM, window: Window) !void {
+        try self.windows.put(window.id, window);
+    }
+
+    /// Remove window - O(1) deletion
+    pub inline fn removeWindow(self: *WM, window_id: u32) void {
+        if (self.windows.fetchRemove(window_id)) |kv| {
+            var win = kv.value;
             win.properties.deinit(self.allocator);
         }
-        self.windows.deinit(self.allocator);
-        self.config.deinit(self.allocator);
+    }
+
+    /// Get focused window
+    pub inline fn getFocusedWindow(self: *WM) ?*Window {
+        const id = self.focused_window orelse return null;
+        return self.getWindow(id);
     }
 };
 
