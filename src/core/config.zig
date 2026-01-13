@@ -65,19 +65,21 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator) !Config {
 /// Falls back to defaults if file doesn't exist
 /// Missing sections/keys use defaults, but invalid values log warnings
 pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !Config {
-    // Try to read the config file
-    const content = readConfigFile(allocator, path) catch |err| switch (err) {
-        // If file doesn't exist, fallback to defaults
+    // Inline the file reading
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    defer threaded.deinit();
+    const max_size = 10 * 1024 * 1024;
+    
+    const content = std.Io.Dir.cwd().readFileAlloc(threaded.io(), path, allocator, @enumFromInt(max_size)) catch |err| switch (err) {
         error.FileNotFound => {
             std.log.info("Config file not found, using defaults", .{});
             return getDefaultConfig();
         },
-        // Other errors (permissions, I/O) should propagate up
         else => return err,
     };
-    defer allocator.free(content); // Free the file content when we're done
+    defer allocator.free(content);
 
-    // Parse TOML syntax for any syntax errors 
+    // Parse TOML syntax for any syntax errors
     var doc = try toml.parse(allocator, content);
     defer doc.deinit(); // Clean up the parsed document
 
@@ -92,18 +94,6 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !Config {
     try validateConfig(allocator, &config);
     
     return config;
-}
-
-/// Read entire config file into memory - uses Zig master std.Io API
-fn readConfigFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    // Create I/O interface for file operations
-    var threaded: std.Io.Threaded = .init_single_threaded;
-    defer threaded.deinit();
-    const io = threaded.io();
-    
-    // Read entire file with 10MB safety limit
-    const max_size = 10 * 1024 * 1024; // = 10MB
-    return try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, @enumFromInt(max_size));
 }
 
 /// Parse the [Keybindings] section

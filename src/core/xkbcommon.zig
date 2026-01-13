@@ -46,7 +46,7 @@ pub const XkbState = struct {
 
         // Setup XKB extension - try a few times if it fails (for startx case)
         var setup_result: i32 = 0;
-        var attempts: u8 = 5; // Only 5 attempts x 20ms = 100ms max
+        var attempts: u8 = 20; // Increased from 5 to 20 (20 × 20ms = 400ms max)
         while (attempts > 0) : (attempts -= 1) {
             setup_result = xkb.xkb_x11_setup_xkb_extension(
                 @ptrCast(xcb_conn),
@@ -56,7 +56,7 @@ pub const XkbState = struct {
                 null, null, null, null
             );
             if (setup_result != 0) break;
-            
+
             // Only retry if it actually failed
             if (attempts > 1) {
                 std.posix.nanosleep(0, 20 * std.time.ns_per_ms);

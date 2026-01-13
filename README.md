@@ -82,7 +82,7 @@ Let me be clear. There's nothing _wrong_ about dwm. It's a perfectly good and fi
   
 + **Simpler** than dwm?
   - Clearer file naming and structuring
-    > Nearly all the code in one file (`dwm.c`)? What does `drw.c` do? Why are there two config files (`config.h` / `config.mk`), each one having three different types (`config.<.h/.def.h/.def.h.orig>` / `config<.mk/.mk.orig/.mk.rej`)? What's so transient about `transient.c`? 
+    > Nearly all the code in one file (`dwm.c`)? What does `drw.c` do? Why are there two config files (`config.h` / `config.mk`), each one having three different types (`config.<.h/.def.h/.def.h.orig>` / `config<.mk/.mk.orig/.mk.rej>`)? What's so transient about `transient.c`? 
   - Config hot-reloading
     > Runtime config instead of recompiling at every minor change (without sacrificing performance on a dynamically interpreted language)
   - Simpler code in general
@@ -118,23 +118,23 @@ But it works! After so much time investigating and trying things only to be met 
 
 ## What Works Right Now
 
-✅ Windows appear on screen  
-✅ Configurable borders (width + color)  
-✅ XCB async event handling  
-✅ Modular architecture  
-✅ TOML configuration  
-✅ Keyboard and mouse input capture (logged only)
+- Windows appear on screen  
+- Configurable borders (width + color)  
+- XCB async event handling  
+- Modular architecture  
+- TOML configuration  
+- Keyboard and mouse input capture (logged only)
 
 ## Roadmap (things to-do):
 
-💡 Window tiling/layouts  
-💡 Keybindings (no shortcuts yet)  
-💡 Window focus  
-💡 Moving/resizing windows  
-💡 Workspaces  
-💡 Status bar  
-💡 Move config to a more coherent dir  
-💡 Move Zig's binary output to a UNIX-compatible bin dir (yet to figure out)  FINITIONS #
+- Window tiling/layouts  
+- Keybindings (no shortcuts yet)  
+- Window focus  
+- Moving/resizing windows  
+- Workspaces  
+- Status bar  
+- Move config to a more coherent dir  
+- Move Zig's binary output to a UNIX-compatible bin dir (yet to figure out)  FINITIONS #
 
 ... Pretty much everything else.
 

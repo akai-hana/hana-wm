@@ -1,8 +1,7 @@
-// Error handling utilities
+// Error handling and reporting utilities
 const std = @import("std");
 const defs = @import("defs");
 const Config = defs.Config;
-// Use xcb from defs to avoid type conflicts
 const xcb = defs.xcb;
 
 // ANSI color codes
@@ -10,7 +9,9 @@ const COLOR_YELLOW = "\x1b[33m";
 const COLOR_RED = "\x1b[31m";
 const COLOR_RESET = "\x1b[0m";
 
-// Loads config with fallback to defaults and user-friendly error messages
+// CONFIG ERROR HANDLING
+
+/// Loads config with fallback to defaults and user-friendly error messages
 pub fn loadConfigOrDefault(
     loadConfig: fn (std.mem.Allocator, []const u8) anyerror!Config,
     allocator: std.mem.Allocator,
@@ -23,7 +24,7 @@ pub fn loadConfigOrDefault(
     };
 }
 
-// Prints user-friendly error message for config loading failures
+/// Prints user-friendly error message for config loading failures
 fn handleConfigError(err: anyerror, path: []const u8) void {
     switch (err) {
         error.FileNotFound => {
@@ -41,37 +42,41 @@ fn handleConfigError(err: anyerror, path: []const u8) void {
     }
 }
 
-// Warns about empty config value
+// CONFIG WARNING FUNCTIONS
+
+/// Warns about empty config value
 pub fn warnEmptyValue(line: usize, key: []const u8) void {
     std.debug.print("{s}Warning{s} (line {}): Empty value for '{s}', falling back to defaults\n", .{ COLOR_YELLOW, COLOR_RESET, line, key });
 }
 
-// Warns about invalid border_width value
+/// Warns about invalid border_width value
 pub fn warnInvalidBorderWidth(line: usize, value: []const u8, err: anyerror) void {
     std.debug.print("{s}Warning{s} (line {}): Invalid border_width '{s}' ({}), falling back to defaults\n", .{ COLOR_YELLOW, COLOR_RESET, line, value, err });
 }
 
-// Warns about invalid border_color value
+/// Warns about invalid border_color value
 pub fn warnInvalidBorderColor(line: usize, value: []const u8, err: anyerror) void {
     std.debug.print("{s}Warning{s} (line {}): Invalid border_color '{s}' ({}), falling back to defaults\n", .{ COLOR_YELLOW, COLOR_RESET, line, value, err });
 }
 
-// Warns about duplicate config key
+/// Warns about duplicate config key
 pub fn warnDuplicateKey(line: usize, key: []const u8) void {
     std.debug.print("{s}Warning{s} (line {}): Duplicate key '{s}', last value will be used\n", .{ COLOR_YELLOW, COLOR_RESET, line, key });
 }
 
-// Warns about color value exceeding RGB range
+/// Warns about color value exceeding RGB range
 pub fn warnColorOutOfRange(line: usize, value: []const u8) void {
     std.debug.print("{s}Warning{s} (line {}): Color value '{s}' exceeds 24-bit RGB range (0x000000-0xFFFFFF), falling back to defaults\n", .{ COLOR_YELLOW, COLOR_RESET, line, value });
 }
 
-// Warns about unknown config key (potential typo)
+/// Warns about unknown config key (potential typo)
 pub fn warnUnknownConfigKey(line: usize, key: []const u8) void {
     std.debug.print("{s}Warning{s} (line {}): Unknown config key '{s}' (ignored)\n", .{ COLOR_YELLOW, COLOR_RESET, line, key });
 }
 
-// Connects to X11 display server with error handling
+// X11 ERROR HANDLING
+
+/// Connects to X11 display server with error handling
 pub fn connectToX11() !*xcb.xcb_connection_t {
     const conn = xcb.xcb_connect(null, null) orelse {
         std.debug.print("{s}Error{s}: Failed to connect to X11 display server (null connection)\n", .{ COLOR_RED, COLOR_RESET });
@@ -84,7 +89,7 @@ pub fn connectToX11() !*xcb.xcb_connection_t {
     return conn;
 }
 
-// Gets X11 screen with error handling
+/// Gets X11 screen with error handling
 pub fn getX11Screen(conn: *xcb.xcb_connection_t) !*xcb.xcb_screen_t {
     const setup = xcb.xcb_get_setup(conn);
     const screen_iter = xcb.xcb_setup_roots_iterator(setup);
@@ -96,7 +101,7 @@ pub fn getX11Screen(conn: *xcb.xcb_connection_t) !*xcb.xcb_screen_t {
     return screen;
 }
 
-// Attempts to become the window manager by claiming root window control
+/// Attempts to become the window manager by claiming root window control
 pub fn becomeWindowManager(conn: *xcb.xcb_connection_t, root: u32, event_mask: u32) !void {
     const mask = xcb.XCB_CW_EVENT_MASK;
     const values = [_]u32{event_mask};
@@ -107,8 +112,3 @@ pub fn becomeWindowManager(conn: *xcb.xcb_connection_t, root: u32, event_mask: u
         return error.AnotherWMRunning;
     }
 }
-
-// Future error handling utilities can go here:
-// - handleModuleError()
-// - handleKeybindError()
-// etc.

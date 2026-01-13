@@ -35,18 +35,20 @@ pub fn build(b: *std.Build) void {
     // Initialize module registry
     var all_modules = std.StringHashMap(*std.Build.Module).init(allocator);
 
-    // Register core modules
-    const core_modules = [_]struct { []const u8, []const u8 }{
-        .{ "defs", "src/core/defs.zig" },
-        .{ "error", "src/core/error.zig" },
-        .{ "toml", "src/core/toml.zig" },
-        .{ "config", "src/core/config.zig" },
-        .{ "xkbcommon", "src/core/xkbcommon.zig" },
+    // Register core modules - module name = filename
+    const core_modules = [_][]const u8{
+        "defs",
+        "toml",
+        "config",
+        "xkbcommon",
+        "input",
+        "window",
     };
 
-    for (core_modules) |mod| {
-        const module = b.addModule(mod[0], .{ .root_source_file = b.path(mod[1]) });
-        all_modules.put(mod[0], module) catch @panic("Failed to register core module");
+    for (core_modules) |name| {
+        const path = b.fmt("src/core/{s}.zig", .{name});
+        const module = b.addModule(name, .{ .root_source_file = b.path(path) });
+        all_modules.put(name, module) catch @panic("Failed to register core module");
     }
 
     // Auto-discover modules
