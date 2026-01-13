@@ -37,21 +37,31 @@ pub const XkbState = struct {
     state: *xkb_state,
     device_id: i32,
 
-    /// Initialize XKB for the given X11 connection
+    /// Initialize XKB for the given X11 connection with optional retry for startx
     pub fn init(xcb_conn: *anyopaque) !XkbState {
         // Create XKB context
-        const ctx = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS) orelse 
+        const ctx = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS) orelse
             return error.XkbContextFailed;
         errdefer xkb.xkb_context_unref(ctx);
 
-        // Setup XKB extension on X11 connection
-        const setup_result = xkb.xkb_x11_setup_xkb_extension(
-            @ptrCast(xcb_conn),
-            xkb.XKB_X11_MIN_MAJOR_XKB_VERSION,
-            xkb.XKB_X11_MIN_MINOR_XKB_VERSION,
-            xkb.XKB_X11_SETUP_XKB_EXTENSION_NO_FLAGS,
-            null, null, null, null
-        );
+        // Setup XKB extension - try a few times if it fails (for startx case)
+        var setup_result: i32 = 0;
+        var attempts: u8 = 5; // Only 5 attempts x 20ms = 100ms max
+        while (attempts > 0) : (attempts -= 1) {
+            setup_result = xkb.xkb_x11_setup_xkb_extension(
+                @ptrCast(xcb_conn),
+                xkb.XKB_X11_MIN_MAJOR_XKB_VERSION,
+                xkb.XKB_X11_MIN_MINOR_XKB_VERSION,
+                xkb.XKB_X11_SETUP_XKB_EXTENSION_NO_FLAGS,
+                null, null, null, null
+            );
+            if (setup_result != 0) break;
+            
+            // Only retry if it actually failed
+            if (attempts > 1) {
+                std.posix.nanosleep(0, 20 * std.time.ns_per_ms);
+            }
+        }
         if (setup_result == 0) return error.XkbSetupFailed;
 
         // Get the keyboard device ID
@@ -95,10 +105,10 @@ pub const XkbState = struct {
     pub fn keysymToKeycode(self: *XkbState, keysym: u32) ?u8 {
         // Could build a lookup table at init time, but costs memory
         // Current linear search is fine for 255 keys max
-        
+
         const min_keycode: u8 = 8;
         const max_keycode: u8 = 255;
-        
+
         var keycode: u8 = min_keycode;
         while (keycode <= max_keycode) : (keycode += 1) {
             const sym = xkb.xkb_state_key_get_one_sym(self.state, keycode);
@@ -107,7 +117,7 @@ pub const XkbState = struct {
                 return keycode;
             }
         }
-        
-        return null;   
+
+        return null;
     }
 };

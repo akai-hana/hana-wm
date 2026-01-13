@@ -16,18 +16,26 @@ pub fn defaultModuleDeinit(_: *WM) void {
 }
 
 // Modifier key masks (from X11)
-pub const MOD_SHIFT: u16 = 1 << 0;
+pub const MOD_SHIFT:   u16 = 1 << 0;
 pub const MOD_CONTROL: u16 = 1 << 2;
-pub const MOD_ALT: u16 = 1 << 3;      // Mod1
-pub const MOD_SUPER: u16 = 1 << 6;     // Mod4
+pub const MOD_ALT:     u16 = 1 << 3; // Mod1
+pub const MOD_SUPER:   u16 = 1 << 6; // Mod4
+
+pub const MOD_LOCK: u16 = 1 << 1;     // CapsLock
+pub const MOD_2: u16 = 1 << 4;        // NumLock
+pub const MOD_3: u16 = 1 << 5;        // ScrollLock (rarely used)
+pub const MOD_5: u16 = 1 << 7;
+
+// Mask to filter out lock keys - only keep modifiers we care about
+pub const MOD_MASK_RELEVANT: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER;
 
 // Keybinding action
 pub const Action = union(enum) {
-    exec: []const u8,           // Execute command
-    close_window: void,         // Close focused window
-    reload_config: void,        // Reload configuration
-    focus_next: void,           // Focus next window
-    focus_prev: void,           // Focus previous window
+    exec:          []const u8, // Execute command
+    close_window:  void,       // Close focused window
+    reload_config: void,       // Reload configuration
+    focus_next:    void,       // Focus next window
+    focus_prev:    void,       // Focus previous window
 
     pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
         switch (self.*) {

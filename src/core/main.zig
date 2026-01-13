@@ -111,6 +111,7 @@ fn setupSignalHandler() void {
 pub fn main() !void {
     // Connect to X11
     const conn = try error_handling.connectToX11();
+
     defer xcb.xcb_disconnect(@ptrCast(conn));
 
     const screen = try error_handling.getX11Screen(conn);
@@ -128,7 +129,10 @@ pub fn main() !void {
     // GPA for runtime allocations
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = if (builtin.mode == .Debug) 
+        gpa.allocator() 
+    else 
+        std.heap.c_allocator;
 
     // Initialize XKB state
     const xkb_state = try allocator.create(xkbcommon.XkbState);
