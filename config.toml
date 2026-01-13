@@ -14,5 +14,5 @@ outer = 20                      # Gap between windows and screen edge (pixels)
 # Execute commands
 # Format: "Modifier+Key" = "command"
 # Modifiers: Mod4 (Super/Windows), Mod1 (Alt), Shift, Control
-Super+Return = "ghostty"
+Super+Return = "kitty"
 Mod4+Shift+q = "kill"  # This will be handled specially to close window

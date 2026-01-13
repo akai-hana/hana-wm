@@ -1,96 +1,67 @@
-// Main event loop
+// Main event loop - EXACTLY like TinyWM (no complexity)
 
-// Imports
 const std     = @import("std");
 const posix   = std.posix;
 const builtin = @import("builtin");
 
-// src/core/
 const config         = @import("config");
 const defs           = @import("defs");
 const xkbcommon      = @import("xkbcommon");
 const window_module = @import("window");
 const input_module  = @import("input");
-
-// src/debug/
 const error_handling = @import("error_handling");
 const logging        = @import("logging");
 
-// Convenience renames inherited from central defs import
 const xcb = defs.xcb;
 const WM  = defs.WM;
 
-// src/modules/
-
-// Constants
 const XCB_CURSOR_LEFT_PTR: u16 = 68;
-const MAX_EVENT_TYPE: comptime_int = 36;
 
-// Signal flag for config reload (atomic for thread-safety)
 var should_reload_config: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
-// Pre-computed event mask constant (compile-time)
+// Only select events we absolutely need on root - NO MOUSE EVENTS
 const WM_EVENT_MASK = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
     xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
-    xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY |
-    xcb.XCB_EVENT_MASK_PROPERTY_CHANGE |
-    xcb.XCB_EVENT_MASK_KEY_PRESS |
-    xcb.XCB_EVENT_MASK_KEY_RELEASE;
+    xcb.XCB_EVENT_MASK_KEY_PRESS;
 
-// Cursor setup
+// TinyWM drag state
+var start_button: u8 = 0;
+var start_subwindow: u32 = 0;
+var start_x: i16 = 0;
+var start_y: i16 = 0;
+var attr_x: i16 = 0;
+var attr_y: i16 = 0;
+var attr_width: u16 = 0;
+var attr_height: u16 = 0;
+
 fn setupRootCursor(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) !void {
     const cursor_font = xcb.xcb_generate_id(conn);
     const font_name = "cursor";
     
-    // Use checked calls only in debug mode
-    if (builtin.mode == .Debug) {
-        const cookie = xcb.xcb_open_font_checked(
-            conn,
-            cursor_font,
-            @intCast(font_name.len),
-            font_name.ptr,
-        );
-        
-        if (xcb.xcb_request_check(conn, cookie) != null) {
-            logging.debugCursorSetupFailed();
-            return error.CursorSetupFailed;
-        }
-    } else {
-        _ = xcb.xcb_open_font(
-            conn,
-            cursor_font,
-            @intCast(font_name.len),
-            font_name.ptr,
-        );
-    }
+    _ = xcb.xcb_open_font(conn, cursor_font, @intCast(font_name.len), font_name.ptr);
 
     const cursor_id = xcb.xcb_generate_id(conn);
     _ = xcb.xcb_create_glyph_cursor(
-        conn,
-        cursor_id,
-        cursor_font,
-        cursor_font,
-        XCB_CURSOR_LEFT_PTR,
-        XCB_CURSOR_LEFT_PTR + 1,
-        0, 0, 0,
-        65535, 65535, 65535,
+        conn, cursor_id, cursor_font, cursor_font,
+        XCB_CURSOR_LEFT_PTR, XCB_CURSOR_LEFT_PTR + 1,
+        0, 0, 0, 65535, 65535, 65535,
     );
 
     const mask: u32 = xcb.XCB_CW_CURSOR;
     const values = [_]u32{cursor_id};
-    _ = xcb.xcb_change_window_attributes(
-        conn,
-        screen.*.root,
-        mask,
-        &values,
-    );
-
+    _ = xcb.xcb_change_window_attributes(conn, screen.*.root, mask, &values);
     _ = xcb.xcb_close_font(conn, cursor_font);
-
-    // No flush here; batched with other operations
 }
 
-/// Resolve keysyms to keycodes for all keybindings
+fn setupTinyWMGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
+    // Don't grab anything - let's test if grabs are the problem
+    _ = conn;
+    _ = root;
+    
+    // If this fixes the jank, then the grabs are interfering
+    // If jank persists, the problem is elsewhere
+}
+
 fn resolveKeybindings(keybindings: anytype, xkb_state: *xkbcommon.XkbState) void {
     for (keybindings) |*keybind| {
         keybind.keycode = xkb_state.keysymToKeycode(keybind.keysym);
@@ -100,7 +71,6 @@ fn resolveKeybindings(keybindings: anytype, xkb_state: *xkbcommon.XkbState) void
     }
 }
 
-/// Setup signal handler for SIGHUP (config reload)
 fn setupSignalHandler() void {
     const sig_handler = struct {
         fn handler(_: posix.SIG) callconv(.c) void {
@@ -111,27 +81,26 @@ fn setupSignalHandler() void {
     var sa = posix.Sigaction{
         .handler = .{ .handler = sig_handler },
         .mask = std.mem.zeroes(posix.sigset_t),
-        .flags = posix.SA.RESTART, // Auto-restart interrupted syscalls
+        .flags = posix.SA.RESTART,
     };
     posix.sigaction(posix.SIG.HUP, &sa, null);
 }
 
 pub fn main() !void {
-    // Connect to X11
     const conn = try error_handling.connectToX11();
     defer xcb.xcb_disconnect(@ptrCast(conn));
 
     const screen = try error_handling.getX11Screen(conn);
     const root = screen.*.root;
 
-    // Become window manager
     try error_handling.becomeWindowManager(conn, root, WM_EVENT_MASK);
-    
     try setupRootCursor(conn, screen);
+    
+    // Setup TinyWM-style grabs
+    setupTinyWMGrabs(conn, root);
 
     logging.debugWMStarted();
 
-    // GPA for runtime allocations
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = if (builtin.mode == .Debug) 
@@ -139,17 +108,14 @@ pub fn main() !void {
     else 
         std.heap.c_allocator;
 
-    // Initialize XKB state
     const xkb_state = try allocator.create(xkbcommon.XkbState);
     errdefer allocator.destroy(xkb_state);
     xkb_state.* = try xkbcommon.XkbState.init(conn);
     errdefer xkb_state.deinit();
 
-    // Load config
     var user_config = try config.loadConfig(allocator, "config.toml");
     resolveKeybindings(user_config.keybindings.items, xkb_state);
 
-    // Initialize WM
     var wm = WM{
         .allocator = allocator,
         .conn = conn,
@@ -162,10 +128,8 @@ pub fn main() !void {
     };
     defer wm.deinit();
 
-    // Setup signal handler
     setupSignalHandler();
 
-    // Initialize modules
     window_module.init(&wm);
     input_module.init(&wm);
     
@@ -174,22 +138,15 @@ pub fn main() !void {
         input_module.deinit(&wm);
     }
 
-    // Grab keybindings
     try grabKeybindings(&wm);
 
-    // Build dispatch table at comptime
-    const event_handlers = comptime buildEventHandlerTable();
-
-    // Single flush after all initialization
     _ = xcb.xcb_flush(conn);
 
-    // Event buffer for batch processing (reduce allocations)
-    var event_buffer: [32]?*anyopaque = undefined;
-    var event_count: usize = 0;
-    
-    // Main event loop - CRITICAL HOT PATH
+    // SIMPLE event loop like TinyWM
     while (true) {
-        // Check config reload (cold path - branch predictor friendly)
+        // CRITICAL: Flush before waiting - XCB doesn't auto-flush like Xlib
+        _ = xcb.xcb_flush(conn);
+        
         if (should_reload_config.load(.acquire)) {
             should_reload_config.store(false, .release);
             handleConfigReload(&wm) catch |err| {
@@ -197,103 +154,123 @@ pub fn main() !void {
             };
         }
 
-        // Try to batch multiple events (reduces context switches)
-        event_count = 0;
-        while (event_count < event_buffer.len) : (event_count += 1) {
-            event_buffer[event_count] = xcb.xcb_poll_for_event(conn);
-            if (event_buffer[event_count] == null) break;
-        }
+        const event = xcb.xcb_wait_for_event(conn) orelse break;
+        defer std.c.free(event);
 
-        // If no events were ready, wait for one
-        if (event_count == 0) {
-            const event = xcb.xcb_wait_for_event(conn) orelse break;
-            event_buffer[0] = event;
-            event_count = 1;
-        }
+        const event_type = @as(*u8, @ptrCast(event)).*;
+        const response_type = event_type & 0x7F;
 
-        // Process all buffered events
-        for (event_buffer[0..event_count]) |maybe_event| {
-            const event = maybe_event orelse continue;
-            defer std.c.free(event);
-
-            // Fast event dispatch - hot path optimization
-            const event_type = @as(*u8, @ptrCast(event)).*;
-            const response_type = event_type & ~defs.X11_SYNTHETIC_EVENT_FLAG;
-
-            // Bounds check will be optimized out by compiler due to comptime MAX_EVENT_TYPE
-            if (response_type < MAX_EVENT_TYPE) {
-                const handler = event_handlers[response_type];
-                
-                // Inline dispatch - zero function call overhead
-                if (handler.window) {
-                    window_module.handleEvent(event_type, event, &wm);
+        // Handle mouse events INLINE like TinyWM
+        switch (response_type) {
+            xcb.XCB_BUTTON_PRESS => {
+                const ev = @as(*const xcb.xcb_button_press_event_t, @alignCast(@ptrCast(event)));
+                if (ev.child != 0) {
+                    // TinyWM: XGetWindowAttributes + save start position
+                    const geom_cookie = xcb.xcb_get_geometry(conn, ev.child);
+                    const geom_reply = xcb.xcb_get_geometry_reply(conn, geom_cookie, null);
+                    if (geom_reply) |g| {
+                        defer std.c.free(g);
+                        attr_x = g.*.x;
+                        attr_y = g.*.y;
+                        attr_width = g.*.width;
+                        attr_height = g.*.height;
+                    }
+                    start_subwindow = ev.child;
+                    start_button = ev.detail;
+                    start_x = ev.root_x;
+                    start_y = ev.root_y;
                 }
-                
-                if (handler.input) {
-                    input_module.handleEvent(event_type, event, &wm);
+                continue;
+            },
+            
+            xcb.XCB_MOTION_NOTIFY => {
+                const ev = @as(*const xcb.xcb_motion_notify_event_t, @alignCast(@ptrCast(event)));
+                if (start_subwindow != 0) {
+                    // TinyWM: calculate diff and move/resize
+                    const xdiff: i32 = @as(i32, ev.root_x) - @as(i32, start_x);
+                    const ydiff: i32 = @as(i32, ev.root_y) - @as(i32, start_y);
+                    
+                    const new_x = if (start_button == 1) attr_x + @as(i16, @intCast(xdiff)) else attr_x;
+                    const new_y = if (start_button == 1) attr_y + @as(i16, @intCast(ydiff)) else attr_y;
+                    const new_w = if (start_button == 3) @max(1, @as(i32, attr_width) + xdiff) else attr_width;
+                    const new_h = if (start_button == 3) @max(1, @as(i32, attr_height) + ydiff) else attr_height;
+                    
+                    _ = xcb.xcb_configure_window(
+                        conn, start_subwindow,
+                        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
+                        xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT,
+                        &[_]u32{
+                            @intCast(new_x), @intCast(new_y),
+                            @intCast(new_w), @intCast(new_h),
+                        },
+                    );
                 }
-            }
+                continue;
+            },
+            
+            xcb.XCB_BUTTON_RELEASE => {
+                start_subwindow = 0; // TinyWM: start.subwindow = None
+                continue;
+            },
+            
+            xcb.XCB_KEY_PRESS => {
+                const ev = @as(*const xcb.xcb_key_press_event_t, @alignCast(@ptrCast(event)));
+                if (ev.child != 0) {
+                    // TinyWM: raise window on keypress
+                    const values = [_]u32{xcb.XCB_STACK_MODE_ABOVE};
+                    _ = xcb.xcb_configure_window(
+                        conn, ev.child, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &values,
+                    );
+                }
+                // Also handle through input module for keybindings
+                input_module.handleEvent(event_type, event, &wm);
+            },
+            
+            xcb.XCB_MAP_REQUEST => {
+                window_module.handleEvent(event_type, event, &wm);
+            },
+            
+            xcb.XCB_CONFIGURE_REQUEST => {
+                window_module.handleEvent(event_type, event, &wm);
+            },
+            
+            xcb.XCB_DESTROY_NOTIFY => {
+                window_module.handleEvent(event_type, event, &wm);
+            },
+            
+            else => {},
         }
     }
 }
 
-/// Build the event dispatch table at comptime
-fn buildEventHandlerTable() [MAX_EVENT_TYPE]EventHandlers {
-    var handlers = [_]EventHandlers{.{ .window = false, .input = false }} ** MAX_EVENT_TYPE;
-    
-    for (window_module.EVENT_TYPES) |event_type| {
-        if (event_type < MAX_EVENT_TYPE) {
-            handlers[event_type].window = true;
-        }
-    }
-    
-    for (input_module.EVENT_TYPES) |event_type| {
-        if (event_type < MAX_EVENT_TYPE) {
-            handlers[event_type].input = true;
-        }
-    }
-    
-    return handlers;
-}
-
-// Compact handler flags (fits in single byte)
-const EventHandlers = packed struct {
-    window: bool,
-    input: bool,
-};
-
-/// Grab keybindings - optimized batch operation
 fn grabKeybindings(wm: *WM) !void {
     _ = xcb.xcb_ungrab_key(wm.conn, xcb.XCB_GRAB_ANY, wm.root, xcb.XCB_MOD_MASK_ANY);
 
-    var grabbed: usize = 0;
+    // Define irrelevant lock modifiers to ignore (Caps Lock, Num Lock, and combo)
+    // Add MOD_3 (Scroll Lock) if needed for your keyboard
+    const irrelevant_mods = [_]u16{
+        0,  // Base (no locks)
+        defs.MOD_LOCK,  // Caps Lock
+        defs.MOD_2,     // Num Lock
+        defs.MOD_LOCK | defs.MOD_2,  // Both
+    };
 
-    // Batch all grab requests
     for (wm.config.keybindings.items) |keybind| {
         const keycode = keybind.keycode orelse continue;
-        
-        _ = xcb.xcb_grab_key(
-            wm.conn,
-            0,
-            wm.root,
-            @intCast(keybind.modifiers),
-            keycode,
-            xcb.XCB_GRAB_MODE_ASYNC,
-            xcb.XCB_GRAB_MODE_ASYNC,
-        );
-        grabbed += 1;
+        for (irrelevant_mods) |irr_mod| {
+            const grab_mods: u16 = @intCast(keybind.modifiers | irr_mod);
+            _ = xcb.xcb_grab_key(
+                wm.conn, 0, wm.root,
+                grab_mods, keycode,
+                xcb.XCB_GRAB_MODE_ASYNC, xcb.XCB_GRAB_MODE_ASYNC,
+            );
+        }
     }
-
-    // Single flush
     _ = xcb.xcb_flush(wm.conn);
-
-    logging.debugKeybindingsGrabbed(grabbed);
 }
 
-/// Config reload handler
 fn handleConfigReload(wm: *WM) !void {
     logging.debugConfigReloading();
-
     var new_config = try config.loadConfig(wm.allocator, "config.toml");
     errdefer new_config.deinit(wm.allocator);
 
@@ -304,6 +281,5 @@ fn handleConfigReload(wm: *WM) !void {
     wm.config = new_config;
     
     try grabKeybindings(wm);
-
     logging.debugConfigReloaded();
 }

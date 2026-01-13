@@ -37,16 +37,22 @@ pub const XkbState = struct {
     state: *xkb_state,
     device_id: i32,
 
-    /// Initialize XKB for the given X11 connection with optional retry for startx
+    /// Initialize XKB for the given X11 connection with retry for startx
     pub fn init(xcb_conn: *anyopaque) !XkbState {
+        std.log.info("Initializing XKB...", .{});
+        
         // Create XKB context
-        const ctx = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS) orelse
+        const ctx = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS) orelse {
+            std.log.err("Failed to create XKB context", .{});
             return error.XkbContextFailed;
+        };
         errdefer xkb.xkb_context_unref(ctx);
 
-        // Setup XKB extension - try a few times if it fails (for startx case)
+        // Setup XKB extension - try multiple times for startx
         var setup_result: i32 = 0;
-        var attempts: u8 = 20; // Increased from 5 to 20 (20 × 20ms = 400ms max)
+        var attempts: u12 = 50; // 50 × 20ms = 1 second max
+        std.log.info("Setting up XKB extension (may retry for startx)...", .{});
+        
         while (attempts > 0) : (attempts -= 1) {
             setup_result = xkb.xkb_x11_setup_xkb_extension(
                 @ptrCast(xcb_conn),
@@ -55,18 +61,31 @@ pub const XkbState = struct {
                 xkb.XKB_X11_SETUP_XKB_EXTENSION_NO_FLAGS,
                 null, null, null, null
             );
-            if (setup_result != 0) break;
+            if (setup_result != 0) {
+                std.log.info("XKB extension setup succeeded", .{});
+                break;
+            }
 
-            // Only retry if it actually failed
             if (attempts > 1) {
+                if (attempts == 49) { // First retry
+                    std.log.info("XKB extension not ready, retrying...", .{});
+                }
                 std.posix.nanosleep(0, 20 * std.time.ns_per_ms);
             }
         }
-        if (setup_result == 0) return error.XkbSetupFailed;
+        
+        if (setup_result == 0) {
+            std.log.err("XKB extension setup failed after all retries", .{});
+            return error.XkbSetupFailed;
+        }
 
         // Get the keyboard device ID
         const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
-        if (device_id == -1) return error.XkbNoKeyboard;
+        if (device_id == -1) {
+            std.log.err("Failed to get keyboard device ID", .{});
+            return error.XkbNoKeyboard;
+        }
+        std.log.info("Keyboard device ID: {}", .{device_id});
 
         // Create keymap from the X11 keyboard
         const keymap = xkb.xkb_x11_keymap_new_from_device(
@@ -74,12 +93,19 @@ pub const XkbState = struct {
             @ptrCast(xcb_conn),
             device_id,
             xkb.XKB_KEYMAP_COMPILE_NO_FLAGS
-        ) orelse return error.XkbKeymapFailed;
+        ) orelse {
+            std.log.err("Failed to create XKB keymap", .{});
+            return error.XkbKeymapFailed;
+        };
         errdefer xkb.xkb_keymap_unref(keymap);
 
         // Create state tracker
-        const state = xkb.xkb_state_new(keymap) orelse return error.XkbStateFailed;
+        const state = xkb.xkb_state_new(keymap) orelse {
+            std.log.err("Failed to create XKB state", .{});
+            return error.XkbStateFailed;
+        };
 
+        std.log.info("XKB initialization complete", .{});
         return XkbState{
             .context = ctx,
             .keymap = keymap,
@@ -103,9 +129,6 @@ pub const XkbState = struct {
     /// Find first keycode that produces the given keysym
     /// Returns null if no keycode produces this keysym
     pub fn keysymToKeycode(self: *XkbState, keysym: u32) ?u8 {
-        // Could build a lookup table at init time, but costs memory
-        // Current linear search is fine for 255 keys max
-
         const min_keycode: u8 = 8;
         const max_keycode: u8 = 255;
 
@@ -113,11 +136,12 @@ pub const XkbState = struct {
         while (keycode <= max_keycode) : (keycode += 1) {
             const sym = xkb.xkb_state_key_get_one_sym(self.state, keycode);
             if (sym == keysym) {
-                @branchHint(.likely); // Found it
                 return keycode;
             }
         }
 
+        // Log when we can't find a keycode (helps debug layout issues)
+        std.log.warn("Could not find keycode for keysym 0x{x}", .{keysym});
         return null;
     }
 };
