@@ -2,9 +2,12 @@
 # Full TOML support - [sections], integers, colors, strings, arrays
 
 [appearance]
+# Color codes admit "#RRGGBB", 0xRRGGBB and RRGGBB.
+# Use what you prefer the most.
+border_focused   = "#00ff00"
+border_unfocused = "#ff0000"
+
 border_width = 4
-border_focused = 0x00ff00       # Border color for focused window
-border_unfocused = 0xff0000     # Border color for unfocused window
 
 [gaps]
 inner = 10                      # Gap between windows (pixels)
@@ -14,5 +17,13 @@ outer = 20                      # Gap between windows and screen edge (pixels)
 # Execute commands
 # Format: "Modifier+Key" = "command"
 # Modifiers: Mod4 (Super/Windows), Mod1 (Alt), Shift, Control
-Super+Return = "kitty"
+Super+Return = "ghostty"
 Mod4+Shift+q = "kill"  # This will be handled specially to close window
+
+# Tiling
+Super+t       = "toggle_layout"
+Super+h       = "decrease_master"
+Super+l       = "increase_master"
+Super+i       = "increase_master_count"
+Super+d       = "decrease_master_count"
+Super+Shift+t = "toggle_tiling"

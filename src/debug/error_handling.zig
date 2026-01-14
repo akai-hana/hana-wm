@@ -26,88 +26,77 @@ pub fn loadConfigOrDefault(
 
 /// Prints user-friendly error message for config loading failures
 fn handleConfigError(err: anyerror, path: []const u8) void {
-    switch (err) {
-        error.FileNotFound => {
-            std.debug.print("{s}Warning{s}: Config file '{s}' not found, falling back to defaults\n", .{ COLOR_YELLOW, COLOR_RESET, path });
-        },
-        error.AccessDenied => {
-            std.debug.print("{s}Error{s}: Cannot access config file '{s}' (permission denied), falling back to defaults\n", .{ COLOR_RED, COLOR_RESET, path });
-        },
-        error.IsDir => {
-            std.debug.print("{s}Error{s}: Config path '{s}' is a directory, not a file, falling back to defaults\n", .{ COLOR_RED, COLOR_RESET, path });
-        },
-        else => {
-            std.debug.print("{s}Error{s}: Failed to load config '{s}' ({}), falling back to defaults\n", .{ COLOR_RED, COLOR_RESET, path, err });
-        },
-    }
+    const msg = switch (err) {
+        error.FileNotFound => "not found",
+        error.AccessDenied => "permission denied",
+        error.IsDir => "is a directory, not a file",
+        else => "unknown error",
+    };
+    const color = if (err == error.FileNotFound) COLOR_YELLOW else COLOR_RED;
+    std.debug.print("{s}Warning{s}: Config file '{s}' {s}, falling back to defaults\n",
+        .{ color, COLOR_RESET, path, msg });
 }
 
 // CONFIG WARNING FUNCTIONS
 
-/// Warns about empty config value
 pub fn warnEmptyValue(line: usize, key: []const u8) void {
-    std.debug.print("{s}Warning{s} (line {}): Empty value for '{s}', falling back to defaults\n", .{ COLOR_YELLOW, COLOR_RESET, line, key });
+    std.debug.print("{s}Warning{s} (line {}): Empty value for '{s}', falling back to defaults\n",
+        .{ COLOR_YELLOW, COLOR_RESET, line, key });
 }
 
-/// Warns about invalid border_width value
 pub fn warnInvalidBorderWidth(line: usize, value: []const u8, err: anyerror) void {
-    std.debug.print("{s}Warning{s} (line {}): Invalid border_width '{s}' ({}), falling back to defaults\n", .{ COLOR_YELLOW, COLOR_RESET, line, value, err });
+    std.debug.print("{s}Warning{s} (line {}): Invalid border_width '{s}' ({}), falling back to defaults\n",
+        .{ COLOR_YELLOW, COLOR_RESET, line, value, err });
 }
 
-/// Warns about invalid border_color value
 pub fn warnInvalidBorderColor(line: usize, value: []const u8, err: anyerror) void {
-    std.debug.print("{s}Warning{s} (line {}): Invalid border_color '{s}' ({}), falling back to defaults\n", .{ COLOR_YELLOW, COLOR_RESET, line, value, err });
+    std.debug.print("{s}Warning{s} (line {}): Invalid border_color '{s}' ({}), falling back to defaults\n",
+        .{ COLOR_YELLOW, COLOR_RESET, line, value, err });
 }
 
-/// Warns about duplicate config key
 pub fn warnDuplicateKey(line: usize, key: []const u8) void {
-    std.debug.print("{s}Warning{s} (line {}): Duplicate key '{s}', last value will be used\n", .{ COLOR_YELLOW, COLOR_RESET, line, key });
+    std.debug.print("{s}Warning{s} (line {}): Duplicate key '{s}', last value will be used\n",
+        .{ COLOR_YELLOW, COLOR_RESET, line, key });
 }
 
-/// Warns about color value exceeding RGB range
 pub fn warnColorOutOfRange(line: usize, value: []const u8) void {
-    std.debug.print("{s}Warning{s} (line {}): Color value '{s}' exceeds 24-bit RGB range (0x000000-0xFFFFFF), falling back to defaults\n", .{ COLOR_YELLOW, COLOR_RESET, line, value });
+    std.debug.print("{s}Warning{s} (line {}): Color value '{s}' exceeds 24-bit RGB range (0x000000-0xFFFFFF), falling back to defaults\n",
+        .{ COLOR_YELLOW, COLOR_RESET, line, value });
 }
 
-/// Warns about unknown config key (potential typo)
 pub fn warnUnknownConfigKey(line: usize, key: []const u8) void {
-    std.debug.print("{s}Warning{s} (line {}): Unknown config key '{s}' (ignored)\n", .{ COLOR_YELLOW, COLOR_RESET, line, key });
+    std.debug.print("{s}Warning{s} (line {}): Unknown config key '{s}' (ignored)\n",
+        .{ COLOR_YELLOW, COLOR_RESET, line, key });
 }
 
 // X11 ERROR HANDLING
 
-/// Connects to X11 display server with error handling
 pub fn connectToX11() !*xcb.xcb_connection_t {
     const conn = xcb.xcb_connect(null, null) orelse {
-        std.debug.print("{s}Error{s}: Failed to connect to X11 display server (null connection)\n", .{ COLOR_RED, COLOR_RESET });
+        std.debug.print("{s}Error{s}: Failed to connect to X11 display server (null connection)\n",
+            .{ COLOR_RED, COLOR_RESET });
         return error.X11ConnectionFailed;
     };
     if (xcb.xcb_connection_has_error(conn) != 0) {
-        std.debug.print("{s}Error{s}: Failed to connect to X11 display server (connection error)\n", .{ COLOR_RED, COLOR_RESET });
+        std.debug.print("{s}Error{s}: Failed to connect to X11 display server (connection error)\n",
+            .{ COLOR_RED, COLOR_RESET });
         return error.X11ConnectionFailed;
     }
     return conn;
 }
 
-/// Gets X11 screen with error handling
 pub fn getX11Screen(conn: *xcb.xcb_connection_t) !*xcb.xcb_screen_t {
     const setup = xcb.xcb_get_setup(conn);
-    const screen_iter = xcb.xcb_setup_roots_iterator(setup);
-    const screen = screen_iter.data;
-    if (screen == null) {
+    const screen = xcb.xcb_setup_roots_iterator(setup).data orelse {
         std.debug.print("{s}Error{s}: Failed to get X11 screen\n", .{ COLOR_RED, COLOR_RESET });
         return error.X11ScreenFailed;
-    }
+    };
     return screen;
 }
 
-/// Attempts to become the window manager by claiming root window control
 pub fn becomeWindowManager(conn: *xcb.xcb_connection_t, root: u32, event_mask: u32) !void {
-    const mask = xcb.XCB_CW_EVENT_MASK;
-    const values = [_]u32{event_mask};
-    const cookie = xcb.xcb_change_window_attributes_checked(conn, root, mask, &values);
-    const err = xcb.xcb_request_check(conn, cookie);
-    if (err != null) {
+    const cookie = xcb.xcb_change_window_attributes_checked(conn, root, xcb.XCB_CW_EVENT_MASK, &[_]u32{event_mask});
+    if (xcb.xcb_request_check(conn, cookie)) |_| {
         std.debug.print("{s}Error{s}: Another window manager is already running\n", .{ COLOR_RED, COLOR_RESET });
         return error.AnotherWMRunning;
     }
