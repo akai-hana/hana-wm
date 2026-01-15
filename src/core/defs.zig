@@ -52,7 +52,7 @@ pub const Action = union(enum) {
 };
 
 // Keybinding definition
-pub            const Keybind = struct {
+pub const Keybind = struct {
     modifiers: u16,
     keysym:    u32,
     keycode:   ?u8 = null, // Cached keycode for X11 grabbing (populated at runtime)
@@ -92,9 +92,22 @@ pub const Window = struct {
     properties: WindowProperties,
 };
 
+// Tiling configuration
+pub const TilingConfig = struct {
+    enabled: bool = true,
+    layout: []const u8 = "master_left",  // "master_left", "monocle", or "grid"
+    master_width_factor: f32 = 0.55,
+    master_count: usize = 1,
+    gaps: u16 = 10,
+    border_width: u16 = 2,
+    border_focused: u32 = 0x5294E2,
+    border_normal: u32 = 0x383C4A,
+};
+
 // Window manager configuration loaded from config.toml
 pub const Config = struct {
-    keybindings: std.ArrayList(Keybind),
+    keybindings: std.ArrayList(Keybind) = .{},
+    tiling: TilingConfig = .{},
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
         for (self.keybindings.items) |*kb| kb.action.deinit(allocator);

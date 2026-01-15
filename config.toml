@@ -1,29 +1,33 @@
 # hana configuration
-# Full TOML support - [sections], integers, colors, strings, arrays
 
-[appearance]
-# Color codes admit "#RRGGBB", 0xRRGGBB and RRGGBB.
-# Use what you prefer the most.
-border_focused   = "#00ff00"
-border_unfocused = "#ff0000"
+[tiling]
+enabled = 1  # 1 -> true, 0 -> false
 
-border_width = 4
+# Behavior
+layout = "master_left" # Options: "master_left", "monocle", "grid"
 
-[gaps]
-inner = 10                      # Gap between windows (pixels)
-outer = 20                      # Gap between windows and screen edge (pixels)
+master_width_factor = 50 # %
+master_count = 1
+
+# Appearance
+border_width = 2
+border_focused = "#5294E2"
+border_normal = "#383C4A"
+
+gaps = 10
 
 [Keybindings]
-# Execute commands
-# Format: "Modifier+Key" = "command"
-# Modifiers: Mod4 (Super/Windows), Mod1 (Alt), Shift, Control
-Super+Return = "ghostty"
-Mod4+Shift+q = "kill"  # This will be handled specially to close window
+# Substitutions
+Mod = "Super" # Mod1/Alt, Mod4/Super, Shift
+
+# Commands
+Mod+Return = "ghostty"
+Mod+Shift+q = "kill"
 
 # Tiling
-Super+t       = "toggle_layout"
-Super+h       = "decrease_master"
-Super+l       = "increase_master"
-Super+i       = "increase_master_count"
-Super+d       = "decrease_master_count"
-Super+Shift+t = "toggle_tiling"
+Mod+t       = "toggle_layout"
+Mod+h       = "decrease_master"
+Mod+l       = "increase_master"
+Mod+i       = "increase_master_count"
+Mod+d       = "decrease_master_count"
+Mod+Shift+t = "toggle_tiling"
