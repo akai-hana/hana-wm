@@ -26,13 +26,13 @@ pub fn getConfigPath(allocator: std.mem.Allocator) ![]const u8 {
     // 1. Check for local config first (Development Mode)
     const cwd_path = try std.process.getCwdAlloc(allocator);
     defer allocator.free(cwd_path);
-    
+
     const local_path = try std.fs.path.join(allocator, &.{ cwd_path, "config.toml" });
-    
+
     // We use a null-terminated string for POSIX calls
     const local_path_z = try allocator.dupeZ(u8, local_path);
     defer allocator.free(local_path_z);
-    
+
     // Try to open the file using raw POSIX to check existence
     const fd_local = std.posix.open(local_path_z, .{ .ACCMODE = .RDONLY }, 0) catch -1;
     if (fd_local != -1) {
@@ -40,10 +40,10 @@ pub fn getConfigPath(allocator: std.mem.Allocator) ![]const u8 {
         return local_path; // Caller frees this
     }
     allocator.free(local_path);
-    
+
     // 2. Fallback to System/XDG paths
     const home = if (std.c.getenv("HOME")) |s| std.mem.span(s) else ".";
-    
+
     var config_home: []const u8 = undefined;
     var owned = false;
     if (std.c.getenv("XDG_CONFIG_HOME")) |s| {
@@ -53,7 +53,7 @@ pub fn getConfigPath(allocator: std.mem.Allocator) ![]const u8 {
         owned = true;
     }
     defer if (owned) allocator.free(config_home);
-    
+
     return std.fs.path.join(allocator, &.{ config_home, "hana", "config.toml" });
 }
 
@@ -62,7 +62,7 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !Config {
     var threaded: std.Io.Threaded = .init_single_threaded;
     defer threaded.deinit();
     const io = threaded.io();
-    
+
     // Open and read the config file
     const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| {
         if (err == error.FileNotFound) {
@@ -72,7 +72,7 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !Config {
         return err;
     };
     defer file.close(io);
-    
+
     // Read the content using a reader
     var read_buf: [4096]u8 = undefined;
     var file_reader = file.reader(io, &read_buf);
@@ -81,16 +81,16 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !Config {
     _ = try file_reader.interface.streamRemaining(&buffer.writer);
     const content = try allocator.dupe(u8, buffer.written());
     defer allocator.free(content);
-    
+
     // Parse TOML
     var doc = try toml.parse(allocator, content);
     defer doc.deinit();
-    
+
     var config = getDefaultConfig();
     try parseKeybindings(allocator, &doc, &config);
     try parseTiling(&doc, &config);
     try validateConfig(allocator, &config);
-    
+
     std.log.info("Successfully loaded config from: {s}", .{path});
     return config;
 }
@@ -104,41 +104,83 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator) !Config {
 fn parseKeybindings(allocator: std.mem.Allocator, doc: *const toml.Document, config: *Config) !void {
     const section = doc.getSection("Keybindings") orelse return;
     try config.keybindings.ensureTotalCapacity(allocator, section.pairs.count());
-    
+
     // First pass: look for "Mod" variable definition
     var mod_substitute: ?[]const u8 = null;
     if (section.getString("Mod")) |mod_value| {
         mod_substitute = mod_value;
         std.log.info("Found Mod variable: {s}", .{mod_value});
     }
-    
+
     var iter = section.pairs.iterator();
     while (iter.next()) |entry| {
         // Skip the "Mod" variable definition itself
         if (std.mem.eql(u8, entry.key_ptr.*, "Mod")) continue;
-        
+
         const command = entry.value_ptr.*.asString() orelse {
             std.log.warn("Keybinding value must be a string: {s}", .{entry.key_ptr.*});
             continue;
         };
-        
+
         // Substitute "Mod" with its value before parsing
         const keybind_str = if (mod_substitute) |mod_val|
             try substituteModVariable(allocator, entry.key_ptr.*, mod_val)
         else
             entry.key_ptr.*;
         defer if (mod_substitute != null) allocator.free(keybind_str);
-        
+
         const parts = parseKeybindString(keybind_str) catch |err| {
             std.log.warn("Invalid keybinding '{s}': {}", .{entry.key_ptr.*, err});
             continue;
         };
-        
+
+        // Parse action - check if it's a keyword or a command to execute
+        const action = try parseAction(allocator, command);
+
         try config.keybindings.append(allocator, .{
             .modifiers = parts.modifiers,
             .keysym = parts.keysym,
-            .action = .{ .exec = try allocator.dupe(u8, command) },
+            .action = action,
         });
+    }
+}
+
+fn parseAction(allocator: std.mem.Allocator, command: []const u8) !defs.Action {
+    // Map command strings to action types
+    if (std.mem.eql(u8, command, "close") or std.mem.eql(u8, command, "kill")) {
+        std.log.info("[config] Keybinding → close_window action", .{});
+        return .close_window;
+    } else if (std.mem.eql(u8, command, "reload") or std.mem.eql(u8, command, "reload_config")) {
+        std.log.info("[config] Keybinding → reload_config action", .{});
+        return .reload_config;
+    } else if (std.mem.eql(u8, command, "focus_next")) {
+        std.log.info("[config] Keybinding → focus_next action", .{});
+        return .focus_next;
+    } else if (std.mem.eql(u8, command, "focus_prev")) {
+        std.log.info("[config] Keybinding → focus_prev action", .{});
+        return .focus_prev;
+    } else if (std.mem.eql(u8, command, "toggle_layout")) {
+        std.log.info("[config] Keybinding → toggle_layout action", .{});
+        return .toggle_layout;
+    } else if (std.mem.eql(u8, command, "increase_master")) {
+        std.log.info("[config] Keybinding → increase_master action", .{});
+        return .increase_master;
+    } else if (std.mem.eql(u8, command, "decrease_master")) {
+        std.log.info("[config] Keybinding → decrease_master action", .{});
+        return .decrease_master;
+    } else if (std.mem.eql(u8, command, "increase_master_count")) {
+        std.log.info("[config] Keybinding → increase_master_count action", .{});
+        return .increase_master_count;
+    } else if (std.mem.eql(u8, command, "decrease_master_count")) {
+        std.log.info("[config] Keybinding → decrease_master_count action", .{});
+        return .decrease_master_count;
+    } else if (std.mem.eql(u8, command, "toggle_tiling")) {
+        std.log.info("[config] Keybinding → toggle_tiling action", .{});
+        return .toggle_tiling;
+    } else {
+        // Not a keyword, treat as command to execute
+        std.log.info("[config] Keybinding → exec command: {s}", .{command});
+        return .{ .exec = try allocator.dupe(u8, command) };
     }
 }
 
@@ -152,83 +194,105 @@ fn substituteModVariable(allocator: std.mem.Allocator, keybind: []const u8, mod_
 
 fn parseTiling(doc: *const toml.Document, config: *Config) !void {
     const section = doc.getSection("tiling") orelse {
-        std.log.warn("[config] No [tiling] section found", .{});
+        std.log.info("[config] No [tiling] section found, using defaults", .{});
         return;
     };
-    
+
+    std.log.info("[config] ========== PARSING TILING CONFIG ==========", .{});
+
     if (section.getString("layout")) |layout| {
         config.tiling.layout = layout;
-        std.log.info("[config] Loaded layout: {s}", .{layout});
+        std.log.info("[config] ✓ layout = \"{s}\"", .{layout});
+    } else {
+        std.log.info("[config] ○ layout not specified, using default: \"{s}\"", .{config.tiling.layout});
     }
-    
-    if (section.getInt("enabled")) |enabled| {
-        config.tiling.enabled = enabled != 0;
-        std.log.info("[config] Loaded enabled: {}", .{enabled != 0});
+
+    if (section.getBool("enabled")) |enabled| {
+        config.tiling.enabled = enabled;
+        std.log.info("[config] ✓ enabled = {}", .{enabled});
+    } else {
+        std.log.info("[config] ○ enabled not specified, using default: {}", .{config.tiling.enabled});
     }
-    
+
     if (section.getInt("master_count")) |count| {
         if (count < 1) {
-            std.log.warn("[config] master_count must be at least 1, using default", .{});
+            std.log.warn("[config] ✗ master_count must be at least 1, using default", .{});
         } else {
             config.tiling.master_count = @intCast(count);
-            std.log.info("[config] Loaded master_count: {}", .{count});
+            std.log.info("[config] ✓ master_count = {}", .{count});
         }
+    } else {
+        std.log.info("[config] ○ master_count not specified, using default: {}", .{config.tiling.master_count});
     }
-    
+
     if (section.getInt("master_width_factor")) |factor| {
         if (factor < 5 or factor > 95) {
-            std.log.warn("[config] master_width_factor {} out of range (5-95), using default", .{factor});
+            std.log.warn("[config] ✗ master_width_factor {} out of range (5-95), using default", .{factor});
         } else {
             config.tiling.master_width_factor = @as(f32, @floatFromInt(factor)) / 100.0;
-            std.log.info("[config] Loaded master_width_factor: {} ({}%)", .{config.tiling.master_width_factor, factor});
+            std.log.info("[config] ✓ master_width_factor = {}% ({d:.2})", .{factor, config.tiling.master_width_factor});
         }
+    } else {
+        std.log.info("[config] ○ master_width_factor not specified, using default: {d:.0}%", .{config.tiling.master_width_factor * 100});
     }
-    
+
     if (section.getInt("gaps")) |gaps| {
         if (gaps > 200) {
-            std.log.warn("[config] gaps={} seems excessive, capping at 200", .{gaps});
+            std.log.warn("[config] ✗ gaps={} seems excessive, capping at 200", .{gaps});
             config.tiling.gaps = 200;
         } else {
             config.tiling.gaps = @intCast(gaps);
-            std.log.info("[config] Loaded gaps: {}", .{gaps});
+            std.log.info("[config] ✓ gaps = {}px", .{gaps});
         }
+    } else {
+        std.log.info("[config] ○ gaps not specified, using default: {}px", .{config.tiling.gaps});
     }
-    
+
     if (section.getInt("border_width")) |width| {
         if (width > 100) {
-            std.log.warn("[config] border_width={} seems excessive, capping at 100", .{width});
+            std.log.warn("[config] ✗ border_width={} seems excessive, capping at 100", .{width});
             config.tiling.border_width = 100;
         } else {
             config.tiling.border_width = @intCast(width);
-            std.log.info("[config] Loaded border_width: {}", .{width});
+            std.log.info("[config] ✓ border_width = {}px", .{width});
         }
+    } else {
+        std.log.info("[config] ○ border_width not specified, using default: {}px", .{config.tiling.border_width});
     }
-    
+
     if (section.getColor("border_focused")) |color| {
         if (color > 0xFFFFFF) {
-            std.log.warn("[config] border_focused 0x{x} exceeds 24-bit RGB range", .{color});
+            std.log.warn("[config] ✗ border_focused 0x{x} exceeds 24-bit RGB range", .{color});
+        } else {
+            config.tiling.border_focused = color;
+            std.log.info("[config] ✓ border_focused = #0x{x:0>6}", .{color});
         }
-        config.tiling.border_focused = color;
-        std.log.info("[config] Loaded border_focused: 0x{x}", .{color});
+    } else {
+        std.log.info("[config] ○ border_focused not specified, using default: #0x{x:0>6}", .{config.tiling.border_focused});
     }
-    
+
     if (section.getColor("border_normal")) |color| {
         if (color > 0xFFFFFF) {
-            std.log.warn("[config] border_normal 0x{x} exceeds 24-bit RGB range", .{color});
+            std.log.warn("[config] ✗ border_normal 0x{x} exceeds 24-bit RGB range", .{color});
+        } else {
+            config.tiling.border_normal = color;
+            std.log.info("[config] ✓ border_normal = #0x{x:0>6}", .{color});
         }
-        config.tiling.border_normal = color;
-        std.log.info("[config] Loaded border_normal: 0x{x}", .{color});
+    } else {
+        std.log.info("[config] ○ border_normal not specified, using default: #0x{x:0>6}", .{config.tiling.border_normal});
     }
+
+    std.log.info("[config] ===============================================", .{});
 }
 
 fn parseKeybindString(str: []const u8) !struct { modifiers: u16, keysym: u32 } {
     var modifiers: u16 = 0;
     var keysym: ?u32 = null;
-    
+
     var parts = std.mem.splitScalar(u8, str, '+');
     while (parts.next()) |part| {
         const trimmed = std.mem.trim(u8, part, " \t");
-        
+
         if (MODIFIER_MAP.get(trimmed)) |mod| {
             modifiers |= mod;
         } else {
@@ -239,28 +303,28 @@ fn parseKeybindString(str: []const u8) !struct { modifiers: u16, keysym: u32 } {
             keysym = try keyNameToKeysym(trimmed);
         }
     }
-    
+
     if (keysym == null) {
         std.log.err("No key found in binding: '{s}'", .{str});
         return error.NoKeysymFound;
     }
-    
+
     return .{ .modifiers = modifiers, .keysym = keysym.? };
 }
 
 fn keyNameToKeysym(name: []const u8) !u32 {
     if (name.len >= 64) return error.KeyNameTooLong;
-    
+
     var buf: [64]u8 = undefined;
     @memcpy(buf[0..name.len], name);
     buf[name.len] = 0;
-    
+
     const keysym = xkb.xkb_keysym_from_name(@ptrCast(&buf), xkb.XKB_KEYSYM_CASE_INSENSITIVE);
     if (keysym == xkb.XKB_KEY_NoSymbol) {
         std.log.warn("Unknown key name: {s}", .{name});
         return error.UnknownKeyName;
     }
-    
+
     return keysym;
 }
 
@@ -276,16 +340,16 @@ pub fn resolveKeybindings(keybindings: anytype, xkb_state: *xkb.XkbState) void {
 
 pub fn validateConfig(allocator: std.mem.Allocator, config: *const Config) !void {
     if (config.keybindings.items.len < 2) return;
-    
+
     var sorted = try allocator.dupe(defs.Keybind, config.keybindings.items);
     defer allocator.free(sorted);
-    
+
     std.mem.sort(defs.Keybind, sorted, {}, struct {
         fn lessThan(_: void, a: defs.Keybind, b: defs.Keybind) bool {
             return if (a.modifiers != b.modifiers) a.modifiers < b.modifiers else a.keysym < b.keysym;
         }
     }.lessThan);
-    
+
     // Check adjacent duplicates after sort
     for (sorted[0..sorted.len-1], sorted[1..]) |a, b| {
         if (a.modifiers == b.modifiers and a.keysym == b.keysym) {

@@ -17,11 +17,21 @@ const grid        = @import("grid");
 
 var tiling_state: ?*TilingState = null;
 
-// Add this helper function anywhere in the file (before or after init)
 fn parseLayout(layout_str: []const u8) Layout {
     if (std.mem.eql(u8, layout_str, "monocle")) return .monocle;
     if (std.mem.eql(u8, layout_str, "grid")) return .grid;
-    return .master_left; // default
+    if (std.mem.eql(u8, layout_str, "master_left")) return .master_left;
+    
+    // Try case-insensitive matching
+    var buf: [32]u8 = undefined;
+    if (layout_str.len > buf.len) return .master_left;
+    
+    const lower = std.ascii.lowerString(&buf, layout_str);
+    if (std.mem.eql(u8, lower, "monocle")) return .monocle;
+    if (std.mem.eql(u8, lower, "grid")) return .grid;
+    
+    std.log.warn("[tiling] Unknown layout '{s}', defaulting to master_left", .{layout_str});
+    return .master_left;
 }
 
 pub fn init(wm: *WM) void {
@@ -30,7 +40,6 @@ pub fn init(wm: *WM) void {
         return;
     };
 
-    // Initialize ArrayList using the new API (empty struct literal)
     state.tiled_windows = .{};
     state.enabled = wm.config.tiling.enabled;
     state.layout = parseLayout(wm.config.tiling.layout);
@@ -43,14 +52,16 @@ pub fn init(wm: *WM) void {
 
     tiling_state = state;
 
-    if (builtin.mode == .Debug) {
-        std.debug.print("[tiling] Module initialized - layout: {s}, gaps: {}px\n",
-            .{@tagName(state.layout), state.gaps});
-    }
-
-    std.log.info("[tiling] Initialized with master_width_factor: {d:.2}", .{state.master_width_factor});
-    std.log.info("[tiling] Layout: {s}, gaps: {}px, border: {}px",
-        .{@tagName(state.layout), state.gaps, state.border_width});
+    std.log.info("[tiling] ============ TILING CONFIGURATION ============", .{});
+    std.log.info("[tiling] Enabled: {}", .{state.enabled});
+    std.log.info("[tiling] Layout: {s} (from config: '{s}')", .{@tagName(state.layout), wm.config.tiling.layout});
+    std.log.info("[tiling] Master count: {}", .{state.master_count});
+    std.log.info("[tiling] Master width factor: {d:.2}%", .{state.master_width_factor * 100});
+    std.log.info("[tiling] Gaps: {}px", .{state.gaps});
+    std.log.info("[tiling] Border width: {}px", .{state.border_width});
+    std.log.info("[tiling] Border focused: #0x{x:0>6}", .{state.border_focused});
+    std.log.info("[tiling] Border normal: #0x{x:0>6}", .{state.border_normal});
+    std.log.info("[tiling] ===============================================", .{});
 }
 
 pub fn deinit(wm: *WM) void {
@@ -82,8 +93,22 @@ pub fn handleEvent(event_type: u8, event: *anyopaque, wm: *WM) void {
             const ev: *const xcb.xcb_unmap_notify_event_t = @ptrCast(@alignCast(event));
             handleRemoveWindow(ev.window, wm, state);
         },
+        xcb.XCB_FOCUS_IN => {
+            const ev: *const xcb.xcb_focus_in_event_t = @ptrCast(@alignCast(event));
+            updateBorderColors(ev.event, wm, state);
+        },
         else => {},
     }
+}
+
+fn updateBorderColors(focused_window: u32, wm: *WM, state: *TilingState) void {
+    // Update all tiled windows' borders based on focus
+    for (state.tiled_windows.items) |win| {
+        const color = if (win == focused_window) state.border_focused else state.border_normal;
+        _ = xcb.xcb_change_window_attributes(wm.conn, win,
+            xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
+    }
+    _ = xcb.xcb_flush(wm.conn);
 }
 
 fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM, state: *TilingState) void {
@@ -104,9 +129,14 @@ fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM, state: *
     // Map the window
     _ = xcb.xcb_map_window(wm.conn, event.window);
 
-    // Set border
+    // Set border (will be updated by focus events)
+    const initial_color = if (wm.focused_window == event.window) 
+        state.border_focused 
+    else 
+        state.border_normal;
+    
     _ = xcb.xcb_change_window_attributes(wm.conn, event.window,
-        xcb.XCB_CW_BORDER_PIXEL, &[_]u32{state.border_normal});
+        xcb.XCB_CW_BORDER_PIXEL, &[_]u32{initial_color});
     _ = xcb.xcb_configure_window(wm.conn, event.window,
         xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{state.border_width});
 
@@ -186,6 +216,11 @@ fn retile(wm: *WM, state: *TilingState) void {
         .grid => grid.tile(wm, state, windows, screen_width, screen_height),
     }
 
+    // Update border colors after retiling
+    if (wm.focused_window) |focused| {
+        updateBorderColors(focused, wm, state);
+    }
+
     _ = xcb.xcb_flush(wm.conn);
 }
 
@@ -208,13 +243,17 @@ pub fn toggleLayout(wm: *WM) void {
 
 pub fn increaseMasterWidth(wm: *WM) void {
     const state = tiling_state orelse return;
+    const old_factor = state.master_width_factor;
     state.master_width_factor = @min(0.95, state.master_width_factor + 0.05);
+    std.log.info("[tiling] Master width: {d:.2}% → {d:.2}%", .{old_factor * 100, state.master_width_factor * 100});
     retile(wm, state);
 }
 
 pub fn decreaseMasterWidth(wm: *WM) void {
     const state = tiling_state orelse return;
+    const old_factor = state.master_width_factor;
     state.master_width_factor = @max(0.05, state.master_width_factor - 0.05);
+    std.log.info("[tiling] Master width: {d:.2}% → {d:.2}%", .{old_factor * 100, state.master_width_factor * 100});
     retile(wm, state);
 }
 
@@ -244,11 +283,19 @@ pub fn toggleTiling(wm: *WM) void {
     }
 }
 
+// Public API for other modules to notify about focus changes
+pub fn updateWindowFocus(wm: *WM, focused_window: u32) void {
+    const state = tiling_state orelse return;
+    if (!state.enabled) return;
+    updateBorderColors(focused_window, wm, state);
+}
+
 pub const EVENT_TYPES = [_]u8{
     xcb.XCB_MAP_REQUEST,
     xcb.XCB_CONFIGURE_REQUEST,
     xcb.XCB_DESTROY_NOTIFY,
     xcb.XCB_UNMAP_NOTIFY,
+    xcb.XCB_FOCUS_IN,  // Added to handle focus changes
 };
 
 pub fn createModule() defs.Module {

@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 
 pub const Value = union(enum) {
     integer: i64,
+    boolean: bool,
     string: []const u8,
     array: std.ArrayList(Value),
     color: u32,
@@ -12,6 +13,14 @@ pub const Value = union(enum) {
     pub inline fn asInt(self: Value) ?i64 {
         return switch (self) {
             .integer => |i| i,
+            else => null,
+        };
+    }
+
+    pub inline fn asBool(self: Value) ?bool {
+        return switch (self) {
+            .boolean => |b| b,
+            .integer => |i| i != 0,  // Also accept integers as booleans
             else => null,
         };
     }
@@ -69,6 +78,10 @@ pub const Section = struct {
 
     pub inline fn getInt(self: *const Section, key: []const u8) ?i64 {
         return if (self.get(key)) |v| v.asInt() else null;
+    }
+
+    pub inline fn getBool(self: *const Section, key: []const u8) ?bool {
+        return if (self.get(key)) |v| v.asBool() else null;
     }
 
     pub inline fn getString(self: *const Section, key: []const u8) ?[]const u8 {
@@ -292,7 +305,7 @@ const Parser = struct {
         if (c == '[') return .{ .array = try self.parseArray(allocator) };
         if (c == '"' or c == '\'') return .{ .string = try self.parseString(allocator) };
 
-        // Parse integer or color
+        // Parse boolean, integer, or color
         const start = self.pos;
         while (self.pos < self.content.len and self.content[self.pos] != '\n' and self.content[self.pos] != '#') {
             self.pos += 1;
@@ -300,6 +313,10 @@ const Parser = struct {
 
         const raw = std.mem.trim(u8, self.content[start..self.pos], " \t\r");
         if (raw.len == 0) return ParseError.InvalidValue;
+
+        // Check for boolean
+        if (std.mem.eql(u8, raw, "true")) return .{ .boolean = true };
+        if (std.mem.eql(u8, raw, "false")) return .{ .boolean = false };
 
         // Detect color: has # prefix, 0x prefix, or hex letters a-f/A-F
         const is_color = raw[0] == '#' or (raw.len > 2 and raw[0] == '0' and raw[1] == 'x') or
