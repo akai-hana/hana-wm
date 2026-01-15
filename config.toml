@@ -1,33 +1,70 @@
-# hana configuration
-
-[tiling]
-enabled = 1  # 1 -> true, 0 -> false
-
-# Behavior
-layout = "master_left" # Options: "master_left", "monocle", "grid"
-
-master_width_factor = 50 # %
-master_count = 1
-
-# Appearance
-border_width = 2
-border_focused = "#FF0000"
-border_normal = "#660000"
-
-gaps = 10
+# Hana Window Manager Configuration
 
 [Keybindings]
-# Substitutions
-Mod = "Super" # Mod1/Alt, Mod4/Super, Shift
+# Define your modifier key
+Mod = "Super"
 
-# Commands
-Mod+Return = "ghostty"
-Mod+Shift+q = "kill"
+# Window management
+"Mod+Return" = "alacritty"
+"Mod+d" = "kill"                    # Kill focused window (ACTION KEYWORD)
+"Mod+Shift+q" = "close"             # Also kills focused window (ACTION KEYWORD)
+"Mod+Shift+r" = "reload"            # Reload config (ACTION KEYWORD)
 
-# Tiling
-Mod+t       = "toggle_layout"
-Mod+h       = "decrease_master"
-Mod+l       = "increase_master"
-Mod+i       = "increase_master_count"
-Mod+d       = "decrease_master_count"
-Mod+Shift+t = "toggle_tiling"
+# Tiling layout controls (ALL ACTION KEYWORDS - NOT SHELL COMMANDS!)
+"Mod+space" = "toggle_layout"       # Cycle through layouts
+"Mod+h" = "decrease_master"         # Decrease master width by 5%
+"Mod+l" = "increase_master"         # Increase master width by 5%
+"Mod+comma" = "increase_master_count"   # More windows in master
+"Mod+period" = "decrease_master_count"  # Fewer windows in master
+"Mod+Shift+space" = "toggle_tiling" # Enable/disable tiling
+
+# Application launchers (these ARE shell commands - anything not a keyword)
+"Mod+p" = "rofi -show drun"
+"Mod+Shift+d" = "dmenu_run"
+"Mod+b" = "firefox"
+
+[tiling]
+# Enable/disable tiling (true or false)
+enabled = true
+
+# Layout mode: "master_left", "monocle", or "grid"
+layout = "master_left"
+
+# Number of windows in master area
+master_count = 1
+
+# Master area width as percentage (5-95)
+master_width_factor = 55
+
+# Gap between windows in pixels
+gaps = 10
+
+# Border width in pixels
+border_width = 2
+
+# Border colors in hex (with or without # or 0x prefix)
+border_focused = 0x5294E2
+border_normal = 0x383C4A
+
+[tiling]
+# Enable/disable tiling (true or false)
+enabled = true
+
+# Layout mode: "master_left", "monocle", or "grid"
+layout = "master_left"
+
+# Number of windows in master area
+master_count = 1
+
+# Master area width as percentage (5-95)
+master_width_factor = 55
+
+# Gap between windows in pixels
+gaps = 10
+
+# Border width in pixels
+border_width = 2
+
+# Border colors in hex (with or without # or 0x prefix)
+border_focused = 0x5294E2
+border_normal = 0x383C4A
