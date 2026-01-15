@@ -71,6 +71,7 @@ pub fn deinit(_: *WM) void {
 fn buildKeybindMap(wm: *WM) !void {
     keybind_map.clearRetainingCapacity();
     for (wm.config.keybindings.items) |*keybind| {
+        // Combine modifiers and keysym into a single u64 key (modifiers in upper 32 bits)
         try keybind_map.put((@as(u64, keybind.modifiers) << 32) | keybind.keysym, &keybind.action);
     }
 }
@@ -169,7 +170,6 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
     switch (action.*) {
         .exec => |cmd| {
             logging.debugExecutingCommand(cmd);
-            // Crazy shit (I barely understand any of this)
             const pid = c.fork();
             if (pid < 0) {
                 std.log.err("Fork failed for command: {s}", .{cmd});
@@ -181,10 +181,14 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
                 std.process.exit(1);
             }
         },
-        .close_window => if (wm.focused_window) |win_id| {
-            logging.debugClosingWindow(win_id);
-            _ = xcb.xcb_destroy_window(wm.conn, win_id);
-            _ = xcb.xcb_flush(wm.conn);
+        .close_window => {
+            if (wm.focused_window) |win_id| {
+                logging.debugClosingWindow(win_id);
+                _ = xcb.xcb_destroy_window(wm.conn, win_id);
+                _ = xcb.xcb_flush(wm.conn);
+            } else {
+                logging.debugNoFocusedWindow();
+            }
         },
         .reload_config => {
             logging.debugConfigReloadTriggered();
@@ -193,7 +197,7 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
             };
         },
         .focus_next, .focus_prev => logging.debugFocusNotImplemented(),
-        
+
         // Tiling actions
         .toggle_layout => tiling.toggleLayout(wm),
         .increase_master => tiling.increaseMasterWidth(wm),

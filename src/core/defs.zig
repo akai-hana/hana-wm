@@ -124,7 +124,6 @@ pub const WM = struct {
     config: Config,
     windows: std.AutoHashMap(u32, Window),
     focused_window: ?u32 = null,
-    previous_focused: ?u32 = null,
     xkb_state: ?*xkbcommon.XkbState,
 
     pub fn deinit(self: *WM) void {
@@ -135,7 +134,7 @@ pub const WM = struct {
         }
         self.windows.deinit();
         self.config.deinit(self.allocator);
-        
+
         if (self.xkb_state) |state| {
             const xkb_ptr: *xkbcommon.XkbState = @ptrCast(@alignCast(state));
             xkb_ptr.deinit();

@@ -11,8 +11,8 @@ master_count = 1
 
 # Appearance
 border_width = 2
-border_focused = "#5294E2"
-border_normal = "#383C4A"
+border_focused = "#FF0000"
+border_normal = "#660000"
 
 gaps = 10
 

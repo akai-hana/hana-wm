@@ -3,6 +3,7 @@
 const std     = @import("std");
 const defs    = @import("defs");
 const builtin = @import("builtin");
+const logging = @import("logging");
 const xcb     = defs.xcb;
 const WM      = defs.WM;
 const Module  = defs.Module;
@@ -29,19 +30,14 @@ pub fn handleEvent(event_type: u8, event: *anyopaque, wm: *WM) void {
 }
 
 fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void {
-    if (builtin.mode == .Debug) {
-        std.debug.print("[window] Map request for window {x}\n", .{event.window});
-    }
-    
+    logging.debugWindowMapRequest(event.window);
+
     _ = xcb.xcb_map_window(wm.conn, event.window);
     _ = xcb.xcb_flush(wm.conn);
 }
 
 fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, wm: *WM) void {
-    if (builtin.mode == .Debug) {
-        std.debug.print("[window] Configure: window {x} -> {}x{} at ({},{})\n",
-            .{event.window, event.width, event.height, event.x, event.y});
-    }
+    logging.debugWindowConfigure(event.window, event.width, event.height, event.x, event.y);
 
     _ = xcb.xcb_configure_window(wm.conn, event.window, event.value_mask, &[_]u32{
         @intCast(event.x),
@@ -53,10 +49,8 @@ fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, wm: *
 }
 
 fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM) void {
-    if (builtin.mode == .Debug) {
-        std.debug.print("[window] Window {x} destroyed\n", .{event.window});
-    }
+    logging.debugWindowDestroyed(event.window);
 
-    _ = wm.windows.remove(event.window);
+    wm.removeWindow(event.window);
     if (wm.focused_window == event.window) wm.focused_window = null;
 }

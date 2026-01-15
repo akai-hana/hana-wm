@@ -43,14 +43,15 @@ pub const XkbState = struct {
 
         // Setup XKB extension with retry for startx
         var setup_result: i32 = 0;
-        for (0..50) |_| {
+
+        for (0..50) |_| { // 50 -> max xkb setup retries
             setup_result = xkb.xkb_x11_setup_xkb_extension(
                 @ptrCast(xcb_conn), xkb.XKB_X11_MIN_MAJOR_XKB_VERSION,
                 xkb.XKB_X11_MIN_MINOR_XKB_VERSION, xkb.XKB_X11_SETUP_XKB_EXTENSION_NO_FLAGS,
                 null, null, null, null
             );
             if (setup_result != 0) break;
-            std.posix.nanosleep(0, 20 * std.time.ns_per_ms);
+            std.posix.nanosleep(0, 20 * std.time.ns_per_ms); // 20 -> xcb retry delay ms
         }
         if (setup_result == 0) return error.XkbSetupFailed;
 

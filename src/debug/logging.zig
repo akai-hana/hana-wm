@@ -32,6 +32,21 @@ pub fn debugCursorSetupFailed() void {
     debugPrint("{s}[cursor]{s} Failed to open font\n", .{ colors.RED, colors.RESET });
 }
 
+// Window Module Debug Functions
+
+pub fn debugWindowMapRequest(window_id: u32) void {
+    debugPrint("{s}[window]{s} Map request for window {x}\n", .{ colors.BLUE, colors.RESET, window_id });
+}
+
+pub fn debugWindowConfigure(window_id: u32, width: u16, height: u16, x: i16, y: i16) void {
+    debugPrint("{s}[window]{s} Configure: window {x} -> {}x{} at ({},{})\n",
+        .{ colors.BLUE, colors.RESET, window_id, width, height, x, y });
+}
+
+pub fn debugWindowDestroyed(window_id: u32) void {
+    debugPrint("{s}[window]{s} Window {x} destroyed\n", .{ colors.BLUE, colors.RESET, window_id });
+}
+
 // Input Module Debug Functions
 
 pub fn debugInputModuleInit(keybind_count: usize) void {
@@ -52,6 +67,10 @@ pub fn debugExecutingCommand(cmd: []const u8) void {
 
 pub fn debugClosingWindow(window_id: u32) void {
     debugPrint("{s}[input]{s} Closing window {}\n", .{ colors.BLUE, colors.RESET, window_id });
+}
+
+pub fn debugNoFocusedWindow() void {
+    debugPrint("{s}[input]{s} No focused window to close\n", .{ colors.YELLOW, colors.RESET });
 }
 
 pub fn debugConfigReloadTriggered() void {

@@ -9,6 +9,8 @@ const tiling_types = @import("tiling_types");
 const TilingState = tiling_types.TilingState;
 
 pub fn tile(wm: *WM, state: *TilingState, windows: []const u32, screen_w: u16, screen_h: u16) void {
+    if (windows.len == 0) return;
+
     const gap = state.gaps;
     const bw = state.border_width;
 
@@ -25,8 +27,6 @@ pub fn tile(wm: *WM, state: *TilingState, windows: []const u32, screen_w: u16, s
     }
 
     // Raise last window to top
-    if (windows.len > 0) {
-        _ = xcb.xcb_configure_window(wm.conn, windows[windows.len - 1],
-            xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
-    }
+    _ = xcb.xcb_configure_window(wm.conn, windows[windows.len - 1],
+        xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 }

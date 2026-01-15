@@ -80,7 +80,7 @@ pub fn main() !void {
     xkb_state.* = try xkbcommon.XkbState.init(conn);
     defer xkb_state.deinit();
 
-    var user_config = try config.loadConfig(allocator, "config.toml");
+    var user_config = try config.loadConfigDefault(allocator);
     config.resolveKeybindings(user_config.keybindings.items, xkb_state);
 
     var wm = WM{
@@ -97,11 +97,24 @@ pub fn main() !void {
 
     setupSignalHandler();
 
-    inline for (modules) |m| m.init_fn(&wm);
-    
+    // Initialize modules with proper error handling
+    var initialized_count: usize = 0;
+    errdefer {
+        var i = initialized_count;
+        while (i > 0) {
+            i -= 1;
+            if (modules[i].deinit_fn) |deinit| deinit(&wm);
+        }
+    }
+
+    inline for (modules) |m| {
+        m.init_fn(&wm);
+        initialized_count += 1;
+    }
+
     defer {
-        comptime var i = modules.len;
-        inline while (i > 0) {
+        var i = initialized_count;
+        while (i > 0) {
             i -= 1;
             if (modules[i].deinit_fn) |deinit| deinit(&wm);
         }
@@ -153,8 +166,8 @@ fn grabKeybindings(wm: *WM) !void {
 
 fn handleConfigReload(wm: *WM) !void {
     logging.debugConfigReloading();
-    
-    var new_config = try config.loadConfig(wm.allocator, "config.toml");
+
+    var new_config = try config.loadConfigDefault(wm.allocator);
     errdefer new_config.deinit(wm.allocator);
 
     config.resolveKeybindings(new_config.keybindings.items, @ptrCast(@alignCast(wm.xkb_state)));

@@ -7,9 +7,11 @@ const tiling_types = @import("tiling_types");
 const TilingState = tiling_types.TilingState;
 
 pub fn tile(wm: *WM, state: *TilingState, windows: []const u32, screen_w: u16, screen_h: u16) void {
+    const n = windows.len;
+    if (n == 0) return;
+
     const gap = state.gaps;
     const bw = state.border_width;
-    const n = windows.len;
 
     // Calculate grid dimensions
     const cols_f = @ceil(@sqrt(@as(f32, @floatFromInt(n))));
