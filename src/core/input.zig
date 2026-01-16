@@ -1,11 +1,9 @@
 // Input handling - keyboard and mouse events
 
-// INITIALIZATION
-
 const std = @import("std");
 const defs = @import("defs");
 const xkbcommon = @import("xkbcommon");
-const logging = @import("logging");
+const log = @import("logging");
 const tiling = @import("tiling");
 
 const c = @cImport({
@@ -15,8 +13,6 @@ const c = @cImport({
 const xcb = defs.xcb;
 const WM = defs.WM;
 const Module = defs.Module;
-
-// BODY
 
 pub const EVENT_TYPES = [_]u8{
     xcb.XCB_KEY_PRESS,
@@ -30,7 +26,6 @@ var keybind_initialized = false;
 
 // Drag state
 const DragState = struct {
-    // Grouped for clarity
     button: u8 = 0,
     subwindow: u32 = 0,
     start_x: i16 = 0,
@@ -54,11 +49,11 @@ var drag: DragState = .{};
 pub fn init(wm: *WM) void {
     keybind_map = std.AutoHashMap(u64, *const defs.Action).init(wm.allocator);
     buildKeybindMap(wm) catch |err| {
-        std.log.err("Failed to build keybind map: {}", .{err});
+        log.errorKeybindMapBuildFailed(err);
         return;
     };
     keybind_initialized = true;
-    logging.debugInputModuleInit(keybind_map.count());
+    log.debugInputModuleInit(keybind_map.count());
 }
 
 pub fn deinit(_: *WM) void {
@@ -71,7 +66,6 @@ pub fn deinit(_: *WM) void {
 fn buildKeybindMap(wm: *WM) !void {
     keybind_map.clearRetainingCapacity();
     for (wm.config.keybindings.items) |*keybind| {
-        // Combine modifiers and keysym into a single u64 key (modifiers in upper 32 bits)
         try keybind_map.put((@as(u64, keybind.modifiers) << 32) | keybind.keysym, &keybind.action);
     }
 }
@@ -99,7 +93,7 @@ fn setWindowFocus(wm: *WM, window: u32) void {
         window,
         xcb.XCB_CURRENT_TIME
     );
-    
+
     // Raise window to top
     _ = xcb.xcb_configure_window(
         wm.conn,
@@ -107,42 +101,41 @@ fn setWindowFocus(wm: *WM, window: u32) void {
         xcb.XCB_CONFIG_WINDOW_STACK_MODE,
         &[_]u32{xcb.XCB_STACK_MODE_ABOVE}
     );
-    
-    // Update WM state and notify tiling module about focus change
+
+    // Update WM state BEFORE notifying tiling module
     const old_focus = wm.focused_window;
     wm.focused_window = window;
-    
-    // Manually trigger border color update by calling tiling module
+
+    log.debugWindowFocusChanged(window);
+
+    // Notify tiling module about focus change
     if (old_focus != window) {
         tiling.updateWindowFocus(wm, window);
     }
-    
+
     _ = xcb.xcb_flush(wm.conn);
 }
 
 fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
-    // Check for keybinding match
     const xkb_ptr: *xkbcommon.XkbState = @ptrCast(@alignCast(wm.xkb_state.?));
     const modifiers: u16 = @intCast(event.state & defs.MOD_MASK_RELEVANT);
     const keysym = xkb_ptr.keycodeToKeysym(event.detail);
     const key = (@as(u64, modifiers) << 32) | keysym;
 
     if (keybind_map.get(key)) |action| {
-        logging.debugKeybindingMatched(modifiers, keysym);
+        log.debugKeybindingMatched(modifiers, keysym);
         executeAction(action, wm) catch |err| {
-            std.log.err("Failed to execute keybinding action: {}", .{err});
+            log.errorActionExecutionFailed(err);
         };
     } else {
-        logging.debugUnboundKey(event.detail, keysym, modifiers, @intCast(event.state));
+        log.debugUnboundKey(event.detail, keysym, modifiers, @intCast(event.state));
     }
 }
 
 fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) void {
     if (event.child == 0) return;
 
-    logging.debugMouseButtonClick(event.detail, event.root_x, event.root_y, event.child);
-
-    // Set focus to clicked window - THIS IS THE FIX!
+    log.debugMouseButtonClick(event.detail, event.root_x, event.root_y, event.child);
     setWindowFocus(wm, event.child);
 
     // Get window geometry and save drag state
@@ -165,7 +158,7 @@ fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) void {
 fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) void {
     if (!drag.isDragging()) return;
 
-    logging.debugDragMotion(event.root_x, event.root_y);
+    log.debugDragMotion(event.root_x, event.root_y);
 
     const dx: i32 = event.root_x - drag.start_x;
     const dy: i32 = event.root_y - drag.start_y;
@@ -188,17 +181,17 @@ fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) void
 
 fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t) void {
     _ = event;
-    logging.debugMouseButtonRelease(drag.button);
+    log.debugMouseButtonRelease(drag.button);
     drag.reset();
 }
 
 fn executeAction(action: *const defs.Action, wm: *WM) !void {
     switch (action.*) {
         .exec => |cmd| {
-            logging.debugExecutingCommand(cmd);
+            log.debugExecutingCommand(cmd);
             const pid = c.fork();
             if (pid < 0) {
-                std.log.err("Fork failed for command: {s}", .{cmd});
+                log.errorCommandForkFailed(cmd);
             } else if (pid == 0) {
                 _ = c.setsid();
                 const cmd_z = try wm.allocator.dupeZ(u8, cmd);
@@ -208,50 +201,48 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
             }
         },
         .close_window => {
-            std.log.info("[input] Executing close_window action", .{});
+            log.debugExecutingAction("close_window");
             if (wm.focused_window) |win_id| {
-                logging.debugClosingWindow(win_id);
+                log.debugClosingWindow(win_id);
                 _ = xcb.xcb_destroy_window(wm.conn, win_id);
                 _ = xcb.xcb_flush(wm.conn);
             } else {
-                logging.debugNoFocusedWindow();
+                log.debugNoFocusedWindow();
             }
         },
         .reload_config => {
-            std.log.info("[input] Executing reload_config action", .{});
-            logging.debugConfigReloadTriggered();
+            log.debugExecutingAction("reload_config");
+            log.debugConfigReloadTriggered();
             buildKeybindMap(wm) catch |err| {
-                std.log.err("Failed to rebuild keybind map: {}", .{err});
+                log.errorKeybindMapRebuildFailed(err);
             };
         },
         .focus_next, .focus_prev => {
-            std.log.info("[input] Executing focus navigation action", .{});
-            logging.debugFocusNotImplemented();
+            log.debugExecutingAction("focus_navigation");
+            log.debugFocusNotImplemented();
         },
-
-        // Tiling actions
         .toggle_layout => {
-            std.log.info("[input] Executing toggle_layout action", .{});
+            log.debugExecutingAction("toggle_layout");
             tiling.toggleLayout(wm);
         },
         .increase_master => {
-            std.log.info("[input] Executing increase_master action", .{});
+            log.debugExecutingAction("increase_master");
             tiling.increaseMasterWidth(wm);
         },
         .decrease_master => {
-            std.log.info("[input] Executing decrease_master action", .{});
+            log.debugExecutingAction("decrease_master");
             tiling.decreaseMasterWidth(wm);
         },
         .increase_master_count => {
-            std.log.info("[input] Executing increase_master_count action", .{});
+            log.debugExecutingAction("increase_master_count");
             tiling.increaseMasterCount(wm);
         },
         .decrease_master_count => {
-            std.log.info("[input] Executing decrease_master_count action", .{});
+            log.debugExecutingAction("decrease_master_count");
             tiling.decreaseMasterCount(wm);
         },
         .toggle_tiling => {
-            std.log.info("[input] Executing toggle_tiling action", .{});
+            log.debugExecutingAction("toggle_tiling");
             tiling.toggleTiling(wm);
         },
     }

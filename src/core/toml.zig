@@ -359,7 +359,11 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
 
         if (c == '[') {
             const section_name = try parser.parseSection();
-            if (doc.sections.contains(section_name)) return ParseError.DuplicateKey;
+            errdefer allocator.free(section_name); // Free on any error
+            
+            if (doc.sections.contains(section_name)) {
+                return ParseError.DuplicateKey;
+            }
 
             try doc.sections.put(section_name, Section.init(allocator, section_name));
             current_section = doc.sections.getPtr(section_name).?;
@@ -369,7 +373,11 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
             continue;
         }
 
-        const kv = try parser.parseKeyValue(allocator);
+        var kv = try parser.parseKeyValue(allocator);
+        errdefer {
+            allocator.free(kv[0]);  // Free the duplicated key
+            kv[1].deinit(allocator);  // Deinit the value (handles strings, arrays, etc.)
+        }
         if (current_section.pairs.contains(kv[0])) return ParseError.DuplicateKey;
         try current_section.pairs.put(kv[0], kv[1]);
 

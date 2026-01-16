@@ -1,6 +1,7 @@
 // XKB bindings for keyboard handling
 
 const std = @import("std");
+const log = @import("logging");
 
 pub const xkb = @cImport({
     @cInclude("xkbcommon/xkbcommon.h");
@@ -35,7 +36,7 @@ pub const XkbState = struct {
     device_id: i32,
 
     pub fn init(xcb_conn: *anyopaque) !XkbState {
-        std.log.info("Initializing XKB...", .{});
+        log.debugXkbInitializing();
 
         const ctx = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS) orelse
             return error.XkbContextFailed;
@@ -57,7 +58,7 @@ pub const XkbState = struct {
 
         const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
         if (device_id == -1) return error.XkbNoKeyboard;
-        std.log.info("Keyboard device ID: {}", .{device_id});
+        log.debugXkbDeviceId(device_id);
 
         // Create and verify keymap with retry
         var keymap: ?*xkb_keymap = null;
@@ -65,7 +66,7 @@ pub const XkbState = struct {
             keymap = xkb.xkb_x11_keymap_new_from_device(
                 ctx, @ptrCast(xcb_conn), device_id, xkb.XKB_KEYMAP_COMPILE_NO_FLAGS
             );
-            
+
             if (keymap) |km| {
                 // Verify keymap is usable by testing Return key (keycode 36)
                 if (xkb.xkb_state_new(km)) |st| {
@@ -75,16 +76,16 @@ pub const XkbState = struct {
                 xkb.xkb_keymap_unref(km);
                 keymap = null;
             }
-            
+
             std.posix.nanosleep(0, 20 * std.time.ns_per_ms);
         }
-        
+
         const final_keymap = keymap orelse return error.XkbKeymapFailed;
         errdefer xkb.xkb_keymap_unref(final_keymap);
 
         const state = xkb.xkb_state_new(final_keymap) orelse return error.XkbStateFailed;
 
-        std.log.info("XKB initialization complete", .{});
+        log.debugXkbInitComplete();
         return XkbState{
             .context = ctx,
             .keymap = final_keymap,
@@ -110,7 +111,7 @@ pub const XkbState = struct {
                 return keycode;
             }
         }
-        std.log.warn("Could not find keycode for keysym 0x{x}", .{keysym});
+        log.warnXkbKeycodeNotFound(keysym);
         return null;
     }
 };

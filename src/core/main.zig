@@ -1,6 +1,5 @@
 // Main event loop - clean and minimal
 
-// Imports
 const std     = @import("std");
 const posix   = std.posix;
 const builtin = @import("builtin");
@@ -12,25 +11,24 @@ const window         = @import("window");
 const input          = @import("input");
 const tiling         = @import("tiling");
 const error_handling = @import("error_handling");
-const logging        = @import("logging");
+const log            = @import("logging");
 
 const xcb = defs.xcb;
 const WM  = defs.WM;
 
 // Centralized module registration
-// This "converts" the raw files into Module structs automatically
 const modules = [_]defs.Module{
     defs.generateModule(window),
     defs.generateModule(input),
     defs.generateModule(tiling),
 };
 
-// Config
 var should_reload_config: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 const WM_EVENT_MASK = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
     xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
-    xcb.XCB_EVENT_MASK_KEY_PRESS;
+    xcb.XCB_EVENT_MASK_KEY_PRESS |
+    xcb.XCB_EVENT_MASK_ENTER_WINDOW;  // Add this for focus-follows-mouse
 
 fn setupRootCursor(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) void {
     const cursor_font = xcb.xcb_generate_id(conn);
@@ -59,6 +57,13 @@ fn setupSignalHandler() void {
     posix.sigaction(posix.SIG.HUP, &sa, null);
 }
 
+fn setupWindowEventMask(conn: *xcb.xcb_connection_t, window_id: u32) void {
+    // Set up event mask for client windows to receive enter/leave events
+    const client_mask = xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW;
+    _ = xcb.xcb_change_window_attributes(conn, window_id, 
+        xcb.XCB_CW_EVENT_MASK, &[_]u32{client_mask});
+}
+
 pub fn main() !void {
     const conn = try error_handling.connectToX11();
     defer xcb.xcb_disconnect(@ptrCast(conn));
@@ -69,7 +74,7 @@ pub fn main() !void {
     try error_handling.becomeWindowManager(conn, root, WM_EVENT_MASK);
     setupRootCursor(conn, screen);
     input.setupGrabs(conn, root);
-    logging.debugWMStarted();
+    log.debugWMStarted();
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -121,6 +126,19 @@ pub fn main() !void {
     }
 
     try grabKeybindings(&wm);
+    
+    // Setup event masks for any existing windows
+    const tree_cookie = xcb.xcb_query_tree(conn, root);
+    if (xcb.xcb_query_tree_reply(conn, tree_cookie, null)) |tree_reply| {
+        defer std.c.free(tree_reply);
+        const children = xcb.xcb_query_tree_children(tree_reply);
+        const children_len = xcb.xcb_query_tree_children_length(tree_reply);
+        var i: usize = 0;
+        while (i < children_len) : (i += 1) {
+            setupWindowEventMask(conn, children[i]);
+        }
+    }
+    
     _ = xcb.xcb_flush(conn);
 
     // Event loop
@@ -129,7 +147,7 @@ pub fn main() !void {
 
         if (should_reload_config.swap(false, .acq_rel)) {
             handleConfigReload(&wm) catch |err| {
-                std.log.err("Config reload failed: {}", .{err});
+                log.errorConfigReloadFailed(err);
             };
         }
 
@@ -138,8 +156,7 @@ pub fn main() !void {
 
         const response_type = @as(*u8, @ptrCast(event)).* & 0x7F;
 
-        // AUTOMATED ROUTING:
-        // This replaces the entire switch (response_type) block
+        // Automated routing to modules
         inline for (modules) |m| {
             if (std.mem.indexOfScalar(u8, m.event_types, response_type)) |_| {
                 m.handle_fn(response_type, event, &wm);
@@ -161,11 +178,11 @@ fn grabKeybindings(wm: *WM) !void {
         }
     }
     _ = xcb.xcb_flush(wm.conn);
-    logging.debugKeybindingsGrabbed(wm.config.keybindings.items.len);
+    log.debugKeybindingsGrabbed(wm.config.keybindings.items.len);
 }
 
 fn handleConfigReload(wm: *WM) !void {
-    logging.debugConfigReloading();
+    log.debugConfigReloading();
 
     var new_config = try config.loadConfigDefault(wm.allocator);
     errdefer new_config.deinit(wm.allocator);
@@ -175,5 +192,5 @@ fn handleConfigReload(wm: *WM) !void {
     wm.config = new_config;
 
     try grabKeybindings(wm);
-    logging.debugConfigReloaded();
+    log.debugConfigReloaded();
 }

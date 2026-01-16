@@ -1,8 +1,8 @@
 // Monocle layout - all windows fullscreen, stacked
-// Only the top window is visible
 const std = @import("std");
 const defs = @import("defs");
 const builtin = @import("builtin");
+const log = @import("logging");
 const xcb = defs.xcb;
 const WM = defs.WM;
 const tiling_types = @import("tiling_types");
@@ -15,13 +15,12 @@ pub fn tile(wm: *WM, state: *TilingState, windows: []const u32, screen_w: u16, s
     const bw = state.border_width;
 
     if (builtin.mode == .Debug) {
-        std.debug.print("[monocle] Tiling {} windows fullscreen\n", .{windows.len});
+        log.debugLayoutTilingSimple("monocle", windows.len);
     }
 
     const w = tiling_types.calcWindowDimension(screen_w, gap, bw);
     const h = tiling_types.calcWindowDimension(screen_h, gap, bw);
 
-    // All windows fullscreen, stacked
     for (windows) |win| {
         tiling_types.configureWindow(wm, win, gap, gap, w, h);
     }
