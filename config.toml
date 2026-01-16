@@ -5,46 +5,23 @@
 Mod = "Super"
 
 # Window management
-"Mod+Return" = "alacritty"
-"Mod+d" = "kill"                    # Kill focused window (ACTION KEYWORD)
-"Mod+Shift+q" = "close"             # Also kills focused window (ACTION KEYWORD)
-"Mod+Shift+r" = "reload"            # Reload config (ACTION KEYWORD)
+Mod+Return = "ghostty"
+Mod+d = "kill"                    # Kill focused window (ACTION KEYWORD)
+Mod+Shift+q = "close"             # Also kills focused window (ACTION KEYWORD)
+Mod+Shift+r = "reload"            # Reload config (ACTION KEYWORD)
 
 # Tiling layout controls (ALL ACTION KEYWORDS - NOT SHELL COMMANDS!)
-"Mod+space" = "toggle_layout"       # Cycle through layouts
-"Mod+h" = "decrease_master"         # Decrease master width by 5%
-"Mod+l" = "increase_master"         # Increase master width by 5%
-"Mod+comma" = "increase_master_count"   # More windows in master
-"Mod+period" = "decrease_master_count"  # Fewer windows in master
-"Mod+Shift+space" = "toggle_tiling" # Enable/disable tiling
+Mod+space = "toggle_layout"       # Cycle through layouts
+Mod+h = "decrease_master"         # Decrease master width by 5%
+Mod+l = "increase_master"         # Increase master width by 5%
+Mod+comma = "increase_master_count"   # More windows in master
+Mod+period = "decrease_master_count"  # Fewer windows in master
+Mod+Shift+space = "toggle_tiling" # Enable/disable tiling
 
 # Application launchers (these ARE shell commands - anything not a keyword)
-"Mod+p" = "rofi -show drun"
-"Mod+Shift+d" = "dmenu_run"
-"Mod+b" = "firefox"
-
-[tiling]
-# Enable/disable tiling (true or false)
-enabled = true
-
-# Layout mode: "master_left", "monocle", or "grid"
-layout = "master_left"
-
-# Number of windows in master area
-master_count = 1
-
-# Master area width as percentage (5-95)
-master_width_factor = 55
-
-# Gap between windows in pixels
-gaps = 10
-
-# Border width in pixels
-border_width = 2
-
-# Border colors in hex (with or without # or 0x prefix)
-border_focused = 0x5294E2
-border_normal = 0x383C4A
+Mod+p = "rofi -show drun"
+Mod+Shift+d = "dmenu_run"
+Mod+b = "firefox"
 
 [tiling]
 # Enable/disable tiling (true or false)
