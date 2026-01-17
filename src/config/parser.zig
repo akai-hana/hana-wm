@@ -244,8 +244,10 @@ const Parser = struct {
         }
 
         // Slow path: handle escapes
-        var result = std.ArrayList(u8){};
-        try result.ensureTotalCapacity(allocator, end_pos - start);
+        var result: std.ArrayList(u8) = std.ArrayList(u8){ .items = null, .len = 0, .allocator = allocator };
+
+        errdefer result.deinit();
+        try result.ensureTotalCapacity(end_pos - start);
 
         while (self.peek()) |c| {
             if (c == quote) break;
@@ -254,7 +256,7 @@ const Parser = struct {
             if (c == '\\') {
                 _ = self.consume();
                 const next = self.consume() orelse return ParseError.InvalidValue;
-                try result.append(allocator, switch (next) {
+                try result.append(switch (next) {
                     'n' => '\n',
                     't' => '\t',
                     'r' => '\r',
@@ -263,13 +265,13 @@ const Parser = struct {
                     else => return ParseError.InvalidValue,
                 });
             } else {
-                try result.append(allocator, c);
+                try result.append(c);
                 _ = self.consume();
             }
         }
 
         _ = self.consume(); // consume closing quote
-        return try result.toOwnedSlice(allocator);
+        return try result.toOwnedSlice();
     }
 
     fn parseColor(_: *Parser, value: []const u8) !u32 {
@@ -292,8 +294,12 @@ const Parser = struct {
     fn parseArray(self: *Parser, allocator: std.mem.Allocator) ParseError!std.ArrayList(Value) {
         _ = self.consume(); // consume '['
 
-        var array = std.ArrayList(Value){};
-        try array.ensureTotalCapacity(allocator, 4);
+        var array = std.ArrayList(Value).init(allocator);
+        errdefer {
+            for (array.items) |*item| item.deinit(allocator);
+            array.deinit();
+        }
+        try array.ensureTotalCapacity(4);
 
         while (true) {
             self.skipWhitespace();
@@ -302,7 +308,7 @@ const Parser = struct {
                 break;
             }
 
-            try array.append(allocator, try self.parseValue(allocator));
+            try array.append(try self.parseValue(allocator));
             self.skipWhitespace();
             if (self.peek() == ',') _ = self.consume();
         }
@@ -359,18 +365,30 @@ const Parser = struct {
         errdefer self.allocator.free(key);  // Free key if error occurs after allocation
         self.skipWhitespace();
         if (self.consume() != '=') return ParseError.InvalidSyntax;
-        return .{ key, try self.parseValue(allocator) };
+        
+        const value = self.parseValue(allocator) catch |err| {
+            self.allocator.free(key);
+            return err;
+        };
+        
+        return .{ key, value };
     }
 
     fn parseKeyValueOrBareWord(self: *Parser, allocator: std.mem.Allocator) ParseError!struct { []const u8, Value } {
         const key = try self.parseKey();
         errdefer self.allocator.free(key);
         self.skipWhitespace();
-        
+
         // Check if there's an equals sign
         if (self.peek() == '=') {
             _ = self.consume(); // consume '='
-            return .{ key, try self.parseValue(allocator) };
+            
+            const value = self.parseValue(allocator) catch |err| {
+                self.allocator.free(key);
+                return err;
+            };
+            
+            return .{ key, value };
         } else {
             // No equals sign - treat as bare word with implicit true value
             return .{ key, Value{ .boolean = true } };
@@ -380,7 +398,10 @@ const Parser = struct {
 
 pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
     var doc = Document.init(allocator);
-    errdefer doc.deinit();
+    errdefer {
+        // CRITICAL: Ensure full cleanup on any error
+        doc.deinit();
+    }
 
     var parser = Parser.init(allocator, content);
     var current_section: *Section = &doc.root;
@@ -400,11 +421,18 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
         }
 
         if (c == '[') {
-            const section_name = try parser.parseSection();
-            errdefer allocator.free(section_name); // Free on any error
+            const section_name = parser.parseSection() catch |err| {
+                std.log.warn("[parser] Skipping invalid section at line {}: {}", .{parser.line, err});
+                parser.skipLine();
+                continue;
+            };
+            errdefer allocator.free(section_name);
 
             if (doc.sections.contains(section_name)) {
-                return ParseError.DuplicateKey;
+                allocator.free(section_name); // Free duplicate section name
+                std.log.warn("[parser] Duplicate section at line {}, ignoring", .{parser.line});
+                parser.skipLine();
+                continue;
             }
 
             try doc.sections.put(section_name, Section.init(allocator, section_name));
