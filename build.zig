@@ -36,20 +36,20 @@ pub fn build(b: *std.Build) void {
     var all_modules = std.StringHashMap(*std.Build.Module).init(allocator);
 
     // Register core modules - module name = filename
-    const core_modules = [_][]const u8{
-        "defs",
-        "toml",
-        "config",
-        "xkbcommon",
-        "input",
-        "window",
-    };
+    // const core_modules = [_][]const u8{
+    //     "defs",
+    //     "toml",
+    //     "config",
+    //     "xkbcommon",
+    //     "input",
+    //     "window",
+    // };
 
-    for (core_modules) |name| {
-        const path = b.fmt("src/core/{s}.zig", .{name});
-        const module = b.addModule(name, .{ .root_source_file = b.path(path) });
-        all_modules.put(name, module) catch @panic("Failed to register core module");
-    }
+    // for (core_modules) |name| {
+    //     const path = b.fmt("src/core/{s}.zig", .{name});
+    //     const module = b.addModule(name, .{ .root_source_file = b.path(path) });
+    //     all_modules.put(name, module) catch @panic("Failed to register core module");
+    // }
 
     // Auto-discover modules
     discoverModules(b, "src", allocator, &all_modules) catch |err| {
@@ -112,12 +112,12 @@ fn discoverModules(
     var iter = dir.iterate();
     while (try iter.next(io)) |entry| {
         // Skip src/core directory
-        if (std.mem.eql(u8, dir_path, "src") and 
-            entry.kind == .directory and 
-            std.mem.eql(u8, entry.name, "core")) 
-        {
-            continue;
-        }
+        // if (std.mem.eql(u8, dir_path, "src") and 
+        //     entry.kind == .directory and 
+        //     std.mem.eql(u8, entry.name, "core")) 
+        // {
+        //     continue;
+        // }
 
         // Recurse into subdirectories
         if (entry.kind == .directory) {
