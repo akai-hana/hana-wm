@@ -1,4 +1,4 @@
-// Minimal custom TOML parser
+// Minimal custom TOML parser with improved error resilience
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -272,9 +272,21 @@ const Parser = struct {
         return try result.toOwnedSlice(allocator);
     }
 
-    fn parseColor(_: *Parser, value: []const u8) ParseError!u32 {
+    fn parseColor(_: *Parser, value: []const u8) !u32 {
+        if (value.len == 0) return error.InvalidColor;
+
         const offset: usize = if (value[0] == '#') 1 else if (value.len > 2 and value[0] == '0' and value[1] == 'x') 2 else 0;
-        return std.fmt.parseInt(u32, value[offset..], 16) catch ParseError.InvalidColor;
+        const hex_part = value[offset..];
+
+        if (hex_part.len == 0) return error.InvalidColor;
+
+        // Try to parse as hex
+        const color = std.fmt.parseInt(u32, hex_part, 16) catch return error.InvalidColor;
+
+        // Validate it's within RGB range (0x000000 - 0xFFFFFF)
+        if (color > 0xFFFFFF) return error.InvalidColor;
+
+        return color;
     }
 
     fn parseArray(self: *Parser, allocator: std.mem.Allocator) ParseError!std.ArrayList(Value) {
@@ -322,17 +334,47 @@ const Parser = struct {
         const is_color = raw[0] == '#' or (raw.len > 2 and raw[0] == '0' and raw[1] == 'x') or
             for (raw) |ch| { if (ch >= 'a' and ch <= 'f' or ch >= 'A' and ch <= 'F') break true; } else false;
 
-        return if (is_color)
-            .{ .color = try self.parseColor(raw) }
-        else
-            .{ .integer = std.fmt.parseInt(i64, raw, 10) catch return ParseError.InvalidValue };
+        if (is_color) {
+            // Try to parse as color, but if it fails, try integer fallback
+            if (self.parseColor(raw)) |color| {
+                return .{ .color = color };
+            } else |_| {
+                // Color parsing failed, try integer
+                if (std.fmt.parseInt(i64, raw, 10)) |int_val| {
+                    return .{ .integer = int_val };
+                } else |_| {
+                    // Both failed - this is truly invalid
+                    std.log.warn("[parser] Invalid color value '{s}' at line {}", .{raw, self.line});
+                    return ParseError.InvalidColor;
+                }
+            }
+        } else {
+            // Parse as integer
+            return .{ .integer = std.fmt.parseInt(i64, raw, 10) catch return ParseError.InvalidValue };
+        }
     }
 
     fn parseKeyValue(self: *Parser, allocator: std.mem.Allocator) ParseError!struct { []const u8, Value } {
         const key = try self.parseKey();
+        errdefer self.allocator.free(key);  // Free key if error occurs after allocation
         self.skipWhitespace();
         if (self.consume() != '=') return ParseError.InvalidSyntax;
         return .{ key, try self.parseValue(allocator) };
+    }
+
+    fn parseKeyValueOrBareWord(self: *Parser, allocator: std.mem.Allocator) ParseError!struct { []const u8, Value } {
+        const key = try self.parseKey();
+        errdefer self.allocator.free(key);
+        self.skipWhitespace();
+        
+        // Check if there's an equals sign
+        if (self.peek() == '=') {
+            _ = self.consume(); // consume '='
+            return .{ key, try self.parseValue(allocator) };
+        } else {
+            // No equals sign - treat as bare word with implicit true value
+            return .{ key, Value{ .boolean = true } };
+        }
     }
 };
 
@@ -360,7 +402,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
         if (c == '[') {
             const section_name = try parser.parseSection();
             errdefer allocator.free(section_name); // Free on any error
-            
+
             if (doc.sections.contains(section_name)) {
                 return ParseError.DuplicateKey;
             }
@@ -373,16 +415,61 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
             continue;
         }
 
-        var kv = try parser.parseKeyValue(allocator);
-        errdefer {
-            allocator.free(kv[0]);  // Free the duplicated key
-            kv[1].deinit(allocator);  // Deinit the value (handles strings, arrays, etc.)
-        }
-        if (current_section.pairs.contains(kv[0])) return ParseError.DuplicateKey;
-        try current_section.pairs.put(kv[0], kv[1]);
+        // Parse key-value pairs (potentially multiple on one line separated by semicolons)
+        while (true) {
+            // Try to parse as key-value, or fall back to bare word
+            var kv = parser.parseKeyValueOrBareWord(allocator) catch |err| {
+                // Skip this line and continue parsing
+                std.log.warn("[parser] Skipping invalid key-value at line {}: {any}", .{parser.line, err});
+                parser.skipLine();
+                break;
+            };
 
-        parser.skipWhitespace();
-        if (parser.peek() == '\n') _ = parser.consume();
+            errdefer {
+                allocator.free(kv[0]);  // Free the duplicated key
+                kv[1].deinit(allocator);  // Deinit the value (handles strings, arrays, etc.)
+            }
+
+            if (current_section.pairs.contains(kv[0])) {
+                std.log.warn("[parser] Duplicate key '{s}' at line {}, using last value", .{kv[0], parser.line});
+                // Free the old value before replacing
+                if (current_section.pairs.getPtr(kv[0])) |old_val| {
+                    old_val.deinit(allocator);
+                }
+            }
+
+            try current_section.pairs.put(kv[0], kv[1]);
+
+            parser.skipWhitespace();
+
+            // Check what comes next
+            const next = parser.peek();
+            if (next == ';') {
+                // Semicolon - consume it and parse another key-value pair on this line
+                _ = parser.consume();
+                parser.skipWhitespace();
+
+                // If we hit a newline or comment after the semicolon, stop
+                const after_semi = parser.peek();
+                if (after_semi == '\n' or after_semi == '#' or after_semi == null) {
+                    if (after_semi == '\n') _ = parser.consume();
+                    if (after_semi == '#') parser.skipLine();
+                    break;
+                }
+                // Otherwise continue to parse next key-value pair
+                continue;
+            } else if (next == '\n' or next == '#' or next == null) {
+                // End of line or comment - stop parsing this line
+                if (next == '\n') _ = parser.consume();
+                if (next == '#') parser.skipLine();
+                break;
+            } else {
+                // Unexpected character - skip rest of line
+                std.log.warn("[parser] Unexpected character after value at line {}, skipping line", .{parser.line});
+                parser.skipLine();
+                break;
+            }
+        }
     }
 
     return doc;

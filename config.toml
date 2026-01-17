@@ -1,35 +1,57 @@
-# Hana Window Manager Configuration
+# hana WM config!
+
+# KEYBINDINGS
+# Define keyboard shortcuts to control the window manager.
+# Format: Key+Combination = "action" or "command"
+#
+# Available modifiers: Super, Mod4, Alt, Mod1, Control, Ctrl, Shift
+# You can define a "Mod" variable to use throughout your config
+#
+# Available actions:
+#   - close/kill             - Close focused window
+#   - reload/reload_config   - Reload this config file
+#   - toggle_layout          - Cycle through layouts
+#   - toggle_tiling          - Enable/disable tiling
+#   - increase_master        - Increase master area width (+5%)
+#   - decrease_master        - Decrease master area width (-5%)
+#   - increase_master_count  - Add one more window to master area
+#   - decrease_master_count  - Remove one window from master area
+#   - workspace_N            - Switch to workspace N (1-20)
+#   - move_to_workspace_N    - Move focused window to workspace N
+#   - dump_state             - Print WM state to console (debug)
+#   - emergency_recover      - Map all windows and disable tiling (recovery)
+#   - "any shell command"    - Execute the command
 
 [Keybindings]
-# Define your modifier key
+# Define your modifier key (will replace "Mod" in bindings below)
 Mod = "Super"
 
 # Window management
-Mod+Return = "ghostty"
-Mod+d = "kill"         # Kill focused window
-Mod+Shift+q = "close"  # Also kills focused window
-Mod+Shift+r = "reload" # Reload config
+Mod+d       = "ghostty" # Launch terminal
+Mod+t       = "xeyes"   # Launch terminal
+Mod+Shift+f = "kill"    # Force kill window
+Mod+Shift+q = "close"   # Close window gracefully
+Mod+Shift+r = "reload"  # Reload config
 
 # Tiling layout controls
-Mod+space = "toggle_layout"          # Cycle through layouts
-Mod+h = "decrease_master"            # Decrease master width by 5%
-Mod+l = "increase_master"            # Increase master width by 5%
-Mod+comma = "increase_master_count"  # More windows in master
-Mod+period = "decrease_master_count" # Fewer windows in master
-Mod+Shift+space = "toggle_tiling"    # Enable/disable tiling
+Mod+space       = "toggle_layout"         # Cycle: master_left → monocle → grid
+Mod+Shift+space = "toggle_tiling"         # Enable/disable tiling
+Mod+h           = "decrease_master"       # Make master area narrower
+Mod+l           = "increase_master"       # Make master area wider
+Mod+comma       = "increase_master_count" # More windows in master
+Mod+period      = "decrease_master_count" # Fewer windows in master
 
-# Workspace switching (1-9)
+# Workspace switching (1-8)
 Mod+1 = "workspace_1"
 Mod+2 = "workspace_2"
 Mod+3 = "workspace_3"
 Mod+4 = "workspace_4"
-Mod+5 = "workspace_5"
-Mod+6 = "workspace_6"
-Mod+7 = "workspace_7"
-Mod+8 = "workspace_8"
-Mod+9 = "workspace_9"
+Mod+q = "workspace_5"
+Mod+w = "workspace_6"
+Mod+e = "workspace_7"
+Mod+r = "workspace_8"
 
-# Move window to workspace
+# Move focused window to workspace
 Mod+Shift+1 = "move_to_workspace_1"
 Mod+Shift+2 = "move_to_workspace_2"
 Mod+Shift+3 = "move_to_workspace_3"
@@ -38,36 +60,129 @@ Mod+Shift+5 = "move_to_workspace_5"
 Mod+Shift+6 = "move_to_workspace_6"
 Mod+Shift+7 = "move_to_workspace_7"
 Mod+Shift+8 = "move_to_workspace_8"
-Mod+Shift+9 = "move_to_workspace_9"
 
 # Application launchers
 Mod+p = "rofi -show drun"
-Mod+Shift+d = "dmenu_run"
-Mod+b = "firefox"
+Mod+a = "firefox"
+
+# Emergency/Debug
+Mod+Shift+d      = "dump_state"         # Print debug info
+Mod+Shift+Escape = "emergency_recover"  # Emergency recovery mode
+
+# TILING CONFIGURATION
+# Configure automatic window tiling behavior
 
 [tiling]
-# Enable/disable tiling (true or false)
-enabled = true
+enabled = true         # Enable tiling on startup
+layout = "master_left" # Default layout: master_left, monocle, or grid
 
-# Layout mode: "master_left", "monocle", or "grid"
-layout = "master_left"
+master_count = 1           # Number of windows in master area
+master_width_factor = 55   # Master area width (5-95, percentage)
+gaps = 12                  # Gap between windows (pixels)
+border_width = 4           # Border thickness (pixels)
+border_focused = "#5294E2" # Focused window border color (hex RGB)
+border_normal  = "#383C4A" # Unfocused window border color (hex RGB)
 
-# Number of windows in master area
-master_count = 1
-
-# Master area width as percentage (5-95)
-master_width_factor = 55
-
-# Gaps between windows (in pixels)
-gaps = 8
-
-# Border width (in pixels)
-border_width = 4
-
-# Border colors in hex (with or without # or 0x prefix)
-border_focused = 0x5294E2
-border_normal = 0x383C4A
+# WORKSPACE CONFIGURATION
 
 [workspaces]
-# Number of workspaces (1-20)
-count = 9
+count = 8  # Number of virtual desktops (1-20)
+
+# WORKSPACE RULES
+# Automatically assign windows to specific workspaces based on their
+# WM_CLASS property (use `xprop WM_CLASS` to find window class names)
+#
+# THREE SUPPORTED FORMATS:
+#
+# FORMAT 1: Section-based (RECOMMENDED - most readable)
+# --------------------------------------------------------
+# [workspace.rules.N]
+# WindowClass1
+# WindowClass2
+#
+# Example:
+#   [workspace.rules.1]
+#   Firefox
+#   Navigator
+#
+# FORMAT 2: Array-based (compact)
+# --------------------------------
+# [workspace.rules]
+# N = ["WindowClass1", "WindowClass2"]
+#
+# Example:
+#   [workspace.rules]
+#   1 = ["Firefox", "Navigator"]
+#   2 = ["discord", "vesktop"]
+#
+# FORMAT 3: Legacy key-value (backwards compatible)
+# --------------------------------------------------
+# [rules]
+# WindowClass = WorkspaceNumber
+#
+# Example:
+#   [rules]
+#   Firefox = 1
+#   discord = 2
+#
+# You can mix formats in the same config!
+
+[workspace.rules.1] #【あ】Browser
+Navigator
+Firefox
+
+[workspace.rules.2] #【か】Socials
+discord
+vesktop
+equibop
+electron
+
+[workspace.rules.3] #【い】Music
+com.github.th_ch.youtube_music
+
+[workspace.rules.4] #【は】Launchers
+steam
+OpenTabletDriver.UX
+
+[workspace.rules.5] #【な】Gaming
+"osu!"
+DDNet
+
+[workspace.rules.6] #【つ】Text/Code editors
+emacs
+xeyes
+
+[workspace.rules.7] #【ん】Media
+freetube
+mpv
+gimp
+
+[workspace.rules.8] #【で】Downloads
+deluge
+
+# ALTERNATIVE FORMAT EXAMPLES (not active, for reference)
+
+# Using FORMAT 2 (array-based):
+#
+# [workspace.rules]
+# 1 = ["Navigator", "Firefox"]
+# 2 = ["discord", "vesktop", "equibop", "electron"]
+# 3 = ["com.github.th_ch.youtube_music"]
+# 4 = ["steam", "OpenTabletDriver.UX"]
+# 5 = ["osu!", "DDNet"]
+
+# Using FORMAT 3 (legacy):
+#
+# [rules]
+# Firefox = 1
+# discord = 2
+# vesktop = 2
+# steam = 4
+
+# TIPS
+# - Find window class: run `xprop WM_CLASS` and click a window
+# - Reload config: Use your configured keybinding (default: Mod+Shift+r)
+# - Multiple entries on one line: Use semicolons
+#   Example: discord = 2; vesktop = 2; equibop = 2
+# - Colors: Hex format with or without # prefix (5294E2 or #5294E2)
+# - Mouse bindings: Super+LeftClick=Move, Super+RightClick=Resize

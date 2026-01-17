@@ -13,10 +13,14 @@ const log = @import("logging");
 const tiling = @import("tiling");
 const workspaces = @import("workspaces");
 const cursor_drag = @import("cursor-window-drag");
+const focus = @import("focus");
 
 const c = @cImport({
     @cInclude("unistd.h");
 });
+
+// Declare waitpid explicitly - it's from sys/wait.h
+extern "c" fn waitpid(pid: c_int, status: ?*c_int, options: c_int) c_int;
 
 const xcb = defs.xcb;
 const WM = defs.WM;
@@ -58,6 +62,12 @@ fn buildKeybindMap(wm: *WM) !void {
     }
 }
 
+/// Rebuild keybind map after config reload
+pub fn rebuildKeybindMap(wm: *WM) !void {
+    try buildKeybindMap(wm);
+    log.debugInputModuleInit(keybind_map.count());
+}
+
 /// Setup mouse button grabs for window manipulation
 /// Super+Button1 = move window, Super+Button3 = resize window
 pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
@@ -92,7 +102,7 @@ pub fn handleEvent(event_type: u8, event: *anyopaque, wm: *WM) void {
 /// Handle key press events - lookup and execute actions
 fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
     const xkb_ptr: *xkbcommon.XkbState = @ptrCast(@alignCast(wm.xkb_state.?));
-    
+
     // Extract relevant modifiers (ignore locks)
     const modifiers: u16 = @intCast(event.state & defs.MOD_MASK_RELEVANT);
     const keysym = xkb_ptr.keycodeToKeysym(event.detail);
@@ -120,15 +130,7 @@ fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) void {
         cursor_drag.startDrag(wm, event.child, event.detail, event.root_x, event.root_y);
     } else {
         // Normal click: Focus and raise window
-        _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, event.child, xcb.XCB_CURRENT_TIME);
-        _ = xcb.xcb_configure_window(wm.conn, event.child, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
-
-        const old_focus = wm.focused_window;
-        wm.focused_window = event.child;
-
-        if (old_focus != event.child) {
-            tiling.updateWindowFocus(wm, event.child);
-        }
+        focus.setFocus(wm, event.child, .mouse_click);
         // Note: flush happens at end of event loop in main.zig
     }
 }
@@ -148,22 +150,37 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
         .toggle_tiling => tiling.toggleTiling(wm),
         .switch_workspace => |ws| workspaces.switchTo(wm, ws),
         .move_to_workspace => |ws| workspaces.moveWindowTo(wm, ws),
+        .dump_state => dumpState(wm),
+        .emergency_recover => emergencyRecover(wm),
     }
 }
 
 /// Execute a shell command in a forked process
+/// Uses double-fork to avoid zombie processes
 fn executeShellCommand(wm: *WM, cmd: []const u8) !void {
     log.debugExecutingCommand(cmd);
-    
+
     const pid = c.fork();
     if (pid == 0) {
-        // Child process
-        _ = c.setsid();
-        const cmd_z = try wm.allocator.dupeZ(u8, cmd);
-        defer wm.allocator.free(cmd_z);
-        _ = c.execvp("/bin/sh", @ptrCast(&[_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z.ptr, null }));
-        std.process.exit(1);
-    } else if (pid < 0) {
+        // Child process - fork again to avoid zombies
+        const pid2 = c.fork();
+        if (pid2 == 0) {
+            // Grandchild process - actually runs the command
+            _ = c.setsid();
+            const cmd_z = try wm.allocator.dupeZ(u8, cmd);
+            defer wm.allocator.free(cmd_z);
+            _ = c.execvp("/bin/sh", @ptrCast(&[_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z.ptr, null }));
+            std.process.exit(1);
+        } else if (pid2 < 0) {
+            std.process.exit(1);
+        }
+        // First child exits immediately (grandchild orphaned and adopted by init)
+        std.process.exit(0);
+    } else if (pid > 0) {
+        // Parent reaps first child to prevent zombie
+        var status: c_int = 0;
+        _ = waitpid(pid, &status, 0);
+    } else {
         log.errorCommandForkFailed(cmd);
     }
 }
@@ -181,5 +198,67 @@ fn closeWindow(wm: *WM) void {
 /// Trigger configuration reload
 fn reloadConfig(wm: *WM) !void {
     log.debugConfigReloadTriggered();
-    try buildKeybindMap(wm);
+    wm.should_reload_config.store(true, .release);
+}
+
+/// Dump current WM state for debugging
+fn dumpState(wm: *WM) void {
+    std.log.info("========== WM STATE DUMP ==========", .{});
+    std.log.info("Focused: {?}", .{wm.focused_window});
+    std.log.info("Total managed windows: {}", .{wm.windows.count()});
+
+    // Dump workspace state
+    if (workspaces.getState()) |ws_state| {
+        std.log.info("Current workspace: {}", .{ws_state.current + 1});
+        for (ws_state.workspaces, 0..) |*ws, i| {
+            std.log.info("  WS{}: {} windows", .{i + 1, ws.windows.items.len});
+            for (ws.windows.items) |win| {
+                const is_mapped = checkIfMapped(wm, win);
+                std.log.info("    0x{x}: mapped={}", .{win, is_mapped});
+            }
+        }
+    }
+
+    // Dump tiling state
+    if (tiling.getState()) |t_state| {
+        std.log.info("Tiling: {} ({} windows)",
+            .{t_state.enabled, t_state.tiled_windows.items.len});
+        std.log.info("Layout: {s}", .{@tagName(t_state.layout)});
+    }
+    std.log.info("===================================", .{});
+}
+
+/// Check if a window is currently mapped
+fn checkIfMapped(wm: *WM, window: u32) bool {
+    const cookie = xcb.xcb_get_window_attributes(wm.conn, window);
+    if (xcb.xcb_get_window_attributes_reply(wm.conn, cookie, null)) |attrs| {
+        defer std.c.free(attrs);
+        return attrs.*.map_state == xcb.XCB_MAP_STATE_VIEWABLE;
+    }
+    return false;
+}
+
+/// Emergency recovery - map all windows and disable tiling
+fn emergencyRecover(wm: *WM) void {
+    std.log.warn("========== EMERGENCY RECOVERY ==========", .{});
+
+    // Map ALL windows from ALL workspaces
+    if (workspaces.getState()) |ws_state| {
+        for (ws_state.workspaces) |*ws| {
+            for (ws.windows.items) |win| {
+                std.log.warn("Mapping window 0x{x}", .{win});
+                _ = xcb.xcb_map_window(wm.conn, win);
+            }
+        }
+    }
+
+    // Disable tiling temporarily
+    if (tiling.getState()) |t_state| {
+        t_state.enabled = false;
+        std.log.warn("Tiling disabled", .{});
+    }
+
+    _ = xcb.xcb_flush(wm.conn);
+    std.log.warn("Recovery complete - all windows mapped, tiling disabled", .{});
+    std.log.warn("Press Mod+Shift+d to see current state", .{});
 }

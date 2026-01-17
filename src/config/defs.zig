@@ -35,42 +35,48 @@ pub const MOD_MASK_RELEVANT: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER
 pub const Action = union(enum) {
     /// Execute a shell command
     exec: []const u8,
-    
+
     /// Close the focused window
     close_window,
-    
+
     /// Reload configuration from disk
     reload_config,
-    
+
     /// Focus next window (not yet implemented)
     focus_next,
-    
+
     /// Focus previous window (not yet implemented)
     focus_prev,
-    
+
     /// Cycle through tiling layouts
     toggle_layout,
-    
+
     /// Increase master area width
     increase_master,
-    
+
     /// Decrease master area width
     decrease_master,
-    
+
     /// Increase number of master windows
     increase_master_count,
-    
+
     /// Decrease number of master windows
     decrease_master_count,
-    
+
     /// Toggle tiling on/off
     toggle_tiling,
-    
+
     /// Switch to workspace N (0-indexed)
     switch_workspace: usize,
-    
+
     /// Move focused window to workspace N (0-indexed)
     move_to_workspace: usize,
+
+    /// Dump current WM state for debugging
+    dump_state,
+
+    /// Emergency recovery - map all windows and disable tiling
+    emergency_recover,
 
     /// Free allocated memory (for exec commands)
     pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
@@ -85,13 +91,13 @@ pub const Action = union(enum) {
 pub const Keybind = struct {
     /// Modifier keys (Shift, Control, Alt, Super)
     modifiers: u16,
-    
+
     /// X11 keysym (symbolic key identifier)
     keysym: u32,
-    
+
     /// Physical keycode (resolved at runtime from keysym)
     keycode: ?u8 = null,
-    
+
     /// Action to execute when triggered
     action: Action,
 };
@@ -102,33 +108,49 @@ pub const Keybind = struct {
 pub const TilingConfig = struct {
     /// Enable/disable tiling
     enabled: bool = true,
-    
+
     /// Default layout name
     layout: []const u8 = "master_left",
-    
+
     /// Master area width as fraction (0.05 - 0.95)
     master_width_factor: f32 = 0.50,
-    
+
     /// Number of windows in master area
     master_count: usize = 1,
-    
+
     /// Gap size in pixels
     gaps: u16 = 10,
-    
+
     /// Border width in pixels
     border_width: u16 = 2,
-    
+
     /// Focused window border color (RGB hex)
     border_focused: u32 = 0x5294E2,
-    
+
     /// Unfocused window border color (RGB hex)
     border_normal: u32 = 0x383C4A,
+};
+
+/// Window placement rule
+pub const Rule = struct {
+    /// WM_CLASS class or instance name to match
+    class_name: []const u8,
+    
+    /// Target workspace (0-indexed)
+    workspace: usize,
+    
+    pub fn deinit(self: *Rule, allocator: std.mem.Allocator) void {
+        allocator.free(self.class_name);
+    }
 };
 
 /// Virtual desktop configuration
 pub const WorkspaceConfig = struct {
     /// Number of workspaces to create
     count: usize = 9,
+    
+    /// Window placement rules
+    rules: std.ArrayListUnmanaged(Rule) = .{},
 };
 
 /// Window metadata storage
@@ -138,7 +160,7 @@ pub const WindowProperties = std.StringHashMap([]const u8);
 pub const Window = struct {
     /// X11 window ID
     id: u32,
-    
+
     /// Custom properties (extensible)
     properties: WindowProperties,
 
@@ -154,10 +176,10 @@ pub const Window = struct {
 pub const Config = struct {
     /// All configured keybindings
     keybindings: std.ArrayListUnmanaged(Keybind) = .{},
-    
+
     /// Tiling settings
     tiling: TilingConfig = .{},
-    
+
     /// Workspace settings
     workspaces: WorkspaceConfig = .{},
 
@@ -166,6 +188,12 @@ pub const Config = struct {
             kb.action.deinit(allocator);
         }
         self.keybindings.deinit(allocator);
+        
+        // Clean up workspace rules
+        for (self.workspaces.rules.items) |*rule| {
+            rule.deinit(allocator);
+        }
+        self.workspaces.rules.deinit(allocator);
     }
 };
 
@@ -175,27 +203,30 @@ pub const Config = struct {
 pub const WM = struct {
     /// Memory allocator
     allocator: std.mem.Allocator,
-    
+
     /// XCB connection to X server
     conn: *xcb.xcb_connection_t,
-    
+
     /// Default screen
     screen: *xcb.xcb_screen_t,
-    
+
     /// Root window ID
     root: u32,
-    
+
     /// Current configuration
     config: Config,
-    
+
     /// All managed windows
     windows: std.AutoHashMap(u32, Window),
-    
+
     /// Currently focused window ID
     focused_window: ?u32 = null,
-    
+
     /// XKB keyboard state
     xkb_state: ?*xkbcommon.XkbState,
+
+    /// Flag to trigger config reload on next event loop iteration
+    should_reload_config: *std.atomic.Value(bool),
 
     pub fn deinit(self: *WM) void {
         // Clean up all window properties
@@ -238,16 +269,16 @@ pub const WM = struct {
 pub const Module = struct {
     /// Module name for debugging
     name: []const u8,
-    
+
     /// Event types this module handles
     event_types: []const u8,
-    
+
     /// Initialization function
     init_fn: *const fn (*WM) void,
-    
+
     /// Event handler function
     handle_fn: *const fn (u8, *anyopaque, *WM) void,
-    
+
     /// Optional cleanup function
     deinit_fn: ?*const fn (*WM) void,
 };

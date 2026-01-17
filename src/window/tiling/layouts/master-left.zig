@@ -1,13 +1,12 @@
 //! Master-left tiling layout implementation.
 //!
-//! Layout structure:
-//! ┌─────────┬──────┐
-//! │         │ S1   │
-//! │ Master  ├──────┤
-//! │  Area   │ S2   │
-//! │         ├──────┤
-//! │         │ S3   │
-//! └─────────┴──────┘
+//! ┌──────────┬──────┐
+//! │          │  S1  │
+//! │          ├──────┤
+//! │  Master  │  S2  │
+//! │          ├──────┤
+//! │          │  S3  │
+//! └──────────┴──────┘
 //!
 //! - Left side: One or more "master" windows (configurable count)
 //! - Right side: Remaining windows stacked vertically
@@ -20,6 +19,9 @@ const log = @import("logging");
 const WM = defs.WM;
 const types = @import("types");
 const TilingState = types.TilingState;
+
+/// Minimum window dimensions to keep windows visible
+const MIN_WINDOW_DIM: u16 = 50;
 
 /// Calculate window dimensions for a vertical column of windows
 fn calcColumnHeight(screen_h: u16, count: u16, gap: u16, bw: u16) struct { win_h: u16 } {
@@ -37,9 +39,9 @@ fn calcColumnHeight(screen_h: u16, count: u16, gap: u16, bw: u16) struct { win_h
     const available = if (screen_h > total_overhead)
         @as(u32, screen_h) - total_overhead
     else
-        count32 * 10; // Fallback minimum per window
+        count32 * MIN_WINDOW_DIM; // Use minimum size as fallback
 
-    return .{ .win_h = @intCast(available / count32) };
+    return .{ .win_h = @max(MIN_WINDOW_DIM, @as(u16, @intCast(available / count32))) };
 }
 
 pub fn tile(wm: *WM, state: *TilingState, windows: []const u32, screen_w: u16, screen_h: u16) void {
@@ -63,9 +65,9 @@ pub fn tile(wm: *WM, state: *TilingState, windows: []const u32, screen_w: u16, s
 
     // Pre-calculate window heights for each column
     const master_dims = calcColumnHeight(screen_h, m_count, gap, bw);
-    const stack_dims = if (s_count > 0) 
-        calcColumnHeight(screen_h, s_count, gap, bw) 
-    else 
+    const stack_dims = if (s_count > 0)
+        calcColumnHeight(screen_h, s_count, gap, bw)
+    else
         @TypeOf(master_dims){ .win_h = 0 };
 
     for (windows, 0..) |win, idx| {
@@ -80,10 +82,12 @@ pub fn tile(wm: *WM, state: *TilingState, windows: []const u32, screen_w: u16, s
             x = gap;  // Gap from left edge
             y = @intCast(gap + row * (master_dims.win_h + 2 * bw + gap));
             // Width: master area minus gaps on both sides and borders
-            w = if (master_width > 2 * gap + 2 * bw) 
-                master_width - 2 * gap - 2 * bw 
-            else 
-                1;
+            w = if (master_width > 2 * gap + 2 * bw)
+                master_width - 2 * gap - 2 * bw
+            else
+                MIN_WINDOW_DIM;
+            // Ensure minimum size
+            w = @max(MIN_WINDOW_DIM, w);
             h = master_dims.win_h;
         } else {
             // === Stack Area ===
@@ -92,10 +96,12 @@ pub fn tile(wm: *WM, state: *TilingState, windows: []const u32, screen_w: u16, s
             x = master_width;  // Starts where master ends (no gap between)
             y = @intCast(gap + row * (stack_dims.win_h + 2 * bw + gap));
             // Width: stack area minus gap on right and borders
-            w = if (stack_width > gap + 2 * bw) 
-                stack_width - gap - 2 * bw 
-            else 
-                1;
+            w = if (stack_width > gap + 2 * bw)
+                stack_width - gap - 2 * bw
+            else
+                MIN_WINDOW_DIM;
+            // Ensure minimum size
+            w = @max(MIN_WINDOW_DIM, w);
             h = stack_dims.win_h;
         }
 

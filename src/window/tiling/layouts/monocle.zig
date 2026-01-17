@@ -24,13 +24,13 @@ pub fn tile(wm: *WM, state: *TilingState, windows: []const u32, screen_w: u16, s
     }
 
     // Calculate fullscreen size accounting for gaps and borders
-    const w = if (screen_w > 2 * gap + 2 * bw) 
-        screen_w - 2 * gap - 2 * bw 
-    else 
+    const w = if (screen_w > 2 * gap + 2 * bw)
+        screen_w - 2 * gap - 2 * bw
+    else
         1;
-    const h = if (screen_h > 2 * gap + 2 * bw) 
-        screen_h - 2 * gap - 2 * bw 
-    else 
+    const h = if (screen_h > 2 * gap + 2 * bw)
+        screen_h - 2 * gap - 2 * bw
+    else
         1;
 
     // Size all windows identically (they're stacked)
