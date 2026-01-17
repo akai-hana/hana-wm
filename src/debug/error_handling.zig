@@ -97,3 +97,13 @@ pub fn becomeWindowManager(conn: *xcb.xcb_connection_t, root: u32, event_mask: u
         return error.AnotherWMRunning;
     }
 }
+
+/// Check XCB request for errors and log them
+pub fn xcbCheckError(conn: *xcb.xcb_connection_t, cookie: xcb.xcb_void_cookie_t, operation: []const u8) bool {
+    if (xcb.xcb_request_check(conn, cookie)) |err| {
+        std.log.err("[XCB] {s} failed: error_code={}", .{operation, err.*.error_code});
+        std.c.free(err);
+        return false;
+    }
+    return true;
+}

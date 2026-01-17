@@ -16,25 +16,25 @@ const WM = defs.WM;
 const DragState = struct {
     /// Which button started the drag (1=move, 3=resize)
     button: u8 = 0,
-    
+
     /// Window being dragged
     window: u32 = 0,
-    
+
     /// Initial cursor X position when drag started
     start_x: i16 = 0,
-    
+
     /// Initial cursor Y position when drag started
     start_y: i16 = 0,
-    
+
     /// Window's initial X position
     attr_x: i16 = 0,
-    
+
     /// Window's initial Y position
     attr_y: i16 = 0,
-    
+
     /// Window's initial width
     attr_width: u16 = 0,
-    
+
     /// Window's initial height
     attr_height: u16 = 0,
 
@@ -78,7 +78,7 @@ pub fn startDrag(wm: *WM, window: u32, button: u8, root_x: i16, root_y: i16) voi
 
     if (@import("builtin").mode == .Debug) {
         const action = if (button == 1) "move" else "resize";
-        std.log.info("[drag] Started {} on window {x} at ({}, {})", .{action, window, root_x, root_y});
+        std.log.info("[drag] Started {s} on window {x} at ({}, {})", .{action, window, root_x, root_y});
     }
 
     // Raise window to top
@@ -97,8 +97,11 @@ pub fn updateDrag(wm: *WM, root_x: i16, root_y: i16) void {
 
     if (drag_state.button == 1) {
         // === Move window ===
-        const new_x: i16 = @intCast(@as(i32, drag_state.attr_x) + dx);
-        const new_y: i16 = @intCast(@as(i32, drag_state.attr_y) + dy);
+        // Prevent integer overflow by clamping to i16 range
+        const new_x_i32 = @as(i32, drag_state.attr_x) + dx;
+        const new_y_i32 = @as(i32, drag_state.attr_y) + dy;
+        const new_x: i16 = @intCast(std.math.clamp(new_x_i32, -32768, 32767));
+        const new_y: i16 = @intCast(std.math.clamp(new_y_i32, -32768, 32767));
 
         _ = xcb.xcb_configure_window(wm.conn, drag_state.window,
             xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
@@ -108,14 +111,15 @@ pub fn updateDrag(wm: *WM, root_x: i16, root_y: i16) void {
             });
     } else {
         // === Resize window ===
+        // Ensure minimum size and prevent overflow
         const new_width = @max(MIN_WINDOW_SIZE, @as(i32, drag_state.attr_width) + dx);
         const new_height = @max(MIN_WINDOW_SIZE, @as(i32, drag_state.attr_height) + dy);
 
         _ = xcb.xcb_configure_window(wm.conn, drag_state.window,
             xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT,
             &[_]u32{
-                @intCast(new_width),
-                @intCast(new_height),
+                @intCast(std.math.clamp(new_width, MIN_WINDOW_SIZE, 65535)),
+                @intCast(std.math.clamp(new_height, MIN_WINDOW_SIZE, 65535)),
             });
     }
 }

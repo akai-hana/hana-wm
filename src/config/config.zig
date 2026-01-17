@@ -37,6 +37,8 @@ const ACTION_MAP = std.StaticStringMap(defs.Action).initComptime(.{
     .{ "increase_master_count", .increase_master_count },
     .{ "decrease_master_count", .decrease_master_count },
     .{ "toggle_tiling", .toggle_tiling },
+    .{ "dump_state", .dump_state },
+    .{ "emergency_recover", .emergency_recover },
 });
 
 pub fn getConfigPath(allocator: std.mem.Allocator) ![]const u8 {
@@ -85,7 +87,7 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !Config {
     };
     defer file.close(io);
 
-    var read_buf: [4096]u8 = undefined;
+    var read_buf: [16384]u8 = undefined;  // Increased buffer size to 16KB
     var file_reader = file.reader(io, &read_buf);
     var buffer = std.Io.Writer.Allocating.init(allocator);
     defer buffer.deinit();
@@ -100,6 +102,7 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !Config {
     try parseKeybindings(allocator, &doc, &config);
     try parseTiling(&doc, &config);
     try parseWorkspaces(&doc, &config);
+    try parseRules(allocator, &doc, &config);
     try validateConfig(allocator, &config);
 
     std.log.info("Successfully loaded config from: {s}", .{path});
@@ -138,7 +141,9 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, c
         defer if (mod_substitute != null) allocator.free(keybind_str);
 
         const parts = parseKeybindString(keybind_str) catch |err| {
-            std.log.warn("Invalid keybinding '{s}': {}", .{entry.key_ptr.*, err});
+            // Free allocated string before continuing (fixes memory leak)
+            if (mod_substitute != null) allocator.free(keybind_str);
+            std.log.warn("Invalid keybinding '{s}': {any}", .{entry.key_ptr.*, err});
             continue;
         };
 
@@ -166,7 +171,10 @@ fn parseAction(allocator: std.mem.Allocator, command: []const u8) !defs.Action {
             std.log.warn("[config] Invalid workspace number in '{s}'", .{command});
             return error.InvalidConfigValue;
         };
-        if (ws_num < 1) return error.InvalidConfigValue;
+        if (ws_num < 1 or ws_num > 20) {
+            std.log.err("[config] Workspace number must be 1-20, got {}", .{ws_num});
+            return error.InvalidConfigValue;
+        }
         std.log.info("[config] Keybinding → switch to workspace {}", .{ws_num});
         return .{ .switch_workspace = ws_num - 1 };
     }
@@ -177,7 +185,10 @@ fn parseAction(allocator: std.mem.Allocator, command: []const u8) !defs.Action {
             std.log.warn("[config] Invalid workspace number in '{s}'", .{command});
             return error.InvalidConfigValue;
         };
-        if (ws_num < 1) return error.InvalidConfigValue;
+        if (ws_num < 1 or ws_num > 20) {
+            std.log.err("[config] Workspace number must be 1-20, got {}", .{ws_num});
+            return error.InvalidConfigValue;
+        }
         std.log.info("[config] Keybinding → move to workspace {}", .{ws_num});
         return .{ .move_to_workspace = ws_num - 1 };
     }
@@ -250,6 +261,8 @@ fn parseTiling(doc: *const parser.Document, config: *Config) !void {
         if (color <= 0xFFFFFF) {
             config.tiling.border_focused = color;
             std.log.info("[config] ✓ border_focused = 0x{x:0>6}", .{color});
+        } else {
+            std.log.warn("[config] ✗ border_focused exceeds RGB range (got 0x{x}), using default", .{color});
         }
     }
 
@@ -257,6 +270,8 @@ fn parseTiling(doc: *const parser.Document, config: *Config) !void {
         if (color <= 0xFFFFFF) {
             config.tiling.border_normal = color;
             std.log.info("[config] ✓ border_normal = 0x{x:0>6}", .{color});
+        } else {
+            std.log.warn("[config] ✗ border_normal exceeds RGB range (got 0x{x}), using default", .{color});
         }
     }
 
@@ -277,6 +292,96 @@ fn parseWorkspaces(doc: *const parser.Document, config: *Config) !void {
         }
     }
 
+    std.log.info("[config] ==================================================", .{});
+}
+
+fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, config: *Config) !void {
+    std.log.info("[config] ========== PARSING WORKSPACE RULES ==========", .{});
+
+    var rules_found: usize = 0;
+
+    // Support both old format [rules] and new format [rules.N]
+
+    // First, check for old-style [rules] section
+    if (doc.getSection("rules")) |section| {
+        var iter = section.pairs.iterator();
+        while (iter.next()) |entry| {
+            const class_name = entry.key_ptr.*;
+            const workspace_num = entry.value_ptr.*.asInt() orelse {
+                std.log.warn("[config] Rule for '{s}' must have integer workspace number", .{class_name});
+                continue;
+            };
+
+            if (workspace_num < 1 or workspace_num > 20) {
+                std.log.warn("[config] Workspace number for '{s}' out of range (1-20): {}", .{class_name, workspace_num});
+                continue;
+            }
+
+            const class_name_copy = try allocator.dupe(u8, class_name);
+            errdefer allocator.free(class_name_copy);
+
+            const rule = defs.Rule{
+                .class_name = class_name_copy,
+                .workspace = @intCast(workspace_num - 1),
+            };
+
+            try config.workspaces.rules.append(allocator, rule);
+            std.log.info("[config] ✓ Rule: '{s}' → workspace {}", .{class_name, workspace_num});
+            rules_found += 1;
+        }
+    }
+
+    // Then check for new-style [rules.1], [rules.2], [workspace.rules.1], etc.
+    var section_iter = doc.sections.iterator();
+    while (section_iter.next()) |section_entry| {
+        const section_name = section_entry.key_ptr.*;
+
+        // Determine if this is a rules section and extract workspace number
+        var workspace_str: ?[]const u8 = null;
+        
+        // Support both [rules.N] and [workspace.rules.N]
+        if (std.mem.startsWith(u8, section_name, "workspace.rules.")) {
+            workspace_str = section_name[16..]; // Skip "workspace.rules."
+        } else if (std.mem.startsWith(u8, section_name, "rules.")) {
+            workspace_str = section_name[6..]; // Skip "rules."
+        }
+
+        if (workspace_str) |ws_str| {
+            const workspace_num = std.fmt.parseInt(usize, ws_str, 10) catch {
+                std.log.warn("[config] Invalid workspace number in section [{s}]", .{section_name});
+                continue;
+            };
+
+            if (workspace_num < 1 or workspace_num > 20) {
+                std.log.warn("[config] Workspace number out of range (1-20) in section [{s}]", .{section_name});
+                continue;
+            }
+
+            const section = section_entry.value_ptr;
+
+            // Each key in this section is a window class for this workspace
+            // The value can be anything (we ignore it) or just be present as a marker
+            var iter = section.pairs.iterator();
+            while (iter.next()) |entry| {
+                const class_name = entry.key_ptr.*;
+
+                const class_name_copy = try allocator.dupe(u8, class_name);
+                errdefer allocator.free(class_name_copy);
+
+                const rule = defs.Rule{
+                    .class_name = class_name_copy,
+                    .workspace = workspace_num - 1, // Convert to 0-indexed
+                };
+
+                try config.workspaces.rules.append(allocator, rule);
+                std.log.info("[config] ✓ Rule: '{s}' → workspace {} (from [{s}])",
+                    .{class_name, workspace_num, section_name});
+                rules_found += 1;
+            }
+        }
+    }
+
+    std.log.info("[config] Loaded {} workspace rules", .{rules_found});
     std.log.info("[config] ==================================================", .{});
 }
 

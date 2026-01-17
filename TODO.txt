@@ -1,24 +1,24 @@
-in-the-works:
-#honor layout setting in config.toml (currently broken)
-#honor master count in config.toml (currently broken)
-
-move all error and logging logic to error_handling.zig and logging.zig respectively
-write all "///" and "//!" comments for functions that aren't commented yet; comment anything else that might benefit from being commented (things that are terse or unobvious upon sight-reading). make sure to be brief in comments and not over-explain things, as overly long comments tend to be counter-productive for readability.
-
 pending features:
 
-if config.toml doesnt exist at current dir, check on ~/.config/hana/config.toml, and then continue with the current logic; if this doesnt exist either, proceed as normal with defaults
-make a defaults config file instead of hard-coding defaults inside .zig files. if fails to read from config.toml, read from this defaults config.
-make mod+tab swap current focused window to master if it's a slave, and to slave if it's a master.
+code fibonacci.zig fibonacci for tiling layouts (just for the swag)
+make Mod+Shift+Space go through the different tiling layouts, but in reverse to Mod+Space.
+add a config option to explicitly whitelist or blacklist different tiling layouts; if nothing's specified, add all the present ones by default
+keep track of the focused window before the currently focused, make it so that Mod+Tab switches focus between both of them
+make mod+shift+tab swap current focused window to master if it's a slave, and to slave if it's a master.
+make it so that one window can belong to more than one workspace (tag-based window workspaces)
+make it so that if theres any duplicate keys, the program doesn't just crash, but it does both defined commands when this one bind is pressed, so that one can define multiple things for one single bind.
+
+make a new themes dir inside src/ where color themes will be defined as .toml files, and will simply be fused with config.toml when being parsed. we can make it so that we can still define colors in config.toml this way, but if not defined in config.toml, pull them from the theme, which we define similarly to how we define the custom tiling layout now. (theme = "xresources" # or something like this))
+make a color theme that pulls in the xresources colors and makes a theme with them.
+
+if config.toml doesnt exist at current dir, check on ~/.config/hana/config.toml, and then continue with the current logic; if that file doesnt exist either, proceed as normal with defaults.
+make a defaults config file instead of hard-coding defaults inside .zig files. if fails to read from config.toml, read from this "defaults.zig" file, which is like a replica of config.zig but with the default config, visual appearance and binds for the program.
+
 move input.zig inside a new input directory and separate out the keyboard from mouse code by moving all the mouse logic to a new file mouse.zig
 (give feedback first before implementation; i want to know if this is a good idea, or if it can be modified in any way) move files like toml.zig, xkbcommon.zig, tiling_types.zig and similar to a new categorized directory. the reasoning is that i feel like these files all have something in common, these are all sort of "libraries" for other files, im unsure how to group them together but i still think it makes logical sense to do so, im unsure about the name to group them with too but im sure theres a good name. would this be a good idea? or would it be better to leave as it is now?...
 
 BIG FEATURES (avoid for now)
-code floating.zig, make it also be defined as a layout from config.toml
-workspaces (tags); one window can be more than one workspace at a time
-code 8 for now, add binds to go to any of them and to send one window from one to another workspace
 bar (code some sort of bar) that contains the workspaces at the left side, a clock at the right, and the focused window's title in the middle
-make it so that colors are pulled in from xresources (possibly make a new themes dir filled with color themes? we can make it so that we can still define colors in config.toml, and these are honored first, but if not defined, pull in from a theme we also define in config.toml (theme = "xresources" # or something like this))
 make it so that mod+space swaps between layouts, and add a visual indicator to the right of the workspaces indicators for the different layouts
 make the different segments of the bar arrangeable and customizable from config
 make it so that window title shown in bar, if its too long and doesnt fit in the bar, that it scrolls continuously to the left. take for example templeOS by terry davis, it also has this same functionality.
@@ -29,7 +29,9 @@ add fibonacci layout (purely for the novelty)
 add a keybind to make layout be from vertical to horizontal (so master which would be at left is now at up and slaves are at the bottom half. be clever at programming this so that we don't have to write an entirely new layout just for this)
 some sort of window animations? though this is crazy work, do it at the very end
 
-if possible:
+general improvements:
+move all error and logging logic to error_handling.zig and logging.zig respectively
+write all "///" and "//!" comments for functions that aren't commented yet; comment anything else that might benefit from being commented (things that are terse or unobvious upon sight-reading). make sure to be brief in comments and not over-explain things, as overly long comments tend to be counter-productive for readability.
 abstract any potentially abstractable code by making functions that make it so that we don't repeat code logic as much as possible
 simplify any code by re-coding it in a more elegant way that makes it shorter code or more optimal
 increase wm's performance by optimizing its different processes (check out projects like tinywm or others, which accomplish an entire working wm so minimalistically that it is a super optimized experience; try to find any such optimizations on my large codebase)
