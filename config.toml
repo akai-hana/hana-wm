@@ -63,7 +63,7 @@ Mod+Shift+8 = "move_to_workspace_8"
 
 # Application launchers
 Mod+p = "rofi -show drun"
-Mod+a = "firefox"
+Mod+a = "sh MOZ_USE_XINPUT2=1 firefox"
 
 # Emergency/Debug
 Mod+Shift+d      = "dump_state"         # Print debug info
