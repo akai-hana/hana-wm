@@ -1,4 +1,4 @@
-// Minimal TOML parser - optimized for speed and low memory usage
+// Minimal custom TOML parser
 
 const std = @import("std");
 const builtin = @import("builtin");

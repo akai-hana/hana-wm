@@ -1,15 +1,12 @@
 in-the-works:
-#honor border colors from config (currently broken)
 #honor layout setting in config.toml (currently broken)
 #honor master count in config.toml (currently broken)
-
-#make mod+h and mod+l resize master by +/-5%
-#make mod+d bind kill whatever's the focused window
 
 move all error and logging logic to error_handling.zig and logging.zig respectively
 write all "///" and "//!" comments for functions that aren't commented yet; comment anything else that might benefit from being commented (things that are terse or unobvious upon sight-reading). make sure to be brief in comments and not over-explain things, as overly long comments tend to be counter-productive for readability.
 
 pending features:
+
 if config.toml doesnt exist at current dir, check on ~/.config/hana/config.toml, and then continue with the current logic; if this doesnt exist either, proceed as normal with defaults
 make a defaults config file instead of hard-coding defaults inside .zig files. if fails to read from config.toml, read from this defaults config.
 make mod+tab swap current focused window to master if it's a slave, and to slave if it's a master.

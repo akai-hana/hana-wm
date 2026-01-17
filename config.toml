@@ -6,19 +6,41 @@ Mod = "Super"
 
 # Window management
 Mod+Return = "ghostty"
-Mod+d = "kill"                    # Kill focused window (ACTION KEYWORD)
-Mod+Shift+q = "close"             # Also kills focused window (ACTION KEYWORD)
-Mod+Shift+r = "reload"            # Reload config (ACTION KEYWORD)
+Mod+d = "kill"         # Kill focused window
+Mod+Shift+q = "close"  # Also kills focused window
+Mod+Shift+r = "reload" # Reload config
 
-# Tiling layout controls (ALL ACTION KEYWORDS - NOT SHELL COMMANDS!)
-Mod+space = "toggle_layout"       # Cycle through layouts
-Mod+h = "decrease_master"         # Decrease master width by 5%
-Mod+l = "increase_master"         # Increase master width by 5%
-Mod+comma = "increase_master_count"   # More windows in master
-Mod+period = "decrease_master_count"  # Fewer windows in master
-Mod+Shift+space = "toggle_tiling" # Enable/disable tiling
+# Tiling layout controls
+Mod+space = "toggle_layout"          # Cycle through layouts
+Mod+h = "decrease_master"            # Decrease master width by 5%
+Mod+l = "increase_master"            # Increase master width by 5%
+Mod+comma = "increase_master_count"  # More windows in master
+Mod+period = "decrease_master_count" # Fewer windows in master
+Mod+Shift+space = "toggle_tiling"    # Enable/disable tiling
 
-# Application launchers (these ARE shell commands - anything not a keyword)
+# Workspace switching (1-9)
+Mod+1 = "workspace_1"
+Mod+2 = "workspace_2"
+Mod+3 = "workspace_3"
+Mod+4 = "workspace_4"
+Mod+5 = "workspace_5"
+Mod+6 = "workspace_6"
+Mod+7 = "workspace_7"
+Mod+8 = "workspace_8"
+Mod+9 = "workspace_9"
+
+# Move window to workspace
+Mod+Shift+1 = "move_to_workspace_1"
+Mod+Shift+2 = "move_to_workspace_2"
+Mod+Shift+3 = "move_to_workspace_3"
+Mod+Shift+4 = "move_to_workspace_4"
+Mod+Shift+5 = "move_to_workspace_5"
+Mod+Shift+6 = "move_to_workspace_6"
+Mod+Shift+7 = "move_to_workspace_7"
+Mod+Shift+8 = "move_to_workspace_8"
+Mod+Shift+9 = "move_to_workspace_9"
+
+# Application launchers
 Mod+p = "rofi -show drun"
 Mod+Shift+d = "dmenu_run"
 Mod+b = "firefox"
@@ -36,12 +58,16 @@ master_count = 1
 # Master area width as percentage (5-95)
 master_width_factor = 55
 
-# Gap between windows in pixels
-gaps = 10
+# Gaps between windows (in pixels)
+gaps = 8
 
-# Border width in pixels
-border_width = 2
+# Border width (in pixels)
+border_width = 4
 
 # Border colors in hex (with or without # or 0x prefix)
 border_focused = 0x5294E2
 border_normal = 0x383C4A
+
+[workspaces]
+# Number of workspaces (1-20)
+count = 9
