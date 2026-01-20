@@ -1,13 +1,10 @@
 //! Core utilities - unified XCB operations, geometry, and common functions
 const std = @import("std");
 const xcb = @import("defs").xcb;
-
-// CONSTANTS
+const defs = @import("defs");
 
 pub const MIN_WINDOW_DIM: u16 = 50;
 pub const MAX_WINDOW_DIM: u16 = 65535;
-
-// GEOMETRY
 
 pub const Rect = struct {
     x: i16,
@@ -16,12 +13,7 @@ pub const Rect = struct {
     height: u16,
 
     pub fn fromXcb(geom: *const xcb.xcb_get_geometry_reply_t) Rect {
-        return .{
-            .x = geom.x,
-            .y = geom.y,
-            .width = geom.width,
-            .height = geom.height,
-        };
+        return .{ .x = geom.x, .y = geom.y, .width = geom.width, .height = geom.height };
     }
 
     pub fn clamp(self: Rect) Rect {
@@ -59,31 +51,15 @@ pub fn calcGridDims(n: usize) struct { cols: u16, rows: u16 } {
     return .{ .cols = cols, .rows = @intCast((n + cols - 1) / cols) };
 }
 
-pub fn calcColumnLayout(
-    total_h: u16,
-    count: u16,
-    margins: Margins,
-) struct { item_h: u16, spacing: u16 } {
+pub fn calcColumnLayout(total_h: u16, count: u16, margins: Margins) struct { item_h: u16, spacing: u16 } {
     if (count == 0) return .{ .item_h = 0, .spacing = 0 };
 
-    // CRITICAL FIX: For n windows, we need (n+1) gaps: top, bottom, and (n-1) in between
-    const gaps = @as(u32, margins.gap) * (count + 1);
-    const borders = @as(u32, margins.border) * 2 * count;
-    const overhead = gaps + borders;
+    const overhead = margins.gap * (count + 1) + margins.border * 2 * count;
+    const available = if (total_h > overhead) total_h - overhead else count * MIN_WINDOW_DIM;
+    const item_h = @max(MIN_WINDOW_DIM, available / count);
 
-    const available = if (total_h > overhead)
-        @as(u32, total_h) - overhead
-    else
-        @as(u32, count) * MIN_WINDOW_DIM;
-
-    const item_h = @max(MIN_WINDOW_DIM, @as(u16, @intCast(available / count)));
-    return .{
-        .item_h = item_h,
-        .spacing = item_h + 2 * margins.border + margins.gap,
-    };
+    return .{ .item_h = item_h, .spacing = item_h + 2 * margins.border + margins.gap };
 }
-
-// XCB OPERATIONS
 
 pub const WindowAttrs = struct {
     x: ?i16 = null,
@@ -100,7 +76,6 @@ pub const WindowAttrs = struct {
         var values: [5]u32 = undefined;
         var idx: usize = 0;
 
-        // CRITICAL FIX: Manually handle each field instead of using comptime string manipulation
         if (self.x) |val| {
             mask |= xcb.XCB_CONFIG_WINDOW_X;
             values[idx] = @bitCast(@as(i32, val));
@@ -126,7 +101,6 @@ pub const WindowAttrs = struct {
             values[idx] = val;
             idx += 1;
         }
-
         if (self.stack_mode) |sm| {
             mask |= xcb.XCB_CONFIG_WINDOW_STACK_MODE;
             values[idx] = sm;
@@ -144,19 +118,8 @@ pub const WindowAttrs = struct {
 
 pub fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect) void {
     const r = rect.clamp();
-    const attrs = WindowAttrs{
-        .x = r.x,
-        .y = r.y,
-        .width = r.width,
-        .height = r.height,
-    };
+    const attrs = WindowAttrs{ .x = r.x, .y = r.y, .width = r.width, .height = r.height };
     attrs.configure(conn, win);
-    
-    // CRITICAL: Check for connection errors after configure
-    const err_code = xcb.xcb_connection_has_error(conn);
-    if (err_code != 0) {
-        std.log.err("[XCB] Connection error {} during configure", .{err_code});
-    }
 }
 
 pub fn getGeometry(conn: *xcb.xcb_connection_t, win: u32) ?Rect {
@@ -192,8 +155,6 @@ pub inline fn flush(conn: *xcb.xcb_connection_t) void {
     _ = xcb.xcb_flush(conn);
 }
 
-// WINDOW PROPERTIES
-
 pub const WMClass = struct {
     instance: []const u8,
     class: []const u8,
@@ -204,11 +165,7 @@ pub const WMClass = struct {
     }
 };
 
-pub fn getWMClass(
-    conn: *xcb.xcb_connection_t,
-    win: u32,
-    allocator: std.mem.Allocator,
-) ?WMClass {
+pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allocator) ?WMClass {
     const wm_class_atom = blk: {
         const cookie = xcb.xcb_intern_atom(conn, 0, 8, "WM_CLASS");
         const reply = xcb.xcb_intern_atom_reply(conn, cookie, null) orelse return null;
@@ -220,7 +177,6 @@ pub fn getWMClass(
     const reply = xcb.xcb_get_property_reply(conn, cookie, null) orelse return null;
     defer std.c.free(reply);
 
-    // CRITICAL FIX: Add dereference operator for C pointer
     if (reply.*.value_len == 0) return null;
 
     const data: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
@@ -242,12 +198,12 @@ pub fn getWMClass(
     };
 }
 
-// HELPERS
-
 pub inline fn clampU16(val: anytype, min: u16, max: u16) u16 {
     return @min(max, @max(min, @as(u16, @intCast(val))));
 }
 
-pub inline fn normalizeModifiers(state: u16) u16 {
-    return @intCast(state & @import("defs").MOD_MASK_RELEVANT);
+/// Normalize modifier state by masking out lock keys (CapsLock, NumLock)
+/// to ensure consistent keybinding matching regardless of lock state
+pub fn normalizeModifiers(state: u16) u16 {
+    return state & defs.MOD_MASK_RELEVANT;
 }

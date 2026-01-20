@@ -6,7 +6,6 @@
 
 const std = @import("std");
 const defs = @import("defs");
-const builtin = @import("builtin");
 const log = @import("logging");
 const xcb = defs.xcb;
 const WM = defs.WM;
@@ -19,9 +18,7 @@ pub fn tile(wm: *WM, state: *TilingState, windows: []const u32, screen_w: u16, s
     const gap = state.gaps;
     const bw = state.border_width;
 
-    if (builtin.mode == .Debug) {
-        log.debugLayoutTilingSimple("monocle", windows.len);
-    }
+    log.debugLayoutTilingSimple("monocle", windows.len);
 
     // Calculate fullscreen size accounting for gaps and borders
     const w = if (screen_w > 2 * gap + 2 * bw)
@@ -39,6 +36,5 @@ pub fn tile(wm: *WM, state: *TilingState, windows: []const u32, screen_w: u16, s
     }
 
     // Ensure last window (most recent) is on top
-    _ = xcb.xcb_configure_window(wm.conn, windows[windows.len - 1],
-        xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+    _ = xcb.xcb_configure_window(wm.conn, windows[windows.len - 1], xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 }

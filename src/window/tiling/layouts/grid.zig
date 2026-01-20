@@ -1,4 +1,4 @@
-// === grid.zig ===
+// grid.zig
 //! Grid layout - windows arranged in a square grid.
 //!
 //! Windows are arranged in rows and columns to form an approximately
@@ -12,7 +12,6 @@
 
 const std = @import("std");
 const defs = @import("defs");
-const builtin = @import("builtin");
 const log = @import("logging");
 const WM = defs.WM;
 const types = @import("types");
@@ -37,9 +36,7 @@ pub fn tile(wm: *WM, state: *TilingState, windows: []const u32, screen_w: u16, s
     std.debug.assert(cols > 0);
     std.debug.assert(rows > 0);
 
-    if (builtin.mode == .Debug) {
-        log.debugLayoutTiling("grid", n, cols, rows);
-    }
+    log.debugLayoutTiling("grid", n, cols, rows);
 
     // Calculate cell size accounting for gaps between cells
     // Layout: gap + cell + gap + cell + ... + gap
