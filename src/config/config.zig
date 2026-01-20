@@ -3,10 +3,9 @@ const std = @import("std");
 const defs = @import("defs");
 const parser = @import("parser");
 const xkb = @import("xkbcommon");
+const log = @import("logging");
 
-// ============================================================================
 // VALIDATION HELPERS
-// ============================================================================
 
 fn inRange(comptime T: type, val: T, min: T, max: T) bool {
     return val >= min and val <= max;
@@ -57,13 +56,13 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator) !defs.Config {
 
     const local = try std.fs.path.join(allocator, &.{ cwd, "config.toml" });
     defer allocator.free(local);
-    
+
     if (loadConfig(allocator, local)) |config| {
         return config;
     } else |_| {
         // Fallback to XDG config
         const home = if (std.c.getenv("HOME")) |h| std.mem.span(h) else ".";
-        const config_home = if (std.c.getenv("XDG_CONFIG_HOME")) |ch| 
+        const config_home = if (std.c.getenv("XDG_CONFIG_HOME")) |ch|
             std.mem.span(ch)
         else
             try std.fmt.allocPrint(allocator, "{s}/.config", .{home});
@@ -71,7 +70,7 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator) !defs.Config {
 
         const xdg_path = try std.fs.path.join(allocator, &.{ config_home, "hana", "config.toml" });
         defer allocator.free(xdg_path);
-        
+
         return loadConfig(allocator, xdg_path);
     }
 }
@@ -80,10 +79,10 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
     // Use POSIX APIs directly - read file into buffer
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
-    
+
     const fd = std.posix.open(path_z, .{ .ACCMODE = .RDONLY }, 0) catch |err| {
         if (err == error.FileNotFound) {
-            std.log.info("[config] Not found: {s}, using defaults", .{path});
+            log.configNotFound(path);
             return getDefaultConfig();
         }
         return err;
@@ -94,7 +93,7 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
     var content = std.ArrayList(u8){};
     try content.ensureTotalCapacity(allocator, 4096);
     defer content.deinit(allocator);
-    
+
     var buf: [4096]u8 = undefined;
     while (true) {
         const bytes_read = try std.posix.read(fd, &buf);
@@ -113,7 +112,7 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
     try parseRules(allocator, &doc, &config);
     try validateConfig(allocator, &config);
 
-    std.log.info("[config] Loaded: {s}", .{path});
+    log.configLoaded(path);
     return config;
 }
 
@@ -121,9 +120,7 @@ fn getDefaultConfig() defs.Config {
     return .{};
 }
 
-// ============================================================================
 // KEYBINDINGS
-// ============================================================================
 
 const MOD_MAP = std.StaticStringMap(u16).initComptime(.{
     .{ "Super", defs.MOD_SUPER },
@@ -243,9 +240,7 @@ pub fn resolveKeybindings(keybindings: anytype, xkb_state: *xkb.XkbState) void {
     }
 }
 
-// ============================================================================
 // TILING CONFIG
-// ============================================================================
 
 fn parseTiling(doc: *const parser.Document, config: *defs.Config) void {
     const section = doc.getSection("tiling") orelse return;
@@ -253,30 +248,38 @@ fn parseTiling(doc: *const parser.Document, config: *defs.Config) void {
     config.tiling.enabled = get(bool, section, "enabled", true, null);
     config.tiling.layout = get([]const u8, section, "layout", "master_left", null);
     config.tiling.master_count = get(usize, section, "master_count", 1, struct {
-        fn v(n: usize) bool { return n >= 1; }
+        fn v(n: usize) bool {
+            return n >= 1;
+        }
     }.v);
     config.tiling.master_width_factor = get(f32, section, "master_width_factor", 50.0, struct {
-        fn v(n: f32) bool { return inRange(f32, n, 0.05, 0.95); }
+        fn v(n: f32) bool {
+            return inRange(f32, n, 0.05, 0.95);
+        }
     }.v);
     config.tiling.gaps = get(u16, section, "gaps", 10, struct {
-        fn v(n: u16) bool { return n <= 200; }
+        fn v(n: u16) bool {
+            return n <= 200;
+        }
     }.v);
     config.tiling.border_width = get(u16, section, "border_width", 2, struct {
-        fn v(n: u16) bool { return n <= 100; }
+        fn v(n: u16) bool {
+            return n <= 100;
+        }
     }.v);
     config.tiling.border_focused = get(u32, section, "border_focused", 0x5294E2, isValidColor);
     config.tiling.border_normal = get(u32, section, "border_normal", 0x383C4A, isValidColor);
 }
 
-// ============================================================================
 // WORKSPACES CONFIG
-// ============================================================================
 
 fn parseWorkspaces(doc: *const parser.Document, config: *defs.Config) void {
     const section = doc.getSection("workspaces") orelse return;
 
     config.workspaces.count = get(usize, section, "count", 9, struct {
-        fn v(n: usize) bool { return inRange(usize, n, 1, 20); }
+        fn v(n: usize) bool {
+            return inRange(usize, n, 1, 20);
+        }
     }.v);
 }
 
@@ -321,9 +324,7 @@ fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, config:
     }
 }
 
-// ============================================================================
 // VALIDATION
-// ============================================================================
 
 fn validateConfig(allocator: std.mem.Allocator, config: *const defs.Config) !void {
     if (config.keybindings.items.len < 2) return;

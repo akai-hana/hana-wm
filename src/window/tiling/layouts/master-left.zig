@@ -14,7 +14,6 @@
 
 const std = @import("std");
 const defs = @import("defs");
-const builtin = @import("builtin");
 const log = @import("logging");
 const WM = defs.WM;
 const types = @import("types");
@@ -53,13 +52,11 @@ pub fn tile(wm: *WM, state: *TilingState, windows: []const u32, screen_w: u16, s
     const m_count: u16 = @intCast(@min(state.master_count, n));
     const s_count: u16 = @intCast(if (n > m_count) n - m_count else 0);
 
-    if (builtin.mode == .Debug) {
-        log.debugLayoutMasterLeft(n, state.master_count, m_count, s_count, screen_w);
-    }
+    log.debugLayoutMasterLeft(n, state.master_count, m_count, s_count, screen_w);
 
     // Calculate column widths
     const master_width: u16 = if (s_count == 0)
-        screen_w  // No stack, master takes full width
+        screen_w // No stack, master takes full width
     else
         @intFromFloat(@as(f32, @floatFromInt(screen_w)) * state.master_width_factor);
 
@@ -77,9 +74,9 @@ pub fn tile(wm: *WM, state: *TilingState, windows: []const u32, screen_w: u16, s
         var h: u16 = undefined;
 
         if (idx < m_count) {
-            // === Master Area ===
+            // Master Area
             const row: u16 = @intCast(idx);
-            x = gap;  // Gap from left edge
+            x = gap; // Gap from left edge
             y = @intCast(gap + row * (master_dims.win_h + 2 * bw + gap));
             // Width: master area minus gaps on both sides and borders
             w = if (master_width > 2 * gap + 2 * bw)
@@ -90,10 +87,10 @@ pub fn tile(wm: *WM, state: *TilingState, windows: []const u32, screen_w: u16, s
             w = @max(MIN_WINDOW_DIM, w);
             h = master_dims.win_h;
         } else {
-            // === Stack Area ===
+            // Stack Area
             const row: u16 = @intCast(idx - m_count);
             const stack_width = screen_w - master_width;
-            x = master_width;  // Starts where master ends (no gap between)
+            x = master_width; // Starts where master ends (no gap between)
             y = @intCast(gap + row * (stack_dims.win_h + 2 * bw + gap));
             // Width: stack area minus gap on right and borders
             w = if (stack_width > gap + 2 * bw)
@@ -107,8 +104,6 @@ pub fn tile(wm: *WM, state: *TilingState, windows: []const u32, screen_w: u16, s
 
         types.configureWindow(wm, win, x, y, w, h);
 
-        if (builtin.mode == .Debug) {
-            log.debugLayoutWindowGeometry(idx, x, y, w, h, idx < m_count);
-        }
+        log.debugLayoutWindowGeometry(idx, x, y, w, h, idx < m_count);
     }
 }

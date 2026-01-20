@@ -7,7 +7,7 @@
 //! - Retry logic for race conditions during X server startup
 
 const std = @import("std");
-const builtin = @import("builtin");
+const log = @import("logging");
 
 pub const xkb = @cImport({
     @cInclude("xkbcommon/xkbcommon.h");
@@ -49,9 +49,7 @@ pub const XkbState = struct {
 
     /// Initialize XKB state with retry logic for X server race conditions
     pub fn init(xcb_conn: *anyopaque) !XkbState {
-        if (builtin.mode == .Debug) {
-            std.log.debug("[xkb] Initializing XKB", .{});
-        }
+        log.xkbInitializing();
 
         // Create XKB context
         const ctx = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS) orelse
@@ -64,10 +62,8 @@ pub const XkbState = struct {
         // Get keyboard device ID
         const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
         if (device_id == -1) return error.XkbNoKeyboard;
-        
-        if (builtin.mode == .Debug) {
-            std.log.debug("[xkb] Device ID: {}", .{device_id});
-        }
+
+        log.xkbDeviceId(device_id);
 
         // Create and verify keymap (with retry)
         const keymap = try retryKeymap(ctx, xcb_conn, device_id);
@@ -76,10 +72,8 @@ pub const XkbState = struct {
         // Create state from keymap
         const state = xkb.xkb_state_new(keymap) orelse return error.XkbStateFailed;
 
-        if (builtin.mode == .Debug) {
-            std.log.debug("[xkb] Initialization complete", .{});
-        }
-        
+        log.xkbInitComplete();
+
         return XkbState{
             .context = ctx,
             .keymap = keymap,
@@ -108,10 +102,8 @@ pub const XkbState = struct {
                 return keycode;
             }
         }
-        
-        if (builtin.mode == .Debug) {
-            std.log.warn("[xkb] Keycode not found for keysym: 0x{x}", .{keysym});
-        }
+
+        log.xkbKeycodeNotFound(keysym);
         return null;
     }
 };
@@ -126,7 +118,10 @@ fn retrySetup(xcb_conn: *anyopaque) !void {
             xkb.XKB_X11_MIN_MAJOR_XKB_VERSION,
             xkb.XKB_X11_MIN_MINOR_XKB_VERSION,
             xkb.XKB_X11_SETUP_XKB_EXTENSION_NO_FLAGS,
-            null, null, null, null
+            null,
+            null,
+            null,
+            null,
         );
 
         if (result != 0) return;
@@ -145,7 +140,10 @@ fn retryKeymap(ctx: *xkb_context, xcb_conn: *anyopaque, device_id: i32) !*xkb_ke
 
     while (attempts < MAX_RETRIES) : (attempts += 1) {
         const km = xkb.xkb_x11_keymap_new_from_device(
-            ctx, @ptrCast(xcb_conn), device_id, xkb.XKB_KEYMAP_COMPILE_NO_FLAGS
+            ctx,
+            @ptrCast(xcb_conn),
+            device_id,
+            xkb.XKB_KEYMAP_COMPILE_NO_FLAGS,
         ) orelse {
             if (attempts + 1 < MAX_RETRIES) {
                 std.posix.nanosleep(0, RETRY_DELAY_MS * std.time.ns_per_ms);

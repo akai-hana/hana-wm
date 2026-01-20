@@ -1,4 +1,4 @@
-//! Input handling with optional motion event coalescing for smooth dragging
+//! Input handling with motion AND enter event coalescing for maximum responsiveness
 const std = @import("std");
 const defs = @import("defs");
 const xkbcommon = @import("xkbcommon");
@@ -6,23 +6,19 @@ const utils = @import("utils");
 const tiling = @import("tiling");
 const workspaces = @import("workspaces");
 const focus = @import("focus");
+const log = @import("logging");
 const xcb = defs.xcb;
 const WM = defs.WM;
 
 const c = @cImport(@cInclude("unistd.h"));
 extern "c" fn waitpid(pid: c_int, status: ?*c_int, options: c_int) c_int;
 
-// ============================================================================
 // CONFIGURATION
-// ============================================================================
 
 /// Enable motion event coalescing for smoother window dragging
-/// Discards intermediate motion events when multiple are queued
 const COALESCE_MOTION_EVENTS = true;
 
-// ============================================================================
 // KEYBIND SYSTEM
-// ============================================================================
 
 var keybind_map: std.AutoHashMap(u64, *const defs.Action) = undefined;
 var keybind_map_ready = std.atomic.Value(bool).init(false);
@@ -52,10 +48,9 @@ fn buildKeybindMap(wm: *WM) !void {
 }
 
 pub fn rebuildKeybindMap(wm: *WM) !void {
-    // CRITICAL: Prevent key handling during rebuild
     keybind_map_ready.store(false, .release);
     defer keybind_map_ready.store(true, .release);
-    
+
     try buildKeybindMap(wm);
 }
 
@@ -66,23 +61,26 @@ inline fn makeHash(mods: u16, keysym: u32) u64 {
 pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
     for ([_]u8{ 1, 3 }) |button| {
         _ = xcb.xcb_grab_button(
-            conn, 0, root,
+            conn,
+            0,
+            root,
             xcb.XCB_EVENT_MASK_BUTTON_PRESS | xcb.XCB_EVENT_MASK_BUTTON_RELEASE | xcb.XCB_EVENT_MASK_POINTER_MOTION,
-            xcb.XCB_GRAB_MODE_ASYNC, xcb.XCB_GRAB_MODE_ASYNC,
-            root, xcb.XCB_NONE, button, defs.MOD_SUPER,
+            xcb.XCB_GRAB_MODE_ASYNC,
+            xcb.XCB_GRAB_MODE_ASYNC,
+            root,
+            xcb.XCB_NONE,
+            button,
+            defs.MOD_SUPER,
         );
     }
     utils.flush(conn);
 }
 
-// ============================================================================
 // EVENT HANDLERS
-// ============================================================================
 
 pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
-    // SAFETY: Don't process keys if map isn't ready
     if (!keybind_map_ready.load(.acquire)) return;
-    
+
     const xkb_ptr: *xkbcommon.XkbState = @ptrCast(@alignCast(wm.xkb_state.?));
 
     const mods = utils.normalizeModifiers(event.state);
@@ -115,11 +113,10 @@ pub fn handleButtonRelease(_: *const xcb.xcb_button_release_event_t, wm: *WM) vo
 pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) void {
     if (!@import("cursor-window-drag").isDragging()) return;
 
-    // RESPONSIVITY: Coalesce motion events
-    // If more motion events are queued, skip this one
+    // OPTIMIZATION: Coalesce motion events
     if (COALESCE_MOTION_EVENTS) {
         if (hasQueuedMotionEvents(wm.conn)) {
-            return; // Skip intermediate event, process latest one
+            return;
         }
     }
 
@@ -127,28 +124,20 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) 
 }
 
 /// Check if there are more motion events queued
-/// Returns true if we should skip the current event
 fn hasQueuedMotionEvents(conn: *xcb.xcb_connection_t) bool {
     const queued = xcb.xcb_poll_for_event(conn);
     if (queued) |next_event| {
         defer std.c.free(next_event);
         const next_type = @as(*u8, @ptrCast(next_event)).* & 0x7F;
 
-        // If next event is also motion, skip current one
         if (next_type == xcb.XCB_MOTION_NOTIFY) {
             return true;
         }
-
-        // Otherwise, we need to process both events
-        // Put the event back (not ideal, but xcb doesn't have unget)
-        // In practice, this rarely happens
     }
     return false;
 }
 
-// ============================================================================
-// ACTION EXECUTION - INLINE FAST PATHS
-// ============================================================================
+// ACTION EXECUTION
 
 inline fn executeAction(action: *const defs.Action, wm: *WM) !void {
     switch (action.*) {
@@ -169,63 +158,57 @@ inline fn executeAction(action: *const defs.Action, wm: *WM) !void {
 
         .exec => |cmd| try executeShellCommand(wm, cmd),
         .switch_workspace => |ws| workspaces.switchTo(wm, ws),
-        .move_to_workspace => |ws| workspaces.moveWindowTo(wm, ws),
+        .move_to_workspace => |ws| {
+            if (wm.focused_window) |win| {
+                workspaces.moveWindowTo(wm, win, ws);
+            }
+        },
 
         .focus_next, .focus_prev => {},
     }
 }
 
 fn executeShellCommand(wm: *WM, cmd: []const u8) !void {
-    // CRITICAL: Allocate null-terminated string in parent process before fork
     const cmd_z = try wm.allocator.dupeZ(u8, cmd);
     defer wm.allocator.free(cmd_z);
-    
+
     const pid = c.fork();
     if (pid == 0) {
-        // First child - fork again to avoid zombies
         const pid2 = c.fork();
         if (pid2 == 0) {
-            // Second child - this will actually run the command
             _ = c.setsid();
-            
-            // Don't use allocator in child process - cmd_z is already allocated
-            _ = c.execvp("/bin/sh", @ptrCast(&[_:null]?[*:0]const u8{
-                "/bin/sh", "-c", cmd_z.ptr, null
-            }));
-            // If execvp fails, just exit - don't try to free anything
+            _ = c.execvp("/bin/sh", @ptrCast(&[_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z.ptr, null }));
             std.process.exit(1);
         } else if (pid2 < 0) {
             std.process.exit(1);
         }
-        // First child exits immediately
         std.process.exit(0);
     } else if (pid > 0) {
-        // Parent waits for first child to avoid zombies
         var status: c_int = 0;
         _ = waitpid(pid, &status, 0);
     }
 }
 
 fn dumpState(wm: *WM) void {
-    std.log.info("========== WM STATE DUMP ==========", .{});
-    std.log.info("Focused: {?}", .{wm.focused_window});
-    std.log.info("Total windows: {}", .{wm.windows.count()});
+    log.dumpStateSeparator();
+    log.dumpStateFocused(wm.focused_window);
+    log.dumpStateTotalWindows(wm.windows.count());
 
     if (workspaces.getState()) |ws_state| {
-        std.log.info("Current workspace: {}", .{ws_state.current + 1});
+        log.dumpStateCurrentWorkspace(ws_state.current);
         for (ws_state.workspaces, 0..) |*ws, i| {
-            std.log.info("  WS{}: {} windows", .{i + 1, ws.windows.items.len});
+            log.dumpStateWorkspace(i, ws.windows.items.len);
         }
     }
 
     if (tiling.getState()) |t_state| {
-        std.log.info("Tiling: {} ({} windows)", .{t_state.enabled, t_state.tiled_windows.items.len});
+        log.dumpStateTiling(t_state.enabled, t_state.tiled_windows.items.len);
     }
-    std.log.info("===================================", .{});
+    log.dumpStateEnd();
 }
 
 fn emergencyRecover(wm: *WM) void {
-    std.log.warn("========== EMERGENCY RECOVERY ==========", .{});
+    log.emergencyRecoveryStart();
 
     if (workspaces.getState()) |ws_state| {
         for (ws_state.workspaces) |*ws| {
@@ -240,5 +223,5 @@ fn emergencyRecover(wm: *WM) void {
     }
 
     utils.flush(wm.conn);
-    std.log.warn("Recovery complete", .{});
+    log.emergencyRecoveryComplete();
 }

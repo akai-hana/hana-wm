@@ -6,7 +6,6 @@ const WM = defs.WM;
 const utils = @import("utils");
 const tiling = @import("tiling");
 const focus = @import("focus");
-const builtin = @import("builtin");
 
 pub const Workspace = struct {
     id: usize,
@@ -76,16 +75,6 @@ pub fn deinit(wm: *WM) void {
 pub fn addWindowToCurrentWorkspace(_: *WM, win: u32) void {
     const s = state orelse return;
     const ws = &s.workspaces[s.current];
-    
-    if (ws.contains(win)) return;
-    ws.windows.append(s.allocator, win) catch return;
-}
-
-pub fn addWindowToWorkspace(_: *WM, win: u32, ws_id: usize) void {
-    const s = state orelse return;
-    if (ws_id >= s.workspaces.len) return;
-    
-    const ws = &s.workspaces[ws_id];
     if (ws.contains(win)) return;
     ws.windows.append(s.allocator, win) catch return;
 }
@@ -97,50 +86,48 @@ pub fn removeWindow(win: u32) void {
     }
 }
 
-/// Move window from current workspace to another (for async rule application)
-pub fn moveWindowToWorkspace(wm: *WM, win: u32, target_ws: usize) void {
+/// Move window to workspace (handles both current and async moves)
+pub fn moveWindowTo(wm: *WM, win: u32, target_ws: usize) void {
     const s = state orelse return;
-    if (target_ws >= s.workspaces.len) return;
+    if (target_ws >= s.workspaces.len or target_ws == s.current) return;
+
+    const is_focused = wm.focused_window == win;
     
-    const current_ws = &s.workspaces[s.current];
-    const target = &s.workspaces[target_ws];
-    
-    // Remove from current
-    if (!current_ws.remove(win)) return;
+    // Remove from all workspaces
+    for (s.workspaces) |*ws| _ = ws.remove(win);
     
     // Add to target
-    target.windows.append(s.allocator, win) catch return;
+    s.workspaces[target_ws].windows.append(s.allocator, win) catch return;
     
-    // Unmap since moving to different workspace
-    _ = xcb.xcb_unmap_window(wm.conn, win);
+    // Only handle focus if it was the focused window
+    if (is_focused) {
+        _ = xcb.xcb_unmap_window(wm.conn, win);
+        if (s.workspaces[s.current].windows.items.len > 0) {
+            focus.setFocus(wm, s.workspaces[s.current].windows.items[0], .window_destroyed);
+        } else {
+            focus.clearFocus(wm);
+        }
+    }
+    
+    focus.markLayoutOperation();
     utils.flush(wm.conn);
-    
-    // Update tiling state
     tiling.retileCurrentWorkspace(wm);
 }
 
-// ============================================================================
-// WORKSPACE SWITCHING - BATCHED FOR RESPONSIVITY
-// ============================================================================
-
 pub fn switchTo(wm: *WM, ws_id: usize) void {
     const s = state orelse return;
-    
     if (ws_id >= s.workspaces.len or ws_id == s.current) return;
 
     const old_ws = &s.workspaces[s.current];
     const new_ws = &s.workspaces[ws_id];
 
-    // Batch unmap old windows - appears as atomic operation
     utils.batchUnmap(wm.conn, old_ws.windows.items);
-    
     s.current = ws_id;
-
-    // Batch map new windows - appears as atomic operation
     utils.batchMap(wm.conn, new_ws.windows.items);
+
+    focus.markLayoutOperation();
     utils.flush(wm.conn);
 
-    // Handle tiling in one operation
     if (wm.config.tiling.enabled) {
         for (new_ws.windows.items) |win| {
             tiling.notifyWindowMapped(wm, win);
@@ -148,42 +135,12 @@ pub fn switchTo(wm: *WM, ws_id: usize) void {
         tiling.retileCurrentWorkspace(wm);
     }
 
-    // Focus first window
     if (new_ws.windows.items.len > 0) {
         focus.setFocus(wm, new_ws.windows.items[0], .workspace_switch);
     } else {
         focus.clearFocus(wm);
     }
 }
-
-pub fn moveWindowTo(wm: *WM, target_ws: usize) void {
-    const s = state orelse return;
-    const focused = wm.focused_window orelse return;
-    
-    if (target_ws >= s.workspaces.len or target_ws == s.current) return;
-
-    const current_ws = &s.workspaces[s.current];
-    const target = &s.workspaces[target_ws];
-
-    if (!current_ws.remove(focused)) return;
-    
-    target.windows.append(s.allocator, focused) catch return;
-    
-    _ = xcb.xcb_unmap_window(wm.conn, focused);
-
-    if (current_ws.windows.items.len > 0) {
-        focus.setFocus(wm, current_ws.windows.items[0], .window_destroyed);
-    } else {
-        focus.clearFocus(wm);
-    }
-
-    utils.flush(wm.conn);
-    tiling.retileCurrentWorkspace(wm);
-}
-
-// ============================================================================
-// QUERY FUNCTIONS - ZERO-COPY
-// ============================================================================
 
 pub fn getCurrentWindowsView() ?[]const u32 {
     const s = state orelse return null;
