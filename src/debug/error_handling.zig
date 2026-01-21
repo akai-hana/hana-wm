@@ -1,9 +1,9 @@
 // Error handling and reporting utilities
-const std = @import("std");
-const defs = @import("defs");
+const std    = @import("std");
+const defs   = @import("defs");
 const colors = @import("colors");
 const Config = defs.Config;
-const xcb = defs.xcb;
+const xcb    = defs.xcb;
 
 // CONFIG ERROR HANDLING
 

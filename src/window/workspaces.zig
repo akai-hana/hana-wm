@@ -1,4 +1,5 @@
-//! Workspace management optimized for responsivity
+//! Virtual desktop management.
+
 const std = @import("std");
 const defs = @import("defs");
 const xcb = defs.xcb;
@@ -86,20 +87,16 @@ pub fn removeWindow(win: u32) void {
     }
 }
 
-/// Move window to workspace (handles both current and async moves)
 pub fn moveWindowTo(wm: *WM, win: u32, target_ws: usize) void {
     const s = state orelse return;
     if (target_ws >= s.workspaces.len or target_ws == s.current) return;
 
     const is_focused = wm.focused_window == win;
-    
-    // Remove from all workspaces
+
     for (s.workspaces) |*ws| _ = ws.remove(win);
-    
-    // Add to target
+
     s.workspaces[target_ws].windows.append(s.allocator, win) catch return;
-    
-    // Only handle focus if it was the focused window
+
     if (is_focused) {
         _ = xcb.xcb_unmap_window(wm.conn, win);
         if (s.workspaces[s.current].windows.items.len > 0) {
@@ -108,7 +105,7 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: usize) void {
             focus.clearFocus(wm);
         }
     }
-    
+
     focus.markLayoutOperation();
     utils.flush(wm.conn);
     tiling.retileCurrentWorkspace(wm);

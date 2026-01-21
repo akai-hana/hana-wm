@@ -1,4 +1,5 @@
-//! Centralized focus management with protection against focus stealing during layout
+//! Centralized focus management with layout operation protection.
+
 const std = @import("std");
 const defs = @import("defs");
 const tiling = @import("tiling");
@@ -46,6 +47,7 @@ pub fn clearFocus(wm: *WM) void {
     }
 }
 
+/// Check if mouse focus should be suppressed (during layout operations)
 pub fn shouldSuppressMouseFocus() bool {
     if (layout_timer) |*timer| {
         const elapsed = timer.read();
@@ -58,11 +60,11 @@ pub fn shouldSuppressMouseFocus() bool {
     return false;
 }
 
+/// Mark start of layout operation (enables focus protection)
 pub fn markLayoutOperation() void {
     layout_timer = std.time.Timer.start() catch {
         layout_timer = null;
         return;
     };
-
     log.focusLayoutMarked();
 }

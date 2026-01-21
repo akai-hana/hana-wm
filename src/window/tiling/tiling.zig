@@ -1,4 +1,5 @@
-//! Tiling system optimized for maximum responsivity
+//! Core tiling system implementation.
+
 const std = @import("std");
 const defs = @import("defs");
 const xcb = defs.xcb;
@@ -6,7 +7,11 @@ const WM = defs.WM;
 const utils = @import("utils");
 const workspaces = @import("workspaces");
 const focus = @import("focus");
-const builtin = @import("builtin");
+
+// Import layout implementations
+const master_left_layout = @import("master-left");
+const monocle_layout = @import("monocle");
+const grid_layout = @import("grid");
 
 pub const Layout = enum { master_left, monocle, grid };
 
@@ -78,7 +83,7 @@ pub fn notifyWindowMapped(wm: *WM, win: u32) void {
     }
 
     s.tiled_windows.insert(wm.allocator, 0, win) catch return;
-    
+
     const attrs = utils.WindowAttrs{
         .border_width = s.border_width,
         .border_color = s.border_focused,
@@ -110,7 +115,7 @@ pub fn notifyWindowDestroyed(wm: *WM, win: u32) void {
     }
 }
 
-/// Update borders when focus changes - O(1) incremental update
+/// Update border colors when focus changes
 pub fn updateWindowFocus(wm: *WM, old_focused: ?u32, new_focused: ?u32) void {
     const s = state orelse return;
     if (!s.enabled) return;
@@ -159,10 +164,12 @@ fn retile(wm: *WM, s: *State) void {
     }
 
     const screen = wm.screen;
+    
+    // Delegate to layout-specific implementations
     switch (s.layout) {
-        .master_left => tileMasterLeft(wm, s, s.visible_cache.items, screen.width_in_pixels, screen.height_in_pixels),
-        .monocle => tileMonocle(wm, s, s.visible_cache.items, screen.width_in_pixels, screen.height_in_pixels),
-        .grid => tileGrid(wm, s, s.visible_cache.items, screen.width_in_pixels, screen.height_in_pixels),
+        .master_left => master_left_layout.tile(wm, s, s.visible_cache.items, screen.width_in_pixels, screen.height_in_pixels),
+        .monocle => monocle_layout.tile(wm, s, s.visible_cache.items, screen.width_in_pixels, screen.height_in_pixels),
+        .grid => grid_layout.tile(wm, s, s.visible_cache.items, screen.width_in_pixels, screen.height_in_pixels),
     }
 
     if (wm.focused_window) |focused| {
@@ -171,72 +178,6 @@ fn retile(wm: *WM, s: *State) void {
 
     focus.markLayoutOperation();
     utils.flush(wm.conn);
-}
-
-fn tileMasterLeft(wm: *WM, s: *State, windows: []const u32, sw: u16, sh: u16) void {
-    const n = windows.len;
-    const m = s.margins();
-    const m_count: u16 = @intCast(@min(s.master_count, n));
-    const s_count: u16 = @intCast(if (n > m_count) n - m_count else 0);
-
-    const master_w: u16 = if (s_count == 0) sw else @intFromFloat(@as(f32, @floatFromInt(sw)) * s.master_width_factor);
-
-    const m_layout = utils.calcColumnLayout(sh, m_count, m);
-    const s_layout = if (s_count > 0)
-        utils.calcColumnLayout(sh, s_count, m)
-    else
-        @TypeOf(m_layout){ .item_h = 0, .spacing = 0 };
-
-    for (windows, 0..) |win, i| {
-        const rect = if (i < m_count) blk: {
-            const row: u16 = @intCast(i);
-            break :blk utils.Rect{
-                .x = @intCast(m.gap),
-                .y = @intCast(m.gap + row * m_layout.spacing),
-                .width = if (master_w > m.total()) master_w - m.total() else utils.MIN_WINDOW_DIM,
-                .height = m_layout.item_h,
-            };
-        } else blk: {
-            const row: u16 = @intCast(i - m_count);
-            const stack_w = sw - master_w;
-            break :blk utils.Rect{
-                .x = @intCast(master_w),
-                .y = @intCast(m.gap + row * s_layout.spacing),
-                .width = if (stack_w > m.gap + 2 * m.border) stack_w - m.gap - 2 * m.border else utils.MIN_WINDOW_DIM,
-                .height = s_layout.item_h,
-            };
-        };
-
-        utils.configureWindow(wm.conn, win, rect);
-    }
-}
-
-fn tileMonocle(wm: *WM, s: *State, windows: []const u32, sw: u16, sh: u16) void {
-    const inner = s.margins().innerRect(sw, sh);
-    for (windows) |win| utils.configureWindow(wm.conn, win, inner);
-    _ = xcb.xcb_configure_window(wm.conn, windows[windows.len - 1], xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
-}
-
-fn tileGrid(wm: *WM, s: *State, windows: []const u32, sw: u16, sh: u16) void {
-    const dims = utils.calcGridDims(windows.len);
-    const m = s.margins();
-
-    const cell_w = (sw -| (dims.cols + 1) * m.gap) / dims.cols;
-    const cell_h = (sh -| (dims.rows + 1) * m.gap) / dims.rows;
-    const win_w = if (cell_w > 2 * m.border) cell_w - 2 * m.border else utils.MIN_WINDOW_DIM;
-    const win_h = if (cell_h > 2 * m.border) cell_h - 2 * m.border else utils.MIN_WINDOW_DIM;
-
-    for (windows, 0..) |win, idx| {
-        const col: u16 = @intCast(idx % dims.cols);
-        const row: u16 = @intCast(idx / dims.cols);
-
-        utils.configureWindow(wm.conn, win, .{
-            .x = @intCast(m.gap + col * (cell_w + m.gap)),
-            .y = @intCast(m.gap + row * (cell_h + m.gap)),
-            .width = win_w,
-            .height = win_h,
-        });
-    }
 }
 
 fn updateBorders(wm: *WM, s: *State, focused: u32) void {
