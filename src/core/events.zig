@@ -1,4 +1,5 @@
-//! Optimized event system with comptime dispatch and minimal overhead
+//! Event system with compile-time dispatch table for zero-overhead routing.
+
 const std = @import("std");
 const defs = @import("defs");
 const xcb = defs.xcb;
@@ -22,6 +23,7 @@ const EventHandlers = struct {
     motion_notify: HandlerFn,
 };
 
+/// Wrap a typed handler into generic HandlerFn
 fn wrapHandler(
     comptime EventType: type,
     comptime handler: fn (*const EventType, *WM) void,
@@ -47,6 +49,8 @@ const handlers = blk: {
 };
 
 const MAX_EVENT_TYPE = 35;
+
+/// Compile-time dispatch table for O(1) event routing
 const handler_table = blk: {
     var table: [MAX_EVENT_TYPE + 1]?HandlerFn = [_]?HandlerFn{null} ** (MAX_EVENT_TYPE + 1);
     table[xcb.XCB_MAP_REQUEST] = handlers.map_request;
@@ -60,6 +64,7 @@ const handler_table = blk: {
     break :blk table;
 };
 
+/// Route event to appropriate handler
 pub fn dispatch(event_type: u8, event: *anyopaque, wm: *WM) void {
     const normalized = event_type & 0x7F;
     if (normalized <= MAX_EVENT_TYPE) {

@@ -1,4 +1,5 @@
-//! Main entry point with optimized event loop
+//! Main entry point and event loop.
+
 const std = @import("std");
 const posix = std.posix;
 const builtin = @import("builtin");
@@ -19,21 +20,19 @@ const WM_EVENT_MASK = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
     xcb.XCB_EVENT_MASK_KEY_PRESS |
     xcb.XCB_EVENT_MASK_ENTER_WINDOW;
 
-/// Event classification for flush strategy
 const EventFlags = packed struct {
     critical: bool = false,
     batchable: bool = false,
 };
 
+/// Compile-time event classification for flush strategy
 const EVENT_FLAGS = blk: {
     var flags = [_]EventFlags{.{}} ** 128;
-    // Critical events need immediate flush
     flags[xcb.XCB_MAP_REQUEST] = .{ .critical = true };
     flags[xcb.XCB_CONFIGURE_REQUEST] = .{ .critical = true };
     flags[xcb.XCB_KEY_PRESS] = .{ .critical = true };
     flags[xcb.XCB_BUTTON_PRESS] = .{ .critical = true };
     flags[xcb.XCB_BUTTON_RELEASE] = .{ .critical = true };
-    // Batchable events can accumulate
     flags[xcb.XCB_ENTER_NOTIFY] = .{ .batchable = true };
     flags[xcb.XCB_LEAVE_NOTIFY] = .{ .batchable = true };
     flags[xcb.XCB_FOCUS_IN] = .{ .batchable = true };
@@ -109,7 +108,6 @@ fn grabKeybindings(wm: *WM) !void {
 
         for ([_]u16{ 0, defs.MOD_LOCK, defs.MOD_2, defs.MOD_LOCK | defs.MOD_2 }) |lock| {
             const cookie = xcb.xcb_grab_key_checked(wm.conn, 0, wm.root, @intCast(kb.modifiers | lock), keycode, xcb.XCB_GRAB_MODE_ASYNC, xcb.XCB_GRAB_MODE_ASYNC);
-
             if (xcb.xcb_request_check(wm.conn, cookie)) |err| std.c.free(err);
         }
     }
@@ -182,7 +180,7 @@ pub fn main() !void {
 
     log.wmStarted();
 
-    // Main Event Loop - Optimized with intelligent batching
+    // Main event loop with intelligent batching
     var batch_count: usize = 0;
     const MAX_BATCH_SIZE: usize = 10;
 
@@ -199,17 +197,15 @@ pub fn main() !void {
             continue;
         }
 
-        // Check config reload
         if (should_reload.swap(false, .acq_rel)) {
             handleConfigReload(&wm) catch |err| {
                 log.configReloadFailed(err);
             };
         }
 
-        // Dispatch event
         events.dispatch(event_type, event, &wm);
 
-        // Intelligent flush strategy based on event type
+        // Intelligent flush based on event type
         const flags = getEventFlags(event_type);
         if (flags.critical) {
             utils.flush(conn);
@@ -221,7 +217,6 @@ pub fn main() !void {
                 batch_count = 0;
             }
         } else {
-            // Unknown event - flush to be safe
             utils.flush(conn);
             batch_count = 0;
         }

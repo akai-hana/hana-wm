@@ -80,7 +80,7 @@ master_count        = 1        # Number of windows in master area
 master_width_factor = 55       # Master area width (5-95, percentage)
 gaps                = 12       # Gap between windows (pixels)
 border_width        = 4        # Border thickness (pixels)
-border_focused      = "#CC9FBF" # Focused window border color (hex RGB)
+border_focused      = "#AC3232" # Focused window border color (hex RGB)
 border_normal       = "#4D2843" # Unfocused window border color (hex RGB)
 
 # TODO: transfer colors from dwm custom build

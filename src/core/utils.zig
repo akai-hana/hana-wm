@@ -1,4 +1,5 @@
-//! Core utilities - unified XCB operations, geometry, and common functions
+//! Core utilities for XCB operations, geometry, and window configuration.
+
 const std = @import("std");
 const xcb = @import("defs").xcb;
 const defs = @import("defs");
@@ -16,6 +17,7 @@ pub const Rect = struct {
         return .{ .x = geom.x, .y = geom.y, .width = geom.width, .height = geom.height };
     }
 
+    /// Clamp dimensions to valid range
     pub fn clamp(self: Rect) Rect {
         return .{
             .x = self.x,
@@ -30,10 +32,12 @@ pub const Margins = struct {
     gap: u16,
     border: u16,
 
+    /// Total margin on one axis (both sides)
     pub fn total(self: Margins) u16 {
         return 2 * self.gap + 2 * self.border;
     }
 
+    /// Calculate usable inner rectangle from outer dimensions
     pub fn innerRect(self: Margins, outer_w: u16, outer_h: u16) Rect {
         const margin = self.total();
         return .{
@@ -45,12 +49,14 @@ pub const Margins = struct {
     }
 };
 
+/// Calculate optimal grid dimensions for N windows (approximately square)
 pub fn calcGridDims(n: usize) struct { cols: u16, rows: u16 } {
     if (n == 0) return .{ .cols = 1, .rows = 1 };
     const cols = @as(u16, @intFromFloat(@ceil(@sqrt(@as(f32, @floatFromInt(n))))));
     return .{ .cols = cols, .rows = @intCast((n + cols - 1) / cols) };
 }
 
+/// Calculate layout for a vertical column of windows
 pub fn calcColumnLayout(total_h: u16, count: u16, margins: Margins) struct { item_h: u16, spacing: u16 } {
     if (count == 0) return .{ .item_h = 0, .spacing = 0 };
 
@@ -61,6 +67,7 @@ pub fn calcColumnLayout(total_h: u16, count: u16, margins: Margins) struct { ite
     return .{ .item_h = item_h, .spacing = item_h + 2 * margins.border + margins.gap };
 }
 
+/// Builder for window configuration
 pub const WindowAttrs = struct {
     x: ?i16 = null,
     y: ?i16 = null,
@@ -71,6 +78,7 @@ pub const WindowAttrs = struct {
     stack_mode: ?u32 = null,
     event_mask: ?u32 = null,
 
+    /// Apply configuration to window
     pub fn configure(self: WindowAttrs, conn: *xcb.xcb_connection_t, win: u32) void {
         var mask: u16 = 0;
         var values: [5]u32 = undefined;
@@ -165,6 +173,7 @@ pub const WMClass = struct {
     }
 };
 
+/// Query WM_CLASS property (instance and class name)
 pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allocator) ?WMClass {
     const wm_class_atom = blk: {
         const cookie = xcb.xcb_intern_atom(conn, 0, 8, "WM_CLASS");
@@ -182,6 +191,7 @@ pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allo
     const data: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
     const len: usize = @intCast(xcb.xcb_get_property_value_length(reply));
 
+    // Parse null-terminated strings: instance\0class\0
     var instance_len: usize = 0;
     while (instance_len < len and data[instance_len] != 0) : (instance_len += 1) {}
     if (instance_len >= len) return null;
@@ -202,8 +212,7 @@ pub inline fn clampU16(val: anytype, min: u16, max: u16) u16 {
     return @min(max, @max(min, @as(u16, @intCast(val))));
 }
 
-/// Normalize modifier state by masking out lock keys (CapsLock, NumLock)
-/// to ensure consistent keybinding matching regardless of lock state
+/// Normalize modifier state by masking out lock keys for consistent matching
 pub fn normalizeModifiers(state: u16) u16 {
     return state & defs.MOD_MASK_RELEVANT;
 }

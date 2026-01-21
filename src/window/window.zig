@@ -1,4 +1,5 @@
-//! Window management optimized for responsivity
+//! Core window event handlers.
+
 const std = @import("std");
 const defs = @import("defs");
 const xcb = defs.xcb;
@@ -7,7 +8,6 @@ const utils = @import("utils");
 const tiling = @import("tiling");
 const workspaces = @import("workspaces");
 const focus = @import("focus");
-const builtin = @import("builtin");
 
 pub fn init(_: *WM) void {}
 pub fn deinit(_: *WM) void {}
@@ -24,7 +24,6 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
 
     if (target_ws) |ws| {
         if (ws != current_ws) {
-            // Add to target workspace (will be mapped when switched)
             workspaces.moveWindowTo(wm, win, ws);
 
             if (wm.config.tiling.enabled) {
@@ -66,8 +65,6 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, w
 pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) void {
     if (event.event == wm.root or event.event == 0) return;
     if (focus.shouldSuppressMouseFocus()) return;
-
-    // Coalesce enter events - skip if more are queued
     if (hasQueuedEnterEvents(wm.conn)) return;
 
     focus.setFocus(wm, event.event, .mouse_enter);
