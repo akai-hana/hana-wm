@@ -1,19 +1,19 @@
 //! Window dragging and resizing with mouse.
 
-const std  = @import("std");
+const std = @import("std");
 const defs = @import("defs");
-const log  = @import("logging");
-const xcb  = defs.xcb;
-const WM   = defs.WM;
+const log = @import("logging");
+const xcb = defs.xcb;
+const WM = defs.WM;
 
 const DragState = struct {
-    button: u8       = 0,
-    window: u32      = 0,
-    start_x: i16     = 0,
-    start_y: i16     = 0,
-    attr_x: i16      = 0,
-    attr_y: i16      = 0,
-    attr_width: u16  = 0,
+    button: u8 = 0,
+    window: u32 = 0,
+    start_x: i16 = 0,
+    start_y: i16 = 0,
+    attr_x: i16 = 0,
+    attr_y: i16 = 0,
+    attr_width: u16 = 0,
     attr_height: u16 = 0,
 
     fn isDragging(self: *const DragState) bool {
@@ -27,8 +27,6 @@ const DragState = struct {
 
 var drag_state: DragState = .{};
 
-const MIN_WINDOW_SIZE = 50;
-
 /// Start dragging: button 1 = move, button 3 = resize
 pub fn startDrag(wm: *WM, window: u32, button: u8, root_x: i16, root_y: i16) void {
     if (button != 1 and button != 3) return;
@@ -38,13 +36,13 @@ pub fn startDrag(wm: *WM, window: u32, button: u8, root_x: i16, root_y: i16) voi
     defer std.c.free(geom_reply);
 
     drag_state = .{
-        .button      = button,
-        .window      = window,
-        .start_x     = root_x,
-        .start_y     = root_y,
-        .attr_x      = geom_reply.*.x,
-        .attr_y      = geom_reply.*.y,
-        .attr_width  = geom_reply.*.width,
+        .button = button,
+        .window = window,
+        .start_x = root_x,
+        .start_y = root_y,
+        .attr_x = geom_reply.*.x,
+        .attr_y = geom_reply.*.y,
+        .attr_width = geom_reply.*.width,
         .attr_height = geom_reply.*.height,
     };
 
@@ -76,12 +74,12 @@ pub fn updateDrag(wm: *WM, root_x: i16, root_y: i16) void {
         });
     } else {
         // Resize
-        const new_width = std.math.add(i32, drag_state.attr_width, dx) catch 65535;
-        const new_height = std.math.add(i32, drag_state.attr_height, dy) catch 65535;
+        const new_width = std.math.add(i32, drag_state.attr_width, dx) catch defs.MAX_WINDOW_DIM;
+        const new_height = std.math.add(i32, drag_state.attr_height, dy) catch defs.MAX_WINDOW_DIM;
 
         _ = xcb.xcb_configure_window(wm.conn, drag_state.window, xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT, &[_]u32{
-            @intCast(std.math.clamp(new_width, MIN_WINDOW_SIZE, 65535)),
-            @intCast(std.math.clamp(new_height, MIN_WINDOW_SIZE, 65535)),
+            @intCast(std.math.clamp(new_width, defs.MIN_WINDOW_DIM, defs.MAX_WINDOW_DIM)),
+            @intCast(std.math.clamp(new_height, defs.MIN_WINDOW_DIM, defs.MAX_WINDOW_DIM)),
         });
     }
 }

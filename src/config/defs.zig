@@ -18,6 +18,15 @@ pub const MOD_SUPER: u16 = xcb.XCB_MOD_MASK_4;
 
 pub const MOD_MASK_RELEVANT: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER;
 
+// Window dimension constants
+pub const MIN_WINDOW_DIM: u16 = 50;
+pub const MAX_WINDOW_DIM: u16 = 65535;
+
+// Timing constants
+pub const FOCUS_PROTECTION_GRACE_NS: u64 = 50 * std.time.ns_per_ms;
+pub const XKB_RETRY_DELAY_MS: u64 = 20;
+pub const XKB_MAX_RETRIES: usize = 50;
+
 pub const Action = union(enum) {
     exec: []const u8,
     close_window,
@@ -53,6 +62,7 @@ pub const Keybind = struct {
 pub const TilingConfig = struct {
     enabled: bool = true,
     layout: []const u8 = "master_left",
+    master_side: []const u8 = "left",
     master_width_factor: f32 = 0.50,
     master_count: usize = 1,
     gaps: u16 = 10,

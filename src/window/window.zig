@@ -104,6 +104,9 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM
 }
 
 fn matchWorkspaceRule(wm: *WM, win: u32) ?usize {
+    // Early return if no rules configured
+    if (wm.config.workspaces.rules.items.len == 0) return null;
+
     const wm_class = utils.getWMClass(wm.conn, win, wm.allocator) orelse return null;
     defer wm_class.deinit(wm.allocator);
 

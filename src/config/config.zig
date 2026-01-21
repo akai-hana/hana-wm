@@ -55,8 +55,8 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator) !defs.Config {
     const local = try std.fs.path.join(allocator, &.{ cwd, "config.toml" });
     defer allocator.free(local);
 
-    if (loadConfig(allocator, local)) |config| {
-        return config;
+    if (loadConfig(allocator, local)) |cfg| {
+        return cfg;
     } else |_| {
         const home = if (std.c.getenv("HOME")) |h| std.mem.span(h) else ".";
         const config_home = if (std.c.getenv("XDG_CONFIG_HOME")) |ch|
@@ -85,9 +85,9 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
     };
     defer std.posix.close(fd);
 
-    var content = std.ArrayList(u8){};
-    try content.ensureTotalCapacity(allocator, 4096);
+    var content: std.ArrayList(u8) = .{};
     defer content.deinit(allocator);
+    try content.ensureTotalCapacity(allocator, 4096);
 
     var buf: [4096]u8 = undefined;
     while (true) {
@@ -100,15 +100,15 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
     var doc = try parser.parse(allocator, content.items);
     defer doc.deinit();
 
-    var config = getDefaultConfig();
-    try parseKeybindings(allocator, &doc, &config);
-    parseTiling(&doc, &config);
-    parseWorkspaces(&doc, &config);
-    try parseRules(allocator, &doc, &config);
-    try validateConfig(allocator, &config);
+    var cfg = getDefaultConfig();
+    try parseKeybindings(allocator, &doc, &cfg);
+    parseTiling(&doc, &cfg);
+    parseWorkspaces(&doc, &cfg);
+    try parseRules(allocator, &doc, &cfg);
+    try validateConfig(allocator, &cfg);
 
     log.configLoaded(path);
-    return config;
+    return cfg;
 }
 
 fn getDefaultConfig() defs.Config {
@@ -142,7 +142,7 @@ const ACTION_MAP = std.StaticStringMap(defs.Action).initComptime(.{
     .{ "emergency_recover", .emergency_recover },
 });
 
-fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, config: *defs.Config) !void {
+fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
     const section = doc.getSection("Keybindings") orelse return;
 
     const mod_substitute = section.getString("Mod");
@@ -162,7 +162,7 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, c
         const parts = parseKeybindString(keybind_str) catch continue;
         const action = try parseAction(allocator, command);
 
-        try config.keybindings.append(allocator, .{
+        try cfg.keybindings.append(allocator, .{
             .modifiers = parts.modifiers,
             .keysym = parts.keysym,
             .action = action,
@@ -269,47 +269,52 @@ fn parseColorString(str: []const u8) !u32 {
     return color;
 }
 
-fn parseTiling(doc: *const parser.Document, config: *defs.Config) void {
+fn parseTiling(doc: *const parser.Document, cfg: *defs.Config) void {
     const section = doc.getSection("tiling") orelse return;
 
-    config.tiling.enabled = get(bool, section, "enabled", true, null);
-    config.tiling.layout = get([]const u8, section, "layout", "master_left", null);
-    config.tiling.master_count = get(usize, section, "master_count", 1, struct {
+    cfg.tiling.enabled = get(bool, section, "enabled", true, null);
+    cfg.tiling.layout = get([]const u8, section, "layout", "master_left", null);
+    cfg.tiling.master_side = get([]const u8, section, "master_side", "left", struct {
+        fn v(val: []const u8) bool {
+            return std.mem.eql(u8, val, "left") or std.mem.eql(u8, val, "right");
+        }
+    }.v);
+    cfg.tiling.master_count = get(usize, section, "master_count", 1, struct {
         fn v(n: usize) bool {
             return n >= 1;
         }
     }.v);
-    config.tiling.master_width_factor = get(f32, section, "master_width_factor", 50.0, struct {
+    cfg.tiling.master_width_factor = get(f32, section, "master_width_factor", 50.0, struct {
         fn v(n: f32) bool {
             return inRange(f32, n, 0.05, 0.95);
         }
     }.v);
-    config.tiling.gaps = get(u16, section, "gaps", 10, struct {
+    cfg.tiling.gaps = get(u16, section, "gaps", 10, struct {
         fn v(n: u16) bool {
             return n <= 200;
         }
     }.v);
-    config.tiling.border_width = get(u16, section, "border_width", 2, struct {
+    cfg.tiling.border_width = get(u16, section, "border_width", 2, struct {
         fn v(n: u16) bool {
             return n <= 100;
         }
     }.v);
 
-    config.tiling.border_focused = getColor(section, "border_focused", 0x5294E2);
-    config.tiling.border_normal = getColor(section, "border_normal", 0x383C4A);
+    cfg.tiling.border_focused = getColor(section, "border_focused", 0x5294E2);
+    cfg.tiling.border_normal = getColor(section, "border_normal", 0x383C4A);
 }
 
-fn parseWorkspaces(doc: *const parser.Document, config: *defs.Config) void {
+fn parseWorkspaces(doc: *const parser.Document, cfg: *defs.Config) void {
     const section = doc.getSection("workspaces") orelse return;
 
-    config.workspaces.count = get(usize, section, "count", 9, struct {
+    cfg.workspaces.count = get(usize, section, "count", 9, struct {
         fn v(n: usize) bool {
             return inRange(usize, n, 1, 20);
         }
     }.v);
 }
 
-fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, config: *defs.Config) !void {
+fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
     if (doc.getSection("rules")) |section| {
         var iter = section.pairs.iterator();
         while (iter.next()) |entry| {
@@ -320,7 +325,7 @@ fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, config:
                 .class_name = try allocator.dupe(u8, entry.key_ptr.*),
                 .workspace = @intCast(ws_num - 1),
             };
-            try config.workspaces.rules.append(allocator, rule);
+            try cfg.workspaces.rules.append(allocator, rule);
         }
     }
 
@@ -343,15 +348,15 @@ fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, config:
                 .class_name = try allocator.dupe(u8, class_entry.key_ptr.*),
                 .workspace = ws_num - 1,
             };
-            try config.workspaces.rules.append(allocator, rule);
+            try cfg.workspaces.rules.append(allocator, rule);
         }
     }
 }
 
-fn validateConfig(allocator: std.mem.Allocator, config: *const defs.Config) !void {
-    if (config.keybindings.items.len < 2) return;
+fn validateConfig(allocator: std.mem.Allocator, cfg: *const defs.Config) !void {
+    if (cfg.keybindings.items.len < 2) return;
 
-    var sorted = try allocator.dupe(defs.Keybind, config.keybindings.items);
+    var sorted = try allocator.dupe(defs.Keybind, cfg.keybindings.items);
     defer allocator.free(sorted);
 
     std.mem.sort(defs.Keybind, sorted, {}, struct {

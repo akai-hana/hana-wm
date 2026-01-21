@@ -1,6 +1,7 @@
 //! XKB (X Keyboard Extension) bindings and keyboard state management.
 
 const std = @import("std");
+const defs = @import("defs");
 const log = @import("logging");
 
 pub const xkb = @cImport({
@@ -9,24 +10,21 @@ pub const xkb = @cImport({
 });
 
 // Re-exports
-pub const XKB_KEYSYM_CASE_INSENSITIVE: u32 = xkb.XKB_KEYSYM_CASE_INSENSITIVE;
-pub const XKB_KEY_NoSymbol: u32 = xkb.XKB_KEY_NoSymbol;
-pub const xkb_context = xkb.struct_xkb_context;
-pub const xkb_keymap = xkb.struct_xkb_keymap;
-pub const xkb_state = xkb.struct_xkb_state;
-pub const xkb_keysym_from_name = xkb.xkb_keysym_from_name;
-pub const xkb_context_new = xkb.xkb_context_new;
-pub const xkb_context_unref = xkb.xkb_context_unref;
-pub const xkb_x11_setup_xkb_extension = xkb.xkb_x11_setup_xkb_extension;
+pub const XKB_KEYSYM_CASE_INSENSITIVE: u32    = xkb.XKB_KEYSYM_CASE_INSENSITIVE;
+pub const XKB_KEY_NoSymbol: u32               = xkb.XKB_KEY_NoSymbol;
+pub const xkb_context                         = xkb.struct_xkb_context;
+pub const xkb_keymap                          = xkb.struct_xkb_keymap;
+pub const xkb_state                           = xkb.struct_xkb_state;
+pub const xkb_keysym_from_name                = xkb.xkb_keysym_from_name;
+pub const xkb_context_new                     = xkb.xkb_context_new;
+pub const xkb_context_unref                   = xkb.xkb_context_unref;
+pub const xkb_x11_setup_xkb_extension         = xkb.xkb_x11_setup_xkb_extension;
 pub const xkb_x11_get_core_keyboard_device_id = xkb.xkb_x11_get_core_keyboard_device_id;
-pub const xkb_x11_keymap_new_from_device = xkb.xkb_x11_keymap_new_from_device;
-pub const xkb_state_new = xkb.xkb_state_new;
-pub const xkb_state_unref = xkb.xkb_state_unref;
-pub const xkb_keymap_unref = xkb.xkb_keymap_unref;
-pub const xkb_state_key_get_one_sym = xkb.xkb_state_key_get_one_sym;
-
-const MAX_RETRIES = 50;
-const RETRY_DELAY_MS = 20;
+pub const xkb_x11_keymap_new_from_device      = xkb.xkb_x11_keymap_new_from_device;
+pub const xkb_state_new                       = xkb.xkb_state_new;
+pub const xkb_state_unref                     = xkb.xkb_state_unref;
+pub const xkb_keymap_unref                    = xkb.xkb_keymap_unref;
+pub const xkb_state_key_get_one_sym           = xkb.xkb_state_key_get_one_sym;
 
 pub const XkbState = struct {
     context: *xkb_context,
@@ -70,7 +68,7 @@ pub const XkbState = struct {
         xkb.xkb_context_unref(self.context);
     }
 
-    pub fn keycodeToKeysym(self: *XkbState, keycode: u8) u32 {
+    pub inline fn keycodeToKeysym(self: *XkbState, keycode: u8) u32 {
         return xkb.xkb_state_key_get_one_sym(self.state, keycode);
     }
 
@@ -90,7 +88,7 @@ pub const XkbState = struct {
 fn retrySetup(xcb_conn: *anyopaque) !void {
     var attempts: usize = 0;
 
-    while (attempts < MAX_RETRIES) : (attempts += 1) {
+    while (attempts < defs.XKB_MAX_RETRIES) : (attempts += 1) {
         const result = xkb.xkb_x11_setup_xkb_extension(
             @ptrCast(xcb_conn),
             xkb.XKB_X11_MIN_MAJOR_XKB_VERSION,
@@ -104,8 +102,8 @@ fn retrySetup(xcb_conn: *anyopaque) !void {
 
         if (result != 0) return;
 
-        if (attempts + 1 < MAX_RETRIES) {
-            std.posix.nanosleep(0, RETRY_DELAY_MS * std.time.ns_per_ms);
+        if (attempts + 1 < defs.XKB_MAX_RETRIES) {
+            std.posix.nanosleep(0, defs.XKB_RETRY_DELAY_MS * std.time.ns_per_ms);
         }
     }
 
@@ -115,15 +113,15 @@ fn retrySetup(xcb_conn: *anyopaque) !void {
 fn retryKeymap(ctx: *xkb_context, xcb_conn: *anyopaque, device_id: i32) !*xkb_keymap {
     var attempts: usize = 0;
 
-    while (attempts < MAX_RETRIES) : (attempts += 1) {
+    while (attempts < defs.XKB_MAX_RETRIES) : (attempts += 1) {
         const km = xkb.xkb_x11_keymap_new_from_device(
             ctx,
             @ptrCast(xcb_conn),
             device_id,
             xkb.XKB_KEYMAP_COMPILE_NO_FLAGS,
         ) orelse {
-            if (attempts + 1 < MAX_RETRIES) {
-                std.posix.nanosleep(0, RETRY_DELAY_MS * std.time.ns_per_ms);
+            if (attempts + 1 < defs.XKB_MAX_RETRIES) {
+                std.posix.nanosleep(0, defs.XKB_RETRY_DELAY_MS * std.time.ns_per_ms);
                 continue;
             }
             return error.XkbKeymapFailed;
@@ -139,8 +137,8 @@ fn retryKeymap(ctx: *xkb_context, xcb_conn: *anyopaque, device_id: i32) !*xkb_ke
 
         xkb.xkb_keymap_unref(km);
 
-        if (attempts + 1 < MAX_RETRIES) {
-            std.posix.nanosleep(0, RETRY_DELAY_MS * std.time.ns_per_ms);
+        if (attempts + 1 < defs.XKB_MAX_RETRIES) {
+            std.posix.nanosleep(0, defs.XKB_RETRY_DELAY_MS * std.time.ns_per_ms);
         }
     }
 

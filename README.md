@@ -127,16 +127,7 @@ But it works! After so much time investigating and trying things only to be met 
 
 ## Roadmap (things to-do):
 
-- Window tiling/layouts  
-- Keybindings (no shortcuts yet)  
-- Window focus  
-- Moving/resizing windows  
-- Workspaces  
-- Status bar  
-- Move config to a more coherent dir  
-- Move Zig's binary output to a UNIX-compatible bin dir (yet to figure out)  FINITIONS #
-
-... Pretty much everything else.
+Moved this over to TODO.txt file for easier editing.
 
 ---
 

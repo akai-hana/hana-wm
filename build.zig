@@ -1,4 +1,5 @@
-// Build configuration for Hana window manager
+//! Build configuration for Hana window manager
+
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {

@@ -12,6 +12,7 @@ pub const Workspace = struct {
     id: usize,
     windows: std.ArrayList(u32),
     name: []const u8,
+    allocator: std.mem.Allocator,
 
     fn contains(self: *const Workspace, win: u32) bool {
         for (self.windows.items) |w| {
@@ -53,8 +54,9 @@ pub fn init(wm: *WM) void {
     for (s.workspaces, 0..) |*ws, i| {
         ws.* = .{
             .id = i,
-            .windows = std.ArrayList(u32){},
+            .windows = .{},
             .name = std.fmt.allocPrint(wm.allocator, "{}", .{i + 1}) catch "?",
+            .allocator = wm.allocator,
         };
     }
 
@@ -64,7 +66,7 @@ pub fn init(wm: *WM) void {
 pub fn deinit(wm: *WM) void {
     if (state) |s| {
         for (s.workspaces) |*ws| {
-            ws.windows.deinit(wm.allocator);
+            ws.windows.deinit(ws.allocator);
             wm.allocator.free(ws.name);
         }
         wm.allocator.free(s.workspaces);
@@ -77,7 +79,7 @@ pub fn addWindowToCurrentWorkspace(_: *WM, win: u32) void {
     const s = state orelse return;
     const ws = &s.workspaces[s.current];
     if (ws.contains(win)) return;
-    ws.windows.append(s.allocator, win) catch return;
+    ws.windows.append(ws.allocator, win) catch return;
 }
 
 pub fn removeWindow(win: u32) void {
@@ -95,7 +97,7 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: usize) void {
 
     for (s.workspaces) |*ws| _ = ws.remove(win);
 
-    s.workspaces[target_ws].windows.append(s.allocator, win) catch return;
+    s.workspaces[target_ws].windows.append(s.workspaces[target_ws].allocator, win) catch return;
 
     if (is_focused) {
         _ = xcb.xcb_unmap_window(wm.conn, win);
