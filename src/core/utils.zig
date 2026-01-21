@@ -4,8 +4,8 @@ const std = @import("std");
 const xcb = @import("defs").xcb;
 const defs = @import("defs");
 
-pub const MIN_WINDOW_DIM: u16 = 50;
-pub const MAX_WINDOW_DIM: u16 = 65535;
+pub const MIN_WINDOW_DIM: u16 = defs.MIN_WINDOW_DIM;
+pub const MAX_WINDOW_DIM: u16 = defs.MAX_WINDOW_DIM;
 
 pub const Rect = struct {
     x: i16,
@@ -18,7 +18,7 @@ pub const Rect = struct {
     }
 
     /// Clamp dimensions to valid range
-    pub fn clamp(self: Rect) Rect {
+    pub inline fn clamp(self: Rect) Rect {
         return .{
             .x = self.x,
             .y = self.y,
@@ -33,12 +33,12 @@ pub const Margins = struct {
     border: u16,
 
     /// Total margin on one axis (both sides)
-    pub fn total(self: Margins) u16 {
+    pub inline fn total(self: Margins) u16 {
         return 2 * self.gap + 2 * self.border;
     }
 
     /// Calculate usable inner rectangle from outer dimensions
-    pub fn innerRect(self: Margins, outer_w: u16, outer_h: u16) Rect {
+    pub inline fn innerRect(self: Margins, outer_w: u16, outer_h: u16) Rect {
         const margin = self.total();
         return .{
             .x = @intCast(self.gap),
@@ -50,14 +50,14 @@ pub const Margins = struct {
 };
 
 /// Calculate optimal grid dimensions for N windows (approximately square)
-pub fn calcGridDims(n: usize) struct { cols: u16, rows: u16 } {
+pub inline fn calcGridDims(n: usize) struct { cols: u16, rows: u16 } {
     if (n == 0) return .{ .cols = 1, .rows = 1 };
     const cols = @as(u16, @intFromFloat(@ceil(@sqrt(@as(f32, @floatFromInt(n))))));
     return .{ .cols = cols, .rows = @intCast((n + cols - 1) / cols) };
 }
 
 /// Calculate layout for a vertical column of windows
-pub fn calcColumnLayout(total_h: u16, count: u16, margins: Margins) struct { item_h: u16, spacing: u16 } {
+pub inline fn calcColumnLayout(total_h: u16, count: u16, margins: Margins) struct { item_h: u16, spacing: u16 } {
     if (count == 0) return .{ .item_h = 0, .spacing = 0 };
 
     const overhead = margins.gap * (count + 1) + margins.border * 2 * count;
@@ -124,10 +124,18 @@ pub const WindowAttrs = struct {
     }
 };
 
-pub fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect) void {
+pub inline fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect) void {
     const r = rect.clamp();
-    const attrs = WindowAttrs{ .x = r.x, .y = r.y, .width = r.width, .height = r.height };
-    attrs.configure(conn, win);
+    const values = [_]u32{
+        @bitCast(@as(i32, r.x)),
+        @bitCast(@as(i32, r.y)),
+        r.width,
+        r.height,
+    };
+    _ = xcb.xcb_configure_window(conn, win,
+        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
+            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT,
+        &values);
 }
 
 pub fn getGeometry(conn: *xcb.xcb_connection_t, win: u32) ?Rect {
@@ -213,6 +221,6 @@ pub inline fn clampU16(val: anytype, min: u16, max: u16) u16 {
 }
 
 /// Normalize modifier state by masking out lock keys for consistent matching
-pub fn normalizeModifiers(state: u16) u16 {
+pub inline fn normalizeModifiers(state: u16) u16 {
     return state & defs.MOD_MASK_RELEVANT;
 }

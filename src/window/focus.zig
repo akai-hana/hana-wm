@@ -16,8 +16,6 @@ pub const Reason = enum {
     tiling_operation,
 };
 
-const FOCUS_PROTECTION_GRACE_NS: u64 = 50 * std.time.ns_per_ms;
-
 var layout_timer: ?std.time.Timer = null;
 
 pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
@@ -48,10 +46,10 @@ pub fn clearFocus(wm: *WM) void {
 }
 
 /// Check if mouse focus should be suppressed (during layout operations)
-pub fn shouldSuppressMouseFocus() bool {
+pub inline fn shouldSuppressMouseFocus() bool {
     if (layout_timer) |*timer| {
         const elapsed = timer.read();
-        if (elapsed < FOCUS_PROTECTION_GRACE_NS) {
+        if (elapsed < defs.FOCUS_PROTECTION_GRACE_NS) {
             log.focusSuppressed(elapsed / std.time.ns_per_ms);
             return true;
         }
@@ -61,7 +59,7 @@ pub fn shouldSuppressMouseFocus() bool {
 }
 
 /// Mark start of layout operation (enables focus protection)
-pub fn markLayoutOperation() void {
+pub inline fn markLayoutOperation() void {
     layout_timer = std.time.Timer.start() catch {
         layout_timer = null;
         return;

@@ -65,7 +65,7 @@ const handler_table = blk: {
 };
 
 /// Route event to appropriate handler
-pub fn dispatch(event_type: u8, event: *anyopaque, wm: *WM) void {
+pub inline fn dispatch(event_type: u8, event: *anyopaque, wm: *WM) void {
     const normalized = event_type & 0x7F;
     if (normalized <= MAX_EVENT_TYPE) {
         if (handler_table[normalized]) |handler| {
