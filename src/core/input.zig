@@ -134,7 +134,21 @@ inline fn executeAction(action: *const defs.Action, wm: *WM) !void {
     switch (action.*) {
         .close_window => {
             if (wm.focused_window) |win| {
+                // DEBUG: Log what we're about to destroy
+                std.log.warn("[DEBUG] Attempting to destroy focused window: 0x{x}", .{win});
+                std.log.warn("[DEBUG] Root window is: 0x{x}", .{wm.root});
+                std.log.warn("[DEBUG] Total managed windows: {}", .{wm.windows.count()});
+                
+                // Check if we're accidentally trying to destroy the root window
+                if (win == wm.root) {
+                    std.log.err("[CRITICAL] Attempted to destroy ROOT window! Aborting.", .{});
+                    return;
+                }
+                
                 _ = xcb.xcb_destroy_window(wm.conn, win);
+                std.log.warn("[DEBUG] xcb_destroy_window called for 0x{x}", .{win});
+            } else {
+                std.log.warn("[DEBUG] close_window called but no focused window", .{});
             }
         },
         .reload_config => wm.should_reload_config.store(true, .release),

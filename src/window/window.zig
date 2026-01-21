@@ -83,11 +83,19 @@ fn hasQueuedEnterEvents(conn: *xcb.xcb_connection_t) bool {
 
 pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM) void {
     const win = event.window;
+
+    // DEBUG logging
+    std.log.warn("[DEBUG DestroyNotify] Window 0x{x} destroyed", .{win});
+    std.log.warn("[DEBUG DestroyNotify] Was focused: {}", .{wm.focused_window == win});
+    std.log.warn("[DEBUG DestroyNotify] Total windows before: {}", .{wm.windows.count()});
+
     const was_focused = wm.focused_window == win;
 
     tiling.notifyWindowDestroyed(wm, win);
     workspaces.removeWindow(win);
     wm.removeWindow(win);
+
+    std.log.warn("[DEBUG DestroyNotify] Total windows after: {}", .{wm.windows.count()});
 
     if (was_focused) {
         wm.focused_window = null;

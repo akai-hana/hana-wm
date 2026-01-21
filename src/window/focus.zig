@@ -19,10 +19,18 @@ pub const Reason = enum {
 var layout_timer: ?std.time.Timer = null;
 
 pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
+    // CRITICAL: Never focus the root window
+    if (win == wm.root) {
+        std.log.err("[CRITICAL] Attempted to focus ROOT window (0x{x})! Reason: {s}. Aborting.", .{win, @tagName(reason)});
+        return;
+    }
+
     if (wm.focused_window == win) return;
 
     const old = wm.focused_window;
     wm.focused_window = win;
+
+    std.log.debug("[focus] {?x} → 0x{x} ({s})", .{ old, win, @tagName(reason) });
 
     _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, xcb.XCB_CURRENT_TIME);
 
