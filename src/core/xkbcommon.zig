@@ -2,7 +2,6 @@
 
 const std = @import("std");
 const defs = @import("defs");
-const log = @import("logging");
 
 pub const xkb = @cImport({
     @cInclude("xkbcommon/xkbcommon.h");
@@ -10,21 +9,21 @@ pub const xkb = @cImport({
 });
 
 // Re-exports
-pub const XKB_KEYSYM_CASE_INSENSITIVE: u32    = xkb.XKB_KEYSYM_CASE_INSENSITIVE;
-pub const XKB_KEY_NoSymbol: u32               = xkb.XKB_KEY_NoSymbol;
-pub const xkb_context                         = xkb.struct_xkb_context;
-pub const xkb_keymap                          = xkb.struct_xkb_keymap;
-pub const xkb_state                           = xkb.struct_xkb_state;
-pub const xkb_keysym_from_name                = xkb.xkb_keysym_from_name;
-pub const xkb_context_new                     = xkb.xkb_context_new;
-pub const xkb_context_unref                   = xkb.xkb_context_unref;
-pub const xkb_x11_setup_xkb_extension         = xkb.xkb_x11_setup_xkb_extension;
+pub const XKB_KEYSYM_CASE_INSENSITIVE: u32 = xkb.XKB_KEYSYM_CASE_INSENSITIVE;
+pub const XKB_KEY_NoSymbol: u32 = xkb.XKB_KEY_NoSymbol;
+pub const xkb_context = xkb.struct_xkb_context;
+pub const xkb_keymap = xkb.struct_xkb_keymap;
+pub const xkb_state = xkb.struct_xkb_state;
+pub const xkb_keysym_from_name = xkb.xkb_keysym_from_name;
+pub const xkb_context_new = xkb.xkb_context_new;
+pub const xkb_context_unref = xkb.xkb_context_unref;
+pub const xkb_x11_setup_xkb_extension = xkb.xkb_x11_setup_xkb_extension;
 pub const xkb_x11_get_core_keyboard_device_id = xkb.xkb_x11_get_core_keyboard_device_id;
-pub const xkb_x11_keymap_new_from_device      = xkb.xkb_x11_keymap_new_from_device;
-pub const xkb_state_new                       = xkb.xkb_state_new;
-pub const xkb_state_unref                     = xkb.xkb_state_unref;
-pub const xkb_keymap_unref                    = xkb.xkb_keymap_unref;
-pub const xkb_state_key_get_one_sym           = xkb.xkb_state_key_get_one_sym;
+pub const xkb_x11_keymap_new_from_device = xkb.xkb_x11_keymap_new_from_device;
+pub const xkb_state_new = xkb.xkb_state_new;
+pub const xkb_state_unref = xkb.xkb_state_unref;
+pub const xkb_keymap_unref = xkb.xkb_keymap_unref;
+pub const xkb_state_key_get_one_sym = xkb.xkb_state_key_get_one_sym;
 
 pub const XkbState = struct {
     context: *xkb_context,
@@ -34,8 +33,6 @@ pub const XkbState = struct {
 
     /// Initialize with retry logic for X server race conditions
     pub fn init(xcb_conn: *anyopaque) !XkbState {
-        log.xkbInitializing();
-
         const ctx = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS) orelse
             return error.XkbContextFailed;
         errdefer xkb.xkb_context_unref(ctx);
@@ -45,14 +42,10 @@ pub const XkbState = struct {
         const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
         if (device_id == -1) return error.XkbNoKeyboard;
 
-        log.xkbDeviceId(device_id);
-
         const keymap = try retryKeymap(ctx, xcb_conn, device_id);
         errdefer xkb.xkb_keymap_unref(keymap);
 
         const state = xkb.xkb_state_new(keymap) orelse return error.XkbStateFailed;
-
-        log.xkbInitComplete();
 
         return XkbState{
             .context = ctx,
@@ -80,7 +73,6 @@ pub const XkbState = struct {
                 return keycode;
             }
         }
-        log.xkbKeycodeNotFound(keysym);
         return null;
     }
 };

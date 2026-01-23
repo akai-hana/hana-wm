@@ -10,7 +10,7 @@ const xkbcommon = @import("xkbcommon");
 const events = @import("events");
 const input = @import("input");
 const utils = @import("utils");
-const log = @import("logging");
+const async = @import("async");
 
 const xcb = defs.xcb;
 const WM = defs.WM;
@@ -128,7 +128,7 @@ fn handleConfigReload(wm: *WM) !void {
     try input.rebuildKeybindMap(wm);
     @import("tiling").reloadConfig(wm);
 
-    log.configReloaded();
+    std.log.info("[config] Reloaded", .{});
 }
 
 pub fn main() !void {
@@ -170,6 +170,9 @@ pub fn main() !void {
     };
     defer wm.deinit();
 
+    try async.initGlobal(allocator);
+    defer async.deinitGlobal(allocator);
+
     setupSignalHandler();
     events.initModules(&wm);
     defer events.deinitModules(&wm);
@@ -178,47 +181,56 @@ pub fn main() !void {
     setupExistingWindows(conn, root);
     utils.flush(conn);
 
-    log.wmStarted();
+    std.log.info("[hana] Started", .{});
 
-    // Main event loop with intelligent batching
+    // Main event loop with async job processing
     var batch_count: usize = 0;
     const MAX_BATCH_SIZE: usize = 10;
 
     while (true) {
-        const event = xcb.xcb_wait_for_event(conn) orelse break;
-        defer std.c.free(event);
+        async.processPending(&wm);
 
-        const event_type = @as(*u8, @ptrCast(event)).*;
+        const event = xcb.xcb_poll_for_event(conn);
 
-        // Fast path for focus events
-        if (event_type == xcb.XCB_ENTER_NOTIFY or event_type == xcb.XCB_FOCUS_IN) {
-            events.dispatch(event_type, event, &wm);
-            utils.flush(conn);
-            continue;
-        }
+        if (event) |ev| {
+            defer std.c.free(ev);
 
-        if (should_reload.swap(false, .acq_rel)) {
-            handleConfigReload(&wm) catch |err| {
-                log.configReloadFailed(err);
-            };
-        }
+            const event_type = @as(*u8, @ptrCast(ev)).*;
 
-        events.dispatch(event_type, event, &wm);
+            // Fast path for focus events
+            if (event_type == xcb.XCB_ENTER_NOTIFY or event_type == xcb.XCB_FOCUS_IN) {
+                events.dispatch(event_type, ev, &wm);
+                utils.flush(conn);
+                continue;
+            }
 
-        // Intelligent flush based on event type
-        const flags = getEventFlags(event_type);
-        if (flags.critical) {
-            utils.flush(conn);
-            batch_count = 0;
-        } else if (flags.batchable) {
-            batch_count += 1;
-            if (batch_count >= MAX_BATCH_SIZE) {
+            if (should_reload.swap(false, .acq_rel)) {
+                handleConfigReload(&wm) catch |err| {
+                    std.log.err("[config] Reload failed: {}", .{err});
+                };
+            }
+
+            events.dispatch(event_type, ev, &wm);
+
+            // Intelligent flush based on event type
+            const flags = getEventFlags(event_type);
+            if (flags.critical) {
+                utils.flush(conn);
+                batch_count = 0;
+            } else if (flags.batchable) {
+                batch_count += 1;
+                if (batch_count >= MAX_BATCH_SIZE) {
+                    utils.flush(conn);
+                    batch_count = 0;
+                }
+            } else {
                 utils.flush(conn);
                 batch_count = 0;
             }
         } else {
-            utils.flush(conn);
-            batch_count = 0;
+            if (!async.getGlobal().?.hasPending()) {
+                std.posix.nanosleep(0, 1 * std.time.ns_per_ms);
+            }
         }
     }
 }

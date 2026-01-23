@@ -7,8 +7,9 @@ const WM = defs.WM;
 const utils = @import("utils");
 const workspaces = @import("workspaces");
 const focus = @import("focus");
+const atomic = @import("atomic");
+const async = @import("async");
 
-// Import layout implementations
 const master_layout = @import("master");
 const monocle_layout = @import("monocle");
 const grid_layout = @import("grid");
@@ -19,6 +20,7 @@ pub const State = struct {
     enabled: bool,
     layout: Layout,
     master_side: []const u8,
+    master_side_owned: bool = false,
     master_width_factor: f32,
     master_count: usize,
     gaps: u16,
@@ -28,6 +30,7 @@ pub const State = struct {
     tiled_windows: std.ArrayList(u32),
     visible_cache: std.ArrayList(u32),
     needs_retile: bool = true,
+    retile_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     allocator: std.mem.Allocator,
 
     pub inline fn margins(self: *const State) utils.Margins {
@@ -39,10 +42,14 @@ var state: ?*State = null;
 
 pub fn init(wm: *WM) void {
     const s = wm.allocator.create(State) catch return;
+
+    const master_side_copy = wm.allocator.dupe(u8, wm.config.tiling.master_side) catch "left";
+
     s.* = .{
         .enabled = wm.config.tiling.enabled,
         .layout = parseLayout(wm.config.tiling.layout),
-        .master_side = wm.config.tiling.master_side,
+        .master_side = master_side_copy,
+        .master_side_owned = true,
         .master_width_factor = wm.config.tiling.master_width_factor,
         .master_count = wm.config.tiling.master_count,
         .gaps = wm.config.tiling.gaps,
@@ -58,6 +65,9 @@ pub fn init(wm: *WM) void {
 
 pub fn deinit(wm: *WM) void {
     if (state) |s| {
+        if (s.master_side_owned) {
+            s.allocator.free(s.master_side);
+        }
         s.tiled_windows.deinit(s.allocator);
         s.visible_cache.deinit(s.allocator);
         wm.allocator.destroy(s);
@@ -81,7 +91,7 @@ pub fn notifyWindowMapped(wm: *WM, win: u32) void {
     for (s.tiled_windows.items) |w| {
         if (w == win) {
             s.needs_retile = true;
-            retile(wm, s);
+            retileAsync(wm, s);
             return;
         }
     }
@@ -97,7 +107,7 @@ pub fn notifyWindowMapped(wm: *WM, win: u32) void {
 
     wm.focused_window = win;
     s.needs_retile = true;
-    retile(wm, s);
+    retileAsync(wm, s);
 }
 
 pub fn notifyWindowDestroyed(wm: *WM, win: u32) void {
@@ -113,13 +123,12 @@ pub fn notifyWindowDestroyed(wm: *WM, win: u32) void {
                 _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, next, xcb.XCB_CURRENT_TIME);
                 wm.focused_window = next;
             }
-            retile(wm, s);
+            retileAsync(wm, s);
             return;
         }
     }
 }
 
-/// Update border colors when focus changes
 pub fn updateWindowFocus(wm: *WM, old_focused: ?u32, new_focused: ?u32) void {
     const s = state orelse return;
     if (!s.enabled) return;
@@ -146,9 +155,26 @@ pub fn isWindowTiled(win: u32) bool {
     return false;
 }
 
+fn retileAsync(wm: *WM, s: *State) void {
+    if (s.retile_pending.swap(true, .acq_rel)) return;
+
+    async.submitGlobal(.retile, .{ .retile = {} }, 10) catch {
+        s.retile_pending.store(false, .release);
+        retile(wm, s);
+    };
+}
+
 fn retile(wm: *WM, s: *State) void {
+    defer s.retile_pending.store(false, .release);
+
     if (!s.needs_retile) return;
     s.needs_retile = false;
+
+    var tx = atomic.Transaction.begin(wm) catch {
+        std.log.err("[tiling] Failed to begin retile transaction", .{});
+        return;
+    };
+    defer tx.deinit();
 
     s.visible_cache.clearRetainingCapacity();
 
@@ -163,31 +189,34 @@ fn retile(wm: *WM, s: *State) void {
     }
 
     if (s.visible_cache.items.len == 0) {
-        utils.flush(wm.conn);
+        tx.commit() catch {};
         return;
     }
 
     const screen = wm.screen;
 
-    // Delegate to layout-specific implementations
     switch (s.layout) {
-        .master => master_layout.tile(wm, s, s.visible_cache.items, screen.width_in_pixels, screen.height_in_pixels),
-        .monocle => monocle_layout.tile(wm, s, s.visible_cache.items, screen.width_in_pixels, screen.height_in_pixels),
-        .grid => grid_layout.tile(wm, s, s.visible_cache.items, screen.width_in_pixels, screen.height_in_pixels),
+        .master => master_layout.tile(&tx, s, s.visible_cache.items, screen.width_in_pixels, screen.height_in_pixels),
+        .monocle => monocle_layout.tile(&tx, s, s.visible_cache.items, screen.width_in_pixels, screen.height_in_pixels),
+        .grid => grid_layout.tile(&tx, s, s.visible_cache.items, screen.width_in_pixels, screen.height_in_pixels),
     }
 
     if (wm.focused_window) |focused| {
-        updateBorders(wm, s, focused);
+        updateBorders(&tx, s, focused);
     }
 
+    tx.commit() catch |err| {
+        std.log.err("[tiling] Retile transaction failed: {}", .{err});
+        tx.rollback();
+        return;
+    };
+
     focus.markLayoutOperation();
-    utils.flush(wm.conn);
 }
 
-fn updateBorders(wm: *WM, s: *State, focused: u32) void {
+fn updateBorders(tx: *atomic.Transaction, s: *State, focused: u32) void {
     const ws_windows = workspaces.getCurrentWindowsView() orelse return;
 
-    // Direct linear search - faster than HashMap for typical window counts (<50)
     for (s.tiled_windows.items) |win| {
         const on_workspace = for (ws_windows) |w| {
             if (w == win) break true;
@@ -196,10 +225,8 @@ fn updateBorders(wm: *WM, s: *State, focused: u32) void {
         if (!on_workspace) continue;
 
         const color = if (win == focused) s.border_focused else s.border_normal;
-        _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
+        tx.setBorder(win, color) catch continue;
     }
-
-    utils.flush(wm.conn);
 }
 
 pub fn retileCurrentWorkspace(wm: *WM) void {
@@ -219,35 +246,38 @@ pub fn toggleLayout(wm: *WM) void {
         .grid => .master,
     };
     s.needs_retile = true;
-    retile(wm, s);
+
+    async.submitGlobal(.layout_change, .{ .layout_change = {} }, 8) catch {
+        retile(wm, s);
+    };
 }
 
 pub fn increaseMasterWidth(wm: *WM) void {
     const s = state orelse return;
     s.master_width_factor = @min(0.95, s.master_width_factor + 0.05);
     s.needs_retile = true;
-    retile(wm, s);
+    retileAsync(wm, s);
 }
 
 pub fn decreaseMasterWidth(wm: *WM) void {
     const s = state orelse return;
     s.master_width_factor = @max(0.05, s.master_width_factor - 0.05);
     s.needs_retile = true;
-    retile(wm, s);
+    retileAsync(wm, s);
 }
 
 pub fn increaseMasterCount(wm: *WM) void {
     const s = state orelse return;
     s.master_count = @min(s.tiled_windows.items.len, s.master_count + 1);
     s.needs_retile = true;
-    retile(wm, s);
+    retileAsync(wm, s);
 }
 
 pub fn decreaseMasterCount(wm: *WM) void {
     const s = state orelse return;
     s.master_count = @max(1, s.master_count -| 1);
     s.needs_retile = true;
-    retile(wm, s);
+    retileAsync(wm, s);
 }
 
 pub fn toggleTiling(wm: *WM) void {
@@ -255,15 +285,23 @@ pub fn toggleTiling(wm: *WM) void {
     s.enabled = !s.enabled;
     if (s.enabled) {
         s.needs_retile = true;
-        retile(wm, s);
+        retileAsync(wm, s);
     }
 }
 
 pub fn reloadConfig(wm: *WM) void {
     const s = state orelse return;
+
+    if (s.master_side_owned) {
+        s.allocator.free(s.master_side);
+    }
+
+    const new_master_side = s.allocator.dupe(u8, wm.config.tiling.master_side) catch "left";
+
     s.enabled = wm.config.tiling.enabled;
     s.layout = parseLayout(wm.config.tiling.layout);
-    s.master_side = wm.config.tiling.master_side;
+    s.master_side = new_master_side;
+    s.master_side_owned = true;
     s.master_width_factor = wm.config.tiling.master_width_factor;
     s.master_count = wm.config.tiling.master_count;
     s.gaps = wm.config.tiling.gaps;
@@ -271,9 +309,9 @@ pub fn reloadConfig(wm: *WM) void {
     s.border_focused = wm.config.tiling.border_focused;
     s.border_normal = wm.config.tiling.border_normal;
     s.needs_retile = true;
-    if (s.enabled) retile(wm, s);
+    if (s.enabled) retileAsync(wm, s);
 }
 
-pub fn getState() ?*State {
+pub inline fn getState() ?*State {
     return state;
 }

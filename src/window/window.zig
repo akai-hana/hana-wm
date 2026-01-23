@@ -8,6 +8,7 @@ const utils = @import("utils");
 const tiling = @import("tiling");
 const workspaces = @import("workspaces");
 const focus = @import("focus");
+const atomic = @import("atomic");
 
 pub fn init(_: *WM) void {}
 pub fn deinit(_: *WM) void {}
@@ -39,11 +40,21 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
         }
     }
 
-    workspaces.addWindowToCurrentWorkspace(wm, win);
-    _ = xcb.xcb_map_window(wm.conn, win);
+    // Map to current workspace atomically
+    atomic.atomicMapWindow(wm, win, target_ws orelse current_ws) catch |err| {
+        std.log.err("[window] Failed to map window atomically: {}", .{err});
+        return;
+    };
 
     if (wm.config.tiling.enabled) {
-        tiling.notifyWindowMapped(wm, win);
+        const attrs = utils.WindowAttrs{
+            .border_width = wm.config.tiling.border_width,
+            .border_color = wm.config.tiling.border_focused,
+            .event_mask = xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW,
+        };
+        attrs.configure(wm.conn, win);
+        wm.focused_window = win;
+        tiling.retileCurrentWorkspace(wm);
     }
 
     focus.markLayoutOperation();
@@ -84,35 +95,14 @@ fn hasQueuedEnterEvents(conn: *xcb.xcb_connection_t) bool {
 pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM) void {
     const win = event.window;
 
-    // DEBUG logging
-    std.log.warn("[DEBUG DestroyNotify] Window 0x{x} destroyed", .{win});
-    std.log.warn("[DEBUG DestroyNotify] Was focused: {}", .{wm.focused_window == win});
-    std.log.warn("[DEBUG DestroyNotify] Total windows before: {}", .{wm.windows.count()});
+    atomic.atomicDestroyWindow(wm, win) catch |err| {
+        std.log.err("[window] Failed to destroy window atomically: {}", .{err});
+    };
 
-    const was_focused = wm.focused_window == win;
-
-    tiling.notifyWindowDestroyed(wm, win);
-    workspaces.removeWindow(win);
     wm.removeWindow(win);
-
-    std.log.warn("[DEBUG DestroyNotify] Total windows after: {}", .{wm.windows.count()});
-
-    if (was_focused) {
-        wm.focused_window = null;
-
-        if (workspaces.getCurrentWindowsView()) |ws_windows| {
-            if (ws_windows.len > 0) {
-                focus.setFocus(wm, ws_windows[0], .window_destroyed);
-                return;
-            }
-        }
-
-        focus.clearFocus(wm);
-    }
 }
 
 fn matchWorkspaceRule(wm: *WM, win: u32) ?usize {
-    // Early return if no rules configured
     if (wm.config.workspaces.rules.items.len == 0) return null;
 
     const wm_class = utils.getWMClass(wm.conn, win, wm.allocator) orelse return null;

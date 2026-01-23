@@ -1,7 +1,6 @@
 //! Minimal TOML parser for configuration files.
 
 const std = @import("std");
-const log = @import("logging");
 
 pub const Value = union(enum) {
     integer: i64,
@@ -340,7 +339,7 @@ const Parser = struct {
                 if (std.fmt.parseInt(i64, raw, 10)) |int_val| {
                     return .{ .integer = int_val };
                 } else |_| {
-                    log.parserInvalidColor(raw, self.line);
+                    std.log.warn("[parser] Invalid color '{s}' at line {}", .{ raw, self.line });
                     return ParseError.InvalidColor;
                 }
             }
@@ -406,7 +405,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
 
         if (c == '[') {
             const section_name = parser.parseSection() catch |err| {
-                log.parserInvalidSection(parser.line, err);
+                std.log.warn("[parser] Invalid section at line {}: {}", .{ parser.line, err });
                 parser.skipLine();
                 continue;
             };
@@ -414,7 +413,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
 
             if (doc.sections.contains(section_name)) {
                 allocator.free(section_name);
-                log.parserDuplicateSection(parser.line);
+                std.log.warn("[parser] Duplicate section at line {}", .{parser.line});
                 parser.skipLine();
                 continue;
             }
@@ -429,7 +428,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
 
         while (true) {
             var kv = parser.parseKeyValueOrBareWord(allocator) catch |err| {
-                log.parserInvalidKeyValue(parser.line, err);
+                std.log.warn("[parser] Invalid key-value at line {}: {}", .{ parser.line, err });
                 parser.skipLine();
                 break;
             };
@@ -440,7 +439,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
             }
 
             if (current_section.pairs.contains(kv[0])) {
-                log.parserDuplicateKey(kv[0], parser.line);
+                std.log.warn("[parser] Duplicate key '{s}' at line {}", .{ kv[0], parser.line });
                 if (current_section.pairs.getPtr(kv[0])) |old_val| {
                     old_val.deinit(allocator);
                 }
@@ -467,7 +466,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
                 if (next == '#') parser.skipLine();
                 break;
             } else {
-                log.parserUnexpectedChar(parser.line);
+                std.log.warn("[parser] Unexpected character at line {}", .{parser.line});
                 parser.skipLine();
                 break;
             }

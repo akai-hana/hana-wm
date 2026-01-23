@@ -152,13 +152,6 @@ pub fn isWindowMapped(conn: *xcb.xcb_connection_t, win: u32) bool {
     return attrs.*.map_state == xcb.XCB_MAP_STATE_VIEWABLE;
 }
 
-pub fn isWindowValid(conn: *xcb.xcb_connection_t, win: u32) bool {
-    const cookie = xcb.xcb_get_window_attributes(conn, win);
-    const attrs = xcb.xcb_get_window_attributes_reply(conn, cookie, null) orelse return false;
-    defer std.c.free(attrs);
-    return true;
-}
-
 pub fn batchMap(conn: *xcb.xcb_connection_t, windows: []const u32) void {
     for (windows) |win| _ = xcb.xcb_map_window(conn, win);
 }
