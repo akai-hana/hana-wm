@@ -2,3 +2,6 @@
 
 # temporary location, but for now let's ignore zig's binary output
 zig-out/
+
+*.orig
+*.rej

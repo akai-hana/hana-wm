@@ -4,7 +4,6 @@ const std = @import("std");
 const defs = @import("defs");
 const parser = @import("parser");
 const xkb = @import("xkbcommon");
-const log = @import("logging");
 
 fn inRange(comptime T: type, val: T, min: T, max: T) bool {
     return val >= min and val <= max;
@@ -78,7 +77,7 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
 
     const fd = std.posix.open(path_z, .{ .ACCMODE = .RDONLY }, 0) catch |err| {
         if (err == error.FileNotFound) {
-            log.configNotFound(path);
+            std.log.info("[config] Not found: {s}, using defaults", .{path});
             return getDefaultConfig();
         }
         return err;
@@ -107,7 +106,7 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
     try parseRules(allocator, &doc, &cfg);
     try validateConfig(allocator, &cfg);
 
-    log.configLoaded(path);
+    std.log.info("[config] Loaded: {s}", .{path});
     return cfg;
 }
 
@@ -130,14 +129,14 @@ const ACTION_MAP = std.StaticStringMap(defs.Action).initComptime(.{
     .{ "kill", .close_window },
     .{ "reload", .reload_config },
     .{ "reload_config", .reload_config },
-    .{ "focus_next", .focus_next },
-    .{ "focus_prev", .focus_prev },
     .{ "toggle_layout", .toggle_layout },
     .{ "increase_master", .increase_master },
     .{ "decrease_master", .decrease_master },
     .{ "increase_master_count", .increase_master_count },
     .{ "decrease_master_count", .decrease_master_count },
     .{ "toggle_tiling", .toggle_tiling },
+    .{ "toggle_fullscreen", .toggle_fullscreen },
+    .{ "fullscreen", .toggle_fullscreen },
     .{ "dump_state", .dump_state },
     .{ "emergency_recover", .emergency_recover },
 });

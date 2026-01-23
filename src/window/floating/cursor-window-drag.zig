@@ -2,7 +2,6 @@
 
 const std = @import("std");
 const defs = @import("defs");
-const log = @import("logging");
 const xcb = defs.xcb;
 const WM = defs.WM;
 
@@ -46,9 +45,6 @@ pub fn startDrag(wm: *WM, window: u32, button: u8, root_x: i16, root_y: i16) voi
         .attr_height = geom_reply.*.height,
     };
 
-    const action = if (button == 1) "move" else "resize";
-    log.dragStarted(action, window, root_x, root_y);
-
     _ = xcb.xcb_configure_window(wm.conn, window, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 }
 
@@ -86,17 +82,14 @@ pub fn updateDrag(wm: *WM, root_x: i16, root_y: i16) void {
 
 pub fn stopDrag(wm: *WM) void {
     if (!drag_state.isDragging()) return;
-
-    log.dragStopped(drag_state.window);
-
     _ = xcb.xcb_flush(wm.conn);
     drag_state.reset();
 }
 
-pub fn isDragging() bool {
+pub inline fn isDragging() bool {
     return drag_state.isDragging();
 }
 
-pub fn getDraggedWindow() ?u32 {
+pub inline fn getDraggedWindow() ?u32 {
     return if (drag_state.isDragging()) drag_state.window else null;
 }

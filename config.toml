@@ -42,6 +42,8 @@ border_normal       = "#4D2843" # Unfocused window border color (hex RGB)
 # Define your modifier key (will replace "Mod" in bindings below)
 Mod = "Super"
 
+Mod+f = "toggle_fullscreen"
+
 # Window management
 Mod+d       = "ghostty" # Launch terminal
 Mod+t       = "xeyes"   # Launch terminal

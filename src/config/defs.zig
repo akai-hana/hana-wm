@@ -31,14 +31,13 @@ pub const Action = union(enum) {
     exec: []const u8,
     close_window,
     reload_config,
-    focus_next,
-    focus_prev,
     toggle_layout,
     increase_master,
     decrease_master,
     increase_master_count,
     decrease_master_count,
     toggle_tiling,
+    toggle_fullscreen,
     switch_workspace: usize,
     move_to_workspace: usize,
     dump_state,
@@ -125,6 +124,14 @@ pub const WM = struct {
     config: Config,
     windows: std.AutoHashMap(u32, Window),
     focused_window: ?u32 = null,
+    fullscreen_window: ?u32 = null,
+    fullscreen_geometry: ?struct {
+        x: i16,
+        y: i16,
+        width: u16,
+        height: u16,
+        border_width: u16,
+    } = null,
     xkb_state: ?*xkbcommon.XkbState,
     should_reload_config: *std.atomic.Value(bool),
 
@@ -157,21 +164,3 @@ pub const WM = struct {
         return if (self.focused_window) |id| self.getWindow(id) else null;
     }
 };
-
-pub const Module = struct {
-    name: []const u8,
-    event_types: []const u8,
-    init_fn: *const fn (*WM) void,
-    handle_fn: *const fn (u8, *anyopaque, *WM) void,
-    deinit_fn: ?*const fn (*WM) void,
-};
-
-pub fn generateModule(comptime module: type) Module {
-    return Module{
-        .name = @typeName(module),
-        .event_types = &module.EVENT_TYPES,
-        .init_fn = module.init,
-        .handle_fn = module.handleEvent,
-        .deinit_fn = if (@hasDecl(module, "deinit")) module.deinit else null,
-    };
-}
