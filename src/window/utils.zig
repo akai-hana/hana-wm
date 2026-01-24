@@ -26,6 +26,12 @@ pub const Rect = struct {
             .height = std.math.clamp(self.height, MIN_WINDOW_DIM, MAX_WINDOW_DIM),
         };
     }
+
+    /// Check if rectangle has valid dimensions
+    pub inline fn isValid(self: Rect) bool {
+        return self.width >= MIN_WINDOW_DIM and self.width <= MAX_WINDOW_DIM and
+            self.height >= MIN_WINDOW_DIM and self.height <= MAX_WINDOW_DIM;
+    }
 };
 
 pub const Margins = struct {
@@ -96,17 +102,17 @@ pub const WindowAttrs = struct {
         }
         if (self.width) |val| {
             mask |= xcb.XCB_CONFIG_WINDOW_WIDTH;
-            values[idx] = val;
+            values[idx] = std.math.clamp(val, MIN_WINDOW_DIM, MAX_WINDOW_DIM);
             idx += 1;
         }
         if (self.height) |val| {
             mask |= xcb.XCB_CONFIG_WINDOW_HEIGHT;
-            values[idx] = val;
+            values[idx] = std.math.clamp(val, MIN_WINDOW_DIM, MAX_WINDOW_DIM);
             idx += 1;
         }
         if (self.border_width) |val| {
             mask |= xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH;
-            values[idx] = val;
+            values[idx] = @min(val, defs.MAX_BORDER_WIDTH);
             idx += 1;
         }
         if (self.stack_mode) |sm| {
@@ -140,14 +146,20 @@ pub inline fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect)
 
 pub fn getGeometry(conn: *xcb.xcb_connection_t, win: u32) ?Rect {
     const cookie = xcb.xcb_get_geometry(conn, win);
-    const reply = xcb.xcb_get_geometry_reply(conn, cookie, null) orelse return null;
+    const reply = xcb.xcb_get_geometry_reply(conn, cookie, null) orelse {
+        std.log.warn("[utils] Failed to get geometry for window 0x{x}", .{win});
+        return null;
+    };
     defer std.c.free(reply);
     return Rect.fromXcb(reply);
 }
 
 pub fn isWindowMapped(conn: *xcb.xcb_connection_t, win: u32) bool {
     const cookie = xcb.xcb_get_window_attributes(conn, win);
-    const attrs = xcb.xcb_get_window_attributes_reply(conn, cookie, null) orelse return false;
+    const attrs = xcb.xcb_get_window_attributes_reply(conn, cookie, null) orelse {
+        std.log.warn("[utils] Failed to get attributes for window 0x{x}", .{win});
+        return false;
+    };
     defer std.c.free(attrs);
     return attrs.*.map_state == xcb.XCB_MAP_STATE_VIEWABLE;
 }
@@ -178,13 +190,19 @@ pub const WMClass = struct {
 pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allocator) ?WMClass {
     const wm_class_atom = blk: {
         const cookie = xcb.xcb_intern_atom(conn, 0, 8, "WM_CLASS");
-        const reply = xcb.xcb_intern_atom_reply(conn, cookie, null) orelse return null;
+        const reply = xcb.xcb_intern_atom_reply(conn, cookie, null) orelse {
+            std.log.warn("[utils] Failed to intern WM_CLASS atom", .{});
+            return null;
+        };
         defer std.c.free(reply);
         break :blk reply.*.atom;
     };
 
     const cookie = xcb.xcb_get_property(conn, 0, win, wm_class_atom, xcb.XCB_ATOM_STRING, 0, 256);
-    const reply = xcb.xcb_get_property_reply(conn, cookie, null) orelse return null;
+    const reply = xcb.xcb_get_property_reply(conn, cookie, null) orelse {
+        std.log.warn("[utils] Failed to get WM_CLASS for window 0x{x}", .{win});
+        return null;
+    };
     defer std.c.free(reply);
 
     if (reply.*.value_len == 0) return null;

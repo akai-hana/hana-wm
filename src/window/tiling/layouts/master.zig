@@ -4,6 +4,7 @@ const std = @import("std");
 const defs = @import("defs");
 const utils = @import("utils");
 const atomic = @import("atomic");
+const bar = @import("bar");
 
 const tiling = @import("tiling");
 const State = tiling.State;
@@ -11,6 +12,9 @@ const State = tiling.State;
 pub fn tile(tx: *atomic.Transaction, state: *State, windows: []const u32, screen_w: u16, screen_h: u16) void {
     const n = windows.len;
     if (n == 0) return;
+
+    const bar_height = bar.getHeight();
+    const usable_h = screen_h - bar_height;
 
     const m = state.margins();
     const m_count: u16 = @intCast(@min(state.master_count, n));
@@ -21,7 +25,7 @@ pub fn tile(tx: *atomic.Transaction, state: *State, windows: []const u32, screen
     else
         screen_w;
 
-    const master_on_right = std.mem.eql(u8, state.master_side, "right");
+    const master_on_right = state.master_side == .right;
 
     const master_x: u16 = if (master_on_right) screen_w - master_w else 0;
     const stack_x: u16 = if (master_on_right) 0 else master_w;
@@ -29,17 +33,19 @@ pub fn tile(tx: *atomic.Transaction, state: *State, windows: []const u32, screen
     const margin_total = m.total();
     const master_inner_w = if (master_w > margin_total) master_w - margin_total else utils.MIN_WINDOW_DIM;
 
-    // Tile master area
-    const m_layout = utils.calcColumnLayout(screen_h, m_count, m);
+    const m_layout = utils.calcColumnLayout(usable_h, m_count, m);
     for (windows[0..m_count], 0..) |win, i| {
         const row: u16 = @intCast(i);
         const rect = utils.Rect{
             .x = @intCast(master_x + m.gap),
-            .y = @intCast(m.gap + row * m_layout.spacing),
+            .y = @intCast(bar_height + m.gap + row * m_layout.spacing),
             .width = master_inner_w,
             .height = m_layout.item_h,
         };
-        tx.configureWindow(win, rect) catch continue;
+        tx.configureWindow(win, rect) catch |err| {
+            std.log.err("[master] Failed to configure master window {}: {}", .{ win, err });
+            continue;
+        };
     }
 
     if (s_count == 0) return;
@@ -47,16 +53,14 @@ pub fn tile(tx: *atomic.Transaction, state: *State, windows: []const u32, screen
     const stack_w = screen_w - master_w;
     const stack_windows = windows[m_count..];
 
-    // Calculate how many windows fit at full height in the stack
     const space_per_window: u32 = utils.MIN_WINDOW_DIM + 2 * @as(u32, m.border) + @as(u32, m.gap);
-    const available: u32 = @as(u32, screen_h) - @as(u32, m.gap);
+    const available: u32 = @as(u32, usable_h) - @as(u32, m.gap);
     const max_fit: u16 = @intCast(@max(1, available / space_per_window));
 
     const stack_margin = m.gap + 2 * m.border;
 
     if (s_count <= max_fit) {
-        // All windows fit - single column at full width
-        const s_layout = utils.calcColumnLayout(screen_h, s_count, m);
+        const s_layout = utils.calcColumnLayout(usable_h, s_count, m);
         const stack_inner_w = if (stack_w > stack_margin)
             @max(utils.MIN_WINDOW_DIM, stack_w - stack_margin)
         else
@@ -66,15 +70,17 @@ pub fn tile(tx: *atomic.Transaction, state: *State, windows: []const u32, screen
             const row: u16 = @intCast(i);
             const rect = utils.Rect{
                 .x = @intCast(stack_x + m.gap),
-                .y = @intCast(m.gap + row * s_layout.spacing),
+                .y = @intCast(bar_height + m.gap + row * s_layout.spacing),
                 .width = stack_inner_w,
                 .height = s_layout.item_h,
             };
-            tx.configureWindow(win, rect) catch continue;
+            tx.configureWindow(win, rect) catch |err| {
+                std.log.err("[master] Failed to configure stack window {}: {}", .{ win, err });
+                continue;
+            };
         }
     } else {
-        // Overflow: progressively split rows as needed
-        const s_layout = utils.calcColumnLayout(screen_h, max_fit, m);
+        const s_layout = utils.calcColumnLayout(usable_h, max_fit, m);
 
         var row: u16 = 0;
         while (row < max_fit) : (row += 1) {
@@ -87,7 +93,7 @@ pub fn tile(tx: *atomic.Transaction, state: *State, windows: []const u32, screen
             if (cols_in_row == 0) break;
 
             const row_col_w = stack_w / cols_in_row;
-            const y_pos = m.gap + row * s_layout.spacing;
+            const y_pos = bar_height + m.gap + row * s_layout.spacing;
             const row_inner_w = if (row_col_w > stack_margin)
                 @max(utils.MIN_WINDOW_DIM, row_col_w - stack_margin)
             else
@@ -104,7 +110,10 @@ pub fn tile(tx: *atomic.Transaction, state: *State, windows: []const u32, screen
                     .width = row_inner_w,
                     .height = s_layout.item_h,
                 };
-                tx.configureWindow(win, rect) catch continue;
+                tx.configureWindow(win, rect) catch |err| {
+                    std.log.err("[master] Failed to configure overflow window {}: {}", .{ win, err });
+                    continue;
+                };
 
                 col += 1;
             }

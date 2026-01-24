@@ -8,7 +8,7 @@ pub fn build(b: *std.Build) void {
 
     // Create the root module
     const root_module = b.createModule(.{
-        .root_source_file = b.path("src/core/main.zig"),
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -26,7 +26,8 @@ pub fn build(b: *std.Build) void {
         .root_module = root_module,
     });
 
-    // Link-Time Optimization is handled automatically by ReleaseFast in newer Zig
+    // Add FreeType include paths
+    exe.root_module.addIncludePath(.{ .cwd_relative = "/usr/include/freetype2" });
 
     // Set up build-time allocator
     var arena = std.heap.ArenaAllocator.init(b.allocator);
@@ -36,35 +37,27 @@ pub fn build(b: *std.Build) void {
     // Initialize module registry
     var all_modules = std.StringHashMap(*std.Build.Module).init(allocator);
 
-    // Register core modules - module name = filename
-    // const core_modules = [_][]const u8{
-    //     "defs",
-    //     "toml",
-    //     "config",
-    //     "xkbcommon",
-    //     "input",
-    //     "window",
-    // };
-
-    // for (core_modules) |name| {
-    //     const path = b.fmt("src/core/{s}.zig", .{name});
-    //     const module = b.addModule(name, .{ .root_source_file = b.path(path) });
-    //     all_modules.put(name, module) catch @panic("Failed to register core module");
-    // }
-
     // Auto-discover modules
     discoverModules(b, "src", allocator, &all_modules) catch |err| {
         std.debug.print("Fatal: Failed to discover modules: {}\n", .{err});
         std.process.exit(1);
     };
 
+    // Add include paths to all modules (needed for C imports)
+    var include_iter = all_modules.iterator();
+    while (include_iter.next()) |entry| {
+        entry.value_ptr.*.addIncludePath(.{ .cwd_relative = "/usr/include/freetype2" });
+    }
+
     // Connect modules
     connectAllModules(root_module, &all_modules);
 
     // Link system libraries
     root_module.linkSystemLibrary("xcb", .{});
+    root_module.linkSystemLibrary("xcb-render", .{});
     root_module.linkSystemLibrary("xkbcommon", .{});
     root_module.linkSystemLibrary("xkbcommon-x11", .{});
+    root_module.linkSystemLibrary("freetype2", .{});
 
     // Install artifact
     b.installArtifact(exe);
@@ -112,14 +105,6 @@ fn discoverModules(
 
     var iter = dir.iterate();
     while (try iter.next(io)) |entry| {
-        // Skip src/core directory
-        // if (std.mem.eql(u8, dir_path, "src") and 
-        //     entry.kind == .directory and 
-        //     std.mem.eql(u8, entry.name, "core")) 
-        // {
-        //     continue;
-        // }
-
         // Recurse into subdirectories
         if (entry.kind == .directory) {
             const subdir = try std.fs.path.join(allocator, &.{ dir_path, entry.name });

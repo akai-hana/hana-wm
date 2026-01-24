@@ -1,4 +1,18 @@
 //! Minimal TOML parser for configuration files.
+//!
+//! This parser handles a subset of TOML sufficient for window manager configuration:
+//! - Sections: [section_name]
+//! - Key-value pairs: key = value
+//! - Values: integers, booleans, strings (quoted), colors (hex), arrays
+//! - Comments: # to end of line
+//!
+//! Intentionally lightweight - doesn't support:
+//! - Dotted keys (workspace.1.name)
+//! - Inline tables
+//! - Multi-line strings
+//! - Dates/times
+//!
+//! This keeps the parser simple and dependencies minimal.
 
 const std = @import("std");
 
@@ -240,7 +254,7 @@ const Parser = struct {
             if (c == '\n') return ParseError.InvalidValue;
         }
 
-        var result: std.ArrayList(u8) = .{};
+        var result = std.ArrayList(u8){};
         errdefer result.deinit(allocator);
         try result.ensureTotalCapacity(allocator, end_pos - start);
 
@@ -287,7 +301,7 @@ const Parser = struct {
     fn parseArray(self: *Parser, allocator: std.mem.Allocator) ParseError!std.ArrayList(Value) {
         _ = self.consume();
 
-        var array: std.ArrayList(Value) = .{};
+        var array = std.ArrayList(Value){};
         errdefer {
             for (array.items) |*item| item.deinit(allocator);
             array.deinit(allocator);
@@ -382,6 +396,7 @@ const Parser = struct {
     }
 };
 
+/// Parse TOML configuration from string
 pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
     var doc = Document.init(allocator);
     errdefer doc.deinit();

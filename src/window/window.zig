@@ -23,26 +23,37 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
 
     const current_ws = workspaces.getCurrentWorkspace() orelse 0;
 
-    if (target_ws) |ws| {
-        if (ws != current_ws) {
-            workspaces.moveWindowTo(wm, win, ws);
-
-            if (wm.config.tiling.enabled) {
-                const attrs = utils.WindowAttrs{
-                    .border_width = wm.config.tiling.border_width,
-                    .event_mask = xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW,
-                };
-                attrs.configure(wm.conn, win);
-            }
-
-            utils.flush(wm.conn);
-            return;
+    const validated_target_ws = if (target_ws) |ws| blk: {
+        const ws_state = workspaces.getState() orelse break :blk current_ws;
+        if (ws >= ws_state.workspaces.len) {
+            std.log.warn("[window] Rule target workspace {} exceeds count {}, using current workspace", .{ ws, ws_state.workspaces.len });
+            break :blk current_ws;
         }
+        break :blk ws;
+    } else current_ws;
+
+    if (validated_target_ws != current_ws) {
+        _ = xcb.xcb_map_window(wm.conn, win);
+
+        workspaces.moveWindowTo(wm, win, validated_target_ws);
+
+        if (wm.config.tiling.enabled) {
+            const attrs = utils.WindowAttrs{
+                .border_width = wm.config.tiling.border_width,
+                .border_color = wm.config.tiling.border_normal,
+                .event_mask = xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW,
+            };
+            attrs.configure(wm.conn, win);
+        }
+
+        _ = xcb.xcb_unmap_window(wm.conn, win);
+
+        utils.flush(wm.conn);
+        return;
     }
 
-    // Map to current workspace atomically
-    atomic.atomicMapWindow(wm, win, target_ws orelse current_ws) catch |err| {
-        std.log.err("[window] Failed to map window atomically: {}", .{err});
+    atomic.atomicMapWindow(wm, win, validated_target_ws) catch |err| {
+        std.log.err("[window] Failed to map window {} atomically: {}", .{ win, err });
         return;
     };
 
@@ -53,11 +64,11 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
             .event_mask = xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW,
         };
         attrs.configure(wm.conn, win);
-        wm.focused_window = win;
+
+        focus.setFocus(wm, win, .tiling_operation);
         tiling.retileCurrentWorkspace(wm);
     }
 
-    focus.markLayoutOperation();
     utils.flush(wm.conn);
 }
 
@@ -75,7 +86,6 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, w
 
 pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) void {
     if (event.event == wm.root or event.event == 0) return;
-    if (focus.shouldSuppressMouseFocus()) return;
     if (hasQueuedEnterEvents(wm.conn)) return;
 
     focus.setFocus(wm, event.event, .mouse_enter);
@@ -96,10 +106,14 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM
     const win = event.window;
 
     atomic.atomicDestroyWindow(wm, win) catch |err| {
-        std.log.err("[window] Failed to destroy window atomically: {}", .{err});
+        std.log.err("[window] Failed to destroy window {} atomically: {}", .{ win, err });
     };
 
     wm.removeWindow(win);
+
+    if (wm.config.tiling.enabled) {
+        tiling.retileCurrentWorkspace(wm);
+    }
 }
 
 fn matchWorkspaceRule(wm: *WM, win: u32) ?usize {

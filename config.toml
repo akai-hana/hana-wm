@@ -25,7 +25,7 @@
 [tiling]
 enabled     = true     # Enable tiling on startup
 layout      = "master" # Default layout: master_left, monocle, or grid
-master_side = "right"
+master_side = "left"
 
 master_count        = 1        # Number of windows in master area
 master_width_factor = 55       # Master area width (5-95, percentage)
@@ -44,12 +44,25 @@ Mod = "Super"
 
 Mod+f = "toggle_fullscreen"
 
+Mod+Shift+Return = "pkill -9 Xorg" # quit
+
 # Window management
-Mod+d       = "ghostty" # Launch terminal
+Mod+a       = "MOZ_USE_XINPUT2=1 firefox"
+Mod+Shift+a = "pkill firefox"
+
+Mod+s       = "flatpak run org.equicord.equibop"
+Mod+Shift+s = "pkill equibop"
+
+Mod+d       = "ghostty"
+Mod+Shift+d = "pkill ghostty"
+
+Mod+v       = "flatpak run com.github.th_ch.youtube_music"
+Mod+Shift+v = "pkill youtube-music"
+
 Mod+t       = "xeyes"   # Launch terminal
-Mod+Shift+f = "kill"    # Force kill window
-Mod+Shift+q = "close"   # Close window gracefully
-Mod+Shift+r = "reload"  # Reload config
+Mod+Shift+f = "close"
+Mod+Shift+g = "kill"
+Mod+Shift+t = "reload"  # Reload config
 
 # Tiling layout controls
 Mod+space       = "toggle_layout"         # Cycle: master_left → monocle → grid
@@ -74,19 +87,29 @@ Mod+Shift+1 = "move_to_workspace_1"
 Mod+Shift+2 = "move_to_workspace_2"
 Mod+Shift+3 = "move_to_workspace_3"
 Mod+Shift+4 = "move_to_workspace_4"
-Mod+Shift+5 = "move_to_workspace_5"
-Mod+Shift+6 = "move_to_workspace_6"
-Mod+Shift+7 = "move_to_workspace_7"
-Mod+Shift+8 = "move_to_workspace_8"
+Mod+Shift+q = "move_to_workspace_5"
+Mod+Shift+w = "move_to_workspace_6"
+Mod+Shift+e = "move_to_workspace_7"
+Mod+Shift+r = "move_to_workspace_8"
 
 # Application launchers
 Mod+p = "rofi -show drun"
-Mod+a = "sh MOZ_USE_XINPUT2=1 firefox"
 
 # Emergency/Debug
-Mod+Shift+d      = "dump_state"         # Print debug info
+#Mod+Shift+d      = "dump_state"         # Print debug info
 Mod+Shift+Escape = "emergency_recover"  # Emergency recovery mode
 
+[bar]
+show        = true
+height      = 24
+font        = "FiraCode Nerd Font Ret:size=10"
+bg          = "#222222"
+fg          = "#BBBBBB"
+selected_bg = "#005577"
+selected_fg = "#EEEEEE"
+occupied_fg = "#EEEEEE"
+urgent_bg   = "#FF0000"
+urgent_fg   = "#FFFFFF"
 
 [workspaces]
 count = 8  # Number of virtual desktops (1-20)
@@ -184,6 +207,9 @@ deluge
 
 # TIPS
 # - Find window class: run `xprop WM_CLASS` and click a window
+# - Find font names: run `fc-list | grep -i <font-name>`
+#   Font format: "Font Family Name:size=N" (e.g., "FiraCode Nerd Font:size=12")
+#   If no size specified, defaults to 10pt
 # - Reload config: Use your configured keybinding (default: Mod+Shift+r)
 # - Multiple entries on one line: Use semicolons
 #   Example: discord = 2; vesktop = 2; equibop = 2

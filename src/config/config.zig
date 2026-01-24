@@ -100,9 +100,11 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
     defer doc.deinit();
 
     var cfg = getDefaultConfig();
+
+    parseWorkspaces(&doc, &cfg);
     try parseKeybindings(allocator, &doc, &cfg);
     parseTiling(&doc, &cfg);
-    parseWorkspaces(&doc, &cfg);
+    parseBar(&doc, &cfg);
     try parseRules(allocator, &doc, &cfg);
     try validateConfig(allocator, &cfg);
 
@@ -158,7 +160,10 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, c
             entry.key_ptr.*;
         defer if (mod_substitute != null) allocator.free(keybind_str);
 
-        const parts = parseKeybindString(keybind_str) catch continue;
+        const parts = parseKeybindString(keybind_str) catch |err| {
+            std.log.warn("[config] Failed to parse keybind '{s}': {}", .{ keybind_str, err });
+            continue;
+        };
         const action = try parseAction(allocator, command);
 
         try cfg.keybindings.append(allocator, .{
@@ -211,13 +216,13 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !defs.Action {
 
     if (std.mem.startsWith(u8, cmd, "workspace_")) {
         const num = try std.fmt.parseInt(usize, cmd[10..], 10);
-        if (num < 1 or num > 20) return error.InvalidWorkspace;
+        if (num < 1 or num > defs.MAX_WORKSPACES) return error.InvalidWorkspace;
         return .{ .switch_workspace = num - 1 };
     }
 
     if (std.mem.startsWith(u8, cmd, "move_to_workspace_")) {
         const num = try std.fmt.parseInt(usize, cmd[18..], 10);
-        if (num < 1 or num > 20) return error.InvalidWorkspace;
+        if (num < 1 or num > defs.MAX_WORKSPACES) return error.InvalidWorkspace;
         return .{ .move_to_workspace = num - 1 };
     }
 
@@ -273,11 +278,11 @@ fn parseTiling(doc: *const parser.Document, cfg: *defs.Config) void {
 
     cfg.tiling.enabled = get(bool, section, "enabled", true, null);
     cfg.tiling.layout = get([]const u8, section, "layout", "master_left", null);
-    cfg.tiling.master_side = get([]const u8, section, "master_side", "left", struct {
-        fn v(val: []const u8) bool {
-            return std.mem.eql(u8, val, "left") or std.mem.eql(u8, val, "right");
-        }
-    }.v);
+
+    if (section.getString("master_side")) |side_str| {
+        cfg.tiling.master_side = defs.MasterSide.fromString(side_str) orelse .left;
+    }
+
     cfg.tiling.master_count = get(usize, section, "master_count", 1, struct {
         fn v(n: usize) bool {
             return n >= 1;
@@ -285,17 +290,17 @@ fn parseTiling(doc: *const parser.Document, cfg: *defs.Config) void {
     }.v);
     cfg.tiling.master_width_factor = get(f32, section, "master_width_factor", 50.0, struct {
         fn v(n: f32) bool {
-            return inRange(f32, n, 0.05, 0.95);
+            return inRange(f32, n, defs.MIN_MASTER_WIDTH, defs.MAX_MASTER_WIDTH);
         }
     }.v);
     cfg.tiling.gaps = get(u16, section, "gaps", 10, struct {
         fn v(n: u16) bool {
-            return n <= 200;
+            return n <= defs.MAX_GAPS;
         }
     }.v);
     cfg.tiling.border_width = get(u16, section, "border_width", 2, struct {
         fn v(n: u16) bool {
-            return n <= 100;
+            return n <= defs.MAX_BORDER_WIDTH;
         }
     }.v);
 
@@ -303,12 +308,32 @@ fn parseTiling(doc: *const parser.Document, cfg: *defs.Config) void {
     cfg.tiling.border_normal = getColor(section, "border_normal", 0x383C4A);
 }
 
+fn parseBar(doc: *const parser.Document, cfg: *defs.Config) void {
+    const section = doc.getSection("bar") orelse return;
+
+    cfg.bar.show = get(bool, section, "show", true, null);
+    cfg.bar.height = get(u16, section, "height", 24, struct {
+        fn v(n: u16) bool {
+            return n >= 16 and n <= 100;
+        }
+    }.v);
+    cfg.bar.font = get([]const u8, section, "font", "FiraCode Nerd Font Ret", null);
+    
+    cfg.bar.bg = getColor(section, "bg", 0x222222);
+    cfg.bar.fg = getColor(section, "fg", 0xBBBBBB);
+    cfg.bar.selected_bg = getColor(section, "selected_bg", 0x005577);
+    cfg.bar.selected_fg = getColor(section, "selected_fg", 0xEEEEEE);
+    cfg.bar.occupied_fg = getColor(section, "occupied_fg", 0xEEEEEE);
+    cfg.bar.urgent_bg = getColor(section, "urgent_bg", 0xFF0000);
+    cfg.bar.urgent_fg = getColor(section, "urgent_fg", 0xFFFFFF);
+}
+
 fn parseWorkspaces(doc: *const parser.Document, cfg: *defs.Config) void {
     const section = doc.getSection("workspaces") orelse return;
 
     cfg.workspaces.count = get(usize, section, "count", 9, struct {
         fn v(n: usize) bool {
-            return inRange(usize, n, 1, 20);
+            return inRange(usize, n, defs.MIN_WORKSPACES, defs.MAX_WORKSPACES);
         }
     }.v);
 }
@@ -318,7 +343,12 @@ fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *d
         var iter = section.pairs.iterator();
         while (iter.next()) |entry| {
             const ws_num = entry.value_ptr.*.asInt() orelse continue;
-            if (ws_num < 1 or ws_num > 20) continue;
+
+            if (ws_num < 1 or ws_num > cfg.workspaces.count) {
+                std.log.warn("[config] Rule workspace {} for '{s}' exceeds workspace count {}, skipping",
+                    .{ ws_num, entry.key_ptr.*, cfg.workspaces.count });
+                continue;
+            }
 
             const rule = defs.Rule{
                 .class_name = try allocator.dupe(u8, entry.key_ptr.*),
@@ -339,7 +369,12 @@ fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *d
             continue;
 
         const ws_num = std.fmt.parseInt(usize, ws_str, 10) catch continue;
-        if (ws_num < 1 or ws_num > 20) continue;
+
+        if (ws_num < 1 or ws_num > cfg.workspaces.count) {
+            std.log.warn("[config] Section '{s}' workspace {} exceeds workspace count {}, skipping",
+                .{ name, ws_num, cfg.workspaces.count });
+            continue;
+        }
 
         var iter = entry.value_ptr.pairs.iterator();
         while (iter.next()) |class_entry| {
