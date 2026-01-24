@@ -11,6 +11,7 @@ const events = @import("events");
 const input = @import("input");
 const utils = @import("utils");
 const async = @import("async");
+const bar = @import("bar");
 
 const xcb = defs.xcb;
 const WM = defs.WM;
@@ -18,7 +19,8 @@ const WM = defs.WM;
 const WM_EVENT_MASK = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
     xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
     xcb.XCB_EVENT_MASK_KEY_PRESS |
-    xcb.XCB_EVENT_MASK_ENTER_WINDOW;
+    xcb.XCB_EVENT_MASK_ENTER_WINDOW |
+    xcb.XCB_EVENT_MASK_PROPERTY_CHANGE;
 
 const EventFlags = packed struct {
     critical: bool = false,
@@ -37,6 +39,7 @@ const EVENT_FLAGS = blk: {
     flags[xcb.XCB_LEAVE_NOTIFY] = .{ .batchable = true };
     flags[xcb.XCB_FOCUS_IN] = .{ .batchable = true };
     flags[xcb.XCB_FOCUS_OUT] = .{ .batchable = true };
+    flags[xcb.XCB_EXPOSE] = .{ .batchable = true };
     break :blk flags;
 };
 
@@ -116,19 +119,51 @@ fn grabKeybindings(wm: *WM) !void {
 }
 
 fn handleConfigReload(wm: *WM) !void {
-    var new_config = try config.loadConfigDefault(wm.allocator);
+    std.log.info("[config] Reload requested, waiting for pending jobs...", .{});
+
+    const queue = async.getGlobal() orelse return error.AsyncQueueNotInitialized;
+
+    var wait_iterations: usize = 0;
+    const max_wait_iterations: usize = 100;
+    while (queue.hasPending() and wait_iterations < max_wait_iterations) : (wait_iterations += 1) {
+        async.processPending(wm);
+        std.posix.nanosleep(0, 1 * std.time.ns_per_ms);
+    }
+
+    if (queue.hasPending()) {
+        std.log.warn("[config] Timeout waiting for jobs to complete, clearing queue", .{});
+        queue.clear();
+    }
+
+    var new_config = config.loadConfigDefault(wm.allocator) catch |err| {
+        std.log.err("[config] Failed to load new config: {}, keeping old config", .{err});
+        return err;
+    };
     errdefer new_config.deinit(wm.allocator);
 
     config.resolveKeybindings(new_config.keybindings.items, @ptrCast(@alignCast(wm.xkb_state)));
 
-    wm.config.deinit(wm.allocator);
+    var old_config = wm.config;
     wm.config = new_config;
 
-    try grabKeybindings(wm);
-    try input.rebuildKeybindMap(wm);
+    grabKeybindings(wm) catch |err| {
+        std.log.err("[config] Failed to grab keybindings: {}, reverting to old config", .{err});
+        new_config.deinit(wm.allocator);
+        wm.config = old_config;
+        try grabKeybindings(wm);
+        return err;
+    };
+
+    old_config.deinit(wm.allocator);
+
+    input.rebuildKeybindMap(wm) catch |err| {
+        std.log.err("[config] Failed to rebuild keybind map: {}", .{err});
+        return err;
+    };
+
     @import("tiling").reloadConfig(wm);
 
-    std.log.info("[config] Reloaded", .{});
+    std.log.info("[config] Reload complete", .{});
 }
 
 pub fn main() !void {
@@ -177,27 +212,42 @@ pub fn main() !void {
     events.initModules(&wm);
     defer events.deinitModules(&wm);
 
+    bar.init(&wm) catch |err| {
+        if (err != error.BarDisabled) {
+            std.log.warn("[bar] Failed to initialize: {}", .{err});
+        }
+    };
+    defer bar.deinit();
+
     try grabKeybindings(&wm);
     setupExistingWindows(conn, root);
     utils.flush(conn);
 
     std.log.info("[hana] Started", .{});
 
-    // Main event loop with async job processing
     var batch_count: usize = 0;
-    const MAX_BATCH_SIZE: usize = 10;
+    var idle_count: usize = 0;
+    var last_bar_update: i64 = 0;
 
     while (true) {
         async.processPending(&wm);
+
+        if (std.posix.clock_gettime(std.posix.CLOCK.REALTIME)) |ts| {
+            const current_time = ts.sec;
+            if (current_time - last_bar_update >= 5) {
+                bar.update() catch {};
+                last_bar_update = current_time;
+            }
+        } else |_| {}
 
         const event = xcb.xcb_poll_for_event(conn);
 
         if (event) |ev| {
             defer std.c.free(ev);
+            idle_count = 0;
 
             const event_type = @as(*u8, @ptrCast(ev)).*;
 
-            // Fast path for focus events
             if (event_type == xcb.XCB_ENTER_NOTIFY or event_type == xcb.XCB_FOCUS_IN) {
                 events.dispatch(event_type, ev, &wm);
                 utils.flush(conn);
@@ -212,14 +262,13 @@ pub fn main() !void {
 
             events.dispatch(event_type, ev, &wm);
 
-            // Intelligent flush based on event type
             const flags = getEventFlags(event_type);
             if (flags.critical) {
                 utils.flush(conn);
                 batch_count = 0;
             } else if (flags.batchable) {
                 batch_count += 1;
-                if (batch_count >= MAX_BATCH_SIZE) {
+                if (batch_count >= defs.MAX_EVENT_BATCH_SIZE) {
                     utils.flush(conn);
                     batch_count = 0;
                 }
@@ -229,7 +278,17 @@ pub fn main() !void {
             }
         } else {
             if (!async.getGlobal().?.hasPending()) {
-                std.posix.nanosleep(0, 1 * std.time.ns_per_ms);
+                idle_count += 1;
+                const sleep_ns = if (idle_count < defs.IDLE_THRESHOLD_SHORT)
+                    defs.EVENT_POLL_SLEEP_NS
+                else if (idle_count < defs.IDLE_THRESHOLD_LONG)
+                    defs.EVENT_POLL_SLEEP_NS * defs.SLEEP_MULTIPLIER_MEDIUM
+                else
+                    defs.EVENT_POLL_SLEEP_NS * defs.SLEEP_MULTIPLIER_LONG;
+
+                std.posix.nanosleep(0, sleep_ns);
+            } else {
+                idle_count = 0;
             }
         }
     }

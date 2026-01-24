@@ -4,6 +4,7 @@ const std = @import("std");
 const defs = @import("defs");
 const utils = @import("utils");
 const atomic = @import("atomic");
+const bar = @import("bar");
 
 const tiling = @import("tiling");
 const State = tiling.State;
@@ -12,11 +13,14 @@ pub fn tile(tx: *atomic.Transaction, state: *State, windows: []const u32, screen
     const n = windows.len;
     if (n == 0) return;
 
+    const bar_height = bar.getHeight();
+    const usable_h = screen_h - bar_height;
+
     const m = state.margins();
     const dims = utils.calcGridDims(n);
 
     const cell_w = (screen_w -| (dims.cols + 1) * m.gap) / dims.cols;
-    const cell_h = (screen_h -| (dims.rows + 1) * m.gap) / dims.rows;
+    const cell_h = (usable_h -| (dims.rows + 1) * m.gap) / dims.rows;
 
     const border_margin = 2 * m.border;
     const win_w = if (cell_w > border_margin) cell_w - border_margin else utils.MIN_WINDOW_DIM;
@@ -31,10 +35,13 @@ pub fn tile(tx: *atomic.Transaction, state: *State, windows: []const u32, screen
 
         const rect = utils.Rect{
             .x = @intCast(m.gap + col * cell_spacing_w),
-            .y = @intCast(m.gap + row * cell_spacing_h),
+            .y = @intCast(bar_height + m.gap + row * cell_spacing_h),
             .width = win_w,
             .height = win_h,
         };
-        tx.configureWindow(win, rect) catch continue;
+        tx.configureWindow(win, rect) catch |err| {
+            std.log.err("[grid] Failed to configure window {}: {}", .{ win, err });
+            continue;
+        };
     }
 }

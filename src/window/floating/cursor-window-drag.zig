@@ -1,4 +1,7 @@
 //! Window dragging and resizing with mouse.
+//!
+//! Provides Super+Button1 for moving and Super+Button3 for resizing windows.
+//! Respects minimum and maximum window dimensions.
 
 const std = @import("std");
 const defs = @import("defs");
@@ -30,8 +33,21 @@ var drag_state: DragState = .{};
 pub fn startDrag(wm: *WM, window: u32, button: u8, root_x: i16, root_y: i16) void {
     if (button != 1 and button != 3) return;
 
+    // Don't allow dragging the root window
+    if (window == wm.root) {
+        std.log.err("[drag] Attempted to drag ROOT window!", .{});
+        return;
+    }
+
+    // Exit fullscreen mode if this window is fullscreen
+    const fullscreen = @import("fullscreen");
+    fullscreen.exitFullscreenForWindow(wm, window);
+
     const geom_cookie = xcb.xcb_get_geometry(wm.conn, window);
-    const geom_reply = xcb.xcb_get_geometry_reply(wm.conn, geom_cookie, null) orelse return;
+    const geom_reply = xcb.xcb_get_geometry_reply(wm.conn, geom_cookie, null) orelse {
+        std.log.warn("[drag] Failed to get window geometry", .{});
+        return;
+    };
     defer std.c.free(geom_reply);
 
     drag_state = .{
@@ -55,7 +71,7 @@ pub fn updateDrag(wm: *WM, root_x: i16, root_y: i16) void {
     const dy: i32 = @as(i32, root_y) - @as(i32, drag_state.start_y);
 
     if (drag_state.button == 1) {
-        // Move
+        // Move window
         const new_x_i32 = std.math.add(i32, drag_state.attr_x, dx) catch
             if (dx > 0) @as(i32, std.math.maxInt(i16)) else @as(i32, std.math.minInt(i16));
         const new_y_i32 = std.math.add(i32, drag_state.attr_y, dy) catch
@@ -69,13 +85,17 @@ pub fn updateDrag(wm: *WM, root_x: i16, root_y: i16) void {
             @bitCast(@as(i32, new_y)),
         });
     } else {
-        // Resize
+        // Resize window
         const new_width = std.math.add(i32, drag_state.attr_width, dx) catch defs.MAX_WINDOW_DIM;
         const new_height = std.math.add(i32, drag_state.attr_height, dy) catch defs.MAX_WINDOW_DIM;
 
+        // Ensure dimensions stay within bounds
+        const clamped_width: u16 = @intCast(std.math.clamp(new_width, defs.MIN_WINDOW_DIM, defs.MAX_WINDOW_DIM));
+        const clamped_height: u16 = @intCast(std.math.clamp(new_height, defs.MIN_WINDOW_DIM, defs.MAX_WINDOW_DIM));
+
         _ = xcb.xcb_configure_window(wm.conn, drag_state.window, xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT, &[_]u32{
-            @intCast(std.math.clamp(new_width, defs.MIN_WINDOW_DIM, defs.MAX_WINDOW_DIM)),
-            @intCast(std.math.clamp(new_height, defs.MIN_WINDOW_DIM, defs.MAX_WINDOW_DIM)),
+            clamped_width,
+            clamped_height,
         });
     }
 }

@@ -1,14 +1,20 @@
 //! Shared types for the tiling window system.
+//!
+//! This module is intentionally minimal - most tiling state lives in tiling.zig.
+//! These types are exported for use by layout implementations.
 
 const std = @import("std");
 const defs = @import("defs");
 
+/// Layout algorithms available in the tiling system
 pub const Layout = enum {
     master_left,
     monocle,
     grid,
 };
 
+/// Runtime state for the tiling system
+/// Note: This is duplicated in tiling.zig - consider consolidating
 pub const TilingState = struct {
     enabled: bool = true,
     layout: Layout = .master_left,

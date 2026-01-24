@@ -5,25 +5,56 @@ const defs = @import("defs");
 const xcb = defs.xcb;
 const WM = defs.WM;
 const utils = @import("utils");
-const tiling = @import("tiling");
 const focus = @import("focus");
 const atomic = @import("atomic");
 const async = @import("async");
+const bar = @import("bar");
 
 pub const Workspace = struct {
     id: usize,
     windows: std.ArrayList(u32),
+    window_set: std.AutoHashMap(u32, void),
+    window_positions: std.AutoHashMap(u32, utils.Rect),
+    window_borders: std.AutoHashMap(u32, u32),
     name: []const u8,
     allocator: std.mem.Allocator,
 
+    pub fn init(allocator: std.mem.Allocator, id: usize, name: []const u8) !Workspace {
+        return .{
+            .id = id,
+            .windows = std.ArrayList(u32){},
+            .window_set = std.AutoHashMap(u32, void).init(allocator),
+            .window_positions = std.AutoHashMap(u32, utils.Rect).init(allocator),
+            .window_borders = std.AutoHashMap(u32, u32).init(allocator),
+            .name = name,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Workspace) void {
+        self.windows.deinit(self.allocator);
+        self.window_set.deinit();
+        self.window_positions.deinit();
+        self.window_borders.deinit();
+    }
+
     pub fn contains(self: *const Workspace, win: u32) bool {
-        for (self.windows.items) |w| {
-            if (w == win) return true;
+        return self.window_set.contains(win);
+    }
+
+    pub fn add(self: *Workspace, win: u32) !void {
+        if (!self.contains(win)) {
+            try self.windows.append(self.allocator, win);
+            try self.window_set.put(win, {});
         }
-        return false;
     }
 
     pub fn remove(self: *Workspace, win: u32) bool {
+        if (!self.window_set.remove(win)) return false;
+
+        _ = self.window_positions.remove(win);
+        _ = self.window_borders.remove(win);
+
         for (self.windows.items, 0..) |w, i| {
             if (w == win) {
                 _ = self.windows.orderedRemove(i);
@@ -31,6 +62,24 @@ pub const Workspace = struct {
             }
         }
         return false;
+    }
+
+    pub fn saveWindowState(self: *Workspace, win: u32, rect: utils.Rect, border_color: u32) !void {
+        try self.window_positions.put(win, rect);
+        try self.window_borders.put(win, border_color);
+    }
+
+    pub fn getWindowPosition(self: *const Workspace, win: u32) ?utils.Rect {
+        return self.window_positions.get(win);
+    }
+
+    pub fn getWindowBorder(self: *const Workspace, win: u32) ?u32 {
+        return self.window_borders.get(win);
+    }
+
+    pub fn clearPositions(self: *Workspace) void {
+        self.window_positions.clearRetainingCapacity();
+        self.window_borders.clearRetainingCapacity();
     }
 };
 
@@ -44,22 +93,31 @@ pub const State = struct {
 var state: ?*State = null;
 
 pub fn init(wm: *WM) void {
-    const s = wm.allocator.create(State) catch return;
+    const s = wm.allocator.create(State) catch {
+        std.log.err("[workspaces] Failed to allocate state", .{});
+        return;
+    };
     s.allocator = wm.allocator;
     s.current = 0;
 
     const count = wm.config.workspaces.count;
     s.workspaces = wm.allocator.alloc(Workspace, count) catch {
+        std.log.err("[workspaces] Failed to allocate workspaces", .{});
         wm.allocator.destroy(s);
         return;
     };
 
     for (s.workspaces, 0..) |*ws, i| {
-        ws.* = .{
-            .id = i,
-            .windows = .{},
-            .name = std.fmt.allocPrint(wm.allocator, "{}", .{i + 1}) catch "?",
-            .allocator = wm.allocator,
+        const name = std.fmt.allocPrint(wm.allocator, "{}", .{i + 1}) catch "?";
+        ws.* = Workspace.init(wm.allocator, i, name) catch {
+            std.log.err("[workspaces] Failed to init workspace {}", .{i});
+            for (s.workspaces[0..i]) |*prev_ws| {
+                prev_ws.deinit();
+                wm.allocator.free(prev_ws.name);
+            }
+            wm.allocator.free(s.workspaces);
+            wm.allocator.destroy(s);
+            return;
         };
     }
 
@@ -69,7 +127,7 @@ pub fn init(wm: *WM) void {
 pub fn deinit(wm: *WM) void {
     if (state) |s| {
         for (s.workspaces) |*ws| {
-            ws.windows.deinit(ws.allocator);
+            ws.deinit();
             wm.allocator.free(ws.name);
         }
         wm.allocator.free(s.workspaces);
@@ -79,28 +137,45 @@ pub fn deinit(wm: *WM) void {
 }
 
 pub fn addWindowToCurrentWorkspace(_: *WM, win: u32) void {
-    const s = state orelse return;
+    const s = state orelse {
+        std.log.warn("[workspaces] Cannot add window: state not initialized", .{});
+        return;
+    };
     const ws = &s.workspaces[s.current];
-    if (ws.contains(win)) return;
-    ws.windows.append(ws.allocator, win) catch return;
+    ws.add(win) catch |err| {
+        std.log.err("[workspaces] Failed to add window {} to workspace {}: {}", .{ win, s.current, err });
+    };
+    bar.update() catch {};
 }
 
 pub fn removeWindow(win: u32) void {
     const s = state orelse return;
     for (s.workspaces) |*ws| {
-        if (ws.remove(win)) return;
+        if (ws.remove(win)) {
+            bar.update() catch {};
+            return;
+        }
     }
 }
 
 pub fn moveWindowTo(wm: *WM, win: u32, target_ws: usize) void {
-    const s = state orelse return;
+    const s = state orelse {
+        std.log.warn("[workspaces] Cannot move window: state not initialized", .{});
+        return;
+    };
 
-    if (target_ws >= s.workspaces.len) return;
+    if (target_ws >= s.workspaces.len) {
+        std.log.err("[workspaces] Invalid target workspace: {} (max: {})", .{ target_ws, s.workspaces.len - 1 });
+        return;
+    }
 
     const from_ws = for (s.workspaces, 0..) |*ws, i| {
         if (ws.contains(win)) break i;
     } else {
-        s.workspaces[target_ws].windows.append(s.workspaces[target_ws].allocator, win) catch return;
+        s.workspaces[target_ws].add(win) catch |err| {
+            std.log.err("[workspaces] Failed to add window to workspace: {}", .{err});
+        };
+        bar.update() catch {};
         return;
     };
 
@@ -109,19 +184,31 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: usize) void {
     atomic.atomicMoveWindow(wm, win, from_ws, target_ws) catch |err| {
         std.log.err("[workspace] Failed to move window atomically: {}", .{err});
     };
+    
+    bar.update() catch {};
 }
 
 pub fn switchTo(wm: *WM, ws_id: usize) void {
-    const s = state orelse return;
+    const s = state orelse {
+        std.log.warn("[workspaces] Cannot switch workspace: state not initialized", .{});
+        return;
+    };
 
-    if (ws_id >= s.workspaces.len or ws_id == s.current) return;
+    if (ws_id >= s.workspaces.len) {
+        std.log.err("[workspaces] Invalid workspace id: {} (max: {})", .{ ws_id, s.workspaces.len - 1 });
+        return;
+    }
 
-    if (s.switching.swap(true, .acq_rel)) return;
+    if (ws_id == s.current) return;
+
+    if (s.switching.swap(true, .acq_rel)) {
+        std.log.warn("[workspaces] Workspace switch already in progress", .{});
+        return;
+    }
 
     const old_ws = s.current;
-    s.current = ws_id;
 
-    async.submitGlobal(
+    _ = async.submitGlobal(
         .workspace_switch,
         .{ .workspace_switch = .{ .from = old_ws, .to = ws_id } },
         9,
@@ -132,36 +219,40 @@ pub fn switchTo(wm: *WM, ws_id: usize) void {
     };
 }
 
-/// Immediate workspace switch (called by async processor or as fallback)
 pub fn switchToImmediate(wm: *WM, ws_id: usize) void {
-    const s = state orelse return;
+    const s = state orelse {
+        std.log.warn("[workspaces] Cannot switch workspace: state not initialized", .{});
+        return;
+    };
     defer s.switching.store(false, .release);
 
-    if (ws_id >= s.workspaces.len) return;
-
-    var old_ws: usize = s.current;
-    for (s.workspaces, 0..) |*ws, i| {
-        if (i != ws_id and ws.windows.items.len > 0) {
-            for (ws.windows.items) |win| {
-                if (utils.isWindowMapped(wm.conn, win)) {
-                    old_ws = i;
-                    break;
-                }
-            }
-            if (old_ws != s.current) break;
-        }
+    if (ws_id >= s.workspaces.len) {
+        std.log.err("[workspaces] Invalid workspace id: {} (max: {})", .{ ws_id, s.workspaces.len - 1 });
+        return;
     }
+
+    const old_ws = s.current;
 
     atomic.atomicSwitchWorkspace(wm, old_ws, ws_id) catch |err| {
         std.log.err("[workspace] Failed to switch workspace atomically: {}", .{err});
         return;
     };
 
-    focus.markLayoutOperation();
+    s.current = ws_id;
 
-    if (wm.config.tiling.enabled) {
+    const tiling = @import("tiling");
+    
+    for (s.workspaces[ws_id].windows.items) |win| {
+        if (!tiling.isWindowTiled(win) and wm.config.tiling.enabled) {
+            tiling.addWindowToTiling(wm, win);
+        }
+    }
+
+    if (!tiling.restoreWindowPositions(wm)) {
         tiling.retileCurrentWorkspace(wm);
     }
+
+    bar.update() catch {};
 }
 
 pub fn getCurrentWindowsView() ?[]const u32 {
@@ -181,4 +272,16 @@ pub fn isOnCurrentWorkspace(win: u32) bool {
 
 pub fn getState() ?*State {
     return state;
+}
+
+pub fn getCurrentWorkspaceObject() ?*Workspace {
+    const s = state orelse return null;
+    return &s.workspaces[s.current];
+}
+
+pub fn clearAllPositions() void {
+    const s = state orelse return;
+    for (s.workspaces) |*ws| {
+        ws.clearPositions();
+    }
 }

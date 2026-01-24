@@ -1,4 +1,14 @@
 //! Event system with compile-time dispatch table for zero-overhead routing.
+//!
+//! This module provides the core event dispatching mechanism for the window manager.
+//! It uses a compile-time generated lookup table for O(1) event routing with zero
+//! runtime overhead.
+//!
+//! Design:
+//! - Events are normalized to their base type (masking response bit)
+//! - Dispatch table is generated at compile time
+//! - Type-safe wrapper functions ensure correct event types
+//! - Module initialization order is carefully controlled
 
 const std = @import("std");
 const defs = @import("defs");
@@ -9,6 +19,7 @@ const window = @import("window");
 const input = @import("input");
 const tiling = @import("tiling");
 const workspaces = @import("workspaces");
+const bar = @import("bar");
 
 const HandlerFn = *const fn (*anyopaque, *WM) void;
 
@@ -21,9 +32,12 @@ const EventHandlers = struct {
     button_press: HandlerFn,
     button_release: HandlerFn,
     motion_notify: HandlerFn,
+    expose: HandlerFn,
+    property_notify: HandlerFn,
 };
 
 /// Wrap a typed handler into generic HandlerFn
+/// This provides type safety at compile time while allowing uniform storage
 fn wrapHandler(
     comptime EventType: type,
     comptime handler: fn (*const EventType, *WM) void,
@@ -35,6 +49,24 @@ fn wrapHandler(
     }.wrapped;
 }
 
+fn handleButtonPressWithBar(event: *const xcb.xcb_button_press_event_t, wm: *WM) void {
+    bar.handleButtonPress(event);
+    input.handleButtonPress(event, wm);
+}
+
+fn handleExposeEvent(event: *const xcb.xcb_expose_event_t, _: *WM) void {
+    bar.handleExpose(event);
+}
+
+fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t, wm: *WM) void {
+    if (event.window == wm.root and event.atom == xcb.XCB_ATOM_WM_NAME) {
+        bar.updateStatus() catch |err| {
+            std.log.err("[events] Failed to update bar status: {}", .{err});
+        };
+    }
+}
+
+/// Compile-time handler configuration
 const handlers = blk: {
     break :blk EventHandlers{
         .map_request = wrapHandler(xcb.xcb_map_request_event_t, window.handleMapRequest),
@@ -42,9 +74,11 @@ const handlers = blk: {
         .destroy_notify = wrapHandler(xcb.xcb_destroy_notify_event_t, window.handleDestroyNotify),
         .enter_notify = wrapHandler(xcb.xcb_enter_notify_event_t, window.handleEnterNotify),
         .key_press = wrapHandler(xcb.xcb_key_press_event_t, input.handleKeyPress),
-        .button_press = wrapHandler(xcb.xcb_button_press_event_t, input.handleButtonPress),
+        .button_press = wrapHandler(xcb.xcb_button_press_event_t, handleButtonPressWithBar),
         .button_release = wrapHandler(xcb.xcb_button_release_event_t, input.handleButtonRelease),
         .motion_notify = wrapHandler(xcb.xcb_motion_notify_event_t, input.handleMotionNotify),
+        .expose = wrapHandler(xcb.xcb_expose_event_t, handleExposeEvent),
+        .property_notify = wrapHandler(xcb.xcb_property_notify_event_t, handlePropertyNotify),
     };
 };
 
@@ -61,6 +95,8 @@ const handler_table = blk: {
     table[xcb.XCB_BUTTON_PRESS] = handlers.button_press;
     table[xcb.XCB_BUTTON_RELEASE] = handlers.button_release;
     table[xcb.XCB_MOTION_NOTIFY] = handlers.motion_notify;
+    table[xcb.XCB_EXPOSE] = handlers.expose;
+    table[xcb.XCB_PROPERTY_NOTIFY] = handlers.property_notify;
     break :blk table;
 };
 
@@ -74,6 +110,7 @@ pub inline fn dispatch(event_type: u8, event: *anyopaque, wm: *WM) void {
     }
 }
 
+/// Initialize all subsystem modules in the correct order
 pub fn initModules(wm: *WM) void {
     workspaces.init(wm);
     window.init(wm);
@@ -81,6 +118,7 @@ pub fn initModules(wm: *WM) void {
     tiling.init(wm);
 }
 
+/// Deinitialize modules in reverse order
 pub fn deinitModules(wm: *WM) void {
     tiling.deinit(wm);
     input.deinit(wm);

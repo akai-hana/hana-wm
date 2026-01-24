@@ -1,4 +1,12 @@
 //! XKB (X Keyboard Extension) bindings and keyboard state management.
+//!
+//! This module wraps xkbcommon-x11 to provide:
+//! - Keyboard state initialization with retry logic (X server race conditions)
+//! - Keycode to keysym translation for event processing
+//! - Keysym to keycode lookup for configuration parsing
+//!
+//! The retry logic is critical for reliability when starting alongside other
+//! X11 applications that may be initializing the keyboard simultaneously.
 
 const std = @import("std");
 const defs = @import("defs");
@@ -8,7 +16,7 @@ pub const xkb = @cImport({
     @cInclude("xkbcommon/xkbcommon-x11.h");
 });
 
-// Re-exports
+// Re-exports for cleaner usage
 pub const XKB_KEYSYM_CASE_INSENSITIVE: u32 = xkb.XKB_KEYSYM_CASE_INSENSITIVE;
 pub const XKB_KEY_NoSymbol: u32 = xkb.XKB_KEY_NoSymbol;
 pub const xkb_context = xkb.struct_xkb_context;
@@ -32,6 +40,9 @@ pub const XkbState = struct {
     device_id: i32,
 
     /// Initialize with retry logic for X server race conditions
+    ///
+    /// When multiple X11 clients start simultaneously, keyboard initialization
+    /// can fail. We retry with exponential backoff to handle this gracefully.
     pub fn init(xcb_conn: *anyopaque) !XkbState {
         const ctx = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS) orelse
             return error.XkbContextFailed;
@@ -61,12 +72,17 @@ pub const XkbState = struct {
         xkb.xkb_context_unref(self.context);
     }
 
+    /// Convert X11 keycode to keysym (for event processing)
     pub inline fn keycodeToKeysym(self: *XkbState, keycode: u8) u32 {
         return xkb.xkb_state_key_get_one_sym(self.state, keycode);
     }
 
-    /// Find keycode for given keysym (reverse lookup)
+    /// Find keycode for given keysym (reverse lookup for config parsing)
+    ///
+    /// Scans the keymap to find which keycode produces the desired keysym.
+    /// Returns null if the keysym is not mapped to any key.
     pub fn keysymToKeycode(self: *XkbState, keysym: u32) ?u8 {
+        // Scan typical keycode range (8-255 on most systems)
         for (8..256) |kc| {
             const keycode: u8 = @intCast(kc);
             if (xkb.xkb_state_key_get_one_sym(self.state, keycode) == keysym) {
@@ -77,6 +93,7 @@ pub const XkbState = struct {
     }
 };
 
+/// Retry XKB extension setup with exponential backoff
 fn retrySetup(xcb_conn: *anyopaque) !void {
     var attempts: usize = 0;
 
@@ -102,6 +119,7 @@ fn retrySetup(xcb_conn: *anyopaque) !void {
     return error.XkbSetupFailed;
 }
 
+/// Retry keymap creation with validation
 fn retryKeymap(ctx: *xkb_context, xcb_conn: *anyopaque, device_id: i32) !*xkb_keymap {
     var attempts: usize = 0;
 
@@ -119,7 +137,8 @@ fn retryKeymap(ctx: *xkb_context, xcb_conn: *anyopaque, device_id: i32) !*xkb_ke
             return error.XkbKeymapFailed;
         };
 
-        // Verify keymap by testing Return key
+        // Verify keymap by testing Return key (keycode 36 on most systems)
+        // If the keymap is corrupt, it might return NoSymbol for basic keys
         if (xkb.xkb_state_new(km)) |test_state| {
             defer xkb.xkb_state_unref(test_state);
             if (xkb.xkb_state_key_get_one_sym(test_state, 36) != xkb.XKB_KEY_NoSymbol) {

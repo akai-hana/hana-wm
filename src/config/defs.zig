@@ -27,6 +27,25 @@ pub const FOCUS_PROTECTION_GRACE_NS: u64 = 50 * std.time.ns_per_ms;
 pub const XKB_RETRY_DELAY_MS: u64 = 20;
 pub const XKB_MAX_RETRIES: usize = 50;
 
+// Event loop constants
+pub const MAX_EVENT_BATCH_SIZE: usize = 10;
+pub const EVENT_POLL_SLEEP_NS: u64 = 1 * std.time.ns_per_ms;
+pub const ASYNC_JOBS_PER_ITERATION: usize = 5;
+
+// Idle detection thresholds for exponential backoff
+pub const IDLE_THRESHOLD_SHORT: usize = 10;
+pub const IDLE_THRESHOLD_LONG: usize = 50;
+pub const SLEEP_MULTIPLIER_MEDIUM: u64 = 2;
+pub const SLEEP_MULTIPLIER_LONG: u64 = 5;
+
+// Configuration validation limits
+pub const MAX_WORKSPACES: usize = 20;
+pub const MIN_WORKSPACES: usize = 1;
+pub const MAX_BORDER_WIDTH: u16 = 100;
+pub const MAX_GAPS: u16 = 200;
+pub const MIN_MASTER_WIDTH: f32 = 0.05;
+pub const MAX_MASTER_WIDTH: f32 = 0.95;
+
 pub const Action = union(enum) {
     exec: []const u8,
     close_window,
@@ -58,16 +77,47 @@ pub const Keybind = struct {
     action: Action,
 };
 
+pub const MasterSide = enum {
+    left,
+    right,
+
+    pub fn fromString(str: []const u8) ?MasterSide {
+        if (std.mem.eql(u8, str, "left")) return .left;
+        if (std.mem.eql(u8, str, "right")) return .right;
+        return null;
+    }
+
+    pub fn toString(self: MasterSide) []const u8 {
+        return switch (self) {
+            .left => "left",
+            .right => "right",
+        };
+    }
+};
+
 pub const TilingConfig = struct {
     enabled: bool = true,
     layout: []const u8 = "master_left",
-    master_side: []const u8 = "left",
+    master_side: MasterSide = .left,
     master_width_factor: f32 = 0.50,
     master_count: usize = 1,
     gaps: u16 = 10,
     border_width: u16 = 2,
     border_focused: u32 = 0x5294E2,
     border_normal: u32 = 0x383C4A,
+};
+
+pub const BarConfig = struct {
+    show: bool = true,
+    height: u16 = 24,
+    font: []const u8 = "monospace:size=10",
+    bg: u32 = 0x222222,
+    fg: u32 = 0xBBBBBB,
+    selected_bg: u32 = 0x005577,
+    selected_fg: u32 = 0xEEEEEE,
+    occupied_fg: u32 = 0xEEEEEE,
+    urgent_bg: u32 = 0xFF0000,
+    urgent_fg: u32 = 0xFFFFFF,
 };
 
 pub const Rule = struct {
@@ -102,6 +152,7 @@ pub const Config = struct {
     keybindings: std.ArrayListUnmanaged(Keybind) = .{},
     tiling: TilingConfig = .{},
     workspaces: WorkspaceConfig = .{},
+    bar: BarConfig = .{},
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
         for (self.keybindings.items) |*kb| {
