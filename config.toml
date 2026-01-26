@@ -102,7 +102,9 @@ Mod+Shift+Escape = "emergency_recover"  # Emergency recovery mode
 [bar]
 show        = true
 height      = 24
-font        = "FiraCode Nerd Font Ret:size=10"
+#font        = "FiraCode Nerd Font Ret:size=10"
+font = "FiraCode NF:size=10"
+#font = "DejaVu Sans:size=10"
 bg          = "#222222"
 fg          = "#BBBBBB"
 selected_bg = "#005577"

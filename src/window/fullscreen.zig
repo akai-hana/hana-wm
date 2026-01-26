@@ -94,6 +94,7 @@ fn exitFullscreen(wm: *WM) void {
         if (tiling.getState()) |t_state| {
             _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_BORDER_PIXEL,
                 &[_]u32{t_state.border_focused});
+            t_state.window_borders.put(win, t_state.border_focused) catch {};
         }
     }
 
