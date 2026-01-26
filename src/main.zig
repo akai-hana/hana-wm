@@ -12,6 +12,9 @@ const input = @import("input");
 const utils = @import("utils");
 const async = @import("async");
 const bar = @import("bar");
+const workspaces = @import("workspaces");
+
+// Note: bar state module removed from polling system
 
 const xcb = defs.xcb;
 const WM = defs.WM;
@@ -27,7 +30,6 @@ const EventFlags = packed struct {
     batchable: bool = false,
 };
 
-/// Compile-time event classification for flush strategy
 const EVENT_FLAGS = blk: {
     var flags = [_]EventFlags{.{}} ** 128;
     flags[xcb.XCB_MAP_REQUEST] = .{ .critical = true };
@@ -48,20 +50,32 @@ inline fn getEventFlags(event_type: u8) EventFlags {
 }
 
 var should_reload = std.atomic.Value(bool).init(false);
+var running = std.atomic.Value(bool).init(true);
 
 fn setupSignalHandler() void {
     const handler = struct {
-        fn h(_: posix.SIG) callconv(.c) void {
+        fn reload(_: posix.SIG) callconv(.c) void {
             should_reload.store(true, .release);
         }
-    }.h;
+        fn terminate(_: posix.SIG) callconv(.c) void {
+            running.store(false, .release);
+        }
+    };
 
-    var sa = posix.Sigaction{
-        .handler = .{ .handler = handler },
+    var sa_reload = posix.Sigaction{
+        .handler = .{ .handler = handler.reload },
         .mask = std.mem.zeroes(posix.sigset_t),
         .flags = posix.SA.RESTART,
     };
-    posix.sigaction(posix.SIG.HUP, &sa, null);
+    posix.sigaction(posix.SIG.HUP, &sa_reload, null);
+
+    var sa_term = posix.Sigaction{
+        .handler = .{ .handler = handler.terminate },
+        .mask = std.mem.zeroes(posix.sigset_t),
+        .flags = posix.SA.RESTART,
+    };
+    posix.sigaction(posix.SIG.TERM, &sa_term, null);
+    posix.sigaction(posix.SIG.INT, &sa_term, null);
 }
 
 fn setupRootCursor(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) void {
@@ -202,6 +216,7 @@ pub fn main() !void {
         .focused_window = null,
         .xkb_state = xkb_state,
         .should_reload_config = &should_reload,
+        .running = &running,
     };
     defer wm.deinit();
 
@@ -214,7 +229,7 @@ pub fn main() !void {
 
     bar.init(&wm) catch |err| {
         if (err != error.BarDisabled) {
-            std.log.warn("[bar] Failed to initialize: {}", .{err});
+            std.log.err("[bar] Failed to initialize: {}", .{err});
         }
     };
     defer bar.deinit();
@@ -227,32 +242,25 @@ pub fn main() !void {
 
     var batch_count: usize = 0;
     var idle_count: usize = 0;
-    var last_bar_update: i64 = 0;
+    var last_flush_time: i64 = 0;
+    const FLUSH_INTERVAL_NS: i64 = 16 * std.time.ns_per_ms;
 
-    while (true) {
+    while (running.load(.acquire)) {
+        // Process async jobs
         async.processPending(&wm);
 
-        if (std.posix.clock_gettime(std.posix.CLOCK.REALTIME)) |ts| {
-            const current_time = ts.sec;
-            if (current_time - last_bar_update >= 5) {
-                bar.update() catch {};
-                last_bar_update = current_time;
-            }
-        } else |_| {}
-
         const event = xcb.xcb_poll_for_event(conn);
+
+        if (xcb.xcb_connection_has_error(conn) != 0) {
+            std.log.err("[main] X11 connection error detected, shutting down", .{});
+            break;
+        }
 
         if (event) |ev| {
             defer std.c.free(ev);
             idle_count = 0;
 
             const event_type = @as(*u8, @ptrCast(ev)).*;
-
-            if (event_type == xcb.XCB_ENTER_NOTIFY or event_type == xcb.XCB_FOCUS_IN) {
-                events.dispatch(event_type, ev, &wm);
-                utils.flush(conn);
-                continue;
-            }
 
             if (should_reload.swap(false, .acq_rel)) {
                 handleConfigReload(&wm) catch |err| {
@@ -266,17 +274,40 @@ pub fn main() !void {
             if (flags.critical) {
                 utils.flush(conn);
                 batch_count = 0;
+                if (std.posix.clock_gettime(std.posix.CLOCK.REALTIME)) |ts| {
+                    last_flush_time = ts.sec * std.time.ns_per_s + ts.nsec;
+                } else |_| {}
             } else if (flags.batchable) {
                 batch_count += 1;
-                if (batch_count >= defs.MAX_EVENT_BATCH_SIZE) {
+
+                const now = if (std.posix.clock_gettime(std.posix.CLOCK.REALTIME)) |ts|
+                    ts.sec * std.time.ns_per_s + ts.nsec
+                else |_|
+                    last_flush_time;
+
+                if (batch_count >= defs.MAX_EVENT_BATCH_SIZE or
+                    (now - last_flush_time) >= FLUSH_INTERVAL_NS)
+                {
                     utils.flush(conn);
                     batch_count = 0;
+                    last_flush_time = now;
                 }
             } else {
                 utils.flush(conn);
                 batch_count = 0;
+                if (std.posix.clock_gettime(std.posix.CLOCK.REALTIME)) |ts| {
+                    last_flush_time = ts.sec * std.time.ns_per_s + ts.nsec;
+                } else |_| {}
             }
         } else {
+            if (batch_count > 0) {
+                utils.flush(conn);
+                batch_count = 0;
+                if (std.posix.clock_gettime(std.posix.CLOCK.REALTIME)) |ts| {
+                    last_flush_time = ts.sec * std.time.ns_per_s + ts.nsec;
+                } else |_| {}
+            }
+
             if (!async.getGlobal().?.hasPending()) {
                 idle_count += 1;
                 const sleep_ns = if (idle_count < defs.IDLE_THRESHOLD_SHORT)
@@ -292,4 +323,6 @@ pub fn main() !void {
             }
         }
     }
+
+    std.log.info("[hana] Shutting down gracefully", .{});
 }

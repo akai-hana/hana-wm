@@ -44,6 +44,10 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
                 .event_mask = xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW,
             };
             attrs.configure(wm.conn, win);
+
+            if (tiling.getState()) |t_state| {
+                t_state.window_borders.put(win, wm.config.tiling.border_normal) catch {};
+            }
         }
 
         _ = xcb.xcb_unmap_window(wm.conn, win);
@@ -65,11 +69,15 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
         };
         attrs.configure(wm.conn, win);
 
+        if (tiling.getState()) |t_state| {
+            t_state.window_borders.put(win, wm.config.tiling.border_focused) catch {};
+        }
+
         focus.setFocus(wm, win, .tiling_operation);
         tiling.retileCurrentWorkspace(wm);
+    } else {
+        utils.flush(wm.conn);
     }
-
-    utils.flush(wm.conn);
 }
 
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, wm: *WM) void {
@@ -86,20 +94,8 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, w
 
 pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) void {
     if (event.event == wm.root or event.event == 0) return;
-    if (hasQueuedEnterEvents(wm.conn)) return;
 
     focus.setFocus(wm, event.event, .mouse_enter);
-}
-
-fn hasQueuedEnterEvents(conn: *xcb.xcb_connection_t) bool {
-    var count: u8 = 0;
-    while (count < 2) : (count += 1) {
-        const queued = xcb.xcb_poll_for_event(conn) orelse return count > 0;
-        defer std.c.free(queued);
-        const next_type = @as(*u8, @ptrCast(queued)).* & 0x7F;
-        if (next_type != xcb.XCB_ENTER_NOTIFY) return count > 0;
-    }
-    return true;
 }
 
 pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM) void {

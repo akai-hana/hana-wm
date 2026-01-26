@@ -8,7 +8,6 @@ pub const xcb = @cImport({
 
 pub const xkbcommon = @import("xkbcommon");
 
-// Modifier key masks
 pub const MOD_SHIFT: u16 = xcb.XCB_MOD_MASK_SHIFT;
 pub const MOD_LOCK: u16 = xcb.XCB_MOD_MASK_LOCK;
 pub const MOD_CONTROL: u16 = xcb.XCB_MOD_MASK_CONTROL;
@@ -18,27 +17,22 @@ pub const MOD_SUPER: u16 = xcb.XCB_MOD_MASK_4;
 
 pub const MOD_MASK_RELEVANT: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER;
 
-// Window dimension constants
 pub const MIN_WINDOW_DIM: u16 = 50;
 pub const MAX_WINDOW_DIM: u16 = 65535;
 
-// Timing constants
 pub const FOCUS_PROTECTION_GRACE_NS: u64 = 50 * std.time.ns_per_ms;
 pub const XKB_RETRY_DELAY_MS: u64 = 20;
 pub const XKB_MAX_RETRIES: usize = 50;
 
-// Event loop constants
 pub const MAX_EVENT_BATCH_SIZE: usize = 10;
 pub const EVENT_POLL_SLEEP_NS: u64 = 1 * std.time.ns_per_ms;
 pub const ASYNC_JOBS_PER_ITERATION: usize = 5;
 
-// Idle detection thresholds for exponential backoff
 pub const IDLE_THRESHOLD_SHORT: usize = 10;
 pub const IDLE_THRESHOLD_LONG: usize = 50;
 pub const SLEEP_MULTIPLIER_MEDIUM: u64 = 2;
 pub const SLEEP_MULTIPLIER_LONG: u64 = 5;
 
-// Configuration validation limits
 pub const MAX_WORKSPACES: usize = 20;
 pub const MIN_WORKSPACES: usize = 1;
 pub const MAX_BORDER_WIDTH: u16 = 100;
@@ -111,6 +105,7 @@ pub const BarConfig = struct {
     show: bool = true,
     height: u16 = 24,
     font: []const u8 = "monospace:size=10",
+    font_size: u16 = 10,
     bg: u32 = 0x222222,
     fg: u32 = 0xBBBBBB,
     selected_bg: u32 = 0x005577,
@@ -118,6 +113,9 @@ pub const BarConfig = struct {
     occupied_fg: u32 = 0xEEEEEE,
     urgent_bg: u32 = 0xFF0000,
     urgent_fg: u32 = 0xFFFFFF,
+    workspace_chars: []const u8 = "123456789",
+    indicator_size: u16 = 4,
+    title_accent: bool = true,
 };
 
 pub const Rule = struct {
@@ -154,6 +152,10 @@ pub const Config = struct {
     workspaces: WorkspaceConfig = .{},
     bar: BarConfig = .{},
 
+    allocated_font: ?[]const u8 = null,
+    allocated_layout: ?[]const u8 = null,
+    allocated_workspace_chars: ?[]const u8 = null,
+
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
         for (self.keybindings.items) |*kb| {
             kb.action.deinit(allocator);
@@ -164,6 +166,10 @@ pub const Config = struct {
             rule.deinit(allocator);
         }
         self.workspaces.rules.deinit(allocator);
+
+        if (self.allocated_font) |f| allocator.free(f);
+        if (self.allocated_layout) |l| allocator.free(l);
+        if (self.allocated_workspace_chars) |w| allocator.free(w);
     }
 };
 
@@ -185,6 +191,7 @@ pub const WM = struct {
     } = null,
     xkb_state: ?*xkbcommon.XkbState,
     should_reload_config: *std.atomic.Value(bool),
+    running: *std.atomic.Value(bool),
 
     pub fn deinit(self: *WM) void {
         var iter = self.windows.valueIterator();

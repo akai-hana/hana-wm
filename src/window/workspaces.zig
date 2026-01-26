@@ -86,8 +86,10 @@ pub const Workspace = struct {
 pub const State = struct {
     workspaces: []Workspace,
     current: usize,
+    window_to_workspace: std.AutoHashMap(u32, usize),
     allocator: std.mem.Allocator,
     switching: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    wm: *WM,
 };
 
 var state: ?*State = null;
@@ -99,6 +101,8 @@ pub fn init(wm: *WM) void {
     };
     s.allocator = wm.allocator;
     s.current = 0;
+    s.window_to_workspace = std.AutoHashMap(u32, usize).init(wm.allocator);
+    s.wm = wm;
 
     const count = wm.config.workspaces.count;
     s.workspaces = wm.allocator.alloc(Workspace, count) catch {
@@ -131,6 +135,7 @@ pub fn deinit(wm: *WM) void {
             wm.allocator.free(ws.name);
         }
         wm.allocator.free(s.workspaces);
+        s.window_to_workspace.deinit();
         wm.allocator.destroy(s);
         state = null;
     }
@@ -144,17 +149,30 @@ pub fn addWindowToCurrentWorkspace(_: *WM, win: u32) void {
     const ws = &s.workspaces[s.current];
     ws.add(win) catch |err| {
         std.log.err("[workspaces] Failed to add window {} to workspace {}: {}", .{ win, s.current, err });
+        return;
     };
-    bar.update() catch {};
+    s.window_to_workspace.put(win, s.current) catch {};
+    
+    // Update bar to show new window count
+    bar.update(s.wm) catch |err| {
+        std.log.err("[workspaces] Failed to update bar: {}", .{err});
+    };
 }
 
 pub fn removeWindow(win: u32) void {
     const s = state orelse return;
-    for (s.workspaces) |*ws| {
-        if (ws.remove(win)) {
-            bar.update() catch {};
-            return;
+
+    if (s.window_to_workspace.fetchRemove(win)) |entry| {
+        const ws_idx = entry.value;
+        if (ws_idx < s.workspaces.len) {
+            _ = s.workspaces[ws_idx].remove(win);
+            
+            // Update bar to show new window count
+            bar.update(s.wm) catch |err| {
+                std.log.err("[workspaces] Failed to update bar: {}", .{err});
+            };
         }
+        return;
     }
 }
 
@@ -169,23 +187,39 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: usize) void {
         return;
     }
 
-    const from_ws = for (s.workspaces, 0..) |*ws, i| {
-        if (ws.contains(win)) break i;
-    } else {
-        s.workspaces[target_ws].add(win) catch |err| {
-            std.log.err("[workspaces] Failed to add window to workspace: {}", .{err});
-        };
-        bar.update() catch {};
-        return;
+    const from_ws = s.window_to_workspace.get(win) orelse blk: {
+        for (s.workspaces, 0..) |*ws, i| {
+            if (ws.contains(win)) {
+                s.window_to_workspace.put(win, i) catch {};
+                break :blk i;
+            }
+        } else {
+            s.workspaces[target_ws].add(win) catch |err| {
+                std.log.err("[workspaces] Failed to add window to workspace: {}", .{err});
+            };
+            s.window_to_workspace.put(win, target_ws) catch {};
+            
+            // Update bar
+            bar.update(wm) catch |err| {
+                std.log.err("[workspaces] Failed to update bar: {}", .{err});
+            };
+            return;
+        }
     };
 
     if (from_ws == target_ws) return;
 
     atomic.atomicMoveWindow(wm, win, from_ws, target_ws) catch |err| {
         std.log.err("[workspace] Failed to move window atomically: {}", .{err});
+        return;
     };
+
+    s.window_to_workspace.put(win, target_ws) catch {};
     
-    bar.update() catch {};
+    // Update bar
+    bar.update(wm) catch |err| {
+        std.log.err("[workspaces] Failed to update bar: {}", .{err});
+    };
 }
 
 pub fn switchTo(wm: *WM, ws_id: usize) void {
@@ -241,7 +275,7 @@ pub fn switchToImmediate(wm: *WM, ws_id: usize) void {
     s.current = ws_id;
 
     const tiling = @import("tiling");
-    
+
     for (s.workspaces[ws_id].windows.items) |win| {
         if (!tiling.isWindowTiled(win) and wm.config.tiling.enabled) {
             tiling.addWindowToTiling(wm, win);
@@ -252,7 +286,10 @@ pub fn switchToImmediate(wm: *WM, ws_id: usize) void {
         tiling.retileCurrentWorkspace(wm);
     }
 
-    bar.update() catch {};
+    // Update bar to show new workspace
+    bar.update(wm) catch |err| {
+        std.log.err("[workspaces] Failed to update bar after workspace switch: {}", .{err});
+    };
 }
 
 pub fn getCurrentWindowsView() ?[]const u32 {
