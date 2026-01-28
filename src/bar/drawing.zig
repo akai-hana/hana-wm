@@ -1,4 +1,5 @@
-//! Pure XCB drawing context with font diagnostics
+//! XCB drawing context with proper baseline positioning
+
 const std = @import("std");
 const defs = @import("defs");
 const c = @cImport({
@@ -20,6 +21,7 @@ pub const DrawContext = struct {
     ft_library: c.FT_Library,
     ft_face: ?c.FT_Face,
     font_height: u16,
+    font_ascender: i16,
     current_color: struct {
         red: u16,
         green: u16,
@@ -28,6 +30,7 @@ pub const DrawContext = struct {
     },
     pictformat: u32,
     alpha_format: ?u32,
+    font_loaded: bool,
 
     pub fn init(allocator: std.mem.Allocator, conn: *defs.xcb.xcb_connection_t, screen: *defs.xcb.xcb_screen_t, drawable: u32, width: u16, height: u16) !*DrawContext {
         const dc = try allocator.create(DrawContext);
@@ -38,7 +41,6 @@ pub const DrawContext = struct {
 
         var ft_lib: c.FT_Library = undefined;
         if (c.FT_Init_FreeType(&ft_lib) != 0) {
-            std.log.err("[drawing] FT_Init_FreeType failed", .{});
             return error.FreeTypeInitFailed;
         }
         errdefer _ = c.FT_Done_FreeType(ft_lib);
@@ -56,7 +58,7 @@ pub const DrawContext = struct {
         );
 
         const alpha_format = findAlphaFormat(c_conn) catch |err| {
-            std.log.warn("[drawing] No alpha format found: {}, text rendering may fail", .{err});
+            std.log.err("[drawing] No alpha format found: {}", .{err});
             return error.NoAlphaFormat;
         };
 
@@ -71,6 +73,7 @@ pub const DrawContext = struct {
             .ft_library = ft_lib,
             .ft_face = null,
             .font_height = 14,
+            .font_ascender = 11,
             .current_color = .{
                 .red = 0xBBBB,
                 .green = 0xBBBB,
@@ -79,6 +82,7 @@ pub const DrawContext = struct {
             },
             .pictformat = pictformat,
             .alpha_format = alpha_format,
+            .font_loaded = false,
         };
 
         return dc;
@@ -96,7 +100,6 @@ pub const DrawContext = struct {
     fn findRGBFormat(conn: *c.xcb_connection_t, screen: *c.xcb_screen_t) !u32 {
         const formats_cookie = c.xcb_render_query_pict_formats(conn);
         const formats_reply = c.xcb_render_query_pict_formats_reply(conn, formats_cookie, null) orelse {
-            std.log.err("[drawing] RENDER extension query failed", .{});
             return error.RenderFormatQueryFailed;
         };
         defer std.c.free(formats_reply);
@@ -145,20 +148,15 @@ pub const DrawContext = struct {
         const font_path_z = try self.allocator.dupeZ(u8, font_path);
         defer self.allocator.free(font_path_z);
 
-        std.log.warn("═══════════════════════════════════════════", .{});
-        std.log.warn("[FONT LOADING] Requested: {s}", .{font_name});
-        std.log.warn("[FONT LOADING] Resolved to: {s}", .{font_path});
-        std.log.warn("[FONT LOADING] Size: {}", .{size});
-
         var face: c.FT_Face = undefined;
         if (c.FT_New_Face(self.ft_library, font_path_z.ptr, 0, &face) != 0) {
-            std.log.err("[drawing] FT_New_Face failed for: {s}", .{font_path});
+            std.log.err("[drawing] Failed to load font from: {s}", .{font_path_z});
             return error.FontLoadFailed;
         }
         errdefer _ = c.FT_Done_Face(face);
 
         if (c.FT_Set_Pixel_Sizes(face, 0, size) != 0) {
-            std.log.err("[drawing] FT_Set_Pixel_Sizes failed", .{});
+            std.log.err("[drawing] Failed to set font size: {}", .{size});
             return error.FontSizeFailed;
         }
 
@@ -168,48 +166,32 @@ pub const DrawContext = struct {
 
         self.ft_face = face;
         const height_64 = face.*.size.*.metrics.height >> 6;
+        const ascender_64 = face.*.size.*.metrics.ascender >> 6;
         self.font_height = @intCast(@max(8, height_64));
-        
-        std.log.warn("[FONT LOADING] Font height: {}", .{self.font_height});
-        
-        // Test loading critical glyphs
-        std.log.warn("[FONT LOADING] Testing glyph availability:", .{});
-        const test_chars = "[]= 0123456789:/";
-        for (test_chars) |ch| {
-            if (c.FT_Load_Char(face, ch, c.FT_LOAD_DEFAULT) == 0) {
-                const glyph_idx = c.FT_Get_Char_Index(face, ch);
-                std.log.warn("[FONT LOADING]   '{c}' (0x{x:0>2}): OK (glyph_index={})", .{ch, ch, glyph_idx});
-            } else {
-                std.log.err("[FONT LOADING]   '{c}' (0x{x:0>2}): FAILED TO LOAD", .{ch, ch});
-            }
-        }
-        std.log.warn("═══════════════════════════════════════════", .{});
+        self.font_ascender = @intCast(ascender_64);
+        self.font_loaded = true;
+
+        std.log.info("[drawing] Font loaded: height={}, ascender={}", .{ self.font_height, self.font_ascender });
     }
 
     fn findFontFile(self: *DrawContext, font_name: []const u8) ![]const u8 {
-        // Try exact name first
         if (self.findFontWithFcMatch(font_name)) |path| {
             return path;
-        } else |_| {
-            std.log.warn("[drawing] fc-match failed for '{s}', trying variants", .{font_name});
-        }
-        
-        // Try common variants
+        } else |_| {}
+
         const variants = [_][]const u8{
-            "FiraCode Nerd Font",
-            "FiraCode NF",
-            "FiraCode",
-            "Fira Code",
+            "DejaVu Sans",
+            "Liberation Sans",
+            "Noto Sans",
+            "monospace",
         };
-        
+
         for (variants) |variant| {
             if (self.findFontWithFcMatch(variant)) |path| {
-                std.log.warn("[drawing] Using variant '{s}' instead", .{variant});
                 return path;
             } else |_| {}
         }
-        
-        std.log.warn("[drawing] All variants failed, using fallback", .{});
+
         return self.findFallbackFont();
     }
 
@@ -301,14 +283,33 @@ pub const DrawContext = struct {
         );
     }
 
+    pub fn getAscender(self: *DrawContext) i16 {
+        return self.font_ascender;
+    }
+
     pub fn drawText(self: *DrawContext, x: u16, y: u16, text: []const u8) !void {
-        const face = self.ft_face orelse return error.NoFont;
+        if (!self.font_loaded) {
+            std.log.warn("[drawing] drawText called but font not loaded", .{});
+            return;
+        }
+
+        const face = self.ft_face orelse {
+            std.log.warn("[drawing] drawText called but no face", .{});
+            return error.NoFont;
+        };
+        
+        if (self.alpha_format == null) {
+            std.log.warn("[drawing] drawText called but no alpha format", .{});
+            return;
+        }
 
         var cursor_x: i16 = @intCast(x);
         const baseline_y: i16 = @intCast(y);
 
         for (text) |ch| {
-            if (c.FT_Load_Char(face, ch, c.FT_LOAD_RENDER) != 0) {
+            const load_result = c.FT_Load_Char(face, ch, c.FT_LOAD_RENDER);
+            if (load_result != 0) {
+                cursor_x += @intCast(face.*.glyph.*.advance.x >> 6);
                 continue;
             }
 
@@ -323,23 +324,23 @@ pub const DrawContext = struct {
             const glyph_x = cursor_x + @as(i16, @intCast(glyph.*.bitmap_left));
             const glyph_y = baseline_y - @as(i16, @intCast(glyph.*.bitmap_top));
 
-            // Bounds check
-            if (glyph_x < 0 or glyph_y < 0 or 
-                glyph_x + @as(i16, @intCast(bitmap.width)) > self.width or
-                glyph_y + @as(i16, @intCast(bitmap.rows)) > self.height) {
+            // More lenient clipping - allow partial glyphs
+            if (glyph_x + @as(i16, @intCast(bitmap.width)) <= 0 or 
+                glyph_x >= self.width or
+                glyph_y + @as(i16, @intCast(bitmap.rows)) <= 0 or
+                glyph_y >= self.height) {
                 cursor_x += @intCast(glyph.*.advance.x >> 6);
                 continue;
             }
 
             self.drawGlyph(glyph_x, glyph_y, bitmap) catch |err| {
-                std.log.debug("[drawing] Failed to draw glyph '{c}': {}", .{ch, err});
+                std.log.warn("[drawing] Failed to draw glyph '{}': {}", .{ ch, err });
+                cursor_x += @intCast(glyph.*.advance.x >> 6);
+                continue;
             };
 
             cursor_x += @intCast(glyph.*.advance.x >> 6);
         }
-        
-        // Flush after drawing text
-        _ = c.xcb_flush(self.conn);
     }
 
     fn drawGlyph(self: *DrawContext, x: i16, y: i16, bitmap: *const c.FT_Bitmap) !void {
@@ -476,6 +477,8 @@ pub const DrawContext = struct {
     }
 
     pub fn textWidth(self: *DrawContext, text: []const u8) u16 {
+        if (!self.font_loaded) return 0;
+
         const face = self.ft_face orelse return 0;
 
         var total_width: i32 = 0;

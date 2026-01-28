@@ -1,4 +1,4 @@
-//! Input handling: keyboard, mouse, and motion event processing.
+//! Input handling - OPTIMIZED (uses utils.setFocus instead of focus module)
 
 const std = @import("std");
 const defs = @import("defs");
@@ -6,7 +6,6 @@ const xkbcommon = @import("xkbcommon");
 const utils = @import("utils");
 const tiling = @import("tiling");
 const workspaces = @import("workspaces");
-const focus = @import("focus");
 const xcb = defs.xcb;
 const WM = defs.WM;
 
@@ -15,47 +14,26 @@ extern "c" fn waitpid(pid: c_int, status: ?*c_int, options: c_int) c_int;
 
 const KeybindState = struct {
     map: std.AutoHashMap(u64, *const defs.Action),
-    ready: std.atomic.Value(bool),
-    mutex: std.Thread.Mutex,
+    allocator: std.mem.Allocator,
 
     fn init(allocator: std.mem.Allocator) KeybindState {
         return .{
             .map = std.AutoHashMap(u64, *const defs.Action).init(allocator),
-            .ready = std.atomic.Value(bool).init(false),
-            .mutex = .{},
+            .allocator = allocator,
         };
     }
 
     fn deinit(self: *KeybindState) void {
-        self.ready.store(false, .release);
         self.map.deinit();
     }
 
-    fn setReady(self: *KeybindState, ready: bool) void {
-        self.ready.store(ready, .release);
-    }
-
-    fn isReady(self: *const KeybindState) bool {
-        return self.ready.load(.acquire);
-    }
-
-    fn get(self: *KeybindState, key: u64) ?*const defs.Action {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    inline fn get(self: *KeybindState, key: u64) ?*const defs.Action {
         return self.map.get(key);
     }
 
     fn rebuild(self: *KeybindState, wm: *WM) !void {
-        self.setReady(false);
-        defer self.setReady(true);
-
-        const needed_capacity: u32 = @intCast(wm.config.keybindings.items.len);
-
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        try self.map.ensureTotalCapacity(needed_capacity);
         self.map.clearRetainingCapacity();
+        try self.map.ensureTotalCapacity(@intCast(wm.config.keybindings.items.len));
 
         for (wm.config.keybindings.items) |*kb| {
             const key = makeHash(kb.modifiers, kb.keysym);
@@ -74,7 +52,7 @@ pub fn init(wm: *WM) void {
     state.* = KeybindState.init(wm.allocator);
 
     state.rebuild(wm) catch |err| {
-        std.log.err("[input] Failed to build initial keybind map: {}", .{err});
+        std.log.err("[input] Failed to build keybind map: {}", .{err});
         state.deinit();
         wm.allocator.destroy(state);
         return;
@@ -123,8 +101,6 @@ pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
 
 pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
     const state = keybind_state orelse return;
-    if (!state.isReady()) return;
-
     const xkb_ptr: *xkbcommon.XkbState = @ptrCast(@alignCast(wm.xkb_state.?));
 
     const mods = utils.normalizeModifiers(event.state);
@@ -144,41 +120,38 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) vo
     const has_super = (event.state & defs.MOD_SUPER) != 0;
 
     if (has_super and (event.detail == 1 or event.detail == 3)) {
-        @import("cursor-window-drag").startDrag(wm, event.child, event.detail, event.root_x, event.root_y);
+        @import("drag").startDrag(wm, event.child, event.detail, event.root_x, event.root_y);
     } else {
-        focus.setFocus(wm, event.child, .mouse_click);
+        utils.setFocus(wm, event.child, true);
+        tiling.updateWindowFocus(wm, null, event.child);
     }
 }
 
 pub fn handleButtonRelease(_: *const xcb.xcb_button_release_event_t, wm: *WM) void {
-    if (@import("cursor-window-drag").isDragging()) {
-        @import("cursor-window-drag").stopDrag(wm);
+    if (@import("drag").isDragging()) {
+        @import("drag").stopDrag(wm);
     }
 }
 
 pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) void {
-    if (!@import("cursor-window-drag").isDragging()) return;
-
-    @import("cursor-window-drag").updateDrag(wm, event.root_x, event.root_y);
+    if (@import("drag").isDragging()) {
+        @import("drag").updateDrag(wm, event.root_x, event.root_y);
+    }
 }
 
 fn closeWindow(wm: *WM, win: u32) void {
     if (win == wm.root) {
-        std.log.err("[CRITICAL] Attempted to close ROOT window! Aborting.", .{});
+        std.log.err("[CRITICAL] Attempted to close ROOT window!", .{});
         return;
     }
 
-    const wm_protocols_atom = getAtom(wm.conn, "WM_PROTOCOLS") catch {
-        std.log.warn("[input] Failed to get WM_PROTOCOLS atom, force destroying window", .{});
-        _ = xcb.xcb_destroy_window(wm.conn, win);
-        utils.flush(wm.conn);
+    const wm_protocols_atom = utils.getAtomCached(wm.conn, "WM_PROTOCOLS") catch {
+        forceDestroyWindow(wm, win);
         return;
     };
 
-    const wm_delete_atom = getAtom(wm.conn, "WM_DELETE_WINDOW") catch {
-        std.log.warn("[input] Failed to get WM_DELETE_WINDOW atom, force destroying window", .{});
-        _ = xcb.xcb_destroy_window(wm.conn, win);
-        utils.flush(wm.conn);
+    const wm_delete_atom = utils.getAtomCached(wm.conn, "WM_DELETE_WINDOW") catch {
+        forceDestroyWindow(wm, win);
         return;
     };
 
@@ -191,53 +164,44 @@ fn closeWindow(wm: *WM, win: u32) void {
         const atoms: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
         const atom_count: usize = @intCast(@divExact(xcb.xcb_get_property_value_length(reply), @as(c_int, @sizeOf(u32))));
 
-        var supports_delete = false;
         for (0..atom_count) |i| {
             if (atoms[i] == wm_delete_atom) {
-                supports_delete = true;
-                break;
+                sendDeleteEvent(wm, win, wm_protocols_atom, wm_delete_atom);
+                return;
             }
-        }
-
-        if (supports_delete) {
-            var event: xcb.xcb_client_message_event_t = undefined;
-            event.response_type = xcb.XCB_CLIENT_MESSAGE;
-            event.format = 32;
-            event.sequence = 0;
-            event.window = win;
-            event.type = wm_protocols_atom;
-            event.data.data32[0] = wm_delete_atom;
-            event.data.data32[1] = xcb.XCB_CURRENT_TIME;
-            event.data.data32[2] = 0;
-            event.data.data32[3] = 0;
-            event.data.data32[4] = 0;
-
-            _ = xcb.xcb_send_event(wm.conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
-            utils.flush(wm.conn);
-            std.log.debug("[input] Sent WM_DELETE_WINDOW to window 0x{x}", .{win});
-            return;
         }
     }
 
-    std.log.debug("[input] Window 0x{x} doesn't support WM_DELETE_WINDOW, force destroying", .{win});
-    _ = xcb.xcb_destroy_window(wm.conn, win);
+    forceDestroyWindow(wm, win);
+}
+
+inline fn sendDeleteEvent(wm: *WM, win: u32, protocols_atom: u32, delete_atom: u32) void {
+    var event: xcb.xcb_client_message_event_t = undefined;
+    event.response_type = xcb.XCB_CLIENT_MESSAGE;
+    event.format = 32;
+    event.sequence = 0;
+    event.window = win;
+    event.type = protocols_atom;
+    event.data.data32[0] = delete_atom;
+    event.data.data32[1] = xcb.XCB_CURRENT_TIME;
+    event.data.data32[2] = 0;
+    event.data.data32[3] = 0;
+    event.data.data32[4] = 0;
+
+    _ = xcb.xcb_send_event(wm.conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
     utils.flush(wm.conn);
 }
 
-fn getAtom(conn: *xcb.xcb_connection_t, name: []const u8) !u32 {
-    const cookie = xcb.xcb_intern_atom(conn, 0, @intCast(name.len), name.ptr);
-    const reply = xcb.xcb_intern_atom_reply(conn, cookie, null) orelse return error.AtomFailed;
-    defer std.c.free(reply);
-    return reply.*.atom;
+inline fn forceDestroyWindow(wm: *WM, win: u32) void {
+    _ = xcb.xcb_destroy_window(wm.conn, win);
+    utils.flush(wm.conn);
 }
 
 inline fn executeAction(action: *const defs.Action, wm: *WM) !void {
     switch (action.*) {
         .toggle_fullscreen => @import("fullscreen").toggleFullscreen(wm),
         .close_window => {
-            if (wm.focused_window) |win| {
-                closeWindow(wm, win);
-            }
+            if (wm.focused_window) |win| closeWindow(wm, win);
         },
         .reload_config => wm.should_reload_config.store(true, .release),
         .toggle_layout => tiling.toggleLayout(wm),

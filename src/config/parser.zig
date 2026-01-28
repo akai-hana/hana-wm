@@ -1,4 +1,4 @@
-//! Minimal TOML parser for configuration files.
+//! Minimal TOML parser for config file.
 //!
 //! This parser handles a subset of TOML sufficient for window manager configuration:
 //! - Sections: [section_name]

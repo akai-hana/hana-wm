@@ -1,24 +1,56 @@
-//! Configuration file parser and loader.
+//! Configuration interpreter
 
 const std = @import("std");
 const defs = @import("defs");
 const parser = @import("parser");
 const xkb = @import("xkbcommon");
 
-fn inRange(comptime T: type, val: T, min: T, max: T) bool {
-    return val >= min and val <= max;
+// Consolidated color parsing
+pub fn parseColor(str: []const u8) !u32 {
+    if (str.len == 0) return error.InvalidColor;
+
+    const offset: usize = if (str[0] == '#') 1 else if (str.len > 2 and str[0] == '0' and (str[1] == 'x' or str[1] == 'X')) 2 else 0;
+    const hex_part = str[offset..];
+
+    if (hex_part.len == 0) return error.InvalidColor;
+
+    const color = std.fmt.parseInt(u32, hex_part, 16) catch return error.InvalidColor;
+    if (color > 0xFFFFFF) return error.InvalidColor;
+
+    return color;
 }
 
-fn isValidColor(val: u32) bool {
-    return val <= 0xFFFFFF;
+fn getColor(section: *const parser.Section, key: []const u8, default: u32) u32 {
+    const value = section.get(key) orelse return default;
+
+    if (value.asColor()) |color| {
+        return if (color <= 0xFFFFFF) color else default;
+    }
+
+    if (value.asString()) |str| {
+        const color = parseColor(str) catch {
+            std.log.warn("[config] Invalid color for {s}: '{s}'", .{ key, str });
+            return default;
+        };
+        return color;
+    }
+
+    if (value.asInt()) |int_val| {
+        const color: u32 = @intCast(int_val);
+        return if (color <= 0xFFFFFF) color else default;
+    }
+
+    return default;
 }
 
+// Simplified getter with inline validation
 fn get(
     comptime T: type,
     section: *const parser.Section,
     key: []const u8,
     default: T,
-    comptime validator: ?fn (T) bool,
+    comptime min: ?T,
+    comptime max: ?T,
 ) T {
     const value = switch (T) {
         bool => section.getBool(key) orelse return default,
@@ -36,10 +68,12 @@ fn get(
         else => @compileError("Unsupported type"),
     };
 
-    if (validator) |v| {
-        if (!v(value)) {
-            std.log.warn("[config] Invalid {s}: using default", .{key});
-            return default;
+    if (comptime min != null or max != null) {
+        if (comptime min) |m| {
+            if (value < m) return default;
+        }
+        if (comptime max) |m| {
+            if (value > m) return default;
         }
     }
 
@@ -105,7 +139,6 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
     try parseTiling(allocator, &doc, &cfg);
     try parseBar(allocator, &doc, &cfg);
     try parseRules(allocator, &doc, &cfg);
-    try validateConfig(allocator, &cfg);
 
     std.log.info("[config] Loaded: {s}", .{path});
     return cfg;
@@ -144,7 +177,6 @@ const ACTION_MAP = std.StaticStringMap(defs.Action).initComptime(.{
 
 fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
     const section = doc.getSection("Keybindings") orelse return;
-
     const mod_substitute = section.getString("Mod");
 
     var iter = section.pairs.iterator();
@@ -234,50 +266,12 @@ pub fn resolveKeybindings(keybindings: anytype, xkb_state: *xkb.XkbState) void {
     }
 }
 
-fn getColor(section: *const parser.Section, key: []const u8, default: u32) u32 {
-    const value = section.get(key) orelse return default;
-
-    if (value.asColor()) |color| {
-        return if (isValidColor(color)) color else default;
-    }
-
-    if (value.asString()) |str| {
-        const color = parseColorString(str) catch {
-            std.log.warn("[config] Invalid color string for {s}: '{s}', using default", .{ key, str });
-            return default;
-        };
-        return if (isValidColor(color)) color else default;
-    }
-
-    if (value.asInt()) |int_val| {
-        const color: u32 = @intCast(int_val);
-        return if (isValidColor(color)) color else default;
-    }
-
-    return default;
-}
-
-fn parseColorString(str: []const u8) !u32 {
-    if (str.len == 0) return error.InvalidColor;
-
-    const offset: usize = if (str[0] == '#') 1 else if (str.len > 2 and str[0] == '0' and str[1] == 'x') 2 else 0;
-    const hex_part = str[offset..];
-
-    if (hex_part.len == 0) return error.InvalidColor;
-
-    const color = std.fmt.parseInt(u32, hex_part, 16) catch return error.InvalidColor;
-
-    if (color > 0xFFFFFF) return error.InvalidColor;
-
-    return color;
-}
-
 fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
     const section = doc.getSection("tiling") orelse return;
 
-    cfg.tiling.enabled = get(bool, section, "enabled", true, null);
+    cfg.tiling.enabled = get(bool, section, "enabled", true, null, null);
 
-    const layout_str = get([]const u8, section, "layout", "master_left", null);
+    const layout_str = get([]const u8, section, "layout", "master_left", null, null);
     cfg.allocated_layout = try allocator.dupe(u8, layout_str);
     cfg.tiling.layout = cfg.allocated_layout.?;
 
@@ -285,26 +279,10 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
         cfg.tiling.master_side = defs.MasterSide.fromString(side_str) orelse .left;
     }
 
-    cfg.tiling.master_count = get(usize, section, "master_count", 1, struct {
-        fn v(n: usize) bool {
-            return n >= 1;
-        }
-    }.v);
-    cfg.tiling.master_width_factor = get(f32, section, "master_width_factor", 50.0, struct {
-        fn v(n: f32) bool {
-            return inRange(f32, n, defs.MIN_MASTER_WIDTH, defs.MAX_MASTER_WIDTH);
-        }
-    }.v);
-    cfg.tiling.gaps = get(u16, section, "gaps", 10, struct {
-        fn v(n: u16) bool {
-            return n <= defs.MAX_GAPS;
-        }
-    }.v);
-    cfg.tiling.border_width = get(u16, section, "border_width", 2, struct {
-        fn v(n: u16) bool {
-            return n <= defs.MAX_BORDER_WIDTH;
-        }
-    }.v);
+    cfg.tiling.master_count = get(usize, section, "master_count", 1, 1, null);
+    cfg.tiling.master_width_factor = get(f32, section, "master_width_factor", 50.0, defs.MIN_MASTER_WIDTH, defs.MAX_MASTER_WIDTH);
+    cfg.tiling.gaps = get(u16, section, "gaps", 10, 0, defs.MAX_GAPS);
+    cfg.tiling.border_width = get(u16, section, "border_width", 2, 0, defs.MAX_BORDER_WIDTH);
 
     cfg.tiling.border_focused = getColor(section, "border_focused", 0x5294E2);
     cfg.tiling.border_normal = getColor(section, "border_normal", 0x383C4A);
@@ -313,22 +291,14 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
 fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
     const section = doc.getSection("bar") orelse return;
 
-    cfg.bar.show = get(bool, section, "show", true, null);
-    cfg.bar.height = get(u16, section, "height", 24, struct {
-        fn v(n: u16) bool {
-            return n >= 16 and n <= 100;
-        }
-    }.v);
+    cfg.bar.show = get(bool, section, "show", true, null, null);
+    cfg.bar.height = get(u16, section, "height", 24, 16, 100);
 
-    const font_str = get([]const u8, section, "font", "monospace:size=10", null);
+    const font_str = get([]const u8, section, "font", "monospace:size=10", null, null);
     cfg.allocated_font = try allocator.dupe(u8, font_str);
     cfg.bar.font = cfg.allocated_font.?;
 
-    cfg.bar.font_size = get(u16, section, "font_size", 10, struct {
-        fn v(n: u16) bool {
-            return n >= 6 and n <= 72;
-        }
-    }.v);
+    cfg.bar.font_size = get(u16, section, "font_size", 10, 6, 72);
 
     cfg.bar.bg = getColor(section, "bg", 0x222222);
     cfg.bar.fg = getColor(section, "fg", 0xBBBBBB);
@@ -338,27 +308,17 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     cfg.bar.urgent_bg = getColor(section, "urgent_bg", 0xFF0000);
     cfg.bar.urgent_fg = getColor(section, "urgent_fg", 0xFFFFFF);
 
-    const ws_chars = get([]const u8, section, "workspace_chars", "123456789", null);
+    const ws_chars = get([]const u8, section, "workspace_chars", "123456789", null, null);
     cfg.allocated_workspace_chars = try allocator.dupe(u8, ws_chars);
     cfg.bar.workspace_chars = cfg.allocated_workspace_chars.?;
 
-    cfg.bar.indicator_size = get(u16, section, "indicator_size", 4, struct {
-        fn v(n: u16) bool {
-            return n >= 2 and n <= 10;
-        }
-    }.v);
-
-    cfg.bar.title_accent = get(bool, section, "title_accent", true, null);
+    cfg.bar.indicator_size = get(u16, section, "indicator_size", 4, 2, 10);
+    cfg.bar.title_accent = get(bool, section, "title_accent", true, null, null);
 }
 
 fn parseWorkspaces(doc: *const parser.Document, cfg: *defs.Config) void {
     const section = doc.getSection("workspaces") orelse return;
-
-    cfg.workspaces.count = get(usize, section, "count", 9, struct {
-        fn v(n: usize) bool {
-            return inRange(usize, n, defs.MIN_WORKSPACES, defs.MAX_WORKSPACES);
-        }
-    }.v);
+    cfg.workspaces.count = get(usize, section, "count", 9, defs.MIN_WORKSPACES, defs.MAX_WORKSPACES);
 }
 
 fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
@@ -368,7 +328,7 @@ fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *d
             const ws_num = entry.value_ptr.*.asInt() orelse continue;
 
             if (ws_num < 1 or ws_num > cfg.workspaces.count) {
-                std.log.warn("[config] Rule workspace {} for '{s}' exceeds workspace count {}, skipping", .{ ws_num, entry.key_ptr.*, cfg.workspaces.count });
+                std.log.warn("[config] Rule workspace {} for '{s}' exceeds count {}, skipping", .{ ws_num, entry.key_ptr.*, cfg.workspaces.count });
                 continue;
             }
 
@@ -393,7 +353,7 @@ fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *d
         const ws_num = std.fmt.parseInt(usize, ws_str, 10) catch continue;
 
         if (ws_num < 1 or ws_num > cfg.workspaces.count) {
-            std.log.warn("[config] Section '{s}' workspace {} exceeds workspace count {}, skipping", .{ name, ws_num, cfg.workspaces.count });
+            std.log.warn("[config] Section '{s}' workspace {} exceeds count {}, skipping", .{ name, ws_num, cfg.workspaces.count });
             continue;
         }
 
@@ -404,28 +364,6 @@ fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *d
                 .workspace = ws_num - 1,
             };
             try cfg.workspaces.rules.append(allocator, rule);
-        }
-    }
-}
-
-fn validateConfig(allocator: std.mem.Allocator, cfg: *const defs.Config) !void {
-    if (cfg.keybindings.items.len < 2) return;
-
-    var sorted = try allocator.dupe(defs.Keybind, cfg.keybindings.items);
-    defer allocator.free(sorted);
-
-    std.mem.sort(defs.Keybind, sorted, {}, struct {
-        fn lt(_: void, a: defs.Keybind, b: defs.Keybind) bool {
-            return if (a.modifiers != b.modifiers)
-                a.modifiers < b.modifiers
-            else
-                a.keysym < b.keysym;
-        }
-    }.lt);
-
-    for (sorted[0 .. sorted.len - 1], sorted[1..]) |a, b| {
-        if (a.modifiers == b.modifiers and a.keysym == b.keysym) {
-            return error.DuplicateKeybinding;
         }
     }
 }
