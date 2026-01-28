@@ -1,26 +1,4 @@
-# hana WM config!
-
-# KEYBINDINGS
-# Define keyboard shortcuts to control the window manager.
-# Format: Key+Combination = "action" or "command"
-#
-# Available modifiers: Super, Mod4, Alt, Mod1, Control, Ctrl, Shift
-# You can define a "Mod" variable to use throughout your config
-#
-# Available actions:
-#   - close/kill             - Close focused window
-#   - reload/reload_config   - Reload this config file
-#   - toggle_layout          - Cycle through layouts
-#   - toggle_tiling          - Enable/disable tiling
-#   - increase_master        - Increase master area width (+5%)
-#   - decrease_master        - Decrease master area width (-5%)
-#   - increase_master_count  - Add one more window to master area
-#   - decrease_master_count  - Remove one window from master area
-#   - workspace_N            - Switch to workspace N (1-20)
-#   - move_to_workspace_N    - Move focused window to workspace N
-#   - dump_state             - Print WM state to console (debug)
-#   - emergency_recover      - Map all windows and disable tiling (recovery)
-#   - "any shell command"    - Execute the command
+# hana WM config - Enhanced with configurable bar!
 
 [tiling]
 enabled     = true     # Enable tiling on startup
@@ -31,12 +9,8 @@ master_count        = 1        # Number of windows in master area
 master_width_factor = 55       # Master area width (5-95, percentage)
 gaps                = 12       # Gap between windows (pixels)
 border_width        = 4        # Border thickness (pixels)
-border_focused      = "#AC3232" # Focused window border color (hex RGB)
-border_normal       = "#4D2843" # Unfocused window border color (hex RGB)
-
-# TODO: transfer colors from dwm custom build
-#border_focused      = "#CC9FBF" # Focused window border color (hex RGB)
-#border_normal       = "#4D2843" # Unfocused window border color (hex RGB)
+border_focused      = "#ac3232" # col_cyan - focused window border
+border_normal       = "#52263e" # col_gray2 - unfocused window border
 
 [Keybindings]
 # Define your modifier key (will replace "Mod" in bindings below)
@@ -56,6 +30,8 @@ Mod+Shift+s = "pkill equibop"
 Mod+d       = "ghostty"
 Mod+Shift+d = "pkill ghostty"
 
+Mod+x = "~/Games/t-client/DDNet"
+
 Mod+v       = "flatpak run com.github.th_ch.youtube_music"
 Mod+Shift+v = "pkill youtube-music"
 
@@ -72,7 +48,7 @@ Mod+l           = "increase_master"       # Make master area wider
 Mod+comma       = "increase_master_count" # More windows in master
 Mod+period      = "decrease_master_count" # Fewer windows in master
 
-# Workspace switching (1-8)
+# Workspace switching (1-4, q, w, e, r)
 Mod+1 = "workspace_1"
 Mod+2 = "workspace_2"
 Mod+3 = "workspace_3"
@@ -100,60 +76,102 @@ Mod+p = "rofi -show drun"
 Mod+Shift+Escape = "emergency_recover"  # Emergency recovery mode
 
 [bar]
-show        = true
-height      = 24
-#font        = "FiraCode Nerd Font Ret:size=10"
+show = true
+
+# Bar height - NEW: Auto-adapts to font size by default!
+# Uncomment to set a fixed height instead:
+# height = 24
+
+# Font configuration
 font = "FiraCode NF:size=10"
-#font = "DejaVu Sans:size=10"
-bg          = "#222222"
-fg          = "#BBBBBB"
-selected_bg = "#005577"
-selected_fg = "#EEEEEE"
-occupied_fg = "#EEEEEE"
+font_size = 10
+
+# NEW: Spacing configuration for better readability!
+padding = 10     # Padding inside segments (around text)
+spacing = 16     # Space between segments
+
+# Colors - matching your dwm config!
+# col_gray1 = #0d0d14 (dark background)
+# col_gray2 = #52263e (border/secondary)
+# col_gray3 = #bbbbbb (normal foreground)
+# col_gray4 = #eeeeee (selected foreground)
+# col_cyan  = #ac3232 (focused color/accent)
+
+bg          = "#0d0d14"  # col_gray1
+fg          = "#bbbbbb"  # col_gray3
+selected_bg = "#ac3232"  # col_cyan
+selected_fg = "#eeeeee"  # col_gray4
+occupied_fg = "#eeeeee"  # col_gray4
 urgent_bg   = "#FF0000"
 urgent_fg   = "#FFFFFF"
+
+# NEW: Accent colors for bar segments!
+# Default accent for all segments
+accent_color = "#ac3232"  # col_cyan - matching your focused border
+
+# NEW: Per-segment accent colors (optional - overrides accent_color)
+[bar.colors]
+workspaces = "#ac3232"  # col_cyan - red accent
+title = "#52263e"       # col_gray2 - purple/burgundy
+clock = "#ac3232"       # col_cyan - red accent
+
+# NEW: Workspace icons - matches your Japanese theme!
+# Using hiragana characters for your workspace labels
+icons = ["あ", "か", "い", "は", "な", "つ", "ん", "で"]
+
+# Alternative icon options (uncomment to try):
+# Numbers with brackets (like your comments):
+# icons = ["【1】", "【2】", "【3】", "【4】", "【5】", "【6】", "【7】", "【8】"]
+
+# Full Japanese labels from your comments:
+# icons = ["あ】Browser", "か】Socials", "い】Music", "は】Launchers", "な】Gaming", "つ】Code", "ん】Media", "で】Downloads"]
+
+# Emoji matching your workspace purposes:
+# icons = ["🌐", "💬", "🎵", "🚀", "🎮", "💻", "📺", "📥"]
+
+# Nerd Font icons (if you want):
+# icons = ["", "", "", "", "", "", "", ""]
+
+indicator_size = 4
+title_accent = true
+
+# NEW: Configurable bar layout!
+# You can rearrange segments however you like
+# Available segments: "workspaces", "title", "clock", "layout"
+
+# Default layout (workspaces left, title center, clock right):
+[bar.layout.left]
+segments = ["workspaces", "layout"]
+
+[bar.layout.center]
+segments = ["title"]
+
+[bar.layout.right]
+segments = ["clock"]
+
+# Alternative layouts to try (uncomment to use):
+
+# Minimal - just workspaces and clock:
+# [bar.layout.left]
+# segments = ["workspaces"]
+# [bar.layout.right]
+# segments = ["clock"]
+
+# Everything on the left:
+# [bar.layout.left]
+# segments = ["workspaces", "title", "clock"]
+
+# Clock on left (reversed!):
+# [bar.layout.left]
+# segments = ["clock", "title"]
+# [bar.layout.right]
+# segments = ["workspaces"]
 
 [workspaces]
 count = 8  # Number of virtual desktops (1-20)
 
 # WORKSPACE RULES
-# Automatically assign windows to specific workspaces based on their
-# WM_CLASS property (use `xprop WM_CLASS` to find window class names)
-#
-# THREE SUPPORTED FORMATS:
-#
-# FORMAT 1: Section-based (RECOMMENDED - most readable)
-# --------------------------------------------------------
-# [workspace.rules.N]
-# WindowClass1
-# WindowClass2
-#
-# Example:
-#   [workspace.rules.1]
-#   Firefox
-#   Navigator
-#
-# FORMAT 2: Array-based (compact)
-# --------------------------------
-# [workspace.rules]
-# N = ["WindowClass1", "WindowClass2"]
-#
-# Example:
-#   [workspace.rules]
-#   1 = ["Firefox", "Navigator"]
-#   2 = ["discord", "vesktop"]
-#
-# FORMAT 3: Legacy key-value (backwards compatible)
-# --------------------------------------------------
-# [rules]
-# WindowClass = WorkspaceNumber
-#
-# Example:
-#   [rules]
-#   Firefox = 1
-#   discord = 2
-#
-# You can mix formats in the same config!
+# Automatically assign windows to specific workspaces
 
 [workspace.rules.1] #【あ】Browser
 Navigator
@@ -187,33 +205,3 @@ gimp
 
 [workspace.rules.8] #【で】Downloads
 deluge
-
-# ALTERNATIVE FORMAT EXAMPLES (not active, for reference)
-
-# Using FORMAT 2 (array-based):
-#
-# [workspace.rules]
-# 1 = ["Navigator", "Firefox"]
-# 2 = ["discord", "vesktop", "equibop", "electron"]
-# 3 = ["com.github.th_ch.youtube_music"]
-# 4 = ["steam", "OpenTabletDriver.UX"]
-# 5 = ["osu!", "DDNet"]
-
-# Using FORMAT 3 (legacy):
-#
-# [rules]
-# Firefox = 1
-# discord = 2
-# vesktop = 2
-# steam = 4
-
-# TIPS
-# - Find window class: run `xprop WM_CLASS` and click a window
-# - Find font names: run `fc-list | grep -i <font-name>`
-#   Font format: "Font Family Name:size=N" (e.g., "FiraCode Nerd Font:size=12")
-#   If no size specified, defaults to 10pt
-# - Reload config: Use your configured keybinding (default: Mod+Shift+r)
-# - Multiple entries on one line: Use semicolons
-#   Example: discord = 2; vesktop = 2; equibop = 2
-# - Colors: Hex format with or without # prefix (5294E2 or #5294E2)
-# - Mouse bindings: Super+LeftClick=Move, Super+RightClick=Resize

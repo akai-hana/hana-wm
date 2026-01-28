@@ -421,6 +421,10 @@ pub fn toggleLayout(wm: *WM) void {
         .monocle => .grid,
         .grid => .master,
     };
+    
+    // Mark bar dirty to update layout indicator
+    bar.markDirty();
+    
     retileCurrentWorkspace(wm);  // Flushes immediately
 }
 
@@ -439,18 +443,30 @@ pub fn decreaseMasterWidth(wm: *WM) void {
 pub fn increaseMasterCount(wm: *WM) void {
     const s = state orelse return;
     s.master_count = @min(s.tiled_windows.items.len, s.master_count + 1);
+    
+    // Mark bar dirty to update layout indicator  
+    bar.markDirty();
+    
     retileCurrentWorkspace(wm);  // Flushes immediately
 }
 
 pub fn decreaseMasterCount(wm: *WM) void {
     const s = state orelse return;
     s.master_count = @max(1, s.master_count -| 1);
+    
+    // Mark bar dirty to update layout indicator
+    bar.markDirty();
+    
     retileCurrentWorkspace(wm);  // Flushes immediately
 }
 
 pub fn toggleTiling(wm: *WM) void {
     const s = state orelse return;
     s.enabled = !s.enabled;
+
+    // Mark bar dirty to update layout indicator
+    bar.markDirty();
+
     if (s.enabled) {
         retileCurrentWorkspace(wm);  // Flushes immediately
     }
