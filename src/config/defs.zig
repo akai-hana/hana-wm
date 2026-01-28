@@ -1,4 +1,4 @@
-//! Core type definitions for window manager state and configuration.
+//! Core type definitions
 
 const std = @import("std");
 
@@ -25,13 +25,12 @@ pub const XKB_RETRY_DELAY_MS: u64 = 20;
 pub const XKB_MAX_RETRIES: usize = 50;
 
 pub const MAX_EVENT_BATCH_SIZE: usize = 10;
-pub const EVENT_POLL_SLEEP_NS: u64 = 1 * std.time.ns_per_ms;
-pub const ASYNC_JOBS_PER_ITERATION: usize = 5;
+pub const EVENT_POLL_SLEEP_NS: u64 = 500 * std.time.ns_per_us; // 0.5ms instead of 1ms
 
-pub const IDLE_THRESHOLD_SHORT: usize = 10;
-pub const IDLE_THRESHOLD_LONG: usize = 50;
+pub const IDLE_THRESHOLD_SHORT: usize = 20; // Stay responsive longer
+pub const IDLE_THRESHOLD_LONG: usize = 100;
 pub const SLEEP_MULTIPLIER_MEDIUM: u64 = 2;
-pub const SLEEP_MULTIPLIER_LONG: u64 = 5;
+pub const SLEEP_MULTIPLIER_LONG: u64 = 4; // Reduced from 5
 
 pub const MAX_WORKSPACES: usize = 20;
 pub const MIN_WORKSPACES: usize = 1;
@@ -132,20 +131,6 @@ pub const WorkspaceConfig = struct {
     rules: std.ArrayListUnmanaged(Rule) = .{},
 };
 
-pub const WindowProperties = std.StringHashMap([]const u8);
-
-pub const Window = struct {
-    id: u32,
-    properties: WindowProperties,
-
-    pub fn init(allocator: std.mem.Allocator, id: u32) Window {
-        return .{
-            .id = id,
-            .properties = WindowProperties.init(allocator),
-        };
-    }
-};
-
 pub const Config = struct {
     keybindings: std.ArrayListUnmanaged(Keybind) = .{},
     tiling: TilingConfig = .{},
@@ -179,7 +164,7 @@ pub const WM = struct {
     screen: *xcb.xcb_screen_t,
     root: u32,
     config: Config,
-    windows: std.AutoHashMap(u32, Window),
+    windows: std.AutoHashMap(u32, void), // SIMPLIFIED: Just track existence
     focused_window: ?u32 = null,
     fullscreen_window: ?u32 = null,
     fullscreen_geometry: ?struct {
@@ -194,31 +179,19 @@ pub const WM = struct {
     running: *std.atomic.Value(bool),
 
     pub fn deinit(self: *WM) void {
-        var iter = self.windows.valueIterator();
-        while (iter.next()) |win| {
-            var w = win.*;
-            w.properties.deinit();
-        }
         self.windows.deinit();
         self.config.deinit(self.allocator);
     }
 
-    pub fn getWindow(self: *WM, window_id: u32) ?*Window {
-        return self.windows.getPtr(window_id);
+    pub inline fn hasWindow(self: *WM, window_id: u32) bool {
+        return self.windows.contains(window_id);
     }
 
-    pub fn putWindow(self: *WM, window: Window) !void {
-        try self.windows.put(window.id, window);
+    pub fn addWindow(self: *WM, window_id: u32) !void {
+        try self.windows.put(window_id, {});
     }
 
     pub fn removeWindow(self: *WM, window_id: u32) void {
-        if (self.windows.fetchRemove(window_id)) |kv| {
-            var win = kv.value;
-            win.properties.deinit();
-        }
-    }
-
-    pub fn getFocusedWindow(self: *WM) ?*Window {
-        return if (self.focused_window) |id| self.getWindow(id) else null;
+        _ = self.windows.remove(window_id);
     }
 };

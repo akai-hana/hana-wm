@@ -1,10 +1,6 @@
-//! Centralized focus management for window manager.
-//!
-//! This module provides a single point of control for window focus changes,
-//! ensuring consistent border updates and proper XCB focus commands.
+//! Focus management
 
 const std = @import("std");
-const builtin = @import("builtin");
 const defs = @import("defs");
 const tiling = @import("tiling");
 const utils = @import("utils");
@@ -21,21 +17,26 @@ pub const Reason = enum {
     tiling_operation,
 };
 
+// Simplified focus protection - no separate timestamp, just a counter
+var focus_protection_active: bool = false;
+
 pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     if (win == wm.root) {
-        std.log.err("[CRITICAL] Attempted to focus ROOT window (0x{x})! Reason: {s}. Aborting.", .{ win, @tagName(reason) });
-        if (builtin.mode == .Debug) {
-            @panic("Root window focus attempted - this is a bug!");
-        }
+        std.log.err("[CRITICAL] Attempted to focus ROOT window!", .{});
         return;
     }
 
-    // Don't focus the bar window
-    if (bar.isBarWindow(win)) {
-        return;
-    }
+    if (bar.isBarWindow(win)) return;
+
+    // Simplified grace period - just block mouse_enter briefly after explicit focus
+    if (reason == .mouse_enter and focus_protection_active) return;
 
     if (wm.focused_window == win) return;
+
+    // Set protection for explicit focus changes
+    if (reason != .mouse_enter) {
+        focus_protection_active = true;
+    }
 
     const old = wm.focused_window;
     wm.focused_window = win;
@@ -48,11 +49,8 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
 
     tiling.updateWindowFocusFast(wm, old, win);
     utils.flush(wm.conn);
-    
-    // Update bar to reflect new focused window
-    bar.update(wm) catch |err| {
-        std.log.err("[focus] Failed to update bar: {}", .{err});
-    };
+
+    bar.markDirty();
 }
 
 pub fn clearFocus(wm: *WM) void {
@@ -64,9 +62,11 @@ pub fn clearFocus(wm: *WM) void {
         tiling.updateWindowFocusFast(wm, old_win, null);
     }
     utils.flush(wm.conn);
-    
-    // Update bar to reflect no focused window
-    bar.update(wm) catch |err| {
-        std.log.err("[focus] Failed to update bar: {}", .{err});
-    };
+
+    bar.markDirty();
+}
+
+// Called from main loop to release focus protection after events settle
+pub fn releaseProtection() void {
+    focus_protection_active = false;
 }
