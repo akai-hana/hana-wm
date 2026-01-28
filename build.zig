@@ -1,5 +1,4 @@
 //! Build configuration for Hana window manager
-
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
@@ -26,9 +25,6 @@ pub fn build(b: *std.Build) void {
         .root_module = root_module,
     });
 
-    // Add FreeType include paths
-    exe.root_module.addIncludePath(.{ .cwd_relative = "/usr/include/freetype2" });
-
     // Set up build-time allocator
     var arena = std.heap.ArenaAllocator.init(b.allocator);
     defer arena.deinit();
@@ -43,21 +39,11 @@ pub fn build(b: *std.Build) void {
         std.process.exit(1);
     };
 
-    // Add include paths to all modules (needed for C imports)
-    var include_iter = all_modules.iterator();
-    while (include_iter.next()) |entry| {
-        entry.value_ptr.*.addIncludePath(.{ .cwd_relative = "/usr/include/freetype2" });
-    }
-
     // Connect modules
     connectAllModules(root_module, &all_modules);
 
-    // Link system libraries
-    root_module.linkSystemLibrary("xcb", .{});
-    root_module.linkSystemLibrary("xcb-render", .{});
-    root_module.linkSystemLibrary("xkbcommon", .{});
-    root_module.linkSystemLibrary("xkbcommon-x11", .{});
-    root_module.linkSystemLibrary("freetype2", .{});
+    // Link system libraries and add include paths to ALL modules
+    linkSystemLibrariesAndIncludes(b, root_module, &all_modules);
 
     // Install artifact
     b.installArtifact(exe);
@@ -86,25 +72,37 @@ fn connectAllModules(root: *std.Build.Module, modules: *std.StringHashMap(*std.B
     }
 }
 
+fn linkSystemLibrariesAndIncludes(b: *std.Build, root: *std.Build.Module, modules: *std.StringHashMap(*std.Build.Module)) void {
+    // Link system libraries to root
+    root.linkSystemLibrary("xcb", .{});
+    root.linkSystemLibrary("xkbcommon", .{});
+    root.linkSystemLibrary("xkbcommon-x11", .{});
+    root.linkSystemLibrary("X11", .{});
+    root.linkSystemLibrary("Xft", .{});
+    
+    // Add FreeType include path to root
+    addFreetypeIncludes(b, root);
+    
+    // Add FreeType include path to all discovered modules
+    // This is critical because @cImport in any module needs the include paths
+    var iter = modules.iterator();
+    while (iter.next()) |entry| {
+        addFreetypeIncludes(b, entry.value_ptr.*);
+    }
+}
+
 fn discoverModules(
     b: *std.Build,
     dir_path: []const u8,
     allocator: std.mem.Allocator,
     all_modules: *std.StringHashMap(*std.Build.Module),
 ) !void {
-    // Set up I/O for directory operations
-    var io_threaded: std.Io.Threaded = .init_single_threaded;
-    const io = io_threaded.io();
-
     // Open directory
-    var dir = b.build_root.handle.openDir(io, dir_path, .{ .iterate = true }) catch |err| {
-        std.debug.print("Cannot open directory '{s}': {}\n", .{ dir_path, err });
-        return err;
-    };
-    defer dir.close(io);
+    var dir = try b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true });
+    defer dir.close(b.graph.io);
 
     var iter = dir.iterate();
-    while (try iter.next(io)) |entry| {
+    while (try iter.next(b.graph.io)) |entry| {
         // Recurse into subdirectories
         if (entry.kind == .directory) {
             const subdir = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
@@ -131,4 +129,18 @@ fn discoverModules(
         const module = b.addModule(name, .{ .root_source_file = b.path(path) });
         try all_modules.put(try allocator.dupe(u8, name), module);
     }
+}
+
+/// Add FreeType include paths (required by Xft.h)
+fn addFreetypeIncludes(b: *std.Build, module: *std.Build.Module) void {
+    _ = b; // Build context not needed for fallback
+    
+    // Use standard path - override with CFLAGS if your system differs
+    addFreetypeFallback(module);
+}
+
+/// Fallback to common FreeType include locations
+fn addFreetypeFallback(module: *std.Build.Module) void {
+    // Just use the most common path - users can override if needed
+    module.addIncludePath(.{ .cwd_relative = "/usr/include/freetype2" });
 }

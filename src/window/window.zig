@@ -76,9 +76,33 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, w
 }
 
 pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) void {
+    // Ignore events on root window or invalid windows
     if (event.event == wm.root or event.event == 0) return;
+    
+    // Ignore bar window
     if (bar.isBarWindow(event.event)) return;
+    
+    // Ignore if focus is protected (brief period after explicit focus changes)
     if (utils.isProtected()) return;
+    
+    // IMPORTANT: Filter out spurious EnterNotify events
+    // X11 sends EnterNotify in many cases beyond just "mouse entered window":
+    // - When windows are mapped/unmapped
+    // - When grabs/ungrabs occur (like Super+drag)
+    // - Virtual crossings when pointer is grabbed
+    
+    // Check crossing mode - ignore grab/ungrab related events
+    const mode = event.mode;
+    if (mode != xcb.XCB_NOTIFY_MODE_NORMAL) {
+        return;
+    }
+    
+    // Check crossing detail - ignore virtual crossings
+    const detail = event.detail;
+    if (detail == xcb.XCB_NOTIFY_DETAIL_VIRTUAL or 
+        detail == xcb.XCB_NOTIFY_DETAIL_NONLINEAR_VIRTUAL) {
+        return;
+    }
 
     const old_focus = wm.focused_window;
     utils.setFocus(wm, event.event, false);
