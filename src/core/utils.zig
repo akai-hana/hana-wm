@@ -23,68 +23,6 @@ pub inline fn configureBorder(conn: *xcb.xcb_connection_t, win: u32, width: u16,
     setBorder(conn, win, color);
 }
 
-// Window attributes helper
-
-pub const WindowAttrs = struct {
-    x: ?i16 = null,
-    y: ?i16 = null,
-    width: ?u16 = null,
-    height: ?u16 = null,
-    border_width: ?u16 = null,
-    border_color: ?u32 = null,
-    event_mask: ?u32 = null,
-    stack_mode: ?u32 = null,
-
-    pub fn configure(self: WindowAttrs, conn: *xcb.xcb_connection_t, win: u32) void {
-        var mask: u32 = 0;
-        var values: [8]u32 = undefined;
-        var idx: usize = 0;
-
-        if (self.x) |x| {
-            mask |= xcb.XCB_CONFIG_WINDOW_X;
-            values[idx] = @bitCast(@as(i32, x));
-            idx += 1;
-        }
-        if (self.y) |y| {
-            mask |= xcb.XCB_CONFIG_WINDOW_Y;
-            values[idx] = @bitCast(@as(i32, y));
-            idx += 1;
-        }
-        if (self.width) |w| {
-            mask |= xcb.XCB_CONFIG_WINDOW_WIDTH;
-            values[idx] = w;
-            idx += 1;
-        }
-        if (self.height) |h| {
-            mask |= xcb.XCB_CONFIG_WINDOW_HEIGHT;
-            values[idx] = h;
-            idx += 1;
-        }
-        if (self.border_width) |bw| {
-            mask |= xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH;
-            values[idx] = bw;
-            idx += 1;
-        }
-        if (self.stack_mode) |sm| {
-            mask |= xcb.XCB_CONFIG_WINDOW_STACK_MODE;
-            values[idx] = sm;
-            idx += 1;
-        }
-
-        if (mask != 0) {
-            _ = xcb.xcb_configure_window(conn, win, @intCast(mask), &values);
-        }
-
-        if (self.border_color) |bc| {
-            setBorder(conn, win, bc);
-        }
-
-        if (self.event_mask) |em| {
-            _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{em});
-        }
-    }
-};
-
 // Geometry utilities
 
 pub const Rect = struct {
@@ -99,14 +37,15 @@ pub const Rect = struct {
 
     pub inline fn clamp(self: Rect) Rect {
         return .{
-            .x = self.x,
-            .y = self.y,
-            .width = std.math.clamp(self.width, defs.MIN_WINDOW_DIM, defs.MAX_WINDOW_DIM),
+            .x      = self.x,
+            .y      = self.y,
+            .width  = std.math.clamp(self.width, defs.MIN_WINDOW_DIM, defs.MAX_WINDOW_DIM),
             .height = std.math.clamp(self.height, defs.MIN_WINDOW_DIM, defs.MAX_WINDOW_DIM),
         };
     }
 
     pub inline fn isValid(self: Rect) bool {
+        // Width & Height
         return self.width >= defs.MIN_WINDOW_DIM and self.width <= defs.MAX_WINDOW_DIM and
             self.height >= defs.MIN_WINDOW_DIM and self.height <= defs.MAX_WINDOW_DIM;
     }
@@ -118,16 +57,6 @@ pub const Margins = struct {
 
     pub inline fn total(self: Margins) u16 {
         return 2 * self.gap + 2 * self.border;
-    }
-
-    pub inline fn innerRect(self: Margins, outer_w: u16, outer_h: u16) Rect {
-        const margin = self.total();
-        return .{
-            .x = @intCast(self.gap),
-            .y = @intCast(self.gap),
-            .width = if (outer_w > margin) outer_w - margin else defs.MIN_WINDOW_DIM,
-            .height = if (outer_h > margin) outer_h - margin else defs.MIN_WINDOW_DIM,
-        };
     }
 };
 
@@ -162,9 +91,9 @@ pub inline fn normalizeModifiers(state: u16) u16 {
 
 const AtomCache = struct {
     wm_protocols: ?u32 = null,
-    wm_delete: ?u32 = null,
-    net_wm_name: ?u32 = null,
-    utf8_string: ?u32 = null,
+    wm_delete: ?u32    = null,
+    net_wm_name: ?u32  = null,
+    utf8_string: ?u32  = null,
 };
 
 var atom_cache: AtomCache = .{};
@@ -247,7 +176,7 @@ pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allo
 
     return WMClass{
         .instance = instance,
-        .class = class,
+        .class    = class,
     };
 }
 
@@ -269,7 +198,7 @@ pub inline fn setFocus(wm: *defs.WM, win: u32, protect: bool) void {
     if (protect) {
         focus_protection_active = true;
     }
-    
+
     // Flush immediately - focus changes need to be instant
     flush(wm.conn);
 }
@@ -277,7 +206,7 @@ pub inline fn setFocus(wm: *defs.WM, win: u32, protect: bool) void {
 pub inline fn clearFocus(wm: *defs.WM) void {
     wm.focused_window = null;
     _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, wm.root, xcb.XCB_CURRENT_TIME);
-    
+
     // Flush immediately
     flush(wm.conn);
 }
@@ -286,6 +215,6 @@ pub inline fn isProtected() bool {
     return focus_protection_active;
 }
 
-pub inline fn releaseProtection() void {
+pub fn releaseProtection() void {
     focus_protection_active = false;
 }
