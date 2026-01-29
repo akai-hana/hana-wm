@@ -80,15 +80,15 @@ show = true
 
 # Bar height - NEW: Auto-adapts to font size by default!
 # Uncomment to set a fixed height instead:
-# height = 24
+height = 16
 
 # Font configuration
-font = "FiraCode NF:size=10"
-font_size = 10
+font = "FiraCode Nerd Font Ret"
+font_size = 12
 
 # NEW: Spacing configuration for better readability!
-padding = 10     # Padding inside segments (around text)
-spacing = 16     # Space between segments
+padding = 0     # Padding inside segments (around text)
+spacing = 0     # Space between segments
 
 # Colors - matching your dwm config!
 # col_gray1 = #0d0d14 (dark background)
@@ -124,18 +124,15 @@ icons = ["あ", "か", "い", "は", "な", "つ", "ん", "で"]
 # icons = ["【1】", "【2】", "【3】", "【4】", "【5】", "【6】", "【7】", "【8】"]
 
 # Full Japanese labels from your comments:
-# icons = ["あ】Browser", "か】Socials", "い】Music", "は】Launchers", "な】Gaming", "つ】Code", "ん】Media", "で】Downloads"]
-
-# Emoji matching your workspace purposes:
-# icons = ["🌐", "💬", "🎵", "🚀", "🎮", "💻", "📺", "📥"]
+#icons = ["あ】Browser", "か】Socials", "い】Music", "は】Launchers", "な】Gaming", "つ】Code", "ん】Media", "で】Downloads"]
 
 # Nerd Font icons (if you want):
 # icons = ["", "", "", "", "", "", "", ""]
 
-indicator_size = 4
+indicator_size = 1
 title_accent = true
 
-# NEW: Configurable bar layout!
+# Configurable bar layout
 # You can rearrange segments however you like
 # Available segments: "workspaces", "title", "clock", "layout"
 

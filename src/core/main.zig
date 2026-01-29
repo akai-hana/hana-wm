@@ -1,16 +1,16 @@
-// Main event loop - MINIMAL: Maximum responsiveness, zero artificial delays
+// Main event loop
 
-const std = @import("std");
-const posix = std.posix;
+const std     = @import("std");
+const posix   = std.posix;
 const builtin = @import("builtin");
 
-const config = @import("config");
-const defs = @import("defs");
+const config    = @import("config");
+const defs      = @import("defs");
 const xkbcommon = @import("xkbcommon");
-const events = @import("events");
-const input = @import("input");
-const utils = @import("utils");
-const bar = @import("bar");
+const events    = @import("events");
+const input     = @import("input");
+const utils     = @import("utils");
+const bar       = @import("bar");
 
 const xcb = defs.xcb;
 const WM = defs.WM;
@@ -35,16 +35,16 @@ fn setupSignalHandler() void {
     };
 
     var sa_reload = posix.Sigaction{
-        .handler = .{ .handler = handler.reload },
-        .mask = std.mem.zeroes(posix.sigset_t),
-        .flags = posix.SA.RESTART,
+        .handler  = .{ .handler = handler.reload },
+        .mask     = std.mem.zeroes(posix.sigset_t),
+        .flags    = posix.SA.RESTART,
     };
     posix.sigaction(posix.SIG.HUP, &sa_reload, null);
 
-    var sa_term = posix.Sigaction{
+    var sa_term  = posix.Sigaction{
         .handler = .{ .handler = handler.terminate },
-        .mask = std.mem.zeroes(posix.sigset_t),
-        .flags = posix.SA.RESTART,
+        .mask    = std.mem.zeroes(posix.sigset_t),
+        .flags   = posix.SA.RESTART,
     };
     posix.sigaction(posix.SIG.TERM, &sa_term, null);
     posix.sigaction(posix.SIG.INT, &sa_term, null);
@@ -71,16 +71,16 @@ fn becomeWindowManager(conn: *xcb.xcb_connection_t, root: u32) !void {
 
 fn setupExistingWindows(conn: *xcb.xcb_connection_t, root: u32) void {
     const cookie = xcb.xcb_query_tree(conn, root);
-    const reply = xcb.xcb_query_tree_reply(conn, cookie, null) orelse return;
+    const reply  = xcb.xcb_query_tree_reply(conn, cookie, null) orelse return;
     defer std.c.free(reply);
 
     const children = xcb.xcb_query_tree_children(reply);
     const len: usize = @intCast(xcb.xcb_query_tree_children_length(reply));
 
     for (0..len) |i| {
-        const win = children[i];
+        const win          = children[i];
         const attrs_cookie = xcb.xcb_get_window_attributes(conn, win);
-        const attrs = xcb.xcb_get_window_attributes_reply(conn, attrs_cookie, null) orelse continue;
+        const attrs        = xcb.xcb_get_window_attributes_reply(conn, attrs_cookie, null) orelse continue;
         defer std.c.free(attrs);
 
         if (attrs.*.override_redirect != 0 or attrs.*.map_state != xcb.XCB_MAP_STATE_VIEWABLE) continue;
@@ -144,9 +144,9 @@ pub fn main() !void {
 
     if (xcb.xcb_connection_has_error(conn) != 0) return error.X11ConnectionFailed;
 
-    const setup = xcb.xcb_get_setup(conn);
+    const setup  = xcb.xcb_get_setup(conn);
     const screen = xcb.xcb_setup_roots_iterator(setup).data orelse return error.X11ScreenFailed;
-    const root = screen.*.root;
+    const root   = screen.*.root;
 
     try becomeWindowManager(conn, root);
     setupRootCursor(conn, screen);
@@ -165,16 +165,16 @@ pub fn main() !void {
     config.resolveKeybindings(user_config.keybindings.items, xkb_state);
 
     var wm = WM{
-        .allocator = allocator,
-        .conn = conn,
-        .screen = screen,
-        .root = root,
-        .config = user_config,
-        .windows = std.AutoHashMap(u32, void).init(allocator),
-        .focused_window = null,
-        .xkb_state = xkb_state,
+        .allocator            = allocator,
+        .conn                 = conn,
+        .screen               = screen,
+        .root                 = root,
+        .config               = user_config,
+        .windows              = std.AutoHashMap(u32, void).init(allocator),
+        .focused_window       = null,
+        .xkb_state            = xkb_state,
         .should_reload_config = &should_reload,
-        .running = &running,
+        .running              = &running,
     };
     defer wm.deinit();
 
@@ -195,7 +195,8 @@ pub fn main() !void {
 
     std.log.info("[hana] Started", .{});
 
-    // MINIMAL LOOP: Process events → flush → repeat
+    // Main loop
+    // Process events -> flush
     while (running.load(.acquire)) {
         var events_handled = false;
 
@@ -218,7 +219,7 @@ pub fn main() !void {
         }
 
         if (events_handled) {
-            // Events were handled - do any resulting work
+            // Do any resulting work
             utils.releaseProtection();
 
             const tiling_mod = @import("tiling");
@@ -228,10 +229,9 @@ pub fn main() !void {
                 std.log.err("[main] Failed to update bar: {}", .{err});
             };
 
-            // FLUSH IMMEDIATELY - no throttling!
             utils.flush(conn);
         } else {
-            // No events - sleep briefly to avoid spinning
+            // No events, sleep briefly to avoid spinning (what is spinning?)
             std.posix.nanosleep(0, 1 * std.time.ns_per_ms);
         }
 

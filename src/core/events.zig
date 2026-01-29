@@ -1,32 +1,32 @@
-//! Event dispatch - OPTIMIZED (no focus module, uses utils)
+//! Event dispatch
 
-const std = @import("std");
+const std  = @import("std");
 const defs = @import("defs");
-const xcb = defs.xcb;
-const WM = defs.WM;
+const xcb  = defs.xcb;
+const WM   = defs.WM;
 
 const window = @import("window");
-const input = @import("input");
-const bar = @import("bar");
-const utils = @import("utils");
+const input  = @import("input");
+const bar    = @import("bar");
+const utils  = @import("utils");
 const tiling = @import("tiling");
 
 const EventHandler = *const fn (event: *anyopaque, wm: *WM) void;
 
 const dispatch_table = blk: {
     var table: [36]?EventHandler = [_]?EventHandler{null} ** 36;
-    
-    table[xcb.XCB_KEY_PRESS] = @ptrCast(&handleKeyPress);
-    table[xcb.XCB_BUTTON_PRESS] = @ptrCast(&handleButtonPress);
-    table[xcb.XCB_BUTTON_RELEASE] = @ptrCast(&handleButtonRelease);
-    table[xcb.XCB_MOTION_NOTIFY] = @ptrCast(&handleMotionNotify);
-    table[xcb.XCB_ENTER_NOTIFY] = @ptrCast(&handleEnterNotify);
-    table[xcb.XCB_MAP_REQUEST] = @ptrCast(&handleMapRequest);
+
+    table[xcb.XCB_KEY_PRESS]         = @ptrCast(&handleKeyPress);
+    table[xcb.XCB_BUTTON_PRESS]      = @ptrCast(&handleButtonPress);
+    table[xcb.XCB_BUTTON_RELEASE]    = @ptrCast(&handleButtonRelease);
+    table[xcb.XCB_MOTION_NOTIFY]     = @ptrCast(&handleMotionNotify);
+    table[xcb.XCB_ENTER_NOTIFY]      = @ptrCast(&handleEnterNotify);
+    table[xcb.XCB_MAP_REQUEST]       = @ptrCast(&handleMapRequest);
     table[xcb.XCB_CONFIGURE_REQUEST] = @ptrCast(&handleConfigureRequest);
-    table[xcb.XCB_DESTROY_NOTIFY] = @ptrCast(&handleDestroyNotify);
-    table[xcb.XCB_EXPOSE] = @ptrCast(&handleExpose);
-    table[xcb.XCB_PROPERTY_NOTIFY] = @ptrCast(&handlePropertyNotify);
-    
+    table[xcb.XCB_DESTROY_NOTIFY]    = @ptrCast(&handleDestroyNotify);
+    table[xcb.XCB_EXPOSE]            = @ptrCast(&handleExpose);
+    table[xcb.XCB_PROPERTY_NOTIFY]   = @ptrCast(&handlePropertyNotify);
+
     break :blk table;
 };
 

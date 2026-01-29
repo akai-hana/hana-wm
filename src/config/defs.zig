@@ -8,6 +8,7 @@ pub const xcb = @cImport({
 
 pub const xkbcommon = @import("xkbcommon");
 
+// Modifier masks
 pub const MOD_SHIFT: u16 = xcb.XCB_MOD_MASK_SHIFT;
 pub const MOD_LOCK: u16 = xcb.XCB_MOD_MASK_LOCK;
 pub const MOD_CONTROL: u16 = xcb.XCB_MOD_MASK_CONTROL;
@@ -17,23 +18,20 @@ pub const MOD_SUPER: u16 = xcb.XCB_MOD_MASK_4;
 
 pub const MOD_MASK_RELEVANT: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER;
 
+// Window constraints
 pub const MIN_WINDOW_DIM: u16 = 50;
 pub const MAX_WINDOW_DIM: u16 = 65535;
+pub const MAX_WINDOWS: usize = 128;  // For stack buffers
 
-pub const FOCUS_PROTECTION_GRACE_NS: u64 = 50 * std.time.ns_per_ms;
+// XKB initialization
 pub const XKB_RETRY_DELAY_MS: u64 = 20;
 pub const XKB_MAX_RETRIES: usize = 50;
 
-pub const MAX_EVENT_BATCH_SIZE: usize = 10;
-pub const EVENT_POLL_SLEEP_NS: u64 = 500 * std.time.ns_per_us; // 0.5ms instead of 1ms
-
-pub const IDLE_THRESHOLD_SHORT: usize = 20; // Stay responsive longer
-pub const IDLE_THRESHOLD_LONG: usize = 100;
-pub const SLEEP_MULTIPLIER_MEDIUM: u64 = 2;
-pub const SLEEP_MULTIPLIER_LONG: u64 = 4; // Reduced from 5
-
+// Workspace limits
 pub const MAX_WORKSPACES: usize = 20;
 pub const MIN_WORKSPACES: usize = 1;
+
+// Tiling constraints
 pub const MAX_BORDER_WIDTH: u16 = 100;
 pub const MAX_GAPS: u16 = 200;
 pub const MIN_MASTER_WIDTH: f32 = 0.05;
@@ -100,7 +98,6 @@ pub const TilingConfig = struct {
     border_normal: u32 = 0x383C4A,
 };
 
-// Bar segment position
 pub const BarPosition = enum {
     left,
     center,
@@ -114,7 +111,6 @@ pub const BarPosition = enum {
     }
 };
 
-// Bar segment type
 pub const BarSegment = enum {
     workspaces,
     title,
@@ -130,7 +126,6 @@ pub const BarSegment = enum {
     }
 };
 
-// Bar layout configuration
 pub const BarLayout = struct {
     position: BarPosition,
     segments: std.ArrayList(BarSegment),
@@ -142,13 +137,12 @@ pub const BarLayout = struct {
 
 pub const BarConfig = struct {
     show: bool = true,
-    height: ?u16 = null, // null = auto-adapt to font
+    height: ?u16 = null,
     font: []const u8 = "monospace:size=10",
     font_size: u16 = 10,
     padding: u16 = 8,
     spacing: u16 = 12,
-    
-    // Colors
+
     bg: u32 = 0x222222,
     fg: u32 = 0xBBBBBB,
     selected_bg: u32 = 0x005577,
@@ -156,22 +150,18 @@ pub const BarConfig = struct {
     occupied_fg: u32 = 0xEEEEEE,
     urgent_bg: u32 = 0xFF0000,
     urgent_fg: u32 = 0xFFFFFF,
-    
-    // Accent colors for segments
+
     accent_color: u32 = 0x61AFEF,
     workspaces_accent: ?u32 = null,
     title_accent_color: ?u32 = null,
     clock_accent: ?u32 = null,
-    
-    // Workspace configuration
+
     workspace_icons: std.ArrayList([]const u8),
     indicator_size: u16 = 4,
     title_accent: bool = true,
-    
-    // Clock format
+
     clock_format: []const u8 = "%Y-%m-%d %H:%M:%S",
-    
-    // Layout
+
     layout: std.ArrayList(BarLayout),
 
     pub fn deinit(self: *BarConfig, allocator: std.mem.Allocator) void {
@@ -179,21 +169,21 @@ pub const BarConfig = struct {
             allocator.free(icon);
         }
         self.workspace_icons.deinit(allocator);
-        
+
         for (self.layout.items) |*item| {
             item.deinit(allocator);
         }
         self.layout.deinit(allocator);
     }
-    
+
     pub fn getWorkspaceAccent(self: *const BarConfig) u32 {
         return self.workspaces_accent orelse self.accent_color;
     }
-    
+
     pub fn getTitleAccent(self: *const BarConfig) u32 {
         return self.title_accent_color orelse self.accent_color;
     }
-    
+
     pub fn getClockAccent(self: *const BarConfig) u32 {
         return self.clock_accent orelse self.accent_color;
     }
@@ -244,7 +234,7 @@ pub const Config = struct {
             rule.deinit(allocator);
         }
         self.workspaces.rules.deinit(allocator);
-        
+
         self.bar.deinit(allocator);
 
         if (self.allocated_font) |f| allocator.free(f);
@@ -253,13 +243,26 @@ pub const Config = struct {
     }
 };
 
+/// Drag state - moved from drag.zig to avoid global mutable state
+pub const DragState = struct {
+    active: bool = false,
+    window: u32 = 0,
+    mode: enum { move, resize } = .move,
+    start_x: i16 = 0,
+    start_y: i16 = 0,
+    start_win_x: i16 = 0,
+    start_win_y: i16 = 0,
+    start_win_width: u16 = 0,
+    start_win_height: u16 = 0,
+};
+
 pub const WM = struct {
     allocator: std.mem.Allocator,
     conn: *xcb.xcb_connection_t,
     screen: *xcb.xcb_screen_t,
     root: u32,
     config: Config,
-    windows: std.AutoHashMap(u32, void), // SIMPLIFIED: Just track existence
+    windows: std.AutoHashMap(u32, void),
     focused_window: ?u32 = null,
     fullscreen_window: ?u32 = null,
     fullscreen_geometry: ?struct {
@@ -272,6 +275,7 @@ pub const WM = struct {
     xkb_state: ?*xkbcommon.XkbState,
     should_reload_config: *std.atomic.Value(bool),
     running: *std.atomic.Value(bool),
+    drag_state: DragState = .{},  // Moved from drag.zig
 
     pub fn deinit(self: *WM) void {
         self.windows.deinit();

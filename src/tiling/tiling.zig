@@ -1,13 +1,13 @@
-//! Tiling system - MINIMAL: Immediate retiling, immediate flushing
+//! Tiling system
 
-const std = @import("std");
-const defs = @import("defs");
-const xcb = defs.xcb;
-const WM = defs.WM;
-const utils = @import("utils");
+const std        = @import("std");
+const defs       = @import("defs");
+const xcb        = defs.xcb;
+const WM         = defs.WM;
+const utils      = @import("utils");
 const workspaces = @import("workspaces");
-const batch = @import("batch");
-const bar = @import("bar");
+const batch      = @import("batch");
+const bar        = @import("bar");
 
 const master_layout = @import("master");
 const monocle_layout = @import("monocle");
@@ -16,19 +16,19 @@ const grid_layout = @import("grid");
 pub const Layout = enum { master, monocle, grid };
 
 pub const State = struct {
-    enabled: bool,
-    layout: Layout,
-    master_side: defs.MasterSide,
+    enabled:             bool,
+    layout:              Layout,
+    master_side:         defs.MasterSide,
     master_width_factor: f32,
-    master_count: usize,
-    gaps: u16,
-    border_width: u16,
-    border_focused: u32,
-    border_normal: u32,
-    tiled_windows: std.ArrayList(u32),
-    tiled_set: std.AutoHashMap(u32, void),
-    allocator: std.mem.Allocator,
-    dirty: bool,
+    master_count:        usize,
+    gaps:                u16,
+    border_width:        u16,
+    border_focused:      u32,
+    border_normal:       u32,
+    tiled_windows:       std.ArrayList(u32),
+    tiled_set:           std.AutoHashMap(u32, void),
+    allocator:           std.mem.Allocator,
+    dirty:               bool,
 
     pub inline fn margins(self: *const State) utils.Margins {
         return .{ .gap = self.gaps, .border = self.border_width };
@@ -62,19 +62,28 @@ pub fn init(wm: *WM) void {
     };
 
     s.* = .{
+        // Setup
         .enabled = wm.config.tiling.enabled,
-        .layout = parseLayout(wm.config.tiling.layout),
-        .master_side = wm.config.tiling.master_side,
+        .layout  = parseLayout(wm.config.tiling.layout),
+
+        // Geometry
+        .master_side         = wm.config.tiling.master_side,
         .master_width_factor = wm.config.tiling.master_width_factor,
-        .master_count = wm.config.tiling.master_count,
-        .gaps = wm.config.tiling.gaps,
-        .border_width = wm.config.tiling.border_width,
+        .master_count        = wm.config.tiling.master_count,
+
+        // Aesthetics
+        .gaps           = wm.config.tiling.gaps,
+        .border_width   = wm.config.tiling.border_width,
         .border_focused = wm.config.tiling.border_focused,
-        .border_normal = wm.config.tiling.border_normal,
+        .border_normal  = wm.config.tiling.border_normal,
+
+        // Tracking
         .tiled_windows = std.ArrayList(u32){},
-        .tiled_set = std.AutoHashMap(u32, void).init(wm.allocator),
+        .tiled_set     = std.AutoHashMap(u32, void).init(wm.allocator),
+
+        // Infrastructure
         .allocator = wm.allocator,
-        .dirty = false,
+        .dirty     = false,
     };
 
     state = s;
@@ -131,7 +140,7 @@ pub fn addWindow(wm: *WM, win: u32) void {
     b.setBorderWidth(win, s.border_width) catch {};
     b.setBorder(win, color) catch {};
     b.setFocus(win) catch {};
-    b.execute();  // Flushes immediately
+    b.execute(); // Flushes immediately
 
     wm.focused_window = win;
     s.markDirty();
@@ -208,13 +217,13 @@ pub inline fn isWindowTiled(win: u32) bool {
     return s.enabled and s.tiled_set.contains(win);
 }
 
-// IMMEDIATE retiling when dirty
+// Immediate retiling when dirty
 pub fn retileIfDirty(wm: *WM) void {
     const s = state orelse return;
     if (!s.isDirty()) return;
 
     s.clearDirty();
-    retileCurrentWorkspace(wm);  // This flushes
+    retileCurrentWorkspace(wm); // This flushes
 }
 
 pub fn retileCurrentWorkspace(wm: *WM) void {
@@ -421,10 +430,10 @@ pub fn toggleLayout(wm: *WM) void {
         .monocle => .grid,
         .grid => .master,
     };
-    
+
     // Mark bar dirty to update layout indicator
     bar.markDirty();
-    
+
     retileCurrentWorkspace(wm);  // Flushes immediately
 }
 
@@ -443,20 +452,20 @@ pub fn decreaseMasterWidth(wm: *WM) void {
 pub fn increaseMasterCount(wm: *WM) void {
     const s = state orelse return;
     s.master_count = @min(s.tiled_windows.items.len, s.master_count + 1);
-    
-    // Mark bar dirty to update layout indicator  
+
+    // Mark bar dirty to update layout indicator
     bar.markDirty();
-    
+
     retileCurrentWorkspace(wm);  // Flushes immediately
 }
 
 pub fn decreaseMasterCount(wm: *WM) void {
     const s = state orelse return;
     s.master_count = @max(1, s.master_count -| 1);
-    
+
     // Mark bar dirty to update layout indicator
     bar.markDirty();
-    
+
     retileCurrentWorkspace(wm);  // Flushes immediately
 }
 
