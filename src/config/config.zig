@@ -43,7 +43,7 @@ fn getColor(section: *const parser.Section, key: []const u8, default: u32) u32 {
     return default;
 }
 
-// Simplified getter with inline validation
+// Simplified getter with inline validation and logging
 fn get(
     comptime T: type,
     section: *const parser.Section,
@@ -68,39 +68,61 @@ fn get(
         else => @compileError("Unsupported type"),
     };
 
+    // Validate bounds and warn if out of range
     if (comptime min != null or max != null) {
+        var out_of_bounds = false;
+        
         if (comptime min) |m| {
-            if (value < m) return default;
+            if (value < m) {
+                std.log.warn("[config] Value for '{s}' ({any}) below minimum ({any}), using default ({any})", 
+                    .{key, value, m, default});
+                out_of_bounds = true;
+            }
         }
+        
         if (comptime max) |m| {
-            if (value > m) return default;
+            if (value > m) {
+                std.log.warn("[config] Value for '{s}' ({any}) above maximum ({any}), using default ({any})", 
+                    .{key, value, m, default});
+                out_of_bounds = true;
+            }
         }
+        
+        if (out_of_bounds) return default;
     }
 
     return value;
 }
 
 pub fn loadConfigDefault(allocator: std.mem.Allocator) !defs.Config {
-    const cwd = try std.process.getCwdAlloc(allocator);
-    defer allocator.free(cwd);
+    // First, try ~/.config/hana/config.toml (XDG_CONFIG_HOME or ~/.config)
+    const home = if (std.c.getenv("HOME")) |h| std.mem.span(h) else ".";
+    const config_home = if (std.c.getenv("XDG_CONFIG_HOME")) |ch|
+        std.mem.span(ch)
+    else
+        try std.fmt.allocPrint(allocator, "{s}/.config", .{home});
+    defer if (std.c.getenv("XDG_CONFIG_HOME") == null) allocator.free(config_home);
 
-    const local = try std.fs.path.join(allocator, &.{ cwd, "config.toml" });
-    defer allocator.free(local);
+    const xdg_path = try std.fs.path.join(allocator, &.{ config_home, "hana", "config.toml" });
+    defer allocator.free(xdg_path);
 
-    if (loadConfig(allocator, local)) |cfg| {
+    if (loadConfig(allocator, xdg_path)) |cfg| {
         return cfg;
     } else |_| {
-        const home = if (std.c.getenv("HOME")) |h| std.mem.span(h) else ".";
-        const config_home = if (std.c.getenv("XDG_CONFIG_HOME")) |ch|
-            std.mem.span(ch)
-        else
-            try std.fmt.allocPrint(allocator, "{s}/.config", .{home});
-        defer if (std.c.getenv("XDG_CONFIG_HOME") == null) allocator.free(config_home);
+        // Second, try ./config.toml in current directory
+        const cwd = try std.process.getCwdAlloc(allocator);
+        defer allocator.free(cwd);
 
-        const xdg_path = try std.fs.path.join(allocator, &.{ config_home, "hana", "config.toml" });
-        defer allocator.free(xdg_path);
+        const local = try std.fs.path.join(allocator, &.{ cwd, "config.toml" });
+        defer allocator.free(local);
 
-        return loadConfig(allocator, xdg_path);
+        if (loadConfig(allocator, local)) |cfg| {
+            return cfg;
+        } else |_| {
+            // Finally, use embedded fallback with auto-detection
+            std.log.info("[config] No config.toml found, using fallback with auto-detection", .{});
+            return try loadFallbackConfig(allocator);
+        }
     }
 }
 
@@ -110,8 +132,8 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
 
     const fd = std.posix.open(path_z, .{ .ACCMODE = .RDONLY }, 0) catch |err| {
         if (err == error.FileNotFound) {
-            std.log.info("[config] Not found: {s}, using defaults", .{path});
-            return getDefaultConfig(allocator);
+            std.log.info("[config] Not found: {s}", .{path});
+            return err;
         }
         return err;
     };
@@ -129,6 +151,12 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
         if (content.items.len > 1024 * 1024) return error.FileTooLarge;
     }
 
+    // Check if file is empty
+    if (content.items.len == 0) {
+        std.log.info("[config] Empty config file: {s}, using fallback", .{path});
+        return try loadFallbackConfig(allocator);
+    }
+
     var doc = try parser.parse(allocator, content.items);
     defer doc.deinit();
 
@@ -141,6 +169,45 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
     try parseRules(allocator, &doc, &cfg);
 
     std.log.info("[config] Loaded: {s}", .{path});
+    return cfg;
+}
+
+/// Load fallback configuration with auto-detection of terminal and font
+fn loadFallbackConfig(allocator: std.mem.Allocator) !defs.Config {
+    const fallback = @import("fallback");
+    const fallback_toml = fallback.getFallbackToml();
+    
+    var doc = try parser.parse(allocator, fallback_toml);
+    defer doc.deinit();
+
+    var cfg = getDefaultConfig(allocator);
+
+    parseWorkspaces(&doc, &cfg);
+    try parseKeybindings(allocator, &doc, &cfg);
+    try parseTiling(allocator, &doc, &cfg);
+    try parseBar(allocator, &doc, &cfg);
+    try parseRules(allocator, &doc, &cfg);
+
+    // Auto-detect terminal and replace "auto_terminal" action
+    const terminal = try fallback.detectTerminal(allocator);
+    for (cfg.keybindings.items) |*kb| {
+        if (kb.action == .exec) {
+            if (std.mem.eql(u8, kb.action.exec, "auto_terminal")) {
+                allocator.free(kb.action.exec);
+                kb.action.exec = try allocator.dupe(u8, terminal);
+            }
+        }
+    }
+
+    // Auto-detect font if set to "auto"
+    if (std.mem.eql(u8, cfg.bar.font, "auto")) {
+        const detected_font = try fallback.detectFont(allocator);
+        const font_with_size = try std.fmt.allocPrint(allocator, "{s}:size={}", .{detected_font, cfg.bar.font_size});
+        // Note: the default font string will be freed by Config.deinit, so we don't allocate it in getDefaultConfig
+        cfg.bar.font = font_with_size;
+    }
+
+    std.log.info("[config] Loaded fallback configuration with auto-detection", .{});
     return cfg;
 }
 
@@ -194,6 +261,8 @@ const ACTION_MAP = std.StaticStringMap(defs.Action).initComptime(.{
     .{ "reload", .reload_config },
     .{ "reload_config", .reload_config },
     .{ "toggle_layout", .toggle_layout },
+    .{ "toggle_layout_reverse", .toggle_layout_reverse },
+    .{ "toggle_bar", .toggle_bar },
     .{ "increase_master", .increase_master },
     .{ "decrease_master", .decrease_master },
     .{ "increase_master_count", .increase_master_count },
@@ -291,8 +360,34 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !defs.Action {
 }
 
 pub fn resolveKeybindings(keybindings: anytype, xkb_state: *xkb.XkbState) void {
+    // First pass: resolve keycodes
     for (keybindings) |*kb| {
         kb.keycode = xkb_state.keysymToKeycode(kb.keysym);
+    }
+    
+    // Second pass: detect conflicts
+    // Map of (modifiers + keycode) -> binding index for conflict detection
+    var seen = std.AutoHashMap(u64, usize).init(std.heap.c_allocator);
+    defer seen.deinit();
+    
+    for (keybindings, 0..) |*kb, i| {
+        const keycode = kb.keycode orelse continue;
+        
+        // Create unique key from modifiers and keycode
+        const key: u64 = (@as(u64, kb.modifiers) << 32) | keycode;
+        
+        if (seen.get(key)) |first_index| {
+            std.log.warn("[config] Keybinding conflict detected!", .{});
+            std.log.warn("  Binding #{}: mods=0x{x:0>4} key={} (first)", .{
+                first_index + 1, keybindings[first_index].modifiers, keycode
+            });
+            std.log.warn("  Binding #{}: mods=0x{x:0>4} key={} (duplicate)", .{
+                i + 1, kb.modifiers, keycode
+            });
+            std.log.warn("  The second binding will override the first!", .{});
+        } else {
+            seen.put(key, i) catch {};
+        }
     }
 }
 
@@ -322,6 +417,11 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     const section = doc.getSection("bar") orelse return;
 
     cfg.bar.show = get(bool, section, "show", true, null, null);
+    
+    // Parse vertical position (top/bottom)
+    if (section.getString("position")) |pos_str| {
+        cfg.bar.vertical_position = defs.BarVerticalPosition.fromString(pos_str) orelse .top;
+    }
     
     // Height can be null for auto-adapt
     if (section.getInt("height")) |h| {

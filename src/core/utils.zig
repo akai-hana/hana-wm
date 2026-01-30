@@ -1,4 +1,4 @@
-//! Core utilities
+//! Core utilities - Focus moved to focus.zig for better API
 
 const std = @import("std");
 const defs = @import("defs");
@@ -6,19 +6,19 @@ const xcb = defs.xcb;
 
 // XCB utilities
 
-pub inline fn flush(conn: *xcb.xcb_connection_t) void {
+pub fn flush(conn: *xcb.xcb_connection_t) void {
     _ = xcb.xcb_flush(conn);
 }
 
-pub inline fn setBorder(conn: *xcb.xcb_connection_t, win: u32, color: u32) void {
+pub fn setBorder(conn: *xcb.xcb_connection_t, win: u32, color: u32) void {
     _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
 }
 
-pub inline fn setBorderWidth(conn: *xcb.xcb_connection_t, win: u32, width: u16) void {
+pub fn setBorderWidth(conn: *xcb.xcb_connection_t, win: u32, width: u16) void {
     _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{width});
 }
 
-pub inline fn configureBorder(conn: *xcb.xcb_connection_t, win: u32, width: u16, color: u32) void {
+pub fn configureBorder(conn: *xcb.xcb_connection_t, win: u32, width: u16, color: u32) void {
     setBorderWidth(conn, win, width);
     setBorder(conn, win, color);
 }
@@ -35,7 +35,7 @@ pub const Rect = struct {
         return .{ .x = geom.x, .y = geom.y, .width = geom.width, .height = geom.height };
     }
 
-    pub inline fn clamp(self: Rect) Rect {
+    pub fn clamp(self: Rect) Rect {
         return .{
             .x      = self.x,
             .y      = self.y,
@@ -44,8 +44,7 @@ pub const Rect = struct {
         };
     }
 
-    pub inline fn isValid(self: Rect) bool {
-        // Width & Height
+    pub fn isValid(self: Rect) bool {
         return self.width >= defs.MIN_WINDOW_DIM and self.width <= defs.MAX_WINDOW_DIM and
             self.height >= defs.MIN_WINDOW_DIM and self.height <= defs.MAX_WINDOW_DIM;
     }
@@ -55,12 +54,12 @@ pub const Margins = struct {
     gap: u16,
     border: u16,
 
-    pub inline fn total(self: Margins) u16 {
+    pub fn total(self: Margins) u16 {
         return 2 * self.gap + 2 * self.border;
     }
 };
 
-pub inline fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect) void {
+pub fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect) void {
     const r = rect.clamp();
     const values = [_]u32{
         @bitCast(@as(i32, r.x)),
@@ -83,20 +82,34 @@ pub fn getGeometry(conn: *xcb.xcb_connection_t, win: u32) ?Rect {
 
 // Modifier utilities
 
-pub inline fn normalizeModifiers(state: u16) u16 {
+pub fn normalizeModifiers(state: u16) u16 {
     return state & defs.MOD_MASK_RELEVANT;
 }
 
-// Atom cache
+// Atom cache - pre-populated at startup for performance
 
 const AtomCache = struct {
-    wm_protocols: ?u32 = null,
-    wm_delete: ?u32    = null,
-    net_wm_name: ?u32  = null,
-    utf8_string: ?u32  = null,
+    wm_protocols: u32,
+    wm_delete: u32,
+    net_wm_name: u32,
+    utf8_string: u32,
 };
 
-var atom_cache: AtomCache = .{};
+var atom_cache: ?AtomCache = null;
+
+pub fn initAtomCache(conn: *xcb.xcb_connection_t) !void {
+    const wm_protocols = try getAtom(conn, "WM_PROTOCOLS");
+    const wm_delete = try getAtom(conn, "WM_DELETE_WINDOW");
+    const net_wm_name = try getAtom(conn, "_NET_WM_NAME");
+    const utf8_string = try getAtom(conn, "UTF8_STRING");
+
+    atom_cache = AtomCache{
+        .wm_protocols = wm_protocols,
+        .wm_delete = wm_delete,
+        .net_wm_name = net_wm_name,
+        .utf8_string = utf8_string,
+    };
+}
 
 pub fn getAtom(conn: *xcb.xcb_connection_t, name: []const u8) !u32 {
     const cookie = xcb.xcb_intern_atom(conn, 0, @intCast(name.len), name.ptr);
@@ -105,20 +118,20 @@ pub fn getAtom(conn: *xcb.xcb_connection_t, name: []const u8) !u32 {
     return reply.*.atom;
 }
 
-pub fn getAtomCached(conn: *xcb.xcb_connection_t, comptime name: []const u8) !u32 {
-    const field_name = comptime blk: {
-        if (std.mem.eql(u8, name, "WM_PROTOCOLS")) break :blk "wm_protocols";
-        if (std.mem.eql(u8, name, "WM_DELETE_WINDOW")) break :blk "wm_delete";
-        if (std.mem.eql(u8, name, "_NET_WM_NAME")) break :blk "net_wm_name";
-        if (std.mem.eql(u8, name, "UTF8_STRING")) break :blk "utf8_string";
-        @compileError("Atom not cacheable: " ++ name);
+pub fn getAtomCached(comptime name: []const u8) !u32 {
+    const cache = atom_cache orelse return error.AtomCacheNotInitialized;
+    
+    return switch (comptime std.meta.stringToEnum(enum { 
+        WM_PROTOCOLS, 
+        WM_DELETE_WINDOW, 
+        _NET_WM_NAME, 
+        UTF8_STRING 
+    }, name) orelse @compileError("Atom not in cache: " ++ name)) {
+        .WM_PROTOCOLS => cache.wm_protocols,
+        .WM_DELETE_WINDOW => cache.wm_delete,
+        ._NET_WM_NAME => cache.net_wm_name,
+        .UTF8_STRING => cache.utf8_string,
     };
-
-    if (@field(atom_cache, field_name)) |atom| return atom;
-
-    const atom = try getAtom(conn, name);
-    @field(atom_cache, field_name) = atom;
-    return atom;
 }
 
 // Window property utilities
@@ -178,43 +191,4 @@ pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allo
         .instance = instance,
         .class    = class,
     };
-}
-
-// Focus helpers - MINIMAL VERSION
-
-var focus_protection_active: bool = false;
-
-pub inline fn setFocus(wm: *defs.WM, win: u32, protect: bool) void {
-    if (win == wm.root) {
-        std.log.err("[CRITICAL] Attempted to focus ROOT window!", .{});
-        return;
-    }
-
-    if (wm.focused_window == win) return;
-
-    wm.focused_window = win;
-    _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, xcb.XCB_CURRENT_TIME);
-
-    if (protect) {
-        focus_protection_active = true;
-    }
-
-    // Flush immediately - focus changes need to be instant
-    flush(wm.conn);
-}
-
-pub inline fn clearFocus(wm: *defs.WM) void {
-    wm.focused_window = null;
-    _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, wm.root, xcb.XCB_CURRENT_TIME);
-
-    // Flush immediately
-    flush(wm.conn);
-}
-
-pub inline fn isProtected() bool {
-    return focus_protection_active;
-}
-
-pub fn releaseProtection() void {
-    focus_protection_active = false;
 }

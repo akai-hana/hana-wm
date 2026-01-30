@@ -10,17 +10,18 @@ const tiling = @import("tiling");
 const State = tiling.State;
 
 pub fn tile(b: *batch.Batch, state: *State, windows: []const u32, screen_w: u16, screen_h: u16) void {
+    tileWithOffset(b, state, windows, screen_w, screen_h, 0);
+}
+
+pub fn tileWithOffset(b: *batch.Batch, state: *State, windows: []const u32, screen_w: u16, screen_h: u16, y_offset: u16) void {
     _ = state;
     if (windows.len == 0) return;
 
-    const bar_height = bar.getHeight();
-    const usable_h = screen_h - bar_height;
-
     const rect = utils.Rect{
         .x = 0,
-        .y = @intCast(bar_height),
+        .y = @intCast(y_offset),
         .width = screen_w,
-        .height = usable_h,
+        .height = screen_h,
     };
 
     for (windows) |win| {

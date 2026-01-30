@@ -20,6 +20,10 @@ pub const Reason = enum {
 // Simplified focus protection - no separate timestamp, just a counter
 var focus_protection_active: bool = false;
 
+pub fn isProtected() bool {
+    return focus_protection_active;
+}
+
 pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     if (win == wm.root) {
         std.log.err("[CRITICAL] Attempted to focus ROOT window!", .{});
