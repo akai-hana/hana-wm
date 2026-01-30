@@ -21,9 +21,9 @@ pub const MOD_MASK_RELEVANT: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER
 // Window constraints
 pub const MIN_WINDOW_DIM: u16 = 50;
 pub const MAX_WINDOW_DIM: u16 = 65535;
-pub const MAX_WINDOWS: usize = 128;  // For stack buffers
+pub const MAX_WINDOWS: usize = 128;  // For stack buffers in common cases
 
-// XKB initialization
+// XKB initialization retry parameters
 pub const XKB_RETRY_DELAY_MS: u64 = 20;
 pub const XKB_MAX_RETRIES: usize = 50;
 
@@ -37,11 +37,16 @@ pub const MAX_GAPS: u16 = 200;
 pub const MIN_MASTER_WIDTH: f32 = 0.05;
 pub const MAX_MASTER_WIDTH: f32 = 0.95;
 
+// Focus protection timeout in milliseconds
+pub const FOCUS_PROTECTION_TIMEOUT_MS: i64 = 250;
+
 pub const Action = union(enum) {
     exec: []const u8,
     close_window,
     reload_config,
     toggle_layout,
+    toggle_layout_reverse,
+    toggle_bar,
     increase_master,
     decrease_master,
     increase_master_count,
@@ -98,6 +103,17 @@ pub const TilingConfig = struct {
     border_normal: u32 = 0x383C4A,
 };
 
+pub const BarVerticalPosition = enum {
+    top,
+    bottom,
+
+    pub fn fromString(str: []const u8) ?BarVerticalPosition {
+        if (std.mem.eql(u8, str, "top")) return .top;
+        if (std.mem.eql(u8, str, "bottom")) return .bottom;
+        return null;
+    }
+};
+
 pub const BarPosition = enum {
     left,
     center,
@@ -137,6 +153,7 @@ pub const BarLayout = struct {
 
 pub const BarConfig = struct {
     show: bool = true,
+    vertical_position: BarVerticalPosition = .top,
     height: ?u16 = null,
     font: []const u8 = "monospace:size=10",
     font_size: u16 = 10,
@@ -243,7 +260,19 @@ pub const Config = struct {
     }
 };
 
-/// Drag state - moved from drag.zig to avoid global mutable state
+/// Fullscreen state tracking
+pub const FullscreenState = struct {
+    window: ?u32 = null,
+    saved_geometry: ?struct {
+        x: i16,
+        y: i16,
+        width: u16,
+        height: u16,
+        border_width: u16,
+    } = null,
+};
+
+/// Drag state for window moving/resizing
 pub const DragState = struct {
     active: bool = false,
     window: u32 = 0,
@@ -264,25 +293,18 @@ pub const WM = struct {
     config: Config,
     windows: std.AutoHashMap(u32, void),
     focused_window: ?u32 = null,
-    fullscreen_window: ?u32 = null,
-    fullscreen_geometry: ?struct {
-        x: i16,
-        y: i16,
-        width: u16,
-        height: u16,
-        border_width: u16,
-    } = null,
+    fullscreen: FullscreenState = .{},
     xkb_state: ?*xkbcommon.XkbState,
     should_reload_config: *std.atomic.Value(bool),
     running: *std.atomic.Value(bool),
-    drag_state: DragState = .{},  // Moved from drag.zig
+    drag_state: DragState = .{},
 
     pub fn deinit(self: *WM) void {
         self.windows.deinit();
         self.config.deinit(self.allocator);
     }
 
-    pub inline fn hasWindow(self: *WM, window_id: u32) bool {
+    pub fn hasWindow(self: *WM, window_id: u32) bool {
         return self.windows.contains(window_id);
     }
 

@@ -1,5 +1,4 @@
-//! Simple XCB + Xft text rendering
-//! This is the standard way - what dwm, dmenu, st use
+//! XCB + Xft text rendering with color caching
 
 const std = @import("std");
 const defs = @import("defs");
@@ -11,6 +10,87 @@ const c = @cImport({
     @cInclude("X11/Xlib-xcb.h");
 });
 
+// Color conversion constant: 8-bit to 16-bit (0xFF -> 0xFFFF)
+const COLOR_8_TO_16_MULTIPLIER: u16 = 0x101;
+
+// Helper to convert RGB888 to XRenderColor
+fn rgbToXRenderColor(rgb: u32) c.XRenderColor {
+    const r: u16 = @intCast((rgb >> 16) & 0xFF);
+    const g: u16 = @intCast((rgb >> 8) & 0xFF);
+    const b: u16 = @intCast(rgb & 0xFF);
+    return .{
+        .red = r * COLOR_8_TO_16_MULTIPLIER,
+        .green = g * COLOR_8_TO_16_MULTIPLIER,
+        .blue = b * COLOR_8_TO_16_MULTIPLIER,
+        .alpha = 0xFFFF,
+    };
+}
+
+// Color cache for performance - avoid allocating/freeing colors repeatedly
+const ColorCache = struct {
+    colors: std.AutoHashMap(u32, c.XftColor),
+    fallback_color: c.XftColor, // For allocation failures
+    display: *c.Display,
+    visual: *c.Visual,
+    colormap: c.Colormap,
+    allocator: std.mem.Allocator,
+
+    fn init(allocator: std.mem.Allocator, display: *c.Display, visual: *c.Visual, colormap: c.Colormap) ColorCache {
+        // Pre-allocate white as fallback color
+        var fallback: c.XftColor = undefined;
+        _ = c.XftColorAllocValue(
+            display,
+            visual,
+            colormap,
+            &rgbToXRenderColor(0xFFFFFF),
+            &fallback,
+        );
+        
+        return .{
+            .colors = std.AutoHashMap(u32, c.XftColor).init(allocator),
+            .fallback_color = fallback,
+            .display = display,
+            .visual = visual,
+            .colormap = colormap,
+            .allocator = allocator,
+        };
+    }
+
+    fn deinit(self: *ColorCache) void {
+        var iter = self.colors.iterator();
+        while (iter.next()) |entry| {
+            var color = entry.value_ptr.*;
+            c.XftColorFree(self.display, self.visual, self.colormap, &color);
+        }
+        self.colors.deinit();
+        c.XftColorFree(self.display, self.visual, self.colormap, &self.fallback_color);
+    }
+
+    fn get(self: *ColorCache, rgb: u32) *c.XftColor {
+        const result = self.colors.getOrPut(rgb) catch {
+            // Allocation failed - return fallback color instead of stack pointer
+            std.log.warn("[drawing] Color cache allocation failed, using fallback", .{});
+            return &self.fallback_color;
+        };
+
+        if (result.found_existing) {
+            return result.value_ptr;
+        }
+
+        // Allocate new color
+        const render_color = rgbToXRenderColor(rgb);
+        _ = c.XftColorAllocValue(
+            self.display,
+            self.visual,
+            self.colormap,
+            &render_color,
+            result.value_ptr,
+        );
+
+        return result.value_ptr;
+    }
+};
+
 pub const DrawContext = struct {
     allocator: std.mem.Allocator,
     display: *c.Display,
@@ -19,18 +99,19 @@ pub const DrawContext = struct {
     xft_font: *c.XftFont,
     width: u16,
     height: u16,
+    color_cache: ColorCache,
+    visual: *c.Visual,
+    colormap: c.Colormap,
     
     pub fn init(allocator: std.mem.Allocator, conn: *defs.xcb.xcb_connection_t, screen: *defs.xcb.xcb_screen_t, drawable: u32, width: u16, height: u16) !*DrawContext {
-        _ = conn; // XCB connection not needed for Xft
-        _ = screen; // We get screen info from Display
+        _ = conn;
+        _ = screen;
         
         const dc = try allocator.create(DrawContext);
         errdefer allocator.destroy(dc);
         
-        // Get Display from XCB connection (required for Xft)
         const display = c.XOpenDisplay(null) orelse return error.DisplayOpenFailed;
         
-        // Create Xft drawable
         const visual = c.XDefaultVisual(display, 0);
         const colormap = c.XDefaultColormap(display, 0);
         const xft_draw = c.XftDrawCreate(display, drawable, visual, colormap) orelse {
@@ -46,6 +127,9 @@ pub const DrawContext = struct {
             .xft_font = undefined, // Set in loadFont
             .width = width,
             .height = height,
+            .color_cache = ColorCache.init(allocator, display, visual, colormap),
+            .visual = visual,
+            .colormap = colormap,
         };
         
         return dc;
@@ -53,6 +137,7 @@ pub const DrawContext = struct {
     
     pub fn deinit(self: *DrawContext) void {
         c.XftFontClose(self.display, self.xft_font);
+        self.color_cache.deinit();
         c.XftDrawDestroy(self.xft_draw);
         _ = c.XCloseDisplay(self.display);
         self.allocator.destroy(self);
@@ -62,7 +147,6 @@ pub const DrawContext = struct {
         const font_name_z = try self.allocator.dupeZ(u8, font_name);
         defer self.allocator.free(font_name_z);
         
-        // Xft handles EVERYTHING - fontconfig, freetype, rendering
         const font = c.XftFontOpenName(self.display, 0, font_name_z.ptr);
         if (font != null) {
             self.xft_font = font.?;
@@ -70,7 +154,6 @@ pub const DrawContext = struct {
             return;
         }
         
-        // Try fallback
         std.log.warn("[drawing] Failed to load '{s}', trying fallback", .{font_name});
         const fallback = c.XftFontOpenName(self.display, 0, "monospace:size=10");
         if (fallback != null) {
@@ -82,59 +165,17 @@ pub const DrawContext = struct {
         return error.FontLoadFailed;
     }
     
-    pub fn setColor(self: *DrawContext, rgb: u32) void {
-        _ = self;
-        _ = rgb;
-        // Color is set per-draw call in Xft
-    }
-    
     pub fn fillRect(self: *DrawContext, x: u16, y: u16, width: u16, height: u16, color: u32) void {
-        const r: u16 = @intCast((color >> 16) & 0xFF);
-        const g: u16 = @intCast((color >> 8) & 0xFF);
-        const b: u16 = @intCast(color & 0xFF);
-        
-        var xft_color: c.XftColor = undefined;
-        _ = c.XftColorAllocValue(
-            self.display,
-            c.XDefaultVisual(self.display, 0),
-            c.XDefaultColormap(self.display, 0),
-            &c.XRenderColor{
-                .red = r * 0x101,
-                .green = g * 0x101,
-                .blue = b * 0x101,
-                .alpha = 0xFFFF,
-            },
-            &xft_color,
-        );
-        
-        c.XftDrawRect(self.xft_draw, &xft_color, @intCast(x), @intCast(y), width, height);
-        c.XftColorFree(self.display, c.XDefaultVisual(self.display, 0), c.XDefaultColormap(self.display, 0), &xft_color);
+        const xft_color = self.color_cache.get(color);
+        c.XftDrawRect(self.xft_draw, xft_color, @intCast(x), @intCast(y), width, height);
     }
     
     pub fn drawText(self: *DrawContext, x: u16, y: u16, text: []const u8, color: u32) !void {
-        const r: u16 = @intCast((color >> 16) & 0xFF);
-        const g: u16 = @intCast((color >> 8) & 0xFF);
-        const b: u16 = @intCast(color & 0xFF);
+        const xft_color = self.color_cache.get(color);
         
-        var xft_color: c.XftColor = undefined;
-        _ = c.XftColorAllocValue(
-            self.display,
-            c.XDefaultVisual(self.display, 0),
-            c.XDefaultColormap(self.display, 0),
-            &c.XRenderColor{
-                .red = r * 0x101,
-                .green = g * 0x101,
-                .blue = b * 0x101,
-                .alpha = 0xFFFF,
-            },
-            &xft_color,
-        );
-        defer c.XftColorFree(self.display, c.XDefaultVisual(self.display, 0), c.XDefaultColormap(self.display, 0), &xft_color);
-        
-        // THIS IS IT - ONE LINE TO DRAW TEXT!
         c.XftDrawStringUtf8(
             self.xft_draw,
-            &xft_color,
+            xft_color,
             self.xft_font,
             @intCast(x),
             @intCast(y),
@@ -159,12 +200,24 @@ pub const DrawContext = struct {
         }
         
         const available = max_width - ellipsis_width;
+        
+        // Try to break at word boundary for better appearance
         var len: usize = 0;
-        while (len < text.len) : (len += 1) {
-            if (self.textWidth(text[0..len]) > available) {
-                if (len > 0) len -= 1;
+        var last_space: usize = 0;
+        
+        while (len < text.len) {
+            if (text[len] == ' ') {
+                last_space = len;
+            }
+            
+            if (self.textWidth(text[0..len + 1]) > available) {
+                // Use last space if found and reasonable
+                if (last_space > 0 and last_space > len / 2) {
+                    len = last_space;
+                }
                 break;
             }
+            len += 1;
         }
         
         if (len > 0) {

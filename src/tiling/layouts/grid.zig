@@ -17,17 +17,18 @@ inline fn calcGridDims(n: usize) struct { cols: u16, rows: u16 } {
 }
 
 pub fn tile(b: *batch.Batch, state: *State, windows: []const u32, screen_w: u16, screen_h: u16) void {
+    tileWithOffset(b, state, windows, screen_w, screen_h, 0);
+}
+
+pub fn tileWithOffset(b: *batch.Batch, state: *State, windows: []const u32, screen_w: u16, screen_h: u16, y_offset: u16) void {
     const n = windows.len;
     if (n == 0) return;
-
-    const bar_height = bar.getHeight();
-    const usable_h = screen_h - bar_height;
 
     const m = state.margins();
     const dims = calcGridDims(n);
 
     const cell_w = (screen_w -| (dims.cols + 1) * m.gap) / dims.cols;
-    const cell_h = (usable_h -| (dims.rows + 1) * m.gap) / dims.rows;
+    const cell_h = (screen_h -| (dims.rows + 1) * m.gap) / dims.rows;
 
     const border_margin = 2 * m.border;
     const win_w = if (cell_w > border_margin) cell_w - border_margin else defs.MIN_WINDOW_DIM;
@@ -42,7 +43,7 @@ pub fn tile(b: *batch.Batch, state: *State, windows: []const u32, screen_w: u16,
 
         const rect = utils.Rect{
             .x = @intCast(m.gap + col * cell_spacing_w),
-            .y = @intCast(bar_height + m.gap + row * cell_spacing_h),
+            .y = @intCast(y_offset + m.gap + row * cell_spacing_h),
             .width = win_w,
             .height = win_h,
         };

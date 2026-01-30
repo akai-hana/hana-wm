@@ -76,6 +76,12 @@ pub fn init(wm: *defs.WM) !void {
     // Calculate height: auto-adapt to font or use configured height
     const height = try calculateBarHeight(wm);
 
+    // Calculate Y position based on vertical_position
+    const y_pos: i16 = if (wm.config.bar.vertical_position == .bottom)
+        @as(i16, @intCast(screen.height_in_pixels)) - @as(i16, @intCast(height))
+    else
+        0;
+
     const window = xcb.xcb_generate_id(wm.conn);
     const values = [_]u32{
         wm.config.bar.bg,
@@ -84,7 +90,7 @@ pub fn init(wm: *defs.WM) !void {
 
     _ = xcb.xcb_create_window(
         wm.conn, xcb.XCB_COPY_FROM_PARENT, window, screen.root,
-        0, 0, width, height, 0,
+        0, y_pos, width, height, 0,
         xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, screen.root_visual,
         xcb.XCB_CW_BACK_PIXEL | xcb.XCB_CW_EVENT_MASK, &values,
     );
@@ -210,10 +216,52 @@ pub inline fn raiseBar() void {
     }
 }
 
+pub fn toggleBar(wm: *defs.WM) void {
+    if (state) |s| {
+        // Toggle the visibility
+        wm.config.bar.show = !wm.config.bar.show;
+        
+        if (wm.config.bar.show) {
+            // Show the bar
+            _ = xcb.xcb_map_window(@ptrCast(s.dc.display), s.window);
+            std.log.info("[bar] Bar shown", .{});
+        } else {
+            // Hide the bar
+            _ = xcb.xcb_unmap_window(@ptrCast(s.dc.display), s.window);
+            std.log.info("[bar] Bar hidden", .{});
+        }
+        
+        utils.flush(wm.conn);
+        
+        // Retile to account for gained/lost screen space
+        @import("tiling").retileCurrentWorkspace(wm);
+    }
+}
+
+pub fn isBarVisible() bool {
+    return if (state) |_| true else false;
+}
+
+pub fn getBarHeight() u16 {
+    return if (state) |s| s.height else 0;
+}
+
+pub fn checkClockUpdate() !void {
+    if (state) |s| {
+        const ts = std.posix.clock_gettime(std.posix.CLOCK.REALTIME) catch return;
+        const current_second = ts.sec;
+        
+        if (current_second != s.last_second) {
+            s.last_second = current_second;
+            s.markClockDirty();
+        }
+    }
+}
+
 pub fn updateIfDirty(wm: *defs.WM) !void {
     if (state) |s| {
         // Check if clock needs updating (once per second)
-        checkClockUpdate(s);
+        checkClockUpdateInternal(s);
         
         if (s.isDirty()) {
             if (s.dirty) {
@@ -228,7 +276,7 @@ pub fn updateIfDirty(wm: *defs.WM) !void {
     }
 }
 
-fn checkClockUpdate(s: *State) void {
+fn checkClockUpdateInternal(s: *State) void {
     const ts = std.posix.clock_gettime(std.posix.CLOCK.REALTIME) catch return;
     const current_second = ts.sec;
     

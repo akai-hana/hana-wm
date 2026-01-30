@@ -42,11 +42,15 @@ Mod+Shift+t = "reload"  # Reload config
 
 # Tiling layout controls
 Mod+space       = "toggle_layout"         # Cycle: master_left → monocle → grid
-Mod+Shift+space = "toggle_tiling"         # Enable/disable tiling
+Mod+Shift+space = "toggle_layout_reverse" # Cycle in reverse: grid → monocle → master_left
+Mod+n           = "toggle_tiling"         # Enable/disable tiling
 Mod+h           = "decrease_master"       # Make master area narrower
 Mod+l           = "increase_master"       # Make master area wider
 Mod+comma       = "increase_master_count" # More windows in master
 Mod+period      = "decrease_master_count" # Fewer windows in master
+
+# Bar toggle
+Mod+b = "toggle_bar"
 
 # Workspace switching (1-4, q, w, e, r)
 Mod+1 = "workspace_1"
@@ -137,6 +141,7 @@ title_accent = true
 # Available segments: "workspaces", "title", "clock", "layout"
 
 # Default layout (workspaces left, title center, clock right):
+# You can anchor any segments to left, right or center.
 [bar.layout.left]
 segments = ["workspaces", "layout"]
 

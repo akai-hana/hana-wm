@@ -1,11 +1,13 @@
-//! Input handling - OPTIMIZED (uses utils.setFocus instead of focus module)
+//! Input handling
 
 const std = @import("std");
 const defs = @import("defs");
 const xkbcommon = @import("xkbcommon");
 const utils = @import("utils");
+const focus = @import("focus");
 const tiling = @import("tiling");
 const workspaces = @import("workspaces");
+const drag = @import("drag");
 const xcb = defs.xcb;
 const WM = defs.WM;
 
@@ -27,7 +29,7 @@ const KeybindState = struct {
         self.map.deinit();
     }
 
-    inline fn get(self: *KeybindState, key: u64) ?*const defs.Action {
+    fn get(self: *KeybindState, key: u64) ?*const defs.Action {
         return self.map.get(key);
     }
 
@@ -77,11 +79,12 @@ pub fn rebuildKeybindMap(wm: *WM) !void {
     }
 }
 
-inline fn makeHash(mods: u16, keysym: u32) u64 {
+fn makeHash(mods: u16, keysym: u32) u64 {
     return (@as(u64, mods) << 32) | keysym;
 }
 
 pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
+    // Grab Super+Button1 (move) and Super+Button3 (resize)
     for ([_]u8{ 1, 3 }) |button| {
         _ = xcb.xcb_grab_button(
             conn,
@@ -120,22 +123,22 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) vo
     const has_super = (event.state & defs.MOD_SUPER) != 0;
 
     if (has_super and (event.detail == 1 or event.detail == 3)) {
-        @import("drag").startDrag(wm, event.child, event.detail, event.root_x, event.root_y);
+        drag.startDrag(wm, event.child, event.detail, event.root_x, event.root_y);
     } else {
-        utils.setFocus(wm, event.child, true);
+        focus.setFocus(wm, event.child, .mouse_click);
         tiling.updateWindowFocus(wm, null, event.child);
     }
 }
 
 pub fn handleButtonRelease(_: *const xcb.xcb_button_release_event_t, wm: *WM) void {
-    if (@import("drag").isDragging()) {
-        @import("drag").stopDrag(wm);
+    if (drag.isDragging(wm)) {
+        drag.stopDrag(wm);
     }
 }
 
 pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) void {
-    if (@import("drag").isDragging()) {
-        @import("drag").updateDrag(wm, event.root_x, event.root_y);
+    if (drag.isDragging(wm)) {
+        drag.updateDrag(wm, event.root_x, event.root_y);
     }
 }
 
@@ -145,12 +148,14 @@ fn closeWindow(wm: *WM, win: u32) void {
         return;
     }
 
-    const wm_protocols_atom = utils.getAtomCached(wm.conn, "WM_PROTOCOLS") catch {
+    const wm_protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch {
+        std.log.warn("[input] Failed to get WM_PROTOCOLS atom, force destroying window", .{});
         forceDestroyWindow(wm, win);
         return;
     };
 
-    const wm_delete_atom = utils.getAtomCached(wm.conn, "WM_DELETE_WINDOW") catch {
+    const wm_delete_atom = utils.getAtomCached("WM_DELETE_WINDOW") catch {
+        std.log.warn("[input] Failed to get WM_DELETE_WINDOW atom, force destroying window", .{});
         forceDestroyWindow(wm, win);
         return;
     };
@@ -175,7 +180,7 @@ fn closeWindow(wm: *WM, win: u32) void {
     forceDestroyWindow(wm, win);
 }
 
-inline fn sendDeleteEvent(wm: *WM, win: u32, protocols_atom: u32, delete_atom: u32) void {
+fn sendDeleteEvent(wm: *WM, win: u32, protocols_atom: u32, delete_atom: u32) void {
     var event: xcb.xcb_client_message_event_t = undefined;
     event.response_type = xcb.XCB_CLIENT_MESSAGE;
     event.format = 32;
@@ -192,12 +197,12 @@ inline fn sendDeleteEvent(wm: *WM, win: u32, protocols_atom: u32, delete_atom: u
     utils.flush(wm.conn);
 }
 
-inline fn forceDestroyWindow(wm: *WM, win: u32) void {
+fn forceDestroyWindow(wm: *WM, win: u32) void {
     _ = xcb.xcb_destroy_window(wm.conn, win);
     utils.flush(wm.conn);
 }
 
-inline fn executeAction(action: *const defs.Action, wm: *WM) !void {
+fn executeAction(action: *const defs.Action, wm: *WM) !void {
     switch (action.*) {
         .toggle_fullscreen => @import("fullscreen").toggleFullscreen(wm),
         .close_window => {
@@ -205,6 +210,8 @@ inline fn executeAction(action: *const defs.Action, wm: *WM) !void {
         },
         .reload_config => wm.should_reload_config.store(true, .release),
         .toggle_layout => tiling.toggleLayout(wm),
+        .toggle_layout_reverse => tiling.toggleLayoutReverse(wm),
+        .toggle_bar => @import("bar").toggleBar(wm),
         .increase_master => tiling.increaseMasterWidth(wm),
         .decrease_master => tiling.decreaseMasterWidth(wm),
         .increase_master_count => tiling.increaseMasterCount(wm),
@@ -228,8 +235,10 @@ fn executeShellCommand(wm: *WM, cmd: []const u8) !void {
 
     const pid = c.fork();
     if (pid == 0) {
+        // First child - fork again to avoid zombie
         const pid2 = c.fork();
         if (pid2 == 0) {
+            // Second child - execute command
             _ = c.setsid();
             const result = c.execvp("/bin/sh", @ptrCast(&[_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z.ptr, null }));
             if (result == -1) {
@@ -242,6 +251,7 @@ fn executeShellCommand(wm: *WM, cmd: []const u8) !void {
         }
         std.process.exit(0);
     } else if (pid > 0) {
+        // Parent - wait for first child
         var status: c_int = 0;
         const wait_result = waitpid(pid, &status, 0);
         if (wait_result == -1) {
@@ -255,9 +265,11 @@ fn executeShellCommand(wm: *WM, cmd: []const u8) !void {
 }
 
 fn dumpState(wm: *WM) void {
-    std.log.info("========== STATE ==========", .{});
+    std.log.info("========== STATE DUMP ==========", .{});
     std.log.info("Focused: {?x}", .{wm.focused_window});
     std.log.info("Total windows: {}", .{wm.windows.count()});
+    std.log.info("Fullscreen: {?x}", .{wm.fullscreen.window});
+    std.log.info("Drag active: {}", .{wm.drag_state.active});
 
     if (workspaces.getState()) |ws_state| {
         std.log.info("Current workspace: {}", .{ws_state.current + 1});
@@ -267,14 +279,19 @@ fn dumpState(wm: *WM) void {
     }
 
     if (tiling.getState()) |t_state| {
-        std.log.info("Tiling: {} ({} windows)", .{ t_state.enabled, t_state.tiled_windows.items.len });
+        std.log.info("Tiling enabled: {}", .{t_state.enabled});
+        std.log.info("Tiling layout: {s}", .{@tagName(t_state.layout)});
+        std.log.info("Tiled windows: {}", .{t_state.tiled_windows.items.len});
+        std.log.info("Master count: {}", .{t_state.master_count});
+        std.log.info("Master width: {d:.2}", .{t_state.master_width_factor});
     }
-    std.log.info("===========================", .{});
+    std.log.info("================================", .{});
 }
 
 fn emergencyRecover(wm: *WM) void {
-    std.log.warn("========== RECOVERY ==========", .{});
+    std.log.warn("========== EMERGENCY RECOVERY ==========", .{});
 
+    // Map all windows
     if (workspaces.getState()) |ws_state| {
         for (ws_state.workspaces) |*ws| {
             for (ws.windows.items) |win| {
@@ -283,10 +300,24 @@ fn emergencyRecover(wm: *WM) void {
         }
     }
 
+    // Disable tiling
     if (tiling.getState()) |t_state| {
         t_state.enabled = false;
+        std.log.warn("Tiling disabled", .{});
+    }
+
+    // Exit fullscreen
+    if (wm.fullscreen.window) |_| {
+        wm.fullscreen = .{};
+        std.log.warn("Fullscreen cleared", .{});
+    }
+
+    // Stop any drag
+    if (wm.drag_state.active) {
+        wm.drag_state.active = false;
+        std.log.warn("Drag stopped", .{});
     }
 
     utils.flush(wm.conn);
-    std.log.warn("Recovery complete", .{});
+    std.log.warn("Recovery complete - all windows mapped, special modes disabled", .{});
 }

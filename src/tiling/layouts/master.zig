@@ -21,11 +21,14 @@ inline fn calcColumnLayout(total_h: u16, count: u16, margins: utils.Margins) str
 }
 
 pub fn tile(b: *batch.Batch, state: *State, windows: []const u32, screen_w: u16, screen_h: u16) void {
+    tileWithOffset(b, state, windows, screen_w, screen_h, 0);
+}
+
+pub fn tileWithOffset(b: *batch.Batch, state: *State, windows: []const u32, screen_w: u16, screen_h: u16, y_offset: u16) void {
     const n = windows.len;
     if (n == 0) return;
 
-    const bar_height = bar.getHeight();
-    const usable_h = screen_h - bar_height;
+    const usable_h = screen_h;
 
     const m = state.margins();
     const m_count: u16 = @intCast(@min(state.master_count, n));
@@ -55,7 +58,7 @@ pub fn tile(b: *batch.Batch, state: *State, windows: []const u32, screen_w: u16,
         const row: u16 = @intCast(i);
         const rect = utils.Rect{
             .x = @intCast(master_x + m.gap),
-            .y = @intCast(bar_height + m.gap + row * m_layout.spacing),
+            .y = @intCast(y_offset + m.gap + row * m_layout.spacing),
             .width = master_inner_w,
             .height = m_layout.item_h,
         };
@@ -86,7 +89,7 @@ pub fn tile(b: *batch.Batch, state: *State, windows: []const u32, screen_w: u16,
             const row: u16 = @intCast(i);
             const rect = utils.Rect{
                 .x = @intCast(stack_x + m.gap / 2),
-                .y = @intCast(bar_height + m.gap + row * s_layout.spacing),
+                .y = @intCast(y_offset + m.gap + row * s_layout.spacing),
                 .width = stack_inner_w,
                 .height = s_layout.item_h,
             };
@@ -110,7 +113,7 @@ pub fn tile(b: *batch.Batch, state: *State, windows: []const u32, screen_w: u16,
 
             const row_total_w = stack_w - m.gap / 2 - m.gap - m.gap * (cols_in_row - 1);
             const row_col_w = row_total_w / cols_in_row;
-            const y_pos = bar_height + m.gap + row * s_layout.spacing;
+            const y_pos = y_offset + m.gap + row * s_layout.spacing;
             const row_inner_w = if (row_col_w > 2 * m.border)
                 @max(defs.MIN_WINDOW_DIM, row_col_w - 2 * m.border)
             else

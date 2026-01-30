@@ -1,10 +1,11 @@
-//! Simplified batch system with border width support
+//! Batch XCB operations for better performance
 
 const std = @import("std");
 const defs = @import("defs");
 const xcb = defs.xcb;
 const WM = defs.WM;
 const utils = @import("utils");
+const focus = @import("focus");
 
 const XcbOp = union(enum) {
     map: u32,
@@ -12,8 +13,8 @@ const XcbOp = union(enum) {
     configure: struct { win: u32, rect: utils.Rect },
     set_border: struct { win: u32, color: u32 },
     set_border_width: struct { win: u32, width: u16 },
-    set_focus: u32,
     raise: u32,
+    // Note: set_focus removed - now called directly through focus module
 };
 
 const MAX_BATCH_OPS = 256;
@@ -31,7 +32,9 @@ pub const Batch = struct {
         };
     }
 
-    pub fn deinit(_: *Batch) void {}
+    pub fn deinit(_: *Batch) void {
+        // No resources to clean up - stack-allocated array
+    }
 
     pub fn map(self: *Batch, win: u32) !void {
         if (self.count >= MAX_BATCH_OPS) return error.BatchFull;
@@ -64,9 +67,9 @@ pub const Batch = struct {
     }
 
     pub fn setFocus(self: *Batch, win: u32) !void {
-        if (self.count >= MAX_BATCH_OPS) return error.BatchFull;
-        self.ops[self.count] = .{ .set_focus = win };
-        self.count += 1;
+        // Focus has important side effects (bar updates, tiling integration, protection)
+        // Call focus module directly instead of batching the raw XCB operation
+        focus.setFocus(self.wm, win, .tiling_operation);
     }
 
     pub fn raise(self: *Batch, win: u32) !void {
@@ -102,7 +105,7 @@ pub const Batch = struct {
                 },
                 .set_border => |sb| _ = xcb.xcb_change_window_attributes(conn, sb.win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{sb.color}),
                 .set_border_width => |sbw| _ = xcb.xcb_configure_window(conn, sbw.win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{sbw.width}),
-                .set_focus => |win| _ = xcb.xcb_set_input_focus(conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, xcb.XCB_CURRENT_TIME),
+                // Note: set_focus is now called directly and not batched
                 .raise => |win| _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE}),
             }
         }

@@ -1,12 +1,4 @@
-//! XKB (X Keyboard Extension) bindings and keyboard state management.
-//!
-//! This module wraps xkbcommon-x11 to provide:
-//! - Keyboard state initialization with retry logic (X server race conditions)
-//! - Keycode to keysym translation for event processing
-//! - Keysym to keycode lookup for configuration parsing
-//!
-//! The retry logic is critical for reliability when starting alongside other
-//! X11 applications that may be initializing the keyboard simultaneously.
+//! XKB (X Keyboard Extension) bindings and keyboard state management
 
 const std = @import("std");
 const defs = @import("defs");
@@ -38,12 +30,10 @@ pub const XkbState = struct {
     keymap: *xkb_keymap,
     state: *xkb_state,
     device_id: i32,
+    reverse_map: std.AutoHashMap(u32, u8), // keysym -> keycode for fast lookup
+    allocator: std.mem.Allocator,
 
-    /// Initialize with retry logic for X server race conditions
-    ///
-    /// When multiple X11 clients start simultaneously, keyboard initialization
-    /// can fail. We retry with exponential backoff to handle this gracefully.
-    pub fn init(xcb_conn: *anyopaque) !XkbState {
+    pub fn init(xcb_conn: *anyopaque, allocator: std.mem.Allocator) !XkbState {
         const ctx = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS) orelse
             return error.XkbContextFailed;
         errdefer xkb.xkb_context_unref(ctx);
@@ -58,38 +48,46 @@ pub const XkbState = struct {
 
         const state = xkb.xkb_state_new(keymap) orelse return error.XkbStateFailed;
 
+        // Build reverse keymap for fast keysym -> keycode lookup
+        var reverse_map = std.AutoHashMap(u32, u8).init(allocator);
+        errdefer reverse_map.deinit();
+        
+        // Scan typical keycode range (8-255)
+        for (8..256) |kc| {
+            const keycode: u8 = @intCast(kc);
+            const keysym = xkb.xkb_state_key_get_one_sym(state, keycode);
+            if (keysym != XKB_KEY_NoSymbol) {
+                // Store first keycode found for each keysym
+                reverse_map.put(keysym, keycode) catch {};
+            }
+        }
+
         return XkbState{
             .context = ctx,
             .keymap = keymap,
             .state = state,
             .device_id = device_id,
+            .reverse_map = reverse_map,
+            .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *XkbState) void {
+        self.reverse_map.deinit();
         xkb.xkb_state_unref(self.state);
         xkb.xkb_keymap_unref(self.keymap);
         xkb.xkb_context_unref(self.context);
     }
 
     /// Convert X11 keycode to keysym (for event processing)
-    pub inline fn keycodeToKeysym(self: *XkbState, keycode: u8) u32 {
+    pub fn keycodeToKeysym(self: *XkbState, keycode: u8) u32 {
         return xkb.xkb_state_key_get_one_sym(self.state, keycode);
     }
 
     /// Find keycode for given keysym (reverse lookup for config parsing)
-    ///
-    /// Scans the keymap to find which keycode produces the desired keysym.
-    /// Returns null if the keysym is not mapped to any key.
+    /// Uses pre-built map for O(1) lookup instead of O(n) scan
     pub fn keysymToKeycode(self: *XkbState, keysym: u32) ?u8 {
-        // Scan typical keycode range (8-255 on most systems)
-        for (8..256) |kc| {
-            const keycode: u8 = @intCast(kc);
-            if (xkb.xkb_state_key_get_one_sym(self.state, keycode) == keysym) {
-                return keycode;
-            }
-        }
-        return null;
+        return self.reverse_map.get(keysym);
     }
 };
 
@@ -137,11 +135,21 @@ fn retryKeymap(ctx: *xkb_context, xcb_conn: *anyopaque, device_id: i32) !*xkb_ke
             return error.XkbKeymapFailed;
         };
 
-        // Verify keymap by testing Return key (keycode 36 on most systems)
-        // If the keymap is corrupt, it might return NoSymbol for basic keys
+        // Verify keymap by testing common keys
+        // Test multiple keys to ensure keymap is valid
         if (xkb.xkb_state_new(km)) |test_state| {
             defer xkb.xkb_state_unref(test_state);
-            if (xkb.xkb_state_key_get_one_sym(test_state, 36) != xkb.XKB_KEY_NoSymbol) {
+            
+            // Test Return (usually keycode 36), Space (65), and A (38)
+            var valid_keys: usize = 0;
+            for ([_]u8{ 36, 65, 38 }) |keycode| {
+                if (xkb.xkb_state_key_get_one_sym(test_state, keycode) != xkb.XKB_KEY_NoSymbol) {
+                    valid_keys += 1;
+                }
+            }
+            
+            // Consider keymap valid if at least 2 of 3 test keys work
+            if (valid_keys >= 2) {
                 return km;
             }
         }

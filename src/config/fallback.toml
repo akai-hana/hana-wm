@@ -1,0 +1,96 @@
+# Hana WM - Fallback Configuration
+# This config is used when no config.toml is found
+
+[tiling]
+enabled     = true
+layout      = "master"
+master_side = "left"
+
+master_count        = 1
+master_width_factor = 55
+gaps                = 12
+border_width        = 4
+border_focused      = "#005577"
+border_normal       = "#444444"
+
+[Keybindings]
+Mod = "Super"
+
+# Terminal (will be auto-detected)
+Mod+Return = "auto_terminal"
+
+# Window management
+Mod+Shift+f = "close"
+Mod+Shift+g = "kill"
+Mod+f       = "toggle_fullscreen"
+
+# Tiling layout controls
+Mod+space       = "toggle_layout"
+Mod+Shift+space = "toggle_layout_reverse"
+Mod+n           = "toggle_tiling"
+Mod+h           = "decrease_master"
+Mod+l           = "increase_master"
+Mod+comma       = "increase_master_count"
+Mod+period      = "decrease_master_count"
+
+# Workspaces 1-9
+Mod+1 = "workspace_1"
+Mod+2 = "workspace_2"
+Mod+3 = "workspace_3"
+Mod+4 = "workspace_4"
+Mod+5 = "workspace_5"
+Mod+6 = "workspace_6"
+Mod+7 = "workspace_7"
+Mod+8 = "workspace_8"
+Mod+9 = "workspace_9"
+
+# Move window to workspace
+Mod+Shift+1 = "move_to_workspace_1"
+Mod+Shift+2 = "move_to_workspace_2"
+Mod+Shift+3 = "move_to_workspace_3"
+Mod+Shift+4 = "move_to_workspace_4"
+Mod+Shift+5 = "move_to_workspace_5"
+Mod+Shift+6 = "move_to_workspace_6"
+Mod+Shift+7 = "move_to_workspace_7"
+Mod+Shift+8 = "move_to_workspace_8"
+Mod+Shift+9 = "move_to_workspace_9"
+
+# Bar toggle
+Mod+b = "toggle_bar"
+
+# Config reload
+Mod+Shift+t = "reload"
+
+[bar]
+show = true
+position = "bottom"
+font = "auto"
+font_size = 12
+padding = 8
+spacing = 6
+
+bg          = "#222222"
+fg          = "#bbbbbb"
+selected_bg = "#005577"
+selected_fg = "#eeeeee"
+occupied_fg = "#eeeeee"
+urgent_bg   = "#ff0000"
+urgent_fg   = "#ffffff"
+
+accent_color = "#005577"
+indicator_size = 4
+title_accent = true
+
+icons = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+
+[bar.layout.left]
+segments = ["workspaces", "layout"]
+
+[bar.layout.center]
+segments = ["title"]
+
+[bar.layout.right]
+segments = ["clock"]
+
+[workspaces]
+count = 9

@@ -1,4 +1,4 @@
-// Main event loop
+// Main event loop - Event-driven architecture
 
 const std     = @import("std");
 const posix   = std.posix;
@@ -11,9 +11,14 @@ const events    = @import("events");
 const input     = @import("input");
 const utils     = @import("utils");
 const bar       = @import("bar");
+const focus     = @import("focus");
+const tiling    = @import("tiling");
 
 const xcb = defs.xcb;
 const WM = defs.WM;
+
+// X11 cursor font name
+const CURSOR_FONT_NAME = "cursor";
 
 const WM_EVENT_MASK = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
     xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
@@ -21,28 +26,43 @@ const WM_EVENT_MASK = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
     xcb.XCB_EVENT_MASK_ENTER_WINDOW |
     xcb.XCB_EVENT_MASK_PROPERTY_CHANGE;
 
+// X11 cursor font glyph indices for left pointer
+const CURSOR_FONT_LEFT_PTR = 68;
+const CURSOR_FONT_LEFT_PTR_MASK = 69;
+
+// Cursor colors: black foreground, white background
+const CURSOR_FG_R: u16 = 0;
+const CURSOR_FG_G: u16 = 0;
+const CURSOR_FG_B: u16 = 0;
+const CURSOR_BG_R: u16 = 65535;
+const CURSOR_BG_G: u16 = 65535;
+const CURSOR_BG_B: u16 = 65535;
+
+// Event loop poll timeout in milliseconds
+// Short timeout allows checking signals and clock updates while being responsive
+const POLL_TIMEOUT_MS: i32 = 100;
+
 var should_reload = std.atomic.Value(bool).init(false);
 var running = std.atomic.Value(bool).init(true);
 
-fn setupSignalHandler() void {
-    const handler = struct {
-        fn reload(_: posix.SIG) callconv(.c) void {
-            should_reload.store(true, .release);
-        }
-        fn terminate(_: posix.SIG) callconv(.c) void {
-            running.store(false, .release);
-        }
-    };
+fn handleReloadSignal(_: posix.SIG) callconv(.c) void {
+    should_reload.store(true, .release);
+}
 
+fn handleTerminateSignal(_: posix.SIG) callconv(.c) void {
+    running.store(false, .release);
+}
+
+fn setupSignalHandler() void {
     var sa_reload = posix.Sigaction{
-        .handler  = .{ .handler = handler.reload },
+        .handler  = .{ .handler = handleReloadSignal },
         .mask     = std.mem.zeroes(posix.sigset_t),
         .flags    = posix.SA.RESTART,
     };
     posix.sigaction(posix.SIG.HUP, &sa_reload, null);
 
     var sa_term  = posix.Sigaction{
-        .handler = .{ .handler = handler.terminate },
+        .handler = .{ .handler = handleTerminateSignal },
         .mask    = std.mem.zeroes(posix.sigset_t),
         .flags   = posix.SA.RESTART,
     };
@@ -52,10 +72,13 @@ fn setupSignalHandler() void {
 
 fn setupRootCursor(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) void {
     const font = xcb.xcb_generate_id(conn);
-    _ = xcb.xcb_open_font(conn, font, 6, "cursor");
+    _ = xcb.xcb_open_font(conn, font, CURSOR_FONT_NAME.len, CURSOR_FONT_NAME);
 
     const cursor = xcb.xcb_generate_id(conn);
-    _ = xcb.xcb_create_glyph_cursor(conn, cursor, font, font, 68, 69, 0, 0, 0, 65535, 65535, 65535);
+    _ = xcb.xcb_create_glyph_cursor(conn, cursor, font, font, 
+        CURSOR_FONT_LEFT_PTR, CURSOR_FONT_LEFT_PTR_MASK, 
+        CURSOR_FG_R, CURSOR_FG_G, CURSOR_FG_B, 
+        CURSOR_BG_R, CURSOR_BG_G, CURSOR_BG_B);
     _ = xcb.xcb_change_window_attributes(conn, screen.*.root, xcb.XCB_CW_CURSOR, &[_]u32{cursor});
     _ = xcb.xcb_close_font(conn, font);
 }
@@ -95,9 +118,13 @@ fn grabKeybindings(wm: *WM) !void {
     for (wm.config.keybindings.items) |kb| {
         const keycode = kb.keycode orelse continue;
 
+        // Grab with all combinations of NumLock and CapsLock to ignore their state
         for ([_]u16{ 0, defs.MOD_LOCK, defs.MOD_2, defs.MOD_LOCK | defs.MOD_2 }) |lock| {
             const cookie = xcb.xcb_grab_key_checked(wm.conn, 0, wm.root, @intCast(kb.modifiers | lock), keycode, xcb.XCB_GRAB_MODE_ASYNC, xcb.XCB_GRAB_MODE_ASYNC);
-            if (xcb.xcb_request_check(wm.conn, cookie)) |err| std.c.free(err);
+            if (xcb.xcb_request_check(wm.conn, cookie)) |err| {
+                std.log.warn("[keybind] Failed to grab key {}: {*}", .{keycode, err});
+                std.c.free(err);
+            }
         }
     }
 
@@ -133,7 +160,7 @@ fn handleConfigReload(wm: *WM) !void {
         return err;
     };
 
-    @import("tiling").reloadConfig(wm);
+    tiling.reloadConfig(wm);
 
     std.log.info("[config] Reload complete", .{});
 }
@@ -158,7 +185,7 @@ pub fn main() !void {
 
     const xkb_state = try allocator.create(xkbcommon.XkbState);
     defer allocator.destroy(xkb_state);
-    xkb_state.* = try xkbcommon.XkbState.init(conn);
+    xkb_state.* = try xkbcommon.XkbState.init(conn, allocator);
     defer xkb_state.deinit();
 
     var user_config = try config.loadConfigDefault(allocator);
@@ -178,6 +205,9 @@ pub fn main() !void {
     };
     defer wm.deinit();
 
+    // Initialize atom cache at startup
+    try utils.initAtomCache(conn);
+
     setupSignalHandler();
     events.initModules(&wm);
     defer events.deinitModules(&wm);
@@ -195,12 +225,21 @@ pub fn main() !void {
 
     std.log.info("[hana] Started", .{});
 
-    // Main loop
-    // Process events -> flush
-    while (running.load(.acquire)) {
-        var events_handled = false;
+    // Cache X connection file descriptor for poll
+    const x_fd = xcb.xcb_get_file_descriptor(conn);
 
-        // Process ALL available events
+    // Event-driven main loop using xcb_poll_for_event
+    // This avoids polling with sleep - we process events as they arrive
+    while (running.load(.acquire)) {
+        // Check for config reload signal
+        if (should_reload.swap(false, .acq_rel)) {
+            handleConfigReload(&wm) catch |err| {
+                std.log.err("[config] Reload failed: {}", .{err});
+            };
+        }
+
+        // Process all available events (non-blocking)
+        var events_handled = false;
         while (true) {
             const event = xcb.xcb_poll_for_event(conn);
             if (event == null) break;
@@ -208,22 +247,15 @@ pub fn main() !void {
 
             events_handled = true;
 
-            if (should_reload.swap(false, .acq_rel)) {
-                handleConfigReload(&wm) catch |err| {
-                    std.log.err("[config] Reload failed: {}", .{err});
-                };
-            }
-
             const event_type = @as(*u8, @ptrCast(event.?)).*;
             events.dispatch(event_type, event.?, &wm);
         }
 
+        // After processing events, do any resulting work
         if (events_handled) {
-            // Do any resulting work
-            utils.releaseProtection();
+            focus.releaseProtection();
 
-            const tiling_mod = @import("tiling");
-            tiling_mod.retileIfDirty(&wm);
+            tiling.retileIfDirty(&wm);
 
             bar.updateIfDirty(&wm) catch |err| {
                 std.log.err("[main] Failed to update bar: {}", .{err});
@@ -231,10 +263,25 @@ pub fn main() !void {
 
             utils.flush(conn);
         } else {
-            // No events, sleep briefly to avoid spinning (what is spinning?)
-            std.posix.nanosleep(0, 1 * std.time.ns_per_ms);
+            // No events available - wait for events with timeout
+            // This is event-driven: we block until an event arrives or timeout
+            // Using a short timeout allows checking signals and clock updates
+            var pollfds = [_]std.posix.pollfd{
+                .{
+                    .fd = x_fd,
+                    .events = std.posix.POLL.IN,
+                    .revents = 0,
+                },
+            };
+
+            // Poll with configured timeout for responsiveness
+            _ = std.posix.poll(&pollfds, POLL_TIMEOUT_MS) catch 0;
+
+            // Check clock for bar updates even if no X events
+            bar.checkClockUpdate() catch {};
         }
 
+        // Check connection health
         if (xcb.xcb_connection_has_error(conn) != 0) {
             std.log.err("[main] X11 connection error, shutting down", .{});
             break;

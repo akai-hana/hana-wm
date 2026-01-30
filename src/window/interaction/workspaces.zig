@@ -1,10 +1,11 @@
-// Workspace management - FIXED: Immediate, event-driven switching
+//! Workspace management - Optimized with batch operations
 
 const std = @import("std");
 const defs = @import("defs");
 const xcb = defs.xcb;
 const WM = defs.WM;
 const utils = @import("utils");
+const focus = @import("focus");
 const bar = @import("bar");
 const batch = @import("batch");
 
@@ -30,7 +31,7 @@ pub const Workspace = struct {
         self.window_set.deinit();
     }
 
-    pub inline fn contains(self: *const Workspace, win: u32) bool {
+    pub fn contains(self: *const Workspace, win: u32) bool {
         return self.window_set.contains(win);
     }
 
@@ -117,10 +118,12 @@ pub fn addWindowToCurrentWorkspace(_: *WM, win: u32) void {
 
     const ws = &s.workspaces[s.current];
     ws.add(win) catch |err| {
-        std.log.err("[workspaces] Failed to add window {}: {}", .{ win, err });
+        std.log.err("[workspaces] Failed to add window {x}: {}", .{ win, err });
         return;
     };
-    s.window_to_workspace.put(win, s.current) catch {};
+    s.window_to_workspace.put(win, s.current) catch |err| {
+        std.log.warn("[workspaces] Failed to update window map for {x}: {}", .{ win, err });
+    };
 }
 
 pub fn removeWindow(win: u32) void {
@@ -142,14 +145,19 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: usize) void {
         return;
     }
 
+    // Find current workspace for this window
     const from_ws = s.window_to_workspace.get(win) orelse blk: {
+        // Window not in map, search for it
         for (s.workspaces, 0..) |*ws, i| {
             if (ws.contains(win)) {
                 s.window_to_workspace.put(win, i) catch {};
                 break :blk i;
             }
         } else {
-            s.workspaces[target_ws].add(win) catch {};
+            // Window not found anywhere, just add to target
+            s.workspaces[target_ws].add(win) catch |err| {
+                std.log.err("[workspaces] Failed to add window to workspace {}: {}", .{ target_ws, err });
+            };
             s.window_to_workspace.put(win, target_ws) catch {};
             return;
         }
@@ -157,17 +165,25 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: usize) void {
 
     if (from_ws == target_ws) return;
 
+    // Move window between workspaces
     _ = s.workspaces[from_ws].remove(win);
-    s.workspaces[target_ws].add(win) catch {};
+    s.workspaces[target_ws].add(win) catch |err| {
+        std.log.err("[workspaces] Failed to add window to workspace {}: {}", .{ target_ws, err });
+        // Try to add back to original workspace
+        s.workspaces[from_ws].add(win) catch {};
+        return;
+    };
     s.window_to_workspace.put(win, target_ws) catch {};
 
+    // Handle visibility changes
     if (from_ws == s.current) {
         _ = xcb.xcb_unmap_window(wm.conn, win);
 
         if (wm.focused_window == win) {
-            utils.clearFocus(wm);
+            focus.clearFocus(wm);
         }
     } else if (target_ws == s.current) {
+        // Moving to current workspace - mark tiling dirty
         if (wm.config.tiling.enabled) {
             const tiling_mod = @import("tiling");
             if (tiling_mod.getState()) |ts| {
@@ -177,7 +193,6 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: usize) void {
     }
 }
 
-// IMMEDIATE execution - no queuing, no delays
 pub fn switchTo(wm: *WM, ws_id: usize) void {
     const s = state orelse return;
 
@@ -187,55 +202,42 @@ pub fn switchTo(wm: *WM, ws_id: usize) void {
     s.current = ws_id;
 }
 
-// Fast execution with minimal XCB calls
+// Optimized workspace switching with batch operations
 fn executeSwitch(wm: *WM, old_ws: usize, new_ws: usize) void {
     const s = state orelse return;
 
-    // OPTIMIZATION: Use stack arrays for speed
-    var unmapped: [128]u32 = undefined;
-    var unmapped_count: usize = 0;
-    var mapped: [128]u32 = undefined;
-    var mapped_count: usize = 0;
+    const old_workspace = &s.workspaces[old_ws];
+    const new_workspace = &s.workspaces[new_ws];
 
-    // Collect windows to unmap
-    for (s.workspaces[old_ws].windows.items) |win| {
-        if (unmapped_count < unmapped.len) {
-            unmapped[unmapped_count] = win;
-            unmapped_count += 1;
-        }
+    // Use batch for efficient map/unmap operations
+    var b = batch.Batch.begin(wm) catch {
+        executeSwitchDirect(wm, old_workspace, new_workspace);
+        return;
+    };
+    defer b.deinit();
+
+    // Map new workspace windows FIRST to prevent flicker
+    for (new_workspace.windows.items) |win| {
+        b.map(win) catch {};
     }
 
-    // Collect windows to map
-    for (s.workspaces[new_ws].windows.items) |win| {
-        if (mapped_count < mapped.len) {
-            mapped[mapped_count] = win;
-            mapped_count += 1;
-        }
+    // Then unmap old workspace windows
+    for (old_workspace.windows.items) |win| {
+        b.unmap(win) catch {};
     }
 
-    const conn = wm.conn;
-
-    // Unmap old workspace (fast!)
-    for (unmapped[0..unmapped_count]) |win| {
-        _ = xcb.xcb_unmap_window(conn, win);
-    }
-
-    // Map new workspace (fast!)
-    for (mapped[0..mapped_count]) |win| {
-        _ = xcb.xcb_map_window(conn, win);
-    }
-
-    // Set focus
-    if (mapped_count > 0) {
-        const win = mapped[0];
-        _ = xcb.xcb_set_input_focus(conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, xcb.XCB_CURRENT_TIME);
+    // Set focus to first window or root
+    if (new_workspace.windows.items.len > 0) {
+        const win = new_workspace.windows.items[0];
+        b.setFocus(win) catch {};
         wm.focused_window = win;
     } else {
-        _ = xcb.xcb_set_input_focus(conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, wm.root, xcb.XCB_CURRENT_TIME);
         wm.focused_window = null;
     }
 
-    // Mark dirty for retiling (happens later in main loop)
+    b.execute();
+
+    // Mark tiling dirty for retiling on new workspace
     if (wm.config.tiling.enabled) {
         const tiling_mod = @import("tiling");
         if (tiling_mod.getState()) |ts| {
@@ -243,7 +245,42 @@ fn executeSwitch(wm: *WM, old_ws: usize, new_ws: usize) void {
         }
     }
 
-    @import("bar").markDirty();
+    bar.markDirty();
+}
+
+// Fallback direct implementation without batch
+fn executeSwitchDirect(wm: *WM, old_workspace: *Workspace, new_workspace: *Workspace) void {
+    // Map new workspace FIRST to prevent flicker
+    for (new_workspace.windows.items) |win| {
+        _ = xcb.xcb_map_window(wm.conn, win);
+    }
+
+    // Then unmap old workspace
+    for (old_workspace.windows.items) |win| {
+        _ = xcb.xcb_unmap_window(wm.conn, win);
+    }
+
+    // Set focus
+    if (new_workspace.windows.items.len > 0) {
+        const win = new_workspace.windows.items[0];
+        _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, xcb.XCB_CURRENT_TIME);
+        wm.focused_window = win;
+    } else {
+        _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, wm.root, xcb.XCB_CURRENT_TIME);
+        wm.focused_window = null;
+    }
+
+    utils.flush(wm.conn);
+
+    // Mark tiling dirty
+    if (wm.config.tiling.enabled) {
+        const tiling_mod = @import("tiling");
+        if (tiling_mod.getState()) |ts| {
+            ts.markDirty();
+        }
+    }
+
+    bar.markDirty();
 }
 
 pub fn getCurrentWindowsView() ?[]const u32 {
@@ -261,11 +298,11 @@ pub fn isOnCurrentWorkspace(win: u32) bool {
     return s.workspaces[s.current].contains(win);
 }
 
-pub inline fn getState() ?*State {
+pub fn getState() ?*State {
     return state;
 }
 
-pub inline fn getCurrentWorkspaceObject() ?*Workspace {
+pub fn getCurrentWorkspaceObject() ?*Workspace {
     const s = state orelse return null;
     return &s.workspaces[s.current];
 }
