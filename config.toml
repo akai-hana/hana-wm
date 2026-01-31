@@ -109,14 +109,14 @@ occupied_fg = "#eeeeee"  # col_gray4
 urgent_bg   = "#FF0000"
 urgent_fg   = "#FFFFFF"
 
-# NEW: Accent colors for bar segments!
+# Accent colors for bar segments!
 # Default accent for all segments
 accent_color = "#ac3232"  # col_cyan - matching your focused border
 
 # NEW: Per-segment accent colors (optional - overrides accent_color)
 [bar.colors]
 workspaces = "#ac3232"  # col_cyan - red accent
-title = "#52263e"       # col_gray2 - purple/burgundy
+#title = "#52263e"       # col_gray2 - purple/burgundy
 clock = "#ac3232"       # col_cyan - red accent
 
 # NEW: Workspace icons - matches your Japanese theme!

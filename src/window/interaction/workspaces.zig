@@ -182,6 +182,14 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: usize) void {
         if (wm.focused_window == win) {
             focus.clearFocus(wm);
         }
+
+        // ISSUE #1 FIX: Retile current workspace when removing a window
+        if (wm.config.tiling.enabled) {
+            const tiling_mod = @import("tiling");
+            if (tiling_mod.getState()) |ts| {
+                ts.markDirty();
+            }
+        }
     } else if (target_ws == s.current) {
         // Moving to current workspace - mark tiling dirty
         if (wm.config.tiling.enabled) {

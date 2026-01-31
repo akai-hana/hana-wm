@@ -42,8 +42,14 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_EVENT_MASK, 
         &[_]u32{xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW});
     
-    // Map window immediately for snappy feel
-    _ = xcb.xcb_map_window(wm.conn, win);
+    // ISSUE #5 FIX: Only map window if it belongs to current workspace
+    // This prevents windows bound to other workspaces from appearing on screen
+    const should_map = (validated_target_ws == current_ws);
+    
+    if (should_map) {
+        _ = xcb.xcb_map_window(wm.conn, win);
+    }
+    
     wm.addWindow(win) catch |err| {
         std.log.err("[window] Failed to track window {x}: {}", .{ win, err });
     };
@@ -56,7 +62,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     }
 
     // Set up tiling if enabled and on current workspace
-    if (wm.config.tiling.enabled and validated_target_ws == current_ws) {
+    if (wm.config.tiling.enabled and validated_target_ws == current_ws and should_map) {
         _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, 
             &[_]u32{wm.config.tiling.border_width});
         _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_BORDER_PIXEL, 
@@ -70,6 +76,11 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
 }
 
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, wm: *WM) void {
+    // Block fullscreen window from reconfiguring itself
+    if (wm.fullscreen.window) |fs_win| {
+        if (fs_win == event.window) return;
+    }
+    
     // Tiled windows ignore configure requests - WM controls their geometry
     if (wm.config.tiling.enabled and tiling.isWindowTiled(event.window)) return;
 
