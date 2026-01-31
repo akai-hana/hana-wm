@@ -199,6 +199,7 @@ pub fn main() !void {
         .config               = user_config,
         .windows              = std.AutoHashMap(u32, void).init(allocator),
         .focused_window       = null,
+        .fullscreen           = defs.FullscreenState.init(allocator),
         .xkb_state            = xkb_state,
         .should_reload_config = &should_reload,
         .running              = &running,

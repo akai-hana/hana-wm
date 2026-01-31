@@ -260,16 +260,59 @@ pub const Config = struct {
     }
 };
 
-/// Fullscreen state tracking
-pub const FullscreenState = struct {
-    window: ?u32 = null,
-    saved_geometry: ?struct {
+/// Fullscreen info for a single window
+pub const FullscreenInfo = struct {
+    window: u32,
+    workspace: usize,
+    saved_geometry: struct {
         x: i16,
         y: i16,
         width: u16,
         height: u16,
         border_width: u16,
-    } = null,
+    },
+};
+
+/// Fullscreen state tracking - supports one fullscreen window per workspace
+pub const FullscreenState = struct {
+    // Map workspace index -> fullscreen info
+    per_workspace: std.AutoHashMap(usize, FullscreenInfo),
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) FullscreenState {
+        return .{
+            .per_workspace = std.AutoHashMap(usize, FullscreenInfo).init(allocator),
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *FullscreenState) void {
+        self.per_workspace.deinit();
+    }
+
+    pub fn isFullscreen(self: *const FullscreenState, win: u32) bool {
+        var it = self.per_workspace.valueIterator();
+        while (it.next()) |info| {
+            if (info.window == win) return true;
+        }
+        return false;
+    }
+
+    pub fn getForWorkspace(self: *const FullscreenState, ws: usize) ?FullscreenInfo {
+        return self.per_workspace.get(ws);
+    }
+
+    pub fn setForWorkspace(self: *FullscreenState, ws: usize, info: FullscreenInfo) !void {
+        try self.per_workspace.put(ws, info);
+    }
+
+    pub fn removeForWorkspace(self: *FullscreenState, ws: usize) void {
+        _ = self.per_workspace.remove(ws);
+    }
+
+    pub fn clear(self: *FullscreenState) void {
+        self.per_workspace.clearRetainingCapacity();
+    }
 };
 
 /// Drag state for window moving/resizing
@@ -293,13 +336,14 @@ pub const WM = struct {
     config: Config,
     windows: std.AutoHashMap(u32, void),
     focused_window: ?u32 = null,
-    fullscreen: FullscreenState = .{},
+    fullscreen: FullscreenState,
     xkb_state: ?*xkbcommon.XkbState,
     should_reload_config: *std.atomic.Value(bool),
     running: *std.atomic.Value(bool),
     drag_state: DragState = .{},
 
     pub fn deinit(self: *WM) void {
+        self.fullscreen.deinit();
         self.windows.deinit();
         self.config.deinit(self.allocator);
     }
