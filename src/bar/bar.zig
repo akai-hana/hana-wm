@@ -105,7 +105,7 @@ pub fn init(wm: *defs.WM) !void {
     );
 
     utils.flush(wm.conn);
-    try setWindowProperties(wm.conn, window, height);
+    try setWindowProperties(wm, window, height);
     utils.flush(wm.conn);
     _ = xcb.xcb_map_window(wm.conn, window);
     utils.flush(wm.conn);
@@ -187,9 +187,22 @@ pub fn deinit() void {
     }
 }
 
-fn setWindowProperties(conn: *xcb.xcb_connection_t, window: u32, height: u16) !void {
+fn setWindowProperties(wm: *defs.WM, window: u32, height: u16) !void {
+    const conn = wm.conn;
+    const screen_w = wm.screen.width_in_pixels;
+
     const wm_strut_partial = try utils.getAtom(conn, "_NET_WM_STRUT_PARTIAL");
-    const strut = [_]u32{ 0, 0, height, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    // _NET_WM_STRUT_PARTIAL layout:
+    //   [0-3]   left, right, top, bottom          — reserved pixel counts per edge
+    //   [4-5]   left_start_y,  left_end_y         — Y range the left strut occupies
+    //   [6-7]   right_start_y, right_end_y        — Y range the right strut occupies
+    //   [8-9]   top_start_x,   top_end_x          — X range the top strut occupies
+    //   [10-11] bottom_start_x, bottom_end_x      — X range the bottom strut occupies
+    const strut: [12]u32 = if (wm.config.bar.vertical_position == .bottom)
+        .{ 0, 0, 0, height,  0, 0, 0, 0,  0, 0,  0, screen_w }
+    else
+        .{ 0, 0, height, 0,  0, 0, 0, 0,  0, screen_w,  0, 0 };
+
     _ = xcb.xcb_change_property(conn, xcb.XCB_PROP_MODE_REPLACE, window,
         wm_strut_partial, xcb.XCB_ATOM_CARDINAL, 32, 12, &strut);
 
@@ -233,6 +246,8 @@ pub fn toggleBar(wm: *defs.WM) void {
         if (wm.config.bar.show) {
             // Show the bar
             _ = xcb.xcb_map_window(s.conn, s.window);
+            // CRITICAL FIX: Immediately redraw to avoid blank bar during Expose event delay
+            draw(s, wm) catch {};
             std.log.info("[bar] Bar shown", .{});
         } else {
             // Hide the bar
@@ -249,6 +264,33 @@ pub fn toggleBar(wm: *defs.WM) void {
 
 pub fn isBarVisible() bool {
     return if (state) |_| true else false;
+}
+
+/// Hide bar temporarily (e.g., for fullscreen) without changing config
+pub fn hideForFullscreen(wm: *defs.WM) void {
+    if (state) |s| {
+        _ = xcb.xcb_unmap_window(s.conn, s.window);
+        utils.flush(wm.conn);
+        std.log.info("[bar] Bar hidden (fullscreen)", .{});
+        
+        // Retile to use full screen space
+        @import("tiling").retileCurrentWorkspace(wm);
+    }
+}
+
+/// Show bar after exiting fullscreen (only if bar is enabled in config)
+pub fn showForFullscreen(wm: *defs.WM) void {
+    if (state) |s| {
+        if (wm.config.bar.show) {  // Only show if bar is enabled in config
+            _ = xcb.xcb_map_window(s.conn, s.window);
+            draw(s, wm) catch {};
+            utils.flush(wm.conn);
+            std.log.info("[bar] Bar shown (exit fullscreen)", .{});
+            
+            // Retile to account for bar space
+            @import("tiling").retileCurrentWorkspace(wm);
+        }
+    }
 }
 
 pub fn getBarHeight() u16 {

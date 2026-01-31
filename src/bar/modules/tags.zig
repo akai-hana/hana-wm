@@ -65,9 +65,17 @@ fn getWorkspaceLabel(config: defs.BarConfig, index: usize) []const u8 {
         return config.workspace_icons.items[index];
     }
     
-    // Fallback to number
-    var buf: [8]u8 = undefined;
-    return std.fmt.bufPrint(&buf, "{}", .{index + 1}) catch "?";
+    // Fallback to number - FIX: Use static strings instead of stack-local buffer
+    const static_numbers = [_][]const u8{
+        "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+        "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"
+    };
+    
+    if (index < static_numbers.len) {
+        return static_numbers[index];
+    }
+    
+    return "?";
 }
 
 fn drawIndicator(
