@@ -23,8 +23,6 @@ pub fn toggleFullscreen(wm: *WM) void {
         enterFullscreen(wm, win);
     }
     
-    // CRITICAL FIX: Re-grab keys after fullscreen transition to prevent keyboard lock
-    // Fullscreen windows can steal keyboard input, so we need to re-establish our grabs
     utils.flush(wm.conn);
 }
 
