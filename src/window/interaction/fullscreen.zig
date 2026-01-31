@@ -51,6 +51,9 @@ fn enterFullscreen(wm: *WM, win: u32, ws: usize) void {
         std.log.err("[fullscreen] Failed to save fullscreen state for workspace {}", .{ws});
         return;
     };
+    
+    // Hide bar for fullscreen
+    @import("bar").hideForFullscreen(wm);
 
     var b = batch.Batch.begin(wm) catch {
         enterFullscreenDirect(wm, win);
@@ -70,11 +73,12 @@ fn enterFullscreen(wm: *WM, win: u32, ws: usize) void {
     b.setBorderWidth(win, 0) catch {};
     b.raise(win) catch {};
     b.execute();
-
-    @import("bar").raiseBar();
 }
 
 fn enterFullscreenDirect(wm: *WM, win: u32) void {
+    // Hide bar for fullscreen
+    @import("bar").hideForFullscreen(wm);
+    
     const screen = wm.screen;
     const rect = utils.Rect{
         .x = 0,
@@ -87,8 +91,6 @@ fn enterFullscreenDirect(wm: *WM, win: u32) void {
     utils.setBorderWidth(wm.conn, win, 0);
     _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     utils.flush(wm.conn);
-    
-    @import("bar").raiseBar();
 }
 
 fn exitFullscreen(wm: *WM, win: u32, ws: usize) void {
@@ -102,6 +104,9 @@ fn exitFullscreen(wm: *WM, win: u32, ws: usize) void {
 
     // Remove fullscreen state for this workspace
     wm.fullscreen.removeForWorkspace(ws);
+    
+    // Show bar again (if enabled in config)
+    @import("bar").showForFullscreen(wm);
 
     if (tiling.isWindowTiled(win)) {
         // Let tiling system handle geometry

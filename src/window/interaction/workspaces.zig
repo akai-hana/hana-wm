@@ -314,6 +314,15 @@ fn executeSwitch(wm: *WM, old_ws: usize, new_ws: usize) void {
     //     tiling is disabled.  If retile already flushed, the buffer is
     //     empty and this is a no-op.
     utils.flush(wm.conn);
+    
+    // Check if new workspace has fullscreen window and adjust bar visibility
+    if (wm.fullscreen.getForWorkspace(new_ws)) |_| {
+        // New workspace has fullscreen - hide bar
+        bar.hideForFullscreen(wm);
+    } else {
+        // New workspace has no fullscreen - show bar (if enabled in config)
+        bar.showForFullscreen(wm);
+    }
 
     // (f) Raise bar above fullscreen window (must happen after the main
     //     flush to avoid splitting the atomic batch), then set focus.

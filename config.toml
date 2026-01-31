@@ -81,6 +81,7 @@ Mod+Shift+Escape = "emergency_recover"  # Emergency recovery mode
 
 [bar]
 show = true
+position = "bottom" # Bar vertical position: "top" or "bottom"
 
 # Bar height - NEW: Auto-adapts to font size by default!
 # Uncomment to set a fixed height instead:
