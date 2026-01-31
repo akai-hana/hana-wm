@@ -37,7 +37,7 @@ pub const State = struct {
 
     pub fn borderColor(self: *const State, wm: *const WM, win: u32) u32 {
         if (!self.tiled_set.contains(win)) return self.border_normal;
-        if (wm.fullscreen.window == win) return 0;
+        if (wm.fullscreen.isFullscreen(win)) return 0;
         return if (wm.focused_window == win) self.border_focused else self.border_normal;
     }
 
@@ -101,9 +101,9 @@ fn parseLayout(name: []const u8) Layout {
 
 pub fn addWindow(wm: *WM, win: u32) void {
     const s = state orelse return;
-    if (!s.enabled or !workspaces.isOnCurrentWorkspace(win)) return;
+    if (!s.enabled) return;
 
-    if (wm.fullscreen.window == win or s.tiled_set.contains(win)) {
+    if (wm.fullscreen.isFullscreen(win) or s.tiled_set.contains(win)) {
         s.markDirty();
         return;
     }
@@ -117,6 +117,15 @@ pub fn addWindow(wm: *WM, win: u32) void {
         _ = s.tiled_windows.orderedRemove(0);
         return;
     };
+
+    // Window is registered in the tiling lists regardless of which workspace it
+    // lives on — retileCurrentWorkspace filters by workspace at layout time.
+    // Skip focus and border setup for windows not on the current workspace;
+    // those side-effects are applied when the workspace is switched to.
+    if (!workspaces.isOnCurrentWorkspace(win)) {
+        s.markDirty();
+        return;
+    }
 
     var b = batch.Batch.begin(wm) catch {
         utils.configureBorder(wm.conn, win, s.border_width, s.borderColor(wm, win));
@@ -168,13 +177,13 @@ pub fn updateWindowFocus(wm: *WM, old_focused: ?u32, new_focused: ?u32) void {
     defer b.deinit();
 
     if (old_focused) |old_win| {
-        if (s.tiled_set.contains(old_win) and wm.fullscreen.window != old_win) {
+        if (s.tiled_set.contains(old_win) and !wm.fullscreen.isFullscreen(old_win)) {
             b.setBorder(old_win, s.borderColor(wm, old_win)) catch {};
         }
     }
 
     if (new_focused) |new_win| {
-        if (s.tiled_set.contains(new_win) and wm.fullscreen.window != new_win) {
+        if (s.tiled_set.contains(new_win) and !wm.fullscreen.isFullscreen(new_win)) {
             b.setBorder(new_win, s.borderColor(wm, new_win)) catch {};
         }
     }
@@ -186,13 +195,13 @@ fn updateWindowFocusDirect(wm: *WM, old_focused: ?u32, new_focused: ?u32) void {
     const s = state orelse return;
 
     if (old_focused) |old_win| {
-        if (s.tiled_set.contains(old_win) and wm.fullscreen.window != old_win) {
+        if (s.tiled_set.contains(old_win) and !wm.fullscreen.isFullscreen(old_win)) {
             utils.setBorder(wm.conn, old_win, s.borderColor(wm, old_win));
         }
     }
 
     if (new_focused) |new_win| {
-        if (s.tiled_set.contains(new_win) and wm.fullscreen.window != new_win) {
+        if (s.tiled_set.contains(new_win) and !wm.fullscreen.isFullscreen(new_win)) {
             utils.setBorder(wm.conn, new_win, s.borderColor(wm, new_win));
         }
     }
@@ -232,7 +241,7 @@ pub fn retileCurrentWorkspace(wm: *WM) void {
     var visible_count: usize = 0;
 
     for (s.tiled_windows.items) |win| {
-        if (wm.fullscreen.window == win) continue;
+        if (wm.fullscreen.isFullscreen(win)) continue;
         if (!s.tiled_set.contains(win)) continue;
         
         if (current_ws.contains(win)) {

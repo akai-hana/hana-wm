@@ -7,38 +7,50 @@ const WM = defs.WM;
 const utils = @import("utils");
 const tiling = @import("tiling");
 const batch = @import("batch");
+const workspaces = @import("workspaces");
 
 pub fn toggleFullscreen(wm: *WM) void {
     const win = wm.focused_window orelse return;
+    const current_ws = workspaces.getCurrentWorkspace() orelse return;
 
-    if (wm.fullscreen.window) |fs_win| {
-        if (fs_win == win) {
-            exitFullscreen(wm, win);
+    // Check if this workspace already has a fullscreen window
+    if (wm.fullscreen.getForWorkspace(current_ws)) |fs_info| {
+        if (fs_info.window == win) {
+            // Toggle off fullscreen for current window
+            exitFullscreen(wm, win, current_ws);
         } else {
-            // Switch fullscreen to different window
-            exitFullscreen(wm, fs_win);
-            enterFullscreen(wm, win);
+            // Switch fullscreen to different window on same workspace
+            exitFullscreen(wm, fs_info.window, current_ws);
+            enterFullscreen(wm, win, current_ws);
         }
     } else {
-        enterFullscreen(wm, win);
+        // No fullscreen window on this workspace, enter fullscreen
+        enterFullscreen(wm, win, current_ws);
     }
     
     utils.flush(wm.conn);
 }
 
-fn enterFullscreen(wm: *WM, win: u32) void {
+fn enterFullscreen(wm: *WM, win: u32, ws: usize) void {
     const geom = utils.getGeometry(wm.conn, win) orelse return;
 
-    // Save current geometry for restoration
-    wm.fullscreen.saved_geometry = .{
-        .x = geom.x,
-        .y = geom.y,
-        .width = geom.width,
-        .height = geom.height,
-        .border_width = if (tiling.isWindowTiled(win)) wm.config.tiling.border_width else 0,
+    // Save fullscreen info for this workspace
+    const fs_info = defs.FullscreenInfo{
+        .window = win,
+        .workspace = ws,
+        .saved_geometry = .{
+            .x = geom.x,
+            .y = geom.y,
+            .width = geom.width,
+            .height = geom.height,
+            .border_width = if (tiling.isWindowTiled(win)) wm.config.tiling.border_width else 0,
+        },
     };
-
-    wm.fullscreen.window = win;
+    
+    wm.fullscreen.setForWorkspace(ws, fs_info) catch {
+        std.log.err("[fullscreen] Failed to save fullscreen state for workspace {}", .{ws});
+        return;
+    };
 
     var b = batch.Batch.begin(wm) catch {
         enterFullscreenDirect(wm, win);
@@ -79,10 +91,17 @@ fn enterFullscreenDirect(wm: *WM, win: u32) void {
     @import("bar").raiseBar();
 }
 
-fn exitFullscreen(wm: *WM, win: u32) void {
-    const saved_geom = wm.fullscreen.saved_geometry orelse return;
+fn exitFullscreen(wm: *WM, win: u32, ws: usize) void {
+    // Get the fullscreen info for this workspace
+    const fs_info = wm.fullscreen.getForWorkspace(ws) orelse return;
+    
+    // Make sure we're exiting the right window
+    if (fs_info.window != win) return;
+    
+    const saved_geom = fs_info.saved_geometry;
 
-    wm.fullscreen = .{}; // Clear fullscreen state
+    // Remove fullscreen state for this workspace
+    wm.fullscreen.removeForWorkspace(ws);
 
     if (tiling.isWindowTiled(win)) {
         // Let tiling system handle geometry

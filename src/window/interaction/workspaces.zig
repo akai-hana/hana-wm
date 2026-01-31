@@ -7,7 +7,6 @@ const WM = defs.WM;
 const utils = @import("utils");
 const focus = @import("focus");
 const bar = @import("bar");
-const batch = @import("batch");
 
 pub const Workspace = struct {
     id: usize,
@@ -206,87 +205,130 @@ pub fn switchTo(wm: *WM, ws_id: usize) void {
 
     if (ws_id >= s.workspaces.len or ws_id == s.current) return;
 
-    executeSwitch(wm, s.current, ws_id);
+    const old_ws = s.current;
+    // Advance current before the switch so that retileCurrentWorkspace,
+    // called inside executeSwitch, lays out the new workspace's windows.
     s.current = ws_id;
+    executeSwitch(wm, old_ws, ws_id);
 }
 
-// Optimized workspace switching with batch operations
+// Flicker-free workspace switch.
+//
+// WHY map/unmap flickers
+// -----------------------
+// xcb_unmap_window destroys a window's rendered content on the server (unless
+// the application requested backing_store = Always, which most do not).
+// xcb_map_window on that window then triggers a server-side clear + Expose.
+// Until the application handles the Expose and redraws — an asynchronous
+// round-trip — the window shows its bare background pixel.  Meanwhile the
+// old-workspace windows have already vanished.  Gaps in the tiling layout
+// expose the root window (wallpaper) for that one frame.  Doing the map
+// *before* the unmap does not help: the server still needs to asynchronously
+// redraw the remapped window's content.
+//
+// WHY moving off-screen works
+// ---------------------------
+// A window that is *moved* (configured to x >= screen_width) stays mapped.
+// A mapped window retains its content in the server indefinitely.  When the
+// window is moved back on-screen later, its content is already there — no
+// Expose, no redraw, no blank frame.
+//
+// The sequence
+// ------------
+//   (a) Queue xcb_configure_window (x = screen_width) for every old-ws window.
+//       They leave the viewport but stay mapped.  Content is preserved.
+//   (b) Queue xcb_map_window for every new-ws window.  This is a no-op for
+//       windows that are already mapped (off-screen from a previous switch).
+//       It is only a real map on the very first visit to a workspace.
+//   (c) If the new workspace has a fullscreen window, queue its geometry
+//       restore here.  retileCurrentWorkspace skips fullscreen windows, so
+//       they must be handled explicitly.
+//   (d) Call retileCurrentWorkspace.  It queues configure requests that move
+//       the tiled windows to their correct on-screen positions, then calls
+//       b.execute() which flushes.  Because XCB uses a single output buffer,
+//       that flush drains (a)+(b)+(c)+(d) in one shot.  The server sees the
+//       entire batch before it paints — no intermediate layout is rendered.
+//   (e) A safety flush in case retile returned early (no tiled windows, etc.).
+//   (f) Raise the bar above any fullscreen window, then set input focus.
 fn executeSwitch(wm: *WM, old_ws: usize, new_ws: usize) void {
     const s = state orelse return;
 
     const old_workspace = &s.workspaces[old_ws];
     const new_workspace = &s.workspaces[new_ws];
+    const screen = wm.screen;
 
-    // Use batch for efficient map/unmap operations
-    var b = batch.Batch.begin(wm) catch {
-        executeSwitchDirect(wm, old_workspace, new_workspace);
-        return;
-    };
-    defer b.deinit();
-
-    // Map new workspace windows FIRST to prevent flicker
-    for (new_workspace.windows.items) |win| {
-        b.map(win) catch {};
-    }
-
-    // Then unmap old workspace windows
-    for (old_workspace.windows.items) |win| {
-        b.unmap(win) catch {};
-    }
-
-    // Set focus to first window or root
+    // Pre-set focused_window so the retile assigns the correct border
+    // colour to the window that will receive focus.
     if (new_workspace.windows.items.len > 0) {
-        const win = new_workspace.windows.items[0];
-        b.setFocus(win) catch {};
-        wm.focused_window = win;
+        wm.focused_window = new_workspace.windows.items[0];
     } else {
         wm.focused_window = null;
     }
 
-    b.execute();
-
-    // Mark tiling dirty for retiling on new workspace
-    if (wm.config.tiling.enabled) {
-        const tiling_mod = @import("tiling");
-        if (tiling_mod.getState()) |ts| {
-            ts.markDirty();
-        }
+    // (a) Move old-workspace windows off-screen.  configure, not unmap —
+    //     this keeps them mapped so their rendered content is preserved for
+    //     the next time we switch back to this workspace.
+    for (old_workspace.windows.items) |win| {
+        _ = xcb.xcb_configure_window(wm.conn, win,
+            xcb.XCB_CONFIG_WINDOW_X,
+            &[_]u32{@intCast(screen.width_in_pixels)});
     }
 
-    bar.markDirty();
-}
-
-// Fallback direct implementation without batch
-fn executeSwitchDirect(wm: *WM, old_workspace: *Workspace, new_workspace: *Workspace) void {
-    // Map new workspace FIRST to prevent flicker
+    // (b) Ensure new-workspace windows are mapped.  No-op for windows that
+    //     are already mapped (off-screen).  A real map only on first visit.
     for (new_workspace.windows.items) |win| {
         _ = xcb.xcb_map_window(wm.conn, win);
     }
 
-    // Then unmap old workspace
-    for (old_workspace.windows.items) |win| {
-        _ = xcb.xcb_unmap_window(wm.conn, win);
+    // (c) Restore fullscreen window on the new workspace.  retile skips
+    //     fullscreen windows, so we restore geometry explicitly here so the
+    //     request travels in the same flush as everything else.
+    if (wm.fullscreen.getForWorkspace(new_ws)) |fs_info| {
+        _ = xcb.xcb_configure_window(wm.conn, fs_info.window,
+            xcb.XCB_CONFIG_WINDOW_X |
+            xcb.XCB_CONFIG_WINDOW_Y |
+            xcb.XCB_CONFIG_WINDOW_WIDTH |
+            xcb.XCB_CONFIG_WINDOW_HEIGHT |
+            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
+            &[_]u32{
+                0,                                      // x
+                0,                                      // y
+                @intCast(screen.width_in_pixels),       // width
+                @intCast(screen.height_in_pixels),      // height
+                0,                                      // border_width
+            });
+        _ = xcb.xcb_configure_window(wm.conn, fs_info.window,
+            xcb.XCB_CONFIG_WINDOW_STACK_MODE,
+            &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     }
 
-    // Set focus
-    if (new_workspace.windows.items.len > 0) {
-        const win = new_workspace.windows.items[0];
-        _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, xcb.XCB_CURRENT_TIME);
-        wm.focused_window = win;
-    } else {
-        _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, wm.root, xcb.XCB_CURRENT_TIME);
-        wm.focused_window = null;
-    }
-
-    utils.flush(wm.conn);
-
-    // Mark tiling dirty
+    // (d) Retile: configures tiled windows at their on-screen positions and
+    //     flushes.  Everything queued in (a)-(c) is still sitting in XCB's
+    //     output buffer and gets sent in the same flush.
     if (wm.config.tiling.enabled) {
         const tiling_mod = @import("tiling");
-        if (tiling_mod.getState()) |ts| {
-            ts.markDirty();
-        }
+        tiling_mod.retileCurrentWorkspace(wm);
     }
+
+    // (e) Safety flush — covers the case where retile returned early or
+    //     tiling is disabled.  If retile already flushed, the buffer is
+    //     empty and this is a no-op.
+    utils.flush(wm.conn);
+
+    // (f) Raise bar above fullscreen window (must happen after the main
+    //     flush to avoid splitting the atomic batch), then set focus.
+    if (wm.fullscreen.getForWorkspace(new_ws)) |_| {
+        bar.raiseBar();
+    }
+
+    if (new_workspace.windows.items.len > 0) {
+        _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
+            wm.focused_window.?, xcb.XCB_CURRENT_TIME);
+    } else {
+        _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
+            wm.root, xcb.XCB_CURRENT_TIME);
+    }
+    utils.flush(wm.conn);
 
     bar.markDirty();
 }

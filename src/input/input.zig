@@ -268,7 +268,18 @@ fn dumpState(wm: *WM) void {
     std.log.info("========== STATE DUMP ==========", .{});
     std.log.info("Focused: {?x}", .{wm.focused_window});
     std.log.info("Total windows: {}", .{wm.windows.count()});
-    std.log.info("Fullscreen: {?x}", .{wm.fullscreen.window});
+    
+    // List fullscreen windows per workspace
+    var fs_it = wm.fullscreen.per_workspace.iterator();
+    var fs_count: usize = 0;
+    while (fs_it.next()) |entry| {
+        std.log.info("Fullscreen on workspace {}: {x}", .{entry.key_ptr.*, entry.value_ptr.window});
+        fs_count += 1;
+    }
+    if (fs_count == 0) {
+        std.log.info("Fullscreen: none", .{});
+    }
+    
     std.log.info("Drag active: {}", .{wm.drag_state.active});
 
     if (workspaces.getState()) |ws_state| {
@@ -306,11 +317,9 @@ fn emergencyRecover(wm: *WM) void {
         std.log.warn("Tiling disabled", .{});
     }
 
-    // Exit fullscreen
-    if (wm.fullscreen.window) |_| {
-        wm.fullscreen = .{};
-        std.log.warn("Fullscreen cleared", .{});
-    }
+    // Exit fullscreen on all workspaces
+    wm.fullscreen.clear();
+    std.log.warn("Fullscreen cleared", .{});
 
     // Stop any drag
     if (wm.drag_state.active) {
