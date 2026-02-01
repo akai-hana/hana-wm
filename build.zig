@@ -79,6 +79,7 @@ fn linkSystemLibrariesAndIncludes(b: *std.Build, root: *std.Build.Module, module
     root.linkSystemLibrary("xkbcommon-x11", .{});
     root.linkSystemLibrary("X11", .{});
     root.linkSystemLibrary("Xft", .{});
+    root.linkSystemLibrary("fontconfig", .{});
     
     // Add FreeType include path to root
     addFreetypeIncludes(b, root);

@@ -156,6 +156,7 @@ pub const BarConfig = struct {
     vertical_position: BarVerticalPosition = .top,
     height: ?u16 = null,
     font: []const u8 = "monospace:size=10",
+    fonts: std.ArrayList([]const u8),  // Multi-font support for CJK/fallback
     font_size: u16 = 10,
     padding: u16 = 8,
     spacing: u16 = 12,
@@ -186,6 +187,11 @@ pub const BarConfig = struct {
             allocator.free(icon);
         }
         self.workspace_icons.deinit(allocator);
+        
+        for (self.fonts.items) |font| {
+            allocator.free(font);
+        }
+        self.fonts.deinit(allocator);
 
         for (self.layout.items) |*item| {
             item.deinit(allocator);
@@ -235,6 +241,7 @@ pub const Config = struct {
         return .{
             .bar = BarConfig{
                 .workspace_icons = std.ArrayList([]const u8){},
+                .fonts = std.ArrayList([]const u8){},
                 .layout = std.ArrayList(BarLayout){},
             },
             .allocator = allocator,

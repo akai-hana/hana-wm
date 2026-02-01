@@ -6,10 +6,11 @@ set -eu
 
 FILES_DIR="dev/files"
 CODE_DIR="dev/codebase"
-DL_ZIP="$HOME/Downloads/files.zip"
+DL_ZIP1="$HOME/Downloads/files.zip"
+DL_ZIP2="$HOME/parallel/Downloads/files.zip"
 TARGET_ZIP="$FILES_DIR/files.zip"
 
-# Preconditions
+# Preconditions (don't create anything)
 if [ ! -d "$FILES_DIR" ]; then
   echo "Error: $FILES_DIR does not exist" >&2
   exit 1
@@ -20,13 +21,21 @@ if [ ! -d "$CODE_DIR" ]; then
   exit 1
 fi
 
-# Handle files.zip download
-if [ -f "$DL_ZIP" ]; then
-  mv "$DL_ZIP" "$TARGET_ZIP"
+# Choose download source: first try ~/Downloads, then ~/parallel/Downloads
+SOURCE=""
+if [ -f "$DL_ZIP1" ]; then
+  SOURCE="$DL_ZIP1"
+elif [ -f "$DL_ZIP2" ]; then
+  SOURCE="$DL_ZIP2"
+fi
+
+# Move if a download was found
+if [ -n "$SOURCE" ]; then
+  mv "$SOURCE" "$TARGET_ZIP"
 fi
 
 if [ ! -f "$TARGET_ZIP" ]; then
-  echo "Error: no files.zip found in $FILES_DIR or ~/Downloads" >&2
+  echo "Error: no files.zip found in $FILES_DIR or in ~/Downloads or ~/parallel/Downloads" >&2
   exit 1
 fi
 
@@ -46,8 +55,12 @@ if [ -d "$FILES_DIR/files" ]; then
   rmdir "$FILES_DIR/files" || true
 fi
 
-# Pipe each file into codebase, then remove it
-for f in "$FILES_DIR"/*; do
+# Pipe each regular file (including dotfiles) into codebase, then remove it
+for f in "$FILES_DIR"/* "$FILES_DIR"/.*; do
+  [ -e "$f" ] || continue
+  case "$(basename "$f")" in
+    .|..) continue ;;
+  esac
   [ -f "$f" ] || continue
   cat "$f" > "$CODE_DIR/$(basename "$f")"
   doas rm -f "$f"
