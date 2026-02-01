@@ -181,6 +181,19 @@ const Parser = struct {
         }
     }
 
+    /// Like skipWhitespace but also skips newlines and comments.
+    /// Used inside multi-line constructs like arrays.
+    fn skipWhitespaceAndNewlines(self: *Parser) void {
+        while (self.pos < self.content.len) {
+            switch (self.content[self.pos]) {
+                ' ', '\t', '\r' => self.pos += 1,
+                '\n' => { self.pos += 1; self.line += 1; },
+                '#' => self.skipLine(),
+                else => break,
+            }
+        }
+    }
+
     fn skipLine(self: *Parser) void {
         while (self.pos < self.content.len and self.content[self.pos] != '\n') {
             self.pos += 1;
@@ -309,14 +322,14 @@ const Parser = struct {
         try array.ensureTotalCapacity(allocator, 4);
 
         while (true) {
-            self.skipWhitespace();
+            self.skipWhitespaceAndNewlines();
             if (self.peek() == ']') {
                 _ = self.consume();
                 break;
             }
 
             try array.append(allocator, try self.parseValue(allocator));
-            self.skipWhitespace();
+            self.skipWhitespaceAndNewlines();
             if (self.peek() == ',') _ = self.consume();
         }
 
