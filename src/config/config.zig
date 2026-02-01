@@ -432,6 +432,26 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     cfg.allocated_font = try allocator.dupe(u8, font_str);
     cfg.bar.font = cfg.allocated_font.?;
 
+    // Parse fonts array for multi-font support (CJK, etc.)
+    if (section.get("fonts")) |value| {
+        if (value.asArray()) |arr| {
+            // Clear any existing fonts
+            for (cfg.bar.fonts.items) |font| {
+                allocator.free(font);
+            }
+            cfg.bar.fonts.clearRetainingCapacity();
+            
+            // Load fonts from array
+            for (arr) |item| {
+                if (item.asString()) |font_name| {
+                    const font_copy = try allocator.dupe(u8, font_name);
+                    try cfg.bar.fonts.append(allocator, font_copy);
+                }
+            }
+            std.log.info("[config] Loaded {} fonts for bar", .{cfg.bar.fonts.items.len});
+        }
+    }
+
     cfg.bar.font_size = get(u16, section, "font_size", 10, 6, 72);
     cfg.bar.padding = get(u16, section, "padding", 8, 0, 50);
     cfg.bar.spacing = get(u16, section, "spacing", 12, 0, 100);

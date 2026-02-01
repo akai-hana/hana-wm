@@ -88,8 +88,18 @@ position = "bottom" # Bar vertical position: "top" or "bottom"
 #height = 32
 
 # Font configuration
-font = "FiraCode Nerd Font Ret"
+# NEW: Multi-font support for proper CJK rendering!
+# List fonts in priority order - first font is primary, others are fallbacks
+# This allows Latin text to use FiraCode while Japanese uses Noto Sans CJK
+fonts = [
+    "FiraCode Nerd Font Ret",
+    "Noto Sans CJK JP",
+]
 font_size = 12
+
+# Legacy single font option (used if fonts array is not set):
+#font = "FiraCode Nerd Font Ret"
+#font_size = 12
 
 # NEW: Spacing configuration for better readability!
 padding = 99    # Padding inside segments (around text)
@@ -114,28 +124,28 @@ urgent_fg   = "#FFFFFF"
 # Default accent for all segments
 accent_color = "#ac3232"  # col_cyan - matching your focused border
 
-# NEW: Per-segment accent colors (optional - overrides accent_color)
-[bar.colors]
-workspaces = "#ac3232"  # col_cyan - red accent
-#title = "#52263e"       # col_gray2 - purple/burgundy
-clock = "#ac3232"       # col_cyan - red accent
-
 # NEW: Workspace icons - matches your Japanese theme!
 # Using hiragana characters for your workspace labels
 icons = ["あ", "か", "い", "は", "な", "つ", "ん", "で"]
 
 # Alternative icon options (uncomment to try):
 # Numbers with brackets (like your comments):
-# icons = ["【1】", "【2】", "【3】", "【4】", "【5】", "【6】", "【7】", "【8】"]
+# icons = ["「1」", "「2」", "「3」", "「4」", "「5」", "「6」", "「7」", "「8」"]
 
 # Full Japanese labels from your comments:
-#icons = ["あ】Browser", "か】Socials", "い】Music", "は】Launchers", "な】Gaming", "つ】Code", "ん】Media", "で】Downloads"]
+#icons = ["あ」Browser", "か」Socials", "い」Music", "は」Launchers", "な」Gaming", "つ」Code", "ん」Media", "で」Downloads"]
 
 # Nerd Font icons (if you want):
 # icons = ["", "", "", "", "", "", "", ""]
 
 indicator_size = 1
 title_accent = true
+
+# NEW: Per-segment accent colors (optional - overrides accent_color)
+[bar.colors]
+workspaces = "#ac3232"  # col_cyan - red accent
+#title = "#52263e"       # col_gray2 - purple/burgundy
+clock = "#ac3232"       # col_cyan - red accent
 
 # Configurable bar layout
 # You can rearrange segments however you like
@@ -176,35 +186,35 @@ count = 8  # Number of virtual desktops (1-20)
 # WORKSPACE RULES
 # Automatically assign windows to specific workspaces
 
-[workspace.rules.1] #【あ】Browser
+[workspace.rules.1] #「あ」Browser
 Navigator
 Firefox
 
-[workspace.rules.2] #【か】Socials
+[workspace.rules.2] #「か」Socials
 discord
 vesktop
 equibop
 electron
 
-[workspace.rules.3] #【い】Music
+[workspace.rules.3] #「い」Music
 com.github.th_ch.youtube_music
 
-[workspace.rules.4] #【は】Launchers
+[workspace.rules.4] #「は」Launchers
 steam
 OpenTabletDriver.UX
 
-[workspace.rules.5] #【な】Gaming
+[workspace.rules.5] #「な」Gaming
 "osu!"
 DDNet
 
-[workspace.rules.6] #【つ】Text/Code editors
+[workspace.rules.6] #「つ」Text/Code editors
 emacs
 xeyes
 
-[workspace.rules.7] #【ん】Media
+[workspace.rules.7] #「ん」Media
 freetube
 mpv
 gimp
 
-[workspace.rules.8] #【で】Downloads
+[workspace.rules.8] #「で」Downloads
 deluge
