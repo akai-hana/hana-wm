@@ -105,10 +105,7 @@ pub const DrawContext = struct {
     visual: *c.Visual,
     colormap: c.Colormap,
     
-    pub fn init(allocator: std.mem.Allocator, conn: *defs.xcb.xcb_connection_t, screen: *defs.xcb.xcb_screen_t, drawable: u32, width: u16, height: u16) !*DrawContext {
-        _ = conn;
-        _ = screen;
-        
+    pub fn init(allocator: std.mem.Allocator, drawable: u32, width: u16, height: u16) !*DrawContext {
         const dc = try allocator.create(DrawContext);
         errdefer allocator.destroy(dc);
         
@@ -369,23 +366,31 @@ pub const DrawContext = struct {
         
         const available = max_width - ellipsis_width;
         
-        // Try to break at word boundary for better appearance
-        var len: usize = 0;
-        var last_space: usize = 0;
-        
-        while (len < text.len) {
-            if (text[len] == ' ') {
-                last_space = len;
+        // Binary search for the longest UTF-8 prefix that fits in `available`.
+        // This is O(log n) textWidth calls instead of O(n).
+        var lo: usize = 0;  // known to fit
+        var hi: usize = text.len;  // known to not fit (full text > max_width)
+        while (lo < hi) {
+            var mid = lo + (hi - lo) / 2;
+            // Snap mid forward to the next valid UTF-8 boundary so we never
+            // slice in the middle of a multibyte sequence.
+            while (mid < hi and mid < text.len and text[mid] & 0xC0 == 0x80) mid += 1;
+            if (mid == lo) { lo = mid + 1; continue; }  // avoid infinite loop on 1-byte gap
+            if (self.textWidth(text[0..mid]) <= available) {
+                lo = mid;
+            } else {
+                hi = mid;
             }
-            
-            if (self.textWidth(text[0..len + 1]) > available) {
-                // Use last space if found and reasonable
-                if (last_space > 0 and last_space > len / 2) {
-                    len = last_space;
-                }
-                break;
+        }
+
+        // Try to snap back to the last space for a nicer break.
+        var len = lo;
+        if (len > 0) {
+            if (std.mem.lastIndexOfScalar(u8, text[0..len], ' ')) |space| {
+                // Only use the word boundary if it's at least half of what we found —
+                // otherwise the gap looks worse than a mid-word cut.
+                if (space > len / 2) len = space;
             }
-            len += 1;
         }
         
         if (len > 0) {
@@ -448,5 +453,15 @@ pub const DrawContext = struct {
     
     pub fn flush(self: *DrawContext) void {
         _ = c.XFlush(self.display);
+    }
+
+    /// Calculate the baseline Y coordinate for vertically-centred text.
+    /// Segments should call this instead of duplicating the ascender/descender math.
+    pub fn baselineY(self: *DrawContext, bar_height: u16) u16 {
+        const ascender: i32 = @intCast(self.xft_font.*.ascent);
+        const descender: i32 = @intCast(self.xft_font.*.descent);
+        const font_height: i32 = ascender + descender;
+        const pad: i32 = @divTrunc(@as(i32, bar_height) - font_height, 2);
+        return @intCast(@max(ascender, pad + ascender));
     }
 };

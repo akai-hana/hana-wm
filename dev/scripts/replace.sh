@@ -55,14 +55,73 @@ if [ -d "$FILES_DIR/files" ]; then
   rmdir "$FILES_DIR/files" || true
 fi
 
-# Pipe each regular file (including dotfiles) into codebase, then remove it
+# Helper to write a source file to a destination basename in CODE_DIR
+write_to_codebase() {
+  src="$1"
+  dest_basename="$2"
+  cat "$src" > "$CODE_DIR/$dest_basename"
+  doas rm -f "$src"
+}
+
+# Helper to drop text/markdown files
+maybe_drop_text() {
+  case "$1" in
+    *.txt|*.md)
+      doas rm -f "$1"
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# First pass: non-optimized / non-compact files
 for f in "$FILES_DIR"/* "$FILES_DIR"/.*; do
   [ -e "$f" ] || continue
   case "$(basename "$f")" in
     .|..) continue ;;
   esac
   [ -f "$f" ] || continue
-  cat "$f" > "$CODE_DIR/$(basename "$f")"
-  doas rm -f "$f"
+
+  maybe_drop_text "$f" && continue
+
+  bn="$(basename "$f")"
+  case "$bn" in
+    *_optimized.*|*_optimized|*_compact.*|*_compact) continue ;;
+  esac
+
+  write_to_codebase "$f" "$bn"
 done
 
+# Second pass: optimized and compact files
+for f in "$FILES_DIR"/* "$FILES_DIR"/.*; do
+  [ -e "$f" ] || continue
+  case "$(basename "$f")" in
+    .|..) continue ;;
+  esac
+  [ -f "$f" ] || continue
+
+  maybe_drop_text "$f" && continue
+
+  bn="$(basename "$f")"
+  case "$bn" in
+    *_optimized.*|*_compact.*)
+      case "$bn" in
+        *_optimized.*) strip="_optimized" ;;
+        *_compact.*) strip="_compact" ;;
+      esac
+      dest="${bn%$strip.*}.${bn##*.}"
+      ;;
+    *_optimized|*_compact)
+      case "$bn" in
+        *_optimized) strip="_optimized" ;;
+        *_compact) strip="_compact" ;;
+      esac
+      dest="${bn%$strip}"
+      ;;
+    *)
+      continue
+      ;;
+  esac
+
+  write_to_codebase "$f" "$dest"
+done
