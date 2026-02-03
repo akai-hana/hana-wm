@@ -17,6 +17,7 @@ const XcbOp = union(enum) {
     // Note: set_focus removed - now called directly through focus module
 };
 
+// 256 operations = ~16KB stack (well within safe limits)
 const MAX_BATCH_OPS = 256;
 
 pub const Batch = struct {
@@ -32,8 +33,8 @@ pub const Batch = struct {
         };
     }
 
-    pub inline fn deinit(_: *Batch) void {
-        // No-op: stack-allocated, no cleanup needed
+    pub inline fn deinit(self: *Batch) void {
+        _ = self; // Stack-allocated, no cleanup needed
     }
 
     inline fn pushOp(self: *Batch, op: XcbOp) !void {
@@ -99,7 +100,6 @@ pub const Batch = struct {
                 },
                 .set_border => |sb| _ = xcb.xcb_change_window_attributes(conn, sb.win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{sb.color}),
                 .set_border_width => |sbw| _ = xcb.xcb_configure_window(conn, sbw.win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{sbw.width}),
-                // Note: set_focus is now called directly and not batched
                 .raise => |win| _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE}),
             }
         }
