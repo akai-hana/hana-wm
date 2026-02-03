@@ -1,8 +1,17 @@
-pending features:
+fibonacci
+bspwm leaf layout
+if window is higher than it is wider, slice it in half, leaving a top and bottom window; if it is wider than higher, slice it in half, leaving a left and right window).
 
-code fibonacci.zig fibonacci for tiling layouts (just for the swag)
-make Mod+Shift+Space go through the different tiling layouts, but in reverse to Mod+Space.
-add a config option to explicitly whitelist or blacklist different tiling layouts; if nothing's specified, add all the present ones by default
+mod + middle click mouse makes an individual window go from tiling to floating, and viceversa, if it's floating on tiled mode, tile it.
+
+add an option in config that's an array where one can set all the active tiling layouts; if commented out or not set, add all layouts found by default.
+
+when opening a window, fullscreening into it, and then killing it, bar remains hidden, even though i'm no longer fullscreened on anything. can you please make it so that this doesn't happen?
+
+"modern" layout: bar at the top, workspaces at the middle, date at the right, system resources at the left, and big spacing in-between (don't make it expanding, but instead static, where each segment is bound to left/right/center, and any gap that remains, remains a gap, isn't filled.)
+
+add a colors/ dir to set color themes
+
 keep track of the focused window before the currently focused, make it so that Mod+Tab switches focus between both of them
 make mod+shift+tab swap current focused window to master if it's a slave, and to slave if it's a master.
 make it so that one window can belong to more than one workspace (tag-based window workspaces)

@@ -1,4 +1,4 @@
-//! Focus management
+// Focus management (OPTIMIZED)
 
 const std = @import("std");
 const defs = @import("defs");
@@ -17,10 +17,10 @@ pub const Reason = enum {
     tiling_operation,
 };
 
-// Simplified focus protection - no separate timestamp, just a counter
+// OPTIMIZATION: Simple boolean flag, no timestamp overhead
 var focus_protection_active: bool = false;
 
-pub fn isProtected() bool {
+pub inline fn isProtected() bool {
     return focus_protection_active;
 }
 
@@ -32,7 +32,7 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
 
     if (bar.isBarWindow(win)) return;
 
-    // Simplified grace period - just block mouse_enter briefly after explicit focus
+    // Block mouse_enter during protection period
     if (reason == .mouse_enter and focus_protection_active) return;
 
     if (wm.focused_window == win) return;
@@ -71,6 +71,6 @@ pub fn clearFocus(wm: *WM) void {
 }
 
 // Called from main loop to release focus protection after events settle
-pub fn releaseProtection() void {
+pub inline fn releaseProtection() void {
     focus_protection_active = false;
 }

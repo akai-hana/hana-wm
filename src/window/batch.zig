@@ -32,38 +32,34 @@ pub const Batch = struct {
         };
     }
 
-    pub fn deinit(_: *Batch) void {
-        // No resources to clean up - stack-allocated array
+    pub inline fn deinit(_: *Batch) void {
+        // No-op: stack-allocated, no cleanup needed
+    }
+
+    inline fn pushOp(self: *Batch, op: XcbOp) !void {
+        if (self.count >= MAX_BATCH_OPS) return error.BatchFull;
+        self.ops[self.count] = op;
+        self.count += 1;
     }
 
     pub fn map(self: *Batch, win: u32) !void {
-        if (self.count >= MAX_BATCH_OPS) return error.BatchFull;
-        self.ops[self.count] = .{ .map = win };
-        self.count += 1;
+        try self.pushOp(.{ .map = win });
     }
 
     pub fn unmap(self: *Batch, win: u32) !void {
-        if (self.count >= MAX_BATCH_OPS) return error.BatchFull;
-        self.ops[self.count] = .{ .unmap = win };
-        self.count += 1;
+        try self.pushOp(.{ .unmap = win });
     }
 
     pub fn configure(self: *Batch, win: u32, rect: utils.Rect) !void {
-        if (self.count >= MAX_BATCH_OPS) return error.BatchFull;
-        self.ops[self.count] = .{ .configure = .{ .win = win, .rect = rect } };
-        self.count += 1;
+        try self.pushOp(.{ .configure = .{ .win = win, .rect = rect } });
     }
 
     pub fn setBorder(self: *Batch, win: u32, color: u32) !void {
-        if (self.count >= MAX_BATCH_OPS) return error.BatchFull;
-        self.ops[self.count] = .{ .set_border = .{ .win = win, .color = color } };
-        self.count += 1;
+        try self.pushOp(.{ .set_border = .{ .win = win, .color = color } });
     }
 
     pub fn setBorderWidth(self: *Batch, win: u32, width: u16) !void {
-        if (self.count >= MAX_BATCH_OPS) return error.BatchFull;
-        self.ops[self.count] = .{ .set_border_width = .{ .win = win, .width = width } };
-        self.count += 1;
+        try self.pushOp(.{ .set_border_width = .{ .win = win, .width = width } });
     }
 
     pub fn setFocus(self: *Batch, win: u32) !void {
@@ -73,9 +69,7 @@ pub const Batch = struct {
     }
 
     pub fn raise(self: *Batch, win: u32) !void {
-        if (self.count >= MAX_BATCH_OPS) return error.BatchFull;
-        self.ops[self.count] = .{ .raise = win };
-        self.count += 1;
+        try self.pushOp(.{ .raise = win });
     }
 
     pub fn execute(self: *Batch) void {

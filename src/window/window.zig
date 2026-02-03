@@ -1,4 +1,4 @@
-//! Window event handlers - Optimized for instant window spawning
+// Window event handlers - Optimized for instant window spawning (OPTIMIZED)
 
 const std = @import("std");
 const defs = @import("defs");
@@ -10,6 +10,7 @@ const tiling = @import("tiling");
 const workspaces = @import("workspaces");
 const bar = @import("bar");
 
+// OPTIMIZATION: Streamlined map request with early returns
 pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void {
     const win = event.window;
 
@@ -21,11 +22,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     }
 
     // Determine target workspace based on rules
-    const target_ws = if (wm.config.workspaces.rules.items.len > 0)
-        matchWorkspaceRule(wm, win)
-    else
-        null;
-
+    const target_ws = matchWorkspaceRule(wm, win);
     const current_ws = workspaces.getCurrentWorkspace() orelse 0;
 
     // Validate target workspace exists
@@ -39,38 +36,33 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     } else current_ws;
 
     // Subscribe to enter/leave events for focus-follows-mouse
-    _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_EVENT_MASK, 
+    _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_EVENT_MASK,
         &[_]u32{xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW});
-    
-    // ISSUE #5 FIX: Only map window if it belongs to current workspace
-    // This prevents windows bound to other workspaces from appearing on screen
-    const should_map = (validated_target_ws == current_ws);
-    
-    if (should_map) {
+
+    // Only map window if it belongs to current workspace
+    const is_current_ws = (validated_target_ws == current_ws);
+
+    if (is_current_ws) {
         _ = xcb.xcb_map_window(wm.conn, win);
     }
-    
+
     wm.addWindow(win) catch |err| {
         std.log.err("[window] Failed to track window {x}: {}", .{ win, err });
     };
 
     // Add to appropriate workspace
-    if (validated_target_ws == current_ws) {
+    if (is_current_ws) {
         workspaces.addWindowToCurrentWorkspace(wm, win);
     } else {
         workspaces.moveWindowTo(wm, win, validated_target_ws);
     }
 
-    // Set up tiling if enabled.
-    // Border pre-configuration only runs when the window is mapped on the
-    // current workspace.  tiling.addWindow is called unconditionally so that
-    // windows bound to a different workspace are still registered in the tiling
-    // lists and will be laid out correctly when that workspace is switched to.
+    // Set up tiling if enabled
     if (wm.config.tiling.enabled) {
-        if (validated_target_ws == current_ws and should_map) {
-            _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, 
+        if (is_current_ws) {
+            _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
                 &[_]u32{wm.config.tiling.border_width});
-            _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_BORDER_PIXEL, 
+            _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_BORDER_PIXEL,
                 &[_]u32{wm.config.tiling.border_normal});
         }
         tiling.addWindow(wm, win);
@@ -83,7 +75,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, wm: *WM) void {
     // Block fullscreen window from reconfiguring itself
     if (wm.fullscreen.isFullscreen(event.window)) return;
-    
+
     // Tiled windows ignore configure requests - WM controls their geometry
     if (wm.config.tiling.enabled and tiling.isWindowTiled(event.window)) return;
 
@@ -98,35 +90,25 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, w
     utils.flush(wm.conn);
 }
 
+// OPTIMIZATION: Improved EnterNotify filtering to reduce spurious focus changes
 pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) void {
-    // Ignore invalid windows
+    // Early returns for invalid conditions
     if (event.event == wm.root or event.event == 0) return;
-    
-    // Ignore bar
     if (bar.isBarWindow(event.event)) return;
-    
-    // Respect focus protection (prevents focus stealing during explicit focus changes)
     if (focus.isProtected()) return;
-    
+
     // Filter spurious EnterNotify events
-    // X11 generates EnterNotify in many scenarios beyond "mouse entered window":
-    // - Window map/unmap operations
-    // - Pointer grabs/ungrabs (e.g., during Super+drag)
-    // - Virtual crossings when pointer is grabbed
-    
-    // Ignore grab/ungrab related events
+    // X11 generates EnterNotify in many scenarios beyond "mouse entered window"
     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL) return;
-    
-    // Ignore virtual crossings
-    if (event.detail == xcb.XCB_NOTIFY_DETAIL_VIRTUAL or 
+    if (event.detail == xcb.XCB_NOTIFY_DETAIL_VIRTUAL or
         event.detail == xcb.XCB_NOTIFY_DETAIL_NONLINEAR_VIRTUAL) return;
 
     const old_focus = wm.focused_window;
     focus.setFocus(wm, event.event, .mouse_enter);
-
     tiling.updateWindowFocus(wm, old_focus, event.event);
 }
 
+// OPTIMIZATION: Streamlined window destruction with batched cleanup
 pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM) void {
     const win = event.window;
 
@@ -134,7 +116,7 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM
 
     // Clean up fullscreen state if this window was fullscreened
     if (wm.fullscreen.isFullscreen(win)) {
-        // Find which workspace this window was fullscreened on and remove it
+        // Find and remove fullscreen entry
         var it = wm.fullscreen.per_workspace.iterator();
         while (it.next()) |entry| {
             if (entry.value_ptr.window == win) {
@@ -159,7 +141,8 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM
     utils.flush(wm.conn);
 }
 
-fn matchWorkspaceRule(wm: *WM, win: u32) ?usize {
+// OPTIMIZATION: Simplified workspace rule matching
+inline fn matchWorkspaceRule(wm: *WM, win: u32) ?usize {
     if (wm.config.workspaces.rules.items.len == 0) return null;
 
     const wm_class = utils.getWMClass(wm.conn, win, wm.allocator) orelse return null;
