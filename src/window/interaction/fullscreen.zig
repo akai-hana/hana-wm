@@ -56,7 +56,18 @@ fn enterFullscreen(wm: *WM, win: u32, ws: usize) void {
     @import("bar").hideForFullscreen(wm);
 
     var b = batch.Batch.begin(wm) catch {
-        enterFullscreenDirect(wm, win);
+        // Fallback to direct XCB calls if batch allocation fails
+        const screen = wm.screen;
+        const rect = utils.Rect{
+            .x = 0,
+            .y = 0,
+            .width = screen.width_in_pixels,
+            .height = screen.height_in_pixels,
+        };
+        utils.configureWindow(wm.conn, win, rect);
+        utils.setBorderWidth(wm.conn, win, 0);
+        _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+        utils.flush(wm.conn);
         return;
     };
     defer b.deinit();
@@ -73,24 +84,6 @@ fn enterFullscreen(wm: *WM, win: u32, ws: usize) void {
     b.setBorderWidth(win, 0) catch {};
     b.raise(win) catch {};
     b.execute();
-}
-
-fn enterFullscreenDirect(wm: *WM, win: u32) void {
-    // Hide bar for fullscreen
-    @import("bar").hideForFullscreen(wm);
-    
-    const screen = wm.screen;
-    const rect = utils.Rect{
-        .x = 0,
-        .y = 0,
-        .width = screen.width_in_pixels,
-        .height = screen.height_in_pixels,
-    };
-    
-    utils.configureWindow(wm.conn, win, rect);
-    utils.setBorderWidth(wm.conn, win, 0);
-    _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
-    utils.flush(wm.conn);
 }
 
 fn exitFullscreen(wm: *WM, win: u32, ws: usize) void {

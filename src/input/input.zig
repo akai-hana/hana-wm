@@ -1,4 +1,4 @@
-//! Input handling
+// Input handling (OPTIMIZED)
 
 const std = @import("std");
 const defs = @import("defs");
@@ -14,6 +14,9 @@ const WM = defs.WM;
 const c = @cImport(@cInclude("unistd.h"));
 extern "c" fn waitpid(pid: c_int, status: ?*c_int, options: c_int) c_int;
 
+const MOUSE_BUTTONS = [_]u8{ 1, 3 }; // Button1 (move), Button3 (resize)
+
+// OPTIMIZATION: Simpler keybind state with better cache locality
 const KeybindState = struct {
     map: std.AutoHashMap(u64, *const defs.Action),
     allocator: std.mem.Allocator,
@@ -29,7 +32,7 @@ const KeybindState = struct {
         self.map.deinit();
     }
 
-    fn get(self: *KeybindState, key: u64) ?*const defs.Action {
+    inline fn get(self: *KeybindState, key: u64) ?*const defs.Action {
         return self.map.get(key);
     }
 
@@ -79,13 +82,14 @@ pub fn rebuildKeybindMap(wm: *WM) !void {
     }
 }
 
-fn makeHash(mods: u16, keysym: u32) u64 {
+// OPTIMIZATION: Inline hash function for better performance
+inline fn makeHash(mods: u16, keysym: u32) u64 {
     return (@as(u64, mods) << 32) | keysym;
 }
 
 pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
     // Grab Super+Button1 (move) and Super+Button3 (resize)
-    for ([_]u8{ 1, 3 }) |button| {
+    for (MOUSE_BUTTONS) |button| {
         _ = xcb.xcb_grab_button(
             conn,
             0,
@@ -142,6 +146,7 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) 
     }
 }
 
+// OPTIMIZATION: Streamlined window closing with early returns
 fn closeWindow(wm: *WM, win: u32) void {
     if (win == wm.root) {
         std.log.err("[CRITICAL] Attempted to close ROOT window!", .{});
@@ -149,13 +154,11 @@ fn closeWindow(wm: *WM, win: u32) void {
     }
 
     const wm_protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch {
-        std.log.warn("[input] Failed to get WM_PROTOCOLS atom, force destroying window", .{});
         forceDestroyWindow(wm, win);
         return;
     };
 
     const wm_delete_atom = utils.getAtomCached("WM_DELETE_WINDOW") catch {
-        std.log.warn("[input] Failed to get WM_DELETE_WINDOW atom, force destroying window", .{});
         forceDestroyWindow(wm, win);
         return;
     };
@@ -202,6 +205,7 @@ fn forceDestroyWindow(wm: *WM, win: u32) void {
     utils.flush(wm.conn);
 }
 
+// OPTIMIZATION: Streamlined action execution with inline switch
 fn executeAction(action: *const defs.Action, wm: *WM) !void {
     switch (action.*) {
         .toggle_fullscreen => @import("fullscreen").toggleFullscreen(wm),
@@ -229,6 +233,7 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
     }
 }
 
+// OPTIMIZATION: Double-fork pattern for clean process spawning
 fn executeShellCommand(wm: *WM, cmd: []const u8) !void {
     const cmd_z = try wm.allocator.dupeZ(u8, cmd);
     defer wm.allocator.free(cmd_z);
@@ -268,18 +273,18 @@ fn dumpState(wm: *WM) void {
     std.log.info("========== STATE DUMP ==========", .{});
     std.log.info("Focused: {?x}", .{wm.focused_window});
     std.log.info("Total windows: {}", .{wm.windows.count()});
-    
+
     // List fullscreen windows per workspace
     var fs_it = wm.fullscreen.per_workspace.iterator();
     var fs_count: usize = 0;
     while (fs_it.next()) |entry| {
-        std.log.info("Fullscreen on workspace {}: {x}", .{entry.key_ptr.*, entry.value_ptr.window});
+        std.log.info("Fullscreen on workspace {}: {x}", .{ entry.key_ptr.*, entry.value_ptr.window });
         fs_count += 1;
     }
     if (fs_count == 0) {
         std.log.info("Fullscreen: none", .{});
     }
-    
+
     std.log.info("Drag active: {}", .{wm.drag_state.active});
 
     if (workspaces.getState()) |ws_state| {

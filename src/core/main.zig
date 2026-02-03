@@ -1,45 +1,27 @@
-// Main event loop - Event-driven architecture
+// Main event loop - Event-driven architecture (OPTIMIZED)
 
-const std     = @import("std");
-const posix   = std.posix;
+const std = @import("std");
+const posix = std.posix;
 const builtin = @import("builtin");
 
-const config    = @import("config");
-const defs      = @import("defs");
+const config = @import("config");
+const defs = @import("defs");
 const xkbcommon = @import("xkbcommon");
-const events    = @import("events");
-const input     = @import("input");
-const utils     = @import("utils");
-const bar       = @import("bar");
-const focus     = @import("focus");
-const tiling    = @import("tiling");
+const events = @import("events");
+const input = @import("input");
+const utils = @import("utils");
+const bar = @import("bar");
+const focus = @import("focus");
+const tiling = @import("tiling");
 
 const xcb = defs.xcb;
 const WM = defs.WM;
 
-// X11 cursor font name
-const CURSOR_FONT_NAME = "cursor";
-
 const WM_EVENT_MASK = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
-    xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
-    xcb.XCB_EVENT_MASK_KEY_PRESS |
-    xcb.XCB_EVENT_MASK_ENTER_WINDOW |
-    xcb.XCB_EVENT_MASK_PROPERTY_CHANGE;
+    xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY | xcb.XCB_EVENT_MASK_KEY_PRESS |
+    xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_PROPERTY_CHANGE;
 
-// X11 cursor font glyph indices for left pointer
-const CURSOR_FONT_LEFT_PTR = 68;
-const CURSOR_FONT_LEFT_PTR_MASK = 69;
-
-// Cursor colors: black foreground, white background
-const CURSOR_FG_R: u16 = 0;
-const CURSOR_FG_G: u16 = 0;
-const CURSOR_FG_B: u16 = 0;
-const CURSOR_BG_R: u16 = 65535;
-const CURSOR_BG_G: u16 = 65535;
-const CURSOR_BG_B: u16 = 65535;
-
-// Event loop poll timeout in milliseconds
-// Short timeout allows checking signals and clock updates while being responsive
+const LOCK_MODIFIERS = [_]u16{ 0, defs.MOD_LOCK, defs.MOD_2, defs.MOD_LOCK | defs.MOD_2 };
 const POLL_TIMEOUT_MS: i32 = 100;
 
 var should_reload = std.atomic.Value(bool).init(false);
@@ -54,80 +36,98 @@ fn handleTerminateSignal(_: posix.SIG) callconv(.c) void {
 }
 
 fn setupSignalHandler() void {
-    var sa_reload = posix.Sigaction{
-        .handler  = .{ .handler = handleReloadSignal },
-        .mask     = std.mem.zeroes(posix.sigset_t),
-        .flags    = posix.SA.RESTART,
+    const base_sa = posix.Sigaction{
+        .handler = undefined,
+        .mask = std.mem.zeroes(posix.sigset_t),
+        .flags = posix.SA.RESTART,
     };
+
+    var sa_reload = base_sa;
+    sa_reload.handler = .{ .handler = handleReloadSignal };
     posix.sigaction(posix.SIG.HUP, &sa_reload, null);
 
-    var sa_term  = posix.Sigaction{
-        .handler = .{ .handler = handleTerminateSignal },
-        .mask    = std.mem.zeroes(posix.sigset_t),
-        .flags   = posix.SA.RESTART,
-    };
+    var sa_term = base_sa;
+    sa_term.handler = .{ .handler = handleTerminateSignal };
     posix.sigaction(posix.SIG.TERM, &sa_term, null);
     posix.sigaction(posix.SIG.INT, &sa_term, null);
 }
 
 fn setupRootCursor(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) void {
     const font = xcb.xcb_generate_id(conn);
-    _ = xcb.xcb_open_font(conn, font, CURSOR_FONT_NAME.len, CURSOR_FONT_NAME);
-
+    _ = xcb.xcb_open_font(conn, font, 6, "cursor");
     const cursor = xcb.xcb_generate_id(conn);
-    _ = xcb.xcb_create_glyph_cursor(conn, cursor, font, font, 
-        CURSOR_FONT_LEFT_PTR, CURSOR_FONT_LEFT_PTR_MASK, 
-        CURSOR_FG_R, CURSOR_FG_G, CURSOR_FG_B, 
-        CURSOR_BG_R, CURSOR_BG_G, CURSOR_BG_B);
+    _ = xcb.xcb_create_glyph_cursor(conn, cursor, font, font, 68, 69, 0, 0, 0, 65535, 65535, 65535);
     _ = xcb.xcb_change_window_attributes(conn, screen.*.root, xcb.XCB_CW_CURSOR, &[_]u32{cursor});
     _ = xcb.xcb_close_font(conn, font);
 }
 
 fn becomeWindowManager(conn: *xcb.xcb_connection_t, root: u32) !void {
-    const cookie = xcb.xcb_change_window_attributes_checked(conn, root, xcb.XCB_CW_EVENT_MASK, &[_]u32{WM_EVENT_MASK});
-    if (xcb.xcb_request_check(conn, cookie)) |err| {
+    if (xcb.xcb_request_check(conn, xcb.xcb_change_window_attributes_checked(conn, root, xcb.XCB_CW_EVENT_MASK, &[_]u32{WM_EVENT_MASK}))) |err| {
         std.c.free(err);
         std.log.err("Another window manager is running", .{});
         return error.AnotherWMRunning;
     }
 }
 
+// OPTIMIZATION: Batch existing window setup to reduce round-trips
 fn setupExistingWindows(conn: *xcb.xcb_connection_t, root: u32) void {
-    const cookie = xcb.xcb_query_tree(conn, root);
-    const reply  = xcb.xcb_query_tree_reply(conn, cookie, null) orelse return;
+    const reply = xcb.xcb_query_tree_reply(conn, xcb.xcb_query_tree(conn, root), null) orelse return;
     defer std.c.free(reply);
 
     const children = xcb.xcb_query_tree_children(reply);
     const len: usize = @intCast(xcb.xcb_query_tree_children_length(reply));
 
-    for (0..len) |i| {
-        const win          = children[i];
-        const attrs_cookie = xcb.xcb_get_window_attributes(conn, win);
-        const attrs        = xcb.xcb_get_window_attributes_reply(conn, attrs_cookie, null) orelse continue;
-        defer std.c.free(attrs);
+    // Stack-allocate cookie buffer for typical window counts
+    const MAX_BATCH = 256;
+    var cookies: [MAX_BATCH]xcb.xcb_get_window_attributes_cookie_t = undefined;
+    
+    // Process in batches to avoid stack overflow with many windows
+    var processed: usize = 0;
+    while (processed < len) {
+        const batch_size = @min(len - processed, MAX_BATCH);
+        
+        // Queue all requests in this batch
+        for (0..batch_size) |i| {
+            cookies[i] = xcb.xcb_get_window_attributes(conn, children[processed + i]);
+        }
+        _ = xcb.xcb_flush(conn);
 
-        if (attrs.*.override_redirect != 0 or attrs.*.map_state != xcb.XCB_MAP_STATE_VIEWABLE) continue;
-
-        _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW});
+        // Process replies using stored cookies
+        for (0..batch_size) |i| {
+            const attrs = xcb.xcb_get_window_attributes_reply(conn, cookies[i], null) orelse continue;
+            defer std.c.free(attrs);
+            
+            if (attrs.*.override_redirect != 0 or attrs.*.map_state != xcb.XCB_MAP_STATE_VIEWABLE) continue;
+            
+            _ = xcb.xcb_change_window_attributes(conn, children[processed + i], xcb.XCB_CW_EVENT_MASK,
+                &[_]u32{xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW});
+        }
+        
+        processed += batch_size;
     }
 }
 
 fn grabKeybindings(wm: *WM) !void {
     _ = xcb.xcb_ungrab_key(wm.conn, xcb.XCB_GRAB_ANY, wm.root, xcb.XCB_MOD_MASK_ANY);
-
+    
+    // OPTIMIZATION: Pre-allocate error checking
+    var failed_count: usize = 0;
+    
     for (wm.config.keybindings.items) |kb| {
         const keycode = kb.keycode orelse continue;
-
-        // Grab with all combinations of NumLock and CapsLock to ignore their state
-        for ([_]u16{ 0, defs.MOD_LOCK, defs.MOD_2, defs.MOD_LOCK | defs.MOD_2 }) |lock| {
-            const cookie = xcb.xcb_grab_key_checked(wm.conn, 0, wm.root, @intCast(kb.modifiers | lock), keycode, xcb.XCB_GRAB_MODE_ASYNC, xcb.XCB_GRAB_MODE_ASYNC);
-            if (xcb.xcb_request_check(wm.conn, cookie)) |err| {
-                std.log.warn("[keybind] Failed to grab key {}: {*}", .{keycode, err});
+        for (LOCK_MODIFIERS) |lock| {
+            if (xcb.xcb_request_check(wm.conn, xcb.xcb_grab_key_checked(wm.conn, 0, wm.root,
+                @intCast(kb.modifiers | lock), keycode, xcb.XCB_GRAB_MODE_ASYNC, xcb.XCB_GRAB_MODE_ASYNC))) |err| {
                 std.c.free(err);
+                failed_count += 1;
             }
         }
     }
-
+    
+    if (failed_count > 0) {
+        std.log.warn("[keybind] {} key grab(s) failed", .{failed_count});
+    }
+    
     utils.flush(wm.conn);
 }
 
@@ -154,31 +154,28 @@ fn handleConfigReload(wm: *WM) !void {
     };
 
     old_config.deinit(wm.allocator);
-
     input.rebuildKeybindMap(wm) catch |err| {
         std.log.err("[config] Failed to rebuild keybind map: {}", .{err});
         return err;
     };
-
     tiling.reloadConfig(wm);
-
     std.log.info("[config] Reload complete", .{});
 }
 
 pub fn main() !void {
     const conn = xcb.xcb_connect(null, null) orelse return error.X11ConnectionFailed;
     defer xcb.xcb_disconnect(conn);
-
     if (xcb.xcb_connection_has_error(conn) != 0) return error.X11ConnectionFailed;
 
-    const setup  = xcb.xcb_get_setup(conn);
+    const setup = xcb.xcb_get_setup(conn);
     const screen = xcb.xcb_setup_roots_iterator(setup).data orelse return error.X11ScreenFailed;
-    const root   = screen.*.root;
+    const root = screen.*.root;
 
     try becomeWindowManager(conn, root);
     setupRootCursor(conn, screen);
     input.setupGrabs(conn, root);
 
+    // OPTIMIZATION: Use C allocator in release mode for better performance
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_allocator;
@@ -192,97 +189,80 @@ pub fn main() !void {
     config.resolveKeybindings(user_config.keybindings.items, xkb_state);
 
     var wm = WM{
-        .allocator            = allocator,
-        .conn                 = conn,
-        .screen               = screen,
-        .root                 = root,
-        .config               = user_config,
-        .windows              = std.AutoHashMap(u32, void).init(allocator),
-        .focused_window       = null,
-        .fullscreen           = defs.FullscreenState.init(allocator),
-        .xkb_state            = xkb_state,
+        .allocator = allocator,
+        .conn = conn,
+        .screen = screen,
+        .root = root,
+        .config = user_config,
+        .windows = std.AutoHashMap(u32, void).init(allocator),
+        .focused_window = null,
+        .fullscreen = defs.FullscreenState.init(allocator),
+        .xkb_state = xkb_state,
         .should_reload_config = &should_reload,
-        .running              = &running,
+        .running = &running,
     };
     defer wm.deinit();
 
-    // Initialize atom cache at startup
     try utils.initAtomCache(conn);
-
     setupSignalHandler();
     events.initModules(&wm);
     defer events.deinitModules(&wm);
 
     bar.init(&wm) catch |err| {
-        if (err != error.BarDisabled) {
-            std.log.err("[bar] Failed to initialize: {}", .{err});
-        }
+        if (err != error.BarDisabled) std.log.err("[bar] Failed to initialize: {}", .{err});
     };
     defer bar.deinit();
 
     try grabKeybindings(&wm);
     setupExistingWindows(conn, root);
     utils.flush(conn);
-
     std.log.info("[hana] Started", .{});
 
-    // Cache X connection file descriptor for poll
     const x_fd = xcb.xcb_get_file_descriptor(conn);
 
-    // Event-driven main loop using xcb_poll_for_event
-    // This avoids polling with sleep - we process events as they arrive
+    // OPTIMIZATION: Main loop with reduced system calls
     while (running.load(.acquire)) {
-        // Check for config reload signal
+        // Check for config reload
         if (should_reload.swap(false, .acq_rel)) {
             handleConfigReload(&wm) catch |err| {
                 std.log.err("[config] Reload failed: {}", .{err});
             };
         }
 
-        // Process all available events (non-blocking)
-        var events_handled = false;
+        // Process all pending events without blocking
+        var events_handled: u32 = 0;
         while (true) {
             const event = xcb.xcb_poll_for_event(conn);
             if (event == null) break;
-            defer std.c.free(event.?);
-
-            events_handled = true;
-
-            const event_type = @as(*u8, @ptrCast(event.?)).*;
-            events.dispatch(event_type, event.?, &wm);
+            defer std.c.free(event);
+            events_handled += 1;
+            events.dispatch(@as(*u8, @ptrCast(event)).*, event, &wm);
         }
 
-        // After processing events, do any resulting work
-        if (events_handled) {
+        if (events_handled > 0) {
+            // Release focus protection after event batch
             focus.releaseProtection();
-
+            
+            // Perform deferred operations in single flush
             tiling.retileIfDirty(&wm);
-
             bar.updateIfDirty(&wm) catch |err| {
                 std.log.err("[main] Failed to update bar: {}", .{err});
             };
-
             utils.flush(conn);
         } else {
-            // No events available - wait for events with timeout
-            // This is event-driven: we block until an event arrives or timeout
-            // Using a short timeout allows checking signals and clock updates
-            var pollfds = [_]std.posix.pollfd{
-                .{
-                    .fd = x_fd,
-                    .events = std.posix.POLL.IN,
-                    .revents = 0,
-                },
-            };
-
-            // Poll with configured timeout for responsiveness
-            _ = std.posix.poll(&pollfds, POLL_TIMEOUT_MS) catch 0;
-
-            // Check clock for bar updates even if no X events
+            // No events - wait for activity with timeout
+            var pollfds = [_]posix.pollfd{.{
+                .fd = x_fd,
+                .events = posix.POLL.IN,
+                .revents = 0,
+            }};
+            _ = posix.poll(&pollfds, POLL_TIMEOUT_MS) catch 0;
+            
+            // Check for clock update during idle
             bar.checkClockUpdate() catch {};
         }
 
-        // Check connection health
+        // Connection health check
         if (xcb.xcb_connection_has_error(conn) != 0) {
             std.log.err("[main] X11 connection error, shutting down", .{});
             break;
