@@ -9,7 +9,6 @@ const focus = @import("focus");
 const workspaces = @import("workspaces");
 const batch = @import("batch");
 const bar = @import("bar");
-const error_context = @import("error_context");
 const tracking = @import("tracking").tracking;
 const ModuleState = @import("module_state").ModuleState;
 
@@ -21,17 +20,26 @@ pub const Layout = enum { master, monocle, grid };
 
 const WINDOW_EVENT_MASK = xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW;
 
+// OPTIMIZATION: Merged error handling directly into this module
+inline fn logError(operation: []const u8, err: anyerror, window: ?u32) void {
+    if (window) |win| {
+        std.log.err("[tiling.{s}] Failed: {} (window: 0x{x})", .{ operation, err, win });
+    } else {
+        std.log.err("[tiling.{s}] Failed: {}", .{ operation, err });
+    }
+}
+
 pub const State = struct {
     enabled: bool,
     layout: Layout,
     master_side: defs.MasterSide,
-    master_width_factor: f32,
+    master_width: f32,
     master_count: usize,
     gaps: u16,
     border_width: u16,
     border_focused: u32,
-    border_normal: u32,
-    windows: tracking,  // Replaces tiled_windows + tiled_set
+    border_unfocused: u32,
+    windows: tracking,
     dirty: bool,
 
     pub inline fn margins(self: *const State) utils.Margins {
@@ -39,9 +47,9 @@ pub const State = struct {
     }
 
     pub inline fn borderColor(self: *const State, wm: *const WM, win: u32) u32 {
-        if (!self.windows.contains(win)) return self.border_normal;
+        if (!self.windows.contains(win)) return self.border_unfocused;
         if (wm.fullscreen.isFullscreen(win)) return 0;
-        return if (wm.focused_window == win) self.border_focused else self.border_normal;
+        return if (wm.focused_window == win) self.border_focused else self.border_unfocused;
     }
 
     pub inline fn markDirty(self: *State) void {
@@ -68,18 +76,18 @@ pub fn init(wm: *WM) void {
         .enabled = wm.config.tiling.enabled,
         .layout = parseLayout(wm.config.tiling.layout),
         .master_side = wm.config.tiling.master_side,
-        .master_width_factor = wm.config.tiling.master_width_factor,
+        .master_width = wm.config.tiling.master_width,
         .master_count = wm.config.tiling.master_count,
         .gaps = wm.config.tiling.gaps,
         .border_width = wm.config.tiling.border_width,
         .border_focused = wm.config.tiling.border_focused,
-        .border_normal = wm.config.tiling.border_normal,
+        .border_unfocused = wm.config.tiling.border_unfocused,
         .windows = tracking.init(wm.allocator),
         .dirty = false,
     };
 
     StateManager.init(wm.allocator, initial_state) catch |err| {
-        std.log.err("[tiling] Failed to initialize state: {}", .{err});
+        logError("init", err, null);
     };
 }
 
@@ -114,7 +122,7 @@ pub fn addWindow(wm: *WM, win: u32) void {
 
     // Add to tiled windows (prepend for focus ordering)
     s.windows.addFront(win) catch |err| {
-        error_context.logError("tiling.addWindow", err, win);
+        logError("addWindow", err, win);
         return;
     };
 
@@ -171,38 +179,30 @@ pub fn updateWindowFocus(wm: *WM, old_focused: ?u32, new_focused: ?u32) void {
             b.setBorder(old_win, s.borderColor(wm, old_win)) catch {};
         }
     }
-
     if (new_focused) |new_win| {
         if (isTileable(s, wm, new_win)) {
             b.setBorder(new_win, s.borderColor(wm, new_win)) catch {};
         }
     }
-
     b.execute();
 }
 
 fn updateWindowFocusDirect(wm: *WM, old_focused: ?u32, new_focused: ?u32) void {
     const s = StateManager.getMut() orelse return;
-
     if (old_focused) |old_win| {
         if (isTileable(s, wm, old_win)) {
             utils.setBorder(wm.conn, old_win, s.borderColor(wm, old_win));
         }
     }
-
     if (new_focused) |new_win| {
         if (isTileable(s, wm, new_win)) {
             utils.setBorder(wm.conn, new_win, s.borderColor(wm, new_win));
         }
     }
-
     utils.flush(wm.conn);
 }
 
-// Alias for compatibility
-pub fn updateWindowFocusFast(wm: *WM, old_focused: ?u32, new_focused: ?u32) void {
-    updateWindowFocus(wm, old_focused, new_focused);
-}
+pub const updateWindowFocusFast = updateWindowFocus;
 
 pub inline fn isWindowTiled(win: u32) bool {
     const s = StateManager.get() orelse return false;
@@ -212,7 +212,6 @@ pub inline fn isWindowTiled(win: u32) bool {
 pub fn retileIfDirty(wm: *WM) void {
     const s = StateManager.getMut() orelse return;
     if (!s.isDirty()) return;
-
     s.clearDirty();
     retileCurrentWorkspace(wm);
 }
@@ -228,11 +227,9 @@ pub fn retileCurrentWorkspace(wm: *WM) void {
     var visible_buf: [128]u32 = undefined;
     var visible_count: usize = 0;
 
-    // OPTIMIZATION: Removed redundant tiled_set check since we're iterating windows from tracking
+    // OPTIMIZATION: Direct iteration without redundant checks
     for (s.windows.items()) |win| {
         if (wm.fullscreen.isFullscreen(win)) continue;
-        // Redundant check removed: if it's in windows.items(), it's already in the set
-
         if (current_ws.contains(win)) {
             if (visible_count < visible_buf.len) {
                 visible_buf[visible_count] = win;
@@ -256,7 +253,7 @@ pub fn retileCurrentWorkspace(wm: *WM) void {
 
     // Create batch for all layout operations
     var b = batch.Batch.begin(wm) catch {
-        std.log.err("[tiling] Failed to create batch, skipping retile", .{});
+        logError("retileCurrentWorkspace", error.BatchFailed, null);
         return;
     };
     defer b.deinit();
@@ -274,65 +271,56 @@ pub fn retileCurrentWorkspace(wm: *WM) void {
         b.setBorderWidth(win, s.border_width) catch {};
         b.setBorder(win, color) catch {};
     }
-
     b.execute();
 }
 
-pub fn toggleLayout(wm: *WM) void {
+fn cycleLayout(wm: *WM, forward: bool) void {
     const s = StateManager.getMut() orelse return;
-    s.layout = switch (s.layout) {
+    s.layout = if (forward) switch (s.layout) {
         .master => .monocle,
         .monocle => .grid,
         .grid => .master,
-    };
-
-    bar.markDirty();
-    retileCurrentWorkspace(wm);
-}
-
-pub fn toggleLayoutReverse(wm: *WM) void {
-    const s = StateManager.getMut() orelse return;
-    s.layout = switch (s.layout) {
+    } else switch (s.layout) {
         .master => .grid,
         .grid => .monocle,
         .monocle => .master,
     };
-
     bar.markDirty();
     retileCurrentWorkspace(wm);
 }
 
-pub fn increaseMasterWidth(wm: *WM) void {
+pub fn toggleLayout(wm: *WM) void { cycleLayout(wm, true); }
+pub fn toggleLayoutReverse(wm: *WM) void { cycleLayout(wm, false); }
+
+fn adjustMasterWidth(wm: *WM, delta: f32) void {
     const s = StateManager.getMut() orelse return;
-    s.master_width_factor = @min(defs.MAX_MASTER_WIDTH, s.master_width_factor + 0.05);
+    s.master_width = std.math.clamp(s.master_width + delta, defs.MIN_MASTER_WIDTH, defs.MAX_MASTER_WIDTH);
     retileCurrentWorkspace(wm);
 }
 
-pub fn decreaseMasterWidth(wm: *WM) void {
+pub fn increaseMasterWidth(wm: *WM) void { adjustMasterWidth(wm, 0.05); }
+pub fn decreaseMasterWidth(wm: *WM) void { adjustMasterWidth(wm, -0.05); }
+
+fn adjustMasterCount(wm: *WM, delta: isize) void {
     const s = StateManager.getMut() orelse return;
-    s.master_width_factor = @max(defs.MIN_MASTER_WIDTH, s.master_width_factor - 0.05);
-    retileCurrentWorkspace(wm);
+    const new_count = if (delta > 0)
+        @min(s.windows.count(), s.master_count + @as(usize, @intCast(delta)))
+    else
+        @max(1, s.master_count -| @as(usize, @intCast(-delta)));
+    if (new_count != s.master_count) {
+        s.master_count = new_count;
+        bar.markDirty();
+        retileCurrentWorkspace(wm);
+    }
 }
 
-pub fn increaseMasterCount(wm: *WM) void {
-    const s = StateManager.getMut() orelse return;
-    s.master_count = @min(s.windows.count(), s.master_count + 1);
-    bar.markDirty();
-    retileCurrentWorkspace(wm);
-}
-
-pub fn decreaseMasterCount(wm: *WM) void {
-    const s = StateManager.getMut() orelse return;
-    s.master_count = @max(1, s.master_count -| 1);
-    bar.markDirty();
-    retileCurrentWorkspace(wm);
-}
+pub fn increaseMasterCount(wm: *WM) void { adjustMasterCount(wm, 1); }
+pub fn decreaseMasterCount(wm: *WM) void { adjustMasterCount(wm, -1); }
 
 pub fn toggleTiling(wm: *WM) void {
     const s = StateManager.getMut() orelse return;
     s.enabled = !s.enabled;
     bar.markDirty();
-
     if (s.enabled) {
         retileCurrentWorkspace(wm);
     }
@@ -340,17 +328,15 @@ pub fn toggleTiling(wm: *WM) void {
 
 pub fn reloadConfig(wm: *WM) void {
     const s = StateManager.getMut() orelse return;
-
     s.enabled = wm.config.tiling.enabled;
     s.layout = parseLayout(wm.config.tiling.layout);
     s.master_side = wm.config.tiling.master_side;
-    s.master_width_factor = wm.config.tiling.master_width_factor;
+    s.master_width = wm.config.tiling.master_width;
     s.master_count = wm.config.tiling.master_count;
     s.gaps = wm.config.tiling.gaps;
     s.border_width = wm.config.tiling.border_width;
     s.border_focused = wm.config.tiling.border_focused;
-    s.border_normal = wm.config.tiling.border_normal;
-
+    s.border_unfocused = wm.config.tiling.border_unfocused;
     if (s.enabled) retileCurrentWorkspace(wm);
 }
 

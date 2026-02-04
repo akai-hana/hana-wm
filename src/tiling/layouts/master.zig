@@ -4,7 +4,7 @@ const std = @import("std");
 const defs = @import("defs");
 const utils = @import("utils");
 const batch = @import("batch");
-const layout_common = @import("layout_common");
+const layouts = @import("layouts");
 
 const tiling = @import("tiling");
 const State = tiling.State;
@@ -34,7 +34,7 @@ pub fn tileWithOffset(b: *batch.Batch, state: *State, windows: []const u32, scre
 
     // Calculate master area width
     const master_w: u16 = if (s_count > 0)
-        @intFromFloat(@as(f32, @floatFromInt(screen_w)) * state.master_width_factor)
+        @intFromFloat(@as(f32, @floatFromInt(screen_w)) * state.master_width)
     else
         screen_w;
 
@@ -61,7 +61,7 @@ pub fn tileWithOffset(b: *batch.Batch, state: *State, windows: []const u32, scre
             .width = master_inner_w,
             .height = m_layout.item_h,
         };
-        layout_common.configureSafe(b, win, rect, "master");
+        layouts.configureSafe(b, win, rect, "master");
     }
 
     if (s_count == 0) return;
@@ -101,7 +101,7 @@ fn tileStackSimple(b: *batch.Batch, windows: []const u32, x: u16, y_offset: u16,
             .width = inner_w,
             .height = s_layout.item_h,
         };
-        layout_common.configureSafe(b, win, rect, "master");
+        layouts.configureSafe(b, win, rect, "master");
     }
 }
 
@@ -144,7 +144,7 @@ fn tileStackOverflow(b: *batch.Batch, windows: []const u32, x: u16, y_offset: u1
                 .width = row_inner_w,
                 .height = s_layout.item_h,
             };
-            layout_common.configureSafe(b, win, rect, "master");
+            layouts.configureSafe(b, win, rect, "master");
 
             col += 1;
         }

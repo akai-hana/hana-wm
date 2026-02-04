@@ -6,12 +6,12 @@ enabled     = true
 layout      = "master"
 master_side = "left"
 
-master_count        = 1
-master_width_factor = 55
-gaps                = 12
-border_width        = 4
-border_focused      = "#005577"
-border_normal       = "#444444"
+master_count     = 1
+master_width     = 55
+gaps             = 12
+border_width     = 4
+border_focused   = "#005577"
+border_unfocused = "#444444"
 
 [Keybindings]
 Mod = "Super"
@@ -77,9 +77,9 @@ occupied_fg = "#eeeeee"
 urgent_bg   = "#ff0000"
 urgent_fg   = "#ffffff"
 
-accent_color = "#005577"
+accent_color   = "#005577"
 indicator_size = 4
-title_accent = true
+title_accent   = true
 
 icons = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
 

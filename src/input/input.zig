@@ -39,7 +39,6 @@ const KeybindState = struct {
     fn rebuild(self: *KeybindState, wm: *WM) !void {
         self.map.clearRetainingCapacity();
         try self.map.ensureTotalCapacity(@intCast(wm.config.keybindings.items.len));
-
         for (wm.config.keybindings.items) |*kb| {
             const key = makeHash(kb.modifiers, kb.keysym);
             self.map.putAssumeCapacity(key, &kb.action);
@@ -62,7 +61,6 @@ pub fn init(wm: *WM) void {
         wm.allocator.destroy(state);
         return;
     };
-
     keybind_state = state;
 }
 
@@ -123,9 +121,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
 
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) void {
     if (event.child == 0) return;
-
     const has_super = (event.state & defs.MOD_SUPER) != 0;
-
     if (has_super and (event.detail == 1 or event.detail == 3)) {
         drag.startDrag(wm, event.child, event.detail, event.root_x, event.root_y);
     } else {
@@ -168,7 +164,6 @@ fn closeWindow(wm: *WM, win: u32) void {
 
     if (prop_reply) |reply| {
         defer std.c.free(reply);
-
         const atoms: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
         const atom_count: usize = @intCast(@divExact(xcb.xcb_get_property_value_length(reply), @as(c_int, @sizeOf(u32))));
 
@@ -179,7 +174,6 @@ fn closeWindow(wm: *WM, win: u32) void {
             }
         }
     }
-
     forceDestroyWindow(wm, win);
 }
 
@@ -195,7 +189,6 @@ fn sendDeleteEvent(wm: *WM, win: u32, protocols_atom: u32, delete_atom: u32) voi
     event.data.data32[2] = 0;
     event.data.data32[3] = 0;
     event.data.data32[4] = 0;
-
     _ = xcb.xcb_send_event(wm.conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
     utils.flush(wm.conn);
 }
@@ -281,10 +274,7 @@ fn dumpState(wm: *WM) void {
         std.log.info("Fullscreen on workspace {}: {x}", .{ entry.key_ptr.*, entry.value_ptr.window });
         fs_count += 1;
     }
-    if (fs_count == 0) {
-        std.log.info("Fullscreen: none", .{});
-    }
-
+    if (fs_count == 0) std.log.info("Fullscreen: none", .{});
     std.log.info("Drag active: {}", .{wm.drag_state.active});
 
     if (workspaces.getState()) |ws_state| {
@@ -299,7 +289,7 @@ fn dumpState(wm: *WM) void {
         std.log.info("Tiling layout: {s}", .{@tagName(t_state.layout)});
         std.log.info("Tiled windows: {}", .{t_state.windows.list.items.len});
         std.log.info("Master count: {}", .{t_state.master_count});
-        std.log.info("Master width: {d:.2}", .{t_state.master_width_factor});
+        std.log.info("Master width: {d:.2}", .{t_state.master_width});
     }
     std.log.info("================================", .{});
 }

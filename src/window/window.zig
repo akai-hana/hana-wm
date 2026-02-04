@@ -16,7 +16,7 @@ inline fn setupTilingBorder(conn: *xcb.xcb_connection_t, win: u32, config: *cons
     _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
         &[_]u32{config.tiling.border_width});
     _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL,
-        &[_]u32{config.tiling.border_normal});
+        &[_]u32{config.tiling.border_unfocused});
 }
 
 // OPTIMIZATION: Inline workspace validation function
