@@ -19,26 +19,46 @@ const XcbOp = union(enum) {
 
 // 256 operations = ~16KB stack (well within safe limits)
 const MAX_BATCH_OPS = 256;
+const AUTO_FLUSH_THRESHOLD = 200;  // Auto-flush at ~80% capacity to prevent overflow
 
 pub const Batch = struct {
     wm: *WM,
     ops: [MAX_BATCH_OPS]XcbOp,
     count: usize,
+    auto_flushed: usize = 0,  // Track auto-flush count for debugging
 
     pub fn begin(wm: *WM) !Batch {
         return .{
             .wm = wm,
             .ops = undefined,
             .count = 0,
+            .auto_flushed = 0,
         };
     }
 
     pub inline fn deinit(self: *Batch) void {
-        _ = self; // Stack-allocated, no cleanup needed
+        if (self.auto_flushed > 0) {
+            std.log.debug("[batch] Stats: {} operations, {} auto-flush(es)", 
+                .{ self.count, self.auto_flushed });
+        }
     }
 
     inline fn pushOp(self: *Batch, op: XcbOp) !void {
-        if (self.count >= MAX_BATCH_OPS) return error.BatchFull;
+        // Auto-flush when approaching capacity to prevent overflow
+        if (self.count >= AUTO_FLUSH_THRESHOLD) {
+            std.log.warn("[batch] Auto-flushing at {} ops (capacity: {})", 
+                .{ self.count, MAX_BATCH_OPS });
+            self.executeNoFlush();
+            _ = xcb.xcb_flush(self.wm.conn);
+            self.count = 0;
+            self.auto_flushed += 1;
+        }
+        
+        if (self.count >= MAX_BATCH_OPS) {
+            std.log.err("[batch] Batch overflow! Consider increasing MAX_BATCH_OPS", .{});
+            return error.BatchFull;
+        }
+        
         self.ops[self.count] = op;
         self.count += 1;
     }

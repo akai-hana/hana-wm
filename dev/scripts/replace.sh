@@ -60,14 +60,14 @@ write_to_codebase() {
   src="$1"
   dest_basename="$2"
   cat "$src" > "$CODE_DIR/$dest_basename"
-  doas rm -f "$src"
+  rm -f "$src"
 }
 
 # Helper to drop text/markdown files
 maybe_drop_text() {
   case "$1" in
     *.txt|*.md)
-      doas rm -f "$1"
+      rm -f "$1"
       return 0
       ;;
   esac

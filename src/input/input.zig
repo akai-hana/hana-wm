@@ -290,14 +290,14 @@ fn dumpState(wm: *WM) void {
     if (workspaces.getState()) |ws_state| {
         std.log.info("Current workspace: {}", .{ws_state.current + 1});
         for (ws_state.workspaces, 0..) |*ws, i| {
-            std.log.info("  WS{}: {} windows", .{ i + 1, ws.windows.items.len });
+            std.log.info("  WS{}: {} windows", .{ i + 1, ws.windows.list.items.len });
         }
     }
 
     if (tiling.getState()) |t_state| {
         std.log.info("Tiling enabled: {}", .{t_state.enabled});
         std.log.info("Tiling layout: {s}", .{@tagName(t_state.layout)});
-        std.log.info("Tiled windows: {}", .{t_state.tiled_windows.items.len});
+        std.log.info("Tiled windows: {}", .{t_state.windows.list.items.len});
         std.log.info("Master count: {}", .{t_state.master_count});
         std.log.info("Master width: {d:.2}", .{t_state.master_width_factor});
     }
@@ -310,7 +310,7 @@ fn emergencyRecover(wm: *WM) void {
     // Map all windows
     if (workspaces.getState()) |ws_state| {
         for (ws_state.workspaces) |*ws| {
-            for (ws.windows.items) |win| {
+            for (ws.windows.list.items) |win| {
                 _ = xcb.xcb_map_window(wm.conn, win);
             }
         }
