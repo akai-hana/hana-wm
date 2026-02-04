@@ -5,16 +5,16 @@ enabled = true     # Enable tiling on startup
 layout  = "master" # Default layout: master_left, monocle, or grid
 
 # Aesthetics
-border_width   = 4  # px
-border_focused = "#ac3232" # "#RRGGBB" / RRGGBB / 0xRRGGBB
-border_normal  = "#52263e"
-gaps           = 12 # px
+gaps             = 12 # px
+border_width     = 4  # px
+border_focused   = "#ac3232" # "#RRGGBB" / RRGGBB / 0xRRGGBB
+border_unfocused = "#52263e"
 
-#  Layout-specific settings
+#  Layouts
 ## Master-stack
-master_side         = "left" #  left / right
-master_count        = 1      #  Number of windows in master area
-master_width_factor = 50 # % (5-95)
+master_count = 1      #  Number of windows in master area
+master_side  = "left" #  left / right
+master_width = 50     #  % (5-95)
 
 [Keybindings]
 # Convenience alias
@@ -24,8 +24,7 @@ Mod = "Super" # Super/Mod4 / Alt/Mod1
 Mod+f = "toggle_fullscreen"
 Mod+Shift+Return = "pkill -9 Xorg" # quit w
 #TODO (implemented but not properly working yet)
-Mod+Shift+f = "close"
-Mod+Shift+g = "kill"
+Mod+Shift+f = "kill"
 Mod+Shift+t = "reload" # Config hot-reload
 
 # Tiling

@@ -4,7 +4,7 @@ const std = @import("std");
 const defs = @import("defs");
 const utils = @import("utils");
 const batch = @import("batch");
-const layout_common = @import("layout_common");
+const layouts = @import("layouts");
 
 const tiling = @import("tiling");
 const State = tiling.State;
@@ -22,7 +22,7 @@ pub fn tileWithOffset(b: *batch.Batch, state: *State, windows: []const u32, scre
 
     // Configure all windows to fullscreen
     for (windows) |win| {
-        layout_common.configureSafe(b, win, rect, "monocle");
+        layouts.configureSafe(b, win, rect, "monocle");
     }
 
     // Raise the last window (most recently focused in tiled_windows order)
