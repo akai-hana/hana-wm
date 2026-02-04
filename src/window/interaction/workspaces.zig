@@ -231,10 +231,10 @@ fn executeSwitch(wm: *WM, old_ws: usize, new_ws: usize) void {
 
     // OPTIMIZATION: Combined bar state management
     if (fs_info != null) {
-        bar.hideForFullscreen(wm);
+        bar.setBarState(wm, .hide_fullscreen);
         bar.raiseBar();
     } else {
-        bar.showForFullscreen(wm);
+        bar.setBarState(wm, .show_fullscreen);
     }
 
     // Set focus

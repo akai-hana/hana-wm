@@ -14,6 +14,20 @@ const static_numbers = blk: {
     break :blk nums;
 };
 
+inline fn drawIndicator(dc: *drawing.DrawContext, x: u16, size: u16, filled: bool, fg: u32) void {
+    const ix, const iy = .{ x + 3, 3 };
+    if (filled) {
+        dc.fillRect(ix, iy, size, size, fg);
+    } else {
+        dc.fillRect(ix, iy, size, 1, fg);
+        dc.fillRect(ix, iy + size - 1, size, 1, fg);
+        if (size > 2) {
+            dc.fillRect(ix, iy + 1, 1, size - 2, fg);
+            dc.fillRect(ix + size - 1, iy + 1, 1, size - 2, fg);
+        }
+    }
+}
+
 pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start_x: u16) !u16 {
     const ws_state = workspaces.getState() orelse return start_x;
     var x = start_x;
@@ -36,20 +50,7 @@ pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start
 
         // Draw window presence indicator
         if (ws.windows.list.items.len > 0) {
-            const size = @max(config.indicator_size, 2);
-            const ix = x + 3;
-            const iy: u16 = 3;
-            
-            if (is_current) {
-                dc.fillRect(ix, iy, size, size, fg);
-            } else {
-                dc.fillRect(ix, iy, size, 1, fg);
-                dc.fillRect(ix, iy + size - 1, size, 1, fg);
-                if (size > 2) {
-                    dc.fillRect(ix, iy + 1, 1, size - 2, fg);
-                    dc.fillRect(ix + size - 1, iy + 1, 1, size - 2, fg);
-                }
-            }
+            drawIndicator(dc, x, @max(config.indicator_size, 2), is_current, fg);
         }
         
         x += WORKSPACE_WIDTH;
