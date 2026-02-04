@@ -40,20 +40,10 @@ const State = struct {
     fn init(allocator: std.mem.Allocator, conn: *xcb.xcb_connection_t, window: u32, width: u16, height: u16,
             dc: *drawing.DrawContext, config: defs.BarConfig) !*State {
         const s = try allocator.create(State);
-        s.* = .{
-            .window = window,
-            .width = width,
-            .height = height,
-            .dc = dc,
-            .conn = conn,
-            .config = config,
-            .status_text = .{},
-            .cached_title = .{},
-            .cached_title_window = null,
-            .dirty = false,
-            .dirty_clock = false,
-            .last_second = 0,
-            .alive = true,
+        s.* = State{
+            .window = window, .width = width, .height = height, .dc = dc, .conn = conn,
+            .config = config, .status_text = .{}, .cached_title = .{}, .cached_title_window = null,
+            .dirty = false, .dirty_clock = false, .last_second = 0, .alive = true,
             .allocator = allocator,
             .cached_clock_width = dc.textWidth("0000-00-00 00:00:00") + 2 * config.padding,
         };
@@ -83,31 +73,32 @@ inline fn updateClockIfNeeded(s: *State) void {
     }
 }
 
+inline fn sizeFont(alloc: std.mem.Allocator, font: []const u8, size: u16) ![]const u8 {
+    return if (size > 0) try std.fmt.allocPrint(alloc, "{s}:size={}", .{font, size}) else font;
+}
+
 fn loadBarFonts(dc: *drawing.DrawContext, wm: *defs.WM) !void {
-    const bar_cfg = wm.config.bar;
+    const cfg = wm.config.bar;
+    const alloc = wm.allocator;
     
-    if (bar_cfg.fonts.items.len > 0) {
-        var sized_fonts = std.ArrayList([]const u8){};
+    if (cfg.fonts.items.len > 0) {
+        var sized = std.ArrayList([]const u8){};
         defer {
-            for (sized_fonts.items) |s| wm.allocator.free(s);
-            sized_fonts.deinit(wm.allocator);
+            for (sized.items) |s| if (cfg.font_size > 0) alloc.free(s);
+            sized.deinit(alloc);
         }
-        for (bar_cfg.fonts.items) |font_name| {
-            const sized = if (bar_cfg.font_size > 0)
-                try std.fmt.allocPrint(wm.allocator, "{s}:size={}", .{ font_name, bar_cfg.font_size })
-            else
-                try wm.allocator.dupe(u8, font_name);
-            try sized_fonts.append(wm.allocator, sized);
-        }
-        return dc.loadFonts(sized_fonts.items);
+        for (cfg.fonts.items) |f| try sized.append(alloc, try sizeFont(alloc, f, cfg.font_size));
+        return dc.loadFonts(sized.items);
     }
     
-    const font_str = if (bar_cfg.font_size > 0)
-        try std.fmt.allocPrint(wm.allocator, "{s}:size={}", .{ bar_cfg.font, bar_cfg.font_size })
-    else
-        bar_cfg.font;
-    defer if (bar_cfg.font_size > 0) wm.allocator.free(font_str);
+    const font_str = try sizeFont(alloc, cfg.font, cfg.font_size);
+    defer if (cfg.font_size > 0) alloc.free(font_str);
     try dc.loadFont(font_str);
+}
+
+inline fn setProp(conn: *xcb.xcb_connection_t, win: u32, name: []const u8, type_: u32, data: anytype) !void {
+    _ = xcb.xcb_change_property(conn, xcb.XCB_PROP_MODE_REPLACE, win,
+        try utils.getAtom(conn, name), type_, 32, data.len, data);
 }
 
 fn setWindowProperties(wm: *defs.WM, window: u32, height: u16) !void {
@@ -116,16 +107,11 @@ fn setWindowProperties(wm: *defs.WM, window: u32, height: u16) !void {
     else
         .{ 0, 0, height, 0, 0, 0, 0, 0, 0, wm.screen.width_in_pixels, 0, 0 };
 
-    _ = xcb.xcb_change_property(wm.conn, xcb.XCB_PROP_MODE_REPLACE, window,
-        try utils.getAtom(wm.conn, "_NET_WM_STRUT_PARTIAL"), xcb.XCB_ATOM_CARDINAL, 32, 12, &strut);
-
-    _ = xcb.xcb_change_property(wm.conn, xcb.XCB_PROP_MODE_REPLACE, window,
-        try utils.getAtom(wm.conn, "_NET_WM_WINDOW_TYPE"), xcb.XCB_ATOM_ATOM, 32, 1,
+    try setProp(wm.conn, window, "_NET_WM_STRUT_PARTIAL", xcb.XCB_ATOM_CARDINAL, &strut);
+    try setProp(wm.conn, window, "_NET_WM_WINDOW_TYPE", xcb.XCB_ATOM_ATOM, 
         &[_]u32{try utils.getAtom(wm.conn, "_NET_WM_WINDOW_TYPE_DOCK")});
-
-    _ = xcb.xcb_change_property(wm.conn, xcb.XCB_PROP_MODE_REPLACE, window,
-        try utils.getAtom(wm.conn, "_NET_WM_STATE"), xcb.XCB_ATOM_ATOM, 32, 2,
-        &[_]u32{ try utils.getAtom(wm.conn, "_NET_WM_STATE_ABOVE"), try utils.getAtom(wm.conn, "_NET_WM_STATE_STICKY") });
+    try setProp(wm.conn, window, "_NET_WM_STATE", xcb.XCB_ATOM_ATOM,
+        &[_]u32{try utils.getAtom(wm.conn, "_NET_WM_STATE_ABOVE"), try utils.getAtom(wm.conn, "_NET_WM_STATE_STICKY")});
 }
 
 fn calculateBarHeight(wm: *defs.WM) !u16 {
@@ -213,17 +199,22 @@ pub inline fn raiseBar() void {
 pub inline fn getBarHeight() u16 { return if (state) |s| s.height else 0; }
 pub inline fn isBarVisible() bool { return state != null; }
 
-pub fn toggleBar(wm: *defs.WM) void {
-    wm.config.bar.show = !wm.config.bar.show;
-    setBarVisibility(wm, wm.config.bar.show, "toggle");
-}
+pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
 
-pub fn hideForFullscreen(wm: *defs.WM) void {
-    setBarVisibility(wm, false, "fullscreen");
-}
-
-pub fn showForFullscreen(wm: *defs.WM) void {
-    if (wm.config.bar.show) setBarVisibility(wm, true, "exit fullscreen");
+pub fn setBarState(wm: *defs.WM, action: BarAction) void {
+    const show = switch (action) {
+        .toggle => blk: { wm.config.bar.show = !wm.config.bar.show; break :blk wm.config.bar.show; },
+        .hide_fullscreen => false,
+        .show_fullscreen => wm.config.bar.show,
+    };
+    const reason = switch (action) {
+        .toggle => "toggle",
+        .hide_fullscreen => "fullscreen",
+        .show_fullscreen => "exit fullscreen",
+    };
+    if (action != .show_fullscreen or wm.config.bar.show) {
+        setBarVisibility(wm, show, reason);
+    }
 }
 
 pub fn updateIfDirty(wm: *defs.WM) !void {
@@ -294,11 +285,11 @@ fn calculateSegmentWidth(s: *State, segment: defs.BarSegment) u16 {
 
 fn drawRightSegments(s: *State, wm: *defs.WM, segments: []const defs.BarSegment) !void {
     var right_x: u16 = s.width;
-    var i = segments.len;
-    while (i > 0) : (i -= 1) {
-        right_x -= calculateSegmentWidth(s, segments[i - 1]);
-        _ = try drawSegment(s, wm, segments[i - 1], right_x, null);
-        if (i > 1) right_x -= s.config.spacing;
+    for (0..segments.len) |i| {
+        const idx = segments.len - 1 - i;
+        right_x -= calculateSegmentWidth(s, segments[idx]);
+        _ = try drawSegment(s, wm, segments[idx], right_x, null);
+        if (i < segments.len - 1) right_x -= s.config.spacing;
     }
 }
 

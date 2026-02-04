@@ -121,7 +121,7 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM
     // Clean up fullscreen state
     if (wm.fullscreen.isFullscreen(win)) {
         cleanupFullscreenWindow(wm, win);
-        bar.showForFullscreen(wm);
+        bar.setBarState(wm, .show_fullscreen);
     }
 
     if (wm.config.tiling.enabled) {

@@ -66,10 +66,10 @@ const ColorCache = struct {
             return &self.fallback_color;
         };
 
-        if (result.found_existing) return result.value_ptr;
-
-        const render_color = rgbToXRenderColor(rgb);
-        _ = c.XftColorAllocValue(self.display, self.visual, self.colormap, &render_color, result.value_ptr);
+        if (!result.found_existing) {
+            _ = c.XftColorAllocValue(self.display, self.visual, self.colormap, 
+                &rgbToXRenderColor(rgb), result.value_ptr);
+        }
         return result.value_ptr;
     }
 };
@@ -155,18 +155,12 @@ pub const DrawContext = struct {
             return error.XftDrawCreateFailed;
         };
         
-        dc.* = .{
-            .allocator = allocator,
-            .display = display,
-            .drawable = drawable,
-            .xft_draw = xft_draw,
-            .xft_font = undefined,
-            .xft_fonts = &[0]*c.XftFont{},
-            .width = width,
-            .height = height,
+        dc.* = DrawContext{
+            .allocator = allocator, .display = display, .drawable = drawable,
+            .xft_draw = xft_draw, .xft_font = undefined, .xft_fonts = &[0]*c.XftFont{},
+            .width = width, .height = height,
             .color_cache = ColorCache.init(allocator, display, visual, colormap),
-            .visual = visual,
-            .colormap = colormap,
+            .visual = visual, .colormap = colormap,
         };
         
         return dc;
@@ -185,17 +179,16 @@ pub const DrawContext = struct {
         const font_name_z = try self.allocator.dupeZ(u8, font_name);
         defer self.allocator.free(font_name_z);
         
-        var font: ?*c.XftFont = c.XftFontOpenName(self.display, 0, font_name_z.ptr);
+        const font = c.XftFontOpenName(self.display, 0, font_name_z.ptr) orelse 
+            c.XftFontOpenName(self.display, 0, "monospace:size=10") orelse {
+                std.log.warn("[drawing] Failed to load '{s}' and fallback", .{font_name});
+                return error.FontLoadFailed;
+            };
         
-        if (font == null) {
-            std.log.warn("[drawing] Failed to load '{s}', trying fallback", .{font_name});
-            font = c.XftFontOpenName(self.display, 0, "monospace:size=10");
-        }
-        
-        if (font == null) return error.FontLoadFailed;
+        if (font == null) std.log.warn("[drawing] Failed to load '{s}', trying fallback", .{font_name});
         
         const slice = try self.allocator.alloc(*c.XftFont, 1);
-        slice[0] = font.?;
+        slice[0] = font;
         self.xft_fonts = slice;
         self.xft_font = slice[0];
         std.log.info("[drawing] Xft font loaded: {s}", .{font_name});
@@ -208,20 +201,19 @@ pub const DrawContext = struct {
         const font = c.XftFontOpenName(self.display, 0, pattern_z.ptr) orelse return null;
 
         var family_cstr: [*:0]const u8 = undefined;
-        const rc = c.FcPatternGetString(font.*.pattern, "family", 0, @ptrCast(&family_cstr));
-        if (rc != 0) {
+        if (c.FcPatternGetString(font.*.pattern, "family", 0, @ptrCast(&family_cstr)) != 0) {
             std.log.warn("[drawing] Could not verify family for '{s}', accepting anyway", .{pattern});
             return font;
         }
-        const actual_family = std.mem.span(family_cstr);
-
+        
+        const actual = std.mem.span(family_cstr);
         const colon = std.mem.indexOfScalar(u8, pattern, ':') orelse pattern.len;
-        const req_family = pattern[0..colon];
-
-        const shorter = if (actual_family.len < req_family.len) actual_family else req_family;
-        const longer  = if (actual_family.len < req_family.len) req_family  else actual_family;
-
-        if (shorter.len == 0 or longer.len == 0 or !std.mem.startsWith(u8, longer, shorter)) {
+        const requested = pattern[0..colon];
+        
+        const shorter, const longer = if (actual.len < requested.len) 
+            .{ actual, requested } else .{ requested, actual };
+        
+        if (shorter.len == 0 or !std.mem.startsWith(u8, longer, shorter)) {
             c.XftFontClose(self.display, font);
             return null;
         }
@@ -288,14 +280,12 @@ pub const DrawContext = struct {
     pub fn drawText(self: *DrawContext, x: u16, y: u16, text: []const u8, color: u32) !void {
         const xft_color = self.color_cache.get(color);
         
-        // Single font fast path
         if (self.xft_fonts.len <= 1) {
             c.XftDrawStringUtf8(self.xft_draw, xft_color, self.xft_font,
                 @intCast(x), @intCast(y), text.ptr, @intCast(text.len));
             return;
         }
         
-        // Multi-font: iterate runs and draw each
         var current_x: i32 = @intCast(x);
         var iter = FontRunIterator.init(self, text);
         while (iter.next()) |run| {
@@ -358,43 +348,31 @@ pub const DrawContext = struct {
     }
     
     pub fn textWidth(self: *DrawContext, text: []const u8) u16 {
-        // Single font fast path
         if (self.xft_fonts.len <= 1) {
             var extents: c.XGlyphInfo = undefined;
             c.XftTextExtentsUtf8(self.display, self.xft_font, text.ptr, @intCast(text.len), &extents);
             return @intCast(extents.xOff);
         }
         
-        // Multi-font: sum run widths
         var total_width: i32 = 0;
         var iter = FontRunIterator.init(self, text);
         while (iter.next()) |run| {
-            const run_text = text[run.start..run.end];
             var extents: c.XGlyphInfo = undefined;
+            const run_text = text[run.start..run.end];
             c.XftTextExtentsUtf8(self.display, run.font, run_text.ptr, @intCast(run_text.len), &extents);
             total_width += extents.xOff;
         }
-        
         return @intCast(total_width);
     }
     
-    pub inline fn getAscender(self: *DrawContext) i16 {
-        return @intCast(self.xft_font.*.ascent);
-    }
-    
-    pub inline fn getDescender(self: *DrawContext) i16 {
-        return -@as(i16, @intCast(self.xft_font.*.descent));
-    }
-    
-    pub inline fn flush(self: *DrawContext) void {
-        _ = c.XFlush(self.display);
-    }
+    pub inline fn getAscender(self: *DrawContext) i16 { return @intCast(self.xft_font.*.ascent); }
+    pub inline fn getDescender(self: *DrawContext) i16 { return -@as(i16, @intCast(self.xft_font.*.descent)); }
+    pub inline fn flush(self: *DrawContext) void { _ = c.XFlush(self.display); }
 
     pub inline fn baselineY(self: *DrawContext, bar_height: u16) u16 {
-        const ascender: i32 = @intCast(self.xft_font.*.ascent);
-        const descender: i32 = @intCast(self.xft_font.*.descent);
-        const font_height: i32 = ascender + descender;
-        const pad: i32 = @divTrunc(@as(i32, bar_height) - font_height, 2);
-        return @intCast(@max(ascender, pad + ascender));
+        const asc: i32 = @intCast(self.xft_font.*.ascent);
+        const desc: i32 = @intCast(self.xft_font.*.descent);
+        const pad: i32 = @divTrunc(@as(i32, bar_height) - (asc + desc), 2);
+        return @intCast(@max(asc, pad + asc));
     }
 };

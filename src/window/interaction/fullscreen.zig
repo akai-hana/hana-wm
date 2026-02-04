@@ -53,7 +53,7 @@ fn enterFullscreen(wm: *WM, win: u32, ws: usize) void {
         return;
     };
     
-    bar.hideForFullscreen(wm);
+    bar.setBarState(wm, .hide_fullscreen);
 
     // OPTIMIZATION: Use batch if possible, fall back to direct calls
     var b = batch.Batch.begin(wm) catch {
@@ -75,7 +75,7 @@ fn exitFullscreen(wm: *WM, win: u32, ws: usize) void {
     
     const saved_geom = fs_info.saved_geometry;
     wm.fullscreen.removeForWorkspace(ws);
-    bar.showForFullscreen(wm);
+    bar.setBarState(wm, .show_fullscreen);
 
     if (tiling.isWindowTiled(win)) {
         tiling.retileCurrentWorkspace(wm);
