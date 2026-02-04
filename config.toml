@@ -1,26 +1,73 @@
-# hana WM config - Enhanced with configurable bar!
+# akai_hana's personal hana WM config :-)
 
 [tiling]
-enabled     = true     # Enable tiling on startup
-layout      = "master" # Default layout: master_left, monocle, or grid
-master_side = "left"
+enabled = true     # Enable tiling on startup
+layout  = "master" # Default layout: master_left, monocle, or grid
 
-master_count        = 1        # Number of windows in master area
-master_width_factor = 55       # Master area width (5-95, percentage)
-gaps                = 12       # Gap between windows (pixels)
-border_width        = 4        # Border thickness (pixels)
-border_focused      = "#ac3232" # col_cyan - focused window border
-border_normal       = "#52263e" # col_gray2 - unfocused window border
+# Aesthetics
+border_width   = 4  # px
+border_focused = "#ac3232" # "#RRGGBB" / RRGGBB / 0xRRGGBB
+border_normal  = "#52263e"
+gaps           = 12 # px
+
+#  Layout-specific settings
+## Master-stack
+master_side         = "left" #  left / right
+master_count        = 1      #  Number of windows in master area
+master_width_factor = 50 # % (5-95)
 
 [Keybindings]
-# Define your modifier key (will replace "Mod" in bindings below)
-Mod = "Super"
+# Convenience alias
+Mod = "Super" # Super/Mod4 / Alt/Mod1
 
+# WM interactions
 Mod+f = "toggle_fullscreen"
+Mod+Shift+Return = "pkill -9 Xorg" # quit w
+#TODO (implemented but not properly working yet)
+Mod+Shift+f = "close"
+Mod+Shift+g = "kill"
+Mod+Shift+t = "reload" # Config hot-reload
 
-Mod+Shift+Return = "pkill -9 Xorg" # quit
+# Tiling
+Mod+n           = "toggle_tiling" # Enable/disable tiling
+Mod+space       = "toggle_layout" # TODO Cycle layouts
+Mod+Shift+space = "toggle_layout_reverse"
 
-# Window management
+# Layouts
+## Master-stack
+Mod+h           = "decrease_master" # area TODO
+Mod+l           = "increase_master" # area
+Mod+comma       = "increase_master_count"
+Mod+period      = "decrease_master_count" 
+
+# Workspaces
+#TODO make workspace array
+Mod+1 = "workspace_1"
+Mod+2 = "workspace_2"
+Mod+3 = "workspace_3"
+Mod+4 = "workspace_4"
+Mod+q = "workspace_5"
+Mod+w = "workspace_6"
+Mod+e = "workspace_7"
+Mod+r = "workspace_8"
+
+#TODO automatically add "Shift" to previous binds for the "move to workspace" binds
+Mod+Shift+1 = "move_to_workspace_1"
+Mod+Shift+2 = "move_to_workspace_2"
+Mod+Shift+3 = "move_to_workspace_3"
+Mod+Shift+4 = "move_to_workspace_4"
+Mod+Shift+q = "move_to_workspace_5"
+Mod+Shift+w = "move_to_workspace_6"
+Mod+Shift+e = "move_to_workspace_7"
+Mod+Shift+r = "move_to_workspace_8"
+
+# Bar toggle
+Mod+b = "toggle_bar"
+
+# Application launchers
+Mod+p = "rofi -show drun"
+
+# Program binds
 Mod+a       = "MOZ_USE_XINPUT2=1 firefox"
 Mod+Shift+a = "pkill firefox"
 
@@ -35,124 +82,66 @@ Mod+x = "~/Games/t-client/DDNet"
 Mod+v       = "flatpak run com.github.th_ch.youtube_music"
 Mod+Shift+v = "pkill youtube-music"
 
-Mod+t       = "xeyes"   # Launch terminal
-Mod+Shift+f = "close"
-Mod+Shift+g = "kill"
-Mod+Shift+t = "reload"  # Reload config
-
-# Tiling layout controls
-Mod+space       = "toggle_layout"         # Cycle: master_left → monocle → grid
-Mod+Shift+space = "toggle_layout_reverse" # Cycle in reverse: grid → monocle → master_left
-Mod+n           = "toggle_tiling"         # Enable/disable tiling
-Mod+h           = "decrease_master"       # Make master area narrower
-Mod+l           = "increase_master"       # Make master area wider
-Mod+comma       = "increase_master_count" # More windows in master
-Mod+period      = "decrease_master_count" # Fewer windows in master
-
-# Bar toggle
-Mod+b = "toggle_bar"
-
-# Workspace switching (1-4, q, w, e, r)
-Mod+1 = "workspace_1"
-Mod+2 = "workspace_2"
-Mod+3 = "workspace_3"
-Mod+4 = "workspace_4"
-Mod+q = "workspace_5"
-Mod+w = "workspace_6"
-Mod+e = "workspace_7"
-Mod+r = "workspace_8"
-
-# Move focused window to workspace
-Mod+Shift+1 = "move_to_workspace_1"
-Mod+Shift+2 = "move_to_workspace_2"
-Mod+Shift+3 = "move_to_workspace_3"
-Mod+Shift+4 = "move_to_workspace_4"
-Mod+Shift+q = "move_to_workspace_5"
-Mod+Shift+w = "move_to_workspace_6"
-Mod+Shift+e = "move_to_workspace_7"
-Mod+Shift+r = "move_to_workspace_8"
-
-# Application launchers
-Mod+p = "rofi -show drun"
-
 # Emergency/Debug
-#Mod+Shift+d      = "dump_state"         # Print debug info
-Mod+Shift+Escape = "emergency_recover"  # Emergency recovery mode
+#TODO not yet working
+#Mod+Shift+d      = "dump_state"       # Print debug info
+Mod+Shift+Escape = "emergency_recover" # Emergency recovery mode
 
 [bar]
 show = true
-position = "bottom" # Bar vertical position: "top" or "bottom"
+position = "bottom" # top/bottom
 
-# Bar height - NEW: Auto-adapts to font size by default!
+font_size = 12
+# Bar height
+# Auto-adapts to font size by default!
 # Uncomment to set a fixed height instead:
 #height = 32
 
-# Font configuration
-# NEW: Multi-font support for proper CJK rendering!
-# List fonts in priority order - first font is primary, others are fallbacks
-# This allows Latin text to use FiraCode while Japanese uses Noto Sans CJK
+# Bar spacing
+padding = 99 # Padding inside segments (around text)
+spacing = 6  # Space between segments
+
+# List fonts in priority order: first font is primary, others come next
+# Useful for non-ASCII character support, while retaining a primary ASCII font  
 fonts = [
     "FiraCode Nerd Font Ret",
     "Noto Sans CJK JP",
 ]
-font_size = 12
 
 # Legacy single font option (used if fonts array is not set):
 #font = "FiraCode Nerd Font Ret"
-#font_size = 12
 
-# NEW: Spacing configuration for better readability!
-padding = 99    # Padding inside segments (around text)
-spacing = 6     # Space between segments
-
-# Colors - matching your dwm config!
-# col_gray1 = #0d0d14 (dark background)
-# col_gray2 = #52263e (border/secondary)
-# col_gray3 = #bbbbbb (normal foreground)
-# col_gray4 = #eeeeee (selected foreground)
-# col_cyan  = #ac3232 (focused color/accent)
-
-bg          = "#0d0d14"  # col_gray1
-fg          = "#bbbbbb"  # col_gray3
-selected_bg = "#ac3232"  # col_cyan
-selected_fg = "#eeeeee"  # col_gray4
-occupied_fg = "#eeeeee"  # col_gray4
+# Main color palette
+bg          = "#0d0d14"
+fg          = "#bbbbbb"
+selected_bg = "#ac3232"
+selected_fg = "#eeeeee"
+occupied_fg = "#eeeeee"
 urgent_bg   = "#FF0000"
 urgent_fg   = "#FFFFFF"
 
-# Accent colors for bar segments!
-# Default accent for all segments
-accent_color = "#ac3232"  # col_cyan - matching your focused border
-
-# NEW: Workspace icons - matches your Japanese theme!
-# Using hiragana characters for your workspace labels
+# Workspace labels/icons
 icons = ["あ", "か", "い", "は", "な", "つ", "ん", "で"]
-
-# Alternative icon options (uncomment to try):
-# Numbers with brackets (like your comments):
-# icons = ["「1」", "「2」", "「3」", "「4」", "「5」", "「6」", "「7」", "「8」"]
-
-# Full Japanese labels from your comments:
-#icons = ["あ」Browser", "か」Socials", "い」Music", "は」Launchers", "な」Gaming", "つ」Code", "ん」Media", "で」Downloads"]
-
-# Nerd Font icons (if you want):
-# icons = ["", "", "", "", "", "", "", ""]
 
 indicator_size = 1
 title_accent = true
 
-# NEW: Per-segment accent colors (optional - overrides accent_color)
-[bar.colors]
-workspaces = "#ac3232"  # col_cyan - red accent
-#title = "#52263e"       # col_gray2 - purple/burgundy
-clock = "#ac3232"       # col_cyan - red accent
+# Accent colors for bar segments
+# Default accent for all segments
+accent_color = "#ac3232" # "#RRGGBB" / RRGGBB / 0xRRGGBB
+
+# Per-segment accent colors (overrides accent_color)
+# [bar.colors]
+# workspaces = "#ac3232"
+# title      = "#ac3232"
+# clock      = "#ac3232"
 
 # Configurable bar layout
 # You can rearrange segments however you like
 # Available segments: "workspaces", "title", "clock", "layout"
 
-# Default layout (workspaces left, title center, clock right):
-# You can anchor any segments to left, right or center.
+# Bar layout
+# Anchors: left/center/right
 [bar.layout.left]
 segments = ["workspaces", "layout"]
 
@@ -162,59 +151,39 @@ segments = ["title"]
 [bar.layout.right]
 segments = ["clock"]
 
-# Alternative layouts to try (uncomment to use):
-
-# Minimal - just workspaces and clock:
-# [bar.layout.left]
-# segments = ["workspaces"]
-# [bar.layout.right]
-# segments = ["clock"]
-
-# Everything on the left:
-# [bar.layout.left]
-# segments = ["workspaces", "title", "clock"]
-
-# Clock on left (reversed!):
-# [bar.layout.left]
-# segments = ["clock", "title"]
-# [bar.layout.right]
-# segments = ["workspaces"]
-
 [workspaces]
-count = 8  # Number of virtual desktops (1-20)
+count = 8
 
-# WORKSPACE RULES
-# Automatically assign windows to specific workspaces
-
-[workspace.rules.1] #「あ」Browser
+# Workspace rules
+[workspace.rules.1] # browser
 Navigator
 Firefox
 
-[workspace.rules.2] #「か」Socials
+[workspace.rules.2] # socials
 discord
 vesktop
 equibop
 electron
 
-[workspace.rules.3] #「い」Music
+[workspace.rules.3] # music
 com.github.th_ch.youtube_music
 
-[workspace.rules.4] #「は」Launchers
+[workspace.rules.4] # launchers
 steam
 OpenTabletDriver.UX
 
-[workspace.rules.5] #「な」Gaming
+[workspace.rules.5] # gaming
 "osu!"
 DDNet
 
-[workspace.rules.6] #「つ」Text/Code editors
+[workspace.rules.6] # editors
 emacs
 xeyes
 
-[workspace.rules.7] #「ん」Media
+[workspace.rules.7] # Media
 freetube
 mpv
 gimp
 
-[workspace.rules.8] #「で」Downloads
+[workspace.rules.8] # torrenting
 deluge

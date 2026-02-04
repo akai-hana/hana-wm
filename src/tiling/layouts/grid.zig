@@ -1,23 +1,23 @@
-//! Grid layout
+//! Grid layout - Arrange windows in optimal grid
 
 const std = @import("std");
 const defs = @import("defs");
 const utils = @import("utils");
 const batch = @import("batch");
-const bar = @import("bar");
+const layout_common = @import("layout_common");
 
 const tiling = @import("tiling");
 const State = tiling.State;
 
-// MOVED from utils.zig - only used here
 inline fn calcGridDims(n: usize) struct { cols: u16, rows: u16 } {
     if (n == 0) return .{ .cols = 1, .rows = 1 };
     const cols = @as(u16, @intFromFloat(@ceil(@sqrt(@as(f32, @floatFromInt(n))))));
-    return .{ .cols = cols, .rows = @intCast((n + cols - 1) / cols) };
+    const rows = @as(u16, @intCast((n + cols - 1) / cols));
+    return .{ .cols = cols, .rows = rows };
 }
 
 pub fn tile(b: *batch.Batch, state: *State, windows: []const u32, screen_w: u16, screen_h: u16) void {
-    tileWithOffset(b, state, windows, screen_w, screen_h, 0);
+    layout_common.tileWrapper(tileWithOffset, b, state, windows, screen_w, screen_h);
 }
 
 pub fn tileWithOffset(b: *batch.Batch, state: *State, windows: []const u32, screen_w: u16, screen_h: u16, y_offset: u16) void {
@@ -27,13 +27,19 @@ pub fn tileWithOffset(b: *batch.Batch, state: *State, windows: []const u32, scre
     const m = state.margins();
     const dims = calcGridDims(n);
 
-    const cell_w = (screen_w -| (dims.cols + 1) * m.gap) / dims.cols;
-    const cell_h = (screen_h -| (dims.rows + 1) * m.gap) / dims.rows;
+    // Calculate cell dimensions accounting for gaps
+    const total_gap_w = (dims.cols + 1) * m.gap;
+    const total_gap_h = (dims.rows + 1) * m.gap;
+    
+    const cell_w = (screen_w -| total_gap_w) / dims.cols;
+    const cell_h = (screen_h -| total_gap_h) / dims.rows;
 
+    // Calculate window dimensions accounting for borders
     const border_margin = 2 * m.border;
     const win_w = if (cell_w > border_margin) cell_w - border_margin else defs.MIN_WINDOW_DIM;
     const win_h = if (cell_h > border_margin) cell_h - border_margin else defs.MIN_WINDOW_DIM;
 
+    // Pre-calculate spacing for performance
     const cell_spacing_w = cell_w + m.gap;
     const cell_spacing_h = cell_h + m.gap;
 
@@ -47,9 +53,6 @@ pub fn tileWithOffset(b: *batch.Batch, state: *State, windows: []const u32, scre
             .width = win_w,
             .height = win_h,
         };
-        b.configure(win, rect) catch |err| {
-            std.log.err("[grid] Failed to configure window {}: {}", .{ win, err });
-            continue;
-        };
+        layout_common.configureSafe(b, win, rect, "grid");
     }
 }
