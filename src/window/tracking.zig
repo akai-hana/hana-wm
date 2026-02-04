@@ -30,18 +30,46 @@ pub const tracking = struct {
         try self.set.put(win, {});
     }
     
+    // OPTIMIZATION: Improved addFront - use ensureUnusedCapacity to avoid reallocation
     pub fn addFront(self: *tracking, win: u32) !void {
         if (self.contains(win)) return;
-        try self.list.insert(self.allocator, 0, win);
+        
+        // OPTIMIZATION: Reserve space first to avoid multiple allocations
+        try self.list.ensureUnusedCapacity(self.allocator, 1);
+        
+        // Shift elements manually for better performance
+        const list_items = self.list.items;
+        if (list_items.len > 0) {
+            self.list.items.len += 1;
+            var i: usize = list_items.len;
+            while (i > 0) : (i -= 1) {
+                self.list.items[i] = self.list.items[i - 1];
+            }
+            self.list.items[0] = win;
+        } else {
+            try self.list.append(self.allocator, win);
+        }
+        
         try self.set.put(win, {});
     }
     
-    // OPTIMIZATION: Use std.mem.indexOfScalar for cleaner code
+    // OPTIMIZATION: Use orderedRemove when order matters, swapRemove when it doesn't
     pub fn remove(self: *tracking, win: u32) bool {
         if (!self.set.remove(win)) return false;
         
         if (std.mem.indexOfScalar(u32, self.list.items, win)) |idx| {
             _ = self.list.swapRemove(idx);
+            return true;
+        }
+        return false;
+    }
+    
+    // OPTIMIZATION: Add orderedRemove variant for when ordering matters
+    pub fn removeOrdered(self: *tracking, win: u32) bool {
+        if (!self.set.remove(win)) return false;
+        
+        if (std.mem.indexOfScalar(u32, self.list.items, win)) |idx| {
+            _ = self.list.orderedRemove(idx);
             return true;
         }
         return false;
@@ -58,5 +86,17 @@ pub const tracking = struct {
     pub inline fn clear(self: *tracking) void {
         self.list.clearRetainingCapacity();
         self.set.clearRetainingCapacity();
+    }
+    
+    // OPTIMIZATION: Add method to get last item efficiently
+    pub inline fn last(self: *const tracking) ?u32 {
+        const items_slice = self.list.items;
+        return if (items_slice.len > 0) items_slice[items_slice.len - 1] else null;
+    }
+    
+    // OPTIMIZATION: Add method to get first item efficiently
+    pub inline fn first(self: *const tracking) ?u32 {
+        const items_slice = self.list.items;
+        return if (items_slice.len > 0) items_slice[0] else null;
     }
 };

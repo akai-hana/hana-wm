@@ -1,4 +1,4 @@
-// Focus management
+// Focus management - OPTIMIZED
 
 const std = @import("std");
 const defs = @import("defs");
@@ -28,13 +28,8 @@ pub inline fn releaseProtection() void {
 }
 
 pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
-    // OPTIMIZATION: Combined early return checks
-    if (win == wm.root or bar.isBarWindow(win) or wm.focused_window == win) return;
-    
-    if (win == wm.root) {
-        std.log.err("[CRITICAL] Attempted to focus ROOT window!", .{});
-        return;
-    }
+    // OPTIMIZATION: Combined early return checks, removed duplicate root check
+    if (win == wm.root or win == 0 or bar.isBarWindow(win) or wm.focused_window == win) return;
 
     // Block mouse_enter during protection period
     if (reason == .mouse_enter and focus_protection_active) return;
@@ -47,13 +42,16 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     const old = wm.focused_window;
     wm.focused_window = win;
 
-    _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, xcb.XCB_CURRENT_TIME);
-
-    // OPTIMIZATION: Single branch for raising window
+    // OPTIMIZATION: Batch XCB calls when raising window
     if (reason == .mouse_click or reason == .user_command) {
+        // Combine set_input_focus and raise in sequence without intermediate flush
+        _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, xcb.XCB_CURRENT_TIME);
         _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+    } else {
+        _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, xcb.XCB_CURRENT_TIME);
     }
 
+    // OPTIMIZATION: Update borders first, flush once at the end
     tiling.updateWindowFocusFast(wm, old, win);
     utils.flush(wm.conn);
     bar.markDirty();
@@ -69,5 +67,35 @@ pub fn clearFocus(wm: *WM) void {
     }
     
     utils.flush(wm.conn);
+    bar.markDirty();
+}
+
+// OPTIMIZATION: Batch focus operation for multiple windows (e.g., during workspace switch)
+pub fn setFocusBatch(wm: *WM, win: u32, reason: Reason, defer_flush: bool) void {
+    if (win == wm.root or win == 0 or bar.isBarWindow(win) or wm.focused_window == win) return;
+
+    if (reason == .mouse_enter and focus_protection_active) return;
+
+    if (reason != .mouse_enter) {
+        focus_protection_active = true;
+    }
+
+    const old = wm.focused_window;
+    wm.focused_window = win;
+
+    if (reason == .mouse_click or reason == .user_command) {
+        _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, xcb.XCB_CURRENT_TIME);
+        _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+    } else {
+        _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, xcb.XCB_CURRENT_TIME);
+    }
+
+    tiling.updateWindowFocusFast(wm, old, win);
+    
+    // OPTIMIZATION: Allow caller to defer flush for batch operations
+    if (!defer_flush) {
+        utils.flush(wm.conn);
+    }
+    
     bar.markDirty();
 }

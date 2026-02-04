@@ -29,23 +29,15 @@ pub fn ModuleState(comptime StateType: type) type {
             }
         }
         
-        /// Get immutable state reference (optional)
-        pub inline fn get() ?*const StateType {
+        /// Get state reference (optional)
+        /// Pass `true` for mutable, `false` for const
+        pub inline fn get(comptime mutable: bool) if (mutable) ?*StateType else ?*const StateType {
             return state;
         }
         
-        /// Get mutable state reference (optional)
-        pub inline fn getMut() ?*StateType {
-            return state;
-        }
-        
-        /// Get mutable state reference (required - returns error if not initialized)
-        pub fn require() !*StateType {
-            return state orelse error.StateNotInitialized;
-        }
-        
-        /// Get immutable state reference (required - returns error if not initialized)
-        pub fn requireConst() !*const StateType {
+        /// Get state reference (required - returns error if not initialized)
+        /// Pass `true` for mutable, `false` for const
+        pub fn require(comptime mutable: bool) !if (mutable) *StateType else *const StateType {
             return state orelse error.StateNotInitialized;
         }
         

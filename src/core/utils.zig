@@ -16,8 +16,8 @@ pub inline fn setBorderWidth(conn: *xcb.xcb_connection_t, win: u32, width: u16) 
     _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{width});
 }
 
-// OPTIMIZATION: Combined border operation - single XCB call when possible
-pub fn configureBorder(conn: *xcb.xcb_connection_t, win: u32, width: u16, color: u32) void {
+// Note: This requires 2 XCB calls as border width and color use different APIs
+pub inline fn configureBorder(conn: *xcb.xcb_connection_t, win: u32, width: u16, color: u32) void {
     setBorderWidth(conn, win, width);
     setBorder(conn, win, color);
 }
@@ -82,7 +82,6 @@ pub inline fn normalizeModifiers(state: u16) u16 {
     return state & defs.MOD_MASK_RELEVANT;
 }
 
-// OPTIMIZATION: Struct-based atom cache with explicit fields for compile-time validation
 const AtomCache = struct {
     wm_protocols: u32,
     wm_delete: u32,
@@ -111,7 +110,6 @@ pub fn getAtom(conn: *xcb.xcb_connection_t, name: []const u8) !u32 {
     return reply.*.atom;
 }
 
-// OPTIMIZATION: Compile-time atom name validation with inline enum matching
 pub fn getAtomCached(comptime name: []const u8) !u32 {
     const cache = atom_cache orelse return error.AtomCacheNotInitialized;
     return switch (comptime std.meta.stringToEnum(enum {
@@ -137,13 +135,9 @@ pub const WMClass = struct {
     }
 };
 
-// OPTIMIZATION: Better error handling and reduced allocations
 pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allocator) ?WMClass {
-    const reply = xcb.xcb_get_property_reply(
-        conn,
-        xcb.xcb_get_property(conn, 0, win, xcb.XCB_ATOM_WM_CLASS, xcb.XCB_ATOM_STRING, 0, 256),
-        null,
-    ) orelse return null;
+    const reply = xcb.xcb_get_property_reply(conn,
+        xcb.xcb_get_property(conn, 0, win, xcb.XCB_ATOM_WM_CLASS, xcb.XCB_ATOM_STRING, 0, 256), null) orelse return null;
     defer std.c.free(reply);
     
     if (reply.*.format != 8 or reply.*.value_len == 0) return null;
@@ -151,9 +145,7 @@ pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allo
     const data: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
     const len: usize = @intCast(reply.*.value_len);
 
-    // Find null terminator for instance
     const instance_end = std.mem.indexOfScalar(u8, data[0..len], 0) orelse return null;
-
     const instance = allocator.dupe(u8, data[0..instance_end]) catch return null;
     errdefer allocator.free(instance);
 
@@ -163,7 +155,6 @@ pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allo
         return null;
     }
 
-    // Find end of class (either null or end of data)
     const class_end = if (std.mem.indexOfScalar(u8, data[class_start..len], 0)) |idx|
         class_start + idx
     else

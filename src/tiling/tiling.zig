@@ -92,7 +92,7 @@ pub fn init(wm: *WM) void {
 }
 
 pub fn deinit(wm: *WM) void {
-    if (StateManager.getMut()) |s| {
+    if (StateManager.get(true)) |s| {
         s.deinit();
     }
     StateManager.deinit(wm.allocator);
@@ -112,7 +112,7 @@ inline fn isTileable(s: *const State, wm: *const WM, win: u32) bool {
 }
 
 pub fn addWindow(wm: *WM, win: u32) void {
-    const s = StateManager.getMut() orelse return;
+    const s = StateManager.get(true) orelse return;
     if (!s.enabled) return;
 
     if (wm.fullscreen.isFullscreen(win) or s.windows.contains(win)) {
@@ -153,7 +153,7 @@ pub fn addWindow(wm: *WM, win: u32) void {
 }
 
 pub fn removeWindow(wm: *WM, win: u32) void {
-    const s = StateManager.getMut() orelse return;
+    const s = StateManager.get(true) orelse return;
 
     if (s.windows.remove(win)) {
         if (s.windows.count() > 0 and wm.focused_window == win) {
@@ -165,7 +165,7 @@ pub fn removeWindow(wm: *WM, win: u32) void {
 }
 
 pub fn updateWindowFocus(wm: *WM, old_focused: ?u32, new_focused: ?u32) void {
-    const s = StateManager.getMut() orelse return;
+    const s = StateManager.get(true) orelse return;
     if (!s.enabled) return;
 
     var b = batch.Batch.begin(wm) catch {
@@ -188,7 +188,7 @@ pub fn updateWindowFocus(wm: *WM, old_focused: ?u32, new_focused: ?u32) void {
 }
 
 fn updateWindowFocusDirect(wm: *WM, old_focused: ?u32, new_focused: ?u32) void {
-    const s = StateManager.getMut() orelse return;
+    const s = StateManager.get(true) orelse return;
     if (old_focused) |old_win| {
         if (isTileable(s, wm, old_win)) {
             utils.setBorder(wm.conn, old_win, s.borderColor(wm, old_win));
@@ -205,19 +205,19 @@ fn updateWindowFocusDirect(wm: *WM, old_focused: ?u32, new_focused: ?u32) void {
 pub const updateWindowFocusFast = updateWindowFocus;
 
 pub inline fn isWindowTiled(win: u32) bool {
-    const s = StateManager.get() orelse return false;
+    const s = StateManager.get(false) orelse return false;
     return s.enabled and s.windows.contains(win);
 }
 
 pub fn retileIfDirty(wm: *WM) void {
-    const s = StateManager.getMut() orelse return;
+    const s = StateManager.get(true) orelse return;
     if (!s.isDirty()) return;
     s.clearDirty();
     retileCurrentWorkspace(wm);
 }
 
 pub fn retileCurrentWorkspace(wm: *WM) void {
-    const s = StateManager.getMut() orelse return;
+    const s = StateManager.get(true) orelse return;
     if (!s.enabled or s.windows.count() == 0) return;
 
     const ws_state = workspaces.getState() orelse return;
@@ -275,7 +275,7 @@ pub fn retileCurrentWorkspace(wm: *WM) void {
 }
 
 fn cycleLayout(wm: *WM, forward: bool) void {
-    const s = StateManager.getMut() orelse return;
+    const s = StateManager.get(true) orelse return;
     s.layout = if (forward) switch (s.layout) {
         .master => .monocle,
         .monocle => .grid,
@@ -293,7 +293,7 @@ pub fn toggleLayout(wm: *WM) void { cycleLayout(wm, true); }
 pub fn toggleLayoutReverse(wm: *WM) void { cycleLayout(wm, false); }
 
 fn adjustMasterWidth(wm: *WM, delta: f32) void {
-    const s = StateManager.getMut() orelse return;
+    const s = StateManager.get(true) orelse return;
     s.master_width = std.math.clamp(s.master_width + delta, defs.MIN_MASTER_WIDTH, defs.MAX_MASTER_WIDTH);
     retileCurrentWorkspace(wm);
 }
@@ -302,7 +302,7 @@ pub fn increaseMasterWidth(wm: *WM) void { adjustMasterWidth(wm, 0.05); }
 pub fn decreaseMasterWidth(wm: *WM) void { adjustMasterWidth(wm, -0.05); }
 
 fn adjustMasterCount(wm: *WM, delta: isize) void {
-    const s = StateManager.getMut() orelse return;
+    const s = StateManager.get(true) orelse return;
     const new_count = if (delta > 0)
         @min(s.windows.count(), s.master_count + @as(usize, @intCast(delta)))
     else
@@ -318,7 +318,7 @@ pub fn increaseMasterCount(wm: *WM) void { adjustMasterCount(wm, 1); }
 pub fn decreaseMasterCount(wm: *WM) void { adjustMasterCount(wm, -1); }
 
 pub fn toggleTiling(wm: *WM) void {
-    const s = StateManager.getMut() orelse return;
+    const s = StateManager.get(true) orelse return;
     s.enabled = !s.enabled;
     bar.markDirty();
     if (s.enabled) {
@@ -327,7 +327,7 @@ pub fn toggleTiling(wm: *WM) void {
 }
 
 pub fn reloadConfig(wm: *WM) void {
-    const s = StateManager.getMut() orelse return;
+    const s = StateManager.get(true) orelse return;
     s.enabled = wm.config.tiling.enabled;
     s.layout = parseLayout(wm.config.tiling.layout);
     s.master_side = wm.config.tiling.master_side;
@@ -341,5 +341,5 @@ pub fn reloadConfig(wm: *WM) void {
 }
 
 pub inline fn getState() ?*State {
-    return StateManager.getMut();
+    return StateManager.get(true);
 }

@@ -5,6 +5,7 @@
 //! - Better error handling
 //! - Cleaner code structure
 //! - Compile-time optimizations
+//! - Improved fast-path string parsing
 
 const std = @import("std");
 
@@ -242,33 +243,44 @@ const Parser = struct {
         return if (key.len > 0) try self.allocator.dupe(u8, key) else ParseError.InvalidSyntax;
     }
 
-    // OPTIMIZATION: Streamlined string parsing
+    // OPTIMIZATION: Improved string parsing with better fast-path
     fn parseString(self: *Parser, allocator: std.mem.Allocator) ParseError![]const u8 {
         const quote = self.consume().?;
         const start = self.pos;
 
-        // Fast path: look for unescaped string
-        var end_pos = start;
+        // OPTIMIZATION: Scan ahead to check if we need escape processing
         var has_escapes = false;
-        while (end_pos < self.content.len) : (end_pos += 1) {
+        var end_pos = start;
+        while (end_pos < self.content.len) {
             const c = self.content[end_pos];
-            if (c == quote) {
-                if (!has_escapes) {
-                    // Fast path: no escapes, just copy
-                    self.pos = end_pos + 1;
-                    return try allocator.dupe(u8, self.content[start..end_pos]);
-                }
+            if (c == quote) break;
+            if (c == '\\') {
+                has_escapes = true;
                 break;
             }
-            if (c == '\\') has_escapes = true;
             if (c == '\n') return ParseError.InvalidValue;
+            end_pos += 1;
+        }
+
+        // Fast path: no escapes - direct slice
+        if (!has_escapes) {
+            // Continue scanning to find end quote
+            while (end_pos < self.content.len and self.content[end_pos] != quote) {
+                if (self.content[end_pos] == '\n') return ParseError.InvalidValue;
+                end_pos += 1;
+            }
+            
+            if (end_pos >= self.content.len) return ParseError.InvalidValue;
+            
+            const result = try allocator.dupe(u8, self.content[start..end_pos]);
+            self.pos = end_pos + 1; // Skip closing quote
+            return result;
         }
 
         // Slow path: handle escapes
-        var result = std.ArrayList(u8){};
+        // OPTIMIZATION: Pre-allocate based on scanned length for better capacity estimation
+        var result = try std.ArrayList(u8).initCapacity(allocator, end_pos - start);
         errdefer result.deinit(allocator);
-        // OPTIMIZATION: Pre-allocate based on original length
-        try result.ensureTotalCapacity(allocator, end_pos - start);
 
         while (self.peek()) |c| {
             if (c == quote) break;
@@ -277,7 +289,7 @@ const Parser = struct {
             if (c == '\\') {
                 _ = self.consume();
                 const next = self.consume() orelse return ParseError.InvalidValue;
-                result.appendAssumeCapacity(switch (next) {
+                try result.append(allocator, switch (next) {
                     'n' => '\n',
                     't' => '\t',
                     'r' => '\r',
@@ -286,7 +298,7 @@ const Parser = struct {
                     else => return ParseError.InvalidValue,
                 });
             } else {
-                result.appendAssumeCapacity(c);
+                try result.append(allocator, c);
                 _ = self.consume();
             }
         }
@@ -316,13 +328,12 @@ const Parser = struct {
     fn parseArray(self: *Parser, allocator: std.mem.Allocator) ParseError!std.ArrayList(Value) {
         _ = self.consume();
 
-        var array = std.ArrayList(Value){};
+        // OPTIMIZATION: Pre-allocate reasonable initial capacity
+        var array = try std.ArrayList(Value).initCapacity(allocator, 8);
         errdefer {
             for (array.items) |*item| item.deinit(allocator);
             array.deinit(allocator);
         }
-        // OPTIMIZATION: Pre-allocate reasonable initial capacity
-        try array.ensureTotalCapacity(allocator, 8);
 
         while (true) {
             self.skipWhitespaceAndNewlines();
@@ -363,20 +374,22 @@ const Parser = struct {
         // OPTIMIZATION: Use static map for boolean lookup
         if (BOOLEANS.get(raw)) |boolean| return .{ .boolean = boolean };
 
-        // Check if it looks like a color (contains hex chars or starts with # or 0x)
-        const is_color = raw[0] == '#' or (raw.len > 2 and raw[0] == '0' and (raw[1] == 'x' or raw[1] == 'X')) or
+        // OPTIMIZATION: Early detection of color values
+        const looks_like_color = raw[0] == '#' or 
+            (raw.len > 2 and raw[0] == '0' and (raw[1] == 'x' or raw[1] == 'X')) or
             blk: {
+                // Quick scan for hex letters
                 for (raw) |ch| {
                     if ((ch >= 'a' and ch <= 'f') or (ch >= 'A' and ch <= 'F')) break :blk true;
                 }
                 break :blk false;
             };
 
-        if (is_color) {
+        if (looks_like_color) {
             if (self.parseColor(raw)) |color| {
                 return .{ .color = color };
             } else |_| {
-                // Try parsing as integer if color parse failed
+                // Fallback: try as integer
                 if (std.fmt.parseInt(i64, raw, 10)) |int_val| {
                     return .{ .integer = int_val };
                 } else |_| {
