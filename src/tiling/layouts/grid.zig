@@ -16,10 +16,6 @@ inline fn calcGridDims(n: usize) struct { cols: u16, rows: u16 } {
     return .{ .cols = cols, .rows = rows };
 }
 
-pub fn tile(b: *batch.Batch, state: *State, windows: []const u32, screen_w: u16, screen_h: u16) void {
-    layout_common.tileWrapper(tileWithOffset, b, state, windows, screen_w, screen_h);
-}
-
 pub fn tileWithOffset(b: *batch.Batch, state: *State, windows: []const u32, screen_w: u16, screen_h: u16, y_offset: u16) void {
     const n = windows.len;
     if (n == 0) return;

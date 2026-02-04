@@ -27,11 +27,6 @@ const LOCK_MODIFIERS = [_]u16{ 0, defs.MOD_LOCK, defs.MOD_2, defs.MOD_LOCK | def
 const CURSOR_LEFT_PTR = 68;
 const CURSOR_LEFT_PTR_MASK = 69;
 
-// Pre-converted signal numbers for efficient comparison
-const SIG_HUP: u32 = @intFromEnum(posix.SIG.HUP);
-const SIG_TERM: u32 = @intFromEnum(posix.SIG.TERM);
-const SIG_INT: u32 = @intFromEnum(posix.SIG.INT);
-
 var should_reload = std.atomic.Value(bool).init(false);
 var running = std.atomic.Value(bool).init(true);
 
@@ -76,10 +71,10 @@ fn handleSignalFd(signal_fd: posix.fd_t, reload_flag: *std.atomic.Value(bool), r
         
         if (bytes_read != @sizeOf(std.os.linux.signalfd_siginfo)) break;
         
-        // Use pre-converted signal constants for efficiency
+        // Inline signal comparisons for efficiency
         switch (siginfo.signo) {
-            SIG_HUP => reload_flag.store(true, .release),
-            SIG_TERM, SIG_INT => running_flag.store(false, .release),
+            @intFromEnum(posix.SIG.HUP) => reload_flag.store(true, .release),
+            @intFromEnum(posix.SIG.TERM), @intFromEnum(posix.SIG.INT) => running_flag.store(false, .release),
             else => {},
         }
     }

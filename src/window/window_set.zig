@@ -55,19 +55,6 @@ pub const WindowSet = struct {
         return false;
     }
     
-    /// Remove window maintaining order (slower but preserves list order)
-    pub fn removeOrdered(self: *WindowSet, win: u32) bool {
-        if (!self.set.remove(win)) return false;
-        
-        for (self.list.items, 0..) |w, i| {
-            if (w == win) {
-                _ = self.list.orderedRemove(i);
-                return true;
-            }
-        }
-        return false;
-    }
-    
     pub inline fn items(self: *const WindowSet) []const u32 {
         return self.list.items;
     }
