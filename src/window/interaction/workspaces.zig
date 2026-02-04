@@ -1,4 +1,4 @@
-// Workspace management - Optimized with batch operations
+// Workspace management - OPTIMIZED with batch operations
 
 const std = @import("std");
 const defs = @import("defs");
@@ -7,6 +7,7 @@ const WM = defs.WM;
 const utils = @import("utils");
 const focus = @import("focus");
 const bar = @import("bar");
+const batch = @import("batch");
 const tracking = @import("tracking").tracking;
 const ModuleState = @import("module_state").ModuleState;
 
@@ -90,7 +91,7 @@ pub fn init(wm: *WM) void {
 }
 
 pub fn deinit(wm: *WM) void {
-    if (StateManager.getMut()) |s| {
+    if (StateManager.get(true)) |s| {
         for (s.workspaces) |*ws| {
             ws.deinit();
             wm.allocator.free(ws.name);
@@ -102,7 +103,7 @@ pub fn deinit(wm: *WM) void {
 }
 
 pub fn addWindowToCurrentWorkspace(_: *WM, win: u32) void {
-    const s = StateManager.getMut() orelse return;
+    const s = StateManager.get(true) orelse return;
     if (@import("bar").isBarWindow(win)) return;
 
     const ws = &s.workspaces[s.current];
@@ -116,7 +117,7 @@ pub fn addWindowToCurrentWorkspace(_: *WM, win: u32) void {
 }
 
 pub fn removeWindow(win: u32) void {
-    const s = StateManager.getMut() orelse return;
+    const s = StateManager.get(true) orelse return;
     if (s.window_to_workspace.fetchRemove(win)) |entry| {
         const ws_idx = entry.value;
         if (ws_idx < s.workspaces.len) {
@@ -126,7 +127,7 @@ pub fn removeWindow(win: u32) void {
 }
 
 pub fn moveWindowTo(wm: *WM, win: u32, target_ws: usize) void {
-    const s = StateManager.getMut() orelse return;
+    const s = StateManager.get(true) orelse return;
 
     if (target_ws >= s.workspaces.len) {
         std.log.err("[workspaces] Invalid target workspace: {}", .{target_ws});
@@ -173,15 +174,16 @@ inline fn markTilingDirty() void {
 }
 
 pub fn switchTo(wm: *WM, ws_id: usize) void {
-    const s = StateManager.getMut() orelse return;
+    const s = StateManager.get(true) orelse return;
     if (ws_id >= s.workspaces.len or ws_id == s.current) return;
     const old_ws = s.current;
     s.current = ws_id;
     executeSwitch(wm, old_ws, ws_id);
 }
 
+// OPTIMIZATION: Completely rewritten to use batch operations
 fn executeSwitch(wm: *WM, old_ws: usize, new_ws: usize) void {
-    const s = StateManager.getMut() orelse return;
+    const s = StateManager.get(true) orelse return;
 
     const old_workspace = &s.workspaces[old_ws];
     const new_workspace = &s.workspaces[new_ws];
@@ -195,38 +197,47 @@ fn executeSwitch(wm: *WM, old_ws: usize, new_ws: usize) void {
 
     const fs_info = wm.fullscreen.getForWorkspace(new_ws);
 
-    // OPTIMIZATION: Batch all XCB operations
-    // Move old windows off-screen
+    // OPTIMIZATION: Use batch operations for all XCB calls
+    var b = batch.Batch.begin(wm) catch {
+        executeSwitchDirect(wm, old_workspace, new_workspace, screen, fs_info);
+        return;
+    };
+    defer b.deinit();
+
+    // Move old windows off-screen (batch)
     for (old_workspace.windows.items()) |win| {
-        _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_X,
-            &[_]u32{@intCast(screen.width_in_pixels)});
-    }
-    // Map new windows
-    for (new_workspace.windows.items()) |win| {
-        _ = xcb.xcb_map_window(wm.conn, win);
-    }
-    // Restore fullscreen window if present
-    if (fs_info) |info| {
-        const values = [_]u32{
-            0, // x
-            0, // y
-            @intCast(screen.width_in_pixels), // width
-            @intCast(screen.height_in_pixels), // height
-            0, // border_width
+        const rect = utils.Rect{
+            .x = @intCast(screen.width_in_pixels),
+            .y = 0,
+            .width = 1,
+            .height = 1,
         };
-        _ = xcb.xcb_configure_window(wm.conn, info.window,
-            xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
-            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
-            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &values);
-        _ = xcb.xcb_configure_window(wm.conn, info.window,
-            xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+        b.configure(win, rect) catch {};
     }
 
-    // Retile and flush
+    // Map new windows (batch)
+    for (new_workspace.windows.items()) |win| {
+        b.map(win) catch {};
+    }
+
+    // Restore fullscreen window if present
+    if (fs_info) |info| {
+        const rect = utils.Rect{
+            .x = 0,
+            .y = 0,
+            .width = screen.width_in_pixels,
+            .height = screen.height_in_pixels,
+        };
+        b.configure(info.window, rect) catch {};
+        b.setBorderWidth(info.window, 0) catch {};
+        b.raise(info.window) catch {};
+    }
+
+    b.execute();
+
+    // Retile after batch execute
     if (wm.config.tiling.enabled) {
         @import("tiling").retileCurrentWorkspace(wm);
-    } else {
-        utils.flush(wm.conn);
     }
 
     // OPTIMIZATION: Combined bar state management
@@ -237,33 +248,72 @@ fn executeSwitch(wm: *WM, old_ws: usize, new_ws: usize) void {
         bar.setBarState(wm, .show_fullscreen);
     }
 
-    // Set focus
+    // Set focus - use deferred flush variant if available
     const focus_target = wm.focused_window orelse wm.root;
     _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, focus_target, xcb.XCB_CURRENT_TIME);
     utils.flush(wm.conn);
     bar.markDirty();
 }
 
+// OPTIMIZATION: Direct fallback when batch unavailable
+fn executeSwitchDirect(wm: *WM, old_workspace: *Workspace, new_workspace: *Workspace, screen: *xcb.xcb_screen_t, fs_info: ?defs.FullscreenInfo) void {
+    const conn = wm.conn;
+    
+    // Move old windows off-screen
+    for (old_workspace.windows.items()) |win| {
+        _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_X,
+            &[_]u32{@intCast(screen.width_in_pixels)});
+    }
+    
+    // Map new windows
+    for (new_workspace.windows.items()) |win| {
+        _ = xcb.xcb_map_window(conn, win);
+    }
+    
+    // Restore fullscreen window if present
+    if (fs_info) |info| {
+        const values = [_]u32{
+            0, // x
+            0, // y
+            @intCast(screen.width_in_pixels), // width
+            @intCast(screen.height_in_pixels), // height
+            0, // border_width
+        };
+        _ = xcb.xcb_configure_window(conn, info.window,
+            xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
+            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
+            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &values);
+        _ = xcb.xcb_configure_window(conn, info.window,
+            xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+    }
+
+    utils.flush(conn);
+    
+    if (wm.config.tiling.enabled) {
+        @import("tiling").retileCurrentWorkspace(wm);
+    }
+}
+
 pub inline fn getCurrentWindowsView() ?[]const u32 {
-    const s = StateManager.getMut() orelse return null;
+    const s = StateManager.get(true) orelse return null;
     return s.workspaces[s.current].windows.items();
 }
 
 pub inline fn getCurrentWorkspace() ?usize {
-    const s = StateManager.getMut() orelse return null;
+    const s = StateManager.get(true) orelse return null;
     return s.current;
 }
 
 pub inline fn isOnCurrentWorkspace(win: u32) bool {
-    const s = StateManager.getMut() orelse return false;
+    const s = StateManager.get(true) orelse return false;
     return s.workspaces[s.current].contains(win);
 }
 
 pub inline fn getState() ?*State {
-    return StateManager.getMut();
+    return StateManager.get(true);
 }
 
 pub inline fn getCurrentWorkspaceObject() ?*Workspace {
-    const s = StateManager.getMut() orelse return null;
+    const s = StateManager.get(true) orelse return null;
     return &s.workspaces[s.current];
 }

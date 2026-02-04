@@ -23,42 +23,39 @@ pub const Batch = struct {
     wm: *WM,
     ops: [MAX_BATCH_OPS]XcbOp,
     count: usize,
-    auto_flushed: usize = 0,
 
     pub fn begin(wm: *WM) !Batch {
         return .{
             .wm = wm,
             .ops = undefined,
             .count = 0,
-            .auto_flushed = 0,
         };
     }
 
-    pub inline fn deinit(self: *Batch) void {
-        // OPTIMIZATION: Skip log call when no operations were performed
-        if (self.count > 0 and self.auto_flushed > 0) {
-            std.log.debug("[batch] Stats: {} operations, {} auto-flush(es)", 
-                .{ self.count, self.auto_flushed });
-        }
+    pub inline fn deinit(_: *Batch) void {
+        // No cleanup needed - ops array is stack-allocated
     }
 
     inline fn pushOp(self: *Batch, op: XcbOp) !void {
-        // OPTIMIZATION: Single branch for capacity check
-        if (self.count >= AUTO_FLUSH_THRESHOLD) {
-            if (self.count >= MAX_BATCH_OPS) {
-                std.log.err("[batch] Batch overflow! Consider increasing MAX_BATCH_OPS", .{});
-                return error.BatchFull;
-            }
-            std.log.warn("[batch] Auto-flushing at {} ops (capacity: {})", 
-                .{ self.count, MAX_BATCH_OPS });
-            self.executeNoFlush();
-            _ = xcb.xcb_flush(self.wm.conn);
-            self.count = 0;
-            self.auto_flushed += 1;
+        // OPTIMIZATION: Single comparison for common case
+        if (self.count < AUTO_FLUSH_THRESHOLD) {
+            self.ops[self.count] = op;
+            self.count += 1;
+            return;
         }
         
-        self.ops[self.count] = op;
-        self.count += 1;
+        // OPTIMIZATION: Rare path - auto-flush
+        if (self.count >= MAX_BATCH_OPS) {
+            std.log.err("[batch] Batch overflow! Consider increasing MAX_BATCH_OPS", .{});
+            return error.BatchFull;
+        }
+        
+        std.log.warn("[batch] Auto-flushing at {} ops", .{self.count});
+        self.executeNoFlush();
+        _ = xcb.xcb_flush(self.wm.conn);
+        self.count = 0;
+        self.ops[0] = op;
+        self.count = 1;
     }
 
     pub inline fn map(self: *Batch, win: u32) !void {
@@ -96,14 +93,28 @@ pub const Batch = struct {
 
     pub fn executeNoFlush(self: *Batch) void {
         const conn = self.wm.conn;
-        const ops = self.ops[0..self.count];
-
-        // OPTIMIZATION: Separate functions enable better inlining
-        for (ops) |op| {
+        
+        // OPTIMIZATION: Direct array access with known bounds
+        var i: usize = 0;
+        while (i < self.count) : (i += 1) {
+            const op = self.ops[i];
             switch (op) {
                 .map => |win| _ = xcb.xcb_map_window(conn, win),
                 .unmap => |win| _ = xcb.xcb_unmap_window(conn, win),
-                .configure => |cfg| executeConfigureOp(conn, cfg),
+                .configure => |cfg| {
+                    // OPTIMIZATION: Inline configure to avoid function call overhead
+                    const r = cfg.rect.clamp();
+                    const values = [_]u32{
+                        @bitCast(@as(i32, r.x)),
+                        @bitCast(@as(i32, r.y)),
+                        r.width,
+                        r.height,
+                    };
+                    _ = xcb.xcb_configure_window(conn, cfg.win,
+                        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
+                            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT,
+                        &values);
+                },
                 .set_border => |sb| _ = xcb.xcb_change_window_attributes(conn, sb.win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{sb.color}),
                 .set_border_width => |sbw| _ = xcb.xcb_configure_window(conn, sbw.win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{sbw.width}),
                 .raise => |win| _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE}),
@@ -111,18 +122,3 @@ pub const Batch = struct {
         }
     }
 };
-
-// OPTIMIZATION: Separate inline function for complex configure operation
-inline fn executeConfigureOp(conn: *xcb.xcb_connection_t, cfg: anytype) void {
-    const r = cfg.rect.clamp();
-    const values = [_]u32{
-        @bitCast(@as(i32, r.x)),
-        @bitCast(@as(i32, r.y)),
-        r.width,
-        r.height,
-    };
-    _ = xcb.xcb_configure_window(conn, cfg.win,
-        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
-            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT,
-        &values);
-}

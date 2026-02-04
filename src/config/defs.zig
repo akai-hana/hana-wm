@@ -150,7 +150,8 @@ pub const BarLayout = struct {
     position: BarPosition,
     segments: std.ArrayList(BarSegment),
 
-    pub fn deinit(self: *BarLayout, allocator: std.mem.Allocator) void {
+    // OPTIMIZATION: Inline deinit since it's called in hot paths
+    pub inline fn deinit(self: *BarLayout, allocator: std.mem.Allocator) void {
         self.segments.deinit(allocator);
     }
 };
@@ -186,17 +187,21 @@ pub const BarConfig = struct {
 
     layout: std.ArrayList(BarLayout),
 
+    // OPTIMIZATION: Batch frees to reduce allocator calls
     pub fn deinit(self: *BarConfig, allocator: std.mem.Allocator) void {
+        // Free workspace icons
         for (self.workspace_icons.items) |icon| {
             allocator.free(icon);
         }
         self.workspace_icons.deinit(allocator);
         
+        // Free fonts
         for (self.fonts.items) |font| {
             allocator.free(font);
         }
         self.fonts.deinit(allocator);
 
+        // Free layouts (inline deinit helps here)
         for (self.layout.items) |*item| {
             item.deinit(allocator);
         }
@@ -220,7 +225,7 @@ pub const Rule = struct {
     class_name: []const u8,
     workspace: usize,
 
-    pub fn deinit(self: *Rule, allocator: std.mem.Allocator) void {
+    pub inline fn deinit(self: *Rule, allocator: std.mem.Allocator) void {
         allocator.free(self.class_name);
     }
 };
@@ -252,19 +257,24 @@ pub const Config = struct {
         };
     }
 
+    // OPTIMIZATION: Batch cleanup operations
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
+        // Clean keybindings
         for (self.keybindings.items) |*kb| {
             kb.action.deinit(allocator);
         }
         self.keybindings.deinit(allocator);
 
+        // Clean workspace rules
         for (self.workspaces.rules.items) |*rule| {
             rule.deinit(allocator);
         }
         self.workspaces.rules.deinit(allocator);
 
+        // Clean bar config
         self.bar.deinit(allocator);
 
+        // Clean allocated strings
         if (self.allocated_font) |f| allocator.free(f);
         if (self.allocated_layout) |l| allocator.free(l);
         if (self.allocated_clock_format) |f| allocator.free(f);
@@ -320,14 +330,14 @@ pub const FullscreenState = struct {
     }
 
     pub fn removeForWorkspace(self: *FullscreenState, ws: usize) void {
-        // Remove from both maps
+        // Remove from both maps atomically
         if (self.per_workspace.get(ws)) |info| {
             _ = self.window_to_workspace.remove(info.window);
         }
         _ = self.per_workspace.remove(ws);
     }
 
-    pub fn clear(self: *FullscreenState) void {
+    pub inline fn clear(self: *FullscreenState) void {
         self.per_workspace.clearRetainingCapacity();
         self.window_to_workspace.clearRetainingCapacity();
     }

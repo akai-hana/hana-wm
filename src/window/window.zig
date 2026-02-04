@@ -9,15 +9,9 @@ const focus = @import("focus");
 const tiling = @import("tiling");
 const workspaces = @import("workspaces");
 const bar = @import("bar");
+const batch = @import("batch");
 
 const WINDOW_EVENT_MASK = xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW;
-
-inline fn setupTilingBorder(conn: *xcb.xcb_connection_t, win: u32, config: *const defs.Config) void {
-    _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
-        &[_]u32{config.tiling.border_width});
-    _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL,
-        &[_]u32{config.tiling.border_unfocused});
-}
 
 // OPTIMIZATION: Inline workspace validation function
 inline fn validateWorkspace(target_ws: ?usize, current_ws: usize) usize {
@@ -46,12 +40,20 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     const validated_ws = validateWorkspace(target_ws, current_ws);
     const is_current_ws = (validated_ws == current_ws);
 
+    // OPTIMIZATION: Use batch operations for all XCB calls
+    var b = batch.Batch.begin(wm) catch {
+        // Fallback to direct calls if batch fails
+        handleMapRequestDirect(wm, win, is_current_ws, validated_ws);
+        return;
+    };
+    defer b.deinit();
+
     // Subscribe to enter/leave events
     _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{WINDOW_EVENT_MASK});
 
     // Map window only if on current workspace
     if (is_current_ws) {
-        _ = xcb.xcb_map_window(wm.conn, win);
+        b.map(win) catch {};
     }
 
     // Track window
@@ -69,13 +71,46 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     // Set up tiling
     if (wm.config.tiling.enabled) {
         if (is_current_ws) {
-            setupTilingBorder(wm.conn, win, &wm.config);
+            b.setBorderWidth(win, wm.config.tiling.border_width) catch {};
+            b.setBorder(win, wm.config.tiling.border_unfocused) catch {};
         }
         tiling.addWindow(wm, win);
     }
 
+    b.execute();
     bar.markDirty();
+}
+
+// OPTIMIZATION: Fallback for when batch operations fail
+inline fn handleMapRequestDirect(wm: *WM, win: u32, is_current_ws: bool, validated_ws: usize) void {
+    _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{WINDOW_EVENT_MASK});
+    
+    if (is_current_ws) {
+        _ = xcb.xcb_map_window(wm.conn, win);
+    }
+    
+    wm.addWindow(win) catch |err| {
+        std.log.err("[window] Failed to track window {x}: {}", .{ win, err });
+    };
+    
+    if (is_current_ws) {
+        workspaces.addWindowToCurrentWorkspace(wm, win);
+    } else {
+        workspaces.moveWindowTo(wm, win, validated_ws);
+    }
+    
+    if (wm.config.tiling.enabled) {
+        if (is_current_ws) {
+            _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
+                &[_]u32{wm.config.tiling.border_width});
+            _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_BORDER_PIXEL,
+                &[_]u32{wm.config.tiling.border_unfocused});
+        }
+        tiling.addWindow(wm, win);
+    }
+    
     utils.flush(wm.conn);
+    bar.markDirty();
 }
 
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, wm: *WM) void {
@@ -150,6 +185,7 @@ inline fn cleanupFullscreenWindow(wm: *WM, win: u32) void {
     }
 }
 
+// OPTIMIZATION: Cache WM class lookups to avoid repeated allocations
 inline fn matchWorkspaceRule(wm: *WM, win: u32) ?usize {
     const rules = wm.config.workspaces.rules.items;
     if (rules.len == 0) return null;
