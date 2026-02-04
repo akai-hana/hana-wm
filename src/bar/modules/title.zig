@@ -7,22 +7,8 @@ const drawing = @import("drawing");
 const workspaces = @import("workspaces");
 const utils = @import("utils");
 
-// Atom cache - initialized on first use
-const AtomCache = struct {
-    net_wm_name: ?u32 = null,
-    utf8_string: ?u32 = null,
-
-    fn ensureLoaded(self: *AtomCache, conn: *xcb.xcb_connection_t) void {
-        if (self.net_wm_name == null) {
-            self.net_wm_name = utils.getAtom(conn, "_NET_WM_NAME") catch null;
-        }
-        if (self.utf8_string == null) {
-            self.utf8_string = utils.getAtom(conn, "UTF8_STRING") catch xcb.XCB_ATOM_STRING;
-        }
-    }
-};
-
-var atom_cache = AtomCache{};
+var net_wm_name: ?u32 = null;
+var utf8_string: ?u32 = null;
 
 pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start_x: u16, width: u16,
     wm: *defs.WM, cached_title: *std.ArrayList(u8), cached_title_window: *?u32, allocator: std.mem.Allocator) !u16 {
@@ -70,23 +56,20 @@ fn getFocusedWindowTitle(wm: *defs.WM, cached_title: *std.ArrayList(u8),
         return "";
     };
     
-    // Return cached title if it's for the same window
-    if (cached_title_window.* == win and cached_title.items.len > 0) {
-        return cached_title.items;
-    }
+    if (cached_title_window.* == win and cached_title.items.len > 0) return cached_title.items;
 
-    // Ensure atoms are loaded
-    atom_cache.ensureLoaded(wm.conn);
+    // Lazy load atoms
+    net_wm_name = net_wm_name orelse utils.getAtom(wm.conn, "_NET_WM_NAME") catch null;
+    utf8_string = utf8_string orelse utils.getAtom(wm.conn, "UTF8_STRING") catch xcb.XCB_ATOM_STRING;
 
     // Try _NET_WM_NAME first (modern UTF-8 property)
-    if (atom_cache.net_wm_name) |net_wm_name| {
-        const title = try fetchProperty(wm.conn, win, net_wm_name,
-            atom_cache.utf8_string orelse xcb.XCB_ATOM_STRING, 
+    if (net_wm_name) |atom| {
+        const title = try fetchProperty(wm.conn, win, atom, utf8_string.?, 
             cached_title, cached_title_window, allocator);
         if (title.len > 0) return title;
     }
     
-    // Fallback to XCB_ATOM_WM_NAME (legacy property)
+    // Fallback to legacy XCB_ATOM_WM_NAME
     return try fetchProperty(wm.conn, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING,
         cached_title, cached_title_window, allocator);
 }

@@ -36,14 +36,14 @@ fn formatUtc(buf: []u8, epoch_sec: i64) ![]const u8 {
     const epoch_day = @divFloor(epoch_sec, std.time.s_per_day);
     const day_sec = @mod(epoch_sec, std.time.s_per_day);
     const civil_day = std.time.epoch.EpochDay{ .day = @intCast(epoch_day) };
-    const month_day = civil_day.calculateYearDay().calculateMonthDay();
+    const year_day = civil_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+
+    const hour: u32 = @intCast(@divFloor(day_sec, std.time.s_per_hour));
+    const min: u32 = @intCast(@divFloor(@mod(day_sec, std.time.s_per_hour), std.time.s_per_min));
+    const sec: u32 = @intCast(@mod(day_sec, std.time.s_per_min));
 
     return try std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{
-        civil_day.calculateYearDay().year,
-        month_day.month.numeric(),
-        month_day.day_index + 1,
-        @as(u32, @intCast(@divFloor(day_sec, std.time.s_per_hour))),
-        @as(u32, @intCast(@divFloor(@mod(day_sec, std.time.s_per_hour), std.time.s_per_min))),
-        @as(u32, @intCast(@mod(day_sec, std.time.s_per_min))),
+        year_day.year, month_day.month.numeric(), month_day.day_index + 1, hour, min, sec,
     });
 }

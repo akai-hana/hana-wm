@@ -1,16 +1,13 @@
 /// Efficient window tracking with both list and set
-/// Replaces duplicate code in workspaces and tiling modules
 
 const std = @import("std");
 
-/// Dual data structure for efficient window tracking
-/// Maintains both ordered list and hash set for O(1) lookups
-pub const WindowSet = struct {
+pub const tracking = struct {
     list: std.ArrayList(u32),
     set: std.AutoHashMap(u32, void),
     allocator: std.mem.Allocator,
     
-    pub fn init(allocator: std.mem.Allocator) WindowSet {
+    pub fn init(allocator: std.mem.Allocator) tracking {
         return .{
             .list = .{},
             .set = std.AutoHashMap(u32, void).init(allocator),
@@ -18,52 +15,47 @@ pub const WindowSet = struct {
         };
     }
     
-    pub fn deinit(self: *WindowSet) void {
+    pub fn deinit(self: *tracking) void {
         self.list.deinit(self.allocator);
         self.set.deinit();
     }
     
-    pub inline fn contains(self: *const WindowSet, win: u32) bool {
+    pub inline fn contains(self: *const tracking, win: u32) bool {
         return self.set.contains(win);
     }
     
-    /// Add window to end of list
-    pub fn add(self: *WindowSet, win: u32) !void {
+    pub fn add(self: *tracking, win: u32) !void {
         if (self.contains(win)) return;
         try self.list.append(self.allocator, win);
         try self.set.put(win, {});
     }
     
-    /// Add window to front of list (for focus ordering)
-    pub fn addFront(self: *WindowSet, win: u32) !void {
+    pub fn addFront(self: *tracking, win: u32) !void {
         if (self.contains(win)) return;
         try self.list.insert(self.allocator, 0, win);
         try self.set.put(win, {});
     }
     
-    /// Remove window from both structures
-    /// Returns true if window was found and removed
-    pub fn remove(self: *WindowSet, win: u32) bool {
+    // OPTIMIZATION: Use std.mem.indexOfScalar for cleaner code
+    pub fn remove(self: *tracking, win: u32) bool {
         if (!self.set.remove(win)) return false;
         
-        for (self.list.items, 0..) |w, i| {
-            if (w == win) {
-                _ = self.list.swapRemove(i);
-                return true;
-            }
+        if (std.mem.indexOfScalar(u32, self.list.items, win)) |idx| {
+            _ = self.list.swapRemove(idx);
+            return true;
         }
         return false;
     }
     
-    pub inline fn items(self: *const WindowSet) []const u32 {
+    pub inline fn items(self: *const tracking) []const u32 {
         return self.list.items;
     }
     
-    pub inline fn count(self: *const WindowSet) usize {
+    pub inline fn count(self: *const tracking) usize {
         return self.list.items.len;
     }
     
-    pub fn clear(self: *WindowSet) void {
+    pub inline fn clear(self: *tracking) void {
         self.list.clearRetainingCapacity();
         self.set.clearRetainingCapacity();
     }

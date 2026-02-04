@@ -1,4 +1,4 @@
-// Window event handlers - Optimized for instant window spawning (OPTIMIZED)
+// Window event handlers - Optimized for instant window spawning
 
 const std = @import("std");
 const defs = @import("defs");
@@ -19,6 +19,18 @@ inline fn setupTilingBorder(conn: *xcb.xcb_connection_t, win: u32, config: *cons
         &[_]u32{config.tiling.border_normal});
 }
 
+// OPTIMIZATION: Inline workspace validation function
+inline fn validateWorkspace(target_ws: ?usize, current_ws: usize) usize {
+    const ws = target_ws orelse return current_ws;
+    const ws_state = workspaces.getState() orelse return current_ws;
+    
+    if (ws >= ws_state.workspaces.len) {
+        std.log.warn("[window] Rule workspace {} exceeds count, using current {}", .{ ws, current_ws });
+        return current_ws;
+    }
+    return ws;
+}
+
 pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void {
     const win = event.window;
 
@@ -29,26 +41,13 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
         return;
     }
 
-    // Determine target workspace
-    const target_ws = matchWorkspaceRule(wm, win);
     const current_ws = workspaces.getCurrentWorkspace() orelse 0;
+    const target_ws = matchWorkspaceRule(wm, win);
+    const validated_ws = validateWorkspace(target_ws, current_ws);
+    const is_current_ws = (validated_ws == current_ws);
 
-    // Validate and clamp workspace index
-    const validated_target_ws = if (target_ws) |ws| blk: {
-        if (workspaces.getState()) |ws_state| {
-            if (ws >= ws_state.workspaces.len) {
-                std.log.warn("[window] Rule workspace {} exceeds count, using current {}", .{ ws, current_ws });
-                break :blk current_ws;
-            }
-            break :blk ws;
-        }
-        break :blk current_ws;
-    } else current_ws;
-
-    // Subscribe to enter/leave events for focus-follows-mouse
+    // Subscribe to enter/leave events
     _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{WINDOW_EVENT_MASK});
-
-    const is_current_ws = (validated_target_ws == current_ws);
 
     // Map window only if on current workspace
     if (is_current_ws) {
@@ -64,7 +63,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     if (is_current_ws) {
         workspaces.addWindowToCurrentWorkspace(wm, win);
     } else {
-        workspaces.moveWindowTo(wm, win, validated_target_ws);
+        workspaces.moveWindowTo(wm, win, validated_ws);
     }
 
     // Set up tiling
@@ -80,14 +79,13 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
 }
 
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, wm: *WM) void {
-    // Block fullscreen window from reconfiguring itself
-    if (wm.fullscreen.isFullscreen(event.window)) return;
-
-    // Tiled windows ignore configure requests - WM controls their geometry
-    if (wm.config.tiling.enabled and tiling.isWindowTiled(event.window)) return;
+    const win = event.window;
+    
+    // OPTIMIZATION: Combine checks with early return
+    if (wm.fullscreen.isFullscreen(win) or 
+        (wm.config.tiling.enabled and tiling.isWindowTiled(win))) return;
 
     // Allow floating windows to configure themselves
-    // Only pass values that are actually requested via value_mask
     const values = [_]u32{
         @intCast(event.x),
         @intCast(event.y),
@@ -95,23 +93,19 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, w
         @intCast(event.height),
         @intCast(event.border_width),
     };
-    _ = xcb.xcb_configure_window(wm.conn, event.window, event.value_mask, &values);
+    _ = xcb.xcb_configure_window(wm.conn, win, event.value_mask, &values);
     utils.flush(wm.conn);
 }
 
 pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) void {
     const win = event.event;
     
-    // Early returns for invalid conditions
-    if (win == wm.root or win == 0) return;
-    if (bar.isBarWindow(win)) return;
-    if (focus.isProtected()) return;
+    // OPTIMIZATION: Combined early return checks
+    if (win == wm.root or win == 0 or bar.isBarWindow(win) or focus.isProtected()) return;
 
     // Filter spurious EnterNotify events
-    // X11 generates EnterNotify in many scenarios beyond "mouse entered window"
-    // Only accept normal pointer motion into a window
-    if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL) return;
-    if (event.detail == xcb.XCB_NOTIFY_DETAIL_VIRTUAL or
+    if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL or
+        event.detail == xcb.XCB_NOTIFY_DETAIL_VIRTUAL or
         event.detail == xcb.XCB_NOTIFY_DETAIL_NONLINEAR_VIRTUAL) return;
 
     const old_focus = wm.focused_window;
@@ -124,15 +118,10 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM
 
     if (bar.isBarWindow(win)) return;
 
-    // Clean up fullscreen state if this window was fullscreened
+    // Clean up fullscreen state
     if (wm.fullscreen.isFullscreen(win)) {
-        var it = wm.fullscreen.per_workspace.iterator();
-        while (it.next()) |entry| {
-            if (entry.value_ptr.window == win) {
-                wm.fullscreen.removeForWorkspace(entry.key_ptr.*);
-                break;
-            }
-        }
+        cleanupFullscreenWindow(wm, win);
+        bar.showForFullscreen(wm);
     }
 
     if (wm.config.tiling.enabled) {
@@ -150,6 +139,17 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM
     utils.flush(wm.conn);
 }
 
+// OPTIMIZATION: Extract fullscreen cleanup into separate function
+inline fn cleanupFullscreenWindow(wm: *WM, win: u32) void {
+    var it = wm.fullscreen.per_workspace.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.window == win) {
+            wm.fullscreen.removeForWorkspace(entry.key_ptr.*);
+            break;
+        }
+    }
+}
+
 inline fn matchWorkspaceRule(wm: *WM, win: u32) ?usize {
     const rules = wm.config.workspaces.rules.items;
     if (rules.len == 0) return null;
@@ -157,6 +157,7 @@ inline fn matchWorkspaceRule(wm: *WM, win: u32) ?usize {
     const wm_class = utils.getWMClass(wm.conn, win, wm.allocator) orelse return null;
     defer wm_class.deinit(wm.allocator);
 
+    // OPTIMIZATION: Single loop with early return
     for (rules) |rule| {
         if (std.mem.eql(u8, rule.class_name, wm_class.class) or
             std.mem.eql(u8, rule.class_name, wm_class.instance))

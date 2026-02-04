@@ -14,18 +14,16 @@ const XcbOp = union(enum) {
     set_border: struct { win: u32, color: u32 },
     set_border_width: struct { win: u32, width: u16 },
     raise: u32,
-    // Note: set_focus removed - now called directly through focus module
 };
 
-// 256 operations = ~16KB stack (well within safe limits)
 const MAX_BATCH_OPS = 256;
-const AUTO_FLUSH_THRESHOLD = 200;  // Auto-flush at ~80% capacity to prevent overflow
+const AUTO_FLUSH_THRESHOLD = 200;
 
 pub const Batch = struct {
     wm: *WM,
     ops: [MAX_BATCH_OPS]XcbOp,
     count: usize,
-    auto_flushed: usize = 0,  // Track auto-flush count for debugging
+    auto_flushed: usize = 0,
 
     pub fn begin(wm: *WM) !Batch {
         return .{
@@ -37,15 +35,20 @@ pub const Batch = struct {
     }
 
     pub inline fn deinit(self: *Batch) void {
-        if (self.auto_flushed > 0) {
+        // OPTIMIZATION: Skip log call when no operations were performed
+        if (self.count > 0 and self.auto_flushed > 0) {
             std.log.debug("[batch] Stats: {} operations, {} auto-flush(es)", 
                 .{ self.count, self.auto_flushed });
         }
     }
 
     inline fn pushOp(self: *Batch, op: XcbOp) !void {
-        // Auto-flush when approaching capacity to prevent overflow
+        // OPTIMIZATION: Single branch for capacity check
         if (self.count >= AUTO_FLUSH_THRESHOLD) {
+            if (self.count >= MAX_BATCH_OPS) {
+                std.log.err("[batch] Batch overflow! Consider increasing MAX_BATCH_OPS", .{});
+                return error.BatchFull;
+            }
             std.log.warn("[batch] Auto-flushing at {} ops (capacity: {})", 
                 .{ self.count, MAX_BATCH_OPS });
             self.executeNoFlush();
@@ -54,42 +57,35 @@ pub const Batch = struct {
             self.auto_flushed += 1;
         }
         
-        if (self.count >= MAX_BATCH_OPS) {
-            std.log.err("[batch] Batch overflow! Consider increasing MAX_BATCH_OPS", .{});
-            return error.BatchFull;
-        }
-        
         self.ops[self.count] = op;
         self.count += 1;
     }
 
-    pub fn map(self: *Batch, win: u32) !void {
+    pub inline fn map(self: *Batch, win: u32) !void {
         try self.pushOp(.{ .map = win });
     }
 
-    pub fn unmap(self: *Batch, win: u32) !void {
+    pub inline fn unmap(self: *Batch, win: u32) !void {
         try self.pushOp(.{ .unmap = win });
     }
 
-    pub fn configure(self: *Batch, win: u32, rect: utils.Rect) !void {
+    pub inline fn configure(self: *Batch, win: u32, rect: utils.Rect) !void {
         try self.pushOp(.{ .configure = .{ .win = win, .rect = rect } });
     }
 
-    pub fn setBorder(self: *Batch, win: u32, color: u32) !void {
+    pub inline fn setBorder(self: *Batch, win: u32, color: u32) !void {
         try self.pushOp(.{ .set_border = .{ .win = win, .color = color } });
     }
 
-    pub fn setBorderWidth(self: *Batch, win: u32, width: u16) !void {
+    pub inline fn setBorderWidth(self: *Batch, win: u32, width: u16) !void {
         try self.pushOp(.{ .set_border_width = .{ .win = win, .width = width } });
     }
 
-    pub fn setFocus(self: *Batch, win: u32) !void {
-        // Focus has important side effects (bar updates, tiling integration, protection)
-        // Call focus module directly instead of batching the raw XCB operation
+    pub inline fn setFocus(self: *Batch, win: u32) !void {
         focus.setFocus(self.wm, win, .tiling_operation);
     }
 
-    pub fn raise(self: *Batch, win: u32) !void {
+    pub inline fn raise(self: *Batch, win: u32) !void {
         try self.pushOp(.{ .raise = win });
     }
 
@@ -100,24 +96,14 @@ pub const Batch = struct {
 
     pub fn executeNoFlush(self: *Batch) void {
         const conn = self.wm.conn;
+        const ops = self.ops[0..self.count];
 
-        for (self.ops[0..self.count]) |op| {
+        // OPTIMIZATION: Separate functions enable better inlining
+        for (ops) |op| {
             switch (op) {
                 .map => |win| _ = xcb.xcb_map_window(conn, win),
                 .unmap => |win| _ = xcb.xcb_unmap_window(conn, win),
-                .configure => |cfg| {
-                    const r = cfg.rect.clamp();
-                    const values = [_]u32{
-                        @bitCast(@as(i32, r.x)),
-                        @bitCast(@as(i32, r.y)),
-                        r.width,
-                        r.height,
-                    };
-                    _ = xcb.xcb_configure_window(conn, cfg.win,
-                        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
-                            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT,
-                        &values);
-                },
+                .configure => |cfg| executeConfigureOp(conn, cfg),
                 .set_border => |sb| _ = xcb.xcb_change_window_attributes(conn, sb.win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{sb.color}),
                 .set_border_width => |sbw| _ = xcb.xcb_configure_window(conn, sbw.win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{sbw.width}),
                 .raise => |win| _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE}),
@@ -125,3 +111,18 @@ pub const Batch = struct {
         }
     }
 };
+
+// OPTIMIZATION: Separate inline function for complex configure operation
+inline fn executeConfigureOp(conn: *xcb.xcb_connection_t, cfg: anytype) void {
+    const r = cfg.rect.clamp();
+    const values = [_]u32{
+        @bitCast(@as(i32, r.x)),
+        @bitCast(@as(i32, r.y)),
+        r.width,
+        r.height,
+    };
+    _ = xcb.xcb_configure_window(conn, cfg.win,
+        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
+            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT,
+        &values);
+}

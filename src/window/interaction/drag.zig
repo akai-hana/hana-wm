@@ -28,7 +28,7 @@ pub fn startDrag(wm: *WM, win: u32, button: u8, x: i16, y: i16) void {
     focus.setFocus(wm, win, .user_command);
 
     // Remove window from tiling if it's tiled
-    if (tiling.isWindowTiled(win) and wm.config.tiling.enabled) {
+    if (wm.config.tiling.enabled and tiling.isWindowTiled(win)) {
         tiling.removeWindow(wm, win);
     }
 }
@@ -40,39 +40,30 @@ pub fn updateDrag(wm: *WM, x: i16, y: i16) void {
     const dx = x - drag.start_x;
     const dy = y - drag.start_y;
 
-    switch (drag.mode) {
-        .move => {
-            const rect = utils.Rect{
-                .x = drag.start_win_x + dx,
-                .y = drag.start_win_y + dy,
-                .width = drag.start_win_width,
-                .height = drag.start_win_height,
-            };
-
-            utils.configureWindow(wm.conn, drag.window, rect);
+    // OPTIMIZATION: Build rect inline to avoid duplication
+    const rect = switch (drag.mode) {
+        .move => utils.Rect{
+            .x = drag.start_win_x + dx,
+            .y = drag.start_win_y + dy,
+            .width = drag.start_win_width,
+            .height = drag.start_win_height,
         },
-        .resize => {
-            const new_width: i32 = @max(@as(i32, defs.MIN_WINDOW_DIM), @as(i32, drag.start_win_width) + dx);
-            const new_height: i32 = @max(@as(i32, defs.MIN_WINDOW_DIM), @as(i32, drag.start_win_height) + dy);
-
-            const rect = utils.Rect{
-                .x = drag.start_win_x,
-                .y = drag.start_win_y,
-                .width = @intCast(new_width),
-                .height = @intCast(new_height),
-            };
-
-            utils.configureWindow(wm.conn, drag.window, rect);
+        .resize => utils.Rect{
+            .x = drag.start_win_x,
+            .y = drag.start_win_y,
+            .width = @intCast(@max(@as(i32, defs.MIN_WINDOW_DIM), @as(i32, drag.start_win_width) + dx)),
+            .height = @intCast(@max(@as(i32, defs.MIN_WINDOW_DIM), @as(i32, drag.start_win_height) + dy)),
         },
-    }
+    };
 
+    utils.configureWindow(wm.conn, drag.window, rect);
     utils.flush(wm.conn);
 }
 
-pub fn stopDrag(wm: *WM) void {
+pub inline fn stopDrag(wm: *WM) void {
     wm.drag_state.active = false;
 }
 
-pub fn isDragging(wm: *WM) bool {
+pub inline fn isDragging(wm: *WM) bool {
     return wm.drag_state.active;
 }

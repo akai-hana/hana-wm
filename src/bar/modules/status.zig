@@ -21,10 +21,14 @@ pub fn update(wm: *defs.WM, status_text: *std.ArrayList(u8), allocator: std.mem.
     defer if (reply) |r| std.c.free(r);
 
     status_text.clearRetainingCapacity();
-    if (reply) |r| if (r.*.value_len > 0) {
-        try status_text.appendSlice(allocator,
-            @as([*]const u8, @ptrCast(xcb.xcb_get_property_value(r)))[0..@intCast(xcb.xcb_get_property_value_length(r))]);
-        return;
-    };
-    try status_text.appendSlice(allocator, DEFAULT_STATUS);
+    
+    const text = if (reply) |r| blk: {
+        if (r.*.value_len > 0) {
+            const ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(r));
+            break :blk ptr[0..@intCast(xcb.xcb_get_property_value_length(r))];
+        }
+        break :blk DEFAULT_STATUS;
+    } else DEFAULT_STATUS;
+    
+    try status_text.appendSlice(allocator, text);
 }
