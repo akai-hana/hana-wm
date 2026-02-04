@@ -76,6 +76,15 @@ const State = struct {
 
 var state: ?*State = null;
 
+// Helper function for time checking
+inline fn updateClockIfNeeded(s: *State) void {
+    const ts = std.posix.clock_gettime(std.posix.CLOCK.REALTIME) catch return;
+    if (ts.sec != s.last_second) {
+        s.last_second = ts.sec;
+        s.markClockDirty();
+    }
+}
+
 fn loadBarFonts(dc: *drawing.DrawContext, wm: *defs.WM) !void {
     if (wm.config.bar.fonts.items.len > 0) {
         var sized_fonts = std.ArrayList([]const u8){};
@@ -221,11 +230,7 @@ pub fn showForFullscreen(wm: *defs.WM) void {
 
 pub fn updateIfDirty(wm: *defs.WM) !void {
     if (state) |s| {
-        const ts = std.posix.clock_gettime(std.posix.CLOCK.REALTIME) catch return;
-        if (ts.sec != s.last_second) {
-            s.last_second = ts.sec;
-            s.markClockDirty();
-        }
+        updateClockIfNeeded(s);
         
         if (s.isDirty()) {
             if (s.dirty) try draw(s, wm) else if (s.dirty_clock) try drawClockOnly(s, wm);
@@ -235,13 +240,7 @@ pub fn updateIfDirty(wm: *defs.WM) !void {
 }
 
 pub fn checkClockUpdate() !void {
-    if (state) |s| {
-        const ts = std.posix.clock_gettime(std.posix.CLOCK.REALTIME) catch return;
-        if (ts.sec != s.last_second) {
-            s.last_second = ts.sec;
-            s.markClockDirty();
-        }
-    }
+    if (state) |s| updateClockIfNeeded(s);
 }
 
 fn drawClockOnly(s: *State, wm: *defs.WM) !void {

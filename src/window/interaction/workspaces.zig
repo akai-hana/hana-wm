@@ -52,6 +52,15 @@ pub const State = struct {
 
 const StateManager = ModuleState(State);
 
+// Helper function to cleanup workspaces on error
+inline fn cleanupWorkspaces(workspaces: []Workspace, allocator: std.mem.Allocator) void {
+    for (workspaces) |*ws| {
+        ws.deinit();
+        allocator.free(ws.name);
+    }
+    allocator.free(workspaces);
+}
+
 pub fn init(wm: *WM) void {
     const count = wm.config.workspaces.count;
     const workspaces_array = wm.allocator.alloc(Workspace, count) catch {
@@ -64,12 +73,7 @@ pub fn init(wm: *WM) void {
         const name = std.fmt.allocPrint(wm.allocator, "{}", .{i + 1}) catch "?";
         ws.* = Workspace.init(wm.allocator, i, name) catch {
             std.log.err("[workspaces] Failed to init workspace {}", .{i});
-            // Clean up previously initialized workspaces
-            for (workspaces_array[0..i]) |*prev_ws| {
-                prev_ws.deinit();
-                wm.allocator.free(prev_ws.name);
-            }
-            wm.allocator.free(workspaces_array);
+            cleanupWorkspaces(workspaces_array[0..i], wm.allocator);
             return;
         };
     }
@@ -84,12 +88,7 @@ pub fn init(wm: *WM) void {
     
     StateManager.init(wm.allocator, initial_state) catch |err| {
         std.log.err("[workspaces] Failed to initialize state: {}", .{err});
-        // Clean up workspaces on failure
-        for (workspaces_array) |*ws| {
-            ws.deinit();
-            wm.allocator.free(ws.name);
-        }
-        wm.allocator.free(workspaces_array);
+        cleanupWorkspaces(workspaces_array, wm.allocator);
     };
 }
 
@@ -270,16 +269,12 @@ fn executeSwitch(wm: *WM, old_ws: usize, new_ws: usize) void {
         utils.flush(wm.conn);
     }
 
-    // Handle bar visibility based on fullscreen state
+    // Handle bar visibility and raise based on fullscreen state (combined checks)
     if (fs_info != null) {
         bar.hideForFullscreen(wm);
+        bar.raiseBar();
     } else {
         bar.showForFullscreen(wm);
-    }
-
-    // Raise bar above fullscreen window (after main flush)
-    if (fs_info != null) {
-        bar.raiseBar();
     }
 
     // Set focus

@@ -24,10 +24,6 @@ inline fn calcMarginedWidth(full_w: u16, left_margin: u16, right_margin: u16) u1
     return if (full_w > total_margin) full_w - total_margin else defs.MIN_WINDOW_DIM;
 }
 
-pub fn tile(b: *batch.Batch, state: *State, windows: []const u32, screen_w: u16, screen_h: u16) void {
-    layout_common.tileWrapper(tileWithOffset, b, state, windows, screen_w, screen_h);
-}
-
 pub fn tileWithOffset(b: *batch.Batch, state: *State, windows: []const u32, screen_w: u16, screen_h: u16, y_offset: u16) void {
     const n = windows.len;
     if (n == 0) return;

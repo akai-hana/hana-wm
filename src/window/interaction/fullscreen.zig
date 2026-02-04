@@ -9,6 +9,11 @@ const tiling = @import("tiling");
 const batch = @import("batch");
 const workspaces = @import("workspaces");
 
+// Helper function to get fullscreen rect from screen
+inline fn getFullscreenRect(screen: *defs.xcb.xcb_screen_t) utils.Rect {
+    return .{ .x = 0, .y = 0, .width = screen.width_in_pixels, .height = screen.height_in_pixels };
+}
+
 pub fn toggleFullscreen(wm: *WM) void {
     const win = wm.focused_window orelse return;
     const current_ws = workspaces.getCurrentWorkspace() orelse return;
@@ -57,13 +62,7 @@ fn enterFullscreen(wm: *WM, win: u32, ws: usize) void {
 
     var b = batch.Batch.begin(wm) catch {
         // Fallback to direct XCB calls if batch allocation fails
-        const screen = wm.screen;
-        const rect = utils.Rect{
-            .x = 0,
-            .y = 0,
-            .width = screen.width_in_pixels,
-            .height = screen.height_in_pixels,
-        };
+        const rect = getFullscreenRect(wm.screen);
         utils.configureWindow(wm.conn, win, rect);
         utils.setBorderWidth(wm.conn, win, 0);
         _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
@@ -72,14 +71,7 @@ fn enterFullscreen(wm: *WM, win: u32, ws: usize) void {
     };
     defer b.deinit();
 
-    const screen = wm.screen;
-    const rect = utils.Rect{
-        .x = 0,
-        .y = 0,
-        .width = screen.width_in_pixels,
-        .height = screen.height_in_pixels,
-    };
-
+    const rect = getFullscreenRect(wm.screen);
     b.configure(win, rect) catch {};
     b.setBorderWidth(win, 0) catch {};
     b.raise(win) catch {};

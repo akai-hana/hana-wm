@@ -37,71 +37,52 @@ pub const ValidationResult = struct {
     }
 };
 
+/// Generic validation and clamping function
+/// Reduces code duplication while maintaining clarity
+fn validateAndClamp(
+    comptime T: type,
+    value: *T,
+    min: T,
+    max: T,
+    name: []const u8,
+    result: *ValidationResult,
+) !void {
+    if (value.* < min or value.* > max) {
+        var buf: [256]u8 = undefined;
+        const msg = switch (T) {
+            f32 => try std.fmt.bufPrint(&buf,
+                "{s} {d:.2} out of range [{d:.2}, {d:.2}], clamping",
+                .{ name, value.*, min, max }),
+            else => try std.fmt.bufPrint(&buf,
+                "{s} {} out of range [{}, {}], clamping",
+                .{ name, value.*, min, max }),
+        };
+        try result.addWarning(msg);
+        value.* = std.math.clamp(value.*, min, max);
+    }
+}
+
 /// Validate and sanitize configuration
 /// Clamps values to safe ranges and logs warnings
 pub fn validateAndSanitize(config: *defs.Config, allocator: std.mem.Allocator) !ValidationResult {
     var result = ValidationResult.init(allocator);
     
-    // Validate master width factor
-    if (config.tiling.master_width_factor < defs.MIN_MASTER_WIDTH or
-        config.tiling.master_width_factor > defs.MAX_MASTER_WIDTH) {
-        
-        var buf: [256]u8 = undefined;
-        const msg = try std.fmt.bufPrint(&buf,
-            "master_width_factor {d:.2} out of range [{d:.2}, {d:.2}], clamping",
-            .{ config.tiling.master_width_factor, defs.MIN_MASTER_WIDTH, defs.MAX_MASTER_WIDTH });
-        try result.addWarning(msg);
-        
-        config.tiling.master_width_factor = std.math.clamp(
-            config.tiling.master_width_factor,
-            defs.MIN_MASTER_WIDTH,
-            defs.MAX_MASTER_WIDTH
-        );
-    }
+    // Validate all numeric ranges using generic function
+    try validateAndClamp(f32, &config.tiling.master_width_factor,
+        defs.MIN_MASTER_WIDTH, defs.MAX_MASTER_WIDTH, "master_width_factor", &result);
     
-    // Validate border width
-    if (config.tiling.border_width > defs.MAX_BORDER_WIDTH) {
-        var buf: [256]u8 = undefined;
-        const msg = try std.fmt.bufPrint(&buf,
-            "border_width {} exceeds maximum {}, clamping",
-            .{ config.tiling.border_width, defs.MAX_BORDER_WIDTH });
-        try result.addWarning(msg);
-        config.tiling.border_width = defs.MAX_BORDER_WIDTH;
-    }
+    try validateAndClamp(u16, &config.tiling.border_width,
+        0, defs.MAX_BORDER_WIDTH, "border_width", &result);
     
-    // Validate gaps
-    if (config.tiling.gaps > defs.MAX_GAPS) {
-        var buf: [256]u8 = undefined;
-        const msg = try std.fmt.bufPrint(&buf,
-            "gaps {} exceeds maximum {}, clamping",
-            .{ config.tiling.gaps, defs.MAX_GAPS });
-        try result.addWarning(msg);
-        config.tiling.gaps = defs.MAX_GAPS;
-    }
+    try validateAndClamp(u16, &config.tiling.gaps,
+        0, defs.MAX_GAPS, "gaps", &result);
     
-    // Validate workspace count
-    if (config.workspaces.count < defs.MIN_WORKSPACES or
-        config.workspaces.count > defs.MAX_WORKSPACES) {
-        
-        var buf: [256]u8 = undefined;
-        const msg = try std.fmt.bufPrint(&buf,
-            "workspace count {} out of range [{}, {}], clamping",
-            .{ config.workspaces.count, defs.MIN_WORKSPACES, defs.MAX_WORKSPACES });
-        try result.addWarning(msg);
-        
-        config.workspaces.count = std.math.clamp(
-            config.workspaces.count,
-            defs.MIN_WORKSPACES,
-            defs.MAX_WORKSPACES
-        );
-    }
+    try validateAndClamp(usize, &config.workspaces.count,
+        defs.MIN_WORKSPACES, defs.MAX_WORKSPACES, "workspace_count", &result);
     
-    // Validate master count is at least 1
+    // Special case: master_count has minimum of 1 (no maximum)
     if (config.tiling.master_count < 1) {
-        var buf: [256]u8 = undefined;
-        const msg = try std.fmt.bufPrint(&buf,
-            "master_count cannot be 0, setting to 1", .{});
-        try result.addWarning(msg);
+        try result.addWarning("master_count cannot be 0, setting to 1");
         config.tiling.master_count = 1;
     }
     
