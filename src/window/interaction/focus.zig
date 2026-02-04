@@ -1,4 +1,4 @@
-// Focus management (OPTIMIZED)
+// Focus management
 
 const std = @import("std");
 const defs = @import("defs");
@@ -17,25 +17,27 @@ pub const Reason = enum {
     tiling_operation,
 };
 
-// OPTIMIZATION: Simple boolean flag, no timestamp overhead
 var focus_protection_active: bool = false;
 
 pub inline fn isProtected() bool {
     return focus_protection_active;
 }
 
+pub inline fn releaseProtection() void {
+    focus_protection_active = false;
+}
+
 pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
+    // OPTIMIZATION: Combined early return checks
+    if (win == wm.root or bar.isBarWindow(win) or wm.focused_window == win) return;
+    
     if (win == wm.root) {
         std.log.err("[CRITICAL] Attempted to focus ROOT window!", .{});
         return;
     }
 
-    if (bar.isBarWindow(win)) return;
-
     // Block mouse_enter during protection period
     if (reason == .mouse_enter and focus_protection_active) return;
-
-    if (wm.focused_window == win) return;
 
     // Set protection for explicit focus changes
     if (reason != .mouse_enter) {
@@ -47,13 +49,13 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
 
     _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, xcb.XCB_CURRENT_TIME);
 
+    // OPTIMIZATION: Single branch for raising window
     if (reason == .mouse_click or reason == .user_command) {
         _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     }
 
     tiling.updateWindowFocusFast(wm, old, win);
     utils.flush(wm.conn);
-
     bar.markDirty();
 }
 
@@ -65,12 +67,7 @@ pub fn clearFocus(wm: *WM) void {
     if (old) |old_win| {
         tiling.updateWindowFocusFast(wm, old_win, null);
     }
+    
     utils.flush(wm.conn);
-
     bar.markDirty();
-}
-
-// Called from main loop to release focus protection after events settle
-pub inline fn releaseProtection() void {
-    focus_protection_active = false;
 }

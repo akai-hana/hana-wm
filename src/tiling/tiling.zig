@@ -10,7 +10,7 @@ const workspaces = @import("workspaces");
 const batch = @import("batch");
 const bar = @import("bar");
 const error_context = @import("error_context");
-const WindowSet = @import("window_set").WindowSet;
+const tracking = @import("tracking").tracking;
 const ModuleState = @import("module_state").ModuleState;
 
 const master_layout = @import("master");
@@ -31,7 +31,7 @@ pub const State = struct {
     border_width: u16,
     border_focused: u32,
     border_normal: u32,
-    windows: WindowSet,  // Replaces tiled_windows + tiled_set
+    windows: tracking,  // Replaces tiled_windows + tiled_set
     dirty: bool,
 
     pub inline fn margins(self: *const State) utils.Margins {
@@ -74,7 +74,7 @@ pub fn init(wm: *WM) void {
         .border_width = wm.config.tiling.border_width,
         .border_focused = wm.config.tiling.border_focused,
         .border_normal = wm.config.tiling.border_normal,
-        .windows = WindowSet.init(wm.allocator),
+        .windows = tracking.init(wm.allocator),
         .dirty = false,
     };
 
@@ -228,7 +228,7 @@ pub fn retileCurrentWorkspace(wm: *WM) void {
     var visible_buf: [128]u32 = undefined;
     var visible_count: usize = 0;
 
-    // OPTIMIZATION: Removed redundant tiled_set check since we're iterating windows from WindowSet
+    // OPTIMIZATION: Removed redundant tiled_set check since we're iterating windows from tracking
     for (s.windows.items()) |win| {
         if (wm.fullscreen.isFullscreen(win)) continue;
         // Redundant check removed: if it's in windows.items(), it's already in the set

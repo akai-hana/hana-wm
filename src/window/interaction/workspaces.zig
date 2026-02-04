@@ -1,4 +1,4 @@
-// Workspace management - Optimized with batch operations (OPTIMIZED & REFACTORED)
+// Workspace management - Optimized with batch operations
 
 const std = @import("std");
 const defs = @import("defs");
@@ -7,21 +7,19 @@ const WM = defs.WM;
 const utils = @import("utils");
 const focus = @import("focus");
 const bar = @import("bar");
-const WindowSet = @import("window_set").WindowSet;
+const tracking = @import("tracking").tracking;
 const ModuleState = @import("module_state").ModuleState;
 
 pub const Workspace = struct {
     id: usize,
-    windows: WindowSet,
+    windows: tracking,
     name: []const u8,
-    allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, id: usize, name: []const u8) !Workspace {
         return .{
             .id = id,
-            .windows = WindowSet.init(allocator),
+            .windows = tracking.init(allocator),
             .name = name,
-            .allocator = allocator,
         };
     }
 
@@ -33,11 +31,11 @@ pub const Workspace = struct {
         return self.windows.contains(win);
     }
 
-    pub fn add(self: *Workspace, win: u32) !void {
+    pub inline fn add(self: *Workspace, win: u32) !void {
         try self.windows.add(win);
     }
 
-    pub fn remove(self: *Workspace, win: u32) bool {
+    pub inline fn remove(self: *Workspace, win: u32) bool {
         return self.windows.remove(win);
     }
 };
@@ -52,7 +50,6 @@ pub const State = struct {
 
 const StateManager = ModuleState(State);
 
-// Helper function to cleanup workspaces on error
 inline fn cleanupWorkspaces(workspaces: []Workspace, allocator: std.mem.Allocator) void {
     for (workspaces) |*ws| {
         ws.deinit();
@@ -68,7 +65,7 @@ pub fn init(wm: *WM) void {
         return;
     };
     
-    // Initialize each workspace
+    // OPTIMIZATION: Single loop for initialization
     for (workspaces_array, 0..) |*ws, i| {
         const name = std.fmt.allocPrint(wm.allocator, "{}", .{i + 1}) catch "?";
         ws.* = Workspace.init(wm.allocator, i, name) catch {
@@ -129,7 +126,6 @@ pub fn removeWindow(win: u32) void {
     }
 }
 
-// OPTIMIZATION: Streamlined window movement with O(1) lookups
 pub fn moveWindowTo(wm: *WM, win: u32, target_ws: usize) void {
     const s = StateManager.getMut() orelse return;
 
@@ -138,7 +134,6 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: usize) void {
         return;
     }
 
-    // O(1) lookup for current workspace
     const from_ws = s.window_to_workspace.get(win) orelse {
         // Window not tracked, just add to target
         s.workspaces[target_ws].add(win) catch |err| {
@@ -154,29 +149,21 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: usize) void {
     _ = s.workspaces[from_ws].remove(win);
     s.workspaces[target_ws].add(win) catch |err| {
         std.log.err("[workspaces] Failed to add window to workspace {}: {}", .{ target_ws, err });
-        // Try to add back to original workspace
         s.workspaces[from_ws].add(win) catch {};
         return;
     };
     s.window_to_workspace.put(win, target_ws) catch {};
 
-    // Handle visibility changes
+    // OPTIMIZATION: Simplified visibility handling
+    const is_tiling = wm.config.tiling.enabled;
     if (from_ws == s.current) {
         _ = xcb.xcb_unmap_window(wm.conn, win);
-
         if (wm.focused_window == win) {
             focus.clearFocus(wm);
         }
-
-        // Mark tiling dirty when removing from current workspace
-        if (wm.config.tiling.enabled) {
-            markTilingDirty();
-        }
-    } else if (target_ws == s.current) {
-        // Moving to current workspace - mark tiling dirty
-        if (wm.config.tiling.enabled) {
-            markTilingDirty();
-        }
+        if (is_tiling) markTilingDirty();
+    } else if (target_ws == s.current and is_tiling) {
+        markTilingDirty();
     }
 }
 
@@ -188,17 +175,13 @@ inline fn markTilingDirty() void {
 
 pub fn switchTo(wm: *WM, ws_id: usize) void {
     const s = StateManager.getMut() orelse return;
-
     if (ws_id >= s.workspaces.len or ws_id == s.current) return;
 
     const old_ws = s.current;
-    // Set current before switch so retileCurrentWorkspace uses the new workspace
     s.current = ws_id;
     executeSwitch(wm, old_ws, ws_id);
 }
 
-// OPTIMIZATION: Flicker-free workspace switch with atomic XCB batch
-// See detailed explanation in original workspaces.zig
 fn executeSwitch(wm: *WM, old_ws: usize, new_ws: usize) void {
     const s = StateManager.getMut() orelse return;
 
@@ -206,88 +189,80 @@ fn executeSwitch(wm: *WM, old_ws: usize, new_ws: usize) void {
     const new_workspace = &s.workspaces[new_ws];
     const screen = wm.screen;
 
-    // Pre-set focused_window so retile assigns correct border color
-    if (new_workspace.windows.items().len > 0) {
-        wm.focused_window = new_workspace.windows.items()[0];
-    } else {
-        wm.focused_window = null;
-    }
+    // Pre-set focused_window for correct border colors
+    wm.focused_window = if (new_workspace.windows.items().len > 0)
+        new_workspace.windows.items()[0]
+    else
+        null;
 
-    // Cache fullscreen info (single lookup instead of 3)
     const fs_info = wm.fullscreen.getForWorkspace(new_ws);
 
-    // OPTIMIZATION: Batch all XCB operations for atomic flush
+    // OPTIMIZATION: Batch all XCB operations
+    batchWindowOperations(wm.conn, old_workspace, new_workspace, screen, fs_info);
 
-    // (a) Move old-workspace windows off-screen (preserves content)
-    for (old_workspace.windows.items()) |win| {
-        _ = xcb.xcb_configure_window(
-            wm.conn,
-            win,
-            xcb.XCB_CONFIG_WINDOW_X,
-            &[_]u32{@intCast(screen.width_in_pixels)},
-        );
-    }
-
-    // (b) Map new-workspace windows (no-op if already mapped off-screen)
-    for (new_workspace.windows.items()) |win| {
-        _ = xcb.xcb_map_window(wm.conn, win);
-    }
-
-    // (c) Restore fullscreen window geometry if present
-    if (fs_info) |info| {
-        _ = xcb.xcb_configure_window(
-            wm.conn,
-            info.window,
-            xcb.XCB_CONFIG_WINDOW_X |
-                xcb.XCB_CONFIG_WINDOW_Y |
-                xcb.XCB_CONFIG_WINDOW_WIDTH |
-                xcb.XCB_CONFIG_WINDOW_HEIGHT |
-                xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
-            &[_]u32{
-                0, // x
-                0, // y
-                @intCast(screen.width_in_pixels), // width
-                @intCast(screen.height_in_pixels), // height
-                0, // border_width
-            },
-        );
-        _ = xcb.xcb_configure_window(
-            wm.conn,
-            info.window,
-            xcb.XCB_CONFIG_WINDOW_STACK_MODE,
-            &[_]u32{xcb.XCB_STACK_MODE_ABOVE},
-        );
-    }
-
-    // (d) Retile: configures tiled windows and flushes
-    // All queued operations from (a)-(c) flush in one atomic batch
+    // Retile and flush
     if (wm.config.tiling.enabled) {
-        const tiling_mod = @import("tiling");
-        tiling_mod.retileCurrentWorkspace(wm);
+        @import("tiling").retileCurrentWorkspace(wm);
     } else {
-        // Only flush if tiling didn't run (which already flushes)
         utils.flush(wm.conn);
     }
 
-    // Handle bar visibility and raise based on fullscreen state (combined checks)
-    if (fs_info != null) {
+    // OPTIMIZATION: Combined bar state management
+    updateBarState(wm, fs_info != null);
+
+    // Set focus
+    const focus_target = wm.focused_window orelse wm.root;
+    _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, focus_target, xcb.XCB_CURRENT_TIME);
+    utils.flush(wm.conn);
+
+    bar.markDirty();
+}
+
+// OPTIMIZATION: Extract batching logic into helper function
+inline fn batchWindowOperations(
+    conn: *xcb.xcb_connection_t,
+    old_workspace: *const Workspace,
+    new_workspace: *const Workspace,
+    screen: *xcb.xcb_screen_t,
+    fs_info: ?defs.FullscreenInfo,
+) void {
+    // Move old windows off-screen
+    for (old_workspace.windows.items()) |win| {
+        _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_X,
+            &[_]u32{@intCast(screen.width_in_pixels)});
+    }
+
+    // Map new windows
+    for (new_workspace.windows.items()) |win| {
+        _ = xcb.xcb_map_window(conn, win);
+    }
+
+    // Restore fullscreen window if present
+    if (fs_info) |info| {
+        const values = [_]u32{
+            0, // x
+            0, // y
+            @intCast(screen.width_in_pixels), // width
+            @intCast(screen.height_in_pixels), // height
+            0, // border_width
+        };
+        _ = xcb.xcb_configure_window(conn, info.window,
+            xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
+            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
+            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &values);
+        _ = xcb.xcb_configure_window(conn, info.window,
+            xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+    }
+}
+
+// OPTIMIZATION: Combine bar state updates
+inline fn updateBarState(wm: *WM, is_fullscreen: bool) void {
+    if (is_fullscreen) {
         bar.hideForFullscreen(wm);
         bar.raiseBar();
     } else {
         bar.showForFullscreen(wm);
     }
-
-    // Set focus
-    const focus_target = if (wm.focused_window) |win| win else wm.root;
-    _ = xcb.xcb_set_input_focus(
-        wm.conn,
-        xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
-        focus_target,
-        xcb.XCB_CURRENT_TIME,
-    );
-    utils.flush(wm.conn);
-
-    bar.markDirty();
 }
 
 pub inline fn getCurrentWindowsView() ?[]const u32 {
