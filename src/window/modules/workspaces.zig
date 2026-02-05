@@ -9,7 +9,7 @@ const focus = @import("focus");
 const bar = @import("bar");
 const batch = @import("batch");
 const tracking = @import("tracking").tracking;
-const ModuleState = @import("module_state").ModuleState;
+const createModule = @import("module").module;
 const debug = @import("debug");
 
 pub const Workspace = struct {
@@ -50,7 +50,7 @@ pub const State = struct {
     wm: *WM,
 };
 
-const StateManager = ModuleState(State);
+const StateManager = createModule(State);
 
 inline fn cleanupWorkspaces(workspaces: []Workspace, allocator: std.mem.Allocator) void {
     for (workspaces) |*ws| {
@@ -213,10 +213,8 @@ fn executeSwitch(wm: *WM, old_ws: usize, new_ws: usize) void {
     }
 
     // Step 2: Position new workspace windows on-screen (but don't flush yet!)
-    // IMPORTANT: For best results, your tiling module's retileCurrentWorkspace
-    // should NOT flush internally. This allows all positioning to be atomic.
     if (wm.config.tiling.enabled) {
-        @import("tiling").retileCurrentWorkspace(wm);
+        @import("tiling").retileCurrentWorkspaceNoFlush(wm);
     }
 
     // Step 3: Configure fullscreen window if present (but don't flush yet!)
@@ -272,7 +270,7 @@ fn executeSwitchDirect(wm: *WM, old_workspace: *Workspace, screen: *xcb.xcb_scre
     
     // Step 2: Position new windows on-screen (ideally no flush)
     if (wm.config.tiling.enabled) {
-        @import("tiling").retileCurrentWorkspace(wm);
+        @import("tiling").retileCurrentWorkspaceNoFlush(wm);
     }
     
     // Step 3: Configure fullscreen window if present (no flush)

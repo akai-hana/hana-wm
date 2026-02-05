@@ -12,7 +12,31 @@ const bar = @import("bar");
 const batch = @import("batch");
 const debug = @import("debug");
 
-const WINDOW_EVENT_MASK = xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW;
+const WINDOW_EVENT_MASK = xcb.XCB_EVENT_MASK_ENTER_WINDOW | 
+                          xcb.XCB_EVENT_MASK_LEAVE_WINDOW |
+                          xcb.XCB_EVENT_MASK_BUTTON_PRESS;
+
+// Grab/ungrab buttons for click-to-focus (DWM approach)
+pub fn grabButtons(wm: *WM, win: u32, focused: bool) void {
+    // Ungrab all first
+    _ = xcb.xcb_ungrab_button(wm.conn, xcb.XCB_BUTTON_INDEX_ANY, win, xcb.XCB_MOD_MASK_ANY);
+    
+    // If unfocused, grab all buttons to intercept clicks for focus
+    if (!focused) {
+        _ = xcb.xcb_grab_button(
+            wm.conn,
+            0, // owner_events = false
+            win,
+            xcb.XCB_EVENT_MASK_BUTTON_PRESS,
+            xcb.XCB_GRAB_MODE_SYNC, // Freeze pointer until we replay
+            xcb.XCB_GRAB_MODE_SYNC, // Freeze keyboard too
+            xcb.XCB_NONE,
+            xcb.XCB_NONE,
+            xcb.XCB_BUTTON_INDEX_ANY,
+            xcb.XCB_MOD_MASK_ANY,
+        );
+    }
+}
 
 // OPTIMIZATION: Inline workspace validation function
 inline fn validateWorkspace(target_ws: ?usize, current_ws: usize) usize {
@@ -85,6 +109,10 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     }
 
     b.execute();
+    
+    // Grab buttons for click-to-focus (window starts unfocused)
+    grabButtons(wm, win, false);
+    
     bar.markDirty();
 }
 
@@ -122,6 +150,7 @@ inline fn handleMapRequestDirect(wm: *WM, win: u32, is_current_ws: bool, validat
     }
     
     utils.flush(wm.conn);
+    grabButtons(wm, win, false);
     bar.markDirty();
 }
 
@@ -148,7 +177,7 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) vo
     const win = event.event;
     
     // OPTIMIZATION: Combined early return checks
-    if (win == wm.root or win == 0 or bar.isBarWindow(win) or focus.isProtected()) return;
+    if (win == wm.root or win == 0 or bar.isBarWindow(win)) return;
 
     // Filter spurious EnterNotify events
     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL or
@@ -158,6 +187,22 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) vo
     const old_focus = wm.focused_window;
     focus.setFocus(wm, win, .mouse_enter);
     tiling.updateWindowFocus(wm, old_focus, win);
+}
+
+pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) void {
+    const win = event.event;
+    
+    if (win == wm.root or win == 0 or bar.isBarWindow(win)) return;
+    
+    // Always ungrab buttons on clicked window (even if already focused)
+    // This is critical for apps like Firefox to receive input properly
+    grabButtons(wm, win, true);
+    
+    // Focus window and replay the event (DWM approach)
+    focus.setFocus(wm, win, .mouse_click);
+    _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_REPLAY_POINTER, xcb.XCB_CURRENT_TIME);
+    _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, xcb.XCB_CURRENT_TIME);
+    utils.flush(wm.conn);
 }
 
 pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM) void {
@@ -171,6 +216,8 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM
         bar.setBarState(wm, .show_fullscreen);
     }
 
+    const was_focused = (wm.focused_window == win);
+
     if (wm.config.tiling.enabled) {
         tiling.removeWindow(wm, win);
     }
@@ -178,12 +225,56 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM
     workspaces.removeWindow(win);
     wm.removeWindow(win);
 
-    if (wm.focused_window == win) {
+    if (was_focused) {
+        // DWM approach: Retile FIRST, THEN handle focus
+        // This ensures windows are in final positions before we decide what to focus
+        if (wm.config.tiling.enabled) {
+            tiling.retileIfDirty(wm);
+            utils.flush(wm.conn);
+        }
+        
         focus.clearFocus(wm);
+        
+        // Now focus based on pointer position after retiling
+        focusWindowUnderPointer(wm);
     }
 
     bar.markDirty();
     utils.flush(wm.conn);
+}
+
+// Focus the window currently under the pointer
+fn focusWindowUnderPointer(wm: *WM) void {
+    const pointer_query = xcb.xcb_query_pointer(wm.conn, wm.root);
+    const pointer_reply = xcb.xcb_query_pointer_reply(wm.conn, pointer_query, null);
+    
+    if (pointer_reply) |reply| {
+        defer std.c.free(reply);
+        
+        const child_win = reply.*.child;
+        
+        // If pointer is over a valid window, focus it
+        if (child_win != 0 and child_win != wm.root and !bar.isBarWindow(child_win)) {
+            if (wm.windows.contains(child_win) and workspaces.isOnCurrentWorkspace(child_win)) {
+                focus.setFocus(wm, child_win, .mouse_enter);
+                tiling.updateWindowFocus(wm, null, child_win);
+                return;
+            }
+        }
+    }
+    
+    // Fallback: focus first window in workspace if pointer isn't over anything valid
+    if (workspaces.getCurrentWorkspaceObject()) |ws| {
+        const windows = ws.windows.list.items;
+        for (windows) |workspace_win| {
+            if (workspace_win != 0 and workspace_win != wm.root and 
+                !bar.isBarWindow(workspace_win) and wm.windows.contains(workspace_win)) {
+                focus.setFocus(wm, workspace_win, .window_destroyed);
+                tiling.updateWindowFocus(wm, null, workspace_win);
+                return;
+            }
+        }
+    }
 }
 
 // OPTIMIZATION: Extract fullscreen cleanup into separate function

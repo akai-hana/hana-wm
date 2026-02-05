@@ -1,3 +1,5 @@
+when hovering over a window while creating another one will result in the cursor hovering a mouse that doesn't have focus. this is actually intended behavior, since if i open a terminal quickly, i don't want to reposition my mouse cursor just for that. however, i'd like to make it so that, if with this mouse cursor positioned on an unfocused window, if i click onto this unfocused window, for it to gain focus, so that i don't have to awkwardly move my mouse away and back to the unfocused window for it to gain focus.
+
 fibonacci
 bspwm leaf layout
 if window is higher than it is wider, slice it in half, leaving a top and bottom window; if it is wider than higher, slice it in half, leaving a left and right window).

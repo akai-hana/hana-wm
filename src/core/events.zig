@@ -11,11 +11,18 @@ const tiling = @import("tiling");
 
 const EventHandler = *const fn (event: *anyopaque, wm: *defs.WM) void;
 
+// Combined button press handler: click-to-focus + dragging
+fn handleButtonPressCombined(event: *anyopaque, wm: *defs.WM) void {
+    const ev: *const xcb.xcb_button_press_event_t = @ptrCast(@alignCast(event));
+    window.handleButtonPress(ev, wm);
+    input.handleButtonPress(ev, wm);
+}
+
 // OPTIMIZATION: Compile-time event dispatch table with minimal size
 const dispatch_table = blk: {
     var table = [_]?EventHandler{null} ** 36;
     table[xcb.XCB_KEY_PRESS] = @ptrCast(&input.handleKeyPress);
-    table[xcb.XCB_BUTTON_PRESS] = @ptrCast(&input.handleButtonPress);
+    table[xcb.XCB_BUTTON_PRESS] = @ptrCast(&handleButtonPressCombined);
     table[xcb.XCB_BUTTON_RELEASE] = @ptrCast(&input.handleButtonRelease);
     table[xcb.XCB_MOTION_NOTIFY] = @ptrCast(&input.handleMotionNotify);
     table[xcb.XCB_ENTER_NOTIFY] = @ptrCast(&window.handleEnterNotify);

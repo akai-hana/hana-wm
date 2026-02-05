@@ -4,7 +4,7 @@
 const std = @import("std");
 
 /// Generic module state manager with consistent error handling
-pub fn ModuleState(comptime StateType: type) type {
+pub fn module(comptime StateType: type) type {
     return struct {
         const Self = @This();
         

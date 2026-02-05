@@ -5,6 +5,7 @@ const defs = @import("defs");
 const tiling = @import("tiling");
 const utils = @import("utils");
 const bar = @import("bar");
+const window = @import("window");
 const xcb = defs.xcb;
 const WM = defs.WM;
 
@@ -17,30 +18,18 @@ pub const Reason = enum {
     tiling_operation,
 };
 
-var focus_protection_active: bool = false;
-
-pub inline fn isProtected() bool {
-    return focus_protection_active;
-}
-
-pub inline fn releaseProtection() void {
-    focus_protection_active = false;
-}
-
 pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     // OPTIMIZATION: Combined early return checks, removed duplicate root check
     if (win == wm.root or win == 0 or bar.isBarWindow(win) or wm.focused_window == win) return;
 
-    // Block mouse_enter during protection period
-    if (reason == .mouse_enter and focus_protection_active) return;
-
-    // Set protection for explicit focus changes
-    if (reason != .mouse_enter) {
-        focus_protection_active = true;
-    }
-
     const old = wm.focused_window;
     wm.focused_window = win;
+
+    // Ungrab buttons on newly focused window, regrab on old window
+    window.grabButtons(wm, win, true);
+    if (old) |old_win| {
+        window.grabButtons(wm, old_win, false);
+    }
 
     // OPTIMIZATION: Batch XCB calls when raising window
     if (reason == .mouse_click or reason == .user_command) {
@@ -63,6 +52,7 @@ pub fn clearFocus(wm: *WM) void {
     _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, wm.root, xcb.XCB_CURRENT_TIME);
 
     if (old) |old_win| {
+        window.grabButtons(wm, old_win, false); // Regrab buttons on unfocused window
         tiling.updateWindowFocusFast(wm, old_win, null);
     }
     
@@ -74,14 +64,14 @@ pub fn clearFocus(wm: *WM) void {
 pub fn setFocusBatch(wm: *WM, win: u32, reason: Reason, defer_flush: bool) void {
     if (win == wm.root or win == 0 or bar.isBarWindow(win) or wm.focused_window == win) return;
 
-    if (reason == .mouse_enter and focus_protection_active) return;
-
-    if (reason != .mouse_enter) {
-        focus_protection_active = true;
-    }
-
     const old = wm.focused_window;
     wm.focused_window = win;
+
+    // Ungrab buttons on newly focused window, regrab on old window
+    window.grabButtons(wm, win, true);
+    if (old) |old_win| {
+        window.grabButtons(wm, old_win, false);
+    }
 
     if (reason == .mouse_click or reason == .user_command) {
         _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, xcb.XCB_CURRENT_TIME);
