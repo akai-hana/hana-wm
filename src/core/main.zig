@@ -302,7 +302,6 @@ pub fn main() !void {
             }
             
             // Batch post-processing after all events
-            focus.releaseProtection();
             tiling.retileIfDirty(&wm);
             bar.updateIfDirty(&wm) catch |err| {
                 debug.err("Failed to update bar: {}", .{err});

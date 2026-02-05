@@ -68,7 +68,7 @@ Mod+p = "rofi -show drun"
 
 # Program binds
 Mod+a       = "MOZ_USE_XINPUT2=1 firefox"
-Mod+Shift+a = "pkill firefox"
+Mod+Shift+a = "pkill -9 firefox"
 
 Mod+s       = "flatpak run org.equicord.equibop"
 Mod+Shift+s = "pkill equibop"

@@ -10,7 +10,7 @@ const workspaces = @import("workspaces");
 const batch = @import("batch");
 const bar = @import("bar");
 const tracking = @import("tracking").tracking;
-const ModuleState = @import("module_state").ModuleState;
+const createModule = @import("module").module;
 const debug = @import("debug");
 
 const master_layout = @import("master");
@@ -70,7 +70,7 @@ pub const State = struct {
     }
 };
 
-const StateManager = ModuleState(State);
+const StateManager = createModule(State);
 
 pub fn init(wm: *WM) void {
     const initial_state = State{
@@ -218,6 +218,15 @@ pub fn retileIfDirty(wm: *WM) void {
 }
 
 pub fn retileCurrentWorkspace(wm: *WM) void {
+    retileCurrentWorkspaceInternal(wm, true);
+}
+
+// NO-FLUSH variant for atomic workspace switching
+pub fn retileCurrentWorkspaceNoFlush(wm: *WM) void {
+    retileCurrentWorkspaceInternal(wm, false);
+}
+
+fn retileCurrentWorkspaceInternal(wm: *WM, should_flush: bool) void {
     const s = StateManager.get(true) orelse return;
     if (!s.enabled or s.windows.count() == 0) return;
 
@@ -272,7 +281,13 @@ pub fn retileCurrentWorkspace(wm: *WM) void {
         b.setBorderWidth(win, s.border_width) catch {};
         b.setBorder(win, color) catch {};
     }
-    b.execute();
+    
+    // Only flush if requested (for atomic workspace switching, caller will flush)
+    if (should_flush) {
+        b.execute();
+    } else {
+        b.executeNoFlush();
+    }
 }
 
 fn cycleLayout(wm: *WM, forward: bool) void {
