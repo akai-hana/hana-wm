@@ -94,7 +94,7 @@ fn becomeWindowManager(conn: *xcb.xcb_connection_t, root: u32) !void {
 }
 
 // OPTIMIZATION: Batch window attribute changes to reduce X11 roundtrips
-fn setupExistingWindows(conn: *xcb.xcb_connection_t, root: u32) void {
+fn setupExistingWindows(conn: *xcb.xcb_connection_t, root: u32, allocator: std.mem.Allocator) !void {
     const reply = xcb.xcb_query_tree_reply(conn, xcb.xcb_query_tree(conn, root), null) orelse return;
     defer std.c.free(reply);
 
@@ -102,30 +102,27 @@ fn setupExistingWindows(conn: *xcb.xcb_connection_t, root: u32) void {
     const len: usize = @intCast(xcb.xcb_query_tree_children_length(reply));
     if (len == 0) return;
 
-    const MAX_BATCH = 256;
-    var cookies: [MAX_BATCH]xcb.xcb_get_window_attributes_cookie_t = undefined;
+    var cookies: std.ArrayList(xcb.xcb_get_window_attributes_cookie_t) = .empty;
+    defer cookies.deinit(allocator);
     const event_mask = xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW;
     
-    var processed: usize = 0;
-    while (processed < len) {
-        const batch_size = @min(len - processed, MAX_BATCH);
-        
-        // Batch: Send all attribute queries
-        for (0..batch_size) |i| cookies[i] = xcb.xcb_get_window_attributes(conn, children[processed + i]);
-        _ = xcb.xcb_flush(conn);
-
-        // Batch: Queue all window attribute changes without waiting for replies
-        for (0..batch_size) |i| {
-            const attrs = xcb.xcb_get_window_attributes_reply(conn, cookies[i], null) orelse continue;
-            defer std.c.free(attrs);
-            if (attrs.*.override_redirect != 0 or attrs.*.map_state != xcb.XCB_MAP_STATE_VIEWABLE) continue;
-            _ = xcb.xcb_change_window_attributes(conn, children[processed + i], xcb.XCB_CW_EVENT_MASK, &[_]u32{event_mask});
-        }
-        // Flush all changes at once instead of per-window
-        _ = xcb.xcb_flush(conn);
-        
-        processed += batch_size;
+    // Batch: Send all attribute queries
+    try cookies.ensureTotalCapacity(allocator, len);
+    for (0..len) |i| {
+        const cookie = xcb.xcb_get_window_attributes(conn, children[i]);
+        cookies.appendAssumeCapacity(cookie);
     }
+    _ = xcb.xcb_flush(conn);
+
+    // Batch: Queue all window attribute changes without waiting for replies
+    for (cookies.items, 0..) |cookie, i| {
+        const attrs = xcb.xcb_get_window_attributes_reply(conn, cookie, null) orelse continue;
+        defer std.c.free(attrs);
+        if (attrs.*.override_redirect != 0 or attrs.*.map_state != xcb.XCB_MAP_STATE_VIEWABLE) continue;
+        _ = xcb.xcb_change_window_attributes(conn, children[i], xcb.XCB_CW_EVENT_MASK, &[_]u32{event_mask});
+    }
+    // Flush all changes at once instead of per-window
+    _ = xcb.xcb_flush(conn);
 }
 
 // OPTIMIZATION: Batch key grabs with smart error detection
@@ -273,7 +270,7 @@ pub fn main() !void {
     defer bar.deinit();
 
     try grabKeybindings(&wm);
-    setupExistingWindows(conn, root);
+    try setupExistingWindows(conn, root, allocator);
     utils.flush(conn);
     debug.info("Started", .{});
 

@@ -32,18 +32,8 @@ pub const Rect = struct {
         return .{ .x = geom.x, .y = geom.y, .width = geom.width, .height = geom.height };
     }
 
-    pub inline fn clamp(self: Rect) Rect {
-        return .{
-            .x = self.x,
-            .y = self.y,
-            .width = std.math.clamp(self.width, defs.MIN_WINDOW_DIM, defs.MAX_WINDOW_DIM),
-            .height = std.math.clamp(self.height, defs.MIN_WINDOW_DIM, defs.MAX_WINDOW_DIM),
-        };
-    }
-
     pub inline fn isValid(self: Rect) bool {
-        return self.width >= defs.MIN_WINDOW_DIM and self.width <= defs.MAX_WINDOW_DIM and
-            self.height >= defs.MIN_WINDOW_DIM and self.height <= defs.MAX_WINDOW_DIM;
+        return self.width >= defs.MIN_WINDOW_DIM and self.height >= defs.MIN_WINDOW_DIM;
     }
 };
 
@@ -57,17 +47,16 @@ pub const Margins = struct {
 };
 
 pub fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect) void {
-    const r = rect.clamp();
     _ = xcb.xcb_configure_window(
         conn,
         win,
         xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
             xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT,
         &[_]u32{
-            @bitCast(@as(i32, r.x)),
-            @bitCast(@as(i32, r.y)),
-            r.width,
-            r.height,
+            @bitCast(@as(i32, rect.x)),
+            @bitCast(@as(i32, rect.y)),
+            rect.width,
+            rect.height,
         },
     );
 }

@@ -17,46 +17,33 @@ const XcbOp = union(enum) {
     raise: u32,
 };
 
-const MAX_BATCH_OPS = 256;
 const AUTO_FLUSH_THRESHOLD = 200;
 
 pub const Batch = struct {
     wm: *WM,
-    ops: [MAX_BATCH_OPS]XcbOp,
-    count: usize,
+    ops: std.ArrayList(XcbOp),
 
     pub fn begin(wm: *WM) !Batch {
         return .{
             .wm = wm,
-            .ops = undefined,
-            .count = 0,
+            .ops = .empty,
         };
     }
 
-    pub inline fn deinit(_: *Batch) void {
-        // No cleanup needed - ops array is stack-allocated
+    pub inline fn deinit(self: *Batch) void {
+        self.ops.deinit(self.wm.allocator);
     }
 
     inline fn pushOp(self: *Batch, op: XcbOp) !void {
-        // OPTIMIZATION: Single comparison for common case
-        if (self.count < AUTO_FLUSH_THRESHOLD) {
-            self.ops[self.count] = op;
-            self.count += 1;
-            return;
+        // OPTIMIZATION: Auto-flush at threshold to keep batches reasonable
+        if (self.ops.items.len >= AUTO_FLUSH_THRESHOLD) {
+            debug.warn("Auto-flushing at {} ops", .{self.ops.items.len});
+            self.executeNoFlush();
+            _ = xcb.xcb_flush(self.wm.conn);
+            self.ops.clearRetainingCapacity();
         }
         
-        // OPTIMIZATION: Rare path - auto-flush
-        if (self.count >= MAX_BATCH_OPS) {
-            debug.err("Batch overflow! Consider increasing MAX_BATCH_OPS", .{});
-            return error.BatchFull;
-        }
-        
-        debug.warn("Auto-flushing at {} ops", .{self.count});
-        self.executeNoFlush();
-        _ = xcb.xcb_flush(self.wm.conn);
-        self.count = 0;
-        self.ops[0] = op;
-        self.count = 1;
+        try self.ops.append(self.wm.allocator, op);
     }
 
     pub inline fn map(self: *Batch, win: u32) !void {
@@ -95,21 +82,18 @@ pub const Batch = struct {
     pub fn executeNoFlush(self: *Batch) void {
         const conn = self.wm.conn;
         
-        // OPTIMIZATION: Direct array access with known bounds
-        var i: usize = 0;
-        while (i < self.count) : (i += 1) {
-            const op = self.ops[i];
+        // OPTIMIZATION: Direct slice access
+        for (self.ops.items) |op| {
             switch (op) {
                 .map => |win| _ = xcb.xcb_map_window(conn, win),
                 .unmap => |win| _ = xcb.xcb_unmap_window(conn, win),
                 .configure => |cfg| {
                     // OPTIMIZATION: Inline configure to avoid function call overhead
-                    const r = cfg.rect.clamp();
                     const values = [_]u32{
-                        @bitCast(@as(i32, r.x)),
-                        @bitCast(@as(i32, r.y)),
-                        r.width,
-                        r.height,
+                        @bitCast(@as(i32, cfg.rect.x)),
+                        @bitCast(@as(i32, cfg.rect.y)),
+                        cfg.rect.width,
+                        cfg.rect.height,
                     };
                     _ = xcb.xcb_configure_window(conn, cfg.win,
                         xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
