@@ -11,6 +11,7 @@ const batch = @import("batch");
 const bar = @import("bar");
 const tracking = @import("tracking").tracking;
 const ModuleState = @import("module_state").ModuleState;
+const debug = @import("debug");
 
 const master_layout = @import("master");
 const monocle_layout = @import("monocle");
@@ -21,11 +22,11 @@ pub const Layout = enum { master, monocle, grid };
 const WINDOW_EVENT_MASK = xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW;
 
 // OPTIMIZATION: Merged error handling directly into this module
-inline fn logError(operation: []const u8, err: anyerror, window: ?u32) void {
+inline fn logError(err: anyerror, window: ?u32) void {
     if (window) |win| {
-        std.log.err("[tiling.{s}] Failed: {} (window: 0x{x})", .{ operation, err, win });
+        debug.err("Failed: {} (window: 0x{x})", .{ err, win });
     } else {
-        std.log.err("[tiling.{s}] Failed: {}", .{ operation, err });
+        debug.err("Failed: {}", .{err});
     }
 }
 
@@ -87,7 +88,7 @@ pub fn init(wm: *WM) void {
     };
 
     StateManager.init(wm.allocator, initial_state) catch |err| {
-        logError("init", err, null);
+        logError(err, null);
     };
 }
 
@@ -122,7 +123,7 @@ pub fn addWindow(wm: *WM, win: u32) void {
 
     // Add to tiled windows (prepend for focus ordering)
     s.windows.addFront(win) catch |err| {
-        logError("addWindow", err, win);
+        logError(err, win);
         return;
     };
 
@@ -253,7 +254,7 @@ pub fn retileCurrentWorkspace(wm: *WM) void {
 
     // Create batch for all layout operations
     var b = batch.Batch.begin(wm) catch {
-        logError("retileCurrentWorkspace", error.BatchFailed, null);
+        logError(error.BatchFailed, null);
         return;
     };
     defer b.deinit();

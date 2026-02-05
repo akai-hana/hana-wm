@@ -6,6 +6,7 @@ const xcb = defs.xcb;
 const WM = defs.WM;
 const utils = @import("utils");
 const focus = @import("focus");
+const debug = @import("debug");
 
 const XcbOp = union(enum) {
     map: u32,
@@ -46,11 +47,11 @@ pub const Batch = struct {
         
         // OPTIMIZATION: Rare path - auto-flush
         if (self.count >= MAX_BATCH_OPS) {
-            std.log.err("[batch] Batch overflow! Consider increasing MAX_BATCH_OPS", .{});
+            debug.err("Batch overflow! Consider increasing MAX_BATCH_OPS", .{});
             return error.BatchFull;
         }
         
-        std.log.warn("[batch] Auto-flushing at {} ops", .{self.count});
+        debug.warn("Auto-flushing at {} ops", .{self.count});
         self.executeNoFlush();
         _ = xcb.xcb_flush(self.wm.conn);
         self.count = 0;

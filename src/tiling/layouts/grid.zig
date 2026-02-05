@@ -49,6 +49,6 @@ pub fn tileWithOffset(b: *batch.Batch, state: *State, windows: []const u32, scre
             .width = win_w,
             .height = win_h,
         };
-        layouts.configureSafe(b, win, rect, "grid");
+        layouts.configureSafe(b, win, rect);
     }
 }

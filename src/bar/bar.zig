@@ -1,22 +1,21 @@
-//! Enhanced status bar with configurable layout and auto-sizing
+//! Hana status bar
+//! Taking heavy inspiration from dwm
 
-const std = @import("std");
-const defs = @import("defs");
-const xcb = defs.xcb;
+const std     = @import("std");
+const defs    = @import("defs");
+    const xcb = defs.xcb;
+const utils   = @import("utils");
+
 const drawing = @import("drawing");
-const utils = @import("utils");
-const workspaces = @import("workspaces");
-const tiling = @import("tiling");
+const tiling  = @import("tiling");
+const debug   = @import("debug");
 
-const c = @cImport({
-    @cInclude("X11/Xlib.h");
-});
-
-const workspaces_segment = @import("tags");
-const layout_segment = @import("layout");
-const title_segment = @import("title");
-const clock_segment = @import("clock");
-const status_segment = @import("status");
+const workspaces             = @import("workspaces");
+    const workspaces_segment = @import("tags");
+    const layout_segment     = @import("layout");
+    const title_segment      = @import("title");
+    const clock_segment      = @import("clock");
+    const status_segment     = @import("status");
 
 pub const WORKSPACE_WIDTH: u16 = 40;
 
@@ -42,7 +41,10 @@ const State = struct {
         const s = try allocator.create(State);
         s.* = State{
             .window = window, .width = width, .height = height, .dc = dc, .conn = conn,
-            .config = config, .status_text = .{}, .cached_title = .{}, .cached_title_window = null,
+            .config = config,
+            .status_text = .{},
+            .cached_title = .{},
+            .cached_title_window = null,
             .dirty = false, .dirty_clock = false, .last_second = 0, .alive = true,
             .allocator = allocator,
             .cached_clock_width = dc.textWidth("0000-00-00 00:00:00") + 2 * config.padding,
@@ -178,13 +180,12 @@ fn setBarVisibility(wm: *defs.WM, visible: bool, reason: []const u8) void {
         if (visible) {
             _ = xcb.xcb_map_window(s.conn, s.window);
             utils.flush(wm.conn);
-            _ = c.XSync(@ptrCast(s.dc.display), 0);
             draw(s, wm) catch {};
         } else {
             _ = xcb.xcb_unmap_window(s.conn, s.window);
         }
         utils.flush(wm.conn);
-        std.log.info("[bar] Bar {s} ({s})", .{ if (visible) "shown" else "hidden", reason });
+        debug.info("Bar {s} ({s})", .{ if (visible) "shown" else "hidden", reason });
         tiling.retileCurrentWorkspace(wm);
     }
 }

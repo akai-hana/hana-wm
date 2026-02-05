@@ -5,6 +5,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Set the optimization mode (Debug, ReleaseFast, ReleaseSafe, ReleaseSmall)") orelse .ReleaseFast;
 
+    // Create build options for debug logging
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "enable_debug_logging", optimize == .Debug);
+
     // Create the root module
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/core/main.zig"),
@@ -34,13 +38,16 @@ pub fn build(b: *std.Build) void {
     var all_modules = std.StringHashMap(*std.Build.Module).init(allocator);
 
     // Auto-discover modules
-    discoverModules(b, "src", allocator, &all_modules) catch |err| {
+    discoverModules(b, "src", target, optimize, allocator, &all_modules) catch |err| {
         std.debug.print("Fatal: Failed to discover modules: {}\n", .{err});
         std.process.exit(1);
     };
 
-    // Connect modules
-    connectAllModules(root_module, &all_modules);
+    // Add build_options to root module
+    root_module.addImport("build_options", build_options.createModule());
+
+    // Connect modules and add build_options to all
+    connectAllModules(root_module, &all_modules, build_options);
 
     // Link system libraries and add include paths to ALL modules
     linkSystemLibrariesAndIncludes(b, root_module, &all_modules);
@@ -59,9 +66,14 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 }
 
-fn connectAllModules(root: *std.Build.Module, modules: *std.StringHashMap(*std.Build.Module)) void {
+fn connectAllModules(root: *std.Build.Module, modules: *std.StringHashMap(*std.Build.Module), build_options: *std.Build.Step.Options) void {
+    const build_options_module = build_options.createModule();
+    
     var iter = modules.iterator();
     while (iter.next()) |entry| {
+        // Add build_options to this module
+        entry.value_ptr.*.addImport("build_options", build_options_module);
+        
         var import_iter = modules.iterator();
         while (import_iter.next()) |import| {
             if (!std.mem.eql(u8, entry.key_ptr.*, import.key_ptr.*)) {
@@ -95,6 +107,8 @@ fn linkSystemLibrariesAndIncludes(b: *std.Build, root: *std.Build.Module, module
 fn discoverModules(
     b: *std.Build,
     dir_path: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
     allocator: std.mem.Allocator,
     all_modules: *std.StringHashMap(*std.Build.Module),
 ) !void {
@@ -107,7 +121,7 @@ fn discoverModules(
         // Recurse into subdirectories
         if (entry.kind == .directory) {
             const subdir = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
-            try discoverModules(b, subdir, allocator, all_modules);
+            try discoverModules(b, subdir, target, optimize, allocator, all_modules);
             continue;
         }
 
@@ -126,8 +140,12 @@ fn discoverModules(
             return error.ModuleNameCollision;
         }
 
-        // Create and register module
-        const module = b.addModule(name, .{ .root_source_file = b.path(path) });
+        // Create and register module WITH target and optimize mode
+        const module = b.addModule(name, .{ 
+            .root_source_file = b.path(path),
+            .target = target,
+            .optimize = optimize,
+        });
         try all_modules.put(try allocator.dupe(u8, name), module);
     }
 }

@@ -1,4 +1,4 @@
-///! Window dragging and resizing - OPTIMIZED with throttling
+///! Window dragging and resizing
 
 const std = @import("std");
 const defs = @import("defs");
@@ -7,9 +7,6 @@ const WM = defs.WM;
 const utils = @import("utils");
 const focus = @import("focus");
 const tiling = @import("tiling");
-
-// OPTIMIZATION: Throttle drag updates to reduce XCB overhead
-const DRAG_UPDATE_EVERY_N_FRAMES = 2; // Update every 2nd frame (~120Hz on 240Hz mouse)
 
 pub fn startDrag(wm: *WM, win: u32, button: u8, x: i16, y: i16) void {
     if (wm.drag_state.active) return;
@@ -34,16 +31,7 @@ pub fn startDrag(wm: *WM, win: u32, button: u8, x: i16, y: i16) void {
     if (wm.config.tiling.enabled and tiling.isWindowTiled(win)) {
         tiling.removeWindow(wm, win);
     }
-    
-    // Reset frame counter
-    frame_counter = 0;
 }
-
-// OPTIMIZATION: Throttled drag updates with deferred flushing
-var frame_counter: u32 = 0;
-var pending_update: bool = false;
-var pending_rect: utils.Rect = undefined;
-var pending_window: u32 = 0;
 
 pub fn updateDrag(wm: *WM, x: i16, y: i16) void {
     if (!wm.drag_state.active) return;
@@ -52,7 +40,6 @@ pub fn updateDrag(wm: *WM, x: i16, y: i16) void {
     const dx = x - drag.start_x;
     const dy = y - drag.start_y;
 
-    // OPTIMIZATION: Build rect inline to avoid duplication
     const rect = switch (drag.mode) {
         .move => utils.Rect{
             .x = drag.start_win_x + dx,
@@ -68,45 +55,19 @@ pub fn updateDrag(wm: *WM, x: i16, y: i16) void {
         },
     };
 
-    // OPTIMIZATION: Frame-based throttling to reduce XCB overhead
-    frame_counter += 1;
-    
-    if (frame_counter >= DRAG_UPDATE_EVERY_N_FRAMES) {
-        // Enough frames have passed - send update immediately
-        utils.configureWindow(wm.conn, drag.window, rect);
-        utils.flush(wm.conn);
-        frame_counter = 0;
-        pending_update = false;
-    } else {
-        // Too soon - store pending update (will be sent on stop or next threshold)
-        pending_update = true;
-        pending_rect = rect;
-        pending_window = drag.window;
-    }
+    utils.configureWindow(wm.conn, drag.window, rect);
+    utils.flush(wm.conn);
 }
 
 pub inline fn stopDrag(wm: *WM) void {
-    // OPTIMIZATION: Flush any pending drag update before stopping
-    if (pending_update and wm.drag_state.active) {
-        utils.configureWindow(wm.conn, pending_window, pending_rect);
-        utils.flush(wm.conn);
-        pending_update = false;
-    }
-    
     wm.drag_state.active = false;
-    frame_counter = 0;
 }
 
 pub inline fn isDragging(wm: *WM) bool {
     return wm.drag_state.active;
 }
 
-// OPTIMIZATION: Allow manual flush of pending updates (e.g., before workspace switch)
 pub inline fn flushPendingUpdate(wm: *WM) void {
-    if (pending_update and wm.drag_state.active) {
-        utils.configureWindow(wm.conn, pending_window, pending_rect);
-        utils.flush(wm.conn);
-        pending_update = false;
-        frame_counter = 0;
-    }
+    // No-op: throttling removed, no pending updates to flush
+    _ = wm;
 }

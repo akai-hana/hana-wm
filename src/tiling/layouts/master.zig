@@ -61,7 +61,7 @@ pub fn tileWithOffset(b: *batch.Batch, state: *State, windows: []const u32, scre
             .width = master_inner_w,
             .height = m_layout.item_h,
         };
-        layouts.configureSafe(b, win, rect, "master");
+        layouts.configureSafe(b, win, rect);
     }
 
     if (s_count == 0) return;
@@ -101,7 +101,7 @@ fn tileStackSimple(b: *batch.Batch, windows: []const u32, x: u16, y_offset: u16,
             .width = inner_w,
             .height = s_layout.item_h,
         };
-        layouts.configureSafe(b, win, rect, "master");
+        layouts.configureSafe(b, win, rect);
     }
 }
 
@@ -144,7 +144,7 @@ fn tileStackOverflow(b: *batch.Batch, windows: []const u32, x: u16, y_offset: u1
                 .width = row_inner_w,
                 .height = s_layout.item_h,
             };
-            layouts.configureSafe(b, win, rect, "master");
+            layouts.configureSafe(b, win, rect);
 
             col += 1;
         }

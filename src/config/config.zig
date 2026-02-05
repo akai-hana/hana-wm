@@ -1,7 +1,8 @@
-// ! Configuration interpreter
+//! Configuration interpreter
 
 const std = @import("std");
 const defs = @import("defs");
+const debug = @import("debug");
 const parser = @import("parser");
 const xkb = @import("xkbcommon");
 
@@ -23,7 +24,7 @@ fn getColor(section: *const parser.Section, key: []const u8, default: u32) u32 {
     }
     if (value.asString()) |str| {
         const color = parseColor(str) catch {
-            std.log.warn("[config] Invalid color for {s}: '{s}'", .{ key, str });
+            debug.warn("Invalid color for {s}: '{s}'", .{ key, str });
             return default;
         };
         return color;
@@ -63,13 +64,13 @@ fn get(
     // Validate bounds and warn if out of range - returns default, NOT clamped value
     if (comptime min) |m| {
         if (value < m) {
-            std.log.warn("[config] Value for '{s}' ({any}) below minimum ({any}), using default", .{key, value, m});
+            debug.warn("Value for '{s}' ({any}) below minimum ({any}), using default", .{key, value, m});
             return default;
         }
     }
     if (comptime max) |m| {
         if (value > m) {
-            std.log.warn("[config] Value for '{s}' ({any}) above maximum ({any}), using default", .{key, value, m});
+            debug.warn("Value for '{s}' ({any}) above maximum ({any}), using default", .{key, value, m});
             return default;
         }
     }
@@ -97,7 +98,7 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator) !defs.Config {
         if (loadConfig(allocator, local)) |cfg| {
             return cfg;
         } else |_| {
-            std.log.info("[config] No config.toml found, using fallback with auto-detection", .{});
+            debug.info("No config.toml found, using fallback with auto-detection", .{});
             return try loadFallbackConfig(allocator);
         }
     }
@@ -109,7 +110,7 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
 
     const fd = std.posix.open(path_z, .{ .ACCMODE = .RDONLY }, 0) catch |err| {
         if (err == error.FileNotFound) {
-            std.log.info("[config] Not found: {s}", .{path});
+            debug.info("Not found: {s}", .{path});
             return err;
         }
         return err;
@@ -129,7 +130,7 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
     }
 
     if (content.items.len == 0) {
-        std.log.info("[config] Empty config file: {s}, using fallback", .{path});
+        debug.info("Empty config file: {s}, using fallback", .{path});
         return try loadFallbackConfig(allocator);
     }
 
@@ -142,7 +143,7 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
     try parseTiling(allocator, &doc, &cfg);
     try parseBar(allocator, &doc, &cfg);
     try parseRules(allocator, &doc, &cfg);
-    std.log.info("[config] Loaded: {s}", .{path});
+    debug.info("Loaded: {s}", .{path});
     return cfg;
 }
 
@@ -176,7 +177,7 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !defs.Config {
         cfg.bar.font = font_with_size;
     }
 
-    std.log.info("[config] Loaded fallback configuration with auto-detection", .{});
+    debug.info("Loaded fallback configuration with auto-detection", .{});
     return cfg;
 }
 
@@ -245,7 +246,7 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, c
         defer if (mod_substitute != null) allocator.free(keybind_str);
 
         const parts = parseKeybindString(keybind_str) catch |err| {
-            std.log.warn("[config] Failed to parse keybind '{s}': {}", .{ keybind_str, err });
+            debug.warn("Failed to parse keybind '{s}': {}", .{ keybind_str, err });
             continue;
         };
 
@@ -324,14 +325,14 @@ pub fn resolveKeybindings(keybindings: anytype, xkb_state: *xkb.XkbState) void {
         const key: u64 = (@as(u64, kb.modifiers) << 32) | keycode;
         
         if (seen.get(key)) |first_index| {
-            std.log.warn("[config] Keybinding conflict detected!", .{});
-            std.log.warn("  Binding #{}: mods=0x{x:0>4} key={} (first)", .{
+            debug.warn("Keybinding conflict detected!", .{});
+            debug.warn("  Binding #{}: mods=0x{x:0>4} key={} (first)", .{
                 first_index + 1, keybindings[first_index].modifiers, keycode
             });
-            std.log.warn("  Binding #{}: mods=0x{x:0>4} key={} (duplicate)", .{
+            debug.warn("  Binding #{}: mods=0x{x:0>4} key={} (duplicate)", .{
                 i + 1, kb.modifiers, keycode
             });
-            std.log.warn("  The second binding will override the first!", .{});
+            debug.warn("  The second binding will override the first!", .{});
         } else {
             seen.put(key, i) catch {};
         }
@@ -383,7 +384,7 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
                     try cfg.bar.fonts.append(allocator, font_copy);
                 }
             }
-            std.log.info("[config] Loaded {} fonts for bar", .{cfg.bar.fonts.items.len});
+            debug.info("Loaded {} fonts for bar", .{cfg.bar.fonts.items.len});
         }
     }
 
@@ -456,7 +457,7 @@ fn parseBarLayout(allocator: std.mem.Allocator, section: *const parser.Section, 
     
     if (section.get("layout")) |value| {
         if (value.asArray()) |_| {
-            std.log.warn("[config] bar.layout array parsing not yet fully supported, use sections like [bar.layout.left]", .{});
+            debug.warn("bar.layout array parsing not yet fully supported, use sections like [bar.layout.left]", .{});
         }
     }
     
@@ -516,7 +517,7 @@ fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *d
         while (iter.next()) |entry| {
             const ws_num = entry.value_ptr.*.asInt() orelse continue;
             if (ws_num < 1 or ws_num > cfg.workspaces.count) {
-                std.log.warn("[config] Rule workspace {} for '{s}' exceeds count {}, skipping", .{ ws_num, entry.key_ptr.*, cfg.workspaces.count });
+                debug.warn("Rule workspace {} for '{s}' exceeds count {}, skipping", .{ ws_num, entry.key_ptr.*, cfg.workspaces.count });
                 continue;
             }
             const rule = defs.Rule{
@@ -539,7 +540,7 @@ fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *d
 
         const ws_num = std.fmt.parseInt(usize, ws_str, 10) catch continue;
         if (ws_num < 1 or ws_num > cfg.workspaces.count) {
-            std.log.warn("[config] Section '{s}' workspace {} exceeds count {}, skipping", .{ name, ws_num, cfg.workspaces.count });
+            debug.warn("Section '{s}' workspace {} exceeds count {}, skipping", .{ name, ws_num, cfg.workspaces.count });
             continue;
         }
 
