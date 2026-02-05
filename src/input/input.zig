@@ -8,6 +8,7 @@ const focus = @import("focus");
 const tiling = @import("tiling");
 const workspaces = @import("workspaces");
 const drag = @import("drag");
+const debug = @import("debug");
 const xcb = defs.xcb;
 const WM = defs.WM;
 
@@ -50,13 +51,13 @@ var keybind_state: ?*KeybindState = null;
 
 pub fn init(wm: *WM) void {
     const state = wm.allocator.create(KeybindState) catch {
-        std.log.err("[input] Failed to allocate keybind state", .{});
+        debug.err("Failed to allocate keybind state", .{});
         return;
     };
     state.* = KeybindState.init(wm.allocator);
 
     state.rebuild(wm) catch |err| {
-        std.log.err("[input] Failed to build keybind map: {}", .{err});
+        debug.err("Failed to build keybind map: {}", .{err});
         state.deinit();
         wm.allocator.destroy(state);
         return;
@@ -114,7 +115,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
 
     if (state.get(key)) |action| {
         executeAction(action, wm) catch |err| {
-            std.log.err("[input] Failed to execute action: {}", .{err});
+            debug.err("Failed to execute action: {}", .{err});
         };
     }
 }
@@ -145,7 +146,7 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) 
 // OPTIMIZATION: Streamlined window closing with early returns
 fn closeWindow(wm: *WM, win: u32) void {
     if (win == wm.root) {
-        std.log.err("[CRITICAL] Attempted to close ROOT window!", .{});
+        debug.err("CRITICAL: Attempted to close ROOT window!", .{});
         return;
     }
 
@@ -240,11 +241,11 @@ fn executeShellCommand(wm: *WM, cmd: []const u8) !void {
             _ = c.setsid();
             const result = c.execvp("/bin/sh", @ptrCast(&[_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z.ptr, null }));
             if (result == -1) {
-                std.log.err("[input] execvp failed for command: {s}", .{cmd});
+                debug.err("execvp failed for command: {s}", .{cmd});
             }
             std.process.exit(1);
         } else if (pid2 < 0) {
-            std.log.err("[input] Second fork failed for command: {s}", .{cmd});
+            debug.err("Second fork failed for command: {s}", .{cmd});
             std.process.exit(1);
         }
         std.process.exit(0);
@@ -253,49 +254,49 @@ fn executeShellCommand(wm: *WM, cmd: []const u8) !void {
         var status: c_int = 0;
         const wait_result = waitpid(pid, &status, 0);
         if (wait_result == -1) {
-            std.log.err("[input] waitpid failed", .{});
+            debug.err("waitpid failed", .{});
             return error.WaitpidFailed;
         }
     } else {
-        std.log.err("[input] First fork failed for command: {s}", .{cmd});
+        debug.err("First fork failed for command: {s}", .{cmd});
         return error.ForkFailed;
     }
 }
 
 fn dumpState(wm: *WM) void {
-    std.log.info("========== STATE DUMP ==========", .{});
-    std.log.info("Focused: {?x}", .{wm.focused_window});
-    std.log.info("Total windows: {}", .{wm.windows.count()});
+    debug.info("========== STATE DUMP ==========", .{});
+    debug.info("Focused: {?x}", .{wm.focused_window});
+    debug.info("Total windows: {}", .{wm.windows.count()});
 
     // List fullscreen windows per workspace
     var fs_it = wm.fullscreen.per_workspace.iterator();
     var fs_count: usize = 0;
     while (fs_it.next()) |entry| {
-        std.log.info("Fullscreen on workspace {}: {x}", .{ entry.key_ptr.*, entry.value_ptr.window });
+        debug.info("Fullscreen on workspace {}: {x}", .{ entry.key_ptr.*, entry.value_ptr.window });
         fs_count += 1;
     }
-    if (fs_count == 0) std.log.info("Fullscreen: none", .{});
-    std.log.info("Drag active: {}", .{wm.drag_state.active});
+    if (fs_count == 0) debug.info("Fullscreen: none", .{});
+    debug.info("Drag active: {}", .{wm.drag_state.active});
 
     if (workspaces.getState()) |ws_state| {
-        std.log.info("Current workspace: {}", .{ws_state.current + 1});
+        debug.info("Current workspace: {}", .{ws_state.current + 1});
         for (ws_state.workspaces, 0..) |*ws, i| {
-            std.log.info("  WS{}: {} windows", .{ i + 1, ws.windows.list.items.len });
+            debug.info("  WS{}: {} windows", .{ i + 1, ws.windows.list.items.len });
         }
     }
 
     if (tiling.getState()) |t_state| {
-        std.log.info("Tiling enabled: {}", .{t_state.enabled});
-        std.log.info("Tiling layout: {s}", .{@tagName(t_state.layout)});
-        std.log.info("Tiled windows: {}", .{t_state.windows.list.items.len});
-        std.log.info("Master count: {}", .{t_state.master_count});
-        std.log.info("Master width: {d:.2}", .{t_state.master_width});
+        debug.info("Tiling enabled: {}", .{t_state.enabled});
+        debug.info("Tiling layout: {s}", .{@tagName(t_state.layout)});
+        debug.info("Tiled windows: {}", .{t_state.windows.list.items.len});
+        debug.info("Master count: {}", .{t_state.master_count});
+        debug.info("Master width: {d:.2}", .{t_state.master_width});
     }
-    std.log.info("================================", .{});
+    debug.info("================================", .{});
 }
 
 fn emergencyRecover(wm: *WM) void {
-    std.log.warn("========== EMERGENCY RECOVERY ==========", .{});
+    debug.warn("========== EMERGENCY RECOVERY ==========", .{});
 
     // Map all windows
     if (workspaces.getState()) |ws_state| {
@@ -309,19 +310,19 @@ fn emergencyRecover(wm: *WM) void {
     // Disable tiling
     if (tiling.getState()) |t_state| {
         t_state.enabled = false;
-        std.log.warn("Tiling disabled", .{});
+        debug.warn("Tiling disabled", .{});
     }
 
     // Exit fullscreen on all workspaces
     wm.fullscreen.clear();
-    std.log.warn("Fullscreen cleared", .{});
+    debug.warn("Fullscreen cleared", .{});
 
     // Stop any drag
     if (wm.drag_state.active) {
         wm.drag_state.active = false;
-        std.log.warn("Drag stopped", .{});
+        debug.warn("Drag stopped", .{});
     }
 
     utils.flush(wm.conn);
-    std.log.warn("Recovery complete - all windows mapped, special modes disabled", .{});
+    debug.warn("Recovery complete - all windows mapped, special modes disabled", .{});
 }

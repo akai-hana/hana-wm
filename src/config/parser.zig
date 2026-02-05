@@ -1,4 +1,4 @@
-//! Minimal TOML parser for config file - OPTIMIZED VERSION
+//! TOML file parser 
 //!
 //! Key improvements:
 //! - Reduced allocations in hot paths
@@ -8,6 +8,7 @@
 //! - Improved fast-path string parsing
 
 const std = @import("std");
+const debug = @import("debug");
 
 pub const Value = union(enum) {
     integer: i64,
@@ -393,7 +394,7 @@ const Parser = struct {
                 if (std.fmt.parseInt(i64, raw, 10)) |int_val| {
                     return .{ .integer = int_val };
                 } else |_| {
-                    std.log.warn("[parser] Invalid color '{s}' at line {}", .{ raw, self.line });
+                    debug.warn("Invalid color '{s}' at line {}", .{ raw, self.line });
                     return ParseError.InvalidColor;
                 }
             }
@@ -450,7 +451,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
 
         if (c == '[') {
             const section_name = parser.parseSection() catch |err| {
-                std.log.warn("[parser] Invalid section at line {}: {}", .{ parser.line, err });
+                debug.warn("Invalid section at line {}: {}", .{ parser.line, err });
                 parser.skipLine();
                 continue;
             };
@@ -458,7 +459,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
 
             if (doc.sections.contains(section_name)) {
                 allocator.free(section_name);
-                std.log.warn("[parser] Duplicate section at line {}", .{parser.line});
+                debug.warn("Duplicate section at line {}", .{parser.line});
                 parser.skipLine();
                 continue;
             }
@@ -474,7 +475,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
         // OPTIMIZATION: Use merged parseKeyValuePair function
         while (true) {
             var kv = parser.parseKeyValuePair(allocator, true) catch |err| {
-                std.log.warn("[parser] Invalid key-value at line {}: {}", .{ parser.line, err });
+                debug.warn("Invalid key-value at line {}: {}", .{ parser.line, err });
                 parser.skipLine();
                 break;
             };
@@ -485,7 +486,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
             }
 
             if (current_section.pairs.contains(kv[0])) {
-                std.log.warn("[parser] Duplicate key '{s}' at line {}", .{ kv[0], parser.line });
+                debug.warn("Duplicate key '{s}' at line {}", .{ kv[0], parser.line });
                 if (current_section.pairs.getPtr(kv[0])) |old_val| {
                     old_val.deinit(allocator);
                 }
@@ -512,7 +513,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
                 if (next == '#') parser.skipLine();
                 break;
             } else {
-                std.log.warn("[parser] Unexpected character at line {}", .{parser.line});
+                debug.warn("Unexpected character at line {}", .{parser.line});
                 parser.skipLine();
                 break;
             }

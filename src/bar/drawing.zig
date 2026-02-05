@@ -1,6 +1,7 @@
 //! XCB + Xft text rendering with color caching
 
 const std = @import("std");
+const debug = @import("debug");
 const defs = @import("defs");
 
 const c = @cImport({
@@ -62,7 +63,7 @@ const ColorCache = struct {
 
     fn get(self: *ColorCache, rgb: u32) *c.XftColor {
         const result = self.colors.getOrPut(rgb) catch {
-            std.log.warn("[drawing] Color cache allocation failed, using fallback", .{});
+            debug.warn("Color cache allocation failed, using fallback", .{});
             return &self.fallback_color;
         };
 
@@ -181,17 +182,17 @@ pub const DrawContext = struct {
         
         const font = c.XftFontOpenName(self.display, 0, font_name_z.ptr) orelse 
             c.XftFontOpenName(self.display, 0, "monospace:size=10") orelse {
-                std.log.warn("[drawing] Failed to load '{s}' and fallback", .{font_name});
+                debug.warn("Failed to load '{s}' and fallback", .{font_name});
                 return error.FontLoadFailed;
             };
         
-        if (font == null) std.log.warn("[drawing] Failed to load '{s}', trying fallback", .{font_name});
+        if (font == null) debug.warn("Failed to load '{s}', trying fallback", .{font_name});
         
         const slice = try self.allocator.alloc(*c.XftFont, 1);
         slice[0] = font;
         self.xft_fonts = slice;
         self.xft_font = slice[0];
-        std.log.info("[drawing] Xft font loaded: {s}", .{font_name});
+        debug.info("Xft font loaded: {s}", .{font_name});
     }
     
     fn openVerified(self: *DrawContext, pattern: []const u8) ?*c.XftFont {
@@ -202,7 +203,7 @@ pub const DrawContext = struct {
 
         var family_cstr: [*:0]const u8 = undefined;
         if (c.FcPatternGetString(font.*.pattern, "family", 0, @ptrCast(&family_cstr)) != 0) {
-            std.log.warn("[drawing] Could not verify family for '{s}', accepting anyway", .{pattern});
+            debug.warn("Could not verify family for '{s}', accepting anyway", .{pattern});
             return font;
         }
         
@@ -218,7 +219,7 @@ pub const DrawContext = struct {
             return null;
         }
 
-        std.log.info("[drawing] Font verified: {s}", .{pattern});
+        debug.info("Font verified: {s}", .{pattern});
         return font;
     }
 
@@ -247,13 +248,13 @@ pub const DrawContext = struct {
                 }
             }
 
-            std.log.warn("[drawing] Font not available: {s}", .{font_name});
+            debug.warn("Font not available: {s}", .{font_name});
         }
 
         if (fonts.items.len == 0) {
             if (c.XftFontOpenName(self.display, 0, "monospace:size=10")) |f| {
                 try fonts.append(self.allocator, f);
-                std.log.warn("[drawing] All requested fonts failed, using monospace fallback", .{});
+                debug.warn("All requested fonts failed, using monospace fallback", .{});
             } else {
                 return error.NoFontsLoaded;
             }

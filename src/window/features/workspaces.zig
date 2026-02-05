@@ -10,6 +10,7 @@ const bar = @import("bar");
 const batch = @import("batch");
 const tracking = @import("tracking").tracking;
 const ModuleState = @import("module_state").ModuleState;
+const debug = @import("debug");
 
 pub const Workspace = struct {
     id: usize,
@@ -62,7 +63,7 @@ inline fn cleanupWorkspaces(workspaces: []Workspace, allocator: std.mem.Allocato
 pub fn init(wm: *WM) void {
     const count = wm.config.workspaces.count;
     const workspaces_array = wm.allocator.alloc(Workspace, count) catch {
-        std.log.err("[workspaces] Failed to allocate workspaces", .{});
+        debug.err("Failed to allocate workspaces", .{});
         return;
     };
     
@@ -70,7 +71,7 @@ pub fn init(wm: *WM) void {
     for (workspaces_array, 0..) |*ws, i| {
         const name = std.fmt.allocPrint(wm.allocator, "{}", .{i + 1}) catch "?";
         ws.* = Workspace.init(wm.allocator, i, name) catch {
-            std.log.err("[workspaces] Failed to init workspace {}", .{i});
+            debug.err("Failed to init workspace {}", .{i});
             cleanupWorkspaces(workspaces_array[0..i], wm.allocator);
             return;
         };
@@ -85,7 +86,7 @@ pub fn init(wm: *WM) void {
     };
     
     StateManager.init(wm.allocator, initial_state) catch |err| {
-        std.log.err("[workspaces] Failed to initialize state: {}", .{err});
+        debug.err("Failed to initialize state: {}", .{err});
         cleanupWorkspaces(workspaces_array, wm.allocator);
     };
 }
@@ -108,11 +109,11 @@ pub fn addWindowToCurrentWorkspace(_: *WM, win: u32) void {
 
     const ws = &s.workspaces[s.current];
     ws.add(win) catch |err| {
-        std.log.err("[workspaces] Failed to add window {x}: {}", .{ win, err });
+        debug.err("Failed to add window {x}: {}", .{ win, err });
         return;
     };
     s.window_to_workspace.put(win, s.current) catch |err| {
-        std.log.warn("[workspaces] Failed to update window map for {x}: {}", .{ win, err });
+        debug.warn("Failed to update window map for {x}: {}", .{ win, err });
     };
 }
 
@@ -130,14 +131,14 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: usize) void {
     const s = StateManager.get(true) orelse return;
 
     if (target_ws >= s.workspaces.len) {
-        std.log.err("[workspaces] Invalid target workspace: {}", .{target_ws});
+        debug.err("Invalid target workspace: {}", .{target_ws});
         return;
     }
 
     const from_ws = s.window_to_workspace.get(win) orelse {
         // Window not tracked, just add to target
         s.workspaces[target_ws].add(win) catch |err| {
-            std.log.err("[workspaces] Failed to add window to workspace {}: {}", .{ target_ws, err });
+            debug.err("Failed to add window to workspace {}: {}", .{ target_ws, err });
         };
         s.window_to_workspace.put(win, target_ws) catch {};
         return;
@@ -148,7 +149,7 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: usize) void {
     // Move window between workspaces
     _ = s.workspaces[from_ws].remove(win);
     s.workspaces[target_ws].add(win) catch |err| {
-        std.log.err("[workspaces] Failed to add window to workspace {}: {}", .{ target_ws, err });
+        debug.err("Failed to add window to workspace {}: {}", .{ target_ws, err });
         s.workspaces[from_ws].add(win) catch {};
         return;
     };

@@ -4,6 +4,7 @@ const std = @import("std");
 const posix = std.posix;
 const builtin = @import("builtin");
 
+const debug = @import("debug");
 const config = @import("config");
 const defs = @import("defs");
 const xkbcommon = @import("xkbcommon");
@@ -87,7 +88,7 @@ fn becomeWindowManager(conn: *xcb.xcb_connection_t, root: u32) !void {
     if (xcb.xcb_request_check(conn, xcb.xcb_change_window_attributes_checked(
         conn, root, xcb.XCB_CW_EVENT_MASK, &[_]u32{WM_EVENT_MASK}))) |err| {
         std.c.free(err);
-        std.log.err("Another window manager is running", .{});
+        debug.err("Another window manager is running", .{});
         return error.AnotherWMRunning;
     }
 }
@@ -168,7 +169,7 @@ fn grabKeybindings(wm: *WM) !void {
     
     // Phase 3: If errors detected, retry with detailed logging
     if (has_errors) {
-        std.log.warn("[keybind] {} grab(s) failed, identifying culprits...", .{failed_count});
+        debug.warn("{} grab(s) failed, identifying culprits...", .{failed_count});
         
         // Re-grab synchronously to identify specific failures
         for (wm.config.keybindings.items) |kb| {
@@ -183,17 +184,17 @@ fn grabKeybindings(wm: *WM) !void {
             }
             // Only log once per keybinding (not per lock modifier)
             if (failed_this_kb) {
-                std.log.warn("[keybind] Failed to grab keycode: {}", .{keycode});
+                debug.warn("Failed to grab keycode: {}", .{keycode});
             }
         }
     }
 }
 
 fn handleConfigReload(wm: *WM) !void {
-    std.log.info("[config] Reload requested", .{});
+    debug.info("Reload requested", .{});
 
     var new_config = config.loadConfigDefault(wm.allocator) catch |err| {
-        std.log.err("[config] Failed to load: {}, keeping old", .{err});
+        debug.err("Failed to load: {}, keeping old", .{err});
         return err;
     };
     errdefer new_config.deinit(wm.allocator);
@@ -204,7 +205,7 @@ fn handleConfigReload(wm: *WM) !void {
     wm.config = new_config;
 
     grabKeybindings(wm) catch |err| {
-        std.log.err("[config] Keybind grab failed: {}, reverting", .{err});
+        debug.err("Keybind grab failed: {}, reverting", .{err});
         new_config.deinit(wm.allocator);
         wm.config = old_config;
         try grabKeybindings(wm);
@@ -214,7 +215,7 @@ fn handleConfigReload(wm: *WM) !void {
     old_config.deinit(wm.allocator);
     try input.rebuildKeybindMap(wm);
     tiling.reloadConfig(wm);
-    std.log.info("[config] Reload complete", .{});
+    debug.info("Reload complete", .{});
 }
 
 pub fn main() !void {
@@ -267,14 +268,14 @@ pub fn main() !void {
     defer events.deinitModules(&wm);
 
     bar.init(&wm) catch |err| {
-        if (err != error.BarDisabled) std.log.err("[bar] Failed to initialize: {}", .{err});
+        if (err != error.BarDisabled) debug.err("Failed to initialize: {}", .{err});
     };
     defer bar.deinit();
 
     try grabKeybindings(&wm);
     setupExistingWindows(conn, root);
     utils.flush(conn);
-    std.log.info("[hana] Started", .{});
+    debug.info("Started", .{});
 
     const x_fd = xcb.xcb_get_file_descriptor(conn);
 
@@ -291,7 +292,7 @@ pub fn main() !void {
     while (running.load(.acquire)) {
         _ = posix.poll(&pollfds, -1) catch |err| {
             if (err == error.Interrupted) continue;
-            std.log.err("[main] Poll error: {}", .{err});
+            debug.err("Poll error: {}", .{err});
             continue;
         };
         
@@ -307,7 +308,7 @@ pub fn main() !void {
             focus.releaseProtection();
             tiling.retileIfDirty(&wm);
             bar.updateIfDirty(&wm) catch |err| {
-                std.log.err("[main] Failed to update bar: {}", .{err});
+                debug.err("Failed to update bar: {}", .{err});
             };
             // Single flush for all changes
             utils.flush(conn);
@@ -319,7 +320,7 @@ pub fn main() !void {
             
             if (should_reload.swap(false, .acq_rel)) {
                 handleConfigReload(&wm) catch |err| {
-                    std.log.err("[config] Reload failed: {}", .{err});
+                    debug.err("Reload failed: {}", .{err});
                 };
             }
         }
@@ -329,17 +330,17 @@ pub fn main() !void {
             var expiration: u64 = 0;
             _ = posix.read(fds.timer, std.mem.asBytes(&expiration)) catch {};
             bar.checkClockUpdate() catch |err| {
-                std.log.err("[bar] Clock update failed: {}", .{err});
+                debug.err("Clock update failed: {}", .{err});
             };
         }
         
         // Error handling (cold path)
         if ((pollfds[0].revents & (posix.POLL.ERR | posix.POLL.HUP)) != 0 or
             xcb.xcb_connection_has_error(conn) != 0) {
-            std.log.err("[main] X11 connection error, shutting down", .{});
+            debug.err("X11 connection error, shutting down", .{});
             break;
         }
     }
 
-    std.log.info("[hana] Shutting down gracefully", .{});
+    debug.info("Shutting down gracefully", .{});
 }

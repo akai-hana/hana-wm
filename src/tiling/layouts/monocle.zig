@@ -5,6 +5,7 @@ const defs = @import("defs");
 const utils = @import("utils");
 const batch = @import("batch");
 const layouts = @import("layouts");
+const debug = @import("debug");
 
 const tiling = @import("tiling");
 const State = tiling.State;
@@ -22,12 +23,12 @@ pub fn tileWithOffset(b: *batch.Batch, state: *State, windows: []const u32, scre
 
     // Configure all windows to fullscreen
     for (windows) |win| {
-        layouts.configureSafe(b, win, rect, "monocle");
+        layouts.configureSafe(b, win, rect);
     }
 
     // Raise the last window (most recently focused in tiled_windows order)
     const top_win = windows[windows.len - 1];
     b.raise(top_win) catch |err| {
-        std.log.err("[monocle] Failed to raise window 0x{x}: {}", .{ top_win, err });
+        debug.err("Failed to raise window 0x{x}: {}", .{ top_win, err });
     };
 }

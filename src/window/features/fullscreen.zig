@@ -9,6 +9,7 @@ const tiling = @import("tiling");
 const batch = @import("batch");
 const workspaces = @import("workspaces");
 const bar = @import("bar");
+const debug = @import("debug");
 
 inline fn getFullscreenRect(screen: *xcb.xcb_screen_t) utils.Rect {
     return .{ .x = 0, .y = 0, .width = screen.width_in_pixels, .height = screen.height_in_pixels };
@@ -49,7 +50,7 @@ fn enterFullscreen(wm: *WM, win: u32, ws: usize) void {
     };
     
     wm.fullscreen.setForWorkspace(ws, fs_info) catch {
-        std.log.err("[fullscreen] Failed to save fullscreen state for workspace {}", .{ws});
+        debug.err("Failed to save fullscreen state for workspace {}", .{ws});
         return;
     };
     

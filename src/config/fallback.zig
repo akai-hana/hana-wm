@@ -1,6 +1,7 @@
 ///! Fallback configuration logic - terminal and font detection - Optimized version
 const std = @import("std");
 
+const debug = @import("debug");
 // Terminal detection - ordered by preference
 const TERMINALS = [_][]const u8{
     "ghostty",
@@ -37,12 +38,12 @@ pub fn detectTerminal(allocator: std.mem.Allocator) ![]const u8 {
     // OPTIMIZATION: Use inline for to allow compiler to unroll
     inline for (TERMINALS) |terminal| {
         if (isCommandAvailable(allocator, terminal)) {
-            std.log.info("[fallback] Detected terminal: {s}", .{terminal});
+            debug.info("Detected terminal: {s}", .{terminal});
             return terminal;
         }
     }
     
-    std.log.warn("[fallback] No preferred terminal found, using 'xterm'", .{});
+    debug.warn("No preferred terminal found, using 'xterm'", .{});
     return "xterm";
 }
 
@@ -51,12 +52,12 @@ pub fn detectFont(_: std.mem.Allocator) ![]const u8 {
     // OPTIMIZATION: Use inline for to allow compiler to unroll
     inline for (FONTS) |font| {
         if (isFontAvailable(font)) {
-            std.log.info("[fallback] Detected font: {s}", .{font});
+            debug.info("Detected font: {s}", .{font});
             return font;
         }
     }
     
-    std.log.warn("[fallback] No preferred font found, using 'monospace'", .{});
+    debug.warn("No preferred font found, using 'monospace'", .{});
     return "monospace";
 }
 

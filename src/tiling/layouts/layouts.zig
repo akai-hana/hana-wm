@@ -5,6 +5,7 @@ const std = @import("std");
 const batch = @import("batch");
 const utils = @import("utils");
 const tiling = @import("tiling");
+const debug = @import("debug");
 
 const State = tiling.State;
 
@@ -13,12 +14,11 @@ const State = tiling.State;
 pub inline fn configureSafe(
     b: *batch.Batch, 
     win: u32, 
-    rect: utils.Rect, 
-    comptime layout_name: []const u8
+    rect: utils.Rect
 ) void {
     b.configure(win, rect) catch |err| {
-        std.log.err("[{s}] Failed to configure window 0x{x}: {}", 
-            .{ layout_name, win, err });
+        debug.err("Failed to configure window 0x{x}: {}", 
+            .{ win, err });
     };
 }
 

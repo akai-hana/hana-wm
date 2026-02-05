@@ -10,6 +10,7 @@ const tiling = @import("tiling");
 const workspaces = @import("workspaces");
 const bar = @import("bar");
 const batch = @import("batch");
+const debug = @import("debug");
 
 const WINDOW_EVENT_MASK = xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW;
 
@@ -19,7 +20,7 @@ inline fn validateWorkspace(target_ws: ?usize, current_ws: usize) usize {
     const ws_state = workspaces.getState() orelse return current_ws;
     
     if (ws >= ws_state.workspaces.len) {
-        std.log.warn("[window] Rule workspace {} exceeds count, using current {}", .{ ws, current_ws });
+        debug.warn("Rule workspace {} exceeds count, using current {}", .{ ws, current_ws });
         return current_ws;
     }
     return ws;
@@ -58,7 +59,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
 
     // Track window
     wm.addWindow(win) catch |err| {
-        std.log.err("[window] Failed to track window {x}: {}", .{ win, err });
+        debug.err("Failed to track window {x}: {}", .{ win, err });
     };
 
     // Add to workspace
@@ -90,7 +91,7 @@ inline fn handleMapRequestDirect(wm: *WM, win: u32, is_current_ws: bool, validat
     }
     
     wm.addWindow(win) catch |err| {
-        std.log.err("[window] Failed to track window {x}: {}", .{ win, err });
+        debug.err("Failed to track window {x}: {}", .{ win, err });
     };
     
     if (is_current_ws) {
