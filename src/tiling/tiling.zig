@@ -295,7 +295,7 @@ pub fn toggleLayoutReverse(wm: *WM) void { cycleLayout(wm, false); }
 
 fn adjustMasterWidth(wm: *WM, delta: f32) void {
     const s = StateManager.get(true) orelse return;
-    s.master_width = std.math.clamp(s.master_width + delta, defs.MIN_MASTER_WIDTH, defs.MAX_MASTER_WIDTH);
+    s.master_width = @max(s.master_width + delta, defs.MIN_MASTER_WIDTH);
     retileCurrentWorkspace(wm);
 }
 

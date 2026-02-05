@@ -1,4 +1,4 @@
-// Event dispatch (OPTIMIZED)
+// X events handling
 
 const std = @import("std");
 const defs = @import("defs");

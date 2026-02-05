@@ -297,13 +297,13 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !defs.Action {
 
     if (std.mem.startsWith(u8, cmd, "workspace_")) {
         const num = try std.fmt.parseInt(usize, cmd[10..], 10);
-        if (num < 1 or num > defs.MAX_WORKSPACES) return error.InvalidWorkspace;
+        if (num < 1) return error.InvalidWorkspace;
         return .{ .switch_workspace = num - 1 };
     }
 
     if (std.mem.startsWith(u8, cmd, "move_to_workspace_")) {
         const num = try std.fmt.parseInt(usize, cmd[18..], 10);
-        if (num < 1 or num > defs.MAX_WORKSPACES) return error.InvalidWorkspace;
+        if (num < 1) return error.InvalidWorkspace;
         return .{ .move_to_workspace = num - 1 };
     }
     return .{ .exec = try allocator.dupe(u8, cmd) };
@@ -352,9 +352,9 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
     }
 
     cfg.tiling.master_count = get(usize, section, "master_count", 1, 1, null);
-    cfg.tiling.master_width = get(f32, section, "master_width", 50.0, defs.MIN_MASTER_WIDTH, defs.MAX_MASTER_WIDTH);
-    cfg.tiling.gaps = get(u16, section, "gaps", 10, 0, defs.MAX_GAPS);
-    cfg.tiling.border_width = get(u16, section, "border_width", 2, 0, defs.MAX_BORDER_WIDTH);
+    cfg.tiling.master_width = get(f32, section, "master_width", 50.0, defs.MIN_MASTER_WIDTH, null);
+    cfg.tiling.gaps = get(u16, section, "gaps", 10, 0, null);
+    cfg.tiling.border_width = get(u16, section, "border_width", 2, 0, null);
     cfg.tiling.border_focused = getColor(section, "border_focused", 0x5294E2);
     cfg.tiling.border_unfocused = getColor(section, "border_unfocused", 0x383C4A);
 }
@@ -508,7 +508,7 @@ fn parseBarLayout(allocator: std.mem.Allocator, section: *const parser.Section, 
 
 fn parseWorkspaces(doc: *const parser.Document, cfg: *defs.Config) void {
     const section = doc.getSection("workspaces") orelse return;
-    cfg.workspaces.count = get(usize, section, "count", 9, defs.MIN_WORKSPACES, defs.MAX_WORKSPACES);
+    cfg.workspaces.count = get(usize, section, "count", 9, defs.MIN_WORKSPACES, null);
 }
 
 fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {

@@ -45,22 +45,15 @@ pub const MOD_MASK_RELEVANT: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER
 
 // Window constraints
 pub const MIN_WINDOW_DIM: u16 = 50;
-pub const MAX_WINDOW_DIM: u16 = 65535;
-pub const MAX_WINDOWS: usize = 128;  // For stack buffers in common cases
 
 // XKB initialization retry parameters
 pub const XKB_RETRY_DELAY_MS: u64 = 20;
-pub const XKB_MAX_RETRIES: usize = 50;
 
 // Workspace limits
-pub const MAX_WORKSPACES: usize = 20;
 pub const MIN_WORKSPACES: usize = 1;
 
 // Tiling constraints
-pub const MAX_BORDER_WIDTH: u16 = 100;
-pub const MAX_GAPS: u16 = 200;
 pub const MIN_MASTER_WIDTH: f32 = 0.05;
-pub const MAX_MASTER_WIDTH: f32 = 0.95;
 
 // Focus protection timeout in milliseconds
 pub const FOCUS_PROTECTION_TIMEOUT_MS: i64 = 250;

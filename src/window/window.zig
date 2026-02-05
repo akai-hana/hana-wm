@@ -52,10 +52,16 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     // Subscribe to enter/leave events
     _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{WINDOW_EVENT_MASK});
 
-    // Map window only if on current workspace
-    if (is_current_ws) {
-        b.map(win) catch {};
+    // DWM APPROACH: Always map window, but position off-screen if not on current workspace
+    if (!is_current_ws) {
+        // Position window off-screen before mapping
+        const off_screen_x: i32 = -4000;
+        const values = [_]u32{@bitCast(off_screen_x)};
+        _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_X, &values);
     }
+    
+    // Always map the window (on-screen if current workspace, off-screen otherwise)
+    b.map(win) catch {};
 
     // Track window
     wm.addWindow(win) catch |err| {
@@ -71,8 +77,8 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
 
     // Set up tiling
     if (wm.config.tiling.enabled) {
+        b.setBorderWidth(win, wm.config.tiling.border_width) catch {};
         if (is_current_ws) {
-            b.setBorderWidth(win, wm.config.tiling.border_width) catch {};
             b.setBorder(win, wm.config.tiling.border_unfocused) catch {};
         }
         tiling.addWindow(wm, win);
@@ -86,9 +92,14 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
 inline fn handleMapRequestDirect(wm: *WM, win: u32, is_current_ws: bool, validated_ws: usize) void {
     _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{WINDOW_EVENT_MASK});
     
-    if (is_current_ws) {
-        _ = xcb.xcb_map_window(wm.conn, win);
+    // DWM APPROACH: Always map, but position off-screen if not current workspace
+    if (!is_current_ws) {
+        const off_screen_x: i32 = -4000;
+        const values = [_]u32{@bitCast(off_screen_x)};
+        _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_X, &values);
     }
+    
+    _ = xcb.xcb_map_window(wm.conn, win);
     
     wm.addWindow(win) catch |err| {
         debug.err("Failed to track window {x}: {}", .{ win, err });
@@ -101,9 +112,9 @@ inline fn handleMapRequestDirect(wm: *WM, win: u32, is_current_ws: bool, validat
     }
     
     if (wm.config.tiling.enabled) {
+        _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
+            &[_]u32{wm.config.tiling.border_width});
         if (is_current_ws) {
-            _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
-                &[_]u32{wm.config.tiling.border_width});
             _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_BORDER_PIXEL,
                 &[_]u32{wm.config.tiling.border_unfocused});
         }

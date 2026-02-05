@@ -94,8 +94,9 @@ pub const XkbState = struct {
 /// Retry XKB extension setup with exponential backoff
 fn retrySetup(xcb_conn: *anyopaque) !void {
     var attempts: usize = 0;
+    const max_retries = 3;
 
-    while (attempts < defs.XKB_MAX_RETRIES) : (attempts += 1) {
+    while (attempts < max_retries) : (attempts += 1) {
         const result = xkb.xkb_x11_setup_xkb_extension(
             @ptrCast(xcb_conn),
             xkb.XKB_X11_MIN_MAJOR_XKB_VERSION,
@@ -109,7 +110,7 @@ fn retrySetup(xcb_conn: *anyopaque) !void {
 
         if (result != 0) return;
 
-        if (attempts + 1 < defs.XKB_MAX_RETRIES) {
+        if (attempts + 1 < max_retries) {
             std.posix.nanosleep(0, defs.XKB_RETRY_DELAY_MS * std.time.ns_per_ms);
         }
     }
@@ -120,15 +121,16 @@ fn retrySetup(xcb_conn: *anyopaque) !void {
 /// Retry keymap creation with validation
 fn retryKeymap(ctx: *xkb_context, xcb_conn: *anyopaque, device_id: i32) !*xkb_keymap {
     var attempts: usize = 0;
+    const max_retries = 3;
 
-    while (attempts < defs.XKB_MAX_RETRIES) : (attempts += 1) {
+    while (attempts < max_retries) : (attempts += 1) {
         const km = xkb.xkb_x11_keymap_new_from_device(
             ctx,
             @ptrCast(xcb_conn),
             device_id,
             xkb.XKB_KEYMAP_COMPILE_NO_FLAGS,
         ) orelse {
-            if (attempts + 1 < defs.XKB_MAX_RETRIES) {
+            if (attempts + 1 < max_retries) {
                 std.posix.nanosleep(0, defs.XKB_RETRY_DELAY_MS * std.time.ns_per_ms);
                 continue;
             }
@@ -156,7 +158,7 @@ fn retryKeymap(ctx: *xkb_context, xcb_conn: *anyopaque, device_id: i32) !*xkb_ke
 
         xkb.xkb_keymap_unref(km);
 
-        if (attempts + 1 < defs.XKB_MAX_RETRIES) {
+        if (attempts + 1 < max_retries) {
             std.posix.nanosleep(0, defs.XKB_RETRY_DELAY_MS * std.time.ns_per_ms);
         }
     }
