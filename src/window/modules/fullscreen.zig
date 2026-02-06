@@ -37,6 +37,11 @@ pub fn toggleFullscreen(wm: *WM) void {
 fn enterFullscreen(wm: *WM, win: u32, ws: usize) void {
     const geom = utils.getGeometry(wm.conn, win) orelse return;
 
+    // Get the actual border width (DPI-scaled) from tiling state
+    const border_width: u16 = if (tiling.isWindowTiled(win)) blk: {
+        break :blk if (tiling.getState()) |s| s.border_width else 0;
+    } else 0;
+    
     const fs_info = defs.FullscreenInfo{
         .window = win,
         .workspace = ws,
@@ -45,7 +50,7 @@ fn enterFullscreen(wm: *WM, win: u32, ws: usize) void {
             .y = geom.y,
             .width = geom.width,
             .height = geom.height,
-            .border_width = if (tiling.isWindowTiled(win)) wm.config.tiling.border_width else 0,
+            .border_width = border_width,
         },
     };
     

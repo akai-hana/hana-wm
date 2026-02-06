@@ -14,6 +14,7 @@ const utils = @import("utils");
 const bar = @import("bar");
 const focus = @import("focus");
 const tiling = @import("tiling");
+const dpi = @import("dpi"); // ADD THIS
 
 const xcb = defs.xcb;
 const WM = defs.WM;
@@ -181,6 +182,7 @@ fn handleConfigReload(wm: *WM) !void {
     errdefer new_config.deinit(wm.allocator);
 
     config.resolveKeybindings(new_config.keybindings.items, @ptrCast(@alignCast(wm.xkb_state)));
+    config.finalizeConfig(&new_config, wm.screen);
 
     var old_config = wm.config;
     wm.config = new_config;
@@ -216,6 +218,10 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_allocator;
 
+    // ADDED: Detect DPI and print info
+    const dpi_info = try dpi.detect(conn, screen);
+    debug.info("DPI Detection - DPI: {d:.1}, Scale: {d:.2}x", .{dpi_info.dpi, dpi_info.scale_factor});
+
     const xkb_state = try allocator.create(xkbcommon.XkbState);
     defer allocator.destroy(xkb_state);
     xkb_state.* = try xkbcommon.XkbState.init(conn, allocator);
@@ -223,6 +229,7 @@ pub fn main() !void {
 
     var user_config = try config.loadConfigDefault(allocator);
     config.resolveKeybindings(user_config.keybindings.items, xkb_state);
+    config.finalizeConfig(&user_config, screen);
 
     var wm = WM{
         .allocator = allocator,
@@ -236,6 +243,7 @@ pub fn main() !void {
         .xkb_state = xkb_state,
         .should_reload_config = &should_reload,
         .running = &running,
+        .dpi_info = dpi_info, // ADDED: Store DPI info in WM
     };
     defer wm.deinit();
 

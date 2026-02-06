@@ -5,6 +5,7 @@ const std     = @import("std");
 const defs    = @import("defs");
     const xcb = defs.xcb;
 const utils   = @import("utils");
+const dpi     = @import("dpi");
 
 const drawing = @import("drawing");
 const tiling  = @import("tiling");
@@ -40,6 +41,7 @@ const State = struct {
     fn init(allocator: std.mem.Allocator, conn: *xcb.xcb_connection_t, window: u32, width: u16, height: u16,
             dc: *drawing.DrawContext, config: defs.BarConfig) !*State {
         const s = try allocator.create(State);
+        const scaled_padding = config.scaledPadding();
         s.* = State{
             .window = window, .width = width, .height = height, .dc = dc, .conn = conn,
             .config = config,
@@ -48,7 +50,7 @@ const State = struct {
             .cached_title_window = null,
             .dirty = false, .dirty_clock = false, .last_second = 0, .alive = true,
             .allocator = allocator,
-            .cached_clock_width = dc.textWidth("0000-00-00 00:00:00") + 2 * config.padding,
+            .cached_clock_width = dc.textWidth("0000-00-00 00:00:00") + 2 * scaled_padding,
         };
         try s.status_text.appendSlice(allocator, "hana");
         return s;
@@ -83,19 +85,20 @@ inline fn sizeFont(alloc: std.mem.Allocator, font: []const u8, size: u16) ![]con
 fn loadBarFonts(dc: *drawing.DrawContext, wm: *defs.WM) !void {
     const cfg = wm.config.bar;
     const alloc = wm.allocator;
+    const scaled_size = cfg.scaledFontSize();
     
     if (cfg.fonts.items.len > 0) {
         var sized = std.ArrayList([]const u8){};
         defer {
-            for (sized.items) |s| if (cfg.font_size > 0) alloc.free(s);
+            for (sized.items) |s| if (scaled_size > 0) alloc.free(s);
             sized.deinit(alloc);
         }
-        for (cfg.fonts.items) |f| try sized.append(alloc, try sizeFont(alloc, f, cfg.font_size));
+        for (cfg.fonts.items) |f| try sized.append(alloc, try sizeFont(alloc, f, scaled_size));
         return dc.loadFonts(sized.items);
     }
     
-    const font_str = try sizeFont(alloc, cfg.font, cfg.font_size);
-    defer if (cfg.font_size > 0) alloc.free(font_str);
+    const font_str = try sizeFont(alloc, cfg.font, scaled_size);
+    defer if (scaled_size > 0) alloc.free(font_str);
     try dc.loadFont(font_str);
 }
 
@@ -130,11 +133,17 @@ fn calculateBarHeight(wm: *defs.WM) !u16 {
     loadBarFonts(temp_dc, wm) catch return 24;
     
     const font_height: u32 = @intCast(temp_dc.getAscender() - temp_dc.getDescender());
-    return @intCast(std.math.clamp(font_height + 2 * wm.config.bar.padding, 20, 100));
+    const scaled_padding = wm.config.bar.scaledPadding();
+    return @intCast(std.math.clamp(font_height + 2 * scaled_padding, 20, 200));
 }
 
 pub fn init(wm: *defs.WM) !void {
     if (!wm.config.bar.show) return error.BarDisabled;
+
+    // Detect DPI and set scale factor
+    const dpi_info = try dpi.detect(wm.conn, wm.screen);
+    wm.config.bar.scale_factor = dpi_info.scale_factor;
+    debug.info("DPI: {d:.1}, Scale factor: {d:.2}x", .{dpi_info.dpi, dpi_info.scale_factor});
 
     const screen = wm.screen;
     const width = screen.width_in_pixels;
@@ -268,7 +277,8 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t, wm: *
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *defs.WM) void {
     if (state) |s| if (event.event == s.window) {
         const ws_state = workspaces.getState() orelse return;
-        const clicked_ws: usize = @intCast(@max(0, @divFloor(event.event_x, WORKSPACE_WIDTH)));
+        const scaled_ws_width = s.config.scaledWorkspaceWidth();
+        const clicked_ws: usize = @intCast(@max(0, @divFloor(event.event_x, scaled_ws_width)));
         if (clicked_ws < ws_state.workspaces.len) {
             workspaces.switchTo(wm, clicked_ws);
             s.markDirty();
@@ -278,7 +288,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *defs.W
 
 fn calculateSegmentWidth(s: *State, segment: defs.BarSegment) u16 {
     return switch (segment) {
-        .workspaces => if (workspaces.getState()) |ws| @intCast(ws.workspaces.len * WORKSPACE_WIDTH) else 270,
+        .workspaces => if (workspaces.getState()) |ws| @intCast(ws.workspaces.len * s.config.scaledWorkspaceWidth()) else 270,
         .layout => 60,
         .title => 100,
         .clock => s.cached_clock_width,
@@ -287,11 +297,12 @@ fn calculateSegmentWidth(s: *State, segment: defs.BarSegment) u16 {
 
 fn drawRightSegments(s: *State, wm: *defs.WM, segments: []const defs.BarSegment) !void {
     var right_x: u16 = s.width;
+    const scaled_spacing = s.config.scaledSpacing();
     for (0..segments.len) |i| {
         const idx = segments.len - 1 - i;
         right_x -= calculateSegmentWidth(s, segments[idx]);
         _ = try drawSegment(s, wm, segments[idx], right_x, null);
-        if (i < segments.len - 1) right_x -= s.config.spacing;
+        if (i < segments.len - 1) right_x -= scaled_spacing;
     }
 }
 
@@ -299,6 +310,7 @@ fn draw(s: *State, wm: *defs.WM) !void {
     s.dc.fillRect(0, 0, s.width, s.height, s.config.bg);
 
     // Pre-calculate widths
+    const scaled_spacing = s.config.scaledSpacing();
     var widths = [_]u16{0} ** 2; // [left, right]
     for (s.config.layout.items) |layout| {
         const idx: usize = switch (layout.position) {
@@ -306,8 +318,8 @@ fn draw(s: *State, wm: *defs.WM) !void {
             .right => 1,
             .center => continue,
         };
-        for (layout.segments.items) |segment| widths[idx] += calculateSegmentWidth(s, segment) + s.config.spacing;
-        if (layout.segments.items.len > 0) widths[idx] -= s.config.spacing;
+        for (layout.segments.items) |segment| widths[idx] += calculateSegmentWidth(s, segment) + scaled_spacing;
+        if (layout.segments.items.len > 0) widths[idx] -= scaled_spacing;
     }
 
     var x: u16 = 0;
@@ -315,14 +327,14 @@ fn draw(s: *State, wm: *defs.WM) !void {
         switch (layout.position) {
             .left => for (layout.segments.items) |segment| {
                 x = try drawSegment(s, wm, segment, x, null);
-                x += s.config.spacing;
+                x += scaled_spacing;
             },
             .center => {
-                const remaining = @max(100, s.width -| x -| widths[1] -| s.config.spacing);
+                const remaining = @max(100, s.width -| x -| widths[1] -| scaled_spacing);
                 for (layout.segments.items) |segment| {
                     const w = if (segment == .title) remaining else calculateSegmentWidth(s, segment);
                     x = try drawSegment(s, wm, segment, x, w);
-                    if (segment != .title) x += s.config.spacing;
+                    if (segment != .title) x += scaled_spacing;
                 }
             },
             .right => try drawRightSegments(s, wm, layout.segments.items),
