@@ -8,14 +8,29 @@ const window = @import("window");
 const input = @import("input");
 const bar = @import("bar");
 const tiling = @import("tiling");
+const focus = @import("focus");
 
 const EventHandler = *const fn (event: *anyopaque, wm: *defs.WM) void;
 
-// Combined button press handler: click-to-focus + dragging
+// FIX: Corrected button press handler to avoid double focus setting
+// Previously called both window.handleButtonPress AND input.handleButtonPress,
+// which would set focus to different windows (event.event vs event.child)
+// causing Firefox to lose focus when clicked
 fn handleButtonPressCombined(event: *anyopaque, wm: *defs.WM) void {
     const ev: *const xcb.xcb_button_press_event_t = @ptrCast(@alignCast(event));
+    
+    // FIX: Only call window.handleButtonPress for click-to-focus
+    // This handles the button grab/ungrab and focus correctly
     window.handleButtonPress(ev, wm);
-    input.handleButtonPress(ev, wm);
+    
+    // Now check if this is a Super+Button drag operation
+    // Only handle drag if event.child exists (not clicking on root/bar)
+    if (ev.child != 0) {
+        const has_super = (ev.state & defs.MOD_SUPER) != 0;
+        if (has_super and (ev.detail == 1 or ev.detail == 3)) {
+            @import("drag").startDrag(wm, ev.child, ev.detail, ev.root_x, ev.root_y);
+        }
+    }
 }
 
 // OPTIMIZATION: Compile-time event dispatch table with minimal size

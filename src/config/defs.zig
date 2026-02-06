@@ -1,4 +1,4 @@
-//! Core type definitions - Optimized version
+// Core type definitions - IMPROVED: Pointer tracking instead of event counters
 
 const std = @import("std");
 
@@ -9,7 +9,6 @@ pub const xcb = @cImport({
 pub const xkbcommon = @import("xkbcommon");
 
 /// Generic compile-time enum <-> string conversion helper
-/// Automatically generates string mapping from enum fields at compile time
 pub fn EnumStringHelper(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -55,8 +54,8 @@ pub const MIN_WORKSPACES: usize = 1;
 // Tiling constraints
 pub const MIN_MASTER_WIDTH: f32 = 0.05;
 
-// Focus protection timeout in milliseconds
-pub const FOCUS_PROTECTION_TIMEOUT_MS: i64 = 250;
+// REMOVED: Event counter-based focus protection (replaced with intelligent filtering)
+// pub const FOCUS_PROTECTION_EVENT_COUNT: u16 = 50;
 
 pub const Action = union(enum) {
     exec: []const u8,
@@ -143,7 +142,6 @@ pub const BarLayout = struct {
     position: BarPosition,
     segments: std.ArrayList(BarSegment),
 
-    // OPTIMIZATION: Inline deinit since it's called in hot paths
     pub inline fn deinit(self: *BarLayout, allocator: std.mem.Allocator) void {
         self.segments.deinit(allocator);
     }
@@ -154,7 +152,7 @@ pub const BarConfig = struct {
     vertical_position: BarVerticalPosition = .top,
     height: ?u16 = null,
     font: []const u8 = "monospace:size=10",
-    fonts: std.ArrayList([]const u8),  // Multi-font support for CJK/fallback
+    fonts: std.ArrayList([]const u8),
     font_size: u16 = 10,
     padding: u16 = 8,
     spacing: u16 = 12,
@@ -180,21 +178,17 @@ pub const BarConfig = struct {
 
     layout: std.ArrayList(BarLayout),
 
-    // OPTIMIZATION: Batch frees to reduce allocator calls
     pub fn deinit(self: *BarConfig, allocator: std.mem.Allocator) void {
-        // Free workspace icons
         for (self.workspace_icons.items) |icon| {
             allocator.free(icon);
         }
         self.workspace_icons.deinit(allocator);
         
-        // Free fonts
         for (self.fonts.items) |font| {
             allocator.free(font);
         }
         self.fonts.deinit(allocator);
 
-        // Free layouts (inline deinit helps here)
         for (self.layout.items) |*item| {
             item.deinit(allocator);
         }
@@ -250,31 +244,25 @@ pub const Config = struct {
         };
     }
 
-    // OPTIMIZATION: Batch cleanup operations
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
-        // Clean keybindings
         for (self.keybindings.items) |*kb| {
             kb.action.deinit(allocator);
         }
         self.keybindings.deinit(allocator);
 
-        // Clean workspace rules
         for (self.workspaces.rules.items) |*rule| {
             rule.deinit(allocator);
         }
         self.workspaces.rules.deinit(allocator);
 
-        // Clean bar config
         self.bar.deinit(allocator);
 
-        // Clean allocated strings
         if (self.allocated_font) |f| allocator.free(f);
         if (self.allocated_layout) |l| allocator.free(l);
         if (self.allocated_clock_format) |f| allocator.free(f);
     }
 };
 
-/// Fullscreen info for a single window
 pub const FullscreenInfo = struct {
     window: u32,
     workspace: usize,
@@ -287,11 +275,8 @@ pub const FullscreenInfo = struct {
     },
 };
 
-/// OPTIMIZATION: Improved fullscreen state with reverse lookup for O(1) window checks
 pub const FullscreenState = struct {
-    // Map workspace index -> fullscreen info
     per_workspace: std.AutoHashMap(usize, FullscreenInfo),
-    // OPTIMIZATION: Reverse map for O(1) window -> workspace lookup
     window_to_workspace: std.AutoHashMap(u32, usize),
     allocator: std.mem.Allocator,
 
@@ -308,7 +293,6 @@ pub const FullscreenState = struct {
         self.window_to_workspace.deinit();
     }
 
-    // OPTIMIZATION: O(1) lookup instead of O(n) iteration
     pub inline fn isFullscreen(self: *const FullscreenState, win: u32) bool {
         return self.window_to_workspace.contains(win);
     }
@@ -323,7 +307,6 @@ pub const FullscreenState = struct {
     }
 
     pub fn removeForWorkspace(self: *FullscreenState, ws: usize) void {
-        // Remove from both maps atomically
         if (self.per_workspace.get(ws)) |info| {
             _ = self.window_to_workspace.remove(info.window);
         }
@@ -336,7 +319,6 @@ pub const FullscreenState = struct {
     }
 };
 
-/// Drag state for window moving/resizing
 pub const DragState = struct {
     active: bool = false,
     window: u32 = 0,
@@ -347,6 +329,13 @@ pub const DragState = struct {
     start_win_y: i16 = 0,
     start_win_width: u16 = 0,
     start_win_height: u16 = 0,
+};
+
+/// IMPROVED: Focus suppression reason for context-aware behavior
+pub const FocusSuppressReason = enum {
+    none,              // Normal operation - focus follows mouse
+    window_spawn,      // Just spawned a window - don't let cursor steal focus
+    tiling_operation,  // Currently tiling - don't let cursor steal focus
 };
 
 pub const WM = struct {
@@ -362,6 +351,21 @@ pub const WM = struct {
     should_reload_config: *std.atomic.Value(bool),
     running: *std.atomic.Value(bool),
     drag_state: DragState = .{},
+    
+    // IMPROVED: Intelligent focus control without event counters
+    // Track last known pointer position to detect actual movement vs window repositioning
+    last_pointer_x: i16 = 0,
+    last_pointer_y: i16 = 0,
+    
+    // Context-aware focus suppression (replaces event counters)
+    // Only suppress when we know cursor shouldn't steal focus (spawn, tiling)
+    // Automatically clears on significant mouse movement
+    suppress_focus_reason: FocusSuppressReason = .none,
+    
+    // REMOVED: Event counter-based approach (unreliable, causes sluggishness)
+    // events_since_programmatic_action: u16 = 999,
+    // last_spawned_window: ?u32 = null,
+    // events_since_last_spawn: u16 = 999,
 
     pub fn deinit(self: *WM) void {
         self.fullscreen.deinit();

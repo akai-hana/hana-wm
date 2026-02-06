@@ -1,4 +1,4 @@
-// Focus management - OPTIMIZED
+// Focus management - IMPROVED: No event counters, intelligent filtering
 
 const std = @import("std");
 const defs = @import("defs");
@@ -19,11 +19,27 @@ pub const Reason = enum {
 };
 
 pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
-    // OPTIMIZATION: Combined early return checks, removed duplicate root check
     if (win == wm.root or win == 0 or bar.isBarWindow(win) or wm.focused_window == win) return;
 
     const old = wm.focused_window;
     wm.focused_window = win;
+
+    // IMPROVED: Set suppression based on context, not arbitrary event counts
+    // This allows precise control over when focus-follows-mouse is active
+    switch (reason) {
+        .mouse_enter, .mouse_click, .window_destroyed => {
+            // User-initiated or expected focus changes - allow normal behavior
+            wm.suppress_focus_reason = .none;
+        },
+        .tiling_operation => {
+            // During tiling, prevent cursor from stealing focus from repositioned windows
+            wm.suppress_focus_reason = .tiling_operation;
+        },
+        .user_command, .workspace_switch => {
+            // Keyboard commands - allow immediate focus changes
+            wm.suppress_focus_reason = .none;
+        },
+    }
 
     // Ungrab buttons on newly focused window, regrab on old window
     window.grabButtons(wm, win, true);
@@ -31,16 +47,20 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
         window.grabButtons(wm, old_win, false);
     }
 
-    // OPTIMIZATION: Batch XCB calls when raising window
+    // Raise window for mouse clicks and user commands
     if (reason == .mouse_click or reason == .user_command) {
-        // Combine set_input_focus and raise in sequence without intermediate flush
         _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, xcb.XCB_CURRENT_TIME);
         _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     } else {
         _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, xcb.XCB_CURRENT_TIME);
     }
+    
+    // Send WM_TAKE_FOCUS protocol message for applications that need it
+    if (utils.supportsWMTakeFocus(wm.conn, win)) {
+        utils.sendWMTakeFocus(wm.conn, win);
+    }
 
-    // OPTIMIZATION: Update borders first, flush once at the end
+    // Update borders
     tiling.updateWindowFocusFast(wm, old, win);
     utils.flush(wm.conn);
     bar.markDirty();
@@ -52,7 +72,7 @@ pub fn clearFocus(wm: *WM) void {
     _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, wm.root, xcb.XCB_CURRENT_TIME);
 
     if (old) |old_win| {
-        window.grabButtons(wm, old_win, false); // Regrab buttons on unfocused window
+        window.grabButtons(wm, old_win, false);
         tiling.updateWindowFocusFast(wm, old_win, null);
     }
     
@@ -60,12 +80,25 @@ pub fn clearFocus(wm: *WM) void {
     bar.markDirty();
 }
 
-// OPTIMIZATION: Batch focus operation for multiple windows (e.g., during workspace switch)
+// Batch focus operation for multiple windows (e.g., during workspace switch)
 pub fn setFocusBatch(wm: *WM, win: u32, reason: Reason, defer_flush: bool) void {
     if (win == wm.root or win == 0 or bar.isBarWindow(win) or wm.focused_window == win) return;
 
     const old = wm.focused_window;
     wm.focused_window = win;
+
+    // Set suppression based on context
+    switch (reason) {
+        .mouse_enter, .mouse_click, .window_destroyed => {
+            wm.suppress_focus_reason = .none;
+        },
+        .tiling_operation => {
+            wm.suppress_focus_reason = .tiling_operation;
+        },
+        .user_command, .workspace_switch => {
+            wm.suppress_focus_reason = .none;
+        },
+    }
 
     // Ungrab buttons on newly focused window, regrab on old window
     window.grabButtons(wm, win, true);
@@ -79,10 +112,15 @@ pub fn setFocusBatch(wm: *WM, win: u32, reason: Reason, defer_flush: bool) void 
     } else {
         _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, xcb.XCB_CURRENT_TIME);
     }
+    
+    // Send WM_TAKE_FOCUS protocol message
+    if (utils.supportsWMTakeFocus(wm.conn, win)) {
+        utils.sendWMTakeFocus(wm.conn, win);
+    }
 
     tiling.updateWindowFocusFast(wm, old, win);
     
-    // OPTIMIZATION: Allow caller to defer flush for batch operations
+    // Allow caller to defer flush for batch operations
     if (!defer_flush) {
         utils.flush(wm.conn);
     }

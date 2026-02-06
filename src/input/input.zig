@@ -1,4 +1,4 @@
-// Input handling (OPTIMIZED)
+// Input handling - IMPROVED: Pointer tracking, no event counters
 
 const std = @import("std");
 const defs = @import("defs");
@@ -17,7 +17,6 @@ extern "c" fn waitpid(pid: c_int, status: ?*c_int, options: c_int) c_int;
 
 const MOUSE_BUTTONS = [_]u8{ 1, 3 }; // Button1 (move), Button3 (resize)
 
-// OPTIMIZATION: Simpler keybind state with better cache locality
 const KeybindState = struct {
     map: std.AutoHashMap(u64, *const defs.Action),
     allocator: std.mem.Allocator,
@@ -81,7 +80,6 @@ pub fn rebuildKeybindMap(wm: *WM) !void {
     }
 }
 
-// OPTIMIZATION: Inline hash function for better performance
 inline fn makeHash(mods: u16, keysym: u32) u64 {
     return (@as(u64, mods) << 32) | keysym;
 }
@@ -114,6 +112,8 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
     const key = makeHash(mods, keysym);
 
     if (state.get(key)) |action| {
+        // REMOVED: No longer need to reset event counters
+        // The new approach doesn't use counters - it uses context-aware suppression
         executeAction(action, wm) catch |err| {
             debug.err("Failed to execute action: {}", .{err});
         };
@@ -141,9 +141,19 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) 
     if (drag.isDragging(wm)) {
         drag.updateDrag(wm, event.root_x, event.root_y);
     }
+    
+    // IMPROVED: Track pointer position during normal motion
+    // This allows us to detect actual cursor movement vs window repositioning
+    wm.last_pointer_x = event.root_x;
+    wm.last_pointer_y = event.root_y;
+    
+    // IMPROVED: Clear focus suppression on significant mouse movement
+    // If user is actively moving the mouse, they want focus to follow
+    if (wm.suppress_focus_reason != .none) {
+        wm.suppress_focus_reason = .none;
+    }
 }
 
-// OPTIMIZATION: Streamlined window closing with early returns
 fn closeWindow(wm: *WM, win: u32) void {
     if (win == wm.root) {
         debug.err("CRITICAL: Attempted to close ROOT window!", .{});
@@ -199,7 +209,6 @@ fn forceDestroyWindow(wm: *WM, win: u32) void {
     utils.flush(wm.conn);
 }
 
-// OPTIMIZATION: Streamlined action execution with inline switch
 fn executeAction(action: *const defs.Action, wm: *WM) !void {
     switch (action.*) {
         .toggle_fullscreen => @import("fullscreen").toggleFullscreen(wm),
@@ -227,17 +236,14 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
     }
 }
 
-// OPTIMIZATION: Double-fork pattern for clean process spawning
 fn executeShellCommand(wm: *WM, cmd: []const u8) !void {
     const cmd_z = try wm.allocator.dupeZ(u8, cmd);
     defer wm.allocator.free(cmd_z);
 
     const pid = c.fork();
     if (pid == 0) {
-        // First child - fork again to avoid zombie
         const pid2 = c.fork();
         if (pid2 == 0) {
-            // Second child - execute command
             _ = c.setsid();
             const result = c.execvp("/bin/sh", @ptrCast(&[_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z.ptr, null }));
             if (result == -1) {
@@ -250,7 +256,6 @@ fn executeShellCommand(wm: *WM, cmd: []const u8) !void {
         }
         std.process.exit(0);
     } else if (pid > 0) {
-        // Parent - wait for first child
         var status: c_int = 0;
         const wait_result = waitpid(pid, &status, 0);
         if (wait_result == -1) {
@@ -267,8 +272,9 @@ fn dumpState(wm: *WM) void {
     debug.info("========== STATE DUMP ==========", .{});
     debug.info("Focused: {?x}", .{wm.focused_window});
     debug.info("Total windows: {}", .{wm.windows.count()});
+    debug.info("Suppress focus: {s}", .{@tagName(wm.suppress_focus_reason)});
+    debug.info("Pointer: ({}, {})", .{wm.last_pointer_x, wm.last_pointer_y});
 
-    // List fullscreen windows per workspace
     var fs_it = wm.fullscreen.per_workspace.iterator();
     var fs_count: usize = 0;
     while (fs_it.next()) |entry| {
@@ -298,7 +304,6 @@ fn dumpState(wm: *WM) void {
 fn emergencyRecover(wm: *WM) void {
     debug.warn("========== EMERGENCY RECOVERY ==========", .{});
 
-    // Map all windows
     if (workspaces.getState()) |ws_state| {
         for (ws_state.workspaces) |*ws| {
             for (ws.windows.list.items) |win| {
@@ -307,17 +312,14 @@ fn emergencyRecover(wm: *WM) void {
         }
     }
 
-    // Disable tiling
     if (tiling.getState()) |t_state| {
         t_state.enabled = false;
         debug.warn("Tiling disabled", .{});
     }
 
-    // Exit fullscreen on all workspaces
     wm.fullscreen.clear();
     debug.warn("Fullscreen cleared", .{});
 
-    // Stop any drag
     if (wm.drag_state.active) {
         wm.drag_state.active = false;
         debug.warn("Drag stopped", .{});

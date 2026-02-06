@@ -74,7 +74,7 @@ maybe_drop_text() {
   return 1
 }
 
-# First pass: non-optimized / non-compact files
+# Process all files (including those with .fixed suffix)
 for f in "$FILES_DIR"/* "$FILES_DIR"/.*; do
   [ -e "$f" ] || continue
   case "$(basename "$f")" in
@@ -85,43 +85,19 @@ for f in "$FILES_DIR"/* "$FILES_DIR"/.*; do
   maybe_drop_text "$f" && continue
 
   bn="$(basename "$f")"
-  case "$bn" in
-    *_optimized.*|*_optimized|*_compact.*|*_compact) continue ;;
-  esac
 
-  write_to_codebase "$f" "$bn"
-done
+  # Remove .fixed suffix if present (but keep the original extension)
+  bn_no_fixed="${bn%.fixed}"
 
-# Second pass: optimized and compact files
-for f in "$FILES_DIR"/* "$FILES_DIR"/.*; do
-  [ -e "$f" ] || continue
-  case "$(basename "$f")" in
-    .|..) continue ;;
-  esac
-  [ -f "$f" ] || continue
+  # Remove any occurrence of "_improved" inside the basename (POSIX-safe)
+  # e.g. "foo_improved.js.fixed" -> "foo.js"
+  dest="$(printf '%s' "$bn_no_fixed" | sed 's/_improved//g')"
 
-  maybe_drop_text "$f" && continue
-
-  bn="$(basename "$f")"
-  case "$bn" in
-    *_optimized.*|*_compact.*)
-      case "$bn" in
-        *_optimized.*) strip="_optimized" ;;
-        *_compact.*) strip="_compact" ;;
-      esac
-      dest="${bn%$strip.*}.${bn##*.}"
-      ;;
-    *_optimized|*_compact)
-      case "$bn" in
-        *_optimized) strip="_optimized" ;;
-        *_compact) strip="_compact" ;;
-      esac
-      dest="${bn%$strip}"
-      ;;
-    *)
-      continue
-      ;;
-  esac
+  # If dest ends up empty for some weird reason, fall back to the original basename
+  if [ -z "$dest" ]; then
+    dest="$bn_no_fixed"
+  fi
 
   write_to_codebase "$f" "$dest"
 done
+
