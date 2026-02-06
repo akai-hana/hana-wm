@@ -139,6 +139,11 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: usize) void {
         // Window not tracked, just add to target
         s.workspaces[target_ws].add(win) catch |err| {
             debug.err("Failed to add window to workspace {}: {}", .{ target_ws, err });
+            // CRITICAL: If we can't add to workspace, remove from tiling to stay consistent
+            if (@import("tiling").getState()) |ts| {
+                _ = ts.windows.remove(win);
+            }
+            return;
         };
         s.window_to_workspace.put(win, target_ws) catch {};
         return;
@@ -150,7 +155,12 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: usize) void {
     _ = s.workspaces[from_ws].remove(win);
     s.workspaces[target_ws].add(win) catch |err| {
         debug.err("Failed to add window to workspace {}: {}", .{ target_ws, err });
+        // CRITICAL: Rollback - add back to original workspace to maintain consistency
         s.workspaces[from_ws].add(win) catch {};
+        // Also ensure it's removed from tiling if add failed
+        if (@import("tiling").getState()) |ts| {
+            _ = ts.windows.remove(win);
+        }
         return;
     };
     s.window_to_workspace.put(win, target_ws) catch {};

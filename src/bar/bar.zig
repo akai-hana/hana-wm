@@ -118,6 +118,15 @@ fn setWindowProperties(wm: *defs.WM, window: u32, height: u16) !void {
         &[_]u32{try utils.getAtom(wm.conn, "_NET_WM_WINDOW_TYPE_DOCK")});
     try setProp(wm.conn, window, "_NET_WM_STATE", xcb.XCB_ATOM_ATOM,
         &[_]u32{try utils.getAtom(wm.conn, "_NET_WM_STATE_ABOVE"), try utils.getAtom(wm.conn, "_NET_WM_STATE_STICKY")});
+    
+    // CRITICAL: Prevent bar from being moved or resized
+    // Set allowed actions to only allow closing (for shutdown), but not move/resize
+    const allowed_actions = [_]u32{
+        try utils.getAtom(wm.conn, "_NET_WM_ACTION_CLOSE"),
+        try utils.getAtom(wm.conn, "_NET_WM_ACTION_ABOVE"),
+        try utils.getAtom(wm.conn, "_NET_WM_ACTION_STICK"),
+    };
+    try setProp(wm.conn, window, "_NET_WM_ALLOWED_ACTIONS", xcb.XCB_ATOM_ATOM, &allowed_actions);
 }
 
 fn calculateBarHeight(wm: *defs.WM) !u16 {
