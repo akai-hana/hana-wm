@@ -213,7 +213,10 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) vo
     // Skip if already focused
     if (wm.focused_window == win) return;
     
-    // Just change focus - NO OTHER FILTERING
+    // CRITICAL: Only focus windows on the current workspace
+    if (!workspaces.isOnCurrentWorkspace(win)) return;
+    
+    // Change focus
     const old_focus = wm.focused_window;
     focus.setFocus(wm, win, .mouse_enter);
     tiling.updateWindowFocus(wm, old_focus, win);
@@ -223,6 +226,9 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) vo
     const win = event.event;
     
     if (win == wm.root or win == 0 or bar.isBarWindow(win)) return;
+    
+    // CRITICAL: Only focus windows on the current workspace
+    if (!workspaces.isOnCurrentWorkspace(win)) return;
     
     // Focus window and replay the event
     focus.setFocus(wm, win, .mouse_click);

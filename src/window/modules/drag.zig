@@ -7,9 +7,13 @@ const WM = defs.WM;
 const utils = @import("utils");
 const focus = @import("focus");
 const tiling = @import("tiling");
+const bar = @import("bar");
 
 pub fn startDrag(wm: *WM, win: u32, button: u8, x: i16, y: i16) void {
     if (wm.drag_state.active) return;
+    
+    // CRITICAL: Don't allow dragging the bar window
+    if (bar.isBarWindow(win)) return;
 
     const geom = utils.getGeometry(wm.conn, win) orelse return;
 

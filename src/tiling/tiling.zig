@@ -307,6 +307,34 @@ fn retileCurrentWorkspaceInternal(wm: *WM, should_flush: bool) void {
         b.setBorder(win, color) catch {};
     }
     
+    // CRITICAL FIX: Safety check for windows that might be in workspace but not in tiling list
+    // This prevents windows from being stuck off-screen at x=-4000
+    // Check all windows in current workspace and ensure they're on-screen
+    for (current_ws.windows.items()) |ws_win| {
+        // Skip if already in visible list
+        var found = false;
+        for (visible) |v_win| {
+            if (v_win == ws_win) {
+                found = true;
+                break;
+            }
+        }
+        if (found or wm.fullscreen.isFullscreen(ws_win)) continue;
+        
+        // This window is in workspace but wasn't retiled - check if it's off-screen
+        const check_geom = utils.getGeometry(wm.conn, ws_win) orelse continue;
+        if (check_geom.x < -1000 or check_geom.x > 10000) {
+            // Window is off-screen! Position it at a default location
+            debug.warn("Recovering window 0x{x} from off-screen position", .{ws_win});
+            const default_x: i16 = @divTrunc(@as(i16, @intCast(screen.width_in_pixels)), 4);
+            const default_y: i16 = @divTrunc(@as(i16, @intCast(available_height)), 4) + @as(i16, @intCast(y_offset));
+            const default_w: u16 = @divTrunc(screen.width_in_pixels, 2);
+            const default_h: u16 = @divTrunc(available_height, 2);
+            const default_rect = utils.Rect{ .x = default_x, .y = default_y, .width = default_w, .height = default_h };
+            b.configure(ws_win, default_rect) catch {};
+        }
+    }
+    
     // Only flush if requested (for atomic workspace switching, caller will flush)
     if (should_flush) {
         b.execute();
