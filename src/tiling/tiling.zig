@@ -288,6 +288,13 @@ fn retileCurrentWorkspaceInternal(wm: *WM, should_flush: bool) void {
     } else {
         b.executeNoFlush();
     }
+    
+    // Clear tiling suppression after retile completes
+    // This allows focus-follows-mouse to work during normal operation
+    // but preserves .window_spawn suppression set during window creation
+    if (wm.suppress_focus_reason == .tiling_operation) {
+        wm.suppress_focus_reason = .none;
+    }
 }
 
 fn cycleLayout(wm: *WM, forward: bool) void {

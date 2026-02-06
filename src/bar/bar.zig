@@ -17,8 +17,8 @@ const workspaces             = @import("workspaces");
     const clock_segment      = @import("clock");
     const status_segment     = @import("status");
 
-// TODO: adjust workspace width based off of monitor DPI
-pub const WORKSPACE_WIDTH: u16 = 20;
+// TODO: make adjustable through config.toml, adjust workspace width based off of monitor DPI
+pub const WORKSPACE_WIDTH: u8 = 50;
 
 const State = struct {
     window: u32,

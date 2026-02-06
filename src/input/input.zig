@@ -141,17 +141,9 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) 
     if (drag.isDragging(wm)) {
         drag.updateDrag(wm, event.root_x, event.root_y);
     }
-    
-    // IMPROVED: Track pointer position during normal motion
-    // This allows us to detect actual cursor movement vs window repositioning
-    wm.last_pointer_x = event.root_x;
-    wm.last_pointer_y = event.root_y;
-    
-    // IMPROVED: Clear focus suppression on significant mouse movement
-    // If user is actively moving the mouse, they want focus to follow
-    if (wm.suppress_focus_reason != .none) {
-        wm.suppress_focus_reason = .none;
-    }
+    // Pointer position tracking removed - only update on EnterNotify
+    // This prevents MotionNotify from "racing" EnterNotify and making it think
+    // the pointer didn't move when hovering between windows
 }
 
 fn closeWindow(wm: *WM, win: u32) void {
