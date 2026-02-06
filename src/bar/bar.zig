@@ -1,5 +1,5 @@
-//! Hana status bar
-//! Taking heavy inspiration from dwm
+//! Status bar
+//! Taking inspiration from dwm
 
 const std     = @import("std");
 const defs    = @import("defs");
@@ -17,7 +17,8 @@ const workspaces             = @import("workspaces");
     const clock_segment      = @import("clock");
     const status_segment     = @import("status");
 
-pub const WORKSPACE_WIDTH: u16 = 40;
+// TODO: adjust workspace width based off of monitor DPI
+pub const WORKSPACE_WIDTH: u16 = 20;
 
 const State = struct {
     window: u32,

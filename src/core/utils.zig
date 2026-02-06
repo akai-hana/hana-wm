@@ -74,6 +74,7 @@ pub inline fn normalizeModifiers(state: u16) u16 {
 const AtomCache = struct {
     wm_protocols: u32,
     wm_delete: u32,
+    wm_take_focus: u32,
     net_wm_name: u32,
     utf8_string: u32,
 };
@@ -84,6 +85,7 @@ pub fn initAtomCache(conn: *xcb.xcb_connection_t) !void {
     atom_cache = AtomCache{
         .wm_protocols = try getAtom(conn, "WM_PROTOCOLS"),
         .wm_delete = try getAtom(conn, "WM_DELETE_WINDOW"),
+        .wm_take_focus = try getAtom(conn, "WM_TAKE_FOCUS"),
         .net_wm_name = try getAtom(conn, "_NET_WM_NAME"),
         .utf8_string = try getAtom(conn, "UTF8_STRING"),
     };
@@ -104,11 +106,13 @@ pub fn getAtomCached(comptime name: []const u8) !u32 {
     return switch (comptime std.meta.stringToEnum(enum {
         WM_PROTOCOLS,
         WM_DELETE_WINDOW,
+        WM_TAKE_FOCUS,
         _NET_WM_NAME,
         UTF8_STRING,
     }, name) orelse @compileError("Atom not in cache: " ++ name)) {
         .WM_PROTOCOLS => cache.wm_protocols,
         .WM_DELETE_WINDOW => cache.wm_delete,
+        .WM_TAKE_FOCUS => cache.wm_take_focus,
         ._NET_WM_NAME => cache.net_wm_name,
         .UTF8_STRING => cache.utf8_string,
     };
@@ -155,4 +159,41 @@ pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allo
     };
 
     return WMClass{ .instance = instance, .class = class };
+}
+
+// Check if window supports WM_TAKE_FOCUS protocol
+pub fn supportsWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32) bool {
+    const protocols_atom = getAtomCached("WM_PROTOCOLS") catch return false;
+    
+    const reply = xcb.xcb_get_property_reply(conn,
+        xcb.xcb_get_property(conn, 0, win, protocols_atom, xcb.XCB_ATOM_ATOM, 0, 256), null) orelse return false;
+    defer std.c.free(reply);
+    
+    if (reply.*.format != 32 or reply.*.value_len == 0) return false;
+    
+    const take_focus_atom = getAtomCached("WM_TAKE_FOCUS") catch return false;
+    const atoms: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
+    const len: usize = @intCast(reply.*.value_len);
+    
+    for (atoms[0..len]) |atom| {
+        if (atom == take_focus_atom) return true;
+    }
+    
+    return false;
+}
+
+// Send WM_TAKE_FOCUS client message to window
+pub fn sendWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32) void {
+    const protocols_atom = getAtomCached("WM_PROTOCOLS") catch return;
+    const take_focus_atom = getAtomCached("WM_TAKE_FOCUS") catch return;
+    
+    var event: xcb.xcb_client_message_event_t = std.mem.zeroes(xcb.xcb_client_message_event_t);
+    event.response_type = xcb.XCB_CLIENT_MESSAGE;
+    event.window = win;
+    event.type = protocols_atom;
+    event.format = 32;
+    event.data.data32[0] = take_focus_atom;
+    event.data.data32[1] = xcb.XCB_CURRENT_TIME;
+    
+    _ = xcb.xcb_send_event(conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
 }

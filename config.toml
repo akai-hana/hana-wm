@@ -6,7 +6,7 @@ layout  = "master" # Default layout: master_left, monocle, or grid
 
 # Aesthetics
 gaps             = 12 # px
-border_width     = 4  # px
+border_width     = 4 # px
 border_focused   = "#ac3232" # "#RRGGBB" / RRGGBB / 0xRRGGBB
 border_unfocused = "#52263e"
 

@@ -1,4 +1,4 @@
-// Main event loop - Event-driven architecture (OPTIMIZED)
+// Main event loop - IMPROVED: No event counter management
 
 const std = @import("std");
 const posix = std.posix;
@@ -41,14 +41,12 @@ inline fn setupSignalSet() std.os.linux.sigset_t {
 }
 
 fn setupPollFds() !FDs {
-    // Setup signal handling
     var sigset = setupSignalSet();
     _ = std.os.linux.sigprocmask(posix.SIG.BLOCK, &sigset, null);
     const sfd = std.os.linux.signalfd(-1, &sigset, std.os.linux.SFD.NONBLOCK | std.os.linux.SFD.CLOEXEC);
     if (sfd < 0) return error.SignalFdFailed;
     errdefer posix.close(@intCast(sfd));
     
-    // Setup timer (1 second interval for clock updates)
     const tfd = std.os.linux.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
     if (tfd < 0) return error.TimerFdFailed;
     const spec = std.os.linux.itimerspec{ .it_interval = .{ .sec = 1, .nsec = 0 }, .it_value = .{ .sec = 1, .nsec = 0 } };
@@ -93,7 +91,6 @@ fn becomeWindowManager(conn: *xcb.xcb_connection_t, root: u32) !void {
     }
 }
 
-// OPTIMIZATION: Batch window attribute changes to reduce X11 roundtrips
 fn setupExistingWindows(conn: *xcb.xcb_connection_t, root: u32, allocator: std.mem.Allocator) !void {
     const reply = xcb.xcb_query_tree_reply(conn, xcb.xcb_query_tree(conn, root), null) orelse return;
     defer std.c.free(reply);
@@ -106,7 +103,6 @@ fn setupExistingWindows(conn: *xcb.xcb_connection_t, root: u32, allocator: std.m
     defer cookies.deinit(allocator);
     const event_mask = xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW;
     
-    // Batch: Send all attribute queries
     try cookies.ensureTotalCapacity(allocator, len);
     for (0..len) |i| {
         const cookie = xcb.xcb_get_window_attributes(conn, children[i]);
@@ -114,31 +110,24 @@ fn setupExistingWindows(conn: *xcb.xcb_connection_t, root: u32, allocator: std.m
     }
     _ = xcb.xcb_flush(conn);
 
-    // Batch: Queue all window attribute changes without waiting for replies
     for (cookies.items, 0..) |cookie, i| {
         const attrs = xcb.xcb_get_window_attributes_reply(conn, cookie, null) orelse continue;
         defer std.c.free(attrs);
         if (attrs.*.override_redirect != 0 or attrs.*.map_state != xcb.XCB_MAP_STATE_VIEWABLE) continue;
         _ = xcb.xcb_change_window_attributes(conn, children[i], xcb.XCB_CW_EVENT_MASK, &[_]u32{event_mask});
     }
-    // Flush all changes at once instead of per-window
     _ = xcb.xcb_flush(conn);
 }
 
-// OPTIMIZATION: Batch key grabs with smart error detection
-// Fast path: batch all grabs, then check for errors
-// If errors found: retry synchronously to identify which specific bindings failed
 fn grabKeybindings(wm: *WM) !void {
     _ = xcb.xcb_ungrab_key(wm.conn, xcb.XCB_GRAB_ANY, wm.root, xcb.XCB_MOD_MASK_ANY);
     
-    // Pre-allocate buffer for all cookies (max: keybindings * lock modifiers)
     const max_grabs = wm.config.keybindings.items.len * LOCK_MODIFIERS.len;
     if (max_grabs == 0) return;
     
     const cookies = try wm.allocator.alloc(xcb.xcb_void_cookie_t, max_grabs);
     defer wm.allocator.free(cookies);
     
-    // Phase 1: Queue all grabs asynchronously (fast - no waiting)
     var cookie_idx: usize = 0;
     for (wm.config.keybindings.items) |kb| {
         const keycode = kb.keycode orelse continue;
@@ -149,10 +138,8 @@ fn grabKeybindings(wm: *WM) !void {
         }
     }
     
-    // Single flush for all grabs
     utils.flush(wm.conn);
     
-    // Phase 2: Check for errors (batched, but still need to check each cookie)
     var has_errors = false;
     var failed_count: usize = 0;
     
@@ -164,11 +151,9 @@ fn grabKeybindings(wm: *WM) !void {
         }
     }
     
-    // Phase 3: If errors detected, retry with detailed logging
     if (has_errors) {
         debug.warn("{} grab(s) failed, identifying culprits...", .{failed_count});
         
-        // Re-grab synchronously to identify specific failures
         for (wm.config.keybindings.items) |kb| {
             const keycode = kb.keycode orelse continue;
             var failed_this_kb = false;
@@ -179,7 +164,6 @@ fn grabKeybindings(wm: *WM) !void {
                     failed_this_kb = true;
                 }
             }
-            // Only log once per keybinding (not per lock modifier)
             if (failed_this_kb) {
                 debug.warn("Failed to grab keycode: {}", .{keycode});
             }
@@ -282,10 +266,8 @@ pub fn main() !void {
         .{ .fd = fds.timer, .events = posix.POLL.IN, .revents = 0 },
     };
     
-    // OPTIMIZATION: Main loop is already well-optimized
-    // - Drains all X11 events before processing
-    // - Single flush per iteration
-    // - Efficient poll() multiplexing
+    // IMPROVED: Main loop without event counter management
+    // Focus control is now handled through intelligent filtering in EnterNotify
     while (running.load(.acquire)) {
         _ = posix.poll(&pollfds, -1) catch |err| {
             if (err == error.Interrupted) continue;
@@ -293,24 +275,27 @@ pub fn main() !void {
             continue;
         };
         
-        // Hot path: X11 events (most frequent)
+        // X11 events
         if (pollfds[0].revents & posix.POLL.IN != 0) {
-            // Drain all available events before processing (reduces syscalls)
+            // Drain all available events
             while (xcb.xcb_poll_for_event(conn)) |event| {
                 defer std.c.free(event);
                 events.dispatch(@as(*u8, @ptrCast(event)).*, event, &wm);
+                
+                // REMOVED: Event counter increments
+                // The new approach uses pointer tracking and context-aware suppression
+                // No need to count events anymore!
             }
             
-            // Batch post-processing after all events
+            // Post-processing
             tiling.retileIfDirty(&wm);
             bar.updateIfDirty(&wm) catch |err| {
                 debug.err("Failed to update bar: {}", .{err});
             };
-            // Single flush for all changes
             utils.flush(conn);
         }
         
-        // Less frequent: signals
+        // Signals
         if (pollfds[1].revents & posix.POLL.IN != 0) {
             handleSignalFd(fds.signal, &should_reload, &running);
             
@@ -321,7 +306,7 @@ pub fn main() !void {
             }
         }
         
-        // Periodic: timer (1 second intervals)
+        // Timer
         if (pollfds[2].revents & posix.POLL.IN != 0) {
             var expiration: u64 = 0;
             _ = posix.read(fds.timer, std.mem.asBytes(&expiration)) catch {};
@@ -330,7 +315,7 @@ pub fn main() !void {
             };
         }
         
-        // Error handling (cold path)
+        // Error handling
         if ((pollfds[0].revents & (posix.POLL.ERR | posix.POLL.HUP)) != 0 or
             xcb.xcb_connection_has_error(conn) != 0) {
             debug.err("X11 connection error, shutting down", .{});

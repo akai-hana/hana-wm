@@ -1,4 +1,6 @@
-//! XCB + Xft text rendering with color caching
+//! Status bar text drawing/rendering
+//! XCB + Xft for text rendering
+//! Includes color caching
 
 const std = @import("std");
 const debug = @import("debug");
@@ -28,7 +30,7 @@ inline fn rgbToXRenderColor(rgb: u32) c.XRenderColor {
     };
 }
 
-// Color cache for performance - avoid allocating/freeing colors repeatedly
+// Color cache for performance; avoid allocating/freeing colors repeatedly
 const ColorCache = struct {
     colors: std.AutoHashMap(u32, c.XftColor),
     fallback_color: c.XftColor,
