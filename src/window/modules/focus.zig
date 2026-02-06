@@ -33,7 +33,10 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
         },
         .tiling_operation => {
             // During tiling, prevent cursor from stealing focus from repositioned windows
-            wm.suppress_focus_reason = .tiling_operation;
+            // BUT: Don't overwrite .window_spawn - that needs to persist
+            if (wm.suppress_focus_reason != .window_spawn) {
+                wm.suppress_focus_reason = .tiling_operation;
+            }
         },
         .user_command, .workspace_switch => {
             // Keyboard commands - allow immediate focus changes
@@ -93,7 +96,10 @@ pub fn setFocusBatch(wm: *WM, win: u32, reason: Reason, defer_flush: bool) void 
             wm.suppress_focus_reason = .none;
         },
         .tiling_operation => {
-            wm.suppress_focus_reason = .tiling_operation;
+            // Don't overwrite .window_spawn - that needs to persist
+            if (wm.suppress_focus_reason != .window_spawn) {
+                wm.suppress_focus_reason = .tiling_operation;
+            }
         },
         .user_command, .workspace_switch => {
             wm.suppress_focus_reason = .none;

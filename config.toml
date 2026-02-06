@@ -71,15 +71,15 @@ Mod+a       = "MOZ_USE_XINPUT2=1 firefox"
 Mod+Shift+a = "pkill -9 firefox"
 
 Mod+s       = "flatpak run org.equicord.equibop"
-Mod+Shift+s = "pkill equibop"
+Mod+Shift+s = "pkill -9 equibop"
 
 Mod+d       = "ghostty"
-Mod+Shift+d = "pkill ghostty"
+Mod+Shift+d = "pkill -9 ghostty"
 
 Mod+x = "~/Games/t-client/DDNet"
 
 Mod+v       = "flatpak run com.github.th_ch.youtube_music"
-Mod+Shift+v = "pkill youtube-music"
+Mod+Shift+v = "pkill -9 youtube-music"
 
 # Emergency/Debug
 #TODO not yet working

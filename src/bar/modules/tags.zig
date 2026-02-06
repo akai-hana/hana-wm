@@ -1,10 +1,10 @@
 ///! Tag workspace indicators segment
 
-const std = @import("std");
-const defs = @import("defs");
-const drawing = @import("drawing");
+const std        = @import("std");
+const defs       = @import("defs");
+const drawing    = @import("drawing");
 const workspaces = @import("workspaces");
-const bar = @import("bar");
+const bar        = @import("bar");
 
 const WORKSPACE_WIDTH = bar.WORKSPACE_WIDTH;
 
