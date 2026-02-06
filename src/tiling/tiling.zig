@@ -16,6 +16,7 @@ const debug = @import("debug");
 const master_layout = @import("master");
 const monocle_layout = @import("monocle");
 const grid_layout = @import("grid");
+const dpi = @import("dpi");
 
 pub const Layout = enum { master, monocle, grid };
 
@@ -73,14 +74,38 @@ pub const State = struct {
 const StateManager = createModule(State);
 
 pub fn init(wm: *WM) void {
+    // Scale border widths and gaps based on DPI
+    // For percentage values, use screen height as reference dimension
+    const screen_height = wm.screen.height_in_pixels;
+    const scaled_border_width = dpi.scaleBorderWidth(wm.config.tiling.border_width, wm.dpi_info.scale_factor, screen_height);
+    const scaled_gaps = dpi.scaleGaps(wm.config.tiling.gaps, wm.dpi_info.scale_factor, screen_height);
+    
+    // Handle master_width (can be percentage or absolute pixels)
+    const master_width_value = dpi.scaleMasterWidth(wm.config.tiling.master_width);
+    const master_width: f32 = if (master_width_value < 0) blk: {
+        // Negative means it's absolute pixels - convert to ratio
+        const abs_pixels = -master_width_value;
+        const screen_width_f: f32 = @floatFromInt(wm.screen.width_in_pixels);
+        const ratio = abs_pixels / screen_width_f;
+        break :blk @min(0.95, @max(defs.MIN_MASTER_WIDTH, ratio));
+    } else master_width_value;
+    
+    debug.info("DPI-scaled tiling: border {}px{s}, gaps {}px{s}, master_width {d:.2}", .{
+        scaled_border_width, 
+        if (wm.config.tiling.border_width.is_percentage) "%" else "",
+        scaled_gaps,
+        if (wm.config.tiling.gaps.is_percentage) "%" else "",
+        master_width,
+    });
+    
     const initial_state = State{
         .enabled = wm.config.tiling.enabled,
         .layout = parseLayout(wm.config.tiling.layout),
         .master_side = wm.config.tiling.master_side,
-        .master_width = wm.config.tiling.master_width,
+        .master_width = master_width,
         .master_count = wm.config.tiling.master_count,
-        .gaps = wm.config.tiling.gaps,
-        .border_width = wm.config.tiling.border_width,
+        .gaps = scaled_gaps,
+        .border_width = scaled_border_width,
         .border_focused = wm.config.tiling.border_focused,
         .border_unfocused = wm.config.tiling.border_unfocused,
         .windows = tracking.init(wm.allocator),
@@ -351,13 +376,29 @@ pub fn toggleTiling(wm: *WM) void {
 
 pub fn reloadConfig(wm: *WM) void {
     const s = StateManager.get(true) orelse return;
+    
+    // Scale border widths and gaps based on DPI
+    const screen_height = wm.screen.height_in_pixels;
+    const scaled_border_width = dpi.scaleBorderWidth(wm.config.tiling.border_width, wm.dpi_info.scale_factor, screen_height);
+    const scaled_gaps = dpi.scaleGaps(wm.config.tiling.gaps, wm.dpi_info.scale_factor, screen_height);
+    
+    // Handle master_width (can be percentage or absolute pixels)
+    const master_width_value = dpi.scaleMasterWidth(wm.config.tiling.master_width);
+    const master_width: f32 = if (master_width_value < 0) blk: {
+        // Negative means it's absolute pixels - convert to ratio
+        const abs_pixels = -master_width_value;
+        const screen_width_f: f32 = @floatFromInt(wm.screen.width_in_pixels);
+        const ratio = abs_pixels / screen_width_f;
+        break :blk @min(0.95, @max(defs.MIN_MASTER_WIDTH, ratio));
+    } else master_width_value;
+    
     s.enabled = wm.config.tiling.enabled;
     s.layout = parseLayout(wm.config.tiling.layout);
     s.master_side = wm.config.tiling.master_side;
-    s.master_width = wm.config.tiling.master_width;
+    s.master_width = master_width;
     s.master_count = wm.config.tiling.master_count;
-    s.gaps = wm.config.tiling.gaps;
-    s.border_width = wm.config.tiling.border_width;
+    s.gaps = scaled_gaps;
+    s.border_width = scaled_border_width;
     s.border_focused = wm.config.tiling.border_focused;
     s.border_unfocused = wm.config.tiling.border_unfocused;
     if (s.enabled) retileCurrentWorkspace(wm);

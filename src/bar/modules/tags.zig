@@ -32,13 +32,15 @@ pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start
     const ws_state = workspaces.getState() orelse return start_x;
     var x = start_x;
     const text_y = dc.baselineY(height);
+    const scaled_ws_width = config.scaledWorkspaceWidth();
+    const scaled_indicator_size = config.scaledIndicatorSize();
 
     for (ws_state.workspaces, 0..) |*ws, i| {
         const is_current = i == ws_state.current;
         const bg = if (is_current) config.selected_bg else config.bg;
         const fg = if (is_current) config.selected_fg else config.fg;
 
-        dc.fillRect(x, 0, WORKSPACE_WIDTH, height, bg);
+        dc.fillRect(x, 0, scaled_ws_width, height, bg);
         
         const label = if (i < config.workspace_icons.items.len) 
             config.workspace_icons.items[i]
@@ -46,14 +48,14 @@ pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start
             static_numbers[i] 
         else "?";
         
-        try dc.drawText(x + (WORKSPACE_WIDTH - dc.textWidth(label)) / 2, text_y, label, fg);
+        try dc.drawText(x + (scaled_ws_width - dc.textWidth(label)) / 2, text_y, label, fg);
 
         // Draw window presence indicator
         if (ws.windows.list.items.len > 0) {
-            drawIndicator(dc, x, @max(config.indicator_size, 2), is_current, fg);
+            drawIndicator(dc, x, scaled_indicator_size, is_current, fg);
         }
         
-        x += WORKSPACE_WIDTH;
+        x += scaled_ws_width;
     }
     return x;
 }

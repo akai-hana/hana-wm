@@ -10,12 +10,27 @@
 const std = @import("std");
 const debug = @import("debug");
 
+/// Represents a value that can be either absolute or percentage-based
+pub const ScalableValue = struct {
+    value: f32,
+    is_percentage: bool,
+
+    pub inline fn absolute(val: f32) ScalableValue {
+        return .{ .value = val, .is_percentage = false };
+    }
+
+    pub inline fn percentage(val: f32) ScalableValue {
+        return .{ .value = val, .is_percentage = true };
+    }
+};
+
 pub const Value = union(enum) {
     integer: i64,
     boolean: bool,
     string: []const u8,
     array: std.ArrayList(Value),
     color: u32,
+    scalable: ScalableValue,
 
     pub inline fn asInt(self: Value) ?i64 {
         return switch (self) {
@@ -49,6 +64,14 @@ pub const Value = union(enum) {
     pub inline fn asArray(self: Value) ?[]const Value {
         return switch (self) {
             .array => |arr| arr.items,
+            else => null,
+        };
+    }
+
+    pub inline fn asScalable(self: Value) ?ScalableValue {
+        return switch (self) {
+            .scalable => |s| s,
+            .integer => |i| ScalableValue.absolute(@floatFromInt(i)),
             else => null,
         };
     }
@@ -98,6 +121,10 @@ pub const Section = struct {
 
     pub inline fn getColor(self: *const Section, key: []const u8) ?u32 {
         return if (self.get(key)) |v| v.asColor() else null;
+    }
+
+    pub inline fn getScalable(self: *const Section, key: []const u8) ?ScalableValue {
+        return if (self.get(key)) |v| v.asScalable() else null;
     }
 };
 
@@ -374,6 +401,16 @@ const Parser = struct {
 
         // OPTIMIZATION: Use static map for boolean lookup
         if (BOOLEANS.get(raw)) |boolean| return .{ .boolean = boolean };
+
+        // Check for percentage suffix
+        if (raw.len > 1 and raw[raw.len - 1] == '%') {
+            const num_part = raw[0..raw.len - 1];
+            if (std.fmt.parseFloat(f32, num_part)) |float_val| {
+                return .{ .scalable = ScalableValue.percentage(float_val) };
+            } else |_| {
+                return ParseError.InvalidValue;
+            }
+        }
 
         // OPTIMIZATION: Early detection of color values
         const looks_like_color = raw[0] == '#' or 

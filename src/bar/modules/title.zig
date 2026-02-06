@@ -15,6 +15,7 @@ pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start
     const ws_state = workspaces.getState() orelse return start_x + width;
     const has_windows = ws_state.workspaces[ws_state.current].windows.list.items.len > 0;
     const is_focused = has_windows and wm.focused_window != null;
+    const scaled_padding = config.scaledPadding();
     
     dc.fillRect(start_x, 0, width, height,
         if (is_focused and config.title_accent) config.getTitleAccent() else config.bg);
@@ -23,10 +24,10 @@ pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start
         const title = try getFocusedWindowTitle(wm, cached_title, cached_title_window, allocator);
         if (title.len > 0) {
             try dc.drawTextEllipsis(
-                start_x + config.padding, 
+                start_x + scaled_padding, 
                 dc.baselineY(height),
                 title, 
-                width -| config.padding * 2,
+                width -| scaled_padding * 2,
                 if (is_focused and config.title_accent) config.selected_fg else config.fg
             );
         }

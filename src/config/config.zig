@@ -77,6 +77,10 @@ fn get(
     return value;
 }
 
+fn getScalable(section: *const parser.Section, key: []const u8, default: parser.ScalableValue) parser.ScalableValue {
+    return section.getScalable(key) orelse default;
+}
+
 pub fn loadConfigDefault(allocator: std.mem.Allocator) !defs.Config {
     const home = if (std.c.getenv("HOME")) |h| std.mem.span(h) else ".";
     const config_home = if (std.c.getenv("XDG_CONFIG_HOME")) |ch|
@@ -173,7 +177,9 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !defs.Config {
 
     if (std.mem.eql(u8, cfg.bar.font, "auto")) {
         const detected_font = try fallback.detectFont(allocator);
-        const font_with_size = try std.fmt.allocPrint(allocator, "{s}:size={}", .{detected_font, cfg.bar.font_size});
+        // Use the raw value from ScalableValue (will be scaled later during bar init)
+        const font_size_val: u16 = @intFromFloat(cfg.bar.font_size.value);
+        const font_with_size = try std.fmt.allocPrint(allocator, "{s}:size={}", .{detected_font, font_size_val});
         cfg.bar.font = font_with_size;
     }
 
@@ -309,6 +315,13 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !defs.Action {
     return .{ .exec = try allocator.dupe(u8, cmd) };
 }
 
+/// Finalize configuration with screen-dependent values (call after screen is available)
+pub fn finalizeConfig(cfg: *defs.Config, screen: *defs.xcb.xcb_screen_t) void {
+    const dpi_module = @import("dpi");
+    // Compute scaled font size based on ScalableValue
+    cfg.bar.scaled_font_size = dpi_module.scaleFontSize(cfg.bar.font_size, screen);
+}
+
 pub fn resolveKeybindings(keybindings: anytype, xkb_state: *xkb.XkbState) void {
     // First pass: resolve keycodes
     for (keybindings) |*kb| {
@@ -352,9 +365,9 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
     }
 
     cfg.tiling.master_count = get(usize, section, "master_count", 1, 1, null);
-    cfg.tiling.master_width = get(f32, section, "master_width", 50.0, defs.MIN_MASTER_WIDTH, null);
-    cfg.tiling.gaps = get(u16, section, "gaps", 10, 0, null);
-    cfg.tiling.border_width = get(u16, section, "border_width", 2, 0, null);
+    cfg.tiling.master_width = getScalable(section, "master_width", parser.ScalableValue.percentage(50.0));
+    cfg.tiling.gaps = getScalable(section, "gaps", parser.ScalableValue.absolute(10.0));
+    cfg.tiling.border_width = getScalable(section, "border_width", parser.ScalableValue.absolute(2.0));
     cfg.tiling.border_focused = getColor(section, "border_focused", 0x5294E2);
     cfg.tiling.border_unfocused = getColor(section, "border_unfocused", 0x383C4A);
 }
@@ -388,7 +401,7 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
         }
     }
 
-    cfg.bar.font_size = get(u16, section, "font_size", 10, 6, 72);
+    cfg.bar.font_size = getScalable(section, "font_size", parser.ScalableValue.percentage(10.0));
     cfg.bar.padding = get(u16, section, "padding", 8, 0, 50);
     cfg.bar.spacing = get(u16, section, "spacing", 12, 0, 100);
 

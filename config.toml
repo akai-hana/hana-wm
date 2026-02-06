@@ -1,4 +1,4 @@
-# akai_hana's personal hana WM config :-)
+### akai_hana's personal hana WM config :-) ###
 
 [tiling]
 enabled = true     # Enable tiling on startup
@@ -6,7 +6,7 @@ layout  = "master" # Default layout: master_left, monocle, or grid
 
 # Aesthetics
 gaps             = 12 # px
-border_width     = 4 # px
+border_width     = 6 # px
 border_focused   = "#ac3232" # "#RRGGBB" / RRGGBB / 0xRRGGBB
 border_unfocused = "#52263e"
 
@@ -14,77 +14,7 @@ border_unfocused = "#52263e"
 ## Master-stack
 master_count = 1      #  Number of windows in master area
 master_side  = "left" #  left / right
-master_width = 50     #  % (5-95)
-
-[Keybindings]
-# Convenience alias
-Mod = "Super" # Super/Mod4 / Alt/Mod1
-
-# WM interactions
-Mod+f = "toggle_fullscreen"
-Mod+Shift+Return = "pkill -9 Xorg" # quit w
-#TODO (implemented but not properly working yet)
-Mod+Shift+f = "kill"
-Mod+Shift+t = "reload" # Config hot-reload
-
-# Tiling
-Mod+n           = "toggle_tiling" # Enable/disable tiling
-Mod+space       = "toggle_layout" # TODO Cycle layouts
-Mod+Shift+space = "toggle_layout_reverse"
-
-# Layouts
-## Master-stack
-Mod+h           = "decrease_master" # area TODO
-Mod+l           = "increase_master" # area
-Mod+comma       = "increase_master_count"
-Mod+period      = "decrease_master_count" 
-
-# Workspaces
-#TODO make workspace array
-Mod+1 = "workspace_1"
-Mod+2 = "workspace_2"
-Mod+3 = "workspace_3"
-Mod+4 = "workspace_4"
-Mod+q = "workspace_5"
-Mod+w = "workspace_6"
-Mod+e = "workspace_7"
-Mod+r = "workspace_8"
-
-#TODO automatically add "Shift" to previous binds for the "move to workspace" binds
-Mod+Shift+1 = "move_to_workspace_1"
-Mod+Shift+2 = "move_to_workspace_2"
-Mod+Shift+3 = "move_to_workspace_3"
-Mod+Shift+4 = "move_to_workspace_4"
-Mod+Shift+q = "move_to_workspace_5"
-Mod+Shift+w = "move_to_workspace_6"
-Mod+Shift+e = "move_to_workspace_7"
-Mod+Shift+r = "move_to_workspace_8"
-
-# Bar toggle
-Mod+b = "toggle_bar"
-
-# Application launchers
-Mod+p = "rofi -show drun"
-
-# Program binds
-Mod+a       = "MOZ_USE_XINPUT2=1 firefox"
-Mod+Shift+a = "pkill -9 firefox"
-
-Mod+s       = "flatpak run org.equicord.equibop"
-Mod+Shift+s = "pkill -9 equibop"
-
-Mod+d       = "ghostty"
-Mod+Shift+d = "pkill -9 ghostty"
-
-Mod+x = "~/Games/t-client/DDNet"
-
-Mod+v       = "flatpak run com.github.th_ch.youtube_music"
-Mod+Shift+v = "pkill -9 youtube-music"
-
-# Emergency/Debug
-#TODO not yet working
-#Mod+Shift+d      = "dump_state"       # Print debug info
-Mod+Shift+Escape = "emergency_recover" # Emergency recovery mode
+master_width = 50%    #  (5-95)
 
 [bar]
 show = true
@@ -92,8 +22,7 @@ position = "bottom" # top/bottom
 
 font_size = 12
 # Bar height
-# Auto-adapts to font size by default!
-# Uncomment to set a fixed height instead:
+## Auto-adapts to font size by default. Uncomment to set a fixed height instead:
 #height = 32
 
 # Bar spacing
@@ -152,6 +81,88 @@ segments = ["clock"]
 
 [workspaces]
 count = 8
+
+
+
+[Keybindings]
+# Convenience alias
+Mod = "Super" # Super/Mod4 / Alt/Mod1
+
+# WM interactions
+Mod+F = "toggle_fullscreen"
+Mod+Shift+Return = "pkill -9 Xorg" # quit w
+#TODO (implemented but not properly working yet)
+Mod+Shift+F = "kill"
+Mod+Shift+T = "reload" # Config hot-reload
+
+# Tiling
+Mod+N           = "toggle_tiling" # Enable/disable tiling
+Mod+space       = "toggle_layout" # TODO Cycle layouts
+Mod+Shift+space = "toggle_layout_reverse"
+
+# Layouts
+## Master-stack
+Mod+H           = "decrease_master" # area TODO
+Mod+L           = "increase_master" # area
+Mod+comma       = "increase_master_count"
+Mod+period      = "decrease_master_count" 
+
+# Workspaces
+#TODO make workspace array
+Mod+1 = "workspace_1"
+Mod+2 = "workspace_2"
+Mod+3 = "workspace_3"
+Mod+4 = "workspace_4"
+Mod+Q = "workspace_5"
+Mod+W = "workspace_6"
+Mod+E = "workspace_7"
+Mod+R = "workspace_8"
+
+#TODO automatically add "Shift" to previous binds for the "move to workspace" binds
+Mod+Shift+1 = "move_to_workspace_1"
+Mod+Shift+2 = "move_to_workspace_2"
+Mod+Shift+3 = "move_to_workspace_3"
+Mod+Shift+4 = "move_to_workspace_4"
+Mod+Shift+Q = "move_to_workspace_5"
+Mod+Shift+W = "move_to_workspace_6"
+Mod+Shift+E = "move_to_workspace_7"
+Mod+Shift+R = "move_to_workspace_8"
+
+# Bar toggle
+Mod+B = "toggle_bar"
+
+# Application launchers
+Mod+P = "rofi -show drun"
+
+# Program binds
+kill = "pkill -9" # program kill placeholder
+
+#TODO: replace "pkill -9" with the kill placeholder
+## Misc
+Mod+A       = "MOZ_USE_XINPUT2=1 firefox"
+Mod+Shift+A = "pkill -9 firefox"
+
+Mod+s       = "flatpak run org.equicord.equibop"
+Mod+Shift+S = "pkill -9 equibop"
+
+Mod+d       = "ghostty"
+Mod+Shift+D = "pkill -9 ghostty"
+
+# z -> osu
+
+Mod+X = "~/Games/t-client/DDNet"
+Mod+Shift+X = "pkill -9 DDNet"
+
+Mod+c = "flatpak run com.valvesoftware.Steam"
+Mod+Shift+C
+
+Mod+V       = "flatpak run com.github.th_ch.youtube_music"
+Mod+Shift+V = "pkill -9 youtube-music"
+
+# Emergency/Debug
+#TODO not yet working
+#Mod+Shift+d      = "dump_state"       # Print debug info
+Mod+Shift+Escape = "emergency_recover" # Emergency recovery mode
 
 # Workspace rules
 [workspace.rules.1] # browser

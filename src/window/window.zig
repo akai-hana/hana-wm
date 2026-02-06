@@ -109,7 +109,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
 
     // Set up tiling
     if (wm.config.tiling.enabled) {
-        b.setBorderWidth(win, wm.config.tiling.border_width) catch {};
+        b.setBorderWidth(win, @intFromFloat(wm.config.tiling.border_width.value)) catch {};
         if (is_current_ws) {
             b.setBorder(win, wm.config.tiling.border_unfocused) catch {};
         }

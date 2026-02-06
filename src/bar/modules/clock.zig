@@ -9,9 +9,10 @@ const c = @cImport(@cInclude("time.h"));
 pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start_x: u16) !u16 {
     var time_buf: [20]u8 = undefined;
     const time_str = try formatTime(&time_buf);
-    const width = dc.textWidth(time_str) + config.padding * 2;
+    const scaled_padding = config.scaledPadding();
+    const width = dc.textWidth(time_str) + scaled_padding * 2;
     dc.fillRect(start_x, 0, width, height, config.bg);
-    try dc.drawText(start_x + config.padding, dc.baselineY(height), time_str, config.fg);
+    try dc.drawText(start_x + scaled_padding, dc.baselineY(height), time_str, config.fg);
     return start_x + width;
 }
 
