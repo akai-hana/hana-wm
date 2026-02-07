@@ -20,7 +20,7 @@ master_width = 50%    #  (5-95)
 show = true
 position = "bottom" # top/bottom
 
-font_size = 12
+font_size = 24
 # Bar height
 ## Auto-adapts to font size by default. Uncomment to set a fixed height instead:
 #height = 32
@@ -55,6 +55,7 @@ urgent_fg   = "#FFFFFF"
 
 # Workspace labels/icons
 icons = ["あ", "か", "い", "は", "な", "つ", "ん", "で"]
+#icons = ["1", "2", "3", "4", "5", "6", "7", "8"]
 
 indicator_size = 1
 title_accent = true
@@ -196,7 +197,7 @@ xeyes
 
 [workspace.rules.7] # Media
 freetube
-mpv
+#mpv
 gimp
 
 [workspace.rules.8] # torrenting

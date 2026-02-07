@@ -90,18 +90,20 @@ fn linkSystemLibrariesAndIncludes(b: *std.Build, root: *std.Build.Module, module
     root.linkSystemLibrary("xkbcommon", .{});
     root.linkSystemLibrary("xkbcommon-x11", .{});
     root.linkSystemLibrary("X11", .{});
-    root.linkSystemLibrary("Xft", .{});
-    root.linkSystemLibrary("Xrender", .{});
-    root.linkSystemLibrary("fontconfig", .{});
+    root.linkSystemLibrary("cairo", .{});
+    root.linkSystemLibrary("pangocairo-1.0", .{});
+    root.linkSystemLibrary("pango-1.0", .{});
+    root.linkSystemLibrary("glib-2.0", .{});
+    root.linkSystemLibrary("gobject-2.0", .{});
     
-    // Add FreeType include path to root
-    addFreetypeIncludes(b, root);
+    // Add Cairo and Pango include paths to root
+    addCairoPangoIncludes(b, root);
     
-    // Add FreeType include path to all discovered modules
+    // Add Cairo and Pango include paths to all discovered modules
     // This is critical because @cImport in any module needs the include paths
     var iter = modules.iterator();
     while (iter.next()) |entry| {
-        addFreetypeIncludes(b, entry.value_ptr.*);
+        addCairoPangoIncludes(b, entry.value_ptr.*);
     }
 }
 
@@ -151,16 +153,11 @@ fn discoverModules(
     }
 }
 
-/// Add FreeType include paths (required by Xft.h)
-fn addFreetypeIncludes(b: *std.Build, module: *std.Build.Module) void {
-    _ = b; // Build context not needed for fallback
+/// Add Cairo and Pango include paths (required for linking)
+fn addCairoPangoIncludes(b: *std.Build, module: *std.Build.Module) void {
+    _ = b; // Not needed anymore since we're using manual extern declarations
+    _ = module; // Manual bindings don't need include paths
     
-    // Use standard path - override with CFLAGS if your system differs
-    addFreetypeFallback(module);
-}
-
-/// Fallback to common FreeType include locations
-fn addFreetypeFallback(module: *std.Build.Module) void {
-    // Just use the most common path - users can override if needed
-    module.addIncludePath(.{ .cwd_relative = "/usr/include/freetype2" });
+    // Note: Include paths are not needed when using manual extern declarations
+    // The linker will find the symbols in the linked libraries
 }

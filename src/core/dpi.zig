@@ -32,7 +32,8 @@ pub const DpiInfo = struct {
     }
 };
 
-/// Read DPI from Xft.dpi resource using XCB
+/// Read DPI from X resources (Xft.dpi property) using XCB
+/// Note: Xft.dpi is a standard X resource set in .Xresources, used by many applications for DPI scaling
 fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
     // Get RESOURCE_MANAGER property from root window
     const atom_cookie = xcb.xcb_intern_atom(conn, 0, 16, "RESOURCE_MANAGER");
@@ -118,13 +119,13 @@ fn calculateScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
 
 /// Detect DPI and calculate scaling factor
 /// Priority:
-/// 1. Xft.dpi from .Xresources (most accurate if user has set it)
+/// 1. Xft.dpi from X resources/.Xresources (most accurate if user has set it)
 /// 2. Calculated from display physical dimensions
 /// 3. Resolution-based scaling as fallback
 pub fn detect(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) !DpiInfo {
-    // Try to get DPI from Xft.dpi using XCB
+    // Try to get DPI from X resources (Xft.dpi property)
     if (readXftDpi(conn, screen)) |xft_dpi| {
-        debug.info("Using Xft.dpi: {d:.1}", .{xft_dpi});
+        debug.info("Using DPI from X resources (Xft.dpi): {d:.1}", .{xft_dpi});
         return DpiInfo.init(xft_dpi);
     }
     

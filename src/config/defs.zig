@@ -242,7 +242,7 @@ pub const BarConfig = struct {
         return @intFromFloat(@round(base_width * self.scale_factor));
     }
     
-    // NEW: Get alpha value in 16-bit format for XRender (0x0000-0xFFFF)
+    // Get alpha value in 16-bit format (0x0000-0xFFFF)
     pub inline fn getAlpha16(self: *const BarConfig) u16 {
         const clamped = std.math.clamp(self.transparency, 0.0, 1.0);
         return @intFromFloat(@round(clamped * 0xFFFF));

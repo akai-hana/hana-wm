@@ -44,12 +44,6 @@ fn findVisualByDepth(screen: *xcb.xcb_screen_t, depth: u8) VisualInfo {
     return .{ .visual_type = null, .visual_id = screen.root_visual };
 }
 
-/// Apply alpha to an RGB color value (RGB -> ARGB)
-fn applyAlphaToColor(rgb: u32, alpha: u16) u32 {
-    const a8: u8 = @intCast(alpha >> 8); // Convert 16-bit alpha to 8-bit
-    return (@as(u32, a8) << 24) | (rgb & 0xFFFFFF);
-}
-
 const State = struct {
     window: u32,
     width: u16,
@@ -166,7 +160,7 @@ fn calculateBarHeight(wm: *defs.WM) !u16 {
         0, 0, 1, 1, 0, xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, wm.screen.root_visual, 0, null);
     defer _ = xcb.xcb_destroy_window(wm.conn, temp_win);
     
-    const temp_dc = drawing.DrawContext.init(wm.allocator, temp_win, 1, 1) catch return 24;
+    const temp_dc = drawing.DrawContext.init(wm.allocator, wm.conn, temp_win, 1, 1, wm.dpi_info.dpi) catch return 24;
     defer temp_dc.deinit();
     loadBarFonts(temp_dc, wm) catch return 24;
     
@@ -211,7 +205,7 @@ pub fn init(wm: *defs.WM) !void {
             colormap, screen.root, visual_info.visual_id);
         
         // For transparent windows, don't set a background pixel
-        // We'll draw everything ourselves with XRender for proper alpha
+        // We'll draw everything ourselves with Cairo for proper alpha
         const value_mask = xcb.XCB_CW_BORDER_PIXEL | 
                            xcb.XCB_CW_EVENT_MASK | xcb.XCB_CW_COLORMAP;
         const value_list = [_]u32{ 
@@ -259,9 +253,9 @@ pub fn init(wm: *defs.WM) !void {
 
     // Create DrawContext with ARGB visual if transparency is enabled
     const dc = if (want_transparency and has_argb_visual)
-        try drawing.DrawContext.initWithVisual(wm.allocator, window, width, height, visual_info.visual_id, colormap)
+        try drawing.DrawContext.initWithVisual(wm.allocator, wm.conn, window, width, height, visual_info.visual_id, colormap, wm.dpi_info.dpi)
     else
-        try drawing.DrawContext.init(wm.allocator, window, width, height);
+        try drawing.DrawContext.init(wm.allocator, wm.conn, window, width, height, wm.dpi_info.dpi);
     errdefer dc.deinit();
     try loadBarFonts(dc, wm);
     
