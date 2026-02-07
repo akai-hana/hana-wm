@@ -20,18 +20,18 @@ Mod = "Super"
 Mod+Return = "auto_terminal"
 
 # Window management
-Mod+Shift+f = "close"
-Mod+Shift+g = "kill"
-Mod+f       = "toggle_fullscreen"
+Mod+Shift+F = "close"
+Mod+Shift+G = "kill"
+Mod+F       = "toggle_fullscreen"
 
 # Tiling layout controls
-Mod+space       = "toggle_layout"
-Mod+Shift+space = "toggle_layout_reverse"
-Mod+n           = "toggle_tiling"
-Mod+h           = "decrease_master"
-Mod+l           = "increase_master"
-Mod+comma       = "increase_master_count"
-Mod+period      = "decrease_master_count"
+Mod+Space       = "toggle_layout"
+Mod+Shift+Space = "toggle_layout_reverse"
+Mod+N           = "toggle_tiling"
+Mod+H           = "decrease_master"
+Mod+L           = "increase_master"
+Mod+Comma       = "increase_master_count"
+Mod+Period      = "decrease_master_count"
 
 # Workspaces 1-9
 Mod+1 = "workspace_1"
@@ -56,10 +56,11 @@ Mod+Shift+8 = "move_to_workspace_8"
 Mod+Shift+9 = "move_to_workspace_9"
 
 # Bar toggle
-Mod+b = "toggle_bar"
+Mod+B = "toggle_bar_visibility"
+Mod+Shift+B = "toggle_bar_position"
 
 # Config reload
-Mod+Shift+t = "reload"
+Mod+Shift+T = "reload"
 
 [bar]
 show = true

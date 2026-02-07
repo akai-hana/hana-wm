@@ -65,7 +65,8 @@ pub const Action = union(enum) {
     reload_config,
     toggle_layout,
     toggle_layout_reverse,
-    toggle_bar,
+    toggle_bar_visibility,
+    toggle_bar_position,  // NEW: toggle bar between top and bottom
     increase_master,
     decrease_master,
     increase_master_count,
@@ -183,6 +184,10 @@ pub const BarConfig = struct {
     
     // DPI scaling
     scale_factor: f32 = 1.0,
+    
+    // NEW: Bar transparency (0.0 = fully transparent, 1.0 = fully opaque)
+    // Accepts both 0-1 (e.g., 0.9) and 0-100 (e.g., 90) formats in config
+    transparency: f32 = 1.0,
 
     pub fn deinit(self: *BarConfig, allocator: std.mem.Allocator) void {
         for (self.workspace_icons.items) |icon| {
@@ -235,6 +240,12 @@ pub const BarConfig = struct {
         // Base workspace width from bar.zig is 50
         const base_width: f32 = 50.0;
         return @intFromFloat(@round(base_width * self.scale_factor));
+    }
+    
+    // NEW: Get alpha value in 16-bit format for XRender (0x0000-0xFFFF)
+    pub inline fn getAlpha16(self: *const BarConfig) u16 {
+        const clamped = std.math.clamp(self.transparency, 0.0, 1.0);
+        return @intFromFloat(@round(clamped * 0xFFFF));
     }
 };
 

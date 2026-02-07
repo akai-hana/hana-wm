@@ -26,7 +26,7 @@ font_size = 12
 #height = 32
 
 # Bar spacing
-padding = 99 # Padding inside segments (around text)
+padding = 999 # Padding inside segments (around text)
 spacing = 6  # Space between segments
 
 # List fonts in priority order: first font is primary, others come next
@@ -35,6 +35,11 @@ fonts = [
     "FiraCode Nerd Font Ret",
     "Noto Sans CJK JP",
 ]
+
+# NEW: Bar transparency (0.0 = fully transparent, 1.0 = fully opaque)
+# Accepts formats: 0.9 or 90 (will be normalized to 0-1)
+# With picom's gaussian blur, the bar will show blurred content behind it
+transparency = 0.5 # %
 
 # Legacy single font option (used if fonts array is not set):
 #font = "FiraCode Nerd Font Ret"
@@ -82,8 +87,6 @@ segments = ["clock"]
 [workspaces]
 count = 8
 
-
-
 [Keybindings]
 # Convenience alias
 Mod = "Super" # Super/Mod4 / Alt/Mod1
@@ -128,8 +131,9 @@ Mod+Shift+W = "move_to_workspace_6"
 Mod+Shift+E = "move_to_workspace_7"
 Mod+Shift+R = "move_to_workspace_8"
 
-# Bar toggle
-Mod+B = "toggle_bar"
+# Bar
+Mod+B = "toggle_bar_visibility"     # shown/hidden
+Mod+Shift+B = "toggle_bar_position" # top/bottom
 
 # Application launchers
 Mod+P = "rofi -show drun"
