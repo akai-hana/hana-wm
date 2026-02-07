@@ -224,7 +224,8 @@ const ACTION_MAP = std.StaticStringMap(defs.Action).initComptime(.{
     .{ "reload_config", .reload_config },
     .{ "toggle_layout", .toggle_layout },
     .{ "toggle_layout_reverse", .toggle_layout_reverse },
-    .{ "toggle_bar", .toggle_bar },
+    .{ "toggle_bar_visibility", .toggle_bar_visibility },
+    .{ "toggle_bar_position", .toggle_bar_position },
     .{ "increase_master", .increase_master },
     .{ "decrease_master", .decrease_master },
     .{ "increase_master_count", .increase_master_count },
@@ -424,6 +425,22 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
 
     cfg.bar.indicator_size = get(u16, section, "indicator_size", 4, 2, 10);
     cfg.bar.title_accent = get(bool, section, "title_accent", true, null, null);
+    
+    // Parse transparency value - supports both 0-1 and 0-100 formats
+    if (section.get("transparency")) |value| {
+        var trans: f32 = 1.0;
+        if (value.asInt()) |i| {
+            // If integer, assume it's 0-100 percentage
+            trans = @as(f32, @floatFromInt(i)) / 100.0;
+        } else if (value.asString()) |str| {
+            // Try parsing as float
+            trans = std.fmt.parseFloat(f32, str) catch 1.0;
+            // If value is > 1, assume it's 0-100 percentage
+            if (trans > 1.0) trans = trans / 100.0;
+        }
+        cfg.bar.transparency = std.math.clamp(trans, 0.0, 1.0);
+        debug.info("Bar transparency set to: {d:.2}%", .{cfg.bar.transparency * 100.0});
+    }
     
     try parseWorkspaceIcons(allocator, section, cfg);
     try parseBarLayout(allocator, section, doc, cfg);

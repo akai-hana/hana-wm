@@ -1,5 +1,6 @@
 //! Status bar
 //! Taking inspiration from dwm
+//! Now with transparency support and position toggling
 
 const std     = @import("std");
 const defs    = @import("defs");
@@ -20,6 +21,34 @@ const workspaces             = @import("workspaces");
 
 // TODO: make adjustable through config.toml, adjust workspace width based off of monitor DPI
 pub const WORKSPACE_WIDTH: u8 = 50;
+
+/// Result of finding a visual - contains both the structure and ID
+const VisualInfo = struct {
+    visual_type: ?*xcb.xcb_visualtype_t,
+    visual_id: u32,
+};
+
+/// Find a visual with the given depth, returning both structure and ID
+fn findVisualByDepth(screen: *xcb.xcb_screen_t, depth: u8) VisualInfo {
+    var depth_iter = xcb.xcb_screen_allowed_depths_iterator(screen);
+    while (depth_iter.rem > 0) : (xcb.xcb_depth_next(&depth_iter)) {
+        if (depth_iter.data.*.depth == depth) {
+            var visual_iter = xcb.xcb_depth_visuals_iterator(depth_iter.data);
+            if (visual_iter.rem > 0) {
+                const vt = visual_iter.data;
+                return .{ .visual_type = vt, .visual_id = vt.*.visual_id };
+            }
+        }
+    }
+    // Fallback to root visual
+    return .{ .visual_type = null, .visual_id = screen.root_visual };
+}
+
+/// Apply alpha to an RGB color value (RGB -> ARGB)
+fn applyAlphaToColor(rgb: u32, alpha: u16) u32 {
+    const a8: u8 = @intCast(alpha >> 8); // Convert 16-bit alpha to 8-bit
+    return (@as(u32, a8) << 24) | (rgb & 0xFFFFFF);
+}
 
 const State = struct {
     window: u32,
@@ -161,22 +190,85 @@ pub fn init(wm: *defs.WM) !void {
         @as(i16, @intCast(screen.height_in_pixels)) - @as(i16, @intCast(height))
     else 0;
 
+    // Get alpha value for transparency
+    const alpha = wm.config.bar.getAlpha16();
+    const want_transparency = alpha < 0xFFFF;
+    
+    // Find 32-bit ARGB visual for transparency support
+    const visual_info = if (want_transparency) findVisualByDepth(screen, 32) else VisualInfo{ .visual_type = null, .visual_id = screen.root_visual };
+    const has_argb_visual = visual_info.visual_type != null;
+    
     const window = xcb.xcb_generate_id(wm.conn);
-    _ = xcb.xcb_create_window(
-        wm.conn, xcb.XCB_COPY_FROM_PARENT, window, screen.root,
-        0, y_pos, width, height, 0,
-        xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, screen.root_visual,
-        xcb.XCB_CW_BACK_PIXEL | xcb.XCB_CW_EVENT_MASK,
-        &[_]u32{ wm.config.bar.bg, xcb.XCB_EVENT_MASK_EXPOSURE | xcb.XCB_EVENT_MASK_BUTTON_PRESS },
-    );
+    
+    // Declare colormap outside the if block so it's available for DrawContext
+    var colormap: u32 = 0;
+    
+    // Create window with ARGB visual if transparency is enabled and available
+    if (want_transparency and has_argb_visual) {
+        // Create colormap for ARGB visual
+        colormap = xcb.xcb_generate_id(wm.conn);
+        _ = xcb.xcb_create_colormap(wm.conn, xcb.XCB_COLORMAP_ALLOC_NONE, 
+            colormap, screen.root, visual_info.visual_id);
+        
+        // For transparent windows, don't set a background pixel
+        // We'll draw everything ourselves with XRender for proper alpha
+        const value_mask = xcb.XCB_CW_BORDER_PIXEL | 
+                           xcb.XCB_CW_EVENT_MASK | xcb.XCB_CW_COLORMAP;
+        const value_list = [_]u32{ 
+            0,  // border pixel
+            xcb.XCB_EVENT_MASK_EXPOSURE | xcb.XCB_EVENT_MASK_BUTTON_PRESS,
+            colormap,
+        };
+        
+        _ = xcb.xcb_create_window(
+            wm.conn, 
+            32,  // 32-bit depth for ARGB
+            window, 
+            screen.root,
+            0, y_pos, width, height, 0,
+            xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, 
+            visual_info.visual_id,
+            value_mask,
+            &value_list,
+        );
+        
+        debug.info("Bar transparency: enabled at {d:.2}% (alpha: 0x{x:0>4})", 
+            .{wm.config.bar.transparency * 100.0, alpha});
+    } else {
+        // Fallback: create window with default visual (no transparency)
+        _ = xcb.xcb_create_window(
+            wm.conn, 
+            xcb.XCB_COPY_FROM_PARENT,
+            window, 
+            screen.root,
+            0, y_pos, width, height, 0,
+            xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, 
+            screen.root_visual,
+            xcb.XCB_CW_BACK_PIXEL | xcb.XCB_CW_EVENT_MASK,
+            &[_]u32{ wm.config.bar.bg, xcb.XCB_EVENT_MASK_EXPOSURE | xcb.XCB_EVENT_MASK_BUTTON_PRESS },
+        );
+        
+        if (want_transparency) {
+            debug.warn("32-bit ARGB visual not available, transparency disabled", .{});
+        }
+    }
 
     try setWindowProperties(wm, window, height);
     _ = xcb.xcb_map_window(wm.conn, window);
     utils.flush(wm.conn);
 
-    const dc = try drawing.DrawContext.init(wm.allocator, window, width, height);
+    // Create DrawContext with ARGB visual if transparency is enabled
+    const dc = if (want_transparency and has_argb_visual)
+        try drawing.DrawContext.initWithVisual(wm.allocator, window, width, height, visual_info.visual_id, colormap)
+    else
+        try drawing.DrawContext.init(wm.allocator, window, width, height);
     errdefer dc.deinit();
     try loadBarFonts(dc, wm);
+    
+    // Set transparency on the draw context if enabled
+    if (want_transparency and has_argb_visual) {
+        dc.setAlphaOverride(alpha);
+    }
 
     const s = try State.init(wm.allocator, wm.conn, window, width, height, dc, wm.config.bar);
     try draw(s, wm);
@@ -205,6 +297,36 @@ fn setBarVisibility(wm: *defs.WM, visible: bool, reason: []const u8) void {
         }
         utils.flush(wm.conn);
         debug.info("Bar {s} ({s})", .{ if (visible) "shown" else "hidden", reason });
+        tiling.retileCurrentWorkspace(wm);
+    }
+}
+
+// NEW: Toggle bar position between top and bottom
+pub fn toggleBarPosition(wm: *defs.WM) !void {
+    if (state) |s| {
+        // Toggle the position in config
+        wm.config.bar.vertical_position = switch (wm.config.bar.vertical_position) {
+            .top => .bottom,
+            .bottom => .top,
+        };
+        
+        // Calculate new y position
+        const new_y: i16 = if (wm.config.bar.vertical_position == .bottom)
+            @as(i16, @intCast(wm.screen.height_in_pixels)) - @as(i16, @intCast(s.height))
+        else 0;
+        
+        // Move the window to new position
+        const values = [_]u32{@as(u32, @bitCast(@as(i32, new_y)))};
+        _ = xcb.xcb_configure_window(s.conn, s.window, 
+            xcb.XCB_CONFIG_WINDOW_Y, &values);
+        
+        // Update window properties for new position
+        try setWindowProperties(wm, s.window, s.height);
+        
+        utils.flush(wm.conn);
+        debug.info("Bar position toggled to: {s}", .{@tagName(wm.config.bar.vertical_position)});
+        
+        // Retile workspace to adjust for new bar position
         tiling.retileCurrentWorkspace(wm);
     }
 }
