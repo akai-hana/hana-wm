@@ -49,6 +49,43 @@ pub extern fn cairo_surface_flush(surface: *cairo_surface_t) void;
 pub extern fn cairo_create(surface: *cairo_surface_t) ?*cairo_t;
 pub extern fn cairo_destroy(cr: *cairo_t) void;
 
+// Cairo operator modes (for transparency)
+pub const cairo_operator_t = enum(c_int) {
+    CLEAR = 0,
+    SOURCE = 1,
+    OVER = 2,
+    IN = 3,
+    OUT = 4,
+    ATOP = 5,
+    DEST = 6,
+    DEST_OVER = 7,
+    DEST_IN = 8,
+    DEST_OUT = 9,
+    DEST_ATOP = 10,
+    XOR = 11,
+    ADD = 12,
+    SATURATE = 13,
+    MULTIPLY = 14,
+    SCREEN = 15,
+    OVERLAY = 16,
+    DARKEN = 17,
+    LIGHTEN = 18,
+    COLOR_DODGE = 19,
+    COLOR_BURN = 20,
+    HARD_LIGHT = 21,
+    SOFT_LIGHT = 22,
+    DIFFERENCE = 23,
+    EXCLUSION = 24,
+    HSL_HUE = 25,
+    HSL_SATURATION = 26,
+    HSL_COLOR = 27,
+    HSL_LUMINOSITY = 28,
+};
+
+// Export operators as constants for convenience
+pub const CAIRO_OPERATOR_CLEAR = cairo_operator_t.CLEAR;
+pub const CAIRO_OPERATOR_OVER = cairo_operator_t.OVER;
+
 // Drawing operations
 pub extern fn cairo_set_source_rgb(cr: *cairo_t, red: f64, green: f64, blue: f64) void;
 pub extern fn cairo_set_source_rgba(cr: *cairo_t, red: f64, green: f64, blue: f64, alpha: f64) void;
@@ -58,6 +95,14 @@ pub extern fn cairo_move_to(cr: *cairo_t, x: f64, y: f64) void;
 pub extern fn cairo_line_to(cr: *cairo_t, x: f64, y: f64) void;
 pub extern fn cairo_stroke(cr: *cairo_t) void;
 pub extern fn cairo_set_line_width(cr: *cairo_t, width: f64) void;
+
+// State management (for save/restore)
+pub extern fn cairo_save(cr: *cairo_t) void;
+pub extern fn cairo_restore(cr: *cairo_t) void;
+
+// Operator and paint (for transparency clearing)
+pub extern fn cairo_set_operator(cr: *cairo_t, op: cairo_operator_t) void;
+pub extern fn cairo_paint(cr: *cairo_t) void;
 
 // ============================================================================
 // Pango Types and Constants

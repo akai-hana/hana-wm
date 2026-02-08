@@ -60,11 +60,12 @@ const State = struct {
     last_second: i64,
     alive: bool,
     visible: bool,  // OPTIMIZATION: Track actual visibility for timer control
+    has_transparency: bool,  // Track if transparency is enabled
     allocator: std.mem.Allocator,
     cached_clock_width: u16,
 
     fn init(allocator: std.mem.Allocator, conn: *xcb.xcb_connection_t, window: u32, width: u16, height: u16,
-            dc: *drawing.DrawContext, config: defs.BarConfig) !*State {
+            dc: *drawing.DrawContext, config: defs.BarConfig, has_transparency: bool) !*State {
         const s = try allocator.create(State);
         const scaled_padding = config.scaledPadding();
         s.* = State{
@@ -75,6 +76,7 @@ const State = struct {
             .cached_title_window = null,
             .dirty = false, .dirty_clock = false, .last_second = 0, .alive = true,
             .visible = true,  // OPTIMIZATION: Start visible, setBarState will update
+            .has_transparency = has_transparency,
             .allocator = allocator,
             .cached_clock_width = dc.textWidth("0000-00-00 00:00:00") + 2 * scaled_padding,
         };
@@ -195,9 +197,23 @@ pub fn init(wm: *defs.WM) !void {
     const alpha = wm.config.bar.getAlpha16();
     const want_transparency = alpha < 0xFFFF;
     
+    debug.info("Bar transparency config: {d:.2}% (want={}, alpha16=0x{x:0>4})", 
+        .{wm.config.bar.transparency * 100.0, want_transparency, alpha});
+    
+    // XCB constant - use literal value to ensure it's correct
+    const XCB_BACK_PIXMAP_NONE: u32 = 0;
+    
     // Find 32-bit ARGB visual for transparency support
     const visual_info = if (want_transparency) findVisualByDepth(screen, 32) else VisualInfo{ .visual_type = null, .visual_id = screen.root_visual };
     const has_argb_visual = visual_info.visual_type != null;
+    
+    if (want_transparency) {
+        if (has_argb_visual) {
+            debug.info("Found 32-bit ARGB visual (id=0x{x})", .{visual_info.visual_id});
+        } else {
+            debug.warn("32-bit ARGB visual NOT found - transparency will be disabled", .{});
+        }
+    }
     
     const window = xcb.xcb_generate_id(wm.conn);
     
@@ -211,15 +227,19 @@ pub fn init(wm: *defs.WM) !void {
         _ = xcb.xcb_create_colormap(wm.conn, xcb.XCB_COLORMAP_ALLOC_NONE, 
             colormap, screen.root, visual_info.visual_id);
         
-        // For transparent windows, don't set a background pixel
-        // We'll draw everything ourselves with Cairo for proper alpha
-        const value_mask = xcb.XCB_CW_BORDER_PIXEL | 
+        // CRITICAL: For ARGB windows, set background pixmap to None (0)
+        // This prevents X11 from initializing the window with an opaque background
+        const value_mask = xcb.XCB_CW_BACK_PIXMAP | xcb.XCB_CW_BORDER_PIXEL | 
                            xcb.XCB_CW_EVENT_MASK | xcb.XCB_CW_COLORMAP;
         const value_list = [_]u32{ 
+            XCB_BACK_PIXMAP_NONE,  // 0 = No background pixmap
             0,  // border pixel
             xcb.XCB_EVENT_MASK_EXPOSURE | xcb.XCB_EVENT_MASK_BUTTON_PRESS,
             colormap,
         };
+        
+        debug.info("Creating ARGB window: depth=32, visual=0x{x}, back_pixmap={}, colormap=0x{x}", 
+            .{visual_info.visual_id, XCB_BACK_PIXMAP_NONE, colormap});
         
         _ = xcb.xcb_create_window(
             wm.conn, 
@@ -233,8 +253,7 @@ pub fn init(wm: *defs.WM) !void {
             &value_list,
         );
         
-        debug.info("Bar transparency: enabled at {d:.2}% (alpha: 0x{x:0>4})", 
-            .{wm.config.bar.transparency * 100.0, alpha});
+        debug.info("ARGB window created successfully (id=0x{x})", .{window});
     } else {
         // Fallback: create window with default visual (no transparency)
         _ = xcb.xcb_create_window(
@@ -267,11 +286,13 @@ pub fn init(wm: *defs.WM) !void {
     try loadBarFonts(dc, wm);
     
     // Set transparency on the draw context if enabled
+    // Background will use this alpha, text will always be opaque
     if (want_transparency and has_argb_visual) {
         dc.setAlphaOverride(alpha);
+        debug.info("Using Cairo transparency: bg at {d:.1}% alpha, text at 100% (opaque)", .{(@as(f32, @floatFromInt(alpha)) / 0xFFFF) * 100.0});
     }
 
-    const s = try State.init(wm.allocator, wm.conn, window, width, height, dc, wm.config.bar);
+    const s = try State.init(wm.allocator, wm.conn, window, width, height, dc, wm.config.bar, want_transparency and has_argb_visual);
     try draw(s, wm);
     utils.flush(wm.conn);
     state = s;
@@ -452,6 +473,12 @@ fn drawRightSegments(s: *State, wm: *defs.WM, segments: []const defs.BarSegment)
 }
 
 fn draw(s: *State, wm: *defs.WM) !void {
+    // CRITICAL: Clear the surface to transparent before drawing (for ARGB windows)
+    // This initializes the alpha channel properly
+    if (s.has_transparency) {
+        s.dc.clearTransparent();
+    }
+    
     s.dc.fillRect(0, 0, s.width, s.height, s.config.bg);
 
     // Pre-calculate widths

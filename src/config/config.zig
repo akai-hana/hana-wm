@@ -451,15 +451,8 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     if (section.get("transparency")) |value| {
         var trans: f32 = 1.0;
         
-        // Check for percentage (scalable value)
-        if (value.asScalable()) |scalable| {
-            if (scalable.is_percentage) {
-                // It's a percentage like 50%
-                trans = scalable.value / 100.0;
-            } else {
-                trans = scalable.value;
-            }
-        } else if (value.asInt()) |i| {
+        // Check integers FIRST (before scalable) to properly handle bare numbers like 50
+        if (value.asInt()) |i| {
             // Integer value: 0, 1, 50, 100, etc.
             if (i == 0) {
                 trans = 0.0;  // Fully transparent
@@ -471,6 +464,15 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
             } else {
                 debug.warn("Invalid transparency value {} (must be 0-100), using default", .{i});
                 trans = 1.0;
+            }
+        } else if (value.asScalable()) |scalable| {
+            // Scalable value with explicit percentage marker
+            if (scalable.is_percentage) {
+                // It's a percentage like 50%
+                trans = scalable.value / 100.0;
+            } else {
+                // Bare decimal like 0.5
+                trans = scalable.value;
             }
         } else if (value.asString()) |str| {
             // String value: "0.5", "50", "1", etc.
