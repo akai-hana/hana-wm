@@ -93,7 +93,7 @@ pub const XkbState = struct {
 
 /// Retry XKB extension setup with exponential backoff
 fn retrySetup(xcb_conn: *anyopaque) !void {
-    var attempts: usize = 0;
+    var attempts: u8 = 0;
     const max_retries = 3;
 
     while (attempts < max_retries) : (attempts += 1) {
@@ -120,7 +120,7 @@ fn retrySetup(xcb_conn: *anyopaque) !void {
 
 /// Retry keymap creation with validation
 fn retryKeymap(ctx: *xkb_context, xcb_conn: *anyopaque, device_id: i32) !*xkb_keymap {
-    var attempts: usize = 0;
+    var attempts: u8 = 0;
     const max_retries = 3;
 
     while (attempts < max_retries) : (attempts += 1) {
@@ -143,7 +143,7 @@ fn retryKeymap(ctx: *xkb_context, xcb_conn: *anyopaque, device_id: i32) !*xkb_ke
             defer xkb.xkb_state_unref(test_state);
             
             // Test Return (usually keycode 36), Space (65), and A (38)
-            var valid_keys: usize = 0;
+            var valid_keys: u8 = 0;
             for ([_]u8{ 36, 65, 38 }) |keycode| {
                 if (xkb.xkb_state_key_get_one_sym(test_state, keycode) != xkb.XKB_KEY_NoSymbol) {
                     valid_keys += 1;

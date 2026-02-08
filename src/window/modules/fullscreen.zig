@@ -1,4 +1,4 @@
-///! Fullscreen management - OPTIMIZED
+///! Fullscreen management - MEMORY OPTIMIZED
 
 const std = @import("std");
 const defs = @import("defs");
@@ -34,7 +34,7 @@ pub fn toggleFullscreen(wm: *WM) void {
     utils.flush(wm.conn);
 }
 
-fn enterFullscreen(wm: *WM, win: u32, ws: usize) void {
+fn enterFullscreen(wm: *WM, win: u32, ws: u8) void {
     const geom = utils.getGeometry(wm.conn, win) orelse return;
 
     // CRITICAL FIX: Don't save off-screen positions (from hidden windows)
@@ -85,7 +85,7 @@ fn enterFullscreen(wm: *WM, win: u32, ws: usize) void {
     b.execute();
 }
 
-fn exitFullscreen(wm: *WM, win: u32, ws: usize) void {
+fn exitFullscreen(wm: *WM, win: u32, ws: u8) void {
     const fs_info = wm.fullscreen.getForWorkspace(ws) orelse return;
     if (fs_info.window != win) return;
     

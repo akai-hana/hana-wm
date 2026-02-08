@@ -89,9 +89,8 @@ for f in "$FILES_DIR"/* "$FILES_DIR"/.*; do
   # Remove .fixed suffix if present (but keep the original extension)
   bn_no_fixed="${bn%.fixed}"
 
-  # Remove any occurrence of "_improved" inside the basename (POSIX-safe)
-  # e.g. "foo_improved.js.fixed" -> "foo.js"
-  dest="$(printf '%s' "$bn_no_fixed" | sed 's/_improved//g')"
+  # Remove any occurrence of "_improved" and "_optimized" inside the basename (POSIX-safe)
+  dest="$(printf '%s' "$bn_no_fixed" | sed 's/_improved//g; s/_optimized//g')"
 
   # If dest ends up empty for some weird reason, fall back to the original basename
   if [ -z "$dest" ]; then

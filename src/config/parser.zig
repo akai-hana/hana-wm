@@ -339,7 +339,7 @@ const Parser = struct {
     inline fn parseColor(_: *Parser, value: []const u8) !u32 {
         if (value.len == 0) return error.InvalidColor;
 
-        const offset: usize = if (value[0] == '#') 1 
+        const offset: u8 = if (value[0] == '#') 1 
             else if (value.len > 2 and value[0] == '0' and (value[1] == 'x' or value[1] == 'X')) 2 
             else 0;
         const hex_part = value[offset..];

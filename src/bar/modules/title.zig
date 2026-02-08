@@ -13,7 +13,9 @@ var utf8_string: ?u32 = null;
 pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start_x: u16, width: u16,
     wm: *defs.WM, cached_title: *std.ArrayList(u8), cached_title_window: *?u32, allocator: std.mem.Allocator) !u16 {
     const ws_state = workspaces.getState() orelse return start_x + width;
-    const has_windows = ws_state.workspaces[ws_state.current].windows.list.items.len > 0;
+    
+    // FIXED: Use count() method instead of .list.items.len
+    const has_windows = ws_state.workspaces[ws_state.current].windows.count() > 0;
     const is_focused = has_windows and wm.focused_window != null;
     const scaled_padding = config.scaledPadding();
     

@@ -53,8 +53,9 @@ pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start
         
         try dc.drawText(x + (scaled_ws_width - dc.textWidth(label)) / 2, text_y, label, fg);
 
-        // Draw window presence indicator
-        if (ws.windows.list.items.len > 0) {
+        // FIXED: Use count() method instead of .list.items.len
+        // This works with both small-array and large tracking implementations
+        if (ws.windows.count() > 0) {
             drawIndicator(dc, x, scaled_indicator_size, is_current, fg);
         }
         

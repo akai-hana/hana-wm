@@ -11,6 +11,7 @@ const dpi     = @import("dpi");
 const drawing = @import("drawing");
 const tiling  = @import("tiling");
 const debug   = @import("debug");
+const timer   = @import("timer");
 
 const workspaces             = @import("workspaces");
     const workspaces_segment = @import("tags");
@@ -58,6 +59,7 @@ const State = struct {
     dirty_clock: bool,
     last_second: i64,
     alive: bool,
+    visible: bool,  // OPTIMIZATION: Track actual visibility for timer control
     allocator: std.mem.Allocator,
     cached_clock_width: u16,
 
@@ -72,6 +74,7 @@ const State = struct {
             .cached_title = .{},
             .cached_title_window = null,
             .dirty = false, .dirty_clock = false, .last_second = 0, .alive = true,
+            .visible = true,  // OPTIMIZATION: Start visible, setBarState will update
             .allocator = allocator,
             .cached_clock_width = dc.textWidth("0000-00-00 00:00:00") + 2 * scaled_padding,
         };
@@ -94,6 +97,9 @@ const State = struct {
 var state: ?*State = null;
 
 inline fn updateClockIfNeeded(s: *State) void {
+    // OPTIMIZATION: Skip clock update if bar is hidden (idle CPU reduction)
+    if (!s.visible) return;
+    
     const ts = std.posix.clock_gettime(std.posix.CLOCK.REALTIME) catch return;
     if (ts.sec != s.last_second) {
         s.last_second = ts.sec;
@@ -282,6 +288,9 @@ pub fn deinit() void {
 
 fn setBarVisibility(wm: *defs.WM, visible: bool, reason: []const u8) void {
     if (state) |s| {
+        // OPTIMIZATION: Update visibility state for timer control
+        s.visible = visible;
+        
         if (visible) {
             _ = xcb.xcb_map_window(s.conn, s.window);
             utils.flush(wm.conn);
@@ -291,6 +300,10 @@ fn setBarVisibility(wm: *defs.WM, visible: bool, reason: []const u8) void {
         }
         utils.flush(wm.conn);
         debug.info("Bar {s} ({s})", .{ if (visible) "shown" else "hidden", reason });
+        
+        // OPTIMIZATION: Update timer state when visibility changes
+        timer.updateTimerState(wm);
+        
         tiling.retileCurrentWorkspace(wm);
     }
 }
@@ -334,6 +347,12 @@ pub inline fn raiseBar() void {
 }
 pub inline fn getBarHeight() u16 { return if (state) |s| s.height else 0; }
 pub inline fn isBarVisible() bool { return state != null; }
+
+// OPTIMIZATION: Check if bar is actually visible (not just created)
+pub inline fn isVisible() bool {
+    if (state) |s| return s.visible;
+    return false;
+}
 
 pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
 

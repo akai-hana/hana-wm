@@ -40,7 +40,7 @@ pub fn grabButtons(wm: *WM, win: u32, focused: bool) void {
     }
 }
 
-inline fn validateWorkspace(target_ws: ?usize, current_ws: usize) usize {
+inline fn validateWorkspace(target_ws: ?u8, current_ws: u8) u8 {
     const ws = target_ws orelse return current_ws;
     const ws_state = workspaces.getState() orelse return current_ws;
     
@@ -131,7 +131,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     bar.markDirty();
 }
 
-inline fn handleMapRequestDirect(wm: *WM, win: u32, is_current_ws: bool, validated_ws: usize) void {
+inline fn handleMapRequestDirect(wm: *WM, win: u32, is_current_ws: bool, validated_ws: u8) void {
     // Query pointer position before mapping
     if (is_current_ws) {
         const pointer_query = xcb.xcb_query_pointer(wm.conn, wm.root);
@@ -309,7 +309,7 @@ fn focusWindowUnderPointer(wm: *WM) void {
     
     // Fallback: focus first window in workspace if pointer isn't over anything valid
     if (workspaces.getCurrentWorkspaceObject()) |ws| {
-        const windows = ws.windows.list.items;
+        const windows = ws.windows.items();
         for (windows) |workspace_win| {
             if (workspace_win != 0 and workspace_win != wm.root and 
                 !bar.isBarWindow(workspace_win) and wm.windows.contains(workspace_win)) {
@@ -331,7 +331,7 @@ inline fn cleanupFullscreenWindow(wm: *WM, win: u32) void {
     }
 }
 
-inline fn matchWorkspaceRule(wm: *WM, win: u32) ?usize {
+inline fn matchWorkspaceRule(wm: *WM, win: u32) ?u8 {
     const rules = wm.config.workspaces.rules.items;
     if (rules.len == 0) return null;
 

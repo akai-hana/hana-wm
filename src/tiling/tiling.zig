@@ -36,7 +36,7 @@ pub const State = struct {
     layout: Layout,
     master_side: defs.MasterSide,
     master_width: f32,
-    master_count: usize,
+    master_count: u8,  // OPTIMIZED: u8 instead of usize - max 255 windows in master
     gaps: u16,
     border_width: u16,
     border_focused: u32,
@@ -379,10 +379,11 @@ pub fn decreaseMasterWidth(wm: *WM) void { adjustMasterWidth(wm, -0.05); }
 
 fn adjustMasterCount(wm: *WM, delta: isize) void {
     const s = StateManager.get(true) orelse return;
-    const new_count = if (delta > 0)
-        @min(s.windows.count(), s.master_count + @as(usize, @intCast(delta)))
+    const win_count: u8 = @intCast(@min(255, s.windows.count()));
+    const new_count: u8 = if (delta > 0)
+        @min(win_count, s.master_count +| @as(u8, @intCast(delta)))
     else
-        @max(1, s.master_count -| @as(usize, @intCast(-delta)));
+        @max(1, s.master_count -| @as(u8, @intCast(-delta)));
     if (new_count != s.master_count) {
         s.master_count = new_count;
         bar.markDirty();

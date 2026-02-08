@@ -1,4 +1,4 @@
-// Workspace management - OPTIMIZED with batch operations
+// Workspace management - MEMORY OPTIMIZED with u8 indices
 
 const std = @import("std");
 const defs = @import("defs");
@@ -13,11 +13,11 @@ const createModule = @import("module").module;
 const debug = @import("debug");
 
 pub const Workspace = struct {
-    id: usize,
+    id: u8,  // OPTIMIZED: u8 instead of usize
     windows: tracking,
     name: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator, id: usize, name: []const u8) !Workspace {
+    pub fn init(allocator: std.mem.Allocator, id: u8, name: []const u8) !Workspace {
         return .{
             .id = id,
             .windows = tracking.init(allocator),
@@ -44,8 +44,8 @@ pub const Workspace = struct {
 
 pub const State = struct {
     workspaces: []Workspace,
-    current: usize,
-    window_to_workspace: std.AutoHashMap(u32, usize),
+    current: u8,  // OPTIMIZED: u8 instead of usize
+    window_to_workspace: std.AutoHashMap(u32, u8),  // OPTIMIZED: u8 values
     allocator: std.mem.Allocator,
     wm: *WM,
 };
@@ -69,18 +69,24 @@ pub fn init(wm: *WM) void {
     
     // OPTIMIZATION: Single loop for initialization
     for (workspaces_array, 0..) |*ws, i| {
+        const ws_id: u8 = @intCast(i);
         const name = std.fmt.allocPrint(wm.allocator, "{}", .{i + 1}) catch "?";
-        ws.* = Workspace.init(wm.allocator, i, name) catch {
+        ws.* = Workspace.init(wm.allocator, ws_id, name) catch {
             debug.err("Failed to init workspace {}", .{i});
             cleanupWorkspaces(workspaces_array[0..i], wm.allocator);
             return;
         };
     }
     
+    // OPTIMIZATION: Pre-allocate hash map capacity
+    // Typical workload: 32 windows across all workspaces
+    var window_to_workspace = std.AutoHashMap(u32, u8).init(wm.allocator);
+    window_to_workspace.ensureTotalCapacity(32) catch {}; // Best-effort pre-allocation
+    
     const initial_state = State{
         .workspaces = workspaces_array,
         .current = 0,
-        .window_to_workspace = std.AutoHashMap(u32, usize).init(wm.allocator),
+        .window_to_workspace = window_to_workspace,
         .allocator = wm.allocator,
         .wm = wm,
     };
@@ -127,7 +133,7 @@ pub fn removeWindow(win: u32) void {
     }
 }
 
-pub fn moveWindowTo(wm: *WM, win: u32, target_ws: usize) void {
+pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) void {
     const s = StateManager.get(true) orelse return;
 
     if (target_ws >= s.workspaces.len) {
@@ -186,7 +192,7 @@ inline fn markTilingDirty() void {
     }
 }
 
-pub fn switchTo(wm: *WM, ws_id: usize) void {
+pub fn switchTo(wm: *WM, ws_id: u8) void {
     const s = StateManager.get(true) orelse return;
     if (ws_id >= s.workspaces.len or ws_id == s.current) return;
     const old_ws = s.current;
@@ -195,7 +201,7 @@ pub fn switchTo(wm: *WM, ws_id: usize) void {
 }
 
 // DWM-STYLE: Move windows off-screen instead of unmapping for flicker-free switching
-fn executeSwitch(wm: *WM, old_ws: usize, new_ws: usize) void {
+fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
     const s = StateManager.get(true) orelse return;
 
     const old_workspace = &s.workspaces[old_ws];
@@ -316,7 +322,7 @@ pub inline fn getCurrentWindowsView() ?[]const u32 {
     return s.workspaces[s.current].windows.items();
 }
 
-pub inline fn getCurrentWorkspace() ?usize {
+pub inline fn getCurrentWorkspace() ?u8 {
     const s = StateManager.get(true) orelse return null;
     return s.current;
 }

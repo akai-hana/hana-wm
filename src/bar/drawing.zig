@@ -1,5 +1,6 @@
 //! Status bar text drawing/rendering using Cairo and Pango
 //! Cairo handles graphics and compositing, Pango handles text layout and fonts
+//! OPTIMIZED: Added metrics caching and color state tracking
 
 const std = @import("std");
 const debug = @import("debug");
@@ -23,6 +24,18 @@ pub const DrawContext = struct {
     
     // Alpha override for bar transparency (0xFFFF = opaque, 0x0000 = fully transparent)
     alpha_override: ?u16 = null,
+    
+    // OPTIMIZATION: Cache font metrics to avoid repeated Pango calls
+    cached_metrics: ?struct {
+        ascent: i16,
+        descent: i16,
+    } = null,
+    
+    // OPTIMIZATION: Track last color to avoid redundant Cairo calls
+    last_color: ?struct {
+        color: u32,
+        alpha: ?u16,
+    } = null,
     
     pub fn init(allocator: std.mem.Allocator, conn: *c.xcb_connection_t, drawable: u32, width: u16, height: u16, dpi: f32) !*DrawContext {
         return initWithVisual(allocator, conn, drawable, width, height, null, 0, dpi);
@@ -69,8 +82,6 @@ pub const DrawContext = struct {
         };
         
         // CRITICAL: Set Pango's DPI resolution to match display
-        // Font sizes in config are in points, which need DPI to convert to pixels
-        // Without this, Pango defaults to 96 DPI, making fonts render at wrong size
         const pango_context = c.pango_layout_get_context(layout);
         c.pango_cairo_context_set_resolution(pango_context, @floatCast(dpi));
         
@@ -100,6 +111,8 @@ pub const DrawContext = struct {
     
     pub fn setAlphaOverride(self: *DrawContext, alpha: ?u16) void {
         self.alpha_override = alpha;
+        // OPTIMIZATION: Invalidate color cache when alpha changes
+        self.last_color = null;
     }
     
     pub fn loadFont(self: *DrawContext, font_name: []const u8) !void {
@@ -121,12 +134,15 @@ pub const DrawContext = struct {
         }
         
         c.pango_layout_set_font_description(self.pango_layout, self.current_font_desc);
+        
+        // OPTIMIZATION: Invalidate cached metrics when font changes
+        self.cached_metrics = null;
+        
         debug.info("Cairo/Pango font loaded: {s}", .{pango_name});
     }
     
     pub fn loadFonts(self: *DrawContext, font_names: []const []const u8) !void {
         // Pango handles font fallback automatically via fontconfig
-        // Just load the first font, Pango will use others as fallbacks
         if (font_names.len > 0) {
             try self.loadFont(font_names[0]);
             
@@ -139,7 +155,6 @@ pub const DrawContext = struct {
     }
     
     /// Helper: Convert RGB color to Cairo RGBA components
-    /// Returns (r, g, b, a) as f64 values in 0.0-1.0 range
     inline fn rgbToRGBA(color: u32, alpha_override: ?u16) struct { f64, f64, f64, f64 } {
         const r = @as(f64, @floatFromInt((color >> 16) & 0xFF)) / 255.0;
         const g = @as(f64, @floatFromInt((color >> 8) & 0xFF)) / 255.0;
@@ -151,33 +166,37 @@ pub const DrawContext = struct {
         return .{ r, g, b, a };
     }
     
-    pub fn fillRect(self: *DrawContext, x: u16, y: u16, width: u16, height: u16, color: u32) void {
-        const r, const g, const b, const a = rgbToRGBA(color, self.alpha_override);
+    /// OPTIMIZATION: Set color only if changed
+    inline fn setColorIfChanged(self: *DrawContext, color: u32) void {
+        if (self.last_color) |last| {
+            if (last.color == color and last.alpha == self.alpha_override) {
+                return; // Color unchanged, skip Cairo call
+            }
+        }
         
+        const r, const g, const b, const a = rgbToRGBA(color, self.alpha_override);
         c.cairo_set_source_rgba(self.ctx, r, g, b, a);
+        self.last_color = .{ .color = color, .alpha = self.alpha_override };
+    }
+    
+    pub fn fillRect(self: *DrawContext, x: u16, y: u16, width: u16, height: u16, color: u32) void {
+        self.setColorIfChanged(color);
+        
         c.cairo_rectangle(self.ctx, @floatFromInt(x), @floatFromInt(y), 
                          @floatFromInt(width), @floatFromInt(height));
         c.cairo_fill(self.ctx);
     }
     
-    /// Draw text at the specified position
-    /// x: horizontal position (left edge)
-    /// y: vertical position (baseline) - use dc.baselineY() for centering
-    /// text: UTF-8 text to render
-    /// color: RGB color (0xRRGGBB format)
     pub fn drawText(self: *DrawContext, x: u16, y: u16, text: []const u8, color: u32) !void {
-        const r, const g, const b, const a = rgbToRGBA(color, self.alpha_override);
-        c.cairo_set_source_rgba(self.ctx, r, g, b, a);
+        self.setColorIfChanged(color);
         
         // Set text in Pango layout
         c.pango_layout_set_text(self.pango_layout, text.ptr, @intCast(text.len));
         
-        // Pango draws from top-left. Y parameter is the baseline position.
-        // Get baseline offset from the layout (works for any font, including fallbacks)
+        // Get baseline offset
         const baseline = c.pango_layout_get_baseline(self.pango_layout);
         const baseline_pixels: f64 = @as(f64, @floatFromInt(baseline)) / @as(f64, @floatFromInt(c.PANGO_SCALE));
         
-        // Move to baseline - baseline_offset = top of layout
         c.cairo_move_to(self.ctx, @floatFromInt(x), @as(f64, @floatFromInt(y)) - baseline_pixels);
         c.pango_cairo_show_layout(self.ctx, self.pango_layout);
     }
@@ -191,19 +210,11 @@ pub const DrawContext = struct {
         c.pango_layout_set_width(self.pango_layout, @intCast(@as(i32, max_width) * c.PANGO_SCALE));
         c.pango_layout_set_ellipsize(self.pango_layout, c.PANGO_ELLIPSIZE_END);
         
-        const r, const g, const b, const a = rgbToRGBA(color, self.alpha_override);
-        c.cairo_set_source_rgba(self.ctx, r, g, b, a);
+        self.setColorIfChanged(color);
         
-        // Pango draws from top-left, but our API uses baseline Y
-        const metrics = c.pango_context_get_metrics(
-            c.pango_layout_get_context(self.pango_layout),
-            self.current_font_desc,
-            null
-        );
-        defer c.pango_font_metrics_unref(metrics);
-        
-        const ascent = c.pango_font_metrics_get_ascent(metrics);
-        const ascent_pixels: f64 = @as(f64, @floatFromInt(ascent)) / @as(f64, @floatFromInt(c.PANGO_SCALE));
+        // OPTIMIZATION: Use cached metrics instead of querying Pango
+        const asc, _ = self.getMetrics();
+        const ascent_pixels: f64 = @floatFromInt(asc);
         
         c.cairo_move_to(self.ctx, @floatFromInt(x), @as(f64, @floatFromInt(y)) - ascent_pixels);
         c.pango_cairo_show_layout(self.ctx, self.pango_layout);
@@ -223,9 +234,12 @@ pub const DrawContext = struct {
         return @intCast(width);
     }
     
-    /// Get ascender and descender metrics in one call (optimization)
-    /// Returns (ascender, descender) both as positive values
+    /// OPTIMIZATION: Get cached metrics or query and cache them
     fn getMetrics(self: *DrawContext) struct { i16, i16 } {
+        if (self.cached_metrics) |m| {
+            return .{ m.ascent, m.descent };
+        }
+        
         const metrics = c.pango_context_get_metrics(
             c.pango_layout_get_context(self.pango_layout),
             self.current_font_desc,
@@ -236,10 +250,13 @@ pub const DrawContext = struct {
         const ascent = c.pango_font_metrics_get_ascent(metrics);
         const descent = c.pango_font_metrics_get_descent(metrics);
         
-        return .{
-            @intCast(@divTrunc(ascent, c.PANGO_SCALE)),
-            @intCast(@divTrunc(descent, c.PANGO_SCALE)),
+        const result = .{
+            @as(i16, @intCast(@divTrunc(ascent, c.PANGO_SCALE))),
+            @as(i16, @intCast(@divTrunc(descent, c.PANGO_SCALE))),
         };
+        
+        self.cached_metrics = .{ .ascent = result[0], .descent = result[1] };
+        return result;
     }
     
     pub fn getAscender(self: *DrawContext) i16 {
@@ -249,30 +266,26 @@ pub const DrawContext = struct {
     
     pub fn getDescender(self: *DrawContext) i16 {
         _, const desc = self.getMetrics();
-        return -@as(i16, desc); // Return as negative
+        return -@as(i16, desc);
     }
     
     pub inline fn flush(self: *DrawContext) void {
         c.cairo_surface_flush(self.surface);
     }
     
-    /// Calculate baseline Y position for vertical centering in the bar
-    /// This uses the primary font's metrics for consistent alignment across all segments
     pub inline fn baselineY(self: *DrawContext, bar_height: u16) u16 {
         const asc, const desc = self.getMetrics();
         const text_height = asc + desc;
         
-        // Calculate padding to vertically center the text
         const total_pad = @as(i32, bar_height) - text_height;
         const top_pad: i32 = @max(0, @divTrunc(total_pad, 2));
         
-        // Baseline Y = top padding + ascender height
         const baseline_y: i32 = top_pad + asc;
         return @intCast(baseline_y);
     }
 };
 
-// Helper to find visual type from visual ID
+// Helper functions (unchanged)
 fn findVisualType(conn: *c.xcb_connection_t, visual_id: u32) ?*c.xcb_visualtype_t {
     const setup = c.xcb_get_setup(conn);
     var screen_iter = c.xcb_setup_roots_iterator(setup);
@@ -310,12 +323,7 @@ fn getDefaultVisualType(screen: *c.xcb_screen_t) *c.xcb_visualtype_t {
     unreachable;
 }
 
-// Convert Xft-style font names to Pango format
-// "monospace:size=10" -> "monospace 10"
-// "DejaVu Sans:size=12:weight=bold" -> "DejaVu Sans Bold 12"
-// "FiraCode Nerd Font Ret" -> "FiraCode Nerd Font Ret" (unchanged)
 fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const u8 {
-    // If it already looks like Pango format (no colons), return as-is
     if (std.mem.indexOfScalar(u8, xft_name, ':') == null) {
         return xft_name;
     }
@@ -343,7 +351,6 @@ fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const 
         }
     }
     
-    // Add slant
     if (slant) |s| {
         if (std.mem.eql(u8, s, "italic") or std.mem.eql(u8, s, "oblique")) {
             try result.append(allocator, ' ');
@@ -351,7 +358,6 @@ fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const 
         }
     }
     
-    // Add weight
     if (weight) |w| {
         if (std.mem.eql(u8, w, "bold")) {
             try result.append(allocator, ' ');
@@ -362,7 +368,6 @@ fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const 
         }
     }
     
-    // Add size
     if (size) |s| {
         try result.append(allocator, ' ');
         try result.appendSlice(allocator, s);
