@@ -396,3 +396,4 @@ fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const 
     
     return result.toOwnedSlice(allocator);
 }
+
