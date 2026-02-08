@@ -4,6 +4,9 @@ const std = @import("std");
 const defs = @import("defs");
 const xcb = defs.xcb;
 
+// Constants for X11 property queries
+const MAX_PROPERTY_LENGTH: u32 = 256;
+
 pub inline fn flush(conn: *xcb.xcb_connection_t) void {
     _ = xcb.xcb_flush(conn);
 }
@@ -130,7 +133,7 @@ pub const WMClass = struct {
 
 pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allocator) ?WMClass {
     const reply = xcb.xcb_get_property_reply(conn,
-        xcb.xcb_get_property(conn, 0, win, xcb.XCB_ATOM_WM_CLASS, xcb.XCB_ATOM_STRING, 0, 256), null) orelse return null;
+        xcb.xcb_get_property(conn, 0, win, xcb.XCB_ATOM_WM_CLASS, xcb.XCB_ATOM_STRING, 0, MAX_PROPERTY_LENGTH), null) orelse return null;
     defer std.c.free(reply);
     
     if (reply.*.format != 8 or reply.*.value_len == 0) return null;
@@ -166,7 +169,7 @@ pub fn supportsWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32) bool {
     const protocols_atom = getAtomCached("WM_PROTOCOLS") catch return false;
     
     const reply = xcb.xcb_get_property_reply(conn,
-        xcb.xcb_get_property(conn, 0, win, protocols_atom, xcb.XCB_ATOM_ATOM, 0, 256), null) orelse return false;
+        xcb.xcb_get_property(conn, 0, win, protocols_atom, xcb.XCB_ATOM_ATOM, 0, MAX_PROPERTY_LENGTH), null) orelse return false;
     defer std.c.free(reply);
     
     if (reply.*.format != 32 or reply.*.value_len == 0) return false;

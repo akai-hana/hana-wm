@@ -74,6 +74,7 @@ fn enterFullscreen(wm: *WM, win: u32, ws: u8) void {
     // OPTIMIZATION: Always use batch for consistency
     var b = batch.Batch.begin(wm) catch {
         applyFullscreenGeometryDirect(wm, win);
+        tiling.invalidateWindowGeometry(win);  // Invalidate after direct apply
         return;
     };
     defer b.deinit();
@@ -83,6 +84,9 @@ fn enterFullscreen(wm: *WM, win: u32, ws: u8) void {
     b.setBorderWidth(win, 0) catch {};
     b.raise(win) catch {};
     b.execute();
+    
+    // OPTIMIZATION: Invalidate cached geometry after fullscreen
+    tiling.invalidateWindowGeometry(win);
 }
 
 fn exitFullscreen(wm: *WM, win: u32, ws: u8) void {
@@ -95,10 +99,13 @@ fn exitFullscreen(wm: *WM, win: u32, ws: u8) void {
 
     if (tiling.isWindowTiled(win)) {
         tiling.retileCurrentWorkspace(wm);
+        // OPTIMIZATION: Invalidate cached geometry after retile
+        tiling.invalidateWindowGeometry(win);
     } else {
         // OPTIMIZATION: Use batch for restore as well
         var b = batch.Batch.begin(wm) catch {
             restoreWindowGeometryDirect(wm.conn, win, saved_geom);
+            tiling.invalidateWindowGeometry(win);  // Invalidate after direct restore
             return;
         };
         defer b.deinit();
@@ -114,6 +121,9 @@ fn exitFullscreen(wm: *WM, win: u32, ws: u8) void {
             b.setBorderWidth(win, saved_geom.border_width) catch {};
         }
         b.execute();
+        
+        // OPTIMIZATION: Invalidate cached geometry after restoration
+        tiling.invalidateWindowGeometry(win);
     }
 }
 

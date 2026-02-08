@@ -29,15 +29,15 @@ pub const Workspace = struct {
         self.windows.deinit();
     }
 
-    pub inline fn contains(self: *const Workspace, win: u32) bool {
+    pub fn contains(self: *const Workspace, win: u32) bool {
         return self.windows.contains(win);
     }
 
-    pub inline fn add(self: *Workspace, win: u32) !void {
+    pub fn add(self: *Workspace, win: u32) !void {
         try self.windows.add(win);
     }
 
-    pub inline fn remove(self: *Workspace, win: u32) bool {
+    pub fn remove(self: *Workspace, win: u32) bool {
         return self.windows.remove(win);
     }
 };
@@ -52,7 +52,7 @@ pub const State = struct {
 
 const StateManager = createModule(State);
 
-inline fn cleanupWorkspaces(workspaces: []Workspace, allocator: std.mem.Allocator) void {
+fn cleanupWorkspaces(workspaces: []Workspace, allocator: std.mem.Allocator) void {
     for (workspaces) |*ws| {
         ws.deinit();
         allocator.free(ws.name);
@@ -186,7 +186,7 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) void {
     }
 }
 
-inline fn markTilingDirty() void {
+fn markTilingDirty() void {
     if (@import("tiling").getState()) |ts| {
         ts.markDirty();
     }
@@ -311,32 +311,32 @@ fn executeSwitchDirect(wm: *WM, old_workspace: *Workspace, screen: *xcb.xcb_scre
 }
 
 // DWM-STYLE: Hide window by moving it off-screen (keeps it mapped)
-inline fn hideWindow(wm: *WM, win: u32) void {
+fn hideWindow(wm: *WM, win: u32) void {
     const off_screen_x: i32 = -4000;
     const values = [_]u32{@bitCast(off_screen_x)};
     _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_X, &values);
 }
 
-pub inline fn getCurrentWindowsView() ?[]const u32 {
+pub fn getCurrentWindowsView() ?[]const u32 {
     const s = StateManager.get(true) orelse return null;
     return s.workspaces[s.current].windows.items();
 }
 
-pub inline fn getCurrentWorkspace() ?u8 {
+pub fn getCurrentWorkspace() ?u8 {
     const s = StateManager.get(true) orelse return null;
     return s.current;
 }
 
-pub inline fn isOnCurrentWorkspace(win: u32) bool {
+pub fn isOnCurrentWorkspace(win: u32) bool {
     const s = StateManager.get(true) orelse return false;
     return s.workspaces[s.current].contains(win);
 }
 
-pub inline fn getState() ?*State {
+pub fn getState() ?*State {
     return StateManager.get(true);
 }
 
-pub inline fn getCurrentWorkspaceObject() ?*Workspace {
+pub fn getCurrentWorkspaceObject() ?*Workspace {
     const s = StateManager.get(true) orelse return null;
     return &s.workspaces[s.current];
 }

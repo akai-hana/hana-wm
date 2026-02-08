@@ -259,21 +259,11 @@ pub const DrawContext = struct {
         return result;
     }
     
-    pub fn getAscender(self: *DrawContext) i16 {
-        const asc, _ = self.getMetrics();
-        return asc;
-    }
-    
-    pub fn getDescender(self: *DrawContext) i16 {
-        _, const desc = self.getMetrics();
-        return -@as(i16, desc);
-    }
-    
-    pub inline fn flush(self: *DrawContext) void {
+    pub fn flush(self: *DrawContext) void {
         c.cairo_surface_flush(self.surface);
     }
     
-    pub inline fn baselineY(self: *DrawContext, bar_height: u16) u16 {
+    pub fn baselineY(self: *DrawContext, bar_height: u16) u16 {
         const asc, const desc = self.getMetrics();
         const text_height = asc + desc;
         
