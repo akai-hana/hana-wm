@@ -1,4 +1,5 @@
 ///! Fullscreen management - MEMORY OPTIMIZED
+/// OPTIMIZED: Direct XCB calls - no batch overhead
 
 const std = @import("std");
 const defs = @import("defs");
@@ -6,7 +7,6 @@ const xcb = defs.xcb;
 const WM = defs.WM;
 const utils = @import("utils");
 const tiling = @import("tiling");
-const batch = @import("batch");
 const workspaces = @import("workspaces");
 const bar = @import("bar");
 const debug = @import("debug");
@@ -23,7 +23,7 @@ pub fn toggleFullscreen(wm: *WM) void {
         if (fs_info.window == win) {
             exitFullscreen(wm, win, current_ws);
         } else {
-            // OPTIMIZATION: Batch the state transition
+            // Transition: exit old fullscreen, enter new
             exitFullscreen(wm, fs_info.window, current_ws);
             enterFullscreen(wm, win, current_ws);
         }
@@ -71,19 +71,20 @@ fn enterFullscreen(wm: *WM, win: u32, ws: u8) void {
     
     bar.setBarState(wm, .hide_fullscreen);
 
-    // OPTIMIZATION: Always use batch for consistency
-    var b = batch.Batch.begin(wm) catch {
-        applyFullscreenGeometryDirect(wm, win);
-        tiling.invalidateWindowGeometry(win);  // Invalidate after direct apply
-        return;
-    };
-    defer b.deinit();
-
+    // Direct XCB calls - no batch overhead
     const rect = getFullscreenRect(wm.screen);
-    b.configure(win, rect) catch {};
-    b.setBorderWidth(win, 0) catch {};
-    b.raise(win) catch {};
-    b.execute();
+    const values = [_]u32{
+        0, // x
+        0, // y
+        rect.width,
+        rect.height,
+        0, // border_width
+    };
+    _ = xcb.xcb_configure_window(wm.conn, win,
+        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
+        xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
+        xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &values);
+    _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     
     // OPTIMIZATION: Invalidate cached geometry after fullscreen
     tiling.invalidateWindowGeometry(win);
@@ -102,74 +103,31 @@ fn exitFullscreen(wm: *WM, win: u32, ws: u8) void {
         // OPTIMIZATION: Invalidate cached geometry after retile
         tiling.invalidateWindowGeometry(win);
     } else {
-        // OPTIMIZATION: Use batch for restore as well
-        var b = batch.Batch.begin(wm) catch {
-            restoreWindowGeometryDirect(wm.conn, win, saved_geom);
-            tiling.invalidateWindowGeometry(win);  // Invalidate after direct restore
-            return;
-        };
-        defer b.deinit();
-        
+        // Direct XCB calls to restore window geometry
         const rect = utils.Rect{
             .x = saved_geom.x,
             .y = saved_geom.y,
             .width = saved_geom.width,
             .height = saved_geom.height,
         };
-        b.configure(win, rect) catch {};
+        
+        var values: [5]u32 = undefined;
+        values[0] = @bitCast(@as(i32, rect.x));
+        values[1] = @bitCast(@as(i32, rect.y));
+        values[2] = rect.width;
+        values[3] = rect.height;
+        
+        var mask: u16 = xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
+            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT;
+        
         if (saved_geom.border_width > 0) {
-            b.setBorderWidth(win, saved_geom.border_width) catch {};
+            values[4] = saved_geom.border_width;
+            mask |= xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH;
         }
-        b.execute();
+        
+        _ = xcb.xcb_configure_window(wm.conn, win, mask, &values);
         
         // OPTIMIZATION: Invalidate cached geometry after restoration
         tiling.invalidateWindowGeometry(win);
     }
-}
-
-// OPTIMIZATION: Direct fallback when batch unavailable
-inline fn applyFullscreenGeometryDirect(wm: *WM, win: u32) void {
-    const rect = getFullscreenRect(wm.screen);
-    const r = rect.clamp();
-    const values = [_]u32{
-        @bitCast(@as(i32, r.x)),
-        @bitCast(@as(i32, r.y)),
-        r.width,
-        r.height,
-        0, // border_width
-    };
-    _ = xcb.xcb_configure_window(wm.conn, win,
-        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
-        xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
-        xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &values);
-    _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
-    utils.flush(wm.conn);
-}
-
-inline fn restoreWindowGeometryDirect(conn: *xcb.xcb_connection_t, win: u32, saved_geom: anytype) void {
-    const rect = utils.Rect{
-        .x = saved_geom.x,
-        .y = saved_geom.y,
-        .width = saved_geom.width,
-        .height = saved_geom.height,
-    };
-    const r = rect.clamp();
-    var values: [5]u32 = undefined;
-    var mask: u16 = xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
-        xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT;
-    var count: usize = 4;
-    
-    values[0] = @bitCast(@as(i32, r.x));
-    values[1] = @bitCast(@as(i32, r.y));
-    values[2] = r.width;
-    values[3] = r.height;
-    
-    if (saved_geom.border_width > 0) {
-        values[4] = saved_geom.border_width;
-        mask |= xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH;
-        count = 5;
-    }
-    
-    _ = xcb.xcb_configure_window(conn, win, mask, values[0..count]);
-    utils.flush(conn);
 }

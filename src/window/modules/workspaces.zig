@@ -7,7 +7,6 @@ const WM = defs.WM;
 const utils = @import("utils");
 const focus = @import("focus");
 const bar = @import("bar");
-const batch = @import("batch");
 const tracking = @import("tracking").tracking;
 const createModule = @import("module").module;
 const debug = @import("debug");
@@ -29,15 +28,15 @@ pub const Workspace = struct {
         self.windows.deinit();
     }
 
-    pub fn contains(self: *const Workspace, win: u32) bool {
+    pub inline fn contains(self: *const Workspace, win: u32) bool {
         return self.windows.contains(win);
     }
 
-    pub fn add(self: *Workspace, win: u32) !void {
+    pub inline fn add(self: *Workspace, win: u32) !void {
         try self.windows.add(win);
     }
 
-    pub fn remove(self: *Workspace, win: u32) bool {
+    pub inline fn remove(self: *Workspace, win: u32) bool {
         return self.windows.remove(win);
     }
 };
@@ -52,7 +51,7 @@ pub const State = struct {
 
 const StateManager = createModule(State);
 
-fn cleanupWorkspaces(workspaces: []Workspace, allocator: std.mem.Allocator) void {
+inline fn cleanupWorkspaces(workspaces: []Workspace, allocator: std.mem.Allocator) void {
     for (workspaces) |*ws| {
         ws.deinit();
         allocator.free(ws.name);
@@ -141,12 +140,15 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) void {
         return;
     }
 
+    // OPTIMIZATION: Get tiling state once if needed
+    const tiling_state = if (wm.config.tiling.enabled) @import("tiling").getState() else null;
+
     const from_ws = s.window_to_workspace.get(win) orelse {
         // Window not tracked, just add to target
         s.workspaces[target_ws].add(win) catch |err| {
             debug.err("Failed to add window to workspace {}: {}", .{ target_ws, err });
             // CRITICAL: If we can't add to workspace, remove from tiling to stay consistent
-            if (@import("tiling").getState()) |ts| {
+            if (tiling_state) |ts| {
                 _ = ts.windows.remove(win);
             }
             return;
@@ -164,7 +166,7 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) void {
         // CRITICAL: Rollback - add back to original workspace to maintain consistency
         s.workspaces[from_ws].add(win) catch {};
         // Also ensure it's removed from tiling if add failed
-        if (@import("tiling").getState()) |ts| {
+        if (tiling_state) |ts| {
             _ = ts.windows.remove(win);
         }
         return;
@@ -172,25 +174,20 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) void {
     s.window_to_workspace.put(win, target_ws) catch {};
 
     // OPTIMIZATION: Simplified visibility handling using dwm approach
-    const is_tiling = wm.config.tiling.enabled;
     if (from_ws == s.current) {
         // Move window off-screen instead of unmapping
         hideWindow(wm, win);
         if (wm.focused_window == win) {
             focus.clearFocus(wm);
         }
-        if (is_tiling) markTilingDirty();
+        if (tiling_state) |ts| ts.markDirty();
     } else if (target_ws == s.current) {
         // Window moving to current workspace - will be shown on next retile
-        if (is_tiling) markTilingDirty();
+        if (tiling_state) |ts| ts.markDirty();
     }
 }
 
-fn markTilingDirty() void {
-    if (@import("tiling").getState()) |ts| {
-        ts.markDirty();
-    }
-}
+// OPTIMIZATION: Removed markTilingDirty() - inlined to reduce function call overhead
 
 pub fn switchTo(wm: *WM, ws_id: u8) void {
     const s = StateManager.get(true) orelse return;
@@ -200,61 +197,61 @@ pub fn switchTo(wm: *WM, ws_id: u8) void {
     executeSwitch(wm, old_ws, ws_id);
 }
 
-// DWM-STYLE: Move windows off-screen instead of unmapping for flicker-free switching
-fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
-    const s = StateManager.get(true) orelse return;
+// Helper: Move window off-screen (DWM-style hiding)
+inline fn hideWindow(wm: *WM, win: u32) void {
+    const values = [_]u32{@bitCast(@as(i32, -4000))};
+    _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_X, &values);
+}
 
+// Helper: Configure fullscreen window
+inline fn configureFullscreen(wm: *WM, info: defs.FullscreenInfo) void {
+    const screen = wm.screen;
+    const values = [_]u32{
+        0, // x
+        0, // y
+        @intCast(screen.width_in_pixels),
+        @intCast(screen.height_in_pixels),
+        0, // border_width
+    };
+    _ = xcb.xcb_configure_window(wm.conn, info.window,
+        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
+        xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
+        xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &values);
+    _ = xcb.xcb_configure_window(wm.conn, info.window,
+        xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+}
+
+// DWM-STYLE: Atomic workspace switching with server grab
+fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
+    const s = StateManager.get(true).?; // Must exist if we got here
     const old_workspace = &s.workspaces[old_ws];
     const new_workspace = &s.workspaces[new_ws];
-    const screen = wm.screen;
 
     // Pre-set focused_window for correct border colors
     wm.focused_window = if (new_workspace.windows.items().len > 0)
-        new_workspace.windows.items()[0]
-    else
-        null;
+        new_workspace.windows.items()[0] else null;
 
     const fs_info = wm.fullscreen.getForWorkspace(new_ws);
 
-    // CRITICAL: Grab server to make switching truly atomic (no intermediate frames)
+    // CRITICAL: Grab server for atomic switching (no intermediate frames)
     _ = xcb.xcb_grab_server(wm.conn);
     defer _ = xcb.xcb_ungrab_server(wm.conn);
 
-    // CRITICAL FIX: Do ALL position changes BEFORE any flush for true atomicity
-    // Step 1: Move old workspace windows off-screen (but don't flush yet!)
-    for (old_workspace.windows.items()) |win| {
-        const off_screen_x: i32 = -4000;
-        const values = [_]u32{@bitCast(off_screen_x)};
-        _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_X, &values);
-    }
+    // Step 1: Hide old workspace windows (no flush yet!)
+    for (old_workspace.windows.items()) |win| hideWindow(wm, win);
 
-    // Step 2: Position new workspace windows on-screen (but don't flush yet!)
+    // Step 2: Position new workspace windows (no flush yet!)
     if (wm.config.tiling.enabled) {
         @import("tiling").retileCurrentWorkspaceNoFlush(wm);
     }
 
-    // Step 3: Configure fullscreen window if present (but don't flush yet!)
-    if (fs_info) |info| {
-        const values = [_]u32{
-            0, // x
-            0, // y
-            @intCast(screen.width_in_pixels), // width
-            @intCast(screen.height_in_pixels), // height
-            0, // border_width
-        };
-        _ = xcb.xcb_configure_window(wm.conn, info.window,
-            xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
-            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
-            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &values);
-        _ = xcb.xcb_configure_window(wm.conn, info.window,
-            xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
-    }
+    // Step 3: Configure fullscreen if present (no flush yet!)
+    if (fs_info) |info| configureFullscreen(wm, info);
 
-    // Step 4: NOW flush everything atomically in one go
-    // This ensures X server processes all position changes simultaneously
-    _ = xcb.xcb_flush(wm.conn);
+    // Step 4: NOW flush everything atomically
+    utils.flush(wm.conn);
 
-    // Bar state management (after everything is positioned)
+    // Bar state management (after positioning complete)
     if (fs_info != null) {
         bar.setBarState(wm, .hide_fullscreen);
         bar.raiseBar();
@@ -269,74 +266,26 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
     bar.markDirty();
 }
 
-// OPTIMIZATION: Direct fallback when batch unavailable
-fn executeSwitchDirect(wm: *WM, old_workspace: *Workspace, screen: *xcb.xcb_screen_t, fs_info: ?defs.FullscreenInfo) void {
-    const conn = wm.conn;
-    
-    // CRITICAL: Grab server for atomic switching
-    _ = xcb.xcb_grab_server(conn);
-    defer _ = xcb.xcb_ungrab_server(conn);
-    
-    // Step 1: Move old windows off-screen (no flush)
-    for (old_workspace.windows.items()) |win| {
-        const off_screen_x: i32 = -4000;
-        const values = [_]u32{@bitCast(off_screen_x)};
-        _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_X, &values);
-    }
-    
-    // Step 2: Position new windows on-screen (ideally no flush)
-    if (wm.config.tiling.enabled) {
-        @import("tiling").retileCurrentWorkspaceNoFlush(wm);
-    }
-    
-    // Step 3: Configure fullscreen window if present (no flush)
-    if (fs_info) |info| {
-        const values = [_]u32{
-            0, // x
-            0, // y
-            @intCast(screen.width_in_pixels), // width
-            @intCast(screen.height_in_pixels), // height
-            0, // border_width
-        };
-        _ = xcb.xcb_configure_window(conn, info.window,
-            xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
-            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
-            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &values);
-        _ = xcb.xcb_configure_window(conn, info.window,
-            xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
-    }
-
-    // Step 4: Atomic flush
-    utils.flush(conn);
-}
-
-// DWM-STYLE: Hide window by moving it off-screen (keeps it mapped)
-fn hideWindow(wm: *WM, win: u32) void {
-    const off_screen_x: i32 = -4000;
-    const values = [_]u32{@bitCast(off_screen_x)};
-    _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_X, &values);
-}
-
-pub fn getCurrentWindowsView() ?[]const u32 {
+pub inline fn getCurrentWindowsView() ?[]const u32 {
     const s = StateManager.get(true) orelse return null;
     return s.workspaces[s.current].windows.items();
 }
 
-pub fn getCurrentWorkspace() ?u8 {
+pub inline fn getCurrentWorkspace() ?u8 {
     const s = StateManager.get(true) orelse return null;
     return s.current;
 }
 
-pub fn isOnCurrentWorkspace(win: u32) bool {
+pub inline fn isOnCurrentWorkspace(win: u32) bool {
     const s = StateManager.get(true) orelse return false;
     return s.workspaces[s.current].contains(win);
 }
 
-pub fn getState() ?*State {
+pub inline fn getState() ?*State {
     return StateManager.get(true);
 }
 
-pub fn getCurrentWorkspaceObject() ?*Workspace {
+pub inline fn getCurrentWorkspaceObject() ?*Workspace {
     const s = StateManager.get(true) orelse return null;
     return &s.workspaces[s.current];
 }

@@ -171,7 +171,7 @@ fn calculateBarHeight(wm: *defs.WM) !u16 {
     loadBarFonts(temp_dc, wm) catch return 24;
     
     const asc, const desc = temp_dc.getMetrics();
-    const font_height: u32 = @intCast(asc - desc);
+    const font_height: u32 = @intCast(asc + desc);  // Both are positive, add them
     const scaled_padding = wm.config.bar.scaledPadding();
     return @intCast(std.math.clamp(font_height + 2 * scaled_padding, 20, 200));
 }

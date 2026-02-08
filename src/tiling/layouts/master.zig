@@ -1,9 +1,9 @@
-//! Master-stack layout with overflow handling
+// ! Master-stack layout with overflow handling
+/// OPTIMIZED: Direct XCB calls - no batch overhead
 
 const std = @import("std");
 const defs = @import("defs");
 const utils = @import("utils");
-const batch = @import("batch");
 const layouts = @import("layouts");
 
 const tiling = @import("tiling");
@@ -24,7 +24,7 @@ inline fn calcMarginedWidth(full_w: u16, left_margin: u16, right_margin: u16) u1
     return if (full_w > total_margin) full_w - total_margin else defs.MIN_WINDOW_DIM;
 }
 
-pub fn tileWithOffset(b: *batch.Batch, state: *State, windows: []const u32, screen_w: u16, screen_h: u16, y_offset: u16) void {
+pub fn tileWithOffset(conn: *defs.xcb.xcb_connection_t, state: *State, windows: []const u32, screen_w: u16, screen_h: u16, y_offset: u16) void {
     const n = windows.len;
     if (n == 0) return;
 
@@ -61,16 +61,16 @@ pub fn tileWithOffset(b: *batch.Batch, state: *State, windows: []const u32, scre
             .width = master_inner_w,
             .height = m_layout.item_h,
         };
-        layouts.configureSafe(b, win, rect);
+        layouts.configureSafe(conn, win, rect);
     }
 
     if (s_count == 0) return;
 
     // Tile stack windows
-    tileStack(b, windows[m_count..], stack_x, y_offset, stack_w, screen_h, m);
+    tileStack(conn, windows[m_count..], stack_x, y_offset, stack_w, screen_h, m);
 }
 
-fn tileStack(b: *batch.Batch, windows: []const u32, x: u16, y_offset: u16, w: u16, h: u16, m: utils.Margins) void {
+fn tileStack(conn: *defs.xcb.xcb_connection_t, windows: []const u32, x: u16, y_offset: u16, w: u16, h: u16, m: utils.Margins) void {
     const s_count: u16 = @intCast(windows.len);
 
     // Calculate how many windows can fit vertically
@@ -82,14 +82,14 @@ fn tileStack(b: *batch.Batch, windows: []const u32, x: u16, y_offset: u16, w: u1
 
     if (s_count <= max_fit) {
         // Simple vertical stack
-        tileStackSimple(b, windows, x, y_offset, h, stack_inner_w, m);
+        tileStackSimple(conn, windows, x, y_offset, h, stack_inner_w, m);
     } else {
         // Overflow: wrap into columns
-        tileStackOverflow(b, windows, x, y_offset, w, h, max_fit, m);
+        tileStackOverflow(conn, windows, x, y_offset, w, h, max_fit, m);
     }
 }
 
-fn tileStackSimple(b: *batch.Batch, windows: []const u32, x: u16, y_offset: u16, h: u16, inner_w: u16, m: utils.Margins) void {
+fn tileStackSimple(conn: *defs.xcb.xcb_connection_t, windows: []const u32, x: u16, y_offset: u16, h: u16, inner_w: u16, m: utils.Margins) void {
     const s_count: u16 = @intCast(windows.len);
     const s_layout = calcColumnLayout(h, s_count, m);
 
@@ -101,11 +101,11 @@ fn tileStackSimple(b: *batch.Batch, windows: []const u32, x: u16, y_offset: u16,
             .width = inner_w,
             .height = s_layout.item_h,
         };
-        layouts.configureSafe(b, win, rect);
+        layouts.configureSafe(conn, win, rect);
     }
 }
 
-fn tileStackOverflow(b: *batch.Batch, windows: []const u32, x: u16, y_offset: u16, w: u16, h: u16, max_fit: u16, m: utils.Margins) void {
+fn tileStackOverflow(conn: *defs.xcb.xcb_connection_t, windows: []const u32, x: u16, y_offset: u16, w: u16, h: u16, max_fit: u16, m: utils.Margins) void {
     const s_count: u16 = @intCast(windows.len);
     const s_layout = calcColumnLayout(h, max_fit, m);
 
@@ -144,7 +144,7 @@ fn tileStackOverflow(b: *batch.Batch, windows: []const u32, x: u16, y_offset: u1
                 .width = row_inner_w,
                 .height = s_layout.item_h,
             };
-            layouts.configureSafe(b, win, rect);
+            layouts.configureSafe(conn, win, rect);
 
             col += 1;
         }

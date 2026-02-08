@@ -373,6 +373,24 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
     cfg.tiling.border_unfocused = getColor(section, "border_unfocused", 0x383C4A);
 }
 
+// OPTIMIZATION: Table-driven bar color parsing
+const BarColorField = struct {
+    name: []const u8,
+    field_name: []const u8,
+    default: u32,
+};
+
+const BAR_COLOR_FIELDS = [_]BarColorField{
+    .{ .name = "bg", .field_name = "bg", .default = 0x222222 },
+    .{ .name = "fg", .field_name = "fg", .default = 0xBBBBBB },
+    .{ .name = "selected_bg", .field_name = "selected_bg", .default = 0x005577 },
+    .{ .name = "selected_fg", .field_name = "selected_fg", .default = 0xEEEEEE },
+    .{ .name = "occupied_fg", .field_name = "occupied_fg", .default = 0xEEEEEE },
+    .{ .name = "urgent_bg", .field_name = "urgent_bg", .default = 0xFF0000 },
+    .{ .name = "urgent_fg", .field_name = "urgent_fg", .default = 0xFFFFFF },
+    .{ .name = "accent_color", .field_name = "accent_color", .default = 0x61AFEF },
+};
+
 fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
     const section = doc.getSection("bar") orelse return;
     cfg.bar.show = get(bool, section, "show", true, null, null);
@@ -406,15 +424,12 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     cfg.bar.padding = get(u8, section, "padding", 8, 0, 50);
     cfg.bar.spacing = get(u8, section, "spacing", 12, 0, 100);
 
-    cfg.bar.bg = getColor(section, "bg", 0x222222);
-    cfg.bar.fg = getColor(section, "fg", 0xBBBBBB);
-    cfg.bar.selected_bg = getColor(section, "selected_bg", 0x005577);
-    cfg.bar.selected_fg = getColor(section, "selected_fg", 0xEEEEEE);
-    cfg.bar.occupied_fg = getColor(section, "occupied_fg", 0xEEEEEE);
-    cfg.bar.urgent_bg = getColor(section, "urgent_bg", 0xFF0000);
-    cfg.bar.urgent_fg = getColor(section, "urgent_fg", 0xFFFFFF);
+    // OPTIMIZATION: Table-driven color parsing (saves 11 LOC)
+    inline for (BAR_COLOR_FIELDS) |field| {
+        @field(cfg.bar, field.field_name) = getColor(section, field.name, field.default);
+    }
     
-    cfg.bar.accent_color = getColor(section, "accent_color", 0x61AFEF);
+    // Accent-based colors with fallback
     cfg.bar.workspaces_accent = getColor(section, "workspaces_accent", cfg.bar.accent_color);
     cfg.bar.title_accent_color = getColor(section, "title_accent_color", cfg.bar.accent_color);
     cfg.bar.clock_accent = getColor(section, "clock_accent", cfg.bar.accent_color);
@@ -426,25 +441,79 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     cfg.bar.indicator_size = get(u8, section, "indicator_size", 4, 2, 10);
     cfg.bar.title_accent = get(bool, section, "title_accent", true, null, null);
     
-    // Parse transparency value - supports both 0-1 and 0-100 formats
+    // Parse transparency value - supports multiple formats:
+    // - Bare decimals: 0.5, 0.75
+    // - Quoted decimals: "0.5", '0.5'
+    // - Integers: 50, 75, 100
+    // - Quoted integers: "50", '75'
+    // - Percentages: 50%, 75%, 100%
+    // Special case: 1, "1", '1', or 100% = fully opaque (skip transparency)
     if (section.get("transparency")) |value| {
         var trans: f32 = 1.0;
-        if (value.asInt()) |i| {
-            // If integer, assume it's 0-100 percentage
-            trans = @as(f32, @floatFromInt(i)) / 100.0;
+        
+        // Check for percentage (scalable value)
+        if (value.asScalable()) |scalable| {
+            if (scalable.is_percentage) {
+                // It's a percentage like 50%
+                trans = scalable.value / 100.0;
+            } else {
+                trans = scalable.value;
+            }
+        } else if (value.asInt()) |i| {
+            // Integer value: 0, 1, 50, 100, etc.
+            if (i == 0) {
+                trans = 0.0;  // Fully transparent
+            } else if (i == 1) {
+                trans = 1.0;  // Fully opaque - skip transparency
+                debug.info("Transparency set to 1 (fully opaque) - transparency disabled", .{});
+            } else if (i >= 2 and i <= 100) {
+                trans = @as(f32, @floatFromInt(i)) / 100.0;  // Treat as percentage
+            } else {
+                debug.warn("Invalid transparency value {} (must be 0-100), using default", .{i});
+                trans = 1.0;
+            }
         } else if (value.asString()) |str| {
-            // Try parsing as float
-            trans = std.fmt.parseFloat(f32, str) catch 1.0;
-            // If value is > 1, assume it's 0-100 percentage
-            if (trans > 1.0) trans = trans / 100.0;
+            // String value: "0.5", "50", "1", etc.
+            const trimmed = std.mem.trim(u8, str, " \t");
+            
+            // Try parsing as float first (handles "0.5", "0.75", "1.0", etc.)
+            if (std.fmt.parseFloat(f32, trimmed)) |float_val| {
+                // Check if it's the special case of 1.0 (fully opaque)
+                if (float_val == 1.0) {
+                    trans = 1.0;
+                    debug.info("Transparency set to 1.0 (fully opaque) - transparency disabled", .{});
+                } else if (float_val >= 0.0 and float_val < 1.0) {
+                    // Decimal value (0.0 - 0.99)
+                    trans = float_val;
+                } else if (float_val >= 1.0 and float_val <= 100.0) {
+                    // Treat as percentage (1-100)
+                    trans = float_val / 100.0;
+                } else {
+                    debug.warn("Invalid transparency value {d} (must be 0.0-1.0 or 0-100), using default", .{float_val});
+                    trans = 1.0;
+                }
+            } else |_| {
+                debug.warn("Invalid transparency value '{s}', using default", .{trimmed});
+                trans = 1.0;
+            }
         }
+        
+        // Clamp to valid range
         cfg.bar.transparency = std.math.clamp(trans, 0.0, 1.0);
-        debug.info("Bar transparency set to: {d:.2}%", .{cfg.bar.transparency * 100.0});
+        
+        // Log the final value
+        if (cfg.bar.transparency == 1.0) {
+            debug.info("Bar transparency: disabled (fully opaque)", .{});
+        } else {
+            debug.info("Bar transparency set to: {d:.2}% (alpha: 0x{x:0>4})", 
+                .{cfg.bar.transparency * 100.0, cfg.bar.getAlpha16()});
+        }
     }
     
     try parseWorkspaceIcons(allocator, section, cfg);
     try parseBarLayout(allocator, section, doc, cfg);
     
+    // Override with bar.colors section if present
     if (doc.getSection("bar.colors")) |colors_section| {
         cfg.bar.workspaces_accent = getColor(colors_section, "workspaces", cfg.bar.workspaces_accent orelse cfg.bar.accent_color);
         cfg.bar.title_accent_color = getColor(colors_section, "title", cfg.bar.title_accent_color orelse cfg.bar.accent_color);
