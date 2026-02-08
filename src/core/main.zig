@@ -1,20 +1,21 @@
 // Main event loop - IMPROVED: No event counter management
 
-const std = @import("std");
-const posix = std.posix;
+const std     = @import("std");
+const posix   = std.posix;
 const builtin = @import("builtin");
 
-const debug = @import("debug");
-const config = @import("config");
-const defs = @import("defs");
+const debug     = @import("debug");
+const config    = @import("config");
+const defs      = @import("defs");
 const xkbcommon = @import("xkbcommon");
-const events = @import("events");
-const input = @import("input");
-const utils = @import("utils");
-const bar = @import("bar");
-const focus = @import("focus");
-const tiling = @import("tiling");
-const dpi = @import("dpi"); // ADD THIS
+const events    = @import("events");
+const input     = @import("input");
+const utils     = @import("utils");
+const bar       = @import("bar");
+const focus     = @import("focus");
+const tiling    = @import("tiling");
+const timer     = @import ("timer");
+const dpi       = @import("dpi"); // ADD THIS
 
 const xcb = defs.xcb;
 const WM = defs.WM;
@@ -50,11 +51,9 @@ fn setupPollFds() !FDs {
     
     const tfd = std.os.linux.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
     if (tfd < 0) return error.TimerFdFailed;
-    const spec = std.os.linux.itimerspec{ .it_interval = .{ .sec = 1, .nsec = 0 }, .it_value = .{ .sec = 1, .nsec = 0 } };
-    if (std.os.linux.timerfd_settime(@intCast(tfd), .{}, &spec, null) < 0) {
-        posix.close(@intCast(tfd));
-        return error.TimerFdSetFailed;
-    }
+    
+    // OPTIMIZATION: Start with timer disabled - will be enabled if clock is visible
+    timer.setTimerFd(@intCast(tfd));
     
     return .{ .signal = @intCast(sfd), .timer = @intCast(tfd) };
 }
@@ -198,6 +197,10 @@ fn handleConfigReload(wm: *WM) !void {
     old_config.deinit(wm.allocator);
     try input.rebuildKeybindMap(wm);
     tiling.reloadConfig(wm);
+    
+    // OPTIMIZATION: Update timer state in case clock visibility changed
+    timer.updateTimerState(wm);
+    
     debug.info("Reload complete", .{});
 }
 
@@ -231,13 +234,17 @@ pub fn main() !void {
     config.resolveKeybindings(user_config.keybindings.items, xkb_state);
     config.finalizeConfig(&user_config, screen);
 
+    // OPTIMIZATION: Pre-allocate WM windows hash map
+    var wm_windows = std.AutoHashMap(u32, void).init(allocator);
+    wm_windows.ensureTotalCapacity(32) catch {}; // Best-effort pre-allocation
+
     var wm = WM{
         .allocator = allocator,
         .conn = conn,
         .screen = screen,
         .root = root,
         .config = user_config,
-        .windows = std.AutoHashMap(u32, void).init(allocator),
+        .windows = wm_windows,
         .focused_window = null,
         .fullscreen = defs.FullscreenState.init(allocator),
         .xkb_state = xkb_state,
@@ -260,6 +267,9 @@ pub fn main() !void {
         if (err != error.BarDisabled) debug.err("Failed to initialize: {}", .{err});
     };
     defer bar.deinit();
+
+    // OPTIMIZATION: Enable timer only if clock is visible
+    timer.updateTimerState(&wm);
 
     try grabKeybindings(&wm);
     try setupExistingWindows(conn, root, allocator);

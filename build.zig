@@ -74,6 +74,9 @@ fn connectAllModules(root: *std.Build.Module, modules: *std.StringHashMap(*std.B
         // Add build_options to this module
         entry.value_ptr.*.addImport("build_options", build_options_module);
         
+        // Add root module as "main" so other modules can import it
+        entry.value_ptr.*.addImport("main", root);
+        
         var import_iter = modules.iterator();
         while (import_iter.next()) |import| {
             if (!std.mem.eql(u8, entry.key_ptr.*, import.key_ptr.*)) {
@@ -130,6 +133,11 @@ fn discoverModules(
 
         // Only process .zig files
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zig")) {
+            continue;
+        }
+
+        // Skip main.zig to avoid conflicts with root module
+        if (std.mem.eql(u8, entry.name, "main.zig")) {
             continue;
         }
 

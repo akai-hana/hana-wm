@@ -32,7 +32,7 @@ spacing = 6  # Space between segments
 # List fonts in priority order: first font is primary, others come next
 # Useful for non-ASCII character support, while retaining a primary ASCII font  
 fonts = [
-    "FiraCode Nerd Font Ret",
+    "FiraCode Nerd Font Propo Ret",
     "Noto Sans CJK JP",
 ]
 

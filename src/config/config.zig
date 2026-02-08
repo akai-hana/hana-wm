@@ -9,7 +9,7 @@ const xkb = @import("xkbcommon");
 // Consolidated color parsing
 pub fn parseColor(str: []const u8) !u32 {
     if (str.len == 0) return error.InvalidColor;
-    const offset: usize = if (str[0] == '#') 1 else if (str.len > 2 and str[0] == '0' and (str[1] == 'x' or str[1] == 'X')) 2 else 0;
+    const offset: u8 = if (str[0] == '#') 1 else if (str.len > 2 and str[0] == '0' and (str[1] == 'x' or str[1] == 'X')) 2 else 0;
     const hex_part = str[offset..];
     if (hex_part.len == 0) return error.InvalidColor;
     const color = std.fmt.parseInt(u32, hex_part, 16) catch return error.InvalidColor;
@@ -55,7 +55,7 @@ fn get(
             }
             return default;
         },
-        u16, u32, usize => blk: {
+        u8, u16, u32, usize => blk: {
             const i = section.getInt(key) orelse return default;
             break :blk @as(T, @intCast(i));
         },
@@ -305,13 +305,13 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !defs.Action {
     if (std.mem.startsWith(u8, cmd, "workspace_")) {
         const num = try std.fmt.parseInt(usize, cmd[10..], 10);
         if (num < 1) return error.InvalidWorkspace;
-        return .{ .switch_workspace = num - 1 };
+        return .{ .switch_workspace = @intCast(num - 1) };
     }
 
     if (std.mem.startsWith(u8, cmd, "move_to_workspace_")) {
         const num = try std.fmt.parseInt(usize, cmd[18..], 10);
         if (num < 1) return error.InvalidWorkspace;
-        return .{ .move_to_workspace = num - 1 };
+        return .{ .move_to_workspace = @intCast(num - 1) };
     }
     return .{ .exec = try allocator.dupe(u8, cmd) };
 }
@@ -365,7 +365,7 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
         cfg.tiling.master_side = defs.MasterSide.fromString(side_str) orelse .left;
     }
 
-    cfg.tiling.master_count = get(usize, section, "master_count", 1, 1, null);
+    cfg.tiling.master_count = get(u8, section, "master_count", 1, 1, null);
     cfg.tiling.master_width = getScalable(section, "master_width", parser.ScalableValue.percentage(50.0));
     cfg.tiling.gaps = getScalable(section, "gaps", parser.ScalableValue.absolute(10.0));
     cfg.tiling.border_width = getScalable(section, "border_width", parser.ScalableValue.absolute(2.0));
@@ -403,8 +403,8 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     }
 
     cfg.bar.font_size = getScalable(section, "font_size", parser.ScalableValue.percentage(10.0));
-    cfg.bar.padding = get(u16, section, "padding", 8, 0, 50);
-    cfg.bar.spacing = get(u16, section, "spacing", 12, 0, 100);
+    cfg.bar.padding = get(u8, section, "padding", 8, 0, 50);
+    cfg.bar.spacing = get(u8, section, "spacing", 12, 0, 100);
 
     cfg.bar.bg = getColor(section, "bg", 0x222222);
     cfg.bar.fg = getColor(section, "fg", 0xBBBBBB);
@@ -423,7 +423,7 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     cfg.allocated_clock_format = try allocator.dupe(u8, clock_fmt);
     cfg.bar.clock_format = cfg.allocated_clock_format.?;
 
-    cfg.bar.indicator_size = get(u16, section, "indicator_size", 4, 2, 10);
+    cfg.bar.indicator_size = get(u8, section, "indicator_size", 4, 2, 10);
     cfg.bar.title_accent = get(bool, section, "title_accent", true, null, null);
     
     // Parse transparency value - supports both 0-1 and 0-100 formats
@@ -538,7 +538,7 @@ fn parseBarLayout(allocator: std.mem.Allocator, section: *const parser.Section, 
 
 fn parseWorkspaces(doc: *const parser.Document, cfg: *defs.Config) void {
     const section = doc.getSection("workspaces") orelse return;
-    cfg.workspaces.count = get(usize, section, "count", 9, defs.MIN_WORKSPACES, null);
+    cfg.workspaces.count = get(u8, section, "count", 9, defs.MIN_WORKSPACES, null);
 }
 
 fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
@@ -578,7 +578,7 @@ fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *d
         while (iter.next()) |class_entry| {
             const rule = defs.Rule{
                 .class_name = try allocator.dupe(u8, class_entry.key_ptr.*),
-                .workspace = ws_num - 1,
+                .workspace = @intCast(ws_num - 1),
             };
             try cfg.workspaces.rules.append(allocator, rule);
         }

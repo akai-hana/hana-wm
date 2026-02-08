@@ -1,4 +1,5 @@
-// Core type definitions - IMPROVED: Pointer tracking instead of event counters
+// Core type definitions - MEMORY OPTIMIZED
+// Using minimal bit-width integers for optimal memory usage
 
 const std = @import("std");
 const dpi = @import("dpi");
@@ -34,7 +35,7 @@ pub fn EnumStringHelper(comptime T: type) type {
     };
 }
 
-// Modifier masks
+// Modifier masks - must be u16 (XCB API requirement)
 pub const MOD_SHIFT: u16 = xcb.XCB_MOD_MASK_SHIFT;
 pub const MOD_LOCK: u16 = xcb.XCB_MOD_MASK_LOCK;
 pub const MOD_CONTROL: u16 = xcb.XCB_MOD_MASK_CONTROL;
@@ -48,16 +49,15 @@ pub const MOD_MASK_RELEVANT: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER
 pub const MIN_WINDOW_DIM: u16 = 50;
 
 // XKB initialization retry parameters
+// NOTE: u64 for constants is fine - they don't consume runtime memory, only compile-time
 pub const XKB_RETRY_DELAY_MS: u64 = 20;
 
 // Workspace limits
-pub const MIN_WORKSPACES: usize = 1;
+// OPTIMIZED: u8 instead of usize - max 255 workspaces is more than enough
+pub const MIN_WORKSPACES: u8 = 1;
 
 // Tiling constraints
 pub const MIN_MASTER_WIDTH: f32 = 0.05;
-
-// REMOVED: Event counter-based focus protection (replaced with intelligent filtering)
-// pub const FOCUS_PROTECTION_EVENT_COUNT: u16 = 50;
 
 pub const Action = union(enum) {
     exec: []const u8,
@@ -66,15 +66,16 @@ pub const Action = union(enum) {
     toggle_layout,
     toggle_layout_reverse,
     toggle_bar_visibility,
-    toggle_bar_position,  // NEW: toggle bar between top and bottom
+    toggle_bar_position,
     increase_master,
     decrease_master,
     increase_master_count,
     decrease_master_count,
     toggle_tiling,
     toggle_fullscreen,
-    switch_workspace: usize,
-    move_to_workspace: usize,
+    // OPTIMIZED: u8 instead of usize - max 255 workspaces
+    switch_workspace: u8,
+    move_to_workspace: u8,
     dump_state,
     emergency_recover,
 
@@ -87,9 +88,9 @@ pub const Action = union(enum) {
 };
 
 pub const Keybind = struct {
-    modifiers: u16,
-    keysym: u32,
-    keycode: ?u8 = null,
+    modifiers: u16,  // XCB API requirement
+    keysym: u32,     // X11 keysym - must be u32
+    keycode: ?u8 = null,  // ALREADY OPTIMAL: 0-255 range
     action: Action,
 };
 
@@ -107,11 +108,12 @@ pub const TilingConfig = struct {
     layout: []const u8 = "master_left",
     master_side: MasterSide = .left,
     master_width: parser.ScalableValue = parser.ScalableValue.percentage(50.0),
-    master_count: usize = 1,
+    // OPTIMIZED: u8 instead of usize - max 255 windows in master is plenty
+    master_count: u8 = 1,
     gaps: parser.ScalableValue = parser.ScalableValue.absolute(10.0),
     border_width: parser.ScalableValue = parser.ScalableValue.absolute(2.0),
-    border_focused: u32 = 0x5294E2,
-    border_unfocused: u32 = 0x383C4A,
+    border_focused: u32 = 0x5294E2,    // RGB color - must be u32
+    border_unfocused: u32 = 0x383C4A,  // RGB color - must be u32
 };
 
 pub const BarVerticalPosition = enum {
@@ -157,10 +159,12 @@ pub const BarConfig = struct {
     font: []const u8 = "monospace:size=10",
     fonts: std.ArrayList([]const u8),
     font_size: parser.ScalableValue = parser.ScalableValue.percentage(10.0),
-    scaled_font_size: u16 = 10, // Computed value after DPI scaling
-    padding: u16 = 8,
-    spacing: u16 = 12,
+    scaled_font_size: u16 = 10, // Can exceed 255 on high DPI - u16 is correct
+    // OPTIMIZED: u8 instead of u16 - max 255 pixels padding/spacing is plenty
+    padding: u8 = 8,
+    spacing: u8 = 12,
 
+    // RGB colors - must be u32
     bg: u32 = 0x222222,
     fg: u32 = 0xBBBBBB,
     selected_bg: u32 = 0x005577,
@@ -175,7 +179,8 @@ pub const BarConfig = struct {
     clock_accent: ?u32 = null,
 
     workspace_icons: std.ArrayList([]const u8),
-    indicator_size: u16 = 4,
+    // OPTIMIZED: u8 instead of u16 - max 255 pixels indicator size
+    indicator_size: u8 = 4,
     title_accent: bool = true,
 
     clock_format: []const u8 = "%Y-%m-%d %H:%M:%S",
@@ -185,8 +190,7 @@ pub const BarConfig = struct {
     // DPI scaling
     scale_factor: f32 = 1.0,
     
-    // NEW: Bar transparency (0.0 = fully transparent, 1.0 = fully opaque)
-    // Accepts both 0-1 (e.g., 0.9) and 0-100 (e.g., 90) formats in config
+    // Bar transparency (0.0 = fully transparent, 1.0 = fully opaque)
     transparency: f32 = 1.0,
 
     pub fn deinit(self: *BarConfig, allocator: std.mem.Allocator) void {
@@ -251,7 +255,8 @@ pub const BarConfig = struct {
 
 pub const Rule = struct {
     class_name: []const u8,
-    workspace: usize,
+    // OPTIMIZED: u8 instead of usize - max 255 workspaces
+    workspace: u8,
 
     pub inline fn deinit(self: *Rule, allocator: std.mem.Allocator) void {
         allocator.free(self.class_name);
@@ -259,7 +264,8 @@ pub const Rule = struct {
 };
 
 pub const WorkspaceConfig = struct {
-    count: usize = 9,
+    // OPTIMIZED: u8 instead of usize - max 255 workspaces
+    count: u8 = 9,
     rules: std.ArrayListUnmanaged(Rule) = .{},
 };
 
@@ -305,26 +311,36 @@ pub const Config = struct {
 };
 
 pub const FullscreenInfo = struct {
-    window: u32,
-    workspace: usize,
+    window: u32,  // XCB window ID - must be u32
+    // OPTIMIZED: u8 instead of usize - max 255 workspaces
+    workspace: u8,
     saved_geometry: struct {
-        x: i16,
+        x: i16,      // Screen coordinates can be negative
         y: i16,
-        width: u16,
+        width: u16,  // Dimensions are always positive
         height: u16,
         border_width: u16,
     },
 };
 
 pub const FullscreenState = struct {
-    per_workspace: std.AutoHashMap(usize, FullscreenInfo),
-    window_to_workspace: std.AutoHashMap(u32, usize),
+    // OPTIMIZED: u8 keys instead of usize for workspace indices
+    per_workspace: std.AutoHashMap(u8, FullscreenInfo),
+    window_to_workspace: std.AutoHashMap(u32, u8),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) FullscreenState {
+        // OPTIMIZATION: Pre-allocate fullscreen hash maps
+        // Typical: 0-2 fullscreen windows per workspace
+        var per_ws = std.AutoHashMap(u8, FullscreenInfo).init(allocator);
+        per_ws.ensureTotalCapacity(4) catch {}; // 4 workspaces with fullscreen
+        
+        var win_to_ws = std.AutoHashMap(u32, u8).init(allocator);
+        win_to_ws.ensureTotalCapacity(4) catch {}; // Match per_workspace
+        
         return .{
-            .per_workspace = std.AutoHashMap(usize, FullscreenInfo).init(allocator),
-            .window_to_workspace = std.AutoHashMap(u32, usize).init(allocator),
+            .per_workspace = per_ws,
+            .window_to_workspace = win_to_ws,
             .allocator = allocator,
         };
     }
@@ -338,16 +354,16 @@ pub const FullscreenState = struct {
         return self.window_to_workspace.contains(win);
     }
 
-    pub inline fn getForWorkspace(self: *const FullscreenState, ws: usize) ?FullscreenInfo {
+    pub inline fn getForWorkspace(self: *const FullscreenState, ws: u8) ?FullscreenInfo {
         return self.per_workspace.get(ws);
     }
 
-    pub fn setForWorkspace(self: *FullscreenState, ws: usize, info: FullscreenInfo) !void {
+    pub fn setForWorkspace(self: *FullscreenState, ws: u8, info: FullscreenInfo) !void {
         try self.per_workspace.put(ws, info);
         try self.window_to_workspace.put(info.window, ws);
     }
 
-    pub fn removeForWorkspace(self: *FullscreenState, ws: usize) void {
+    pub fn removeForWorkspace(self: *FullscreenState, ws: u8) void {
         if (self.per_workspace.get(ws)) |info| {
             _ = self.window_to_workspace.remove(info.window);
         }
@@ -362,17 +378,19 @@ pub const FullscreenState = struct {
 
 pub const DragState = struct {
     active: bool = false,
-    window: u32 = 0,
+    window: u32 = 0,  // XCB window ID - must be u32
     mode: enum { move, resize } = .move,
+    // Screen coordinates can be negative
     start_x: i16 = 0,
     start_y: i16 = 0,
     start_win_x: i16 = 0,
     start_win_y: i16 = 0,
+    // Dimensions are always positive
     start_win_width: u16 = 0,
     start_win_height: u16 = 0,
 };
 
-/// IMPROVED: Focus suppression reason for context-aware behavior
+/// Focus suppression reason for context-aware behavior
 pub const FocusSuppressReason = enum {
     none,              // Normal operation - focus follows mouse
     window_spawn,      // Just spawned a window - don't let cursor steal focus
@@ -383,9 +401,9 @@ pub const WM = struct {
     allocator: std.mem.Allocator,
     conn: *xcb.xcb_connection_t,
     screen: *xcb.xcb_screen_t,
-    root: u32,
+    root: u32,  // XCB window ID - must be u32
     config: Config,
-    windows: std.AutoHashMap(u32, void),
+    windows: std.AutoHashMap(u32, void),  // u32 for XCB window IDs
     focused_window: ?u32 = null,
     fullscreen: FullscreenState,
     xkb_state: ?*xkbcommon.XkbState,
@@ -394,20 +412,13 @@ pub const WM = struct {
     dpi_info: dpi.DpiInfo,
     drag_state: DragState = .{},
     
-    // IMPROVED: Intelligent focus control without event counters
+    // Intelligent focus control
     // Track last known pointer position to detect actual movement vs window repositioning
     last_pointer_x: i16 = 0,
     last_pointer_y: i16 = 0,
     
-    // Context-aware focus suppression (replaces event counters)
-    // Only suppress when we know cursor shouldn't steal focus (spawn, tiling)
-    // Automatically clears on significant mouse movement
+    // Context-aware focus suppression
     suppress_focus_reason: FocusSuppressReason = .none,
-    
-    // REMOVED: Event counter-based approach (unreliable, causes sluggishness)
-    // events_since_programmatic_action: u16 = 999,
-    // last_spawned_window: ?u32 = null,
-    // events_since_last_spawn: u16 = 999,
 
     pub fn deinit(self: *WM) void {
         self.fullscreen.deinit();
