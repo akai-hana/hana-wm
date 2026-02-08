@@ -1,13 +1,14 @@
 //! Grid layout - Arrange windows in optimal grid
+/// OPTIMIZED: Direct XCB calls - no batch overhead
 
 const std = @import("std");
 const defs = @import("defs");
 const utils = @import("utils");
-const batch = @import("batch");
 const layouts = @import("layouts");
 
 const tiling = @import("tiling");
 const State = tiling.State;
+const xcb = defs.xcb;
 
 inline fn calcGridDims(n: usize) struct { cols: u16, rows: u16 } {
     if (n == 0) return .{ .cols = 1, .rows = 1 };
@@ -16,7 +17,7 @@ inline fn calcGridDims(n: usize) struct { cols: u16, rows: u16 } {
     return .{ .cols = cols, .rows = rows };
 }
 
-pub fn tileWithOffset(b: *batch.Batch, state: *State, windows: []const u32, screen_w: u16, screen_h: u16, y_offset: u16) void {
+pub fn tileWithOffset(conn: *xcb.xcb_connection_t, state: *State, windows: []const u32, screen_w: u16, screen_h: u16, y_offset: u16) void {
     const n = windows.len;
     if (n == 0) return;
 
@@ -49,6 +50,6 @@ pub fn tileWithOffset(b: *batch.Batch, state: *State, windows: []const u32, scre
             .width = win_w,
             .height = win_h,
         };
-        layouts.configureSafe(b, win, rect);
+        layouts.configureSafe(conn, win, rect);
     }
 }

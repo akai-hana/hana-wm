@@ -235,7 +235,7 @@ pub const DrawContext = struct {
     }
     
     /// OPTIMIZATION: Get cached metrics or query and cache them
-    fn getMetrics(self: *DrawContext) struct { i16, i16 } {
+    pub fn getMetrics(self: *DrawContext) struct { i16, i16 } {
         if (self.cached_metrics) |m| {
             return .{ m.ascent, m.descent };
         }

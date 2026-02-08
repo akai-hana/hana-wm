@@ -9,7 +9,6 @@ const focus = @import("focus");
 const tiling = @import("tiling");
 const workspaces = @import("workspaces");
 const bar = @import("bar");
-const batch = @import("batch");
 const debug = @import("debug");
 
 const WINDOW_EVENT_MASK = xcb.XCB_EVENT_MASK_ENTER_WINDOW | 
@@ -81,22 +80,15 @@ fn setupWindow(wm: *WM, win: u32, is_current_ws: bool, validated_ws: u8) !void {
 }
 
 // OPTIMIZATION: Extract tiling setup logic
-fn setupTiling(wm: *WM, win: u32, is_current_ws: bool, b: ?*batch.Batch) void {
+fn setupTiling(wm: *WM, win: u32, is_current_ws: bool) void {
     if (!wm.config.tiling.enabled) return;
     
     const border_width = wm.config.tiling.border_width;
-    if (b) |batch_ptr| {
-        batch_ptr.setBorderWidth(win, @intFromFloat(border_width.value)) catch {};
-        if (is_current_ws) {
-            batch_ptr.setBorder(win, wm.config.tiling.border_unfocused) catch {};
-        }
-    } else {
-        _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
-            &[_]u32{@intFromFloat(border_width.value)});
-        if (is_current_ws) {
-            _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_BORDER_PIXEL,
-                &[_]u32{wm.config.tiling.border_unfocused});
-        }
+    _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
+        &[_]u32{@intFromFloat(border_width.value)});
+    if (is_current_ws) {
+        _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_BORDER_PIXEL,
+            &[_]u32{wm.config.tiling.border_unfocused});
     }
     tiling.addWindow(wm, win);
 }
@@ -118,16 +110,10 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     // Query pointer position BEFORE mapping to establish baseline
     if (is_current_ws) queryAndCachePointer(wm);
 
-    var b = batch.Batch.begin(wm) catch {
-        handleMapRequestDirect(wm, win, is_current_ws, validated_ws);
-        return;
-    };
-    defer b.deinit();
-
     setupWindow(wm, win, is_current_ws, validated_ws) catch return;
-    b.map(win) catch {};
-    setupTiling(wm, win, is_current_ws, &b);
-    b.execute();
+    _ = xcb.xcb_map_window(wm.conn, win);
+    setupTiling(wm, win, is_current_ws);
+    utils.flush(wm.conn);
     
     // Focus new window if on current workspace
     if (is_current_ws) {
@@ -140,23 +126,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     bar.markDirty();
 }
 
-inline fn handleMapRequestDirect(wm: *WM, win: u32, is_current_ws: bool, validated_ws: u8) void {
-    if (is_current_ws) queryAndCachePointer(wm);
-    
-    setupWindow(wm, win, is_current_ws, validated_ws) catch return;
-    _ = xcb.xcb_map_window(wm.conn, win);
-    setupTiling(wm, win, is_current_ws, null);
-    utils.flush(wm.conn);
-    
-    if (is_current_ws) {
-        wm.suppress_focus_reason = .window_spawn;
-        focus.setFocus(wm, win, .tiling_operation);
-    } else {
-        grabButtons(wm, win, false);
-    }
-    
-    bar.markDirty();
-}
+// Removed handleMapRequestDirect - no longer needed since we use direct XCB calls everywhere
 
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, wm: *WM) void {
     const win = event.window;

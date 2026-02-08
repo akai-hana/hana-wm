@@ -2,6 +2,8 @@
 # Sequentially pipe all files inside dev/files/ onto dev/codebase/.
 # The purpose of this is to be able to write and replace files more easily.
 
+dev/scripts/single-dir.sh
+
 set -eu
 
 FILES_DIR="dev/files"
@@ -100,3 +102,4 @@ for f in "$FILES_DIR"/* "$FILES_DIR"/.*; do
   write_to_codebase "$f" "$dest"
 done
 
+zig build -freference-trace=20 --color on 2>&1 | sed -E '/failed command:/,/Build Summary:/d'
