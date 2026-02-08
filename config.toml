@@ -103,6 +103,7 @@ Mod+Shift+T = "reload" # Config hot-reload
 Mod+N           = "toggle_tiling" # Enable/disable tiling
 Mod+space       = "toggle_layout" # TODO Cycle layouts
 Mod+Shift+space = "toggle_layout_reverse"
+Mod+Tab         = "swap_master"   # Swap focused window with master (slave→master or master↔slave)
 
 # Layouts
 ## Master-stack

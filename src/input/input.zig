@@ -221,6 +221,7 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
         .increase_master_count => tiling.increaseMasterCount(wm),
         .decrease_master_count => tiling.decreaseMasterCount(wm),
         .toggle_tiling => tiling.toggleTiling(wm),
+        .swap_master => tiling.swapWithMaster(wm),  // NEW: Handle swap_master action
         .dump_state => dumpState(wm),
         .emergency_recover => emergencyRecover(wm),
         .exec => |cmd| try executeShellCommand(wm, cmd),

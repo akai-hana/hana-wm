@@ -299,20 +299,20 @@ fn keyNameToKeysym(name: []const u8) !u32 {
     return if (keysym == xkb.XKB_KEY_NoSymbol) error.UnknownKeyName else keysym;
 }
 
+// OPTIMIZATION: Generic workspace action parser
+fn tryParseWorkspace(command: []const u8, prefix: []const u8) ?u8 {
+    if (!std.mem.startsWith(u8, command, prefix)) return null;
+    const num = std.fmt.parseInt(usize, command[prefix.len..], 10) catch return null;
+    if (num < 1) return null;
+    return @intCast(num - 1);
+}
+
 fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !defs.Action {
     if (ACTION_MAP.get(cmd)) |action| return action;
 
-    if (std.mem.startsWith(u8, cmd, "workspace_")) {
-        const num = try std.fmt.parseInt(usize, cmd[10..], 10);
-        if (num < 1) return error.InvalidWorkspace;
-        return .{ .switch_workspace = @intCast(num - 1) };
-    }
-
-    if (std.mem.startsWith(u8, cmd, "move_to_workspace_")) {
-        const num = try std.fmt.parseInt(usize, cmd[18..], 10);
-        if (num < 1) return error.InvalidWorkspace;
-        return .{ .move_to_workspace = @intCast(num - 1) };
-    }
+    if (tryParseWorkspace(cmd, "workspace_")) |ws| return .{ .switch_workspace = ws };
+    if (tryParseWorkspace(cmd, "move_to_workspace_")) |ws| return .{ .move_to_workspace = ws };
+    
     return .{ .exec = try allocator.dupe(u8, cmd) };
 }
 

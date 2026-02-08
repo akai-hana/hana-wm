@@ -73,6 +73,7 @@ pub const Action = union(enum) {
     decrease_master_count,
     toggle_tiling,
     toggle_fullscreen,
+    swap_master,  // NEW: Swap focused window with master (or move slave to master)
     // OPTIMIZED: u8 instead of usize - max 255 workspaces
     switch_workspace: u8,
     move_to_workspace: u8,

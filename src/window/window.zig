@@ -26,16 +26,9 @@ pub fn grabButtons(wm: *WM, win: u32, focused: bool) void {
     
     if (!focused) {
         _ = xcb.xcb_grab_button(
-            wm.conn,
-            0,
-            win,
-            xcb.XCB_EVENT_MASK_BUTTON_PRESS,
-            xcb.XCB_GRAB_MODE_SYNC,
-            xcb.XCB_GRAB_MODE_SYNC,
-            xcb.XCB_NONE,
-            xcb.XCB_NONE,
-            xcb.XCB_BUTTON_INDEX_ANY,
-            xcb.XCB_MOD_MASK_ANY,
+            wm.conn, 0, win, xcb.XCB_EVENT_MASK_BUTTON_PRESS,
+            xcb.XCB_GRAB_MODE_SYNC, xcb.XCB_GRAB_MODE_SYNC,
+            xcb.XCB_NONE, xcb.XCB_NONE, xcb.XCB_BUTTON_INDEX_ANY, xcb.XCB_MOD_MASK_ANY,
         );
     }
 }
@@ -49,6 +42,63 @@ inline fn validateWorkspace(target_ws: ?u8, current_ws: u8) u8 {
         return current_ws;
     }
     return ws;
+}
+
+// OPTIMIZATION: Extract common pointer query logic
+inline fn queryAndCachePointer(wm: *WM) void {
+    const pointer_query = xcb.xcb_query_pointer(wm.conn, wm.root);
+    const pointer_reply = xcb.xcb_query_pointer_reply(wm.conn, pointer_query, null);
+    if (pointer_reply) |reply| {
+        defer std.c.free(reply);
+        wm.last_pointer_x = reply.*.root_x;
+        wm.last_pointer_y = reply.*.root_y;
+    }
+}
+
+// OPTIMIZATION: Extract off-screen positioning
+inline fn positionOffScreen(conn: *xcb.xcb_connection_t, win: u32) void {
+    const off_screen_x: i32 = -4000;
+    const values = [_]u32{@bitCast(off_screen_x)};
+    _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_X, &values);
+}
+
+// OPTIMIZATION: Extract window setup logic
+fn setupWindow(wm: *WM, win: u32, is_current_ws: bool, validated_ws: u8) !void {
+    _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{WINDOW_EVENT_MASK});
+    
+    if (!is_current_ws) positionOffScreen(wm.conn, win);
+    
+    wm.addWindow(win) catch |err| {
+        debug.err("Failed to track window {x}: {}", .{ win, err });
+        return err;
+    };
+    
+    if (is_current_ws) {
+        workspaces.addWindowToCurrentWorkspace(wm, win);
+    } else {
+        workspaces.moveWindowTo(wm, win, validated_ws);
+    }
+}
+
+// OPTIMIZATION: Extract tiling setup logic
+fn setupTiling(wm: *WM, win: u32, is_current_ws: bool, b: ?*batch.Batch) void {
+    if (!wm.config.tiling.enabled) return;
+    
+    const border_width = wm.config.tiling.border_width;
+    if (b) |batch_ptr| {
+        batch_ptr.setBorderWidth(win, @intFromFloat(border_width.value)) catch {};
+        if (is_current_ws) {
+            batch_ptr.setBorder(win, wm.config.tiling.border_unfocused) catch {};
+        }
+    } else {
+        _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
+            &[_]u32{@intFromFloat(border_width.value)});
+        if (is_current_ws) {
+            _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_BORDER_PIXEL,
+                &[_]u32{wm.config.tiling.border_unfocused});
+        }
+    }
+    tiling.addWindow(wm, win);
 }
 
 pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void {
@@ -65,17 +115,8 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     const validated_ws = validateWorkspace(target_ws, current_ws);
     const is_current_ws = (validated_ws == current_ws);
 
-    // IMPROVED: Query pointer position BEFORE mapping to establish baseline
-    // This allows us to detect if EnterNotify is from window motion vs cursor motion
-    if (is_current_ws) {
-        const pointer_query = xcb.xcb_query_pointer(wm.conn, wm.root);
-        const pointer_reply = xcb.xcb_query_pointer_reply(wm.conn, pointer_query, null);
-        if (pointer_reply) |reply| {
-            defer std.c.free(reply);
-            wm.last_pointer_x = reply.*.root_x;
-            wm.last_pointer_y = reply.*.root_y;
-        }
-    }
+    // Query pointer position BEFORE mapping to establish baseline
+    if (is_current_ws) queryAndCachePointer(wm);
 
     var b = batch.Batch.begin(wm) catch {
         handleMapRequestDirect(wm, win, is_current_ws, validated_ws);
@@ -83,45 +124,13 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     };
     defer b.deinit();
 
-    // Subscribe to enter/leave events
-    _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{WINDOW_EVENT_MASK});
-
-    // Position window off-screen if not on current workspace
-    if (!is_current_ws) {
-        const off_screen_x: i32 = -4000;
-        const values = [_]u32{@bitCast(off_screen_x)};
-        _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_X, &values);
-    }
-    
+    setupWindow(wm, win, is_current_ws, validated_ws) catch return;
     b.map(win) catch {};
-
-    // Track window
-    wm.addWindow(win) catch |err| {
-        debug.err("Failed to track window {x}: {}", .{ win, err });
-    };
-
-    // Add to workspace
-    if (is_current_ws) {
-        workspaces.addWindowToCurrentWorkspace(wm, win);
-    } else {
-        workspaces.moveWindowTo(wm, win, validated_ws);
-    }
-
-    // Set up tiling
-    if (wm.config.tiling.enabled) {
-        b.setBorderWidth(win, @intFromFloat(wm.config.tiling.border_width.value)) catch {};
-        if (is_current_ws) {
-            b.setBorder(win, wm.config.tiling.border_unfocused) catch {};
-        }
-        tiling.addWindow(wm, win);
-    }
-
+    setupTiling(wm, win, is_current_ws, &b);
     b.execute();
     
     // Focus new window if on current workspace
     if (is_current_ws) {
-        // IMPROVED: Set suppression AFTER mapping to prevent spurious EnterNotify
-        // from stealing focus back to windows that get repositioned
         wm.suppress_focus_reason = .window_spawn;
         focus.setFocus(wm, win, .tiling_operation);
     } else {
@@ -132,47 +141,11 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
 }
 
 inline fn handleMapRequestDirect(wm: *WM, win: u32, is_current_ws: bool, validated_ws: u8) void {
-    // Query pointer position before mapping
-    if (is_current_ws) {
-        const pointer_query = xcb.xcb_query_pointer(wm.conn, wm.root);
-        const pointer_reply = xcb.xcb_query_pointer_reply(wm.conn, pointer_query, null);
-        if (pointer_reply) |reply| {
-            defer std.c.free(reply);
-            wm.last_pointer_x = reply.*.root_x;
-            wm.last_pointer_y = reply.*.root_y;
-        }
-    }
-
-    _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{WINDOW_EVENT_MASK});
+    if (is_current_ws) queryAndCachePointer(wm);
     
-    if (!is_current_ws) {
-        const off_screen_x: i32 = -4000;
-        const values = [_]u32{@bitCast(off_screen_x)};
-        _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_X, &values);
-    }
-    
+    setupWindow(wm, win, is_current_ws, validated_ws) catch return;
     _ = xcb.xcb_map_window(wm.conn, win);
-    
-    wm.addWindow(win) catch |err| {
-        debug.err("Failed to track window {x}: {}", .{ win, err });
-    };
-    
-    if (is_current_ws) {
-        workspaces.addWindowToCurrentWorkspace(wm, win);
-    } else {
-        workspaces.moveWindowTo(wm, win, validated_ws);
-    }
-    
-    if (wm.config.tiling.enabled) {
-        _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
-            &[_]u32{wm.config.tiling.border_width});
-        if (is_current_ws) {
-            _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_BORDER_PIXEL,
-                &[_]u32{wm.config.tiling.border_unfocused});
-        }
-        tiling.addWindow(wm, win);
-    }
-    
+    setupTiling(wm, win, is_current_ws, null);
     utils.flush(wm.conn);
     
     if (is_current_ws) {
@@ -199,6 +172,10 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, w
         @intCast(event.border_width),
     };
     _ = xcb.xcb_configure_window(wm.conn, win, event.value_mask, &values);
+    
+    // OPTIMIZATION: Invalidate cached geometry after configuration change
+    tiling.invalidateWindowGeometry(win);
+    
     utils.flush(wm.conn);
 }
 
@@ -253,6 +230,9 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM
     if (wm.config.tiling.enabled) {
         tiling.removeWindow(wm, win);
     }
+    
+    // OPTIMIZATION: Invalidate cached geometry when window is destroyed
+    tiling.invalidateWindowGeometry(win);
 
     workspaces.removeWindow(win);
     wm.removeWindow(win);

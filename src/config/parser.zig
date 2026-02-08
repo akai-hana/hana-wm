@@ -103,27 +103,27 @@ pub const Section = struct {
         self.pairs.deinit();
     }
 
-    pub inline fn get(self: *const Section, key: []const u8) ?Value {
+    pub fn get(self: *const Section, key: []const u8) ?Value {
         return self.pairs.get(key);
     }
 
-    pub inline fn getInt(self: *const Section, key: []const u8) ?i64 {
+    pub fn getInt(self: *const Section, key: []const u8) ?i64 {
         return if (self.get(key)) |v| v.asInt() else null;
     }
 
-    pub inline fn getBool(self: *const Section, key: []const u8) ?bool {
+    pub fn getBool(self: *const Section, key: []const u8) ?bool {
         return if (self.get(key)) |v| v.asBool() else null;
     }
 
-    pub inline fn getString(self: *const Section, key: []const u8) ?[]const u8 {
+    pub fn getString(self: *const Section, key: []const u8) ?[]const u8 {
         return if (self.get(key)) |v| v.asString() else null;
     }
 
-    pub inline fn getColor(self: *const Section, key: []const u8) ?u32 {
+    pub fn getColor(self: *const Section, key: []const u8) ?u32 {
         return if (self.get(key)) |v| v.asColor() else null;
     }
 
-    pub inline fn getScalable(self: *const Section, key: []const u8) ?ScalableValue {
+    pub fn getScalable(self: *const Section, key: []const u8) ?ScalableValue {
         return if (self.get(key)) |v| v.asScalable() else null;
     }
 };
@@ -168,11 +168,11 @@ pub const Document = struct {
         self.sections.deinit();
     }
 
-    pub inline fn getSection(self: *const Document, name: []const u8) ?*const Section {
+    pub fn getSection(self: *const Document, name: []const u8) ?*const Section {
         return self.sections.getPtr(name);
     }
 
-    pub inline fn get(self: *const Document, key: []const u8) ?Value {
+    pub fn get(self: *const Document, key: []const u8) ?Value {
         return self.root.get(key);
     }
 };
@@ -196,28 +196,19 @@ const Parser = struct {
         return .{ .allocator = allocator, .content = content, .pos = 0, .line = 1 };
     }
 
-    // OPTIMIZATION: Inline simple methods
-    inline fn skipWhitespace(self: *Parser) void {
+    // OPTIMIZATION: Unified skip function
+    fn skip(self: *Parser, comptime include_newlines: bool, comptime include_comments: bool) void {
         while (self.pos < self.content.len) {
             switch (self.content[self.pos]) {
                 ' ', '\t', '\r' => self.pos += 1,
+                '\n' => if (include_newlines) { self.pos += 1; self.line += 1; } else break,
+                '#' => if (include_comments) self.skipToNewline() else break,
                 else => break,
             }
         }
     }
 
-    inline fn skipWhitespaceAndNewlines(self: *Parser) void {
-        while (self.pos < self.content.len) {
-            switch (self.content[self.pos]) {
-                ' ', '\t', '\r' => self.pos += 1,
-                '\n' => { self.pos += 1; self.line += 1; },
-                '#' => self.skipLine(),
-                else => break,
-            }
-        }
-    }
-
-    inline fn skipLine(self: *Parser) void {
+    fn skipToNewline(self: *Parser) void {
         while (self.pos < self.content.len and self.content[self.pos] != '\n') {
             self.pos += 1;
         }
@@ -226,6 +217,11 @@ const Parser = struct {
             self.line += 1;
         }
     }
+    
+    // Convenience aliases
+    inline fn skipWhitespace(self: *Parser) void { self.skip(false, false); }
+    inline fn skipWhitespaceAndNewlines(self: *Parser) void { self.skip(true, true); }
+    inline fn skipLine(self: *Parser) void { self.skipToNewline(); }
 
     inline fn peek(self: *const Parser) ?u8 {
         return if (self.pos < self.content.len) self.content[self.pos] else null;

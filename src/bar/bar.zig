@@ -88,15 +88,15 @@ const State = struct {
         self.allocator.destroy(self);
     }
 
-    inline fn markDirty(self: *State) void { self.dirty = true; }
-    inline fn markClockDirty(self: *State) void { self.dirty_clock = true; }
-    inline fn clearDirty(self: *State) void { self.dirty = false; self.dirty_clock = false; }
-    inline fn isDirty(self: *State) bool { return self.dirty or self.dirty_clock; }
+    fn markDirty(self: *State) void { self.dirty = true; }
+    fn markClockDirty(self: *State) void { self.dirty_clock = true; }
+    fn clearDirty(self: *State) void { self.dirty = false; self.dirty_clock = false; }
+    fn isDirty(self: *State) bool { return self.dirty or self.dirty_clock; }
 };
 
 var state: ?*State = null;
 
-inline fn updateClockIfNeeded(s: *State) void {
+fn updateClockIfNeeded(s: *State) void {
     // OPTIMIZATION: Skip clock update if bar is hidden (idle CPU reduction)
     if (!s.visible) return;
     
@@ -107,7 +107,7 @@ inline fn updateClockIfNeeded(s: *State) void {
     }
 }
 
-inline fn sizeFont(alloc: std.mem.Allocator, font: []const u8, size: u16) ![]const u8 {
+fn sizeFont(alloc: std.mem.Allocator, font: []const u8, size: u16) ![]const u8 {
     return if (size > 0) try std.fmt.allocPrint(alloc, "{s}:size={}", .{font, size}) else font;
 }
 
@@ -170,7 +170,8 @@ fn calculateBarHeight(wm: *defs.WM) !u16 {
     defer temp_dc.deinit();
     loadBarFonts(temp_dc, wm) catch return 24;
     
-    const font_height: u32 = @intCast(temp_dc.getAscender() - temp_dc.getDescender());
+    const asc, const desc = temp_dc.getMetrics();
+    const font_height: u32 = @intCast(asc - desc);
     const scaled_padding = wm.config.bar.scaledPadding();
     return @intCast(std.math.clamp(font_height + 2 * scaled_padding, 20, 200));
 }
@@ -338,18 +339,18 @@ pub fn toggleBarPosition(wm: *defs.WM) !void {
     }
 }
 
-pub inline fn getBarWindow() u32 { return if (state) |s| s.window else 0; }
-pub inline fn isBarWindow(win: u32) bool { return if (state) |s| s.window == win else false; }
-pub inline fn markDirty() void { if (state) |s| s.markDirty(); }
-pub inline fn raiseBar() void {
+pub fn getBarWindow() u32 { return if (state) |s| s.window else 0; }
+pub fn isBarWindow(win: u32) bool { return if (state) |s| s.window == win else false; }
+pub fn markDirty() void { if (state) |s| s.markDirty(); }
+pub fn raiseBar() void {
     if (state) |s| _ = xcb.xcb_configure_window(s.conn, s.window,
         xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 }
-pub inline fn getBarHeight() u16 { return if (state) |s| s.height else 0; }
-pub inline fn isBarVisible() bool { return state != null; }
+pub fn getBarHeight() u16 { return if (state) |s| s.height else 0; }
+pub fn isBarVisible() bool { return state != null; }
 
 // OPTIMIZATION: Check if bar is actually visible (not just created)
-pub inline fn isVisible() bool {
+pub fn isVisible() bool {
     if (state) |s| return s.visible;
     return false;
 }
