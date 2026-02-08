@@ -26,7 +26,7 @@ font_size = 24
 #height = 32
 
 # Bar spacing
-padding = 999 # Padding inside segments (around text)
+padding = 99 # Padding inside segments (around text)
 spacing = 6  # Space between segments
 
 # List fonts in priority order: first font is primary, others come next
@@ -39,14 +39,18 @@ fonts = [
 # NEW: Bar transparency (0.0 = fully transparent, 1.0 = fully opaque)
 # Accepts formats: 0.9 or 90 (will be normalized to 0-1)
 # With picom's gaussian blur, the bar will show blurred content behind it
-transparency = 0.5 # %
+# transparency = 50 # %
 
 # Legacy single font option (used if fonts array is not set):
 #font = "FiraCode Nerd Font Ret"
 
 # Main color palette
+## Bar
 bg          = "#0d0d14"
-fg          = "#bbbbbb"
+# fg          = "#bbbbbb"
+fg          = "#ebd9bc"
+
+## Workspace tag indicators
 selected_bg = "#ac3232"
 selected_fg = "#eeeeee"
 occupied_fg = "#eeeeee"
@@ -98,6 +102,12 @@ Mod+Shift+Return = "pkill -9 Xorg" # quit w
 #TODO (implemented but not properly working yet)
 Mod+Shift+F = "kill"
 Mod+Shift+T = "reload" # Config hot-reload
+
+
+# wallpaper
+Mod+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-switch.sh" # start shader wallpaper
+Mod+Shift+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-stop.sh" # stop shader wallpaper
+
 
 # Tiling
 Mod+N           = "toggle_tiling" # Enable/disable tiling

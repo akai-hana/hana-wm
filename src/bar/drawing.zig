@@ -166,8 +166,8 @@ pub const DrawContext = struct {
         return .{ r, g, b, a };
     }
     
-    /// OPTIMIZATION: Set color only if changed
-    inline fn setColorIfChanged(self: *DrawContext, color: u32) void {
+    /// OPTIMIZATION: Set color only if changed (for backgrounds, uses alpha_override)
+    inline fn setColorForBackground(self: *DrawContext, color: u32) void {
         if (self.last_color) |last| {
             if (last.color == color and last.alpha == self.alpha_override) {
                 return; // Color unchanged, skip Cairo call
@@ -179,8 +179,39 @@ pub const DrawContext = struct {
         self.last_color = .{ .color = color, .alpha = self.alpha_override };
     }
     
+    /// OPTIMIZATION: Set color for text (ALWAYS opaque, ignores alpha_override)
+    inline fn setColorForText(self: *DrawContext, color: u32) void {
+        if (self.last_color) |last| {
+            if (last.color == color and last.alpha == null) {
+                return; // Color unchanged, skip Cairo call
+            }
+        }
+        
+        const r, const g, const b, const a = rgbToRGBA(color, null); // Force opaque
+        c.cairo_set_source_rgba(self.ctx, r, g, b, a);
+        self.last_color = .{ .color = color, .alpha = null };
+    }
+    
+    /// Clear the entire surface to fully transparent (for ARGB windows)
+    /// This must be called before drawing when using transparency to properly
+    /// initialize the alpha channel. Without this, the window will be opaque
+    /// regardless of the alpha values used in drawing operations.
+    pub fn clearTransparent(self: *DrawContext) void {
+        c.cairo_save(self.ctx);
+        c.cairo_set_operator(self.ctx, c.CAIRO_OPERATOR_CLEAR);
+        c.cairo_paint(self.ctx);
+        c.cairo_restore(self.ctx);
+        
+        // CRITICAL: Explicitly set operator to OVER for proper alpha blending
+        // Without this, subsequent drawing operations may not blend correctly
+        c.cairo_set_operator(self.ctx, c.CAIRO_OPERATOR_OVER);
+        
+        // OPTIMIZATION: Invalidate color cache after clearing
+        self.last_color = null;
+    }
+    
     pub fn fillRect(self: *DrawContext, x: u16, y: u16, width: u16, height: u16, color: u32) void {
-        self.setColorIfChanged(color);
+        self.setColorForBackground(color);  // Use background color (with transparency)
         
         c.cairo_rectangle(self.ctx, @floatFromInt(x), @floatFromInt(y), 
                          @floatFromInt(width), @floatFromInt(height));
@@ -188,7 +219,7 @@ pub const DrawContext = struct {
     }
     
     pub fn drawText(self: *DrawContext, x: u16, y: u16, text: []const u8, color: u32) !void {
-        self.setColorIfChanged(color);
+        self.setColorForText(color);  // Text is ALWAYS opaque
         
         // Set text in Pango layout
         c.pango_layout_set_text(self.pango_layout, text.ptr, @intCast(text.len));
@@ -210,7 +241,7 @@ pub const DrawContext = struct {
         c.pango_layout_set_width(self.pango_layout, @intCast(@as(i32, max_width) * c.PANGO_SCALE));
         c.pango_layout_set_ellipsize(self.pango_layout, c.PANGO_ELLIPSIZE_END);
         
-        self.setColorIfChanged(color);
+        self.setColorForText(color);  // Text is ALWAYS opaque
         
         // OPTIMIZATION: Use cached metrics instead of querying Pango
         const asc, _ = self.getMetrics();
