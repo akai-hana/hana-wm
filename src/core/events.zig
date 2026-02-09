@@ -9,6 +9,8 @@ const input = @import("input");
 const bar = @import("bar");
 const tiling = @import("tiling");
 const focus = @import("focus");
+const drag = @import("drag");
+const workspaces = @import("workspaces");
 
 const EventHandler = *const fn (event: *anyopaque, wm: *defs.WM) void;
 
@@ -28,7 +30,7 @@ fn handleButtonPressCombined(event: *anyopaque, wm: *defs.WM) void {
     if (ev.child != 0) {
         const has_super = (ev.state & defs.MOD_SUPER) != 0;
         if (has_super and (ev.detail == 1 or ev.detail == 3)) {
-            @import("drag").startDrag(wm, ev.child, ev.detail, ev.root_x, ev.root_y);
+            drag.startDrag(wm, ev.child, ev.detail, ev.root_x, ev.root_y);
         }
     }
 }
@@ -61,12 +63,12 @@ pub inline fn dispatch(event_type: u8, event: *anyopaque, wm: *defs.WM) void {
 
 pub fn initModules(wm: *defs.WM) void {
     input.init(wm);
-    @import("workspaces").init(wm);
+    workspaces.init(wm);
     tiling.init(wm);
 }
 
 pub fn deinitModules(wm: *defs.WM) void {
     tiling.deinit(wm);
-    @import("workspaces").deinit(wm);
+    workspaces.deinit(wm);
     input.deinit(wm);
 }

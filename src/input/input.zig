@@ -8,6 +8,8 @@ const focus = @import("focus");
 const tiling = @import("tiling");
 const workspaces = @import("workspaces");
 const drag = @import("drag");
+const fullscreen = @import("fullscreen");
+const bar = @import("bar");
 const debug = @import("debug");
 const xcb = defs.xcb;
 const WM = defs.WM;
@@ -203,16 +205,16 @@ fn forceDestroyWindow(wm: *WM, win: u32) void {
 
 fn executeAction(action: *const defs.Action, wm: *WM) !void {
     switch (action.*) {
-        .toggle_fullscreen => @import("fullscreen").toggleFullscreen(wm),
+        .toggle_fullscreen => fullscreen.toggleFullscreen(wm),
         .close_window => {
             if (wm.focused_window) |win| closeWindow(wm, win);
         },
         .reload_config => wm.should_reload_config.store(true, .release),
         .toggle_layout => tiling.toggleLayout(wm),
         .toggle_layout_reverse => tiling.toggleLayoutReverse(wm),
-        .toggle_bar_visibility => @import("bar").setBarState(wm, .toggle),
+        .toggle_bar_visibility => bar.setBarState(wm, .toggle),
         .toggle_bar_position => {
-            @import("bar").toggleBarPosition(wm) catch |err| {
+            bar.toggleBarPosition(wm) catch |err| {
                 debug.warn("Failed to toggle bar position: {}", .{err});
             };
         },
