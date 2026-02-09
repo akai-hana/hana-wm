@@ -6,7 +6,7 @@ const drawing    = @import("drawing");
 const workspaces = @import("workspaces");
 const bar        = @import("bar");
 
-const WORKSPACE_WIDTH = bar.WORKSPACE_WIDTH;
+// const WORKSPACE_WIDTH = bar.WORKSPACE_WIDTH;
 
 const static_numbers = blk: {
     var nums: [20][]const u8 = undefined;

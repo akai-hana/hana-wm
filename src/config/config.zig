@@ -609,7 +609,7 @@ fn parseBarLayout(allocator: std.mem.Allocator, section: *const parser.Section, 
 
 fn parseWorkspaces(doc: *const parser.Document, cfg: *defs.Config) void {
     const section = doc.getSection("workspaces") orelse return;
-    cfg.workspaces.count = get(u8, section, "count", 9, defs.MIN_WORKSPACES, null);
+    cfg.workspaces.count = get(u8, section, "count", 9, 1, null); // Minimum 1 workspace required
 }
 
 fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {

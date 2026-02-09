@@ -7,6 +7,7 @@ const WM = defs.WM;
 const utils = @import("utils");
 const focus = @import("focus");
 const bar = @import("bar");
+const tiling = @import("tiling");
 const tracking = @import("tracking").tracking;
 const createModule = @import("module").module;
 const debug = @import("debug");
@@ -242,7 +243,7 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
 
     // Step 2: Position new workspace windows (no flush yet!)
     if (wm.config.tiling.enabled) {
-        @import("tiling").retileCurrentWorkspaceNoFlush(wm);
+        tiling.retileCurrentWorkspace(wm, false); // No flush - atomic operation
     }
 
     // Step 3: Configure fullscreen if present (no flush yet!)

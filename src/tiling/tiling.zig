@@ -238,24 +238,23 @@ pub fn retileIfDirty(wm: *WM) void {
     const s = StateManager.get(true) orelse return;
     if (!s.isDirty()) return;
     s.clearDirty();
-    retileCurrentWorkspaceWithState(wm, s);
+    retileCurrentWorkspaceWithState(wm, s, true);
 }
 
-pub fn retileCurrentWorkspace(wm: *WM) void {
-    retileCurrentWorkspaceInternal(wm, true, null);
+/// Retile the current workspace with optional flush control
+/// flush: true = flush XCB connection after retiling (default for most operations)
+///        false = skip flush (used for atomic workspace switching)
+pub fn retileCurrentWorkspace(wm: *WM, flush: bool) void {
+    retileCurrentWorkspaceInternal(wm, flush, null);
 }
 
-// OPTIMIZATION: Accept state to avoid redundant StateManager.get() calls
-inline fn retileCurrentWorkspaceWithState(wm: *WM, s: *State) void {
-    retileCurrentWorkspaceInternal(wm, true, s);
+/// OPTIMIZATION: Accept state to avoid redundant StateManager.get() calls
+inline fn retileCurrentWorkspaceWithState(wm: *WM, s: *State, flush: bool) void {
+    retileCurrentWorkspaceInternal(wm, flush, s);
 }
 
-// NO-FLUSH variant for atomic workspace switching
-pub fn retileCurrentWorkspaceNoFlush(wm: *WM) void {
-    retileCurrentWorkspaceInternal(wm, false, null);
-}
-
-// OPTIMIZATION: Accept optional state parameter to reduce redundant StateManager.get() calls
+/// OPTIMIZATION: Accept optional state parameter to reduce redundant StateManager.get() calls
+/// Internal implementation - use public API functions instead
 fn retileCurrentWorkspaceInternal(wm: *WM, should_flush: bool, state_opt: ?*State) void {
     const s = state_opt orelse StateManager.get(true) orelse return;
     if (!s.enabled or s.windows.count() == 0) return;
@@ -366,7 +365,7 @@ fn cycleLayout(wm: *WM, forward: bool) void {
         .monocle => .master,
     };
     bar.markDirty();
-    retileCurrentWorkspaceWithState(wm, s); // OPTIMIZATION: Pass state to avoid redundant fetch
+    retileCurrentWorkspaceWithState(wm, s, true); // OPTIMIZATION: Pass state to avoid redundant fetch
 }
 
 pub fn toggleLayout(wm: *WM) void { cycleLayout(wm, true); }
@@ -375,7 +374,7 @@ pub fn toggleLayoutReverse(wm: *WM) void { cycleLayout(wm, false); }
 fn adjustMasterWidth(wm: *WM, delta: f32) void {
     const s = StateManager.get(true) orelse return;
     s.master_width = @max(s.master_width + delta, defs.MIN_MASTER_WIDTH);
-    retileCurrentWorkspaceWithState(wm, s); // OPTIMIZATION: Pass state to avoid redundant fetch
+    retileCurrentWorkspaceWithState(wm, s, true); // OPTIMIZATION: Pass state to avoid redundant fetch
 }
 
 pub fn increaseMasterWidth(wm: *WM) void { adjustMasterWidth(wm, 0.05); }
@@ -391,7 +390,7 @@ fn adjustMasterCount(wm: *WM, delta: isize) void {
     if (new_count != s.master_count) {
         s.master_count = new_count;
         bar.markDirty();
-        retileCurrentWorkspaceWithState(wm, s); // OPTIMIZATION: Pass state to avoid redundant fetch
+        retileCurrentWorkspaceWithState(wm, s, true); // OPTIMIZATION: Pass state to avoid redundant fetch
     }
 }
 
@@ -403,7 +402,7 @@ pub fn toggleTiling(wm: *WM) void {
     s.enabled = !s.enabled;
     bar.markDirty();
     if (s.enabled) {
-        retileCurrentWorkspaceWithState(wm, s); // OPTIMIZATION: Pass state to avoid redundant fetch
+        retileCurrentWorkspaceWithState(wm, s, true); // OPTIMIZATION: Pass state to avoid redundant fetch
     }
 }
 
@@ -439,7 +438,7 @@ pub fn swapWithMaster(wm: *WM) void {
             // Swap master with first slave
             swapWindows(s, idx, master_count);
             s.markDirty();
-            retileCurrentWorkspaceWithState(wm, s); // OPTIMIZATION: Pass state to avoid redundant fetch
+            retileCurrentWorkspaceWithState(wm, s, true); // OPTIMIZATION: Pass state to avoid redundant fetch
             // Keep focus on the window (it's now in slave position)
             focus.setFocus(wm, focused, .tiling_operation);
         }
@@ -448,7 +447,7 @@ pub fn swapWithMaster(wm: *WM) void {
         // Move it to first master position (pushing previous master to slaves)
         moveToFront(s, idx);
         s.markDirty();
-        retileCurrentWorkspaceWithState(wm, s); // OPTIMIZATION: Pass state to avoid redundant fetch
+        retileCurrentWorkspaceWithState(wm, s, true); // OPTIMIZATION: Pass state to avoid redundant fetch
         // Keep focus on the window (it's now in master position)
         focus.setFocus(wm, focused, .tiling_operation);
     }
@@ -519,7 +518,7 @@ pub fn reloadConfig(wm: *WM) void {
     s.border_width = scaled_border_width;
     s.border_focused = wm.config.tiling.border_focused;
     s.border_unfocused = wm.config.tiling.border_unfocused;
-    if (s.enabled) retileCurrentWorkspace(wm);
+    if (s.enabled) retileCurrentWorkspace(wm, true);
 }
 
 pub inline fn getState() ?*State {

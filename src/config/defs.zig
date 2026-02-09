@@ -52,10 +52,6 @@ pub const MIN_WINDOW_DIM: u16 = 50;
 // NOTE: u64 for constants is fine - they don't consume runtime memory, only compile-time
 pub const XKB_RETRY_DELAY_MS: u64 = 20;
 
-// Workspace limits
-// OPTIMIZED: u8 instead of usize - max 255 workspaces is more than enough
-pub const MIN_WORKSPACES: u8 = 1;
-
 // Tiling constraints
 pub const MIN_MASTER_WIDTH: f32 = 0.05;
 
@@ -74,7 +70,7 @@ pub const Action = union(enum) {
     toggle_tiling,
     toggle_fullscreen,
     swap_master,  // NEW: Swap focused window with master (or move slave to master)
-    // OPTIMIZED: u8 instead of usize - max 255 workspaces
+    // OPTIMIZED: u8 for workspace indices - max 255 workspaces
     switch_workspace: u8,
     move_to_workspace: u8,
     dump_state,
@@ -109,7 +105,7 @@ pub const TilingConfig = struct {
     layout: []const u8 = "master_left",
     master_side: MasterSide = .left,
     master_width: parser.ScalableValue = parser.ScalableValue.percentage(50.0),
-    // OPTIMIZED: u8 instead of usize - max 255 windows in master is plenty
+    // OPTIMIZED: u8 for master count - max 255 windows is plenty
     master_count: u8 = 1,
     gaps: parser.ScalableValue = parser.ScalableValue.absolute(10.0),
     border_width: parser.ScalableValue = parser.ScalableValue.absolute(2.0),
@@ -161,7 +157,7 @@ pub const BarConfig = struct {
     fonts: std.ArrayList([]const u8),
     font_size: parser.ScalableValue = parser.ScalableValue.percentage(10.0),
     scaled_font_size: u16 = 10, // Can exceed 255 on high DPI - u16 is correct
-    // OPTIMIZED: u8 instead of u16 - max 255 pixels padding/spacing is plenty
+    // OPTIMIZED: u8 for padding/spacing - max 255 pixels is plenty
     padding: u8 = 8,
     spacing: u8 = 12,
 
@@ -180,7 +176,7 @@ pub const BarConfig = struct {
     clock_accent: ?u32 = null,
 
     workspace_icons: std.ArrayList([]const u8),
-    // OPTIMIZED: u8 instead of u16 - max 255 pixels indicator size
+    // OPTIMIZED: u8 for indicator size - max 255 pixels
     indicator_size: u8 = 4,
     title_accent: bool = true,
 
@@ -242,8 +238,8 @@ pub const BarConfig = struct {
     }
     
     pub inline fn scaledWorkspaceWidth(self: *const BarConfig) u16 {
-        // Base workspace width from bar.zig is 50
-        const base_width: f32 = 50.0;
+        // Base workspace width (50 from bar.zig, reduced to 40 for tighter spacing)
+        const base_width: f32 = 40.0;
         return @intFromFloat(@round(base_width * self.scale_factor));
     }
     
@@ -256,7 +252,7 @@ pub const BarConfig = struct {
 
 pub const Rule = struct {
     class_name: []const u8,
-    // OPTIMIZED: u8 instead of usize - max 255 workspaces
+    // OPTIMIZED: u8 for workspace indices - max 255 workspaces
     workspace: u8,
 
     pub inline fn deinit(self: *Rule, allocator: std.mem.Allocator) void {
@@ -265,7 +261,7 @@ pub const Rule = struct {
 };
 
 pub const WorkspaceConfig = struct {
-    // OPTIMIZED: u8 instead of usize - max 255 workspaces
+    // OPTIMIZED: u8 for workspace count - max 255 workspaces
     count: u8 = 9,
     rules: std.ArrayListUnmanaged(Rule) = .{},
 };
@@ -313,7 +309,7 @@ pub const Config = struct {
 
 pub const FullscreenInfo = struct {
     window: u32,  // XCB window ID - must be u32
-    // OPTIMIZED: u8 instead of usize - max 255 workspaces
+    // OPTIMIZED: u8 for workspace indices - max 255 workspaces
     workspace: u8,
     saved_geometry: struct {
         x: i16,      // Screen coordinates can be negative
@@ -325,7 +321,7 @@ pub const FullscreenInfo = struct {
 };
 
 pub const FullscreenState = struct {
-    // OPTIMIZED: u8 keys instead of usize for workspace indices
+    // OPTIMIZED: u8 keys for workspace indices - max 255 workspaces
     per_workspace: std.AutoHashMap(u8, FullscreenInfo),
     window_to_workspace: std.AutoHashMap(u32, u8),
     allocator: std.mem.Allocator,
