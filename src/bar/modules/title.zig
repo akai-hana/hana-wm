@@ -20,7 +20,7 @@ pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start
     const scaled_padding = config.scaledPadding();
     
     dc.fillRect(start_x, 0, width, height,
-        if (is_focused and config.title_accent) config.getTitleAccent() else config.bg);
+        if (is_focused) config.getTitleAccent() else config.bg);
 
     if (has_windows) {
         const title = try getFocusedWindowTitle(wm, cached_title, cached_title_window, allocator);
@@ -30,7 +30,7 @@ pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start
                 dc.baselineY(height),
                 title, 
                 width -| scaled_padding * 2,
-                if (is_focused and config.title_accent) config.selected_fg else config.fg
+                if (is_focused) config.selected_fg else config.fg
             );
         }
     }

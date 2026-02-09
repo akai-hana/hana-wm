@@ -19,7 +19,7 @@ pub fn setTimerFd(fd: i32) void {
 /// Check if clock should be running based on bar state
 fn shouldClockRun(wm: *defs.WM) bool {
     // Don't run timer if bar is disabled
-    if (!wm.config.bar.show) return false;
+    if (!wm.config.bar.enable) return false;
     
     // Don't run timer if bar is hidden (fullscreen)
     if (!bar.isVisible()) return false;

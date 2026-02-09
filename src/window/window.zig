@@ -81,7 +81,7 @@ fn setupWindow(wm: *WM, win: u32, is_current_ws: bool, validated_ws: u8) !void {
 
 // OPTIMIZATION: Extract tiling setup logic
 fn setupTiling(wm: *WM, win: u32, is_current_ws: bool) void {
-    if (!wm.config.tiling.enabled) return;
+    if (!wm.config.tiling.enable) return;
     
     const border_width = wm.config.tiling.border_width;
     _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
@@ -132,7 +132,7 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, w
     const win = event.window;
     
     if (wm.fullscreen.isFullscreen(win) or 
-        (wm.config.tiling.enabled and tiling.isWindowTiled(win))) return;
+        (wm.config.tiling.enable and tiling.isWindowTiled(win))) return;
 
     const values = [_]u32{
         @intCast(event.x),
@@ -197,7 +197,7 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM
 
     const was_focused = (wm.focused_window == win);
 
-    if (wm.config.tiling.enabled) {
+    if (wm.config.tiling.enable) {
         tiling.removeWindow(wm, win);
     }
     
@@ -209,7 +209,7 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM
 
     if (was_focused) {
         // Retile FIRST to position windows correctly
-        if (wm.config.tiling.enabled) {
+        if (wm.config.tiling.enable) {
             tiling.retileIfDirty(wm);
             utils.flush(wm.conn);
         }

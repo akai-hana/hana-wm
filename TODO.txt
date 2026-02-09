@@ -1,3 +1,5 @@
+make workspace width settable on line 242 in defs.zig: make default (40) 100%, and 150% is 40x1.5, and so on. otherwise, if no percentage placed on config, just set the literal pixel value.
+
 can you make it so that if i set transparency to 100, that all the transparency logic isn't processed at all, and the wm instead renders a regular RGB bar, skipping argb and 32 bits and all that? this is to avoid any unneeded computational processing when the user doesn't want transparency to begin with.
 
 can you please make it so that the entire bar isn't re-rendered every time i switch focus between windows? i want only the title segment to be updated, and specifically, only the text it displays. if there's no focus, display no text and make the bar look as its background color, but by default, make this segment's color the focused color. this way, with each window re-focus, the bar's background color doesn't flicker between its unfocused and focused colors quickly, even if i am switching from one window to another.
