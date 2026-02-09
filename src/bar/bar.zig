@@ -185,7 +185,7 @@ fn calculateBarHeight(wm: *defs.WM) !u16 {
 }
 
 pub fn init(wm: *defs.WM) !void {
-    if (!wm.config.bar.show) return error.BarDisabled;
+    if (!wm.config.bar.enable) return error.BarDisabled;
 
     // Detect DPI and set scale factor
     const dpi_info = try dpi.detect(wm.conn, wm.screen);
@@ -383,16 +383,16 @@ pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
 
 pub fn setBarState(wm: *defs.WM, action: BarAction) void {
     const show = switch (action) {
-        .toggle => blk: { wm.config.bar.show = !wm.config.bar.show; break :blk wm.config.bar.show; },
+        .toggle => blk: { wm.config.bar.enable = !wm.config.bar.enable; break :blk wm.config.bar.enable; },
         .hide_fullscreen => false,
-        .show_fullscreen => wm.config.bar.show,
+        .show_fullscreen => wm.config.bar.enable,
     };
     const reason = switch (action) {
         .toggle => "toggle",
         .hide_fullscreen => "fullscreen",
         .show_fullscreen => "exit fullscreen",
     };
-    if (action != .show_fullscreen or wm.config.bar.show) {
+    if (action != .show_fullscreen or wm.config.bar.enable) {
         setBarVisibility(wm, show, reason);
     }
 }

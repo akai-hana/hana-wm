@@ -189,6 +189,12 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !defs.Config {
 
 fn getDefaultConfig(allocator: std.mem.Allocator) defs.Config {
     var cfg = defs.Config.init(allocator);
+    
+    // Add default tiling layout
+    const default_layout = allocator.dupe(u8, "master_left") catch "master_left";
+    cfg.tiling.layouts.append(allocator, default_layout) catch {};
+    cfg.tiling.layout = if (cfg.tiling.layouts.items.len > 0) cfg.tiling.layouts.items[0] else "master_left";
+    
     for (0..9) |i| {
         const icon = std.fmt.allocPrint(allocator, "{}", .{i + 1}) catch continue;
         cfg.bar.workspace_icons.append(allocator, icon) catch {};
@@ -239,28 +245,38 @@ const ACTION_MAP = std.StaticStringMap(defs.Action).initComptime(.{
 
 fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
     const section = doc.getSection("Keybindings") orelse return;
-    const mod_substitute = section.getString("Mod");
+    const mod_placeholder = section.getString("Mod");
+    const kill_placeholder = section.getString("kill") orelse return;
 
     var iter = section.pairs.iterator();
     while (iter.next()) |entry| {
         if (std.mem.eql(u8, entry.key_ptr.*, "Mod")) continue;
+        if (std.mem.eql(u8, entry.key_ptr.*, "kill")) continue;
+        
         const command = entry.value_ptr.*.asString() orelse continue;
 
-        const keybind_str = if (mod_substitute) |mod|
+        const keybind_str = if (mod_placeholder) |mod|
             try substituteModVariable(allocator, entry.key_ptr.*, mod)
         else
             entry.key_ptr.*;
-        defer if (mod_substitute != null) allocator.free(keybind_str);
+        defer if (mod_placeholder != null) allocator.free(keybind_str);
 
         const parts = parseKeybindString(keybind_str) catch |err| {
             debug.warn("Failed to parse keybind '{s}': {}", .{ keybind_str, err });
             continue;
         };
 
+        // Substitute {kill} placeholder in commands
+        const final_command = if (std.mem.indexOf(u8, command, "{kill}")) |_|
+            try std.mem.replaceOwned(u8, allocator, command, "{kill}", kill_placeholder)
+        else
+            command;
+        defer if (final_command.ptr != command.ptr) allocator.free(final_command);
+
         try cfg.keybindings.append(allocator, .{
             .modifiers = parts.modifiers,
             .keysym = parts.keysym,
-            .action = try parseAction(allocator, command),
+            .action = try parseAction(allocator, final_command),
         });
     }
 }
@@ -355,22 +371,62 @@ pub fn resolveKeybindings(keybindings: anytype, xkb_state: *xkb.XkbState) void {
 
 fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
     const section = doc.getSection("tiling") orelse return;
-    cfg.tiling.enabled = get(bool, section, "enabled", true, null, null);
+    cfg.tiling.enable = get(bool, section, "enable", true, null, null);
 
-    const layout_str = get([]const u8, section, "layout", "master_left", null, null);
-    cfg.allocated_layout = try allocator.dupe(u8, layout_str);
-    cfg.tiling.layout = cfg.allocated_layout.?;
-
-    if (section.getString("master_side")) |side_str| {
-        cfg.tiling.master_side = defs.MasterSide.fromString(side_str) orelse .left;
+    // Parse layouts array (new structure)
+    if (section.get("layouts")) |layouts_value| {
+        if (layouts_value.asArray()) |layouts_arr| {
+            for (cfg.tiling.layouts.items) |layout| allocator.free(layout);
+            cfg.tiling.layouts.clearRetainingCapacity();
+            
+            for (layouts_arr) |layout_item| {
+                if (layout_item.asString()) |layout_str| {
+                    const layout_copy = try allocator.dupe(u8, layout_str);
+                    try cfg.tiling.layouts.append(allocator, layout_copy);
+                }
+            }
+            
+            // Set current layout to first in array if available
+            if (cfg.tiling.layouts.items.len > 0) {
+                cfg.tiling.layout = cfg.tiling.layouts.items[0];
+            }
+        }
+    } else {
+        // Fallback to old "layout" field if layouts array not present
+        const layout_str = get([]const u8, section, "layout", "master_left", null, null);
+        cfg.allocated_layout = try allocator.dupe(u8, layout_str);
+        cfg.tiling.layout = cfg.allocated_layout.?;
+        
+        // Also add to layouts array for consistency
+        const layout_copy = try allocator.dupe(u8, layout_str);
+        try cfg.tiling.layouts.append(allocator, layout_copy);
     }
 
-    cfg.tiling.master_count = get(u8, section, "master_count", 1, 1, null);
-    cfg.tiling.master_width = getScalable(section, "master_width", parser.ScalableValue.percentage(50.0));
-    cfg.tiling.gaps = getScalable(section, "gaps", parser.ScalableValue.absolute(10.0));
-    cfg.tiling.border_width = getScalable(section, "border_width", parser.ScalableValue.absolute(2.0));
-    cfg.tiling.border_focused = getColor(section, "border_focused", 0x5294E2);
-    cfg.tiling.border_unfocused = getColor(section, "border_unfocused", 0x383C4A);
+    // Try parsing from new [tiling.aesthetics] section first
+    const aesthetics_section = doc.getSection("tiling.aesthetics");
+    const aesthetic_src = aesthetics_section orelse section;
+    
+    cfg.tiling.gaps = getScalable(aesthetic_src, "gaps", parser.ScalableValue.absolute(10.0));
+    cfg.tiling.border_width = getScalable(aesthetic_src, "border_width", parser.ScalableValue.absolute(2.0));
+    cfg.tiling.border_focused = getColor(aesthetic_src, "border_focused", 0x5294E2);
+    cfg.tiling.border_unfocused = getColor(aesthetic_src, "border_unfocused", 0x383C4A);
+
+    // Try parsing from new [tiling.layouts.master-stack] section
+    const master_stack_section = doc.getSection("tiling.layouts.master-stack");
+    const master_src = master_stack_section orelse section;
+    
+    // Use new names if in master-stack section, old names otherwise
+    const count_key = if (master_stack_section != null) "count" else "master_count";
+    const side_key = if (master_stack_section != null) "side" else "master_side";
+    const width_key = if (master_stack_section != null) "width" else "master_width";
+    
+    cfg.tiling.master_count = get(u8, master_src, count_key, 1, 1, null);
+    
+    if (master_src.getString(side_key)) |side_str| {
+        cfg.tiling.master_side = defs.MasterSide.fromStringWithAlias(side_str) orelse .left;
+    }
+    
+    cfg.tiling.master_width = getScalable(master_src, width_key, parser.ScalableValue.percentage(50.0));
 }
 
 // OPTIMIZATION: Table-driven bar color parsing
@@ -393,7 +449,7 @@ const BAR_COLOR_FIELDS = [_]BarColorField{
 
 fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
     const section = doc.getSection("bar") orelse return;
-    cfg.bar.show = get(bool, section, "show", true, null, null);
+    cfg.bar.enable = get(bool, section, "enable", true, null, null);
     
     if (section.getString("position")) |pos_str| {
         cfg.bar.vertical_position = defs.BarVerticalPosition.fromString(pos_str) orelse .top;
@@ -439,7 +495,6 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     cfg.bar.clock_format = cfg.allocated_clock_format.?;
 
     cfg.bar.indicator_size = get(u8, section, "indicator_size", 4, 2, 10);
-    cfg.bar.title_accent = get(bool, section, "title_accent", true, null, null);
     
     // Parse transparency value - supports multiple formats:
     // - Bare decimals: 0.5, 0.75

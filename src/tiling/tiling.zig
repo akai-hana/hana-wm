@@ -128,7 +128,7 @@ pub fn init(wm: *WM) void {
     });
     
     const initial_state = State{
-        .enabled = wm.config.tiling.enabled,
+        .enabled = wm.config.tiling.enable,
         .layout = parseLayout(wm.config.tiling.layout),
         .master_side = wm.config.tiling.master_side,
         .master_width = master_width,
@@ -283,9 +283,9 @@ fn retileCurrentWorkspaceInternal(wm: *WM, should_flush: bool, state_opt: ?*Stat
     const screen = wm.screen;
 
     // Calculate available space accounting for bar
-    const bar_height = if (wm.config.bar.show) bar.getBarHeight() else 0;
+    const bar_height = if (wm.config.bar.enable) bar.getBarHeight() else 0;
     const available_height = screen.height_in_pixels - bar_height;
-    const y_offset: u16 = if (wm.config.bar.show and wm.config.bar.vertical_position == .top)
+    const y_offset: u16 = if (wm.config.bar.enable and wm.config.bar.vertical_position == .top)
         bar_height
     else
         0;
@@ -509,7 +509,7 @@ pub fn reloadConfig(wm: *WM) void {
         break :blk @min(0.95, @max(defs.MIN_MASTER_WIDTH, ratio));
     } else master_width_value;
     
-    s.enabled = wm.config.tiling.enabled;
+    s.enabled = wm.config.tiling.enable;
     s.layout = parseLayout(wm.config.tiling.layout);
     s.master_side = wm.config.tiling.master_side;
     s.master_width = master_width;

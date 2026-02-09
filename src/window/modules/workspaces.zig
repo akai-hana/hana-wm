@@ -142,7 +142,7 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) void {
     }
 
     // OPTIMIZATION: Get tiling state once if needed
-    const tiling_state = if (wm.config.tiling.enabled) @import("tiling").getState() else null;
+    const tiling_state = if (wm.config.tiling.enable) @import("tiling").getState() else null;
 
     const from_ws = s.window_to_workspace.get(win) orelse {
         // Window not tracked, just add to target
@@ -242,7 +242,7 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
     for (old_workspace.windows.items()) |win| hideWindow(wm, win);
 
     // Step 2: Position new workspace windows (no flush yet!)
-    if (wm.config.tiling.enabled) {
+    if (wm.config.tiling.enable) {
         tiling.retileCurrentWorkspace(wm, false); // No flush - atomic operation
     }
 

@@ -1,6 +1,8 @@
 ### akai_hana's personal hana WM config.toml :-) ###
 
 ### NOTES:
+### (configuration tips & tricks)
+#
 # + All parameters (X =) and values (= Y) are CAPS-insensitive. 
 #   - _It boils down to preference. Style them however you want :9_
 #
@@ -12,81 +14,78 @@
 #   - Any percentage value can be N% or %N, decimal or not (N.NN%),
 #     and if decimal, use a dot or a comma (N.N%/N,N%).
 #
+# + Any string can be wrapped with "" or ''
+
 # + HEX code values can be set with either of the following formats:
-#   "#RRGGBB" / '#RRGGBB' / RRGGBB / 0xRRGGBB
-#   - (Any string can be wrapped with "" or '')
+#   (RRGGBB/rrggbb, ""/'') "#RRGGBB" / RRGGBB / 0xRRGGBB
 
 [tiling]
-enabled = true #TODO: change "enabled" to "enable"
-layout = "master" # master_left / monocle / grid / fibonacci
+enable = true
 
-# Aesthetics
-#TODO: replace with [tiling.aesthetics]
+# Enabled layouts
+## First is default; cycling follows order
+#TODO: make this work (currently this isn't respected;
+# only the first layout is set as a default, but any of the following aren't
+# applied to the order, and commenting out any layout doesn't stop it from appearing
+# as an option while cycling
+layouts = [
+    "monocle",
+    "master-stack",
+    "grid",
+    # "fibonacci", # NOT YET IMPLEMENTED
+]
+
+[tiling.aesthetics]
 gaps             = 2.5%
 border_width     = 1% 
 border_focused   = '#ac3232'
 border_unfocused = '#52263e' # Letters can also be MAJUS/minus
 
-#TODO: make new [tiling.layouts] section, where the user can set the available layouts through an array.
-# the first element in the array is the bootup default, while cycling forward will move from the top to
-# the bottom of the array.
-# ej.
-
-# layouts = [
-# 	master-stack,
-# 	monocle,
-# 	grid,
-# ]
-
-# Tiling layouts
-## Master-stack
-#TODO: convert previous 2 lines to [tiling.layouts.master-stack], then replace master_count with count, master_side with side, and so on, instead of appending "master_" to each parameter.
-master_count = 1      # Number of windows in master area (master stack size)
-master_side  = "left" # "Left"/"Right" / 'L'/'R' #TODO: implement 'L'/'R' value recognition
-master_width = 50%    # N/N% (5%-95% (suggestion of presentation))
+# Layout-specific settings
+[tiling.layouts.master-stack]
+count = 1        # Number of windows in master area (master stack size)
+side  = "left"   # "left"/"right" / 'L'/'R'
+width = 50%      # N/N% (5%-95% suggested range)
 
 [bar]
-show      = true #TODO: change "show" to "enable"
-position  = "bottom" # top/bottom; can be swapped on runtime
+enable   = true
+position = "bottom" # top/bottom; can be swapped on runtime
 
-# Font array; priority order: first font is primary, others come next when first doesn't support some character.
+# Font array
+# Priority order: first font is primary, others come next when first doesn't support some character.
 # Useful for non-ASCII character support, while retaining a primary ASCII font.
 fonts = [
     "FiraCode Nerd Font Propo Ret",
-    "Noto Sans CJK JP",
+    "Noto Sans CJK JP", # to render japanese characters
 ]
 
-# Legacy single font option (used if fonts array is not set):
-#font = "FiraCode Nerd Font Ret" #TODO: remove this legacy feature; user can just set an array with one element.
+# Font size as percentage of bar height (e.g., 16% = font takes up 16% of the bar's vertical space)
+font_size = 26%
 
-font_size = 16% #TODO: add a comment on what this line does. in specific, what's the ratio of this percentage-based value (between what and what?)
+# Spacing between each segment/module inside the bar
+segment_spacing = 8%
 
-# Workspace labels/icons
+# Workspace labels/icons (1-N)
 icons = ["あ", "か", "い", "は", "な", "つ", "ん", "で"]
-segment_spacing = 8% # Spacing between each segment/module inside the bar
-#TODO: what's the difference between setting segment_spacing as N and as N%? i notice no real difference...
-# add a comment explaining so. if there truly is no difference, then fix it, as it'd make no sense then.
+
+#TODO: add workspace width parameter, that modifies line 242 in defs.zig: make default (40) 100%, and 150% is 40x1.5, and so on. otherwise, if no percentage placed on config, just set the literal pixel value.
 
 # Bar height
 ## Auto-adapts to font size by default. Uncomment to set a fixed height instead:
-#height = 32 #TODO: enable a percentage value, where 100% is the auto-calculated size, and 150% would be 1.5x times the size of that, for example.
+## TODO: Future enhancement: percentage values where 100% = auto-calculated size, 150% = 1.5x auto size
+height = 40
 
-# Bar spacing
-padding = 99 # Padding inside segments (around text)
-#TODO: i'm still not sure what padding actually does. can you add a comment here clarifying what it does?
+# Padding inside segments (horizontal space around text content within each segment)
+padding = 99
 
-# Bar transparency (0.0 = fully transparent, 1.0 = fully opaque)
-# Accepts formats: 0.9 or 90 (will be normalized to 0-1)
+# Bar transparency (0 = fully transparent, 1 = fully opaque)
 # With picom's gaussian blur, the bar will show blurred content behind it
-# transparency = 50 # %
-transparency = 0% # [0 - 1] / [0% - 100%]
-#TODO: restrict ranges to (0-1) or (0%-100%). currently, "50" sets it to 50% transparency, even though N (without %) is only intended as a 0.NN range.
+transparency = 0% # [0.0 - 1.0] / [0% - 100%]
 
 # Main color palette
 ## Bar
-bg          = "#0d0d14"
-# fg          = "#bbbbbb"
-fg          = "#ebd9bc"
+bg = "#0d0d14"
+fg = "#ebd9bc"
 
 ## Workspace tag indicators
 selected_bg = "#ac3232"
@@ -95,16 +94,19 @@ occupied_fg = "#eeeeee"
 urgent_bg   = "#FF0000"
 urgent_fg   = "#FFFFFF"
 
-indicator_size = 1
+#TODO: implement the logic for the wm to recognize the following parameter inside this config (100% -> 4, any other percentage multiplies this 4 value)
+# indicator_size = 100%
 
 # Accent colors for bar segments
 # Default accent for all segments
-title_accent = true #TODO: remove this parameter, and all its related logic, as it is useless; the user could just set the title accent hex code to the same hexcode of the background color.
-accent_color = "#ac3232"
+# accent_color = "#ac3232" #TODO: rename "accent_color" to "accent", move under [bar.colors]
+accent_color = "#b9c0a8"
 
 # Per-segment accent colors (overrides accent_color)
-# [bar.colors]
+[bar.colors]
 # workspaces = "#ac3232"
+workspaces = "#b9c0a8" #TODO: why doesn't this work? no matter what color i place, it won't change. pending to fix.
+
 # title      = "#ac3232"
 # clock      = "#ac3232"
 
@@ -132,32 +134,29 @@ Mod = "Super" # Super/Mod4 / Alt/Mod1
 
 # WM interactions
 Mod+F = "toggle_fullscreen"
-Mod+Shift+Return = "pkill -9 Xorg" # quit w
-#TODO (implemented but not properly working yet)
+Mod+Shift+Return = "kill Xorg" # quit wm
 Mod+Shift+F = "kill"
 Mod+Shift+T = "reload" # Config hot-reload
-
 
 # wallpaper
 Mod+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-switch.sh" # start shader wallpaper
 Mod+Shift+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-stop.sh" # stop shader wallpaper
 
-
 # Tiling
 Mod+N           = "toggle_tiling" # Enable/disable tiling
-Mod+space       = "toggle_layout" # TODO Cycle layouts
-Mod+Shift+space = "toggle_layout_reverse"
+Mod+space       = "toggle_layout" # Cycle layouts forward
+Mod+Shift+space = "toggle_layout_reverse" # Cycle layouts backward
 Mod+Tab         = "swap_master"   # Swap focused window with master (slave→master or master↔slave)
 
 # Layouts
 ## Master-stack
-Mod+H           = "decrease_master" # area TODO
-Mod+L           = "increase_master" # area
-Mod+comma       = "increase_master_count"
-Mod+period      = "decrease_master_count" 
+Mod+H      = "decrease_master" 
+Mod+L      = "increase_master" # Increase master area width
+Mod+comma  = "increase_master_count"
+Mod+period = "decrease_master_count" 
 
 # Workspaces
-#TODO make workspace array
+# Switch to workspace N
 Mod+1 = "workspace_1"
 Mod+2 = "workspace_2"
 Mod+3 = "workspace_3"
@@ -167,7 +166,7 @@ Mod+W = "workspace_6"
 Mod+E = "workspace_7"
 Mod+R = "workspace_8"
 
-#TODO automatically add "Shift" to previous binds for the "move to workspace" binds
+# Move window to workspace N
 Mod+Shift+1 = "move_to_workspace_1"
 Mod+Shift+2 = "move_to_workspace_2"
 Mod+Shift+3 = "move_to_workspace_3"
@@ -187,31 +186,29 @@ Mod+P = "rofi -show drun"
 # Program binds
 kill = "pkill -9" # program kill placeholder
 
-#TODO: replace "pkill -9" with the kill placeholder
 ## Misc
 Mod+A       = "MOZ_USE_XINPUT2=1 firefox"
-Mod+Shift+A = "pkill -9 firefox"
+Mod+Shift+A = "{kill} firefox"
 
 Mod+s       = "flatpak run org.equicord.equibop"
-Mod+Shift+S = "pkill -9 equibop"
+Mod+Shift+S = "{kill} equibop"
 
 Mod+d       = "ghostty"
-Mod+Shift+D = "pkill -9 ghostty"
+Mod+Shift+D = "{kill} ghostty"
 
 # z -> osu
 
-Mod+X = "~/Games/t-client/DDNet"
-Mod+Shift+X = "pkill -9 DDNet"
+Mod+X       = "~/Games/t-client/DDNet"
+Mod+Shift+X = "{kill} DDNet"
 
-Mod+c = "flatpak run com.valvesoftware.Steam"
-Mod+Shift+C
+Mod+c       = "flatpak run com.valvesoftware.Steam"
+Mod+Shift+C = "{kill} steam"
 
 Mod+V       = "flatpak run com.github.th_ch.youtube_music"
-Mod+Shift+V = "pkill -9 youtube-music"
+Mod+Shift+V = "{kill} youtube-music"
 
 # Emergency/Debug
-#TODO not yet working
-#Mod+Shift+d      = "dump_state"       # Print debug info
+#TODO: this does nothing? either figure out if it's dead code, or make it work, or outright remove it.
 Mod+Shift+Escape = "emergency_recover" # Emergency recovery mode
 
 # Workspace rules
@@ -241,7 +238,6 @@ xeyes
 
 [workspace.rules.7] # Media
 freetube
-#mpv
 gimp
 
 [workspace.rules.8] # torrenting

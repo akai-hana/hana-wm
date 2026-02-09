@@ -98,11 +98,24 @@ pub const MasterSide = enum {
     const Helper = EnumStringHelper(MasterSide);
     pub const fromString = Helper.fromString;
     pub const toString = Helper.toString;
+    
+    // Support 'L'/'R' aliases in addition to full names
+    pub fn fromStringWithAlias(str: []const u8) ?MasterSide {
+        var buf: [16]u8 = undefined;
+        if (str.len > buf.len) return null;
+        
+        const lower = std.ascii.lowerString(&buf, str);
+        
+        if (std.mem.eql(u8, lower, "l") or std.mem.eql(u8, lower, "left")) return .left;
+        if (std.mem.eql(u8, lower, "r") or std.mem.eql(u8, lower, "right")) return .right;
+        return null;
+    }
 };
 
 pub const TilingConfig = struct {
-    enabled: bool = true,
+    enable: bool = true,
     layout: []const u8 = "master_left",
+    layouts: std.ArrayList([]const u8),  // Available layouts in cycle order
     master_side: MasterSide = .left,
     master_width: parser.ScalableValue = parser.ScalableValue.percentage(50.0),
     // OPTIMIZED: u8 for master count - max 255 windows is plenty
@@ -111,6 +124,13 @@ pub const TilingConfig = struct {
     border_width: parser.ScalableValue = parser.ScalableValue.absolute(2.0),
     border_focused: u32 = 0x5294E2,    // RGB color - must be u32
     border_unfocused: u32 = 0x383C4A,  // RGB color - must be u32
+    
+    pub fn deinit(self: *TilingConfig, allocator: std.mem.Allocator) void {
+        for (self.layouts.items) |layout| {
+            allocator.free(layout);
+        }
+        self.layouts.deinit(allocator);
+    }
 };
 
 pub const BarVerticalPosition = enum {
@@ -150,7 +170,7 @@ pub const BarLayout = struct {
 };
 
 pub const BarConfig = struct {
-    show: bool = true,
+    enable: bool = true,
     vertical_position: BarVerticalPosition = .top,
     height: ?u16 = null,
     font: []const u8 = "monospace:size=10",
@@ -178,7 +198,6 @@ pub const BarConfig = struct {
     workspace_icons: std.ArrayList([]const u8),
     // OPTIMIZED: u8 for indicator size - max 255 pixels
     indicator_size: u8 = 4,
-    title_accent: bool = true,
 
     clock_format: []const u8 = "%Y-%m-%d %H:%M:%S",
 
@@ -238,7 +257,7 @@ pub const BarConfig = struct {
     }
     
     pub inline fn scaledWorkspaceWidth(self: *const BarConfig) u16 {
-        // Base workspace width (50 from bar.zig, reduced to 40 for tighter spacing)
+        // Base workspace width TODO: make available as a settable width in config.toml
         const base_width: f32 = 40.0;
         return @intFromFloat(@round(base_width * self.scale_factor));
     }
@@ -268,7 +287,7 @@ pub const WorkspaceConfig = struct {
 
 pub const Config = struct {
     keybindings: std.ArrayListUnmanaged(Keybind) = .{},
-    tiling: TilingConfig = .{},
+    tiling: TilingConfig,
     workspaces: WorkspaceConfig = .{},
     bar: BarConfig,
     allocator: std.mem.Allocator,
@@ -279,6 +298,18 @@ pub const Config = struct {
 
     pub fn init(allocator: std.mem.Allocator) Config {
         return .{
+            .tiling = TilingConfig{
+                .layouts = std.ArrayList([]const u8){},
+                .layout = undefined,  // Will be set after layouts are loaded
+                .master_side = .left,
+                .master_width = parser.ScalableValue.percentage(50.0),
+                .master_count = 1,
+                .gaps = parser.ScalableValue.absolute(10.0),
+                .border_width = parser.ScalableValue.absolute(2.0),
+                .border_focused = 0x5294E2,
+                .border_unfocused = 0x383C4A,
+                .enable = true,
+            },
             .bar = BarConfig{
                 .workspace_icons = std.ArrayList([]const u8){},
                 .fonts = std.ArrayList([]const u8){},
@@ -300,6 +331,7 @@ pub const Config = struct {
         self.workspaces.rules.deinit(allocator);
 
         self.bar.deinit(allocator);
+        self.tiling.deinit(allocator);
 
         if (self.allocated_font) |f| allocator.free(f);
         if (self.allocated_layout) |l| allocator.free(l);
