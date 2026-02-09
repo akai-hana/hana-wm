@@ -99,7 +99,7 @@ fn exitFullscreen(wm: *WM, win: u32, ws: u8) void {
     bar.setBarState(wm, .show_fullscreen);
 
     if (tiling.isWindowTiled(win)) {
-        tiling.retileCurrentWorkspace(wm);
+        tiling.retileCurrentWorkspace(wm, true);
         // OPTIMIZATION: Invalidate cached geometry after retile
         tiling.invalidateWindowGeometry(win);
     } else {

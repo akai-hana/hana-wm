@@ -45,6 +45,13 @@ pub extern fn cairo_xcb_surface_create(
 pub extern fn cairo_surface_destroy(surface: *cairo_surface_t) void;
 pub extern fn cairo_surface_flush(surface: *cairo_surface_t) void;
 
+// Surface data access for manual alpha channel manipulation
+pub extern fn cairo_image_surface_get_data(surface: *cairo_surface_t) [*]u8;
+pub extern fn cairo_image_surface_get_width(surface: *cairo_surface_t) c_int;
+pub extern fn cairo_image_surface_get_height(surface: *cairo_surface_t) c_int;
+pub extern fn cairo_image_surface_get_stride(surface: *cairo_surface_t) c_int;
+pub extern fn cairo_surface_mark_dirty(surface: *cairo_surface_t) void;
+
 // Context creation and destruction
 pub extern fn cairo_create(surface: *cairo_surface_t) ?*cairo_t;
 pub extern fn cairo_destroy(cr: *cairo_t) void;
@@ -84,6 +91,7 @@ pub const cairo_operator_t = enum(c_int) {
 
 // Export operators as constants for convenience
 pub const CAIRO_OPERATOR_CLEAR = cairo_operator_t.CLEAR;
+pub const CAIRO_OPERATOR_SOURCE = cairo_operator_t.SOURCE;
 pub const CAIRO_OPERATOR_OVER = cairo_operator_t.OVER;
 
 // Drawing operations

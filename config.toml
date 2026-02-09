@@ -6,7 +6,7 @@ layout  = "master" # Default layout: master_left, monocle, or grid
 
 # Aesthetics
 gaps             = 12 # px
-border_width     = 6 # px
+border_width     = 2% # px
 border_focused   = "#ac3232" # "#RRGGBB" / RRGGBB / 0xRRGGBB
 border_unfocused = "#52263e"
 
@@ -20,7 +20,8 @@ master_width = 50%    #  (5-95)
 show = true
 position = "bottom" # top/bottom
 
-font_size = 24
+# font_size = 24
+font_size = 14
 # Bar height
 ## Auto-adapts to font size by default. Uncomment to set a fixed height instead:
 #height = 32
@@ -39,6 +40,7 @@ fonts = [
 # NEW: Bar transparency (0.0 = fully transparent, 1.0 = fully opaque)
 # Accepts formats: 0.9 or 90 (will be normalized to 0-1)
 # With picom's gaussian blur, the bar will show blurred content behind it
+# transparency = 50 # %
 transparency = 50 # %
 
 # Legacy single font option (used if fonts array is not set):
