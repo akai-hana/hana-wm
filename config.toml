@@ -1,50 +1,86 @@
-### akai_hana's personal hana WM config :-) ###
+### akai_hana's personal hana WM config.toml :-) ###
+
+### NOTES:
+# + All parameters (X =) and values (= Y) are CAPS-insensitive. 
+#   - _It boils down to preference. Style them however you want :9_
+#
+# + Numerical values can be either N (px) or N%/%N (ratio)
+#   - The former represents an exact amount of pixels,
+#     while the latter represents a ratio between two elements.
+#     For example, 'gaps = 5%' will make gaps take up 5%
+#     of viewable area in relation to the size of windows.
+#   - Any percentage value can be N% or %N, decimal or not (N.NN%),
+#     and if decimal, use a dot or a comma (N.N%/N,N%).
+#
+# + HEX code values can be set with either of the following formats:
+#   "#RRGGBB" / '#RRGGBB' / RRGGBB / 0xRRGGBB
+#   - (Any string can be wrapped with "" or '')
 
 [tiling]
-enabled = true     # Enable tiling on startup
-layout  = "master" # Default layout: master_left, monocle, or grid
+enabled = true #TODO: change "enabled" to "enable"
+layout = "master" # master_left / monocle / grid / fibonacci
 
 # Aesthetics
-gaps             = 12 # px
-border_width     = 1% # px
-border_focused   = "#ac3232" # "#RRGGBB" / RRGGBB / 0xRRGGBB
-border_unfocused = "#52263e"
+#TODO: replace with [tiling.aesthetics]
+gaps             = 2.5%
+border_width     = 1% 
+border_focused   = '#ac3232'
+border_unfocused = '#52263e' # Letters can also be MAJUS/minus
 
-#  Layouts
+#TODO: make new [tiling.layouts] section, where the user can set the available layouts through an array.
+# the first element in the array is the bootup default, while cycling forward will move from the top to
+# the bottom of the array.
+# ej.
+
+# layouts = [
+# 	master-stack,
+# 	monocle,
+# 	grid,
+# ]
+
+# Tiling layouts
 ## Master-stack
-master_count = 1      #  Number of windows in master area
-master_side  = "left" #  left / right
-master_width = 50%    #  (5-95)
+#TODO: convert previous 2 lines to [tiling.layouts.master-stack], then replace master_count with count, master_side with side, and so on, instead of appending "master_" to each parameter.
+master_count = 1      # Number of windows in master area (master stack size)
+master_side  = "left" # "Left"/"Right" / 'L'/'R' #TODO: implement 'L'/'R' value recognition
+master_width = 50%    # N/N% (5%-95% (suggestion of presentation))
 
 [bar]
-show = true
-position = "bottom" # top/bottom
+show      = true #TODO: change "show" to "enable"
+position  = "bottom" # top/bottom; can be swapped on runtime
 
-font_size = 24
-# font_size = 14
-# Bar height
-## Auto-adapts to font size by default. Uncomment to set a fixed height instead:
-#height = 32
-
-# Bar spacing
-padding = 99 # Padding inside segments (around text)
-spacing = 6  # Space between segments
-
-# List fonts in priority order: first font is primary, others come next
-# Useful for non-ASCII character support, while retaining a primary ASCII font  
+# Font array; priority order: first font is primary, others come next when first doesn't support some character.
+# Useful for non-ASCII character support, while retaining a primary ASCII font.
 fonts = [
     "FiraCode Nerd Font Propo Ret",
     "Noto Sans CJK JP",
 ]
 
-# NEW: Bar transparency (0.0 = fully transparent, 1.0 = fully opaque)
+# Legacy single font option (used if fonts array is not set):
+#font = "FiraCode Nerd Font Ret" #TODO: remove this legacy feature; user can just set an array with one element.
+
+font_size = 16% #TODO: add a comment on what this line does. in specific, what's the ratio of this percentage-based value (between what and what?)
+
+# Workspace labels/icons
+icons = ["あ", "か", "い", "は", "な", "つ", "ん", "で"]
+segment_spacing = 8% # Spacing between each segment/module inside the bar
+#TODO: what's the difference between setting segment_spacing as N and as N%? i notice no real difference...
+# add a comment explaining so. if there truly is no difference, then fix it, as it'd make no sense then.
+
+# Bar height
+## Auto-adapts to font size by default. Uncomment to set a fixed height instead:
+#height = 32 #TODO: enable a percentage value, where 100% is the auto-calculated size, and 150% would be 1.5x times the size of that, for example.
+
+# Bar spacing
+padding = 99 # Padding inside segments (around text)
+#TODO: i'm still not sure what padding actually does. can you add a comment here clarifying what it does?
+
+# Bar transparency (0.0 = fully transparent, 1.0 = fully opaque)
 # Accepts formats: 0.9 or 90 (will be normalized to 0-1)
 # With picom's gaussian blur, the bar will show blurred content behind it
 # transparency = 50 # %
-transparency = 0 # %
-
-# Legacy single font option (used if fonts array is not set):
-#font = "FiraCode Nerd Font Ret"
+transparency = 0% # [0 - 1] / [0% - 100%]
+#TODO: restrict ranges to (0-1) or (0%-100%). currently, "50" sets it to 50% transparency, even though N (without %) is only intended as a 0.NN range.
 
 # Main color palette
 ## Bar
@@ -59,16 +95,12 @@ occupied_fg = "#eeeeee"
 urgent_bg   = "#FF0000"
 urgent_fg   = "#FFFFFF"
 
-# Workspace labels/icons
-icons = ["あ", "か", "い", "は", "な", "つ", "ん", "で"]
-#icons = ["1", "2", "3", "4", "5", "6", "7", "8"]
-
 indicator_size = 1
-title_accent = true
 
 # Accent colors for bar segments
 # Default accent for all segments
-accent_color = "#ac3232" # "#RRGGBB" / RRGGBB / 0xRRGGBB
+title_accent = true #TODO: remove this parameter, and all its related logic, as it is useless; the user could just set the title accent hex code to the same hexcode of the background color.
+accent_color = "#ac3232"
 
 # Per-segment accent colors (overrides accent_color)
 # [bar.colors]
@@ -197,7 +229,6 @@ electron
 com.github.th_ch.youtube_music
 
 [workspace.rules.4] # launchers
-steam
 OpenTabletDriver.UX
 
 [workspace.rules.5] # gaming
