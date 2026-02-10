@@ -32,7 +32,7 @@ pub fn startDrag(wm: *WM, win: u32, button: u8, x: i16, y: i16) void {
     focus.setFocus(wm, win, .user_command);
 
     // Remove window from tiling if it's tiled
-    if (wm.config.tiling.enable and tiling.isWindowTiled(win)) {
+    if (wm.config.tiling.enabled and tiling.isWindowTiled(win)) {
         tiling.removeWindow(wm, win);
     }
 }

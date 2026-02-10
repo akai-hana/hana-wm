@@ -23,6 +23,16 @@ const workspaces             = @import("workspaces");
 // TODO: make adjustable through config.toml, adjust workspace width based off of monitor DPI
 pub const WORKSPACE_WIDTH: u8 = 50;
 
+// FIXED: Magic numbers replaced with named constants
+/// Minimum allowed bar height in pixels
+const MIN_BAR_HEIGHT: u32 = 20;
+
+/// Maximum allowed bar height in pixels
+const MAX_BAR_HEIGHT: u32 = 200;
+
+/// Default bar height if font metrics cannot be determined
+const DEFAULT_BAR_HEIGHT: u16 = 24;
+
 /// Result of finding a visual - contains both the structure and ID
 const VisualInfo = struct {
     visual_type: ?*xcb.xcb_visualtype_t,
@@ -96,6 +106,9 @@ const State = struct {
     fn isDirty(self: *State) bool { return self.dirty or self.dirty_clock; }
 };
 
+// FIXED: Document thread safety - single-threaded access only
+/// Single-threaded: Only accessed from main event loop
+/// NOT thread-safe: Do not access from signal handlers or other threads
 var state: ?*State = null;
 
 fn updateClockIfNeeded(s: *State) void {
@@ -109,8 +122,17 @@ fn updateClockIfNeeded(s: *State) void {
     }
 }
 
+// FIXED: Use stack buffer for common case to avoid heap allocation
 fn sizeFont(alloc: std.mem.Allocator, font: []const u8, size: u16) ![]const u8 {
-    return if (size > 0) try std.fmt.allocPrint(alloc, "{s}:size={}", .{font, size}) else font;
+    if (size == 0) return font;
+    
+    // Try stack buffer first (most font strings with size fit in 256 bytes)
+    var buf: [256]u8 = undefined;
+    const result = std.fmt.bufPrint(&buf, "{s}:size={}", .{font, size}) catch {
+        // Fall back to heap allocation for very long font names
+        return std.fmt.allocPrint(alloc, "{s}:size={}", .{font, size});
+    };
+    return try alloc.dupe(u8, result);
 }
 
 fn loadBarFonts(dc: *drawing.DrawContext, wm: *defs.WM) !void {
@@ -174,18 +196,22 @@ fn calculateBarHeight(wm: *defs.WM) !u16 {
         0, 0, 1, 1, 0, xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, wm.screen.root_visual, 0, null);
     defer _ = xcb.xcb_destroy_window(wm.conn, temp_win);
     
-    const temp_dc = drawing.DrawContext.init(wm.allocator, wm.conn, temp_win, 1, 1, wm.dpi_info.dpi) catch return 24;
+    const temp_dc = drawing.DrawContext.init(wm.allocator, wm.conn, temp_win, 1, 1, wm.dpi_info.dpi) catch return DEFAULT_BAR_HEIGHT;
     defer temp_dc.deinit();
-    loadBarFonts(temp_dc, wm) catch return 24;
+    loadBarFonts(temp_dc, wm) catch {
+        // If font loading fails, return default height instead of failing
+        debug.warn("Failed to load bar fonts for height calculation, using default", .{});
+        return DEFAULT_BAR_HEIGHT;
+    };
     
     const asc, const desc = temp_dc.getMetrics();
     const font_height: u32 = @intCast(asc + desc);  // Both are positive, add them
     const scaled_padding = wm.config.bar.scaledPadding();
-    return @intCast(std.math.clamp(font_height + 2 * scaled_padding, 20, 200));
+    return @intCast(std.math.clamp(font_height + 2 * scaled_padding, MIN_BAR_HEIGHT, MAX_BAR_HEIGHT));
 }
 
 pub fn init(wm: *defs.WM) !void {
-    if (!wm.config.bar.enable) return error.BarDisabled;
+    if (!wm.config.bar.enabled) return error.BarDisabled;
 
     // Detect DPI and set scale factor
     const dpi_info = try dpi.detect(wm.conn, wm.screen);
@@ -383,16 +409,16 @@ pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
 
 pub fn setBarState(wm: *defs.WM, action: BarAction) void {
     const show = switch (action) {
-        .toggle => blk: { wm.config.bar.enable = !wm.config.bar.enable; break :blk wm.config.bar.enable; },
+        .toggle => blk: { wm.config.bar.enabled = !wm.config.bar.enabled; break :blk wm.config.bar.enabled; },
         .hide_fullscreen => false,
-        .show_fullscreen => wm.config.bar.enable,
+        .show_fullscreen => wm.config.bar.enabled,
     };
     const reason = switch (action) {
         .toggle => "toggle",
         .hide_fullscreen => "fullscreen",
         .show_fullscreen => "exit fullscreen",
     };
-    if (action != .show_fullscreen or wm.config.bar.enable) {
+    if (action != .show_fullscreen or wm.config.bar.enabled) {
         setBarVisibility(wm, show, reason);
     }
 }

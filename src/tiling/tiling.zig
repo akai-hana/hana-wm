@@ -1,3 +1,31 @@
+//! # Tiling Window Management Module
+//!
+//! Provides automatic window layout and tiling functionality with multiple layout algorithms.
+//!
+//! ## Dependencies:
+//! - `defs`: Core WM types
+//! - `xcb`: X11 bindings
+//! - `utils`: Utility functions
+//! - `focus`: Window focus management
+//! - `workspaces`: Workspace state management
+//! - `tracking`: Window tracking structures
+//! - `master`: Master-stack layout algorithm
+//!
+//! ## Exports:
+//! - `addWindow()`: Add a window to tiling
+//! - `removeWindow()`: Remove a window from tiling
+//! - `isWindowTiled()`: Check if window is tiled
+//! - `retileIfDirty()`: Retile workspace if layout changed
+//! - `adjustMasterCount()`: Adjust number of master windows
+//! - `adjustMasterWidth()`: Adjust master window width
+//!
+//! ## Key Features:
+//! - Multiple layout algorithms (master-stack, etc.)
+//! - Automatic window placement
+//! - Master/stack window organization
+//! - Off-screen window recovery
+//! - Dirty-flag based retiling for performance
+//
 // Tiling system - Delegates to layout modules (OPTIMIZED & REFACTORED)
 
 const std = @import("std");
@@ -20,6 +48,13 @@ const dpi = @import("dpi");
 pub const Layout = enum { master, monocle, grid };
 
 const WINDOW_EVENT_MASK = xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW;
+
+// FIXED: Magic numbers replaced with named constants (shared with window.zig)
+/// Minimum X coordinate threshold for detecting off-screen windows
+const OFFSCREEN_THRESHOLD_MIN: i32 = -1000;
+
+/// Maximum X coordinate threshold for detecting off-screen windows  
+const OFFSCREEN_THRESHOLD_MAX: i32 = 10000;
 
 // OPTIMIZATION: Merged error handling directly into this module
 inline fn logError(err: anyerror, window: ?u32) void {
@@ -128,7 +163,7 @@ pub fn init(wm: *WM) void {
     });
     
     const initial_state = State{
-        .enabled = wm.config.tiling.enable,
+        .enabled = wm.config.tiling.enabled,
         .layout = parseLayout(wm.config.tiling.layout),
         .master_side = wm.config.tiling.master_side,
         .master_width = master_width,
@@ -168,6 +203,13 @@ inline fn isTileable(s: *const State, wm: *const WM, win: u32) bool {
     return !wm.fullscreen.isFullscreen(win) and s.windows.contains(win);
 }
 
+/// Adds a window to the tiling system.
+/// 
+/// If the window is already tiled or in fullscreen mode, only marks
+/// the layout as dirty. Otherwise, prepends the window to the tiled
+/// list and applies initial border/focus setup for windows on the current workspace.
+///
+/// Side effects: May retile workspace if dirty flag is set later
 pub fn addWindow(wm: *WM, win: u32) void {
     const s = StateManager.get(true) orelse return;
     if (!s.enabled) return;
@@ -197,6 +239,12 @@ pub fn addWindow(wm: *WM, win: u32) void {
     s.markDirty();
 }
 
+/// Removes a window from the tiling system.
+/// 
+/// If the removed window was focused, focuses the next window in the tiled list.
+/// Marks the layout as dirty to trigger retiling.
+///
+/// Side effects: May change focused window, triggers retiling
 pub fn removeWindow(wm: *WM, win: u32) void {
     const s = StateManager.get(true) orelse return;
 
@@ -283,9 +331,9 @@ fn retileCurrentWorkspaceInternal(wm: *WM, should_flush: bool, state_opt: ?*Stat
     const screen = wm.screen;
 
     // Calculate available space accounting for bar
-    const bar_height = if (wm.config.bar.enable) bar.getBarHeight() else 0;
+    const bar_height = if (wm.config.bar.enabled) bar.getBarHeight() else 0;
     const available_height = screen.height_in_pixels - bar_height;
-    const y_offset: u16 = if (wm.config.bar.enable and wm.config.bar.vertical_position == .top)
+    const y_offset: u16 = if (wm.config.bar.enabled and wm.config.bar.vertical_position == .top)
         bar_height
     else
         0;
@@ -340,7 +388,7 @@ fn recoverOffscreenWindows(wm: *WM, current_ws: *workspaces.Workspace, visible: 
         
         // This window is in workspace but wasn't retiled - check if it's off-screen
         const check_geom = utils.getGeometry(wm.conn, ws_win) orelse continue;
-        if (check_geom.x < -1000 or check_geom.x > 10000) {
+        if (check_geom.x < OFFSCREEN_THRESHOLD_MIN or check_geom.x > OFFSCREEN_THRESHOLD_MAX) {
             // Window is off-screen! Position it at a default location
             debug.warn("Recovering window 0x{x} from off-screen position", .{ws_win});
             const default_x: i16 = @divTrunc(@as(i16, @intCast(screen.width_in_pixels)), 4);
@@ -380,7 +428,9 @@ fn adjustMasterWidth(wm: *WM, delta: f32) void {
 pub fn increaseMasterWidth(wm: *WM) void { adjustMasterWidth(wm, 0.05); }
 pub fn decreaseMasterWidth(wm: *WM) void { adjustMasterWidth(wm, -0.05); }
 
-fn adjustMasterCount(wm: *WM, delta: isize) void {
+// FIXED: Changed delta type from isize to i8 to prevent overflow issues
+// Only ever called with 1 or -1, so i8 is sufficient and safer
+fn adjustMasterCount(wm: *WM, delta: i8) void {
     const s = StateManager.get(true) orelse return;
     const win_count: u8 = @intCast(@min(255, s.windows.count()));
     const new_count: u8 = if (delta > 0)
@@ -455,13 +505,16 @@ pub fn swapWithMaster(wm: *WM) void {
 
 // Helper: Swap two windows in the tracking list
 inline fn swapWindows(s: *State, idx1: usize, idx2: usize) void {
-    // We need to manipulate the internal list
-    // Since tracking uses small array or large list, we need to handle both cases
+    // FIXED: Add bounds checking to prevent out-of-bounds access
     if (s.windows.small) |*small| {
+        std.debug.assert(idx1 < small.len);
+        std.debug.assert(idx2 < small.len);
         const temp = small.items[idx1];
         small.items[idx1] = small.items[idx2];
         small.items[idx2] = temp;
     } else if (s.windows.large) |*large| {
+        std.debug.assert(idx1 < large.list.items.len);
+        std.debug.assert(idx2 < large.list.items.len);
         const temp = large.list.items[idx1];
         large.list.items[idx1] = large.list.items[idx2];
         large.list.items[idx2] = temp;
@@ -472,7 +525,9 @@ inline fn swapWindows(s: *State, idx1: usize, idx2: usize) void {
 inline fn moveToFront(s: *State, from_idx: usize) void {
     if (from_idx == 0) return;
     
+    // FIXED: Add bounds checking to prevent out-of-bounds access
     if (s.windows.small) |*small| {
+        std.debug.assert(from_idx < small.len);
         const window = small.items[from_idx];
         // Shift everything from 0..from_idx one position right
         var i = from_idx;
@@ -481,6 +536,7 @@ inline fn moveToFront(s: *State, from_idx: usize) void {
         }
         small.items[0] = window;
     } else if (s.windows.large) |*large| {
+        std.debug.assert(from_idx < large.list.items.len);
         const window = large.list.items[from_idx];
         // Shift everything from 0..from_idx one position right
         var i = from_idx;
@@ -509,7 +565,7 @@ pub fn reloadConfig(wm: *WM) void {
         break :blk @min(0.95, @max(defs.MIN_MASTER_WIDTH, ratio));
     } else master_width_value;
     
-    s.enabled = wm.config.tiling.enable;
+    s.enabled = wm.config.tiling.enabled;
     s.layout = parseLayout(wm.config.tiling.layout);
     s.master_side = wm.config.tiling.master_side;
     s.master_width = master_width;

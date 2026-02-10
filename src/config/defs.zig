@@ -113,7 +113,7 @@ pub const MasterSide = enum {
 };
 
 pub const TilingConfig = struct {
-    enable: bool = true,
+    enabled: bool = true,
     layout: []const u8 = "master_left",
     layouts: std.ArrayList([]const u8),  // Available layouts in cycle order
     master_side: MasterSide = .left,
@@ -170,7 +170,7 @@ pub const BarLayout = struct {
 };
 
 pub const BarConfig = struct {
-    enable: bool = true,
+    enabled: bool = true,
     vertical_position: BarVerticalPosition = .top,
     height: ?u16 = null,
     font: []const u8 = "monospace:size=10",
@@ -196,8 +196,10 @@ pub const BarConfig = struct {
     clock_accent: ?u32 = null,
 
     workspace_icons: std.ArrayList([]const u8),
-    // OPTIMIZED: u8 for indicator size - max 255 pixels
-    indicator_size: u8 = 4,
+    // Workspace indicator size - ScalableValue (100% = 4px base)
+    indicator_size: parser.ScalableValue = parser.ScalableValue.percentage(100.0),
+    // Workspace width - ScalableValue (100% = 40px base)
+    workspace_width: parser.ScalableValue = parser.ScalableValue.percentage(100.0),
 
     clock_format: []const u8 = "%Y-%m-%d %H:%M:%S",
 
@@ -252,14 +254,23 @@ pub const BarConfig = struct {
     }
     
     pub inline fn scaledIndicatorSize(self: *const BarConfig) u16 {
-        const scaled: f32 = @as(f32, @floatFromInt(self.indicator_size)) * self.scale_factor;
-        return @max(2, @as(u16, @intFromFloat(@round(scaled))));
+        // Base indicator size is 4px when percentage is 100%
+        const base_size: f32 = 4.0;
+        const size: f32 = if (self.indicator_size.is_percentage)
+            base_size * (self.indicator_size.value / 100.0) * self.scale_factor
+        else
+            self.indicator_size.value * self.scale_factor;
+        return @max(2, @as(u16, @intFromFloat(@round(size))));
     }
     
     pub inline fn scaledWorkspaceWidth(self: *const BarConfig) u16 {
-        // Base workspace width TODO: make available as a settable width in config.toml
+        // Base workspace width is 40px when percentage is 100%
         const base_width: f32 = 40.0;
-        return @intFromFloat(@round(base_width * self.scale_factor));
+        const width: f32 = if (self.workspace_width.is_percentage)
+            base_width * (self.workspace_width.value / 100.0) * self.scale_factor
+        else
+            self.workspace_width.value * self.scale_factor;
+        return @intFromFloat(@round(width));
     }
     
     // Get alpha value in 16-bit format (0x0000-0xFFFF)
@@ -308,7 +319,7 @@ pub const Config = struct {
                 .border_width = parser.ScalableValue.absolute(2.0),
                 .border_focused = 0x5294E2,
                 .border_unfocused = 0x383C4A,
-                .enable = true,
+                .enabled = true,
             },
             .bar = BarConfig{
                 .workspace_icons = std.ArrayList([]const u8){},

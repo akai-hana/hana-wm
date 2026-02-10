@@ -1,8 +1,28 @@
+//! # Core Utilities Module
+//!
+//! Provides common utility functions for X11 operations, geometry manipulation,
+//! and window property queries.
+//!
+//! ## Dependencies:
+//! - `defs`: Core WM types
+//! - `xcb`: X11 bindings
+//! - `debug`: Logging facilities
+//!
+//! ## Exports:
+//! - `flush()`: Flush XCB connection
+//! - `configureWindow()`: Set window geometry
+//! - `getGeometry()`: Query window geometry
+//! - `getAtom()`: Intern X11 atoms
+//! - `getWindowProperty()`: Query window properties
+//! - `normalizeModifiers()`: Normalize keyboard modifiers
+//! - `Rect`: Rectangle geometry struct
+//
 // Core utilities (OPTIMIZED)
 
 const std = @import("std");
 const defs = @import("defs");
 const xcb = defs.xcb;
+const debug = @import("debug");
 
 // Constants for X11 property queries
 const MAX_PROPERTY_LENGTH: u32 = 256;
@@ -49,6 +69,8 @@ pub const Margins = struct {
     }
 };
 
+/// Sets the geometry (position and size) of a window.
+/// Note: Only configures window geometry, not other properties like border or attributes.
 pub fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect) void {
     _ = xcb.xcb_configure_window(
         conn,
@@ -56,6 +78,7 @@ pub fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect) void {
         xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
             xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT,
         &[_]u32{
+            // XCB expects unsigned values but uses bitcast for signed coordinates
             @bitCast(@as(i32, rect.x)),
             @bitCast(@as(i32, rect.y)),
             rect.width,
@@ -99,7 +122,10 @@ pub fn getAtom(conn: *xcb.xcb_connection_t, name: []const u8) !u32 {
         conn,
         xcb.xcb_intern_atom(conn, 0, @intCast(name.len), name.ptr),
         null,
-    ) orelse return error.AtomFailed;
+    ) orelse {
+        debug.err("Failed to intern atom: {s}", .{name});
+        return error.AtomFailed;
+    };
     defer std.c.free(reply);
     return reply.*.atom;
 }

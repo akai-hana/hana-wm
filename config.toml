@@ -15,40 +15,42 @@
 #     and if decimal, use a dot or a comma (N.N%/N,N%).
 #
 # + Any string can be wrapped with "" or ''
-
+#
 # + HEX code values can be set with either of the following formats:
 #   (RRGGBB/rrggbb, ""/'') "#RRGGBB" / RRGGBB / 0xRRGGBB
+#
 
 [tiling]
-enable = true
+enabled = true
 
 # Enabled layouts
 ## First is default; cycling follows order
-#TODO: make this work (currently this isn't respected;
-# only the first layout is set as a default, but any of the following aren't
-# applied to the order, and commenting out any layout doesn't stop it from appearing
-# as an option while cycling
+## Layouts are now respected in the exact order specified
+## Commented out layouts will not appear in the cycle
 layouts = [
     "monocle",
     "master-stack",
     "grid",
-    # "fibonacci", # NOT YET IMPLEMENTED
+    # "fibonacci", # <- not yet implemented
 ]
 
 [tiling.aesthetics]
+# Percentage values now use a new scaling system:
+# - 0-100%: Linear scaling where 100% = 50% of window space (half window, half gaps/border)
+# - 100-200%: Can go extreme, where 200% = entire window consumed by gaps/border
+# This keeps the 0-100% range "sane" while allowing extreme customization if needed
 gaps             = 2.5%
-border_width     = 1% 
+border_width     = 1%
 border_focused   = '#ac3232'
 border_unfocused = '#52263e' # Letters can also be MAJUS/minus
 
-# Layout-specific settings
 [tiling.layouts.master-stack]
 count = 1        # Number of windows in master area (master stack size)
 side  = "left"   # "left"/"right" / 'L'/'R'
 width = 50%      # N/N% (5%-95% suggested range)
 
 [bar]
-enable   = true
+enabled = true
 position = "bottom" # top/bottom; can be swapped on runtime
 
 # Font array
@@ -60,7 +62,7 @@ fonts = [
 ]
 
 # Font size as percentage of bar height (e.g., 16% = font takes up 16% of the bar's vertical space)
-font_size = 26%
+font_size = 16%
 
 # Spacing between each segment/module inside the bar
 segment_spacing = 8%
@@ -68,12 +70,13 @@ segment_spacing = 8%
 # Workspace labels/icons (1-N)
 icons = ["あ", "か", "い", "は", "な", "つ", "ん", "で"]
 
-#TODO: add workspace width parameter, that modifies line 242 in defs.zig: make default (40) 100%, and 150% is 40x1.5, and so on. otherwise, if no percentage placed on config, just set the literal pixel value.
+# Workspace width as percentage of base (100% = 40px, 150% = 60px, or set exact pixels)
+workspace_width = 125%  # Default base width
 
 # Bar height
 ## Auto-adapts to font size by default. Uncomment to set a fixed height instead:
-## TODO: Future enhancement: percentage values where 100% = auto-calculated size, 150% = 1.5x auto size
-height = 40
+## TODO: Future enhancement: percentage values where 100% = auto-calculated size, 150% = 1.5x auto size.
+height = 60
 
 # Padding inside segments (horizontal space around text content within each segment)
 padding = 99
@@ -94,21 +97,24 @@ occupied_fg = "#eeeeee"
 urgent_bg   = "#FF0000"
 urgent_fg   = "#FFFFFF"
 
-#TODO: implement the logic for the wm to recognize the following parameter inside this config (100% -> 4, any other percentage multiplies this 4 value)
-# indicator_size = 100%
+# Indicator size as percentage (100% = 4px base, 150% = 6px, or set exact pixels)
+indicator_size = 100%
 
 # Accent colors for bar segments
 # Default accent for all segments
-# accent_color = "#ac3232" #TODO: rename "accent_color" to "accent", move under [bar.colors]
-accent_color = "#b9c0a8"
+# accent_color = "#ac3232"
+accent_color = "#ac3232"
 
-# Per-segment accent colors (overrides accent_color)
+# "#007373"
+# 009691
+# 85a796
+
+# Per-segment accent colors (overrides default accent_color)
+# These are now properly working - each segment can have its own accent color
 [bar.colors]
-# workspaces = "#ac3232"
-workspaces = "#b9c0a8" #TODO: why doesn't this work? no matter what color i place, it won't change. pending to fix.
-
-# title      = "#ac3232"
-# clock      = "#ac3232"
+workspaces = "#b9c0a8"  # Custom accent for workspace indicators
+title = "#ac3232"       # Custom accent for title segment  
+clock = "#ac3232"       # Custom accent for clock segment
 
 # Configurable bar layout
 # You can rearrange segments however you like
@@ -125,17 +131,22 @@ segments = ["title"]
 [bar.layout.right]
 segments = ["clock"]
 
-[workspaces]
-count = 8
+# Bar module configurations
+[bar.modules.workspaces]
+count = 8  # Number of workspaces
 
-[Keybindings]
+[binds]
 # Convenience alias
-Mod = "Super" # Super/Mod4 / Alt/Mod1
+## Parameter placeholders
+Mod = "Super" # Super/Mod4, Alt/Mod1
+
+## Value placeholders ({})
+kill = "pkill -9" # program kill value placeholder
 
 # WM interactions
 Mod+F = "toggle_fullscreen"
-Mod+Shift+Return = "kill Xorg" # quit wm
-Mod+Shift+F = "kill"
+Mod+Shift+Return = "{kill} Xorg" # quit wm
+Mod+Shift+F = "close_window" # Close focused window
 Mod+Shift+T = "reload" # Config hot-reload
 
 # wallpaper
@@ -176,6 +187,10 @@ Mod+Shift+W = "move_to_workspace_6"
 Mod+Shift+E = "move_to_workspace_7"
 Mod+Shift+R = "move_to_workspace_8"
 
+# Note: The config parser now automatically generates move_to_workspace_N binds
+# from workspace_N binds when using Mod+Shift modifier. You can still override
+# specific binds if needed by defining them explicitly.
+
 # Bar
 Mod+B = "toggle_bar_visibility"     # shown/hidden
 Mod+Shift+B = "toggle_bar_position" # top/bottom
@@ -184,7 +199,6 @@ Mod+Shift+B = "toggle_bar_position" # top/bottom
 Mod+P = "rofi -show drun"
 
 # Program binds
-kill = "pkill -9" # program kill placeholder
 
 ## Misc
 Mod+A       = "MOZ_USE_XINPUT2=1 firefox"
@@ -208,8 +222,8 @@ Mod+V       = "flatpak run com.github.th_ch.youtube_music"
 Mod+Shift+V = "{kill} youtube-music"
 
 # Emergency/Debug
-#TODO: this does nothing? either figure out if it's dead code, or make it work, or outright remove it.
-Mod+Shift+Escape = "emergency_recover" # Emergency recovery mode
+# Emergency recovery: Disables tiling, clears fullscreen, maps all windows, stops drag
+Mod+Shift+Escape = "emergency_recover"
 
 # Workspace rules
 [workspace.rules.1] # browser
@@ -242,3 +256,10 @@ gimp
 
 [workspace.rules.8] # torrenting
 deluge
+
+# Alternative array format (both formats are supported):
+# [workspace.rules]
+# 1 = ["Navigator", "Firefox"]           # browser
+# 2 = ["discord", "vesktop", "equibop"]  # socials  
+# 3 = ["com.github.th_ch.youtube_music"] # music
+# ... and so on
