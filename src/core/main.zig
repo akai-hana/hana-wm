@@ -24,12 +24,20 @@ const WM_EVENT_MASK = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
     xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY | xcb.XCB_EVENT_MASK_KEY_PRESS |
     xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_PROPERTY_CHANGE;
 
+/// Lock key combinations to grab: none, CapsLock, NumLock, and both.
+/// This ensures keybindings work regardless of lock key state.
 const LOCK_MODIFIERS = [_]u16{ 0, defs.MOD_LOCK, defs.MOD_2, defs.MOD_LOCK | defs.MOD_2 };
 
 const CURSOR_LEFT_PTR = 68;
 const CURSOR_LEFT_PTR_MASK = 69;
 
+// FIXED: Document thread safety guarantees
+/// Thread-safe: Written by signal handler, read by main loop
+/// Memory ordering: Sequential consistency for cross-thread visibility
 var should_reload = std.atomic.Value(bool).init(false);
+
+/// Thread-safe: Written by signal handler, read by main loop  
+/// Memory ordering: Sequential consistency for cross-thread visibility
 var running = std.atomic.Value(bool).init(true);
 
 const FDs = struct { signal: posix.fd_t, timer: posix.fd_t };
@@ -66,8 +74,9 @@ fn handleSignalFd(signal_fd: posix.fd_t, reload_flag: *std.atomic.Value(bool), r
         if (bytes_read != @sizeOf(std.os.linux.signalfd_siginfo)) break;
         
         switch (siginfo.signo) {
-            @intFromEnum(posix.SIG.HUP) => reload_flag.store(true, .release),
-            @intFromEnum(posix.SIG.TERM), @intFromEnum(posix.SIG.INT) => running_flag.store(false, .release),
+            // FIXED: Use seq_cst for consistency across all atomic operations
+            @intFromEnum(posix.SIG.HUP) => reload_flag.store(true, .seq_cst),
+            @intFromEnum(posix.SIG.TERM), @intFromEnum(posix.SIG.INT) => running_flag.store(false, .seq_cst),
             else => {},
         }
     }
@@ -180,6 +189,19 @@ fn handleConfigReload(wm: *WM) !void {
     };
     errdefer new_config.deinit(wm.allocator);
 
+    // FIXED: Validate config before applying it
+    if (new_config.tiling.master_count == 0) {
+        debug.err("Invalid config: master_count must be > 0, keeping old", .{});
+        new_config.deinit(wm.allocator);
+        return error.InvalidConfig;
+    }
+    if (new_config.tiling.master_width.value <= 0
+    or new_config.tiling.master_width.value > 1.0) {
+        debug.err("Invalid config: master_width must be between 0 and 1, keeping old", .{});
+        // new_config.deinit(wm.allocator);
+        return error.InvalidConfig;
+    }
+
     config.resolveKeybindings(new_config.keybindings.items, @ptrCast(@alignCast(wm.xkb_state)));
     config.finalizeConfig(&new_config, wm.screen);
 
@@ -188,9 +210,10 @@ fn handleConfigReload(wm: *WM) !void {
 
     grabKeybindings(wm) catch |err| {
         debug.err("Keybind grab failed: {}, reverting", .{err});
+        // FIXED: Don't try grabbing again - just revert and propagate error
+        // Trying again could fail and leave us with inconsistent state
         new_config.deinit(wm.allocator);
         wm.config = old_config;
-        try grabKeybindings(wm);
         return err;
     };
 
@@ -205,9 +228,16 @@ fn handleConfigReload(wm: *WM) !void {
 }
 
 pub fn main() !void {
-    const conn = xcb.xcb_connect(null, null) orelse return error.X11ConnectionFailed;
+    const conn = xcb.xcb_connect(null, null) orelse {
+        debug.err("Failed to connect to X11 server", .{});
+        return error.X11ConnectionFailed;
+    };
     defer xcb.xcb_disconnect(conn);
-    if (xcb.xcb_connection_has_error(conn) != 0) return error.X11ConnectionFailed;
+    
+    if (xcb.xcb_connection_has_error(conn) != 0) {
+        debug.err("X11 connection has errors", .{});
+        return error.X11ConnectionFailed;
+    }
 
     const setup = xcb.xcb_get_setup(conn);
     const screen = xcb.xcb_setup_roots_iterator(setup).data orelse return error.X11ScreenFailed;
@@ -236,7 +266,11 @@ pub fn main() !void {
 
     // OPTIMIZATION: Pre-allocate WM windows hash map
     var wm_windows = std.AutoHashMap(u32, void).init(allocator);
-    wm_windows.ensureTotalCapacity(32) catch {}; // Best-effort pre-allocation
+    // FIXED: Log allocation failure instead of silently ignoring it
+    wm_windows.ensureTotalCapacity(32) catch |err| {
+        debug.warn("Failed to pre-allocate window capacity: {}", .{err});
+        // Continue with default capacity - not critical for functionality
+    };
 
     var wm = WM{
         .allocator = allocator,
@@ -286,7 +320,8 @@ pub fn main() !void {
     
     // IMPROVED: Main loop without event counter management
     // Focus control is now handled through intelligent filtering in EnterNotify
-    while (running.load(.acquire)) {
+    // FIXED: Use seq_cst for consistency with signal handler stores
+    while (running.load(.seq_cst)) {
         _ = posix.poll(&pollfds, -1) catch |err| {
             if (err == error.Interrupted) continue;
             debug.err("Poll error: {}", .{err});
@@ -317,7 +352,8 @@ pub fn main() !void {
         if (pollfds[1].revents & posix.POLL.IN != 0) {
             handleSignalFd(fds.signal, &should_reload, &running);
             
-            if (should_reload.swap(false, .acq_rel)) {
+            // FIXED: Use seq_cst for consistency with signal handler stores
+            if (should_reload.swap(false, .seq_cst)) {
                 handleConfigReload(&wm) catch |err| {
                     debug.err("Reload failed: {}", .{err});
                 };

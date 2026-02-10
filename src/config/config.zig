@@ -225,6 +225,7 @@ const MOD_MAP = std.StaticStringMap(u16).initComptime(.{
 
 const ACTION_MAP = std.StaticStringMap(defs.Action).initComptime(.{
     .{ "close", .close_window },
+    .{ "close_window", .close_window },
     .{ "kill", .close_window },
     .{ "reload", .reload_config },
     .{ "reload_config", .reload_config },
@@ -239,12 +240,14 @@ const ACTION_MAP = std.StaticStringMap(defs.Action).initComptime(.{
     .{ "toggle_tiling", .toggle_tiling },
     .{ "toggle_fullscreen", .toggle_fullscreen },
     .{ "fullscreen", .toggle_fullscreen },
+    .{ "swap_master", .swap_master },
     .{ "dump_state", .dump_state },
     .{ "emergency_recover", .emergency_recover },
 });
 
 fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
-    const section = doc.getSection("Keybindings") orelse return;
+    // Support both [binds] (new) and [Keybindings] (legacy) section names
+    const section = doc.getSection("binds") orelse doc.getSection("Keybindings") orelse return;
     const mod_placeholder = section.getString("Mod");
     const kill_placeholder = section.getString("kill") orelse return;
 
@@ -371,7 +374,7 @@ pub fn resolveKeybindings(keybindings: anytype, xkb_state: *xkb.XkbState) void {
 
 fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
     const section = doc.getSection("tiling") orelse return;
-    cfg.tiling.enable = get(bool, section, "enable", true, null, null);
+    cfg.tiling.enabled = get(bool, section, "enabled", true, null, null);
 
     // Parse layouts array (new structure)
     if (section.get("layouts")) |layouts_value| {
@@ -449,7 +452,7 @@ const BAR_COLOR_FIELDS = [_]BarColorField{
 
 fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
     const section = doc.getSection("bar") orelse return;
-    cfg.bar.enable = get(bool, section, "enable", true, null, null);
+    cfg.bar.enabled = get(bool, section, "enabled", true, null, null);
     
     if (section.getString("position")) |pos_str| {
         cfg.bar.vertical_position = defs.BarVerticalPosition.fromString(pos_str) orelse .top;
@@ -494,7 +497,8 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     cfg.allocated_clock_format = try allocator.dupe(u8, clock_fmt);
     cfg.bar.clock_format = cfg.allocated_clock_format.?;
 
-    cfg.bar.indicator_size = get(u8, section, "indicator_size", 4, 2, 10);
+    cfg.bar.indicator_size = getScalable(section, "indicator_size", parser.ScalableValue.percentage(100.0));
+    cfg.bar.workspace_width = getScalable(section, "workspace_width", parser.ScalableValue.percentage(100.0));
     
     // Parse transparency value - supports multiple formats:
     // - Bare decimals: 0.5, 0.75
@@ -663,11 +667,53 @@ fn parseBarLayout(allocator: std.mem.Allocator, section: *const parser.Section, 
 }
 
 fn parseWorkspaces(doc: *const parser.Document, cfg: *defs.Config) void {
-    const section = doc.getSection("workspaces") orelse return;
+    // Support both [bar.modules.workspaces] (new) and [workspaces] (legacy)
+    const section = doc.getSection("bar.modules.workspaces") orelse doc.getSection("workspaces") orelse return;
     cfg.workspaces.count = get(u8, section, "count", 9, 1, null); // Minimum 1 workspace required
 }
 
 fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
+    // Support alternative array format: [workspace.rules] with numbered arrays
+    // e.g., 1 = ["Navigator", "Firefox"]
+    if (doc.getSection("workspace.rules")) |rules_section| {
+        var iter = rules_section.pairs.iterator();
+        while (iter.next()) |entry| {
+            const ws_num = std.fmt.parseInt(usize, entry.key_ptr.*, 10) catch {
+                // Not a number, try old format
+                const ws = entry.value_ptr.*.asInt() orelse continue;
+                if (ws < 1 or ws > cfg.workspaces.count) {
+                    debug.warn("Rule workspace {} for '{s}' exceeds count {}, skipping", .{ ws, entry.key_ptr.*, cfg.workspaces.count });
+                    continue;
+                }
+                const rule = defs.Rule{
+                    .class_name = try allocator.dupe(u8, entry.key_ptr.*),
+                    .workspace = @intCast(ws - 1),
+                };
+                try cfg.workspaces.rules.append(allocator, rule);
+                continue;
+            };
+            
+            // New array format: key is workspace number, value is array of class names
+            if (ws_num < 1 or ws_num > cfg.workspaces.count) {
+                debug.warn("Rule workspace {} exceeds count {}, skipping", .{ ws_num, cfg.workspaces.count });
+                continue;
+            }
+            
+            if (entry.value_ptr.*.asArray()) |arr| {
+                for (arr) |item| {
+                    if (item.asString()) |class_name| {
+                        const rule = defs.Rule{
+                            .class_name = try allocator.dupe(u8, class_name),
+                            .workspace = @intCast(ws_num - 1),
+                        };
+                        try cfg.workspaces.rules.append(allocator, rule);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Legacy format support: [rules] section
     if (doc.getSection("rules")) |section| {
         var iter = section.pairs.iterator();
         while (iter.next()) |entry| {
@@ -684,6 +730,7 @@ fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *d
         }
     }
 
+    // Per-workspace sections: [workspace.rules.N]
     var section_iter = doc.sections.iterator();
     while (section_iter.next()) |entry| {
         const name = entry.key_ptr.*;
