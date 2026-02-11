@@ -242,8 +242,38 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
     for (old_workspace.windows.items()) |win| hideWindow(wm, win);
 
     // Step 2: Position new workspace windows (no flush yet!)
-    if (wm.config.tiling.enabled) {
+    // CRITICAL: Handle all cases properly
+    if (fs_info) |info| {
+        // Case 1: There's a fullscreen window on this workspace
+        // Skip positioning all windows - configureFullscreen will handle the fullscreen window
+        // and other windows can stay off-screen since they're not visible anyway
+        _ = info; // Suppress unused variable warning
+    } else if (wm.config.tiling.enabled) {
+        // Case 2: Tiling enabled, no fullscreen - retile all windows
         tiling.retileCurrentWorkspace(wm, false); // No flush - atomic operation
+    } else {
+        // Case 3: Tiling disabled, no fullscreen - manually position windows to be visible
+        for (new_workspace.windows.items()) |win| {
+            // Get current geometry to preserve window sizes
+            const geom_cookie = xcb.xcb_get_geometry(wm.conn, win);
+            const geom_reply = xcb.xcb_get_geometry_reply(wm.conn, geom_cookie, null);
+            
+            if (geom_reply) |reply| {
+                defer std.c.free(reply);
+                
+                // Position window at a reasonable visible location (centered-ish)
+                // Use the window's current width/height to maintain size
+                const x: i16 = @divTrunc(@as(i16, @intCast(wm.screen.width_in_pixels)), 4);
+                const y: i16 = @divTrunc(@as(i16, @intCast(wm.screen.height_in_pixels)), 4);
+                
+                const values = [_]u32{
+                    @bitCast(@as(i32, x)),
+                    @bitCast(@as(i32, y)),
+                };
+                _ = xcb.xcb_configure_window(wm.conn, win,
+                    xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y, &values);
+            }
+        }
     }
 
     // Step 3: Configure fullscreen if present (no flush yet!)
