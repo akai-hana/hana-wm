@@ -1,8 +1,6 @@
 ### hana's TODO list! ###
 # In here i write the things i want to do to not lose track of the different ideas i come up with while developing 
 
-if im on one workspace and change my focus to any window in there, and then switch to another workspace where i have two or more windows (think one master and N slaves in the stack), alt+tabbing will do nothing. this is obvious, since the last focused window is on another workspace, so there's nothing to actually alt tab, but i don't just want it to not do anything. in this edge case, instead of falling back to doing nothing, i'd like it to fall back to the following behavior: if the currently focused window is a master, switch it to the first slave window in the stack (so, the window that's at the top of the stack, or in order of creation, the one that was created before the master window. that is, assuming no windows were moved). can you please achieve this? TY!
-
 LONG TERM: code a similar tool to drun, replace it instead of rofi in config.toml
 
 somehow make vertical layout left and right

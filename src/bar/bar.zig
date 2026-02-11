@@ -463,10 +463,24 @@ pub fn handleExpose(event: *const xcb.xcb_expose_event_t, wm: *defs.WM) void {
 }
 
 pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t, wm: *defs.WM) void {
-    if (state) |s| if (event.window == wm.root and event.atom == xcb.XCB_ATOM_WM_NAME) {
+    const s = state orelse return;
+    
+    // Handle root window property changes (status bar)
+    if (event.window == wm.root and event.atom == xcb.XCB_ATOM_WM_NAME) {
         status_segment.update(wm, &s.status_text, s.allocator) catch {};
         s.markDirty();
-    };
+        return;
+    }
+    
+    // Handle focused window title changes
+    if (wm.focused_window) |focused_win| {
+        if (event.window == focused_win and 
+            (event.atom == xcb.XCB_ATOM_WM_NAME or 
+             event.atom == utils.getAtomCached("_NET_WM_NAME") catch return)) {
+            // Only mark dirty - the title will be re-rendered on next draw
+            s.markDirty();
+        }
+    }
 }
 
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *defs.WM) void {

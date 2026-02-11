@@ -11,17 +11,21 @@ const State = tiling.State;
 const xcb = defs.xcb;
 
 pub fn tileWithOffset(conn: *xcb.xcb_connection_t, state: *State, windows: []const u32, screen_w: u16, screen_h: u16, y_offset: u16) void {
-    _ = state;
     if (windows.len == 0) return;
 
+    const margin = state.margins();
+    const gap = margin.gap;
+    const border = margin.border;
+
+    // Calculate window geometry respecting gaps and borders
     const rect = utils.Rect{
-        .x = 0,
-        .y = @intCast(y_offset),
-        .width = screen_w,
-        .height = screen_h,
+        .x = @intCast(gap),
+        .y = @intCast(y_offset + gap),
+        .width = screen_w - gap * 2 - border * 2,
+        .height = screen_h - gap * 2 - border * 2,
     };
 
-    // Configure all windows to fullscreen
+    // Configure all windows to same geometry (fullscreen with gaps/borders)
     for (windows) |win| {
         layouts.configureSafe(conn, win, rect);
     }
