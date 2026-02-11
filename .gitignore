@@ -5,3 +5,5 @@ zig-out/
 
 *.orig
 *.rej
+*.swp
+*.swo

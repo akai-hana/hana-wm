@@ -52,10 +52,11 @@ const OFFSCREEN_THRESHOLD_MIN: i32 = -1000;
 /// Maximum X coordinate threshold for detecting off-screen windows
 const OFFSCREEN_THRESHOLD_MAX: i32 = 10000;
 
-/// Event mask for managed windows: enter/leave notifications and button press
+/// Event mask for managed windows: enter/leave notifications, button press, and property changes
 const WINDOW_EVENT_MASK = xcb.XCB_EVENT_MASK_ENTER_WINDOW | 
                           xcb.XCB_EVENT_MASK_LEAVE_WINDOW |
-                          xcb.XCB_EVENT_MASK_BUTTON_PRESS;
+                          xcb.XCB_EVENT_MASK_BUTTON_PRESS |
+                          xcb.XCB_EVENT_MASK_PROPERTY_CHANGE;
 
 /// Helper to check if a window is a system window (root, null, or bar)
 inline fn isSystemWindow(wm: *const WM, win: u32) bool {
