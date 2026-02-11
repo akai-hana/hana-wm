@@ -28,8 +28,8 @@ enabled = true
 ## Layouts are now respected in the exact order specified
 ## Commented out layouts will not appear in the cycle
 layouts = [
-    "monocle",
     "master-stack",
+    "monocle",
     "grid",
     # "fibonacci", # <- not yet implemented
 ]

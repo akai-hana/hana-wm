@@ -41,9 +41,13 @@ fn enterFullscreen(wm: *WM, win: u32, ws: u8) void {
     // If window is off-screen, use a sensible default geometry for when we exit fullscreen
     const is_offscreen = geom.x < -1000 or geom.x > 10000 or geom.y < -1000 or geom.y > 10000;
 
-    // Get the actual border width (DPI-scaled) from tiling state
-    const border_width: u16 = if (tiling.isWindowTiled(win)) blk: {
-        break :blk if (tiling.getState()) |s| s.border_width else 0;
+    // BUGFIX: Query the actual border width directly from the window using XCB
+    // Previously only saved border_width for tiled windows, causing floating windows to lose borders
+    const geom_cookie = xcb.xcb_get_geometry(wm.conn, win);
+    const geom_reply = xcb.xcb_get_geometry_reply(wm.conn, geom_cookie, null);
+    const border_width: u16 = if (geom_reply) |reply| blk: {
+        defer std.c.free(reply);
+        break :blk reply.*.border_width;
     } else 0;
     
     // Use default centered geometry if window is off-screen
@@ -102,6 +106,18 @@ fn exitFullscreen(wm: *WM, win: u32, ws: u8) void {
         tiling.retileCurrentWorkspace(wm, true);
         // OPTIMIZATION: Invalidate cached geometry after retile
         tiling.invalidateWindowGeometry(win);
+        
+        // CRITICAL FIX: Ensure border is restored after retile
+        // Retiling might not restore borders if they were set to 0 during fullscreen
+        if (saved_geom.border_width > 0) {
+            _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, 
+                &[_]u32{saved_geom.border_width});
+            const border_color = if (wm.focused_window == win) 
+                wm.config.tiling.border_focused 
+            else 
+                wm.config.tiling.border_unfocused;
+            _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{border_color});
+        }
     } else {
         // Direct XCB calls to restore window geometry
         const rect = utils.Rect{
@@ -116,16 +132,23 @@ fn exitFullscreen(wm: *WM, win: u32, ws: u8) void {
         values[1] = @bitCast(@as(i32, rect.y));
         values[2] = rect.width;
         values[3] = rect.height;
+        values[4] = saved_geom.border_width;
         
-        var mask: u16 = xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
-            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT;
-        
-        if (saved_geom.border_width > 0) {
-            values[4] = saved_geom.border_width;
-            mask |= xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH;
-        }
+        // BUGFIX: Always restore border_width, even if it's 0
+        // The previous conditional restoration caused border loss for floating windows
+        const mask: u16 = xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
+            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
+            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH;
         
         _ = xcb.xcb_configure_window(wm.conn, win, mask, &values);
+        
+        // CRITICAL FIX: Restore border color after setting border width
+        // Without this, the border is invisible even though width is restored
+        const border_color = if (wm.focused_window == win) 
+            wm.config.tiling.border_focused 
+        else 
+            wm.config.tiling.border_unfocused;
+        _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{border_color});
         
         // OPTIMIZATION: Invalidate cached geometry after restoration
         tiling.invalidateWindowGeometry(win);

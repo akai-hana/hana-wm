@@ -385,7 +385,12 @@ pub fn toggleBarPosition(wm: *defs.WM) !void {
         debug.info("Bar position toggled to: {s}", .{@tagName(wm.config.bar.vertical_position)});
         
         // Retile workspace to adjust for new bar position
-        tiling.retileCurrentWorkspace(wm, true);
+        // BUGFIX: Don't retile if there's a fullscreen window on the current workspace
+        // Fullscreen windows should remain fullscreen and not have their geometry updated
+        const current_ws = workspaces.getCurrentWorkspace() orelse return;
+        if (wm.fullscreen.getForWorkspace(current_ws) == null) {
+            tiling.retileCurrentWorkspace(wm, true);
+        }
     }
 }
 
