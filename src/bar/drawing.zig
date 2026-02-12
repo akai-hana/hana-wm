@@ -1,6 +1,8 @@
-//! Status bar text drawing/rendering using Cairo and Pango
+//! Status bar
+//! Text drawing/rendering with Cairo + Pango
 //! Cairo handles graphics and compositing, Pango handles text layout and fonts
-//! OPTIMIZED: Added metrics caching and color state tracking
+//!
+//! Added metrics caching and color state tracking
 
 const std = @import("std");
 const debug = @import("debug");
@@ -14,33 +16,35 @@ pub const DrawContext = struct {
     width: u16,
     height: u16,
     
-    // Cairo structures (for text rendering only)
+    // Cairo structures (text rendering only)
     surface: *c.cairo_surface_t,
     ctx: *c.cairo_t,
     
-    // XCB graphics context (for background rectangles - like window borders)
+    // XCB graphics context (background rectangles: window borders)
     gc: u32,
     
-    // Pango for text rendering
+    // Pango text rendering
     pango_layout: *c.PangoLayout,
     current_font_desc: ?*c.PangoFontDescription = null,
     
     // Alpha override for window opacity (not used for Cairo anymore)
+    // TODO: verify alpha_override serves any purpose at all? or if it's fine to remove it?
     alpha_override: ?u16 = null,
     
     // Track if this is an ARGB window (32-bit with alpha channel)
+    // TODO: is this variable necessary?
     is_argb: bool = false,
     
     // Transparency value for ARGB windows (0.0 = transparent, 1.0 = opaque)
     transparency: f32 = 1.0,
     
-    // OPTIMIZATION: Cache font metrics to avoid repeated Pango calls
+    // Cache font metrics to avoid calling Pango
     cached_metrics: ?struct {
         ascent: i16,
         descent: i16,
     } = null,
     
-    // OPTIMIZATION: Track last color to avoid redundant Cairo calls
+    // Track last color to avoid calling Cairo
     last_color: ?struct {
         color: u32,
         alpha: ?u16,
@@ -53,7 +57,7 @@ pub const DrawContext = struct {
     pub fn initWithVisual(allocator: std.mem.Allocator, conn: *c.xcb_connection_t, 
                           drawable: u32, width: u16, height: u16, 
                           visual_id: ?u32, colormap_id: u32, dpi: f32, is_argb: bool, transparency: f32) !*DrawContext {
-        _ = colormap_id; // Not needed for Cairo XCB
+        _ = colormap_id; // Not needed for Cairo XCB. TODO: can this line be removed?
         
         const dc = try allocator.create(DrawContext);
         errdefer allocator.destroy(dc);
@@ -90,7 +94,7 @@ pub const DrawContext = struct {
             return error.PangoLayoutCreateFailed;
         };
         
-        // CRITICAL: Set Pango's DPI resolution to match display
+        // Set Pango's DPI resolution to match display
         const pango_context = c.pango_layout_get_context(layout);
         c.pango_cairo_context_set_resolution(pango_context, @floatCast(dpi));
         
@@ -108,7 +112,7 @@ pub const DrawContext = struct {
             .transparency = transparency,
         };
         
-        // Create XCB graphics context for direct rectangle drawing (like window borders)
+        // Create XCB graphics context for direct rectangle drawing (window borders)
         dc.gc = defs.xcb.xcb_generate_id(conn);
         _ = defs.xcb.xcb_create_gc(conn, dc.gc, drawable, 0, null);
         
@@ -130,16 +134,17 @@ pub const DrawContext = struct {
     
     pub fn setAlphaOverride(self: *DrawContext, alpha: ?u16) void {
         self.alpha_override = alpha;
-        // OPTIMIZATION: Invalidate color cache when alpha changes
-        self.last_color = null;
+        // self.last_color = null; // Invalidate color cache when alpha changes //TODO: can this be removed safely? i commented it out and nothing seems broken, but should it stay commented? does it serve any purpose?
     }
     
     pub fn loadFont(self: *DrawContext, font_name: []const u8) !void {
+        //TODO: add comment
         if (self.current_font_desc) |desc| {
             c.pango_font_description_free(desc);
         }
         
         // Convert Xft-style font names to Pango format if needed
+        // TODO: is this needed?
         const pango_name = try convertFontName(self.allocator, font_name);
         defer if (pango_name.ptr != font_name.ptr) self.allocator.free(pango_name);
         
@@ -154,8 +159,9 @@ pub const DrawContext = struct {
         
         c.pango_layout_set_font_description(self.pango_layout, self.current_font_desc);
         
-        // OPTIMIZATION: Invalidate cached metrics when font changes
-        self.cached_metrics = null;
+        // Invalidate cached metrics when font changes
+        // TODO: when would font change? is this necessary?
+        // self.cached_metrics = null;
         
         debug.info("Cairo/Pango font loaded: {s}", .{pango_name});
     }
@@ -163,17 +169,18 @@ pub const DrawContext = struct {
     pub fn loadFonts(self: *DrawContext, font_names: []const []const u8) !void {
         // Pango handles font fallback automatically via fontconfig
         if (font_names.len > 0) {
-            try self.loadFont(font_names[0]);
+            try self.loadFont(font_names[0]); //TODO: add comment
             
             if (font_names.len > 1) {
-                debug.info("Font fallback: Pango will automatically use {} additional fonts for missing glyphs", .{font_names.len - 1});
+                debug.info("More than one font detected ({}). Pango will use these alongside primary font set.", .{font_names.len - 1});
             }
         } else {
-            try self.loadFont("monospace:size=10");
+            try self.loadFont("monospace:size=10"); // Fallback font
         }
     }
     
-    /// Helper: Convert RGB color to Cairo RGBA components
+    /// (Helper) Convert RGB color to Cairo RGBA components
+    /// TODO: can this process be simplified in any way?
     inline fn rgbToRGBA(color: u32, alpha_override: ?u16) struct { f64, f64, f64, f64 } {
         const r = @as(f64, @floatFromInt((color >> 16) & 0xFF)) / 255.0;
         const g = @as(f64, @floatFromInt((color >> 8) & 0xFF)) / 255.0;
@@ -185,7 +192,8 @@ pub const DrawContext = struct {
         return .{ r, g, b, a };
     }
     
-    /// OPTIMIZATION: Set color only if changed (for backgrounds, uses alpha_override)
+    /// Set color only if changed (for backgrounds, uses alpha_override)
+    /// TODO: can this be simplified or removed? the purpose is not clear to me
     inline fn setColorForBackground(self: *DrawContext, color: u32) void {
         if (self.last_color) |last| {
             if (last.color == color and last.alpha == self.alpha_override) {
@@ -198,7 +206,8 @@ pub const DrawContext = struct {
         self.last_color = .{ .color = color, .alpha = self.alpha_override };
     }
     
-    /// OPTIMIZATION: Set color for text (ALWAYS opaque, ignores alpha_override)
+    /// Set text color (always opaque)
+    /// TODO: can anything inside this function be simplified, even if minor things?
     inline fn setColorForText(self: *DrawContext, color: u32) void {
         if (self.last_color) |last| {
             if (last.color == color and last.alpha == null) {
@@ -206,37 +215,38 @@ pub const DrawContext = struct {
             }
         }
         
-        const r, const g, const b, const a = rgbToRGBA(color, null); // Force opaque
+        const r, const g, const b, const a = rgbToRGBA(color, null); // Force opaqueness
         c.cairo_set_source_rgba(self.ctx, r, g, b, a);
         self.last_color = .{ .color = color, .alpha = null };
     }
     
-    /// Clear the entire surface to fully transparent (for ARGB windows)
-    /// This must be called before drawing when using transparency to properly
-    /// initialize the alpha channel. Without this, the window will be opaque
-    /// regardless of the alpha values used in drawing operations.
+    /// Clear surface to set it fully transparent (ARGB windows)
+    /// This must be called before drawing when using transparency, to properly init the alpha channel.
+    /// Without this, the window will be opaque regardless of the alpha values used in drawing operations.
+    /// TODO: this sounds a bit weird. can't this be inlined, or some other process simplified, in order for this to not be needed anymore? or is it strictly necessary?
     pub fn clearTransparent(self: *DrawContext) void {
         c.cairo_save(self.ctx);
         c.cairo_set_operator(self.ctx, c.CAIRO_OPERATOR_CLEAR);
         c.cairo_paint(self.ctx);
         c.cairo_restore(self.ctx);
         
-        // CRITICAL: Explicitly set operator to OVER for proper alpha blending
+        // Explicitly set operator to OVER for proper alpha blending
         // Without this, subsequent drawing operations may not blend correctly
         c.cairo_set_operator(self.ctx, c.CAIRO_OPERATOR_OVER);
         
-        // OPTIMIZATION: Invalidate color cache after clearing
+        // Invalidate color cache after clearing
         self.last_color = null;
     }
     
     pub fn fillRect(self: *DrawContext, x: u16, y: u16, width: u16, height: u16, color: u32) void {
-        // CRITICAL: Use XCB to draw rectangles directly (like window borders)
-        // This avoids Cairo's premultiplied alpha - we use raw RGB pixel values
-        // The compositor will apply transparency, just like with window borders
+        // Use XCB to draw rectangles directly (like window borders)
+        // I previously used Cairo, but Cairo's alpha is premultiplied, which darkens the bar significantly.
+        // Using XCB we can just use raw RGB pixel values and solve this issue.
+        // The compositor will apply transparency, making bar and window borders identical in color tone.
         
         // For ARGB windows, automatically add alpha channel based on transparency setting
         const final_color = if (self.is_argb) blk: {
-            // Convert transparency (0.0-1.0) to alpha byte (0-255)
+            // Convert transparency [0.0-1.0] to alpha byte [0-255]
             const alpha_f32 = std.math.clamp(self.transparency, 0.0, 1.0);
             const alpha_byte: u32 = @intFromFloat(@round(alpha_f32 * 255.0));
             break :blk (alpha_byte << 24) | (color & 0xFFFFFF);
@@ -255,11 +265,12 @@ pub const DrawContext = struct {
         _ = defs.xcb.xcb_poly_fill_rectangle(self.conn, self.drawable, self.gc, 1, &rect);
         
         // Flush to ensure the rectangle is drawn
-        _ = defs.xcb.xcb_flush(self.conn);
+        // TODO: is this flush necessary? i commented it out and nothing seems broken, so is it?
+        // _ = defs.xcb.xcb_flush(self.conn);
     }
     
     pub fn drawText(self: *DrawContext, x: u16, y: u16, text: []const u8, color: u32) !void {
-        self.setColorForText(color);  // Text is ALWAYS opaque
+        self.setColorForText(color); // Text is opaque
         
         // Set text in Pango layout
         c.pango_layout_set_text(self.pango_layout, text.ptr, @intCast(text.len));
@@ -272,21 +283,23 @@ pub const DrawContext = struct {
         c.pango_cairo_show_layout(self.ctx, self.pango_layout);
     }
     
-    pub fn drawTextEllipsis(self: *DrawContext, x: u16, y: u16, text: []const u8, 
-                           max_width: u16, color: u32) !void {
+    //TODO: comment on what this does
+    pub fn drawTextEllipsis(self: *DrawContext, x: u16, y: u16, text: []const u8, max_width: u16, color: u32) !void {
         // Set text
         c.pango_layout_set_text(self.pango_layout, text.ptr, @intCast(text.len));
         
         // Set ellipsize mode and width
+        // TODO: what is an ellipsize mode?
         c.pango_layout_set_width(self.pango_layout, @intCast(@as(i32, max_width) * c.PANGO_SCALE));
         c.pango_layout_set_ellipsize(self.pango_layout, c.PANGO_ELLIPSIZE_END);
         
-        self.setColorForText(color);  // Text is ALWAYS opaque
+        self.setColorForText(color); // Text is opaque
         
-        // OPTIMIZATION: Use cached metrics instead of querying Pango
+        // Use cached metrics instead of querying Pango
         const asc, _ = self.getMetrics();
         const ascent_pixels: f64 = @floatFromInt(asc);
         
+        //TODO: comment
         c.cairo_move_to(self.ctx, @floatFromInt(x), @as(f64, @floatFromInt(y)) - ascent_pixels);
         c.pango_cairo_show_layout(self.ctx, self.pango_layout);
         
@@ -295,9 +308,11 @@ pub const DrawContext = struct {
         c.pango_layout_set_ellipsize(self.pango_layout, c.PANGO_ELLIPSIZE_NONE);
     }
     
+    //TODO: what does this do?
     pub fn textWidth(self: *DrawContext, text: []const u8) u16 {
         c.pango_layout_set_text(self.pango_layout, text.ptr, @intCast(text.len));
         
+        //TODO: what does this do?
         var width: c_int = undefined;
         var height: c_int = undefined;
         c.pango_layout_get_pixel_size(self.pango_layout, &width, &height);
@@ -305,7 +320,7 @@ pub const DrawContext = struct {
         return @intCast(width);
     }
     
-    /// OPTIMIZATION: Get cached metrics or query and cache them
+    /// Get cached metrics or query and cache them
     pub fn getMetrics(self: *DrawContext) struct { i16, i16 } {
         if (self.cached_metrics) |m| {
             return .{ m.ascent, m.descent };
@@ -318,6 +333,7 @@ pub const DrawContext = struct {
         );
         defer c.pango_font_metrics_unref(metrics);
         
+        //TODO: what is this?
         const ascent = c.pango_font_metrics_get_ascent(metrics);
         const descent = c.pango_font_metrics_get_descent(metrics);
         
@@ -346,11 +362,14 @@ pub const DrawContext = struct {
     }
 };
 
-// Helper functions (unchanged)
+// Helper functions
+
+//TODO: comment
 fn findVisualType(conn: *c.xcb_connection_t, visual_id: u32) ?*c.xcb_visualtype_t {
     const setup = c.xcb_get_setup(conn);
     var screen_iter = c.xcb_setup_roots_iterator(setup);
     
+    //TODO: comment
     while (screen_iter.rem > 0) {
         const screen = screen_iter.data;
         var depth_iter = c.xcb_screen_allowed_depths_iterator(screen);
@@ -372,6 +391,7 @@ fn findVisualType(conn: *c.xcb_connection_t, visual_id: u32) ?*c.xcb_visualtype_
     return null;
 }
 
+//TODO: comment
 fn getDefaultVisualType(screen: *c.xcb_screen_t) *c.xcb_visualtype_t {
     var depth_iter = c.xcb_screen_allowed_depths_iterator(screen);
     while (depth_iter.rem > 0) {
@@ -384,6 +404,7 @@ fn getDefaultVisualType(screen: *c.xcb_screen_t) *c.xcb_visualtype_t {
     unreachable;
 }
 
+//TODO: comment
 fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const u8 {
     if (std.mem.indexOfScalar(u8, xft_name, ':') == null) {
         return xft_name;
@@ -436,4 +457,3 @@ fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const 
     
     return result.toOwnedSlice(allocator);
 }
-

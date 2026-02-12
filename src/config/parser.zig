@@ -186,6 +186,24 @@ pub const ParseError = error{
     OutOfMemory,
 };
 
+/// CONSOLIDATED: Public color parsing function (used by both parser and config)
+pub fn parseColor(value: []const u8) !u32 {
+    if (value.len == 0) return error.InvalidColor;
+
+    const offset: u8 = if (value[0] == '#') 1 
+        else if (value.len > 2 and value[0] == '0' and (value[1] == 'x' or value[1] == 'X')) 2 
+        else 0;
+    const hex_part = value[offset..];
+
+    if (hex_part.len == 0) return error.InvalidColor;
+
+    const color = std.fmt.parseInt(u32, hex_part, 16) catch return error.InvalidColor;
+
+    if (color > 0xFFFFFF) return error.InvalidColor;
+
+    return color;
+}
+
 const Parser = struct {
     allocator: std.mem.Allocator,
     content: []const u8,
@@ -331,24 +349,6 @@ const Parser = struct {
         return try result.toOwnedSlice(allocator);
     }
 
-    // OPTIMIZATION: Inline color parsing
-    inline fn parseColor(_: *Parser, value: []const u8) !u32 {
-        if (value.len == 0) return error.InvalidColor;
-
-        const offset: u8 = if (value[0] == '#') 1 
-            else if (value.len > 2 and value[0] == '0' and (value[1] == 'x' or value[1] == 'X')) 2 
-            else 0;
-        const hex_part = value[offset..];
-
-        if (hex_part.len == 0) return error.InvalidColor;
-
-        const color = std.fmt.parseInt(u32, hex_part, 16) catch return error.InvalidColor;
-
-        if (color > 0xFFFFFF) return error.InvalidColor;
-
-        return color;
-    }
-
     fn parseArray(self: *Parser, allocator: std.mem.Allocator) ParseError!std.ArrayList(Value) {
         _ = self.consume();
 
@@ -420,7 +420,7 @@ const Parser = struct {
             };
 
         if (looks_like_color) {
-            if (self.parseColor(raw)) |color| {
+            if (parseColor(raw)) |color| {
                 return .{ .color = color };
             } else |_| {
                 // Fallback: try as integer

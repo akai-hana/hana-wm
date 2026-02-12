@@ -1,6 +1,6 @@
 //! C bindings for Cairo and Pango
-//! Manual extern declarations (no @cImport) for better compile times and control
-//! NOTE: XCB types come from defs.zig via @cImport
+//! Manual extern declarations for better compile times and control (and because @cImport gave me lots of trouble)
+//! XCB types do come from defs.zig via @cImport
 
 const defs = @import("defs");
 
@@ -17,13 +17,12 @@ pub const xcb_screen_next = defs.xcb.xcb_screen_next;
 pub const xcb_depth_next = defs.xcb.xcb_depth_next;
 pub const xcb_visualtype_next = defs.xcb.xcb_visualtype_next;
 
-// ============================================================================
-// Cairo Types and Functions
-// ============================================================================
+// CAIRO TYPES AND FUNCTIONS //
 
 pub const cairo_surface_t = opaque {};
 pub const cairo_t = opaque {};
 
+//TODO: the purpose of this function is a bit unclear
 pub const cairo_format_t = enum(c_int) {
     ARGB32 = 0,
     RGB24 = 1,
@@ -56,7 +55,7 @@ pub extern fn cairo_surface_mark_dirty(surface: *cairo_surface_t) void;
 pub extern fn cairo_create(surface: *cairo_surface_t) ?*cairo_t;
 pub extern fn cairo_destroy(cr: *cairo_t) void;
 
-// Cairo operator modes (for transparency)
+// Cairo operator modes enum
 pub const cairo_operator_t = enum(c_int) {
     CLEAR = 0,
     SOURCE = 1,
@@ -95,6 +94,7 @@ pub const CAIRO_OPERATOR_SOURCE = cairo_operator_t.SOURCE;
 pub const CAIRO_OPERATOR_OVER = cairo_operator_t.OVER;
 
 // Drawing operations
+// TODO: can the "f64"s be made smaller somehow to use less memory?
 pub extern fn cairo_set_source_rgb(cr: *cairo_t, red: f64, green: f64, blue: f64) void;
 pub extern fn cairo_set_source_rgba(cr: *cairo_t, red: f64, green: f64, blue: f64, alpha: f64) void;
 pub extern fn cairo_rectangle(cr: *cairo_t, x: f64, y: f64, width: f64, height: f64) void;
@@ -104,17 +104,15 @@ pub extern fn cairo_line_to(cr: *cairo_t, x: f64, y: f64) void;
 pub extern fn cairo_stroke(cr: *cairo_t) void;
 pub extern fn cairo_set_line_width(cr: *cairo_t, width: f64) void;
 
-// State management (for save/restore)
+// State management (save/restore)
 pub extern fn cairo_save(cr: *cairo_t) void;
 pub extern fn cairo_restore(cr: *cairo_t) void;
 
-// Operator and paint (for transparency clearing)
+// Operator and paint (transparency clearing)
 pub extern fn cairo_set_operator(cr: *cairo_t, op: cairo_operator_t) void;
 pub extern fn cairo_paint(cr: *cairo_t) void;
 
-// ============================================================================
-// Pango Types and Constants
-// ============================================================================
+// PANGO TYPES AND CONSTANTS //
 
 pub const PangoLayout = opaque {};
 pub const PangoContext = opaque {};
@@ -122,6 +120,7 @@ pub const PangoFontDescription = opaque {};
 pub const PangoFontMetrics = opaque {};
 pub const PangoLayoutLine = opaque {};
 
+//TODO: is this really necessary?
 pub const PANGO_SCALE: c_int = 1024;
 
 pub const PangoEllipsizeMode = enum(c_int) {
@@ -144,18 +143,15 @@ pub const PangoRectangle = extern struct {
     height: c_int,
 };
 
-// ============================================================================
 // Pango-Cairo Functions
-// ============================================================================
 
 pub extern fn pango_cairo_create_layout(cr: *cairo_t) ?*PangoLayout;
 pub extern fn pango_cairo_show_layout(cr: *cairo_t, layout: *PangoLayout) void;
 pub extern fn pango_cairo_context_set_resolution(context: *PangoContext, dpi: f64) void;
 
-// ============================================================================
-// Pango Layout Functions
-// ============================================================================
+// PANGO LAYOUT FUNCTIONS //
 
+//TODO: i dont quite get all of this. what does all of this below do?
 pub extern fn pango_layout_set_text(layout: *PangoLayout, text: [*]const u8, length: c_int) void;
 pub extern fn pango_layout_set_markup(layout: *PangoLayout, markup: [*]const u8, length: c_int) void;
 pub extern fn pango_layout_set_font_description(layout: *PangoLayout, desc: ?*PangoFontDescription) void;
@@ -166,13 +162,11 @@ pub extern fn pango_layout_set_width(layout: *PangoLayout, width: c_int) void;
 pub extern fn pango_layout_set_ellipsize(layout: *PangoLayout, ellipsize: PangoEllipsizeMode) void;
 pub extern fn pango_layout_get_baseline(layout: *PangoLayout) c_int;
 
-// NEW: Functions for baselineYForText to get actual font metrics
+// Functions for baselineYForText to get actual font metrics
 pub extern fn pango_layout_get_line_readonly(layout: *PangoLayout, line: c_int) ?*const PangoLayoutLine;
 pub extern fn pango_layout_line_get_pixel_extents(line: *const PangoLayoutLine, ink_rect: ?*PangoRectangle, logical_rect: ?*PangoRectangle) void;
 
-// ============================================================================
 // Pango Font Functions
-// ============================================================================
 
 pub extern fn pango_font_description_from_string(str: [*:0]const u8) ?*PangoFontDescription;
 pub extern fn pango_font_description_free(desc: *PangoFontDescription) void;
@@ -188,9 +182,7 @@ pub extern fn pango_font_metrics_get_ascent(metrics: *PangoFontMetrics) c_int;
 pub extern fn pango_font_metrics_get_descent(metrics: *PangoFontMetrics) c_int;
 pub extern fn pango_font_metrics_unref(metrics: *PangoFontMetrics) void;
 
-// ============================================================================
 // GLib/GObject Functions (for Pango)
-// ============================================================================
 
 pub extern fn g_object_unref(object: *anyopaque) void;
 

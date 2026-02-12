@@ -1,9 +1,11 @@
 //! Timer management for bar clock updates
-//! OPTIMIZATION: Dynamic timer control to reduce idle CPU to near-zero
+//! Dynamic timer control to reduce idle CPU to near-zero
 
-const std = @import("std");
-const defs = @import("defs");
-const bar = @import("bar");
+//TODO: consolidate this file into the clock module itself
+
+const std   = @import("std");
+const defs  = @import("defs");
+const bar   = @import("bar");
 const debug = @import("debug");
 
 // Timer state for dynamic enable/disable to reduce idle CPU
@@ -18,9 +20,6 @@ pub fn setTimerFd(fd: i32) void {
 
 /// Check if clock should be running based on bar state
 fn shouldClockRun(wm: *defs.WM) bool {
-    // Don't run timer if bar is disabled
-    if (!wm.config.bar.enabled) return false;
-    
     // Don't run timer if bar is hidden (fullscreen)
     if (!bar.isVisible()) return false;
     
@@ -30,6 +29,7 @@ fn shouldClockRun(wm: *defs.WM) bool {
             if (seg == .clock) return true;
         }
     }
+
     return false;
 }
 
@@ -39,7 +39,7 @@ fn enableTimer() void {
     
     const spec = std.os.linux.itimerspec{
         .it_interval = .{ .sec = 1, .nsec = 0 },
-        .it_value = .{ .sec = 1, .nsec = 0 }
+        .it_value    = .{ .sec = 1, .nsec = 0 }
     };
     
     if (std.os.linux.timerfd_settime(@intCast(global_timer_fd), .{}, &spec, null) >= 0) {
@@ -50,16 +50,19 @@ fn enableTimer() void {
 
 /// Disable the timer (stops ticks, reduces idle CPU)
 fn disableTimer() void {
-    if (!timer_enabled) return;
+    if (!timer_enabled) {
+        debug.info("Timer is already disabled...", .{});
+        return;
+    } 
     
     const spec = std.os.linux.itimerspec{
         .it_interval = .{ .sec = 0, .nsec = 0 },
-        .it_value = .{ .sec = 0, .nsec = 0 }
+        .it_value    = .{ .sec = 0, .nsec = 0 }
     };
     
     if (std.os.linux.timerfd_settime(@intCast(global_timer_fd), .{}, &spec, null) >= 0) {
         timer_enabled = false;
-        debug.info("Clock timer disabled (idle CPU optimization)", .{});
+        debug.info("Clock timer disabled", .{});
     }
 }
 

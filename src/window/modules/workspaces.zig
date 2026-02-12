@@ -228,58 +228,59 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
     const old_workspace = &s.workspaces[old_ws];
     const new_workspace = &s.workspaces[new_ws];
 
+    const fs_info = wm.fullscreen.getForWorkspace(new_ws);
+
     // Pre-set focused_window for correct border colors
     wm.focused_window = if (new_workspace.windows.items().len > 0)
         new_workspace.windows.items()[0] else null;
-
-    const fs_info = wm.fullscreen.getForWorkspace(new_ws);
 
     // CRITICAL: Grab server for atomic switching (no intermediate frames)
     _ = xcb.xcb_grab_server(wm.conn);
     defer _ = xcb.xcb_ungrab_server(wm.conn);
 
-    // Step 1: Hide old workspace windows (no flush yet!)
-    for (old_workspace.windows.items()) |win| hideWindow(wm, win);
+    // Step 1: Hide ALL old workspace windows
+    for (old_workspace.windows.items()) |win| {
+        hideWindow(wm, win);
+    }
 
-    // Step 2: Position new workspace windows (no flush yet!)
-    // CRITICAL: Handle all cases properly
+    // Step 2: If there's a fullscreen window, configure it FIRST and ONLY
+    // Don't position any other windows - they should stay hidden
     if (fs_info) |info| {
-        // Case 1: There's a fullscreen window on this workspace
-        // Skip positioning all windows - configureFullscreen will handle the fullscreen window
-        // and other windows can stay off-screen since they're not visible anyway
-        _ = info; // Suppress unused variable warning
-    } else if (wm.config.tiling.enabled) {
-        // Case 2: Tiling enabled, no fullscreen - retile all windows
-        tiling.retileCurrentWorkspace(wm, false); // No flush - atomic operation
+        configureFullscreen(wm, info);
     } else {
-        // Case 3: Tiling disabled, no fullscreen - manually position windows to be visible
-        for (new_workspace.windows.items()) |win| {
-            // Get current geometry to preserve window sizes
-            const geom_cookie = xcb.xcb_get_geometry(wm.conn, win);
-            const geom_reply = xcb.xcb_get_geometry_reply(wm.conn, geom_cookie, null);
-            
-            if (geom_reply) |reply| {
-                defer std.c.free(reply);
+        // No fullscreen - position windows based on RUNTIME tiling state
+        // CRITICAL FIX: Check tiling.State.enabled, not config.tiling.enabled!
+        // When user toggles tiling with Mod+N, it changes State.enabled, not config
+        const tiling_state = tiling.getState();
+        const tiling_enabled = if (tiling_state) |ts| ts.enabled else false;
+        
+        if (tiling_enabled) {
+            // Tiling enabled - let tiling system position windows
+            tiling.retileCurrentWorkspace(wm, false);
+        } else {
+            // Tiling disabled - manually position windows to visible locations
+            for (new_workspace.windows.items()) |win| {
+                const geom_cookie = xcb.xcb_get_geometry(wm.conn, win);
+                const geom_reply = xcb.xcb_get_geometry_reply(wm.conn, geom_cookie, null);
                 
-                // Position window at a reasonable visible location (centered-ish)
-                // Use the window's current width/height to maintain size
-                const x: i16 = @divTrunc(@as(i16, @intCast(wm.screen.width_in_pixels)), 4);
-                const y: i16 = @divTrunc(@as(i16, @intCast(wm.screen.height_in_pixels)), 4);
-                
-                const values = [_]u32{
-                    @bitCast(@as(i32, x)),
-                    @bitCast(@as(i32, y)),
-                };
-                _ = xcb.xcb_configure_window(wm.conn, win,
-                    xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y, &values);
+                if (geom_reply) |reply| {
+                    defer std.c.free(reply);
+                    
+                    const x: i16 = @divTrunc(@as(i16, @intCast(wm.screen.width_in_pixels)), 4);
+                    const y: i16 = @divTrunc(@as(i16, @intCast(wm.screen.height_in_pixels)), 4);
+                    
+                    const values = [_]u32{
+                        @bitCast(@as(i32, x)),
+                        @bitCast(@as(i32, y)),
+                    };
+                    _ = xcb.xcb_configure_window(wm.conn, win,
+                        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y, &values);
+                }
             }
         }
     }
 
-    // Step 3: Configure fullscreen if present (no flush yet!)
-    if (fs_info) |info| configureFullscreen(wm, info);
-
-    // Step 4: NOW flush everything atomically
+    // Step 3: NOW flush everything atomically
     utils.flush(wm.conn);
 
     // Bar state management (after positioning complete)
