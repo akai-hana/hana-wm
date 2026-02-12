@@ -154,7 +154,7 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) void {
             }
             return;
         };
-        s.window_to_workspace.put(win, target_ws) catch {};
+        s.window_to_workspace.put(win, target_ws) catch |e| debug.warnOnErr(e, "window_to_workspace after untracked add");
         return;
     };
 
@@ -165,14 +165,14 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) void {
     s.workspaces[target_ws].add(win) catch |err| {
         debug.err("Failed to add window to workspace {}: {}", .{ target_ws, err });
         // CRITICAL: Rollback - add back to original workspace to maintain consistency
-        s.workspaces[from_ws].add(win) catch {};
+        s.workspaces[from_ws].add(win) catch |e| debug.warnOnErr(e, "workspace rollback re-add");
         // Also ensure it's removed from tiling if add failed
         if (tiling_state) |ts| {
             _ = ts.windows.remove(win);
         }
         return;
     };
-    s.window_to_workspace.put(win, target_ws) catch {};
+    s.window_to_workspace.put(win, target_ws) catch |e| debug.warnOnErr(e, "window_to_workspace after move");
 
     // OPTIMIZATION: Simplified visibility handling using dwm approach
     if (from_ws == s.current) {
@@ -195,6 +195,7 @@ pub fn switchTo(wm: *WM, ws_id: u8) void {
     if (ws_id >= s.workspaces.len or ws_id == s.current) return;
     const old_ws = s.current;
     s.current = ws_id;
+    std.debug.assert(s.current < s.workspaces.len);  // Current workspace must be valid index
     executeSwitch(wm, old_ws, ws_id);
 }
 
@@ -233,6 +234,7 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
     // Pre-set focused_window for correct border colors
     wm.focused_window = if (new_workspace.windows.items().len > 0)
         new_workspace.windows.items()[0] else null;
+    std.debug.assert(wm.focused_window == null or wm.hasWindow(wm.focused_window.?));  // Focused window must be valid if set
 
     // CRITICAL: Grab server for atomic switching (no intermediate frames)
     _ = xcb.xcb_grab_server(wm.conn);

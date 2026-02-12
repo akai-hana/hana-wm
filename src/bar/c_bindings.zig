@@ -4,18 +4,10 @@
 
 const defs = @import("defs");
 
-// Re-export XCB types and functions from defs.xcb for use in drawing.zig
-pub const xcb_connection_t = defs.xcb.xcb_connection_t;
-pub const xcb_screen_t = defs.xcb.xcb_screen_t;
-pub const xcb_visualtype_t = defs.xcb.xcb_visualtype_t;
-pub const xcb_drawable_t = defs.xcb.xcb_drawable_t;
-pub const xcb_get_setup = defs.xcb.xcb_get_setup;
-pub const xcb_setup_roots_iterator = defs.xcb.xcb_setup_roots_iterator;
-pub const xcb_screen_allowed_depths_iterator = defs.xcb.xcb_screen_allowed_depths_iterator;
-pub const xcb_depth_visuals_iterator = defs.xcb.xcb_depth_visuals_iterator;
-pub const xcb_screen_next = defs.xcb.xcb_screen_next;
-pub const xcb_depth_next = defs.xcb.xcb_depth_next;
-pub const xcb_visualtype_next = defs.xcb.xcb_visualtype_next;
+// XCB types referenced in Cairo extern declarations below
+const xcb_connection_t = defs.xcb.xcb_connection_t;
+const xcb_drawable_t   = defs.xcb.xcb_drawable_t;
+const xcb_visualtype_t = defs.xcb.xcb_visualtype_t;
 
 // CAIRO TYPES AND FUNCTIONS //
 
@@ -88,11 +80,6 @@ pub const cairo_operator_t = enum(c_int) {
     HSL_LUMINOSITY = 28,
 };
 
-// Export operators as constants for convenience
-pub const CAIRO_OPERATOR_CLEAR = cairo_operator_t.CLEAR;
-pub const CAIRO_OPERATOR_SOURCE = cairo_operator_t.SOURCE;
-pub const CAIRO_OPERATOR_OVER = cairo_operator_t.OVER;
-
 // Drawing operations
 // TODO: can the "f64"s be made smaller somehow to use less memory?
 pub extern fn cairo_set_source_rgb(cr: *cairo_t, red: f64, green: f64, blue: f64) void;
@@ -129,12 +116,6 @@ pub const PangoEllipsizeMode = enum(c_int) {
     MIDDLE = 2,
     END = 3,
 };
-
-// Export enum values as constants for convenience
-pub const PANGO_ELLIPSIZE_NONE = PangoEllipsizeMode.NONE;
-pub const PANGO_ELLIPSIZE_START = PangoEllipsizeMode.START;
-pub const PANGO_ELLIPSIZE_MIDDLE = PangoEllipsizeMode.MIDDLE;
-pub const PANGO_ELLIPSIZE_END = PangoEllipsizeMode.END;
 
 pub const PangoRectangle = extern struct {
     x: c_int,

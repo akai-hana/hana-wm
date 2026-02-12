@@ -3,6 +3,7 @@
 const std = @import("std");
 const defs = @import("defs");
 const xcb = defs.xcb;
+const constants = @import("constants");
 
 const window = @import("window");
 const input = @import("input");
@@ -36,8 +37,10 @@ fn handleButtonPressCombined(event: *anyopaque, wm: *defs.WM) void {
 }
 
 // OPTIMIZATION: Compile-time event dispatch table with minimal size
+// Size is based on highest X11 event type we handle (XCB_PROPERTY_NOTIFY = 28)
+// We use 36 to safely cover all event types with some margin
 const dispatch_table = blk: {
-    var table = [_]?EventHandler{null} ** 36;
+    var table = [_]?EventHandler{null} ** constants.Sizes.EVENT_DISPATCH_TABLE;
     table[xcb.XCB_KEY_PRESS] = @ptrCast(&input.handleKeyPress);
     table[xcb.XCB_BUTTON_PRESS] = @ptrCast(&handleButtonPressCombined);
     table[xcb.XCB_BUTTON_RELEASE] = @ptrCast(&input.handleButtonRelease);

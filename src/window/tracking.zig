@@ -124,16 +124,12 @@ pub const tracking = struct {
         }
     }
     
-    pub fn remove(self: *tracking, win: u32) bool {
+    fn removeImpl(self: *tracking, win: u32, comptime ordered: bool) bool {
         if (self.small) |*s| {
-            // Find and remove from small array
             for (s.items[0..s.len], 0..) |w, i| {
                 if (w == win) {
-                    // Shift elements left
                     var j: u8 = @intCast(i);
-                    while (j < s.len - 1) : (j += 1) {
-                        s.items[j] = s.items[j + 1];
-                    }
+                    while (j < s.len - 1) : (j += 1) s.items[j] = s.items[j + 1];
                     s.len -= 1;
                     return true;
                 }
@@ -141,52 +137,18 @@ pub const tracking = struct {
             return false;
         } else if (self.large) |*l| {
             if (!l.set.remove(win)) return false;
-            
             if (std.mem.indexOfScalar(u32, l.list.items, win)) |idx| {
-                _ = l.list.swapRemove(idx);
-                
-                // OPTIMIZATION: Demote to small if count drops below threshold
-                if (l.list.items.len <= DEMOTION_THRESHOLD) {
-                    self.demoteToSmall();
-                }
-                
+                if (ordered) _ = l.list.orderedRemove(idx) else _ = l.list.swapRemove(idx);
+                if (l.list.items.len <= DEMOTION_THRESHOLD) self.demoteToSmall();
                 return true;
             }
             return false;
         }
         return false;
     }
-    
-    pub fn removeOrdered(self: *tracking, win: u32) bool {
-        if (self.small) |*s| {
-            // Same as remove() for small array
-            for (s.items[0..s.len], 0..) |w, i| {
-                if (w == win) {
-                    var j: u8 = @intCast(i);
-                    while (j < s.len - 1) : (j += 1) {
-                        s.items[j] = s.items[j + 1];
-                    }
-                    s.len -= 1;
-                    return true;
-                }
-            }
-            return false;
-        } else if (self.large) |*l| {
-            if (!l.set.remove(win)) return false;
-            
-            if (std.mem.indexOfScalar(u32, l.list.items, win)) |idx| {
-                _ = l.list.orderedRemove(idx);
-                
-                if (l.list.items.len <= DEMOTION_THRESHOLD) {
-                    self.demoteToSmall();
-                }
-                
-                return true;
-            }
-            return false;
-        }
-        return false;
-    }
+
+    pub fn remove(self: *tracking, win: u32) bool { return self.removeImpl(win, false); }
+    pub fn removeOrdered(self: *tracking, win: u32) bool { return self.removeImpl(win, true); }
     
     pub inline fn items(self: *const tracking) []const u32 {
         if (self.small) |s| {

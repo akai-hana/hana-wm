@@ -217,15 +217,15 @@ fn getDefaultConfig(allocator: std.mem.Allocator) defs.Config {
     
     // Add default tiling layout
     const default_layout = allocator.dupe(u8, "master_left") catch "master_left";
-    cfg.tiling.layouts.append(allocator, default_layout) catch {};
+    cfg.tiling.layouts.append(allocator, default_layout) catch |e| debug.warnOnErr(e, "default layout append");
     cfg.tiling.layout = if (cfg.tiling.layouts.items.len > 0) cfg.tiling.layouts.items[0] else "master_left";
     
     for (0..9) |i| {
         const icon = std.fmt.allocPrint(allocator, "{}", .{i + 1}) catch continue;
-        cfg.bar.workspace_icons.append(allocator, icon) catch {};
+        cfg.bar.workspace_icons.append(allocator, icon) catch |e| debug.warnOnErr(e, "workspace icon append");
     }
     
-    initDefaultBarLayout(allocator, &cfg) catch {};
+    initDefaultBarLayout(allocator, &cfg) catch |e| debug.warnOnErr(e, "default bar layout init");
     return cfg;
 }
 

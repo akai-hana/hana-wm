@@ -1,9 +1,9 @@
 ///! Current layout indicator segment
 
-const std = @import("std");
-const defs = @import("defs");
+const std     = @import("std");
+const defs    = @import("defs");
 const drawing = @import("drawing");
-const tiling = @import("tiling");
+const tiling  = @import("tiling");
 
 const layouts = [_][]const u8{ "[]=", "[M]", "[+]", "[@]" };
 
