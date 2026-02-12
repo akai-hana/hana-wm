@@ -2,6 +2,7 @@
 const std = @import("std");
 
 const debug = @import("debug");
+
 // Terminal detection - ordered by preference
 const TERMINALS = [_][]const u8{
     "ghostty",
@@ -33,32 +34,41 @@ const FONTS = [_][]const u8{
     "monospace", // System fallback
 };
 
-/// Detect first available terminal from the system
-pub fn detectTerminal(allocator: std.mem.Allocator) ![]const u8 {
-    // OPTIMIZATION: Use inline for to allow compiler to unroll
-    inline for (TERMINALS) |terminal| {
-        if (isCommandAvailable(allocator, terminal)) {
-            debug.info("Detected terminal: {s}", .{terminal});
-            return terminal;
+// CONSOLIDATED: Generic detection helper to eliminate duplication
+fn detectFromList(
+    comptime list: []const []const u8,
+    comptime checkFn: fn([]const u8) bool,
+    item_type: []const u8,
+    fallback: []const u8,
+) []const u8 {
+    inline for (list) |item| {
+        if (checkFn(item)) {
+            debug.info("Detected {s}: {s}", .{item_type, item});
+            return item;
         }
     }
-    
-    debug.warn("No preferred terminal found, using 'xterm'", .{});
-    return "xterm";
+    debug.warn("No preferred {s} found, using '{s}'", .{item_type, fallback});
+    return fallback;
+}
+
+/// Detect first available terminal from the system
+pub fn detectTerminal(_: std.mem.Allocator) ![]const u8 {
+    return detectFromList(
+        &TERMINALS,
+        struct { fn check(cmd: []const u8) bool { return isCommandAvailable(std.heap.c_allocator, cmd); } }.check,
+        "terminal",
+        "xterm"
+    );
 }
 
 /// Detect first available font from the system
 pub fn detectFont(_: std.mem.Allocator) ![]const u8 {
-    // OPTIMIZATION: Use inline for to allow compiler to unroll
-    inline for (FONTS) |font| {
-        if (isFontAvailable(font)) {
-            debug.info("Detected font: {s}", .{font});
-            return font;
-        }
-    }
-    
-    debug.warn("No preferred font found, using 'monospace'", .{});
-    return "monospace";
+    return detectFromList(
+        &FONTS,
+        isFontAvailable,
+        "font",
+        "monospace"
+    );
 }
 
 /// OPTIMIZATION: Inline helper for path checking

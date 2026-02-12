@@ -1,105 +1,94 @@
-//! Debug logging with automatic tags - GUARANTEED to work based on build mode
-//! 
-//! This version uses build_options to check the optimization mode,
-//! ensuring debug calls are only active when built with -Doptimize=Debug.
+//! Debug logging with automatic tags
+//! Using build_options to check optimization mode,
+//! for debug calls to only be active when built with -Doptimize=Debug.
 
 const std = @import("std");
 const build_options = @import("build_options");
 
 /// Extract module name from source location
-inline fn extractModuleName(comptime src: std.builtin.SourceLocation) []const u8 {
+fn getModuleName() []const u8 {
+    const src = @src();
     const file = src.file;
-    comptime var start: usize = 0;
-    
-    inline for (file, 0..) |c, i| {
+    var start: usize = 0;
+    for (file, 0..) |c, i| {
         if (c == '/' or c == '\\') start = i + 1;
     }
-    
     const basename = file[start..];
-    comptime var end = basename.len;
-    
+    var end = basename.len;
     if (basename.len >= 4 and std.mem.eql(u8, basename[basename.len-4..], ".zig")) {
         end = basename.len - 4;
     }
-    
     return basename[0..end];
 }
 
-/// Check build_options.enable_debug_logging instead of builtin.mode
-/// This ensures it matches your -Doptimize flag
+/// Check if debug logging is enabled
+inline fn debug_enabled() bool {
+    return build_options.enable_debug_logging;
+}
 
 pub inline fn err(comptime fmt: []const u8, args: anytype) void {
-    if (!build_options.enable_debug_logging) return;
-    
-    const module = comptime extractModuleName(@src());
-    const tagged = comptime "[" ++ module ++ "] " ++ fmt;
-    std.log.err(tagged, args);
+    if (!debug_enabled()) return;
+    const module = getModuleName();
+    std.log.err("[" ++ module ++ "] " ++ fmt, args);
 }
 
 pub inline fn warn(comptime fmt: []const u8, args: anytype) void {
-    if (!build_options.enable_debug_logging) return;
-    
-    const module = comptime extractModuleName(@src());
-    const tagged = comptime "[" ++ module ++ "] " ++ fmt;
-    std.log.warn(tagged, args);
+    if (!debug_enabled()) return;
+    const module = getModuleName();
+    std.log.warn("[" ++ module ++ "] " ++ fmt, args);
 }
 
 pub inline fn info(comptime fmt: []const u8, args: anytype) void {
-    if (!build_options.enable_debug_logging) return;
-    
-    const module = comptime extractModuleName(@src());
-    const tagged = comptime "[" ++ module ++ "] " ++ fmt;
-    std.log.info(tagged, args);
+    if (!debug_enabled()) return;
+    const module = getModuleName();
+    std.log.info("[" ++ module ++ "] " ++ fmt, args);
 }
 
 pub inline fn debug(comptime fmt: []const u8, args: anytype) void {
-    if (!build_options.enable_debug_logging) return;
-    
-    const module = comptime extractModuleName(@src());
-    const tagged = comptime "[" ++ module ++ "] " ++ fmt;
-    std.log.debug(tagged, args);
+    if (!debug_enabled()) return;
+    const module = getModuleName();
+    std.log.debug("[" ++ module ++ "] " ++ fmt, args);
 }
 
 pub inline fn errIf(condition: bool, comptime fmt: []const u8, args: anytype) void {
-    if (!build_options.enable_debug_logging) return;
-    if (!condition) return;
-    err(fmt, args);
+    if (!debug_enabled() or !condition) return;
+    const module = getModuleName();
+    std.log.err("[" ++ module ++ "] " ++ fmt, args);
 }
 
 pub inline fn warnIf(condition: bool, comptime fmt: []const u8, args: anytype) void {
-    if (!build_options.enable_debug_logging) return;
-    if (!condition) return;
-    warn(fmt, args);
+    if (!debug_enabled() or !condition) return;
+    const module = getModuleName();
+    std.log.warn("[" ++ module ++ "] " ++ fmt, args);
 }
 
 pub inline fn infoIf(condition: bool, comptime fmt: []const u8, args: anytype) void {
-    if (!build_options.enable_debug_logging) return;
-    if (!condition) return;
-    info(fmt, args);
+    if (!debug_enabled() or !condition) return;
+    const module = getModuleName();
+    std.log.info("[" ++ module ++ "] " ++ fmt, args);
 }
 
 pub inline fn debugIf(condition: bool, comptime fmt: []const u8, args: anytype) void {
-    if (!build_options.enable_debug_logging) return;
-    if (!condition) return;
-    debug(fmt, args);
+    if (!debug_enabled() or !condition) return;
+    const module = getModuleName();
+    std.log.debug("[" ++ module ++ "] " ++ fmt, args);
 }
 
 pub inline fn assert(condition: bool, comptime message: []const u8) void {
-    if (!build_options.enable_debug_logging) return;
-    if (!condition) {
-        const module = comptime extractModuleName(@src());
-        @panic("[" ++ module ++ "] Assertion failed: " ++ message);
-    }
+    if (!debug_enabled() or condition) return;
+    const module = getModuleName();
+    @panic("[" ++ module ++ "] Assertion failed: " ++ message);
 }
 
 pub inline fn trace(comptime func_name: []const u8) void {
-    if (!build_options.enable_debug_logging) return;
-    const module = comptime extractModuleName(@src());
+    if (!debug_enabled()) return;
+    const module = getModuleName();
     std.log.debug("[{s}] -> {s}", .{ module, func_name });
 }
 
 pub inline fn print(comptime label: []const u8, value: anytype) void {
-    if (!build_options.enable_debug_logging) return;
-    const module = comptime extractModuleName(@src());
+    if (!debug_enabled()) return;
+    const module = getModuleName();
     std.log.debug("[{s}] {s} = {any}", .{ module, label, value });
 }
+

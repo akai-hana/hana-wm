@@ -377,6 +377,12 @@ pub fn retileIfDirty(wm: *WM) void {
 fn retile(wm: *WM, screen: utils.Rect) void {
     const s = StateManager.get(true) orelse return;
     
+    // Don't retile if there's a fullscreen window on current workspace
+    const current_ws = workspaces.getCurrentWorkspace() orelse return;
+    if (wm.fullscreen.getForWorkspace(current_ws)) |_| {
+        return; // Fullscreen window present - don't retile anything
+    }
+    
     // Get windows on current workspace
     var ws_windows = std.ArrayListUnmanaged(u32){};
     defer ws_windows.deinit(wm.allocator);
@@ -576,34 +582,52 @@ pub fn swapWithMaster(wm: *WM) void {
     const focused = wm.focused_window orelse return;
     
     if (!s.windows.contains(focused)) return;
+    if (!workspaces.isOnCurrentWorkspace(focused)) return;
     
-    const windows = s.windows.items();
-    if (windows.len < 2) return;
+    // Get ALL tiled windows (global list that determines tiling order)
+    const all_windows = s.windows.items();
+    if (all_windows.len < 2) return;
     
+    // Find focused window index in global list
     var focused_idx: ?usize = null;
-    for (windows, 0..) |win, i| {
+    for (all_windows, 0..) |win, i| {
         if (win == focused) {
             focused_idx = i;
             break;
         }
     }
+    const focused_pos = focused_idx orelse return;
     
-    const idx = focused_idx orelse return;
+    // Find first window on current workspace (this is the "master" for this workspace)
+    var master_idx: ?usize = null;
+    for (all_windows, 0..) |win, i| {
+        if (workspaces.isOnCurrentWorkspace(win)) {
+            master_idx = i;
+            break;
+        }
+    }
+    const master_pos = master_idx orelse return;
     
-    // BUGFIX: If focused is already master, swap with first slave (top of slave stack)
-    if (idx == 0) {
-        // Master is focused - swap with first slave (window at index 1)
-        // After swap: slave becomes new master, old master becomes first slave
-        moveWindowToIndex(s, 1, 0);
-        // Force retile with cache clear to ensure proper positioning
-        retileCurrentWorkspace(wm, true);
-        return;
+    // If focused is already master, find second window on workspace to swap with
+    if (focused_pos == master_pos) {
+        var second_idx: ?usize = null;
+        for (all_windows, 0..) |win, i| {
+            if (i == master_pos) continue;
+            if (workspaces.isOnCurrentWorkspace(win)) {
+                second_idx = i;
+                break;
+            }
+        }
+        const second_pos = second_idx orelse return;
+        
+        // Swap master with second window
+        moveWindowToIndex(s, second_pos, master_pos);
+    } else {
+        // Swap focused with master
+        moveWindowToIndex(s, focused_pos, master_pos);
     }
     
-    // Focused is not master - swap with master
-    // After swap: focused slave becomes new master, old master moves to slave position
-    moveWindowToIndex(s, idx, 0);
-    // Force retile with cache clear to ensure proper positioning
+    s.markDirty();
     retileCurrentWorkspace(wm, true);
 }
 
