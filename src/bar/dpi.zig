@@ -185,12 +185,8 @@ pub fn scaleBorderWidth(value: @import("parser").ScalableValue, scale_factor: f3
     }
 }
 
-/// Scale a gap value  
-/// For absolute values: use the value as-is (DPI-independent)
-/// For percentage values: same logic as border width
-pub fn scaleGaps(value: @import("parser").ScalableValue, scale_factor: f32, reference_dimension: u16) u16 {
-    return scaleBorderWidth(value, scale_factor, reference_dimension);
-}
+/// Scale gap value between tiled windows (same semantics as scaleBorderWidth)
+pub const scaleGaps = scaleBorderWidth;
 
 /// Scale master width value
 /// For absolute values: use the value as-is in pixels

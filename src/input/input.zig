@@ -17,7 +17,17 @@ const WM = defs.WM;
 const c = @cImport(@cInclude("unistd.h"));
 extern "c" fn waitpid(pid: c_int, status: ?*c_int, options: c_int) c_int;
 
-const MOUSE_BUTTONS = [_]u8{ 1, 3 }; // Button1 (move), Button3 (resize)
+// Mouse button constants for clarity
+const MOUSE_BUTTON_LEFT = 1;
+const MOUSE_BUTTON_RIGHT = 3;
+
+const MOUSE_BUTTONS = [_]u8{ MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT };  // Super+Button1 (move), Super+Button3 (resize)
+
+// OPTIMIZATION: Cache commonly-used WM atoms to avoid repeated lookups
+var cached_atoms: struct {
+    wm_protocols: ?u32 = null,
+    wm_delete_window: ?u32 = null,
+} = .{};
 
 const KeybindState = struct {
     map: std.AutoHashMap(u64, *const defs.Action),
@@ -64,6 +74,10 @@ pub fn init(wm: *WM) void {
         return;
     };
     keybind_state = state;
+    
+    // OPTIMIZATION: Pre-cache WM atoms used in closeWindow to avoid repeated lookups
+    cached_atoms.wm_protocols = utils.getAtomCached("WM_PROTOCOLS") catch null;
+    cached_atoms.wm_delete_window = utils.getAtomCached("WM_DELETE_WINDOW") catch null;
 }
 
 pub fn deinit(wm: *WM) void {
@@ -125,7 +139,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) void {
     if (event.child == 0) return;
     const has_super = (event.state & defs.MOD_SUPER) != 0;
-    if (has_super and (event.detail == 1 or event.detail == 3)) {
+    if (has_super and (event.detail == MOUSE_BUTTON_LEFT or event.detail == MOUSE_BUTTON_RIGHT)) {
         drag.startDrag(wm, event.child, event.detail, event.root_x, event.root_y);
     } else {
         focus.setFocus(wm, event.child, .mouse_click);
@@ -154,12 +168,13 @@ fn closeWindow(wm: *WM, win: u32) void {
         return;
     }
 
-    const wm_protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch {
+    // OPTIMIZATION: Use pre-cached atoms instead of looking them up each time
+    const wm_protocols_atom = cached_atoms.wm_protocols orelse {
         forceDestroyWindow(wm, win);
         return;
     };
 
-    const wm_delete_atom = utils.getAtomCached("WM_DELETE_WINDOW") catch {
+    const wm_delete_atom = cached_atoms.wm_delete_window orelse {
         forceDestroyWindow(wm, win);
         return;
     };

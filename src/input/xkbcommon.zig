@@ -58,6 +58,10 @@ pub const XkbState = struct {
             const keysym = xkb.xkb_state_key_get_one_sym(state, keycode);
             if (keysym != XKB_KEY_NoSymbol) {
                 // Store first keycode found for each keysym
+                // Best-effort: skip keysyms that don't fit in the map (OOM).
+                // The reverse_map is used for heuristic lookup only; missing
+                // entries degrade gracefully. No per-entry logging here to avoid
+                // flooding; callers that care should check the returned map size.
                 reverse_map.put(keysym, keycode) catch {};
             }
         }

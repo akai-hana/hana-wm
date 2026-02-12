@@ -6,12 +6,10 @@ const std     = @import("std");
 const defs    = @import("defs");
     const xcb = defs.xcb;
 const utils   = @import("utils");
-const dpi     = @import("dpi");
 
 const drawing = @import("drawing");
 const tiling  = @import("tiling");
 const debug   = @import("debug");
-const timer   = @import("timer");
 
 const workspaces             = @import("workspaces");
     const workspaces_segment = @import("tags");
@@ -33,28 +31,6 @@ const MAX_BAR_HEIGHT: u32 = 200;
 /// Default bar height if font metrics cannot be determined
 const DEFAULT_BAR_HEIGHT: u16 = 24;
 
-/// Result of finding a visual - contains both the structure and ID
-const VisualInfo = struct {
-    visual_type: ?*xcb.xcb_visualtype_t,
-    visual_id: u32,
-};
-
-/// Find a visual with the given depth, returning both structure and ID
-fn findVisualByDepth(screen: *xcb.xcb_screen_t, depth: u8) VisualInfo {
-    var depth_iter = xcb.xcb_screen_allowed_depths_iterator(screen);
-    while (depth_iter.rem > 0) : (xcb.xcb_depth_next(&depth_iter)) {
-        if (depth_iter.data.*.depth == depth) {
-            var visual_iter = xcb.xcb_depth_visuals_iterator(depth_iter.data);
-            if (visual_iter.rem > 0) {
-                const vt = visual_iter.data;
-                return .{ .visual_type = vt, .visual_id = vt.*.visual_id };
-            }
-        }
-    }
-    // Fallback to root visual
-    return .{ .visual_type = null, .visual_id = screen.root_visual };
-}
-
 const State = struct {
     window: u32,
     width: u16,
@@ -68,7 +44,6 @@ const State = struct {
     dirty: bool,
     dirty_clock: bool,
     last_second: i64,
-    alive: bool,
     visible: bool,  // OPTIMIZATION: Track actual visibility for timer control
     has_transparency: bool,  // Track if transparency is enabled
     allocator: std.mem.Allocator,
@@ -84,7 +59,7 @@ const State = struct {
             .status_text = .{},
             .cached_title = .{},
             .cached_title_window = null,
-            .dirty = false, .dirty_clock = false, .last_second = 0, .alive = true,
+            .dirty = false, .dirty_clock = false, .last_second = 0,
             .visible = true,  // OPTIMIZATION: Start visible, setBarState will update
             .has_transparency = has_transparency,
             .allocator = allocator,
@@ -115,7 +90,10 @@ fn updateClockIfNeeded(s: *State) void {
     // OPTIMIZATION: Skip clock update if bar is hidden (idle CPU reduction)
     if (!s.visible) return;
     
-    const ts = std.posix.clock_gettime(std.posix.CLOCK.REALTIME) catch return;
+    const ts = std.posix.clock_gettime(std.posix.CLOCK.REALTIME) catch |e| {
+        debug.warnOnErr(e, "clock_gettime in updateClockIfNeeded");
+        return;
+    };
     if (ts.sec != s.last_second) {
         s.last_second = ts.sec;
         s.markClockDirty();
@@ -196,7 +174,10 @@ fn calculateBarHeight(wm: *defs.WM) !u16 {
         0, 0, 1, 1, 0, xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, wm.screen.root_visual, 0, null);
     defer _ = xcb.xcb_destroy_window(wm.conn, temp_win);
     
-    const temp_dc = drawing.DrawContext.init(wm.allocator, wm.conn, temp_win, 1, 1, wm.dpi_info.dpi) catch return DEFAULT_BAR_HEIGHT;
+    const temp_dc = drawing.DrawContext.init(wm.allocator, wm.conn, temp_win, 1, 1, wm.dpi_info.dpi) catch |e| {
+        debug.warnOnErr(e, "DrawContext.init in measureBarHeight");
+        return DEFAULT_BAR_HEIGHT;
+    };
     defer temp_dc.deinit();
     loadBarFonts(temp_dc, wm) catch {
         // If font loading fails, return default height instead of failing
@@ -213,10 +194,9 @@ fn calculateBarHeight(wm: *defs.WM) !u16 {
 pub fn init(wm: *defs.WM) !void {
     if (!wm.config.bar.enabled) return error.BarDisabled;
 
-    // Detect DPI and set scale factor
-    const dpi_info = try dpi.detect(wm.conn, wm.screen);
-    wm.config.bar.scale_factor = dpi_info.scale_factor;
-    debug.info("DPI: {d:.1}, Scale factor: {d:.2}x", .{dpi_info.dpi, dpi_info.scale_factor});
+    // Use DPI info already detected in main() — no need to detect again
+    wm.config.bar.scale_factor = wm.dpi_info.scale_factor;
+    debug.info("DPI: {d:.1}, Scale factor: {d:.2}x", .{wm.dpi_info.dpi, wm.dpi_info.scale_factor});
 
     const screen = wm.screen;
     const width = screen.width_in_pixels;
@@ -238,9 +218,9 @@ pub fn init(wm: *defs.WM) !void {
     
     // Find appropriate visual and depth for transparency
     const visual_info = if (want_transparency) 
-        findVisualByDepth(screen, 32)  // Use 32-bit depth for transparency
+        drawing.findVisualByDepth(screen, 32)  // Use 32-bit depth for transparency
     else 
-        VisualInfo{ .visual_type = null, .visual_id = screen.root_visual };
+        drawing.VisualInfo{ .visual_type = null, .visual_id = screen.root_visual };
     
     const depth: u8 = if (want_transparency) 32 else xcb.XCB_COPY_FROM_PARENT;
     
@@ -309,7 +289,6 @@ pub fn init(wm: *defs.WM) !void {
         width, 
         height, 
         visual_info.visual_id,
-        colormap,
         wm.dpi_info.dpi,
         want_transparency,  // is_argb flag
         wm.config.bar.transparency  // transparency value
@@ -343,7 +322,7 @@ fn setBarVisibility(wm: *defs.WM, visible: bool, reason: []const u8) void {
         if (visible) {
             _ = xcb.xcb_map_window(s.conn, s.window);
             utils.flush(wm.conn);
-            draw(s, wm) catch {};
+            draw(s, wm) catch |e| debug.warnOnErr(e, "draw in setVisibility");
         } else {
             _ = xcb.xcb_unmap_window(s.conn, s.window);
         }
@@ -351,7 +330,7 @@ fn setBarVisibility(wm: *defs.WM, visible: bool, reason: []const u8) void {
         debug.info("Bar {s} ({s})", .{ if (visible) "shown" else "hidden", reason });
         
         // OPTIMIZATION: Update timer state when visibility changes
-        timer.updateTimerState(wm);
+        clock_segment.updateTimerState(wm);
         
         tiling.retileCurrentWorkspace(wm, true);
     }
@@ -464,7 +443,7 @@ fn drawClockOnly(s: *State, wm: *defs.WM) !void {
 }
 
 pub fn handleExpose(event: *const xcb.xcb_expose_event_t, wm: *defs.WM) void {
-    if (state) |s| if (event.window == s.window and event.count == 0) draw(s, wm) catch {};
+    if (state) |s| if (event.window == s.window and event.count == 0) draw(s, wm) catch |e| debug.warnOnErr(e, "draw in handleExpose");
 }
 
 pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t, wm: *defs.WM) void {
@@ -472,7 +451,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t, wm: *
     
     // Handle root window property changes (status bar)
     if (event.window == wm.root and event.atom == xcb.XCB_ATOM_WM_NAME) {
-        status_segment.update(wm, &s.status_text, s.allocator) catch {};
+        status_segment.update(wm, &s.status_text, s.allocator) catch |e| debug.warnOnErr(e, "status_segment.update");
         s.markDirty();
         return;
     }
@@ -481,7 +460,10 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t, wm: *
     if (wm.focused_window) |focused_win| {
         if (event.window == focused_win and 
             (event.atom == xcb.XCB_ATOM_WM_NAME or 
-             event.atom == utils.getAtomCached("_NET_WM_NAME") catch return)) {
+             event.atom == (utils.getAtomCached("_NET_WM_NAME") catch |e| {
+                debug.warnOnErr(e, "getAtomCached _NET_WM_NAME in handlePropertyNotify");
+                return;
+            }))) {
             // Only mark dirty - the title will be re-rendered on next draw
             s.markDirty();
         }

@@ -3,25 +3,22 @@
 
 LONG TERM: code a similar tool to drun, replace it instead of rofi in config.toml
 
-somehow make vertical layout left and right
+LONG TERM: somehow make vertical layout left and right
 
 make workspace width settable on line 242 in defs.zig: make default (40) 100%, and 150% is 40x1.5, and so on. otherwise, if no percentage placed on config, just set the literal pixel value.
 
 can you make it so that if i set transparency to 100, that all the transparency logic isn't processed at all, and the wm instead renders a regular RGB bar, skipping argb and 32 bits and all that? this is to avoid any unneeded computational processing when the user doesn't want transparency to begin with.
 
-can you please make it so that the entire bar isn't re-rendered every time i switch focus between windows? i want only the title segment to be updated, and specifically, only the text it displays. if there's no focus, display no text and make the bar look as its background color, but by default, make this segment's color the focused color. this way, with each window re-focus, the bar's background color doesn't flicker between its unfocused and focused colors quickly, even if i am switching from one window to another.
-
 can you please implement some sort of mechanism that make it so that the bar looks proportionally the same regardless of the resolution? for example, if i use a 1920x1080 display, the font of the bar looks significantly bigger, and the workspace widths do so too, as well as the separation between the dfferent modules/segments of the bar. i'd like to implement some sort of system which measures the display's resolution and takes it into consideration, multiplying these variables by some sort of factor that normalizes the size of these elements, regardless of 
 
 when hovering over a window while creating another one will result in the cursor hovering a mouse that doesn't have focus. this is actually intended behavior, since if i open a terminal quickly, i don't want to reposition my mouse cursor just for that. however, i'd like to make it so that, if with this mouse cursor positioned on an unfocused window, if i click onto this unfocused window, for it to gain focus, so that i don't have to awkwardly move my mouse away and back to the unfocused window for it to gain focus.
 
-fibonacci
+{
 bspwm leaf layout
 if window is higher than it is wider, slice it in half, leaving a top and bottom window; if it is wider than higher, slice it in half, leaving a left and right window).
+}
 
 mod + middle click mouse makes an individual window go from tiling to floating, and viceversa, if it's floating on tiled mode, tile it.
-
-add an option in config that's an array where one can set all the active tiling layouts; if commented out or not set, add all layouts found by default.
 
 when opening a window, fullscreening into it, and then killing it, bar remains hidden, even though i'm no longer fullscreened on anything. can you please make it so that this doesn't happen?
 
@@ -29,10 +26,7 @@ when opening a window, fullscreening into it, and then killing it, bar remains h
 
 add a colors/ dir to set color themes
 
-keep track of the focused window before the currently focused, make it so that Mod+Tab switches focus between both of them
-make mod+shift+tab swap current focused window to master if it's a slave, and to slave if it's a master.
 make it so that one window can belong to more than one workspace (tag-based window workspaces)
-make it so that if theres any duplicate keys, the program doesn't just crash, but it does both defined commands when this one bind is pressed, so that one can define multiple things for one single bind.
 
 make a new themes dir inside src/ where color themes will be defined as .toml files, and will simply be fused with config.toml when being parsed. we can make it so that we can still define colors in config.toml this way, but if not defined in config.toml, pull them from the theme, which we define similarly to how we define the custom tiling layout now. (theme = "xresources" # or something like this))
 make a color theme that pulls in the xresources colors and makes a theme with them.
