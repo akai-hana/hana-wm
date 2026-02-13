@@ -9,7 +9,15 @@ const layouts = [_][]const u8{ "[]=", "[M]", "[+]", "[@]" };
 
 pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start_x: u16) !u16 {
     const t_state = tiling.getState() orelse return start_x;
-    const layout_str = layouts[@intFromEnum(t_state.layout)];
+    const layout_idx = @intFromEnum(t_state.layout);
+    
+    // Bounds check to prevent out-of-bounds access
+    if (layout_idx >= layouts.len) {
+        std.debug.print("ERROR: Invalid layout index: {d} (max: {d})\n", .{layout_idx, layouts.len});
+        return start_x;
+    }
+    
+    const layout_str = layouts[layout_idx];
     const scaled_padding = config.scaledPadding();
     const width = dc.textWidth(layout_str) + scaled_padding * 2;
     dc.fillRect(start_x, 0, width, height, config.bg);

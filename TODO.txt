@@ -1,6 +1,8 @@
 ### hana's TODO list! ###
 # In here i write the things i want to do to not lose track of the different ideas i come up with while developing 
 
+when i full-screen into a window, i want all the other windows to be unmapped. this is already the case when i fullscreen into a window, go to another workspace and come back, but i want it to be the case immediately when i fullscreen, not just when i switch workspaces. i want this to happen since if im dealing with transparent windows, it can be a bit distracting to see the half-tiling windows i have behind the fullscreened window, and to have to switch back and forth workspaces for this to be updated is a bit of a hassle. can you please achieve this?
+
 LONG TERM: code a similar tool to drun, replace it instead of rofi in config.toml
 
 LONG TERM: somehow make vertical layout left and right

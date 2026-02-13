@@ -29,8 +29,8 @@ inline fn drawIndicator(dc: *drawing.DrawContext, x: u16, size: u16, filled: boo
 pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start_x: u16) !u16 {
     const ws_state = workspaces.getState() orelse return start_x;
     var x = start_x;
-    const scaled_ws_width = config.scaledWorkspaceWidth();
-    const scaled_indicator_size = config.scaledIndicatorSize();
+    const scaled_ws_width = bar.getCachedWorkspaceWidth();
+    const scaled_indicator_size = bar.getCachedIndicatorSize();
 
     for (ws_state.workspaces, 0..) |*ws, i| {
         const is_current = i == ws_state.current;
@@ -49,7 +49,10 @@ pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start
         // Even if fallback fonts are used, align to the primary font's baseline
         const text_y = dc.baselineY(height);
         
-        try dc.drawText(x + (scaled_ws_width - dc.textWidth(label)) / 2, text_y, label, fg);
+        // Get cached label width from bar if available, otherwise calculate
+        const label_width = bar.getCachedLabelWidth(i) orelse dc.textWidth(label);
+        const text_x = x + (scaled_ws_width - label_width) / 2;
+        try dc.drawText(text_x, text_y, label, fg);
 
         // FIXED: Use count() method instead of .list.items.len
         // This works with both small-array and large tracking implementations

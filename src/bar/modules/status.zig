@@ -24,8 +24,11 @@ pub fn update(wm: *defs.WM, status_text: *std.ArrayList(u8), allocator: std.mem.
     
     const text = if (reply) |r| blk: {
         if (r.*.value_len > 0) {
+            // Limit maximum length to prevent excessive memory usage
+            const max_len: usize = 1024;
+            const actual_len = @min(@as(usize, @intCast(r.*.value_len)), max_len);
             const ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(r));
-            break :blk ptr[0..@intCast(xcb.xcb_get_property_value_length(r))];
+            break :blk ptr[0..actual_len];
         }
         break :blk DEFAULT_STATUS;
     } else DEFAULT_STATUS;

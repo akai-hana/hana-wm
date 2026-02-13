@@ -46,8 +46,12 @@ fn fetchProperty(conn: *xcb.xcb_connection_t, win: u32, atom: u32, atom_type: u3
     if (reply.*.format != 8 or reply.*.value_len == 0) return "";
 
     cached_title.clearRetainingCapacity();
+    
+    // Limit maximum title length to prevent excessive memory usage
+    const max_len: usize = 1024;
+    const actual_len = @min(@as(usize, @intCast(reply.*.value_len)), max_len);
     const value_ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
-    try cached_title.appendSlice(allocator, value_ptr[0..@intCast(reply.*.value_len)]);
+    try cached_title.appendSlice(allocator, value_ptr[0..actual_len]);
     cached_title_window.* = win;
     return cached_title.items;
 }
