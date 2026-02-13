@@ -12,6 +12,10 @@ const c = @cImport(@cInclude("time.h"));
 
 // Timer state ─────────────────────────────────────────────────────────────
 
+// Cached clock formatting to avoid redundant formatting
+var last_formatted_time: [20]u8 = undefined;
+var last_formatted_sec: i64 = -1;
+
 // Timer state for dynamic enable/disable to reduce idle CPU
 var global_timer_fd: i32 = 0;
 var timer_enabled: bool = false;
@@ -24,17 +28,12 @@ pub fn setTimerFd(fd: i32) void {
 
 /// Check if clock should be running based on bar state
 fn shouldClockRun(wm: *defs.WM) bool {
+    _ = wm;
     // Don't run timer if bar is hidden (fullscreen)
     if (!bar.isVisible()) return false;
 
-    // Check if clock segment exists in layout
-    for (wm.config.bar.layout.items) |layout| {
-        for (layout.segments.items) |seg| {
-            if (seg == .clock) return true;
-        }
-    }
-
-    return false;
+    // Use cached clock segment detection - O(1) instead of O(n*m)
+    return bar.hasClockSegment();
 }
 
 /// Enable the timer (starts 1Hz ticks)
@@ -84,8 +83,17 @@ pub fn updateTimerState(wm: *defs.WM) void {
 // Drawing
 
 pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start_x: u16) !u16 {
-    var time_buf: [20]u8 = undefined;
-    const time_str = try formatTime(&time_buf);
+    const ts = try std.posix.clock_gettime(std.posix.CLOCK.REALTIME);
+    
+    // Use cached formatting if still the same second
+    const time_str = if (ts.sec == last_formatted_sec)
+        last_formatted_time[0..19]
+    else blk: {
+        const str = try formatTime(&last_formatted_time);
+        last_formatted_sec = ts.sec;
+        break :blk str;
+    };
+    
     const scaled_padding = config.scaledPadding();
     const width = dc.textWidth(time_str) + scaled_padding * 2;
     dc.fillRect(start_x, 0, width, height, config.bg);

@@ -10,6 +10,7 @@ const utils   = @import("utils");
 const drawing = @import("drawing");
 const tiling  = @import("tiling");
 const debug   = @import("debug");
+const cache   = @import("cache");
 
 const workspaces             = @import("workspaces");
     const workspaces_segment = @import("tags");
@@ -20,6 +21,9 @@ const workspaces             = @import("workspaces");
 
 // TODO: make adjustable through config.toml, adjust workspace width based off of monitor DPI
 pub const WORKSPACE_WIDTH: u8 = 50;
+
+// Clock format string constant for width calculation
+const CLOCK_FORMAT = "0000-00-00 00:00:00";
 
 // FIXED: Magic numbers replaced with named constants
 /// Minimum allowed bar height in pixels
@@ -48,28 +52,51 @@ const State = struct {
     has_transparency: bool,  // Track if transparency is enabled
     allocator: std.mem.Allocator,
     cached_clock_width: u16,
+    cached_ws_width: u16,
+    cached_indicator_size: u16,
+    has_clock_segment: bool,
+    cache_manager: *cache.CacheManager,  // Unified caching layer
 
     fn init(allocator: std.mem.Allocator, conn: *xcb.xcb_connection_t, window: u32, width: u16, height: u16,
             dc: *drawing.DrawContext, config: defs.BarConfig, has_transparency: bool) !*State {
         const s = try allocator.create(State);
         const scaled_padding = config.scaledPadding();
+        
+        // Create cache manager
+        const cache_mgr = try cache.CacheManager.init(allocator);
+        errdefer cache_mgr.deinit();
+        
         s.* = State{
             .window = window, .width = width, .height = height, .dc = dc, .conn = conn,
             .config = config,
-            .status_text = .{},
-            .cached_title = .{},
+            .status_text = std.ArrayList(u8).empty,
+            .cached_title = std.ArrayList(u8).empty,
             .cached_title_window = null,
             .dirty = false, .dirty_clock = false, .last_second = 0,
             .visible = true,  // OPTIMIZATION: Start visible, setBarState will update
             .has_transparency = has_transparency,
             .allocator = allocator,
-            .cached_clock_width = dc.textWidth("0000-00-00 00:00:00") + 2 * scaled_padding,
+            .cached_clock_width = dc.textWidth(CLOCK_FORMAT) + 2 * scaled_padding,
+            .cached_ws_width = config.scaledWorkspaceWidth(),
+            .cached_indicator_size = config.scaledIndicatorSize(),
+            .has_clock_segment = State.detectClockSegment(&config),
+            .cache_manager = cache_mgr,
         };
+        
+        // Pre-allocate capacity for performance
+        try s.status_text.ensureTotalCapacity(allocator, 256);
+        try s.cached_title.ensureTotalCapacity(allocator, 256);
+        
         try s.status_text.appendSlice(allocator, "hana");
+        
+        // Initialize workspace label cache
+        try s.cache_manager.updateWorkspaceLabels(dc, &config);
+        
         return s;
     }
 
     fn deinit(self: *State) void {
+        self.cache_manager.deinit();
         self.status_text.deinit(self.allocator);
         self.cached_title.deinit(self.allocator);
         self.allocator.destroy(self);
@@ -79,6 +106,15 @@ const State = struct {
     fn markClockDirty(self: *State) void { self.dirty_clock = true; }
     fn clearDirty(self: *State) void { self.dirty = false; self.dirty_clock = false; }
     fn isDirty(self: *State) bool { return self.dirty or self.dirty_clock; }
+    
+    fn detectClockSegment(config: *const defs.BarConfig) bool {
+        for (config.layout.items) |layout| {
+            for (layout.segments.items) |seg| {
+                if (seg == .clock) return true;
+            }
+        }
+        return false;
+    }
 };
 
 // FIXED: Document thread safety - single-threaded access only
@@ -191,21 +227,21 @@ fn calculateBarHeight(wm: *defs.WM) !u16 {
     return @intCast(std.math.clamp(font_height + 2 * scaled_padding, MIN_BAR_HEIGHT, MAX_BAR_HEIGHT));
 }
 
-pub fn init(wm: *defs.WM) !void {
-    if (!wm.config.bar.enabled) return error.BarDisabled;
+// Helper functions for init() refactoring (Batch 2.1)
 
-    // Use DPI info already detected in main() — no need to detect again
+fn setupDPI(wm: *defs.WM) void {
     wm.config.bar.scale_factor = wm.dpi_info.scale_factor;
     debug.info("DPI: {d:.1}, Scale factor: {d:.2}x", .{wm.dpi_info.dpi, wm.dpi_info.scale_factor});
+}
 
-    const screen = wm.screen;
-    const width = screen.width_in_pixels;
-    const height = try calculateBarHeight(wm);
-    const y_pos: i16 = if (wm.config.bar.vertical_position == .bottom)
-        @as(i16, @intCast(screen.height_in_pixels)) - @as(i16, @intCast(height))
-    else 0;
+const VisualSetup = struct {
+    depth: u8,
+    visual_id: u32,
+    has_transparency: bool,
+    colormap: u32,
+};
 
-    // Get alpha value for transparency
+fn setupVisual(wm: *defs.WM) VisualSetup {
     const alpha = wm.config.bar.getAlpha16();
     const want_transparency = alpha < 0xFFFF;
     
@@ -218,38 +254,58 @@ pub fn init(wm: *defs.WM) !void {
     
     // Find appropriate visual and depth for transparency
     const visual_info = if (want_transparency) 
-        drawing.findVisualByDepth(screen, 32)  // Use 32-bit depth for transparency
+        drawing.findVisualByDepth(wm.screen, 32)
     else 
-        drawing.VisualInfo{ .visual_type = null, .visual_id = screen.root_visual };
+        drawing.VisualInfo{ .visual_type = null, .visual_id = wm.screen.root_visual };
     
     const depth: u8 = if (want_transparency) 32 else xcb.XCB_COPY_FROM_PARENT;
     
     // Create colormap for ARGB visual if needed
     const colormap = if (want_transparency) blk: {
         const cmap = xcb.xcb_generate_id(wm.conn);
-        _ = xcb.xcb_create_colormap(wm.conn, xcb.XCB_COLORMAP_ALLOC_NONE, cmap, screen.root, visual_info.visual_id);
+        _ = xcb.xcb_create_colormap(wm.conn, xcb.XCB_COLORMAP_ALLOC_NONE, cmap, wm.screen.root, visual_info.visual_id);
         break :blk cmap;
     } else 0;
     
-    // Create window with appropriate depth/visual for transparency
+    if (want_transparency) {
+        debug.info("Created 32-bit ARGB window for transparency (handled by compositor like borders)", .{});
+    } else {
+        debug.info("Created RGB window (fully opaque)", .{});
+    }
+    
+    return .{
+        .depth = depth,
+        .visual_id = visual_info.visual_id,
+        .has_transparency = want_transparency,
+        .colormap = colormap,
+    };
+}
+
+fn createBarWindow(wm: *defs.WM, height: u16, visual_setup: VisualSetup) u32 {
+    const screen = wm.screen;
+    const width = screen.width_in_pixels;
+    const y_pos: i16 = if (wm.config.bar.vertical_position == .bottom)
+        @as(i16, @intCast(screen.height_in_pixels)) - @as(i16, @intCast(height))
+    else 0;
+    
     const window = xcb.xcb_generate_id(wm.conn);
     
-    if (want_transparency) {
-        const bg_color = 0xFF000000 | wm.config.bar.bg;  // Add alpha channel (opaque)
+    if (visual_setup.has_transparency) {
+        const bg_color = 0xFF000000 | wm.config.bar.bg;
         const values = [_]u32{ 
             bg_color, 
             0, 
             xcb.XCB_EVENT_MASK_EXPOSURE | xcb.XCB_EVENT_MASK_BUTTON_PRESS, 
-            colormap 
+            visual_setup.colormap 
         };
         _ = xcb.xcb_create_window(
             wm.conn, 
-            depth,
+            visual_setup.depth,
             window, 
             screen.root,
             0, y_pos, width, height, 0,
             xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, 
-            visual_info.visual_id,
+            visual_setup.visual_id,
             xcb.XCB_CW_BACK_PIXEL | xcb.XCB_CW_BORDER_PIXEL | xcb.XCB_CW_EVENT_MASK | xcb.XCB_CW_COLORMAP,
             &values,
         );
@@ -260,45 +316,64 @@ pub fn init(wm: *defs.WM) !void {
         };
         _ = xcb.xcb_create_window(
             wm.conn, 
-            depth,
+            visual_setup.depth,
             window, 
             screen.root,
             0, y_pos, width, height, 0,
             xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, 
-            visual_info.visual_id,
+            visual_setup.visual_id,
             xcb.XCB_CW_BACK_PIXEL | xcb.XCB_CW_EVENT_MASK,
             &values,
         );
     }
     
-    if (want_transparency) {
-        debug.info("Created 32-bit ARGB window for transparency (handled by compositor like borders)", .{});
-    } else {
-        debug.info("Created RGB window (fully opaque)", .{});
-    }
+    return window;
+}
 
-    try setWindowProperties(wm, window, height, want_transparency, alpha);
-    _ = xcb.xcb_map_window(wm.conn, window);
-    utils.flush(wm.conn);
-
-    // Create DrawContext with ARGB awareness
-    const dc = try drawing.DrawContext.initWithVisual(
+fn initDrawContext(wm: *defs.WM, window: u32, width: u16, height: u16, visual_setup: VisualSetup) !*drawing.DrawContext {
+    return drawing.DrawContext.initWithVisual(
         wm.allocator, 
         wm.conn, 
         window, 
         width, 
         height, 
-        visual_info.visual_id,
+        visual_setup.visual_id,
         wm.dpi_info.dpi,
-        want_transparency,  // is_argb flag
-        wm.config.bar.transparency  // transparency value
+        visual_setup.has_transparency,
+        wm.config.bar.transparency
     );
-    errdefer dc.deinit();
-    try loadBarFonts(dc, wm);
+}
+
+pub fn init(wm: *defs.WM) !void {
+    if (!wm.config.bar.enabled) return error.BarDisabled;
+
+    // Step 1: Setup DPI
+    setupDPI(wm);
+
+    // Step 2: Calculate bar height
+    const height = try calculateBarHeight(wm);
     
+    // Step 3: Setup visual for transparency
+    const visual_setup = setupVisual(wm);
+
+    // Step 4: Create bar window
+    const window = createBarWindow(wm, height, visual_setup);
+    
+    // Step 5: Set window properties
+    try setWindowProperties(wm, window, height, visual_setup.has_transparency, wm.config.bar.getAlpha16());
+    _ = xcb.xcb_map_window(wm.conn, window);
+    utils.flush(wm.conn);
+
+    // Step 6: Initialize draw context
+    const dc = try initDrawContext(wm, window, wm.screen.width_in_pixels, height, visual_setup);
+    errdefer dc.deinit();
+    
+    // Step 7: Load fonts
+    try loadBarFonts(dc, wm);
     debug.info("Bar uses XCB rendering for backgrounds (like borders), Pango for text", .{});
 
-    const s = try State.init(wm.allocator, wm.conn, window, width, height, dc, wm.config.bar, want_transparency);
+    // Step 8: Create state and perform initial draw
+    const s = try State.init(wm.allocator, wm.conn, window, wm.screen.width_in_pixels, height, dc, wm.config.bar, visual_setup.has_transparency);
     try draw(s, wm);
     utils.flush(wm.conn);
     state = s;
@@ -382,6 +457,22 @@ pub fn raiseBar() void {
 }
 pub fn getBarHeight() u16 { return if (state) |s| s.height else 0; }
 pub fn isBarVisible() bool { return state != null; }
+
+// OPTIMIZATION: Cached workspace dimensions for fast access
+pub fn getCachedWorkspaceWidth() u16 { return if (state) |s| s.cached_ws_width else 50; }
+pub fn getCachedIndicatorSize() u16 { return if (state) |s| s.cached_indicator_size else 5; }
+
+// OPTIMIZATION: Cached workspace label width
+pub fn getCachedLabelWidth(index: usize) ?u16 {
+    if (state) |s| {
+        const width = s.cache_manager.getWorkspaceLabelWidth(index);
+        return if (width > 0) width else null;
+    }
+    return null;
+}
+
+// OPTIMIZATION: Cached clock segment detection
+pub fn hasClockSegment() bool { return if (state) |s| s.has_clock_segment else false; }
 
 // OPTIMIZATION: Check if bar is actually visible (not just created)
 pub fn isVisible() bool {
@@ -484,7 +575,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *defs.W
 
 fn calculateSegmentWidth(s: *State, segment: defs.BarSegment) u16 {
     return switch (segment) {
-        .workspaces => if (workspaces.getState()) |ws| @intCast(ws.workspaces.len * s.config.scaledWorkspaceWidth()) else 270,
+        .workspaces => if (workspaces.getState()) |ws| @intCast(ws.workspaces.len * s.cached_ws_width) else 270,
         .layout => 60,
         .title => 100,
         .clock => s.cached_clock_width,

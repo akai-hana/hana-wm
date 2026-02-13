@@ -18,6 +18,20 @@ const BASELINE_DPI: f32 = 96.0; // Standard DPI
 const FONT_BASELINE_WIDTH: f32 = 1920.0;
 const FONT_BASELINE_HEIGHT: f32 = 1080.0;
 
+// DPI cache for avoiding redundant detection
+var dpi_cache: struct {
+    result: ?DpiInfo = null,
+    screen_signature: u64 = 0,
+} = .{};
+
+// Common DPI values for snapping
+const COMMON_DPI_TABLE = [_]struct { dpi: f32, name: []const u8 }{
+    .{ .dpi = 96.0, .name = "1x (Standard)" },
+    .{ .dpi = 120.0, .name = "1.25x" },
+    .{ .dpi = 144.0, .name = "1.5x (High DPI)" },
+    .{ .dpi = 192.0, .name = "2x (Retina)" },
+};
+
 /// DPI information and scaling factor
 pub const DpiInfo = struct {
     dpi: f32,
@@ -97,6 +111,28 @@ fn calculateDpiFromGeometry(screen: *xcb.xcb_screen_t) f32 {
     return avg_dpi;
 }
 
+/// Snap DPI to common values if close enough (within 5%)
+fn snapToCommonDPI(dpi: f32) f32 {
+    var closest = COMMON_DPI_TABLE[0];
+    var min_diff = @abs(dpi - closest.dpi);
+    
+    for (COMMON_DPI_TABLE[1..]) |entry| {
+        const diff = @abs(dpi - entry.dpi);
+        if (diff < min_diff) {
+            min_diff = diff;
+            closest = entry;
+        }
+    }
+    
+    // Snap if within 5% of common value
+    if (min_diff / closest.dpi < 0.05) {
+        debug.info("Snapped DPI {d:.1} to common value {d:.1} ({s})", 
+            .{dpi, closest.dpi, closest.name});
+        return closest.dpi;
+    }
+    return dpi;
+}
+
 /// Calculate scale factor based on resolution relative to baseline
 /// This is an alternative approach that scales based on screen width
 fn calculateScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
@@ -122,15 +158,40 @@ fn calculateScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
 /// 1. Xft.dpi from X resources/.Xresources (most accurate if user has set it)
 /// 2. Calculated from display physical dimensions
 /// 3. Resolution-based scaling as fallback
+/// 
+/// Uses caching to avoid redundant detection calls
 pub fn detect(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) !DpiInfo {
+    // Create screen signature from dimensions
+    const sig = (@as(u64, screen.width_in_pixels) << 32) | 
+                (@as(u64, screen.height_in_pixels) << 16) |
+                (@as(u64, screen.width_in_millimeters) << 8) |
+                screen.height_in_millimeters;
+    
+    // Return cached if screen hasn't changed
+    if (dpi_cache.result) |cached| {
+        if (dpi_cache.screen_signature == sig) {
+            return cached;
+        }
+    }
+    
+    // Detect fresh
+    const result = try detectFresh(conn, screen);
+    dpi_cache.result = result;
+    dpi_cache.screen_signature = sig;
+    return result;
+}
+
+/// Perform fresh DPI detection (internal, called by detect())
+fn detectFresh(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) !DpiInfo {
     // Try to get DPI from X resources (Xft.dpi property)
     if (readXftDpi(conn, screen)) |xft_dpi| {
         debug.info("Using DPI from X resources (Xft.dpi): {d:.1}", .{xft_dpi});
-        return DpiInfo.init(xft_dpi);
+        const snapped = snapToCommonDPI(xft_dpi);
+        return DpiInfo.init(snapped);
     }
     
     // Calculate from geometry
-    const geometry_dpi = calculateDpiFromGeometry(screen);
+    var geometry_dpi = calculateDpiFromGeometry(screen);
     
     // Sanity check: if DPI seems unreasonable, use resolution-based scaling
     if (geometry_dpi < 50.0 or geometry_dpi > 300.0) {
@@ -138,11 +199,12 @@ pub fn detect(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) !DpiInfo {
         const resolution_scale = calculateScaleFromResolution(screen);
         const effective_dpi = BASELINE_DPI * resolution_scale;
         debug.info("Using resolution-based DPI: {d:.1}", .{effective_dpi});
-        return DpiInfo.init(effective_dpi);
+        geometry_dpi = effective_dpi;
     }
     
     debug.info("Using geometry-calculated DPI: {d:.1}", .{geometry_dpi});
-    return DpiInfo.init(geometry_dpi);
+    const snapped = snapToCommonDPI(geometry_dpi);
+    return DpiInfo.init(snapped);
 }
 
 /// Scale a dimension value based on DPI
