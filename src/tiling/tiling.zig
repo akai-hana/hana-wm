@@ -245,7 +245,7 @@ pub inline fn isWindowTiled(window_id: u32) bool {
     return s.windows.contains(window_id);
 }
 
-// Screen area ──────────────────────────────────────────────────────────────
+// Screen area ──
 
 fn calculateScreenArea(wm: *WM) utils.Rect {
     const bar_height: u16 = if (bar.isVisible()) bar.getBarHeight() else 0;
@@ -448,10 +448,11 @@ pub fn adjustMasterWidth(wm: *WM, delta: f32) void {
     retileCurrentWorkspace(wm, false);
 }
 
-pub inline fn increaseMasterWidth(wm: *WM) void { adjustMasterWidth(wm,  0.05); }
-pub inline fn decreaseMasterWidth(wm: *WM) void { adjustMasterWidth(wm, -0.05); }
+//TODO: make the "0.05" adjustable through config.toml [0.NNNN; up to 4 decimal numbers] with the name "adjust_width_factor".
+pub inline fn increaseMasterWidth(wm: *WM) void { adjustMasterWidth(wm,  0.025); }
+pub inline fn decreaseMasterWidth(wm: *WM) void { adjustMasterWidth(wm, -0.025); }
 
-// Focus cycling ────────────────────────────────────────────────────────────
+// Focus cycling 
 
 inline fn switchFocus(wm: *WM, s: *State, from: ?u32, to: u32) void {
     std.debug.assert(to != 0 and wm.hasWindow(to));

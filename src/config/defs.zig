@@ -193,6 +193,7 @@ pub const BarConfig = struct {
     accent_color: u32 = 0x61AFEF,
     workspaces_accent: ?u32 = null,
     title_accent_color: ?u32 = null,
+    title_unfocused_accent: ?u32 = null,
     clock_accent: ?u32 = null,
 
     workspace_icons: std.ArrayList([]const u8),
@@ -236,6 +237,10 @@ pub const BarConfig = struct {
         return self.title_accent_color orelse self.accent_color;
     }
 
+    pub fn getTitleUnfocusedAccent(self: BarConfig) u32 {
+        return self.title_unfocused_accent orelse self.accent_color;
+    }
+
     pub inline fn getClockAccent(self: *const BarConfig) u32 {
         return self.clock_accent orelse self.accent_color;
     }
@@ -255,7 +260,7 @@ pub const BarConfig = struct {
     
     pub inline fn scaledIndicatorSize(self: *const BarConfig) u16 {
         // Base indicator size is 4px when percentage is 100%
-        const base_size: f32 = 4.0;
+        const base_size: f32 = 5.0;
         const size: f32 = if (self.indicator_size.is_percentage)
             base_size * (self.indicator_size.value / 100.0) * self.scale_factor
         else

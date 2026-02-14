@@ -47,7 +47,7 @@ var g_state: ?State = null;
 
 pub fn getState() ?*State { return if (g_state != null) &g_state.? else null; }
 
-// Init / deinit ────────────────────────────────────────────────────────────
+// Init / deinit 
 
 pub fn init(wm: *WM) void {
     const count = wm.config.workspaces.count;

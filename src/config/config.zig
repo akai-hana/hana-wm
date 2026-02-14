@@ -501,6 +501,7 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     // Accent-based colors with fallback
     cfg.bar.workspaces_accent = getColor(section, "workspaces_accent", cfg.bar.accent_color);
     cfg.bar.title_accent_color = getColor(section, "title_accent_color", cfg.bar.accent_color);
+    cfg.bar.title_unfocused_accent = getColor(section, "title_unfocused_accent", cfg.bar.bg);
     cfg.bar.clock_accent = getColor(section, "clock_accent", cfg.bar.accent_color);
 
     const clock_fmt = get([]const u8, section, "clock_format", "%Y-%m-%d %H:%M:%S", null, null);
@@ -588,6 +589,7 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     if (doc.getSection("bar.colors")) |colors_section| {
         cfg.bar.workspaces_accent = getColor(colors_section, "workspaces", cfg.bar.workspaces_accent orelse cfg.bar.accent_color);
         cfg.bar.title_accent_color = getColor(colors_section, "title", cfg.bar.title_accent_color orelse cfg.bar.accent_color);
+        cfg.bar.title_unfocused_accent = getColor(colors_section, "title_unfocused", cfg.bar.title_unfocused_accent orelse cfg.bar.bg);
         cfg.bar.clock_accent = getColor(colors_section, "clock", cfg.bar.clock_accent orelse cfg.bar.accent_color);
     }
 }
