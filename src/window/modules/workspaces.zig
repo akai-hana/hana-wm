@@ -12,6 +12,13 @@ const tracking = @import("tracking").Tracking;
 const createModule = @import("module").module;
 const debug = @import("debug");
 
+// OPTIMIZATION: Static workspace names (no heap allocation)
+const WORKSPACE_NAMES = blk: {
+    var names: [20][]const u8 = undefined;
+    for (&names, 1..) |*name, i| name.* = std.fmt.comptimePrint("{d}", .{i});
+    break :blk names;
+};
+
 pub const Workspace = struct {
     id: u8,  // OPTIMIZED: u8 instead of usize
     windows: tracking,
@@ -55,7 +62,7 @@ const StateManager = createModule(State);
 inline fn cleanupWorkspaces(workspaces: []Workspace, allocator: std.mem.Allocator) void {
     for (workspaces) |*ws| {
         ws.deinit();
-        allocator.free(ws.name);
+        // Note: workspace names are now static (WORKSPACE_NAMES), no need to free
     }
     allocator.free(workspaces);
 }
@@ -67,10 +74,10 @@ pub fn init(wm: *WM) void {
         return;
     };
     
-    // OPTIMIZATION: Single loop for initialization
+    // OPTIMIZATION: Single loop for initialization with static names
     for (workspaces_array, 0..) |*ws, i| {
         const ws_id: u8 = @intCast(i);
-        const name = std.fmt.allocPrint(wm.allocator, "{}", .{i + 1}) catch "?";
+        const name = if (i < WORKSPACE_NAMES.len) WORKSPACE_NAMES[i] else "?";
         ws.* = Workspace.init(wm.allocator, ws_id, name) catch {
             debug.err("Failed to init workspace {}", .{i});
             cleanupWorkspaces(workspaces_array[0..i], wm.allocator);
@@ -99,10 +106,7 @@ pub fn init(wm: *WM) void {
 
 pub fn deinit(wm: *WM) void {
     if (StateManager.get()) |s| {
-        for (s.workspaces) |*ws| {
-            ws.deinit();
-            wm.allocator.free(ws.name);
-        }
+        for (s.workspaces) |*ws| ws.deinit();
         wm.allocator.free(s.workspaces);
         s.window_to_workspace.deinit();
     }
@@ -171,7 +175,10 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) void {
         }
         if (tiling_state) |ts| ts.markDirty();
     } else if (target_ws == s.current) {
-        // Window moving to current workspace - will be shown on next retile
+        // Window moving to current workspace — map it in case it was deferred
+        // (workspace-bound windows that spawned while this workspace was inactive
+        // are kept unmapped until shown).
+        _ = xcb.xcb_map_window(s.wm.conn, win);
         if (tiling_state) |ts| ts.markDirty();
     }
 }
@@ -238,6 +245,14 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
     if (fs_info) |info| {
         configureFullscreen(wm, info);
     } else {
+        // Map any windows that were deferred (workspace-bound windows that spawned
+        // while this workspace was inactive are kept unmapped to avoid the
+        // compositor allocating a cold off-screen buffer).  xcb_map_window is a
+        // no-op for already-mapped windows, so this is always safe.
+        for (new_workspace.windows.items()) |win| {
+            _ = xcb.xcb_map_window(wm.conn, win);
+        }
+
         // No fullscreen - position windows based on RUNTIME tiling state
         // CRITICAL FIX: Check tiling.State.enabled, not config.tiling.enabled!
         // When user toggles tiling with Mod+N, it changes State.enabled, not config
@@ -245,8 +260,9 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
         const tiling_enabled = if (tiling_state) |ts| ts.enabled else false;
         
         if (tiling_enabled) {
-            // Tiling enabled - let tiling system position windows
-            tiling.retileCurrentWorkspace(wm, false);
+            // Force retile so windows always reflect the current bar visibility
+            // and screen area, regardless of what changed on other workspaces.
+            tiling.retileCurrentWorkspace(wm, true);
         } else {
             // FIXED 2.6: Pre-batch geometry cookies BEFORE positioning
             // Prevents blocking geometry queries during server grab

@@ -36,7 +36,7 @@ pub fn startDrag(wm: *WM, win: u32, button: u8, x: i16, y: i16) void {
     const tiling_state = tiling.getState();
     const tiling_enabled = if (tiling_state) |ts| ts.enabled else false;
     if (tiling_enabled and tiling.isWindowTiled(win)) {
-        tiling.removeWindow(wm, win);
+        tiling.removeWindow(win);
     }
 }
 
