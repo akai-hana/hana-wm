@@ -226,16 +226,12 @@ fn detectFresh(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) !DpiInfo 
     return DpiInfo.init(snapped);
 }
 
-/// Scale a dimension value based on DPI
+/// Scale an integer dimension value based on DPI
 pub inline fn scale(base_value: anytype, scale_factor: f32) @TypeOf(base_value) {
     const T = @TypeOf(base_value);
-    const float_val: f32 = @floatFromInt(base_value);
-    const scaled = float_val * scale_factor;
-    
     return switch (@typeInfo(T)) {
-        .int, .comptime_int => @intFromFloat(@round(scaled)),
-        .float, .comptime_float => scaled,
-        else => @compileError("Unsupported type for scaling"),
+        .int, .comptime_int => @intFromFloat(@round(@as(f32, @floatFromInt(base_value)) * scale_factor)),
+        else => @compileError("scale() only supports integer types; use scaleToInt() for floats"),
     };
 }
 

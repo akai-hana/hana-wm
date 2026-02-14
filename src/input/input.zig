@@ -23,12 +23,6 @@ const MOUSE_BUTTON_RIGHT = 3;
 
 const MOUSE_BUTTONS = [_]u8{ MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT };  // Super+Button1 (move), Super+Button3 (resize)
 
-// OPTIMIZATION: Cache commonly-used WM atoms to avoid repeated lookups
-var cached_atoms: struct {
-    wm_protocols: ?u32 = null,
-    wm_delete_window: ?u32 = null,
-} = .{};
-
 const KeybindState = struct {
     map: std.AutoHashMap(u64, *const defs.Action),
     allocator: std.mem.Allocator,
@@ -42,10 +36,6 @@ const KeybindState = struct {
 
     fn deinit(self: *KeybindState) void {
         self.map.deinit();
-    }
-
-    inline fn get(self: *KeybindState, key: u64) ?*const defs.Action {
-        return self.map.get(key);
     }
 
     fn rebuild(self: *KeybindState, wm: *WM) !void {
@@ -74,10 +64,6 @@ pub fn init(wm: *WM) void {
         return;
     };
     keybind_state = state;
-    
-    // OPTIMIZATION: Pre-cache WM atoms used in closeWindow to avoid repeated lookups
-    cached_atoms.wm_protocols = utils.getAtomCached("WM_PROTOCOLS") catch null;
-    cached_atoms.wm_delete_window = utils.getAtomCached("WM_DELETE_WINDOW") catch null;
 }
 
 pub fn deinit(wm: *WM) void {
@@ -127,7 +113,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
     const keysym = xkb_ptr.keycodeToKeysym(event.detail);
     const key = makeHash(mods, keysym);
 
-    if (state.get(key)) |action| {
+    if (state.map.get(key)) |action| {
         // REMOVED: No longer need to reset event counters
         // The new approach doesn't use counters - it uses context-aware suppression
         executeAction(action, wm) catch |err| {
@@ -168,27 +154,24 @@ fn closeWindow(wm: *WM, win: u32) void {
         return;
     }
 
-    // OPTIMIZATION: Use pre-cached atoms instead of looking them up each time
-    const wm_protocols_atom = cached_atoms.wm_protocols orelse {
+    const wm_protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch {
+        forceDestroyWindow(wm, win);
+        return;
+    };
+    const wm_delete_atom = utils.getAtomCached("WM_DELETE_WINDOW") catch {
         forceDestroyWindow(wm, win);
         return;
     };
 
-    const wm_delete_atom = cached_atoms.wm_delete_window orelse {
-        forceDestroyWindow(wm, win);
-        return;
-    };
-
-    const prop_cookie = xcb.xcb_get_property(wm.conn, 0, win, wm_protocols_atom, xcb.XCB_ATOM_ATOM, 0, 1024);
-    const prop_reply = xcb.xcb_get_property_reply(wm.conn, prop_cookie, null);
+    const prop_reply = xcb.xcb_get_property_reply(wm.conn,
+        xcb.xcb_get_property(wm.conn, 0, win, wm_protocols_atom, xcb.XCB_ATOM_ATOM, 0, 1024), null);
 
     if (prop_reply) |reply| {
         defer std.c.free(reply);
         const atoms: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
         const atom_count: usize = @intCast(@divExact(xcb.xcb_get_property_value_length(reply), @as(c_int, @sizeOf(u32))));
-
-        for (0..atom_count) |i| {
-            if (atoms[i] == wm_delete_atom) {
+        for (atoms[0..atom_count]) |atom| {
+            if (atom == wm_delete_atom) {
                 sendDeleteEvent(wm, win, wm_protocols_atom, wm_delete_atom);
                 return;
             }
@@ -198,17 +181,13 @@ fn closeWindow(wm: *WM, win: u32) void {
 }
 
 fn sendDeleteEvent(wm: *WM, win: u32, protocols_atom: u32, delete_atom: u32) void {
-    var event: xcb.xcb_client_message_event_t = undefined;
-    event.response_type = xcb.XCB_CLIENT_MESSAGE;
-    event.format = 32;
-    event.sequence = 0;
-    event.window = win;
-    event.type = protocols_atom;
+    var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
+    event.response_type  = xcb.XCB_CLIENT_MESSAGE;
+    event.format         = 32;
+    event.window         = win;
+    event.type           = protocols_atom;
     event.data.data32[0] = delete_atom;
     event.data.data32[1] = xcb.XCB_CURRENT_TIME;
-    event.data.data32[2] = 0;
-    event.data.data32[3] = 0;
-    event.data.data32[4] = 0;
     _ = xcb.xcb_send_event(wm.conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
     utils.flush(wm.conn);
 }

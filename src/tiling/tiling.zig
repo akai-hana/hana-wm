@@ -92,10 +92,6 @@ const FocusRing = struct {
     }
     
     pub fn remove(self: *FocusRing, win: u32) void {
-        self.removeWindow(win);
-    }
-    
-    fn removeWindow(self: *FocusRing, win: u32) void {
         var i: u8 = 0;
         while (i < self.len) : (i += 1) {
             const idx = (self.head + i) % 16;
@@ -206,66 +202,6 @@ pub const State = struct {
         self.geometry_cache.clearRetainingCapacity();
     }
     
-    // ============================================================================
-    // PHASE 2 IMPROVEMENT: Geometry Cache Cleanup
-    // ============================================================================
-    
-    /// Clean up stale geometry cache entries for windows that no longer exist
-    /// This prevents the cache from growing unbounded over time
-    /// Call this periodically (e.g., after workspace switches or major layout changes)
-    pub fn cleanupStaleGeometryCache(self: *State, wm: *const WM) void {
-        // FIXED 3.16: Use stack buffer instead of heap allocation
-        // Geometry cache >64 entries is extremely rare
-        var to_remove: [64]u32 = undefined;
-        var count: usize = 0;
-        
-        var iter = self.geometry_cache.keyIterator();
-        while (iter.next()) |win_ptr| {
-            // Remove cache entries for windows that:
-            // 1. No longer exist in the WM's window tracking
-            // 2. Are not in the tiling system
-            if (!wm.hasWindow(win_ptr.*) or !self.windows.contains(win_ptr.*)) {
-                if (count < to_remove.len) {
-                    to_remove[count] = win_ptr.*;
-                    count += 1;
-                }
-            }
-        }
-        
-        // Remove all stale entries
-        for (to_remove[0..count]) |win| {
-            _ = self.geometry_cache.remove(win);
-        }
-        
-        // Optionally shrink the hashmap if it's much larger than needed
-        // This helps prevent memory fragmentation over time
-        const current_capacity = self.geometry_cache.capacity();
-        const active_windows = self.windows.count();
-        
-        // If capacity is more than 4x the number of active windows, consider shrinking
-        // This threshold prevents too-frequent reallocations while reclaiming memory
-        if (current_capacity > active_windows * 4 and current_capacity > 32) {
-            // Note: std.AutoHashMap doesn't have a shrink method, but we can
-            // clear and re-add entries if needed. For now, just clearing old entries
-            // is sufficient as the allocator will handle fragmentation.
-        }
-    }
-    
-    /// Update focus history using simplified FocusRing (Phase 3 refactor)
-    pub fn updateFocusHistory(self: *State, win: u32) void {
-        self.focus_ring.push(win);
-    }
-    
-    /// Remove window from focus history
-    pub fn removeFocusHistory(self: *State, win: u32) void {
-        self.focus_ring.remove(win);
-    }
-    
-    /// Get focus history iterator (most recent first)
-    pub fn focusHistoryIter(self: *const State) FocusHistoryIterator {
-        return self.focus_ring.iter();
-    }
-    
     pub fn deinit(self: *State) void {
         self.windows.deinit();
         self.geometry_cache.deinit();
@@ -322,9 +258,7 @@ pub fn init(wm: *WM) void {
 }
 
 pub fn deinit(wm: *WM) void {
-    if (StateManager.get()) |s| {
-        s.deinit();
-    }
+    if (StateManager.get()) |s| s.deinit();
     StateManager.deinit(wm.allocator);
 }
 
@@ -356,15 +290,14 @@ pub fn addWindow(wm: *WM, window_id: u32) void {
     debug.info("Added window 0x{x} to tiling", .{window_id});
 }
 
-pub fn removeWindow(wm: *WM, window_id: u32) void {
+pub fn removeWindow(window_id: u32) void {
     const s = StateManager.get() orelse return;
     if (s.windows.remove(window_id)) {
         s.markDirty();
         s.invalidateGeometry(window_id);
-        s.removeFocusHistory(window_id);
+        s.focus_ring.remove(window_id);
         debug.info("Removed window 0x{x} from tiling", .{window_id});
     }
-    _ = wm;
 }
 
 pub inline fn isWindowTiled(window_id: u32) bool {
@@ -374,13 +307,15 @@ pub inline fn isWindowTiled(window_id: u32) bool {
 
 // Helper function to calculate screen area available for tiling
 fn calculateScreenArea(wm: *WM) utils.Rect {
-    const bar_height = bar.getBarHeight();
+    // Only reserve space for the bar when it is actually visible on screen.
+    // When the user hides the bar (mod+b), bar.isVisible() returns false and we
+    // use the full screen height so tiling doesn't leave an empty gap.
+    const bar_height: u16 = if (bar.isVisible()) bar.getBarHeight() else 0;
     const bar_at_bottom = wm.config.bar.vertical_position == .bottom;
-    
     return .{
-        .x = 0,
-        .y = if (bar_at_bottom) 0 else @intCast(bar_height),
-        .width = wm.screen.width_in_pixels,
+        .x      = 0,
+        .y      = if (bar_at_bottom) 0 else @intCast(bar_height),
+        .width  = wm.screen.width_in_pixels,
         .height = wm.screen.height_in_pixels - bar_height,
     };
 }
@@ -535,23 +470,17 @@ pub fn toggleTiling(wm: *WM) void {
     debug.info("Tiling {s}", .{if (s.enabled) "enabled" else "disabled"});
 }
 
-pub fn cycleLayout(wm: *WM) void {
+pub fn toggleLayout(wm: *WM) void {
     const s = StateManager.get() orelse return;
-    
     s.layout = switch (s.layout) {
         .master => .monocle,
         .monocle => .grid,
         .grid => .fibonacci,
         .fibonacci => .master,
     };
-    
     s.markDirty();
     retileCurrentWorkspace(wm, false);
     debug.info("Cycled to layout: {s}", .{@tagName(s.layout)});
-}
-
-pub fn toggleLayout(wm: *WM) void {
-    cycleLayout(wm);
 }
 
 pub fn toggleLayoutReverse(wm: *WM) void {
@@ -689,7 +618,7 @@ inline fn switchFocus(wm: *WM, s: *State, from: ?u32, to: u32) void {
     std.debug.assert(to != 0 and wm.hasWindow(to));  // Focus target must be valid and tracked
     focus.setFocus(wm, to, .tiling_operation);
     wm.focused_window = to;
-    s.updateFocusHistory(to);
+    s.focus_ring.push(to);
     updateWindowFocus(wm, from, to);
 }
 
@@ -729,7 +658,7 @@ pub fn focusPrevious(wm: *WM) void {
     const current_focused = wm.focused_window orelse return;
     
     // OPTIMIZATION: Use circular buffer iterator instead of slice
-    var iter = s.focusHistoryIter();
+    var iter = s.focus_ring.iter();
     while (iter.next()) |hist_win| {
         if (hist_win == current_focused) continue;
         if (workspaces.isOnCurrentWorkspace(hist_win) and s.windows.contains(hist_win)) {
@@ -763,7 +692,7 @@ pub fn focusSecondLast(wm: *WM) void {
     
     // OPTIMIZATION: Use circular buffer iterator
     var found_current = false;
-    var iter = s.focusHistoryIter();
+    var iter = s.focus_ring.iter();
     while (iter.next()) |hist_win| {
         if (hist_win == current_focused.?) {
             found_current = true;

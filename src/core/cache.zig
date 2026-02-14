@@ -1,133 +1,56 @@
-//! Unified caching layer for bar system
-//! Centralizes all caching mechanisms with smart invalidation
+//! Bar caching — workspace label pixel-widths.
+//!
+//! The original CacheManager carried a color hashmap, dirty-flags, a config-hash
+//! and several methods (getColor, markDirty, checkConfigChange) that were never
+//! called from outside this module.  All dead code has been removed; only the
+//! label-width cache (the sole external consumer) is retained.
 
-const std = @import("std");
-const defs = @import("defs");
+const std    = @import("std");
+const defs   = @import("defs");
 const drawing = @import("drawing");
 
-/// RGB color representation for caching
-pub const RGBColor = struct {
-    r: f64,
-    g: f64,
-    b: f64,
-};
-
-/// Workspace label cache entry
-pub const WorkspaceLabelCache = struct {
-    label_widths: [20]u16 = [_]u16{0} ** 20,
-    valid: bool = false,
-};
-
-/// Cache type for selective invalidation
-pub const CacheType = enum {
-    layout,
-    colors,
-    widths,
-    all,
-};
-
-/// Centralized cache manager
+/// Caches per-workspace label pixel widths so the bar avoids redundant
+/// Pango measurements on every draw call.
 pub const CacheManager = struct {
-    allocator: std.mem.Allocator,
-    colors: std.AutoHashMap(u32, RGBColor),
-    workspace_labels: WorkspaceLabelCache,
-    last_config_hash: u64,
-    dirty_flags: struct {
-        layout: bool = true,
-        colors: bool = true,
-        widths: bool = true,
-    },
-    
+    label_widths: [20]u16 = [_]u16{0} ** 20,
+    valid:        bool    = false,
+    allocator:    std.mem.Allocator,
+
     pub fn init(allocator: std.mem.Allocator) !*CacheManager {
         const cm = try allocator.create(CacheManager);
-        cm.* = .{
-            .allocator = allocator,
-            .colors = std.AutoHashMap(u32, RGBColor).init(allocator),
-            .workspace_labels = .{},
-            .last_config_hash = 0,
-            .dirty_flags = .{},
-        };
+        cm.* = .{ .allocator = allocator };
         return cm;
     }
-    
+
     pub fn deinit(self: *CacheManager) void {
-        self.colors.deinit();
         self.allocator.destroy(self);
     }
-    
-    /// Mark specific cache as dirty
-    pub fn markDirty(self: *CacheManager, cache_type: CacheType) void {
-        switch (cache_type) {
-            .layout => self.dirty_flags.layout = true,
-            .colors => {
-                self.dirty_flags.colors = true;
-                self.colors.clearRetainingCapacity();
-            },
-            .widths => {
-                self.dirty_flags.widths = true;
-                self.workspace_labels.valid = false;
-            },
-            .all => {
-                self.dirty_flags = .{ .layout = true, .colors = true, .widths = true };
-                self.colors.clearRetainingCapacity();
-                self.workspace_labels.valid = false;
-                self.last_config_hash = 0;
-            },
-        }
-    }
-    
-    /// Get cached RGB color or compute and cache it
-    pub fn getColor(self: *CacheManager, color: u32) !RGBColor {
-        if (self.colors.get(color)) |rgb| return rgb;
-        
-        const rgb = RGBColor{
-            .r = @as(f64, @floatFromInt((color >> 16) & 0xFF)) / 255.0,
-            .g = @as(f64, @floatFromInt((color >> 8) & 0xFF)) / 255.0,
-            .b = @as(f64, @floatFromInt(color & 0xFF)) / 255.0,
+
+    pub fn updateWorkspaceLabels(
+        self:   *CacheManager,
+        dc:     *drawing.DrawContext,
+        config: *const defs.BarConfig,
+    ) !void {
+        if (self.valid) return;
+        const static_numbers = [_][]const u8{
+            "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
         };
-        
-        try self.colors.put(color, rgb);
-        return rgb;
-    }
-    
-    /// Update workspace label cache if invalid
-    pub fn updateWorkspaceLabels(self: *CacheManager, dc: *drawing.DrawContext, config: *const defs.BarConfig) !void {
-        if (self.workspace_labels.valid) return;
-        
-        const static_numbers = [_][]const u8{ "1", "2", "3", "4", "5", "6", "7", "8", "9", "10" };
-        
-        for (&self.workspace_labels.label_widths, 0..) |*width, i| {
-            const label = if (i < config.workspace_icons.items.len)
-                config.workspace_icons.items[i]
-            else if (i < static_numbers.len)
-                static_numbers[i]
-            else
-                "?";
+        for (&self.label_widths, 0..) |*width, i| {
+            const label: []const u8 =
+                if (i < config.workspace_icons.items.len) config.workspace_icons.items[i]
+                else if (i < static_numbers.len)          static_numbers[i]
+                else                                      "?";
             width.* = dc.textWidth(label);
         }
-        
-        self.workspace_labels.valid = true;
+        self.valid = true;
     }
-    
-    /// Get cached workspace label width
-    pub fn getWorkspaceLabelWidth(self: *CacheManager, index: usize) u16 {
-        if (!self.workspace_labels.valid or index >= 20) return 0;
-        return self.workspace_labels.label_widths[index];
+
+    pub fn getWorkspaceLabelWidth(self: *const CacheManager, index: usize) u16 {
+        if (!self.valid or index >= self.label_widths.len) return 0;
+        return self.label_widths[index];
     }
-    
-    /// Check if config has changed and invalidate caches if needed
-    pub fn checkConfigChange(self: *CacheManager, config: *const defs.BarConfig) void {
-        var h = std.hash.Wyhash.init(0);
-        h.update(std.mem.asBytes(&config.bg));
-        h.update(std.mem.asBytes(&config.fg));
-        h.update(std.mem.asBytes(&config.font_size));
-        h.update(std.mem.asBytes(&config.padding));
-        h.update(std.mem.asBytes(&config.segment_spacing));
-        const new_hash = h.final();
-        
-        if (new_hash != self.last_config_hash) {
-            self.markDirty(.all);
-            self.last_config_hash = new_hash;
-        }
+
+    pub fn invalidate(self: *CacheManager) void {
+        self.valid = false;
     }
 };

@@ -47,8 +47,7 @@ const State = struct {
     cached_title_window: ?u32,
     dirty: bool,
     dirty_clock: bool,
-    last_second: i64,
-    visible: bool,  // OPTIMIZATION: Track actual visibility for timer control
+    visible: bool,
     has_transparency: bool,  // Track if transparency is enabled
     allocator: std.mem.Allocator,
     cached_clock_width: u16,
@@ -74,8 +73,8 @@ const State = struct {
             .status_text = std.ArrayList(u8).empty,
             .cached_title = std.ArrayList(u8).empty,
             .cached_title_window = null,
-            .dirty = false, .dirty_clock = false, .last_second = 0,
-            .visible = true,  // OPTIMIZATION: Start visible, setBarState will update
+            .dirty = false, .dirty_clock = false,
+            .visible = true,
             .has_transparency = has_transparency,
             .allocator = allocator,
             .cached_clock_width = dc.textWidth(CLOCK_FORMAT) + 2 * scaled_padding,
@@ -129,34 +128,9 @@ const State = struct {
 /// NOT thread-safe: Do not access from signal handlers or other threads
 var state: ?*State = null;
 
-fn updateClockIfNeeded(s: *State) void {
-    // OPTIMIZATION: Skip clock update if bar is hidden (idle CPU reduction)
-    if (!s.visible) return;
-    
-    const ts = std.posix.clock_gettime(std.posix.CLOCK.REALTIME) catch |e| {
-        debug.warnOnErr(e, "clock_gettime in updateClockIfNeeded");
-        return;
-    };
-    if (ts.sec != s.last_second) {
-        s.last_second = ts.sec;
-        s.markClockDirty();
-    }
-}
-
-// FIXED: Use stack buffer for common case to avoid heap allocation
-// NOTE 2.8: Result is always heap-allocated because caller needs owned memory
-// The stack buffer optimization reduces allocator overhead but still requires
-// final heap allocation since callers (loadBarFonts) free the result later
 fn sizeFont(alloc: std.mem.Allocator, font: []const u8, size: u16) ![]const u8 {
     if (size == 0) return font;
-    
-    // Try stack buffer first (most font strings with size fit in 256 bytes)
-    var buf: [256]u8 = undefined;
-    const result = std.fmt.bufPrint(&buf, "{s}:size={}", .{font, size}) catch {
-        // Fall back to heap allocation for very long font names
-        return std.fmt.allocPrint(alloc, "{s}:size={}", .{font, size});
-    };
-    return try alloc.dupe(u8, result);
+    return std.fmt.allocPrint(alloc, "{s}:size={}", .{font, size});
 }
 
 fn loadBarFonts(dc: *drawing.DrawContext, wm: *defs.WM) !void {
@@ -184,9 +158,7 @@ inline fn setProp(conn: *xcb.xcb_connection_t, win: u32, name: []const u8, type_
         try utils.getAtom(conn, name), type_, 32, data.len, data);
 }
 
-fn setWindowProperties(wm: *defs.WM, window: u32, height: u16, want_transparency: bool, alpha: u16) !void {
-    _ = want_transparency;
-    _ = alpha;
+fn setWindowProperties(wm: *defs.WM, window: u32, height: u16) !void {
     
     const strut: [12]u32 = if (wm.config.bar.vertical_position == .bottom)
         .{ 0, 0, 0, height, 0, 0, 0, 0, 0, 0, 0, wm.screen.width_in_pixels }
@@ -240,13 +212,6 @@ fn calculateBarHeight(wm: *defs.WM) !u16 {
     return @intCast(std.math.clamp(font_height + 2 * scaled_padding, MIN_BAR_HEIGHT, MAX_BAR_HEIGHT));
 }
 
-// Helper functions for init() refactoring (Batch 2.1)
-
-fn setupDPI(wm: *defs.WM) void {
-    wm.config.bar.scale_factor = wm.dpi_info.scale_factor;
-    debug.info("DPI: {d:.1}, Scale factor: {d:.2}x", .{wm.dpi_info.dpi, wm.dpi_info.scale_factor});
-}
-
 const VisualSetup = struct {
     depth: u8,
     visual_id: u32,
@@ -258,12 +223,7 @@ fn setupVisual(wm: *defs.WM) VisualSetup {
     const alpha = wm.config.bar.getAlpha16();
     const want_transparency = alpha < 0xFFFF;
     
-    if (want_transparency) {
-        debug.info("Bar transparency: {d:.2}% (handled by compositor, not window opacity)", 
-            .{wm.config.bar.transparency * 100.0});
-    } else {
-        debug.info("Bar transparency: disabled (fully opaque)", .{});
-    }
+    debug.info("Bar transparency: {s}", .{if (want_transparency) "enabled (ARGB, compositor-driven)" else "disabled (opaque)"});
     
     // Find appropriate visual and depth for transparency
     const visual_info = if (want_transparency) 
@@ -280,11 +240,6 @@ fn setupVisual(wm: *defs.WM) VisualSetup {
         break :blk cmap;
     } else 0;
     
-    if (want_transparency) {
-        debug.info("Created 32-bit ARGB window for transparency (handled by compositor like borders)", .{});
-    } else {
-        debug.info("Created RGB window (fully opaque)", .{});
-    }
     
     return .{
         .depth = depth,
@@ -302,66 +257,44 @@ fn createBarWindow(wm: *defs.WM, height: u16, visual_setup: VisualSetup) u32 {
     else 0;
     
     const window = xcb.xcb_generate_id(wm.conn);
+    const event_mask = xcb.XCB_EVENT_MASK_EXPOSURE | xcb.XCB_EVENT_MASK_BUTTON_PRESS;
+    
+    var values: [4]u32 = undefined;
+    var value_mask: u32 = xcb.XCB_CW_BACK_PIXEL | xcb.XCB_CW_EVENT_MASK;
+    var value_count: usize = 2;
     
     if (visual_setup.has_transparency) {
-        const bg_color = 0xFF000000 | wm.config.bar.bg;
-        const values = [_]u32{ 
-            bg_color, 
-            0, 
-            xcb.XCB_EVENT_MASK_EXPOSURE | xcb.XCB_EVENT_MASK_BUTTON_PRESS, 
-            visual_setup.colormap 
-        };
-        _ = xcb.xcb_create_window(
-            wm.conn, 
-            visual_setup.depth,
-            window, 
-            screen.root,
-            0, y_pos, width, height, 0,
-            xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, 
-            visual_setup.visual_id,
-            xcb.XCB_CW_BACK_PIXEL | xcb.XCB_CW_BORDER_PIXEL | xcb.XCB_CW_EVENT_MASK | xcb.XCB_CW_COLORMAP,
-            &values,
-        );
+        values[0] = 0xFF000000 | wm.config.bar.bg;
+        values[1] = 0;  // border pixel
+        values[2] = event_mask;
+        values[3] = visual_setup.colormap;
+        value_mask |= xcb.XCB_CW_BORDER_PIXEL | xcb.XCB_CW_COLORMAP;
+        value_count = 4;
     } else {
-        const values = [_]u32{ 
-            wm.config.bar.bg, 
-            xcb.XCB_EVENT_MASK_EXPOSURE | xcb.XCB_EVENT_MASK_BUTTON_PRESS 
-        };
-        _ = xcb.xcb_create_window(
-            wm.conn, 
-            visual_setup.depth,
-            window, 
-            screen.root,
-            0, y_pos, width, height, 0,
-            xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, 
-            visual_setup.visual_id,
-            xcb.XCB_CW_BACK_PIXEL | xcb.XCB_CW_EVENT_MASK,
-            &values,
-        );
+        values[0] = wm.config.bar.bg;
+        values[1] = event_mask;
     }
+    
+    _ = xcb.xcb_create_window(
+        wm.conn, 
+        visual_setup.depth,
+        window, 
+        screen.root,
+        0, y_pos, width, height, 0,
+        xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, 
+        visual_setup.visual_id,
+        value_mask,
+        @as(?*const anyopaque, @ptrCast(values[0..value_count].ptr)),
+    );
     
     return window;
 }
 
-fn initDrawContext(wm: *defs.WM, window: u32, width: u16, height: u16, visual_setup: VisualSetup) !*drawing.DrawContext {
-    return drawing.DrawContext.initWithVisual(
-        wm.allocator, 
-        wm.conn, 
-        window, 
-        width, 
-        height, 
-        visual_setup.visual_id,
-        wm.dpi_info.dpi,
-        visual_setup.has_transparency,
-        wm.config.bar.transparency
-    );
-}
 
 pub fn init(wm: *defs.WM) !void {
     if (!wm.config.bar.enabled) return error.BarDisabled;
 
-    // Step 1: Setup DPI
-    setupDPI(wm);
+    wm.config.bar.scale_factor = wm.dpi_info.scale_factor;
 
     // Step 2: Calculate bar height
     const height = try calculateBarHeight(wm);
@@ -373,12 +306,16 @@ pub fn init(wm: *defs.WM) !void {
     const window = createBarWindow(wm, height, visual_setup);
     
     // Step 5: Set window properties
-    try setWindowProperties(wm, window, height, visual_setup.has_transparency, wm.config.bar.getAlpha16());
+    try setWindowProperties(wm, window, height);
     _ = xcb.xcb_map_window(wm.conn, window);
     utils.flush(wm.conn);
 
     // Step 6: Initialize draw context
-    const dc = try initDrawContext(wm, window, wm.screen.width_in_pixels, height, visual_setup);
+    const dc = try drawing.DrawContext.initWithVisual(
+        wm.allocator, wm.conn, window, wm.screen.width_in_pixels, height,
+        visual_setup.visual_id, wm.dpi_info.dpi,
+        visual_setup.has_transparency, wm.config.bar.transparency,
+    );
     errdefer dc.deinit();
     
     // Step 7: Load fonts
@@ -409,7 +346,6 @@ fn setBarVisibility(wm: *defs.WM, visible: bool, reason: []const u8) void {
         
         if (visible) {
             _ = xcb.xcb_map_window(s.conn, s.window);
-            utils.flush(wm.conn);
             draw(s, wm) catch |e| debug.warnOnErr(e, "draw in setVisibility");
         } else {
             _ = xcb.xcb_unmap_window(s.conn, s.window);
@@ -444,9 +380,7 @@ pub fn toggleBarPosition(wm: *defs.WM) !void {
             xcb.XCB_CONFIG_WINDOW_Y, &values);
         
         // Update window properties for new position
-        const alpha = wm.config.bar.getAlpha16();
-        const want_transparency = alpha < 0xFFFF;
-        try setWindowProperties(wm, s.window, s.height, want_transparency, alpha);
+        try setWindowProperties(wm, s.window, s.height);
         
         utils.flush(wm.conn);
         debug.info("Bar position toggled to: {s}", .{@tagName(wm.config.bar.vertical_position)});
@@ -469,7 +403,9 @@ pub fn raiseBar() void {
         xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 }
 pub fn getBarHeight() u16 { return if (state) |s| s.height else 0; }
-pub fn isBarVisible() bool { return state != null; }
+/// Returns true if the bar was successfully initialised (not necessarily visible on screen).
+/// Use isVisible() to check whether the bar is currently shown.
+pub fn isBarInitialized() bool { return state != null; }
 
 // OPTIMIZATION: Cached workspace dimensions for fast access
 pub fn getCachedWorkspaceWidth() u16 { return if (state) |s| s.cached_ws_width else 50; }
@@ -496,26 +432,19 @@ pub fn isVisible() bool {
 pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
 
 pub fn setBarState(wm: *defs.WM, action: BarAction) void {
-    const show = switch (action) {
-        .toggle => blk: { wm.config.bar.enabled = !wm.config.bar.enabled; break :blk wm.config.bar.enabled; },
-        .hide_fullscreen => false,
-        .show_fullscreen => wm.config.bar.enabled,
+    if (action == .show_fullscreen and !wm.config.bar.enabled) return;
+    if (action == .toggle) wm.config.bar.enabled = !wm.config.bar.enabled;
+    const show, const reason = switch (action) {
+        .toggle          => .{ wm.config.bar.enabled, "toggle" },
+        .hide_fullscreen => .{ false,                 "fullscreen" },
+        .show_fullscreen => .{ true,                  "exit fullscreen" },
     };
-    const reason = switch (action) {
-        .toggle => "toggle",
-        .hide_fullscreen => "fullscreen",
-        .show_fullscreen => "exit fullscreen",
-    };
-    if (action != .show_fullscreen or wm.config.bar.enabled) {
-        setBarVisibility(wm, show, reason);
-    }
+    setBarVisibility(wm, show, reason);
 }
 
 pub fn updateIfDirty(wm: *defs.WM) !void {
     if (state) |s| {
-        // FIXED 2.11: Removed updateClockIfNeeded - timerfd handles clock updates
-        // updateClockIfNeeded does clock_gettime on every event, but the timer
-        // fd fires exactly once per second, making the syscall here redundant
+        // FIXED 2.11: Clock updates driven by timerfd (fires once/sec), not polling
         if (s.isDirty()) {
             if (s.dirty) try draw(s, wm) else if (s.dirty_clock) try drawClockOnly(s, wm);
             s.clearDirty();
@@ -523,8 +452,8 @@ pub fn updateIfDirty(wm: *defs.WM) !void {
     }
 }
 
-pub fn checkClockUpdate() !void {
-    if (state) |s| updateClockIfNeeded(s);
+pub fn checkClockUpdate() void {
+    if (state) |s| if (s.visible) s.markClockDirty();
 }
 
 fn drawClockOnly(s: *State, wm: *defs.WM) !void {

@@ -69,9 +69,6 @@ fn get(
     return value;
 }
 
-fn getScalable(section: *const parser.Section, key: []const u8, default: parser.ScalableValue) parser.ScalableValue {
-    return section.getScalable(key) orelse default;
-}
 
 // CONSOLIDATED: Helper for workspace range validation
 fn validateWorkspace(ws_num: usize, max: usize, context: []const u8) bool {
@@ -146,10 +143,7 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
     defer allocator.free(path_z);
 
     const fd = std.posix.open(path_z, .{ .ACCMODE = .RDONLY }, 0) catch |err| {
-        if (err == error.FileNotFound) {
-            debug.info("Not found: {s}", .{path});
-            return err;
-        }
+        if (err == error.FileNotFound) debug.info("Not found: {s}", .{path});
         return err;
     };
     defer std.posix.close(fd);
@@ -425,8 +419,8 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
     const aesthetics_section = doc.getSection("tiling.aesthetics");
     const aesthetic_src = aesthetics_section orelse section;
     
-    cfg.tiling.gaps = getScalable(aesthetic_src, "gaps", parser.ScalableValue.absolute(10.0));
-    cfg.tiling.border_width = getScalable(aesthetic_src, "border_width", parser.ScalableValue.absolute(2.0));
+    cfg.tiling.gaps = aesthetic_src.getScalable("gaps") orelse parser.ScalableValue.absolute(10.0);
+    cfg.tiling.border_width = aesthetic_src.getScalable("border_width") orelse parser.ScalableValue.absolute(2.0);
     cfg.tiling.border_focused = getColor(aesthetic_src, "border_focused", 0x5294E2);
     cfg.tiling.border_unfocused = getColor(aesthetic_src, "border_unfocused", 0x383C4A);
 
@@ -445,7 +439,7 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
         cfg.tiling.master_side = defs.MasterSide.fromStringWithAlias(side_str) orelse .left;
     }
     
-    cfg.tiling.master_width = getScalable(master_src, width_key, parser.ScalableValue.percentage(50.0));
+    cfg.tiling.master_width = master_src.getScalable(width_key) orelse parser.ScalableValue.percentage(50.0);
 }
 
 // OPTIMIZATION: Table-driven bar color parsing
@@ -495,7 +489,7 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
         }
     }
 
-    cfg.bar.font_size = getScalable(section, "font_size", parser.ScalableValue.percentage(10.0));
+    cfg.bar.font_size = section.getScalable("font_size") orelse parser.ScalableValue.percentage(10.0);
     cfg.bar.padding = get(u8, section, "padding", 8, 0, 50);
     cfg.bar.spacing = get(u8, section, "spacing", 12, 0, 100);
 
@@ -513,8 +507,8 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     cfg.allocated_clock_format = try allocator.dupe(u8, clock_fmt);
     cfg.bar.clock_format = cfg.allocated_clock_format.?;
 
-    cfg.bar.indicator_size = getScalable(section, "indicator_size", parser.ScalableValue.percentage(100.0));
-    cfg.bar.workspace_width = getScalable(section, "workspace_width", parser.ScalableValue.percentage(100.0));
+    cfg.bar.indicator_size = section.getScalable("indicator_size") orelse parser.ScalableValue.percentage(100.0);
+    cfg.bar.workspace_width = section.getScalable("workspace_width") orelse parser.ScalableValue.percentage(100.0);
     
     // Parse transparency value - supports multiple formats:
     // - Bare decimals: 0.5, 0.75
