@@ -91,6 +91,28 @@ pub const Tracking = struct {
         }
     }
 
+    /// Reorder the window list in a single pass using a caller-provided buffer.
+    /// `new_order` must be a permutation of the current windows.
+    /// For the small path this is a direct memcpy; for the large path it also
+    /// rebuilds the hash set to stay consistent.
+    pub fn reorder(self: *Tracking, new_order: []const u32) void {
+        switch (self.storage) {
+            .small => |*s| {
+                const len: u8 = @intCast(@min(new_order.len, SMALL_THRESHOLD));
+                @memcpy(s.items[0..len], new_order[0..len]);
+                s.len = len;
+            },
+            .large => |*l| {
+                l.list.clearRetainingCapacity();
+                l.set.clearRetainingCapacity();
+                for (new_order) |win| {
+                    l.list.append(self.allocator, win) catch continue;
+                    l.set.put(win, {}) catch continue;
+                }
+            },
+        }
+    }
+
     /// Ordered removal (preserves window order — use this by default).
     pub fn remove(self: *Tracking, win: u32) bool {
         return self.removeImpl(win, true);

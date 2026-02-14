@@ -1,30 +1,19 @@
 //! Bar caching — workspace label pixel-widths.
-//!
-//! The original CacheManager carried a color hashmap, dirty-flags, a config-hash
-//! and several methods (getColor, markDirty, checkConfigChange) that were never
-//! called from outside this module.  All dead code has been removed; only the
-//! label-width cache (the sole external consumer) is retained.
 
-const std    = @import("std");
-const defs   = @import("defs");
+const std     = @import("std");
+const defs    = @import("defs");
 const drawing = @import("drawing");
 
 /// Caches per-workspace label pixel widths so the bar avoids redundant
-/// Pango measurements on every draw call.
+/// Pango measurements on every draw call.  Embedded by value inside the bar
+/// State struct (which is itself heap-allocated), so no separate allocation
+/// is needed.
 pub const CacheManager = struct {
     label_widths: [20]u16 = [_]u16{0} ** 20,
     valid:        bool    = false,
-    allocator:    std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator) !*CacheManager {
-        const cm = try allocator.create(CacheManager);
-        cm.* = .{ .allocator = allocator };
-        return cm;
-    }
-
-    pub fn deinit(self: *CacheManager) void {
-        self.allocator.destroy(self);
-    }
+    /// Zero-initialised; call updateWorkspaceLabels() before first use.
+    pub fn init() CacheManager { return .{}; }
 
     pub fn updateWorkspaceLabels(
         self:   *CacheManager,
@@ -50,7 +39,5 @@ pub const CacheManager = struct {
         return self.label_widths[index];
     }
 
-    pub fn invalidate(self: *CacheManager) void {
-        self.valid = false;
-    }
+    pub fn invalidate(self: *CacheManager) void { self.valid = false; }
 };

@@ -67,7 +67,7 @@ pub inline fn normalizeModifiers(state: u16) u16 {
     return state & defs.MOD_MASK_RELEVANT;
 }
 
-// ─── Atom cache ───────────────────────────────────────────────────────────────
+// Atom cache
 
 const AtomCache = struct {
     wm_protocols:  u32,
@@ -104,15 +104,22 @@ pub fn getAtom(conn: *xcb.xcb_connection_t, name: []const u8) !u32 {
 
 pub fn getAtomCached(name: []const u8) !u32 {
     const cache = atom_cache orelse return error.AtomCacheNotInitialized;
-    if (std.mem.eql(u8, name, "WM_PROTOCOLS"))    return cache.wm_protocols;
-    if (std.mem.eql(u8, name, "WM_DELETE_WINDOW")) return cache.wm_delete;
-    if (std.mem.eql(u8, name, "WM_TAKE_FOCUS"))   return cache.wm_take_focus;
-    if (std.mem.eql(u8, name, "_NET_WM_NAME"))    return cache.net_wm_name;
-    if (std.mem.eql(u8, name, "UTF8_STRING"))     return cache.utf8_string;
-    return error.AtomNotInCache;
+    // Map atom name to its cached field.  Using an enum + stringToEnum keeps
+    // this exhaustive and avoids a chain of string comparisons.
+    const AtomName = enum {
+        @"WM_PROTOCOLS", @"WM_DELETE_WINDOW", @"WM_TAKE_FOCUS",
+        @"_NET_WM_NAME", @"UTF8_STRING",
+    };
+    return switch (std.meta.stringToEnum(AtomName, name) orelse return error.AtomNotInCache) {
+        .@"WM_PROTOCOLS"    => cache.wm_protocols,
+        .@"WM_DELETE_WINDOW"=> cache.wm_delete,
+        .@"WM_TAKE_FOCUS"   => cache.wm_take_focus,
+        .@"_NET_WM_NAME"    => cache.net_wm_name,
+        .@"UTF8_STRING"     => cache.utf8_string,
+    };
 }
 
-// ─── Property helpers ─────────────────────────────────────────────────────────
+// Property helpers ─────────────────────────────────────────────────────────
 
 pub fn fetchPropertyToBuffer(
     conn:      *xcb.xcb_connection_t,
@@ -136,7 +143,7 @@ pub fn fetchPropertyToBuffer(
     return buffer.items;
 }
 
-// ─── WM_TAKE_FOCUS caching ────────────────────────────────────────────────────
+// WM_TAKE_FOCUS caching ────────────────────────────────────────────────────
 
 var wm_take_focus_cache: ?std.AutoHashMap(u32, bool) = null;
 
@@ -170,7 +177,7 @@ pub fn supportsWMTakeFocusCached(conn: *xcb.xcb_connection_t, win: u32) bool {
     return supports;
 }
 
-// ─── WM_CLASS ─────────────────────────────────────────────────────────────────
+// WM_CLASS──
 
 pub const WMClass = struct {
     instance: []const u8,
@@ -205,7 +212,7 @@ pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allo
     return .{ .instance = instance, .class = class };
 }
 
-// ─── Private helpers ──────────────────────────────────────────────────────────
+// Private helpers ──────────────────────────────────────────────────────────
 
 fn queryWMTakeFocusSupport(conn: *xcb.xcb_connection_t, win: u32) bool {
     const protocols_atom  = getAtomCached("WM_PROTOCOLS")  catch return false;

@@ -19,14 +19,10 @@ const workspaces             = @import("workspaces");
     const clock_segment      = @import("clock");
     const status_segment     = @import("status");
 
-// TODO: make adjustable through config.toml, adjust workspace width based off of monitor DPI
-pub const WORKSPACE_WIDTH: u8 = 50;
-
 // Clock format string constant for width calculation
 const CLOCK_FORMAT = "0000-00-00 00:00:00";
 
-// FIXED: Magic numbers replaced with named constants
-/// Minimum allowed bar height in pixels
+// Minimum allowed bar height in pixels
 const MIN_BAR_HEIGHT: u32 = 20;
 
 /// Maximum allowed bar height in pixels
@@ -34,6 +30,11 @@ const MAX_BAR_HEIGHT: u32 = 200;
 
 /// Default bar height if font metrics cannot be determined
 const DEFAULT_BAR_HEIGHT: u16 = 24;
+
+// Segment width constants
+const FALLBACK_WORKSPACES_WIDTH: u16 = 270;
+const LAYOUT_SEGMENT_WIDTH: u16 = 60;
+const TITLE_SEGMENT_MIN_WIDTH: u16 = 100;
 
 const State = struct {
     window: u32,
@@ -51,21 +52,17 @@ const State = struct {
     has_transparency: bool,  // Track if transparency is enabled
     allocator: std.mem.Allocator,
     cached_clock_width: u16,
-    cached_clock_x: ?u16,  // FIXED 2.2: Cache clock X position to skip width calculation
+    cached_clock_x: ?u16,  // Cache clock X position to skip width calculation
     cached_ws_width: u16,
-    cached_workspace_x: u16,  // FIXED 2.7: Cache workspace segment X offset for click handling
+    cached_workspace_x: u16,  // Cache workspace segment X offset for click handling
     cached_indicator_size: u16,
     has_clock_segment: bool,
-    cache_manager: *cache.CacheManager,  // Unified caching layer
+    cache_manager: cache.CacheManager,  // Embedded by value — State is already heap-allocated
 
     fn init(allocator: std.mem.Allocator, conn: *xcb.xcb_connection_t, window: u32, width: u16, height: u16,
             dc: *drawing.DrawContext, config: defs.BarConfig, has_transparency: bool) !*State {
         const s = try allocator.create(State);
         const scaled_padding = config.scaledPadding();
-        
-        // Create cache manager
-        const cache_mgr = try cache.CacheManager.init(allocator);
-        errdefer cache_mgr.deinit();
         
         s.* = State{
             .window = window, .width = width, .height = height, .dc = dc, .conn = conn,
@@ -78,19 +75,17 @@ const State = struct {
             .has_transparency = has_transparency,
             .allocator = allocator,
             .cached_clock_width = dc.textWidth(CLOCK_FORMAT) + 2 * scaled_padding,
-            .cached_clock_x = null,  // FIXED 2.2: Populated on first full draw
+            .cached_clock_x = null,
             .cached_ws_width = config.scaledWorkspaceWidth(),
-            .cached_workspace_x = 0,  // FIXED 2.7: Populated during draw
+            .cached_workspace_x = 0,
             .cached_indicator_size = config.scaledIndicatorSize(),
-            .has_clock_segment = State.detectClockSegment(&config),  // TODO 3.8: Needs updating on config reload
-            .cache_manager = cache_mgr,
+            .has_clock_segment = State.detectClockSegment(&config),
+            .cache_manager = cache.CacheManager.init(),
         };
         
         // Pre-allocate capacity for performance
         try s.status_text.ensureTotalCapacity(allocator, 256);
         try s.cached_title.ensureTotalCapacity(allocator, 256);
-        
-        // FIXED 3.21: Removed "hana" debug leftover - start with empty status
         
         // Initialize workspace label cache
         try s.cache_manager.updateWorkspaceLabels(dc, &config);
@@ -99,7 +94,6 @@ const State = struct {
     }
 
     fn deinit(self: *State) void {
-        self.cache_manager.deinit();
         self.status_text.deinit(self.allocator);
         self.cached_title.deinit(self.allocator);
         self.allocator.destroy(self);
@@ -107,7 +101,7 @@ const State = struct {
 
     fn markDirty(self: *State) void { 
         self.dirty = true; 
-        self.cached_clock_x = null;  // FIXED 2.2: Invalidate clock position cache
+        self.cached_clock_x = null;  // Invalidate clock position cache
     }
     fn markClockDirty(self: *State) void { self.dirty_clock = true; }
     fn clearDirty(self: *State) void { self.dirty = false; self.dirty_clock = false; }
@@ -123,33 +117,38 @@ const State = struct {
     }
 };
 
-// FIXED: Document thread safety - single-threaded access only
 /// Single-threaded: Only accessed from main event loop
 /// NOT thread-safe: Do not access from signal handlers or other threads
 var state: ?*State = null;
 
-fn sizeFont(alloc: std.mem.Allocator, font: []const u8, size: u16) ![]const u8 {
-    if (size == 0) return font;
-    return std.fmt.allocPrint(alloc, "{s}:size={}", .{font, size});
+/// Append `:size=N` to a font name when size > 0.
+/// Returns null when no modification is needed (use original font name as-is).
+/// Caller must free the returned slice when it is non-null.
+fn sizeFont(alloc: std.mem.Allocator, font: []const u8, size: u16) !?[]const u8 {
+    if (size == 0) return null;
+    return @as(?[]const u8, try std.fmt.allocPrint(alloc, "{s}:size={}", .{ font, size }));
 }
 
 fn loadBarFonts(dc: *drawing.DrawContext, wm: *defs.WM) !void {
-    const cfg = wm.config.bar;
-    const alloc = wm.allocator;
+    const cfg        = wm.config.bar;
+    const alloc      = wm.allocator;
     const scaled_size = cfg.scaledFontSize();
-    
+
     if (cfg.fonts.items.len > 0) {
         var sized = std.ArrayList([]const u8){};
         defer {
-            for (sized.items) |s| if (scaled_size > 0) alloc.free(s);
+            for (sized.items, 0..) |s, i| if (s.ptr != cfg.fonts.items[i].ptr) alloc.free(s);
             sized.deinit(alloc);
         }
-        for (cfg.fonts.items) |f| try sized.append(alloc, try sizeFont(alloc, f, scaled_size));
+        for (cfg.fonts.items) |f| {
+            const s = (try sizeFont(alloc, f, scaled_size)) orelse f;
+            try sized.append(alloc, s);
+        }
         return dc.loadFonts(sized.items);
     }
-    
-    const font_str = try sizeFont(alloc, cfg.font, scaled_size);
-    defer if (scaled_size > 0) alloc.free(font_str);
+
+    const font_str = (try sizeFont(alloc, cfg.font, scaled_size)) orelse cfg.font;
+    defer if (font_str.ptr != cfg.font.ptr) alloc.free(font_str);
     try dc.loadFont(font_str);
 }
 
@@ -174,8 +173,7 @@ fn setWindowProperties(wm: *defs.WM, window: u32, height: u16) !void {
     // DON'T set _NET_WM_WINDOW_OPACITY - let picom handle transparency like it does for borders
     // This ensures the bar and borders render the same way
     
-    // CRITICAL: Prevent bar from being moved or resized
-    // Set allowed actions to only allow closing (for shutdown), but not move/resize
+    // Prevent bar from being moved or resized by restricting allowed actions
     const allowed_actions = [_]u32{
         try utils.getAtom(wm.conn, "_NET_WM_ACTION_CLOSE"),
         try utils.getAtom(wm.conn, "_NET_WM_ACTION_ABOVE"),
@@ -187,9 +185,9 @@ fn setWindowProperties(wm: *defs.WM, window: u32, height: u16) !void {
 fn calculateBarHeight(wm: *defs.WM) !u16 {
     if (wm.config.bar.height) |h| return h;
     
-    // TODO 2.3: Optimization opportunity - create real bar window first with provisional
-    // height, load fonts on real DrawContext, measure, then resize if needed
-    // This would eliminate temporary window creation + 2 extra X11 roundtrips
+    // Create a temporary window to measure font height, then calculate bar height.
+    // Optimization: Could create the real bar window with a provisional height,
+    // measure on the real DrawContext, then resize if needed.
     const temp_win = xcb.xcb_generate_id(wm.conn);
     _ = xcb.xcb_create_window(wm.conn, xcb.XCB_COPY_FROM_PARENT, temp_win, wm.screen.root,
         0, 0, 1, 1, 0, xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, wm.screen.root_visual, 0, null);
@@ -339,26 +337,7 @@ pub fn deinit() void {
     }
 }
 
-fn setBarVisibility(wm: *defs.WM, visible: bool, reason: []const u8) void {
-    if (state) |s| {
-        // OPTIMIZATION: Update visibility state for timer control
-        s.visible = visible;
-        
-        if (visible) {
-            _ = xcb.xcb_map_window(s.conn, s.window);
-            draw(s, wm) catch |e| debug.warnOnErr(e, "draw in setVisibility");
-        } else {
-            _ = xcb.xcb_unmap_window(s.conn, s.window);
-        }
-        utils.flush(wm.conn);
-        debug.info("Bar {s} ({s})", .{ if (visible) "shown" else "hidden", reason });
-        
-        // OPTIMIZATION: Update timer state when visibility changes
-        clock_segment.updateTimerState(wm);
-        
-        tiling.retileCurrentWorkspace(wm, true);
-    }
-}
+
 
 // NEW: Toggle bar position between top and bottom
 pub fn toggleBarPosition(wm: *defs.WM) !void {
@@ -386,7 +365,7 @@ pub fn toggleBarPosition(wm: *defs.WM) !void {
         debug.info("Bar position toggled to: {s}", .{@tagName(wm.config.bar.vertical_position)});
         
         // Retile workspace to adjust for new bar position
-        // BUGFIX: Don't retile if there's a fullscreen window on the current workspace
+        // Don't retile if there's a fullscreen window on the current workspace
         // Fullscreen windows should remain fullscreen and not have their geometry updated
         const current_ws = workspaces.getCurrentWorkspace() orelse return;
         if (wm.fullscreen.getForWorkspace(current_ws) == null) {
@@ -420,10 +399,8 @@ pub fn getCachedLabelWidth(index: usize) ?u16 {
     return null;
 }
 
-// OPTIMIZATION: Cached clock segment detection
 pub fn hasClockSegment() bool { return if (state) |s| s.has_clock_segment else false; }
 
-// OPTIMIZATION: Check if bar is actually visible (not just created)
 pub fn isVisible() bool {
     if (state) |s| return s.visible;
     return false;
@@ -434,17 +411,33 @@ pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
 pub fn setBarState(wm: *defs.WM, action: BarAction) void {
     if (action == .show_fullscreen and !wm.config.bar.enabled) return;
     if (action == .toggle) wm.config.bar.enabled = !wm.config.bar.enabled;
-    const show, const reason = switch (action) {
-        .toggle          => .{ wm.config.bar.enabled, "toggle" },
-        .hide_fullscreen => .{ false,                 "fullscreen" },
-        .show_fullscreen => .{ true,                  "exit fullscreen" },
+
+    const show = switch (action) {
+        .toggle          => wm.config.bar.enabled,
+        .hide_fullscreen => false,
+        .show_fullscreen => true,
     };
-    setBarVisibility(wm, show, reason);
+
+    if (state) |s| {
+        s.visible = show;
+        if (show) {
+            _ = xcb.xcb_map_window(s.conn, s.window);
+            draw(s, wm) catch |e| debug.warnOnErr(e, "draw in setBarState");
+        } else {
+            _ = xcb.xcb_unmap_window(s.conn, s.window);
+        }
+        utils.flush(wm.conn);
+        debug.info("Bar {s} ({s})", .{
+            if (show) "shown" else "hidden",
+            @tagName(action),
+        });
+        clock_segment.updateTimerState(wm);
+        tiling.retileCurrentWorkspace(wm, true);
+    }
 }
 
 pub fn updateIfDirty(wm: *defs.WM) !void {
     if (state) |s| {
-        // FIXED 2.11: Clock updates driven by timerfd (fires once/sec), not polling
         if (s.isDirty()) {
             if (s.dirty) try draw(s, wm) else if (s.dirty_clock) try drawClockOnly(s, wm);
             s.clearDirty();
@@ -457,7 +450,7 @@ pub fn checkClockUpdate() void {
 }
 
 fn drawClockOnly(s: *State, wm: *defs.WM) !void {
-    // FIXED 2.2: Use cached clock position instead of recalculating
+    // Use cached clock position if available to avoid recalculating layout
     if (s.cached_clock_x) |clock_x| {
         _ = try clock_segment.draw(s.dc, s.config, s.height, clock_x);
         s.dc.flush();
@@ -508,17 +501,30 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t, wm: *
                 debug.warnOnErr(e, "getAtomCached _NET_WM_NAME in handlePropertyNotify");
                 return;
             }))) {
-            // Only mark dirty - the title will be re-rendered on next draw
+            // Invalidate cached title to force re-fetch on next draw
+            s.cached_title_window = null;
             s.markDirty();
         }
     }
+}
+
+/// Enable property change monitoring for the focused window
+/// Call this when a window gains focus to receive title change events
+pub fn monitorFocusedWindow(wm: *defs.WM) void {
+    const win = wm.focused_window orelse return;
+    
+    // Add XCB_EVENT_MASK_PROPERTY_CHANGE to the window's event mask
+    // This ensures we receive PropertyNotify events when the window's title changes
+    const mask = xcb.XCB_CW_EVENT_MASK;
+    const values = [_]u32{xcb.XCB_EVENT_MASK_PROPERTY_CHANGE};
+    _ = xcb.xcb_change_window_attributes(wm.conn, win, mask, &values);
 }
 
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *defs.WM) void {
     if (state) |s| if (event.event == s.window) {
         const ws_state = workspaces.getState() orelse return;
         const scaled_ws_width = s.config.scaledWorkspaceWidth();
-        // FIXED 2.7: Account for left-side segments before workspace segment
+        // Account for left-side segments before workspace segment
         const click_x = @max(0, event.event_x - s.cached_workspace_x);
         const clicked_ws: usize = @intCast(@divFloor(click_x, scaled_ws_width));
         if (clicked_ws < ws_state.workspaces.len) {
@@ -530,9 +536,9 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *defs.W
 
 fn calculateSegmentWidth(s: *State, segment: defs.BarSegment) u16 {
     return switch (segment) {
-        .workspaces => if (workspaces.getState()) |ws| @intCast(ws.workspaces.len * s.cached_ws_width) else 270,
-        .layout => 60,
-        .title => 100,
+        .workspaces => if (workspaces.getState()) |ws| @intCast(ws.workspaces.len * s.cached_ws_width) else FALLBACK_WORKSPACES_WIDTH,
+        .layout => LAYOUT_SEGMENT_WIDTH,
+        .title => TITLE_SEGMENT_MIN_WIDTH,
         .clock => s.cached_clock_width,
     };
 }
@@ -543,7 +549,7 @@ fn drawRightSegments(s: *State, wm: *defs.WM, segments: []const defs.BarSegment)
     for (0..segments.len) |i| {
         const idx = segments.len - 1 - i;
         right_x -= calculateSegmentWidth(s, segments[idx]);
-        // FIXED 2.2: Cache clock position for drawClockOnly optimization
+        // Cache clock position for drawClockOnly optimization
         if (segments[idx] == .clock) {
             s.cached_clock_x = right_x;
         }
@@ -596,7 +602,7 @@ fn draw(s: *State, wm: *defs.WM) !void {
 }
 
 fn drawSegment(s: *State, wm: *defs.WM, segment: defs.BarSegment, x: u16, width: ?u16) !u16 {
-    // FIXED 2.7: Cache workspace segment X offset for click handling
+    // Cache workspace segment X offset for click handling
     if (segment == .workspaces) {
         s.cached_workspace_x = x;
     }

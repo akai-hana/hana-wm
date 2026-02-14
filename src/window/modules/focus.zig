@@ -23,8 +23,8 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     setFocusImpl(wm, win, reason, true);
 }
 
-pub fn setFocusBatch(wm: *WM, win: u32, reason: Reason, defer_flush: bool) void {
-    setFocusImpl(wm, win, reason, !defer_flush);
+pub fn setFocusBatch(wm: *WM, win: u32, reason: Reason, do_flush: bool) void {
+    setFocusImpl(wm, win, reason, do_flush);
 }
 
 fn setFocusImpl(wm: *WM, win: u32, reason: Reason, do_flush: bool) void {
@@ -52,7 +52,7 @@ fn setFocusImpl(wm: *WM, win: u32, reason: Reason, do_flush: bool) void {
     }
     
     // Send WM_TAKE_FOCUS protocol message for applications that need it
-    // FIXED 2.1: Use cached version to avoid ~50µs roundtrip
+    // Use cached version to avoid ~50µs roundtrip
     if (utils.supportsWMTakeFocusCached(wm.conn, win)) {
         utils.sendWMTakeFocus(wm.conn, win);
     }

@@ -48,34 +48,28 @@ const KeybindState = struct {
     }
 };
 
-var keybind_state: ?*KeybindState = null;
+// Direct global — no heap allocation needed for a module singleton.
+var keybind_state: ?KeybindState = null;
 
 pub fn init(wm: *WM) void {
-    const state = wm.allocator.create(KeybindState) catch {
-        debug.err("Failed to allocate keybind state", .{});
-        return;
-    };
-    state.* = KeybindState.init(wm.allocator);
-
+    var state = KeybindState.init(wm.allocator);
     state.rebuild(wm) catch |err| {
         debug.err("Failed to build keybind map: {}", .{err});
         state.deinit();
-        wm.allocator.destroy(state);
         return;
     };
     keybind_state = state;
 }
 
-pub fn deinit(wm: *WM) void {
-    if (keybind_state) |state| {
+pub fn deinit(_: *WM) void {
+    if (keybind_state) |*state| {
         state.deinit();
-        wm.allocator.destroy(state);
         keybind_state = null;
     }
 }
 
 pub fn rebuildKeybindMap(wm: *WM) !void {
-    if (keybind_state) |state| {
+    if (keybind_state) |*state| {
         try state.rebuild(wm);
     } else {
         return error.KeybindStateNotInitialized;
@@ -106,7 +100,7 @@ pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
 }
 
 pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
-    const state = keybind_state orelse return;
+    var state = &(keybind_state orelse return);
     const xkb_ptr: *xkbcommon.XkbState = @ptrCast(@alignCast(wm.xkb_state.?));
 
     const mods = utils.normalizeModifiers(event.state);
@@ -114,8 +108,6 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
     const key = makeHash(mods, keysym);
 
     if (state.map.get(key)) |action| {
-        // REMOVED: No longer need to reset event counters
-        // The new approach doesn't use counters - it uses context-aware suppression
         executeAction(action, wm) catch |err| {
             debug.err("Failed to execute action: {}", .{err});
         };
@@ -204,19 +196,40 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
             if (wm.focused_window) |win| closeWindow(wm, win);
         },
         .reload_config => wm.should_reload_config.store(true, .release),
-        .toggle_layout => tiling.toggleLayout(wm),
-        .toggle_layout_reverse => tiling.toggleLayoutReverse(wm),
+        .toggle_layout => {
+            tiling.toggleLayout(wm);
+            bar.markDirty();  // Force immediate bar update for layout indicator
+        },
+        .toggle_layout_reverse => {
+            tiling.toggleLayoutReverse(wm);
+            bar.markDirty();  // Force immediate bar update for layout indicator
+        },
         .toggle_bar_visibility => bar.setBarState(wm, .toggle),
         .toggle_bar_position => {
             bar.toggleBarPosition(wm) catch |err| {
                 debug.warn("Failed to toggle bar position: {}", .{err});
             };
         },
-        .increase_master => tiling.increaseMasterWidth(wm),
-        .decrease_master => tiling.decreaseMasterWidth(wm),
-        .increase_master_count => tiling.increaseMasterCount(wm),
-        .decrease_master_count => tiling.decreaseMasterCount(wm),
-        .toggle_tiling => tiling.toggleTiling(wm),
+        .increase_master => {
+            tiling.increaseMasterWidth(wm);
+            bar.markDirty();  // Update bar to reflect layout changes
+        },
+        .decrease_master => {
+            tiling.decreaseMasterWidth(wm);
+            bar.markDirty();  // Update bar to reflect layout changes
+        },
+        .increase_master_count => {
+            tiling.increaseMasterCount(wm);
+            bar.markDirty();  // Update bar to reflect layout changes
+        },
+        .decrease_master_count => {
+            tiling.decreaseMasterCount(wm);
+            bar.markDirty();  // Update bar to reflect layout changes
+        },
+        .toggle_tiling => {
+            tiling.toggleTiling(wm);
+            bar.markDirty();  // Update bar to reflect tiling state
+        },
         .swap_master => tiling.swapWithMaster(wm),  // NEW: Handle swap_master action
         .dump_state => dumpState(wm),
         .emergency_recover => emergencyRecover(wm),

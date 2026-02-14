@@ -1,317 +1,255 @@
-//! # Tiling Window Management Module
-//!
-//! Provides automatic window layout and tiling functionality with multiple layout algorithms.
-//!
-//! ## Dependencies:
-//! - `defs`: Core WM types
-//! - `xcb`: X11 bindings
-//! - `utils`: Utility functions
-//! - `focus`: Window focus management
-//! - `workspaces`: Workspace state management
-//! - `tracking`: Window tracking structures
-//! - `master`: Master-stack layout algorithm
-//!
-//! ## Exports:
-//! - `addWindow()`: Add a window to tiling
-//! - `removeWindow()`: Remove a window from tiling
-//! - `isWindowTiled()`: Check if window is tiled
-//! - `retileIfDirty()`: Retile workspace if layout changed
-//! - `adjustMasterCount()`: Adjust number of master windows
-//! - `adjustMasterWidth()`: Adjust master window width
-//!
-//! ## Key Features:
-//! - Multiple layout algorithms (master-stack, etc.)
-//! - Automatic window placement
-//! - Master/stack window organization
-//! - Off-screen window recovery
-//! - Dirty-flag based retiling for performance
-//
-// Tiling system - Delegates to layout modules (OPTIMIZED & REFACTORED)
+// Tiling window management — delegates to layout modules.
 
-const std = @import("std");
-const defs = @import("defs");
-const xcb = defs.xcb;
-const WM = defs.WM;
-const utils = @import("utils");
-const constants = @import("constants");
-const focus = @import("focus");
+const std        = @import("std");
+const defs       = @import("defs");
+const xcb        = defs.xcb;
+const WM         = defs.WM;
+const utils      = @import("utils");
+const constants  = @import("constants");
+const focus      = @import("focus");
 const workspaces = @import("workspaces");
-const bar = @import("bar");
-const tracking = @import("tracking").Tracking;
-const createModule = @import("module").module;
-const debug = @import("debug");
+const bar        = @import("bar");
+const Tracking   = @import("tracking").Tracking;
+const debug      = @import("debug");
+const dpi        = @import("dpi");
 
-const master_layout = @import("master");
-const monocle_layout = @import("monocle");
-const grid_layout = @import("grid");
+const master_layout    = @import("master");
+const monocle_layout   = @import("monocle");
+const grid_layout      = @import("grid");
 const fibonacci_layout = @import("fibonacci");
-const dpi = @import("dpi");
 
-// Maximum master window width ratio (95%)
 const MAX_MASTER_WIDTH: f32 = 0.95;
+const WINDOW_EVENT_MASK     = constants.EventMasks.MANAGED_WINDOW;
+// Stack-local buffer size for per-retile workspace window list.
+const MAX_WS_WINDOWS: usize = 128;
 
 pub const Layout = enum { master, monocle, grid, fibonacci };
 
-const WINDOW_EVENT_MASK = constants.EventMasks.MANAGED_WINDOW;
+// Focus ring
+// Fixed-capacity circular buffer of recently-focused window IDs.
+// Newest entry is always at buffer[head].
 
-/// Simplified circular buffer for focus history (Phase 3 refactor)
+const RING_CAP = 16;
+
 const FocusRing = struct {
-    buffer: [16]u32 = [_]u32{0} ** 16,
-    head: u8 = 0,
-    len: u8 = 0,
-    
+    buffer: [RING_CAP]u32 = [_]u32{0} ** RING_CAP,
+    head:   u8            = 0,
+    len:    u8            = 0,
+
     pub fn push(self: *FocusRing, win: u32) void {
-        // FIXED 2.10: Single scan for both head check and duplicate removal
-        // Check if already at head and find existing position in one pass
-        if (self.len > 0) {
-            const head_win = self.buffer[self.head];
-            if (head_win == win) return; // Already at head
-            
-            // Search for window in rest of ring
-            var i: u8 = 1;
-            while (i < self.len) : (i += 1) {
-                const idx = (self.head + i) % 16;
-                if (self.buffer[idx] == win) {
-                    // Found duplicate - shift elements to remove it
-                    var j = i;
-                    while (j + 1 < self.len) : (j += 1) {
-                        const curr = (self.head + j) % 16;
-                        const next = (self.head + j + 1) % 16;
-                        self.buffer[curr] = self.buffer[next];
-                    }
-                    self.len -= 1;
-                    break;
-                }
+        if (self.len > 0 and self.buffer[self.head] == win) return;
+
+        // Remove any existing occurrence so the ring has no duplicates.
+        var i: u8 = 1;
+        while (i < self.len) : (i += 1) {
+            const idx = (self.head + i) % RING_CAP;
+            if (self.buffer[idx] == win) {
+                self.compactFrom(i);
+                break;
             }
         }
-        
-        // Add to front
-        self.head = if (self.head == 0) 15 else self.head - 1;
+
+        self.head = if (self.head == 0) RING_CAP - 1 else self.head - 1;
         self.buffer[self.head] = win;
-        if (self.len < 16) self.len += 1;
+        if (self.len < RING_CAP) self.len += 1;
     }
-    
+
     pub fn remove(self: *FocusRing, win: u32) void {
         var i: u8 = 0;
         while (i < self.len) : (i += 1) {
-            const idx = (self.head + i) % 16;
-            if (self.buffer[idx] == win) {
-                // Shift remaining elements
-                var j = i;
-                while (j + 1 < self.len) : (j += 1) {
-                    const curr = (self.head + j) % 16;
-                    const next = (self.head + j + 1) % 16;
-                    self.buffer[curr] = self.buffer[next];
-                }
-                self.len -= 1;
-                return;
-            }
+            const idx = (self.head + i) % RING_CAP;
+            if (self.buffer[idx] != win) continue;
+            self.compactFrom(i);
+            return;
         }
     }
-    
-    pub fn iter(self: *const FocusRing) FocusHistoryIterator {
-        return FocusHistoryIterator{
-            .ring = &self.buffer,
-            .head = self.head,
-            .len = self.len,
-            .pos = 0,
-        };
+
+    inline fn compactFrom(self: *FocusRing, start: u8) void {
+        var j = start;
+        while (j + 1 < self.len) : (j += 1) {
+            const cur  = (self.head + j)     % RING_CAP;
+            const next = (self.head + j + 1) % RING_CAP;
+            self.buffer[cur] = self.buffer[next];
+        }
+        self.len -= 1;
     }
+
+    pub fn iter(self: *const FocusRing) Iterator {
+        return .{ .ring = &self.buffer, .head = self.head, .len = self.len, .pos = 0 };
+    }
+
+    const Iterator = struct {
+        ring: *const [RING_CAP]u32,
+        head: u8, len: u8, pos: u8,
+
+        pub fn next(self: *Iterator) ?u32 {
+            if (self.pos >= self.len) return null;
+            const idx = (self.head + self.pos) % RING_CAP;
+            self.pos += 1;
+            return self.ring[idx];
+        }
+    };
 };
 
-/// Iterator for circular focus history buffer
-const FocusHistoryIterator = struct {
-    ring: *const [16]u32,
-    head: u8,
-    len: u8,
-    pos: u8,
-    
-    pub fn next(self: *FocusHistoryIterator) ?u32 {
-        if (self.pos >= self.len) return null;
-        const idx = (self.head + self.pos) % 16;
-        self.pos += 1;
-        return self.ring[idx];
-    }
-};
+// State─────
 
 pub const State = struct {
-    enabled: bool,
-    layout: Layout,
-    master_side: defs.MasterSide,
-    master_width: f32,
-    master_count: u8,  // OPTIMIZED: u8 instead of usize - max 255 windows in master
-    gaps: u16,
-    border_width: u16,
-    border_focused: u32,
+    enabled:          bool,
+    layout:           Layout,
+    master_side:      defs.MasterSide,
+    master_width:     f32,
+    master_count:     u8,
+    gaps:             u16,
+    border_width:     u16,
+    border_focused:   u32,
     border_unfocused: u32,
-    windows: tracking,
-    dirty: bool,
-    // OPTIMIZATION: Cache window geometries to reduce X11 queries
-    geometry_cache: std.AutoHashMap(u32, utils.Rect),
-    // OPTIMIZATION: Simplified circular buffer for focus history (Phase 3 refactor)
-    focus_ring: FocusRing,
-    // OPTIMIZATION: Reusable buffer for workspace windows to avoid repeated allocations
-    workspace_windows_buffer: std.ArrayListUnmanaged(u32),
-    allocator: std.mem.Allocator,
+    windows:          Tracking,
+    dirty:            bool,
+    focus_ring:       FocusRing,
 
     pub inline fn margins(self: *const State) utils.Margins {
         return .{ .gap = self.gaps, .border = self.border_width };
     }
 
     pub inline fn borderColor(self: *const State, wm: *const WM, win: u32) u32 {
-        if (!self.windows.contains(win)) return self.border_unfocused;
         if (wm.fullscreen.isFullscreen(win)) return 0;
         return if (wm.focused_window == win) self.border_focused else self.border_unfocused;
     }
 
-    pub inline fn markDirty(self: *State) void {
-        self.dirty = true;
-    }
+    pub inline fn markDirty(self: *State)     void { self.dirty = true;  }
+    pub inline fn isDirty(self: *const State) bool { return self.dirty;  }
+    pub inline fn clearDirty(self: *State)    void { self.dirty = false; }
 
-    pub inline fn isDirty(self: *const State) bool {
-        return self.dirty;
-    }
-
-    pub inline fn clearDirty(self: *State) void {
-        self.dirty = false;
-    }
-    
-    // OPTIMIZATION: Get cached geometry or query and cache it
-    pub fn getGeometry(self: *State, conn: *xcb.xcb_connection_t, win: u32) ?utils.Rect {
-        // Try cache first
-        if (self.geometry_cache.get(win)) |rect| {
-            return rect;
-        }
-        
-        // Cache miss - query X11 and cache result
-        if (utils.getGeometry(conn, win)) |rect| {
-            self.geometry_cache.put(win, rect) catch |e| debug.warnOnErr(e, "geometry cache put"); // best-effort
-            return rect;
-        }
-        
-        return null;
-    }
-    
-    // OPTIMIZATION: Invalidate cached geometry for a window
-    pub inline fn invalidateGeometry(self: *State, win: u32) void {
-        _ = self.geometry_cache.remove(win);
-    }
-    
-    // OPTIMIZATION: Clear all geometry cache entries
-    pub inline fn clearGeometryCache(self: *State) void {
-        self.geometry_cache.clearRetainingCapacity();
-    }
-    
     pub fn deinit(self: *State) void {
         self.windows.deinit();
-        self.geometry_cache.deinit();
-        self.workspace_windows_buffer.deinit(self.allocator);
     }
 };
 
-const StateManager = createModule(State);
+// Module singleton ─────────────────────────────────────────────────────────
 
-/// Extract scaled config values from wm and apply them to an existing state.
-/// Used by both init() and reloadConfig() to avoid duplication.
-fn applyConfigToState(wm: *WM, s: *State) void {
+var g_state: ?State = null;
+
+pub fn getState() ?*State { return if (g_state != null) &g_state.? else null; }
+
+// Config────
+
+/// Build a complete State from the current WM configuration.
+fn buildState(wm: *WM) State {
     const screen_height = wm.screen.height_in_pixels;
-    s.border_width = dpi.scaleBorderWidth(wm.config.tiling.border_width, wm.dpi_info.scale_factor, screen_height);
-    s.gaps        = dpi.scaleGaps(wm.config.tiling.gaps, wm.dpi_info.scale_factor, screen_height);
+    const border_width  = dpi.scaleBorderWidth(wm.config.tiling.border_width, wm.dpi_info.scale_factor, screen_height);
+    const gaps          = dpi.scaleGaps(wm.config.tiling.gaps, wm.dpi_info.scale_factor, screen_height);
 
-    const mw = dpi.scaleMasterWidth(wm.config.tiling.master_width);
-    s.master_width = if (mw < 0) blk: {
-        const ratio = -mw / @as(f32, @floatFromInt(wm.screen.width_in_pixels));
+    const raw_mw = dpi.scaleMasterWidth(wm.config.tiling.master_width);
+    const master_width: f32 = if (raw_mw < 0) blk: {
+        const ratio = -raw_mw / @as(f32, @floatFromInt(wm.screen.width_in_pixels));
         break :blk @min(MAX_MASTER_WIDTH, @max(defs.MIN_MASTER_WIDTH, ratio));
-    } else mw;
+    } else raw_mw;
 
-    s.enabled         = wm.config.tiling.enabled;
-    s.layout          = parseLayout(wm.config.tiling.layout);
-    s.master_side     = wm.config.tiling.master_side;
-    s.master_count    = wm.config.tiling.master_count;
-    s.border_focused  = wm.config.tiling.border_focused;
-    s.border_unfocused = wm.config.tiling.border_unfocused;
+    return .{
+        .enabled          = wm.config.tiling.enabled,
+        .layout           = std.meta.stringToEnum(Layout, wm.config.tiling.layout) orelse .master,
+        .master_side      = wm.config.tiling.master_side,
+        .master_width     = master_width,
+        .master_count     = wm.config.tiling.master_count,
+        .gaps             = gaps,
+        .border_width     = border_width,
+        .border_focused   = wm.config.tiling.border_focused,
+        .border_unfocused = wm.config.tiling.border_unfocused,
+        .windows          = Tracking.init(wm.allocator),
+        .dirty            = false,
+        .focus_ring       = .{},
+    };
 }
 
 pub fn init(wm: *WM) void {
-    var initial: State = undefined;
-    applyConfigToState(wm, &initial);
-    StateManager.init(wm.allocator, .{
-        .enabled         = initial.enabled,
-        .layout          = initial.layout,
-        .master_side     = initial.master_side,
-        .master_width    = initial.master_width,
-        .master_count    = initial.master_count,
-        .gaps            = initial.gaps,
-        .border_width    = initial.border_width,
-        .border_focused  = initial.border_focused,
-        .border_unfocused = initial.border_unfocused,
-        .windows         = tracking.init(wm.allocator),
-        .dirty           = false,
-        .geometry_cache  = std.AutoHashMap(u32, utils.Rect).init(wm.allocator),
-        .focus_ring      = FocusRing{},
-        .workspace_windows_buffer = std.ArrayListUnmanaged(u32){},
-        .allocator       = wm.allocator,
-    }) catch |err| {
-        debug.err("Failed to initialize tiling state: {}", .{err});
-        return;
+    g_state = buildState(wm);
+}
+
+pub fn deinit(_: *WM) void {
+    if (g_state) |*s| s.deinit();
+    g_state = null;
+}
+
+pub fn reloadConfig(wm: *WM) void {
+    const s = getState() orelse return;
+    
+    // Preserve runtime tracking; rebuild everything else from config.
+    const saved_windows    = s.windows;
+    const saved_focus_ring = s.focus_ring;
+    
+    const screen_height = wm.screen.height_in_pixels;
+    const border_width  = dpi.scaleBorderWidth(wm.config.tiling.border_width, wm.dpi_info.scale_factor, screen_height);
+    const gaps          = dpi.scaleGaps(wm.config.tiling.gaps, wm.dpi_info.scale_factor, screen_height);
+
+    const raw_mw = dpi.scaleMasterWidth(wm.config.tiling.master_width);
+    const master_width: f32 = if (raw_mw < 0) blk: {
+        const ratio = -raw_mw / @as(f32, @floatFromInt(wm.screen.width_in_pixels));
+        break :blk @min(MAX_MASTER_WIDTH, @max(defs.MIN_MASTER_WIDTH, ratio));
+    } else raw_mw;
+
+    g_state = .{
+        .enabled          = wm.config.tiling.enabled,
+        .layout           = std.meta.stringToEnum(Layout, wm.config.tiling.layout) orelse .master,
+        .master_side      = wm.config.tiling.master_side,
+        .master_width     = master_width,
+        .master_count     = wm.config.tiling.master_count,
+        .gaps             = gaps,
+        .border_width     = border_width,
+        .border_focused   = wm.config.tiling.border_focused,
+        .border_unfocused = wm.config.tiling.border_unfocused,
+        .windows          = saved_windows,
+        .dirty            = false,
+        .focus_ring       = saved_focus_ring,
     };
+    
+    if (g_state.?.enabled) retileCurrentWorkspace(wm, true);
 }
 
-pub fn deinit(wm: *WM) void {
-    if (StateManager.get()) |s| s.deinit();
-    StateManager.deinit(wm.allocator);
-}
-
-// FIXED 3.6: Use std.meta.stringToEnum instead of manual string comparisons
-fn parseLayout(layout_str: []const u8) Layout {
-    return std.meta.stringToEnum(Layout, layout_str) orelse .master;
-}
+// Window management ────────────────────────────────────────────────────────
 
 pub fn addWindow(wm: *WM, window_id: u32) void {
-    std.debug.assert(window_id != 0);  // Window ID should never be 0
-    const s = StateManager.get() orelse return;
+    std.debug.assert(window_id != 0);
+    const s = getState() orelse return;
     if (!s.enabled) return;
 
-    s.windows.add(window_id) catch |err| {
-        debug.logError(err, window_id);
-        return;
-    };
-    
+    s.windows.add(window_id) catch |err| { debug.logError(err, window_id); return; };
     s.markDirty();
-    s.invalidateGeometry(window_id);
-    
-    // FIXED 2.9: Merged event mask and border color into single XCB call (3 calls → 2)
+
     const border_color = s.borderColor(wm, window_id);
-    const attr_values = [_]u32{ WINDOW_EVENT_MASK, border_color };
     _ = xcb.xcb_change_window_attributes(wm.conn, window_id,
-        xcb.XCB_CW_EVENT_MASK | xcb.XCB_CW_BORDER_PIXEL, &attr_values);
-    _ = xcb.xcb_configure_window(wm.conn, window_id, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &s.border_width);
-    
+        xcb.XCB_CW_EVENT_MASK | xcb.XCB_CW_BORDER_PIXEL,
+        &[_]u32{ WINDOW_EVENT_MASK, border_color });
+    _ = xcb.xcb_configure_window(wm.conn, window_id,
+        xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{s.border_width});
     debug.info("Added window 0x{x} to tiling", .{window_id});
 }
 
+/// Invalidate cached geometry for a window (no-op in current implementation).
+/// Called when window geometry is changed externally (e.g., fullscreen toggle).
+pub fn invalidateWindowGeometry(_: u32) void {
+    // Currently no per-window geometry cache to invalidate.
+    // Retiling will recalculate all geometries as needed.
+}
+
 pub fn removeWindow(window_id: u32) void {
-    const s = StateManager.get() orelse return;
+    const s = getState() orelse return;
     if (s.windows.remove(window_id)) {
         s.markDirty();
-        s.invalidateGeometry(window_id);
         s.focus_ring.remove(window_id);
         debug.info("Removed window 0x{x} from tiling", .{window_id});
     }
 }
 
 pub inline fn isWindowTiled(window_id: u32) bool {
-    const s = StateManager.get() orelse return false;
+    const s = getState() orelse return false;
     return s.windows.contains(window_id);
 }
 
-// Helper function to calculate screen area available for tiling
+// Screen area ──────────────────────────────────────────────────────────────
+
 fn calculateScreenArea(wm: *WM) utils.Rect {
-    // Only reserve space for the bar when it is actually visible on screen.
-    // When the user hides the bar (mod+b), bar.isVisible() returns false and we
-    // use the full screen height so tiling doesn't leave an empty gap.
     const bar_height: u16 = if (bar.isVisible()) bar.getBarHeight() else 0;
-    const bar_at_bottom = wm.config.bar.vertical_position == .bottom;
+    const bar_at_bottom   = wm.config.bar.vertical_position == .bottom;
     return .{
         .x      = 0,
         .y      = if (bar_at_bottom) 0 else @intCast(bar_height),
@@ -320,41 +258,35 @@ fn calculateScreenArea(wm: *WM) utils.Rect {
     };
 }
 
-pub fn retileIfDirty(wm: *WM) void {
-    const s = StateManager.get() orelse return;
-    if (!s.enabled or !s.dirty) return;
+// Retiling──
 
-    const screen_area = calculateScreenArea(wm);
-    retile(wm, screen_area);
+pub fn retileIfDirty(wm: *WM) void {
+    const s = getState() orelse return;
+    if (!s.enabled or !s.dirty) return;
+    retile(wm, calculateScreenArea(wm));
+    s.clearDirty();
+}
+
+pub fn retileCurrentWorkspace(wm: *WM, force: bool) void {
+    const s = getState() orelse return;
+    if (!s.enabled) return;
+    _ = force;  // unused, kept for API compatibility
+    retile(wm, calculateScreenArea(wm));
     s.clearDirty();
 }
 
 fn retile(wm: *WM, screen: utils.Rect) void {
-    const s = StateManager.get() orelse return;
-    
-    // Don't retile if there's a fullscreen window on current workspace
+    const s = getState() orelse return;
+
     const current_ws = workspaces.getCurrentWorkspace() orelse return;
-    if (wm.fullscreen.getForWorkspace(current_ws)) |_| {
-        return; // Fullscreen window present - don't retile anything
-    }
-    
-    // OPTIMIZATION: Reuse existing buffer instead of allocating new one each time
-    s.workspace_windows_buffer.clearRetainingCapacity();
-    
-    const all_windows = s.windows.items();
-    for (all_windows) |win| {
-        if (workspaces.isOnCurrentWorkspace(win)) {
-            s.workspace_windows_buffer.append(wm.allocator, win) catch continue;
-        }
-    }
-    
-    const ws_windows = s.workspace_windows_buffer.items;
+    if (wm.fullscreen.getForWorkspace(current_ws)) |_| return;
+
+    // Collect windows for the current workspace into a stack-local buffer.
+    var ws_buf: [MAX_WS_WINDOWS]u32 = undefined;
+    const ws_count = filterWorkspaceWindows(s, &ws_buf);
+    const ws_windows = ws_buf[0..ws_count];
     if (ws_windows.len == 0) return;
-    
-    // FIXED 2.15: Removed cache invalidation loop - the cache exists to avoid
-    // redundant geometry queries. Invalidating before layout defeats its purpose.
-    // The cache is already invalidated when windows are added/removed/configured.
-    
+
     const w = screen.width;
     const h = screen.height;
     const y: u16 = @intCast(screen.y);
@@ -364,393 +296,255 @@ fn retile(wm: *WM, screen: utils.Rect) void {
         .grid      => grid_layout.tileWithOffset(wm.conn, s, ws_windows, w, h, y),
         .fibonacci => fibonacci_layout.tileWithOffset(wm.conn, s, ws_windows, w, h, y),
     }
-    updateWindowBorders(wm);
+    updateBorders(wm, ws_windows);
 }
 
-pub fn retileCurrentWorkspace(wm: *WM, force: bool) void {
-    const s = StateManager.get() orelse return;
-    if (!s.enabled) return;
-
-    if (force) {
-        s.markDirty();
-        s.clearGeometryCache();
-    }
-
-    const screen_area = calculateScreenArea(wm);
-    retile(wm, screen_area);
-    s.clearDirty();
-}
-
-fn updateWindowBorders(wm: *WM) void {
-    const s = StateManager.get() orelse return;
-    
-    // OPTIMIZATION: Use already-filtered workspace windows from retile()
-    // No need to check isOnCurrentWorkspace() for every window
-    const ws_windows = s.workspace_windows_buffer.items;
-    
+fn updateBorders(wm: *WM, ws_windows: []const u32) void {
+    const s = getState() orelse return;
     for (ws_windows) |win| {
-        const border_color = s.borderColor(wm, win);
-        _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_BORDER_PIXEL, &border_color);
+        const color = s.borderColor(wm, win);
+        _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_BORDER_PIXEL, &color);
     }
-    
-    // FIXED 2.4: Removed redundant flush - main loop handles it
 }
+
+// Focus border updates ─────────────────────────────────────────────────────
 
 pub fn updateWindowFocus(wm: *WM, old_focused: ?u32, new_focused: ?u32) void {
-    updateWindowFocusFast(wm, old_focused, new_focused);
+    updateBorderForFocusChange(wm, old_focused, new_focused);
     _ = xcb.xcb_flush(wm.conn);
 }
 
-// Fast version without flush - for use in focus management
 pub fn updateWindowFocusFast(wm: *WM, old_focused: ?u32, new_focused: ?u32) void {
-    const s = StateManager.get() orelse return;
-    
-    if (old_focused) |old_win| {
-        if (s.windows.contains(old_win)) {
-            const border_color = s.borderColor(wm, old_win);
-            _ = xcb.xcb_change_window_attributes(wm.conn, old_win, xcb.XCB_CW_BORDER_PIXEL, &border_color);
-        }
-    }
-    
-    if (new_focused) |new_win| {
-        if (s.windows.contains(new_win)) {
-            const border_color = s.borderColor(wm, new_win);
-            _ = xcb.xcb_change_window_attributes(wm.conn, new_win, xcb.XCB_CW_BORDER_PIXEL, &border_color);
-        }
-    }
+    updateBorderForFocusChange(wm, old_focused, new_focused);
 }
 
-// FIXED 3.13: Removed dead onFocusChange export (no callers)
-
-pub fn adjustMasterCount(wm: *WM, delta: i8) void {
-    const s = StateManager.get() orelse return;
-    
-    const new_count: i16 = @as(i16, s.master_count) + delta;
-    if (new_count < 0) return;
-    
-    s.master_count = @intCast(@min(new_count, 10));
-    s.markDirty();
-    retileCurrentWorkspace(wm, false);
-}
-
-pub inline fn increaseMasterCount(wm: *WM) void {
-    adjustMasterCount(wm, 1);
-}
-
-pub inline fn decreaseMasterCount(wm: *WM) void {
-    adjustMasterCount(wm, -1);
-}
-
-pub fn adjustMasterWidth(wm: *WM, delta: f32) void {
-    const s = StateManager.get() orelse return;
-    
-    const new_width = s.master_width + delta;
-    s.master_width = @max(defs.MIN_MASTER_WIDTH, @min(MAX_MASTER_WIDTH, new_width));
-    std.debug.assert(s.master_width > 0 and s.master_width <= 1.0);  // Master width must be valid ratio
-    s.markDirty();
-    retileCurrentWorkspace(wm, false);
-}
-
-pub inline fn increaseMasterWidth(wm: *WM) void {
-    adjustMasterWidth(wm, 0.05);
-}
-
-pub inline fn decreaseMasterWidth(wm: *WM) void {
-    adjustMasterWidth(wm, -0.05);
-}
-
-pub fn toggleTiling(wm: *WM) void {
-    const s = StateManager.get() orelse return;
-    s.enabled = !s.enabled;
-    
-    if (s.enabled) {
-        retileCurrentWorkspace(wm, true);
-    }
-    
-    debug.info("Tiling {s}", .{if (s.enabled) "enabled" else "disabled"});
-}
-
-pub fn toggleLayout(wm: *WM) void {
-    const s = StateManager.get() orelse return;
-    s.layout = switch (s.layout) {
-        .master => .monocle,
-        .monocle => .grid,
-        .grid => .fibonacci,
-        .fibonacci => .master,
+inline fn updateBorderForFocusChange(wm: *WM, old_focused: ?u32, new_focused: ?u32) void {
+    const s = getState() orelse return;
+    if (old_focused) |win| if (s.windows.contains(win)) {
+        const color = s.borderColor(wm, win);
+        _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_BORDER_PIXEL, &color);
     };
-    s.markDirty();
-    retileCurrentWorkspace(wm, false);
-    debug.info("Cycled to layout: {s}", .{@tagName(s.layout)});
+    if (new_focused) |win| if (s.windows.contains(win)) {
+        const color = s.borderColor(wm, win);
+        _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_BORDER_PIXEL, &color);
+    };
 }
 
-pub fn toggleLayoutReverse(wm: *WM) void {
-    const s = StateManager.get() orelse return;
-    
-    s.layout = switch (s.layout) {
-        .master => .fibonacci,
-        .fibonacci => .grid,
-        .grid => .monocle,
-        .monocle => .master,
-    };
-    
-    s.markDirty();
-    retileCurrentWorkspace(wm, false);
-    debug.info("Cycled to layout (reverse): {s}", .{@tagName(s.layout)});
+// Window reordering ────────────────────────────────────────────────────────
+
+/// Move the window at `from_idx` to `to_idx` in tiling order.
+fn moveWindowToIndex(s: *State, from_idx: usize, to_idx: usize) void {
+    if (from_idx == to_idx) return;
+    const current = s.windows.items();
+    if (current.len == 0) return;
+
+    var temp: [256]u32 = undefined;
+    if (current.len > temp.len) {
+        debug.warn("moveWindowToIndex: too many windows ({})", .{current.len});
+        return;
+    }
+
+    const win = current[from_idx];
+    var j: usize = 0;
+    for (current, 0..) |w, i| {
+        if (i == from_idx) continue;
+        if (j == to_idx) { temp[j] = win; j += 1; }
+        temp[j] = w;
+        j += 1;
+    }
+    if (to_idx >= j) { temp[j] = win; j += 1; }
+    s.windows.reorder(temp[0..j]);
 }
 
 pub fn swapWithMaster(wm: *WM) void {
-    const s = StateManager.get() orelse return;
+    const s = getState() orelse return;
     const focused = wm.focused_window orelse return;
-    
-    if (!s.windows.contains(focused)) return;
-    if (!workspaces.isOnCurrentWorkspace(focused)) return;
-    
-    // Get ALL tiled windows (global list that determines tiling order)
-    const all_windows = s.windows.items();
-    if (all_windows.len < 2) return;
-    
-    // OPTIMIZATION: Use helper to find focused window index
-    const focused_pos = findWindowIndex(all_windows, focused) orelse return;
-    
-    // Find first window on current workspace (this is the "master" for this workspace)
-    var master_idx: ?usize = null;
-    for (all_windows, 0..) |win, i| {
-        if (workspaces.isOnCurrentWorkspace(win)) {
-            master_idx = i;
-            break;
-        }
+    if (!s.windows.contains(focused) or !workspaces.isOnCurrentWorkspace(focused)) return;
+
+    const all = s.windows.items();
+    if (all.len < 2) return;
+
+    const focused_pos = findWindowIndex(all, focused) orelse return;
+
+    // Find first window on current workspace — that's the effective master.
+    var master_pos: usize = 0;
+    var found_master = false;
+    for (all, 0..) |win, i| {
+        if (workspaces.isOnCurrentWorkspace(win)) { master_pos = i; found_master = true; break; }
     }
-    const master_pos = master_idx orelse return;
-    
-    // If focused is already master, find second window on workspace to swap with
+    if (!found_master) return;
+
     if (focused_pos == master_pos) {
-        var second_idx: ?usize = null;
-        for (all_windows, 0..) |win, i| {
-            if (i == master_pos) continue;
+        // Already master: swap with the next workspace window.
+        for (all[master_pos + 1..], master_pos + 1..) |win, i| {
             if (workspaces.isOnCurrentWorkspace(win)) {
-                second_idx = i;
+                moveWindowToIndex(s, i, master_pos);
                 break;
             }
         }
-        const second_pos = second_idx orelse return;
-        
-        // Swap master with second window
-        moveWindowToIndex(s, second_pos, master_pos);
     } else {
-        // Swap focused with master
         moveWindowToIndex(s, focused_pos, master_pos);
     }
-    
-    s.markDirty();
     retileCurrentWorkspace(wm, true);
 }
 
 pub fn promoteToMaster(wm: *WM) void {
-    const s = StateManager.get() orelse return;
+    const s = getState() orelse return;
     const focused = wm.focused_window orelse return;
     if (!s.windows.contains(focused)) return;
-
-    const windows = s.windows.items();
-    const from_idx = findWindowIndex(windows, focused) orelse return;
-    if (from_idx == 0) return;
-
-    moveWindowToIndex(s, from_idx, 0);
-    s.markDirty();
+    const idx = findWindowIndex(s.windows.items(), focused) orelse return;
+    if (idx == 0) return;
+    moveWindowToIndex(s, idx, 0);
     retileCurrentWorkspace(wm, false);
 }
 
-fn moveWindowToIndex(s: *State, from_idx: usize, to_idx: usize) void {
-    if (from_idx == to_idx) return;
-    
-    // NOTE 2.5: Original implementation was already O(n), not O(n²) as documented
-    // The actual issue was the 256-window hard limit. Improvement plan author's analysis
-    // was incorrect about complexity. Without mutable slice access in Tracking API,
-    // we cannot avoid the remove-all/add-all pattern. Kept original logic with clearer code.
-    const items = s.windows.items();
-    const window = items[from_idx];
-    
-    // Special case: moving to front can use optimized addFront
-    if (to_idx == 0) {
-        _ = s.windows.remove(window);
-        s.windows.addFront(window) catch |e| debug.warnOnErr(e, "moveWindowToIndex addFront");
-        return;
-    }
-    
-    // General case: build new order with single allocation
-    const len = items.len;
-    var temp: [256]u32 = undefined;
-    if (len > 256) {
-        debug.warn("moveWindowToIndex: too many windows ({}), using first 256", .{len});
-        return;
-    }
-    
-    // Build new order in temp buffer
-    var j: usize = 0;
-    for (items, 0..) |win, i| {
-        if (i == from_idx) continue; // Skip window being moved
-        if (j == to_idx) {
-            temp[j] = window; // Insert moved window at target
-            j += 1;
-        }
-        temp[j] = win;
-        j += 1;
-    }
-    if (to_idx >= j) temp[j] = window; // Append if moving to end
-    
-    // Single remove-all/add-all cycle
-    for (items) |win| _ = s.windows.remove(win);
-    for (temp[0..len]) |win| s.windows.add(win) catch |e| debug.warnOnErr(e, "moveWindowToIndex add");
-}
+// Layout and master controls ───────────────────────────────────────────────
 
-pub fn moveToIndex(from_idx: usize) void {
-    const s = StateManager.get() orelse return;
-    moveWindowToIndex(s, from_idx, 0);
-}
-
-pub fn reloadConfig(wm: *WM) void {
-    const s = StateManager.get() orelse return;
-    applyConfigToState(wm, s);
+pub fn toggleTiling(wm: *WM) void {
+    const s = getState() orelse return;
+    s.enabled = !s.enabled;
     if (s.enabled) retileCurrentWorkspace(wm, true);
+    debug.info("Tiling {s}", .{if (s.enabled) "enabled" else "disabled"});
 }
 
-/// Helper: complete a focus switch in tiling context.
+pub fn toggleLayout(wm: *WM) void {
+    const s = getState() orelse return;
+    s.layout = switch (s.layout) {
+        .master    => .monocle,
+        .monocle   => .grid,
+        .grid      => .fibonacci,
+        .fibonacci => .master,
+    };
+    retileCurrentWorkspace(wm, false);
+    debug.info("Layout: {s}", .{@tagName(s.layout)});
+}
+
+pub fn toggleLayoutReverse(wm: *WM) void {
+    const s = getState() orelse return;
+    s.layout = switch (s.layout) {
+        .master    => .fibonacci,
+        .fibonacci => .grid,
+        .grid      => .monocle,
+        .monocle   => .master,
+    };
+    retileCurrentWorkspace(wm, false);
+    debug.info("Layout (reverse): {s}", .{@tagName(s.layout)});
+}
+
+pub fn adjustMasterCount(wm: *WM, delta: i8) void {
+    const s = getState() orelse return;
+    const new: i16 = @as(i16, s.master_count) + delta;
+    if (new < 0) return;
+    s.master_count = @intCast(@min(new, 10));
+    retileCurrentWorkspace(wm, false);
+}
+
+pub inline fn increaseMasterCount(wm: *WM) void { adjustMasterCount(wm,  1); }
+pub inline fn decreaseMasterCount(wm: *WM) void { adjustMasterCount(wm, -1); }
+
+pub fn adjustMasterWidth(wm: *WM, delta: f32) void {
+    const s = getState() orelse return;
+    s.master_width = @max(defs.MIN_MASTER_WIDTH, @min(MAX_MASTER_WIDTH, s.master_width + delta));
+    retileCurrentWorkspace(wm, false);
+}
+
+pub inline fn increaseMasterWidth(wm: *WM) void { adjustMasterWidth(wm,  0.05); }
+pub inline fn decreaseMasterWidth(wm: *WM) void { adjustMasterWidth(wm, -0.05); }
+
+// Focus cycling ────────────────────────────────────────────────────────────
+
 inline fn switchFocus(wm: *WM, s: *State, from: ?u32, to: u32) void {
-    std.debug.assert(to != 0 and wm.hasWindow(to));  // Focus target must be valid and tracked
+    std.debug.assert(to != 0 and wm.hasWindow(to));
     focus.setFocus(wm, to, .tiling_operation);
     wm.focused_window = to;
     s.focus_ring.push(to);
     updateWindowFocus(wm, from, to);
 }
 
-/// OPTIMIZATION: Helper to filter windows on current workspace
-/// Reduces code duplication in focusPrevious and focusSecondLast
-/// Returns the number of windows copied to the buffer
 fn filterWorkspaceWindows(s: *State, buf: []u32) usize {
-    var count: usize = 0;
-    const all_windows = s.windows.items();
-    for (all_windows) |win| {
-        if (count >= buf.len) break;
-        if (workspaces.isOnCurrentWorkspace(win)) {
-            buf[count] = win;
-            count += 1;
-        }
+    var n: usize = 0;
+    for (s.windows.items()) |win| {
+        if (n >= buf.len) break;
+        if (workspaces.isOnCurrentWorkspace(win)) { buf[n] = win; n += 1; }
     }
-    return count;
+    return n;
 }
 
-/// OPTIMIZATION: Get effective master count for current workspace
 inline fn getMasterCount(s: *const State, window_count: usize) u8 {
     return @min(s.master_count, @as(u8, @intCast(window_count)));
 }
 
-/// OPTIMIZATION: Helper to find window index in a slice
 inline fn findWindowIndex(windows: []const u32, target: u32) ?usize {
-    for (windows, 0..) |win, i| {
-        if (win == target) return i;
-    }
-    return null;
+    return std.mem.indexOfScalar(u32, windows, target);
 }
 
-/// Focus the previously focused window (alt+tab functionality)
-/// Fallback: if previous window is on another workspace, focus the first slave if current is master
+/// Focus the most-recently-focused other window (alt+tab).
 pub fn focusPrevious(wm: *WM) void {
-    const s = StateManager.get() orelse return;
-    const current_focused = wm.focused_window orelse return;
-    
-    // OPTIMIZATION: Use circular buffer iterator instead of slice
-    var iter = s.focus_ring.iter();
-    while (iter.next()) |hist_win| {
-        if (hist_win == current_focused) continue;
-        if (workspaces.isOnCurrentWorkspace(hist_win) and s.windows.contains(hist_win)) {
-            switchFocus(wm, s, current_focused, hist_win);
+    const s   = getState() orelse return;
+    const cur = wm.focused_window orelse return;
+
+    var it = s.focus_ring.iter();
+    while (it.next()) |win| {
+        if (win == cur) continue;
+        if (workspaces.isOnCurrentWorkspace(win) and s.windows.contains(win)) {
+            switchFocus(wm, s, cur, win);
             return;
         }
     }
+
+    // Fallback: nothing useful in history — find a neighbour in current workspace.
+    var ws_buf: [MAX_WS_WINDOWS]u32 = undefined;
+    const ws_count = filterWorkspaceWindows(s, &ws_buf);
+    if (ws_count < 2) return;
+    const ws_windows = ws_buf[0..ws_count];
     
-    // Fallback: No valid window in history on current workspace
-    const windows = s.windows.items();
-    if (windows.len < 2) return;
-    
-    const idx = findWindowIndex(windows, current_focused) orelse return;
-    const master_count = getMasterCount(s, windows.len);
-    
-    if (idx < master_count and windows.len > master_count) {
-        switchFocus(wm, s, current_focused, windows[master_count]);
-    } else if (idx >= master_count) {
-        switchFocus(wm, s, current_focused, windows[if (idx + 1 < windows.len) idx + 1 else 0]);
+    const idx = findWindowIndex(ws_windows, cur) orelse return;
+    const mc  = getMasterCount(s, ws_count);
+    if (idx < mc and ws_count > mc) {
+        switchFocus(wm, s, cur, ws_windows[mc]);
+    } else if (idx >= mc) {
+        switchFocus(wm, s, cur, ws_windows[if (idx + 1 < ws_count) idx + 1 else 0]);
     }
 }
 
-/// Focus the second-last focused window (mod+shift+tab functionality)
-/// With intelligent fallback and carousel behavior
+/// Focus the second-most-recently-focused window (shift+alt+tab).
 pub fn focusSecondLast(wm: *WM) void {
-    const s = StateManager.get() orelse return;
-    const current_focused = wm.focused_window;
-    
-    const windows = s.windows.items();
-    if (windows.len < 2) return;
-    
-    // OPTIMIZATION: Use circular buffer iterator
-    var found_current = false;
-    var iter = s.focus_ring.iter();
-    while (iter.next()) |hist_win| {
-        if (hist_win == current_focused.?) {
-            found_current = true;
-            continue;
-        }
-        if (found_current and workspaces.isOnCurrentWorkspace(hist_win) and s.windows.contains(hist_win)) {
-            switchFocus(wm, s, current_focused, hist_win);
+    const s   = getState() orelse return;
+    const cur = wm.focused_window orelse return;
+    if (s.windows.count() < 2) return;
+
+    var found = false;
+    var it = s.focus_ring.iter();
+    while (it.next()) |win| {
+        if (win == cur) { found = true; continue; }
+        if (found and workspaces.isOnCurrentWorkspace(win) and s.windows.contains(win)) {
+            switchFocus(wm, s, cur, win);
             return;
         }
     }
-    
-    // Fallback: second-last is on another workspace
-    // Stack-allocated buffer for workspace windows (max 64 windows)
-    var ws_windows_buffer: [64]u32 = undefined;
-    const ws_win_count = filterWorkspaceWindows(s, &ws_windows_buffer);
-    
-    if (ws_win_count < 2) return;
-    
-    const current_ws_windows = ws_windows_buffer[0..ws_win_count];
-    
-    if (ws_win_count == 2) {
-        const other_win = if (current_ws_windows[0] == current_focused.?) 
-            current_ws_windows[1] else current_ws_windows[0];
-        switchFocus(wm, s, current_focused, other_win);
+
+    // Fallback: carousel within workspace windows.
+    var buf: [MAX_WS_WINDOWS]u32 = undefined;
+    const ws_count = filterWorkspaceWindows(s, &buf);
+    if (ws_count < 2) return;
+    const ws_wins = buf[0..ws_count];
+
+    if (ws_count == 2) {
+        const other = if (ws_wins[0] == cur) ws_wins[1] else ws_wins[0];
+        switchFocus(wm, s, cur, other);
         return;
     }
-    
-    // 3+ windows: carousel or swap behavior
-    const master_count = getMasterCount(s, ws_win_count);
-    
-    // Find current focused window index
-    const idx = if (current_focused) |cf|
-        findWindowIndex(current_ws_windows, cf) orelse 0
-    else
-        0;
-    
-    if (idx < master_count) {
-        if (master_count == 1) {
-            switchFocus(wm, s, current_focused, current_ws_windows[ws_win_count - 1]);
-        } else {
-            const next_master_idx = if (idx + 1 < master_count) idx + 1 else 0;
-            switchFocus(wm, s, current_focused, current_ws_windows[next_master_idx]);
-        }
+
+    const mc  = getMasterCount(s, ws_count);
+    const idx = findWindowIndex(ws_wins, cur) orelse 0;
+
+    if (idx < mc) {
+        const next = if (mc == 1) ws_count - 1 else (if (idx + 1 < mc) idx + 1 else 0);
+        switchFocus(wm, s, cur, ws_wins[next]);
     } else {
-        const slave_start = master_count;
-        const slave_count = ws_win_count - master_count;
-        const slave_idx = idx - slave_start;
-        const next_slave_idx = if (slave_idx + 1 < slave_count) slave_idx + 1 else 0;
-        switchFocus(wm, s, current_focused, current_ws_windows[slave_start + next_slave_idx]);
+        const slave_count = ws_count - mc;
+        const si          = idx - mc;
+        const next_si     = if (si + 1 < slave_count) si + 1 else 0;
+        switchFocus(wm, s, cur, ws_wins[mc + next_si]);
     }
-}
-
-pub inline fn getState() ?*State {
-    return StateManager.get();
-}
-
-// OPTIMIZATION: Invalidate cached geometry when window is moved/resized
-pub inline fn invalidateWindowGeometry(win: u32) void {
-    const s = StateManager.get() orelse return;
-    s.invalidateGeometry(win);
 }

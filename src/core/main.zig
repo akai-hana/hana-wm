@@ -48,7 +48,7 @@ fn setupPollFds() !FDs {
     return .{ .signal = @intCast(sfd), .timer = @intCast(tfd) };
 }
 
-fn handleSignalFd(signal_fd: posix.fd_t, reload_flag: *std.atomic.Value(bool), running_flag: *std.atomic.Value(bool)) void {
+fn handleSignalFd(signal_fd: posix.fd_t) void {
     while (true) {
         var siginfo: std.os.linux.signalfd_siginfo = undefined;
         const bytes_read = posix.read(signal_fd, std.mem.asBytes(&siginfo)) catch break;
@@ -56,8 +56,8 @@ fn handleSignalFd(signal_fd: posix.fd_t, reload_flag: *std.atomic.Value(bool), r
         if (bytes_read != @sizeOf(std.os.linux.signalfd_siginfo)) break;
         
         switch (siginfo.signo) {
-            @intFromEnum(posix.SIG.HUP) => reload_flag.store(true, .seq_cst),
-            @intFromEnum(posix.SIG.TERM), @intFromEnum(posix.SIG.INT) => running_flag.store(false, .seq_cst),
+            @intFromEnum(posix.SIG.HUP) => should_reload.store(true, .seq_cst),
+            @intFromEnum(posix.SIG.TERM), @intFromEnum(posix.SIG.INT) => running.store(false, .seq_cst),
             else => {},
         }
     }
@@ -89,6 +89,11 @@ fn setupExistingWindows(conn: *xcb.xcb_connection_t, root: u32, allocator: std.m
     const len: usize = @intCast(xcb.xcb_query_tree_children_length(reply));
     if (len == 0) return;
 
+    // Design choice: Only subscribe to enter/leave events on pre-existing windows.
+    // We do NOT call addWindow, workspaces.moveWindowTo, or tiling.addWindow.
+    // This means pre-existing windows are not managed — only new windows created
+    // after WM startup are tiled. This is intentional: on WM restart, the user's
+    // existing window layout is preserved rather than forcibly retiled.
     const event_mask = xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW;
     
     // Use stack allocation for common case (≤32 windows), heap for many
@@ -116,11 +121,10 @@ fn setupExistingWindows(conn: *xcb.xcb_connection_t, root: u32, allocator: std.m
 fn grabKeybindings(wm: *WM) !void {
     _ = xcb.xcb_ungrab_key(wm.conn, xcb.XCB_GRAB_ANY, wm.root, xcb.XCB_MOD_MASK_ANY);
     
-    var failed_count: usize = 0;
+    var failed_keybinds: usize = 0;
     
     for (wm.config.keybindings.items) |kb| {
         const keycode = kb.keycode orelse continue;
-        var failed_this_kb = false;
         
         for (constants.LOCK_MODIFIERS) |lock| {
             const cookie = xcb.xcb_grab_key_checked(
@@ -133,18 +137,15 @@ fn grabKeybindings(wm: *WM) !void {
             
             if (xcb.xcb_request_check(wm.conn, cookie)) |err| {
                 std.c.free(err);
-                failed_this_kb = true;
-                failed_count += 1;
+                debug.warn("Failed to grab keycode: {}", .{keycode});
+                failed_keybinds += 1;
+                break;  // Don't try other lock modifiers if one fails
             }
-        }
-        
-        if (failed_this_kb) {
-            debug.warn("Failed to grab keycode: {}", .{keycode});
         }
     }
     
-    if (failed_count > 0) {
-        debug.warn("{} grab(s) failed", .{failed_count});
+    if (failed_keybinds > 0) {
+        debug.warn("{} keybinding(s) failed to grab", .{failed_keybinds});
     }
     
     _ = xcb.xcb_flush(wm.conn);
@@ -303,7 +304,7 @@ pub fn main() !void {
         
         // Signals
         if (pollfds[1].revents & posix.POLL.IN != 0) {
-            handleSignalFd(fds.signal, &should_reload, &running);
+            handleSignalFd(fds.signal);
             
             if (should_reload.swap(false, .seq_cst)) {
                 handleConfigReload(&wm) catch |err| {
