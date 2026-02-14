@@ -1,18 +1,17 @@
-// Workspace management - MEMORY OPTIMIZED with u8 indices
+// Workspace management
 
-const std = @import("std");
-const defs = @import("defs");
-const xcb = defs.xcb;
-const WM = defs.WM;
-const utils = @import("utils");
-const focus = @import("focus");
-const bar = @import("bar");
-const tiling = @import("tiling");
-const tracking = @import("tracking").Tracking;
-const createModule = @import("module").module;
-const debug = @import("debug");
+const std      = @import("std");
+const defs     = @import("defs");
+const xcb      = defs.xcb;
+const WM       = defs.WM;
+const utils    = @import("utils");
+const focus    = @import("focus");
+const bar      = @import("bar");
+const tiling   = @import("tiling");
+const Tracking = @import("tracking").Tracking;
+const debug    = @import("debug");
 
-// OPTIMIZATION: Static workspace names (no heap allocation)
+// Comptime-generated workspace name strings ("1".."20"), never heap-allocated.
 const WORKSPACE_NAMES = blk: {
     var names: [20][]const u8 = undefined;
     for (&names, 1..) |*name, i| name.* = std.fmt.comptimePrint("{d}", .{i});
@@ -20,286 +19,193 @@ const WORKSPACE_NAMES = blk: {
 };
 
 pub const Workspace = struct {
-    id: u8,  // OPTIMIZED: u8 instead of usize
-    windows: tracking,
-    name: []const u8,
+    id:      u8,
+    windows: Tracking,
+    name:    []const u8,
 
     pub fn init(allocator: std.mem.Allocator, id: u8, name: []const u8) !Workspace {
-        return .{
-            .id = id,
-            .windows = tracking.init(allocator),
-            .name = name,
-        };
+        return .{ .id = id, .windows = Tracking.init(allocator), .name = name };
     }
 
-    pub fn deinit(self: *Workspace) void {
-        self.windows.deinit();
-    }
+    pub fn deinit(self: *Workspace) void { self.windows.deinit(); }
 
-    pub inline fn contains(self: *const Workspace, win: u32) bool {
-        return self.windows.contains(win);
-    }
-
-    pub inline fn add(self: *Workspace, win: u32) !void {
-        try self.windows.add(win);
-    }
-
-    pub inline fn remove(self: *Workspace, win: u32) bool {
-        return self.windows.remove(win);
-    }
+    pub inline fn contains(self: *const Workspace, win: u32) bool { return self.windows.contains(win); }
+    pub inline fn add(self: *Workspace, win: u32)  !void  { try self.windows.add(win); }
+    pub inline fn remove(self: *Workspace, win: u32) bool { return self.windows.remove(win); }
 };
 
 pub const State = struct {
-    workspaces: []Workspace,
-    current: u8,  // OPTIMIZED: u8 instead of usize
-    window_to_workspace: std.AutoHashMap(u32, u8),  // OPTIMIZED: u8 values
-    allocator: std.mem.Allocator,
-    wm: *WM,
+    workspaces:          []Workspace,
+    current:             u8,
+    window_to_workspace: std.AutoHashMap(u32, u8),
+    allocator:           std.mem.Allocator,
 };
 
-const StateManager = createModule(State);
+// Module singleton ─────────────────────────────────────────────────────────
 
-inline fn cleanupWorkspaces(workspaces: []Workspace, allocator: std.mem.Allocator) void {
-    for (workspaces) |*ws| {
-        ws.deinit();
-        // Note: workspace names are now static (WORKSPACE_NAMES), no need to free
-    }
-    allocator.free(workspaces);
-}
+var g_state: ?State = null;
+
+pub fn getState() ?*State { return if (g_state != null) &g_state.? else null; }
+
+// Init / deinit ────────────────────────────────────────────────────────────
 
 pub fn init(wm: *WM) void {
     const count = wm.config.workspaces.count;
-    const workspaces_array = wm.allocator.alloc(Workspace, count) catch {
+    const wss = wm.allocator.alloc(Workspace, count) catch {
         debug.err("Failed to allocate workspaces", .{});
         return;
     };
-    
-    // OPTIMIZATION: Single loop for initialization with static names
-    for (workspaces_array, 0..) |*ws, i| {
-        const ws_id: u8 = @intCast(i);
-        const name = if (i < WORKSPACE_NAMES.len) WORKSPACE_NAMES[i] else "?";
-        ws.* = Workspace.init(wm.allocator, ws_id, name) catch {
+
+    for (wss, 0..) |*ws, i| {
+        const id: u8     = @intCast(i);
+        const name       = if (i < WORKSPACE_NAMES.len) WORKSPACE_NAMES[i] else "?";
+        ws.* = Workspace.init(wm.allocator, id, name) catch {
             debug.err("Failed to init workspace {}", .{i});
-            cleanupWorkspaces(workspaces_array[0..i], wm.allocator);
+            for (wss[0..i]) |*w| w.deinit();
+            wm.allocator.free(wss);
             return;
         };
     }
-    
-    // OPTIMIZATION: Pre-allocate hash map capacity
-    // Typical workload: 32 windows across all workspaces
-    var window_to_workspace = std.AutoHashMap(u32, u8).init(wm.allocator);
-    window_to_workspace.ensureTotalCapacity(32) catch {}; // Best-effort pre-allocation
-    
-    const initial_state = State{
-        .workspaces = workspaces_array,
-        .current = 0,
-        .window_to_workspace = window_to_workspace,
-        .allocator = wm.allocator,
-        .wm = wm,
-    };
-    
-    StateManager.init(wm.allocator, initial_state) catch |err| {
-        debug.err("Failed to initialize state: {}", .{err});
-        cleanupWorkspaces(workspaces_array, wm.allocator);
+
+    var w2ws = std.AutoHashMap(u32, u8).init(wm.allocator);
+    w2ws.ensureTotalCapacity(32) catch {};
+
+    g_state = .{
+        .workspaces          = wss,
+        .current             = 0,
+        .window_to_workspace = w2ws,
+        .allocator           = wm.allocator,
     };
 }
 
 pub fn deinit(wm: *WM) void {
-    if (StateManager.get()) |s| {
+    if (g_state) |*s| {
         for (s.workspaces) |*ws| ws.deinit();
         wm.allocator.free(s.workspaces);
         s.window_to_workspace.deinit();
     }
-    StateManager.deinit(wm.allocator);
+    g_state = null;
 }
 
-// FIXED 3.12: Removed dead addWindowToCurrentWorkspace function (no callers)
+// Window tracking ──────────────────────────────────────────────────────────
 
 pub fn removeWindow(win: u32) void {
-    const s = StateManager.get() orelse return;
+    const s = getState() orelse return;
     if (s.window_to_workspace.fetchRemove(win)) |entry| {
-        const ws_idx = entry.value;
-        if (ws_idx < s.workspaces.len) {
-            _ = s.workspaces[ws_idx].remove(win);
-        }
+        if (entry.value < s.workspaces.len)
+            _ = s.workspaces[entry.value].remove(win);
     }
 }
 
 pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) void {
-    const s = StateManager.get() orelse return;
-
+    const s = getState() orelse return;
     if (target_ws >= s.workspaces.len) {
         debug.err("Invalid target workspace: {}", .{target_ws});
         return;
     }
 
-    // OPTIMIZATION: Get tiling state once if needed
-    const tiling_state = if (wm.config.tiling.enabled) @import("tiling").getState() else null;
+    const ts = if (wm.config.tiling.enabled) tiling.getState() else null;
 
     const from_ws = s.window_to_workspace.get(win) orelse {
-        // Window not tracked, just add to target
+        // Window not yet tracked — add it directly to the target.
         s.workspaces[target_ws].add(win) catch |err| {
             debug.err("Failed to add window to workspace {}: {}", .{ target_ws, err });
-            // CRITICAL: If we can't add to workspace, remove from tiling to stay consistent
-            if (tiling_state) |ts| {
-                _ = ts.windows.remove(win);
-            }
+            if (ts) |t| _ = t.windows.remove(win);
             return;
         };
-        s.window_to_workspace.put(win, target_ws) catch |e| debug.warnOnErr(e, "window_to_workspace after untracked add");
+        s.window_to_workspace.put(win, target_ws) catch |e| debug.warnOnErr(e, "w2ws put");
         return;
     };
 
     if (from_ws == target_ws) return;
 
-    // Move window between workspaces
     _ = s.workspaces[from_ws].remove(win);
     s.workspaces[target_ws].add(win) catch |err| {
         debug.err("Failed to add window to workspace {}: {}", .{ target_ws, err });
-        // CRITICAL: Rollback - add back to original workspace to maintain consistency
-        s.workspaces[from_ws].add(win) catch |e| debug.warnOnErr(e, "workspace rollback re-add");
-        // Also ensure it's removed from tiling if add failed
-        if (tiling_state) |ts| {
-            _ = ts.windows.remove(win);
-        }
+        s.workspaces[from_ws].add(win) catch |e| debug.warnOnErr(e, "workspace rollback");
+        if (ts) |t| _ = t.windows.remove(win);
         return;
     };
-    s.window_to_workspace.put(win, target_ws) catch |e| debug.warnOnErr(e, "window_to_workspace after move");
+    s.window_to_workspace.put(win, target_ws) catch |e| debug.warnOnErr(e, "w2ws put after move");
 
-    // OPTIMIZATION: Simplified visibility handling using dwm approach
     if (from_ws == s.current) {
-        // Move window off-screen instead of unmapping
-        hideWindow(wm, win);
-        if (wm.focused_window == win) {
-            focus.clearFocus(wm);
-        }
-        if (tiling_state) |ts| ts.markDirty();
+        // Hide window by moving it off-screen (avoids an unmap/remap cycle).
+        _ = xcb.xcb_configure_window(wm.conn, win,
+            xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, -4000))});
+        if (wm.focused_window == win) focus.clearFocus(wm);
+        if (ts) |t| t.markDirty();
     } else if (target_ws == s.current) {
-        // Window moving to current workspace — map it in case it was deferred
-        // (workspace-bound windows that spawned while this workspace was inactive
-        // are kept unmapped until shown).
-        _ = xcb.xcb_map_window(s.wm.conn, win);
-        if (tiling_state) |ts| ts.markDirty();
+        // Map in case the window was deferred (spawned while this ws was inactive).
+        _ = xcb.xcb_map_window(wm.conn, win);
+        if (ts) |t| t.markDirty();
     }
 }
 
-// OPTIMIZATION: Removed markTilingDirty() - inlined to reduce function call overhead
+// Workspace switching ──────────────────────────────────────────────────────
 
 pub fn switchTo(wm: *WM, ws_id: u8) void {
-    const s = StateManager.get() orelse return;
+    const s = getState() orelse return;
     if (ws_id >= s.workspaces.len or ws_id == s.current) return;
-    const old_ws = s.current;
-    s.current = ws_id;
-    std.debug.assert(s.current < s.workspaces.len);  // Current workspace must be valid index
-    executeSwitch(wm, old_ws, ws_id);
+    const old    = s.current;
+    s.current    = ws_id;
+    executeSwitch(wm, old, ws_id);
 }
 
-// Helper: Move window off-screen (DWM-style hiding)
-inline fn hideWindow(wm: *WM, win: u32) void {
-    const values = [_]u32{@bitCast(@as(i32, -4000))};
-    _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_X, &values);
-}
-
-// Helper: Configure fullscreen window
-inline fn configureFullscreen(wm: *WM, info: defs.FullscreenInfo) void {
-    const screen = wm.screen;
-    const values = [_]u32{
-        0, // x
-        0, // y
-        @intCast(screen.width_in_pixels),
-        @intCast(screen.height_in_pixels),
-        0, // border_width
-    };
-    _ = xcb.xcb_configure_window(wm.conn, info.window,
-        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
-        xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
-        xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &values);
-    _ = xcb.xcb_configure_window(wm.conn, info.window,
-        xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
-}
-
-// DWM-STYLE: Atomic workspace switching with server grab
 fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
-    const s = StateManager.get().?; // Must exist if we got here
-    const old_workspace = &s.workspaces[old_ws];
-    const new_workspace = &s.workspaces[new_ws];
+    const s          = getState().?;
+    const old_ws_obj = &s.workspaces[old_ws];
+    const new_ws_obj = &s.workspaces[new_ws];
+    const fs_info    = wm.fullscreen.getForWorkspace(new_ws);
 
-    const fs_info = wm.fullscreen.getForWorkspace(new_ws);
+    wm.focused_window = new_ws_obj.windows.first();
+    std.debug.assert(wm.focused_window == null or wm.hasWindow(wm.focused_window.?));
 
-    // Pre-set focused_window for correct border colors
-    wm.focused_window = if (new_workspace.windows.items().len > 0)
-        new_workspace.windows.items()[0] else null;
-    std.debug.assert(wm.focused_window == null or wm.hasWindow(wm.focused_window.?));  // Focused window must be valid if set
-
-    // CRITICAL: Grab server for atomic switching (no intermediate frames)
+    // Grab the server so the switch is atomic — no intermediate frames visible.
     _ = xcb.xcb_grab_server(wm.conn);
     defer _ = xcb.xcb_ungrab_server(wm.conn);
 
-    // Step 1: Hide ALL old workspace windows
-    for (old_workspace.windows.items()) |win| {
-        hideWindow(wm, win);
+    // Step 1: hide all windows from the old workspace.
+    for (old_ws_obj.windows.items()) |win| {
+        _ = xcb.xcb_configure_window(wm.conn, win,
+            xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, -4000))});
     }
 
-    // Step 2: If there's a fullscreen window, configure it FIRST and ONLY
-    // Don't position any other windows - they should stay hidden
+    // Step 2: show windows for the new workspace.
     if (fs_info) |info| {
-        configureFullscreen(wm, info);
+        // Fullscreen: configure the fs window to cover the screen and raise it.
+        _ = xcb.xcb_configure_window(wm.conn, info.window,
+            xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
+            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
+            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
+            &[_]u32{ 0, 0,
+                @intCast(wm.screen.width_in_pixels),
+                @intCast(wm.screen.height_in_pixels), 0 });
+        _ = xcb.xcb_configure_window(wm.conn, info.window,
+            xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     } else {
-        // Map any windows that were deferred (workspace-bound windows that spawned
-        // while this workspace was inactive are kept unmapped to avoid the
-        // compositor allocating a cold off-screen buffer).  xcb_map_window is a
-        // no-op for already-mapped windows, so this is always safe.
-        for (new_workspace.windows.items()) |win| {
-            _ = xcb.xcb_map_window(wm.conn, win);
-        }
+        // Map any deferred windows (spawned while this workspace was inactive).
+        // xcb_map_window is a no-op for already-mapped windows.
+        for (new_ws_obj.windows.items()) |win| _ = xcb.xcb_map_window(wm.conn, win);
 
-        // No fullscreen - position windows based on RUNTIME tiling state
-        // CRITICAL FIX: Check tiling.State.enabled, not config.tiling.enabled!
-        // When user toggles tiling with Mod+N, it changes State.enabled, not config
-        const tiling_state = tiling.getState();
-        const tiling_enabled = if (tiling_state) |ts| ts.enabled else false;
-        
-        if (tiling_enabled) {
-            // Force retile so windows always reflect the current bar visibility
-            // and screen area, regardless of what changed on other workspaces.
+        const ts            = tiling.getState();
+        const tiling_active = if (ts) |t| t.enabled else false;
+
+        if (tiling_active) {
+            // Force-retile so bar visibility / screen area are always current.
             tiling.retileCurrentWorkspace(wm, true);
         } else {
-            // FIXED 2.6: Pre-batch geometry cookies BEFORE positioning
-            // Prevents blocking geometry queries during server grab
-            const GeometryInfo = struct { cookie: xcb.xcb_get_geometry_cookie_t, win: u32 };
-            var geom_infos = std.ArrayList(GeometryInfo).empty;
-            defer geom_infos.deinit(wm.allocator);
-            
-            // Send all geometry requests first (non-blocking)
-            for (new_workspace.windows.items()) |win| {
-                const cookie = xcb.xcb_get_geometry(wm.conn, win);
-                geom_infos.append(wm.allocator, .{ .cookie = cookie, .win = win }) catch continue;
-            }
-            
-            // Tiling disabled - manually position windows to visible locations
-            const x: i16 = @divTrunc(@as(i16, @intCast(wm.screen.width_in_pixels)), 4);
-            const y: i16 = @divTrunc(@as(i16, @intCast(wm.screen.height_in_pixels)), 4);
-            
-            for (geom_infos.items) |info| {
-                const geom_reply = xcb.xcb_get_geometry_reply(wm.conn, info.cookie, null);
-                if (geom_reply) |reply| {
-                    defer std.c.free(reply);
-                    
-                    const values = [_]u32{
-                        @bitCast(@as(i32, x)),
-                        @bitCast(@as(i32, y)),
-                    };
-                    _ = xcb.xcb_configure_window(wm.conn, info.win,
-                        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y, &values);
-                }
+            // Floating: move all windows to a sensible on-screen position.
+            const x: u32 = @intCast(wm.screen.width_in_pixels  / 4);
+            const y: u32 = @intCast(wm.screen.height_in_pixels / 4);
+            for (new_ws_obj.windows.items()) |win| {
+                _ = xcb.xcb_configure_window(wm.conn, win,
+                    xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{ x, y });
             }
         }
     }
 
-    // Step 3: NOW flush everything atomically
     utils.flush(wm.conn);
 
-    // Bar state management (after positioning complete)
     if (fs_info != null) {
         bar.setBarState(wm, .hide_fullscreen);
         bar.raiseBar();
@@ -307,35 +213,31 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
         bar.setBarState(wm, .show_fullscreen);
     }
 
-    // Set focus
-    const focus_target = wm.focused_window orelse wm.root;
-    _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, focus_target, xcb.XCB_CURRENT_TIME);
+    _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
+        wm.focused_window orelse wm.root, xcb.XCB_CURRENT_TIME);
     utils.flush(wm.conn);
     bar.markDirty();
 }
 
+// Queries───
+
 pub inline fn getCurrentWindowsView() ?[]const u32 {
-    const s = StateManager.get() orelse return null;
+    const s = getState() orelse return null;
     return s.workspaces[s.current].windows.items();
 }
 
 pub inline fn getCurrentWorkspace() ?u8 {
-    const s = StateManager.get() orelse return null;
+    const s = getState() orelse return null;
     return s.current;
 }
 
 pub inline fn isOnCurrentWorkspace(win: u32) bool {
-    const s = StateManager.get() orelse return false;
-    // FIXED 2.13: O(1) hashmap lookup instead of O(n) linear scan
+    const s = getState() orelse return false;
     const ws_idx = s.window_to_workspace.get(win) orelse return false;
     return ws_idx == s.current;
 }
 
-pub inline fn getState() ?*State {
-    return StateManager.get();
-}
-
 pub inline fn getCurrentWorkspaceObject() ?*Workspace {
-    const s = StateManager.get() orelse return null;
+    const s = getState() orelse return null;
     return &s.workspaces[s.current];
 }

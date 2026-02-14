@@ -98,7 +98,7 @@ urgent_bg   = "#FF0000"
 urgent_fg   = "#FFFFFF"
 
 # Indicator size as percentage (100% = 4px base, 150% = 6px, or set exact pixels)
-indicator_size = 100%
+indicator_size = 150%
 
 # Accent colors for bar segments
 # Default accent for all segments
