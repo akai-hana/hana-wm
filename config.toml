@@ -98,7 +98,7 @@ urgent_bg   = "#FF0000"
 urgent_fg   = "#FFFFFF"
 
 # Indicator size as percentage (100% = 4px base, 150% = 6px, or set exact pixels)
-indicator_size = 150%
+indicator_size = 125%
 
 # Accent colors for bar segments
 # Default accent for all segments
@@ -114,6 +114,8 @@ accent_color = "#ac3232"
 [bar.colors]
 workspaces = "#b9c0a8"  # Custom accent for workspace indicators
 title = "#ac3232"       # Custom accent for title segment  
+title_unfocused = "#52263e"
+
 clock = "#ac3232"       # Custom accent for clock segment
 
 # Configurable bar layout

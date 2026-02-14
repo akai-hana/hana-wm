@@ -13,7 +13,7 @@ const c = @cImport(@cInclude("time.h"));
 // Time formatting constant
 const TIME_FORMAT = "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}";
 
-// Timer state ─────────────────────────────────────────────────────────────
+// Timer state ─
 
 // Cached clock formatting to avoid redundant formatting
 var last_formatted_time: [20]u8 = undefined;
