@@ -11,16 +11,8 @@ pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start
     const t_state = tiling.getState() orelse return start_x;
     const layout_idx = @intFromEnum(t_state.layout);
     
-    // Bounds check to prevent out-of-bounds access
-    if (layout_idx >= layouts.len) {
-        std.debug.print("ERROR: Invalid layout index: {d} (max: {d})\n", .{layout_idx, layouts.len});
-        return start_x;
-    }
-    
-    const layout_str = layouts[layout_idx];
-    const scaled_padding = config.scaledPadding();
-    const width = dc.textWidth(layout_str) + scaled_padding * 2;
-    dc.fillRect(start_x, 0, width, height, config.bg);
-    try dc.drawText(start_x + scaled_padding, dc.baselineY(height), layout_str, config.fg);
-    return start_x + width;
+    // Clamp to valid range for defensive programming
+    const safe_idx = @min(layout_idx, layouts.len - 1);
+    const layout_str = layouts[safe_idx];
+    return dc.drawSegment(start_x, height, layout_str, config.scaledPadding(), config.bg, config.fg);
 }

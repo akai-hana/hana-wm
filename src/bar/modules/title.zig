@@ -39,21 +39,9 @@ pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start
 
 fn fetchProperty(conn: *xcb.xcb_connection_t, win: u32, atom: u32, atom_type: u32,
     cached_title: *std.ArrayList(u8), cached_title_window: *?u32, allocator: std.mem.Allocator) ![]const u8 {
-    const reply = xcb.xcb_get_property_reply(conn,
-        xcb.xcb_get_property(conn, 0, win, atom, atom_type, 0, 256), null) orelse return "";
-    defer std.c.free(reply);
-    
-    if (reply.*.format != 8 or reply.*.value_len == 0) return "";
-
-    cached_title.clearRetainingCapacity();
-    
-    // Limit maximum title length to prevent excessive memory usage
-    const max_len: usize = 1024;
-    const actual_len = @min(@as(usize, @intCast(reply.*.value_len)), max_len);
-    const value_ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
-    try cached_title.appendSlice(allocator, value_ptr[0..actual_len]);
-    cached_title_window.* = win;
-    return cached_title.items;
+    const text = try utils.fetchPropertyToBuffer(conn, win, atom, atom_type, cached_title, allocator);
+    if (text.len > 0) cached_title_window.* = win;
+    return text;
 }
 
 fn getFocusedWindowTitle(wm: *defs.WM, cached_title: *std.ArrayList(u8),

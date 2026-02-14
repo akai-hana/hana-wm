@@ -1,4 +1,4 @@
-// Main event loop - IMPROVED: No event counter management
+// Main event loop
 
 const std     = @import("std");
 const posix   = std.posix;
@@ -21,13 +21,10 @@ const constants = @import("constants");
 const xcb = defs.xcb;
 const WM = defs.WM;
 
-// FIXED: Document thread safety guarantees
 /// Thread-safe: Written by signal handler, read by main loop
-/// Memory ordering: Sequential consistency for cross-thread visibility
 var should_reload = std.atomic.Value(bool).init(false);
 
 /// Thread-safe: Written by signal handler, read by main loop  
-/// Memory ordering: Sequential consistency for cross-thread visibility
 var running = std.atomic.Value(bool).init(true);
 
 const FDs = struct { signal: posix.fd_t, timer: posix.fd_t };
@@ -50,7 +47,6 @@ fn setupPollFds() !FDs {
     const tfd = std.os.linux.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true });
     if (tfd < 0) return error.TimerFdFailed;
     
-    // OPTIMIZATION: Start with timer disabled - will be enabled if clock is visible
     clock.setTimerFd(@intCast(tfd));
     
     return .{ .signal = @intCast(sfd), .timer = @intCast(tfd) };
@@ -64,7 +60,6 @@ fn handleSignalFd(signal_fd: posix.fd_t, reload_flag: *std.atomic.Value(bool), r
         if (bytes_read != @sizeOf(std.os.linux.signalfd_siginfo)) break;
         
         switch (siginfo.signo) {
-            // FIXED: Use seq_cst for consistency across all atomic operations
             @intFromEnum(posix.SIG.HUP) => reload_flag.store(true, .seq_cst),
             @intFromEnum(posix.SIG.TERM), @intFromEnum(posix.SIG.INT) => running_flag.store(false, .seq_cst),
             else => {},
@@ -76,7 +71,7 @@ fn setupRootCursor(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) void 
     const font = xcb.xcb_generate_id(conn);
     const cursor = xcb.xcb_generate_id(conn);
     _ = xcb.xcb_open_font(conn, font, 6, "cursor");
-    _ = xcb.xcb_create_glyph_cursor(conn, cursor, font, font, constants.Cursors.LEFT_PTR, constants.Cursors.LEFT_PTR_MASK, 0, 0, 0, 65535, 65535, 65535);
+    _ = xcb.xcb_create_glyph_cursor(conn, cursor, font, font, constants.CURSOR_LEFT_PTR, constants.CURSOR_LEFT_PTR_MASK, 0, 0, 0, 65535, 65535, 65535);
     _ = xcb.xcb_change_window_attributes(conn, screen.*.root, xcb.XCB_CW_CURSOR, &[_]u32{cursor});
     _ = xcb.xcb_close_font(conn, font);
 }
@@ -90,14 +85,6 @@ fn becomeWindowManager(conn: *xcb.xcb_connection_t, root: u32) !void {
     }
 }
 
-// ============================================================================
-// PHASE 2 IMPROVEMENT: Reduced Allocations in setupExistingWindows
-// ============================================================================
-
-/// Typical window count - most systems have ≤32 windows at startup
-/// This allows zero-allocation fast path for common case
-const TYPICAL_WINDOW_COUNT = 32;
-
 fn setupExistingWindows(conn: *xcb.xcb_connection_t, root: u32, allocator: std.mem.Allocator) !void {
     const reply = xcb.xcb_query_tree_reply(conn, xcb.xcb_query_tree(conn, root), null) orelse return;
     defer std.c.free(reply);
@@ -106,43 +93,26 @@ fn setupExistingWindows(conn: *xcb.xcb_connection_t, root: u32, allocator: std.m
     const len: usize = @intCast(xcb.xcb_query_tree_children_length(reply));
     if (len == 0) return;
 
-    // PHASE 2 OPTIMIZATION: Use stack allocation for typical case (≤32 windows)
-    // Only allocate heap memory if we have more windows than typical
-    var cookie_buffer: [TYPICAL_WINDOW_COUNT]xcb.xcb_get_window_attributes_cookie_t = undefined;
-    
-    // Note: We use a minimal event mask here (enter/leave) for existing windows
-    // Full MANAGED_WINDOW mask is applied in window.zig when windows are properly managed
     const event_mask = xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW;
     
-    if (len <= TYPICAL_WINDOW_COUNT) {
-        // Fast path: Use stack allocation (zero heap allocations!)
-        for (0..len) |i| {
-            cookie_buffer[i] = xcb.xcb_get_window_attributes(conn, children[i]);
-        }
-        _ = xcb.xcb_flush(conn);
-        
-        for (cookie_buffer[0..len], 0..) |cookie, i| {
-            const attrs = xcb.xcb_get_window_attributes_reply(conn, cookie, null) orelse continue;
-            defer std.c.free(attrs);
-            if (attrs.*.override_redirect != 0 or attrs.*.map_state != xcb.XCB_MAP_STATE_VIEWABLE) continue;
-            _ = xcb.xcb_change_window_attributes(conn, children[i], xcb.XCB_CW_EVENT_MASK, &[_]u32{event_mask});
-        }
-    } else {
-        // Slow path: Need heap allocation for many windows
-        const cookies = try allocator.alloc(xcb.xcb_get_window_attributes_cookie_t, len);
-        defer allocator.free(cookies);
-        
-        for (0..len) |i| {
-            cookies[i] = xcb.xcb_get_window_attributes(conn, children[i]);
-        }
-        _ = xcb.xcb_flush(conn);
-        
-        for (cookies, 0..) |cookie, i| {
-            const attrs = xcb.xcb_get_window_attributes_reply(conn, cookie, null) orelse continue;
-            defer std.c.free(attrs);
-            if (attrs.*.override_redirect != 0 or attrs.*.map_state != xcb.XCB_MAP_STATE_VIEWABLE) continue;
-            _ = xcb.xcb_change_window_attributes(conn, children[i], xcb.XCB_CW_EVENT_MASK, &[_]u32{event_mask});
-        }
+    // Use stack allocation for common case (≤32 windows), heap for many
+    var stack_cookies: [constants.Sizes.WINDOW_CAPACITY]xcb.xcb_get_window_attributes_cookie_t = undefined;
+    const cookies = if (len <= constants.Sizes.WINDOW_CAPACITY) 
+        stack_cookies[0..len] 
+    else 
+        try allocator.alloc(xcb.xcb_get_window_attributes_cookie_t, len);
+    defer if (len > constants.Sizes.WINDOW_CAPACITY) allocator.free(cookies);
+    
+    for (0..len) |i| {
+        cookies[i] = xcb.xcb_get_window_attributes(conn, children[i]);
+    }
+    _ = xcb.xcb_flush(conn);
+    
+    for (cookies, 0..) |cookie, i| {
+        const attrs = xcb.xcb_get_window_attributes_reply(conn, cookie, null) orelse continue;
+        defer std.c.free(attrs);
+        if (attrs.*.override_redirect != 0 or attrs.*.map_state != xcb.XCB_MAP_STATE_VIEWABLE) continue;
+        _ = xcb.xcb_change_window_attributes(conn, children[i], xcb.XCB_CW_EVENT_MASK, &[_]u32{event_mask});
     }
     _ = xcb.xcb_flush(conn);
 }
@@ -150,53 +120,38 @@ fn setupExistingWindows(conn: *xcb.xcb_connection_t, root: u32, allocator: std.m
 fn grabKeybindings(wm: *WM) !void {
     _ = xcb.xcb_ungrab_key(wm.conn, xcb.XCB_GRAB_ANY, wm.root, xcb.XCB_MOD_MASK_ANY);
     
-    const max_grabs = wm.config.keybindings.items.len * constants.LOCK_MODIFIERS.len;
-    if (max_grabs == 0) return;
-    
-    const cookies = try wm.allocator.alloc(xcb.xcb_void_cookie_t, max_grabs);
-    defer wm.allocator.free(cookies);
-    
-    var cookie_idx: usize = 0;
-    for (wm.config.keybindings.items) |kb| {
-        const keycode = kb.keycode orelse continue;
-        for (constants.LOCK_MODIFIERS) |lock| {
-            cookies[cookie_idx] = xcb.xcb_grab_key_checked(wm.conn, 0, wm.root,
-                @intCast(kb.modifiers | lock), keycode, xcb.XCB_GRAB_MODE_ASYNC, xcb.XCB_GRAB_MODE_ASYNC);
-            cookie_idx += 1;
-        }
-    }
-    
-    utils.flush(wm.conn);
-    
-    var has_errors = false;
     var failed_count: usize = 0;
     
-    for (cookies[0..cookie_idx]) |cookie| {
-        if (xcb.xcb_request_check(wm.conn, cookie)) |err| {
-            std.c.free(err);
-            has_errors = true;
-            failed_count += 1;
+    for (wm.config.keybindings.items) |kb| {
+        const keycode = kb.keycode orelse continue;
+        var failed_this_kb = false;
+        
+        for (constants.LOCK_MODIFIERS) |lock| {
+            const cookie = xcb.xcb_grab_key_checked(
+                wm.conn, 0, wm.root,
+                @intCast(kb.modifiers | lock), 
+                keycode, 
+                xcb.XCB_GRAB_MODE_ASYNC, 
+                xcb.XCB_GRAB_MODE_ASYNC
+            );
+            
+            if (xcb.xcb_request_check(wm.conn, cookie)) |err| {
+                std.c.free(err);
+                failed_this_kb = true;
+                failed_count += 1;
+            }
+        }
+        
+        if (failed_this_kb) {
+            debug.warn("Failed to grab keycode: {}", .{keycode});
         }
     }
     
-    if (has_errors) {
-        debug.warn("{} grab(s) failed, identifying culprits...", .{failed_count});
-        
-        for (wm.config.keybindings.items) |kb| {
-            const keycode = kb.keycode orelse continue;
-            var failed_this_kb = false;
-            for (constants.LOCK_MODIFIERS) |lock| {
-                if (xcb.xcb_request_check(wm.conn, xcb.xcb_grab_key_checked(wm.conn, 0, wm.root,
-                    @intCast(kb.modifiers | lock), keycode, xcb.XCB_GRAB_MODE_ASYNC, xcb.XCB_GRAB_MODE_ASYNC))) |err| {
-                    std.c.free(err);
-                    failed_this_kb = true;
-                }
-            }
-            if (failed_this_kb) {
-                debug.warn("Failed to grab keycode: {}", .{keycode});
-            }
-        }
+    if (failed_count > 0) {
+        debug.warn("{} grab(s) failed", .{failed_count});
     }
+    
+    _ = xcb.xcb_flush(wm.conn);
 }
 
 fn handleConfigReload(wm: *WM) !void {
@@ -208,7 +163,7 @@ fn handleConfigReload(wm: *WM) !void {
     };
     errdefer new_config.deinit(wm.allocator);
 
-    // FIXED: Validate config before applying it
+    // Validate config before applying it
     if (new_config.tiling.master_count == 0) {
         debug.err("Invalid config: master_count must be > 0, keeping old", .{});
         new_config.deinit(wm.allocator);
@@ -228,8 +183,6 @@ fn handleConfigReload(wm: *WM) !void {
 
     grabKeybindings(wm) catch |err| {
         debug.err("Keybind grab failed: {}, reverting", .{err});
-        // FIXED: Don't try grabbing again - just revert and propagate error
-        // Trying again could fail and leave us with inconsistent state
         new_config.deinit(wm.allocator);
         wm.config = old_config;
         return err;
@@ -238,8 +191,6 @@ fn handleConfigReload(wm: *WM) !void {
     old_config.deinit(wm.allocator);
     try input.rebuildKeybindMap(wm);
     tiling.reloadConfig(wm);
-    
-    // OPTIMIZATION: Update timer state in case clock visibility changed
     clock.updateTimerState(wm);
     
     debug.info("Reload complete", .{});
@@ -269,7 +220,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_allocator;
 
-    // ADDED: Detect DPI and print info
     const dpi_info = try dpi.detect(conn, screen);
     debug.info("DPI Detection - DPI: {d:.1}, Scale: {d:.2}x", .{dpi_info.dpi, dpi_info.scale_factor});
 
@@ -282,12 +232,9 @@ pub fn main() !void {
     config.resolveKeybindings(user_config.keybindings.items, xkb_state);
     config.finalizeConfig(&user_config, screen);
 
-    // OPTIMIZATION: Pre-allocate WM windows hash map
     var wm_windows = std.AutoHashMap(u32, void).init(allocator);
-    // FIXED: Log allocation failure instead of silently ignoring it
-    wm_windows.ensureTotalCapacity(constants.Sizes.DEFAULT_WINDOW_CAPACITY) catch |err| {
+    wm_windows.ensureTotalCapacity(constants.Sizes.WINDOW_CAPACITY) catch |err| {
         debug.warn("Failed to pre-allocate window capacity: {}", .{err});
-        // Continue with default capacity - not critical for functionality
     };
 
     var wm = WM{
@@ -302,11 +249,13 @@ pub fn main() !void {
         .xkb_state = xkb_state,
         .should_reload_config = &should_reload,
         .running = &running,
-        .dpi_info = dpi_info, // ADDED: Store DPI info in WM
+        .dpi_info = dpi_info,
     };
     defer wm.deinit();
 
     try utils.initAtomCache(conn);
+    utils.initWMTakeFocusCache(wm.allocator);
+    defer utils.deinitWMTakeFocusCache();
     
     const fds = try setupPollFds();
     defer posix.close(fds.signal);
@@ -320,12 +269,11 @@ pub fn main() !void {
     };
     defer bar.deinit();
 
-    // OPTIMIZATION: Enable timer only if clock is visible
     clock.updateTimerState(&wm);
 
     try grabKeybindings(&wm);
     try setupExistingWindows(conn, root, allocator);
-    utils.flush(conn);
+    _ = xcb.xcb_flush(conn);
     debug.info("Started", .{});
 
     const x_fd = xcb.xcb_get_file_descriptor(conn);
@@ -336,9 +284,6 @@ pub fn main() !void {
         .{ .fd = fds.timer, .events = posix.POLL.IN, .revents = 0 },
     };
     
-    // IMPROVED: Main loop without event counter management
-    // Focus control is now handled through intelligent filtering in EnterNotify
-    // FIXED: Use seq_cst for consistency with signal handler stores
     while (running.load(.seq_cst)) {
         _ = posix.poll(&pollfds, -1) catch |err| {
             if (err == error.Interrupted) continue;
@@ -348,29 +293,22 @@ pub fn main() !void {
         
         // X11 events
         if (pollfds[0].revents & posix.POLL.IN != 0) {
-            // Drain all available events
             while (xcb.xcb_poll_for_event(conn)) |event| {
                 defer std.c.free(event);
                 events.dispatch(@as(*u8, @ptrCast(event)).*, event, &wm);
-                
-                // REMOVED: Event counter increments
-                // The new approach uses pointer tracking and context-aware suppression
-                // No need to count events anymore!
             }
             
-            // Post-processing
             tiling.retileIfDirty(&wm);
             bar.updateIfDirty(&wm) catch |err| {
                 debug.err("Failed to update bar: {}", .{err});
             };
-            utils.flush(conn);
+            _ = xcb.xcb_flush(conn);
         }
         
         // Signals
         if (pollfds[1].revents & posix.POLL.IN != 0) {
             handleSignalFd(fds.signal, &should_reload, &running);
             
-            // FIXED: Use seq_cst for consistency with signal handler stores
             if (should_reload.swap(false, .seq_cst)) {
                 handleConfigReload(&wm) catch |err| {
                     debug.err("Reload failed: {}", .{err});

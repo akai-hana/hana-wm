@@ -18,6 +18,7 @@
 //! - `handleConfigureRequest()`: Handle window resize requests
 //! - `handleEnterNotify()`: Handle mouse enter events
 //! - `handleButtonPress()`: Handle mouse clicks
+//! - `handleUnmapNotify()`: Handle window unmap events
 //! - `handleDestroyNotify()`: Handle window destruction
 //!
 //! ## Key Features:
@@ -187,6 +188,8 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
         return;
     };
     _ = xcb.xcb_map_window(wm.conn, win);
+    // FIXED 2.1: Cache WM_TAKE_FOCUS support once per window
+    utils.cacheWMTakeFocus(wm.conn, win);
     setupTiling(wm, win, is_current_workspace);
     utils.flush(wm.conn);
     
@@ -262,6 +265,57 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) vo
     utils.flush(wm.conn);
 }
 
+pub fn handleUnmapNotify(event: *const xcb.xcb_unmap_notify_event_t, wm: *WM) void {
+    const win = event.window;
+
+    if (bar.isBarWindow(win)) return;
+    
+    // Check if this is a window we're managing
+    if (!wm.hasWindow(win)) return;
+
+    // Clean up fullscreen state if window was fullscreen
+    if (wm.fullscreen.isFullscreen(win)) {
+        cleanupFullscreenWindow(wm, win);
+        bar.setBarState(wm, .show_fullscreen);
+    }
+
+    const was_focused = (wm.focused_window == win);
+
+    if (wm.config.tiling.enabled) {
+        tiling.removeWindow(wm, win);
+    }
+    
+    // OPTIMIZATION: Invalidate cached geometry when window is unmapped
+    tiling.invalidateWindowGeometry(win);
+    // FIXED 2.1: Remove from WM_TAKE_FOCUS cache
+    utils.uncacheWMTakeFocus(win);
+
+    workspaces.removeWindow(win);
+    wm.removeWindow(win);
+
+    if (was_focused) {
+        // Retile FIRST to position windows correctly
+        if (wm.config.tiling.enabled) {
+            tiling.retileIfDirty(wm);
+            utils.flush(wm.conn);
+        }
+        
+        focus.clearFocus(wm);
+        
+        // IMPROVED: Explicitly enable focus-follows-mouse after window unmap
+        wm.suppress_focus_reason = .none;
+        
+        // PHASE 2: Use cached pointer instead of querying again
+        _ = getCachedPointer(wm);
+        
+        // Now focus window under pointer
+        focusWindowUnderPointer(wm);
+    }
+
+    bar.markDirty();
+    utils.flush(wm.conn);
+}
+
 pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM) void {
     const win = event.window;
 
@@ -281,6 +335,8 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM
     
     // OPTIMIZATION: Invalidate cached geometry when window is destroyed
     tiling.invalidateWindowGeometry(win);
+    // FIXED 2.1: Remove from WM_TAKE_FOCUS cache
+    utils.uncacheWMTakeFocus(win);
 
     workspaces.removeWindow(win);
     wm.removeWindow(win);

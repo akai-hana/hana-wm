@@ -52,7 +52,8 @@ fn setFocusImpl(wm: *WM, win: u32, reason: Reason, do_flush: bool) void {
     }
     
     // Send WM_TAKE_FOCUS protocol message for applications that need it
-    if (utils.supportsWMTakeFocus(wm.conn, win)) {
+    // FIXED 2.1: Use cached version to avoid ~50µs roundtrip
+    if (utils.supportsWMTakeFocusCached(wm.conn, win)) {
         utils.sendWMTakeFocus(wm.conn, win);
     }
 

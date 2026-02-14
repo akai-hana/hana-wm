@@ -15,19 +15,14 @@ const workspaces = @import("workspaces");
 
 const EventHandler = *const fn (event: *anyopaque, wm: *defs.WM) void;
 
-// FIX: Corrected button press handler to avoid double focus setting
-// Previously called both window.handleButtonPress AND input.handleButtonPress,
-// which would set focus to different windows (event.event vs event.child)
-// causing Firefox to lose focus when clicked
+// Unified button press handler for click-to-focus and drag operations
 fn handleButtonPressCombined(event: *anyopaque, wm: *defs.WM) void {
     const ev: *const xcb.xcb_button_press_event_t = @ptrCast(@alignCast(event));
     
-    // FIX: Only call window.handleButtonPress for click-to-focus
-    // This handles the button grab/ungrab and focus correctly
+    // Handle click-to-focus
     window.handleButtonPress(ev, wm);
     
-    // Now check if this is a Super+Button drag operation
-    // Only handle drag if event.child exists (not clicking on root/bar)
+    // Check for Super+Button drag operation
     if (ev.child != 0) {
         const has_super = (ev.state & defs.MOD_SUPER) != 0;
         if (has_super and (ev.detail == 1 or ev.detail == 3)) {
@@ -36,9 +31,7 @@ fn handleButtonPressCombined(event: *anyopaque, wm: *defs.WM) void {
     }
 }
 
-// OPTIMIZATION: Compile-time event dispatch table with minimal size
-// Size is based on highest X11 event type we handle (XCB_PROPERTY_NOTIFY = 28)
-// We use 36 to safely cover all event types with some margin
+// Compile-time event dispatch table
 const dispatch_table = blk: {
     var table = [_]?EventHandler{null} ** constants.Sizes.EVENT_DISPATCH_TABLE;
     table[xcb.XCB_KEY_PRESS] = @ptrCast(&input.handleKeyPress);
@@ -48,13 +41,13 @@ const dispatch_table = blk: {
     table[xcb.XCB_ENTER_NOTIFY] = @ptrCast(&window.handleEnterNotify);
     table[xcb.XCB_MAP_REQUEST] = @ptrCast(&window.handleMapRequest);
     table[xcb.XCB_CONFIGURE_REQUEST] = @ptrCast(&window.handleConfigureRequest);
+    table[xcb.XCB_UNMAP_NOTIFY] = @ptrCast(&window.handleUnmapNotify);
     table[xcb.XCB_DESTROY_NOTIFY] = @ptrCast(&window.handleDestroyNotify);
     table[xcb.XCB_EXPOSE] = @ptrCast(&bar.handleExpose);
     table[xcb.XCB_PROPERTY_NOTIFY] = @ptrCast(&bar.handlePropertyNotify);
     break :blk table;
 };
 
-// OPTIMIZATION: Inline dispatch for minimal overhead
 pub inline fn dispatch(event_type: u8, event: *anyopaque, wm: *defs.WM) void {
     const idx = event_type & 0x7f;
     if (idx < dispatch_table.len) {

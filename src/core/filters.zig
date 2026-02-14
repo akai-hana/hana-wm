@@ -2,12 +2,6 @@
 //!
 //! Provides unified filtering and validation functions for windows.
 //! Eliminates duplicate validation logic across window.zig and tiling.zig.
-//!
-//! ## Exports:
-//! - `isSystemWindow()`: Check if window is root, null, or bar
-//! - `isValidManagedWindow()`: Check if window is tracked by WM
-//! - `isOnCurrentWorkspace()`: Check if window is on current workspace
-//! - `collectCurrentWorkspaceWindows()`: Filter windows for current workspace
 
 const std = @import("std");
 const defs = @import("defs");
@@ -52,10 +46,4 @@ pub fn collectCurrentWorkspaceWindows(
         }
     }
     return count;
-}
-
-/// Check if a window is valid for focus
-/// This includes the workspace check and ensures it's not a system window
-pub inline fn canReceiveFocus(wm: *defs.WM, win: u32) bool {
-    return isOnCurrentWorkspace(wm, win);
 }

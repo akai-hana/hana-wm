@@ -41,19 +41,14 @@ pub const LOCK_MODIFIERS = [_]u16{
 };
 
 /// Cursor constants for X11
-pub const Cursors = struct {
-    pub const LEFT_PTR = 68;
-    pub const LEFT_PTR_MASK = 69;
-};
+pub const CURSOR_LEFT_PTR = 68;
+pub const CURSOR_LEFT_PTR_MASK = 69;
 
 /// Size constants
 pub const Sizes = struct {
     /// Dispatch table size (covers all X11 event types we handle)
     pub const EVENT_DISPATCH_TABLE = 36;
     
-    /// Default pre-allocation capacity for window tracking
-    pub const DEFAULT_WINDOW_CAPACITY = 32;
-    
-    /// Typical number of windows at startup for stack allocation optimization
-    pub const TYPICAL_STARTUP_WINDOWS = 32;
+    /// Default capacity for window tracking and stack allocation
+    pub const WINDOW_CAPACITY = 32;
 };

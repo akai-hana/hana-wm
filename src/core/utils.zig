@@ -2,48 +2,27 @@
 //!
 //! Provides common utility functions for X11 operations, geometry manipulation,
 //! and window property queries.
-//!
-//! ## Dependencies:
-//! - `defs`: Core WM types
-//! - `xcb`: X11 bindings
-//! - `debug`: Logging facilities
-//!
-//! ## Exports:
-//! - `flush()`: Flush XCB connection
-//! - `configureWindow()`: Set window geometry
-//! - `getGeometry()`: Query window geometry
-//! - `getAtom()`: Intern X11 atoms
-//! - `getWindowProperty()`: Query window properties
-//! - `normalizeModifiers()`: Normalize keyboard modifiers
-//! - `BatchOps`: Batched XCB operations for performance
-//! - `Rect`: Rectangle geometry struct
-//
-// Core utilities (OPTIMIZED)
 
 const std = @import("std");
 const defs = @import("defs");
 const xcb = defs.xcb;
 const debug = @import("debug");
 
-// Constants for X11 property queries
 const MAX_PROPERTY_LENGTH: u32 = 256;
+
+/// Maximum length to read from XCB property values (in bytes)
+pub const XCB_PROPERTY_MAX_VALUE_LENGTH: usize = 1024;
+
+/// Flag for xcb_get_property - do not delete the property after reading
+pub const XCB_PROPERTY_NO_DELETE: u8 = 0;
 
 pub inline fn flush(conn: *xcb.xcb_connection_t) void {
     _ = xcb.xcb_flush(conn);
 }
 
-pub inline fn setBorder(conn: *xcb.xcb_connection_t, win: u32, color: u32) void {
-    _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
-}
-
-pub inline fn setBorderWidth(conn: *xcb.xcb_connection_t, win: u32, width: u16) void {
-    _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{width});
-}
-
-// Note: This requires 2 XCB calls as border width and color use different APIs
 pub inline fn configureBorder(conn: *xcb.xcb_connection_t, win: u32, width: u16, color: u32) void {
-    setBorderWidth(conn, win, width);
-    setBorder(conn, win, color);
+    _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{width});
+    _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
 }
 
 pub const Rect = struct {
@@ -70,8 +49,6 @@ pub const Margins = struct {
     }
 };
 
-/// Sets the geometry (position and size) of a window.
-/// Note: Only configures window geometry, not other properties like border or attributes.
 pub fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect) void {
     _ = xcb.xcb_configure_window(
         conn,
@@ -79,7 +56,6 @@ pub fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect) void {
         xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
             xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT,
         &[_]u32{
-            // XCB expects unsigned values but uses bitcast for signed coordinates
             @bitCast(@as(i32, rect.x)),
             @bitCast(@as(i32, rect.y)),
             rect.width,
@@ -98,13 +74,7 @@ pub inline fn normalizeModifiers(state: u16) u16 {
     return state & defs.MOD_MASK_RELEVANT;
 }
 
-// ============================================================================
-// PHASE 2 IMPROVEMENT: Batched XCB Operations
-// ============================================================================
-
-/// Batched XCB operations for improved performance.
-/// Allows batching multiple XCB calls and checking errors in one go.
-/// This significantly reduces roundtrips and improves retiling performance by 20-30%.
+/// Batched XCB operations for improved performance
 pub const BatchOps = struct {
     cookies: std.ArrayListUnmanaged(xcb.xcb_void_cookie_t),
     allocator: std.mem.Allocator,
@@ -120,64 +90,8 @@ pub const BatchOps = struct {
         self.cookies.deinit(self.allocator);
     }
     
-    /// Configure borders for multiple windows in a batch
-    pub fn configureBorderBatch(
-        self: *BatchOps,
-        conn: *xcb.xcb_connection_t,
-        windows: []const u32,
-        width: u16,
-        color: u32,
-    ) !void {
-        try self.cookies.ensureTotalCapacity(self.allocator, self.cookies.items.len + windows.len * 2);
-        
-        for (windows) |win| {
-            self.cookies.appendAssumeCapacity(
-                xcb.xcb_configure_window_checked(
-                    conn, win, 
-                    xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, 
-                    &[_]u32{width}
-                )
-            );
-            self.cookies.appendAssumeCapacity(
-                xcb.xcb_change_window_attributes_checked(
-                    conn, win, 
-                    xcb.XCB_CW_BORDER_PIXEL, 
-                    &[_]u32{color}
-                )
-            );
-        }
-    }
-    
-    /// Configure geometry for multiple windows in a batch
-    pub fn configureWindowBatch(
-        self: *BatchOps,
-        conn: *xcb.xcb_connection_t,
-        windows: []const u32,
-        rects: []const Rect,
-    ) !void {
-        std.debug.assert(windows.len == rects.len);
-        try self.cookies.ensureTotalCapacity(self.allocator, self.cookies.items.len + windows.len);
-        
-        for (windows, rects) |win, rect| {
-            self.cookies.appendAssumeCapacity(
-                xcb.xcb_configure_window_checked(
-                    conn,
-                    win,
-                    xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
-                        xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT,
-                    &[_]u32{
-                        @bitCast(@as(i32, rect.x)),
-                        @bitCast(@as(i32, rect.y)),
-                        rect.width,
-                        rect.height,
-                    },
-                )
-            );
-        }
-    }
-    
-    /// Add a single configure window operation to the batch
-    pub fn addConfigureWindow(
+    /// Configure window geometry (position and size)
+    pub fn configureWindow(
         self: *BatchOps,
         conn: *xcb.xcb_connection_t,
         win: u32,
@@ -185,22 +99,19 @@ pub const BatchOps = struct {
     ) !void {
         try self.cookies.append(self.allocator,
             xcb.xcb_configure_window_checked(
-                conn,
-                win,
+                conn, win,
                 xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
-                    xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT,
+                xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT,
                 &[_]u32{
                     @bitCast(@as(i32, rect.x)),
                     @bitCast(@as(i32, rect.y)),
                     rect.width,
                     rect.height,
-                },
-            )
-        );
+                }));
     }
     
-    /// Add a border configuration to the batch
-    pub fn addConfigureBorder(
+    /// Configure border width and color
+    pub fn configureBorder(
         self: *BatchOps,
         conn: *xcb.xcb_connection_t,
         win: u32,
@@ -213,23 +124,17 @@ pub const BatchOps = struct {
             xcb.xcb_configure_window_checked(
                 conn, win, 
                 xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, 
-                &[_]u32{width}
-            )
-        );
+                &[_]u32{width}));
+        
         self.cookies.appendAssumeCapacity(
             xcb.xcb_change_window_attributes_checked(
                 conn, win, 
                 xcb.XCB_CW_BORDER_PIXEL, 
-                &[_]u32{color}
-            )
-        );
+                &[_]u32{color}));
     }
     
     /// Flush all batched operations and check for errors
-    /// Returns true if all operations succeeded, false if any errors occurred
-    pub fn flushAndCheck(self: *BatchOps, conn: *xcb.xcb_connection_t) bool {
-        _ = xcb.xcb_flush(conn);
-        
+    pub fn flush(self: *BatchOps, conn: *xcb.xcb_connection_t) bool {
         var had_errors = false;
         for (self.cookies.items) |cookie| {
             if (xcb.xcb_request_check(conn, cookie)) |err| {
@@ -237,7 +142,6 @@ pub const BatchOps = struct {
                 had_errors = true;
             }
         }
-        
         self.cookies.clearRetainingCapacity();
         return !had_errors;
     }
@@ -247,8 +151,6 @@ pub const BatchOps = struct {
         self.cookies.clearRetainingCapacity();
     }
 };
-
-// ============================================================================
 
 const AtomCache = struct {
     wm_protocols: u32,
@@ -283,21 +185,85 @@ pub fn getAtom(conn: *xcb.xcb_connection_t, name: []const u8) !u32 {
     return reply.*.atom;
 }
 
-pub fn getAtomCached(comptime name: []const u8) !u32 {
+pub fn getAtomCached(name: []const u8) !u32 {
     const cache = atom_cache orelse return error.AtomCacheNotInitialized;
-    return switch (comptime std.meta.stringToEnum(enum {
-        WM_PROTOCOLS,
-        WM_DELETE_WINDOW,
-        WM_TAKE_FOCUS,
-        _NET_WM_NAME,
-        UTF8_STRING,
-    }, name) orelse @compileError("Atom not in cache: " ++ name)) {
-        .WM_PROTOCOLS => cache.wm_protocols,
-        .WM_DELETE_WINDOW => cache.wm_delete,
-        .WM_TAKE_FOCUS => cache.wm_take_focus,
-        ._NET_WM_NAME => cache.net_wm_name,
-        .UTF8_STRING => cache.utf8_string,
-    };
+    
+    if (std.mem.eql(u8, name, "WM_PROTOCOLS")) return cache.wm_protocols;
+    if (std.mem.eql(u8, name, "WM_DELETE_WINDOW")) return cache.wm_delete;
+    if (std.mem.eql(u8, name, "WM_TAKE_FOCUS")) return cache.wm_take_focus;
+    if (std.mem.eql(u8, name, "_NET_WM_NAME")) return cache.net_wm_name;
+    if (std.mem.eql(u8, name, "UTF8_STRING")) return cache.utf8_string;
+    
+    return error.AtomNotInCache;
+}
+
+/// Fetch an XCB property and write its value to an ArrayList buffer
+pub fn fetchPropertyToBuffer(
+    conn: *xcb.xcb_connection_t,
+    window: u32,
+    atom: u32,
+    atom_type: u32,
+    buffer: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+) ![]const u8 {
+    const reply = xcb.xcb_get_property_reply(conn,
+        xcb.xcb_get_property(conn, XCB_PROPERTY_NO_DELETE, window, atom, atom_type, 0, MAX_PROPERTY_LENGTH),
+        null
+    ) orelse return "";
+    defer std.c.free(reply);
+    
+    if (reply.*.format != 8 or reply.*.value_len == 0) return "";
+    
+    buffer.clearRetainingCapacity();
+    const actual_len = @min(@as(usize, @intCast(reply.*.value_len)), XCB_PROPERTY_MAX_VALUE_LENGTH);
+    const value_ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
+    try buffer.appendSlice(allocator, value_ptr[0..actual_len]);
+    
+    return buffer.items;
+}
+
+// WM_TAKE_FOCUS caching for ~50µs speedup per focus
+var wm_take_focus_cache: ?std.AutoHashMap(u32, bool) = null;
+
+pub fn initWMTakeFocusCache(allocator: std.mem.Allocator) void {
+    wm_take_focus_cache = std.AutoHashMap(u32, bool).init(allocator);
+}
+
+pub fn deinitWMTakeFocusCache() void {
+    if (wm_take_focus_cache) |*cache| {
+        cache.deinit();
+        wm_take_focus_cache = null;
+    }
+}
+
+/// Cache WM_TAKE_FOCUS support for a window (call on MapRequest)
+pub fn cacheWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32) void {
+    if (wm_take_focus_cache) |*cache| {
+        const supports = queryWMTakeFocusSupport(conn, win);
+        cache.put(win, supports) catch {};
+    }
+}
+
+/// Remove cached WM_TAKE_FOCUS support (call on DestroyNotify)
+pub fn uncacheWMTakeFocus(win: u32) void {
+    if (wm_take_focus_cache) |*cache| {
+        _ = cache.remove(win);
+    }
+}
+
+/// Check if window supports WM_TAKE_FOCUS (cached version for performance)
+pub fn supportsWMTakeFocusCached(conn: *xcb.xcb_connection_t, win: u32) bool {
+    if (wm_take_focus_cache) |*cache| {
+        if (cache.get(win)) |cached| return cached;
+    }
+    
+    const supports = queryWMTakeFocusSupport(conn, win);
+    
+    if (wm_take_focus_cache) |*cache| {
+        cache.put(win, supports) catch {};
+    }
+    
+    return supports;
 }
 
 pub const WMClass = struct {
@@ -311,39 +277,46 @@ pub const WMClass = struct {
 };
 
 pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allocator) ?WMClass {
+    const class_atom = getAtom(conn, "WM_CLASS") catch return null;
+    
     const reply = xcb.xcb_get_property_reply(conn,
-        xcb.xcb_get_property(conn, 0, win, xcb.XCB_ATOM_WM_CLASS, xcb.XCB_ATOM_STRING, 0, MAX_PROPERTY_LENGTH), null) orelse return null;
+        xcb.xcb_get_property(conn, 0, win, class_atom, xcb.XCB_ATOM_STRING, 0, MAX_PROPERTY_LENGTH), null) orelse return null;
     defer std.c.free(reply);
     
     if (reply.*.format != 8 or reply.*.value_len == 0) return null;
-
+    
     const data: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
     const len: usize = @intCast(reply.*.value_len);
-
-    const instance_end = std.mem.indexOfScalar(u8, data[0..len], 0) orelse return null;
-    const instance = allocator.dupe(u8, data[0..instance_end]) catch return null;
-
-    const class_start = instance_end + 1;
+    
+    var null_idx: ?usize = null;
+    for (data[0..len], 0..) |byte, i| {
+        if (byte == 0) {
+            null_idx = i;
+            break;
+        }
+    }
+    
+    if (null_idx == null) return null;
+    const sep = null_idx.?;
+    
+    const instance = allocator.dupe(u8, data[0..sep]) catch return null;
+    errdefer allocator.free(instance);
+    
+    const class_start = sep + 1;
     if (class_start >= len) {
         allocator.free(instance);
         return null;
     }
-
-    const class_end = if (std.mem.indexOfScalar(u8, data[class_start..len], 0)) |idx|
-        class_start + idx
-    else
-        len;
-
-    const class = allocator.dupe(u8, data[class_start..class_end]) catch {
+    
+    const class = allocator.dupe(u8, data[class_start..len]) catch {
         allocator.free(instance);
         return null;
     };
-
-    return WMClass{ .instance = instance, .class = class };
+    
+    return .{ .instance = instance, .class = class };
 }
 
-// Check if window supports WM_TAKE_FOCUS protocol
-pub fn supportsWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32) bool {
+fn queryWMTakeFocusSupport(conn: *xcb.xcb_connection_t, win: u32) bool {
     const protocols_atom = getAtomCached("WM_PROTOCOLS") catch return false;
     
     const reply = xcb.xcb_get_property_reply(conn,
@@ -363,7 +336,6 @@ pub fn supportsWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32) bool {
     return false;
 }
 
-// Send WM_TAKE_FOCUS client message to window
 pub fn sendWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32) void {
     const protocols_atom = getAtomCached("WM_PROTOCOLS") catch return;
     const take_focus_atom = getAtomCached("WM_TAKE_FOCUS") catch return;

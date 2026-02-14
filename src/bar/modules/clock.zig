@@ -10,6 +10,9 @@ const debug   = @import("debug");
 
 const c = @cImport(@cInclude("time.h"));
 
+// Time formatting constant
+const TIME_FORMAT = "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}";
+
 // Timer state ─────────────────────────────────────────────────────────────
 
 // Cached clock formatting to avoid redundant formatting
@@ -27,8 +30,7 @@ pub fn setTimerFd(fd: i32) void {
 }
 
 /// Check if clock should be running based on bar state
-fn shouldClockRun(wm: *defs.WM) bool {
-    _ = wm;
+fn shouldClockRun() bool {
     // Don't run timer if bar is hidden (fullscreen)
     if (!bar.isVisible()) return false;
 
@@ -36,48 +38,26 @@ fn shouldClockRun(wm: *defs.WM) bool {
     return bar.hasClockSegment();
 }
 
-/// Enable the timer (starts 1Hz ticks)
-fn enableTimer() void {
-    if (timer_enabled) return;
-
+/// Set timer state (enable or disable)
+fn setTimerState(enable: bool) void {
+    if (enable == timer_enabled) return;
+    
+    const interval_sec: i64 = if (enable) 1 else 0;
     const spec = std.os.linux.itimerspec{
-        .it_interval = .{ .sec = 1, .nsec = 0 },
-        .it_value    = .{ .sec = 1, .nsec = 0 },
+        .it_interval = .{ .sec = interval_sec, .nsec = 0 },
+        .it_value    = .{ .sec = interval_sec, .nsec = 0 },
     };
-
+    
     if (std.os.linux.timerfd_settime(@intCast(global_timer_fd), .{}, &spec, null) >= 0) {
-        timer_enabled = true;
-        debug.info("Clock timer enabled", .{});
-    }
-}
-
-/// Disable the timer (stops ticks, reduces idle CPU)
-fn disableTimer() void {
-    if (!timer_enabled) {
-        debug.info("Timer is already disabled...", .{});
-        return;
-    }
-
-    const spec = std.os.linux.itimerspec{
-        .it_interval = .{ .sec = 0, .nsec = 0 },
-        .it_value    = .{ .sec = 0, .nsec = 0 },
-    };
-
-    if (std.os.linux.timerfd_settime(@intCast(global_timer_fd), .{}, &spec, null) >= 0) {
-        timer_enabled = false;
-        debug.info("Clock timer disabled", .{});
+        timer_enabled = enable;
+        debug.info("Clock timer {s}", .{if (enable) "enabled" else "disabled"});
     }
 }
 
 /// Update timer state based on current WM configuration.
 /// Called when bar visibility changes or config is reloaded.
-pub fn updateTimerState(wm: *defs.WM) void {
-    const should_run = shouldClockRun(wm);
-    if (should_run and !timer_enabled) {
-        enableTimer();
-    } else if (!should_run and timer_enabled) {
-        disableTimer();
-    }
+pub fn updateTimerState(_: *defs.WM) void {
+    setTimerState(shouldClockRun());
 }
 
 // Drawing
@@ -94,11 +74,7 @@ pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start
         break :blk str;
     };
     
-    const scaled_padding = config.scaledPadding();
-    const width = dc.textWidth(time_str) + scaled_padding * 2;
-    dc.fillRect(start_x, 0, width, height, config.bg);
-    try dc.drawText(start_x + scaled_padding, dc.baselineY(height), time_str, config.fg);
-    return start_x + width;
+    return dc.drawSegment(start_x, height, time_str, config.scaledPadding(), config.bg, config.fg);
 }
 
 fn formatTime(buf: []u8) ![]const u8 {
@@ -108,7 +84,7 @@ fn formatTime(buf: []u8) ![]const u8 {
     var raw_sec: c.time_t = @intCast(ts.sec);
     const local_ts = c.localtime(&raw_sec) orelse return formatUtc(buf, ts.sec);
 
-    return try std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{
+    return try std.fmt.bufPrint(buf, TIME_FORMAT, .{
         @as(u32, @intCast(local_ts.*.tm_year + 1900)),
         @as(u32, @intCast(local_ts.*.tm_mon + 1)),
         @as(u32, @intCast(local_ts.*.tm_mday)),
@@ -129,7 +105,7 @@ fn formatUtc(buf: []u8, epoch_sec: i64) ![]const u8 {
     const min: u32 = @intCast(@divFloor(@mod(day_sec, std.time.s_per_hour), std.time.s_per_min));
     const sec: u32 = @intCast(@mod(day_sec, std.time.s_per_min));
 
-    return try std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{
+    return try std.fmt.bufPrint(buf, TIME_FORMAT, .{
         year_day.year, month_day.month.numeric(), month_day.day_index + 1, hour, min, sec,
     });
 }

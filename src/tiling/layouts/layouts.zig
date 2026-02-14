@@ -13,21 +13,13 @@ const State = tiling.State;
 
 /// Direct configure operation - no batch overhead
 /// XCB already buffers internally, so we just call directly
+/// FIXED 3.3: Delegates to utils.configureWindow to eliminate duplication
 pub inline fn configure(
     conn: *xcb.xcb_connection_t,
     win: u32,
     rect: utils.Rect
 ) void {
-    const values = [_]u32{
-        @bitCast(@as(i32, rect.x)),
-        @bitCast(@as(i32, rect.y)),
-        rect.width,
-        rect.height,
-    };
-    _ = xcb.xcb_configure_window(conn, win,
-        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
-        xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT,
-        &values);
+    utils.configureWindow(conn, win, rect);
 }
 
 /// Unified error-handling wrapper for configure operations
