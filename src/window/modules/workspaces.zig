@@ -8,7 +8,7 @@ const utils = @import("utils");
 const focus = @import("focus");
 const bar = @import("bar");
 const tiling = @import("tiling");
-const tracking = @import("tracking").tracking;
+const tracking = @import("tracking").Tracking;
 const createModule = @import("module").module;
 const debug = @import("debug");
 
@@ -98,7 +98,7 @@ pub fn init(wm: *WM) void {
 }
 
 pub fn deinit(wm: *WM) void {
-    if (StateManager.get(true)) |s| {
+    if (StateManager.get()) |s| {
         for (s.workspaces) |*ws| {
             ws.deinit();
             wm.allocator.free(ws.name);
@@ -109,22 +109,10 @@ pub fn deinit(wm: *WM) void {
     StateManager.deinit(wm.allocator);
 }
 
-pub fn addWindowToCurrentWorkspace(_: *WM, win: u32) void {
-    const s = StateManager.get(true) orelse return;
-    if (@import("bar").isBarWindow(win)) return;
-
-    const ws = &s.workspaces[s.current];
-    ws.add(win) catch |err| {
-        debug.err("Failed to add window {x}: {}", .{ win, err });
-        return;
-    };
-    s.window_to_workspace.put(win, s.current) catch |err| {
-        debug.warn("Failed to update window map for {x}: {}", .{ win, err });
-    };
-}
+// FIXED 3.12: Removed dead addWindowToCurrentWorkspace function (no callers)
 
 pub fn removeWindow(win: u32) void {
-    const s = StateManager.get(true) orelse return;
+    const s = StateManager.get() orelse return;
     if (s.window_to_workspace.fetchRemove(win)) |entry| {
         const ws_idx = entry.value;
         if (ws_idx < s.workspaces.len) {
@@ -134,7 +122,7 @@ pub fn removeWindow(win: u32) void {
 }
 
 pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) void {
-    const s = StateManager.get(true) orelse return;
+    const s = StateManager.get() orelse return;
 
     if (target_ws >= s.workspaces.len) {
         debug.err("Invalid target workspace: {}", .{target_ws});
@@ -191,7 +179,7 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) void {
 // OPTIMIZATION: Removed markTilingDirty() - inlined to reduce function call overhead
 
 pub fn switchTo(wm: *WM, ws_id: u8) void {
-    const s = StateManager.get(true) orelse return;
+    const s = StateManager.get() orelse return;
     if (ws_id >= s.workspaces.len or ws_id == s.current) return;
     const old_ws = s.current;
     s.current = ws_id;
@@ -225,7 +213,7 @@ inline fn configureFullscreen(wm: *WM, info: defs.FullscreenInfo) void {
 
 // DWM-STYLE: Atomic workspace switching with server grab
 fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
-    const s = StateManager.get(true).?; // Must exist if we got here
+    const s = StateManager.get().?; // Must exist if we got here
     const old_workspace = &s.workspaces[old_ws];
     const new_workspace = &s.workspaces[new_ws];
 
@@ -260,22 +248,32 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
             // Tiling enabled - let tiling system position windows
             tiling.retileCurrentWorkspace(wm, false);
         } else {
-            // Tiling disabled - manually position windows to visible locations
+            // FIXED 2.6: Pre-batch geometry cookies BEFORE positioning
+            // Prevents blocking geometry queries during server grab
+            const GeometryInfo = struct { cookie: xcb.xcb_get_geometry_cookie_t, win: u32 };
+            var geom_infos = std.ArrayList(GeometryInfo).empty;
+            defer geom_infos.deinit(wm.allocator);
+            
+            // Send all geometry requests first (non-blocking)
             for (new_workspace.windows.items()) |win| {
-                const geom_cookie = xcb.xcb_get_geometry(wm.conn, win);
-                const geom_reply = xcb.xcb_get_geometry_reply(wm.conn, geom_cookie, null);
-                
+                const cookie = xcb.xcb_get_geometry(wm.conn, win);
+                geom_infos.append(wm.allocator, .{ .cookie = cookie, .win = win }) catch continue;
+            }
+            
+            // Tiling disabled - manually position windows to visible locations
+            const x: i16 = @divTrunc(@as(i16, @intCast(wm.screen.width_in_pixels)), 4);
+            const y: i16 = @divTrunc(@as(i16, @intCast(wm.screen.height_in_pixels)), 4);
+            
+            for (geom_infos.items) |info| {
+                const geom_reply = xcb.xcb_get_geometry_reply(wm.conn, info.cookie, null);
                 if (geom_reply) |reply| {
                     defer std.c.free(reply);
-                    
-                    const x: i16 = @divTrunc(@as(i16, @intCast(wm.screen.width_in_pixels)), 4);
-                    const y: i16 = @divTrunc(@as(i16, @intCast(wm.screen.height_in_pixels)), 4);
                     
                     const values = [_]u32{
                         @bitCast(@as(i32, x)),
                         @bitCast(@as(i32, y)),
                     };
-                    _ = xcb.xcb_configure_window(wm.conn, win,
+                    _ = xcb.xcb_configure_window(wm.conn, info.win,
                         xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y, &values);
                 }
             }
@@ -301,25 +299,27 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
 }
 
 pub inline fn getCurrentWindowsView() ?[]const u32 {
-    const s = StateManager.get(true) orelse return null;
+    const s = StateManager.get() orelse return null;
     return s.workspaces[s.current].windows.items();
 }
 
 pub inline fn getCurrentWorkspace() ?u8 {
-    const s = StateManager.get(true) orelse return null;
+    const s = StateManager.get() orelse return null;
     return s.current;
 }
 
 pub inline fn isOnCurrentWorkspace(win: u32) bool {
-    const s = StateManager.get(true) orelse return false;
-    return s.workspaces[s.current].contains(win);
+    const s = StateManager.get() orelse return false;
+    // FIXED 2.13: O(1) hashmap lookup instead of O(n) linear scan
+    const ws_idx = s.window_to_workspace.get(win) orelse return false;
+    return ws_idx == s.current;
 }
 
 pub inline fn getState() ?*State {
-    return StateManager.get(true);
+    return StateManager.get();
 }
 
 pub inline fn getCurrentWorkspaceObject() ?*Workspace {
-    const s = StateManager.get(true) orelse return null;
+    const s = StateManager.get() orelse return null;
     return &s.workspaces[s.current];
 }

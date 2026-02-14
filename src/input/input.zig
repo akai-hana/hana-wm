@@ -143,7 +143,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) vo
         drag.startDrag(wm, event.child, event.detail, event.root_x, event.root_y);
     } else {
         focus.setFocus(wm, event.child, .mouse_click);
-        tiling.updateWindowFocus(wm, null, event.child);
+        // FIXED: Removed redundant updateWindowFocus - setFocus already calls updateWindowFocusFast
     }
 }
 

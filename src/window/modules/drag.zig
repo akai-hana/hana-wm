@@ -31,8 +31,11 @@ pub fn startDrag(wm: *WM, win: u32, button: u8, x: i16, y: i16) void {
 
     focus.setFocus(wm, win, .user_command);
 
+    // FIXED: Check State.enabled, not config.enabled (runtime toggle desync fix)
     // Remove window from tiling if it's tiled
-    if (wm.config.tiling.enabled and tiling.isWindowTiled(win)) {
+    const tiling_state = tiling.getState();
+    const tiling_enabled = if (tiling_state) |ts| ts.enabled else false;
+    if (tiling_enabled and tiling.isWindowTiled(win)) {
         tiling.removeWindow(wm, win);
     }
 }
@@ -71,7 +74,4 @@ pub inline fn isDragging(wm: *WM) bool {
     return wm.drag_state.active;
 }
 
-pub inline fn flushPendingUpdate(wm: *WM) void {
-    // No-op: throttling removed, no pending updates to flush
-    _ = wm;
-}
+// FIXED 3.2: Removed flushPendingUpdate - was a no-op with no callers

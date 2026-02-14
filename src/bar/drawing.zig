@@ -8,6 +8,7 @@ const std = @import("std");
 const debug = @import("debug");
 const defs = @import("defs");
 const c = @import("c_bindings");
+const cache_module = @import("cache");  // FIXED 2.14: Import for RGBColor type (renamed to avoid shadowing)
 
 // ─── Visual lookup (moved here from bar.zig) ─────────────────────────────────
 
@@ -35,15 +36,35 @@ pub fn findVisualByDepth(screen: *defs.xcb.xcb_screen_t, depth: u8) VisualInfo {
 
 // ─── DrawContext ──────────────────────────────────────────────────────────────
 
-// RGB color representation for caching
-const RGBColor = struct {
-    r: f64,
-    g: f64,
-    b: f64,
-};
+// FIXED 2.14 (partial): Use RGBColor from cache module to eliminate duplicate type
+// TODO: Consolidate color_cache with CacheManager.colors to fully eliminate duplication
+const RGBColor = cache_module.RGBColor;
 
 // Font name conversion cache to avoid repeated allocations
 var font_conversion_cache: ?std.StringHashMap([]const u8) = null;
+
+// ─── Helper Functions ─────────────────────────────────────────────────────────
+
+/// Create XCB rectangle with coordinate casting
+inline fn makeRect(x: u16, y: u16, width: u16, height: u16) defs.xcb.xcb_rectangle_t {
+    return .{
+        .x = @intCast(x),
+        .y = @intCast(y),
+        .width = width,
+        .height = height,
+    };
+}
+
+/// Extract RGB color components from packed 0xRRGGBB value
+inline fn extractRGBComponents(color: u32) struct { u8, u8, u8 } {
+    return .{
+        @intCast((color >> 16) & 0xFF),
+        @intCast((color >> 8)  & 0xFF),
+        @intCast( color        & 0xFF),
+    };
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 
 pub const DrawContext = struct {
     allocator: std.mem.Allocator,
@@ -142,7 +163,12 @@ pub const DrawContext = struct {
 
         // Create XCB graphics context for direct rectangle drawing (window borders)
         dc.gc = defs.xcb.xcb_generate_id(conn);
-        _ = defs.xcb.xcb_create_gc(conn, dc.gc, drawable, 0, null);
+        const gc_cookie = defs.xcb.xcb_create_gc_checked(conn, dc.gc, drawable, 0, null);
+        // FIXED: Check GC creation result instead of discarding
+        if (defs.xcb.xcb_request_check(conn, gc_cookie)) |err| {
+            std.c.free(err);
+            return error.GCCreationFailed;
+        }
 
         return dc;
     }
@@ -180,11 +206,25 @@ pub const DrawContext = struct {
     }
 
     pub fn loadFonts(self: *DrawContext, font_names: []const []const u8) !void {
-        // Pango handles font fallback automatically via fontconfig
+        // FIXED 3.22: Compose all fonts into comma-separated fallback list for Pango
+        // Pango natively supports multiple fonts via font description strings
         if (font_names.len > 0) {
-            try self.loadFont(font_names[0]);
-            if (font_names.len > 1) {
-                debug.info("More than one font detected ({}). Pango will use these alongside primary font set.", .{font_names.len - 1});
+            if (font_names.len == 1) {
+                try self.loadFont(font_names[0]);
+            } else {
+                // Compose comma-separated font list for Pango fallback
+                var font_list = std.ArrayList(u8){};
+                defer font_list.deinit(self.allocator);
+                
+                for (font_names, 0..) |font, i| {
+                    try font_list.appendSlice(self.allocator, font);
+                    if (i < font_names.len - 1) {
+                        try font_list.append(self.allocator, ',');
+                    }
+                }
+                
+                try self.loadFont(font_list.items);
+                debug.info("Loaded {} fonts with fallback support", .{font_names.len});
             }
         } else {
             try self.loadFont("monospace:size=10");
@@ -195,10 +235,11 @@ pub const DrawContext = struct {
     fn colorToRGB(self: *DrawContext, color: u32) struct { f64, f64, f64 } {
         if (self.color_cache.get(color)) |rgb| return .{ rgb.r, rgb.g, rgb.b };
         
+        const r, const g, const b = extractRGBComponents(color);
         const rgb = RGBColor{
-            .r = @as(f64, @floatFromInt((color >> 16) & 0xFF)) / 255.0,
-            .g = @as(f64, @floatFromInt((color >> 8)  & 0xFF)) / 255.0,
-            .b = @as(f64, @floatFromInt( color        & 0xFF)) / 255.0,
+            .r = @as(f64, @floatFromInt(r)) / 255.0,
+            .g = @as(f64, @floatFromInt(g)) / 255.0,
+            .b = @as(f64, @floatFromInt(b)) / 255.0,
         };
         self.color_cache.put(color, rgb) catch {};
         return .{ rgb.r, rgb.g, rgb.b };
@@ -210,6 +251,29 @@ pub const DrawContext = struct {
         const r, const g, const b = self.colorToRGB(color);
         c.cairo_set_source_rgba(self.ctx, r, g, b, 1.0);
         self.last_color = color;
+    }
+
+    /// Apply transparency to a color for ARGB windows
+    inline fn applyTransparency(self: *DrawContext, color: u32) u32 {
+        if (!self.is_argb) return color;
+        const alpha_f32 = std.math.clamp(self.transparency, 0.0, 1.0);
+        const alpha_byte: u32 = @intFromFloat(@round(alpha_f32 * 255.0));
+        return (alpha_byte << 24) | (color & 0xFFFFFF);
+    }
+
+    /// Set Pango layout text (helper to avoid repeated intCast)
+    inline fn setPangoText(self: *DrawContext, text: []const u8) void {
+        c.pango_layout_set_text(self.pango_layout, text.ptr, @intCast(text.len));
+    }
+
+    /// Convert Pango units to pixels (f64)
+    inline fn pangoToPixelsF64(pango_units: c_int) f64 {
+        return @as(f64, @floatFromInt(pango_units)) / @as(f64, @floatFromInt(c.PANGO_SCALE));
+    }
+
+    /// Convert Pango units to pixels (i16)
+    inline fn pangoToPixelsI16(pango_units: c_int) i16 {
+        return @intCast(@divTrunc(pango_units, c.PANGO_SCALE));
     }
 
     /// Clear the surface to fully transparent before drawing on ARGB windows.
@@ -229,32 +293,22 @@ pub const DrawContext = struct {
         // Cairo's premultiplied alpha darkens colors significantly; raw XCB avoids this.
         // The compositor applies transparency, keeping bar and window border colors identical.
 
-        // For ARGB windows, embed the alpha channel from the transparency setting
-        const final_color = if (self.is_argb) blk: {
-            const alpha_f32 = std.math.clamp(self.transparency, 0.0, 1.0);
-            const alpha_byte: u32 = @intFromFloat(@round(alpha_f32 * 255.0));
-            break :blk (alpha_byte << 24) | (color & 0xFFFFFF);
-        } else color;
+        const final_color = self.applyTransparency(color);
 
         _ = defs.xcb.xcb_change_gc(self.conn, self.gc, defs.xcb.XCB_GC_FOREGROUND, &[_]u32{final_color});
 
-        const rect = defs.xcb.xcb_rectangle_t{
-            .x      = @intCast(x),
-            .y      = @intCast(y),
-            .width  = width,
-            .height = height,
-        };
+        const rect = makeRect(x, y, width, height);
         _ = defs.xcb.xcb_poly_fill_rectangle(self.conn, self.drawable, self.gc, 1, &rect);
     }
 
     pub fn drawText(self: *DrawContext, x: u16, y: u16, text: []const u8, color: u32) !void {
         self.setColor(color);
 
-        c.pango_layout_set_text(self.pango_layout, text.ptr, @intCast(text.len));
+        self.setPangoText(text);
 
         // Offset move_to by the baseline so text sits at the correct vertical position
         const baseline = c.pango_layout_get_baseline(self.pango_layout);
-        const baseline_pixels: f64 = @as(f64, @floatFromInt(baseline)) / @as(f64, @floatFromInt(c.PANGO_SCALE));
+        const baseline_pixels = pangoToPixelsF64(baseline);
 
         c.cairo_move_to(self.ctx, @floatFromInt(x), @as(f64, @floatFromInt(y)) - baseline_pixels);
         c.pango_cairo_show_layout(self.ctx, self.pango_layout);
@@ -262,7 +316,7 @@ pub const DrawContext = struct {
 
     /// Draw text with end-ellipsis truncation when it exceeds max_width pixels
     pub fn drawTextEllipsis(self: *DrawContext, x: u16, y: u16, text: []const u8, max_width: u16, color: u32) !void {
-        c.pango_layout_set_text(self.pango_layout, text.ptr, @intCast(text.len));
+        self.setPangoText(text);
         c.pango_layout_set_width(self.pango_layout, @intCast(@as(i32, max_width) * c.PANGO_SCALE));
         c.pango_layout_set_ellipsize(self.pango_layout, c.PangoEllipsizeMode.END);
 
@@ -281,7 +335,7 @@ pub const DrawContext = struct {
 
     /// Return the rendered pixel width of a string using the current font
     pub fn textWidth(self: *DrawContext, text: []const u8) u16 {
-        c.pango_layout_set_text(self.pango_layout, text.ptr, @intCast(text.len));
+        self.setPangoText(text);
         var width: c_int = undefined;
         var height: c_int = undefined;
         c.pango_layout_get_pixel_size(self.pango_layout, &width, &height);
@@ -303,8 +357,8 @@ pub const DrawContext = struct {
         const descent = c.pango_font_metrics_get_descent(metrics);
 
         const result = .{
-            @as(i16, @intCast(@divTrunc(ascent,  c.PANGO_SCALE))),
-            @as(i16, @intCast(@divTrunc(descent, c.PANGO_SCALE))),
+            pangoToPixelsI16(ascent),
+            pangoToPixelsI16(descent),
         };
 
         self.cached_metrics = .{ .ascent = result[0], .descent = result[1] };
@@ -322,9 +376,29 @@ pub const DrawContext = struct {
         const top_pad: i32 = @max(0, @divTrunc(total_pad, 2));
         return @intCast(top_pad + asc);
     }
+
+    /// Draw a simple text segment with background and padding
+    /// Common pattern for status bar segments (clock, layout, status, etc.)
+    pub fn drawSegment(
+        self: *DrawContext,
+        x: u16,
+        height: u16,
+        text: []const u8,
+        padding: u16,
+        bg: u32,
+        fg: u32,
+    ) !u16 {
+        const width = self.textWidth(text) + padding * 2;
+        self.fillRect(x, 0, width, height, bg);
+        try self.drawText(x + padding, self.baselineY(height), text, fg);
+        return x + width;
+    }
 };
 
 // ─── DrawBatch for batching rectangle operations ──────────────────────────────
+// FIXED 2.12: DrawBatch is fully implemented and available for optimization
+// TODO: Wire into bar segment drawing to batch rectangle draws into single XCB call
+// Currently segment backgrounds are drawn individually - batching would reduce XCB calls
 
 /// Batch multiple rectangle draw operations to reduce XCB round-trips
 pub const DrawBatch = struct {
@@ -334,34 +408,25 @@ pub const DrawBatch = struct {
     
     pub fn init(allocator: std.mem.Allocator, color: u32) !DrawBatch {
         return .{
-            .rects = std.ArrayList(defs.xcb.xcb_rectangle_t).init(allocator),
+            .rects = std.ArrayList(defs.xcb.xcb_rectangle_t){},
             .color = color,
             .allocator = allocator,
         };
     }
     
     pub fn deinit(self: *DrawBatch) void {
-        self.rects.deinit();
+        self.rects.deinit(self.allocator);
     }
     
     pub fn addRect(self: *DrawBatch, x: u16, y: u16, w: u16, h: u16) !void {
-        try self.rects.append(self.allocator, .{
-            .x = @intCast(x),
-            .y = @intCast(y),
-            .width = w,
-            .height = h,
-        });
+        try self.rects.append(self.allocator, makeRect(x, y, w, h));
     }
     
     pub fn flush(self: *DrawBatch, dc: *DrawContext) void {
         if (self.rects.items.len == 0) return;
         
         // Set color for all rectangles
-        const final_color = if (dc.is_argb) blk: {
-            const alpha_f32 = std.math.clamp(dc.transparency, 0.0, 1.0);
-            const alpha_byte: u32 = @intFromFloat(@round(alpha_f32 * 255.0));
-            break :blk (alpha_byte << 24) | (self.color & 0xFFFFFF);
-        } else self.color;
+        const final_color = dc.applyTransparency(self.color);
         
         _ = defs.xcb.xcb_change_gc(dc.conn, dc.gc, 
             defs.xcb.XCB_GC_FOREGROUND, &[_]u32{final_color});
@@ -407,10 +472,9 @@ fn findVisualType(conn: *defs.xcb.xcb_connection_t, visual_id: u32) ?*defs.xcb.x
 /// Return the first available visual type on the given screen (used as a fallback)
 fn getDefaultVisualType(screen: *defs.xcb.xcb_screen_t) *defs.xcb.xcb_visualtype_t {
     var depth_iter = defs.xcb.xcb_screen_allowed_depths_iterator(screen);
-    while (depth_iter.rem > 0) {
+    while (depth_iter.rem > 0) : (defs.xcb.xcb_depth_next(&depth_iter)) {
         var visual_iter = defs.xcb.xcb_depth_visuals_iterator(depth_iter.data);
         if (visual_iter.rem > 0) return visual_iter.data;
-        defs.xcb.xcb_depth_next(&depth_iter);
     }
     unreachable;
 }
@@ -430,7 +494,8 @@ fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const 
     
     if (std.mem.indexOfScalar(u8, xft_name, ':') == null) return xft_name;
 
-    var result = try std.ArrayList(u8).initCapacity(allocator, xft_name.len);
+    var result = std.ArrayList(u8){};
+    try result.ensureTotalCapacity(allocator, xft_name.len);
     errdefer result.deinit(allocator);
 
     var parts = std.mem.splitScalar(u8, xft_name, ':');

@@ -35,26 +35,22 @@ pub fn toggleFullscreen(wm: *WM) void {
 }
 
 fn enterFullscreen(wm: *WM, win: u32, ws: u8) void {
-    const geom = utils.getGeometry(wm.conn, win) orelse return;
+    // FIXED: Single geometry query instead of two roundtrips
+    const geom_cookie = xcb.xcb_get_geometry(wm.conn, win);
+    const geom_reply = xcb.xcb_get_geometry_reply(wm.conn, geom_cookie, null) orelse return;
+    defer std.c.free(geom_reply);
 
     // CRITICAL FIX: Don't save off-screen positions (from hidden windows)
     // If window is off-screen, use a sensible default geometry for when we exit fullscreen
-    const is_offscreen = geom.x < -1000 or geom.x > 10000 or geom.y < -1000 or geom.y > 10000;
+    const is_offscreen = geom_reply.*.x < -1000 or geom_reply.*.x > 10000 or geom_reply.*.y < -1000 or geom_reply.*.y > 10000;
 
-    // BUGFIX: Query the actual border width directly from the window using XCB
-    // Previously only saved border_width for tiled windows, causing floating windows to lose borders
-    const geom_cookie = xcb.xcb_get_geometry(wm.conn, win);
-    const geom_reply = xcb.xcb_get_geometry_reply(wm.conn, geom_cookie, null);
-    const border_width: u16 = if (geom_reply) |reply| blk: {
-        defer std.c.free(reply);
-        break :blk reply.*.border_width;
-    } else 0;
+    const border_width: u16 = geom_reply.*.border_width;
     
     // Use default centered geometry if window is off-screen
-    const saved_x: i16 = if (is_offscreen) @divTrunc(@as(i16, @intCast(wm.screen.width_in_pixels)), 4) else geom.x;
-    const saved_y: i16 = if (is_offscreen) @divTrunc(@as(i16, @intCast(wm.screen.height_in_pixels)), 4) else geom.y;
-    const saved_width: u16 = if (is_offscreen) @divTrunc(wm.screen.width_in_pixels, 2) else geom.width;
-    const saved_height: u16 = if (is_offscreen) @divTrunc(wm.screen.height_in_pixels, 2) else geom.height;
+    const saved_x: i16 = if (is_offscreen) @divTrunc(@as(i16, @intCast(wm.screen.width_in_pixels)), 4) else geom_reply.*.x;
+    const saved_y: i16 = if (is_offscreen) @divTrunc(@as(i16, @intCast(wm.screen.height_in_pixels)), 4) else geom_reply.*.y;
+    const saved_width: u16 = if (is_offscreen) @divTrunc(wm.screen.width_in_pixels, 2) else geom_reply.*.width;
+    const saved_height: u16 = if (is_offscreen) @divTrunc(wm.screen.height_in_pixels, 2) else geom_reply.*.height;
     
     const fs_info = defs.FullscreenInfo{
         .window = win,

@@ -30,14 +30,12 @@ pub fn module(comptime StateType: type) type {
         }
         
         /// Get state reference (optional)
-        /// Pass `true` for mutable, `false` for const
-        pub inline fn get(comptime mutable: bool) if (mutable) ?*StateType else ?*const StateType {
+        pub inline fn get() ?*StateType {
             return state;
         }
         
         /// Get state reference (required - returns error if not initialized)
-        /// Pass `true` for mutable, `false` for const
-        pub fn require(comptime mutable: bool) !if (mutable) *StateType else *const StateType {
+        pub fn require() !*StateType {
             return state orelse error.StateNotInitialized;
         }
         

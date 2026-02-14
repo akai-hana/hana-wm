@@ -141,21 +141,24 @@ fn retryKeymap(ctx: *xkb_context, xcb_conn: *anyopaque, device_id: i32) !*xkb_ke
             return error.XkbKeymapFailed;
         };
 
-        // Verify keymap by testing common keys
-        // Test multiple keys to ensure keymap is valid
+        // Verify keymap has sufficient valid keysyms
+        // FIXED 2.16: Use threshold validation instead of hardcoded keycodes
+        // Keycodes 36, 65, 38 (Enter, Space, A) vary across hardware/layouts
         if (xkb.xkb_state_new(km)) |test_state| {
             defer xkb.xkb_state_unref(test_state);
             
-            // Test Return (usually keycode 36), Space (65), and A (38)
-            var valid_keys: u8 = 0;
-            for ([_]u8{ 36, 65, 38 }) |keycode| {
+            // Count valid keysyms across a range of common keycodes
+            // Most keyboards have keycodes in the 8-255 range
+            var valid_keys: u32 = 0;
+            var keycode: u32 = 8;
+            while (keycode < 128) : (keycode += 1) {
                 if (xkb.xkb_state_key_get_one_sym(test_state, keycode) != xkb.XKB_KEY_NoSymbol) {
                     valid_keys += 1;
                 }
             }
             
-            // Consider keymap valid if at least 2 of 3 test keys work
-            if (valid_keys >= 2) {
+            // Valid keymap should have at least 40 valid keysyms
+            if (valid_keys >= 40) {
                 return km;
             }
         }

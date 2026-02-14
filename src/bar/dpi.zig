@@ -32,6 +32,28 @@ const COMMON_DPI_TABLE = [_]struct { dpi: f32, name: []const u8 }{
     .{ .dpi = 192.0, .name = "2x (Retina)" },
 };
 
+/// Screen dimensions as floats for calculations
+const ScreenDimensions = struct {
+    width_px: f32,
+    height_px: f32,
+    width_mm: f32,
+    height_mm: f32,
+    
+    fn from(screen: *xcb.xcb_screen_t) ScreenDimensions {
+        return .{
+            .width_px = @floatFromInt(screen.width_in_pixels),
+            .height_px = @floatFromInt(screen.height_in_pixels),
+            .width_mm = @floatFromInt(screen.width_in_millimeters),
+            .height_mm = @floatFromInt(screen.height_in_millimeters),
+        };
+    }
+    
+    /// Calculate diagonal in pixels
+    fn diagonalPx(self: ScreenDimensions) f32 {
+        return @sqrt(self.width_px * self.width_px + self.height_px * self.height_px);
+    }
+};
+
 /// DPI information and scaling factor
 pub const DpiInfo = struct {
     dpi: f32,
@@ -90,20 +112,17 @@ fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
 /// Calculate DPI from display geometry
 /// Uses diagonal size and pixel density to estimate DPI
 fn calculateDpiFromGeometry(screen: *xcb.xcb_screen_t) f32 {
-    const width_px: f32 = @floatFromInt(screen.width_in_pixels);
-    const height_px: f32 = @floatFromInt(screen.height_in_pixels);
-    const width_mm: f32 = @floatFromInt(screen.width_in_millimeters);
-    const height_mm: f32 = @floatFromInt(screen.height_in_millimeters);
+    const dims = ScreenDimensions.from(screen);
     
     // Avoid division by zero
-    if (width_mm == 0 or height_mm == 0) {
+    if (dims.width_mm == 0 or dims.height_mm == 0) {
         debug.warn("Display reports 0mm dimensions, using baseline DPI", .{});
         return BASELINE_DPI;
     }
     
     // Calculate DPI from horizontal and vertical separately, then average
-    const dpi_x = (width_px / width_mm) * 25.4;
-    const dpi_y = (height_px / height_mm) * 25.4;
+    const dpi_x = (dims.width_px / dims.width_mm) * 25.4;
+    const dpi_y = (dims.height_px / dims.height_mm) * 25.4;
     const avg_dpi = (dpi_x + dpi_y) / 2.0;
     
     debug.info("Calculated DPI: X={d:.1}, Y={d:.1}, Average={d:.1}", .{dpi_x, dpi_y, avg_dpi});
@@ -136,18 +155,16 @@ fn snapToCommonDPI(dpi: f32) f32 {
 /// Calculate scale factor based on resolution relative to baseline
 /// This is an alternative approach that scales based on screen width
 fn calculateScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
-    const width_px: f32 = @floatFromInt(screen.width_in_pixels);
-    const height_px: f32 = @floatFromInt(screen.height_in_pixels);
+    const dims = ScreenDimensions.from(screen);
     
     // Calculate diagonal in pixels
-    const diagonal_px = @sqrt(width_px * width_px + height_px * height_px);
     const baseline_diagonal = @sqrt(BASELINE_WIDTH * BASELINE_WIDTH + BASELINE_HEIGHT * BASELINE_HEIGHT);
     
     // Scale based on diagonal size
-    const resolution_scale = diagonal_px / baseline_diagonal;
+    const resolution_scale = dims.diagonalPx() / baseline_diagonal;
     
     debug.info("Resolution scaling: {d}x{d} -> {d:.2}x baseline ({d}x{d})", 
-        .{@as(u16, @intFromFloat(width_px)), @as(u16, @intFromFloat(height_px)), 
+        .{@as(u16, @intFromFloat(dims.width_px)), @as(u16, @intFromFloat(dims.height_px)), 
           resolution_scale, @as(u16, @intFromFloat(BASELINE_WIDTH)), @as(u16, @intFromFloat(BASELINE_HEIGHT))});
     
     return resolution_scale;
@@ -161,11 +178,13 @@ fn calculateScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
 /// 
 /// Uses caching to avoid redundant detection calls
 pub fn detect(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) !DpiInfo {
-    // Create screen signature from dimensions
-    const sig = (@as(u64, screen.width_in_pixels) << 32) | 
-                (@as(u64, screen.height_in_pixels) << 16) |
-                (@as(u64, screen.width_in_millimeters) << 8) |
-                screen.height_in_millimeters;
+    // FIXED: Use non-overlapping 16-bit boundaries for cache signature
+    // width_in_pixels (48-63), height_in_pixels (32-47), 
+    // width_in_millimeters (16-31), height_in_millimeters (0-15)
+    const sig = (@as(u64, screen.width_in_pixels) << 48) | 
+                (@as(u64, screen.height_in_pixels) << 32) |
+                (@as(u64, screen.width_in_millimeters) << 16) |
+                @as(u64, screen.height_in_millimeters);
     
     // Return cached if screen hasn't changed
     if (dpi_cache.result) |cached| {
