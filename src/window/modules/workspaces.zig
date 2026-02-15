@@ -170,7 +170,16 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
             xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, -4000))});
     }
 
-    // Step 2: show windows for the new workspace.
+    // Step 2: Determine if we need to adjust bar visibility for the new workspace
+    // If switching to a fullscreen workspace, hide the bar temporarily
+    // Otherwise, show/hide based on global state
+    if (fs_info != null) {
+        bar.setBarState(wm, .hide_fullscreen);
+    } else {
+        bar.setBarState(wm, .show_fullscreen);
+    }
+
+    // Step 3: show windows for the new workspace.
     if (fs_info) |info| {
         // Fullscreen: configure the fs window to cover the screen and raise it.
         _ = xcb.xcb_configure_window(wm.conn, info.window,
@@ -191,7 +200,8 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
         const tiling_active = if (ts) |t| t.enabled else false;
 
         if (tiling_active) {
-            // Force-retile so bar visibility / screen area are always current.
+            // Retile to position windows correctly on-screen
+            // Windows should already have correct height from bar toggle, but need X positioning
             tiling.retileCurrentWorkspace(wm, true);
         } else {
             // Floating: move all windows to a sensible on-screen position.
@@ -205,13 +215,7 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
     }
 
     utils.flush(wm.conn);
-
-    if (fs_info != null) {
-        bar.setBarState(wm, .hide_fullscreen);
-        bar.raiseBar();
-    } else {
-        bar.setBarState(wm, .show_fullscreen);
-    }
+    bar.raiseBar();
 
     _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
         wm.focused_window orelse wm.root, xcb.XCB_CURRENT_TIME);

@@ -1,21 +1,13 @@
 ### hana's TODO list! ###
 # In here i write the things i want to do to not lose track of the different ideas i come up with while developing 
 
-i want to make it so that if in a single workspace there are multiple windows, for the title.zig element to be split in half, where the window that's more at the left (or if both are at the same level on the left, the one that's most up; or if both are at the exact same dimensions, the one that was created first) to be on the left half, while the other one is at the right half, and both of the segments
-
-when i full-screen into a window, i want all the other windows to be unmapped. this is already the case when i fullscreen into a window, go to another workspace and come back, but i want it to be the case immediately when i fullscreen, not just when i switch workspaces. i want this to happen since if im dealing with transparent windows, it can be a bit distracting to see the half-tiling windows i have behind the fullscreened window, and to have to switch back and forth workspaces for this to be updated is a bit of a hassle. can you please achieve this?
-
 LONG TERM: code a similar tool to drun, replace it instead of rofi in config.toml
 
 LONG TERM: somehow make vertical layout left and right
 
-make workspace width settable on line 242 in defs.zig: make default (40) 100%, and 150% is 40x1.5, and so on. otherwise, if no percentage placed on config, just set the literal pixel value.
-
 can you make it so that if i set transparency to 100, that all the transparency logic isn't processed at all, and the wm instead renders a regular RGB bar, skipping argb and 32 bits and all that? this is to avoid any unneeded computational processing when the user doesn't want transparency to begin with.
 
 can you please implement some sort of mechanism that make it so that the bar looks proportionally the same regardless of the resolution? for example, if i use a 1920x1080 display, the font of the bar looks significantly bigger, and the workspace widths do so too, as well as the separation between the dfferent modules/segments of the bar. i'd like to implement some sort of system which measures the display's resolution and takes it into consideration, multiplying these variables by some sort of factor that normalizes the size of these elements, regardless of 
-
-when hovering over a window while creating another one will result in the cursor hovering a mouse that doesn't have focus. this is actually intended behavior, since if i open a terminal quickly, i don't want to reposition my mouse cursor just for that. however, i'd like to make it so that, if with this mouse cursor positioned on an unfocused window, if i click onto this unfocused window, for it to gain focus, so that i don't have to awkwardly move my mouse away and back to the unfocused window for it to gain focus.
 
 {
 bspwm leaf layout
@@ -23,8 +15,6 @@ if window is higher than it is wider, slice it in half, leaving a top and bottom
 }
 
 mod + middle click mouse makes an individual window go from tiling to floating, and viceversa, if it's floating on tiled mode, tile it.
-
-when opening a window, fullscreening into it, and then killing it, bar remains hidden, even though i'm no longer fullscreened on anything. can you please make it so that this doesn't happen?
 
 "modern" layout: bar at the top, workspaces at the middle, date at the right, system resources at the left, and big spacing in-between (don't make it expanding, but instead static, where each segment is bound to left/right/center, and any gap that remains, remains a gap, isn't filled.)
 
@@ -35,19 +25,8 @@ make it so that one window can belong to more than one workspace (tag-based wind
 make a new themes dir inside src/ where color themes will be defined as .toml files, and will simply be fused with config.toml when being parsed. we can make it so that we can still define colors in config.toml this way, but if not defined in config.toml, pull them from the theme, which we define similarly to how we define the custom tiling layout now. (theme = "xresources" # or something like this))
 make a color theme that pulls in the xresources colors and makes a theme with them.
 
-if config.toml doesnt exist at current dir, check on ~/.config/hana/config.toml, and then continue with the current logic; if that file doesnt exist either, proceed as normal with defaults.
-make a defaults config file instead of hard-coding defaults inside .zig files. if fails to read from config.toml, read from this "defaults.zig" file, which is like a replica of config.zig but with the default config, visual appearance and binds for the program.
-
-move input.zig inside a new input directory and separate out the keyboard from mouse code by moving all the mouse logic to a new file mouse.zig
-(give feedback first before implementation; i want to know if this is a good idea, or if it can be modified in any way) move files like toml.zig, xkbcommon.zig, tiling_types.zig and similar to a new categorized directory. the reasoning is that i feel like these files all have something in common, these are all sort of "libraries" for other files, im unsure how to group them together but i still think it makes logical sense to do so, im unsure about the name to group them with too but im sure theres a good name. would this be a good idea? or would it be better to leave as it is now?...
-
 BIG FEATURES (avoid for now)
-bar (code some sort of bar) that contains the workspaces at the left side, a clock at the right, and the focused window's title in the middle
-make it so that mod+space swaps between layouts, and add a visual indicator to the right of the workspaces indicators for the different layouts
-make the different segments of the bar arrangeable and customizable from config
 make it so that window title shown in bar, if its too long and doesnt fit in the bar, that it scrolls continuously to the left. take for example templeOS by terry davis, it also has this same functionality.
-(when finished) replace auto module detection for binding to manual, for core files (if possible, separate dependency definitions from build.zig)
-(when finished) for the remaining files that are inside the src/ dir and aren't in core, make it so that if there's a subdirectory within a directory (ex. src/modules/tiling/layouts subdir in src/modules/tiling dir), make it so that all files inside this subdir are binded to the dir. this way we can easily manage dependencies without explicitly writing them out on build.zig, allowing for easier customization (seamless drag'n'drop files and organization by simply making folders) for non-core files
 translate all dwm binds from config.h to my config.toml
 add fibonacci layout (purely for the novelty)
 add a keybind to make layout be from vertical to horizontal (so master which would be at left is now at up and slaves are at the bottom half. be clever at programming this so that we don't have to write an entirely new layout just for this)
