@@ -228,33 +228,31 @@ pub fn init(wm: *defs.WM) !void {
     else
         0;
     
-    // Check if transparency is supported and enabled
-    const visual_id = wm.screen.root_visual;
-    const depth_iter = xcb.xcb_screen_allowed_depths_iterator(wm.screen);
-    var has_argb_visual = false;
+    // Setup transparency support
+    const alpha = wm.config.bar.getAlpha16();
+    const want_transparency = alpha < 0xFFFF;
     
-    if (wm.config.bar.transparency > 0) {
-        var depth_it = depth_iter;
-        while (depth_it.rem > 0) : (xcb.xcb_depth_next(&depth_it)) {
-            if (depth_it.data.*.depth == 32) {
-                has_argb_visual = true;
-                break;
-            }
-        }
-    }
+    // Find appropriate visual and depth for transparency
+    const visual_info = if (want_transparency) 
+        drawing.findVisualByDepth(wm.screen, 32)
+    else 
+        drawing.VisualInfo{ .visual_type = null, .visual_id = wm.screen.root_visual };
     
-    const depth: u8 = if (has_argb_visual) 32 else xcb.XCB_COPY_FROM_PARENT;
-    const window = xcb.xcb_generate_id(wm.conn);
+    const depth: u8 = if (want_transparency) 32 else xcb.XCB_COPY_FROM_PARENT;
+    const visual_id = visual_info.visual_id;
+    const has_argb_visual = want_transparency;
+    
+    debug.info("Bar transparency: {s}", .{if (want_transparency) "enabled (ARGB, compositor-driven)" else "disabled (opaque)"});
+    
+    // Create colormap for ARGB visual if needed
     const colormap = if (has_argb_visual) blk: {
         const cmap = xcb.xcb_generate_id(wm.conn);
-        _ = xcb.xcb_create_colormap(wm.conn, xcb.XCB_COLORMAP_ALLOC_NONE, cmap, wm.root, visual_id);
+        _ = xcb.xcb_create_colormap(wm.conn, xcb.XCB_COLORMAP_ALLOC_NONE, cmap, wm.screen.root, visual_id);
         break :blk cmap;
     } else 0;
-    defer {
-        if (has_argb_visual) {
-            _ = xcb.xcb_free_colormap(wm.conn, colormap);
-        }
-    }
+    // Don't defer free colormap - window needs it
+    
+    const window = xcb.xcb_generate_id(wm.conn);
     
     const value_mask = xcb.XCB_CW_BACK_PIXEL | xcb.XCB_CW_BORDER_PIXEL | 
                        xcb.XCB_CW_OVERRIDE_REDIRECT | xcb.XCB_CW_EVENT_MASK |
@@ -267,7 +265,7 @@ pub fn init(wm: *defs.WM) !void {
         colormap, // XCB_CW_COLORMAP (ignored if not has_argb_visual)
     };
     
-    _ = xcb.xcb_create_window(wm.conn, depth, window, wm.root,
+    _ = xcb.xcb_create_window(wm.conn, depth, window, wm.screen.root,
         0, y_pos, screen_width, height, 0,
         xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, visual_id,
         @intCast(value_mask), &value_list);
@@ -276,7 +274,11 @@ pub fn init(wm: *defs.WM) !void {
     _ = xcb.xcb_map_window(wm.conn, window);
     utils.flush(wm.conn);
     
-    const dc = try drawing.DrawContext.init(wm.allocator, wm.conn, window, screen_width, height, wm.dpi_info.dpi);
+    const dc = try drawing.DrawContext.initWithVisual(
+        wm.allocator, wm.conn, window, screen_width, height,
+        visual_id, wm.dpi_info.dpi,
+        has_argb_visual, wm.config.bar.transparency,
+    );
     errdefer dc.deinit();
     try loadBarFonts(dc, wm);
     
