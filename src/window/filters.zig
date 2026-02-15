@@ -1,4 +1,4 @@
-//! # Window Filtering Module
+//! Window Filtering Module
 //!
 //! Provides unified filtering and validation functions for windows.
 //! Eliminates duplicate validation logic across window.zig and tiling.zig.

@@ -42,15 +42,37 @@ fn shouldClockRun() bool {
 fn setTimerState(enable: bool) void {
     if (enable == timer_enabled) return;
     
-    const interval_sec: i64 = if (enable) 1 else 0;
-    const spec = std.os.linux.itimerspec{
-        .it_interval = .{ .sec = interval_sec, .nsec = 0 },
-        .it_value    = .{ .sec = interval_sec, .nsec = 0 },
-    };
-    
-    if (std.os.linux.timerfd_settime(@intCast(global_timer_fd), .{}, &spec, null) >= 0) {
-        timer_enabled = enable;
-        debug.info("Clock timer {s}", .{if (enable) "enabled" else "disabled"});
+    if (enable) {
+        // Calculate nanoseconds until next second boundary
+        const ts = std.posix.clock_gettime(std.posix.CLOCK.REALTIME) catch {
+            debug.warn("Failed to get time for timer alignment", .{});
+            return;
+        };
+        
+        // Calculate nanoseconds remaining in current second
+        const nsec_remaining = std.time.ns_per_s - @as(u64, @intCast(ts.nsec));
+        
+        // Set timer to fire at next second boundary, then every 1 second
+        const spec = std.os.linux.itimerspec{
+            .it_interval = .{ .sec = 1, .nsec = 0 },  // Fire every 1 second after initial
+            .it_value    = .{ .sec = 0, .nsec = @intCast(nsec_remaining) },  // Fire when second changes
+        };
+        
+        if (std.os.linux.timerfd_settime(@intCast(global_timer_fd), .{}, &spec, null) >= 0) {
+            timer_enabled = true;
+            debug.info("Clock timer enabled (aligned to second boundary)", .{});
+        }
+    } else {
+        // Disable timer
+        const spec = std.os.linux.itimerspec{
+            .it_interval = .{ .sec = 0, .nsec = 0 },
+            .it_value    = .{ .sec = 0, .nsec = 0 },
+        };
+        
+        if (std.os.linux.timerfd_settime(@intCast(global_timer_fd), .{}, &spec, null) >= 0) {
+            timer_enabled = false;
+            debug.info("Clock timer disabled", .{});
+        }
     }
 }
 

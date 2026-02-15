@@ -115,14 +115,32 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
 }
 
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) void {
-    if (event.child == 0) return;
+    // Determine which window was clicked:
+    // - For root grabs (Super+Button): child is the clicked window
+    // - For window grabs (SYNC click-to-focus): event is the clicked window, child may be 0
+    const clicked_window = if (event.child != 0) event.child else event.event;
+    
+    // Skip if clicking on root or invalid window
+    if (clicked_window == 0 or clicked_window == wm.root) {
+        _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_REPLAY_POINTER, xcb.XCB_CURRENT_TIME);
+        utils.flush(wm.conn);
+        return;
+    }
+    
     const has_super = (event.state & defs.MOD_SUPER) != 0;
     if (has_super and (event.detail == MOUSE_BUTTON_LEFT or event.detail == MOUSE_BUTTON_RIGHT)) {
-        drag.startDrag(wm, event.child, event.detail, event.root_x, event.root_y);
+        // Super+Button drag operation
+        drag.startDrag(wm, clicked_window, event.detail, event.root_x, event.root_y);
     } else {
-        focus.setFocus(wm, event.child, .mouse_click);
-        // FIXED: Removed redundant updateWindowFocus - setFocus already calls updateWindowFocusFast
+        // Normal click-to-focus operation
+        focus.setFocus(wm, clicked_window, .mouse_click);
     }
+    
+    // CRITICAL: Always release SYNC grabs to prevent permanent input freeze
+    // This must be called for ALL button press events, not just some paths
+    _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_REPLAY_POINTER, xcb.XCB_CURRENT_TIME);
+    _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, xcb.XCB_CURRENT_TIME);
+    utils.flush(wm.conn);
 }
 
 pub fn handleButtonRelease(_: *const xcb.xcb_button_release_event_t, wm: *WM) void {

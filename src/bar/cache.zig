@@ -5,7 +5,7 @@ const defs    = @import("defs");
 const drawing = @import("drawing");
 
 /// Caches per-workspace label pixel widths so the bar avoids redundant
-/// Pango measurements on every draw call.  Embedded by value inside the bar
+/// Pango measurements on every draw call. Embedded by value inside the bar
 /// State struct (which is itself heap-allocated), so no separate allocation
 /// is needed.
 pub const CacheManager = struct {
