@@ -7,6 +7,7 @@ const utils = @import("utils");
 const focus = @import("focus");
 const tiling = @import("tiling");
 const workspaces = @import("workspaces");
+const filters = @import("filters");
 const drag = @import("drag");
 const fullscreen = @import("fullscreen");
 const bar = @import("bar");
@@ -166,11 +167,30 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) 
         return;
     }
     
-    // For focus-follows-mouse: check if pointer is over a different window
-    // Only process if motion is on root window
-    if (event.event == wm.root) {
-        window.checkPointerFocus(wm);
-    }
+    // Throttle to every 20th event to reduce overhead
+    const static = struct { var counter: u8 = 0; };
+    static.counter +%= 1;
+    if (static.counter % 5 != 0) return;
+    
+    // Query which window pointer is over
+    const reply = xcb.xcb_query_pointer_reply(
+        wm.conn,
+        xcb.xcb_query_pointer(wm.conn, wm.root),
+        null,
+    ) orelse return;
+    defer std.c.free(reply);
+    
+    const child = reply.*.child;
+    if (child == 0 or child == wm.root) return;
+    
+    const managed = utils.findManagedWindow(wm.conn, child, wm);
+    if (managed == 0) return;
+    if (filters.isSystemWindow(wm, managed)) return;
+    if (!wm.hasWindow(managed)) return;
+    if (!workspaces.isOnCurrentWorkspace(managed)) return;
+    if (wm.focused_window == managed) return;
+    
+    focus.setFocus(wm, managed, .mouse_enter);
 }
 
 fn closeWindow(wm: *WM, win: u32) void {
