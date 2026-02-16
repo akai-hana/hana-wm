@@ -30,6 +30,12 @@ pub fn setFocusBatch(wm: *WM, win: u32, reason: Reason, do_flush: bool) void {
 fn setFocusImpl(wm: *WM, win: u32, reason: Reason, do_flush: bool) void {
     if (win == wm.root or win == 0 or bar.isBarWindow(win) or wm.focused_window == win) return;
 
+    // Determine ICCCM input model for this window
+    const input_model = utils.getInputModel(wm.conn, win);
+    
+    // Don't focus windows that don't want input at all
+    if (input_model == .no_input) return;
+
     const old = wm.focused_window;
     wm.focused_window = win;
 
@@ -43,17 +49,19 @@ fn setFocusImpl(wm: *WM, win: u32, reason: Reason, do_flush: bool) void {
     window.grabButtons(wm, win, true);
     if (old) |old_win| window.grabButtons(wm, old_win, false);
 
-    // Set input focus
-    _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, xcb.XCB_CURRENT_TIME);
+    // Set input focus for passive and locally_active models
+    // (globally_active windows only receive WM_TAKE_FOCUS, not XSetInputFocus)
+    if (input_model == .passive or input_model == .locally_active) {
+        _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, xcb.XCB_CURRENT_TIME);
+    }
     
     // Raise window only for mouse clicks and user commands
     if (reason == .mouse_click or reason == .user_command) {
         _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     }
     
-    // Send WM_TAKE_FOCUS protocol message for applications that need it
-    // Use cached version to avoid ~50µs roundtrip
-    if (utils.supportsWMTakeFocusCached(wm.conn, win)) {
+    // Send WM_TAKE_FOCUS protocol for locally_active and globally_active models
+    if (input_model == .locally_active or input_model == .globally_active) {
         utils.sendWMTakeFocus(wm.conn, win);
     }
 
