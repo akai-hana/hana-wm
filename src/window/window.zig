@@ -63,7 +63,10 @@ inline fn setupTiling(wm: *WM, win: u32, on_current: bool) void {
 }
 
 inline fn setupWindow(wm: *WM, win: u32, workspace_index: u8) !void {
-    _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{WINDOW_EVENT_MASK});
+    // CRITICAL: Must include ENTER_WINDOW mask to receive EnterNotify events!
+    // This is what dwm does - see dwm.c line 1071
+    const event_mask = WINDOW_EVENT_MASK | xcb.XCB_EVENT_MASK_ENTER_WINDOW;
+    _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{event_mask});
     try wm.addWindow(win);
     workspaces.moveWindowTo(wm, win, workspace_index);
 }
@@ -116,14 +119,57 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, w
 // Focus events ─
 
 pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) void {
+    // Use dwm's exact filtering logic (see dwm.c line 766)
+    // Filter out: mode != Normal OR detail == Inferior (unless it's root window)
+    if ((event.mode != xcb.XCB_NOTIFY_MODE_NORMAL or 
+         event.detail == xcb.XCB_NOTIFY_DETAIL_INFERIOR) and 
+        event.event != wm.root) {
+        return;
+    }
+    
     const win = event.event;
-    if (filters.isSystemWindow(wm, win)) return;
-    if (!wm.hasWindow(win)) return;
-    if (!workspaces.isOnCurrentWorkspace(win)) return;
-    if (wm.focused_window == win) return;
+    
+    // Resolve child windows to their managed parent (for Electron apps etc.)
+    const managed_window = utils.findManagedWindow(wm.conn, win, wm);
+    
+    if (filters.isSystemWindow(wm, managed_window)) return;
+    if (!wm.hasWindow(managed_window)) return;
+    if (!workspaces.isOnCurrentWorkspace(managed_window)) return;
+    if (wm.focused_window == managed_window) return;
+    
     const old = wm.focused_window;
-    focus.setFocus(wm, win, .mouse_enter);
-    tiling.updateWindowFocus(wm, old, win);
+    focus.setFocus(wm, managed_window, .mouse_enter);
+    tiling.updateWindowFocus(wm, old, managed_window);
+}
+
+/// Check window under pointer and focus it if different from current focus.
+/// This can be called periodically (e.g. from a timer) to implement hover-focus
+/// for Electron apps that don't deliver EnterNotify events from child windows.
+pub fn checkPointerFocus(wm: *WM) void {
+    // Query pointer position
+    const reply = xcb.xcb_query_pointer_reply(
+        wm.conn,
+        xcb.xcb_query_pointer(wm.conn, wm.root),
+        null,
+    ) orelse return;
+    defer std.c.free(reply);
+    
+    // child field contains the window under the pointer
+    const child = reply.*.child;
+    if (child == 0 or child == wm.root) return;
+    
+    // Resolve to managed window
+    const managed_window = utils.findManagedWindow(wm.conn, child, wm);
+    
+    if (filters.isSystemWindow(wm, managed_window)) return;
+    if (!wm.hasWindow(managed_window)) return;
+    if (!workspaces.isOnCurrentWorkspace(managed_window)) return;
+    if (wm.focused_window == managed_window) return;
+    
+    // Focus changed!
+    const old = wm.focused_window;
+    focus.setFocus(wm, managed_window, .mouse_enter);
+    tiling.updateWindowFocus(wm, old, managed_window);
 }
 
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) void {
