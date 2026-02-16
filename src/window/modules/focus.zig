@@ -6,6 +6,7 @@ const tiling = @import("tiling");
 const utils = @import("utils");
 const bar = @import("bar");
 const window = @import("window");
+const debug = @import("debug");
 const xcb = defs.xcb;
 const WM = defs.WM;
 
@@ -27,13 +28,43 @@ pub fn setFocusBatch(wm: *WM, win: u32, reason: Reason, do_flush: bool) void {
     setFocusImpl(wm, win, reason, do_flush);
 }
 
-fn setFocusImpl(wm: *WM, win: u32, reason: Reason, do_flush: bool) void {
-    if (win == wm.root or win == 0 or bar.isBarWindow(win) or wm.focused_window == win) return;
+pub fn clearFocus(wm: *WM) void {
+    if (wm.focused_window) |old_win| {
+        window.grabButtons(wm, old_win, false);
+        tiling.updateWindowFocusFast(wm, old_win, null);
+    }
+    wm.focused_window = null;
+    _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, wm.root, xcb.XCB_CURRENT_TIME);
+    bar.markDirty();
+}
 
-    // Determine ICCCM input model for this window
-    const input_model = utils.getInputModel(wm.conn, win);
+fn setFocusImpl(wm: *WM, win: u32, reason: Reason, do_flush: bool) void {
+    if (win == wm.root or win == 0 or bar.isBarWindow(win)) return;
+
+    const focus_reply = xcb.xcb_get_input_focus_reply(
+        wm.conn,
+        xcb.xcb_get_input_focus(wm.conn),
+        null,
+    );
     
-    // Don't focus windows that don't want input at all
+    const static = struct { var count: u32 = 0; };
+    static.count += 1;
+    
+    if (focus_reply) |reply| {
+        defer std.c.free(reply);
+        const curr = reply.*.focus;
+        if (curr == win) {
+            if (false) {
+                debug.info("setFocus: {x} already focused ({}x)", .{win, static.count});
+            }
+            return;
+        }
+        if (false) {
+            debug.info("setFocus #{}: {x} <- {x}", .{static.count, win, curr});
+        }
+    }
+
+    const input_model = utils.getInputModel(wm.conn, win);
     if (input_model == .no_input) return;
 
     const old = wm.focused_window;
@@ -69,19 +100,5 @@ fn setFocusImpl(wm: *WM, win: u32, reason: Reason, do_flush: bool) void {
     tiling.updateWindowFocusFast(wm, old, win);
     
     if (do_flush) utils.flush(wm.conn);
-    bar.markDirty();
-}
-
-pub fn clearFocus(wm: *WM) void {
-    const old = wm.focused_window;
-    wm.focused_window = null;
-    _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, wm.root, xcb.XCB_CURRENT_TIME);
-
-    if (old) |old_win| {
-        window.grabButtons(wm, old_win, false);
-        tiling.updateWindowFocusFast(wm, old_win, null);
-    }
-    
-    utils.flush(wm.conn);
     bar.markDirty();
 }
