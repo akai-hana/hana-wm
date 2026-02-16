@@ -10,6 +10,7 @@ const workspaces = @import("workspaces");
 const drag = @import("drag");
 const fullscreen = @import("fullscreen");
 const bar = @import("bar");
+const window = @import("window");
 const debug = @import("debug");
 const xcb = defs.xcb;
 const WM = defs.WM;

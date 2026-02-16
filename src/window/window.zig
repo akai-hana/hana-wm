@@ -164,12 +164,18 @@ pub fn checkPointerFocus(wm: *WM) void {
     if (filters.isSystemWindow(wm, managed_window)) return;
     if (!wm.hasWindow(managed_window)) return;
     if (!workspaces.isOnCurrentWorkspace(managed_window)) return;
-    if (wm.focused_window == managed_window) return;
     
-    // Focus changed!
+    // TEMPORARY: Comment out already_focused check to test if that's the issue
+    // if (wm.focused_window != null and wm.focused_window.? == managed_window) return;
+    
+    // Always attempt to focus - this will let us see if the "already focused" check is the problem
     const old = wm.focused_window;
-    focus.setFocus(wm, managed_window, .mouse_enter);
-    tiling.updateWindowFocus(wm, old, managed_window);
+    
+    // Only change focus if it's actually different
+    if (old == null or old.? != managed_window) {
+        focus.setFocus(wm, managed_window, .mouse_enter);
+        tiling.updateWindowFocus(wm, old, managed_window);
+    }
 }
 
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) void {
