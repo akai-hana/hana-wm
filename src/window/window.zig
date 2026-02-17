@@ -125,6 +125,15 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) vo
     if (!wm.hasWindow(managed_win)) return;
     if (!workspaces.isOnCurrentWorkspace(managed_win)) return;
     if (wm.focused_window == managed_win) return;
+
+    // When a window was just spawned, the retile shifts all stack windows so
+    // the cursor (which may have been sitting in a gap) suddenly lands on a
+    // window.  X sends a synthetic EnterNotify for that window, which would
+    // steal focus away from the newly spawned window.  Suppress all such
+    // synthetic enters until the user actually moves the mouse (cleared in
+    // handleMotionNotify).
+    if (wm.suppress_focus_reason == .window_spawn) return;
+
     const old = wm.focused_window;
     focus.setFocus(wm, managed_win, .mouse_enter);
     tiling.updateWindowFocus(wm, old, managed_win);

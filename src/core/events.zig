@@ -4,15 +4,15 @@ const std        = @import("std");
 const defs       = @import("defs");
 const xcb        = defs.xcb;
 const constants  = @import("constants");
-const window     = @import("window");
 const input      = @import("input");
-const bar        = @import("bar");
+const window     = @import("window");
 const tiling     = @import("tiling");
 const workspaces = @import("workspaces");
+const bar        = @import("bar");
 
 const EventHandler = *const fn (event: *anyopaque, wm: *defs.WM) void;
 
-// Compile-time dispatch table — O(1) event routing with zero runtime branching.
+// Comptime dispatch table for XCB O(1) event routing
 const dispatch_table = blk: {
     var table = [_]?EventHandler{null} ** constants.Sizes.EVENT_DISPATCH_TABLE;
     table[xcb.XCB_KEY_PRESS]         = @ptrCast(&input.handleKeyPress);
@@ -29,6 +29,7 @@ const dispatch_table = blk: {
     break :blk table;
 };
 
+// Event dispatcher to handlers
 pub inline fn dispatch(event_type: u8, event: *anyopaque, wm: *defs.WM) void {
     const idx = event_type & 0x7F;
     if (idx < dispatch_table.len) {

@@ -166,7 +166,16 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) 
         drag.updateDrag(wm, event.root_x, event.root_y);
         return;
     }
-    
+
+    // A real mouse movement after a window spawn clears the enter-notify
+    // suppression.  We return immediately so this motion doesn't itself cause
+    // a focus change — the next EnterNotify (once the cursor enters a window
+    // through genuine movement) will handle that.
+    if (wm.suppress_focus_reason == .window_spawn) {
+        wm.suppress_focus_reason = .none;
+        return;
+    }
+
     // Throttle to every 20th event to reduce overhead
     const static = struct { var counter: u8 = 0; };
     static.counter +%= 1;
