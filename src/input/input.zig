@@ -1,4 +1,4 @@
-// Input handling - IMPROVED: Pointer tracking, no event counters
+// Input handling — keyboard, mouse buttons, pointer motion, drag operations.
 
 const std = @import("std");
 const defs = @import("defs");
@@ -23,7 +23,7 @@ extern "c" fn waitpid(pid: c_int, status: ?*c_int, options: c_int) c_int;
 const MOUSE_BUTTON_LEFT = 1;
 const MOUSE_BUTTON_RIGHT = 3;
 
-const MOUSE_BUTTONS = [_]u8{ MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT };  // Super+Button1 (move), Super+Button3 (resize)
+const MOUSE_BUTTONS = [_]u8{ MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT };
 
 const KeybindState = struct {
     map: std.AutoHashMap(u64, *const defs.Action),
@@ -119,39 +119,30 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
 
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) void {
     wm.last_event_time = event.time;
-    // Determine which window was clicked:
-    // - For root grabs (Super+Button): child is the clicked window
-    // - For window grabs (SYNC click-to-focus): event is the clicked window, child may be 0
     const clicked_window = if (event.child != 0) event.child else event.event;
-    
-    // Skip if clicking on root or invalid window
+
     if (clicked_window == 0 or clicked_window == wm.root) {
         _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_REPLAY_POINTER, xcb.XCB_CURRENT_TIME);
         utils.flush(wm.conn);
         return;
     }
-    
-    // Resolve child windows to their managed parent (for Electron apps etc.)
+
     const managed_window = utils.findManagedWindow(wm.conn, clicked_window, wm);
-    
-    // Skip if we couldn't find a managed window
+
     if (managed_window == 0 or managed_window == wm.root or !wm.hasWindow(managed_window)) {
         _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_REPLAY_POINTER, xcb.XCB_CURRENT_TIME);
         utils.flush(wm.conn);
         return;
     }
-    
+
     const has_super = (event.state & defs.MOD_SUPER) != 0;
     if (has_super and (event.detail == MOUSE_BUTTON_LEFT or event.detail == MOUSE_BUTTON_RIGHT)) {
-        // Super+Button drag operation
         drag.startDrag(wm, managed_window, event.detail, event.root_x, event.root_y);
     } else {
-        // Normal click-to-focus operation
         focus.setFocus(wm, managed_window, .mouse_click);
     }
-    
-    // CRITICAL: Always release SYNC grabs to prevent permanent input freeze
-    // This must be called for ALL button press events, not just some paths
+
+    // CRITICAL: Release the SYNC grab so events are not permanently frozen.
     _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_REPLAY_POINTER, xcb.XCB_CURRENT_TIME);
     _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, xcb.XCB_CURRENT_TIME);
     utils.flush(wm.conn);
@@ -170,13 +161,16 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) 
         drag.updateDrag(wm, event.root_x, event.root_y);
         return;
     }
-
-    // A real mouse movement after a window spawn clears the enter-notify
-    // suppression.  We return immediately so this motion doesn't itself cause
-    // a focus change — the next EnterNotify or LeaveNotify will handle that.
+    // Real movement clears window-spawn suppression so the next
+    // EnterNotify / LeaveNotify can act on it normally.
     if (wm.suppress_focus_reason == .window_spawn) {
         wm.suppress_focus_reason = .none;
     }
+    // POINTER_MOTION_HINT delivers only one MotionNotify per gesture; re-arm
+    // by calling xcb_query_pointer so the next movement generates a new event.
+    if (xcb.xcb_query_pointer_reply(
+        wm.conn, xcb.xcb_query_pointer(wm.conn, wm.root), null,
+    )) |reply| std.c.free(reply);
 }
 
 fn closeWindow(wm: *WM, win: u32) void {
@@ -195,13 +189,12 @@ fn closeWindow(wm: *WM, win: u32) void {
     };
 
     const prop_reply = xcb.xcb_get_property_reply(wm.conn,
-        xcb.xcb_get_property(wm.conn, 0, win, wm_protocols_atom, xcb.XCB_ATOM_ATOM, 0, 1024), null);
+        xcb.xcb_get_property(wm.conn, 0, win, wm_protocols_atom, xcb.XCB_ATOM_ATOM, 0, 256), null);
 
     if (prop_reply) |reply| {
         defer std.c.free(reply);
         const atoms: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
-        const atom_count: usize = @intCast(@divExact(xcb.xcb_get_property_value_length(reply), @as(c_int, @sizeOf(u32))));
-        for (atoms[0..atom_count]) |atom| {
+        for (atoms[0..@intCast(reply.*.value_len)]) |atom| {
             if (atom == wm_delete_atom) {
                 sendDeleteEvent(wm, win, wm_protocols_atom, wm_delete_atom);
                 return;
@@ -237,11 +230,11 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
         .reload_config => wm.should_reload_config.store(true, .release),
         .toggle_layout => {
             tiling.toggleLayout(wm);
-            bar.markDirty();  // Force immediate bar update for layout indicator
+            bar.markDirty();
         },
         .toggle_layout_reverse => {
             tiling.toggleLayoutReverse(wm);
-            bar.markDirty();  // Force immediate bar update for layout indicator
+            bar.markDirty();
         },
         .toggle_bar_visibility => bar.setBarState(wm, .toggle),
         .toggle_bar_position => {
@@ -251,25 +244,25 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
         },
         .increase_master => {
             tiling.increaseMasterWidth(wm);
-            bar.markDirty();  // Update bar to reflect layout changes
+            bar.markDirty();
         },
         .decrease_master => {
             tiling.decreaseMasterWidth(wm);
-            bar.markDirty();  // Update bar to reflect layout changes
+            bar.markDirty();
         },
         .increase_master_count => {
             tiling.increaseMasterCount(wm);
-            bar.markDirty();  // Update bar to reflect layout changes
+            bar.markDirty();
         },
         .decrease_master_count => {
             tiling.decreaseMasterCount(wm);
-            bar.markDirty();  // Update bar to reflect layout changes
+            bar.markDirty();
         },
         .toggle_tiling => {
             tiling.toggleTiling(wm);
-            bar.markDirty();  // Update bar to reflect tiling state
+            bar.markDirty();
         },
-        .swap_master => tiling.swapWithMaster(wm),  // NEW: Handle swap_master action
+        .swap_master => tiling.swapWithMaster(wm),
         .dump_state => dumpState(wm),
         .emergency_recover => emergencyRecover(wm),
         .exec => |cmd| try executeShellCommand(wm, cmd),
@@ -319,7 +312,6 @@ fn dumpState(wm: *WM) void {
     debug.info("Focused: {?x}", .{wm.focused_window});
     debug.info("Total windows: {}", .{wm.windows.count()});
     debug.info("Suppress focus: {s}", .{@tagName(wm.suppress_focus_reason)});
-    debug.info("Pointer: ({}, {})", .{wm.last_pointer_x, wm.last_pointer_y});
 
     var fs_it = wm.fullscreen.per_workspace.iterator();
     var fs_count: u8 = 0;

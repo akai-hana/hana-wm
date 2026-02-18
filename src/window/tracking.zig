@@ -70,6 +70,7 @@ pub const Tracking = struct {
     }
 
     pub fn addFront(self: *Tracking, win: u32) !void {
+        std.debug.assert(win != 0);
         if (self.contains(win)) return;
         switch (self.storage) {
             .small => |*s| {
@@ -128,16 +129,23 @@ pub const Tracking = struct {
             .small => |*s| {
                 for (s.items[0..s.len], 0..) |w, i| {
                     if (w != win) continue;
-                    var j: u8 = @intCast(i);
-                    while (j < s.len - 1) : (j += 1) s.items[j] = s.items[j + 1];
                     s.len -= 1;
+                    if (ordered) {
+                        var j: u8 = @intCast(i);
+                        while (j < s.len) : (j += 1) s.items[j] = s.items[j + 1];
+                    } else {
+                        s.items[i] = s.items[s.len];
+                    }
                     return true;
                 }
                 return false;
             },
             .large => |*l| {
-                if (!l.set.remove(win)) return false;
+                // Find the list index first — if the window somehow isn't in the
+                // list (shouldn't happen, but guards against inconsistency), bail
+                // before touching the set so both structures stay in sync.
                 const idx = std.mem.indexOfScalar(u32, l.list.items, win) orelse return false;
+                _ = l.set.remove(win);
                 if (ordered) _ = l.list.orderedRemove(idx) else _ = l.list.swapRemove(idx);
                 // Capture the condition before demoteToSmall() invalidates `l`.
                 if (l.list.items.len <= DEMOTION_THRESHOLD) self.demoteToSmall();
@@ -185,6 +193,9 @@ pub const Tracking = struct {
         const s = self.storage.small;
         var list: std.ArrayListUnmanaged(u32) = .empty;
         var set = std.AutoHashMap(u32, void).init(self.allocator);
+        // If either allocation fails, release whatever was already allocated.
+        errdefer list.deinit(self.allocator);
+        errdefer set.deinit();
         try list.ensureTotalCapacity(self.allocator, s.len + 8);
         try set.ensureTotalCapacity(s.len + 8);
         for (s.items[0..s.len]) |win| {

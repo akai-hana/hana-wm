@@ -1,5 +1,4 @@
-// Core type definitions - MEMORY OPTIMIZED
-// Using minimal bit-width integers for optimal memory usage
+// Core type definitions
 
 const std = @import("std");
 const dpi = @import("dpi");
@@ -49,7 +48,6 @@ pub const MOD_MASK_RELEVANT: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER
 pub const MIN_WINDOW_DIM: u16 = 50;
 
 // XKB initialization retry parameters
-// NOTE: u64 for constants is fine - they don't consume runtime memory, only compile-time
 pub const XKB_RETRY_DELAY_MS: u64 = 20;
 
 // Tiling constraints
@@ -69,8 +67,7 @@ pub const Action = union(enum) {
     decrease_master_count,
     toggle_tiling,
     toggle_fullscreen,
-    swap_master,  // NEW: Swap focused window with master (or move slave to master)
-    // OPTIMIZED: u8 for workspace indices - max 255 workspaces
+    swap_master,
     switch_workspace: u8,
     move_to_workspace: u8,
     dump_state,
@@ -87,7 +84,7 @@ pub const Action = union(enum) {
 pub const Keybind = struct {
     modifiers: u16,  // XCB API requirement
     keysym: u32,     // X11 keysym - must be u32
-    keycode: ?u8 = null,  // ALREADY OPTIMAL: 0-255 range
+    keycode: ?u8 = null,
     action: Action,
 };
 
@@ -118,7 +115,6 @@ pub const TilingConfig = struct {
     layouts: std.ArrayList([]const u8),  // Available layouts in cycle order
     master_side: MasterSide = .left,
     master_width: parser.ScalableValue = parser.ScalableValue.percentage(50.0),
-    // OPTIMIZED: u8 for master count - max 255 windows is plenty
     master_count: u8 = 1,
     gaps: parser.ScalableValue = parser.ScalableValue.absolute(10.0),
     border_width: parser.ScalableValue = parser.ScalableValue.absolute(2.0),
@@ -177,7 +173,6 @@ pub const BarConfig = struct {
     fonts: std.ArrayList([]const u8),
     font_size: parser.ScalableValue = parser.ScalableValue.percentage(10.0),
     scaled_font_size: u16 = 10, // Can exceed 255 on high DPI - u16 is correct
-    // OPTIMIZED: u8 for padding/spacing - max 255 pixels is plenty
     padding: u8 = 8,
     spacing: u8 = 12,
 
@@ -237,7 +232,7 @@ pub const BarConfig = struct {
         return self.title_accent_color orelse self.accent_color;
     }
 
-    pub fn getTitleUnfocusedAccent(self: BarConfig) u32 {
+    pub inline fn getTitleUnfocusedAccent(self: BarConfig) u32 {
         return self.title_unfocused_accent orelse self.accent_color;
     }
 
@@ -287,7 +282,6 @@ pub const BarConfig = struct {
 
 pub const Rule = struct {
     class_name: []const u8,
-    // OPTIMIZED: u8 for workspace indices - max 255 workspaces
     workspace: u8,
 
     pub inline fn deinit(self: *Rule, allocator: std.mem.Allocator) void {
@@ -296,7 +290,6 @@ pub const Rule = struct {
 };
 
 pub const WorkspaceConfig = struct {
-    // OPTIMIZED: u8 for workspace count - max 255 workspaces
     count: u8 = 9,
     rules: std.ArrayListUnmanaged(Rule) = .{},
 };
@@ -357,7 +350,6 @@ pub const Config = struct {
 
 pub const FullscreenInfo = struct {
     window: u32,  // XCB window ID - must be u32
-    // OPTIMIZED: u8 for workspace indices - max 255 workspaces
     workspace: u8,
     saved_geometry: struct {
         x: i16,      // Screen coordinates can be negative
@@ -369,19 +361,16 @@ pub const FullscreenInfo = struct {
 };
 
 pub const FullscreenState = struct {
-    // OPTIMIZED: u8 keys for workspace indices - max 255 workspaces
     per_workspace: std.AutoHashMap(u8, FullscreenInfo),
     window_to_workspace: std.AutoHashMap(u32, u8),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) FullscreenState {
-        // OPTIMIZATION: Pre-allocate fullscreen hash maps
-        // Typical: 0-2 fullscreen windows per workspace
         var per_ws = std.AutoHashMap(u8, FullscreenInfo).init(allocator);
-        per_ws.ensureTotalCapacity(4) catch {}; // 4 workspaces with fullscreen
+        per_ws.ensureTotalCapacity(4) catch {};
         
         var win_to_ws = std.AutoHashMap(u32, u8).init(allocator);
-        win_to_ws.ensureTotalCapacity(4) catch {}; // Match per_workspace
+        win_to_ws.ensureTotalCapacity(4) catch {};
         
         return .{
             .per_workspace = per_ws,
@@ -456,24 +445,10 @@ pub const WM = struct {
     running: *std.atomic.Value(bool),
     dpi_info: dpi.DpiInfo,
     drag_state: DragState = .{},
-    
-    // Intelligent focus control
-    // Track last known pointer position to detect actual movement vs window repositioning
-    last_pointer_x: i16 = 0,
-    last_pointer_y: i16 = 0,
-    
-    // PHASE 2: Pointer query caching timestamp (in milliseconds)
-    // Reduces X11 roundtrips by ~60% in focus-follows-mouse scenarios
-    last_pointer_query_time: i64 = 0,
-    
-    // Timestamp of the last processed X event (xcb_timestamp_t = u32).
-    // Used for ICCCM-compliant focus requests — WM_TAKE_FOCUS messages and
-    // xcb_set_input_focus must carry the event timestamp, not XCB_CURRENT_TIME,
-    // because globally-active windows (e.g. Electron) validate the timestamp
-    // and silently ignore requests with time=0.
+    // Timestamp of the last processed X event; used for ICCCM-compliant
+    // focus requests — xcb_set_input_focus and WM_TAKE_FOCUS messages must
+    // carry the triggering event's timestamp, not XCB_CURRENT_TIME (0).
     last_event_time: u32 = 0,
-
-    // Context-aware focus suppression
     suppress_focus_reason: FocusSuppressReason = .none,
 
     pub fn deinit(self: *WM) void {

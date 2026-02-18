@@ -1,6 +1,5 @@
 // X event dispatch
 
-const std        = @import("std");
 const defs       = @import("defs");
 const xcb        = defs.xcb;
 const constants  = @import("constants");

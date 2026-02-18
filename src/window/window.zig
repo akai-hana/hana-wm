@@ -33,14 +33,35 @@ pub fn grabButtons(wm: *WM, win: u32, focused: bool) void {
 
 // Workspace rule matching ──────────────────────────────────────────────────
 
-fn matchWorkspaceRule(wm: *WM, win: u32) ?u8 {
-    const rules = wm.config.workspaces.rules.items;
-    if (rules.len == 0) return null;
-    const wm_class = utils.getWMClass(wm.conn, win, wm.allocator) orelse return null;
-    defer wm_class.deinit(wm.allocator);
-    for (rules) |rule| {
-        if (std.mem.eql(u8, rule.class_name, wm_class.class) or
-            std.mem.eql(u8, rule.class_name, wm_class.instance))
+fn validateWorkspace(target: ?u8, current: u8) u8 {
+    const ws = target orelse return current;
+    const s  = workspaces.getState() orelse return current;
+    return if (ws < s.workspaces.len) ws else current;
+}
+
+/// Collect a pre-fired WM_CLASS property cookie and match it against workspace
+/// rules.  Parses instance/class directly from the reply buffer — no allocation.
+/// Returns the target workspace index, or null if no rule matched or no reply.
+fn collectWorkspaceRule(wm: *WM, cookie: xcb.xcb_get_property_cookie_t) ?u8 {
+    const reply = xcb.xcb_get_property_reply(wm.conn, cookie, null) orelse return null;
+    defer std.c.free(reply);
+    if (reply.*.format != 8 or reply.*.value_len == 0) return null;
+
+    const data: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
+    // Strip trailing null bytes that some clients include in value_len.
+    var len: usize = @intCast(reply.*.value_len);
+    while (len > 0 and data[len - 1] == 0) len -= 1;
+
+    const sep = std.mem.indexOfScalar(u8, data[0..len], 0) orelse return null;
+    const class_start = sep + 1;
+    if (class_start >= len) return null;
+
+    const instance = data[0..sep];
+    const class    = data[class_start..len];
+
+    for (wm.config.workspaces.rules.items) |rule| {
+        if (std.mem.eql(u8, rule.class_name, class) or
+            std.mem.eql(u8, rule.class_name, instance))
         {
             return rule.workspace;
         }
@@ -48,13 +69,7 @@ fn matchWorkspaceRule(wm: *WM, win: u32) ?u8 {
     return null;
 }
 
-fn validateWorkspace(target: ?u8, current: u8) u8 {
-    const ws = target orelse return current;
-    const s  = workspaces.getState() orelse return current;
-    return if (ws < s.workspaces.len) ws else current;
-}
-
-// Setup helpers 
+// Setup helper
 
 inline fn setupTiling(wm: *WM, win: u32, on_current: bool) void {
     if (!wm.config.tiling.enabled) return;
@@ -62,30 +77,74 @@ inline fn setupTiling(wm: *WM, win: u32, on_current: bool) void {
     if (on_current) tiling.retileCurrentWorkspace(wm, false);
 }
 
-inline fn setupWindow(wm: *WM, win: u32, workspace_index: u8) !void {
-    _ = xcb.xcb_change_window_attributes(wm.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{WINDOW_EVENT_MASK});
-    try wm.addWindow(win);
-    workspaces.moveWindowTo(wm, win, workspace_index);
-}
-
-// Map request ──
+// Map request ──────────────────────────────────────────────────────────────
 
 pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void {
-    const win          = event.window;
-    const current_ws   = workspaces.getCurrentWorkspace() orelse 0;
-    const validated_ws = validateWorkspace(matchWorkspaceRule(wm, win), current_ws);
-    const is_current   = (validated_ws == current_ws);
+    const win        = event.window;
+    const current_ws = workspaces.getCurrentWorkspace() orelse 0;
 
-    setupWindow(wm, win, validated_ws) catch |err| { debug.logError(err, win); return; };
+    // Subscribe to events on this window before anything else so no
+    // state-change events escape between setup and the map.
+    _ = xcb.xcb_change_window_attributes(
+        wm.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{WINDOW_EVENT_MASK},
+    );
 
-    // Only map immediately for the current workspace.  Windows on inactive
-    // workspaces are left unmapped so the compositor never allocates a buffer
-    // for off-screen content.  executeSwitch() maps them inside the server grab.
-    if (is_current) _ = xcb.xcb_map_window(wm.conn, win);
+    // Fire focus-cache property cookies — always needed, no blocking.
+    const c_protocols = xcb.xcb_get_property(
+        wm.conn, 0, win,
+        utils.getAtomCached("WM_PROTOCOLS") catch 0,
+        xcb.XCB_ATOM_ATOM, 0, 256,
+    );
+    const c_hints = xcb.xcb_get_property(
+        wm.conn, 0, win, xcb.XCB_ATOM_WM_HINTS, xcb.XCB_ATOM_WM_HINTS, 0, 9,
+    );
 
-    utils.cacheWMTakeFocus(wm.conn, win);
-    setupTiling(wm, win, is_current);
+    // Determine target workspace.
+    // No-rules (common path): purely local — zero round-trips.
+    // With rules: one WM_CLASS round-trip; xcb_get_property_reply flushes
+    //             the output buffer implicitly before blocking, so the focus
+    //             cookies above also land at the server during that wait.
+    const validated_ws: u8 = blk: {
+        if (wm.config.workspaces.rules.items.len == 0) break :blk current_ws;
+        const c_class = xcb.xcb_get_property(
+            wm.conn, 0, win,
+            utils.getAtomCached("WM_CLASS") catch 0,
+            xcb.XCB_ATOM_STRING, 0, 256,
+        );
+        const target = collectWorkspaceRule(wm, c_class);
+        break :blk validateWorkspace(target, current_ws);
+    };
+    const is_current = (validated_ws == current_ws);
+
+    // All local state — no X11 round-trips.
+    wm.addWindow(win) catch |err| {
+        debug.logError(err, win);
+        utils.flush(wm.conn);
+        return;
+    };
+    workspaces.moveWindowTo(wm, win, validated_ws);
+
+    if (is_current) {
+        // Queue the tiled geometry configure BEFORE the map command.  XCB
+        // guarantees in-order processing within a connection, so the server
+        // applies the geometry first — the window appears at its correct
+        // tiled position with no intermediate geometry flash.
+        setupTiling(wm, win, true);
+        _ = xcb.xcb_map_window(wm.conn, win);
+    }
+    // Off-screen windows are intentionally never mapped here.
+    // executeSwitch() maps them inside the server grab when their workspace
+    // is activated, so the compositor never allocates a buffer for them.
+
+    // Single flush covers: change_window_attributes + focus cookies +
+    // (for is_current) all configure_window calls + map_window.
     utils.flush(wm.conn);
+
+    // Collect focus property replies.  On the no-rules path these were
+    // fired before any blocking and the flush just pushed them to the
+    // server; replies are typically already in the socket read buffer.
+    // On the rules path the WM_CLASS blocking step also flushed them.
+    utils.populateFocusCacheFromCookies(wm.conn, win, c_protocols, c_hints);
 
     if (is_current) {
         focus.setFocus(wm, win, .window_spawn);
@@ -100,70 +159,71 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
 
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, wm: *WM) void {
     const win = event.window;
-    // Tiled and fullscreen windows have their geometry managed by us — ignore.
     if ((wm.config.tiling.enabled and tiling.isWindowTiled(win)) or
         wm.fullscreen.isFullscreen(win)) return;
 
-    _ = xcb.xcb_configure_window(wm.conn, win, event.value_mask, &[_]u32{
-        @intCast(event.x), @intCast(event.y),
-        @intCast(event.width), @intCast(event.height),
-        @intCast(event.border_width),
-    });
+    // Honour only the geometry bits we provide values for.  Passing the raw
+    // value_mask unmodified would cause XCB to read past our value array if
+    // the client also sets Sibling (0x020) or StackMode (0x040).
+    const GEOMETRY_MASK: u16 =
+        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
+        xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
+        xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH;
+    const mask = event.value_mask & GEOMETRY_MASK;
+    if (mask == 0) return;
+
+    // XCB reads values in bit-order: for each set bit in mask (lowest first)
+    // it consumes values[0], values[1], etc.  Providing all 5 values regardless
+    // of which bits are set is wrong — e.g. if only WIDTH|HEIGHT are requested,
+    // XCB reads values[0] for width, but we would have stored event.x there.
+    var values: [5]u32 = undefined;
+    var n: u3 = 0;
+    if (mask & xcb.XCB_CONFIG_WINDOW_X != 0)            { values[n] = @bitCast(@as(i32, event.x));            n += 1; }
+    if (mask & xcb.XCB_CONFIG_WINDOW_Y != 0)            { values[n] = @bitCast(@as(i32, event.y));            n += 1; }
+    if (mask & xcb.XCB_CONFIG_WINDOW_WIDTH != 0)        { values[n] = event.width;                            n += 1; }
+    if (mask & xcb.XCB_CONFIG_WINDOW_HEIGHT != 0)       { values[n] = event.height;                           n += 1; }
+    if (mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0) { values[n] = event.border_width;                     n += 1; }
+    _ = xcb.xcb_configure_window(wm.conn, win, mask, &values);
     utils.flush(wm.conn);
 }
 
-// Focus events ─
+// Focus events ─────────────────────────────────────────────────────────────
 
 pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) void {
     wm.last_event_time = event.time;
+    // Filter GRAB/UNGRAB crossings (passive grab activate/deactivate).
+    // WHILE_GRABBED must pass through — it fires during active grabs from
+    // other clients (GTK, Qt) and represents genuine pointer movement.
+    if (event.mode == xcb.XCB_NOTIFY_MODE_GRAB or
+        event.mode == xcb.XCB_NOTIFY_MODE_UNGRAB) return;
+    if (wm.drag_state.active) return;
+    if (wm.suppress_focus_reason == .window_spawn) return;
 
-    // Ignore crossings caused by pointer grabs/ungrabs (e.g. during window drags).
-    if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL) return;
-
-    // Root receives a virtual EnterNotify (detail=NonlinearVirtual) whenever the
-    // pointer moves to any direct child, regardless of that child's own event mask.
-    // This is the only delivery path for apps like Electron/Chromium that call
-    // XSelectInput after mapping to strip ENTER_WINDOW from our subscription.
-    // For normal windows we receive both root's virtual event and the window's own
-    // event; the focused_window equality check below deduplicates them.
     const win = if (event.event == wm.root and event.child != 0)
         event.child
     else
         event.event;
 
-    const managed_win = utils.findManagedWindow(wm.conn, win, wm);
+    if (filters.isSystemWindow(wm, win)) return;
+    if (!wm.hasWindow(win)) return;
+    if (!workspaces.isOnCurrentWorkspace(win)) return;
+    if (wm.focused_window == win) return;
 
-    if (filters.isSystemWindow(wm, managed_win)) return;
-    if (!wm.hasWindow(managed_win)) return;
-    if (!workspaces.isOnCurrentWorkspace(managed_win)) return;
-    if (wm.focused_window == managed_win) return;
-
-    // Suppress synthetic EnterNotify events generated when retiling shifts
-    // windows under the cursor after a window spawn.  Cleared in
-    // handleMotionNotify once the user actually moves the mouse.
-    if (wm.suppress_focus_reason == .window_spawn) return;
-
-    focus.setFocus(wm, managed_win, .mouse_enter);
+    focus.setFocus(wm, win, .mouse_enter);
 }
-
-// Leave notify (root) ──────────────────────────────────────────────────────
 
 /// Root's LeaveNotify fires the instant the pointer enters any child window,
 /// including Electron/Chromium which generates no EnterNotify or MotionNotify
-/// events visible to root.  This gives us an event-driven focus path for those
-/// windows rather than relying on the 50 ms polling fallback.
+/// events visible to root.  This gives us event-driven focus at the same
+/// latency as handleEnterNotify for all other windows.
 pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t, wm: *WM) void {
     wm.last_event_time = event.time;
-
-    // Only care about root losing the pointer to a child window.
     if (event.event != wm.root) return;
     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL) return;
     if (wm.drag_state.active) return;
     if (wm.suppress_focus_reason == .window_spawn) return;
 
-    // event.child is the direct child of root being entered (if any).
-    // If it is zero (pointer left root entirely, which shouldn't happen, or
-    // the field wasn't populated), fall back to a single pointer query.
+    // event.child is the direct child of root being entered.
     const target: u32 = if (event.child != 0) event.child else blk: {
         const reply = xcb.xcb_query_pointer_reply(
             wm.conn, xcb.xcb_query_pointer(wm.conn, wm.root), null,
@@ -171,27 +231,32 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t, wm: *WM) vo
         defer std.c.free(reply);
         break :blk reply.*.child;
     };
-
     if (target == 0 or target == wm.root) return;
 
-    const managed = utils.findManagedWindow(wm.conn, target, wm);
-    if (filters.isSystemWindow(wm, managed)) return;
-    if (!wm.hasWindow(managed)) return;
-    if (!workspaces.isOnCurrentWorkspace(managed)) return;
-    if (wm.focused_window == managed) return;
+    if (filters.isSystemWindow(wm, target)) return;
+    if (!wm.hasWindow(target)) return;
+    if (!workspaces.isOnCurrentWorkspace(target)) return;
+    if (wm.focused_window == target) return;
 
-    focus.setFocus(wm, managed, .mouse_enter);
+    focus.setFocus(wm, target, .mouse_enter);
 }
 
 // Property notify ──────────────────────────────────────────────────────────
 
-/// Refresh WM_TAKE_FOCUS cache when WM_PROTOCOLS changes. Electron apps
-/// set this after mapping, which would leave a stale false in the cache.
+/// Keep the focus-property cache coherent when relevant window properties change.
+/// WM_PROTOCOLS: Electron sets WM_TAKE_FOCUS after mapping, so a cached false
+///               would make us treat it as passive.  Recompute on any change.
+/// WM_HINTS:     The input field is stable in practice, but some apps update it.
+///               Recomputing is cheap — one property round-trip, done rarely.
 pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t, wm: *WM) void {
     if (!wm.hasWindow(event.window)) return;
     const wm_protocols = utils.getAtomCached("WM_PROTOCOLS") catch return;
     if (event.atom == wm_protocols) {
-        utils.cacheWMTakeFocus(wm.conn, event.window);
+        utils.recacheTakeFocus(wm.conn, event.window);
+        return;
+    }
+    if (event.atom == xcb.XCB_ATOM_WM_HINTS) {
+        utils.recacheHintsInput(wm.conn, event.window);
     }
 }
 
@@ -199,13 +264,10 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t, wm: *
 
 fn unmanageWindow(wm: *WM, win: u32) void {
     if (wm.fullscreen.isFullscreen(win)) {
-        // Clear fullscreen state for this window across all workspaces.
-        var it = wm.fullscreen.per_workspace.iterator();
-        while (it.next()) |entry| {
-            if (entry.value_ptr.window == win) {
-                wm.fullscreen.removeForWorkspace(entry.key_ptr.*);
-                break;
-            }
+        // window_to_workspace is the reverse index — O(1) lookup rather than
+        // iterating per_workspace to find which workspace holds this window.
+        if (wm.fullscreen.window_to_workspace.get(win)) |ws| {
+            wm.fullscreen.removeForWorkspace(ws);
         }
         bar.setBarState(wm, .show_fullscreen);
     }
@@ -213,15 +275,12 @@ fn unmanageWindow(wm: *WM, win: u32) void {
     const was_focused = (wm.focused_window == win);
 
     if (wm.config.tiling.enabled) tiling.removeWindow(win);
-    utils.uncacheWMTakeFocus(win);
+    utils.uncacheWindowFocusProps(win);
     workspaces.removeWindow(win);
     wm.removeWindow(win);
 
     if (was_focused) {
-        if (wm.config.tiling.enabled) {
-            tiling.retileIfDirty(wm);
-            utils.flush(wm.conn);
-        }
+        if (wm.config.tiling.enabled) tiling.retileIfDirty(wm);
         focus.clearFocus(wm);
         focusWindowUnderPointer(wm);
     }

@@ -23,21 +23,20 @@ pub const Reason = enum {
 };
 
 pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
-    setFocusBatch(wm, win, reason, true);
-}
-
-pub fn setFocusBatch(wm: *WM, win: u32, reason: Reason, do_flush: bool) void {
     if (win == 0 or win == wm.root or bar.isBarWindow(win)) return;
-
-    // Deduplicate against the WM's own model, not the X server's live state.
-    // Querying the server would introduce a blocking round-trip and could cause
-    // state divergence if the X focus and wm.focused_window disagreed.
     if (wm.focused_window == win) return;
 
-    // Calling xcb_set_input_focus on an unmapped window produces a BadMatch error.
-    if (!isWindowMapped(wm.conn, win)) return;
+    // EnterNotify / LeaveNotify are only delivered for mapped, viewable windows —
+    // the X server guarantees this.  Skip the round-trip for hover focus.
+    // For .window_spawn, xcb_map_window was sent on this same connection moments
+    // before this call; XCB's in-order delivery means the get_window_attributes
+    // reply will always reflect the already-mapped state — the check can never
+    // fail, so skip it.  For all other reasons (click, workspace switch, destroy
+    // recovery) the window could be destroyed between the triggering event and
+    // this call, so we guard against that BadMatch race.
+    if (reason != .mouse_enter and reason != .window_spawn and !isWindowMapped(wm.conn, win)) return;
 
-    const input_model = utils.getInputModel(wm.conn, win);
+    const input_model = utils.getInputModelCached(wm.conn, win);
     if (input_model == .no_input) return;
 
     const old = wm.focused_window;
@@ -62,20 +61,20 @@ pub fn setFocusBatch(wm: *WM, win: u32, reason: Reason, do_flush: bool) void {
     // Electron/Chromium only accept focus when topmost in the stacking order.
     if (shouldRaise(reason) or (reason == .mouse_enter and input_model == .globally_active)) {
         _ = xcb.xcb_configure_window(
-            wm.conn,
-            win,
+            wm.conn, win,
             xcb.XCB_CONFIG_WINDOW_STACK_MODE,
             &[_]u32{xcb.XCB_STACK_MODE_ABOVE},
         );
     }
 
     if (input_model == .locally_active or input_model == .globally_active) {
-        utils.sendWMTakeFocus(wm.conn, win);
+        utils.sendWMTakeFocus(wm.conn, win, wm.last_event_time);
     }
 
     tiling.updateWindowFocusFast(wm, old, win);
-
-    if (do_flush) utils.flush(wm.conn);
+    // Do not flush here — the main event loop flushes after draining all pending
+    // events.  This batches rapid hover crossings (e.g. fast mouse sweeps across
+    // several windows) into a single write syscall rather than one per crossing.
     bar.markDirty();
 }
 

@@ -81,73 +81,58 @@ fn becomeWindowManager(conn: *xcb.xcb_connection_t, root: u32) !void {
     }
 }
 
-fn setupExistingWindows(conn: *xcb.xcb_connection_t, root: u32, allocator: std.mem.Allocator) !void {
-    const reply = xcb.xcb_query_tree_reply(conn, xcb.xcb_query_tree(conn, root), null) orelse return;
-    defer std.c.free(reply);
-
-    const children = xcb.xcb_query_tree_children(reply);
-    const len: usize = @intCast(xcb.xcb_query_tree_children_length(reply));
-    if (len == 0) return;
-
-    // Design choice: Only subscribe to enter/leave events on pre-existing windows.
-    // We do NOT call addWindow, workspaces.moveWindowTo, or tiling.addWindow.
-    // This means pre-existing windows are not managed — only new windows created
-    // after WM startup are tiled. This is intentional: on WM restart, the user's
-    // existing window layout is preserved rather than forcibly retiled.
-    const event_mask = xcb.XCB_EVENT_MASK_ENTER_WINDOW | xcb.XCB_EVENT_MASK_LEAVE_WINDOW;
-    
-    // Use stack allocation for common case (≤32 windows), heap for many
-    var stack_cookies: [constants.Sizes.WINDOW_CAPACITY]xcb.xcb_get_window_attributes_cookie_t = undefined;
-    const cookies = if (len <= constants.Sizes.WINDOW_CAPACITY) 
-        stack_cookies[0..len] 
-    else 
-        try allocator.alloc(xcb.xcb_get_window_attributes_cookie_t, len);
-    defer if (len > constants.Sizes.WINDOW_CAPACITY) allocator.free(cookies);
-    
-    for (0..len) |i| {
-        cookies[i] = xcb.xcb_get_window_attributes(conn, children[i]);
-    }
-    _ = xcb.xcb_flush(conn);
-    
-    for (cookies, 0..) |cookie, i| {
-        const attrs = xcb.xcb_get_window_attributes_reply(conn, cookie, null) orelse continue;
-        defer std.c.free(attrs);
-        if (attrs.*.override_redirect != 0 or attrs.*.map_state != xcb.XCB_MAP_STATE_VIEWABLE) continue;
-        _ = xcb.xcb_change_window_attributes(conn, children[i], xcb.XCB_CW_EVENT_MASK, &[_]u32{event_mask});
-    }
-    _ = xcb.xcb_flush(conn);
-}
-
 fn grabKeybindings(wm: *WM) !void {
     _ = xcb.xcb_ungrab_key(wm.conn, xcb.XCB_GRAB_ANY, wm.root, xcb.XCB_MOD_MASK_ANY);
-    
-    var failed_keybinds: usize = 0;
-    
+
+    // Count total grabs needed so we can pre-size the cookie array.
+    var total: usize = 0;
+    for (wm.config.keybindings.items) |kb| {
+        if (kb.keycode != null) total += constants.LOCK_MODIFIERS.len;
+    }
+    if (total == 0) {
+        _ = xcb.xcb_flush(wm.conn);
+        return;
+    }
+
+    const CookieEntry = struct {
+        cookie:  xcb.xcb_void_cookie_t,
+        keycode: u8,
+    };
+    const cookies = try wm.allocator.alloc(CookieEntry, total);
+    defer wm.allocator.free(cookies);
+
+    // Fire every grab request without waiting for a reply — all requests are
+    // written to the output buffer in one shot before any are flushed.
+    var n: usize = 0;
     for (wm.config.keybindings.items) |kb| {
         const keycode = kb.keycode orelse continue;
-        
         for (constants.LOCK_MODIFIERS) |lock| {
-            const cookie = xcb.xcb_grab_key_checked(
-                wm.conn, 0, wm.root,
-                @intCast(kb.modifiers | lock), 
-                keycode, 
-                xcb.XCB_GRAB_MODE_ASYNC, 
-                xcb.XCB_GRAB_MODE_ASYNC
-            );
-            
-            if (xcb.xcb_request_check(wm.conn, cookie)) |err| {
-                std.c.free(err);
-                debug.warn("Failed to grab keycode: {}", .{keycode});
-                failed_keybinds += 1;
-                break;  // Don't try other lock modifiers if one fails
-            }
+            cookies[n] = .{
+                .cookie = xcb.xcb_grab_key_checked(
+                    wm.conn, 0, wm.root,
+                    @intCast(kb.modifiers | lock),
+                    keycode,
+                    xcb.XCB_GRAB_MODE_ASYNC,
+                    xcb.XCB_GRAB_MODE_ASYNC,
+                ),
+                .keycode = keycode,
+            };
+            n += 1;
         }
     }
-    
-    if (failed_keybinds > 0) {
-        debug.warn("{} keybinding(s) failed to grab", .{failed_keybinds});
+
+    // Now collect all results.  The first xcb_request_check flushes the buffer
+    // and waits; subsequent calls find replies already in the read buffer.
+    var failed: usize = 0;
+    for (cookies[0..n]) |entry| {
+        if (xcb.xcb_request_check(wm.conn, entry.cookie)) |err| {
+            std.c.free(err);
+            debug.warn("Failed to grab keycode: {}", .{entry.keycode});
+            failed += 1;
+        }
     }
-    
+
+    if (failed > 0) debug.warn("{} keybinding(s) failed to grab", .{failed});
     _ = xcb.xcb_flush(wm.conn);
 }
 
@@ -251,7 +236,9 @@ pub fn main() !void {
 
     try utils.initAtomCache(conn);
     utils.initWMTakeFocusCache(wm.allocator);
+    utils.initInputModelCache(wm.allocator);
     defer utils.deinitWMTakeFocusCache();
+    defer utils.deinitInputModelCache();
     defer drawing.deinitFontCache(allocator);
     
     const fds = try setupPollFds();
@@ -269,7 +256,6 @@ pub fn main() !void {
     clock.updateTimerState(&wm);
 
     try grabKeybindings(&wm);
-    try setupExistingWindows(conn, root, allocator);
     _ = xcb.xcb_flush(conn);
     debug.info("Started", .{});
 
@@ -281,7 +267,7 @@ pub fn main() !void {
         .{ .fd = fds.timer, .events = posix.POLL.IN, .revents = 0 },
     };
     
-    while (running.load(.seq_cst)) {
+    while (running.load(.acquire)) {
         _ = posix.poll(&pollfds, -1) catch |err| {
             if (err == error.Interrupted) continue;
             debug.err("Poll error: {}", .{err});
