@@ -1,4 +1,4 @@
-// Focus management - IMPROVED: No event counters, intelligent filtering
+// Focus management
 
 const std = @import("std");
 const defs = @import("defs");
@@ -17,15 +17,66 @@ pub const Reason = enum {
     workspace_switch,
     user_command,
     tiling_operation,
+    // Explicit reason for newly spawned windows; prevents tiling operations
+    // from inadvertently inheriting window_spawn suppression via external state.
+    window_spawn,
 };
 
-// OPTIMIZATION: Single unified focus function with optional flush control
 pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
-    setFocusImpl(wm, win, reason, true);
+    setFocusBatch(wm, win, reason, true);
 }
 
 pub fn setFocusBatch(wm: *WM, win: u32, reason: Reason, do_flush: bool) void {
-    setFocusImpl(wm, win, reason, do_flush);
+    if (win == 0 or win == wm.root or bar.isBarWindow(win)) return;
+
+    // Deduplicate against the WM's own model, not the X server's live state.
+    // Querying the server would introduce a blocking round-trip and could cause
+    // state divergence if the X focus and wm.focused_window disagreed.
+    if (wm.focused_window == win) return;
+
+    // Calling xcb_set_input_focus on an unmapped window produces a BadMatch error.
+    if (!isWindowMapped(wm.conn, win)) return;
+
+    const input_model = utils.getInputModel(wm.conn, win);
+    if (input_model == .no_input) return;
+
+    const old = wm.focused_window;
+    wm.focused_window = win;
+    wm.suppress_focus_reason = suppressionFor(reason);
+
+    window.grabButtons(wm, win, true);
+    if (old) |old_win| window.grabButtons(wm, old_win, false);
+
+    // ICCCM §4.1.7 says xcb_set_input_focus must not be sent to globally_active
+    // windows.  In practice, Electron/Chromium ignores WM_TAKE_FOCUS for
+    // pointer-entry events and only accepts focus via XSetInputFocus anyway.
+    // Sending it unconditionally is what i3, openbox, xfwm4, and kwin all do.
+    _ = xcb.xcb_set_input_focus(
+        wm.conn,
+        xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
+        win,
+        wm.last_event_time,
+    );
+
+    // Raise windows on click/command, AND for globally_active windows on hover.
+    // Electron/Chromium only accept focus when topmost in the stacking order.
+    if (shouldRaise(reason) or (reason == .mouse_enter and input_model == .globally_active)) {
+        _ = xcb.xcb_configure_window(
+            wm.conn,
+            win,
+            xcb.XCB_CONFIG_WINDOW_STACK_MODE,
+            &[_]u32{xcb.XCB_STACK_MODE_ABOVE},
+        );
+    }
+
+    if (input_model == .locally_active or input_model == .globally_active) {
+        utils.sendWMTakeFocus(wm.conn, win);
+    }
+
+    tiling.updateWindowFocusFast(wm, old, win);
+
+    if (do_flush) utils.flush(wm.conn);
+    bar.markDirty();
 }
 
 pub fn clearFocus(wm: *WM) void {
@@ -34,71 +85,45 @@ pub fn clearFocus(wm: *WM) void {
         tiling.updateWindowFocusFast(wm, old_win, null);
     }
     wm.focused_window = null;
-    _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, wm.root, xcb.XCB_CURRENT_TIME);
+    wm.suppress_focus_reason = .none;
+    _ = xcb.xcb_set_input_focus(
+        wm.conn,
+        xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
+        wm.root,
+        wm.last_event_time,
+    );
     bar.markDirty();
 }
 
-fn setFocusImpl(wm: *WM, win: u32, reason: Reason, do_flush: bool) void {
-    if (win == wm.root or win == 0 or bar.isBarWindow(win)) return;
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-    const focus_reply = xcb.xcb_get_input_focus_reply(
-        wm.conn,
-        xcb.xcb_get_input_focus(wm.conn),
-        null,
-    );
-    
-    const static = struct { var count: u32 = 0; };
-    static.count += 1;
-    
-    if (focus_reply) |reply| {
-        defer std.c.free(reply);
-        const curr = reply.*.focus;
-        if (curr == win) {
-            if (false) {
-                debug.info("setFocus: {x} already focused ({}x)", .{win, static.count});
-            }
-            return;
-        }
-        if (false) {
-            debug.info("setFocus #{}: {x} <- {x}", .{static.count, win, curr});
-        }
-    }
-
-    const input_model = utils.getInputModel(wm.conn, win);
-    if (input_model == .no_input) return;
-
-    const old = wm.focused_window;
-    wm.focused_window = win;
-
-    // Set suppression based on context
-    wm.suppress_focus_reason = switch (reason) {
-        .mouse_enter, .mouse_click, .window_destroyed, .user_command, .workspace_switch => .none,
-        .tiling_operation => if (wm.suppress_focus_reason == .window_spawn) .window_spawn else .tiling_operation,
+fn shouldRaise(reason: Reason) bool {
+    return switch (reason) {
+        .mouse_click, .user_command => true,
+        .mouse_enter, .window_destroyed, .workspace_switch,
+        .tiling_operation, .window_spawn => false,
     };
+}
 
-    // Ungrab buttons on newly focused window, regrab on old window
-    window.grabButtons(wm, win, true);
-    if (old) |old_win| window.grabButtons(wm, old_win, false);
+fn suppressionFor(reason: Reason) defs.FocusSuppressReason {
+    return switch (reason) {
+        .mouse_click, .mouse_enter, .window_destroyed,
+        .user_command, .workspace_switch => .none,
+        .tiling_operation => .tiling_operation,
+        .window_spawn     => .window_spawn,
+    };
+}
 
-    // Set input focus for passive and locally_active models
-    // (globally_active windows only receive WM_TAKE_FOCUS, not XSetInputFocus)
-    if (input_model == .passive or input_model == .locally_active) {
-        _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, xcb.XCB_CURRENT_TIME);
+// Returns true only if the window is mapped and viewable. xcb_get_window_attributes
+// failing (e.g. the window was destroyed) is treated as unmapped.
+fn isWindowMapped(conn: *xcb.xcb_connection_t, win: u32) bool {
+    const cookie = xcb.xcb_get_window_attributes(conn, win);
+    const reply = xcb.xcb_get_window_attributes_reply(conn, cookie, null);
+    if (reply) |r| {
+        defer std.c.free(r);
+        return r.*.map_state == xcb.XCB_MAP_STATE_VIEWABLE;
     }
-    
-    // Raise window only for mouse clicks and user commands
-    if (reason == .mouse_click or reason == .user_command) {
-        _ = xcb.xcb_configure_window(wm.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
-    }
-    
-    // Send WM_TAKE_FOCUS protocol for locally_active and globally_active models
-    if (input_model == .locally_active or input_model == .globally_active) {
-        utils.sendWMTakeFocus(wm.conn, win);
-    }
-
-    // Update borders
-    tiling.updateWindowFocusFast(wm, old, win);
-    
-    if (do_flush) utils.flush(wm.conn);
-    bar.markDirty();
+    return false;
 }

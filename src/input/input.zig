@@ -102,6 +102,7 @@ pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
 }
 
 pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
+    wm.last_event_time = event.time;
     var state = &(keybind_state orelse return);
     const xkb_ptr: *xkbcommon.XkbState = @ptrCast(@alignCast(wm.xkb_state.?));
 
@@ -117,6 +118,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
 }
 
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) void {
+    wm.last_event_time = event.time;
     // Determine which window was clicked:
     // - For root grabs (Super+Button): child is the clicked window
     // - For window grabs (SYNC click-to-focus): event is the clicked window, child may be 0
@@ -155,13 +157,15 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) vo
     utils.flush(wm.conn);
 }
 
-pub fn handleButtonRelease(_: *const xcb.xcb_button_release_event_t, wm: *WM) void {
+pub fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t, wm: *WM) void {
+    wm.last_event_time = event.time;
     if (drag.isDragging(wm)) {
         drag.stopDrag(wm);
     }
 }
 
 pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) void {
+    wm.last_event_time = event.time;
     if (drag.isDragging(wm)) {
         drag.updateDrag(wm, event.root_x, event.root_y);
         return;
@@ -169,37 +173,10 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) 
 
     // A real mouse movement after a window spawn clears the enter-notify
     // suppression.  We return immediately so this motion doesn't itself cause
-    // a focus change — the next EnterNotify (once the cursor enters a window
-    // through genuine movement) will handle that.
+    // a focus change — the next EnterNotify or LeaveNotify will handle that.
     if (wm.suppress_focus_reason == .window_spawn) {
         wm.suppress_focus_reason = .none;
-        return;
     }
-
-    // Throttle to every 20th event to reduce overhead
-    const static = struct { var counter: u8 = 0; };
-    static.counter +%= 1;
-    if (static.counter % 5 != 0) return;
-    
-    // Query which window pointer is over
-    const reply = xcb.xcb_query_pointer_reply(
-        wm.conn,
-        xcb.xcb_query_pointer(wm.conn, wm.root),
-        null,
-    ) orelse return;
-    defer std.c.free(reply);
-    
-    const child = reply.*.child;
-    if (child == 0 or child == wm.root) return;
-    
-    const managed = utils.findManagedWindow(wm.conn, child, wm);
-    if (managed == 0) return;
-    if (filters.isSystemWindow(wm, managed)) return;
-    if (!wm.hasWindow(managed)) return;
-    if (!workspaces.isOnCurrentWorkspace(managed)) return;
-    if (wm.focused_window == managed) return;
-    
-    focus.setFocus(wm, managed, .mouse_enter);
 }
 
 fn closeWindow(wm: *WM, win: u32) void {

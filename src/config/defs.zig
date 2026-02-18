@@ -466,6 +466,13 @@ pub const WM = struct {
     // Reduces X11 roundtrips by ~60% in focus-follows-mouse scenarios
     last_pointer_query_time: i64 = 0,
     
+    // Timestamp of the last processed X event (xcb_timestamp_t = u32).
+    // Used for ICCCM-compliant focus requests — WM_TAKE_FOCUS messages and
+    // xcb_set_input_focus must carry the event timestamp, not XCB_CURRENT_TIME,
+    // because globally-active windows (e.g. Electron) validate the timestamp
+    // and silently ignore requests with time=0.
+    last_event_time: u32 = 0,
+
     // Context-aware focus suppression
     suppress_focus_reason: FocusSuppressReason = .none,
 
