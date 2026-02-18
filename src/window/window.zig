@@ -88,8 +88,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     utils.flush(wm.conn);
 
     if (is_current) {
-        wm.suppress_focus_reason = .window_spawn;
-        focus.setFocus(wm, win, .tiling_operation);
+        focus.setFocus(wm, win, .window_spawn);
     } else {
         grabButtons(wm, win, false);
     }
@@ -116,37 +115,84 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, w
 // Focus events ─
 
 pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) void {
-    const win = event.event;
-    
-    // Resolve child windows to their managed parent (for Electron apps)
+    wm.last_event_time = event.time;
+
+    // Ignore crossings caused by pointer grabs/ungrabs (e.g. during window drags).
+    if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL) return;
+
+    // Root receives a virtual EnterNotify (detail=NonlinearVirtual) whenever the
+    // pointer moves to any direct child, regardless of that child's own event mask.
+    // This is the only delivery path for apps like Electron/Chromium that call
+    // XSelectInput after mapping to strip ENTER_WINDOW from our subscription.
+    // For normal windows we receive both root's virtual event and the window's own
+    // event; the focused_window equality check below deduplicates them.
+    const win = if (event.event == wm.root and event.child != 0)
+        event.child
+    else
+        event.event;
+
     const managed_win = utils.findManagedWindow(wm.conn, win, wm);
-    
+
     if (filters.isSystemWindow(wm, managed_win)) return;
     if (!wm.hasWindow(managed_win)) return;
     if (!workspaces.isOnCurrentWorkspace(managed_win)) return;
     if (wm.focused_window == managed_win) return;
 
-    // When a window was just spawned, the retile shifts all stack windows so
-    // the cursor (which may have been sitting in a gap) suddenly lands on a
-    // window.  X sends a synthetic EnterNotify for that window, which would
-    // steal focus away from the newly spawned window.  Suppress all such
-    // synthetic enters until the user actually moves the mouse (cleared in
-    // handleMotionNotify).
+    // Suppress synthetic EnterNotify events generated when retiling shifts
+    // windows under the cursor after a window spawn.  Cleared in
+    // handleMotionNotify once the user actually moves the mouse.
     if (wm.suppress_focus_reason == .window_spawn) return;
 
-    const old = wm.focused_window;
     focus.setFocus(wm, managed_win, .mouse_enter);
-    tiling.updateWindowFocus(wm, old, managed_win);
 }
 
-pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) void {
-    const win = event.event;
-    if (filters.isSystemWindow(wm, win)) return;
-    if (!workspaces.isOnCurrentWorkspace(win)) return;
-    focus.setFocus(wm, win, .mouse_click);
-    _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_REPLAY_POINTER, xcb.XCB_CURRENT_TIME);
-    _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, xcb.XCB_CURRENT_TIME);
-    utils.flush(wm.conn);
+// Leave notify (root) ──────────────────────────────────────────────────────
+
+/// Root's LeaveNotify fires the instant the pointer enters any child window,
+/// including Electron/Chromium which generates no EnterNotify or MotionNotify
+/// events visible to root.  This gives us an event-driven focus path for those
+/// windows rather than relying on the 50 ms polling fallback.
+pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t, wm: *WM) void {
+    wm.last_event_time = event.time;
+
+    // Only care about root losing the pointer to a child window.
+    if (event.event != wm.root) return;
+    if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL) return;
+    if (wm.drag_state.active) return;
+    if (wm.suppress_focus_reason == .window_spawn) return;
+
+    // event.child is the direct child of root being entered (if any).
+    // If it is zero (pointer left root entirely, which shouldn't happen, or
+    // the field wasn't populated), fall back to a single pointer query.
+    const target: u32 = if (event.child != 0) event.child else blk: {
+        const reply = xcb.xcb_query_pointer_reply(
+            wm.conn, xcb.xcb_query_pointer(wm.conn, wm.root), null,
+        ) orelse return;
+        defer std.c.free(reply);
+        break :blk reply.*.child;
+    };
+
+    if (target == 0 or target == wm.root) return;
+
+    const managed = utils.findManagedWindow(wm.conn, target, wm);
+    if (filters.isSystemWindow(wm, managed)) return;
+    if (!wm.hasWindow(managed)) return;
+    if (!workspaces.isOnCurrentWorkspace(managed)) return;
+    if (wm.focused_window == managed) return;
+
+    focus.setFocus(wm, managed, .mouse_enter);
+}
+
+// Property notify ──────────────────────────────────────────────────────────
+
+/// Refresh WM_TAKE_FOCUS cache when WM_PROTOCOLS changes. Electron apps
+/// set this after mapping, which would leave a stale false in the cache.
+pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t, wm: *WM) void {
+    if (!wm.hasWindow(event.window)) return;
+    const wm_protocols = utils.getAtomCached("WM_PROTOCOLS") catch return;
+    if (event.atom == wm_protocols) {
+        utils.cacheWMTakeFocus(wm.conn, event.window);
+    }
 }
 
 // Unmap / destroy ──────────────────────────────────────────────────────────
@@ -177,7 +223,6 @@ fn unmanageWindow(wm: *WM, win: u32) void {
             utils.flush(wm.conn);
         }
         focus.clearFocus(wm);
-        wm.suppress_focus_reason = .none;
         focusWindowUnderPointer(wm);
     }
 

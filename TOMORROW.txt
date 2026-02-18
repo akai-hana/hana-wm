@@ -1,1 +1,5 @@
+akaihanatsundeee:
+absolutely nothing has changed. i'm kind of worried you're thinking so long and failing so many times on such a simple problem. it's been a good amount of dozens of prompts already. do you consider it'd be easier just rewriting it from scratch than trying to diagnose this issue?
+
+once fixed:
 fix config hot-reloading not working

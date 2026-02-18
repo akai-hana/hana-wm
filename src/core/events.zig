@@ -12,6 +12,13 @@ const bar        = @import("bar");
 
 const EventHandler = *const fn (event: *anyopaque, wm: *defs.WM) void;
 
+// PropertyNotify dispatcher - fans out to both bar (title) and window (WM_PROTOCOLS cache)
+fn handlePropertyNotify(event: *anyopaque, wm: *defs.WM) void {
+    const e: *xcb.xcb_property_notify_event_t = @ptrCast(@alignCast(event));
+    bar.handlePropertyNotify(e, wm);
+    window.handlePropertyNotify(e, wm);
+}
+
 // Comptime dispatch table for XCB O(1) event routing
 const dispatch_table = blk: {
     var table = [_]?EventHandler{null} ** constants.Sizes.EVENT_DISPATCH_TABLE;
@@ -20,12 +27,13 @@ const dispatch_table = blk: {
     table[xcb.XCB_BUTTON_RELEASE]    = @ptrCast(&input.handleButtonRelease);
     table[xcb.XCB_MOTION_NOTIFY]     = @ptrCast(&input.handleMotionNotify);
     table[xcb.XCB_ENTER_NOTIFY]      = @ptrCast(&window.handleEnterNotify);
+    table[xcb.XCB_LEAVE_NOTIFY]      = @ptrCast(&window.handleLeaveNotify);
     table[xcb.XCB_MAP_REQUEST]       = @ptrCast(&window.handleMapRequest);
     table[xcb.XCB_CONFIGURE_REQUEST] = @ptrCast(&window.handleConfigureRequest);
     table[xcb.XCB_UNMAP_NOTIFY]      = @ptrCast(&window.handleUnmapNotify);
     table[xcb.XCB_DESTROY_NOTIFY]    = @ptrCast(&window.handleDestroyNotify);
     table[xcb.XCB_EXPOSE]            = @ptrCast(&bar.handleExpose);
-    table[xcb.XCB_PROPERTY_NOTIFY]   = @ptrCast(&bar.handlePropertyNotify);
+    table[xcb.XCB_PROPERTY_NOTIFY]   = @ptrCast(&handlePropertyNotify);
     break :blk table;
 };
 
