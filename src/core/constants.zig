@@ -21,12 +21,6 @@ pub const EventMasks = struct {
                             xcb.XCB_EVENT_MASK_BUTTON_PRESS |
                             xcb.XCB_EVENT_MASK_ENTER_WINDOW |
                             xcb.XCB_EVENT_MASK_LEAVE_WINDOW |
-                            // handleMotionNotify uses motion events to clear window-spawn
-                            // focus suppression.  Full POINTER_MOTION is required — HINT
-                            // mode delivers only one event then stops until xcb_query_pointer
-                            // is called, which would leave suppression permanently set after
-                            // the first motion event is consumed around the spawn.
-                            xcb.XCB_EVENT_MASK_POINTER_MOTION |
                             xcb.XCB_EVENT_MASK_PROPERTY_CHANGE;
 
     /// Event mask for managed windows (click-to-focus, property changes).

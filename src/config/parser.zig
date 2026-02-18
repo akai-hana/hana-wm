@@ -94,7 +94,7 @@ pub const Section = struct {
 
     pub fn init(allocator: std.mem.Allocator, name: []const u8) Section {
         var map = std.StringHashMap(Value).init(allocator);
-        // OPTIMIZATION: Pre-allocate reasonable capacity
+        // Pre-allocate reasonable capacity
         map.ensureTotalCapacity(16) catch {};
         return .{ .name = name, .pairs = map };
     }
@@ -135,7 +135,7 @@ pub const Document = struct {
 
     pub fn init(allocator: std.mem.Allocator) Document {
         var sections = std.StringHashMap(Section).init(allocator);
-        // OPTIMIZATION: Pre-allocate reasonable capacity
+        // Pre-allocate reasonable capacity
         sections.ensureTotalCapacity(8) catch {};
         return .{
             .allocator = allocator,
@@ -145,7 +145,7 @@ pub const Document = struct {
     }
 
     pub fn deinit(self: *Document) void {
-        // OPTIMIZATION: Extract cleanup helper to reduce duplication
+        // Extract cleanup helper to reduce duplication
         const cleanPairs = struct {
             fn clean(alloc: std.mem.Allocator, pairs: *std.StringHashMap(Value)) void {
                 var iter = pairs.iterator();
@@ -186,7 +186,7 @@ pub const ParseError = error{
     OutOfMemory,
 };
 
-/// CONSOLIDATED: Public color parsing function (used by both parser and config)
+/// Public color parsing function (used by both parser and config)
 pub fn parseColor(value: []const u8) !u32 {
     if (value.len == 0) return error.InvalidColor;
 
@@ -214,7 +214,7 @@ const Parser = struct {
         return .{ .allocator = allocator, .content = content, .pos = 0, .line = 1 };
     }
 
-    // OPTIMIZATION: Unified skip function
+    // Unified skip function
     fn skip(self: *Parser, comptime include_newlines: bool, comptime include_comments: bool) void {
         while (self.pos < self.content.len) {
             switch (self.content[self.pos]) {
@@ -285,12 +285,12 @@ const Parser = struct {
         return if (key.len > 0) try self.allocator.dupe(u8, key) else ParseError.InvalidSyntax;
     }
 
-    // OPTIMIZATION: Improved string parsing with better fast-path
+    // Improved string parsing with better fast-path
     fn parseString(self: *Parser, allocator: std.mem.Allocator) ParseError![]const u8 {
         const quote = self.consume().?;
         const start = self.pos;
 
-        // OPTIMIZATION: Scan ahead to check if we need escape processing
+        // Scan ahead to check if we need escape processing
         var has_escapes = false;
         var end_pos = start;
         while (end_pos < self.content.len) {
@@ -320,7 +320,7 @@ const Parser = struct {
         }
 
         // Slow path: handle escapes
-        // OPTIMIZATION: Pre-allocate based on scanned length for better capacity estimation
+        // Pre-allocate based on scanned length for better capacity estimation
         var result = try std.ArrayList(u8).initCapacity(allocator, end_pos - start);
         errdefer result.deinit(allocator);
 
@@ -352,7 +352,7 @@ const Parser = struct {
     fn parseArray(self: *Parser, allocator: std.mem.Allocator) ParseError!std.ArrayList(Value) {
         _ = self.consume();
 
-        // OPTIMIZATION: Pre-allocate reasonable initial capacity
+        // Pre-allocate reasonable initial capacity
         var array = try std.ArrayList(Value).initCapacity(allocator, 8);
         errdefer {
             for (array.items) |*item| item.deinit(allocator);
@@ -374,7 +374,7 @@ const Parser = struct {
         return array;
     }
 
-    // OPTIMIZATION: Use static string maps for keyword detection
+    // Use static string maps for keyword detection
     const BOOLEANS = std.StaticStringMap(bool).initComptime(.{
         .{ "true", true },
         .{ "false", false },
@@ -395,7 +395,7 @@ const Parser = struct {
         const raw = std.mem.trim(u8, self.content[start..self.pos], " \t\r");
         if (raw.len == 0) return ParseError.InvalidValue;
 
-        // OPTIMIZATION: Use static map for boolean lookup
+        // Use static map for boolean lookup
         if (BOOLEANS.get(raw)) |boolean| return .{ .boolean = boolean };
 
         // Check for percentage suffix
@@ -408,7 +408,7 @@ const Parser = struct {
             }
         }
 
-        // OPTIMIZATION: Early detection of color values
+        // Early detection of color values
         const looks_like_color = raw[0] == '#' or 
             (raw.len > 2 and raw[0] == '0' and (raw[1] == 'x' or raw[1] == 'X')) or
             blk: {
@@ -436,7 +436,7 @@ const Parser = struct {
         }
     }
 
-    // OPTIMIZATION: Merge parseKeyValue and parseKeyValueOrBareWord to reduce duplication
+    // Merge parseKeyValue and parseKeyValueOrBareWord to reduce duplication
     fn parseKeyValuePair(self: *Parser, allocator: std.mem.Allocator, allow_bare: bool) ParseError!struct { []const u8, Value } {
         const key = try self.parseKey();
         errdefer self.allocator.free(key);
@@ -505,7 +505,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
             continue;
         }
 
-        // OPTIMIZATION: Use merged parseKeyValuePair function
+        // Use merged parseKeyValuePair function
         while (true) {
             var kv = parser.parseKeyValuePair(allocator, true) catch |err| {
                 debug.warn("Invalid key-value at line {}: {}", .{ parser.line, err });

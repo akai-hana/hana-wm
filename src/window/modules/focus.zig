@@ -71,7 +71,7 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
         utils.sendWMTakeFocus(wm.conn, win, wm.last_event_time);
     }
 
-    tiling.updateWindowFocusFast(wm, old, win);
+    tiling.updateWindowFocus(wm, old, win);
     // Do not flush here — the main event loop flushes after draining all pending
     // events.  This batches rapid hover crossings (e.g. fast mouse sweeps across
     // several windows) into a single write syscall rather than one per crossing.
@@ -81,7 +81,7 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
 pub fn clearFocus(wm: *WM) void {
     if (wm.focused_window) |old_win| {
         window.grabButtons(wm, old_win, false);
-        tiling.updateWindowFocusFast(wm, old_win, null);
+        tiling.updateWindowFocus(wm, old_win, null);
     }
     wm.focused_window = null;
     wm.suppress_focus_reason = .none;

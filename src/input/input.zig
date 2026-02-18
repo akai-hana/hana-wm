@@ -142,7 +142,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) vo
         focus.setFocus(wm, managed_window, .mouse_click);
     }
 
-    // CRITICAL: Release the SYNC grab so events are not permanently frozen.
+    // Release the SYNC grab so events are not permanently frozen.
     _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_REPLAY_POINTER, xcb.XCB_CURRENT_TIME);
     _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, xcb.XCB_CURRENT_TIME);
     utils.flush(wm.conn);
@@ -175,7 +175,7 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) 
 
 fn closeWindow(wm: *WM, win: u32) void {
     if (win == wm.root) {
-        debug.err("CRITICAL: Attempted to close ROOT window!", .{});
+        debug.err("Attempted to close ROOT window!", .{});
         return;
     }
 

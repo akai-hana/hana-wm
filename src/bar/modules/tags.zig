@@ -54,7 +54,7 @@ pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start
         const text_x = x + (scaled_ws_width - label_width) / 2;
         try dc.drawText(text_x, text_y, label, fg);
 
-        // FIXED: Use count() method instead of .list.items.len
+        // Use count() method instead of .list.items.len
         // This works with both small-array and large tracking implementations
         if (ws.windows.count() > 0) {
             drawIndicator(dc, x, scaled_indicator_size, is_current, fg);

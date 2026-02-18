@@ -1,5 +1,5 @@
-// ! Master-stack layout with overflow handling
-/// OPTIMIZED: Direct XCB calls - no batch overhead
+//! Master-stack layout with overflow handling
+/// Direct XCB calls — no batch overhead
 
 const std = @import("std");
 const defs = @import("defs");
@@ -81,10 +81,8 @@ fn tileStack(conn: *defs.xcb.xcb_connection_t, windows: []const u32, x: u16, y_o
     const stack_inner_w = calcMarginedWidth(w, m.gap / 2, m.gap + 2 * m.border);
 
     if (s_count <= max_fit) {
-        // Simple vertical stack
         tileStackSimple(conn, windows, x, y_offset, h, stack_inner_w, m);
     } else {
-        // Overflow: wrap into columns
         tileStackOverflow(conn, windows, x, y_offset, w, h, max_fit, m);
     }
 }

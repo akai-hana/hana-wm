@@ -28,7 +28,7 @@ pub fn findVisualByDepth(screen: *defs.xcb.xcb_screen_t, depth: u8) VisualInfo {
     return .{ .visual_type = null, .visual_id = screen.root_visual };
 }
 
-// DrawContext ──
+// DrawContext 
 
 /// Packed 0xRRGGBB color broken into Cairo-ready f64 components.
 const RGBColor = struct { r: f64, g: f64, b: f64 };
@@ -290,7 +290,7 @@ pub const DrawContext = struct {
     }
 };
 
-// Private helpers ──────────────────────────────────────────────────────────
+// Private helpers 
 
 fn findVisualType(conn: *defs.xcb.xcb_connection_t, visual_id: u32) ?*defs.xcb.xcb_visualtype_t {
     const setup = defs.xcb.xcb_get_setup(conn);
