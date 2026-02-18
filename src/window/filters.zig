@@ -3,9 +3,8 @@
 //! Provides unified filtering and validation functions for windows.
 //! Eliminates duplicate validation logic across window.zig and tiling.zig.
 
-const std = @import("std");
-const defs = @import("defs");
-const bar = @import("bar");
+const defs       = @import("defs");
+const bar        = @import("bar");
 const workspaces = @import("workspaces");
 
 /// Check if a window is a system window (root, null, or bar)

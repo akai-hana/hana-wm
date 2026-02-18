@@ -5,10 +5,8 @@ const defs = @import("defs");
 const xcb  = defs.xcb;
 const debug = @import("debug");
 
-// Internal constants (not part of the public API)
-const MAX_PROPERTY_LENGTH: u32  = 256;
-const PROPERTY_NO_DELETE:  u8   = 0;
-const PROPERTY_MAX_VALUE:  usize = 1024;
+const MAX_PROPERTY_LENGTH: u32 = 256; // long-words requested from the X server
+const PROPERTY_NO_DELETE:  u8  = 0;
 
 pub inline fn flush(conn: *xcb.xcb_connection_t) void {
     _ = xcb.xcb_flush(conn);
@@ -75,17 +73,41 @@ const AtomCache = struct {
     wm_take_focus: u32,
     net_wm_name:   u32,
     utf8_string:   u32,
+    wm_class:      u32,
 };
 
 var atom_cache: ?AtomCache = null;
 
 pub fn initAtomCache(conn: *xcb.xcb_connection_t) !void {
+    // Fire all intern_atom requests before waiting for any reply — one round-trip
+    // instead of six sequential ones.
+    const c_protocols  = xcb.xcb_intern_atom(conn, 0, 12, "WM_PROTOCOLS");
+    const c_delete     = xcb.xcb_intern_atom(conn, 0, 16, "WM_DELETE_WINDOW");
+    const c_take_focus = xcb.xcb_intern_atom(conn, 0, 13, "WM_TAKE_FOCUS");
+    const c_net_name   = xcb.xcb_intern_atom(conn, 0, 12, "_NET_WM_NAME");
+    const c_utf8       = xcb.xcb_intern_atom(conn, 0, 11, "UTF8_STRING");
+    const c_class      = xcb.xcb_intern_atom(conn, 0, 8,  "WM_CLASS");
+
+    const r_protocols  = xcb.xcb_intern_atom_reply(conn, c_protocols,  null) orelse return error.AtomFailed;
+    defer std.c.free(r_protocols);
+    const r_delete     = xcb.xcb_intern_atom_reply(conn, c_delete,     null) orelse return error.AtomFailed;
+    defer std.c.free(r_delete);
+    const r_take_focus = xcb.xcb_intern_atom_reply(conn, c_take_focus, null) orelse return error.AtomFailed;
+    defer std.c.free(r_take_focus);
+    const r_net_name   = xcb.xcb_intern_atom_reply(conn, c_net_name,   null) orelse return error.AtomFailed;
+    defer std.c.free(r_net_name);
+    const r_utf8       = xcb.xcb_intern_atom_reply(conn, c_utf8,       null) orelse return error.AtomFailed;
+    defer std.c.free(r_utf8);
+    const r_class      = xcb.xcb_intern_atom_reply(conn, c_class,      null) orelse return error.AtomFailed;
+    defer std.c.free(r_class);
+
     atom_cache = .{
-        .wm_protocols  = try getAtom(conn, "WM_PROTOCOLS"),
-        .wm_delete     = try getAtom(conn, "WM_DELETE_WINDOW"),
-        .wm_take_focus = try getAtom(conn, "WM_TAKE_FOCUS"),
-        .net_wm_name   = try getAtom(conn, "_NET_WM_NAME"),
-        .utf8_string   = try getAtom(conn, "UTF8_STRING"),
+        .wm_protocols  = r_protocols.*.atom,
+        .wm_delete     = r_delete.*.atom,
+        .wm_take_focus = r_take_focus.*.atom,
+        .net_wm_name   = r_net_name.*.atom,
+        .utf8_string   = r_utf8.*.atom,
+        .wm_class      = r_class.*.atom,
     };
 }
 
@@ -102,20 +124,23 @@ pub fn getAtom(conn: *xcb.xcb_connection_t, name: []const u8) !u32 {
     return reply.*.atom;
 }
 
-pub fn getAtomCached(name: []const u8) !u32 {
+pub fn getAtomCached(comptime name: []const u8) error{AtomCacheNotInitialized}!u32 {
     const cache = atom_cache orelse return error.AtomCacheNotInitialized;
-    // Map atom name to its cached field.  Using an enum + stringToEnum keeps
-    // this exhaustive and avoids a chain of string comparisons.
+    // All callers pass string literals; the switch resolves at compile time.
+    // An unknown name produces a build error rather than a silent runtime failure.
     const AtomName = enum {
         @"WM_PROTOCOLS", @"WM_DELETE_WINDOW", @"WM_TAKE_FOCUS",
-        @"_NET_WM_NAME", @"UTF8_STRING",
+        @"_NET_WM_NAME", @"UTF8_STRING", @"WM_CLASS",
     };
-    return switch (std.meta.stringToEnum(AtomName, name) orelse return error.AtomNotInCache) {
-        .@"WM_PROTOCOLS"    => cache.wm_protocols,
-        .@"WM_DELETE_WINDOW"=> cache.wm_delete,
-        .@"WM_TAKE_FOCUS"   => cache.wm_take_focus,
-        .@"_NET_WM_NAME"    => cache.net_wm_name,
-        .@"UTF8_STRING"     => cache.utf8_string,
+    const field = comptime (std.meta.stringToEnum(AtomName, name) orelse
+        @compileError("atom not in cache: " ++ name));
+    return switch (field) {
+        .@"WM_PROTOCOLS"     => cache.wm_protocols,
+        .@"WM_DELETE_WINDOW" => cache.wm_delete,
+        .@"WM_TAKE_FOCUS"    => cache.wm_take_focus,
+        .@"_NET_WM_NAME"     => cache.net_wm_name,
+        .@"UTF8_STRING"      => cache.utf8_string,
+        .@"WM_CLASS"         => cache.wm_class,
     };
 }
 
@@ -126,7 +151,7 @@ pub fn fetchPropertyToBuffer(
     window:    u32,
     atom:      u32,
     atom_type: u32,
-    buffer:    *std.ArrayList(u8),
+    buffer:    *std.ArrayListUnmanaged(u8),
     allocator: std.mem.Allocator,
 ) ![]const u8 {
     const reply = xcb.xcb_get_property_reply(conn,
@@ -136,16 +161,22 @@ pub fn fetchPropertyToBuffer(
     defer std.c.free(reply);
     if (reply.*.format != 8 or reply.*.value_len == 0) return "";
 
+    // value_len is already bounded by MAX_PROPERTY_LENGTH from the request.
     buffer.clearRetainingCapacity();
-    const actual_len = @min(@as(usize, @intCast(reply.*.value_len)), PROPERTY_MAX_VALUE);
     const value_ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
-    try buffer.appendSlice(allocator, value_ptr[0..actual_len]);
+    try buffer.appendSlice(allocator, value_ptr[0..@intCast(reply.*.value_len)]);
     return buffer.items;
 }
 
-// WM_TAKE_FOCUS caching ────────────────────────────────────────────────────
+// WM_TAKE_FOCUS + InputModel caching ──────────────────────────────────────
+//
+// Both caches are keyed by window ID and populated at map time.  They are
+// invalidated on the relevant PropertyNotify atoms (WM_PROTOCOLS, WM_HINTS)
+// and cleared on window destruction.  This keeps setFocus's hot path free
+// of blocking X11 round-trips for windows we've already seen.
 
-var wm_take_focus_cache: ?std.AutoHashMap(u32, bool) = null;
+var wm_take_focus_cache: ?std.AutoHashMap(u32, bool)            = null;
+var input_model_cache:   ?std.AutoHashMap(u32, InputModel)      = null;
 
 pub fn initWMTakeFocusCache(allocator: std.mem.Allocator) void {
     wm_take_focus_cache = std.AutoHashMap(u32, bool).init(allocator);
@@ -158,17 +189,98 @@ pub fn deinitWMTakeFocusCache() void {
     }
 }
 
-pub fn cacheWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32) void {
-    if (wm_take_focus_cache) |*cache| {
-        cache.put(win, queryWMTakeFocusSupport(conn, win)) catch {};
+pub fn initInputModelCache(allocator: std.mem.Allocator) void {
+    input_model_cache = std.AutoHashMap(u32, InputModel).init(allocator);
+}
+
+pub fn deinitInputModelCache() void {
+    if (input_model_cache) |*cache| {
+        cache.deinit();
+        input_model_cache = null;
     }
 }
 
-pub fn uncacheWMTakeFocus(win: u32) void {
-    if (wm_take_focus_cache) |*cache| _ = cache.remove(win);
+/// Collect pre-fired WM_PROTOCOLS and WM_HINTS cookies and populate both
+/// focus caches.  The caller is responsible for having fired the cookies
+/// before calling this — typically after xcb_map_window + flush, so the
+/// server processes the property requests in parallel with the map.
+pub fn populateFocusCacheFromCookies(
+    conn: *xcb.xcb_connection_t,
+    win:  u32,
+    c_protocols: xcb.xcb_get_property_cookie_t,
+    c_hints:     xcb.xcb_get_property_cookie_t,
+) void {
+    const take_focus_atom = getAtomCached("WM_TAKE_FOCUS") catch return;
+    var supports = false;
+    if (xcb.xcb_get_property_reply(conn, c_protocols, null)) |r| {
+        defer std.c.free(r);
+        if (r.*.format == 32 and r.*.value_len > 0) {
+            const atoms: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(r)));
+            for (atoms[0..@intCast(r.*.value_len)]) |atom| {
+                if (atom == take_focus_atom) { supports = true; break; }
+            }
+        }
+    }
+
+    var accepts = true;
+    if (xcb.xcb_get_property_reply(conn, c_hints, null)) |r| {
+        defer std.c.free(r);
+        if (r.*.format == 32 and r.*.value_len >= 1) {
+            const hints: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(r)));
+            const INPUT_HINT_FLAG: u32 = 1 << 0;
+            if ((hints[0] & INPUT_HINT_FLAG) != 0 and r.*.value_len >= 2) {
+                accepts = hints[1] != 0;
+            }
+        }
+    }
+
+    if (wm_take_focus_cache) |*c| c.put(win, supports) catch {};
+    const model: InputModel = if (supports)
+        (if (accepts) .locally_active else .globally_active)
+    else
+        (if (accepts) .passive else .no_input);
+    if (input_model_cache) |*c| c.put(win, model) catch {};
 }
 
-pub fn supportsWMTakeFocusCached(conn: *xcb.xcb_connection_t, win: u32) bool {
+/// Invalidate the WM_TAKE_FOCUS entry and recompute InputModel.
+/// Call when WM_PROTOCOLS changes (Electron sets it after mapping).
+pub fn recacheTakeFocus(conn: *xcb.xcb_connection_t, win: u32) void {
+    const supports = queryWMTakeFocusSupport(conn, win);
+    if (wm_take_focus_cache) |*c| c.put(win, supports) catch {};
+    recacheInputModel(conn, win);
+}
+
+/// Invalidate the WM_HINTS input field and recompute InputModel.
+/// Call when WM_HINTS changes.
+pub fn recacheHintsInput(conn: *xcb.xcb_connection_t, win: u32) void {
+    recacheInputModel(conn, win);
+}
+
+fn recacheInputModel(conn: *xcb.xcb_connection_t, win: u32) void {
+    const supports = if (wm_take_focus_cache) |*c| (c.get(win) orelse queryWMTakeFocusSupport(conn, win)) else queryWMTakeFocusSupport(conn, win);
+    const accepts  = queryWMHintsInput(conn, win);
+    const model: InputModel = if (supports)
+        (if (accepts) .locally_active else .globally_active)
+    else
+        (if (accepts) .passive else .no_input);
+    if (input_model_cache) |*c| c.put(win, model) catch {};
+}
+
+pub fn uncacheWindowFocusProps(win: u32) void {
+    if (wm_take_focus_cache) |*c| _ = c.remove(win);
+    if (input_model_cache)   |*c| _ = c.remove(win);
+}
+
+/// Return the cached InputModel, falling back to a live query if not cached.
+/// For the hover focus hot path this should always be a cache hit.
+pub fn getInputModelCached(conn: *xcb.xcb_connection_t, win: u32) InputModel {
+    if (input_model_cache) |*c| {
+        if (c.get(win)) |model| return model;
+    }
+    return getInputModel(conn, win);
+}
+
+fn supportsWMTakeFocusCached(conn: *xcb.xcb_connection_t, win: u32) bool {
     if (wm_take_focus_cache) |*cache| {
         if (cache.get(win)) |cached| return cached;
     }
@@ -177,7 +289,7 @@ pub fn supportsWMTakeFocusCached(conn: *xcb.xcb_connection_t, win: u32) bool {
     return supports;
 }
 
-// WM_CLASS──
+// WM_CLASS ─────────────────────────────────────────────────────────────────
 
 pub const WMClass = struct {
     instance: []const u8,
@@ -190,7 +302,7 @@ pub const WMClass = struct {
 };
 
 pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allocator) ?WMClass {
-    const class_atom = getAtom(conn, "WM_CLASS") catch return null;
+    const class_atom = getAtomCached("WM_CLASS") catch return null;
     const reply = xcb.xcb_get_property_reply(conn,
         xcb.xcb_get_property(conn, 0, win, class_atom, xcb.XCB_ATOM_STRING, 0, MAX_PROPERTY_LENGTH), null,
     ) orelse return null;
@@ -230,7 +342,11 @@ fn queryWMTakeFocusSupport(conn: *xcb.xcb_connection_t, win: u32) bool {
     return false;
 }
 
-pub fn sendWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32) void {
+/// Send a WM_TAKE_FOCUS client message (ICCCM §4.1.7).
+/// `time` must be the timestamp of the triggering event — globally_active
+/// windows (e.g. Electron/Chromium) validate this and silently ignore the
+/// message when it is XCB_CURRENT_TIME (0).
+pub fn sendWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32, time: u32) void {
     const protocols_atom  = getAtomCached("WM_PROTOCOLS")  catch return;
     const take_focus_atom = getAtomCached("WM_TAKE_FOCUS") catch return;
 
@@ -240,7 +356,7 @@ pub fn sendWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32) void {
     event.type           = protocols_atom;
     event.format         = 32;
     event.data.data32[0] = take_focus_atom;
-    event.data.data32[1] = xcb.XCB_CURRENT_TIME;
+    event.data.data32[1] = time;
 
     _ = xcb.xcb_send_event(conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
 }
