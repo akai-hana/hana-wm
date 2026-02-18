@@ -6,7 +6,7 @@ const debug = @import("debug");
 const parser = @import("parser");
 const xkb = @import("xkbcommon");
 
-// CONSOLIDATED: Use parseColor from parser module (removed duplicate)
+// Use parseColor from parser module (removed duplicate)
 const parseColor = parser.parseColor;
 
 fn getColor(section: *const parser.Section, key: []const u8, default: u32) u32 {
@@ -70,7 +70,7 @@ fn get(
 }
 
 
-// CONSOLIDATED: Helper for workspace range validation
+// Helper for workspace range validation
 fn validateWorkspace(ws_num: usize, max: usize, context: []const u8) bool {
     if (ws_num < 1 or ws_num > max) {
         debug.warn("Rule workspace {} for '{s}' exceeds count {}, skipping", .{ ws_num, context, max });
@@ -79,7 +79,7 @@ fn validateWorkspace(ws_num: usize, max: usize, context: []const u8) bool {
     return true;
 }
 
-// CONSOLIDATED: Helper for creating and adding rules
+// Helper for creating and adding rules
 fn addRule(allocator: std.mem.Allocator, cfg: *defs.Config, class_name: []const u8, ws_num: usize) !void {
     const rule = defs.Rule{
         .class_name = try allocator.dupe(u8, class_name),
@@ -88,7 +88,7 @@ fn addRule(allocator: std.mem.Allocator, cfg: *defs.Config, class_name: []const 
     try cfg.workspaces.rules.append(allocator, rule);
 }
 
-// CONSOLIDATED: Helper for initializing default bar layout
+// Helper for initializing default bar layout
 fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *defs.Config) !void {
     const layout_defaults = [_]struct{pos: defs.BarPosition, seg: defs.BarSegment}{
         .{.pos = .left, .seg = .workspaces},
@@ -129,7 +129,7 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator) !defs.Config {
     }
 }
 
-// CONSOLIDATED: Extracted common config parsing logic
+// Extracted common config parsing logic
 fn parseConfigSections(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
     parseWorkspaces(doc, cfg);
     try parseKeybindings(allocator, doc, cfg);
@@ -328,7 +328,7 @@ fn keyNameToKeysym(name: []const u8) !u32 {
     return if (keysym == xkb.XKB_KEY_NoSymbol) error.UnknownKeyName else keysym;
 }
 
-// OPTIMIZATION: Generic workspace action parser
+// Generic workspace action parser
 fn tryParseWorkspace(command: []const u8, prefix: []const u8) ?u8 {
     if (!std.mem.startsWith(u8, command, prefix)) return null;
     const num = std.fmt.parseInt(usize, command[prefix.len..], 10) catch return null;
@@ -442,7 +442,7 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
     cfg.tiling.master_width = master_src.getScalable(width_key) orelse parser.ScalableValue.percentage(50.0);
 }
 
-// OPTIMIZATION: Table-driven bar color parsing
+// Table-driven bar color parsing
 const BarColorField = struct {
     name: []const u8,
     field_name: []const u8,
@@ -493,7 +493,7 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     cfg.bar.padding = get(u8, section, "padding", 8, 0, 50);
     cfg.bar.spacing = get(u8, section, "spacing", 12, 0, 100);
 
-    // OPTIMIZATION: Table-driven color parsing (saves 11 LOC)
+    // Table-driven color parsing (saves 11 LOC)
     inline for (BAR_COLOR_FIELDS) |field| {
         @field(cfg.bar, field.field_name) = getColor(section, field.name, field.default);
     }

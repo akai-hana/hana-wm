@@ -11,8 +11,7 @@ const bar = @import("bar");
 
 pub fn startDrag(wm: *WM, win: u32, button: u8, x: i16, y: i16) void {
     if (wm.drag_state.active) return;
-    
-    // CRITICAL: Don't allow dragging the bar window
+
     if (bar.isBarWindow(win)) return;
 
     const geom = utils.getGeometry(wm.conn, win) orelse return;
@@ -31,11 +30,9 @@ pub fn startDrag(wm: *WM, win: u32, button: u8, x: i16, y: i16) void {
 
     focus.setFocus(wm, win, .user_command);
 
-    // FIXED: Check State.enabled, not config.enabled (runtime toggle desync fix)
-    // Remove window from tiling if it's tiled
-    const tiling_state = tiling.getState();
-    const tiling_enabled = if (tiling_state) |ts| ts.enabled else false;
-    if (tiling_enabled and tiling.isWindowTiled(win)) {
+    // Remove the window from tiling so the drag moves it freely.
+    // isWindowTiled checks State.enabled internally, so no separate state lookup needed.
+    if (tiling.isWindowTiled(win)) {
         tiling.removeWindow(win);
     }
 }
@@ -73,5 +70,3 @@ pub inline fn stopDrag(wm: *WM) void {
 pub inline fn isDragging(wm: *WM) bool {
     return wm.drag_state.active;
 }
-
-// FIXED 3.2: Removed flushPendingUpdate - was a no-op with no callers

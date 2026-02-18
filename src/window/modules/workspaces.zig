@@ -9,6 +9,7 @@ const focus    = @import("focus");
 const bar      = @import("bar");
 const tiling   = @import("tiling");
 const Tracking = @import("tracking").Tracking;
+const constants = @import("constants");
 const debug    = @import("debug");
 
 // Comptime-generated workspace name strings ("1".."20"), never heap-allocated.
@@ -41,13 +42,13 @@ pub const State = struct {
     allocator:           std.mem.Allocator,
 };
 
-// Module singleton ─────────────────────────────────────────────────────────
+// Module singleton
 
 var g_state: ?State = null;
 
 pub fn getState() ?*State { return if (g_state != null) &g_state.? else null; }
 
-// Init / deinit 
+// Init / deinit
 
 pub fn init(wm: *WM) void {
     const count = wm.config.workspaces.count;
@@ -87,7 +88,7 @@ pub fn deinit(wm: *WM) void {
     g_state = null;
 }
 
-// Window tracking ──────────────────────────────────────────────────────────
+// Window tracking
 
 pub fn removeWindow(win: u32) void {
     const s = getState() orelse return;
@@ -131,7 +132,7 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) void {
     if (from_ws == s.current) {
         // Hide window by moving it off-screen (avoids an unmap/remap cycle).
         _ = xcb.xcb_configure_window(wm.conn, win,
-            xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, -4000))});
+            xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
         if (wm.focused_window == win) focus.clearFocus(wm);
         if (ts) |t| t.markDirty();
     } else if (target_ws == s.current) {
@@ -141,7 +142,7 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) void {
     }
 }
 
-// Workspace switching ──────────────────────────────────────────────────────
+// Workspace switching
 
 pub fn switchTo(wm: *WM, ws_id: u8) void {
     const s = getState() orelse return;
@@ -157,7 +158,8 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
     const new_ws_obj = &s.workspaces[new_ws];
     const fs_info    = wm.fullscreen.getForWorkspace(new_ws);
 
-    wm.focused_window = new_ws_obj.windows.first();
+    wm.focused_window        = new_ws_obj.windows.first();
+    wm.suppress_focus_reason = .none;
     std.debug.assert(wm.focused_window == null or wm.hasWindow(wm.focused_window.?));
 
     // Grab the server so the switch is atomic — no intermediate frames visible.
@@ -167,17 +169,11 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
     // Step 1: hide all windows from the old workspace.
     for (old_ws_obj.windows.items()) |win| {
         _ = xcb.xcb_configure_window(wm.conn, win,
-            xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, -4000))});
+            xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
     }
 
-    // Step 2: Determine if we need to adjust bar visibility for the new workspace
-    // If switching to a fullscreen workspace, hide the bar temporarily
-    // Otherwise, show/hide based on global state
-    if (fs_info != null) {
-        bar.setBarState(wm, .hide_fullscreen);
-    } else {
-        bar.setBarState(wm, .show_fullscreen);
-    }
+    // Step 2: adjust bar visibility for the new workspace.
+    bar.setBarState(wm, if (fs_info != null) .hide_fullscreen else .show_fullscreen);
 
     // Step 3: show windows for the new workspace.
     if (fs_info) |info| {
@@ -200,9 +196,7 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
         const tiling_active = if (ts) |t| t.enabled else false;
 
         if (tiling_active) {
-            // Retile to position windows correctly on-screen
-            // Windows should already have correct height from bar toggle, but need X positioning
-            tiling.retileCurrentWorkspace(wm, true);
+            tiling.retileCurrentWorkspace(wm);
         } else {
             // Floating: move all windows to a sensible on-screen position.
             const x: u32 = @intCast(wm.screen.width_in_pixels  / 4);
@@ -214,16 +208,23 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
         }
     }
 
-    utils.flush(wm.conn);
-    bar.raiseBar();
+    // Ungrab buttons on the new focused window so clicks go directly to it.
+    // Windows on non-current workspaces always carry button grabs (they were
+    // last seen as unfocused); we must clear that grab now that one of them
+    // is the active focused window.
+    if (wm.focused_window) |new_win| {
+        _ = xcb.xcb_ungrab_button(wm.conn, xcb.XCB_BUTTON_INDEX_ANY, new_win, xcb.XCB_MOD_MASK_ANY);
+    }
 
     _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
         wm.focused_window orelse wm.root, xcb.XCB_CURRENT_TIME);
+
     utils.flush(wm.conn);
+    bar.raiseBar();
     bar.markDirty();
 }
 
-// Queries───
+// Queries
 
 pub inline fn getCurrentWindowsView() ?[]const u32 {
     const s = getState() orelse return null;

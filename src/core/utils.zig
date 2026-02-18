@@ -1,4 +1,4 @@
-//! Core utilities — X11 geometry helpers, atom caching, WM_TAKE_FOCUS support.
+//! Core utilities — X11 geometry helpers, atom caching, InputModel caching.
 
 const std  = @import("std");
 const defs = @import("defs");
@@ -144,7 +144,7 @@ pub fn getAtomCached(comptime name: []const u8) error{AtomCacheNotInitialized}!u
     };
 }
 
-// Property helpers ─────────────────────────────────────────────────────────
+// Property helpers
 
 pub fn fetchPropertyToBuffer(
     conn:      *xcb.xcb_connection_t,
@@ -168,26 +168,27 @@ pub fn fetchPropertyToBuffer(
     return buffer.items;
 }
 
-// WM_TAKE_FOCUS + InputModel caching ──────────────────────────────────────
+// InputModel cache
 //
-// Both caches are keyed by window ID and populated at map time.  They are
-// invalidated on the relevant PropertyNotify atoms (WM_PROTOCOLS, WM_HINTS)
-// and cleared on window destruction.  This keeps setFocus's hot path free
-// of blocking X11 round-trips for windows we've already seen.
+// Keyed by window ID; populated at map time via populateFocusCacheFromCookies.
+// Invalidated on WM_PROTOCOLS / WM_HINTS PropertyNotify and on window destruction.
+// Keeps the setFocus hot path free of blocking X11 round-trips for seen windows.
+//
+// A previous design also maintained a wm_take_focus_cache so that a WM_HINTS
+// PropertyNotify could recompute InputModel without re-querying WM_PROTOCOLS.
+// That saves one round-trip on an event that is effectively never seen in
+// practice, at the cost of a second HashMap, a second init/deinit pair, and
+// tangled invalidation logic across six functions. The intermediate cache has
+// been removed; both properties are queried when the model needs recomputation.
 
-var wm_take_focus_cache: ?std.AutoHashMap(u32, bool)            = null;
-var input_model_cache:   ?std.AutoHashMap(u32, InputModel)      = null;
+pub const InputModel = enum {
+    no_input,        // input=False, no WM_TAKE_FOCUS — window doesn't want focus
+    passive,         // input=True,  no WM_TAKE_FOCUS — set focus via XSetInputFocus
+    locally_active,  // input=True,  WM_TAKE_FOCUS    — set focus + send protocol
+    globally_active, // input=False, WM_TAKE_FOCUS    — only send protocol
+};
 
-pub fn initWMTakeFocusCache(allocator: std.mem.Allocator) void {
-    wm_take_focus_cache = std.AutoHashMap(u32, bool).init(allocator);
-}
-
-pub fn deinitWMTakeFocusCache() void {
-    if (wm_take_focus_cache) |*cache| {
-        cache.deinit();
-        wm_take_focus_cache = null;
-    }
-}
+var input_model_cache: ?std.AutoHashMap(u32, InputModel) = null;
 
 pub fn initInputModelCache(allocator: std.mem.Allocator) void {
     input_model_cache = std.AutoHashMap(u32, InputModel).init(allocator);
@@ -200,10 +201,10 @@ pub fn deinitInputModelCache() void {
     }
 }
 
-/// Collect pre-fired WM_PROTOCOLS and WM_HINTS cookies and populate both
-/// focus caches.  The caller is responsible for having fired the cookies
-/// before calling this — typically after xcb_map_window + flush, so the
-/// server processes the property requests in parallel with the map.
+/// Consume pre-fired WM_PROTOCOLS and WM_HINTS cookies and store the resulting
+/// InputModel.  The caller fires the cookies before calling this — typically
+/// right after xcb_map_window + flush so the server processes the property
+/// requests in parallel with the map.
 pub fn populateFocusCacheFromCookies(
     conn: *xcb.xcb_connection_t,
     win:  u32,
@@ -234,41 +235,20 @@ pub fn populateFocusCacheFromCookies(
         }
     }
 
-    if (wm_take_focus_cache) |*c| c.put(win, supports) catch {};
-    const model: InputModel = if (supports)
-        (if (accepts) .locally_active else .globally_active)
-    else
-        (if (accepts) .passive else .no_input);
-    if (input_model_cache) |*c| c.put(win, model) catch {};
+    storeInputModel(win, inputModelFrom(supports, accepts));
 }
 
-/// Invalidate the WM_TAKE_FOCUS entry and recompute InputModel.
-/// Call when WM_PROTOCOLS changes (Electron sets it after mapping).
-pub fn recacheTakeFocus(conn: *xcb.xcb_connection_t, win: u32) void {
-    const supports = queryWMTakeFocusSupport(conn, win);
-    if (wm_take_focus_cache) |*c| c.put(win, supports) catch {};
-    recacheInputModel(conn, win);
-}
-
-/// Invalidate the WM_HINTS input field and recompute InputModel.
-/// Call when WM_HINTS changes.
-pub fn recacheHintsInput(conn: *xcb.xcb_connection_t, win: u32) void {
-    recacheInputModel(conn, win);
-}
-
-fn recacheInputModel(conn: *xcb.xcb_connection_t, win: u32) void {
-    const supports = if (wm_take_focus_cache) |*c| (c.get(win) orelse queryWMTakeFocusSupport(conn, win)) else queryWMTakeFocusSupport(conn, win);
-    const accepts  = queryWMHintsInput(conn, win);
-    const model: InputModel = if (supports)
-        (if (accepts) .locally_active else .globally_active)
-    else
-        (if (accepts) .passive else .no_input);
-    if (input_model_cache) |*c| c.put(win, model) catch {};
+/// Recompute and cache the InputModel after a WM_PROTOCOLS or WM_HINTS change.
+/// Two round-trips; called only on rare PropertyNotify events.
+pub fn recacheInputModel(conn: *xcb.xcb_connection_t, win: u32) void {
+    storeInputModel(win, inputModelFrom(
+        queryWMTakeFocusSupport(conn, win),
+        queryWMHintsInput(conn, win),
+    ));
 }
 
 pub fn uncacheWindowFocusProps(win: u32) void {
-    if (wm_take_focus_cache) |*c| _ = c.remove(win);
-    if (input_model_cache)   |*c| _ = c.remove(win);
+    if (input_model_cache) |*c| _ = c.remove(win);
 }
 
 /// Return the cached InputModel, falling back to a live query if not cached.
@@ -277,19 +257,27 @@ pub fn getInputModelCached(conn: *xcb.xcb_connection_t, win: u32) InputModel {
     if (input_model_cache) |*c| {
         if (c.get(win)) |model| return model;
     }
-    return getInputModel(conn, win);
+    // Cache miss — compute live and store for next time.
+    const model = inputModelFrom(
+        queryWMTakeFocusSupport(conn, win),
+        queryWMHintsInput(conn, win),
+    );
+    storeInputModel(win, model);
+    return model;
 }
 
-fn supportsWMTakeFocusCached(conn: *xcb.xcb_connection_t, win: u32) bool {
-    if (wm_take_focus_cache) |*cache| {
-        if (cache.get(win)) |cached| return cached;
-    }
-    const supports = queryWMTakeFocusSupport(conn, win);
-    if (wm_take_focus_cache) |*cache| cache.put(win, supports) catch {};
-    return supports;
+inline fn inputModelFrom(supports_take_focus: bool, accepts_input: bool) InputModel {
+    return if (supports_take_focus)
+        (if (accepts_input) .locally_active else .globally_active)
+    else
+        (if (accepts_input) .passive else .no_input);
 }
 
-// WM_CLASS ─────────────────────────────────────────────────────────────────
+inline fn storeInputModel(win: u32, model: InputModel) void {
+    if (input_model_cache) |*c| c.put(win, model) catch {};
+}
+
+// WM_CLASS
 
 pub const WMClass = struct {
     instance: []const u8,
@@ -324,7 +312,7 @@ pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allo
     return .{ .instance = instance, .class = class };
 }
 
-// Private helpers ──────────────────────────────────────────────────────────
+// Private helpers
 
 fn queryWMTakeFocusSupport(conn: *xcb.xcb_connection_t, win: u32) bool {
     const protocols_atom  = getAtomCached("WM_PROTOCOLS")  catch return false;
@@ -361,52 +349,27 @@ pub fn sendWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32, time: u32) void {
     _ = xcb.xcb_send_event(conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
 }
 
-// WM_HINTS input checking ──────────────────────────────────────────────────
-
-pub const InputModel = enum {
-    no_input,        // input=False, no WM_TAKE_FOCUS - window doesn't want focus
-    passive,         // input=True,  no WM_TAKE_FOCUS - set focus via XSetInputFocus
-    locally_active,  // input=True,  WM_TAKE_FOCUS    - set focus + send protocol
-    globally_active, // input=False, WM_TAKE_FOCUS    - only send protocol
-};
-
 /// Query WM_HINTS to determine if window accepts input via XSetInputFocus.
-/// Returns true if input field is absent (assume True) or explicitly True.
+/// Returns true if the input field is absent (assume True) or explicitly True.
 fn queryWMHintsInput(conn: *xcb.xcb_connection_t, win: u32) bool {
     const reply = xcb.xcb_get_property_reply(conn,
         xcb.xcb_get_property(conn, 0, win, xcb.XCB_ATOM_WM_HINTS, xcb.XCB_ATOM_WM_HINTS, 0, 9),
         null,
-    ) orelse return true; // Default to true if WM_HINTS absent
+    ) orelse return true;
     defer std.c.free(reply);
-    
+
     if (reply.*.format != 32 or reply.*.value_len < 1) return true;
-    
+
     const hints: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
-    const flags = hints[0];
-    const INPUT_HINT_FLAG: u32 = (1 << 0);
-    
-    // If InputHint flag is set, check the input field (hints[1])
-    if ((flags & INPUT_HINT_FLAG) != 0 and reply.*.value_len >= 2) {
+    const INPUT_HINT_FLAG: u32 = 1 << 0;
+
+    if ((hints[0] & INPUT_HINT_FLAG) != 0 and reply.*.value_len >= 2) {
         return hints[1] != 0;
     }
-    
-    // InputHint not set - assume window accepts input
     return true;
 }
 
-/// Determine the ICCCM input model for a window.
-pub fn getInputModel(conn: *xcb.xcb_connection_t, win: u32) InputModel {
-    const accepts_input = queryWMHintsInput(conn, win);
-    const supports_take_focus = supportsWMTakeFocusCached(conn, win);
-    
-    if (supports_take_focus) {
-        return if (accepts_input) .locally_active else .globally_active;
-    } else {
-        return if (accepts_input) .passive else .no_input;
-    }
-}
-
-// Child window resolution ──────────────────────────────────────────────────
+// Child window resolution
 
 /// Find the top-level window that the WM manages, starting from a potentially
 /// child window. Electron apps and other toolkits often use child windows for
@@ -414,28 +377,25 @@ pub fn getInputModel(conn: *xcb.xcb_connection_t, win: u32) InputModel {
 pub fn findManagedWindow(conn: *xcb.xcb_connection_t, win: u32, wm: anytype) u32 {
     var current = win;
     var depth: u8 = 0;
-    const MAX_DEPTH = 10; // Prevent infinite loops
-    
+    const MAX_DEPTH = 10;
+
     while (depth < MAX_DEPTH) : (depth += 1) {
-        // If this window is managed by the WM, we're done
         if (wm.hasWindow(current)) return current;
-        
-        // Query parent window
+
         const tree_reply = xcb.xcb_query_tree_reply(
             conn,
             xcb.xcb_query_tree(conn, current),
             null,
-        ) orelse return win; // Failed to query - return original
+        ) orelse return win;
         defer std.c.free(tree_reply);
-        
+
         const parent = tree_reply.*.parent;
-        const root = tree_reply.*.root;
-        
-        // If parent is root, we've gone too far
+        const root   = tree_reply.*.root;
+
         if (parent == root or parent == 0) return win;
-        
+
         current = parent;
     }
-    
-    return win; // Exceeded max depth - return original
+
+    return win;
 }

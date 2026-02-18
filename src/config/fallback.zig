@@ -34,7 +34,7 @@ const FONTS = [_][]const u8{
     "monospace", // System fallback
 };
 
-// CONSOLIDATED: Generic detection helper to eliminate duplication
+// Generic detection helper to eliminate duplication
 fn detectFromList(
     comptime list: []const []const u8,
     comptime checkFn: fn([]const u8) bool,
@@ -71,7 +71,7 @@ pub fn detectFont(_: std.mem.Allocator) ![]const u8 {
     );
 }
 
-/// OPTIMIZATION: Inline helper for path checking
+/// Inline helper for path checking
 inline fn checkPath(buf: []u8, dir: []const u8, command: []const u8) bool {
     const full_path = std.fmt.bufPrintZ(buf, "{s}/{s}", .{ dir, command }) catch return false;
     const fd = std.posix.open(full_path, .{ .ACCMODE = .RDONLY }, 0) catch return false;
@@ -79,11 +79,11 @@ inline fn checkPath(buf: []u8, dir: []const u8, command: []const u8) bool {
     return true;
 }
 
-/// OPTIMIZATION: Improved command availability check with caching
+/// Improved command availability check with caching
 fn isCommandAvailable(_: std.mem.Allocator, command: []const u8) bool {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     
-    // OPTIMIZATION: Check most common paths first (faster than PATH parsing)
+    // Check most common paths first (faster than PATH parsing)
     // Most binaries are in /usr/bin
     const common_paths = [_][]const u8{ "/usr/bin", "/usr/local/bin", "/bin" };
     inline for (common_paths) |path| {
@@ -114,9 +114,9 @@ fn isCommandAvailable(_: std.mem.Allocator, command: []const u8) bool {
     return false;
 }
 
-/// OPTIMIZATION: Simplified font checking with compile-time string map
+/// Simplified font checking with compile-time string map
 fn isFontAvailable(font: []const u8) bool {
-    // OPTIMIZATION: Use compile-time string map for O(1) lookup
+    // Use compile-time string map for O(1) lookup
     const COMMON_FONTS = std.StaticStringMap(void).initComptime(.{
         .{ "monospace", {} },
         .{ "FiraCode", {} },

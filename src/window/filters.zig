@@ -29,20 +29,3 @@ pub inline fn isOnCurrentWorkspace(wm: *defs.WM, win: u32) bool {
            workspaces.isOnCurrentWorkspace(win);
 }
 
-/// Collect all windows from a list that are on the current workspace
-/// This is a common operation in tiling and focus management
-pub fn collectCurrentWorkspaceWindows(
-    wm: *defs.WM,
-    all_windows: []const u32,
-    out_buffer: []u32,
-) usize {
-    var count: usize = 0;
-    for (all_windows) |win| {
-        if (count >= out_buffer.len) break;
-        if (isOnCurrentWorkspace(wm, win)) {
-            out_buffer[count] = win;
-            count += 1;
-        }
-    }
-    return count;
-}

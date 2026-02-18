@@ -235,9 +235,7 @@ pub fn main() !void {
     defer wm.deinit();
 
     try utils.initAtomCache(conn);
-    utils.initWMTakeFocusCache(wm.allocator);
     utils.initInputModelCache(wm.allocator);
-    defer utils.deinitWMTakeFocusCache();
     defer utils.deinitInputModelCache();
     defer drawing.deinitFontCache(allocator);
     

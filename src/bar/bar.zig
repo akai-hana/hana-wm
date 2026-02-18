@@ -294,7 +294,7 @@ pub fn deinit() void {
     }
 }
 
-// Public API functions ─────────────────────────────────────────────────────
+// Public API functions 
 
 pub fn toggleBarPosition(wm: *defs.WM) !void {
     if (state) |s| {
@@ -323,7 +323,7 @@ pub fn toggleBarPosition(wm: *defs.WM) !void {
         // Retile workspace to adjust for new bar position
         const current_ws = workspaces.getCurrentWorkspace() orelse return;
         if (wm.fullscreen.getForWorkspace(current_ws) == null) {
-            tiling.retileCurrentWorkspace(wm, true);
+            tiling.retileCurrentWorkspace(wm);
         }
     }
 }
@@ -412,7 +412,7 @@ pub fn setBarState(wm: *defs.WM, action: BarAction) void {
     if (action == .toggle) {
         retileAllWorkspaces(wm);
     } else {
-        tiling.retileCurrentWorkspace(wm, true);
+        tiling.retileCurrentWorkspace(wm);
     }
 }
 
@@ -425,7 +425,7 @@ fn retileAllWorkspaces(wm: *defs.WM) void {
     
     if (!tiling_active) {
         // For floating mode, just retile current workspace
-        tiling.retileCurrentWorkspace(wm, true);
+        tiling.retileCurrentWorkspace(wm);
         return;
     }
     
@@ -445,7 +445,7 @@ fn retileAllWorkspaces(wm: *defs.WM) void {
         ws_state.current = @intCast(idx);
         
         // Retile to update geometry (calculates correct Y position and height for bar state)
-        tiling.retileCurrentWorkspace(wm, true);
+        tiling.retileCurrentWorkspace(wm);
         
         // If this isn't the original workspace, move windows back off-screen
         // They now have correct Y/height but need to stay invisible
@@ -469,7 +469,7 @@ fn retileAllWorkspaces(wm: *defs.WM) void {
     // Now ungrab - all changes will appear atomically
     _ = xcb.xcb_ungrab_server(wm.conn);
     
-    // CRITICAL: Wait for X server to process all geometry updates before returning
+    // Wait for X server to process all geometry updates before returning
     // This ensures windows have correct geometry immediately
     const cookie = xcb.xcb_get_input_focus(wm.conn);
     const reply = xcb.xcb_get_input_focus_reply(wm.conn, cookie, null);

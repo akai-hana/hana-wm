@@ -104,11 +104,15 @@ pub const Tracking = struct {
                 s.len = len;
             },
             .large => |*l| {
+                // new_order is a permutation of the existing windows, so its
+                // length never exceeds the current capacity of either structure.
+                // clearRetainingCapacity keeps the allocated storage, making
+                // the assumeCapacity variants below unconditionally safe.
                 l.list.clearRetainingCapacity();
                 l.set.clearRetainingCapacity();
                 for (new_order) |win| {
-                    l.list.append(self.allocator, win) catch continue;
-                    l.set.put(win, {}) catch continue;
+                    l.list.appendAssumeCapacity(win);
+                    l.set.putAssumeCapacity(win, {});
                 }
             },
         }
@@ -200,7 +204,7 @@ pub const Tracking = struct {
         try set.ensureTotalCapacity(s.len + 8);
         for (s.items[0..s.len]) |win| {
             list.appendAssumeCapacity(win);
-            try set.put(win, {});
+            set.putAssumeCapacity(win, {});
         }
         self.storage = .{ .large = .{ .list = list, .set = set } };
     }

@@ -1,5 +1,5 @@
 //! Grid layout - Arrange windows in optimal grid
-/// OPTIMIZED: Direct XCB calls - no batch overhead
+/// Direct XCB calls - no batch overhead
 
 const std = @import("std");
 const defs = @import("defs");

@@ -24,7 +24,6 @@ const dispatch_table = blk: {
     table[xcb.XCB_KEY_PRESS]         = @ptrCast(&input.handleKeyPress);
     table[xcb.XCB_BUTTON_PRESS]      = @ptrCast(&input.handleButtonPress);
     table[xcb.XCB_BUTTON_RELEASE]    = @ptrCast(&input.handleButtonRelease);
-    table[xcb.XCB_MOTION_NOTIFY]     = @ptrCast(&input.handleMotionNotify);
     table[xcb.XCB_ENTER_NOTIFY]      = @ptrCast(&window.handleEnterNotify);
     table[xcb.XCB_LEAVE_NOTIFY]      = @ptrCast(&window.handleLeaveNotify);
     table[xcb.XCB_MAP_REQUEST]       = @ptrCast(&window.handleMapRequest);

@@ -15,7 +15,7 @@ const debug      = @import("debug");
 
 const WINDOW_EVENT_MASK = constants.EventMasks.MANAGED_WINDOW;
 
-// Button grabs ─
+// Button grabs 
 
 /// For unfocused windows we grab all buttons in sync mode so we can intercept
 /// the click, focus the window, and replay the event.  For focused windows we
@@ -31,7 +31,7 @@ pub fn grabButtons(wm: *WM, win: u32, focused: bool) void {
     }
 }
 
-// Workspace rule matching ──────────────────────────────────────────────────
+// Workspace rule matching 
 
 fn validateWorkspace(target: ?u8, current: u8) u8 {
     const ws = target orelse return current;
@@ -74,10 +74,10 @@ fn collectWorkspaceRule(wm: *WM, cookie: xcb.xcb_get_property_cookie_t) ?u8 {
 inline fn setupTiling(wm: *WM, win: u32, on_current: bool) void {
     if (!wm.config.tiling.enabled) return;
     tiling.addWindow(wm, win);
-    if (on_current) tiling.retileCurrentWorkspace(wm, false);
+    if (on_current) tiling.retileCurrentWorkspace(wm);
 }
 
-// Map request ──────────────────────────────────────────────────────────────
+// Map request 
 
 pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void {
     const win        = event.window;
@@ -155,7 +155,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     bar.markDirty();
 }
 
-// Configure request ────────────────────────────────────────────────────────
+// Configure request 
 
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, wm: *WM) void {
     const win = event.window;
@@ -187,7 +187,7 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, w
     utils.flush(wm.conn);
 }
 
-// Focus events ─────────────────────────────────────────────────────────────
+// Focus events 
 
 pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) void {
     wm.last_event_time = event.time;
@@ -197,15 +197,17 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) vo
     if (event.mode == xcb.XCB_NOTIFY_MODE_GRAB or
         event.mode == xcb.XCB_NOTIFY_MODE_UNGRAB) return;
     if (wm.drag_state.active) return;
-    if (wm.suppress_focus_reason == .window_spawn) return;
+    // A crossing event with mode NORMAL means the pointer has genuinely moved.
+    // That is sufficient signal to lift window-spawn suppression — the user is
+    // no longer in the brief window immediately after a window appeared.
+    if (wm.suppress_focus_reason == .window_spawn) wm.suppress_focus_reason = .none;
 
     const win = if (event.event == wm.root and event.child != 0)
         event.child
     else
         event.event;
 
-    if (filters.isSystemWindow(wm, win)) return;
-    if (!wm.hasWindow(win)) return;
+    if (!filters.isValidManagedWindow(wm, win)) return;
     if (!workspaces.isOnCurrentWorkspace(win)) return;
     if (wm.focused_window == win) return;
 
@@ -213,15 +215,15 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) vo
 }
 
 /// Root's LeaveNotify fires the instant the pointer enters any child window,
-/// including Electron/Chromium which generates no EnterNotify or MotionNotify
-/// events visible to root.  This gives us event-driven focus at the same
-/// latency as handleEnterNotify for all other windows.
+/// including Electron/Chromium which generates no EnterNotify events visible
+/// to root.  This gives us event-driven focus at the same latency as
+/// handleEnterNotify for all other windows.
 pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t, wm: *WM) void {
     wm.last_event_time = event.time;
     if (event.event != wm.root) return;
     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL) return;
     if (wm.drag_state.active) return;
-    if (wm.suppress_focus_reason == .window_spawn) return;
+    if (wm.suppress_focus_reason == .window_spawn) wm.suppress_focus_reason = .none;
 
     // event.child is the direct child of root being entered.
     const target: u32 = if (event.child != 0) event.child else blk: {
@@ -233,15 +235,14 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t, wm: *WM) vo
     };
     if (target == 0 or target == wm.root) return;
 
-    if (filters.isSystemWindow(wm, target)) return;
-    if (!wm.hasWindow(target)) return;
+    if (!filters.isValidManagedWindow(wm, target)) return;
     if (!workspaces.isOnCurrentWorkspace(target)) return;
     if (wm.focused_window == target) return;
 
     focus.setFocus(wm, target, .mouse_enter);
 }
 
-// Property notify ──────────────────────────────────────────────────────────
+// Property notify 
 
 /// Keep the focus-property cache coherent when relevant window properties change.
 /// WM_PROTOCOLS: Electron sets WM_TAKE_FOCUS after mapping, so a cached false
@@ -251,16 +252,12 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t, wm: *WM) vo
 pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t, wm: *WM) void {
     if (!wm.hasWindow(event.window)) return;
     const wm_protocols = utils.getAtomCached("WM_PROTOCOLS") catch return;
-    if (event.atom == wm_protocols) {
-        utils.recacheTakeFocus(wm.conn, event.window);
-        return;
-    }
-    if (event.atom == xcb.XCB_ATOM_WM_HINTS) {
-        utils.recacheHintsInput(wm.conn, event.window);
+    if (event.atom == wm_protocols or event.atom == xcb.XCB_ATOM_WM_HINTS) {
+        utils.recacheInputModel(wm.conn, event.window);
     }
 }
 
-// Unmap / destroy ──────────────────────────────────────────────────────────
+// Unmap / destroy 
 
 fn unmanageWindow(wm: *WM, win: u32) void {
     if (wm.fullscreen.isFullscreen(win)) {
@@ -301,7 +298,7 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM
     unmanageWindow(wm, win);
 }
 
-// Post-unmanage focus recovery ─────────────────────────────────────────────
+// Post-unmanage focus recovery 
 
 fn focusWindowUnderPointer(wm: *WM) void {
     const reply = xcb.xcb_query_pointer_reply(
@@ -312,7 +309,6 @@ fn focusWindowUnderPointer(wm: *WM) void {
     const child = reply.*.child;
     if (filters.isValidManagedWindow(wm, child) and workspaces.isOnCurrentWorkspace(child)) {
         focus.setFocus(wm, child, .mouse_enter);
-        tiling.updateWindowFocus(wm, null, child);
         return;
     }
     focusFallback(wm);
@@ -324,7 +320,6 @@ fn focusFallback(wm: *WM) void {
     for (ws.windows.items()) |win| {
         if (filters.isValidManagedWindow(wm, win)) {
             focus.setFocus(wm, win, .window_destroyed);
-            tiling.updateWindowFocus(wm, null, win);
             return;
         }
     }
