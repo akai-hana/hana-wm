@@ -8,6 +8,7 @@ const window     = @import("window");
 const tiling     = @import("tiling");
 const workspaces = @import("workspaces");
 const bar        = @import("bar");
+const minimize   = @import("minimize");
 
 const EventHandler = *const fn (event: *anyopaque, wm: *defs.WM) void;
 
@@ -47,9 +48,11 @@ pub fn initModules(wm: *defs.WM) void {
     input.init(wm);
     workspaces.init(wm);
     tiling.init(wm);
+    minimize.init(wm.allocator, wm.config.workspaces.count);
 }
 
 pub fn deinitModules(wm: *defs.WM) void {
+    minimize.deinit();
     tiling.deinit(wm);
     workspaces.deinit(wm);
     input.deinit(wm);

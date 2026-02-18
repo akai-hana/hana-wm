@@ -105,16 +105,13 @@ indicator_size = 125%
 # accent_color = "#ac3232"
 accent_color = "#ac3232"
 
-# "#007373"
-# 009691
-# 85a796
-
 # Per-segment accent colors (overrides default accent_color)
 # These are now properly working - each segment can have its own accent color
 [bar.colors]
 workspaces = "#b9c0a8"  # Custom accent for workspace indicators
 title = "#ac3232"       # Custom accent for title segment  
 title_unfocused = "#52263e"
+title_minimized = "#007373"
 
 clock = "#ac3232"       # Custom accent for clock segment
 
@@ -151,6 +148,11 @@ Mod+Shift+Return = "{kill} Xorg" # quit wm
 Mod+Shift+F = "close_window" # Close focused window
 Mod+Shift+T = "reload" # Config hot-reload
 
+Mod+T           = "minimize_window"
+Mod+Shift+T     = "unminimize_lifo"
+Mod+Alt+T       = "unminimize_fifo"
+Mod+Shift+Alt+T = "unminimize_all"
+
 # wallpaper
 Mod+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-switch.sh" # start shader wallpaper
 Mod+Shift+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-stop.sh" # stop shader wallpaper
@@ -159,7 +161,8 @@ Mod+Shift+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-stop.sh" # st
 Mod+N           = "toggle_tiling" # Enable/disable tiling
 Mod+space       = "toggle_layout" # Cycle layouts forward
 Mod+Shift+space = "toggle_layout_reverse" # Cycle layouts backward
-Mod+Tab         = "swap_master"   # Swap focused window with master (slave→master or master↔slave)
+Mod+Tab         = "swap_master"   # Swap focused window with master (slave→master or master-slave)
+Mod+Shift+Tab   = "rofi -show drun" #
 
 # Layouts
 ## Master-stack
