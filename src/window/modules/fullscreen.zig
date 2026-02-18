@@ -10,10 +10,21 @@ const workspaces = @import("workspaces");
 const bar        = @import("bar");
 const constants  = @import("constants");
 const debug      = @import("debug");
+const minimize   = @import("minimize");
 
 inline fn borderColor(wm: *WM, win: u32) u32 {
     return if (wm.focused_window == win) wm.config.tiling.border_focused
            else                          wm.config.tiling.border_unfocused;
+}
+
+/// Enter fullscreen for a specific window on the current workspace.
+/// Used by the minimize module to restore windows that were fullscreen when
+/// minimized.  The caller is responsible for setting wm.focused_window before
+/// calling this function.
+pub fn enterFullscreenForWindow(wm: *WM, win: u32) void {
+    const ws = workspaces.getCurrentWorkspace() orelse return;
+    enterFullscreen(wm, win, ws);
+    // enterFullscreen ends with its own flush; no extra flush needed here.
 }
 
 pub fn toggleFullscreen(wm: *WM) void {
@@ -124,10 +135,10 @@ fn exitFullscreen(wm: *WM, win: u32, ws: u8) void {
             const x: u32 = @intCast(wm.screen.width_in_pixels  / 4);
             const y: u32 = @intCast(wm.screen.height_in_pixels / 4);
             for (ws_obj.windows.items()) |other_win| {
-                if (other_win != win) {
-                    _ = xcb.xcb_configure_window(wm.conn, other_win,
-                        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{ x, y });
-                }
+                if (other_win == win) continue;
+                if (minimize.isMinimized(other_win)) continue;
+                _ = xcb.xcb_configure_window(wm.conn, other_win,
+                    xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{ x, y });
             }
         }
     }

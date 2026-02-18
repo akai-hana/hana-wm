@@ -72,6 +72,10 @@ pub const Action = union(enum) {
     move_to_workspace: u8,
     dump_state,
     emergency_recover,
+    minimize_window,
+    unminimize_lifo,
+    unminimize_fifo,
+    unminimize_all,
 
     pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -189,6 +193,7 @@ pub const BarConfig = struct {
     workspaces_accent: ?u32 = null,
     title_accent_color: ?u32 = null,
     title_unfocused_accent: ?u32 = null,
+    title_minimized_accent: ?u32 = null,
     clock_accent: ?u32 = null,
 
     workspace_icons: std.ArrayList([]const u8),
@@ -234,6 +239,10 @@ pub const BarConfig = struct {
 
     pub inline fn getTitleUnfocusedAccent(self: BarConfig) u32 {
         return self.title_unfocused_accent orelse self.accent_color;
+    }
+
+    pub inline fn getTitleMinimizedAccent(self: *const BarConfig) u32 {
+        return self.title_minimized_accent orelse self.bg;
     }
 
     pub inline fn getClockAccent(self: *const BarConfig) u32 {

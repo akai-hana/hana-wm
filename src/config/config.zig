@@ -253,6 +253,11 @@ const ACTION_MAP = std.StaticStringMap(defs.Action).initComptime(.{
     .{ "swap_master", .swap_master },
     .{ "dump_state", .dump_state },
     .{ "emergency_recover", .emergency_recover },
+    .{ "minimize_window",   .minimize_window },
+    .{ "minimize",          .minimize_window },
+    .{ "unminimize_lifo",   .unminimize_lifo },
+    .{ "unminimize_fifo",   .unminimize_fifo },
+    .{ "unminimize_all",    .unminimize_all  },
 });
 
 fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
@@ -587,10 +592,11 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     
     // Override with bar.colors section if present
     if (doc.getSection("bar.colors")) |colors_section| {
-        cfg.bar.workspaces_accent = getColor(colors_section, "workspaces", cfg.bar.workspaces_accent orelse cfg.bar.accent_color);
-        cfg.bar.title_accent_color = getColor(colors_section, "title", cfg.bar.title_accent_color orelse cfg.bar.accent_color);
-        cfg.bar.title_unfocused_accent = getColor(colors_section, "title_unfocused", cfg.bar.title_unfocused_accent orelse cfg.bar.bg);
-        cfg.bar.clock_accent = getColor(colors_section, "clock", cfg.bar.clock_accent orelse cfg.bar.accent_color);
+        cfg.bar.workspaces_accent       = getColor(colors_section, "workspaces",      cfg.bar.workspaces_accent       orelse cfg.bar.accent_color);
+        cfg.bar.title_accent_color      = getColor(colors_section, "title",            cfg.bar.title_accent_color      orelse cfg.bar.accent_color);
+        cfg.bar.title_unfocused_accent  = getColor(colors_section, "title_unfocused",  cfg.bar.title_unfocused_accent  orelse cfg.bar.bg);
+        cfg.bar.title_minimized_accent  = getColor(colors_section, "title_minimized",  cfg.bar.title_minimized_accent  orelse cfg.bar.bg);
+        cfg.bar.clock_accent            = getColor(colors_section, "clock",            cfg.bar.clock_accent            orelse cfg.bar.accent_color);
     }
 }
 

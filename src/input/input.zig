@@ -15,6 +15,7 @@ const window = @import("window");
 const debug = @import("debug");
 const xcb = defs.xcb;
 const WM = defs.WM;
+const minimize = @import("minimize");
 
 const c = @cImport(@cInclude("unistd.h"));
 extern "c" fn waitpid(pid: c_int, status: ?*c_int, options: c_int) c_int;
@@ -265,6 +266,10 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
         .swap_master => tiling.swapWithMaster(wm),
         .dump_state => dumpState(wm),
         .emergency_recover => emergencyRecover(wm),
+        .minimize_window      => minimize.minimizeWindow(wm),
+        .unminimize_lifo      => minimize.unminimizeLifo(wm),
+        .unminimize_fifo      => minimize.unminimizeFifo(wm),
+        .unminimize_all       => minimize.unminimizeAll(wm),
         .exec => |cmd| try executeShellCommand(wm, cmd),
         .switch_workspace => |ws| workspaces.switchTo(wm, ws),
         .move_to_workspace => |ws| {

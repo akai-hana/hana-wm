@@ -12,6 +12,7 @@ const tiling     = @import("tiling");
 const bar        = @import("bar");
 const workspaces = @import("workspaces");
 const debug      = @import("debug");
+const minimize   = @import("minimize");
 
 const WINDOW_EVENT_MASK = constants.EventMasks.MANAGED_WINDOW;
 
@@ -209,6 +210,7 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) vo
 
     if (!filters.isValidManagedWindow(wm, win)) return;
     if (!workspaces.isOnCurrentWorkspace(win)) return;
+    if (minimize.isMinimized(win)) return;
     if (wm.focused_window == win) return;
 
     focus.setFocus(wm, win, .mouse_enter);
@@ -237,6 +239,7 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t, wm: *WM) vo
 
     if (!filters.isValidManagedWindow(wm, target)) return;
     if (!workspaces.isOnCurrentWorkspace(target)) return;
+    if (minimize.isMinimized(target)) return;
     if (wm.focused_window == target) return;
 
     focus.setFocus(wm, target, .mouse_enter);
@@ -307,18 +310,18 @@ fn focusWindowUnderPointer(wm: *WM) void {
     defer std.c.free(reply);
 
     const child = reply.*.child;
-    if (filters.isValidManagedWindow(wm, child) and workspaces.isOnCurrentWorkspace(child)) {
+    if (filters.isValidManagedWindow(wm, child) and workspaces.isOnCurrentWorkspace(child) and !minimize.isMinimized(child)) {
         focus.setFocus(wm, child, .mouse_enter);
         return;
     }
     focusFallback(wm);
 }
 
-/// Focus the first visible window in the current workspace (last-resort fallback).
+/// Focus the first visible, non-minimized window in the current workspace (last-resort fallback).
 fn focusFallback(wm: *WM) void {
     const ws = workspaces.getCurrentWorkspaceObject() orelse return;
     for (ws.windows.items()) |win| {
-        if (filters.isValidManagedWindow(wm, win)) {
+        if (filters.isValidManagedWindow(wm, win) and !minimize.isMinimized(win)) {
             focus.setFocus(wm, win, .window_destroyed);
             return;
         }
