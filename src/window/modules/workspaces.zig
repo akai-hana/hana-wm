@@ -276,3 +276,13 @@ pub inline fn getCurrentWorkspaceObject() ?*Workspace {
     const s = getState() orelse return null;
     return &s.workspaces[s.current];
 }
+
+pub inline fn getWorkspaceCount() usize {
+    const s = getState() orelse return 0;
+    return s.workspaces.len;
+}
+
+pub inline fn getWorkspaceForWindow(win: u32) ?u8 {
+    const s = getState() orelse return null;
+    return s.window_to_workspace.get(win);
+}
