@@ -8,7 +8,7 @@ const xkb    = @import("xkbcommon");
 
 const parseColor = parser.parseColor;
 
-// ── Typed value getters ───────────────────────────────────────────────────────
+// Typed value getters ───────────────────────────────────────────────────────
 
 /// Returns `default` when the key is absent, out of range, or the wrong type.
 /// Out-of-range values log a warning and return the default (not clamped).
@@ -61,7 +61,7 @@ fn getColor(section: *const parser.Section, key: []const u8, default: u32) u32 {
     return default;
 }
 
-// ── Rule helpers ──────────────────────────────────────────────────────────────
+// Rule helpers─
 
 fn validateWorkspace(ws_num: usize, max: usize, context: []const u8) bool {
     if (ws_num < 1 or ws_num > max) {
@@ -78,7 +78,7 @@ fn addRule(allocator: std.mem.Allocator, cfg: *defs.Config, class_name: []const 
     });
 }
 
-// ── Default bar layout ────────────────────────────────────────────────────────
+// Default bar layout ────────────────────────────────────────────────────────
 
 fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *defs.Config) !void {
     const defaults = [_]struct { pos: defs.BarPosition, seg: defs.BarSegment }{
@@ -93,7 +93,7 @@ fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *defs.Config) !void {
     }
 }
 
-// ── Config loading ────────────────────────────────────────────────────────────
+// Config loading ────────────────────────────────────────────────────────────
 
 /// Loads config from XDG path, CWD, or the embedded fallback — whichever succeeds first.
 pub fn loadConfigDefault(allocator: std.mem.Allocator) !defs.Config {
@@ -211,7 +211,7 @@ fn parseConfigSections(allocator: std.mem.Allocator, doc: *const parser.Document
     try parseRules(allocator, doc, cfg);
 }
 
-// ── Keybinding parsing ────────────────────────────────────────────────────────
+// Keybinding parsing ────────────────────────────────────────────────────────
 
 const MOD_MAP = std.StaticStringMap(u16).initComptime(.{
     .{ "Super",   defs.MOD_SUPER   },
@@ -337,7 +337,7 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !defs.Action {
     return .{ .exec = try allocator.dupe(u8, cmd) };
 }
 
-// ── Public post-load helpers ──────────────────────────────────────────────────
+// Public post-load helpers ──────────────────────────────────────────────────
 
 /// Resolves keybindings to keycodes and logs conflicts. Call after screen is available.
 pub fn finalizeConfig(cfg: *defs.Config, screen: *defs.xcb.xcb_screen_t) void {
@@ -365,7 +365,7 @@ pub fn resolveKeybindings(keybindings: anytype, xkb_state: *xkb.XkbState) void {
     }
 }
 
-// ── Section parsers ───────────────────────────────────────────────────────────
+// Section parsers ───────────────────────────────────────────────────────────
 
 fn parseWorkspaces(doc: *const parser.Document, cfg: *defs.Config) void {
     // Support both [bar.modules.workspaces] (current) and [workspaces] (legacy).

@@ -190,12 +190,22 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
 
     // Grab the server so the switch is atomic — no intermediate frames visible.
     _ = xcb.xcb_grab_server(wm.conn);
-    defer _ = xcb.xcb_ungrab_server(wm.conn);
+    // NOTE: no defer for ungrab — we queue it explicitly before the flush so
+    // that grab + all commands + raiseBar + ungrab all land in a single write.
+    // A deferred ungrab would run after the flush, leaving the server locked
+    // for an extra event-loop cycle and delaying when picom can composite.
 
     // Step 1: hide all windows from the old workspace.
+    // Also invalidate each window's geom_cache entry.  The cache holds their
+    // last tiled positions; we're about to move them to OFFSCREEN_X_POSITION
+    // via a partial configure (X only).  Without invalidation, the next
+    // retileCurrentWorkspace on this workspace would compute the same tiled
+    // positions, find cache hits, and skip the configure_window calls —
+    // leaving windows stranded offscreen when the user switches back.
     for (old_ws_obj.windows.items()) |win| {
         _ = xcb.xcb_configure_window(wm.conn, win,
             xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
+        tiling.invalidateGeomCache(win);
     }
 
     // Step 2: adjust bar visibility for the new workspace.
@@ -294,9 +304,21 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
     _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
         wm.focused_window orelse wm.root, xcb.XCB_CURRENT_TIME);
 
-    utils.flush(wm.conn);
+    // Raise the bar, redraw it with the new workspace highlighted, then release
+    // the grab — all before the flush so everything lands in a single write.
+    //
+    // Redrawing here (instead of deferring via markDirty) is critical: if we
+    // defer, picom composites one frame showing the old workspace highlighted
+    // in the bar before the deferred redraw fires.  Drawing inside the grab is
+    // safe — Cairo/XCB rendering goes to the bar's backing pixmap; picom
+    // composites the updated content the moment it unfreezes.
+    //
+    // ws_state.current was already set to new_ws in switchTo() before this
+    // function was called, so the draw correctly highlights the new workspace.
     bar.raiseBar();
-    bar.markDirty();
+    bar.redrawImmediate(wm);
+    _ = xcb.xcb_ungrab_server(wm.conn);
+    utils.flush(wm.conn);
 }
 
 // Queries

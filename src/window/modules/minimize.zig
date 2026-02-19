@@ -166,10 +166,8 @@ pub fn minimizeWindow(wm: *WM) void {
     // Phase 2: remove from tiling (before retile so the layout excludes it).
     if (wm.config.tiling.enabled) tiling.removeWindow(win);
 
-    // Phase 3: move off-screen.
-    hideWindow(wm, win);
-
-    // Phase 4: track.  On failure, roll back tiling membership and abort.
+    // Phase 4 (track) is attempted before the grab so we can abort cleanly on
+    // allocation failure without ever having entered the grab.
     if (!trackMinimized(s, ws_idx, win, saved_fs)) {
         debug.err("minimize: allocation failure tracking window 0x{x} — rolling back", .{win});
         if (wm.config.tiling.enabled) {
@@ -179,6 +177,14 @@ pub fn minimizeWindow(wm: *WM) void {
         return;
     }
 
+    // Phases 3, 5, 6 wrapped in a single server grab so picom never composites
+    // an intermediate state (window gone but layout/focus not yet updated, or
+    // fullscreen bar still hidden while siblings remain offscreen).
+    _ = xcb.xcb_grab_server(wm.conn);
+
+    // Phase 3: move off-screen.
+    hideWindow(wm, win);
+
     // Phase 5: update focus (must precede retile so border colours are correct).
     refocusAfterMinimize(wm);
 
@@ -187,13 +193,20 @@ pub fn minimizeWindow(wm: *WM) void {
         // setBarState(.show_fullscreen) restores the bar and, for tiled
         // workspaces, triggers a retile.  The minimized window is not in the
         // tiling list so it will not receive a tile position.
+        // The flush inside setBarState happens while picom is frozen (grab
+        // is held) — harmless.
         bar.setBarState(wm, .show_fullscreen);
     } else if (wm.config.tiling.enabled) {
         tiling.retileCurrentWorkspace(wm);
     }
 
+    // Redraw the bar inside the grab so the updated workspace/title state is
+    // composited atomically with the window hide and layout change.  Without
+    // this, picom composites one frame showing the old bar content (e.g. the
+    // minimized window's title still displayed) before the deferred redraw fires.
+    bar.redrawImmediate(wm);
+    _ = xcb.xcb_ungrab_server(wm.conn);
     utils.flush(wm.conn);
-    bar.markDirty();
 }
 
 // Restore
@@ -227,14 +240,19 @@ fn restoreWindow(wm: *WM, win: u32) void {
         utils.flush(wm.conn);
 
         // Re-enter fullscreen — covers the screen, hides the bar, and pushes
-        // sibling windows off-screen.
+        // sibling windows off-screen.  enterFullscreenForWindow owns its own
+        // server grab, so this path is already atomic.
         wm.focused_window = win;
         fullscreen.enterFullscreenForWindow(wm, win);
         bar.markDirty();
         return;
     }
 
-    // Non-fullscreen restore.
+    // Non-fullscreen restore: wrap addWindow + retile + focus in a single grab
+    // so picom never composites a frame where the window has appeared but its
+    // neighbours have not yet been repositioned (or vice-versa).
+    _ = xcb.xcb_grab_server(wm.conn);
+
     if (wm.config.tiling.enabled) {
         tiling.addWindow(wm, win);
         tiling.retileCurrentWorkspace(wm);
@@ -248,9 +266,16 @@ fn restoreWindow(wm: *WM, win: u32) void {
         );
     }
 
+    // .window_spawn skips the isWindowMapped round-trip in setFocus, keeping
+    // the grab scope free of avoidable blocking calls.
     focus.setFocus(wm, win, .window_spawn);
+
+    // Redraw the bar inside the grab: the restored window's title and workspace
+    // indicator are correct now.  Without this, picom composites one stale-bar
+    // frame (no title, old minimized count) before the deferred redraw fires.
+    bar.redrawImmediate(wm);
+    _ = xcb.xcb_ungrab_server(wm.conn);
     utils.flush(wm.conn);
-    bar.markDirty();
 }
 
 // Public unminimize API
