@@ -7,12 +7,6 @@ const defs       = @import("defs");
 const bar        = @import("bar");
 const workspaces = @import("workspaces");
 
-/// Check if a window is a system window (root, null, or bar)
-/// System windows should not be managed or receive focus
-pub inline fn isSystemWindow(wm: *defs.WM, win: u32) bool {
-    return win == wm.root or win == 0 or bar.isBarWindow(win);
-}
-
 /// Check if a window is valid and tracked by the window manager
 /// This is the core validation for any window operation
 pub inline fn isValidManagedWindow(wm: *defs.WM, win: u32) bool {

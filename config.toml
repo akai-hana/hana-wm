@@ -3,22 +3,25 @@
 ### NOTES:
 ### (configuration tips & tricks)
 #
-# + All parameters (X =) and values (= Y) are CAPS-insensitive. 
-#   - _It boils down to preference. Style them however you want :9_
+# + All parameters and values are CAPS-insensitive. 
+#
+# + Strings can be set with "" or '', decimal values can use a
+#   dot (N.NN) or comma (N,NN).
 #
 # + Numerical values can be either N (px) or N%/%N (ratio)
-#   - The former represents an exact amount of pixels,
-#     while the latter represents a ratio between two elements.
-#     For example, 'gaps = 5%' will make gaps take up 5%
-#     of viewable area in relation to the size of windows.
-#   - Any percentage value can be N% or %N, decimal or not (N.NN%),
-#     and if decimal, use a dot or a comma (N.N%/N,N%).
-#
-# + Any string can be wrapped with "" or ''
+#   - 'N' represents an exact amount of pixels.
+#   - 'N%/%N' represents either a ratio or a default value scaled.
+#      - For example, 'gaps = 5%' will make window gaps take up 5%
+#        of a display's viewable area in relation to the windows, and
+#        'border_width = 5%' will make window's borders be 5% of a
+#        window's occupied area.
+#      - As for default scaling, 'indicator_size = 125%' will make the
+#        workspace indicators be +25% of the default value set (5 px).
+#   - Any percentage value can be decimal (N.NN%), and if decimal,
+#     use a dot or a comma (N.N%/N,N%).
 #
 # + HEX code values can be set with either of the following formats:
 #   (RRGGBB/rrggbb, ""/'') "#RRGGBB" / RRGGBB / 0xRRGGBB
-#
 
 [tiling]
 enabled = true
@@ -35,13 +38,13 @@ layouts = [
 ]
 
 [tiling.aesthetics]
-# Percentage values now use a new scaling system:
 # - 0-100%: Linear scaling where 100% = 50% of window space (half window, half gaps/border)
 # - 100-200%: Can go extreme, where 200% = entire window consumed by gaps/border
 # This keeps the 0-100% range "sane" while allowing extreme customization if needed
 gaps             = 2.5%
 border_width     = 1%
 border_focused   = '#ac3232'
+# border_focused   = '#FFFFFF'
 border_unfocused = '#52263e' # Letters can also be MAJUS/minus
 
 [tiling.layouts.master-stack]
@@ -146,7 +149,7 @@ kill = "pkill -9" # program kill value placeholder
 Mod+F = "toggle_fullscreen"
 Mod+Shift+Return = "{kill} Xorg" # quit wm
 Mod+Shift+F = "close_window" # Close focused window
-Mod+Shift+T = "reload" # Config hot-reload
+Mod+Shift+Y = "reload" # Config hot-reload
 
 Mod+T           = "minimize_window"
 Mod+Shift+T     = "unminimize_lifo"

@@ -15,7 +15,6 @@ const BASELINE_DPI: f32 = 96.0; // Standard DPI
 
 // Font size baseline: 1920x1080 (1080p)
 // Font percentages are relative to this resolution
-const FONT_BASELINE_WIDTH: f32 = 1920.0;
 const FONT_BASELINE_HEIGHT: f32 = 1080.0;
 
 // DPI cache for avoiding redundant detection
@@ -152,16 +151,16 @@ fn snapToCommonDPI(dpi: f32) f32 {
     return dpi;
 }
 
+// Precomputed at compile time — avoids repeated sqrt on every fallback DPI call
+const BASELINE_DIAGONAL: f32 = @sqrt(BASELINE_WIDTH * BASELINE_WIDTH + BASELINE_HEIGHT * BASELINE_HEIGHT);
+
 /// Calculate scale factor based on resolution relative to baseline
 /// This is an alternative approach that scales based on screen width
 fn calculateScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
     const dims = ScreenDimensions.from(screen);
-    
-    // Calculate diagonal in pixels
-    const baseline_diagonal = @sqrt(BASELINE_WIDTH * BASELINE_WIDTH + BASELINE_HEIGHT * BASELINE_HEIGHT);
-    
+
     // Scale based on diagonal size
-    const resolution_scale = dims.diagonalPx() / baseline_diagonal;
+    const resolution_scale = dims.diagonalPx() / BASELINE_DIAGONAL;
     
     debug.info("Resolution scaling: {d}x{d} -> {d:.2}x baseline ({d}x{d})", 
         .{@as(u16, @intFromFloat(dims.width_px)), @as(u16, @intFromFloat(dims.height_px)), 
@@ -249,16 +248,10 @@ pub inline fn scaleToInt(comptime T: type, base_value: f32, scale_factor: f32) T
 ///   - Formula: (percentage / 100) * 0.5 * reference_dimension
 pub fn scaleBorderWidth(value: @import("parser").ScalableValue, scale_factor: f32, reference_dimension: u16) u16 {
     if (value.is_percentage) {
-        // For percentage: scale relative to window dimension
-        // 100% means border equals viewing area (border = 50% of total)
         const dim_f: f32 = @floatFromInt(reference_dimension);
-        const border_px = (value.value / 100.0) * 0.5 * dim_f * scale_factor;
-        const result: u16 = @intFromFloat(@max(0.0, @round(border_px)));
-        return result;
+        return @intFromFloat(@max(0.0, @round((value.value / 100.0) * 0.5 * dim_f * scale_factor)));
     } else {
-        // Absolute value - use as-is, no DPI scaling
-        const result: u16 = @intFromFloat(@max(0.0, @round(value.value)));
-        return result;
+        return @intFromFloat(@max(0.0, @round(value.value)));
     }
 }
 

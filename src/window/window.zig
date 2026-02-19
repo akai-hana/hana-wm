@@ -125,15 +125,12 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     };
     workspaces.moveWindowTo(wm, win, validated_ws);
 
-    // Always register the window with the tiling state, regardless of which
-    // workspace it lands on.  For on-current windows this also retiles
-    // immediately (so the configure_window call lands before xcb_map_window,
-    // preventing a geometry flash).  For off-current windows we skip the
-    // retile — tiling.addWindow marks the state dirty, so executeSwitch will
-    // fall through to retileCurrentWorkspace when the workspace is activated.
-    setupTiling(wm, win, is_current);
-
     if (is_current) {
+        // Queue the tiled geometry configure BEFORE the map command.  XCB
+        // guarantees in-order processing within a connection, so the server
+        // applies the geometry first — the window appears at its correct
+        // tiled position with no intermediate geometry flash.
+        setupTiling(wm, win, true);
         _ = xcb.xcb_map_window(wm.conn, win);
     }
     // Off-screen windows are intentionally never mapped here.
@@ -211,8 +208,7 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) vo
     else
         event.event;
 
-    if (!filters.isValidManagedWindow(wm, win)) return;
-    if (!workspaces.isOnCurrentWorkspace(win)) return;
+    if (!filters.isOnCurrentWorkspace(wm, win)) return;
     if (minimize.isMinimized(win)) return;
     if (wm.focused_window == win) return;
 
@@ -240,8 +236,7 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t, wm: *WM) vo
     };
     if (target == 0 or target == wm.root) return;
 
-    if (!filters.isValidManagedWindow(wm, target)) return;
-    if (!workspaces.isOnCurrentWorkspace(target)) return;
+    if (!filters.isOnCurrentWorkspace(wm, target)) return;
     if (minimize.isMinimized(target)) return;
     if (wm.focused_window == target) return;
 
@@ -313,7 +308,7 @@ fn focusWindowUnderPointer(wm: *WM) void {
     defer std.c.free(reply);
 
     const child = reply.*.child;
-    if (filters.isValidManagedWindow(wm, child) and workspaces.isOnCurrentWorkspace(child) and !minimize.isMinimized(child)) {
+    if (filters.isOnCurrentWorkspace(wm, child) and !minimize.isMinimized(child)) {
         focus.setFocus(wm, child, .mouse_enter);
         return;
     }

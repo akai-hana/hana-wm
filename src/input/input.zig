@@ -111,10 +111,17 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
     const keysym = xkb_ptr.keycodeToKeysym(event.detail);
     const key = makeHash(mods, keysym);
 
+    debug.info("[KEY] keycode={} state=0x{x} mods=0x{x} keysym=0x{x} hash=0x{x}", .{
+        event.detail, event.state, mods, keysym, key,
+    });
+
     if (state.map.get(key)) |action| {
+        debug.info("[KEY] action found: {s}", .{@tagName(action.*)});
         executeAction(action, wm) catch |err| {
             debug.err("Failed to execute action: {}", .{err});
         };
+    } else {
+        debug.info("[KEY] no binding found for this key", .{});
     }
 }
 
@@ -228,7 +235,10 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
         .close_window => {
             if (wm.focused_window) |win| closeWindow(wm, win);
         },
-        .reload_config => wm.should_reload_config.store(true, .release),
+        .reload_config => {
+            debug.info("[RELOAD] flag set by keybinding", .{});
+            wm.should_reload_config.store(true, .release);
+        },
         .toggle_layout => {
             tiling.toggleLayout(wm);
             bar.markDirty();

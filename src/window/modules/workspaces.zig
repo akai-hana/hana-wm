@@ -186,9 +186,7 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
     const new_ws_obj = &s.workspaces[new_ws];
     const fs_info    = wm.fullscreen.getForWorkspace(new_ws);
 
-    wm.focused_window        = firstNonMinimized(new_ws_obj);
     wm.suppress_focus_reason = .none;
-    std.debug.assert(wm.focused_window == null or wm.hasWindow(wm.focused_window.?));
 
     // Grab the server so the switch is atomic — no intermediate frames visible.
     _ = xcb.xcb_grab_server(wm.conn);
@@ -224,7 +222,17 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
         const tiling_active = if (ts) |t| t.enabled else false;
 
         if (tiling_active) {
-            tiling.retileCurrentWorkspace(wm);
+            // Fast path: replay cached tiled positions without running the layout
+            // algorithm.  Falls back to a full retile only if the workspace is dirty
+            // (window added/removed/layout changed while away), the cache is cold,
+            // or the screen area changed (bar toggled, etc.).
+            // restoreWorkspaceGeom calls utils.configureWindow directly, bypassing
+            // the geom cache — this is intentional: the windows were moved to
+            // OFFSCREEN_X_POSITION in step 1, so the cache has their correct tiled
+            // rects but the server does not.
+            if (!tiling.restoreWorkspaceGeom(wm)) {
+                tiling.retileCurrentWorkspace(wm);
+            }
         } else {
             // Floating: move all non-minimized windows to a sensible on-screen position.
             // Minimized windows stay at the offscreen X position — do not touch them.
@@ -238,10 +246,47 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
         }
     }
 
-    // Ungrab buttons on the new focused window so clicks go directly to it.
-    // Windows on non-current workspaces always carry button grabs (they were
-    // last seen as unfocused); we must clear that grab now that one of them
-    // is the active focused window.
+    // Step 4: determine focus target.
+    //
+    // We must not eagerly focus the master window and then correct it after the
+    // server grab releases — doing so causes a visible border flicker as the
+    // master briefly gets the focused border colour before focus moves to the
+    // window under the cursor.
+    //
+    // Instead, query the pointer NOW (inside the grab, after all configure_window
+    // calls have been queued).  XCB sends all pending requests before blocking on
+    // the reply, so the server sees the fully repositioned layout when it evaluates
+    // which window is under the pointer.  If the child is a managed, non-minimized
+    // window on the new workspace we focus it directly.  Only if no such window is
+    // found do we fall back to the first non-minimized window (master).
+    const focus_target: ?u32 = blk: {
+        const ptr = xcb.xcb_query_pointer_reply(
+            wm.conn, xcb.xcb_query_pointer(wm.conn, wm.root), null,
+        ) orelse break :blk firstNonMinimized(new_ws_obj);
+        defer std.c.free(ptr);
+
+        const child = ptr.*.child;
+        if (child != 0 and child != wm.root and
+            wm.hasWindow(child) and
+            new_ws_obj.contains(child) and
+            !minimize.isMinimized(child))
+        {
+            break :blk child;
+        }
+        break :blk firstNonMinimized(new_ws_obj);
+    };
+
+    const old_focused    = wm.focused_window;
+    wm.focused_window = focus_target;
+    std.debug.assert(wm.focused_window == null or wm.hasWindow(wm.focused_window.?));
+
+    // Paint borders with the correct focused/unfocused colours before the
+    // server grab releases.  This is what prevents the master-flash: the
+    // focused window gets its border set to border_focused here, inside the
+    // grab, so there is never a frame where the wrong window has a focused border.
+    tiling.updateWindowFocus(wm, old_focused, wm.focused_window);
+
+    // Ungrab buttons on the focused window so clicks reach it directly.
     if (wm.focused_window) |new_win| {
         _ = xcb.xcb_ungrab_button(wm.conn, xcb.XCB_BUTTON_INDEX_ANY, new_win, xcb.XCB_MOD_MASK_ANY);
     }
@@ -255,11 +300,6 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
 }
 
 // Queries
-
-pub inline fn getCurrentWindowsView() ?[]const u32 {
-    const s = getState() orelse return null;
-    return s.workspaces[s.current].windows.items();
-}
 
 pub inline fn getCurrentWorkspace() ?u8 {
     const s = getState() orelse return null;

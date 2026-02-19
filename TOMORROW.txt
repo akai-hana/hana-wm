@@ -1,8 +1,2 @@
 89shiroikuro:
-yes, but now im having the same issue i had earlier. open a window in a workspace, switch workspaces back and forth, come back to a display with the windows nowhere to be seen. they dont get tiled correctly upon coming back. you already solved this, yet you broke the same thing again.
-
-once fixed:
-fix config hot-reloading not working
-
-next feature:
 alternate tiling layout workspaces

@@ -2,16 +2,16 @@
 //!
 //! Cairo handles graphics and compositing; Pango handles text layout and fonts.
 
-const std   = @import("std");
+const std = @import("std");
 const debug = @import("debug");
-const defs  = @import("defs");
-const c     = @import("c_bindings");
+const defs = @import("defs");
+const c = @import("c_bindings");
 
-// Visual lookup 
+// Visual lookup
 
 pub const VisualInfo = struct {
     visual_type: ?*defs.xcb.xcb_visualtype_t,
-    visual_id:   u32,
+    visual_id: u32,
 };
 
 pub fn findVisualByDepth(screen: *defs.xcb.xcb_screen_t, depth: u8) VisualInfo {
@@ -28,7 +28,7 @@ pub fn findVisualByDepth(screen: *defs.xcb.xcb_screen_t, depth: u8) VisualInfo {
     return .{ .visual_type = null, .visual_id = screen.root_visual };
 }
 
-// DrawContext 
+// DrawContext
 
 /// Packed 0xRRGGBB color broken into Cairo-ready f64 components.
 const RGBColor = struct { r: f64, g: f64, b: f64 };
@@ -37,52 +37,52 @@ const RGBColor = struct { r: f64, g: f64, b: f64 };
 var font_conversion_cache: ?std.StringHashMap([]const u8) = null;
 
 pub const DrawContext = struct {
-    allocator:     std.mem.Allocator,
-    conn:          *defs.xcb.xcb_connection_t,
-    drawable:      u32,
-    width:         u16,
-    height:        u16,
+    allocator: std.mem.Allocator,
+    conn: *defs.xcb.xcb_connection_t,
+    drawable: u32,
+    width: u16,
+    height: u16,
 
-    surface:       *c.cairo_surface_t,
-    ctx:           *c.cairo_t,
-    gc:            u32,
+    surface: *c.cairo_surface_t,
+    ctx: *c.cairo_t,
+    gc: u32,
 
-    pango_layout:      *c.PangoLayout,
+    pango_layout: *c.PangoLayout,
     current_font_desc: ?*c.PangoFontDescription = null,
 
-    is_argb:      bool  = false,
-    transparency: f32   = 1.0,
+    is_argb: bool = false,
+    transparency: f32 = 1.0,
 
     cached_metrics: ?struct { ascent: i16, descent: i16 } = null,
-    last_color:     ?u32 = null,
-    color_cache:    std.AutoHashMap(u32, RGBColor),
+    last_color: ?u32 = null,
+    color_cache: std.AutoHashMap(u32, RGBColor),
 
     pub fn init(
         allocator: std.mem.Allocator,
-        conn:      *defs.xcb.xcb_connection_t,
-        drawable:  u32,
-        width:     u16,
-        height:    u16,
-        dpi:       f32,
+        conn: *defs.xcb.xcb_connection_t,
+        drawable: u32,
+        width: u16,
+        height: u16,
+        dpi: f32,
     ) !*DrawContext {
         return initWithVisual(allocator, conn, drawable, width, height, null, dpi, false, 1.0);
     }
 
     pub fn initWithVisual(
-        allocator:    std.mem.Allocator,
-        conn:         *defs.xcb.xcb_connection_t,
-        drawable:     u32,
-        width:        u16,
-        height:       u16,
-        visual_id:    ?u32,
-        dpi:          f32,
-        is_argb:      bool,
+        allocator: std.mem.Allocator,
+        conn: *defs.xcb.xcb_connection_t,
+        drawable: u32,
+        width: u16,
+        height: u16,
+        visual_id: ?u32,
+        dpi: f32,
+        is_argb: bool,
         transparency: f32,
     ) !*DrawContext {
         const dc = try allocator.create(DrawContext);
         errdefer allocator.destroy(dc);
 
-        const setup  = defs.xcb.xcb_get_setup(conn);
+        const setup = defs.xcb.xcb_get_setup(conn);
         const screen = defs.xcb.xcb_setup_roots_iterator(setup).data;
 
         const visual_type = if (visual_id) |vid|
@@ -102,18 +102,18 @@ pub const DrawContext = struct {
         c.pango_cairo_context_set_resolution(c.pango_layout_get_context(layout), @floatCast(dpi));
 
         dc.* = .{
-            .allocator    = allocator,
-            .conn         = conn,
-            .drawable     = drawable,
-            .width        = width,
-            .height       = height,
-            .surface      = surface,
-            .ctx          = ctx,
+            .allocator = allocator,
+            .conn = conn,
+            .drawable = drawable,
+            .width = width,
+            .height = height,
+            .surface = surface,
+            .ctx = ctx,
             .pango_layout = layout,
-            .gc           = 0,
-            .is_argb      = is_argb,
+            .gc = 0,
+            .is_argb = is_argb,
             .transparency = transparency,
-            .color_cache  = std.AutoHashMap(u32, RGBColor).init(allocator),
+            .color_cache = std.AutoHashMap(u32, RGBColor).init(allocator),
         };
 
         dc.gc = defs.xcb.xcb_generate_id(conn);
@@ -139,7 +139,7 @@ pub const DrawContext = struct {
     pub fn loadFont(self: *DrawContext, font_name: []const u8) !void {
         if (self.current_font_desc) |desc| c.pango_font_description_free(desc);
 
-        const pango_name   = try convertFontName(self.allocator, font_name);
+        const pango_name = try convertFontName(self.allocator, font_name);
         const pango_name_z = try self.allocator.dupeZ(u8, pango_name);
         defer self.allocator.free(pango_name_z);
 
@@ -165,8 +165,8 @@ pub const DrawContext = struct {
         if (self.color_cache.get(color)) |rgb| return .{ rgb.r, rgb.g, rgb.b };
         const rgb = RGBColor{
             .r = @as(f64, @floatFromInt((color >> 16) & 0xFF)) / 255.0,
-            .g = @as(f64, @floatFromInt((color >>  8) & 0xFF)) / 255.0,
-            .b = @as(f64, @floatFromInt( color        & 0xFF)) / 255.0,
+            .g = @as(f64, @floatFromInt((color >> 8) & 0xFF)) / 255.0,
+            .b = @as(f64, @floatFromInt(color & 0xFF)) / 255.0,
         };
         self.color_cache.put(color, rgb) catch {};
         return .{ rgb.r, rgb.g, rgb.b };
@@ -223,12 +223,12 @@ pub const DrawContext = struct {
     }
 
     pub fn drawTextEllipsis(
-        self:      *DrawContext,
-        x:         u16,
-        y:         u16,
-        text:      []const u8,
+        self: *DrawContext,
+        x: u16,
+        y: u16,
+        text: []const u8,
         max_width: u16,
-        color:     u32,
+        color: u32,
     ) !void {
         self.setPangoText(text);
         c.pango_layout_set_width(self.pango_layout, @intCast(@as(i32, max_width) * c.PANGO_SCALE));
@@ -275,13 +275,13 @@ pub const DrawContext = struct {
     }
 
     pub fn drawSegment(
-        self:    *DrawContext,
-        x:       u16,
-        height:  u16,
-        text:    []const u8,
+        self: *DrawContext,
+        x: u16,
+        height: u16,
+        text: []const u8,
         padding: u16,
-        bg:      u32,
-        fg:      u32,
+        bg: u32,
+        fg: u32,
     ) !u16 {
         const width = self.textWidth(text) + padding * 2;
         self.fillRect(x, 0, width, height, bg);
@@ -290,22 +290,19 @@ pub const DrawContext = struct {
     }
 };
 
-// Private helpers 
+// Private helpers
 
 fn findVisualType(conn: *defs.xcb.xcb_connection_t, visual_id: u32) ?*defs.xcb.xcb_visualtype_t {
     const setup = defs.xcb.xcb_get_setup(conn);
     var screen_iter = defs.xcb.xcb_setup_roots_iterator(setup);
-    while (screen_iter.rem > 0) {
+    while (screen_iter.rem > 0) : (defs.xcb.xcb_screen_next(&screen_iter)) {
         var depth_iter = defs.xcb.xcb_screen_allowed_depths_iterator(screen_iter.data);
-        while (depth_iter.rem > 0) {
+        while (depth_iter.rem > 0) : (defs.xcb.xcb_depth_next(&depth_iter)) {
             var visual_iter = defs.xcb.xcb_depth_visuals_iterator(depth_iter.data);
-            while (visual_iter.rem > 0) {
+            while (visual_iter.rem > 0) : (defs.xcb.xcb_visualtype_next(&visual_iter)) {
                 if (visual_iter.data.*.visual_id == visual_id) return visual_iter.data;
-                defs.xcb.xcb_visualtype_next(&visual_iter);
             }
-            defs.xcb.xcb_depth_next(&depth_iter);
         }
-        defs.xcb.xcb_screen_next(&screen_iter);
     }
     return null;
 }
@@ -319,6 +316,12 @@ fn getDefaultVisualType(screen: *defs.xcb.xcb_screen_t) *defs.xcb.xcb_visualtype
     unreachable;
 }
 
+/// Append a space and a style token (e.g. "Bold", "Italic") to a result buffer.
+inline fn appendStyle(result: *std.ArrayList(u8), allocator: std.mem.Allocator, token: []const u8) !void {
+    try result.append(allocator, ' ');
+    try result.appendSlice(allocator, token);
+}
+
 fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const u8 {
     if (font_conversion_cache == null)
         font_conversion_cache = std.StringHashMap([]const u8).init(allocator);
@@ -330,34 +333,32 @@ fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const 
     try result.ensureTotalCapacity(allocator, xft_name.len);
     errdefer result.deinit(allocator);
 
-    var parts  = std.mem.splitScalar(u8, xft_name, ':');
+    var parts = std.mem.splitScalar(u8, xft_name, ':');
     try result.appendSlice(allocator, parts.first());
 
-    var size:   ?[]const u8 = null;
+    var size: ?[]const u8 = null;
     var weight: ?[]const u8 = null;
-    var slant:  ?[]const u8 = null;
+    var slant: ?[]const u8 = null;
 
     while (parts.next()) |part| {
-        if      (std.mem.startsWith(u8, part, "size="))      size   = part[5..]
-        else if (std.mem.startsWith(u8, part, "pixelsize=")) size   = part[10..]
-        else if (std.mem.startsWith(u8, part, "weight="))    weight = part[7..]
-        else if (std.mem.startsWith(u8, part, "slant="))     slant  = part[6..];
+        if (std.mem.startsWith(u8, part, "size=")) size = part[5..]
+        else if (std.mem.startsWith(u8, part, "pixelsize=")) size = part[10..]
+        else if (std.mem.startsWith(u8, part, "weight=")) weight = part[7..]
+        else if (std.mem.startsWith(u8, part, "slant=")) slant = part[6..];
     }
 
-    if (slant) |s| if (std.mem.eql(u8, s, "italic") or std.mem.eql(u8, s, "oblique")) {
-        try result.append(allocator, ' ');
-        try result.appendSlice(allocator, "Italic");
-    };
+    if (slant) |s| if (std.mem.eql(u8, s, "italic") or std.mem.eql(u8, s, "oblique"))
+        try appendStyle(&result, allocator, "Italic");
 
     if (weight) |w| {
-        if      (std.mem.eql(u8, w, "bold"))  { try result.append(allocator, ' '); try result.appendSlice(allocator, "Bold"); }
-        else if (std.mem.eql(u8, w, "light")) { try result.append(allocator, ' '); try result.appendSlice(allocator, "Light"); }
+        const token: ?[]const u8 =
+            if (std.mem.eql(u8, w, "bold")) "Bold"
+            else if (std.mem.eql(u8, w, "light")) "Light"
+            else null;
+        if (token) |t| try appendStyle(&result, allocator, t);
     }
 
-    if (size) |s| {
-        try result.append(allocator, ' ');
-        try result.appendSlice(allocator, s);
-    }
+    if (size) |s| try appendStyle(&result, allocator, s);
 
     const converted = try result.toOwnedSlice(allocator);
     font_conversion_cache.?.put(xft_name, converted) catch {};
