@@ -1,8 +1,6 @@
 ### hana's TODO list! ###
 # In here i write the things i want to do to not lose track of the different ideas i come up with while developing 
 
-read tmo
-
 LONG TERM: code a similar tool to drun, replace it instead of rofi in config.toml
 
 LONG TERM: somehow make vertical layout left and right
@@ -14,6 +12,7 @@ can you please implement some sort of mechanism that make it so that the bar loo
 {
 bspwm leaf layout
 if window is higher than it is wider, slice it in half, leaving a top and bottom window; if it is wider than higher, slice it in half, leaving a left and right window).
+window spawning in this layout is dependant on what the current window focused is: if no windows within workspace, just spawn one regularly, the second one will make both split, the third one will split the right one to a top half and the spawned to the bottom half of the right segment of the display. Up to now it is basically like master-stack layout. the thing is, if i were focusing the left window when i had two windows open, the split would've happened on that window, on the left half. any subsequent splits happen according to the currently focused window, following the horizontal/vertical split criteria mentioned earlier.
 }
 
 mod + middle click mouse makes an individual window go from tiling to floating, and viceversa, if it's floating on tiled mode, tile it.

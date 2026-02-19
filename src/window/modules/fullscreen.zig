@@ -46,6 +46,8 @@ pub fn toggleFullscreen(wm: *WM) void {
 }
 
 fn enterFullscreen(wm: *WM, win: u32, ws: u8) void {
+    // Round-trip to get geometry must happen BEFORE the server grab — blocking
+    // inside a grab would deadlock if any other client holds a grab of its own.
     const geom_reply = xcb.xcb_get_geometry_reply(wm.conn, xcb.xcb_get_geometry(wm.conn, win), null) orelse return;
     defer std.c.free(geom_reply);
 
@@ -70,6 +72,15 @@ fn enterFullscreen(wm: *WM, win: u32, ws: u8) void {
         debug.err("Failed to save fullscreen state for workspace {}", .{ws});
         return;
     };
+
+    // Grab the server so picom sees the entire transition atomically.
+    // Without this, it can composite intermediate frames: siblings gone + bar
+    // hidden, but the fullscreen window not yet covering the screen.
+    // All commands queued inside the grab (including the flushes inside
+    // setBarState and retileCurrentWorkspace) are processed by the X server
+    // immediately on our connection, but picom is frozen and won't composite
+    // until we ungrab — so it always sees the fully-transitioned state.
+    _ = xcb.xcb_grab_server(wm.conn);
 
     // Push all other windows off-screen so the fullscreen window has no neighbours.
     if (workspaces.getCurrentWorkspaceObject()) |ws_obj| {
@@ -97,6 +108,8 @@ fn enterFullscreen(wm: *WM, win: u32, ws: u8) void {
         xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 
     utils.flush(wm.conn);
+    _ = xcb.xcb_ungrab_server(wm.conn);
+    utils.flush(wm.conn);
 }
 
 fn exitFullscreen(wm: *WM, win: u32, ws: u8) void {
@@ -105,6 +118,12 @@ fn exitFullscreen(wm: *WM, win: u32, ws: u8) void {
 
     const saved = fs_info.saved_geometry;
     wm.fullscreen.removeForWorkspace(ws);
+
+    // Grab the server so picom sees the entire exit transition atomically.
+    // Without this, it can composite a frame where the bar has reappeared and
+    // the tiled layout has been restored, but the window is still full-screen
+    // sized — or the reverse on the tiled path.
+    _ = xcb.xcb_grab_server(wm.conn);
 
     // Restore bar based on global visibility state.
     // For tiled windows this also retiles the workspace, so we don't retile again below.
@@ -143,5 +162,7 @@ fn exitFullscreen(wm: *WM, win: u32, ws: u8) void {
         }
     }
 
+    utils.flush(wm.conn);
+    _ = xcb.xcb_ungrab_server(wm.conn);
     utils.flush(wm.conn);
 }

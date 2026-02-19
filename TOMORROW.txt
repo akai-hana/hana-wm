@@ -1,2 +1,5 @@
 89shiroikuro:
+make tiling layout set be a per-workspace configuration; if in a workspace i switch to monocle, other workspaces should remain on the default set tiling layout.
+- Enable a setting in config.toml that converts workspace set to a global configuration setting, making it so switching to a different tiling layout switches it across all workspaces, just like how it currently works.
+
 alternate tiling layout workspaces

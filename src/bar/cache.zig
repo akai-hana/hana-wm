@@ -4,17 +4,18 @@ const std     = @import("std");
 const defs    = @import("defs");
 const drawing = @import("drawing");
 
-/// Caches per-workspace label pixel widths so the bar avoids redundant
-/// Pango measurements on every draw call. Embedded by value inside the bar
-/// State struct (which is itself heap-allocated), so no separate allocation
-/// is needed.
+/// Caches per-workspace label pixel widths to avoid redundant Pango measurements
+/// on every draw call. Embedded by value inside `State` (which is heap-allocated),
+/// so no separate allocation is needed.
 pub const CacheManager = struct {
     label_widths: [20]u16 = [_]u16{0} ** 20,
     valid:        bool    = false,
 
-    /// Zero-initialised; call updateWorkspaceLabels() before first use.
+    /// Returns a zero-initialised CacheManager. Call `updateWorkspaceLabels` before first use.
     pub fn init() CacheManager { return .{}; }
 
+    /// Measures and caches the pixel width of each workspace label.
+    /// No-ops when the cache is already valid.
     pub fn updateWorkspaceLabels(
         self:   *CacheManager,
         dc:     *drawing.DrawContext,
@@ -34,10 +35,12 @@ pub const CacheManager = struct {
         self.valid = true;
     }
 
+    /// Returns the cached pixel width for workspace `index`, or 0 on cache miss.
     pub fn getWorkspaceLabelWidth(self: *const CacheManager, index: usize) u16 {
         if (!self.valid or index >= self.label_widths.len) return 0;
         return self.label_widths[index];
     }
 
+    /// Marks the cache as stale, forcing a full remeasure on the next draw.
     pub fn invalidate(self: *CacheManager) void { self.valid = false; }
 };

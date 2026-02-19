@@ -26,6 +26,20 @@ const MAX_WS_WINDOWS: usize = 128;
 
 pub const Layout = enum { master, monocle, grid, fibonacci };
 
+// Variation enums are defined in defs.zig to allow config.zig to parse them
+// without a circular import. Re-exported here for convenience.
+pub const MasterVariation  = defs.MasterVariation;
+pub const MonocleVariation = defs.MonocleVariation;
+pub const GridVariation    = defs.GridVariation;
+
+/// Stores the active variation for every layout independently.
+/// Each layout remembers its last variation when the user switches away and back.
+pub const LayoutVariations = struct {
+    master:  MasterVariation  = .lifo,
+    monocle: MonocleVariation = .gapless,
+    grid:    GridVariation    = .rigid,
+};
+
 // Focus ring
 // Fixed-capacity circular buffer of recently-focused window IDs.
 // Newest entry is always at buffer[head].
@@ -98,6 +112,10 @@ pub const State = struct {
     allocator:        std.mem.Allocator,
     enabled:          bool,
     layout:           Layout,
+    layout_variations: LayoutVariations,
+    /// 3-character indicator shown in the bar for the fibonacci layout (which has no variations).
+    /// Configurable in config.toml; defaults to "NUL".
+    fibonacci_indicator: [3]u8,
     master_side:      defs.MasterSide,
     master_width:     f32,
     master_count:     u8,
@@ -159,10 +177,17 @@ fn computeMasterWidth(wm: *WM) f32 {
 /// Build a complete State from the current WM configuration.
 fn buildState(wm: *WM) State {
     const screen_height = wm.screen.height_in_pixels;
+
     return .{
         .allocator        = wm.allocator,
         .enabled          = wm.config.tiling.enabled,
         .layout           = std.meta.stringToEnum(Layout, wm.config.tiling.layout) orelse .master,
+        .layout_variations = .{
+            .master  = wm.config.tiling.master_variation,
+            .monocle = wm.config.tiling.monocle_variation,
+            .grid    = wm.config.tiling.grid_variation,
+        },
+        .fibonacci_indicator = wm.config.tiling.fibonacci_indicator,
         .master_side      = wm.config.tiling.master_side,
         .master_width     = computeMasterWidth(wm),
         .master_count     = wm.config.tiling.master_count,
@@ -226,7 +251,14 @@ pub fn addWindow(wm: *WM, window_id: u32) void {
     const s = getState() orelse return;
     if (!s.enabled) return;
 
-    s.windows.add(window_id) catch |err| { debug.logError(err, window_id); return; };
+    // Add window to tracking. In master layout with FIFO variation, new windows
+    // go to the front (master position). All other cases append to the end (stack).
+    const use_fifo = (s.layout == .master) and (s.layout_variations.master == .fifo);
+    if (use_fifo) {
+        s.windows.addFront(window_id) catch |err| { debug.logError(err, window_id); return; };
+    } else {
+        s.windows.add(window_id) catch |err| { debug.logError(err, window_id); return; };
+    }
     s.markDirty();
 
     // Set BORDER_PIXEL only — EVENT_MASK was already applied by handleMapRequest,
@@ -572,6 +604,63 @@ pub fn adjustMasterWidth(wm: *WM, delta: f32) void {
 
 pub inline fn increaseMasterWidth(wm: *WM) void { adjustMasterWidth(wm,  0.025); }
 pub inline fn decreaseMasterWidth(wm: *WM) void { adjustMasterWidth(wm, -0.025); }
+
+/// Cycle to the next variation for the currently active layout.
+/// Each layout's variation is stored independently, so switching layouts
+/// and back preserves each layout's last-used variation.
+pub fn cycleLayoutVariation(wm: *WM) void {
+    const s = getState() orelse return;
+    switch (s.layout) {
+        .master => {
+            s.layout_variations.master = switch (s.layout_variations.master) {
+                .lifo => .fifo,
+                .fifo => .lifo,
+            };
+            debug.info("Master variation: {s}", .{@tagName(s.layout_variations.master)});
+        },
+        .monocle => {
+            s.layout_variations.monocle = switch (s.layout_variations.monocle) {
+                .gapless => .gaps,
+                .gaps    => .gapless,
+            };
+            debug.info("Monocle variation: {s}", .{@tagName(s.layout_variations.monocle)});
+        },
+        .grid => {
+            s.layout_variations.grid = switch (s.layout_variations.grid) {
+                .rigid   => .relaxed,
+                .relaxed => .rigid,
+            };
+            debug.info("Grid variation: {s}", .{@tagName(s.layout_variations.grid)});
+        },
+        .fibonacci => {
+            debug.info("Fibonacci has no variations", .{});
+            return; // Nothing to cycle — skip retile and bar update
+        },
+    }
+    s.markDirty();
+    retileCurrentWorkspace(wm);
+    bar.markDirty();
+}
+
+/// Return the 3-character variation indicator for the current layout.
+/// Used by the bar layout segment to display alongside the layout icon.
+pub fn getVariationIndicator(s: *const State) []const u8 {
+    return switch (s.layout) {
+        .master => switch (s.layout_variations.master) {
+            .lifo => "[N]",
+            .fifo => "=N=",
+        },
+        .monocle => switch (s.layout_variations.monocle) {
+            .gapless => "<->",
+            .gaps    => ">-<",
+        },
+        .grid => switch (s.layout_variations.grid) {
+            .rigid   => "[#]",
+            .relaxed => "[~]",
+        },
+        .fibonacci => &s.fibonacci_indicator,
+    };
+}
 
 // Focus cycling
 
