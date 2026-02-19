@@ -7,7 +7,7 @@ const debug = @import("debug");
 const defs  = @import("defs");
 const c     = @import("c_bindings");
 
-// ── Visual helpers ────────────────────────────────────────────────────────────
+// Visual helpers ────────────────────────────────────────────────────────────
 
 pub const VisualInfo = struct {
     visual_type: ?*defs.xcb.xcb_visualtype_t,
@@ -29,7 +29,7 @@ pub fn findVisualByDepth(screen: *defs.xcb.xcb_screen_t, depth: u8) VisualInfo {
     return .{ .visual_type = null, .visual_id = screen.root_visual };
 }
 
-// ── DrawContext ───────────────────────────────────────────────────────────────
+// DrawContext──
 
 /// Packed 0xRRGGBB color broken into Cairo-ready f64 components.
 const RGBColor = struct { r: f64, g: f64, b: f64 };
@@ -306,7 +306,7 @@ pub const DrawContext = struct {
     }
 };
 
-// ── Private helpers ───────────────────────────────────────────────────────────
+// Private helpers ───────────────────────────────────────────────────────────
 
 /// Finds the `xcb_visualtype_t` for `visual_id` by scanning all screens and depths.
 fn findVisualType(conn: *defs.xcb.xcb_connection_t, visual_id: u32) ?*defs.xcb.xcb_visualtype_t {

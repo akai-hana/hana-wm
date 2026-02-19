@@ -304,29 +304,53 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t, wm: *
 // Unmap / destroy 
 
 fn unmanageWindow(wm: *WM, win: u32) void {
-    if (wm.fullscreen.isFullscreen(win)) {
-        // window_to_workspace is the reverse index — O(1) lookup rather than
-        // iterating per_workspace to find which workspace holds this window.
+    const was_fullscreen = wm.fullscreen.isFullscreen(win);
+    if (was_fullscreen) {
+        // Clear fullscreen state BEFORE the grab so setBarState (called inside
+        // the grab) doesn't see the workspace as still-fullscreen and bail.
         if (wm.fullscreen.window_to_workspace.get(win)) |ws| {
             wm.fullscreen.removeForWorkspace(ws);
         }
-        bar.setBarState(wm, .show_fullscreen);
     }
 
     const was_focused = (wm.focused_window == win);
 
+    // Update all bookkeeping state before the grab — no XCB calls here.
     if (wm.config.tiling.enabled) tiling.removeWindow(win);
     utils.uncacheWindowFocusProps(win);
     workspaces.removeWindow(win);
     wm.removeWindow(win);
 
+    // Wrap all visual changes in a single server grab so picom never composites
+    // an intermediate state where the destroyed window's slot is empty but the
+    // remaining windows have not yet been repositioned, or where the bar has
+    // reappeared but the layout still reflects the old (fullscreen) geometry.
+    _ = xcb.xcb_grab_server(wm.conn);
+
+    if (was_fullscreen) {
+        // setBarState(.show_fullscreen) restores bar visibility and retiles.
+        // Its internal flush is harmless — picom is frozen during our grab.
+        bar.setBarState(wm, .show_fullscreen);
+    }
+
     if (was_focused) {
+        // retileIfDirty is a no-op when was_fullscreen (setBarState already
+        // retiled and cleared the dirty flag).  For non-fullscreen focused
+        // windows, removeWindow set dirty and this call retiles the workspace.
         if (wm.config.tiling.enabled) tiling.retileIfDirty(wm);
         focus.clearFocus(wm);
+        // focusWindowUnderPointer does a round-trip (xcb_query_pointer).
+        // Round-trips from our own connection are safe inside a server grab —
+        // the server responds normally; only other connections are frozen.
         focusWindowUnderPointer(wm);
     }
 
-    bar.markDirty();
+    // Redraw the bar inside the grab so the updated title and focus state are
+    // composited atomically with the window removal and layout change.  The bar
+    // is redrawn whether or not the window was focused: the workspace indicator
+    // and window count change regardless.
+    bar.redrawImmediate(wm);
+    _ = xcb.xcb_ungrab_server(wm.conn);
     utils.flush(wm.conn);
 }
 

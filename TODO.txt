@@ -1,6 +1,19 @@
 ### hana's TODO list! ###
 # In here i write the things i want to do to not lose track of the different ideas i come up with while developing 
 
+can you please fix the following edge case on my window manager?
+- open two windows in a workspace
+- send one window to another workspace
+- switch to that workspace
+now, the window i sent over this workspace appears tiled onto the right half of my display, even though it's the only window in the workspace. if i go to a different workspace and come back, it'll fix itself and be tiled properly.
+why is this the case? can you please identify and fix the root issue? thanks.
+
+make cursor from xresources be used instead of default x11; hovering root window shows the normal xorg tiny cursor, while hovering over any other window it shows my custom cursor i configured. in dwm this isn't the case, so could it be something my wm's missing somewhere? can you please add it?
+
+when i un-fullscreen a window, i want to avoid cursor stealing focus if it lands on any window other than the one i was fullscreened into. also, when i alt+tab (swap master and slave in stack) while focused on a master window, the master window gets moved to stack and focus is kept to that window, but if i swap slave to master, the cursor steals focus if it's located on top of another window. i don't want focus to be stolen in this case either. can you please place in the required guardrails to prevent these particular focus-stealing edge cases?
+
+is the "marking as dirty" solution we have right now on some parts of the code optimal? it's the only solution that came to mind, but i was wondering if there was a more optimal solution, either that improves responsiveness/performance or that makes the code leaner/more readable/easier to understand...
+
 LONG TERM: code a similar tool to drun, replace it instead of rofi in config.toml
 
 LONG TERM: somehow make vertical layout left and right

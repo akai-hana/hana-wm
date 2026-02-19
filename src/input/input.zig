@@ -24,7 +24,7 @@ const MOUSE_BUTTON_LEFT:  u8 = 1;
 const MOUSE_BUTTON_RIGHT: u8 = 3;
 const MOUSE_BUTTONS = [_]u8{ MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT };
 
-// ── Keybind state ─────────────────────────────────────────────────────────────
+// Keybind state
 
 const KeybindState = struct {
     map:       std.AutoHashMap(u64, *const defs.Action),
@@ -74,7 +74,7 @@ inline fn makeHash(mods: u16, keysym: u32) u64 {
     return (@as(u64, mods) << 32) | keysym;
 }
 
-// ── Grab setup ────────────────────────────────────────────────────────────────
+// Grab setup───
 
 /// Grabs Super+Button1 (move) and Super+Button3 (resize) on the root window.
 pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
@@ -89,7 +89,7 @@ pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
     utils.flush(conn);
 }
 
-// ── Event handlers ────────────────────────────────────────────────────────────
+// Event handlers ────────────────────────────────────────────────────────────
 
 pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
     wm.last_event_time = event.time;
@@ -161,7 +161,7 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) 
         std.c.free(reply);
 }
 
-// ── Window close ──────────────────────────────────────────────────────────────
+// Window close─
 
 fn closeWindow(wm: *WM, win: u32) void {
     if (win == wm.root) { debug.err("Attempted to close ROOT window!", .{}); return; }
@@ -206,7 +206,7 @@ fn forceDestroyWindow(wm: *WM, win: u32) void {
     utils.flush(wm.conn);
 }
 
-// ── Action dispatch ───────────────────────────────────────────────────────────
+// Action dispatch ───────────────────────────────────────────────────────────
 
 fn executeAction(action: *const defs.Action, wm: *WM) !void {
     switch (action.*) {
@@ -216,16 +216,16 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
             debug.info("[RELOAD] flag set by keybinding", .{});
             wm.should_reload_config.store(true, .release);
         },
-        .toggle_layout          => { tiling.toggleLayout(wm);        bar.markDirty(); },
-        .toggle_layout_reverse  => { tiling.toggleLayoutReverse(wm); bar.markDirty(); },
+        .toggle_layout          => { tiling.toggleLayout(wm);        bar.redrawImmediate(wm); },
+        .toggle_layout_reverse  => { tiling.toggleLayoutReverse(wm); bar.redrawImmediate(wm); },
         .toggle_bar_visibility  => bar.setBarState(wm, .toggle),
         .toggle_bar_position    => bar.toggleBarPosition(wm) catch |err|
             debug.warn("Failed to toggle bar position: {}", .{err}),
-        .increase_master        => { tiling.increaseMasterWidth(wm);   bar.markDirty(); },
-        .decrease_master        => { tiling.decreaseMasterWidth(wm);   bar.markDirty(); },
-        .increase_master_count  => { tiling.increaseMasterCount(wm);   bar.markDirty(); },
-        .decrease_master_count  => { tiling.decreaseMasterCount(wm);   bar.markDirty(); },
-        .toggle_tiling          => { tiling.toggleTiling(wm);          bar.markDirty(); },
+        .increase_master        => tiling.increaseMasterWidth(wm),
+        .decrease_master        => tiling.decreaseMasterWidth(wm),
+        .increase_master_count  => tiling.increaseMasterCount(wm),
+        .decrease_master_count  => tiling.decreaseMasterCount(wm),
+        .toggle_tiling          => tiling.toggleTiling(wm),
         .swap_master            => tiling.swapWithMaster(wm),
         .cycle_layout_variation => tiling.cycleLayoutVariation(wm),
         .dump_state             => dumpState(wm),
@@ -240,7 +240,7 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
     }
 }
 
-// ── Shell execution ───────────────────────────────────────────────────────────
+// Shell execution ───────────────────────────────────────────────────────────
 
 /// Spawns `cmd` via a double-fork so the child is re-parented to init and
 /// the WM never needs to reap it.
@@ -273,7 +273,7 @@ fn executeShellCommand(wm: *WM, cmd: []const u8) !void {
     }
 }
 
-// ── Diagnostics ───────────────────────────────────────────────────────────────
+// Diagnostics──
 
 fn dumpState(wm: *WM) void {
     debug.info("========== STATE DUMP ==========", .{});

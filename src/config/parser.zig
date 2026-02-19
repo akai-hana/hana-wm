@@ -136,7 +136,7 @@ pub fn parseColor(value: []const u8) !u32 {
     return color;
 }
 
-// ── Internal parser ───────────────────────────────────────────────────────────
+// Internal parser ───────────────────────────────────────────────────────────
 
 const Parser = struct {
     allocator: std.mem.Allocator,
