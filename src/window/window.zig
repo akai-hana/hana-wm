@@ -149,6 +149,22 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
 
     if (is_current) {
         focus.setFocus(wm, win, .window_spawn);
+
+        // The flush above has already delivered all configure_window calls to
+        // the X server, so its hit-testing reflects the post-retile layout.
+        // If the cursor is now inside a tiled window (child != 0) it means it
+        // was previously sitting in a gap that the retile just covered.  The
+        // X server will fire two crossing events — LeaveNotify on root and
+        // EnterNotify on the newly covering window — both of which would
+        // otherwise steal focus away from the just-spawned window.  Bump the
+        // suppression counter so both are absorbed rather than just the first.
+        if (wm.suppress_focus_reason == .window_spawn) {
+            const ptr_cookie = xcb.xcb_query_pointer(wm.conn, wm.root);
+            if (xcb.xcb_query_pointer_reply(wm.conn, ptr_cookie, null)) |ptr| {
+                defer std.c.free(ptr);
+                if (ptr.*.child != 0) wm.suppress_focus_count = 2;
+            }
+        }
     } else {
         grabButtons(wm, win, false);
     }
@@ -198,10 +214,24 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) vo
     if (event.mode == xcb.XCB_NOTIFY_MODE_GRAB or
         event.mode == xcb.XCB_NOTIFY_MODE_UNGRAB) return;
     if (wm.drag_state.active) return;
-    // A crossing event with mode NORMAL means the pointer has genuinely moved.
-    // That is sufficient signal to lift window-spawn suppression — the user is
-    // no longer in the brief window immediately after a window appeared.
-    if (wm.suppress_focus_reason == .window_spawn) wm.suppress_focus_reason = .none;
+    // If a window was just spawned, the cursor may be sitting still over a gap
+    // that is now covered by a newly tiled window.  The resulting EnterNotify
+    // is not genuine user movement — absorb it.  When the cursor was in a gap
+    // before the retile, the X server fires both a LeaveNotify on root AND an
+    // EnterNotify on the newly covering window; suppress_focus_count tracks how
+    // many of those paired events remain to be absorbed (normally 1, set to 2
+    // by handleMapRequest when the post-retile pointer query finds the cursor
+    // over a tiled window).  Once the count reaches zero, normal focus
+    // behaviour resumes.
+    if (wm.suppress_focus_reason == .window_spawn) {
+        if (wm.suppress_focus_count > 1) {
+            wm.suppress_focus_count -= 1;
+        } else {
+            wm.suppress_focus_reason = .none;
+            wm.suppress_focus_count = 1;
+        }
+        return;
+    }
 
     const win = if (event.event == wm.root and event.child != 0)
         event.child
@@ -224,7 +254,20 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t, wm: *WM) vo
     if (event.event != wm.root) return;
     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL) return;
     if (wm.drag_state.active) return;
-    if (wm.suppress_focus_reason == .window_spawn) wm.suppress_focus_reason = .none;
+    // Same suppression logic as handleEnterNotify — retiling after a spawn
+    // can push a window under the stationary cursor, generating a spurious
+    // LeaveNotify on root.  Decrement the event counter rather than clearing
+    // the reason outright: when the cursor was in a gap, both this LeaveNotify
+    // and the paired EnterNotify on the newly covering window must be absorbed.
+    if (wm.suppress_focus_reason == .window_spawn) {
+        if (wm.suppress_focus_count > 1) {
+            wm.suppress_focus_count -= 1;
+        } else {
+            wm.suppress_focus_reason = .none;
+            wm.suppress_focus_count = 1;
+        }
+        return;
+    }
 
     // event.child is the direct child of root being entered.
     const target: u32 = if (event.child != 0) event.child else blk: {

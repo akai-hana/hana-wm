@@ -14,23 +14,30 @@ pub fn tileWithOffset(conn: *xcb.xcb_connection_t, state: *State, windows: []con
     if (windows.len == 0) return;
 
     const margin = state.margins();
-    const gap = margin.gap;
+    const gap    = margin.gap;
     const border = margin.border;
 
-    // Calculate window geometry respecting gaps and borders
-    const rect = utils.Rect{
-        .x = @intCast(gap),
-        .y = @intCast(y_offset + gap),
-        .width = screen_w - gap * 2 - border * 2,
-        .height = screen_h - gap * 2 - border * 2,
+    // All windows in monocle share the same geometry, but only the top window
+    // is ever visible — the rest are entirely hidden behind it.  Configure and
+    // raise only that one window; the others are configured lazily the moment
+    // they are brought to the top, so the cost here is always O(1).
+    const top_win = windows[windows.len - 1];
+
+    const rect: utils.Rect = switch (state.layout_variations.monocle) {
+        .gapless => .{
+            .x      = 0,
+            .y      = @intCast(y_offset),
+            .width  = if (screen_w > border * 2) screen_w - border * 2 else defs.MIN_WINDOW_DIM,
+            .height = if (screen_h > border * 2) screen_h - border * 2 else defs.MIN_WINDOW_DIM,
+        },
+        .gaps => .{
+            .x      = @intCast(gap),
+            .y      = @intCast(y_offset + gap),
+            .width  = if (screen_w > gap * 2 + border * 2) screen_w - gap * 2 - border * 2 else defs.MIN_WINDOW_DIM,
+            .height = if (screen_h > gap * 2 + border * 2) screen_h - gap * 2 - border * 2 else defs.MIN_WINDOW_DIM,
+        },
     };
 
-    // Configure all windows to same geometry (fullscreen with gaps/borders)
-    for (windows) |win| {
-        layouts.configureSafe(conn, win, rect);
-    }
-
-    // Raise the last window (most recently focused in tiled_windows order)
-    const top_win = windows[windows.len - 1];
+    layouts.configureSafe(conn, top_win, rect);
     _ = xcb.xcb_configure_window(conn, top_win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 }

@@ -26,6 +26,21 @@
 [tiling]
 enabled = true
 
+# Per-layout behavioral variations
+# master_variation: "lifo" = old window stays in master, new goes to stack (default)
+#                  "fifo" = new window always takes master, old moves to stack
+master_variation = "lifo"
+
+monocle_variation = "gaps" # "gaps"/"gapless"
+
+# grid_variation: "rigid"   = strict grid cells; incomplete rows leave empty cells (default)
+#                 "relaxed" = last window in an incomplete row expands to fill the row
+grid_variation = "relaxed"
+
+# fibonacci_indicator: 3-char label shown in bar when fibonacci layout is active
+# (fibonacci has no variations; this is purely cosmetic)
+# fibonacci_indicator = "NUL"
+
 # Enabled layouts
 ## First is default; cycling follows order
 ## Layouts are now respected in the exact order specified
@@ -38,19 +53,17 @@ layouts = [
 ]
 
 [tiling.aesthetics]
-# - 0-100%: Linear scaling where 100% = 50% of window space (half window, half gaps/border)
-# - 100-200%: Can go extreme, where 200% = entire window consumed by gaps/border
-# This keeps the 0-100% range "sane" while allowing extreme customization if needed
+# - 0-200%:  100% makes a window have borders as wide as the window's viewable area.
+# - Going beyond 100% is not sane anymore; 200% makes a window be completely swallowed by its borders.
 gaps             = 2.5%
 border_width     = 1%
 border_focused   = '#ac3232'
-# border_focused   = '#FFFFFF'
 border_unfocused = '#52263e' # Letters can also be MAJUS/minus
 
 [tiling.layouts.master-stack]
 count = 1        # Number of windows in master area (master stack size)
 side  = "left"   # "left"/"right" / 'L'/'R'
-width = 50%      # N/N% (5%-95% suggested range)
+width = 50%      # N/N% (suggestion of presentation: 5%-95%)
 
 [bar]
 enabled = true
@@ -131,7 +144,7 @@ segments = ["workspaces", "layout"]
 segments = ["title"]
 
 [bar.layout.right]
-segments = ["clock"]
+segments = ["variations", "clock"]
 
 # Bar module configurations
 [bar.modules.workspaces]
@@ -148,8 +161,8 @@ kill = "pkill -9" # program kill value placeholder
 # WM interactions
 Mod+F = "toggle_fullscreen"
 Mod+Shift+Return = "{kill} Xorg" # quit wm
-Mod+Shift+F = "close_window" # Close focused window
-Mod+Shift+Y = "reload" # Config hot-reload
+Mod+Shift+F = "close_window"     # Close focused window
+Mod+Shift+Y = "reload"           # Config hot-reload
 
 Mod+T           = "minimize_window"
 Mod+Shift+T     = "unminimize_lifo"
@@ -161,11 +174,11 @@ Mod+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-switch.sh" # start 
 Mod+Shift+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-stop.sh" # stop shader wallpaper
 
 # Tiling
-Mod+N           = "toggle_tiling" # Enable/disable tiling
-Mod+space       = "toggle_layout" # Cycle layouts forward
-Mod+Shift+space = "toggle_layout_reverse" # Cycle layouts backward
-Mod+Tab         = "swap_master"   # Swap focused window with master (slave→master or master-slave)
-Mod+Shift+Tab   = "rofi -show drun" #
+Mod+N           = "toggle_tiling"          # Enable/disable tiling
+Mod+space       = "toggle_layout"          # Cycle layouts forward
+Mod+Shift+space = "toggle_layout_reverse"  # Cycle layouts backward
+Mod+Tab         = "swap_master"            # Swap focused window with master (slave→master or master→slave)
+Mod+Shift+Tab   = "rofi -show drun"
 
 # Layouts
 ## Master-stack
@@ -200,8 +213,9 @@ Mod+Shift+R = "move_to_workspace_8"
 # specific binds if needed by defining them explicitly.
 
 # Bar
-Mod+B = "toggle_bar_visibility"     # shown/hidden
-Mod+Shift+B = "toggle_bar_position" # top/bottom
+Mod+B       = "toggle_bar_visibility"  # shown/hidden
+Mod+Shift+B = "toggle_bar_position"    # top/bottom
+Mod+Alt+B   = "cycle_layout_variation" # Cycle current layout's variation (Super+V)
 
 # Application launchers
 Mod+P = "rofi -show drun"

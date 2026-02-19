@@ -52,6 +52,7 @@ pub const Action = union(enum) {
     unminimize_lifo,
     unminimize_fifo,
     unminimize_all,
+    cycle_layout_variation,
 
     pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -86,6 +87,23 @@ pub const MasterSide = enum {
     }
 };
 
+/// Per-layout behavioral variations — defined here (not in tiling.zig) so that
+/// config.zig can parse them without creating a circular import.
+pub const MasterVariation = enum {
+    lifo, // new window → stack, existing master stays (default)
+    fifo, // new window → master, existing master → stack
+};
+
+pub const MonocleVariation = enum {
+    gapless, // true fullscreen — ignore gap settings (default)
+    gaps,    // honor gap settings like every other layout
+};
+
+pub const GridVariation = enum {
+    rigid,   // strict grid: leave empty cells in incomplete last row (default)
+    relaxed, // last window in incomplete row expands to fill the row
+};
+
 pub const TilingConfig = struct {
     enabled: bool = true,
     layout: []const u8 = "master_left",
@@ -97,6 +115,15 @@ pub const TilingConfig = struct {
     border_width: parser.ScalableValue = parser.ScalableValue.absolute(2.0),
     border_focused: u32 = 0x5294E2, // RGB color - must be u32
     border_unfocused: u32 = 0x383C4A, // RGB color - must be u32
+
+    // Per-layout variation preferences — stored as parsed enums (not raw strings)
+    // to avoid dangling slices after the config document is freed.
+    master_variation:  MasterVariation  = .lifo,
+    monocle_variation: MonocleVariation = .gapless,
+    grid_variation:    GridVariation    = .rigid,
+    // 3-char label shown in bar for fibonacci (which has no variations).
+    // Stored as a fixed-size array so it never needs to be freed.
+    fibonacci_indicator: [3]u8 = "NUL".*,
 
     pub fn deinit(self: *TilingConfig, allocator: std.mem.Allocator) void {
         for (self.layouts.items) |layout| allocator.free(layout);
@@ -124,6 +151,7 @@ pub const BarSegment = enum {
     title,
     clock,
     layout,
+    variations,
 
     pub fn fromString(str: []const u8) ?BarSegment { return std.meta.stringToEnum(BarSegment, str); }
 };
@@ -411,6 +439,12 @@ pub const WM = struct {
     // carry the triggering event's timestamp, not XCB_CURRENT_TIME (0).
     last_event_time: u32 = 0,
     suppress_focus_reason: FocusSuppressReason = .none,
+    /// Number of crossing events (EnterNotify / root LeaveNotify) still to absorb
+    /// before lifting the window_spawn focus suppression.  Normally 1, but bumped
+    /// to 2 when the post-retile pointer query reveals the cursor is now sitting
+    /// inside a tiled window — meaning the X server will fire a LeaveNotify on
+    /// root *and* an EnterNotify on that window, and both must be swallowed.
+    suppress_focus_count: u8 = 1,
 
     pub fn deinit(self: *WM) void {
         self.fullscreen.deinit();
