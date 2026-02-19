@@ -3,6 +3,9 @@
 # temporary location, but for now let's ignore zig's binary output
 zig-out/
 
+# single-dir codebase
+dev/codebase/*
+
 *.orig
 *.rej
 *.swp

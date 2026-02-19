@@ -23,10 +23,9 @@ pub fn module(comptime StateType: type) type {
         
         /// Deinitialize module state
         pub fn deinit(allocator: std.mem.Allocator) void {
-            if (state) |s| {
-                allocator.destroy(s);
-                state = null;
-            }
+            const s = state orelse return;
+            allocator.destroy(s);
+            state = null;
         }
         
         /// Get state reference (optional)

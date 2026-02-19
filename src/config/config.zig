@@ -11,20 +11,12 @@ const parseColor = parser.parseColor;
 
 fn getColor(section: *const parser.Section, key: []const u8, default: u32) u32 {
     const value = section.get(key) orelse return default;
-    if (value.asColor()) |color| {
-        return if (color <= 0xFFFFFF) color else default;
-    }
-    if (value.asString()) |str| {
-        const color = parseColor(str) catch {
-            debug.warn("Invalid color for {s}: '{s}'", .{ key, str });
-            return default;
-        };
-        return color;
-    }
-    if (value.asInt()) |int_val| {
-        const color: u32 = @intCast(int_val);
-        return if (color <= 0xFFFFFF) color else default;
-    }
+    if (value.asColor()) |c| return c;
+    if (value.asString()) |s| return parseColor(s) catch {
+        debug.warn("Invalid color for {s}: '{s}'", .{ key, s });
+        return default;
+    };
+    if (value.asInt()) |i| if (@as(u32, @intCast(@max(0, i))) <= 0xFFFFFF) return @intCast(i);
     return default;
 }
 
@@ -56,19 +48,18 @@ fn get(
     // Validate bounds and warn if out of range - returns default, NOT clamped value
     if (comptime min) |m| {
         if (value < m) {
-            debug.warn("Value for '{s}' ({any}) below minimum ({any}), using default", .{key, value, m});
+            debug.warn("Value for '{s}' ({any}) below minimum ({any}), using default", .{ key, value, m });
             return default;
         }
     }
     if (comptime max) |m| {
         if (value > m) {
-            debug.warn("Value for '{s}' ({any}) above maximum ({any}), using default", .{key, value, m});
+            debug.warn("Value for '{s}' ({any}) above maximum ({any}), using default", .{ key, value, m });
             return default;
         }
     }
     return value;
 }
-
 
 // Helper for workspace range validation
 fn validateWorkspace(ws_num: usize, max: usize, context: []const u8) bool {
@@ -90,10 +81,10 @@ fn addRule(allocator: std.mem.Allocator, cfg: *defs.Config, class_name: []const 
 
 // Helper for initializing default bar layout
 fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *defs.Config) !void {
-    const layout_defaults = [_]struct{pos: defs.BarPosition, seg: defs.BarSegment}{
-        .{.pos = .left, .seg = .workspaces},
-        .{.pos = .center, .seg = .title},
-        .{.pos = .right, .seg = .clock},
+    const layout_defaults = [_]struct { pos: defs.BarPosition, seg: defs.BarSegment }{
+        .{ .pos = .left, .seg = .workspaces },
+        .{ .pos = .center, .seg = .title },
+        .{ .pos = .right, .seg = .clock },
     };
     for (layout_defaults) |ld| {
         var bar_layout = defs.BarLayout{ .position = ld.pos, .segments = std.ArrayList(defs.BarSegment){} };
@@ -104,11 +95,12 @@ fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *defs.Config) !void {
 
 pub fn loadConfigDefault(allocator: std.mem.Allocator) !defs.Config {
     const home = if (std.c.getenv("HOME")) |h| std.mem.span(h) else ".";
-    const config_home = if (std.c.getenv("XDG_CONFIG_HOME")) |ch|
+    const xdg_config_home = std.c.getenv("XDG_CONFIG_HOME");
+    const config_home = if (xdg_config_home) |ch|
         std.mem.span(ch)
     else
         try std.fmt.allocPrint(allocator, "{s}/.config", .{home});
-    defer if (std.c.getenv("XDG_CONFIG_HOME") == null) allocator.free(config_home);
+    defer if (xdg_config_home == null) allocator.free(config_home);
 
     const xdg_path = try std.fs.path.join(allocator, &.{ config_home, "hana", "config.toml" });
     defer allocator.free(xdg_path);
@@ -177,7 +169,7 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
 fn loadFallbackConfig(allocator: std.mem.Allocator) !defs.Config {
     const fallback = @import("fallback");
     const fallback_toml = fallback.getFallbackToml();
-    
+
     var doc = try parser.parse(allocator, fallback_toml);
     defer doc.deinit();
 
@@ -186,19 +178,16 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !defs.Config {
 
     const terminal = try fallback.detectTerminal(allocator);
     for (cfg.keybindings.items) |*kb| {
-        if (kb.action == .exec) {
-            if (std.mem.eql(u8, kb.action.exec, "auto_terminal")) {
-                allocator.free(kb.action.exec);
-                kb.action.exec = try allocator.dupe(u8, terminal);
-            }
+        if (kb.action == .exec and std.mem.eql(u8, kb.action.exec, "auto_terminal")) {
+            allocator.free(kb.action.exec);
+            kb.action.exec = try allocator.dupe(u8, terminal);
         }
     }
 
     if (std.mem.eql(u8, cfg.bar.font, "auto")) {
         const detected_font = try fallback.detectFont(allocator);
-        // Use the raw value from ScalableValue (will be scaled later during bar init)
         const font_size_val: u16 = @intFromFloat(cfg.bar.font_size.value);
-        const font_with_size = try std.fmt.allocPrint(allocator, "{s}:size={}", .{detected_font, font_size_val});
+        const font_with_size = try std.fmt.allocPrint(allocator, "{s}:size={}", .{ detected_font, font_size_val });
         cfg.bar.font = font_with_size;
     }
 
@@ -208,17 +197,17 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !defs.Config {
 
 fn getDefaultConfig(allocator: std.mem.Allocator) defs.Config {
     var cfg = defs.Config.init(allocator);
-    
+
     // Add default tiling layout
     const default_layout = allocator.dupe(u8, "master_left") catch "master_left";
     cfg.tiling.layouts.append(allocator, default_layout) catch |e| debug.warnOnErr(e, "default layout append");
     cfg.tiling.layout = if (cfg.tiling.layouts.items.len > 0) cfg.tiling.layouts.items[0] else "master_left";
-    
+
     for (0..9) |i| {
         const icon = std.fmt.allocPrint(allocator, "{}", .{i + 1}) catch continue;
         cfg.bar.workspace_icons.append(allocator, icon) catch |e| debug.warnOnErr(e, "workspace icon append");
     }
-    
+
     initDefaultBarLayout(allocator, &cfg) catch |e| debug.warnOnErr(e, "default bar layout init");
     return cfg;
 }
@@ -253,11 +242,11 @@ const ACTION_MAP = std.StaticStringMap(defs.Action).initComptime(.{
     .{ "swap_master", .swap_master },
     .{ "dump_state", .dump_state },
     .{ "emergency_recover", .emergency_recover },
-    .{ "minimize_window",   .minimize_window },
-    .{ "minimize",          .minimize_window },
-    .{ "unminimize_lifo",   .unminimize_lifo },
-    .{ "unminimize_fifo",   .unminimize_fifo },
-    .{ "unminimize_all",    .unminimize_all  },
+    .{ "minimize_window", .minimize_window },
+    .{ "minimize", .minimize_window },
+    .{ "unminimize_lifo", .unminimize_lifo },
+    .{ "unminimize_fifo", .unminimize_fifo },
+    .{ "unminimize_all", .unminimize_all },
 });
 
 fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
@@ -270,7 +259,7 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, c
     while (iter.next()) |entry| {
         if (std.mem.eql(u8, entry.key_ptr.*, "Mod")) continue;
         if (std.mem.eql(u8, entry.key_ptr.*, "kill")) continue;
-        
+
         const command = entry.value_ptr.*.asString() orelse continue;
 
         const keybind_str = if (mod_placeholder) |mod|
@@ -343,42 +332,35 @@ fn tryParseWorkspace(command: []const u8, prefix: []const u8) ?u8 {
 
 fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !defs.Action {
     if (ACTION_MAP.get(cmd)) |action| return action;
-
     if (tryParseWorkspace(cmd, "workspace_")) |ws| return .{ .switch_workspace = ws };
     if (tryParseWorkspace(cmd, "move_to_workspace_")) |ws| return .{ .move_to_workspace = ws };
-    
     return .{ .exec = try allocator.dupe(u8, cmd) };
 }
 
 /// Finalize configuration with screen-dependent values (call after screen is available)
 pub fn finalizeConfig(cfg: *defs.Config, screen: *defs.xcb.xcb_screen_t) void {
     const dpi_module = @import("dpi");
-    // Compute scaled font size based on ScalableValue
     cfg.bar.scaled_font_size = dpi_module.scaleFontSize(cfg.bar.font_size, screen);
 }
 
 pub fn resolveKeybindings(keybindings: anytype, xkb_state: *xkb.XkbState) void {
-    // First pass: resolve keycodes
     for (keybindings) |*kb| {
         kb.keycode = xkb_state.keysymToKeycode(kb.keysym);
     }
-    // Second pass: detect conflicts
-    // Map of (modifiers + keycode) -> binding index for conflict detection
     var seen = std.AutoHashMap(u64, usize).init(std.heap.c_allocator);
     defer seen.deinit();
-    
+
     for (keybindings, 0..) |*kb, i| {
         const keycode = kb.keycode orelse continue;
-        // Create unique key from modifiers and keycode
         const key: u64 = (@as(u64, kb.modifiers) << 32) | keycode;
-        
+
         if (seen.get(key)) |first_index| {
             debug.warn("Keybinding conflict detected!", .{});
             debug.warn("  Binding #{}: mods=0x{x:0>4} key={} (first)", .{
-                first_index + 1, keybindings[first_index].modifiers, keycode
+                first_index + 1, keybindings[first_index].modifiers, keycode,
             });
             debug.warn("  Binding #{}: mods=0x{x:0>4} key={} (duplicate)", .{
-                i + 1, kb.modifiers, keycode
+                i + 1, kb.modifiers, keycode,
             });
             debug.warn("  The second binding will override the first!", .{});
         } else {
@@ -391,20 +373,17 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
     const section = doc.getSection("tiling") orelse return;
     cfg.tiling.enabled = get(bool, section, "enabled", true, null, null);
 
-    // Parse layouts array (new structure)
     if (section.get("layouts")) |layouts_value| {
         if (layouts_value.asArray()) |layouts_arr| {
             for (cfg.tiling.layouts.items) |layout| allocator.free(layout);
             cfg.tiling.layouts.clearRetainingCapacity();
-            
+
             for (layouts_arr) |layout_item| {
                 if (layout_item.asString()) |layout_str| {
-                    const layout_copy = try allocator.dupe(u8, layout_str);
-                    try cfg.tiling.layouts.append(allocator, layout_copy);
+                    try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, layout_str));
                 }
             }
-            
-            // Set current layout to first in array if available
+
             if (cfg.tiling.layouts.items.len > 0) {
                 cfg.tiling.layout = cfg.tiling.layouts.items[0];
             }
@@ -414,45 +393,33 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
         const layout_str = get([]const u8, section, "layout", "master_left", null, null);
         cfg.allocated_layout = try allocator.dupe(u8, layout_str);
         cfg.tiling.layout = cfg.allocated_layout.?;
-        
-        // Also add to layouts array for consistency
-        const layout_copy = try allocator.dupe(u8, layout_str);
-        try cfg.tiling.layouts.append(allocator, layout_copy);
+        try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, layout_str));
     }
 
     // Try parsing from new [tiling.aesthetics] section first
-    const aesthetics_section = doc.getSection("tiling.aesthetics");
-    const aesthetic_src = aesthetics_section orelse section;
-    
+    const aesthetic_src = doc.getSection("tiling.aesthetics") orelse section;
     cfg.tiling.gaps = aesthetic_src.getScalable("gaps") orelse parser.ScalableValue.absolute(10.0);
     cfg.tiling.border_width = aesthetic_src.getScalable("border_width") orelse parser.ScalableValue.absolute(2.0);
     cfg.tiling.border_focused = getColor(aesthetic_src, "border_focused", 0x5294E2);
     cfg.tiling.border_unfocused = getColor(aesthetic_src, "border_unfocused", 0x383C4A);
 
     // Try parsing from new [tiling.layouts.master-stack] section
-    const master_stack_section = doc.getSection("tiling.layouts.master-stack");
-    const master_src = master_stack_section orelse section;
-    
-    // Use new names if in master-stack section, old names otherwise
-    const count_key = if (master_stack_section != null) "count" else "master_count";
-    const side_key = if (master_stack_section != null) "side" else "master_side";
-    const width_key = if (master_stack_section != null) "width" else "master_width";
-    
-    cfg.tiling.master_count = get(u8, master_src, count_key, 1, 1, null);
-    
-    if (master_src.getString(side_key)) |side_str| {
+    const master_section_opt = doc.getSection("tiling.layouts.master-stack");
+    const master_src = master_section_opt orelse section;
+    const in_master_section = master_section_opt != null;
+
+    cfg.tiling.master_count = get(u8, master_src, if (in_master_section) "count" else "master_count", 1, 1, null);
+
+    if (master_src.getString(if (in_master_section) "side" else "master_side")) |side_str| {
         cfg.tiling.master_side = defs.MasterSide.fromStringWithAlias(side_str) orelse .left;
     }
-    
-    cfg.tiling.master_width = master_src.getScalable(width_key) orelse parser.ScalableValue.percentage(50.0);
+
+    cfg.tiling.master_width = master_src.getScalable(if (in_master_section) "width" else "master_width") orelse
+        parser.ScalableValue.percentage(50.0);
 }
 
 // Table-driven bar color parsing
-const BarColorField = struct {
-    name: []const u8,
-    field_name: []const u8,
-    default: u32,
-};
+const BarColorField = struct { name: []const u8, field_name: []const u8, default: u32 };
 
 const BAR_COLOR_FIELDS = [_]BarColorField{
     .{ .name = "bg", .field_name = "bg", .default = 0x222222 },
@@ -465,10 +432,43 @@ const BAR_COLOR_FIELDS = [_]BarColorField{
     .{ .name = "accent_color", .field_name = "accent_color", .default = 0x61AFEF },
 };
 
+/// Parse bar transparency from any supported value format:
+/// integers 0–100, bare decimals 0.0–1.0, percentages (50%), or quoted strings.
+/// Returns a clamped [0.0, 1.0] opacity value; returns 1.0 (opaque) on any error.
+fn parseTransparency(value: parser.Value) f32 {
+    if (value.asInt()) |i| {
+        if (i == 0) return 0.0;
+        if (i == 1) {
+            debug.info("Transparency set to 1 (fully opaque) - transparency disabled", .{});
+            return 1.0;
+        }
+        if (i >= 2 and i <= 100) return @as(f32, @floatFromInt(i)) / 100.0;
+        debug.warn("Invalid transparency value {} (must be 0-100), using default", .{i});
+        return 1.0;
+    }
+    if (value.asScalable()) |s| return if (s.is_percentage) s.value / 100.0 else s.value;
+    if (value.asString()) |str| {
+        const trimmed = std.mem.trim(u8, str, " \t");
+        const f = std.fmt.parseFloat(f32, trimmed) catch {
+            debug.warn("Invalid transparency value '{s}', using default", .{trimmed});
+            return 1.0;
+        };
+        if (f == 1.0) {
+            debug.info("Transparency set to 1.0 (fully opaque) - transparency disabled", .{});
+            return 1.0;
+        }
+        if (f >= 0.0 and f < 1.0) return f;
+        if (f > 1.0 and f <= 100.0) return f / 100.0;
+        debug.warn("Invalid transparency value {d} (must be 0.0-1.0 or 0-100), using default", .{f});
+        return 1.0;
+    }
+    return 1.0;
+}
+
 fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
     const section = doc.getSection("bar") orelse return;
     cfg.bar.enabled = get(bool, section, "enabled", true, null, null);
-    
+
     if (section.getString("position")) |pos_str| {
         cfg.bar.vertical_position = defs.BarVerticalPosition.fromString(pos_str) orelse .top;
     }
@@ -486,8 +486,7 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
             cfg.bar.fonts.clearRetainingCapacity();
             for (arr) |item| {
                 if (item.asString()) |font_name| {
-                    const font_copy = try allocator.dupe(u8, font_name);
-                    try cfg.bar.fonts.append(allocator, font_copy);
+                    try cfg.bar.fonts.append(allocator, try allocator.dupe(u8, font_name));
                 }
             }
             debug.info("Loaded {} fonts for bar", .{cfg.bar.fonts.items.len});
@@ -498,11 +497,11 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     cfg.bar.padding = get(u8, section, "padding", 8, 0, 50);
     cfg.bar.spacing = get(u8, section, "spacing", 12, 0, 100);
 
-    // Table-driven color parsing (saves 11 LOC)
+    // Table-driven color parsing
     inline for (BAR_COLOR_FIELDS) |field| {
         @field(cfg.bar, field.field_name) = getColor(section, field.name, field.default);
     }
-    
+
     // Accent-based colors with fallback
     cfg.bar.workspaces_accent = getColor(section, "workspaces_accent", cfg.bar.accent_color);
     cfg.bar.title_accent_color = getColor(section, "title_accent_color", cfg.bar.accent_color);
@@ -515,136 +514,72 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
 
     cfg.bar.indicator_size = section.getScalable("indicator_size") orelse parser.ScalableValue.percentage(100.0);
     cfg.bar.workspace_width = section.getScalable("workspace_width") orelse parser.ScalableValue.percentage(100.0);
-    
-    // Parse transparency value - supports multiple formats:
-    // - Bare decimals: 0.5, 0.75
-    // - Quoted decimals: "0.5", '0.5'
-    // - Integers: 50, 75, 100
-    // - Quoted integers: "50", '75'
-    // - Percentages: 50%, 75%, 100%
-    // Special case: 1, "1", '1', or 100% = fully opaque (skip transparency)
+
     if (section.get("transparency")) |value| {
-        var trans: f32 = 1.0;
-        
-        // Check integers FIRST (before scalable) to properly handle bare numbers like 50
-        if (value.asInt()) |i| {
-            // Integer value: 0, 1, 50, 100, etc.
-            if (i == 0) {
-                trans = 0.0;  // Fully transparent
-            } else if (i == 1) {
-                trans = 1.0;  // Fully opaque - skip transparency
-                debug.info("Transparency set to 1 (fully opaque) - transparency disabled", .{});
-            } else if (i >= 2 and i <= 100) {
-                trans = @as(f32, @floatFromInt(i)) / 100.0;  // Treat as percentage
-            } else {
-                debug.warn("Invalid transparency value {} (must be 0-100), using default", .{i});
-                trans = 1.0;
-            }
-        } else if (value.asScalable()) |scalable| {
-            // Scalable value with explicit percentage marker
-            if (scalable.is_percentage) {
-                // It's a percentage like 50%
-                trans = scalable.value / 100.0;
-            } else {
-                // Bare decimal like 0.5
-                trans = scalable.value;
-            }
-        } else if (value.asString()) |str| {
-            // String value: "0.5", "50", "1", etc.
-            const trimmed = std.mem.trim(u8, str, " \t");
-            
-            // Try parsing as float first (handles "0.5", "0.75", "1.0", etc.)
-            if (std.fmt.parseFloat(f32, trimmed)) |float_val| {
-                // Check if it's the special case of 1.0 (fully opaque)
-                if (float_val == 1.0) {
-                    trans = 1.0;
-                    debug.info("Transparency set to 1.0 (fully opaque) - transparency disabled", .{});
-                } else if (float_val >= 0.0 and float_val < 1.0) {
-                    // Decimal value (0.0 - 0.99)
-                    trans = float_val;
-                } else if (float_val >= 1.0 and float_val <= 100.0) {
-                    // Treat as percentage (1-100)
-                    trans = float_val / 100.0;
-                } else {
-                    debug.warn("Invalid transparency value {d} (must be 0.0-1.0 or 0-100), using default", .{float_val});
-                    trans = 1.0;
-                }
-            } else |_| {
-                debug.warn("Invalid transparency value '{s}', using default", .{trimmed});
-                trans = 1.0;
-            }
-        }
-        
-        // Clamp to valid range
-        cfg.bar.transparency = std.math.clamp(trans, 0.0, 1.0);
-        
-        // Log the final value
+        cfg.bar.transparency = std.math.clamp(parseTransparency(value), 0.0, 1.0);
         if (cfg.bar.transparency == 1.0) {
             debug.info("Bar transparency: disabled (fully opaque)", .{});
         } else {
-            debug.info("Bar transparency set to: {d:.2}% (alpha: 0x{x:0>4})", 
-                .{cfg.bar.transparency * 100.0, cfg.bar.getAlpha16()});
+            debug.info("Bar transparency set to: {d:.2}% (alpha: 0x{x:0>4})", .{
+                cfg.bar.transparency * 100.0, cfg.bar.getAlpha16(),
+            });
         }
     }
-    
+
     try parseWorkspaceIcons(allocator, section, cfg);
     try parseBarLayout(allocator, section, doc, cfg);
-    
+
     // Override with bar.colors section if present
     if (doc.getSection("bar.colors")) |colors_section| {
-        cfg.bar.workspaces_accent       = getColor(colors_section, "workspaces",      cfg.bar.workspaces_accent       orelse cfg.bar.accent_color);
-        cfg.bar.title_accent_color      = getColor(colors_section, "title",            cfg.bar.title_accent_color      orelse cfg.bar.accent_color);
-        cfg.bar.title_unfocused_accent  = getColor(colors_section, "title_unfocused",  cfg.bar.title_unfocused_accent  orelse cfg.bar.bg);
-        cfg.bar.title_minimized_accent  = getColor(colors_section, "title_minimized",  cfg.bar.title_minimized_accent  orelse cfg.bar.bg);
-        cfg.bar.clock_accent            = getColor(colors_section, "clock",            cfg.bar.clock_accent            orelse cfg.bar.accent_color);
+        cfg.bar.workspaces_accent = getColor(colors_section, "workspaces", cfg.bar.workspaces_accent orelse cfg.bar.accent_color);
+        cfg.bar.title_accent_color = getColor(colors_section, "title", cfg.bar.title_accent_color orelse cfg.bar.accent_color);
+        cfg.bar.title_unfocused_accent = getColor(colors_section, "title_unfocused", cfg.bar.title_unfocused_accent orelse cfg.bar.bg);
+        cfg.bar.title_minimized_accent = getColor(colors_section, "title_minimized", cfg.bar.title_minimized_accent orelse cfg.bar.bg);
+        cfg.bar.clock_accent = getColor(colors_section, "clock", cfg.bar.clock_accent orelse cfg.bar.accent_color);
     }
 }
 
 fn parseWorkspaceIcons(allocator: std.mem.Allocator, section: *const parser.Section, cfg: *defs.Config) !void {
     for (cfg.bar.workspace_icons.items) |icon| allocator.free(icon);
     cfg.bar.workspace_icons.clearRetainingCapacity();
-    
+
     if (section.get("icons")) |value| {
         if (value.asArray()) |arr| {
             for (arr) |item| {
                 if (item.asString()) |str| {
-                    const icon = try allocator.dupe(u8, str);
-                    try cfg.bar.workspace_icons.append(allocator, icon);
+                    try cfg.bar.workspace_icons.append(allocator, try allocator.dupe(u8, str));
                 } else if (item.asInt()) |num| {
-                    const icon = try std.fmt.allocPrint(allocator, "{}", .{num});
-                    try cfg.bar.workspace_icons.append(allocator, icon);
+                    try cfg.bar.workspace_icons.append(allocator, try std.fmt.allocPrint(allocator, "{}", .{num}));
                 }
             }
         } else if (value.asString()) |str| {
             for (str) |ch| {
-                const icon = try std.fmt.allocPrint(allocator, "{c}", .{ch});
-                try cfg.bar.workspace_icons.append(allocator, icon);
+                try cfg.bar.workspace_icons.append(allocator, try std.fmt.allocPrint(allocator, "{c}", .{ch}));
             }
         }
     }
-    
-    while (cfg.bar.workspace_icons.items.len < cfg.workspaces.count) : ({}) {
-        const icon = try std.fmt.allocPrint(allocator, "{}", .{cfg.bar.workspace_icons.items.len + 1});
-        try cfg.bar.workspace_icons.append(allocator, icon);
+
+    while (cfg.bar.workspace_icons.items.len < cfg.workspaces.count) {
+        try cfg.bar.workspace_icons.append(allocator, try std.fmt.allocPrint(allocator, "{}", .{cfg.bar.workspace_icons.items.len + 1}));
     }
 }
 
 fn parseBarLayout(allocator: std.mem.Allocator, section: *const parser.Section, doc: *const parser.Document, cfg: *defs.Config) !void {
     for (cfg.bar.layout.items) |*item| item.deinit(allocator);
     cfg.bar.layout.clearRetainingCapacity();
-    
+
     if (section.get("layout")) |value| {
         if (value.asArray()) |_| {
             debug.warn("bar.layout array parsing not yet fully supported, use sections like [bar.layout.left]", .{});
         }
     }
-    
+
     const positions = [_]struct { name: []const u8, pos: defs.BarPosition }{
         .{ .name = "bar.layout.left", .pos = .left },
         .{ .name = "bar.layout.center", .pos = .center },
         .{ .name = "bar.layout.right", .pos = .right },
     };
-    
+
     for (positions) |p| {
         if (doc.getSection(p.name)) |layout_section| {
             var bar_layout = defs.BarLayout{
@@ -669,7 +604,7 @@ fn parseBarLayout(allocator: std.mem.Allocator, section: *const parser.Section, 
             }
         }
     }
-    
+
     if (cfg.bar.layout.items.len == 0) {
         try initDefaultBarLayout(allocator, cfg);
     }
@@ -678,12 +613,10 @@ fn parseBarLayout(allocator: std.mem.Allocator, section: *const parser.Section, 
 fn parseWorkspaces(doc: *const parser.Document, cfg: *defs.Config) void {
     // Support both [bar.modules.workspaces] (new) and [workspaces] (legacy)
     const section = doc.getSection("bar.modules.workspaces") orelse doc.getSection("workspaces") orelse return;
-    cfg.workspaces.count = get(u8, section, "count", 9, 1, null); // Minimum 1 workspace required
+    cfg.workspaces.count = get(u8, section, "count", 9, 1, null);
 }
 
 fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
-    // Support alternative array format: [workspace.rules] with numbered arrays
-    // e.g., 1 = ["Navigator", "Firefox"]
     if (doc.getSection("workspace.rules")) |rules_section| {
         var iter = rules_section.pairs.iterator();
         while (iter.next()) |entry| {
@@ -694,10 +627,9 @@ fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *d
                 try addRule(allocator, cfg, entry.key_ptr.*, @intCast(ws));
                 continue;
             };
-            
-            // New array format: key is workspace number, value is array of class names
+
             if (!validateWorkspace(ws_num, cfg.workspaces.count, entry.key_ptr.*)) continue;
-            
+
             if (entry.value_ptr.*.asArray()) |arr| {
                 for (arr) |item| {
                     if (item.asString()) |class_name| {
@@ -707,7 +639,7 @@ fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *d
             }
         }
     }
-    
+
     // Legacy format support: [rules] section
     if (doc.getSection("rules")) |section| {
         var iter = section.pairs.iterator();

@@ -7,6 +7,7 @@ const debug = @import("debug");
 
 const MAX_PROPERTY_LENGTH: u32 = 256; // long-words requested from the X server
 const PROPERTY_NO_DELETE:  u8  = 0;
+const INPUT_HINT_FLAG:     u32 = 1 << 0; // WM_HINTS flags field bit 0
 
 pub inline fn flush(conn: *xcb.xcb_connection_t) void {
     _ = xcb.xcb_flush(conn);
@@ -81,33 +82,28 @@ var atom_cache: ?AtomCache = null;
 pub fn initAtomCache(conn: *xcb.xcb_connection_t) !void {
     // Fire all intern_atom requests before waiting for any reply — one round-trip
     // instead of six sequential ones.
-    const c_protocols  = xcb.xcb_intern_atom(conn, 0, 12, "WM_PROTOCOLS");
-    const c_delete     = xcb.xcb_intern_atom(conn, 0, 16, "WM_DELETE_WINDOW");
-    const c_take_focus = xcb.xcb_intern_atom(conn, 0, 13, "WM_TAKE_FOCUS");
-    const c_net_name   = xcb.xcb_intern_atom(conn, 0, 12, "_NET_WM_NAME");
-    const c_utf8       = xcb.xcb_intern_atom(conn, 0, 11, "UTF8_STRING");
-    const c_class      = xcb.xcb_intern_atom(conn, 0, 8,  "WM_CLASS");
+    const names = [_][]const u8{
+        "WM_PROTOCOLS", "WM_DELETE_WINDOW", "WM_TAKE_FOCUS",
+        "_NET_WM_NAME",  "UTF8_STRING",      "WM_CLASS",
+    };
+    var cookies: [names.len]xcb.xcb_intern_atom_cookie_t = undefined;
+    for (&cookies, names) |*c, name|
+        c.* = xcb.xcb_intern_atom(conn, 0, @intCast(name.len), name.ptr);
 
-    const r_protocols  = xcb.xcb_intern_atom_reply(conn, c_protocols,  null) orelse return error.AtomFailed;
-    defer std.c.free(r_protocols);
-    const r_delete     = xcb.xcb_intern_atom_reply(conn, c_delete,     null) orelse return error.AtomFailed;
-    defer std.c.free(r_delete);
-    const r_take_focus = xcb.xcb_intern_atom_reply(conn, c_take_focus, null) orelse return error.AtomFailed;
-    defer std.c.free(r_take_focus);
-    const r_net_name   = xcb.xcb_intern_atom_reply(conn, c_net_name,   null) orelse return error.AtomFailed;
-    defer std.c.free(r_net_name);
-    const r_utf8       = xcb.xcb_intern_atom_reply(conn, c_utf8,       null) orelse return error.AtomFailed;
-    defer std.c.free(r_utf8);
-    const r_class      = xcb.xcb_intern_atom_reply(conn, c_class,      null) orelse return error.AtomFailed;
-    defer std.c.free(r_class);
+    var values: [names.len]u32 = undefined;
+    for (&values, cookies) |*v, cookie| {
+        const r = xcb.xcb_intern_atom_reply(conn, cookie, null) orelse return error.AtomFailed;
+        defer std.c.free(r);
+        v.* = r.*.atom;
+    }
 
     atom_cache = .{
-        .wm_protocols  = r_protocols.*.atom,
-        .wm_delete     = r_delete.*.atom,
-        .wm_take_focus = r_take_focus.*.atom,
-        .net_wm_name   = r_net_name.*.atom,
-        .utf8_string   = r_utf8.*.atom,
-        .wm_class      = r_class.*.atom,
+        .wm_protocols  = values[0],
+        .wm_delete     = values[1],
+        .wm_take_focus = values[2],
+        .net_wm_name   = values[3],
+        .utf8_string   = values[4],
+        .wm_class      = values[5],
     };
 }
 
@@ -228,7 +224,6 @@ pub fn populateFocusCacheFromCookies(
         defer std.c.free(r);
         if (r.*.format == 32 and r.*.value_len >= 1) {
             const hints: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(r)));
-            const INPUT_HINT_FLAG: u32 = 1 << 0;
             if ((hints[0] & INPUT_HINT_FLAG) != 0 and r.*.value_len >= 2) {
                 accepts = hints[1] != 0;
             }
@@ -292,7 +287,7 @@ pub const WMClass = struct {
 pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allocator) ?WMClass {
     const class_atom = getAtomCached("WM_CLASS") catch return null;
     const reply = xcb.xcb_get_property_reply(conn,
-        xcb.xcb_get_property(conn, 0, win, class_atom, xcb.XCB_ATOM_STRING, 0, MAX_PROPERTY_LENGTH), null,
+        xcb.xcb_get_property(conn, PROPERTY_NO_DELETE, win, class_atom, xcb.XCB_ATOM_STRING, 0, MAX_PROPERTY_LENGTH), null,
     ) orelse return null;
     defer std.c.free(reply);
     if (reply.*.format != 8 or reply.*.value_len == 0) return null;
@@ -301,11 +296,10 @@ pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allo
     const len: usize = @intCast(reply.*.value_len);
 
     const sep = std.mem.indexOfScalar(u8, data[0..len], 0) orelse return null;
-    const class_start = sep + 1;
-    if (class_start >= len) return null;
+    if (sep + 1 >= len) return null;
 
     const instance = allocator.dupe(u8, data[0..sep]) catch return null;
-    const class    = allocator.dupe(u8, data[class_start..len]) catch {
+    const class    = allocator.dupe(u8, data[sep + 1..len]) catch {
         allocator.free(instance);
         return null;
     };
@@ -317,7 +311,7 @@ pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allo
 fn queryWMTakeFocusSupport(conn: *xcb.xcb_connection_t, win: u32) bool {
     const protocols_atom  = getAtomCached("WM_PROTOCOLS")  catch return false;
     const reply = xcb.xcb_get_property_reply(conn,
-        xcb.xcb_get_property(conn, 0, win, protocols_atom, xcb.XCB_ATOM_ATOM, 0, MAX_PROPERTY_LENGTH), null,
+        xcb.xcb_get_property(conn, PROPERTY_NO_DELETE, win, protocols_atom, xcb.XCB_ATOM_ATOM, 0, MAX_PROPERTY_LENGTH), null,
     ) orelse return false;
     defer std.c.free(reply);
     if (reply.*.format != 32 or reply.*.value_len == 0) return false;
@@ -353,7 +347,7 @@ pub fn sendWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32, time: u32) void {
 /// Returns true if the input field is absent (assume True) or explicitly True.
 fn queryWMHintsInput(conn: *xcb.xcb_connection_t, win: u32) bool {
     const reply = xcb.xcb_get_property_reply(conn,
-        xcb.xcb_get_property(conn, 0, win, xcb.XCB_ATOM_WM_HINTS, xcb.XCB_ATOM_WM_HINTS, 0, 9),
+        xcb.xcb_get_property(conn, PROPERTY_NO_DELETE, win, xcb.XCB_ATOM_WM_HINTS, xcb.XCB_ATOM_WM_HINTS, 0, 9),
         null,
     ) orelse return true;
     defer std.c.free(reply);
@@ -361,8 +355,6 @@ fn queryWMHintsInput(conn: *xcb.xcb_connection_t, win: u32) bool {
     if (reply.*.format != 32 or reply.*.value_len < 1) return true;
 
     const hints: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
-    const INPUT_HINT_FLAG: u32 = 1 << 0;
-
     if ((hints[0] & INPUT_HINT_FLAG) != 0 and reply.*.value_len >= 2) {
         return hints[1] != 0;
     }
@@ -376,26 +368,16 @@ fn queryWMHintsInput(conn: *xcb.xcb_connection_t, win: u32) bool {
 /// rendering, but the WM only manages the top-level parent.
 pub fn findManagedWindow(conn: *xcb.xcb_connection_t, win: u32, wm: anytype) u32 {
     var current = win;
-    var depth: u8 = 0;
-    const MAX_DEPTH = 10;
-
-    while (depth < MAX_DEPTH) : (depth += 1) {
+    for (0..10) |_| {
         if (wm.hasWindow(current)) return current;
 
         const tree_reply = xcb.xcb_query_tree_reply(
-            conn,
-            xcb.xcb_query_tree(conn, current),
-            null,
+            conn, xcb.xcb_query_tree(conn, current), null,
         ) orelse return win;
         defer std.c.free(tree_reply);
 
-        const parent = tree_reply.*.parent;
-        const root   = tree_reply.*.root;
-
-        if (parent == root or parent == 0) return win;
-
-        current = parent;
+        if (tree_reply.*.parent == tree_reply.*.root or tree_reply.*.parent == 0) return win;
+        current = tree_reply.*.parent;
     }
-
     return win;
 }

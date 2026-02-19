@@ -337,11 +337,8 @@ pub fn isBarInitialized() bool { return state != null; }
 pub fn getCachedWorkspaceWidth() u16 { return if (state) |s| s.cached_ws_width else 50; }
 pub fn getCachedIndicatorSize() u16 { return if (state) |s| s.cached_indicator_size else 5; }
 pub fn getCachedLabelWidth(index: usize) ?u16 {
-    if (state) |s| {
-        const width = s.cache_manager.getWorkspaceLabelWidth(index);
-        return if (width > 0) width else null;
-    }
-    return null;
+    const w = if (state) |s| s.cache_manager.getWorkspaceLabelWidth(index) else return null;
+    return if (w > 0) w else null;
 }
 
 pub fn hasClockSegment() bool { return if (state) |s| s.has_clock_segment else false; }
@@ -352,19 +349,9 @@ pub inline fn raiseBar() void {
         xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 }
 
-pub fn isVisible() bool {
-    return if (state) |s| s.visible else false;
-}
-
-pub fn getGlobalVisibility() bool {
-    return if (state) |s| s.global_visible else false;
-}
-
-pub fn setGlobalVisibility(visible: bool) void {
-    if (state) |s| {
-        s.global_visible = visible;
-    }
-}
+pub fn isVisible() bool { return if (state) |s| s.visible else false; }
+pub fn getGlobalVisibility() bool { return if (state) |s| s.global_visible else false; }
+pub fn setGlobalVisibility(visible: bool) void { if (state) |s| s.global_visible = visible; }
 
 pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
 
@@ -420,8 +407,7 @@ pub fn setBarState(wm: *defs.WM, action: BarAction) void {
 /// This ensures windows have correct geometry when switching workspaces (prevents flicker)
 fn retileAllWorkspaces(wm: *defs.WM) void {
     const ws_state = workspaces.getState() orelse return;
-    const ts = if (wm.config.tiling.enabled) tiling.getState() else null;
-    const tiling_active = if (ts) |t| t.enabled else false;
+    const tiling_active = wm.config.tiling.enabled and if (tiling.getState()) |t| t.enabled else false;
     
     if (!tiling_active) {
         // For floating mode, just retile current workspace

@@ -123,11 +123,6 @@ pub const Tracking = struct {
         return self.removeImpl(win, true);
     }
 
-    /// Unordered removal (swap-remove — use when order is irrelevant).
-    pub fn removeUnordered(self: *Tracking, win: u32) bool {
-        return self.removeImpl(win, false);
-    }
-
     fn removeImpl(self: *Tracking, win: u32, comptime ordered: bool) bool {
         switch (self.storage) {
             .small => |*s| {

@@ -1,6 +1,5 @@
-///! Fallback configuration logic - terminal and font detection - Optimized version
+///! Fallback configuration logic - terminal and font detection
 const std = @import("std");
-
 const debug = @import("debug");
 
 // Terminal detection - ordered by preference
@@ -37,17 +36,17 @@ const FONTS = [_][]const u8{
 // Generic detection helper to eliminate duplication
 fn detectFromList(
     comptime list: []const []const u8,
-    comptime checkFn: fn([]const u8) bool,
+    comptime checkFn: fn ([]const u8) bool,
     item_type: []const u8,
     fallback: []const u8,
 ) []const u8 {
     inline for (list) |item| {
         if (checkFn(item)) {
-            debug.info("Detected {s}: {s}", .{item_type, item});
+            debug.info("Detected {s}: {s}", .{ item_type, item });
             return item;
         }
     }
-    debug.warn("No preferred {s} found, using '{s}'", .{item_type, fallback});
+    debug.warn("No preferred {s} found, using '{s}'", .{ item_type, fallback });
     return fallback;
 }
 
@@ -55,20 +54,23 @@ fn detectFromList(
 pub fn detectTerminal(_: std.mem.Allocator) ![]const u8 {
     return detectFromList(
         &TERMINALS,
-        struct { fn check(cmd: []const u8) bool { return isCommandAvailable(std.heap.c_allocator, cmd); } }.check,
+        struct {
+            fn check(cmd: []const u8) bool {
+                return isCommandAvailable(cmd);
+            }
+        }.check,
         "terminal",
-        "xterm"
+        "xterm",
     );
 }
 
-/// Detect first available font from the system
+/// Detect first available font from the system.
+/// Fonts are checked in preference order; X11 falls back gracefully if a font
+/// is not actually installed, so we assume any font in our curated list is usable.
 pub fn detectFont(_: std.mem.Allocator) ![]const u8 {
-    return detectFromList(
-        &FONTS,
-        isFontAvailable,
-        "font",
-        "monospace"
-    );
+    return detectFromList(&FONTS, struct {
+        fn check(_: []const u8) bool { return true; }
+    }.check, "font", "monospace");
 }
 
 /// Inline helper for path checking
@@ -79,58 +81,28 @@ inline fn checkPath(buf: []u8, dir: []const u8, command: []const u8) bool {
     return true;
 }
 
-/// Improved command availability check with caching
-fn isCommandAvailable(_: std.mem.Allocator, command: []const u8) bool {
+/// Check command availability by searching common paths then $PATH
+fn isCommandAvailable(command: []const u8) bool {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    
-    // Check most common paths first (faster than PATH parsing)
-    // Most binaries are in /usr/bin
+
+    // Check most common paths first (faster than full PATH parsing)
     const common_paths = [_][]const u8{ "/usr/bin", "/usr/local/bin", "/bin" };
     inline for (common_paths) |path| {
         if (checkPath(&buf, path, command)) return true;
     }
-    
-    // If not in common paths, check full PATH
-    if (std.c.getenv("PATH")) |path_env| {
-        var it = std.mem.splitScalar(u8, std.mem.span(path_env), ':');
-        while (it.next()) |path_dir| {
-            // Skip empty paths and paths we already checked
-            if (path_dir.len == 0) continue;
-            
-            // Skip if we already checked this path
-            var skip = false;
-            inline for (common_paths) |common| {
-                if (std.mem.eql(u8, path_dir, common)) {
-                    skip = true;
-                    break;
-                }
-            }
-            if (skip) continue;
-            
-            if (checkPath(&buf, path_dir, command)) return true;
-        }
-    }
-    
-    return false;
-}
 
-/// Simplified font checking with compile-time string map
-fn isFontAvailable(font: []const u8) bool {
-    // Use compile-time string map for O(1) lookup
-    const COMMON_FONTS = std.StaticStringMap(void).initComptime(.{
-        .{ "monospace", {} },
-        .{ "FiraCode", {} },
-        .{ "FiraCode Retina", {} },
-        .{ "FiraCode Nerd Font", {} },
-        .{ "FiraCode Nerd Font Ret", {} },
-        .{ "JetBrains Mono", {} },
-        .{ "JetBrains Mono Nerd Font", {} },
-        .{ "Terminus", {} },
-    });
-    
-    // If it's a common font, assume available
-    // X11 will use fallback if not actually present
-    return COMMON_FONTS.has(font);
+    // Walk $PATH, skipping directories already checked above
+    const path_env = std.mem.span(std.c.getenv("PATH") orelse return false);
+    var it = std.mem.splitScalar(u8, path_env, ':');
+    while (it.next()) |dir| {
+        if (dir.len == 0) continue;
+        const already_checked = inline for (common_paths) |c| {
+            if (std.mem.eql(u8, dir, c)) break true;
+        } else false;
+        if (!already_checked and checkPath(&buf, dir, command)) return true;
+    }
+
+    return false;
 }
 
 /// Load fallback TOML embedded in binary

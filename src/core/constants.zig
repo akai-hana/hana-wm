@@ -42,9 +42,9 @@ pub const LOCK_MODIFIERS = [_]u16{
     defs.MOD_LOCK | defs.MOD_2 
 };
 
-/// X11 Cursor constants
-pub const CURSOR_LEFT_PTR = 68;
-pub const CURSOR_LEFT_PTR_MASK = 69;
+/// X11 Cursor constants (mask glyph is always source + 1 by convention)
+pub const CURSOR_LEFT_PTR      = 68;
+pub const CURSOR_LEFT_PTR_MASK = CURSOR_LEFT_PTR + 1;
 
 /// Size constants
 pub const Sizes = struct {

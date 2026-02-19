@@ -10,30 +10,6 @@ pub const xcb = @cImport({
 
 pub const xkbcommon = @import("xkbcommon");
 
-/// Generic compile-time enum <-> string conversion helper
-pub fn EnumStringHelper(comptime T: type) type {
-    return struct {
-        const Self = @This();
-        
-        const map = blk: {
-            const fields = @typeInfo(T).@"enum".fields;
-            var entries: [fields.len]struct { []const u8, T } = undefined;
-            for (fields, 0..) |field, i| {
-                entries[i] = .{ field.name, @enumFromInt(field.value) };
-            }
-            break :blk std.StaticStringMap(T).initComptime(entries);
-        };
-        
-        pub inline fn fromString(str: []const u8) ?T {
-            return map.get(str);
-        }
-        
-        pub inline fn toString(value: T) []const u8 {
-            return @tagName(value);
-        }
-    };
-}
-
 // Modifier masks - must be u16 (XCB API requirement)
 pub const MOD_SHIFT: u16 = xcb.XCB_MOD_MASK_SHIFT;
 pub const MOD_LOCK: u16 = xcb.XCB_MOD_MASK_LOCK;
@@ -86,8 +62,8 @@ pub const Action = union(enum) {
 };
 
 pub const Keybind = struct {
-    modifiers: u16,  // XCB API requirement
-    keysym: u32,     // X11 keysym - must be u32
+    modifiers: u16, // XCB API requirement
+    keysym: u32, // X11 keysym - must be u32
     keycode: ?u8 = null,
     action: Action,
 };
@@ -96,17 +72,14 @@ pub const MasterSide = enum {
     left,
     right,
 
-    const Helper = EnumStringHelper(MasterSide);
-    pub const fromString = Helper.fromString;
-    pub const toString = Helper.toString;
-    
+    pub fn fromString(str: []const u8) ?MasterSide { return std.meta.stringToEnum(MasterSide, str); }
+    pub fn toString(value: MasterSide) []const u8 { return @tagName(value); }
+
     // Support 'L'/'R' aliases in addition to full names
     pub fn fromStringWithAlias(str: []const u8) ?MasterSide {
         var buf: [16]u8 = undefined;
         if (str.len > buf.len) return null;
-        
         const lower = std.ascii.lowerString(&buf, str);
-        
         if (std.mem.eql(u8, lower, "l") or std.mem.eql(u8, lower, "left")) return .left;
         if (std.mem.eql(u8, lower, "r") or std.mem.eql(u8, lower, "right")) return .right;
         return null;
@@ -116,19 +89,17 @@ pub const MasterSide = enum {
 pub const TilingConfig = struct {
     enabled: bool = true,
     layout: []const u8 = "master_left",
-    layouts: std.ArrayList([]const u8),  // Available layouts in cycle order
+    layouts: std.ArrayList([]const u8), // Available layouts in cycle order
     master_side: MasterSide = .left,
     master_width: parser.ScalableValue = parser.ScalableValue.percentage(50.0),
     master_count: u8 = 1,
     gaps: parser.ScalableValue = parser.ScalableValue.absolute(10.0),
     border_width: parser.ScalableValue = parser.ScalableValue.absolute(2.0),
-    border_focused: u32 = 0x5294E2,    // RGB color - must be u32
-    border_unfocused: u32 = 0x383C4A,  // RGB color - must be u32
-    
+    border_focused: u32 = 0x5294E2, // RGB color - must be u32
+    border_unfocused: u32 = 0x383C4A, // RGB color - must be u32
+
     pub fn deinit(self: *TilingConfig, allocator: std.mem.Allocator) void {
-        for (self.layouts.items) |layout| {
-            allocator.free(layout);
-        }
+        for (self.layouts.items) |layout| allocator.free(layout);
         self.layouts.deinit(allocator);
     }
 };
@@ -137,8 +108,7 @@ pub const BarVerticalPosition = enum {
     top,
     bottom,
 
-    const Helper = EnumStringHelper(BarVerticalPosition);
-    pub const fromString = Helper.fromString;
+    pub fn fromString(str: []const u8) ?BarVerticalPosition { return std.meta.stringToEnum(BarVerticalPosition, str); }
 };
 
 pub const BarPosition = enum {
@@ -146,8 +116,7 @@ pub const BarPosition = enum {
     center,
     right,
 
-    const Helper = EnumStringHelper(BarPosition);
-    pub const fromString = Helper.fromString;
+    pub fn fromString(str: []const u8) ?BarPosition { return std.meta.stringToEnum(BarPosition, str); }
 };
 
 pub const BarSegment = enum {
@@ -156,8 +125,7 @@ pub const BarSegment = enum {
     clock,
     layout,
 
-    const Helper = EnumStringHelper(BarSegment);
-    pub const fromString = Helper.fromString;
+    pub fn fromString(str: []const u8) ?BarSegment { return std.meta.stringToEnum(BarSegment, str); }
 };
 
 pub const BarLayout = struct {
@@ -205,27 +173,17 @@ pub const BarConfig = struct {
     clock_format: []const u8 = "%Y-%m-%d %H:%M:%S",
 
     layout: std.ArrayList(BarLayout),
-    
+
     // DPI scaling
     scale_factor: f32 = 1.0,
-    
+
     // Bar transparency (0.0 = fully transparent, 1.0 = fully opaque)
     transparency: f32 = 1.0,
 
     pub fn deinit(self: *BarConfig, allocator: std.mem.Allocator) void {
-        for (self.workspace_icons.items) |icon| {
-            allocator.free(icon);
-        }
-        self.workspace_icons.deinit(allocator);
-        
-        for (self.fonts.items) |font| {
-            allocator.free(font);
-        }
-        self.fonts.deinit(allocator);
-
-        for (self.layout.items) |*item| {
-            item.deinit(allocator);
-        }
+        freeStringList(&self.workspace_icons, allocator);
+        freeStringList(&self.fonts, allocator);
+        for (self.layout.items) |*item| item.deinit(allocator);
         self.layout.deinit(allocator);
     }
 
@@ -248,46 +206,46 @@ pub const BarConfig = struct {
     pub inline fn getClockAccent(self: *const BarConfig) u32 {
         return self.clock_accent orelse self.accent_color;
     }
-    
-    // DPI-aware scaling helpers
-    pub inline fn scaledFontSize(self: *const BarConfig) u16 {
-        return self.scaled_font_size;
-    }
-    
-    pub inline fn scaledPadding(self: *const BarConfig) u16 {
-        return @intFromFloat(@round(@as(f32, @floatFromInt(self.padding)) * self.scale_factor));
-    }
-    
-    pub inline fn scaledSpacing(self: *const BarConfig) u16 {
-        return @intFromFloat(@round(@as(f32, @floatFromInt(self.spacing)) * self.scale_factor));
-    }
-    
+
+    pub inline fn scaledFontSize(self: *const BarConfig) u16 { return self.scaled_font_size; }
+
+    pub inline fn scaledPadding(self: *const BarConfig) u16 { return scaleU8(self.padding, self.scale_factor); }
+    pub inline fn scaledSpacing(self: *const BarConfig) u16 { return scaleU8(self.spacing, self.scale_factor); }
+
     pub inline fn scaledIndicatorSize(self: *const BarConfig) u16 {
-        // Base indicator size is 4px when percentage is 100%
-        const base_size: f32 = 5.0;
-        const size: f32 = if (self.indicator_size.is_percentage)
-            base_size * (self.indicator_size.value / 100.0) * self.scale_factor
-        else
-            self.indicator_size.value * self.scale_factor;
-        return @max(2, @as(u16, @intFromFloat(@round(size))));
+        // Base indicator size is 5px when percentage is 100%
+        return scaleScalable(self.indicator_size, 5.0, self.scale_factor, 2);
     }
-    
+
     pub inline fn scaledWorkspaceWidth(self: *const BarConfig) u16 {
         // Base workspace width is 40px when percentage is 100%
-        const base_width: f32 = 40.0;
-        const width: f32 = if (self.workspace_width.is_percentage)
-            base_width * (self.workspace_width.value / 100.0) * self.scale_factor
-        else
-            self.workspace_width.value * self.scale_factor;
-        return @intFromFloat(@round(width));
+        return scaleScalable(self.workspace_width, 40.0, self.scale_factor, 0);
     }
-    
+
     // Get alpha value in 16-bit format (0x0000-0xFFFF)
     pub inline fn getAlpha16(self: *const BarConfig) u16 {
-        const clamped = std.math.clamp(self.transparency, 0.0, 1.0);
-        return @intFromFloat(@round(clamped * 0xFFFF));
+        return @intFromFloat(@round(std.math.clamp(self.transparency, 0.0, 1.0) * 0xFFFF));
     }
 };
+
+// Private helpers for BarConfig
+
+inline fn scaleU8(value: u8, factor: f32) u16 {
+    return @intFromFloat(@round(@as(f32, @floatFromInt(value)) * factor));
+}
+
+inline fn scaleScalable(sv: parser.ScalableValue, base_px: f32, factor: f32, min_px: u16) u16 {
+    const px: f32 = if (sv.is_percentage)
+        base_px * (sv.value / 100.0) * factor
+    else
+        sv.value * factor;
+    return @max(min_px, @as(u16, @intFromFloat(@round(px))));
+}
+
+fn freeStringList(list: *std.ArrayList([]const u8), allocator: std.mem.Allocator) void {
+    for (list.items) |s| allocator.free(s);
+    list.deinit(allocator);
+}
 
 pub const Rule = struct {
     class_name: []const u8,
@@ -318,7 +276,7 @@ pub const Config = struct {
         return .{
             .tiling = TilingConfig{
                 .layouts = std.ArrayList([]const u8){},
-                .layout = undefined,  // Will be set after layouts are loaded
+                .layout = undefined, // Will be set after layouts are loaded
                 .master_side = .left,
                 .master_width = parser.ScalableValue.percentage(50.0),
                 .master_count = 1,
@@ -338,14 +296,10 @@ pub const Config = struct {
     }
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
-        for (self.keybindings.items) |*kb| {
-            kb.action.deinit(allocator);
-        }
+        for (self.keybindings.items) |*kb| kb.action.deinit(allocator);
         self.keybindings.deinit(allocator);
 
-        for (self.workspaces.rules.items) |*rule| {
-            rule.deinit(allocator);
-        }
+        for (self.workspaces.rules.items) |*rule| rule.deinit(allocator);
         self.workspaces.rules.deinit(allocator);
 
         self.bar.deinit(allocator);
@@ -358,12 +312,12 @@ pub const Config = struct {
 };
 
 pub const FullscreenInfo = struct {
-    window: u32,  // XCB window ID - must be u32
+    window: u32, // XCB window ID - must be u32
     workspace: u8,
     saved_geometry: struct {
-        x: i16,      // Screen coordinates can be negative
+        x: i16, // Screen coordinates can be negative
         y: i16,
-        width: u16,  // Dimensions are always positive
+        width: u16, // Dimensions are always positive
         height: u16,
         border_width: u16,
     },
@@ -377,10 +331,8 @@ pub const FullscreenState = struct {
     pub fn init(allocator: std.mem.Allocator) FullscreenState {
         var per_ws = std.AutoHashMap(u8, FullscreenInfo).init(allocator);
         per_ws.ensureTotalCapacity(4) catch {};
-        
         var win_to_ws = std.AutoHashMap(u32, u8).init(allocator);
         win_to_ws.ensureTotalCapacity(4) catch {};
-        
         return .{
             .per_workspace = per_ws,
             .window_to_workspace = win_to_ws,
@@ -421,7 +373,7 @@ pub const FullscreenState = struct {
 
 pub const DragState = struct {
     active: bool = false,
-    window: u32 = 0,  // XCB window ID - must be u32
+    window: u32 = 0, // XCB window ID - must be u32
     mode: enum { move, resize } = .move,
     // Screen coordinates can be negative
     start_x: i16 = 0,
@@ -435,18 +387,18 @@ pub const DragState = struct {
 
 /// Focus suppression reason for context-aware behavior
 pub const FocusSuppressReason = enum {
-    none,              // Normal operation - focus follows mouse
-    window_spawn,      // Just spawned a window - don't let cursor steal focus
-    tiling_operation,  // Currently tiling - don't let cursor steal focus
+    none, // Normal operation - focus follows mouse
+    window_spawn, // Just spawned a window - don't let cursor steal focus
+    tiling_operation, // Currently tiling - don't let cursor steal focus
 };
 
 pub const WM = struct {
     allocator: std.mem.Allocator,
     conn: *xcb.xcb_connection_t,
     screen: *xcb.xcb_screen_t,
-    root: u32,  // XCB window ID - must be u32
+    root: u32, // XCB window ID - must be u32
     config: Config,
-    windows: std.AutoHashMap(u32, void),  // u32 for XCB window IDs
+    windows: std.AutoHashMap(u32, void), // u32 for XCB window IDs
     focused_window: ?u32 = null,
     fullscreen: FullscreenState,
     xkb_state: ?*xkbcommon.XkbState,
