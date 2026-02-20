@@ -10,7 +10,6 @@ pub fn build(b: *std.Build) void {
     // producing two separate but identical module objects.
     const build_options = b.addOptions();
     build_options.addOption(bool, "enable_debug_logging", optimize == .Debug);
-    const build_options_module = build_options.createModule();
 
     // Create the root module
     const root_module = b.createModule(.{
@@ -25,9 +24,6 @@ pub fn build(b: *std.Build) void {
         root_module.single_threaded = true;
         root_module.strip = true;
     }
-
-    // Add build_options to root module
-    root_module.addImport("build_options", build_options_module);
 
     // Create the executable
     const exe = b.addExecutable(.{
@@ -49,8 +45,35 @@ pub fn build(b: *std.Build) void {
         std.process.exit(1);
     };
 
+    const build_options_module = build_options.createModule();
+
+    // Generate layout_flags.zig as a plain Zig source file reflecting which
+    // layout files were found on disk.  Using addWriteFiles rather than
+    // addOptions avoids any options-module caching ambiguity — the file's
+    // content hash changes exactly when the set of present layouts changes,
+    // and it is imported by tiling.zig as a normal @import("layout_flags").
+    const layout_flags_src = std.fmt.allocPrint(allocator,
+        \\pub const has_master    = {};
+        \\pub const has_monocle   = {};
+        \\pub const has_grid      = {};
+        \\pub const has_fibonacci = {};
+        \\
+    , .{
+        all_modules.contains("master"),
+        all_modules.contains("monocle"),
+        all_modules.contains("grid"),
+        all_modules.contains("fibonacci"),
+    }) catch @panic("OOM");
+    const layout_flags_file   = b.addWriteFiles().add("layout_flags.zig", layout_flags_src);
+    const layout_flags_module = b.createModule(.{
+        .root_source_file = layout_flags_file,
+        .target           = target,
+        .optimize         = optimize,
+    });
+
     // Wire up every discovered module:
     //   - give it access to build_options
+    //   - give it access to layout_flags (has_master/monocle/grid/fibonacci)
     //   - give it access to every sibling module by name
     //   - register it on root so root can @import("name")
     //
@@ -60,7 +83,9 @@ pub fn build(b: *std.Build) void {
     // defeating per-module incremental analysis and bloating LTO work.
     // If a module genuinely needs to reach into main, it should depend on a
     // shared types/defs module instead.
-    connectAllModules(root_module, &all_modules, build_options_module, optimize);
+    root_module.addImport("build_options", build_options_module);
+    root_module.addImport("layout_flags",  layout_flags_module);
+    connectAllModules(root_module, &all_modules, build_options_module, layout_flags_module, optimize);
 
     // Link system libraries to root (discovered modules inherit via root)
     linkSystemLibraries(root_module);
@@ -83,6 +108,7 @@ fn connectAllModules(
     root: *std.Build.Module,
     modules: *std.StringHashMap(*std.Build.Module),
     build_options_module: *std.Build.Module,
+    layout_flags_module: *std.Build.Module,
     optimize: std.builtin.OptimizeMode,
 ) void {
     var iter = modules.iterator();
@@ -97,8 +123,12 @@ fn connectAllModules(
             mod.strip = true;
         }
 
-        // Give every module access to build_options (single shared instance)
+        // Give every module access to build_options (single shared instance).
         mod.addImport("build_options", build_options_module);
+
+        // Give every module access to layout_flags so tiling.zig (and any
+        // future module) can query which layout files are present.
+        mod.addImport("layout_flags", layout_flags_module);
 
         // Give every module access to every sibling module by name.
         // addImport only makes the module *available* — Zig compiles lazily,
@@ -125,6 +155,7 @@ fn linkSystemLibraries(root: *std.Build.Module) void {
     root.linkSystemLibrary("pango-1.0", .{});
     root.linkSystemLibrary("glib-2.0", .{});
     root.linkSystemLibrary("gobject-2.0", .{});
+    root.linkSystemLibrary("xcb-cursor", .{});
     // Include paths are not needed: manual extern declarations are used
     // throughout, so the linker resolves symbols directly from linked libs.
 }

@@ -125,6 +125,10 @@ pub const TilingConfig = struct {
     // Stored as a fixed-size array so it never needs to be freed.
     fibonacci_indicator: [3]u8 = "NUL".*,
 
+    /// When true, layout changes apply globally across all workspaces (legacy behavior).
+    /// When false (default), each workspace independently remembers its own layout.
+    global_layout: bool = false,
+
     pub fn deinit(self: *TilingConfig, allocator: std.mem.Allocator) void {
         for (self.layouts.items) |layout| allocator.free(layout);
         self.layouts.deinit(allocator);
@@ -439,12 +443,14 @@ pub const WM = struct {
     // carry the triggering event's timestamp, not XCB_CURRENT_TIME (0).
     last_event_time: u32 = 0,
     suppress_focus_reason: FocusSuppressReason = .none,
-    /// Number of crossing events (EnterNotify / root LeaveNotify) still to absorb
-    /// before lifting the window_spawn focus suppression.  Normally 1, but bumped
-    /// to 2 when the post-retile pointer query reveals the cursor is now sitting
-    /// inside a tiled window — meaning the X server will fire a LeaveNotify on
-    /// root *and* an EnterNotify on that window, and both must be swallowed.
-    suppress_focus_count: u8 = 1,
+    /// Cursor position (root coordinates) recorded the moment a window spawns.
+    /// EnterNotify / LeaveNotify events whose root_x/root_y still match these
+    /// coordinates are retile side-effects from a stationary cursor and are
+    /// suppressed.  The first crossing event with different coords means the
+    /// cursor genuinely moved, so suppression lifts unconditionally — regardless
+    /// of how many spurious events the X server generates on slow hardware.
+    spawn_cursor_x: i16 = 0,
+    spawn_cursor_y: i16 = 0,
 
     pub fn deinit(self: *WM) void {
         self.fullscreen.deinit();

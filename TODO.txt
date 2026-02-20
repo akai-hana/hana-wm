@@ -1,6 +1,21 @@
 ### hana's TODO list! ###
 # In here i write the things i want to do to not lose track of the different ideas i come up with while developing 
 
+when i remove a tiling layout from src/tiling/layouts/, i want the program to still compile regardless. can you please solve this?
+install
+└─ install hana
+   └─ compile exe hana ReleaseFast native 1 errors
+src/tiling/tiling.zig:20:34: error: no module named 'fibonacci' available within module 'tiling'
+const fibonacci_layout = @import("fibonacci");
+                                 ^~~~~~~~~~~
+referenced by:
+    retile: src/tiling/tiling.zig:488:49
+    retileIfDirty: src/tiling/tiling.zig:455:11
+    5 reference(s) hidden; use '-freference-trace=7' to see all references
+error: 1 compilation errors
+
+i want you to improve the efficiency of the bar redraws. currently, when i focus from one window to another, the entire bar gets re-drawn, including all segments of all currently opened windows. instead, i want it to behave like this: when i focus from one window to another, make it so that the previously focused window ONLY gets its background color changed from focused accent color to unfocused color, and the newly focused window the opposite, from unfocused to focused background color. only these two should be updated, from their current state to the opposite, and no other title segments of other unrelated windows should change; this is to prevent flickering across the whole bar just because i focus between windows, and also to prevent computational resources being mis-used, making the wm both smoother and more efficient in resource utilization.
+
 can you please fix the following edge case on my window manager?
 - open two windows in a workspace
 - send one window to another workspace

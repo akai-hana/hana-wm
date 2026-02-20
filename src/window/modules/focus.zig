@@ -42,7 +42,6 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     const old = wm.focused_window;
     wm.focused_window = win;
     wm.suppress_focus_reason = suppressionFor(reason);
-    wm.suppress_focus_count = 1; // handleMapRequest bumps to 2 when needed
 
     window.grabButtons(wm, win, true);
     if (old) |old_win| window.grabButtons(wm, old_win, false);
@@ -86,7 +85,6 @@ pub fn clearFocus(wm: *WM) void {
     }
     wm.focused_window = null;
     wm.suppress_focus_reason = .none;
-    wm.suppress_focus_count = 1;
     _ = xcb.xcb_set_input_focus(
         wm.conn,
         xcb.XCB_INPUT_FOCUS_POINTER_ROOT,

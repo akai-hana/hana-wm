@@ -17,7 +17,7 @@ inline fn borderColor(wm: *WM, win: u32) u32 {
            else                          wm.config.tiling.border_unfocused;
 }
 
-// Geometry pre-fetch ───────────────────────────────────────────────────────
+// Geometry pre-fetch 
 
 /// Saved geometry captured before the server grab.
 /// xcb_get_geometry_reply is a blocking round-trip that must never happen
@@ -59,7 +59,7 @@ fn fetchWindowGeom(wm: *WM, win: u32) SavedGeom {
     };
 }
 
-// Atomic inner helpers (no grab, no flush) ─────────────────────────────────
+// Atomic inner helpers (no grab, no flush) 
 //
 // These functions only queue XCB requests — they never grab the server or
 // flush.  The caller owns the grab/ungrab/flush envelope.
@@ -185,7 +185,7 @@ fn exitFullscreenCommit(wm: *WM, win: u32, ws: u8) void {
     }
 }
 
-// Grab-owning wrappers ─────────────────────────────────────────────────────
+// Grab-owning wrappers 
 //
 // Pattern for each wrapper:
 //   1. Any blocking round-trips (geometry fetch) happen BEFORE the grab.
@@ -214,7 +214,7 @@ fn exitFullscreen(wm: *WM, win: u32, ws: u8) void {
     utils.flush(wm.conn);
 }
 
-// Public API──
+// Public API
 
 /// Enter fullscreen for a specific window on the current workspace.
 /// Used by the minimize module to restore windows that were fullscreen when
