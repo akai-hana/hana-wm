@@ -24,9 +24,13 @@ pub const Workspace = struct {
     id:      u8,
     windows: Tracking,
     name:    []const u8,
+    /// The tiling layout active on this workspace.
+    /// Initialized to the default from config; updated whenever the user
+    /// switches layouts while on this workspace (in per-workspace mode).
+    layout:  tiling.Layout,
 
-    pub fn init(allocator: std.mem.Allocator, id: u8, name: []const u8) !Workspace {
-        return .{ .id = id, .windows = Tracking.init(allocator), .name = name };
+    pub fn init(allocator: std.mem.Allocator, id: u8, name: []const u8, default_layout: tiling.Layout) !Workspace {
+        return .{ .id = id, .windows = Tracking.init(allocator), .name = name, .layout = default_layout };
     }
 
     pub fn deinit(self: *Workspace) void { self.windows.deinit(); }
@@ -58,10 +62,16 @@ pub fn init(wm: *WM) void {
         return;
     };
 
+    // Derive the default layout from the tiling state (already initialized by
+    // the time workspaces.init runs) so every workspace starts on the same
+    // layout as the global default.  Falls back to .master if tiling is off.
+    const default_layout: tiling.Layout =
+        if (tiling.getState()) |ts| ts.layout else .master;
+
     for (wss, 0..) |*ws, i| {
         const id: u8     = @intCast(i);
         const name       = if (i < WORKSPACE_NAMES.len) WORKSPACE_NAMES[i] else "?";
-        ws.* = Workspace.init(wm.allocator, id, name) catch {
+        ws.* = Workspace.init(wm.allocator, id, name, default_layout) catch {
             debug.err("Failed to init workspace {}", .{i});
             for (wss[0..i]) |*w| w.deinit();
             wm.allocator.free(wss);
@@ -232,6 +242,14 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
         const tiling_active = if (ts) |t| t.enabled else false;
 
         if (tiling_active) {
+            // Per-workspace layout mode: restore the layout this workspace was
+            // last using before switching to it.  This must happen before any
+            // retile/geom-cache restore so the right layout algorithm runs and
+            // the bar segment shows the correct layout icon.
+            if (!wm.config.tiling.global_layout) {
+                tiling.syncLayoutFromWorkspace(new_ws_obj.layout);
+            }
+
             // Fast path: replay cached tiled positions without running the layout
             // algorithm.  Falls back to a full retile only if the workspace is dirty
             // (window added/removed/layout changed while away), the cache is cold,

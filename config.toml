@@ -26,6 +26,9 @@
 [tiling]
 enabled = true
 
+# per-workspace tiling layout?
+global_layout = false # true/false
+
 # Per-layout behavioral variations
 # master_variation: "lifo" = old window stays in master, new goes to stack (default)
 #                  "fifo" = new window always takes master, old moves to stack
@@ -138,13 +141,13 @@ clock = "#ac3232"       # Custom accent for clock segment
 # Bar layout
 # Anchors: left/center/right
 [bar.layout.left]
-segments = ["workspaces", "layout"]
+segments = ["workspaces", "layout", "variations"]
 
 [bar.layout.center]
 segments = ["title"]
 
 [bar.layout.right]
-segments = ["variations", "clock"]
+segments = ["clock"]
 
 # Bar module configurations
 [bar.modules.workspaces]
@@ -177,6 +180,7 @@ Mod+Shift+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-stop.sh" # st
 Mod+N           = "toggle_tiling"          # Enable/disable tiling
 Mod+space       = "toggle_layout"          # Cycle layouts forward
 Mod+Shift+space = "toggle_layout_reverse"  # Cycle layouts backward
+Mod+Alt+space   = "cycle_layout_variation" # Cycle current layout's variation (Super+V)
 Mod+Tab         = "swap_master"            # Swap focused window with master (slave→master or master→slave)
 Mod+Shift+Tab   = "rofi -show drun"
 
@@ -215,7 +219,6 @@ Mod+Shift+R = "move_to_workspace_8"
 # Bar
 Mod+B       = "toggle_bar_visibility"  # shown/hidden
 Mod+Shift+B = "toggle_bar_position"    # top/bottom
-Mod+Alt+B   = "cycle_layout_variation" # Cycle current layout's variation (Super+V)
 
 # Application launchers
 Mod+P = "rofi -show drun"

@@ -2,6 +2,9 @@
 # Sequentially pipe all files inside dev/files/ onto dev/codebase/.
 # The purpose of this is to be able to write and replace files more easily.
 
+mkdir -p dev/files
+mkdir -p dev/codebase
+
 dev/scripts/single-dir.sh
 
 set -eu

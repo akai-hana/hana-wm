@@ -17,7 +17,8 @@ const tiling    = @import("tiling");
 const clock     = @import("clock");
 const dpi       = @import("dpi");
 const drawing   = @import("drawing");
-const constants = @import("constants");
+const constants    = @import("constants");
+const c_bindings   = @import("c_bindings");
 
 const xcb = defs.xcb;
 const WM  = defs.WM;
@@ -63,13 +64,32 @@ fn handleSignalFd(signal_fd: posix.fd_t) void {
 }
 
 fn setupRootCursor(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) void {
+    // Try xcb-cursor first: reads Xcursor.theme + Xcursor.size from Xresources
+    // and loads the fully-themed cursor, matching what client windows display.
+    var ctx: *c_bindings.xcb_cursor_context_t = undefined;
+    if (c_bindings.xcb_cursor_context_new(conn, screen, &ctx) >= 0) {
+        defer c_bindings.xcb_cursor_context_free(ctx);
+        const cursor = c_bindings.xcb_cursor_load_cursor(ctx, "left_ptr");
+        if (cursor != 0) {
+            _ = xcb.xcb_change_window_attributes(conn, screen.*.root,
+                    xcb.XCB_CW_CURSOR, &[_]u32{cursor});
+            return;
+        }
+        debug.warn("xcb-cursor: left_ptr load failed, falling back to bitmap cursor", .{});
+    } else {
+        debug.warn("xcb-cursor: context init failed, falling back to bitmap cursor", .{});
+    }
+
+    // Fallback: plain bitmap cursor from the built-in X11 cursor font.
+    // Correct shape but ignores the user's Xcursor theme.
     const font   = xcb.xcb_generate_id(conn);
     const cursor = xcb.xcb_generate_id(conn);
     _ = xcb.xcb_open_font(conn, font, 6, "cursor");
     _ = xcb.xcb_create_glyph_cursor(conn, cursor, font, font,
             constants.CURSOR_LEFT_PTR, constants.CURSOR_LEFT_PTR_MASK,
             0, 0, 0, 65535, 65535, 65535);
-    _ = xcb.xcb_change_window_attributes(conn, screen.*.root, xcb.XCB_CW_CURSOR, &[_]u32{cursor});
+    _ = xcb.xcb_change_window_attributes(conn, screen.*.root,
+            xcb.XCB_CW_CURSOR, &[_]u32{cursor});
     _ = xcb.xcb_close_font(conn, font);
 }
 

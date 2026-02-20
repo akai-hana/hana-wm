@@ -78,6 +78,53 @@ inline fn setupTiling(wm: *WM, win: u32, on_current: bool) void {
     if (on_current) tiling.retileCurrentWorkspace(wm);
 }
 
+// Spawn workspace recovery 
+
+/// Collect the _NET_WM_PID reply and read HANA_SPAWN_WS from the process
+/// environment via /proc/pid/environ.  Returns the workspace index the window
+/// should be assigned to, or null if the property is absent, the process can't
+/// be read, or the variable isn't set (window wasn't spawned by an exec bind).
+fn getSpawnWorkspace(
+    conn: *xcb.xcb_connection_t,
+    c_pid: xcb.xcb_get_property_cookie_t,
+) ?u8 {
+    const reply = xcb.xcb_get_property_reply(conn, c_pid, null) orelse return null;
+    defer std.c.free(reply);
+    if (reply.*.format != 32 or reply.*.value_len == 0) return null;
+
+    const values: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
+    const pid = values[0];
+    if (pid == 0) return null;
+
+    return readSpawnWorkspaceFromEnv(pid);
+}
+
+/// Read /proc/[pid]/environ and extract the HANA_SPAWN_WS value written by
+/// executeShellCommand.  The environment is a sequence of null-terminated
+/// strings; we scan without loading the entire file into a heap allocation.
+fn readSpawnWorkspaceFromEnv(pid: u32) ?u8 {
+    var path_buf: [48]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/environ", .{pid}) catch return null;
+
+    const fd = std.posix.open(path, .{ .ACCMODE = .RDONLY }, 0) catch return null;
+    defer std.posix.close(fd);
+
+    var buf: [8192]u8 = undefined;
+    const n = std.posix.read(fd, &buf) catch return null;
+
+    const prefix = "HANA_SPAWN_WS=";
+    var i: usize = 0;
+    while (i < n) {
+        const end = std.mem.indexOfScalarPos(u8, buf[0..n], i, 0) orelse n;
+        const entry = buf[i..end];
+        if (std.mem.startsWith(u8, entry, prefix)) {
+            return std.fmt.parseInt(u8, entry[prefix.len..], 10) catch null;
+        }
+        i = end + 1;
+    }
+    return null;
+}
+
 // Map request 
 
 pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void {
@@ -99,21 +146,48 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     const c_hints = xcb.xcb_get_property(
         wm.conn, 0, win, xcb.XCB_ATOM_WM_HINTS, xcb.XCB_ATOM_WM_HINTS, 0, 9,
     );
+    // Fire _NET_WM_PID cookie so we can recover the spawn workspace from the
+    // grandchild's process environment (HANA_SPAWN_WS set by executeShellCommand).
+    // Fired here alongside the other cookies so all three land in the same write.
+    const c_pid = xcb.xcb_get_property(
+        wm.conn, 0, win,
+        utils.getAtomCached("_NET_WM_PID") catch 0,
+        xcb.XCB_ATOM_CARDINAL, 0, 1,
+    );
 
     // Determine target workspace.
-    // No-rules (common path): purely local — zero round-trips.
-    // With rules: one WM_CLASS round-trip; xcb_get_property_reply flushes
-    //             the output buffer implicitly before blocking, so the focus
-    //             cookies above also land at the server during that wait.
+    // Priority: workspace rules > exec spawn workspace > current workspace.
+    //
+    // Workspace rules (WM_CLASS): one round-trip; xcb_get_property_reply
+    //   flushes the output buffer implicitly, so all cookies above also land.
+    // Spawn workspace (_NET_WM_PID + /proc/pid/environ): one round-trip for
+    //   the PID reply, then a local file read — no extra X round-trip.
+    // Current workspace: zero round-trips (fast path for unmanaged windows).
     const validated_ws: u8 = blk: {
-        if (wm.config.workspaces.rules.items.len == 0) break :blk current_ws;
-        const c_class = xcb.xcb_get_property(
-            wm.conn, 0, win,
-            utils.getAtomCached("WM_CLASS") catch 0,
-            xcb.XCB_ATOM_STRING, 0, 256,
-        );
-        const target = collectWorkspaceRule(wm, c_class);
-        break :blk validateWorkspace(target, current_ws);
+        // 1. Workspace rules — explicit class-based assignment, highest priority.
+        if (wm.config.workspaces.rules.items.len > 0) {
+            const c_class = xcb.xcb_get_property(
+                wm.conn, 0, win,
+                utils.getAtomCached("WM_CLASS") catch 0,
+                xcb.XCB_ATOM_STRING, 0, 256,
+            );
+            if (collectWorkspaceRule(wm, c_class)) |target| {
+                // Rule matched — consume the c_pid reply so it doesn't linger
+                // in XCB's reply queue and confuse subsequent round-trips.
+                if (xcb.xcb_get_property_reply(wm.conn, c_pid, null)) |r| std.c.free(r);
+                break :blk validateWorkspace(target, current_ws);
+            }
+            // No rule matched; fall through and try the spawn workspace.
+        }
+        // 2. Exec spawn workspace — window was launched via a keybind exec action.
+        //    executeShellCommand wrote HANA_SPAWN_WS into the child environment;
+        //    we recover it here via _NET_WM_PID + /proc/pid/environ so the window
+        //    always lands on the workspace where the user pressed the bind, even
+        //    if they switched away while the application was starting.
+        if (getSpawnWorkspace(wm.conn, c_pid)) |spawn_ws|
+            break :blk validateWorkspace(spawn_ws, current_ws);
+        // 3. Default: whichever workspace is active at map time.
+        break :blk current_ws;
     };
     const is_current = (validated_ws == current_ws);
 
@@ -132,10 +206,26 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
         // tiled position with no intermediate geometry flash.
         setupTiling(wm, win, true);
         _ = xcb.xcb_map_window(wm.conn, win);
+    } else {
+        // Window belongs to a different workspace — do not map it yet.
+        // executeSwitch() maps it inside a server grab when its workspace is
+        // activated, so the compositor never allocates a buffer for it early.
+        //
+        // We MUST still register it with the tiling system (addWindow), even
+        // though it won't be retiled now.  Without this:
+        //   - s.windows never contains the window, so filterWorkspaceWindows
+        //     skips it on every subsequent retileCurrentWorkspace call.
+        //   - No border width or colour is ever set on it.
+        //   - On the first visit the window appears at server-default geometry
+        //     with no border; after the first hide-to-offscreen in executeSwitch
+        //     step 1 it is stranded off-screen permanently.
+        //
+        // setupTiling with on_current=false calls addWindow (registering the
+        // window in s.windows, setting its border, marking dirty) but does NOT
+        // call retileCurrentWorkspace — the current workspace is unaffected.
+        setupTiling(wm, win, false);
+        grabButtons(wm, win, false);
     }
-    // Off-screen windows are intentionally never mapped here.
-    // executeSwitch() maps them inside the server grab when their workspace
-    // is activated, so the compositor never allocates a buffer for them.
 
     // Single flush covers: change_window_attributes + focus cookies +
     // (for is_current) all configure_window calls + map_window.
@@ -158,15 +248,21 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
         // EnterNotify on the newly covering window — both of which would
         // otherwise steal focus away from the just-spawned window.  Bump the
         // suppression counter so both are absorbed rather than just the first.
+        // Record where the cursor is the moment the window spawns.
+        // handleEnterNotify / handleLeaveNotify compare incoming events against
+        // this position: events with matching coords are retile side-effects
+        // (the window layout shifted under a stationary cursor) and are silently
+        // dropped.  The first crossing event whose coords differ means the cursor
+        // genuinely moved, so suppression lifts automatically — regardless of how
+        // many spurious events the X server generates before then.
         if (wm.suppress_focus_reason == .window_spawn) {
             const ptr_cookie = xcb.xcb_query_pointer(wm.conn, wm.root);
             if (xcb.xcb_query_pointer_reply(wm.conn, ptr_cookie, null)) |ptr| {
                 defer std.c.free(ptr);
-                if (ptr.*.child != 0) wm.suppress_focus_count = 2;
+                wm.spawn_cursor_x = ptr.*.root_x;
+                wm.spawn_cursor_y = ptr.*.root_y;
             }
         }
-    } else {
-        grabButtons(wm, win, false);
     }
 
     bar.markDirty();
@@ -174,10 +270,53 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
 
 // Configure request 
 
+/// Send a synthetic ConfigureNotify to `win` reporting its current geometry.
+/// Required by ICCCM §4.1.5 whenever a WM silently ignores a ConfigureRequest:
+/// the client must be told what geometry it actually has, or it may block
+/// waiting for an acknowledgement that never arrives.
+fn sendSyntheticConfigureNotify(wm: *WM, win: u32) void {
+    const reply = xcb.xcb_get_geometry_reply(
+        wm.conn, xcb.xcb_get_geometry(wm.conn, win), null,
+    ) orelse return;
+    defer std.c.free(reply);
+
+    const ev = xcb.xcb_configure_notify_event_t{
+        .response_type  = xcb.XCB_CONFIGURE_NOTIFY,
+        .pad0           = 0,
+        .sequence       = 0,
+        .event          = win,
+        .window         = win,
+        .above_sibling  = xcb.XCB_NONE,
+        .x              = reply.*.x,
+        .y              = reply.*.y,
+        .width          = reply.*.width,
+        .height         = reply.*.height,
+        .border_width   = reply.*.border_width,
+        .override_redirect = 0,
+        .pad1           = 0,
+    };
+    _ = xcb.xcb_send_event(
+        wm.conn, 0, win,
+        xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY,
+        @ptrCast(&ev),
+    );
+    // No flush here — the caller (event loop) flushes after each event batch.
+}
+
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, wm: *WM) void {
     const win = event.window;
     if ((wm.config.tiling.enabled and tiling.isWindowTiled(win)) or
-        wm.fullscreen.isFullscreen(win)) return;
+        wm.fullscreen.isFullscreen(win))
+    {
+        // ICCCM §4.1.5: when a WM ignores a ConfigureRequest it must send the
+        // client a synthetic ConfigureNotify with the window's actual current
+        // geometry.  Without this, clients that block on ConfigureNotify to
+        // finish initialising (most terminals) stall indefinitely — visible as
+        // a frozen window that only wakes up when a subsequent retile happens
+        // to send a real configure_window for unrelated reasons.
+        sendSyntheticConfigureNotify(wm, win);
+        return;
+    }
 
     // Honour only the geometry bits we provide values for.  Passing the raw
     // value_mask unmodified would cause XCB to read past our value array if
@@ -214,23 +353,22 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) vo
     if (event.mode == xcb.XCB_NOTIFY_MODE_GRAB or
         event.mode == xcb.XCB_NOTIFY_MODE_UNGRAB) return;
     if (wm.drag_state.active) return;
-    // If a window was just spawned, the cursor may be sitting still over a gap
-    // that is now covered by a newly tiled window.  The resulting EnterNotify
-    // is not genuine user movement — absorb it.  When the cursor was in a gap
-    // before the retile, the X server fires both a LeaveNotify on root AND an
-    // EnterNotify on the newly covering window; suppress_focus_count tracks how
-    // many of those paired events remain to be absorbed (normally 1, set to 2
-    // by handleMapRequest when the post-retile pointer query finds the cursor
-    // over a tiled window).  Once the count reaches zero, normal focus
-    // behaviour resumes.
+    // Suppress crossing events that are retile side-effects rather than genuine
+    // cursor movement.  When a new window spawns we record the cursor position;
+    // any EnterNotify whose root coordinates still match means the pointer has
+    // not moved — the X server generated the event because the layout shifted
+    // under a stationary cursor.  The first event with different coordinates
+    // signals real movement and lifts the suppression unconditionally.
+    // This is strictly stronger than the old counter approach: it absorbs any
+    // number of spurious events with no timing dependency, so it works correctly
+    // on slow hardware that generates more crossing events than the counter could
+    // anticipate.
     if (wm.suppress_focus_reason == .window_spawn) {
-        if (wm.suppress_focus_count > 1) {
-            wm.suppress_focus_count -= 1;
-        } else {
-            wm.suppress_focus_reason = .none;
-            wm.suppress_focus_count = 1;
+        if (event.root_x == wm.spawn_cursor_x and event.root_y == wm.spawn_cursor_y) {
+            return; // cursor hasn't moved — suppress this retile-induced crossing
         }
-        return;
+        // Cursor moved: genuine user intent, lift suppression and fall through.
+        wm.suppress_focus_reason = .none;
     }
 
     const win = if (event.event == wm.root and event.child != 0)
@@ -254,19 +392,16 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t, wm: *WM) vo
     if (event.event != wm.root) return;
     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL) return;
     if (wm.drag_state.active) return;
-    // Same suppression logic as handleEnterNotify — retiling after a spawn
-    // can push a window under the stationary cursor, generating a spurious
-    // LeaveNotify on root.  Decrement the event counter rather than clearing
-    // the reason outright: when the cursor was in a gap, both this LeaveNotify
-    // and the paired EnterNotify on the newly covering window must be absorbed.
+    // Same position-based suppression as handleEnterNotify — see comment there.
+    // A retile after spawn can push a window under the stationary cursor, which
+    // generates a LeaveNotify on root.  If the cursor coordinates in the event
+    // still match the position recorded at spawn time the pointer has not moved,
+    // so this event is spurious and is silently dropped.
     if (wm.suppress_focus_reason == .window_spawn) {
-        if (wm.suppress_focus_count > 1) {
-            wm.suppress_focus_count -= 1;
-        } else {
-            wm.suppress_focus_reason = .none;
-            wm.suppress_focus_count = 1;
+        if (event.root_x == wm.spawn_cursor_x and event.root_y == wm.spawn_cursor_y) {
+            return;
         }
-        return;
+        wm.suppress_focus_reason = .none;
     }
 
     // event.child is the direct child of root being entered.

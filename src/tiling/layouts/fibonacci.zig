@@ -1,4 +1,4 @@
-//! Fibonacci (Spiral) Tiling Layout
+//! Fibonacci (spiral) Tiling Layout
 //!
 //! Creates a true fibonacci spiral pattern where windows spiral around the center
 //! in a counter-clockwise direction: right → down → left → up → repeat
@@ -70,7 +70,26 @@ fn tileFibonacci(
     direction: Direction,
 ) void {
     if (index >= windows.len) return;
-    if (width < gap * 2 + border * 2 or height < gap * 2 + border * 2) return;
+    if (width < gap * 2 + border * 2 or height < gap * 2 + border * 2) {
+        // The remaining area is too small to keep splitting.  Instead of
+        // leaving these windows untiled (floating), stack all of them on top
+        // of each other in whatever space is still available.  They remain
+        // part of the tiled layer — just overlapping — exactly like a
+        // single-cell monocle for the overflow windows.
+        const clamped_w = if (width > border * 2) width - border * 2 else 1;
+        const clamped_h = if (height > border * 2) height - border * 2 else 1;
+        const rect = utils.Rect{
+            .x = @intCast(x),
+            .y = @intCast(y),
+            .width  = clamped_w,
+            .height = clamped_h,
+        };
+        var i = index;
+        while (i < windows.len) : (i += 1) {
+            utils.configureWindow(conn, windows[i], rect);
+        }
+        return;
+    }
     
     const win = windows[index];
     

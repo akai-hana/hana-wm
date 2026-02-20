@@ -17,7 +17,10 @@ const minimize   = @import("minimize");
 const xcb        = defs.xcb;
 const WM         = defs.WM;
 
-const c = @cImport(@cInclude("unistd.h"));
+const c = @cImport({
+    @cInclude("unistd.h");
+    @cInclude("stdlib.h");
+});
 extern "c" fn waitpid(pid: c_int, status: ?*c_int, options: c_int) c_int;
 
 const MOUSE_BUTTON_LEFT:  u8 = 1;
@@ -74,7 +77,7 @@ inline fn makeHash(mods: u16, keysym: u32) u64 {
     return (@as(u64, mods) << 32) | keysym;
 }
 
-// Grab setup───
+// Grab setup
 
 /// Grabs Super+Button1 (move) and Super+Button3 (resize) on the root window.
 pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
@@ -89,7 +92,7 @@ pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
     utils.flush(conn);
 }
 
-// Event handlers ────────────────────────────────────────────────────────────
+// Event handlers 
 
 pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
     wm.last_event_time = event.time;
@@ -161,7 +164,7 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) 
         std.c.free(reply);
 }
 
-// Window close─
+// Window close
 
 fn closeWindow(wm: *WM, win: u32) void {
     if (win == wm.root) { debug.err("Attempted to close ROOT window!", .{}); return; }
@@ -206,7 +209,7 @@ fn forceDestroyWindow(wm: *WM, win: u32) void {
     utils.flush(wm.conn);
 }
 
-// Action dispatch ───────────────────────────────────────────────────────────
+// Action dispatch 
 
 fn executeAction(action: *const defs.Action, wm: *WM) !void {
     switch (action.*) {
@@ -240,13 +243,30 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
     }
 }
 
-// Shell execution ───────────────────────────────────────────────────────────
+// Shell execution 
 
 /// Spawns `cmd` via a double-fork so the child is re-parented to init and
 /// the WM never needs to reap it.
 fn executeShellCommand(wm: *WM, cmd: []const u8) !void {
     const cmd_z = try wm.allocator.dupeZ(u8, cmd);
     defer wm.allocator.free(cmd_z);
+
+    // Stamp the active workspace index into the environment before forking.
+    // Both the intermediate child and the grandchild (the real app process)
+    // inherit it.  handleMapRequest reads it back via _NET_WM_PID +
+    // /proc/pid/environ and assigns the window to the correct workspace even
+    // if the user switched away before the app finished starting.
+    // We unset it in the parent immediately after fork so the WM's own
+    // environment stays clean.  The WM is single-threaded, so there is no
+    // race between the setenv and unsetenv calls.
+    var spawn_ws_set = false;
+    if (workspaces.getCurrentWorkspace()) |ws| {
+        var ws_buf = std.mem.zeroes([16]u8); // last byte stays 0 → null terminator
+        _ = std.fmt.bufPrint(ws_buf[0..15], "{d}", .{ws}) catch {};
+        _ = c.setenv("HANA_SPAWN_WS", @as([*c]const u8, @ptrCast(&ws_buf)), 1);
+        spawn_ws_set = true;
+    }
+    defer if (spawn_ws_set) { _ = c.unsetenv("HANA_SPAWN_WS"); };
 
     const pid = c.fork();
     if (pid == 0) {
@@ -273,7 +293,7 @@ fn executeShellCommand(wm: *WM, cmd: []const u8) !void {
     }
 }
 
-// Diagnostics──
+// Diagnostics
 
 fn dumpState(wm: *WM) void {
     debug.info("========== STATE DUMP ==========", .{});
