@@ -168,18 +168,15 @@ pub fn fetchPropertyToBuffer(
     return buffer.items;
 }
 
-// InputModel cache
+// Window focus property cache
 //
 // Keyed by window ID; populated at map time via populateFocusCacheFromCookies.
 // Invalidated on WM_PROTOCOLS / WM_HINTS PropertyNotify and on window destruction.
-// Keeps the setFocus hot path free of blocking X11 round-trips for seen windows.
+// Keeps the setFocus hot path and close-window path free of blocking X11
+// round-trips for all windows that were seen at map time.
 //
-// A previous design also maintained a wm_take_focus_cache so that a WM_HINTS
-// PropertyNotify could recompute InputModel without re-querying WM_PROTOCOLS.
-// That saves one round-trip on an event that is effectively never seen in
-// practice, at the cost of a second HashMap, a second init/deinit pair, and
-// tangled invalidation logic across six functions. The intermediate cache has
-// been removed; both properties are queried when the model needs recomputation.
+// Both InputModel (focus routing) and wm_delete (close protocol support) are
+// derived from WM_PROTOCOLS, so they are populated together in a single scan.
 
 pub const InputModel = enum {
     no_input,        // input=False, no WM_TAKE_FOCUS — window doesn't want focus
@@ -188,10 +185,18 @@ pub const InputModel = enum {
     globally_active, // input=False, WM_TAKE_FOCUS    — only send protocol
 };
 
-var input_model_cache: ?std.AutoHashMap(u32, InputModel) = null;
+/// Combined per-window property cache entry.  Both fields are populated from
+/// a single WM_PROTOCOLS scan at map time, so there is no extra cost over
+/// caching InputModel alone.
+const CachedProps = struct {
+    model:     InputModel,
+    wm_delete: bool,
+};
+
+var input_model_cache: ?std.AutoHashMap(u32, CachedProps) = null;
 
 pub fn initInputModelCache(allocator: std.mem.Allocator) void {
-    input_model_cache = std.AutoHashMap(u32, InputModel).init(allocator);
+    input_model_cache = std.AutoHashMap(u32, CachedProps).init(allocator);
 }
 
 pub fn deinitInputModelCache() void {
@@ -211,14 +216,19 @@ pub fn populateFocusCacheFromCookies(
     c_protocols: xcb.xcb_get_property_cookie_t,
     c_hints:     xcb.xcb_get_property_cookie_t,
 ) void {
-    const take_focus_atom = getAtomCached("WM_TAKE_FOCUS") catch return;
-    var supports = false;
+    const take_focus_atom = getAtomCached("WM_TAKE_FOCUS")    catch return;
+    const wm_delete_atom  = getAtomCached("WM_DELETE_WINDOW") catch return;
+
+    // Scan WM_PROTOCOLS once for both atoms — no second round-trip.
+    var take_focus = false;
+    var wm_delete  = false;
     if (xcb.xcb_get_property_reply(conn, c_protocols, null)) |r| {
         defer std.c.free(r);
         if (r.*.format == 32 and r.*.value_len > 0) {
             const atoms: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(r)));
             for (atoms[0..@intCast(r.*.value_len)]) |atom| {
-                if (atom == take_focus_atom) { supports = true; break; }
+                if (atom == take_focus_atom) take_focus = true;
+                if (atom == wm_delete_atom)  wm_delete  = true;
             }
         }
     }
@@ -234,16 +244,21 @@ pub fn populateFocusCacheFromCookies(
         }
     }
 
-    storeInputModel(win, inputModelFrom(supports, accepts));
+    storeCachedProps(win, .{
+        .model     = inputModelFrom(take_focus, accepts),
+        .wm_delete = wm_delete,
+    });
 }
 
-/// Recompute and cache the InputModel after a WM_PROTOCOLS or WM_HINTS change.
-/// Two round-trips; called only on rare PropertyNotify events.
+/// Recompute and cache the focus properties after a WM_PROTOCOLS or WM_HINTS
+/// change.  Two round-trips (WM_PROTOCOLS + WM_HINTS); called only on rare
+/// PropertyNotify events so latency is not a concern.
 pub fn recacheInputModel(conn: *xcb.xcb_connection_t, win: u32) void {
-    storeInputModel(win, inputModelFrom(
-        queryWMTakeFocusSupport(conn, win),
-        queryWMHintsInput(conn, win),
-    ));
+    const proto = queryWMProtocolsProps(conn, win);
+    storeCachedProps(win, .{
+        .model     = inputModelFrom(proto.take_focus, queryWMHintsInput(conn, win)),
+        .wm_delete = proto.wm_delete,
+    });
 }
 
 pub fn uncacheWindowFocusProps(win: u32) void {
@@ -254,15 +269,29 @@ pub fn uncacheWindowFocusProps(win: u32) void {
 /// For the hover focus hot path this should always be a cache hit.
 pub fn getInputModelCached(conn: *xcb.xcb_connection_t, win: u32) InputModel {
     if (input_model_cache) |*c| {
-        if (c.get(win)) |model| return model;
+        if (c.get(win)) |props| return props.model;
     }
-    // Cache miss — compute live and store for next time.
-    const model = inputModelFrom(
-        queryWMTakeFocusSupport(conn, win),
-        queryWMHintsInput(conn, win),
-    );
-    storeInputModel(win, model);
-    return model;
+    // Cache miss — query all protocol props in one scan and cache everything.
+    const proto = queryWMProtocolsProps(conn, win);
+    const props = CachedProps{
+        .model     = inputModelFrom(proto.take_focus, queryWMHintsInput(conn, win)),
+        .wm_delete = proto.wm_delete,
+    };
+    storeCachedProps(win, props);
+    return props.model;
+}
+
+/// Return true if `win` declared WM_DELETE_WINDOW support at map time.
+/// Eliminates the blocking WM_PROTOCOLS round-trip in closeWindow — the same
+/// property was already scanned at map time and the result cached.
+/// Falls back to a live query only on a genuine cache miss (extremely rare).
+pub fn supportsWMDeleteCached(conn: *xcb.xcb_connection_t, win: u32) bool {
+    if (input_model_cache) |*c| {
+        if (c.get(win)) |props| return props.wm_delete;
+    }
+    // Cache miss: query WM_PROTOCOLS live.  No point caching without the
+    // WM_HINTS result too; closeWindow is called at most once per window.
+    return queryWMProtocolsProps(conn, win).wm_delete;
 }
 
 inline fn inputModelFrom(supports_take_focus: bool, accepts_input: bool) InputModel {
@@ -272,8 +301,8 @@ inline fn inputModelFrom(supports_take_focus: bool, accepts_input: bool) InputMo
         (if (accepts_input) .passive else .no_input);
 }
 
-inline fn storeInputModel(win: u32, model: InputModel) void {
-    if (input_model_cache) |*c| c.put(win, model) catch {};
+inline fn storeCachedProps(win: u32, props: CachedProps) void {
+    if (input_model_cache) |*c| c.put(win, props) catch {};
 }
 
 // WM_CLASS
@@ -312,20 +341,30 @@ pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allo
 
 // Private helpers
 
-fn queryWMTakeFocusSupport(conn: *xcb.xcb_connection_t, win: u32) bool {
-    const protocols_atom  = getAtomCached("WM_PROTOCOLS")  catch return false;
+const WMProtocolsProps = struct { take_focus: bool, wm_delete: bool };
+
+/// Scan WM_PROTOCOLS once and return all flags the WM cares about.
+/// One round-trip per call; results are always cached by callers.
+fn queryWMProtocolsProps(conn: *xcb.xcb_connection_t, win: u32) WMProtocolsProps {
+    const protocols_atom = getAtomCached("WM_PROTOCOLS") catch
+        return .{ .take_focus = false, .wm_delete = false };
     const reply = xcb.xcb_get_property_reply(conn,
         xcb.xcb_get_property(conn, PROPERTY_NO_DELETE, win, protocols_atom, xcb.XCB_ATOM_ATOM, 0, MAX_PROPERTY_LENGTH), null,
-    ) orelse return false;
+    ) orelse return .{ .take_focus = false, .wm_delete = false };
     defer std.c.free(reply);
-    if (reply.*.format != 32 or reply.*.value_len == 0) return false;
+    if (reply.*.format != 32 or reply.*.value_len == 0)
+        return .{ .take_focus = false, .wm_delete = false };
 
-    const take_focus_atom = getAtomCached("WM_TAKE_FOCUS") catch return false;
+    const take_focus_atom = getAtomCached("WM_TAKE_FOCUS")    catch return .{ .take_focus = false, .wm_delete = false };
+    const wm_delete_atom  = getAtomCached("WM_DELETE_WINDOW") catch return .{ .take_focus = false, .wm_delete = false };
+
+    var props: WMProtocolsProps = .{ .take_focus = false, .wm_delete = false };
     const atoms: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
     for (atoms[0..@intCast(reply.*.value_len)]) |atom| {
-        if (atom == take_focus_atom) return true;
+        if (atom == take_focus_atom) props.take_focus = true;
+        if (atom == wm_delete_atom)  props.wm_delete  = true;
     }
-    return false;
+    return props;
 }
 
 /// Send a WM_TAKE_FOCUS client message (ICCCM §4.1.7).

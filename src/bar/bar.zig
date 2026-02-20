@@ -28,7 +28,7 @@ const FALLBACK_WORKSPACES_WIDTH: u16 = 270;
 const LAYOUT_SEGMENT_WIDTH:      u16 = 60;
 const TITLE_SEGMENT_MIN_WIDTH:   u16 = 100;
 
-// State
+// State────────
 
 const State = struct {
     window:               u32,
@@ -125,7 +125,7 @@ fn detectClockSegment(config: *const defs.BarConfig) bool {
 /// Single-threaded — only accessed from the main event loop.
 var state: ?*State = null;
 
-// Window creation helpers 
+// Window creation helpers ───────────────────────────────────────────────────
 
 /// Computes the bar Y position for the given `height` and position config.
 fn barYPos(wm: *defs.WM, height: u16) i16 {
@@ -180,7 +180,7 @@ fn createBarWindow(wm: *defs.WM, height: u16, y_pos: i16) BarWindowSetup {
     return .{ .window = window, .visual_id = visual_id, .has_argb = want_transparency };
 }
 
-// Font helpers
+// Font helpers─
 
 /// Appends `:size=N` to `font` when `size > 0`. The caller must free the returned
 /// slice when non-null; when null the original `font` pointer should be used directly.
@@ -210,7 +210,7 @@ fn loadBarFonts(dc: *drawing.DrawContext, wm: *defs.WM) !void {
     try dc.loadFont(font_str);
 }
 
-// X11 property helpers 
+// X11 property helpers ──────────────────────────────────────────────────────
 
 /// Sets an XCB window property from an array.
 inline fn setProp(conn: *xcb.xcb_connection_t, win: u32, name: []const u8, type_: u32, data: anytype) !void {
@@ -243,7 +243,7 @@ fn setWindowProperties(wm: *defs.WM, window: u32, height: u16) !void {
         });
 }
 
-// Bar height
+// Bar height───
 
 /// Calculates bar height from font metrics and configured padding, clamped to sane bounds.
 /// Creates a temporary off-screen window to measure font height when no explicit height is set.
@@ -273,7 +273,7 @@ fn calculateBarHeight(wm: *defs.WM) !u16 {
     return @intCast(@min(@max(computed, MIN_BAR_HEIGHT), MAX_BAR_HEIGHT));
 }
 
-// Lifecycle
+// Lifecycle────
 
 /// Creates the bar window, loads fonts, and performs the first draw.
 pub fn init(wm: *defs.WM) !void {
@@ -387,7 +387,7 @@ pub fn reload(wm: *defs.WM) void {
     old.deinit();
 }
 
-// Public API
+// Public API───
 
 /// Toggles bar position between top and bottom, retiling the current workspace.
 pub fn toggleBarPosition(wm: *defs.WM) !void {
@@ -472,17 +472,23 @@ pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
 ///   - `.hide_fullscreen`: hides without changing global state.
 ///   - `.show_fullscreen`: restores global state when exiting fullscreen.
 pub fn setBarState(wm: *defs.WM, action: BarAction) void {
-    const s          = state orelse return;
-    const current_ws = workspaces.getCurrentWorkspace() orelse 0;
-    const is_fullscreen = wm.fullscreen.getForWorkspace(current_ws) != null;
+    const s = state orelse return;
 
+    // is_fullscreen is only meaningful for .toggle and .show_fullscreen; it is
+    // computed lazily inside each branch so .hide_fullscreen pays no cost.
     const show = switch (action) {
         .toggle => blk: {
             s.global_visible = !s.global_visible;
+            const current_ws    = workspaces.getCurrentWorkspace() orelse 0;
+            const is_fullscreen = wm.fullscreen.getForWorkspace(current_ws) != null;
             break :blk if (is_fullscreen) false else s.global_visible;
         },
         .hide_fullscreen => false,
-        .show_fullscreen => if (is_fullscreen) false else s.global_visible,
+        .show_fullscreen => blk: {
+            const current_ws    = workspaces.getCurrentWorkspace() orelse 0;
+            const is_fullscreen = wm.fullscreen.getForWorkspace(current_ws) != null;
+            break :blk if (is_fullscreen) false else s.global_visible;
+        },
     };
 
     if (s.visible == show and action != .toggle) return;
@@ -517,10 +523,15 @@ pub fn setBarState(wm: *defs.WM, action: BarAction) void {
         // workspaces with bar_height=0 geometry.  On switch, the bar appears and
         // the screen rect no longer matches last_retile_screen, forcing a full
         // retile at switch time and causing the exact flicker we want to avoid.
-        const retile_visible_save = s.visible;
-        if (is_fullscreen) s.visible = s.global_visible;
+        // When toggling while fullscreened, re-read is_fullscreen since the
+        // .toggle branch above already computed it but it went out of scope.
+        // This is a cheap HashMap lookup on a rarely-taken path.
+        const toggle_current_ws    = workspaces.getCurrentWorkspace() orelse 0;
+        const toggle_is_fullscreen = wm.fullscreen.getForWorkspace(toggle_current_ws) != null;
+        const retile_visible_save  = s.visible;
+        if (toggle_is_fullscreen) s.visible = s.global_visible;
         retileAllWorkspacesNoGrab(wm);
-        if (is_fullscreen) s.visible = retile_visible_save;
+        if (toggle_is_fullscreen) s.visible = retile_visible_save;
 
         _ = xcb.xcb_ungrab_server(wm.conn);
         utils.flush(wm.conn);
@@ -544,7 +555,7 @@ pub fn setBarState(wm: *defs.WM, action: BarAction) void {
     clock_segment.updateTimerState(wm);
 }
 
-// Update loop
+// Update loop──
 
 /// Redraws the bar if any dirty flag is set. Called each iteration of the event loop.
 pub fn updateIfDirty(wm: *defs.WM) !void {
@@ -623,7 +634,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *defs.W
     };
 }
 
-// Drawing
+// Drawing──────
 
 /// Returns the pixel width of a single bar segment.
 fn calculateSegmentWidth(s: *State, segment: defs.BarSegment) u16 {
@@ -715,7 +726,7 @@ fn drawSegment(s: *State, wm: *defs.WM, segment: defs.BarSegment, x: u16, width:
     };
 }
 
-// Workspace retiling 
+// Workspace retiling ────────────────────────────────────────────────────────
 
 /// Retiles all workspaces — queue-only, no grab, no flush.
 /// Caller is responsible for the grab/ungrab/flush envelope.
@@ -750,6 +761,11 @@ fn retileAllWorkspacesNoGrab(wm: *defs.WM) void {
         // holds a position that matches what the next retile will compute →
         // configureSafe gets a hit → skips configure_window → window stays
         // offscreen when the user switches back (if the fallback retile path runs).
+        //
+        // The current workspace is NOT pushed off-screen — its windows stay at
+        // their freshly-retiled on-screen positions.  Fullscreen workspaces are
+        // skipped entirely (above) because their geometry is managed by the
+        // fullscreen module; retiling them here would clobber the fullscreen rect.
         if (@as(u8, @intCast(idx)) != original_ws) {
             for (ws.windows.items()) |win| {
                 _ = xcb.xcb_configure_window(wm.conn, win,
@@ -762,19 +778,4 @@ fn retileAllWorkspacesNoGrab(wm: *defs.WM) void {
 
     ws_state.current = original_ws;
     // No grab/ungrab/flush — caller owns those.
-}
-
-/// Retiles all workspaces when the bar is toggled, keeping off-screen workspaces
-/// off-screen after the geometry update. This prevents geometry staleness and
-/// visual flicker when switching workspaces after a bar show/hide.
-fn retileAllWorkspaces(wm: *defs.WM) void {
-    // Grab → retile all workspaces → ungrab → single flush.
-    // Queuing the ungrab before the flush is critical: it ensures that
-    // grab + all retile commands + ungrab all land on the X server in one
-    // write, so picom is frozen for the entire batch and composites only the
-    // fully-retiled final state.
-    _ = xcb.xcb_grab_server(wm.conn);
-    retileAllWorkspacesNoGrab(wm);
-    _ = xcb.xcb_ungrab_server(wm.conn);
-    utils.flush(wm.conn);
 }

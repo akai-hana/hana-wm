@@ -14,6 +14,7 @@ const utils     = @import("utils");
 const bar       = @import("bar");
 const focus     = @import("focus");
 const tiling    = @import("tiling");
+const layouts   = @import("layouts");
 const clock     = @import("clock");
 const dpi       = @import("dpi");
 const drawing   = @import("drawing");
@@ -55,9 +56,9 @@ fn handleSignalFd(signal_fd: posix.fd_t) void {
         if (n != @sizeOf(std.os.linux.signalfd_siginfo)) break;
 
         switch (siginfo.signo) {
-            @intFromEnum(posix.SIG.HUP)  => should_reload.store(true, .seq_cst),
+            @intFromEnum(posix.SIG.HUP)  => should_reload.store(true, .release),
             @intFromEnum(posix.SIG.TERM),
-            @intFromEnum(posix.SIG.INT)  => running.store(false, .seq_cst),
+            @intFromEnum(posix.SIG.INT)  => running.store(false, .release),
             else => {},
         }
     }
@@ -148,7 +149,7 @@ fn initBar(wm: *WM) void {
 
 /// Consumes the reload flag and, if set, reloads the configuration.
 fn maybeReload(wm: *WM) void {
-    if (should_reload.swap(false, .seq_cst))
+    if (should_reload.swap(false, .acq_rel))
         handleConfigReload(wm) catch |err| debug.err("Reload failed: {}", .{err});
 }
 
@@ -246,6 +247,7 @@ pub fn main() !void {
     utils.initInputModelCache(wm.allocator);
     defer utils.deinitInputModelCache();
     defer drawing.deinitFontCache(allocator);
+    defer layouts.deinitSizeHintsCache(allocator);
 
     const fds = try setupPollFds();
     defer posix.close(fds.signal);

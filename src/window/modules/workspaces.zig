@@ -180,11 +180,13 @@ pub fn switchTo(wm: *WM, ws_id: u8) void {
     executeSwitch(wm, old, ws_id);
 }
 
-/// Return the first non-minimized window in `ws`, or null if all windows are
-/// minimized (or the workspace is empty).  Used when switching workspaces so
+/// Return the first non-minimized window in `windows`, or null if all are
+/// minimized (or the slice is empty).  Used when switching workspaces so
 /// that a minimized-only workspace never receives keyboard focus.
-fn firstNonMinimized(ws: *const Workspace) ?u32 {
-    for (ws.windows.items()) |win| {
+/// Takes a plain slice rather than *Workspace so it is decoupled from the
+/// workspace data structure and easier to test in isolation.
+fn firstNonMinimized(windows: []const u32) ?u32 {
+    for (windows) |win| {
         if (!minimize.isMinimized(win)) return win;
     }
     return null;
@@ -290,7 +292,7 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
     const focus_target: ?u32 = blk: {
         const ptr = xcb.xcb_query_pointer_reply(
             wm.conn, xcb.xcb_query_pointer(wm.conn, wm.root), null,
-        ) orelse break :blk firstNonMinimized(new_ws_obj);
+        ) orelse break :blk firstNonMinimized(new_ws_obj.windows.items());
         defer std.c.free(ptr);
 
         const child = ptr.*.child;
@@ -301,7 +303,7 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
         {
             break :blk child;
         }
-        break :blk firstNonMinimized(new_ws_obj);
+        break :blk firstNonMinimized(new_ws_obj.windows.items());
     };
 
     const old_focused    = wm.focused_window;

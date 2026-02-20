@@ -426,6 +426,16 @@ pub inline fn isWindowTiled(window_id: u32) bool {
     return s.windows.contains(window_id);
 }
 
+/// Return the cached geometry for `window_id` if present.
+///
+/// This is a zero-cost lookup into the tiling state's geometry cache and
+/// avoids an X round-trip. Returns null when the window has no cached rect
+/// (e.g. fullscreen windows or after an explicit invalidate).
+pub fn getCachedGeom(window_id: u32) ?utils.Rect {
+    const s = getState() orelse return null;
+    return s.geom_cache.get(window_id);
+}
+
 // Screen area
 
 fn calculateScreenArea(wm: *WM) utils.Rect {

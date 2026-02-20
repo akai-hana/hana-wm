@@ -13,6 +13,7 @@ const bar        = @import("bar");
 const workspaces = @import("workspaces");
 const debug      = @import("debug");
 const minimize   = @import("minimize");
+const layouts    = @import("layouts");
 
 const WINDOW_EVENT_MASK = constants.EventMasks.MANAGED_WINDOW;
 
@@ -80,47 +81,51 @@ inline fn setupTiling(wm: *WM, win: u32, on_current: bool) void {
 
 // Spawn workspace recovery 
 
-/// Collect the _NET_WM_PID reply and read HANA_SPAWN_WS from the process
-/// environment via /proc/pid/environ.  Returns the workspace index the window
-/// should be assigned to, or null if the property is absent, the process can't
-/// be read, or the variable isn't set (window wasn't spawned by an exec bind).
-fn getSpawnWorkspace(
-    conn: *xcb.xcb_connection_t,
-    c_pid: xcb.xcb_get_property_cookie_t,
-) ?u8 {
-    const reply = xcb.xcb_get_property_reply(conn, c_pid, null) orelse return null;
-    defer std.c.free(reply);
-    if (reply.*.format != 32 or reply.*.value_len == 0) return null;
+// Spawn workspace queue
+//
+// When the user presses an exec keybind, input.executeShellCommand calls
+// registerSpawn() with the active workspace before forking.  handleMapRequest
+// pops the oldest non-expired entry and uses it as the workspace assignment.
+//
+// This replaces the _NET_WM_PID + /proc/pid/environ approach, which fails for
+// daemon-mode terminals (kitty, wezterm, foot --server): those terminals
+// re-use a long-lived daemon process whose /proc/pid/environ still reflects
+// the workspace that was active when the daemon was first started, not now.
+// The queue is purely in-process — no X round-trips, no filesystem reads.
 
-    const values: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
-    const pid = values[0];
-    if (pid == 0) return null;
+const SPAWN_TIMEOUT_NS: u64 = 15 * std.time.ns_per_s;
+const SPAWN_QUEUE_CAP:  u8  = 16;
 
-    return readSpawnWorkspaceFromEnv(pid);
+const SpawnEntry = struct { workspace: u8, time: std.time.Instant };
+
+var spawn_buf:  [SPAWN_QUEUE_CAP]SpawnEntry = undefined;
+var spawn_head: u8 = 0;
+var spawn_len:  u8 = 0;
+
+/// Called by input.executeShellCommand immediately after a successful fork.
+/// Records the workspace the user was on when they pressed the exec keybind.
+pub fn registerSpawn(workspace: u8) void {
+    const now = std.time.Instant.now() catch return;
+    const tail = (spawn_head + spawn_len) % SPAWN_QUEUE_CAP;
+    spawn_buf[tail] = .{ .workspace = workspace, .time = now };
+    if (spawn_len < SPAWN_QUEUE_CAP) {
+        spawn_len += 1;
+    } else {
+        // Queue full — silently discard oldest entry.
+        spawn_head = (spawn_head + 1) % SPAWN_QUEUE_CAP;
+    }
 }
 
-/// Read /proc/[pid]/environ and extract the HANA_SPAWN_WS value written by
-/// executeShellCommand.  The environment is a sequence of null-terminated
-/// strings; we scan without loading the entire file into a heap allocation.
-fn readSpawnWorkspaceFromEnv(pid: u32) ?u8 {
-    var path_buf: [48]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/environ", .{pid}) catch return null;
-
-    const fd = std.posix.open(path, .{ .ACCMODE = .RDONLY }, 0) catch return null;
-    defer std.posix.close(fd);
-
-    var buf: [8192]u8 = undefined;
-    const n = std.posix.read(fd, &buf) catch return null;
-
-    const prefix = "HANA_SPAWN_WS=";
-    var i: usize = 0;
-    while (i < n) {
-        const end = std.mem.indexOfScalarPos(u8, buf[0..n], i, 0) orelse n;
-        const entry = buf[i..end];
-        if (std.mem.startsWith(u8, entry, prefix)) {
-            return std.fmt.parseInt(u8, entry[prefix.len..], 10) catch null;
-        }
-        i = end + 1;
+/// Pop the oldest non-expired entry.  Expired entries are silently discarded.
+/// Returns null when the queue is empty or all entries have timed out.
+fn popSpawnWorkspace() ?u8 {
+    const now = std.time.Instant.now() catch return null;
+    while (spawn_len > 0) {
+        const entry = spawn_buf[spawn_head];
+        spawn_head = (spawn_head + 1) % SPAWN_QUEUE_CAP;
+        spawn_len -= 1;
+        if (now.since(entry.time) <= SPAWN_TIMEOUT_NS) return entry.workspace;
+        // Expired — discard and try the next entry.
     }
     return null;
 }
@@ -146,22 +151,21 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     const c_hints = xcb.xcb_get_property(
         wm.conn, 0, win, xcb.XCB_ATOM_WM_HINTS, xcb.XCB_ATOM_WM_HINTS, 0, 9,
     );
-    // Fire _NET_WM_PID cookie so we can recover the spawn workspace from the
-    // grandchild's process environment (HANA_SPAWN_WS set by executeShellCommand).
-    // Fired here alongside the other cookies so all three land in the same write.
-    const c_pid = xcb.xcb_get_property(
+    // WM_NORMAL_HINTS: used to clamp tiled geometry to the window's declared
+    // minimum size.  Terminals set min_height = one character row; without this
+    // clamp they can receive invalid geometry.  Fired here with the other
+    // cookies — no extra round-trip cost.
+    const c_normal_hints = xcb.xcb_get_property(
         wm.conn, 0, win,
-        utils.getAtomCached("_NET_WM_PID") catch 0,
-        xcb.XCB_ATOM_CARDINAL, 0, 1,
+        xcb.XCB_ATOM_WM_NORMAL_HINTS, xcb.XCB_ATOM_ANY, 0, 18,
     );
-
     // Determine target workspace.
     // Priority: workspace rules > exec spawn workspace > current workspace.
     //
     // Workspace rules (WM_CLASS): one round-trip; xcb_get_property_reply
     //   flushes the output buffer implicitly, so all cookies above also land.
-    // Spawn workspace (_NET_WM_PID + /proc/pid/environ): one round-trip for
-    //   the PID reply, then a local file read — no extra X round-trip.
+    // Spawn workspace (queue): zero round-trips — registerSpawn() was called
+    //   at fork time; popSpawnWorkspace() is a pure in-process ring-buffer pop.
     // Current workspace: zero round-trips (fast path for unmanaged windows).
     const validated_ws: u8 = blk: {
         // 1. Workspace rules — explicit class-based assignment, highest priority.
@@ -172,19 +176,16 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
                 xcb.XCB_ATOM_STRING, 0, 256,
             );
             if (collectWorkspaceRule(wm, c_class)) |target| {
-                // Rule matched — consume the c_pid reply so it doesn't linger
-                // in XCB's reply queue and confuse subsequent round-trips.
-                if (xcb.xcb_get_property_reply(wm.conn, c_pid, null)) |r| std.c.free(r);
                 break :blk validateWorkspace(target, current_ws);
             }
             // No rule matched; fall through and try the spawn workspace.
         }
         // 2. Exec spawn workspace — window was launched via a keybind exec action.
-        //    executeShellCommand wrote HANA_SPAWN_WS into the child environment;
-        //    we recover it here via _NET_WM_PID + /proc/pid/environ so the window
-        //    always lands on the workspace where the user pressed the bind, even
-        //    if they switched away while the application was starting.
-        if (getSpawnWorkspace(wm.conn, c_pid)) |spawn_ws|
+        //    executeShellCommand called registerSpawn() before forking, recording
+        //    the active workspace in the spawn queue.  Pop the oldest non-expired
+        //    entry so the window lands on the workspace where the bind was pressed,
+        //    even when the terminal reuses a long-lived daemon process.
+        if (popSpawnWorkspace()) |spawn_ws|
             break :blk validateWorkspace(spawn_ws, current_ws);
         // 3. Default: whichever workspace is active at map time.
         break :blk current_ws;
@@ -204,6 +205,10 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
         // guarantees in-order processing within a connection, so the server
         // applies the geometry first — the window appears at its correct
         // tiled position with no intermediate geometry flash.
+        //
+        // Cache WM_NORMAL_HINTS before the first retile so configureSafe
+        // can clamp the geometry immediately.
+        collectAndCacheSizeHints(wm, win, c_normal_hints);
         setupTiling(wm, win, true);
         _ = xcb.xcb_map_window(wm.conn, win);
     } else {
@@ -223,6 +228,10 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
         // setupTiling with on_current=false calls addWindow (registering the
         // window in s.windows, setting its border, marking dirty) but does NOT
         // call retileCurrentWorkspace — the current workspace is unaffected.
+        // Consume the WM_NORMAL_HINTS reply now so the reply queue stays
+        // clean.  The hints are cached and will be used when this workspace
+        // is first visited and retiled.
+        collectAndCacheSizeHints(wm, win, c_normal_hints);
         setupTiling(wm, win, false);
         grabButtons(wm, win, false);
     }
@@ -275,25 +284,56 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
 /// the client must be told what geometry it actually has, or it may block
 /// waiting for an acknowledgement that never arrives.
 fn sendSyntheticConfigureNotify(wm: *WM, win: u32) void {
+    // Fast path: serve the geometry from the tiling cache — zero round-trips.
+    // Tiled windows always have a cache entry written by the last retile.
+    // Fullscreen windows are never in the geom cache, so they fall through to
+    // the live get_geometry query below (one blocking round-trip, rare).
+    if (tiling.getCachedGeom(win)) |rect| {
+        const border: u16 = if (tiling.getState()) |s| s.border_width else 0;
+        const ev = xcb.xcb_configure_notify_event_t{
+            .response_type     = xcb.XCB_CONFIGURE_NOTIFY,
+            .pad0              = 0,
+            .sequence          = 0,
+            .event             = win,
+            .window            = win,
+            .above_sibling     = xcb.XCB_NONE,
+            .x                 = rect.x,
+            .y                 = rect.y,
+            .width             = rect.width,
+            .height            = rect.height,
+            .border_width      = border,
+            .override_redirect = 0,
+            .pad1              = 0,
+        };
+        _ = xcb.xcb_send_event(
+            wm.conn, 0, win,
+            xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY,
+            @ptrCast(&ev),
+        );
+        return;
+    }
+
+    // Slow path: fullscreen windows (or a cache miss on a newly-tiled window
+    // before the first retile).  One blocking round-trip.
     const reply = xcb.xcb_get_geometry_reply(
         wm.conn, xcb.xcb_get_geometry(wm.conn, win), null,
     ) orelse return;
     defer std.c.free(reply);
 
     const ev = xcb.xcb_configure_notify_event_t{
-        .response_type  = xcb.XCB_CONFIGURE_NOTIFY,
-        .pad0           = 0,
-        .sequence       = 0,
-        .event          = win,
-        .window         = win,
-        .above_sibling  = xcb.XCB_NONE,
-        .x              = reply.*.x,
-        .y              = reply.*.y,
-        .width          = reply.*.width,
-        .height         = reply.*.height,
-        .border_width   = reply.*.border_width,
+        .response_type     = xcb.XCB_CONFIGURE_NOTIFY,
+        .pad0              = 0,
+        .sequence          = 0,
+        .event             = win,
+        .window            = win,
+        .above_sibling     = xcb.XCB_NONE,
+        .x                 = reply.*.x,
+        .y                 = reply.*.y,
+        .width             = reply.*.width,
+        .height            = reply.*.height,
+        .border_width      = reply.*.border_width,
         .override_redirect = 0,
-        .pad1           = 0,
+        .pad1              = 0,
     };
     _ = xcb.xcb_send_event(
         wm.conn, 0, win,
@@ -453,6 +493,7 @@ fn unmanageWindow(wm: *WM, win: u32) void {
     // Update all bookkeeping state before the grab — no XCB calls here.
     if (wm.config.tiling.enabled) tiling.removeWindow(win);
     utils.uncacheWindowFocusProps(win);
+    layouts.evictSizeHints(win);
     workspaces.removeWindow(win);
     wm.removeWindow(win);
 
@@ -526,4 +567,54 @@ fn focusFallback(wm: *WM) void {
             return;
         }
     }
+}
+
+// WM_NORMAL_HINTS ─────────────────────────────────────────────────────────
+
+/// Parse a WM_NORMAL_HINTS reply and populate the layouts size-hints cache.
+/// XSizeHints wire layout (each field is one 32-bit CARD32):
+///   [0]       flags
+///   [1..4]    x, y, width, height  (deprecated USPosition/USSize — ignored)
+///   [5..6]    min_width, min_height          (PMinSize  = 0x010)
+///   [7..8]    max_width, max_height          (PMaxSize  = 0x020)
+///   [9..10]   width_inc, height_inc          (PResizeInc = 0x040)
+///   [11..14]  min/max aspect numerator/denom (PAspect  = 0x080)
+///   [15..16]  base_width, base_height        (PBaseSize = 0x100)
+///   [17]      win_gravity                    (PWinGravity = 0x200)
+///
+/// We cache min_width / min_height (and base_* as a fallback lower bound)
+/// so that configureSafe can clamp tiled rects to the window's minimums.
+fn collectAndCacheSizeHints(
+    wm:     *WM,
+    win:    u32,
+    cookie: xcb.xcb_get_property_cookie_t,
+) void {
+    const reply = xcb.xcb_get_property_reply(wm.conn, cookie, null) orelse return;
+    defer std.c.free(reply);
+    if (reply.*.format != 32 or reply.*.value_len < 5) return;
+
+    const vals: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
+    const len   = reply.*.value_len;
+    const flags = vals[0];
+
+    const P_MIN_SIZE:  u32 = 0x10;
+    const P_BASE_SIZE: u32 = 0x100;
+
+    var min_w: u16 = 0;
+    var min_h: u16 = 0;
+
+    if (flags & P_MIN_SIZE != 0 and len >= 7) {
+        min_w = @intCast(@min(vals[5], std.math.maxInt(u16)));
+        min_h = @intCast(@min(vals[6], std.math.maxInt(u16)));
+    }
+    // PBaseSize gives the zero-increment base; use it as an additional lower
+    // bound — some apps set base > min for character-cell sizing reasons.
+    if (flags & P_BASE_SIZE != 0 and len >= 17) {
+        const bw: u16 = @intCast(@min(vals[15], std.math.maxInt(u16)));
+        const bh: u16 = @intCast(@min(vals[16], std.math.maxInt(u16)));
+        if (bw > 0) min_w = @max(min_w, bw);
+        if (bh > 0) min_h = @max(min_h, bh);
+    }
+
+    layouts.cacheSizeHints(wm.allocator, win, .{ .min_width = min_w, .min_height = min_h });
 }

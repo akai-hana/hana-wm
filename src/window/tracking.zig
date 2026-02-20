@@ -43,8 +43,8 @@ pub const Tracking = struct {
     /// O(n) for small (cache-friendly), O(1) for large.
     pub inline fn contains(self: *const Tracking, win: u32) bool {
         return switch (self.storage) {
-            .small => |*s| std.mem.indexOfScalar(u32, s.items[0..s.len], win) != null,
-            .large => |*l| l.set.contains(win),
+            .small => |s| std.mem.indexOfScalar(u32, s.items[0..s.len], win) != null,
+            .large => |l| l.set.contains(win),
         };
     }
 
@@ -156,15 +156,15 @@ pub const Tracking = struct {
     /// Returns a slice into Tracking's own storage — valid for the lifetime of self.
     pub inline fn items(self: *const Tracking) []const u32 {
         return switch (self.storage) {
-            .small => |*s| s.items[0..s.len],
-            .large => |*l| l.list.items,
+            .small => |s| s.items[0..s.len],
+            .large => |l| l.list.items,
         };
     }
 
     pub inline fn count(self: *const Tracking) usize {
         return switch (self.storage) {
             .small => |s| s.len,
-            .large => |*l| l.list.items.len,
+            .large => |l| l.list.items.len,
         };
     }
 
