@@ -7,20 +7,14 @@ const std = @import("std");
 const build_options = @import("build_options");
 
 /// Extract module name from source location.
-/// Must be called with @src() passed in from the inline call site so that
-/// the file path reflects the caller's module, not debug.zig itself.
+/// Since these functions are `inline`, @src() inside them captures the call
+/// site's source location — so the returned name is always the caller's module.
 fn moduleFromSrc(src: std.builtin.SourceLocation) []const u8 {
-    const file = src.file;
-    var start: usize = 0;
-    for (file, 0..) |c, i| {
-        if (c == '/' or c == '\\') start = i + 1;
-    }
-    const basename = file[start..];
-    const end = if (basename.len >= 4 and std.mem.eql(u8, basename[basename.len - 4 ..], ".zig"))
-        basename.len - 4
+    const basename = std.fs.path.basename(src.file);
+    return if (std.mem.endsWith(u8, basename, ".zig"))
+        basename[0 .. basename.len - 4]
     else
-        basename.len;
-    return basename[0..end];
+        basename;
 }
 
 /// Check if debug logging is enabled

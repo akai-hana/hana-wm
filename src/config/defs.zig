@@ -227,7 +227,7 @@ pub const BarConfig = struct {
         return self.title_accent_color orelse self.accent_color;
     }
 
-    pub inline fn getTitleUnfocusedAccent(self: BarConfig) u32 {
+    pub inline fn getTitleUnfocusedAccent(self: *const BarConfig) u32 {
         return self.title_unfocused_accent orelse self.accent_color;
     }
 
@@ -305,23 +305,16 @@ pub const Config = struct {
     allocated_clock_format: ?[]const u8 = null,
 
     pub fn init(allocator: std.mem.Allocator) Config {
+        // Only fields without struct-level defaults need explicit init here.
+        // All TilingConfig scalar fields (master_side, master_width, etc.)
+        // use their declared defaults; only the ArrayList fields must be
+        // zero-initialised explicitly so they are safe to deinit.
         return .{
-            .tiling = TilingConfig{
-                .layouts = std.ArrayList([]const u8){},
-                .layout = undefined, // Will be set after layouts are loaded
-                .master_side = .left,
-                .master_width = parser.ScalableValue.percentage(50.0),
-                .master_count = 1,
-                .gaps = parser.ScalableValue.absolute(10.0),
-                .border_width = parser.ScalableValue.absolute(2.0),
-                .border_focused = 0x5294E2,
-                .border_unfocused = 0x383C4A,
-                .enabled = true,
-            },
-            .bar = BarConfig{
+            .tiling    = TilingConfig{ .layouts = std.ArrayList([]const u8){} },
+            .bar       = BarConfig{
                 .workspace_icons = std.ArrayList([]const u8){},
-                .fonts = std.ArrayList([]const u8){},
-                .layout = std.ArrayList(BarLayout){},
+                .fonts           = std.ArrayList([]const u8){},
+                .layout          = std.ArrayList(BarLayout){},
             },
             .allocator = allocator,
         };

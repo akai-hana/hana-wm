@@ -31,9 +31,6 @@ pub fn findVisualByDepth(screen: *defs.xcb.xcb_screen_t, depth: u8) VisualInfo {
 
 // DrawContext
 
-/// Packed 0xRRGGBB color broken into Cairo-ready f64 components.
-const RGBColor = struct { r: f64, g: f64, b: f64 };
-
 /// Font name conversion cache — avoids repeated allocations across bar redraws.
 var font_conversion_cache: ?std.StringHashMap([]const u8) = null;
 
@@ -54,7 +51,9 @@ pub const DrawContext = struct {
     transparency:      f32                       = 1.0,
     cached_metrics:    ?struct { ascent: i16, descent: i16 } = null,
     last_color:        ?u32                      = null,
-    color_cache:       std.AutoHashMap(u32, RGBColor),
+    /// Cached GC foreground color — skips xcb_change_gc when color is unchanged.
+    /// Mirrors last_color but for the XCB GC used by fillRect rather than Cairo.
+    last_gc_color:     ?u32                      = null,
 
     /// Creates a DrawContext on the default root visual.
     pub fn init(
@@ -114,7 +113,6 @@ pub const DrawContext = struct {
             .gc           = 0,
             .is_argb      = is_argb,
             .transparency = transparency,
-            .color_cache  = std.AutoHashMap(u32, RGBColor).init(allocator),
         };
 
         dc.gc = defs.xcb.xcb_generate_id(conn);
@@ -129,7 +127,6 @@ pub const DrawContext = struct {
 
     /// Frees all resources owned by this DrawContext.
     pub fn deinit(self: *DrawContext) void {
-        self.color_cache.deinit();
         if (self.current_font_desc) |desc| c.pango_font_description_free(desc);
         _ = defs.xcb.xcb_free_gc(self.conn, self.gc);
         c.g_object_unref(self.pango_layout);
@@ -165,22 +162,23 @@ pub const DrawContext = struct {
         debug.info("Loaded {} fonts with fallback support", .{font_names.len});
     }
 
-    /// Converts a packed 0xRRGGBB integer to {r, g, b} f64 components, with caching.
-    fn colorToRGB(self: *DrawContext, color: u32) struct { f64, f64, f64 } {
-        if (self.color_cache.get(color)) |rgb| return .{ rgb.r, rgb.g, rgb.b };
-        const rgb = RGBColor{
-            .r = @as(f64, @floatFromInt((color >> 16) & 0xFF)) / 255.0,
-            .g = @as(f64, @floatFromInt((color >> 8)  & 0xFF)) / 255.0,
-            .b = @as(f64, @floatFromInt( color         & 0xFF)) / 255.0,
+    /// Converts a packed 0xRRGGBB integer to {r, g, b} f64 components.
+    /// Pure bit-shift arithmetic — no allocation, no hashing.
+    /// The last_color guard in setColor means this is only reached on actual
+    /// color changes (typically 1-2 per segment boundary), so the trivial
+    /// computation cost is irrelevant.
+    inline fn colorToRGB(color: u32) struct { f64, f64, f64 } {
+        return .{
+            @as(f64, @floatFromInt((color >> 16) & 0xFF)) / 255.0,
+            @as(f64, @floatFromInt((color >> 8)  & 0xFF)) / 255.0,
+            @as(f64, @floatFromInt( color         & 0xFF)) / 255.0,
         };
-        self.color_cache.put(color, rgb) catch {};
-        return .{ rgb.r, rgb.g, rgb.b };
     }
 
     /// Sets the current Cairo source color, skipping redundant calls via `last_color`.
     inline fn setColor(self: *DrawContext, color: u32) void {
         if (self.last_color == color) return;
-        const r, const g, const b = self.colorToRGB(color);
+        const r, const g, const b = colorToRGB(color);
         c.cairo_set_source_rgba(self.ctx, r, g, b, 1.0);
         self.last_color = color;
     }
@@ -214,7 +212,10 @@ pub const DrawContext = struct {
     /// Fills a rectangle using XCB (bypasses Cairo — used for solid bar backgrounds).
     pub fn fillRect(self: *DrawContext, x: u16, y: u16, width: u16, height: u16, color: u32) void {
         const final_color = self.applyTransparency(color);
-        _ = defs.xcb.xcb_change_gc(self.conn, self.gc, defs.xcb.XCB_GC_FOREGROUND, &[_]u32{final_color});
+        if (self.last_gc_color != final_color) {
+            _ = defs.xcb.xcb_change_gc(self.conn, self.gc, defs.xcb.XCB_GC_FOREGROUND, &[_]u32{final_color});
+            self.last_gc_color = final_color;
+        }
         const rect = defs.xcb.xcb_rectangle_t{
             .x = @intCast(x), .y = @intCast(y), .width = width, .height = height,
         };

@@ -10,6 +10,7 @@ const tiling     = @import("tiling");
 const debug      = @import("debug");
 const cache      = @import("cache");
 const workspaces = @import("workspaces");
+const constants  = @import("constants");
 
 const workspaces_segment = @import("tags");
 const layout_segment     = @import("layout");
@@ -212,34 +213,37 @@ fn loadBarFonts(dc: *drawing.DrawContext, wm: *defs.WM) !void {
 
 // X11 property helpers ──────────────────────────────────────────────────────
 
-/// Sets an XCB window property from an array.
-inline fn setProp(conn: *xcb.xcb_connection_t, win: u32, name: []const u8, type_: u32, data: anytype) !void {
+/// Sets an XCB window property from a pre-resolved atom.
+inline fn setPropAtom(conn: *xcb.xcb_connection_t, win: u32, prop: u32, type_: u32, data: anytype) void {
     _ = xcb.xcb_change_property(conn, xcb.XCB_PROP_MODE_REPLACE, win,
-        try utils.getAtom(conn, name), type_, 32, data.len, data);
+        prop, type_, 32, data.len, data);
 }
 
 /// Applies dock/strut/state properties so the bar is treated correctly by compositors.
-/// Transparency is handled by picom, not via _NET_WM_WINDOW_OPACITY, keeping consistent
-/// rendering between the bar and window borders.
+/// All atoms are resolved from the pre-populated cache — zero X round-trips.
 fn setWindowProperties(wm: *defs.WM, window: u32, height: u16) !void {
     const strut: [12]u32 = if (wm.config.bar.vertical_position == .bottom)
         .{ 0, 0, 0, height, 0, 0, 0, 0, 0, 0, 0, wm.screen.width_in_pixels }
     else
         .{ 0, 0, height, 0, 0, 0, 0, 0, 0, wm.screen.width_in_pixels, 0, 0 };
 
-    try setProp(wm.conn, window, "_NET_WM_STRUT_PARTIAL", xcb.XCB_ATOM_CARDINAL, &strut);
-    try setProp(wm.conn, window, "_NET_WM_WINDOW_TYPE",   xcb.XCB_ATOM_ATOM,
-        &[_]u32{try utils.getAtom(wm.conn, "_NET_WM_WINDOW_TYPE_DOCK")});
-    try setProp(wm.conn, window, "_NET_WM_STATE",         xcb.XCB_ATOM_ATOM,
+    setPropAtom(wm.conn, window,
+        try utils.getAtomCached("_NET_WM_STRUT_PARTIAL"), xcb.XCB_ATOM_CARDINAL, &strut);
+    setPropAtom(wm.conn, window,
+        try utils.getAtomCached("_NET_WM_WINDOW_TYPE"), xcb.XCB_ATOM_ATOM,
+        &[_]u32{try utils.getAtomCached("_NET_WM_WINDOW_TYPE_DOCK")});
+    setPropAtom(wm.conn, window,
+        try utils.getAtomCached("_NET_WM_STATE"), xcb.XCB_ATOM_ATOM,
         &[_]u32{
-            try utils.getAtom(wm.conn, "_NET_WM_STATE_ABOVE"),
-            try utils.getAtom(wm.conn, "_NET_WM_STATE_STICKY"),
+            try utils.getAtomCached("_NET_WM_STATE_ABOVE"),
+            try utils.getAtomCached("_NET_WM_STATE_STICKY"),
         });
-    try setProp(wm.conn, window, "_NET_WM_ALLOWED_ACTIONS", xcb.XCB_ATOM_ATOM,
+    setPropAtom(wm.conn, window,
+        try utils.getAtomCached("_NET_WM_ALLOWED_ACTIONS"), xcb.XCB_ATOM_ATOM,
         &[_]u32{
-            try utils.getAtom(wm.conn, "_NET_WM_ACTION_CLOSE"),
-            try utils.getAtom(wm.conn, "_NET_WM_ACTION_ABOVE"),
-            try utils.getAtom(wm.conn, "_NET_WM_ACTION_STICK"),
+            try utils.getAtomCached("_NET_WM_ACTION_CLOSE"),
+            try utils.getAtomCached("_NET_WM_ACTION_ABOVE"),
+            try utils.getAtomCached("_NET_WM_ACTION_STICK"),
         });
 }
 
@@ -769,7 +773,7 @@ fn retileAllWorkspacesNoGrab(wm: *defs.WM) void {
         if (@as(u8, @intCast(idx)) != original_ws) {
             for (ws.windows.items()) |win| {
                 _ = xcb.xcb_configure_window(wm.conn, win,
-                    xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, -4000))});
+                    xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
                 tiling.invalidateGeomCache(win);
             }
         }

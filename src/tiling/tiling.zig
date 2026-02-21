@@ -472,34 +472,38 @@ pub fn retileAllWorkspaces(wm: *WM) void {
 
     layouts.armGeomCache(&s.geom_cache, s.allocator);
 
+    // One pass: bucket every tiled window into its workspace slot — O(windows)
+    // instead of the previous O(workspaces × windows) double loop.
+    // MAX_WS must be at least as large as the maximum workspace count; 32 is
+    // more than enough for any realistic config and costs 32×128×4 = 16 KB of
+    // stack (the old code used a fresh 128-element stack buffer per workspace
+    // iteration anyway, so the total stack pressure is actually lower now).
+    const MAX_WS: usize = 32;
+    const effective_ws = @min(ws_count, MAX_WS);
+    var bufs: [MAX_WS][MAX_WS_WINDOWS]u32 = undefined;
+    var lens: [MAX_WS]usize               = @splat(0);
+
+    for (s.windows.items()) |win| {
+        const ws_idx = workspaces.getWorkspaceForWindow(win) orelse continue;
+        if (ws_idx >= effective_ws) continue;
+        if (lens[ws_idx] < MAX_WS_WINDOWS) {
+            bufs[ws_idx][lens[ws_idx]] = win;
+            lens[ws_idx] += 1;
+        }
+    }
+
     var ws_idx: u8 = 0;
-    while (ws_idx < ws_count) : (ws_idx += 1) {
-        // Current workspace: already handled by the bar module's internal
-        // retileCurrentWorkspace call.  Skip to avoid a redundant second pass.
+    while (ws_idx < effective_ws) : (ws_idx += 1) {
         if (ws_idx == current_ws) continue;
-        // Fullscreen workspace: sibling windows are offscreen; they'll get the
-        // correct geometry when the user exits fullscreen and retile runs then.
         if (wm.fullscreen.getForWorkspace(ws_idx)) |_| continue;
 
-        // Collect tiled windows belonging to this workspace.
-        var buf: [MAX_WS_WINDOWS]u32 = undefined;
-        var n: usize = 0;
-        for (s.windows.items()) |win| {
-            if (n >= buf.len) break;
-            if (workspaces.getWorkspaceForWindow(win) == ws_idx) {
-                buf[n] = win;
-                n += 1;
-            }
-        }
-        const ws_windows = buf[0..n];
+        const ws_windows = bufs[ws_idx][0..lens[ws_idx]];
         if (ws_windows.len == 0) continue;
 
         const w = screen.width;
         const h = screen.height;
         const y: u16 = @intCast(screen.y);
 
-        // In per-workspace mode each workspace may have its own layout;
-        // in global mode every workspace shares s.layout.
         const ws_layout: Layout = if (wm.config.tiling.global_layout) s.layout else blk: {
             const ws_state = workspaces.getState() orelse break :blk s.layout;
             if (ws_idx < ws_state.workspaces.len)

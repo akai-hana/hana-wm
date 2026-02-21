@@ -6,6 +6,7 @@
 const std = @import("std");
 const xcb = @import("defs").xcb;
 const utils = @import("utils");
+const layouts = @import("layouts");
 
 const Direction = enum {
     right,  // Split vertically, window on left, remaining on right
@@ -44,7 +45,7 @@ pub fn tileWithOffset(
             .width = screen_width - gap * 2 - border * 2,
             .height = available_height - gap * 2 - border * 2,
         };
-        utils.configureWindow(conn, visible[0], rect);
+        layouts.configureSafe(conn, visible[0], rect);
         return;
     }
     
@@ -86,7 +87,7 @@ fn tileFibonacci(
         };
         var i = index;
         while (i < windows.len) : (i += 1) {
-            utils.configureWindow(conn, windows[i], rect);
+            layouts.configureSafe(conn, windows[i], rect);
         }
         return;
     }
@@ -101,7 +102,7 @@ fn tileFibonacci(
             .width = width -| border * 2,
             .height = height -| border * 2,
         };
-        utils.configureWindow(conn, win, rect);
+        layouts.configureSafe(conn, win, rect);
         return;
     }
     
@@ -118,7 +119,7 @@ fn tileFibonacci(
                 .width = win_width -| border * 2,
                 .height = height -| border * 2,
             };
-            utils.configureWindow(conn, win, rect);
+            layouts.configureSafe(conn, win, rect);
             
             // Remaining windows spiral to the right
             const remaining_x = x + @as(i32, @intCast(win_width + gap));
@@ -137,7 +138,7 @@ fn tileFibonacci(
                 .width = width -| border * 2,
                 .height = win_height -| border * 2,
             };
-            utils.configureWindow(conn, win, rect);
+            layouts.configureSafe(conn, win, rect);
             
             // Remaining windows spiral downward
             const remaining_y = y + @as(i32, @intCast(win_height + gap));
@@ -156,7 +157,7 @@ fn tileFibonacci(
                 .width = win_width -| border * 2,
                 .height = height -| border * 2,
             };
-            utils.configureWindow(conn, win, rect);
+            layouts.configureSafe(conn, win, rect);
             
             // Remaining windows spiral to the left
             const remaining_width = width -| (win_width + gap);
@@ -174,7 +175,7 @@ fn tileFibonacci(
                 .width = width -| border * 2,
                 .height = win_height -| border * 2,
             };
-            utils.configureWindow(conn, win, rect);
+            layouts.configureSafe(conn, win, rect);
             
             // Remaining windows spiral upward
             const remaining_height = height -| (win_height + gap);
