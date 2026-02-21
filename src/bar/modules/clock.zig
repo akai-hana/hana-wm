@@ -66,18 +66,16 @@ pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start
     const time_str = if (ts.sec == last_formatted_sec)
         last_formatted_time[0..19]
     else blk: {
-        const str = try formatTime(&last_formatted_time);
+        // Pass ts through so formatTime doesn't need its own clock_gettime call.
+        const str = try formatTime(&last_formatted_time, ts);
         last_formatted_sec = ts.sec;
         break :blk str;
     };
     return dc.drawSegment(start_x, height, time_str, config.scaledPadding(), config.bg, config.fg);
 }
 
-/// Formats the current local time into `buf`. Falls back to UTC on `localtime` failure.
-fn formatTime(buf: []u8) ![]const u8 {
-    const ts = std.posix.clock_gettime(std.posix.CLOCK.REALTIME) catch
-        return try std.fmt.bufPrint(buf, "????-??-?? ??:??:??", .{});
-
+/// Formats a timespec into `buf` as local time. Falls back to UTC on `localtime` failure.
+fn formatTime(buf: []u8, ts: std.posix.timespec) ![]const u8 {
     var raw_sec: c.time_t = @intCast(ts.sec);
     const local_ts = c.localtime(&raw_sec) orelse return formatUtc(buf, ts.sec);
 

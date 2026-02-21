@@ -75,18 +75,33 @@ const AtomCache = struct {
     net_wm_name:   u32,
     utf8_string:   u32,
     wm_class:      u32,
-    net_wm_pid:    u32,
+    // Bar window property atoms — used by bar.setWindowProperties on every init/reload.
+    // Batched here so setWindowProperties pays zero X round-trips rather than 10 serial ones.
+    net_wm_strut_partial:    u32,
+    net_wm_window_type:      u32,
+    net_wm_window_type_dock: u32,
+    net_wm_state:            u32,
+    net_wm_state_above:      u32,
+    net_wm_state_sticky:     u32,
+    net_wm_allowed_actions:  u32,
+    net_wm_action_close:     u32,
+    net_wm_action_above:     u32,
+    net_wm_action_stick:     u32,
 };
 
 var atom_cache: ?AtomCache = null;
 
 pub fn initAtomCache(conn: *xcb.xcb_connection_t) !void {
     // Fire all intern_atom requests before waiting for any reply — one round-trip
-    // instead of six sequential ones.
+    // instead of sixteen sequential ones.
     const names = [_][]const u8{
         "WM_PROTOCOLS", "WM_DELETE_WINDOW", "WM_TAKE_FOCUS",
         "_NET_WM_NAME",  "UTF8_STRING",      "WM_CLASS",
-        "_NET_WM_PID",
+        "_NET_WM_STRUT_PARTIAL",
+        "_NET_WM_WINDOW_TYPE",  "_NET_WM_WINDOW_TYPE_DOCK",
+        "_NET_WM_STATE",        "_NET_WM_STATE_ABOVE",      "_NET_WM_STATE_STICKY",
+        "_NET_WM_ALLOWED_ACTIONS",
+        "_NET_WM_ACTION_CLOSE", "_NET_WM_ACTION_ABOVE",     "_NET_WM_ACTION_STICK",
     };
     var cookies: [names.len]xcb.xcb_intern_atom_cookie_t = undefined;
     for (&cookies, names) |*c, name|
@@ -106,7 +121,16 @@ pub fn initAtomCache(conn: *xcb.xcb_connection_t) !void {
         .net_wm_name   = values[3],
         .utf8_string   = values[4],
         .wm_class      = values[5],
-        .net_wm_pid    = values[6],
+        .net_wm_strut_partial    = values[6],
+        .net_wm_window_type      = values[7],
+        .net_wm_window_type_dock = values[8],
+        .net_wm_state            = values[9],
+        .net_wm_state_above      = values[10],
+        .net_wm_state_sticky     = values[11],
+        .net_wm_allowed_actions  = values[12],
+        .net_wm_action_close     = values[13],
+        .net_wm_action_above     = values[14],
+        .net_wm_action_stick     = values[15],
     };
 }
 
@@ -129,7 +153,12 @@ pub fn getAtomCached(comptime name: []const u8) error{AtomCacheNotInitialized}!u
     // An unknown name produces a build error rather than a silent runtime failure.
     const AtomName = enum {
         @"WM_PROTOCOLS", @"WM_DELETE_WINDOW", @"WM_TAKE_FOCUS",
-        @"_NET_WM_NAME", @"UTF8_STRING", @"WM_CLASS", @"_NET_WM_PID",
+        @"_NET_WM_NAME", @"UTF8_STRING", @"WM_CLASS",
+        @"_NET_WM_STRUT_PARTIAL",
+        @"_NET_WM_WINDOW_TYPE",  @"_NET_WM_WINDOW_TYPE_DOCK",
+        @"_NET_WM_STATE",        @"_NET_WM_STATE_ABOVE",     @"_NET_WM_STATE_STICKY",
+        @"_NET_WM_ALLOWED_ACTIONS",
+        @"_NET_WM_ACTION_CLOSE", @"_NET_WM_ACTION_ABOVE",    @"_NET_WM_ACTION_STICK",
     };
     const field = comptime (std.meta.stringToEnum(AtomName, name) orelse
         @compileError("atom not in cache: " ++ name));
@@ -140,7 +169,16 @@ pub fn getAtomCached(comptime name: []const u8) error{AtomCacheNotInitialized}!u
         .@"_NET_WM_NAME"     => cache.net_wm_name,
         .@"UTF8_STRING"      => cache.utf8_string,
         .@"WM_CLASS"         => cache.wm_class,
-        .@"_NET_WM_PID"      => cache.net_wm_pid,
+        .@"_NET_WM_STRUT_PARTIAL"    => cache.net_wm_strut_partial,
+        .@"_NET_WM_WINDOW_TYPE"      => cache.net_wm_window_type,
+        .@"_NET_WM_WINDOW_TYPE_DOCK" => cache.net_wm_window_type_dock,
+        .@"_NET_WM_STATE"            => cache.net_wm_state,
+        .@"_NET_WM_STATE_ABOVE"      => cache.net_wm_state_above,
+        .@"_NET_WM_STATE_STICKY"     => cache.net_wm_state_sticky,
+        .@"_NET_WM_ALLOWED_ACTIONS"  => cache.net_wm_allowed_actions,
+        .@"_NET_WM_ACTION_CLOSE"     => cache.net_wm_action_close,
+        .@"_NET_WM_ACTION_ABOVE"     => cache.net_wm_action_above,
+        .@"_NET_WM_ACTION_STICK"     => cache.net_wm_action_stick,
     };
 }
 

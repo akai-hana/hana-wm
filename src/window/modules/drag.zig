@@ -14,7 +14,13 @@ pub fn startDrag(wm: *WM, win: u32, button: u8, x: i16, y: i16) void {
 
     if (bar.isBarWindow(win)) return;
 
-    const geom = utils.getGeometry(wm.conn, win) orelse return;
+    // Fast path: serve geometry from the tiling cache — zero X round-trips.
+    // Falls back to a live xcb_get_geometry query only for floating windows.
+    const geom = geom: {
+        if (tiling.getCachedGeom(win)) |r|
+            break :geom utils.Rect{ .x = r.x, .y = r.y, .width = r.width, .height = r.height };
+        break :geom utils.getGeometry(wm.conn, win) orelse return;
+    };
 
     wm.drag_state = .{
         .active = true,
