@@ -51,7 +51,7 @@ pub const State = struct {
 
 var g_state: ?State = null;
 
-pub fn getState() ?*State { return if (g_state != null) &g_state.? else null; }
+pub fn getState() ?*State { return if (g_state) |*s| s else null; }
 
 // Init / deinit
 
@@ -90,10 +90,10 @@ pub fn init(wm: *WM) void {
     };
 }
 
-pub fn deinit(wm: *WM) void {
+pub fn deinit() void {
     if (g_state) |*s| {
         for (s.workspaces) |*ws| ws.deinit();
-        wm.allocator.free(s.workspaces);
+        s.allocator.free(s.workspaces);
         s.window_to_workspace.deinit();
     }
     g_state = null;
@@ -109,7 +109,7 @@ pub fn removeWindow(win: u32) void {
     }
 }
 
-pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) void {
+pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) !void {
     const s = getState() orelse return;
     if (target_ws >= s.workspaces.len) {
         debug.err("Invalid target workspace: {}", .{target_ws});
@@ -120,12 +120,11 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) void {
 
     const from_ws = s.window_to_workspace.get(win) orelse {
         // Window not yet tracked — add it directly to the target.
-        s.workspaces[target_ws].add(win) catch |err| {
-            debug.err("Failed to add window to workspace {}: {}", .{ target_ws, err });
-            if (ts) |t| _ = t.windows.remove(win);
-            return;
+        try s.workspaces[target_ws].add(win);
+        s.window_to_workspace.put(win, target_ws) catch |e| {
+            _ = s.workspaces[target_ws].remove(win);
+            return e;
         };
-        s.window_to_workspace.put(win, target_ws) catch |e| debug.warnOnErr(e, "w2ws put");
         return;
     };
 
@@ -162,11 +161,26 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) void {
         _ = xcb.xcb_configure_window(wm.conn, win,
             xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
         if (wm.focused_window == win) focus.clearFocus(wm);
-        if (ts) |t| t.markDirty();
+        if (ts) |t| t.dirty = true;
+        // Evict the window's stale geometry cache entry.
+        //
+        // The cache holds the rect from the window's last retile on this workspace.
+        // markDirty() above triggers a retile of the current workspace via
+        // retileIfDirty() in the event loop, but that retile only covers windows
+        // still on the current workspace — win has already been moved to target_ws,
+        // so its cache entry is never refreshed and remains stale.
+        //
+        // Without this eviction, restoreWorkspaceGeom finds a cache hit for win
+        // when the user later switches to target_ws, replays the old geometry
+        // (e.g. right-half stack position from its previous workspace), and the
+        // window appears mis-tiled instead of filling its new workspace correctly.
+        // A full retile then fixes it — which is exactly what switching away and
+        // back triggered, explaining why that workaround worked.
+        tiling.invalidateGeomCache(win);
     } else if (target_ws == s.current) {
         // Map in case the window was deferred (spawned while this ws was inactive).
         _ = xcb.xcb_map_window(wm.conn, win);
-        if (ts) |t| t.markDirty();
+        if (ts) |t| t.dirty = true;
     }
 }
 
@@ -185,7 +199,7 @@ pub fn switchTo(wm: *WM, ws_id: u8) void {
 /// that a minimized-only workspace never receives keyboard focus.
 /// Takes a plain slice rather than *Workspace so it is decoupled from the
 /// workspace data structure and easier to test in isolation.
-fn firstNonMinimized(windows: []const u32) ?u32 {
+pub fn firstNonMinimized(windows: []const u32) ?u32 {
     for (windows) |win| {
         if (!minimize.isMinimized(win)) return win;
     }
@@ -240,8 +254,7 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
         // xcb_map_window is a no-op for already-mapped windows.
         for (new_ws_obj.windows.items()) |win| _ = xcb.xcb_map_window(wm.conn, win);
 
-        const ts            = tiling.getState();
-        const tiling_active = if (ts) |t| t.enabled else false;
+        const tiling_active = if (tiling.getState()) |t| t.enabled else false;
 
         if (tiling_active) {
             // Per-workspace layout mode: restore the layout this workspace was
@@ -253,14 +266,22 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
             }
 
             // Fast path: replay cached tiled positions without running the layout
-            // algorithm.  Falls back to a full retile only if the workspace is dirty
-            // (window added/removed/layout changed while away), the cache is cold,
-            // or the screen area changed (bar toggled, etc.).
+            // algorithm.  Falls back to a full retile only if this workspace's
+            // ws_geom_valid bit is not set (window added/removed/layout changed
+            // while away), the cache is cold, or the screen area changed.
             // restoreWorkspaceGeom calls utils.configureWindow directly, bypassing
             // the geom cache — this is intentional: the windows were moved to
             // OFFSCREEN_X_POSITION in step 1, so the cache has their correct tiled
             // rects but the server does not.
             if (!tiling.restoreWorkspaceGeom(wm)) {
+                // Evict the new workspace's geom cache entries before retriling.
+                // retileInactiveWorkspace may have pre-populated them with correct
+                // on-screen positions.  If we skip straight to retileCurrentWorkspace
+                // without evicting, configureSafe finds cache[win] == computed_geom
+                // (both are the correct on-screen rect), treats it as "no change",
+                // and skips the configure_window call — leaving windows stranded at
+                // OFFSCREEN_X_POSITION instead of moving them back on-screen.
+                for (new_ws_obj.windows.items()) |win| tiling.invalidateGeomCache(win);
                 tiling.retileCurrentWorkspace(wm);
             }
         } else {
@@ -297,7 +318,7 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
 
         const child = ptr.*.child;
         if (child != 0 and child != wm.root and
-            wm.hasWindow(child) and
+            s.window_to_workspace.contains(child) and
             new_ws_obj.contains(child) and
             !minimize.isMinimized(child))
         {
@@ -308,7 +329,7 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
 
     const old_focused    = wm.focused_window;
     wm.focused_window = focus_target;
-    std.debug.assert(wm.focused_window == null or wm.hasWindow(wm.focused_window.?));
+    std.debug.assert(wm.focused_window == null or isManaged(wm.focused_window.?));
 
     // Paint borders with the correct focused/unfocused colours before the
     // server grab releases.  This is what prevents the master-flash: the
@@ -321,8 +342,14 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
         _ = xcb.xcb_ungrab_button(wm.conn, xcb.XCB_BUTTON_INDEX_ANY, new_win, xcb.XCB_MOD_MASK_ANY);
     }
 
+    // ICCCM §4.1.7: xcb_set_input_focus must carry the timestamp of the
+    // user action that triggered the switch — not XCB_CURRENT_TIME (0).
+    // Globally-active windows (Electron, Chrome) validate this timestamp
+    // and silently ignore focus messages that arrive with timestamp 0.
+    // wm.last_event_time was set by handleKeyPress when the switch keybind
+    // was pressed, so it is always valid here.
     _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
-        wm.focused_window orelse wm.root, xcb.XCB_CURRENT_TIME);
+        wm.focused_window orelse wm.root, wm.last_event_time);
 
     // Raise the bar, redraw it with the new workspace highlighted, then release
     // the grab — all before the flush so everything lands in a single write.
@@ -367,4 +394,11 @@ pub inline fn getWorkspaceCount() usize {
 pub inline fn getWorkspaceForWindow(win: u32) ?u8 {
     const s = getState() orelse return null;
     return s.window_to_workspace.get(win);
+}
+
+/// Predicate form of getWorkspaceForWindow for use as a function pointer.
+/// Used by utils.findManagedWindow to check window membership without
+/// creating a circular import between utils and workspaces.
+pub fn isManaged(win: u32) bool {
+    return getWorkspaceForWindow(win) != null;
 }

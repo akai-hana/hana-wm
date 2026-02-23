@@ -30,14 +30,17 @@ pub extern fn cairo_xcb_surface_create(
     height:     c_int,
 ) ?*cairo_surface_t;
 
+/// Creates an in-memory image surface (no X connection)
+/// Used for off-screen font measurement (e.g. bar height calculation)
+/// to avoid the round-trips that xcb_create_window + xcb_create_gc incur.
+pub extern fn cairo_image_surface_create(
+    format: cairo_format_t,
+    width:  c_int,
+    height: c_int,
+) ?*cairo_surface_t;
+
 pub extern fn cairo_surface_destroy(surface: *cairo_surface_t) void;
 pub extern fn cairo_surface_flush(surface: *cairo_surface_t) void;
-
-pub extern fn cairo_image_surface_get_data(surface: *cairo_surface_t) [*]u8;
-pub extern fn cairo_image_surface_get_width(surface: *cairo_surface_t) c_int;
-pub extern fn cairo_image_surface_get_height(surface: *cairo_surface_t) c_int;
-pub extern fn cairo_image_surface_get_stride(surface: *cairo_surface_t) c_int;
-pub extern fn cairo_surface_mark_dirty(surface: *cairo_surface_t) void;
 
 pub extern fn cairo_create(surface: *cairo_surface_t) ?*cairo_t;
 pub extern fn cairo_destroy(cr: *cairo_t) void;
@@ -75,14 +78,8 @@ pub const cairo_operator_t = enum(c_int) {
     HSL_LUMINOSITY = 28,
 };
 
-pub extern fn cairo_set_source_rgb(cr: *cairo_t, red: f64, green: f64, blue: f64) void;
 pub extern fn cairo_set_source_rgba(cr: *cairo_t, red: f64, green: f64, blue: f64, alpha: f64) void;
-pub extern fn cairo_rectangle(cr: *cairo_t, x: f64, y: f64, width: f64, height: f64) void;
-pub extern fn cairo_fill(cr: *cairo_t) void;
 pub extern fn cairo_move_to(cr: *cairo_t, x: f64, y: f64) void;
-pub extern fn cairo_line_to(cr: *cairo_t, x: f64, y: f64) void;
-pub extern fn cairo_stroke(cr: *cairo_t) void;
-pub extern fn cairo_set_line_width(cr: *cairo_t, width: f64) void;
 pub extern fn cairo_save(cr: *cairo_t) void;
 pub extern fn cairo_restore(cr: *cairo_t) void;
 pub extern fn cairo_set_operator(cr: *cairo_t, op: cairo_operator_t) void;
@@ -118,20 +115,21 @@ pub extern fn pango_cairo_show_layout(cr: *cairo_t, layout: *PangoLayout) void;
 pub extern fn pango_cairo_context_set_resolution(context: *PangoContext, dpi: f64) void;
 
 pub extern fn pango_layout_set_text(layout: *PangoLayout, text: [*]const u8, length: c_int) void;
-pub extern fn pango_layout_set_markup(layout: *PangoLayout, markup: [*]const u8, length: c_int) void;
 pub extern fn pango_layout_set_font_description(layout: *PangoLayout, desc: ?*PangoFontDescription) void;
 pub extern fn pango_layout_get_context(layout: *PangoLayout) *PangoContext;
 pub extern fn pango_layout_get_pixel_size(layout: *PangoLayout, width: *c_int, height: *c_int) void;
-pub extern fn pango_layout_get_pixel_extents(layout: *PangoLayout, ink_rect: ?*PangoRectangle, logical_rect: ?*PangoRectangle) void;
 pub extern fn pango_layout_set_width(layout: *PangoLayout, width: c_int) void;
 pub extern fn pango_layout_set_ellipsize(layout: *PangoLayout, ellipsize: PangoEllipsizeMode) void;
 pub extern fn pango_layout_get_baseline(layout: *PangoLayout) c_int;
-pub extern fn pango_layout_get_line_readonly(layout: *PangoLayout, line: c_int) ?*const PangoLayoutLine;
-pub extern fn pango_layout_line_get_pixel_extents(line: *const PangoLayoutLine, ink_rect: ?*PangoRectangle, logical_rect: ?*PangoRectangle) void;
 
 pub extern fn pango_font_description_from_string(str: [*:0]const u8) ?*PangoFontDescription;
 pub extern fn pango_font_description_free(desc: *PangoFontDescription) void;
+pub extern fn pango_font_description_get_size(desc: *PangoFontDescription) c_int;
+pub extern fn pango_font_description_get_size_is_absolute(desc: *PangoFontDescription) c_int;
 pub extern fn pango_font_description_set_size(desc: *PangoFontDescription, size: c_int) void;
+pub extern fn pango_font_description_set_absolute_size(desc: *PangoFontDescription, size: f64) void;
+
+pub extern fn pango_layout_get_extents(layout: *PangoLayout, ink_rect: ?*PangoRectangle, logical_rect: ?*PangoRectangle) void;
 
 pub extern fn pango_context_get_metrics(
     context:  *PangoContext,

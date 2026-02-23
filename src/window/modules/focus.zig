@@ -94,9 +94,7 @@ pub fn clearFocus(wm: *WM) void {
     bar.markDirty();
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 fn shouldRaise(reason: Reason) bool {
     return switch (reason) {

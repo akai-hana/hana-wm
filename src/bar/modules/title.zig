@@ -29,7 +29,10 @@ const WindowInfo = struct {
     minimized: bool,
 };
 
-const WindowGeometry = struct { x: i16, y: i16, width: u16, height: u16 };
+/// Fixed left indent added to all title text draw calls, independent of the
+/// percentage-based scaledSegmentPadding. Ensures the text never touches the
+/// left border even at font_size = 100% (where scaledSegmentPadding == 0).
+const TITLE_LEAD_PX: u16 = 4;
 
 /// Draws the title segment at `start_x`, returning `start_x + width`.
 pub fn draw(
@@ -52,7 +55,7 @@ pub fn draw(
         return start_x + width;
     }
 
-    const scaled_padding = config.scaledPadding();
+    const scaled_padding = config.scaledSegmentPadding(height);
 
     if (window_count == 1) {
         const single_win   = current_ws.windows.items()[0];
@@ -72,14 +75,14 @@ pub fn draw(
             const title = getWindowTitle(wm.conn, single_win, allocator) catch null;
             defer if (title) |t| allocator.free(t);
             if (title) |t| {
-                try dc.drawTextEllipsis(start_x + scaled_padding, dc.baselineY(height),
-                    t, width -| scaled_padding * 2, config.fg);
+                try dc.drawTextEllipsis(start_x + scaled_padding + TITLE_LEAD_PX, dc.baselineY(height),
+                    t, width -| scaled_padding * 2 -| TITLE_LEAD_PX, config.fg);
             }
         } else {
             const title = try getFocusedWindowTitle(wm, cached_title, cached_title_window, allocator);
             if (title.len > 0) {
-                try dc.drawTextEllipsis(start_x + scaled_padding, dc.baselineY(height),
-                    title, width -| scaled_padding * 2,
+                try dc.drawTextEllipsis(start_x + scaled_padding + TITLE_LEAD_PX, dc.baselineY(height),
+                    title, width -| scaled_padding * 2 -| TITLE_LEAD_PX,
                     if (is_focused) config.selected_fg else config.fg);
             }
         }
@@ -109,7 +112,7 @@ fn drawSegmentedTitles(
     const MAX_WINS: usize = 128;
     const n_wins = @min(win_items.len, MAX_WINS);
 
-    // ── Phase 1: pipeline all _NET_WM_NAME cookies in a single write pass ──
+    // Phase 1: pipeline all _NET_WM_NAME cookies in a single write pass 
     // For each window we fire the cookie without waiting for a reply, so the
     // X server can process all requests concurrently.  The read pass below then
     // collects replies in order — turning N serial round-trips into one batch.
@@ -122,7 +125,7 @@ fn drawSegmentedTitles(
         }
     }
 
-    // ── Phase 2: collect _NET_WM_NAME replies; queue WM_NAME fallbacks ──
+    // Phase 2: collect _NET_WM_NAME replies; queue WM_NAME fallbacks 
     // We allocate titles as heap slices; a null entry means "needs WM_NAME fallback".
     var titles:   [MAX_WINS]?[]const u8                 = @splat(null);
     var fb_cookies: [MAX_WINS]xcb.xcb_get_property_cookie_t = undefined;
@@ -147,7 +150,7 @@ fn drawSegmentedTitles(
         }
     }
 
-    // ── Phase 3: collect WM_NAME fallback replies (subset only) ──
+    // Phase 3: collect WM_NAME fallback replies (subset only) 
     for (0..n_wins) |i| {
         if (!needs_fb[i]) continue;
         const r = xcb.xcb_get_property_reply(wm.conn, fb_cookies[i], null) orelse continue;
@@ -160,17 +163,16 @@ fn drawSegmentedTitles(
     }
     defer for (titles[0..n_wins]) |t| if (t) |s| allocator.free(s);
 
-    // ── Build WindowInfo list and sort ──
+    // Build WindowInfo list and sort 
     // WindowInfo.title borrows from titles[]; the defer above owns the memory.
     var window_infos = std.ArrayList(WindowInfo){};
     defer window_infos.deinit(allocator);
 
     for (win_items[0..n_wins], 0..) |win, i| {
         const is_min   = minimize.isMinimized(win);
-        const geom: WindowGeometry = if (!is_min) blk: {
-            if (tiling.getCachedGeom(win)) |rect|
-                break :blk .{ .x = rect.x, .y = rect.y, .width = rect.width, .height = rect.height };
-            break :blk getWindowGeometry(wm.conn, win) catch continue;
+        const geom: utils.Rect = if (!is_min) blk: {
+            if (tiling.getCachedGeom(win)) |rect| break :blk rect;
+            break :blk utils.getGeometry(wm.conn, win) orelse continue;
         } else .{ .x = std.math.maxInt(i16), .y = std.math.maxInt(i16), .width = 0, .height = 0 };
 
         try window_infos.append(allocator, .{
@@ -202,10 +204,10 @@ fn drawSegmentedTitles(
 
         if (info.title.len > 0 and segment_width > scaled_padding * 2) {
             try dc.drawTextEllipsis(
-                segment_x + scaled_padding,
+                segment_x + scaled_padding + TITLE_LEAD_PX,
                 dc.baselineY(height),
                 info.title,
-                segment_width -| scaled_padding * 2,
+                segment_width -| scaled_padding * 2 -| TITLE_LEAD_PX,
                 if (is_focused_win) config.selected_fg else config.fg,
             );
         }
@@ -220,13 +222,6 @@ fn compareWindows(_: void, a: WindowInfo, b: WindowInfo) bool {
     return a.window < b.window;
 }
 
-/// Fetches the geometry of `window` from the X server.
-fn getWindowGeometry(conn: *xcb.xcb_connection_t, window: u32) !WindowGeometry {
-    const cookie = xcb.xcb_get_geometry(conn, window);
-    const reply  = xcb.xcb_get_geometry_reply(conn, cookie, null) orelse return error.GeometryQueryFailed;
-    defer std.c.free(reply);
-    return .{ .x = reply.*.x, .y = reply.*.y, .width = reply.*.width, .height = reply.*.height };
-}
 
 /// Fetches a string property from `win`, allocating the result. Returns null when absent.
 fn fetchProperty(conn: *xcb.xcb_connection_t, win: u32, atom: u32, atom_type: u32, allocator: std.mem.Allocator) !?[]const u8 {

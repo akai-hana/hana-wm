@@ -55,18 +55,6 @@ pub const DrawContext = struct {
     /// Mirrors last_color but for the XCB GC used by fillRect rather than Cairo.
     last_gc_color:     ?u32                      = null,
 
-    /// Creates a DrawContext on the default root visual.
-    pub fn init(
-        allocator: std.mem.Allocator,
-        conn:      *defs.xcb.xcb_connection_t,
-        drawable:  u32,
-        width:     u16,
-        height:    u16,
-        dpi:       f32,
-    ) !*DrawContext {
-        return initWithVisual(allocator, conn, drawable, width, height, null, dpi, false, 1.0);
-    }
-
     /// Creates a DrawContext with an explicit visual (required for ARGB/32-bit windows).
     pub fn initWithVisual(
         allocator:    std.mem.Allocator,
@@ -125,10 +113,56 @@ pub const DrawContext = struct {
         return dc;
     }
 
+    /// Creates an off-screen DrawContext backed by a Cairo image surface.
+    ///
+    /// No X connection is used for surface or GC creation, eliminating the
+    /// xcb_create_window + xcb_create_gc_checked + xcb_request_check round-trips
+    /// that the normal init path incurs.  `conn` is stored in the struct so
+    /// `deinit` is uniform, but it is never dereferenced during construction or
+    /// font metric queries.  `gc` is left as 0; `deinit` skips xcb_free_gc for it.
+    ///
+    /// Intended for one-shot font measurement (e.g. bar height calculation).
+    /// Do NOT call fillRect / drawText / flush on an offscreen context — those
+    /// methods require a real XCB drawable and GC.
+    pub fn initOffscreen(
+        allocator: std.mem.Allocator,
+        conn:      *defs.xcb.xcb_connection_t,
+        dpi:       f32,
+    ) !*DrawContext {
+        const dc = try allocator.create(DrawContext);
+        errdefer allocator.destroy(dc);
+
+        // A 1×1 ARGB32 image surface — no drawable, no visual lookup, no server traffic.
+        const surface = c.cairo_image_surface_create(.ARGB32, 1, 1)
+            orelse return error.CairoSurfaceCreateFailed;
+        errdefer c.cairo_surface_destroy(surface);
+
+        const ctx = c.cairo_create(surface) orelse return error.CairoCreateFailed;
+        errdefer c.cairo_destroy(ctx);
+
+        const layout = c.pango_cairo_create_layout(ctx) orelse return error.PangoLayoutCreateFailed;
+        c.pango_cairo_context_set_resolution(c.pango_layout_get_context(layout), @floatCast(dpi));
+
+        dc.* = .{
+            .allocator    = allocator,
+            .conn         = conn,
+            .drawable     = 0,
+            .width        = 1,
+            .height       = 1,
+            .surface      = surface,
+            .ctx          = ctx,
+            .pango_layout = layout,
+            .gc           = 0, // sentinel: deinit skips xcb_free_gc
+        };
+
+        return dc;
+    }
+
     /// Frees all resources owned by this DrawContext.
     pub fn deinit(self: *DrawContext) void {
         if (self.current_font_desc) |desc| c.pango_font_description_free(desc);
-        _ = defs.xcb.xcb_free_gc(self.conn, self.gc);
+        // gc == 0 means this is an offscreen context with no XCB GC.
+        if (self.gc != 0) _ = defs.xcb.xcb_free_gc(self.conn, self.gc);
         c.g_object_unref(self.pango_layout);
         c.cairo_destroy(self.ctx);
         c.cairo_surface_destroy(self.surface);
@@ -220,6 +254,45 @@ pub const DrawContext = struct {
             .x = @intCast(x), .y = @intCast(y), .width = width, .height = height,
         };
         _ = defs.xcb.xcb_poly_fill_rectangle(self.conn, self.drawable, self.gc, 1, &rect);
+    }
+
+    /// Draws `text` at a temporarily-overridden absolute font size.
+    /// `x` is the left edge; `y_top` is the desired top of the ink bounds
+    /// (not the logical bounds), so the glyph renders flush to the target row.
+    /// The font size and metrics cache are restored before returning.
+    pub fn drawTextSized(self: *DrawContext, x: u16, y_top: u16, text: []const u8, size_px: u16, color: u32) !void {
+        const desc = self.current_font_desc orelse return error.NoFont;
+
+        // Save existing size and whether it was set as absolute or scaled.
+        const saved_size     = c.pango_font_description_get_size(desc);
+        const saved_absolute = c.pango_font_description_get_size_is_absolute(desc);
+        defer {
+            if (saved_absolute != 0)
+                c.pango_font_description_set_absolute_size(desc, @floatFromInt(saved_size))
+            else
+                c.pango_font_description_set_size(desc, saved_size);
+            c.pango_layout_set_font_description(self.pango_layout, desc);
+            self.cached_metrics = null;
+        }
+
+        // Override to the requested absolute pixel size.
+        c.pango_font_description_set_absolute_size(desc, @as(f64, @floatFromInt(size_px)) * @as(f64, @floatFromInt(c.PANGO_SCALE)));
+        c.pango_layout_set_font_description(self.pango_layout, desc);
+        self.cached_metrics = null;
+
+        self.setPangoText(text);
+
+        // Use ink extents so the glyph's visual top lands exactly at y_top,
+        // regardless of any leading space Pango adds above the ascent.
+        var ink_rect: c.PangoRectangle = undefined;
+        c.pango_layout_get_extents(self.pango_layout, &ink_rect, null);
+        const ink_top_px: f64 = @as(f64, @floatFromInt(ink_rect.y)) /
+                                 @as(f64, @floatFromInt(c.PANGO_SCALE));
+
+        self.setColor(color);
+        c.cairo_move_to(self.ctx, @floatFromInt(x),
+            @as(f64, @floatFromInt(y_top)) - ink_top_px);
+        c.pango_cairo_show_layout(self.ctx, self.pango_layout);
     }
 
     /// Draws `text` at pixel coordinates `(x, y)` where `y` is the font baseline.

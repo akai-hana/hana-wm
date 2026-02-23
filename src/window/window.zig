@@ -6,7 +6,6 @@ const xcb        = defs.xcb;
 const WM         = defs.WM;
 const utils      = @import("utils");
 const constants  = @import("constants");
-const filters    = @import("filters");
 const focus      = @import("focus");
 const tiling     = @import("tiling");
 const bar        = @import("bar");
@@ -16,6 +15,26 @@ const minimize   = @import("minimize");
 const layouts    = @import("layouts");
 
 const WINDOW_EVENT_MASK = constants.EventMasks.MANAGED_WINDOW;
+
+// Window predicates
+
+/// Returns true when `win` is non-zero, not the root window, not the bar, and
+/// is tracked by the window manager. This is the core validity check for any
+/// window operation.
+pub inline fn isValidManagedWindow(wm: *WM, win: u32) bool {
+    return win != 0 and
+           win != wm.root and
+           !bar.isBarWindow(win) and
+           workspaces.getWorkspaceForWindow(win) != null;
+}
+
+/// Returns true when `win` passes isValidManagedWindow and is on the current
+/// workspace. Combines both checks in a single call for event handlers.
+pub inline fn isOnCurrentWorkspace(wm: *WM, win: u32) bool {
+    return isValidManagedWindow(wm, win) and
+           workspaces.isOnCurrentWorkspace(win);
+}
+
 
 // Button grabs 
 
@@ -35,10 +54,9 @@ pub fn grabButtons(wm: *WM, win: u32, focused: bool) void {
 
 // Workspace rule matching 
 
-fn validateWorkspace(target: ?u8, current: u8) u8 {
-    const ws = target orelse return current;
-    const s  = workspaces.getState() orelse return current;
-    return if (ws < s.workspaces.len) ws else current;
+fn validateWorkspace(target: u8, current: u8) u8 {
+    const s = workspaces.getState() orelse return current;
+    return if (target < s.workspaces.len) target else current;
 }
 
 /// Collect a pre-fired WM_CLASS property cookie and match it against workspace
@@ -93,21 +111,29 @@ inline fn setupTiling(wm: *WM, win: u32, on_current: bool) void {
 // the workspace that was active when the daemon was first started, not now.
 // The queue is purely in-process — no X round-trips, no filesystem reads.
 
-const SPAWN_TIMEOUT_NS: u64 = 15 * std.time.ns_per_s;
-const SPAWN_QUEUE_CAP:  u8  = 16;
+const SPAWN_QUEUE_CAP: u8 = 16;
 
-const SpawnEntry = struct { workspace: u8, time: std.time.Instant };
+const SpawnEntry = struct {
+    workspace: u8,
+    /// PID written into _NET_WM_PID by the grandchild process.  Used for
+    /// direct matching so the window is assigned to the right workspace even
+    /// when the program takes arbitrarily long to start.  Set to 0 for
+    /// daemon-mode terminals (kitty --single-instance, wezterm server, foot
+    /// --server): their client process exits before the window maps, so no PID
+    /// match is possible; those entries fall back to the FIFO path instead.
+    pid: u32,
+};
 
 var spawn_buf:  [SPAWN_QUEUE_CAP]SpawnEntry = undefined;
 var spawn_head: u8 = 0;
 var spawn_len:  u8 = 0;
 
-/// Called by input.executeShellCommand immediately after a successful fork.
-/// Records the workspace the user was on when they pressed the exec keybind.
-pub fn registerSpawn(workspace: u8) void {
-    const now = std.time.Instant.now() catch return;
+/// Called by input.executeShellCommand after a confirmed successful exec.
+/// `pid` is the grandchild PID forwarded via pipe; it is 0 for daemon-mode
+/// terminals whose client process exited before we could verify exec success.
+pub fn registerSpawn(workspace: u8, pid: u32) void {
     const tail = (spawn_head + spawn_len) % SPAWN_QUEUE_CAP;
-    spawn_buf[tail] = .{ .workspace = workspace, .time = now };
+    spawn_buf[tail] = .{ .workspace = workspace, .pid = pid };
     if (spawn_len < SPAWN_QUEUE_CAP) {
         spawn_len += 1;
     } else {
@@ -116,18 +142,41 @@ pub fn registerSpawn(workspace: u8) void {
     }
 }
 
-/// Pop the oldest non-expired entry.  Expired entries are silently discarded.
-/// Returns null when the queue is empty or all entries have timed out.
-fn popSpawnWorkspace() ?u8 {
-    const now = std.time.Instant.now() catch return null;
-    while (spawn_len > 0) {
-        const entry = spawn_buf[spawn_head];
-        spawn_head = (spawn_head + 1) % SPAWN_QUEUE_CAP;
+/// Search for an entry whose PID matches `win_pid` (from _NET_WM_PID).
+/// On a hit the entry is removed and its workspace returned.  On a miss
+/// returns null — the caller should fall back to popSpawnFifo().
+fn popSpawnByPid(win_pid: u32) ?u8 {
+    if (win_pid == 0) return null;
+    var i: u8 = 0;
+    while (i < spawn_len) : (i += 1) {
+        const idx = (spawn_head + i) % SPAWN_QUEUE_CAP;
+        if (spawn_buf[idx].pid != win_pid) continue;
+        const ws = spawn_buf[idx].workspace;
+        // Collapse the slot by shifting the tail of the logical queue down.
+        var j: u8 = i;
+        while (j + 1 < spawn_len) : (j += 1) {
+            const cur  = (spawn_head + j)     % SPAWN_QUEUE_CAP;
+            const next = (spawn_head + j + 1) % SPAWN_QUEUE_CAP;
+            spawn_buf[cur] = spawn_buf[next];
+        }
         spawn_len -= 1;
-        if (now.since(entry.time) <= SPAWN_TIMEOUT_NS) return entry.workspace;
-        // Expired — discard and try the next entry.
+        return ws;
     }
     return null;
+}
+
+/// Pop the oldest entry unconditionally (FIFO, no expiry).
+/// Used as a fallback for daemon-mode terminals whose grandchild exits before
+/// the window maps, making PID matching impossible.  Entries only accumulate
+/// here from confirmed successful execs, so there are no stale entries to
+/// time out — the exec-pipe mechanism in executeShellCommand guarantees that
+/// failed launches are discarded before registerSpawn is ever called.
+fn popSpawnFifo() ?u8 {
+    if (spawn_len == 0) return null;
+    const ws = spawn_buf[spawn_head].workspace;
+    spawn_head = (spawn_head + 1) % SPAWN_QUEUE_CAP;
+    spawn_len -= 1;
+    return ws;
 }
 
 // Map request 
@@ -159,13 +208,30 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
         wm.conn, 0, win,
         xcb.XCB_ATOM_WM_NORMAL_HINTS, xcb.XCB_ATOM_ANY, 0, 18,
     );
+    // _NET_WM_PID: only queried when there are pending spawn entries, so the
+    // extra round-trip is paid only when we have a reason to use the result.
+    // The cookie is pipelined with the others above — no extra flush needed.
+    const has_pending_spawns = spawn_len > 0;
+    const c_net_wm_pid = if (has_pending_spawns) xcb.xcb_get_property(
+        wm.conn, 0, win,
+        utils.getAtomCached("_NET_WM_PID") catch 0,
+        xcb.XCB_ATOM_CARDINAL, 0, 1,
+    ) else undefined;
+
     // Determine target workspace.
     // Priority: workspace rules > exec spawn workspace > current workspace.
     //
     // Workspace rules (WM_CLASS): one round-trip; xcb_get_property_reply
     //   flushes the output buffer implicitly, so all cookies above also land.
-    // Spawn workspace (queue): zero round-trips — registerSpawn() was called
-    //   at fork time; popSpawnWorkspace() is a pure in-process ring-buffer pop.
+    // Spawn workspace: two-phase lookup —
+    //   Phase 1 (PID match): compare _NET_WM_PID against stored grandchild
+    //     PIDs.  Works for any program regardless of startup time — no expiry.
+    //   Phase 2 (FIFO fallback): for daemon-mode terminals (kitty, wezterm,
+    //     foot --server) whose client process exits before the window maps,
+    //     making PID matching impossible.  Entries are guaranteed stale-free
+    //     because executeShellCommand only calls registerSpawn() after the
+    //     exec-pipe confirms the grandchild exec'd successfully; exec failures
+    //     are discarded there and never enter the queue.
     // Current workspace: zero round-trips (fast path for unmanaged windows).
     const validated_ws: u8 = blk: {
         // 1. Workspace rules — explicit class-based assignment, highest priority.
@@ -176,41 +242,52 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
                 xcb.XCB_ATOM_STRING, 0, 256,
             );
             if (collectWorkspaceRule(wm, c_class)) |target| {
+                // Discard the PID cookie so XCB does not see an uncollected reply.
+                if (has_pending_spawns) xcb.xcb_discard_reply(wm.conn, c_net_wm_pid.sequence);
                 break :blk validateWorkspace(target, current_ws);
             }
             // No rule matched; fall through and try the spawn workspace.
         }
-        // 2. Exec spawn workspace — window was launched via a keybind exec action.
-        //    executeShellCommand called registerSpawn() before forking, recording
-        //    the active workspace in the spawn queue.  Pop the oldest non-expired
-        //    entry so the window lands on the workspace where the bind was pressed,
-        //    even when the terminal reuses a long-lived daemon process.
-        if (popSpawnWorkspace()) |spawn_ws|
-            break :blk validateWorkspace(spawn_ws, current_ws);
+        // 2. Exec spawn workspace.
+        if (has_pending_spawns) {
+            // Phase 1: direct PID match.
+            const pid_reply = xcb.xcb_get_property_reply(wm.conn, c_net_wm_pid, null);
+            if (pid_reply) |r| {
+                defer std.c.free(r);
+                if (r.*.format == 32 and r.*.value_len >= 1) {
+                    const win_pid = @as([*]const u32, @ptrCast(@alignCast(xcb.xcb_get_property_value(r))))[0];
+                    if (popSpawnByPid(win_pid)) |spawn_ws|
+                        break :blk validateWorkspace(spawn_ws, current_ws);
+                }
+            }
+            // Phase 2: FIFO fallback for daemon-mode terminals.
+            if (popSpawnFifo()) |spawn_ws|
+                break :blk validateWorkspace(spawn_ws, current_ws);
+        }
         // 3. Default: whichever workspace is active at map time.
         break :blk current_ws;
     };
     const is_current = (validated_ws == current_ws);
 
     // All local state — no X11 round-trips.
-    wm.addWindow(win) catch |err| {
+    workspaces.moveWindowTo(wm, win, validated_ws) catch |err| {
         debug.logError(err, win);
         utils.flush(wm.conn);
         return;
     };
-    workspaces.moveWindowTo(wm, win, validated_ws);
+
+    // Cache WM_NORMAL_HINTS before any retile so configureSafe can clamp
+    // geometry immediately, regardless of which workspace the window lands on.
+    collectAndCacheSizeHints(wm, win, c_normal_hints);
 
     if (is_current) {
-        // Queue the tiled geometry configure BEFORE the map command.  XCB
-        // guarantees in-order processing within a connection, so the server
-        // applies the geometry first — the window appears at its correct
-        // tiled position with no intermediate geometry flash.
-        //
-        // Cache WM_NORMAL_HINTS before the first retile so configureSafe
-        // can clamp the geometry immediately.
-        collectAndCacheSizeHints(wm, win, c_normal_hints);
+        // Freeze the compositor for the duration of retile + map so picom never
+        // composites a frame where the existing windows have been repositioned
+        // but the new window has not yet appeared (or vice-versa).
+        _ = xcb.xcb_grab_server(wm.conn);
         setupTiling(wm, win, true);
         _ = xcb.xcb_map_window(wm.conn, win);
+        _ = xcb.xcb_ungrab_server(wm.conn);
     } else {
         // Window belongs to a different workspace — do not map it yet.
         // executeSwitch() maps it inside a server grab when its workspace is
@@ -228,16 +305,28 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
         // setupTiling with on_current=false calls addWindow (registering the
         // window in s.windows, setting its border, marking dirty) but does NOT
         // call retileCurrentWorkspace — the current workspace is unaffected.
-        // Consume the WM_NORMAL_HINTS reply now so the reply queue stays
-        // clean.  The hints are cached and will be used when this workspace
-        // is first visited and retiled.
-        collectAndCacheSizeHints(wm, win, c_normal_hints);
         setupTiling(wm, win, false);
         grabButtons(wm, win, false);
+
+        // Pre-compute the correct tiled geometry for the inactive workspace now,
+        // so that restoreWorkspaceGeom can take its fast path when the user
+        // switches to it — no mid-switch layout run, no flash.
+        //
+        // This mirrors the inactive-workspace kill fix in unmanageWindow: addWindow
+        // set s.dirty, which would cause restoreWorkspaceGeom to fall back to a
+        // full retile at switch time.  Calling retileInactiveWorkspace inside a
+        // grab here clears dirty and populates the geom cache with the correct
+        // positions (including the new window), then pushes them back offscreen.
+        if (wm.config.tiling.enabled) {
+            _ = xcb.xcb_grab_server(wm.conn);
+            tiling.retileInactiveWorkspace(wm, validated_ws);
+            _ = xcb.xcb_ungrab_server(wm.conn);
+        }
     }
 
-    // Single flush covers: change_window_attributes + focus cookies +
-    // (for is_current) all configure_window calls + map_window.
+    // Single flush delivers the entire batch: change_window_attributes, focus
+    // cookies, and for is_current: grab + retile + map + ungrab — all in one
+    // syscall.  For the inactive path: border set + retileInactiveWorkspace.
     utils.flush(wm.conn);
 
     // Collect focus property replies.  On the no-rules path these were
@@ -247,23 +336,23 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     utils.populateFocusCacheFromCookies(wm.conn, win, c_protocols, c_hints);
 
     if (is_current) {
+        // Second grab: focus the new window and redraw the bar atomically so
+        // picom never composites a frame where the window is mapped and tiled
+        // but the bar still shows the old focused title and workspace state.
+        // The focus property cookies were collected above (round-trips done),
+        // so setFocus has everything it needs without any further blocking.
+        _ = xcb.xcb_grab_server(wm.conn);
         focus.setFocus(wm, win, .window_spawn);
+        bar.redrawImmediate(wm);
+        _ = xcb.xcb_ungrab_server(wm.conn);
+        utils.flush(wm.conn);
 
-        // The flush above has already delivered all configure_window calls to
-        // the X server, so its hit-testing reflects the post-retile layout.
-        // If the cursor is now inside a tiled window (child != 0) it means it
-        // was previously sitting in a gap that the retile just covered.  The
-        // X server will fire two crossing events — LeaveNotify on root and
-        // EnterNotify on the newly covering window — both of which would
-        // otherwise steal focus away from the just-spawned window.  Bump the
-        // suppression counter so both are absorbed rather than just the first.
-        // Record where the cursor is the moment the window spawns.
-        // handleEnterNotify / handleLeaveNotify compare incoming events against
-        // this position: events with matching coords are retile side-effects
-        // (the window layout shifted under a stationary cursor) and are silently
-        // dropped.  The first crossing event whose coords differ means the cursor
-        // genuinely moved, so suppression lifts automatically — regardless of how
-        // many spurious events the X server generates before then.
+        // The flush above has delivered all configure_window calls to the X
+        // server, so its hit-testing reflects the post-retile layout.
+        // Record where the cursor is the moment the window spawns so that
+        // handleEnterNotify / handleLeaveNotify can distinguish retile-induced
+        // crossings (cursor stationary, layout shifted under it) from genuine
+        // movement and suppress only the former.
         if (wm.suppress_focus_reason == .window_spawn) {
             const ptr_cookie = xcb.xcb_query_pointer(wm.conn, wm.root);
             if (xcb.xcb_query_pointer_reply(wm.conn, ptr_cookie, null)) |ptr| {
@@ -272,9 +361,9 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
                 wm.spawn_cursor_y = ptr.*.root_y;
             }
         }
+    } else {
+        bar.markDirty();
     }
-
-    bar.markDirty();
 }
 
 // Configure request 
@@ -283,6 +372,25 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
 /// Required by ICCCM §4.1.5 whenever a WM silently ignores a ConfigureRequest:
 /// the client must be told what geometry it actually has, or it may block
 /// waiting for an acknowledgement that never arrives.
+fn sendConfigureNotify(wm: *WM, win: u32, x: i16, y: i16, w: u16, h: u16, border: u16) void {
+    const ev = xcb.xcb_configure_notify_event_t{
+        .response_type     = xcb.XCB_CONFIGURE_NOTIFY,
+        .pad0              = 0,
+        .sequence          = 0,
+        .event             = win,
+        .window            = win,
+        .above_sibling     = xcb.XCB_NONE,
+        .x                 = x,
+        .y                 = y,
+        .width             = w,
+        .height            = h,
+        .border_width      = border,
+        .override_redirect = 0,
+        .pad1              = 0,
+    };
+    _ = xcb.xcb_send_event(wm.conn, 0, win, xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY, @ptrCast(&ev));
+}
+
 fn sendSyntheticConfigureNotify(wm: *WM, win: u32) void {
     // Fast path: serve the geometry from the tiling cache — zero round-trips.
     // Tiled windows always have a cache entry written by the last retile.
@@ -290,26 +398,7 @@ fn sendSyntheticConfigureNotify(wm: *WM, win: u32) void {
     // the live get_geometry query below (one blocking round-trip, rare).
     if (tiling.getCachedGeom(win)) |rect| {
         const border: u16 = if (tiling.getState()) |s| s.border_width else 0;
-        const ev = xcb.xcb_configure_notify_event_t{
-            .response_type     = xcb.XCB_CONFIGURE_NOTIFY,
-            .pad0              = 0,
-            .sequence          = 0,
-            .event             = win,
-            .window            = win,
-            .above_sibling     = xcb.XCB_NONE,
-            .x                 = rect.x,
-            .y                 = rect.y,
-            .width             = rect.width,
-            .height            = rect.height,
-            .border_width      = border,
-            .override_redirect = 0,
-            .pad1              = 0,
-        };
-        _ = xcb.xcb_send_event(
-            wm.conn, 0, win,
-            xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY,
-            @ptrCast(&ev),
-        );
+        sendConfigureNotify(wm, win, rect.x, rect.y, rect.width, rect.height, border);
         return;
     }
 
@@ -319,28 +408,8 @@ fn sendSyntheticConfigureNotify(wm: *WM, win: u32) void {
         wm.conn, xcb.xcb_get_geometry(wm.conn, win), null,
     ) orelse return;
     defer std.c.free(reply);
-
-    const ev = xcb.xcb_configure_notify_event_t{
-        .response_type     = xcb.XCB_CONFIGURE_NOTIFY,
-        .pad0              = 0,
-        .sequence          = 0,
-        .event             = win,
-        .window            = win,
-        .above_sibling     = xcb.XCB_NONE,
-        .x                 = reply.*.x,
-        .y                 = reply.*.y,
-        .width             = reply.*.width,
-        .height            = reply.*.height,
-        .border_width      = reply.*.border_width,
-        .override_redirect = 0,
-        .pad1              = 0,
-    };
-    _ = xcb.xcb_send_event(
-        wm.conn, 0, win,
-        xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY,
-        @ptrCast(&ev),
-    );
     // No flush here — the caller (event loop) flushes after each event batch.
+    sendConfigureNotify(wm, win, reply.*.x, reply.*.y, reply.*.width, reply.*.height, reply.*.border_width);
 }
 
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, wm: *WM) void {
@@ -416,7 +485,7 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) vo
     else
         event.event;
 
-    if (!filters.isOnCurrentWorkspace(wm, win)) return;
+    if (!isOnCurrentWorkspace(wm, win)) return;
     if (minimize.isMinimized(win)) return;
     if (wm.focused_window == win) return;
 
@@ -454,7 +523,7 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t, wm: *WM) vo
     };
     if (target == 0 or target == wm.root) return;
 
-    if (!filters.isOnCurrentWorkspace(wm, target)) return;
+    if (!isOnCurrentWorkspace(wm, target)) return;
     if (minimize.isMinimized(target)) return;
     if (wm.focused_window == target) return;
 
@@ -469,7 +538,7 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t, wm: *WM) vo
 /// WM_HINTS:     The input field is stable in practice, but some apps update it.
 ///               Recomputing is cheap — one property round-trip, done rarely.
 pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t, wm: *WM) void {
-    if (!wm.hasWindow(event.window)) return;
+    if (workspaces.getWorkspaceForWindow(event.window) == null) return;
     const wm_protocols = utils.getAtomCached("WM_PROTOCOLS") catch return;
     if (event.atom == wm_protocols or event.atom == xcb.XCB_ATOM_WM_HINTS) {
         utils.recacheInputModel(wm.conn, event.window);
@@ -479,23 +548,29 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t, wm: *
 // Unmap / destroy 
 
 fn unmanageWindow(wm: *WM, win: u32) void {
-    const was_fullscreen = wm.fullscreen.isFullscreen(win);
-    if (was_fullscreen) {
-        // Clear fullscreen state BEFORE the grab so setBarState (called inside
-        // the grab) doesn't see the workspace as still-fullscreen and bail.
-        if (wm.fullscreen.window_to_workspace.get(win)) |ws| {
-            wm.fullscreen.removeForWorkspace(ws);
-        }
-    }
+    // Single map lookup: covers both the "is fullscreen?" check and retrieves
+    // the workspace ID for removeForWorkspace.  Avoids the double-lookup that
+    // isFullscreen (contains) + window_to_workspace.get would otherwise cause.
+    // Must clear fullscreen state BEFORE the grab so setBarState (called inside
+    // the grab) doesn't see the workspace as still-fullscreen and bail early.
+    const was_fullscreen = if (wm.fullscreen.window_to_workspace.get(win)) |ws| blk: {
+        wm.fullscreen.removeForWorkspace(ws);
+        break :blk true;
+    } else false;
 
     const was_focused = (wm.focused_window == win);
+
+    // Capture the window's workspace and the current workspace BEFORE removing
+    // the window from tracking — workspaces.removeWindow (below) drops it from
+    // window_to_workspace, so getWorkspaceForWindow would return null afterward.
+    const win_ws     = workspaces.getWorkspaceForWindow(win);
+    const current_ws = workspaces.getCurrentWorkspace();
 
     // Update all bookkeeping state before the grab — no XCB calls here.
     if (wm.config.tiling.enabled) tiling.removeWindow(win);
     utils.uncacheWindowFocusProps(win);
     layouts.evictSizeHints(win);
     workspaces.removeWindow(win);
-    wm.removeWindow(win);
 
     // Wrap all visual changes in a single server grab so picom never composites
     // an intermediate state where the destroyed window's slot is empty but the
@@ -519,6 +594,25 @@ fn unmanageWindow(wm: *WM, win: u32) void {
         // Round-trips from our own connection are safe inside a server grab —
         // the server responds normally; only other connections are frozen.
         focusWindowUnderPointer(wm);
+    } else if (!was_fullscreen and wm.config.tiling.enabled) {
+        // The window was not focused, so the was_focused branch did not retile.
+        // Determine whether it was on the current workspace or a different one
+        // and retile accordingly so the layout is correct immediately.
+        if (win_ws) |ws| {
+            const cur = current_ws orelse std.math.maxInt(u8);
+            if (ws == cur) {
+                // Killed on the current workspace but was not the focused window
+                // (e.g. there are 3 windows and a non-focused one is pkilled).
+                // Retile inside the grab for atomicity.
+                tiling.retileIfDirty(wm);
+            } else {
+                // Killed on an inactive workspace.  Pre-compute the correct
+                // geometry for that workspace now so that restoreWorkspaceGeom
+                // succeeds at switch time without running the layout algorithm
+                // mid-switch — preventing the flash the deferred retile causes.
+                tiling.retileInactiveWorkspace(wm, ws);
+            }
+        }
     }
 
     // Redraw the bar inside the grab so the updated title and focus state are
@@ -532,13 +626,13 @@ fn unmanageWindow(wm: *WM, win: u32) void {
 
 pub fn handleUnmapNotify(event: *const xcb.xcb_unmap_notify_event_t, wm: *WM) void {
     const win = event.window;
-    if (bar.isBarWindow(win) or !wm.hasWindow(win)) return;
+    if (bar.isBarWindow(win) or workspaces.getWorkspaceForWindow(win) == null) return;
     unmanageWindow(wm, win);
 }
 
 pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM) void {
     const win = event.window;
-    if (bar.isBarWindow(win)) return;
+    if (bar.isBarWindow(win) or workspaces.getWorkspaceForWindow(win) == null) return;
     unmanageWindow(wm, win);
 }
 
@@ -547,29 +641,19 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM
 fn focusWindowUnderPointer(wm: *WM) void {
     const reply = xcb.xcb_query_pointer_reply(
         wm.conn, xcb.xcb_query_pointer(wm.conn, wm.root), null,
-    ) orelse { focusFallback(wm); return; };
+    ) orelse { minimize.focusBestAvailable(wm); return; };
     defer std.c.free(reply);
 
     const child = reply.*.child;
-    if (filters.isOnCurrentWorkspace(wm, child) and !minimize.isMinimized(child)) {
+    if (isOnCurrentWorkspace(wm, child) and !minimize.isMinimized(child)) {
         focus.setFocus(wm, child, .mouse_enter);
         return;
     }
-    focusFallback(wm);
+    minimize.focusBestAvailable(wm);
 }
 
-/// Focus the first visible, non-minimized window in the current workspace (last-resort fallback).
-fn focusFallback(wm: *WM) void {
-    const ws = workspaces.getCurrentWorkspaceObject() orelse return;
-    for (ws.windows.items()) |win| {
-        if (filters.isValidManagedWindow(wm, win) and !minimize.isMinimized(win)) {
-            focus.setFocus(wm, win, .window_destroyed);
-            return;
-        }
-    }
-}
 
-// WM_NORMAL_HINTS ─────────────────────────────────────────────────────────
+// WM_NORMAL_HINTS 
 
 /// Parse a WM_NORMAL_HINTS reply and populate the layouts size-hints cache.
 /// XSizeHints wire layout (each field is one 32-bit CARD32):

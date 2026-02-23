@@ -3,14 +3,16 @@
 const defs = @import("defs");
 const xcb = defs.xcb;
 
-/// X coordinate for positioning windows off-screen (far left)
+/// X coordinate for positioning windows off-screen (far left).
 pub const OFFSCREEN_X_POSITION: i32 = -4000;
 
-/// Minimum X coordinate threshold for detecting off-screen windows
+/// X coordinate range used by fullscreen.zig to detect whether a window is
+/// currently parked off-screen (e.g. on an inactive workspace or minimized).
 pub const OFFSCREEN_THRESHOLD_MIN: i32 = -1000;
-
-/// Maximum X coordinate threshold for detecting off-screen windows
 pub const OFFSCREEN_THRESHOLD_MAX: i32 = 10000;
+
+/// Maximum depth when walking the X11 window tree in findManagedWindow.
+pub const MAX_WINDOW_TREE_DEPTH: usize = 10;
 
 /// Event masks for window types
 pub const EventMasks = struct {
@@ -34,15 +36,15 @@ pub const EventMasks = struct {
                                xcb.XCB_EVENT_MASK_PROPERTY_CHANGE;
 };
 
-/// Lock key combinations grabbed
-pub const LOCK_MODIFIERS = [_]u16{ 
-    0, 
-    defs.MOD_LOCK, 
+/// Lock key combinations grabbed alongside every keybinding.
+pub const LOCK_MODIFIERS = [_]u16{
+    0,
+    defs.MOD_LOCK,
     defs.MOD_2, // NumLock
-    defs.MOD_LOCK | defs.MOD_2 
+    defs.MOD_LOCK | defs.MOD_2,
 };
 
-/// X11 Cursor constants (mask glyph is always source + 1 by convention)
+/// X11 Cursor constants (mask glyph is always source + 1 by convention).
 pub const CURSOR_LEFT_PTR      = 68;
 pub const CURSOR_LEFT_PTR_MASK = CURSOR_LEFT_PTR + 1;
 
@@ -50,8 +52,6 @@ pub const CURSOR_LEFT_PTR_MASK = CURSOR_LEFT_PTR + 1;
 pub const Sizes = struct {
     /// Dispatch table size (covers all X11 event types)
     pub const EVENT_DISPATCH_TABLE = 36;
-    
-    /// Pre-allocation capacity for window tracking structures.
-    /// Sized for a typical session; structures grow automatically beyond this.
-    pub const WINDOW_CAPACITY = 32;
+
+
 };

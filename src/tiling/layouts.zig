@@ -6,7 +6,7 @@ const debug = @import("debug");
 const defs  = @import("defs");
 const xcb   = defs.xcb;
 
-// WM_NORMAL_HINTS size hint cache ──────────────────────────────────────────
+// WM_NORMAL_HINTS size hint cache
 //
 // Populated from WM_NORMAL_HINTS during handleMapRequest and evicted on
 // unmanage.  configureSafe clamps every rect to the stored minimums so that
@@ -60,6 +60,12 @@ pub fn disarmGeomCache() void {
     g_geom_ctx = null;
 }
 
+// Shared rect equality — avoids repeating the four-field comparison in both
+// configureSafe and testAndApplyMonocleRect.
+inline fn rectsEqual(a: utils.Rect, b: utils.Rect) bool {
+    return a.x == b.x and a.y == b.y and a.width == b.width and a.height == b.height;
+}
+
 // configureSafe; the single call-site every layout module uses to apply
 // geometry.  With the cache armed, calls for unchanged windows are elided.
 
@@ -90,13 +96,7 @@ pub inline fn configureSafe(
 
     if (g_geom_ctx) |ctx| {
         if (ctx.cache.get(win)) |cached| {
-            if (cached.x      == effective.x      and
-                cached.y      == effective.y      and
-                cached.width  == effective.width  and
-                cached.height == effective.height)
-            {
-                return; // geometry unchanged; skip redundant XCB call
-            }
+            if (rectsEqual(cached, effective)) return; // geometry unchanged; skip redundant XCB call
         }
         // Store before sending so that any duplicate sub-calls within the
         // same retile pass (e.g. overflow cells) are also deduplicated.
@@ -106,36 +106,3 @@ pub inline fn configureSafe(
     utils.configureWindow(conn, win, effective);
 }
 
-/// Monocle-specific fast path: all windows share the same rect, so one cache
-/// check on the first window determines whether any work needs doing at all.
-/// If the geometry is unchanged every window is skipped in O(1).
-/// If it changed, we send XCB calls and update the cache for all windows
-/// without the per-window hash lookup overhead of calling configureSafe N times.
-pub fn testAndApplyMonocleRect(
-    conn:    *xcb.xcb_connection_t,
-    windows: []const u32,
-    rect:    utils.Rect,
-) void {
-    const ctx = g_geom_ctx orelse {
-        // Cache not armed — fall back to a plain configure for every window.
-        for (windows) |win| utils.configureWindow(conn, win, rect);
-        return;
-    };
-
-    // Single cache probe against the first window decides for all.
-    if (ctx.cache.get(windows[0])) |cached| {
-        if (cached.x      == rect.x     and
-            cached.y      == rect.y     and
-            cached.width  == rect.width and
-            cached.height == rect.height)
-        {
-            return; // geometry unchanged for every window; nothing to send
-        }
-    }
-
-    // Geometry changed — configure all windows and update the cache in one pass.
-    for (windows) |win| {
-        utils.configureWindow(conn, win, rect);
-        ctx.cache.put(ctx.allocator, win, rect) catch {};
-    }
-}

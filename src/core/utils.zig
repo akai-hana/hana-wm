@@ -3,7 +3,8 @@
 const std  = @import("std");
 const defs = @import("defs");
 const xcb  = defs.xcb;
-const debug = @import("debug");
+const debug     = @import("debug");
+const constants = @import("constants");
 
 const MAX_PROPERTY_LENGTH: u32 = 256; // long-words requested from the X server
 const PROPERTY_NO_DELETE:  u8  = 0;
@@ -68,25 +69,29 @@ pub inline fn normalizeModifiers(state: u16) u16 {
 
 // Atom cache
 
+// Field names match the X11 atom strings exactly so getAtomCached can resolve
+// them with a single @field call — no switch, no redundant enum, no second
+// place to add entries when a new atom is needed.
 const AtomCache = struct {
-    wm_protocols:  u32,
-    wm_delete:     u32,
-    wm_take_focus: u32,
-    net_wm_name:   u32,
-    utf8_string:   u32,
-    wm_class:      u32,
+    @"WM_PROTOCOLS":             u32,
+    @"WM_DELETE_WINDOW":         u32,
+    @"WM_TAKE_FOCUS":            u32,
+    @"_NET_WM_NAME":             u32,
+    @"UTF8_STRING":              u32,
+    @"WM_CLASS":                 u32,
     // Bar window property atoms — used by bar.setWindowProperties on every init/reload.
     // Batched here so setWindowProperties pays zero X round-trips rather than 10 serial ones.
-    net_wm_strut_partial:    u32,
-    net_wm_window_type:      u32,
-    net_wm_window_type_dock: u32,
-    net_wm_state:            u32,
-    net_wm_state_above:      u32,
-    net_wm_state_sticky:     u32,
-    net_wm_allowed_actions:  u32,
-    net_wm_action_close:     u32,
-    net_wm_action_above:     u32,
-    net_wm_action_stick:     u32,
+    @"_NET_WM_STRUT_PARTIAL":    u32,
+    @"_NET_WM_WINDOW_TYPE":      u32,
+    @"_NET_WM_WINDOW_TYPE_DOCK": u32,
+    @"_NET_WM_STATE":            u32,
+    @"_NET_WM_STATE_ABOVE":      u32,
+    @"_NET_WM_STATE_STICKY":     u32,
+    @"_NET_WM_ALLOWED_ACTIONS":  u32,
+    @"_NET_WM_ACTION_CLOSE":     u32,
+    @"_NET_WM_ACTION_ABOVE":     u32,
+    @"_NET_WM_ACTION_STICK":     u32,
+    @"_NET_WM_PID":              u32,
 };
 
 var atom_cache: ?AtomCache = null;
@@ -102,6 +107,7 @@ pub fn initAtomCache(conn: *xcb.xcb_connection_t) !void {
         "_NET_WM_STATE",        "_NET_WM_STATE_ABOVE",      "_NET_WM_STATE_STICKY",
         "_NET_WM_ALLOWED_ACTIONS",
         "_NET_WM_ACTION_CLOSE", "_NET_WM_ACTION_ABOVE",     "_NET_WM_ACTION_STICK",
+        "_NET_WM_PID",
     };
     var cookies: [names.len]xcb.xcb_intern_atom_cookie_t = undefined;
     for (&cookies, names) |*c, name|
@@ -115,22 +121,23 @@ pub fn initAtomCache(conn: *xcb.xcb_connection_t) !void {
     }
 
     atom_cache = .{
-        .wm_protocols  = values[0],
-        .wm_delete     = values[1],
-        .wm_take_focus = values[2],
-        .net_wm_name   = values[3],
-        .utf8_string   = values[4],
-        .wm_class      = values[5],
-        .net_wm_strut_partial    = values[6],
-        .net_wm_window_type      = values[7],
-        .net_wm_window_type_dock = values[8],
-        .net_wm_state            = values[9],
-        .net_wm_state_above      = values[10],
-        .net_wm_state_sticky     = values[11],
-        .net_wm_allowed_actions  = values[12],
-        .net_wm_action_close     = values[13],
-        .net_wm_action_above     = values[14],
-        .net_wm_action_stick     = values[15],
+        .@"WM_PROTOCOLS"             = values[0],
+        .@"WM_DELETE_WINDOW"         = values[1],
+        .@"WM_TAKE_FOCUS"            = values[2],
+        .@"_NET_WM_NAME"             = values[3],
+        .@"UTF8_STRING"              = values[4],
+        .@"WM_CLASS"                 = values[5],
+        .@"_NET_WM_STRUT_PARTIAL"    = values[6],
+        .@"_NET_WM_WINDOW_TYPE"      = values[7],
+        .@"_NET_WM_WINDOW_TYPE_DOCK" = values[8],
+        .@"_NET_WM_STATE"            = values[9],
+        .@"_NET_WM_STATE_ABOVE"      = values[10],
+        .@"_NET_WM_STATE_STICKY"     = values[11],
+        .@"_NET_WM_ALLOWED_ACTIONS"  = values[12],
+        .@"_NET_WM_ACTION_CLOSE"     = values[13],
+        .@"_NET_WM_ACTION_ABOVE"     = values[14],
+        .@"_NET_WM_ACTION_STICK"     = values[15],
+        .@"_NET_WM_PID"              = values[16],
     };
 }
 
@@ -148,38 +155,10 @@ pub fn getAtom(conn: *xcb.xcb_connection_t, name: []const u8) !u32 {
 }
 
 pub fn getAtomCached(comptime name: []const u8) error{AtomCacheNotInitialized}!u32 {
+    // Unknown names produce a build error rather than a silent runtime failure.
+    comptime if (!@hasField(AtomCache, name)) @compileError("atom not in cache: " ++ name);
     const cache = atom_cache orelse return error.AtomCacheNotInitialized;
-    // All callers pass string literals; the switch resolves at compile time.
-    // An unknown name produces a build error rather than a silent runtime failure.
-    const AtomName = enum {
-        @"WM_PROTOCOLS", @"WM_DELETE_WINDOW", @"WM_TAKE_FOCUS",
-        @"_NET_WM_NAME", @"UTF8_STRING", @"WM_CLASS",
-        @"_NET_WM_STRUT_PARTIAL",
-        @"_NET_WM_WINDOW_TYPE",  @"_NET_WM_WINDOW_TYPE_DOCK",
-        @"_NET_WM_STATE",        @"_NET_WM_STATE_ABOVE",     @"_NET_WM_STATE_STICKY",
-        @"_NET_WM_ALLOWED_ACTIONS",
-        @"_NET_WM_ACTION_CLOSE", @"_NET_WM_ACTION_ABOVE",    @"_NET_WM_ACTION_STICK",
-    };
-    const field = comptime (std.meta.stringToEnum(AtomName, name) orelse
-        @compileError("atom not in cache: " ++ name));
-    return switch (field) {
-        .@"WM_PROTOCOLS"     => cache.wm_protocols,
-        .@"WM_DELETE_WINDOW" => cache.wm_delete,
-        .@"WM_TAKE_FOCUS"    => cache.wm_take_focus,
-        .@"_NET_WM_NAME"     => cache.net_wm_name,
-        .@"UTF8_STRING"      => cache.utf8_string,
-        .@"WM_CLASS"         => cache.wm_class,
-        .@"_NET_WM_STRUT_PARTIAL"    => cache.net_wm_strut_partial,
-        .@"_NET_WM_WINDOW_TYPE"      => cache.net_wm_window_type,
-        .@"_NET_WM_WINDOW_TYPE_DOCK" => cache.net_wm_window_type_dock,
-        .@"_NET_WM_STATE"            => cache.net_wm_state,
-        .@"_NET_WM_STATE_ABOVE"      => cache.net_wm_state_above,
-        .@"_NET_WM_STATE_STICKY"     => cache.net_wm_state_sticky,
-        .@"_NET_WM_ALLOWED_ACTIONS"  => cache.net_wm_allowed_actions,
-        .@"_NET_WM_ACTION_CLOSE"     => cache.net_wm_action_close,
-        .@"_NET_WM_ACTION_ABOVE"     => cache.net_wm_action_above,
-        .@"_NET_WM_ACTION_STICK"     => cache.net_wm_action_stick,
-    };
+    return @field(cache, name);
 }
 
 // Property helpers
@@ -379,24 +358,22 @@ pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allo
 
 // Private helpers
 
-const WMProtocolsProps = struct { take_focus: bool, wm_delete: bool };
+const WMProtocolsProps = struct { take_focus: bool = false, wm_delete: bool = false };
 
 /// Scan WM_PROTOCOLS once and return all flags the WM cares about.
 /// One round-trip per call; results are always cached by callers.
 fn queryWMProtocolsProps(conn: *xcb.xcb_connection_t, win: u32) WMProtocolsProps {
-    const protocols_atom = getAtomCached("WM_PROTOCOLS") catch
-        return .{ .take_focus = false, .wm_delete = false };
+    const protocols_atom = getAtomCached("WM_PROTOCOLS") catch return .{};
     const reply = xcb.xcb_get_property_reply(conn,
         xcb.xcb_get_property(conn, PROPERTY_NO_DELETE, win, protocols_atom, xcb.XCB_ATOM_ATOM, 0, MAX_PROPERTY_LENGTH), null,
-    ) orelse return .{ .take_focus = false, .wm_delete = false };
+    ) orelse return .{};
     defer std.c.free(reply);
-    if (reply.*.format != 32 or reply.*.value_len == 0)
-        return .{ .take_focus = false, .wm_delete = false };
+    if (reply.*.format != 32 or reply.*.value_len == 0) return .{};
 
-    const take_focus_atom = getAtomCached("WM_TAKE_FOCUS")    catch return .{ .take_focus = false, .wm_delete = false };
-    const wm_delete_atom  = getAtomCached("WM_DELETE_WINDOW") catch return .{ .take_focus = false, .wm_delete = false };
+    const take_focus_atom = getAtomCached("WM_TAKE_FOCUS")    catch return .{};
+    const wm_delete_atom  = getAtomCached("WM_DELETE_WINDOW") catch return .{};
 
-    var props: WMProtocolsProps = .{ .take_focus = false, .wm_delete = false };
+    var props: WMProtocolsProps = .{};
     const atoms: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
     for (atoms[0..@intCast(reply.*.value_len)]) |atom| {
         if (atom == take_focus_atom) props.take_focus = true;
@@ -447,10 +424,10 @@ fn queryWMHintsInput(conn: *xcb.xcb_connection_t, win: u32) bool {
 /// Find the top-level window that the WM manages, starting from a potentially
 /// child window. Electron apps and other toolkits often use child windows for
 /// rendering, but the WM only manages the top-level parent.
-pub fn findManagedWindow(conn: *xcb.xcb_connection_t, win: u32, wm: anytype) u32 {
+pub fn findManagedWindow(conn: *xcb.xcb_connection_t, win: u32, isManaged: fn(u32) bool) u32 {
     var current = win;
-    for (0..10) |_| {
-        if (wm.hasWindow(current)) return current;
+    for (0..constants.MAX_WINDOW_TREE_DEPTH) |_| {
+        if (isManaged(current)) return current;
 
         const tree_reply = xcb.xcb_query_tree_reply(
             conn, xcb.xcb_query_tree(conn, current), null,

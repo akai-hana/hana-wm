@@ -56,7 +56,7 @@ fn setTimerState(enable: bool) void {
 
 /// Recalculates whether the timer should run and applies the change.
 /// Call when bar visibility changes or the config is reloaded.
-pub fn updateTimerState(_: *defs.WM) void {
+pub fn updateTimerState() void {
     setTimerState(shouldClockRun());
 }
 
@@ -71,7 +71,7 @@ pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start
         last_formatted_sec = ts.sec;
         break :blk str;
     };
-    return dc.drawSegment(start_x, height, time_str, config.scaledPadding(), config.bg, config.fg);
+    return dc.drawSegment(start_x, height, time_str, config.scaledSegmentPadding(height), config.bg, config.fg);
 }
 
 /// Formats a timespec into `buf` as local time. Falls back to UTC on `localtime` failure.
