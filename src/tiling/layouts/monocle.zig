@@ -1,14 +1,13 @@
 //! Monocle layout - All windows fullscreen, stacked
-/// Direct XCB calls - no batch overhead
+//! Direct XCB calls — no batch overhead
 
-const std = @import("std");
-const defs = @import("defs");
-const utils = @import("utils");
+const defs    = @import("defs");
+const utils   = @import("utils");
 const layouts = @import("layouts");
 
 const tiling = @import("tiling");
-const State = tiling.State;
-const xcb = defs.xcb;
+const State  = tiling.State;
+const xcb    = defs.xcb;
 
 pub fn tileWithOffset(conn: *xcb.xcb_connection_t, state: *State, windows: []const u32, screen_w: u16, screen_h: u16, y_offset: u16) void {
     if (windows.len == 0) return;

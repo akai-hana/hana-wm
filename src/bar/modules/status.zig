@@ -12,7 +12,7 @@ const DEFAULT_STATUS = "hana";
 /// Returns `start_x` unchanged when there is no text to display.
 pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start_x: u16, status_text: []const u8) !u16 {
     if (status_text.len == 0) return start_x;
-    return dc.drawSegment(start_x, height, status_text, config.scaledPadding(), config.bg, config.fg);
+    return dc.drawSegment(start_x, height, status_text, config.scaledSegmentPadding(height), config.bg, config.fg);
 }
 
 /// Fetches the root WM_NAME property into `status_text`, falling back to `DEFAULT_STATUS`.

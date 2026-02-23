@@ -20,13 +20,10 @@ const dpi       = @import("dpi");
 const drawing   = @import("drawing");
 const constants    = @import("constants");
 const c_bindings   = @import("c_bindings");
+const lifecycle    = @import("lifecycle");
 
 const xcb = defs.xcb;
 const WM  = defs.WM;
-
-// Written by signal handlers, read by the main loop.
-var should_reload = std.atomic.Value(bool).init(false);
-var running       = std.atomic.Value(bool).init(true);
 
 const FDs = struct { signal: posix.fd_t, timer: posix.fd_t };
 
@@ -56,9 +53,9 @@ fn handleSignalFd(signal_fd: posix.fd_t) void {
         if (n != @sizeOf(std.os.linux.signalfd_siginfo)) break;
 
         switch (siginfo.signo) {
-            @intFromEnum(posix.SIG.HUP)  => should_reload.store(true, .release),
+            @intFromEnum(posix.SIG.HUP)  => lifecycle.reload(),
             @intFromEnum(posix.SIG.TERM),
-            @intFromEnum(posix.SIG.INT)  => running.store(false, .release),
+            @intFromEnum(posix.SIG.INT)  => lifecycle.quit(),
             else => {},
         }
     }
@@ -140,16 +137,9 @@ fn grabKeybindings(wm: *WM) !void {
     _ = xcb.xcb_flush(wm.conn);
 }
 
-/// Initialises the bar, silently ignoring `error.BarDisabled`.
-fn initBar(wm: *WM) void {
-    bar.init(wm) catch |err| {
-        if (err != error.BarDisabled) debug.err("Bar init failed: {}", .{err});
-    };
-}
-
 /// Consumes the reload flag and, if set, reloads the configuration.
 fn maybeReload(wm: *WM) void {
-    if (should_reload.swap(false, .acq_rel))
+    if (lifecycle.consumeReload())
         handleConfigReload(wm) catch |err| debug.err("Reload failed: {}", .{err});
 }
 
@@ -183,7 +173,7 @@ fn handleConfigReload(wm: *WM) !void {
     old_config.deinit(wm.allocator);
     try input.rebuildKeybindMap(wm);
     tiling.reloadConfig(wm);
-    clock.updateTimerState(wm);
+    clock.updateTimerState();
     // The bar caches dimensions, fonts, and layout at init time; reload recreates it.
     bar.reload(wm);
     debug.info("Reload complete", .{});
@@ -225,21 +215,15 @@ pub fn main() !void {
     config.resolveKeybindings(user_config.keybindings.items, xkb_state);
     config.finalizeConfig(&user_config, screen);
 
-    var wm_windows = std.AutoHashMap(u32, void).init(allocator);
-    wm_windows.ensureTotalCapacity(constants.Sizes.WINDOW_CAPACITY) catch {};
-
     var wm = WM{
-        .allocator    = allocator,
-        .conn         = conn,
-        .screen       = screen,
-        .root         = root,
-        .config       = user_config,
-        .windows      = wm_windows,
-        .fullscreen   = defs.FullscreenState.init(allocator),
-        .xkb_state    = xkb_state,
-        .should_reload_config = &should_reload,
-        .running      = &running,
-        .dpi_info     = dpi_info,
+        .allocator  = allocator,
+        .conn       = conn,
+        .screen     = screen,
+        .root       = root,
+        .config     = user_config,
+        .fullscreen = defs.FullscreenState.init(allocator),
+        .xkb_state  = xkb_state,
+        .dpi_info   = dpi_info,
     };
     defer wm.deinit();
 
@@ -254,12 +238,14 @@ pub fn main() !void {
     defer posix.close(fds.timer);
 
     events.initModules(&wm);
-    defer events.deinitModules(&wm);
+    defer events.deinitModules();
 
-    initBar(&wm);
+    bar.init(&wm) catch |err| {
+        if (err != error.BarDisabled) debug.err("Bar init failed: {}", .{err});
+    };
     defer bar.deinit();
 
-    clock.updateTimerState(&wm);
+    clock.updateTimerState();
     try grabKeybindings(&wm);
     _ = xcb.xcb_flush(conn);
     debug.info("Started", .{});
@@ -271,7 +257,7 @@ pub fn main() !void {
         .{ .fd = fds.timer,  .events = posix.POLL.IN, .revents = 0 },
     };
 
-    while (running.load(.acquire)) {
+    while (lifecycle.running.load(.acquire)) {
         _ = posix.poll(&pollfds, -1) catch |err| {
             if (err == error.Interrupted) continue;
             debug.err("Poll error: {}", .{err});

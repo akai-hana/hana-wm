@@ -229,3 +229,25 @@ pub fn scaleFontSize(value: @import("parser").ScalableValue, screen: *@import("d
         return @intFromFloat(@max(1.0, @round(value.value)));
     }
 }
+
+/// Scales a bar height value against the actual screen height.
+///
+///   - Percentage: `pct / 100 × screen_height` — a direct fraction of the
+///     display's vertical extent.  `height = 2.5%` on a 1600px-tall display
+///     gives 40px; on a 400px-tall display it gives 10px, keeping the bar
+///     proportionally correct across all resolutions.
+///   - Absolute: raw pixel value used as-is, identical to the old integer
+///     behaviour.  Existing configs with `height = 40` continue to work
+///     without any change.
+///
+/// Result is clamped to a minimum of 20px (matching `MIN_BAR_HEIGHT` in
+/// bar.zig) so the bar remains usable even on very small or unusual displays.
+pub fn scaleBarHeight(value: @import("parser").ScalableValue, screen_height: u16) u16 {
+    const MIN_PX: u16 = 20;
+    const h: f32  = @floatFromInt(screen_height);
+    const px: f32 = if (value.is_percentage)
+        h * (value.value / 100.0)
+    else
+        value.value;
+    return @max(MIN_PX, @as(u16, @intFromFloat(@round(px))));
+}

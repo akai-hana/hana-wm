@@ -118,23 +118,15 @@ pub const Tracking = struct {
         }
     }
 
-    /// Ordered removal (preserves window order — use this by default).
+    /// Ordered removal (preserves window order).
     pub fn remove(self: *Tracking, win: u32) bool {
-        return self.removeImpl(win, true);
-    }
-
-    fn removeImpl(self: *Tracking, win: u32, comptime ordered: bool) bool {
         switch (self.storage) {
             .small => |*s| {
                 for (s.items[0..s.len], 0..) |w, i| {
                     if (w != win) continue;
                     s.len -= 1;
-                    if (ordered) {
-                        var j: u8 = @intCast(i);
-                        while (j < s.len) : (j += 1) s.items[j] = s.items[j + 1];
-                    } else {
-                        s.items[i] = s.items[s.len];
-                    }
+                    var j: u8 = @intCast(i);
+                    while (j < s.len) : (j += 1) s.items[j] = s.items[j + 1];
                     return true;
                 }
                 return false;
@@ -145,7 +137,7 @@ pub const Tracking = struct {
                 // before touching the set so both structures stay in sync.
                 const idx = std.mem.indexOfScalar(u32, l.list.items, win) orelse return false;
                 _ = l.set.remove(win);
-                if (ordered) _ = l.list.orderedRemove(idx) else _ = l.list.swapRemove(idx);
+                _ = l.list.orderedRemove(idx);
                 // Capture the condition before demoteToSmall() invalidates `l`.
                 if (l.list.items.len <= DEMOTION_THRESHOLD) self.demoteToSmall();
                 return true;
@@ -166,26 +158,6 @@ pub const Tracking = struct {
             .small => |s| s.len,
             .large => |l| l.list.items.len,
         };
-    }
-
-    pub inline fn clear(self: *Tracking) void {
-        switch (self.storage) {
-            .small => |*s| s.len = 0,
-            .large => |*l| {
-                l.list.clearRetainingCapacity();
-                l.set.clearRetainingCapacity();
-            },
-        }
-    }
-
-    pub inline fn first(self: *const Tracking) ?u32 {
-        const s = self.items();
-        return if (s.len > 0) s[0] else null;
-    }
-
-    pub inline fn last(self: *const Tracking) ?u32 {
-        const s = self.items();
-        return if (s.len > 0) s[s.len - 1] else null;
     }
 
     fn promoteToLarge(self: *Tracking) !void {

@@ -104,6 +104,32 @@ pub const GridVariation = enum {
     relaxed, // last window in incomplete row expands to fill the row
 };
 
+/// Fibonacci has no behavioral variations today; this enum is a placeholder
+/// that lets the config and tiling systems treat all four layouts uniformly.
+pub const FibonacciVariation = enum {
+    default,
+};
+
+/// A layout variation discriminated by which layout it belongs to.
+/// Used in WorkspaceLayoutOverride so we can store a type-safe, allocation-free
+/// variation value alongside a workspace→layout assignment.
+pub const LayoutVariationOverride = union(enum) {
+    master:    MasterVariation,
+    monocle:   MonocleVariation,
+    grid:      GridVariation,
+    fibonacci: FibonacciVariation,
+};
+
+/// Records that a specific workspace should start in a particular layout
+/// (and optionally a particular variation of that layout), overriding the
+/// workspace default that would otherwise come from the first entry in the
+/// layouts array.
+pub const WorkspaceLayoutOverride = struct {
+    workspace_idx: u8,                      // 0-indexed workspace number
+    layout_idx:    u8,                      // index into TilingConfig.layouts
+    variation:     ?LayoutVariationOverride, // null = use per-layout section default
+};
+
 pub const TilingConfig = struct {
     enabled: bool = true,
     layout: []const u8 = "master_left",
@@ -121,9 +147,22 @@ pub const TilingConfig = struct {
     master_variation:  MasterVariation  = .lifo,
     monocle_variation: MonocleVariation = .gapless,
     grid_variation:    GridVariation    = .rigid,
+    fibonacci_variation: FibonacciVariation = .default,
+
+    // Per-layout 3-character indicator overrides (null = derive from active variation).
+    // Stored as fixed-size arrays — no allocation, no dangling pointers.
+    // Set via `indicator = "XYZ"` in the corresponding [tiling.layouts.*] section.
+    master_indicator:     ?[3]u8 = null,
+    monocle_indicator:    ?[3]u8 = null,
+    grid_indicator:       ?[3]u8 = null,
     // 3-char label shown in bar for fibonacci (which has no variations).
     // Stored as a fixed-size array so it never needs to be freed.
     fibonacci_indicator: [3]u8 = "NUL".*,
+
+    /// Per-workspace layout assignments parsed from the layouts array.
+    /// Entries here take precedence over the first-element default when
+    /// the WM initialises a workspace for the first time.
+    workspace_layout_overrides: std.ArrayListUnmanaged(WorkspaceLayoutOverride) = .{},
 
     /// When true, layout changes apply globally across all workspaces (legacy behavior).
     /// When false (default), each workspace independently remembers its own layout.
@@ -132,6 +171,52 @@ pub const TilingConfig = struct {
     pub fn deinit(self: *TilingConfig, allocator: std.mem.Allocator) void {
         for (self.layouts.items) |layout| allocator.free(layout);
         self.layouts.deinit(allocator);
+        self.workspace_layout_overrides.deinit(allocator);
+    }
+};
+
+/// Where in the workspace cell the activity indicator is drawn.
+/// Diagonal variants like `up_left` accept both orderings in config
+/// (e.g. "up-left" and "left-up" both map to `up_left`).
+pub const IndicatorLocation = enum {
+    up,
+    down,
+    left,
+    right,
+    up_left,
+    up_right,
+    down_left,
+    down_right,
+
+    /// Case-insensitive parse. Accepts hyphens or underscores, and both
+    /// orderings of diagonal names (e.g. "left-up" == "up-left").
+    pub fn fromString(str: []const u8) ?IndicatorLocation {
+        const map = std.StaticStringMap(IndicatorLocation).initComptime(.{
+            .{ "up",         .up         },
+            .{ "down",       .down       },
+            .{ "left",       .left       },
+            .{ "right",      .right      },
+            .{ "up-left",    .up_left    },
+            .{ "up_left",    .up_left    },
+            .{ "left-up",    .up_left    },
+            .{ "left_up",    .up_left    },
+            .{ "up-right",   .up_right   },
+            .{ "up_right",   .up_right   },
+            .{ "right-up",   .up_right   },
+            .{ "right_up",   .up_right   },
+            .{ "down-left",  .down_left  },
+            .{ "down_left",  .down_left  },
+            .{ "left-down",  .down_left  },
+            .{ "left_down",  .down_left  },
+            .{ "down-right", .down_right },
+            .{ "down_right", .down_right },
+            .{ "right-down", .down_right },
+            .{ "right_down", .down_right },
+        });
+        var buf: [16]u8 = undefined;
+        if (str.len > buf.len) return null;
+        const lower = std.ascii.lowerString(&buf, str);
+        return map.get(lower);
     }
 };
 
@@ -172,13 +257,15 @@ pub const BarLayout = struct {
 pub const BarConfig = struct {
     enabled: bool = true,
     vertical_position: BarVerticalPosition = .top,
-    height: ?u16 = null,
+    // Configured bar height: either an absolute pixel value or a percentage of
+    // the screen height.  Resolved to pixels at init time via dpi.scaleBarHeight.
+    // null = auto-calculate from font metrics alone.
+    height: ?parser.ScalableValue = null,
     font: []const u8 = "monospace:size=10",
     fonts: std.ArrayList([]const u8),
     font_size: parser.ScalableValue = parser.ScalableValue.percentage(10.0),
     scaled_font_size: u16 = 10, // Can exceed 255 on high DPI - u16 is correct
-    padding: u8 = 8,
-    spacing: u8 = 12,
+    spacing: parser.ScalableValue = parser.ScalableValue.absolute(12.0),
 
     // RGB colors - must be u32
     bg: u32 = 0x222222,
@@ -197,10 +284,24 @@ pub const BarConfig = struct {
     clock_accent: ?u32 = null,
 
     workspace_icons: std.ArrayList([]const u8),
-    // Workspace indicator size - ScalableValue (100% = 4px base)
-    indicator_size: parser.ScalableValue = parser.ScalableValue.percentage(100.0),
+    // Workspace indicator size - percentage of the font's pixel height.
+    // E.g. with font_size=75% on a 40px bar: font is 30px, indicator_size=30% → 9px square.
+    // Keep this small (20-40%) so it doesn't overlap workspace label characters.
+    indicator_size: parser.ScalableValue = parser.ScalableValue.percentage(30.0),
     // Workspace width - ScalableValue (100% = 40px base)
-    workspace_width: parser.ScalableValue = parser.ScalableValue.percentage(100.0),
+    workspace_tag_width: parser.ScalableValue = parser.ScalableValue.percentage(100.0),
+
+    /// Where in the workspace cell to draw the activity indicator.
+    indicator_location:  IndicatorLocation = .up_left,
+    /// Padding as a 0.0–1.0 ratio: 0% = flush to corner, 50% = halfway to center, 100% = centered.
+    indicator_padding:   f32 = 0.1,
+    /// Glyph shown when a workspace has windows and IS focused.
+    indicator_focused:   []const u8 = "■",
+    /// Glyph shown when a workspace has windows and is NOT focused.
+    /// If only one of the two is set in config, the other mirrors it.
+    indicator_unfocused: []const u8 = "□",
+    /// Color for both indicator glyphs. null = inherit the workspace fg color.
+    indicator_color:     ?u32 = null,
 
     clock_format: []const u8 = "%Y-%m-%d %H:%M:%S",
 
@@ -241,17 +342,58 @@ pub const BarConfig = struct {
 
     pub inline fn scaledFontSize(self: *const BarConfig) u16 { return self.scaled_font_size; }
 
-    pub inline fn scaledPadding(self: *const BarConfig) u16 { return scaleU8(self.padding, self.scale_factor); }
-    pub inline fn scaledSpacing(self: *const BarConfig) u16 { return scaleU8(self.spacing, self.scale_factor); }
 
-    pub inline fn scaledIndicatorSize(self: *const BarConfig) u16 {
-        // Base indicator size is 5px when percentage is 100%
-        return scaleScalable(self.indicator_size, 5.0, self.scale_factor, 2);
+    /// Derives horizontal padding inside a segment from the font_size percentage.
+    /// Mirrors the vertical margin: at 75% font_size the font occupies 75% of bar
+    /// height, so (1 - 0.75) / 2 = 12.5% of bar height is left on each side.
+    /// The same ratio is used horizontally to keep segment proportions consistent.
+    /// For absolute font_size values, falls back to 0.
+    pub inline fn scaledSegmentPadding(self: *const BarConfig, bar_height: u16) u16 {
+        if (!self.font_size.is_percentage) return 0;
+        const margin_ratio = (1.0 - self.font_size.value / 100.0) / 2.0;
+        const px = @as(f32, @floatFromInt(bar_height)) * margin_ratio * self.scale_factor;
+        return @as(u16, @intFromFloat(@round(@max(0.0, px))));
     }
 
-    pub inline fn scaledWorkspaceWidth(self: *const BarConfig) u16 {
-        // Base workspace width is 40px when percentage is 100%
-        return scaleScalable(self.workspace_width, 40.0, self.scale_factor, 0);
+    /// Returns the inter-segment spacing in pixels.
+    /// Percentage values are relative to 5× bar height, giving a wide usable range:
+    ///   1% of a 40px bar = 2px spacing, 10% = 20px, 100% = 200px (very extreme).
+    /// Keeping bar height as the proportional unit ensures consistent visual spacing
+    /// across any resolutions that share the same bar height config.
+    /// Absolute values are DPI-scaled directly.
+    pub inline fn scaledSpacing(self: *const BarConfig, bar_height: u16) u16 {
+        const sv = self.spacing;
+        const px: f32 = if (sv.is_percentage)
+            @as(f32, @floatFromInt(bar_height)) * 5.0 * (sv.value / 100.0) * self.scale_factor
+        else
+            sv.value * self.scale_factor;
+        return @as(u16, @intFromFloat(@round(@max(0.0, px))));
+    }
+
+    /// Returns the indicator glyph size in pixels.
+    /// Works identically to font_size: a percentage value is relative to bar height,
+    /// an absolute value is DPI-scaled directly.
+    /// E.g. `indicator_size = 10%` on a 40px bar → 4px, `font_size = 80%` → 32px.
+    pub inline fn scaledIndicatorSize(self: *const BarConfig, bar_height: u16) u16 {
+        const sv = self.indicator_size;
+        const px: f32 = if (sv.is_percentage)
+            @as(f32, @floatFromInt(bar_height)) * (sv.value / 100.0)
+        else
+            sv.value;
+        return @max(1, @as(u16, @intFromFloat(@round(px))));
+    }
+
+    /// Returns the workspace tag width in pixels.
+    /// When `workspace_tag_width` is a percentage, 100% equals `bar_height` px,
+    /// making the tag square at 100% and scaling proportionally otherwise.
+    /// When it is an absolute value, it is DPI-scaled directly.
+    pub inline fn scaledWorkspaceWidth(self: *const BarConfig, bar_height: u16) u16 {
+        const sv = self.workspace_tag_width;
+        const px: f32 = if (sv.is_percentage)
+            @as(f32, @floatFromInt(bar_height)) * (sv.value / 100.0) * self.scale_factor
+        else
+            sv.value * self.scale_factor;
+        return @max(1, @as(u16, @intFromFloat(@round(px))));
     }
 
     // Get alpha value in 16-bit format (0x0000-0xFFFF)
@@ -303,6 +445,8 @@ pub const Config = struct {
     allocated_font: ?[]const u8 = null,
     allocated_layout: ?[]const u8 = null,
     allocated_clock_format: ?[]const u8 = null,
+    allocated_indicator_focused:   ?[]const u8 = null,
+    allocated_indicator_unfocused: ?[]const u8 = null,
 
     pub fn init(allocator: std.mem.Allocator) Config {
         // Only fields without struct-level defaults need explicit init here.
@@ -333,25 +477,29 @@ pub const Config = struct {
         if (self.allocated_font) |f| allocator.free(f);
         if (self.allocated_layout) |l| allocator.free(l);
         if (self.allocated_clock_format) |f| allocator.free(f);
+        if (self.allocated_indicator_focused)   |s| allocator.free(s);
+        if (self.allocated_indicator_unfocused) |s| allocator.free(s);
     }
 };
 
+/// Geometry snapshot used by both fullscreen and minimize — single definition
+/// instead of three near-identical private structs scattered across modules.
+pub const WindowGeometry = struct {
+    x:            i16,
+    y:            i16,
+    width:        u16,
+    height:       u16,
+    border_width: u16,
+};
+
 pub const FullscreenInfo = struct {
-    window: u32, // XCB window ID - must be u32
-    workspace: u8,
-    saved_geometry: struct {
-        x: i16, // Screen coordinates can be negative
-        y: i16,
-        width: u16, // Dimensions are always positive
-        height: u16,
-        border_width: u16,
-    },
+    window:         u32,          // XCB window ID - must be u32
+    saved_geometry: WindowGeometry,
 };
 
 pub const FullscreenState = struct {
-    per_workspace: std.AutoHashMap(u8, FullscreenInfo),
+    per_workspace:       std.AutoHashMap(u8, FullscreenInfo),
     window_to_workspace: std.AutoHashMap(u32, u8),
-    allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) FullscreenState {
         var per_ws = std.AutoHashMap(u8, FullscreenInfo).init(allocator);
@@ -359,9 +507,8 @@ pub const FullscreenState = struct {
         var win_to_ws = std.AutoHashMap(u32, u8).init(allocator);
         win_to_ws.ensureTotalCapacity(4) catch {};
         return .{
-            .per_workspace = per_ws,
+            .per_workspace       = per_ws,
             .window_to_workspace = win_to_ws,
-            .allocator = allocator,
         };
     }
 
@@ -418,19 +565,16 @@ pub const FocusSuppressReason = enum {
 };
 
 pub const WM = struct {
-    allocator: std.mem.Allocator,
-    conn: *xcb.xcb_connection_t,
-    screen: *xcb.xcb_screen_t,
-    root: u32, // XCB window ID - must be u32
-    config: Config,
-    windows: std.AutoHashMap(u32, void), // u32 for XCB window IDs
+    allocator:      std.mem.Allocator,
+    conn:           *xcb.xcb_connection_t,
+    screen:         *xcb.xcb_screen_t,
+    root:           u32, // XCB window ID - must be u32
+    config:         Config,
     focused_window: ?u32 = null,
-    fullscreen: FullscreenState,
-    xkb_state: ?*xkbcommon.XkbState,
-    should_reload_config: *std.atomic.Value(bool),
-    running: *std.atomic.Value(bool),
-    dpi_info: dpi.DpiInfo,
-    drag_state: DragState = .{},
+    fullscreen:     FullscreenState,
+    xkb_state:      ?*xkbcommon.XkbState,
+    dpi_info:       dpi.DpiInfo,
+    drag_state:     DragState = .{},
     // Timestamp of the last processed X event; used for ICCCM-compliant
     // focus requests — xcb_set_input_focus and WM_TAKE_FOCUS messages must
     // carry the triggering event's timestamp, not XCB_CURRENT_TIME (0).
@@ -447,19 +591,6 @@ pub const WM = struct {
 
     pub fn deinit(self: *WM) void {
         self.fullscreen.deinit();
-        self.windows.deinit();
         self.config.deinit(self.allocator);
-    }
-
-    pub inline fn hasWindow(self: *WM, window_id: u32) bool {
-        return self.windows.contains(window_id);
-    }
-
-    pub fn addWindow(self: *WM, window_id: u32) !void {
-        try self.windows.put(window_id, {});
-    }
-
-    pub fn removeWindow(self: *WM, window_id: u32) void {
-        _ = self.windows.remove(window_id);
     }
 };

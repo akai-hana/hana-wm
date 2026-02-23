@@ -30,26 +30,15 @@ const debug      = @import("debug");
 
 // Types
 
-/// Saved pre-fullscreen geometry for a window that was fullscreen when minimized.
-/// Stored so we can reconstruct the fullscreen state faithfully on restore
-/// without querying the window (which is off-screen at that point).
-pub const SavedGeometry = struct {
-    x:            i16,
-    y:            i16,
-    width:        u16,
-    height:       u16,
-    border_width: u16,
-};
-
 pub const State = struct {
     /// Fixed array (one slot per workspace) of insertion-ordered window ID lists.
     /// Indexed directly by workspace id — no hashing overhead.
     /// LIFO restore = pop from tail; FIFO restore = remove from head.
-    per_workspace:  []std.ArrayList(u32),
+    per_workspace:  []std.ArrayListUnmanaged(u32),
     /// Maps minimized window -> saved fullscreen geometry, or null if the window
     /// was not fullscreen when minimized.  Doubles as the O(1) membership set:
     /// a window is minimized iff it has an entry here.
-    minimized_info: std.AutoHashMap(u32, ?SavedGeometry),
+    minimized_info: std.AutoHashMap(u32, ?defs.WindowGeometry),
     allocator:      std.mem.Allocator,
 };
 
@@ -57,20 +46,18 @@ pub const State = struct {
 
 var g_state: ?State = null;
 
-pub fn getState() ?*State {
-    return if (g_state != null) &g_state.? else null;
-}
+pub fn getState() ?*State { return if (g_state) |*s| s else null; }
 
 // Init / deinit
 
 pub fn init(allocator: std.mem.Allocator, workspace_count: u8) void {
-    const lists = allocator.alloc(std.ArrayList(u32), workspace_count) catch {
+    const lists = allocator.alloc(std.ArrayListUnmanaged(u32), workspace_count) catch {
         debug.err("minimize: failed to allocate per-workspace lists", .{});
         return;
     };
     for (lists) |*l| l.* = .{};
 
-    var info_map = std.AutoHashMap(u32, ?SavedGeometry).init(allocator);
+    var info_map = std.AutoHashMap(u32, ?defs.WindowGeometry).init(allocator);
     // Reserve for a handful of minimized windows — typical workload is tiny.
     info_map.ensureTotalCapacity(8) catch {};
 
@@ -102,7 +89,7 @@ pub fn isMinimized(win: u32) bool {
 /// Record win as minimized in the per-workspace ordered list and in the info
 /// map.  saved_fs is non-null iff the window was fullscreen when minimized.
 /// Returns false on allocation failure; caller must roll back any side-effects.
-fn trackMinimized(s: *State, ws_idx: u8, win: u32, saved_fs: ?SavedGeometry) bool {
+fn trackMinimized(s: *State, ws_idx: u8, win: u32, saved_fs: ?defs.WindowGeometry) bool {
     s.per_workspace[ws_idx].append(s.allocator, win) catch return false;
     s.minimized_info.put(win, saved_fs) catch {
         _ = s.per_workspace[ws_idx].pop();
@@ -123,18 +110,17 @@ inline fn hideWindow(wm: *WM, win: u32) void {
 
 /// Focus the best available non-minimized window on the current workspace,
 /// or clear focus if none exists.
-fn refocusAfterMinimize(wm: *WM) void {
+/// Shared by the minimize path and the window unmanage path in window.zig.
+pub fn focusBestAvailable(wm: *WM) void {
     const ws = workspaces.getCurrentWorkspaceObject() orelse {
         focus.clearFocus(wm);
         return;
     };
-    for (ws.windows.items()) |win| {
-        if (!isMinimized(win)) {
-            focus.setFocus(wm, win, .window_destroyed);
-            return;
-        }
+    if (workspaces.firstNonMinimized(ws.windows.items())) |win| {
+        focus.setFocus(wm, win, .window_destroyed);
+    } else {
+        focus.clearFocus(wm);
     }
-    focus.clearFocus(wm);
 }
 
 // Minimize
@@ -146,27 +132,21 @@ pub fn minimizeWindow(wm: *WM) void {
 
     if (isMinimized(win)) return; // idempotent
 
-    // Phase 1: exit fullscreen if active, saving geometry for restoration.
+    // Step 1: exit fullscreen if active, saving geometry for restoration.
     // Single map lookup covers both the "is fullscreen?" check and the ws lookup.
-    var saved_fs: ?SavedGeometry = null;
+    var saved_fs: ?defs.WindowGeometry = null;
     if (wm.fullscreen.window_to_workspace.get(win)) |fs_ws| {
         if (wm.fullscreen.getForWorkspace(fs_ws)) |info| {
-            saved_fs = .{
-                .x            = info.saved_geometry.x,
-                .y            = info.saved_geometry.y,
-                .width        = info.saved_geometry.width,
-                .height       = info.saved_geometry.height,
-                .border_width = info.saved_geometry.border_width,
-            };
+            saved_fs = info.saved_geometry;
             wm.fullscreen.removeForWorkspace(fs_ws);
         }
     }
     const was_fullscreen = saved_fs != null;
 
-    // Phase 2: remove from tiling (before retile so the layout excludes it).
+    // Step 2: remove from tiling (before retile so the layout excludes it).
     if (wm.config.tiling.enabled) tiling.removeWindow(win);
 
-    // Phase 4 (track) is attempted before the grab so we can abort cleanly on
+    // Step 3: track — attempted before the grab so we can abort cleanly on
     // allocation failure without ever having entered the grab.
     if (!trackMinimized(s, ws_idx, win, saved_fs)) {
         debug.err("minimize: allocation failure tracking window 0x{x} — rolling back", .{win});
@@ -177,18 +157,18 @@ pub fn minimizeWindow(wm: *WM) void {
         return;
     }
 
-    // Phases 3, 5, 6 wrapped in a single server grab so picom never composites
+    // Steps 4–6 wrapped in a single server grab so picom never composites
     // an intermediate state (window gone but layout/focus not yet updated, or
     // fullscreen bar still hidden while siblings remain offscreen).
     _ = xcb.xcb_grab_server(wm.conn);
 
-    // Phase 3: move off-screen.
+    // Step 4: move off-screen.
     hideWindow(wm, win);
 
-    // Phase 5: update focus (must precede retile so border colours are correct).
-    refocusAfterMinimize(wm);
+    // Step 5: update focus (must precede retile so border colours are correct).
+    focusBestAvailable(wm);
 
-    // Phase 6: bring remaining windows back on-screen / retile.
+    // Step 6: bring remaining windows back on-screen / retile.
     if (was_fullscreen) {
         // setBarState(.show_fullscreen) restores the bar and, for tiled
         // workspaces, triggers a retile.  The minimized window is not in the
@@ -222,28 +202,18 @@ fn restoreWindow(wm: *WM, win: u32) void {
     const saved_fs = entry.value;
 
     if (saved_fs) |geom| {
-        // Restore pre-fullscreen geometry so enterFullscreenForWindow reads
-        // accurate on-screen coordinates from xcb_get_geometry.
-        _ = xcb.xcb_configure_window(
-            wm.conn, win,
-            xcb.XCB_CONFIG_WINDOW_X     | xcb.XCB_CONFIG_WINDOW_Y     |
-            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
-            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
-            &[_]u32{
-                @bitCast(@as(i32, geom.x)),
-                @bitCast(@as(i32, geom.y)),
-                geom.width,
-                geom.height,
-                geom.border_width,
-            },
-        );
-        utils.flush(wm.conn);
-
-        // Re-enter fullscreen — covers the screen, hides the bar, and pushes
-        // sibling windows off-screen.  enterFullscreenForWindow owns its own
-        // server grab, so this path is already atomic.
+        // The window is currently at OFFSCREEN_X_POSITION.  Pass the saved
+        // geometry directly so we can skip:
+        //   (a) the xcb_get_geometry round-trip that enterFullscreen normally
+        //       uses to learn the window's pre-fullscreen size, and
+        //   (b) the configure_window + flush that previously "pre-positioned"
+        //       the window at its saved on-screen coordinates before the
+        //       fullscreen grab acquired — that flush produced an intermediate
+        //       compositor frame showing the window at its small saved size.
+        // With enterFullscreenWithSavedGeom the window goes from offscreen to
+        // fullscreen in a single atomic grab: no intermediate frame visible.
         wm.focused_window = win;
-        fullscreen.enterFullscreenForWindow(wm, win);
+        fullscreen.enterFullscreenWithSavedGeom(wm, win, geom);
         bar.markDirty();
         return;
     }
@@ -309,9 +279,8 @@ pub fn unminimizeAll(wm: *WM) void {
     const list   = &s.per_workspace[ws_idx];
     if (list.items.len == 0) return;
 
-    // Snapshot then clear before iterating: the list is our responsibility,
-    // and clearing up-front keeps state consistent even if a restore fails.
-    var snapshot: std.ArrayList(u32) = .{};
+    // Snapshot then clear the ordered list before iterating.
+    var snapshot: std.ArrayListUnmanaged(u32) = .{};
     defer snapshot.deinit(s.allocator);
     snapshot.appendSlice(s.allocator, list.items) catch |err| {
         debug.warnOnErr(err, "unminimize_all: snapshot allocation failed");
@@ -319,8 +288,57 @@ pub fn unminimizeAll(wm: *WM) void {
     };
     list.clearRetainingCapacity();
 
-    for (snapshot.items) |win| restoreWindow(wm, win);
+    // If any window was fullscreen when minimized, fall back to the per-window
+    // path.  Re-entering fullscreen involves its own grab + bar hide + sibling
+    // offscreen — batching that with the other windows is complex and this case
+    // is rare enough that N separate grabs is acceptable.
+    for (snapshot.items) |win| {
+        if (s.minimized_info.get(win)) |saved_fs| {
+            if (saved_fs != null) {
+                for (snapshot.items) |w| restoreWindow(wm, w);
+                return;
+            }
+        }
+    }
+
+    // Common case: no fullscreen windows among the minimized set.
+    // Batch all additions, retile, focus, and bar redraw into a single server
+    // grab so picom composites exactly one frame where all windows have appeared
+    // at their correct tiled positions.  The per-window restoreWindow loop would
+    // produce N separate grab/retile/bar_redraw cycles — N-1 intermediate frames.
+    _ = xcb.xcb_grab_server(wm.conn);
+
+    for (snapshot.items) |win| {
+        // Remove from the info map (was not yet removed — only the ordered list
+        // was cleared above).  saved_fs is null for all entries (checked above).
+        _ = s.minimized_info.fetchRemove(win);
+        if (wm.config.tiling.enabled) {
+            tiling.addWindow(wm, win);
+        } else {
+            // Floating: place at a sensible on-screen position.
+            const x: u32 = @intCast(wm.screen.width_in_pixels  / 4);
+            const y: u32 = @intCast(wm.screen.height_in_pixels / 4);
+            _ = xcb.xcb_configure_window(wm.conn, win,
+                xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
+                &[_]u32{ x, y });
+        }
+    }
+
+    if (wm.config.tiling.enabled) tiling.retileCurrentWorkspace(wm);
+
+    // Focus the most-recently-minimized window (last entry in the snapshot —
+    // same result as N sequential restoreWindow calls each stealing focus).
+    // .window_spawn skips the isWindowMapped round-trip, keeping the grab
+    // scope free of avoidable blocking calls.
+    if (snapshot.items.len > 0) {
+        focus.setFocus(wm, snapshot.items[snapshot.items.len - 1], .window_spawn);
+    }
+
+    bar.redrawImmediate(wm);
+    _ = xcb.xcb_ungrab_server(wm.conn);
+    utils.flush(wm.conn);
 }
+
 
 // Lifecycle hooks
 

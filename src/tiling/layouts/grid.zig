@@ -1,14 +1,13 @@
 //! Grid layout - Arrange windows in optimal grid
-/// Direct XCB calls - no batch overhead
+//! Direct XCB calls — no batch overhead
 
-const std = @import("std");
-const defs = @import("defs");
-const utils = @import("utils");
+const defs    = @import("defs");
+const utils   = @import("utils");
 const layouts = @import("layouts");
 
 const tiling = @import("tiling");
-const State = tiling.State;
-const xcb = defs.xcb;
+const State  = tiling.State;
+const xcb    = defs.xcb;
 
 inline fn calcGridDims(n: usize) struct { cols: u16, rows: u16 } {
     if (n == 0) return .{ .cols = 1, .rows = 1 };
@@ -59,9 +58,8 @@ pub fn tileWithOffset(conn: *xcb.xcb_connection_t, state: *State, windows: []con
                     // x_start = m.gap + col * cell_spacing_w
                     // right edge = screen_w - m.gap
                     // available width = screen_w - m.gap - x_start - border_margin
-                    const x_start = m.gap + col * cell_spacing_w;
-                    const right_margin = m.gap;
-                    const available = screen_w -| x_start -| right_margin -| border_margin;
+                    const x_start    = m.gap + col * cell_spacing_w;
+                    const available  = screen_w -| x_start -| m.gap -| border_margin;
                     break :blk if (available > 0) @max(available, defs.MIN_WINDOW_DIM) else defs.MIN_WINDOW_DIM;
                 }
                 break :blk win_w;

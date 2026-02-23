@@ -24,81 +24,121 @@
 #   (RRGGBB/rrggbb, ""/'') "#RRGGBB" / RRGGBB / 0xRRGGBB
 
 [tiling]
-enabled = true
+enabled = true # true/false
 
-# per-workspace tiling layout?
+# Per-workspace tiling layout cycling
 global_layout = false # true/false
 
-# Per-layout behavioral variations
-# master_variation: "lifo" = old window stays in master, new goes to stack (default)
-#                  "fifo" = new window always takes master, old moves to stack
-master_variation = "lifo"
-
-monocle_variation = "gaps" # "gaps"/"gapless"
-
-# grid_variation: "rigid"   = strict grid cells; incomplete rows leave empty cells (default)
-#                 "relaxed" = last window in an incomplete row expands to fill the row
-grid_variation = "relaxed"
-
-# fibonacci_indicator: 3-char label shown in bar when fibonacci layout is active
-# (fibonacci has no variations; this is purely cosmetic)
-# fibonacci_indicator = "NUL"
-
 # Enabled layouts
-## First is default; cycling follows order
-## Layouts are now respected in the exact order specified
-## Commented out layouts will not appear in the cycle
+## First value is the default layout across workspaces.
+## Layouts not added to the array will not be available at runtime.
+## Not defining the array at all enables all layouts in their default order.
+#
+# Each entry can optionally be followed (as the next array element) by:
+#   "<variation>"        — overrides that layout's default variation globally
+#   "<workspace_nums>"   — comma-separated workspace numbers that start in this layout
+# A layout entry may include either, both, or neither of these suffixes.
+# The <layout> order also defines the cycling order used by toggle_layout.
+#
+# Examples:
+#   layouts = [
+#       "master-stack",                      # default layout, no override
+#       "monocle", "gapless", "4,8",         # workspaces 4 & 8 start in monocle/gapless
+#       "grid", "relaxed", "3,6",            # workspaces 3 & 6 start in grid/relaxed
+#       "fibonacci",                         # available in cycle but no workspace pinning
+#   ]
 layouts = [
-    "master-stack",
-    "monocle",
-    "grid",
-    # "fibonacci", # <- not yet implemented
+	"master-stack",
+	"monocle",
+	"grid",
+	"fibonacci",
 ]
 
 [tiling.aesthetics]
-# - 0-200%:  100% makes a window have borders as wide as the window's viewable area.
-# - Going beyond 100% is not sane anymore; 200% makes a window be completely swallowed by its borders.
+# [0%-200%] / [0-N] px
+## 100% makes a window's borders equal to the window's viewable area.
+## 200% makes windows be swallowed by their borders.
 gaps             = 2.5%
 border_width     = 1%
-border_focused   = '#ac3232'
-border_unfocused = '#52263e' # Letters can also be MAJUS/minus
+border_focused   = "#ac3232"
+border_unfocused = "#52263e"
 
 [tiling.layouts.master-stack]
-count = 1        # Number of windows in master area (master stack size)
-side  = "left"   # "left"/"right" / 'L'/'R'
-width = 50%      # N/N% (suggestion of presentation: 5%-95%)
+count = 1      # Number of windows in master area (master stack size)
+side  = "left" # "left"/"right" / 'L'/'R'
+width = 50%    # (0%-100%) / (0-N] px
+
+# Behavioral variation for master-stack:
+#   "lifo" = old window stays in master, new window moves to bottom of stack (default)
+#   "fifo" = new window replaces master, old master moves to top of stack
+variation = "lifo"
+
+# Override the 3-character indicator shown in the bar for this layout.
+# Defaults to the variation name ("LIF" or "FIF") when not set.
+# indicator = "M-S"
+
+[tiling.layouts.monocle]
+# Behavioral variation for monocle:
+#   "gaps"    = honour window gap settings like every other layout
+#   "gapless" = true fullscreen — ignore gap settings (default)
+variation = "gaps"
+
+# Override the 3-character indicator shown in the bar for this layout.
+# Defaults to the variation name ("GAP" or "GLS") when not set.
+# indicator = "MON"
+
+[tiling.layouts.grid]
+# Behavioral variation for grid:
+#   "rigid"   = strict grid; empty cells left in an incomplete last row (default)
+#   "relaxed" = last window in an incomplete row expands to fill the row
+variation = "relaxed"
+
+# Override the 3-character indicator shown in the bar for this layout.
+# Defaults to the variation name ("RGD" or "RLX") when not set.
+# indicator = "GRD"
+
+[tiling.layouts.fibonacci]
+# Fibonacci has no behavioral variations.
+# Optionally override the 3-character indicator shown in the bar for this layout.
+# indicator = "FIB"
 
 [bar]
 enabled = true
-position = "bottom" # top/bottom; can be swapped on runtime
+position = "bottom" # "top"/"bottom"; can be swapped on runtime
 
 # Font array
-# Priority order: first font is primary, others come next when first doesn't support some character.
-# Useful for non-ASCII character support, while retaining a primary ASCII font.
+## First value is the default font used
+## Subsequent values render in characters not included by first value (ej. non-ASCII)
 fonts = [
     "FiraCode Nerd Font Propo Ret",
     "Noto Sans CJK JP", # to render japanese characters
 ]
+# Bar height
+## Auto-adapts to font size by default. Uncomment to set a fixed height instead:
+## TODO: Future enhancement: percentage values where 100% = auto-calculated size, 150% = 1.5x auto size.
+height = 3.5%
+
+segment_spacing = 5%
 
 # Font size as percentage of bar height (e.g., 16% = font takes up 16% of the bar's vertical space)
-font_size = 16%
-
-# Spacing between each segment/module inside the bar
-segment_spacing = 8%
+font_size = 75%
+indicator_size = 25%
 
 # Workspace labels/icons (1-N)
 icons = ["あ", "か", "い", "は", "な", "つ", "ん", "で"]
 
+indicator_padding = 37.5%
+
+#
+## if neither is set
+# indicator_focused = ""
+# indicator_unfocused = ""
+indicator_location = "up-left"
+
 # Workspace width as percentage of base (100% = 40px, 150% = 60px, or set exact pixels)
-workspace_width = 125%  # Default base width
+workspace_tag_width = 100%  # Default base width
 
-# Bar height
-## Auto-adapts to font size by default. Uncomment to set a fixed height instead:
-## TODO: Future enhancement: percentage values where 100% = auto-calculated size, 150% = 1.5x auto size.
-height = 60
 
-# Padding inside segments (horizontal space around text content within each segment)
-padding = 99
 
 # Bar transparency (0 = fully transparent, 1 = fully opaque)
 # With picom's gaussian blur, the bar will show blurred content behind it
@@ -115,9 +155,6 @@ selected_fg = "#eeeeee"
 occupied_fg = "#eeeeee"
 urgent_bg   = "#FF0000"
 urgent_fg   = "#FFFFFF"
-
-# Indicator size as percentage (100% = 4px base, 150% = 6px, or set exact pixels)
-indicator_size = 125%
 
 # Accent colors for bar segments
 # Default accent for all segments

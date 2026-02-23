@@ -1,13 +1,12 @@
 //! Master-stack layout with overflow handling
-/// Direct XCB calls — no batch overhead
+//! Direct XCB calls — no batch overhead
 
-const std = @import("std");
-const defs = @import("defs");
-const utils = @import("utils");
+const defs    = @import("defs");
+const utils   = @import("utils");
 const layouts = @import("layouts");
 
 const tiling = @import("tiling");
-const State = tiling.State;
+const State  = tiling.State;
 
 inline fn calcAvailable(total_h: u16, count: u16, margins: utils.Margins) u16 {
     const overhead = margins.gap * (count + 1) + margins.border * 2 * count;

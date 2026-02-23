@@ -1,40 +1,21 @@
 ### hana's TODO list! ###
 # In here i write the things i want to do to not lose track of the different ideas i come up with while developing 
 
-when i remove a tiling layout from src/tiling/layouts/, i want the program to still compile regardless. can you please solve this?
-install
-└─ install hana
-   └─ compile exe hana ReleaseFast native 1 errors
-src/tiling/tiling.zig:20:34: error: no module named 'fibonacci' available within module 'tiling'
-const fibonacci_layout = @import("fibonacci");
-                                 ^~~~~~~~~~~
-referenced by:
-    retile: src/tiling/tiling.zig:488:49
-    retileIfDirty: src/tiling/tiling.zig:455:11
-    5 reference(s) hidden; use '-freference-trace=7' to see all references
-error: 1 compilation errors
+if i spawn a window in a workspace and then quickly move onto another workspace, on weak machines where the program im opening will take a bit to open, will open on the workspace i switched to and currently am, instead of the workspace i originally spawned this window at. i want this behavior to stop, and if a program is summoned in a specific workspace, for it to be opened on that workspace, regardless of how long the program's window takes to open.
+
+right now, the title.zig segments look a bit wanky. what i mean is, if i keep focus on the last window of the segments, in relation to the amount of windows that i open, it isn't perfectly aligned to the right. this results in that the total width of the title.zig segment varies a couple of pixels depending on how many windows i have opened. this is pretty slight, it's just off by a couple pixels each time, but i'd like for it to ideally be pixel perfect. can you please accomplish this? thanks.
+
+right now, when i disable tiling with mod+n, all windows behave weirdly: their origin coordinate get moved slightly down and right, so they're clipping beyond the right and bottom part of the display, but most of the window is still visible. why does this happen?
+
+mod + middle click mouse makes an individual window go from tiling to floating, and viceversa, if it's floating on tiled mode, tile it.
 
 i want you to improve the efficiency of the bar redraws. currently, when i focus from one window to another, the entire bar gets re-drawn, including all segments of all currently opened windows. instead, i want it to behave like this: when i focus from one window to another, make it so that the previously focused window ONLY gets its background color changed from focused accent color to unfocused color, and the newly focused window the opposite, from unfocused to focused background color. only these two should be updated, from their current state to the opposite, and no other title segments of other unrelated windows should change; this is to prevent flickering across the whole bar just because i focus between windows, and also to prevent computational resources being mis-used, making the wm both smoother and more efficient in resource utilization.
-
-can you please fix the following edge case on my window manager?
-- open two windows in a workspace
-- send one window to another workspace
-- switch to that workspace
-now, the window i sent over this workspace appears tiled onto the right half of my display, even though it's the only window in the workspace. if i go to a different workspace and come back, it'll fix itself and be tiled properly.
-why is this the case? can you please identify and fix the root issue? thanks.
-
-make cursor from xresources be used instead of default x11; hovering root window shows the normal xorg tiny cursor, while hovering over any other window it shows my custom cursor i configured. in dwm this isn't the case, so could it be something my wm's missing somewhere? can you please add it?
-
-when i un-fullscreen a window, i want to avoid cursor stealing focus if it lands on any window other than the one i was fullscreened into. also, when i alt+tab (swap master and slave in stack) while focused on a master window, the master window gets moved to stack and focus is kept to that window, but if i swap slave to master, the cursor steals focus if it's located on top of another window. i don't want focus to be stolen in this case either. can you please place in the required guardrails to prevent these particular focus-stealing edge cases?
-
-is the "marking as dirty" solution we have right now on some parts of the code optimal? it's the only solution that came to mind, but i was wondering if there was a more optimal solution, either that improves responsiveness/performance or that makes the code leaner/more readable/easier to understand...
 
 LONG TERM: code a similar tool to drun, replace it instead of rofi in config.toml
 
 LONG TERM: somehow make vertical layout left and right
 
 can you make it so that if i set transparency to 100, that all the transparency logic isn't processed at all, and the wm instead renders a regular RGB bar, skipping argb and 32 bits and all that? this is to avoid any unneeded computational processing when the user doesn't want transparency to begin with.
-
 can you please implement some sort of mechanism that make it so that the bar looks proportionally the same regardless of the resolution? for example, if i use a 1920x1080 display, the font of the bar looks significantly bigger, and the workspace widths do so too, as well as the separation between the dfferent modules/segments of the bar. i'd like to implement some sort of system which measures the display's resolution and takes it into consideration, multiplying these variables by some sort of factor that normalizes the size of these elements, regardless of 
 
 {
@@ -43,7 +24,6 @@ if window is higher than it is wider, slice it in half, leaving a top and bottom
 window spawning in this layout is dependant on what the current window focused is: if no windows within workspace, just spawn one regularly, the second one will make both split, the third one will split the right one to a top half and the spawned to the bottom half of the right segment of the display. Up to now it is basically like master-stack layout. the thing is, if i were focusing the left window when i had two windows open, the split would've happened on that window, on the left half. any subsequent splits happen according to the currently focused window, following the horizontal/vertical split criteria mentioned earlier.
 }
 
-mod + middle click mouse makes an individual window go from tiling to floating, and viceversa, if it's floating on tiled mode, tile it.
 
 "modern" layout: bar at the top, workspaces at the middle, date at the right, system resources at the left, and big spacing in-between (don't make it expanding, but instead static, where each segment is bound to left/right/center, and any gap that remains, remains a gap, isn't filled.)
 

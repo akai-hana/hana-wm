@@ -19,20 +19,11 @@ inline fn borderColor(wm: *WM, win: u32) u32 {
 
 // Geometry pre-fetch 
 
-/// Saved geometry captured before the server grab.
-/// xcb_get_geometry_reply is a blocking round-trip that must never happen
-/// inside a grab — another client holding a concurrent grab would deadlock.
-const SavedGeom = struct {
-    x: i16, y: i16,
-    width: u16, height: u16,
-    border_width: u16,
-};
-
 /// Fetch the current geometry of `win` with a round-trip.
 /// If the window is offscreen (e.g. a sibling of the current fullscreen window
 /// that was parked during a previous enter), falls back to a sensible default
 /// centred quarter of the screen.
-fn fetchWindowGeom(wm: *WM, win: u32) SavedGeom {
+fn fetchWindowGeom(wm: *WM, win: u32) defs.WindowGeometry {
     const reply = xcb.xcb_get_geometry_reply(
         wm.conn, xcb.xcb_get_geometry(wm.conn, win), null,
     ) orelse return .{
@@ -70,17 +61,10 @@ fn fetchWindowGeom(wm: *WM, win: u32) SavedGeom {
 
 /// Queue all XCB commands needed to enter fullscreen for `win` on `ws`.
 /// `geom` must be pre-fetched outside the grab via fetchWindowGeom.
-fn enterFullscreenCommit(wm: *WM, win: u32, ws: u8, geom: SavedGeom) void {
+fn enterFullscreenCommit(wm: *WM, win: u32, ws: u8, geom: defs.WindowGeometry) void {
     wm.fullscreen.setForWorkspace(ws, .{
-        .window    = win,
-        .workspace = ws,
-        .saved_geometry = .{
-            .x            = geom.x,
-            .y            = geom.y,
-            .width        = geom.width,
-            .height       = geom.height,
-            .border_width = geom.border_width,
-        },
+        .window         = win,
+        .saved_geometry = geom,
     }) catch {
         debug.err("Failed to save fullscreen state for workspace {}", .{ws});
         return;
@@ -223,6 +207,28 @@ fn exitFullscreen(wm: *WM, win: u32, ws: u8) void {
 pub fn enterFullscreenForWindow(wm: *WM, win: u32) void {
     const ws = workspaces.getCurrentWorkspace() orelse return;
     enterFullscreen(wm, win, ws);
+}
+
+/// Enter fullscreen using geometry that is already known to the caller.
+///
+/// Used by the minimize module when restoring a window that was fullscreen
+/// when minimized: the pre-fullscreen geometry was saved at minimize time, so
+/// there is no need for the xcb_get_geometry round-trip that `enterFullscreen`
+/// performs via `fetchWindowGeom`.  More importantly, it avoids the
+/// configure_window + flush that the old path used to "pre-position" the window
+/// at its saved coordinates before entering fullscreen: that sequence produced
+/// an intermediate compositor frame where the window was briefly visible at its
+/// small pre-fullscreen size.
+///
+/// The window stays at OFFSCREEN_X_POSITION (where minimize left it) until the
+/// grab acquires, at which point `enterFullscreenCommit` expands it directly to
+/// cover the full screen.  The compositor never sees an in-between state.
+pub fn enterFullscreenWithSavedGeom(wm: *WM, win: u32, geom: defs.WindowGeometry) void {
+    const ws = workspaces.getCurrentWorkspace() orelse return;
+    _ = xcb.xcb_grab_server(wm.conn);
+    enterFullscreenCommit(wm, win, ws, geom);
+    _ = xcb.xcb_ungrab_server(wm.conn);
+    utils.flush(wm.conn);
 }
 
 pub fn toggleFullscreen(wm: *WM) void {

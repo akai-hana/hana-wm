@@ -1,6 +1,4 @@
-///! Window dragging and resizing
-
-const std = @import("std");
+//! Window dragging and resizing
 const defs = @import("defs");
 const xcb = defs.xcb;
 const WM = defs.WM;
@@ -8,20 +6,13 @@ const utils = @import("utils");
 const focus = @import("focus");
 const tiling = @import("tiling");
 const bar = @import("bar");
-
 pub fn startDrag(wm: *WM, win: u32, button: u8, x: i16, y: i16) void {
     if (wm.drag_state.active) return;
-
     if (bar.isBarWindow(win)) return;
-
     // Fast path: serve geometry from the tiling cache — zero X round-trips.
     // Falls back to a live xcb_get_geometry query only for floating windows.
-    const geom = geom: {
-        if (tiling.getCachedGeom(win)) |r|
-            break :geom utils.Rect{ .x = r.x, .y = r.y, .width = r.width, .height = r.height };
-        break :geom utils.getGeometry(wm.conn, win) orelse return;
-    };
-
+    const geom = tiling.getCachedGeom(win) orelse
+        utils.getGeometry(wm.conn, win) orelse return;
     wm.drag_state = .{
         .active = true,
         .window = win,
@@ -33,23 +24,26 @@ pub fn startDrag(wm: *WM, win: u32, button: u8, x: i16, y: i16) void {
         .start_win_width = geom.width,
         .start_win_height = geom.height,
     };
-
     focus.setFocus(wm, win, .user_command);
-
     // Remove the window from tiling so the drag moves it freely.
     // isWindowTiled checks State.enabled internally, so no separate state lookup needed.
     if (tiling.isWindowTiled(win)) {
+        // Wrap the removal and retile of the remaining windows in a single server
+        // grab.  Without the grab, the compositor can composite a frame where the
+        // dragged window has left its tiled slot but the other windows have not yet
+        // reflowed to fill the gap — producing a visible hole for one frame.
+        _ = xcb.xcb_grab_server(wm.conn);
         tiling.removeWindow(win);
+        tiling.retileCurrentWorkspace(wm);
+        _ = xcb.xcb_ungrab_server(wm.conn);
+        utils.flush(wm.conn);
     }
 }
-
 pub fn updateDrag(wm: *WM, x: i16, y: i16) void {
     if (!wm.drag_state.active) return;
-
     const drag = &wm.drag_state;
     const dx = x - drag.start_x;
     const dy = y - drag.start_y;
-
     const rect = switch (drag.mode) {
         .move => utils.Rect{
             .x = drag.start_win_x + dx,
@@ -64,15 +58,12 @@ pub fn updateDrag(wm: *WM, x: i16, y: i16) void {
             .height = @intCast(@max(@as(i32, defs.MIN_WINDOW_DIM), @as(i32, drag.start_win_height) + dy)),
         },
     };
-
     utils.configureWindow(wm.conn, drag.window, rect);
     utils.flush(wm.conn);
 }
-
 pub inline fn stopDrag(wm: *WM) void {
     wm.drag_state.active = false;
 }
-
 pub inline fn isDragging(wm: *WM) bool {
     return wm.drag_state.active;
 }
