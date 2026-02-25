@@ -79,18 +79,6 @@ pub const Document = struct {
     }
 
     pub fn deinit(self: *Document) void {
-        const cleanPairs = struct {
-            fn clean(alloc: std.mem.Allocator, pairs: *std.StringHashMap(Value)) void {
-                var iter = pairs.iterator();
-                while (iter.next()) |entry| {
-                    alloc.free(entry.key_ptr.*);
-                    var val = entry.value_ptr.*;
-                    val.deinit(alloc);
-                }
-                pairs.deinit();
-            }
-        }.clean;
-
         cleanPairs(self.allocator, &self.root.pairs);
 
         var section_iter = self.sections.iterator();
@@ -136,7 +124,20 @@ pub fn parseColor(value: []const u8) !u32 {
     return color;
 }
 
-// Internal parser 
+// Internal parser
+
+/// Frees all keys and values in `pairs`, then deinits the map.
+fn cleanPairs(alloc: std.mem.Allocator, pairs: *std.StringHashMap(Value)) void {
+    var iter = pairs.iterator();
+    while (iter.next()) |entry| {
+        alloc.free(entry.key_ptr.*);
+        var val = entry.value_ptr.*;
+        val.deinit(alloc);
+    }
+    pairs.deinit();
+}
+
+
 
 const Parser = struct {
     allocator: std.mem.Allocator,
@@ -166,7 +167,6 @@ const Parser = struct {
 
     inline fn skipWhitespace(self: *Parser) void              { self.skip(false, false); }
     inline fn skipWhitespaceAndNewlines(self: *Parser) void   { self.skip(true, true); }
-    inline fn skipLine(self: *Parser) void                    { self.skipToNewline(); }
 
     inline fn peek(self: *const Parser) ?u8 {
         return if (self.pos < self.content.len) self.content[self.pos] else null;
@@ -368,12 +368,12 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
         const c = p.peek() orelse break;
 
         if (c == '\n') { _ = p.consume(); continue; }
-        if (c == '#')  { p.skipLine();    continue; }
+        if (c == '#')  { p.skipToNewline();    continue; }
 
         if (c == '[') {
             const section_name = p.parseSection() catch |err| {
                 debug.warn("Invalid section at line {}: {}", .{ p.line, err });
-                p.skipLine();
+                p.skipToNewline();
                 continue;
             };
             errdefer allocator.free(section_name);
@@ -381,7 +381,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
             if (doc.sections.contains(section_name)) {
                 allocator.free(section_name);
                 debug.warn("Duplicate section at line {}", .{p.line});
-                p.skipLine();
+                p.skipToNewline();
                 continue;
             }
 
@@ -396,7 +396,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
         while (true) {
             var kv = p.parseKeyValuePair(allocator, true) catch |err| {
                 debug.warn("Invalid key-value at line {}: {}", .{ p.line, err });
-                p.skipLine();
+                p.skipToNewline();
                 break;
             };
 
@@ -421,7 +421,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
                 const after = p.peek();
                 if (after == '\n' or after == '#' or after == null) {
                     if (after == '\n') _ = p.consume();
-                    if (after == '#') p.skipLine();
+                    if (after == '#') p.skipToNewline();
                     break;
                 }
                 continue;
@@ -429,12 +429,12 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
 
             if (next == '\n' or next == '#' or next == null) {
                 if (next == '\n') _ = p.consume();
-                if (next == '#') p.skipLine();
+                if (next == '#') p.skipToNewline();
                 break;
             }
 
             debug.warn("Unexpected character at line {}", .{p.line});
-            p.skipLine();
+            p.skipToNewline();
             break;
         }
     }

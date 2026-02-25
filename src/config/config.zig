@@ -128,7 +128,7 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
     };
     defer std.posix.close(fd);
 
-    var content: std.ArrayList(u8) = .{};
+    var content: std.ArrayListUnmanaged(u8) = .empty;
     defer content.deinit(allocator);
     try content.ensureTotalCapacity(allocator, 4096);
 
@@ -188,7 +188,7 @@ fn getDefaultConfig(allocator: std.mem.Allocator) defs.Config {
 
     const default_layout = allocator.dupe(u8, "master_left") catch "master_left";
     cfg.tiling.layouts.append(allocator, default_layout) catch |e| debug.warnOnErr(e, "default layout append");
-    cfg.tiling.layout = if (cfg.tiling.layouts.items.len > 0) cfg.tiling.layouts.items[0] else "master_left";
+    cfg.tiling.layout = if (cfg.tiling.layouts.items.len > 0) cfg.tiling.layouts.items[0] else default_layout;
 
     for (0..9) |i| {
         const icon = std.fmt.allocPrint(allocator, "{}", .{i + 1}) catch continue;
@@ -412,51 +412,46 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
     cfg.tiling.master_width = master_src.getScalable(if (in_master_section) "width" else "master_width") orelse
         parser.ScalableValue.percentage(50.0);
 
-    // Variations & indicators — all live in [tiling.layouts.<n>].
+    parseTilingVariations(doc, cfg);
 
-    if (master_section_opt) |ms| {
-        if (ms.getString("variation")) |v| {
+    cfg.tiling.global_layout = get(bool, section, "global_layout", false, null, null);
+}
+
+/// Parses per-layout variation and indicator settings from [tiling.layouts.*] sections.
+fn parseTilingVariations(doc: *const parser.Document, cfg: *defs.Config) void {
+    if (doc.getSection("tiling.layouts.master-stack")) |ms| {
+        if (ms.getString("variation")) |v|
             cfg.tiling.master_variation = std.meta.stringToEnum(defs.MasterVariation, v) orelse blk: {
                 debug.warn("Unknown master-stack variation '{s}', using default 'lifo'", .{v});
                 break :blk .lifo;
             };
-        }
-        if (ms.getString("indicator")) |raw|
-            cfg.tiling.master_indicator = parseIndicator(raw);
+        if (ms.getString("indicator")) |raw| cfg.tiling.master_indicator = parseIndicator(raw);
     }
 
     if (doc.getSection("tiling.layouts.monocle")) |ms| {
-        if (ms.getString("variation")) |v| {
+        if (ms.getString("variation")) |v|
             cfg.tiling.monocle_variation = std.meta.stringToEnum(defs.MonocleVariation, v) orelse blk: {
                 debug.warn("Unknown monocle variation '{s}', using default 'gapless'", .{v});
                 break :blk .gapless;
             };
-        }
-        if (ms.getString("indicator")) |raw|
-            cfg.tiling.monocle_indicator = parseIndicator(raw);
+        if (ms.getString("indicator")) |raw| cfg.tiling.monocle_indicator = parseIndicator(raw);
     }
 
     if (doc.getSection("tiling.layouts.grid")) |ms| {
-        if (ms.getString("variation")) |v| {
+        if (ms.getString("variation")) |v|
             cfg.tiling.grid_variation = std.meta.stringToEnum(defs.GridVariation, v) orelse blk: {
                 debug.warn("Unknown grid variation '{s}', using default 'rigid'", .{v});
                 break :blk .rigid;
             };
-        }
-        if (ms.getString("indicator")) |raw|
-            cfg.tiling.grid_indicator = parseIndicator(raw);
+        if (ms.getString("indicator")) |raw| cfg.tiling.grid_indicator = parseIndicator(raw);
     }
 
     if (doc.getSection("tiling.layouts.fibonacci")) |ms| {
-        if (ms.getString("indicator")) |raw|
-            cfg.tiling.fibonacci_indicator = parseIndicator(raw);
-        if (ms.getString("variation")) |v| {
+        if (ms.getString("indicator")) |raw| cfg.tiling.fibonacci_indicator = parseIndicator(raw);
+        if (ms.getString("variation")) |v|
             if (!std.mem.eql(u8, v, "default"))
                 debug.warn("fibonacci does not support variation '{s}' (ignored)", .{v});
-        }
     }
-
-    cfg.tiling.global_layout = get(bool, section, "global_layout", false, null, null);
 }
 
 // Layout-array helpers
@@ -485,13 +480,16 @@ fn isKnownLayout(name: []const u8) bool {
     return false;
 }
 
-/// Returns true if `s` looks like a workspace-number list: only digits, commas, spaces.
+/// Returns true if `s` looks like a workspace-number list: only digits, commas, spaces,
+/// and contains at least one digit.
 fn isWorkspaceList(s: []const u8) bool {
     if (s.len == 0) return false;
-    for (s) |c| if (!std.ascii.isDigit(c) and c != ',' and c != ' ') return false;
-    // Must contain at least one digit.
-    for (s) |c| if (std.ascii.isDigit(c)) return true;
-    return false;
+    var has_digit = false;
+    for (s) |c| {
+        if (std.ascii.isDigit(c)) { has_digit = true; continue; }
+        if (c != ',' and c != ' ') return false;
+    }
+    return has_digit;
 }
 
 /// Canonicalises a layout name to the plain lowercase form used in the layouts list.

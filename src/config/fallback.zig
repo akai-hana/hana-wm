@@ -1,4 +1,4 @@
-//! Fallback configuration — terminal and font auto-detection.
+//! Fallback configuration -- terminal and font auto-detection.
 
 const std   = @import("std");
 const debug = @import("debug");
@@ -11,9 +11,8 @@ const TERMINALS = [_][]const u8{
     "mate-terminal", "lxterminal", "terminator",
 };
 
+// Checked in preference order. "monospace" is always the final fallback.
 const FONTS = [_][]const u8{
-    "FiraCode Nerd Font Ret",
-    "FiraCode Retina",
     "FiraCode Nerd Font",
     "FiraCode",
     "JetBrains Mono Nerd Font",
@@ -22,46 +21,67 @@ const FONTS = [_][]const u8{
     "monospace",
 };
 
-/// Walks `list` in order and returns the first entry for which `checkFn` returns true.
-/// Falls back to `fallback` and logs a warning when nothing matches.
-fn detectFromList(
-    comptime list:    []const []const u8,
-    comptime checkFn: fn ([]const u8) bool,
-    item_type:        []const u8,
-    fallback:         []const u8,
-) []const u8 {
-    inline for (list) |item| {
-        if (checkFn(item)) {
-            debug.info("Detected {s}: {s}", .{ item_type, item });
-            return item;
+// Direct libc bindings — avoids depending on the nightly std.process.Child API,
+// which requires an Io handle incompatible with synchronous config loading.
+// link_libc = true in build.zig makes these resolve at link time.
+const FILE = opaque {};
+extern fn popen(command: [*:0]const u8, mode: [*:0]const u8) ?*FILE;
+extern fn pclose(stream: *FILE) c_int;
+extern fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *FILE) usize;
+extern fn feof(stream: *FILE) c_int;
+
+/// Returns the first available terminal from TERMINALS, or "xterm".
+pub fn detectTerminal(_: std.mem.Allocator) ![]const u8 {
+    for (TERMINALS) |cmd| {
+        if (isCommandAvailable(cmd)) {
+            debug.info("Detected terminal: {s}", .{cmd});
+            return cmd;
         }
     }
-    debug.warn("No preferred {s} found, using '{s}'", .{ item_type, fallback });
-    return fallback;
+    debug.warn("No preferred terminal found, using 'xterm'", .{});
+    return "xterm";
 }
 
-/// Returns the first available terminal from `TERMINALS`, or `"xterm"`.
-pub fn detectTerminal(_: std.mem.Allocator) ![]const u8 {
-    return detectFromList(
-        &TERMINALS,
-        struct { fn check(cmd: []const u8) bool { return isCommandAvailable(cmd); } }.check,
-        "terminal",
-        "xterm",
-    );
+/// Runs fc-list and returns the first FONTS entry present on the system.
+/// Falls back to "monospace" when fc-list is unavailable or produces no match.
+pub fn detectFont(allocator: std.mem.Allocator) ![]const u8 {
+    const pipe = popen("fc-list --format=%{family}\\n", "r") orelse {
+        debug.warn("fc-list unavailable, using 'monospace'", .{});
+        return "monospace";
+    };
+    defer _ = pclose(pipe);
+
+    var output: std.ArrayListUnmanaged(u8) = .empty;
+    defer output.deinit(allocator);
+
+    var buf: [4096]u8 = undefined;
+    while (feof(pipe) == 0) {
+        const n = fread(&buf, 1, buf.len, pipe);
+        if (n == 0) break;
+        try output.appendSlice(allocator, buf[0..n]);
+        if (output.items.len > 256 * 1024) break; // guard against pathological fc-list output
+    }
+
+    // fc-list may emit comma-separated aliases per line, e.g. "FiraCode,FiraCode Nerd Font".
+    // Iterate FONTS first so preference order is respected regardless of fc-list output order.
+    for (FONTS) |font| {
+        var lines = std.mem.splitScalar(u8, output.items, '\n');
+        while (lines.next()) |line| {
+            var families = std.mem.splitScalar(u8, line, ',');
+            while (families.next()) |family| {
+                if (std.mem.eql(u8, std.mem.trim(u8, family, " \t\r"), font)) {
+                    debug.info("Detected font: {s}", .{font});
+                    return font;
+                }
+            }
+        }
+    }
+
+    debug.warn("No preferred font found via fc-list, using 'monospace'", .{});
+    return "monospace";
 }
 
-/// Returns the first font from `FONTS`. Fonts are assumed present if listed;
-/// no filesystem check is performed. To verify installation, use fc-list or similar.
-pub fn detectFont(_: std.mem.Allocator) ![]const u8 {
-    return detectFromList(
-        &FONTS,
-        struct { fn check(_: []const u8) bool { return true; } }.check,
-        "font",
-        "monospace",
-    );
-}
-
-/// Checks whether `command` exists and is readable in a common bin directory or `$PATH`.
+/// Checks whether command exists in a common bin directory or $PATH.
 fn isCommandAvailable(command: []const u8) bool {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
 
@@ -74,7 +94,6 @@ fn isCommandAvailable(command: []const u8) bool {
     var it = std.mem.splitScalar(u8, path_env, ':');
     while (it.next()) |dir| {
         if (dir.len == 0) continue;
-        // Skip directories already checked above.
         const already_checked = inline for (common_paths) |c| {
             if (std.mem.eql(u8, dir, c)) break true;
         } else false;

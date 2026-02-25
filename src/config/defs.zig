@@ -314,8 +314,10 @@ pub const BarConfig = struct {
     transparency: f32 = 1.0,
 
     pub fn deinit(self: *BarConfig, allocator: std.mem.Allocator) void {
-        freeStringList(&self.workspace_icons, allocator);
-        freeStringList(&self.fonts, allocator);
+        for (self.workspace_icons.items) |s| allocator.free(s);
+        self.workspace_icons.deinit(allocator);
+        for (self.fonts.items) |s| allocator.free(s);
+        self.fonts.deinit(allocator);
         for (self.layout.items) |*item| item.deinit(allocator);
         self.layout.deinit(allocator);
     }
@@ -400,13 +402,6 @@ pub const BarConfig = struct {
         return @intFromFloat(@round(std.math.clamp(self.transparency, 0.0, 1.0) * 0xFFFF));
     }
 };
-
-// Private helpers for BarConfig
-
-fn freeStringList(list: *std.ArrayList([]const u8), allocator: std.mem.Allocator) void {
-    for (list.items) |s| allocator.free(s);
-    list.deinit(allocator);
-}
 
 pub const Rule = struct {
     class_name: []const u8,
