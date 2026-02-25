@@ -9,13 +9,17 @@ const debug   = @import("debug");
 
 const c = @cImport(@cInclude("time.h"));
 
-// Matches the width of the longest possible clock output, used for pre-sizing the segment.
 const TIME_FORMAT = "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}";
+
+/// A concrete string matching the longest possible output of TIME_FORMAT.
+/// Used by bar.zig to pre-compute the clock segment width without duplicating
+/// the format knowledge.
+pub const SAMPLE_STRING: []const u8 = "0000-00-00 00:00:00";
 
 var last_formatted_time: [20]u8 = undefined;
 var last_formatted_sec:  i64    = -1;
 
-var global_timer_fd: i32 = 0;
+var global_timer_fd: i32  = 0;
 var timer_enabled:   bool = false;
 
 /// Registers the timerfd file descriptor. Must be called once during initialisation.
@@ -40,7 +44,6 @@ fn setTimerState(enable: bool) void {
         };
         break :blk .{
             .it_interval = .{ .sec = 1, .nsec = 0 },
-            // Fire on the next second boundary, then every second after.
             .it_value = .{ .sec = 0, .nsec = @intCast(std.time.ns_per_s - @as(u64, @intCast(ts.nsec))) },
         };
     } else .{
@@ -66,7 +69,6 @@ pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start
     const time_str = if (ts.sec == last_formatted_sec)
         last_formatted_time[0..19]
     else blk: {
-        // Pass ts through so formatTime doesn't need its own clock_gettime call.
         const str = try formatTime(&last_formatted_time, ts);
         last_formatted_sec = ts.sec;
         break :blk str;

@@ -226,11 +226,7 @@ const Parser = struct {
         }
 
         if (!has_escapes) {
-            // Fast path: no escapes — scan to closing quote and slice directly.
-            while (end_pos < self.content.len and self.content[end_pos] != quote) {
-                if (self.content[end_pos] == '\n') return ParseError.InvalidValue;
-                end_pos += 1;
-            }
+            // Pre-scan left end_pos at the closing quote (or end-of-input if unterminated).
             if (end_pos >= self.content.len) return ParseError.InvalidValue;
             const result = try allocator.dupe(u8, self.content[start..end_pos]);
             self.pos = end_pos + 1;

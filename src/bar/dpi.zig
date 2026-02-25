@@ -35,7 +35,6 @@ const ScreenDimensions = struct {
     width_mm:  f32,
     height_mm: f32,
 
-    /// Construct from an XCB screen descriptor.
     fn from(screen: *xcb.xcb_screen_t) ScreenDimensions {
         return .{
             .width_px  = @floatFromInt(screen.width_in_pixels),
@@ -45,7 +44,6 @@ const ScreenDimensions = struct {
         };
     }
 
-    /// Diagonal size in pixels.
     fn diagonalPx(self: ScreenDimensions) f32 {
         return @sqrt(self.width_px * self.width_px + self.height_px * self.height_px);
     }
@@ -56,7 +54,6 @@ pub const DpiInfo = struct {
     dpi:          f32,
     scale_factor: f32,
 
-    /// Computes the scale factor as `dpi / BASELINE_DPI`.
     pub fn init(dpi: f32) DpiInfo {
         return .{ .dpi = dpi, .scale_factor = dpi / BASELINE_DPI };
     }
@@ -78,8 +75,8 @@ fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
     const value_len = xcb.xcb_get_property_value_length(prop_reply);
     if (value_len == 0) return null;
 
-    const value_ptr     = xcb.xcb_get_property_value(prop_reply);
-    const resource_str  = @as([*]const u8, @ptrCast(value_ptr))[0..@intCast(value_len)];
+    const value_ptr    = xcb.xcb_get_property_value(prop_reply);
+    const resource_str = @as([*]const u8, @ptrCast(value_ptr))[0..@intCast(value_len)];
 
     var lines = std.mem.splitScalar(u8, resource_str, '\n');
     while (lines.next()) |line| {
@@ -132,7 +129,7 @@ fn snapToCommonDPI(dpi: f32) f32 {
 /// screen's diagonal to the baseline diagonal. Used when physical dimensions
 /// are unavailable or unreasonable.
 fn calculateScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
-    const dims  = ScreenDimensions.from(screen);
+    const dims             = ScreenDimensions.from(screen);
     const resolution_scale = dims.diagonalPx() / BASELINE_DIAGONAL;
     debug.info("Resolution scaling: {d}x{d} -> {d:.2}x baseline ({d}x{d})",
         .{ @as(u16, @intFromFloat(dims.width_px)), @as(u16, @intFromFloat(dims.height_px)),
@@ -156,13 +153,12 @@ pub fn detect(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) !DpiInfo {
         if (dpi_cache.screen_signature == sig) return cached;
     }
 
-    const result             = try detectFresh(conn, screen);
-    dpi_cache.result         = result;
+    const result               = try detectFresh(conn, screen);
+    dpi_cache.result           = result;
     dpi_cache.screen_signature = sig;
     return result;
 }
 
-/// Performs fresh DPI detection without consulting the cache.
 fn detectFresh(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) !DpiInfo {
     if (readXftDpi(conn, screen)) |xft_dpi| {
         debug.info("Using DPI from X resources (Xft.dpi): {d:.1}", .{xft_dpi});
@@ -198,7 +194,6 @@ pub inline fn scaleToInt(comptime T: type, base_value: f32, scale_factor: f32) T
 /// Scales a border or gap value.
 ///   - Absolute: used as-is (DPI-independent pixel value).
 ///   - Percentage: `(pct / 100) * 0.5 * reference_dimension * scale_factor`.
-///     100% means the border equals 50% of the total space on each side.
 pub fn scaleBorderWidth(value: @import("parser").ScalableValue, scale_factor: f32, reference_dimension: u16) u16 {
     if (value.is_percentage) {
         const dim_f: f32 = @floatFromInt(reference_dimension);
@@ -212,7 +207,7 @@ pub fn scaleBorderWidth(value: @import("parser").ScalableValue, scale_factor: f3
 pub const scaleGaps = scaleBorderWidth;
 
 /// Scales a master-pane width value.
-///   - Percentage: returns a 0.0–1.0 ratio (e.g. 50% → 0.5).
+///   - Percentage: returns a 0.0-1.0 ratio (e.g. 50% -> 0.5).
 ///   - Absolute: returns the negative of the pixel value as a sentinel;
 ///     callers must convert to a ratio using the actual screen width.
 pub fn scaleMasterWidth(value: @import("parser").ScalableValue) f32 {
@@ -231,17 +226,9 @@ pub fn scaleFontSize(value: @import("parser").ScalableValue, screen: *@import("d
 }
 
 /// Scales a bar height value against the actual screen height.
-///
-///   - Percentage: `pct / 100 × screen_height` — a direct fraction of the
-///     display's vertical extent.  `height = 2.5%` on a 1600px-tall display
-///     gives 40px; on a 400px-tall display it gives 10px, keeping the bar
-///     proportionally correct across all resolutions.
-///   - Absolute: raw pixel value used as-is, identical to the old integer
-///     behaviour.  Existing configs with `height = 40` continue to work
-///     without any change.
-///
-/// Result is clamped to a minimum of 20px (matching `MIN_BAR_HEIGHT` in
-/// bar.zig) so the bar remains usable even on very small or unusual displays.
+///   - Percentage: `pct / 100 * screen_height`.
+///   - Absolute: raw pixel value used as-is.
+/// Result is clamped to a minimum of 20px.
 pub fn scaleBarHeight(value: @import("parser").ScalableValue, screen_height: u16) u16 {
     const MIN_PX: u16 = 20;
     const h: f32  = @floatFromInt(screen_height);

@@ -12,15 +12,14 @@ const events    = @import("events");
 const input     = @import("input");
 const utils     = @import("utils");
 const bar       = @import("bar");
-const focus     = @import("focus");
 const tiling    = @import("tiling");
 const layouts   = @import("layouts");
 const clock     = @import("clock");
 const dpi       = @import("dpi");
 const drawing   = @import("drawing");
-const constants    = @import("constants");
-const c_bindings   = @import("c_bindings");
-const lifecycle    = @import("lifecycle");
+const constants  = @import("constants");
+const c_bindings = @import("c_bindings");
+const lifecycle  = @import("lifecycle");
 
 const xcb = defs.xcb;
 const WM  = defs.WM;
@@ -158,7 +157,7 @@ fn handleConfigReload(wm: *WM) !void {
         return error.InvalidConfig;
     }
 
-    config.resolveKeybindings(new_config.keybindings.items, @ptrCast(@alignCast(wm.xkb_state)));
+    config.resolveKeybindings(new_config.keybindings.items, @ptrCast(@alignCast(wm.xkb_state)), wm.allocator);
     config.finalizeConfig(&new_config, wm.screen);
 
     var old_config = wm.config;
@@ -212,7 +211,7 @@ pub fn main() !void {
     defer xkb_state.deinit();
 
     var user_config = try config.loadConfigDefault(allocator);
-    config.resolveKeybindings(user_config.keybindings.items, xkb_state);
+    config.resolveKeybindings(user_config.keybindings.items, xkb_state, allocator);
     config.finalizeConfig(&user_config, screen);
 
     var wm = WM{
@@ -237,7 +236,7 @@ pub fn main() !void {
     defer posix.close(fds.signal);
     defer posix.close(fds.timer);
 
-    events.initModules(&wm);
+    try events.initModules(&wm);
     defer events.deinitModules();
 
     bar.init(&wm) catch |err| {
@@ -264,6 +263,13 @@ pub fn main() !void {
             continue;
         };
 
+        // Detect a dead X11 connection before dispatching events.
+        if ((pollfds[0].revents & (posix.POLL.ERR | posix.POLL.HUP)) != 0 or
+            xcb.xcb_connection_has_error(conn) != 0) {
+            debug.err("X11 connection error, shutting down", .{});
+            break;
+        }
+
         // X11 events
         if (pollfds[0].revents & posix.POLL.IN != 0) {
             while (xcb.xcb_poll_for_event(conn)) |event| {
@@ -289,12 +295,6 @@ pub fn main() !void {
             var expiration: u64 = 0;
             _ = posix.read(fds.timer, std.mem.asBytes(&expiration)) catch {};
             bar.checkClockUpdate();
-        }
-
-        if ((pollfds[0].revents & (posix.POLL.ERR | posix.POLL.HUP)) != 0 or
-            xcb.xcb_connection_has_error(conn) != 0) {
-            debug.err("X11 connection error, shutting down", .{});
-            break;
         }
     }
 

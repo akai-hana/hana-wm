@@ -8,7 +8,7 @@ const xkb    = @import("xkbcommon");
 
 const parseColor = parser.parseColor;
 
-// Typed value getters 
+// Typed value getters
 
 /// Returns `default` when the key is absent, out of range, or the wrong type.
 /// Out-of-range values log a warning and return the default (not clamped).
@@ -23,10 +23,6 @@ fn get(
     const value = switch (T) {
         bool         => section.getBool(key)   orelse return default,
         []const u8   => section.getString(key) orelse return default,
-        f32          => blk: {
-            const i = section.getInt(key) orelse return default;
-            break :blk @as(f32, @floatFromInt(i)) / 100.0;
-        },
         u8, u16, u32, usize => blk: {
             const i = section.getInt(key) orelse return default;
             break :blk @as(T, @intCast(i));
@@ -78,7 +74,7 @@ fn addRule(allocator: std.mem.Allocator, cfg: *defs.Config, class_name: []const 
     });
 }
 
-// Default bar layout 
+// Default bar layout
 
 fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *defs.Config) !void {
     const defaults = [_]struct { pos: defs.BarPosition, seg: defs.BarSegment }{
@@ -93,7 +89,7 @@ fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *defs.Config) !void {
     }
 }
 
-// Config loading 
+// Config loading
 
 /// Loads config from XDG path, CWD, or the embedded fallback — whichever succeeds first.
 pub fn loadConfigDefault(allocator: std.mem.Allocator) !defs.Config {
@@ -159,7 +155,7 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
 }
 
 fn loadFallbackConfig(allocator: std.mem.Allocator) !defs.Config {
-    const fallback     = @import("fallback");
+    const fallback      = @import("fallback");
     const fallback_toml = fallback.getFallbackToml();
 
     var doc = try parser.parse(allocator, fallback_toml);
@@ -211,7 +207,7 @@ fn parseConfigSections(allocator: std.mem.Allocator, doc: *const parser.Document
     try parseRules(allocator, doc, cfg);
 }
 
-// Keybinding parsing 
+// Keybinding parsing
 
 const MOD_MAP = std.StaticStringMap(u16).initComptime(.{
     .{ "Super",   defs.MOD_SUPER   },
@@ -256,7 +252,8 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, c
     // Support both [binds] (current) and [Keybindings] (legacy).
     const section         = doc.getSection("binds") orelse doc.getSection("Keybindings") orelse return;
     const mod_placeholder = section.getString("Mod");
-    const kill_placeholder = section.getString("kill") orelse return;
+    // Optional: if set, `{kill}` in exec commands is replaced with this string.
+    const kill_placeholder = section.getString("kill");
 
     var iter = section.pairs.iterator();
     while (iter.next()) |entry| {
@@ -276,8 +273,12 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, c
             continue;
         };
 
-        const final_command = if (std.mem.indexOf(u8, command, "{kill}")) |_|
-            try std.mem.replaceOwned(u8, allocator, command, "{kill}", kill_placeholder)
+        // Substitute {kill} only when the kill placeholder is defined in config.
+        const final_command: []const u8 = if (kill_placeholder) |kp|
+            if (std.mem.indexOf(u8, command, "{kill}") != null)
+                try std.mem.replaceOwned(u8, allocator, command, "{kill}", kp)
+            else
+                command
         else
             command;
         defer if (final_command.ptr != command.ptr) allocator.free(final_command);
@@ -331,25 +332,25 @@ fn tryParseWorkspace(command: []const u8, prefix: []const u8) ?u8 {
 }
 
 fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !defs.Action {
-    if (ACTION_MAP.get(cmd))                        |a| return a;
-    if (tryParseWorkspace(cmd, "workspace_"))        |ws| return .{ .switch_workspace  = ws };
-    if (tryParseWorkspace(cmd, "move_to_workspace_"))|ws| return .{ .move_to_workspace = ws };
+    if (ACTION_MAP.get(cmd))                         |a| return a;
+    if (tryParseWorkspace(cmd, "workspace_"))         |ws| return .{ .switch_workspace  = ws };
+    if (tryParseWorkspace(cmd, "move_to_workspace_")) |ws| return .{ .move_to_workspace = ws };
     return .{ .exec = try allocator.dupe(u8, cmd) };
 }
 
-// Public post-load helpers 
+// Public post-load helpers
 
-/// Resolves keybindings to keycodes and logs conflicts. Call after screen is available.
+/// Scales font size and other DPI-dependent fields. Call once the screen is available.
 pub fn finalizeConfig(cfg: *defs.Config, screen: *defs.xcb.xcb_screen_t) void {
     const dpi_module = @import("dpi");
     cfg.bar.scaled_font_size = dpi_module.scaleFontSize(cfg.bar.font_size, screen);
 }
 
 /// Resolves keysyms to keycodes and warns about duplicate bindings.
-pub fn resolveKeybindings(keybindings: anytype, xkb_state: *xkb.XkbState) void {
+pub fn resolveKeybindings(keybindings: anytype, xkb_state: *xkb.XkbState, allocator: std.mem.Allocator) void {
     for (keybindings) |*kb| kb.keycode = xkb_state.keysymToKeycode(kb.keysym);
 
-    var seen = std.AutoHashMap(u64, usize).init(std.heap.c_allocator);
+    var seen = std.AutoHashMap(u64, usize).init(allocator);
     defer seen.deinit();
 
     for (keybindings, 0..) |*kb, i| {
@@ -365,7 +366,7 @@ pub fn resolveKeybindings(keybindings: anytype, xkb_state: *xkb.XkbState) void {
     }
 }
 
-// Section parsers 
+// Section parsers
 
 fn parseWorkspaces(doc: *const parser.Document, cfg: *defs.Config) void {
     // Support both [bar.modules.workspaces] (current) and [workspaces] (legacy).
@@ -411,8 +412,7 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
     cfg.tiling.master_width = master_src.getScalable(if (in_master_section) "width" else "master_width") orelse
         parser.ScalableValue.percentage(50.0);
 
-    // ── Variations & indicators ──────────────────────────────────────────────
-    // All variation and indicator settings live in [tiling.layouts.<name>].
+    // Variations & indicators — all live in [tiling.layouts.<n>].
 
     if (master_section_opt) |ms| {
         if (ms.getString("variation")) |v| {
@@ -459,7 +459,7 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
     cfg.tiling.global_layout = get(bool, section, "global_layout", false, null, null);
 }
 
-// ── Layout-array helpers ─────────────────────────────────────────────────────
+// Layout-array helpers
 
 /// Copies up to 3 bytes of `raw` into a fixed [3]u8, padding with spaces.
 fn parseIndicator(raw: []const u8) [3]u8 {
@@ -539,23 +539,19 @@ fn parseLayoutVariation(layout_name: []const u8, variation_str: []const u8) ?def
     return null;
 }
 
-/// Parses the `layouts` TOML array, which may use the extended grouping format:
+/// Parses the `layouts` TOML array. Supports an extended grouping format:
 ///
 ///   layouts = [
 ///       "master-stack",
-///       "monocle", "gapless", "4,8",   ← variation then workspace list
-///       "grid", "3,6",                  ← just workspace list, no variation
+///       "monocle", "gapless", "4,8",   -- variation then workspace list
+///       "grid", "3,6",                  -- just workspace list, no variation
 ///       "fibonacci",
 ///   ]
 ///
-/// The parser groups consecutive array elements: a known layout name starts a
-/// new group; the next element (if not itself a layout name) is treated as a
-/// variation override if it is a variation word, or a workspace list if it
-/// consists only of digits and commas.  A third element may follow as the
-/// workspace list when the second was a variation.
-///
-/// The plain single-name format ("master-stack", "monocle", …) is fully
-/// backward-compatible.
+/// A known layout name starts a new group. The next element (if not a layout name) is
+/// treated as a variation override if it is a variation word, or a workspace list if it
+/// consists only of digits and commas. A third element may follow as the workspace list
+/// when the second was a variation. The plain single-name format is fully backward-compatible.
 fn parseLayoutsArray(
     allocator: std.mem.Allocator,
     arr:       []const parser.Value,
@@ -582,7 +578,6 @@ fn parseLayoutsArray(
         var variation: ?defs.LayoutVariationOverride = null;
         var ws_list_str: ?[]const u8 = null;
 
-        // Peek at the next element: is it a variation or workspace list?
         if (i + 1 < arr.len) {
             if (arr[i + 1].asString()) |peek| {
                 if (!isKnownLayout(peek)) {
@@ -590,7 +585,6 @@ fn parseLayoutsArray(
                         ws_list_str = peek;
                         i += 1;
                     } else {
-                        // Treat as variation override.
                         variation = parseLayoutVariation(canonical, peek);
                         i += 1;
                         // After a variation, also peek for an optional workspace list.
@@ -607,7 +601,6 @@ fn parseLayoutsArray(
             }
         }
 
-        // Register per-workspace overrides for each workspace number in the list.
         if (ws_list_str) |ws_str| {
             var ws_iter = std.mem.splitScalar(u8, ws_str, ',');
             while (ws_iter.next()) |ws_tok| {
@@ -680,10 +673,8 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     if (section.getString("position")) |pos_str|
         cfg.bar.vertical_position = defs.BarVerticalPosition.fromString(pos_str) orelse .top;
 
-    // height accepts either a raw pixel value (e.g. `height = 40`) or a
-    // percentage of the screen height (e.g. `height = 2.5%`).  Null means
-    // auto-calculate from font metrics + padding.  Resolution happens at
-    // bar-init time in dpi.scaleBarHeight so the screen dimensions are known.
+    // height accepts a raw pixel value or a percentage of screen height.
+    // Null = auto-calculate from font metrics. Resolution happens at bar-init time.
     cfg.bar.height = section.getScalable("height");
 
     const font_str = get([]const u8, section, "font", "monospace:size=10", null, null);
@@ -717,10 +708,9 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     cfg.allocated_clock_format = try allocator.dupe(u8, clock_fmt);
     cfg.bar.clock_format       = cfg.allocated_clock_format.?;
 
-    cfg.bar.indicator_size  = section.getScalable("indicator_size")  orelse parser.ScalableValue.percentage(20.0);
+    cfg.bar.indicator_size      = section.getScalable("indicator_size")      orelse parser.ScalableValue.percentage(20.0);
     cfg.bar.workspace_tag_width = section.getScalable("workspace_tag_width") orelse parser.ScalableValue.percentage(100.0);
 
-    // indicator_location
     if (section.getString("indicator_location")) |loc_str| {
         cfg.bar.indicator_location = defs.IndicatorLocation.fromString(loc_str) orelse blk: {
             debug.warn("Unknown indicator_location '{s}', using default 'up-left'", .{loc_str});
@@ -739,8 +729,7 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
         cfg.bar.indicator_padding = std.math.clamp(f, 0.0, 1.0);
     }
 
-    // indicator_focused / indicator_unfocused
-    // If only one is set, the other mirrors it.
+    // indicator_focused / indicator_unfocused: if only one is set, the other mirrors it.
     {
         const raw_focused   = section.getString("indicator_focused");
         const raw_unfocused = section.getString("indicator_unfocused");
@@ -758,12 +747,11 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     if (section.get("indicator_color")) |_|
         cfg.bar.indicator_color = getColor(section, "indicator_color", cfg.bar.fg);
 
-    if (section.get("transparency")) |value| {
+    if (section.get("transparency")) |value|
         cfg.bar.transparency = std.math.clamp(parseTransparency(value), 0.0, 1.0);
-    }
 
     try parseWorkspaceIcons(allocator, section, cfg);
-    try parseBarLayout(allocator, section, doc, cfg);
+    try parseBarLayout(allocator, doc, cfg);
 
     // [bar.colors] overrides the per-module accent values set above.
     if (doc.getSection("bar.colors")) |colors| {
@@ -800,8 +788,7 @@ fn parseWorkspaceIcons(allocator: std.mem.Allocator, section: *const parser.Sect
     }
 }
 
-fn parseBarLayout(allocator: std.mem.Allocator, section: *const parser.Section, doc: *const parser.Document, cfg: *defs.Config) !void {
-    _ = section;
+fn parseBarLayout(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
     for (cfg.bar.layout.items) |*item| item.deinit(allocator);
     cfg.bar.layout.clearRetainingCapacity();
 
