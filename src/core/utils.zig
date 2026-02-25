@@ -57,6 +57,25 @@ pub fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect) void {
     );
 }
 
+/// Five-field variant of configureWindow that also sets border_width.
+/// Used by fullscreen enter/exit and workspace switching where the border
+/// must be set atomically with the geometry to avoid a one-frame flash.
+pub fn configureWindowGeom(conn: *xcb.xcb_connection_t, win: u32, geom: defs.WindowGeometry) void {
+    _ = xcb.xcb_configure_window(
+        conn, win,
+        xcb.XCB_CONFIG_WINDOW_X     | xcb.XCB_CONFIG_WINDOW_Y     |
+        xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
+        xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
+        &[_]u32{
+            @bitCast(@as(i32, geom.x)),
+            @bitCast(@as(i32, geom.y)),
+            geom.width,
+            geom.height,
+            geom.border_width,
+        },
+    );
+}
+
 pub fn getGeometry(conn: *xcb.xcb_connection_t, win: u32) ?Rect {
     const reply = xcb.xcb_get_geometry_reply(conn, xcb.xcb_get_geometry(conn, win), null) orelse return null;
     defer std.c.free(reply);
@@ -65,6 +84,15 @@ pub fn getGeometry(conn: *xcb.xcb_connection_t, win: u32) ?Rect {
 
 pub inline fn normalizeModifiers(state: u16) u16 {
     return state & defs.MOD_MASK_RELEVANT;
+}
+
+/// Default floating window position: one quarter of the screen in from the top-left.
+/// Shared by workspaces, minimize, and fullscreen — single definition, zero duplication.
+pub inline fn floatDefaultPos(wm: *const defs.WM) struct { x: u32, y: u32 } {
+    return .{
+        .x = @intCast(wm.screen.width_in_pixels  / 4),
+        .y = @intCast(wm.screen.height_in_pixels / 4),
+    };
 }
 
 // Atom cache
@@ -96,49 +124,25 @@ const AtomCache = struct {
 
 var atom_cache: ?AtomCache = null;
 
+/// Intern all atoms in a single round-trip batch.
+/// Atom names are derived directly from AtomCache field names at comptime,
+/// so adding a field to AtomCache is the only change required — no parallel
+/// array to maintain and no risk of index-order mismatch.
 pub fn initAtomCache(conn: *xcb.xcb_connection_t) !void {
-    // Fire all intern_atom requests before waiting for any reply — one round-trip
-    // instead of sixteen sequential ones.
-    const names = [_][]const u8{
-        "WM_PROTOCOLS", "WM_DELETE_WINDOW", "WM_TAKE_FOCUS",
-        "_NET_WM_NAME",  "UTF8_STRING",      "WM_CLASS",
-        "_NET_WM_STRUT_PARTIAL",
-        "_NET_WM_WINDOW_TYPE",  "_NET_WM_WINDOW_TYPE_DOCK",
-        "_NET_WM_STATE",        "_NET_WM_STATE_ABOVE",      "_NET_WM_STATE_STICKY",
-        "_NET_WM_ALLOWED_ACTIONS",
-        "_NET_WM_ACTION_CLOSE", "_NET_WM_ACTION_ABOVE",     "_NET_WM_ACTION_STICK",
-        "_NET_WM_PID",
-    };
-    var cookies: [names.len]xcb.xcb_intern_atom_cookie_t = undefined;
-    for (&cookies, names) |*c, name|
-        c.* = xcb.xcb_intern_atom(conn, 0, @intCast(name.len), name.ptr);
+    const fields = std.meta.fields(AtomCache);
+    var cookies: [fields.len]xcb.xcb_intern_atom_cookie_t = undefined;
 
-    var values: [names.len]u32 = undefined;
-    for (&values, cookies) |*v, cookie| {
-        const r = xcb.xcb_intern_atom_reply(conn, cookie, null) orelse return error.AtomFailed;
+    // Fire all requests before waiting for any reply — one round-trip total.
+    inline for (fields, 0..) |f, i|
+        cookies[i] = xcb.xcb_intern_atom(conn, 0, @intCast(f.name.len), f.name.ptr);
+
+    var cache: AtomCache = undefined;
+    inline for (fields, 0..) |f, i| {
+        const r = xcb.xcb_intern_atom_reply(conn, cookies[i], null) orelse return error.AtomFailed;
         defer std.c.free(r);
-        v.* = r.*.atom;
+        @field(cache, f.name) = r.*.atom;
     }
-
-    atom_cache = .{
-        .@"WM_PROTOCOLS"             = values[0],
-        .@"WM_DELETE_WINDOW"         = values[1],
-        .@"WM_TAKE_FOCUS"            = values[2],
-        .@"_NET_WM_NAME"             = values[3],
-        .@"UTF8_STRING"              = values[4],
-        .@"WM_CLASS"                 = values[5],
-        .@"_NET_WM_STRUT_PARTIAL"    = values[6],
-        .@"_NET_WM_WINDOW_TYPE"      = values[7],
-        .@"_NET_WM_WINDOW_TYPE_DOCK" = values[8],
-        .@"_NET_WM_STATE"            = values[9],
-        .@"_NET_WM_STATE_ABOVE"      = values[10],
-        .@"_NET_WM_STATE_STICKY"     = values[11],
-        .@"_NET_WM_ALLOWED_ACTIONS"  = values[12],
-        .@"_NET_WM_ACTION_CLOSE"     = values[13],
-        .@"_NET_WM_ACTION_ABOVE"     = values[14],
-        .@"_NET_WM_ACTION_STICK"     = values[15],
-        .@"_NET_WM_PID"              = values[16],
-    };
+    atom_cache = cache;
 }
 
 pub fn getAtom(conn: *xcb.xcb_connection_t, name: []const u8) !u32 {

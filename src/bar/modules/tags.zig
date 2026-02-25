@@ -1,7 +1,6 @@
 //! Workspace tag indicator segment.
 //!
-//! Owns the workspace segment cache that was previously split across cache.zig
-//! and bar.State: label pixel-widths and workspace cell width.
+//! Owns the workspace segment cache: label pixel-widths and workspace cell width.
 //! Call `invalidate()` whenever the font, config, or DPI changes (i.e. on bar
 //! reload) so the next draw remeasures everything with the fresh DrawContext.
 
@@ -30,15 +29,12 @@ inline fn getLabel(i: usize, config: defs.BarConfig) []const u8 {
     return "?";
 }
 
-/// Marks the cache stale. Call on bar reload (font/config/DPI change) so the
-/// next draw remeasures label widths and re-derives layout constants.
+/// Marks the cache stale. Call on bar reload (font/config/DPI change).
 pub fn invalidate() void { cache_valid = false; }
 
 /// Returns the cached workspace cell width (pixels). Valid after first draw.
 /// Used by bar.zig for segment width calculation and click hit-testing.
 pub fn getCachedWorkspaceWidth() u16 { return ws_width; }
-
-// Private helpers
 
 /// Populates label_widths and ws_width from the current DrawContext and config.
 /// No-ops when cache_valid is already true.
@@ -64,7 +60,6 @@ fn indicatorPos(
     const cw: f32 = @floatFromInt(cell_w);
     const bh: f32 = @floatFromInt(bar_height);
 
-    // Corner position for each location (as a fraction of cell dimensions).
     const corner_x: f32 = switch (location) {
         .left, .up_left, .down_left    => 0.0,
         .up, .down                     => 0.5,
@@ -80,7 +75,6 @@ fn indicatorPos(
     const ax: f32 = corner_x + padding * (0.5 - corner_x);
     const ay: f32 = corner_y + padding * (0.5 - corner_y);
 
-    // Convert to pixels and center the item on the anchor.
     const iw: f32 = @floatFromInt(item_w);
     const ih: f32 = @floatFromInt(item_h);
     const ix: u16 = @intCast(@max(0, @as(i32, @intFromFloat(@round(ax * cw - iw / 2.0)))));
@@ -111,8 +105,7 @@ pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start
         if (ws.windows.count() > 0) {
             const glyph = if (is_current) config.indicator_focused else config.indicator_unfocused;
             const color = config.indicator_color orelse fg;
-            // Use ind_size for both dimensions — glyphs are roughly square,
-            // and this avoids measuring at the wrong (bar) font size.
+            // Use ind_size for both dimensions — glyphs are roughly square.
             const pos   = indicatorPos(x, ws_width, height, ind_size, ind_size, loc, config.indicator_padding);
             try dc.drawTextSized(pos.x, pos.y, glyph, ind_size, color);
         }

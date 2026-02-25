@@ -1,5 +1,5 @@
-//! C bindings for Cairo and Pango.
-//! Manual extern declarations — XCB types come from defs.zig via @cImport.
+//! C bindings for Cairo, Pango, GLib, and xcb-cursor.
+//! XCB types come from defs.zig via @cImport.
 
 const defs = @import("defs");
 
@@ -30,9 +30,7 @@ pub extern fn cairo_xcb_surface_create(
     height:     c_int,
 ) ?*cairo_surface_t;
 
-/// Creates an in-memory image surface (no X connection)
-/// Used for off-screen font measurement (e.g. bar height calculation)
-/// to avoid the round-trips that xcb_create_window + xcb_create_gc incur.
+/// In-memory image surface; no X connection needed. Used for off-screen font measurement.
 pub extern fn cairo_image_surface_create(
     format: cairo_format_t,
     width:  c_int,
@@ -145,11 +143,7 @@ pub extern fn pango_font_metrics_unref(metrics: *PangoFontMetrics) void;
 
 pub extern fn g_object_unref(object: *anyopaque) void;
 
-// xcb-cursor 
-//
-// Wraps libXcursor for XCB callers.  Reads Xcursor.theme and Xcursor.size
-// from Xresources so themed cursors are loaded correctly.
-// Link with: -lxcb-cursor
+// xcb-cursor — wraps libXcursor for XCB callers. Link with: -lxcb-cursor
 
 pub const xcb_cursor_context_t = opaque {};
 

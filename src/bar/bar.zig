@@ -19,9 +19,6 @@ const title_segment      = @import("title");
 const clock_segment      = @import("clock");
 const status_segment     = @import("status");
 
-// Placeholder matching the clock output length, used to pre-compute the clock segment width.
-const CLOCK_FORMAT = "0000-00-00 00:00:00";
-
 const MIN_BAR_HEIGHT:           u32 = 20;
 const MAX_BAR_HEIGHT:           u32 = 200;
 const DEFAULT_BAR_HEIGHT:       u16 = 24;
@@ -54,13 +51,13 @@ const State = struct {
     has_clock_segment:    bool,
 
     fn init(
-        allocator:       std.mem.Allocator,
-        conn:            *xcb.xcb_connection_t,
-        window:          u32,
-        width:           u16,
-        height:          u16,
-        dc:              *drawing.DrawContext,
-        config:          defs.BarConfig,
+        allocator:        std.mem.Allocator,
+        conn:             *xcb.xcb_connection_t,
+        window:           u32,
+        width:            u16,
+        height:           u16,
+        dc:               *drawing.DrawContext,
+        config:           defs.BarConfig,
         has_transparency: bool,
     ) !*State {
         const s = try allocator.create(State);
@@ -80,7 +77,8 @@ const State = struct {
             .global_visible       = true,
             .has_transparency     = has_transparency,
             .allocator            = allocator,
-            .cached_clock_width   = dc.textWidth(CLOCK_FORMAT) + 2 * config.scaledSegmentPadding(height),
+            // Use the clock module's sample string so the width stays in sync automatically.
+            .cached_clock_width   = dc.textWidth(clock_segment.SAMPLE_STRING) + 2 * config.scaledSegmentPadding(height),
             .cached_clock_x       = null,
             .cached_workspace_x   = 0,
             .has_clock_segment    = detectClockSegment(&config),
@@ -120,7 +118,7 @@ fn detectClockSegment(config: *const defs.BarConfig) bool {
 /// Single-threaded — only accessed from the main event loop.
 var state: ?*State = null;
 
-// Window creation helpers 
+// Window creation helpers
 
 /// Computes the bar Y position for the given `height` and position config.
 fn barYPos(wm: *defs.WM, height: u16) i16 {
@@ -132,9 +130,9 @@ fn barYPos(wm: *defs.WM, height: u16) i16 {
 
 /// Result of `createBarWindow`.
 const BarWindowSetup = struct {
-    window:   u32,
+    window:    u32,
     visual_id: u32,
-    has_argb: bool,
+    has_argb:  bool,
 };
 
 /// Creates and configures an XCB window for the bar (unmapped).
@@ -186,9 +184,9 @@ fn sizeFont(alloc: std.mem.Allocator, font: []const u8, size: u16) !?[]const u8 
 
 /// Loads bar fonts into `dc`, appending the configured size suffix when present.
 fn loadBarFonts(dc: *drawing.DrawContext, wm: *defs.WM) !void {
-    const cfg          = wm.config.bar;
-    const alloc        = wm.allocator;
-    const scaled_size  = cfg.scaledFontSize();
+    const cfg         = wm.config.bar;
+    const alloc       = wm.allocator;
+    const scaled_size = cfg.scaledFontSize();
 
     if (cfg.fonts.items.len > 0) {
         var sized = std.ArrayList([]const u8){};
@@ -205,7 +203,7 @@ fn loadBarFonts(dc: *drawing.DrawContext, wm: *defs.WM) !void {
     try dc.loadFont(font_str);
 }
 
-// X11 property helpers 
+// X11 property helpers
 
 /// Sets an XCB window property from a pre-resolved atom.
 inline fn setPropAtom(conn: *xcb.xcb_connection_t, win: u32, prop: u32, type_: u32, data: anytype) void {
@@ -245,19 +243,15 @@ fn setWindowProperties(wm: *defs.WM, window: u32, height: u16) !void {
 
 /// Loads fonts at a trial point size, measures the actual rendered glyph height,
 /// and back-calculates the Pango point size at which glyphs exactly fill `bar_height`.
-/// Returns the final `scaled_font_size` to use (max_fit_pt × pct), or null if
+/// Returns the final `scaled_font_size` to use (max_fit_pt x pct), or null if
 /// measurement fails (caller keeps the existing value).
 ///
 /// Why we can't just set size = bar_height directly: Pango sizes are in points,
-/// not pixels. A font at "size=40" renders taller than 40px due to the pt→px
+/// not pixels. A font at "size=40" renders taller than 40px due to the pt->px
 /// conversion and internal ascender/descender ratios. We measure at a known trial
 /// size, derive the true px/pt ratio, then invert it to find the fitting pt size.
 fn resolvePercentageFontSize(wm: *defs.WM, bar_height: u16) ?u16 {
-    // Measure at 100pt, not 1pt. getMetrics() converts Pango units to pixels via
-    // integer division (pango_units / PANGO_SCALE). At 1pt the ascent+descent
-    // truncates to 1–2px, making the px/pt ratio too coarse and the back-calculated
-    // font size consistently smaller than intended. At 100pt the result is ~130–160px
-    // so the integer error is < 1% and the ratio is accurate enough for any bar height.
+    // Measure at 100pt — at 1pt integer truncation in getMetrics makes the ratio too coarse.
     const TRIAL_PT: u16 = 100;
 
     const saved_size = wm.config.bar.scaled_font_size;
@@ -277,9 +271,6 @@ fn resolvePercentageFontSize(wm: *defs.WM, bar_height: u16) ?u16 {
     const px_per_pt: f32  = font_px / @as(f32, @floatFromInt(TRIAL_PT));
     const height_f: f32   = @floatFromInt(bar_height);
 
-    // The pt size that exactly fills bar_height without clipping is:
-    //   max_size_pt = bar_height / px_per_pt
-    // Apply the user's percentage on top of that.
     const max_size_pt = height_f / px_per_pt;
     const final_size  = max_size_pt * (wm.config.bar.font_size.value / 100.0);
     return @max(1, @as(u16, @intFromFloat(@round(final_size))));
@@ -440,9 +431,8 @@ pub fn toggleBarPosition(wm: *defs.WM) !void {
             .bottom => .top,
         };
 
-        const new_y: i16 = if (wm.config.bar.vertical_position == .bottom)
-            @as(i16, @intCast(wm.screen.height_in_pixels)) - @as(i16, @intCast(s.height))
-        else 0;
+        // barYPos reads the already-toggled vertical_position from wm.config.
+        const new_y = barYPos(wm, s.height);
 
         // setWindowProperties makes blocking round-trips (getAtom); do this
         // before the grab so we never block inside an active server grab.
@@ -470,10 +460,10 @@ pub fn toggleBarPosition(wm: *defs.WM) !void {
     }
 }
 
-pub fn getBarWindow() u32      { return if (state) |s| s.window else 0; }
+pub fn getBarWindow() u32        { return if (state) |s| s.window else 0; }
 pub fn isBarWindow(win: u32) bool { return if (state) |s| s.window == win else false; }
-pub fn getBarHeight() u16      { return if (state) |s| s.height else 0; }
-pub fn isBarInitialized() bool { return state != null; }
+pub fn getBarHeight() u16        { return if (state) |s| s.height else 0; }
+pub fn isBarInitialized() bool   { return state != null; }
 
 pub fn hasClockSegment() bool { return if (state) |s| s.has_clock_segment else false; }
 
@@ -481,16 +471,14 @@ pub inline fn markDirty() void { if (state) |s| s.markDirty(); }
 
 /// Redraw the bar immediately and mark it clean.
 /// Used inside server grabs (e.g. workspace switch) so picom composites the
-/// correct bar content the moment it unfreezes — rather than the stale content
-/// from the previous frame that markDirty+deferred-draw would produce.
-/// Drawing inside a grab is safe: Cairo/XCB rendering commands go to the bar
-/// window's backing pixmap; picom composites the updated content on ungrab.
+/// correct bar content the moment it unfreezes.
 pub fn redrawImmediate(wm: *defs.WM) void {
     const s = state orelse return;
     if (!s.visible) return;
     draw(s, wm) catch |e| debug.warnOnErr(e, "draw in redrawImmediate");
     s.clearDirty();
 }
+
 pub inline fn raiseBar() void {
     if (state) |s| _ = xcb.xcb_configure_window(s.conn, s.window,
         xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
@@ -510,7 +498,7 @@ pub fn setBarState(wm: *defs.WM, action: BarAction) void {
     const s = state orelse return;
 
     // Flip global visibility before computing show so the result reflects
-    // the new desired state.  .hide_fullscreen skips the fullscreen lookup.
+    // the new desired state. .hide_fullscreen skips the fullscreen lookup.
     if (action == .toggle) s.global_visible = !s.global_visible;
     const is_fullscreen = switch (action) {
         .hide_fullscreen => false,
@@ -523,33 +511,18 @@ pub fn setBarState(wm: *defs.WM, action: BarAction) void {
     s.visible = show;
 
     if (action == .toggle) {
-        // For a user-initiated toggle the bar visibility change and the
-        // full-workspace retile must be atomic: picom must never composite
-        // a frame where the bar has appeared/disappeared but the window
-        // positions still reflect the old bar height.
-        //
-        // Drawing happens BEFORE the grab because Cairo's dc.flush() may
-        // trigger XCB calls; doing those inside the grab adds latency and
-        // makes reasoning about grab scope harder.  The drawn content is
-        // already committed to the bar window's backing store by the time
-        // the map lands, so the compositor sees correct content immediately.
+        // Drawing happens BEFORE the grab: Cairo/XCB calls inside a grab add latency.
+        // The drawn content is committed to the backing store before map lands,
+        // so the compositor sees correct content immediately.
         if (show) draw(s, wm) catch |e| debug.warnOnErr(e, "draw in setBarState");
 
         _ = xcb.xcb_grab_server(wm.conn);
         if (show) _ = xcb.xcb_map_window(s.conn, s.window)
         else      _ = xcb.xcb_unmap_window(s.conn, s.window);
 
-        // When toggling while fullscreened, s.visible stays false (bar is
-        // physically hidden by fullscreen), but inactive workspaces must be
-        // retiled using the *intended* future bar height — the height that will
-        // apply the moment they become active.  calculateScreenArea reads
-        // bar.isVisible() (i.e. s.visible), so we briefly expose global_visible
-        // through it for the duration of the retile, then restore the true value.
-        //
-        // Without this, toggling hidden→shown while fullscreened retiles other
-        // workspaces with bar_height=0 geometry.  On switch, the bar appears and
-        // the screen rect no longer matches last_retile_screen, forcing a full
-        // retile at switch time and causing the exact flicker we want to avoid.
+        // When toggling while fullscreened, briefly expose global_visible through
+        // isVisible() for the duration of the retile so calculateScreenArea uses
+        // the correct intended bar height for non-current workspaces.
         const retile_visible_save = s.visible;
         if (is_fullscreen) s.visible = s.global_visible;
         retileAllWorkspacesNoGrab(wm);
@@ -558,11 +531,8 @@ pub fn setBarState(wm: *defs.WM, action: BarAction) void {
         _ = xcb.xcb_ungrab_server(wm.conn);
         utils.flush(wm.conn);
     } else {
-        // hide_fullscreen / show_fullscreen: these are always called from
-        // within the fullscreen module's own server grab, so the flush here
-        // happens while picom is already frozen — harmless.  The retile
-        // commands queued by retileCurrentWorkspace will be flushed together
-        // with the grab release in the outer caller.
+        // hide_fullscreen / show_fullscreen: called from within the fullscreen module's
+        // own server grab; flush and retile commands are batched with the outer release.
         if (show) {
             _ = xcb.xcb_map_window(s.conn, s.window);
             draw(s, wm) catch |e| debug.warnOnErr(e, "draw in setBarState");
@@ -600,12 +570,8 @@ pub fn checkClockUpdate() void {
 pub fn handleExpose(event: *const xcb.xcb_expose_event_t, wm: *defs.WM) void {
     if (state) |s| if (event.window == s.window and event.count == 0) {
         if (wm.drag_state.active) {
-            // During a drag, the resized/moved window continuously uncovers
-            // and re-covers parts of the bar, generating a rapid stream of
-            // Expose events.  A full Cairo redraw on each one causes visible
-            // flickering with zero benefit — nothing bar-visible changes
-            // during a drag.  Schedule a single deferred redraw instead;
-            // it fires on the first event-loop iteration after the drag ends.
+            // During a drag, Expose events stream continuously with zero bar-visible
+            // changes. Schedule a single deferred redraw instead of drawing each one.
             s.markDirty();
         } else {
             draw(s, wm) catch |e| debug.warnOnErr(e, "draw in handleExpose");
@@ -646,9 +612,9 @@ pub fn monitorFocusedWindow(wm: *defs.WM) void {
 /// Routes a button press to workspace switching if clicked on the workspace segment.
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *defs.WM) void {
     if (state) |s| if (event.event == s.window) {
-        const ws_state       = workspaces.getState() orelse return;
-        const click_x       = @max(0, event.event_x - s.cached_workspace_x);
-        const clicked_ws: usize = @intCast(@divFloor(click_x, workspaces_segment.getCachedWorkspaceWidth()));
+        const ws_state           = workspaces.getState() orelse return;
+        const click_x            = @max(0, event.event_x - s.cached_workspace_x);
+        const clicked_ws: usize  = @intCast(@divFloor(click_x, workspaces_segment.getCachedWorkspaceWidth()));
         if (clicked_ws < ws_state.workspaces.len) {
             workspaces.switchTo(wm, clicked_ws);
             s.markDirty();
@@ -691,7 +657,8 @@ fn draw(s: *State, wm: *defs.WM) !void {
     s.dc.fillRect(0, 0, s.width, s.height, s.config.bg);
 
     const scaled_spacing = s.config.scaledSpacing(s.height);
-    var widths = [_]u16{0} ** 2; // [0] = left total, [1] = right total
+    // Accumulate total pixel width of left [0] and right [1] groups for center layout math.
+    var widths = [_]u16{0} ** 2;
     for (s.config.layout.items) |layout| {
         const idx: usize = switch (layout.position) {
             .left   => 0,
@@ -748,7 +715,7 @@ fn drawSegment(s: *State, wm: *defs.WM, segment: defs.BarSegment, x: u16, width:
     };
 }
 
-// Workspace retiling 
+// Workspace retiling
 
 /// Retiles all workspaces — queue-only, no grab, no flush.
 /// Caller is responsible for the grab/ungrab/flush envelope.
@@ -773,21 +740,10 @@ fn retileAllWorkspacesNoGrab(wm: *defs.WM) void {
         ws_state.current = @intCast(idx);
         tiling.retileCurrentWorkspace(wm);
 
-        // Push non-current-workspace windows back off-screen so they are not
-        // visible while their workspace is inactive.  The grab held by the
-        // caller means picom never composites the briefly-on-screen positions.
-        //
-        // Crucially, also invalidate each window's geom_cache entry.  The retile
-        // above just stored the tiled position in the cache, but we're about to
-        // move the window to OFFSCREEN_X.  If we don't invalidate, the cache
-        // holds a position that matches what the next retile will compute →
-        // configureSafe gets a hit → skips configure_window → window stays
-        // offscreen when the user switches back (if the fallback retile path runs).
-        //
-        // The current workspace is NOT pushed off-screen — its windows stay at
-        // their freshly-retiled on-screen positions.  Fullscreen workspaces are
-        // skipped entirely (above) because their geometry is managed by the
-        // fullscreen module; retiling them here would clobber the fullscreen rect.
+        // Push non-current-workspace windows back off-screen and invalidate their
+        // geom_cache entries. Without invalidation the cache holds the tiled position,
+        // so the next switch skips configure_window and the window stays off-screen.
+        // Current workspace stays on-screen. Fullscreen workspaces are skipped above.
         if (@as(u8, @intCast(idx)) != original_ws) {
             for (ws.windows.items()) |win| {
                 _ = xcb.xcb_configure_window(wm.conn, win,
@@ -795,9 +751,7 @@ fn retileAllWorkspacesNoGrab(wm: *defs.WM) void {
                 tiling.invalidateGeomCache(win);
             }
         }
-        // No intermediate flush — caller owns the flush.
     }
 
     ws_state.current = original_ws;
-    // No grab/ungrab/flush — caller owns those.
 }

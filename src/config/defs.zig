@@ -342,7 +342,6 @@ pub const BarConfig = struct {
 
     pub inline fn scaledFontSize(self: *const BarConfig) u16 { return self.scaled_font_size; }
 
-
     /// Derives horizontal padding inside a segment from the font_size percentage.
     /// Mirrors the vertical margin: at 75% font_size the font occupies 75% of bar
     /// height, so (1 - 0.75) / 2 = 12.5% of bar height is left on each side.
@@ -403,18 +402,6 @@ pub const BarConfig = struct {
 };
 
 // Private helpers for BarConfig
-
-inline fn scaleU8(value: u8, factor: f32) u16 {
-    return @intFromFloat(@round(@as(f32, @floatFromInt(value)) * factor));
-}
-
-inline fn scaleScalable(sv: parser.ScalableValue, base_px: f32, factor: f32, min_px: u16) u16 {
-    const px: f32 = if (sv.is_percentage)
-        base_px * (sv.value / 100.0) * factor
-    else
-        sv.value * factor;
-    return @max(min_px, @as(u16, @intFromFloat(@round(px))));
-}
 
 fn freeStringList(list: *std.ArrayList([]const u8), allocator: std.mem.Allocator) void {
     for (list.items) |s| allocator.free(s);
@@ -557,11 +544,104 @@ pub const DragState = struct {
     start_win_height: u16 = 0,
 };
 
-/// Focus suppression reason for context-aware behavior
+/// Focus suppression reason for context-aware behavior.
 pub const FocusSuppressReason = enum {
-    none, // Normal operation - focus follows mouse
-    window_spawn, // Just spawned a window - don't let cursor steal focus
-    tiling_operation, // Currently tiling - don't let cursor steal focus
+    none,             // normal operation: focus follows mouse
+    window_spawn,     // just spawned a window: don't let cursor steal focus
+    tiling_operation, // currently tiling: don't let cursor steal focus
+};
+
+// Spawn queue — maps newly-mapped windows to the workspace they were launched on.
+// Lives in WM so the event loop can inject it in tests without a global singleton.
+
+pub const SPAWN_QUEUE_CAP: u8 = 16;
+
+pub const SpawnEntry = struct {
+    workspace: u8,
+    /// _NET_WM_PID of the grandchild; 0 for daemon-mode terminals.
+    pid: u32,
+};
+
+/// Fixed-capacity circular FIFO for pending spawn-workspace assignments.
+pub const SpawnQueue = struct {
+    buf:  [SPAWN_QUEUE_CAP]SpawnEntry = undefined,
+    head: u8 = 0,
+    len:  u8 = 0,
+
+    /// Push a spawn entry. Drops the oldest entry when the queue is full.
+    pub fn push(self: *SpawnQueue, workspace: u8, pid: u32) void {
+        if (self.len == SPAWN_QUEUE_CAP) {
+            self.head = (self.head + 1) % SPAWN_QUEUE_CAP;
+            self.len -= 1;
+        }
+        const tail = (self.head + self.len) % SPAWN_QUEUE_CAP;
+        self.buf[tail] = .{ .workspace = workspace, .pid = pid };
+        self.len += 1;
+    }
+
+    /// Remove and return the workspace for the entry matching `win_pid`, or null.
+    /// Returns null immediately for pid=0 (use popOldestDaemon instead).
+    pub fn popByPid(self: *SpawnQueue, win_pid: u32) ?u8 {
+        if (win_pid == 0) return null;
+        var i: u8 = 0;
+        while (i < self.len) : (i += 1) {
+            const idx = (self.head + i) % SPAWN_QUEUE_CAP;
+            if (self.buf[idx].pid != win_pid) continue;
+            const ws = self.buf[idx].workspace;
+            self.removeAt(i);
+            return ws;
+        }
+        return null;
+    }
+
+    /// Remove and return the workspace of the oldest daemon (pid=0) entry, or null.
+    pub fn popOldestDaemon(self: *SpawnQueue) ?u8 {
+        var i: u8 = 0;
+        while (i < self.len) : (i += 1) {
+            const idx = (self.head + i) % SPAWN_QUEUE_CAP;
+            if (self.buf[idx].pid != 0) continue;
+            const ws = self.buf[idx].workspace;
+            self.removeAt(i);
+            return ws;
+        }
+        return null;
+    }
+
+    fn removeAt(self: *SpawnQueue, i: u8) void {
+        var j: u8 = i;
+        while (j + 1 < self.len) : (j += 1) {
+            const cur  = (self.head + j)     % SPAWN_QUEUE_CAP;
+            const next = (self.head + j + 1) % SPAWN_QUEUE_CAP;
+            self.buf[cur] = self.buf[next];
+        }
+        self.len -= 1;
+    }
+};
+
+/// Per-window minimize record. Carries the optional pre-fullscreen geometry
+/// and — crucially — the workspace index, so forceUntrack can locate and
+/// remove the entry from exactly one per-workspace list in O(n) instead of
+/// scanning all workspace lists.
+pub const MinimizedEntry = struct {
+    saved_fs:  ?WindowGeometry, // non-null iff the window was fullscreen when minimized
+    workspace: u8,              // index into MinimizeState.per_workspace
+};
+
+/// Per-workspace minimization state, owned by WM.
+/// Defined here so minimize.zig functions can receive *WM without circular imports.
+pub const MinimizeState = struct {
+    // One insertion-ordered list per workspace (indexed by workspace id).
+    // LIFO restore = pop from tail; FIFO restore = remove from head.
+    per_workspace:  []std.ArrayListUnmanaged(u32),
+    // Maps minimized window → MinimizedEntry (O(1) membership test and workspace lookup).
+    minimized_info: std.AutoHashMap(u32, MinimizedEntry),
+    allocator:      std.mem.Allocator,
+
+    pub fn deinit(self: *MinimizeState) void {
+        for (self.per_workspace) |*list| list.deinit(self.allocator);
+        self.allocator.free(self.per_workspace);
+        self.minimized_info.deinit();
+    }
 };
 
 pub const WM = struct {
@@ -575,6 +655,10 @@ pub const WM = struct {
     xkb_state:      ?*xkbcommon.XkbState,
     dpi_info:       dpi.DpiInfo,
     drag_state:     DragState = .{},
+    minimize:       ?MinimizeState = null,
+    /// Pending spawn-workspace assignments — owned here so callers can inject
+    /// a zeroed queue in tests without touching module-level global state.
+    spawn_queue:    SpawnQueue = .{},
     // Timestamp of the last processed X event; used for ICCCM-compliant
     // focus requests — xcb_set_input_focus and WM_TAKE_FOCUS messages must
     // carry the triggering event's timestamp, not XCB_CURRENT_TIME (0).
@@ -590,6 +674,7 @@ pub const WM = struct {
     spawn_cursor_y: i16 = 0,
 
     pub fn deinit(self: *WM) void {
+        if (self.minimize) |*m| m.deinit();
         self.fullscreen.deinit();
         self.config.deinit(self.allocator);
     }

@@ -121,7 +121,7 @@ height = 3.5%
 segment_spacing = 5%
 
 # Font size as percentage of bar height (e.g., 16% = font takes up 16% of the bar's vertical space)
-font_size = 75%
+font_size = 65%
 indicator_size = 25%
 
 # Workspace labels/icons (1-N)

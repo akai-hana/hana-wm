@@ -50,7 +50,8 @@ pub fn detectTerminal(_: std.mem.Allocator) ![]const u8 {
     );
 }
 
-/// Returns the first font from `FONTS` (assumed installed if listed), or `"monospace"`.
+/// Returns the first font from `FONTS`. Fonts are assumed present if listed;
+/// no filesystem check is performed. To verify installation, use fc-list or similar.
 pub fn detectFont(_: std.mem.Allocator) ![]const u8 {
     return detectFromList(
         &FONTS,

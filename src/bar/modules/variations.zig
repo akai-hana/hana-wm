@@ -3,8 +3,6 @@
 //! Displays the 3-character variation indicator for the active tiling layout.
 //! Can be placed independently from the layout icon in the bar layout config,
 //! e.g. in [bar.layout.left], [bar.layout.center], or [bar.layout.right].
-//!
-//! Available segment name: "variations"
 
 const defs    = @import("defs");
 const drawing = @import("drawing");

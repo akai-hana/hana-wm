@@ -1,11 +1,12 @@
-//! Fibonacci (spiral) Tiling Layout
-//!
-//! Creates a true fibonacci spiral pattern where windows spiral around the center
-//! in a counter-clockwise direction: right → down → left → up → repeat
+//! Fibonacci (spiral) tiling layout.
+//! Windows spiral counter-clockwise: right, down, left, up, repeat.
 
+const defs    = @import("defs");
 const xcb     = @import("defs").xcb;
 const utils   = @import("utils");
 const layouts = @import("layouts");
+const tiling  = @import("tiling");
+const State   = tiling.State;
 
 const Direction = enum {
     right, // Split vertically, window on left, remaining on right
@@ -25,32 +26,23 @@ const Direction = enum {
 
 pub fn tileWithOffset(
     conn:             *xcb.xcb_connection_t,
-    s:                anytype,
+    s:                *State,
     visible:          []const u32,
     screen_width:     u16,
     available_height: u16,
     y_offset:         u16,
 ) void {
+    if (visible.len == 0) return;
+
     const margin = s.margins();
     const gap    = margin.gap;
     const border = margin.border;
 
-    if (visible.len == 0) return;
-    if (visible.len == 1) {
-        layouts.configureSafe(conn, visible[0], .{
-            .x      = @intCast(gap),
-            .y      = @intCast(y_offset + gap),
-            .width  = screen_width - gap * 2 - border * 2,
-            .height = available_height - gap * 2 - border * 2,
-        });
-        return;
-    }
-
     tileFibonacci(conn, visible,
         @intCast(gap),
-        @intCast(y_offset + gap),
-        screen_width - gap * 2,
-        available_height - gap * 2,
+        @intCast(y_offset +| gap),
+        screen_width  -| gap *| 2,
+        available_height -| gap *| 2,
         gap, border, 0, .right);
 }
 
@@ -66,8 +58,6 @@ fn tileFibonacci(
     index:     usize,
     direction: Direction,
 ) void {
-    if (index >= windows.len) return;
-
     // The remaining area is too small to keep splitting.  Stack all overflow
     // windows on top of each other in whatever space is still available — like
     // a single-cell monocle for the remainder.
@@ -75,8 +65,8 @@ fn tileFibonacci(
         const rect = utils.Rect{
             .x      = @intCast(x),
             .y      = @intCast(y),
-            .width  = if (width  > border * 2) width  - border * 2 else 1,
-            .height = if (height > border * 2) height - border * 2 else 1,
+            .width  = if (width  > border * 2) width  - border * 2 else defs.MIN_WINDOW_DIM,
+            .height = if (height > border * 2) height - border * 2 else defs.MIN_WINDOW_DIM,
         };
         for (windows[index..]) |win| layouts.configureSafe(conn, win, rect);
         return;

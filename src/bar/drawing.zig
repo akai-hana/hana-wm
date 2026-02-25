@@ -7,7 +7,7 @@ const debug = @import("debug");
 const defs  = @import("defs");
 const c     = @import("c_bindings");
 
-// Visual helpers 
+// Visual helpers
 
 pub const VisualInfo = struct {
     visual_type: ?*defs.xcb.xcb_visualtype_t,
@@ -32,7 +32,10 @@ pub fn findVisualByDepth(screen: *defs.xcb.xcb_screen_t, depth: u8) VisualInfo {
 // DrawContext
 
 /// Font name conversion cache — avoids repeated allocations across bar redraws.
+/// Module-global so the cache is shared across all DrawContext instances.
 var font_conversion_cache: ?std.StringHashMap([]const u8) = null;
+
+const FALLBACK_FONT = "monospace:size=10";
 
 pub const DrawContext = struct {
     allocator: std.mem.Allocator,
@@ -52,7 +55,6 @@ pub const DrawContext = struct {
     cached_metrics:    ?struct { ascent: i16, descent: i16 } = null,
     last_color:        ?u32                      = null,
     /// Cached GC foreground color — skips xcb_change_gc when color is unchanged.
-    /// Mirrors last_color but for the XCB GC used by fillRect rather than Cairo.
     last_gc_color:     ?u32                      = null,
 
     /// Creates a DrawContext with an explicit visual (required for ARGB/32-bit windows).
@@ -116,14 +118,12 @@ pub const DrawContext = struct {
     /// Creates an off-screen DrawContext backed by a Cairo image surface.
     ///
     /// No X connection is used for surface or GC creation, eliminating the
-    /// xcb_create_window + xcb_create_gc_checked + xcb_request_check round-trips
-    /// that the normal init path incurs.  `conn` is stored in the struct so
-    /// `deinit` is uniform, but it is never dereferenced during construction or
-    /// font metric queries.  `gc` is left as 0; `deinit` skips xcb_free_gc for it.
+    /// xcb_create_window + xcb_create_gc_checked round-trips the normal init incurs.
+    /// `conn` is stored so `deinit` is uniform, but never dereferenced during construction.
+    /// `gc` is left as 0; `deinit` skips xcb_free_gc for it.
     ///
     /// Intended for one-shot font measurement (e.g. bar height calculation).
-    /// Do NOT call fillRect / drawText / flush on an offscreen context — those
-    /// methods require a real XCB drawable and GC.
+    /// Do NOT call fillRect / drawText / flush on an offscreen context.
     pub fn initOffscreen(
         allocator: std.mem.Allocator,
         conn:      *defs.xcb.xcb_connection_t,
@@ -132,7 +132,7 @@ pub const DrawContext = struct {
         const dc = try allocator.create(DrawContext);
         errdefer allocator.destroy(dc);
 
-        // A 1×1 ARGB32 image surface — no drawable, no visual lookup, no server traffic.
+        // 1x1 ARGB32 image surface — no drawable, no visual lookup, no server traffic.
         const surface = c.cairo_image_surface_create(.ARGB32, 1, 1)
             orelse return error.CairoSurfaceCreateFailed;
         errdefer c.cairo_surface_destroy(surface);
@@ -161,7 +161,6 @@ pub const DrawContext = struct {
     /// Frees all resources owned by this DrawContext.
     pub fn deinit(self: *DrawContext) void {
         if (self.current_font_desc) |desc| c.pango_font_description_free(desc);
-        // gc == 0 means this is an offscreen context with no XCB GC.
         if (self.gc != 0) _ = defs.xcb.xcb_free_gc(self.conn, self.gc);
         c.g_object_unref(self.pango_layout);
         c.cairo_destroy(self.ctx);
@@ -188,7 +187,7 @@ pub const DrawContext = struct {
 
     /// Loads multiple fonts as a comma-separated fallback list.
     pub fn loadFonts(self: *DrawContext, font_names: []const []const u8) !void {
-        if (font_names.len == 0) return self.loadFont("monospace:size=10");
+        if (font_names.len == 0) return self.loadFont(FALLBACK_FONT);
         if (font_names.len == 1) return self.loadFont(font_names[0]);
         const font_list = try std.mem.join(self.allocator, ",", font_names);
         defer self.allocator.free(font_list);
@@ -197,10 +196,6 @@ pub const DrawContext = struct {
     }
 
     /// Converts a packed 0xRRGGBB integer to {r, g, b} f64 components.
-    /// Pure bit-shift arithmetic — no allocation, no hashing.
-    /// The last_color guard in setColor means this is only reached on actual
-    /// color changes (typically 1-2 per segment boundary), so the trivial
-    /// computation cost is irrelevant.
     inline fn colorToRGB(color: u32) struct { f64, f64, f64 } {
         return .{
             @as(f64, @floatFromInt((color >> 16) & 0xFF)) / 255.0,
@@ -257,13 +252,11 @@ pub const DrawContext = struct {
     }
 
     /// Draws `text` at a temporarily-overridden absolute font size.
-    /// `x` is the left edge; `y_top` is the desired top of the ink bounds
-    /// (not the logical bounds), so the glyph renders flush to the target row.
-    /// The font size and metrics cache are restored before returning.
+    /// `x` is the left edge; `y_top` is the desired top of the ink bounds.
+    /// Font size and metrics cache are restored before returning.
     pub fn drawTextSized(self: *DrawContext, x: u16, y_top: u16, text: []const u8, size_px: u16, color: u32) !void {
         const desc = self.current_font_desc orelse return error.NoFont;
 
-        // Save existing size and whether it was set as absolute or scaled.
         const saved_size     = c.pango_font_description_get_size(desc);
         const saved_absolute = c.pango_font_description_get_size_is_absolute(desc);
         defer {
@@ -275,7 +268,6 @@ pub const DrawContext = struct {
             self.cached_metrics = null;
         }
 
-        // Override to the requested absolute pixel size.
         c.pango_font_description_set_absolute_size(desc, @as(f64, @floatFromInt(size_px)) * @as(f64, @floatFromInt(c.PANGO_SCALE)));
         c.pango_layout_set_font_description(self.pango_layout, desc);
         self.cached_metrics = null;
@@ -283,7 +275,7 @@ pub const DrawContext = struct {
         self.setPangoText(text);
 
         // Use ink extents so the glyph's visual top lands exactly at y_top,
-        // regardless of any leading space Pango adds above the ascent.
+        // regardless of leading space Pango adds above the ascent.
         var ink_rect: c.PangoRectangle = undefined;
         c.pango_layout_get_extents(self.pango_layout, &ink_rect, null);
         const ink_top_px: f64 = @as(f64, @floatFromInt(ink_rect.y)) /
@@ -299,7 +291,6 @@ pub const DrawContext = struct {
     pub fn drawText(self: *DrawContext, x: u16, y: u16, text: []const u8, color: u32) !void {
         self.setColor(color);
         self.setPangoText(text);
-        // y is the baseline; compute the layout top by subtracting the Pango baseline offset.
         const baseline_px = @as(f64, @floatFromInt(c.pango_layout_get_baseline(self.pango_layout)))
             / @as(f64, @floatFromInt(c.PANGO_SCALE));
         c.cairo_move_to(self.ctx, @floatFromInt(x), @as(f64, @floatFromInt(y)) - baseline_px);
@@ -319,8 +310,10 @@ pub const DrawContext = struct {
         c.pango_layout_set_width(self.pango_layout, @intCast(@as(i32, max_width) * c.PANGO_SCALE));
         c.pango_layout_set_ellipsize(self.pango_layout, c.PangoEllipsizeMode.END);
         self.setColor(color);
-        const asc, _ = self.getMetrics();
-        c.cairo_move_to(self.ctx, @floatFromInt(x), @as(f64, @floatFromInt(y)) - @as(f64, @floatFromInt(asc)));
+        // Use pango_layout_get_baseline for consistency with drawText.
+        const baseline_px = @as(f64, @floatFromInt(c.pango_layout_get_baseline(self.pango_layout)))
+            / @as(f64, @floatFromInt(c.PANGO_SCALE));
+        c.cairo_move_to(self.ctx, @floatFromInt(x), @as(f64, @floatFromInt(y)) - baseline_px);
         c.pango_cairo_show_layout(self.ctx, self.pango_layout);
         c.pango_layout_set_width(self.pango_layout, -1);
         c.pango_layout_set_ellipsize(self.pango_layout, c.PangoEllipsizeMode.NONE);
@@ -380,7 +373,7 @@ pub const DrawContext = struct {
     }
 };
 
-// Private helpers 
+// Private helpers
 
 /// Finds the `xcb_visualtype_t` for `visual_id` by scanning all screens and depths.
 fn findVisualType(conn: *defs.xcb.xcb_connection_t, visual_id: u32) ?*defs.xcb.xcb_visualtype_t {
@@ -415,8 +408,8 @@ inline fn appendStyle(result: *std.ArrayList(u8), allocator: std.mem.Allocator, 
 }
 
 /// Converts an Xft-style font name (e.g. `"JetBrains Mono:size=10:weight=bold"`) to
-/// the Pango format (`"JetBrains Mono Bold 10"`). Returns `xft_name` unchanged when
-/// no `:` separator is present. Results are memoised in `font_conversion_cache`.
+/// Pango format (`"JetBrains Mono Bold 10"`). Returns `xft_name` unchanged when no `:`
+/// separator is present. Results are memoised in `font_conversion_cache`.
 fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const u8 {
     if (font_conversion_cache == null)
         font_conversion_cache = std.StringHashMap([]const u8).init(allocator);

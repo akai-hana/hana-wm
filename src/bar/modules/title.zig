@@ -13,7 +13,6 @@ var net_wm_name: ?u32 = null;
 var utf8_string: ?u32 = null;
 
 /// Resolves title-related atoms from the pre-populated atom cache.
-/// Zero X round-trips — both atoms are interned at startup in utils.initAtomCache.
 /// Safe to call on every draw; the null-check makes repeated calls free.
 fn ensureAtoms() void {
     if (net_wm_name != null) return;
@@ -29,9 +28,8 @@ const WindowInfo = struct {
     minimized: bool,
 };
 
-/// Fixed left indent added to all title text draw calls, independent of the
-/// percentage-based scaledSegmentPadding. Ensures the text never touches the
-/// left border even at font_size = 100% (where scaledSegmentPadding == 0).
+/// Fixed left indent added to all title text draw calls, independent of scaledSegmentPadding.
+/// Ensures the text never touches the left border even at font_size = 100%.
 const TITLE_LEAD_PX: u16 = 4;
 
 /// Draws the title segment at `start_x`, returning `start_x + width`.
@@ -59,7 +57,7 @@ pub fn draw(
 
     if (window_count == 1) {
         const single_win   = current_ws.windows.items()[0];
-        const is_minimized = minimize.isMinimized(single_win);
+        const is_minimized = minimize.isMinimized(wm, single_win);
         const is_focused   = wm.focused_window != null;
 
         const accent = if (is_minimized)
@@ -71,7 +69,6 @@ pub fn draw(
         dc.fillRect(start_x, 0, width, height, accent);
 
         if (is_minimized) {
-            // focused_window is null when minimized, so fetch the title directly.
             const title = getWindowTitle(wm.conn, single_win, allocator) catch null;
             defer if (title) |t| allocator.free(t);
             if (title) |t| {
@@ -112,10 +109,10 @@ fn drawSegmentedTitles(
     const MAX_WINS: usize = 128;
     const n_wins = @min(win_items.len, MAX_WINS);
 
-    // Phase 1: pipeline all _NET_WM_NAME cookies in a single write pass 
-    // For each window we fire the cookie without waiting for a reply, so the
-    // X server can process all requests concurrently.  The read pass below then
-    // collects replies in order — turning N serial round-trips into one batch.
+    // Phase 1: pipeline all _NET_WM_NAME cookies in a single write pass.
+    // Fire all cookies without waiting for replies so the X server can process
+    // them concurrently. The read pass below collects replies in order, turning
+    // N serial round-trips into one batch.
     var net_cookies: [MAX_WINS]xcb.xcb_get_property_cookie_t = undefined;
     const net_atom = net_wm_name orelse 0;
     const utf_type = utf8_string orelse xcb.XCB_ATOM_STRING;
@@ -125,11 +122,11 @@ fn drawSegmentedTitles(
         }
     }
 
-    // Phase 2: collect _NET_WM_NAME replies; queue WM_NAME fallbacks 
-    // We allocate titles as heap slices; a null entry means "needs WM_NAME fallback".
-    var titles:   [MAX_WINS]?[]const u8                 = @splat(null);
-    var fb_cookies: [MAX_WINS]xcb.xcb_get_property_cookie_t = undefined;
-    var needs_fb: [MAX_WINS]bool                        = @splat(false);
+    // Phase 2: collect _NET_WM_NAME replies; queue WM_NAME fallbacks.
+    // titles[i] borrows from allocator; null means "needs WM_NAME fallback".
+    var titles:     [MAX_WINS]?[]const u8                    = @splat(null);
+    var fb_cookies: [MAX_WINS]xcb.xcb_get_property_cookie_t  = undefined;
+    var needs_fb:   [MAX_WINS]bool                           = @splat(false);
 
     for (win_items[0..n_wins], 0..) |win, i| {
         got: {
@@ -143,14 +140,13 @@ fn drawSegmentedTitles(
                     break :got;
                 }
             }
-            // _NET_WM_NAME was absent or empty — queue WM_NAME fallback.
             fb_cookies[i] = xcb.xcb_get_property(
                 wm.conn, 0, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, 0, 8192);
             needs_fb[i] = true;
         }
     }
 
-    // Phase 3: collect WM_NAME fallback replies (subset only) 
+    // Phase 3: collect WM_NAME fallback replies (subset only).
     for (0..n_wins) |i| {
         if (!needs_fb[i]) continue;
         const r = xcb.xcb_get_property_reply(wm.conn, fb_cookies[i], null) orelse continue;
@@ -163,36 +159,38 @@ fn drawSegmentedTitles(
     }
     defer for (titles[0..n_wins]) |t| if (t) |s| allocator.free(s);
 
-    // Build WindowInfo list and sort 
-    // WindowInfo.title borrows from titles[]; the defer above owns the memory.
-    var window_infos = std.ArrayList(WindowInfo){};
-    defer window_infos.deinit(allocator);
+    // Build WindowInfo list on the stack — eliminates a heap allocation per multi-window draw.
+    // MAX_WINS = 128 and WindowInfo is ~32 bytes, totaling ~4 KB — well within stack budget.
+    var infos_buf: [MAX_WINS]WindowInfo = undefined;
+    var n_infos: usize = 0;
 
     for (win_items[0..n_wins], 0..) |win, i| {
-        const is_min   = minimize.isMinimized(win);
+        const is_min   = minimize.isMinimized(wm, win);
         const geom: utils.Rect = if (!is_min) blk: {
             if (tiling.getCachedGeom(win)) |rect| break :blk rect;
             break :blk utils.getGeometry(wm.conn, win) orelse continue;
         } else .{ .x = std.math.maxInt(i16), .y = std.math.maxInt(i16), .width = 0, .height = 0 };
 
-        try window_infos.append(allocator, .{
+        infos_buf[n_infos] = .{
             .window    = win,
             .x         = geom.x,
             .y         = geom.y,
             .title     = titles[i] orelse "",
             .minimized = is_min,
-        });
+        };
+        n_infos += 1;
     }
 
-    if (window_infos.items.len == 0) return;
+    if (n_infos == 0) return;
 
-    std.mem.sort(WindowInfo, window_infos.items, {}, compareWindows);
+    const window_infos = infos_buf[0..n_infos];
+    std.mem.sort(WindowInfo, window_infos, {}, compareWindows);
 
-    const num_windows:   u32 = @intCast(window_infos.items.len);
+    const num_windows:   u32 = @intCast(window_infos.len);
     const segment_width: u16 = @intCast(@divFloor(@as(u32, width), num_windows));
     if (segment_width == 0) return;
 
-    for (window_infos.items, 0..) |info, i| {
+    for (window_infos, 0..) |info, i| {
         const segment_x      = start_x + @as(u16, @intCast(@as(u32, @intCast(i)) * segment_width));
         const is_focused_win = wm.focused_window == info.window;
 
@@ -221,7 +219,6 @@ fn compareWindows(_: void, a: WindowInfo, b: WindowInfo) bool {
     if (a.y != b.y) return a.y < b.y;
     return a.window < b.window;
 }
-
 
 /// Fetches a string property from `win`, allocating the result. Returns null when absent.
 fn fetchProperty(conn: *xcb.xcb_connection_t, win: u32, atom: u32, atom_type: u32, allocator: std.mem.Allocator) !?[]const u8 {

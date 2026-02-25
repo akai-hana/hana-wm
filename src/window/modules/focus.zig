@@ -1,14 +1,13 @@
 // Focus management
 
-const std = @import("std");
-const defs = @import("defs");
+const std    = @import("std");
+const defs   = @import("defs");
 const tiling = @import("tiling");
-const utils = @import("utils");
-const bar = @import("bar");
+const utils  = @import("utils");
+const bar    = @import("bar");
 const window = @import("window");
-const debug = @import("debug");
-const xcb = defs.xcb;
-const WM = defs.WM;
+const xcb    = defs.xcb;
+const WM     = defs.WM;
 
 pub const Reason = enum {
     mouse_click,
@@ -17,23 +16,20 @@ pub const Reason = enum {
     workspace_switch,
     user_command,
     tiling_operation,
-    // Explicit reason for newly spawned windows; prevents tiling operations
-    // from inadvertently inheriting window_spawn suppression via external state.
+    // Distinct from other reasons so tiling operations cannot accidentally
+    // inherit window_spawn crossing suppression via external state.
     window_spawn,
 };
 
 pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
-    if (win == 0 or win == wm.root or bar.isBarWindow(win)) return;
+    if (win == 0 or win == wm.root) return;
     if (wm.focused_window == win) return;
+    if (bar.isBarWindow(win)) return;
 
-    // EnterNotify / LeaveNotify are only delivered for mapped, viewable windows —
-    // the X server guarantees this.  Skip the round-trip for hover focus.
-    // For .window_spawn, xcb_map_window was sent on this same connection moments
-    // before this call; XCB's in-order delivery means the get_window_attributes
-    // reply will always reflect the already-mapped state — the check can never
-    // fail, so skip it.  For all other reasons (click, workspace switch, destroy
-    // recovery) the window could be destroyed between the triggering event and
-    // this call, so we guard against that BadMatch race.
+    // EnterNotify/LeaveNotify are only delivered for mapped windows, so skip
+    // the round-trip on hover. For window_spawn the map was queued on this
+    // connection moments ago, so the attributes reply will always show mapped.
+    // For all other reasons a race with destroy is possible, so we guard.
     if (reason != .mouse_enter and reason != .window_spawn and !isWindowMapped(wm.conn, win)) return;
 
     const input_model = utils.getInputModelCached(wm.conn, win);
@@ -47,9 +43,8 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     if (old) |old_win| window.grabButtons(wm, old_win, false);
 
     // ICCCM §4.1.7 says xcb_set_input_focus must not be sent to globally_active
-    // windows.  In practice, Electron/Chromium ignores WM_TAKE_FOCUS for
-    // pointer-entry events and only accepts focus via XSetInputFocus anyway.
-    // Sending it unconditionally is what i3, openbox, xfwm4, and kwin all do.
+    // windows, but Electron/Chromium ignores WM_TAKE_FOCUS on hover and only
+    // accepts XSetInputFocus. Sending it unconditionally matches i3/openbox/kwin.
     _ = xcb.xcb_set_input_focus(
         wm.conn,
         xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
@@ -57,8 +52,8 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
         wm.last_event_time,
     );
 
-    // Raise windows on click/command, AND for globally_active windows on hover.
-    // Electron/Chromium only accept focus when topmost in the stacking order.
+    // Raise on click/command, and also on hover for globally_active windows
+    // (Electron/Chromium only accept focus when topmost in the stacking order).
     if (shouldRaise(reason) or (reason == .mouse_enter and input_model == .globally_active)) {
         _ = xcb.xcb_configure_window(
             wm.conn, win,
@@ -72,9 +67,8 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     }
 
     tiling.updateWindowFocus(wm, old, win);
-    // Do not flush here — the main event loop flushes after draining all pending
-    // events.  This batches rapid hover crossings (e.g. fast mouse sweeps across
-    // several windows) into a single write syscall rather than one per crossing.
+    // No flush here: the event loop batches rapid hover crossings into a single
+    // write syscall rather than flushing on each one.
     bar.markDirty();
 }
 
@@ -94,8 +88,6 @@ pub fn clearFocus(wm: *WM) void {
     bar.markDirty();
 }
 
-// Helpers
-
 fn shouldRaise(reason: Reason) bool {
     return switch (reason) {
         .mouse_click, .user_command => true,
@@ -113,14 +105,12 @@ fn suppressionFor(reason: Reason) defs.FocusSuppressReason {
     };
 }
 
-// Returns true only if the window is mapped and viewable. xcb_get_window_attributes
-// failing (e.g. the window was destroyed) is treated as unmapped.
+// Returns true only if the window is mapped and viewable.
+// A failed reply (e.g. window was destroyed) is treated as unmapped.
 fn isWindowMapped(conn: *xcb.xcb_connection_t, win: u32) bool {
-    const cookie = xcb.xcb_get_window_attributes(conn, win);
-    const reply = xcb.xcb_get_window_attributes_reply(conn, cookie, null);
-    if (reply) |r| {
-        defer std.c.free(r);
-        return r.*.map_state == xcb.XCB_MAP_STATE_VIEWABLE;
-    }
-    return false;
+    const reply = xcb.xcb_get_window_attributes_reply(
+        conn, xcb.xcb_get_window_attributes(conn, win), null,
+    ) orelse return false;
+    defer std.c.free(reply);
+    return reply.*.map_state == xcb.XCB_MAP_STATE_VIEWABLE;
 }
