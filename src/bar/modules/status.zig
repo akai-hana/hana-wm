@@ -8,14 +8,12 @@ const utils   = @import("utils");
 
 const DEFAULT_STATUS = "hana";
 
-/// Draws the status text at `start_x`, returning the next X position.
-/// Returns `start_x` unchanged when there is no text to display.
 pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start_x: u16, status_text: []const u8) !u16 {
     if (status_text.len == 0) return start_x;
     return dc.drawSegment(start_x, height, status_text, config.scaledSegmentPadding(height), config.bg, config.fg);
 }
 
-/// Fetches the root WM_NAME property into `status_text`, falling back to `DEFAULT_STATUS`.
+/// Fetches the root WM_NAME into `status_text`, falling back to DEFAULT_STATUS.
 pub fn update(wm: *defs.WM, status_text: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
     const text = try utils.fetchPropertyToBuffer(
         wm.conn, wm.root, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING,

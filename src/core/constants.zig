@@ -53,5 +53,8 @@ pub const Sizes = struct {
     /// Dispatch table size (covers all X11 event types)
     pub const EVENT_DISPATCH_TABLE = 36;
 
-
+    /// Upper bound for the XCB cookie scratch buffer in grabKeybindings.
+    /// = max distinct keybindings × LOCK_MODIFIERS combinations (4).
+    /// 128 keybindings × 4 = 512; raise if you ever exceed that.
+    pub const MAX_KEYBIND_COOKIES = 512;
 };

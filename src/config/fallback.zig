@@ -30,8 +30,10 @@ extern fn pclose(stream: *FILE) c_int;
 extern fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *FILE) usize;
 extern fn feof(stream: *FILE) c_int;
 
+// Iter 1: removed unused `allocator` parameter — detectTerminal is a pure PATH
+// scan that does not allocate and returns a static string slice.
 /// Returns the first available terminal from TERMINALS, or "xterm".
-pub fn detectTerminal(_: std.mem.Allocator) ![]const u8 {
+pub fn detectTerminal() ![]const u8 {
     for (TERMINALS) |cmd| {
         if (isCommandAvailable(cmd)) {
             debug.info("Detected terminal: {s}", .{cmd});
@@ -83,7 +85,7 @@ pub fn detectFont(allocator: std.mem.Allocator) ![]const u8 {
 
 /// Checks whether command exists in a common bin directory or $PATH.
 fn isCommandAvailable(command: []const u8) bool {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
     const common_paths = [_][]const u8{ "/usr/bin", "/usr/local/bin", "/bin" };
     inline for (common_paths) |path| {
@@ -103,10 +105,14 @@ fn isCommandAvailable(command: []const u8) bool {
     return false;
 }
 
+// std.Io.Dir.openFileAbsolute takes []const u8 directly — no null terminator needed.
+// std.options.debug_io is appropriate: this is a blocking existence check that
+// runs at startup before any event loop or Io context is available.
 inline fn checkPath(buf: []u8, dir: []const u8, command: []const u8) bool {
-    const full_path = std.fmt.bufPrintZ(buf, "{s}/{s}", .{ dir, command }) catch return false;
-    const fd = std.posix.open(full_path, .{ .ACCMODE = .RDONLY }, 0) catch return false;
-    std.posix.close(fd);
+    const full_path = std.fmt.bufPrint(buf, "{s}/{s}", .{ dir, command }) catch return false;
+    const io = std.Options.debug_io;
+    const file = std.Io.Dir.openFileAbsolute(io, full_path, .{}) catch return false;
+    file.close(io);
     return true;
 }
 

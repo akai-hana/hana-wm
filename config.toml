@@ -4,9 +4,8 @@
 ### (configuration tips & tricks)
 #
 # + All parameters and values are CAPS-insensitive. 
-#
-# + Strings can be set with "" or '', decimal values can use a
-#   dot (N.NN) or comma (N,NN).
+# + Strings can be set with single or double quotes ("/')
+# + Decimal values can use a dot (N.NN) or comma (N,NN).
 #
 # + Numerical values can be either N (px) or N%/%N (ratio)
 #   - 'N' represents an exact amount of pixels.

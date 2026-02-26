@@ -6,21 +6,20 @@ const debug = @import("debug");
 
 const xcb = defs.xcb;
 
-// Baseline reference display: 2560x1600 at standard 96 DPI.
 const BASELINE_WIDTH:  f32 = 2560.0;
 const BASELINE_HEIGHT: f32 = 1600.0;
 const BASELINE_DPI:    f32 = 96.0;
 
-// Font percentages are relative to a 1080p screen height.
 const FONT_BASELINE_HEIGHT: f32 = 1080.0;
 
-// Precomputed at compile time to avoid repeated sqrt calls.
 const BASELINE_DIAGONAL: f32 = @sqrt(BASELINE_WIDTH * BASELINE_WIDTH + BASELINE_HEIGHT * BASELINE_HEIGHT);
 
-var dpi_cache: struct {
+const DpiCache = struct {
     result:           ?DpiInfo = null,
     screen_signature: u64      = 0,
-} = .{};
+};
+
+var dpi_cache: DpiCache = .{};
 
 const COMMON_DPI_TABLE = [_]struct { dpi: f32, name: []const u8 }{
     .{ .dpi =  96.0, .name = "1x (Standard)" },
@@ -49,7 +48,6 @@ const ScreenDimensions = struct {
     }
 };
 
-/// Holds the detected DPI and the resulting scale factor relative to the baseline.
 pub const DpiInfo = struct {
     dpi:          f32,
     scale_factor: f32,
@@ -59,7 +57,6 @@ pub const DpiInfo = struct {
     }
 };
 
-/// Reads `Xft.dpi` from the X RESOURCE_MANAGER root property.
 fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
     const atom_cookie = xcb.xcb_intern_atom(conn, 0, 16, "RESOURCE_MANAGER");
     const atom_reply  = xcb.xcb_intern_atom_reply(conn, atom_cookie, null) orelse return null;
@@ -95,7 +92,6 @@ fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
     return null;
 }
 
-/// Estimates DPI from the screen's reported physical dimensions.
 fn calculateDpiFromGeometry(screen: *xcb.xcb_screen_t) f32 {
     const dims = ScreenDimensions.from(screen);
     if (dims.width_mm == 0 or dims.height_mm == 0) {
@@ -109,7 +105,6 @@ fn calculateDpiFromGeometry(screen: *xcb.xcb_screen_t) f32 {
     return avg_dpi;
 }
 
-/// Snaps `dpi` to the nearest entry in `COMMON_DPI_TABLE` if within 5%.
 fn snapToCommonDPI(dpi: f32) f32 {
     var closest  = COMMON_DPI_TABLE[0];
     var min_diff = @abs(dpi - closest.dpi);
@@ -125,9 +120,6 @@ fn snapToCommonDPI(dpi: f32) f32 {
     return dpi;
 }
 
-/// Derives an effective DPI by scaling the baseline DPI by the ratio of the
-/// screen's diagonal to the baseline diagonal. Used when physical dimensions
-/// are unavailable or unreasonable.
 fn calculateScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
     const dims             = ScreenDimensions.from(screen);
     const resolution_scale = dims.diagonalPx() / BASELINE_DIAGONAL;
@@ -138,11 +130,10 @@ fn calculateScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
 }
 
 /// Detects DPI with caching. Detection priority:
-///   1. `Xft.dpi` from X resources (most accurate when set by the user)
+///   1. `Xft.dpi` from X resources
 ///   2. Calculated from display physical dimensions
 ///   3. Resolution-based scaling as a last resort
 pub fn detect(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) !DpiInfo {
-    // Pack screen dimensions into a 64-bit signature for cache validation.
     const sig =
         (@as(u64, screen.width_in_pixels)        << 48) |
         (@as(u64, screen.height_in_pixels)        << 32) |
@@ -177,7 +168,6 @@ fn detectFresh(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) !DpiInfo 
     return DpiInfo.init(snapToCommonDPI(geometry_dpi));
 }
 
-/// Scales an integer dimension by `scale_factor`, rounding to the nearest integer.
 pub inline fn scale(base_value: anytype, scale_factor: f32) @TypeOf(base_value) {
     const T = @TypeOf(base_value);
     return switch (@typeInfo(T)) {
@@ -186,14 +176,10 @@ pub inline fn scale(base_value: anytype, scale_factor: f32) @TypeOf(base_value) 
     };
 }
 
-/// Scales a float value and rounds to the nearest integer of type `T`.
 pub inline fn scaleToInt(comptime T: type, base_value: f32, scale_factor: f32) T {
     return @intFromFloat(@round(base_value * scale_factor));
 }
 
-/// Scales a border or gap value.
-///   - Absolute: used as-is (DPI-independent pixel value).
-///   - Percentage: `(pct / 100) * 0.5 * reference_dimension * scale_factor`.
 pub fn scaleBorderWidth(value: @import("parser").ScalableValue, scale_factor: f32, reference_dimension: u16) u16 {
     if (value.is_percentage) {
         const dim_f: f32 = @floatFromInt(reference_dimension);
@@ -206,16 +192,10 @@ pub fn scaleBorderWidth(value: @import("parser").ScalableValue, scale_factor: f3
 /// Alias for `scaleBorderWidth` — gaps and borders share identical scaling semantics.
 pub const scaleGaps = scaleBorderWidth;
 
-/// Scales a master-pane width value.
-///   - Percentage: returns a 0.0-1.0 ratio (e.g. 50% -> 0.5).
-///   - Absolute: returns the negative of the pixel value as a sentinel;
-///     callers must convert to a ratio using the actual screen width.
 pub fn scaleMasterWidth(value: @import("parser").ScalableValue) f32 {
     return if (value.is_percentage) value.value / 100.0 else -value.value;
 }
 
-/// Scales a font size. Percentage values are relative to a 1080p screen height;
-/// absolute values are used as-is.
 pub fn scaleFontSize(value: @import("parser").ScalableValue, screen: *@import("defs").xcb.xcb_screen_t) u16 {
     if (value.is_percentage) {
         const screen_height: f32 = @floatFromInt(screen.height_in_pixels);
@@ -225,10 +205,6 @@ pub fn scaleFontSize(value: @import("parser").ScalableValue, screen: *@import("d
     }
 }
 
-/// Scales a bar height value against the actual screen height.
-///   - Percentage: `pct / 100 * screen_height`.
-///   - Absolute: raw pixel value used as-is.
-/// Result is clamped to a minimum of 20px.
 pub fn scaleBarHeight(value: @import("parser").ScalableValue, screen_height: u16) u16 {
     const MIN_PX: u16 = 20;
     const h: f32  = @floatFromInt(screen_height);

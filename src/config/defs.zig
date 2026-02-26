@@ -11,12 +11,12 @@ pub const xcb = @cImport({
 pub const xkbcommon = @import("xkbcommon");
 
 // Modifier masks - must be u16 (XCB API requirement)
-pub const MOD_SHIFT: u16 = xcb.XCB_MOD_MASK_SHIFT;
-pub const MOD_LOCK: u16 = xcb.XCB_MOD_MASK_LOCK;
+pub const MOD_SHIFT: u16   = xcb.XCB_MOD_MASK_SHIFT;
+pub const MOD_LOCK: u16    = xcb.XCB_MOD_MASK_LOCK;
 pub const MOD_CONTROL: u16 = xcb.XCB_MOD_MASK_CONTROL;
-pub const MOD_ALT: u16 = xcb.XCB_MOD_MASK_1;
-pub const MOD_2: u16 = xcb.XCB_MOD_MASK_2;
-pub const MOD_SUPER: u16 = xcb.XCB_MOD_MASK_4;
+pub const MOD_ALT: u16     = xcb.XCB_MOD_MASK_1;
+pub const MOD_2: u16       = xcb.XCB_MOD_MASK_2;
+pub const MOD_SUPER: u16   = xcb.XCB_MOD_MASK_4;
 
 pub const MOD_MASK_RELEVANT: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER;
 
@@ -44,7 +44,7 @@ pub const Action = union(enum) {
     toggle_tiling,
     toggle_fullscreen,
     swap_master,
-    switch_workspace: u8,
+    switch_workspace:  u8,
     move_to_workspace: u8,
     dump_state,
     emergency_recover,
@@ -57,16 +57,16 @@ pub const Action = union(enum) {
     pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .exec => |cmd| allocator.free(cmd),
-            else => {},
+            else  => {},
         }
     }
 };
 
 pub const Keybind = struct {
-    modifiers: u16, // XCB API requirement
-    keysym: u32, // X11 keysym - must be u32
-    keycode: ?u8 = null,
-    action: Action,
+    modifiers: u16,    // XCB API requirement
+    keysym:    u32,    // X11 keysym - must be u32
+    keycode:   ?u8 = null,
+    action:    Action,
 };
 
 pub const MasterSide = enum {
@@ -74,14 +74,14 @@ pub const MasterSide = enum {
     right,
 
     pub fn fromString(str: []const u8) ?MasterSide { return std.meta.stringToEnum(MasterSide, str); }
-    pub fn toString(value: MasterSide) []const u8 { return @tagName(value); }
+    pub fn toString(value: MasterSide) []const u8   { return @tagName(value); }
 
-    // Support 'L'/'R' aliases in addition to full names
+    // Support 'L'/'R' aliases in addition to full names.
     pub fn fromStringWithAlias(str: []const u8) ?MasterSide {
         var buf: [16]u8 = undefined;
         if (str.len > buf.len) return null;
         const lower = std.ascii.lowerString(&buf, str);
-        if (std.mem.eql(u8, lower, "l") or std.mem.eql(u8, lower, "left")) return .left;
+        if (std.mem.eql(u8, lower, "l") or std.mem.eql(u8, lower, "left"))  return .left;
         if (std.mem.eql(u8, lower, "r") or std.mem.eql(u8, lower, "right")) return .right;
         return null;
     }
@@ -111,8 +111,6 @@ pub const FibonacciVariation = enum {
 };
 
 /// A layout variation discriminated by which layout it belongs to.
-/// Used in WorkspaceLayoutOverride so we can store a type-safe, allocation-free
-/// variation value alongside a workspace→layout assignment.
 pub const LayoutVariationOverride = union(enum) {
     master:    MasterVariation,
     monocle:   MonocleVariation,
@@ -121,51 +119,46 @@ pub const LayoutVariationOverride = union(enum) {
 };
 
 /// Records that a specific workspace should start in a particular layout
-/// (and optionally a particular variation of that layout), overriding the
-/// workspace default that would otherwise come from the first entry in the
-/// layouts array.
+/// (and optionally a variation), overriding the first-element default.
 pub const WorkspaceLayoutOverride = struct {
-    workspace_idx: u8,                      // 0-indexed workspace number
-    layout_idx:    u8,                      // index into TilingConfig.layouts
+    workspace_idx: u8,                       // 0-indexed workspace number
+    layout_idx:    u8,                       // index into TilingConfig.layouts
     variation:     ?LayoutVariationOverride, // null = use per-layout section default
 };
 
 pub const TilingConfig = struct {
-    enabled: bool = true,
-    layout: []const u8 = "master_left",
-    layouts: std.ArrayList([]const u8), // Available layouts in cycle order
-    master_side: MasterSide = .left,
+    enabled:      bool           = true,
+    layout:       []const u8     = "master_left",
+    layouts:      std.ArrayList([]const u8), // Available layouts in cycle order
+    master_side:  MasterSide     = .left,
     master_width: parser.ScalableValue = parser.ScalableValue.percentage(50.0),
-    master_count: u8 = 1,
-    gaps: parser.ScalableValue = parser.ScalableValue.absolute(10.0),
+    master_count: u8             = 1,
+    gaps:         parser.ScalableValue = parser.ScalableValue.absolute(10.0),
     border_width: parser.ScalableValue = parser.ScalableValue.absolute(2.0),
-    border_focused: u32 = 0x5294E2, // RGB color - must be u32
+    border_focused:   u32 = 0x5294E2, // RGB color - must be u32
     border_unfocused: u32 = 0x383C4A, // RGB color - must be u32
 
     // Per-layout variation preferences — stored as parsed enums (not raw strings)
     // to avoid dangling slices after the config document is freed.
-    master_variation:  MasterVariation  = .lifo,
-    monocle_variation: MonocleVariation = .gapless,
-    grid_variation:    GridVariation    = .rigid,
+    master_variation:    MasterVariation    = .lifo,
+    monocle_variation:   MonocleVariation   = .gapless,
+    grid_variation:      GridVariation      = .rigid,
     fibonacci_variation: FibonacciVariation = .default,
 
     // Per-layout 3-character indicator overrides (null = derive from active variation).
     // Stored as fixed-size arrays — no allocation, no dangling pointers.
     // Set via `indicator = "XYZ"` in the corresponding [tiling.layouts.*] section.
-    master_indicator:     ?[3]u8 = null,
-    monocle_indicator:    ?[3]u8 = null,
-    grid_indicator:       ?[3]u8 = null,
-    // 3-char label shown in bar for fibonacci (which has no variations).
-    // Stored as a fixed-size array so it never needs to be freed.
-    fibonacci_indicator: [3]u8 = "NUL".*,
+    master_indicator:    ?[3]u8 = null,
+    monocle_indicator:   ?[3]u8 = null,
+    grid_indicator:      ?[3]u8 = null,
+    // 3-char label displayed in the bar for fibonacci (which has no variations).
+    // Defaults to "FIB"; override with `indicator = "..."` in [tiling.layouts.fibonacci].
+    fibonacci_indicator: [3]u8 = "FIB".*,
 
     /// Per-workspace layout assignments parsed from the layouts array.
-    /// Entries here take precedence over the first-element default when
-    /// the WM initialises a workspace for the first time.
     workspace_layout_overrides: std.ArrayListUnmanaged(WorkspaceLayoutOverride) = .{},
 
     /// When true, layout changes apply globally across all workspaces (legacy behavior).
-    /// When false (default), each workspace independently remembers its own layout.
     global_layout: bool = false,
 
     pub fn deinit(self: *TilingConfig, allocator: std.mem.Allocator) void {
@@ -176,8 +169,6 @@ pub const TilingConfig = struct {
 };
 
 /// Where in the workspace cell the activity indicator is drawn.
-/// Diagonal variants like `up_left` accept both orderings in config
-/// (e.g. "up-left" and "left-up" both map to `up_left`).
 pub const IndicatorLocation = enum {
     up,
     down,
@@ -192,26 +183,26 @@ pub const IndicatorLocation = enum {
     /// orderings of diagonal names (e.g. "left-up" == "up-left").
     pub fn fromString(str: []const u8) ?IndicatorLocation {
         const map = std.StaticStringMap(IndicatorLocation).initComptime(.{
-            .{ "up",         .up         },
-            .{ "down",       .down       },
-            .{ "left",       .left       },
-            .{ "right",      .right      },
-            .{ "up-left",    .up_left    },
-            .{ "up_left",    .up_left    },
-            .{ "left-up",    .up_left    },
-            .{ "left_up",    .up_left    },
-            .{ "up-right",   .up_right   },
-            .{ "up_right",   .up_right   },
-            .{ "right-up",   .up_right   },
-            .{ "right_up",   .up_right   },
-            .{ "down-left",  .down_left  },
-            .{ "down_left",  .down_left  },
-            .{ "left-down",  .down_left  },
-            .{ "left_down",  .down_left  },
-            .{ "down-right", .down_right },
-            .{ "down_right", .down_right },
-            .{ "right-down", .down_right },
-            .{ "right_down", .down_right },
+            .{ "up",          .up         },
+            .{ "down",        .down       },
+            .{ "left",        .left       },
+            .{ "right",       .right      },
+            .{ "up-left",     .up_left    },
+            .{ "up_left",     .up_left    },
+            .{ "left-up",     .up_left    },
+            .{ "left_up",     .up_left    },
+            .{ "up-right",    .up_right   },
+            .{ "up_right",    .up_right   },
+            .{ "right-up",    .up_right   },
+            .{ "right_up",    .up_right   },
+            .{ "down-left",   .down_left  },
+            .{ "down_left",   .down_left  },
+            .{ "left-down",   .down_left  },
+            .{ "left_down",   .down_left  },
+            .{ "down-right",  .down_right },
+            .{ "down_right",  .down_right },
+            .{ "right-down",  .down_right },
+            .{ "right_down",  .down_right },
         });
         var buf: [16]u8 = undefined;
         if (str.len > buf.len) return null;
@@ -224,7 +215,9 @@ pub const BarVerticalPosition = enum {
     top,
     bottom,
 
-    pub fn fromString(str: []const u8) ?BarVerticalPosition { return std.meta.stringToEnum(BarVerticalPosition, str); }
+    pub fn fromString(str: []const u8) ?BarVerticalPosition {
+        return std.meta.stringToEnum(BarVerticalPosition, str);
+    }
 };
 
 pub const BarPosition = enum {
@@ -232,7 +225,9 @@ pub const BarPosition = enum {
     center,
     right,
 
-    pub fn fromString(str: []const u8) ?BarPosition { return std.meta.stringToEnum(BarPosition, str); }
+    pub fn fromString(str: []const u8) ?BarPosition {
+        return std.meta.stringToEnum(BarPosition, str);
+    }
 };
 
 pub const BarSegment = enum {
@@ -242,7 +237,9 @@ pub const BarSegment = enum {
     layout,
     variations,
 
-    pub fn fromString(str: []const u8) ?BarSegment { return std.meta.stringToEnum(BarSegment, str); }
+    pub fn fromString(str: []const u8) ?BarSegment {
+        return std.meta.stringToEnum(BarSegment, str);
+    }
 };
 
 pub const BarLayout = struct {
@@ -255,62 +252,48 @@ pub const BarLayout = struct {
 };
 
 pub const BarConfig = struct {
-    enabled: bool = true,
-    vertical_position: BarVerticalPosition = .top,
-    // Configured bar height: either an absolute pixel value or a percentage of
-    // the screen height.  Resolved to pixels at init time via dpi.scaleBarHeight.
+    enabled:           bool                   = true,
+    vertical_position: BarVerticalPosition    = .top,
+    // Configured bar height: absolute pixel value or percentage of screen height.
     // null = auto-calculate from font metrics alone.
-    height: ?parser.ScalableValue = null,
-    font: []const u8 = "monospace:size=10",
-    fonts: std.ArrayList([]const u8),
-    font_size: parser.ScalableValue = parser.ScalableValue.percentage(10.0),
-    scaled_font_size: u16 = 10, // Can exceed 255 on high DPI - u16 is correct
-    spacing: parser.ScalableValue = parser.ScalableValue.absolute(12.0),
+    height:            ?parser.ScalableValue  = null,
+    font:              []const u8             = "monospace:size=10",
+    fonts:             std.ArrayList([]const u8),
+    font_size:         parser.ScalableValue   = parser.ScalableValue.percentage(10.0),
+    scaled_font_size:  u16                    = 10, // Can exceed 255 on high DPI - u16 is correct
+    spacing:           parser.ScalableValue   = parser.ScalableValue.absolute(12.0),
 
     // RGB colors - must be u32
-    bg: u32 = 0x222222,
-    fg: u32 = 0xBBBBBB,
+    bg:          u32 = 0x222222,
+    fg:          u32 = 0xBBBBBB,
     selected_bg: u32 = 0x005577,
     selected_fg: u32 = 0xEEEEEE,
     occupied_fg: u32 = 0xEEEEEE,
-    urgent_bg: u32 = 0xFF0000,
-    urgent_fg: u32 = 0xFFFFFF,
+    urgent_bg:   u32 = 0xFF0000,
+    urgent_fg:   u32 = 0xFFFFFF,
 
-    accent_color: u32 = 0x61AFEF,
-    workspaces_accent: ?u32 = null,
-    title_accent_color: ?u32 = null,
+    accent_color:           u32  = 0x61AFEF,
+    workspaces_accent:      ?u32 = null,
+    title_accent_color:     ?u32 = null,
     title_unfocused_accent: ?u32 = null,
     title_minimized_accent: ?u32 = null,
-    clock_accent: ?u32 = null,
+    clock_accent:           ?u32 = null,
 
-    workspace_icons: std.ArrayList([]const u8),
-    // Workspace indicator size - percentage of the font's pixel height.
-    // E.g. with font_size=75% on a 40px bar: font is 30px, indicator_size=30% → 9px square.
-    // Keep this small (20-40%) so it doesn't overlap workspace label characters.
-    indicator_size: parser.ScalableValue = parser.ScalableValue.percentage(30.0),
-    // Workspace width - ScalableValue (100% = 40px base)
+    workspace_icons:     std.ArrayList([]const u8),
+    indicator_size:      parser.ScalableValue = parser.ScalableValue.percentage(30.0),
     workspace_tag_width: parser.ScalableValue = parser.ScalableValue.percentage(100.0),
 
-    /// Where in the workspace cell to draw the activity indicator.
     indicator_location:  IndicatorLocation = .up_left,
-    /// Padding as a 0.0–1.0 ratio: 0% = flush to corner, 50% = halfway to center, 100% = centered.
-    indicator_padding:   f32 = 0.1,
-    /// Glyph shown when a workspace has windows and IS focused.
-    indicator_focused:   []const u8 = "■",
-    /// Glyph shown when a workspace has windows and is NOT focused.
-    /// If only one of the two is set in config, the other mirrors it.
-    indicator_unfocused: []const u8 = "□",
-    /// Color for both indicator glyphs. null = inherit the workspace fg color.
-    indicator_color:     ?u32 = null,
+    indicator_padding:   f32               = 0.1,
+    indicator_focused:   []const u8        = "■",
+    indicator_unfocused: []const u8        = "□",
+    indicator_color:     ?u32              = null,
 
     clock_format: []const u8 = "%Y-%m-%d %H:%M:%S",
 
     layout: std.ArrayList(BarLayout),
 
-    // DPI scaling
     scale_factor: f32 = 1.0,
-
-    // Bar transparency (0.0 = fully transparent, 1.0 = fully opaque)
     transparency: f32 = 1.0,
 
     pub fn deinit(self: *BarConfig, allocator: std.mem.Allocator) void {
@@ -325,30 +308,21 @@ pub const BarConfig = struct {
     pub inline fn getWorkspaceAccent(self: *const BarConfig) u32 {
         return self.workspaces_accent orelse self.accent_color;
     }
-
     pub inline fn getTitleAccent(self: *const BarConfig) u32 {
         return self.title_accent_color orelse self.accent_color;
     }
-
     pub inline fn getTitleUnfocusedAccent(self: *const BarConfig) u32 {
         return self.title_unfocused_accent orelse self.accent_color;
     }
-
     pub inline fn getTitleMinimizedAccent(self: *const BarConfig) u32 {
         return self.title_minimized_accent orelse self.bg;
     }
-
     pub inline fn getClockAccent(self: *const BarConfig) u32 {
         return self.clock_accent orelse self.accent_color;
     }
-
     pub inline fn scaledFontSize(self: *const BarConfig) u16 { return self.scaled_font_size; }
 
-    /// Derives horizontal padding inside a segment from the font_size percentage.
-    /// Mirrors the vertical margin: at 75% font_size the font occupies 75% of bar
-    /// height, so (1 - 0.75) / 2 = 12.5% of bar height is left on each side.
-    /// The same ratio is used horizontally to keep segment proportions consistent.
-    /// For absolute font_size values, falls back to 0.
+    /// Derives horizontal segment padding from the font_size percentage.
     pub inline fn scaledSegmentPadding(self: *const BarConfig, bar_height: u16) u16 {
         if (!self.font_size.is_percentage) return 0;
         const margin_ratio = (1.0 - self.font_size.value / 100.0) / 2.0;
@@ -357,11 +331,6 @@ pub const BarConfig = struct {
     }
 
     /// Returns the inter-segment spacing in pixels.
-    /// Percentage values are relative to 5× bar height, giving a wide usable range:
-    ///   1% of a 40px bar = 2px spacing, 10% = 20px, 100% = 200px (very extreme).
-    /// Keeping bar height as the proportional unit ensures consistent visual spacing
-    /// across any resolutions that share the same bar height config.
-    /// Absolute values are DPI-scaled directly.
     pub inline fn scaledSpacing(self: *const BarConfig, bar_height: u16) u16 {
         const sv = self.spacing;
         const px: f32 = if (sv.is_percentage)
@@ -372,9 +341,6 @@ pub const BarConfig = struct {
     }
 
     /// Returns the indicator glyph size in pixels.
-    /// Works identically to font_size: a percentage value is relative to bar height,
-    /// an absolute value is DPI-scaled directly.
-    /// E.g. `indicator_size = 10%` on a 40px bar → 4px, `font_size = 80%` → 32px.
     pub inline fn scaledIndicatorSize(self: *const BarConfig, bar_height: u16) u16 {
         const sv = self.indicator_size;
         const px: f32 = if (sv.is_percentage)
@@ -385,9 +351,6 @@ pub const BarConfig = struct {
     }
 
     /// Returns the workspace tag width in pixels.
-    /// When `workspace_tag_width` is a percentage, 100% equals `bar_height` px,
-    /// making the tag square at 100% and scaling proportionally otherwise.
-    /// When it is an absolute value, it is DPI-scaled directly.
     pub inline fn scaledWorkspaceWidth(self: *const BarConfig, bar_height: u16) u16 {
         const sv = self.workspace_tag_width;
         const px: f32 = if (sv.is_percentage)
@@ -397,7 +360,7 @@ pub const BarConfig = struct {
         return @max(1, @as(u16, @intFromFloat(@round(px))));
     }
 
-    // Get alpha value in 16-bit format (0x0000-0xFFFF)
+    /// Returns the bar's alpha in 16-bit format (0x0000–0xFFFF).
     pub inline fn getAlpha16(self: *const BarConfig) u16 {
         return @intFromFloat(@round(std.math.clamp(self.transparency, 0.0, 1.0) * 0xFFFF));
     }
@@ -405,7 +368,7 @@ pub const BarConfig = struct {
 
 pub const Rule = struct {
     class_name: []const u8,
-    workspace: u8,
+    workspace:  u8,
 
     pub inline fn deinit(self: *Rule, allocator: std.mem.Allocator) void {
         allocator.free(self.class_name);
@@ -419,22 +382,18 @@ pub const WorkspaceConfig = struct {
 
 pub const Config = struct {
     keybindings: std.ArrayListUnmanaged(Keybind) = .{},
-    tiling: TilingConfig,
-    workspaces: WorkspaceConfig = .{},
-    bar: BarConfig,
-    allocator: std.mem.Allocator,
+    tiling:      TilingConfig,
+    workspaces:  WorkspaceConfig = .{},
+    bar:         BarConfig,
+    allocator:   std.mem.Allocator,
 
-    allocated_font: ?[]const u8 = null,
-    allocated_layout: ?[]const u8 = null,
-    allocated_clock_format: ?[]const u8 = null,
+    allocated_font:                ?[]const u8 = null,
+    allocated_layout:              ?[]const u8 = null,
+    allocated_clock_format:        ?[]const u8 = null,
     allocated_indicator_focused:   ?[]const u8 = null,
     allocated_indicator_unfocused: ?[]const u8 = null,
 
     pub fn init(allocator: std.mem.Allocator) Config {
-        // Only fields without struct-level defaults need explicit init here.
-        // All TilingConfig scalar fields (master_side, master_width, etc.)
-        // use their declared defaults; only the ArrayList fields must be
-        // zero-initialised explicitly so they are safe to deinit.
         return .{
             .tiling    = TilingConfig{ .layouts = std.ArrayList([]const u8){} },
             .bar       = BarConfig{
@@ -446,26 +405,28 @@ pub const Config = struct {
         };
     }
 
-    pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
-        for (self.keybindings.items) |*kb| kb.action.deinit(allocator);
-        self.keybindings.deinit(allocator);
+    /// Uses self.allocator — the same allocator passed to Config.init and all
+    /// subsequent config allocations — so callers do not need to pass it again.
+    pub fn deinit(self: *Config) void {
+        const a = self.allocator;
+        for (self.keybindings.items) |*kb| kb.action.deinit(a);
+        self.keybindings.deinit(a);
 
-        for (self.workspaces.rules.items) |*rule| rule.deinit(allocator);
-        self.workspaces.rules.deinit(allocator);
+        for (self.workspaces.rules.items) |*rule| rule.deinit(a);
+        self.workspaces.rules.deinit(a);
 
-        self.bar.deinit(allocator);
-        self.tiling.deinit(allocator);
+        self.bar.deinit(a);
+        self.tiling.deinit(a);
 
-        if (self.allocated_font) |f| allocator.free(f);
-        if (self.allocated_layout) |l| allocator.free(l);
-        if (self.allocated_clock_format) |f| allocator.free(f);
-        if (self.allocated_indicator_focused)   |s| allocator.free(s);
-        if (self.allocated_indicator_unfocused) |s| allocator.free(s);
+        if (self.allocated_font)                |f| a.free(f);
+        if (self.allocated_layout)              |l| a.free(l);
+        if (self.allocated_clock_format)        |f| a.free(f);
+        if (self.allocated_indicator_focused)   |s| a.free(s);
+        if (self.allocated_indicator_unfocused) |s| a.free(s);
     }
 };
 
-/// Geometry snapshot used by both fullscreen and minimize — single definition
-/// instead of three near-identical private structs scattered across modules.
+/// Geometry snapshot used by both fullscreen and minimize.
 pub const WindowGeometry = struct {
     x:            i16,
     y:            i16,
@@ -475,7 +436,7 @@ pub const WindowGeometry = struct {
 };
 
 pub const FullscreenInfo = struct {
-    window:         u32,          // XCB window ID - must be u32
+    window:         u32, // XCB window ID - must be u32
     saved_geometry: WindowGeometry,
 };
 
@@ -484,14 +445,11 @@ pub const FullscreenState = struct {
     window_to_workspace: std.AutoHashMap(u32, u8),
 
     pub fn init(allocator: std.mem.Allocator) FullscreenState {
-        var per_ws = std.AutoHashMap(u8, FullscreenInfo).init(allocator);
-        per_ws.ensureTotalCapacity(4) catch {};
+        var per_ws    = std.AutoHashMap(u8, FullscreenInfo).init(allocator);
         var win_to_ws = std.AutoHashMap(u32, u8).init(allocator);
+        per_ws.ensureTotalCapacity(4)    catch {};
         win_to_ws.ensureTotalCapacity(4) catch {};
-        return .{
-            .per_workspace       = per_ws,
-            .window_to_workspace = win_to_ws,
-        };
+        return .{ .per_workspace = per_ws, .window_to_workspace = win_to_ws };
     }
 
     pub fn deinit(self: *FullscreenState) void {
@@ -513,9 +471,8 @@ pub const FullscreenState = struct {
     }
 
     pub fn removeForWorkspace(self: *FullscreenState, ws: u8) void {
-        if (self.per_workspace.get(ws)) |info| {
+        if (self.per_workspace.get(ws)) |info|
             _ = self.window_to_workspace.remove(info.window);
-        }
         _ = self.per_workspace.remove(ws);
     }
 
@@ -526,17 +483,15 @@ pub const FullscreenState = struct {
 };
 
 pub const DragState = struct {
-    active: bool = false,
-    window: u32 = 0, // XCB window ID - must be u32
-    mode: enum { move, resize } = .move,
-    // Screen coordinates can be negative
-    start_x: i16 = 0,
-    start_y: i16 = 0,
-    start_win_x: i16 = 0,
-    start_win_y: i16 = 0,
-    // Dimensions are always positive
-    start_win_width: u16 = 0,
-    start_win_height: u16 = 0,
+    active:           bool  = false,
+    window:           u32   = 0, // XCB window ID - must be u32
+    mode:             enum { move, resize } = .move,
+    start_x:          i16   = 0,
+    start_y:          i16   = 0,
+    start_win_x:      i16   = 0,
+    start_win_y:      i16   = 0,
+    start_win_width:  u16   = 0,
+    start_win_height: u16   = 0,
 };
 
 /// Focus suppression reason for context-aware behavior.
@@ -545,9 +500,6 @@ pub const FocusSuppressReason = enum {
     window_spawn,     // just spawned a window: don't let cursor steal focus
     tiling_operation, // currently tiling: don't let cursor steal focus
 };
-
-// Spawn queue — maps newly-mapped windows to the workspace they were launched on.
-// Lives in WM so the event loop can inject it in tests without a global singleton.
 
 pub const SPAWN_QUEUE_CAP: u8 = 16;
 
@@ -613,22 +565,15 @@ pub const SpawnQueue = struct {
     }
 };
 
-/// Per-window minimize record. Carries the optional pre-fullscreen geometry
-/// and — crucially — the workspace index, so forceUntrack can locate and
-/// remove the entry from exactly one per-workspace list in O(n) instead of
-/// scanning all workspace lists.
+/// Per-window minimize record.
 pub const MinimizedEntry = struct {
     saved_fs:  ?WindowGeometry, // non-null iff the window was fullscreen when minimized
     workspace: u8,              // index into MinimizeState.per_workspace
 };
 
 /// Per-workspace minimization state, owned by WM.
-/// Defined here so minimize.zig functions can receive *WM without circular imports.
 pub const MinimizeState = struct {
-    // One insertion-ordered list per workspace (indexed by workspace id).
-    // LIFO restore = pop from tail; FIFO restore = remove from head.
     per_workspace:  []std.ArrayListUnmanaged(u32),
-    // Maps minimized window → MinimizedEntry (O(1) membership test and workspace lookup).
     minimized_info: std.AutoHashMap(u32, MinimizedEntry),
     allocator:      std.mem.Allocator,
 
@@ -651,26 +596,15 @@ pub const WM = struct {
     dpi_info:       dpi.DpiInfo,
     drag_state:     DragState = .{},
     minimize:       ?MinimizeState = null,
-    /// Pending spawn-workspace assignments — owned here so callers can inject
-    /// a zeroed queue in tests without touching module-level global state.
     spawn_queue:    SpawnQueue = .{},
-    // Timestamp of the last processed X event; used for ICCCM-compliant
-    // focus requests — xcb_set_input_focus and WM_TAKE_FOCUS messages must
-    // carry the triggering event's timestamp, not XCB_CURRENT_TIME (0).
-    last_event_time: u32 = 0,
-    suppress_focus_reason: FocusSuppressReason = .none,
-    /// Cursor position (root coordinates) recorded the moment a window spawns.
-    /// EnterNotify / LeaveNotify events whose root_x/root_y still match these
-    /// coordinates are retile side-effects from a stationary cursor and are
-    /// suppressed.  The first crossing event with different coords means the
-    /// cursor genuinely moved, so suppression lifts unconditionally — regardless
-    /// of how many spurious events the X server generates on slow hardware.
+    last_event_time:        u32 = 0,
+    suppress_focus_reason:  FocusSuppressReason = .none,
     spawn_cursor_x: i16 = 0,
     spawn_cursor_y: i16 = 0,
 
     pub fn deinit(self: *WM) void {
         if (self.minimize) |*m| m.deinit();
         self.fullscreen.deinit();
-        self.config.deinit(self.allocator);
+        self.config.deinit();
     }
 };
