@@ -41,6 +41,26 @@ pub fn build(b: *std.Build) void {
         std.process.exit(1);
     };
 
+    const Stub = struct { name: []const u8, src: []const u8, filename: []const u8 };
+    const stubs = [_]Stub{
+        .{ .name = "bar",   .src = bar_stub_src,   .filename = "bar_stub.zig"   },
+        .{ .name = "input", .src = input_stub_src, .filename = "input_stub.zig" },
+        .{ .name = "dpi",   .src = dpi_stub_src,   .filename = "dpi_stub.zig"   },
+    };
+    inline for (stubs) |stub| {
+        if (!all_modules.contains(stub.name)) {
+            const src = b.addWriteFiles().add(stub.filename, stub.src);
+            all_modules.put(stub.name, .{
+                .module = b.addModule(stub.name, .{
+                    .root_source_file = src,
+                    .target   = target,
+                    .optimize = optimize,
+                }),
+                .source_path = "",
+            }) catch @panic("OOM: stub registration");
+        }
+    }
+
     const build_options_module = build_options.createModule();
 
     const layout_flags_src = std.fmt.allocPrint(allocator,
@@ -103,6 +123,14 @@ pub fn build(b: *std.Build) void {
 
     // Wire each module based on what it actually @imports.
     wireModules(b, root_module, &all_modules, build_options_module, layout_flags_module, bar_flags_module, optimize, allocator);
+
+    if (all_modules.get("defs")) |defs_entry| {
+        var it = all_modules.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.source_path.len == 0)
+                entry.value_ptr.module.addImport("defs", defs_entry.module);
+        }
+    }
 
     linkSystemLibraries(root_module, has_any_segment);
 
@@ -199,6 +227,75 @@ fn linkSystemLibraries(root: *std.Build.Module, has_bar: bool) void {
         root.linkSystemLibrary("gobject-2.0", .{});
     }
 }
+
+// ── Generated stub sources ────────────────────────────────────────────────────
+
+const bar_stub_src =
+    \\const defs = @import("defs");
+    \\const xcb  = defs.xcb;
+    \\
+    \\pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
+    \\
+    \\pub fn init(_: *defs.WM) error{BarDisabled}!void          { return error.BarDisabled; }
+    \\pub fn deinit() void                                       {}
+    \\pub fn reload(_: *defs.WM) void                           {}
+    \\pub fn toggleBarPosition(_: *defs.WM) !void               {}
+    \\pub fn getBarWindow() u32                                  { return 0; }
+    \\pub fn isBarWindow(_: u32) bool                           { return false; }
+    \\pub fn getBarHeight() u16                                  { return 0; }
+    \\pub fn isBarInitialized() bool                            { return false; }
+    \\pub fn hasClockSegment() bool                             { return false; }
+    \\pub fn markDirty() void                                   {}
+    \\pub fn redrawImmediate(_: *defs.WM) void                  {}
+    \\pub fn raiseBar() void                                    {}
+    \\pub fn isVisible() bool                                   { return false; }
+    \\pub fn getGlobalVisibility() bool                         { return false; }
+    \\pub fn setGlobalVisibility(_: bool) void                  {}
+    \\pub fn setBarState(_: *defs.WM, _: BarAction) void        {}
+    \\pub fn updateIfDirty(_: *defs.WM) !void                  {}
+    \\pub fn checkClockUpdate() void                            {}
+    \\pub fn pollTimeoutMs() i32                                { return -1; }
+    \\pub fn updateTimerState() void                            {}
+    \\pub fn handleExpose(_: *const xcb.xcb_expose_event_t, _: *defs.WM) void                 {}
+    \\pub fn handlePropertyNotify(_: *const xcb.xcb_property_notify_event_t, _: *defs.WM) void {}
+    \\pub fn monitorFocusedWindow(_: *defs.WM) void             {}
+    \\pub fn handleButtonPress(_: *const xcb.xcb_button_press_event_t, _: *defs.WM) void      {}
+    \\pub fn notifyFocusChange(_: *defs.WM, _: ?u32) void       {}
+    \\
+;
+
+const input_stub_src =
+    \\const defs = @import("defs");
+    \\const xcb  = defs.xcb;
+    \\
+    \\pub fn setupGrabs(_: *xcb.xcb_connection_t, _: u32) void                          {}
+    \\pub fn init(_: *defs.WM) !void                                                     {}
+    \\pub fn deinit() void                                                                {}
+    \\pub fn rebuildKeybindMap(_: *defs.WM) !void                                       {}
+    \\pub fn handleKeyPress(_: *xcb.xcb_key_press_event_t, _: *defs.WM) void           {}
+    \\pub fn handleButtonPress(_: *xcb.xcb_button_press_event_t, _: *defs.WM) void     {}
+    \\pub fn handleButtonRelease(_: *xcb.xcb_button_release_event_t, _: *defs.WM) void {}
+    \\pub fn handleMotionNotify(_: *xcb.xcb_motion_notify_event_t, _: *defs.WM) void   {}
+    \\
+;
+
+const dpi_stub_src =
+    \\const defs = @import("defs");
+    \\const xcb  = defs.xcb;
+    \\
+    \\pub const DpiInfo = struct {
+    \\    dpi:          f64,
+    \\    scale_factor: f64,
+    \\};
+    \\
+    \\pub fn detect(
+    \\    _: *xcb.xcb_connection_t,
+    \\    _: *xcb.xcb_screen_t,
+    \\) error{}!DpiInfo {
+    \\    return .{ .dpi = 96.0, .scale_factor = 1.0 };
+    \\}
+    \\
+;
 
 /// Returns true when `path` (relative to the build root) names a regular file.
 /// Uses the same b.graph.io API as the rest of the build so behaviour is

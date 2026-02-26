@@ -17,11 +17,8 @@ const utils     = @import("utils");
 const bar       = @import("bar");
 const tiling    = @import("tiling");
 const layouts   = @import("layouts");
-const clock     = @import("clock");
 const dpi       = @import("dpi");
-const drawing   = @import("drawing");
 const constants  = @import("constants");
-const c_bindings = @import("c_bindings");
 const lifecycle  = @import("lifecycle");
 
 const xcb     = defs.xcb;
@@ -66,19 +63,6 @@ fn handleSignalFd(fd: std.posix.fd_t) void {
 }
 
 fn setupRootCursor(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) void {
-    var ctx: *c_bindings.xcb_cursor_context_t = undefined;
-    if (c_bindings.xcb_cursor_context_new(conn, screen, &ctx) >= 0) {
-        defer c_bindings.xcb_cursor_context_free(ctx);
-        const cursor = c_bindings.xcb_cursor_load_cursor(ctx, "left_ptr");
-        if (cursor != 0) {
-            _ = xcb.xcb_change_window_attributes(conn, screen.*.root,
-                    xcb.XCB_CW_CURSOR, &[_]u32{cursor});
-            return;
-        }
-        debug.warn("xcb-cursor: left_ptr load failed, falling back to bitmap cursor", .{});
-    } else {
-        debug.warn("xcb-cursor: context init failed, falling back to bitmap cursor", .{});
-    }
     const font   = xcb.xcb_generate_id(conn);
     const cursor = xcb.xcb_generate_id(conn);
     _ = xcb.xcb_open_font(conn, font, 6, "cursor");
@@ -161,7 +145,7 @@ fn handleConfigReload(wm: *WM) !void {
     old_config.deinit();
     try input.rebuildKeybindMap(wm);
     tiling.reloadConfig(wm);
-    clock.updateTimerState();
+    bar.updateTimerState();
     bar.reload(wm);
     debug.info("Reload complete", .{});
 }
@@ -271,7 +255,6 @@ pub fn main() !void {
     try utils.initAtomCache(conn);
     utils.initInputModelCache(wm.allocator);
     defer utils.deinitInputModelCache();
-    defer drawing.deinitFontCache(allocator);
     defer layouts.deinitSizeHintsCache(allocator);
 
     const signal_fd = try setupSignalFd();
@@ -285,7 +268,7 @@ pub fn main() !void {
     };
     defer bar.deinit();
 
-    clock.updateTimerState();
+    bar.updateTimerState();
     try grabKeybindings(&wm);
     _ = xcb.xcb_flush(conn);
     debug.info("Started", .{});
@@ -299,7 +282,7 @@ pub fn main() !void {
     submitPollAdd(&iou, x_fd, TAG_XCB);
     submitPollAdd(&iou, signal_fd, TAG_SIGNAL);
     var clock_pending = blk: {
-        const ms = clock.pollTimeoutMs();
+        const ms = bar.pollTimeoutMs();
         if (ms >= 0) { submitClockTimeout(&iou, ms); break :blk true; }
         break :blk false;
     };
@@ -361,7 +344,7 @@ pub fn main() !void {
             // If the clock was inactive (e.g. bar had no clock before reload),
             // check again after reload may have added one.
             if (!clock_pending) {
-                const ms = clock.pollTimeoutMs();
+                const ms = bar.pollTimeoutMs();
                 if (ms >= 0) { submitClockTimeout(&iou, ms); clock_pending = true; }
             }
         }
@@ -374,7 +357,7 @@ pub fn main() !void {
 
         if (saw_clock) {
             bar.checkClockUpdate();
-            const ms = clock.pollTimeoutMs();
+            const ms = bar.pollTimeoutMs();
             if (ms >= 0) { submitClockTimeout(&iou, ms); clock_pending = true; }
         }
     }
