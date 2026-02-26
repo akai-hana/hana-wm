@@ -9,6 +9,12 @@ pub fn build(b: *std.Build) void {
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "enable_debug_logging", optimize == .Debug);
+    // Optional subsystem flags — false when the entry-point file is absent so
+    // main.zig can guard @import("bar") / @import("input") at comptime.
+    const has_bar   = fileExists(b, "src/bar/bar.zig");
+    const has_input = fileExists(b, "src/input/input.zig");
+    build_options.addOption(bool, "has_bar",   has_bar);
+    build_options.addOption(bool, "has_input", has_input);
 
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/core/main.zig"),
@@ -18,7 +24,6 @@ pub fn build(b: *std.Build) void {
     });
 
     if (optimize != .Debug) {
-        root_module.single_threaded = true;
         root_module.strip = true;
     }
 
@@ -129,7 +134,6 @@ fn wireModules(
         const mod = entry.value_ptr.module;
 
         if (optimize != .Debug) {
-            mod.single_threaded = true;
             mod.strip = true;
         }
 
@@ -196,6 +200,14 @@ fn linkSystemLibraries(root: *std.Build.Module, has_bar: bool) void {
     }
 }
 
+/// Returns true when `path` (relative to the build root) names a regular file.
+/// Uses the same b.graph.io API as the rest of the build so behaviour is
+/// consistent across platforms and Zig versions.
+fn fileExists(b: *std.Build, path: []const u8) bool {
+    _ = b.build_root.handle.statFile(b.graph.io, path, .{}) catch return false;
+    return true;
+}
+
 fn discoverModules(
     b:           *std.Build,
     dir_path:    []const u8,
@@ -210,6 +222,17 @@ fn discoverModules(
     var iter = dir.iterate();
     while (try iter.next(b.graph.io)) |entry| {
         if (entry.kind == .directory) {
+            // Gate optional subsystems: skip the entire subtree when the
+            // subsystem's entry-point file is absent.  All other subdirectories
+            // are always recursed into unconditionally.
+            if (std.mem.eql(u8, entry.name, "bar") or
+                std.mem.eql(u8, entry.name, "input"))
+            {
+                const gate_path = try std.fs.path.join(allocator,
+                    &.{ dir_path, entry.name, entry.name });
+                const gate_zig  = try std.mem.concat(allocator, u8, &.{ gate_path, ".zig" });
+                if (!fileExists(b, gate_zig)) continue;
+            }
             const subdir = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
             try discoverModules(b, subdir, target, optimize, allocator, all_modules);
             continue;

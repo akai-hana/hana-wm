@@ -43,37 +43,12 @@ pub extern fn cairo_surface_flush(surface: *cairo_surface_t) void;
 pub extern fn cairo_create(surface: *cairo_surface_t) ?*cairo_t;
 pub extern fn cairo_destroy(cr: *cairo_t) void;
 
-/// Compositing operators controlling how source and destination pixels combine.
+// Iter 1: trimmed cairo_operator_t to only the two values actually used (CLEAR, OVER).
+// The full 29-variant enum listed every compositing mode but none beyond these two
+// appear in drawing.zig. The numeric values are unchanged so the ABI is unaffected.
 pub const cairo_operator_t = enum(c_int) {
-    CLEAR       = 0,
-    SOURCE      = 1,
-    OVER        = 2,
-    IN          = 3,
-    OUT         = 4,
-    ATOP        = 5,
-    DEST        = 6,
-    DEST_OVER   = 7,
-    DEST_IN     = 8,
-    DEST_OUT    = 9,
-    DEST_ATOP   = 10,
-    XOR         = 11,
-    ADD         = 12,
-    SATURATE    = 13,
-    MULTIPLY    = 14,
-    SCREEN      = 15,
-    OVERLAY     = 16,
-    DARKEN      = 17,
-    LIGHTEN     = 18,
-    COLOR_DODGE = 19,
-    COLOR_BURN  = 20,
-    HARD_LIGHT  = 21,
-    SOFT_LIGHT  = 22,
-    DIFFERENCE  = 23,
-    EXCLUSION   = 24,
-    HSL_HUE     = 25,
-    HSL_SATURATION = 26,
-    HSL_COLOR      = 27,
-    HSL_LUMINOSITY = 28,
+    CLEAR = 0,
+    OVER  = 2,
 };
 
 pub extern fn cairo_set_source_rgba(cr: *cairo_t, red: f64, green: f64, blue: f64, alpha: f64) void;
@@ -115,7 +90,8 @@ pub extern fn pango_cairo_context_set_resolution(context: *PangoContext, dpi: f6
 pub extern fn pango_layout_set_text(layout: *PangoLayout, text: [*]const u8, length: c_int) void;
 pub extern fn pango_layout_set_font_description(layout: *PangoLayout, desc: ?*PangoFontDescription) void;
 pub extern fn pango_layout_get_context(layout: *PangoLayout) *PangoContext;
-pub extern fn pango_layout_get_pixel_size(layout: *PangoLayout, width: *c_int, height: *c_int) void;
+/// `width` and `height` may be null if the caller only needs one dimension.
+pub extern fn pango_layout_get_pixel_size(layout: *PangoLayout, width: ?*c_int, height: ?*c_int) void;
 pub extern fn pango_layout_set_width(layout: *PangoLayout, width: c_int) void;
 pub extern fn pango_layout_set_ellipsize(layout: *PangoLayout, ellipsize: PangoEllipsizeMode) void;
 pub extern fn pango_layout_get_baseline(layout: *PangoLayout) c_int;

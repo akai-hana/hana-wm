@@ -137,8 +137,6 @@ fn cleanPairs(alloc: std.mem.Allocator, pairs: *std.StringHashMap(Value)) void {
     pairs.deinit();
 }
 
-
-
 const Parser = struct {
     allocator: std.mem.Allocator,
     content:   []const u8,
@@ -332,9 +330,10 @@ const Parser = struct {
         return .{ .integer = std.fmt.parseInt(i64, raw, 10) catch return ParseError.InvalidValue };
     }
 
-    /// Parses `key = value`. When `allow_bare` is true and no `=` follows the key,
-    /// returns `{ key, true }` (bare keyword shorthand).
-    fn parseKeyValuePair(self: *Parser, allocator: std.mem.Allocator, allow_bare: bool) ParseError!struct { []const u8, Value } {
+    // Iter 2: removed `allow_bare` parameter — the only call site always passes `true`,
+    // so the `else return ParseError.InvalidSyntax` branch was dead code.
+    // Bare keys (no `=`) now unconditionally produce `{ key, true }`.
+    fn parseKeyValuePair(self: *Parser, allocator: std.mem.Allocator) ParseError!struct { []const u8, Value } {
         const key = try self.parseKey();
         errdefer self.allocator.free(key);
         self.skipWhitespace();
@@ -346,12 +345,9 @@ const Parser = struct {
                 return err;
             };
             return .{ key, value };
-        } else if (allow_bare) {
-            return .{ key, Value{ .boolean = true } };
-        } else {
-            self.allocator.free(key);
-            return ParseError.InvalidSyntax;
         }
+        // Bare key shorthand — treat as `key = true`.
+        return .{ key, Value{ .boolean = true } };
     }
 };
 
@@ -394,7 +390,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
         }
 
         while (true) {
-            var kv = p.parseKeyValuePair(allocator, true) catch |err| {
+            var kv = p.parseKeyValuePair(allocator) catch |err| {
                 debug.warn("Invalid key-value at line {}: {}", .{ p.line, err });
                 p.skipToNewline();
                 break;

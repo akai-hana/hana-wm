@@ -9,101 +9,84 @@ const debug   = @import("debug");
 
 const c = @cImport(@cInclude("time.h"));
 
-const TIME_FORMAT = "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}";
-
-/// A concrete string matching the longest possible output of TIME_FORMAT.
-/// Used by bar.zig to pre-compute the clock segment width without duplicating
-/// the format knowledge.
 pub const SAMPLE_STRING: []const u8 = "0000-00-00 00:00:00";
 
-var last_formatted_time: [20]u8 = undefined;
-var last_formatted_sec:  i64    = -1;
+const TimerState = struct {
+    enabled: bool = false,
+};
 
-var global_timer_fd: i32  = 0;
-var timer_enabled:   bool = false;
+var timer:               TimerState = .{};
+var last_formatted_time: [20]u8     = undefined;
+var last_formatted_sec:  i64        = -1;
 
-/// Registers the timerfd file descriptor. Must be called once during initialisation.
-pub fn setTimerFd(fd: i32) void {
-    global_timer_fd = fd;
-    timer_enabled   = false;
-}
 
-/// Returns true when the clock timer should be running.
 fn shouldClockRun() bool {
     return bar.isVisible() and bar.hasClockSegment();
 }
 
-/// Enables or disables the timerfd, aligning the first tick to the next second boundary.
 fn setTimerState(enable: bool) void {
-    if (enable == timer_enabled) return;
-
-    const spec: std.os.linux.itimerspec = if (enable) blk: {
-        const ts = std.posix.clock_gettime(std.posix.CLOCK.REALTIME) catch {
-            debug.warn("Failed to get time for timer alignment", .{});
-            return;
-        };
-        break :blk .{
-            .it_interval = .{ .sec = 1, .nsec = 0 },
-            .it_value = .{ .sec = 0, .nsec = @intCast(std.time.ns_per_s - @as(u64, @intCast(ts.nsec))) },
-        };
-    } else .{
-        .it_interval = .{ .sec = 0, .nsec = 0 },
-        .it_value    = .{ .sec = 0, .nsec = 0 },
-    };
-
-    if (std.os.linux.timerfd_settime(@intCast(global_timer_fd), .{}, &spec, null) >= 0) {
-        timer_enabled = enable;
+    if (enable != timer.enabled) {
+        timer.enabled = enable;
         debug.info("Clock timer {s}", .{if (enable) "enabled" else "disabled"});
     }
 }
 
-/// Recalculates whether the timer should run and applies the change.
-/// Call when bar visibility changes or the config is reloaded.
+/// Returns the number of milliseconds until the next whole-second boundary,
+/// or -1 if the clock is disabled (telling poll to block indefinitely).
+pub fn pollTimeoutMs() i32 {
+    if (!timer.enabled) return -1;
+    const now_ts = std.posix.clock_gettime(.REALTIME) catch return 1000;
+    const ns_remaining: u64 = @intCast(std.time.ns_per_s - now_ts.nsec);
+    // Round up to the nearest millisecond so we never fire slightly early.
+    return @intCast((ns_remaining + 999_999) / 1_000_000);
+}
+
 pub fn updateTimerState() void {
     setTimerState(shouldClockRun());
 }
 
-/// Draws the clock segment at `start_x`, returning the next X position.
 pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start_x: u16) !u16 {
-    const ts = try std.posix.clock_gettime(std.posix.CLOCK.REALTIME);
-    const time_str = if (ts.sec == last_formatted_sec)
+    // Derive seconds from clock_gettime(REALTIME); sub-second precision is not needed for display.
+    const now_ts2 = std.posix.clock_gettime(.REALTIME) catch unreachable;
+    const sec: i64 = now_ts2.sec;
+    const time_str = if (sec == last_formatted_sec)
         last_formatted_time[0..19]
     else blk: {
-        const str = try formatTime(&last_formatted_time, ts);
-        last_formatted_sec = ts.sec;
+        const str = try formatTime(&last_formatted_time, sec);
+        last_formatted_sec = sec;
         break :blk str;
     };
     return dc.drawSegment(start_x, height, time_str, config.scaledSegmentPadding(height), config.bg, config.fg);
 }
 
-/// Formats a timespec into `buf` as local time. Falls back to UTC on `localtime` failure.
-fn formatTime(buf: []u8, ts: std.posix.timespec) ![]const u8 {
-    var raw_sec: c.time_t = @intCast(ts.sec);
-    const local_ts = c.localtime(&raw_sec) orelse return formatUtc(buf, ts.sec);
+// localtime() is tried first; if it returns null we fall back to inline UTC arithmetic.
+// Parameter is plain i64 seconds since the epoch — derived from std.time.nanoTimestamp()
+// by the callers above.
+fn formatTime(buf: []u8, sec: i64) ![]const u8 {
+    var raw_sec: c.time_t = @intCast(sec);
+    if (c.localtime(&raw_sec)) |local_ts| {
+        return try std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{
+            @as(u32, @intCast(local_ts.*.tm_year + 1900)),
+            @as(u32, @intCast(local_ts.*.tm_mon  + 1)),
+            @as(u32, @intCast(local_ts.*.tm_mday)),
+            @as(u32, @intCast(local_ts.*.tm_hour)),
+            @as(u32, @intCast(local_ts.*.tm_min)),
+            @as(u32, @intCast(local_ts.*.tm_sec)),
+        });
+    }
 
-    return try std.fmt.bufPrint(buf, TIME_FORMAT, .{
-        @as(u32, @intCast(local_ts.*.tm_year + 1900)),
-        @as(u32, @intCast(local_ts.*.tm_mon  + 1)),
-        @as(u32, @intCast(local_ts.*.tm_mday)),
-        @as(u32, @intCast(local_ts.*.tm_hour)),
-        @as(u32, @intCast(local_ts.*.tm_min)),
-        @as(u32, @intCast(local_ts.*.tm_sec)),
-    });
-}
-
-/// Formats `epoch_sec` as UTC when local time is unavailable.
-fn formatUtc(buf: []u8, epoch_sec: i64) ![]const u8 {
-    const epoch_day  = @divFloor(epoch_sec, std.time.s_per_day);
-    const day_sec    = @mod(epoch_sec, std.time.s_per_day);
-    const civil_day  = std.time.epoch.EpochDay{ .day = @intCast(epoch_day) };
-    const year_day   = civil_day.calculateYearDay();
-    const month_day  = year_day.calculateMonthDay();
+    // UTC fallback — localtime() returned null (timezone data unavailable).
+    const epoch_day = @divFloor(sec, std.time.s_per_day);
+    const day_sec   = @mod(sec, std.time.s_per_day);
+    const civil_day = std.time.epoch.EpochDay{ .day = @intCast(epoch_day) };
+    const year_day  = civil_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
 
     const hour: u32 = @intCast(@divFloor(day_sec, std.time.s_per_hour));
     const min:  u32 = @intCast(@divFloor(@mod(day_sec, std.time.s_per_hour), std.time.s_per_min));
-    const sec:  u32 = @intCast(@mod(day_sec, std.time.s_per_min));
+    const secs: u32 = @intCast(@mod(day_sec, std.time.s_per_min));
 
-    return try std.fmt.bufPrint(buf, TIME_FORMAT, .{
-        year_day.year, month_day.month.numeric(), month_day.day_index + 1, hour, min, sec,
+    return try std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{
+        year_day.year, month_day.month.numeric(), month_day.day_index + 1, hour, min, secs,
     });
 }
