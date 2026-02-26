@@ -8,13 +8,14 @@ const layouts = @import("layouts");
 const tiling  = @import("tiling");
 const State   = tiling.State;
 
+// Direction cycles counter-clockwise: right → down → left → up → right …
 const Direction = enum {
-    right, // Split vertically, window on left, remaining on right
-    down,  // Split horizontally, window on top, remaining below
-    left,  // Split vertically, window on right, remaining on left
-    up,    // Split horizontally, window on bottom, remaining above
+    right, // Split vertically: window on left, remaining on right
+    down,  // Split horizontally: window on top, remaining below
+    left,  // Split vertically: window on right, remaining on left
+    up,    // Split horizontally: window on bottom, remaining above
 
-    fn next(self: Direction) Direction {
+    inline fn next(self: Direction) Direction {
         return switch (self) {
             .right => .down,
             .down  => .left,
@@ -25,7 +26,7 @@ const Direction = enum {
 };
 
 pub fn tileWithOffset(
-    conn:             *xcb.xcb_connection_t,
+    ctx:              *const layouts.LayoutCtx,
     s:                *State,
     visible:          []const u32,
     screen_width:     u16,
@@ -38,106 +39,90 @@ pub fn tileWithOffset(
     const gap    = margin.gap;
     const border = margin.border;
 
-    tileFibonacci(conn, visible,
-        @intCast(gap),
-        @intCast(y_offset +| gap),
-        screen_width  -| gap *| 2,
-        available_height -| gap *| 2,
-        gap, border, 0, .right);
-}
+    // Iterative spiral: tracks the shrinking bounding box and current
+    // direction. Eliminates the previous recursive implementation whose call
+    // depth equalled the window count, carrying conn, windows, gap, and border
+    // down every frame unnecessarily.
+    var x: i32 = @intCast(gap);
+    var y: i32 = @intCast(y_offset +| gap);
+    var w: u16 = screen_width    -| gap *| 2;
+    var h: u16 = available_height -| gap *| 2;
+    var dir: Direction = .right;
 
-fn tileFibonacci(
-    conn:      *xcb.xcb_connection_t,
-    windows:   []const u32,
-    x:         i32,
-    y:         i32,
-    width:     u16,
-    height:    u16,
-    gap:       u16,
-    border:    u16,
-    index:     usize,
-    direction: Direction,
-) void {
-    // The remaining area is too small to keep splitting.  Stack all overflow
-    // windows on top of each other in whatever space is still available — like
-    // a single-cell monocle for the remainder.
-    if (width < gap * 2 + border * 2 or height < gap * 2 + border * 2) {
-        const rect = utils.Rect{
-            .x      = @intCast(x),
-            .y      = @intCast(y),
-            .width  = if (width  > border * 2) width  - border * 2 else defs.MIN_WINDOW_DIM,
-            .height = if (height > border * 2) height - border * 2 else defs.MIN_WINDOW_DIM,
-        };
-        for (windows[index..]) |win| layouts.configureSafe(conn, win, rect);
-        return;
-    }
+    for (visible, 0..) |win, i| {
+        // If the remaining area is too small to keep splitting, stack all
+        // overflow windows on top of each other in whatever space is left —
+        // a single-cell monocle for the remainder.
+        if (w < gap * 2 + border * 2 or h < gap * 2 + border * 2) {
+            const rect = utils.Rect{
+                .x      = @intCast(x),
+                .y      = @intCast(y),
+                .width  = if (w > border * 2) w - border * 2 else defs.MIN_WINDOW_DIM,
+                .height = if (h > border * 2) h - border * 2 else defs.MIN_WINDOW_DIM,
+            };
+            for (visible[i..]) |ow| layouts.configureSafe(ctx, ow, rect);
+            return;
+        }
 
-    const win = windows[index];
-
-    if (index == windows.len - 1) {
         // Last window gets all remaining space.
-        layouts.configureSafe(conn, win, .{
-            .x      = @intCast(x),
-            .y      = @intCast(y),
-            .width  = width  -| border * 2,
-            .height = height -| border * 2,
-        });
-        return;
-    }
+        if (i == visible.len - 1) {
+            layouts.configureSafe(ctx, win, .{
+                .x      = @intCast(x),
+                .y      = @intCast(y),
+                .width  = w -| border * 2,
+                .height = h -| border * 2,
+            });
+            return;
+        }
 
-    // Split the space according to the spiral direction.
-    switch (direction) {
-        .right => {
-            const win_width = width / 2 -| gap;
-            layouts.configureSafe(conn, win, .{
-                .x      = @intCast(x),
-                .y      = @intCast(y),
-                .width  = win_width -| border * 2,
-                .height = height    -| border * 2,
-            });
-            tileFibonacci(conn, windows,
-                x + @as(i32, @intCast(win_width + gap)), y,
-                width -| (win_width + gap), height,
-                gap, border, index + 1, direction.next());
-        },
-        .down => {
-            const win_height = height / 2 -| gap;
-            layouts.configureSafe(conn, win, .{
-                .x      = @intCast(x),
-                .y      = @intCast(y),
-                .width  = width      -| border * 2,
-                .height = win_height -| border * 2,
-            });
-            tileFibonacci(conn, windows,
-                x, y + @as(i32, @intCast(win_height + gap)),
-                width, height -| (win_height + gap),
-                gap, border, index + 1, direction.next());
-        },
-        .left => {
-            const win_width = width / 2 -| gap;
-            layouts.configureSafe(conn, win, .{
-                .x      = @intCast(x + @as(i32, @intCast(width - win_width))),
-                .y      = @intCast(y),
-                .width  = win_width -| border * 2,
-                .height = height    -| border * 2,
-            });
-            tileFibonacci(conn, windows,
-                x, y,
-                width -| (win_width + gap), height,
-                gap, border, index + 1, direction.next());
-        },
-        .up => {
-            const win_height = height / 2 -| gap;
-            layouts.configureSafe(conn, win, .{
-                .x      = @intCast(x),
-                .y      = @intCast(y + @as(i32, @intCast(height - win_height))),
-                .width  = width      -| border * 2,
-                .height = win_height -| border * 2,
-            });
-            tileFibonacci(conn, windows,
-                x, y,
-                width, height -| (win_height + gap),
-                gap, border, index + 1, direction.next());
-        },
+        // Split the bounding box according to the spiral direction, place the
+        // current window in its half, then shrink the box to the remainder.
+        switch (dir) {
+            .right => {
+                const win_w = w / 2 -| gap;
+                layouts.configureSafe(ctx, win, .{
+                    .x      = @intCast(x),
+                    .y      = @intCast(y),
+                    .width  = win_w -| border * 2,
+                    .height = h     -| border * 2,
+                });
+                x += @as(i32, @intCast(win_w + gap));
+                w  = w -| (win_w + gap);
+            },
+            .down => {
+                const win_h = h / 2 -| gap;
+                layouts.configureSafe(ctx, win, .{
+                    .x      = @intCast(x),
+                    .y      = @intCast(y),
+                    .width  = w     -| border * 2,
+                    .height = win_h -| border * 2,
+                });
+                y += @as(i32, @intCast(win_h + gap));
+                h  = h -| (win_h + gap);
+            },
+            .left => {
+                const win_w = w / 2 -| gap;
+                layouts.configureSafe(ctx, win, .{
+                    .x      = @intCast(x + @as(i32, @intCast(w - win_w))),
+                    .y      = @intCast(y),
+                    .width  = win_w -| border * 2,
+                    .height = h     -| border * 2,
+                });
+                // x stays; shrink w from the right
+                w = w -| (win_w + gap);
+            },
+            .up => {
+                const win_h = h / 2 -| gap;
+                layouts.configureSafe(ctx, win, .{
+                    .x      = @intCast(x),
+                    .y      = @intCast(y + @as(i32, @intCast(h - win_h))),
+                    .width  = w     -| border * 2,
+                    .height = win_h -| border * 2,
+                });
+                // y stays; shrink h from the bottom
+                h = h -| (win_h + gap);
+            },
+        }
+        dir = dir.next();
     }
 }

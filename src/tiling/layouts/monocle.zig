@@ -8,7 +8,7 @@ const tiling = @import("tiling");
 const State  = tiling.State;
 const xcb    = defs.xcb;
 
-pub fn tileWithOffset(conn: *xcb.xcb_connection_t, state: *State, windows: []const u32, screen_w: u16, screen_h: u16, y_offset: u16) void {
+pub fn tileWithOffset(ctx: *const layouts.LayoutCtx, state: *State, windows: []const u32, screen_w: u16, screen_h: u16, y_offset: u16) void {
     if (windows.len == 0) return;
 
     const margin = state.margins();
@@ -35,6 +35,6 @@ pub fn tileWithOffset(conn: *xcb.xcb_connection_t, state: *State, windows: []con
         },
     };
 
-    layouts.configureSafe(conn, top_win, rect);
-    _ = xcb.xcb_configure_window(conn, top_win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+    layouts.configureSafe(ctx, top_win, rect);
+    _ = xcb.xcb_configure_window(ctx.conn, top_win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 }

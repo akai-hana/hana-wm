@@ -20,8 +20,8 @@ inline fn windowHeight(i: u16, count: u16, available: u16) u16 {
     return @max(defs.MIN_WINDOW_DIM, h);
 }
 
-// Y position of window i, derived from the cumulative formula so that
-// preceding windows' heights (which may vary by 1px) are accounted for.
+// Y position of window i, derived from the cumulative formula so preceding
+// windows' heights (which may vary by 1px) are accounted for.
 inline fn windowY(i: u16, count: u16, available: u16, y_offset: u16, margins: utils.Margins) u16 {
     const y_start = i * available / count;
     return y_offset +| margins.gap +| y_start +| i *| (margins.gap +| 2 * margins.border);
@@ -32,7 +32,7 @@ inline fn calcMarginedWidth(full_w: u16, left_margin: u16, right_margin: u16) u1
     return if (full_w > total_margin) full_w - total_margin else defs.MIN_WINDOW_DIM;
 }
 
-pub fn tileWithOffset(conn: *xcb.xcb_connection_t, state: *State, windows: []const u32, screen_w: u16, screen_h: u16, y_offset: u16) void {
+pub fn tileWithOffset(ctx: *const layouts.LayoutCtx, state: *State, windows: []const u32, screen_w: u16, screen_h: u16, y_offset: u16) void {
     const n = windows.len;
     if (n == 0) return;
 
@@ -64,15 +64,15 @@ pub fn tileWithOffset(conn: *xcb.xcb_connection_t, state: *State, windows: []con
             .width  = master_inner_w,
             .height = windowHeight(row, m_count, m_avail),
         };
-        layouts.configureSafe(conn, win, rect);
+        layouts.configureSafe(ctx, win, rect);
     }
 
     if (s_count == 0) return;
 
-    tileStack(conn, windows[m_count..], stack_x, y_offset, stack_w, screen_h, m);
+    tileStack(ctx, windows[m_count..], stack_x, y_offset, stack_w, screen_h, m);
 }
 
-fn tileStack(conn: *xcb.xcb_connection_t, windows: []const u32, x: u16, y_offset: u16, w: u16, h: u16, m: utils.Margins) void {
+fn tileStack(ctx: *const layouts.LayoutCtx, windows: []const u32, x: u16, y_offset: u16, w: u16, h: u16, m: utils.Margins) void {
     const s_count: u16 = @intCast(windows.len);
 
     const space_per_window: u32 = defs.MIN_WINDOW_DIM + 2 * @as(u32, m.border) + @as(u32, m.gap);
@@ -82,13 +82,13 @@ fn tileStack(conn: *xcb.xcb_connection_t, windows: []const u32, x: u16, y_offset
     const stack_inner_w = calcMarginedWidth(w, m.gap / 2, m.gap + 2 * m.border);
 
     if (s_count <= max_fit) {
-        tileStackSimple(conn, windows, x, y_offset, h, stack_inner_w, m);
+        tileStackSimple(ctx, windows, x, y_offset, h, stack_inner_w, m);
     } else {
-        tileStackOverflow(conn, windows, x, y_offset, w, h, max_fit, m);
+        tileStackOverflow(ctx, windows, x, y_offset, w, h, max_fit, m);
     }
 }
 
-fn tileStackSimple(conn: *xcb.xcb_connection_t, windows: []const u32, x: u16, y_offset: u16, h: u16, inner_w: u16, m: utils.Margins) void {
+fn tileStackSimple(ctx: *const layouts.LayoutCtx, windows: []const u32, x: u16, y_offset: u16, h: u16, inner_w: u16, m: utils.Margins) void {
     const s_count: u16 = @intCast(windows.len);
     const s_avail  = calcAvailable(h, s_count, m);
 
@@ -100,19 +100,24 @@ fn tileStackSimple(conn: *xcb.xcb_connection_t, windows: []const u32, x: u16, y_
             .width  = inner_w,
             .height = windowHeight(row, s_count, s_avail),
         };
-        layouts.configureSafe(conn, win, rect);
+        layouts.configureSafe(ctx, win, rect);
     }
 }
 
-fn tileStackOverflow(conn: *xcb.xcb_connection_t, windows: []const u32, x: u16, y_offset: u16, w: u16, h: u16, max_fit: u16, m: utils.Margins) void {
+fn tileStackOverflow(ctx: *const layouts.LayoutCtx, windows: []const u32, x: u16, y_offset: u16, w: u16, h: u16, max_fit: u16, m: utils.Margins) void {
     const s_count: u16 = @intCast(windows.len);
     const s_avail  = calcAvailable(h, max_fit, m);
 
+    // Windows are arranged column-major within the overflow grid: row `r`
+    // contains the windows at indices r, r+max_fit, r+2*max_fit, …
+    // The number of columns in row `r` is therefore:
+    //   ceil((s_count - r) / max_fit)
+    // computed with integer arithmetic, eliminating the inner counting loop
+    // from the previous implementation.
     var row: u16 = 0;
     while (row < max_fit) : (row += 1) {
-        var cols_in_row: u16 = 0;
-        var win_idx = row;
-        while (win_idx < s_count) : (win_idx += max_fit) cols_in_row += 1;
+        const remaining   = s_count - row;
+        const cols_in_row: u16 = (remaining + max_fit - 1) / max_fit;
         if (cols_in_row == 0) break;
 
         const gaps_in_row = m.gap / 2 + m.gap + m.gap * (cols_in_row - 1);
@@ -127,7 +132,7 @@ fn tileStackOverflow(conn: *xcb.xcb_connection_t, windows: []const u32, x: u16, 
         const row_h  = windowHeight(row, max_fit, s_avail);
 
         var col: u16 = 0;
-        win_idx = row;
+        var win_idx: u16 = row;
         while (win_idx < s_count) : (win_idx += max_fit) {
             const rect = utils.Rect{
                 .x      = @intCast(x +| m.gap / 2 +| col *| (row_col_w +| m.gap)),
@@ -135,7 +140,7 @@ fn tileStackOverflow(conn: *xcb.xcb_connection_t, windows: []const u32, x: u16, 
                 .width  = row_inner_w,
                 .height = row_h,
             };
-            layouts.configureSafe(conn, windows[win_idx], rect);
+            layouts.configureSafe(ctx, windows[win_idx], rect);
             col += 1;
         }
     }

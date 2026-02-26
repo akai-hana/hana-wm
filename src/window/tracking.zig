@@ -20,9 +20,14 @@ pub fn TrackingType(comptime small_cap: u8) type {
         len:   u8 = 0,
     };
 
+    // Both fields are now Unmanaged so ownership is uniform: every alloc/free
+    // goes through an explicit allocator parameter.  The previous LargeStore
+    // embedded the allocator inside AutoHashMap, which made deinit, promote,
+    // and demote inconsistent — some paths called set.deinit() with no
+    // argument while list.deinit required one.
     const LargeStore = struct {
         list: std.ArrayListUnmanaged(u32),
-        set:  std.AutoHashMap(u32, void),
+        set:  std.AutoHashMapUnmanaged(u32, void),
     };
 
     const Storage = union(enum) { small: SmallStore, large: LargeStore };
@@ -40,7 +45,7 @@ pub fn TrackingType(comptime small_cap: u8) type {
         pub fn deinit(self: *Self) void {
             if (self.storage == .large) {
                 self.storage.large.list.deinit(self.allocator);
-                self.storage.large.set.deinit();
+                self.storage.large.set.deinit(self.allocator); // uniform: allocator required
             }
         }
 
@@ -54,45 +59,63 @@ pub fn TrackingType(comptime small_cap: u8) type {
 
         pub fn add(self: *Self, win: u32) !void {
             std.debug.assert(win != 0);
-            if (self.contains(win)) return;
             switch (self.storage) {
                 .small => |*s| {
+                    // Small path: linear scan is unavoidable to check for
+                    // duplicates; the array is at most small_cap entries long.
+                    if (std.mem.indexOfScalar(u32, s.items[0..s.len], win) != null) return;
                     if (s.len < small_cap) {
                         s.items[s.len] = win;
                         s.len += 1;
                     } else {
                         try self.promoteToLarge();
-                        // promoteToLarge reserves s.len+8 slots, so there is always room.
+                        // promoteToLarge reserves s.len+8 slots, so assumeCapacity is safe.
                         self.storage.large.list.appendAssumeCapacity(win);
                         self.storage.large.set.putAssumeCapacity(win, {});
                     }
                 },
                 .large => |*l| {
-                    try l.list.append(self.allocator, win);
-                    try l.set.put(win, {});
+                    // Large path: single getOrPut probe covers both the duplicate
+                    // check and the insertion, eliminating the previous double-probe
+                    // pattern of contains() followed by set.put().
+                    const gop = try l.set.getOrPut(self.allocator, win);
+                    if (gop.found_existing) return;
+                    // Roll back the set entry if the list append fails so both
+                    // structures stay in sync.
+                    l.list.append(self.allocator, win) catch |err| {
+                        _ = l.set.remove(win);
+                        return err;
+                    };
                 },
             }
         }
 
         pub fn addFront(self: *Self, win: u32) !void {
             std.debug.assert(win != 0);
-            if (self.contains(win)) return;
             switch (self.storage) {
                 .small => |*s| {
+                    if (std.mem.indexOfScalar(u32, s.items[0..s.len], win) != null) return;
                     if (s.len < small_cap) {
                         std.mem.copyBackwards(u32, s.items[1 .. s.len + 1], s.items[0..s.len]);
                         s.items[0] = win;
                         s.len += 1;
                     } else {
                         try self.promoteToLarge();
-                        // promoteToLarge reserves s.len+8 slots; insert re-checks capacity.
+                        // promoteToLarge reserves s.len+8 slots; insert checks capacity.
                         try self.storage.large.list.insert(self.allocator, 0, win);
                         self.storage.large.set.putAssumeCapacity(win, {});
                     }
                 },
                 .large => |*l| {
-                    try l.list.insert(self.allocator, 0, win);
-                    try l.set.put(win, {});
+                    // Single probe: if the key is already present we return early
+                    // without touching the list. Roll back the set entry on list
+                    // failure so structures stay in sync.
+                    const gop = try l.set.getOrPut(self.allocator, win);
+                    if (gop.found_existing) return;
+                    l.list.insert(self.allocator, 0, win) catch |err| {
+                        _ = l.set.remove(win);
+                        return err;
+                    };
                 },
             }
         }
@@ -107,9 +130,7 @@ pub fn TrackingType(comptime small_cap: u8) type {
                     s.len = len;
                 },
                 .large => |*l| {
-                    // new_order must be a permutation: same length, fits existing capacity.
                     std.debug.assert(new_order.len <= l.list.capacity);
-                    // clearRetainingCapacity keeps storage, making assumeCapacity safe below.
                     l.list.clearRetainingCapacity();
                     l.set.clearRetainingCapacity();
                     for (new_order) |win| {
@@ -133,12 +154,14 @@ pub fn TrackingType(comptime small_cap: u8) type {
                     return false;
                 },
                 .large => |*l| {
-                    // Find list index first; bail before touching the set if missing
-                    // so both structures stay in sync.
-                    const idx = std.mem.indexOfScalar(u32, l.list.items, win) orelse return false;
-                    _ = l.set.remove(win);
+                    // Check and remove from the set first (O(1)).  If absent we
+                    // bail before touching the list, keeping both structures in sync.
+                    // When present we know the list must also contain the entry, so
+                    // the subsequent indexOfScalar is guaranteed to succeed — the
+                    // .? is safe.
+                    if (!l.set.remove(win)) return false;
+                    const idx = std.mem.indexOfScalar(u32, l.list.items, win).?;
                     _ = l.list.orderedRemove(idx);
-                    // Capture len before demoteToSmall() invalidates `l`.
                     if (l.list.items.len <= demotion_threshold) self.demoteToSmall();
                     return true;
                 },
@@ -168,11 +191,11 @@ pub fn TrackingType(comptime small_cap: u8) type {
         fn promoteToLarge(self: *Self) !void {
             const s = self.storage.small;
             var list: std.ArrayListUnmanaged(u32) = .empty;
-            var set = std.AutoHashMap(u32, void).init(self.allocator);
+            var set:  std.AutoHashMapUnmanaged(u32, void) = .{};
             errdefer list.deinit(self.allocator);
-            errdefer set.deinit();
+            errdefer set.deinit(self.allocator); // unmanaged: explicit allocator
             try list.ensureTotalCapacity(self.allocator, s.len + 8);
-            try set.ensureTotalCapacity(s.len + 8);
+            try set.ensureTotalCapacity(self.allocator, s.len + 8); // unmanaged form
             for (s.items[0..s.len]) |win| {
                 list.appendAssumeCapacity(win);
                 set.putAssumeCapacity(win, {});
@@ -186,7 +209,7 @@ pub fn TrackingType(comptime small_cap: u8) type {
             small.len = @intCast(l.list.items.len);
             @memcpy(small.items[0..small.len], l.list.items);
             l.list.deinit(self.allocator);
-            l.set.deinit();
+            l.set.deinit(self.allocator); // unmanaged: explicit allocator
             self.storage = .{ .small = small };
         }
     };

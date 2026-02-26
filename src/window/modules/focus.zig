@@ -26,11 +26,22 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     if (wm.focused_window == win) return;
     if (bar.isBarWindow(win)) return;
 
-    // EnterNotify/LeaveNotify are only delivered for mapped windows, so skip
-    // the round-trip on hover. For window_spawn the map was queued on this
-    // connection moments ago, so the attributes reply will always show mapped.
-    // For all other reasons a race with destroy is possible, so we guard.
-    if (reason != .mouse_enter and reason != .window_spawn and !isWindowMapped(wm.conn, win)) return;
+    // Skip the blocking xcb_get_window_attributes round-trip when we can
+    // guarantee the window is mapped without asking the server:
+    //
+    //  mouse_enter / mouse_leave — only delivered for mapped windows.
+    //  window_spawn              — map was queued on this connection moments ago.
+    //  tiling_operation          — window is in the tiling tracking set, which is
+    //                              populated at map time and kept coherent by
+    //                              removeWindow on unmap/destroy. Any window
+    //                              reachable via a tiling operation is mapped.
+    //
+    // For all other reasons (click, command, destroyed, workspace_switch) a race
+    // with destroy is possible, so we guard with a live attribute query.
+    const skip_mapped_check = reason == .mouse_enter or
+                              reason == .window_spawn or
+                              reason == .tiling_operation;
+    if (!skip_mapped_check and !isWindowMapped(wm.conn, win)) return;
 
     const input_model = utils.getInputModelCached(wm.conn, win);
     if (input_model == .no_input) return;
@@ -42,9 +53,6 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     window.grabButtons(wm, win, true);
     if (old) |old_win| window.grabButtons(wm, old_win, false);
 
-    // ICCCM §4.1.7 says xcb_set_input_focus must not be sent to globally_active
-    // windows, but Electron/Chromium ignores WM_TAKE_FOCUS on hover and only
-    // accepts XSetInputFocus. Sending it unconditionally matches i3/openbox/kwin.
     _ = xcb.xcb_set_input_focus(
         wm.conn,
         xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
@@ -67,8 +75,6 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     }
 
     tiling.updateWindowFocus(wm, old, win);
-    // No flush here: the event loop batches rapid hover crossings into a single
-    // write syscall rather than flushing on each one.
     bar.markDirty();
 }
 

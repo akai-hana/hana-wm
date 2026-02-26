@@ -6,10 +6,16 @@ const debug = @import("debug");
 const defs  = @import("defs");
 const xcb   = defs.xcb;
 
-// WM_NORMAL_HINTS size hint cache.
+// ── WM_NORMAL_HINTS size hint cache ──────────────────────────────────────────
+//
 // Populated from WM_NORMAL_HINTS during handleMapRequest; evicted on unmanage.
 // configureSafe clamps every rect to stored minimums so terminals always
 // receive a geometry they can render.
+//
+// TODO(item-4): fold g_hints into tiling.State so it shares the same
+// lifetime/ownership as geom_cache and border_cache and is rebuilt cleanly
+// on reloadConfig. Requires threading the allocator through evictSizeHints,
+// which touches window.zig (not in scope for this edit pass).
 
 pub const SizeHints = struct {
     min_width:  u16 = 0,
@@ -32,45 +38,63 @@ pub fn deinitSizeHintsCache(allocator: std.mem.Allocator) void {
     g_hints.deinit(allocator);
 }
 
-// Geometry dedup cache: set by tiling.retile before layout dispatch, cleared
-// immediately after. configureSafe skips redundant xcb_configure_window calls
-// for windows whose rect has not changed since the last retile.
+// ── Per-window combined cache entry ──────────────────────────────────────────
+//
+// Merges the previous pair of separate geom_cache and border_cache maps into a
+// single AutoHashMapUnmanaged, halving hash lookups on the hot retile and
+// border-update paths and improving cache-line locality.
+//
+// configureSafe writes only `.rect`; tiling.sendBorderColor writes only
+// `.border`. Both use getOrPut so a single hash probe handles both the
+// "found / skip if unchanged" and "insert" cases.
 
-var g_geom_ctx: ?struct {
-    cache:     *std.AutoHashMapUnmanaged(u32, utils.Rect),
+pub const WindowData = struct {
+    rect:   utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    border: u32        = 0,
+};
+
+pub const CacheMap = std.AutoHashMapUnmanaged(u32, WindowData);
+
+// ── Layout context ────────────────────────────────────────────────────────────
+//
+// Replaces the previous arm/disarm global pointer (g_geom_ctx). Every layout
+// module receives a *const LayoutCtx; configureSafe reads the cache from it
+// rather than from a module-level global. This makes the dependency explicit,
+// eliminates hidden call-site ordering requirements, and lets the compiler see
+// the null-cache case statically.
+
+pub const LayoutCtx = struct {
+    conn:      *xcb.xcb_connection_t,
+    /// Pointer into tiling.State.cache. Non-null during a normal retile pass;
+    /// null only when called from a code path that intentionally bypasses dedup
+    /// (currently unused — kept as an escape hatch).
+    cache:     ?*CacheMap,
     allocator: std.mem.Allocator,
-} = null;
+};
 
-/// Called by tiling.retile immediately before layout dispatch.
-pub fn armGeomCache(
-    cache:     *std.AutoHashMapUnmanaged(u32, utils.Rect),
-    allocator: std.mem.Allocator,
-) void {
-    g_geom_ctx = .{ .cache = cache, .allocator = allocator };
-}
+// ── Rect comparison ───────────────────────────────────────────────────────────
+//
+// Four-field equality used in configureSafe and restoreWorkspaceGeom.
+// If utils.Rect is declared as a packed struct (or has no internal padding),
+// this can be replaced with a single 64-bit integer compare:
+//   @as(u64, @bitCast(a)) == @as(u64, @bitCast(b))
+// That optimisation is left as a follow-up once Rect's layout is confirmed.
 
-/// Called by tiling.retile immediately after layout dispatch.
-pub fn disarmGeomCache() void {
-    g_geom_ctx = null;
-}
-
-/// True when all four rect fields are equal. Exported so tiling.zig can reuse
-/// the same comparison in restoreWorkspaceGeom without duplicating it.
 pub inline fn rectsEqual(a: utils.Rect, b: utils.Rect) bool {
     return a.x == b.x and a.y == b.y and a.width == b.width and a.height == b.height;
 }
 
+// ── configureSafe ─────────────────────────────────────────────────────────────
+
 /// The single call-site every layout module uses to apply geometry.
-/// Clamps to WM_NORMAL_HINTS minimums and, when the cache is armed, skips
-/// the XCB call for windows whose rect matches the last applied value.
+/// Clamps to WM_NORMAL_HINTS minimums and, when the cache is non-null,
+/// skips the XCB call for windows whose rect matches the last applied value.
 pub inline fn configureSafe(
-    conn: *xcb.xcb_connection_t,
+    ctx:  *const LayoutCtx,
     win:  u32,
     rect: utils.Rect,
 ) void {
     // Clamp to WM_NORMAL_HINTS minimums.
-    // Terminals advertise min_height equal to one character row; sending
-    // anything smaller causes them to stall.
     const effective: utils.Rect = if (g_hints.get(win)) |h| .{
         .x      = rect.x,
         .y      = rect.y,
@@ -84,14 +108,21 @@ pub inline fn configureSafe(
         return;
     }
 
-    if (g_geom_ctx) |ctx| {
-        if (ctx.cache.get(win)) |cached| {
-            if (rectsEqual(cached, effective)) return; // geometry unchanged; skip redundant XCB call
+    if (ctx.cache) |cache| {
+        // getOrPut: single hash probe covers both the "already exists" (dedup)
+        // and "new entry" (insert) paths.
+        const gop = cache.getOrPut(ctx.allocator, win) catch {
+            // Allocation failure: send the XCB call without caching.
+            utils.configureWindow(ctx.conn, win, effective);
+            return;
+        };
+        if (gop.found_existing) {
+            if (rectsEqual(gop.value_ptr.rect, effective)) return; // geometry unchanged
+            gop.value_ptr.rect = effective; // update rect; preserve existing border
+        } else {
+            gop.value_ptr.* = .{ .rect = effective, .border = 0 };
         }
-        // Store before sending so duplicate sub-calls within the same retile
-        // pass (e.g. overflow cells) are also deduplicated.
-        ctx.cache.put(ctx.allocator, win, effective) catch {};
     }
 
-    utils.configureWindow(conn, win, effective);
+    utils.configureWindow(ctx.conn, win, effective);
 }

@@ -8,13 +8,18 @@ const tiling = @import("tiling");
 const State  = tiling.State;
 const xcb    = defs.xcb;
 
+// Integer ceiling-sqrt: smallest c such that c*c >= n.
+// Replaces the previous @ceil(@sqrt(@floatFromInt(n))) to avoid the float
+// pipeline entirely. Terminates in at most 7 iterations for any window count
+// that could realistically appear in a tiling WM (sqrt(128) < 12).
 inline fn calcGridDims(n: usize) struct { cols: u16, rows: u16 } {
-    const cols = @as(u16, @intFromFloat(@ceil(@sqrt(@as(f32, @floatFromInt(n))))));
-    const rows = @as(u16, @intCast((n + cols - 1) / cols));
+    var cols: u16 = 1;
+    while (@as(usize, cols) * cols < n) cols += 1;
+    const rows: u16 = @intCast((n + cols - 1) / cols);
     return .{ .cols = cols, .rows = rows };
 }
 
-pub fn tileWithOffset(conn: *xcb.xcb_connection_t, state: *State, windows: []const u32, screen_w: u16, screen_h: u16, y_offset: u16) void {
+pub fn tileWithOffset(ctx: *const layouts.LayoutCtx, state: *State, windows: []const u32, screen_w: u16, screen_h: u16, y_offset: u16) void {
     const n = windows.len;
     if (n == 0) return;
 
@@ -38,12 +43,11 @@ pub fn tileWithOffset(conn: *xcb.xcb_connection_t, state: *State, windows: []con
         const col: u16 = @intCast(idx % dims.cols);
         const row: u16 = @intCast(idx / dims.cols);
 
-        // Compute the effective window width for this cell.
         const effective_win_w: u16 = switch (state.layout_variations.grid) {
             .rigid => win_w,
             .relaxed => blk: {
                 if (idx == n - 1 and n % dims.cols != 0) {
-                    // Expand from this cell's left edge to the right margin.
+                    // Last window in a partial row: expand to the right margin.
                     const x_start    = m.gap +| col *| cell_spacing_w;
                     const available  = screen_w -| x_start -| m.gap -| border_margin;
                     break :blk if (available > 0) @max(available, defs.MIN_WINDOW_DIM) else defs.MIN_WINDOW_DIM;
@@ -58,6 +62,6 @@ pub fn tileWithOffset(conn: *xcb.xcb_connection_t, state: *State, windows: []con
             .width  = effective_win_w,
             .height = win_h,
         };
-        layouts.configureSafe(conn, win, rect);
+        layouts.configureSafe(ctx, win, rect);
     }
 }

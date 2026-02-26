@@ -12,9 +12,35 @@ const constants  = @import("constants");
 const debug      = @import("debug");
 const minimize   = @import("minimize");
 
-// Fetch the current geometry of `win`. Falls back to a centered quarter-screen
-// default if the reply fails or the window is currently offscreen.
+// Fetch the current geometry of `win`.
+//
+// Fast path: tiled windows always have a valid rect in the geometry cache,
+// written by the last retile. Reading from the cache avoids the blocking
+// xcb_get_geometry round-trip that would otherwise occur for every tiled
+// window that enters fullscreen.
+//
+// Slow path (floating windows, cache miss): one blocking round-trip.
+// Falls back to a centered quarter-screen default if the reply fails or the
+// window is currently offscreen.
 fn fetchWindowGeom(wm: *WM, win: u32) defs.WindowGeometry {
+    // Try the tiling geometry cache first.  getCachedGeom returns null for
+    // fullscreen windows (their rect is zeroed on enter) and floating windows
+    // (never tiled), so the fast path is exclusive to normally-tiled windows.
+    if (tiling.getCachedGeom(win)) |rect| {
+        // The cached rect holds the inner content geometry (without border).
+        // The border_width is stored in tiling.State; include it so the saved
+        // geometry round-trips correctly on fullscreen exit.
+        const bw: u16 = if (tiling.getState()) |ts| ts.border_width else 0;
+        return .{
+            .x            = rect.x,
+            .y            = rect.y,
+            .width        = rect.width,
+            .height       = rect.height,
+            .border_width = bw,
+        };
+    }
+
+    // Slow path: floating or un-cached window — one blocking round-trip.
     const default: defs.WindowGeometry = .{
         .x            = @divTrunc(@as(i16, @intCast(wm.screen.width_in_pixels)),  4),
         .y            = @divTrunc(@as(i16, @intCast(wm.screen.height_in_pixels)), 4),
@@ -45,8 +71,6 @@ fn fetchWindowGeom(wm: *WM, win: u32) defs.WindowGeometry {
 // The caller owns the grab/ungrab/flush envelope so that paired
 // exit+enter transitions can share a single grab with no intermediate frame.
 
-// Queue all XCB commands to enter fullscreen for `win` on `ws`.
-// `geom` must be pre-fetched outside the grab via fetchWindowGeom.
 fn enterFullscreenCommit(wm: *WM, win: u32, ws: u8, geom: defs.WindowGeometry) void {
     wm.fullscreen.setForWorkspace(ws, .{
         .window         = win,
@@ -57,8 +81,6 @@ fn enterFullscreenCommit(wm: *WM, win: u32, ws: u8, geom: defs.WindowGeometry) v
     };
 
     // Push siblings offscreen and evict their geometry cache entries.
-    // Without eviction, the next retile would find cache hits for the stored
-    // tiled rects and skip configure_window, leaving siblings stuck offscreen.
     if (workspaces.getCurrentWorkspaceObject()) |ws_obj| {
         for (ws_obj.windows.items()) |other_win| {
             if (other_win == win) continue;
@@ -69,11 +91,8 @@ fn enterFullscreenCommit(wm: *WM, win: u32, ws: u8, geom: defs.WindowGeometry) v
         }
     }
 
-    // Hide bar; fullscreen state is recorded above so any retile triggered
-    // inside setBarState returns early without fighting us.
     bar.setBarState(wm, .hide_fullscreen);
 
-    // Expand to cover the full screen with no border, then raise above floats.
     utils.configureWindowGeom(wm.conn, win, .{
         .x            = 0,
         .y            = 0,
@@ -90,34 +109,22 @@ fn enterFullscreenCommit(wm: *WM, win: u32, ws: u8, geom: defs.WindowGeometry) v
     tiling.invalidateGeomCache(win);
 }
 
-// Queue all XCB commands to exit fullscreen for `win` on `ws`.
-// Clears fullscreen state before triggering any retile so retile's early-return
-// guard does not abort the run.
 fn exitFullscreenCommit(wm: *WM, win: u32, ws: u8) void {
     const fs_info = wm.fullscreen.getForWorkspace(ws) orelse return;
     if (fs_info.window != win) return;
 
     const saved = fs_info.saved_geometry;
 
-    // Clear before calling setBarState so the retile it triggers does not see
-    // an active fullscreen and bail.
     wm.fullscreen.removeForWorkspace(ws);
 
-    // Show bar; for tiled workspaces this also retiles, repositioning all
-    // windows (including `win`) back to their correct tiled geometry.
     bar.setBarState(wm, .show_fullscreen);
 
     if (tiling.isWindowTiled(win)) {
-        // retile above already sent the correct geometry for `win`.
-        // Restore border width separately: the Rect that retile sends does not
-        // include BORDER_WIDTH, so it remains 0 until here.
         _ = xcb.xcb_configure_window(wm.conn, win,
             xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{saved.border_width});
     } else {
-        // Floating: restore saved geometry and border width explicitly.
         utils.configureWindowGeom(wm.conn, win, saved);
 
-        // Bring non-minimized siblings back to a visible position.
         if (workspaces.getCurrentWorkspaceObject()) |ws_obj| {
             const pos = utils.floatDefaultPos(wm);
             for (ws_obj.windows.items()) |other_win| {
@@ -130,9 +137,6 @@ fn exitFullscreenCommit(wm: *WM, win: u32, ws: u8) void {
         }
     }
 
-    // Restore border colour for both tiled and floating paths.
-    // Tiled: retile sends geometry but not colour.
-    // Floating: configureWindowGeom does not touch border attributes.
     _ = xcb.xcb_change_window_attributes(wm.conn, win,
         xcb.XCB_CW_BORDER_PIXEL, &[_]u32{
             if (wm.focused_window == win) wm.config.tiling.border_focused
@@ -140,8 +144,6 @@ fn exitFullscreenCommit(wm: *WM, win: u32, ws: u8) void {
         });
 }
 
-// Shared grab-owning wrapper for all enter paths.
-// Any blocking round-trips (fetchWindowGeom) must happen before calling this.
 fn enterFullscreen(wm: *WM, win: u32, ws: u8, geom: defs.WindowGeometry) void {
     _ = xcb.xcb_grab_server(wm.conn);
     enterFullscreenCommit(wm, win, ws, geom);
@@ -156,23 +158,13 @@ fn exitFullscreen(wm: *WM, win: u32, ws: u8) void {
     utils.flush(wm.conn);
 }
 
-// Public API
-
-// Enter fullscreen for `win` on the current workspace, fetching its current
-// geometry via a blocking round-trip.  Use enterFullscreenWithSavedGeom when
-// the geometry is already known (e.g. restoring a minimized fullscreen window)
-// to avoid the extra round-trip and the intermediate compositor frame.
-// Caller is responsible for setting wm.focused_window before calling.
 pub fn enterFullscreenForWindow(wm: *WM, win: u32) void {
     const ws = workspaces.getCurrentWorkspace() orelse return;
+    // fetchWindowGeom uses the tiling cache for tiled windows, avoiding the
+    // blocking xcb_get_geometry round-trip in the common case.
     enterFullscreen(wm, win, ws, fetchWindowGeom(wm, win));
 }
 
-// Enter fullscreen using geometry already known to the caller.
-// Used by the minimize module to restore a fullscreen-minimized window:
-// the saved geometry avoids the xcb_get_geometry round-trip, and the window
-// goes directly from offscreen to fullscreen in a single atomic grab with
-// no intermediate compositor frame.
 pub fn enterFullscreenWithSavedGeom(wm: *WM, win: u32, geom: defs.WindowGeometry) void {
     const ws = workspaces.getCurrentWorkspace() orelse return;
     enterFullscreen(wm, win, ws, geom);
@@ -187,10 +179,9 @@ pub fn toggleFullscreen(wm: *WM) void {
             exitFullscreen(wm, win, current_ws);
         } else {
             // Switching fullscreen from one window to another.
-            // Pre-fetch geometry BEFORE the grab: xcb_get_geometry_reply blocks
-            // and blocking inside a grab risks deadlock with concurrent grabs.
+            // fetchWindowGeom tries the cache; for tiled windows this avoids
+            // a blocking round-trip before the grab.
             const geom = fetchWindowGeom(wm, win);
-            // Wrap both transitions in a single grab to avoid an intermediate frame.
             _ = xcb.xcb_grab_server(wm.conn);
             exitFullscreenCommit(wm, fs_info.window, current_ws);
             enterFullscreenCommit(wm, win, current_ws, geom);

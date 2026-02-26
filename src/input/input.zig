@@ -203,8 +203,7 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
         .toggle_layout          => { tiling.toggleLayout(wm);        bar.redrawImmediate(wm); },
         .toggle_layout_reverse  => { tiling.toggleLayoutReverse(wm); bar.redrawImmediate(wm); },
         .toggle_bar_visibility  => bar.setBarState(wm, .toggle),
-        .toggle_bar_position    => bar.toggleBarPosition(wm) catch |err|
-            debug.warn("Failed to toggle bar position: {}", .{err}),
+        .toggle_bar_position    => bar.toggleBarPosition(wm),
         .increase_master        => tiling.increaseMasterWidth(),
         .decrease_master        => tiling.decreaseMasterWidth(),
         .increase_master_count  => tiling.increaseMasterCount(wm),
