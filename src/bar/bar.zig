@@ -44,6 +44,8 @@ pub fn setGlobalVisibility(visible: bool) void                         { Impl.se
 pub fn setBarState(wm: *defs.WM, action: BarAction) void              { Impl.setBarState(wm, action); }
 pub fn updateIfDirty(wm: *defs.WM) !void                              { return Impl.updateIfDirty(wm); }
 pub fn checkClockUpdate() void                                         { Impl.checkClockUpdate(); }
+pub fn pollTimeoutMs() i32                                             { return Impl.pollTimeoutMs(); }
+pub fn updateTimerState() void                                         { Impl.updateTimerState(); }
 pub fn handleExpose(ev: *const xcb.xcb_expose_event_t, wm: *defs.WM) void { Impl.handleExpose(ev, wm); }
 pub fn handlePropertyNotify(ev: *const xcb.xcb_property_notify_event_t, wm: *defs.WM) void { Impl.handlePropertyNotify(ev, wm); }
 pub fn monitorFocusedWindow(wm: *defs.WM) void                        { Impl.monitorFocusedWindow(wm); }
@@ -71,6 +73,8 @@ const BarStub = struct {
     pub fn setBarState(_: *defs.WM, _: BarAction) void {}
     pub fn updateIfDirty(_: *defs.WM) !void {}
     pub fn checkClockUpdate() void {}
+    pub fn pollTimeoutMs() i32     { return -1; }
+    pub fn updateTimerState() void {}
     pub fn handleExpose(_: *const xcb.xcb_expose_event_t, _: *defs.WM) void {}
     pub fn handlePropertyNotify(_: *const xcb.xcb_property_notify_event_t, _: *defs.WM) void {}
     pub fn monitorFocusedWindow(_: *defs.WM) void {}
@@ -817,6 +821,7 @@ const BarFull = struct {
         if (state) |s| {
             _ = xcb.xcb_destroy_window(s.conn, s.window);
             s.dc.deinit();
+            drawing.deinitFontCache(s.allocator);
             s.deinit();
             state = null;
         }
@@ -1004,6 +1009,14 @@ const BarFull = struct {
         const s = state orelse return;
         if (!s.visible) return;
         signalClockDirty();
+    }
+
+    pub fn pollTimeoutMs() i32 {
+        return clock_segment.pollTimeoutMs();
+    }
+
+    pub fn updateTimerState() void {
+        clock_segment.updateTimerState();
     }
 
     pub fn handleExpose(event: *const xcb.xcb_expose_event_t, wm: *defs.WM) void {
