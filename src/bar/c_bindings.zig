@@ -97,6 +97,7 @@ pub extern fn pango_layout_set_ellipsize(layout: *PangoLayout, ellipsize: PangoE
 pub extern fn pango_layout_get_baseline(layout: *PangoLayout) c_int;
 
 pub extern fn pango_font_description_from_string(str: [*:0]const u8) ?*PangoFontDescription;
+pub extern fn pango_font_description_copy(desc: *PangoFontDescription) ?*PangoFontDescription;
 pub extern fn pango_font_description_free(desc: *PangoFontDescription) void;
 pub extern fn pango_font_description_get_size(desc: *PangoFontDescription) c_int;
 pub extern fn pango_font_description_get_size_is_absolute(desc: *PangoFontDescription) c_int;

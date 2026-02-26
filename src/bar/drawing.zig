@@ -276,23 +276,18 @@ pub const DrawContext = struct {
     }
 
     /// Draws `text` at a temporarily-overridden absolute font size.
+    /// Uses a temporary copy of the font description so the shared
+    /// current_font_desc and cached_metrics are never touched.
     pub fn drawTextSized(self: *DrawContext, x: u16, y_top: u16, text: []const u8, size_px: u16, color: u32) !void {
         const desc = self.current_font_desc orelse return error.NoFont;
 
-        const saved_size     = c.pango_font_description_get_size(desc);
-        const saved_absolute = c.pango_font_description_get_size_is_absolute(desc);
-        defer {
-            if (saved_absolute != 0)
-                c.pango_font_description_set_absolute_size(desc, @floatFromInt(saved_size))
-            else
-                c.pango_font_description_set_size(desc, saved_size);
-            c.pango_layout_set_font_description(self.pango_layout, desc);
-            self.cached_metrics = null;
-        }
+        const temp = c.pango_font_description_copy(desc) orelse return error.PangoDescCopyFailed;
+        defer c.pango_font_description_free(temp);
 
-        c.pango_font_description_set_absolute_size(desc, @as(f64, @floatFromInt(size_px)) * @as(f64, @floatFromInt(c.PANGO_SCALE)));
-        c.pango_layout_set_font_description(self.pango_layout, desc);
-        self.cached_metrics = null;
+        c.pango_font_description_set_absolute_size(temp,
+            @as(f64, @floatFromInt(size_px)) * @as(f64, @floatFromInt(c.PANGO_SCALE)));
+        c.pango_layout_set_font_description(self.pango_layout, temp);
+        defer c.pango_layout_set_font_description(self.pango_layout, desc);
 
         self.setPangoText(text);
 
@@ -437,9 +432,7 @@ inline fn appendStyle(result: *std.ArrayList(u8), allocator: std.mem.Allocator, 
 /// Returns `xft_name` unchanged when no `:` separator is present.
 /// Results are memoised in `font_conversion_cache`.
 fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const u8 {
-    if (font_conversion_cache == null)
-        font_conversion_cache = std.StringHashMap([]const u8).init(allocator);
-
+    // font_conversion_cache is guaranteed initialised by drawing.initFontCache().
     if (font_conversion_cache.?.get(xft_name)) |cached| return cached;
     if (std.mem.indexOfScalar(u8, xft_name, ':') == null) return xft_name;
 
@@ -477,6 +470,13 @@ fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const 
     const converted = try result.toOwnedSlice(allocator);
     font_conversion_cache.?.put(xft_name, converted) catch {};
     return converted;
+}
+
+/// Initialises the font-name conversion cache. Must be called once before any
+/// DrawContext loads fonts. Idempotent — safe to call on reload.
+pub fn initFontCache(allocator: std.mem.Allocator) void {
+    if (font_conversion_cache == null)
+        font_conversion_cache = std.StringHashMap([]const u8).init(allocator);
 }
 
 /// Releases the font-name conversion cache. Call once at shutdown.

@@ -58,8 +58,6 @@ pub fn init(wm: *WM) void {
         return;
     };
 
-    // Derive the default layout from the tiling state so every workspace
-    // starts on the same layout as the global default. Falls back to .master.
     const default_layout: tiling.Layout =
         if (tiling.getState()) |ts| ts.layout else .master;
 
@@ -108,15 +106,22 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) !void {
 
     const from_ws = s.window_to_workspace.get(win) orelse {
         // Not yet tracked: add directly to the target.
+        // Pre-reserve map capacity before touching Tracking so that if the
+        // put would fail, we haven't already mutated the workspace's window
+        // list (no INVARIANT BREAK).
+        try s.window_to_workspace.ensureUnusedCapacity(1);
         try s.workspaces[target_ws].add(win);
-        s.window_to_workspace.put(win, target_ws) catch |e| {
-            _ = s.workspaces[target_ws].remove(win);
-            return e;
-        };
+        // ensureUnusedCapacity above guarantees this cannot fail.
+        s.window_to_workspace.putAssumeCapacity(win, target_ws);
         return;
     };
 
     if (from_ws == target_ws) return;
+
+    // Pre-reserve map capacity before any Tracking mutations.  This closes the
+    // INVARIANT BREAK window: if the reservation fails we have not yet touched
+    // either workspace's Tracking, so the rollback path is clean.
+    try s.window_to_workspace.ensureUnusedCapacity(1);
 
     _ = s.workspaces[from_ws].remove(win);
     s.workspaces[target_ws].add(win) catch |err| {
@@ -125,19 +130,12 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) !void {
         if (ts) |t| _ = t.windows.remove(win);
         return;
     };
-    s.window_to_workspace.put(win, target_ws) catch |e| {
-        // INVARIANT BREAK: workspaces[target_ws] now contains `win` but
-        // window_to_workspace still maps win -> from_ws (or retains whatever
-        // value it had before). Rolling back the Tracking move here would
-        // require a second fallible add; given that OOM at this point usually
-        // means the session is dying, we log and accept the stale entry.
-        // Callers that rely on getWorkspaceForWindow should treat a mismatch
-        // between the map and the workspace's window list as a degenerate-but-
-        // non-crashing state.
-        debug.warnOnErr(e, "w2ws put after move: window_to_workspace is stale");
-    };
+    // Capacity was pre-reserved above — this cannot fail.
+    s.window_to_workspace.putAssumeCapacity(win, target_ws);
 
-    if (minimize.isMinimized(wm, win)) minimize.moveToWorkspace(wm, win, from_ws, target_ws);
+    // minimize.moveToWorkspace reads the old workspace from minimized_info
+    // directly, so we no longer pass from_ws here.
+    if (minimize.isMinimized(wm, win)) minimize.moveToWorkspace(wm, win, target_ws);
 
     if (from_ws == s.current) {
         // If the window is fullscreen on the current workspace, tear down the
@@ -211,14 +209,12 @@ fn showFullscreenWindow(wm: *WM, info: defs.FullscreenInfo) void {
 // Step 3b: restore tiled or floating geometry for the new workspace.
 fn restoreWorkspaceWindows(wm: *WM, ws: *const Workspace) void {
     // Map any deferred windows (spawned while this workspace was inactive).
-    // xcb_map_window is a no-op for already-mapped windows.
     for (ws.windows.items()) |win| _ = xcb.xcb_map_window(wm.conn, win);
 
     const tiling_active = if (tiling.getState()) |t| t.enabled else false;
 
     if (tiling_active) {
-        // Per-workspace layout: restore the layout this workspace was last
-        // using so the right algorithm runs and the bar shows the correct icon.
+        // Per-workspace layout: restore the layout this workspace was last using.
         if (!wm.config.tiling.global_layout) {
             tiling.syncLayoutFromWorkspace(ws.layout);
         }
@@ -226,15 +222,16 @@ fn restoreWorkspaceWindows(wm: *WM, ws: *const Workspace) void {
         // Fast path: replay cached tiled positions without running the layout
         // algorithm. Falls back to a full retile only if the cache is cold,
         // the workspace's valid bit is unset, or the screen area changed.
-        // restoreWorkspaceGeom calls utils.configureWindow directly, bypassing
-        // the geom cache: windows were moved to OFFSCREEN_X_POSITION in step 1
-        // so the cache holds correct rects but the server does not.
+        //
+        // The eviction loop only runs in the fallback branch — it does not
+        // discard pre-computed entries (written by retileInactiveWorkspace)
+        // unless restoreWorkspaceGeom has already determined those entries
+        // are stale or absent. This preserves the pre-computation fast path.
         if (!tiling.restoreWorkspaceGeom(wm)) {
-            // Evict new workspace cache entries before retriling.
-            // retileInactiveWorkspace may have pre-populated them with correct
-            // on-screen positions. Without eviction, configureSafe finds
-            // cache[win] == computed_geom and skips configure_window, leaving
-            // windows stranded at OFFSCREEN_X_POSITION.
+            // Evict before retriling: windows are at OFFSCREEN_X_POSITION,
+            // not their cached positions. Without eviction, configureSafe
+            // finds matching rects and skips configure_window, leaving
+            // windows stranded offscreen.
             for (ws.windows.items()) |win| tiling.invalidateGeomCache(win);
             tiling.retileCurrentWorkspace(wm);
         }
@@ -251,15 +248,6 @@ fn restoreWorkspaceWindows(wm: *WM, ws: *const Workspace) void {
 }
 
 // Step 4: resolve the post-switch focus target and apply it.
-// Query the pointer inside the grab, after all configure_window calls have
-// been queued. XCB sends pending requests before blocking on the reply, so
-// the server sees the fully repositioned layout when evaluating which window
-// is under the pointer. This avoids the master-flash: we never eagerly focus
-// the master and then correct it after the grab releases.
-//
-// NOTE: wm.focused_window is written directly (not via focus.setFocus) because
-// we are inside a server grab and focus.setFocus may issue a blocking
-// xcb_get_window_attributes round-trip for the mapped check.
 fn applyPostSwitchFocus(wm: *WM, new_ws: u8, new_ws_obj: *const Workspace) void {
     const s = getState().?;
 
@@ -283,17 +271,12 @@ fn applyPostSwitchFocus(wm: *WM, new_ws: u8, new_ws_obj: *const Workspace) void 
     wm.focused_window = focus_target;
     std.debug.assert(wm.focused_window == null or isManaged(wm.focused_window.?));
 
-    // Paint borders inside the grab so the focused window gets border_focused
-    // before any frame is composited: no border flash on the master window.
     tiling.updateWindowFocus(wm, old_focused, wm.focused_window);
 
     if (wm.focused_window) |new_win| {
         _ = xcb.xcb_ungrab_button(wm.conn, xcb.XCB_BUTTON_INDEX_ANY, new_win, xcb.XCB_MOD_MASK_ANY);
     }
 
-    // ICCCM §4.1.7: xcb_set_input_focus must carry the timestamp of the user
-    // action that triggered the switch. Globally-active windows (Electron)
-    // silently ignore focus messages with timestamp 0.
     _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
         wm.focused_window orelse wm.root, wm.last_event_time);
 }
@@ -305,17 +288,12 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
 
     wm.suppress_focus_reason = .none;
 
-    // Grab the server so the switch is atomic: no intermediate frames visible.
-    // NOTE: no defer for ungrab; we queue it explicitly before the flush so that
-    // grab + all changes + raiseBar + ungrab land in a single write.
     _ = xcb.xcb_grab_server(wm.conn);
 
     hideWorkspaceWindows(wm, &s.workspaces[old_ws]);
 
-    // Step 2: adjust bar visibility for the new workspace.
     bar.setBarState(wm, if (fs_info != null) .hide_fullscreen else .show_fullscreen);
 
-    // Step 3: show windows for the new workspace.
     if (fs_info) |info| {
         showFullscreenWindow(wm, info);
     } else {
@@ -324,8 +302,6 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
 
     applyPostSwitchFocus(wm, new_ws, new_ws_obj);
 
-    // Redraw the bar inside the grab so picom composites the updated workspace
-    // highlight atomically; deferring via markDirty shows one stale frame first.
     bar.raiseBar();
     bar.redrawImmediate(wm);
     _ = xcb.xcb_ungrab_server(wm.conn);
@@ -358,8 +334,6 @@ pub inline fn getWorkspaceForWindow(win: u32) ?u8 {
     return s.window_to_workspace.get(win);
 }
 
-// Predicate form used by utils.findManagedWindow to check membership without
-// creating a circular import between utils and workspaces.
 pub fn isManaged(win: u32) bool {
     return getWorkspaceForWindow(win) != null;
 }
