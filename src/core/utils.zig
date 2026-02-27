@@ -19,7 +19,12 @@ pub inline fn configureBorder(conn: *xcb.xcb_connection_t, win: u32, width: u16,
     _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
 }
 
-pub const Rect = struct {
+// `extern struct` gives Rect a defined C-compatible layout (fields packed in
+// declaration order with natural alignment).  All four fields are i16/u16 —
+// identical alignment and size — so the compiler inserts no padding and the
+// struct is exactly 8 bytes.  The explicit layout enables the single-u64
+// comparison in rectsEqual (layouts.zig) and is a no-op for all other callers.
+pub const Rect = extern struct {
     x:      i16,
     y:      i16,
     width:  u16,

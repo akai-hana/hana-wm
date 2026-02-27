@@ -74,14 +74,14 @@ pub const LayoutCtx = struct {
 
 // ── Rect comparison ───────────────────────────────────────────────────────────
 //
-// Four-field equality used in configureSafe and restoreWorkspaceGeom.
-// If utils.Rect is declared as a packed struct (or has no internal padding),
-// this can be replaced with a single 64-bit integer compare:
-//   @as(u64, @bitCast(a)) == @as(u64, @bitCast(b))
-// That optimisation is left as a follow-up once Rect's layout is confirmed.
+// utils.Rect is `extern struct { i16, i16, u16, u16 }` — 8 bytes, no padding.
+// A single 64-bit integer comparison replaces the original four 16-bit ones.
+// The comptime assert makes the layout assumption explicit and catches any
+// future struct changes that would silently break the bitcast.
 
 pub inline fn rectsEqual(a: utils.Rect, b: utils.Rect) bool {
-    return a.x == b.x and a.y == b.y and a.width == b.width and a.height == b.height;
+    comptime std.debug.assert(@sizeOf(utils.Rect) == @sizeOf(u64));
+    return @as(u64, @bitCast(a)) == @as(u64, @bitCast(b));
 }
 
 // ── configureSafe ─────────────────────────────────────────────────────────────

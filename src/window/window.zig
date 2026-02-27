@@ -242,22 +242,40 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
 
     collectAndCacheSizeHints(wm, win, c_normal_hints);
 
+    // Collect focus-cache property replies *before* any visual commands.
+    //
+    // Previously this call came after utils.flush(), which meant the server
+    // (and compositor) received map + unfocused-border in one batch, then had
+    // to wait for two xcb_get_property_reply round-trips before seeing
+    // set_input_focus + focused-border in a second batch.  With a compositor
+    // running that produced a visible intermediate frame where the spawned
+    // window appeared briefly unfocused/unfocused-colored before snapping to
+    // its final state — the "sluggish spawn" feel.
+    //
+    // Moving the call here is safe: the cookies were fired at the top of this
+    // function before any flush, so the X server has already queued the
+    // property replies by the time we read them.  getInputModelCached in
+    // setFocus finds the cache warm and does no live query.
+    //
+    // Result: registerWithTiling + xcb_map_window + setFocus (set_input_focus
+    // + focused border) are all queued on the XCB write buffer before the
+    // single flush below.  They land at the server — and the compositor — as
+    // one atomic batch, matching dwm's Xlib-buffer behaviour.
+    utils.populateFocusCacheFromCookies(wm.conn, win, c_protocols, c_hints);
+
     if (on_current_workspace) {
         registerWithTiling(wm, win, true);
         _ = xcb.xcb_map_window(wm.conn, win);
+        focus.setFocus(wm, win, .window_spawn);
+        snapshotSpawnCursor(wm);
     } else {
         registerWithTiling(wm, win, false);
         grabButtons(wm, win, false);
     }
 
+    // Single flush — all visual state (geometry, map, border, focus) arrives
+    // at the server in one batch.  No intermediate compositor frame possible.
     utils.flush(wm.conn);
-
-    utils.populateFocusCacheFromCookies(wm.conn, win, c_protocols, c_hints);
-
-    if (on_current_workspace) {
-        focus.setFocus(wm, win, .window_spawn);
-        snapshotSpawnCursor(wm);
-    }
 
     bar.markDirty();
 }
@@ -275,6 +293,16 @@ fn unmanageWindow(wm: *WM, win: u32) void {
     const window_workspace = workspaces.getWorkspaceForWindow(win);
     const current_ws       = workspaces.getCurrentWorkspace();
 
+    // Pre-fire pointer query before state cleanup so the round-trip runs
+    // concurrently with the in-memory operations below (tiling remove, cache
+    // evictions, workspace remove — all pure hash-table work, no X round-trips).
+    // By the time focusWindowUnderPointer consumes the reply the network
+    // latency is fully hidden and the reply is already in the receive buffer.
+    // The cookie is conditional: no query needed when the closed window was not
+    // focused, avoiding an unnecessary round-trip in the common case.
+    const ptr_cookie: ?xcb.xcb_query_pointer_cookie_t =
+        if (was_focused) xcb.xcb_query_pointer(wm.conn, wm.root) else null;
+
     if (wm.config.tiling.enabled) tiling.removeWindow(win);
     utils.uncacheWindowFocusProps(win);
     layouts.evictSizeHints(win);
@@ -290,7 +318,7 @@ fn unmanageWindow(wm: *WM, win: u32) void {
     if (was_focused) {
         if (wm.config.tiling.enabled) tiling.retileIfDirty(wm);
         focus.clearFocus(wm);
-        focusWindowUnderPointer(wm);
+        focusWindowUnderPointer(wm, ptr_cookie.?);
     } else if (!was_fullscreen and wm.config.tiling.enabled) {
         if (window_workspace) |ws| {
             if (current_ws == ws) {
@@ -320,11 +348,13 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM
 }
 
 // Post-unmanage focus recovery
-
-fn focusWindowUnderPointer(wm: *WM) void {
-    const reply = xcb.xcb_query_pointer_reply(
-        wm.conn, xcb.xcb_query_pointer(wm.conn, wm.root), null,
-    ) orelse {
+//
+// Accepts a pre-fired xcb_query_pointer cookie so the round-trip runs
+// concurrently with the in-memory state cleanup in unmanageWindow (tiling
+// remove, cache evictions, workspace remove).  By the time this is called
+// the reply is already in the receive buffer — zero additional wait.
+fn focusWindowUnderPointer(wm: *WM, ptr_cookie: xcb.xcb_query_pointer_cookie_t) void {
+    const reply = xcb.xcb_query_pointer_reply(wm.conn, ptr_cookie, null) orelse {
         minimize.focusBestAvailable(wm);
         return;
     };
@@ -436,14 +466,16 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t, wm: *WM) vo
     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL) return;
     if (wm.drag_state.active) return;
     if (suppressSpawnCrossing(wm, event.root_x, event.root_y)) return;
-    const target: u32 = if (event.child != 0) event.child else blk: {
-        const reply = xcb.xcb_query_pointer_reply(
-            wm.conn, xcb.xcb_query_pointer(wm.conn, wm.root), null,
-        ) orelse return;
-        defer std.c.free(reply);
-        break :blk reply.*.child;
-    };
-    maybeFocusWindow(wm, target);
+
+    // `event.child` is the new inferior of root being entered.
+    // When non-zero, the event already carries the answer — no round-trip needed.
+    // When zero, the pointer left to an area not covered by any X window
+    // (off-screen, inter-monitor gap, etc.).  A QueryPointer in that case also
+    // returns child=0, so maybeFocusWindow(wm, 0) would immediately fail
+    // isOnCurrentWorkspace and return.  Skip the useless round-trip entirely.
+    if (event.child == 0) return;
+
+    maybeFocusWindow(wm, event.child);
 }
 
 // Property notify
