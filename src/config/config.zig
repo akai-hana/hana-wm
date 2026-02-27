@@ -702,6 +702,10 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     cfg.allocated_clock_format = try allocator.dupe(u8, clock_fmt);
     cfg.bar.clock_format       = cfg.allocated_clock_format.?;
 
+    const drun_prompt = get([]const u8, section, "drun_prompt", "run: ", null, null);
+    cfg.allocated_drun_prompt = try allocator.dupe(u8, drun_prompt);
+    cfg.bar.drun_prompt       = cfg.allocated_drun_prompt.?;
+
     cfg.bar.indicator_size      = section.getScalable("indicator_size")      orelse parser.ScalableValue.percentage(20.0);
     cfg.bar.workspace_tag_width = section.getScalable("workspace_tag_width") orelse parser.ScalableValue.percentage(100.0);
 
@@ -751,6 +755,9 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
         cfg.bar.title_unfocused_accent = getColor(colors, "title_unfocused", cfg.bar.getTitleUnfocusedAccent());
         cfg.bar.title_minimized_accent = getColor(colors, "title_minimized", cfg.bar.getTitleMinimizedAccent());
         cfg.bar.clock_accent           = getColor(colors, "clock",           cfg.bar.getClockAccent());
+        if (colors.get("drun_bg"))           |_| cfg.bar.drun_bg           = getColor(colors, "drun_bg",           cfg.bar.getDrunBg());
+        if (colors.get("drun_fg"))           |_| cfg.bar.drun_fg           = getColor(colors, "drun_fg",           cfg.bar.getDrunFg());
+        if (colors.get("drun_prompt_color")) |_| cfg.bar.drun_prompt_color = getColor(colors, "drun_prompt_color", cfg.bar.getDrunPromptColor());
     }
 }
 

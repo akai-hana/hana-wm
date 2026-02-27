@@ -143,6 +143,9 @@ workspace_tag_width = 100%  # Default base width
 # With picom's gaussian blur, the bar will show blurred content behind it
 transparency = 0% # [0.0 - 1.0] / [0% - 100%]
 
+# drun command runner prompt string (default: "run: ")
+# drun_prompt = "run: "
+
 # Main color palette
 ## Bar
 bg = "#0d0d14"
@@ -169,6 +172,11 @@ title_unfocused = "#52263e"
 title_minimized = "#007373"
 
 clock = "#ac3232"       # Custom accent for clock segment
+
+# drun command runner colors (all optional — omit to use bar-wide defaults)
+# drun_bg           = "#0d0d14"  # background (default: bar bg)
+# drun_fg           = "#ebd9bc"  # typed text  (default: bar fg)
+# drun_prompt_color = "#ac3232"  # prompt text + cursor (default: title accent)
 
 # Configurable bar layout
 # You can rearrange segments however you like
@@ -218,7 +226,7 @@ Mod+space       = "toggle_layout"          # Cycle layouts forward
 Mod+Shift+space = "toggle_layout_reverse"  # Cycle layouts backward
 Mod+Alt+space   = "cycle_layout_variation" # Cycle current layout's variation (Super+V)
 Mod+Tab         = "swap_master"            # Swap focused window with master (slave→master or master→slave)
-Mod+Shift+Tab   = "rofi -show drun"
+Mod+Shift+Tab   = "drun_toggle"
 
 # Layouts
 ## Master-stack
