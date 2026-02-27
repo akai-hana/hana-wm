@@ -6,10 +6,15 @@ const xcb = defs.xcb;
 /// X coordinate for positioning windows off-screen (far left).
 pub const OFFSCREEN_X_POSITION: i32 = -4000;
 
-/// X coordinate range used by fullscreen.zig to detect whether a window is
-/// currently parked off-screen (e.g. on an inactive workspace or minimized).
+/// Lower bound used to detect whether a window is currently parked off-screen
+/// (e.g. on an inactive workspace or minimized).  Any x/y below this value is
+/// treated as the offscreen sentinel.
+///
+/// A maximum bound is intentionally absent: a fixed upper limit would misfire
+/// on multi-monitor setups where the combined desktop can easily exceed 10 000 px.
+/// Only the minimum threshold is needed because the sole offscreen sentinel we
+/// write is OFFSCREEN_X_POSITION (-4000), which is well below -1000.
 pub const OFFSCREEN_THRESHOLD_MIN: i32 = -1000;
-pub const OFFSCREEN_THRESHOLD_MAX: i32 = 10000;
 
 /// Maximum depth when walking the X11 window tree in findManagedWindow.
 pub const MAX_WINDOW_TREE_DEPTH: usize = 10;

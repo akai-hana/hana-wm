@@ -1,4 +1,4 @@
-//! Main event loop — io_uring edition.
+//! Main event loop
 //!
 //! Uses POLL_ADD for the XCB and signal file descriptors plus an optional
 //! TIMEOUT for the clock segment.  Each operation is resubmitted after it
@@ -7,31 +7,36 @@
 const std     = @import("std");
 const builtin = @import("builtin");
 
-const debug     = @import("debug");
-const config    = @import("config");
 const defs      = @import("defs");
-const xkbcommon = @import("xkbcommon");
-const events    = @import("events");
-const input     = @import("input");
+    const WM    = defs.WM;
+    const xcb   = defs.xcb;
+const constants = @import("constants");
+const config    = @import("config");
 const utils     = @import("utils");
-const bar       = @import("bar");
+const dpi       = @import("dpi");
+const debug     = @import("debug");
+
+const xkbcommon = @import("xkbcommon");
+const input     = @import("input");
+const events    = @import("events");
+
+const lifecycle = @import("lifecycle");
 const tiling    = @import("tiling");
 const layouts   = @import("layouts");
-const dpi       = @import("dpi");
-const constants  = @import("constants");
-const lifecycle  = @import("lifecycle");
 
-const xcb     = defs.xcb;
-const WM      = defs.WM;
-const IoUring = std.os.linux.IoUring;
+const bar = @import("bar");
+
+//TODO: replace with something that is also bsd-compatible
+const IoUring = std.os.linux.IoUring; // async I/O interface
 
 // User-data tags for io_uring CQEs.
 const TAG_XCB    : u64 = 1;
 const TAG_SIGNAL : u64 = 2;
 const TAG_CLOCK  : u64 = 3;
 
-// Stable storage for the clock timeout timespec — must outlive the io_uring
-// operation (i.e. remain valid from submission until the CQE arrives).
+// Stable storage for the clock timeout timespec.
+// Must outlive the io_uring operation
+// (i.e. remain valid from submission until the CQE arrives).
 var clock_ts: std.os.linux.kernel_timespec = .{ .sec = 0, .nsec = 0 };
 
 /// Creates a signalfd (for SIGHUP / SIGTERM / SIGINT).
@@ -92,7 +97,7 @@ fn grabKeybindings(wm: *WM) !void {
         const keycode = kb.keycode orelse continue;
         for (constants.LOCK_MODIFIERS) |lock| {
             if (n >= cookies.len) {
-                debug.warn("Too many keybindings — increase Sizes.MAX_KEYBIND_COOKIES (currently {})", .{constants.Sizes.MAX_KEYBIND_COOKIES});
+                debug.warn("Too many keybindings. Increase Sizes.MAX_KEYBIND_COOKIES (currently {})", .{constants.Sizes.MAX_KEYBIND_COOKIES});
                 break;
             }
             cookies[n] = .{
@@ -142,8 +147,16 @@ fn handleConfigReload(wm: *WM) !void {
         wm.config = old_config;
         return err;
     };
+    // rebuildKeybindMap must succeed before we release the old config.
+    // If it fails we can still roll back by restoring old_config; once
+    // old_config.deinit() is called that rollback window is permanently closed.
+    input.rebuildKeybindMap(wm) catch |err| {
+        debug.err("rebuildKeybindMap failed: {}, reverting\n", .{err});
+        wm.config = old_config;
+        // new_config is still live (errdefer will deinit it on return)
+        return err;
+    };
     old_config.deinit();
-    try input.rebuildKeybindMap(wm);
     tiling.reloadConfig(wm);
     bar.updateTimerState();
     bar.reload(wm);
@@ -153,8 +166,15 @@ fn handleConfigReload(wm: *WM) !void {
 // io_uring helpers 
 
 fn getSqe(iou: *IoUring) *std.os.linux.io_uring_sqe {
+    // The ring is initialised with depth 8 and we submit at most 3 ops at once
+    // (XCB poll + signal poll + optional clock timeout), so get_sqe should
+    // almost never fail.  submit_and_wait(0) flushes pending SQEs without
+    // blocking to free ring slots; if it errors we log and retry rather than
+    // silently looping forever.
     while (true) return iou.get_sqe() catch {
-        _ = iou.submit_and_wait(0) catch {};
+        _ = iou.submit_and_wait(0) catch |err| {
+            debug.err("io_uring submit_and_wait failed in getSqe: {s}", .{@errorName(err)});
+        };
         continue;
     };
 }

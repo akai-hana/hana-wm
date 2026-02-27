@@ -59,11 +59,13 @@ pub const Section = struct {
 
     pub fn deinit(self: *Section) void { self.pairs.deinit(); }
 
-    pub fn get(self: *const Section, key: []const u8) ?Value         { return self.pairs.get(key); }
-    pub fn getInt(self: *const Section, key: []const u8) ?i64        { return if (self.get(key)) |v| v.asInt()      else null; }
-    pub fn getBool(self: *const Section, key: []const u8) ?bool      { return if (self.get(key)) |v| v.asBool()     else null; }
-    pub fn getString(self: *const Section, key: []const u8) ?[]const u8 { return if (self.get(key)) |v| v.asString() else null; }
-    pub fn getColor(self: *const Section, key: []const u8) ?u32      { return if (self.get(key)) |v| v.asColor()    else null; }
+    pub fn get(self: *const Section, key: []const u8) ?Value { return self.pairs.get(key); }
+
+    // Typed convenience getters — each delegates to the corresponding Value.asX().
+    pub fn getInt     (self: *const Section, key: []const u8) ?i64          { return if (self.get(key)) |v| v.asInt()      else null; }
+    pub fn getBool    (self: *const Section, key: []const u8) ?bool         { return if (self.get(key)) |v| v.asBool()     else null; }
+    pub fn getString  (self: *const Section, key: []const u8) ?[]const u8   { return if (self.get(key)) |v| v.asString()   else null; }
+    pub fn getColor   (self: *const Section, key: []const u8) ?u32          { return if (self.get(key)) |v| v.asColor()    else null; }
     pub fn getScalable(self: *const Section, key: []const u8) ?ScalableValue { return if (self.get(key)) |v| v.asScalable() else null; }
 };
 
@@ -311,12 +313,7 @@ const Parser = struct {
         // trying integer parsing, because hex digits overlap with base-10.
         const looks_like_color = raw[0] == '#' or
             (raw.len > 2 and raw[0] == '0' and (raw[1] == 'x' or raw[1] == 'X')) or
-            blk: {
-                for (raw) |ch| {
-                    if ((ch >= 'a' and ch <= 'f') or (ch >= 'A' and ch <= 'F')) break :blk true;
-                }
-                break :blk false;
-            };
+            std.mem.indexOfAny(u8, raw, "abcdefABCDEF") != null;
 
         if (looks_like_color) {
             if (parseColor(raw)) |color| return .{ .color = color } else |_| {

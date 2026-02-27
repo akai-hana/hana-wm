@@ -77,13 +77,13 @@ pub const MasterSide = enum {
     pub fn toString(value: MasterSide) []const u8   { return @tagName(value); }
 
     // Support 'L'/'R' aliases in addition to full names.
+    const alias_map = std.StaticStringMap(MasterSide).initComptime(.{
+        .{ "l", .left }, .{ "left", .left }, .{ "r", .right }, .{ "right", .right },
+    });
     pub fn fromStringWithAlias(str: []const u8) ?MasterSide {
         var buf: [16]u8 = undefined;
         if (str.len > buf.len) return null;
-        const lower = std.ascii.lowerString(&buf, str);
-        if (std.mem.eql(u8, lower, "l") or std.mem.eql(u8, lower, "left"))  return .left;
-        if (std.mem.eql(u8, lower, "r") or std.mem.eql(u8, lower, "right")) return .right;
-        return null;
+        return alias_map.get(std.ascii.lowerString(&buf, str));
     }
 };
 
@@ -330,34 +330,21 @@ pub const BarConfig = struct {
         return @as(u16, @intFromFloat(@round(@max(0.0, px))));
     }
 
-    /// Returns the inter-segment spacing in pixels.
+    /// Scales a ScalableValue to pixels. `factor` multiplies the percentage path;
+    /// `scale` is applied on both paths (pass 1.0 to skip).
+    fn scaleValue(sv: parser.ScalableValue, bar_height: u16, factor: f32, scale: f32) f32 {
+        const h: f32 = @floatFromInt(bar_height);
+        return if (sv.is_percentage) h * factor * (sv.value / 100.0) * scale else sv.value * scale;
+    }
+
     pub inline fn scaledSpacing(self: *const BarConfig, bar_height: u16) u16 {
-        const sv = self.spacing;
-        const px: f32 = if (sv.is_percentage)
-            @as(f32, @floatFromInt(bar_height)) * 5.0 * (sv.value / 100.0) * self.scale_factor
-        else
-            sv.value * self.scale_factor;
-        return @as(u16, @intFromFloat(@round(@max(0.0, px))));
+        return @as(u16, @intFromFloat(@round(@max(0.0, scaleValue(self.spacing, bar_height, 5.0, self.scale_factor)))));
     }
-
-    /// Returns the indicator glyph size in pixels.
     pub inline fn scaledIndicatorSize(self: *const BarConfig, bar_height: u16) u16 {
-        const sv = self.indicator_size;
-        const px: f32 = if (sv.is_percentage)
-            @as(f32, @floatFromInt(bar_height)) * (sv.value / 100.0)
-        else
-            sv.value;
-        return @max(1, @as(u16, @intFromFloat(@round(px))));
+        return @max(1, @as(u16, @intFromFloat(@round(scaleValue(self.indicator_size, bar_height, 1.0, 1.0)))));
     }
-
-    /// Returns the workspace tag width in pixels.
     pub inline fn scaledWorkspaceWidth(self: *const BarConfig, bar_height: u16) u16 {
-        const sv = self.workspace_tag_width;
-        const px: f32 = if (sv.is_percentage)
-            @as(f32, @floatFromInt(bar_height)) * (sv.value / 100.0) * self.scale_factor
-        else
-            sv.value * self.scale_factor;
-        return @max(1, @as(u16, @intFromFloat(@round(px))));
+        return @max(1, @as(u16, @intFromFloat(@round(scaleValue(self.workspace_tag_width, bar_height, 1.0, self.scale_factor)))));
     }
 
     /// Returns the bar's alpha in 16-bit format (0x0000–0xFFFF).
@@ -418,11 +405,10 @@ pub const Config = struct {
         self.bar.deinit(a);
         self.tiling.deinit(a);
 
-        if (self.allocated_font)                |f| a.free(f);
-        if (self.allocated_layout)              |l| a.free(l);
-        if (self.allocated_clock_format)        |f| a.free(f);
-        if (self.allocated_indicator_focused)   |s| a.free(s);
-        if (self.allocated_indicator_unfocused) |s| a.free(s);
+        inline for (.{
+            "allocated_font", "allocated_layout", "allocated_clock_format",
+            "allocated_indicator_focused", "allocated_indicator_unfocused",
+        }) |field| if (@field(self, field)) |s| a.free(s);
     }
 };
 
@@ -515,6 +501,8 @@ pub const SpawnQueue = struct {
     head: u8 = 0,
     len:  u8 = 0,
 
+    pub inline fn isEmpty(self: *const SpawnQueue) bool { return self.len == 0; }
+
     /// Push a spawn entry. Drops the oldest entry when the queue is full.
     pub fn push(self: *SpawnQueue, workspace: u8, pid: u32) void {
         if (self.len == SPAWN_QUEUE_CAP) {
@@ -530,23 +518,17 @@ pub const SpawnQueue = struct {
     /// Returns null immediately for pid=0 (use popOldestDaemon instead).
     pub fn popByPid(self: *SpawnQueue, win_pid: u32) ?u8 {
         if (win_pid == 0) return null;
-        var i: u8 = 0;
-        while (i < self.len) : (i += 1) {
-            const idx = (self.head + i) % SPAWN_QUEUE_CAP;
-            if (self.buf[idx].pid != win_pid) continue;
-            const ws = self.buf[idx].workspace;
-            self.removeAt(i);
-            return ws;
-        }
-        return null;
+        return self.popWhere(.by_pid, win_pid);
     }
 
     /// Remove and return the workspace of the oldest daemon (pid=0) entry, or null.
-    pub fn popOldestDaemon(self: *SpawnQueue) ?u8 {
+    pub fn popOldestDaemon(self: *SpawnQueue) ?u8 { return self.popWhere(.daemon, 0); }
+
+    fn popWhere(self: *SpawnQueue, comptime mode: enum { by_pid, daemon }, target: u32) ?u8 {
         var i: u8 = 0;
         while (i < self.len) : (i += 1) {
             const idx = (self.head + i) % SPAWN_QUEUE_CAP;
-            if (self.buf[idx].pid != 0) continue;
+            if (if (mode == .by_pid) self.buf[idx].pid != target else self.buf[idx].pid != 0) continue;
             const ws = self.buf[idx].workspace;
             self.removeAt(i);
             return ws;

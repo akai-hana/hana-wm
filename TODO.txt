@@ -1,6 +1,9 @@
 ### hana's TODO list! ###
 # In here i write the things i want to do to not lose track of the different ideas i come up with while developing 
 
+from what i understand, io_uring is exclusive to linux, so does that mean that this window manager won't work on bsd systems? be brief.
+can you please replace the current solution with something that works on both linux and bsd, and retains I/O asynchronicity and performance/responsivity/lightness.
+
 if the user doesn't include the bar.zig file inside src/bar, or doesn't include the entire src/bar directory, make the window manager still compile perfectly fine. if it doesn't include src/bar/bar.zig but still does all of the other fiels inside src/bar, they shouldn't be compiled at all, they should be completely ignored. same thing for src/input.zig
 
 ensure the usage of xcb in this program is optimal; that all xcb calls are optimal, not making redundant calls, or calling multiple times when i could call less times and make the program more responsive as a result. XCB is the majority of this program's responsivity, so please make sure XCB usage is completely optimized to the point where it's 100% efficiently used.

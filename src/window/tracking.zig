@@ -1,11 +1,11 @@
-// Efficient window tracking with small-array optimisation.
-//
-// Storage strategy:
-//   Small (<=small_cap windows): fixed inline array, cache-friendly, zero allocations.
-//   Large (>small_cap windows):  ArrayList + HashSet for O(1) contains/remove.
-//
-// A tagged union enforces that exactly one mode is active at all times.
-// Use the `Tracking` alias for the default 16-window capacity.
+//! Efficient window tracking with small-array optimisation.
+//!
+//! Storage strategy:
+//!   Small (<=small_cap windows): fixed inline array, cache-friendly, zero allocations.
+//!   Large (>small_cap windows):  ArrayList + HashSet for O(1) contains/remove.
+//!
+//! A tagged union enforces that exactly one mode is active at all times.
+//! Use the `Tracking` alias for the default 16-window capacity.
 
 const std = @import("std");
 
@@ -57,80 +57,68 @@ pub fn TrackingType(comptime small_cap: u8) type {
             };
         }
 
-        pub fn add(self: *Self, win: u32) !void {
+        // Shared implementation for add (front=false) and addFront (front=true).
+        // Every branch is identical except the list-mutation: append vs insert-at-0.
+        // Single getOrPut probe on the large path covers both duplicate check and
+        // insertion; set entry is rolled back if the list mutation fails.
+        fn addImpl(self: *Self, win: u32, comptime front: bool) !void {
             std.debug.assert(win != 0);
             switch (self.storage) {
                 .small => |*s| {
-                    // Small path: linear scan is unavoidable to check for
-                    // duplicates; the array is at most small_cap entries long.
                     if (std.mem.indexOfScalar(u32, s.items[0..s.len], win) != null) return;
                     if (s.len < small_cap) {
-                        s.items[s.len] = win;
+                        if (front) {
+                            std.mem.copyBackwards(u32, s.items[1 .. s.len + 1], s.items[0..s.len]);
+                            s.items[0] = win;
+                        } else {
+                            s.items[s.len] = win;
+                        }
                         s.len += 1;
                     } else {
                         try self.promoteToLarge();
                         // promoteToLarge reserves s.len+8 slots, so assumeCapacity is safe.
-                        self.storage.large.list.appendAssumeCapacity(win);
+                        if (front) {
+                            try self.storage.large.list.insert(self.allocator, 0, win);
+                        } else {
+                            self.storage.large.list.appendAssumeCapacity(win);
+                        }
                         self.storage.large.set.putAssumeCapacity(win, {});
                     }
                 },
                 .large => |*l| {
-                    // Large path: single getOrPut probe covers both the duplicate
-                    // check and the insertion, eliminating the previous double-probe
-                    // pattern of contains() followed by set.put().
                     const gop = try l.set.getOrPut(self.allocator, win);
                     if (gop.found_existing) return;
-                    // Roll back the set entry if the list append fails so both
-                    // structures stay in sync.
-                    l.list.append(self.allocator, win) catch |err| {
-                        _ = l.set.remove(win);
-                        return err;
-                    };
+                    const list_err = if (front) l.list.insert(self.allocator, 0, win)
+                                    else        l.list.append(self.allocator, win);
+                    list_err catch |err| { _ = l.set.remove(win); return err; };
                 },
             }
         }
 
-        pub fn addFront(self: *Self, win: u32) !void {
-            std.debug.assert(win != 0);
-            switch (self.storage) {
-                .small => |*s| {
-                    if (std.mem.indexOfScalar(u32, s.items[0..s.len], win) != null) return;
-                    if (s.len < small_cap) {
-                        std.mem.copyBackwards(u32, s.items[1 .. s.len + 1], s.items[0..s.len]);
-                        s.items[0] = win;
-                        s.len += 1;
-                    } else {
-                        try self.promoteToLarge();
-                        // promoteToLarge reserves s.len+8 slots; insert checks capacity.
-                        try self.storage.large.list.insert(self.allocator, 0, win);
-                        self.storage.large.set.putAssumeCapacity(win, {});
-                    }
-                },
-                .large => |*l| {
-                    // Single probe: if the key is already present we return early
-                    // without touching the list. Roll back the set entry on list
-                    // failure so structures stay in sync.
-                    const gop = try l.set.getOrPut(self.allocator, win);
-                    if (gop.found_existing) return;
-                    l.list.insert(self.allocator, 0, win) catch |err| {
-                        _ = l.set.remove(win);
-                        return err;
-                    };
-                },
-            }
-        }
+        pub fn add(self: *Self, win: u32) !void      { return self.addImpl(win, false); }
+        pub fn addFront(self: *Self, win: u32) !void { return self.addImpl(win, true);  }
 
         // Reorder in a single pass using a caller-provided permutation of current items.
         // For large storage, also rebuilds the hash set to stay consistent.
         pub fn reorder(self: *Self, new_order: []const u32) void {
             switch (self.storage) {
                 .small => |*s| {
+                    // Debug: verify the caller is passing a true permutation.
+                    std.debug.assert(new_order.len == s.len);
                     const len: u8 = @intCast(@min(new_order.len, small_cap));
                     @memcpy(s.items[0..len], new_order[0..len]);
                     s.len = len;
                 },
                 .large => |*l| {
+                    // Debug: verify length and that new_order is a permutation
+                    // of the current items.  A mismatch here means the caller
+                    // passed a stale or incorrect window list; catching it early
+                    // prevents silent list/set divergence.
+                    std.debug.assert(new_order.len == l.list.items.len);
                     std.debug.assert(new_order.len <= l.list.capacity);
+                    if (std.debug.runtime_safety) {
+                        for (new_order) |win| std.debug.assert(l.set.contains(win));
+                    }
                     l.list.clearRetainingCapacity();
                     l.set.clearRetainingCapacity();
                     for (new_order) |win| {
