@@ -10,7 +10,9 @@ pub const xcb = @cImport({
 
 pub const xkbcommon = @import("xkbcommon");
 
-// Modifier masks - must be u16 (XCB API requirement)
+// Modifier masks
+//
+// Must be u16 due to XCB API requirements; will fail otherwise
 pub const MOD_SHIFT: u16   = xcb.XCB_MOD_MASK_SHIFT;
 pub const MOD_LOCK: u16    = xcb.XCB_MOD_MASK_LOCK;
 pub const MOD_CONTROL: u16 = xcb.XCB_MOD_MASK_CONTROL;
@@ -64,8 +66,8 @@ pub const Action = union(enum) {
 };
 
 pub const Keybind = struct {
-    modifiers: u16,    // XCB API requirement
-    keysym:    u32,    // X11 keysym - must be u32
+    modifiers: u16, // XCB API requirement
+    keysym:    u32, // X11 keysym (must be u32) //TODO: why?
     keycode:   ?u8 = null,
     action:    Action,
 };
@@ -79,7 +81,8 @@ pub const MasterSide = enum {
 
     // Support 'L'/'R' aliases in addition to full names.
     const alias_map = std.StaticStringMap(MasterSide).initComptime(.{
-        .{ "l", .left }, .{ "left", .left }, .{ "r", .right }, .{ "right", .right },
+        .{ "l", .left }, .{ "left", .left },
+        .{ "r", .right }, .{ "right", .right },
     });
     pub fn fromStringWithAlias(str: []const u8) ?MasterSide {
         var buf: [16]u8 = undefined;
@@ -88,15 +91,17 @@ pub const MasterSide = enum {
     }
 };
 
-/// Per-layout behavioral variations — defined here (not in tiling.zig) so that
-/// config.zig can parse them without creating a circular import.
+/// Per-layout behavioral variations.
+///
+/// Defined here and not in tiling.zig so that config.zig
+/// can parse them without creating a circular import.
 pub const MasterVariation = enum {
-    lifo, // new window → stack, existing master stays (default)
-    fifo, // new window → master, existing master → stack
+    lifo, // new window -> stack, existing master stays (default)
+    fifo, // new window -> master, existing master -> stack
 };
 
 pub const MonocleVariation = enum {
-    gapless, // true fullscreen — ignore gap settings (default)
+    gapless, // true fullscreen; ignore gap settings (default)
     gaps,    // honor gap settings like every other layout
 };
 
@@ -136,25 +141,29 @@ pub const TilingConfig = struct {
     master_count: u8             = 1,
     gaps:         parser.ScalableValue = parser.ScalableValue.absolute(10.0),
     border_width: parser.ScalableValue = parser.ScalableValue.absolute(2.0),
-    border_focused:   u32 = 0x5294E2, // RGB color - must be u32
-    border_unfocused: u32 = 0x383C4A, // RGB color - must be u32
+    border_focused:   u32 = 0x5294E2, // RGB color (must be u32) //TODO: why?
+    border_unfocused: u32 = 0x383C4A, // RGB color (must be u32) //TODO: why?
 
-    // Per-layout variation preferences — stored as parsed enums (not raw strings)
-    // to avoid dangling slices after the config document is freed.
+
+    // Per-layout variation preferences
+    //
+    // Stored as parsed enums (not raw strings) to avoid
+    // dangling slices after the config document is freed.
     master_variation:    MasterVariation    = .lifo,
     monocle_variation:   MonocleVariation   = .gapless,
     grid_variation:      GridVariation      = .rigid,
     fibonacci_variation: FibonacciVariation = .default,
 
     // Per-layout 3-character indicator overrides (null = derive from active variation).
-    // Stored as fixed-size arrays — no allocation, no dangling pointers.
-    // Set via `indicator = "XYZ"` in the corresponding [tiling.layouts.*] section.
+    // Stored as fixed-size arrays: no allocation, no dangling pointers.
+    // Set via `indicator = "XYZ"` (3 chars) in the corresponding [tiling.layouts.*] section.
     master_indicator:    ?[3]u8 = null,
     monocle_indicator:   ?[3]u8 = null,
     grid_indicator:      ?[3]u8 = null,
     // 3-char label displayed in the bar for fibonacci (which has no variations).
     // Defaults to "FIB"; override with `indicator = "..."` in [tiling.layouts.fibonacci].
     fibonacci_indicator: [3]u8 = "FIB".*,
+    //TODO: don't make this a default for fibonacci specifically, but for all tiling laoyuts that do not have a variation made for them. so, if the variation count for said layout is equal to zero, pass "NUL".
 
     /// Per-workspace layout assignments parsed from the layouts array.
     workspace_layout_overrides: std.ArrayListUnmanaged(WorkspaceLayoutOverride) = .{},
@@ -180,9 +189,12 @@ pub const IndicatorLocation = enum {
     down_left,
     down_right,
 
-    /// Case-insensitive parse. Accepts hyphens or underscores, and both
-    /// orderings of diagonal names (e.g. "left-up" == "up-left").
+    /// Case-insensitive parse.
+    ///
+    /// Accepts hyphens or underscores, and both orderings of diagonal names 
+    /// (e.g. "left-up" == "up-left")
     pub fn fromString(str: []const u8) ?IndicatorLocation {
+        //TODO: is there some way to micro-optimize this, so that somehow '-' == '_', and "up-/_left" == "left-/_up"?
         const map = std.StaticStringMap(IndicatorLocation).initComptime(.{
             .{ "up",          .up         },
             .{ "down",        .down       },
@@ -261,10 +273,10 @@ pub const BarConfig = struct {
     font:              []const u8             = "monospace:size=10",
     fonts:             std.ArrayList([]const u8),
     font_size:         parser.ScalableValue   = parser.ScalableValue.percentage(10.0),
-    scaled_font_size:  u16                    = 10, // Can exceed 255 on high DPI - u16 is correct
+    scaled_font_size:  u16                    = 10, // Can exceed 255 on high DPI - u16 is correct //TODO: it isn't clear what this comment refers to
     spacing:           parser.ScalableValue   = parser.ScalableValue.absolute(12.0),
 
-    // RGB colors - must be u32
+    // RGB colors (must be u32) //TODO: why?
     bg:          u32 = 0x222222,
     fg:          u32 = 0xBBBBBB,
     selected_bg: u32 = 0x005577,
@@ -292,11 +304,11 @@ pub const BarConfig = struct {
 
     clock_format: []const u8 = "%Y-%m-%d %H:%M:%S",
 
-    // drun segment colors and prompt (all optional — fall back to bar-wide defaults)
-    drun_bg:           ?u32       = null, // background; falls back to bg
-    drun_fg:           ?u32       = null, // typed text color; falls back to fg
-    drun_prompt_color: ?u32       = null, // prompt text color; falls back to getTitleAccent()
-    drun_prompt:       []const u8 = "run: ", // displayed before the input field
+    // drun segment colors and prompt (all optional. Fall-back to bar-wide defaults)
+    drun_bg:           ?u32       = null,    // Background; falls back to bg
+    drun_fg:           ?u32       = null,    // Typed text color; falls back to fg
+    drun_prompt_color: ?u32       = null,    // Prompt text color; falls back to getTitleAccent()
+    drun_prompt:       []const u8 = "run: ", // Displayed before the input field
 
     layout: std.ArrayList(BarLayout),
 
@@ -409,8 +421,10 @@ pub const Config = struct {
         };
     }
 
-    /// Uses self.allocator — the same allocator passed to Config.init and all
-    /// subsequent config allocations — so callers do not need to pass it again.
+    /// Uses self.allocator
+    ///
+    /// The same allocator passed to Config.init and all subsequent 
+    /// config allocations, so callers do not need to pass it again.
     pub fn deinit(self: *Config) void {
         const a = self.allocator;
         for (self.keybindings.items) |*kb| kb.action.deinit(a);
@@ -440,7 +454,7 @@ pub const WindowGeometry = struct {
 };
 
 pub const FullscreenInfo = struct {
-    window:         u32, // XCB window ID - must be u32
+    window:         u32, // XCB window ID (must be u32) //TODO: why?
     saved_geometry: WindowGeometry,
 };
 
@@ -488,8 +502,8 @@ pub const FullscreenState = struct {
 
 pub const DragState = struct {
     active:           bool  = false,
-    window:           u32   = 0, // XCB window ID - must be u32
-    mode:             enum { move, resize } = .move,
+    window:           u32   = 0, // XCB window ID (must be u32) //TODO: why?
+    mode:             enum  { move, resize } = .move,
     start_x:          i16   = 0,
     start_y:          i16   = 0,
     start_win_x:      i16   = 0,
@@ -588,7 +602,7 @@ pub const WM = struct {
     allocator:      std.mem.Allocator,
     conn:           *xcb.xcb_connection_t,
     screen:         *xcb.xcb_screen_t,
-    root:           u32, // XCB window ID - must be u32
+    root:           u32, // XCB window ID - must be u32 (TODO)
     config:         Config,
     focused_window: ?u32 = null,
     fullscreen:     FullscreenState,
