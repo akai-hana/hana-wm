@@ -225,6 +225,7 @@ fn linkSystemLibraries(root: *std.Build.Module, has_bar: bool) void {
         root.linkSystemLibrary("pango-1.0", .{});
         root.linkSystemLibrary("glib-2.0", .{});
         root.linkSystemLibrary("gobject-2.0", .{});
+        root.linkSystemLibrary("xcb-keysyms", .{});
     }
 }
 

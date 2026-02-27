@@ -9,6 +9,7 @@ const tiling     = @import("tiling");
 const workspaces = @import("workspaces");
 const bar        = @import("bar");
 const minimize   = @import("minimize");
+const drun       = @import("drun");
 
 const EventHandler = *const fn (event: *anyopaque, wm: *defs.WM) void;
 
@@ -49,10 +50,12 @@ pub fn initModules(wm: *defs.WM) !void {
     workspaces.init(wm);
     tiling.init(wm);
     minimize.init(wm);
+    drun.init(wm.conn);
 }
 
 pub fn deinitModules() void {
     // minimize state is owned by WM.deinit — no separate deinit here.
+    drun.deinit();
     tiling.deinit();
     workspaces.deinit();
     input.deinit();

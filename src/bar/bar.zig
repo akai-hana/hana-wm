@@ -35,6 +35,8 @@ pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
     const layout_segment     = if (bar_flags.has_layout)     @import("layout")     else DrawOnlyStub;
     const variations_segment = if (bar_flags.has_variations) @import("variations") else DrawOnlyStub;
 
+    const drun = @import("drun");
+
     const title_segment = if (bar_flags.has_title) @import("title") else struct {
         pub fn draw(
             _: *drawing.DrawContext, _: defs.BarConfig, _: u16,
@@ -237,7 +239,7 @@ pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
                     snap.ws_current, snap.ws_has_windows.items),
                 .layout     => try layout_segment.draw(self.dc, self.config, self.height, x),
                 .variations => try variations_segment.draw(self.dc, self.config, self.height, x),
-                .title      => try title_segment.draw(
+                .title      => try drun.draw(
                     self.dc, self.config, self.height, x, width orelse 100,
                     self.conn, snap.focused_window,
                     snap.current_ws_wins.items, snap.minimized.items,
@@ -316,6 +318,7 @@ pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
         }
 
         fn drawTitleOnly(self: *State, new_focused: ?u32) void {
+            if (drun.isActive()) return; // drun owns the title area; skip focus-only redraws
             if (!self.title_layout_valid or self.cached_title_w == 0) return;
             _ = title_segment.draw(
                 self.dc, self.config, self.height,

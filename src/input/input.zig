@@ -14,6 +14,7 @@ const window     = @import("window");
 const debug      = @import("debug");
 const minimize   = @import("minimize");
 const lifecycle  = @import("lifecycle");
+const drun       = @import("drun");
 const xcb        = defs.xcb;
 const WM         = defs.WM;
 
@@ -94,6 +95,15 @@ pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
 
 pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
     wm.last_event_time = event.time;
+
+    // While drun is active it owns all key input. Feed the event to it first;
+    // if it returns true the event was consumed and we must not fall through to
+    // the normal keybind dispatch (which would fire binds on top of typing).
+    if (drun.handleKeyPress(event, wm)) {
+        bar.redrawImmediate(wm);
+        return;
+    }
+
     var state = &(keybind_state orelse return);
     const xkb_ptr: *xkbcommon.XkbState = @ptrCast(@alignCast(wm.xkb_state.?));
 
@@ -211,6 +221,7 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
         .toggle_tiling          => tiling.toggleTiling(wm),
         .swap_master            => tiling.swapWithMaster(wm),
         .cycle_layout_variation => tiling.cycleLayoutVariation(wm),
+        .drun_toggle            => { drun.toggle(wm); bar.redrawImmediate(wm); },
         .dump_state             => dumpState(wm),
         .emergency_recover      => emergencyRecover(wm),
         .minimize_window        => minimize.minimizeWindow(wm),
