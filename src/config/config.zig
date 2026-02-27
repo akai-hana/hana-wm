@@ -244,6 +244,8 @@ const ACTION_MAP = std.StaticStringMap(defs.Action).initComptime(.{
     .{ "unminimize_all",         .unminimize_all         },
     .{ "cycle_layout_variation", .cycle_layout_variation },
     .{ "cycle_variation",        .cycle_layout_variation },
+    .{ "drun_toggle",            .drun_toggle            },
+    .{ "drun",                   .drun_toggle            },
 });
 
 fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
