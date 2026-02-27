@@ -219,8 +219,8 @@ fn findModuleImports(
     source_path: []const u8,
     all_modules: *std.StringHashMap(ModuleEntry),
 ) []const []const u8 {
-    const source = std.Io.Dir.readFileAlloc(
-        b.build_root.handle, b.graph.io, source_path, allocator, .limited(1024 * 1024),
+    const source = b.build_root.handle.readFileAlloc(
+        b.graph.io, source_path, allocator, .limited(1024 * 1024),
     ) catch return &.{};
     // Do NOT free source — name slices below point into it.
 

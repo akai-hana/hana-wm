@@ -165,8 +165,17 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) 
     // Real movement lifts window-spawn focus suppression.
     if (wm.suppress_focus_reason == .window_spawn) wm.suppress_focus_reason = .none;
     // POINTER_MOTION_HINT delivers one event per gesture; re-arm by querying pointer.
-    if (xcb.xcb_query_pointer_reply(wm.conn, xcb.xcb_query_pointer(wm.conn, wm.root), null)) |reply|
-        std.c.free(reply);
+    //
+    // We fire the request and immediately discard the reply — we don't use any
+    // of the reply fields here.  The X server re-arms motion delivery when it
+    // receives the *request*, not when we receive the *reply*, so the discard is
+    // semantically identical to waiting but without the blocking round-trip.
+    //
+    // This matters because MotionNotify is the highest-frequency X event under
+    // normal use.  The old blocking read stalled the entire event loop for a
+    // full RTT on every non-drag motion, delaying processing of any other events
+    // queued behind it (EnterNotify, KeyPress, etc.).
+    xcb.xcb_discard_reply(wm.conn, xcb.xcb_query_pointer(wm.conn, wm.root).sequence);
 }
 
 // Window close

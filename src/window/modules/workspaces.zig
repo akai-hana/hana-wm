@@ -278,13 +278,17 @@ fn restoreWorkspaceWindows(wm: *WM, ws: *const Workspace) void {
 // make blocking round-trips inside the grab without any issue — the
 // restriction is client-to-client, not self-imposed.  getInputModelCached's
 // slow path (two blocking requests on a cache miss) is therefore safe here.
-fn applyPostSwitchFocus(wm: *WM, new_ws: u8, new_ws_obj: *const Workspace) void {
+//
+// `ptr_cookie` is pre-fired by executeSwitch before the server grab so that
+// the round-trip runs concurrently with hideWorkspaceWindows +
+// restoreWorkspaceWindows.  By the time we consume it here the reply is
+// already sitting in the receive buffer — zero additional wait.
+fn applyPostSwitchFocus(wm: *WM, new_ws: u8, new_ws_obj: *const Workspace, ptr_cookie: xcb.xcb_query_pointer_cookie_t) void {
     const s = getState().?;
 
     const focus_target: ?u32 = blk: {
-        const ptr = xcb.xcb_query_pointer_reply(
-            wm.conn, xcb.xcb_query_pointer(wm.conn, wm.root), null,
-        ) orelse break :blk firstNonMinimized(wm, new_ws_obj.windows.items());
+        const ptr = xcb.xcb_query_pointer_reply(wm.conn, ptr_cookie, null)
+            orelse break :blk firstNonMinimized(wm, new_ws_obj.windows.items());
         defer std.c.free(ptr);
 
         const child = ptr.*.child;
@@ -332,6 +336,20 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
 
     wm.suppress_focus_reason = .none;
 
+    // Pre-fire the pointer query before the server grab.
+    //
+    // hideWorkspaceWindows + restoreWorkspaceWindows queue many configure_window
+    // calls but perform no blocking round-trips themselves.  By the time
+    // applyPostSwitchFocus consumes the reply it has been in-flight for the
+    // entire duration of those operations and is already sitting in the receive
+    // buffer — the round-trip cost is fully hidden behind the switch work.
+    //
+    // Both requests (query_pointer and grab_server) are sent together in the
+    // same TCP segment on the first implicit flush, so grab_server is still
+    // the first request the server acts on from a multi-client correctness
+    // perspective (the server processes requests in sequence).
+    const ptr_cookie = xcb.xcb_query_pointer(wm.conn, wm.root);
+
     _ = xcb.xcb_grab_server(wm.conn);
 
     hideWorkspaceWindows(wm, &s.workspaces[old_ws]);
@@ -344,7 +362,7 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
         restoreWorkspaceWindows(wm, new_ws_obj);
     }
 
-    applyPostSwitchFocus(wm, new_ws, new_ws_obj);
+    applyPostSwitchFocus(wm, new_ws, new_ws_obj, ptr_cookie);
 
     bar.raiseBar();
     bar.redrawImmediate(wm);
