@@ -398,17 +398,12 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
     cfg.tiling.border_focused   = getColor(aesthetic_src, "border_focused",   0x5294E2);
     cfg.tiling.border_unfocused = getColor(aesthetic_src, "border_unfocused", 0x383C4A);
 
-    const master_section_opt = doc.getSection("tiling.layouts.master-stack");
-    const master_src         = master_section_opt orelse section;
-    const in_master_section  = master_section_opt != null;
+    const master_src = doc.getSection("tiling.layouts.master-stack") orelse section;
+    const dedicated  = master_src != section; // true when [tiling.layouts.master-stack] exists
 
-    cfg.tiling.master_count = get(u8, master_src, if (in_master_section) "count" else "master_count", 1, 1, null);
-
-    if (master_src.getString(if (in_master_section) "side" else "master_side")) |s|
-        cfg.tiling.master_side = defs.MasterSide.fromStringWithAlias(s) orelse .left;
-
-    cfg.tiling.master_width = master_src.getScalable(if (in_master_section) "width" else "master_width") orelse
-        parser.ScalableValue.percentage(50.0);
+    cfg.tiling.master_count = get(u8, master_src, if (dedicated) "count" else "master_count", 1, 1, null);
+    if (master_src.getString(if (dedicated) "side"  else "master_side"))  |s| cfg.tiling.master_side  = defs.MasterSide.fromStringWithAlias(s) orelse .left;
+    cfg.tiling.master_width = master_src.getScalable(if (dedicated) "width" else "master_width") orelse parser.ScalableValue.percentage(50.0);
 
     parseTilingVariations(doc, cfg);
 
@@ -473,20 +468,16 @@ fn parseIndicator(raw: []const u8) [3]u8 {
     return ind;
 }
 
-const KNOWN_LAYOUTS = [_][]const u8{
-    "master-stack", "master_stack", "master",
-    "monocle",
-    "grid",
-    "fibonacci",
-};
+const KNOWN_LAYOUT_SET = std.StaticStringMap(void).initComptime(.{
+    .{ "master-stack", {} }, .{ "master_stack", {} }, .{ "master", {} },
+    .{ "monocle", {} }, .{ "grid", {} }, .{ "fibonacci", {} },
+});
 
 /// Returns true if `name` (case-insensitive) is a recognised layout name.
 fn isKnownLayout(name: []const u8) bool {
     var buf: [32]u8 = undefined;
     if (name.len > buf.len) return false;
-    const lower = std.ascii.lowerString(&buf, name);
-    for (KNOWN_LAYOUTS) |kl| if (std.mem.eql(u8, lower, kl)) return true;
-    return false;
+    return KNOWN_LAYOUT_SET.has(std.ascii.lowerString(&buf, name));
 }
 
 /// Returns true if `s` looks like a workspace-number list: only digits, commas, spaces,
@@ -517,26 +508,19 @@ fn parseLayoutVariation(layout_name: []const u8, variation_str: []const u8) ?def
     if (layout_name.len > buf.len) return null;
     const lower_layout = std.ascii.lowerString(buf[0..layout_name.len], layout_name);
 
-    if (std.mem.eql(u8, lower_layout, "master-stack")) {
-        const v = std.meta.stringToEnum(defs.MasterVariation, variation_str) orelse {
-            debug.warn("Unknown master-stack variation '{s}' in layouts array, ignoring", .{variation_str});
-            return null;
-        };
-        return .{ .master = v };
-    }
-    if (std.mem.eql(u8, lower_layout, "monocle")) {
-        const v = std.meta.stringToEnum(defs.MonocleVariation, variation_str) orelse {
-            debug.warn("Unknown monocle variation '{s}' in layouts array, ignoring", .{variation_str});
-            return null;
-        };
-        return .{ .monocle = v };
-    }
-    if (std.mem.eql(u8, lower_layout, "grid")) {
-        const v = std.meta.stringToEnum(defs.GridVariation, variation_str) orelse {
-            debug.warn("Unknown grid variation '{s}' in layouts array, ignoring", .{variation_str});
-            return null;
-        };
-        return .{ .grid = v };
+    const typed_layouts = .{
+        .{ "master-stack", defs.MasterVariation,  "master"   },
+        .{ "monocle",      defs.MonocleVariation, "monocle"  },
+        .{ "grid",         defs.GridVariation,    "grid"     },
+    };
+    inline for (typed_layouts) |entry| {
+        if (std.mem.eql(u8, lower_layout, entry[0])) {
+            const v = std.meta.stringToEnum(entry[1], variation_str) orelse {
+                debug.warn("Unknown {s} variation '{s}' in layouts array, ignoring", .{ entry[0], variation_str });
+                return null;
+            };
+            return @unionInit(defs.LayoutVariationOverride, entry[2], v);
+        }
     }
     if (std.mem.eql(u8, lower_layout, "fibonacci")) {
         if (!std.mem.eql(u8, variation_str, "default"))
@@ -740,17 +724,13 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     }
 
     // indicator_focused / indicator_unfocused: if only one is set, the other mirrors it.
-    {
-        const raw_focused   = section.getString("indicator_focused");
-        const raw_unfocused = section.getString("indicator_unfocused");
-        if (raw_focused orelse raw_unfocused) |_| {
-            const resolved_focused   = raw_focused   orelse raw_unfocused.?;
-            const resolved_unfocused = raw_unfocused orelse raw_focused.?;
-            cfg.allocated_indicator_focused   = try allocator.dupe(u8, resolved_focused);
-            cfg.allocated_indicator_unfocused = try allocator.dupe(u8, resolved_unfocused);
-            cfg.bar.indicator_focused   = cfg.allocated_indicator_focused.?;
-            cfg.bar.indicator_unfocused = cfg.allocated_indicator_unfocused.?;
-        }
+    const raw_focused   = section.getString("indicator_focused");
+    const raw_unfocused = section.getString("indicator_unfocused");
+    if (raw_focused orelse raw_unfocused) |_| {
+        cfg.allocated_indicator_focused   = try allocator.dupe(u8, raw_focused   orelse raw_unfocused.?);
+        cfg.allocated_indicator_unfocused = try allocator.dupe(u8, raw_unfocused orelse raw_focused.?);
+        cfg.bar.indicator_focused   = cfg.allocated_indicator_focused.?;
+        cfg.bar.indicator_unfocused = cfg.allocated_indicator_unfocused.?;
     }
 
     // indicator_color (optional; null = inherit workspace fg)

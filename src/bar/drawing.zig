@@ -48,7 +48,7 @@ pub const DrawContext = struct {
     surface:      *c.cairo_surface_t,
     ctx:          *c.cairo_t,
     gc:           u32,
-    /// Separate GC used exclusively for the xcb_copy_area in present().
+    /// Separate GC used exclusively for the xcb_copy_area in flush().
     copy_gc:      u32,
     pango_layout: *c.PangoLayout,
 
@@ -213,18 +213,13 @@ pub const DrawContext = struct {
         debug.info("Loaded {} fonts with fallback support", .{font_names.len});
     }
 
-    inline fn colorToRGB(color: u32) struct { f64, f64, f64 } {
-        return .{
+    inline fn setColor(self: *DrawContext, color: u32) void {
+        if (self.last_color == color) return;
+        c.cairo_set_source_rgba(self.ctx,
             @as(f64, @floatFromInt((color >> 16) & 0xFF)) / 255.0,
             @as(f64, @floatFromInt((color >> 8)  & 0xFF)) / 255.0,
             @as(f64, @floatFromInt( color         & 0xFF)) / 255.0,
-        };
-    }
-
-    inline fn setColor(self: *DrawContext, color: u32) void {
-        if (self.last_color == color) return;
-        const r, const g, const b = colorToRGB(color);
-        c.cairo_set_source_rgba(self.ctx, r, g, b, 1.0);
+            1.0);
         self.last_color = color;
     }
 
@@ -239,19 +234,12 @@ pub const DrawContext = struct {
         c.pango_layout_set_text(self.pango_layout, text.ptr, @intCast(text.len));
     }
 
-    inline fn pangoToPixelsI16(pango_units: c_int) i16 {
-        return @intCast(@divTrunc(pango_units, c.PANGO_SCALE));
-    }
-
-    inline fn pangoBaseline(self: *DrawContext) f64 {
-        return @as(f64, @floatFromInt(c.pango_layout_get_baseline(self.pango_layout)))
-            / @as(f64, @floatFromInt(c.PANGO_SCALE));
-    }
-
-    // Iter 2: extracted from drawText and drawTextEllipsis to avoid duplicating
+    // Extracted from drawText and drawTextEllipsis to avoid duplicating
     // the identical cairo_move_to call in both functions.
     inline fn moveToTextBaseline(self: *DrawContext, x: u16, y: u16) void {
-        c.cairo_move_to(self.ctx, @floatFromInt(x), @as(f64, @floatFromInt(y)) - self.pangoBaseline());
+        const baseline = @as(f64, @floatFromInt(c.pango_layout_get_baseline(self.pango_layout)))
+            / @as(f64, @floatFromInt(c.PANGO_SCALE));
+        c.cairo_move_to(self.ctx, @floatFromInt(x), @as(f64, @floatFromInt(y)) - baseline);
     }
 
     pub fn clearTransparent(self: *DrawContext) void {
@@ -341,8 +329,8 @@ pub const DrawContext = struct {
         );
         defer c.pango_font_metrics_unref(metrics);
         const result = .{
-            pangoToPixelsI16(c.pango_font_metrics_get_ascent(metrics)),
-            pangoToPixelsI16(c.pango_font_metrics_get_descent(metrics)),
+            @as(i16, @intCast(@divTrunc(c.pango_font_metrics_get_ascent(metrics),  c.PANGO_SCALE))),
+            @as(i16, @intCast(@divTrunc(c.pango_font_metrics_get_descent(metrics), c.PANGO_SCALE))),
         };
         self.cached_metrics = .{ .ascent = result[0], .descent = result[1] };
         return result;
@@ -367,8 +355,7 @@ pub const DrawContext = struct {
 
     pub fn baselineY(self: *DrawContext, bar_height: u16) u16 {
         const asc, const desc = self.getMetrics();
-        const text_height     = asc + desc;
-        const top_pad: i32    = @max(0, @divTrunc(@as(i32, bar_height) - text_height, 2));
+        const top_pad: i32    = @max(0, @divTrunc(@as(i32, bar_height) - (asc + desc), 2));
         return @intCast(top_pad + asc);
     }
 

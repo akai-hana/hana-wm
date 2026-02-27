@@ -1,4 +1,4 @@
-//! Window dragging and resizing
+//! Window dragging and resizing via pointer button grabs.
 
 const defs   = @import("defs");
 const xcb    = defs.xcb;
@@ -8,9 +8,15 @@ const focus  = @import("focus");
 const tiling = @import("tiling");
 const bar    = @import("bar");
 
-/// Apply an i16 delta to a u16 dimension, floored at MIN_WINDOW_DIM.
+/// Apply an i16 delta to a u16 dimension, clamped to [MIN_WINDOW_DIM, u16_MAX].
+/// Without the upper clamp, base=65535 + delta=32767 = 98302 overflows u16 and
+/// panics in safe builds (Debug/ReleaseSafe).
 inline fn clampDim(base: u16, delta: i16) u16 {
-    return @intCast(@max(@as(i32, defs.MIN_WINDOW_DIM), @as(i32, base) + delta));
+    const std = @import("std");
+    return @intCast(@min(
+        @as(i32, std.math.maxInt(u16)),
+        @max(@as(i32, defs.MIN_WINDOW_DIM), @as(i32, base) + @as(i32, delta)),
+    ));
 }
 
 pub fn startDrag(wm: *WM, win: u32, button: u8, x: i16, y: i16) void {
@@ -54,6 +60,15 @@ pub fn updateDrag(wm: *WM, x: i16, y: i16) void {
             .width  = drag.start_win_width,
             .height = drag.start_win_height,
         },
+        // Resize is anchored to the window's top-left corner: the position is
+        // fixed while width and height grow with the drag delta.  This means
+        // dragging rightward/downward enlarges the window, while dragging
+        // leftward/upward shrinks it (clamped to MIN_WINDOW_DIM).
+        //
+        // Dragging from the left or top edge of the window has no resizing
+        // effect because the anchor does not move.  If anchor-from-nearest-
+        // corner behaviour is ever desired, compute the anchor at drag start
+        // by comparing the pointer position to the window centre.
         .resize => utils.Rect{
             .x      = drag.start_win_x,
             .y      = drag.start_win_y,

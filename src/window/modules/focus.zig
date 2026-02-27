@@ -1,4 +1,4 @@
-// Focus management
+//! Focus management — set, clear, and reason-aware focus routing.
 
 const std    = @import("std");
 const defs   = @import("defs");
@@ -38,9 +38,10 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     //
     // For all other reasons (click, command, destroyed, workspace_switch) a race
     // with destroy is possible, so we guard with a live attribute query.
-    const skip_mapped_check = reason == .mouse_enter or
-                              reason == .window_spawn or
-                              reason == .tiling_operation;
+    const skip_mapped_check = switch (reason) {
+        .mouse_enter, .window_spawn, .tiling_operation => true,
+        .mouse_click, .window_destroyed, .workspace_switch, .user_command => false,
+    };
     if (!skip_mapped_check and !isWindowMapped(wm.conn, win)) return;
 
     const input_model = utils.getInputModelCached(wm.conn, win);
