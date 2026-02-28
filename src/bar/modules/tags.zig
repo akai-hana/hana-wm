@@ -19,9 +19,14 @@ const static_numbers = blk: {
     break :blk nums;
 };
 
-var label_widths: [20]u16 = [_]u16{0} ** 20;
-var ws_width:     u16     = 0;
-var cache_valid:  bool    = false;
+var label_widths:      [20]u16 = [_]u16{0} ** 20;
+var ws_width:          u16     = 0;
+var cache_valid:       bool    = false;
+/// Cached horizontal offset of the indicator glyph within a workspace cell.
+/// Added to the cell's start_x at draw time. Constant for all cells.
+var cached_ind_x_off:  u16     = 0;
+/// Cached vertical top position of the indicator glyph. Constant for all cells.
+var cached_ind_y:      u16     = 0;
 
 inline fn getLabel(i: usize, config: defs.BarConfig) []const u8 {
     if (i < config.workspace_icons.items.len) return config.workspace_icons.items[i];
@@ -38,6 +43,17 @@ fn ensureCache(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16) vo
     for (&label_widths, 0..) |*w, i| w.* = dc.textWidth(getLabel(i, config));
     ws_width    = config.scaledWorkspaceWidth(height);
     cache_valid = true;
+
+    // Precompute the indicator glyph position within a cell. All geometry
+    // inputs (cell width, bar height, indicator size, location, padding) are
+    // constant between reloads, so the result is valid for the entire session
+    // until the next invalidate() + ensureCache() cycle.
+    const ind_size = config.scaledIndicatorSize(height);
+    const pos = indicatorPos(0, ws_width, height, ind_size, ind_size,
+        config.indicator_location, config.indicator_padding);
+    // pos.x is computed with cell_x = 0, so it is already the intra-cell offset.
+    cached_ind_x_off = pos.x;
+    cached_ind_y     = pos.y;
 }
 
 /// Computes the top-left pixel position of an indicator item within a workspace cell.
@@ -91,7 +107,6 @@ pub fn draw(
     if (ws_has_windows.len == 0) return start_x;
     ensureCache(dc, config, height);
     const ind_size = config.scaledIndicatorSize(height);
-    const loc      = config.indicator_location;
     var x = start_x;
 
     for (ws_has_windows, 0..) |has_windows, i| {
@@ -109,8 +124,8 @@ pub fn draw(
         if (has_windows) {
             const glyph = if (is_current) config.indicator_focused else config.indicator_unfocused;
             const color = config.indicator_color orelse fg;
-            const pos   = indicatorPos(x, ws_width, height, ind_size, ind_size, loc, config.indicator_padding);
-            try dc.drawTextSized(pos.x, pos.y, glyph, ind_size, color);
+            // Use the pre-cached intra-cell offset; avoids per-workspace float arithmetic.
+            try dc.drawTextSized(x + cached_ind_x_off, cached_ind_y, glyph, ind_size, color);
         }
 
         x += ws_width;

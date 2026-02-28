@@ -105,33 +105,33 @@ variation = "relaxed"
 enabled = true
 position = "bottom" # "top"/"bottom"; can be swapped on runtime
 
-# Font array
+# Font
 ## First value is the default font used
 ## Subsequent values render in characters not included by first value (ej. non-ASCII)
 fonts = [
     "FiraCode Nerd Font Propo Ret",
     "Noto Sans CJK JP", # to render japanese characters
 ]
+
 # Bar height
-## Auto-adapts to font size by default. Uncomment to set a fixed height instead:
-## TODO: Future enhancement: percentage values where 100% = auto-calculated size, 150% = 1.5x auto size.
+## Auto-adapts to font size by default.
 height = 3.5%
 
-segment_spacing = 5%
-
-# Font size as percentage of bar height (e.g., 16% = font takes up 16% of the bar's vertical space)
+## Font size covers a percentage of the bar's area according to its height
+## (e.g., 16% = font takes up 16% of the bar's vertical space)
 font_size = 72.5%
 indicator_size = 25%
 
 # Workspace labels/icons (1-N)
 icons = ["あ", "か", "い", "は", "な", "つ", "ん", "で"]
 
+segment_spacing = 5%
 indicator_padding = 37.5%
 
 #
 ## if neither is set
-# indicator_focused = ""
-# indicator_unfocused = ""
+# indicator_focused = "■"
+# indicator_unfocused = "□"
 indicator_location = "up-left"
 
 # Workspace width as percentage of base (100% = 40px, 150% = 60px, or set exact pixels)

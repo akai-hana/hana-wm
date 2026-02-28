@@ -90,12 +90,16 @@ const CURSOR_V_PAD: u16  = 2;
 // ── Module state ──────────────────────────────────────────────────────────────
 
 const DrunState = struct {
-    active:   bool                     = false,
-    buf:      [MAX_INPUT]u8            = undefined,
-    len:      usize                    = 0,
+    active:          bool                     = false,
+    buf:             [MAX_INPUT]u8            = undefined,
+    len:             usize                    = 0,
     /// Byte offset of the text-insertion point within buf[0..len].
-    cursor:   usize                    = 0,
-    key_syms: ?*xcb_key_symbols_t      = null,
+    cursor:          usize                    = 0,
+    key_syms:        ?*xcb_key_symbols_t      = null,
+    /// Cached pixel width of the prompt string. Measured once per activation
+    /// (on the first drawActive call) and reused for all subsequent keystrokes.
+    /// Reset to null on deactivate so a font reload between sessions re-measures.
+    cached_prompt_w: ?u16                     = null,
 };
 
 var g: DrunState = .{};
@@ -217,14 +221,15 @@ fn activate(wm: *defs.WM) void {
         xcb.XCB_GRAB_MODE_ASYNC,
         xcb.XCB_GRAB_MODE_ASYNC,
     );
-    if (xcb.xcb_grab_keyboard_reply(wm.conn, cookie, null)) |reply| {
-        std.c.free(reply);
-    }
+    // The grab either succeeds or it doesn't; we proceed the same way either
+    // way, so there's no point blocking for the status reply.
+    xcb.xcb_discard_reply(wm.conn, cookie.sequence);
     _ = xcb.xcb_flush(wm.conn);
 }
 
 fn deactivate(wm: *defs.WM) void {
-    g.active = false;
+    g.active          = false;
+    g.cached_prompt_w = null;
     _ = xcb.xcb_ungrab_keyboard(wm.conn, xcb.XCB_CURRENT_TIME);
     _ = xcb.xcb_flush(wm.conn);
 }
@@ -324,7 +329,14 @@ fn drawActive(
     const max_text_px  = end_x -| pad -| text_start_x; // usable pixel width
 
     // ── Measure sub-strings ───────────────────────────────────────────────────
-    const prompt_w = dc.textWidth(prompt);
+    // The prompt string is constant for the lifetime of an activation; cache its
+    // width after the first measurement so subsequent keystrokes skip one
+    // pango_layout_set_text + pango_layout_get_pixel_size round-trip.
+    const prompt_w: u16 = g.cached_prompt_w orelse blk: {
+        const w = dc.textWidth(prompt);
+        g.cached_prompt_w = w;
+        break :blk w;
+    };
 
     const pre_text  = g.buf[0..g.cursor];
     const cur_text  = if (g.cursor < g.len) g.buf[g.cursor .. g.cursor + 1] else " ";
