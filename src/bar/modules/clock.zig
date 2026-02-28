@@ -59,12 +59,15 @@ pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start
     return dc.drawSegment(start_x, height, time_str, config.scaledSegmentPadding(height), config.bg, config.fg);
 }
 
-// localtime() is tried first; if it returns null we fall back to inline UTC arithmetic.
+// localtime_r() is tried first; if it returns null we fall back to inline UTC arithmetic.
 // Parameter is plain i64 seconds since the epoch — derived from std.time.nanoTimestamp()
 // by the callers above.
+// localtime_r is POSIX-guaranteed reentrant (output goes into caller-supplied tm_buf),
+// making this function safe to call from the bar render thread.
 fn formatTime(buf: []u8, sec: i64) ![]const u8 {
     var raw_sec: c.time_t = @intCast(sec);
-    if (c.localtime(&raw_sec)) |local_ts| {
+    var tm_buf: c.struct_tm = undefined;
+    if (c.localtime_r(&raw_sec, &tm_buf)) |local_ts| {
         return try std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{
             @as(u32, @intCast(local_ts.*.tm_year + 1900)),
             @as(u32, @intCast(local_ts.*.tm_mon  + 1)),
@@ -75,7 +78,7 @@ fn formatTime(buf: []u8, sec: i64) ![]const u8 {
         });
     }
 
-    // UTC fallback — localtime() returned null (timezone data unavailable).
+    // UTC fallback — localtime_r() returned null (timezone data unavailable).
     const epoch_day = @divFloor(sec, std.time.s_per_day);
     const day_sec   = @mod(sec, std.time.s_per_day);
     const civil_day = std.time.epoch.EpochDay{ .day = @intCast(epoch_day) };

@@ -140,11 +140,21 @@ fn drawSegmentedTitles(
     const net_atom = atoms.net_wm_name;
     const utf_type = atoms.utf8Type();
 
-    // Phase 1: fire all _NET_WM_NAME cookies without waiting.
-    var net_cookies: [MAX_WINS]xcb.xcb_get_property_cookie_t = undefined;
-    if (net_atom != 0) {
-        for (win_items[0..n_wins], 0..) |win, i| {
+    // Phase 1: fire all _NET_WM_NAME cookies AND geometry cookies without waiting.
+    // Both sets are independent requests; sending them together means the server
+    // can answer all of them in a single round-trip.  By the time Phase 2 and
+    // Phase 3 finish collecting title replies, the geometry replies are already
+    // sitting in the receive buffer — zero additional wait at consumption time.
+    var net_cookies:  [MAX_WINS]xcb.xcb_get_property_cookie_t = undefined;
+    var geom_cookies: [MAX_WINS]xcb.xcb_get_geometry_cookie_t = undefined;
+    var needs_geom:   [MAX_WINS]bool                          = @splat(false);
+
+    for (win_items[0..n_wins], 0..) |win, i| {
+        if (net_atom != 0)
             net_cookies[i] = xcb.xcb_get_property(conn, 0, win, net_atom, utf_type, 0, 8192);
+        if (!isMinimizedInSnap(minimized, win)) {
+            geom_cookies[i] = xcb.xcb_get_geometry(conn, win);
+            needs_geom[i]   = true;
         }
     }
 
@@ -184,15 +194,22 @@ fn drawSegmentedTitles(
     }
     defer for (titles[0..n_wins]) |t| if (t) |s| allocator.free(s);
 
-    // Build WindowInfo list. Use live XCB geometry query (the bar thread cannot
-    // safely read the tiling geom cache while the main thread may be writing it).
+    // Build WindowInfo list. Geometry replies were pre-fired in Phase 1 and are
+    // already buffered — xcb_get_geometry_reply returns immediately from cache.
     var infos_buf: [MAX_WINS]WindowInfo = undefined;
     var n_infos: usize = 0;
 
     for (win_items[0..n_wins], 0..) |win, i| {
-        const is_min = isMinimizedInSnap(minimized, win);
-        const geom: utils.Rect = if (!is_min) blk: {
-            break :blk utils.getGeometry(conn, win) orelse continue;
+        const is_min = !needs_geom[i];
+        const geom: utils.Rect = if (needs_geom[i]) blk: {
+            const r = xcb.xcb_get_geometry_reply(conn, geom_cookies[i], null) orelse continue;
+            defer std.c.free(r);
+            break :blk utils.Rect{
+                .x      = @intCast(r.*.x),
+                .y      = @intCast(r.*.y),
+                .width  = r.*.width,
+                .height = r.*.height,
+            };
         } else .{ .x = std.math.maxInt(i16), .y = std.math.maxInt(i16), .width = 0, .height = 0 };
 
         infos_buf[n_infos] = .{
@@ -211,7 +228,7 @@ fn drawSegmentedTitles(
     std.mem.sort(WindowInfo, window_infos, {}, compareWindows);
 
     const num_windows: u32 = @intCast(window_infos.len);
-    if (num_windows == 0) return;
+    // n_infos > 0 is guaranteed above, so window_infos.len > 0 here.
 
     for (window_infos, 0..) |info, i| {
         // Pixel-perfect tiling: segment i spans [i*W/n, (i+1)*W/n).

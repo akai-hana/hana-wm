@@ -121,17 +121,16 @@ pub const DrawContext = struct {
             .transparency = transparency,
         };
 
-        // Drawing GC — targets the pixmap for fillRect calls.
+        // Fire both GC-create requests before blocking on either reply,
+        // so both are in-flight in the same TCP segment.
         dc.gc = defs.xcb.xcb_generate_id(conn);
-        const gc_cookie = defs.xcb.xcb_create_gc_checked(conn, dc.gc, pixmap, 0, null);
+        dc.copy_gc = defs.xcb.xcb_generate_id(conn);
+        const gc_cookie      = defs.xcb.xcb_create_gc_checked(conn, dc.gc,      pixmap, 0, null);
+        const copy_gc_cookie = defs.xcb.xcb_create_gc_checked(conn, dc.copy_gc, window, 0, null);
         if (defs.xcb.xcb_request_check(conn, gc_cookie)) |err| {
             std.c.free(err);
             return error.GCCreationFailed;
         }
-
-        // Copy GC — targets the window, used only in flush().
-        dc.copy_gc = defs.xcb.xcb_generate_id(conn);
-        const copy_gc_cookie = defs.xcb.xcb_create_gc_checked(conn, dc.copy_gc, window, 0, null);
         if (defs.xcb.xcb_request_check(conn, copy_gc_cookie)) |err| {
             std.c.free(err);
             return error.GCCreationFailed;

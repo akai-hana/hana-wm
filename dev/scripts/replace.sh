@@ -105,4 +105,4 @@ for f in "$FILES_DIR"/* "$FILES_DIR"/.*; do
   write_to_codebase "$f" "$dest"
 done
 
-zig build -freference-trace=20 --color on 2>&1 | sed -E '/failed command:/,/Build Summary:/d'
+zig build --color on --error-style minimal -freference-trace=5
