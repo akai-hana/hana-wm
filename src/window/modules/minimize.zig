@@ -34,12 +34,9 @@ inline fn getMinState(wm: *WM) ?*defs.MinimizeState {
 }
 
 /// Ordered removal of `win` from `list`. No-op if absent.
-fn removeFromList(list: *std.ArrayListUnmanaged(u32), win: u32) void {
-    for (list.items, 0..) |w, i| {
-        if (w != win) continue;
-        _ = list.orderedRemove(i);
-        return;
-    }
+inline fn removeFromList(list: *std.ArrayListUnmanaged(u32), win: u32) void {
+    const i = std.mem.indexOfScalar(u32, list.items, win) orelse return;
+    _ = list.orderedRemove(i);
 }
 
 pub fn init(wm: *WM) void {
@@ -59,20 +56,32 @@ pub fn init(wm: *WM) void {
     };
 }
 
-pub fn isMinimized(wm: *const WM, win: u32) bool {
+pub inline fn isMinimized(wm: *const WM, win: u32) bool {
     const s = if (wm.minimize) |*m| m else return false;
     return s.minimized_info.contains(win);
 }
 
 fn trackMinimized(s: *defs.MinimizeState, ws_mask: u64, win: u32, saved_fs: ?defs.WindowGeometry) bool {
-    // Add to every workspace in the mask's per-workspace ordered list.
-    var remaining = ws_mask;
-    while (remaining != 0) {
-        const idx: u8 = @intCast(@ctz(remaining));
-        remaining &= remaining - 1;
+    // Pre-allocate capacity for every affected per-workspace list before
+    // mutating any of them. If any allocation fails, no lists have been
+    // touched yet so the rollback is a no-op and returning false is clean.
+    var rem = ws_mask;
+    while (rem != 0) {
+        const idx: u8 = @intCast(@ctz(rem));
+        rem &= rem - 1;
         if (idx < s.per_workspace.len)
-            s.per_workspace[idx].append(s.allocator, win) catch {};
+            s.per_workspace[idx].ensureUnusedCapacity(s.allocator, 1) catch return false;
     }
+
+    // Capacity is guaranteed; these appends cannot fail.
+    rem = ws_mask;
+    while (rem != 0) {
+        const idx: u8 = @intCast(@ctz(rem));
+        rem &= rem - 1;
+        if (idx < s.per_workspace.len)
+            s.per_workspace[idx].appendAssumeCapacity(win);
+    }
+
     s.minimized_info.put(win, .{ .saved_fs = saved_fs, .workspace_mask = ws_mask }) catch {
         // Rollback: remove from all per-workspace lists.
         var rem2 = ws_mask;
@@ -95,21 +104,16 @@ inline fn hideWindow(wm: *WM, win: u32) void {
 }
 
 pub fn focusBestAvailable(wm: *WM) void {
-    const ws = workspaces.getCurrentWorkspaceObject() orelse {
-        focus.clearFocus(wm);
-        return;
-    };
-    if (workspaces.firstNonMinimized(wm, ws.windows.items())) |win| {
-        // Use .tiling_operation rather than .window_destroyed:
-        //  - tiling_operation skips the blocking xcb_get_window_attributes
-        //    mapped-check (windows in the tiling set are guaranteed mapped).
-        //  - window_destroyed would trigger the check unnecessarily and also
-        //    set the wrong suppress_focus_reason, potentially interfering with
-        //    crossing-event suppression logic.
-        focus.setFocus(wm, win, .tiling_operation);
-    } else {
-        focus.clearFocus(wm);
+    if (workspaces.getCurrentWorkspaceObject()) |ws| {
+        // Use .tiling_operation: skips the blocking mapped-check since windows
+        // in the tiling set are guaranteed mapped, and avoids setting the wrong
+        // suppress_focus_reason for crossing-event suppression.
+        if (workspaces.firstNonMinimized(wm, ws.windows.items())) |win| {
+            focus.setFocus(wm, win, .tiling_operation);
+            return;
+        }
     }
+    focus.clearFocus(wm);
 }
 
 pub fn minimizeWindow(wm: *WM) void {
@@ -166,17 +170,14 @@ pub fn minimizeWindow(wm: *WM) void {
     utils.flush(wm.conn);
 }
 
-fn restoreWindow(wm: *WM, win: u32) void {
-    const s = getMinState(wm) orelse return;
-
-    const entry = s.minimized_info.fetchRemove(win) orelse return;
-
-    if (entry.value.saved_fs) |geom| {
-        // enterFullscreen does not set keyboard focus on its own; call setFocus
-        // first so grabButtons, xcb_set_input_focus, and tiling border state are
-        // all applied correctly before the window is raised to fullscreen size.
-        // .window_spawn skips the unnecessary isWindowMapped round-trip (the
-        // window is known-mapped: it was just offscreen, not unmapped).
+// Inner restore: called with an already-fetched entry to avoid a second
+// hash probe when the caller (unminimize) already holds the entry value.
+fn restoreWindowImpl(wm: *WM, win: u32, saved_fs: ?defs.WindowGeometry) void {
+    if (saved_fs) |geom| {
+        // setFocus first so grabButtons, xcb_set_input_focus, and tiling border
+        // state are all applied correctly before the window is raised to fullscreen.
+        // .window_spawn skips the isWindowMapped round-trip (window is mapped,
+        // just offscreen).
         focus.setFocus(wm, win, .window_spawn);
         fullscreen.enterFullscreen(wm, win, geom);
         bar.markDirty();
@@ -203,6 +204,12 @@ fn restoreWindow(wm: *WM, win: u32) void {
     utils.flush(wm.conn);
 }
 
+inline fn restoreWindow(wm: *WM, win: u32) void {
+    const s = getMinState(wm) orelse return;
+    const entry = s.minimized_info.fetchRemove(win) orelse return;
+    restoreWindowImpl(wm, win, entry.value.saved_fs);
+}
+
 pub const RestoreOrder = enum { lifo, fifo };
 
 pub fn unminimize(wm: *WM, order: RestoreOrder) void {
@@ -214,16 +221,16 @@ pub fn unminimize(wm: *WM, order: RestoreOrder) void {
         .lifo => list.pop().?,
         .fifo => list.orderedRemove(0),
     };
-    // Also remove from all other per-workspace lists this window was in.
-    if (s.minimized_info.get(win)) |entry| {
-        var mask = entry.workspace_mask & ~(@as(u64, 1) << @intCast(ws_idx));
-        while (mask != 0) {
-            const idx: u8 = @intCast(@ctz(mask));
-            mask &= mask - 1;
-            if (idx < s.per_workspace.len) removeFromList(&s.per_workspace[idx], win);
-        }
+    // fetchRemove here covers both the per-workspace cleanup below and the
+    // restoration — one hash probe instead of get + fetchRemove.
+    const entry = s.minimized_info.fetchRemove(win) orelse return;
+    var mask = entry.value.workspace_mask & ~(@as(u64, 1) << @intCast(ws_idx));
+    while (mask != 0) {
+        const idx: u8 = @intCast(@ctz(mask));
+        mask &= mask - 1;
+        if (idx < s.per_workspace.len) removeFromList(&s.per_workspace[idx], win);
     }
-    restoreWindow(wm, win);
+    restoreWindowImpl(wm, win, entry.value.saved_fs);
 }
 
 pub fn unminimizeAll(wm: *WM) void {
@@ -244,9 +251,7 @@ pub fn unminimizeAll(wm: *WM) void {
     list.clearRetainingCapacity();
 
     // In-place partition: plain (non-fullscreen) windows to the front, fullscreen
-    // windows to the back.  Single pass over the already-allocated snapshot slice —
-    // no extra allocation and no truncation (the previous fixed [64]/[128] buffers
-    // silently dropped any windows beyond those capacities).
+    // windows to the back. Single pass over the already-allocated snapshot slice.
     var plain_count: usize = 0;
     for (snapshot.items, 0..) |win, i| {
         const is_fs = if (s.minimized_info.get(win)) |e| e.saved_fs != null else false;
@@ -278,8 +283,6 @@ pub fn unminimizeAll(wm: *WM) void {
             }
         }
 
-        // Focus the most-recently-minimized plain window (last in snapshot order
-        // that ended up in the plain partition).
         focus.setFocus(wm, plain_wins[plain_wins.len - 1], .window_spawn);
 
         bar.redrawImmediate(wm);
@@ -289,7 +292,6 @@ pub fn unminimizeAll(wm: *WM) void {
 
     // Per-window path: fullscreen windows each need their own grab because
     // re-entering fullscreen involves bar hide + sibling offscreen + raise.
-    // This case is rare enough that N separate grabs is acceptable.
     for (fs_wins) |win| restoreWindow(wm, win);
 }
 
@@ -314,7 +316,6 @@ pub fn moveToWorkspace(wm: *WM, win: u32, new_ws: u8) void {
     const old_mask = entry.workspace_mask;
     const new_bit: u64 = @as(u64, 1) << @intCast(new_ws);
 
-    // Remove from all old workspaces, add to new one.
     var rem = old_mask;
     while (rem != 0) {
         const idx: u8 = @intCast(@ctz(rem));

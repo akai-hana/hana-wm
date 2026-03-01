@@ -360,6 +360,8 @@ fn executeShellCommand(wm: *WM, cmd: []const u8) !void {
             window.registerSpawn(wm, ws, pid_u32);
         }
     } else {
+        closePipe(exec_pipe);
+        closePipe(pid_pipe);
         debug.err("First fork failed for command: {s}", .{cmd});
         return error.ForkFailed;
     }

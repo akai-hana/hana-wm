@@ -12,24 +12,12 @@ const constants  = @import("constants");
 const debug      = @import("debug");
 const minimize   = @import("minimize");
 
-// Fetch the current geometry of `win`.
-//
-// Fast path: tiled windows always have a valid rect in the geometry cache,
-// written by the last retile. Reading from the cache avoids the blocking
-// xcb_get_geometry round-trip that would otherwise occur for every tiled
-// window that enters fullscreen.
-//
-// Slow path (floating windows, cache miss): one blocking round-trip.
-// Falls back to a centered quarter-screen default if the reply fails or the
-// window is currently offscreen.
+// Fast path: tiled windows have a valid rect in the geometry cache; reading
+// from it avoids the blocking xcb_get_geometry round-trip.
+// Slow path (floating/cache miss): one blocking round-trip, falling back to
+// a centered quarter-screen default if the reply fails or the window is offscreen.
 fn fetchWindowGeom(wm: *WM, win: u32) defs.WindowGeometry {
-    // Try the tiling geometry cache first.  getCachedGeom returns null for
-    // fullscreen windows (their rect is zeroed on enter) and floating windows
-    // (never tiled), so the fast path is exclusive to normally-tiled windows.
     if (tiling.getCachedGeom(win)) |rect| {
-        // The cached rect holds the inner content geometry (without border).
-        // The border_width is stored in tiling.State; include it so the saved
-        // geometry round-trips correctly on fullscreen exit.
         const bw: u16 = if (tiling.getState()) |ts| ts.border_width else 0;
         return .{
             .x            = rect.x,
@@ -40,10 +28,7 @@ fn fetchWindowGeom(wm: *WM, win: u32) defs.WindowGeometry {
         };
     }
 
-    // Slow path: floating or un-cached window — one blocking round-trip.
     const default: defs.WindowGeometry = .{
-        // Divide via i32 to avoid overflow: i16 saturates at 32767px, which is
-        // within the range of a large multi-monitor or HiDPI virtual desktop.
         .x            = @intCast(@divTrunc(@as(i32, wm.screen.width_in_pixels),  4)),
         .y            = @intCast(@divTrunc(@as(i32, wm.screen.height_in_pixels), 4)),
         .width        = @divTrunc(wm.screen.width_in_pixels,  2),
@@ -67,8 +52,7 @@ fn fetchWindowGeom(wm: *WM, win: u32) defs.WindowGeometry {
     };
 }
 
-// Atomic commit helpers: only queue XCB requests, never grab or flush.
-// The caller owns the grab/ungrab/flush envelope so that paired
+// Only queue XCB requests; the caller owns grab/ungrab/flush so that paired
 // exit+enter transitions can share a single grab with no intermediate frame.
 
 fn enterFullscreenCommit(wm: *WM, win: u32, ws: u8, geom: defs.WindowGeometry) void {
@@ -80,7 +64,6 @@ fn enterFullscreenCommit(wm: *WM, win: u32, ws: u8, geom: defs.WindowGeometry) v
         return;
     };
 
-    // Push siblings offscreen and evict their geometry cache entries.
     if (workspaces.getCurrentWorkspaceObject()) |ws_obj| {
         for (ws_obj.windows.items()) |other_win| {
             if (other_win == win) continue;
@@ -130,13 +113,6 @@ fn exitFullscreenCommit(wm: *WM, win: u32, ws: u8) void {
             for (ws_obj.windows.items()) |other_win| {
                 if (other_win == win) continue;
                 if (minimize.isMinimized(wm, other_win)) continue;
-                // NOTE: all floating siblings are moved to the same default
-                // position here because we do not save per-window floating
-                // geometry before fullscreen entry.  If two or more floating
-                // windows were visible before fullscreen they will stack on
-                // top of each other on exit.  Saving each window's pre-entry
-                // x/y (similar to MinimizedEntry.saved_fs) would eliminate
-                // this, at the cost of more bookkeeping in enterFullscreenCommit.
                 _ = xcb.xcb_configure_window(wm.conn, other_win,
                     xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
                     &[_]u32{ pos.x, pos.y });
@@ -149,13 +125,6 @@ fn exitFullscreenCommit(wm: *WM, win: u32, ws: u8) void {
             if (wm.focused_window == win) wm.config.tiling.border_focused
             else wm.config.tiling.border_unfocused,
         });
-}
-
-fn exitFullscreen(wm: *WM, win: u32, ws: u8) void {
-    _ = xcb.xcb_grab_server(wm.conn);
-    exitFullscreenCommit(wm, win, ws);
-    _ = xcb.xcb_ungrab_server(wm.conn);
-    utils.flush(wm.conn);
 }
 
 /// Enter fullscreen for `win` on the current workspace.
@@ -177,7 +146,10 @@ pub fn toggleFullscreen(wm: *WM) void {
 
     if (wm.fullscreen.getForWorkspace(current_ws)) |fs_info| {
         if (fs_info.window == win) {
-            exitFullscreen(wm, win, current_ws);
+            _ = xcb.xcb_grab_server(wm.conn);
+            exitFullscreenCommit(wm, win, current_ws);
+            _ = xcb.xcb_ungrab_server(wm.conn);
+            utils.flush(wm.conn);
         } else {
             // Switching fullscreen from one window to another: share a single grab.
             const geom = fetchWindowGeom(wm, win);

@@ -7,8 +7,26 @@ const defs    = @import("defs");
 const drawing = @import("drawing");
 const tiling  = @import("tiling");
 
+pub fn getIndicator(s: *const tiling.State) []const u8 {
+    return switch (s.layout) {
+        .master => switch (s.layout_variations.master) {
+            .lifo => "[N]",
+            .fifo => "=N=",
+        },
+        .monocle => switch (s.layout_variations.monocle) {
+            .gapless => "<->",
+            .gaps    => ">-<",
+        },
+        .grid => switch (s.layout_variations.grid) {
+            .rigid   => "[#]",
+            .relaxed => "[~]",
+        },
+        .fibonacci => &s.fibonacci_indicator,
+    };
+}
+
 pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start_x: u16) !u16 {
     const t_state = tiling.getState() orelse return start_x;
-    const indicator = tiling.getVariationIndicator(t_state);
+    const indicator = getIndicator(t_state);
     return dc.drawSegment(start_x, height, indicator, config.scaledSegmentPadding(height), config.bg, config.fg);
 }

@@ -2,7 +2,6 @@
 //! Windows spiral counter-clockwise: right, down, left, up, repeat.
 
 const defs    = @import("defs");
-const xcb     = @import("defs").xcb;
 const utils   = @import("utils");
 const layouts = @import("layouts");
 const tiling  = @import("tiling");

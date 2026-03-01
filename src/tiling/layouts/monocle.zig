@@ -20,18 +20,19 @@ pub fn tileWithOffset(ctx: *const layouts.LayoutCtx, state: *State, windows: []c
     // when brought to the top, keeping cost O(1).
     const top_win = windows[windows.len - 1];
 
+    const border2 = border * 2;
     const rect: utils.Rect = switch (state.layout_variations.monocle) {
         .gapless => .{
             .x      = 0,
             .y      = @intCast(y_offset),
-            .width  = if (screen_w > border * 2) screen_w - border * 2 else defs.MIN_WINDOW_DIM,
-            .height = if (screen_h > border * 2) screen_h - border * 2 else defs.MIN_WINDOW_DIM,
+            .width  = if (screen_w > border2) screen_w - border2 else defs.MIN_WINDOW_DIM,
+            .height = if (screen_h > border2) screen_h - border2 else defs.MIN_WINDOW_DIM,
         },
         .gaps => .{
             .x      = @intCast(gap),
             .y      = @intCast(y_offset +| gap),
-            .width  = if (screen_w > gap * 2 + border * 2) screen_w - gap * 2 - border * 2 else defs.MIN_WINDOW_DIM,
-            .height = if (screen_h > gap * 2 + border * 2) screen_h - gap * 2 - border * 2 else defs.MIN_WINDOW_DIM,
+            .width  = if (screen_w > gap * 2 + border2) screen_w - gap * 2 - border2 else defs.MIN_WINDOW_DIM,
+            .height = if (screen_h > gap * 2 + border2) screen_h - gap * 2 - border2 else defs.MIN_WINDOW_DIM,
         },
     };
 

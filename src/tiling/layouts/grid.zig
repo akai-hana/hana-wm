@@ -50,7 +50,7 @@ pub fn tileWithOffset(ctx: *const layouts.LayoutCtx, state: *State, windows: []c
                     // Last window in a partial row: expand to the right margin.
                     const x_start    = m.gap +| col *| cell_spacing_w;
                     const available  = screen_w -| x_start -| m.gap -| border_margin;
-                    break :blk if (available > 0) @max(available, defs.MIN_WINDOW_DIM) else defs.MIN_WINDOW_DIM;
+                    break :blk @max(available, defs.MIN_WINDOW_DIM);
                 }
                 break :blk win_w;
             },

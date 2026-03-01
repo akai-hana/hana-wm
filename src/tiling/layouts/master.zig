@@ -120,7 +120,7 @@ fn tileStackOverflow(ctx: *const layouts.LayoutCtx, windows: []const u32, x: u16
         const cols_in_row: u16 = (remaining + max_fit - 1) / max_fit;
         if (cols_in_row == 0) break;
 
-        const gaps_in_row = m.gap / 2 + m.gap + m.gap * (cols_in_row - 1);
+        const gaps_in_row = m.gap / 2 + m.gap * cols_in_row;
         const row_total_w = if (w > gaps_in_row) w - gaps_in_row else cols_in_row * defs.MIN_WINDOW_DIM;
         const row_col_w   = row_total_w / cols_in_row;
         const row_inner_w = if (row_col_w > 2 * m.border)
@@ -131,9 +131,9 @@ fn tileStackOverflow(ctx: *const layouts.LayoutCtx, windows: []const u32, x: u16
         const y_pos = windowY(row, max_fit, s_avail, y_offset, m);
         const row_h  = windowHeight(row, max_fit, s_avail);
 
-        var col: u16 = 0;
         var win_idx: u16 = row;
         while (win_idx < s_count) : (win_idx += max_fit) {
+            const col: u16 = (win_idx - row) / max_fit;
             const rect = utils.Rect{
                 .x      = @intCast(x +| m.gap / 2 +| col *| (row_col_w +| m.gap)),
                 .y      = @intCast(y_pos),
@@ -141,7 +141,6 @@ fn tileStackOverflow(ctx: *const layouts.LayoutCtx, windows: []const u32, x: u16
                 .height = row_h,
             };
             layouts.configureSafe(ctx, windows[win_idx], rect);
-            col += 1;
         }
     }
 }

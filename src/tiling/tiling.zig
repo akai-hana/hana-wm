@@ -52,10 +52,10 @@ const LAYOUT_CYCLE: []const Layout = blk: {
 };
 
 /// Returns the first layout available at build time (fallback default).
-pub fn defaultLayout() Layout { return LAYOUT_CYCLE[0]; }
+pub inline fn defaultLayout() Layout { return LAYOUT_CYCLE[0]; }
 
 /// True when the module file for `layout` was present at build time.
-pub fn isLayoutAvailable(layout: Layout) bool {
+pub inline fn isLayoutAvailable(layout: Layout) bool {
     return switch (layout) {
         .master    => layout_flags.has_master,
         .monocle   => layout_flags.has_monocle,
@@ -68,7 +68,7 @@ pub fn isLayoutAvailable(layout: Layout) bool {
 // The list is at most 4 elements long; linear scan is intentional and fine.
 // If `current` names a layout whose file was removed (not in LAYOUT_CYCLE),
 // we jump to the first available entry.
-fn stepCycle(current: Layout, comptime forward: bool) Layout {
+inline fn stepCycle(current: Layout, comptime forward: bool) Layout {
     for (LAYOUT_CYCLE, 0..) |l, i| {
         if (l == current) return LAYOUT_CYCLE[
             if (forward) (i + 1) % LAYOUT_CYCLE.len
@@ -153,7 +153,7 @@ pub const State = struct {
 
 var g_state: ?State = null;
 
-pub fn getState() ?*State { return if (g_state) |*s| s else null; }
+pub inline fn getState() ?*State { return if (g_state) |*s| s else null; }
 
 // Config 
 
@@ -321,7 +321,7 @@ pub fn saveWindowGeom(window_id: u32, rect: utils.Rect) void {
 
 /// Return the cached geometry for any window (tiled or floating).
 /// Returns null when no entry exists or the entry was invalidated (zeroed rect).
-pub fn getWindowGeom(window_id: u32) ?utils.Rect {
+pub inline fn getWindowGeom(window_id: u32) ?utils.Rect {
     const s = getState() orelse return null;
     const wd = s.cache.get(window_id) orelse return null;
     if (wd.rect.width == 0 and wd.rect.height == 0) return null;
@@ -343,13 +343,13 @@ pub fn invalidateGeomCache(window_id: u32) void {
 /// Clear the workspace-valid bit for `ws_idx` so the next restoreWorkspaceGeom
 /// for that workspace triggers a full retile. Used when a window's tag changes
 /// for an inactive workspace without touching the current one.
-pub fn invalidateWsGeomBit(ws_idx: u8) void {
+pub inline fn invalidateWsGeomBit(ws_idx: u8) void {
     const s = getState() orelse return;
     if (ws_idx < 64) s.ws_geom_valid &= ~(@as(u64, 1) << @intCast(ws_idx));
 }
 
 /// Mark tiling dirty without immediately retriling.
-pub fn dirty() void {
+pub inline fn dirty() void {
     const s = getState() orelse return;
     s.dirty = true;
 }
@@ -384,8 +384,8 @@ pub fn restoreWorkspaceGeom(wm: *WM) bool {
         rects[i] = wd.rect;
     }
 
-    for (ws_windows, 0..) |win, i| {
-        utils.configureWindow(wm.conn, win, rects[i]);
+    for (ws_windows, rects[0..ws_windows.len]) |win, rect| {
+        utils.configureWindow(wm.conn, win, rect);
     }
     updateBorders(s, wm, ws_windows);
     return true;
@@ -398,11 +398,8 @@ pub inline fn isWindowTiled(window_id: u32) bool {
 
 // Zero-cost cache lookup for drag.zig — avoids an X round-trip for tiled windows.
 // Returns null for fullscreen windows or after an explicit invalidate.
-pub fn getCachedGeom(window_id: u32) ?utils.Rect {
-    const s = getState() orelse return null;
-    const wd = s.cache.get(window_id) orelse return null;
-    if (wd.rect.width == 0 and wd.rect.height == 0) return null;
-    return wd.rect;
+pub inline fn getCachedGeom(window_id: u32) ?utils.Rect {
+    return getWindowGeom(window_id);
 }
 
 // Layout dispatch 
@@ -418,7 +415,7 @@ fn dispatchLayout(layout: Layout, ctx: *const layouts.LayoutCtx, s: *State, wins
 
 // Screen area 
 
-fn calculateScreenArea(wm: *WM) utils.Rect {
+inline fn calculateScreenArea(wm: *WM) utils.Rect {
     const bar_height: u16 = if (bar.isVisible()) bar.getBarHeight() else 0;
     const bar_at_bottom   = wm.config.bar.vertical_position == .bottom;
     return .{
@@ -598,7 +595,7 @@ fn sendBorderColor(s: *State, conn: *xcb.xcb_connection_t, win: u32, color: u32)
     _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
 }
 
-fn updateBorders(s: *State, wm: *WM, ws_windows: []const u32) void {
+inline fn updateBorders(s: *State, wm: *WM, ws_windows: []const u32) void {
     for (ws_windows) |win| sendBorderColor(s, wm.conn, win, s.borderColor(wm, win));
 }
 
@@ -700,7 +697,7 @@ pub fn syncLayoutFromWorkspace(ws: *const workspaces.Workspace) void {
     }
 }
 
-fn saveLayoutToCurrentWorkspace(layout: Layout) void {
+inline fn saveLayoutToCurrentWorkspace(layout: Layout) void {
     if (workspaces.getCurrentWorkspaceObject()) |ws| ws.layout = layout;
 }
 
@@ -777,23 +774,6 @@ pub fn cycleLayoutVariation(wm: *WM) void {
     bar.markDirty();
 }
 
-pub fn getVariationIndicator(s: *const State) []const u8 {
-    return switch (s.layout) {
-        .master => switch (s.layout_variations.master) {
-            .lifo => "[N]",
-            .fifo => "=N=",
-        },
-        .monocle => switch (s.layout_variations.monocle) {
-            .gapless => "<->",
-            .gaps    => ">-<",
-        },
-        .grid => switch (s.layout_variations.grid) {
-            .rigid   => "[#]",
-            .relaxed => "[~]",
-        },
-        .fibonacci => &s.fibonacci_indicator,
-    };
-}
 
 // Internal helpers 
 
