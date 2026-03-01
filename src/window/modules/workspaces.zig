@@ -28,7 +28,10 @@ pub const Workspace = struct {
     // The tiling layout active on this workspace.
     // Initialized from config; updated when the user switches layouts
     // in per-workspace mode.
-    layout:  tiling.Layout,
+    layout:    tiling.Layout,
+    // Optional layout variation override set via the layouts array in config.
+    // Applied on every workspace switch; null means use the global defaults.
+    variation: ?defs.LayoutVariationOverride = null,
 
     pub fn init(allocator: std.mem.Allocator, id: u8, name: []const u8, default_layout: tiling.Layout) Workspace {
         return .{ .id = id, .windows = Tracking.init(allocator), .name = name, .layout = default_layout };
@@ -52,6 +55,13 @@ var g_state: ?State = null;
 
 pub fn getState() ?*State { return if (g_state) |*s| s else null; }
 
+/// Resolves a canonical layout name string (e.g. "master-stack", "monocle")
+/// to the tiling.Layout enum. Falls back to the first available layout.
+fn layoutFromName(name: []const u8) tiling.Layout {
+    if (std.mem.eql(u8, name, "master-stack")) return .master;
+    return std.meta.stringToEnum(tiling.Layout, name) orelse tiling.defaultLayout();
+}
+
 pub fn init(wm: *WM) void {
     const count = wm.config.workspaces.count;
     const wss = wm.allocator.alloc(Workspace, count) catch {
@@ -62,10 +72,28 @@ pub fn init(wm: *WM) void {
     const default_layout: tiling.Layout =
         if (tiling.getState()) |ts| ts.layout else .master;
 
+    const cfg_tiling = &wm.config.tiling;
+
     for (wss, 0..) |*ws, i| {
         const id: u8 = @intCast(i);
         const name   = if (i < WORKSPACE_NAMES.len) WORKSPACE_NAMES[i] else "?";
-        ws.* = Workspace.init(wm.allocator, id, name, default_layout);
+
+        // Apply any workspace-specific layout + variation override from the
+        // layouts array (e.g. `"monocle", "gapless", "4,8"` in config.toml).
+        var ws_layout    = default_layout;
+        var ws_variation: ?defs.LayoutVariationOverride = null;
+        for (cfg_tiling.workspace_layout_overrides.items) |override| {
+            if (override.workspace_idx == id) {
+                if (override.layout_idx < cfg_tiling.layouts.items.len) {
+                    ws_layout = layoutFromName(cfg_tiling.layouts.items[override.layout_idx]);
+                }
+                ws_variation = override.variation;
+                break;
+            }
+        }
+
+        ws.* = Workspace.init(wm.allocator, id, name, ws_layout);
+        ws.variation = ws_variation;
     }
 
     var w2ws = std.AutoHashMap(u32, u8).init(wm.allocator);
@@ -227,7 +255,7 @@ fn restoreWorkspaceWindows(wm: *WM, ws: *const Workspace) void {
     if (tiling_active) {
         // Per-workspace layout: restore the layout this workspace was last using.
         if (!wm.config.tiling.global_layout) {
-            tiling.syncLayoutFromWorkspace(ws.layout);
+            tiling.syncLayoutFromWorkspace(ws);
         }
 
         // Fast path: replay cached tiled positions without running the layout

@@ -51,6 +51,9 @@ const LAYOUT_CYCLE: []const Layout = blk: {
     break :blk list;
 };
 
+/// Returns the first layout available at build time (fallback default).
+pub fn defaultLayout() Layout { return LAYOUT_CYCLE[0]; }
+
 /// True when the module file for `layout` was present at build time.
 pub fn isLayoutAvailable(layout: Layout) bool {
     return switch (layout) {
@@ -618,12 +621,26 @@ pub fn toggleTiling(wm: *WM) void {
     debug.info("Tiling {s}", .{if (s.enabled) "enabled" else "disabled"});
 }
 
-pub fn syncLayoutFromWorkspace(layout: Layout) void {
+pub fn syncLayoutFromWorkspace(ws: *const workspaces.Workspace) void {
     const s = getState() orelse return;
-    if (s.layout == layout) return;
+    const layout = ws.layout;
+    const needs_retile = s.layout != layout or ws.variation != null;
     s.layout = layout;
-    s.dirty = true;
-    s.ws_geom_valid = 0;
+    // Apply the workspace-pinned variation override when present; a null
+    // variation means "use whatever the global default currently is", so we
+    // leave layout_variations untouched in that case.
+    if (ws.variation) |v| {
+        switch (v) {
+            .master    => |mv| s.layout_variations.master  = mv,
+            .monocle   => |mv| s.layout_variations.monocle = mv,
+            .grid      => |gv| s.layout_variations.grid    = gv,
+            .fibonacci => {},
+        }
+    }
+    if (needs_retile) {
+        s.dirty = true;
+        s.ws_geom_valid = 0;
+    }
 }
 
 fn saveLayoutToCurrentWorkspace(layout: Layout) void {

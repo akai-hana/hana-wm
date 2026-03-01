@@ -23,32 +23,26 @@
 #   (RRGGBB/rrggbb, ""/'') "#RRGGBB" / RRGGBB / 0xRRGGBB
 
 [tiling]
-enabled = true # true/false
+enabled = true
 
-# Per-workspace tiling layout cycling
-global_layout = false # true/false
+# Per-workspace tiling layouts
+global_layout = false
 
 # Enabled layouts
-## First value is the default layout across workspaces.
 ## Layouts not added to the array will not be available at runtime.
 ## Not defining the array at all enables all layouts in their default order.
-#
-# Each entry can optionally be followed (as the next array element) by:
-#   "<variation>"        — overrides that layout's default variation globally
-#   "<workspace_nums>"   — comma-separated workspace numbers that start in this layout
-# A layout entry may include either, both, or neither of these suffixes.
-# The <layout> order also defines the cycling order used by toggle_layout.
-#
-# Examples:
+
 #   layouts = [
-#       "master-stack",                      # default layout, no override
-#       "monocle", "gapless", "4,8",         # workspaces 4 & 8 start in monocle/gapless
-#       "grid", "relaxed", "3,6",            # workspaces 3 & 6 start in grid/relaxed
-#       "fibonacci",                         # available in cycle but no workspace pinning
+#       "master-stack",              # default layout, no override
+#       "monocle", "gapless", "4,8", # workspaces 4 & 8 start in monocle/gapless
+#       "grid", "relaxed", "3,6",    # workspaces 3 & 6 start in grid/relaxed
+#       "fibonacci",                 # available in cycle but no workspace pinning
 #   ]
+
 layouts = [
-	"master-stack",
-	"monocle",
+	"master-stack", # Default layout
+	"monocle", "gapless", "4,5",
+	"monocle", "gaps", "6,7"
 	"grid",
 	"fibonacci",
 ]
@@ -103,14 +97,14 @@ variation = "relaxed"
 
 [bar]
 enabled = true
-position = "bottom" # "top"/"bottom"; can be swapped on runtime
+position = "bottom" # can be switched on runtime
 
 # Font
 ## First value is the default font used
 ## Subsequent values render in characters not included by first value (ej. non-ASCII)
 fonts = [
     "FiraCode Nerd Font Propo Ret",
-    "Noto Sans CJK JP", # to render japanese characters
+    "Noto Sans CJK JP", # japanese characters
 ]
 
 # Bar height
@@ -119,14 +113,14 @@ height = 3.5%
 
 ## Font size covers a percentage of the bar's area according to its height
 ## (e.g., 16% = font takes up 16% of the bar's vertical space)
-font_size = 72.5%
+font_size = 70%
 indicator_size = 25%
 
 # Workspace labels/icons (1-N)
 icons = ["あ", "か", "い", "は", "な", "つ", "ん", "で"]
 
 segment_spacing = 5%
-indicator_padding = 37.5%
+indicator_padding = 40%
 
 #
 ## if neither is set
