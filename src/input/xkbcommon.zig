@@ -79,12 +79,12 @@ pub const XkbState = struct {
     }
 
     /// Converts an X11 keycode to a keysym (used during event processing).
-    pub fn keycodeToKeysym(self: *XkbState, keycode: u8) u32 {
+    pub inline fn keycodeToKeysym(self: *XkbState, keycode: u8) u32 {
         return xkb.xkb_state_key_get_one_sym(self.state, keycode);
     }
 
     /// Reverse-looks up a keysym to its keycode (used during config parsing).
-    pub fn keysymToKeycode(self: *XkbState, keysym: u32) ?u8 {
+    pub inline fn keysymToKeycode(self: *XkbState, keysym: u32) ?u8 {
         return self.reverse_map.get(keysym);
     }
 };

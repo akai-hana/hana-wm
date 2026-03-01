@@ -23,32 +23,28 @@ const XSIZE_HINTS_P_BASE_SIZE: u32 = 0x100;
 
 // ── Module-level atom cache ───────────────────────────────────────────────────
 //
-// utils.getAtomCached already memoises atom→ID lookups, but each call still
-// pays a string-keyed hash probe.  The three atoms used on every MapRequest
-// are resolved once into plain u32 fields on first use, turning per-event
-// probes into direct field reads.
+// The three atoms used on every MapRequest are resolved once into plain u32
+// fields, turning per-event hash probes into direct field reads.
+// Atoms that cannot be interned remain 0; property cookies sent with atom 0
+// return an empty reply, which existing null-reply guards handle correctly.
 //
-// Atoms that cannot be interned remain 0 (XCB_ATOM_NONE); property cookies
-// sent with atom 0 return an empty reply, which existing null-reply guards
-// already handle correctly.
+// g_init_once guarantees populateAtomCache runs exactly once and is safe
+// under a future multi-threaded event loop without further changes.
 
 var g_atoms: struct {
     wm_protocols: u32 = 0,
     wm_class:     u32 = 0,
     net_wm_pid:   u32 = 0,
 } = .{};
-var g_atoms_ready: bool = false;
 
-// Populate g_atoms on the first call; all subsequent calls are a branch-predictable early return.
-// TODO: replace with std.once when the codebase moves to a multi-threaded event loop.
-fn initAtomCache() void {
-    if (g_atoms_ready) return;
+var g_init_once = std.once(populateAtomCache);
+
+fn populateAtomCache() void {
     inline for (.{
         .{ "wm_protocols", "WM_PROTOCOLS" },
         .{ "wm_class",     "WM_CLASS"     },
         .{ "net_wm_pid",   "_NET_WM_PID"  },
     }) |e| @field(g_atoms, e[0]) = utils.getAtomCached(e[1]) catch 0;
-    g_atoms_ready = true;
 }
 
 // Window predicates
@@ -80,24 +76,20 @@ pub fn grabButtons(wm: *WM, win: u32, focused: bool) void {
 
 // Workspace rule matching
 
-fn resolveWorkspace(target: u8, fallback: u8) u8 {
+inline fn resolveWorkspace(target: u8, fallback: u8) u8 {
     const s = workspaces.getState() orelse return fallback;
     return if (target < s.workspaces.len) target else fallback;
 }
 
 /// Collect a pre-fired WM_CLASS property cookie and match it against workspace
 /// rules.  Parses instance/class directly from the reply buffer — no allocation.
-/// O(n) in the number of rules; typical configs have a handful, so this is
-/// fine.  If rule counts grow large, a pre-built StringHashMap at config-load
-/// time would give O(1) per MapRequest.
 fn workspaceRuleForClass(wm: *WM, cookie: xcb.xcb_get_property_cookie_t) ?u8 {
     const reply = xcb.xcb_get_property_reply(wm.conn, cookie, null) orelse return null;
     defer std.c.free(reply);
     if (reply.*.format != 8 or reply.*.value_len == 0) return null;
 
     const raw: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
-    const raw_all = raw[0..@as(usize, @intCast(reply.*.value_len))];
-    const data    = std.mem.trimEnd(u8, raw_all, &[_]u8{0});
+    const data = std.mem.trimEnd(u8, raw[0..reply.*.value_len], "\x00");
 
     const sep = std.mem.indexOfScalar(u8, data, 0) orelse return null;
     const class_start = sep + 1;
@@ -116,14 +108,6 @@ fn workspaceRuleForClass(wm: *WM, cookie: xcb.xcb_get_property_cookie_t) ?u8 {
     return null;
 }
 
-// Tiling registration
-
-fn registerWithTiling(wm: *WM, win: u32, and_retile: bool) void {
-    if (!wm.config.tiling.enabled) return;
-    tiling.addWindow(wm, win);
-    if (and_retile) tiling.retileCurrentWorkspace(wm);
-}
-
 // Workspace assignment
 
 fn resolveTargetWorkspace(
@@ -136,8 +120,9 @@ fn resolveTargetWorkspace(
     c_net_wm_pid: ?xcb.xcb_get_property_cookie_t,
 ) u8 {
     // Phase 1 — Workspace class rules (highest priority).
-    // g_atoms.wm_class is a cached direct field read; no hash probe.
-    if (wm.config.workspaces.rules.items.len > 0) {
+    // Guard on g_atoms.wm_class: if internment failed the cookie would carry
+    // atom 0, triggering a pointless server round-trip on every MapRequest.
+    if (wm.config.workspaces.rules.items.len > 0 and g_atoms.wm_class != 0) {
         const c_class = xcb.xcb_get_property(
             wm.conn, 0, win,
             g_atoms.wm_class,
@@ -176,7 +161,7 @@ fn resolveTargetWorkspace(
 
 // Map request
 
-pub fn registerSpawn(wm: *WM, workspace: u8, pid: u32) void {
+pub inline fn registerSpawn(wm: *WM, workspace: u8, pid: u32) void {
     wm.spawn_queue.push(workspace, pid);
 }
 
@@ -194,15 +179,13 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     const win        = event.window;
     const current_ws = workspaces.getCurrentWorkspace() orelse 0;
 
-    // Ensure atom IDs are populated.  No-op after first call.
-    initAtomCache();
+    g_init_once.call();
 
     _ = xcb.xcb_change_window_attributes(
         wm.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{WINDOW_EVENT_MASK},
     );
 
-    // Fire focus-cache property cookies — always needed, no blocking.
-    // g_atoms.wm_protocols is a direct field read; no string hash probe.
+    // Fire property cookies before any blocking work.
     const c_protocols = xcb.xcb_get_property(
         wm.conn, 0, win,
         g_atoms.wm_protocols,
@@ -215,9 +198,8 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
         wm.conn, 0, win,
         xcb.XCB_ATOM_WM_NORMAL_HINTS, xcb.XCB_ATOM_ANY, 0, 18,
     );
-    // g_atoms.net_wm_pid is a direct field read; no string hash probe.
-    // Use an optional so the type system enforces that this cookie is only
-    // consumed when the spawn queue is non-empty — no silent undefined reads.
+    // Use an optional so the type system enforces this cookie is only consumed
+    // when the spawn queue is non-empty — no silent undefined reads.
     const c_net_wm_pid: ?xcb.xcb_get_property_cookie_t =
         if (!wm.spawn_queue.isEmpty()) xcb.xcb_get_property(
             wm.conn, 0, win,
@@ -230,9 +212,6 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
 
     workspaces.moveWindowTo(wm, win, target_ws) catch |err| {
         debug.logError(err, win);
-        // Discard all outstanding property cookies.  XCB buffers uncollected
-        // replies internally; never discarding them causes unbounded growth in
-        // applications that fail to map frequently (e.g. crash-looping clients).
         xcb.xcb_discard_reply(wm.conn, c_protocols.sequence);
         xcb.xcb_discard_reply(wm.conn, c_hints.sequence);
         xcb.xcb_discard_reply(wm.conn, c_normal_hints.sequence);
@@ -242,39 +221,25 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
 
     collectAndCacheSizeHints(wm, win, c_normal_hints);
 
-    // Collect focus-cache property replies *before* any visual commands.
-    //
-    // Previously this call came after utils.flush(), which meant the server
-    // (and compositor) received map + unfocused-border in one batch, then had
-    // to wait for two xcb_get_property_reply round-trips before seeing
-    // set_input_focus + focused-border in a second batch.  With a compositor
-    // running that produced a visible intermediate frame where the spawned
-    // window appeared briefly unfocused/unfocused-colored before snapping to
-    // its final state — the "sluggish spawn" feel.
-    //
-    // Moving the call here is safe: the cookies were fired at the top of this
-    // function before any flush, so the X server has already queued the
-    // property replies by the time we read them.  getInputModelCached in
-    // setFocus finds the cache warm and does no live query.
-    //
-    // Result: registerWithTiling + xcb_map_window + setFocus (set_input_focus
-    // + focused border) are all queued on the XCB write buffer before the
-    // single flush below.  They land at the server — and the compositor — as
-    // one atomic batch, matching dwm's Xlib-buffer behaviour.
+    // Collect focus-cache property replies before any visual commands so that
+    // registerWithTiling + xcb_map_window + setFocus all land at the server in
+    // one atomic batch, eliminating the intermediate unfocused frame that was
+    // visible when the flush preceded these round-trips.
     utils.populateFocusCacheFromCookies(wm.conn, win, c_protocols, c_hints);
 
     if (on_current_workspace) {
-        registerWithTiling(wm, win, true);
+        if (wm.config.tiling.enabled) {
+            tiling.addWindow(wm, win);
+            tiling.retileCurrentWorkspace(wm);
+        }
         _ = xcb.xcb_map_window(wm.conn, win);
         focus.setFocus(wm, win, .window_spawn);
         snapshotSpawnCursor(wm);
     } else {
-        registerWithTiling(wm, win, false);
+        if (wm.config.tiling.enabled) tiling.addWindow(wm, win);
         grabButtons(wm, win, false);
     }
 
-    // Single flush — all visual state (geometry, map, border, focus) arrives
-    // at the server in one batch.  No intermediate compositor frame possible.
     utils.flush(wm.conn);
 
     bar.markDirty();
@@ -294,12 +259,9 @@ fn unmanageWindow(wm: *WM, win: u32) void {
     const current_ws       = workspaces.getCurrentWorkspace();
 
     // Pre-fire pointer query before state cleanup so the round-trip runs
-    // concurrently with the in-memory operations below (tiling remove, cache
-    // evictions, workspace remove — all pure hash-table work, no X round-trips).
-    // By the time focusWindowUnderPointer consumes the reply the network
-    // latency is fully hidden and the reply is already in the receive buffer.
-    // The cookie is conditional: no query needed when the closed window was not
-    // focused, avoiding an unnecessary round-trip in the common case.
+    // concurrently with in-memory operations (tiling remove, cache evictions,
+    // workspace remove). Cookie is conditional: no query needed when the closed
+    // window was not focused, avoiding an unnecessary round-trip.
     const ptr_cookie: ?xcb.xcb_query_pointer_cookie_t =
         if (was_focused) xcb.xcb_query_pointer(wm.conn, wm.root) else null;
 
@@ -334,25 +296,17 @@ fn unmanageWindow(wm: *WM, win: u32) void {
     utils.flush(wm.conn);
 }
 
-fn handleWindowGone(wm: *WM, win: u32) void {
-    if (!isValidManagedWindow(wm, win)) return;
-    unmanageWindow(wm, win);
-}
-
 pub fn handleUnmapNotify(event: *const xcb.xcb_unmap_notify_event_t, wm: *WM) void {
-    handleWindowGone(wm, event.window);
+    if (isValidManagedWindow(wm, event.window)) unmanageWindow(wm, event.window);
 }
 
 pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM) void {
-    handleWindowGone(wm, event.window);
+    if (isValidManagedWindow(wm, event.window)) unmanageWindow(wm, event.window);
 }
 
-// Post-unmanage focus recovery
-//
+// Post-unmanage focus recovery.
 // Accepts a pre-fired xcb_query_pointer cookie so the round-trip runs
-// concurrently with the in-memory state cleanup in unmanageWindow (tiling
-// remove, cache evictions, workspace remove).  By the time this is called
-// the reply is already in the receive buffer — zero additional wait.
+// concurrently with the in-memory state cleanup in unmanageWindow.
 fn focusWindowUnderPointer(wm: *WM, ptr_cookie: xcb.xcb_query_pointer_cookie_t) void {
     const reply = xcb.xcb_query_pointer_reply(wm.conn, ptr_cookie, null) orelse {
         minimize.focusBestAvailable(wm);
@@ -442,7 +396,6 @@ inline fn suppressSpawnCrossing(wm: *WM, root_x: i16, root_y: i16) bool {
     return false;
 }
 
-// Common tail for enter/leave: guard managed+visible+unfocused, then set focus.
 inline fn maybeFocusWindow(wm: *WM, win: u32) void {
     if (!isOnCurrentWorkspace(wm, win)) return;
     if (minimize.isMinimized(wm, win)) return;
@@ -466,15 +419,9 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t, wm: *WM) vo
     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL) return;
     if (wm.drag_state.active) return;
     if (suppressSpawnCrossing(wm, event.root_x, event.root_y)) return;
-
-    // `event.child` is the new inferior of root being entered.
-    // When non-zero, the event already carries the answer — no round-trip needed.
-    // When zero, the pointer left to an area not covered by any X window
-    // (off-screen, inter-monitor gap, etc.).  A QueryPointer in that case also
-    // returns child=0, so maybeFocusWindow(wm, 0) would immediately fail
-    // isOnCurrentWorkspace and return.  Skip the useless round-trip entirely.
+    // When child is zero the pointer left to an area not covered by any window;
+    // maybeFocusWindow(wm, 0) would immediately fail isOnCurrentWorkspace anyway.
     if (event.child == 0) return;
-
     maybeFocusWindow(wm, event.child);
 }
 
@@ -482,9 +429,6 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t, wm: *WM) vo
 
 pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t, wm: *WM) void {
     if (!isValidManagedWindow(wm, event.window)) return;
-    // g_atoms.wm_protocols is a direct field read after initAtomCache().
-    // initAtomCache is called at handleMapRequest time for every managed window,
-    // so g_atoms is always populated by the time a PropertyNotify arrives.
     if (event.atom == g_atoms.wm_protocols or event.atom == xcb.XCB_ATOM_WM_HINTS) {
         utils.recacheInputModel(wm.conn, event.window);
     }
@@ -509,6 +453,10 @@ fn collectAndCacheSizeHints(
     const field_count = reply.*.value_len;
     const flags       = fields[0];
 
+    // Skip the cache write entirely for windows that declare no size constraints,
+    // which is the common case.
+    if (flags & (XSIZE_HINTS_P_MIN_SIZE | XSIZE_HINTS_P_BASE_SIZE) == 0) return;
+
     var min_width:  u16 = 0;
     var min_height: u16 = 0;
 
@@ -517,10 +465,11 @@ fn collectAndCacheSizeHints(
         min_height = clampU16(fields[6]);
     }
     if (flags & XSIZE_HINTS_P_BASE_SIZE != 0 and field_count >= 17) {
-        // @max with 0 is a no-op, so no explicit > 0 guard is needed.
         min_width  = @max(min_width,  clampU16(fields[15]));
         min_height = @max(min_height, clampU16(fields[16]));
     }
 
-    layouts.cacheSizeHints(wm.allocator, win, .{ .min_width = min_width, .min_height = min_height });
+    // Don't occupy a cache slot for degenerate hints that declare zero on both axes.
+    if (min_width > 0 or min_height > 0)
+        layouts.cacheSizeHints(wm.allocator, win, .{ .min_width = min_width, .min_height = min_height });
 }

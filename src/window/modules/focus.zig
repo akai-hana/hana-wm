@@ -33,19 +33,17 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     //  window_spawn              — map was queued on this connection moments ago.
     //  tiling_operation          — window is in the tiling tracking set, which is
     //                              populated at map time and kept coherent by
-    //                              removeWindow on unmap/destroy. Any window
-    //                              reachable via a tiling operation is mapped.
+    //                              removeWindow on unmap/destroy.
     //
     // For all other reasons (click, command, destroyed, workspace_switch) a race
     // with destroy is possible, so we guard with a live attribute query.
-    const skip_mapped_check = switch (reason) {
-        .mouse_enter, .window_spawn, .tiling_operation => true,
-        .mouse_click, .window_destroyed, .workspace_switch, .user_command => false,
-    };
-    if (!skip_mapped_check and !isWindowMapped(wm.conn, win)) return;
-
     const input_model = utils.getInputModelCached(wm.conn, win);
     if (input_model == .no_input) return;
+
+    if (switch (reason) {
+        .mouse_click, .window_destroyed, .workspace_switch, .user_command => !isWindowMapped(wm.conn, win),
+        .mouse_enter, .window_spawn, .tiling_operation => false,
+    }) return;
 
     const old = wm.focused_window;
     wm.focused_window = win;
@@ -95,7 +93,7 @@ pub fn clearFocus(wm: *WM) void {
     bar.markDirty();
 }
 
-fn shouldRaise(reason: Reason) bool {
+inline fn shouldRaise(reason: Reason) bool {
     return switch (reason) {
         .mouse_click, .user_command => true,
         .mouse_enter, .window_destroyed, .workspace_switch,
@@ -103,7 +101,7 @@ fn shouldRaise(reason: Reason) bool {
     };
 }
 
-fn suppressionFor(reason: Reason) defs.FocusSuppressReason {
+inline fn suppressionFor(reason: Reason) defs.FocusSuppressReason {
     return switch (reason) {
         .mouse_click, .mouse_enter, .window_destroyed,
         .user_command, .workspace_switch => .none,
@@ -112,8 +110,6 @@ fn suppressionFor(reason: Reason) defs.FocusSuppressReason {
     };
 }
 
-// Returns true only if the window is mapped and viewable.
-// A failed reply (e.g. window was destroyed) is treated as unmapped.
 fn isWindowMapped(conn: *xcb.xcb_connection_t, win: u32) bool {
     const reply = xcb.xcb_get_window_attributes_reply(
         conn, xcb.xcb_get_window_attributes(conn, win), null,

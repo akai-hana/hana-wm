@@ -48,7 +48,7 @@ pub const Margins = struct {
     }
 };
 
-pub fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect) void {
+pub inline fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect) void {
     _ = xcb.xcb_configure_window(
         conn, win,
         xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
@@ -65,7 +65,7 @@ pub fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect) void {
 /// Five-field variant of configureWindow that also sets border_width.
 /// Used by fullscreen enter/exit and workspace switching where the border
 /// must be set atomically with the geometry to avoid a one-frame flash.
-pub fn configureWindowGeom(conn: *xcb.xcb_connection_t, win: u32, geom: defs.WindowGeometry) void {
+pub inline fn configureWindowGeom(conn: *xcb.xcb_connection_t, win: u32, geom: defs.WindowGeometry) void {
     _ = xcb.xcb_configure_window(
         conn, win,
         xcb.XCB_CONFIG_WINDOW_X     | xcb.XCB_CONFIG_WINDOW_Y     |
@@ -142,10 +142,15 @@ pub fn initAtomCache(conn: *xcb.xcb_connection_t) !void {
         cookies[i] = xcb.xcb_intern_atom(conn, 0, @intCast(f.name.len), f.name.ptr);
 
     var cache: AtomCache = undefined;
+    var consumed: usize = 0;
     inline for (fields, 0..) |f, i| {
-        const r = xcb.xcb_intern_atom_reply(conn, cookies[i], null) orelse return error.AtomFailed;
+        const r = xcb.xcb_intern_atom_reply(conn, cookies[i], null) orelse {
+            for (consumed..fields.len) |j| xcb.xcb_discard_reply(conn, cookies[j].sequence);
+            return error.AtomFailed;
+        };
         defer std.c.free(r);
         @field(cache, f.name) = r.*.atom;
+        consumed = i + 1;
     }
     atom_cache = cache;
 }
@@ -163,7 +168,7 @@ pub fn getAtom(conn: *xcb.xcb_connection_t, name: []const u8) !u32 {
     return reply.*.atom;
 }
 
-pub fn getAtomCached(comptime name: []const u8) error{AtomCacheNotInitialized}!u32 {
+pub inline fn getAtomCached(comptime name: []const u8) error{AtomCacheNotInitialized}!u32 {
     // Unknown names produce a build error rather than a silent runtime failure.
     comptime if (!@hasField(AtomCache, name)) @compileError("atom not in cache: " ++ name);
     const cache = atom_cache orelse return error.AtomCacheNotInitialized;
@@ -242,8 +247,16 @@ pub fn populateFocusCacheFromCookies(
     c_protocols: xcb.xcb_get_property_cookie_t,
     c_hints:     xcb.xcb_get_property_cookie_t,
 ) void {
-    const take_focus_atom = getAtomCached("WM_TAKE_FOCUS")    catch return;
-    const wm_delete_atom  = getAtomCached("WM_DELETE_WINDOW") catch return;
+    const take_focus_atom = getAtomCached("WM_TAKE_FOCUS") catch {
+        xcb.xcb_discard_reply(conn, c_protocols.sequence);
+        xcb.xcb_discard_reply(conn, c_hints.sequence);
+        return;
+    };
+    const wm_delete_atom = getAtomCached("WM_DELETE_WINDOW") catch {
+        xcb.xcb_discard_reply(conn, c_protocols.sequence);
+        xcb.xcb_discard_reply(conn, c_hints.sequence);
+        return;
+    };
 
     // Scan WM_PROTOCOLS once for both atoms — no second round-trip.
     var take_focus = false;
@@ -255,6 +268,7 @@ pub fn populateFocusCacheFromCookies(
             for (atoms[0..@intCast(r.*.value_len)]) |atom| {
                 if (atom == take_focus_atom) take_focus = true;
                 if (atom == wm_delete_atom)  wm_delete  = true;
+                if (take_focus and wm_delete) break;
             }
         }
     }
@@ -287,7 +301,7 @@ pub fn recacheInputModel(conn: *xcb.xcb_connection_t, win: u32) void {
     });
 }
 
-pub fn uncacheWindowFocusProps(win: u32) void {
+pub inline fn uncacheWindowFocusProps(win: u32) void {
     if (input_model_cache) |*c| _ = c.remove(win);
 }
 
@@ -358,7 +372,9 @@ pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allo
     if (sep + 1 >= len) return null;
 
     const instance = allocator.dupe(u8, data[0..sep]) catch return null;
-    const class    = allocator.dupe(u8, data[sep + 1..len]) catch {
+    const class_raw = data[sep + 1..len];
+    const class_str = std.mem.trimRight(u8, class_raw, "\x00");
+    const class     = allocator.dupe(u8, class_str) catch {
         allocator.free(instance);
         return null;
     };
@@ -387,6 +403,7 @@ fn queryWMProtocolsProps(conn: *xcb.xcb_connection_t, win: u32) WMProtocolsProps
     for (atoms[0..@intCast(reply.*.value_len)]) |atom| {
         if (atom == take_focus_atom) props.take_focus = true;
         if (atom == wm_delete_atom)  props.wm_delete  = true;
+        if (props.take_focus and props.wm_delete) break;
     }
     return props;
 }
