@@ -214,99 +214,93 @@ fn setWindowMask(s: *State, win: u32, new_mask: u64) void {
     }
 }
 
-/// Mod+Shift+N: toggle workspace tag N on the focused window.
+/// Mod+Shift+N: pure toggle of workspace tag N.
 ///
-/// • If window IS on N   → remove tag N (unless it's the only workspace).
-/// • If window NOT on N  → remove from current workspace, add N.
-///   (If N == current, both paths behave identically as a pure toggle.)
+/// Flips bit N in the window's mask with no other side-effects on the mask.
+/// Focus is intentionally NOT changed so the user can hold Mod+Shift and
+/// press 2, 3, 4 in sequence to tag/untag multiple workspaces on the same
+/// window without losing track of which window they're operating on.
+///
+/// • Bit N set   → clear it (window leaves N). If N == current, pushed offscreen.
+/// • Bit N clear → set it  (window gains N). Silently added to an inactive workspace.
+/// • Last workspace is protected: cannot clear the final bit.
 pub fn tagToggle(wm: *WM, win: u32, target_ws: u8) void {
     const s = getState() orelse return;
     if (target_ws >= s.workspaces.len) return;
     if (minimize.isMinimized(wm, win)) return;
 
     const current = s.current;
-    const mask    = s.window_to_workspaces.get(win) orelse return;
-    const tbit:  u64 = @as(u64, 1) << @intCast(target_ws);
-    const cbit:  u64 = @as(u64, 1) << @intCast(current);
+    const mask = s.window_to_workspaces.get(win) orelse return;
+    const tbit: u64 = @as(u64, 1) << @intCast(target_ws);
 
     if (mask & tbit != 0) {
-        // Window already on target: toggle it off.
-        if (@popCount(mask) <= 1) return; // last workspace — do nothing
+        // Remove tag N.
+        if (@popCount(mask) <= 1) return; // last workspace — protect
         const new_mask = mask & ~tbit;
         setWindowMask(s, win, new_mask);
         if (target_ws == current) {
-            // Window leaving the visible workspace.
             _ = xcb.xcb_configure_window(wm.conn, win,
-                xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
+                xcb.XCB_CONFIG_WINDOW_X,
+                &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
             tiling.invalidateGeomCache(win);
-            if (wm.focused_window == win) minimize.focusBestAvailable(wm);
             if (wm.config.tiling.enabled) tiling.retileCurrentWorkspace(wm);
+            // Focus intentionally kept on this window — lets the user chain
+            // multiple Mod+Shift+N presses to reorganise tags freely.
         } else {
-            // Window removed from an inactive workspace: just invalidate its cache there.
             tiling.invalidateWsGeomBit(target_ws);
         }
     } else {
-        // Window not on target: move it there (remove from current, add to target).
-        var new_mask = mask | tbit;
-        if (target_ws != current and (mask & cbit) != 0) {
-            new_mask &= ~cbit; // remove from current when sending elsewhere
-        }
-        if (new_mask == 0) new_mask = tbit; // safety
+        // Add tag N — no other bits are touched.
+        const new_mask = mask | tbit;
         setWindowMask(s, win, new_mask);
-        if (target_ws != current) {
-            // Window moving away from the current view.
-            _ = xcb.xcb_configure_window(wm.conn, win,
-                xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
-            tiling.invalidateGeomCache(win);
-            if (wm.focused_window == win) minimize.focusBestAvailable(wm);
+        if (target_ws == current) {
+            _ = xcb.xcb_map_window(wm.conn, win);
             if (wm.config.tiling.enabled) tiling.retileCurrentWorkspace(wm);
+        } else {
+            tiling.invalidateWsGeomBit(target_ws);
         }
-        // If target == current: adding to a workspace you're already viewing is a
-        // no-op visually (the window is already on screen).
     }
 
     bar.markDirty();
     utils.flush(wm.conn);
 }
 
-/// Mod+Alt+N: toggle workspace tag N on the focused window, additive style.
+/// Mod+Alt+N: additive tag toggle.
 ///
-/// • If window IS on N   → same as tagToggle (remove N, if count > 1).
-/// • If window NOT on N  → add N while keeping the current workspace too.
+/// Same as tagToggle but the current workspace is protected: pressing
+/// Mod+Alt+N while the window IS tagged to current is a no-op (it cannot
+/// remove the current workspace bit). Use this to copy a window to other
+/// workspaces while keeping it visible where you are.
+///
+/// • N == current and window IS on current → no-op (protected).
+/// • N == current and window NOT on current → add current (edge case).
+/// • N != current → pure toggle of bit N, current bit unaffected.
+/// • Last workspace protected as in tagToggle.
 pub fn tagAdditive(wm: *WM, win: u32, target_ws: u8) void {
     const s = getState() orelse return;
     if (target_ws >= s.workspaces.len) return;
     if (minimize.isMinimized(wm, win)) return;
 
     const current = s.current;
-    const mask    = s.window_to_workspaces.get(win) orelse return;
+    const mask = s.window_to_workspaces.get(win) orelse return;
     const tbit: u64 = @as(u64, 1) << @intCast(target_ws);
+    const cbit: u64 = @as(u64, 1) << @intCast(current);
 
     if (mask & tbit != 0) {
-        // Already on target: toggle off (same logic as tagToggle removal path).
-        if (@popCount(mask) <= 1) return;
+        // Remove tag N — but refuse to remove the current workspace.
+        if (target_ws == current) return;
+        if (@popCount(mask) <= 1) return; // last workspace — protect
         const new_mask = mask & ~tbit;
         setWindowMask(s, win, new_mask);
-        if (target_ws == current) {
-            _ = xcb.xcb_configure_window(wm.conn, win,
-                xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
-            tiling.invalidateGeomCache(win);
-            if (wm.focused_window == win) minimize.focusBestAvailable(wm);
-            if (wm.config.tiling.enabled) tiling.retileCurrentWorkspace(wm);
-        } else {
-            tiling.invalidateWsGeomBit(target_ws);
-        }
+        tiling.invalidateWsGeomBit(target_ws);
     } else {
-        // Not on target: add it without removing current.
-        const new_mask = mask | tbit;
+        // Add tag N, always ensuring current workspace stays set.
+        const new_mask = (mask | tbit) | cbit;
         setWindowMask(s, win, new_mask);
-        // Window stays on screen (still on current). Only the target workspace's
-        // layout cache needs invalidation.
         if (target_ws != current) {
             tiling.invalidateWsGeomBit(target_ws);
         }
-        // If target == current: window wasn't on current (shouldn't normally happen
-        // for a focused window) — just add it, no visibility change needed.
+        // Window remains visible on current workspace — no screen change needed.
     }
 
     bar.markDirty();
@@ -587,5 +581,3 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
     _ = xcb.xcb_ungrab_server(wm.conn);
     utils.flush(wm.conn);
 }
-
-
