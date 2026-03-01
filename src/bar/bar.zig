@@ -135,7 +135,6 @@ pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
         title_invalidated:    bool,
         visible:              bool,
         global_visible:       bool,
-        has_transparency:     bool,
         allocator:            std.mem.Allocator,
         cached_clock_width:   u16,
         cached_clock_x:       ?u16,
@@ -160,7 +159,6 @@ pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
             height:           u16,
             dc:               *drawing.DrawContext,
             config:           defs.BarConfig,
-            has_transparency: bool,
         ) !*State {
             const s = try allocator.create(State);
             s.* = .{
@@ -178,7 +176,6 @@ pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
                 .title_invalidated    = false,
                 .visible              = true,
                 .global_visible       = true,
-                .has_transparency     = has_transparency,
                 .allocator            = allocator,
                 .cached_clock_width   = dc.textWidth(clock_segment.SAMPLE_STRING) + 2 * config.scaledSegmentPadding(height),
                 .cached_clock_x       = null,
@@ -276,7 +273,8 @@ pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
 
         fn drawAll(self: *State, snap: *const BarSnapshot) !void {
             if (snap.title_invalidated) self.cached_title_window = null;
-            if (self.has_transparency) self.dc.clearTransparent();
+            // No clearTransparent needed: fillRect(0, 0, width, height) covers every pixel,
+            // so a preceding full CLEAR pass would be pure wasted server-side work.
             self.dc.fillRect(0, 0, self.width, self.height, self.config.bg);
 
             const scaled_spacing = self.config.scaledSpacing(self.height);
@@ -684,7 +682,7 @@ pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
         debug.info("Bar transparency: {s}", .{if (setup.has_argb) "enabled (ARGB)" else "disabled (opaque)"});
 
         state = try State.init(wm.allocator, wm.conn, setup.window, setup.colormap,
-            wm.screen.width_in_pixels, height, dc, wm.config.bar, setup.has_argb);
+            wm.screen.width_in_pixels, height, dc, wm.config.bar);
 
         startBarThread(state.?);
         submitDraw(wm, true);
@@ -736,7 +734,7 @@ pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
         try loadBarFonts(new_dc, wm);
 
         const new_state = try State.init(wm.allocator, wm.conn, setup.window, setup.colormap,
-            wm.screen.width_in_pixels, height, new_dc, wm.config.bar, setup.has_argb);
+            wm.screen.width_in_pixels, height, new_dc, wm.config.bar);
         new_state.visible        = old.visible;
         new_state.global_visible = old.global_visible;
 

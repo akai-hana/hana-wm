@@ -217,6 +217,44 @@ const MOD_MAP = std.StaticStringMap(u16).initComptime(.{
     .{ "Shift",   defs.MOD_SHIFT   },
 });
 
+/// Case-insensitive map from button name → XCB button number.
+/// Supports both the generic "ButtonN" form and descriptive aliases.
+const MOUSE_BUTTON_MAP = std.StaticStringMap(u8).initComptime(.{
+    .{ "button1",     1 }, .{ "leftclick",   1 }, .{ "left",   1 },
+    .{ "button2",     2 }, .{ "middleclick", 2 }, .{ "middle", 2 },
+    .{ "button3",     3 }, .{ "rightclick",  3 }, .{ "right",  3 },
+    .{ "button4",     4 }, .{ "scrollup",    4 },
+    .{ "button5",     5 }, .{ "scrolldown",  5 },
+});
+
+/// Returns the XCB button number for `name`, or null if it's not a mouse button token.
+fn mouseButtonFromName(name: []const u8) ?u8 {
+    var buf: [16]u8 = undefined;
+    if (name.len > buf.len) return null;
+    return MOUSE_BUTTON_MAP.get(std.ascii.lowerString(&buf, name));
+}
+
+/// If `str` is a valid `Mods+ButtonName` combination, returns the parsed
+/// modifiers and button number. Returns null when any token is unrecognised
+/// (caller should fall through to normal keybind parsing).
+fn tryParseMouseBind(str: []const u8) ?struct { modifiers: u16, button: u8 } {
+    var modifiers: u16 = 0;
+    var button:    ?u8 = null;
+    var parts = std.mem.splitScalar(u8, str, '+');
+    while (parts.next()) |part| {
+        const trimmed = std.mem.trim(u8, part, " \t");
+        if (MOD_MAP.get(trimmed)) |mod| {
+            modifiers |= mod;
+        } else if (mouseButtonFromName(trimmed)) |btn| {
+            if (button != null) return null; // refuse two buttons
+            button = btn;
+        } else {
+            return null; // unknown token → not a mouse bind
+        }
+    }
+    return if (button) |b| .{ .modifiers = modifiers, .button = b } else null;
+}
+
 const ACTION_MAP = std.StaticStringMap(defs.Action).initComptime(.{
     .{ "close",                  .close_window           },
     .{ "close_window",           .close_window           },
@@ -246,6 +284,8 @@ const ACTION_MAP = std.StaticStringMap(defs.Action).initComptime(.{
     .{ "cycle_variation",        .cycle_layout_variation },
     .{ "drun_toggle",            .drun_toggle            },
     .{ "drun",                   .drun_toggle            },
+    .{ "toggle_float",           .toggle_float           },
+    .{ "float",                  .toggle_float           },
 });
 
 fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
@@ -268,11 +308,6 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, c
             entry.key_ptr.*;
         defer if (mod_placeholder != null) allocator.free(keybind_str);
 
-        const parts = parseKeybindString(keybind_str) catch |err| {
-            debug.warn("Failed to parse keybind '{s}': {}", .{ keybind_str, err });
-            continue;
-        };
-
         // Substitute {kill} only when the kill placeholder is defined in config.
         const final_command: []const u8 = if (kill_placeholder) |kp|
             if (std.mem.indexOf(u8, command, "{kill}") != null)
@@ -282,6 +317,23 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, c
         else
             command;
         defer if (final_command.ptr != command.ptr) allocator.free(final_command);
+
+        // Try mouse bind first (e.g. "Super+MiddleClick").  If the key string
+        // contains a known button token it cannot be a valid keysym, so we
+        // never fall through to parseKeybindString for it.
+        if (tryParseMouseBind(keybind_str)) |mb| {
+            try cfg.mouse_bindings.append(allocator, .{
+                .modifiers = mb.modifiers,
+                .button    = mb.button,
+                .action    = try parseAction(allocator, final_command),
+            });
+            continue;
+        }
+
+        const parts = parseKeybindString(keybind_str) catch |err| {
+            debug.warn("Failed to parse keybind '{s}': {}", .{ keybind_str, err });
+            continue;
+        };
 
         try cfg.keybindings.append(allocator, .{
             .modifiers = parts.modifiers,
@@ -335,6 +387,8 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !defs.Action {
     if (ACTION_MAP.get(cmd))                         |a| return a;
     if (tryParseWorkspace(cmd, "workspace_"))         |ws| return .{ .switch_workspace  = ws };
     if (tryParseWorkspace(cmd, "move_to_workspace_")) |ws| return .{ .move_to_workspace = ws };
+    if (tryParseWorkspace(cmd, "tag_toggle_"))        |ws| return .{ .tag_toggle        = ws };
+    if (tryParseWorkspace(cmd, "tag_additive_"))      |ws| return .{ .tag_additive      = ws };
     return .{ .exec = try allocator.dupe(u8, cmd) };
 }
 

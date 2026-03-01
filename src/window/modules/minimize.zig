@@ -64,14 +64,23 @@ pub fn isMinimized(wm: *const WM, win: u32) bool {
     return s.minimized_info.contains(win);
 }
 
-fn trackMinimized(s: *defs.MinimizeState, ws_idx: u8, win: u32, saved_fs: ?defs.WindowGeometry) bool {
-    s.per_workspace[ws_idx].append(s.allocator, win) catch return false;
-    s.minimized_info.put(win, .{ .saved_fs = saved_fs, .workspace = ws_idx }) catch {
-        // The rollback assumes `win` is the last element.  Assert here so a
-        // future refactor that inserts multiple entries before the put does
-        // not silently corrupt the list instead of triggering a visible failure.
-        std.debug.assert(s.per_workspace[ws_idx].items[s.per_workspace[ws_idx].items.len - 1] == win);
-        _ = s.per_workspace[ws_idx].pop();
+fn trackMinimized(s: *defs.MinimizeState, ws_mask: u64, win: u32, saved_fs: ?defs.WindowGeometry) bool {
+    // Add to every workspace in the mask's per-workspace ordered list.
+    var remaining = ws_mask;
+    while (remaining != 0) {
+        const idx: u8 = @intCast(@ctz(remaining));
+        remaining &= remaining - 1;
+        if (idx < s.per_workspace.len)
+            s.per_workspace[idx].append(s.allocator, win) catch {};
+    }
+    s.minimized_info.put(win, .{ .saved_fs = saved_fs, .workspace_mask = ws_mask }) catch {
+        // Rollback: remove from all per-workspace lists.
+        var rem2 = ws_mask;
+        while (rem2 != 0) {
+            const idx: u8 = @intCast(@ctz(rem2));
+            rem2 &= rem2 - 1;
+            if (idx < s.per_workspace.len) removeFromList(&s.per_workspace[idx], win);
+        }
         return false;
     };
     return true;
@@ -110,6 +119,10 @@ pub fn minimizeWindow(wm: *WM) void {
 
     if (isMinimized(wm, win)) return;
 
+    // Build a mask of all workspaces this window belongs to.
+    const ws_mask = workspaces.getWindowWorkspaceMask(win) orelse
+        (@as(u64, 1) << @intCast(ws_idx));
+
     var saved_fs: ?defs.WindowGeometry = null;
     var fs_ws_for_rollback: ?u8 = null;
     if (wm.fullscreen.window_to_workspace.get(win)) |fs_ws| {
@@ -123,23 +136,17 @@ pub fn minimizeWindow(wm: *WM) void {
 
     if (wm.config.tiling.enabled) tiling.removeWindow(win);
 
-    if (!trackMinimized(s, ws_idx, win, saved_fs)) {
+    if (!trackMinimized(s, ws_mask, win, saved_fs)) {
         debug.err("minimize: allocation failure tracking window 0x{x} -- rolling back", .{win});
-        // Roll back tiling removal so the window remains in the layout.
         if (wm.config.tiling.enabled) {
             tiling.addWindow(wm, win);
             tiling.retileCurrentWorkspace(wm);
         }
-        // Roll back fullscreen removal: the window is still visually fullscreen
-        // (it was never hidden), but without this the WM has no record of it.
-        // Re-inserting restores coherent state so toggleFullscreen still works.
         if (was_fullscreen) {
             wm.fullscreen.setForWorkspace(fs_ws_for_rollback.?, .{
                 .window         = win,
                 .saved_geometry = saved_fs.?,
             }) catch {
-                // setForWorkspace itself failed under OOM — log and accept the
-                // incoherent state rather than panicking.
                 debug.err("minimize rollback: failed to re-insert fullscreen state for 0x{x}", .{win});
             };
         }
@@ -207,6 +214,15 @@ pub fn unminimize(wm: *WM, order: RestoreOrder) void {
         .lifo => list.pop().?,
         .fifo => list.orderedRemove(0),
     };
+    // Also remove from all other per-workspace lists this window was in.
+    if (s.minimized_info.get(win)) |entry| {
+        var mask = entry.workspace_mask & ~(@as(u64, 1) << @intCast(ws_idx));
+        while (mask != 0) {
+            const idx: u8 = @intCast(@ctz(mask));
+            mask &= mask - 1;
+            if (idx < s.per_workspace.len) removeFromList(&s.per_workspace[idx], win);
+        }
+    }
     restoreWindow(wm, win);
 }
 
@@ -281,35 +297,33 @@ pub fn unminimizeAll(wm: *WM) void {
 pub fn forceUntrack(wm: *WM, win: u32) void {
     const s     = getMinState(wm) orelse return;
     const entry = s.minimized_info.fetchRemove(win) orelse return;
-    removeFromList(&s.per_workspace[entry.value.workspace], win);
+    var mask = entry.value.workspace_mask;
+    while (mask != 0) {
+        const idx: u8 = @intCast(@ctz(mask));
+        mask &= mask - 1;
+        if (idx < s.per_workspace.len) removeFromList(&s.per_workspace[idx], win);
+    }
 }
 
-// Called by workspaces.zig when a minimized window is moved to another workspace.
-// The old workspace is read from minimized_info directly — the caller no longer
-// needs to supply it, eliminating the class of bugs where the passed ws diverges
-// from the stored canonical value.
+/// Called by workspaces.zig when a minimized window is moved to another workspace.
 pub fn moveToWorkspace(wm: *WM, win: u32, new_ws: u8) void {
     const s = getMinState(wm) orelse return;
-    // Read the canonical old workspace from the info map rather than trusting
-    // the caller-supplied value, which could be stale if the window was moved
-    // between workspaces before this call.
     const entry = s.minimized_info.getPtr(win) orelse return;
-    const old_ws = entry.workspace;
+    if (new_ws >= s.per_workspace.len) return;
 
-    if (old_ws == new_ws) return;
-    if (old_ws >= s.per_workspace.len or new_ws >= s.per_workspace.len) return;
+    const old_mask = entry.workspace_mask;
+    const new_bit: u64 = @as(u64, 1) << @intCast(new_ws);
 
-    removeFromList(&s.per_workspace[old_ws], win);
-
+    // Remove from all old workspaces, add to new one.
+    var rem = old_mask;
+    while (rem != 0) {
+        const idx: u8 = @intCast(@ctz(rem));
+        rem &= rem - 1;
+        if (idx < s.per_workspace.len) removeFromList(&s.per_workspace[idx], win);
+    }
     s.per_workspace[new_ws].append(s.allocator, win) catch |err| {
-        // INVARIANT BREAK: win has been removed from per_workspace[old_ws] but
-        // cannot be added to per_workspace[new_ws]. minimized_info still maps
-        // win -> old_ws; forceUntrack will find a mismatched entry (no-op remove
-        // then info eviction). The window silently disappears from the minimized
-        // list — acceptable under OOM.
-        debug.warnOnErr(err, "minimize.moveToWorkspace: failed to append, window lost from minimize list");
+        debug.warnOnErr(err, "minimize.moveToWorkspace: failed to append");
         return;
     };
-
-    entry.workspace = new_ws;
+    entry.workspace_mask = new_bit;
 }

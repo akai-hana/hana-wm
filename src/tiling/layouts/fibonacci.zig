@@ -79,7 +79,7 @@ pub fn tileWithOffset(
         // current window in its half, then shrink the box to the remainder.
         switch (dir) {
             .right => {
-                const win_w = w / 2 -| gap;
+                const win_w = (w -| gap) / 2;
                 layouts.configureSafe(ctx, win, .{
                     .x      = @intCast(x),
                     .y      = @intCast(y),
@@ -90,7 +90,7 @@ pub fn tileWithOffset(
                 w  = w -| (win_w + gap);
             },
             .down => {
-                const win_h = h / 2 -| gap;
+                const win_h = (h -| gap) / 2;
                 layouts.configureSafe(ctx, win, .{
                     .x      = @intCast(x),
                     .y      = @intCast(y),
@@ -101,7 +101,7 @@ pub fn tileWithOffset(
                 h  = h -| (win_h + gap);
             },
             .left => {
-                const win_w = w / 2 -| gap;
+                const win_w = (w -| gap) / 2;
                 layouts.configureSafe(ctx, win, .{
                     .x      = @intCast(x + @as(i32, @intCast(w - win_w))),
                     .y      = @intCast(y),
@@ -112,7 +112,7 @@ pub fn tileWithOffset(
                 w = w -| (win_w + gap);
             },
             .up => {
-                const win_h = h / 2 -| gap;
+                const win_h = (h -| gap) / 2;
                 layouts.configureSafe(ctx, win, .{
                     .x      = @intCast(x),
                     .y      = @intCast(y + @as(i32, @intCast(h - win_h))),
