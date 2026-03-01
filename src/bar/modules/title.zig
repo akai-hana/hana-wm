@@ -79,6 +79,8 @@ pub fn draw(
     }
 
     const scaled_padding = config.scaledSegmentPadding(height);
+    // baselineY is constant for a given DC + height; compute once for both branches.
+    const baseline_y = dc.baselineY(height);
 
     if (window_count == 1) {
         const single_win   = current_ws_wins[0];
@@ -97,7 +99,7 @@ pub fn draw(
             const title = getWindowTitle(conn, single_win, allocator) catch null;
             defer if (title) |t| allocator.free(t);
             if (title) |t| {
-                try dc.drawTextEllipsis(start_x + scaled_padding + TITLE_LEAD_PX, dc.baselineY(height),
+                try dc.drawTextEllipsis(start_x + scaled_padding + TITLE_LEAD_PX, baseline_y,
                     t, width -| scaled_padding * 2 -| TITLE_LEAD_PX, config.fg);
             }
         } else {
@@ -105,7 +107,7 @@ pub fn draw(
                 conn, focused_window, cached_title, cached_title_window,
                 title_invalidated, allocator);
             if (title.len > 0) {
-                try dc.drawTextEllipsis(start_x + scaled_padding + TITLE_LEAD_PX, dc.baselineY(height),
+                try dc.drawTextEllipsis(start_x + scaled_padding + TITLE_LEAD_PX, baseline_y,
                     title, width -| scaled_padding * 2 -| TITLE_LEAD_PX,
                     if (is_focused) config.selected_fg else config.fg);
             }
@@ -230,6 +232,9 @@ fn drawSegmentedTitles(
     const num_windows: u32 = @intCast(window_infos.len);
     // n_infos > 0 is guaranteed above, so window_infos.len > 0 here.
 
+    // baselineY is identical for every segment — hoist it once outside the loop.
+    const baseline_y = dc.baselineY(height);
+
     for (window_infos, 0..) |info, i| {
         // Pixel-perfect tiling: segment i spans [i*W/n, (i+1)*W/n).
         // Each remainder pixel is handed to a later segment naturally, so
@@ -251,7 +256,7 @@ fn drawSegmentedTitles(
         if (info.title.len > 0 and segment_width > scaled_padding * 2) {
             try dc.drawTextEllipsis(
                 segment_x + scaled_padding + TITLE_LEAD_PX,
-                dc.baselineY(height),
+                baseline_y,
                 info.title,
                 segment_width -| scaled_padding * 2 -| TITLE_LEAD_PX,
                 if (is_focused_win) config.selected_fg else config.fg,

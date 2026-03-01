@@ -32,19 +32,14 @@ global_layout = false
 ## Layouts not added to the array will not be available at runtime.
 ## Not defining the array at all enables all layouts in their default order.
 
-#   layouts = [
-#       "master-stack",              # default layout, no override
-#       "monocle", "gapless", "4,8", # workspaces 4 & 8 start in monocle/gapless
-#       "grid", "relaxed", "3,6",    # workspaces 3 & 6 start in grid/relaxed
-#       "fibonacci",                 # available in cycle but no workspace pinning
-#   ]
-
+#       Layout          Variation  Workspaces
+#              ("default"/"alts")  (restricted to)
 layouts = [
-	"master-stack", # Default layout
-	"monocle", "gapless", "4,5",
-	"monocle", "gaps", "6,7"
-	"grid",
-	"fibonacci",
+	"master-stack",                   # "lifo"/"fifo"
+	"monocle",      "gapless", "4,5", # "gapless"/"gaps"
+	"monocle",      "gaps",    "6,7"
+	"grid",         "rigid",          # "rigid"/"relaxed"
+	"fibonacci",                      # no variations
 ]
 
 [tiling.aesthetics]
@@ -221,6 +216,7 @@ Mod+Shift+space = "toggle_layout_reverse"  # Cycle layouts backward
 Mod+Alt+space   = "cycle_layout_variation" # Cycle current layout's variation (Super+V)
 Mod+Tab         = "swap_master"            # Swap focused window with master (slave→master or master→slave)
 Mod+Shift+Tab   = "drun_toggle"
+Mod+MiddleClick = "toggle_float"           # Toggle clicked window between tiled and floating
 
 # Layouts
 ## Master-stack
@@ -264,10 +260,10 @@ Mod+Shift+B = "toggle_bar_position"    # top/bottom
 Mod+A       = "MOZ_USE_XINPUT2=1 firefox"
 Mod+Shift+A = "{kill} firefox"
 
-Mod+s       = "flatpak run org.equicord.equibop"
+Mod+S       = "flatpak run org.equicord.equibop"
 Mod+Shift+S = "{kill} equibop"
 
-Mod+d       = "ghostty"
+Mod+D       = "ghostty"
 Mod+Shift+D = "{kill} ghostty"
 
 # z -> osu

@@ -4,6 +4,31 @@
 //! type a shell command and press Return to execute it via sh(1), or press Escape
 //! to dismiss without running anything. Full inline cursor editing is supported.
 //!
+//! ── Vim-mode ─────────────────────────────────────────────────────────────────
+//!
+//!  drun opens in INSERT mode. A mode label is anchored to the left of the
+//!  prompt area and updates live:
+//!
+//!    [INSERT]   — normal typing; Escape enters NORMAL mode
+//!    [NORMAL]   — motion / delete commands; i/a re-enters INSERT mode
+//!
+//!  NORMAL mode bindings:
+//!
+//!    i / a     — enter INSERT mode (a places cursor one step right, like vim)
+//!    h / l     — move left / right one character
+//!    w         — move forward one word
+//!    b         — move backward one word
+//!    $         — move to end of line
+//!    ^ / 0     — move to start of line
+//!    d + w     — delete forward one word
+//!    d + b     — delete backward one word
+//!    d + $     — delete to end of line
+//!    d + ^ / 0 — delete to start of line
+//!    d + d     — delete entire line (clear buffer)
+//!    Return    — execute and close (works in either mode)
+//!    Escape    — close drun (from NORMAL mode)
+//!    Ctrl+C    — close drun (from either mode)
+//!
 //! ── Integration checklist ────────────────────────────────────────────────────
 //!
 //!  1. bar.zig  — In drawSegment(), replace the `.title` arm dispatch so that
@@ -87,19 +112,39 @@ const MIN_CURSOR_PX: u16 = 8;
 /// Vertical inset for the cursor block, in pixels.
 const CURSOR_V_PAD: u16  = 2;
 
+/// The two editing modes, displayed as a label anchored left of the prompt.
+const Mode = enum {
+    insert,
+    normal,
+
+    fn label(self: Mode) []const u8 {
+        return switch (self) {
+            .insert => "[INSERT]",
+            .normal => "[NORMAL]",
+        };
+    }
+};
+
 // ── Module state ──────────────────────────────────────────────────────────────
 
 const DrunState = struct {
-    active:          bool                     = false,
-    buf:             [MAX_INPUT]u8            = undefined,
-    len:             usize                    = 0,
+    active:          bool                = false,
+    mode:            Mode                = .insert,
+    /// Set to true when 'd' has been pressed in NORMAL mode and we are waiting
+    /// for the second key of a delete motion (dw / db / d$ / d^ / dd).
+    pending_d:       bool                = false,
+    buf:             [MAX_INPUT]u8       = undefined,
+    len:             usize               = 0,
     /// Byte offset of the text-insertion point within buf[0..len].
-    cursor:          usize                    = 0,
-    key_syms:        ?*xcb_key_symbols_t      = null,
+    cursor:          usize               = 0,
+    key_syms:        ?*xcb_key_symbols_t = null,
     /// Cached pixel width of the prompt string. Measured once per activation
     /// (on the first drawActive call) and reused for all subsequent keystrokes.
     /// Reset to null on deactivate so a font reload between sessions re-measures.
-    cached_prompt_w: ?u16                     = null,
+    cached_prompt_w: ?u16                = null,
+    /// Cached pixel widths for each mode label; index matches Mode ordinal.
+    /// Both are reset to null on deactivate.
+    cached_mode_w:   [2]?u16            = .{ null, null },
 };
 
 var g: DrunState = .{};
@@ -141,34 +186,19 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *defs.WM) boo
 
     const syms = g.key_syms orelse return true; // active but no syms: swallow events
 
-    // Try shifted keysym first so Shift+char gives the correct upper-case glyph.
-    const col: c_int  = if (event.state & xcb.XCB_MOD_MASK_SHIFT != 0) 1 else 0;
-    const sym         = xcb_key_symbols_get_keysym(syms, event.detail, col);
+    // Resolve the keysym. Use the shifted column so Shift+char gives the right glyph.
+    const col: c_int = if (event.state & xcb.XCB_MOD_MASK_SHIFT != 0) 1 else 0;
+    const sym        = xcb_key_symbols_get_keysym(syms, event.detail, col);
 
-    switch (sym) {
+    // Ctrl+C — cancel from either mode.
+    if (event.state & xcb.XCB_MOD_MASK_CONTROL != 0 and sym == 'c') {
+        deactivate(wm);
+        return true;
+    }
 
-        XK_Escape => deactivate(wm),
-
-        XK_Return => {
-            const cmd = g.buf[0..g.len];
-            if (cmd.len > 0) spawnCommand(cmd);
-            deactivate(wm);
-        },
-
-        XK_BackSpace => deleteBefore(),
-        XK_Delete    => deleteAfter(),
-        XK_Left      => { if (g.cursor > 0) g.cursor -= 1; },
-        XK_Right     => { if (g.cursor < g.len) g.cursor += 1; },
-        XK_Home      => g.cursor = 0,
-        XK_End       => g.cursor = g.len,
-
-        else => {
-            // Accept printable ASCII (0x20–0x7e).  Extending to full Unicode
-            // would require xkb UTF-8 conversion; keep it simple for now.
-            if (sym >= 0x20 and sym <= 0x7e) {
-                insertChar(@truncate(sym));
-            }
-        },
+    switch (g.mode) {
+        .insert => handleInsert(sym, wm),
+        .normal => handleNormal(sym, wm),
     }
 
     return true;
@@ -206,12 +236,106 @@ pub fn draw(
     return drawActive(dc, config, height, start_x, width);
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
+// ── Internal: mode handlers ───────────────────────────────────────────────────
+
+/// Key handler for INSERT mode.
+fn handleInsert(sym: xcb.xcb_keysym_t, wm: *defs.WM) void {
+    switch (sym) {
+
+        // Escape: enter NORMAL mode instead of quitting.
+        XK_Escape => {
+            g.mode      = .normal;
+            g.pending_d = false;
+        },
+
+        XK_Return => {
+            const cmd = g.buf[0..g.len];
+            if (cmd.len > 0) spawnCommand(cmd);
+            deactivate(wm);
+        },
+
+        XK_BackSpace => deleteBefore(),
+        XK_Delete    => deleteAfter(),
+        XK_Left      => { if (g.cursor > 0) g.cursor -= 1; },
+        XK_Right     => { if (g.cursor < g.len) g.cursor += 1; },
+        XK_Home      => g.cursor = 0,
+        XK_End       => g.cursor = g.len,
+
+        else => {
+            // Accept printable ASCII (0x20–0x7e).
+            if (sym >= 0x20 and sym <= 0x7e) {
+                insertChar(@truncate(sym));
+            }
+        },
+    }
+}
+
+/// Key handler for NORMAL mode.
+fn handleNormal(sym: xcb.xcb_keysym_t, wm: *defs.WM) void {
+    // ── Pending-d: resolve the second key of a delete motion ─────────────────
+    if (g.pending_d) {
+        g.pending_d = false;
+        switch (sym) {
+            'w'           => deleteRange(g.cursor, wordForwardPos()),
+            'b'           => deleteRange(wordBackwardPos(), g.cursor),
+            '$', XK_End   => deleteRange(g.cursor, g.len),
+            '^', '0',
+            XK_Home       => deleteRange(0, g.cursor),
+            'd'           => { g.cursor = 0; g.len = 0; }, // dd — clear line
+            else          => {}, // unrecognised second key — cancel silently
+        }
+        return;
+    }
+
+    // ── Normal single-key commands ────────────────────────────────────────────
+    switch (sym) {
+
+        // Escape in NORMAL mode: quit drun entirely.
+        XK_Escape => deactivate(wm),
+
+        XK_Return => {
+            const cmd = g.buf[0..g.len];
+            if (cmd.len > 0) spawnCommand(cmd);
+            deactivate(wm);
+        },
+
+        // Enter INSERT mode at cursor position.
+        'i' => g.mode = .insert,
+
+        // Enter INSERT mode, advance cursor one step first (vim 'a' — append).
+        'a' => {
+            if (g.cursor < g.len) g.cursor += 1;
+            g.mode = .insert;
+        },
+
+        // Character motions (h/l mirror the arrow keys).
+        'h', XK_Left  => { if (g.cursor > 0) g.cursor -= 1; },
+        'l', XK_Right => { if (g.cursor < g.len) g.cursor += 1; },
+
+        // Word motions.
+        'w' => g.cursor = wordForwardPos(),
+        'b' => g.cursor = wordBackwardPos(),
+
+        // Line-end motions.
+        '$', XK_End => g.cursor = g.len,
+        '^', '0',
+        XK_Home     => g.cursor = 0,
+
+        // Begin a delete motion — arm pending_d and wait for the second key.
+        'd' => g.pending_d = true,
+
+        else => {}, // ignore unbound keys in normal mode
+    }
+}
+
+// ── Internal: editing helpers ─────────────────────────────────────────────────
 
 fn activate(wm: *defs.WM) void {
-    g.len    = 0;
-    g.cursor = 0;
-    g.active = true;
+    g.len           = 0;
+    g.cursor        = 0;
+    g.mode          = .insert;
+    g.pending_d     = false;
+    g.active        = true;
 
     const cookie = xcb.xcb_grab_keyboard(
         wm.conn,
@@ -229,7 +353,9 @@ fn activate(wm: *defs.WM) void {
 
 fn deactivate(wm: *defs.WM) void {
     g.active          = false;
+    g.pending_d       = false;
     g.cached_prompt_w = null;
+    g.cached_mode_w   = .{ null, null };
     _ = xcb.xcb_ungrab_keyboard(wm.conn, xcb.XCB_CURRENT_TIME);
     _ = xcb.xcb_flush(wm.conn);
 }
@@ -270,6 +396,33 @@ fn deleteAfter() void {
     g.len -= 1;
 }
 
+/// Delete the half-open byte range [from, to) and place the cursor at `from`.
+fn deleteRange(from: usize, to: usize) void {
+    if (from >= to or to > g.len) return;
+    const count = to - from;
+    std.mem.copyForwards(u8, g.buf[from .. g.len - count], g.buf[to .. g.len]);
+    g.len    -= count;
+    g.cursor  = from;
+}
+
+/// Return the cursor position after a 'w' (forward-word) motion.
+/// Skips the current run of non-space chars, then skips any following spaces.
+fn wordForwardPos() usize {
+    var p = g.cursor;
+    while (p < g.len and g.buf[p] != ' ') p += 1; // skip word chars
+    while (p < g.len and g.buf[p] == ' ') p += 1; // skip spaces
+    return p;
+}
+
+/// Return the cursor position after a 'b' (backward-word) motion.
+/// Skips any spaces going left, then skips the preceding run of non-space chars.
+fn wordBackwardPos() usize {
+    var p = g.cursor;
+    while (p > 0 and g.buf[p - 1] == ' ') p -= 1; // skip spaces
+    while (p > 0 and g.buf[p - 1] != ' ') p -= 1; // skip word chars
+    return p;
+}
+
 /// Spawn `sh -c <cmd>` detached via double-fork so the grandchild is re-parented
 /// to init. Mirrors the pattern used by input.zig's executeShellCommand.
 fn spawnCommand(cmd: []const u8) void {
@@ -300,14 +453,17 @@ fn spawnCommand(cmd: []const u8) void {
     }
 }
 
+// ── Rendering ─────────────────────────────────────────────────────────────────
+
 /// Render the active input UI into the title area.
 ///
-/// Layout:
+/// Layout (left to right, all within the padded region):
 ///
-///   [ pad | PROMPT | text_before_cursor | [CURSOR] | text_after_cursor | pad ]
+///   [ pad | MODE_LABEL | scrollable: PROMPT | pre | CURSOR | post | pad ]
 ///
-/// Text is clipped to a scrollable viewport centred around the cursor so the
-/// field never overflows and the user always sees the point of insertion.
+/// The mode label ([INSERT] / [NORMAL]) is pinned to the left edge and does
+/// not scroll. Everything to its right — the prompt and input text — scrolls
+/// horizontally to keep the cursor in view.
 fn drawActive(
     dc:      *drawing.DrawContext,
     config:  defs.BarConfig,
@@ -322,16 +478,36 @@ fn drawActive(
     const fg     = config.getDrunFg();
     const prompt = config.drun_prompt;
 
-    // Full background
+    // Full background.
     dc.fillRect(start_x, 0, width, height, bg);
 
-    const text_start_x = start_x + pad;
-    const max_text_px  = end_x -| pad -| text_start_x; // usable pixel width
+    const baseline    = dc.baselineY(height);
+    const text_left_x = start_x + pad;  // absolute x where text area begins
+    const text_end_x  = end_x   -| pad; // absolute x where text area ends
 
-    // ── Measure sub-strings ───────────────────────────────────────────────────
-    // The prompt string is constant for the lifetime of an activation; cache its
-    // width after the first measurement so subsequent keystrokes skip one
-    // pango_layout_set_text + pango_layout_get_pixel_size round-trip.
+    if (text_left_x >= text_end_x) return end_x; // no usable space
+
+    // ── Mode label (pinned, not scrolled) ─────────────────────────────────────
+    const mode_label = g.mode.label();
+    const mode_idx: usize = @intFromEnum(g.mode);
+
+    const mode_w: u16 = g.cached_mode_w[mode_idx] orelse blk: {
+        const w = dc.textWidth(mode_label);
+        g.cached_mode_w[mode_idx] = w;
+        break :blk w;
+    };
+
+    if (mode_w > 0 and text_left_x + mode_w <= text_end_x) {
+        try dc.drawText(text_left_x, baseline, mode_label, accent);
+    }
+
+    // The scrollable region starts right after the mode label.
+    const scroll_left_x = text_left_x + mode_w;
+    if (scroll_left_x >= text_end_x) return end_x;
+
+    const max_scroll_px: u16 = text_end_x - scroll_left_x;
+
+    // ── Measure scrollable content ────────────────────────────────────────────
     const prompt_w: u16 = g.cached_prompt_w orelse blk: {
         const w = dc.textWidth(prompt);
         g.cached_prompt_w = w;
@@ -346,46 +522,44 @@ fn drawActive(
     const cur_w  = @max(dc.textWidth(cur_text), MIN_CURSOR_PX);
     const post_w = dc.textWidth(post_text);
 
-    // Total content width; may exceed max_text_px for long inputs.
+    // Total scrollable content width; may exceed max_scroll_px for long inputs.
     const content_w = prompt_w + pre_w + cur_w + post_w;
 
-    // ── Horizontal scroll offset (keeps cursor visible) ───────────────────────
+    // ── Scroll offset — keeps the cursor block visible ────────────────────────
     var scroll_x: u16 = 0;
-    if (content_w > max_text_px) {
+    if (content_w > max_scroll_px) {
         const cursor_left  = prompt_w + pre_w;
         const cursor_right = cursor_left + cur_w;
-
-        if (cursor_right > max_text_px) {
-            scroll_x = cursor_right -| max_text_px +| cur_w;
+        if (cursor_right > max_scroll_px) {
+            scroll_x = cursor_right -| max_scroll_px +| cur_w;
         }
     }
 
-    // ── Draw ──────────────────────────────────────────────────────────────────
-    var px: i32 = @as(i32, text_start_x) - @as(i32, scroll_x);
-    const baseline = dc.baselineY(height);
+    // ── Draw scrollable content ───────────────────────────────────────────────
+    var px: i32 = @as(i32, scroll_left_x) - @as(i32, scroll_x);
 
     // Prompt
-    if (px + @as(i32, prompt_w) > @as(i32, text_start_x) and px < @as(i32, end_x -| pad)) {
-        const draw_x: u16 = @intCast(@max(px, @as(i32, text_start_x)));
+    if (px + @as(i32, prompt_w) > @as(i32, scroll_left_x) and px < @as(i32, text_end_x)) {
+        const draw_x: u16 = @intCast(@max(px, @as(i32, scroll_left_x)));
         try dc.drawText(draw_x, baseline, prompt, accent);
     }
     px += @intCast(prompt_w);
 
     // Text before cursor
     if (pre_text.len > 0) {
-        if (px + @as(i32, pre_w) > @as(i32, text_start_x) and px < @as(i32, end_x -| pad)) {
-            const draw_x: u16 = @intCast(@max(px, @as(i32, text_start_x)));
+        if (px + @as(i32, pre_w) > @as(i32, scroll_left_x) and px < @as(i32, text_end_x)) {
+            const draw_x: u16 = @intCast(@max(px, @as(i32, scroll_left_x)));
             try dc.drawText(draw_x, baseline, pre_text, fg);
         }
         px += @intCast(pre_w);
     }
 
     // Cursor block
-    if (px + @as(i32, cur_w) > @as(i32, text_start_x) and px < @as(i32, end_x -| pad)) {
-        const draw_x: u16 = @intCast(@max(px, @as(i32, text_start_x)));
+    if (px + @as(i32, cur_w) > @as(i32, scroll_left_x) and px < @as(i32, text_end_x)) {
+        const draw_x: u16 = @intCast(@max(px, @as(i32, scroll_left_x)));
         const visible_w: u16 = @intCast(@min(
             @as(i32, cur_w),
-            @as(i32, end_x -| pad) - px,
+            @as(i32, text_end_x) - px,
         ));
         if (visible_w > 0) {
             dc.fillRect(draw_x, CURSOR_V_PAD, visible_w, height -| CURSOR_V_PAD * 2, accent);
@@ -396,9 +570,9 @@ fn drawActive(
     px += @intCast(cur_w);
 
     // Text after cursor
-    if (post_text.len > 0 and px < @as(i32, end_x -| pad)) {
-        const draw_x: u16 = @intCast(@max(px, @as(i32, text_start_x)));
-        const remaining: u16 = end_x -| pad -| draw_x;
+    if (post_text.len > 0 and px < @as(i32, text_end_x)) {
+        const draw_x: u16 = @intCast(@max(px, @as(i32, scroll_left_x)));
+        const remaining: u16 = text_end_x -| draw_x;
         if (remaining > 0)
             try dc.drawTextEllipsis(draw_x, baseline, post_text, remaining, fg);
     }

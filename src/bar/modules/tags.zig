@@ -109,6 +109,9 @@ pub fn draw(
     const ind_size = config.scaledIndicatorSize(height);
     var x = start_x;
 
+    // baselineY returns the same value for every cell — hoist it once outside the loop.
+    const baseline_y = dc.baselineY(height);
+
     for (ws_has_windows, 0..) |has_windows, i| {
         const is_current = i == ws_current;
         const bg         = if (is_current) config.selected_bg else config.bg;
@@ -119,7 +122,7 @@ pub fn draw(
         const label   = getLabel(i, config);
         const label_w = if (i < label_widths.len) label_widths[i] else dc.textWidth(label);
         const text_x  = x + (ws_width - label_w) / 2;
-        try dc.drawText(text_x, dc.baselineY(height), label, fg);
+        try dc.drawText(text_x, baseline_y, label, fg);
 
         if (has_windows) {
             const glyph = if (is_current) config.indicator_focused else config.indicator_unfocused;

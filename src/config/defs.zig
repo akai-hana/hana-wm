@@ -48,6 +48,8 @@ pub const Action = union(enum) {
     swap_master,
     switch_workspace:  u8,
     move_to_workspace: u8,
+    tag_toggle:        u8, // Mod+Shift+N: toggle tag N (remove from current if adding)
+    tag_additive:      u8, // Mod+Alt+N:   toggle tag N (keep current workspace when adding)
     dump_state,
     emergency_recover,
     minimize_window,
@@ -56,6 +58,7 @@ pub const Action = union(enum) {
     unminimize_all,
     cycle_layout_variation,
     drun_toggle,
+    toggle_float,
 
     pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -70,6 +73,17 @@ pub const Keybind = struct {
     keysym:    u32, // X11 keysym (must be u32) //TODO: why?
     keycode:   ?u8 = null,
     action:    Action,
+};
+
+/// A binding triggered by a mouse button press with modifier keys held.
+pub const MouseBind = struct {
+    modifiers: u16,
+    button:    u8,
+    action:    Action,
+
+    pub fn deinit(self: *MouseBind, allocator: std.mem.Allocator) void {
+        self.action.deinit(allocator);
+    }
 };
 
 pub const MasterSide = enum {
@@ -396,7 +410,8 @@ pub const WorkspaceConfig = struct {
 };
 
 pub const Config = struct {
-    keybindings: std.ArrayListUnmanaged(Keybind) = .{},
+    keybindings:   std.ArrayListUnmanaged(Keybind)   = .{},
+    mouse_bindings: std.ArrayListUnmanaged(MouseBind) = .{},
     tiling:      TilingConfig,
     workspaces:  WorkspaceConfig = .{},
     bar:         BarConfig,
@@ -429,6 +444,9 @@ pub const Config = struct {
         const a = self.allocator;
         for (self.keybindings.items) |*kb| kb.action.deinit(a);
         self.keybindings.deinit(a);
+
+        for (self.mouse_bindings.items) |*mb| mb.deinit(a);
+        self.mouse_bindings.deinit(a);
 
         for (self.workspaces.rules.items) |*rule| rule.deinit(a);
         self.workspaces.rules.deinit(a);
@@ -581,8 +599,8 @@ pub const SpawnQueue = struct {
 
 /// Per-window minimize record.
 pub const MinimizedEntry = struct {
-    saved_fs:  ?WindowGeometry, // non-null iff the window was fullscreen when minimized
-    workspace: u8,              // index into MinimizeState.per_workspace
+    saved_fs:       ?WindowGeometry, // non-null iff the window was fullscreen when minimized
+    workspace_mask: u64,             // bitmask of all workspaces this window belongs to
 };
 
 /// Per-workspace minimization state, owned by WM.

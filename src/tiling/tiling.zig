@@ -90,7 +90,7 @@ pub const LayoutVariations = struct {
     grid:    GridVariation    = .rigid,
 };
 
-// ── State ─────────────────────────────────────────────────────────────────────
+// State 
 
 pub const State = struct {
     allocator:        std.mem.Allocator,
@@ -149,13 +149,13 @@ pub const State = struct {
     }
 };
 
-// ── Module singleton ──────────────────────────────────────────────────────────
+// Module singleton 
 
 var g_state: ?State = null;
 
 pub fn getState() ?*State { return if (g_state) |*s| s else null; }
 
-// ── Config ────────────────────────────────────────────────────────────────────
+// Config 
 
 fn computeMasterWidth(wm: *WM) f32 {
     const raw = dpi.scaleMasterWidth(wm.config.tiling.master_width);
@@ -248,7 +248,7 @@ pub fn reloadConfig(wm: *WM) void {
     }
 }
 
-// ── Window management ─────────────────────────────────────────────────────────
+// Window management 
 
 pub fn addWindow(wm: *WM, window_id: u32) void {
     std.debug.assert(window_id != 0);
@@ -285,6 +285,49 @@ pub fn removeWindow(window_id: u32) void {
     }
 }
 
+/// Toggle a window between tiled and floating.
+///
+/// Tiled → floating: removes the window from the tiling pool so it sits
+/// freely at its current position.
+///
+/// Floating → tiled: hands the window back to the tiling pool (respecting
+/// the current layout's LIFO/FIFO insertion rule) and immediately retiles
+/// the workspace so the new window gets a proper slot.
+pub fn toggleWindowFloat(wm: *WM, window_id: u32) void {
+    const s = getState() orelse return;
+    if (!s.enabled) return;
+
+    if (s.windows.contains(window_id)) {
+        removeWindow(window_id);
+        retileCurrentWorkspace(wm);
+        debug.info("[FLOAT] 0x{x} → floating", .{window_id});
+    } else {
+        addWindow(wm, window_id);
+        retileCurrentWorkspace(wm);
+        debug.info("[FLOAT] 0x{x} → tiled", .{window_id});
+    }
+    utils.flush(wm.conn);
+}
+
+/// Save geometry for any window (tiled or floating) into the shared cache.
+/// Called by the workspace switcher before pushing windows off-screen so that
+/// floating windows can be restored to their exact position on return.
+pub fn saveWindowGeom(window_id: u32, rect: utils.Rect) void {
+    const s = getState() orelse return;
+    const gop = s.cache.getOrPut(s.allocator, window_id) catch return;
+    gop.value_ptr.rect = rect;
+    if (!gop.found_existing) gop.value_ptr.border = 0;
+}
+
+/// Return the cached geometry for any window (tiled or floating).
+/// Returns null when no entry exists or the entry was invalidated (zeroed rect).
+pub fn getWindowGeom(window_id: u32) ?utils.Rect {
+    const s = getState() orelse return null;
+    const wd = s.cache.get(window_id) orelse return null;
+    if (wd.rect.width == 0 and wd.rect.height == 0) return null;
+    return wd.rect;
+}
+
 // Evict a window's rect from the cache without removing it from tiling.
 // Call whenever a window's position is changed outside the normal retile path
 // (e.g. pushed offscreen during fullscreen) so the next retile does not find
@@ -295,6 +338,20 @@ pub fn invalidateGeomCache(window_id: u32) void {
     if (s.cache.getPtr(window_id)) |wd| {
         wd.rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
     }
+}
+
+/// Clear the workspace-valid bit for `ws_idx` so the next restoreWorkspaceGeom
+/// for that workspace triggers a full retile. Used when a window's tag changes
+/// for an inactive workspace without touching the current one.
+pub fn invalidateWsGeomBit(ws_idx: u8) void {
+    const s = getState() orelse return;
+    if (ws_idx < 64) s.ws_geom_valid &= ~(@as(u64, 1) << @intCast(ws_idx));
+}
+
+/// Mark tiling dirty without immediately retriling.
+pub fn dirty() void {
+    const s = getState() orelse return;
+    s.dirty = true;
 }
 
 // Restore windows on the current workspace to their cached tiled positions,
@@ -348,7 +405,7 @@ pub fn getCachedGeom(window_id: u32) ?utils.Rect {
     return wd.rect;
 }
 
-// ── Layout dispatch ───────────────────────────────────────────────────────────
+// Layout dispatch 
 
 fn dispatchLayout(layout: Layout, ctx: *const layouts.LayoutCtx, s: *State, wins: []const u32, w: u16, h: u16, y: u16) void {
     switch (layout) {
@@ -359,7 +416,7 @@ fn dispatchLayout(layout: Layout, ctx: *const layouts.LayoutCtx, s: *State, wins
     }
 }
 
-// ── Screen area ───────────────────────────────────────────────────────────────
+// Screen area 
 
 fn calculateScreenArea(wm: *WM) utils.Rect {
     const bar_height: u16 = if (bar.isVisible()) bar.getBarHeight() else 0;
@@ -372,7 +429,7 @@ fn calculateScreenArea(wm: *WM) utils.Rect {
     };
 }
 
-// ── Retiling ──────────────────────────────────────────────────────────────────
+// Retiling 
 
 // Retile every tiled window on every workspace.
 pub fn retileAllWorkspaces(wm: *WM) void {
@@ -526,7 +583,7 @@ fn retile(wm: *WM, screen: utils.Rect, for_ws: ?u8) void {
     markWsGeomValid(s, target_ws);
 }
 
-// ── Border management ─────────────────────────────────────────────────────────
+// Border management 
 
 // Send border pixel only if color changed since last send.
 // Uses the merged cache (WindowData.border) — one getOrPut covers dedup + insert.
@@ -554,7 +611,7 @@ pub fn updateWindowFocus(wm: *WM, old_focused: ?u32, new_focused: ?u32) void {
     }
 }
 
-// ── Window reordering ─────────────────────────────────────────────────────────
+// Window reordering 
 
 // Move the window at from_idx to to_idx in tiling order.
 // Buffer is capped at MAX_WS_WINDOWS to be consistent with all other
@@ -612,7 +669,7 @@ pub fn swapWithMaster(wm: *WM) void {
     retileCurrentWorkspace(wm);
 }
 
-// ── Layout and master controls ────────────────────────────────────────────────
+// Layout and master controls 
 
 pub fn toggleTiling(wm: *WM) void {
     const s = getState() orelse return;
@@ -738,7 +795,7 @@ pub fn getVariationIndicator(s: *const State) []const u8 {
     };
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
+// Internal helpers 
 
 // Set the per-workspace geometry-valid bit. ws_idx must be < 64.
 inline fn markWsGeomValid(s: *State, ws_idx: anytype) void {
@@ -753,7 +810,7 @@ fn filterWorkspaceWindows(s: *State, buf: []u32, for_ws: ?u8) usize {
     for (s.windows.items()) |win| {
         if (n >= buf.len) break;
         const on_ws = if (for_ws) |idx|
-            (workspaces.getWorkspaceForWindow(win) orelse continue) == @as(usize, idx)
+            workspaces.isWindowOnWorkspace(win, idx)
         else
             workspaces.isOnCurrentWorkspace(win);
         if (on_ws) { buf[n] = win; n += 1; }

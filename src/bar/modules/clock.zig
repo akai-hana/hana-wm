@@ -11,22 +11,17 @@ const c = @cImport(@cInclude("time.h"));
 
 pub const SAMPLE_STRING: []const u8 = "0000-00-00 00:00:00";
 
-const TimerState = struct {
-    enabled: bool = false,
-};
-
-var timer:               TimerState = .{};
-var last_formatted_time: [20]u8     = undefined;
-var last_formatted_sec:  i64        = -1;
-
+var timer_enabled:       bool    = false;
+var last_formatted_time: [20]u8  = undefined;
+var last_formatted_sec:  i64     = -1;
 
 fn shouldClockRun() bool {
     return bar.isVisible() and bar.hasClockSegment();
 }
 
 fn setTimerState(enable: bool) void {
-    if (enable != timer.enabled) {
-        timer.enabled = enable;
+    if (enable != timer_enabled) {
+        timer_enabled = enable;
         debug.info("Clock timer {s}", .{if (enable) "enabled" else "disabled"});
     }
 }
@@ -34,7 +29,7 @@ fn setTimerState(enable: bool) void {
 /// Returns the number of milliseconds until the next whole-second boundary,
 /// or -1 if the clock is disabled (telling poll to block indefinitely).
 pub fn pollTimeoutMs() i32 {
-    if (!timer.enabled) return -1;
+    if (!timer_enabled) return -1;
     const now_ts = std.posix.clock_gettime(.REALTIME) catch return 1000;
     const ns_remaining: u64 = @intCast(std.time.ns_per_s - now_ts.nsec);
     // Round up to the nearest millisecond so we never fire slightly early.
@@ -47,8 +42,8 @@ pub fn updateTimerState() void {
 
 pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start_x: u16) !u16 {
     // Derive seconds from clock_gettime(REALTIME); sub-second precision is not needed for display.
-    const now_ts2 = std.posix.clock_gettime(.REALTIME) catch unreachable;
-    const sec: i64 = now_ts2.sec;
+    const now_ts = std.posix.clock_gettime(.REALTIME) catch unreachable;
+    const sec: i64 = now_ts.sec;
     const time_str = if (sec == last_formatted_sec)
         last_formatted_time[0..19]
     else blk: {

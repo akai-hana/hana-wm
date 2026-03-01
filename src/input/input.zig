@@ -25,9 +25,10 @@ const c = @cImport({
     @cInclude("fcntl.h");
 });
 
-const MOUSE_BUTTON_LEFT:  u8 = 1;
-const MOUSE_BUTTON_RIGHT: u8 = 3;
-const MOUSE_BUTTONS = [_]u8{ MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT };
+const MOUSE_BUTTON_LEFT:   u8 = 1;
+const MOUSE_BUTTON_MIDDLE: u8 = 2;
+const MOUSE_BUTTON_RIGHT:  u8 = 3;
+const MOUSE_BUTTONS = [_]u8{ MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_RIGHT };
 
 // Keybind state
 // TODO: move KeybindState into WM to eliminate module-level mutable global.
@@ -138,6 +139,23 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) vo
         return;
     }
 
+    // Check config-driven mouse binds (e.g. Super+MiddleClick = "toggle_float").
+    // These take priority over the default drag behaviour so a bind is never
+    // swallowed by the drag handler.
+    if ((event.state & defs.MOD_SUPER) != 0) {
+        const mods = utils.normalizeModifiers(event.state);
+        for (wm.config.mouse_bindings.items) |*mb| {
+            if (mb.modifiers == mods and mb.button == event.detail) {
+                executeMouseAction(&mb.action, wm, managed_window)
+                    catch |err| debug.err("mouse bind error: {}", .{err});
+                _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_REPLAY_POINTER,  event.time);
+                _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, event.time);
+                utils.flush(wm.conn);
+                return;
+            }
+        }
+    }
+
     if ((event.state & defs.MOD_SUPER) != 0 and
         (event.detail == MOUSE_BUTTON_LEFT or event.detail == MOUSE_BUTTON_RIGHT)) {
         drag.startDrag(wm, managed_window, event.detail, event.root_x, event.root_y);
@@ -237,9 +255,22 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
         .unminimize_lifo        => minimize.unminimize(wm, .lifo),
         .unminimize_fifo        => minimize.unminimize(wm, .fifo),
         .unminimize_all         => minimize.unminimizeAll(wm),
+        .toggle_float           => { if (wm.focused_window) |win| tiling.toggleWindowFloat(wm, win); },
+        .tag_toggle             => |ws| { if (wm.focused_window) |win| workspaces.tagToggle(wm, win, ws); },
+        .tag_additive           => |ws| { if (wm.focused_window) |win| workspaces.tagAdditive(wm, win, ws); },
         .exec                   => |cmd| try executeShellCommand(wm, cmd),
         .switch_workspace       => |ws| workspaces.switchTo(wm, ws),
         .move_to_workspace      => |ws| { if (wm.focused_window) |win| workspaces.moveWindowTo(wm, win, ws) catch |e| debug.warnOnErr(e, "move_to_workspace"); },
+    }
+}
+
+/// Like executeAction but carries the specific window that was clicked.
+/// Used by the mouse bind dispatcher so toggle_float acts on the clicked
+/// window rather than the keyboard-focused one (they may differ).
+fn executeMouseAction(action: *const defs.Action, wm: *WM, clicked_win: u32) !void {
+    switch (action.*) {
+        .toggle_float => tiling.toggleWindowFloat(wm, clicked_win),
+        else          => try executeAction(action, wm),
     }
 }
 
@@ -340,7 +371,7 @@ fn executeShellCommand(wm: *WM, cmd: []const u8) !void {
 fn dumpState(wm: *WM) void {
     debug.info("========== STATE DUMP ==========", .{});
     debug.info("Focused: {?x}",         .{wm.focused_window});
-    const win_count = if (workspaces.getState()) |s| s.window_to_workspace.count() else 0;
+    const win_count = if (workspaces.getState()) |s| s.window_to_workspaces.count() else 0;
     debug.info("Total windows: {}",     .{win_count});
     debug.info("Suppress focus: {s}",   .{@tagName(wm.suppress_focus_reason)});
 
