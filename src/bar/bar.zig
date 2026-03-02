@@ -490,6 +490,11 @@ pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
         }
     }
 
+    /// Non-blocking draw submission for use by external callers (e.g. drun blink tick).
+    /// Equivalent to submitDraw(wm, false): posts a snapshot to the bar thread and
+    /// returns immediately without waiting for the draw to complete.
+    pub fn submitDrawAsync(wm: *defs.WM) void { submitDraw(wm, false); }
+
     // ── Module singleton ─────────────────────────────────────────────────────
 
     var state: ?*State = null;

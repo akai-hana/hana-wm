@@ -10,7 +10,7 @@ pub fn build(b: *std.Build) void {
         "Set the optimization mode (Debug, ReleaseFast, ReleaseSafe, ReleaseSmall)")
         orelse .ReleaseFast;
 
-    // ── Install prefix ────────────────────────────────────────────────────────
+    // Install prefix 
     // Try system-wide bin directories in order; fall back to ./bin/ if none are
     // writable or exist. The user can still override with -Dprefix=... as usual.
     if (b.install_prefix.len == 0 or std.mem.eql(u8, b.install_prefix, b.pathFromRoot("zig-out"))) {
@@ -239,12 +239,12 @@ fn findModuleImports(
 }
 
 fn linkSystemLibraries(root: *std.Build.Module, has_bar: bool) void {
-    root.linkSystemLibrary("xcb", .{});
-    root.linkSystemLibrary("xkbcommon", .{});
-    root.linkSystemLibrary("xkbcommon-x11", .{});
     root.linkSystemLibrary("X11", .{});
+    root.linkSystemLibrary("xcb", .{});
     root.linkSystemLibrary("xcb-cursor", .{});
     root.linkSystemLibrary("xcb-keysyms", .{});
+    root.linkSystemLibrary("xkbcommon", .{});
+    root.linkSystemLibrary("xkbcommon-x11", .{});
 
     if (has_bar) {
         root.linkSystemLibrary("cairo", .{});
@@ -255,7 +255,7 @@ fn linkSystemLibraries(root: *std.Build.Module, has_bar: bool) void {
     }
 }
 
-// ── Generated stub sources ────────────────────────────────────────────────────
+// Generated stub sources 
 
 const bar_stub_src =
     \\const defs = @import("defs");

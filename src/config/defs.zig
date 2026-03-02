@@ -60,7 +60,7 @@ pub const Action = union(enum) {
     drun_toggle,
     toggle_float,
 
-    pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
+    pub inline fn deinit(self: *Action, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .exec => |cmd| allocator.free(cmd),
             else  => {},
@@ -81,7 +81,7 @@ pub const MouseBind = struct {
     button:    u8,
     action:    Action,
 
-    pub fn deinit(self: *MouseBind, allocator: std.mem.Allocator) void {
+    pub inline fn deinit(self: *MouseBind, allocator: std.mem.Allocator) void {
         self.action.deinit(allocator);
     }
 };
@@ -90,15 +90,15 @@ pub const MasterSide = enum {
     left,
     right,
 
-    pub fn fromString(str: []const u8) ?MasterSide { return std.meta.stringToEnum(MasterSide, str); }
-    pub fn toString(value: MasterSide) []const u8   { return @tagName(value); }
+    pub inline fn fromString(str: []const u8) ?MasterSide { return std.meta.stringToEnum(MasterSide, str); }
+    pub inline fn toString(value: MasterSide) []const u8   { return @tagName(value); }
 
     // Support 'L'/'R' aliases in addition to full names.
     const alias_map = std.StaticStringMap(MasterSide).initComptime(.{
         .{ "l", .left }, .{ "left", .left },
         .{ "r", .right }, .{ "right", .right },
     });
-    pub fn fromStringWithAlias(str: []const u8) ?MasterSide {
+    pub inline fn fromStringWithAlias(str: []const u8) ?MasterSide {
         var buf: [16]u8 = undefined;
         if (str.len > buf.len) return null;
         return alias_map.get(std.ascii.lowerString(&buf, str));
@@ -158,7 +158,6 @@ pub const TilingConfig = struct {
     border_focused:   u32 = 0x5294E2, // RGB color (must be u32) //TODO: why?
     border_unfocused: u32 = 0x383C4A, // RGB color (must be u32) //TODO: why?
 
-
     // Per-layout variation preferences
     //
     // Stored as parsed enums (not raw strings) to avoid
@@ -207,7 +206,7 @@ pub const IndicatorLocation = enum {
     ///
     /// Accepts hyphens or underscores, and both orderings of diagonal names 
     /// (e.g. "left-up" == "up-left")
-    pub fn fromString(str: []const u8) ?IndicatorLocation {
+    pub inline fn fromString(str: []const u8) ?IndicatorLocation {
         //TODO: is there some way to micro-optimize this, so that somehow '-' == '_', and "up-/_left" == "left-/_up"?
         const map = std.StaticStringMap(IndicatorLocation).initComptime(.{
             .{ "up",          .up         },
@@ -242,7 +241,7 @@ pub const BarVerticalPosition = enum {
     top,
     bottom,
 
-    pub fn fromString(str: []const u8) ?BarVerticalPosition {
+    pub inline fn fromString(str: []const u8) ?BarVerticalPosition {
         return std.meta.stringToEnum(BarVerticalPosition, str);
     }
 };
@@ -252,7 +251,7 @@ pub const BarPosition = enum {
     center,
     right,
 
-    pub fn fromString(str: []const u8) ?BarPosition {
+    pub inline fn fromString(str: []const u8) ?BarPosition {
         return std.meta.stringToEnum(BarPosition, str);
     }
 };
@@ -264,7 +263,7 @@ pub const BarSegment = enum {
     layout,
     variations,
 
-    pub fn fromString(str: []const u8) ?BarSegment {
+    pub inline fn fromString(str: []const u8) ?BarSegment {
         return std.meta.stringToEnum(BarSegment, str);
     }
 };
@@ -374,7 +373,7 @@ pub const BarConfig = struct {
 
     /// Scales a ScalableValue to pixels. `factor` multiplies the percentage path;
     /// `scale` is applied on both paths (pass 1.0 to skip).
-    fn scaleValue(sv: parser.ScalableValue, bar_height: u16, factor: f32, scale: f32) f32 {
+    inline fn scaleValue(sv: parser.ScalableValue, bar_height: u16, factor: f32, scale: f32) f32 {
         const h: f32 = @floatFromInt(bar_height);
         return if (sv.is_percentage) h * factor * (sv.value / 100.0) * scale else sv.value * scale;
     }
@@ -502,8 +501,10 @@ pub const FullscreenState = struct {
     }
 
     pub fn setForWorkspace(self: *FullscreenState, ws: u8, info: FullscreenInfo) !void {
-        try self.per_workspace.put(ws, info);
-        try self.window_to_workspace.put(info.window, ws);
+        try self.per_workspace.ensureUnusedCapacity(1);
+        try self.window_to_workspace.ensureUnusedCapacity(1);
+        self.per_workspace.putAssumeCapacity(ws, info);
+        self.window_to_workspace.putAssumeCapacity(info.window, ws);
     }
 
     pub fn removeForWorkspace(self: *FullscreenState, ws: u8) void {
@@ -572,7 +573,7 @@ pub const SpawnQueue = struct {
     }
 
     /// Remove and return the workspace of the oldest daemon (pid=0) entry, or null.
-    pub fn popOldestDaemon(self: *SpawnQueue) ?u8 { return self.popWhere(.daemon, 0); }
+    pub inline fn popOldestDaemon(self: *SpawnQueue) ?u8 { return self.popWhere(.daemon, 0); }
 
     fn popWhere(self: *SpawnQueue, comptime mode: enum { by_pid, daemon }, target: u32) ?u8 {
         var i: u8 = 0;
@@ -586,7 +587,7 @@ pub const SpawnQueue = struct {
         return null;
     }
 
-    fn removeAt(self: *SpawnQueue, i: u8) void {
+    inline fn removeAt(self: *SpawnQueue, i: u8) void {
         var j: u8 = i;
         while (j + 1 < self.len) : (j += 1) {
             const cur  = (self.head + j)     % SPAWN_QUEUE_CAP;

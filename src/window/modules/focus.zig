@@ -60,7 +60,7 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     );
 
     // Raise on click/command, and also on hover for globally_active windows
-    // (Electron/Chromium only accept focus when topmost in the stacking order).
+    // (they never receive xcb_set_input_focus, so raising is the only signal).
     if (shouldRaise(reason) or (reason == .mouse_enter and input_model == .globally_active)) {
         _ = xcb.xcb_configure_window(
             wm.conn, win,
@@ -71,6 +71,56 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
 
     if (input_model == .locally_active or input_model == .globally_active) {
         utils.sendWMTakeFocus(wm.conn, win, wm.last_event_time);
+    }
+
+    // Compliant locally_active clients respond to xcb_set_input_focus directly
+    // and need no raise. Non-compliant ones (e.g. Electron, which mis-declares
+    // its input model) silently ignore the request unless they are already
+    // topmost. Passive clients (Java/AWT, some Electron builds that omit
+    // WM_TAKE_FOCUS) have the same problem — xcb_set_input_focus is silently
+    // dropped when the window is not topmost.
+    //
+    // Confirm via xcb_get_input_focus: if focus didn't land, raise and retry.
+    // The blocking reply also acts as a flush barrier, ensuring the original
+    // xcb_set_input_focus request has been processed before we check.
+    //
+    // This avoids unconditionally raising all passive/locally_active windows on
+    // hover while still self-correcting for any non-compliant client regardless
+    // of toolkit, class name, or property advertisement.
+    //
+    // For locally_active windows (e.g. Qt), WM_TAKE_FOCUS is the real focus
+    // activation trigger.  The client processes it asynchronously — potentially
+    // after our confirm check has already passed — and may redirect input focus
+    // to a child widget.  Re-sending WM_TAKE_FOCUS after the raise ensures the
+    // client processes it in the correct stacking context.
+    if (reason == .mouse_enter and
+        (input_model == .locally_active or input_model == .passive))
+    {
+        const confirm_cookie = xcb.xcb_get_input_focus(wm.conn);
+        const confirm = xcb.xcb_get_input_focus_reply(wm.conn, confirm_cookie, null);
+        if (confirm) |c| {
+            defer std.c.free(c);
+            if (c.*.focus != win) {
+                _ = xcb.xcb_configure_window(
+                    wm.conn, win,
+                    xcb.XCB_CONFIG_WINDOW_STACK_MODE,
+                    &[_]u32{xcb.XCB_STACK_MODE_ABOVE},
+                );
+                _ = xcb.xcb_set_input_focus(
+                    wm.conn,
+                    xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
+                    win,
+                    wm.last_event_time,
+                );
+                // Re-send WM_TAKE_FOCUS after the raise so locally_active
+                // clients (e.g. Qt) process it in the correct stacking context.
+                // Not sent for passive windows — they have no WM_TAKE_FOCUS
+                // handler and xcb_set_input_focus alone is the correct protocol.
+                if (input_model == .locally_active) {
+                    utils.sendWMTakeFocus(wm.conn, win, wm.last_event_time);
+                }
+            }
+        }
     }
 
     tiling.updateWindowFocus(wm, old, win);

@@ -21,7 +21,7 @@ const WINDOW_EVENT_MASK = constants.EventMasks.MANAGED_WINDOW;
 const XSIZE_HINTS_P_MIN_SIZE:  u32 = 0x010;
 const XSIZE_HINTS_P_BASE_SIZE: u32 = 0x100;
 
-// ── Module-level atom cache ───────────────────────────────────────────────────
+// Module-level atom cache 
 //
 // The three atoms used on every MapRequest are resolved once into plain u32
 // fields, turning per-event hash probes into direct field reads.
@@ -409,7 +409,23 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) vo
         event.mode == xcb.XCB_NOTIFY_MODE_UNGRAB) return;
     if (wm.drag_state.active) return;
     if (suppressSpawnCrossing(wm, event.root_x, event.root_y)) return;
-    const win = if (event.event == wm.root and event.child != 0) event.child else event.event;
+    var win = if (event.event == wm.root and event.child != 0) event.child else event.event;
+    // If the entered window isn't managed it may be an unmanaged child sub-window.
+    // Java/AWT (Minecraft, etc.) and other toolkits can nest multiple levels deep
+    // beneath the managed top-level, so walk up the full ancestor chain rather than
+    // a single hop — ICCCM §4.1.3.1 permits arbitrarily deep sub-window hierarchies.
+    if (!isOnCurrentWorkspace(wm, win)) {
+        var cur = win;
+        while (cur != 0 and cur != wm.root and !isOnCurrentWorkspace(wm, cur)) {
+            const tree = xcb.xcb_query_tree_reply(
+                wm.conn, xcb.xcb_query_tree(wm.conn, cur), null,
+            ) orelse break;
+            const parent = tree.*.parent;
+            std.c.free(tree);
+            cur = parent;
+        }
+        if (isOnCurrentWorkspace(wm, cur)) win = cur;
+    }
     maybeFocusWindow(wm, win);
 }
 

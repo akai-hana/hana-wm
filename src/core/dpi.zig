@@ -34,7 +34,7 @@ const ScreenDimensions = struct {
     width_mm:  f32,
     height_mm: f32,
 
-    fn from(screen: *xcb.xcb_screen_t) ScreenDimensions {
+    inline fn from(screen: *xcb.xcb_screen_t) ScreenDimensions {
         return .{
             .width_px  = @floatFromInt(screen.width_in_pixels),
             .height_px = @floatFromInt(screen.height_in_pixels),
@@ -43,7 +43,7 @@ const ScreenDimensions = struct {
         };
     }
 
-    fn diagonalPx(self: ScreenDimensions) f32 {
+    inline fn diagonalPx(self: ScreenDimensions) f32 {
         return @sqrt(self.width_px * self.width_px + self.height_px * self.height_px);
     }
 };
@@ -52,13 +52,13 @@ pub const DpiInfo = struct {
     dpi:          f32,
     scale_factor: f32,
 
-    pub fn init(dpi: f32) DpiInfo {
+    pub inline fn init(dpi: f32) DpiInfo {
         return .{ .dpi = dpi, .scale_factor = dpi / BASELINE_DPI };
     }
 };
 
 fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
-    const atom_cookie = xcb.xcb_intern_atom(conn, 0, 16, "RESOURCE_MANAGER");
+    const atom_cookie = xcb.xcb_intern_atom(conn, 0, "RESOURCE_MANAGER".len, "RESOURCE_MANAGER");
     const atom_reply  = xcb.xcb_intern_atom_reply(conn, atom_cookie, null) orelse return null;
     defer std.c.free(atom_reply);
 
@@ -180,7 +180,7 @@ pub inline fn scaleToInt(comptime T: type, base_value: f32, scale_factor: f32) T
     return @intFromFloat(@round(base_value * scale_factor));
 }
 
-pub fn scaleBorderWidth(value: @import("parser").ScalableValue, scale_factor: f32, reference_dimension: u16) u16 {
+pub inline fn scaleBorderWidth(value: @import("parser").ScalableValue, scale_factor: f32, reference_dimension: u16) u16 {
     if (value.is_percentage) {
         const dim_f: f32 = @floatFromInt(reference_dimension);
         return @intFromFloat(@max(0.0, @round((value.value / 100.0) * 0.5 * dim_f * scale_factor)));
@@ -192,11 +192,11 @@ pub fn scaleBorderWidth(value: @import("parser").ScalableValue, scale_factor: f3
 /// Alias for `scaleBorderWidth` — gaps and borders share identical scaling semantics.
 pub const scaleGaps = scaleBorderWidth;
 
-pub fn scaleMasterWidth(value: @import("parser").ScalableValue) f32 {
+pub inline fn scaleMasterWidth(value: @import("parser").ScalableValue) f32 {
     return if (value.is_percentage) value.value / 100.0 else -value.value;
 }
 
-pub fn scaleFontSize(value: @import("parser").ScalableValue, screen: *@import("defs").xcb.xcb_screen_t) u16 {
+pub inline fn scaleFontSize(value: @import("parser").ScalableValue, screen: *@import("defs").xcb.xcb_screen_t) u16 {
     if (value.is_percentage) {
         const screen_height: f32 = @floatFromInt(screen.height_in_pixels);
         return @intFromFloat(@max(1.0, @round(value.value * (screen_height / FONT_BASELINE_HEIGHT))));
@@ -205,7 +205,7 @@ pub fn scaleFontSize(value: @import("parser").ScalableValue, screen: *@import("d
     }
 }
 
-pub fn scaleBarHeight(value: @import("parser").ScalableValue, screen_height: u16) u16 {
+pub inline fn scaleBarHeight(value: @import("parser").ScalableValue, screen_height: u16) u16 {
     const MIN_PX: u16 = 20;
     const h: f32  = @floatFromInt(screen_height);
     const px: f32 = if (value.is_percentage)
