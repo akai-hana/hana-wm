@@ -35,11 +35,10 @@ global_layout = false
 #       Layout          Variation  Workspaces
 #              ("default"/"alts")  (restricted to)
 layouts = [
-	"master-stack",                   # "lifo"/"fifo"
-	"monocle",      "gapless", "4,5", # "gapless"/"gaps"
-	"monocle",      "gaps",    "6,7"
-	"grid",         "rigid",          # "rigid"/"relaxed"
-	"fibonacci",                      # no variations
+	"master-stack",                     # "lifo"/"fifo"
+	"monocle",      "gaps",    "2,5,8", # "gapless"/"gaps"
+	"grid",         "relaxed", "6",     # "rigid"/"relaxed"
+	# "fibonacci",                      # no variations
 ]
 
 [tiling.aesthetics]
@@ -307,6 +306,7 @@ emacs
 xeyes
 
 [workspace.rules.7] # Media
+prismlauncher
 freetube
 gimp
 

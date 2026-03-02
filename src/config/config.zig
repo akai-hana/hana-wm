@@ -46,20 +46,20 @@ fn get(
 }
 
 /// Resolves a color from a section key, accepting `#RRGGBB`, `0xRRGGBB`, or an integer.
-fn getColor(section: *const parser.Section, key: []const u8, default: u32) u32 {
+inline fn getColor(section: *const parser.Section, key: []const u8, default: u32) u32 {
     const value = section.get(key) orelse return default;
     if (value.asColor()) |c|   return c;
     if (value.asString()) |s|  return parseColor(s) catch {
         debug.warn("Invalid color for {s}: '{s}'", .{ key, s });
         return default;
     };
-    if (value.asInt()) |i| if (@as(u32, @intCast(@max(0, i))) <= 0xFFFFFF) return @intCast(i);
+    if (value.asInt()) |i| if (i >= 0 and i <= 0xFFFFFF) return @intCast(i);
     return default;
 }
 
 // Rule helpers
 
-fn validateWorkspace(ws_num: usize, max: usize, context: []const u8) bool {
+inline fn validateWorkspace(ws_num: usize, max: usize, context: []const u8) bool {
     if (ws_num < 1 or ws_num > max) {
         debug.warn("Rule workspace {} for '{s}' exceeds count {}, skipping", .{ ws_num, context, max });
         return false;
@@ -67,7 +67,7 @@ fn validateWorkspace(ws_num: usize, max: usize, context: []const u8) bool {
     return true;
 }
 
-fn addRule(allocator: std.mem.Allocator, cfg: *defs.Config, class_name: []const u8, ws_num: usize) !void {
+inline fn addRule(allocator: std.mem.Allocator, cfg: *defs.Config, class_name: []const u8, ws_num: usize) !void {
     try cfg.workspaces.rules.append(allocator, .{
         .class_name = try allocator.dupe(u8, class_name),
         .workspace  = @intCast(ws_num - 1),
@@ -172,8 +172,11 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !defs.Config {
 
     if (std.mem.eql(u8, cfg.bar.font, "auto")) {
         const detected_font  = try fallback.detectFont(allocator);
+        defer allocator.free(detected_font);
         const font_size_val: u16 = @intFromFloat(cfg.bar.font_size.value);
         const font_with_size = try std.fmt.allocPrint(allocator, "{s}:size={}", .{ detected_font, font_size_val });
+        if (cfg.allocated_font) |old| allocator.free(old);
+        cfg.allocated_font = font_with_size;
         cfg.bar.font = font_with_size;
     }
 
@@ -228,7 +231,7 @@ const MOUSE_BUTTON_MAP = std.StaticStringMap(u8).initComptime(.{
 });
 
 /// Returns the XCB button number for `name`, or null if it's not a mouse button token.
-fn mouseButtonFromName(name: []const u8) ?u8 {
+inline fn mouseButtonFromName(name: []const u8) ?u8 {
     var buf: [16]u8 = undefined;
     if (name.len > buf.len) return null;
     return MOUSE_BUTTON_MAP.get(std.ascii.lowerString(&buf, name));
@@ -343,9 +346,9 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, c
     }
 }
 
-fn substituteModVariable(allocator: std.mem.Allocator, keybind: []const u8, mod: []const u8) ![]const u8 {
+inline fn substituteModVariable(allocator: std.mem.Allocator, keybind: []const u8, mod: []const u8) ![]const u8 {
     if (std.mem.startsWith(u8, keybind, "Mod+"))
-        return try std.fmt.allocPrint(allocator, "{s}+{s}", .{ mod, keybind[4..] });
+        return try std.fmt.allocPrint(allocator, "{s}+{s}", .{ mod, keybind["Mod+".len..] });
     return try allocator.dupe(u8, keybind);
 }
 
@@ -376,10 +379,10 @@ fn keyNameToKeysym(name: []const u8) !u32 {
 }
 
 /// Extracts a workspace index from commands like `"workspace_3"` or `"move_to_workspace_2"`.
-fn tryParseWorkspace(command: []const u8, prefix: []const u8) ?u8 {
+inline fn tryParseWorkspace(command: []const u8, prefix: []const u8) ?u8 {
     if (!std.mem.startsWith(u8, command, prefix)) return null;
     const num = std.fmt.parseInt(usize, command[prefix.len..], 10) catch return null;
-    if (num < 1) return null;
+    if (num < 1 or num > 256) return null;
     return @intCast(num - 1);
 }
 
@@ -395,7 +398,7 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !defs.Action {
 // Public post-load helpers
 
 /// Scales font size and other DPI-dependent fields. Call once the screen is available.
-pub fn finalizeConfig(cfg: *defs.Config, screen: *defs.xcb.xcb_screen_t) void {
+pub inline fn finalizeConfig(cfg: *defs.Config, screen: *defs.xcb.xcb_screen_t) void {
     const dpi_module = @import("dpi");
     cfg.bar.scaled_font_size = dpi_module.scaleFontSize(cfg.bar.font_size, screen);
 }
@@ -415,7 +418,7 @@ pub fn resolveKeybindings(keybindings: anytype, xkb_state: *xkbcommon.XkbState, 
             debug.warn("Keybinding conflict: #{} and #{} share mods=0x{x:0>4} key={} — second wins",
                 .{ first + 1, i + 1, kb.modifiers, keycode });
         } else {
-            seen.put(key, i) catch {};
+            seen.put(key, i) catch |e| debug.warnOnErr(e, "keybind dedup");
         }
     }
 }
@@ -471,7 +474,7 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
 
 /// Parses a `variation = "..."` key from `section` as type T.
 /// Leaves `field` unchanged and warns if the value is not a valid T tag.
-fn tryParseVariation(
+inline fn tryParseVariation(
     comptime T:   type,
     section:      *const parser.Section,
     layout_name:  []const u8,
@@ -485,7 +488,7 @@ fn tryParseVariation(
 }
 
 /// Parses an `indicator = "..."` key from `section` into a ?[3]u8 field.
-fn tryParseIndicator(section: *const parser.Section, field: *?[3]u8) void {
+inline fn tryParseIndicator(section: *const parser.Section, field: *?[3]u8) void {
     if (section.getString("indicator")) |raw| field.* = parseIndicator(raw);
 }
 
@@ -517,7 +520,7 @@ fn parseTilingVariations(doc: *const parser.Document, cfg: *defs.Config) void {
 // Layout-array helpers
 
 /// Copies up to 3 bytes of `raw` into a fixed [3]u8, padding with spaces.
-fn parseIndicator(raw: []const u8) [3]u8 {
+inline fn parseIndicator(raw: []const u8) [3]u8 {
     var ind: [3]u8 = "   ".*;
     const n = @min(raw.len, 3);
     @memcpy(ind[0..n], raw[0..n]);
@@ -530,7 +533,7 @@ const KNOWN_LAYOUT_SET = std.StaticStringMap(void).initComptime(.{
 });
 
 /// Returns true if `name` (case-insensitive) is a recognised layout name.
-fn isKnownLayout(name: []const u8) bool {
+inline fn isKnownLayout(name: []const u8) bool {
     var buf: [32]u8 = undefined;
     if (name.len > buf.len) return false;
     return KNOWN_LAYOUT_SET.has(std.ascii.lowerString(&buf, name));
@@ -538,7 +541,7 @@ fn isKnownLayout(name: []const u8) bool {
 
 /// Returns true if `s` looks like a workspace-number list: only digits, commas, spaces,
 /// and contains at least one digit.
-fn isWorkspaceList(s: []const u8) bool {
+inline fn isWorkspaceList(s: []const u8) bool {
     if (s.len == 0) return false;
     var has_digit = false;
     for (s) |c| {
@@ -550,7 +553,7 @@ fn isWorkspaceList(s: []const u8) bool {
 
 /// Canonicalises a layout name to the plain lowercase form used in the layouts list.
 /// "master_stack" and "master" both become "master-stack".
-fn canonicalLayout(name: []const u8, buf: []u8) []const u8 {
+inline fn canonicalLayout(name: []const u8, buf: []u8) []const u8 {
     const lower = std.ascii.lowerString(buf[0..name.len], name);
     if (std.mem.eql(u8, lower, "master_stack") or std.mem.eql(u8, lower, "master"))
         return "master-stack";
@@ -914,9 +917,9 @@ fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *d
     while (section_iter.next()) |entry| {
         const name   = entry.key_ptr.*;
         const ws_str = if (std.mem.startsWith(u8, name, "workspace.rules."))
-            name[16..]
+            name["workspace.rules.".len..]
         else if (std.mem.startsWith(u8, name, "rules."))
-            name[6..]
+            name["rules.".len..]
         else
             continue;
 
