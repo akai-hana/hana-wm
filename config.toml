@@ -21,6 +21,18 @@
 #
 # + HEX code values can be set with either of the following formats:
 #   (RRGGBB/rrggbb, ""/'') "#RRGGBB" / RRGGBB / 0xRRGGBB
+#
+# + Keybind globs: use {…} in a key to expand one line into many binds.
+#   Keys are assigned workspace indices by their position in the list.
+#   Supports comma-separated tokens and single-character ranges:
+#     Mod+{1-4,Q,W,E,R} = "workspace"   # expands to workspace_1 … workspace_8
+#     Mod+{A-Z}         = "workspace"   # expands to workspace_1 … workspace_26
+#
+# + Multi-action binds: assign multiple actions to the same key two ways:
+#   Array syntax  — Mod+D = ["ghostty", "firefox"]
+#   Duplicate key — Mod+D = "ghostty"
+#                   Mod+D = "firefox"
+#   Both are equivalent; the actions fire left-to-right.
 
 [tiling]
 enabled = true
@@ -226,28 +238,13 @@ Mod+period = "decrease_master_count"
 
 # Workspaces
 # Switch to workspace N
-Mod+1 = "workspace_1"
-Mod+2 = "workspace_2"
-Mod+3 = "workspace_3"
-Mod+4 = "workspace_4"
-Mod+Q = "workspace_5"
-Mod+W = "workspace_6"
-Mod+E = "workspace_7"
-Mod+R = "workspace_8"
+Mod+{1-4,Q,W,E,R} = "workspace"
 
-# Move window to workspace N
-Mod+Shift+1 = "move_to_workspace_1"
-Mod+Shift+2 = "move_to_workspace_2"
-Mod+Shift+3 = "move_to_workspace_3"
-Mod+Shift+4 = "move_to_workspace_4"
-Mod+Shift+Q = "move_to_workspace_5"
-Mod+Shift+W = "move_to_workspace_6"
-Mod+Shift+E = "move_to_workspace_7"
-Mod+Shift+R = "move_to_workspace_8"
+# Move window to workspace N (first press), tag onto more (subsequent presses)
+Mod+Shift+{1-4,Q,W,E,R} = "move_or_tag"
 
-# Note: The config parser now automatically generates move_to_workspace_N binds
-# from workspace_N binds when using Mod+Shift modifier. You can still override
-# specific binds if needed by defining them explicitly.
+# Pure tag-toggle — flip workspace membership without moving
+Mod+Shift+{1-4,Q,W,E,R} = "tag_toggle"
 
 # Bar
 Mod+B       = "toggle_bar_visibility"  # shown/hidden
@@ -318,4 +315,3 @@ deluge
 # 1 = ["Navigator", "Firefox"]           # browser
 # 2 = ["discord", "vesktop", "equibop"]  # socials  
 # 3 = ["com.github.th_ch.youtube_music"] # music
-# ... and so on

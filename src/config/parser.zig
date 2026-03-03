@@ -398,12 +398,32 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
                 kv[1].deinit(allocator);
             }
 
-            if (current_section.pairs.contains(kv[0])) {
-                debug.warn("Duplicate key '{s}' at line {}", .{ kv[0], p.line });
-                if (current_section.pairs.getPtr(kv[0])) |old| old.deinit(allocator);
+            if (current_section.pairs.getPtr(kv[0])) |old| {
+                // Duplicate key: merge both values into an array rather than
+                // overwriting. This lets the user write the same keybind twice
+                // (or any key twice) to naturally build a sequence of actions:
+                //
+                //   Mod+Shift+1 = "move_to_workspace_1"
+                //   Mod+Shift+1 = "tag_toggle_1"
+                //
+                // parseKeybindings already handles array values as sequences,
+                // so no further changes are needed there.
+                if (old.* == .array) {
+                    // Already an array from a previous merge — just append.
+                    try old.array.append(allocator, kv[1]);
+                } else {
+                    // First duplicate: wrap the original scalar + new value in a
+                    // 2-element array. initCapacity(2) guarantees the two
+                    // appendAssumeCapacity calls cannot fail.
+                    var arr = try std.ArrayList(Value).initCapacity(allocator, 2);
+                    arr.appendAssumeCapacity(old.*); // move existing value in
+                    arr.appendAssumeCapacity(kv[1]); // move new value in
+                    old.* = .{ .array = arr };
+                }
+                allocator.free(kv[0]); // original key already owned by the map
+            } else {
+                try current_section.pairs.put(kv[0], kv[1]);
             }
-
-            try current_section.pairs.put(kv[0], kv[1]);
 
             p.skipWhitespace();
             const next = p.peek();

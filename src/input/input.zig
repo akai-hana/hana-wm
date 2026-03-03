@@ -53,6 +53,23 @@ const KeybindState = struct {
 
 var keybind_state: ?KeybindState = null;
 
+// Chord state for move_to_workspace + tag_toggle sequences.
+//
+// When a sequence pairs move_to_workspace_N and tag_toggle_N on the same bind,
+// the sequence executor uses this to distinguish the first keypress from
+// subsequent ones within the same Super hold:
+//   first press  → move only
+//   subsequent   → tag_toggle only
+//
+// Reset conditions:
+//   * Super is released      (handleKeyRelease)
+//   * Focused window changes (sequence executor checks .window)
+const MoveOrTagState = struct {
+    active: bool = false,
+    window: ?u32 = null,
+};
+var g_move_or_tag = MoveOrTagState{};
+
 pub fn init(wm: *WM) !void {
     var state = KeybindState.init(wm.allocator);
     errdefer state.deinit();
@@ -121,6 +138,17 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
     } else {
         debug.info("[KEY] no binding found for this key", .{});
     }
+}
+
+// XKB keysym values for the Super (Mod4) modifier keys.
+const XK_Super_L: u32 = 0xffeb;
+const XK_Super_R: u32 = 0xffec;
+
+pub fn handleKeyRelease(event: *const xcb.xcb_key_release_event_t, wm: *WM) void {
+    wm.last_event_time = event.time;
+    const xkb_ptr: *xkbcommon.XkbState = @ptrCast(@alignCast(wm.xkb_state orelse return));
+    const keysym = xkb_ptr.keycodeToKeysym(event.detail);
+    if (keysym == XK_Super_L or keysym == XK_Super_R) g_move_or_tag = .{};
 }
 
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) void {
@@ -258,6 +286,41 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
         .toggle_float           => { if (wm.focused_window) |win| tiling.toggleWindowFloat(wm, win); },
         .tag_toggle             => |ws| { if (wm.focused_window) |win| workspaces.tagToggle(wm, win, ws); },
         .tag_additive           => |ws| { if (wm.focused_window) |win| workspaces.tagAdditive(wm, win, ws); },
+        .sequence               => |acts| {
+            // Detect a move_to_workspace_N + tag_toggle_N pair in this sequence.
+            // When found, apply chord logic so the two actions compose correctly:
+            //   first press  → move only  (tag_toggle skipped — bit just got set by move)
+            //   subsequent presses while Super held, same window → tag_toggle only
+            // Any other actions in the sequence always execute normally.
+            var move_ws: ?u8 = null;
+            var tag_ws:  ?u8 = null;
+            for (acts) |*a| switch (a.*) {
+                .move_to_workspace => |ws| move_ws = ws,
+                .tag_toggle        => |ws| tag_ws  = ws,
+                else               => {},
+            };
+
+            const is_move_tag_pair = move_ws != null and tag_ws != null and move_ws.? == tag_ws.?;
+
+            if (is_move_tag_pair) {
+                if (wm.focused_window) |win| {
+                    if (g_move_or_tag.active and g_move_or_tag.window == win) {
+                        workspaces.tagToggle(wm, win, tag_ws.?);
+                    } else {
+                        workspaces.moveWindowTo(wm, win, move_ws.?)
+                            catch |e| debug.warnOnErr(e, "move_to_workspace");
+                        g_move_or_tag = .{ .active = true, .window = win };
+                    }
+                }
+                // Still execute any other actions in the sequence (e.g. exec commands).
+                for (acts) |*a| switch (a.*) {
+                    .move_to_workspace, .tag_toggle => {},
+                    else => try executeAction(a, wm),
+                };
+            } else {
+                for (acts) |*a| try executeAction(a, wm);
+            }
+        },
         .exec                   => |cmd| try executeShellCommand(wm, cmd),
         .switch_workspace       => |ws| workspaces.switchTo(wm, ws),
         .move_to_workspace      => |ws| { if (wm.focused_window) |win| workspaces.moveWindowTo(wm, win, ws) catch |e| debug.warnOnErr(e, "move_to_workspace"); },

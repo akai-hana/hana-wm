@@ -48,8 +48,9 @@ pub const Action = union(enum) {
     swap_master,
     switch_workspace:  u8,
     move_to_workspace: u8,
-    tag_toggle:        u8, // Mod+Shift+N: toggle tag N (remove from current if adding)
-    tag_additive:      u8, // Mod+Alt+N:   toggle tag N (keep current workspace when adding)
+    tag_toggle:        u8, // pure toggle — flips bit N, never moves
+    tag_additive:      u8, // toggle keeping current workspace always set
+    sequence:          []const Action, // ordered list of actions executed left-to-right
     dump_state,
     emergency_recover,
     minimize_window,
@@ -60,10 +61,14 @@ pub const Action = union(enum) {
     drun_toggle,
     toggle_float,
 
-    pub inline fn deinit(self: *Action, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
         switch (self.*) {
-            .exec => |cmd| allocator.free(cmd),
-            else  => {},
+            .exec     => |cmd|  allocator.free(cmd),
+            .sequence => |acts| {
+                for (@constCast(acts)) |*a| a.deinit(allocator);
+                allocator.free(acts);
+            },
+            else => {},
         }
     }
 };

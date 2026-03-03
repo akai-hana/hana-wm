@@ -291,11 +291,107 @@ const ACTION_MAP = std.StaticStringMap(defs.Action).initComptime(.{
     .{ "float",                  .toggle_float           },
 });
 
+// Glob expansion for keybind patterns
+//
+// Allows compact syntax like:
+//   Mod+{1-4,Q,W,E,R}       = "workspace"
+//   Mod+Shift+{1-4,Q,W,E,R} = "move_or_tag"
+//
+// The {…} portion is expanded into individual keys. Each expanded key is
+// assigned a 1-based workspace index by its position in the list, which is
+// automatically appended to bare workspace action names ("workspace" → "workspace_1",
+// "move_or_tag" → "move_or_tag_1", etc.).
+//
+// Non-workspace actions (exec commands, toggles, etc.) are passed through
+// unchanged for every expanded key — useful for launching multiple programs:
+//   Mod+D = ["ghostty", "firefox"]
+
+const GlobEntry = struct {
+    key:    []const u8,
+    ws_idx: u8,   // 1-based position in the expanded list; 0 when there is no glob
+    owned:  bool, // true when key was heap-allocated and must be freed by the caller
+};
+
+/// Expands a key pattern containing a `{…}` glob into individual key strings.
+/// Supports comma-separated tokens and single-character ranges (e.g. `1-4`, `A-Z`).
+/// Returns a single-entry slice (not owned) when no glob is present.
+fn expandGlobKeys(allocator: std.mem.Allocator, key_pattern: []const u8) ![]GlobEntry {
+    const lbrace = std.mem.indexOfScalar(u8, key_pattern, '{') orelse {
+        const entries = try allocator.alloc(GlobEntry, 1);
+        entries[0] = .{ .key = key_pattern, .ws_idx = 0, .owned = false };
+        return entries;
+    };
+    const rbrace = std.mem.indexOfScalarPos(u8, key_pattern, lbrace + 1, '}') orelse {
+        debug.warn("Keybind glob missing closing '}}' in '{s}', treating as literal", .{key_pattern});
+        const entries = try allocator.alloc(GlobEntry, 1);
+        entries[0] = .{ .key = key_pattern, .ws_idx = 0, .owned = false };
+        return entries;
+    };
+
+    const prefix = key_pattern[0..lbrace];
+    const suffix = key_pattern[rbrace + 1..];
+    const inner  = key_pattern[lbrace + 1..rbrace];
+
+    var keys: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (keys.items) |k| allocator.free(k);
+        keys.deinit(allocator);
+    }
+
+    var it = std.mem.splitScalar(u8, inner, ',');
+    while (it.next()) |token| {
+        const t = std.mem.trim(u8, token, " \t");
+        if (t.len == 0) continue;
+        // Single-character range: "X-Y"
+        if (t.len == 3 and t[1] == '-') {
+            var c = t[0];
+            const end = t[2];
+            while (c <= end) : (c += 1)
+                try keys.append(allocator, try std.fmt.allocPrint(allocator, "{s}{c}{s}", .{ prefix, c, suffix }));
+        } else {
+            try keys.append(allocator, try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ prefix, t, suffix }));
+        }
+    }
+
+    if (keys.items.len == 0) {
+        // Empty or unparseable glob — fall back to the original literal key.
+        keys.deinit(allocator);
+        const entries = try allocator.alloc(GlobEntry, 1);
+        entries[0] = .{ .key = key_pattern, .ws_idx = 0, .owned = false };
+        return entries;
+    }
+
+    const entries = try allocator.alloc(GlobEntry, keys.items.len);
+    for (keys.items, 0..) |k, i|
+        entries[i] = .{ .key = k, .ws_idx = @intCast(i + 1), .owned = true };
+    keys.deinit(allocator); // deinit the ArrayList struct; items are now owned by entries
+    return entries;
+}
+
+/// Returns true when `action` is a bare workspace-action name that should have
+/// `_<ws_idx>` appended when used inside a glob expansion.
+fn isWorkspaceActionBase(action: []const u8) bool {
+    const bases = [_][]const u8{
+        "workspace", "move_to_workspace", "tag_toggle", "tag_additive", "move_or_tag",
+    };
+    for (bases) |base| if (std.mem.eql(u8, action, base)) return true;
+    return false;
+}
+
+/// If `action` is a bare workspace-action base and `ws_idx > 0`, returns a new
+/// heap-allocated string with `_<ws_idx>` appended (.owned = true).
+/// Otherwise returns the original string unchanged (.owned = false).
+const ResolvedStr = struct { str: []const u8, owned: bool };
+fn resolveActionStr(allocator: std.mem.Allocator, action: []const u8, ws_idx: u8) !ResolvedStr {
+    if (ws_idx > 0 and isWorkspaceActionBase(action))
+        return .{ .str = try std.fmt.allocPrint(allocator, "{s}_{d}", .{ action, ws_idx }), .owned = true };
+    return .{ .str = action, .owned = false };
+}
+
 fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
     // Support both [binds] (current) and [Keybindings] (legacy).
-    const section         = doc.getSection("binds") orelse doc.getSection("Keybindings") orelse return;
-    const mod_placeholder = section.getString("Mod");
-    // Optional: if set, `{kill}` in exec commands is replaced with this string.
+    const section          = doc.getSection("binds") orelse doc.getSection("Keybindings") orelse return;
+    const mod_placeholder  = section.getString("Mod");
     const kill_placeholder = section.getString("kill");
 
     var iter = section.pairs.iterator();
@@ -303,47 +399,85 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, c
         if (std.mem.eql(u8, entry.key_ptr.*, "Mod"))  continue;
         if (std.mem.eql(u8, entry.key_ptr.*, "kill")) continue;
 
-        const command = entry.value_ptr.*.asString() orelse continue;
-
-        const keybind_str = if (mod_placeholder) |mod|
-            try substituteModVariable(allocator, entry.key_ptr.*, mod)
-        else
-            entry.key_ptr.*;
-        defer if (mod_placeholder != null) allocator.free(keybind_str);
-
-        // Substitute {kill} only when the kill placeholder is defined in config.
-        const final_command: []const u8 = if (kill_placeholder) |kp|
-            if (std.mem.indexOf(u8, command, "{kill}") != null)
-                try std.mem.replaceOwned(u8, allocator, command, "{kill}", kp)
-            else
-                command
-        else
-            command;
-        defer if (final_command.ptr != command.ptr) allocator.free(final_command);
-
-        // Try mouse bind first (e.g. "Super+MiddleClick").  If the key string
-        // contains a known button token it cannot be a valid keysym, so we
-        // never fall through to parseKeybindString for it.
-        if (tryParseMouseBind(keybind_str)) |mb| {
-            try cfg.mouse_bindings.append(allocator, .{
-                .modifiers = mb.modifiers,
-                .button    = mb.button,
-                .action    = try parseAction(allocator, final_command),
-            });
-            continue;
+        // Expand glob patterns in the key (e.g. `Mod+{1-4,Q,W,E,R}` → 8 entries).
+        // Non-glob keys produce a single-entry slice with ws_idx = 0.
+        const glob_entries = try expandGlobKeys(allocator, entry.key_ptr.*);
+        defer {
+            for (glob_entries) |ge| if (ge.owned) allocator.free(ge.key);
+            allocator.free(glob_entries);
         }
 
-        const parts = parseKeybindString(keybind_str) catch |err| {
-            debug.warn("Failed to parse keybind '{s}': {}", .{ keybind_str, err });
-            continue;
-        };
+        for (glob_entries) |ge| {
+            const keybind_str = if (mod_placeholder) |mod|
+                try substituteModVariable(allocator, ge.key, mod)
+            else
+                ge.key;
+            defer if (keybind_str.ptr != ge.key.ptr) allocator.free(keybind_str);
 
-        try cfg.keybindings.append(allocator, .{
-            .modifiers = parts.modifiers,
-            .keysym    = parts.keysym,
-            .action    = try parseAction(allocator, final_command),
-        });
+            // Build the action — string or array, with ws_idx resolved into
+            // bare workspace-action names ("move_or_tag" → "move_or_tag_3", etc.).
+            const action: defs.Action = act: {
+                if (entry.value_ptr.*.asArray()) |arr| {
+                    var acts: std.ArrayList(defs.Action) = .empty;
+                    errdefer {
+                        for (acts.items) |*a| a.deinit(allocator);
+                        acts.deinit(allocator);
+                    }
+                    for (arr) |elem| {
+                        const cmd = elem.asString() orelse continue;
+                        const resolved = try resolveActionStr(allocator, cmd, ge.ws_idx);
+                        defer if (resolved.owned) allocator.free(resolved.str);
+                        const final = try applyPlaceholders(allocator, resolved.str, kill_placeholder);
+                        defer if (final.ptr != resolved.str.ptr) allocator.free(final);
+                        try acts.append(allocator, try parseAction(allocator, final));
+                    }
+                    if (acts.items.len == 0) { acts.deinit(allocator); continue; }
+                    if (acts.items.len == 1) {
+                        const only = acts.items[0];
+                        acts.deinit(allocator);
+                        break :act only;
+                    }
+                    break :act .{ .sequence = try acts.toOwnedSlice(allocator) };
+                } else if (entry.value_ptr.*.asString()) |command| {
+                    const resolved = try resolveActionStr(allocator, command, ge.ws_idx);
+                    defer if (resolved.owned) allocator.free(resolved.str);
+                    const final = try applyPlaceholders(allocator, resolved.str, kill_placeholder);
+                    defer if (final.ptr != resolved.str.ptr) allocator.free(final);
+                    break :act try parseAction(allocator, final);
+                } else continue;
+            };
+
+            // Try mouse bind first (e.g. "Super+MiddleClick").
+            if (tryParseMouseBind(keybind_str)) |mb| {
+                try cfg.mouse_bindings.append(allocator, .{
+                    .modifiers = mb.modifiers,
+                    .button    = mb.button,
+                    .action    = action,
+                });
+                continue;
+            }
+
+            const parts = parseKeybindString(keybind_str) catch |err| {
+                debug.warn("Failed to parse keybind '{s}': {}", .{ keybind_str, err });
+                continue;
+            };
+
+            try cfg.keybindings.append(allocator, .{
+                .modifiers = parts.modifiers,
+                .keysym    = parts.keysym,
+                .action    = action,
+            });
+        }
     }
+}
+
+/// Applies the {kill} placeholder substitution when kill_placeholder is set.
+/// Returns the original slice unchanged (same pointer) when no substitution is needed.
+inline fn applyPlaceholders(allocator: std.mem.Allocator, cmd: []const u8, kill_placeholder: ?[]const u8) ![]const u8 {
+    if (kill_placeholder) |kp|
+        if (std.mem.indexOf(u8, cmd, "{kill}") != null)
+            return try std.mem.replaceOwned(u8, allocator, cmd, "{kill}", kp);
+    return cmd;
 }
 
 inline fn substituteModVariable(allocator: std.mem.Allocator, keybind: []const u8, mod: []const u8) ![]const u8 {
