@@ -4,40 +4,11 @@
 //! type a shell command and press Return to execute it via sh(1). A full
 //! vim-style modal editing layer is built in; see vim.zig for details.
 //!
-//! ── Integration checklist ────────────────────────────────────────────────────
-//!
-//!  1. bar.zig  — In drawSegment(), replace the `.title` arm dispatch so that
-//!                when drun.isActive() is true, drun.draw() is called instead
-//!                of title_segment.draw(). Both share the same signature:
-//!
-//!                  .title => if (drun.isActive())
-//!                      try drun.draw(self.dc, self.config, self.height, x,
-//!                          width orelse 100, self.conn, snap.focused_window,
-//!                          snap.current_ws_wins.items, snap.minimized.items,
-//!                          &self.cached_title, &self.cached_title_window,
-//!                          snap.title_invalidated, self.allocator)
-//!                  else
-//!                      try title_segment.draw(...)
-//!
-//!                Also guard drawTitleOnly() with `if (!drun.isActive())`.
-//!
-//!  2. event loop — Call drun.handleKeyPress() *before* normal keybind dispatch:
-//!
-//!                  const kp: *xcb.xcb_key_press_event_t = @ptrCast(event);
-//!                  if (drun.handleKeyPress(kp, wm)) {
-//!                      bar.submitDrawAsync(wm);
-//!                      continue;
-//!                  }
-//!
-//!  3. action dispatch — Add a "drun_toggle" action calling drun.toggle(wm).
-//!
-//!  4. bar init / deinit — drun.init(conn) / drun.deinit().
-//!
-//! ── config.toml ──────────────────────────────────────────────────────────────
-//!
-//!   Mod+Shift+Tab = "drun_toggle"
-//!
-//! ─────────────────────────────────────────────────────────────────────────────
+//! Integration is complete: bar.zig dispatches the .title segment to drun.draw()
+//! when isActive() is true and guards drawTitleOnly() accordingly; the main event
+//! loop routes key-press events through handleKeyPress() before normal keybind
+//! dispatch; a "drun_toggle" action calls toggle(wm); and bar.init/deinit call
+//! drun.init/deinit.
 
 const std     = @import("std");
 const defs    = @import("defs");
@@ -644,7 +615,7 @@ inline fn drawSpan(
     scroll_end_x: u16,
     baseline:     u16,
     text:         []const u8,
-    color:        anytype,
+    color:        u32,
 ) !void {
     const w = dc.textWidth(text);
     defer px.* += @intCast(w);

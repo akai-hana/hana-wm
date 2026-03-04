@@ -1,4 +1,4 @@
-// Common layout interface and utilities.
+//! Common layout interface and utilities.
 
 const std   = @import("std");
 const utils = @import("utils");
@@ -8,35 +8,15 @@ const xcb   = defs.xcb;
 
 // ── WM_NORMAL_HINTS size hint cache ──────────────────────────────────────────
 //
-// Populated from WM_NORMAL_HINTS during handleMapRequest; evicted on unmanage.
-// configureSafe clamps every rect to stored minimums so terminals always
-// receive a geometry they can render.
-//
-// TODO(item-4): fold g_hints into tiling.State so it shares the same
-// lifetime/ownership as geom_cache and border_cache and is rebuilt cleanly
-// on reloadConfig. Requires threading the allocator through evictSizeHints,
-// which touches window.zig (not in scope for this edit pass).
+// Per-window minimum size constraints, populated from WM_NORMAL_HINTS at map
+// time and evicted on unmanage. Owned by tiling.State so it shares the same
+// lifetime as the geometry cache and is never stale after a reloadConfig.
+// configureSafe reads the cache via ctx.size_hints.
 
 pub const SizeHints = struct {
     min_width:  u16 = 0,
     min_height: u16 = 0,
 };
-
-var g_hints: std.AutoHashMapUnmanaged(u32, SizeHints) = .{};
-
-pub fn cacheSizeHints(allocator: std.mem.Allocator, win: u32, hints: SizeHints) void {
-    if (hints.min_width == 0 and hints.min_height == 0) return;
-    g_hints.put(allocator, win, hints) catch {};
-}
-
-pub fn evictSizeHints(win: u32) void {
-    _ = g_hints.remove(win);
-}
-
-/// Free the entire size-hints map. Call once at WM shutdown.
-pub fn deinitSizeHintsCache(allocator: std.mem.Allocator) void {
-    g_hints.deinit(allocator);
-}
 
 // ── Per-window combined cache entry ──────────────────────────────────────────
 //
@@ -68,7 +48,10 @@ pub const LayoutCtx = struct {
     /// Pointer into tiling.State.cache. Non-null during a normal retile pass;
     /// null only when called from a code path that intentionally bypasses dedup
     /// (currently unused — kept as an escape hatch).
-    cache:     ?*CacheMap,
+    cache:      ?*CacheMap,
+    /// Pointer into tiling.State.size_hints.  configureSafe reads min-size
+    /// constraints from here rather than from a module-level global.
+    size_hints: *const std.AutoHashMapUnmanaged(u32, SizeHints),
     allocator: std.mem.Allocator,
 };
 
@@ -95,7 +78,7 @@ pub inline fn configureSafe(
     rect: utils.Rect,
 ) void {
     // Clamp to WM_NORMAL_HINTS minimums.
-    const effective: utils.Rect = if (g_hints.get(win)) |h| .{
+    const effective: utils.Rect = if (ctx.size_hints.get(win)) |h| .{
         .x      = rect.x,
         .y      = rect.y,
         .width  = @max(rect.width,  h.min_width),

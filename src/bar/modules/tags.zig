@@ -19,7 +19,11 @@ const static_numbers = blk: {
     break :blk nums;
 };
 
-var label_widths:      [20]u16 = [_]u16{0} ** 20;
+// Both arrays are capped at 20 entries, matching static_numbers and
+// workspaces.WORKSPACE_NAMES. Workspaces beyond index 20 still render
+// correctly: draw() falls back to dc.textWidth(label) on a cache miss.
+// Raise this cap if workspace count ever exceeds 20.
+var label_widths: [20]u16 = [_]u16{0} ** 20;
 var ws_width:          u16     = 0;
 var cache_valid:       bool    = false;
 /// Cached horizontal offset of the indicator glyph within a workspace cell.

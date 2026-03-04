@@ -13,7 +13,6 @@ const bar        = @import("bar");
 const window     = @import("window");
 const debug      = @import("debug");
 const minimize   = @import("minimize");
-const lifecycle  = @import("lifecycle");
 const drun       = @import("drun");
 const xcb        = defs.xcb;
 const WM         = defs.WM;
@@ -53,23 +52,6 @@ const KeybindState = struct {
 
 var keybind_state: ?KeybindState = null;
 
-// Chord state for move_to_workspace + tag_toggle sequences.
-//
-// When a sequence pairs move_to_workspace_N and tag_toggle_N on the same bind,
-// the sequence executor uses this to distinguish the first keypress from
-// subsequent ones within the same Super hold:
-//   first press  → move only
-//   subsequent   → tag_toggle only
-//
-// Reset conditions:
-//   * Super is released      (handleKeyRelease)
-//   * Focused window changes (sequence executor checks .window)
-const MoveOrTagState = struct {
-    active: bool = false,
-    window: ?u32 = null,
-};
-var g_move_or_tag = MoveOrTagState{};
-
 pub fn init(wm: *WM) !void {
     var state = KeybindState.init(wm.allocator);
     errdefer state.deinit();
@@ -96,7 +78,8 @@ inline fn makeHash(mods: u16, keysym: u32) u64 {
 
 // Grab setup
 
-/// Grabs Super+Button1 (move) and Super+Button3 (resize) on the root window.
+/// Grabs Super+Button1/2/3 on the root window.
+/// Button1 = move, Button3 = resize, Button2 = config-driven binds (e.g. toggle_float).
 pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
     for (MOUSE_BUTTONS) |button| {
         _ = xcb.xcb_grab_button(
@@ -106,7 +89,7 @@ pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
             root, xcb.XCB_NONE, button, defs.MOD_SUPER,
         );
     }
-    utils.flush(conn);
+    _ = xcb.xcb_flush(conn);
 }
 
 // Event handlers
@@ -114,20 +97,26 @@ pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
 pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
     wm.last_event_time = event.time;
 
-    // While drun is active it owns all key input. Feed the event to it first;
-    // if it returns true the event was consumed and we must not fall through to
-    // the normal keybind dispatch (which would fire binds on top of typing).
-    if (drun.handleKeyPress(event, wm)) {
-        bar.redrawImmediate(wm);
-        return;
-    }
-
-    var state = &(keybind_state orelse return);
+    const state  = &(keybind_state orelse return);
     const xkb_ptr: *xkbcommon.XkbState = @ptrCast(@alignCast(wm.xkb_state.?));
-
     const mods   = utils.normalizeModifiers(event.state);
     const keysym = xkb_ptr.keycodeToKeysym(event.detail);
     const key    = makeHash(mods, keysym);
+
+    // When drun is active it owns all key input — with one exception: if the
+    // pressed key is bound to close_window, dismiss drun instead of either
+    // closing a window or swallowing the keystroke silently.
+    if (drun.isActive()) {
+        if (state.map.get(key)) |action| {
+            if (action.* == .close_window) {
+                drun.toggle(wm);
+                bar.redrawImmediate(wm);
+                return;
+            }
+        }
+        if (drun.handleKeyPress(event, wm)) bar.redrawImmediate(wm);
+        return;
+    }
 
     debug.info("[KEY] keycode={} state=0x{x} mods=0x{x} keysym=0x{x} hash=0x{x}",
         .{ event.detail, event.state, mods, keysym, key });
@@ -138,17 +127,6 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
     } else {
         debug.info("[KEY] no binding found for this key", .{});
     }
-}
-
-// XKB keysym values for the Super (Mod4) modifier keys.
-const XK_Super_L: u32 = 0xffeb;
-const XK_Super_R: u32 = 0xffec;
-
-pub fn handleKeyRelease(event: *const xcb.xcb_key_release_event_t, wm: *WM) void {
-    wm.last_event_time = event.time;
-    const xkb_ptr: *xkbcommon.XkbState = @ptrCast(@alignCast(wm.xkb_state orelse return));
-    const keysym = xkb_ptr.keycodeToKeysym(event.detail);
-    if (keysym == XK_Super_L or keysym == XK_Super_R) g_move_or_tag = .{};
 }
 
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) void {
@@ -178,7 +156,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) vo
                     catch |err| debug.err("mouse bind error: {}", .{err});
                 _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_REPLAY_POINTER,  event.time);
                 _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, event.time);
-                utils.flush(wm.conn);
+                _ = xcb.xcb_flush(wm.conn);
                 return;
             }
         }
@@ -194,7 +172,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) vo
     // Release the SYNC grab; use event.time not XCB_CURRENT_TIME to avoid silent drop.
     _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_REPLAY_POINTER,  event.time);
     _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, event.time);
-    utils.flush(wm.conn);
+    _ = xcb.xcb_flush(wm.conn);
 }
 
 pub fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t, wm: *WM) void {
@@ -235,7 +213,7 @@ fn closeWindow(wm: *WM, win: u32) void {
         sendDeleteEvent(wm, win);
     } else {
         _ = xcb.xcb_destroy_window(wm.conn, win);
-        utils.flush(wm.conn);
+        _ = xcb.xcb_flush(wm.conn);
     }
 }
 
@@ -252,7 +230,7 @@ fn sendDeleteEvent(wm: *WM, win: u32) void {
     event.data.data32[0] = delete_atom;
     event.data.data32[1] = wm.last_event_time;
     _ = xcb.xcb_send_event(wm.conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
-    utils.flush(wm.conn);
+    _ = xcb.xcb_flush(wm.conn);
 }
 
 // Action dispatch
@@ -263,14 +241,14 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
         .close_window           => { if (wm.focused_window) |win| closeWindow(wm, win); },
         .reload_config          => {
             debug.info("[RELOAD] flag set by keybinding", .{});
-            lifecycle.reload();
+            utils.reload();
         },
         .toggle_layout          => { tiling.toggleLayout(wm);        bar.redrawImmediate(wm); },
         .toggle_layout_reverse  => { tiling.toggleLayoutReverse(wm); bar.redrawImmediate(wm); },
         .toggle_bar_visibility  => bar.setBarState(wm, .toggle),
         .toggle_bar_position    => bar.toggleBarPosition(wm),
-        .increase_master        => tiling.increaseMasterWidth(),
-        .decrease_master        => tiling.decreaseMasterWidth(),
+        .increase_master        => tiling.increaseMasterWidth(wm),
+        .decrease_master        => tiling.decreaseMasterWidth(wm),
         .increase_master_count  => tiling.increaseMasterCount(wm),
         .decrease_master_count  => tiling.decreaseMasterCount(wm),
         .toggle_tiling          => tiling.toggleTiling(wm),
@@ -286,44 +264,11 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
         .toggle_float           => { if (wm.focused_window) |win| tiling.toggleWindowFloat(wm, win); },
         .tag_toggle             => |ws| { if (wm.focused_window) |win| workspaces.tagToggle(wm, win, ws); },
         .tag_additive           => |ws| { if (wm.focused_window) |win| workspaces.tagAdditive(wm, win, ws); },
-        .sequence               => |acts| {
-            // Detect a move_to_workspace_N + tag_toggle_N pair in this sequence.
-            // When found, apply chord logic so the two actions compose correctly:
-            //   first press  → move only  (tag_toggle skipped — bit just got set by move)
-            //   subsequent presses while Super held, same window → tag_toggle only
-            // Any other actions in the sequence always execute normally.
-            var move_ws: ?u8 = null;
-            var tag_ws:  ?u8 = null;
-            for (acts) |*a| switch (a.*) {
-                .move_to_workspace => |ws| move_ws = ws,
-                .tag_toggle        => |ws| tag_ws  = ws,
-                else               => {},
-            };
-
-            const is_move_tag_pair = move_ws != null and tag_ws != null and move_ws.? == tag_ws.?;
-
-            if (is_move_tag_pair) {
-                if (wm.focused_window) |win| {
-                    if (g_move_or_tag.active and g_move_or_tag.window == win) {
-                        workspaces.tagToggle(wm, win, tag_ws.?);
-                    } else {
-                        workspaces.moveWindowTo(wm, win, move_ws.?)
-                            catch |e| debug.warnOnErr(e, "move_to_workspace");
-                        g_move_or_tag = .{ .active = true, .window = win };
-                    }
-                }
-                // Still execute any other actions in the sequence (e.g. exec commands).
-                for (acts) |*a| switch (a.*) {
-                    .move_to_workspace, .tag_toggle => {},
-                    else => try executeAction(a, wm),
-                };
-            } else {
-                for (acts) |*a| try executeAction(a, wm);
-            }
-        },
+        .sequence               => |acts| { for (acts) |*a| try executeAction(a, wm); },
         .exec                   => |cmd| try executeShellCommand(wm, cmd),
         .switch_workspace       => |ws| workspaces.switchTo(wm, ws),
         .move_to_workspace      => |ws| { if (wm.focused_window) |win| workspaces.moveWindowTo(wm, win, ws) catch |e| debug.warnOnErr(e, "move_to_workspace"); },
+        .move_window            => |ws| { if (wm.focused_window) |win| workspaces.moveWindowExclusive(wm, win, ws); },
     }
 }
 
@@ -431,7 +376,7 @@ fn executeShellCommand(wm: *WM, cmd: []const u8) !void {
 }
 
 // Diagnostics and recovery
-// TODO: consider migrating dumpState -> debug.zig, emergencyRecover -> lifecycle.zig.
+// TODO: consider migrating dumpState -> debug.zig, emergencyRecover -> utils.zig.
 
 fn dumpState(wm: *WM) void {
     debug.info("========== STATE DUMP ==========", .{});
@@ -488,7 +433,7 @@ fn emergencyRecover(wm: *WM) void {
         debug.warn("Drag stopped", .{});
     }
 
-    utils.flush(wm.conn);
+    _ = xcb.xcb_flush(wm.conn);
     debug.warn("Recovery complete — all windows mapped, special modes disabled", .{});
 }
 
@@ -497,7 +442,7 @@ fn emergencyRecover(wm: *WM) void {
 /// Replays a frozen pointer event and flushes. Always pass `event.time`, never XCB_CURRENT_TIME.
 inline fn replayPointer(wm: *WM, time: u32) void {
     _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_REPLAY_POINTER, time);
-    utils.flush(wm.conn);
+    _ = xcb.xcb_flush(wm.conn);
 }
 
 /// Closes both ends of a pipe pair.

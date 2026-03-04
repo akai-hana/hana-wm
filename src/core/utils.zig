@@ -1,4 +1,5 @@
-//! Core utilities — X11 geometry helpers, atom caching, InputModel caching.
+//! Core utilities — X11 geometry helpers, atom caching, InputModel caching,
+//! and process lifecycle signals.
 
 const std  = @import("std");
 const defs = @import("defs");
@@ -6,13 +7,40 @@ const xcb  = defs.xcb;
 const debug     = @import("debug");
 const constants = @import("constants");
 
-const MAX_PROPERTY_LENGTH: u32 = 256; // long-words requested from the X server
-const PROPERTY_NO_DELETE:  u8  = 0;
-const INPUT_HINT_FLAG:     u32 = 1 << 0; // WM_HINTS flags field bit 0
+const MAX_PROPERTY_LENGTH:  u32 = 256; // long-words requested from the X server
+const PROPERTY_NO_DELETE:   u8  = 0;
+const INPUT_HINT_FLAG:      u32 = 1 << 0; // WM_HINTS flags field bit 0
+const WM_HINTS_LONG_LENGTH: u32 = 9;      // flags + 8 fields (input, initial_state, icon_pixmap, icon_window, icon_x, icon_y, icon_mask, window_group)
 
-pub inline fn flush(conn: *xcb.xcb_connection_t) void {
-    _ = xcb.xcb_flush(conn);
+// Process lifecycle signals
+//
+// Module-level atomics rather than WM struct fields because they are process
+// control state, not window-manager state.  Keeping them here removes pointer
+// indirections from every consumer and makes the dependency explicit: signal
+// handlers and keybind actions write here; the main event loop reads here.
+
+/// Set to false by SIGTERM / SIGINT to break the main event loop.
+pub var running = std.atomic.Value(bool).init(true);
+
+/// Set to true by SIGHUP or the reload_config keybinding; consumed (swapped
+/// to false) by maybeReload in the main event loop.
+pub var should_reload = std.atomic.Value(bool).init(false);
+
+pub inline fn quit() void {
+    running.store(false, .release);
 }
+
+pub inline fn reload() void {
+    should_reload.store(true, .release);
+}
+
+/// Atomically consume the reload flag.  Returns true exactly once per
+/// request — whichever call path checks first wins; the second is a no-op.
+pub inline fn consumeReload() bool {
+    return should_reload.swap(false, .acq_rel);
+}
+
+// Geometry
 
 pub inline fn configureBorder(conn: *xcb.xcb_connection_t, win: u32, width: u16, color: u32) void {
     _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{width});
@@ -44,7 +72,7 @@ pub const Margins = struct {
     border: u16,
 
     pub inline fn total(self: Margins) u16 {
-        return 2 * self.gap + 2 * self.border;
+        return 2 * (self.gap + self.border);
     }
 };
 
@@ -142,15 +170,14 @@ pub fn initAtomCache(conn: *xcb.xcb_connection_t) !void {
         cookies[i] = xcb.xcb_intern_atom(conn, 0, @intCast(f.name.len), f.name.ptr);
 
     var cache: AtomCache = undefined;
-    var consumed: usize = 0;
     inline for (fields, 0..) |f, i| {
+        // xcb_intern_atom_reply always consumes cookie i, so only discard i+1 onward.
         const r = xcb.xcb_intern_atom_reply(conn, cookies[i], null) orelse {
-            for (consumed..fields.len) |j| xcb.xcb_discard_reply(conn, cookies[j].sequence);
+            for (i + 1..fields.len) |j| xcb.xcb_discard_reply(conn, cookies[j].sequence);
             return error.AtomFailed;
         };
         defer std.c.free(r);
         @field(cache, f.name) = r.*.atom;
-        consumed = i + 1;
     }
     atom_cache = cache;
 }
@@ -247,12 +274,12 @@ pub fn populateFocusCacheFromCookies(
     c_protocols: xcb.xcb_get_property_cookie_t,
     c_hints:     xcb.xcb_get_property_cookie_t,
 ) void {
-    const take_focus_atom = getAtomCached("WM_TAKE_FOCUS") catch {
-        xcb.xcb_discard_reply(conn, c_protocols.sequence);
-        xcb.xcb_discard_reply(conn, c_hints.sequence);
-        return;
-    };
-    const wm_delete_atom = getAtomCached("WM_DELETE_WINDOW") catch {
+    // Resolve both atoms before consuming either cookie — single cleanup path.
+    const atoms = blk: {
+        const tf = getAtomCached("WM_TAKE_FOCUS")    catch break :blk null;
+        const wd = getAtomCached("WM_DELETE_WINDOW") catch break :blk null;
+        break :blk .{ .take_focus = tf, .wm_delete = wd };
+    } orelse {
         xcb.xcb_discard_reply(conn, c_protocols.sequence);
         xcb.xcb_discard_reply(conn, c_hints.sequence);
         return;
@@ -264,10 +291,10 @@ pub fn populateFocusCacheFromCookies(
     if (xcb.xcb_get_property_reply(conn, c_protocols, null)) |r| {
         defer std.c.free(r);
         if (r.*.format == 32 and r.*.value_len > 0) {
-            const atoms: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(r)));
-            for (atoms[0..@intCast(r.*.value_len)]) |atom| {
-                if (atom == take_focus_atom) take_focus = true;
-                if (atom == wm_delete_atom)  wm_delete  = true;
+            const protocol_atoms: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(r)));
+            for (protocol_atoms[0..@intCast(r.*.value_len)]) |atom| {
+                if (atom == atoms.take_focus) take_focus = true;
+                if (atom == atoms.wm_delete)  wm_delete  = true;
                 if (take_focus and wm_delete) break;
             }
         }
@@ -334,15 +361,23 @@ pub fn supportsWMDeleteCached(conn: *xcb.xcb_connection_t, win: u32) bool {
     return queryWMProtocolsProps(conn, win).wm_delete;
 }
 
-inline fn inputModelFrom(supports_take_focus: bool, accepts_input: bool) InputModel {
-    return if (supports_take_focus)
-        (if (accepts_input) .locally_active else .globally_active)
-    else
-        (if (accepts_input) .passive else .no_input);
-}
+/// Send a WM_TAKE_FOCUS client message (ICCCM §4.1.7).
+/// `time` must be the timestamp of the triggering event — globally_active
+/// windows (e.g. Electron/Chromium) validate this and silently ignore the
+/// message when it is XCB_CURRENT_TIME (0).
+pub fn sendWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32, time: u32) void {
+    const protocols_atom  = getAtomCached("WM_PROTOCOLS")  catch return;
+    const take_focus_atom = getAtomCached("WM_TAKE_FOCUS") catch return;
 
-inline fn storeCachedProps(win: u32, props: CachedProps) void {
-    if (input_model_cache) |*c| c.put(win, props) catch {};
+    var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
+    event.response_type  = xcb.XCB_CLIENT_MESSAGE;
+    event.window         = win;
+    event.type           = protocols_atom;
+    event.format         = 32;
+    event.data.data32[0] = take_focus_atom;
+    event.data.data32[1] = time;
+
+    _ = xcb.xcb_send_event(conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
 }
 
 // WM_CLASS
@@ -372,8 +407,7 @@ pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allo
     if (sep + 1 >= len) return null;
 
     const instance = allocator.dupe(u8, data[0..sep]) catch return null;
-    const class_raw = data[sep + 1..len];
-    const class_str = std.mem.trimRight(u8, class_raw, "\x00");
+    const class_str = std.mem.trimRight(u8, data[sep + 1..len], "\x00");
     const class     = allocator.dupe(u8, class_str) catch {
         allocator.free(instance);
         return null;
@@ -382,6 +416,17 @@ pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allo
 }
 
 // Private helpers
+
+inline fn inputModelFrom(supports_take_focus: bool, accepts_input: bool) InputModel {
+    return if (supports_take_focus)
+        (if (accepts_input) .locally_active else .globally_active)
+    else
+        (if (accepts_input) .passive else .no_input);
+}
+
+inline fn storeCachedProps(win: u32, props: CachedProps) void {
+    if (input_model_cache) |*c| c.put(win, props) catch {};
+}
 
 const WMProtocolsProps = struct { take_focus: bool = false, wm_delete: bool = false };
 
@@ -408,30 +453,11 @@ fn queryWMProtocolsProps(conn: *xcb.xcb_connection_t, win: u32) WMProtocolsProps
     return props;
 }
 
-/// Send a WM_TAKE_FOCUS client message (ICCCM §4.1.7).
-/// `time` must be the timestamp of the triggering event — globally_active
-/// windows (e.g. Electron/Chromium) validate this and silently ignore the
-/// message when it is XCB_CURRENT_TIME (0).
-pub fn sendWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32, time: u32) void {
-    const protocols_atom  = getAtomCached("WM_PROTOCOLS")  catch return;
-    const take_focus_atom = getAtomCached("WM_TAKE_FOCUS") catch return;
-
-    var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
-    event.response_type  = xcb.XCB_CLIENT_MESSAGE;
-    event.window         = win;
-    event.type           = protocols_atom;
-    event.format         = 32;
-    event.data.data32[0] = take_focus_atom;
-    event.data.data32[1] = time;
-
-    _ = xcb.xcb_send_event(conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
-}
-
 /// Query WM_HINTS to determine if window accepts input via XSetInputFocus.
 /// Returns true if the input field is absent (assume True) or explicitly True.
 fn queryWMHintsInput(conn: *xcb.xcb_connection_t, win: u32) bool {
     const reply = xcb.xcb_get_property_reply(conn,
-        xcb.xcb_get_property(conn, PROPERTY_NO_DELETE, win, xcb.XCB_ATOM_WM_HINTS, xcb.XCB_ATOM_WM_HINTS, 0, 9),
+        xcb.xcb_get_property(conn, PROPERTY_NO_DELETE, win, xcb.XCB_ATOM_WM_HINTS, xcb.XCB_ATOM_WM_HINTS, 0, WM_HINTS_LONG_LENGTH),
         null,
     ) orelse return true;
     defer std.c.free(reply);
@@ -450,7 +476,7 @@ fn queryWMHintsInput(conn: *xcb.xcb_connection_t, win: u32) bool {
 /// Find the top-level window that the WM manages, starting from a potentially
 /// child window. Electron apps and other toolkits often use child windows for
 /// rendering, but the WM only manages the top-level parent.
-pub fn findManagedWindow(conn: *xcb.xcb_connection_t, win: u32, isManaged: fn(u32) bool) u32 {
+pub fn findManagedWindow(conn: *xcb.xcb_connection_t, win: u32, isManaged: *const fn (u32) bool) u32 {
     var current = win;
     for (0..constants.MAX_WINDOW_TREE_DEPTH) |_| {
         if (isManaged(current)) return current;

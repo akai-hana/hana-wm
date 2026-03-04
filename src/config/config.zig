@@ -162,7 +162,7 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !defs.Config {
     try parseConfigSections(allocator, &doc, &cfg);
 
     // Iter 3: detectTerminal no longer needs an allocator (pure PATH scan).
-    const terminal = try fallback.detectTerminal();
+    const terminal = fallback.detectTerminal();
     for (cfg.keybindings.items) |*kb| {
         if (kb.action == .exec and std.mem.eql(u8, kb.action.exec, "auto_terminal")) {
             allocator.free(kb.action.exec);
@@ -295,12 +295,10 @@ const ACTION_MAP = std.StaticStringMap(defs.Action).initComptime(.{
 //
 // Allows compact syntax like:
 //   Mod+{1-4,Q,W,E,R}       = "workspace"
-//   Mod+Shift+{1-4,Q,W,E,R} = "move_or_tag"
 //
 // The {…} portion is expanded into individual keys. Each expanded key is
 // assigned a 1-based workspace index by its position in the list, which is
 // automatically appended to bare workspace action names ("workspace" → "workspace_1",
-// "move_or_tag" → "move_or_tag_1", etc.).
 //
 // Non-workspace actions (exec commands, toggles, etc.) are passed through
 // unchanged for every expanded key — useful for launching multiple programs:
@@ -372,7 +370,7 @@ fn expandGlobKeys(allocator: std.mem.Allocator, key_pattern: []const u8) ![]Glob
 /// `_<ws_idx>` appended when used inside a glob expansion.
 fn isWorkspaceActionBase(action: []const u8) bool {
     const bases = [_][]const u8{
-        "workspace", "move_to_workspace", "tag_toggle", "tag_additive", "move_or_tag",
+        "workspace", "move_to_workspace", "tag_toggle", "tag_additive",
     };
     for (bases) |base| if (std.mem.eql(u8, action, base)) return true;
     return false;
@@ -415,7 +413,6 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, c
             defer if (keybind_str.ptr != ge.key.ptr) allocator.free(keybind_str);
 
             // Build the action — string or array, with ws_idx resolved into
-            // bare workspace-action names ("move_or_tag" → "move_or_tag_3", etc.).
             const action: defs.Action = act: {
                 if (entry.value_ptr.*.asArray()) |arr| {
                     var acts: std.ArrayList(defs.Action) = .empty;
@@ -483,7 +480,7 @@ inline fn applyPlaceholders(allocator: std.mem.Allocator, cmd: []const u8, kill_
 inline fn substituteModVariable(allocator: std.mem.Allocator, keybind: []const u8, mod: []const u8) ![]const u8 {
     if (std.mem.startsWith(u8, keybind, "Mod+"))
         return try std.fmt.allocPrint(allocator, "{s}+{s}", .{ mod, keybind["Mod+".len..] });
-    return try allocator.dupe(u8, keybind);
+    return keybind;
 }
 
 fn parseKeybindString(str: []const u8) !struct { modifiers: u16, keysym: u32 } {
@@ -586,8 +583,10 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
     }
 
     const aesthetic_src = doc.getSection("tiling.aesthetics") orelse section;
-    cfg.tiling.gaps         = aesthetic_src.getScalable("gaps")         orelse parser.ScalableValue.absolute(10.0);
-    cfg.tiling.border_width = aesthetic_src.getScalable("border_width") orelse parser.ScalableValue.absolute(2.0);
+
+    cfg.tiling.gap_width        = aesthetic_src.getScalable("gap_width")    orelse parser.ScalableValue.absolute(0.0);
+    cfg.tiling.border_width     = aesthetic_src.getScalable("border_width") orelse parser.ScalableValue.absolute(2.0);
+
     cfg.tiling.border_focused   = getColor(aesthetic_src, "border_focused",   0x5294E2);
     cfg.tiling.border_unfocused = getColor(aesthetic_src, "border_unfocused", 0x383C4A);
 

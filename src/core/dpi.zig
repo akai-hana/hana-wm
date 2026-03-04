@@ -4,7 +4,8 @@ const std   = @import("std");
 const defs  = @import("defs");
 const debug = @import("debug");
 
-const xcb = defs.xcb;
+const xcb           = defs.xcb;
+const ScalableValue = @import("parser").ScalableValue;
 
 const BASELINE_WIDTH:  f32 = 2560.0;
 const BASELINE_HEIGHT: f32 = 1600.0;
@@ -13,6 +14,17 @@ const BASELINE_DPI:    f32 = 96.0;
 const FONT_BASELINE_HEIGHT: f32 = 1080.0;
 
 const BASELINE_DIAGONAL: f32 = @sqrt(BASELINE_WIDTH * BASELINE_WIDTH + BASELINE_HEIGHT * BASELINE_HEIGHT);
+
+/// Snap to a common DPI value if within this fraction of it (5%).
+const SNAP_THRESHOLD: f32 = 0.05;
+
+/// Minimum bar height in pixels. Exposed so callers can validate config values
+/// before passing them to scaleBarHeight.
+pub const BAR_MIN_HEIGHT_PX: u16 = 20;
+
+/// Maximum long-words to request for the RESOURCE_MANAGER property.
+/// RESOURCE_MANAGER is a text database — 4096 long-words (16 KB) is ample.
+const RESOURCE_MANAGER_MAX_LEN: u32 = 4096;
 
 const DpiCache = struct {
     result:           ?DpiInfo = null,
@@ -52,7 +64,7 @@ pub const DpiInfo = struct {
     dpi:          f32,
     scale_factor: f32,
 
-    pub inline fn init(dpi: f32) DpiInfo {
+    pub inline fn fromDpi(dpi: f32) DpiInfo {
         return .{ .dpi = dpi, .scale_factor = dpi / BASELINE_DPI };
     }
 };
@@ -63,7 +75,7 @@ fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
     defer std.c.free(atom_reply);
 
     const prop_cookie = xcb.xcb_get_property(conn, 0, screen.*.root, atom_reply.*.atom,
-        xcb.XCB_ATOM_STRING, 0, std.math.maxInt(u32));
+        xcb.XCB_ATOM_STRING, 0, RESOURCE_MANAGER_MAX_LEN);
     const prop_reply = xcb.xcb_get_property_reply(conn, prop_cookie, null) orelse return null;
     defer std.c.free(prop_reply);
 
@@ -75,18 +87,17 @@ fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
     const value_ptr    = xcb.xcb_get_property_value(prop_reply);
     const resource_str = @as([*]const u8, @ptrCast(value_ptr))[0..@intCast(value_len)];
 
+    // Xresources format: "Xft.dpi:\t96" or "Xft.dpi: 96".
+    // Slice off the known prefix and trim whitespace — avoids the split-on-multiple-
+    // delimiters trap where ":\t" would yield an empty token before the value.
+    const prefix = "Xft.dpi:";
     var lines = std.mem.splitScalar(u8, resource_str, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (std.mem.startsWith(u8, trimmed, "Xft.dpi:") or
-            std.mem.startsWith(u8, trimmed, "Xft.dpi\t"))
-        {
-            var parts = std.mem.splitAny(u8, trimmed, ":\t");
-            _ = parts.next();
-            if (parts.next()) |val| {
-                const dpi = std.fmt.parseFloat(f32, std.mem.trim(u8, val, " \t")) catch continue;
-                return dpi;
-            }
+        if (std.mem.startsWith(u8, trimmed, prefix)) {
+            const rest = std.mem.trim(u8, trimmed[prefix.len..], " \t");
+            const dpi  = std.fmt.parseFloat(f32, rest) catch continue;
+            return dpi;
         }
     }
     return null;
@@ -112,7 +123,7 @@ fn snapToCommonDPI(dpi: f32) f32 {
         const diff = @abs(dpi - entry.dpi);
         if (diff < min_diff) { min_diff = diff; closest = entry; }
     }
-    if (min_diff / closest.dpi < 0.05) {
+    if (min_diff / closest.dpi < SNAP_THRESHOLD) {
         debug.info("Snapped DPI {d:.1} to common value {d:.1} ({s})",
             .{ dpi, closest.dpi, closest.name });
         return closest.dpi;
@@ -133,7 +144,7 @@ fn calculateScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
 ///   1. `Xft.dpi` from X resources
 ///   2. Calculated from display physical dimensions
 ///   3. Resolution-based scaling as a last resort
-pub fn detect(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) !DpiInfo {
+pub fn detect(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) DpiInfo {
     const sig =
         (@as(u64, screen.width_in_pixels)        << 48) |
         (@as(u64, screen.height_in_pixels)        << 32) |
@@ -144,16 +155,16 @@ pub fn detect(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) !DpiInfo {
         if (dpi_cache.screen_signature == sig) return cached;
     }
 
-    const result               = try detectFresh(conn, screen);
+    const result               = detectFresh(conn, screen);
     dpi_cache.result           = result;
     dpi_cache.screen_signature = sig;
     return result;
 }
 
-fn detectFresh(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) !DpiInfo {
+fn detectFresh(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) DpiInfo {
     if (readXftDpi(conn, screen)) |xft_dpi| {
         debug.info("Using DPI from X resources (Xft.dpi): {d:.1}", .{xft_dpi});
-        return DpiInfo.init(snapToCommonDPI(xft_dpi));
+        return DpiInfo.fromDpi(snapToCommonDPI(xft_dpi));
     }
 
     var geometry_dpi = calculateDpiFromGeometry(screen);
@@ -165,14 +176,14 @@ fn detectFresh(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) !DpiInfo 
         debug.info("Using geometry-calculated DPI: {d:.1}", .{geometry_dpi});
     }
 
-    return DpiInfo.init(snapToCommonDPI(geometry_dpi));
+    return DpiInfo.fromDpi(snapToCommonDPI(geometry_dpi));
 }
 
-pub inline fn scale(base_value: anytype, scale_factor: f32) @TypeOf(base_value) {
+pub inline fn scaleInt(base_value: anytype, scale_factor: f32) @TypeOf(base_value) {
     const T = @TypeOf(base_value);
     return switch (@typeInfo(T)) {
         .int, .comptime_int => @intFromFloat(@round(@as(f32, @floatFromInt(base_value)) * scale_factor)),
-        else => @compileError("scale() only supports integer types; use scaleToInt() for floats"),
+        else => @compileError("scaleInt() only supports integer types; use scaleToInt() for floats"),
     };
 }
 
@@ -180,7 +191,10 @@ pub inline fn scaleToInt(comptime T: type, base_value: f32, scale_factor: f32) T
     return @intFromFloat(@round(base_value * scale_factor));
 }
 
-pub inline fn scaleBorderWidth(value: @import("parser").ScalableValue, scale_factor: f32, reference_dimension: u16) u16 {
+/// Scales a border width value.
+/// For absolute pixel values, `scale_factor` is intentionally ignored — absolute
+/// pixel values are screen-independent and should render at their stated size.
+pub inline fn scaleBorderWidth(value: ScalableValue, scale_factor: f32, reference_dimension: u16) u16 {
     if (value.is_percentage) {
         const dim_f: f32 = @floatFromInt(reference_dimension);
         return @intFromFloat(@max(0.0, @round((value.value / 100.0) * 0.5 * dim_f * scale_factor)));
@@ -192,11 +206,11 @@ pub inline fn scaleBorderWidth(value: @import("parser").ScalableValue, scale_fac
 /// Alias for `scaleBorderWidth` — gaps and borders share identical scaling semantics.
 pub const scaleGaps = scaleBorderWidth;
 
-pub inline fn scaleMasterWidth(value: @import("parser").ScalableValue) f32 {
+pub inline fn scaleMasterWidth(value: ScalableValue) f32 {
     return if (value.is_percentage) value.value / 100.0 else -value.value;
 }
 
-pub inline fn scaleFontSize(value: @import("parser").ScalableValue, screen: *@import("defs").xcb.xcb_screen_t) u16 {
+pub inline fn scaleFontSize(value: ScalableValue, screen: *xcb.xcb_screen_t) u16 {
     if (value.is_percentage) {
         const screen_height: f32 = @floatFromInt(screen.height_in_pixels);
         return @intFromFloat(@max(1.0, @round(value.value * (screen_height / FONT_BASELINE_HEIGHT))));
@@ -205,12 +219,11 @@ pub inline fn scaleFontSize(value: @import("parser").ScalableValue, screen: *@im
     }
 }
 
-pub inline fn scaleBarHeight(value: @import("parser").ScalableValue, screen_height: u16) u16 {
-    const MIN_PX: u16 = 20;
+pub inline fn scaleBarHeight(value: ScalableValue, screen_height: u16) u16 {
     const h: f32  = @floatFromInt(screen_height);
     const px: f32 = if (value.is_percentage)
         h * (value.value / 100.0)
     else
         value.value;
-    return @max(MIN_PX, @as(u16, @intFromFloat(@round(px))));
+    return @max(BAR_MIN_HEIGHT_PX, @as(u16, @intFromFloat(@round(px))));
 }
