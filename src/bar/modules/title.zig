@@ -11,8 +11,8 @@ const drawing = @import("drawing");
 const utils   = @import("utils");
 
 const Atoms = struct {
-    net_wm_name: u32  = 0,
-    utf8_string:  u32  = 0,
+    net_wm_name: u32 = 0,
+    utf8_string: u32 = 0,
     initialized: bool = false,
 
     fn ensure(self: *Atoms) void {

@@ -23,7 +23,7 @@ pub fn startDrag(wm: *WM, win: u32, button: u8, x: i16, y: i16) void {
     if (wm.drag_state.active) return;
     if (bar.isBarWindow(win)) return;
     // Prefer the tiling cache; fall back to a live round-trip for floating windows.
-    const geom = tiling.getCachedGeom(win) orelse
+    const geom = tiling.getWindowGeom(win) orelse
         utils.getGeometry(wm.conn, win) orelse return;
     wm.drag_state = .{
         .active           = true,
@@ -44,7 +44,7 @@ pub fn startDrag(wm: *WM, win: u32, button: u8, x: i16, y: i16) void {
         tiling.removeWindow(win);
         tiling.retileCurrentWorkspace(wm);
         _ = xcb.xcb_ungrab_server(wm.conn);
-        utils.flush(wm.conn);
+        _ = xcb.xcb_flush(wm.conn);
     }
 }
 
@@ -70,7 +70,7 @@ pub fn updateDrag(wm: *WM, x: i16, y: i16) void {
         },
     };
     utils.configureWindow(wm.conn, drag.window, rect);
-    utils.flush(wm.conn);
+    _ = xcb.xcb_flush(wm.conn);
 }
 
 pub inline fn stopDrag(wm: *WM) void {

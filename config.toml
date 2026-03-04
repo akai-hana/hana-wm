@@ -1,52 +1,53 @@
 ### akai_hana's personal hana WM config.toml :-) ###
 
 ### NOTES:
-### (configuration tips & tricks)
 #
-# + All parameters and values are CAPS-insensitive. 
-# + Strings can be set with single or double quotes ("/')
-# + Decimal values can use a dot (N.NN) or comma (N,NN).
+# - All parameters and values are cApS-iNsEnSiTiVe. 
+# - Strings can be set with single or double quotes (''/"").
+# - Decimal values can use a dot (N.NN) or comma (N,NN).
+# - Any percentage value can be decimal (N.NN%/%N.NN).
 #
-# + Numerical values can be either N (px) or N%/%N (ratio)
-#   - 'N' represents an exact amount of pixels.
-#   - 'N%/%N' represents either a ratio or a default value scaled.
-#      - For example, 'gaps = 5%' will make window gaps take up 5%
-#        of a display's viewable area in relation to the windows, and
-#        'border_width = 5%' will make window's borders be 5% of a
-#        window's occupied area.
-#      - As for default scaling, 'indicator_size = 125%' will make the
-#        workspace indicators be +25% of the default value set (5 px).
-#   - Any percentage value can be decimal (N.NN%), and if decimal,
-#     use a dot or a comma (N.N%/N,N%).
+# + Parameters can be set to a numerical value N (px) or N%/%N (ratio)
+#   - 'N' represents an exact amount of pixels occupied on the screen.
+#   + 'N%' represents either a ratio or the scaling of a default value.
+#      - For example, `gap_width = 5%` will make the gaps of windows
+#        take up 5% of the total display's viewable area.
+#      - As for default value scaling, 'indicator_size = 125%' will make
+#         the workspace indicators be +25% of their default 100% (5 px).
 #
-# + HEX code values can be set with either of the following formats:
-#   (RRGGBB/rrggbb, ""/'') "#RRGGBB" / RRGGBB / 0xRRGGBB
+# #TODO: move to future colors.toml
+# + HEX color code values can be set to either of the following formats:
+#   "#RRGGBB" / RRGGBB / 0xRRGGBB
 #
-# + Keybind globs: use {…} in a key to expand one line into many binds.
+# + Keys in a keybind can be expanded by using `{}` in the key combination
+#   in order to set an array of keybinds, effectively assigning a single
+#   action to multiple key combinations in the same line.
+#   - `Mod+{Q,W,E,R} = "workspace"` sets workspace switching to 4 binds,
+#     Mod+Q through R.
+#   - `Mod+{1-9} = "workspace"` sets workspace switching to 9 binds, keys
+#     Mod+1 through 9.
+#   - Both can be combined at will: `Mod+{1-4,Q,W,E,R} = "workspace"`.
+# + `{}` in place of the action instead of the keybind serves as an alias
+#   `Mod+L = "larry"; kill = "pkill -9"; Mod+Shift+L = "{kill} larry"`
+#   
+# + A single keybind can invoke multiple actions at once.
+#   - `Mod+A = "foo"; Mod+A = "bar"` aren't conflicting;
+#     both `foo` and `bar` will be executed upon pressing Mod+A.
+#   - More conveniently, arrays of actions can be set onto a bind:
+#     `Mod+A = ["foo", "bar"]`
+# + A single keybind can contain multiple actions
 #   Keys are assigned workspace indices by their position in the list.
-#   Supports comma-separated tokens and single-character ranges:
-#     Mod+{1-4,Q,W,E,R} = "workspace"   # expands to workspace_1 … workspace_8
-#     Mod+{A-Z}         = "workspace"   # expands to workspace_1 … workspace_26
-#
-# + Multi-action binds: assign multiple actions to the same key two ways:
-#   Array syntax  — Mod+D = ["ghostty", "firefox"]
-#   Duplicate key — Mod+D = "ghostty"
-#                   Mod+D = "firefox"
-#   Both are equivalent; the actions fire left-to-right.
 
 [tiling]
-enabled = true
-
-# Per-workspace tiling layouts
-global_layout = false
+enabled       = true
+global_layout = false # Per-workspace tiling layouts
 
 # Enabled layouts
-## Layouts not added to the array will not be available at runtime.
-## Not defining the array at all enables all layouts in their default order.
+## Layouts not defined on the array will not be available in runtime.
+## Not defining the array at all enables all layouts in `src/tiling/layouts/.`
 
 #       Layout          Variation  Workspaces
-#              ("default"/"alts")  (restricted to)
-layouts = [
+layouts = [                                 # ("default"/"alternative") 
 	"master-stack",                     # "lifo"/"fifo"
 	"monocle",      "gaps",    "2,5,8", # "gapless"/"gaps"
 	"grid",         "relaxed", "6",     # "rigid"/"relaxed"
@@ -55,26 +56,27 @@ layouts = [
 
 [tiling.aesthetics]
 # [0%-200%] / [0-N] px
-## 100% makes a window's borders equal to the window's viewable area.
-## 200% makes windows be swallowed by their borders.
-gaps             = 2.5%
-border_width     = 1%
+## 100% = Entire display; 0% = disabled
+gap_width        = %1.5
+border_width     = %0.5
+
 border_focused   = "#ac3232"
 border_unfocused = "#52263e"
 
 [tiling.layouts.master-stack]
 count = 1      # Number of windows in master area (master stack size)
 side  = "left" # "left"/"right" / 'L'/'R'
-width = 50%    # (0%-100%) / (0-N] px
+width = %50    # [5%-95%] / (0-N] px
 
-# Behavioral variation for master-stack:
-#   "lifo" = old window stays in master, new window moves to bottom of stack (default)
-#   "fifo" = new window replaces master, old master moves to top of stack
-variation = "lifo"
+# "lifo" = Last (window remains) In (master area), First (window gets) Out (of master, and onto the stack).
+# "fifo" = First (window goes) In (master area), First (window goes) Out (of master, and onto the stack).
+variation = "lifo" # "lifo"/"fifo"
 
 # Override the 3-character indicator shown in the bar for this layout.
 # Defaults to the variation name ("LIF" or "FIF") when not set.
 # indicator = "M-S"
+
+### TODO: review from here on down
 
 [tiling.layouts.monocle]
 # Behavioral variation for monocle:
@@ -238,13 +240,11 @@ Mod+period = "decrease_master_count"
 
 # Workspaces
 # Switch to workspace N
-Mod+{1-4,Q,W,E,R} = "workspace"
+Mod+{1-4,Q,W,E,R} = "workspace" #TODO: rename to "switch_to_workspace"
 
-# Move window to workspace N (first press), tag onto more (subsequent presses)
-Mod+Shift+{1-4,Q,W,E,R} = "move_or_tag"
-
-# Pure tag-toggle — flip workspace membership without moving
-Mod+Shift+{1-4,Q,W,E,R} = "tag_toggle"
+# Workspace window sending
+Mod+Shift+{1-4,Q,W,E,R} = "move_to_workspace"
+Mod+Alt+{1-4,Q,W,E,R} = "tag_toggle" #TODO: rename to toggle_to_workspace
 
 # Bar
 Mod+B       = "toggle_bar_visibility"  # shown/hidden
@@ -275,9 +275,28 @@ Mod+Shift+V = "{kill} youtube-music"
 
 # Emergency/Debug
 # Emergency recovery: Disables tiling, clears fullscreen, maps all windows, stops drag
-Mod+Shift+Escape = "emergency_recover"
+Mod+Shift+Escape = "emergency_recover" #TODO: remove. this is hacky and assumes the program bugging out is a recurrent issue. therefore it is unneeded.
 
 # Workspace rules
+
+# Available formats:
+# 
+# - Per-workspace rules
+# Example: 
+#
+# ```toml
+# [workspace.rules.N] # N = workspace number
+# <program_name>
+# ```
+#
+# - Rule arrays
+# Example:
+#
+# ```toml
+# 1 = ["<program_1>", "<program_2>"] # Workspace 1
+# 2 = ["<program_3>"]                # Workspace 2
+# ```
+
 [workspace.rules.1] # browser
 Navigator
 Firefox
@@ -302,16 +321,10 @@ DDNet
 emacs
 xeyes
 
-[workspace.rules.7] # Media
+[workspace.rules.7] # media
 prismlauncher
 freetube
 gimp
 
 [workspace.rules.8] # torrenting
 deluge
-
-# Alternative array format (both formats are supported):
-# [workspace.rules]
-# 1 = ["Navigator", "Firefox"]           # browser
-# 2 = ["discord", "vesktop", "equibop"]  # socials  
-# 3 = ["com.github.th_ch.youtube_music"] # music

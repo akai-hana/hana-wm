@@ -12,13 +12,15 @@ const WM     = defs.WM;
 pub const Reason = enum {
     mouse_click,
     mouse_enter,
-    window_destroyed,
-    workspace_switch,
     user_command,
     tiling_operation,
     // Distinct from other reasons so tiling operations cannot accidentally
     // inherit window_spawn crossing suppression via external state.
     window_spawn,
+    // Workspace switch: windows are guaranteed mapped (skip the round-trip
+    // guard), focus-follow-mouse suppression is cleared, and the window is
+    // never raised (the stacking order is already correct after the switch).
+    workspace_switch,
 };
 
 pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
@@ -35,14 +37,14 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     //                              populated at map time and kept coherent by
     //                              removeWindow on unmap/destroy.
     //
-    // For all other reasons (click, command, destroyed, workspace_switch) a race
-    // with destroy is possible, so we guard with a live attribute query.
+    // For all other reasons (click, command) a race with destroy is possible,
+    // so we guard with a live attribute query.
     const input_model = utils.getInputModelCached(wm.conn, win);
     if (input_model == .no_input) return;
 
     if (switch (reason) {
-        .mouse_click, .window_destroyed, .workspace_switch, .user_command => !isWindowMapped(wm.conn, win),
-        .mouse_enter, .window_spawn, .tiling_operation => false,
+        .mouse_click, .user_command => !isWindowMapped(wm.conn, win),
+        .mouse_enter, .window_spawn, .tiling_operation, .workspace_switch => false,
     }) return;
 
     const old = wm.focused_window;
@@ -146,15 +148,13 @@ pub fn clearFocus(wm: *WM) void {
 inline fn shouldRaise(reason: Reason) bool {
     return switch (reason) {
         .mouse_click, .user_command => true,
-        .mouse_enter, .window_destroyed, .workspace_switch,
-        .tiling_operation, .window_spawn => false,
+        .mouse_enter, .tiling_operation, .window_spawn, .workspace_switch => false,
     };
 }
 
 inline fn suppressionFor(reason: Reason) defs.FocusSuppressReason {
     return switch (reason) {
-        .mouse_click, .mouse_enter, .window_destroyed,
-        .user_command, .workspace_switch => .none,
+        .mouse_click, .mouse_enter, .user_command, .workspace_switch => .none,
         .tiling_operation => .tiling_operation,
         .window_spawn     => .window_spawn,
     };

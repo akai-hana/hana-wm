@@ -33,7 +33,7 @@ extern fn feof(stream: *FILE) c_int;
 // Iter 1: removed unused `allocator` parameter — detectTerminal is a pure PATH
 // scan that does not allocate and returns a static string slice.
 /// Returns the first available terminal from TERMINALS, or "xterm".
-pub fn detectTerminal() ![]const u8 {
+pub fn detectTerminal() []const u8 {
     for (TERMINALS) |cmd| {
         if (isCommandAvailable(cmd)) {
             debug.info("Detected terminal: {s}", .{cmd});

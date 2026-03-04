@@ -13,7 +13,6 @@ const bar        = @import("bar");
 const workspaces = @import("workspaces");
 const debug      = @import("debug");
 const minimize   = @import("minimize");
-const layouts    = @import("layouts");
 
 const WINDOW_EVENT_MASK = constants.EventMasks.MANAGED_WINDOW;
 
@@ -215,7 +214,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
         xcb.xcb_discard_reply(wm.conn, c_protocols.sequence);
         xcb.xcb_discard_reply(wm.conn, c_hints.sequence);
         xcb.xcb_discard_reply(wm.conn, c_normal_hints.sequence);
-        utils.flush(wm.conn);
+        _ = xcb.xcb_flush(wm.conn);
         return;
     };
 
@@ -240,7 +239,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
         grabButtons(wm, win, false);
     }
 
-    utils.flush(wm.conn);
+    _ = xcb.xcb_flush(wm.conn);
 
     bar.markDirty();
 }
@@ -267,7 +266,7 @@ fn unmanageWindow(wm: *WM, win: u32) void {
 
     if (wm.config.tiling.enabled) tiling.removeWindow(win);
     utils.uncacheWindowFocusProps(win);
-    layouts.evictSizeHints(win);
+    tiling.evictSizeHints(win);
     minimize.forceUntrack(wm, win);
     workspaces.removeWindow(win);
 
@@ -293,7 +292,7 @@ fn unmanageWindow(wm: *WM, win: u32) void {
 
     bar.redrawImmediate(wm);
     _ = xcb.xcb_ungrab_server(wm.conn);
-    utils.flush(wm.conn);
+    _ = xcb.xcb_flush(wm.conn);
 }
 
 pub fn handleUnmapNotify(event: *const xcb.xcb_unmap_notify_event_t, wm: *WM) void {
@@ -350,7 +349,7 @@ fn sendConfigureNotify(wm: *WM, win: u32, x: i16, y: i16, width: u16, height: u1
 
 fn sendSyntheticConfigureNotify(wm: *WM, win: u32) void {
     // Fast path: serve the geometry from the tiling cache — zero round-trips.
-    if (tiling.getCachedGeom(win)) |rect| {
+    if (tiling.getWindowGeom(win)) |rect| {
         const border: u16 = if (tiling.getState()) |s| s.border_width else 0;
         sendConfigureNotify(wm, win, rect.x, rect.y, rect.width, rect.height, border);
         return;
@@ -384,7 +383,7 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, w
     if (mask & xcb.XCB_CONFIG_WINDOW_HEIGHT != 0)       { values[n] = event.height;                           n += 1; }
     if (mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0) { values[n] = event.border_width;                     n += 1; }
     _ = xcb.xcb_configure_window(wm.conn, win, mask, &values);
-    utils.flush(wm.conn);
+    _ = xcb.xcb_flush(wm.conn);
 }
 
 // Focus / crossing events
@@ -487,5 +486,5 @@ fn collectAndCacheSizeHints(
 
     // Don't occupy a cache slot for degenerate hints that declare zero on both axes.
     if (min_width > 0 or min_height > 0)
-        layouts.cacheSizeHints(wm.allocator, win, .{ .min_width = min_width, .min_height = min_height });
+        tiling.cacheSizeHints(wm.allocator, win, .{ .min_width = min_width, .min_height = min_height });
 }

@@ -17,7 +17,7 @@ pub const OFFSCREEN_X_POSITION: i32 = -4000;
 pub const OFFSCREEN_THRESHOLD_MIN: i32 = -1000;
 
 /// Maximum depth when walking the X11 window tree in findManagedWindow.
-pub const MAX_WINDOW_TREE_DEPTH: usize = 10;
+pub const MAX_WINDOW_TREE_DEPTH: u4 = 15;
 
 /// Event masks for window types
 pub const EventMasks = struct {
@@ -53,8 +53,8 @@ pub const LOCK_MODIFIERS = [_]u16{
 pub const CURSOR_LEFT_PTR      = 68;
 pub const CURSOR_LEFT_PTR_MASK = CURSOR_LEFT_PTR + 1;
 
-/// Size constants
-pub const Sizes = struct {
+/// Capacity limits and upper bounds.
+pub const Limits = struct {
     /// Dispatch table size (covers all X11 event types)
     pub const EVENT_DISPATCH_TABLE = 36;
 

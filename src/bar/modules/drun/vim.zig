@@ -1,34 +1,12 @@
-//! vim — modal editing engine for drun.
+//! Partial re-implementation of vim motions, for use with drun.
 //!
-//! Implements a vim-style modal editing layer over a single-line text buffer.
-//! All state is contained in `VimState`.  The four mode handlers each return an
-//! `Action` value so the caller can react without a circular dependency:
-//!
-//!   .none       — nothing special; caller should just redraw
-//!   .deactivate — user pressed Escape / Ctrl+C to close
-//!   .spawn      — user pressed Return; execute buf[0..len] and close
-//!
-//! Typical integration in a key-press handler:
-//!
-//!   const action = switch (vs.mode) {
-//!       .insert  => vim.handleInsert(vs, sym),
-//!       .normal  => vim.handleNormal(vs, sym),
-//!       .visual  => vim.handleVisual(vs, sym),
-//!       .replace => vim.handleReplace(vs, sym),
-//!   };
-//!   switch (action) {
-//!       .none       => {},
-//!       .deactivate => ...,
-//!       .spawn      => { runCmd(vs.buf[0..vs.len]); ... },
-//!   }
-//!
-//! Ctrl-modified keys should be pre-handled and routed to handleCtrl().
+//! Implements a modal editing layer over a single-line text buffer (drun's bar segment).
 
-const std = @import("std");
+const std  = @import("std");
 const defs = @import("defs");
 const xcb  = defs.xcb;
 
-// ── X11 keysym constants ──────────────────────────────────────────────────────
+// X11 keysym constants 
 
 pub const XK_BackSpace : xcb.xcb_keysym_t = 0xff08;
 pub const XK_Tab       : xcb.xcb_keysym_t = 0xff09;
@@ -40,13 +18,13 @@ pub const XK_Right     : xcb.xcb_keysym_t = 0xff53;
 pub const XK_Home      : xcb.xcb_keysym_t = 0xff50;
 pub const XK_End       : xcb.xcb_keysym_t = 0xff57;
 
-// ── Shared constants ──────────────────────────────────────────────────────────
+// Shared constants 
 
-pub const MAX_INPUT  : usize = 512;
-pub const UNDO_MAX   : usize = 32;
-pub const MARK_COUNT : usize = 26; // marks a–z
+pub const MAX_INPUT  : u10 = 512;
+pub const UNDO_MAX   : u6 = 32;
+pub const MARK_COUNT : u5 = 26; // marks a–z
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// Types 
 
 /// What the caller should do after handling a key.
 pub const Action = enum { none, deactivate, spawn };
@@ -112,7 +90,7 @@ pub const UndoEntry = struct {
     cursor: usize         = 0,
 };
 
-// ── VimState ──────────────────────────────────────────────────────────────────
+// VimState 
 
 /// All state for the vim editing engine.  Embed one of these in your application
 /// state and pass a pointer to the handle* functions each key press.
@@ -122,7 +100,7 @@ pub const VimState = struct {
     cursor: usize         = 0,
     mode:   Mode          = .insert,
 
-    // ── Normal-mode sub-state ─────────────────────────────────────────────────
+    // Normal-mode sub-state 
     n_count:          u32  = 0,   // digit accumulator
     n_op:             u8   = 0,   // pending operator ('d'/'c'/'y')
     n_op_count:       u32  = 0,   // count when operator was armed
@@ -137,28 +115,28 @@ pub const VimState = struct {
     last_find_kind:   u8   = 0,
     last_find_ch:     u8   = 0,
 
-    // ── Yank / delete register ────────────────────────────────────────────────
+    // Yank / delete register 
     yank_buf: [MAX_INPUT]u8 = undefined,
     yank_len: usize         = 0,
 
-    // ── Visual mode ───────────────────────────────────────────────────────────
+    // Visual mode 
     vis_anchor: usize = 0,
 
-    // ── Replace mode ──────────────────────────────────────────────────────────
+    // Replace mode 
     replace_orig_buf: [MAX_INPUT]u8 = undefined,
     replace_orig_len: usize         = 0,
     replace_orig_cur: usize         = 0, // cursor position when R was pressed
 
-    // ── Marks a–z ─────────────────────────────────────────────────────────────
+    // Marks a–z 
     marks: [MARK_COUNT]?usize = [_]?usize{null} ** MARK_COUNT,
 
-    // ── Undo / redo ───────────────────────────────────────────────────────────
+    // Undo / redo 
     undo_stack: [UNDO_MAX]UndoEntry = undefined,
     undo_top:   usize               = 0,
     redo_stack: [UNDO_MAX]UndoEntry = undefined,
     redo_top:   usize               = 0,
 
-    // ── Dot repeat ────────────────────────────────────────────────────────────
+    // Dot repeat 
     dot:              DotRecord     = .{},
     in_dot_replay:    bool          = false,
     recording_insert: bool          = false,
@@ -166,7 +144,7 @@ pub const VimState = struct {
     insert_rec_len:   usize         = 0,
 };
 
-// ── Public helpers ────────────────────────────────────────────────────────────
+// Public helpers 
 
 /// Reset all normal-mode sub-state (counts, pending operators, prefix flags).
 pub fn resetNormalSub(vs: *VimState) void {
@@ -215,7 +193,7 @@ inline fn clampCursorForNormal(vs: *VimState) void {
     if (vs.len > 0 and vs.cursor == vs.len) vs.cursor = vs.len - 1;
 }
 
-// ── Key handlers ──────────────────────────────────────────────────────────────
+// Key handlers 
 
 /// Handle a Ctrl-modified key.  Call this before dispatching to mode handlers.
 /// Returns `.deactivate` for Ctrl+C; `.none` for all others (mutations applied
@@ -233,7 +211,7 @@ pub fn handleCtrl(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
-// ── INSERT mode handler ───────────────────────────────────────────────────────
+// INSERT mode handler 
 
 pub fn handleInsert(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     switch (sym) {
@@ -274,7 +252,7 @@ pub fn handleInsert(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
-// ── NORMAL mode handler ───────────────────────────────────────────────────────
+// NORMAL mode handler 
 
 /// Digit accumulation shared by handleNormal and handleVisual.
 /// Returns true and updates n_count if sym is a digit (1-9 always; 0 only if
@@ -303,8 +281,7 @@ fn tryArmFindPrefix(vs: *VimState, sym: xcb.xcb_keysym_t) bool {
 }
 
 pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
-
-    // ── 1. Pending r{c} ───────────────────────────────────────────────────────
+    // 1. Pending r{c} 
     if (vs.n_pending_r) {
         if (sym >= 0x20 and sym <= 0x7e and vs.cursor < vs.len) {
             const ch: u8   = @truncate(sym);
@@ -319,7 +296,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         return .none;
     }
 
-    // ── 2. Pending f/F/t/T char ───────────────────────────────────────────────
+    // 2. Pending f/F/t/T char 
     if (vs.n_find_kind != 0) {
         if (sym >= 0x20 and sym <= 0x7e) {
             const ch: u8   = @truncate(sym);
@@ -342,7 +319,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         return .none;
     }
 
-    // ── 3. Pending g-prefix ───────────────────────────────────────────────────
+    // 3. Pending g-prefix 
     if (vs.n_pending_g) {
         const cnt = effCount(vs);
         const mr_opt: ?MotionResult = switch (sym) {
@@ -368,7 +345,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         return .none;
     }
 
-    // ── 3.5. Pending text-object delimiter ────────────────────────────────────
+    // 4. Pending text-object delimiter 
     if (vs.n_text_obj_kind != 0) {
         if (sym >= 0x20 and sym <= 0x7e) {
             const ch: u8 = @truncate(sym);
@@ -385,7 +362,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         return .none;
     }
 
-    // ── 3.6. Pending mark set (m{a-z}) ───────────────────────────────────────
+    // 5. Pending mark set (m{a-z}) 
     if (vs.n_pending_m) {
         if (sym >= 'a' and sym <= 'z')
             vs.marks[@as(usize, @intCast(sym - 'a'))] = vs.cursor;
@@ -393,7 +370,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         return .none;
     }
 
-    // ── 3.7. Pending mark jump ('{a-z}) ──────────────────────────────────────
+    // 6. Pending mark jump ('{a-z}) 
     if (vs.n_pending_apos) {
         if (sym >= 'a' and sym <= 'z') {
             if (vs.marks[@as(usize, @intCast(sym - 'a'))]) |pos| {
@@ -405,10 +382,10 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         return .none;
     }
 
-    // ── 4. Digit accumulation ─────────────────────────────────────────────────
+    // 7. Digit accumulation 
     if (tryAccumulateDigit(vs, sym)) return .none;
 
-    // ── 5. ; / , (repeat last find) ──────────────────────────────────────────
+    // 8. ; / , (repeat last find) 
     if (sym == ';' or sym == ',') {
         if (vs.last_find_kind != 0) {
             const cnt  = effCount(vs);
@@ -420,7 +397,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         return .none;
     }
 
-    // ── 6. Simple motions ─────────────────────────────────────────────────────
+    // 9. Simple motions 
     if (resolveSimpleMotion(vs, sym, effCount(vs))) |mr| {
         if (vs.n_op != 0) {
             vs.dot = DotRecord{
@@ -435,7 +412,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         return .none;
     }
 
-    // ── 7. Operator arming / text-object detection ────────────────────────────
+    // 10. Operator arming / text-object detection 
     if ((sym == 'i' or sym == 'a') and vs.n_op != 0) {
         vs.n_text_obj_kind = @truncate(sym);
         return .none;
@@ -456,13 +433,13 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         return .none;
     }
 
-    // ── 8. Prefix arming ─────────────────────────────────────────────────────
+    // 11. Prefix arming 
     if (tryArmFindPrefix(vs, sym)) return .none;
     if (sym == 'r' and vs.n_op == 0) { vs.n_pending_r    = true; return .none; }
     if (sym == 'm' and vs.n_op == 0) { vs.n_pending_m    = true; return .none; }
     if (sym == 0x27)                 { vs.n_pending_apos = true; return .none; } // apostrophe
 
-    // ── 9. Single-key commands ────────────────────────────────────────────────
+    // 12. Single-key commands 
     const cnt = effCount(vs);
 
     switch (sym) {
@@ -581,10 +558,9 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
-// ── VISUAL mode handler ───────────────────────────────────────────────────────
+// VISUAL mode handler 
 
 pub fn handleVisual(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
-
     // Resolve pending find.
     if (vs.n_find_kind != 0) {
         if (sym >= 0x20 and sym <= 0x7e) {
@@ -701,7 +677,7 @@ pub fn handleVisual(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
-// ── REPLACE mode handler ──────────────────────────────────────────────────────
+// REPLACE mode handler 
 
 pub fn handleReplace(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     switch (sym) {
@@ -743,7 +719,7 @@ pub fn handleReplace(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
-// ── Motion resolvers ──────────────────────────────────────────────────────────
+// Motion resolvers 
 
 fn resolveSimpleMotion(vs: *VimState, sym: xcb.xcb_keysym_t, cnt: u32) ?MotionResult {
     return switch (sym) {
@@ -762,7 +738,7 @@ fn resolveSimpleMotion(vs: *VimState, sym: xcb.xcb_keysym_t, cnt: u32) ?MotionRe
     };
 }
 
-// ── Primitive motion functions ────────────────────────────────────────────────
+// Primitive motion functions 
 
 inline fn isWordChar(ch: u8) bool {
     return std.ascii.isAlphanumeric(ch) or ch == '_';
@@ -948,7 +924,7 @@ fn motionMatchBracket(vs: *VimState) usize {
     return vs.cursor;
 }
 
-// ── Text object resolver ──────────────────────────────────────────────────────
+// Text object resolver 
 
 fn resolveTextObject(vs: *VimState, kind: u8, delim: u8) ?MotionResult {
     const inner = (kind == 'i');
@@ -1056,7 +1032,7 @@ fn textObjBracket(vs: *VimState, open: u8, close: u8, inner: bool) ?MotionResult
     }
 }
 
-// ── Operator application ──────────────────────────────────────────────────────
+// Operator application 
 
 fn doOp(vs: *VimState, op: u8, mr: MotionResult) void {
     var from: usize = undefined;
@@ -1101,7 +1077,7 @@ fn doOpLine(vs: *VimState, op: u8) void {
     }
 }
 
-// ── Edit helpers ──────────────────────────────────────────────────────────────
+// Edit helpers 
 
 /// Move cursor (normal mode: clamp to last valid position).
 fn setCursor(vs: *VimState, mr: MotionResult) void {
@@ -1259,7 +1235,7 @@ fn ctrlAdjustNumber(vs: *VimState, delta: i64) void {
     vs.cursor = num_start + new_len - 1;
 }
 
-// ── Undo / redo ───────────────────────────────────────────────────────────────
+// Undo / redo 
 
 /// Push the current buffer state onto the undo stack unconditionally.
 /// If the stack is full, the oldest entry is dropped to make room.
@@ -1312,7 +1288,7 @@ fn undoRedo(vs: *VimState) void {
     vs.len = e.len; vs.cursor = e.cursor;
 }
 
-// ── Dot repeat ────────────────────────────────────────────────────────────────
+// Dot repeat 
 
 fn dotReplay(vs: *VimState) void {
     if (vs.dot.kind == .none) return;
@@ -1393,7 +1369,7 @@ fn dotReplay(vs: *VimState) void {
     }
 }
 
-// ── Normal-mode sub-state helpers ─────────────────────────────────────────────
+// Normal-mode sub-state helpers 
 
 /// Treat a count of 0 as 1 (vim convention: no count = repeat once).
 inline fn resolveCount(n: u32) u32 { return if (n == 0) 1 else n; }

@@ -1,4 +1,4 @@
-// Tiling window management: delegates to layout modules.
+//! Tiling window management: delegates to layout modules.
 
 const std        = @import("std");
 const defs       = @import("defs");
@@ -34,7 +34,7 @@ const fibonacci_layout = if (layout_flags.has_fibonacci) @import("fibonacci") el
 
 const MAX_MASTER_WIDTH: f32 = 0.95;
 // Stack-local buffer size for per-retile workspace window list.
-const MAX_WS_WINDOWS: usize = 128;
+const MAX_WS_WINDOWS: u7 = 127; //TODO: make dynamically memory allocated, instead of hard-capped to an arbitrary number
 
 pub const Layout = enum { master, monocle, grid, fibonacci };
 
@@ -90,7 +90,7 @@ pub const LayoutVariations = struct {
     grid:    GridVariation    = .rigid,
 };
 
-// State 
+// State
 
 pub const State = struct {
     allocator:        std.mem.Allocator,
@@ -102,7 +102,7 @@ pub const State = struct {
     master_side:      defs.MasterSide,
     master_width:     f32,
     master_count:     u8,
-    gaps:             u16,
+    gap_width:        u16,
     border_width:     u16,
     border_focused:   u32,
     border_unfocused: u32,
@@ -134,8 +134,13 @@ pub const State = struct {
     /// field). Both use getOrPut so one probe handles dedup + insert.
     cache: layouts.CacheMap,
 
+    /// WM_NORMAL_HINTS minimum-size constraints, populated at MapRequest time
+    /// and evicted on unmanage.  Owned here so it shares the same lifetime as
+    /// the geometry cache and is never stale after a reloadConfig.
+    size_hints: std.AutoHashMapUnmanaged(u32, layouts.SizeHints),
+
     pub inline fn margins(self: *const State) utils.Margins {
-        return .{ .gap = self.gaps, .border = self.border_width };
+        return .{ .gap = self.gap_width, .border = self.border_width };
     }
 
     pub inline fn borderColor(self: *const State, wm: *const WM, win: u32) u32 {
@@ -146,16 +151,17 @@ pub const State = struct {
     pub fn deinit(self: *State) void {
         self.windows.deinit();
         self.cache.deinit(self.allocator);
+        self.size_hints.deinit(self.allocator);
     }
 };
 
-// Module singleton 
+// Module singleton
 
 var g_state: ?State = null;
 
 pub inline fn getState() ?*State { return if (g_state) |*s| s else null; }
 
-// Config 
+// Config
 
 fn computeMasterWidth(wm: *WM) f32 {
     const raw = dpi.scaleMasterWidth(wm.config.tiling.master_width);
@@ -185,7 +191,7 @@ fn buildState(wm: *WM) State {
         .master_side      = wm.config.tiling.master_side,
         .master_width     = computeMasterWidth(wm),
         .master_count     = wm.config.tiling.master_count,
-        .gaps             = dpi.scaleGaps(wm.config.tiling.gaps, wm.dpi_info.scale_factor, screen_height),
+        .gap_width             = dpi.scaleGaps(wm.config.tiling.gap_width, wm.dpi_info.scale_factor, screen_height),
         .border_width     = dpi.scaleBorderWidth(wm.config.tiling.border_width, wm.dpi_info.scale_factor, screen_height),
         .border_focused   = wm.config.tiling.border_focused,
         .border_unfocused = wm.config.tiling.border_unfocused,
@@ -194,6 +200,7 @@ fn buildState(wm: *WM) State {
         .ws_geom_valid    = 0,
         .last_retile_screen = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
         .cache            = .{},
+        .size_hints       = .{},
     };
 }
 
@@ -212,6 +219,10 @@ pub fn reloadConfig(wm: *WM) void {
     // Preserve runtime tracking state.
     const saved_windows = s.windows;
 
+    // Preserve size hints: these are window properties, not config, so they
+    // must survive a reload. The underlying allocation is reused unchanged.
+    const saved_size_hints = s.size_hints;
+
     // Clear the combined cache in-place, retaining the allocated capacity so
     // the next retile does not pay for a fresh heap allocation. The old data
     // is intentionally discarded: config changes (gaps, border width, colors)
@@ -220,12 +231,14 @@ pub fn reloadConfig(wm: *WM) void {
     saved_cache.clearRetainingCapacity();
     // Disown before buildState overwrites g_state; s is a dangling pointer
     // from this point forward and must not be used.
-    s.cache = .{};
+    s.cache      = .{};
+    s.size_hints = .{};  // disown so buildState/deinit doesn't double-free
 
     g_state = buildState(wm);
     const ns = &g_state.?;
-    ns.windows = saved_windows;
-    ns.cache   = saved_cache; // reuse the allocation
+    ns.windows    = saved_windows;
+    ns.cache      = saved_cache;    // reuse the allocation
+    ns.size_hints = saved_size_hints;
 
     // On config reload, reset all workspace layouts to the new default.
     if (workspaces.getState()) |ws_state| {
@@ -244,8 +257,22 @@ pub fn reloadConfig(wm: *WM) void {
         retileCurrentWorkspace(wm);
         bar.redrawImmediate(wm);
         _ = xcb.xcb_ungrab_server(wm.conn);
-        utils.flush(wm.conn);
+        _ = xcb.xcb_flush(wm.conn);
     }
+}
+
+/// Cache WM_NORMAL_HINTS minimum size constraints for `win`.
+/// Called from window.zig at MapRequest time.
+pub fn cacheSizeHints(allocator: std.mem.Allocator, win: u32, hints: layouts.SizeHints) void {
+    if (hints.min_width == 0 and hints.min_height == 0) return;
+    const s = getState() orelse return;
+    s.size_hints.put(allocator, win, hints) catch {};
+}
+
+/// Evict the size-hint entry for `win`. Called from window.zig at unmanage time.
+pub fn evictSizeHints(win: u32) void {
+    const s = getState() orelse return;
+    _ = s.size_hints.remove(win);
 }
 
 // Window management 
@@ -306,7 +333,7 @@ pub fn toggleWindowFloat(wm: *WM, window_id: u32) void {
         retileCurrentWorkspace(wm);
         debug.info("[FLOAT] 0x{x} → tiled", .{window_id});
     }
-    utils.flush(wm.conn);
+    _ = xcb.xcb_flush(wm.conn);
 }
 
 /// Save geometry for any window (tiled or floating) into the shared cache.
@@ -396,12 +423,6 @@ pub inline fn isWindowTiled(window_id: u32) bool {
     return s.windows.contains(window_id);
 }
 
-// Zero-cost cache lookup for drag.zig — avoids an X round-trip for tiled windows.
-// Returns null for fullscreen windows or after an explicit invalidate.
-pub inline fn getCachedGeom(window_id: u32) ?utils.Rect {
-    return getWindowGeom(window_id);
-}
-
 // Layout dispatch 
 
 fn dispatchLayout(layout: Layout, ctx: *const layouts.LayoutCtx, s: *State, wins: []const u32, w: u16, h: u16, y: u16) void {
@@ -440,12 +461,11 @@ pub fn retileAllWorkspaces(wm: *WM) void {
     const ws_state_opt = if (!wm.config.tiling.global_layout) workspaces.getState() else null;
 
     const ctx = layouts.LayoutCtx{
-        .conn      = wm.conn,
-        .cache     = &s.cache,
-        .allocator = s.allocator,
+        .conn       = wm.conn,
+        .cache      = &s.cache,
+        .size_hints = &s.size_hints,
+        .allocator  = s.allocator,
     };
-
-    // One pass: bucket every tiled window into its workspace slot.
     const MAX_WS: usize = 64; // matches the u64 ws_geom_valid bitmask width
     const effective_ws = @min(ws_count, MAX_WS);
     var bufs: [MAX_WS][MAX_WS_WINDOWS]u32 = undefined;
@@ -560,12 +580,11 @@ fn retile(wm: *WM, screen: utils.Rect, for_ws: ?u8) void {
     // Build the layout context once; it carries the connection and the
     // cache pointer so configureSafe never touches module-level globals.
     const ctx = layouts.LayoutCtx{
-        .conn      = wm.conn,
-        .cache     = &s.cache,
-        .allocator = s.allocator,
+        .conn       = wm.conn,
+        .cache      = &s.cache,
+        .size_hints = &s.size_hints,
+        .allocator  = s.allocator,
     };
-
-    // Resolve the layout for this workspace (per-workspace mode or global).
     const layout: Layout = if (!wm.config.tiling.global_layout)
         if (workspaces.getState()) |ws_state|
             if (target_ws < ws_state.workspaces.len) ws_state.workspaces[target_ws].layout else s.layout
@@ -731,15 +750,16 @@ pub fn adjustMasterCount(wm: *WM, delta: i8) void {
 pub inline fn increaseMasterCount(wm: *WM) void { adjustMasterCount(wm,  1); }
 pub inline fn decreaseMasterCount(wm: *WM) void { adjustMasterCount(wm, -1); }
 
-pub fn adjustMasterWidth(delta: f32) void {
+pub fn adjustMasterWidth(wm: *WM, delta: f32) void {
     const s = getState() orelse return;
     s.master_width = @max(defs.MIN_MASTER_WIDTH, @min(MAX_MASTER_WIDTH, s.master_width + delta));
     s.dirty = true;
     s.ws_geom_valid = 0;
+    retileCurrentWorkspace(wm);
 }
 
-pub inline fn increaseMasterWidth() void { adjustMasterWidth( 0.025); }
-pub inline fn decreaseMasterWidth() void { adjustMasterWidth(-0.025); }
+pub inline fn increaseMasterWidth(wm: *WM) void { adjustMasterWidth(wm,  0.025); }
+pub inline fn decreaseMasterWidth(wm: *WM) void { adjustMasterWidth(wm, -0.025); }
 
 pub fn cycleLayoutVariation(wm: *WM) void {
     const s = getState() orelse return;
