@@ -43,9 +43,9 @@ const WindowInfo = struct {
 const TITLE_LEAD_PX: u16 = 4;
 
 /// Returns true when `win` appears in the minimized snapshot slice.
-inline fn isMinimizedInSnap(minimized: []const u32, win: u32) bool {
-    for (minimized) |w| if (w == win) return true;
-    return false;
+/// O(1) minimized membership check using the pre-built set from BarSnapshot.
+inline fn isMinimizedInSnap(minimized_set: *const std.AutoHashMapUnmanaged(u32, void), win: u32) bool {
+    return minimized_set.contains(win);
 }
 
 /// Draw the title segment.
@@ -56,6 +56,9 @@ inline fn isMinimizedInSnap(minimized: []const u32, win: u32) bool {
 ///   `current_ws_wins`   — window IDs on the current workspace (snapshot copy).
 ///   `minimized`         — snapshot of minimized window IDs (for isMinimized checks).
 ///   `title_invalidated` — when true, the cached title is stale and must be re-fetched.
+/// Draw the title segment.
+/// `focused_title` is pre-fetched on the main thread in captureIntoSlot —
+/// the bar render thread makes zero blocking X11 calls for the focused window title.
 pub fn draw(
     dc:                   *drawing.DrawContext,
     config:               defs.BarConfig,
@@ -64,8 +67,9 @@ pub fn draw(
     width:                u16,
     conn:                 *xcb.xcb_connection_t,
     focused_window:       ?u32,
+    focused_title:        []const u8,
     current_ws_wins:      []const u32,
-    minimized:            []const u32,
+    minimized_set:        *const std.AutoHashMapUnmanaged(u32, void),
     cached_title:         *std.ArrayList(u8),
     cached_title_window:  *?u32,
     title_invalidated:    bool,
@@ -84,7 +88,7 @@ pub fn draw(
 
     if (window_count == 1) {
         const single_win   = current_ws_wins[0];
-        const is_minimized = isMinimizedInSnap(minimized, single_win);
+        const is_minimized = isMinimizedInSnap(minimized_set, single_win);
         const is_focused   = focused_window != null;
 
         const accent = if (is_minimized)
@@ -103,18 +107,21 @@ pub fn draw(
                     t, width -| scaled_padding * 2 -| TITLE_LEAD_PX, config.fg);
             }
         } else {
-            const title = try getFocusedWindowTitle(
-                conn, focused_window, cached_title, cached_title_window,
-                title_invalidated, allocator);
-            if (title.len > 0) {
+            // focused_title was pre-fetched on the main thread — zero X11 I/O here.
+            if (focused_title.len > 0) {
+                if (title_invalidated or cached_title_window.* != focused_window) {
+                    cached_title.clearRetainingCapacity();
+                    cached_title.appendSlice(allocator, focused_title) catch {};
+                    cached_title_window.* = focused_window;
+                }
                 try dc.drawTextEllipsis(start_x + scaled_padding + TITLE_LEAD_PX, baseline_y,
-                    title, width -| scaled_padding * 2 -| TITLE_LEAD_PX,
+                    focused_title, width -| scaled_padding * 2 -| TITLE_LEAD_PX,
                     if (is_focused) config.selected_fg else config.fg);
             }
         }
     } else {
         try drawSegmentedTitles(dc, config, height, start_x, width,
-            conn, focused_window, current_ws_wins, minimized, allocator, scaled_padding);
+            conn, focused_window, current_ws_wins, minimized_set, allocator, scaled_padding);
     }
 
     return start_x + width;
@@ -129,7 +136,7 @@ fn drawSegmentedTitles(
     conn:           *xcb.xcb_connection_t,
     focused_window: ?u32,
     win_items:      []const u32,
-    minimized:      []const u32,
+    minimized_set:  *const std.AutoHashMapUnmanaged(u32, void),
     allocator:      std.mem.Allocator,
     scaled_padding: u16,
 ) !void {
@@ -154,7 +161,7 @@ fn drawSegmentedTitles(
     for (win_items[0..n_wins], 0..) |win, i| {
         if (net_atom != 0)
             net_cookies[i] = xcb.xcb_get_property(conn, 0, win, net_atom, utf_type, 0, 8192);
-        if (!isMinimizedInSnap(minimized, win)) {
+        if (!isMinimizedInSnap(minimized_set, win)) {
             geom_cookies[i] = xcb.xcb_get_geometry(conn, win);
             needs_geom[i]   = true;
         }
@@ -311,11 +318,32 @@ fn getFocusedWindowTitle(
     const utf_type = atoms.utf8Type();
 
     if (atoms.net_wm_name != 0) {
-        const title = try utils.fetchPropertyToBuffer(conn, win, atoms.net_wm_name, utf_type, cached_title, allocator);
-        if (title.len > 0) { cached_title_window.* = win; return title; }
+        if (try utils.fetchPropertyToBuffer(conn, win, atoms.net_wm_name, utf_type, cached_title, allocator)) |title| {
+            if (title.len > 0) { cached_title_window.* = win; return title; }
+        }
     }
 
-    const title = try utils.fetchPropertyToBuffer(conn, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, cached_title, allocator);
+    const title = (try utils.fetchPropertyToBuffer(conn, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, cached_title, allocator)) orelse "";
     if (title.len > 0) cached_title_window.* = win;
     return title;
+}
+
+/// Fetches the title of `win` into `buf` (an ArrayListUnmanaged), reusing its
+/// existing capacity. Called by bar.captureIntoSlot on the main thread so that
+/// the bar render thread never makes blocking X11 round-trips.
+pub fn fetchFocusedTitleInto(
+    conn:      *xcb.xcb_connection_t,
+    win:       u32,
+    buf:       *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+) !void {
+    atoms.ensure();
+    const utf_type = atoms.utf8Type();
+
+    if (atoms.net_wm_name != 0) {
+        if (utils.fetchPropertyToBuffer(conn, win, atoms.net_wm_name, utf_type, buf, allocator) catch null) |t| {
+            if (t.len > 0) return;
+        }
+    }
+    _ = utils.fetchPropertyToBuffer(conn, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, buf, allocator) catch {};
 }

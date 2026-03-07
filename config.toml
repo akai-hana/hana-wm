@@ -16,7 +16,7 @@
 #         the workspace indicators be +25% of their default 100% (5 px).
 #
 # #TODO: move to future colors.toml
-# + HEX color code values can be set to either of the following formats:
+# - HEX color code values can be set to either of the following formats:
 #   "#RRGGBB" / RRGGBB / 0xRRGGBB
 #
 # + Keys in a keybind can be expanded by using `{}` in the key combination
@@ -27,16 +27,19 @@
 #   - `Mod+{1-9} = "workspace"` sets workspace switching to 9 binds, keys
 #     Mod+1 through 9.
 #   - Both can be combined at will: `Mod+{1-4,Q,W,E,R} = "workspace"`.
+#
 # + `{}` in place of the action instead of the keybind serves as an alias
-#   `Mod+L = "larry"; kill = "pkill -9"; Mod+Shift+L = "{kill} larry"`
+#   ```toml
+#   Mod+L = "larry"
+#   kill = "pkill -9"
+#   Mod+Shift+L = "{kill} larry"
+#   ```
 #   
 # + A single keybind can invoke multiple actions at once.
 #   - `Mod+A = "foo"; Mod+A = "bar"` aren't conflicting;
 #     both `foo` and `bar` will be executed upon pressing Mod+A.
 #   - More conveniently, arrays of actions can be set onto a bind:
 #     `Mod+A = ["foo", "bar"]`
-# + A single keybind can contain multiple actions
-#   Keys are assigned workspace indices by their position in the list.
 
 [tiling]
 enabled       = true
@@ -49,16 +52,17 @@ global_layout = false # Per-workspace tiling layouts
 #       Layout          Variation  Workspaces
 layouts = [                                 # ("default"/"alternative") 
 	"master-stack",                     # "lifo"/"fifo"
-	"monocle",      "gaps",    "2,5,8", # "gapless"/"gaps"
-	"grid",         "relaxed", "6",     # "rigid"/"relaxed"
+	"monocle",      "gaps",    "5",     # "gapless"/"gaps"
+	"grid",         "relaxed", "6,8",   # "rigid"/"relaxed"
 	# "fibonacci",                      # no variations
 ]
 
 [tiling.aesthetics]
 # [0%-200%] / [0-N] px
 ## 100% = Entire display; 0% = disabled
-gap_width        = %1.5
-border_width     = %0.5
+gap_width        = 3%
+border_width     = 1.5% #TODO: 100% doesn't cover 100% of the display.
+#TODO: make config parser accept both N% and %N values (currently %N doesn't work).
 
 border_focused   = "#ac3232"
 border_unfocused = "#52263e"
@@ -66,7 +70,7 @@ border_unfocused = "#52263e"
 [tiling.layouts.master-stack]
 count = 1      # Number of windows in master area (master stack size)
 side  = "left" # "left"/"right" / 'L'/'R'
-width = %50    # [5%-95%] / (0-N] px
+width = 50%    # [5%-95%] / (0-N] px
 
 # "lifo" = Last (window remains) In (master area), First (window gets) Out (of master, and onto the stack).
 # "fifo" = First (window goes) In (master area), First (window goes) Out (of master, and onto the stack).
@@ -219,8 +223,10 @@ Mod+Alt+T       = "unminimize_fifo"
 Mod+Shift+Alt+T = "unminimize_all"
 
 # wallpaper
-Mod+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-switch.sh" # start shader wallpaper
-Mod+Shift+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-stop.sh" # stop shader wallpaper
+## start shader wallpaper
+Mod+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-switch.sh" 
+## stop shader wallpaper
+Mod+Shift+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-stop.sh"
 
 # Tiling
 Mod+N           = "toggle_tiling"          # Enable/disable tiling
@@ -228,7 +234,8 @@ Mod+space       = "toggle_layout"          # Cycle layouts forward
 Mod+Shift+space = "toggle_layout_reverse"  # Cycle layouts backward
 Mod+Alt+space   = "cycle_layout_variation" # Cycle current layout's variation (Super+V)
 Mod+Tab         = "swap_master"            # Swap focused window with master (slave→master or master→slave)
-Mod+Shift+Tab   = "drun_toggle"
+Mod+Shift+Tab   = "swap_master_focus_swap" # Same swap, but focus transfers to the displaced window
+Mod+grave       = "drun_toggle"
 Mod+MiddleClick = "toggle_float"           # Toggle clicked window between tiled and floating
 
 # Layouts
@@ -239,10 +246,11 @@ Mod+comma  = "increase_master_count"
 Mod+period = "decrease_master_count" 
 
 # Workspaces
-# Switch to workspace N
+## Switch to workspace N
+### Keys are assigned workspace indices by their position in the list.
 Mod+{1-4,Q,W,E,R} = "workspace" #TODO: rename to "switch_to_workspace"
 
-# Workspace window sending
+## Workspace window sending
 Mod+Shift+{1-4,Q,W,E,R} = "move_to_workspace"
 Mod+Alt+{1-4,Q,W,E,R} = "tag_toggle" #TODO: rename to toggle_to_workspace
 
@@ -262,7 +270,8 @@ Mod+Shift+S = "{kill} equibop"
 Mod+D       = "ghostty"
 Mod+Shift+D = "{kill} ghostty"
 
-# z -> osu
+Mod+Z       = "wine ~/Games/isaac-repentance/isaac-ng.exe"
+Mod+Shift+Z = "pkill isaac-ng"
 
 Mod+X       = "~/Games/t-client/DDNet"
 Mod+Shift+X = "{kill} DDNet"

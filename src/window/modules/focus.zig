@@ -9,6 +9,30 @@ const window = @import("window");
 const xcb    = defs.xcb;
 const WM     = defs.WM;
 
+// ── Module state ──────────────────────────────────────────────────────────────
+//
+// These three fields were formerly on the WM struct; they belong here because
+// only focus.zig should be their primary writer.  All other modules call the
+// typed accessors below rather than reaching into WM.
+
+var g_focused_window:       ?u32                      = null;
+var g_prev_focused_window:  ?u32                      = null;
+var g_suppress_reason:      defs.FocusSuppressReason  = .none;
+var g_last_event_time:      u32                       = 0;
+
+// ── Public accessors ──────────────────────────────────────────────────────────
+
+pub inline fn getFocused()      ?u32                     { return g_focused_window; }
+pub inline fn getPrevFocused()  ?u32                     { return g_prev_focused_window; }
+pub inline fn getSuppressReason() defs.FocusSuppressReason { return g_suppress_reason; }
+pub inline fn getLastEventTime() u32                     { return g_last_event_time; }
+
+pub inline fn setFocused(win: ?u32) void                      { g_focused_window  = win; }
+pub inline fn setSuppressReason(r: defs.FocusSuppressReason) void { g_suppress_reason = r; }
+pub inline fn setLastEventTime(t: u32) void                   { g_last_event_time = t; }
+
+// ── Focus logic ───────────────────────────────────────────────────────────────
+
 pub const Reason = enum {
     mouse_click,
     mouse_enter,
@@ -25,7 +49,7 @@ pub const Reason = enum {
 
 pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     if (win == 0 or win == wm.root) return;
-    if (wm.focused_window == win) return;
+    if (g_focused_window == win) return;
     if (bar.isBarWindow(win)) return;
 
     // Skip the blocking xcb_get_window_attributes round-trip when we can
@@ -47,9 +71,10 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
         .mouse_enter, .window_spawn, .tiling_operation, .workspace_switch => false,
     }) return;
 
-    const old = wm.focused_window;
-    wm.focused_window = win;
-    wm.suppress_focus_reason = suppressionFor(reason);
+    const old = g_focused_window;
+    if (old != null) g_prev_focused_window = old;
+    g_focused_window = win;
+    g_suppress_reason = suppressionFor(reason);
 
     window.grabButtons(wm, win, true);
     if (old) |old_win| window.grabButtons(wm, old_win, false);
@@ -58,7 +83,7 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
         wm.conn,
         xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
         win,
-        wm.last_event_time,
+        g_last_event_time,
     );
 
     // Raise on click/command, and also on hover for globally_active windows
@@ -72,7 +97,7 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     }
 
     if (input_model == .locally_active or input_model == .globally_active) {
-        utils.sendWMTakeFocus(wm.conn, win, wm.last_event_time);
+        utils.sendWMTakeFocus(wm.conn, win, g_last_event_time);
     }
 
     // Compliant locally_active clients respond to xcb_set_input_focus directly
@@ -112,37 +137,76 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
                     wm.conn,
                     xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
                     win,
-                    wm.last_event_time,
+                    g_last_event_time,
                 );
                 // Re-send WM_TAKE_FOCUS after the raise so locally_active
                 // clients (e.g. Qt) process it in the correct stacking context.
                 // Not sent for passive windows — they have no WM_TAKE_FOCUS
                 // handler and xcb_set_input_focus alone is the correct protocol.
                 if (input_model == .locally_active) {
-                    utils.sendWMTakeFocus(wm.conn, win, wm.last_event_time);
+                    utils.sendWMTakeFocus(wm.conn, win, g_last_event_time);
                 }
             }
         }
     }
 
     tiling.updateWindowFocus(wm, old, win);
-    bar.markDirty();
+    bar.scheduleFocusRedraw(win);
+}
+
+/// Called when the X server reports a FocusIn on a managed window.
+///
+/// When a window focuses itself (e.g. an app received a replayed click and
+/// handled focus internally), the WM is never told via setFocus, so
+/// g_focused_window stays stale.  A stale g_focused_window causes the
+/// `getFocused() == win` guard in maybeFocusWindow to fire spuriously,
+/// silently blocking all subsequent hover-focus attempts.
+///
+/// Syncing here keeps WM state consistent with the actual X focus so that
+/// hover focus works correctly after any application-driven focus change.
+///
+/// NotifyGrab / NotifyUngrab are skipped — they are transient and do not
+/// represent a real focus change (e.g. WM grabbing the server, key grabs).
+pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t, wm: *WM) void {
+    if (event.mode == xcb.XCB_NOTIFY_MODE_GRAB or
+        event.mode == xcb.XCB_NOTIFY_MODE_UNGRAB) return;
+    // NotifyWhileGrabbed: focus change during an active grab — skip to avoid
+    // spurious updates during drag or key-grab sequences.
+    if (event.mode == xcb.XCB_NOTIFY_MODE_WHILE_GRABBED) return;
+    // NotifyInferior: a child of this window received focus; the managed
+    // top-level did not change focus itself.  We only track top-level granularity.
+    if (event.detail == xcb.XCB_NOTIFY_DETAIL_INFERIOR) return;
+    // NotifyPointerRoot / NotifyNone: focus moved to no real window.
+    if (event.detail == xcb.XCB_NOTIFY_DETAIL_POINTER_ROOT or
+        event.detail == xcb.XCB_NOTIFY_DETAIL_NONE) return;
+
+    const win = event.event;
+    if (win == 0 or win == wm.root) return;
+    if (bar.isBarWindow(win)) return;
+    if (!window.isValidManagedWindow(wm, win)) return;
+    if (g_focused_window == win) return;
+
+    const old = g_focused_window;
+    if (old != null) g_prev_focused_window = old;
+    g_focused_window = win;
+    tiling.updateWindowFocus(wm, old, win);
+    bar.scheduleFocusRedraw(win);
 }
 
 pub fn clearFocus(wm: *WM) void {
-    if (wm.focused_window) |old_win| {
+    if (g_focused_window) |old_win| {
         window.grabButtons(wm, old_win, false);
         tiling.updateWindowFocus(wm, old_win, null);
     }
-    wm.focused_window = null;
-    wm.suppress_focus_reason = .none;
+    g_focused_window = null;
+    g_suppress_reason = .none;
     _ = xcb.xcb_set_input_focus(
         wm.conn,
         xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
         wm.root,
-        wm.last_event_time,
+        g_last_event_time,
     );
-    bar.markDirty();
+    bar.scheduleFocusRedraw(null);
 }
 
 inline fn shouldRaise(reason: Reason) bool {
@@ -167,3 +231,4 @@ fn isWindowMapped(conn: *xcb.xcb_connection_t, win: u32) bool {
     defer std.c.free(reply);
     return reply.*.map_state == xcb.XCB_MAP_STATE_VIEWABLE;
 }
+

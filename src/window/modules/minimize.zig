@@ -56,34 +56,43 @@ const State = struct {
 
 // ── Module state ──────────────────────────────────────────────────────────────
 
-var g_state: ?State = null;
+// Module singleton — guaranteed live after init().
+var g_state:       State = undefined;
+var g_initialized: bool  = false;
 
-pub inline fn getState() ?*State {
-    return if (g_state) |*s| s else null;
+pub inline fn getState() *State {
+    std.debug.assert(g_initialized);
+    return &g_state;
+}
+
+pub inline fn getStateOpt() ?*State {
+    return if (g_initialized) &g_state else null;
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
-pub fn init(wm: *WM) void {
+pub fn init(wm: *WM) !void {
     var info_map = std.AutoHashMap(u32, MinimizedEntry).init(wm.allocator);
-    info_map.ensureTotalCapacity(8) catch {};
+    try info_map.ensureTotalCapacity(8);
     g_state = .{
         .minimized_info = info_map,
         .allocator      = wm.allocator,
         .next_timestamp = 0,
     };
+    g_initialized = true;
 }
 
 pub fn deinit() void {
-    if (g_state) |*s| s.deinit();
-    g_state = null;
+    if (!g_initialized) return;
+    g_state.deinit();
+    g_initialized = false;
 }
 
 // ── Public queries ────────────────────────────────────────────────────────────
 
 pub inline fn isMinimized(_: *const WM, win: u32) bool {
-    const s = g_state orelse return false;
-    return s.minimized_info.contains(win);
+    if (!g_initialized) return false;
+    return g_state.minimized_info.contains(win);
 }
 
 inline fn hideWindow(wm: *WM, win: u32) void {
@@ -107,9 +116,9 @@ pub fn focusBestAvailable(wm: *WM) void {
 // ── Minimize ──────────────────────────────────────────────────────────────────
 
 pub fn minimizeWindow(wm: *WM) void {
-    const win    = wm.focused_window                orelse return;
+    const win    = focus.getFocused()               orelse return;
     const ws_idx = workspaces.getCurrentWorkspace() orelse return;
-    const s      = getState()                       orelse return;
+    const s      = getState();
 
     if (isMinimized(wm, win)) return;
 
@@ -119,11 +128,11 @@ pub fn minimizeWindow(wm: *WM) void {
     // Tear down fullscreen state if needed, saving geometry for later restore.
     var saved_fs: ?defs.WindowGeometry = null;
     var fs_ws_for_rollback: ?u8 = null;
-    if (wm.fullscreen.window_to_workspace.get(win)) |fs_ws| {
-        if (wm.fullscreen.getForWorkspace(fs_ws)) |info| {
+    if (fullscreen.workspaceFor(win)) |fs_ws| {
+        if (fullscreen.getForWorkspace(fs_ws)) |info| {
             saved_fs = info.saved_geometry;
             fs_ws_for_rollback = fs_ws;
-            wm.fullscreen.removeForWorkspace(fs_ws);
+            fullscreen.removeForWorkspace(fs_ws);
         }
     }
     const was_fullscreen = saved_fs != null;
@@ -142,7 +151,7 @@ pub fn minimizeWindow(wm: *WM) void {
             tiling.retileCurrentWorkspace(wm);
         }
         if (was_fullscreen) {
-            wm.fullscreen.setForWorkspace(fs_ws_for_rollback.?, .{
+            fullscreen.setForWorkspace(fs_ws_for_rollback.?, .{
                 .window         = win,
                 .saved_geometry = saved_fs.?,
             }) catch {
@@ -161,7 +170,7 @@ pub fn minimizeWindow(wm: *WM) void {
     } else if (wm.config.tiling.enabled) {
         tiling.retileCurrentWorkspace(wm);
     }
-    bar.redrawImmediate(wm);
+    bar.redrawInsideGrab(wm);
     _ = xcb.xcb_ungrab_server(wm.conn);
     _ = xcb.xcb_flush(wm.conn);
 }
@@ -176,7 +185,7 @@ fn restoreWindowImpl(wm: *WM, win: u32, saved_fs: ?defs.WindowGeometry) void {
         // just offscreen).
         focus.setFocus(wm, win, .window_spawn);
         fullscreen.enterFullscreen(wm, win, geom);
-        bar.markDirty();
+        bar.scheduleRedraw();
         return;
     }
 
@@ -195,14 +204,14 @@ fn restoreWindowImpl(wm: *WM, win: u32, saved_fs: ?defs.WindowGeometry) void {
     }
 
     focus.setFocus(wm, win, .window_spawn);
-    bar.redrawImmediate(wm);
+    bar.redrawInsideGrab(wm);
     _ = xcb.xcb_ungrab_server(wm.conn);
     _ = xcb.xcb_flush(wm.conn);
 }
 
 /// Remove `win` from minimized_info and restore it.
 inline fn restoreWindow(wm: *WM, win: u32) void {
-    const s = getState() orelse return;
+    const s = getState();
     const entry = s.minimized_info.fetchRemove(win) orelse return;
     restoreWindowImpl(wm, win, entry.value.saved_fs);
 }
@@ -212,7 +221,7 @@ inline fn restoreWindow(wm: *WM, win: u32) void {
 pub const RestoreOrder = enum { lifo, fifo };
 
 pub fn unminimize(wm: *WM, order: RestoreOrder) void {
-    const s      = getState()                       orelse return;
+    const s      = getState();
     const ws_idx = workspaces.getCurrentWorkspace() orelse return;
     const ws_bit: u64 = @as(u64, 1) << @intCast(ws_idx);
 
@@ -237,7 +246,7 @@ pub fn unminimize(wm: *WM, order: RestoreOrder) void {
 }
 
 pub fn unminimizeAll(wm: *WM) void {
-    const s      = getState()                       orelse return;
+    const s      = getState();
     const ws_idx = workspaces.getCurrentWorkspace() orelse return;
     const ws_bit: u64 = @as(u64, 1) << @intCast(ws_idx);
 
@@ -299,7 +308,7 @@ pub fn unminimizeAll(wm: *WM) void {
 
         focus.setFocus(wm, plain_wins[plain_wins.len - 1].win, .window_spawn);
 
-        bar.redrawImmediate(wm);
+        bar.redrawInsideGrab(wm);
         _ = xcb.xcb_ungrab_server(wm.conn);
         _ = xcb.xcb_flush(wm.conn);
     }
@@ -312,13 +321,14 @@ pub fn unminimizeAll(wm: *WM) void {
 
 /// Called by window.zig on unmap/destroy to keep state coherent.
 pub fn forceUntrack(_: *WM, win: u32) void {
-    const s = getState() orelse return;
+    const s = getState();
     _ = s.minimized_info.remove(win);
 }
 
 /// Called by workspaces.zig when a minimized window is moved to another workspace.
 pub fn moveToWorkspace(_: *WM, win: u32, new_ws: u8) void {
-    const s = getState() orelse return;
+    const s = getState();
     const entry = s.minimized_info.getPtr(win) orelse return;
     entry.workspace_mask = @as(u64, 1) << @intCast(new_ws);
 }
+

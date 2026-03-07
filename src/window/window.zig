@@ -11,16 +11,84 @@ const focus      = @import("focus");
 const tiling     = @import("tiling");
 const bar        = @import("bar");
 const workspaces = @import("workspaces");
+const drag       = @import("drag");
 const debug      = @import("debug");
 const minimize   = @import("minimize");
+const fullscreen = @import("fullscreen");
 
 const WINDOW_EVENT_MASK = constants.EventMasks.MANAGED_WINDOW;
 
 // XSizeHints flags (ICCCM §4.1.2.3)
-const XSIZE_HINTS_P_MIN_SIZE:  u32 = 0x010;
+const XSIZE_HINTS_P_MIN_SIZE:  u32 = 0x10;
 const XSIZE_HINTS_P_BASE_SIZE: u32 = 0x100;
 
-// Module-level atom cache 
+// Spawn queue
+//
+// Tracks pending (workspace, pid) assignments for newly-mapped windows.
+// Lives here (window.zig) because it is exclusively accessed by this module.
+
+const SPAWN_QUEUE_CAP: u8 = 16;
+
+const SpawnEntry = struct {
+    workspace: u8,
+    /// _NET_WM_PID of the grandchild; 0 for daemon-mode terminals.
+    pid: u32,
+};
+
+/// Fixed-capacity circular FIFO for pending spawn-workspace assignments.
+const SpawnQueue = struct {
+    buf:  [SPAWN_QUEUE_CAP]SpawnEntry = undefined,
+    head: u8 = 0,
+    len:  u8 = 0,
+
+    pub inline fn isEmpty(self: *const SpawnQueue) bool { return self.len == 0; }
+
+    pub fn push(self: *SpawnQueue, workspace: u8, pid: u32) void {
+        if (self.len == SPAWN_QUEUE_CAP) {
+            self.head = (self.head + 1) % SPAWN_QUEUE_CAP;
+            self.len -= 1;
+        }
+        const tail = (self.head + self.len) % SPAWN_QUEUE_CAP;
+        self.buf[tail] = .{ .workspace = workspace, .pid = pid };
+        self.len += 1;
+    }
+
+    pub fn popByPid(self: *SpawnQueue, win_pid: u32) ?u8 {
+        if (win_pid == 0) return null;
+        return self.popWhere(.by_pid, win_pid);
+    }
+
+    pub inline fn popOldestDaemon(self: *SpawnQueue) ?u8 { return self.popWhere(.daemon, 0); }
+
+    fn popWhere(self: *SpawnQueue, comptime mode: enum { by_pid, daemon }, target: u32) ?u8 {
+        var i: u8 = 0;
+        while (i < self.len) : (i += 1) {
+            const idx = (self.head + i) % SPAWN_QUEUE_CAP;
+            if (if (mode == .by_pid) self.buf[idx].pid != target else self.buf[idx].pid != 0) continue;
+            const ws = self.buf[idx].workspace;
+            self.removeAt(i);
+            return ws;
+        }
+        return null;
+    }
+
+    inline fn removeAt(self: *SpawnQueue, i: u8) void {
+        var j: u8 = i;
+        while (j + 1 < self.len) : (j += 1) {
+            const cur  = (self.head + j)     % SPAWN_QUEUE_CAP;
+            const next = (self.head + j + 1) % SPAWN_QUEUE_CAP;
+            self.buf[cur] = self.buf[next];
+        }
+        self.len -= 1;
+    }
+};
+
+/// Module-level spawn state.
+var g_spawn_queue:    SpawnQueue = .{};
+var g_spawn_cursor_x: i16       = 0;
+var g_spawn_cursor_y: i16       = 0;
+
+// Module-level atom cache
 //
 // The three atoms used on every MapRequest are resolved once into plain u32
 // fields, turning per-event hash probes into direct field reads.
@@ -109,13 +177,14 @@ fn workspaceRuleForClass(wm: *WM, cookie: xcb.xcb_get_property_cookie_t) ?u8 {
 
 // Workspace assignment
 
+/// Resolves the target workspace for a newly mapped window.
+/// `c_net_wm_pid` is null when the spawn queue is empty — avoids the need for
+/// a separate `has_pending_spawns` bool and makes it impossible to access an
+/// undefined cookie.
 fn resolveTargetWorkspace(
-    wm:          *WM,
-    win:         u32,
-    current_ws:  u8,
-    // Null when the spawn queue is empty — avoids the need for a separate
-    // `has_pending_spawns` bool and makes it impossible to access an
-    // undefined cookie.
+    wm:           *WM,
+    win:          u32,
+    current_ws:   u8,
     c_net_wm_pid: ?xcb.xcb_get_property_cookie_t,
 ) u8 {
     // Phase 1 — Workspace class rules (highest priority).
@@ -146,11 +215,11 @@ fn resolveTargetWorkspace(
             break :pid @as([*]const u32, @ptrCast(@alignCast(xcb.xcb_get_property_value(pid_reply))))[0];
         };
 
-        if (wm.spawn_queue.popByPid(win_pid)) |spawn_ws|
+        if (g_spawn_queue.popByPid(win_pid)) |spawn_ws|
             return resolveWorkspace(spawn_ws, current_ws);
 
         if (win_pid == 0) {
-            if (wm.spawn_queue.popOldestDaemon()) |spawn_ws|
+            if (g_spawn_queue.popOldestDaemon()) |spawn_ws|
                 return resolveWorkspace(spawn_ws, current_ws);
         }
     }
@@ -160,18 +229,18 @@ fn resolveTargetWorkspace(
 
 // Map request
 
-pub inline fn registerSpawn(wm: *WM, workspace: u8, pid: u32) void {
-    wm.spawn_queue.push(workspace, pid);
+pub inline fn registerSpawn(workspace: u8, pid: u32) void {
+    g_spawn_queue.push(workspace, pid);
 }
 
 fn snapshotSpawnCursor(wm: *WM) void {
-    if (wm.suppress_focus_reason != .window_spawn) return;
+    if (focus.getSuppressReason() != .window_spawn) return;
     const ptr = xcb.xcb_query_pointer_reply(
         wm.conn, xcb.xcb_query_pointer(wm.conn, wm.root), null,
     ) orelse return;
     defer std.c.free(ptr);
-    wm.spawn_cursor_x = ptr.*.root_x;
-    wm.spawn_cursor_y = ptr.*.root_y;
+    g_spawn_cursor_x = ptr.*.root_x;
+    g_spawn_cursor_y = ptr.*.root_y;
 }
 
 pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void {
@@ -200,14 +269,14 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     // Use an optional so the type system enforces this cookie is only consumed
     // when the spawn queue is non-empty — no silent undefined reads.
     const c_net_wm_pid: ?xcb.xcb_get_property_cookie_t =
-        if (!wm.spawn_queue.isEmpty()) xcb.xcb_get_property(
+        if (!g_spawn_queue.isEmpty()) xcb.xcb_get_property(
             wm.conn, 0, win,
             g_atoms.net_wm_pid,
             xcb.XCB_ATOM_CARDINAL, 0, 1,
         ) else null;
 
     const target_ws            = resolveTargetWorkspace(wm, win, current_ws, c_net_wm_pid);
-    const on_current_workspace = (target_ws == current_ws);
+    const on_current_workspace = target_ws == current_ws;
 
     workspaces.moveWindowTo(wm, win, target_ws) catch |err| {
         debug.logError(err, win);
@@ -226,55 +295,60 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void
     // visible when the flush preceded these round-trips.
     utils.populateFocusCacheFromCookies(wm.conn, win, c_protocols, c_hints);
 
+    if (on_current_workspace) _ = xcb.xcb_grab_server(wm.conn);
+
+    // Configure geometry BEFORE mapping.  xcb_configure_window is valid on
+    // an unmapped window — the geometry is stored and takes effect atomically
+    // when the window is mapped.  Retiling here (which also pushes background
+    // monocle windows offscreen) means the compositor never sees the new
+    // window at its default X position or background windows still on-screen.
+    if (wm.config.tiling.enabled) {
+        tiling.addWindow(wm, win);
+        if (on_current_workspace) tiling.retileCurrentWorkspace(wm);
+    }
+
     if (on_current_workspace) {
-        if (wm.config.tiling.enabled) {
-            tiling.addWindow(wm, win);
-            tiling.retileCurrentWorkspace(wm);
-        }
         _ = xcb.xcb_map_window(wm.conn, win);
-        focus.setFocus(wm, win, .window_spawn);
         snapshotSpawnCursor(wm);
     } else {
-        if (wm.config.tiling.enabled) tiling.addWindow(wm, win);
         grabButtons(wm, win, false);
     }
 
-    _ = xcb.xcb_flush(wm.conn);
+    bar.scheduleRedraw();
+    if (on_current_workspace) focus.setFocus(wm, win, .window_spawn);
 
-    bar.markDirty();
+    if (on_current_workspace) _ = xcb.xcb_ungrab_server(wm.conn);
+    _ = xcb.xcb_flush(wm.conn);
 }
 
 // Unmap / destroy
 
 fn unmanageWindow(wm: *WM, win: u32) void {
-    const was_fullscreen = if (wm.fullscreen.window_to_workspace.get(win)) |ws| blk: {
-        wm.fullscreen.removeForWorkspace(ws);
-        break :blk true;
-    } else false;
+    const fs_ws = fullscreen.workspaceFor(win);
+    if (fs_ws) |ws| fullscreen.removeForWorkspace(ws);
+    const was_fullscreen = fs_ws != null;
 
-    const was_focused = (wm.focused_window == win);
+    const was_focused = (focus.getFocused() == win);
 
     const window_workspace = workspaces.getWorkspaceForWindow(win);
     const current_ws       = workspaces.getCurrentWorkspace();
 
-    // Pre-fire pointer query before state cleanup so the round-trip runs
-    // concurrently with in-memory operations (tiling remove, cache evictions,
-    // workspace remove). Cookie is conditional: no query needed when the closed
-    // window was not focused, avoiding an unnecessary round-trip.
+    utils.uncacheWindowFocusProps(win);
+
+    // Pre-fire pointer query before grab so the round-trip runs concurrently
+    // with in-memory cleanup. Conditional: no round-trip when window wasn't focused.
     const ptr_cookie: ?xcb.xcb_query_pointer_cookie_t =
         if (was_focused) xcb.xcb_query_pointer(wm.conn, wm.root) else null;
 
+    _ = xcb.xcb_grab_server(wm.conn);
+
+    // Notify each module in order inside the server grab.
     if (wm.config.tiling.enabled) tiling.removeWindow(win);
-    utils.uncacheWindowFocusProps(win);
     tiling.evictSizeHints(win);
     minimize.forceUntrack(wm, win);
     workspaces.removeWindow(win);
 
-    _ = xcb.xcb_grab_server(wm.conn);
-
-    if (was_fullscreen) {
-        bar.setBarState(wm, .show_fullscreen);
-    }
+    if (was_fullscreen) bar.setBarState(wm, .show_fullscreen);
 
     if (was_focused) {
         if (wm.config.tiling.enabled) tiling.retileIfDirty(wm);
@@ -290,7 +364,8 @@ fn unmanageWindow(wm: *WM, win: u32) void {
         }
     }
 
-    bar.redrawImmediate(wm);
+    bar.redrawInsideGrab(wm);
+
     _ = xcb.xcb_ungrab_server(wm.conn);
     _ = xcb.xcb_flush(wm.conn);
 }
@@ -304,15 +379,12 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM
 }
 
 // Post-unmanage focus recovery.
-// Accepts a pre-fired xcb_query_pointer cookie so the round-trip runs
-// concurrently with the in-memory state cleanup in unmanageWindow.
 fn focusWindowUnderPointer(wm: *WM, ptr_cookie: xcb.xcb_query_pointer_cookie_t) void {
     const reply = xcb.xcb_query_pointer_reply(wm.conn, ptr_cookie, null) orelse {
         minimize.focusBestAvailable(wm);
         return;
     };
     defer std.c.free(reply);
-
     const child = reply.*.child;
     if (isOnCurrentWorkspace(wm, child) and !minimize.isMinimized(wm, child)) {
         focus.setFocus(wm, child, .mouse_enter);
@@ -350,7 +422,7 @@ fn sendConfigureNotify(wm: *WM, win: u32, x: i16, y: i16, width: u16, height: u1
 fn sendSyntheticConfigureNotify(wm: *WM, win: u32) void {
     // Fast path: serve the geometry from the tiling cache — zero round-trips.
     if (tiling.getWindowGeom(win)) |rect| {
-        const border: u16 = if (tiling.getState()) |s| s.border_width else 0;
+        const border: u16 = if (tiling.getStateOpt()) |s| s.border_width else 0;
         sendConfigureNotify(wm, win, rect.x, rect.y, rect.width, rect.height, border);
         return;
     }
@@ -365,8 +437,7 @@ fn sendSyntheticConfigureNotify(wm: *WM, win: u32) void {
 
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, wm: *WM) void {
     const win = event.window;
-    if ((wm.config.tiling.enabled and tiling.isWindowTiled(win)) or
-        wm.fullscreen.isFullscreen(win))
+    if (tiling.isWindowActiveTiled(win) or fullscreen.isFullscreen(win))
     {
         sendSyntheticConfigureNotify(wm, win);
         return;
@@ -388,52 +459,37 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, w
 
 // Focus / crossing events
 
-inline fn suppressSpawnCrossing(wm: *WM, root_x: i16, root_y: i16) bool {
-    if (wm.suppress_focus_reason != .window_spawn) return false;
-    if (root_x == wm.spawn_cursor_x and root_y == wm.spawn_cursor_y) return true;
-    wm.suppress_focus_reason = .none;
+inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
+    if (focus.getSuppressReason() != .window_spawn) return false;
+    if (root_x == g_spawn_cursor_x and root_y == g_spawn_cursor_y) return true;
+    focus.setSuppressReason(.none);
     return false;
 }
 
 inline fn maybeFocusWindow(wm: *WM, win: u32) void {
     if (!isOnCurrentWorkspace(wm, win)) return;
     if (minimize.isMinimized(wm, win)) return;
-    if (wm.focused_window == win) return;
+    if (focus.getFocused() == win) return;
     focus.setFocus(wm, win, .mouse_enter);
 }
 
 pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) void {
-    wm.last_event_time = event.time;
+    focus.setLastEventTime(event.time);
     if (event.mode == xcb.XCB_NOTIFY_MODE_GRAB or
         event.mode == xcb.XCB_NOTIFY_MODE_UNGRAB) return;
-    if (wm.drag_state.active) return;
-    if (suppressSpawnCrossing(wm, event.root_x, event.root_y)) return;
-    var win = if (event.event == wm.root and event.child != 0) event.child else event.event;
-    // If the entered window isn't managed it may be an unmanaged child sub-window.
-    // Java/AWT (Minecraft, etc.) and other toolkits can nest multiple levels deep
-    // beneath the managed top-level, so walk up the full ancestor chain rather than
-    // a single hop — ICCCM §4.1.3.1 permits arbitrarily deep sub-window hierarchies.
-    if (!isOnCurrentWorkspace(wm, win)) {
-        var cur = win;
-        while (cur != 0 and cur != wm.root and !isOnCurrentWorkspace(wm, cur)) {
-            const tree = xcb.xcb_query_tree_reply(
-                wm.conn, xcb.xcb_query_tree(wm.conn, cur), null,
-            ) orelse break;
-            const parent = tree.*.parent;
-            std.c.free(tree);
-            cur = parent;
-        }
-        if (isOnCurrentWorkspace(wm, cur)) win = cur;
-    }
-    maybeFocusWindow(wm, win);
+    if (drag.isDragging()) return;
+    if (suppressSpawnCrossing(event.root_x, event.root_y)) return;
+
+    const win = if (event.event == wm.root and event.child != 0) event.child else event.event;
+    maybeFocusWindow(wm, utils.findManagedWindow(wm.conn, win, workspaces.isManaged));
 }
 
 pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t, wm: *WM) void {
-    wm.last_event_time = event.time;
+    focus.setLastEventTime(event.time);
     if (event.event != wm.root) return;
     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL) return;
-    if (wm.drag_state.active) return;
-    if (suppressSpawnCrossing(wm, event.root_x, event.root_y)) return;
+    if (drag.isDragging()) return;
+    if (suppressSpawnCrossing(event.root_x, event.root_y)) return;
     // When child is zero the pointer left to an area not covered by any window;
     // maybeFocusWindow(wm, 0) would immediately fail isOnCurrentWorkspace anyway.
     if (event.child == 0) return;
@@ -450,10 +506,6 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t, wm: *
 }
 
 // Size-hint parsing
-
-inline fn clampU16(v: u32) u16 {
-    return @intCast(@min(v, std.math.maxInt(u16)));
-}
 
 fn collectAndCacheSizeHints(
     wm:     *WM,
@@ -476,15 +528,13 @@ fn collectAndCacheSizeHints(
     var min_height: u16 = 0;
 
     if (flags & XSIZE_HINTS_P_MIN_SIZE != 0 and field_count >= 7) {
-        min_width  = clampU16(fields[5]);
-        min_height = clampU16(fields[6]);
+        min_width  = @intCast(@min(fields[5], std.math.maxInt(u16)));
+        min_height = @intCast(@min(fields[6], std.math.maxInt(u16)));
     }
     if (flags & XSIZE_HINTS_P_BASE_SIZE != 0 and field_count >= 17) {
-        min_width  = @max(min_width,  clampU16(fields[15]));
-        min_height = @max(min_height, clampU16(fields[16]));
+        min_width  = @max(min_width,  @as(u16, @intCast(@min(fields[15], std.math.maxInt(u16)))));
+        min_height = @max(min_height, @as(u16, @intCast(@min(fields[16], std.math.maxInt(u16)))));
     }
 
-    // Don't occupy a cache slot for degenerate hints that declare zero on both axes.
-    if (min_width > 0 or min_height > 0)
-        tiling.cacheSizeHints(wm.allocator, win, .{ .min_width = min_width, .min_height = min_height });
+    tiling.cacheSizeHints(wm.allocator, win, .{ .min_width = min_width, .min_height = min_height });
 }

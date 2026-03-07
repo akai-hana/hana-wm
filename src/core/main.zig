@@ -1,46 +1,60 @@
-//! Main event loop
+//! WM entry point and main event loop.
 //!
-//! Uses POLL_ADD for the XCB and signal file descriptors plus an optional
-//! TIMEOUT for the clock segment.  Each operation is resubmitted after it
-//! fires (no MULTI flag, so kernel 5.4+ suffices).
+//! Inits the X11 connection, loads configuration, and drives all I/O through `poll`.
 
+// Zig stdlib
 const std     = @import("std");
 const builtin = @import("builtin");
 
+// core/
+const utils     = @import("utils");
+const constants = @import("constants");
+const events    = @import("events");
+const dpi       = @import("dpi");
+
+// config/
+const config    = @import("config");
 const defs      = @import("defs");
     const WM    = defs.WM;
     const xcb   = defs.xcb;
 
-const constants = @import("constants");
-const config    = @import("config");
-const utils     = @import("utils");
-const dpi       = @import("dpi");
-const debug     = @import("debug");
-
-const xkbcommon = @import("xkbcommon");
+// input/
 const input     = @import("input");
-const events    = @import("events");
+const xkbcommon = @import("xkbcommon");
 
+// tiling/
+const layouts = @import("layouts");
+
+// bar/
 const bar     = @import("bar");
 
+// debug/
+const debug     = @import("debug");
+
 // xcb-cursor extern declarations.
-// Declared manually instead of via cImport because xcb_cursor_load_name is a
-// static inline function in some versions of the header, which Zig's cImport
-// silently drops. extern declarations resolve directly against the linker symbol.
+//
+// Declared manually instead of via cImport because xcb_cursor_load_name is a static
+// inline function in some versions of the header, which Zig's cImport silently drops.
+// Extern declarations resolve directly against the linker symbol.
 const XcbCursorContext = opaque {};
+
 extern fn xcb_cursor_context_new(
     conn:   *xcb.xcb_connection_t,
     screen: *xcb.xcb_screen_t,
     ctx:    *?*XcbCursorContext,
 ) c_int;
+
 extern fn xcb_cursor_load_cursor(ctx: *XcbCursorContext, name: [*:0]const u8) u32;
 extern fn xcb_cursor_context_free(ctx: ?*XcbCursorContext) void;
 
+/// Sets the root window cursor to the standard left-pointer shape.
+/// Prefers a themed cursor via xcb-cursor; falls back to X11's built-in
+/// cursor font (always present on a conforming server) if loading fails.
 fn setupRootCursor(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) void {
-    var ctx: ?*XcbCursorContext = null;
-    if (xcb_cursor_context_new(conn, screen, &ctx) >= 0) {
-        defer xcb_cursor_context_free(ctx);
-        const cursor = xcb_cursor_load_cursor(ctx.?, "left_ptr");
+    var cursor_ctx: ?*XcbCursorContext = null;
+    if (xcb_cursor_context_new(conn, screen, &cursor_ctx) >= 0) {
+        defer xcb_cursor_context_free(cursor_ctx);
+        const cursor = xcb_cursor_load_cursor(cursor_ctx.?, "left_ptr");
         if (cursor != xcb.XCB_NONE) {
             _ = xcb.xcb_change_window_attributes(
                 conn, screen.*.root, xcb.XCB_CW_CURSOR, &[_]u32{cursor},
@@ -50,22 +64,28 @@ fn setupRootCursor(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) void 
         }
     }
 
-    // Fallback: themed cursor unavailable, use core glyph cursor.
-    debug.warn("xcb_cursor unavailable, falling back to core cursor", .{});
-    const font   = xcb.xcb_generate_id(conn);
-    const cursor = xcb.xcb_generate_id(conn);
-    _ = xcb.xcb_open_font(conn, font, 6, "cursor");
-    _ = xcb.xcb_create_glyph_cursor(
-        conn, cursor, font, font,
-        constants.CURSOR_LEFT_PTR, constants.CURSOR_LEFT_PTR_MASK,
-        0, 0, 0, 65535, 65535, 65535,
-    );
-    _ = xcb.xcb_change_window_attributes(
-        conn, screen.*.root, xcb.XCB_CW_CURSOR, &[_]u32{cursor},
-    );
-    _ = xcb.xcb_close_font(conn, font);
+    // FALLBACK CODE LOGIC; COMMENTED OUT BECAUSE I'M NOT EVEN SURE IT WORKS
+    // debug.warn("xcb_cursor unavailable, falling back to core cursor", .{});
+    // const font   = xcb.xcb_generate_id(conn);
+    // const cursor = xcb.xcb_generate_id(conn);
+    // _ = xcb.xcb_open_font(conn, font, "cursor".len, "cursor");
+    // const rgb_channel_min: u16 = 0;
+    // const rgb_channel_max: u16 = 65535;
+    // _ = xcb.xcb_create_glyph_cursor(
+    //     conn, cursor, font, font,
+    //     constants.CURSOR_LEFT_PTR, constants.CURSOR_LEFT_PTR_MASK,
+    //     rgb_channel_min, rgb_channel_min, rgb_channel_min,
+    //     rgb_channel_max, rgb_channel_max, rgb_channel_max,
+    // );
+    // _ = xcb.xcb_change_window_attributes(
+    //     conn, screen.*.root, xcb.XCB_CW_CURSOR, &[_]u32{cursor},
+    // );
+    // _ = xcb.xcb_close_font(conn, font);
 }
 
+/// Attempts to claim the WM role by subscribing to substructure-redirect
+/// events on the root window.  X11 permits only one client to hold this
+/// mask at a time, so the server returns an error if another WM is running.
 fn becomeWindowManager(conn: *xcb.xcb_connection_t, root: u32) !void {
     if (xcb.xcb_request_check(conn, xcb.xcb_change_window_attributes_checked(
         conn, root, xcb.XCB_CW_EVENT_MASK, &[_]u32{constants.EventMasks.ROOT_WINDOW}))) |err| {
@@ -97,6 +117,8 @@ pub fn main() !void {
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
+    // GPA tracks every allocation in debug builds so leaks surface at exit;
+    // in release builds the C allocator is faster and avoids the overhead.
     const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_allocator;
 
     const dpi_info = dpi.detect(conn, screen);
@@ -117,8 +139,6 @@ pub fn main() !void {
         .screen     = screen,
         .root       = root,
         .config     = user_config,
-        .fullscreen = defs.FullscreenState.init(allocator),
-        .xkb_state  = xkb_state,
         .dpi_info   = dpi_info,
     };
     defer wm.deinit();
@@ -126,11 +146,13 @@ pub fn main() !void {
     try utils.initAtomCache(conn);
     utils.initInputModelCache(wm.allocator);
     defer utils.deinitInputModelCache();
+    defer layouts.deinitSizeHintsCache(allocator);
 
-    const signal_fd = try events.setupSignalFd();
+    const signal_fd = try events.setupSignalPipe();
     defer std.posix.close(signal_fd);
+    defer events.deinitSignalPipe();
 
-    try events.initModules(&wm);
+    try events.initModules(&wm, xkb_state);
     defer events.deinitModules();
 
     bar.init(&wm) catch |err| {
@@ -140,6 +162,8 @@ pub fn main() !void {
 
     bar.updateTimerState();
     try events.grabKeybindings(&wm);
+    // XCB batches requests; flush now so every setup call above reaches the
+    // server before we block in the event loop waiting for replies/events.
     _ = xcb.xcb_flush(conn);
     debug.info("Started", .{});
 
@@ -147,3 +171,4 @@ pub fn main() !void {
 
     debug.info("Shutting down gracefully", .{});
 }
+

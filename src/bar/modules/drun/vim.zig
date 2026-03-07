@@ -1,30 +1,55 @@
-//! Partial re-implementation of vim motions, for use with drun.
+//! vim — modal editing engine for drun.
 //!
-//! Implements a modal editing layer over a single-line text buffer (drun's bar segment).
+//! Implements a vim-style modal editing layer over a single-line text buffer.
+//! All state is contained in `VimState`.  The four mode handlers each return an
+//! `Action` value so the caller can react without a circular dependency:
+//!
+//!   .none       — nothing special; caller should just redraw
+//!   .deactivate — user pressed Escape / Ctrl+C to close
+//!   .spawn      — user pressed Return; execute buf[0..len] and close
+//!
+//! Typical integration in a key-press handler:
+//!
+//!   const action = switch (vs.mode) {
+//!       .insert  => vim.handleInsert(vs, sym),
+//!       .normal  => vim.handleNormal(vs, sym),
+//!       .visual  => vim.handleVisual(vs, sym),
+//!       .replace => vim.handleReplace(vs, sym),
+//!   };
+//!   switch (action) {
+//!       .none       => {},
+//!       .deactivate => ...,
+//!       .spawn      => { runCmd(vs.buf[0..vs.len]); ... },
+//!   }
+//!
+//! Ctrl-modified keys should be pre-handled and routed to handleCtrl().
 
-const std  = @import("std");
+const std = @import("std");
 const defs = @import("defs");
 const xcb  = defs.xcb;
 
-// X11 keysym constants 
+// ── X11 keysym constants ──────────────────────────────────────────────────────
+// Re-exported from keysyms.zig for callers that write `vim.XK_*`.
+// New code should import keysyms.zig directly.
 
-pub const XK_BackSpace : xcb.xcb_keysym_t = 0xff08;
-pub const XK_Tab       : xcb.xcb_keysym_t = 0xff09;
-pub const XK_Return    : xcb.xcb_keysym_t = 0xff0d;
-pub const XK_Escape    : xcb.xcb_keysym_t = 0xff1b;
-pub const XK_Delete    : xcb.xcb_keysym_t = 0xffff;
-pub const XK_Left      : xcb.xcb_keysym_t = 0xff51;
-pub const XK_Right     : xcb.xcb_keysym_t = 0xff53;
-pub const XK_Home      : xcb.xcb_keysym_t = 0xff50;
-pub const XK_End       : xcb.xcb_keysym_t = 0xff57;
+const ks = @import("keysyms");
+pub const XK_BackSpace = ks.XK_BackSpace;
+pub const XK_Tab       = ks.XK_Tab;
+pub const XK_Return    = ks.XK_Return;
+pub const XK_Escape    = ks.XK_Escape;
+pub const XK_Delete    = ks.XK_Delete;
+pub const XK_Left      = ks.XK_Left;
+pub const XK_Right     = ks.XK_Right;
+pub const XK_Home      = ks.XK_Home;
+pub const XK_End       = ks.XK_End;
 
-// Shared constants 
+// ── Shared constants ──────────────────────────────────────────────────────────
 
-pub const MAX_INPUT  : u10 = 512;
-pub const UNDO_MAX   : u6 = 32;
-pub const MARK_COUNT : u5 = 26; // marks a–z
+pub const MAX_INPUT  : usize = 512;
+pub const UNDO_MAX   : usize = 32;
+pub const MARK_COUNT : usize = 26; // marks a–z
 
-// Types 
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 /// What the caller should do after handling a key.
 pub const Action = enum { none, deactivate, spawn };
@@ -90,7 +115,7 @@ pub const UndoEntry = struct {
     cursor: usize         = 0,
 };
 
-// VimState 
+// ── VimState ──────────────────────────────────────────────────────────────────
 
 /// All state for the vim editing engine.  Embed one of these in your application
 /// state and pass a pointer to the handle* functions each key press.
@@ -100,7 +125,7 @@ pub const VimState = struct {
     cursor: usize         = 0,
     mode:   Mode          = .insert,
 
-    // Normal-mode sub-state 
+    // ── Normal-mode sub-state ─────────────────────────────────────────────────
     n_count:          u32  = 0,   // digit accumulator
     n_op:             u8   = 0,   // pending operator ('d'/'c'/'y')
     n_op_count:       u32  = 0,   // count when operator was armed
@@ -115,28 +140,28 @@ pub const VimState = struct {
     last_find_kind:   u8   = 0,
     last_find_ch:     u8   = 0,
 
-    // Yank / delete register 
+    // ── Yank / delete register ────────────────────────────────────────────────
     yank_buf: [MAX_INPUT]u8 = undefined,
     yank_len: usize         = 0,
 
-    // Visual mode 
+    // ── Visual mode ───────────────────────────────────────────────────────────
     vis_anchor: usize = 0,
 
-    // Replace mode 
+    // ── Replace mode ──────────────────────────────────────────────────────────
     replace_orig_buf: [MAX_INPUT]u8 = undefined,
     replace_orig_len: usize         = 0,
     replace_orig_cur: usize         = 0, // cursor position when R was pressed
 
-    // Marks a–z 
+    // ── Marks a–z ─────────────────────────────────────────────────────────────
     marks: [MARK_COUNT]?usize = [_]?usize{null} ** MARK_COUNT,
 
-    // Undo / redo 
+    // ── Undo / redo ───────────────────────────────────────────────────────────
     undo_stack: [UNDO_MAX]UndoEntry = undefined,
     undo_top:   usize               = 0,
     redo_stack: [UNDO_MAX]UndoEntry = undefined,
     redo_top:   usize               = 0,
 
-    // Dot repeat 
+    // ── Dot repeat ────────────────────────────────────────────────────────────
     dot:              DotRecord     = .{},
     in_dot_replay:    bool          = false,
     recording_insert: bool          = false,
@@ -144,7 +169,7 @@ pub const VimState = struct {
     insert_rec_len:   usize         = 0,
 };
 
-// Public helpers 
+// ── Public helpers ────────────────────────────────────────────────────────────
 
 /// Reset all normal-mode sub-state (counts, pending operators, prefix flags).
 pub fn resetNormalSub(vs: *VimState) void {
@@ -159,24 +184,22 @@ pub fn resetNormalSub(vs: *VimState) void {
     vs.n_pending_apos  = false;
 }
 
+inline fn beginInsertRecording(vs: *VimState) void {
+    vs.insert_rec_len   = 0;
+    vs.recording_insert = true;
+}
+
 /// Enter INSERT mode from a standalone command (i/a/I/A).
 /// Pushes an undo snapshot and begins recording for dot repeat.
 pub fn enterInsert(vs: *VimState) void {
-    if (!vs.in_dot_replay) {
-        undoPush(vs);
-        vs.insert_rec_len   = 0;
-        vs.recording_insert = true;
-    }
+    if (!vs.in_dot_replay) { undoPush(vs); beginInsertRecording(vs); }
     vs.mode = .insert;
 }
 
 /// Switch to INSERT mode without an undo push (used by c-operators that
 /// already called undoPush before the deletion).
 pub fn startInsertMode(vs: *VimState) void {
-    if (!vs.in_dot_replay) {
-        vs.insert_rec_len   = 0;
-        vs.recording_insert = true;
-    }
+    if (!vs.in_dot_replay) beginInsertRecording(vs);
     vs.mode = .insert;
 }
 
@@ -193,7 +216,7 @@ inline fn clampCursorForNormal(vs: *VimState) void {
     if (vs.len > 0 and vs.cursor == vs.len) vs.cursor = vs.len - 1;
 }
 
-// Key handlers 
+// ── Key handlers ──────────────────────────────────────────────────────────────
 
 /// Handle a Ctrl-modified key.  Call this before dispatching to mode handlers.
 /// Returns `.deactivate` for Ctrl+C; `.none` for all others (mutations applied
@@ -211,7 +234,7 @@ pub fn handleCtrl(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
-// INSERT mode handler 
+// ── INSERT mode handler ───────────────────────────────────────────────────────
 
 pub fn handleInsert(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     switch (sym) {
@@ -252,7 +275,7 @@ pub fn handleInsert(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
-// NORMAL mode handler 
+// ── NORMAL mode handler ───────────────────────────────────────────────────────
 
 /// Digit accumulation shared by handleNormal and handleVisual.
 /// Returns true and updates n_count if sym is a digit (1-9 always; 0 only if
@@ -281,7 +304,7 @@ fn tryArmFindPrefix(vs: *VimState, sym: xcb.xcb_keysym_t) bool {
 }
 
 pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
-    // 1. Pending r{c} 
+    // ── 1. Pending r{c} ───────────────────────────────────────────────────────
     if (vs.n_pending_r) {
         if (sym >= 0x20 and sym <= 0x7e and vs.cursor < vs.len) {
             const ch: u8   = @truncate(sym);
@@ -296,7 +319,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         return .none;
     }
 
-    // 2. Pending f/F/t/T char 
+    // ── 2. Pending f/F/t/T char ───────────────────────────────────────────────
     if (vs.n_find_kind != 0) {
         if (sym >= 0x20 and sym <= 0x7e) {
             const ch: u8   = @truncate(sym);
@@ -319,7 +342,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         return .none;
     }
 
-    // 3. Pending g-prefix 
+    // ── 3. Pending g-prefix ───────────────────────────────────────────────────
     if (vs.n_pending_g) {
         const cnt = effCount(vs);
         const mr_opt: ?MotionResult = switch (sym) {
@@ -345,7 +368,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         return .none;
     }
 
-    // 4. Pending text-object delimiter 
+    // ── 4. Pending text-object delimiter ─────────────────────────────────────
     if (vs.n_text_obj_kind != 0) {
         if (sym >= 0x20 and sym <= 0x7e) {
             const ch: u8 = @truncate(sym);
@@ -362,7 +385,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         return .none;
     }
 
-    // 5. Pending mark set (m{a-z}) 
+    // ── 5. Pending mark set (m{a-z}) ─────────────────────────────────────────
     if (vs.n_pending_m) {
         if (sym >= 'a' and sym <= 'z')
             vs.marks[@as(usize, @intCast(sym - 'a'))] = vs.cursor;
@@ -370,7 +393,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         return .none;
     }
 
-    // 6. Pending mark jump ('{a-z}) 
+    // ── 6. Pending mark jump ('{a-z}) ────────────────────────────────────────
     if (vs.n_pending_apos) {
         if (sym >= 'a' and sym <= 'z') {
             if (vs.marks[@as(usize, @intCast(sym - 'a'))]) |pos| {
@@ -382,10 +405,10 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         return .none;
     }
 
-    // 7. Digit accumulation 
+    // ── 7. Digit accumulation ─────────────────────────────────────────────────
     if (tryAccumulateDigit(vs, sym)) return .none;
 
-    // 8. ; / , (repeat last find) 
+    // ── 8. ; / , (repeat last find) ──────────────────────────────────────────
     if (sym == ';' or sym == ',') {
         if (vs.last_find_kind != 0) {
             const cnt  = effCount(vs);
@@ -397,7 +420,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         return .none;
     }
 
-    // 9. Simple motions 
+    // ── 9. Simple motions ─────────────────────────────────────────────────────
     if (resolveSimpleMotion(vs, sym, effCount(vs))) |mr| {
         if (vs.n_op != 0) {
             vs.dot = DotRecord{
@@ -412,7 +435,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         return .none;
     }
 
-    // 10. Operator arming / text-object detection 
+    // ── 10. Operator arming / text-object detection ───────────────────────────
     if ((sym == 'i' or sym == 'a') and vs.n_op != 0) {
         vs.n_text_obj_kind = @truncate(sym);
         return .none;
@@ -427,19 +450,19 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         }
         if (vs.n_op == op) {
             vs.dot = DotRecord{ .kind = .op_line, .op = op, .op_count = vs.n_op_count, .motion_count = vs.n_count };
-            doOpLine(vs, op);
+            doOp(vs, op, .{ .pos = vs.len, .from_override = 0 });
         }
         resetNormalSub(vs);
         return .none;
     }
 
-    // 11. Prefix arming 
+    // ── 11. Prefix arming ────────────────────────────────────────────────────
     if (tryArmFindPrefix(vs, sym)) return .none;
     if (sym == 'r' and vs.n_op == 0) { vs.n_pending_r    = true; return .none; }
     if (sym == 'm' and vs.n_op == 0) { vs.n_pending_m    = true; return .none; }
     if (sym == 0x27)                 { vs.n_pending_apos = true; return .none; } // apostrophe
 
-    // 12. Single-key commands 
+    // ── 12. Single-key commands ───────────────────────────────────────────────
     const cnt = effCount(vs);
 
     switch (sym) {
@@ -458,38 +481,24 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
             return .spawn;
         },
 
-        'x' => {
-            vs.dot = .{ .kind = .direct, .direct_sym = 'x', .direct_count = cnt };
-            doOp(vs, 'd', MotionResult{ .pos = charRight(vs, cnt) });
-        },
-        'X' => {
-            vs.dot = .{ .kind = .direct, .direct_sym = 'X', .direct_count = cnt };
-            doOp(vs, 'd', MotionResult{ .pos = charLeft(vs, cnt) });
-        },
-
-        'D' => {
-            vs.dot = .{ .kind = .direct, .direct_sym = 'D', .direct_count = cnt };
-            doOp(vs, 'd', MotionResult{ .pos = vs.len });
-        },
-        'C' => {
-            vs.dot = .{ .kind = .direct, .direct_sym = 'C', .direct_count = cnt };
-            doOp(vs, 'c', MotionResult{ .pos = vs.len });
+        // delete/change to a computed position: x X D C s
+        'x', 'X', 'D', 'C', 's' => {
+            const op: u8     = if (sym == 'x' or sym == 'X' or sym == 'D') 'd' else 'c';
+            const pos: usize = switch (sym) {
+                'X'      => charLeft(vs, cnt),
+                'D', 'C' => vs.len,
+                else     => charRight(vs, cnt), // x, s
+            };
+            vs.dot = .{ .kind = .direct, .direct_sym = @truncate(sym), .direct_count = cnt };
+            doOp(vs, op, .{ .pos = pos });
         },
 
-        'p' => {
+        'p', 'P' => {
             if (vs.yank_len > 0) {
-                vs.dot = .{ .kind = .direct, .direct_sym = 'p', .direct_count = cnt };
+                vs.dot = .{ .kind = .direct, .direct_sym = @truncate(sym), .direct_count = cnt };
                 undoPush(vs);
                 var i: u32 = 0;
-                while (i < cnt) : (i += 1) pasteAfter(vs);
-            }
-        },
-        'P' => {
-            if (vs.yank_len > 0) {
-                vs.dot = .{ .kind = .direct, .direct_sym = 'P', .direct_count = cnt };
-                undoPush(vs);
-                var i: u32 = 0;
-                while (i < cnt) : (i += 1) pasteBefore(vs);
+                while (i < cnt) : (i += 1) { if (sym == 'p') pasteAfter(vs) else pasteBefore(vs); }
             }
         },
 
@@ -500,10 +509,6 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
             while (i < cnt) : (i += 1) toggleCaseOnce(vs);
         },
 
-        's' => {
-            vs.dot = .{ .kind = .direct, .direct_sym = 's', .direct_count = cnt };
-            doOp(vs, 'c', MotionResult{ .pos = charRight(vs, cnt) });
-        },
         'S' => {
             vs.dot = .{ .kind = .direct, .direct_sym = 'S', .direct_count = cnt };
             undoPush(vs);
@@ -513,10 +518,16 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
             startInsertMode(vs);
         },
 
-        'i' => { vs.dot = .{ .kind = .insert_session }; enterInsert(vs); },
-        'I' => { vs.cursor = firstNonBlank(vs); vs.dot = .{ .kind = .insert_session }; enterInsert(vs); },
-        'a' => { if (vs.cursor < vs.len) vs.cursor += 1; vs.dot = .{ .kind = .insert_session }; enterInsert(vs); },
-        'A' => { vs.cursor = vs.len; vs.dot = .{ .kind = .insert_session }; enterInsert(vs); },
+        'i', 'I', 'a', 'A' => {
+            vs.cursor = switch (sym) {
+                'I'  => firstNonBlank(vs),
+                'a'  => @min(vs.cursor + 1, vs.len),
+                'A'  => vs.len,
+                else => vs.cursor,
+            };
+            vs.dot = .{ .kind = .insert_session };
+            enterInsert(vs);
+        },
 
         'v' => {
             vs.vis_anchor = vs.cursor;
@@ -558,7 +569,9 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
-// VISUAL mode handler 
+// ── VISUAL mode handler ───────────────────────────────────────────────────────
+
+inline fn exitVisual(vs: *VimState) void { vs.mode = .normal; resetNormalSub(vs); }
 
 pub fn handleVisual(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     // Resolve pending find.
@@ -570,7 +583,7 @@ pub fn handleVisual(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
             const mr      = motionFind(vs, kind, ch, cnt);
             vs.last_find_kind = kind;
             vs.last_find_ch   = ch;
-            setCursorVisual(vs, mr.pos);
+            setCursor(vs, mr);
         }
         resetNormalSub(vs);
         return .none;
@@ -586,7 +599,7 @@ pub fn handleVisual(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
             '$', XK_End       => vs.len,
             else    => null,
         };
-        if (pos) |p| setCursorVisual(vs, p);
+        if (pos) |p| setCursor(vs, MotionResult{ .pos = p });
         resetNormalSub(vs);
         return .none;
     }
@@ -599,7 +612,7 @@ pub fn handleVisual(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         if (vs.last_find_kind != 0) {
             const cnt  = effCount(vs);
             const kind = if (sym == ',') reverseFindKind(vs.last_find_kind) else vs.last_find_kind;
-            setCursorVisual(vs, motionFind(vs, kind, vs.last_find_ch, cnt).pos);
+            setCursor(vs, motionFind(vs, kind, vs.last_find_ch, cnt));
         }
         resetNormalSub(vs);
         return .none;
@@ -607,7 +620,7 @@ pub fn handleVisual(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
 
     // Simple motions extend selection.
     if (resolveSimpleMotion(vs, sym, effCount(vs))) |mr| {
-        setCursorVisual(vs, mr.pos);
+        setCursor(vs, mr);
         resetNormalSub(vs);
         return .none;
     }
@@ -618,43 +631,28 @@ pub fn handleVisual(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     // Operator and other keys.
     switch (sym) {
 
-        XK_Escape, 'v' => {
-            vs.mode = .normal;
-            resetNormalSub(vs);
-        },
+        XK_Escape, 'v' => exitVisual(vs),
 
         XK_Return => {
             resetNormalSub(vs);
             return .spawn;
         },
 
-        'd', 'x' => {
+        'd', 'x', 'c' => {
             const sel = visualRange(vs);
-            vs.dot = .{ .kind = .op_line, .op = 'd' };
+            vs.dot = .{ .kind = .op_line, .op = if (sym == 'c') @as(u8, 'c') else @as(u8, 'd') };
             undoPush(vs);
             yankRange(vs, sel[0], sel[1]);
             deleteRange(vs, sel[0], sel[1]);
-            vs.mode = .normal;
-            resetNormalSub(vs);
-        },
-
-        'c' => {
-            const sel = visualRange(vs);
-            vs.dot = .{ .kind = .op_line, .op = 'c' };
-            undoPush(vs);
-            yankRange(vs, sel[0], sel[1]);
-            deleteRange(vs, sel[0], sel[1]);
-            vs.mode = .normal;
-            resetNormalSub(vs);
-            startInsertMode(vs);
+            exitVisual(vs);
+            if (sym == 'c') startInsertMode(vs);
         },
 
         'y' => {
             const sel = visualRange(vs);
             yankRange(vs, sel[0], sel[1]);
             vs.cursor = sel[0];
-            vs.mode = .normal;
-            resetNormalSub(vs);
+            exitVisual(vs);
         },
 
         '~' => {
@@ -668,8 +666,7 @@ pub fn handleVisual(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
                             else ch;
             }
             vs.cursor = sel[0];
-            vs.mode = .normal;
-            resetNormalSub(vs);
+            exitVisual(vs);
         },
 
         else => resetNormalSub(vs),
@@ -677,7 +674,7 @@ pub fn handleVisual(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
-// REPLACE mode handler 
+// ── REPLACE mode handler ──────────────────────────────────────────────────────
 
 pub fn handleReplace(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     switch (sym) {
@@ -719,7 +716,7 @@ pub fn handleReplace(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
-// Motion resolvers 
+// ── Motion resolvers ──────────────────────────────────────────────────────────
 
 fn resolveSimpleMotion(vs: *VimState, sym: xcb.xcb_keysym_t, cnt: u32) ?MotionResult {
     return switch (sym) {
@@ -738,10 +735,18 @@ fn resolveSimpleMotion(vs: *VimState, sym: xcb.xcb_keysym_t, cnt: u32) ?MotionRe
     };
 }
 
-// Primitive motion functions 
+// ── Primitive motion functions ────────────────────────────────────────────────
 
 inline fn isWordChar(ch: u8) bool {
     return std.ascii.isAlphanumeric(ch) or ch == '_';
+}
+
+/// Character class for word motions.  big=true collapses to space/non-space.
+/// 0 = space, 1 = word char (or any non-space when big), 2 = punctuation.
+inline fn charClass(big: bool, ch: u8) u2 {
+    if (ch == ' ') return 0;
+    if (big or isWordChar(ch)) return 1;
+    return 2;
 }
 
 fn charLeft(vs: *VimState, cnt: u32) usize {
@@ -757,15 +762,8 @@ fn motionWordNext(vs: *VimState, big: bool, cnt: u32) usize {
     var i: u32 = 0;
     while (i < cnt) : (i += 1) {
         if (p >= vs.len) break;
-        if (big) {
-            while (p < vs.len and vs.buf[p] != ' ') p += 1;
-        } else {
-            if (isWordChar(vs.buf[p])) {
-                while (p < vs.len and  isWordChar(vs.buf[p])) p += 1;
-            } else if (vs.buf[p] != ' ') {
-                while (p < vs.len and !isWordChar(vs.buf[p]) and vs.buf[p] != ' ') p += 1;
-            }
-        }
+        const cls = charClass(big, vs.buf[p]);
+        while (p < vs.len and charClass(big, vs.buf[p]) == cls) p += 1;
         while (p < vs.len and vs.buf[p] == ' ') p += 1;
     }
     return p;
@@ -778,15 +776,8 @@ fn motionWordPrev(vs: *VimState, big: bool, cnt: u32) usize {
         if (p == 0) break;
         while (p > 0 and vs.buf[p - 1] == ' ') p -= 1;
         if (p == 0) break;
-        if (big) {
-            while (p > 0 and vs.buf[p - 1] != ' ') p -= 1;
-        } else {
-            if (isWordChar(vs.buf[p - 1])) {
-                while (p > 0 and isWordChar(vs.buf[p - 1])) p -= 1;
-            } else {
-                while (p > 0 and !isWordChar(vs.buf[p - 1]) and vs.buf[p - 1] != ' ') p -= 1;
-            }
-        }
+        const cls = charClass(big, vs.buf[p - 1]);
+        while (p > 0 and charClass(big, vs.buf[p - 1]) == cls) p -= 1;
     }
     return p;
 }
@@ -799,15 +790,8 @@ fn motionWordEnd(vs: *VimState, big: bool, cnt: u32) usize {
         p += 1;
         while (p < vs.len and vs.buf[p] == ' ') p += 1;
         if (p >= vs.len) { p = vs.len; break; }
-        if (big) {
-            while (p + 1 < vs.len and vs.buf[p + 1] != ' ') p += 1;
-        } else {
-            if (isWordChar(vs.buf[p])) {
-                while (p + 1 < vs.len and isWordChar(vs.buf[p + 1])) p += 1;
-            } else {
-                while (p + 1 < vs.len and !isWordChar(vs.buf[p + 1]) and vs.buf[p + 1] != ' ') p += 1;
-            }
-        }
+        const cls = charClass(big, vs.buf[p]);
+        while (p + 1 < vs.len and charClass(big, vs.buf[p + 1]) == cls) p += 1;
     }
     return @min(p, vs.len -| 1);
 }
@@ -817,16 +801,9 @@ fn motionWordEndBack(vs: *VimState, big: bool, cnt: u32) usize {
     var i: u32 = 0;
     while (i < cnt) : (i += 1) {
         if (p == 0) break;
-        if (vs.buf[p] != ' ') {
-            if (big) {
-                while (p > 0 and vs.buf[p - 1] != ' ') p -= 1;
-            } else {
-                if (isWordChar(vs.buf[p])) {
-                    while (p > 0 and isWordChar(vs.buf[p - 1])) p -= 1;
-                } else {
-                    while (p > 0 and !isWordChar(vs.buf[p - 1]) and vs.buf[p - 1] != ' ') p -= 1;
-                }
-            }
+        const cls0 = charClass(big, vs.buf[p]);
+        if (cls0 != 0) {
+            while (p > 0 and charClass(big, vs.buf[p - 1]) == cls0) p -= 1;
         }
         if (p == 0) break;
         p -= 1;
@@ -836,37 +813,23 @@ fn motionWordEndBack(vs: *VimState, big: bool, cnt: u32) usize {
 }
 
 fn motionFind(vs: *VimState, kind: u8, ch: u8, cnt: u32) MotionResult {
-    var p  = vs.cursor;
+    var p: usize = vs.cursor;
     var i: u32 = 0;
     while (i < cnt) : (i += 1) {
         switch (kind) {
-            'f' => {
+            'f', 't' => {
                 var q = p + 1;
                 while (q < vs.len and vs.buf[q] != ch) q += 1;
-                if (q < vs.len) p = q else break;
+                if (q < vs.len) p = if (kind == 't') q - 1 else q else break;
             },
-            'F' => {
+            'F', 'T' => {
                 if (p == 0) break;
                 var q = p - 1;
                 while (vs.buf[q] != ch) {
                     if (q == 0) { q = vs.len; break; }
                     q -= 1;
                 }
-                if (q < vs.len) p = q else break;
-            },
-            't' => {
-                var q = p + 1;
-                while (q < vs.len and vs.buf[q] != ch) q += 1;
-                if (q < vs.len and q > 0) p = q - 1 else break;
-            },
-            'T' => {
-                if (p == 0) break;
-                var q = p - 1;
-                while (vs.buf[q] != ch) {
-                    if (q == 0) { q = vs.len; break; }
-                    q -= 1;
-                }
-                if (q < vs.len and q + 1 <= vs.cursor) p = q + 1 else break;
+                if (q < vs.len) p = if (kind == 'T') q + 1 else q else break;
             },
             else => {},
         }
@@ -924,7 +887,7 @@ fn motionMatchBracket(vs: *VimState) usize {
     return vs.cursor;
 }
 
-// Text object resolver 
+// ── Text object resolver ──────────────────────────────────────────────────────
 
 fn resolveTextObject(vs: *VimState, kind: u8, delim: u8) ?MotionResult {
     const inner = (kind == 'i');
@@ -945,19 +908,10 @@ fn textObjWord(vs: *VimState, big: bool, inner: bool) ?MotionResult {
     var lo = vs.cursor;
     var hi = vs.cursor;
 
-    const on_word = if (big) vs.buf[vs.cursor] != ' ' else isWordChar(vs.buf[vs.cursor]);
-
-    if (on_word) {
-        if (big) {
-            while (lo > 0 and vs.buf[lo - 1] != ' ') lo -= 1;
-        } else {
-            while (lo > 0 and isWordChar(vs.buf[lo - 1])) lo -= 1;
-        }
-        if (big) {
-            while (hi < vs.len and vs.buf[hi] != ' ') hi += 1;
-        } else {
-            while (hi < vs.len and isWordChar(vs.buf[hi])) hi += 1;
-        }
+    const cls = charClass(big, vs.buf[vs.cursor]);
+    if (cls != 0) {
+        while (lo > 0 and charClass(big, vs.buf[lo - 1]) == cls) lo -= 1;
+        while (hi < vs.len and charClass(big, vs.buf[hi]) == cls) hi += 1;
         if (!inner) {
             if (hi < vs.len and vs.buf[hi] == ' ') {
                 while (hi < vs.len and vs.buf[hi] == ' ') hi += 1;
@@ -1032,7 +986,7 @@ fn textObjBracket(vs: *VimState, open: u8, close: u8, inner: bool) ?MotionResult
     }
 }
 
-// Operator application 
+// ── Operator application ──────────────────────────────────────────────────────
 
 fn doOp(vs: *VimState, op: u8, mr: MotionResult) void {
     var from: usize = undefined;
@@ -1054,30 +1008,13 @@ fn doOp(vs: *VimState, op: u8, mr: MotionResult) void {
     if (from >= to) return;
 
     switch (op) {
-        'd' => { undoPush(vs); yankRange(vs, from, to); deleteRange(vs, from, to); },
-        'c' => { undoPush(vs); yankRange(vs, from, to); deleteRange(vs, from, to); startInsertMode(vs); },
+        'd', 'c' => { undoPush(vs); yankRange(vs, from, to); deleteRange(vs, from, to); if (op == 'c') startInsertMode(vs); },
         'y' => { yankRange(vs, from, to); vs.cursor = from; },
         else => {},
     }
 }
 
-fn clearLine(vs: *VimState) void {
-    undoPush(vs);
-    yankRange(vs, 0, vs.len);
-    vs.cursor = 0;
-    vs.len    = 0;
-}
-
-fn doOpLine(vs: *VimState, op: u8) void {
-    switch (op) {
-        'd' => clearLine(vs),
-        'c' => { clearLine(vs); startInsertMode(vs); },
-        'y' => { yankRange(vs, 0, vs.len); vs.cursor = 0; },
-        else => {},
-    }
-}
-
-// Edit helpers 
+// ── Edit helpers ──────────────────────────────────────────────────────────────
 
 /// Move cursor (normal mode: clamp to last valid position).
 fn setCursor(vs: *VimState, mr: MotionResult) void {
@@ -1085,22 +1022,7 @@ fn setCursor(vs: *VimState, mr: MotionResult) void {
     vs.cursor = @min(mr.pos, max_pos);
 }
 
-/// Move cursor in visual mode — same clamping as normal mode.
-fn setCursorVisual(vs: *VimState, pos: usize) void {
-    setCursor(vs, MotionResult{ .pos = pos });
-}
-
-fn insertChar(vs: *VimState, ch: u8) void {
-    if (vs.len >= MAX_INPUT - 1) return;
-    if (vs.cursor < vs.len) {
-        std.mem.copyBackwards(u8,
-            vs.buf[vs.cursor + 1 .. vs.len + 1],
-            vs.buf[vs.cursor     .. vs.len]);
-    }
-    vs.buf[vs.cursor] = ch;
-    vs.len    += 1;
-    vs.cursor += 1;
-}
+fn insertChar(vs: *VimState, ch: u8) void { insertSlice(vs, &[1]u8{ch}); }
 
 pub fn insertSlice(vs: *VimState, slice: []const u8) void {
     const n = @min(slice.len, MAX_INPUT - 1 - vs.len);
@@ -1123,11 +1045,7 @@ fn deleteBefore(vs: *VimState) void {
 
 fn deleteAfter(vs: *VimState) void {
     if (vs.cursor >= vs.len) return;
-    if (vs.cursor < vs.len - 1) {
-        std.mem.copyForwards(u8,
-            vs.buf[vs.cursor     .. vs.len - 1],
-            vs.buf[vs.cursor + 1 .. vs.len]);
-    }
+    std.mem.copyForwards(u8, vs.buf[vs.cursor .. vs.len - 1], vs.buf[vs.cursor + 1 .. vs.len]);
     vs.len -= 1;
 }
 
@@ -1172,16 +1090,7 @@ fn toggleCaseOnce(vs: *VimState) void {
 fn ctrlW(vs: *VimState) void {
     if (vs.cursor == 0) return;
     undoPush(vs);
-    var p = vs.cursor;
-    while (p > 0 and vs.buf[p - 1] == ' ') p -= 1;
-    if (p > 0) {
-        if (isWordChar(vs.buf[p - 1])) {
-            while (p > 0 and isWordChar(vs.buf[p - 1])) p -= 1;
-        } else {
-            while (p > 0 and !isWordChar(vs.buf[p - 1]) and vs.buf[p - 1] != ' ') p -= 1;
-        }
-    }
-    deleteRange(vs, p, vs.cursor);
+    deleteRange(vs, motionWordPrev(vs, false, 1), vs.cursor);
 }
 
 fn ctrlU(vs: *VimState) void {
@@ -1235,7 +1144,7 @@ fn ctrlAdjustNumber(vs: *VimState, delta: i64) void {
     vs.cursor = num_start + new_len - 1;
 }
 
-// Undo / redo 
+// ── Undo / redo ───────────────────────────────────────────────────────────────
 
 /// Push the current buffer state onto the undo stack unconditionally.
 /// If the stack is full, the oldest entry is dropped to make room.
@@ -1260,14 +1169,20 @@ fn undoPush(vs: *VimState) void {
     vs.redo_top = 0;
 }
 
-fn undoUndo(vs: *VimState) void {
-    if (vs.undo_top == 0) return;
-    if (vs.redo_top < UNDO_MAX) {
-        const e = &vs.redo_stack[vs.redo_top];
+/// Save current state onto `stack[top.*]` and advance top (no overflow guard —
+/// caller ensures there is room or uses the raw path).
+inline fn stackSave(stack: []UndoEntry, top: *usize, vs: *VimState) void {
+    if (top.* < UNDO_MAX) {
+        const e = &stack[top.*];
         @memcpy(e.buf[0..vs.len], vs.buf[0..vs.len]);
         e.len = vs.len; e.cursor = vs.cursor;
-        vs.redo_top += 1;
+        top.* += 1;
     }
+}
+
+fn undoUndo(vs: *VimState) void {
+    if (vs.undo_top == 0) return;
+    stackSave(&vs.redo_stack, &vs.redo_top, vs);
     vs.undo_top -= 1;
     const e = &vs.undo_stack[vs.undo_top];
     @memcpy(vs.buf[0..e.len], e.buf[0..e.len]);
@@ -1276,19 +1191,14 @@ fn undoUndo(vs: *VimState) void {
 
 fn undoRedo(vs: *VimState) void {
     if (vs.redo_top == 0) return;
-    if (vs.undo_top < UNDO_MAX) {
-        const e = &vs.undo_stack[vs.undo_top];
-        @memcpy(e.buf[0..vs.len], vs.buf[0..vs.len]);
-        e.len = vs.len; e.cursor = vs.cursor;
-        vs.undo_top += 1;
-    }
+    stackSave(&vs.undo_stack, &vs.undo_top, vs);
     vs.redo_top -= 1;
     const e = &vs.redo_stack[vs.redo_top];
     @memcpy(vs.buf[0..e.len], e.buf[0..e.len]);
     vs.len = e.len; vs.cursor = e.cursor;
 }
 
-// Dot repeat 
+// ── Dot repeat ────────────────────────────────────────────────────────────────
 
 fn dotReplay(vs: *VimState) void {
     if (vs.dot.kind == .none) return;
@@ -1300,25 +1210,24 @@ fn dotReplay(vs: *VimState) void {
     defer vs.in_dot_replay = false;
 
     switch (vs.dot.kind) {
-        .none => {},
+        .none => unreachable,
 
         .direct => {
             const cnt = vs.dot.direct_count;
             switch (vs.dot.direct_sym) {
-                'x' => doOp(vs, 'd', MotionResult{ .pos = charRight(vs, cnt) }),
-                'X' => doOp(vs, 'd', MotionResult{ .pos = charLeft(vs, cnt)  }),
-                'D' => doOp(vs, 'd', MotionResult{ .pos = vs.len }),
-                'C' => {
-                    doOp(vs, 'c', MotionResult{ .pos = vs.len });
-                    insertSlice(vs, vs.dot.insert_buf[0..vs.dot.insert_len]);
+                'x', 'X', 'D', 'C', 's' => {
+                    const d = vs.dot.direct_sym;
+                    const op: u8     = if (d == 'x' or d == 'X' or d == 'D') 'd' else 'c';
+                    const pos: usize = switch (d) {
+                        'X'      => charLeft(vs, cnt),
+                        'D', 'C' => vs.len,
+                        else     => charRight(vs, cnt), // x, s
+                    };
+                    doOp(vs, op, .{ .pos = pos });
+                    if (op == 'c') insertSlice(vs, vs.dot.insert_buf[0..vs.dot.insert_len]);
                 },
-                'p' => { var i: u32 = 0; while (i < cnt) : (i += 1) pasteAfter(vs); },
-                'P' => { var i: u32 = 0; while (i < cnt) : (i += 1) pasteBefore(vs); },
+                'p', 'P' => { var i: u32 = 0; while (i < cnt) : (i += 1) { if (vs.dot.direct_sym == 'p') pasteAfter(vs) else pasteBefore(vs); } },
                 '~' => { var i: u32 = 0; while (i < cnt) : (i += 1) toggleCaseOnce(vs); },
-                's' => {
-                    doOp(vs, 'c', MotionResult{ .pos = charRight(vs, cnt) });
-                    insertSlice(vs, vs.dot.insert_buf[0..vs.dot.insert_len]);
-                },
                 'S' => {
                     yankRange(vs, 0, vs.len);
                     vs.len = 0; vs.cursor = 0;
@@ -1358,7 +1267,7 @@ fn dotReplay(vs: *VimState) void {
         },
 
         .op_line => {
-            doOpLine(vs, vs.dot.op);
+            doOp(vs, vs.dot.op, .{ .pos = vs.len, .from_override = 0 });
             if (vs.dot.op == 'c')
                 insertSlice(vs, vs.dot.insert_buf[0..vs.dot.insert_len]);
         },
@@ -1369,7 +1278,7 @@ fn dotReplay(vs: *VimState) void {
     }
 }
 
-// Normal-mode sub-state helpers 
+// ── Normal-mode sub-state helpers ─────────────────────────────────────────────
 
 /// Treat a count of 0 as 1 (vim convention: no count = repeat once).
 inline fn resolveCount(n: u32) u32 { return if (n == 0) 1 else n; }
