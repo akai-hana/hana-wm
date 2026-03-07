@@ -1,7 +1,8 @@
 //! XKB (X Keyboard Extension) bindings and keyboard state management.
 
-const std  = @import("std");
-const defs = @import("defs");
+const std       = @import("std");
+const constants = @import("constants");
+const defs      = @import("defs");
 
 pub const xkb = @cImport({
     @cInclude("xkbcommon/xkbcommon.h");
@@ -25,7 +26,6 @@ pub const xkb_state_unref                            = xkb.xkb_state_unref;
 pub const xkb_keymap_unref                           = xkb.xkb_keymap_unref;
 pub const xkb_state_key_get_one_sym                  = xkb.xkb_state_key_get_one_sym;
 
-/// Maximum number of attempts for XKB extension/keymap setup calls.
 const MAX_ATTEMPTS: u8 = 3;
 
 pub const XkbState = struct {
@@ -33,7 +33,7 @@ pub const XkbState = struct {
     keymap:      *xkb_keymap,
     state:       *xkb_state,
     device_id:   i32,
-    /// Keysym -> keycode; built at init time for O(1) config-time lookups.
+    /// Keysym → keycode map built at init time for O(1) config-time lookups.
     reverse_map: std.AutoHashMap(u32, u8),
 
     pub fn init(xcb_conn: *anyopaque, allocator: std.mem.Allocator) !XkbState {
@@ -78,31 +78,30 @@ pub const XkbState = struct {
         xkb.xkb_context_unref(self.context);
     }
 
-    /// Converts an X11 keycode to a keysym (used during event processing).
+    /// Convert an X11 keycode to a keysym (used during event processing).
     pub inline fn keycodeToKeysym(self: *XkbState, keycode: u8) u32 {
         return xkb.xkb_state_key_get_one_sym(self.state, keycode);
     }
 
-    /// Reverse-looks up a keysym to its keycode (used during config parsing).
+    /// Reverse-look up a keysym to its keycode (used during config parsing).
     pub inline fn keysymToKeycode(self: *XkbState, keysym: u32) ?u8 {
         return self.reverse_map.get(keysym);
     }
 };
 
-/// Sleeps XKB_RETRY_DELAY_MS between attempts; skips the sleep on the final attempt
-/// to avoid a pointless wait before the caller propagates the error.
-/// Uses std.Io.Clock.Duration.sleep with std.Options.debug_io — the global blocking
-/// Io instance — because retryDelay runs during init before any Io is threaded through.
-/// The sleep is best-effort: a failure (e.g. unsupported clock) just retries sooner.
+/// Sleep between retry attempts; skips the sleep on the final attempt to avoid
+/// a pointless wait before the error propagates to the caller.
+/// Uses the global blocking Io instance — retryDelay runs during init before
+/// any Io context is threaded through. Failure (e.g. unsupported clock) just
+/// retries sooner.
 inline fn retryDelay(attempt: u8) void {
     if (attempt < MAX_ATTEMPTS - 1)
         std.Io.Clock.Duration.sleep(
-            .{ .clock = .awake, .raw = .fromMilliseconds(defs.XKB_RETRY_DELAY_MS) },
+            .{ .clock = .awake, .raw = .fromMilliseconds(constants.XKB_RETRY_DELAY_MS) },
             std.Options.debug_io,
         ) catch {};
 }
 
-/// Sets up the XKB extension, retrying up to MAX_ATTEMPTS times.
 fn retrySetup(xcb_conn: *anyopaque) !void {
     for (0..MAX_ATTEMPTS) |i| {
         const ok = xkb.xkb_x11_setup_xkb_extension(
@@ -118,8 +117,8 @@ fn retrySetup(xcb_conn: *anyopaque) !void {
     return error.XkbSetupFailed;
 }
 
-/// Creates a keymap from the device, retrying up to MAX_ATTEMPTS times.
-/// Accepts only keymaps with at least 40 reachable keysyms in the 8..128 range.
+/// Accept a keymap only if it has at least 40 reachable keysyms in the 8..128
+/// range — guards against a partially-initialised keymap on early startup.
 fn retryKeymap(ctx: *xkb_context, xcb_conn: *anyopaque, device_id: i32) !*xkb_keymap {
     for (0..MAX_ATTEMPTS) |i| {
         const km = xkb.xkb_x11_keymap_new_from_device(

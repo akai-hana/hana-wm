@@ -7,23 +7,27 @@ const debug = @import("debug");
 const xcb           = defs.xcb;
 const ScalableValue = @import("parser").ScalableValue;
 
+// Baseline screen used to define "1× scale". All percentage-based values
+// are computed relative to this reference display.
 const BASELINE_WIDTH:  f32 = 2560.0;
 const BASELINE_HEIGHT: f32 = 1600.0;
 const BASELINE_DPI:    f32 = 96.0;
 
+// Font size percentages are relative to 1080 p height, not the baseline display,
+// so font sizing degrades more gracefully on smaller screens.
 const FONT_BASELINE_HEIGHT: f32 = 1080.0;
 
 const BASELINE_DIAGONAL: f32 = @sqrt(BASELINE_WIDTH * BASELINE_WIDTH + BASELINE_HEIGHT * BASELINE_HEIGHT);
 
-/// Snap to a common DPI value if within this fraction of it (5%).
+/// Snap to a common DPI value if within 5% of it, to avoid rendering at odd
+/// intermediate DPIs caused by imprecise monitor EDID data.
 const SNAP_THRESHOLD: f32 = 0.05;
 
 /// Minimum bar height in pixels. Exposed so callers can validate config values
 /// before passing them to scaleBarHeight.
 pub const BAR_MIN_HEIGHT_PX: u16 = 20;
 
-/// Maximum long-words to request for the RESOURCE_MANAGER property.
-/// RESOURCE_MANAGER is a text database — 4096 long-words (16 KB) is ample.
+/// Maximum long-words to request for the RESOURCE_MANAGER property (16 KB).
 const RESOURCE_MANAGER_MAX_LEN: u32 = 4096;
 
 const DpiCache = struct {
@@ -87,9 +91,9 @@ fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
     const value_ptr    = xcb.xcb_get_property_value(prop_reply);
     const resource_str = @as([*]const u8, @ptrCast(value_ptr))[0..@intCast(value_len)];
 
-    // Xresources format: "Xft.dpi:\t96" or "Xft.dpi: 96".
-    // Slice off the known prefix and trim whitespace — avoids the split-on-multiple-
-    // delimiters trap where ":\t" would yield an empty token before the value.
+    // Format: "Xft.dpi:\t96" or "Xft.dpi: 96".
+    // Slice off the prefix and trim whitespace — avoids the split-on-delimiter
+    // trap where ":\t" would yield an empty token before the value.
     const prefix = "Xft.dpi:";
     var lines = std.mem.splitScalar(u8, resource_str, '\n');
     while (lines.next()) |line| {
@@ -140,10 +144,8 @@ fn calculateScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
     return resolution_scale;
 }
 
-/// Detects DPI with caching. Detection priority:
-///   1. `Xft.dpi` from X resources
-///   2. Calculated from display physical dimensions
-///   3. Resolution-based scaling as a last resort
+/// Detect DPI, with caching keyed on the screen's pixel and physical dimensions.
+/// Priority: Xft.dpi from X resources → geometry calculation → resolution-based scaling.
 pub fn detect(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) DpiInfo {
     const sig =
         (@as(u64, screen.width_in_pixels)        << 48) |
@@ -191,13 +193,15 @@ pub inline fn scaleToInt(comptime T: type, base_value: f32, scale_factor: f32) T
     return @intFromFloat(@round(base_value * scale_factor));
 }
 
-/// Scales a border width value.
-/// For absolute pixel values, `scale_factor` is intentionally ignored — absolute
-/// pixel values are screen-independent and should render at their stated size.
+/// Scale a border or gap value.
+/// Percentage values are screen-relative, so scale_factor is intentionally
+/// ignored — applying it would double-scale on HiDPI displays.
+/// Absolute pixel values are screen-independent and used as-is.
 pub inline fn scaleBorderWidth(value: ScalableValue, scale_factor: f32, reference_dimension: u16) u16 {
+    _ = scale_factor;
     if (value.is_percentage) {
         const dim_f: f32 = @floatFromInt(reference_dimension);
-        return @intFromFloat(@max(0.0, @round((value.value / 100.0) * 0.5 * dim_f * scale_factor)));
+        return @intFromFloat(@max(0.0, @round((value.value / 100.0) * 0.5 * dim_f)));
     } else {
         return @intFromFloat(@max(0.0, @round(value.value)));
     }

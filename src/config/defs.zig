@@ -1,35 +1,27 @@
-// Core type definitions
+//! Core WM type definitions.
+//!
+//! This file is intentionally kept small (~100 lines).
+//! - Config types are defined directly in this file (Action, Config, BarConfig, etc.).
+//! - Runtime constants (MOD_*, MIN_*) live in constants.zig.
+//! - Fullscreen types live in fullscreen.zig.
+//! - SpawnQueue lives in window.zig.
 
-const std = @import("std");
-const dpi = @import("dpi");
+const std    = @import("std");
+const dpi    = @import("dpi");
 const parser = @import("parser");
 
 pub const xcb = @cImport({
     @cInclude("xcb/xcb.h");
 });
 
-pub const xkbcommon = @import("xkbcommon");
+/// Type alias for XCB window identifiers.
+/// xcb_window_t is uint32_t in every version of the XCB protocol spec —
+/// a 32-bit opaque handle by definition, never widened.
+/// Using this alias makes window-ID fields self-documenting and gives a
+/// single canonical grep target.
+pub const WindowId = u32;
 
-// Modifier masks
-//
-// Must be u16 due to XCB API requirements; will fail otherwise
-pub const MOD_SHIFT: u16   = xcb.XCB_MOD_MASK_SHIFT;
-pub const MOD_LOCK: u16    = xcb.XCB_MOD_MASK_LOCK;
-pub const MOD_CONTROL: u16 = xcb.XCB_MOD_MASK_CONTROL;
-pub const MOD_ALT: u16     = xcb.XCB_MOD_MASK_1;
-pub const MOD_2: u16       = xcb.XCB_MOD_MASK_2;
-pub const MOD_SUPER: u16   = xcb.XCB_MOD_MASK_4;
-
-pub const MOD_MASK_RELEVANT: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER;
-
-// Window constraints
-pub const MIN_WINDOW_DIM: u16 = 50;
-
-// XKB initialization retry parameters
-pub const XKB_RETRY_DELAY_MS: u64 = 20;
-
-// Tiling constraints
-pub const MIN_MASTER_WIDTH: f32 = 0.05;
+// ── Config types ─────────────────────────────────────────────────────────────
 
 pub const Action = union(enum) {
     exec: []const u8,
@@ -46,14 +38,13 @@ pub const Action = union(enum) {
     toggle_tiling,
     toggle_fullscreen,
     swap_master,
+    swap_master_focus_swap,
     switch_workspace:  u8,
     move_to_workspace: u8,
     move_window:       u8, // exclusive move — clears all tags, sets only target
     tag_toggle:        u8, // pure toggle — flips bit N, never moves
-    tag_additive:      u8, // toggle keeping current workspace always set
     sequence:          []const Action, // ordered list of actions executed left-to-right
     dump_state,
-    emergency_recover,
     minimize_window,
     unminimize_lifo,
     unminimize_fifo,
@@ -76,7 +67,7 @@ pub const Action = union(enum) {
 
 pub const Keybind = struct {
     modifiers: u16, // XCB API requirement
-    keysym:    u32, // X11 keysym (must be u32) //TODO: why?
+    keysym:    u32, // xcb_keysym_t is uint32_t in every version of the X11 protocol spec
     keycode:   ?u8 = null,
     action:    Action,
 };
@@ -159,10 +150,10 @@ pub const TilingConfig = struct {
     master_side:  MasterSide     = .left,
     master_width: parser.ScalableValue = parser.ScalableValue.percentage(50.0),
     master_count: u8             = 1,
-    gap_width:    parser.ScalableValue = parser.ScalableValue.absolute(0.0),
+    gap_width:    parser.ScalableValue = parser.ScalableValue.absolute(10.0),
     border_width: parser.ScalableValue = parser.ScalableValue.absolute(2.0),
-    border_focused:   u32 = 0x5294E2, // RGB color (must be u32) //TODO: why?
-    border_unfocused: u32 = 0x383C4A, // RGB color (must be u32) //TODO: why?
+    border_focused:   u32 = 0x5294E2, // 0xRRGGBB packed into 32 bits (X11 color format)
+    border_unfocused: u32 = 0x383C4A, // 0xRRGGBB packed into 32 bits (X11 color format)
 
     // Per-layout variation preferences
     //
@@ -295,7 +286,7 @@ pub const BarConfig = struct {
     scaled_font_size:  u16                    = 10, // Can exceed 255 on high DPI - u16 is correct //TODO: it isn't clear what this comment refers to
     spacing:           parser.ScalableValue   = parser.ScalableValue.absolute(12.0),
 
-    // RGB colors (must be u32) //TODO: why?
+    // Colors: 0xRRGGBB packed into 32 bits (X11 color format).
     bg:          u32 = 0x222222,
     fg:          u32 = 0xBBBBBB,
     selected_bg: u32 = 0x005577,
@@ -467,6 +458,8 @@ pub const Config = struct {
     }
 };
 
+// ── Core geometric type ───────────────────────────────────────────────────────
+
 /// Geometry snapshot used by both fullscreen and minimize.
 pub const WindowGeometry = struct {
     x:            i16,
@@ -476,59 +469,12 @@ pub const WindowGeometry = struct {
     border_width: u16,
 };
 
-pub const FullscreenInfo = struct {
-    window:         u32, // XCB window ID (must be u32) //TODO: why?
-    saved_geometry: WindowGeometry,
-};
-
-pub const FullscreenState = struct {
-    per_workspace:       std.AutoHashMap(u8, FullscreenInfo),
-    window_to_workspace: std.AutoHashMap(u32, u8),
-
-    pub fn init(allocator: std.mem.Allocator) FullscreenState {
-        var per_ws    = std.AutoHashMap(u8, FullscreenInfo).init(allocator);
-        var win_to_ws = std.AutoHashMap(u32, u8).init(allocator);
-        per_ws.ensureTotalCapacity(4)    catch {};
-        win_to_ws.ensureTotalCapacity(4) catch {};
-        return .{ .per_workspace = per_ws, .window_to_workspace = win_to_ws };
-    }
-
-    pub fn deinit(self: *FullscreenState) void {
-        self.per_workspace.deinit();
-        self.window_to_workspace.deinit();
-    }
-
-    pub inline fn isFullscreen(self: *const FullscreenState, win: u32) bool {
-        return self.window_to_workspace.contains(win);
-    }
-
-    pub inline fn getForWorkspace(self: *const FullscreenState, ws: u8) ?FullscreenInfo {
-        return self.per_workspace.get(ws);
-    }
-
-    pub fn setForWorkspace(self: *FullscreenState, ws: u8, info: FullscreenInfo) !void {
-        try self.per_workspace.ensureUnusedCapacity(1);
-        try self.window_to_workspace.ensureUnusedCapacity(1);
-        self.per_workspace.putAssumeCapacity(ws, info);
-        self.window_to_workspace.putAssumeCapacity(info.window, ws);
-    }
-
-    pub fn removeForWorkspace(self: *FullscreenState, ws: u8) void {
-        if (self.per_workspace.get(ws)) |info|
-            _ = self.window_to_workspace.remove(info.window);
-        _ = self.per_workspace.remove(ws);
-    }
-
-    pub inline fn clear(self: *FullscreenState) void {
-        self.per_workspace.clearRetainingCapacity();
-        self.window_to_workspace.clearRetainingCapacity();
-    }
-};
+// ── Input model types ─────────────────────────────────────────────────────────
 
 pub const DragState = struct {
     active:           bool  = false,
-    window:           u32   = 0, // XCB window ID (must be u32) //TODO: why?
-    mode:             enum  { move, resize } = .move,
+    window:           WindowId = 0,
+    mode:             enum { move, resize } = .move,
     start_x:          i16   = 0,
     start_y:          i16   = 0,
     start_win_x:      i16   = 0,
@@ -544,85 +490,20 @@ pub const FocusSuppressReason = enum {
     tiling_operation, // currently tiling: don't let cursor steal focus
 };
 
-pub const SPAWN_QUEUE_CAP: u8 = 16;
-
-pub const SpawnEntry = struct {
-    workspace: u8,
-    /// _NET_WM_PID of the grandchild; 0 for daemon-mode terminals.
-    pid: u32,
-};
-
-/// Fixed-capacity circular FIFO for pending spawn-workspace assignments.
-pub const SpawnQueue = struct {
-    buf:  [SPAWN_QUEUE_CAP]SpawnEntry = undefined,
-    head: u8 = 0,
-    len:  u8 = 0,
-
-    pub inline fn isEmpty(self: *const SpawnQueue) bool { return self.len == 0; }
-
-    /// Push a spawn entry. Drops the oldest entry when the queue is full.
-    pub fn push(self: *SpawnQueue, workspace: u8, pid: u32) void {
-        if (self.len == SPAWN_QUEUE_CAP) {
-            self.head = (self.head + 1) % SPAWN_QUEUE_CAP;
-            self.len -= 1;
-        }
-        const tail = (self.head + self.len) % SPAWN_QUEUE_CAP;
-        self.buf[tail] = .{ .workspace = workspace, .pid = pid };
-        self.len += 1;
-    }
-
-    /// Remove and return the workspace for the entry matching `win_pid`, or null.
-    /// Returns null immediately for pid=0 (use popOldestDaemon instead).
-    pub fn popByPid(self: *SpawnQueue, win_pid: u32) ?u8 {
-        if (win_pid == 0) return null;
-        return self.popWhere(.by_pid, win_pid);
-    }
-
-    /// Remove and return the workspace of the oldest daemon (pid=0) entry, or null.
-    pub inline fn popOldestDaemon(self: *SpawnQueue) ?u8 { return self.popWhere(.daemon, 0); }
-
-    fn popWhere(self: *SpawnQueue, comptime mode: enum { by_pid, daemon }, target: u32) ?u8 {
-        var i: u8 = 0;
-        while (i < self.len) : (i += 1) {
-            const idx = (self.head + i) % SPAWN_QUEUE_CAP;
-            if (if (mode == .by_pid) self.buf[idx].pid != target else self.buf[idx].pid != 0) continue;
-            const ws = self.buf[idx].workspace;
-            self.removeAt(i);
-            return ws;
-        }
-        return null;
-    }
-
-    inline fn removeAt(self: *SpawnQueue, i: u8) void {
-        var j: u8 = i;
-        while (j + 1 < self.len) : (j += 1) {
-            const cur  = (self.head + j)     % SPAWN_QUEUE_CAP;
-            const next = (self.head + j + 1) % SPAWN_QUEUE_CAP;
-            self.buf[cur] = self.buf[next];
-        }
-        self.len -= 1;
-    }
-};
+// ── WM connection context ─────────────────────────────────────────────────────
+// After the full modular refactor, WM holds only connection plumbing + config.
+// Runtime state (focus, drag, spawn queue, fullscreen, workspaces, tiling,
+// minimize) lives in each module's own g_state.
 
 pub const WM = struct {
-    allocator:      std.mem.Allocator,
-    conn:           *xcb.xcb_connection_t,
-    screen:         *xcb.xcb_screen_t,
-    root:           u32, // XCB window ID - must be u32 (TODO)
-    config:         Config,
-    focused_window: ?u32 = null,
-    fullscreen:     FullscreenState,
-    xkb_state:      ?*xkbcommon.XkbState,
-    dpi_info:       dpi.DpiInfo,
-    drag_state:     DragState = .{},
-    spawn_queue:    SpawnQueue = .{},
-    last_event_time:        u32 = 0,
-    suppress_focus_reason:  FocusSuppressReason = .none,
-    spawn_cursor_x: i16 = 0,
-    spawn_cursor_y: i16 = 0,
+    allocator: std.mem.Allocator,
+    conn:      *xcb.xcb_connection_t,
+    screen:    *xcb.xcb_screen_t,
+    root:      WindowId,
+    config:    Config,
+    dpi_info:  dpi.DpiInfo,
 
     pub fn deinit(self: *WM) void {
-        self.fullscreen.deinit();
         self.config.deinit();
     }
 };

@@ -1,9 +1,15 @@
-//! Minimal TOML parser for configuration files.
+//! Minimal TOML-inspired parser for hana WM configuration files.
+//!
+//! The format extends TOML with WM-specific conveniences: bare keys (treated
+//! as `key = true`), percentage literals (e.g. `50%`), unquoted hex colors
+//! (`#ac3232`), comma-as-decimal separator, and duplicate-key merging into
+//! arrays (used to bind multiple actions to one key).
 
 const std   = @import("std");
 const debug = @import("debug");
 
-/// A value that can be expressed as either an absolute number or a percentage.
+/// A value that can be expressed as either an absolute pixel count or a
+/// percentage of some reference dimension.
 pub const ScalableValue = struct {
     value:        f32,
     is_percentage: bool,
@@ -61,7 +67,6 @@ pub const Section = struct {
 
     pub fn get(self: *const Section, key: []const u8) ?Value { return self.pairs.get(key); }
 
-    // Typed convenience getters — each delegates to the corresponding Value.asX().
     pub fn getInt     (self: *const Section, key: []const u8) ?i64          { return if (self.get(key)) |v| v.asInt()      else null; }
     pub fn getBool    (self: *const Section, key: []const u8) ?bool         { return if (self.get(key)) |v| v.asBool()     else null; }
     pub fn getString  (self: *const Section, key: []const u8) ?[]const u8   { return if (self.get(key)) |v| v.asString()   else null; }
@@ -126,9 +131,6 @@ pub fn parseColor(value: []const u8) !u32 {
     return color;
 }
 
-// Internal parser
-
-/// Frees all keys and values in `pairs`, then deinits the map.
 fn cleanPairs(alloc: std.mem.Allocator, pairs: *std.StringHashMap(Value)) void {
     var iter = pairs.iterator();
     while (iter.next()) |entry| {
@@ -165,8 +167,8 @@ const Parser = struct {
         if (self.pos < self.content.len) { self.pos += 1; self.line += 1; }
     }
 
-    inline fn skipWhitespace(self: *Parser) void              { self.skip(false, false); }
-    inline fn skipWhitespaceAndNewlines(self: *Parser) void   { self.skip(true, true); }
+    inline fn skipWhitespace(self: *Parser) void            { self.skip(false, false); }
+    inline fn skipWhitespaceAndNewlines(self: *Parser) void { self.skip(true, true); }
 
     inline fn peek(self: *const Parser) ?u8 {
         return if (self.pos < self.content.len) self.content[self.pos] else null;
@@ -226,14 +228,12 @@ const Parser = struct {
         }
 
         if (!has_escapes) {
-            // Pre-scan left end_pos at the closing quote (or end-of-input if unterminated).
             if (end_pos >= self.content.len) return ParseError.InvalidValue;
             const result = try allocator.dupe(u8, self.content[start..end_pos]);
             self.pos = end_pos + 1;
             return result;
         }
 
-        // Slow path: process escape sequences.
         var result = try std.ArrayList(u8).initCapacity(allocator, end_pos - start);
         errdefer result.deinit(allocator);
 
@@ -289,7 +289,7 @@ const Parser = struct {
         self.skipWhitespace();
         const c = self.peek() orelse return ParseError.InvalidValue;
 
-        if (c == '[')            return .{ .array  = try self.parseArray(allocator) };
+        if (c == '[')              return .{ .array  = try self.parseArray(allocator) };
         if (c == '"' or c == '\'') return .{ .string = try self.parseString(allocator) };
 
         const start = self.pos;
@@ -309,8 +309,9 @@ const Parser = struct {
             return .{ .scalable = ScalableValue.percentage(f) };
         }
 
-        // Heuristic: check whether the token looks like a hex color before
-        // trying integer parsing, because hex digits overlap with base-10.
+        // Hex digits overlap with base-10, so check for a color-like token before
+        // trying integer parsing; otherwise "ac3232" would fail integer parsing
+        // rather than being recognised as a color.
         const looks_like_color = raw[0] == '#' or
             (raw.len > 2 and raw[0] == '0' and (raw[1] == 'x' or raw[1] == 'X')) or
             std.mem.indexOfAny(u8, raw, "abcdefABCDEF") != null;
@@ -327,9 +328,8 @@ const Parser = struct {
         return .{ .integer = std.fmt.parseInt(i64, raw, 10) catch return ParseError.InvalidValue };
     }
 
-    // Iter 2: removed `allow_bare` parameter — the only call site always passes `true`,
-    // so the `else return ParseError.InvalidSyntax` branch was dead code.
-    // Bare keys (no `=`) now unconditionally produce `{ key, true }`.
+    // Bare keys (no `=`) are treated as `key = true`, which is the only call
+    // site's expectation. Workspace rule entries like `Navigator` use this.
     fn parseKeyValuePair(self: *Parser, allocator: std.mem.Allocator) ParseError!struct { []const u8, Value } {
         const key = try self.parseKey();
         errdefer self.allocator.free(key);
@@ -343,12 +343,11 @@ const Parser = struct {
             };
             return .{ key, value };
         }
-        // Bare key shorthand — treat as `key = true`.
         return .{ key, Value{ .boolean = true } };
     }
 };
 
-/// Parses a TOML configuration string into a `Document`.
+/// Parses a configuration string into a `Document`.
 pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
     var doc = Document.init(allocator);
     errdefer doc.deinit();
@@ -400,8 +399,8 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
 
             if (current_section.pairs.getPtr(kv[0])) |old| {
                 // Duplicate key: merge both values into an array rather than
-                // overwriting. This lets the user write the same keybind twice
-                // (or any key twice) to naturally build a sequence of actions:
+                // overwriting. This lets the user assign multiple actions to
+                // one keybind by repeating the key:
                 //
                 //   Mod+Shift+1 = "move_to_workspace_1"
                 //   Mod+Shift+1 = "tag_toggle_1"
@@ -409,18 +408,17 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
                 // parseKeybindings already handles array values as sequences,
                 // so no further changes are needed there.
                 if (old.* == .array) {
-                    // Already an array from a previous merge — just append.
                     try old.array.append(allocator, kv[1]);
                 } else {
-                    // First duplicate: wrap the original scalar + new value in a
-                    // 2-element array. initCapacity(2) guarantees the two
+                    // First duplicate: wrap the original scalar and new value
+                    // in a 2-element array. initCapacity(2) guarantees both
                     // appendAssumeCapacity calls cannot fail.
                     var arr = try std.ArrayList(Value).initCapacity(allocator, 2);
-                    arr.appendAssumeCapacity(old.*); // move existing value in
-                    arr.appendAssumeCapacity(kv[1]); // move new value in
+                    arr.appendAssumeCapacity(old.*);
+                    arr.appendAssumeCapacity(kv[1]);
                     old.* = .{ .array = arr };
                 }
-                allocator.free(kv[0]); // original key already owned by the map
+                allocator.free(kv[0]);
             } else {
                 try current_section.pairs.put(kv[0], kv[1]);
             }

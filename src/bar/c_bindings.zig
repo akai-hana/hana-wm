@@ -7,12 +7,11 @@ const xcb_connection_t = defs.xcb.xcb_connection_t;
 const xcb_drawable_t   = defs.xcb.xcb_drawable_t;
 const xcb_visualtype_t = defs.xcb.xcb_visualtype_t;
 
-// Cairo
+// ── Cairo ─────────────────────────────────────────────────────────────────────
 
 pub const cairo_surface_t = opaque {};
 pub const cairo_t         = opaque {};
 
-/// Pixel format used when creating image surfaces.
 pub const cairo_format_t = enum(c_int) {
     ARGB32    = 0,
     RGB24     = 1,
@@ -43,9 +42,8 @@ pub extern fn cairo_surface_flush(surface: *cairo_surface_t) void;
 pub extern fn cairo_create(surface: *cairo_surface_t) ?*cairo_t;
 pub extern fn cairo_destroy(cr: *cairo_t) void;
 
-// Iter 1: trimmed cairo_operator_t to only the two values actually used (CLEAR, OVER).
-// The full 29-variant enum listed every compositing mode but none beyond these two
-// appear in drawing.zig. The numeric values are unchanged so the ABI is unaffected.
+// Trimmed to only the two operators used (CLEAR, OVER); the full enum has 29
+// variants. Numeric values are unchanged so the ABI is unaffected.
 pub const cairo_operator_t = enum(c_int) {
     CLEAR = 0,
     OVER  = 2,
@@ -56,7 +54,7 @@ pub extern fn cairo_move_to(cr: *cairo_t, x: f64, y: f64) void;
 pub extern fn cairo_set_operator(cr: *cairo_t, op: cairo_operator_t) void;
 pub extern fn cairo_paint(cr: *cairo_t) void;
 
-// Pango
+// ── Pango ─────────────────────────────────────────────────────────────────────
 
 pub const PangoLayout          = opaque {};
 pub const PangoContext         = opaque {};
@@ -114,11 +112,12 @@ pub extern fn pango_font_metrics_get_ascent(metrics: *PangoFontMetrics) c_int;
 pub extern fn pango_font_metrics_get_descent(metrics: *PangoFontMetrics) c_int;
 pub extern fn pango_font_metrics_unref(metrics: *PangoFontMetrics) void;
 
-// GLib/GObject
+// ── GLib/GObject ──────────────────────────────────────────────────────────────
 
 pub extern fn g_object_unref(object: *anyopaque) void;
 
-// xcb-cursor — wraps libXcursor for XCB callers. Link with: -lxcb-cursor
+// ── xcb-cursor ────────────────────────────────────────────────────────────────
+// Wraps libXcursor for XCB callers. Link with: -lxcb-cursor
 
 pub const xcb_cursor_context_t = opaque {};
 

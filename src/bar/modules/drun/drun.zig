@@ -87,7 +87,7 @@ pub fn needsRedraw() bool { return g.active and g.vim.mode == .insert; }
 
 /// Returns the blink timerfd (or -1 if not active / not supported).
 /// Add this fd to the main poll set.  When it becomes readable, call
-/// blinkTick() and then redraw the bar (e.g. bar.submitDrawAsync(wm)).
+/// blinkTick() and then redraw the bar (e.g. bar.submitDraw(wm)).
 /// The fd is opened in activate() and closed in deactivate().
 pub fn blinkFd() i32 { return g.blink_fd; }
 
@@ -96,7 +96,7 @@ pub fn blinkFd() i32 { return g.blink_fd; }
 ///
 ///   if (drun.blinkFd() >= 0 and poll says fd is readable) {
 ///       drun.blinkTick();
-///       bar.submitDrawAsync(wm);
+///       bar.submitDraw(wm);
 ///   }
 pub fn blinkTick() void {
     if (g.blink_fd >= 0) {
@@ -175,8 +175,9 @@ pub fn draw(
     width:               u16,
     conn:                *xcb.xcb_connection_t,
     focused_window:      ?u32,
+    focused_title:       []const u8,
     current_ws_wins:     []const u32,
-    minimized:           []const u32,
+    minimized_set:       *const std.AutoHashMapUnmanaged(u32, void),
     cached_title:        *std.ArrayList(u8),
     cached_title_window: *?u32,
     title_invalidated:   bool,
@@ -185,7 +186,7 @@ pub fn draw(
     if (!g.active) {
         return title.draw(
             dc, config, height, start_x, width,
-            conn, focused_window, current_ws_wins, minimized,
+            conn, focused_window, focused_title, current_ws_wins, minimized_set,
             cached_title, cached_title_window, title_invalidated, allocator,
         );
     }

@@ -15,11 +15,10 @@ pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start
 
 /// Fetches the root WM_NAME into `status_text`, falling back to DEFAULT_STATUS.
 pub fn update(wm: *defs.WM, status_text: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
-    const text = try utils.fetchPropertyToBuffer(
+    if (try utils.fetchPropertyToBuffer(
         wm.conn, wm.root, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING,
         status_text, allocator,
-    );
-    if (text.len == 0) {
+    ) == null) {
         try status_text.appendSlice(allocator, DEFAULT_STATUS);
     }
 }

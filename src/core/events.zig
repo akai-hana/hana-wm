@@ -1,36 +1,48 @@
 //! X event dispatch, signal handling, config reload, and the main event loop.
 
-const std = @import("std");
+// Zig stdlib
+const std        = @import("std");
+const builtin    = @import("builtin");
+const fullscreen = @import("fullscreen");
 
-const defs      = @import("defs");
-const xcb       = defs.xcb;
-    const WM    = defs.WM;
-const constants = @import("constants");
-const config    = @import("config");
+// core/
 const utils     = @import("utils");
-const debug     = @import("debug");
+const constants = @import("constants");
+
+// config/
+const config  = @import("config");
+const defs    = @import("defs");
+    const WM  = defs.WM;
+    const xcb = defs.xcb;
+
+// debug/
+const debug = @import("debug");
+
+// input/
+const input     = @import("input");
 const xkbcommon = @import("xkbcommon");
 
-const input      = @import("input");
-const window     = @import("window");
-const tiling     = @import("tiling");
-const workspaces = @import("workspaces");
-const bar        = @import("bar");
-const minimize   = @import("minimize");
-const drun       = @import("drun");
+// window/
+const window         = @import("window");
+    const focus      = @import("focus");
+    const minimize   = @import("minimize");
+    const workspaces = @import("workspaces");
 
-const IoUring = std.os.linux.IoUring;
+// tiling/
+const tiling = @import("tiling");
 
-// User-data tags for io_uring CQEs.
-const TAG_XCB    : u64 = 1;
-const TAG_SIGNAL : u64 = 2;
-const TAG_CLOCK  : u64 = 3;
-const TAG_BLINK  : u64 = 4;
+// bar/
+const bar      = @import("bar");
+    const drun = @import("drun");
 
-// Stable storage for the clock timeout timespec.
-// Must outlive the io_uring operation
-// (i.e. remain valid from submission until the CQE arrives).
-var clock_ts: std.os.linux.kernel_timespec = .{ .sec = 0, .nsec = 0 };
+// Indices into the poll fd array.
+const FD_XCB:    usize = 0;
+const FD_SIGNAL: usize = 1;
+const FD_BLINK:  usize = 2;
+
+// Self-pipe for portable signal delivery.
+// Signal handlers write to [1]; the event loop polls [0].
+var signal_pipe: [2]std.posix.fd_t = .{ -1, -1 };
 
 // Dispatch table
 
@@ -57,6 +69,7 @@ const dispatch_table = blk: {
     table[xcb.XCB_MOTION_NOTIFY]     = asHandler(input.handleMotionNotify);
     table[xcb.XCB_ENTER_NOTIFY]      = asHandler(window.handleEnterNotify);
     table[xcb.XCB_LEAVE_NOTIFY]      = asHandler(window.handleLeaveNotify);
+    table[xcb.XCB_FOCUS_IN]          = asHandler(focus.handleFocusIn);
     table[xcb.XCB_MAP_REQUEST]       = asHandler(window.handleMapRequest);
     table[xcb.XCB_CONFIGURE_REQUEST] = asHandler(window.handleConfigureRequest);
     table[xcb.XCB_UNMAP_NOTIFY]      = asHandler(window.handleUnmapNotify);
@@ -75,47 +88,131 @@ pub inline fn dispatch(event_type: u8, event: *anyopaque, wm: *WM) void {
 
 // Module lifecycle
 
-pub fn initModules(wm: *WM) !void {
-    try input.init(wm);
+pub fn initModules(wm: *WM, xkb_state: *xkbcommon.XkbState) !void {
+    try input.init(wm, xkb_state);
+    fullscreen.init(wm);
     workspaces.init(wm);
-    tiling.init(wm);
-    minimize.init(wm);
+    try tiling.init(wm);
+    try minimize.init(wm);
     drun.init(wm.conn);
 }
 
 pub fn deinitModules() void {
+    // minimize state is owned by WM.deinit — no separate deinit here.
     drun.deinit();
-    minimize.deinit();
     tiling.deinit();
     workspaces.deinit();
+    fullscreen.deinit();
     input.deinit();
 }
 
 // Signal handling
 
-/// Creates a signalfd (for SIGHUP / SIGTERM / SIGINT).
-pub fn setupSignalFd() !std.posix.fd_t {
-    var sigset: std.os.linux.sigset_t = std.mem.zeroes(std.os.linux.sigset_t);
-    std.os.linux.sigaddset(&sigset, std.posix.SIG.HUP);
-    std.os.linux.sigaddset(&sigset, std.posix.SIG.TERM);
-    std.os.linux.sigaddset(&sigset, std.posix.SIG.INT);
-    _ = std.os.linux.sigprocmask(std.posix.SIG.BLOCK, &sigset, null);
-    const sfd = std.os.linux.signalfd(-1, &sigset,
-        std.os.linux.SFD.NONBLOCK | std.os.linux.SFD.CLOEXEC);
-    if (sfd < 0) return error.SignalFdFailed;
-    return @intCast(sfd);
+/// Async-signal-safe handler: writes the signal number as a byte to the pipe.
+/// write(2) is async-signal-safe on all POSIX platforms.
+///
+/// The signal number parameter type expected by std.posix.Sigaction's handler,
+/// derived directly from the Sigaction struct so it stays correct regardless
+/// of stdlib changes.
+const SigParam = param: {
+    const handler_type = @FieldType(@FieldType(std.posix.Sigaction, "handler"), "handler");
+    const fn_type = @typeInfo(@typeInfo(handler_type).optional.child).pointer.child;
+    break :param @typeInfo(fn_type).@"fn".params[0].type.?;
+};
+
+fn signalHandler(signo: SigParam) callconv(.c) void {
+    const byte: u8 = @truncate(if (builtin.os.tag == .linux)
+        @intFromEnum(signo)
+    else
+        @as(u32, @bitCast(signo)));
+    _ = std.posix.write(signal_pipe[1], &[_]u8{byte}) catch {};
 }
 
-/// Drains the non-blocking signal fd and dispatches each signal.
-fn handleSignalFd(fd: std.posix.fd_t) void {
+/// Creates a pipe with O_NONBLOCK | O_CLOEXEC set on both ends.
+///
+/// Uses pipe(2) + fcntl(2) rather than pipe2(2) for portability:
+///   - pipe2 requires Linux >= 2.6.27 and is not available on BSD.
+///   - pipe(2) + fcntl(2) is POSIX.1-2001 and works everywhere XCB does.
+///
+/// The TOCTOU window between pipe() and the fcntl() calls is acceptable
+/// here: the pipe is local to this process and not shared before flags are set.
+fn createPipe() ![2]std.posix.fd_t {
+    var fds: [2]std.posix.fd_t = undefined;
+
+    // Call pipe(2). On Linux we use the raw syscall to avoid a libc dependency;
+    // on BSD, libc is always linked so std.c.pipe is fine.
+    if (comptime builtin.os.tag == .linux) {
+        switch (std.posix.errno(std.os.linux.pipe(&fds))) {
+            .SUCCESS => {},
+            .MFILE   => return error.ProcessFdQuotaExceeded,
+            .NFILE   => return error.SystemFdQuotaExceeded,
+            else     => |err| return std.posix.unexpectedErrno(err),
+        }
+    } else {
+        switch (std.posix.errno(std.c.pipe(&fds))) {
+            .SUCCESS => {},
+            .MFILE   => return error.ProcessFdQuotaExceeded,
+            .NFILE   => return error.SystemFdQuotaExceeded,
+            else     => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+    errdefer {
+        std.posix.close(fds[0]);
+        std.posix.close(fds[1]);
+    }
+
+    const o_nonblock: usize = @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true }));
+
+    for (fds) |fd| {
+        _ = try std.posix.fcntl(fd, std.posix.F.SETFD, std.posix.FD_CLOEXEC);
+        _ = try std.posix.fcntl(fd, std.posix.F.SETFL, o_nonblock);
+    }
+
+    return fds;
+}
+
+/// Creates the signal self-pipe and installs handlers for SIGHUP/SIGTERM/SIGINT.
+/// Returns the read end; the caller polls it and closes it on shutdown.
+pub fn setupSignalPipe() !std.posix.fd_t {
+    signal_pipe = try createPipe();
+
+    const sa: std.posix.Sigaction = .{
+        .handler = .{ .handler = signalHandler },
+        .mask    = std.posix.sigemptyset(),
+        .flags   = std.posix.SA.RESTART,
+    };
+    std.posix.sigaction(std.posix.SIG.HUP,  &sa, null);
+    std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
+    std.posix.sigaction(std.posix.SIG.INT,  &sa, null);
+
+    return signal_pipe[0];
+}
+
+/// Closes the write end of the signal pipe. The read end is closed by the caller.
+pub fn deinitSignalPipe() void {
+    std.posix.close(signal_pipe[1]);
+    signal_pipe[1] = -1;
+}
+
+/// Normalises a std.posix.SIG member to u8 at comptime.
+/// On Linux (Zig master) SIG is an enum(u32); on BSD it is plain integer constants.
+inline fn signum(comptime sig: anytype) u8 {
+    return switch (@typeInfo(@TypeOf(sig))) {
+        .@"enum" => @intCast(@intFromEnum(sig)),
+        else     => @intCast(sig),
+    };
+}
+
+/// Drains the non-blocking signal pipe and dispatches each signal.
+fn handleSignalPipe(fd: std.posix.fd_t) void {
+    var byte: [1]u8 = undefined;
     while (true) {
-        var siginfo: std.os.linux.signalfd_siginfo = undefined;
-        const n = std.posix.read(fd, std.mem.asBytes(&siginfo)) catch break;
-        if (n != @sizeOf(std.os.linux.signalfd_siginfo)) break;
-        switch (siginfo.signo) {
-            @intFromEnum(std.posix.SIG.HUP)  => utils.reload(),
-            @intFromEnum(std.posix.SIG.TERM),
-            @intFromEnum(std.posix.SIG.INT)  => utils.quit(),
+        const n = std.posix.read(fd, &byte) catch break;
+        if (n == 0) break;
+        switch (byte[0]) {
+            signum(std.posix.SIG.HUP)  => utils.reload(),
+            signum(std.posix.SIG.TERM),
+            signum(std.posix.SIG.INT)  => utils.quit(),
             else => {},
         }
     }
@@ -175,7 +272,7 @@ fn handleConfigReload(wm: *WM) !void {
         debug.err("Invalid config: master_count must be > 0, keeping old", .{});
         return error.InvalidConfig;
     }
-    config.resolveKeybindings(new_config.keybindings.items, @ptrCast(@alignCast(wm.xkb_state)), wm.allocator);
+    config.resolveKeybindings(new_config.keybindings.items, input.getXkbState(), wm.allocator);
     config.finalizeConfig(&new_config, wm.screen);
     var old_config = wm.config;
     wm.config = new_config;
@@ -200,110 +297,42 @@ fn handleConfigReload(wm: *WM) !void {
     debug.info("Reload complete", .{});
 }
 
-// io_uring helpers
-
-fn getSqe(iou: *IoUring) *std.os.linux.io_uring_sqe {
-    // The ring is initialised with depth 8 and we submit at most 3 ops at once
-    // (XCB poll + signal poll + optional clock timeout), so get_sqe should
-    // almost never fail.  submit_and_wait(0) flushes pending SQEs without
-    // blocking to free ring slots; if it errors we log and retry rather than
-    // silently looping forever.
-    while (true) {
-        if (iou.get_sqe()) |sqe| return sqe else |_| {}
-        _ = iou.submit_and_wait(0) catch |err| {
-            debug.err("io_uring submit_and_wait failed in getSqe: {s}", .{@errorName(err)});
-        };
-    }
-}
-
-inline fn submitPollAdd(iou: *IoUring, fd: std.posix.fd_t, tag: u64) void {
-    var sqe = std.mem.zeroes(std.os.linux.io_uring_sqe);
-    sqe.opcode    = .POLL_ADD;
-    sqe.fd        = fd;
-    sqe.rw_flags  = std.posix.POLL.IN;
-    sqe.user_data = tag;
-    getSqe(iou).* = sqe;
-}
-
-inline fn submitClockTimeout(iou: *IoUring, ms: i32) void {
-    const ns: i64 = @as(i64, ms) * std.time.ns_per_ms;
-    clock_ts = .{
-        .sec  = @intCast(@divFloor(ns, std.time.ns_per_s)),
-        .nsec = @intCast(@mod(ns, std.time.ns_per_s)),
-    };
-    var sqe = std.mem.zeroes(std.os.linux.io_uring_sqe);
-    sqe.opcode    = .TIMEOUT;
-    sqe.addr      = @intFromPtr(&clock_ts);
-    sqe.len       = 1;
-    sqe.user_data = TAG_CLOCK;
-    getSqe(iou).* = sqe;
-}
-
 // Event loop
 
 pub fn run(wm: *WM, signal_fd: std.posix.fd_t) !void {
     const x_fd: std.posix.fd_t = xcb.xcb_get_file_descriptor(wm.conn);
     const bfd = drun.blinkFd();
-    const blink_pending = bfd >= 0;
 
-    var iou = try IoUring.init(8, 0);
-    defer iou.deinit();
-
-    // Submit initial polls.
-    submitPollAdd(&iou, x_fd, TAG_XCB);
-    submitPollAdd(&iou, signal_fd, TAG_SIGNAL);
-    if (blink_pending) submitPollAdd(&iou, bfd, TAG_BLINK);
-    const ms_init = bar.pollTimeoutMs();
-    var clock_pending = ms_init >= 0;
-    if (clock_pending) submitClockTimeout(&iou, ms_init);
-
-    var cqes: [16]std.os.linux.io_uring_cqe = undefined;
+    var fds = [_]std.posix.pollfd{
+        .{ .fd = x_fd,      .events = std.posix.POLL.IN, .revents = 0 },
+        .{ .fd = signal_fd, .events = std.posix.POLL.IN, .revents = 0 },
+        .{ .fd = bfd,       .events = std.posix.POLL.IN, .revents = 0 },
+    };
+    const nfds: usize = if (bfd >= 0) 3 else 2;
 
     while (utils.running.load(.acquire)) {
-        _ = iou.submit_and_wait(1) catch |err| {
+        // bar.pollTimeoutMs() returns -1 when no clock segment is active,
+        // which poll treats as "wait forever" — no timeout needed.
+        const ready = std.posix.poll(fds[0..nfds], bar.pollTimeoutMs()) catch |err| {
             if (err == error.SignalInterrupt) continue;
-            debug.err("io_uring error: {s}", .{@errorName(err)});
+            debug.err("poll error: {s}", .{@errorName(err)});
             break;
         };
 
-        const n = iou.copy_cqes(&cqes, 0) catch |err| blk: {
-            if (err == error.SignalInterrupt) break :blk @as(u32, 0);
-            debug.err("copy_cqes error: {s}", .{@errorName(err)});
-            break :blk @as(u32, 0);
-        };
-
-        var saw_xcb    = false;
-        var saw_signal = false;
-        var saw_clock  = false;
-        var saw_blink  = false;
-        var x_dead     = false;
-
-        for (cqes[0..n]) |cqe| {
-            switch (cqe.user_data) {
-                TAG_XCB => {
-                    if (cqe.res < 0) {
-                        x_dead = true;
-                    } else {
-                        const revents: u32 = @bitCast(cqe.res);
-                        if (revents & (std.posix.POLL.ERR | std.posix.POLL.HUP) != 0)
-                            x_dead = true
-                        else
-                            saw_xcb = true;
-                    }
-                },
-                TAG_SIGNAL => { saw_signal = true; },
-                TAG_CLOCK  => { clock_pending = false; saw_clock = true; },
-                TAG_BLINK  => { saw_blink = true; },
-                else => {},
-            }
+        if (ready == 0) {
+            // Timeout fired — tick the clock segment.
+            bar.checkClockUpdate();
+            continue;
         }
 
-        if (x_dead or xcb.xcb_connection_has_error(wm.conn) != 0) {
+        if ((fds[FD_XCB].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0 or
+            xcb.xcb_connection_has_error(wm.conn) != 0)
+        {
             debug.err("X11 connection error, shutting down", .{});
             break;
         }
 
-        if (saw_xcb) {
+        if ((fds[FD_XCB].revents & std.posix.POLL.IN) != 0) {
             while (xcb.xcb_poll_for_event(wm.conn)) |event| {
                 defer std.c.free(event);
                 dispatch(@as(*u8, @ptrCast(event)).*, event, wm);
@@ -312,31 +341,16 @@ pub fn run(wm: *WM, signal_fd: std.posix.fd_t) !void {
             tiling.retileIfDirty(wm);
             bar.updateIfDirty(wm) catch |err| debug.err("Failed to update bar: {}", .{err});
             _ = xcb.xcb_flush(wm.conn);
-            submitPollAdd(&iou, x_fd, TAG_XCB);
-            // If the clock was inactive (e.g. bar had no clock before reload),
-            // check again after reload may have added one.
-            if (!clock_pending) {
-                const ms = bar.pollTimeoutMs();
-                if (ms >= 0) { submitClockTimeout(&iou, ms); clock_pending = true; }
-            }
         }
 
-        if (saw_signal) {
-            handleSignalFd(signal_fd);
+        if ((fds[FD_SIGNAL].revents & std.posix.POLL.IN) != 0) {
+            handleSignalPipe(signal_fd);
             maybeReload(wm);
-            submitPollAdd(&iou, signal_fd, TAG_SIGNAL);
         }
 
-        if (saw_clock) {
-            bar.checkClockUpdate();
-            const ms = bar.pollTimeoutMs();
-            if (ms >= 0) { submitClockTimeout(&iou, ms); clock_pending = true; }
-        }
-
-        if (saw_blink) {
+        if (nfds > FD_BLINK and (fds[FD_BLINK].revents & std.posix.POLL.IN) != 0) {
             drun.blinkTick();
-            bar.submitDrawAsync(wm);
-            submitPollAdd(&iou, bfd, TAG_BLINK);
+            bar.submitDraw(wm, false);
         }
     }
 }

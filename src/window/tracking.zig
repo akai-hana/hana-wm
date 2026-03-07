@@ -56,7 +56,7 @@ pub fn TrackingType(comptime small_cap: u8) type {
 
         // Shared implementation for add (front=false) and addFront (front=true).
         // Single getOrPut probe on the large path covers both duplicate check and
-        // insertion; set entry is rolled back if the list mutation fails.
+        // insertion; the set entry is rolled back if the list mutation fails.
         fn addImpl(self: *Self, win: u32, comptime front: bool) !void {
             std.debug.assert(win != 0);
             switch (self.storage) {
@@ -135,7 +135,7 @@ pub fn TrackingType(comptime small_cap: u8) type {
             }
         }
 
-        // Returns a slice into Self's own storage, valid for the lifetime of self.
+        /// Returns a slice into Self's own storage, valid for the lifetime of self.
         pub inline fn items(self: *const Self) []const u32 {
             return switch (self.storage) {
                 .small => |s| s.items[0..s.len],
@@ -150,9 +150,7 @@ pub fn TrackingType(comptime small_cap: u8) type {
             };
         }
 
-        pub inline fn isEmpty(self: *const Self) bool {
-            return self.count() == 0;
-        }
+        pub inline fn isEmpty(self: *const Self) bool { return self.count() == 0; }
 
         fn promoteToLarge(self: *Self) !void {
             const s = self.storage.small;
