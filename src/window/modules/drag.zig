@@ -24,6 +24,12 @@ inline fn clampDim(base: u16, delta: i16) u16 {
 // single owner — consistent with the module-g_state pattern used elsewhere.
 var g_drag: defs.DragState = .{};
 
+// Deferred float flag: true when the dragged window was tiled at press time
+// and has not yet been removed from the tiling pool.  The removal is deferred
+// until the first real motion event so that a quick Mod+click that never moves
+// the cursor does not accidentally float the window.
+var g_pending_float: bool = false;
+
 pub fn startDrag(wm: *WM, win: u32, button: u8, x: i16, y: i16) void {
     if (g_drag.active) return;
     if (bar.isBarWindow(win)) return;
@@ -42,19 +48,27 @@ pub fn startDrag(wm: *WM, win: u32, button: u8, x: i16, y: i16) void {
         .start_win_height = geom.height,
     };
     focus.setFocus(wm, win, .user_command);
-    // Wrap removal + retile in a grab to prevent a one-frame gap in the layout.
-    if (tiling.isWindowTiled(win)) {
-        _ = xcb.xcb_grab_server(wm.conn);
-        tiling.removeWindow(win);
-        tiling.retileCurrentWorkspace(wm);
-        _ = xcb.xcb_ungrab_server(wm.conn);
-        _ = xcb.xcb_flush(wm.conn);
-    }
+    // Float conversion is deferred to the first motion event.
+    // Record whether the window needs it so updateDrag can act on first move.
+    g_pending_float = tiling.isWindowTiled(win);
 }
 
 pub fn updateDrag(wm: *WM, x: i16, y: i16) void {
     if (!g_drag.active) return;
     const drag = &g_drag;
+
+    // First real motion: now commit the float conversion.  Doing it here
+    // rather than in startDrag means a Mod+click that never moves the cursor
+    // leaves the window tiled, as if the click never happened.
+    if (g_pending_float) {
+        g_pending_float = false;
+        _ = xcb.xcb_grab_server(wm.conn);
+        tiling.removeWindow(drag.window);
+        tiling.retileCurrentWorkspace(wm);
+        _ = xcb.xcb_ungrab_server(wm.conn);
+        _ = xcb.xcb_flush(wm.conn);
+    }
+
     const dx = x - drag.start_x;
     const dy = y - drag.start_y;
     const rect = switch (drag.mode) {
@@ -77,5 +91,11 @@ pub fn updateDrag(wm: *WM, x: i16, y: i16) void {
     _ = xcb.xcb_flush(wm.conn);
 }
 
-pub inline fn stopDrag() void  { g_drag.active = false; }
+pub fn stopDrag() void {
+    // If the button was released before any motion, g_pending_float is still
+    // set — discard it so the window stays tiled.
+    g_pending_float = false;
+    g_drag.active = false;
+}
+
 pub inline fn isDragging() bool { return g_drag.active; }

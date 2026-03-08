@@ -153,6 +153,7 @@ const State = struct {
     cached_title_x:       u16,
     cached_title_w:       u16,
     cached_ws_wins:       []u32,
+    cached_minimized_set: std.AutoHashMapUnmanaged(u32, void),
     title_layout_valid:   bool,
     cached_right_total:              u16,
     cached_right_total_ws_count:     u32, // invalidation key for cached_right_total
@@ -199,6 +200,7 @@ const State = struct {
             .cached_title_x       = 0,
             .cached_title_w       = 0,
             .cached_ws_wins       = &.{},
+            .cached_minimized_set = .{},
             .title_layout_valid   = false,
             .cached_right_total          = 0,
             .cached_right_total_ws_count = std.math.maxInt(u32),
@@ -218,6 +220,7 @@ const State = struct {
         if (self.colormap != 0) _ = xcb.xcb_free_colormap(self.conn, self.colormap);
         self.status_text.deinit(self.allocator);
         self.cached_title.deinit(self.allocator);
+        self.cached_minimized_set.deinit(self.allocator);
         self.allocator.free(self.cached_ws_wins);
         self.allocator.destroy(self);
     }
@@ -350,8 +353,8 @@ const State = struct {
             self.dc, self.config, self.height,
             self.cached_title_x, self.cached_title_w,
             self.conn, new_focused,
-            self.cached_title.items, // re-use cached title for focus-only redraws
-            self.cached_ws_wins, &std.AutoHashMapUnmanaged(u32, void){},
+            self.cached_title.items,
+            self.cached_ws_wins, &self.cached_minimized_set,
             &self.cached_title, &self.cached_title_window,
             true, self.allocator,
         ) catch |e| { debug.warnOnErr(e, "drawTitleOnly"); return; };
@@ -365,6 +368,12 @@ const State = struct {
 
     fn updateTitleCache(self: *State, snap: *const BarSnapshot, x: u16, w: u16) void {
         dupeIfChanged(self.allocator, &self.cached_ws_wins, snap.current_ws_wins.items);
+        // Mirror the snapshot's minimized set so drawTitleOnly renders correct
+        // segment order and colors without a full redraw.
+        self.cached_minimized_set.clearRetainingCapacity();
+        var it = snap.minimized_set.keyIterator();
+        while (it.next()) |key|
+            self.cached_minimized_set.put(self.allocator, key.*, {}) catch {};
         self.cached_title_x     = x;
         self.cached_title_w     = w;
         self.title_layout_valid = true;

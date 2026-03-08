@@ -539,7 +539,16 @@ pub fn retileIfDirty(wm: *WM) void {
 
 pub fn retileCurrentWorkspace(wm: *WM) void {
     const s = getState();
-    if (!s.enabled) return;
+    if (!s.enabled) {
+        // Tiling is disabled at runtime but windows are still tracked in
+        // s.windows.  The workspace switcher routes them through this function
+        // for restore, so we must bring them back to their last known on-screen
+        // positions via the geometry cache instead of running the layout engine.
+        // restoreWorkspaceGeom is a no-op when the cache is missing or stale,
+        // so there is no risk of clobbering an already-correct state.
+        _ = restoreWorkspaceGeom(wm);
+        return;
+    }
     retile(wm, calculateScreenArea(wm), null);
     s.dirty = false;
 }

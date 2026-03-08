@@ -38,7 +38,6 @@ const bar      = @import("bar");
 // Indices into the poll fd array.
 const FD_XCB:    usize = 0;
 const FD_SIGNAL: usize = 1;
-const FD_BLINK:  usize = 2;
 
 // Self-pipe for portable signal delivery.
 // Signal handlers write to [1]; the event loop polls [0].
@@ -60,7 +59,7 @@ fn handlePropertyNotify(event: *anyopaque, wm: *WM) void {
     window.handlePropertyNotify(e, wm);
 }
 
-/// Comptime O(1) dispatch table indexed by XCB event type (low 7 bits).
+/// O(1) dispatch via a comptime-built table indexed by XCB event type (low 7 bits).
 const dispatch_table = blk: {
     var table = [_]?EventHandler{null} ** constants.Limits.EVENT_DISPATCH_TABLE;
     table[xcb.XCB_KEY_PRESS]         = asHandler(input.handleKeyPress);
@@ -81,9 +80,7 @@ const dispatch_table = blk: {
 
 pub inline fn dispatch(event_type: u8, event: *anyopaque, wm: *WM) void {
     const idx = event_type & 0x7F; // strip XCB synthetic-event bit
-    if (idx < dispatch_table.len) {
-        if (dispatch_table[idx]) |handler| handler(event, wm);
-    }
+    if (dispatch_table[idx]) |handler| handler(event, wm);
 }
 
 // Module lifecycle
@@ -108,60 +105,52 @@ pub fn deinitModules() void {
 
 // Signal handling
 
-/// Async-signal-safe handler: writes the signal number as a byte to the pipe.
-/// write(2) is async-signal-safe on all POSIX platforms.
-///
-/// The signal number parameter type expected by std.posix.Sigaction's handler,
-/// derived directly from the Sigaction struct so it stays correct regardless
-/// of stdlib changes.
-const SigParam = param: {
-    const handler_type = @FieldType(@FieldType(std.posix.Sigaction, "handler"), "handler");
-    const fn_type = @typeInfo(@typeInfo(handler_type).optional.child).pointer.child;
-    break :param @typeInfo(fn_type).@"fn".params[0].type.?;
+/// Derive the correct signal number parameter type directly from what
+/// std.posix.Sigaction's handler field actually expects, so this stays
+/// correct regardless of future stdlib changes.
+const SigNumType = param: {
+    const handler_fn = @FieldType(@FieldType(std.posix.Sigaction, "handler"), "handler");
+    const fn_info = @typeInfo(@typeInfo(handler_fn).optional.child).pointer.child;
+    break :param @typeInfo(fn_info).@"fn".params[0].type.?;
 };
 
-fn signalHandler(signo: SigParam) callconv(.c) void {
-    const byte: u8 = @truncate(if (builtin.os.tag == .linux)
-        @intFromEnum(signo)
-    else
-        @as(u32, @bitCast(signo)));
-    _ = std.posix.write(signal_pipe[1], &[_]u8{byte}) catch {};
+/// Converts any signal value — enum or integer — to its raw u8 number.
+/// Used by both signalHandler (runtime) and handleSignalPipe (comptime prongs).
+inline fn sigToU8(sig: anytype) u8 {
+    return switch (@typeInfo(@TypeOf(sig))) {
+        .@"enum" => @intCast(@intFromEnum(sig)),
+        else     => @intCast(sig),
+    };
+}
+
+/// Async-signal-safe handler: writes the signal number as a byte to the pipe.
+/// write(2) is async-signal-safe on all POSIX platforms.
+fn signalHandler(signo: SigNumType) callconv(.c) void {
+    _ = std.posix.write(signal_pipe[1], &[_]u8{sigToU8(signo)}) catch {};
 }
 
 /// Creates a pipe with O_NONBLOCK | O_CLOEXEC set on both ends.
-///
-/// Uses pipe(2) + fcntl(2) rather than pipe2(2) for portability:
-///   - pipe2 requires Linux >= 2.6.27 and is not available on BSD.
-///   - pipe(2) + fcntl(2) is POSIX.1-2001 and works everywhere XCB does.
-///
-/// The TOCTOU window between pipe() and the fcntl() calls is acceptable
-/// here: the pipe is local to this process and not shared before flags are set.
 fn createPipe() ![2]std.posix.fd_t {
     var fds: [2]std.posix.fd_t = undefined;
 
-    // Call pipe(2). On Linux we use the raw syscall to avoid a libc dependency;
-    // on BSD, libc is always linked so std.c.pipe is fine.
-    if (comptime builtin.os.tag == .linux) {
-        switch (std.posix.errno(std.os.linux.pipe(&fds))) {
-            .SUCCESS => {},
-            .MFILE   => return error.ProcessFdQuotaExceeded,
-            .NFILE   => return error.SystemFdQuotaExceeded,
-            else     => |err| return std.posix.unexpectedErrno(err),
-        }
-    } else {
-        switch (std.posix.errno(std.c.pipe(&fds))) {
-            .SUCCESS => {},
-            .MFILE   => return error.ProcessFdQuotaExceeded,
-            .NFILE   => return error.SystemFdQuotaExceeded,
-            else     => |err| return std.posix.unexpectedErrno(err),
-        }
+    const rc = if (builtin.os.tag == .linux)
+        std.os.linux.pipe(&fds)
+    else
+        std.os.system.pipe(&fds);
+
+    switch (std.posix.errno(rc)) {
+        .SUCCESS => {},
+        .MFILE   => return error.ProcessFdQuotaExceeded,
+        .NFILE   => return error.SystemFdQuotaExceeded,
+        else     => |err| return std.posix.unexpectedErrno(err),
     }
+
     errdefer {
         std.posix.close(fds[0]);
         std.posix.close(fds[1]);
     }
 
-    const o_nonblock: usize = @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true }));
+    const o_nonblock = comptime @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true }));
 
     for (fds) |fd| {
         _ = try std.posix.fcntl(fd, std.posix.F.SETFD, std.posix.FD_CLOEXEC);
@@ -181,6 +170,8 @@ pub fn setupSignalPipe() !std.posix.fd_t {
         .mask    = std.posix.sigemptyset(),
         .flags   = std.posix.SA.RESTART,
     };
+
+    // sigaction returns void in modern Zig Master; no 'try' needed.
     std.posix.sigaction(std.posix.SIG.HUP,  &sa, null);
     std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
     std.posix.sigaction(std.posix.SIG.INT,  &sa, null);
@@ -190,17 +181,10 @@ pub fn setupSignalPipe() !std.posix.fd_t {
 
 /// Closes the write end of the signal pipe. The read end is closed by the caller.
 pub fn deinitSignalPipe() void {
-    std.posix.close(signal_pipe[1]);
-    signal_pipe[1] = -1;
-}
-
-/// Normalises a std.posix.SIG member to u8 at comptime.
-/// On Linux (Zig master) SIG is an enum(u32); on BSD it is plain integer constants.
-inline fn signum(comptime sig: anytype) u8 {
-    return switch (@typeInfo(@TypeOf(sig))) {
-        .@"enum" => @intCast(@intFromEnum(sig)),
-        else     => @intCast(sig),
-    };
+    if (signal_pipe[1] != -1) {
+        std.posix.close(signal_pipe[1]);
+        signal_pipe[1] = -1;
+    }
 }
 
 /// Drains the non-blocking signal pipe and dispatches each signal.
@@ -210,9 +194,9 @@ fn handleSignalPipe(fd: std.posix.fd_t) void {
         const n = std.posix.read(fd, &byte) catch break;
         if (n == 0) break;
         switch (byte[0]) {
-            signum(std.posix.SIG.HUP)  => utils.reload(),
-            signum(std.posix.SIG.TERM),
-            signum(std.posix.SIG.INT)  => utils.quit(),
+            sigToU8(std.posix.SIG.HUP)  => utils.reload(),
+            sigToU8(std.posix.SIG.TERM),
+            sigToU8(std.posix.SIG.INT)  => utils.quit(),
             else => {},
         }
     }
@@ -281,13 +265,10 @@ fn handleConfigReload(wm: *WM) !void {
         wm.config = old_config;
         return err;
     };
-    // rebuildKeybindMap must succeed before we release the old config.
-    // If it fails we can still roll back by restoring old_config; once
-    // old_config.deinit() is called that rollback window is permanently closed.
     input.rebuildKeybindMap(wm) catch |err| {
         debug.err("rebuildKeybindMap failed: {}, reverting", .{err});
         wm.config = old_config;
-        // new_config is still live (errdefer will deinit it on return)
+        grabKeybindings(wm) catch {}; // restore X server state to match old config
         return err;
     };
     old_config.deinit();
@@ -299,35 +280,41 @@ fn handleConfigReload(wm: *WM) !void {
 
 // Event loop
 
+/// Returns the shortest timeout across all subsystems that need periodic wakeups,
+/// or -1 if nothing needs one right now (block indefinitely).
+fn combinedTimeoutMs() i32 {
+    const clock_ms = bar.pollTimeoutMs();
+    const blink_ms = drun.blinkPollTimeoutMs();
+    if (clock_ms < 0) return blink_ms;
+    if (blink_ms < 0) return clock_ms;
+    return @min(clock_ms, blink_ms);
+}
+
 pub fn run(wm: *WM, signal_fd: std.posix.fd_t) !void {
     const x_fd: std.posix.fd_t = xcb.xcb_get_file_descriptor(wm.conn);
-    const bfd = drun.blinkFd();
 
     var fds = [_]std.posix.pollfd{
         .{ .fd = x_fd,      .events = std.posix.POLL.IN, .revents = 0 },
         .{ .fd = signal_fd, .events = std.posix.POLL.IN, .revents = 0 },
-        .{ .fd = bfd,       .events = std.posix.POLL.IN, .revents = 0 },
     };
-    const nfds: usize = if (bfd >= 0) 3 else 2;
 
     while (utils.running.load(.acquire)) {
-        // bar.pollTimeoutMs() returns -1 when no clock segment is active,
-        // which poll treats as "wait forever" — no timeout needed.
-        const ready = std.posix.poll(fds[0..nfds], bar.pollTimeoutMs()) catch |err| {
+        const ready = std.posix.poll(&fds, combinedTimeoutMs()) catch |err| {
             if (err == error.SignalInterrupt) continue;
             debug.err("poll error: {s}", .{@errorName(err)});
             break;
         };
 
         if (ready == 0) {
-            // Timeout fired — tick the clock segment.
             bar.checkClockUpdate();
+            if (drun.blinkPollTimeoutMs() >= 0) {
+                drun.blinkTick();
+                bar.submitDraw(wm, false);
+            }
             continue;
         }
 
-        if ((fds[FD_XCB].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0 or
-            xcb.xcb_connection_has_error(wm.conn) != 0)
-        {
+        if ((fds[FD_XCB].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
             debug.err("X11 connection error, shutting down", .{});
             break;
         }
@@ -337,7 +324,6 @@ pub fn run(wm: *WM, signal_fd: std.posix.fd_t) !void {
                 defer std.c.free(event);
                 dispatch(@as(*u8, @ptrCast(event)).*, event, wm);
             }
-            maybeReload(wm);
             tiling.retileIfDirty(wm);
             bar.updateIfDirty(wm) catch |err| debug.err("Failed to update bar: {}", .{err});
             _ = xcb.xcb_flush(wm.conn);
@@ -346,11 +332,6 @@ pub fn run(wm: *WM, signal_fd: std.posix.fd_t) !void {
         if ((fds[FD_SIGNAL].revents & std.posix.POLL.IN) != 0) {
             handleSignalPipe(signal_fd);
             maybeReload(wm);
-        }
-
-        if (nfds > FD_BLINK and (fds[FD_BLINK].revents & std.posix.POLL.IN) != 0) {
-            drun.blinkTick();
-            bar.submitDraw(wm, false);
         }
     }
 }
