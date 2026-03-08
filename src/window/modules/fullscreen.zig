@@ -268,6 +268,12 @@ pub fn toggleFullscreen(wm: *WM) void {
         if (fs_info.window == win) {
             _ = xcb.xcb_grab_server(wm.conn);
             exitFullscreenCommit(wm, win, current_ws);
+            // Suppress hover-focus theft: retiling moves windows under the
+            // cursor, generating EnterNotify events that would otherwise
+            // steal focus away from the window we just un-fullscreened.
+            // tiling_operation suppression is cleared by the first real
+            // mouse movement in input.handleMotionNotify.
+            focus.setSuppressReason(.tiling_operation);
             _ = xcb.xcb_ungrab_server(wm.conn);
             _ = xcb.xcb_flush(wm.conn);
         } else {

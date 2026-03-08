@@ -335,6 +335,10 @@ fn unmanageWindow(wm: *WM, win: u32) void {
 
     utils.uncacheWindowFocusProps(win);
 
+    // Prune the window from focus history before any focus-recovery logic runs,
+    // so the history never vends a pointer to the window being destroyed.
+    focus.removeFromHistory(win);
+
     // Pre-fire pointer query before grab so the round-trip runs concurrently
     // with in-memory cleanup. Conditional: no round-trip when window wasn't focused.
     const ptr_cookie: ?xcb.xcb_query_pointer_cookie_t =
@@ -379,9 +383,28 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM
 }
 
 // Post-unmanage focus recovery.
+//
+// Priority order:
+//   1. Window directly under the pointer (hover-focus expectation).
+//   2. MRU history scan — the most recently focused window that is still
+//      present, on the current workspace, and not minimized.  This means
+//      closing N windows in a row always returns focus to the last window the
+//      user actually interacted with, regardless of tiling order.
+//   3. Tiling best-available fallback (master or first remaining slave) for
+//      the case where history is empty or all history entries are gone.
+fn focusPrevOrBest(wm: *WM) void {
+    for (focus.historyItems()) |prev| {
+        if (isOnCurrentWorkspace(wm, prev) and !minimize.isMinimized(wm, prev)) {
+            focus.setFocus(wm, prev, .tiling_operation);
+            return;
+        }
+    }
+    minimize.focusBestAvailable(wm);
+}
+
 fn focusWindowUnderPointer(wm: *WM, ptr_cookie: xcb.xcb_query_pointer_cookie_t) void {
     const reply = xcb.xcb_query_pointer_reply(wm.conn, ptr_cookie, null) orelse {
-        minimize.focusBestAvailable(wm);
+        focusPrevOrBest(wm);
         return;
     };
     defer std.c.free(reply);
@@ -390,7 +413,7 @@ fn focusWindowUnderPointer(wm: *WM, ptr_cookie: xcb.xcb_query_pointer_cookie_t) 
         focus.setFocus(wm, child, .mouse_enter);
         return;
     }
-    minimize.focusBestAvailable(wm);
+    focusPrevOrBest(wm);
 }
 
 // Configure request
@@ -479,6 +502,10 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) vo
         event.mode == xcb.XCB_NOTIFY_MODE_UNGRAB) return;
     if (drag.isDragging()) return;
     if (suppressSpawnCrossing(event.root_x, event.root_y)) return;
+    // A tiling operation (e.g. fullscreen exit) just repositioned windows,
+    // potentially sliding one under the cursor.  Suppress focus-follow-mouse
+    // until the user actually moves the cursor; cleared by handleMotionNotify.
+    if (focus.getSuppressReason() == .tiling_operation) return;
 
     const win = if (event.event == wm.root and event.child != 0) event.child else event.event;
     maybeFocusWindow(wm, utils.findManagedWindow(wm.conn, win, workspaces.isManaged));

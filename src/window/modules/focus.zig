@@ -15,21 +15,74 @@ const WM     = defs.WM;
 // only focus.zig should be their primary writer.  All other modules call the
 // typed accessors below rather than reaching into WM.
 
-var g_focused_window:       ?u32                      = null;
-var g_prev_focused_window:  ?u32                      = null;
-var g_suppress_reason:      defs.FocusSuppressReason  = .none;
-var g_last_event_time:      u32                       = 0;
+var g_focused_window:  ?u32                     = null;
+var g_suppress_reason: defs.FocusSuppressReason = .none;
+var g_last_event_time: u32                      = 0;
+
+// ── Focus history ─────────────────────────────────────────────────────────────
+//
+// Full MRU list of previously focused windows.  Index 0 is the most recently
+// focused window before the current one, index 1 the one before that, and so on.
+//
+// Invariants:
+//   • g_focused_window is never present in the history.
+//   • Each window appears at most once.
+//   • Entries are never left pointing at destroyed windows; callers must call
+//     removeFromHistory(win) when a window is unmanaged.
+//
+// The list grows dynamically via the allocator supplied to focus.init and is
+// freed by focus.deinit.  There is no artificial cap — the list will never
+// hold more entries than there are managed windows.
+
+var g_history:   std.ArrayListUnmanaged(u32) = .empty;
+var g_allocator: std.mem.Allocator           = undefined;
+
+// ── Lifecycle ─────────────────────────────────────────────────────────────────
+
+pub fn init(allocator: std.mem.Allocator) void {
+    g_allocator = allocator;
+    g_history   = .empty;
+}
+
+pub fn deinit() void {
+    g_history.deinit(g_allocator);
+    g_history = .empty;
+}
+
+/// Push `win` to the front of the history, deduplicating if already present.
+/// Called internally whenever g_focused_window changes to a new value.
+/// Allocation failures are silently ignored — the history may be shorter than
+/// ideal, but focus still functions correctly.
+fn recordInHistory(win: u32) void {
+    if (win == 0) return;
+    // Remove any existing entry so each window appears exactly once.
+    removeFromHistory(win);
+    // Prepend: insert at index 0, shifting everything else right.
+    g_history.insert(g_allocator, 0, win) catch {};
+}
+
+/// Remove `win` from the history (called when a window is unmanaged).
+/// Safe to call even if `win` is not present.
+pub fn removeFromHistory(win: u32) void {
+    const idx = std.mem.indexOfScalar(u32, g_history.items, win) orelse return;
+    _ = g_history.orderedRemove(idx);
+}
+
+/// Returns a slice of previously focused windows in MRU order.
+/// The slice is valid until the next call to any focus mutator.
+pub inline fn historyItems() []const u32 {
+    return g_history.items;
+}
 
 // ── Public accessors ──────────────────────────────────────────────────────────
 
-pub inline fn getFocused()      ?u32                     { return g_focused_window; }
-pub inline fn getPrevFocused()  ?u32                     { return g_prev_focused_window; }
-pub inline fn getSuppressReason() defs.FocusSuppressReason { return g_suppress_reason; }
-pub inline fn getLastEventTime() u32                     { return g_last_event_time; }
+pub inline fn getFocused()        ?u32                       { return g_focused_window; }
+pub inline fn getSuppressReason() defs.FocusSuppressReason   { return g_suppress_reason; }
+pub inline fn getLastEventTime()  u32                        { return g_last_event_time; }
 
-pub inline fn setFocused(win: ?u32) void                      { g_focused_window  = win; }
+pub inline fn setFocused(win: ?u32) void                         { g_focused_window  = win; }
 pub inline fn setSuppressReason(r: defs.FocusSuppressReason) void { g_suppress_reason = r; }
-pub inline fn setLastEventTime(t: u32) void                   { g_last_event_time = t; }
+pub inline fn setLastEventTime(t: u32) void                      { g_last_event_time = t; }
 
 // ── Focus logic ───────────────────────────────────────────────────────────────
 
@@ -72,7 +125,7 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     }) return;
 
     const old = g_focused_window;
-    if (old != null) g_prev_focused_window = old;
+    if (old) |old_win| recordInHistory(old_win);
     g_focused_window = win;
     g_suppress_reason = suppressionFor(reason);
 
@@ -187,7 +240,7 @@ pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t, wm: *WM) void {
     if (g_focused_window == win) return;
 
     const old = g_focused_window;
-    if (old != null) g_prev_focused_window = old;
+    if (old) |old_win| recordInHistory(old_win);
     g_focused_window = win;
     tiling.updateWindowFocus(wm, old, win);
     bar.scheduleFocusRedraw(win);
@@ -217,10 +270,15 @@ inline fn shouldRaise(reason: Reason) bool {
 }
 
 inline fn suppressionFor(reason: Reason) defs.FocusSuppressReason {
+    // Only window_spawn suppresses enter-notify via setFocus.
+    // tiling_operation must NOT suppress here: callers such as focusBestAvailable
+    // (minimize) and focusPrevOrBest (window kill) set focus programmatically and
+    // should not block subsequent hover-focus events.  The one caller that genuinely
+    // needs enter-notify suppression (fullscreen exit) calls setSuppressReason
+    // directly and is therefore unaffected by this change.
     return switch (reason) {
-        .mouse_click, .mouse_enter, .user_command, .workspace_switch => .none,
-        .tiling_operation => .tiling_operation,
-        .window_spawn     => .window_spawn,
+        .window_spawn => .window_spawn,
+        else          => .none,
     };
 }
 

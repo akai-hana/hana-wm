@@ -40,7 +40,7 @@ extern fn xcb_key_symbols_get_keysym(syms: *xcb_key_symbols_t, code: xcb.xcb_key
 
 const MIN_CURSOR_PX  : u16   = 8;
 const CURSOR_WIDTH   : u16   = 1;    // caret width in pixels (insert mode)
-const CURSOR_BLINK_MS: u64   = 530;  // half-period: on for 530 ms, off for 530 ms
+const CURSOR_BLINK_MS: u64   = 300;  // half-period: on for N ms, off for N ms
 const CURSOR_V_PAD   : u16   = 2;
 const MAX_COMPLETIONS: usize = 4096; // max executables stored
 const MAX_COMP_LEN   : usize = 64;   // max length of a single executable name
@@ -65,8 +65,6 @@ const DrunState = struct {
     ghost_buf: [MAX_COMP_LEN]u8 = undefined,
     ghost_len: usize            = 0,
 
-    // timerfd used to drive cursor blink redraws (-1 = not open).
-    blink_fd:      i32  = -1,
     blink_visible: bool = true,
 
     // ── Command history (newest at index 0) ───────────────────────────────────
@@ -85,25 +83,18 @@ pub fn isActive() bool { return g.active; }
 /// should schedule a periodic redraw so the cursor blink animation runs.
 pub fn needsRedraw() bool { return g.active and g.vim.mode == .insert; }
 
-/// Returns the blink timerfd (or -1 if not active / not supported).
-/// Add this fd to the main poll set.  When it becomes readable, call
-/// blinkTick() and then redraw the bar (e.g. bar.submitDraw(wm)).
-/// The fd is opened in activate() and closed in deactivate().
-pub fn blinkFd() i32 { return g.blink_fd; }
+/// Returns the milliseconds until the next blink toggle, or -1 if the cursor
+/// blink animation is not running.  Pass this (combined with the clock timeout)
+/// to poll() so the event loop wakes up exactly when a redraw is needed.
+pub fn blinkPollTimeoutMs() i32 {
+    if (!g.active or g.vim.mode != .insert) return -1;
+    return CURSOR_BLINK_MS;
+}
 
-/// Toggle cursor visibility.  Call this from the main event loop each time
-/// the timerfd returned by blinkFd() becomes readable, then trigger a redraw:
-///
-///   if (drun.blinkFd() >= 0 and poll says fd is readable) {
-///       drun.blinkTick();
-///       bar.submitDraw(wm);
-///   }
+/// Toggle cursor visibility.  Call from the event loop on every poll timeout
+/// where blinkPollTimeoutMs() >= 0, then trigger a bar redraw.
 pub fn blinkTick() void {
-    if (g.blink_fd >= 0) {
-        var buf: u64 = 0;
-        _ = c.read(g.blink_fd, &buf, @sizeOf(u64));
-        g.blink_visible = !g.blink_visible;
-    }
+    g.blink_visible = !g.blink_visible;
 }
 
 pub fn init(conn: *xcb.xcb_connection_t) void {
@@ -218,19 +209,6 @@ fn activate(wm: *defs.WM) void {
     g.active        = true;
     g.blink_visible = true;
 
-    // Open a timerfd that fires every CURSOR_BLINK_MS so the caret blinks
-    // even when no keystrokes arrive.
-    if (g.blink_fd == -1) {
-        if (std.posix.timerfd_create(.MONOTONIC, .{ .NONBLOCK = true, .CLOEXEC = true })) |fd| {
-            const sec:  u64 = CURSOR_BLINK_MS / 1000;
-            const nsec: u64 = (CURSOR_BLINK_MS % 1000) * 1_000_000;
-            const ts = std.os.linux.timespec{ .sec = @intCast(sec), .nsec = @intCast(nsec) };
-            const spec = std.os.linux.itimerspec{ .it_interval = ts, .it_value = ts };
-            std.posix.timerfd_settime(fd, .{}, &spec, null) catch {};
-            g.blink_fd = fd;
-        } else |_| {}
-    }
-
     const cookie = xcb.xcb_grab_keyboard(
         wm.conn, 0, wm.root, xcb.XCB_CURRENT_TIME,
         xcb.XCB_GRAB_MODE_ASYNC, xcb.XCB_GRAB_MODE_ASYNC,
@@ -244,10 +222,6 @@ fn deactivate(wm: *defs.WM) void {
     g.vim.in_dot_replay    = false;
     g.vim.recording_insert = false;
     vim.resetNormalSub(&g.vim);
-    if (g.blink_fd >= 0) {
-        _ = c.close(g.blink_fd);
-        g.blink_fd = -1;
-    }
     _ = xcb.xcb_ungrab_keyboard(wm.conn, xcb.XCB_CURRENT_TIME);
     _ = xcb.xcb_flush(wm.conn);
 }

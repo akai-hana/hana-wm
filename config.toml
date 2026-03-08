@@ -270,7 +270,7 @@ Mod+Shift+S = "{kill} equibop"
 Mod+D       = "ghostty"
 Mod+Shift+D = "{kill} ghostty"
 
-Mod+Z       = "wine ~/Games/isaac-repentance/isaac-ng.exe"
+Mod+Z       = "cd ~/Games/isaac-repentance; wine isaac-ng.exe"
 Mod+Shift+Z = "pkill isaac-ng"
 
 Mod+X       = "~/Games/t-client/DDNet"
@@ -325,6 +325,7 @@ OpenTabletDriver.UX
 [workspace.rules.5] # gaming
 "osu!"
 DDNet
+isaac-ng
 
 [workspace.rules.6] # editors
 emacs
