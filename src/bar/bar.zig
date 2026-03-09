@@ -38,7 +38,7 @@ const DrawOnlyStub = struct {
 const layout_segment     = if (bar_flags.has_layout)     @import("layout")     else DrawOnlyStub;
 const variations_segment = if (bar_flags.has_variations) @import("variations") else DrawOnlyStub;
 
-const drun = @import("drun");
+const prompt = @import("prompt");
 const fullscreen = @import("fullscreen");
 const title_mod  = @import("title"); // fetches focused window title on the main thread
 
@@ -265,7 +265,7 @@ const State = struct {
                 snap.ws_current, snap.ws_has_windows.items),
             .layout     => try layout_segment.draw(self.dc, self.config, self.height, x),
             .variations => try variations_segment.draw(self.dc, self.config, self.height, x),
-            .title      => try drun.draw(
+            .title      => try prompt.draw(
                 self.dc, self.config, self.height, x, width orelse 100,
                 self.conn, snap.focused_window,
                 snap.focused_title.items,
@@ -347,7 +347,7 @@ const State = struct {
     }
 
     fn drawTitleOnly(self: *State, new_focused: ?u32) void {
-        if (drun.isActive()) return; // drun owns the title area; skip focus-only redraws
+        if (prompt.isActive()) return; // prompt owns the title area; skip focus-only redraws
         if (!self.title_layout_valid or self.cached_title_w == 0) return;
         _ = title_segment.draw(
             self.dc, self.config, self.height,

@@ -7,7 +7,7 @@
 //! Integration is complete: bar.zig dispatches the .title segment to drun.draw()
 //! when isActive() is true and guards drawTitleOnly() accordingly; the main event
 //! loop routes key-press events through handleKeyPress() before normal keybind
-//! dispatch; a "drun_toggle" action calls toggle(wm); and bar.init/deinit call
+//! dispatch; a "prompt_toggle" action calls toggle(wm); and bar.init/deinit call
 //! drun.init/deinit.
 
 const std     = @import("std");

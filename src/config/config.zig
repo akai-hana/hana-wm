@@ -273,8 +273,8 @@ const ACTION_MAP = std.StaticStringMap(defs.Action).initComptime(.{
     .{ "unminimize_all",         .unminimize_all         },
     .{ "cycle_layout_variation", .cycle_layout_variation },
     .{ "cycle_variation",        .cycle_layout_variation },
-    .{ "drun_toggle",            .drun_toggle            },
-    .{ "drun",                   .drun_toggle            },
+    .{ "prompt_toggle",            .prompt_toggle            },
+    .{ "drun",                   .prompt_toggle            },
     .{ "toggle_float",           .toggle_float           },
     .{ "float",                  .toggle_float           },
 });

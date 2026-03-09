@@ -32,8 +32,8 @@ const window         = @import("window");
 const tiling = @import("tiling");
 
 // bar/
-const bar      = @import("bar");
-    const drun = @import("drun");
+const bar        = @import("bar");
+    const prompt = @import("prompt");
 
 // Indices into the poll fd array.
 const FD_XCB:    usize = 0;
@@ -91,12 +91,12 @@ pub fn initModules(wm: *WM, xkb_state: *xkbcommon.XkbState) !void {
     workspaces.init(wm);
     try tiling.init(wm);
     try minimize.init(wm);
-    drun.init(wm.conn);
+    prompt.init(wm.conn);
 }
 
 pub fn deinitModules() void {
     // minimize state is owned by WM.deinit — no separate deinit here.
-    drun.deinit();
+    prompt.deinit();
     tiling.deinit();
     workspaces.deinit();
     fullscreen.deinit();
@@ -284,7 +284,7 @@ fn handleConfigReload(wm: *WM) !void {
 /// or -1 if nothing needs one right now (block indefinitely).
 fn combinedTimeoutMs() i32 {
     const clock_ms = bar.pollTimeoutMs();
-    const blink_ms = drun.blinkPollTimeoutMs();
+    const blink_ms = prompt.blinkPollTimeoutMs();
     if (clock_ms < 0) return blink_ms;
     if (blink_ms < 0) return clock_ms;
     return @min(clock_ms, blink_ms);
@@ -307,8 +307,8 @@ pub fn run(wm: *WM, signal_fd: std.posix.fd_t) !void {
 
         if (ready == 0) {
             bar.checkClockUpdate();
-            if (drun.blinkPollTimeoutMs() >= 0) {
-                drun.blinkTick();
+            if (prompt.blinkPollTimeoutMs() >= 0) {
+                prompt.blinkTick();
                 bar.submitDraw(wm, false);
             }
             continue;

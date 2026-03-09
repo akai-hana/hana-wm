@@ -14,7 +14,7 @@ const bar        = @import("bar");
 const window     = @import("window");
 const debug      = @import("debug");
 const minimize   = @import("minimize");
-const drun       = @import("drun");
+const prompt       = @import("prompt");
 const xcb        = defs.xcb;
 const WM         = defs.WM;
 
@@ -110,18 +110,18 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
     const keysym = xkb_state.?.keycodeToKeysym(event.detail);
     const key    = makeHash(mods, keysym);
 
-    // When drun is active it owns all key input — with one exception: if the
-    // pressed key is bound to close_window, dismiss drun instead of either
+    // When prompt is active it owns all key input — with one exception: if the
+    // pressed key is bound to close_window, dismiss prompt instead of either
     // closing a window or swallowing the keystroke silently.
-    if (drun.isActive()) {
+    if (prompt.isActive()) {
         if (state.map.get(key)) |action| {
             if (action.* == .close_window) {
-                drun.toggle(wm);
+                prompt.toggle(wm);
                 bar.scheduleRedraw();
                 return;
             }
         }
-        if (drun.handleKeyPress(event, wm)) bar.scheduleRedraw();
+        if (prompt.handleKeyPress(event, wm)) bar.scheduleRedraw();
         return;
     }
 
@@ -262,7 +262,7 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
         .swap_master            => { tiling.swapWithMaster(wm);          bar.scheduleRedraw(); },
         .swap_master_focus_swap => { tiling.swapWithMasterFocusSwap(wm); bar.scheduleRedraw(); },
         .cycle_layout_variation => tiling.cycleLayoutVariation(wm),
-        .drun_toggle            => { drun.toggle(wm); bar.scheduleRedraw(); },
+        .prompt_toggle          => { prompt.toggle(wm); bar.scheduleRedraw(); },
         .dump_state             => dumpState(wm),
         .minimize_window        => minimize.minimizeWindow(wm),
         .unminimize_lifo        => minimize.unminimize(wm, .lifo),
