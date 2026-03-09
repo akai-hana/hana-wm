@@ -50,7 +50,7 @@ pub const Action = union(enum) {
     unminimize_fifo,
     unminimize_all,
     cycle_layout_variation,
-    drun_toggle,
+    prompt_toggle,
     toggle_float,
 
     pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
