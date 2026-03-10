@@ -105,6 +105,77 @@ pub const Document = struct {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Document merging
+// ---------------------------------------------------------------------------
+
+/// Deep-copies a Value; string and array contents are newly allocated.
+/// Integer, boolean, color, and scalable values are plain copies.
+fn deepCopyValue(allocator: std.mem.Allocator, val: Value) std.mem.Allocator.Error!Value {
+    return switch (val) {
+        .string => |s| .{ .string = try allocator.dupe(u8, s) },
+        .array  => |arr| blk: {
+            var new_arr = try std.ArrayList(Value).initCapacity(allocator, arr.items.len);
+            errdefer {
+                for (new_arr.items) |*item| item.deinit(allocator);
+                new_arr.deinit(allocator);
+            }
+            for (arr.items) |item| try new_arr.append(allocator, try deepCopyValue(allocator, item));
+            break :blk .{ .array = new_arr };
+        },
+        else => val, // integer / boolean / color / scalable are trivially copyable
+    };
+}
+
+/// Merges the key-value pairs of `src` into `dst`.
+/// Keys present in both are overwritten with `src`'s value (last-file-wins).
+/// `src` is not modified; all new data is freshly allocated.
+fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Section) !void {
+    var iter = src.pairs.iterator();
+    while (iter.next()) |entry| {
+        const src_key = entry.key_ptr.*;
+        const src_val = entry.value_ptr.*;
+        if (dst.pairs.getPtr(src_key)) |old_val| {
+            // Overwrite: free the old value, deep-copy the incoming one.
+            var old = old_val.*;
+            old.deinit(allocator);
+            old_val.* = try deepCopyValue(allocator, src_val);
+        } else {
+            const key_copy = try allocator.dupe(u8, src_key);
+            errdefer allocator.free(key_copy);
+            try dst.pairs.put(key_copy, try deepCopyValue(allocator, src_val));
+        }
+    }
+}
+
+/// Merges `src` into `dst`; `src` takes precedence for any conflicting scalar
+/// keys (last-file-wins), but both documents remain valid after the call.
+///
+/// Intended use: parse each config file into its own Document, then fold them
+/// all into a single Document with successive `mergeDocumentsInto` calls.
+pub fn mergeDocumentsInto(allocator: std.mem.Allocator, dst: *Document, src: *const Document) !void {
+    // Merge root-level keys.
+    try mergeSectionsInto(allocator, &dst.root, &src.root);
+
+    // Merge named sections.
+    var iter = src.sections.iterator();
+    while (iter.next()) |entry| {
+        const name = entry.key_ptr.*;
+        if (dst.sections.getPtr(name)) |dst_sec| {
+            // Section already exists — merge pairs.
+            try mergeSectionsInto(allocator, dst_sec, entry.value_ptr);
+        } else {
+            // New section — deep-copy it wholesale.
+            var new_sec = Section.init(allocator, name);
+            errdefer new_sec.deinit();
+            try mergeSectionsInto(allocator, &new_sec, entry.value_ptr);
+            const name_copy = try allocator.dupe(u8, name);
+            errdefer allocator.free(name_copy);
+            try dst.sections.put(name_copy, new_sec);
+        }
+    }
+}
+
 pub const ParseError = error{
     InvalidSyntax,
     InvalidSection,

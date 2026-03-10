@@ -235,7 +235,7 @@ Mod+Shift+space = "toggle_layout_reverse"  # Cycle layouts backward
 Mod+Alt+space   = "cycle_layout_variation" # Cycle current layout's variation (Super+V)
 Mod+Tab         = "swap_master"            # Swap focused window with master (slave→master or master→slave)
 Mod+Shift+Tab   = "swap_master_focus_swap" # Same swap, but focus transfers to the displaced window
-Mod+grave       = "drun_toggle"
+Mod+grave       = "prompt_toggle"
 Mod+MiddleClick = "toggle_float"           # Toggle clicked window between tiled and floating
 
 # Layouts
@@ -270,7 +270,7 @@ Mod+Shift+S = "{kill} equibop"
 Mod+D       = "ghostty"
 Mod+Shift+D = "{kill} ghostty"
 
-Mod+Z       = "cd ~/Games/isaac-repentance; wine isaac-ng.exe"
+Mod+Z       = "cd ~/Games/isaac-repentance+; wine isaac-ng.exe"
 Mod+Shift+Z = "pkill isaac-ng"
 
 Mod+X       = "~/Games/t-client/DDNet"
@@ -281,6 +281,9 @@ Mod+Shift+C = "{kill} steam"
 
 Mod+V       = "flatpak run com.github.th_ch.youtube_music"
 Mod+Shift+V = "{kill} youtube-music"
+
+Mod+Y       = "thunar"
+Mod+Shift+Y = "{kill} thunar"
 
 # Emergency/Debug
 # Emergency recovery: Disables tiling, clears fullscreen, maps all windows, stops drag
@@ -325,7 +328,7 @@ OpenTabletDriver.UX
 [workspace.rules.5] # gaming
 "osu!"
 DDNet
-isaac-ng
+isaac-ng.exe
 
 [workspace.rules.6] # editors
 emacs

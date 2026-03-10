@@ -60,6 +60,16 @@ const SpawnQueue = struct {
 
     pub inline fn popOldestDaemon(self: *SpawnQueue) ?u8 { return self.popWhere(.daemon, 0); }
 
+    /// Pops the oldest entry regardless of PID.  Used as a last-resort fallback
+    /// when PID matching fails (window set no _NET_WM_PID, or the app re-exec'd /
+    /// forked internally and its window PID differs from the registered grandchild).
+    pub fn popOldest(self: *SpawnQueue) ?u8 {
+        if (self.len == 0) return null;
+        const ws = self.buf[self.head].workspace;
+        self.removeAt(0);
+        return ws;
+    }
+
     fn popWhere(self: *SpawnQueue, comptime mode: enum { by_pid, daemon }, target: u32) ?u8 {
         var i: u8 = 0;
         while (i < self.len) : (i += 1) {
@@ -222,6 +232,32 @@ fn resolveTargetWorkspace(
             if (g_spawn_queue.popOldestDaemon()) |spawn_ws|
                 return resolveWorkspace(spawn_ws, current_ws);
         }
+
+        // Phase 2b — PID-agnostic fallback.
+        //
+        // Reached when the spawn queue was non-empty at MapRequest time but
+        // neither exact-PID nor daemon matching succeeded.  Two failure modes:
+        //
+        //   • win_pid == 0: the window never set _NET_WM_PID (some GTK / legacy
+        //     apps).  popOldestDaemon above only matches pid==0 queue entries;
+        //     if no daemon slot exists the registered entry (with a real PID) was
+        //     silently skipped and we would fall through to current_ws — wrong.
+        //
+        //   • win_pid != 0 but no PID match: the app re-exec'd or forked
+        //     internally (browsers, Electron apps, app-restart patterns), giving
+        //     its window a PID that differs from the registered grandchild.
+        //     popByPid returns null and we again fall through — wrong.
+        //
+        // On fast machines the window appears before the user can switch
+        // workspaces, so current_ws already equals the spawn workspace and the
+        // bug is invisible.  On slow machines the window arrives after a switch
+        // and lands on the wrong workspace.
+        //
+        // Consuming the oldest pending entry is the correct heuristic: the spawn
+        // queue is only populated by explicit user exec actions, so any pending
+        // entry is almost certainly the source of the window that just mapped.
+        if (g_spawn_queue.popOldest()) |spawn_ws|
+            return resolveWorkspace(spawn_ws, current_ws);
     }
 
     return current_ws;

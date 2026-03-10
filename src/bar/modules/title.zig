@@ -42,6 +42,78 @@ const WindowInfo = struct {
 /// Fixed left indent independent of scaledSegmentPadding.
 const TITLE_LEAD_PX: u16 = 4;
 
+// ── Carousel / ticker scroll ──────────────────────────────────────────────
+//
+// The title text is pre-rendered once into a CarouselPixmap (background +
+// glyphs).  Every tick is then two xcb_copy_area blits — no Pango, no Cairo,
+// no font shaping.  The pixmap is only re-rendered when the title changes.
+//
+// Leapfrog wrap: two logical copies sit `cycle_w` apart.  As `offset`
+// advances 0 → cycle_w the first copy exits left while the second enters
+// right.  At cycle_w the state is identical to 0 → seamless loop.
+
+/// Horizontal scroll speed in pixels per millisecond (≈ 90 px/s).
+const CAROUSEL_PX_PER_MS: f64 = 0.400;
+/// Pixel gap between the end of one copy and the start of the next.
+const CAROUSEL_GAP_PX: u16 = 60;
+
+/// Pre-rendered title pixmap + invalidation key.
+const CarouselCache = struct {
+    cp:      drawing.CarouselPixmap,
+    window:  ?u32,
+    cycle_w: u16,  // cached: text_w + CAROUSEL_GAP_PX, never recomputed per tick
+};
+
+var g_carousel:        ?CarouselCache = null;
+var g_carousel_active: bool           = false;
+
+pub fn isCarouselActive() bool { return g_carousel_active; }
+
+/// Free the pre-rendered carousel pixmap. Call on bar deinit or reload.
+pub fn deinitCarousel() void {
+    if (g_carousel) |*cc| { cc.cp.deinit(); g_carousel = null; }
+    g_carousel_active = false;
+}
+
+/// Fast per-tick carousel redraw.  Skips Pango, Cairo surface flush, and the
+/// full-bar blit.  Returns false if no carousel is active (caller must fall
+/// back to a full title draw).
+///
+/// On the hot path this does exactly:
+///   fillRect (background)  — one xcb_poly_fill_rectangle
+///   blitFrame              — at most two xcb_copy_area
+///   flushRect              — one targeted xcb_copy_area, no cairo_surface_flush
+pub fn drawCarouselTick(
+    dc:     *drawing.DrawContext,
+    bg:     u32,
+    height: u16,
+    x:      u16,
+    avail_w: u16,
+) bool {
+    const cc = g_carousel orelse return false;
+    // Fill the segment background so the gap between copies shows the right colour.
+    dc.fillRect(x, 0, avail_w, height, bg);
+    const offset = carouselOffset(cc.cycle_w);
+    cc.cp.blitFrame(dc.drawable, dc.gc, x, avail_w, offset, cc.cycle_w);
+    dc.flushRect(x, avail_w);
+    return true;
+}
+
+/// Current scroll offset in [0, cycle_w).  Derived purely from wall-clock
+/// time — no mutable position state, no accumulated drift.
+fn carouselOffset(cycle_w: u16) u16 {
+    const cycle_ms: i64 = @intFromFloat(
+        @ceil(@as(f64, @floatFromInt(cycle_w)) / CAROUSEL_PX_PER_MS),
+    );
+    const ts = std.posix.clock_gettime(.MONOTONIC) catch return 0;
+    const now_ms: i64 = ts.sec * 1000 + @divTrunc(ts.nsec, 1_000_000);
+    const phase   = @mod(now_ms, cycle_ms);
+    const px: f64 = @as(f64, @floatFromInt(phase)) * CAROUSEL_PX_PER_MS;
+    return @intCast(@min(@as(u64, @intFromFloat(px)), @as(u64, cycle_w - 1)));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// Returns true when `win` appears in the minimized snapshot slice.
 /// O(1) minimized membership check using the pre-built set from BarSnapshot.
 inline fn isMinimizedInSnap(minimized_set: *const std.AutoHashMapUnmanaged(u32, void), win: u32) bool {
@@ -103,8 +175,9 @@ pub fn draw(
             const title = getWindowTitle(conn, single_win, allocator) catch null;
             defer if (title) |t| allocator.free(t);
             if (title) |t| {
-                try dc.drawTextEllipsis(start_x + scaled_padding + TITLE_LEAD_PX, baseline_y,
-                    t, width -| scaled_padding * 2 -| TITLE_LEAD_PX, config.fg);
+                try drawTitleText(dc, start_x + scaled_padding + TITLE_LEAD_PX, baseline_y,
+                    width -| scaled_padding * 2 -| TITLE_LEAD_PX, height,
+                    t, accent, config.fg, single_win, title_invalidated);
             }
         } else {
             // focused_title was pre-fetched on the main thread — zero X11 I/O here.
@@ -114,9 +187,10 @@ pub fn draw(
                     cached_title.appendSlice(allocator, focused_title) catch {};
                     cached_title_window.* = focused_window;
                 }
-                try dc.drawTextEllipsis(start_x + scaled_padding + TITLE_LEAD_PX, baseline_y,
-                    focused_title, width -| scaled_padding * 2 -| TITLE_LEAD_PX,
-                    if (is_focused) config.selected_fg else config.fg);
+                const fg = if (is_focused) config.selected_fg else config.fg;
+                try drawTitleText(dc, start_x + scaled_padding + TITLE_LEAD_PX, baseline_y,
+                    width -| scaled_padding * 2 -| TITLE_LEAD_PX, height,
+                    focused_title, accent, fg, focused_window, title_invalidated);
             }
         }
     } else {
@@ -125,6 +199,56 @@ pub fn draw(
     }
 
     return start_x + width;
+}
+
+/// Render a window title into `avail_w` pixels starting at `x`.
+///
+/// Fits: drawn directly via Pango/Cairo as normal.
+/// Overflows: uses a pre-rendered CarouselPixmap blitted via xcb_copy_area.
+/// The pixmap is rebuilt only when `window` or `title_invalidated` changes.
+fn drawTitleText(
+    dc:                *drawing.DrawContext,
+    x:                 u16,
+    y:                 u16,
+    avail_w:           u16,
+    bar_h:             u16,
+    text:              []const u8,
+    bg:                u32,
+    fg:                u32,
+    window:            ?u32,
+    title_invalidated: bool,
+) !void {
+    const text_w = dc.textWidth(text);
+
+    if (text_w <= avail_w) {
+        // Text fits — no carousel needed.  Free any stale pixmap.
+        if (g_carousel != null) deinitCarousel();
+        g_carousel_active = false;
+        try dc.drawText(x, y, text, fg);
+        return;
+    }
+
+    g_carousel_active = true;
+
+    // Rebuild the pixmap if the window changed or the title is stale.
+    const stale = g_carousel == null
+        or g_carousel.?.window != window
+        or title_invalidated;
+
+    if (stale) {
+        if (g_carousel) |*cc| { cc.cp.deinit(); g_carousel = null; }
+
+        var cp = try drawing.CarouselPixmap.init(dc, text_w);
+        errdefer cp.deinit();
+        try cp.render(dc, text, bg, fg, y);
+        const cycle_w: u16 = text_w + CAROUSEL_GAP_PX;
+        g_carousel = .{ .cp = cp, .window = window, .cycle_w = cycle_w };
+    }
+
+    const cc = g_carousel.?;
+    const offset = carouselOffset(cc.cycle_w);
+    cc.cp.blitFrame(dc.drawable, dc.gc, x, avail_w, offset, cc.cycle_w);
+    _ = bar_h;
 }
 
 fn drawSegmentedTitles(
