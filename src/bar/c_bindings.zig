@@ -54,6 +54,12 @@ pub extern fn cairo_move_to(cr: *cairo_t, x: f64, y: f64) void;
 pub extern fn cairo_set_operator(cr: *cairo_t, op: cairo_operator_t) void;
 pub extern fn cairo_paint(cr: *cairo_t) void;
 
+// Clip / state save-restore — used by the carousel text scroller.
+pub extern fn cairo_save(cr: *cairo_t) void;
+pub extern fn cairo_restore(cr: *cairo_t) void;
+pub extern fn cairo_rectangle(cr: *cairo_t, x: f64, y: f64, width: f64, height: f64) void;
+pub extern fn cairo_clip(cr: *cairo_t) void;
+
 // ── Pango ─────────────────────────────────────────────────────────────────────
 
 pub const PangoLayout          = opaque {};

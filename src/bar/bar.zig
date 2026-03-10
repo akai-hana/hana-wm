@@ -154,6 +154,9 @@ const State = struct {
     cached_title_w:       u16,
     cached_ws_wins:       []u32,
     cached_minimized_set: std.AutoHashMapUnmanaged(u32, void),
+    /// Focused window ID cached from the last full draw; used for carousel
+    /// partial redraws that need the current focus without a new snapshot.
+    cached_focused_window: ?u32,
     title_layout_valid:   bool,
     cached_right_total:              u16,
     cached_right_total_ws_count:     u32, // invalidation key for cached_right_total
@@ -201,6 +204,7 @@ const State = struct {
             .cached_title_w       = 0,
             .cached_ws_wins       = &.{},
             .cached_minimized_set = .{},
+            .cached_focused_window = null,
             .title_layout_valid   = false,
             .cached_right_total          = 0,
             .cached_right_total_ws_count = std.math.maxInt(u32),
@@ -347,8 +351,17 @@ const State = struct {
     }
 
     fn drawTitleOnly(self: *State, new_focused: ?u32) void {
-        if (prompt.isActive()) return; // prompt owns the title area; skip focus-only redraws
+        if (prompt.isActive()) return;
         if (!self.title_layout_valid or self.cached_title_w == 0) return;
+
+        // Fast path: if the carousel is active, skip the full title.draw() —
+        // no Pango, no cairo_surface_flush, no full-bar blit.
+        if (title_mod.isCarouselActive()) {
+            const accent = self.config.getTitleAccent();
+            if (title_mod.drawCarouselTick(self.dc, accent, self.height,
+                    self.cached_title_x, self.cached_title_w)) return;
+        }
+
         _ = title_segment.draw(
             self.dc, self.config, self.height,
             self.cached_title_x, self.cached_title_w,
@@ -356,7 +369,7 @@ const State = struct {
             self.cached_title.items,
             self.cached_ws_wins, &self.cached_minimized_set,
             &self.cached_title, &self.cached_title_window,
-            true, self.allocator,
+            false, self.allocator,
         ) catch |e| { debug.warnOnErr(e, "drawTitleOnly"); return; };
         self.dc.flush();
     }
@@ -374,6 +387,7 @@ const State = struct {
         var it = snap.minimized_set.keyIterator();
         while (it.next()) |key|
             self.cached_minimized_set.put(self.allocator, key.*, {}) catch {};
+        self.cached_focused_window = snap.focused_window;
         self.cached_title_x     = x;
         self.cached_title_w     = w;
         self.title_layout_valid = true;
@@ -382,18 +396,40 @@ const State = struct {
 
 // ── Bar thread ────────────────────────────────────────────────────────────
 
+/// Interval at which the bar thread self-wakes to advance the carousel, in ns.
+/// Matches 165 Hz (1_000_000_000 / 165 ≈ 6_060_606 ns).
+const CAROUSEL_WAKE_NS: u64 = 6_060_606;
+
 fn barThreadFn(s: *State) void {
+    // Absolute deadline for the next carousel frame.
+    // Tracked in monotonic nanoseconds so each sleep targets the next fixed
+    // point in time — late wakes don't compound into accumulated drift.
+    var next_carousel_ns: u64 = 0;
+
     while (true) {
         g_channel.mutex.lock();
+
         while (!g_channel.quit and !g_channel.snap_ready and
                !g_channel.clock_dirty and !g_channel.focus_dirty)
         {
-            g_channel.work_cond.wait(&g_channel.mutex);
+            if (title_mod.isCarouselActive()) {
+                // Compute remaining sleep to the next absolute deadline.
+                const now_ns = monoNowNs();
+                if (now_ns >= next_carousel_ns) {
+                    // Deadline already passed (first frame or we slept long) — fire now.
+                    break;
+                }
+                const remaining = next_carousel_ns - now_ns;
+                g_channel.work_cond.timedWait(&g_channel.mutex, remaining) catch {};
+                break;
+            } else {
+                next_carousel_ns = 0; // reset so first active frame fires immediately
+                g_channel.work_cond.wait(&g_channel.mutex);
+            }
         }
         if (g_channel.quit) { g_channel.mutex.unlock(); return; }
 
         const snap_ready    = g_channel.snap_ready;
-        // read_idx is 1 - write_idx: the slot the main thread just filled.
         const read_idx: u1  = 1 - g_channel.write_idx;
         const do_clock      = g_channel.clock_dirty and !snap_ready;
         const do_focus      = g_channel.focus_dirty and !snap_ready;
@@ -411,15 +447,23 @@ fn barThreadFn(s: *State) void {
             g_channel.done_cond.broadcast();
             g_channel.mutex.unlock();
         } else {
-            // Both do_focus and do_clock can be true simultaneously (e.g. a
-            // focus change arrives in the same wakeup as a clock tick). Handle
-            // both so neither is silently dropped. drawTitleOnly is ordered
-            // first because it is the more visually prominent update; the clock
-            // repaint costs essentially nothing on top.
             if (do_focus) s.drawTitleOnly(focus_new_win);
+            if (!do_focus and title_mod.isCarouselActive()) {
+                s.drawTitleOnly(s.cached_focused_window);
+                // Advance deadline by exactly one frame interval so cadence is
+                // steady regardless of how long the draw + OS scheduling took.
+                if (next_carousel_ns == 0) next_carousel_ns = monoNowNs();
+                next_carousel_ns +%= CAROUSEL_WAKE_NS;
+            }
             if (do_clock) s.drawClockOnly();
         }
     }
+}
+
+/// Monotonic clock in nanoseconds. Used for absolute-deadline carousel sleep.
+inline fn monoNowNs() u64 {
+    const ts = std.posix.clock_gettime(.MONOTONIC) catch return 0;
+    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 
 fn startBarThread(s: *State) void {
@@ -720,6 +764,7 @@ pub fn init(wm: *defs.WM) !void {
 pub fn deinit() void {
     stopBarThread();
     if (state) |s| {
+        title_mod.deinitCarousel();
         // Free the buffers grown inside the double-buffer channel slots.
         for (&g_channel.slots) |*slot| slot.deinit(s.allocator);
         _ = xcb.xcb_destroy_window(s.conn, s.window);

@@ -45,7 +45,7 @@ const CURSOR_V_PAD   : u16   = 2;
 const MAX_COMPLETIONS: usize = 4096; // max executables stored
 const MAX_COMP_LEN   : usize = 64;   // max length of a single executable name
 const MAX_HIST       : usize = 512;  // history entries kept in memory
-const MAX_HIST_LINE  : usize = vim.MAX_INPUT; // max chars per history entry
+const MAX_HIST_LINE  : usize = vim.DEFAULT_MAX_INPUT; // max chars per history entry
 
 // ── Module state ──────────────────────────────────────────────────────────────
 
@@ -53,22 +53,24 @@ const DrunState = struct {
     active:   bool = false,
     vim:      vim.VimState = .{},
 
+    allocator: std.mem.Allocator = undefined,
+
     key_syms:        ?*xcb_key_symbols_t = null,
     cached_prompt_w: ?u16                = null,
     cached_mode_w:   [4]?u16             = .{ null, null, null, null },
 
     // ── PATH completion ───────────────────────────────────────────────────────
-    comp_names: [(MAX_COMP_LEN + 1) * MAX_COMPLETIONS]u8 = undefined,
+    comp_names: []u8  = &.{},
     comp_count: usize = 0,
 
     // Ghost text (the completion suffix shown dimmed after the cursor).
-    ghost_buf: [MAX_COMP_LEN]u8 = undefined,
-    ghost_len: usize            = 0,
+    ghost_buf: []u8  = &.{},
+    ghost_len: usize = 0,
 
     blink_visible: bool = true,
 
     // ── Command history (newest at index 0) ───────────────────────────────────
-    hist_entries: [(MAX_HIST_LINE + 1) * MAX_HIST]u8 = undefined,
+    hist_entries: []u8  = &.{},
     hist_count:   usize = 0,
     hist_loaded:  bool  = false,
 };
@@ -97,8 +99,13 @@ pub fn blinkTick() void {
     g.blink_visible = !g.blink_visible;
 }
 
-pub fn init(conn: *xcb.xcb_connection_t) void {
-    if (g.key_syms != null) return;
+pub fn init(allocator: std.mem.Allocator, conn: *xcb.xcb_connection_t) !void {
+    if (g.vim.buf.len != 0) return; // already initialised
+    g.allocator   = allocator;
+    g.vim         = try vim.VimState.init(allocator, vim.DEFAULT_MAX_INPUT, vim.DEFAULT_UNDO_MAX);
+    g.comp_names  = try allocator.alloc(u8, (MAX_COMP_LEN + 1) * MAX_COMPLETIONS);
+    g.ghost_buf   = try allocator.alloc(u8, MAX_COMP_LEN);
+    g.hist_entries= try allocator.alloc(u8, (MAX_HIST_LINE + 1) * MAX_HIST);
     g.key_syms = xcb_key_symbols_alloc(conn);
     if (g.key_syms == null)
         debug.warn("drun: xcb_key_symbols_alloc failed — key input will not work", .{});
@@ -109,6 +116,11 @@ pub fn deinit() void {
         xcb_key_symbols_free(ks);
         g.key_syms = null;
     }
+    if (g.vim.buf.len != 0) g.vim.deinit();
+    if (g.hist_entries.len != 0) g.allocator.free(g.hist_entries);
+    if (g.ghost_buf.len   != 0) g.allocator.free(g.ghost_buf);
+    if (g.comp_names.len  != 0) g.allocator.free(g.comp_names);
+    g = .{};
 }
 
 pub fn toggle(wm: *defs.WM) void {
@@ -135,7 +147,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *defs.WM) boo
     // ── Tab: accept ghost completion ──────────────────────────────────────────
     if (sym == vim.XK_Tab and g.vim.mode == .insert) {
         if (g.ghost_len > 0 and g.vim.cursor == g.vim.len) {
-            const n = @min(g.ghost_len, vim.MAX_INPUT - 1 - g.vim.len);
+            const n = @min(g.ghost_len, g.vim.max_input - 1 - g.vim.len);
             if (n > 0) {
                 vim.insertSlice(&g.vim, g.ghost_buf[0..n]);
                 g.ghost_len = 0;
@@ -200,8 +212,35 @@ fn handleAction(action: vim.Action, wm: *defs.WM) void {
 
 // ── Activate / deactivate ─────────────────────────────────────────────────────
 
+/// Reset all VimState editing fields to their defaults without touching the
+/// heap-allocated buffers (buf, yank_buf, undo/redo stacks, etc.).
+fn resetVimState(vs: *vim.VimState) void {
+    const allocator       = vs.allocator;
+    const max_input       = vs.max_input;
+    const undo_max        = vs.undo_max;
+    const buf             = vs.buf;
+    const yank_buf        = vs.yank_buf;
+    const replace_orig_buf= vs.replace_orig_buf;
+    const insert_rec_buf  = vs.insert_rec_buf;
+    const dot_insert_buf  = vs.dot_insert_buf;
+    const undo_stack      = vs.undo_stack;
+    const redo_stack      = vs.redo_stack;
+    vs.* = .{
+        .allocator          = allocator,
+        .max_input          = max_input,
+        .undo_max           = undo_max,
+        .buf                = buf,
+        .yank_buf           = yank_buf,
+        .replace_orig_buf   = replace_orig_buf,
+        .insert_rec_buf     = insert_rec_buf,
+        .dot_insert_buf     = dot_insert_buf,
+        .undo_stack         = undo_stack,
+        .redo_stack         = redo_stack,
+    };
+}
+
 fn activate(wm: *defs.WM) void {
-    g.vim              = .{};  // reset all vim state to defaults
+    resetVimState(&g.vim);  // reset all editing state, preserve heap allocations
     g.ghost_len        = 0;
     // Load completions and history on first activation.
     if (g.comp_count == 0) loadCompletions();
@@ -522,8 +561,8 @@ fn spawnCommand(cmd: []const u8) void {
     histPrepend(cmd);
     histAppendToDrunFile(cmd);
 
-    // cmd.len <= vim.MAX_INPUT - 1 (enforced by insertChar), so buf always has room.
-    var buf: [vim.MAX_INPUT]u8 = undefined;
+    // cmd.len <= vim.DEFAULT_MAX_INPUT - 1 (enforced by insertChar), so buf always has room.
+    var buf: [vim.DEFAULT_MAX_INPUT]u8 = undefined;
     @memcpy(buf[0..cmd.len], cmd);
     buf[cmd.len] = 0;
     const cmd_z: [*:0]const u8 = buf[0..cmd.len :0];

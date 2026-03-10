@@ -79,7 +79,201 @@ fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *defs.Config) !void {
 
 // Config loading
 
-/// Loads config from XDG path, CWD, or the embedded fallback — whichever succeeds first.
+// Config directory / multi-file loading
+
+/// Maximum include nesting depth — guards against circular includes.
+const MAX_INCLUDE_DEPTH = 8;
+
+/// Maximum bytes accepted from a single .toml file (1 MiB).
+const MAX_FILE_BYTES = 1024 * 1024;
+
+/// Reads the file at `path` into a freshly allocated slice owned by the caller.
+/// Returns `error.FileTooLarge` when the file exceeds `MAX_FILE_BYTES`.
+fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const io   = std.Options.debug_io;
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| {
+        if (err == error.FileNotFound) debug.info("Not found: {s}", .{path});
+        return err;
+    };
+    defer file.close(io);
+
+    const buf = try allocator.alloc(u8, MAX_FILE_BYTES + 1);
+    errdefer allocator.free(buf);
+    const n = try file.readPositionalAll(io, buf, 0);
+    if (n > MAX_FILE_BYTES) { allocator.free(buf); return error.FileTooLarge; }
+
+    // Shrink to exact size so callers can rely on buf.len == content length.
+    return allocator.realloc(buf, n) catch buf[0..n];
+}
+
+/// Scans `content` line-by-line and replaces any standalone include directive
+///
+///     "sub/file.toml"   or   'sub/file.toml'
+///
+/// with the content of that file (resolved relative to `config_dir`).
+/// Include paths must point to a file inside a subdirectory of `config_dir`
+/// (they must contain at least one '/').  Direct files inside `config_dir`
+/// itself are loaded automatically and do not need explicit includes.
+/// Recursion is limited to `MAX_INCLUDE_DEPTH` levels.
+fn resolveIncludes(
+    allocator:  std.mem.Allocator,
+    content:    []const u8,
+    config_dir: []const u8,
+    depth:      u8,
+) ![]u8 {
+    if (depth > MAX_INCLUDE_DEPTH) {
+        debug.warn("Include depth exceeded {}, stopping recursion", .{MAX_INCLUDE_DEPTH});
+        return allocator.dupe(u8, content);
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |raw_line| {
+        // Strip inline comment and surrounding whitespace for the pattern check,
+        // but preserve the original line otherwise.
+        const trimmed = blk: {
+            var s = std.mem.trim(u8, raw_line, " \t\r");
+            if (std.mem.indexOfScalar(u8, s, '#')) |ci| s = std.mem.trimEnd(u8, s[0..ci], " \t");
+            break :blk s;
+        };
+
+        // Match: ("path/to/file.toml") or ('path/to/file.toml')
+        const is_include = trimmed.len >= 4 and
+            (trimmed[0] == '"' or trimmed[0] == '\'') and
+            trimmed[trimmed.len - 1] == trimmed[0] and
+            (std.mem.endsWith(u8, trimmed, ".toml\"") or
+             std.mem.endsWith(u8, trimmed, ".toml'"));
+
+        // Re-derive the path string (content between the quotes).
+        const include_path: ?[]const u8 = if (is_include) blk: {
+            const inner = trimmed[1 .. trimmed.len - 1];
+            // Must reference a subdirectory (contain '/') to be an include;
+            // bare "file.toml" without a directory component is not valid.
+            break :blk if (std.mem.indexOfScalar(u8, inner, '/') != null and
+                           std.mem.endsWith(u8, inner, ".toml"))
+                inner
+            else
+                null;
+        } else null;
+
+        if (include_path) |rel| {
+            const abs = try std.fs.path.join(allocator, &.{ config_dir, rel });
+            defer allocator.free(abs);
+
+            const raw = readFileAlloc(allocator, abs) catch |err| {
+                debug.warn("Could not read include '{s}': {}", .{ abs, err });
+                try out.appendSlice(allocator, raw_line);
+                try out.append(allocator, '\n');
+                continue;
+            };
+            defer allocator.free(raw);
+
+            // Recursively resolve includes inside the included file.
+            const sub_dir = std.fs.path.dirname(abs) orelse config_dir;
+            const resolved = try resolveIncludes(allocator, raw, sub_dir, depth + 1);
+            defer allocator.free(resolved);
+
+            debug.info("Included: {s}", .{abs});
+            try out.appendSlice(allocator, resolved);
+            try out.append(allocator, '\n');
+        } else {
+            try out.appendSlice(allocator, raw_line);
+            try out.append(allocator, '\n');
+        }
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+/// Loads and merges all `*.toml` files found directly inside `dir_path`
+/// (subdirectories are intentionally ignored — they are only reachable via
+/// explicit include directives inside a top-level file).
+///
+/// Files are sorted alphabetically before merging so the result is
+/// deterministic.  Later files override earlier ones for conflicting scalar
+/// keys; array values (e.g. keybindings) accumulate across all files.
+pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !defs.Config {
+    // Collect .toml filenames (not full paths — sort first, then resolve).
+    var names: std.ArrayList([]u8) = .empty;
+    defer {
+        for (names.items) |n| allocator.free(n);
+        names.deinit(allocator);
+    }
+
+    {
+        const io = std.Options.debug_io;
+        var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch |err| {
+            if (err == error.FileNotFound or err == error.NotDir)
+                debug.info("Config dir not found: {s}", .{dir_path});
+            return err;
+        };
+        defer dir.close(io);
+
+        var it = dir.iterate();
+        while (try it.next(io)) |entry| {
+            // Skip subdirectories and non-.toml files.
+            if (entry.kind == .directory) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".toml")) continue;
+            try names.append(allocator, try allocator.dupe(u8, entry.name));
+        }
+    }
+
+    if (names.items.len == 0) {
+        debug.info("No .toml files in config dir: {s}", .{dir_path});
+        return error.FileNotFound;
+    }
+
+    // Deterministic ordering: sort alphabetically.
+    std.mem.sort([]u8, names.items, {}, struct {
+        fn lt(_: void, a: []u8, b: []u8) bool { return std.mem.lessThan(u8, a, b); }
+    }.lt);
+
+    // Parse each file into a Document, then fold all of them into `merged`.
+    var merged = parser.Document.init(allocator);
+    errdefer merged.deinit();
+
+    for (names.items) |name| {
+        const path = try std.fs.path.join(allocator, &.{ dir_path, name });
+        defer allocator.free(path);
+
+        const raw = readFileAlloc(allocator, path) catch |err| {
+            debug.warn("Skipping '{s}': {}", .{ path, err });
+            continue;
+        };
+        defer allocator.free(raw);
+
+        if (raw.len == 0) { debug.info("Skipping empty file: {s}", .{path}); continue; }
+
+        // Resolve include directives before parsing.
+        const content = try resolveIncludes(allocator, raw, dir_path, 0);
+        defer allocator.free(content);
+
+        var doc = parser.parse(allocator, content) catch |err| {
+            debug.warn("Parse error in '{s}': {}", .{ path, err });
+            continue;
+        };
+        defer doc.deinit();
+
+        try parser.mergeDocumentsInto(allocator, &merged, &doc);
+        debug.info("Merged: {s}", .{path});
+    }
+
+    var cfg = getDefaultConfig(allocator);
+    try parseConfigSections(allocator, &merged, &cfg);
+    debug.info("Loaded config from dir: {s} ({} file(s))", .{ dir_path, names.items.len });
+    return cfg;
+}
+
+// Entry points
+
+/// Loads config from (in priority order):
+///   1. ~/.config/hana/   — all *.toml files merged
+///   2. ./config/         — all *.toml files merged
+///   3. ~/.config/hana/config.toml  — single-file legacy path
+///   4. ./config.toml               — single-file legacy path
+///   5. Embedded fallback
 pub fn loadConfigDefault(allocator: std.mem.Allocator) !defs.Config {
     const home            = if (std.c.getenv("HOME")) |h| std.mem.span(h) else ".";
     const xdg_config_home = std.c.getenv("XDG_CONFIG_HOME");
@@ -89,46 +283,52 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator) !defs.Config {
         try std.fmt.allocPrint(allocator, "{s}/.config", .{home});
     defer if (xdg_config_home == null) allocator.free(config_home);
 
-    const xdg_path = try std.Io.Dir.path.join(allocator, &.{ config_home, "hana", "config.toml" });
+    // 1. ~/.config/hana/ directory 
+    const xdg_dir = try std.fs.path.join(allocator, &.{ config_home, "hana" });
+    defer allocator.free(xdg_dir);
+
+    if (loadConfigFromDir(allocator, xdg_dir)) |cfg| return cfg else |_| {}
+
+    // 2. ./config/ directory 
+    const cwd = try std.process.getCwdAlloc(allocator);
+    defer allocator.free(cwd);
+
+    const local_dir = try std.fs.path.join(allocator, &.{ cwd, "config" });
+    defer allocator.free(local_dir);
+
+    if (loadConfigFromDir(allocator, local_dir)) |cfg| return cfg else |_| {}
+
+    // 3. Single-file legacy: ~/.config/hana/config.toml 
+    const xdg_path = try std.fs.path.join(allocator, &.{ xdg_dir, "config.toml" });
     defer allocator.free(xdg_path);
 
     if (loadConfig(allocator, xdg_path)) |cfg| return cfg else |_| {}
 
-    const cwd   = try std.process.getCwdAlloc(allocator);
-    defer allocator.free(cwd);
-    const local = try std.Io.Dir.path.join(allocator, &.{ cwd, "config.toml" });
+    // 4. Single-file legacy: ./config.toml 
+    const local = try std.fs.path.join(allocator, &.{ cwd, "config.toml" });
     defer allocator.free(local);
 
     if (loadConfig(allocator, local)) |cfg| return cfg else |_| {}
 
-    debug.info("No config.toml found, using fallback with auto-detection", .{});
+    // 5. Embedded fallback 
+    debug.info("No config found, using fallback with auto-detection", .{});
     return try loadFallbackConfig(allocator);
 }
 
-/// Reads, parses, and returns the config at `path`.
+/// Reads, parses, and returns the config at `path` (single-file entry point).
 pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
-    // Config loading is synchronous and runs before the event loop, so
-    // std.options.debug_io (the global blocking Io instance) is appropriate here.
-    const io = std.Options.debug_io;
-    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| {
-        if (err == error.FileNotFound) debug.info("Not found: {s}", .{path});
-        return err;
-    };
-    defer file.close(io);
+    const raw = readFileAlloc(allocator, path) catch |err| return err;
+    defer allocator.free(raw);
 
-    // Allocate max+1 bytes so readPositionalAll can detect oversized files without
-    // a streaming loop: if it fills the whole buffer the file exceeded the limit.
-    const max = 1024 * 1024;
-    const buf = try allocator.alloc(u8, max + 1);
-    defer allocator.free(buf);
-    const n = try file.readPositionalAll(io, buf, 0);
-    if (n > max) return error.FileTooLarge;
-    const content = buf[0..n];
-
-    if (content.len == 0) {
+    if (raw.len == 0) {
         debug.info("Empty config file: {s}, using fallback", .{path});
         return try loadFallbackConfig(allocator);
     }
+
+    // Resolve any include directives relative to the file's own directory.
+    const dir     = std.fs.path.dirname(path) orelse ".";
+    const content = try resolveIncludes(allocator, raw, dir, 0);
+    defer allocator.free(content);
 
     const cfg = try parseDocToConfig(allocator, content);
     debug.info("Loaded: {s}", .{path});

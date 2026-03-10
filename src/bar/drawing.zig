@@ -86,6 +86,13 @@ pub const DrawContext = struct {
     cached_sized_desc:   ?*c.PangoFontDescription  = null,
     cached_sized_px:     u16                        = 0,
 
+    /// Stored for CarouselPixmap — needed to create a Cairo surface with the same visual.
+    visual_type: ?*defs.xcb.xcb_visualtype_t = null,
+    /// DPI used when rendering into a CarouselPixmap (must match bar's Pango layout).
+    dpi:         f32                          = 96.0,
+    /// Actual pixel depth of dc.drawable — 32 for ARGB, screen root_depth otherwise.
+    depth:       u8                           = 24,
+
     /// Creates a DrawContext backed by an off-screen pixmap.
     /// All drawing targets the pixmap; call flush() to blit it to the window
     /// atomically via xcb_copy_area, eliminating visible partial-frame compositing.
@@ -147,6 +154,9 @@ pub const DrawContext = struct {
                 @intFromFloat(@round(std.math.clamp(transparency, 0.0, 1.0) * 255.0))
             else
                 0xFF,
+            .visual_type  = visual_type,
+            .dpi          = dpi,
+            .depth        = if (is_argb) 32 else screen.*.root_depth,
         };
 
         // Fire both GC-create requests before blocking on either reply so both
@@ -425,6 +435,23 @@ pub const DrawContext = struct {
         );
     }
 
+    /// Blit only the rectangle [x, x+w) from the off-screen pixmap to the window.
+    /// Does NOT call cairo_surface_flush — use this when only XCB (not Cairo) has
+    /// written to the pixmap in the current frame, e.g. carousel blits.
+    pub fn flushRect(self: *DrawContext, x: u16, w: u16) void {
+        if (self.copy_gc == 0) return;
+        _ = defs.xcb.xcb_copy_area(
+            self.conn,
+            self.drawable,
+            self.window,
+            self.copy_gc,
+            @intCast(x), 0,
+            @intCast(x), 0,
+            w, self.height,
+        );
+        _ = defs.xcb.xcb_flush(self.conn);
+    }
+
     pub fn baselineY(self: *DrawContext, bar_height: u16) u16 {
         const asc, const desc = self.getMetrics();
         const top_pad: i32    = @max(0, @divTrunc(@as(i32, bar_height) - (asc + desc), 2));
@@ -454,6 +481,128 @@ pub const DrawContext = struct {
         self.moveToTextBaseline(x + padding, self.baselineY(height));
         c.pango_cairo_show_layout(self.ctx, self.pango_layout);
         return x + width;
+    }
+};
+
+// ── CarouselPixmap ────────────────────────────────────────────────────────────
+//
+// Pre-renders a window title (background + glyphs) into a dedicated XCB pixmap
+// exactly once.  Every subsequent carousel tick is two xcb_copy_area calls —
+// raw pixel blits with zero Pango/Cairo involvement.
+//
+// Leapfrog model: two logical copies of the pixmap exist side-by-side,
+// `cycle_w` pixels apart (cycle_w = text_w + gap).  As `offset` advances from
+// 0 to cycle_w the first copy scrolls out of the left edge while the second
+// enters from the right.  At offset == cycle_w the state is identical to
+// offset == 0, giving a perfectly seamless loop.
+
+pub const CarouselPixmap = struct {
+    conn:    *defs.xcb.xcb_connection_t,
+    pixmap:  u32,
+    gc:      u32,
+    text_w:  u16,
+    height:  u16,
+
+    pub fn init(dc: *const DrawContext, text_w: u16) !CarouselPixmap {
+        const pixmap = defs.xcb.xcb_generate_id(dc.conn);
+        _ = defs.xcb.xcb_create_pixmap(dc.conn, dc.depth, pixmap, dc.drawable, text_w, dc.height);
+        errdefer _ = defs.xcb.xcb_free_pixmap(dc.conn, pixmap);
+
+        const gc     = defs.xcb.xcb_generate_id(dc.conn);
+        const cookie = defs.xcb.xcb_create_gc_checked(dc.conn, gc, pixmap, 0, null);
+        if (defs.xcb.xcb_request_check(dc.conn, cookie)) |err| {
+            std.c.free(err);
+            return error.GCCreationFailed;
+        }
+
+        return .{ .conn = dc.conn, .pixmap = pixmap, .gc = gc,
+                   .text_w = text_w, .height = dc.height };
+    }
+
+    pub fn deinit(self: *CarouselPixmap) void {
+        _ = defs.xcb.xcb_free_gc(self.conn, self.gc);
+        _ = defs.xcb.xcb_free_pixmap(self.conn, self.pixmap);
+    }
+
+    /// Render background colour + text into the pixmap.
+    /// Called once when the title changes; blitFrame handles every tick after.
+    pub fn render(
+        self:     *CarouselPixmap,
+        dc:       *DrawContext,
+        text:     []const u8,
+        bg:       u32,
+        fg:       u32,
+        baseline: u16,
+    ) !void {
+        // ── Background fill (XCB, straight-alpha, matches fillRect) ──────────
+        const packed_bg = dc.applyTransparency(bg);
+        _ = defs.xcb.xcb_change_gc(self.conn, self.gc, defs.xcb.XCB_GC_FOREGROUND, &[_]u32{packed_bg});
+        _ = defs.xcb.xcb_poly_fill_rectangle(self.conn, self.pixmap, self.gc, 1,
+            &defs.xcb.xcb_rectangle_t{ .x = 0, .y = 0, .width = self.text_w, .height = self.height });
+
+        // ── Text (Cairo + Pango, short-lived context) ─────────────────────────
+        const vt = dc.visual_type orelse return error.NoVisualType;
+        const surf = c.cairo_xcb_surface_create(
+            self.conn, self.pixmap, vt, @intCast(self.text_w), @intCast(self.height),
+        ) orelse return error.CairoSurfaceFailed;
+        defer c.cairo_surface_destroy(surf);
+
+        const ctx = c.cairo_create(surf) orelse return error.CairoFailed;
+        defer c.cairo_destroy(ctx);
+
+        const layout = c.pango_cairo_create_layout(ctx) orelse return error.PangoFailed;
+        defer c.g_object_unref(layout);
+        c.pango_cairo_context_set_resolution(c.pango_layout_get_context(layout), @floatCast(dc.dpi));
+        c.pango_layout_set_font_description(layout, dc.current_font_desc);
+        c.pango_layout_set_text(layout, text.ptr, @intCast(text.len));
+
+        c.cairo_set_source_rgba(ctx,
+            @as(f64, @floatFromInt((fg >> 16) & 0xFF)) / 255.0,
+            @as(f64, @floatFromInt((fg >>  8) & 0xFF)) / 255.0,
+            @as(f64, @floatFromInt( fg         & 0xFF)) / 255.0,
+            1.0);
+
+        const bl = @as(f64, @floatFromInt(c.pango_layout_get_baseline(layout)))
+                 / @as(f64, @floatFromInt(c.PANGO_SCALE));
+        c.cairo_move_to(ctx, 0.0, @as(f64, @floatFromInt(baseline)) - bl);
+        c.pango_cairo_show_layout(ctx, layout);
+        c.cairo_surface_flush(surf);
+    }
+
+    /// Blit two copies into `dst_pixmap` using `dst_gc`, clipped to the title
+    /// segment [`clip_x`, `clip_x + clip_w`].  No Pango/Cairo — pure XCB blits.
+    pub fn blitFrame(
+        self:    *const CarouselPixmap,
+        dst:     u32,
+        dst_gc:  u32,
+        clip_x:  u16,
+        clip_w:  u16,
+        offset:  u16,
+        cycle_w: u16,
+    ) void {
+        // Copy A sits at (clip_x - offset); copy B is one cycle_w to its right.
+        // As offset grows from 0 → cycle_w, A scrolls off left while B enters right.
+        const cx: i32 = @intCast(clip_x);
+        const cw: i32 = @intCast(clip_w);
+        const tw: i32 = @intCast(self.text_w);
+        const h        = self.height;
+
+        for ([2]i32{ 0, @intCast(cycle_w) }) |shift| {
+            const draw_x: i32 = cx - @as(i32, @intCast(offset)) + shift;
+
+            // Intersect [draw_x, draw_x+text_w) with [clip_x, clip_x+clip_w).
+            const vis_start = @max(draw_x, cx);
+            const vis_end   = @min(draw_x + tw, cx + cw);
+            if (vis_end <= vis_start) continue;
+
+            _ = defs.xcb.xcb_copy_area(
+                self.conn,
+                self.pixmap, dst, dst_gc,
+                @intCast(vis_start - draw_x), 0,   // src_x, src_y
+                @intCast(vis_start),           0,   // dst_x, dst_y
+                @intCast(vis_end - vis_start), h,   // width, height
+            );
+        }
     }
 };
 

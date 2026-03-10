@@ -91,7 +91,7 @@ pub fn initModules(wm: *WM, xkb_state: *xkbcommon.XkbState) !void {
     workspaces.init(wm);
     try tiling.init(wm);
     try minimize.init(wm);
-    prompt.init(wm.conn);
+    try prompt.init(wm.allocator, wm.conn);
 }
 
 pub fn deinitModules() void {

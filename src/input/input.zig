@@ -211,33 +211,30 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) 
 
 // Window close
 
-/// Ask `win` to close politely, or forcibly destroy it if it doesn't support WM_DELETE_WINDOW.
-/// WM_PROTOCOLS is cached at map time so this path never blocks on a round-trip.
 fn closeWindow(wm: *WM, win: u32) void {
-    if (win == wm.root) { debug.err("Attempted to close ROOT window!", .{}); return; }
-
+    // If the window supports the `WM_DELETE_WINDOW` signal,
     if (utils.supportsWMDeleteCached(wm.conn, win)) {
-        sendDeleteEvent(wm, win);
+        // Ask window to close politely
+        const protocols_atom = utils.getAtomCached("WM_PROTOCOLS")     catch return;
+        const delete_atom    = utils.getAtomCached("WM_DELETE_WINDOW") catch return;
+
+        var event = std.mem.zeroes(xcb.xcb_client_message_event_t); //TODO: what does this do?
+
+        event.response_type  = xcb.XCB_CLIENT_MESSAGE;
+        event.format         = 32;
+        event.window         = win;
+        event.type           = protocols_atom;
+        event.data.data32[0] = delete_atom;
+        event.data.data32[1] = focus.getLastEventTime(); // ICCCM §4.1.7
+
+        // Send a WM_DELETE_WINDOW client message (ICCCM §4.1.2.7)
+        _ = xcb.xcb_send_event(wm.conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
+        _ = xcb.xcb_flush(wm.conn);
     } else {
+        // Fallback: Destroy window entirely, through a raw xcb signal.
         _ = xcb.xcb_destroy_window(wm.conn, win);
         _ = xcb.xcb_flush(wm.conn);
     }
-}
-
-/// Send a WM_DELETE_WINDOW client message (ICCCM §4.1.2.7).
-/// Uses focus.getLastEventTime() as required by ICCCM §4.1.7.
-fn sendDeleteEvent(wm: *WM, win: u32) void {
-    const protocols_atom = utils.getAtomCached("WM_PROTOCOLS")    catch return;
-    const delete_atom    = utils.getAtomCached("WM_DELETE_WINDOW") catch return;
-    var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
-    event.response_type  = xcb.XCB_CLIENT_MESSAGE;
-    event.format         = 32;
-    event.window         = win;
-    event.type           = protocols_atom;
-    event.data.data32[0] = delete_atom;
-    event.data.data32[1] = focus.getLastEventTime();
-    _ = xcb.xcb_send_event(wm.conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
-    _ = xcb.xcb_flush(wm.conn);
 }
 
 // Action dispatch
@@ -246,35 +243,40 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
     switch (action.*) {
         .toggle_fullscreen      => fullscreen.toggleFullscreen(wm),
         .close_window           => { if (focus.getFocused()) |win| closeWindow(wm, win); },
-        .reload_config          => {
-            debug.info("[RELOAD] triggered config reloading...", .{});
-            utils.reload();
-        },
+        .reload_config          => { utils.reload(); },
+        //TODO: add comment here
+        .sequence               => |acts| { for (acts) |*a| try executeAction(a, wm); },
+        .exec                   => |cmd| try executeShellCommand(wm, cmd),
+        .dump_state             => dumpState(wm),
+
+        .toggle_tiling          => tiling.toggleTiling(wm),
+        .toggle_float           => { if (focus.getFocused()) |win| tiling.toggleWindowFloat(wm, win); },
         .toggle_layout          => { tiling.toggleLayout(wm);        bar.scheduleRedraw(); },
         .toggle_layout_reverse  => { tiling.toggleLayoutReverse(wm); bar.scheduleRedraw(); },
+        .cycle_layout_variation => tiling.cycleLayoutVariation(wm),
+
         .toggle_bar_visibility  => bar.setBarState(wm, .toggle),
         .toggle_bar_position    => bar.toggleBarPosition(wm),
+
         .increase_master        => tiling.increaseMasterWidth(wm),
         .decrease_master        => tiling.decreaseMasterWidth(wm),
         .increase_master_count  => tiling.increaseMasterCount(wm),
         .decrease_master_count  => tiling.decreaseMasterCount(wm),
-        .toggle_tiling          => tiling.toggleTiling(wm),
-        .swap_master            => { tiling.swapWithMaster(wm);          bar.scheduleRedraw(); },
-        .swap_master_focus_swap => { tiling.swapWithMasterFocusSwap(wm); bar.scheduleRedraw(); },
-        .cycle_layout_variation => tiling.cycleLayoutVariation(wm),
-        .prompt_toggle          => { prompt.toggle(wm); bar.scheduleRedraw(); },
-        .dump_state             => dumpState(wm),
+
+        .swap_master            => { tiling.swapWithMaster(wm);          focus.setSuppressReason(.tiling_operation); bar.scheduleRedraw(); },
+        .swap_master_focus_swap => { tiling.swapWithMasterFocusSwap(wm); focus.setSuppressReason(.tiling_operation); bar.scheduleRedraw(); },
+
         .minimize_window        => minimize.minimizeWindow(wm),
         .unminimize_lifo        => minimize.unminimize(wm, .lifo),
         .unminimize_fifo        => minimize.unminimize(wm, .fifo),
         .unminimize_all         => minimize.unminimizeAll(wm),
-        .toggle_float           => { if (focus.getFocused()) |win| tiling.toggleWindowFloat(wm, win); },
-        .tag_toggle             => |ws| { if (focus.getFocused()) |win| workspaces.tagToggle(wm, win, ws, true); },
-        .sequence               => |acts| { for (acts) |*a| try executeAction(a, wm); },
-        .exec                   => |cmd| try executeShellCommand(wm, cmd),
+
         .switch_workspace       => |ws| workspaces.switchTo(wm, ws),
         .move_to_workspace      => |ws| { if (focus.getFocused()) |win| workspaces.moveWindowTo(wm, win, ws) catch |e| debug.warnOnErr(e, "move_to_workspace"); },
         .move_window            => |ws| { if (focus.getFocused()) |win| workspaces.moveWindowExclusive(wm, win, ws); },
+
+        .tag_toggle             => |ws| { if (focus.getFocused()) |win| workspaces.tagToggle(wm, win, ws, true); },
+        .prompt_toggle          => { prompt.toggle(wm); bar.scheduleRedraw(); },
     }
 }
 
