@@ -6,7 +6,7 @@ const debug = @import("debug");
 const defs  = @import("defs");
 const xcb   = defs.xcb;
 
-// ── WM_NORMAL_HINTS size hint cache ──────────────────────────────────────────
+// WM_NORMAL_HINTS size hint cache 
 //
 // Populated from WM_NORMAL_HINTS during handleMapRequest; evicted on unmanage.
 // configureSafe clamps every rect to stored minimums so terminals always
@@ -40,7 +40,7 @@ pub fn deinitSizeHintsCache(allocator: std.mem.Allocator) void {
     g_hints.deinit(allocator);
 }
 
-// ── Per-window combined cache entry ──────────────────────────────────────────
+// Per-window combined cache entry 
 //
 // A single AutoHashMapUnmanaged keyed by window ID, storing both geometry and
 // border color. configureSafe writes only `.rect`; tiling.sendBorderColor
@@ -54,7 +54,7 @@ pub const WindowData = struct {
 
 pub const CacheMap = std.AutoHashMapUnmanaged(u32, WindowData);
 
-// ── Layout context ────────────────────────────────────────────────────────────
+// Layout context 
 //
 // Every layout module receives a *const LayoutCtx; configureSafe reads the
 // cache from it rather than from a module-level global, making the dependency

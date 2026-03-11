@@ -22,7 +22,7 @@ const constants  = @import("constants");
 const debug      = @import("debug");
 const minimize   = @import("minimize");
 
-// ── Fullscreen types ──────────────────────────────────────────────────────────
+// Fullscreen types 
 // Defined here (not in defs.zig) so fullscreen.zig is the single owner.
 // defs.zig used to declare these; remaining references should use fullscreen.X.
 
@@ -76,7 +76,7 @@ pub const FullscreenState = struct {
 };
 
 
-// ── Module state ──────────────────────────────────────────────────────────────
+// Module state 
 
 var g_state: ?FullscreenState = null;
 
@@ -89,7 +89,7 @@ pub fn deinit() void {
     g_state = null;
 }
 
-// ── Public state queries ──────────────────────────────────────────────────────
+// Public state queries 
 
 pub inline fn isFullscreen(win: u32) bool {
     const s = g_state orelse return false;
@@ -129,7 +129,7 @@ pub fn perWorkspaceIterator() ?std.AutoHashMap(u8, FullscreenInfo).Iterator {
     return s.per_workspace.iterator();
 }
 
-// ── Geometry helpers ──────────────────────────────────────────────────────────
+// Geometry helpers 
 
 // Fast path: tiled windows have a valid rect in the geometry cache; reading
 // from it avoids the blocking xcb_get_geometry round-trip.
@@ -171,7 +171,7 @@ fn fetchWindowGeom(wm: *WM, win: u32) defs.WindowGeometry {
     };
 }
 
-// ── Commit helpers (XCB-only; caller owns grab/ungrab/flush) ──────────────────
+// Commit helpers (XCB-only; caller owns grab/ungrab/flush) 
 
 fn enterFullscreenCommit(wm: *WM, win: u32, ws: u8, geom: defs.WindowGeometry) void {
     setForWorkspace(ws, .{
@@ -245,7 +245,7 @@ fn exitFullscreenCommit(wm: *WM, win: u32, ws: u8) void {
         });
 }
 
-// ── Public actions ────────────────────────────────────────────────────────────
+// Public actions 
 
 /// Enter fullscreen for `win` on the current workspace.
 /// Pass a pre-computed geometry in `saved_geom` (e.g. when restoring a

@@ -53,7 +53,7 @@ const TITLE_LEAD_PX: u16 = 4;
 // right.  At cycle_w the state is identical to 0 → seamless loop.
 
 /// Horizontal scroll speed in pixels per millisecond (≈ 90 px/s).
-const CAROUSEL_PX_PER_MS: f64 = 0.400;
+const CAROUSEL_PX_PER_MS: f64 = 0.100;
 /// Pixel gap between the end of one copy and the start of the next.
 const CAROUSEL_GAP_PX: u16 = 60;
 
@@ -67,12 +67,40 @@ const CarouselCache = struct {
 var g_carousel:        ?CarouselCache = null;
 var g_carousel_active: bool           = false;
 
-pub fn isCarouselActive() bool { return g_carousel_active; }
+// ── Per-segment (split-view) carousel ────────────────────────────────────
+//
+// Only the *focused* window ever gets a carousel in split view.  Unfocused
+// segments that overflow always show an ellipsis instead.
+//
+// `start_ms` records the monotonic timestamp at which the focused window
+// gained focus (or the pixmap was first built).  The scroll offset is derived
+// from `now - start_ms`, so the animation always begins at position 0 the
+// moment a window gains focus.  Switching focus frees the old pixmap and
+// rebuilds a fresh one for the new focused window.
 
-/// Free the pre-rendered carousel pixmap. Call on bar deinit or reload.
+const SegCarousel = struct {
+    cp:       drawing.CarouselPixmap,
+    window:   u32,
+    cycle_w:  u16,
+    start_ms: i64,
+};
+
+var g_seg_carousel:        ?SegCarousel = null;
+var g_seg_carousel_active: bool         = false;
+
+pub fn isCarouselActive() bool { return g_carousel_active or g_seg_carousel_active; }
+
+/// Free all carousel pixmaps. Call on bar deinit or reload.
 pub fn deinitCarousel() void {
-    if (g_carousel) |*cc| { cc.cp.deinit(); g_carousel = null; }
-    g_carousel_active = false;
+    if (g_carousel)     |*cc| { cc.cp.deinit();  g_carousel     = null; }
+    if (g_seg_carousel) |*sc| { sc.cp.deinit();  g_seg_carousel = null; }
+    g_carousel_active     = false;
+    g_seg_carousel_active = false;
+}
+
+fn nowMs() i64 {
+    const ts = std.posix.clock_gettime(.MONOTONIC) catch return 0;
+    return ts.sec * 1000 + @divTrunc(ts.nsec, 1_000_000);
 }
 
 /// Fast per-tick carousel redraw.  Skips Pango, Cairo surface flush, and the
@@ -93,21 +121,20 @@ pub fn drawCarouselTick(
     const cc = g_carousel orelse return false;
     // Fill the segment background so the gap between copies shows the right colour.
     dc.fillRect(x, 0, avail_w, height, bg);
-    const offset = carouselOffset(cc.cycle_w);
+    const offset = carouselOffsetFrom(0, cc.cycle_w);
     cc.cp.blitFrame(dc.drawable, dc.gc, x, avail_w, offset, cc.cycle_w);
     dc.flushRect(x, avail_w);
     return true;
 }
 
-/// Current scroll offset in [0, cycle_w).  Derived purely from wall-clock
-/// time — no mutable position state, no accumulated drift.
-fn carouselOffset(cycle_w: u16) u16 {
+/// Scroll offset in [0, cycle_w) relative to `start_ms`.
+/// Pass `start_ms = 0` for the absolute-time (legacy single-window) behaviour.
+fn carouselOffsetFrom(start_ms: i64, cycle_w: u16) u16 {
     const cycle_ms: i64 = @intFromFloat(
         @ceil(@as(f64, @floatFromInt(cycle_w)) / CAROUSEL_PX_PER_MS),
     );
-    const ts = std.posix.clock_gettime(.MONOTONIC) catch return 0;
-    const now_ms: i64 = ts.sec * 1000 + @divTrunc(ts.nsec, 1_000_000);
-    const phase   = @mod(now_ms, cycle_ms);
+    const elapsed = nowMs() - start_ms;
+    const phase   = @mod(elapsed, cycle_ms);
     const px: f64 = @as(f64, @floatFromInt(phase)) * CAROUSEL_PX_PER_MS;
     return @intCast(@min(@as(u64, @intFromFloat(px)), @as(u64, cycle_w - 1)));
 }
@@ -195,7 +222,8 @@ pub fn draw(
         }
     } else {
         try drawSegmentedTitles(dc, config, height, start_x, width,
-            conn, focused_window, current_ws_wins, minimized_set, allocator, scaled_padding);
+            conn, focused_window, current_ws_wins, minimized_set, allocator, scaled_padding,
+            title_invalidated);
     }
 
     return start_x + width;
@@ -246,25 +274,35 @@ fn drawTitleText(
     }
 
     const cc = g_carousel.?;
-    const offset = carouselOffset(cc.cycle_w);
+    const offset = carouselOffsetFrom(0, cc.cycle_w);
     cc.cp.blitFrame(dc.drawable, dc.gc, x, avail_w, offset, cc.cycle_w);
     _ = bar_h;
 }
 
 fn drawSegmentedTitles(
-    dc:             *drawing.DrawContext,
-    config:         defs.BarConfig,
-    height:         u16,
-    start_x:        u16,
-    width:          u16,
-    conn:           *xcb.xcb_connection_t,
-    focused_window: ?u32,
-    win_items:      []const u32,
-    minimized_set:  *const std.AutoHashMapUnmanaged(u32, void),
-    allocator:      std.mem.Allocator,
-    scaled_padding: u16,
+    dc:                *drawing.DrawContext,
+    config:            defs.BarConfig,
+    height:            u16,
+    start_x:           u16,
+    width:             u16,
+    conn:              *xcb.xcb_connection_t,
+    focused_window:    ?u32,
+    win_items:         []const u32,
+    minimized_set:     *const std.AutoHashMapUnmanaged(u32, void),
+    allocator:         std.mem.Allocator,
+    scaled_padding:    u16,
+    title_invalidated: bool,
 ) !void {
     if (win_items.len == 0) return;
+
+    // If the focused window left the workspace, free the stale carousel now
+    // so we don't blit a pixmap for a window that no longer exists on-screen.
+    if (g_seg_carousel) |sc| {
+        var still_present = false;
+        for (win_items) |w| if (w == sc.window) { still_present = true; break; };
+        if (!still_present) { g_seg_carousel.?.cp.deinit(); g_seg_carousel = null; }
+    }
+    g_seg_carousel_active = false;
 
     const MAX_WINS: usize = 128;
     const n_wins = @min(win_items.len, MAX_WINS);
@@ -385,13 +423,53 @@ fn drawSegmentedTitles(
         dc.fillRect(segment_x, 0, segment_width, height, accent);
 
         if (info.title.len > 0 and segment_width > scaled_padding * 2) {
-            try dc.drawTextEllipsis(
-                segment_x + scaled_padding + TITLE_LEAD_PX,
-                baseline_y,
-                info.title,
-                segment_width -| scaled_padding * 2 -| TITLE_LEAD_PX,
-                if (is_focused_win) config.selected_fg else config.fg,
-            );
+            const text_x  = segment_x + scaled_padding + TITLE_LEAD_PX;
+            const avail_w = segment_width -| scaled_padding * 2 -| TITLE_LEAD_PX;
+            const text_fg = if (is_focused_win) config.selected_fg else config.fg;
+            const text_w  = dc.textWidth(info.title);
+
+            if (!is_focused_win) {
+                // Non-focused window: never scroll — always ellipsis if overflow.
+                if (text_w <= avail_w)
+                    try dc.drawText(text_x, baseline_y, info.title, text_fg)
+                else
+                    try dc.drawTextEllipsis(text_x, baseline_y, info.title, avail_w, text_fg);
+            } else if (text_w <= avail_w) {
+                // Focused and fits — no carousel needed; free any stale pixmap.
+                if (g_seg_carousel) |*sc| { sc.cp.deinit(); g_seg_carousel = null; }
+                try dc.drawText(text_x, baseline_y, info.title, text_fg);
+            } else {
+                // Focused and overflows — build or reuse the single seg carousel.
+                g_seg_carousel_active = true;
+
+                const expected_cycle_w: u16 = text_w + CAROUSEL_GAP_PX;
+
+                // Detect stale pixmap: wrong window (focus switched) or title changed.
+                const stale = if (g_seg_carousel) |sc|
+                    sc.window != info.window or
+                    title_invalidated or
+                    sc.cycle_w != expected_cycle_w
+                else
+                    true;
+
+                if (stale) {
+                    if (g_seg_carousel) |*sc| { sc.cp.deinit(); g_seg_carousel = null; }
+                    var cp = try drawing.CarouselPixmap.init(dc, text_w);
+                    errdefer cp.deinit();
+                    try cp.render(dc, info.title, accent, text_fg, baseline_y);
+                    g_seg_carousel = .{
+                        .cp       = cp,
+                        .window   = info.window,
+                        .cycle_w  = expected_cycle_w,
+                        // Record when focus was gained so offset starts at 0.
+                        .start_ms = nowMs(),
+                    };
+                }
+
+                const sc  = g_seg_carousel.?;
+                const off = carouselOffsetFrom(sc.start_ms, sc.cycle_w);
+                sc.cp.blitFrame(dc.drawable, dc.gc, text_x, avail_w, off, sc.cycle_w);
+            }
         }
     }
 }

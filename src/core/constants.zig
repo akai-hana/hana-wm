@@ -4,7 +4,7 @@ const xcb = @cImport({
     @cInclude("xcb/xcb.h");
 });
 
-// ── Modifier masks ────────────────────────────────────────────────────────────
+// Modifier masks 
 // Must be u16 per XCB API; widening to u32 breaks xcb_grab_key.
 pub const MOD_SHIFT:   u16 = xcb.XCB_MOD_MASK_SHIFT;
 pub const MOD_LOCK:    u16 = xcb.XCB_MOD_MASK_LOCK;
@@ -15,14 +15,14 @@ pub const MOD_SUPER:   u16 = xcb.XCB_MOD_MASK_4;
 
 pub const MOD_MASK_RELEVANT: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER;
 
-// ── Window constraints ────────────────────────────────────────────────────────
+// Window constraints 
 pub const MIN_WINDOW_DIM:   u16 = 50;
 pub const MIN_MASTER_WIDTH: f32 = 0.05;
 
-// ── XKB retry parameters ──────────────────────────────────────────────────────
+// XKB retry parameters 
 pub const XKB_RETRY_DELAY_MS: u64 = 20;
 
-// ── Offscreen positioning ─────────────────────────────────────────────────────
+// Offscreen positioning 
 // Windows on inactive workspaces are parked at OFFSCREEN_X_POSITION so they
 // are hidden without being unmapped (unmapping causes some apps to pause).
 pub const OFFSCREEN_X_POSITION: i32 = -4000;
@@ -35,7 +35,7 @@ pub const OFFSCREEN_THRESHOLD_MIN: i32 = -1000;
 /// Maximum depth when walking the X11 window tree in findManagedWindow.
 pub const MAX_WINDOW_TREE_DEPTH: usize = 10;
 
-// ── Event masks ───────────────────────────────────────────────────────────────
+// Event masks 
 pub const EventMasks = struct {
     pub const ROOT_WINDOW = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
                             xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |

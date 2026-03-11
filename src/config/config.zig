@@ -79,11 +79,6 @@ fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *defs.Config) !void {
 
 // Config loading
 
-// Config directory / multi-file loading
-
-/// Maximum include nesting depth — guards against circular includes.
-const MAX_INCLUDE_DEPTH = 8;
-
 /// Maximum bytes accepted from a single .toml file (1 MiB).
 const MAX_FILE_BYTES = 1024 * 1024;
 
@@ -106,85 +101,43 @@ fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return allocator.realloc(buf, n) catch buf[0..n];
 }
 
-/// Scans `content` line-by-line and replaces any standalone include directive
-///
-///     "sub/file.toml"   or   'sub/file.toml'
-///
-/// with the content of that file (resolved relative to `config_dir`).
-/// Include paths must point to a file inside a subdirectory of `config_dir`
-/// (they must contain at least one '/').  Direct files inside `config_dir`
-/// itself are loaded automatically and do not need explicit includes.
-/// Recursion is limited to `MAX_INCLUDE_DEPTH` levels.
-fn resolveIncludes(
-    allocator:  std.mem.Allocator,
-    content:    []const u8,
-    config_dir: []const u8,
-    depth:      u8,
-) ![]u8 {
-    if (depth > MAX_INCLUDE_DEPTH) {
-        debug.warn("Include depth exceeded {}, stopping recursion", .{MAX_INCLUDE_DEPTH});
-        return allocator.dupe(u8, content);
-    }
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-
-    var lines = std.mem.splitScalar(u8, content, '\n');
-    while (lines.next()) |raw_line| {
-        // Strip inline comment and surrounding whitespace for the pattern check,
-        // but preserve the original line otherwise.
-        const trimmed = blk: {
-            var s = std.mem.trim(u8, raw_line, " \t\r");
-            if (std.mem.indexOfScalar(u8, s, '#')) |ci| s = std.mem.trimEnd(u8, s[0..ci], " \t");
-            break :blk s;
-        };
-
-        // Match: ("path/to/file.toml") or ('path/to/file.toml')
-        const is_include = trimmed.len >= 4 and
-            (trimmed[0] == '"' or trimmed[0] == '\'') and
-            trimmed[trimmed.len - 1] == trimmed[0] and
-            (std.mem.endsWith(u8, trimmed, ".toml\"") or
-             std.mem.endsWith(u8, trimmed, ".toml'"));
-
-        // Re-derive the path string (content between the quotes).
-        const include_path: ?[]const u8 = if (is_include) blk: {
-            const inner = trimmed[1 .. trimmed.len - 1];
-            // Must reference a subdirectory (contain '/') to be an include;
-            // bare "file.toml" without a directory component is not valid.
-            break :blk if (std.mem.indexOfScalar(u8, inner, '/') != null and
-                           std.mem.endsWith(u8, inner, ".toml"))
-                inner
-            else
-                null;
-        } else null;
-
-        if (include_path) |rel| {
-            const abs = try std.fs.path.join(allocator, &.{ config_dir, rel });
-            defer allocator.free(abs);
-
-            const raw = readFileAlloc(allocator, abs) catch |err| {
-                debug.warn("Could not read include '{s}': {}", .{ abs, err });
-                try out.appendSlice(allocator, raw_line);
-                try out.append(allocator, '\n');
-                continue;
-            };
-            defer allocator.free(raw);
-
-            // Recursively resolve includes inside the included file.
-            const sub_dir = std.fs.path.dirname(abs) orelse config_dir;
-            const resolved = try resolveIncludes(allocator, raw, sub_dir, depth + 1);
-            defer allocator.free(resolved);
-
-            debug.info("Included: {s}", .{abs});
-            try out.appendSlice(allocator, resolved);
-            try out.append(allocator, '\n');
-        } else {
-            try out.appendSlice(allocator, raw_line);
-            try out.append(allocator, '\n');
+/// Processes `include = [...]` from `src_doc` and merges each listed file into `dst`.
+/// `dir_path` is the base directory for resolving relative paths.
+/// Include paths must contain a '/' — top-level files are auto-loaded and don't need listing.
+fn processIncludes(allocator: std.mem.Allocator, dst: *parser.Document, src_doc: *const parser.Document, dir_path: []const u8) !void {
+    const inc_val = src_doc.get("include") orelse return;
+    const includes = inc_val.asArray() orelse return;
+    for (includes) |item| {
+        const rel = item.asString() orelse continue;
+        if (std.mem.indexOfScalar(u8, rel, '/') == null) {
+            debug.warn("include '{s}': top-level files are auto-loaded, skipping", .{rel});
+            continue;
         }
-    }
+        if (!std.mem.endsWith(u8, rel, ".toml")) {
+            debug.warn("include '{s}': only .toml files are supported, skipping", .{rel});
+            continue;
+        }
 
-    return out.toOwnedSlice(allocator);
+        const abs = try std.fs.path.join(allocator, &.{ dir_path, rel });
+        defer allocator.free(abs);
+
+        const raw = readFileAlloc(allocator, abs) catch |err| {
+            debug.warn("include '{s}': could not read: {}", .{ abs, err });
+            continue;
+        };
+        defer allocator.free(raw);
+
+        if (raw.len == 0) { debug.info("include '{s}': empty, skipping", .{abs}); continue; }
+
+        var inc_doc = parser.parse(allocator, raw) catch |err| {
+            debug.warn("include '{s}': parse error: {}", .{ abs, err });
+            continue;
+        };
+        defer inc_doc.deinit();
+
+        try parser.mergeDocumentsInto(allocator, dst, &inc_doc);
+        debug.info("Merged (include): {s}", .{abs});
+    }
 }
 
 /// Loads and merges all `*.toml` files found directly inside `dir_path`
@@ -213,9 +166,10 @@ pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !de
 
         var it = dir.iterate();
         while (try it.next(io)) |entry| {
-            // Skip subdirectories and non-.toml files.
+            // Skip subdirectories, non-.toml files, and the embedded fallback.
             if (entry.kind == .directory) continue;
             if (!std.mem.endsWith(u8, entry.name, ".toml")) continue;
+            if (std.mem.eql(u8, entry.name, "fallback.toml")) continue;
             try names.append(allocator, try allocator.dupe(u8, entry.name));
         }
     }
@@ -232,7 +186,7 @@ pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !de
 
     // Parse each file into a Document, then fold all of them into `merged`.
     var merged = parser.Document.init(allocator);
-    errdefer merged.deinit();
+    defer merged.deinit();
 
     for (names.items) |name| {
         const path = try std.fs.path.join(allocator, &.{ dir_path, name });
@@ -246,11 +200,7 @@ pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !de
 
         if (raw.len == 0) { debug.info("Skipping empty file: {s}", .{path}); continue; }
 
-        // Resolve include directives before parsing.
-        const content = try resolveIncludes(allocator, raw, dir_path, 0);
-        defer allocator.free(content);
-
-        var doc = parser.parse(allocator, content) catch |err| {
+        var doc = parser.parse(allocator, raw) catch |err| {
             debug.warn("Parse error in '{s}': {}", .{ path, err });
             continue;
         };
@@ -258,6 +208,7 @@ pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !de
 
         try parser.mergeDocumentsInto(allocator, &merged, &doc);
         debug.info("Merged: {s}", .{path});
+        try processIncludes(allocator, &merged, &doc, dir_path);
     }
 
     var cfg = getDefaultConfig(allocator);
@@ -275,7 +226,7 @@ pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !de
 ///   4. ./config.toml               — single-file legacy path
 ///   5. Embedded fallback
 pub fn loadConfigDefault(allocator: std.mem.Allocator) !defs.Config {
-    const home            = if (std.c.getenv("HOME")) |h| std.mem.span(h) else ".";
+    const home            = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "./config";
     const xdg_config_home = std.c.getenv("XDG_CONFIG_HOME");
     const config_home     = if (xdg_config_home) |ch|
         std.mem.span(ch)
@@ -325,23 +276,29 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
         return try loadFallbackConfig(allocator);
     }
 
-    // Resolve any include directives relative to the file's own directory.
-    const dir     = std.fs.path.dirname(path) orelse ".";
-    const content = try resolveIncludes(allocator, raw, dir, 0);
-    defer allocator.free(content);
+    var merged = parser.Document.init(allocator);
+    defer merged.deinit();
 
-    const cfg = try parseDocToConfig(allocator, content);
+    var doc = try parser.parse(allocator, raw);
+    defer doc.deinit();
+    try parser.mergeDocumentsInto(allocator, &merged, &doc);
+    try processIncludes(allocator, &merged, &doc, std.fs.path.dirname(path) orelse ".");
+
+    var cfg = getDefaultConfig(allocator);
+    try parseConfigSections(allocator, &merged, &cfg);
     debug.info("Loaded: {s}", .{path});
     return cfg;
 }
 
 fn loadFallbackConfig(allocator: std.mem.Allocator) !defs.Config {
     const fallback      = @import("fallback");
-    const fallback_toml = fallback.getFallbackToml();
+    const fallback_toml = try fallback.getFallbackToml();
 
-    var cfg = try parseDocToConfig(allocator, fallback_toml);
+    var doc = try parser.parse(allocator, fallback_toml);
+    defer doc.deinit();
+    var cfg = getDefaultConfig(allocator);
+    try parseConfigSections(allocator, &doc, &cfg);
 
-    // Iter 3: detectTerminal no longer needs an allocator (pure PATH scan).
     const terminal = fallback.detectTerminal();
     for (cfg.keybindings.items) |*kb| {
         if (kb.action == .exec and std.mem.eql(u8, kb.action.exec, "auto_terminal")) {
@@ -377,14 +334,6 @@ fn getDefaultConfig(allocator: std.mem.Allocator) defs.Config {
     }
 
     initDefaultBarLayout(allocator, &cfg) catch |e| debug.warnOnErr(e, "default bar layout init");
-    return cfg;
-}
-
-fn parseDocToConfig(allocator: std.mem.Allocator, content: []const u8) !defs.Config {
-    var doc = try parser.parse(allocator, content);
-    defer doc.deinit();
-    var cfg = getDefaultConfig(allocator);
-    try parseConfigSections(allocator, &doc, &cfg);
     return cfg;
 }
 
@@ -498,7 +447,7 @@ const GlobEntry = struct {
     owned:  bool, // true when key was heap-allocated and must be freed by the caller
 };
 
-/// Returns a single-entry (not owned) slice for a literal key with no glob.
+/// Returns a single-element non-owned GlobEntry slice for a literal (non-glob) key.
 fn literalEntry(allocator: std.mem.Allocator, key: []const u8) ![]GlobEntry {
     const e = try allocator.alloc(GlobEntry, 1);
     e[0] = .{ .key = key, .ws_idx = 0, .owned = false };
@@ -512,7 +461,7 @@ fn expandGlobKeys(allocator: std.mem.Allocator, key_pattern: []const u8) ![]Glob
     const lbrace = std.mem.indexOfScalar(u8, key_pattern, '{') orelse
         return literalEntry(allocator, key_pattern);
     const rbrace = std.mem.indexOfScalarPos(u8, key_pattern, lbrace + 1, '}') orelse {
-        debug.warn("Keybind glob missing closing '}}' in '{s}', treating as literal", .{key_pattern});
+        debug.warn("Keybind glob missing closing '}}\' in '{s}', treating as literal", .{key_pattern});
         return literalEntry(allocator, key_pattern);
     };
 
@@ -542,7 +491,6 @@ fn expandGlobKeys(allocator: std.mem.Allocator, key_pattern: []const u8) ![]Glob
     }
 
     if (keys.items.len == 0) {
-        // Empty or unparseable glob — fall back to the original literal key.
         keys.deinit(allocator);
         return literalEntry(allocator, key_pattern);
     }
@@ -557,26 +505,17 @@ fn expandGlobKeys(allocator: std.mem.Allocator, key_pattern: []const u8) ![]Glob
 const WORKSPACE_ACTION_BASES = std.StaticStringMap(void).initComptime(.{
     .{ "workspace", {} }, .{ "move_to_workspace", {} }, .{ "tag_toggle", {} },
 });
-inline fn isWorkspaceActionBase(action: []const u8) bool {
-    return WORKSPACE_ACTION_BASES.has(action);
-}
-
-/// If `action` is a bare workspace-action base and `ws_idx > 0`, returns a new
-/// heap-allocated string with `_<ws_idx>` appended (.owned = true).
-/// Otherwise returns the original string unchanged (.owned = false).
-const ResolvedStr = struct { str: []const u8, owned: bool };
-fn resolveActionStr(allocator: std.mem.Allocator, action: []const u8, ws_idx: u8) !ResolvedStr {
-    if (ws_idx > 0 and isWorkspaceActionBase(action))
-        return .{ .str = try std.fmt.allocPrint(allocator, "{s}_{d}", .{ action, ws_idx }), .owned = true };
-    return .{ .str = action, .owned = false };
-}
 
 /// Resolves workspace index and kill placeholder, then parses to a defs.Action.
 fn resolveAndParseAction(allocator: std.mem.Allocator, cmd: []const u8, ws_idx: u8, kill_placeholder: ?[]const u8) !defs.Action {
-    const resolved = try resolveActionStr(allocator, cmd, ws_idx);
-    defer if (resolved.owned) allocator.free(resolved.str);
-    const final = try applyPlaceholders(allocator, resolved.str, kill_placeholder);
-    defer if (final.ptr != resolved.str.ptr) allocator.free(final);
+    const ws_str: ?[]u8 = if (ws_idx > 0 and WORKSPACE_ACTION_BASES.has(cmd))
+        try std.fmt.allocPrint(allocator, "{s}_{d}", .{ cmd, ws_idx })
+    else
+        null;
+    defer if (ws_str) |s| allocator.free(s);
+    const after_ws = ws_str orelse cmd;
+    const final = try applyPlaceholders(allocator, after_ws, kill_placeholder);
+    defer if (final.ptr != after_ws.ptr) allocator.free(final);
     return try parseAction(allocator, final);
 }
 
@@ -606,7 +545,7 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, c
                 ge.key;
             defer if (keybind_str.ptr != ge.key.ptr) allocator.free(keybind_str);
 
-            // Build the action — string or array, with ws_idx resolved into
+            // Build the action from a string or array value, resolving ws_idx for workspace actions.
             const action: defs.Action = act: {
                 if (entry.value_ptr.*.asArray()) |arr| {
                     var acts: std.ArrayList(defs.Action) = .empty;
@@ -784,9 +723,6 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
 
     cfg.tiling.global_layout = get(bool, section, "global_layout", false, null, null);
 }
-
-// Iter 2: extracted shared variation-parse and indicator-parse helpers to
-// replace four near-identical copy-paste blocks in parseTilingVariations.
 
 /// Parses a `variation = "..."` key from `section` as type T.
 /// Leaves `field` unchanged and warns if the value is not a valid T tag.
@@ -980,12 +916,7 @@ fn parseLayoutsArray(
     }
 }
 
-// Iter 1: removed `field_name` from BarColorField — it was always equal to `name`,
-// so storing both was pure duplication. The inline for now uses `field.name` for both
-// the TOML key lookup and the struct field pointer.
-const BarColorField = struct { name: []const u8, default: u32 };
-
-const BAR_COLOR_FIELDS = [_]BarColorField{
+const BAR_COLOR_FIELDS = [_]struct { name: []const u8, default: u32 }{
     .{ .name = "bg",           .default = 0x222222 },
     .{ .name = "fg",           .default = 0xBBBBBB },
     .{ .name = "selected_bg",  .default = 0x005577 },
@@ -1047,14 +978,8 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     cfg.bar.font_size     = section.getScalable("font_size") orelse parser.ScalableValue.percentage(10.0);
     cfg.bar.spacing       = section.getScalable("segment_spacing") orelse parser.ScalableValue.absolute(12.0);
 
-    // Iter 1: `field_name` removed from BarColorField; use `field.name` for both key and field.
     inline for (BAR_COLOR_FIELDS) |field|
         @field(cfg.bar, field.name) = getColor(section, field.name, field.default);
-
-    cfg.bar.workspaces_accent       = getColor(section, "workspaces_accent",       cfg.bar.accent_color);
-    cfg.bar.title_accent_color      = getColor(section, "title_accent_color",      cfg.bar.accent_color);
-    cfg.bar.title_unfocused_accent  = getColor(section, "title_unfocused_accent",  cfg.bar.bg);
-    cfg.bar.clock_accent            = getColor(section, "clock_accent",            cfg.bar.accent_color);
 
     cfg.allocated_clock_format = try allocator.dupe(u8, get([]const u8, section, "clock_format", "%Y-%m-%d %H:%M:%S", null, null));
     cfg.bar.clock_format       = cfg.allocated_clock_format.?;
@@ -1103,17 +1028,18 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     try parseWorkspaceIcons(allocator, section, cfg);
     try parseBarLayout(allocator, doc, cfg);
 
-    // Iter 3: use BarConfig accessor methods as defaults instead of repeating
-    // the `orelse cfg.bar.accent_color` fallback that the accessors already encode.
-    if (doc.getSection("bar.colors")) |colors| {
-        cfg.bar.workspaces_accent      = getColor(colors, "workspaces",      cfg.bar.getWorkspaceAccent());
-        cfg.bar.title_accent_color     = getColor(colors, "title",           cfg.bar.getTitleAccent());
-        cfg.bar.title_unfocused_accent = getColor(colors, "title_unfocused", cfg.bar.getTitleUnfocusedAccent());
-        cfg.bar.title_minimized_accent = getColor(colors, "title_minimized", cfg.bar.getTitleMinimizedAccent());
-        cfg.bar.clock_accent           = getColor(colors, "clock",           cfg.bar.getClockAccent());
-        if (colors.get("drun_bg"))           |_| cfg.bar.drun_bg           = getColor(colors, "drun_bg",           cfg.bar.getDrunBg());
-        if (colors.get("drun_fg"))           |_| cfg.bar.drun_fg           = getColor(colors, "drun_fg",           cfg.bar.getDrunFg());
-        if (colors.get("drun_prompt_color")) |_| cfg.bar.drun_prompt_color = getColor(colors, "drun_prompt_color", cfg.bar.getDrunPromptColor());
+    // Segment accent colors — read from [bar.colors] if present, otherwise fall back to
+    // accent_color (or bg for unfocused). This is the single canonical place they are set.
+    const colors = doc.getSection("bar.colors");
+    cfg.bar.workspaces_accent      = if (colors) |c| getColor(c, "workspaces",      cfg.bar.accent_color) else cfg.bar.accent_color;
+    cfg.bar.title_accent_color     = if (colors) |c| getColor(c, "title",           cfg.bar.accent_color) else cfg.bar.accent_color;
+    cfg.bar.title_unfocused_accent = if (colors) |c| getColor(c, "title_unfocused", cfg.bar.bg)           else cfg.bar.bg;
+    cfg.bar.title_minimized_accent = if (colors) |c| getColor(c, "title_minimized", cfg.bar.accent_color) else cfg.bar.accent_color;
+    cfg.bar.clock_accent           = if (colors) |c| getColor(c, "clock",           cfg.bar.accent_color) else cfg.bar.accent_color;
+    if (colors) |c| {
+        if (c.get("drun_bg"))           |_| cfg.bar.drun_bg           = getColor(c, "drun_bg",           cfg.bar.bg);
+        if (c.get("drun_fg"))           |_| cfg.bar.drun_fg           = getColor(c, "drun_fg",           cfg.bar.fg);
+        if (c.get("drun_prompt_color")) |_| cfg.bar.drun_prompt_color = getColor(c, "drun_prompt_color", cfg.bar.accent_color);
     }
 }
 
@@ -1171,12 +1097,23 @@ fn parseBarLayout(allocator: std.mem.Allocator, doc: *const parser.Document, cfg
     if (cfg.bar.layout.items.len == 0) try initDefaultBarLayout(allocator, cfg);
 }
 
+/// Parses `class_name = workspace_num` pairs from a flat rules section.
+/// Used by both the [rules] and the non-numeric fallback of [workspace.rules].
+fn parseClassRulePairs(allocator: std.mem.Allocator, cfg: *defs.Config, section: *const parser.Section) !void {
+    var iter = section.pairs.iterator();
+    while (iter.next()) |entry| {
+        const ws_num = entry.value_ptr.*.asInt() orelse continue;
+        if (!validateWorkspace(@intCast(ws_num), cfg.workspaces.count, entry.key_ptr.*)) continue;
+        try addRule(allocator, cfg, entry.key_ptr.*, @intCast(ws_num));
+    }
+}
+
 fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
     if (doc.getSection("workspace.rules")) |rules_section| {
         var iter = rules_section.pairs.iterator();
         while (iter.next()) |entry| {
             const ws_num = std.fmt.parseInt(usize, entry.key_ptr.*, 10) catch {
-                // Not a number — treat as a class name with the value as workspace index.
+                // Non-numeric key: class_name = workspace_num (same as [rules] format).
                 const ws = entry.value_ptr.*.asInt() orelse continue;
                 if (!validateWorkspace(@intCast(ws), cfg.workspaces.count, entry.key_ptr.*)) continue;
                 try addRule(allocator, cfg, entry.key_ptr.*, @intCast(ws));
@@ -1193,15 +1130,9 @@ fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *d
         }
     }
 
-    // Legacy [rules] section.
-    if (doc.getSection("rules")) |rules_section| {
-        var iter = rules_section.pairs.iterator();
-        while (iter.next()) |entry| {
-            const ws_num = entry.value_ptr.*.asInt() orelse continue;
-            if (!validateWorkspace(@intCast(ws_num), cfg.workspaces.count, entry.key_ptr.*)) continue;
-            try addRule(allocator, cfg, entry.key_ptr.*, @intCast(ws_num));
-        }
-    }
+    // Legacy [rules] section: flat class_name = workspace_num pairs.
+    if (doc.getSection("rules")) |rules_section|
+        try parseClassRulePairs(allocator, cfg, rules_section);
 
     // Per-workspace sections: [workspace.rules.N] or [rules.N].
     var section_iter = doc.sections.iterator();

@@ -1,0 +1,83 @@
+### akai — hana WM default theme ###
+
+# - HEX color code values can be set to either of the following formats:
+#   "#RRGGBB" / RRGGBB / 0xRRGGBB
+
+[tiling.aesthetics]
+# [0%-200%] / [0-N] px
+## 100% = Entire display; 0% = disabled
+gap_width        = 3%
+border_width     = 1.5% #TODO: 100% doesn't cover 100% of the display.
+#TODO: make config parser accept both N% and %N values (currently %N doesn't work).
+
+border_focused   = "#ac3232"
+border_unfocused = "#52263e"
+
+[bar]
+# Font
+## First value is the default font used
+## Subsequent values render in characters not included by first value (ej. non-ASCII)
+fonts = [
+    "FiraCode Nerd Font Propo Ret",
+    "Noto Sans CJK JP", # japanese characters
+]
+
+# Bar height
+## Auto-adapts to font size by default.
+height = 3.5%
+
+## Font size covers a percentage of the bar's area according to its height
+## (e.g., 16% = font takes up 16% of the bar's vertical space)
+font_size      = 70%
+indicator_size = 25%
+
+# Workspace labels/icons (1-N)
+icons = ["あ", "か", "い", "は", "な", "つ", "ん", "で"]
+
+segment_spacing    = 5%
+indicator_padding  = 40%
+
+#
+## if neither is set
+# indicator_focused   = "■"
+# indicator_unfocused = "□"
+indicator_location = "up-left"
+
+# Workspace width as percentage of base (100% = 40px, 150% = 60px, or set exact pixels)
+workspace_tag_width = 100%  # Default base width
+
+# Bar transparency (0 = fully transparent, 1 = fully opaque)
+# With picom's gaussian blur, the bar will show blurred content behind it
+transparency = 0% # [0.0 - 1.0] / [0% - 100%]
+
+# drun command runner prompt string (default: "run: ")
+drun_prompt = "❯ "
+
+# Main color palette
+## Bar
+bg = "#0d0d14"
+fg = "#ebd9bc"
+
+## Workspace tag indicators
+selected_bg = "#ac3232"
+selected_fg = "#eeeeee"
+occupied_fg = "#eeeeee"
+urgent_bg   = "#FF0000"
+urgent_fg   = "#FFFFFF"
+
+# Accent colors for bar segments
+# Default accent for all segments
+accent_color = "#ac3232"
+
+# Per-segment accent colors (overrides default accent_color)
+[bar.colors]
+workspaces      = "#b9c0a8"  # Custom accent for workspace indicators
+title           = "#ac3232"  # Custom accent for title segment
+title_unfocused = "#52263e"
+title_minimized = "#007373"
+clock           = "#ac3232"  # Custom accent for clock segment
+
+# drun command runner colors (all optional — omit to use bar-wide defaults)
+ # drun_bg           = "#0d0d14"  # background (default: bar bg)
+ # drun_fg           = "#ebd9bc"  # typed text  (default: bar fg)
+ # drun_prompt_color = "#ac3232"  # prompt text + cursor (default: title accent)

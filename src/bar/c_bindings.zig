@@ -7,7 +7,7 @@ const xcb_connection_t = defs.xcb.xcb_connection_t;
 const xcb_drawable_t   = defs.xcb.xcb_drawable_t;
 const xcb_visualtype_t = defs.xcb.xcb_visualtype_t;
 
-// ── Cairo ─────────────────────────────────────────────────────────────────────
+// Cairo 
 
 pub const cairo_surface_t = opaque {};
 pub const cairo_t         = opaque {};
@@ -60,7 +60,7 @@ pub extern fn cairo_restore(cr: *cairo_t) void;
 pub extern fn cairo_rectangle(cr: *cairo_t, x: f64, y: f64, width: f64, height: f64) void;
 pub extern fn cairo_clip(cr: *cairo_t) void;
 
-// ── Pango ─────────────────────────────────────────────────────────────────────
+// Pango 
 
 pub const PangoLayout          = opaque {};
 pub const PangoContext         = opaque {};
@@ -118,11 +118,11 @@ pub extern fn pango_font_metrics_get_ascent(metrics: *PangoFontMetrics) c_int;
 pub extern fn pango_font_metrics_get_descent(metrics: *PangoFontMetrics) c_int;
 pub extern fn pango_font_metrics_unref(metrics: *PangoFontMetrics) void;
 
-// ── GLib/GObject ──────────────────────────────────────────────────────────────
+// GLib/GObject 
 
 pub extern fn g_object_unref(object: *anyopaque) void;
 
-// ── xcb-cursor ────────────────────────────────────────────────────────────────
+// xcb-cursor 
 // Wraps libXcursor for XCB callers. Link with: -lxcb-cursor
 
 pub const xcb_cursor_context_t = opaque {};
