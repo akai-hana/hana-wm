@@ -73,7 +73,7 @@ const FALLBACK_WORKSPACES_WIDTH: u16 = 270;
 const LAYOUT_SEGMENT_WIDTH:      u16 = 60;
 const TITLE_SEGMENT_MIN_WIDTH:   u16 = 100;
 
-// ── Snapshot ─────────────────────────────────────────────────────────────
+// Snapshot 
 
 /// Point-in-time bar state. Lives in BarChannel.slots[]; never heap-allocated.
 /// Variable-length fields use ArrayListUnmanaged so buffers grow only when
@@ -101,7 +101,7 @@ const BarSnapshot = struct {
     }
 };
 
-// ── Channel ───────────────────────────────────────────────────────────────
+// Channel 
 
 /// Lock-based channel between main thread (producer) and bar thread (consumer).
 ///
@@ -128,7 +128,7 @@ const BarChannel = struct {
 var g_channel: BarChannel     = .{};
 var g_bar_thread: ?std.Thread = null;
 
-// ── State ─────────────────────────────────────────────────────────────────
+// State 
 
 const State = struct {
     window:               u32,
@@ -394,7 +394,7 @@ const State = struct {
     }
 };
 
-// ── Bar thread ────────────────────────────────────────────────────────────
+// Bar thread 
 
 /// Interval at which the bar thread self-wakes to advance the carousel, in ns.
 /// Matches 165 Hz (1_000_000_000 / 165 ≈ 6_060_606 ns).
@@ -486,7 +486,7 @@ fn stopBarThread() void {
     g_channel.quit = false; // Reset so the channel can be reused on the next init/reload.
 }
 
-// ── Snapshot capture (main thread) ───────────────────────────────────────
+// Snapshot capture (main thread) 
 
 /// Populates a pre-allocated BarSnapshot slot in-place.
 /// All variable-length fields use ArrayListUnmanaged that grow only when
@@ -563,11 +563,11 @@ pub fn submitDraw(wm: *defs.WM, wait: bool) void {
 }
 
 
-// ── Module singleton ─────────────────────────────────────────────────────
+// Module singleton 
 
 var state: ?*State = null;
 
-// ── Pre-interned atoms ───────────────────────────────────────────────────
+// Pre-interned atoms 
 
 /// All atoms needed by setWindowProperties, interned once at bar init.
 var g_atoms: struct {
@@ -650,7 +650,7 @@ fn createBarWindow(wm: *defs.WM, height: u16, y_pos: i16) BarWindowSetup {
 fn loadBarFonts(dc: *drawing.DrawContext, wm: *defs.WM) !void {
     const cfg         = wm.config.bar;
     const alloc       = wm.allocator;
-    const scaled_size = cfg.scaledFontSize();
+    const scaled_size = wm.config.bar.scaled_font_size;
     const fonts       = cfg.fonts.items;
     if (fonts.len == 0) return;
 
@@ -728,7 +728,7 @@ fn calculateBarHeight(wm: *defs.WM) !u16 {
     return @intCast(std.math.clamp(@as(u32, @intCast(asc + desc)), MIN_BAR_HEIGHT, MAX_BAR_HEIGHT));
 }
 
-// ── Public API ────────────────────────────────────────────────────────────
+// Public API 
 
 pub fn init(wm: *defs.WM) !void {
     // Precondition: caller must check wm.config.bar.enabled before calling.

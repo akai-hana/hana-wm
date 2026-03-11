@@ -1,7 +1,9 @@
-//! Input handling — keyboard, mouse buttons, pointer motion, drag operations.
+//! User input handling
+//!
+//! Handles keyboard, mouse buttons, pointer motion and drag operations.
 
 const std        = @import("std");
-const constants = @import("constants");
+const constants  = @import("constants");
 const defs       = @import("defs");
 const xkbcommon  = @import("xkbcommon");
 const utils      = @import("utils");
@@ -14,7 +16,7 @@ const bar        = @import("bar");
 const window     = @import("window");
 const debug      = @import("debug");
 const minimize   = @import("minimize");
-const prompt       = @import("prompt");
+const prompt     = @import("prompt");
 const xcb        = defs.xcb;
 const WM         = defs.WM;
 

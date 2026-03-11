@@ -173,7 +173,7 @@ pub const State = struct {
     /// hash table. Populated by configureSafe (rect) and sendBorderColor (border).
     cache: layouts.CacheMap,
 
-    // ── Scratch buffers (heap-allocated, sized from max_ws_windows / max_ws) ──
+    // Scratch buffers (heap-allocated, sized from max_ws_windows / max_ws) 
     //
     // Reused across retile calls to avoid per-call stack pressure.  All four
     // slices are allocated in buildState and freed in deinit.

@@ -116,7 +116,10 @@ inline fn checkPath(buf: []u8, dir: []const u8, command: []const u8) bool {
     return true;
 }
 
-/// Returns the fallback TOML configuration embedded in the binary.
-pub inline fn getFallbackToml() []const u8 {
-    return @embedFile("fallback.toml");
+/// Returns the fallback TOML configuration embedded in the binary,
+/// or error.FallbackMissing if config/fallback.toml was absent at build time.
+pub inline fn getFallbackToml() error{FallbackMissing}![]const u8 {
+    const opts = @import("build_options");
+    if (!opts.has_fallback_toml) return error.FallbackMissing;
+    return opts.fallback_toml;
 }

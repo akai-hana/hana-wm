@@ -68,7 +68,7 @@ pub const DrawContext = struct {
     /// Cached GC foreground — skips xcb_change_gc when the packed ARGB pixel is unchanged.
     last_gc_color:       ?u32                      = null,
 
-    // ── Pango layout state cache ──────────────────────────────────────────────
+    // Pango layout state cache 
     // Tracks the current width/ellipsize values set on pango_layout so we can
     // skip redundant Pango calls when the values haven't changed.
     // NOTE: pango_layout_get_baseline is intentionally NOT cached here. The
@@ -80,7 +80,7 @@ pub const DrawContext = struct {
     last_layout_width:   i32                       = -1,
     last_ellipsize_mode: c.PangoEllipsizeMode      = .NONE,
 
-    // ── drawTextSized cache ───────────────────────────────────────────────────
+    // drawTextSized cache 
     // Avoids copying the font description on every indicator-glyph draw when the
     // requested size matches the previous call.
     cached_sized_desc:   ?*c.PangoFontDescription  = null,
@@ -484,7 +484,7 @@ pub const DrawContext = struct {
     }
 };
 
-// ── CarouselPixmap ────────────────────────────────────────────────────────────
+// CarouselPixmap 
 //
 // Pre-renders a window title (background + glyphs) into a dedicated XCB pixmap
 // exactly once.  Every subsequent carousel tick is two xcb_copy_area calls —
@@ -534,13 +534,13 @@ pub const CarouselPixmap = struct {
         fg:       u32,
         baseline: u16,
     ) !void {
-        // ── Background fill (XCB, straight-alpha, matches fillRect) ──────────
+        // Background fill (XCB, straight-alpha, matches fillRect) 
         const packed_bg = dc.applyTransparency(bg);
         _ = defs.xcb.xcb_change_gc(self.conn, self.gc, defs.xcb.XCB_GC_FOREGROUND, &[_]u32{packed_bg});
         _ = defs.xcb.xcb_poly_fill_rectangle(self.conn, self.pixmap, self.gc, 1,
             &defs.xcb.xcb_rectangle_t{ .x = 0, .y = 0, .width = self.text_w, .height = self.height });
 
-        // ── Text (Cairo + Pango, short-lived context) ─────────────────────────
+        // Text (Cairo + Pango, short-lived context) 
         const vt = dc.visual_type orelse return error.NoVisualType;
         const surf = c.cairo_xcb_surface_create(
             self.conn, self.pixmap, vt, @intCast(self.text_w), @intCast(self.height),

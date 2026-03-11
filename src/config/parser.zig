@@ -63,7 +63,7 @@ pub const Section = struct {
         return .{ .name = name, .pairs = map };
     }
 
-    pub fn deinit(self: *Section) void { self.pairs.deinit(); }
+    pub fn deinit(self: *Section, allocator: std.mem.Allocator) void { cleanPairs(allocator, &self.pairs); }
 
     pub fn get(self: *const Section, key: []const u8) ?Value { return self.pairs.get(key); }
 
@@ -120,7 +120,7 @@ fn deepCopyValue(allocator: std.mem.Allocator, val: Value) std.mem.Allocator.Err
                 for (new_arr.items) |*item| item.deinit(allocator);
                 new_arr.deinit(allocator);
             }
-            for (arr.items) |item| try new_arr.append(allocator, try deepCopyValue(allocator, item));
+            for (arr.items) |item| new_arr.appendAssumeCapacity(try deepCopyValue(allocator, item));
             break :blk .{ .array = new_arr };
         },
         else => val, // integer / boolean / color / scalable are trivially copyable
@@ -128,7 +128,9 @@ fn deepCopyValue(allocator: std.mem.Allocator, val: Value) std.mem.Allocator.Err
 }
 
 /// Merges the key-value pairs of `src` into `dst`.
-/// Keys present in both are overwritten with `src`'s value (last-file-wins).
+/// Duplicate keys are accumulated into arrays, exactly like the parser does for
+/// duplicate keys within a single file — so a keybind defined in two different
+/// config files will have both actions executed, not one overwriting the other.
 /// `src` is not modified; all new data is freshly allocated.
 fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Section) !void {
     var iter = src.pairs.iterator();
@@ -136,10 +138,44 @@ fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Se
         const src_key = entry.key_ptr.*;
         const src_val = entry.value_ptr.*;
         if (dst.pairs.getPtr(src_key)) |old_val| {
-            // Overwrite: free the old value, deep-copy the incoming one.
-            var old = old_val.*;
-            old.deinit(allocator);
-            old_val.* = try deepCopyValue(allocator, src_val);
+            // Duplicate key: accumulate into an array, same as the single-file
+            // parser does at parse time.
+            const incoming = try deepCopyValue(allocator, src_val);
+            errdefer { var v = incoming; v.deinit(allocator); }
+            if (old_val.* == .array) {
+                // Existing value is already an array — append into it.
+                if (incoming == .array) {
+                    // Flatten: append each element of the incoming array.
+                    for (incoming.array.items) |item| {
+                        const item_copy = try deepCopyValue(allocator, item);
+                        try old_val.array.append(allocator, item_copy);
+                    }
+                    var inc = incoming;
+                    inc.deinit(allocator);
+                } else {
+                    try old_val.array.append(allocator, incoming);
+                }
+            } else {
+                // First duplicate: wrap the existing scalar and the incoming
+                // value in a 2-element array (or flatten if incoming is array).
+                var arr = try std.ArrayList(Value).initCapacity(allocator, 2);
+                errdefer {
+                    for (arr.items) |*item| item.deinit(allocator);
+                    arr.deinit(allocator);
+                }
+                arr.appendAssumeCapacity(old_val.*);
+                if (incoming == .array) {
+                    for (incoming.array.items) |item| {
+                        const item_copy = try deepCopyValue(allocator, item);
+                        try arr.append(allocator, item_copy);
+                    }
+                    var inc = incoming;
+                    inc.deinit(allocator);
+                } else {
+                    arr.appendAssumeCapacity(incoming);
+                }
+                old_val.* = .{ .array = arr };
+            }
         } else {
             const key_copy = try allocator.dupe(u8, src_key);
             errdefer allocator.free(key_copy);
@@ -148,11 +184,10 @@ fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Se
     }
 }
 
-/// Merges `src` into `dst`; `src` takes precedence for any conflicting scalar
-/// keys (last-file-wins), but both documents remain valid after the call.
-///
-/// Intended use: parse each config file into its own Document, then fold them
-/// all into a single Document with successive `mergeDocumentsInto` calls.
+/// Merges `src` into `dst`. Duplicate keys are accumulated into arrays rather
+/// than overwritten, so the result is equivalent to having written all the
+/// key-value pairs in a single file — consistent with how the parser itself
+/// handles duplicate keys within one file.
 pub fn mergeDocumentsInto(allocator: std.mem.Allocator, dst: *Document, src: *const Document) !void {
     // Merge root-level keys.
     try mergeSectionsInto(allocator, &dst.root, &src.root);
@@ -167,7 +202,7 @@ pub fn mergeDocumentsInto(allocator: std.mem.Allocator, dst: *Document, src: *co
         } else {
             // New section — deep-copy it wholesale.
             var new_sec = Section.init(allocator, name);
-            errdefer new_sec.deinit();
+            errdefer new_sec.deinit(allocator);
             try mergeSectionsInto(allocator, &new_sec, entry.value_ptr);
             const name_copy = try allocator.dupe(u8, name);
             errdefer allocator.free(name_copy);
@@ -181,7 +216,6 @@ pub const ParseError = error{
     InvalidSection,
     InvalidValue,
     InvalidColor,
-    DuplicateKey,
     OutOfMemory,
 };
 
@@ -283,7 +317,7 @@ const Parser = struct {
         return if (key.len > 0) try self.allocator.dupe(u8, key) else ParseError.InvalidSyntax;
     }
 
-    fn parseString(self: *Parser, allocator: std.mem.Allocator) ParseError![]const u8 {
+    fn parseString(self: *Parser) ParseError![]const u8 {
         const quote = self.consume().?;
         const start = self.pos;
 
@@ -300,13 +334,13 @@ const Parser = struct {
 
         if (!has_escapes) {
             if (end_pos >= self.content.len) return ParseError.InvalidValue;
-            const result = try allocator.dupe(u8, self.content[start..end_pos]);
+            const result = try self.allocator.dupe(u8, self.content[start..end_pos]);
             self.pos = end_pos + 1;
             return result;
         }
 
-        var result = try std.ArrayList(u8).initCapacity(allocator, end_pos - start);
-        errdefer result.deinit(allocator);
+        var result = try std.ArrayList(u8).initCapacity(self.allocator, end_pos - start);
+        errdefer result.deinit(self.allocator);
 
         while (self.peek()) |c| {
             if (c == quote) break;
@@ -315,7 +349,7 @@ const Parser = struct {
             if (c == '\\') {
                 _ = self.consume();
                 const next = self.consume() orelse return ParseError.InvalidValue;
-                try result.append(allocator, switch (next) {
+                try result.append(self.allocator, switch (next) {
                     'n'        => '\n',
                     't'        => '\t',
                     'r'        => '\r',
@@ -324,27 +358,27 @@ const Parser = struct {
                     else       => return ParseError.InvalidValue,
                 });
             } else {
-                try result.append(allocator, c);
+                try result.append(self.allocator, c);
                 _ = self.consume();
             }
         }
 
         _ = self.consume();
-        return try result.toOwnedSlice(allocator);
+        return try result.toOwnedSlice(self.allocator);
     }
 
-    fn parseArray(self: *Parser, allocator: std.mem.Allocator) ParseError!std.ArrayList(Value) {
+    fn parseArray(self: *Parser) ParseError!std.ArrayList(Value) {
         _ = self.consume();
-        var array = try std.ArrayList(Value).initCapacity(allocator, 8);
+        var array = try std.ArrayList(Value).initCapacity(self.allocator, 8);
         errdefer {
-            for (array.items) |*item| item.deinit(allocator);
-            array.deinit(allocator);
+            for (array.items) |*item| item.deinit(self.allocator);
+            array.deinit(self.allocator);
         }
 
         while (true) {
             self.skipWhitespaceAndNewlines();
             if (self.peek() == ']') { _ = self.consume(); break; }
-            try array.append(allocator, try self.parseValue(allocator));
+            try array.append(self.allocator, try self.parseValue());
             self.skipWhitespaceAndNewlines();
             if (self.peek() == ',') _ = self.consume();
         }
@@ -356,12 +390,12 @@ const Parser = struct {
         .{ "true", true }, .{ "false", false },
     });
 
-    fn parseValue(self: *Parser, allocator: std.mem.Allocator) ParseError!Value {
+    fn parseValue(self: *Parser) ParseError!Value {
         self.skipWhitespace();
         const c = self.peek() orelse return ParseError.InvalidValue;
 
-        if (c == '[')              return .{ .array  = try self.parseArray(allocator) };
-        if (c == '"' or c == '\'') return .{ .string = try self.parseString(allocator) };
+        if (c == '[')              return .{ .array  = try self.parseArray() };
+        if (c == '"' or c == '\'') return .{ .string = try self.parseString() };
 
         const start = self.pos;
         while (self.pos < self.content.len and
@@ -401,14 +435,14 @@ const Parser = struct {
 
     // Bare keys (no `=`) are treated as `key = true`, which is the only call
     // site's expectation. Workspace rule entries like `Navigator` use this.
-    fn parseKeyValuePair(self: *Parser, allocator: std.mem.Allocator) ParseError!struct { []const u8, Value } {
+    fn parseKeyValuePair(self: *Parser) ParseError!struct { []const u8, Value } {
         const key = try self.parseKey();
         errdefer self.allocator.free(key);
         self.skipWhitespace();
 
         if (self.peek() == '=') {
             _ = self.consume();
-            const value = self.parseValue(allocator) catch |err| {
+            const value = self.parseValue() catch |err| {
                 self.allocator.free(key);
                 return err;
             };
@@ -457,7 +491,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
         }
 
         while (true) {
-            var kv = p.parseKeyValuePair(allocator) catch |err| {
+            var kv = p.parseKeyValuePair() catch |err| {
                 debug.warn("Invalid key-value at line {}: {}", .{ p.line, err });
                 p.skipToNewline();
                 break;

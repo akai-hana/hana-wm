@@ -38,6 +38,11 @@ pub fn build(b: *std.Build) void {
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "enable_debug_logging", optimize == .Debug);
+    const fallback_toml = b.build_root.handle.readFileAlloc(
+        b.graph.io, "config/fallback.toml", b.allocator, .limited(1024 * 1024),
+    ) catch null;
+    build_options.addOption(bool,       "has_fallback_toml", fallback_toml != null);
+    build_options.addOption([]const u8, "fallback_toml",     fallback_toml orelse "");
     // Optional subsystem flags — false when the entry-point file is absent so
     // main.zig can guard @import("bar") / @import("input") at comptime.
     const has_bar   = fileExists(b, ROOT_DIR ++ "bar/bar.zig");

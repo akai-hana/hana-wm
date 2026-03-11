@@ -31,7 +31,7 @@ const bar        = @import("bar");
 const constants  = @import("constants");
 const debug      = @import("debug");
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// Types 
 
 /// Per-window minimize record.
 const MinimizedEntry = struct {
@@ -54,7 +54,7 @@ const State = struct {
     }
 };
 
-// ── Module state ──────────────────────────────────────────────────────────────
+// Module state 
 
 // Module singleton — guaranteed live after init().
 var g_state:       State = undefined;
@@ -69,7 +69,7 @@ pub inline fn getStateOpt() ?*State {
     return if (g_initialized) &g_state else null;
 }
 
-// ── Lifecycle ─────────────────────────────────────────────────────────────────
+// Lifecycle 
 
 pub fn init(wm: *WM) !void {
     var info_map = std.AutoHashMap(u32, MinimizedEntry).init(wm.allocator);
@@ -88,7 +88,7 @@ pub fn deinit() void {
     g_initialized = false;
 }
 
-// ── Public queries ────────────────────────────────────────────────────────────
+// Public queries 
 
 pub inline fn isMinimized(_: *const WM, win: u32) bool {
     if (!g_initialized) return false;
@@ -113,7 +113,7 @@ pub fn focusBestAvailable(wm: *WM) void {
     focus.clearFocus(wm);
 }
 
-// ── Minimize ──────────────────────────────────────────────────────────────────
+// Minimize 
 
 pub fn minimizeWindow(wm: *WM) void {
     const win    = focus.getFocused()               orelse return;
@@ -175,7 +175,7 @@ pub fn minimizeWindow(wm: *WM) void {
     _ = xcb.xcb_flush(wm.conn);
 }
 
-// ── Restore helpers ───────────────────────────────────────────────────────────
+// Restore helpers 
 
 fn restoreWindowImpl(wm: *WM, win: u32, saved_fs: ?defs.WindowGeometry) void {
     if (saved_fs) |geom| {
@@ -216,7 +216,7 @@ inline fn restoreWindow(wm: *WM, win: u32) void {
     restoreWindowImpl(wm, win, entry.value.saved_fs);
 }
 
-// ── Unminimize ────────────────────────────────────────────────────────────────
+// Unminimize 
 
 pub const RestoreOrder = enum { lifo, fifo };
 
@@ -317,7 +317,7 @@ pub fn unminimizeAll(wm: *WM) void {
     for (fs_wins) |e| restoreWindow(wm, e.win);
 }
 
-// ── State maintenance ─────────────────────────────────────────────────────────
+// State maintenance 
 
 /// Called by window.zig on unmap/destroy to keep state coherent.
 pub fn forceUntrack(_: *WM, win: u32) void {

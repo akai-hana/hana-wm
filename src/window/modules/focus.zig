@@ -9,7 +9,7 @@ const window = @import("window");
 const xcb    = defs.xcb;
 const WM     = defs.WM;
 
-// ── Module state ──────────────────────────────────────────────────────────────
+// Module state 
 //
 // These three fields were formerly on the WM struct; they belong here because
 // only focus.zig should be their primary writer.  All other modules call the
@@ -19,7 +19,7 @@ var g_focused_window:  ?u32                     = null;
 var g_suppress_reason: defs.FocusSuppressReason = .none;
 var g_last_event_time: u32                      = 0;
 
-// ── Focus history ─────────────────────────────────────────────────────────────
+// Focus history 
 //
 // Full MRU list of previously focused windows.  Index 0 is the most recently
 // focused window before the current one, index 1 the one before that, and so on.
@@ -37,7 +37,7 @@ var g_last_event_time: u32                      = 0;
 var g_history:   std.ArrayListUnmanaged(u32) = .empty;
 var g_allocator: std.mem.Allocator           = undefined;
 
-// ── Lifecycle ─────────────────────────────────────────────────────────────────
+// Lifecycle 
 
 pub fn init(allocator: std.mem.Allocator) void {
     g_allocator = allocator;
@@ -74,7 +74,7 @@ pub inline fn historyItems() []const u32 {
     return g_history.items;
 }
 
-// ── Public accessors ──────────────────────────────────────────────────────────
+// Public accessors 
 
 pub inline fn getFocused()        ?u32                       { return g_focused_window; }
 pub inline fn getSuppressReason() defs.FocusSuppressReason   { return g_suppress_reason; }
@@ -84,7 +84,7 @@ pub inline fn setFocused(win: ?u32) void                         { g_focused_win
 pub inline fn setSuppressReason(r: defs.FocusSuppressReason) void { g_suppress_reason = r; }
 pub inline fn setLastEventTime(t: u32) void                      { g_last_event_time = t; }
 
-// ── Focus logic ───────────────────────────────────────────────────────────────
+// Focus logic 
 
 pub const Reason = enum {
     mouse_click,

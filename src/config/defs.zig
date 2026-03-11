@@ -1,6 +1,6 @@
 //! Core WM type definitions.
 //!
-//! This file is intentionally kept small (~100 lines).
+//! This file has grown beyond its original intent but remains the canonical home for all
 //! - Config types are defined directly in this file (Action, Config, BarConfig, etc.).
 //! - Runtime constants (MOD_*, MIN_*) live in constants.zig.
 //! - Fullscreen types live in fullscreen.zig.
@@ -21,7 +21,7 @@ pub const xcb = @cImport({
 /// single canonical grep target.
 pub const WindowId = u32;
 
-// ── Config types ─────────────────────────────────────────────────────────────
+// Config types 
 
 pub const Action = union(enum) {
     exec: []const u8,
@@ -43,7 +43,7 @@ pub const Action = union(enum) {
     move_to_workspace: u8,
     move_window:       u8, // exclusive move — clears all tags, sets only target
     tag_toggle:        u8, // pure toggle — flips bit N, never moves
-    sequence:          []const Action, // ordered list of actions executed left-to-right
+    sequence:          []Action, // ordered list of actions executed left-to-right; owned slice
     dump_state,
     minimize_window,
     unminimize_lifo,
@@ -57,7 +57,7 @@ pub const Action = union(enum) {
         switch (self.*) {
             .exec     => |cmd|  allocator.free(cmd),
             .sequence => |acts| {
-                for (@constCast(acts)) |*a| a.deinit(allocator);
+                for (acts) |*a| a.deinit(allocator);
                 allocator.free(acts);
             },
             else => {},
@@ -87,10 +87,8 @@ pub const MasterSide = enum {
     left,
     right,
 
-    pub inline fn fromString(str: []const u8) ?MasterSide { return std.meta.stringToEnum(MasterSide, str); }
-    pub inline fn toString(value: MasterSide) []const u8   { return @tagName(value); }
-
-    // Support 'L'/'R' aliases in addition to full names.
+    // alias_map covers all full names (case-insensitively) and short aliases;
+    // fromStringWithAlias is the canonical parse entry point.
     const alias_map = std.StaticStringMap(MasterSide).initComptime(.{
         .{ "l", .left }, .{ "left", .left },
         .{ "r", .right }, .{ "right", .right },
@@ -204,7 +202,8 @@ pub const IndicatorLocation = enum {
     /// Accepts hyphens or underscores, and both orderings of diagonal names 
     /// (e.g. "left-up" == "up-left")
     pub inline fn fromString(str: []const u8) ?IndicatorLocation {
-        //TODO: is there some way to micro-optimize this, so that somehow '-' == '_', and "up-/_left" == "left-/_up"?
+        // Both orderings of diagonal names and both separators are pre-listed.
+        // StaticStringMap.initComptime is a compile-time perfect hash — O(1), no runtime cost.
         const map = std.StaticStringMap(IndicatorLocation).initComptime(.{
             .{ "up",          .up         },
             .{ "down",        .down       },
@@ -283,7 +282,7 @@ pub const BarConfig = struct {
     font:              []const u8             = "monospace:size=10",
     fonts:             std.ArrayList([]const u8),
     font_size:         parser.ScalableValue   = parser.ScalableValue.percentage(10.0),
-    scaled_font_size:  u16                    = 10, // Can exceed 255 on high DPI - u16 is correct //TODO: it isn't clear what this comment refers to
+    scaled_font_size:  u16                    = 10, // Can exceed 255 on high DPI - u16 is correct
     spacing:           parser.ScalableValue   = parser.ScalableValue.absolute(12.0),
 
     // Colors: 0xRRGGBB packed into 32 bits (X11 color format).
@@ -295,12 +294,12 @@ pub const BarConfig = struct {
     urgent_bg:   u32 = 0xFF0000,
     urgent_fg:   u32 = 0xFFFFFF,
 
-    accent_color:           u32  = 0x61AFEF,
-    workspaces_accent:      ?u32 = null,
-    title_accent_color:     ?u32 = null,
-    title_unfocused_accent: ?u32 = null,
-    title_minimized_accent: ?u32 = null,
-    clock_accent:           ?u32 = null,
+    accent_color:           u32 = 0x61AFEF,
+    workspaces_accent:      u32 = 0x61AFEF,
+    title_accent_color:     u32 = 0x61AFEF,
+    title_unfocused_accent: u32 = 0x222222,
+    title_minimized_accent: u32 = 0x61AFEF,
+    clock_accent:           u32 = 0x61AFEF,
 
     workspace_icons:     std.ArrayList([]const u8),
     indicator_size:      parser.ScalableValue = parser.ScalableValue.percentage(30.0),
@@ -317,7 +316,7 @@ pub const BarConfig = struct {
     // drun segment colors and prompt (all optional. Fall-back to bar-wide defaults)
     drun_bg:           ?u32       = null,    // Background; falls back to bg
     drun_fg:           ?u32       = null,    // Typed text color; falls back to fg
-    drun_prompt_color: ?u32       = null,    // Prompt text color; falls back to getTitleAccent()
+    drun_prompt_color: ?u32       = null,    // Prompt text color; falls back to accent_color
     drun_prompt:       []const u8 = "run: ", // Displayed before the input field
 
     layout: std.ArrayList(BarLayout),
@@ -334,21 +333,11 @@ pub const BarConfig = struct {
         self.layout.deinit(allocator);
     }
 
-    pub inline fn getWorkspaceAccent(self: *const BarConfig) u32 {
-        return self.workspaces_accent orelse self.accent_color;
-    }
-    pub inline fn getTitleAccent(self: *const BarConfig) u32 {
-        return self.title_accent_color orelse self.accent_color;
-    }
-    pub inline fn getTitleUnfocusedAccent(self: *const BarConfig) u32 {
-        return self.title_unfocused_accent orelse self.accent_color;
-    }
-    pub inline fn getTitleMinimizedAccent(self: *const BarConfig) u32 {
-        return self.title_minimized_accent orelse self.bg;
-    }
-    pub inline fn getClockAccent(self: *const BarConfig) u32 {
-        return self.clock_accent orelse self.accent_color;
-    }
+    pub inline fn getWorkspaceAccent(self: *const BarConfig) u32    { return self.workspaces_accent;      }
+    pub inline fn getTitleAccent(self: *const BarConfig) u32         { return self.title_accent_color;     }
+    pub inline fn getTitleUnfocusedAccent(self: *const BarConfig) u32 { return self.title_unfocused_accent; }
+    pub inline fn getTitleMinimizedAccent(self: *const BarConfig) u32 { return self.title_minimized_accent; }
+    pub inline fn getClockAccent(self: *const BarConfig) u32         { return self.clock_accent;           }
     pub inline fn getDrunBg(self: *const BarConfig) u32 {
         return self.drun_bg orelse self.bg;
     }
@@ -356,10 +345,8 @@ pub const BarConfig = struct {
         return self.drun_fg orelse self.fg;
     }
     pub inline fn getDrunPromptColor(self: *const BarConfig) u32 {
-        return self.drun_prompt_color orelse self.getTitleAccent();
+        return self.drun_prompt_color orelse self.accent_color;
     }
-    pub inline fn scaledFontSize(self: *const BarConfig) u16 { return self.scaled_font_size; }
-
     /// Derives horizontal segment padding from the font_size percentage.
     pub inline fn scaledSegmentPadding(self: *const BarConfig, bar_height: u16) u16 {
         if (!self.font_size.is_percentage) return 0;
@@ -458,7 +445,7 @@ pub const Config = struct {
     }
 };
 
-// ── Core geometric type ───────────────────────────────────────────────────────
+// Core geometric type 
 
 /// Geometry snapshot used by both fullscreen and minimize.
 pub const WindowGeometry = struct {
@@ -469,7 +456,7 @@ pub const WindowGeometry = struct {
     border_width: u16,
 };
 
-// ── Input model types ─────────────────────────────────────────────────────────
+// Input model types 
 
 pub const DragState = struct {
     active:           bool  = false,
@@ -490,7 +477,7 @@ pub const FocusSuppressReason = enum {
     tiling_operation, // currently tiling: don't let cursor steal focus
 };
 
-// ── WM connection context ─────────────────────────────────────────────────────
+// WM connection context 
 // After the full modular refactor, WM holds only connection plumbing + config.
 // Runtime state (focus, drag, spawn queue, fullscreen, workspaces, tiling,
 // minimize) lives in each module's own g_state.

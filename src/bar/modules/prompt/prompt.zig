@@ -28,7 +28,7 @@ const c = @cImport({
     @cInclude("sys/wait.h");
 });
 
-// ── xcb-keysyms bindings (link with -lxcb-keysyms) ───────────────────────────
+// xcb-keysyms bindings (link with -lxcb-keysyms) 
 
 const xcb_key_symbols_t = opaque {};
 
@@ -36,7 +36,7 @@ extern fn xcb_key_symbols_alloc(conn: *xcb.xcb_connection_t) ?*xcb_key_symbols_t
 extern fn xcb_key_symbols_free(syms: *xcb_key_symbols_t) void;
 extern fn xcb_key_symbols_get_keysym(syms: *xcb_key_symbols_t, code: xcb.xcb_keycode_t, col: c_int) xcb.xcb_keysym_t;
 
-// ── Constants ─────────────────────────────────────────────────────────────────
+// Constants 
 
 const MIN_CURSOR_PX  : u16   = 8;
 const CURSOR_WIDTH   : u16   = 1;    // caret width in pixels (insert mode)
@@ -47,7 +47,7 @@ const MAX_COMP_LEN   : usize = 64;   // max length of a single executable name
 const MAX_HIST       : usize = 512;  // history entries kept in memory
 const MAX_HIST_LINE  : usize = vim.DEFAULT_MAX_INPUT; // max chars per history entry
 
-// ── Module state ──────────────────────────────────────────────────────────────
+// Module state 
 
 const DrunState = struct {
     active:   bool = false,
@@ -59,7 +59,7 @@ const DrunState = struct {
     cached_prompt_w: ?u16                = null,
     cached_mode_w:   [4]?u16             = .{ null, null, null, null },
 
-    // ── PATH completion ───────────────────────────────────────────────────────
+    // PATH completion 
     comp_names: []u8  = &.{},
     comp_count: usize = 0,
 
@@ -69,7 +69,7 @@ const DrunState = struct {
 
     blink_visible: bool = true,
 
-    // ── Command history (newest at index 0) ───────────────────────────────────
+    // Command history (newest at index 0) 
     hist_entries: []u8  = &.{},
     hist_count:   usize = 0,
     hist_loaded:  bool  = false,
@@ -77,7 +77,7 @@ const DrunState = struct {
 
 var g: DrunState = .{};
 
-// ── Public API ────────────────────────────────────────────────────────────────
+// Public API 
 
 pub fn isActive() bool { return g.active; }
 
@@ -137,14 +137,14 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *defs.WM) boo
     const col: c_int = if (shift_held) 1 else 0;
     const sym        = xcb_key_symbols_get_keysym(syms, event.detail, col);
 
-    // ── Ctrl-modified keys ────────────────────────────────────────────────────
+    // Ctrl-modified keys 
     if (ctrl_held) {
         const action = vim.handleCtrl(&g.vim, sym);
         handleAction(action, wm);
         return true;
     }
 
-    // ── Tab: accept ghost completion ──────────────────────────────────────────
+    // Tab: accept ghost completion 
     if (sym == vim.XK_Tab and g.vim.mode == .insert) {
         if (g.ghost_len > 0 and g.vim.cursor == g.vim.len) {
             const n = @min(g.ghost_len, g.vim.max_input - 1 - g.vim.len);
@@ -157,7 +157,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *defs.WM) boo
         return true;
     }
 
-    // ── Dispatch to mode handler ──────────────────────────────────────────────
+    // Dispatch to mode handler 
     const action = switch (g.vim.mode) {
         .insert  => vim.handleInsert(&g.vim, sym),
         .normal  => vim.handleNormal(&g.vim, sym),
@@ -196,7 +196,7 @@ pub fn draw(
     return drawActive(dc, config, height, start_x, width);
 }
 
-// ── Action handling ───────────────────────────────────────────────────────────
+// Action handling 
 
 fn handleAction(action: vim.Action, wm: *defs.WM) void {
     switch (action) {
@@ -210,7 +210,7 @@ fn handleAction(action: vim.Action, wm: *defs.WM) void {
     }
 }
 
-// ── Activate / deactivate ─────────────────────────────────────────────────────
+// Activate / deactivate 
 
 /// Reset all VimState editing fields to their defaults without touching the
 /// heap-allocated buffers (buf, yank_buf, undo/redo stacks, etc.).
@@ -265,7 +265,7 @@ fn deactivate(wm: *defs.WM) void {
     _ = xcb.xcb_flush(wm.conn);
 }
 
-// ── PATH completion ──────────────────────────────────────────────────────────
+// PATH completion 
 
 /// Scan every directory in $PATH and collect executable names into the static
 /// comp_names table.  Called once on first activation.
@@ -355,7 +355,7 @@ fn updateGhost() void {
 
     const prefix = g.vim.buf[0..g.vim.len];
 
-    // ── 1. History-based suggestion (newest first) ──────────────────────────
+    // 1. History-based suggestion (newest first) 
     var hi: usize = 0;
     while (hi < g.hist_count) : (hi += 1) {
         const hslot = hi * (MAX_HIST_LINE + 1);
@@ -376,7 +376,7 @@ fn updateGhost() void {
         return;
     }
 
-    // ── 2. Fallback: shortest executable that starts with prefix ────────────
+    // 2. Fallback: shortest executable that starts with prefix 
     //    comp_names is sorted, so the first entry past the lower bound that
     //    starts with prefix and is longer than prefix IS the shortest match.
     var i: usize = compLowerBound(prefix);
@@ -393,7 +393,7 @@ fn updateGhost() void {
     }
 }
 
-// ── History ──────────────────────────────────────────────────────────────────
+// History 
 
 /// Prepend `cmd` to the in-memory history (newest at index 0).
 fn histPrepend(cmd: []const u8) void {
@@ -555,7 +555,7 @@ fn loadHistory() void {
     }
 }
 
-// ── Spawn ─────────────────────────────────────────────────────────────────────
+// Spawn 
 
 fn spawnCommand(cmd: []const u8) void {
     histPrepend(cmd);
@@ -582,7 +582,7 @@ fn spawnCommand(cmd: []const u8) void {
     }
 }
 
-// ── Rendering ─────────────────────────────────────────────────────────────────
+// Rendering 
 
 /// Binary search: first byte offset where textWidth(text[0..offset]) >= target_px.
 /// That is: the index of the first character that begins at or past `target_px`
@@ -685,7 +685,7 @@ fn drawActive(
     const text_end_x  = end_x   -| pad;
     if (text_left_x >= text_end_x) return end_x;
 
-    // ── Mode label (pinned right) ─────────────────────────────────────────────
+    // Mode label (pinned right) 
     const mode_label = g.vim.mode.label();
     const mode_idx: usize = @intFromEnum(g.vim.mode);
 
@@ -706,14 +706,14 @@ fn drawActive(
 
     const max_scroll_px: u16 = scroll_end_x - text_left_x;
 
-    // ── Measure prompt ────────────────────────────────────────────────────────
+    // Measure prompt 
     const prompt_w: u16 = g.cached_prompt_w orelse blk: {
         const w = dc.textWidth(prompt);
         g.cached_prompt_w = w;
         break :blk w;
     };
 
-    // ── Compute scroll offset (keep cursor visible) ───────────────────────────
+    // Compute scroll offset (keep cursor visible) 
     //
     // In INSERT mode the cursor is a thin 2-px caret; the character it sits on
     // is NOT consumed, so post_text starts at cursor (not cursor+1) and the
@@ -737,11 +737,11 @@ fn drawActive(
     if (cursor_right > max_scroll_px)
         scroll_x = cursor_right -| max_scroll_px +| caret_w;
 
-    // ── Draw prompt ───────────────────────────────────────────────────────────
+    // Draw prompt 
     var px: i32 = @as(i32, text_left_x) - @as(i32, scroll_x);
     try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, prompt, accent);
 
-    // ── Mode-specific text rendering ──────────────────────────────────────────
+    // Mode-specific text rendering 
     if (g.vim.mode == .visual) {
         // Visual mode: split buffer into pre-selection, selection, post-selection.
         const sel      = vim.visualRange(&g.vim);
@@ -779,7 +779,7 @@ fn drawActive(
         }
 
     } else if (g.vim.mode == .insert) {
-        // ── INSERT mode: blinking 2-px caret, text NOT consumed by cursor ────
+        // INSERT mode: blinking 2-px caret, text NOT consumed by cursor 
         const pre_text = g.vim.buf[0..g.vim.cursor];
 
         if (pre_text.len > 0)
@@ -813,7 +813,7 @@ fn drawActive(
         }
 
     } else {
-        // ── NORMAL / REPLACE: full-character block cursor ─────────────────────
+        // NORMAL / REPLACE: full-character block cursor 
         const pre_text = g.vim.buf[0..g.vim.cursor];
         const cur_text = if (g.vim.cursor < g.vim.len) g.vim.buf[g.vim.cursor .. g.vim.cursor + 1] else " ";
         const cur_w    = @max(dc.textWidth(cur_text), MIN_CURSOR_PX);
