@@ -267,12 +267,12 @@ pub fn moveWindowExclusive(wm: *WM, win: u32, target_ws: u8) void {
 /// without losing track of which window they're operating on.
 ///
 /// `protect_current` (Mod+Alt+N / tag_additive):
-///   When true, the current workspace bit can never be cleared, and adding a
-///   tag always keeps the current workspace set too. Use this to copy a window
-///   to other workspaces while keeping it visible where you are.
+///   When true, adding a tag always keeps the current workspace set too.
+///   Removing the current workspace tag is still allowed as long as the
+///   window remains tagged to at least one other workspace.
 ///
-/// • Bit N set   → clear it (window leaves N). If N == current and unprotected,
-///                 pushed offscreen. If protected, no-op.
+/// • Bit N set   → clear it (window leaves N). Allowed unless it is the
+///                 window's last tag. If N == current, pushed offscreen.
 /// • Bit N clear → set it  (window gains N). Silently added to inactive workspace.
 /// • Last workspace is always protected: cannot clear the final bit.
 pub fn tagToggle(wm: *WM, win: u32, target_ws: u8, protect_current: bool) void {
@@ -286,7 +286,6 @@ pub fn tagToggle(wm: *WM, win: u32, target_ws: u8, protect_current: bool) void {
 
     if (mask & tbit != 0) {
         // Remove tag N.
-        if (protect_current and target_ws == current) return;
         if (@popCount(mask) <= 1) return; // last workspace — protect
         setWindowMask(s, win, mask & ~tbit);
         if (target_ws == current) {

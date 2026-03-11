@@ -4,10 +4,11 @@ const std    = @import("std");
 const defs   = @import("defs");
 const tiling = @import("tiling");
 const utils  = @import("utils");
-const bar    = @import("bar");
-const window = @import("window");
-const xcb    = defs.xcb;
-const WM     = defs.WM;
+const bar      = @import("bar");
+const window   = @import("window");
+const carousel = @import("carousel");
+const xcb      = defs.xcb;
+const WM       = defs.WM;
 
 // Module state 
 //
@@ -127,7 +128,7 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     const old = g_focused_window;
     if (old) |old_win| recordInHistory(old_win);
     g_focused_window = win;
-    g_suppress_reason = suppressionFor(reason);
+    g_suppress_reason = suppressionFor(reason, g_suppress_reason);
 
     window.grabButtons(wm, win, true);
     if (old) |old_win| window.grabButtons(wm, old_win, false);
@@ -204,6 +205,9 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     }
 
     tiling.updateWindowFocus(wm, old, win);
+    // Notify the carousel immediately so it can free the stale seg-carousel
+    // pixmap and record focus-click time before the draw cycle runs.
+    carousel.notifyFocusChanged(win);
     bar.scheduleFocusRedraw(win);
 }
 
@@ -243,6 +247,7 @@ pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t, wm: *WM) void {
     if (old) |old_win| recordInHistory(old_win);
     g_focused_window = win;
     tiling.updateWindowFocus(wm, old, win);
+    carousel.notifyFocusChanged(win);
     bar.scheduleFocusRedraw(win);
 }
 
@@ -259,6 +264,7 @@ pub fn clearFocus(wm: *WM) void {
         wm.root,
         g_last_event_time,
     );
+    carousel.notifyFocusChanged(null);
     bar.scheduleFocusRedraw(null);
 }
 
@@ -269,16 +275,31 @@ inline fn shouldRaise(reason: Reason) bool {
     };
 }
 
-inline fn suppressionFor(reason: Reason) defs.FocusSuppressReason {
-    // Only window_spawn suppresses enter-notify via setFocus.
-    // tiling_operation must NOT suppress here: callers such as focusBestAvailable
-    // (minimize) and focusPrevOrBest (window kill) set focus programmatically and
-    // should not block subsequent hover-focus events.  The one caller that genuinely
-    // needs enter-notify suppression (fullscreen exit) calls setSuppressReason
-    // directly and is therefore unaffected by this change.
+inline fn suppressionFor(reason: Reason, current: defs.FocusSuppressReason) defs.FocusSuppressReason {
+    // Only explicit user-driven actions clear suppression unconditionally.
+    // Programmatic focus changes (tiling_operation, workspace_switch, mouse_enter)
+    // must preserve any suppression that was set externally — most importantly by
+    // the fullscreen-exit path, which calls setSuppressReason directly before
+    // calling setFocus(.tiling_operation).
+    //
+    // Without this, the sequence:
+    //   setSuppressReason(.window_spawn)        ← fullscreen exit
+    //   setFocus(win, .tiling_operation)         ← restores focus
+    //     → suppressionFor(.tiling_operation) returned .none
+    //     → g_suppress_reason clobbered to .none before the EnterNotify arrives
+    //     → spurious EnterNotify is no longer suppressed, focus goes to the wrong
+    //       window; or if setFocus hit the g_focused_window == win early-return,
+    //       suppression was never cleared and all subsequent hover events are
+    //       silently swallowed until the user clicks.
+    //
+    // Rules:
+    //   mouse_click / user_command — explicit user interaction: always clear.
+    //   window_spawn               — new window capturing focus: set suppression.
+    //   everything else            — programmatic: leave current value unchanged.
     return switch (reason) {
-        .window_spawn => .window_spawn,
-        else          => .none,
+        .mouse_click, .user_command => .none,
+        .window_spawn               => .window_spawn,
+        else                        => current,
     };
 }
 
@@ -289,4 +310,3 @@ fn isWindowMapped(conn: *xcb.xcb_connection_t, win: u32) bool {
     defer std.c.free(reply);
     return reply.*.map_state == xcb.XCB_MAP_STATE_VIEWABLE;
 }
-
