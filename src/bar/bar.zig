@@ -447,8 +447,9 @@ fn barThreadFn(s: *State) void {
             g_channel.done_cond.broadcast();
             g_channel.mutex.unlock();
         } else {
-            if (do_focus) s.drawTitleOnly(focus_new_win);
-            if (!do_focus and title_mod.isCarouselActive()) {
+            if (do_focus) {
+                s.drawTitleOnly(focus_new_win);
+            } else if (title_mod.isCarouselActive()) {
                 s.drawTitleOnly(s.cached_focused_window);
                 // Advance deadline by exactly one frame interval so cadence is
                 // steady regardless of how long the draw + OS scheduling took.
@@ -630,19 +631,13 @@ fn createBarWindow(wm: *defs.WM, height: u16, y_pos: i16) BarWindowSetup {
                        xcb.XCB_CW_OVERRIDE_REDIRECT | xcb.XCB_CW_EVENT_MASK |
                        if (want_transparency) xcb.XCB_CW_COLORMAP else 0;
     const base_events = xcb.XCB_EVENT_MASK_EXPOSURE | xcb.XCB_EVENT_MASK_BUTTON_PRESS;
-    if (want_transparency) {
-        const value_list = [_]u32{ 0, 0, 1, base_events, colormap };
-        _ = xcb.xcb_create_window(wm.conn, depth, window, wm.screen.root,
-            0, y_pos, wm.screen.width_in_pixels, height, 0,
-            xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, visual_id,
-            @intCast(value_mask), &value_list);
-    } else {
-        const value_list = [_]u32{ 0, 0, 1, base_events };
-        _ = xcb.xcb_create_window(wm.conn, depth, window, wm.screen.root,
-            0, y_pos, wm.screen.width_in_pixels, height, 0,
-            xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, visual_id,
-            @intCast(value_mask), &value_list);
-    }
+    // colormap is 0 when opaque; value_mask omits XCB_CW_COLORMAP in that case,
+    // so XCB reads only the first four values and the trailing 0 is ignored.
+    const value_list = [5]u32{ 0, 0, 1, base_events, colormap };
+    _ = xcb.xcb_create_window(wm.conn, depth, window, wm.screen.root,
+        0, y_pos, wm.screen.width_in_pixels, height, 0,
+        xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, visual_id,
+        @intCast(value_mask), &value_list);
 
     return .{ .window = window, .visual_id = visual_id, .has_argb = want_transparency, .colormap = colormap };
 }

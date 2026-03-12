@@ -7,25 +7,26 @@ const xcb = @cImport({
 // Modifier masks 
 // Must be u16 per XCB API; widening to u32 breaks xcb_grab_key.
 pub const MOD_SHIFT:   u16 = xcb.XCB_MOD_MASK_SHIFT;
-pub const MOD_LOCK:    u16 = xcb.XCB_MOD_MASK_LOCK;
+pub const MOD_LOCK:    u16 = xcb.XCB_MOD_MASK_LOCK; //TODO: difference between lock and numlock?
 pub const MOD_CONTROL: u16 = xcb.XCB_MOD_MASK_CONTROL;
 pub const MOD_ALT:     u16 = xcb.XCB_MOD_MASK_1;
-pub const MOD_2:       u16 = xcb.XCB_MOD_MASK_2;  // NumLock
+pub const MOD_2:       u16 = xcb.XCB_MOD_MASK_2; // TODO: inconsistent naming with the other constants
 pub const MOD_SUPER:   u16 = xcb.XCB_MOD_MASK_4;
 
+//TODO: is "RELEVANT" the best naming there could be? it doesn't quite convince me
 pub const MOD_MASK_RELEVANT: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER;
 
 // Window constraints 
-pub const MIN_WINDOW_DIM:   u16 = 50;
-pub const MIN_MASTER_WIDTH: f32 = 0.05;
+pub const MIN_WINDOW_DIM:   u16 = 50; //TODO: arbitrary dimensions?
+pub const MIN_MASTER_WIDTH: f32 = 0.05; //TODO: arbitrary dimensions?
 
 // XKB retry parameters 
-pub const XKB_RETRY_DELAY_MS: u64 = 20;
+pub const XKB_RETRY_DELAY_MS: u64 = 20; //TODO: why 20 specifically? 
 
 // Offscreen positioning 
 // Windows on inactive workspaces are parked at OFFSCREEN_X_POSITION so they
 // are hidden without being unmapped (unmapping causes some apps to pause).
-pub const OFFSCREEN_X_POSITION: i32 = -4000;
+pub const OFFSCREEN_X_POSITION: i32 = -4000; //TODO: why -4000?
 
 // Lower bound for detecting whether a window is parked offscreen.
 // A fixed upper bound is intentionally absent: multi-monitor desktops can

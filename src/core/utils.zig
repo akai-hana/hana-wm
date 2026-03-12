@@ -28,6 +28,7 @@ const WM_HINTS_LONG_LENGTH:  u32   = 9; // flags + 8 fields
 // Signal handlers and keybind actions write here; the main event loop reads here.
 
 /// Set to false by SIGTERM/SIGINT to break the main event loop.
+//TODO
 pub var running = std.atomic.Value(bool).init(true);
 
 /// Set to true by SIGHUP or the `reload_config` keybinding.

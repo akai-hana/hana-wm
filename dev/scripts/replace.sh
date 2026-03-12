@@ -105,4 +105,6 @@ for f in "$FILES_DIR"/* "$FILES_DIR"/.*; do
   write_to_codebase "$f" "$dest"
 done
 
+rm -r dev/codebase
+
 zig build --color on --error-style minimal -freference-trace=5

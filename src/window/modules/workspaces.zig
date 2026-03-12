@@ -394,7 +394,7 @@ fn hideWorkspaceWindows(wm: *WM, ws: *const Workspace, new_ws: u8) void {
 
     for (ws.windows.items()) |win| {
         if (isWindowOnWorkspace(win, new_ws)) continue; // stays visible
-        if (!tiling.isWindowTiled(win) and !minimize.isMinimized(wm, win)) {
+        if (!tiling.isWindowActiveTiled(win) and !minimize.isMinimized(wm, win)) {
             if (float_n < MAX_FLOAT) {
                 float_wins[float_n]    = win;
                 float_cookies[float_n] = xcb.xcb_get_geometry(wm.conn, win);
@@ -420,7 +420,7 @@ fn hideWorkspaceWindows(wm: *WM, ws: *const Workspace, new_ws: u8) void {
             fi += 1;
         }
         pushOffscreen(wm.conn, win);
-        if (tiling.isWindowTiled(win)) tiling.invalidateGeomCache(win);
+        if (tiling.isWindowActiveTiled(win)) tiling.invalidateGeomCache(win);
     }
 }
 
@@ -452,7 +452,7 @@ fn restoreWorkspaceWindows(wm: *WM, ws: *const Workspace, old_ws: u8) void {
     const pos = utils.floatDefaultPos(wm);
     for (ws.windows.items()) |win| {
         _ = xcb.xcb_map_window(wm.conn, win);
-        if (!tiling.isWindowTiled(win) and !minimize.isMinimized(wm, win) and
+        if (!tiling.isWindowActiveTiled(win) and !minimize.isMinimized(wm, win) and
             !isWindowOnWorkspace(win, old_ws))
         {
             if (tiling.getWindowGeom(win)) |rect| {
