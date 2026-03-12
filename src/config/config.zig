@@ -211,8 +211,7 @@ pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !de
         try processIncludes(allocator, &merged, &doc, dir_path);
     }
 
-    var cfg = getDefaultConfig(allocator);
-    try parseConfigSections(allocator, &merged, &cfg);
+    const cfg = try buildConfigFromDoc(allocator, &merged);
     debug.info("Loaded config from dir: {s} ({} file(s))", .{ dir_path, names.items.len });
     return cfg;
 }
@@ -276,16 +275,13 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
         return try loadFallbackConfig(allocator);
     }
 
-    var merged = parser.Document.init(allocator);
-    defer merged.deinit();
-
     var doc = try parser.parse(allocator, raw);
     defer doc.deinit();
+    var merged = parser.Document.init(allocator);
+    defer merged.deinit();
     try parser.mergeDocumentsInto(allocator, &merged, &doc);
     try processIncludes(allocator, &merged, &doc, std.fs.path.dirname(path) orelse ".");
-
-    var cfg = getDefaultConfig(allocator);
-    try parseConfigSections(allocator, &merged, &cfg);
+    const cfg = try buildConfigFromDoc(allocator, &merged);
     debug.info("Loaded: {s}", .{path});
     return cfg;
 }
@@ -296,8 +292,7 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !defs.Config {
 
     var doc = try parser.parse(allocator, fallback_toml);
     defer doc.deinit();
-    var cfg = getDefaultConfig(allocator);
-    try parseConfigSections(allocator, &doc, &cfg);
+    var cfg = try buildConfigFromDoc(allocator, &doc);
 
     const terminal = fallback.detectTerminal();
     for (cfg.keybindings.items) |*kb| {
@@ -345,6 +340,13 @@ fn parseConfigSections(allocator: std.mem.Allocator, doc: *const parser.Document
     try parseRules(allocator, doc, cfg);
 }
 
+/// Builds a Config from a parsed Document: initialises defaults then applies all sections.
+fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *const parser.Document) !defs.Config {
+    var cfg = getDefaultConfig(allocator);
+    try parseConfigSections(allocator, doc, &cfg);
+    return cfg;
+}
+
 // Keybinding parsing
 
 const MOD_MAP = std.StaticStringMap(u16).initComptime(.{
@@ -372,27 +374,6 @@ inline fn mouseButtonFromName(name: []const u8) ?u8 {
     var buf: [16]u8 = undefined;
     if (name.len > buf.len) return null;
     return MOUSE_BUTTON_MAP.get(std.ascii.lowerString(&buf, name));
-}
-
-/// If `str` is a valid `Mods+ButtonName` combination, returns the parsed
-/// modifiers and button number. Returns null when any token is unrecognised
-/// (caller should fall through to normal keybind parsing).
-fn tryParseMouseBind(str: []const u8) ?struct { modifiers: u16, button: u8 } {
-    var modifiers: u16 = 0;
-    var button:    ?u8 = null;
-    var parts = std.mem.splitScalar(u8, str, '+');
-    while (parts.next()) |part| {
-        const trimmed = std.mem.trim(u8, part, " \t");
-        if (MOD_MAP.get(trimmed)) |mod| {
-            modifiers |= mod;
-        } else if (mouseButtonFromName(trimmed)) |btn| {
-            if (button != null) return null; // refuse two buttons
-            button = btn;
-        } else {
-            return null; // unknown token → not a mouse bind
-        }
-    }
-    return if (button) |b| .{ .modifiers = modifiers, .button = b } else null;
 }
 
 const ACTION_MAP = std.StaticStringMap(defs.Action).initComptime(.{
@@ -447,22 +428,20 @@ const GlobEntry = struct {
     owned:  bool, // true when key was heap-allocated and must be freed by the caller
 };
 
-/// Returns a single-element non-owned GlobEntry slice for a literal (non-glob) key.
-fn literalEntry(allocator: std.mem.Allocator, key: []const u8) ![]GlobEntry {
-    const e = try allocator.alloc(GlobEntry, 1);
-    e[0] = .{ .key = key, .ws_idx = 0, .owned = false };
-    return e;
-}
-
 /// Expands a key pattern containing a `{…}` glob into individual key strings.
 /// Supports comma-separated tokens and single-character ranges (e.g. `1-4`, `A-Z`).
 /// Returns a single-entry slice (not owned) when no glob is present.
 fn expandGlobKeys(allocator: std.mem.Allocator, key_pattern: []const u8) ![]GlobEntry {
-    const lbrace = std.mem.indexOfScalar(u8, key_pattern, '{') orelse
-        return literalEntry(allocator, key_pattern);
+    const lbrace = std.mem.indexOfScalar(u8, key_pattern, '{') orelse {
+        const e = try allocator.alloc(GlobEntry, 1);
+        e[0] = .{ .key = key_pattern, .ws_idx = 0, .owned = false };
+        return e;
+    };
     const rbrace = std.mem.indexOfScalarPos(u8, key_pattern, lbrace + 1, '}') orelse {
         debug.warn("Keybind glob missing closing '}}\' in '{s}', treating as literal", .{key_pattern});
-        return literalEntry(allocator, key_pattern);
+        const e = try allocator.alloc(GlobEntry, 1);
+        e[0] = .{ .key = key_pattern, .ws_idx = 0, .owned = false };
+        return e;
     };
 
     const prefix = key_pattern[0..lbrace];
@@ -492,7 +471,9 @@ fn expandGlobKeys(allocator: std.mem.Allocator, key_pattern: []const u8) ![]Glob
 
     if (keys.items.len == 0) {
         keys.deinit(allocator);
-        return literalEntry(allocator, key_pattern);
+        const e = try allocator.alloc(GlobEntry, 1);
+        e[0] = .{ .key = key_pattern, .ws_idx = 0, .owned = false };
+        return e;
     }
 
     const entries = try allocator.alloc(GlobEntry, keys.items.len);
@@ -514,7 +495,15 @@ fn resolveAndParseAction(allocator: std.mem.Allocator, cmd: []const u8, ws_idx: 
         null;
     defer if (ws_str) |s| allocator.free(s);
     const after_ws = ws_str orelse cmd;
-    const final = try applyPlaceholders(allocator, after_ws, kill_placeholder);
+
+    // Apply {kill} placeholder substitution when set.
+    const final: []const u8 = if (kill_placeholder) |kp|
+        if (std.mem.indexOf(u8, after_ws, "{kill}") != null)
+            try std.mem.replaceOwned(u8, allocator, after_ws, "{kill}", kp)
+        else
+            after_ws
+    else
+        after_ws;
     defer if (final.ptr != after_ws.ptr) allocator.free(final);
     return try parseAction(allocator, final);
 }
@@ -539,8 +528,11 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, c
         }
 
         for (glob_entries) |ge| {
-            const keybind_str = if (mod_placeholder) |mod|
-                try substituteModVariable(allocator, ge.key, mod)
+            const keybind_str: []const u8 = if (mod_placeholder) |mod|
+                if (std.mem.startsWith(u8, ge.key, "Mod+"))
+                    try std.fmt.allocPrint(allocator, "{s}+{s}", .{ mod, ge.key["Mod+".len..] })
+                else
+                    ge.key
             else
                 ge.key;
             defer if (keybind_str.ptr != ge.key.ptr) allocator.free(keybind_str);
@@ -569,60 +561,57 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, c
                 } else continue;
             };
 
-            // Try mouse bind first (e.g. "Super+MiddleClick").
-            if (tryParseMouseBind(keybind_str)) |mb| {
-                try cfg.mouse_bindings.append(allocator, .{
-                    .modifiers = mb.modifiers,
-                    .button    = mb.button,
-                    .action    = action,
-                });
-                continue;
-            }
-
-            const parts = parseKeybindString(keybind_str) catch |err| {
+            // Try mouse bind first; fall through to keyboard on error.
+            const bind = parseBindString(keybind_str) catch |err| {
                 debug.warn("Failed to parse keybind '{s}': {}", .{ keybind_str, err });
                 continue;
             };
-
-            try cfg.keybindings.append(allocator, .{
-                .modifiers = parts.modifiers,
-                .keysym    = parts.keysym,
-                .action    = action,
-            });
+            switch (bind) {
+                .mouse => |mb| try cfg.mouse_bindings.append(allocator, .{
+                    .modifiers = mb.modifiers,
+                    .button    = mb.button,
+                    .action    = action,
+                }),
+                .keyboard => |kb| try cfg.keybindings.append(allocator, .{
+                    .modifiers = kb.modifiers,
+                    .keysym    = kb.keysym,
+                    .action    = action,
+                }),
+            }
         }
     }
 }
 
-/// Applies the {kill} placeholder substitution when kill_placeholder is set.
-/// Returns the original slice unchanged (same pointer) when no substitution is needed.
-inline fn applyPlaceholders(allocator: std.mem.Allocator, cmd: []const u8, kill_placeholder: ?[]const u8) ![]const u8 {
-    if (kill_placeholder) |kp|
-        if (std.mem.indexOf(u8, cmd, "{kill}") != null)
-            return try std.mem.replaceOwned(u8, allocator, cmd, "{kill}", kp);
-    return cmd;
-}
+const BindResult = union(enum) {
+    keyboard: struct { modifiers: u16, keysym: u32 },
+    mouse:    struct { modifiers: u16, button: u8  },
+};
 
-inline fn substituteModVariable(allocator: std.mem.Allocator, keybind: []const u8, mod: []const u8) ![]const u8 {
-    if (std.mem.startsWith(u8, keybind, "Mod+"))
-        return try std.fmt.allocPrint(allocator, "{s}+{s}", .{ mod, keybind["Mod+".len..] });
-    return keybind;
-}
-
-fn parseKeybindString(str: []const u8) !struct { modifiers: u16, keysym: u32 } {
+/// Parses a `Mods+Key` or `Mods+ButtonName` string into a typed BindResult.
+/// Returns an error when any token is unrecognised.
+fn parseBindString(str: []const u8) !BindResult {
     var modifiers: u16 = 0;
-    var keysym:   ?u32 = null;
-
+    var keysym:    ?u32 = null;
+    var button:    ?u8  = null;
     var parts = std.mem.splitScalar(u8, str, '+');
     while (parts.next()) |part| {
         const trimmed = std.mem.trim(u8, part, " \t");
         if (MOD_MAP.get(trimmed)) |mod| {
             modifiers |= mod;
+        } else if (mouseButtonFromName(trimmed)) |btn| {
+            if (button != null) return error.MultipleButtons;
+            button = btn;
         } else {
+            if (button != null) return error.AmbiguousBinding;
             if (keysym != null) return error.MultipleKeys;
             keysym = try keyNameToKeysym(trimmed);
         }
     }
-    return .{ .modifiers = modifiers, .keysym = keysym orelse return error.NoKeysym };
+    if (button) |b| {
+        if (keysym != null) return error.AmbiguousBinding;
+        return .{ .mouse    = .{ .modifiers = modifiers, .button = b } };
+    }
+    return          .{ .keyboard = .{ .modifiers = modifiers, .keysym = keysym orelse return error.NoKeysym } };
 }
 
 fn keyNameToKeysym(name: []const u8) !u32 {
@@ -774,8 +763,7 @@ inline fn parseIndicator(raw: []const u8) [3]u8 {
 }
 
 const KNOWN_LAYOUT_SET = std.StaticStringMap(void).initComptime(.{
-    .{ "master-stack", {} }, .{ "master_stack", {} }, .{ "master", {} },
-    .{ "monocle", {} }, .{ "grid", {} }, .{ "fibonacci", {} },
+    .{ "master-stack", {} }, .{ "monocle", {} }, .{ "grid", {} }, .{ "fibonacci", {} },
 });
 
 /// Returns true if `name` (case-insensitive) is a recognised layout name.
@@ -860,13 +848,13 @@ fn parseLayoutsArray(
             continue;
         };
 
-        if (!isKnownLayout(name_str)) {
+        var name_buf: [32]u8 = undefined;
+        const canonical = canonicalLayout(name_str, &name_buf);
+        if (!isKnownLayout(canonical)) {
             debug.warn("layouts array: unknown layout name '{s}' at index {}, skipping", .{ name_str, i });
             continue;
         }
 
-        var name_buf: [32]u8 = undefined;
-        const canonical = canonicalLayout(name_str, &name_buf);
         const layout_idx: u8 = @intCast(cfg.tiling.layouts.items.len);
         try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, canonical));
 
@@ -932,9 +920,9 @@ const BAR_COLOR_FIELDS = [_]struct { name: []const u8, default: u32 }{
 fn parseTransparency(value: parser.Value) f32 {
     if (value.asInt()) |i| {
         if (i == 0) return 0.0;
-        if (i == 1) { debug.info("Transparency set to 1 (fully opaque)", .{}); return 1.0; }
         if (i >= 2 and i <= 100) return @as(f32, @floatFromInt(i)) / 100.0;
-        debug.warn("Invalid transparency value {} (must be 0–100), using default", .{i});
+        if (i == 1) debug.info("Transparency set to 1 (fully opaque)", .{})
+        else        debug.warn("Invalid transparency value {} (must be 0–100), using default", .{i});
         return 1.0;
     }
     if (value.asScalable()) |s| return if (s.is_percentage) s.value / 100.0 else s.value;
@@ -944,10 +932,10 @@ fn parseTransparency(value: parser.Value) f32 {
             debug.warn("Invalid transparency value '{s}', using default", .{trimmed});
             return 1.0;
         };
-        if (f == 1.0) { debug.info("Transparency set to 1.0 (fully opaque)", .{}); return 1.0; }
         if (f >= 0.0 and f < 1.0)   return f;
         if (f > 1.0 and f <= 100.0) return f / 100.0;
-        debug.warn("Invalid transparency value {d} (must be 0.0–1.0 or 0–100), using default", .{f});
+        if (f == 1.0) debug.info("Transparency set to 1.0 (fully opaque)", .{})
+        else          debug.warn("Invalid transparency value {d} (must be 0.0–1.0 or 0–100), using default", .{f});
         return 1.0;
     }
     return 1.0;
@@ -1031,11 +1019,20 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     // Segment accent colors — read from [bar.colors] if present, otherwise fall back to
     // accent_color (or bg for unfocused). This is the single canonical place they are set.
     const colors = doc.getSection("bar.colors");
-    cfg.bar.workspaces_accent      = if (colors) |c| getColor(c, "workspaces",      cfg.bar.accent_color) else cfg.bar.accent_color;
-    cfg.bar.title_accent_color     = if (colors) |c| getColor(c, "title",           cfg.bar.accent_color) else cfg.bar.accent_color;
-    cfg.bar.title_unfocused_accent = if (colors) |c| getColor(c, "title_unfocused", cfg.bar.bg)           else cfg.bar.bg;
-    cfg.bar.title_minimized_accent = if (colors) |c| getColor(c, "title_minimized", cfg.bar.accent_color) else cfg.bar.accent_color;
-    cfg.bar.clock_accent           = if (colors) |c| getColor(c, "clock",           cfg.bar.accent_color) else cfg.bar.accent_color;
+
+    const ACCENT_FIELDS = [_]struct { field: []const u8, key: []const u8, fallback: []const u8 }{
+        .{ .field = "workspaces_accent",      .key = "workspaces",      .fallback = "accent_color" },
+        .{ .field = "title_accent_color",     .key = "title",           .fallback = "accent_color" },
+        .{ .field = "title_unfocused_accent", .key = "title_unfocused", .fallback = "bg"           },
+        .{ .field = "title_minimized_accent", .key = "title_minimized", .fallback = "accent_color" },
+        .{ .field = "clock_accent",           .key = "clock",           .fallback = "accent_color" },
+    };
+    inline for (ACCENT_FIELDS) |f|
+        @field(cfg.bar, f.field) = if (colors) |c|
+            getColor(c, f.key, @field(cfg.bar, f.fallback))
+        else
+            @field(cfg.bar, f.fallback);
+
     if (colors) |c| {
         if (c.get("drun_bg"))           |_| cfg.bar.drun_bg           = getColor(c, "drun_bg",           cfg.bar.bg);
         if (c.get("drun_fg"))           |_| cfg.bar.drun_fg           = getColor(c, "drun_fg",           cfg.bar.fg);
@@ -1097,17 +1094,6 @@ fn parseBarLayout(allocator: std.mem.Allocator, doc: *const parser.Document, cfg
     if (cfg.bar.layout.items.len == 0) try initDefaultBarLayout(allocator, cfg);
 }
 
-/// Parses `class_name = workspace_num` pairs from a flat rules section.
-/// Used by both the [rules] and the non-numeric fallback of [workspace.rules].
-fn parseClassRulePairs(allocator: std.mem.Allocator, cfg: *defs.Config, section: *const parser.Section) !void {
-    var iter = section.pairs.iterator();
-    while (iter.next()) |entry| {
-        const ws_num = entry.value_ptr.*.asInt() orelse continue;
-        if (!validateWorkspace(@intCast(ws_num), cfg.workspaces.count, entry.key_ptr.*)) continue;
-        try addRule(allocator, cfg, entry.key_ptr.*, @intCast(ws_num));
-    }
-}
-
 fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
     if (doc.getSection("workspace.rules")) |rules_section| {
         var iter = rules_section.pairs.iterator();
@@ -1131,8 +1117,14 @@ fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *d
     }
 
     // Legacy [rules] section: flat class_name = workspace_num pairs.
-    if (doc.getSection("rules")) |rules_section|
-        try parseClassRulePairs(allocator, cfg, rules_section);
+    if (doc.getSection("rules")) |rules_section| {
+        var iter = rules_section.pairs.iterator();
+        while (iter.next()) |entry| {
+            const ws_num = entry.value_ptr.*.asInt() orelse continue;
+            if (!validateWorkspace(@intCast(ws_num), cfg.workspaces.count, entry.key_ptr.*)) continue;
+            try addRule(allocator, cfg, entry.key_ptr.*, @intCast(ws_num));
+        }
+    }
 
     // Per-workspace sections: [workspace.rules.N] or [rules.N].
     var section_iter = doc.sections.iterator();

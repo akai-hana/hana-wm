@@ -271,11 +271,18 @@ pub fn toggleFullscreen(wm: *WM) void {
             // Suppress hover-focus theft: retiling moves windows under the
             // cursor, generating EnterNotify events that would otherwise
             // steal focus away from the window we just un-fullscreened.
-            // Use .window_spawn so handleMotionNotify clears it on the
-            // first real mouse movement — that handler only clears
-            // .window_spawn, so .tiling_operation would never be cleared
-            // and hover focus would remain broken until the next click.
-            focus.setSuppressReason(.window_spawn);
+            // Use .tiling_operation so handleEnterNotify unconditionally
+            // suppresses all crossing events from repositioned windows.
+            // handleMotionNotify clears any non-.none reason (including
+            // .tiling_operation) on the first real mouse movement, after
+            // which hover focus resumes normally.
+            // NOTE: .window_spawn is wrong here — suppressSpawnCrossing uses
+            // cursor-position matching against a stale g_spawn_cursor_x/y
+            // (only updated during window spawns, never on fullscreen exit).
+            // When positions differ, the first crossing event clears the
+            // suppression immediately and lets all subsequent spurious
+            // EnterNotify events through unguarded.
+            focus.setSuppressReason(.tiling_operation);
             _ = xcb.xcb_ungrab_server(wm.conn);
             _ = xcb.xcb_flush(wm.conn);
         } else {

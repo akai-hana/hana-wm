@@ -58,13 +58,14 @@ const LAYOUT_CYCLE: []const Layout = blk: {
 
 pub inline fn defaultLayout() Layout { return LAYOUT_CYCLE[0]; }
 
-fn layoutFromString(name: []const u8) ?Layout {
-    if (std.mem.eql(u8, name, "master-stack") or std.mem.eql(u8, name, "master")) return .master;
-    if (std.mem.eql(u8, name, "monocle"))    return .monocle;
-    if (std.mem.eql(u8, name, "grid"))       return .grid;
-    if (std.mem.eql(u8, name, "fibonacci"))  return .fibonacci;
-    return null;
-}
+const LAYOUT_NAME_MAP = std.StaticStringMap(Layout).initComptime(.{
+    .{ "master-stack", .master }, .{ "master", .master },
+    .{ "monocle",      .monocle },
+    .{ "grid",         .grid    },
+    .{ "fibonacci",    .fibonacci },
+});
+
+inline fn layoutFromString(name: []const u8) ?Layout { return LAYOUT_NAME_MAP.get(name); }
 
 /// Build the runtime-enabled layout list from the config's `layouts` array,
 /// keeping only entries whose .zig file is present on disk. Duplicates are
@@ -76,9 +77,7 @@ fn buildEnabledLayouts(layouts_cfg: []const []const u8) struct { arr: [4]Layout,
         if (len >= arr.len) break;
         const layout = layoutFromString(name) orelse continue;
         if (!isLayoutAvailable(layout)) continue;
-        var seen = false;
-        for (arr[0..len]) |l| if (l == layout) { seen = true; break; };
-        if (seen) continue;
+        if (std.mem.indexOfScalar(Layout, arr[0..len], layout) != null) continue;
         arr[len] = layout;
         len += 1;
     }
@@ -101,21 +100,13 @@ pub inline fn isLayoutAvailable(layout: Layout) bool {
 // backward. Falls back to LAYOUT_CYCLE if state has no enabled layouts (should
 // not happen after init, but guarded defensively).
 inline fn stepCycle(s: *const State, current: Layout, comptime forward: bool) Layout {
-    const cycle = s.enabled_layouts[0..s.enabled_layouts_len];
-    if (cycle.len == 0) {
-        for (LAYOUT_CYCLE, 0..) |l, i| {
-            if (l == current) return LAYOUT_CYCLE[
-                if (forward) (i + 1) % LAYOUT_CYCLE.len
-                else         (LAYOUT_CYCLE.len + i - 1) % LAYOUT_CYCLE.len
-            ];
-        }
-        return LAYOUT_CYCLE[0];
-    }
+    const cycle: []const Layout = if (s.enabled_layouts_len > 0)
+        s.enabled_layouts[0..s.enabled_layouts_len]
+    else
+        LAYOUT_CYCLE;
     for (cycle, 0..) |l, i| {
-        if (l == current) return cycle[
-            if (forward) (i + 1) % cycle.len
-            else         (cycle.len + i - 1) % cycle.len
-        ];
+        if (l != current) continue;
+        return cycle[if (forward) (i + 1) % cycle.len else (cycle.len + i - 1) % cycle.len];
     }
     return cycle[0]; // current not in list (layout disabled at reload) — jump to first
 }
@@ -373,16 +364,10 @@ pub fn reloadConfig(wm: *WM) void {
     }
 }
 
-/// Cache WM_NORMAL_HINTS minimum size constraints for `win`.
-/// Called from window.zig at MapRequest time.
-pub fn cacheSizeHints(allocator: std.mem.Allocator, win: u32, hints: layouts.SizeHints) void {
-    layouts.cacheSizeHints(allocator, win, hints);
-}
-
+/// Cache WM_NORMAL_HINTS minimum size constraints for `win`. Called from window.zig at MapRequest time.
+pub const cacheSizeHints = layouts.cacheSizeHints;
 /// Evict the size-hint entry for `win`. Called from window.zig at unmanage time.
-pub fn evictSizeHints(win: u32) void {
-    layouts.evictSizeHints(win);
-}
+pub const evictSizeHints = layouts.evictSizeHints;
 
 pub fn addWindow(wm: *WM, window_id: u32) void {
     std.debug.assert(window_id != 0);
@@ -720,34 +705,33 @@ fn moveWindowToIndex(s: *State, from_idx: usize, to_idx: usize) void {
     s.windows.reorder(temp[0..j]);
 }
 
+/// Locates the focused window and the current workspace's master window in the
+/// ordered window list. Returns null when preconditions are not met (nothing
+/// focused, not tiled, not on current workspace, or fewer than 2 windows).
+const FocusMasterPos = struct { fp: usize, mp: usize, all: []const u32 };
+fn findFocusMasterPos(s: *State) ?FocusMasterPos {
+    const focused = focus.getFocused() orelse return null;
+    if (!s.windows.contains(focused) or !workspaces.isOnCurrentWorkspace(focused)) return null;
+    const all = s.windows.items();
+    if (all.len < 2) return null;
+    var fp: ?usize = null;
+    var mp: ?usize = null;
+    for (all, 0..) |win, i| {
+        if (win == focused) fp = i;
+        if (mp == null and workspaces.isOnCurrentWorkspace(win)) mp = i;
+        if (fp != null and mp != null) break;
+    }
+    return .{ .fp = fp orelse return null, .mp = mp orelse return null, .all = all };
+}
+
 pub fn swapWithMaster(wm: *WM) void {
     const s = getState();
-    const focused = focus.getFocused() orelse return;
-    if (!s.windows.contains(focused) or !workspaces.isOnCurrentWorkspace(focused)) return;
-
-    const all = s.windows.items();
-    if (all.len < 2) return;
-
-    var focused_pos: ?usize = null;
-    var master_pos:  ?usize = null;
-    for (all, 0..) |win, i| {
-        if (win == focused) focused_pos = i;
-        if (master_pos == null and workspaces.isOnCurrentWorkspace(win)) master_pos = i;
-        if (focused_pos != null and master_pos != null) break;
-    }
-    const fp = focused_pos orelse return;
-    const mp = master_pos  orelse return;
-
-    if (fp == mp) {
-        for (all[mp + 1..], mp + 1..) |win, i| {
-            if (workspaces.isOnCurrentWorkspace(win)) {
-                moveWindowToIndex(s, i, mp);
-                break;
-            }
+    const pos = findFocusMasterPos(s) orelse return;
+    if (pos.fp == pos.mp) {
+        for (pos.all[pos.mp + 1..], pos.mp + 1..) |win, i| {
+            if (workspaces.isOnCurrentWorkspace(win)) { moveWindowToIndex(s, i, pos.mp); break; }
         }
-    } else {
-        moveWindowToIndex(s, fp, mp);
-    }
+    } else moveWindowToIndex(s, pos.fp, pos.mp);
     retileCurrentWorkspace(wm);
 }
 
@@ -755,36 +739,21 @@ pub fn swapWithMaster(wm: *WM) void {
 /// staying on the window that was moved.
 pub fn swapWithMasterFocusSwap(wm: *WM) void {
     const s = getState();
-    const focused = focus.getFocused() orelse return;
-    if (!s.windows.contains(focused) or !workspaces.isOnCurrentWorkspace(focused)) return;
-
-    const all = s.windows.items();
-    if (all.len < 2) return;
-
-    var focused_pos: ?usize = null;
-    var master_pos:  ?usize = null;
-    for (all, 0..) |win, i| {
-        if (win == focused) focused_pos = i;
-        if (master_pos == null and workspaces.isOnCurrentWorkspace(win)) master_pos = i;
-        if (focused_pos != null and master_pos != null) break;
-    }
-    const fp = focused_pos orelse return;
-    const mp = master_pos  orelse return;
-
+    const pos = findFocusMasterPos(s) orelse return;
     var other_win: ?u32 = null;
-    if (fp == mp) {
-        // Focused is already master -- swap with next window; focus follows to it.
-        for (all[mp + 1..], mp + 1..) |win, i| {
+    if (pos.fp == pos.mp) {
+        // Focused is already master — swap with next window; focus follows to it.
+        for (pos.all[pos.mp + 1..], pos.mp + 1..) |win, i| {
             if (workspaces.isOnCurrentWorkspace(win)) {
                 other_win = win;
-                moveWindowToIndex(s, i, mp);
+                moveWindowToIndex(s, i, pos.mp);
                 break;
             }
         }
     } else {
-        // Focused is a slave -- swap into master; focus follows to the old master.
-        other_win = all[mp];
-        moveWindowToIndex(s, fp, mp);
+        // Focused is a slave — swap into master; focus follows to the old master.
+        other_win = pos.all[pos.mp];
+        moveWindowToIndex(s, pos.fp, pos.mp);
     }
     retileCurrentWorkspace(wm);
     if (other_win) |win| focus.setFocus(wm, win, .tiling_operation);
