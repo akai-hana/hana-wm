@@ -70,16 +70,16 @@ pub fn init(wm: *WM, xkb: *xkbcommon.XkbState) !void {
 }
 
 pub fn deinit() void {
-    if (keybind_state) |*state| { state.deinit(); keybind_state = null; }
+    if (keybind_state) |*state| {
+        state.deinit();
+        keybind_state = null;
+    }
 }
 
 /// Rebuilds the keybind lookup map from the current config (called after reload).
 pub fn rebuildKeybindMap(wm: *WM) !void {
-    if (keybind_state) |*state| {
-        try state.rebuild(wm);
-    } else {
-        return error.KeybindStateNotInitialized;
-    }
+    const state = &(keybind_state orelse return error.KeybindStateNotInitialized);
+    try state.rebuild(wm);
 }
 
 inline fn makeHash(mods: u16, keysym: u32) u64 {
@@ -138,6 +138,11 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
     }
 }
 
+/// Dispatches a button-press event using the following priority order:
+///   1. Ignore clicks on the root window or unknown windows (replay pointer).
+///   2. Check config-driven mouse bindings (e.g. Super+MiddleClick = toggle_float).
+///   3. Super+Left/Right drag: start a move or resize operation.
+///   4. Any other click: focus the window under the cursor.
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) void {
     focus.setLastEventTime(event.time);
     const clicked_window = if (event.child != 0) event.child else event.event;
@@ -157,7 +162,8 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) vo
     // Check config-driven mouse binds (e.g. Super+MiddleClick = "toggle_float").
     // These take priority over the default drag behaviour so a bind is never
     // swallowed by the drag handler.
-    if ((event.state & constants.MOD_SUPER) != 0) {
+    const super_held = (event.state & constants.MOD_SUPER) != 0;
+    if (super_held) {
         const mods = utils.normalizeModifiers(event.state);
         for (wm.config.mouse_bindings.items) |*mb| {
             if (mb.modifiers == mods and mb.button == event.detail) {
@@ -171,8 +177,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) vo
         }
     }
 
-    if ((event.state & constants.MOD_SUPER) != 0 and
-        (event.detail == MOUSE_BUTTON_LEFT or event.detail == MOUSE_BUTTON_RIGHT)) {
+    if (super_held and (event.detail == MOUSE_BUTTON_LEFT or event.detail == MOUSE_BUTTON_RIGHT)) {
         drag.startDrag(wm, managed_window, event.detail, event.root_x, event.root_y);
     } else {
         focus.setFocus(wm, managed_window, .mouse_click);
@@ -214,13 +219,15 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) 
 // Window close
 
 fn closeWindow(wm: *WM, win: u32) void {
-    // If the window supports the `WM_DELETE_WINDOW` signal,
+    // Prefer a graceful shutdown: send a WM_DELETE_WINDOW client message so the
+    // application can save state and clean up before exiting (ICCCM §4.1.2.7).
     if (utils.supportsWMDeleteCached(wm.conn, win)) {
-        // Ask window to close politely
         const protocols_atom = utils.getAtomCached("WM_PROTOCOLS")     catch return;
         const delete_atom    = utils.getAtomCached("WM_DELETE_WINDOW") catch return;
 
-        var event = std.mem.zeroes(xcb.xcb_client_message_event_t); //TODO: what does this do?
+        // Zero-initialise the event struct. XCB transmits the raw bytes over
+        // the wire, so any uninitialised padding would be undefined behaviour.
+        var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
 
         event.response_type  = xcb.XCB_CLIENT_MESSAGE;
         event.format         = 32;
@@ -229,11 +236,10 @@ fn closeWindow(wm: *WM, win: u32) void {
         event.data.data32[0] = delete_atom;
         event.data.data32[1] = focus.getLastEventTime(); // ICCCM §4.1.7
 
-        // Send a WM_DELETE_WINDOW client message (ICCCM §4.1.2.7)
         _ = xcb.xcb_send_event(wm.conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
         _ = xcb.xcb_flush(wm.conn);
     } else {
-        // Fallback: Destroy window entirely, through a raw xcb signal.
+        // The window does not support WM_DELETE_WINDOW, so destroy it forcefully.
         _ = xcb.xcb_destroy_window(wm.conn, win);
         _ = xcb.xcb_flush(wm.conn);
     }
@@ -246,7 +252,8 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
         .toggle_fullscreen      => fullscreen.toggleFullscreen(wm),
         .close_window           => { if (focus.getFocused()) |win| closeWindow(wm, win); },
         .reload_config          => { utils.reload(); },
-        //TODO: add comment here
+        // Runs each action in the list in order. Stops and propagates the
+        // first error encountered, leaving any remaining actions unexecuted.
         .sequence               => |acts| { for (acts) |*a| try executeAction(a, wm); },
         .exec                   => |cmd| try executeShellCommand(wm, cmd),
         .dump_state             => dumpState(wm),
@@ -257,7 +264,7 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
         .toggle_layout_reverse  => { tiling.toggleLayoutReverse(wm); bar.scheduleRedraw(); },
         .cycle_layout_variation => tiling.cycleLayoutVariation(wm),
 
-        .toggle_bar_visibility  => bar.setBarState(wm, .toggle),
+        .toggle_bar_visibility  => bar.toggleBarVisibility(wm),
         .toggle_bar_position    => bar.toggleBarPosition(wm),
 
         .increase_master        => tiling.increaseMasterWidth(wm),
@@ -294,6 +301,35 @@ fn executeMouseAction(action: *const defs.Action, wm: *WM, clicked_win: u32) !vo
 
 // Shell execution
 
+/// Grandchild process: detach from the session and exec the command.
+/// Writes a sentinel byte to exec_pipe_write if execvp fails, so the WM
+/// can distinguish exec failure from success (which closes the pipe via CLOEXEC).
+fn grandchildExec(exec_pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
+    _ = c.setsid();
+    _ = c.execvp("/bin/sh", @ptrCast(&[_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z, null }));
+    // execvp only returns on failure; signal this to the WM via exec_pipe.
+    const sentinel: u8 = 1;
+    _ = c.write(exec_pipe_write, &sentinel, 1);
+    std.process.exit(1);
+}
+
+/// Intermediate child process: spawns the grandchild, forwards its PID over
+/// pid_pipe, then exits so the grandchild is re-parented to init.
+/// Closing exec_pipe_write before exit is required — without it the WM's
+/// read would block indefinitely waiting for an EOF that never comes.
+fn intermediateChild(exec_pipe_write: c_int, pid_pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
+    const grandchild_pid = c.fork();
+    switch (grandchild_pid) {
+        0  => grandchildExec(exec_pipe_write, cmd_z),
+        -1 => { debug.err("Second fork failed", .{}); std.process.exit(1); },
+        else => {},
+    }
+    _ = c.write(pid_pipe_write, &grandchild_pid, @sizeOf(c_int));
+    _ = c.close(pid_pipe_write);
+    _ = c.close(exec_pipe_write);
+    std.process.exit(0);
+}
+
 /// Spawns `cmd` via double-fork so the grandchild is re-parented to init.
 ///
 /// exec_pipe: write end is FD_CLOEXEC; EOF on success, sentinel byte on exec failure.
@@ -319,69 +355,52 @@ fn executeShellCommand(wm: *WM, cmd: []const u8) !void {
     _ = c.fcntl(exec_pipe[1], c.F_SETFD, c.FD_CLOEXEC);
 
     const pid = c.fork();
-    if (pid == 0) {
-        // Intermediate child: fork grandchild, forward its PID, then exit.
-        _ = c.close(exec_pipe[0]);
-        _ = c.close(pid_pipe[0]);
-
-        const pid2 = c.fork();
-        if (pid2 == 0) {
-            // Grandchild: exec the command.
-            _ = c.close(pid_pipe[1]);
-            _ = c.setsid();
-            const result = c.execvp("/bin/sh", @ptrCast(&[_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z.ptr, null }));
-            if (result == -1) {
-                // exec failed: write sentinel so WM skips registerSpawn.
-                const sentinel: u8 = 1;
-                _ = c.write(exec_pipe[1], &sentinel, 1);
-                debug.err("execvp failed for command: {s}", .{cmd});
-            }
-            std.process.exit(1);
-        } else if (pid2 < 0) {
-            debug.err("Second fork failed for command: {s}", .{cmd});
-            std.process.exit(1);
-        }
-        // Write grandchild PID, then close write ends and exit.
-        // Closing exec_pipe[1] here is required: without it the WM read would block.
-        _ = c.write(pid_pipe[1], &pid2, @sizeOf(c_int));
-        _ = c.close(pid_pipe[1]);
-        _ = c.close(exec_pipe[1]);
-        std.process.exit(0);
-    } else if (pid > 0) {
-        // WM: close write ends we don't own to allow reads to complete.
-        _ = c.close(exec_pipe[1]);
-        _ = c.close(pid_pipe[1]);
-
-        var status: c_int = 0;
-        if (c.waitpid(pid, &status, 0) == -1) {
+    switch (pid) {
+        0 => {
+            // Intermediate child process. Close the read ends we don't need,
+            // then hand off to the named helper.
             _ = c.close(exec_pipe[0]);
             _ = c.close(pid_pipe[0]);
-            debug.err("waitpid failed", .{});
-            return error.WaitpidFailed;
-        }
+            intermediateChild(exec_pipe[1], pid_pipe[1], cmd_z.ptr);
+        },
+        -1 => {
+            closePipe(exec_pipe);
+            closePipe(pid_pipe);
+            debug.err("First fork failed for command: {s}", .{cmd});
+            return error.ForkFailed;
+        },
+        else => {
+            // WM (parent) process: close write ends we don't own, then wait
+            // for the intermediate child so it doesn't become a zombie.
+            _ = c.close(exec_pipe[1]);
+            _ = c.close(pid_pipe[1]);
 
-        // pid_pipe: intermediate child writes grandchild PID before exiting,
-        // so by the time waitpid returns the value is already buffered.
-        var grandchild_pid: c_int = -1;
-        _ = c.read(pid_pipe[0], &grandchild_pid, @sizeOf(c_int));
-        _ = c.close(pid_pipe[0]);
+            var status: c_int = 0;
+            if (c.waitpid(pid, &status, 0) == -1) {
+                _ = c.close(exec_pipe[0]);
+                _ = c.close(pid_pipe[0]);
+                debug.err("waitpid failed", .{});
+                return error.WaitpidFailed;
+            }
 
-        // exec_pipe: EOF (n==0) means exec succeeded; sentinel byte (n==1) means failure.
-        var sentinel: u8 = 0;
-        const n = c.read(exec_pipe[0], &sentinel, 1);
-        _ = c.close(exec_pipe[0]);
+            // By the time waitpid returns, the intermediate child has already
+            // written the grandchild PID into pid_pipe, so this read won't block.
+            var grandchild_pid: c_int = -1;
+            _ = c.read(pid_pipe[0], &grandchild_pid, @sizeOf(c_int));
+            _ = c.close(pid_pipe[0]);
 
-        if (n > 0) return; // exec failed — skip spawn registration.
+            // EOF (n == 0) on exec_pipe means exec succeeded (CLOEXEC closed it).
+            // A sentinel byte (n == 1) means execvp failed; skip spawn registration.
+            var sentinel: u8 = 0;
+            const n = c.read(exec_pipe[0], &sentinel, 1);
+            _ = c.close(exec_pipe[0]);
+            if (n > 0) return;
 
-        if (workspaces.getCurrentWorkspace()) |ws| {
-            const pid_u32: u32 = if (grandchild_pid > 0) @intCast(grandchild_pid) else 0;
-            window.registerSpawn(ws, pid_u32);
-        }
-    } else {
-        closePipe(exec_pipe);
-        closePipe(pid_pipe);
-        debug.err("First fork failed for command: {s}", .{cmd});
-        return error.ForkFailed;
+            if (workspaces.getCurrentWorkspace()) |ws| {
+                const pid_u32: u32 = if (grandchild_pid > 0) @intCast(grandchild_pid) else 0;
+                window.registerSpawn(ws, pid_u32);
+            }
+        },
     }
 }
 
@@ -394,13 +413,15 @@ fn dumpState(_: *WM) void {
     debug.info("Total windows: {}",     .{win_count});
     debug.info("Suppress focus: {s}",   .{@tagName(focus.getSuppressReason())});
 
-    var fs_opt_it = fullscreen.perWorkspaceIterator();
-    var fs_count: u8 = 0;
-    if (fs_opt_it) |*fs_it| while (fs_it.next()) |entry| {
-        debug.info("Fullscreen on workspace {}: {x}", .{ entry.key_ptr.*, entry.value_ptr.window });
-        fs_count += 1;
-    };
-    if (fs_count == 0) debug.info("Fullscreen: none", .{});
+    var maybe_fullscreen_it = fullscreen.perWorkspaceIterator();
+    var found_fullscreen = false;
+    if (maybe_fullscreen_it) |*it| {
+        while (it.next()) |entry| {
+            debug.info("Fullscreen on workspace {}: {x}", .{ entry.key_ptr.*, entry.value_ptr.window });
+            found_fullscreen = true;
+        }
+    }
+    if (!found_fullscreen) debug.info("Fullscreen: none", .{});
     debug.info("Drag active: {}", .{drag.isDragging()});
 
     if (workspaces.getState()) |ws_state| {

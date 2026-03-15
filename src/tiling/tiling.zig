@@ -404,6 +404,84 @@ pub fn removeWindow(window_id: u32) void {
     }
 }
 
+/// Returns the position of `win` in the current-workspace-filtered window
+/// list — the same slice the master layout receives as its `windows` argument.
+/// Index 0 is the master slot; indices >= master_count are stack slots.
+///
+/// Must be called BEFORE removeWindow so the window is still tracked.
+/// Returns null when tiling is disabled or `win` is not in the tiling list.
+pub fn getWindowFilteredIndex(win: u32) ?usize {
+    const s = getStateOpt() orelse return null;
+    if (!s.enabled) return null;
+    var filtered_idx: usize = 0;
+    for (s.windows.items()) |w| {
+        if (w == win) return filtered_idx;
+        if (workspaces.isOnCurrentWorkspace(w)) filtered_idx += 1;
+    }
+    return null;
+}
+
+/// Add `win` to the tiling list and place it at workspace-filtered position
+/// `target_filtered_idx`.  If `target_filtered_idx` exceeds the current
+/// filtered length the window is left at the back (natural addWindow position).
+///
+/// Used by the unminimize path to restore a window to its original layout
+/// slot.  The index is captured by minimizeWindow via getWindowFilteredIndex
+/// before the window is removed.
+///
+/// Works correctly for both LIFO (default, addWindow appends to end) and
+/// FIFO (addFront prepends to front) layout variations.
+pub fn addWindowAtFilteredIndex(wm: *WM, win: u32, target_filtered_idx: usize) void {
+    addWindow(wm, win);
+    moveWindowToFilteredSlot(getState(), win, target_filtered_idx);
+}
+
+/// Reposition `win` within the global window list so that it lands at
+/// workspace-filtered index `target` (0 = master slot).
+///
+/// Background — the shift arithmetic:
+///   moveWindowToIndex(from, to) removes the source element first, then
+///   inserts it at position `to` in the *shortened* list.  When `from` lies
+///   before `to` in the original list, the removal shifts every subsequent
+///   element left by one, so the effective insertion point is `tg - 1`.
+///   When `from` lies after `to` no shift occurs.
+///
+/// Example (global list [A B C D], workspace = all, target = 1 = "B's slot"):
+///   addWindow appended win W → [A B C D W], from_global = 4
+///   target window at filtered[1] = B → to_global = 1
+///   from(4) > to(1) → effective_to = 1, no shift
+///   moveWindowToIndex(4, 1) → [A W B C D]  ✓  filtered[1] = W
+///
+/// Example (FIFO: addFront prepended W → [W A B C D], from_global = 0):
+///   target window at filtered[1] = B → to_global = 2
+///   from(0) < to(2) → effective_to = 2 - 1 = 1
+///   moveWindowToIndex(0, 1) → [A W B C D]  ✓  filtered[1] = W
+fn moveWindowToFilteredSlot(s: *State, win: u32, target: usize) void {
+    const items = s.windows.items();
+
+    var from_global: usize = items.len; // sentinel
+    for (items, 0..) |w, i| {
+        if (w == win) { from_global = i; break; }
+    }
+    if (from_global == items.len) return; // shouldn't happen
+
+    // Find the global index of the workspace window currently at `target`
+    // (excluding win itself).  That window should end up immediately AFTER win,
+    // so inserting win just before it places win at the desired filtered slot.
+    var filtered_count: usize = 0;
+    var to_global: ?usize = null;
+    for (items, 0..) |w, i| {
+        if (w == win) continue;
+        if (!workspaces.isOnCurrentWorkspace(w)) continue;
+        if (filtered_count == target) { to_global = i; break; }
+        filtered_count += 1;
+    }
+
+    const tg = to_global orelse return; // target at/past end — already correct
+    const effective_to: usize = if (from_global < tg) tg - 1 else tg;
+    if (effective_to != from_global) moveWindowToIndex(s, from_global, effective_to);
+}
+
 /// Toggle a window between tiled and floating.
 ///
 /// Tiled -> floating: removes from the tiling pool so it sits at its current position.

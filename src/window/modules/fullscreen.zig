@@ -129,12 +129,20 @@ pub fn perWorkspaceIterator() ?std.AutoHashMap(u8, FullscreenInfo).Iterator {
     return s.per_workspace.iterator();
 }
 
-// Geometry helpers 
+// Geometry helpers
 
-// Fast path: tiled windows have a valid rect in the geometry cache; reading
-// from it avoids the blocking xcb_get_geometry round-trip.
-// Slow path (floating/cache miss): one blocking round-trip, falling back to
-// a centered quarter-screen default if the reply fails or the window is offscreen.
+/// Retrieve the pre-fullscreen geometry for `win` before entering fullscreen.
+///
+/// Fast path — tiled windows: `configureSafe` stores the most recent tiled
+/// rect in the geometry cache after every retile.  Reading from the cache
+/// avoids a blocking xcb_get_geometry round-trip.
+///
+/// Slow path — floating or newly-spawned windows: these are not in the tiling
+/// cache (they were never passed through `configureSafe`), so a blocking
+/// xcb_get_geometry round-trip is unavoidable.  Falls back to a centred
+/// quarter-screen default if the reply fails or the window is offscreen
+/// (x/y below OFFSCREEN_THRESHOLD_MIN), which happens when a window was
+/// spawned but never placed on-screen before the user triggered fullscreen.
 fn fetchWindowGeom(wm: *WM, win: u32) defs.WindowGeometry {
     if (tiling.getWindowGeom(win)) |rect| {
         const bw: u16 = if (tiling.getStateOpt()) |ts| ts.border_width else 0;
@@ -173,7 +181,7 @@ fn fetchWindowGeom(wm: *WM, win: u32) defs.WindowGeometry {
 
 // Commit helpers (XCB-only; caller owns grab/ungrab/flush) 
 
-fn enterFullscreenCommit(wm: *WM, win: u32, ws: u8, geom: defs.WindowGeometry) void {
+inline fn enterFullscreenCommit(wm: *WM, win: u32, ws: u8, geom: defs.WindowGeometry) void {
     setForWorkspace(ws, .{
         .window         = win,
         .saved_geometry = geom,
@@ -210,7 +218,7 @@ fn enterFullscreenCommit(wm: *WM, win: u32, ws: u8, geom: defs.WindowGeometry) v
     tiling.invalidateGeomCache(win);
 }
 
-fn exitFullscreenCommit(wm: *WM, win: u32, ws: u8) void {
+inline fn exitFullscreenCommit(wm: *WM, win: u32, ws: u8) void {
     const fs_info = getForWorkspace(ws) orelse return;
     if (fs_info.window != win) return;
 
@@ -268,21 +276,17 @@ pub fn toggleFullscreen(wm: *WM) void {
         if (fs_info.window == win) {
             _ = xcb.xcb_grab_server(wm.conn);
             exitFullscreenCommit(wm, win, current_ws);
-            // Suppress hover-focus theft: retiling moves windows under the
-            // cursor, generating EnterNotify events that would otherwise
-            // steal focus away from the window we just un-fullscreened.
-            // Use .tiling_operation so handleEnterNotify unconditionally
-            // suppresses all crossing events from repositioned windows.
-            // handleMotionNotify clears any non-.none reason (including
-            // .tiling_operation) on the first real mouse movement, after
-            // which hover focus resumes normally.
-            // NOTE: .window_spawn is wrong here — suppressSpawnCrossing uses
-            // cursor-position matching against a stale g_spawn_cursor_x/y
-            // (only updated during window spawns, never on fullscreen exit).
-            // When positions differ, the first crossing event clears the
-            // suppression immediately and lets all subsequent spurious
-            // EnterNotify events through unguarded.
-            focus.setSuppressReason(.tiling_operation);
+            // Do NOT suppress crossing events here.  The retile inside
+            // exitFullscreenCommit moves tiled windows back to their slots.
+            // If the cursor lands inside a window B that moved under it, the
+            // resulting EnterNotify is the one and only event that correctly
+            // updates hover focus to B.  Suppressing it (the previous
+            // behaviour) caused hover focus to stick on the former fullscreen
+            // window indefinitely: handleMotionNotify would eventually clear
+            // the suppress reason, but by then the cursor was already
+            // statically inside B with no new EnterNotify pending, so hover
+            // focus would not update until the cursor physically crossed a
+            // window boundary.
             _ = xcb.xcb_ungrab_server(wm.conn);
             _ = xcb.xcb_flush(wm.conn);
         } else {
