@@ -22,111 +22,82 @@ const constants  = @import("constants");
 const debug      = @import("debug");
 const minimize   = @import("minimize");
 
-// Fullscreen types 
-// Defined here (not in defs.zig) so fullscreen.zig is the single owner.
-// defs.zig used to declare these; remaining references should use fullscreen.X.
+// Fullscreen types
 
 pub const FullscreenInfo = struct {
     window:         defs.WindowId,
     saved_geometry: defs.WindowGeometry,
 };
 
-pub const FullscreenState = struct {
-    per_workspace:       std.AutoHashMap(u8, FullscreenInfo),
-    window_to_workspace: std.AutoHashMap(u32, u8),
+// Module state
+//
+// Two hash maps rather than a single one: keyed by workspace for O(1) lookup
+// when switching workspaces, and keyed by window for O(1) isFullscreen checks.
+// Both are always kept in sync — every write goes through setForWorkspace /
+// removeForWorkspace which updates both atomically.
 
-    pub fn init(allocator: std.mem.Allocator) FullscreenState {
-        var per_ws    = std.AutoHashMap(u8, FullscreenInfo).init(allocator);
-        var win_to_ws = std.AutoHashMap(u32, u8).init(allocator);
-        per_ws.ensureTotalCapacity(4)    catch {};
-        win_to_ws.ensureTotalCapacity(4) catch {};
-        return .{ .per_workspace = per_ws, .window_to_workspace = win_to_ws };
-    }
-
-    pub fn deinit(self: *FullscreenState) void {
-        self.per_workspace.deinit();
-        self.window_to_workspace.deinit();
-    }
-
-    pub inline fn isFullscreen(self: *const FullscreenState, win: u32) bool {
-        return self.window_to_workspace.contains(win);
-    }
-
-    pub inline fn getForWorkspace(self: *const FullscreenState, ws: u8) ?FullscreenInfo {
-        return self.per_workspace.get(ws);
-    }
-
-    pub fn setForWorkspace(self: *FullscreenState, ws: u8, info: FullscreenInfo) !void {
-        try self.per_workspace.ensureUnusedCapacity(1);
-        try self.window_to_workspace.ensureUnusedCapacity(1);
-        self.per_workspace.putAssumeCapacity(ws, info);
-        self.window_to_workspace.putAssumeCapacity(info.window, ws);
-    }
-
-    pub fn removeForWorkspace(self: *FullscreenState, ws: u8) void {
-        if (self.per_workspace.get(ws)) |info|
-            _ = self.window_to_workspace.remove(info.window);
-        _ = self.per_workspace.remove(ws);
-    }
-
-    pub inline fn clear(self: *FullscreenState) void {
-        self.per_workspace.clearRetainingCapacity();
-        self.window_to_workspace.clearRetainingCapacity();
-    }
-};
-
-
-// Module state 
-
-var g_state: ?FullscreenState = null;
+var g_per_workspace:       std.AutoHashMap(u8,  FullscreenInfo) = undefined;
+var g_window_to_workspace: std.AutoHashMap(u32, u8)             = undefined;
+var g_initialized: bool = false;
 
 pub fn init(wm: *WM) void {
-    g_state = FullscreenState.init(wm.allocator);
+    g_per_workspace       = std.AutoHashMap(u8,  FullscreenInfo).init(wm.allocator);
+    g_window_to_workspace = std.AutoHashMap(u32, u8).init(wm.allocator);
+    g_per_workspace.ensureTotalCapacity(4)       catch {};
+    g_window_to_workspace.ensureTotalCapacity(4) catch {};
+    g_initialized = true;
 }
 
 pub fn deinit() void {
-    if (g_state) |*s| s.deinit();
-    g_state = null;
+    if (!g_initialized) return;
+    g_per_workspace.deinit();
+    g_window_to_workspace.deinit();
+    g_initialized = false;
 }
 
-// Public state queries 
+// Public state queries
 
-pub inline fn isFullscreen(win: u32) bool {
-    const s = g_state orelse return false;
-    return s.isFullscreen(win);
+pub fn isFullscreen(win: u32) bool {
+    if (!g_initialized) return false;
+    return g_window_to_workspace.contains(win);
 }
 
-pub inline fn getForWorkspace(ws: u8) ?FullscreenInfo {
-    const s = g_state orelse return null;
-    return s.getForWorkspace(ws);
+pub fn getForWorkspace(ws: u8) ?FullscreenInfo {
+    if (!g_initialized) return null;
+    return g_per_workspace.get(ws);
 }
 
 /// Returns the workspace index that `win` is fullscreen on, or null.
-/// Used instead of direct window_to_workspace.get() access.
-pub inline fn workspaceFor(win: u32) ?u8 {
-    const s = g_state orelse return null;
-    return s.window_to_workspace.get(win);
+pub fn workspaceFor(win: u32) ?u8 {
+    if (!g_initialized) return null;
+    return g_window_to_workspace.get(win);
 }
 
 pub fn setForWorkspace(ws: u8, info: FullscreenInfo) !void {
-    const s = &(g_state orelse return);
-    try s.setForWorkspace(ws, info);
+    if (!g_initialized) return;
+    try g_per_workspace.ensureUnusedCapacity(1);
+    try g_window_to_workspace.ensureUnusedCapacity(1);
+    g_per_workspace.putAssumeCapacity(ws, info);
+    g_window_to_workspace.putAssumeCapacity(info.window, ws);
 }
 
 pub fn removeForWorkspace(ws: u8) void {
-    const s = &(g_state orelse return);
-    s.removeForWorkspace(ws);
+    if (!g_initialized) return;
+    if (g_per_workspace.get(ws)) |info|
+        _ = g_window_to_workspace.remove(info.window);
+    _ = g_per_workspace.remove(ws);
 }
 
 pub fn clear() void {
-    const s = &(g_state orelse return);
-    s.clear();
+    if (!g_initialized) return;
+    g_per_workspace.clearRetainingCapacity();
+    g_window_to_workspace.clearRetainingCapacity();
 }
 
 /// Iterator over per-workspace fullscreen entries. Diagnostics only.
 pub fn perWorkspaceIterator() ?std.AutoHashMap(u8, FullscreenInfo).Iterator {
-    const s = &(g_state orelse return null);
-    return s.per_workspace.iterator();
+    if (!g_initialized) return null;
+    return g_per_workspace.iterator();
 }
 
 // Geometry helpers
@@ -145,16 +116,16 @@ pub fn perWorkspaceIterator() ?std.AutoHashMap(u8, FullscreenInfo).Iterator {
 /// spawned but never placed on-screen before the user triggered fullscreen.
 fn fetchWindowGeom(wm: *WM, win: u32) defs.WindowGeometry {
     if (tiling.getWindowGeom(win)) |rect| {
+        // Fast path: tiled windows have a cached rect from the last retile.
         const bw: u16 = if (tiling.getStateOpt()) |ts| ts.border_width else 0;
-        return .{
-            .x            = rect.x,
-            .y            = rect.y,
-            .width        = rect.width,
-            .height       = rect.height,
-            .border_width = bw,
-        };
+        return rectToGeom(rect, bw);
     }
 
+    // Slow path: floating or newly-spawned windows are not in the tiling cache
+    // (never passed through configureSafe), so a blocking round-trip is needed.
+    // Falls back to a centred quarter-screen default if the reply fails or the
+    // window is offscreen (x/y below OFFSCREEN_THRESHOLD_MIN), which happens
+    // when a window was spawned but never placed on-screen before fullscreen.
     const default: defs.WindowGeometry = .{
         .x            = @intCast(@divTrunc(@as(i32, wm.screen.width_in_pixels),  4)),
         .y            = @intCast(@divTrunc(@as(i32, wm.screen.height_in_pixels), 4)),
@@ -176,6 +147,17 @@ fn fetchWindowGeom(wm: *WM, win: u32) defs.WindowGeometry {
         .width        = reply.*.width,
         .height       = reply.*.height,
         .border_width = reply.*.border_width,
+    };
+}
+
+/// Convert a tiling rect + border width to a WindowGeometry.
+inline fn rectToGeom(rect: utils.Rect, border_width: u16) defs.WindowGeometry {
+    return .{
+        .x            = rect.x,
+        .y            = rect.y,
+        .width        = rect.width,
+        .height       = rect.height,
+        .border_width = border_width,
     };
 }
 
@@ -238,7 +220,7 @@ inline fn exitFullscreenCommit(wm: *WM, win: u32, ws: u8) void {
             const pos = utils.floatDefaultPos(wm);
             for (ws_obj.windows.items()) |other_win| {
                 if (other_win == win) continue;
-                if (minimize.isMinimized(wm, other_win)) continue;
+                if (minimize.isMinimized(other_win)) continue;
                 _ = xcb.xcb_configure_window(wm.conn, other_win,
                     xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
                     &[_]u32{ pos.x, pos.y });
@@ -276,17 +258,7 @@ pub fn toggleFullscreen(wm: *WM) void {
         if (fs_info.window == win) {
             _ = xcb.xcb_grab_server(wm.conn);
             exitFullscreenCommit(wm, win, current_ws);
-            // Do NOT suppress crossing events here.  The retile inside
-            // exitFullscreenCommit moves tiled windows back to their slots.
-            // If the cursor lands inside a window B that moved under it, the
-            // resulting EnterNotify is the one and only event that correctly
-            // updates hover focus to B.  Suppressing it (the previous
-            // behaviour) caused hover focus to stick on the former fullscreen
-            // window indefinitely: handleMotionNotify would eventually clear
-            // the suppress reason, but by then the cursor was already
-            // statically inside B with no new EnterNotify pending, so hover
-            // focus would not update until the cursor physically crossed a
-            // window boundary.
+            // The retile's EnterNotify correctly updates hover focus — no suppression needed.
             _ = xcb.xcb_ungrab_server(wm.conn);
             _ = xcb.xcb_flush(wm.conn);
         } else {

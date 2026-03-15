@@ -99,7 +99,7 @@ pub fn deinit() void {
 
 // Public queries 
 
-pub inline fn isMinimized(_: *const WM, win: u32) bool {
+pub inline fn isMinimized(win: u32) bool {
     if (!g_initialized) return false;
     return g_state.minimized_info.contains(win);
 }
@@ -114,7 +114,7 @@ inline fn hideWindow(wm: *WM, win: u32) void {
 
 pub fn focusBestAvailable(wm: *WM) void {
     if (workspaces.getCurrentWorkspaceObject()) |ws| {
-        if (workspaces.firstNonMinimized(wm, ws.windows.items())) |win| {
+        if (workspaces.firstNonMinimized(ws.windows.items())) |win| {
             focus.setFocus(wm, win, .tiling_operation);
             return;
         }
@@ -122,14 +122,38 @@ pub fn focusBestAvailable(wm: *WM) void {
     focus.clearFocus(wm);
 }
 
-// Minimize 
+// Minimize
+
+/// Undo a partially-completed minimizeWindow call.
+/// Called only on hash-map allocation failure; restores tiling and fullscreen
+/// state so the window remains visible and the WM stays consistent.
+inline fn rollbackMinimize(
+    wm:              *WM,
+    win:             u32,
+    was_fullscreen:  bool,
+    fs_ws:           ?u8,
+    saved_fs:        ?defs.WindowGeometry,
+) void {
+    if (wm.config.tiling.enabled) {
+        tiling.addWindow(wm, win);
+        tiling.retileCurrentWorkspace(wm);
+    }
+    if (was_fullscreen) {
+        fullscreen.setForWorkspace(fs_ws.?, .{
+            .window         = win,
+            .saved_geometry = saved_fs.?,
+        }) catch {
+            debug.err("minimize rollback: failed to re-insert fullscreen state for 0x{x}", .{win});
+        };
+    }
+}
 
 pub fn minimizeWindow(wm: *WM) void {
     const win    = focus.getFocused()               orelse return;
     const ws_idx = workspaces.getCurrentWorkspace() orelse return;
     const s      = getState();
 
-    if (isMinimized(wm, win)) return;
+    if (isMinimized(win)) return;
 
     // Tear down fullscreen state if needed, saving geometry for later restore.
     var saved_fs: ?defs.WindowGeometry = null;
@@ -157,18 +181,7 @@ pub fn minimizeWindow(wm: *WM) void {
         .tiling_index  = tiling_index,
     }) catch {
         debug.err("minimize: allocation failure tracking window 0x{x} -- rolling back", .{win});
-        if (wm.config.tiling.enabled) {
-            tiling.addWindow(wm, win);
-            tiling.retileCurrentWorkspace(wm);
-        }
-        if (was_fullscreen) {
-            fullscreen.setForWorkspace(fs_ws_for_rollback.?, .{
-                .window         = win,
-                .saved_geometry = saved_fs.?,
-            }) catch {
-                debug.err("minimize rollback: failed to re-insert fullscreen state for 0x{x}", .{win});
-            };
-        }
+        rollbackMinimize(wm, win, was_fullscreen, fs_ws_for_rollback, saved_fs);
         return;
     };
     s.next_timestamp = ts + 1;
@@ -287,8 +300,8 @@ pub fn unminimizeAll(wm: *WM) void {
     }
     if (count == 0) return;
 
-    // Sort by timestamp ascending; fullscreen windows sort after plain ones
-    // because each fullscreen restore needs its own server grab.
+    // Sort plain windows before fullscreen ones; each fullscreen restore needs
+    // its own server grab so they must be handled separately after the batch.
     std.sort.pdq(Entry, entries[0..count], {}, struct {
         fn lt(_: void, a: Entry, b: Entry) bool {
             if (a.is_fs != b.is_fs) return !a.is_fs; // plain before fullscreen
@@ -296,10 +309,11 @@ pub fn unminimizeAll(wm: *WM) void {
         }
     }.lt);
 
-    var plain_end: usize = count;
-    for (entries[0..count], 0..) |e, i| {
-        if (e.is_fs) { plain_end = i; break; }
-    }
+    // After sorting, all plain entries precede all fullscreen entries.
+    // Find the boundary using indexOfScalar on the is_fs field.
+    const plain_end: usize = for (entries[0..count], 0..) |e, i| {
+        if (e.is_fs) break i;
+    } else count;
     const plain_wins = entries[0..plain_end];
     const fs_wins    = entries[plain_end..count];
 
@@ -340,13 +354,13 @@ pub fn unminimizeAll(wm: *WM) void {
 // State maintenance 
 
 /// Called by window.zig on unmap/destroy to keep state coherent.
-pub fn forceUntrack(_: *WM, win: u32) void {
+pub fn forceUntrack(win: u32) void {
     const s = getState();
     _ = s.minimized_info.remove(win);
 }
 
 /// Called by workspaces.zig when a minimized window is moved to another workspace.
-pub fn moveToWorkspace(_: *WM, win: u32, new_ws: u8) void {
+pub fn moveToWorkspace(win: u32, new_ws: u8) void {
     const s = getState();
     const entry = s.minimized_info.getPtr(win) orelse return;
     entry.workspace_idx = new_ws;

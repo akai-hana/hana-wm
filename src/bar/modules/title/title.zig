@@ -33,8 +33,6 @@ const Atoms = struct {
     inline fn utf8Type(self: *const Atoms) u32 {
         return if (self.utf8_string != 0) self.utf8_string else xcb.XCB_ATOM_STRING;
     }
-
-    fn invalidate(self: *Atoms) void { self.initialized = false; }
 };
 
 var atoms: Atoms = .{};
@@ -47,16 +45,6 @@ const WindowInfo = struct {
     y:         i16,
     title:     []const u8,
     minimized: bool,
-};
-
-/// Shared rendering context bundled to keep drawSegmentedTitles' parameter
-/// list manageable.  All fields come directly from draw()'s parameters.
-const TitleDrawCtx = struct {
-    dc:        *drawing.DrawContext,
-    config:    defs.BarConfig,
-    height:    u16,
-    conn:      *xcb.xcb_connection_t,
-    allocator: std.mem.Allocator,
 };
 
 /// Fixed left indent independent of scaledSegmentPadding.
@@ -124,6 +112,8 @@ pub fn draw(
             config.bg;
         dc.fillRect(start_x, 0, width, height, accent);
 
+        // Compute text bounds once; both the minimized and focused branches
+        // use the same inset position for both static draw and carousel blit.
         const text_x  = start_x + scaled_padding + TITLE_LEAD_PX;
         const avail_w = width -| scaled_padding * 2 -| TITLE_LEAD_PX;
 
@@ -132,7 +122,7 @@ pub fn draw(
             defer if (title) |t| allocator.free(t);
             if (title) |t| {
                 try carousel.drawOrScrollTitle(dc, text_x, baseline_y, avail_w,
-                    t, accent, config.fg, single_win, title_invalidated);
+                    text_x, avail_w, t, accent, config.fg, single_win, title_invalidated);
             }
         } else {
             // focused_title was pre-fetched on the main thread — zero X11 I/O.
@@ -144,19 +134,13 @@ pub fn draw(
                 }
                 const fg = if (is_focused) config.selected_fg else config.fg;
                 try carousel.drawOrScrollTitle(dc, text_x, baseline_y, avail_w,
-                    focused_title, accent, fg, focused_window, title_invalidated);
+                    text_x, avail_w, focused_title, accent, fg, focused_window, title_invalidated);
             }
         }
     } else {
-        const ctx = TitleDrawCtx{
-            .dc        = dc,
-            .config    = config,
-            .height    = height,
-            .conn      = conn,
-            .allocator = allocator,
-        };
-        try drawSegmentedTitles(ctx, start_x, width, focused_window,
-            current_ws_wins, minimized_set, scaled_padding, title_invalidated);
+        try drawSegmentedTitles(dc, config, height, start_x, width,
+            conn, focused_window, current_ws_wins, minimized_set, allocator,
+            scaled_padding, title_invalidated);
     }
 
     return start_x + width;
@@ -165,19 +149,23 @@ pub fn draw(
 // Private — split-view segmented titles
 
 fn drawSegmentedTitles(
-    ctx:               TitleDrawCtx,
+    dc:                *drawing.DrawContext,
+    config:            defs.BarConfig,
+    height:            u16,
     start_x:           u16,
     width:             u16,
+    conn:              *xcb.xcb_connection_t,
     focused_window:    ?u32,
     win_items:         []const u32,
     minimized_set:     *const std.AutoHashMapUnmanaged(u32, void),
+    allocator:         std.mem.Allocator,
     scaled_padding:    u16,
     title_invalidated: bool,
 ) !void {
     if (win_items.len == 0) return;
 
-    // Prune a stale seg-carousel whose window has left the workspace, and free
-    // the single-window carousel (the two paths are mutually exclusive).
+    // Free the single-window carousel (mutually exclusive with segmented) and
+    // prune the seg-carousel if its window has left the workspace.
     carousel.prepareSegCarousel(win_items);
 
     const MAX_WINS: usize = 128;
@@ -200,9 +188,9 @@ fn drawSegmentedTitles(
 
     for (win_items[0..n_wins], 0..) |win, i| {
         if (net_atom != 0)
-            net_cookies[i] = xcb.xcb_get_property(ctx.conn, 0, win, net_atom, utf_type, 0, 8192);
+            net_cookies[i] = xcb.xcb_get_property(conn, 0, win, net_atom, utf_type, 0, 8192);
         if (!minimized_set.contains(win)) {
-            geom_cookies[i] = xcb.xcb_get_geometry(ctx.conn, win);
+            geom_cookies[i] = xcb.xcb_get_geometry(conn, win);
             needs_geom[i]   = true;
         }
     }
@@ -215,17 +203,17 @@ fn drawSegmentedTitles(
     for (win_items[0..n_wins], 0..) |win, i| {
         got: {
             if (net_atom != 0) {
-                const r = xcb.xcb_get_property_reply(ctx.conn, net_cookies[i], null) orelse break :got;
+                const r = xcb.xcb_get_property_reply(conn, net_cookies[i], null) orelse break :got;
                 defer std.c.free(r);
                 const len = xcb.xcb_get_property_value_length(r);
                 if (len > 0) {
                     const ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(r));
-                    titles[i] = try ctx.allocator.dupe(u8, ptr[0..@intCast(len)]);
+                    titles[i] = try allocator.dupe(u8, ptr[0..@intCast(len)]);
                     break :got;
                 }
             }
             fb_cookies[i] = xcb.xcb_get_property(
-                ctx.conn, 0, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, 0, 8192);
+                conn, 0, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, 0, 8192);
             needs_fb[i] = true;
         }
     }
@@ -233,15 +221,15 @@ fn drawSegmentedTitles(
     // Phase 3: collect WM_NAME fallback replies.
     for (0..n_wins) |i| {
         if (!needs_fb[i]) continue;
-        const r = xcb.xcb_get_property_reply(ctx.conn, fb_cookies[i], null) orelse continue;
+        const r = xcb.xcb_get_property_reply(conn, fb_cookies[i], null) orelse continue;
         defer std.c.free(r);
         const len = xcb.xcb_get_property_value_length(r);
         if (len > 0) {
             const ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(r));
-            titles[i] = try ctx.allocator.dupe(u8, ptr[0..@intCast(len)]);
+            titles[i] = try allocator.dupe(u8, ptr[0..@intCast(len)]);
         }
     }
-    defer for (titles[0..n_wins]) |t| if (t) |s| ctx.allocator.free(s);
+    defer for (titles[0..n_wins]) |t| if (t) |s| allocator.free(s);
 
     // Build WindowInfo list.  Geometry replies are already buffered from Phase 1.
     var infos_buf: [MAX_WINS]WindowInfo = undefined;
@@ -250,7 +238,7 @@ fn drawSegmentedTitles(
     for (win_items[0..n_wins], 0..) |win, i| {
         const is_min = !needs_geom[i];
         const geom: utils.Rect = if (needs_geom[i]) blk: {
-            const r = xcb.xcb_get_geometry_reply(ctx.conn, geom_cookies[i], null) orelse continue;
+            const r = xcb.xcb_get_geometry_reply(conn, geom_cookies[i], null) orelse continue;
             defer std.c.free(r);
             break :blk utils.Rect{
                 .x      = @intCast(r.*.x),
@@ -276,7 +264,7 @@ fn drawSegmentedTitles(
     std.mem.sort(WindowInfo, window_infos, {}, compareWindows);
 
     const num_windows: u32 = @intCast(window_infos.len);
-    const baseline_y       = ctx.dc.baselineY(ctx.height);
+    const baseline_y       = dc.baselineY(height);
 
     for (window_infos, 0..) |info, i| {
         // Pixel-perfect tiling: segment i spans [i*W/n, (i+1)*W/n).
@@ -288,42 +276,36 @@ fn drawSegmentedTitles(
 
         const is_focused_win = focused_window == info.window;
 
-        const accent = if (is_focused_win)  ctx.config.getTitleAccent()
-            else if (info.minimized)         ctx.config.getTitleMinimizedAccent()
-            else                             ctx.config.getTitleUnfocusedAccent();
+        const accent = if (is_focused_win)  config.getTitleAccent()
+            else if (info.minimized)         config.getTitleMinimizedAccent()
+            else                             config.getTitleUnfocusedAccent();
 
-        ctx.dc.fillRect(segment_x, 0, segment_width, ctx.height, accent);
+        dc.fillRect(segment_x, 0, segment_width, height, accent);
 
         if (info.title.len > 0 and segment_width > scaled_padding * 2) {
             const text_x  = segment_x + scaled_padding + TITLE_LEAD_PX;
             const avail_w = segment_width -| scaled_padding * 2 -| TITLE_LEAD_PX;
-            const text_fg = if (is_focused_win) ctx.config.selected_fg else ctx.config.fg;
-            const text_w  = ctx.dc.textWidth(info.title);
+            const text_fg = if (is_focused_win) config.selected_fg else config.fg;
+            const text_w  = dc.textWidth(info.title);
 
-            if (!is_focused_win) {
-                // Non-focused: always ellipsis on overflow, never scroll.
-                if (text_w <= avail_w)
-                    try ctx.dc.drawText(text_x, baseline_y, info.title, text_fg)
-                else
-                    try ctx.dc.drawTextEllipsis(text_x, baseline_y, info.title, avail_w, text_fg);
-            } else if (carousel.isCarouselEnabled()) {
+            if (is_focused_win and carousel.isCarouselEnabled()) {
                 // Focused + carousel enabled: pass the full segment bounds so
-                // the scroll covers the entire segment with no static padding
-                // gaps, matching the single-window carousel behaviour.
+                // the scroll covers the entire segment width with no static
+                // padding gaps on either side.
                 const scrolled = try carousel.blitSegCarousel(
-                    ctx.dc, segment_x, baseline_y, segment_width, text_w,
+                    dc, segment_x, baseline_y, segment_width, text_w,
                     info.title, accent, text_fg, info.window, title_invalidated,
                 );
                 if (!scrolled) {
                     // Text fits — draw it inset with normal padding.
-                    try ctx.dc.drawText(text_x, baseline_y, info.title, text_fg);
+                    try dc.drawText(text_x, baseline_y, info.title, text_fg);
                 }
             } else {
-                // Focused + carousel disabled: use ellipsis as fallback.
+                // Non-focused or carousel disabled: ellipsis on overflow, never scroll.
                 if (text_w <= avail_w)
-                    try ctx.dc.drawText(text_x, baseline_y, info.title, text_fg)
+                    try dc.drawText(text_x, baseline_y, info.title, text_fg)
                 else
-                    try ctx.dc.drawTextEllipsis(text_x, baseline_y, info.title, avail_w, text_fg);
+                    try dc.drawTextEllipsis(text_x, baseline_y, info.title, avail_w, text_fg);
             }
         }
     }

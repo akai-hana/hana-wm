@@ -264,7 +264,7 @@ fn executeAction(action: *const defs.Action, wm: *WM) !void {
         .toggle_layout_reverse  => { tiling.toggleLayoutReverse(wm); bar.scheduleRedraw(); },
         .cycle_layout_variation => tiling.cycleLayoutVariation(wm),
 
-        .toggle_bar_visibility  => bar.toggleBarVisibility(wm),
+        .toggle_bar_visibility  => bar.setBarState(wm, .toggle),
         .toggle_bar_position    => bar.toggleBarPosition(wm),
 
         .increase_master        => tiling.increaseMasterWidth(wm),

@@ -413,6 +413,10 @@ pub fn removeWindow(window_id: u32) void {
 pub fn getWindowFilteredIndex(win: u32) ?usize {
     const s = getStateOpt() orelse return null;
     if (!s.enabled) return null;
+    // Only windows on the current workspace have a meaningful filtered index.
+    // minimizeWindow always minimizes a focused window on the current workspace,
+    // so this assertion documents and enforces the expected call-site contract.
+    std.debug.assert(workspaces.isOnCurrentWorkspace(win));
     var filtered_idx: usize = 0;
     for (s.windows.items()) |w| {
         if (w == win) return filtered_idx;
@@ -459,11 +463,11 @@ pub fn addWindowAtFilteredIndex(wm: *WM, win: u32, target_filtered_idx: usize) v
 fn moveWindowToFilteredSlot(s: *State, win: u32, target: usize) void {
     const items = s.windows.items();
 
-    var from_global: usize = items.len; // sentinel
+    var from_global: ?usize = null;
     for (items, 0..) |w, i| {
         if (w == win) { from_global = i; break; }
     }
-    if (from_global == items.len) return; // shouldn't happen
+    const fg = from_global orelse return; // win not in list — shouldn't happen
 
     // Find the global index of the workspace window currently at `target`
     // (excluding win itself).  That window should end up immediately AFTER win,
@@ -478,8 +482,8 @@ fn moveWindowToFilteredSlot(s: *State, win: u32, target: usize) void {
     }
 
     const tg = to_global orelse return; // target at/past end — already correct
-    const effective_to: usize = if (from_global < tg) tg - 1 else tg;
-    if (effective_to != from_global) moveWindowToIndex(s, from_global, effective_to);
+    const effective_to: usize = if (fg < tg) tg - 1 else tg;
+    if (effective_to != fg) moveWindowToIndex(s, fg, effective_to);
 }
 
 /// Toggle a window between tiled and floating.
