@@ -42,56 +42,65 @@ pub const CAROUSEL_PX_PER_S: f64 = 150.0;
 pub const CAROUSEL_GAP_PX: u16 = 60;
 
 // Types
+//
+// Two distinct entry types enforce at the type level which fields belong to
+// which path.  Using a single shared type with optional-defaulted fields
+// (the previous approach) required a comment to prevent the seg path from
+// accidentally writing single-window-only fields.
 
-/// A pre-rendered XCB pixmap for one carousel instance — used for both the
-/// single-window path and the segmented (split-view) path.  Sharing one type
-/// removes the duplicate cp/window/cycle_w/start_ms fields that previously
-/// existed in the separate CarouselCache and SegCarousel structs.
-///
-/// Fields in the "single-window only" section default to 0 and are ignored
-/// by the segmented path.
-const CarouselEntry = struct {
+/// Shared base for both carousel entry types.
+const CarouselBase = struct {
     cp:       drawing.CarouselPixmap,
-    /// Window ID this pixmap was rendered for.  null is accepted by the
-    /// single-window path when no window is focused; always non-null for
-    /// the segmented path.
-    window:   ?u32,
     cycle_w:  u16,
     start_ms: i64,
+};
 
-    // ── Single-window path only ──────────────────────────────────────────
-    // The segmented path never reads or writes these; they default to 0.
+/// Single-window carousel entry.
+///
+/// `window`      — Window ID the pixmap was rendered for.  null when no
+///                 window is focused (the pixmap shows an empty/default title).
+/// `last_bg`     — Background colour baked into the pixmap.  When this differs
+///                 from the requested bg the pixmap is rebuilt (with start_ms
+///                 preserved) so accent changes are reflected immediately.
+/// `text_x` /
+/// `text_avail_w`— Inset clip coords used by drawCarouselTick.  Must match
+///                 the coords passed to blitFrame by drawOrScrollTitle so both
+///                 code paths compute the same draw_x = clip_x - offset.
+const SingleEntry = struct {
+    base:         CarouselBase,
+    window:       ?u32,
+    last_bg:      u32,
+    text_x:       u16,
+    text_avail_w: u16,
+};
 
-    /// Background colour baked into the pixmap at render() time.  Used to
-    /// detect accent changes (e.g. minimize/unminimize) so the pixmap can
-    /// be rebuilt while preserving start_ms for a seamless scroll.
-    last_bg:      u32 = 0,
-    /// Inset clip coords stored so drawCarouselTick uses the same clip_x
-    /// as drawOrScrollTitle.  Both paths compute draw_x = clip_x - offset,
-    /// so matching clip_x prevents a positional stutter when start_ms is
-    /// preserved across a bg-only rebuild.
-    text_x:       u16 = 0,
-    text_avail_w: u16 = 0,
+/// Segmented (split-view) carousel entry.
+///
+/// `window` is always a real window ID — the seg path never renders for a
+/// null-focus state (it only activates for the focused window in a split).
+const SegEntry = struct {
+    base:   CarouselBase,
+    window: u32,
 };
 
 // Module state
 
-/// Active single-window carousel.  Non-null iff the title segment is currently
-/// scrolling a single-window title.
-var g_carousel: ?CarouselEntry = null;
+/// Active single-window carousel.  Non-null iff the title segment is scrolling
+/// a single-window title.
+var g_carousel: ?SingleEntry = null;
 
 /// Active segmented carousel for the focused window in split-view.  Non-null
 /// iff a split-view title is being scrolled.
-var g_seg_carousel: ?CarouselEntry = null;
+var g_seg_carousel: ?SegEntry = null;
 
 /// Monotonic timestamp (ms) recorded the instant focus changed to a new
 /// window — set by notifyFocusChanged and consumed once by blitSegCarousel
 /// when it builds the replacement pixmap.
 ///
-/// Keeping this separate from CarouselEntry.start_ms means the animation
+/// Keeping this separate from SegEntry.base.start_ms means the animation
 /// clock starts ticking at focus-click time even if several milliseconds
 /// elapse before the next draw cycle actually runs.  A value of 0 means
-/// no pending focus change (the draw cycle will call nowMs() as usual).
+/// no pending focus change (blitSegCarousel will call nowMs() as usual).
 var g_seg_focus_start_ms: i64 = 0;
 
 /// When false the carousel is disabled globally.  Both single-window and
@@ -124,8 +133,8 @@ pub fn isCarouselActive() bool {
 
 /// Free all carousel pixmaps.  Call on bar deinit or config reload.
 pub fn deinitCarousel() void {
-    if (g_carousel)     |*e| { e.cp.deinit(); g_carousel     = null; }
-    if (g_seg_carousel) |*e| { e.cp.deinit(); g_seg_carousel = null; }
+    if (g_carousel)     |*e| { e.base.cp.deinit(); g_carousel     = null; }
+    if (g_seg_carousel) |*e| { e.base.cp.deinit(); g_seg_carousel = null; }
     g_seg_focus_start_ms = 0;
 }
 
@@ -133,28 +142,31 @@ pub fn deinitCarousel() void {
 ///
 /// Two things happen here that cannot wait for the next draw cycle:
 ///
-///   1. g_seg_focus_start_ms is stamped to the current monotonic clock so the
-///      animation is anchored to focus-click time, not draw time.
-///
-///   2. The stale seg-carousel pixmap is freed immediately (when the window
+///   1. The stale seg-carousel pixmap is freed immediately (when the window
 ///      actually changed).  Without this the bar keeps blitting the old
 ///      window's title for however many frames elapse before the next full
 ///      draw runs.
 ///
+///   2. g_seg_focus_start_ms is stamped to the current monotonic clock so the
+///      animation is anchored to focus-click time, not draw time.  It is only
+///      stamped when the window actually changed so a re-focus of the same
+///      window does not disturb the running animation.
+///
 /// Pass new_window = null when focus is cleared entirely.
 /// Safe to call at any time; a no-op when the window is unchanged.
 pub fn notifyFocusChanged(new_window: ?u32) void {
-    // Always stamp the focus timestamp first — blitSegCarousel consumes it
-    // when it builds the replacement pixmap so the animation is anchored to
-    // when the user clicked, not when the draw cycle happened to run.
-    g_seg_focus_start_ms = nowMs();
-
     if (g_seg_carousel) |*e| {
-        const same = if (new_window) |nw| e.window == @as(?u32, nw) else false;
-        if (!same) {
-            e.cp.deinit();
-            g_seg_carousel = null;
-        }
+        // If the focused window is unchanged, leave the running animation alone.
+        const same = if (new_window) |nw| nw == e.window else false;
+        if (same) return;
+        e.base.cp.deinit();
+        g_seg_carousel = null;
+        g_seg_focus_start_ms = nowMs();
+    } else if (new_window != null) {
+        // No existing pixmap to free, but stamp the timestamp so the very
+        // first carousel built after this focus change starts from position 0
+        // relative to when the user clicked, not when the draw cycle ran.
+        g_seg_focus_start_ms = nowMs();
     }
 }
 
@@ -169,7 +181,8 @@ pub fn notifyFocusChanged(new_window: ?u32) void {
 /// Hot path:
 ///   fillRect   — one xcb_poly_fill_rectangle  (background + gap fill)
 ///   blitFrame  — at most two xcb_copy_area     (two leapfrog text copies)
-///   flushRect  — one targeted xcb_copy_area    (no cairo_surface_flush)
+///   flushRect  — one targeted xcb_copy_area    (drawCarouselTick's own flush,
+///                so the outer drawTitleOnly skips the full dc.flush())
 pub fn drawCarouselTick(
     dc:      *drawing.DrawContext,
     bg:      u32,
@@ -178,13 +191,13 @@ pub fn drawCarouselTick(
     avail_w: u16,
 ) bool {
     const e = g_carousel orelse return false;
-    // Fill the full segment area (background + the gap between text copies).
+    // fillRect and flushRect use the full segment coords (x/avail_w) to cover
+    // the background including padding gaps.
     dc.fillRect(x, 0, avail_w, height, bg);
-    const offset = carouselOffset(e.start_ms, e.cycle_w);
-    // Use the *inset* text coords stored in the entry so this path and
-    // drawOrScrollTitle both compute draw_x = clip_x - offset with the same
-    // clip_x, keeping the text position identical between the two paths.
-    e.cp.blitFrame(dc.drawable, dc.gc, e.text_x, e.text_avail_w, offset, e.cycle_w);
+    const offset = carouselOffset(e.base.start_ms, e.base.cycle_w);
+    // Blit using the inset coords stored at build time so this path and
+    // drawOrScrollTitle compute the same draw_x = clip_x - offset.
+    e.base.cp.blitFrame(dc.drawable, dc.gc, e.text_x, e.text_avail_w, offset, e.base.cycle_w);
     dc.flushRect(x, avail_w);
     return true;
 }
@@ -193,15 +206,24 @@ pub fn drawCarouselTick(
 
 /// Render `text` into `avail_w` pixels starting at (`x`, `y`).
 ///
+/// `x` / `avail_w`      — inset text area: used for the overflow check, for
+///                         static text that fits, and for ellipsis fallback.
+/// `blit_x` / `blit_w`  — clip coords for the carousel blit.  Stored in the
+///                         entry so drawCarouselTick uses the same clip_x,
+///                         keeping draw_x = clip_x - offset identical between
+///                         the two code paths.
+///
 /// If the text fits it is drawn normally via Pango/Cairo.
-/// If it overflows and the carousel is enabled, a CarouselPixmap is built (or
-/// reused) and blitted with a v-synced scroll offset.
+/// If it overflows and the carousel is enabled, a pixmap is built (or reused)
+/// and blitted with a v-synced scroll offset.
 /// If it overflows and the carousel is disabled, ellipsis is used as fallback.
 pub fn drawOrScrollTitle(
     dc:                *drawing.DrawContext,
     x:                 u16,
     y:                 u16,
     avail_w:           u16,
+    blit_x:            u16,
+    blit_w:            u16,
     text:              []const u8,
     bg:                u32,
     fg:                u32,
@@ -212,14 +234,14 @@ pub fn drawOrScrollTitle(
 
     if (text_w <= avail_w) {
         // Text fits — release any stale pixmap and draw normally.
-        if (g_carousel) |*e| { e.cp.deinit(); g_carousel = null; }
+        if (g_carousel) |*e| { e.base.cp.deinit(); g_carousel = null; }
         try dc.drawText(x, y, text, fg);
         return;
     }
 
     // Text overflows — use ellipsis when the carousel feature is disabled.
     if (!g_carousel_enabled) {
-        if (g_carousel) |*e| { e.cp.deinit(); g_carousel = null; }
+        if (g_carousel) |*e| { e.base.cp.deinit(); g_carousel = null; }
         try dc.drawTextEllipsis(x, y, text, avail_w, fg);
         return;
     }
@@ -236,51 +258,47 @@ pub fn drawOrScrollTitle(
 
     if (full_stale or bg_changed) {
         const preserved_start_ms: i64 =
-            if (!full_stale and bg_changed) g_carousel.?.start_ms else nowMs();
+            if (!full_stale and bg_changed) g_carousel.?.base.start_ms else nowMs();
 
-        if (g_carousel) |*e| { e.cp.deinit(); g_carousel = null; }
+        if (g_carousel) |*e| { e.base.cp.deinit(); g_carousel = null; }
 
         var cp = try drawing.CarouselPixmap.init(dc, text_w);
         errdefer cp.deinit();
         try cp.render(dc, text, bg, fg, y);
         g_carousel = .{
-            .cp           = cp,
+            .base         = .{ .cp = cp, .cycle_w = text_w + CAROUSEL_GAP_PX, .start_ms = preserved_start_ms },
             .window       = window,
-            .cycle_w      = text_w + CAROUSEL_GAP_PX,
-            .start_ms     = preserved_start_ms,
             .last_bg      = bg,
-            .text_x       = x,
-            .text_avail_w = avail_w,
+            .text_x       = blit_x,
+            .text_avail_w = blit_w,
         };
     }
 
     const e      = g_carousel.?;
-    const offset = carouselOffset(e.start_ms, e.cycle_w);
-    e.cp.blitFrame(dc.drawable, dc.gc, x, avail_w, offset, e.cycle_w);
+    const offset = carouselOffset(e.base.start_ms, e.base.cycle_w);
+    e.base.cp.blitFrame(dc.drawable, dc.gc, blit_x, blit_w, offset, e.base.cycle_w);
 }
 
 // Public API — split-view segmented carousel
 
 /// Call at the top of a segmented-titles draw pass.
 ///
-/// The single-window carousel (g_carousel) is always freed here because the
-/// single-window and segmented paths are mutually exclusive: entering a
-/// segmented pass means there are >=2 windows, so g_carousel is stale by
-/// definition.  Leaving it alive would cause the carousel timer to blit the
-/// old single-window pixmap over the correct split render every frame.
+/// Frees g_carousel unconditionally: the single-window and segmented paths
+/// are mutually exclusive (>=2 windows means g_carousel is stale), and leaving
+/// it alive would cause the carousel timer to blit the old single-window pixmap
+/// over the correct split render every frame.
 ///
 /// Also frees the seg-carousel when its window is no longer in the workspace
 /// window list, so we never blit a title for a window that has been closed.
 pub fn prepareSegCarousel(win_items: []const u32) void {
-    if (g_carousel) |*e| { e.cp.deinit(); g_carousel = null; }
+    if (g_carousel) |*e| { e.base.cp.deinit(); g_carousel = null; }
 
     if (g_seg_carousel) |e| {
-        var still_present = false;
-        for (win_items) |w| {
-            if (@as(?u32, w) == e.window) { still_present = true; break; }
-        }
+        const still_present = for (win_items) |w| {
+            if (w == e.window) break true;
+        } else false;
         if (!still_present) {
-            g_seg_carousel.?.cp.deinit();
+            g_seg_carousel.?.base.cp.deinit();
             g_seg_carousel = null;
         }
     }
@@ -311,37 +329,32 @@ pub fn blitSegCarousel(
     const expected_cycle_w: u16 = text_w + CAROUSEL_GAP_PX;
 
     const stale = if (g_seg_carousel) |e|
-        e.window != @as(?u32, window) or
-        title_invalidated              or
-        e.cycle_w != expected_cycle_w
+        e.window != window            or
+        title_invalidated             or
+        e.base.cycle_w != expected_cycle_w
     else
         true;
 
     if (stale) {
-        if (g_seg_carousel) |*e| { e.cp.deinit(); g_seg_carousel = null; }
+        if (g_seg_carousel) |*e| { e.base.cp.deinit(); g_seg_carousel = null; }
         var cp = try drawing.CarouselPixmap.init(dc, text_w);
         errdefer cp.deinit();
         try cp.render(dc, text, accent, text_fg, baseline_y);
         // Use the focus-event timestamp when available so the animation is
         // anchored to when the user clicked, not when the draw cycle ran.
-        // Consume it (reset to 0) so subsequent invalidations (e.g. title
-        // text changes) fall back to the normal nowMs() path.
-        const start: i64 = if (g_seg_focus_start_ms != 0) blk: {
-            const t = g_seg_focus_start_ms;
-            g_seg_focus_start_ms = 0;
-            break :blk t;
-        } else nowMs();
+        // Always reset g_seg_focus_start_ms to 0 after consuming it so
+        // subsequent title-text invalidations fall back to nowMs().
+        const start = if (g_seg_focus_start_ms != 0) g_seg_focus_start_ms else nowMs();
+        g_seg_focus_start_ms = 0;
         g_seg_carousel = .{
-            .cp       = cp,
-            .window   = window,
-            .cycle_w  = expected_cycle_w,
-            .start_ms = start,
+            .base   = .{ .cp = cp, .cycle_w = expected_cycle_w, .start_ms = start },
+            .window = window,
         };
     }
 
     const e      = g_seg_carousel.?;
-    const offset = carouselOffset(e.start_ms, e.cycle_w);
-    e.cp.blitFrame(dc.drawable, dc.gc, text_x, avail_w, offset, e.cycle_w);
+    const offset = carouselOffset(e.base.start_ms, e.base.cycle_w);
+    e.base.cp.blitFrame(dc.drawable, dc.gc, text_x, avail_w, offset, e.base.cycle_w);
     return true;
 }
 
@@ -364,10 +377,6 @@ fn nowMs() i64 {
 /// Quantising to frames aligns visual updates with v-blank and prevents the
 /// partial-frame tearing that arises when the bar redraws at an arbitrary
 /// sub-frame moment.
-///
-/// `start_ms` is the monotonic timestamp at which this entry was last built.
-/// All carousels derive their offset from `now - start_ms`, so the animation
-/// always begins at position 0 when first shown.
 fn carouselOffset(start_ms: i64, cycle_w: u16) u16 {
     const hz           = hertz.getCached();
     const frame_ms     = 1000.0 / hz;

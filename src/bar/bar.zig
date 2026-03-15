@@ -15,7 +15,7 @@ const debug = @import("debug");
 
 const bar_flags = @import("bar_flags");
 
-pub const BarAction = enum { hide_fullscreen, show_fullscreen };
+pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
 const drawing    = @import("drawing");
 const tiling     = @import("tiling");
 const drag       = @import("drag");
@@ -41,7 +41,6 @@ const variations_segment = if (bar_flags.has_variations) @import("variations") e
 const prompt     = @import("prompt");
 const fullscreen = @import("fullscreen");
 const carousel   = @import("carousel");
-const title_mod  = @import("title"); // fetches focused window title on the main thread
 
 const title_segment = if (bar_flags.has_title) @import("title") else struct {
     pub fn draw(
@@ -74,15 +73,7 @@ const FALLBACK_WORKSPACES_WIDTH: u16 = 270;
 const LAYOUT_SEGMENT_WIDTH:      u16 = 60;
 const TITLE_SEGMENT_MIN_WIDTH:   u16 = 100;
 
-// Snapshot
-
-/// The three per-segment dirty flags computed in captureIntoSlot.
-/// Grouping them makes the relationship explicit and keeps BarSnapshot cleaner.
-const DirtyFlags = struct {
-    all:   bool = true, // ws_count changed or full-redraw forced
-    ws:    bool = true, // workspace state changed
-    title: bool = true, // title / focus / minimized state changed
-};
+// Snapshot 
 
 /// Point-in-time bar state. Lives in BarChannel.slots[]; never heap-allocated.
 /// Variable-length fields use ArrayListUnmanaged so buffers grow only when
@@ -100,10 +91,12 @@ const BarSnapshot = struct {
     ws_count:          u32                           = 0,
     status_text:       std.ArrayListUnmanaged(u8)    = .empty,
     title_invalidated: bool                          = false,
-    /// Per-segment dirty flags computed during captureIntoSlot by comparing
-    /// against the previous snapshot.  drawAll uses these to skip segments
+    /// Per-segment dirty flags, computed during captureIntoSlot by comparing
+    /// against the previous snapshot. drawAll uses these to skip segments
     /// whose inputs have not changed, avoiding unnecessary Pango layout passes.
-    dirty: DirtyFlags = .{},
+    dirty_all:   bool = true,  // ws_count changed or full-redraw forced
+    dirty_ws:    bool = true,  // workspace state changed
+    dirty_title: bool = true,  // title / focus / minimized state changed
 
     fn deinit(snap: *BarSnapshot, allocator: std.mem.Allocator) void {
         snap.focused_title.deinit(allocator);
@@ -124,16 +117,6 @@ const BarSnapshot = struct {
 /// Since write_idx is only mutated by the main thread, reading it outside
 /// the lock before writing is safe; the mutex acquire before the flip
 /// establishes the required memory fence for the bar thread.
-///
-/// Work-notification flags and their priority order (highest first):
-///   snap_ready   — a full BarSnapshot is waiting; supersedes all others.
-///                  The bar thread runs drawAll and signals done_cond.
-///   focus_dirty  — only the focused window changed; run the lightweight
-///                  drawTitleOnly path.  Skipped when snap_ready is set.
-///   clock_dirty  — only the clock needs repainting; run drawClockOnly.
-///                  Skipped when snap_ready is set; can co-occur with focus_dirty.
-///   (carousel)   — no flag; the bar thread self-wakes on a timed deadline
-///                  whenever isCarouselActive() returns true.
 const BarChannel = struct {
     mutex:         std.Thread.Mutex     = .{},
     work_cond:     std.Thread.Condition = .{},
@@ -153,10 +136,8 @@ const BarChannel = struct {
     force_dirty_all:  bool  = false,
 };
 
-var g_channel:    BarChannel     = .{};
-var g_bar_thread: ?std.Thread    = null;
-/// Bar render state.  Non-null from bar.init() to bar.deinit().
-var state:        ?*State        = null;
+var g_channel: BarChannel     = .{};
+var g_bar_thread: ?std.Thread = null;
 
 // State 
 
@@ -182,7 +163,7 @@ const State = struct {
     has_clock_segment:    bool,
     cached_title_x:       u16,
     cached_title_w:       u16,
-    cached_ws_wins:       []u32,
+    cached_ws_wins:       std.ArrayListUnmanaged(u32),
     cached_minimized_set: std.AutoHashMapUnmanaged(u32, void),
     /// Focused window ID cached from the last full draw; used for carousel
     /// partial redraws that need the current focus without a new snapshot.
@@ -232,7 +213,7 @@ const State = struct {
             },
             .cached_title_x       = 0,
             .cached_title_w       = 0,
-            .cached_ws_wins       = &.{},
+            .cached_ws_wins       = .empty,
             .cached_minimized_set = .{},
             .cached_focused_window = null,
             .title_layout_valid   = false,
@@ -255,7 +236,7 @@ const State = struct {
         self.status_text.deinit(self.allocator);
         self.cached_title.deinit(self.allocator);
         self.cached_minimized_set.deinit(self.allocator);
-        self.allocator.free(self.cached_ws_wins);
+        self.cached_ws_wins.deinit(self.allocator);
         self.allocator.destroy(self);
     }
 
@@ -323,26 +304,13 @@ const State = struct {
         }
     }
 
-    /// Returns true when a segment can be skipped because its inputs are
-    /// unchanged since the last draw.  Always false when a full redraw is
-    /// forced (snap.dirty.all), and only relevant for the two segments that
-    /// have distinct dirty tracking: workspaces and title.
-    fn shouldSkipSegment(snap: *const BarSnapshot, seg: defs.BarSegment) bool {
-        if (snap.dirty.all) return false;
-        return switch (seg) {
-            .workspaces => !snap.dirty.ws,
-            .title      => !snap.dirty.title,
-            else        => false,
-        };
-    }
-
     fn drawAll(self: *State, snap: *const BarSnapshot) !void {
         if (snap.title_invalidated) self.cached_title_window = null;
         // Fill the whole bar background only on a full redraw.  Partial redraws
         // skip this: non-dirty segments retain their previous pixels (which are
         // correct since their inputs did not change), and every "always-draw"
         // segment (layout, variations, clock, status) fills its own background.
-        if (snap.dirty.all) self.dc.fillRect(0, 0, self.width, self.height, self.config.bg);
+        if (snap.dirty_all) self.dc.fillRect(0, 0, self.width, self.height, self.config.bg);
 
         const scaled_spacing = self.config.scaledSpacing(self.height);
 
@@ -370,7 +338,12 @@ const State = struct {
                 .left => for (layout.segments.items) |seg| {
                     const seg_w = self.calculateSegmentWidth(snap, seg);
                     if (seg == .title) { title_seg_x = x; title_seg_w = seg_w; }
-                    if (shouldSkipSegment(snap, seg)) { x += seg_w; } else { x = try self.drawSegment(snap, seg, x, null); }
+                    const skip = !snap.dirty_all and switch (seg) {
+                        .workspaces => !snap.dirty_ws,
+                        .title      => !snap.dirty_title,
+                        else        => false,
+                    };
+                    if (skip) { x += seg_w; } else { x = try self.drawSegment(snap, seg, x, null); }
                     x += scaled_spacing;
                 },
                 .center => {
@@ -378,7 +351,12 @@ const State = struct {
                     for (layout.segments.items) |seg| {
                         const w = if (seg == .title) remaining else self.calculateSegmentWidth(snap, seg);
                         if (seg == .title) { title_seg_x = x; title_seg_w = w; }
-                        if (shouldSkipSegment(snap, seg)) { x += w; } else { x = try self.drawSegment(snap, seg, x, w); }
+                        const skip = !snap.dirty_all and switch (seg) {
+                            .workspaces => !snap.dirty_ws,
+                            .title      => !snap.dirty_title,
+                            else        => false,
+                        };
+                        if (skip) { x += w; } else { x = try self.drawSegment(snap, seg, x, w); }
                         if (seg != .title) x += scaled_spacing;
                     }
                 },
@@ -408,11 +386,14 @@ const State = struct {
 
         // Fast path: if the single-window carousel is active, skip the full
         // title.draw() — no Pango, no cairo_surface_flush, no full-bar blit.
+        // carousel.drawCarouselTick includes its own targeted flushRect, so
+        // the outer dc.flush() at the end of this function is intentionally
+        // skipped when the fast path fires.
         // Use the minimized accent when the sole workspace window is minimized
         // so the gap area (filled by fillRect) matches the pixmap background.
         if (carousel.isCarouselActive()) {
-            const accent: u32 = if (self.cached_ws_wins.len == 1 and
-                self.cached_minimized_set.contains(self.cached_ws_wins[0]))
+            const accent: u32 = if (self.cached_ws_wins.items.len == 1 and
+                self.cached_minimized_set.contains(self.cached_ws_wins.items[0]))
                 self.config.getTitleMinimizedAccent()
             else
                 self.config.getTitleAccent();
@@ -425,20 +406,19 @@ const State = struct {
             self.cached_title_x, self.cached_title_w,
             self.conn, new_focused,
             self.cached_title.items,
-            self.cached_ws_wins, &self.cached_minimized_set,
+            self.cached_ws_wins.items, &self.cached_minimized_set,
             &self.cached_title, &self.cached_title_window,
             false, self.allocator,
         ) catch |e| { debug.warnOnErr(e, "drawTitleOnly"); return; };
         self.dc.flush();
     }
 
-    fn dupeIfChanged(allocator: std.mem.Allocator, cached: *[]u32, fresh: []const u32) void {
-        if (std.mem.eql(u32, cached.*, fresh)) return;
-        if (allocator.dupe(u32, fresh)) |d| { allocator.free(cached.*); cached.* = d; } else |_| {}
-    }
-
     fn updateTitleCache(self: *State, snap: *const BarSnapshot, x: u16, w: u16) void {
-        dupeIfChanged(self.allocator, &self.cached_ws_wins, snap.current_ws_wins.items);
+        // Sync the window list using clearRetainingCapacity + appendSlice so
+        // the buffer grows only when needed, matching the pattern used by all
+        // other cached collections on State.
+        self.cached_ws_wins.clearRetainingCapacity();
+        self.cached_ws_wins.appendSlice(self.allocator, snap.current_ws_wins.items) catch {};
         // Mirror the snapshot's minimized set so drawTitleOnly renders correct
         // segment order and colors without a full redraw.
         self.cached_minimized_set.clearRetainingCapacity();
@@ -589,7 +569,7 @@ fn captureIntoSlot(wm: *defs.WM, s: *State, snap: *BarSnapshot, prev: *const Bar
     // only when the title exceeds the previously allocated capacity.
     snap.focused_title.clearRetainingCapacity();
     if (snap.focused_window) |fw| {
-        title_mod.fetchFocusedTitleInto(wm.conn, fw, &snap.focused_title, allocator) catch {};
+        title_segment.fetchFocusedTitleInto(wm.conn, fw, &snap.focused_title, allocator) catch {};
     }
 
     // Compute per-segment dirty flags by comparing against the previous snapshot.
@@ -598,11 +578,11 @@ fn captureIntoSlot(wm: *defs.WM, s: *State, snap: *BarSnapshot, prev: *const Bar
     const forced = g_channel.force_dirty_all;
     g_channel.force_dirty_all = false;
 
-    snap.dirty.all = forced or (snap.ws_count != prev.ws_count);
-    snap.dirty.ws  = snap.dirty.all or
+    snap.dirty_all = forced or (snap.ws_count != prev.ws_count);
+    snap.dirty_ws  = snap.dirty_all or
         snap.ws_current != prev.ws_current or
         !std.mem.eql(bool, snap.ws_has_windows.items, prev.ws_has_windows.items);
-    snap.dirty.title =
+    snap.dirty_title =
         snap.focused_window != prev.focused_window or
         snap.title_invalidated or
         !std.mem.eql(u8,  snap.focused_title.items,  prev.focused_title.items)   or
@@ -639,7 +619,11 @@ pub fn submitDraw(wm: *defs.WM, wait: bool) void {
 }
 
 
-// Pre-interned atoms
+// Module singleton 
+
+var state: ?*State = null;
+
+// Pre-interned atoms 
 
 /// All atoms needed by setWindowProperties, interned once at bar init.
 var g_atoms: struct {
@@ -751,53 +735,46 @@ fn setWindowProperties(wm: *defs.WM, window: u32, height: u16) void {
     if (g_atoms.allowed_actions  != 0) setPropAtom(wm.conn, window, g_atoms.allowed_actions,  xcb.XCB_ATOM_ATOM, &[_]u32{g_atoms.action_close, g_atoms.action_above, g_atoms.action_stick});
 }
 
-/// Compute the bar height in pixels and (when the font size is specified as a
-/// percentage) resolve and store the scaled point size.
-///
-/// When the config supplies an explicit pixel/DIP height, it is used directly
-/// and only a single offscreen DC is created (for percentage font resolution).
-/// When the height is derived from font metrics, the same single DC is used for
-/// both metric measurement and — if needed — font-size resolution.
+fn resolvePercentageFontSize(wm: *defs.WM, bar_height: u16) ?u16 {
+    const TRIAL_PT: u16 = 100;
+    const saved_size = wm.config.bar.scaled_font_size;
+    wm.config.bar.scaled_font_size = TRIAL_PT;
+    defer wm.config.bar.scaled_font_size = saved_size;
+
+    const temp_dc = drawing.DrawContext.initOffscreen(wm.allocator, wm.conn, wm.dpi_info.dpi) catch |e| {
+        debug.warnOnErr(e, "DrawContext.initOffscreen in resolvePercentageFontSize");
+        return null;
+    };
+    defer temp_dc.deinit();
+    loadBarFonts(temp_dc, wm) catch return null;
+
+    const asc, const desc = temp_dc.getMetrics();
+    const px_per_pt: f32  = @as(f32, @floatFromInt(@max(1, asc + desc))) / @as(f32, @floatFromInt(TRIAL_PT));
+    const max_size_pt     = @as(f32, @floatFromInt(bar_height)) / px_per_pt;
+    return @max(1, @as(u16, @intFromFloat(@round(max_size_pt * (wm.config.bar.font_size.value / 100.0)))));
+}
+
 fn calculateBarHeight(wm: *defs.WM) !u16 {
     if (wm.config.bar.height) |h| {
         const height = dpi_mod.scaleBarHeight(h, wm.screen.height_in_pixels);
         if (wm.config.bar.font_size.is_percentage) {
-            // Temporarily set a known trial size so loadBarFonts produces a
-            // font whose ascent+descent can be compared to 100 pt to derive
-            // the px/pt ratio, then scale that ratio to the target percentage.
-            const TRIAL_PT: u16 = 100;
-            const saved_size = wm.config.bar.scaled_font_size;
-            wm.config.bar.scaled_font_size = TRIAL_PT;
-            defer wm.config.bar.scaled_font_size = saved_size;
-
-            const dc = drawing.DrawContext.initOffscreen(wm.allocator, wm.conn, wm.dpi_info.dpi) catch |e| {
-                debug.warnOnErr(e, "DrawContext.initOffscreen in calculateBarHeight (percentage)");
-                return height;
-            };
-            defer dc.deinit();
-            if (loadBarFonts(dc, wm)) {
-                const asc, const desc = dc.getMetrics();
-                const px_per_pt: f32  = @as(f32, @floatFromInt(@max(1, asc + desc))) / @as(f32, @floatFromInt(TRIAL_PT));
-                const max_size_pt     = @as(f32, @floatFromInt(height)) / px_per_pt;
-                const sz = @max(1, @as(u16, @intFromFloat(@round(max_size_pt * (wm.config.bar.font_size.value / 100.0)))));
+            if (resolvePercentageFontSize(wm, height)) |sz|
                 wm.config.bar.scaled_font_size = sz;
-            } else |_| {}
         }
         return height;
     }
 
-    // No explicit height — derive it from font ascent + descent.
-    const dc = drawing.DrawContext.initOffscreen(wm.allocator, wm.conn, wm.dpi_info.dpi) catch |e| {
+    const temp_dc = drawing.DrawContext.initOffscreen(wm.allocator, wm.conn, wm.dpi_info.dpi) catch |e| {
         debug.warnOnErr(e, "DrawContext.initOffscreen in calculateBarHeight");
         return DEFAULT_BAR_HEIGHT;
     };
-    defer dc.deinit();
-    loadBarFonts(dc, wm) catch {
+    defer temp_dc.deinit();
+    loadBarFonts(temp_dc, wm) catch {
         debug.warn("Failed to load fonts for height calculation, using default", .{});
         return DEFAULT_BAR_HEIGHT;
     };
 
-    const asc, const desc = dc.getMetrics();
+    const asc, const desc = temp_dc.getMetrics();
     return @intCast(std.math.clamp(@as(u32, @intCast(asc + desc)), MIN_BAR_HEIGHT, MAX_BAR_HEIGHT));
 }
 
@@ -981,67 +958,42 @@ pub fn raiseBar() void {
         xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 }
 
-/// Toggle the bar between shown and hidden (user keybind).
-///
-/// Re-tiles all workspaces under the grab so window layout accounts for the
-/// new bar height.  When a fullscreen window is active the toggle is deferred
-/// to the next workspace visit so the fullscreen view is not broken.
-pub fn toggleBarVisibility(wm: *defs.WM) void {
-    const s = state orelse return;
-    s.global_visible = !s.global_visible;
-
-    const current_ws    = workspaces.getCurrentWorkspace() orelse 0;
-    const is_fullscreen = fullscreen.getForWorkspace(current_ws) != null;
-    const show = !is_fullscreen and s.global_visible;
-
-    s.visible = show;
-    if (show) g_channel.force_dirty_all = true;
-    if (show) submitDraw(wm, true);
-    _ = xcb.xcb_grab_server(wm.conn);
-    if (show) _ = xcb.xcb_map_window(wm.conn, s.window)
-    else      _ = xcb.xcb_unmap_window(wm.conn, s.window);
-    // Temporarily expose the bar to the retile if a fullscreen window is
-    // active so window geometry is computed with the correct bar height.
-    const saved = s.visible;
-    if (is_fullscreen) s.visible = s.global_visible;
-    retileAllWorkspacesNoGrab(wm);
-    if (is_fullscreen) s.visible = saved;
-    _ = xcb.xcb_ungrab_server(wm.conn);
-    _ = xcb.xcb_flush(wm.conn);
-    debug.info("Bar {s} (toggle)", .{if (show) "shown" else "hidden"});
-    clock_segment.updateTimerState();
-}
-
-/// Show or hide the bar in response to a fullscreen transition.
-///
-/// .hide_fullscreen — a window just went fullscreen; hide the bar and
-///                    retile the current workspace to reclaim bar space.
-/// .show_fullscreen — fullscreen exited; show the bar and retile.
-///
-/// Does nothing when the bar is already in the requested state, unless
-/// the global visibility flag disagrees (the user hid the bar before the
-/// fullscreen transition).
 pub fn setBarState(wm: *defs.WM, action: BarAction) void {
     const s = state orelse return;
+    if (action == .toggle) s.global_visible = !s.global_visible;
 
     const current_ws    = workspaces.getCurrentWorkspace() orelse 0;
     const is_fullscreen = action != .hide_fullscreen and
         fullscreen.getForWorkspace(current_ws) != null;
     const show = !is_fullscreen and s.global_visible and action != .hide_fullscreen;
 
-    if (s.visible == show) return;
+    if (s.visible == show and action != .toggle) return;
     s.visible = show;
 
-    if (show) {
-        // Freshly mapped window has uninitialised pixels — force full redraw.
-        g_channel.force_dirty_all = true;
-        submitDraw(wm, true);
-        _ = xcb.xcb_map_window(wm.conn, s.window);
+    if (action == .toggle) {
+        if (show) g_channel.force_dirty_all = true;
+        if (show) submitDraw(wm, true);
+        _ = xcb.xcb_grab_server(wm.conn);
+        if (show) _ = xcb.xcb_map_window(wm.conn, s.window)
+        else      _ = xcb.xcb_unmap_window(wm.conn, s.window);
+        const saved = s.visible;
+        if (is_fullscreen) s.visible = s.global_visible;
+        retileAllWorkspacesNoGrab(wm);
+        if (is_fullscreen) s.visible = saved;
+        _ = xcb.xcb_ungrab_server(wm.conn);
+        _ = xcb.xcb_flush(wm.conn);
     } else {
-        _ = xcb.xcb_unmap_window(wm.conn, s.window);
+        if (show) {
+            // Freshly mapped window has uninitialised pixels — force full redraw.
+            g_channel.force_dirty_all = true;
+            submitDraw(wm, true);
+            _ = xcb.xcb_map_window(wm.conn, s.window);
+        } else {
+            _ = xcb.xcb_unmap_window(wm.conn, s.window);
+        }
+        _ = xcb.xcb_flush(wm.conn);
+        tiling.retileCurrentWorkspace(wm);
     }
-    _ = xcb.xcb_flush(wm.conn);
-    tiling.retileCurrentWorkspace(wm);
 
     debug.info("Bar {s} ({s})", .{ if (show) "shown" else "hidden", @tagName(action) });
     clock_segment.updateTimerState();

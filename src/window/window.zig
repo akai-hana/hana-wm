@@ -376,7 +376,7 @@ fn unmanageWindow(wm: *WM, win: u32) void {
     // Notify each module in order inside the server grab.
     if (wm.config.tiling.enabled) tiling.removeWindow(win);
     tiling.evictSizeHints(win);
-    minimize.forceUntrack(wm, win);
+    minimize.forceUntrack(win);
     workspaces.removeWindow(win);
 
     if (was_fullscreen) bar.setBarState(wm, .show_fullscreen);
@@ -421,7 +421,7 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM
 //      the case where history is empty or all history entries are gone.
 fn focusPrevOrBest(wm: *WM) void {
     for (focus.historyItems()) |prev| {
-        if (isOnCurrentWorkspace(wm, prev) and !minimize.isMinimized(wm, prev)) {
+        if (isOnCurrentWorkspace(wm, prev) and !minimize.isMinimized(prev)) {
             focus.setFocus(wm, prev, .tiling_operation);
             return;
         }
@@ -436,7 +436,7 @@ fn focusWindowUnderPointer(wm: *WM, ptr_cookie: xcb.xcb_query_pointer_cookie_t) 
     };
     defer std.c.free(reply);
     const child = reply.*.child;
-    if (isOnCurrentWorkspace(wm, child) and !minimize.isMinimized(wm, child)) {
+    if (isOnCurrentWorkspace(wm, child) and !minimize.isMinimized(child)) {
         focus.setFocus(wm, child, .mouse_enter);
         return;
     }
@@ -537,7 +537,7 @@ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
 
 inline fn maybeFocusWindow(wm: *WM, win: u32) void {
     if (!isOnCurrentWorkspace(wm, win)) return;
-    if (minimize.isMinimized(wm, win)) return;
+    if (minimize.isMinimized(win)) return;
     if (focus.getFocused() == win) return;
     focus.setFocus(wm, win, .mouse_enter);
 }
