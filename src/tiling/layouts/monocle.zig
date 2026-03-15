@@ -46,8 +46,6 @@ pub fn tileWithOffset(ctx: *const layouts.LayoutCtx, state: *State, windows: []c
         _ = xcb.xcb_configure_window(ctx.conn, win,
             xcb.XCB_CONFIG_WINDOW_X,
             &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
-        if (ctx.cache) |cache| {
-            if (cache.getPtr(win)) |wd| wd.rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
-        }
+        if (ctx.cache.getPtr(win)) |wd| wd.rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
     }
 }

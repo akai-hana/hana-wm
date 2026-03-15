@@ -1,183 +1,53 @@
-//! Efficient window tracking with small-array optimisation.
+//! Efficient window tracking backed by a contiguous array.
 //!
-//! Storage strategy:
-//!   Small (<=small_cap windows): fixed inline array, cache-friendly, zero allocations.
-//!   Large (>small_cap windows):  ArrayList + HashSet for O(1) contains/remove.
-//!
-//! A tagged union enforces that exactly one mode is active at all times.
-//! Use the `Tracking` alias for the default 16-window capacity.
+//! A linear scan over a small array of u32s is cache-friendly enough to
+//! outperform a HashSet at any window count a window manager realistically
+//! reaches. No dual-mode switching, no arbitrary promotion thresholds.
 
 const std = @import("std");
 
-/// Generic window tracker parameterised by small-store capacity.
-/// Callers that need a different threshold can instantiate directly;
-/// all existing call sites use the `Tracking` alias below.
-pub fn TrackingType(comptime small_cap: u8) type {
-    const demotion_threshold = small_cap / 2;
+pub const Tracking = struct {
+    list:      std.ArrayListUnmanaged(u32) = .empty,
+    allocator: std.mem.Allocator,
 
-    const SmallStore = struct {
-        items: [small_cap]u32 = undefined,
-        len:   u8 = 0,
-    };
+    const Self = @This();
 
-    // Both fields are Unmanaged so ownership is uniform: every alloc/free
-    // goes through an explicit allocator parameter.
-    const LargeStore = struct {
-        list: std.ArrayListUnmanaged(u32),
-        set:  std.AutoHashMapUnmanaged(u32, void),
-    };
+    pub fn init(allocator: std.mem.Allocator) Self {
+        return .{ .list = .empty, .allocator = allocator };
+    }
 
-    const Storage = union(enum) { small: SmallStore, large: LargeStore };
+    pub fn deinit(self: *Self) void {
+        self.list.deinit(self.allocator);
+    }
 
-    return struct {
-        storage:   Storage,
-        allocator: std.mem.Allocator,
+    pub fn contains(self: *const Self, win: u32) bool {
+        return std.mem.indexOfScalar(u32, self.list.items, win) != null;
+    }
 
-        const Self = @This();
+    pub fn add(self: *Self, win: u32) !void {
+        if (self.contains(win)) return;
+        try self.list.append(self.allocator, win);
+    }
 
-        pub fn init(allocator: std.mem.Allocator) Self {
-            return .{ .storage = .{ .small = .{} }, .allocator = allocator };
-        }
+    pub fn addFront(self: *Self, win: u32) !void {
+        if (self.contains(win)) return;
+        try self.list.insert(self.allocator, 0, win);
+    }
 
-        pub fn deinit(self: *Self) void {
-            if (self.storage == .large) {
-                self.storage.large.list.deinit(self.allocator);
-                self.storage.large.set.deinit(self.allocator);
-            }
-        }
+    pub fn remove(self: *Self, win: u32) bool {
+        const i = std.mem.indexOfScalar(u32, self.list.items, win) orelse return false;
+        _ = self.list.orderedRemove(i);
+        return true;
+    }
 
-        // O(n) for small (cache-friendly scan), O(1) for large.
-        pub inline fn contains(self: *const Self, win: u32) bool {
-            return switch (self.storage) {
-                .small => |s| std.mem.indexOfScalar(u32, s.items[0..s.len], win) != null,
-                .large => |l| l.set.contains(win),
-            };
-        }
+    /// Reorders contents to match new_order, which must be a permutation of
+    /// the current items — same elements, no additions or removals.
+    pub fn reorder(self: *Self, new_order: []const u32) void {
+        std.debug.assert(new_order.len == self.list.items.len);
+        @memcpy(self.list.items, new_order);
+    }
 
-        // Shared implementation for add (front=false) and addFront (front=true).
-        // Single getOrPut probe on the large path covers both duplicate check and
-        // insertion; the set entry is rolled back if the list mutation fails.
-        fn addImpl(self: *Self, win: u32, comptime front: bool) !void {
-            std.debug.assert(win != 0);
-            switch (self.storage) {
-                .small => |*s| {
-                    if (std.mem.indexOfScalar(u32, s.items[0..s.len], win) != null) return;
-                    if (s.len < small_cap) {
-                        if (front) {
-                            std.mem.copyBackwards(u32, s.items[1 .. s.len + 1], s.items[0..s.len]);
-                            s.items[0] = win;
-                        } else {
-                            s.items[s.len] = win;
-                        }
-                        s.len += 1;
-                    } else {
-                        try self.promoteToLarge();
-                        // promoteToLarge reserves s.len+8 slots, so assumeCapacity is safe.
-                        if (front) {
-                            self.storage.large.list.insertAssumeCapacity(0, win);
-                        } else {
-                            self.storage.large.list.appendAssumeCapacity(win);
-                        }
-                        self.storage.large.set.putAssumeCapacity(win, {});
-                    }
-                },
-                .large => |*l| {
-                    const gop = try l.set.getOrPut(self.allocator, win);
-                    if (gop.found_existing) return;
-                    const list_err = if (front) l.list.insert(self.allocator, 0, win)
-                                    else        l.list.append(self.allocator, win);
-                    list_err catch |err| { _ = l.set.remove(win); return err; };
-                },
-            }
-        }
-
-        pub fn add(self: *Self, win: u32) !void      { return self.addImpl(win, false); }
-        pub fn addFront(self: *Self, win: u32) !void { return self.addImpl(win, true);  }
-
-        // Reorder using a caller-provided permutation of current items.
-        // For large storage, also rebuilds the hash set to stay consistent.
-        pub fn reorder(self: *Self, new_order: []const u32) void {
-            switch (self.storage) {
-                .small => |*s| {
-                    std.debug.assert(new_order.len == s.len);
-                    @memcpy(s.items[0..s.len], new_order);
-                },
-                .large => |*l| {
-                    std.debug.assert(new_order.len == l.list.items.len);
-                    if (std.debug.runtime_safety) {
-                        for (new_order) |win| std.debug.assert(l.set.contains(win));
-                    }
-                    l.list.clearRetainingCapacity();
-                    l.set.clearRetainingCapacity();
-                    for (new_order) |win| {
-                        l.list.appendAssumeCapacity(win);
-                        l.set.putAssumeCapacity(win, {});
-                    }
-                },
-            }
-        }
-
-        pub fn remove(self: *Self, win: u32) bool {
-            switch (self.storage) {
-                .small => |*s| {
-                    const i = std.mem.indexOfScalar(u32, s.items[0..s.len], win) orelse return false;
-                    s.len -= 1;
-                    std.mem.copyForwards(u32, s.items[i..s.len], s.items[i + 1 .. s.len + 1]);
-                    return true;
-                },
-                .large => |*l| {
-                    if (!l.set.remove(win)) return false;
-                    const idx = std.mem.indexOfScalar(u32, l.list.items, win).?;
-                    _ = l.list.orderedRemove(idx);
-                    if (l.list.items.len <= demotion_threshold) self.demoteToSmall();
-                    return true;
-                },
-            }
-        }
-
-        /// Returns a slice into Self's own storage, valid for the lifetime of self.
-        pub inline fn items(self: *const Self) []const u32 {
-            return switch (self.storage) {
-                .small => |s| s.items[0..s.len],
-                .large => |l| l.list.items,
-            };
-        }
-
-        pub inline fn count(self: *const Self) usize {
-            return switch (self.storage) {
-                .small => |s| s.len,
-                .large => |l| l.list.items.len,
-            };
-        }
-
-        pub inline fn isEmpty(self: *const Self) bool { return self.count() == 0; }
-
-        fn promoteToLarge(self: *Self) !void {
-            const s = self.storage.small;
-            var list: std.ArrayListUnmanaged(u32) = .empty;
-            var set:  std.AutoHashMapUnmanaged(u32, void) = .{};
-            errdefer list.deinit(self.allocator);
-            errdefer set.deinit(self.allocator);
-            try list.ensureTotalCapacity(self.allocator, s.len + 8);
-            try set.ensureTotalCapacity(self.allocator, s.len + 8);
-            for (s.items[0..s.len]) |win| {
-                list.appendAssumeCapacity(win);
-                set.putAssumeCapacity(win, {});
-            }
-            self.storage = .{ .large = .{ .list = list, .set = set } };
-        }
-
-        fn demoteToSmall(self: *Self) void {
-            const l = &self.storage.large;
-            var small: SmallStore = .{};
-            small.len = @intCast(l.list.items.len);
-            @memcpy(small.items[0..small.len], l.list.items);
-            l.list.deinit(self.allocator);
-            l.set.deinit(self.allocator);
-            self.storage = .{ .small = small };
-        }
-    };
-}
-
-/// Default alias used by all call sites: 16-window small-array optimisation.
-pub const Tracking = TrackingType(16);
+    pub fn items(self: *const Self) []const u32 { return self.list.items; }
+    pub fn count(self: *const Self) usize { return self.list.items.len; }
+    pub fn isEmpty(self: *const Self) bool { return self.list.items.len == 0; }
+};
