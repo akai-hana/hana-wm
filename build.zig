@@ -1,8 +1,83 @@
 //! Build configuration for Hana window manager
-const std = @import("std");
+
+const std     = @import("std");
+const builtin = @import("builtin");
+
+// Musl compat: weak getauxval fallback for old musl (< 1.1) that lacks it.
+//
+// The Zig stdlib branches on `link_libc` to decide who owns getauxval:
+//
+//   link_libc = false  →  stdlib weakly exports its own getauxvalImpl.
+//                          Adding a second export here would trigger Zig's
+//                          compile-time "exported symbol collision" error.
+//
+//   link_libc = true   →  stdlib assumes libc supplies getauxval and emits
+//                          *no* export of its own.  Old musl doesn't have it,
+//                          so we must provide a weak fallback ourselves.
+//
+// Weak linkage means a strong getauxval in libc (musl ≥ 1.1, glibc) wins at
+// link time; the stub is only used when libc has no definition.  Returning 0
+// safely disables the VDSO fast-path — syscalls fall back to the normal kernel
+// entry point, which is correct and only marginally slower.
+comptime {
+    if (builtin.os.tag == .linux and builtin.link_libc) {
+        const S = struct {
+            fn getauxvalFallback(_: usize) callconv(.c) usize { return 0; }
+        };
+        @export(&S.getauxvalFallback, .{ .name = "getauxval", .linkage = .weak });
+    }
+}
 
 /// Root source directory. Change this one constant to relocate the entire source tree.
 const ROOT_DIR = "src/";
+
+// ── Optional subsystems ───────────────────────────────────────────────────────
+// To make any module or directory optional, add one entry here and guard its
+// usage in source with a comptime conditional import:
+//
+//   const has_foo = @import("build_options").has_foo;
+//   const foo = if (has_foo) @import("foo") else struct {
+//       // only the symbols THIS file actually calls
+//   };
+//
+//   name         – the @import("name") used throughout the source tree
+//   entry_point  – path (relative to build root) to the real entry-point file;
+//                  absence of this file sets has_<n> = false in build_options
+//   gate_dir     – bare directory name to skip in discoverModules when the
+//                  entry point is absent; null for single-file optionals
+const OptionalSubsystem = struct {
+    name:        []const u8,
+    entry_point: []const u8,
+    gate_dir:    ?[]const u8 = null,
+};
+
+// ▼ Add new optional subsystems here ▼
+const optional_subsystems = [_]OptionalSubsystem{
+    .{
+        .name        = "bar",
+        .entry_point = ROOT_DIR ++ "bar/bar.zig",
+        .gate_dir    = "bar",
+    },
+    .{
+        .name        = "input",
+        .entry_point = ROOT_DIR ++ "input/input.zig",
+        .gate_dir    = "input",
+    },
+    .{
+        .name        = "dpi",
+        .entry_point = ROOT_DIR ++ "core/dpi.zig",
+    },
+    .{
+        .name        = "tiling",
+        .entry_point = ROOT_DIR ++ "tiling/tiling.zig",
+        .gate_dir    = "tiling",
+    },
+    .{
+        .name        = "layouts",
+        .entry_point = ROOT_DIR ++ "tiling/layouts.zig",
+    },
+};
+// ▲ Add new optional subsystems here ▲
 
 pub fn build(b: *std.Build) void {
     const target   = b.standardTargetOptions(.{});
@@ -10,45 +85,22 @@ pub fn build(b: *std.Build) void {
         "Set the optimization mode (Debug, ReleaseFast, ReleaseSafe, ReleaseSmall)")
         orelse .ReleaseFast;
 
-    // Install prefix 
-    // Try system-wide bin directories in order; fall back to ./bin/ if none are
-    // writable or exist. The user can still override with -Dprefix=... as usual.
-    if (b.install_prefix.len == 0 or std.mem.eql(u8, b.install_prefix, b.pathFromRoot("zig-out"))) {
-        // System bin dirs are only writable as root.  For non-root builds skip
-        // straight to the local fallback rather than probing dirs we can't use.
-        const is_root = std.posix.getuid() == 0;
-        var found = false;
-        if (is_root) {
-            const linux = std.os.linux;
-            const candidates = [_][*:0]const u8{ "/usr/bin", "/usr/local/bin", "/bin" };
-            for (candidates) |dir| {
-                // faccessat with W_OK=2 checks the dir is writable.
-                const rc = linux.faccessat(linux.AT.FDCWD, dir, 2, 0);
-                if (linux.errno(rc) == .SUCCESS) {
-                    b.install_prefix = std.mem.span(dir);
-                    found = true;
-                    break;
-                }
-            }
-        }
-        if (!found) {
-            b.install_prefix = b.pathFromRoot("bin");
-        }
-    }
-
     const build_options = b.addOptions();
     build_options.addOption(bool, "enable_debug_logging", optimize == .Debug);
+
     const fallback_toml = b.build_root.handle.readFileAlloc(
         b.graph.io, "config/fallback.toml", b.allocator, .limited(1024 * 1024),
     ) catch null;
     build_options.addOption(bool,       "has_fallback_toml", fallback_toml != null);
     build_options.addOption([]const u8, "fallback_toml",     fallback_toml orelse "");
-    // Optional subsystem flags — false when the entry-point file is absent so
-    // main.zig can guard @import("bar") / @import("input") at comptime.
-    const has_bar   = fileExists(b, ROOT_DIR ++ "bar/bar.zig");
-    const has_input = fileExists(b, ROOT_DIR ++ "input/input.zig");
-    build_options.addOption(bool, "has_bar",   has_bar);
-    build_options.addOption(bool, "has_input", has_input);
+
+    // Emit has_<n> = true/false for every optional subsystem.
+    for (optional_subsystems) |sys| {
+        build_options.addOption(bool,
+            b.fmt("has_{s}", .{sys.name}),
+            fileExists(b, sys.entry_point),
+        );
+    }
 
     const root_module = b.createModule(.{
         .root_source_file = b.path(ROOT_DIR ++ "core/main.zig"),
@@ -57,47 +109,24 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    if (optimize != .Debug) {
-        root_module.strip = true;
-    }
+    if (optimize != .Debug) root_module.strip = true;
 
     const exe = b.addExecutable(.{ .name = "hana", .root_module = root_module });
 
     var arena = std.heap.ArenaAllocator.init(b.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
+    const alloc = arena.allocator();
 
-    // name -> (module, absolute source path)
-    var all_modules = std.StringHashMap(ModuleEntry).init(allocator);
+    var all_modules = std.StringHashMap(ModuleEntry).init(alloc);
 
-    discoverModules(b, ROOT_DIR, target, optimize, allocator, &all_modules) catch |err| {
+    discoverModules(b, ROOT_DIR, target, optimize, alloc, &all_modules) catch |err| {
         std.debug.print("Fatal: failed to discover modules: {}\n", .{err});
         std.process.exit(1);
     };
 
-    const Stub = struct { name: []const u8, src: []const u8, filename: []const u8 };
-    const stubs = [_]Stub{
-        .{ .name = "bar",   .src = bar_stub_src,   .filename = "bar_stub.zig"   },
-        .{ .name = "input", .src = input_stub_src, .filename = "input_stub.zig" },
-        .{ .name = "dpi",   .src = dpi_stub_src,   .filename = "dpi_stub.zig"   },
-    };
-    inline for (stubs) |stub| {
-        if (!all_modules.contains(stub.name)) {
-            const src = b.addWriteFiles().add(stub.filename, stub.src);
-            all_modules.put(stub.name, .{
-                .module = b.addModule(stub.name, .{
-                    .root_source_file = src,
-                    .target   = target,
-                    .optimize = optimize,
-                }),
-                .source_path = "",
-            }) catch @panic("OOM: stub registration");
-        }
-    }
-
     const build_options_module = build_options.createModule();
 
-    const layout_flags_src = std.fmt.allocPrint(allocator,
+    const layout_flags_src = std.fmt.allocPrint(alloc,
         \\pub const has_master    = {};
         \\pub const has_monocle   = {};
         \\pub const has_grid      = {};
@@ -116,9 +145,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // bar_flags: tells bar.zig which segment module files are present on disk.
-    // When has_any_segment is false, BarFull is never analyzed by Zig's lazy
-    // evaluator, so drawing.zig is never compiled and cairo/pango are not linked.
     const has_any_segment = all_modules.contains("tags")       or
                             all_modules.contains("layout")     or
                             all_modules.contains("variations") or
@@ -126,13 +152,13 @@ pub fn build(b: *std.Build) void {
                             all_modules.contains("clock")      or
                             all_modules.contains("status");
 
-    const bar_flags_src = std.fmt.allocPrint(allocator,
-        \\pub const has_tags       = {};
-        \\pub const has_layout     = {};
-        \\pub const has_variations = {};
-        \\pub const has_title      = {};
-        \\pub const has_clock      = {};
-        \\pub const has_status     = {};
+    const bar_flags_src = std.fmt.allocPrint(alloc,
+        \\pub const has_tags        = {};
+        \\pub const has_layout      = {};
+        \\pub const has_variations  = {};
+        \\pub const has_title       = {};
+        \\pub const has_clock       = {};
+        \\pub const has_status      = {};
         \\pub const has_any_segment = {};
         \\
     , .{
@@ -155,14 +181,14 @@ pub fn build(b: *std.Build) void {
     root_module.addImport("layout_flags",  layout_flags_module);
     root_module.addImport("bar_flags",     bar_flags_module);
 
-    // Wire each module based on what it actually @imports.
-    wireModules(b, root_module, &all_modules, build_options_module, layout_flags_module, bar_flags_module, optimize, allocator);
+    wireModules(b, root_module, &all_modules,
+        build_options_module, layout_flags_module, bar_flags_module,
+        optimize, alloc);
 
     if (all_modules.get("defs")) |defs_entry| {
         var it = all_modules.iterator();
         while (it.next()) |entry| {
-            if (entry.value_ptr.source_path.len == 0)
-                entry.value_ptr.module.addImport("defs", defs_entry.module);
+            entry.value_ptr.module.addImport("defs", defs_entry.module);
         }
     }
 
@@ -178,7 +204,7 @@ pub fn build(b: *std.Build) void {
 
 const ModuleEntry = struct {
     module:      *std.Build.Module,
-    source_path: []const u8, // path relative to build root
+    source_path: []const u8,
 };
 
 fn wireModules(
@@ -194,30 +220,22 @@ fn wireModules(
     var iter = all_modules.iterator();
     while (iter.next()) |entry| {
         const mod = entry.value_ptr.module;
-
-        if (optimize != .Debug) {
-            mod.strip = true;
-        }
+        if (optimize != .Debug) mod.strip = true;
 
         mod.addImport("build_options", build_options_module);
         mod.addImport("layout_flags",  layout_flags_module);
         mod.addImport("bar_flags",     bar_flags_module);
 
-        // Read the source file and wire only the @imports that are known modules.
         const imports = findModuleImports(b, allocator, entry.value_ptr.source_path, all_modules);
         for (imports) |name| {
             const dep = all_modules.get(name) orelse continue;
             mod.addImport(name, dep.module);
         }
 
-        // Expose every module on root so main.zig can import it.
         root.addImport(entry.key_ptr.*, mod);
     }
 }
 
-/// Reads `source_path` (relative to build root) and returns every @import("name")
-/// where `name` is a key in `all_modules`. Slices point into arena-allocated
-/// source bytes — safe because the arena outlives the entire build() call.
 fn findModuleImports(
     b:           *std.Build,
     allocator:   std.mem.Allocator,
@@ -227,7 +245,6 @@ fn findModuleImports(
     const source = b.build_root.handle.readFileAlloc(
         b.graph.io, source_path, allocator, .limited(1024 * 1024),
     ) catch return &.{};
-    // Do NOT free source — name slices below point into it.
 
     var results: std.ArrayList([]const u8) = .empty;
     const needle = "@import(\"";
@@ -260,78 +277,6 @@ fn linkSystemLibraries(root: *std.Build.Module, has_bar: bool) void {
     }
 }
 
-// Generated stub sources 
-
-const bar_stub_src =
-    \\const defs = @import("defs");
-    \\const xcb  = defs.xcb;
-    \\
-    \\pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
-    \\
-    \\pub fn init(_: *defs.WM) error{BarDisabled}!void          { return error.BarDisabled; }
-    \\pub fn deinit() void                                       {}
-    \\pub fn reload(_: *defs.WM) void                           {}
-    \\pub fn toggleBarPosition(_: *defs.WM) !void               {}
-    \\pub fn getBarWindow() u32                                  { return 0; }
-    \\pub fn isBarWindow(_: u32) bool                           { return false; }
-    \\pub fn getBarHeight() u16                                  { return 0; }
-    \\pub fn isBarInitialized() bool                            { return false; }
-    \\pub fn hasClockSegment() bool                             { return false; }
-    \\pub fn markDirty() void                                   {}
-    \\pub fn redrawImmediate(_: *defs.WM) void                  {}
-    \\pub fn raiseBar() void                                    {}
-    \\pub fn isVisible() bool                                   { return false; }
-    \\pub fn getGlobalVisibility() bool                         { return false; }
-    \\pub fn setGlobalVisibility(_: bool) void                  {}
-    \\pub fn setBarState(_: *defs.WM, _: BarAction) void        {}
-    \\pub fn updateIfDirty(_: *defs.WM) !void                  {}
-    \\pub fn checkClockUpdate() void                            {}
-    \\pub fn pollTimeoutMs() i32                                { return -1; }
-    \\pub fn updateTimerState() void                            {}
-    \\pub fn handleExpose(_: *const xcb.xcb_expose_event_t, _: *defs.WM) void                 {}
-    \\pub fn handlePropertyNotify(_: *const xcb.xcb_property_notify_event_t, _: *defs.WM) void {}
-    \\pub fn monitorFocusedWindow(_: *defs.WM) void             {}
-    \\pub fn handleButtonPress(_: *const xcb.xcb_button_press_event_t, _: *defs.WM) void      {}
-    \\pub fn notifyFocusChange(_: *defs.WM, _: ?u32) void       {}
-    \\
-;
-
-const input_stub_src =
-    \\const defs = @import("defs");
-    \\const xcb  = defs.xcb;
-    \\
-    \\pub fn setupGrabs(_: *xcb.xcb_connection_t, _: u32) void                          {}
-    \\pub fn init(_: *defs.WM) !void                                                     {}
-    \\pub fn deinit() void                                                                {}
-    \\pub fn rebuildKeybindMap(_: *defs.WM) !void                                       {}
-    \\pub fn handleKeyPress(_: *xcb.xcb_key_press_event_t, _: *defs.WM) void           {}
-    \\pub fn handleButtonPress(_: *xcb.xcb_button_press_event_t, _: *defs.WM) void     {}
-    \\pub fn handleButtonRelease(_: *xcb.xcb_button_release_event_t, _: *defs.WM) void {}
-    \\pub fn handleMotionNotify(_: *xcb.xcb_motion_notify_event_t, _: *defs.WM) void   {}
-    \\
-;
-
-const dpi_stub_src =
-    \\const defs = @import("defs");
-    \\const xcb  = defs.xcb;
-    \\
-    \\pub const DpiInfo = struct {
-    \\    dpi:          f64,
-    \\    scale_factor: f64,
-    \\};
-    \\
-    \\pub fn detect(
-    \\    _: *xcb.xcb_connection_t,
-    \\    _: *xcb.xcb_screen_t,
-    \\) error{}!DpiInfo {
-    \\    return .{ .dpi = 96.0, .scale_factor = 1.0 };
-    \\}
-    \\
-;
-
-/// Returns true when `path` (relative to the build root) names a regular file.
-/// Uses the same b.graph.io API as the rest of the build so behaviour is
-/// consistent across platforms and Zig versions.
 fn fileExists(b: *std.Build, path: []const u8) bool {
     _ = b.build_root.handle.statFile(b.graph.io, path, .{}) catch return false;
     return true;
@@ -351,17 +296,17 @@ fn discoverModules(
     var iter = dir.iterate();
     while (try iter.next(b.graph.io)) |entry| {
         if (entry.kind == .directory) {
-            // Gate optional subsystems: skip the entire subtree when the
-            // subsystem's entry-point file is absent.  All other subdirectories
-            // are always recursed into unconditionally.
-            if (std.mem.eql(u8, entry.name, "bar") or
-                std.mem.eql(u8, entry.name, "input"))
-            {
-                const gate_path = try std.fs.path.join(allocator,
-                    &.{ dir_path, entry.name, entry.name });
-                const gate_zig  = try std.mem.concat(allocator, u8, &.{ gate_path, ".zig" });
-                if (!fileExists(b, gate_zig)) continue;
-            }
+            // Skip gated directories whose entry-point file is absent.
+            const skip = blk: {
+                for (optional_subsystems) |sys| {
+                    const gd = sys.gate_dir orelse continue;
+                    if (std.mem.eql(u8, entry.name, gd))
+                        break :blk !fileExists(b, sys.entry_point);
+                }
+                break :blk false;
+            };
+            if (skip) continue;
+
             const subdir = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
             try discoverModules(b, subdir, target, optimize, allocator, all_modules);
             continue;
@@ -370,7 +315,7 @@ fn discoverModules(
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zig")) continue;
         if (std.mem.eql(u8, entry.name, "main.zig")) continue;
 
-        const name = std.fs.path.stem(entry.name);
+        const name     = std.fs.path.stem(entry.name);
         const rel_path = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
 
         if (all_modules.contains(name)) {

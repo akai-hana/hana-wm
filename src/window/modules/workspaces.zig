@@ -8,7 +8,24 @@ const utils      = @import("utils");
 const focus      = @import("focus");
 const window     = @import("window");
 const bar        = @import("bar");
-const tiling     = @import("tiling");
+const has_tiling = @import("build_options").has_tiling;
+const tiling = if (has_tiling) @import("tiling") else struct {
+    pub const Layout = enum { master, monocle, grid, fibonacci };
+    const TilingState = struct { enabled: bool = false, layout: Layout = .master };
+    var _state = TilingState{};
+    pub fn getState() *TilingState { return &_state; }
+    pub fn defaultLayout() Layout { return .master; }
+    pub fn dirty() void {}
+    pub fn invalidateGeomCache(_: u32) void {}
+    pub fn invalidateWsGeomBit(_: u8) void {}
+    pub fn saveWindowGeom(_: u32, _: anytype) void {}
+    pub fn isWindowActiveTiled(_: u32) bool { return false; }
+    pub fn isWindowTiled(_: u32) bool { return false; }
+    pub fn getWindowGeom(_: u32) ?@import("utils").Rect { return null; }
+    pub fn syncLayoutFromWorkspace(_: anytype) void {}
+    pub fn restoreWorkspaceGeom() bool { return false; }
+    pub fn retileCurrentWorkspace() void {}
+};
 const Tracking   = @import("tracking").Tracking;
 const constants  = @import("constants");
 const debug      = @import("debug");
@@ -493,7 +510,7 @@ fn applyPostSwitchFocus(new_ws: u8, new_ws_obj: *const Workspace, ptr_cookie: xc
     const old_focused = focus.getFocused();
     focus.setFocused(focus_target);
 
-    tiling.updateWindowFocus(old_focused, focus.getFocused());
+    window.updateFocusBorders(old_focused, focus.getFocused());
 
     if (old_focused) |old_win| window.grabButtons(old_win, false);
 

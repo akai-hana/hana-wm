@@ -23,7 +23,14 @@ const core = @import("core");
 const xcb        = core.xcb;
 const utils      = @import("utils");
 const focus      = @import("focus");
-const tiling     = @import("tiling");
+const has_tiling = @import("build_options").has_tiling;
+const tiling = if (has_tiling) @import("tiling") else struct {
+    pub fn addWindow(_: u32) void {}
+    pub fn addWindowAtFilteredIndex(_: u32, _: usize) void {}
+    pub fn removeWindow(_: u32) void {}
+    pub fn retileCurrentWorkspace() void {}
+    pub fn getWindowFilteredIndex(_: u32) ?usize { return null; }
+};
 const workspaces = @import("workspaces");
 const fullscreen = @import("fullscreen");
 const bar        = @import("bar");

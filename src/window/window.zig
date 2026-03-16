@@ -7,10 +7,12 @@ const xcb        = core.xcb;
 const utils      = @import("utils");
 const constants  = @import("constants");
 const focus      = @import("focus");
-const tiling     = @import("tiling");
+const build_options = @import("build_options");
+const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
 const bar        = @import("bar");
 const workspaces = @import("workspaces");
 const drag       = @import("drag");
+const dpi        = @import("dpi");
 const debug      = @import("debug");
 const minimize   = @import("minimize");
 const fullscreen = @import("fullscreen");
@@ -293,10 +295,17 @@ fn commitWindowToScreen(win: u32, on_current_workspace: bool) void {
     // when the window is mapped.  Retiling here (which also pushes background
     // monocle windows offscreen) means the compositor never sees the new
     // window at its default X position or background windows still on-screen.
-    if (core.config.tiling.enabled) {
-        tiling.addWindow(win);
-        if (on_current_workspace) tiling.retileCurrentWorkspace();
+    if (comptime build_options.has_tiling) {
+        if (core.config.tiling.enabled) {
+            tiling.addWindow(win);
+            if (on_current_workspace) tiling.retileCurrentWorkspace();
+        }
     }
+
+    // Apply border width and initial color before mapping so the compositor
+    // never sees a borderless first frame. Color is corrected to focused below
+    // after setFocus, still inside the server grab.
+    applyBorder(win);
 
     if (on_current_workspace) {
         _ = xcb.xcb_map_window(core.conn, win);
@@ -306,7 +315,13 @@ fn commitWindowToScreen(win: u32, on_current_workspace: bool) void {
     }
 
     bar.scheduleRedraw();
-    if (on_current_workspace) focus.setFocus(win, .window_spawn);
+    if (on_current_workspace) {
+        const old_focused = focus.getFocused();
+        focus.setFocus(win, .window_spawn);
+        // Correct the new window to focused and strip focus from the old one,
+        // still inside the server grab so no intermediate frame is visible.
+        updateFocusBorders(old_focused, win);
+    }
 
     if (on_current_workspace) _ = xcb.xcb_ungrab_server(core.conn);
     _ = xcb.xcb_flush(core.conn);
@@ -372,23 +387,31 @@ fn unmanageWindow(win: u32) void {
     _ = xcb.xcb_grab_server(core.conn);
 
     // Notify each module in order inside the server grab.
-    if (core.config.tiling.enabled) tiling.removeWindow(win);
-    tiling.evictSizeHints(win);
+    if (comptime build_options.has_tiling) {
+        if (core.config.tiling.enabled) tiling.removeWindow(win);
+        tiling.evictSizeHints(win);
+    }
     minimize.forceUntrack(win);
     workspaces.removeWindow(win);
 
     if (was_fullscreen) bar.setBarState(.show_fullscreen);
 
     if (was_focused) {
-        if (core.config.tiling.enabled) tiling.retileIfDirty();
+        if (comptime build_options.has_tiling) {
+            if (core.config.tiling.enabled) tiling.retileIfDirty();
+        }
         focus.clearFocus();
         focusWindowUnderPointer(ptr_cookie.?);
-    } else if (!was_fullscreen and core.config.tiling.enabled) {
-        if (window_workspace) |ws| {
-            if (current_ws == ws) {
-                tiling.retileIfDirty();
-            } else {
-                tiling.retileInactiveWorkspace(ws);
+    } else if (!was_fullscreen) {
+        if (comptime build_options.has_tiling) {
+            if (core.config.tiling.enabled) {
+                if (window_workspace) |ws| {
+                    if (current_ws == ws) {
+                        tiling.retileIfDirty();
+                    } else {
+                        tiling.retileInactiveWorkspace(ws);
+                    }
+                }
             }
         }
     }
@@ -477,13 +500,15 @@ fn sendConfigureNotify(win: u32, geom: WindowGeometry) void {
 
 fn sendSyntheticConfigureNotify(win: u32) void {
     // Fast path: serve the geometry from the tiling cache — zero round-trips.
-    if (tiling.getWindowGeom(win)) |rect| {
-        const border: u16 = if (tiling.getStateOpt()) |s| s.border_width else 0;
-        sendConfigureNotify(win, .{
-            .x = rect.x, .y = rect.y, .width = rect.width, .height = rect.height,
-            .border_width = border,
-        });
-        return;
+    if (comptime build_options.has_tiling) {
+        if (tiling.getWindowGeom(win)) |rect| {
+            const border: u16 = if (tiling.getStateOpt()) |s| s.border_width else 0;
+            sendConfigureNotify(win, .{
+                .x = rect.x, .y = rect.y, .width = rect.width, .height = rect.height,
+                .border_width = border,
+            });
+            return;
+        }
     }
 
     // Slow path: fullscreen windows or a cache miss. One blocking round-trip.
@@ -499,7 +524,8 @@ fn sendSyntheticConfigureNotify(win: u32) void {
 
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) void {
     const win = event.window;
-    if (tiling.isWindowActiveTiled(win) or fullscreen.isFullscreen(win)) {
+    const is_tiled = if (comptime build_options.has_tiling) tiling.isWindowActiveTiled(win) else false;
+    if (is_tiled or fullscreen.isFullscreen(win)) {
         sendSyntheticConfigureNotify(win);
         return;
     }
@@ -611,5 +637,87 @@ fn parseSizeHintsIntoCache(
         min_height = @max(min_height, @as(u16, @intCast(@min(fields[16], std.math.maxInt(u16)))));
     }
 
-    tiling.cacheSizeHints(core.alloc, win, .{ .min_width = min_width, .min_height = min_height });
+    if (comptime build_options.has_tiling)
+        tiling.cacheSizeHints(core.alloc, win, .{ .min_width = min_width, .min_height = min_height });
+}
+
+// Window borders
+//
+// Border state lives here so borders work regardless of whether the tiling
+// subsystem is present. Width is read from tiling state when available (tiling
+// owns the DPI-scaled value it uses in layout math); it is computed directly
+// from config + DPI info only when tiling is absent.
+// Colors are always owned by this module and read straight from config so they
+// are automatically correct after a config reload without any extra init step.
+
+/// Returns the DPI-scaled border width. Reads the pre-computed value from
+/// tiling state when tiling is present, avoids redundant DPI arithmetic.
+pub inline fn getBorderWidth() u16 {
+    if (comptime build_options.has_tiling) {
+        if (tiling.getStateOpt()) |s| return s.border_width;
+    }
+    return dpi.scaleBorderWidth(
+        core.config.tiling.border_width,
+        core.dpi_info.scale_factor,
+        core.screen.height_in_pixels,
+    );
+}
+
+/// Returns the correct border color for `win`:
+///   0               — fullscreen windows (compositor owns the frame)
+///   border_focused  — the currently focused window
+///   border_unfocused — everything else
+inline fn borderColor(win: u32) u32 {
+    if (fullscreen.isFullscreen(win)) return 0;
+    const cfg = &core.config.tiling;
+    return if (focus.getFocused() == win) cfg.border_focused else cfg.border_unfocused;
+}
+
+/// Apply border width and color to `win`. Called when a window is first
+/// managed so it has its border before it ever appears on screen.
+pub fn applyBorder(win: u32) void {
+    const width = getBorderWidth();
+    if (width > 0)
+        _ = xcb.xcb_configure_window(core.conn, win,
+            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{width});
+    _ = xcb.xcb_change_window_attributes(core.conn, win,
+        xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
+}
+
+/// Refresh border color for `old_focused` and `new_focused` after a focus
+/// change. Pass null for either when no window held or will hold focus.
+/// Does NOT flush — callers are responsible for flushing at the right time.
+pub fn updateFocusBorders(old_focused: ?u32, new_focused: ?u32) void {
+    for ([2]?u32{ old_focused, new_focused }) |opt| {
+        const win = opt orelse continue;
+        _ = xcb.xcb_change_window_attributes(core.conn, win,
+            xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
+    }
+}
+
+/// Refresh border colors for every window on the current workspace.
+/// Called after a retile pass: layout changes can implicitly shift which
+/// window is fullscreen or focused, making cached colors stale.
+pub fn updateWorkspaceBorders() void {
+    const ws = workspaces.getCurrentWorkspaceObject() orelse return;
+    for (ws.windows.items()) |win|
+        _ = xcb.xcb_change_window_attributes(core.conn, win,
+            xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
+}
+
+/// Push updated border width and colors to every managed window across all
+/// workspaces. Called on config reload so color and width changes take effect
+/// immediately on all windows, not just those on the current workspace.
+pub fn reloadBorders() void {
+    const width = getBorderWidth();
+    const ws_state = workspaces.getState() orelse return;
+    for (ws_state.workspaces) |*ws| {
+        for (ws.windows.items()) |win| {
+            if (width > 0)
+                _ = xcb.xcb_configure_window(core.conn, win,
+                    xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{width});
+            _ = xcb.xcb_change_window_attributes(core.conn, win,
+                xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
+        }
+    }
 }

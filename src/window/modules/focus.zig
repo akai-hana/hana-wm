@@ -2,7 +2,8 @@
 
 const std    = @import("std");
 const core = @import("core");
-const tiling = @import("tiling");
+const build_options = @import("build_options");
+const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
 const utils  = @import("utils");
 const bar      = @import("bar");
 const window   = @import("window");
@@ -203,7 +204,7 @@ pub fn setFocus(win: u32, reason: Reason) void {
         }
     }
 
-    tiling.updateWindowFocus(old, win);
+    if (comptime build_options.has_tiling) tiling.updateWindowFocus(old, win);
     // Notify the carousel immediately so it can free the stale seg-carousel
     // pixmap and record focus-click time before the draw cycle runs.
     carousel.notifyFocusChanged(win);
@@ -245,7 +246,7 @@ pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
     const old = g_focused_window;
     if (old) |old_win| recordInHistory(old_win);
     g_focused_window = win;
-    tiling.updateWindowFocus(old, win);
+    if (comptime build_options.has_tiling) tiling.updateWindowFocus(old, win);
     carousel.notifyFocusChanged(win);
     bar.scheduleFocusRedraw(win);
 }
@@ -253,7 +254,7 @@ pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
 pub fn clearFocus() void {
     if (g_focused_window) |old_win| {
         window.grabButtons(old_win, false);
-        tiling.updateWindowFocus(old_win, null);
+        if (comptime build_options.has_tiling) tiling.updateWindowFocus(old_win, null);
     }
     g_focused_window = null;
     g_suppress_reason = .none;
