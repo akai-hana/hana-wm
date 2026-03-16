@@ -6,7 +6,8 @@ const core = @import("core");
 const xcb       = core.xcb;
 const utils     = @import("utils");
 const focus     = @import("focus");
-const tiling    = @import("tiling");
+const build_options = @import("build_options");
+const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
 const bar       = @import("bar");
 
 // Apply an i16 delta to a u16 dimension, clamped to [MIN_WINDOW_DIM, u16_MAX].
@@ -33,8 +34,12 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     if (g_drag.active) return;
     if (bar.isBarWindow(win)) return;
     // Prefer the tiling cache; fall back to a live round-trip for floating windows.
-    const geom = tiling.getWindowGeom(win) orelse
-        utils.getGeometry(core.conn, win) orelse return;
+    const geom = blk: {
+        if (comptime build_options.has_tiling) {
+            if (tiling.getWindowGeom(win)) |g| break :blk g;
+        }
+        break :blk utils.getGeometry(core.conn, win) orelse return;
+    };
     g_drag = .{
         .active           = true,
         .window           = win,
@@ -47,9 +52,12 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
         .start_win_height = geom.height,
     };
     focus.setFocus(win, .user_command);
+    _ = xcb.xcb_configure_window(core.conn, win,
+        xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+    _ = xcb.xcb_flush(core.conn);
     // Float conversion is deferred to the first motion event.
     // Record whether the window needs it so updateDrag can act on first move.
-    g_pending_float = tiling.isWindowTiled(win);
+    g_pending_float = if (comptime build_options.has_tiling) tiling.isWindowTiled(win) else false;
 }
 
 pub fn updateDrag(x: i16, y: i16) void {
@@ -62,8 +70,10 @@ pub fn updateDrag(x: i16, y: i16) void {
     if (g_pending_float) {
         g_pending_float = false;
         _ = xcb.xcb_grab_server(core.conn);
-        tiling.removeWindow(drag.window);
-        tiling.retileCurrentWorkspace();
+        if (comptime build_options.has_tiling) {
+            tiling.removeWindow(drag.window);
+            tiling.retileCurrentWorkspace();
+        }
         _ = xcb.xcb_ungrab_server(core.conn);
         _ = xcb.xcb_flush(core.conn);
     }

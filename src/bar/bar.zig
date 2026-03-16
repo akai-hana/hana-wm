@@ -16,8 +16,9 @@ const debug = @import("debug");
 const bar_flags = @import("bar_flags");
 
 pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
+const build_options = @import("build_options");
 const drawing    = @import("drawing");
-const tiling     = @import("tiling");
+const tiling     = if (build_options.has_tiling) @import("tiling") else struct {};
 const drag       = @import("drag");
 const utils      = @import("utils");
 const workspaces = @import("workspaces");
@@ -899,7 +900,7 @@ pub fn toggleBarPosition() void {
         return;
     };
     if (fullscreen.getForWorkspace(current_ws) == null)
-        tiling.retileCurrentWorkspace();
+        if (comptime build_options.has_tiling) tiling.retileCurrentWorkspace();
     _ = xcb.xcb_ungrab_server(core.conn);
     _ = xcb.xcb_flush(core.conn);
     debug.info("Bar position toggled to: {s}", .{@tagName(core.config.bar.vertical_position)});
@@ -992,7 +993,7 @@ pub fn setBarState(action: BarAction) void {
             _ = xcb.xcb_unmap_window(core.conn, s.window);
         }
         _ = xcb.xcb_flush(core.conn);
-        tiling.retileCurrentWorkspace();
+        if (comptime build_options.has_tiling) tiling.retileCurrentWorkspace();
     }
 
     debug.info("Bar {s} ({s})", .{ if (show) "shown" else "hidden", @tagName(action) });
@@ -1081,6 +1082,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
 }
 
 fn retileAllWorkspacesNoGrab() void {
+    if (comptime !build_options.has_tiling) return;
     const ws_state = workspaces.getState() orelse return;
     const tiling_active = core.config.tiling.enabled and
         if (tiling.getStateOpt()) |t| t.enabled else false;

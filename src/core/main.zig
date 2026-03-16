@@ -20,7 +20,10 @@ const input = @import("input");
 const focus = @import("focus");
 
 // tiling/
-const layouts = @import("layouts");
+const has_layouts = @import("build_options").has_layouts;
+const layouts = if (has_layouts) @import("layouts") else struct {
+    pub fn deinitSizeHintsCache(_: std.mem.Allocator) void {}
+};
 
 // bar/
 const bar = @import("bar");

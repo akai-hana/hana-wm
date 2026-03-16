@@ -8,7 +8,8 @@ const core = @import("core");
 const xkbcommon  = @import("xkbcommon");
 const utils      = @import("utils");
 const focus      = @import("focus");
-const tiling     = @import("tiling");
+const build_options = @import("build_options");
+const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
 const workspaces = @import("workspaces");
 const drag       = @import("drag");
 const fullscreen = @import("fullscreen");
@@ -276,22 +277,22 @@ fn executeAction(action: *const core.Action) !void {
         .exec                   => |cmd| try executeShellCommand(cmd),
         .dump_state             => dumpState(),
 
-        .toggle_tiling          => tiling.toggleTiling(),
-        .toggle_float           => { if (focus.getFocused()) |win| tiling.toggleWindowFloat(win); },
-        .toggle_layout          => { tiling.toggleLayout();        bar.scheduleRedraw(); },
-        .toggle_layout_reverse  => { tiling.toggleLayoutReverse(); bar.scheduleRedraw(); },
-        .cycle_layout_variation => tiling.cycleLayoutVariation(),
+        .toggle_tiling          => if (comptime build_options.has_tiling) tiling.toggleTiling(),
+        .toggle_float           => { if (comptime build_options.has_tiling) { if (focus.getFocused()) |win| tiling.toggleWindowFloat(win); } },
+        .toggle_layout          => { if (comptime build_options.has_tiling) { tiling.toggleLayout();        bar.scheduleRedraw(); } },
+        .toggle_layout_reverse  => { if (comptime build_options.has_tiling) { tiling.toggleLayoutReverse(); bar.scheduleRedraw(); } },
+        .cycle_layout_variation => if (comptime build_options.has_tiling) tiling.cycleLayoutVariation(),
 
         .toggle_bar_visibility  => bar.setBarState(.toggle),
         .toggle_bar_position    => bar.toggleBarPosition(),
 
-        .increase_master        => tiling.increaseMasterWidth(),
-        .decrease_master        => tiling.decreaseMasterWidth(),
-        .increase_master_count  => tiling.increaseMasterCount(),
-        .decrease_master_count  => tiling.decreaseMasterCount(),
+        .increase_master        => if (comptime build_options.has_tiling) tiling.increaseMasterWidth(),
+        .decrease_master        => if (comptime build_options.has_tiling) tiling.decreaseMasterWidth(),
+        .increase_master_count  => if (comptime build_options.has_tiling) tiling.increaseMasterCount(),
+        .decrease_master_count  => if (comptime build_options.has_tiling) tiling.decreaseMasterCount(),
 
-        .swap_master            => { tiling.swapWithMaster();          focus.syncFocusToPointer(); bar.scheduleRedraw(); },
-        .swap_master_focus_swap => { tiling.swapWithMasterFocusSwap(); focus.syncFocusToPointer(); bar.scheduleRedraw(); },
+        .swap_master            => { if (comptime build_options.has_tiling) { tiling.swapWithMaster();          focus.syncFocusToPointer(); bar.scheduleRedraw(); } },
+        .swap_master_focus_swap => { if (comptime build_options.has_tiling) { tiling.swapWithMasterFocusSwap(); focus.syncFocusToPointer(); bar.scheduleRedraw(); } },
 
         .minimize_window        => minimize.minimizeWindow(),
         .unminimize_lifo        => minimize.unminimize(.lifo),
@@ -312,7 +313,7 @@ fn executeAction(action: *const core.Action) !void {
 /// window rather than the keyboard-focused one (they may differ).
 fn executeMouseAction(action: *const core.Action, clicked_win: u32) !void {
     switch (action.*) {
-        .toggle_float => tiling.toggleWindowFloat(clicked_win),
+        .toggle_float => if (comptime build_options.has_tiling) tiling.toggleWindowFloat(clicked_win),
         else          => try executeAction(action),
     }
 }
@@ -449,12 +450,14 @@ fn dumpState() void {
         }
     }
 
-    if (tiling.getStateOpt()) |t_state| {
-        debug.info("Tiling enabled: {}",  .{t_state.enabled});
-        debug.info("Tiling layout: {s}", .{@tagName(t_state.layout)});
-        debug.info("Tiled windows: {}",  .{t_state.windows.count()});
-        debug.info("Master count: {}",   .{t_state.master_count});
-        debug.info("Master width: {d:.2}", .{t_state.master_width});
+    if (comptime build_options.has_tiling) {
+        if (tiling.getStateOpt()) |t_state| {
+            debug.info("Tiling enabled: {}",  .{t_state.enabled});
+            debug.info("Tiling layout: {s}", .{@tagName(t_state.layout)});
+            debug.info("Tiled windows: {}",  .{t_state.windows.count()});
+            debug.info("Master count: {}",   .{t_state.master_count});
+            debug.info("Master width: {d:.2}", .{t_state.master_width});
+        }
     }
     debug.info("================================", .{});
 }
