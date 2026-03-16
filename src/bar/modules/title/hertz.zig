@@ -6,8 +6,8 @@
 //!   hertz.invalidate();             // call on RRScreenChangeNotify to force re-detect
 
 const std = @import("std");
-const defs = @import("defs");
-const xcb = defs.xcb;
+const core = @import("core");
+const xcb = core.xcb;
 
 /// Fallback rate used when RandR is unavailable or returns an invalid value.
 pub const DEFAULT_HZ: f64 = 60.0;

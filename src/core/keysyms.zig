@@ -5,7 +5,7 @@
 //!
 //! Values match <X11/keysymdef.h> (stable since X11R1).
 
-const xcb = @import("defs").xcb;
+const xcb = @import("core").xcb;
 
 pub const XK_BackSpace : xcb.xcb_keysym_t = 0xff08;
 pub const XK_Tab       : xcb.xcb_keysym_t = 0xff09;

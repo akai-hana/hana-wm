@@ -7,7 +7,6 @@
 //! - SpawnQueue lives in window.zig.
 
 const std    = @import("std");
-const dpi    = @import("dpi");
 const parser = @import("parser");
 
 pub const xcb = @cImport({
@@ -477,20 +476,15 @@ pub const FocusSuppressReason = enum {
     tiling_operation, // currently tiling: don't let cursor steal focus
 };
 
-// WM connection context 
-// After the full modular refactor, WM holds only connection plumbing + config.
-// Runtime state (focus, drag, spawn queue, fullscreen, workspaces, tiling,
-// minimize) lives in each module's own g_state.
 
-pub const WM = struct {
-    allocator: std.mem.Allocator,
-    conn:      *xcb.xcb_connection_t,
-    screen:    *xcb.xcb_screen_t,
-    root:      WindowId,
-    config:    Config,
-    dpi_info:  dpi.DpiInfo,
+// Global WM state — set once at startup by main.zig, valid for the lifetime of the process.
+// Every module accesses these via `const core = @import("core")`.
 
-    pub fn deinit(self: *WM) void {
-        self.config.deinit();
-    }
-};
+const dpi_mod = @import("dpi");
+
+pub var conn:      *xcb.xcb_connection_t = undefined;
+pub var screen:    *xcb.xcb_screen_t     = undefined;
+pub var root:      WindowId              = undefined;
+pub var alloc: std.mem.Allocator     = undefined;
+pub var config:    Config                = undefined;
+pub var dpi_info:  dpi_mod.DpiInfo       = undefined;

@@ -1,14 +1,13 @@
 //! Focus management — set, clear, and reason-aware focus routing.
 
 const std    = @import("std");
-const defs   = @import("defs");
+const core = @import("core");
 const tiling = @import("tiling");
 const utils  = @import("utils");
 const bar      = @import("bar");
 const window   = @import("window");
 const carousel = @import("carousel");
-const xcb      = defs.xcb;
-const WM       = defs.WM;
+const xcb      = core.xcb;
 
 // Module state 
 //
@@ -17,7 +16,7 @@ const WM       = defs.WM;
 // typed accessors below rather than reaching into WM.
 
 var g_focused_window:  ?u32                     = null;
-var g_suppress_reason: defs.FocusSuppressReason = .none;
+var g_suppress_reason: core.FocusSuppressReason = .none;
 var g_last_event_time: u32                      = 0;
 
 // Focus history 
@@ -78,11 +77,11 @@ pub inline fn historyItems() []const u32 {
 // Public accessors 
 
 pub inline fn getFocused()        ?u32                       { return g_focused_window; }
-pub inline fn getSuppressReason() defs.FocusSuppressReason   { return g_suppress_reason; }
+pub inline fn getSuppressReason() core.FocusSuppressReason   { return g_suppress_reason; }
 pub inline fn getLastEventTime()  u32                        { return g_last_event_time; }
 
 pub inline fn setFocused(win: ?u32) void                         { g_focused_window  = win; }
-pub inline fn setSuppressReason(r: defs.FocusSuppressReason) void { g_suppress_reason = r; }
+pub inline fn setSuppressReason(r: core.FocusSuppressReason) void { g_suppress_reason = r; }
 pub inline fn setLastEventTime(t: u32) void                      { g_last_event_time = t; }
 
 // Focus logic 
@@ -101,8 +100,8 @@ pub const Reason = enum {
     workspace_switch,
 };
 
-pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
-    if (win == 0 or win == wm.root) return;
+pub fn setFocus(win: u32, reason: Reason) void {
+    if (win == 0 or win == core.root) return;
     if (g_focused_window == win) return;
     if (bar.isBarWindow(win)) return;
 
@@ -117,11 +116,11 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     //
     // For all other reasons (click, command) a race with destroy is possible,
     // so we guard with a live attribute query.
-    const input_model = utils.getInputModelCached(wm.conn, win);
+    const input_model = utils.getInputModelCached(core.conn, win);
     if (input_model == .no_input) return;
 
     if (switch (reason) {
-        .mouse_click, .user_command => !isWindowMapped(wm.conn, win),
+        .mouse_click, .user_command => !isWindowMapped(core.conn, win),
         .mouse_enter, .window_spawn, .tiling_operation, .workspace_switch => false,
     }) return;
 
@@ -130,11 +129,11 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     g_focused_window = win;
     g_suppress_reason = suppressionFor(reason, g_suppress_reason);
 
-    window.grabButtons(wm, win, true);
-    if (old) |old_win| window.grabButtons(wm, old_win, false);
+    window.grabButtons(win, true);
+    if (old) |old_win| window.grabButtons(old_win, false);
 
     _ = xcb.xcb_set_input_focus(
-        wm.conn,
+        core.conn,
         xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
         win,
         g_last_event_time,
@@ -144,14 +143,14 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     // (they never receive xcb_set_input_focus, so raising is the only signal).
     if (shouldRaise(reason) or (reason == .mouse_enter and input_model == .globally_active)) {
         _ = xcb.xcb_configure_window(
-            wm.conn, win,
+            core.conn, win,
             xcb.XCB_CONFIG_WINDOW_STACK_MODE,
             &[_]u32{xcb.XCB_STACK_MODE_ABOVE},
         );
     }
 
     if (input_model == .locally_active or input_model == .globally_active) {
-        utils.sendWMTakeFocus(wm.conn, win, g_last_event_time);
+        utils.sendWMTakeFocus(core.conn, win, g_last_event_time);
     }
 
     // Compliant locally_active clients respond to xcb_set_input_focus directly
@@ -177,18 +176,18 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
     if (reason == .mouse_enter and
         (input_model == .locally_active or input_model == .passive))
     {
-        const confirm_cookie = xcb.xcb_get_input_focus(wm.conn);
-        const confirm = xcb.xcb_get_input_focus_reply(wm.conn, confirm_cookie, null);
+        const confirm_cookie = xcb.xcb_get_input_focus(core.conn);
+        const confirm = xcb.xcb_get_input_focus_reply(core.conn, confirm_cookie, null);
         if (confirm) |c| {
             defer std.c.free(c);
             if (c.*.focus != win) {
                 _ = xcb.xcb_configure_window(
-                    wm.conn, win,
+                    core.conn, win,
                     xcb.XCB_CONFIG_WINDOW_STACK_MODE,
                     &[_]u32{xcb.XCB_STACK_MODE_ABOVE},
                 );
                 _ = xcb.xcb_set_input_focus(
-                    wm.conn,
+                    core.conn,
                     xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
                     win,
                     g_last_event_time,
@@ -198,13 +197,13 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
                 // Not sent for passive windows — they have no WM_TAKE_FOCUS
                 // handler and xcb_set_input_focus alone is the correct protocol.
                 if (input_model == .locally_active) {
-                    utils.sendWMTakeFocus(wm.conn, win, g_last_event_time);
+                    utils.sendWMTakeFocus(core.conn, win, g_last_event_time);
                 }
             }
         }
     }
 
-    tiling.updateWindowFocus(wm, old, win);
+    tiling.updateWindowFocus(old, win);
     // Notify the carousel immediately so it can free the stale seg-carousel
     // pixmap and record focus-click time before the draw cycle runs.
     carousel.notifyFocusChanged(win);
@@ -224,7 +223,7 @@ pub fn setFocus(wm: *WM, win: u32, reason: Reason) void {
 ///
 /// NotifyGrab / NotifyUngrab are skipped — they are transient and do not
 /// represent a real focus change (e.g. WM grabbing the server, key grabs).
-pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t, wm: *WM) void {
+pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
     if (event.mode == xcb.XCB_NOTIFY_MODE_GRAB or
         event.mode == xcb.XCB_NOTIFY_MODE_UNGRAB) return;
     // NotifyWhileGrabbed: focus change during an active grab — skip to avoid
@@ -238,30 +237,30 @@ pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t, wm: *WM) void {
         event.detail == xcb.XCB_NOTIFY_DETAIL_NONE) return;
 
     const win = event.event;
-    if (win == 0 or win == wm.root) return;
+    if (win == 0 or win == core.root) return;
     if (bar.isBarWindow(win)) return;
-    if (!window.isValidManagedWindow(wm, win)) return;
+    if (!window.isValidManagedWindow(win)) return;
     if (g_focused_window == win) return;
 
     const old = g_focused_window;
     if (old) |old_win| recordInHistory(old_win);
     g_focused_window = win;
-    tiling.updateWindowFocus(wm, old, win);
+    tiling.updateWindowFocus(old, win);
     carousel.notifyFocusChanged(win);
     bar.scheduleFocusRedraw(win);
 }
 
-pub fn clearFocus(wm: *WM) void {
+pub fn clearFocus() void {
     if (g_focused_window) |old_win| {
-        window.grabButtons(wm, old_win, false);
-        tiling.updateWindowFocus(wm, old_win, null);
+        window.grabButtons(old_win, false);
+        tiling.updateWindowFocus(old_win, null);
     }
     g_focused_window = null;
     g_suppress_reason = .none;
     _ = xcb.xcb_set_input_focus(
-        wm.conn,
+        core.conn,
         xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
-        wm.root,
+        core.root,
         g_last_event_time,
     );
     carousel.notifyFocusChanged(null);
@@ -275,7 +274,7 @@ inline fn shouldRaise(reason: Reason) bool {
     };
 }
 
-inline fn suppressionFor(reason: Reason, current: defs.FocusSuppressReason) defs.FocusSuppressReason {
+inline fn suppressionFor(reason: Reason, current: core.FocusSuppressReason) core.FocusSuppressReason {
     // Only explicit user-driven actions clear suppression unconditionally.
     // Programmatic focus changes (tiling_operation, workspace_switch, mouse_enter)
     // must preserve any suppression that was set externally — most importantly by
@@ -301,6 +300,32 @@ inline fn suppressionFor(reason: Reason, current: defs.FocusSuppressReason) defs
         .window_spawn               => .window_spawn,
         else                        => current,
     };
+}
+
+/// After a tiling operation that repositions windows, sync WM focus state to
+/// whichever managed window is currently under the pointer.  This prevents the
+/// `.tiling_operation` suppression from persisting indefinitely when there is no
+/// active pointer grab to deliver MotionNotify events that would normally clear it.
+pub fn syncFocusToPointer() void {
+    const reply = xcb.xcb_query_pointer_reply(
+        core.conn, xcb.xcb_query_pointer(core.conn, core.root), null,
+    ) orelse {
+        g_suppress_reason = .none;
+        return;
+    };
+    defer std.c.free(reply);
+
+    const child = reply.*.child;
+    if (child == 0 or child == core.root or !window.isValidManagedWindow(child)) {
+        g_suppress_reason = .none;
+        return;
+    }
+
+    // Use .mouse_enter so the window is not raised, just focused.
+    // If g_focused_window already equals child, setFocus returns early —
+    // that's fine, we just need the suppression cleared below.
+    setFocus(child, .mouse_enter);
+    g_suppress_reason = .none; // clear regardless of whether setFocus short-circuited
 }
 
 fn isWindowMapped(conn: *xcb.xcb_connection_t, win: u32) bool {

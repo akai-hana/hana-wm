@@ -2,7 +2,7 @@
 //! The timer is dynamically enabled/disabled to reduce idle CPU usage.
 
 const std     = @import("std");
-const defs    = @import("defs");
+const core    = @import("core");
 const drawing = @import("drawing");
 const bar     = @import("bar");
 const debug   = @import("debug");
@@ -40,7 +40,7 @@ pub fn updateTimerState() void {
     setTimerState(shouldClockRun());
 }
 
-pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start_x: u16) !u16 {
+pub fn draw(dc: *drawing.DrawContext, config: core.BarConfig, height: u16, start_x: u16) !u16 {
     // Derive seconds from clock_gettime(REALTIME); sub-second precision is not needed for display.
     const now_ts = std.posix.clock_gettime(.REALTIME) catch unreachable;
     const sec: i64 = now_ts.sec;

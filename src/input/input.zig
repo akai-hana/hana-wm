@@ -4,7 +4,7 @@
 
 const std        = @import("std");
 const constants  = @import("constants");
-const defs       = @import("defs");
+const core = @import("core");
 const xkbcommon  = @import("xkbcommon");
 const utils      = @import("utils");
 const focus      = @import("focus");
@@ -17,8 +17,7 @@ const window     = @import("window");
 const debug      = @import("debug");
 const minimize   = @import("minimize");
 const prompt     = @import("prompt");
-const xcb        = defs.xcb;
-const WM         = defs.WM;
+const xcb        = core.xcb;
 
 const c = @cImport({
     @cInclude("unistd.h");
@@ -36,37 +35,50 @@ const MOUSE_BUTTONS = [_]u8{ MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, MOUSE_BUTTO
 // TODO: move KeybindState into WM to eliminate module-level mutable global.
 
 const KeybindState = struct {
-    map: std.AutoHashMap(u64, *const defs.Action),
+    map: std.AutoHashMap(u64, *const core.Action),
 
     fn init(allocator: std.mem.Allocator) KeybindState {
-        return .{ .map = std.AutoHashMap(u64, *const defs.Action).init(allocator) };
+        return .{ .map = std.AutoHashMap(u64, *const core.Action).init(allocator) };
     }
 
     fn deinit(self: *KeybindState) void { self.map.deinit(); }
 
-    fn rebuild(self: *KeybindState, wm: *WM) !void {
+    fn rebuild(self: *KeybindState) !void {
         self.map.clearRetainingCapacity();
-        try self.map.ensureTotalCapacity(@intCast(wm.config.keybindings.items.len));
-        for (wm.config.keybindings.items) |*kb| {
+        try self.map.ensureTotalCapacity(@intCast(core.config.keybindings.items.len));
+        for (core.config.keybindings.items) |*kb| {
             self.map.putAssumeCapacity(makeHash(kb.modifiers, kb.keysym), &kb.action);
         }
     }
 };
 
-var keybind_state: ?KeybindState     = null;
-var xkb_state:     ?*xkbcommon.XkbState = null;
+var keybind_state: ?KeybindState       = null;
+var xkb_state:     ?xkbcommon.XkbState = null;
 
-/// Returns the XkbState pointer. Used by events.zig for config reload.
-pub fn getXkbState() *xkbcommon.XkbState {
-    return xkb_state.?;
+/// Initializes XKB context, keymap, and key state from the server's current keyboard config.
+/// Must be called before init().
+pub fn initXkb(conn: *xcb.xcb_connection_t, allocator: std.mem.Allocator) !void {
+    xkb_state = try xkbcommon.XkbState.init(conn, allocator);
 }
 
-pub fn init(wm: *WM, xkb: *xkbcommon.XkbState) !void {
-    var state = KeybindState.init(wm.allocator);
+/// Cleans up XKB state. Must be called after deinit().
+pub fn deinitXkb() void {
+    if (xkb_state) |*s| {
+        s.deinit();
+        xkb_state = null;
+    }
+}
+
+/// Returns a pointer to the module-owned XkbState. Used by events.zig for config reload.
+pub fn getXkbState() *xkbcommon.XkbState {
+    return &xkb_state.?;
+}
+
+pub fn init() !void {
+    var state = KeybindState.init(core.alloc);
     errdefer state.deinit();
-    try state.rebuild(wm);
+    try state.rebuild();
     keybind_state = state;
-    xkb_state     = xkb;
 }
 
 pub fn deinit() void {
@@ -77,9 +89,9 @@ pub fn deinit() void {
 }
 
 /// Rebuilds the keybind lookup map from the current config (called after reload).
-pub fn rebuildKeybindMap(wm: *WM) !void {
+pub fn rebuildKeybindMap() !void {
     const state = &(keybind_state orelse return error.KeybindStateNotInitialized);
-    try state.rebuild(wm);
+    try state.rebuild();
 }
 
 inline fn makeHash(mods: u16, keysym: u32) u64 {
@@ -87,6 +99,12 @@ inline fn makeHash(mods: u16, keysym: u32) u64 {
 }
 
 // Grab setup
+
+/// Grabs mouse buttons and sets the root window cursor. Call once at startup.
+pub fn setup(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t, root: u32) void {
+    setupGrabs(conn, root);
+    XcbCursor.setupRoot(conn, screen);
+}
 
 /// Grabs Super+Button1/2/3 on the root window.
 /// Button1 = move, Button3 = resize, Button2 = config-driven binds (e.g. toggle_float).
@@ -104,7 +122,7 @@ pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
 
 // Event handlers
 
-pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
+pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     focus.setLastEventTime(event.time);
 
     const state  = &(keybind_state orelse return);
@@ -118,12 +136,12 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
     if (prompt.isActive()) {
         if (state.map.get(key)) |action| {
             if (action.* == .close_window) {
-                prompt.toggle(wm);
+                prompt.toggle();
                 bar.scheduleRedraw();
                 return;
             }
         }
-        if (prompt.handleKeyPress(event, wm)) bar.scheduleRedraw();
+        if (prompt.handleKeyPress(event)) bar.scheduleRedraw();
         return;
     }
 
@@ -132,7 +150,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
 
     if (state.map.get(key)) |action| {
         debug.info("[KEY] action found: {s}", .{@tagName(action.*)});
-        executeAction(action, wm) catch |err| debug.err("Failed to execute action: {}", .{err});
+        executeAction(action) catch |err| debug.err("Failed to execute action: {}", .{err});
     } else {
         debug.info("[KEY] no binding found for this key", .{});
     }
@@ -143,19 +161,19 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *WM) void {
 ///   2. Check config-driven mouse bindings (e.g. Super+MiddleClick = toggle_float).
 ///   3. Super+Left/Right drag: start a move or resize operation.
 ///   4. Any other click: focus the window under the cursor.
-pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) void {
+pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     focus.setLastEventTime(event.time);
     const clicked_window = if (event.child != 0) event.child else event.event;
 
-    if (clicked_window == 0 or clicked_window == wm.root) {
+    if (clicked_window == 0 or clicked_window == core.root) {
         // Use event.time, not XCB_CURRENT_TIME — server matches by timestamp.
-        replayPointer(wm, event.time);
+        replayPointer(event.time);
         return;
     }
 
-    const managed_window = utils.findManagedWindow(wm.conn, clicked_window, workspaces.isManaged);
+    const managed_window = utils.findManagedWindow(core.conn, clicked_window, workspaces.isManaged);
     if (managed_window == 0) {
-        replayPointer(wm, event.time);
+        replayPointer(event.time);
         return;
     }
 
@@ -165,39 +183,39 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t, wm: *WM) vo
     const super_held = (event.state & constants.MOD_SUPER) != 0;
     if (super_held) {
         const mods = utils.normalizeModifiers(event.state);
-        for (wm.config.mouse_bindings.items) |*mb| {
+        for (core.config.mouse_bindings.items) |*mb| {
             if (mb.modifiers == mods and mb.button == event.detail) {
-                executeMouseAction(&mb.action, wm, managed_window)
+                executeMouseAction(&mb.action, managed_window)
                     catch |err| debug.err("mouse bind error: {}", .{err});
-                _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_REPLAY_POINTER,  event.time);
-                _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, event.time);
-                _ = xcb.xcb_flush(wm.conn);
+                _ = xcb.xcb_allow_events(core.conn, xcb.XCB_ALLOW_REPLAY_POINTER,  event.time);
+                _ = xcb.xcb_allow_events(core.conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, event.time);
+                _ = xcb.xcb_flush(core.conn);
                 return;
             }
         }
     }
 
     if (super_held and (event.detail == MOUSE_BUTTON_LEFT or event.detail == MOUSE_BUTTON_RIGHT)) {
-        drag.startDrag(wm, managed_window, event.detail, event.root_x, event.root_y);
+        drag.startDrag(managed_window, event.detail, event.root_x, event.root_y);
     } else {
-        focus.setFocus(wm, managed_window, .mouse_click);
+        focus.setFocus(managed_window, .mouse_click);
     }
 
     // Release the SYNC grab; use event.time not XCB_CURRENT_TIME to avoid silent drop.
-    _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_REPLAY_POINTER,  event.time);
-    _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, event.time);
-    _ = xcb.xcb_flush(wm.conn);
+    _ = xcb.xcb_allow_events(core.conn, xcb.XCB_ALLOW_REPLAY_POINTER,  event.time);
+    _ = xcb.xcb_allow_events(core.conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, event.time);
+    _ = xcb.xcb_flush(core.conn);
 }
 
-pub fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t, _: *WM) void {
+pub fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t) void {
     focus.setLastEventTime(event.time);
     if (drag.isDragging()) drag.stopDrag();
 }
 
-pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) void {
+pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
     focus.setLastEventTime(event.time);
     if (drag.isDragging()) {
-        drag.updateDrag(wm, event.root_x, event.root_y);
+        drag.updateDrag(event.root_x, event.root_y);
         return;
     }
     // Real movement lifts any active focus suppression (window_spawn or tiling_operation).
@@ -213,15 +231,15 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t, wm: *WM) 
     // normal use.  The old blocking read stalled the entire event loop for a
     // full RTT on every non-drag motion, delaying processing of any other events
     // queued behind it (EnterNotify, KeyPress, etc.).
-    xcb.xcb_discard_reply(wm.conn, xcb.xcb_query_pointer(wm.conn, wm.root).sequence);
+    xcb.xcb_discard_reply(core.conn, xcb.xcb_query_pointer(core.conn, core.root).sequence);
 }
 
 // Window close
 
-fn closeWindow(wm: *WM, win: u32) void {
+fn closeWindow(win: u32) void {
     // Prefer a graceful shutdown: send a WM_DELETE_WINDOW client message so the
     // application can save state and clean up before exiting (ICCCM §4.1.2.7).
-    if (utils.supportsWMDeleteCached(wm.conn, win)) {
+    if (utils.supportsWMDeleteCached(core.conn, win)) {
         const protocols_atom = utils.getAtomCached("WM_PROTOCOLS")     catch return;
         const delete_atom    = utils.getAtomCached("WM_DELETE_WINDOW") catch return;
 
@@ -236,66 +254,66 @@ fn closeWindow(wm: *WM, win: u32) void {
         event.data.data32[0] = delete_atom;
         event.data.data32[1] = focus.getLastEventTime(); // ICCCM §4.1.7
 
-        _ = xcb.xcb_send_event(wm.conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
-        _ = xcb.xcb_flush(wm.conn);
+        _ = xcb.xcb_send_event(core.conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
+        _ = xcb.xcb_flush(core.conn);
     } else {
         // The window does not support WM_DELETE_WINDOW, so destroy it forcefully.
-        _ = xcb.xcb_destroy_window(wm.conn, win);
-        _ = xcb.xcb_flush(wm.conn);
+        _ = xcb.xcb_destroy_window(core.conn, win);
+        _ = xcb.xcb_flush(core.conn);
     }
 }
 
 // Action dispatch
 
-fn executeAction(action: *const defs.Action, wm: *WM) !void {
+fn executeAction(action: *const core.Action) !void {
     switch (action.*) {
-        .toggle_fullscreen      => fullscreen.toggleFullscreen(wm),
-        .close_window           => { if (focus.getFocused()) |win| closeWindow(wm, win); },
+        .toggle_fullscreen      => fullscreen.toggleFullscreen(),
+        .close_window           => { if (focus.getFocused()) |win| closeWindow(win); },
         .reload_config          => { utils.reload(); },
         // Runs each action in the list in order. Stops and propagates the
         // first error encountered, leaving any remaining actions unexecuted.
-        .sequence               => |acts| { for (acts) |*a| try executeAction(a, wm); },
-        .exec                   => |cmd| try executeShellCommand(wm, cmd),
-        .dump_state             => dumpState(wm),
+        .sequence               => |acts| { for (acts) |*a| try executeAction(a); },
+        .exec                   => |cmd| try executeShellCommand(cmd),
+        .dump_state             => dumpState(),
 
-        .toggle_tiling          => tiling.toggleTiling(wm),
-        .toggle_float           => { if (focus.getFocused()) |win| tiling.toggleWindowFloat(wm, win); },
-        .toggle_layout          => { tiling.toggleLayout(wm);        bar.scheduleRedraw(); },
-        .toggle_layout_reverse  => { tiling.toggleLayoutReverse(wm); bar.scheduleRedraw(); },
-        .cycle_layout_variation => tiling.cycleLayoutVariation(wm),
+        .toggle_tiling          => tiling.toggleTiling(),
+        .toggle_float           => { if (focus.getFocused()) |win| tiling.toggleWindowFloat(win); },
+        .toggle_layout          => { tiling.toggleLayout();        bar.scheduleRedraw(); },
+        .toggle_layout_reverse  => { tiling.toggleLayoutReverse(); bar.scheduleRedraw(); },
+        .cycle_layout_variation => tiling.cycleLayoutVariation(),
 
-        .toggle_bar_visibility  => bar.setBarState(wm, .toggle),
-        .toggle_bar_position    => bar.toggleBarPosition(wm),
+        .toggle_bar_visibility  => bar.setBarState(.toggle),
+        .toggle_bar_position    => bar.toggleBarPosition(),
 
-        .increase_master        => tiling.increaseMasterWidth(wm),
-        .decrease_master        => tiling.decreaseMasterWidth(wm),
-        .increase_master_count  => tiling.increaseMasterCount(wm),
-        .decrease_master_count  => tiling.decreaseMasterCount(wm),
+        .increase_master        => tiling.increaseMasterWidth(),
+        .decrease_master        => tiling.decreaseMasterWidth(),
+        .increase_master_count  => tiling.increaseMasterCount(),
+        .decrease_master_count  => tiling.decreaseMasterCount(),
 
-        .swap_master            => { tiling.swapWithMaster(wm);          focus.setSuppressReason(.tiling_operation); bar.scheduleRedraw(); },
-        .swap_master_focus_swap => { tiling.swapWithMasterFocusSwap(wm); focus.setSuppressReason(.tiling_operation); bar.scheduleRedraw(); },
+        .swap_master            => { tiling.swapWithMaster();          focus.syncFocusToPointer(); bar.scheduleRedraw(); },
+        .swap_master_focus_swap => { tiling.swapWithMasterFocusSwap(); focus.syncFocusToPointer(); bar.scheduleRedraw(); },
 
-        .minimize_window        => minimize.minimizeWindow(wm),
-        .unminimize_lifo        => minimize.unminimize(wm, .lifo),
-        .unminimize_fifo        => minimize.unminimize(wm, .fifo),
-        .unminimize_all         => minimize.unminimizeAll(wm),
+        .minimize_window        => minimize.minimizeWindow(),
+        .unminimize_lifo        => minimize.unminimize(.lifo),
+        .unminimize_fifo        => minimize.unminimize(.fifo),
+        .unminimize_all         => minimize.unminimizeAll(),
 
-        .switch_workspace       => |ws| workspaces.switchTo(wm, ws),
-        .move_to_workspace      => |ws| { if (focus.getFocused()) |win| workspaces.moveWindowTo(wm, win, ws) catch |e| debug.warnOnErr(e, "move_to_workspace"); },
-        .move_window            => |ws| { if (focus.getFocused()) |win| workspaces.moveWindowExclusive(wm, win, ws); },
+        .switch_workspace       => |ws| workspaces.switchTo(ws),
+        .move_to_workspace      => |ws| { if (focus.getFocused()) |win| workspaces.moveWindowTo(win, ws) catch |e| debug.warnOnErr(e, "move_to_workspace"); },
+        .move_window            => |ws| { if (focus.getFocused()) |win| workspaces.moveWindowExclusive(win, ws); },
 
-        .tag_toggle             => |ws| { if (focus.getFocused()) |win| workspaces.tagToggle(wm, win, ws, true); },
-        .prompt_toggle          => { prompt.toggle(wm); bar.scheduleRedraw(); },
+        .tag_toggle             => |ws| { if (focus.getFocused()) |win| workspaces.tagToggle(win, ws, true); },
+        .prompt_toggle          => { prompt.toggle(); bar.scheduleRedraw(); },
     }
 }
 
 /// Like executeAction but carries the specific window that was clicked.
 /// Used by the mouse bind dispatcher so toggle_float acts on the clicked
 /// window rather than the keyboard-focused one (they may differ).
-fn executeMouseAction(action: *const defs.Action, wm: *WM, clicked_win: u32) !void {
+fn executeMouseAction(action: *const core.Action, clicked_win: u32) !void {
     switch (action.*) {
-        .toggle_float => tiling.toggleWindowFloat(wm, clicked_win),
-        else          => try executeAction(action, wm),
+        .toggle_float => tiling.toggleWindowFloat(clicked_win),
+        else          => try executeAction(action),
     }
 }
 
@@ -335,9 +353,9 @@ fn intermediateChild(exec_pipe_write: c_int, pid_pipe_write: c_int, cmd_z: [*:0]
 /// exec_pipe: write end is FD_CLOEXEC; EOF on success, sentinel byte on exec failure.
 /// pid_pipe:  intermediate child writes grandchild PID before exiting.
 /// registerSpawn() is only called when exec is confirmed to have succeeded.
-fn executeShellCommand(wm: *WM, cmd: []const u8) !void {
-    const cmd_z = try wm.allocator.dupeZ(u8, cmd);
-    defer wm.allocator.free(cmd_z);
+fn executeShellCommand(cmd: []const u8) !void {
+    const cmd_z = try core.alloc.dupeZ(u8, cmd);
+    defer core.alloc.free(cmd_z);
 
     var exec_pipe: [2]c_int = undefined;
     var pid_pipe:  [2]c_int = undefined;
@@ -406,7 +424,7 @@ fn executeShellCommand(wm: *WM, cmd: []const u8) !void {
 
 // Diagnostics
 
-fn dumpState(_: *WM) void {
+fn dumpState() void {
     debug.info("========== STATE DUMP ==========", .{});
     debug.info("Focused: {?x}",         .{focus.getFocused()});
     const win_count = if (workspaces.getState()) |s| s.window_to_workspaces.count() else 0;
@@ -444,9 +462,9 @@ fn dumpState(_: *WM) void {
 // Helpers
 
 /// Replays a frozen pointer event and flushes. Always pass `event.time`, never XCB_CURRENT_TIME.
-inline fn replayPointer(wm: *WM, time: u32) void {
-    _ = xcb.xcb_allow_events(wm.conn, xcb.XCB_ALLOW_REPLAY_POINTER, time);
-    _ = xcb.xcb_flush(wm.conn);
+inline fn replayPointer(time: u32) void {
+    _ = xcb.xcb_allow_events(core.conn, xcb.XCB_ALLOW_REPLAY_POINTER, time);
+    _ = xcb.xcb_flush(core.conn);
 }
 
 /// Closes both ends of a pipe pair.
@@ -454,3 +472,50 @@ inline fn closePipe(p: [2]c_int) void {
     _ = c.close(p[0]);
     _ = c.close(p[1]);
 }
+
+/// xcb-cursor extern declarations and helpers.
+///
+/// Declared manually instead of using cImport because cImport cannot bind
+/// static inline functions, and xcb_cursor_load_cursor is defined that way.
+const XcbCursor = struct {
+    const Context = opaque {};
+
+    extern fn xcb_cursor_context_new(
+        conn:   *xcb.xcb_connection_t,
+        screen: *xcb.xcb_screen_t,
+        ctx:    *?*Context,
+    ) c_int;
+
+    extern fn xcb_cursor_load_cursor(ctx: *Context, name: [*:0]const u8) u32;
+    extern fn xcb_cursor_context_free(ctx: ?*Context) void;
+
+    /// Makes the user theme's cursor be used by the root window (hovering hana's background wallpaper),
+    /// respecting the user's custom cursor instead of just displaying the default X server's cursor.
+    ///
+    /// Falls back to no change if xcb-cursor fails to load it.
+    fn setupRoot(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) void {
+        var cursor_ctx: ?*Context = null;
+
+        if (xcb_cursor_context_new(conn, screen, &cursor_ctx) < 0)
+            return;
+        defer xcb_cursor_context_free(cursor_ctx);
+
+        const cursor  = xcb_cursor_load_cursor(cursor_ctx.?, "left_ptr"); // Set custom cursor
+        if (cursor == xcb.XCB_NONE) return;                               // Fallback; no settable cursor detected
+
+        // Apply the loaded cursor to the root window.
+        const cookie = xcb.xcb_change_window_attributes_checked(
+            conn, screen.*.root, xcb.XCB_CW_CURSOR, &[_]u32{cursor},
+        );
+
+        if (xcb.xcb_request_check(conn, cookie)) |err| {
+            debug.err("Failed to set custom cursor onto hana's root window: {}", .{err});
+            std.c.free(err);
+        }
+
+        // Release our client-side handle. The server uses reference counting — it keeps
+        // the cursor alive as long as any window still has it set, so this is safe to
+        // call immediately after applying it to the root window.
+        _ = xcb.xcb_free_cursor(conn, cursor);
+    }
+};

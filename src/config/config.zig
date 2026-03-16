@@ -1,7 +1,7 @@
 //! Configuration interpreter — loads, parses, and validates TOML config files.
 
 const std       = @import("std");
-const defs      = @import("defs");
+const core = @import("core");
 const debug     = @import("debug");
 const parser    = @import("parser");
 const xkbcommon = @import("xkbcommon");
@@ -55,7 +55,7 @@ inline fn validateWorkspace(ws_num: usize, max: usize, context: []const u8) bool
     return true;
 }
 
-inline fn addRule(allocator: std.mem.Allocator, cfg: *defs.Config, class_name: []const u8, ws_num: usize) !void {
+inline fn addRule(allocator: std.mem.Allocator, cfg: *core.Config, class_name: []const u8, ws_num: usize) !void {
     try cfg.workspaces.rules.append(allocator, .{
         .class_name = try allocator.dupe(u8, class_name),
         .workspace  = @intCast(ws_num - 1),
@@ -64,14 +64,14 @@ inline fn addRule(allocator: std.mem.Allocator, cfg: *defs.Config, class_name: [
 
 // Default bar layout
 
-fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *defs.Config) !void {
-    const defaults = [_]struct { pos: defs.BarPosition, seg: defs.BarSegment }{
+fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *core.Config) !void {
+    const defaults = [_]struct { pos: core.BarPosition, seg: core.BarSegment }{
         .{ .pos = .left,   .seg = .workspaces },
         .{ .pos = .center, .seg = .title      },
         .{ .pos = .right,  .seg = .clock      },
     };
     for (defaults) |d| {
-        var layout = defs.BarLayout{ .position = d.pos, .segments = std.ArrayList(defs.BarSegment){} };
+        var layout = core.BarLayout{ .position = d.pos, .segments = std.ArrayList(core.BarSegment){} };
         try layout.segments.append(allocator, d.seg);
         try cfg.bar.layout.append(allocator, layout);
     }
@@ -147,7 +147,7 @@ fn processIncludes(allocator: std.mem.Allocator, dst: *parser.Document, src_doc:
 /// Files are sorted alphabetically before merging so the result is
 /// deterministic.  Later files override earlier ones for conflicting scalar
 /// keys; array values (e.g. keybindings) accumulate across all files.
-pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !defs.Config {
+pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !core.Config {
     // Collect .toml filenames (not full paths — sort first, then resolve).
     var names: std.ArrayList([]u8) = .empty;
     defer {
@@ -224,7 +224,7 @@ pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !de
 ///   3. ~/.config/hana/config.toml  — single-file legacy path
 ///   4. ./config.toml               — single-file legacy path
 ///   5. Embedded fallback
-pub fn loadConfigDefault(allocator: std.mem.Allocator) !defs.Config {
+pub fn loadConfigDefault(allocator: std.mem.Allocator) !core.Config {
     const home            = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "./config";
     const xdg_config_home = std.c.getenv("XDG_CONFIG_HOME");
     const config_home     = if (xdg_config_home) |ch|
@@ -266,7 +266,7 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator) !defs.Config {
 }
 
 /// Reads, parses, and returns the config at `path` (single-file entry point).
-pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
+pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !core.Config {
     const raw = readFileAlloc(allocator, path) catch |err| return err;
     defer allocator.free(raw);
 
@@ -286,7 +286,7 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !defs.Config {
     return cfg;
 }
 
-fn loadFallbackConfig(allocator: std.mem.Allocator) !defs.Config {
+fn loadFallbackConfig(allocator: std.mem.Allocator) !core.Config {
     const fallback      = @import("fallback");
     const fallback_toml = try fallback.getFallbackToml();
 
@@ -316,8 +316,8 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !defs.Config {
     return cfg;
 }
 
-fn getDefaultConfig(allocator: std.mem.Allocator) defs.Config {
-    var cfg = defs.Config.init(allocator);
+fn getDefaultConfig(allocator: std.mem.Allocator) core.Config {
+    var cfg = core.Config.init(allocator);
 
     const default_layout = allocator.dupe(u8, "master_left") catch "master_left";
     cfg.tiling.layouts.append(allocator, default_layout) catch |e| debug.warnOnErr(e, "default layout append");
@@ -332,7 +332,7 @@ fn getDefaultConfig(allocator: std.mem.Allocator) defs.Config {
     return cfg;
 }
 
-fn parseConfigSections(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
+fn parseConfigSections(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *core.Config) !void {
     parseWorkspaces(doc, cfg);
     try parseKeybindings(allocator, doc, cfg);
     try parseTiling(allocator, doc, cfg);
@@ -341,7 +341,7 @@ fn parseConfigSections(allocator: std.mem.Allocator, doc: *const parser.Document
 }
 
 /// Builds a Config from a parsed Document: initialises defaults then applies all sections.
-fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *const parser.Document) !defs.Config {
+fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *const parser.Document) !core.Config {
     var cfg = getDefaultConfig(allocator);
     try parseConfigSections(allocator, doc, &cfg);
     return cfg;
@@ -376,7 +376,7 @@ inline fn mouseButtonFromName(name: []const u8) ?u8 {
     return MOUSE_BUTTON_MAP.get(std.ascii.lowerString(&buf, name));
 }
 
-const ACTION_MAP = std.StaticStringMap(defs.Action).initComptime(.{
+const ACTION_MAP = std.StaticStringMap(core.Action).initComptime(.{
     .{ "close",                  .close_window           },
     .{ "close_window",           .close_window           },
     .{ "kill",                   .close_window           },
@@ -487,8 +487,8 @@ const WORKSPACE_ACTION_BASES = std.StaticStringMap(void).initComptime(.{
     .{ "workspace", {} }, .{ "move_to_workspace", {} }, .{ "tag_toggle", {} },
 });
 
-/// Resolves workspace index and kill placeholder, then parses to a defs.Action.
-fn resolveAndParseAction(allocator: std.mem.Allocator, cmd: []const u8, ws_idx: u8, kill_placeholder: ?[]const u8) !defs.Action {
+/// Resolves workspace index and kill placeholder, then parses to a core.Action.
+fn resolveAndParseAction(allocator: std.mem.Allocator, cmd: []const u8, ws_idx: u8, kill_placeholder: ?[]const u8) !core.Action {
     const ws_str: ?[]u8 = if (ws_idx > 0 and WORKSPACE_ACTION_BASES.has(cmd))
         try std.fmt.allocPrint(allocator, "{s}_{d}", .{ cmd, ws_idx })
     else
@@ -508,7 +508,7 @@ fn resolveAndParseAction(allocator: std.mem.Allocator, cmd: []const u8, ws_idx: 
     return try parseAction(allocator, final);
 }
 
-fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
+fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *core.Config) !void {
     // Support both [binds] (current) and [Keybindings] (legacy).
     const section          = doc.getSection("binds") orelse doc.getSection("Keybindings") orelse return;
     const mod_placeholder  = section.getString("Mod");
@@ -538,9 +538,9 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, c
             defer if (keybind_str.ptr != ge.key.ptr) allocator.free(keybind_str);
 
             // Build the action from a string or array value, resolving ws_idx for workspace actions.
-            const action: defs.Action = act: {
+            const action: core.Action = act: {
                 if (entry.value_ptr.*.asArray()) |arr| {
-                    var acts: std.ArrayList(defs.Action) = .empty;
+                    var acts: std.ArrayList(core.Action) = .empty;
                     errdefer {
                         for (acts.items) |*a| a.deinit(allocator);
                         acts.deinit(allocator);
@@ -631,7 +631,7 @@ inline fn tryParseWorkspace(command: []const u8, prefix: []const u8) ?u8 {
     return @intCast(num - 1);
 }
 
-fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !defs.Action {
+fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !core.Action {
     if (ACTION_MAP.get(cmd))                         |a| return a;
     if (tryParseWorkspace(cmd, "workspace_"))         |ws| return .{ .switch_workspace  = ws };
     if (tryParseWorkspace(cmd, "move_to_workspace_")) |ws| return .{ .move_to_workspace = ws };
@@ -642,7 +642,7 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !defs.Action {
 // Public post-load helpers
 
 /// Scales font size and other DPI-dependent fields. Call once the screen is available.
-pub inline fn finalizeConfig(cfg: *defs.Config, screen: *defs.xcb.xcb_screen_t) void {
+pub inline fn finalizeConfig(cfg: *core.Config, screen: *core.xcb.xcb_screen_t) void {
     const dpi_module = @import("dpi");
     cfg.bar.scaled_font_size = dpi_module.scaleFontSize(cfg.bar.font_size, screen);
 }
@@ -667,15 +667,24 @@ pub fn resolveKeybindings(keybindings: anytype, xkb_state: *xkbcommon.XkbState, 
     }
 }
 
+/// Loads, resolves keybindings, and finalizes config in one call.
+/// This is the canonical entry point for startup and config reload.
+pub fn load(allocator: std.mem.Allocator, screen: *core.xcb.xcb_screen_t, xkb_state: *xkbcommon.XkbState) !core.Config {
+    var cfg = try loadConfigDefault(allocator);
+    resolveKeybindings(cfg.keybindings.items, xkb_state, allocator);
+    finalizeConfig(&cfg, screen);
+    return cfg;
+}
+
 // Section parsers
 
-fn parseWorkspaces(doc: *const parser.Document, cfg: *defs.Config) void {
+fn parseWorkspaces(doc: *const parser.Document, cfg: *core.Config) void {
     // Support both [bar.modules.workspaces] (current) and [workspaces] (legacy).
     const section = doc.getSection("bar.modules.workspaces") orelse doc.getSection("workspaces") orelse return;
     cfg.workspaces.count = get(u8, section, "count", 9, 1, null);
 }
 
-fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
+fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *core.Config) !void {
     const section = doc.getSection("tiling") orelse return;
     cfg.tiling.enabled = get(bool, section, "enabled", true, null, null);
 
@@ -705,7 +714,7 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
     const dedicated  = master_src != section; // true when [tiling.layouts.master-stack] exists
 
     cfg.tiling.master_count = get(u8, master_src, if (dedicated) "count" else "master_count", 1, 1, null);
-    if (master_src.getString(if (dedicated) "side"  else "master_side"))  |s| cfg.tiling.master_side  = defs.MasterSide.fromStringWithAlias(s) orelse .left;
+    if (master_src.getString(if (dedicated) "side"  else "master_side"))  |s| cfg.tiling.master_side  = core.MasterSide.fromStringWithAlias(s) orelse .left;
     cfg.tiling.master_width = master_src.getScalable(if (dedicated) "width" else "master_width") orelse parser.ScalableValue.percentage(50.0);
 
     parseTilingVariations(doc, cfg);
@@ -734,11 +743,11 @@ inline fn tryParseIndicator(section: *const parser.Section, field: *?[3]u8) void
 }
 
 /// Parses per-layout variation and indicator settings from [tiling.layouts.*] sections.
-fn parseTilingVariations(doc: *const parser.Document, cfg: *defs.Config) void {
+fn parseTilingVariations(doc: *const parser.Document, cfg: *core.Config) void {
     inline for (.{
-        .{ "tiling.layouts.master-stack", defs.MasterVariation,  "master-stack", "master_variation",  "master_indicator"  },
-        .{ "tiling.layouts.monocle",      defs.MonocleVariation, "monocle",      "monocle_variation", "monocle_indicator" },
-        .{ "tiling.layouts.grid",         defs.GridVariation,    "grid",         "grid_variation",    "grid_indicator"    },
+        .{ "tiling.layouts.master-stack", core.MasterVariation,  "master-stack", "master_variation",  "master_indicator"  },
+        .{ "tiling.layouts.monocle",      core.MonocleVariation, "monocle",      "monocle_variation", "monocle_indicator" },
+        .{ "tiling.layouts.grid",         core.GridVariation,    "grid",         "grid_variation",    "grid_indicator"    },
     }) |e| if (doc.getSection(e[0])) |ms| {
         tryParseVariation(e[1], ms, e[2], &@field(cfg.tiling, e[3]));
         tryParseIndicator(ms, &@field(cfg.tiling, e[4]));
@@ -796,15 +805,15 @@ inline fn canonicalLayout(name: []const u8, buf: []u8) []const u8 {
 
 /// Parses a variation string for the given layout name into a LayoutVariationOverride.
 /// Returns null and emits a warning when the string is not valid for that layout.
-fn parseLayoutVariation(layout_name: []const u8, variation_str: []const u8) ?defs.LayoutVariationOverride {
+fn parseLayoutVariation(layout_name: []const u8, variation_str: []const u8) ?core.LayoutVariationOverride {
     var buf: [32]u8 = undefined;
     if (layout_name.len > buf.len) return null;
     const lower_layout = std.ascii.lowerString(buf[0..layout_name.len], layout_name);
 
     const typed_layouts = .{
-        .{ "master-stack", defs.MasterVariation,  "master"   },
-        .{ "monocle",      defs.MonocleVariation, "monocle"  },
-        .{ "grid",         defs.GridVariation,    "grid"     },
+        .{ "master-stack", core.MasterVariation,  "master"   },
+        .{ "monocle",      core.MonocleVariation, "monocle"  },
+        .{ "grid",         core.GridVariation,    "grid"     },
     };
     inline for (typed_layouts) |entry| {
         if (std.mem.eql(u8, lower_layout, entry[0])) {
@@ -812,7 +821,7 @@ fn parseLayoutVariation(layout_name: []const u8, variation_str: []const u8) ?def
                 debug.warn("Unknown {s} variation '{s}' in layouts array, ignoring", .{ entry[0], variation_str });
                 return null;
             };
-            return @unionInit(defs.LayoutVariationOverride, entry[2], v);
+            return @unionInit(core.LayoutVariationOverride, entry[2], v);
         }
     }
     if (std.mem.eql(u8, lower_layout, "fibonacci")) {
@@ -839,7 +848,7 @@ fn parseLayoutVariation(layout_name: []const u8, variation_str: []const u8) ?def
 fn parseLayoutsArray(
     allocator: std.mem.Allocator,
     arr:       []const parser.Value,
-    cfg:       *defs.Config,
+    cfg:       *core.Config,
 ) !void {
     var i: usize = 0;
     while (i < arr.len) : (i += 1) {
@@ -859,7 +868,7 @@ fn parseLayoutsArray(
         try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, canonical));
 
         // Look ahead for optional variation and/or workspace-list elements.
-        var variation: ?defs.LayoutVariationOverride = null;
+        var variation: ?core.LayoutVariationOverride = null;
         var ws_list_str: ?[]const u8 = null;
 
         if (i + 1 < arr.len) {
@@ -941,12 +950,12 @@ fn parseTransparency(value: parser.Value) f32 {
     return 1.0;
 }
 
-fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
+fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *core.Config) !void {
     const section = doc.getSection("bar") orelse return;
     cfg.bar.enabled = get(bool, section, "enabled", true, null, null);
 
     if (section.getString("position")) |pos_str|
-        cfg.bar.vertical_position = defs.BarVerticalPosition.fromString(pos_str) orelse .top;
+        cfg.bar.vertical_position = core.BarVerticalPosition.fromString(pos_str) orelse .top;
 
     // height accepts a raw pixel value or a percentage of screen height.
     // Null = auto-calculate from font metrics. Resolution happens at bar-init time.
@@ -979,7 +988,7 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     cfg.bar.workspace_tag_width = section.getScalable("workspace_tag_width") orelse parser.ScalableValue.percentage(100.0);
 
     if (section.getString("indicator_location")) |loc_str| {
-        cfg.bar.indicator_location = defs.IndicatorLocation.fromString(loc_str) orelse blk: {
+        cfg.bar.indicator_location = core.IndicatorLocation.fromString(loc_str) orelse blk: {
             debug.warn("Unknown indicator_location '{s}', using default 'up-left'", .{loc_str});
             break :blk .up_left;
         };
@@ -1040,7 +1049,7 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *def
     }
 }
 
-fn parseWorkspaceIcons(allocator: std.mem.Allocator, section: *const parser.Section, cfg: *defs.Config) !void {
+fn parseWorkspaceIcons(allocator: std.mem.Allocator, section: *const parser.Section, cfg: *core.Config) !void {
     for (cfg.bar.workspace_icons.items) |icon| allocator.free(icon);
     cfg.bar.workspace_icons.clearRetainingCapacity();
 
@@ -1065,11 +1074,11 @@ fn parseWorkspaceIcons(allocator: std.mem.Allocator, section: *const parser.Sect
     }
 }
 
-fn parseBarLayout(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
+fn parseBarLayout(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *core.Config) !void {
     for (cfg.bar.layout.items) |*item| item.deinit(allocator);
     cfg.bar.layout.clearRetainingCapacity();
 
-    const positions = [_]struct { name: []const u8, pos: defs.BarPosition }{
+    const positions = [_]struct { name: []const u8, pos: core.BarPosition }{
         .{ .name = "bar.layout.left",   .pos = .left   },
         .{ .name = "bar.layout.center", .pos = .center },
         .{ .name = "bar.layout.right",  .pos = .right  },
@@ -1077,11 +1086,11 @@ fn parseBarLayout(allocator: std.mem.Allocator, doc: *const parser.Document, cfg
 
     for (positions) |p| {
         const layout_section = doc.getSection(p.name) orelse continue;
-        var bar_layout = defs.BarLayout{ .position = p.pos, .segments = std.ArrayList(defs.BarSegment){} };
+        var bar_layout = core.BarLayout{ .position = p.pos, .segments = std.ArrayList(core.BarSegment){} };
 
         if (layout_section.get("segments")) |sv| if (sv.asArray()) |seg_arr|
             for (seg_arr) |item| if (item.asString()) |s|
-                if (defs.BarSegment.fromString(s)) |segment|
+                if (core.BarSegment.fromString(s)) |segment|
                     try bar_layout.segments.append(allocator, segment);
 
         if (bar_layout.segments.items.len > 0) {
@@ -1094,7 +1103,7 @@ fn parseBarLayout(allocator: std.mem.Allocator, doc: *const parser.Document, cfg
     if (cfg.bar.layout.items.len == 0) try initDefaultBarLayout(allocator, cfg);
 }
 
-fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *defs.Config) !void {
+fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *core.Config) !void {
     if (doc.getSection("workspace.rules")) |rules_section| {
         var iter = rules_section.pairs.iterator();
         while (iter.next()) |entry| {

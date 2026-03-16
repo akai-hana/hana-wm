@@ -3,8 +3,8 @@
 const std = @import("std");
 const utils = @import("utils");
 const debug = @import("debug");
-const defs = @import("defs");
-const xcb = defs.xcb;
+const core = @import("core");
+const xcb = core.xcb;
 
 // WM_NORMAL_HINTS size hint cache
 //

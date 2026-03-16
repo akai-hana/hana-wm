@@ -2,15 +2,15 @@
 //! multiple windows.
 //!
 //! draw() receives pre-computed snapshot data (conn, focused_window, workspace
-//! windows, minimized set) instead of a *defs.WM pointer, making it safe to
+//! windows, minimized set) instead of a *core.WM pointer, making it safe to
 //! call from the bar rendering thread.
 //!
 //! Carousel logic lives in carousel.zig.
 //! Monitor refresh-rate detection lives in hertz.zig.
 
 const std      = @import("std");
-const defs     = @import("defs");
-const xcb      = defs.xcb;
+const core     = @import("core");
+const xcb      = core.xcb;
 const drawing  = @import("drawing");
 const utils    = @import("utils");
 const carousel = @import("carousel");
@@ -54,7 +54,7 @@ const TITLE_LEAD_PX: u16 = 4;
 
 /// Draw the title segment.
 ///
-/// Parameters replacing the old `wm: *defs.WM`:
+/// Parameters replacing the old `wm: *core.WM`:
 ///   `conn`              — XCB connection (thread-safe for I/O).
 ///   `focused_window`    — currently focused window ID, or null.
 ///   `focused_title`     — pre-fetched on the main thread in captureIntoSlot;
@@ -65,7 +65,7 @@ const TITLE_LEAD_PX: u16 = 4;
 ///                         re-fetched.
 pub fn draw(
     dc:                   *drawing.DrawContext,
-    config:               defs.BarConfig,
+    config:               core.BarConfig,
     height:               u16,
     start_x:              u16,
     width:                u16,
@@ -150,7 +150,7 @@ pub fn draw(
 
 fn drawSegmentedTitles(
     dc:                *drawing.DrawContext,
-    config:            defs.BarConfig,
+    config:            core.BarConfig,
     height:            u16,
     start_x:           u16,
     width:             u16,

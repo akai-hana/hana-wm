@@ -9,8 +9,8 @@ const std = @import("std");
 const constants = @import("constants");
 
 // config/
-const defs    = @import("defs");
-    const xcb = defs.xcb;
+const core = @import("core");
+    const xcb = core.xcb;
 
 // debug/
 const debug = @import("debug");
@@ -100,7 +100,7 @@ pub inline fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect)
 
 /// Five-field variant that also sets border_width atomically with geometry,
 /// preventing a one-frame flash on fullscreen enter/exit and workspace switch. //TODO: see previous TODO, also applies here.
-pub inline fn configureWindowGeom(conn: *xcb.xcb_connection_t, win: u32, geom: defs.WindowGeometry) void {
+pub inline fn configureWindowGeom(conn: *xcb.xcb_connection_t, win: u32, geom: core.WindowGeometry) void {
     _ = xcb.xcb_configure_window(
         conn, win,
         xcb.XCB_CONFIG_WINDOW_X     | xcb.XCB_CONFIG_WINDOW_Y     |
@@ -132,10 +132,10 @@ pub inline fn normalizeModifiers(state: u16) u16 {
 
 /// Returns the default floating window position
 /// (one quarter of the screen in from the top-left).
-pub inline fn floatDefaultPos(wm: *const defs.WM) struct { x: u32, y: u32 } {
+pub inline fn floatDefaultPos() struct { x: u32, y: u32 } {
     return .{
-        .x = @intCast(wm.screen.width_in_pixels  / 4),
-        .y = @intCast(wm.screen.height_in_pixels / 4),
+        .x = @intCast(core.screen.width_in_pixels  / 4),
+        .y = @intCast(core.screen.height_in_pixels / 4),
     };
 }
 

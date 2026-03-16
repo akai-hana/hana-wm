@@ -1,27 +1,23 @@
 //! hana's entry point and main loop.
 //!
-//! Handles the X server connection and all of hana's modules
+//! Global WM state (conn, screen, root, allocator, config, dpi_info) lives in
+//! core.zig and is initialized here at startup. Modules import core directly.
 
 // Zig stdlib
 const std     = @import("std");
 const builtin = @import("builtin");
 
 // core/
-const utils     = @import("utils");
-const constants = @import("constants");
-const events    = @import("events");
-const dpi       = @import("dpi");
-
-// config/
+const core    = @import("core");
+const utils   = @import("utils");
+const events  = @import("events");
+const dpi     = @import("dpi");
 const config  = @import("config");
-const defs    = @import("defs");
-    const WM  = defs.WM;
-    const xcb = defs.xcb;
+const xcb     = core.xcb;
 
 // input/
-const input     = @import("input");
-const xkbcommon = @import("xkbcommon");
-const focus     = @import("focus");
+const input = @import("input");
+const focus = @import("focus");
 
 // tiling/
 const layouts = @import("layouts");
@@ -34,191 +30,109 @@ const debug = @import("debug");
 
 /// hana's startup sequence and event-loop entry point.
 pub fn main() !void {
-    // Initial X server connection
-    const conn = xcb.xcb_connect(
-        null, // display number (N:);   Pass null so XCB reads $DISPLAY and figures out the display itself
-        null  // monitor number (N.M:); Short answer: Old legacy X parameter, just pass null
-              //
-              // Long answer: In old X11, a single X server could manage multiple physical monitors,
-              // but each one was a completely separate screen (e.g. :0.1 -> "display 0, second monitor").
-              // In modern multi-monitor setups (Xrandr, Xinerama), all monitors are exposed in X as
-              // one big unified screen, so this parameter is now mostly irrelevant.
-    ).?;
-    defer xcb.xcb_disconnect(conn);
+    const x = try connectToX();
+    defer xcb.xcb_disconnect(x.conn);
 
-    if (xcb.xcb_connection_has_error(conn) != 0) {
-        debug.err("X11 connection failed with following errors:", .{});
+    core.conn     = x.conn;
+    core.screen   = x.screen;
+    core.root     = x.root;
+    core.alloc    = std.heap.c_allocator;
+    core.dpi_info = dpi.detect(x.conn, x.screen);
+
+    input.setup(x.conn, x.screen, x.root);
+    try input.initXkb(x.conn, core.alloc);
+    defer input.deinitXkb();
+
+    core.config = try config.load(core.alloc, x.screen, input.getXkbState());
+    defer core.config.deinit();
+
+    try initGlobalCaches(x.conn, core.alloc);
+    // Defers run in LIFO order: core.config.deinit() must run before deinitGlobalCaches().
+    defer deinitGlobalCaches(core.alloc);
+
+    try events.setupSignalPipe();
+    defer events.deinitSignalPipe();
+
+    try events.grabKeybindings();
+    try events.initModules();
+    defer events.deinitModules();
+
+    initBar();
+    defer bar.deinit();
+
+    bar.updateTimerState();
+    _ = xcb.xcb_flush(core.conn);
+    debug.info("hana booted up successfully!", .{});
+
+    try events.run();
+    debug.info("Shutting down gracefully...", .{});
+}
+
+/// X server connection context returned by connectToX.
+const X = struct {
+    conn:   *xcb.xcb_connection_t,
+    screen: *xcb.xcb_screen_t,
+    root:   core.WindowId,
+};
+
+/// Opens an X server connection, fetches screen 0, and registers hana as the WM.
+/// Fails if the display is unavailable, the screen cannot be retrieved,
+/// or another WM is already running.
+fn connectToX() !X {
+    // Pass null for both display and screen number: XCB reads $DISPLAY and
+    // selects screen 0. The screen number parameter is a legacy X11 concept —
+    // modern multi-monitor setups use a single unified screen via Xrandr/Xinerama.
+    const conn_ = xcb.xcb_connect(null, null).?;
+
+    if (xcb.xcb_connection_has_error(conn_) != 0) {
+        debug.err("X11 connection failed", .{});
         return error.X11ConnectionFailed;
     }
 
-    const setup  = xcb.xcb_get_setup(conn);                 // Fetch screen info
-    const screen = xcb.xcb_setup_roots_iterator(setup).data // .data is screen 0
+    const screen_ = xcb.xcb_setup_roots_iterator(xcb.xcb_get_setup(conn_)).data
         orelse return error.X11ScreenFailed;
-    const root   = screen.*.root;
 
-    // Register hana as the window manager.
-    const wm_reg_cookie = xcb.xcb_change_window_attributes_checked(
-        conn, root, xcb.XCB_CW_EVENT_MASK,
-        &[_]u32{constants.EventMasks.ROOT_WINDOW},
+    // Claim SubstructureRedirectMask on the root window to become the WM.
+    // The X server rejects this if another WM already holds it.
+    const cookie = xcb.xcb_change_window_attributes_checked(
+        conn_, screen_.*.root, xcb.XCB_CW_EVENT_MASK,
+        &[_]u32{@import("constants").EventMasks.ROOT_WINDOW},
     );
-
-    // Fail if another WM is already running.
-    if (xcb.xcb_request_check(conn, wm_reg_cookie)) |err| {
-        debug.err("Error. A window manager is already running: {}", .{err});
+    if (xcb.xcb_request_check(conn_, cookie)) |err| {
+        debug.err("Another window manager is already running: {}", .{err});
         std.c.free(err);
         return error.AnotherWMRunning;
     }
 
-    // Initialize user input grabbing and custom cursor
-    input.setupGrabs(conn, root);
-    XcbCursor.setupRoot(conn, screen);
+    return .{ .conn = conn_, .screen = screen_, .root = screen_.*.root };
+}
 
-    // Initialize memory resources
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator =
-        if (builtin.mode == .Debug) gpa.allocator() // In a debug build, pick GPA allocator to track every memory allocation
-        else std.heap.c_allocator;                  // In release builds, the C allocator is faster and has less overhead
-
-    // Detect display's DPI
-    const dpi_info = dpi.detect(conn, screen);
-    debug.info("DPI Detection - DPI: {d:.1}, Scale: {d:.2}x",
-             .{ dpi_info.dpi, dpi_info.scale_factor });
-
-    // Heap-allocate XKB's state, so it can be accessed globally with a stable address.
-    // XKB state is needed anywhere keyboard input is handled, so rather than passing it down
-    // through every function call, hana's modules can just hold onto a pointer to it directly.
-    const xkb_state = try allocator.create(xkbcommon.XkbState);
-    defer allocator.destroy(xkb_state);
-
-    // Load XKB's state: context, keymap, and key state, from the server's current keyboard config.
-    xkb_state.* = try xkbcommon.XkbState.init(conn, allocator);
-    defer xkb_state.deinit();
-
-    // Load user config
-    var user_config = try config.loadConfigDefault(allocator);
-
-    // Translate user configured binds into server keycodes, using the active XKB keymap.
-    config.resolveKeybindings(user_config.keybindings.items, xkb_state, allocator);
-    config.finalizeConfig(&user_config, screen);
-
-    // hana's central states container
-    var wm = WM {
-        .allocator  = allocator,
-        .conn       = conn,
-        .screen     = screen,
-        .root       = root,
-        .config     = user_config,
-        .dpi_info   = dpi_info,
-    };
-
-    // Initialize global caches
-    try initGlobalCaches(conn, allocator);
-    // Defers run in LIFO order: wm.deinit() must execute before deinitGlobalCaches(),
-    // since wm cleanup may still reference focus state, layout hints, etc.
-    defer deinitGlobalCaches(allocator);
-    defer wm.deinit();
-
-    // Setup Unix signals (for graceful shutdown)
-    const signal_fd = try events.setupSignalPipe();
-    defer {
-        std.posix.close(signal_fd);
-        events.deinitSignalPipe();
-    }
-
-    // Register keybinds with the server.
-    try events.grabKeybindings(&wm);
-
-    // Initialize event-handling modules (layout, focus, hotkey dispatch...)
-    try events.initModules(&wm, xkb_state);
-    defer events.deinitModules();
-
-    // Initialize bar (if it isn't disabled or removed)
-    //
-    // if/else used instead of switch because bar.init's error set is inferred/anyerror,
-    // so BarDisabled and BarNotFound are not statically declared members and can't be switch arms.
-    bar.init(&wm) catch |err| {
+/// Initializes the bar, logging the outcome if it is disabled or not found.
+///
+/// if/else used instead of switch because bar.init's error set is inferred/anyerror,
+/// so BarDisabled and BarNotFound are not statically declared members and can't be switch arms.
+fn initBar() void {
+    bar.init() catch |err| {
         if (err == error.BarDisabled) {
             debug.info("Bar disabled on user config.", .{});
         } else if (err == error.BarNotFound) {
             debug.info("Bar not found; either purposefully removed by user, or changed bar.zig's name/path from defaults (src/bar/bar.zig).", .{});
         } else {
-            debug.err("Bar init failed with following error: {}", .{err});
+            debug.err("Bar init failed: {}", .{err});
         }
     };
-    defer bar.deinit();
-
-    // Seed the bar's timer before the loop starts
-    bar.updateTimerState();
-
-    // XCB batches requests; flush now so every setup call above reaches the server
-    // before hana blocks in the event loop waiting for replies/events
-    _ = xcb.xcb_flush(conn);
-    debug.info("hana booted up successfully!", .{});
-
-    // Block calls until user exits hana
-    try events.run(&wm, signal_fd);
-
-    debug.info("Shutting down gracefully...", .{});
 }
 
 /// Initializes global utility caches.
-fn initGlobalCaches(conn: *xcb.xcb_connection_t, allocator: std.mem.Allocator) !void {
-    try utils.initAtomCache(conn);        // Intern frequently used X atoms
-    utils.initInputModelCache(allocator); // Build keysym to keycode lookup tables
-    focus.init(allocator);
+fn initGlobalCaches(conn_: *xcb.xcb_connection_t, alloc: std.mem.Allocator) !void {
+    try utils.initAtomCache(conn_);    // Intern frequently used X atoms
+    utils.initInputModelCache(alloc);  // Build keysym to keycode lookup tables
+    focus.init(alloc);
 }
 
 /// Cleans up global utility caches.
-fn deinitGlobalCaches(allocator: std.mem.Allocator) void {
+fn deinitGlobalCaches(alloc: std.mem.Allocator) void {
     utils.deinitInputModelCache();
-    layouts.deinitSizeHintsCache(allocator); // Also frees cached ICCCM size hints
+    layouts.deinitSizeHintsCache(alloc); // Also frees cached ICCCM size hints
     focus.deinit();
 }
-
-/// xcb-cursor extern declarations and helpers.
-///
-/// Declared manually instead of using cImport because cImport cannot bind
-/// static inline functions, and xcb_cursor_load_cursor is defined that way.
-const XcbCursor = struct {
-    const Context = opaque {};
-
-    extern fn xcb_cursor_context_new(
-        conn:   *xcb.xcb_connection_t,
-        screen: *xcb.xcb_screen_t,
-        ctx:    *?*Context,
-    ) c_int;
-
-    extern fn xcb_cursor_load_cursor(ctx: *Context, name: [*:0]const u8) u32;
-    extern fn xcb_cursor_context_free(ctx: ?*Context) void;
-
-    /// Makes the user theme's cursor be used by the root window (hovering hana's background wallpaper),
-    /// respecting the user's custom cursor instead of just displaying the default X server's cursor.
-    ///
-    /// Falls back to no change if xcb-cursor fails to load it.
-    fn setupRoot(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) void {
-        var cursor_ctx: ?*Context = null;
-
-        if (xcb_cursor_context_new(conn, screen, &cursor_ctx) < 0)
-            return;
-        defer xcb_cursor_context_free(cursor_ctx);
-
-        const cursor  = xcb_cursor_load_cursor(cursor_ctx.?, "left_ptr"); // Set custom cursor
-        if (cursor == xcb.XCB_NONE) return;                               // Fallback; no settable cursor detected
-
-        // Apply the loaded cursor to the root window.
-        const cookie = xcb.xcb_change_window_attributes_checked(
-            conn, screen.*.root, xcb.XCB_CW_CURSOR, &[_]u32{cursor},
-        );
-
-        if (xcb.xcb_request_check(conn, cookie)) |err| {
-            debug.err("Failed to set custom cursor onto hana's root window: {}", .{err});
-            std.c.free(err);
-        }
-
-        // Release our client-side handle. The server uses reference counting — it keeps
-        // the cursor alive as long as any window still has it set, so this is safe to
-        // call immediately after applying it to the root window.
-        _ = xcb.xcb_free_cursor(conn, cursor);
-    }
-};

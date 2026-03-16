@@ -1,11 +1,11 @@
 //! C bindings for Cairo, Pango, GLib, and xcb-cursor.
-//! XCB types come from defs.zig via @cImport.
+//! XCB types come from core.zig via @cImport.
 
-const defs = @import("defs");
+const core = @import("core");
 
-const xcb_connection_t = defs.xcb.xcb_connection_t;
-const xcb_drawable_t   = defs.xcb.xcb_drawable_t;
-const xcb_visualtype_t = defs.xcb.xcb_visualtype_t;
+const xcb_connection_t = core.xcb.xcb_connection_t;
+const xcb_drawable_t   = core.xcb.xcb_drawable_t;
+const xcb_visualtype_t = core.xcb.xcb_visualtype_t;
 
 // Cairo 
 

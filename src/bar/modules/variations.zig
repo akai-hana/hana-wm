@@ -3,7 +3,7 @@
 //! Displays the 3-character variation indicator for the active tiling layout.
 //! Can be placed independently from the layout icon in the bar layout config.
 
-const defs    = @import("defs");
+const core    = @import("core");
 const drawing = @import("drawing");
 const tiling  = @import("tiling");
 
@@ -25,7 +25,7 @@ pub fn getIndicator(s: *const tiling.State) []const u8 {
     };
 }
 
-pub fn draw(dc: *drawing.DrawContext, config: defs.BarConfig, height: u16, start_x: u16) !u16 {
+pub fn draw(dc: *drawing.DrawContext, config: core.BarConfig, height: u16, start_x: u16) !u16 {
     const t_state = tiling.getStateOpt() orelse return start_x;
     const indicator = getIndicator(t_state);
     return dc.drawSegment(start_x, height, indicator, config.scaledSegmentPadding(height), config.bg, config.fg);
