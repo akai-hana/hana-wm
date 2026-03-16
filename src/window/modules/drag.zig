@@ -2,9 +2,8 @@
 
 const std       = @import("std");
 const constants = @import("constants");
-const defs      = @import("defs");
-const xcb       = defs.xcb;
-const WM        = defs.WM;
+const core = @import("core");
+const xcb       = core.xcb;
 const utils     = @import("utils");
 const focus     = @import("focus");
 const tiling    = @import("tiling");
@@ -22,7 +21,7 @@ inline fn clampDim(base: u16, delta: i16) u16 {
 
 // Module-level drag state. Lives here instead of WM so drag.zig is the
 // single owner — consistent with the module-g_state pattern used elsewhere.
-var g_drag: defs.DragState = .{};
+var g_drag: core.DragState = .{};
 
 // Deferred float flag: true when the dragged window was tiled at press time
 // and has not yet been removed from the tiling pool.  The removal is deferred
@@ -30,12 +29,12 @@ var g_drag: defs.DragState = .{};
 // the cursor does not accidentally float the window.
 var g_pending_float: bool = false;
 
-pub fn startDrag(wm: *WM, win: u32, button: u8, x: i16, y: i16) void {
+pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     if (g_drag.active) return;
     if (bar.isBarWindow(win)) return;
     // Prefer the tiling cache; fall back to a live round-trip for floating windows.
     const geom = tiling.getWindowGeom(win) orelse
-        utils.getGeometry(wm.conn, win) orelse return;
+        utils.getGeometry(core.conn, win) orelse return;
     g_drag = .{
         .active           = true,
         .window           = win,
@@ -47,13 +46,13 @@ pub fn startDrag(wm: *WM, win: u32, button: u8, x: i16, y: i16) void {
         .start_win_width  = geom.width,
         .start_win_height = geom.height,
     };
-    focus.setFocus(wm, win, .user_command);
+    focus.setFocus(win, .user_command);
     // Float conversion is deferred to the first motion event.
     // Record whether the window needs it so updateDrag can act on first move.
     g_pending_float = tiling.isWindowTiled(win);
 }
 
-pub fn updateDrag(wm: *WM, x: i16, y: i16) void {
+pub fn updateDrag(x: i16, y: i16) void {
     if (!g_drag.active) return;
     const drag = &g_drag;
 
@@ -62,11 +61,11 @@ pub fn updateDrag(wm: *WM, x: i16, y: i16) void {
     // leaves the window tiled, as if the click never happened.
     if (g_pending_float) {
         g_pending_float = false;
-        _ = xcb.xcb_grab_server(wm.conn);
+        _ = xcb.xcb_grab_server(core.conn);
         tiling.removeWindow(drag.window);
-        tiling.retileCurrentWorkspace(wm);
-        _ = xcb.xcb_ungrab_server(wm.conn);
-        _ = xcb.xcb_flush(wm.conn);
+        tiling.retileCurrentWorkspace();
+        _ = xcb.xcb_ungrab_server(core.conn);
+        _ = xcb.xcb_flush(core.conn);
     }
 
     const dx = x - drag.start_x;
@@ -87,8 +86,8 @@ pub fn updateDrag(wm: *WM, x: i16, y: i16) void {
             .height = clampDim(drag.start_win_height, dy),
         },
     };
-    utils.configureWindow(wm.conn, drag.window, rect);
-    _ = xcb.xcb_flush(wm.conn);
+    utils.configureWindow(core.conn, drag.window, rect);
+    _ = xcb.xcb_flush(core.conn);
 }
 
 pub fn stopDrag() void {

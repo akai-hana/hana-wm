@@ -7,12 +7,12 @@
 //! Integration is complete: bar.zig dispatches the .title segment to drun.draw()
 //! when isActive() is true and guards drawTitleOnly() accordingly; the main event
 //! loop routes key-press events through handleKeyPress() before normal keybind
-//! dispatch; a "prompt_toggle" action calls toggle(wm); and bar.init/deinit call
+//! dispatch; a "prompt_toggle" action calls toggle(); and bar.init/deinit call
 //! drun.init/deinit.
 
 const std     = @import("std");
-const defs    = @import("defs");
-const xcb     = defs.xcb;
+const core = @import("core");
+const xcb     = core.xcb;
 const drawing = @import("drawing");
 const title   = @import("title");
 const debug   = @import("debug");
@@ -123,11 +123,11 @@ pub fn deinit() void {
     g = .{};
 }
 
-pub fn toggle(wm: *defs.WM) void {
-    if (g.active) deactivate(wm) else activate(wm);
+pub fn toggle() void {
+    if (g.active) deactivate() else activate();
 }
 
-pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *defs.WM) bool {
+pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     if (!g.active) return false;
 
     const syms = g.key_syms orelse return false;
@@ -140,7 +140,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *defs.WM) boo
     // Ctrl-modified keys 
     if (ctrl_held) {
         const action = vim.handleCtrl(&g.vim, sym);
-        handleAction(action, wm);
+        handleAction(action);
         return true;
     }
 
@@ -164,7 +164,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *defs.WM) boo
         .visual  => vim.handleVisual(&g.vim, sym),
         .replace => vim.handleReplace(&g.vim, sym),
     };
-    handleAction(action, wm);
+    handleAction(action);
     updateGhost();
     g.blink_visible = true;
     return true;
@@ -172,7 +172,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t, wm: *defs.WM) boo
 
 pub fn draw(
     dc:                  *drawing.DrawContext,
-    config:              defs.BarConfig,
+    config:              core.BarConfig,
     height:              u16,
     start_x:             u16,
     width:               u16,
@@ -198,14 +198,14 @@ pub fn draw(
 
 // Action handling 
 
-fn handleAction(action: vim.Action, wm: *defs.WM) void {
+fn handleAction(action: vim.Action) void {
     switch (action) {
         .none       => {},
-        .deactivate => deactivate(wm),
+        .deactivate => deactivate(),
         .spawn      => {
             const cmd = g.vim.buf[0..g.vim.len];
             if (cmd.len > 0) spawnCommand(cmd);
-            deactivate(wm);
+            deactivate();
         },
     }
 }
@@ -239,7 +239,7 @@ fn resetVimState(vs: *vim.VimState) void {
     };
 }
 
-fn activate(wm: *defs.WM) void {
+fn activate() void {
     resetVimState(&g.vim);  // reset all editing state, preserve heap allocations
     g.ghost_len        = 0;
     // Load completions and history on first activation.
@@ -249,20 +249,20 @@ fn activate(wm: *defs.WM) void {
     g.blink_visible = true;
 
     const cookie = xcb.xcb_grab_keyboard(
-        wm.conn, 0, wm.root, xcb.XCB_CURRENT_TIME,
+        core.conn, 0, core.root, xcb.XCB_CURRENT_TIME,
         xcb.XCB_GRAB_MODE_ASYNC, xcb.XCB_GRAB_MODE_ASYNC,
     );
-    xcb.xcb_discard_reply(wm.conn, cookie.sequence);
-    _ = xcb.xcb_flush(wm.conn);
+    xcb.xcb_discard_reply(core.conn, cookie.sequence);
+    _ = xcb.xcb_flush(core.conn);
 }
 
-fn deactivate(wm: *defs.WM) void {
+fn deactivate() void {
     g.active               = false;
     g.vim.in_dot_replay    = false;
     g.vim.recording_insert = false;
     vim.resetNormalSub(&g.vim);
-    _ = xcb.xcb_ungrab_keyboard(wm.conn, xcb.XCB_CURRENT_TIME);
-    _ = xcb.xcb_flush(wm.conn);
+    _ = xcb.xcb_ungrab_keyboard(core.conn, xcb.XCB_CURRENT_TIME);
+    _ = xcb.xcb_flush(core.conn);
 }
 
 // PATH completion 
@@ -666,7 +666,7 @@ inline fn drawSpan(
 /// The scrollable region keeps the cursor in view.
 fn drawActive(
     dc:      *drawing.DrawContext,
-    config:  defs.BarConfig,
+    config:  core.BarConfig,
     height:  u16,
     start_x: u16,
     width:   u16,

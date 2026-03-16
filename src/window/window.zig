@@ -2,9 +2,8 @@
 //! and per-window property caching.
 
 const std        = @import("std");
-const defs       = @import("defs");
-const xcb        = defs.xcb;
-const WM         = defs.WM;
+const core = @import("core");
+const xcb        = core.xcb;
 const utils      = @import("utils");
 const constants  = @import("constants");
 const focus      = @import("focus");
@@ -79,25 +78,25 @@ fn populateAtomCache() void {
 
 // Window predicates
 
-pub inline fn isValidManagedWindow(wm: *WM, win: u32) bool {
+pub inline fn isValidManagedWindow(win: u32) bool {
     return win != 0 and
-           win != wm.root and
+           win != core.root and
            !bar.isBarWindow(win) and
            workspaces.getWorkspaceForWindow(win) != null;
 }
 
-pub inline fn isOnCurrentWorkspace(wm: *WM, win: u32) bool {
-    return isValidManagedWindow(wm, win) and
+pub inline fn isOnCurrentWorkspace(win: u32) bool {
+    return isValidManagedWindow(win) and
            workspaces.isOnCurrentWorkspace(win);
 }
 
 // Button grab management
 
-pub fn grabButtons(wm: *WM, win: u32, focused: bool) void {
-    _ = xcb.xcb_ungrab_button(wm.conn, xcb.XCB_BUTTON_INDEX_ANY, win, xcb.XCB_MOD_MASK_ANY);
+pub fn grabButtons(win: u32, focused: bool) void {
+    _ = xcb.xcb_ungrab_button(core.conn, xcb.XCB_BUTTON_INDEX_ANY, win, xcb.XCB_MOD_MASK_ANY);
     if (!focused) {
         _ = xcb.xcb_grab_button(
-            wm.conn, 0, win, xcb.XCB_EVENT_MASK_BUTTON_PRESS,
+            core.conn, 0, win, xcb.XCB_EVENT_MASK_BUTTON_PRESS,
             xcb.XCB_GRAB_MODE_SYNC, xcb.XCB_GRAB_MODE_SYNC,
             xcb.XCB_NONE, xcb.XCB_NONE, xcb.XCB_BUTTON_INDEX_ANY, xcb.XCB_MOD_MASK_ANY,
         );
@@ -114,8 +113,8 @@ inline fn clampToValidWorkspace(target: u8, fallback: u8) u8 {
 
 /// Resolves a pre-fired WM_CLASS property cookie against workspace rules.
 /// Parses instance/class directly from the reply buffer — no allocation.
-fn findWorkspaceRuleByClass(wm: *WM, cookie: xcb.xcb_get_property_cookie_t) ?u8 {
-    const reply = xcb.xcb_get_property_reply(wm.conn, cookie, null) orelse return null;
+fn findWorkspaceRuleByClass(cookie: xcb.xcb_get_property_cookie_t) ?u8 {
+    const reply = xcb.xcb_get_property_reply(core.conn, cookie, null) orelse return null;
     defer std.c.free(reply);
     if (reply.*.format != 8 or reply.*.value_len == 0) return null;
 
@@ -129,7 +128,7 @@ fn findWorkspaceRuleByClass(wm: *WM, cookie: xcb.xcb_get_property_cookie_t) ?u8 
     const instance = data[0..sep];
     const class    = data[class_start..];
 
-    for (wm.config.workspaces.rules.items) |rule| {
+    for (core.config.workspaces.rules.items) |rule| {
         if (std.mem.eql(u8, rule.class_name, class) or
             std.mem.eql(u8, rule.class_name, instance))
         {
@@ -145,14 +144,14 @@ fn findWorkspaceRuleByClass(wm: *WM, cookie: xcb.xcb_get_property_cookie_t) ?u8 
 /// Returns the matching workspace index, or null if no rule applies.
 /// Guards on g_atoms.wm_class: if atom internment failed the cookie would
 /// carry atom 0, triggering a pointless server round-trip on every MapRequest.
-fn findClassRuleWorkspace(wm: *WM, win: u32) ?u8 {
-    if (wm.config.workspaces.rules.items.len == 0 or g_atoms.wm_class == 0) return null;
+fn findClassRuleWorkspace(win: u32) ?u8 {
+    if (core.config.workspaces.rules.items.len == 0 or g_atoms.wm_class == 0) return null;
     const cookie = xcb.xcb_get_property(
-        wm.conn, 0, win,
+        core.conn, 0, win,
         g_atoms.wm_class,
         xcb.XCB_ATOM_STRING, 0, 256,
     );
-    return findWorkspaceRuleByClass(wm, cookie);
+    return findWorkspaceRuleByClass(cookie);
 }
 
 /// Phase 2 of workspace resolution: matches the window against the spawn queue.
@@ -160,11 +159,11 @@ fn findClassRuleWorkspace(wm: *WM, win: u32) ?u8 {
 /// the oldest pending entry — the correct heuristic when an app re-execs or
 /// forks internally and its window PID differs from the registered grandchild.
 /// Returns null when the spawn queue was empty (c_net_wm_pid == null).
-fn findSpawnQueueWorkspace(wm: *WM, c_net_wm_pid: ?xcb.xcb_get_property_cookie_t) ?u8 {
+fn findSpawnQueueWorkspace(c_net_wm_pid: ?xcb.xcb_get_property_cookie_t) ?u8 {
     const pid_cookie = c_net_wm_pid orelse return null;
 
     const win_pid: u32 = pid: {
-        const pid_reply = xcb.xcb_get_property_reply(wm.conn, pid_cookie, null)
+        const pid_reply = xcb.xcb_get_property_reply(core.conn, pid_cookie, null)
             orelse break :pid 0;
         defer std.c.free(pid_reply);
         if (pid_reply.*.format != 32 or pid_reply.*.value_len < 1) break :pid 0;
@@ -214,20 +213,19 @@ fn findSpawnQueueWorkspace(wm: *WM, c_net_wm_pid: ?xcb.xcb_get_property_cookie_t
 /// a separate `has_pending_spawns` bool and makes it impossible to access an
 /// undefined cookie.
 fn resolveTargetWorkspace(
-    wm:           *WM,
     win:          u32,
     current_ws:   u8,
     c_net_wm_pid: ?xcb.xcb_get_property_cookie_t,
 ) u8 {
-    if (findClassRuleWorkspace(wm, win)) |target| {
+    if (findClassRuleWorkspace(win)) |target| {
         // Discard the PID cookie if one was fired; XCB requires every
         // outstanding cookie to be consumed before the connection is closed.
         if (c_net_wm_pid) |pid_cookie|
-            xcb.xcb_discard_reply(wm.conn, pid_cookie.sequence);
+            xcb.xcb_discard_reply(core.conn, pid_cookie.sequence);
         return clampToValidWorkspace(target, current_ws);
     }
 
-    if (findSpawnQueueWorkspace(wm, c_net_wm_pid)) |spawn_ws|
+    if (findSpawnQueueWorkspace(c_net_wm_pid)) |spawn_ws|
         return clampToValidWorkspace(spawn_ws, current_ws);
 
     return current_ws;
@@ -239,10 +237,10 @@ pub inline fn registerSpawn(workspace: u8, pid: u32) void {
     g_spawn_queue.push(.{ .workspace = workspace, .pid = pid });
 }
 
-fn snapshotSpawnCursor(wm: *WM) void {
+fn snapshotSpawnCursor() void {
     if (focus.getSuppressReason() != .window_spawn) return;
     const ptr = xcb.xcb_query_pointer_reply(
-        wm.conn, xcb.xcb_query_pointer(wm.conn, wm.root), null,
+        core.conn, xcb.xcb_query_pointer(core.conn, core.root), null,
     ) orelse return;
     defer std.c.free(ptr);
     g_spawn_cursor.x = ptr.*.root_x;
@@ -260,25 +258,25 @@ const PropertyCookies = struct {
 
 /// Fires all property requests in a single batch before any blocking work,
 /// so the replies arrive concurrently with in-memory setup.
-fn firePropertyCookies(wm: *WM, win: u32) PropertyCookies {
+fn firePropertyCookies(win: u32) PropertyCookies {
     return .{
         .protocols = xcb.xcb_get_property(
-            wm.conn, 0, win,
+            core.conn, 0, win,
             g_atoms.wm_protocols,
             xcb.XCB_ATOM_ATOM, 0, 256,
         ),
         .hints = xcb.xcb_get_property(
-            wm.conn, 0, win,
+            core.conn, 0, win,
             xcb.XCB_ATOM_WM_HINTS, xcb.XCB_ATOM_WM_HINTS, 0, 9,
         ),
         .normal_hints = xcb.xcb_get_property(
-            wm.conn, 0, win,
+            core.conn, 0, win,
             xcb.XCB_ATOM_WM_NORMAL_HINTS, xcb.XCB_ATOM_ANY, 0, 18,
         ),
         // Only fired when the spawn queue is non-empty so the type system
         // enforces this cookie is never accessed on an idle queue.
         .net_wm_pid = if (g_spawn_queue.len > 0) xcb.xcb_get_property(
-            wm.conn, 0, win,
+            core.conn, 0, win,
             g_atoms.net_wm_pid,
             xcb.XCB_ATOM_CARDINAL, 0, 1,
         ) else null,
@@ -287,70 +285,70 @@ fn firePropertyCookies(wm: *WM, win: u32) PropertyCookies {
 
 /// Performs all visual work for a newly adopted window inside a server grab:
 /// tiling registration, geometry configuration, map, focus, and bar redraw.
-fn commitWindowToScreen(wm: *WM, win: u32, on_current_workspace: bool) void {
-    if (on_current_workspace) _ = xcb.xcb_grab_server(wm.conn);
+fn commitWindowToScreen(win: u32, on_current_workspace: bool) void {
+    if (on_current_workspace) _ = xcb.xcb_grab_server(core.conn);
 
     // Configure geometry BEFORE mapping.  xcb_configure_window is valid on
     // an unmapped window — the geometry is stored and takes effect atomically
     // when the window is mapped.  Retiling here (which also pushes background
     // monocle windows offscreen) means the compositor never sees the new
     // window at its default X position or background windows still on-screen.
-    if (wm.config.tiling.enabled) {
-        tiling.addWindow(wm, win);
-        if (on_current_workspace) tiling.retileCurrentWorkspace(wm);
+    if (core.config.tiling.enabled) {
+        tiling.addWindow(win);
+        if (on_current_workspace) tiling.retileCurrentWorkspace();
     }
 
     if (on_current_workspace) {
-        _ = xcb.xcb_map_window(wm.conn, win);
-        snapshotSpawnCursor(wm);
+        _ = xcb.xcb_map_window(core.conn, win);
+        snapshotSpawnCursor();
     } else {
-        grabButtons(wm, win, false);
+        grabButtons(win, false);
     }
 
     bar.scheduleRedraw();
-    if (on_current_workspace) focus.setFocus(wm, win, .window_spawn);
+    if (on_current_workspace) focus.setFocus(win, .window_spawn);
 
-    if (on_current_workspace) _ = xcb.xcb_ungrab_server(wm.conn);
-    _ = xcb.xcb_flush(wm.conn);
+    if (on_current_workspace) _ = xcb.xcb_ungrab_server(core.conn);
+    _ = xcb.xcb_flush(core.conn);
 }
 
-pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t, wm: *WM) void {
+pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const win        = event.window;
     const current_ws = workspaces.getCurrentWorkspace() orelse 0;
 
     g_init_once.call();
 
     _ = xcb.xcb_change_window_attributes(
-        wm.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{constants.EventMasks.MANAGED_WINDOW},
+        core.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{constants.EventMasks.MANAGED_WINDOW},
     );
 
-    const cookies  = firePropertyCookies(wm, win);
-    const target_ws = resolveTargetWorkspace(wm, win, current_ws, cookies.net_wm_pid);
+    const cookies  = firePropertyCookies(win);
+    const target_ws = resolveTargetWorkspace(win, current_ws, cookies.net_wm_pid);
     const on_current = target_ws == current_ws;
 
-    workspaces.moveWindowTo(wm, win, target_ws) catch |err| {
+    workspaces.moveWindowTo(win, target_ws) catch |err| {
         debug.logError(err, win);
-        xcb.xcb_discard_reply(wm.conn, cookies.protocols.sequence);
-        xcb.xcb_discard_reply(wm.conn, cookies.hints.sequence);
-        xcb.xcb_discard_reply(wm.conn, cookies.normal_hints.sequence);
-        _ = xcb.xcb_flush(wm.conn);
+        xcb.xcb_discard_reply(core.conn, cookies.protocols.sequence);
+        xcb.xcb_discard_reply(core.conn, cookies.hints.sequence);
+        xcb.xcb_discard_reply(core.conn, cookies.normal_hints.sequence);
+        _ = xcb.xcb_flush(core.conn);
         return;
     };
 
-    parseSizeHintsIntoCache(wm, win, cookies.normal_hints);
+    parseSizeHintsIntoCache(win, cookies.normal_hints);
 
     // Collect focus-cache property replies before any visual commands so that
     // registerWithTiling + xcb_map_window + setFocus all land at the server in
     // one atomic batch, eliminating the intermediate unfocused frame that was
     // visible when the flush preceded these round-trips.
-    utils.populateFocusCacheFromCookies(wm.conn, win, cookies.protocols, cookies.hints);
+    utils.populateFocusCacheFromCookies(core.conn, win, cookies.protocols, cookies.hints);
 
-    commitWindowToScreen(wm, win, on_current);
+    commitWindowToScreen(win, on_current);
 }
 
 // Unmap / destroy
 
-fn unmanageWindow(wm: *WM, win: u32) void {
+fn unmanageWindow(win: u32) void {
     const fs_ws = fullscreen.workspaceFor(win);
     if (fs_ws) |ws| fullscreen.removeForWorkspace(ws);
     const was_fullscreen = fs_ws != null;
@@ -369,44 +367,44 @@ fn unmanageWindow(wm: *WM, win: u32) void {
     // Pre-fire pointer query before grab so the round-trip runs concurrently
     // with in-memory cleanup. Conditional: no round-trip when window wasn't focused.
     const ptr_cookie: ?xcb.xcb_query_pointer_cookie_t =
-        if (was_focused) xcb.xcb_query_pointer(wm.conn, wm.root) else null;
+        if (was_focused) xcb.xcb_query_pointer(core.conn, core.root) else null;
 
-    _ = xcb.xcb_grab_server(wm.conn);
+    _ = xcb.xcb_grab_server(core.conn);
 
     // Notify each module in order inside the server grab.
-    if (wm.config.tiling.enabled) tiling.removeWindow(win);
+    if (core.config.tiling.enabled) tiling.removeWindow(win);
     tiling.evictSizeHints(win);
     minimize.forceUntrack(win);
     workspaces.removeWindow(win);
 
-    if (was_fullscreen) bar.setBarState(wm, .show_fullscreen);
+    if (was_fullscreen) bar.setBarState(.show_fullscreen);
 
     if (was_focused) {
-        if (wm.config.tiling.enabled) tiling.retileIfDirty(wm);
-        focus.clearFocus(wm);
-        focusWindowUnderPointer(wm, ptr_cookie.?);
-    } else if (!was_fullscreen and wm.config.tiling.enabled) {
+        if (core.config.tiling.enabled) tiling.retileIfDirty();
+        focus.clearFocus();
+        focusWindowUnderPointer(ptr_cookie.?);
+    } else if (!was_fullscreen and core.config.tiling.enabled) {
         if (window_workspace) |ws| {
             if (current_ws == ws) {
-                tiling.retileIfDirty(wm);
+                tiling.retileIfDirty();
             } else {
-                tiling.retileInactiveWorkspace(wm, ws);
+                tiling.retileInactiveWorkspace(ws);
             }
         }
     }
 
-    bar.redrawInsideGrab(wm);
+    bar.redrawInsideGrab();
 
-    _ = xcb.xcb_ungrab_server(wm.conn);
-    _ = xcb.xcb_flush(wm.conn);
+    _ = xcb.xcb_ungrab_server(core.conn);
+    _ = xcb.xcb_flush(core.conn);
 }
 
-pub fn handleUnmapNotify(event: *const xcb.xcb_unmap_notify_event_t, wm: *WM) void {
-    if (isValidManagedWindow(wm, event.window)) unmanageWindow(wm, event.window);
+pub fn handleUnmapNotify(event: *const xcb.xcb_unmap_notify_event_t) void {
+    if (isValidManagedWindow(event.window)) unmanageWindow(event.window);
 }
 
-pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM) void {
-    if (isValidManagedWindow(wm, event.window)) unmanageWindow(wm, event.window);
+pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t) void {
+    if (isValidManagedWindow(event.window)) unmanageWindow(event.window);
 }
 
 // Post-unmanage focus recovery.
@@ -419,28 +417,28 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t, wm: *WM
 //      user actually interacted with, regardless of tiling order.
 //   3. Tiling best-available fallback (master or first remaining slave) for
 //      the case where history is empty or all history entries are gone.
-fn focusPrevOrBest(wm: *WM) void {
+fn focusPrevOrBest() void {
     for (focus.historyItems()) |prev| {
-        if (isOnCurrentWorkspace(wm, prev) and !minimize.isMinimized(prev)) {
-            focus.setFocus(wm, prev, .tiling_operation);
+        if (isOnCurrentWorkspace(prev) and !minimize.isMinimized(prev)) {
+            focus.setFocus(prev, .tiling_operation);
             return;
         }
     }
-    minimize.focusBestAvailable(wm);
+    minimize.focusBestAvailable();
 }
 
-fn focusWindowUnderPointer(wm: *WM, ptr_cookie: xcb.xcb_query_pointer_cookie_t) void {
-    const reply = xcb.xcb_query_pointer_reply(wm.conn, ptr_cookie, null) orelse {
-        focusPrevOrBest(wm);
+fn focusWindowUnderPointer(ptr_cookie: xcb.xcb_query_pointer_cookie_t) void {
+    const reply = xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null) orelse {
+        focusPrevOrBest();
         return;
     };
     defer std.c.free(reply);
     const child = reply.*.child;
-    if (isOnCurrentWorkspace(wm, child) and !minimize.isMinimized(child)) {
-        focus.setFocus(wm, child, .mouse_enter);
+    if (isOnCurrentWorkspace(child) and !minimize.isMinimized(child)) {
+        focus.setFocus(child, .mouse_enter);
         return;
     }
-    focusPrevOrBest(wm);
+    focusPrevOrBest();
 }
 
 // Configure request
@@ -458,7 +456,7 @@ const WindowGeometry = struct {
     border_width: u16,
 };
 
-fn sendConfigureNotify(wm: *WM, win: u32, geom: WindowGeometry) void {
+fn sendConfigureNotify(win: u32, geom: WindowGeometry) void {
     const ev = xcb.xcb_configure_notify_event_t{
         .response_type     = xcb.XCB_CONFIGURE_NOTIFY,
         .pad0              = 0,
@@ -474,14 +472,14 @@ fn sendConfigureNotify(wm: *WM, win: u32, geom: WindowGeometry) void {
         .override_redirect = 0,
         .pad1              = 0,
     };
-    _ = xcb.xcb_send_event(wm.conn, 0, win, xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY, @ptrCast(&ev));
+    _ = xcb.xcb_send_event(core.conn, 0, win, xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY, @ptrCast(&ev));
 }
 
-fn sendSyntheticConfigureNotify(wm: *WM, win: u32) void {
+fn sendSyntheticConfigureNotify(win: u32) void {
     // Fast path: serve the geometry from the tiling cache — zero round-trips.
     if (tiling.getWindowGeom(win)) |rect| {
         const border: u16 = if (tiling.getStateOpt()) |s| s.border_width else 0;
-        sendConfigureNotify(wm, win, .{
+        sendConfigureNotify(win, .{
             .x = rect.x, .y = rect.y, .width = rect.width, .height = rect.height,
             .border_width = border,
         });
@@ -490,19 +488,19 @@ fn sendSyntheticConfigureNotify(wm: *WM, win: u32) void {
 
     // Slow path: fullscreen windows or a cache miss. One blocking round-trip.
     const reply = xcb.xcb_get_geometry_reply(
-        wm.conn, xcb.xcb_get_geometry(wm.conn, win), null,
+        core.conn, xcb.xcb_get_geometry(core.conn, win), null,
     ) orelse return;
     defer std.c.free(reply);
-    sendConfigureNotify(wm, win, .{
+    sendConfigureNotify(win, .{
         .x = reply.*.x, .y = reply.*.y, .width = reply.*.width, .height = reply.*.height,
         .border_width = reply.*.border_width,
     });
 }
 
-pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, wm: *WM) void {
+pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) void {
     const win = event.window;
     if (tiling.isWindowActiveTiled(win) or fullscreen.isFullscreen(win)) {
-        sendSyntheticConfigureNotify(wm, win);
+        sendSyntheticConfigureNotify(win);
         return;
     }
 
@@ -522,8 +520,8 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t, w
     for (geom_fields) |f| {
         if (mask & f.bit != 0) { values[n] = f.value; n += 1; }
     }
-    _ = xcb.xcb_configure_window(wm.conn, win, mask, &values);
-    _ = xcb.xcb_flush(wm.conn);
+    _ = xcb.xcb_configure_window(core.conn, win, mask, &values);
+    _ = xcb.xcb_flush(core.conn);
 }
 
 // Focus / crossing events
@@ -535,14 +533,14 @@ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
     return false;
 }
 
-inline fn maybeFocusWindow(wm: *WM, win: u32) void {
-    if (!isOnCurrentWorkspace(wm, win)) return;
+inline fn maybeFocusWindow(win: u32) void {
+    if (!isOnCurrentWorkspace(win)) return;
     if (minimize.isMinimized(win)) return;
     if (focus.getFocused() == win) return;
-    focus.setFocus(wm, win, .mouse_enter);
+    focus.setFocus(win, .mouse_enter);
 }
 
-pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) void {
+pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t) void {
     focus.setLastEventTime(event.time);
     if (event.mode == xcb.XCB_NOTIFY_MODE_GRAB or
         event.mode == xcb.XCB_NOTIFY_MODE_UNGRAB) return;
@@ -555,42 +553,41 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t, wm: *WM) vo
 
     // EnterNotify on the root window names the entered child in event.child.
     // For all other windows the event window is the target directly.
-    const win: u32 = if (event.event == wm.root and event.child != 0)
+    const win: u32 = if (event.event == core.root and event.child != 0)
         event.child
     else
         event.event;
-    maybeFocusWindow(wm, utils.findManagedWindow(wm.conn, win, workspaces.isManaged));
+    maybeFocusWindow(utils.findManagedWindow(core.conn, win, workspaces.isManaged));
 }
 
-pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t, wm: *WM) void {
+pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t) void {
     focus.setLastEventTime(event.time);
-    if (event.event != wm.root) return;
+    if (event.event != core.root) return;
     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL) return;
     if (drag.isDragging()) return;
     if (suppressSpawnCrossing(event.root_x, event.root_y)) return;
     // When child is zero the pointer left to an area not covered by any window;
-    // maybeFocusWindow(wm, 0) would immediately fail isOnCurrentWorkspace anyway.
+    // maybeFocusWindow(0) would immediately fail isOnCurrentWorkspace anyway.
     if (event.child == 0) return;
-    maybeFocusWindow(wm, event.child);
+    maybeFocusWindow(event.child);
 }
 
 // Property notify
 
-pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t, wm: *WM) void {
-    if (!isValidManagedWindow(wm, event.window)) return;
+pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void {
+    if (!isValidManagedWindow(event.window)) return;
     if (event.atom == g_atoms.wm_protocols or event.atom == xcb.XCB_ATOM_WM_HINTS) {
-        utils.recacheInputModel(wm.conn, event.window);
+        utils.recacheInputModel(core.conn, event.window);
     }
 }
 
 // Size-hint parsing
 
 fn parseSizeHintsIntoCache(
-    wm:     *WM,
     win:    u32,
     cookie: xcb.xcb_get_property_cookie_t,
 ) void {
-    const reply = xcb.xcb_get_property_reply(wm.conn, cookie, null) orelse return;
+    const reply = xcb.xcb_get_property_reply(core.conn, cookie, null) orelse return;
     defer std.c.free(reply);
     if (reply.*.format != 32 or reply.*.value_len < 5) return;
 
@@ -614,5 +611,5 @@ fn parseSizeHintsIntoCache(
         min_height = @max(min_height, @as(u16, @intCast(@min(fields[16], std.math.maxInt(u16)))));
     }
 
-    tiling.cacheSizeHints(wm.allocator, win, .{ .min_width = min_width, .min_height = min_height });
+    tiling.cacheSizeHints(core.alloc, win, .{ .min_width = min_width, .min_height = min_height });
 }

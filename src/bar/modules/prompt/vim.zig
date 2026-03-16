@@ -31,8 +31,8 @@
 //! Ctrl-modified keys should be pre-handled and routed to handleCtrl().
 
 const std = @import("std");
-const defs = @import("defs");
-const xcb  = defs.xcb;
+const core = @import("core");
+const xcb  = core.xcb;
 
 // X11 keysym constants 
 // Re-exported from keysyms.zig for callers that write `vim.XK_*`.

@@ -1,12 +1,12 @@
 //! Monocle layout: all windows fullscreen, stacked; only the top window visible.
 
-const defs      = @import("defs");
+const core      = @import("core");
 const constants = @import("constants");
 const utils     = @import("utils");
 const layouts   = @import("layouts");
 const tiling    = @import("tiling");
 const State     = tiling.State;
-const xcb       = defs.xcb;
+const xcb       = core.xcb;
 
 pub fn tileWithOffset(ctx: *const layouts.LayoutCtx, state: *State, windows: []const u32, screen_w: u16, screen_h: u16, y_offset: u16) void {
     if (windows.len == 0) return;

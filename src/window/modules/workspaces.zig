@@ -2,9 +2,8 @@
 
 const std        = @import("std");
 const fullscreen = @import("fullscreen");
-const defs       = @import("defs");
-const xcb        = defs.xcb;
-const WM         = defs.WM;
+const core = @import("core");
+const xcb        = core.xcb;
 const utils      = @import("utils");
 const focus      = @import("focus");
 const window     = @import("window");
@@ -32,7 +31,7 @@ pub const Workspace = struct {
     layout:    tiling.Layout,
     // Optional layout variation override set via the layouts array in config.
     // Applied on every workspace switch; null means use the global defaults.
-    variation: ?defs.LayoutVariationOverride = null,
+    variation: ?core.LayoutVariationOverride = null,
     // Per-workspace master width override (master-stack layout).
     // null = use the global default from tiling state.
     // Set when the user adjusts master width in per-workspace layout mode;
@@ -101,16 +100,16 @@ fn layoutFromName(name: []const u8) tiling.Layout {
     return std.meta.stringToEnum(tiling.Layout, name) orelse tiling.defaultLayout();
 }
 
-pub fn init(wm: *WM) void {
-    const count = wm.config.workspaces.count;
-    const wss = wm.allocator.alloc(Workspace, count) catch {
+pub fn init() void {
+    const count = core.config.workspaces.count;
+    const wss = core.alloc.alloc(Workspace, count) catch {
         debug.err("Failed to allocate workspaces", .{});
         return;
     };
 
     const default_layout = tiling.getState().layout;
 
-    const cfg_tiling = &wm.config.tiling;
+    const cfg_tiling = &core.config.tiling;
 
     for (wss, 0..) |*ws, i| {
         const id: u8 = @intCast(i);
@@ -119,7 +118,7 @@ pub fn init(wm: *WM) void {
         // Apply any workspace-specific layout + variation override from the
         // layouts array (e.g. `"monocle", "gapless", "4,8"` in config.toml).
         var ws_layout    = default_layout;
-        var ws_variation: ?defs.LayoutVariationOverride = null;
+        var ws_variation: ?core.LayoutVariationOverride = null;
         for (cfg_tiling.workspace_layout_overrides.items) |override| {
             if (override.workspace_idx == id) {
                 if (override.layout_idx < cfg_tiling.layouts.items.len) {
@@ -130,18 +129,18 @@ pub fn init(wm: *WM) void {
             }
         }
 
-        ws.* = Workspace.init(wm.allocator, id, name, ws_layout);
+        ws.* = Workspace.init(core.alloc, id, name, ws_layout);
         ws.variation = ws_variation;
     }
 
-    var w2ws = std.AutoHashMap(u32, u64).init(wm.allocator);
+    var w2ws = std.AutoHashMap(u32, u64).init(core.alloc);
     w2ws.ensureTotalCapacity(32) catch |err| debug.err("workspaces: capacity pre-alloc failed: {}", .{err});
 
     g_state = .{
         .workspaces           = wss,
         .current              = 0,
         .window_to_workspaces = w2ws,
-        .allocator            = wm.allocator,
+        .allocator            = core.alloc,
     };
 }
 
@@ -165,7 +164,7 @@ pub fn removeWindow(win: u32) void {
     }
 }
 
-pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) !void {
+pub fn moveWindowTo(win: u32, target_ws: u8) !void {
     const s = getState() orelse return;
     if (target_ws >= s.workspaces.len) {
         debug.err("Invalid target workspace: {}", .{target_ws});
@@ -196,9 +195,9 @@ pub fn moveWindowTo(wm: *WM, win: u32, target_ws: u8) !void {
 
     if (minimize.isMinimized(win)) minimize.moveToWorkspace(win, target_ws);
 
-    pushOffscreen(wm.conn, win);
-    if (focus.getFocused() == win) focus.clearFocus(wm);
-    if (wm.config.tiling.enabled) tiling.dirty();
+    pushOffscreen(core.conn, win);
+    if (focus.getFocused() == win) focus.clearFocus();
+    if (core.config.tiling.enabled) tiling.dirty();
     tiling.invalidateGeomCache(win);
     bar.scheduleRedraw();
 }
@@ -239,7 +238,7 @@ fn setWindowMask(s: *State, win: u32, new_mask: u64) void {
 ///
 /// Pair with tag_toggle (Mod+Alt+N) to accumulate extra workspaces after
 /// the initial move.
-pub fn moveWindowExclusive(wm: *WM, win: u32, target_ws: u8) void {
+pub fn moveWindowExclusive(win: u32, target_ws: u8) void {
     const s = getState() orelse return;
     if (target_ws >= s.workspaces.len) return;
     if (minimize.isMinimized(win)) return;
@@ -250,14 +249,14 @@ pub fn moveWindowExclusive(wm: *WM, win: u32, target_ws: u8) void {
     setWindowMask(s, win, workspaceBit(target_ws));
 
     if (target_ws != s.current) {
-        pushOffscreen(wm.conn, win);
+        pushOffscreen(core.conn, win);
         tiling.invalidateGeomCache(win);
-        if (focus.getFocused() == win) focus.clearFocus(wm);
+        if (focus.getFocused() == win) focus.clearFocus();
     }
 
-    if (wm.config.tiling.enabled) tiling.retileCurrentWorkspace(wm);
+    if (core.config.tiling.enabled) tiling.retileCurrentWorkspace();
     bar.scheduleRedraw();
-    _ = xcb.xcb_flush(wm.conn);
+    _ = xcb.xcb_flush(core.conn);
 }
 
 /// Toggle workspace tag N on `win`.
@@ -275,7 +274,7 @@ pub fn moveWindowExclusive(wm: *WM, win: u32, target_ws: u8) void {
 ///                 window's last tag. If N == current, pushed offscreen.
 /// • Bit N clear → set it  (window gains N). Silently added to inactive workspace.
 /// • Last workspace is always protected: cannot clear the final bit.
-pub fn tagToggle(wm: *WM, win: u32, target_ws: u8, protect_current: bool) void {
+pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
     const s = getState() orelse return;
     if (target_ws >= s.workspaces.len) return;
     if (minimize.isMinimized(win)) return;
@@ -289,9 +288,9 @@ pub fn tagToggle(wm: *WM, win: u32, target_ws: u8, protect_current: bool) void {
         if (@popCount(mask) <= 1) return; // last workspace — protect
         setWindowMask(s, win, mask & ~tbit);
         if (target_ws == current) {
-            pushOffscreen(wm.conn, win);
+            pushOffscreen(core.conn, win);
             tiling.invalidateGeomCache(win);
-            if (wm.config.tiling.enabled) tiling.retileCurrentWorkspace(wm);
+            if (core.config.tiling.enabled) tiling.retileCurrentWorkspace();
         } else {
             tiling.invalidateWsGeomBit(target_ws);
         }
@@ -300,25 +299,25 @@ pub fn tagToggle(wm: *WM, win: u32, target_ws: u8, protect_current: bool) void {
         const new_mask = if (protect_current) mask | tbit | workspaceBit(current) else mask | tbit;
         setWindowMask(s, win, new_mask);
         if (target_ws == current) {
-            _ = xcb.xcb_map_window(wm.conn, win);
-            if (wm.config.tiling.enabled) tiling.retileCurrentWorkspace(wm);
+            _ = xcb.xcb_map_window(core.conn, win);
+            if (core.config.tiling.enabled) tiling.retileCurrentWorkspace();
         } else {
             tiling.invalidateWsGeomBit(target_ws);
         }
     }
 
     bar.scheduleRedraw();
-    _ = xcb.xcb_flush(wm.conn);
+    _ = xcb.xcb_flush(core.conn);
 }
 
 // Workspace switch
 
-pub fn switchTo(wm: *WM, ws_id: u8) void {
+pub fn switchTo(ws_id: u8) void {
     const s = getState() orelse return;
     if (ws_id >= s.workspaces.len or ws_id == s.current) return;
     const old = s.current;
     s.current = ws_id;
-    executeSwitch(wm, old, ws_id);
+    executeSwitch(old, ws_id);
 }
 
 // Query helpers
@@ -345,8 +344,7 @@ pub inline fn firstNonMinimized(windows: []const u32) ?u32 {
 }
 
 // Prefer the workspace's remembered focus target; fall back to firstNonMinimized.
-inline fn lastFocusedOrFirst(wm: *const WM, ws: *const Workspace) ?u32 {
-    _ = wm;
+inline fn lastFocusedOrFirst(ws: *const Workspace) ?u32 {
     if (ws.last_focused) |win|
         if (!minimize.isMinimized(win)) return win;
     return firstNonMinimized(ws.windows.items());
@@ -385,7 +383,7 @@ pub fn isManaged(win: u32) bool {
 
 // Step 1: move old-workspace windows offscreen.
 // Windows ALSO tagged to `new_ws` stay on screen — they're visible on both.
-fn hideWorkspaceWindows(wm: *WM, ws: *const Workspace, new_ws: u8) void {
+fn hideWorkspaceWindows(ws: *const Workspace, new_ws: u8) void {
     // Capped at 64: covers the realistic upper bound for a single workspace.
     // Windows beyond this limit are moved offscreen without geometry save.
     const MAX_FLOAT = 64;
@@ -398,7 +396,7 @@ fn hideWorkspaceWindows(wm: *WM, ws: *const Workspace, new_ws: u8) void {
         if (!tiling.isWindowActiveTiled(win) and !minimize.isMinimized(win)) {
             if (float_n < MAX_FLOAT) {
                 float_wins[float_n]    = win;
-                float_cookies[float_n] = xcb.xcb_get_geometry(wm.conn, win);
+                float_cookies[float_n] = xcb.xcb_get_geometry(core.conn, win);
                 float_n += 1;
             }
         }
@@ -411,7 +409,7 @@ fn hideWorkspaceWindows(wm: *WM, ws: *const Workspace, new_ws: u8) void {
     for (ws.windows.items()) |win| {
         if (isWindowOnWorkspace(win, new_ws)) continue;
         if (fi < float_n and float_wins[fi] == win) {
-            if (xcb.xcb_get_geometry_reply(wm.conn, float_cookies[fi], null)) |geom| {
+            if (xcb.xcb_get_geometry_reply(core.conn, float_cookies[fi], null)) |geom| {
                 defer std.c.free(geom);
                 tiling.saveWindowGeom(win, .{
                     .x = geom.*.x, .y = geom.*.y,
@@ -420,17 +418,17 @@ fn hideWorkspaceWindows(wm: *WM, ws: *const Workspace, new_ws: u8) void {
             }
             fi += 1;
         }
-        pushOffscreen(wm.conn, win);
+        pushOffscreen(core.conn, win);
         if (tiling.isWindowActiveTiled(win)) tiling.invalidateGeomCache(win);
     }
 }
 
 // Step 3b: restore geometry for the new workspace.
-fn restoreWorkspaceWindows(wm: *WM, ws: *const Workspace, old_ws: u8) void {
+fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
     const tiling_active = tiling.getState().enabled;
 
     if (tiling_active) {
-        if (!wm.config.tiling.global_layout) tiling.syncLayoutFromWorkspace(ws);
+        if (!core.config.tiling.global_layout) tiling.syncLayoutFromWorkspace(ws);
 
         // Invalidate geometry for windows that were also on the old workspace —
         // their cache holds old-workspace tiling positions which are now stale.
@@ -439,27 +437,27 @@ fn restoreWorkspaceWindows(wm: *WM, ws: *const Workspace, old_ws: u8) void {
                 tiling.invalidateGeomCache(win);
         }
 
-        if (!tiling.restoreWorkspaceGeom(wm)) {
+        if (!tiling.restoreWorkspaceGeom()) {
             for (ws.windows.items()) |win| {
                 if (tiling.isWindowTiled(win)) tiling.invalidateGeomCache(win);
             }
-            tiling.retileCurrentWorkspace(wm);
+            tiling.retileCurrentWorkspace();
         }
     }
 
     // Single pass: map every window and restore floating geometry for windows
     // not already on screen. Both are fire-and-forget XCB writes with no
     // ordering dependency between them, so no separate map loop is needed.
-    const pos = utils.floatDefaultPos(wm);
+    const pos = utils.floatDefaultPos();
     for (ws.windows.items()) |win| {
-        _ = xcb.xcb_map_window(wm.conn, win);
+        _ = xcb.xcb_map_window(core.conn, win);
         if (!tiling.isWindowActiveTiled(win) and !minimize.isMinimized(win) and
             !isWindowOnWorkspace(win, old_ws))
         {
             if (tiling.getWindowGeom(win)) |rect| {
-                utils.configureWindow(wm.conn, win, rect);
+                utils.configureWindow(core.conn, win, rect);
             } else {
-                _ = xcb.xcb_configure_window(wm.conn, win,
+                _ = xcb.xcb_configure_window(core.conn, win,
                     xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
                     &[_]u32{ pos.x, pos.y });
             }
@@ -476,43 +474,43 @@ fn restoreWorkspaceWindows(wm: *WM, ws: *const Workspace, old_ws: u8) void {
 //
 // `ptr_cookie` is pre-fired by executeSwitch before the server grab so that
 // the round-trip overlaps with hideWorkspaceWindows + restoreWorkspaceWindows.
-fn applyPostSwitchFocus(wm: *WM, new_ws: u8, new_ws_obj: *const Workspace, ptr_cookie: xcb.xcb_query_pointer_cookie_t) void {
+fn applyPostSwitchFocus(new_ws: u8, new_ws_obj: *const Workspace, ptr_cookie: xcb.xcb_query_pointer_cookie_t) void {
     const focus_target: ?u32 = blk: {
-        const ptr = xcb.xcb_query_pointer_reply(wm.conn, ptr_cookie, null)
-            orelse break :blk lastFocusedOrFirst(wm, new_ws_obj);
+        const ptr = xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null)
+            orelse break :blk lastFocusedOrFirst(new_ws_obj);
         defer std.c.free(ptr);
 
         const child = ptr.*.child;
-        if (child != 0 and child != wm.root and
+        if (child != 0 and child != core.root and
             isWindowOnWorkspace(child, new_ws) and
             !minimize.isMinimized(child))
         {
             break :blk child;
         }
-        break :blk lastFocusedOrFirst(wm, new_ws_obj);
+        break :blk lastFocusedOrFirst(new_ws_obj);
     };
 
     const old_focused = focus.getFocused();
     focus.setFocused(focus_target);
 
-    tiling.updateWindowFocus(wm, old_focused, focus.getFocused());
+    tiling.updateWindowFocus(old_focused, focus.getFocused());
 
-    if (old_focused) |old_win| window.grabButtons(wm, old_win, false);
+    if (old_focused) |old_win| window.grabButtons(old_win, false);
 
     if (focus.getFocused()) |new_win| {
-        window.grabButtons(wm, new_win, true);
+        window.grabButtons(new_win, true);
 
-        const input_model = utils.getInputModelCached(wm.conn, new_win);
+        const input_model = utils.getInputModelCached(core.conn, new_win);
         if (input_model == .locally_active or input_model == .globally_active) {
-            utils.sendWMTakeFocus(wm.conn, new_win, focus.getLastEventTime());
+            utils.sendWMTakeFocus(core.conn, new_win, focus.getLastEventTime());
         }
     }
 
-    _ = xcb.xcb_set_input_focus(wm.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
-        focus.getFocused() orelse wm.root, focus.getLastEventTime());
+    _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
+        focus.getFocused() orelse core.root, focus.getLastEventTime());
 }
 
-fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
+fn executeSwitch(old_ws: u8, new_ws: u8) void {
     const s          = getState().?;
     const new_ws_obj = &s.workspaces[new_ws];
     const fs_info    = fullscreen.getForWorkspace(new_ws);
@@ -524,31 +522,31 @@ fn executeSwitch(wm: *WM, old_ws: u8, new_ws: u8) void {
 
     // Pre-fire the pointer query before the server grab so the round-trip
     // overlaps with hideWorkspaceWindows + restoreWorkspaceWindows.
-    const ptr_cookie = xcb.xcb_query_pointer(wm.conn, wm.root);
+    const ptr_cookie = xcb.xcb_query_pointer(core.conn, core.root);
 
-    _ = xcb.xcb_grab_server(wm.conn);
+    _ = xcb.xcb_grab_server(core.conn);
 
-    hideWorkspaceWindows(wm, &s.workspaces[old_ws], new_ws);
+    hideWorkspaceWindows(&s.workspaces[old_ws], new_ws);
 
-    bar.setBarState(wm, if (fs_info != null) .hide_fullscreen else .show_fullscreen);
+    bar.setBarState(if (fs_info != null) .hide_fullscreen else .show_fullscreen);
 
     if (fs_info) |info| {
-        utils.configureWindowGeom(wm.conn, info.window, .{
+        utils.configureWindowGeom(core.conn, info.window, .{
             .x = 0, .y = 0,
-            .width        = @intCast(wm.screen.width_in_pixels),
-            .height       = @intCast(wm.screen.height_in_pixels),
+            .width        = @intCast(core.screen.width_in_pixels),
+            .height       = @intCast(core.screen.height_in_pixels),
             .border_width = 0,
         });
-        _ = xcb.xcb_configure_window(wm.conn, info.window,
+        _ = xcb.xcb_configure_window(core.conn, info.window,
             xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     } else {
-        restoreWorkspaceWindows(wm, new_ws_obj, old_ws);
+        restoreWorkspaceWindows(new_ws_obj, old_ws);
     }
 
-    applyPostSwitchFocus(wm, new_ws, new_ws_obj, ptr_cookie);
+    applyPostSwitchFocus(new_ws, new_ws_obj, ptr_cookie);
 
     bar.raiseBar();
-    bar.redrawInsideGrab(wm);
-    _ = xcb.xcb_ungrab_server(wm.conn);
-    _ = xcb.xcb_flush(wm.conn);
+    bar.redrawInsideGrab();
+    _ = xcb.xcb_ungrab_server(core.conn);
+    _ = xcb.xcb_flush(core.conn);
 }

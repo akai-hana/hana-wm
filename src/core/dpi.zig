@@ -1,10 +1,10 @@
 //! DPI detection and scaling utilities for consistent bar appearance across display resolutions.
 
 const std   = @import("std");
-const defs  = @import("defs");
+const core  = @import("core");
 const debug = @import("debug");
 
-const xcb           = defs.xcb;
+const xcb           = core.xcb;
 const ScalableValue = @import("parser").ScalableValue;
 
 // Baseline screen used to define "1× scale". All percentage-based values
