@@ -235,20 +235,12 @@ pub const IndicatorLocation = enum {
 pub const BarVerticalPosition = enum {
     top,
     bottom,
-
-    pub inline fn fromString(str: []const u8) ?BarVerticalPosition {
-        return std.meta.stringToEnum(BarVerticalPosition, str);
-    }
 };
 
 pub const BarPosition = enum {
     left,
     center,
     right,
-
-    pub inline fn fromString(str: []const u8) ?BarPosition {
-        return std.meta.stringToEnum(BarPosition, str);
-    }
 };
 
 pub const BarSegment = enum {
@@ -257,10 +249,6 @@ pub const BarSegment = enum {
     clock,
     layout,
     variations,
-
-    pub inline fn fromString(str: []const u8) ?BarSegment {
-        return std.meta.stringToEnum(BarSegment, str);
-    }
 };
 
 pub const BarLayout = struct {
@@ -332,11 +320,6 @@ pub const BarConfig = struct {
         self.layout.deinit(allocator);
     }
 
-    pub inline fn getWorkspaceAccent(self: *const BarConfig) u32    { return self.workspaces_accent;      }
-    pub inline fn getTitleAccent(self: *const BarConfig) u32         { return self.title_accent_color;     }
-    pub inline fn getTitleUnfocusedAccent(self: *const BarConfig) u32 { return self.title_unfocused_accent; }
-    pub inline fn getTitleMinimizedAccent(self: *const BarConfig) u32 { return self.title_minimized_accent; }
-    pub inline fn getClockAccent(self: *const BarConfig) u32         { return self.clock_accent;           }
     pub inline fn getDrunBg(self: *const BarConfig) u32 {
         return self.drun_bg orelse self.bg;
     }
@@ -346,12 +329,18 @@ pub const BarConfig = struct {
     pub inline fn getDrunPromptColor(self: *const BarConfig) u32 {
         return self.drun_prompt_color orelse self.accent_color;
     }
-    /// Derives horizontal segment padding from the font_size percentage.
+    /// Derives horizontal segment padding from font_size.
+    /// Percentage path: margin = (bar_height - font_height) / 2, scaled.
+    /// Absolute path:   margin = (bar_height - font_px * scale_factor) / 2.
     pub inline fn scaledSegmentPadding(self: *const BarConfig, bar_height: u16) u16 {
-        if (!self.font_size.is_percentage) return 0;
-        const margin_ratio = (1.0 - self.font_size.value / 100.0) / 2.0;
-        const px = @as(f32, @floatFromInt(bar_height)) * margin_ratio * self.scale_factor;
-        return @as(u16, @intFromFloat(@round(@max(0.0, px))));
+        const h: f32 = @floatFromInt(bar_height);
+        if (self.font_size.is_percentage) {
+            const margin_ratio = (1.0 - self.font_size.value / 100.0) / 2.0;
+            return @as(u16, @intFromFloat(@round(@max(0.0, h * margin_ratio * self.scale_factor))));
+        } else {
+            const font_px = self.font_size.value * self.scale_factor;
+            return @as(u16, @intFromFloat(@round(@max(0.0, (h - font_px) / 2.0))));
+        }
     }
 
     /// Scales a ScalableValue to pixels. `factor` multiplies the percentage path;
@@ -365,7 +354,7 @@ pub const BarConfig = struct {
         return @as(u16, @intFromFloat(@round(@max(0.0, scaleValue(self.spacing, bar_height, 5.0, self.scale_factor)))));
     }
     pub inline fn scaledIndicatorSize(self: *const BarConfig, bar_height: u16) u16 {
-        return @max(1, @as(u16, @intFromFloat(@round(scaleValue(self.indicator_size, bar_height, 1.0, 1.0)))));
+        return @max(1, @as(u16, @intFromFloat(@round(scaleValue(self.indicator_size, bar_height, 1.0, self.scale_factor)))));
     }
     pub inline fn scaledWorkspaceWidth(self: *const BarConfig, bar_height: u16) u16 {
         return @max(1, @as(u16, @intFromFloat(@round(scaleValue(self.workspace_tag_width, bar_height, 1.0, self.scale_factor)))));

@@ -260,18 +260,18 @@ pub fn unminimize(order: RestoreOrder) void {
     const s      = getState();
     const ws_idx = workspaces.getCurrentWorkspace() orelse return;
 
-    // Single pass over minimized_info: find the window on the current workspace
-    // with the highest (LIFO) or lowest (FIFO) timestamp.
+    // Resolve the comparison direction once before the loop — `order` is a
+    // loop-invariant constant and the switch would otherwise be re-evaluated
+    // on every hash-map entry.
+    const want_max = (order == .lifo);
     var best_win: ?u32 = null;
     var best_ts:  u64  = 0;
     var it = s.minimized_info.iterator();
     while (it.next()) |kv| {
         if (kv.value_ptr.workspace_idx != ws_idx) continue;
         const ts = kv.value_ptr.timestamp;
-        const better = switch (order) {
-            .lifo => best_win == null or ts > best_ts,
-            .fifo => best_win == null or ts < best_ts,
-        };
+        const better = best_win == null or
+            (if (want_max) ts > best_ts else ts < best_ts);
         if (better) { best_win = kv.key_ptr.*; best_ts = ts; }
     }
 

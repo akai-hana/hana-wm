@@ -284,10 +284,7 @@ pub const DrawContext = struct {
     /// last_gc_color guards xcb_change_gc: skips the call when the color is
     /// unchanged, which is the common case when adjacent segments share a background.
     pub fn fillRect(self: *DrawContext, x: u16, y: u16, width: u16, height: u16, color: u32) void {
-        const final_color: u32 = if (self.is_argb)
-            (@as(u32, self.alpha_u8) << 24) | (color & 0x00FFFFFF)
-        else
-            color;
+        const final_color: u32 = self.applyTransparency(color);
         if (self.last_gc_color != final_color) {
             _ = core.xcb.xcb_change_gc(self.conn, self.gc, core.xcb.XCB_GC_FOREGROUND, &[_]u32{final_color});
             self.last_gc_color = final_color;
@@ -466,7 +463,7 @@ pub const MeasureContext = struct {
         c.cairo_surface_destroy(self.surface);
     }
 
-    pub fn loadFont(self: *MeasureContext,  font_names: []const u8)       !void          { return self.font.loadFont(font_names); }
+    pub fn loadFont(self: *MeasureContext,  font_name: []const u8)        !void          { return self.font.loadFont(font_name); }
     pub fn loadFonts(self: *MeasureContext, font_names: []const []const u8) !void        { return self.font.loadFonts(font_names); }
     pub fn getMetrics(self: *MeasureContext) struct { i16, i16 }                         { return self.font.getMetrics(); }
 };
@@ -582,10 +579,11 @@ pub const CarouselPixmap = struct {
         const cx: i32 = @intCast(clip_x);
         const cw: i32 = @intCast(clip_w);
         const tw: i32 = @intCast(self.text_w);
-        const h        = self.height;
+        const h              = self.height;
+        const offset_i32: i32 = @intCast(offset);
 
         for ([2]i32{ 0, @intCast(cycle_w) }) |shift| {
-            const draw_x: i32 = ax - @as(i32, @intCast(offset)) + shift;
+            const draw_x: i32 = ax - offset_i32 + shift;
 
             // Intersect [draw_x, draw_x+text_w) with [clip_x, clip_x+clip_w).
             const vis_start = @max(draw_x, cx);
@@ -679,19 +677,22 @@ fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const 
     if (size) |s| try appendStyle(&result, allocator, s);
 
     const converted = try result.toOwnedSlice(allocator);
-    font_conversion_cache.?.put(xft_name, converted) catch {};
+    const owned_key = try allocator.dupe(u8, xft_name);
+    errdefer allocator.free(owned_key);
+    font_conversion_cache.?.put(owned_key, converted) catch {};
     return converted;
 }
-
-/// No-op — the cache is now lazy-initialized on first font load.
-/// Kept for call-site compatibility.
-pub fn initFontCache(_: std.mem.Allocator) void {}
 
 /// Release the font-name conversion cache. Call once at shutdown.
 pub fn deinitFontCache(allocator: std.mem.Allocator) void {
     if (font_conversion_cache) |*cache| {
         var iter = cache.iterator();
         while (iter.next()) |entry| {
+            // Both keys and values (when converted) are owned allocations.
+            // Keys are always duped on insertion; values share the key pointer
+            // only when no conversion was needed (i.e. no ':' separator), in
+            // which case the converted string IS the key — skip the double-free.
+            allocator.free(entry.key_ptr.*);
             if (entry.value_ptr.*.ptr != entry.key_ptr.*.ptr)
                 allocator.free(entry.value_ptr.*);
         }

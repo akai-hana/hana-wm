@@ -89,9 +89,9 @@ pub fn setForWorkspace(ws: u8, info: FullscreenInfo) !void {
 
 pub fn removeForWorkspace(ws: u8) void {
     if (!g_initialized) return;
-    if (g_per_workspace.get(ws)) |info|
-        _ = g_window_to_workspace.remove(info.window);
-    _ = g_per_workspace.remove(ws);
+    // fetchRemove combines the get + remove into a single hash probe instead of two.
+    if (g_per_workspace.fetchRemove(ws)) |entry|
+        _ = g_window_to_workspace.remove(entry.value.window);
 }
 
 pub fn clear() void {
@@ -229,16 +229,15 @@ fn restoreFloatingWindows(skip_win: u32) void {
         const is_tiled = if (comptime build_options.has_tiling) tiling.isWindowTiled(w) else false;
         if (is_tiled) continue;
 
-        if (g_saved_float_geoms.get(w)) |rect| {
-            utils.configureWindow(core.conn, w, rect);
-        } else if (comptime build_options.has_tiling) {
-            if (tiling.getWindowGeom(w)) |rect| {
-                utils.configureWindow(core.conn, w, rect);
-            } else {
-                _ = xcb.xcb_configure_window(core.conn, w,
-                    xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
-                    &[_]u32{ pos.x, pos.y });
-            }
+        // Resolve the best available geometry through the priority chain:
+        //   1. saved float geometry (exact pre-fullscreen position)
+        //   2. tiling cache (last known tiled rect)
+        //   3. null → fall through to default placement below
+        const rect: ?utils.Rect = g_saved_float_geoms.get(w) orelse
+            if (comptime build_options.has_tiling) tiling.getWindowGeom(w) else null;
+
+        if (rect) |r| {
+            utils.configureWindow(core.conn, w, r);
         } else {
             _ = xcb.xcb_configure_window(core.conn, w,
                 xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,

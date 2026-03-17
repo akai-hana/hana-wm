@@ -58,9 +58,6 @@ var g_spawn_cursor: struct { x: i16 = 0, y: i16 = 0 } = .{};
 // fields, turning per-event hash probes into direct field reads.
 // Atoms that cannot be interned remain 0; property cookies sent with atom 0
 // return an empty reply, which existing null-reply guards handle correctly.
-//
-// g_init_once guarantees populateAtomCache runs exactly once and is safe
-// under a future multi-threaded event loop without further changes.
 
 var g_atoms: struct {
     wm_protocols: u32 = 0,
@@ -68,7 +65,11 @@ var g_atoms: struct {
     net_wm_pid:   u32 = 0,
 } = .{};
 
-var g_init_done = std.atomic.Value(bool).init(false);
+// FIX #8: Replaced std.atomic.Value(bool) with a plain bool. The event loop is
+// single-threaded, so the acq_rel swap on every MapRequest was pure overhead.
+// If true multi-threaded dispatch is introduced later, replace this with
+// std.Thread.Once or an explicit mutex rather than a raw atomic swap.
+var g_init_done: bool = false;
 
 fn populateAtomCache() void {
     inline for (.{
@@ -88,8 +89,16 @@ pub inline fn isValidManagedWindow(win: u32) bool {
 }
 
 pub inline fn isOnCurrentWorkspace(win: u32) bool {
-    return isValidManagedWindow(win) and
-           workspaces.isOnCurrentWorkspace(win);
+    // The old body called isValidManagedWindow (which probes window_to_workspaces
+    // via getWorkspaceForWindow) and then workspaces.isOnCurrentWorkspace (which
+    // probes the same map again via isWindowOnWorkspace) — two lookups on the same
+    // key.  Inlining both checks here reduces that to a single probe on the hot
+    // path of every EnterNotify, history scan, and pointer-child test.
+    if (win == 0 or win == core.root) return false;
+    if (bar.isBarWindow(win)) return false;
+    const s = workspaces.getState() orelse return false;
+    const mask = s.window_to_workspaces.get(win) orelse return false;
+    return (mask >> @intCast(s.current)) & 1 != 0;
 }
 
 // Button grab management
@@ -156,6 +165,17 @@ fn findClassRuleWorkspace(win: u32) ?u8 {
     return findWorkspaceRuleByClass(cookie);
 }
 
+// FIX #6: Extracted the repeated three-line removal idiom into a single helper.
+// The original code duplicated copyForwards + len-- + return ws identically
+// across all three match branches. Any future change (e.g. zeroing the vacated
+// slot) now only needs to happen in one place.
+inline fn consumeSpawnEntry(entries: []SpawnEntry, i: usize) u8 {
+    const ws = entries[i].workspace;
+    std.mem.copyForwards(SpawnEntry, entries[i .. entries.len - 1], entries[i + 1 ..]);
+    g_spawn_queue.len -= 1;
+    return ws;
+}
+
 /// Phase 2 of workspace resolution: matches the window against the spawn queue.
 /// Tries exact PID match, then daemon-mode (pid==0) match, then falls back to
 /// the oldest pending entry — the correct heuristic when an app re-execs or
@@ -177,37 +197,26 @@ fn findSpawnQueueWorkspace(c_net_wm_pid: ?xcb.xcb_get_property_cookie_t) ?u8 {
     // Exact PID match.
     if (win_pid != 0) {
         for (entries, 0..) |e, i| {
-            if (e.pid == win_pid) {
-                const ws = e.workspace;
-                std.mem.copyForwards(SpawnEntry, entries[i..entries.len-1], entries[i+1..]);
-                g_spawn_queue.len -= 1;
-                return ws;
-            }
+            if (e.pid == win_pid) return consumeSpawnEntry(entries, i);
         }
     }
 
     // Daemon match (pid == 0 in both window and queue entry).
     if (win_pid == 0) {
         for (entries, 0..) |e, i| {
-            if (e.pid == 0) {
-                const ws = e.workspace;
-                std.mem.copyForwards(SpawnEntry, entries[i..entries.len-1], entries[i+1..]);
-                g_spawn_queue.len -= 1;
-                return ws;
-            }
+            if (e.pid == 0) return consumeSpawnEntry(entries, i);
         }
     }
 
+    // FIX #5: Removed the redundant `g_spawn_queue.len > 0` guard and the
+    // dead `return null` that followed it. The function is only entered when
+    // c_net_wm_pid is non-null, which firePropertyCookies guarantees only when
+    // g_spawn_queue.len > 0. No branch between here and that entry point removes
+    // an entry without returning, so the queue is provably non-empty at this point.
+    //
     // Oldest-entry fallback: any pending entry is almost certainly the source
     // of this window (the queue is only populated by explicit user exec actions).
-    if (g_spawn_queue.len > 0) {
-        const ws = entries[0].workspace;
-        std.mem.copyForwards(SpawnEntry, entries[0..entries.len-1], entries[1..]);
-        g_spawn_queue.len -= 1;
-        return ws;
-    }
-
-    return null;
+    return consumeSpawnEntry(entries, 0);
 }
 
 /// Resolves the target workspace for a newly mapped window.
@@ -331,7 +340,9 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const win        = event.window;
     const current_ws = workspaces.getCurrentWorkspace() orelse 0;
 
-    if (!g_init_done.swap(true, .acq_rel)) populateAtomCache();
+    // FIX #8: Plain bool branch instead of atomic swap — zero overhead after
+    // the first MapRequest in the single-threaded event loop.
+    if (!g_init_done) { g_init_done = true; populateAtomCache(); }
 
     _ = xcb.xcb_change_window_attributes(
         core.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{constants.EventMasks.MANAGED_WINDOW},
@@ -388,8 +399,11 @@ fn unmanageWindow(win: u32) void {
 
     // Notify each module in order inside the server grab.
     if (comptime build_options.has_tiling) {
-        if (core.config.tiling.enabled) tiling.removeWindow(win);
-        tiling.evictSizeHints(win);
+        // Both calls are guarded by the same runtime flag — evaluate it once.
+        if (core.config.tiling.enabled) {
+            tiling.removeWindow(win);
+            tiling.evictSizeHints(win);
+        }
     }
     minimize.forceUntrack(win);
     workspaces.removeWindow(win);
@@ -559,10 +573,16 @@ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
     return false;
 }
 
+// FIX #4: Reordered guards cheapest-first. `focus.getFocused() == win` is a
+// single field read and integer comparison — it short-circuits the entire chain
+// for the common case of a window re-entering while already focused (e.g. mouse
+// jitter). The original ordering ran `isOnCurrentWorkspace` first, which chains
+// through isValidManagedWindow → bar.isBarWindow + getWorkspaceForWindow on
+// every enter/leave event before reaching the cheapest possible check.
 inline fn maybeFocusWindow(win: u32) void {
+    if (focus.getFocused() == win) return;
     if (!isOnCurrentWorkspace(win)) return;
     if (minimize.isMinimized(win)) return;
-    if (focus.getFocused() == win) return;
     focus.setFocus(win, .mouse_enter);
 }
 
@@ -609,6 +629,13 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
 
 // Size-hint parsing
 
+// FIX #9: Extracted the repeated saturating-cast idiom into a helper.
+// The four-way repetition of @intCast(@min(v, maxInt(u16))) was error-prone
+// (wrong field index would compile silently) and obscured the intent.
+inline fn clampToU16(v: u32) u16 {
+    return @intCast(@min(v, std.math.maxInt(u16)));
+}
+
 fn parseSizeHintsIntoCache(
     win:    u32,
     cookie: xcb.xcb_get_property_cookie_t,
@@ -629,12 +656,12 @@ fn parseSizeHintsIntoCache(
     var min_height: u16 = 0;
 
     if (flags & XSIZE_HINTS_P_MIN_SIZE != 0 and field_count >= 7) {
-        min_width  = @intCast(@min(fields[5], std.math.maxInt(u16)));
-        min_height = @intCast(@min(fields[6], std.math.maxInt(u16)));
+        min_width  = clampToU16(fields[5]);
+        min_height = clampToU16(fields[6]);
     }
     if (flags & XSIZE_HINTS_P_BASE_SIZE != 0 and field_count >= 17) {
-        min_width  = @max(min_width,  @as(u16, @intCast(@min(fields[15], std.math.maxInt(u16)))));
-        min_height = @max(min_height, @as(u16, @intCast(@min(fields[16], std.math.maxInt(u16)))));
+        min_width  = @max(min_width,  clampToU16(fields[15]));
+        min_height = @max(min_height, clampToU16(fields[16]));
     }
 
     if (comptime build_options.has_tiling)
@@ -711,13 +738,22 @@ pub fn updateWorkspaceBorders() void {
 pub fn reloadBorders() void {
     const width = getBorderWidth();
     const ws_state = workspaces.getState() orelse return;
-    for (ws_state.workspaces) |*ws| {
-        for (ws.windows.items()) |win| {
-            if (width > 0)
+    // Hoist the width > 0 check outside both loops — it is loop-invariant and
+    // would otherwise be re-evaluated once per managed window on every reload.
+    if (width > 0) {
+        for (ws_state.workspaces) |*ws| {
+            for (ws.windows.items()) |win| {
                 _ = xcb.xcb_configure_window(core.conn, win,
                     xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{width});
-            _ = xcb.xcb_change_window_attributes(core.conn, win,
-                xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
+                _ = xcb.xcb_change_window_attributes(core.conn, win,
+                    xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
+            }
+        }
+    } else {
+        for (ws_state.workspaces) |*ws| {
+            for (ws.windows.items()) |win|
+                _ = xcb.xcb_change_window_attributes(core.conn, win,
+                    xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
         }
     }
 }

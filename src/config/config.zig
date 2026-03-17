@@ -958,7 +958,7 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *cor
     cfg.bar.enabled = get(bool, section, "enabled", true, null, null);
 
     if (section.getString("position")) |pos_str|
-        cfg.bar.vertical_position = core.BarVerticalPosition.fromString(pos_str) orelse .top;
+        cfg.bar.vertical_position = std.meta.stringToEnum(core.BarVerticalPosition, pos_str) orelse .top;
 
     // height accepts a raw pixel value or a percentage of screen height.
     // Null = auto-calculate from font metrics. Resolution happens at bar-init time.
@@ -1114,7 +1114,7 @@ fn parseBarLayout(allocator: std.mem.Allocator, doc: *const parser.Document, cfg
 
         if (layout_section.get("segments")) |sv| if (sv.asArray()) |seg_arr|
             for (seg_arr) |item| if (item.asString()) |s|
-                if (core.BarSegment.fromString(s)) |segment|
+                if (std.meta.stringToEnum(core.BarSegment, s)) |segment|
                     try bar_layout.segments.append(allocator, segment);
 
         if (bar_layout.segments.items.len > 0) {
