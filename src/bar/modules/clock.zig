@@ -30,7 +30,11 @@ fn setTimerState(enable: bool) void {
 /// or -1 if the clock is disabled (telling poll to block indefinitely).
 pub fn pollTimeoutMs() i32 {
     if (!timer_enabled) return -1;
-    const now_ts = std.posix.clock_gettime(.REALTIME) catch return 1000;
+    var now_ts: std.os.linux.timespec = undefined;
+    switch (std.posix.errno(std.os.linux.clock_gettime(.REALTIME, &now_ts))) {
+        .SUCCESS => {},
+        else     => return 1000,
+    }
     const ns_remaining: u64 = @intCast(std.time.ns_per_s - now_ts.nsec);
     // Round up to the nearest millisecond so we never fire slightly early.
     return @intCast((ns_remaining + 999_999) / 1_000_000);
@@ -42,7 +46,8 @@ pub fn updateTimerState() void {
 
 pub fn draw(dc: *drawing.DrawContext, config: core.BarConfig, height: u16, start_x: u16) !u16 {
     // Derive seconds from clock_gettime(REALTIME); sub-second precision is not needed for display.
-    const now_ts = std.posix.clock_gettime(.REALTIME) catch unreachable;
+    var now_ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.REALTIME, &now_ts);
     const sec: i64 = now_ts.sec;
     const time_str = if (sec == last_formatted_sec)
         last_formatted_time[0..19]

@@ -130,7 +130,7 @@ inline fn sigToU8(sig: anytype) u8 {
 /// Async-signal-safe handler: writes the signal number as a byte to the pipe.
 /// write(2) is async-signal-safe on all POSIX platforms.
 fn signalHandler(signo: SigNumType) callconv(.c) void {
-    _ = std.posix.write(signal_pipe[1], &[_]u8{sigToU8(signo)}) catch {};
+    _ = std.os.linux.write(signal_pipe[1], &[_]u8{sigToU8(signo)}, 1);
 }
 
 /// Creates a pipe with O_NONBLOCK | O_CLOEXEC set on both ends.
@@ -150,15 +150,21 @@ fn createPipe() ![2]std.posix.fd_t {
     }
 
     errdefer {
-        std.posix.close(fds[0]);
-        std.posix.close(fds[1]);
+        _ = std.os.linux.close(fds[0]);
+        _ = std.os.linux.close(fds[1]);
     }
 
     const o_nonblock = comptime @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true }));
 
     for (fds) |fd| {
-        _ = try std.posix.fcntl(fd, std.posix.F.SETFD, std.posix.FD_CLOEXEC);
-        _ = try std.posix.fcntl(fd, std.posix.F.SETFL, o_nonblock);
+        switch (std.posix.errno(std.os.linux.fcntl(fd, std.posix.F.SETFD, std.posix.FD_CLOEXEC))) {
+            .SUCCESS => {},
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+        switch (std.posix.errno(std.os.linux.fcntl(fd, std.posix.F.SETFL, o_nonblock))) {
+            .SUCCESS => {},
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
     }
 
     return fds;
@@ -183,7 +189,7 @@ pub fn setupSignalPipe() !void {
 pub fn deinitSignalPipe() void {
     for (&signal_pipe) |*fd| {
         if (fd.* != -1) {
-            std.posix.close(fd.*);
+            _ = std.os.linux.close(fd.*);
             fd.* = -1;
         }
     }
@@ -193,7 +199,13 @@ pub fn deinitSignalPipe() void {
 fn handleSignalPipe(fd: std.posix.fd_t) void {
     var byte: [1]u8 = undefined;
     while (true) {
-        const n = std.posix.read(fd, &byte) catch break;
+        const rc = std.os.linux.read(fd, &byte, 1);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {},
+            .AGAIN, .INTR => break,
+            else => break,
+        }
+        const n = rc;
         if (n == 0) break;
         switch (byte[0]) {
             sigToU8(std.posix.SIG.HUP)  => utils.reload(),
@@ -303,10 +315,14 @@ pub fn run() !void {
     };
 
     while (utils.running.load(.acquire)) {
-        const ready = std.posix.poll(&fds, combinedTimeoutMs()) catch |err| {
-            if (err == error.SignalInterrupt) continue;
-            debug.err("poll error: {s}", .{@errorName(err)});
-            break;
+        const poll_rc = std.os.linux.poll(&fds, fds.len, combinedTimeoutMs());
+        const ready: usize = switch (std.posix.errno(poll_rc)) {
+            .SUCCESS => @intCast(poll_rc),
+            .INTR    => continue,
+            else     => |err| {
+                debug.err("poll error: {s}", .{@errorName(std.posix.unexpectedErrno(err))});
+                break;
+            },
         };
 
         if (ready == 0) {

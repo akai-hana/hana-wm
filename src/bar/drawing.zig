@@ -560,24 +560,32 @@ pub const CarouselPixmap = struct {
 
     /// Blit two copies into `dst_pixmap` using `dst_gc`, clipped to the title
     /// segment [`clip_x`, `clip_x + clip_w`].  No Pango/Cairo — pure XCB blits.
+    ///
+    /// `anchor_x` — screen x of pixmap pixel 0 when offset=0 (= text start, after padding).
+    /// `clip_x`   — left clip boundary (= segment start, before padding).
+    /// `clip_w`   — width of the clip region (from clip_x to segment right edge).
     pub fn blitFrame(
-        self:    *const CarouselPixmap,
-        dst:     u32,
-        dst_gc:  u32,
-        clip_x:  u16,
-        clip_w:  u16,
-        offset:  u16,
-        cycle_w: u16,
+        self:     *const CarouselPixmap,
+        dst:      u32,
+        dst_gc:   u32,
+        anchor_x: u16,
+        clip_x:   u16,
+        clip_w:   u16,
+        offset:   u16,
+        cycle_w:  u16,
     ) void {
-        // Copy A sits at (clip_x - offset); copy B is one cycle_w to its right.
+        // Copy A sits at (anchor_x - offset); copy B is one cycle_w to its right.
         // As offset grows from 0 → cycle_w, A scrolls off left while B enters right.
+        // Clipping to [clip_x, clip_x+clip_w) lets text scroll into the left padding
+        // gap rather than disappearing at the text-start position.
+        const ax: i32 = @intCast(anchor_x);
         const cx: i32 = @intCast(clip_x);
         const cw: i32 = @intCast(clip_w);
         const tw: i32 = @intCast(self.text_w);
         const h        = self.height;
 
         for ([2]i32{ 0, @intCast(cycle_w) }) |shift| {
-            const draw_x: i32 = cx - @as(i32, @intCast(offset)) + shift;
+            const draw_x: i32 = ax - @as(i32, @intCast(offset)) + shift;
 
             // Intersect [draw_x, draw_x+text_w) with [clip_x, clip_x+clip_w).
             const vis_start = @max(draw_x, cx);
@@ -625,7 +633,7 @@ fn getDefaultVisualType(screen: *core.xcb.xcb_screen_t) *core.xcb.xcb_visualtype
     unreachable;
 }
 
-inline fn appendStyle(result: *std.ArrayList(u8), allocator: std.mem.Allocator, token: []const u8) !void {
+inline fn appendStyle(result: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, token: []const u8) !void {
     try result.append(allocator, ' ');
     try result.appendSlice(allocator, token);
 }
@@ -639,7 +647,7 @@ fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const 
     if (font_conversion_cache.?.get(xft_name)) |cached| return cached;
     if (std.mem.indexOfScalar(u8, xft_name, ':') == null) return xft_name;
 
-    var result = std.ArrayList(u8){};
+    var result: std.ArrayListUnmanaged(u8) = .empty;
     try result.ensureTotalCapacity(allocator, xft_name.len);
     errdefer result.deinit(allocator);
 

@@ -122,7 +122,7 @@ pub fn draw(
             defer if (title) |t| allocator.free(t);
             if (title) |t| {
                 try carousel.drawOrScrollTitle(dc, text_x, baseline_y, avail_w,
-                    text_x, avail_w, t, accent, config.fg, single_win, title_invalidated);
+                    text_x, start_x + width - text_x, start_x, width, t, accent, config.fg, single_win, title_invalidated);
             }
         } else {
             // focused_title was pre-fetched on the main thread — zero X11 I/O.
@@ -134,7 +134,7 @@ pub fn draw(
                 }
                 const fg = if (is_focused) config.selected_fg else config.fg;
                 try carousel.drawOrScrollTitle(dc, text_x, baseline_y, avail_w,
-                    text_x, avail_w, focused_title, accent, fg, focused_window, title_invalidated);
+                    text_x, start_x + width - text_x, start_x, width, focused_title, accent, fg, focused_window, title_invalidated);
             }
         }
     } else {
@@ -293,7 +293,7 @@ fn drawSegmentedTitles(
                 // the scroll covers the entire segment width with no static
                 // padding gaps on either side.
                 const scrolled = try carousel.blitSegCarousel(
-                    dc, segment_x, baseline_y, segment_width, text_w,
+                    dc, text_x, baseline_y, avail_w, segment_x, segment_width, text_w,
                     info.title, accent, text_fg, info.window, title_invalidated,
                 );
                 if (!scrolled) {
