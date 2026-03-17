@@ -563,6 +563,19 @@ fn stopBarThread() void {
 
 // Snapshot capture (main thread) 
 
+/// Returns true when the two minimized sets differ in membership, not just count.
+/// A count-only comparison misses the case where the same number of windows are
+/// minimized but different ones (one un-minimized, another minimized in the same frame).
+fn minimizedSetChanged(
+    a: *const std.AutoHashMapUnmanaged(u32, void),
+    b: *const std.AutoHashMapUnmanaged(u32, void),
+) bool {
+    if (a.count() != b.count()) return true;
+    var it = a.keyIterator();
+    while (it.next()) |key| if (!b.contains(key.*)) return true;
+    return false;
+}
+
 /// Populates a pre-allocated BarSnapshot slot in-place.
 /// All variable-length fields use ArrayListUnmanaged that grow only when
 /// their content exceeds the previously allocated capacity.
@@ -603,9 +616,15 @@ fn captureIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot) !voi
     // thread never makes blocking X11 round-trips during rendering.
     // fetchPropertyToBuffer reuses the existing ArrayList buffer, growing
     // only when the title exceeds the previously allocated capacity.
+    // Skip the round-trip entirely when the focused window has not changed and
+    // the title has not been invalidated — the previous title is still correct.
     snap.focused_title.clearRetainingCapacity();
     if (snap.focused_window) |fw| {
-        title_segment.fetchFocusedTitleInto(core.conn, fw, &snap.focused_title, allocator) catch {};
+        if (snap.focused_window != prev.focused_window or snap.title_invalidated) {
+            title_segment.fetchFocusedTitleInto(core.conn, fw, &snap.focused_title, allocator) catch {};
+        } else {
+            snap.focused_title.appendSlice(allocator, prev.focused_title.items) catch {};
+        }
     }
 
     // Compute per-segment dirty flags by comparing against the previous snapshot.
@@ -619,11 +638,12 @@ fn captureIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot) !voi
         snap.ws_current != prev.ws_current or
         !std.mem.eql(bool, snap.ws_has_windows.items, prev.ws_has_windows.items);
     snap.dirty_title =
+        prompt.isActive() or
         snap.focused_window != prev.focused_window or
         snap.title_invalidated or
         !std.mem.eql(u8,  snap.focused_title.items,  prev.focused_title.items)   or
         !std.mem.eql(u32, snap.current_ws_wins.items, prev.current_ws_wins.items) or
-        snap.minimized_set.count() != prev.minimized_set.count();
+        minimizedSetChanged(&snap.minimized_set, &prev.minimized_set);
 }
 
 /// Posts a snapshot to the bar thread. `wait = true` blocks until the draw
@@ -1038,6 +1058,7 @@ pub fn setBarState(action: BarAction) void {
 pub fn updateIfDirty() !void {
     const s = state orelse return;
     if (!s.visible) return;
+    if (prompt.consumeRedrawRequest()) { g_channel.force_dirty_all = true; s.setDirty(); }
     if (s.dirty) {
         submitDraw(false);
         s.dirty = false;

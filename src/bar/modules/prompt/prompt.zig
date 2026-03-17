@@ -66,8 +66,16 @@ const DrunState = struct {
     // Ghost text (the completion suffix shown dimmed after the cursor).
     ghost_buf: []u8  = &.{},
     ghost_len: usize = 0,
+    // True when the current buffer contains at least one space.  Maintained
+    // incrementally so updateGhost can skip the full buffer scan on every call.
+    has_space: bool = false,
 
     blink_visible: bool = true,
+
+    // Caret geometry cached after the first insert-mode draw.  Font metrics and
+    // bar height are constant between reloads, so these never need clearing.
+    cached_caret_top: ?u16 = null,
+    cached_caret_h:   ?u16 = null,
 
     // Command history (newest at index 0) 
     hist_entries: []u8  = &.{},
@@ -97,6 +105,19 @@ pub fn blinkPollTimeoutMs() i32 {
 /// where blinkPollTimeoutMs() >= 0, then trigger a bar redraw.
 pub fn blinkTick() void {
     g.blink_visible = !g.blink_visible;
+}
+
+/// Set by handleKeyPress, activate, and deactivate to notify the bar that the
+/// prompt area needs to be redrawn.  Consumed (read + cleared) by bar.updateIfDirty
+/// to avoid a circular import between prompt ↔ bar.
+var redraw_pending: bool = false;
+
+/// Returns true and clears the flag if a prompt-driven redraw is outstanding.
+/// Call once per event-loop iteration from bar.updateIfDirty.
+pub fn consumeRedrawRequest() bool {
+    const v = redraw_pending;
+    redraw_pending = false;
+    return v;
 }
 
 pub fn init(allocator: std.mem.Allocator, conn: *xcb.xcb_connection_t) !void {
@@ -140,7 +161,11 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     // Ctrl-modified keys 
     if (ctrl_held) {
         const action = vim.handleCtrl(&g.vim, sym);
+        const prev_len = g.vim.len;
         handleAction(action);
+        if (g.vim.len != prev_len)
+            g.has_space = std.mem.indexOfScalar(u8, g.vim.buf[0..g.vim.len], ' ') != null;
+        redraw_pending = true;
         return true;
     }
 
@@ -154,6 +179,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
             }
         }
         g.blink_visible = true;
+        redraw_pending = true;
         return true;
     }
 
@@ -164,9 +190,13 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
         .visual  => vim.handleVisual(&g.vim, sym),
         .replace => vim.handleReplace(&g.vim, sym),
     };
+    const prev_len = g.vim.len;
     handleAction(action);
+    if (g.vim.len != prev_len)
+        g.has_space = std.mem.indexOfScalar(u8, g.vim.buf[0..g.vim.len], ' ') != null;
     updateGhost();
     g.blink_visible = true;
+    redraw_pending = true;
     return true;
 }
 
@@ -241,19 +271,30 @@ fn resetVimState(vs: *vim.VimState) void {
 
 fn activate() void {
     resetVimState(&g.vim);  // reset all editing state, preserve heap allocations
-    g.ghost_len        = 0;
+    g.ghost_len = 0;
+    g.has_space = false;
     // Load completions and history on first activation.
     if (g.comp_count == 0) loadCompletions();
     if (!g.hist_loaded) loadHistory();
-    g.active        = true;
     g.blink_visible = true;
 
     const cookie = xcb.xcb_grab_keyboard(
         core.conn, 0, core.root, xcb.XCB_CURRENT_TIME,
         xcb.XCB_GRAB_MODE_ASYNC, xcb.XCB_GRAB_MODE_ASYNC,
     );
-    xcb.xcb_discard_reply(core.conn, cookie.sequence);
+    const grab_reply = xcb.xcb_grab_keyboard_reply(core.conn, cookie, null);
+    if (grab_reply == null) {
+        debug.warn("drun: xcb_grab_keyboard_reply returned null — aborting activation", .{});
+        return;
+    }
+    defer std.c.free(grab_reply);
+    if (grab_reply.*.status != xcb.XCB_GRAB_STATUS_SUCCESS) {
+        debug.warn("drun: keyboard grab failed (status {}) — aborting activation", .{grab_reply.*.status});
+        return;
+    }
+    g.active = true;
     _ = xcb.xcb_flush(core.conn);
+    redraw_pending = true;
 }
 
 fn deactivate() void {
@@ -263,6 +304,7 @@ fn deactivate() void {
     vim.resetNormalSub(&g.vim);
     _ = xcb.xcb_ungrab_keyboard(core.conn, xcb.XCB_CURRENT_TIME);
     _ = xcb.xcb_flush(core.conn);
+    redraw_pending = true;
 }
 
 // PATH completion 
@@ -304,7 +346,7 @@ fn loadCompletions() void {
 
     // Sort for O(log n) binary search in updateGhost.
     const SLOT = MAX_COMP_LEN + 1;
-    const entries = @as([*][SLOT]u8, @ptrCast(&g.comp_names))[0..g.comp_count];
+    const entries = @as([*][SLOT]u8, @ptrCast(g.comp_names.ptr))[0..g.comp_count];
     std.sort.pdq([SLOT]u8, entries, {}, struct {
         fn lt(_: void, a: [SLOT]u8, b: [SLOT]u8) bool {
             return std.mem.order(u8, std.mem.sliceTo(&a, 0), std.mem.sliceTo(&b, 0)) == .lt;
@@ -351,7 +393,7 @@ fn updateGhost() void {
 
     if (g.vim.mode != .insert) return;
     if (g.vim.len == 0 or g.vim.cursor != g.vim.len) return;
-    if (std.mem.indexOfScalar(u8, g.vim.buf[0..g.vim.len], ' ') != null) return;
+    if (g.has_space) return;
 
     const prefix = g.vim.buf[0..g.vim.len];
 
@@ -476,16 +518,11 @@ fn histLoadFile(fp: *c.FILE) void {
     const text = fbuf[0..n_read];
 
     const MAX_LINES = MAX_HIST * 2;
-    const line_starts: []usize = blk: {
-        const ptr = c.malloc(@sizeOf(usize) * MAX_LINES) orelse return;
-        break :blk @as([*]usize, @ptrCast(@alignCast(ptr)))[0..MAX_LINES];
-    };
-    defer c.free(line_starts.ptr);
-    const line_ends: []usize = blk: {
-        const ptr = c.malloc(@sizeOf(usize) * MAX_LINES) orelse return;
-        break :blk @as([*]usize, @ptrCast(@alignCast(ptr)))[0..MAX_LINES];
-    };
-    defer c.free(line_ends.ptr);
+    const lines_raw = c.malloc(@sizeOf(usize) * MAX_LINES * 2) orelse return;
+    defer c.free(lines_raw);
+    const lines_buf  = @as([*]usize, @ptrCast(@alignCast(lines_raw)));
+    const line_starts = lines_buf[0..MAX_LINES];
+    const line_ends   = lines_buf[MAX_LINES .. MAX_LINES * 2];
 
     var n_lines: usize = 0;
     var pos: usize = 0;
@@ -500,6 +537,18 @@ fn histLoadFile(fp: *c.FILE) void {
     }
 
     var out_line: [MAX_HIST_LINE]u8 = undefined;
+
+    // Build a hash set of already-loaded entries so duplicate detection is O(1)
+    // instead of the previous O(n²) inner scan.  Pre-populate with any entries
+    // that were prepended by earlier histLoadFile calls in the same session.
+    var seen = std.AutoHashMapUnmanaged(u64, void){};
+    defer seen.deinit(g.allocator);
+    for (0..g.hist_count) |di| {
+        const dslot = di * (MAX_HIST_LINE + 1);
+        const existing = std.mem.sliceTo(g.hist_entries[dslot .. dslot + MAX_HIST_LINE + 1], 0);
+        seen.put(g.allocator, std.hash.Wyhash.hash(0, existing), {}) catch {};
+    }
+
     var li: usize = n_lines;
     while (li > 0) {
         li -= 1;
@@ -507,16 +556,10 @@ fn histLoadFile(fp: *c.FILE) void {
         const line = text[line_starts[li]..line_ends[li]];
         const len = histParseLine(line, &out_line);
         if (len == 0) continue;
-        // Skip if this command already exists anywhere in history (not just at [0]).
-        var dup = false;
-        var di: usize = 0;
-        while (di < g.hist_count) : (di += 1) {
-            const dslot = di * (MAX_HIST_LINE + 1);
-            const prev  = std.mem.sliceTo(g.hist_entries[dslot .. dslot + MAX_HIST_LINE + 1], 0);
-            if (std.mem.eql(u8, prev, out_line[0..len])) { dup = true; break; }
-        }
-        if (dup) continue;
+        const h = std.hash.Wyhash.hash(0, out_line[0..len]);
+        if (seen.contains(h)) continue;
         histPrepend(out_line[0..len]);
+        seen.put(g.allocator, h, {}) catch {};
     }
 }
 
@@ -779,17 +822,20 @@ fn drawActive(
         }
 
     } else if (g.vim.mode == .insert) {
-        // INSERT mode: blinking 2-px caret, text NOT consumed by cursor 
-        const pre_text = g.vim.buf[0..g.vim.cursor];
+        // INSERT mode: blinking 2-px caret, text NOT consumed by cursor
+        if (pre_cur_text.len > 0)
+            try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, pre_cur_text, fg);
 
-        if (pre_text.len > 0)
-            try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, pre_text, fg);
-
-        // Blinking caret sized to actual font height.
-        const asc, const desc = dc.getMetrics();
-        const font_h: u16    = @intCast(@max(0, @as(i32, asc) + @as(i32, desc)));
-        const caret_top: u16 = (height -| font_h) / 2;
-        const caret_h: u16   = @min(font_h, height);
+        // Blinking caret geometry — cached since font metrics and bar height are
+        // constant between reloads.
+        if (g.cached_caret_top == null) {
+            const asc, const desc = dc.getMetrics();
+            const font_h: u16 = @intCast(@max(0, @as(i32, asc) + @as(i32, desc)));
+            g.cached_caret_top = (height -| font_h) / 2;
+            g.cached_caret_h   = @min(font_h, height);
+        }
+        const caret_top = g.cached_caret_top.?;
+        const caret_h   = g.cached_caret_h.?;
 
         if (g.blink_visible and px >= @as(i32, text_left_x) and px < @as(i32, scroll_end_x)) {
             dc.fillRect(@intCast(px), caret_top, CURSOR_WIDTH, caret_h, accent);
@@ -843,5 +889,6 @@ fn drawActive(
         }
     }
 
+    dc.flushRect(start_x, width);
     return end_x;
 }
