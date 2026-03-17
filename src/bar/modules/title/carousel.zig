@@ -1,4 +1,5 @@
-//! Carousel / ticker logic for the title segment.
+//! Carousel / ticker logic for the title segment, including monitor
+//! refresh-rate detection (previously hertz.zig, now inlined here).
 //!
 //! A "carousel" is a pre-rendered XCB pixmap that is wider than the available
 //! area.  Every frame, a window into that pixmap is blitted via xcb_copy_area
@@ -30,13 +31,124 @@
 const std     = @import("std");
 const defs    = @import("defs");
 const drawing = @import("drawing");
-const hertz   = @import("hertz");
+const core    = @import("core");
+const xcb     = core.xcb;
+
+// ── Hertz — monitor refresh-rate detection (inlined from hertz.zig) ──────────
+//
+// Usage pattern (unchanged from when this lived in a separate file):
+//   carousel.ensureDetected(conn);   // once per draw cycle — cheap no-op after first call
+//   carousel.invalidate();           // call on RRScreenChangeNotify to force re-detect
+//   carousel.getCached();            // reads the cached value; never blocks
+//
+// The rest of the file treats the Hz value through the private helpers below;
+// external callers (title.zig, bar event loop) use only the three pub functions.
+
+/// Fallback rate used when RandR is unavailable or returns an invalid value.
+pub const DEFAULT_HZ: f64 = 60.0;
+
+var g_hz:       f64  = DEFAULT_HZ;
+var g_hz_ready: bool = false;
+
+/// Return the cached refresh rate (Hz).
+/// Always safe to call; returns DEFAULT_HZ if detection has not yet run.
+pub fn getCached() f64 {
+    return g_hz;
+}
+
+/// Detect and cache the monitor refresh rate.
+/// Subsequent calls are a single branch and a return — zero X11 I/O.
+pub fn ensureDetected(conn: *xcb.xcb_connection_t) void {
+    if (g_hz_ready) return;
+    g_hz_ready = true;
+    g_hz       = hzDetect(conn);
+}
+
+/// Force re-detection on the next ensureDetected() call.
+/// Call this when handling an RRScreenChangeNotify event so that a monitor
+/// hotplug or mode switch is picked up on the next draw cycle.
+pub fn invalidate() void {
+    g_hz_ready = false;
+}
+
+fn hzGetRootWindow(conn: *xcb.xcb_connection_t) u32 {
+    const setup = xcb.xcb_get_setup(conn);
+    var it      = xcb.xcb_setup_roots_iterator(setup);
+    if (it.rem > 0) return it.data.*.root;
+    return 0;
+}
+
+/// Read the refresh rate of the first active CRTC via
+/// xcb_randr_get_screen_resources_current + xcb_randr_get_crtc_info.
+/// Returns null on any failure.
+fn hzDetectViaCrtc(conn: *xcb.xcb_connection_t, root: u32) ?f64 {
+    const rc = xcb.xcb_randr_get_screen_resources_current(conn, root);
+    const rr = xcb.xcb_randr_get_screen_resources_current_reply(conn, rc, null) orelse
+        return null;
+    defer std.c.free(rr);
+
+    const mode_it_len = xcb.xcb_randr_get_screen_resources_current_modes_length(rr);
+    const mode_it_ptr = xcb.xcb_randr_get_screen_resources_current_modes(rr);
+    if (mode_it_len <= 0 or mode_it_ptr == null) return null;
+    const modes = mode_it_ptr.?[0..@intCast(mode_it_len)];
+
+    const crtc_it_len = xcb.xcb_randr_get_screen_resources_current_crtcs_length(rr);
+    const crtc_it_ptr = xcb.xcb_randr_get_screen_resources_current_crtcs(rr);
+    if (crtc_it_len <= 0 or crtc_it_ptr == null) return null;
+    const crtcs = crtc_it_ptr.?[0..@intCast(crtc_it_len)];
+
+    for (crtcs) |crtc| {
+        const cc = xcb.xcb_randr_get_crtc_info(conn, crtc, rr.*.config_timestamp);
+        const cr = xcb.xcb_randr_get_crtc_info_reply(conn, cc, null) orelse continue;
+        defer std.c.free(cr);
+
+        const mode_id = cr.*.mode;
+        if (mode_id == 0) continue; // CRTC disabled
+
+        for (modes) |m| {
+            if (m.id != mode_id) continue;
+            const htotal: u64 = m.htotal;
+            const vtotal: u64 = m.vtotal;
+            if (htotal == 0 or vtotal == 0) break;
+            const hz: f64 = @as(f64, @floatFromInt(m.dot_clock)) /
+                @as(f64, @floatFromInt(htotal * vtotal));
+            if (hz > 0.0) return hz;
+            break;
+        }
+    }
+    return null;
+}
+
+/// Attempt to read the current refresh rate via xcb_randr_get_screen_info.
+/// Falls back to CRTC mode data when rate == 0, then to DEFAULT_HZ.
+fn hzDetect(conn: *xcb.xcb_connection_t) f64 {
+    if (!@hasDecl(xcb, "xcb_randr_get_screen_info")) return DEFAULT_HZ;
+
+    const root = hzGetRootWindow(conn);
+    if (root == 0) return DEFAULT_HZ;
+
+    const cookie = xcb.xcb_randr_get_screen_info(conn, root);
+    const reply  = xcb.xcb_randr_get_screen_info_reply(conn, cookie, null) orelse
+        return DEFAULT_HZ;
+    defer std.c.free(reply);
+
+    const rate = reply.*.rate;
+    if (rate > 0) return @floatFromInt(rate);
+
+    // Some drivers report rate=0 but supply correct data via get_screen_resources_current.
+    if (@hasDecl(xcb, "xcb_randr_get_screen_resources_current"))
+        if (hzDetectViaCrtc(conn, root)) |hz| return hz;
+
+    return DEFAULT_HZ;
+}
+
+// ── End of inlined hertz logic ────────────────────────────────────────────────
 
 // Constants
 
-/// Horizontal scroll speed in pixels per second (≈ 150 px/s).
-/// Divided by the monitor Hz to get pixels-per-frame at detection time.
-pub const CAROUSEL_PX_PER_S: f64 = 125.0;
+/// Default horizontal scroll speed in pixels per second.
+/// Overridable at runtime via setScrollSpeed().
+pub const DEFAULT_SCROLL_SPEED: f64 = 125.0;
 
 /// Pixel gap between the end of one text copy and the start of the next.
 pub const CAROUSEL_GAP_PX: u16 = 60;
@@ -85,6 +197,17 @@ const SegEntry = struct {
     window: u32,
 };
 
+// Runtime-configurable carousel parameters
+
+/// Scroll speed in pixels per second.  Defaults to DEFAULT_SCROLL_SPEED.
+/// Changed via setScrollSpeed() on config load / reload.
+var g_scroll_speed: f64 = DEFAULT_SCROLL_SPEED;
+
+/// When > 0, overrides the auto-detected monitor Hz for carousel frame
+/// quantisation.  0 means "use the value from getCached()".
+/// Changed via setRefreshRateOverride() on config load / reload.
+var g_refresh_rate_override: f64 = 0.0;
+
 // Module state
 
 /// Active single-window carousel.  Non-null iff the title segment is scrolling
@@ -123,6 +246,36 @@ pub fn setCarouselEnabled(enabled: bool) void {
 /// Returns true when the carousel feature is currently enabled.
 pub fn isCarouselEnabled() bool {
     return g_carousel_enabled;
+}
+
+/// Set the scroll speed in pixels per second.
+///
+/// Values ≤ 0 are silently clamped to DEFAULT_SCROLL_SPEED.
+/// The change takes effect on the next carousel tick — no pixmap rebuild
+/// is needed because speed only affects the offset calculation.
+pub fn setScrollSpeed(px_per_s: f64) void {
+    g_scroll_speed = if (px_per_s > 0.0) px_per_s else DEFAULT_SCROLL_SPEED;
+}
+
+/// Returns the current scroll speed in pixels per second.
+pub fn getScrollSpeed() f64 {
+    return g_scroll_speed;
+}
+
+/// Override the refresh rate used for carousel frame quantisation.
+///
+/// Pass a positive Hz value to fix the rendering cadence regardless of
+/// what the monitor reports (useful for capping the carousel on high-Hz
+/// displays or forcing a specific rate).  Pass 0.0 to restore automatic
+/// detection via getCached().
+pub fn setRefreshRateOverride(hz: f64) void {
+    g_refresh_rate_override = if (hz > 0.0) hz else 0.0;
+}
+
+/// Returns the active refresh rate: the override when set, otherwise the
+/// auto-detected monitor rate.
+pub fn getEffectiveRefreshRate() f64 {
+    return if (g_refresh_rate_override > 0.0) g_refresh_rate_override else getCached();
 }
 
 // Public API — lifecycle
@@ -381,17 +534,21 @@ fn nowMs() i64 {
 /// The offset is quantised to monitor frame boundaries:
 ///
 ///   frame_duration_ms = 1000.0 / hz
-///   px_per_frame      = CAROUSEL_PX_PER_S / hz
+///   px_per_frame      = g_scroll_speed / hz
 ///   frame_num         = floor(elapsed_ms / frame_duration_ms)
 ///   offset            = (frame_num × px_per_frame) mod cycle_w
 ///
 /// Quantising to frames aligns visual updates with v-blank and prevents the
 /// partial-frame tearing that arises when the bar redraws at an arbitrary
 /// sub-frame moment.
+///
+/// `hz` is taken from g_refresh_rate_override when set, otherwise from
+/// getCached().  `px_per_frame` uses the runtime-configurable
+/// g_scroll_speed rather than a baked-in constant.
 fn carouselOffset(start_ms: i64, cycle_w: u16) u16 {
-    const hz           = hertz.getCached();
+    const hz           = if (g_refresh_rate_override > 0.0) g_refresh_rate_override else getCached();
     const frame_ms     = 1000.0 / hz;
-    const px_per_frame = CAROUSEL_PX_PER_S / hz;
+    const px_per_frame = g_scroll_speed / hz;
 
     const elapsed_ms = @as(f64, @floatFromInt(nowMs() - start_ms));
     const frame_num  = @floor(elapsed_ms / frame_ms);

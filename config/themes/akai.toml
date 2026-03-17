@@ -53,6 +53,21 @@ transparency = 0% # [0.0 - 1.0] / [0% - 100%]
 # drun command runner prompt string (default: "run: ")
 drun_prompt = "❯ "
 
+# ── Carousel (scrolling title) ───────────────────────────────────────────────
+# carousel_enabled: set to false to disable scrolling entirely and use a
+#   static ellipsis when the title overflows.
+carousel_enabled = true
+
+# scroll_speed: how many pixels the title advances per second.
+# Higher = faster scroll.  Minimum accepted value is 1.
+scroll_speed = 125
+
+# carousel_refresh_rate: frame-quantisation rate in Hz.
+# 0 = auto-detect from the monitor via RandR (recommended).
+# Set to a specific value (e.g. 30) to cap the carousel cadence on
+# high-Hz displays or to match a custom redraw interval.
+carousel_refresh_rate = 0  # [0 = auto | 1-N = Hz]
+
 # Main color palette
 ## Bar
 bg = "#0d0d14"
