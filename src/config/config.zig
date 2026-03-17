@@ -1,11 +1,12 @@
 //! Configuration interpreter — loads, parses, and validates TOML config files.
 
 const std       = @import("std");
-const core = @import("core");
+const core      = @import("core");
 const debug     = @import("debug");
 const parser    = @import("parser");
 const xkbcommon = @import("xkbcommon");
-const constants  = @import("constants");
+const constants = @import("constants");
+const carousel  = @import("carousel");
 
 const parseColor = parser.parseColor;
 
@@ -1049,6 +1050,27 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *cor
         if (c.get("drun_fg"))           |_| cfg.bar.drun_fg           = getColor(c, "drun_fg",           cfg.bar.fg);
         if (c.get("drun_prompt_color")) |_| cfg.bar.drun_prompt_color = getColor(c, "drun_prompt_color", cfg.bar.accent_color);
     }
+
+    // ── Carousel settings ────────────────────────────────────────────────────
+    // carousel_enabled (bool, default true):
+    //   When false the title segment falls back to static ellipsis on overflow
+    //   and all carousel pixmaps are freed immediately.
+    //
+    // scroll_speed (u16 px/s, default 125):
+    //   How many pixels the text advances per second.  Higher values scroll
+    //   faster; the minimum accepted value is 1.
+    //
+    // carousel_refresh_rate (u16 Hz, default 0 = auto):
+    //   Fixes the frame-quantisation rate used by the carousel.  When 0 the
+    //   rate is auto-detected from the monitor via RandR.  Set to a lower value
+    //   (e.g. 30) to cap the rendering cadence on high-Hz displays.
+    carousel.setCarouselEnabled(get(bool, section, "carousel_enabled", true, null, null));
+    carousel.setScrollSpeed(@as(f64, @floatFromInt(
+        get(u16, section, "scroll_speed", 125, 1, null)
+    )));
+    carousel.setRefreshRateOverride(@as(f64, @floatFromInt(
+        get(u16, section, "carousel_refresh_rate", 0, null, null)
+    )));
 }
 
 fn parseWorkspaceIcons(allocator: std.mem.Allocator, section: *const parser.Section, cfg: *core.Config) !void {

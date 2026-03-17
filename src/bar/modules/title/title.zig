@@ -6,7 +6,7 @@
 //! call from the bar rendering thread.
 //!
 //! Carousel logic lives in carousel.zig.
-//! Monitor refresh-rate detection lives in hertz.zig.
+//! Monitor refresh-rate detection lives in carousel.zig.
 
 const std      = @import("std");
 const core     = @import("core");
@@ -14,7 +14,6 @@ const xcb      = core.xcb;
 const drawing  = @import("drawing");
 const utils    = @import("utils");
 const carousel = @import("carousel");
-const hertz    = @import("hertz");
 
 // Atom cache
 
@@ -81,7 +80,7 @@ pub fn draw(
 ) !u16 {
     // Ensure the monitor refresh rate is detected before any carousel call.
     // This is a no-op on every call after the first.
-    hertz.ensureDetected(conn);
+    carousel.ensureDetected(conn);
 
     const window_count = current_ws_wins.len;
 
