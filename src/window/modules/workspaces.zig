@@ -59,7 +59,7 @@ pub const Workspace = struct {
     last_focused: ?u32 = null,
 
     pub fn init(allocator: std.mem.Allocator, id: u8, name: []const u8, default_layout: tiling.Layout) Workspace {
-        return .{ .id = id, .windows = Tracking.init(allocator), .name = name, .layout = default_layout };
+        return .{ .id = id, .windows = .{ .allocator = allocator }, .name = name, .layout = default_layout };
     }
 
     pub fn deinit(self: *Workspace) void { self.windows.deinit(); }
@@ -348,7 +348,9 @@ pub inline fn getWindowWorkspaceMask(win: u32) ?u64 {
 /// True when workspace `ws_idx` is set in `win`'s tag bitmask.
 pub inline fn isWindowOnWorkspace(win: u32, ws_idx: u8) bool {
     const mask = getWindowWorkspaceMask(win) orelse return false;
-    if (ws_idx >= 64) return false;
+    // ws_idx is always < 20 (workspace count cap); >= 64 is unreachable.
+    // Assert in debug builds rather than silently returning false at runtime.
+    std.debug.assert(ws_idx < 64);
     return (mask >> @intCast(ws_idx)) & 1 != 0;
 }
 
@@ -510,11 +512,11 @@ fn applyPostSwitchFocus(new_ws: u8, new_ws_obj: *const Workspace, ptr_cookie: xc
     const old_focused = focus.getFocused();
     focus.setFocused(focus_target);
 
-    window.updateFocusBorders(old_focused, focus.getFocused());
+    window.updateFocusBorders(old_focused, focus_target);
 
     if (old_focused) |old_win| window.grabButtons(old_win, false);
 
-    if (focus.getFocused()) |new_win| {
+    if (focus_target) |new_win| {
         window.grabButtons(new_win, true);
 
         const input_model = utils.getInputModelCached(core.conn, new_win);
@@ -524,7 +526,7 @@ fn applyPostSwitchFocus(new_ws: u8, new_ws_obj: *const Workspace, ptr_cookie: xc
     }
 
     _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
-        focus.getFocused() orelse core.root, focus.getLastEventTime());
+        focus_target orelse core.root, focus.getLastEventTime());
 }
 
 fn executeSwitch(old_ws: u8, new_ws: u8) void {

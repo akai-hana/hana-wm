@@ -2,7 +2,6 @@
 
 // Zig stdlib
 const std        = @import("std");
-const builtin    = @import("builtin");
 const fullscreen = @import("fullscreen");
 
 // core/
@@ -133,38 +132,16 @@ fn signalHandler(signo: SigNumType) callconv(.c) void {
     _ = std.os.linux.write(signal_pipe[1], &[_]u8{sigToU8(signo)}, 1);
 }
 
-/// Creates a pipe with O_NONBLOCK | O_CLOEXEC set on both ends.
+/// Creates a pipe with O_NONBLOCK | O_CLOEXEC set on both ends atomically via pipe2(2).
 fn createPipe() ![2]std.posix.fd_t {
     var fds: [2]std.posix.fd_t = undefined;
 
-    const rc = if (builtin.os.tag == .linux)
-        std.os.linux.pipe(&fds)
-    else
-        std.os.system.pipe(&fds);
-
-    switch (std.posix.errno(rc)) {
+    const flags = std.os.linux.O{ .CLOEXEC = true, .NONBLOCK = true };
+    switch (std.posix.errno(std.os.linux.pipe2(&fds, flags))) {
         .SUCCESS => {},
         .MFILE   => return error.ProcessFdQuotaExceeded,
         .NFILE   => return error.SystemFdQuotaExceeded,
         else     => |err| return std.posix.unexpectedErrno(err),
-    }
-
-    errdefer {
-        _ = std.os.linux.close(fds[0]);
-        _ = std.os.linux.close(fds[1]);
-    }
-
-    const o_nonblock = comptime @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true }));
-
-    for (fds) |fd| {
-        switch (std.posix.errno(std.os.linux.fcntl(fd, std.posix.F.SETFD, std.posix.FD_CLOEXEC))) {
-            .SUCCESS => {},
-            else => |err| return std.posix.unexpectedErrno(err),
-        }
-        switch (std.posix.errno(std.os.linux.fcntl(fd, std.posix.F.SETFL, o_nonblock))) {
-            .SUCCESS => {},
-            else => |err| return std.posix.unexpectedErrno(err),
-        }
     }
 
     return fds;
@@ -205,8 +182,6 @@ fn handleSignalPipe(fd: std.posix.fd_t) void {
             .AGAIN, .INTR => break,
             else => break,
         }
-        const n = rc;
-        if (n == 0) break;
         switch (byte[0]) {
             sigToU8(std.posix.SIG.HUP)  => utils.reload(),
             sigToU8(std.posix.SIG.TERM),
@@ -297,9 +272,8 @@ fn handleConfigReload() !void {
 
 /// Returns the shortest timeout across all subsystems that need periodic wakeups,
 /// or -1 if nothing needs one right now (block indefinitely).
-fn combinedTimeoutMs() i32 {
+fn combinedTimeoutMs(blink_ms: i32) i32 {
     const clock_ms = bar.pollTimeoutMs();
-    const blink_ms = prompt.blinkPollTimeoutMs();
     if (clock_ms < 0) return blink_ms;
     if (blink_ms < 0) return clock_ms;
     return @min(clock_ms, blink_ms);
@@ -315,7 +289,8 @@ pub fn run() !void {
     };
 
     while (utils.running.load(.acquire)) {
-        const poll_rc = std.os.linux.poll(&fds, fds.len, combinedTimeoutMs());
+        const blink_ms = prompt.blinkPollTimeoutMs();
+        const poll_rc = std.os.linux.poll(&fds, fds.len, combinedTimeoutMs(blink_ms));
         const ready: usize = switch (std.posix.errno(poll_rc)) {
             .SUCCESS => @intCast(poll_rc),
             .INTR    => continue,
@@ -327,7 +302,7 @@ pub fn run() !void {
 
         if (ready == 0) {
             bar.checkClockUpdate();
-            if (prompt.blinkPollTimeoutMs() >= 0) {
+            if (blink_ms >= 0) {
                 prompt.blinkTick();
                 bar.submitDraw(false);
             }

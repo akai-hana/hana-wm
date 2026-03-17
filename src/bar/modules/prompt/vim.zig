@@ -184,8 +184,10 @@ pub const VimState = struct {
     // Undo / redo 
     undo_stack: []UndoEntry = &.{},
     undo_top:   usize       = 0,
+    undo_base:  usize       = 0,  // ring-buffer start index
     redo_stack: []UndoEntry = &.{},
     redo_top:   usize       = 0,
+    redo_base:  usize       = 0,  // ring-buffer start index
 
     // Dot repeat 
     dot:              DotRecord = .none,
@@ -355,6 +357,19 @@ fn tryArmFindPrefix(vs: *VimState, sym: xcb.xcb_keysym_t) bool {
     return false;
 }
 
+/// Shared g-prefix position resolver used by handleNormal and handleVisual.
+/// Returns the destination position for ge/gE/gg/g0/g$/gEnd, or null for
+/// unrecognised symbols.
+fn resolveGPrefixPos(vs: *VimState, sym: xcb.xcb_keysym_t, cnt: u32) ?usize {
+    return switch (sym) {
+        'e'               => motionWordEndBack(vs, false, cnt),
+        'E'               => motionWordEndBack(vs, true,  cnt),
+        'g', '0', XK_Home => @as(usize, 0),
+        '$', XK_End       => vs.len,
+        else              => null,
+    };
+}
+
 pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     // 1. Pending r{c} 
     if (vs.nsub.pending_r) {
@@ -395,14 +410,8 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     // 3. Pending g-prefix 
     if (vs.nsub.pending_g) {
         const cnt = effCount(vs);
-        const mr_opt: ?MotionResult = switch (sym) {
-            'e'     => MotionResult{ .pos = motionWordEndBack(vs, false, cnt), .inclusive = true },
-            'E'     => MotionResult{ .pos = motionWordEndBack(vs, true,  cnt), .inclusive = true },
-            'g', '0', XK_Home => MotionResult{ .pos = 0 },
-            '$', XK_End       => MotionResult{ .pos = vs.len },
-            else    => null,
-        };
-        if (mr_opt) |mr| {
+        if (resolveGPrefixPos(vs, sym, cnt)) |pos| {
+            const mr = MotionResult{ .pos = pos, .inclusive = (sym == 'e' or sym == 'E') };
             if (vs.nsub.op != 0) {
                 vs.dot = .{ .op_motion = .{ .op = vs.nsub.op, .op_count = vs.nsub.op_count,
                     .motion_count = vs.nsub.count, .motion_sym = sym, .g_prefix = true } };
@@ -453,10 +462,12 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     // 7. Digit accumulation 
     if (tryAccumulateDigit(vs, sym)) return .none;
 
+    // Resolved once here; used by steps 8, 9, and 12 below.
+    const cnt = effCount(vs);
+
     // 8. ; / , (repeat last find) 
     if (sym == ';' or sym == ',') {
         if (vs.last_find_kind != 0) {
-            const cnt  = effCount(vs);
             const kind = if (sym == ',') reverseFindKind(vs.last_find_kind) else vs.last_find_kind;
             const mr   = motionFind(vs, kind, vs.last_find_ch, cnt);
             if (vs.nsub.op != 0) doOp(vs, vs.nsub.op, mr) else setCursor(vs, mr);
@@ -466,7 +477,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     }
 
     // 9. Simple motions 
-    if (resolveSimpleMotion(vs, sym, effCount(vs))) |mr| {
+    if (resolveSimpleMotion(vs, sym, cnt)) |mr| {
         if (vs.nsub.op != 0) {
             vs.dot = .{ .op_motion = .{ .op = vs.nsub.op, .op_count = vs.nsub.op_count,
                 .motion_count = vs.nsub.count, .motion_sym = sym } };
@@ -506,8 +517,6 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     if (sym == 0x27)                 { vs.nsub.pending_apos = true; return .none; } // apostrophe
 
     // 12. Single-key commands 
-    const cnt = effCount(vs);
-
     switch (sym) {
 
         XK_Escape => {
@@ -623,15 +632,8 @@ pub fn handleVisual(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
 
     // Resolve pending g-prefix.
     if (vs.nsub.pending_g) {
-        const cnt = effCount(vs);
-        const pos: ?usize = switch (sym) {
-            'e'     => motionWordEndBack(vs, false, cnt),
-            'E'     => motionWordEndBack(vs, true,  cnt),
-            'g', '0', XK_Home => @as(usize, 0),
-            '$', XK_End       => vs.len,
-            else    => null,
-        };
-        if (pos) |p| setCursor(vs, MotionResult{ .pos = p });
+        if (resolveGPrefixPos(vs, sym, effCount(vs))) |pos|
+            setCursor(vs, MotionResult{ .pos = pos });
         resetNormalSub(vs);
         return .none;
     }
@@ -869,10 +871,10 @@ fn motionFind(vs: *VimState, kind: u8, ch: u8, cnt: u32) MotionResult {
     return .{ .pos = p, .inclusive = (kind == 'f' or kind == 'F') };
 }
 
+/// f↔F and t↔T differ only in bit 5 (0x20 = lowercase flag).
 fn reverseFindKind(kind: u8) u8 {
     return switch (kind) {
-        'f' => 'F', 'F' => 'f',
-        't' => 'T', 'T' => 't',
+        'f', 'F', 't', 'T' => kind ^ 0x20,
         else => kind,
     };
 }
@@ -1192,56 +1194,68 @@ fn ctrlAdjustNumber(vs: *VimState, delta: i64) void {
 // Undo / redo 
 
 /// Push the current buffer state onto the undo stack unconditionally.
-/// If the stack is full, the oldest entry is dropped to make room.
+/// Uses a ring buffer so the oldest entry's slot is reused in-place when the
+/// stack is full — no struct-copying, no leaked buf pointers.
 /// Does NOT check in_dot_replay — callers are responsible for that guard.
 fn undoPushRaw(vs: *VimState) void {
+    const idx = (vs.undo_base + vs.undo_top) % vs.undo_max;
     if (vs.undo_top < vs.undo_max) {
-        const e = &vs.undo_stack[vs.undo_top];
-        @memcpy(e.buf[0..vs.len], vs.buf[0..vs.len]);
-        e.len = vs.len; e.cursor = vs.cursor;
         vs.undo_top += 1;
     } else {
-        std.mem.copyForwards(UndoEntry, vs.undo_stack[0 .. vs.undo_max - 1], vs.undo_stack[1..vs.undo_max]);
-        const e = &vs.undo_stack[vs.undo_max - 1];
-        @memcpy(e.buf[0..vs.len], vs.buf[0..vs.len]);
-        e.len = vs.len; e.cursor = vs.cursor;
+        // Full: advance base to discard the oldest entry, reuse its slot.
+        vs.undo_base = (vs.undo_base + 1) % vs.undo_max;
     }
+    const e = &vs.undo_stack[idx];
+    @memcpy(e.buf[0..vs.len], vs.buf[0..vs.len]);
+    e.len = vs.len; e.cursor = vs.cursor;
 }
 
 fn undoPush(vs: *VimState) void {
     if (vs.in_dot_replay) return;
     undoPushRaw(vs);
-    vs.redo_top = 0;
+    vs.redo_top  = 0;
+    vs.redo_base = 0;
 }
 
-/// Save current state onto `stack[top.*]` and advance top (no overflow guard —
-/// caller ensures there is room or uses the raw path).
-inline fn stackSave(stack: []UndoEntry, top: *usize, vs: *VimState) void {
+/// Save current state into stack[ring] and advance top; if full, advance base
+/// to overwrite the oldest slot instead of silently dropping the save.
+inline fn stackSave(
+    stack: []UndoEntry, top: *usize, base: *usize, vs: *VimState,
+) void {
+    const idx = (base.* + top.*) % stack.len;
     if (top.* < stack.len) {
-        const e = &stack[top.*];
-        @memcpy(e.buf[0..vs.len], vs.buf[0..vs.len]);
-        e.len = vs.len; e.cursor = vs.cursor;
         top.* += 1;
+    } else {
+        base.* = (base.* + 1) % stack.len;
     }
+    const e = &stack[idx];
+    @memcpy(e.buf[0..vs.len], vs.buf[0..vs.len]);
+    e.len = vs.len; e.cursor = vs.cursor;
 }
 
-fn undoStep(vs: *VimState,
-    from: []UndoEntry, from_top: *usize,
-    to:   []UndoEntry, to_top:   *usize,
+fn undoStep(
+    vs:        *VimState,
+    from:      []UndoEntry, from_top: *usize, from_base: *usize,
+    to:        []UndoEntry, to_top:   *usize, to_base:   *usize,
 ) void {
     if (from_top.* == 0) return;
-    stackSave(to, to_top, vs);
+    stackSave(to, to_top, to_base, vs);
     from_top.* -= 1;
-    const e = &from[from_top.*];
+    const idx = (from_base.* + from_top.*) % from.len;
+    const e = &from[idx];
     @memcpy(vs.buf[0..e.len], e.buf[0..e.len]);
     vs.len = e.len; vs.cursor = e.cursor;
 }
 
 fn undoUndo(vs: *VimState) void {
-    undoStep(vs, vs.undo_stack, &vs.undo_top, vs.redo_stack, &vs.redo_top);
+    undoStep(vs,
+        vs.undo_stack, &vs.undo_top, &vs.undo_base,
+        vs.redo_stack, &vs.redo_top, &vs.redo_base);
 }
 fn undoRedo(vs: *VimState) void {
-    undoStep(vs, vs.redo_stack, &vs.redo_top, vs.undo_stack, &vs.undo_top);
+    undoStep(vs,
+        vs.redo_stack, &vs.redo_top, &vs.redo_base,
+        vs.undo_stack, &vs.undo_top, &vs.undo_base);
 }
 
 // Dot repeat 

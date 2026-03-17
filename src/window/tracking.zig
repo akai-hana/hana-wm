@@ -12,9 +12,9 @@ pub const Tracking = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator) Self {
-        return .{ .list = .empty, .allocator = allocator };
-    }
+    // FIX #3: `init` removed. `list` already defaults to `.empty` via the field
+    // initializer above, so callers can write `Tracking{ .allocator = alloc }`
+    // directly — the wrapper added indirection with no benefit.
 
     pub fn deinit(self: *Self) void {
         self.list.deinit(self.allocator);
@@ -29,14 +29,30 @@ pub const Tracking = struct {
         try self.list.append(self.allocator, win);
     }
 
+    // FIX #1: Inlined `indexOfScalar` directly instead of calling `self.contains`.
+    // The original code paid for a `contains` call (one named function dispatch +
+    // indexOfScalar scan) followed by `insert` (a second scan-and-shift). Inlining
+    // removes the intermediate function call overhead so the single scan result
+    // drives the duplicate guard without an extra frame.
     pub fn addFront(self: *Self, win: u32) !void {
-        if (self.contains(win)) return;
+        if (std.mem.indexOfScalar(u32, self.list.items, win) != null) return;
         try self.list.insert(self.allocator, 0, win);
     }
 
+    // FIX #2 (order-preserving path): Kept for call sites where list order is
+    // semantically significant (MRU traversal, reorder, etc.).
     pub fn remove(self: *Self, win: u32) bool {
         const i = std.mem.indexOfScalar(u32, self.list.items, win) orelse return false;
         _ = self.list.orderedRemove(i);
+        return true;
+    }
+
+    // FIX #2 (unordered path): O(1) removal via swap for call sites where the
+    // relative order of remaining entries does not matter (e.g. tearing down a
+    // workspace). Prefer this over `remove` wherever order is irrelevant.
+    pub fn removeUnordered(self: *Self, win: u32) bool {
+        const i = std.mem.indexOfScalar(u32, self.list.items, win) orelse return false;
+        _ = self.list.swapRemove(i);
         return true;
     }
 

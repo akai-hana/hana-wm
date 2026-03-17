@@ -56,6 +56,9 @@ pub fn deinit() void {
 /// ideal, but focus still functions correctly.
 fn recordInHistory(win: u32) void {
     if (win == 0) return;
+    // Short-circuit: if win is already the most-recent entry there is nothing
+    // to do — skip the O(n) scan+shift pair entirely.
+    if (g_history.items.len > 0 and g_history.items[0] == win) return;
     // Remove any existing entry so each window appears exactly once.
     removeFromHistory(win);
     // Prepend: insert at index 0, shifting everything else right.

@@ -56,7 +56,7 @@ pub inline fn configureBorder(conn: *xcb.xcb_connection_t, win: u32, width: u16,
 }
 
 /// Position and dimensions of a managed window, relative to the root window (the total display area).
-pub const Rect = extern struct {
+pub const Rect = struct {
     x:      i16,
     y:      i16,
     width:  u16,
@@ -305,7 +305,8 @@ pub fn populateFocusCacheFromCookies(
         return;
     };
 
-    // Scan WM_PROTOCOLS once for both atoms (no second round-trip)
+    // Scan WM_PROTOCOLS once for both atoms (no second round-trip).
+    // Reads the raw atom list from the cookie reply and delegates to the shared helper.
     var take_focus = false;
     var wm_delete  = false;
 
@@ -313,13 +314,10 @@ pub fn populateFocusCacheFromCookies(
         defer std.c.free(r);
 
         if (r.*.format == 32 and r.*.value_len > 0) {
-            const protocol_atoms: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(r))); //VERBOSE (what does this even do?)
-
-            for (protocol_atoms[0..@intCast(r.*.value_len)]) |atom| { //VERBOSE
-                if (atom == atoms.take_focus) take_focus = true;
-                if (atom == atoms.wm_delete)  wm_delete  = true;
-                if (take_focus and wm_delete) break;
-            }
+            const raw: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(r)));
+            const result = scanProtocolAtoms(raw[0..@intCast(r.*.value_len)], atoms.take_focus, atoms.wm_delete);
+            take_focus = result.take_focus;
+            wm_delete  = result.wm_delete;
         }
     }
 
@@ -387,7 +385,7 @@ pub fn getInputModelCached(conn: *xcb.xcb_connection_t, win: u32) InputModel {
 /// Falls back to a live query only on a genuine cache miss (extremely rare).
 pub fn supportsWMDeleteCached(conn: *xcb.xcb_connection_t, win: u32) bool {
     if (getCachedProps(win)) |props| return props.wm_delete;
-    return queryWMProtocolsProps(conn, win).wm_delete;
+    return queryAndCacheProps(conn, win).wm_delete;
 }
 
 /// Sends a WM_TAKE_FOCUS client message (ICCCM §4.1.7).
@@ -441,7 +439,7 @@ pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allo
     if (sep + 1 >= len) return null; // no class string follows the null separator
 
     const instance = allocator.dupe(u8, data[0..sep]) catch return null;
-    const class_str = std.mem.trimRight(u8, data[sep + 1..len], "\x00");
+    const class_str = std.mem.sliceTo(data[sep + 1 .. len], 0);
     const class     = allocator.dupe(u8, class_str) catch {
         allocator.free(instance);
         return null;
@@ -464,26 +462,32 @@ inline fn inputModelFrom(supports_take_focus: bool, accepts_input: bool) InputMo
 /// Flags extracted from a single WM_PROTOCOLS scan.
 const WMProtocolsProps = struct { take_focus: bool = false, wm_delete: bool = false };
 
+/// Scans a slice of protocol atoms and returns all WM_PROTOCOLS flags in one pass.
+/// Shared by queryWMProtocolsProps (live query) and populateFocusCacheFromCookies (cookie path).
+inline fn scanProtocolAtoms(atoms: []const u32, take_focus_atom: u32, wm_delete_atom: u32) WMProtocolsProps {
+    var props: WMProtocolsProps = .{};
+    for (atoms) |atom| {
+        if (atom == take_focus_atom) props.take_focus = true;
+        if (atom == wm_delete_atom)  props.wm_delete  = true;
+        if (props.take_focus and props.wm_delete) break;
+    }
+    return props;
+}
+
 /// Scans WM_PROTOCOLS once and returns all flags the WM cares about.
 fn queryWMProtocolsProps(conn: *xcb.xcb_connection_t, win: u32) WMProtocolsProps {
-    const protocols_atom = getAtomCached("WM_PROTOCOLS") catch return .{};
+    const protocols_atom  = getAtomCached("WM_PROTOCOLS")    catch return .{};
+    const take_focus_atom = getAtomCached("WM_TAKE_FOCUS")   catch return .{};
+    const wm_delete_atom  = getAtomCached("WM_DELETE_WINDOW") catch return .{};
+
     const reply = xcb.xcb_get_property_reply(conn,
         xcb.xcb_get_property(conn, PROPERTY_NO_DELETE, win, protocols_atom, xcb.XCB_ATOM_ATOM, 0, MAX_PROPERTY_LENGTH), null,
     ) orelse return .{};
     defer std.c.free(reply);
     if (reply.*.format != 32 or reply.*.value_len == 0) return .{};
 
-    const take_focus_atom = getAtomCached("WM_TAKE_FOCUS")    catch return .{};
-    const wm_delete_atom  = getAtomCached("WM_DELETE_WINDOW") catch return .{};
-
-    var props: WMProtocolsProps = .{};
-    const atoms: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
-    for (atoms[0..@intCast(reply.*.value_len)]) |atom| {
-        if (atom == take_focus_atom) props.take_focus = true;
-        if (atom == wm_delete_atom)  props.wm_delete  = true;
-        if (props.take_focus and props.wm_delete) break;
-    }
-    return props;
+    const raw: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
+    return scanProtocolAtoms(raw[0..@intCast(reply.*.value_len)], take_focus_atom, wm_delete_atom);
 }
 
 /// Queries the WM_HINTS input field. Returns true when absent (assume True) or explicitly True.

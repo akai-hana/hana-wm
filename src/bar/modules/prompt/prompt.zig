@@ -148,6 +148,32 @@ pub fn toggle() void {
     if (g.active) deactivate() else activate();
 }
 
+/// Complete key-event routing entry point called by input.zig.
+///
+/// Owns all prompt-specific routing decisions so input.zig stays free of
+/// prompt internals:
+///   - Returns false immediately when the prompt is inactive, so the caller
+///     falls through to normal keybind dispatch without any special-casing.
+///   - If the key is bound to `close_window`, dismisses the prompt instead of
+///     closing a window or silently swallowing the keystroke.
+///   - Otherwise delegates to the inner handler which processes the raw key.
+///
+/// `bound_action` is whatever the keybind map resolved for this key; pass
+/// `state.map.get(key)` directly — null is fine when there is no binding.
+pub fn handlePromptKeypress(
+    event:        *const xcb.xcb_key_press_event_t,
+    bound_action: ?*const core.Action,
+) bool {
+    if (!g.active) return false;
+    if (bound_action) |action| {
+        if (action.* == .close_window) {
+            deactivate();
+            return true;
+        }
+    }
+    return handleKeyPress(event);
+}
+
 pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     if (!g.active) return false;
 

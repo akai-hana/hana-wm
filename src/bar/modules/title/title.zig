@@ -104,9 +104,9 @@ pub fn draw(
         const is_focused   = focused_window != null;
 
         const accent = if (is_minimized)
-            config.getTitleMinimizedAccent()
+            config.title_minimized_accent
         else if (is_focused)
-            config.getTitleAccent()
+            config.title_accent_color
         else
             config.bg;
         dc.fillRect(start_x, 0, width, height, accent);
@@ -275,9 +275,9 @@ fn drawSegmentedTitles(
 
         const is_focused_win = focused_window == info.window;
 
-        const accent = if (is_focused_win)  config.getTitleAccent()
-            else if (info.minimized)         config.getTitleMinimizedAccent()
-            else                             config.getTitleUnfocusedAccent();
+        const accent = if (is_focused_win)  config.title_accent_color
+            else if (info.minimized)         config.title_minimized_accent
+            else                             config.title_unfocused_accent;
 
         dc.fillRect(segment_x, 0, segment_width, height, accent);
 

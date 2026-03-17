@@ -13,38 +13,49 @@ const core = @import("core");
 const xcb   = core.xcb;
 const debug = @import("debug");
 
-const pthread = @cImport({
-    @cInclude("pthread.h");
-});
-
-/// Drop-in replacement for the removed std.Thread.Mutex.
+/// Blocking mutex backed by pthread_mutex_t.
+/// Zero-initialisation is equivalent to PTHREAD_MUTEX_INITIALIZER on Linux,
+/// so `.{}` as a field default is safe without an explicit pthread_mutex_init call.
 const Mutex = struct {
-    raw: pthread.pthread_mutex_t = std.mem.zeroes(pthread.pthread_mutex_t),
-    pub fn lock(self: *Mutex) void   { _ = pthread.pthread_mutex_lock(&self.raw); }
-    pub fn unlock(self: *Mutex) void { _ = pthread.pthread_mutex_unlock(&self.raw); }
+    inner: std.c.pthread_mutex_t = .{},
+
+    pub fn lock(m: *Mutex) void {
+        _ = std.c.pthread_mutex_lock(&m.inner);
+    }
+    pub fn unlock(m: *Mutex) void {
+        _ = std.c.pthread_mutex_unlock(&m.inner);
+    }
 };
 
-/// Drop-in replacement for the removed std.Thread.Condition.
+/// Condition variable backed by pthread_cond_t.
+/// Zero-initialisation is equivalent to PTHREAD_COND_INITIALIZER on Linux.
 const Condition = struct {
-    raw: pthread.pthread_cond_t = std.mem.zeroes(pthread.pthread_cond_t),
+    inner: std.c.pthread_cond_t = .{},
 
-    pub fn wait(self: *Condition, mutex: *Mutex) void {
-        _ = pthread.pthread_cond_wait(&self.raw, &mutex.raw);
+    pub fn wait(c: *Condition, m: *Mutex) void {
+        _ = std.c.pthread_cond_wait(&c.inner, &m.inner);
     }
 
-    /// timeout_ns is a relative duration. Converts to an absolute REALTIME deadline.
-    pub fn timedWait(self: *Condition, mutex: *Mutex, timeout_ns: u64) error{Timeout}!void {
+    /// Waits up to `timeout_ns` nanoseconds. Returns error.Timeout on expiry.
+    /// Uses CLOCK_MONOTONIC via pthread_condattr when available; falls back to
+    /// the REALTIME absolute deadline required by POSIX pthread_cond_timedwait.
+    pub fn timedWait(c: *Condition, m: *Mutex, timeout_ns: u64) error{Timeout}!void {
         var ts: std.os.linux.timespec = undefined;
         _ = std.os.linux.clock_gettime(.REALTIME, &ts);
-        const ns = @as(u64, @intCast(ts.nsec)) + (timeout_ns % std.time.ns_per_s);
-        ts.sec  += @intCast(timeout_ns / std.time.ns_per_s + ns / std.time.ns_per_s);
-        ts.nsec  = @intCast(ns % std.time.ns_per_s);
-        if (pthread.pthread_cond_timedwait(&self.raw, &mutex.raw, @ptrCast(&ts)) != 0)
-            return error.Timeout;
+        const new_nsec = @as(u64, @intCast(ts.nsec)) + timeout_ns;
+        ts.sec  += @intCast(new_nsec / std.time.ns_per_s);
+        ts.nsec  = @intCast(new_nsec % std.time.ns_per_s);
+        const rc = std.c.pthread_cond_timedwait(&c.inner, &m.inner, @ptrCast(&ts));
+        if (rc == std.posix.E.TIMEDOUT) return error.Timeout;
     }
 
-    pub fn signal(self: *Condition) void    { _ = pthread.pthread_cond_signal(&self.raw); }
-    pub fn broadcast(self: *Condition) void { _ = pthread.pthread_cond_broadcast(&self.raw); }
+    pub fn signal(c: *Condition) void {
+        _ = std.c.pthread_cond_signal(&c.inner);
+    }
+
+    pub fn broadcast(c: *Condition) void {
+        _ = std.c.pthread_cond_broadcast(&c.inner);
+    }
 };
 
 const bar_flags = @import("bar_flags");
@@ -326,6 +337,15 @@ const State = struct {
         };
     }
 
+    inline fn segmentSkip(snap: *const BarSnapshot, seg: core.BarSegment) bool {
+        if (snap.dirty_all) return false;
+        return switch (seg) {
+            .workspaces => !snap.dirty_ws,
+            .title      => !snap.dirty_title,
+            else        => false,
+        };
+    }
+
     fn drawRightSegments(self: *State, snap: *const BarSnapshot, segments: []const core.BarSegment) !void {
         var right_x          = self.width;
         const scaled_spacing = self.config.scaledSpacing(self.height);
@@ -373,12 +393,7 @@ const State = struct {
                 .left => for (layout.segments.items) |seg| {
                     const seg_w = self.calculateSegmentWidth(snap, seg);
                     if (seg == .title) { title_seg_x = x; title_seg_w = seg_w; }
-                    const skip = !snap.dirty_all and switch (seg) {
-                        .workspaces => !snap.dirty_ws,
-                        .title      => !snap.dirty_title,
-                        else        => false,
-                    };
-                    if (skip) { x += seg_w; } else { x = try self.drawSegment(snap, seg, x, null); }
+                    if (segmentSkip(snap, seg)) { x += seg_w; } else { x = try self.drawSegment(snap, seg, x, null); }
                     x += scaled_spacing;
                 },
                 .center => {
@@ -386,12 +401,7 @@ const State = struct {
                     for (layout.segments.items) |seg| {
                         const w = if (seg == .title) remaining else self.calculateSegmentWidth(snap, seg);
                         if (seg == .title) { title_seg_x = x; title_seg_w = w; }
-                        const skip = !snap.dirty_all and switch (seg) {
-                            .workspaces => !snap.dirty_ws,
-                            .title      => !snap.dirty_title,
-                            else        => false,
-                        };
-                        if (skip) { x += w; } else { x = try self.drawSegment(snap, seg, x, w); }
+                        if (segmentSkip(snap, seg)) { x += w; } else { x = try self.drawSegment(snap, seg, x, w); }
                         if (seg != .title) x += scaled_spacing;
                     }
                 },
@@ -429,9 +439,9 @@ const State = struct {
         if (carousel.isCarouselActive()) {
             const accent: u32 = if (self.cached_ws_wins.items.len == 1 and
                 self.cached_minimized_set.contains(self.cached_ws_wins.items[0]))
-                self.config.getTitleMinimizedAccent()
+                self.config.title_minimized_accent
             else
-                self.config.getTitleAccent();
+                self.config.title_accent_color;
             if (carousel.drawCarouselTick(self.dc, accent, self.height,
                     self.cached_title_x, self.cached_title_w)) return;
         }
@@ -454,12 +464,10 @@ const State = struct {
         // other cached collections on State.
         self.cached_ws_wins.clearRetainingCapacity();
         self.cached_ws_wins.appendSlice(self.allocator, snap.current_ws_wins.items) catch {};
-        // Mirror the snapshot's minimized set so drawTitleOnly renders correct
-        // segment order and colors without a full redraw.
-        self.cached_minimized_set.clearRetainingCapacity();
-        var it = snap.minimized_set.keyIterator();
-        while (it.next()) |key|
-            self.cached_minimized_set.put(self.allocator, key.*, {}) catch {};
+        // Mirror the snapshot's minimized set using clone() — one bulk allocation
+        // and memcpy instead of re-hashing every key individually.
+        self.cached_minimized_set.deinit(self.allocator);
+        self.cached_minimized_set = snap.minimized_set.clone(self.allocator) catch .{};
         self.cached_focused_window = snap.focused_window;
         self.cached_title_x     = x;
         self.cached_title_w     = w;
@@ -756,7 +764,7 @@ fn createBarWindow(height: u16, y_pos: i16) BarWindowSetup {
 fn loadBarFonts(dc: anytype) !void {
     const cfg         = core.config.bar;
     const alloc       = core.alloc;
-    const scaled_size = core.config.bar.scaled_font_size;
+    const scaled_size = cfg.scaled_font_size;
     const fonts       = cfg.fonts.items;
     if (fonts.len == 0) return;
 
@@ -840,7 +848,6 @@ pub fn init() !void {
     // Precondition: caller must check core.config.bar.enabled before calling.
     std.debug.assert(core.config.bar.enabled);
     initAtoms();
-    drawing.initFontCache(core.alloc);
 
     const height = try calculateBarHeight();
     const y_pos  = barYPos(height);
@@ -927,7 +934,6 @@ fn reloadImpl(old: *State, setup: BarWindowSetup, height: u16) !void {
     _ = xcb.xcb_grab_server(core.conn);
     if (new_state.visible) _ = xcb.xcb_map_window(core.conn, setup.window);
     _ = xcb.xcb_destroy_window(core.conn, old.window);
-    _ = xcb.xcb_flush(core.conn);
     _ = xcb.xcb_ungrab_server(core.conn);
     _ = xcb.xcb_flush(core.conn);
 
@@ -1027,8 +1033,10 @@ pub fn setBarState(action: BarAction) void {
     s.visible = show;
 
     if (action == .toggle) {
-        if (show) g_channel.force_dirty_all = true;
-        if (show) submitDraw(true);
+        if (show) {
+            g_channel.force_dirty_all = true;
+            submitDraw(true);
+        }
         _ = xcb.xcb_grab_server(core.conn);
         if (show) _ = xcb.xcb_map_window(core.conn, s.window)
         else      _ = xcb.xcb_unmap_window(core.conn, s.window);

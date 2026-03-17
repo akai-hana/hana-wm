@@ -81,11 +81,9 @@ pub const LayoutCtx = struct {
 /// Returns true if two rects are identical via a single 64-bit comparison.
 /// utils.Rect is `extern struct { i16, i16, u16, u16 }` — 8 bytes, no padding.
 /// A single 64-bit comparison compiles to one instruction on all targets versus
-/// four separate field comparisons. The comptime assert catches any future
-/// struct changes that would silently break the bitcast.
+/// Compares two Rects by value across all four fields.
 pub inline fn rectsEqual(a: utils.Rect, b: utils.Rect) bool {
-    comptime std.debug.assert(@sizeOf(utils.Rect) == @sizeOf(u64));
-    return @as(u64, @bitCast(a)) == @as(u64, @bitCast(b));
+    return a.x == b.x and a.y == b.y and a.width == b.width and a.height == b.height;
 }
 
 /// The single call-site every layout module uses to apply geometry.

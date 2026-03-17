@@ -131,20 +131,9 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     const keysym = xkb_state.?.keycodeToKeysym(event.detail);
     const key    = makeHash(mods, keysym);
 
-    // When prompt is active it owns all key input — with one exception: if the
-    // pressed key is bound to close_window, dismiss prompt instead of either
-    // closing a window or swallowing the keystroke silently.
-    if (prompt.isActive()) {
-        if (state.map.get(key)) |action| {
-            if (action.* == .close_window) {
-                prompt.toggle();
-                bar.scheduleRedraw();
-                return;
-            }
-        }
-        if (prompt.handleKeyPress(event)) bar.scheduleRedraw();
-        return;
-    }
+    // Prompt owns all key input when active. Routing decisions (including the
+    // close_window dismiss shortcut) live entirely in prompt.handleKeyEvent.
+    if (prompt.handlePromptKeypress(event, state.map.get(key))) return;
 
     debug.info("[KEY] keycode={} state=0x{x} mods=0x{x} keysym=0x{x} hash=0x{x}",
         .{ event.detail, event.state, mods, keysym, key });
@@ -304,7 +293,7 @@ fn executeAction(action: *const core.Action) !void {
         .move_window            => |ws| { if (focus.getFocused()) |win| workspaces.moveWindowExclusive(win, ws); },
 
         .tag_toggle             => |ws| { if (focus.getFocused()) |win| workspaces.tagToggle(win, ws, true); },
-        .prompt_toggle          => { prompt.toggle(); bar.scheduleRedraw(); },
+        .prompt_toggle          => prompt.toggle(),
     }
 }
 
