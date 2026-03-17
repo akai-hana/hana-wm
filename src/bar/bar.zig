@@ -13,6 +13,40 @@ const core = @import("core");
 const xcb   = core.xcb;
 const debug = @import("debug");
 
+const pthread = @cImport({
+    @cInclude("pthread.h");
+});
+
+/// Drop-in replacement for the removed std.Thread.Mutex.
+const Mutex = struct {
+    raw: pthread.pthread_mutex_t = std.mem.zeroes(pthread.pthread_mutex_t),
+    pub fn lock(self: *Mutex) void   { _ = pthread.pthread_mutex_lock(&self.raw); }
+    pub fn unlock(self: *Mutex) void { _ = pthread.pthread_mutex_unlock(&self.raw); }
+};
+
+/// Drop-in replacement for the removed std.Thread.Condition.
+const Condition = struct {
+    raw: pthread.pthread_cond_t = std.mem.zeroes(pthread.pthread_cond_t),
+
+    pub fn wait(self: *Condition, mutex: *Mutex) void {
+        _ = pthread.pthread_cond_wait(&self.raw, &mutex.raw);
+    }
+
+    /// timeout_ns is a relative duration. Converts to an absolute REALTIME deadline.
+    pub fn timedWait(self: *Condition, mutex: *Mutex, timeout_ns: u64) error{Timeout}!void {
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.REALTIME, &ts);
+        const ns = @as(u64, @intCast(ts.nsec)) + (timeout_ns % std.time.ns_per_s);
+        ts.sec  += @intCast(timeout_ns / std.time.ns_per_s + ns / std.time.ns_per_s);
+        ts.nsec  = @intCast(ns % std.time.ns_per_s);
+        if (pthread.pthread_cond_timedwait(&self.raw, &mutex.raw, @ptrCast(&ts)) != 0)
+            return error.Timeout;
+    }
+
+    pub fn signal(self: *Condition) void    { _ = pthread.pthread_cond_signal(&self.raw); }
+    pub fn broadcast(self: *Condition) void { _ = pthread.pthread_cond_broadcast(&self.raw); }
+};
+
 const bar_flags = @import("bar_flags");
 
 pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
@@ -119,9 +153,9 @@ const BarSnapshot = struct {
 /// the lock before writing is safe; the mutex acquire before the flip
 /// establishes the required memory fence for the bar thread.
 const BarChannel = struct {
-    mutex:         std.Thread.Mutex     = .{},
-    work_cond:     std.Thread.Condition = .{},
-    done_cond:     std.Thread.Condition = .{},
+    mutex:         Mutex     = .{},
+    work_cond:     Condition = .{},
+    done_cond:     Condition = .{},
     slots:         [2]BarSnapshot       = .{ .{}, .{} },
     write_idx:     u1                   = 0,
     snap_ready:       bool  = false,
@@ -502,7 +536,8 @@ fn barThreadFn(s: *State) void {
 
 /// Monotonic clock in nanoseconds. Used for absolute-deadline carousel sleep.
 inline fn monoNowNs() u64 {
-    const ts = std.posix.clock_gettime(.MONOTONIC) catch return 0;
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 

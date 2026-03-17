@@ -143,7 +143,7 @@ pub const WorkspaceLayoutOverride = struct {
 pub const TilingConfig = struct {
     enabled:      bool           = true,
     layout:       []const u8     = "master_left",
-    layouts:      std.ArrayList([]const u8), // Available layouts in cycle order
+    layouts:      std.ArrayListUnmanaged([]const u8), // Available layouts in cycle order
     master_side:  MasterSide     = .left,
     master_width: parser.ScalableValue = parser.ScalableValue.percentage(50.0),
     master_count: u8             = 1,
@@ -173,7 +173,7 @@ pub const TilingConfig = struct {
     //TODO: don't make this a default for fibonacci specifically, but for all tiling laoyuts that do not have a variation made for them. so, if the variation count for said layout is equal to zero, pass "NUL".
 
     /// Per-workspace layout assignments parsed from the layouts array.
-    workspace_layout_overrides: std.ArrayListUnmanaged(WorkspaceLayoutOverride) = .{},
+    workspace_layout_overrides: std.ArrayListUnmanaged(WorkspaceLayoutOverride) = .empty,
 
     /// When true, layout changes apply globally across all workspaces (legacy behavior).
     global_layout: bool = false,
@@ -265,7 +265,7 @@ pub const BarSegment = enum {
 
 pub const BarLayout = struct {
     position: BarPosition,
-    segments: std.ArrayList(BarSegment),
+    segments: std.ArrayListUnmanaged(BarSegment),
 
     pub inline fn deinit(self: *BarLayout, allocator: std.mem.Allocator) void {
         self.segments.deinit(allocator);
@@ -279,7 +279,7 @@ pub const BarConfig = struct {
     // null = auto-calculate from font metrics alone.
     height:            ?parser.ScalableValue  = null,
     font:              []const u8             = "monospace:size=10",
-    fonts:             std.ArrayList([]const u8),
+    fonts:             std.ArrayListUnmanaged([]const u8),
     font_size:         parser.ScalableValue   = parser.ScalableValue.percentage(10.0),
     scaled_font_size:  u16                    = 10, // Can exceed 255 on high DPI - u16 is correct
     spacing:           parser.ScalableValue   = parser.ScalableValue.absolute(12.0),
@@ -300,7 +300,7 @@ pub const BarConfig = struct {
     title_minimized_accent: u32 = 0x61AFEF,
     clock_accent:           u32 = 0x61AFEF,
 
-    workspace_icons:     std.ArrayList([]const u8),
+    workspace_icons:     std.ArrayListUnmanaged([]const u8),
     indicator_size:      parser.ScalableValue = parser.ScalableValue.percentage(30.0),
     workspace_tag_width: parser.ScalableValue = parser.ScalableValue.percentage(100.0),
 
@@ -318,7 +318,7 @@ pub const BarConfig = struct {
     drun_prompt_color: ?u32       = null,    // Prompt text color; falls back to accent_color
     drun_prompt:       []const u8 = "run: ", // Displayed before the input field
 
-    layout: std.ArrayList(BarLayout),
+    layout: std.ArrayListUnmanaged(BarLayout),
 
     scale_factor: f32 = 1.0,
     transparency: f32 = 1.0,
@@ -388,12 +388,12 @@ pub const Rule = struct {
 
 pub const WorkspaceConfig = struct {
     count: u8 = 9,
-    rules: std.ArrayListUnmanaged(Rule) = .{},
+    rules: std.ArrayListUnmanaged(Rule) = .empty,
 };
 
 pub const Config = struct {
-    keybindings:   std.ArrayListUnmanaged(Keybind)   = .{},
-    mouse_bindings: std.ArrayListUnmanaged(MouseBind) = .{},
+    keybindings:   std.ArrayListUnmanaged(Keybind)   = .empty,
+    mouse_bindings: std.ArrayListUnmanaged(MouseBind) = .empty,
     tiling:      TilingConfig,
     workspaces:  WorkspaceConfig = .{},
     bar:         BarConfig,
@@ -408,11 +408,11 @@ pub const Config = struct {
 
     pub fn init(allocator: std.mem.Allocator) Config {
         return .{
-            .tiling    = TilingConfig{ .layouts = std.ArrayList([]const u8){} },
+            .tiling    = TilingConfig{ .layouts = .empty },
             .bar       = BarConfig{
-                .workspace_icons = std.ArrayList([]const u8){},
-                .fonts           = std.ArrayList([]const u8){},
-                .layout          = std.ArrayList(BarLayout){},
+                .workspace_icons = .empty,
+                .fonts           = .empty,
+                .layout          = .empty,
             },
             .allocator = allocator,
         };

@@ -71,7 +71,7 @@ fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *core.Config) !void {
         .{ .pos = .right,  .seg = .clock      },
     };
     for (defaults) |d| {
-        var layout = core.BarLayout{ .position = d.pos, .segments = std.ArrayList(core.BarSegment){} };
+        var layout = core.BarLayout{ .position = d.pos, .segments = .empty };
         try layout.segments.append(allocator, d.seg);
         try cfg.bar.layout.append(allocator, layout);
     }
@@ -240,7 +240,9 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator) !core.Config {
     if (loadConfigFromDir(allocator, xdg_dir)) |cfg| return cfg else |_| {}
 
     // 2. ./config/ directory 
-    const cwd = try std.process.getCwdAlloc(allocator);
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.CurrentWorkingDirectoryUnlinked;
+    const cwd = try allocator.dupe(u8, std.mem.sliceTo(&cwd_buf, 0));
     defer allocator.free(cwd);
 
     const local_dir = try std.fs.path.join(allocator, &.{ cwd, "config" });
@@ -1086,7 +1088,7 @@ fn parseBarLayout(allocator: std.mem.Allocator, doc: *const parser.Document, cfg
 
     for (positions) |p| {
         const layout_section = doc.getSection(p.name) orelse continue;
-        var bar_layout = core.BarLayout{ .position = p.pos, .segments = std.ArrayList(core.BarSegment){} };
+        var bar_layout = core.BarLayout{ .position = p.pos, .segments = .empty };
 
         if (layout_section.get("segments")) |sv| if (sv.asArray()) |seg_arr|
             for (seg_arr) |item| if (item.asString()) |s|

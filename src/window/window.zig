@@ -68,7 +68,7 @@ var g_atoms: struct {
     net_wm_pid:   u32 = 0,
 } = .{};
 
-var g_init_once = std.once(populateAtomCache);
+var g_init_done = std.atomic.Value(bool).init(false);
 
 fn populateAtomCache() void {
     inline for (.{
@@ -331,7 +331,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const win        = event.window;
     const current_ws = workspaces.getCurrentWorkspace() orelse 0;
 
-    g_init_once.call();
+    if (!g_init_done.swap(true, .acq_rel)) populateAtomCache();
 
     _ = xcb.xcb_change_window_attributes(
         core.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{constants.EventMasks.MANAGED_WINDOW},
