@@ -6,7 +6,7 @@ const drawing       = @import("drawing");
 const build_options = @import("build_options");
 const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
 
-const layout_icons = [_][]const u8{ "[]=", "[M]", "[+]", "[@]" };
+const layout_icons = [_][]const u8{ "[]=", "[M]", "[+]", "[@]", "><>" };
 
 pub fn draw(dc: *drawing.DrawContext, config: core.BarConfig, height: u16, start_x: u16) !u16 {
     if (comptime build_options.has_tiling) {

@@ -35,19 +35,16 @@ const core = @import("core");
 const xcb  = core.xcb;
 
 // X11 keysym constants 
-// Re-exported from keysyms.zig for callers that write `vim.XK_*`.
-// New code should import keysyms.zig directly.
 
-const ks = @import("keysyms");
-pub const XK_BackSpace = ks.XK_BackSpace;
-pub const XK_Tab       = ks.XK_Tab;
-pub const XK_Return    = ks.XK_Return;
-pub const XK_Escape    = ks.XK_Escape;
-pub const XK_Delete    = ks.XK_Delete;
-pub const XK_Left      = ks.XK_Left;
-pub const XK_Right     = ks.XK_Right;
-pub const XK_Home      = ks.XK_Home;
-pub const XK_End       = ks.XK_End;
+pub const XK_BackSpace = core.XK_BackSpace;
+pub const XK_Tab       = core.XK_Tab;
+pub const XK_Return    = core.XK_Return;
+pub const XK_Escape    = core.XK_Escape;
+pub const XK_Delete    = core.XK_Delete;
+pub const XK_Left      = core.XK_Left;
+pub const XK_Right     = core.XK_Right;
+pub const XK_Home      = core.XK_Home;
+pub const XK_End       = core.XK_End;
 
 // Shared constants 
 // These are the default capacities passed to VimState.init when the caller
