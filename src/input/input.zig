@@ -2,23 +2,23 @@
 //!
 //! Handles keyboard, mouse buttons, pointer motion and drag operations.
 
-const std        = @import("std");
-const constants  = @import("constants");
-const core = @import("core");
-const xkbcommon  = @import("xkbcommon");
-const utils      = @import("utils");
-const focus      = @import("focus");
+const std           = @import("std");
+const constants     = @import("constants");
+const core          = @import("core");
+const xkbcommon     = @import("xkbcommon");
+const utils         = @import("utils");
+const focus         = @import("focus");
 const build_options = @import("build_options");
 const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
-const workspaces = @import("workspaces");
-const drag       = @import("drag");
-const fullscreen = @import("fullscreen");
-const bar        = @import("bar");
-const window     = @import("window");
-const debug      = @import("debug");
-const minimize   = @import("minimize");
-const prompt     = @import("prompt");
-const xcb        = core.xcb;
+const workspaces    = @import("workspaces");
+const drag          = @import("drag");
+const fullscreen    = @import("fullscreen");
+const bar           = @import("bar");
+const window        = @import("window");
+const debug         = @import("debug");
+const minimize      = @import("minimize");
+const prompt        = @import("prompt");
+const xcb           = core.xcb;
 
 const c = @cImport({
     @cInclude("unistd.h");
@@ -64,10 +64,8 @@ pub fn initXkb(conn: *xcb.xcb_connection_t, allocator: std.mem.Allocator) !void 
 
 /// Cleans up XKB state. Must be called after deinit().
 pub fn deinitXkb() void {
-    if (xkb_state) |*s| {
-        s.deinit();
-        xkb_state = null;
-    }
+    if (xkb_state) |*s| s.deinit();
+    xkb_state = null;
 }
 
 /// Returns a pointer to the module-owned XkbState. Used by events.zig for config reload.
@@ -83,10 +81,8 @@ pub fn init() !void {
 }
 
 pub fn deinit() void {
-    if (keybind_state) |*state| {
-        state.deinit();
-        keybind_state = null;
-    }
+    if (keybind_state) |*state| state.deinit();
+    keybind_state = null;
 }
 
 /// Rebuilds the keybind lookup map from the current config (called after reload).
@@ -177,9 +173,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
             if (mb.modifiers == mods and mb.button == event.detail) {
                 executeMouseAction(&mb.action, managed_window)
                     catch |err| debug.err("mouse bind error: {}", .{err});
-                _ = xcb.xcb_allow_events(core.conn, xcb.XCB_ALLOW_REPLAY_POINTER,  event.time);
-                _ = xcb.xcb_allow_events(core.conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, event.time);
-                _ = xcb.xcb_flush(core.conn);
+                releaseGrab(event.time);
                 return;
             }
         }
@@ -192,9 +186,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     }
 
     // Release the SYNC grab; use event.time not XCB_CURRENT_TIME to avoid silent drop.
-    _ = xcb.xcb_allow_events(core.conn, xcb.XCB_ALLOW_REPLAY_POINTER,  event.time);
-    _ = xcb.xcb_allow_events(core.conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, event.time);
-    _ = xcb.xcb_flush(core.conn);
+    releaseGrab(event.time);
 }
 
 pub fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t) void {
@@ -245,12 +237,11 @@ fn closeWindow(win: u32) void {
         event.data.data32[1] = focus.getLastEventTime(); // ICCCM §4.1.7
 
         _ = xcb.xcb_send_event(core.conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
-        _ = xcb.xcb_flush(core.conn);
     } else {
         // The window does not support WM_DELETE_WINDOW, so destroy it forcefully.
         _ = xcb.xcb_destroy_window(core.conn, win);
-        _ = xcb.xcb_flush(core.conn);
     }
+    _ = xcb.xcb_flush(core.conn);
 }
 
 // Action dispatch
@@ -266,7 +257,7 @@ fn executeAction(action: *const core.Action) !void {
         .exec                   => |cmd| try executeShellCommand(cmd),
         .dump_state             => dumpState(),
 
-        .toggle_tiling          => if (comptime build_options.has_tiling) tiling.toggleTiling(),
+        .toggle_floating         => if (comptime build_options.has_tiling) tiling.toggleFloating(),
         .toggle_float           => { if (comptime build_options.has_tiling) { if (focus.getFocused()) |win| tiling.toggleWindowFloat(win); } },
         .toggle_layout          => { if (comptime build_options.has_tiling) { tiling.toggleLayout();        bar.scheduleRedraw(); } },
         .toggle_layout_reverse  => { if (comptime build_options.has_tiling) { tiling.toggleLayoutReverse(); bar.scheduleRedraw(); } },
@@ -454,8 +445,17 @@ fn dumpState() void {
 // Helpers
 
 /// Replays a frozen pointer event and flushes. Always pass `event.time`, never XCB_CURRENT_TIME.
+/// Only sends REPLAY_POINTER — used when no keyboard grab is active (e.g. clicking root/unmanaged).
 inline fn replayPointer(time: u32) void {
     _ = xcb.xcb_allow_events(core.conn, xcb.XCB_ALLOW_REPLAY_POINTER, time);
+    _ = xcb.xcb_flush(core.conn);
+}
+
+/// Releases both the pointer and keyboard SYNC grabs acquired during Super+button events,
+/// then flushes. Always pass `event.time`, never XCB_CURRENT_TIME.
+inline fn releaseGrab(time: u32) void {
+    _ = xcb.xcb_allow_events(core.conn, xcb.XCB_ALLOW_REPLAY_POINTER,  time);
+    _ = xcb.xcb_allow_events(core.conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, time);
     _ = xcb.xcb_flush(core.conn);
 }
 

@@ -59,7 +59,7 @@ pub const XkbState = struct {
         for (8..256) |kc| {
             const keycode: u8 = @intCast(kc);
             const keysym: u32 = xkb.xkb_state_key_get_one_sym(st, keycode);
-            if (keysym != XKB_KEY_NoSymbol) reverse_map.put(keysym, keycode) catch {};
+            if (keysym != xkb.XKB_KEY_NoSymbol) reverse_map.put(keysym, keycode) catch {};
         }
 
         return XkbState{

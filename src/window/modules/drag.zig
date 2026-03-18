@@ -57,7 +57,12 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     _ = xcb.xcb_flush(core.conn);
     // Float conversion is deferred to the first motion event.
     // Record whether the window needs it so updateDrag can act on first move.
-    g_pending_float = if (comptime build_options.has_tiling) tiling.isWindowTiled(win) else false;
+    // A tiled window must be detached from the pool on first motion so it can
+    // move freely.  Skip this in the floating layout — all windows are already
+    // unconstrained and must stay tracked for retile on layout exit.
+    g_pending_float = if (comptime build_options.has_tiling)
+        tiling.isWindowTiled(win) and !tiling.isFloatingLayout()
+    else false;
 }
 
 pub fn updateDrag(x: i16, y: i16) void {

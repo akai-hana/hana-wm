@@ -147,7 +147,7 @@ Mod+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-switch.sh"
 Mod+Shift+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-stop.sh"
 
 # Tiling
-Mod+N           = "toggle_tiling"          # Enable/disable tiling
+Mod+N           = "toggle_floating"        # Enter/exit floating layout
 Mod+space       = "toggle_layout"          # Cycle layouts forward
 Mod+Shift+space = "toggle_layout_reverse"  # Cycle layouts backward
 Mod+Alt+space   = "cycle_layout_variation" # Cycle current layout's variation (Super+V)

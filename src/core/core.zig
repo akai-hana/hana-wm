@@ -5,6 +5,7 @@
 //! - Runtime constants (MOD_*, MIN_*) live in constants.zig.
 //! - Fullscreen types live in fullscreen.zig.
 //! - SpawnQueue lives in window.zig.
+//! - X11 keysym constants (XK_*) are defined here; values match <X11/keysymdef.h>.
 
 const std    = @import("std");
 const parser = @import("parser");
@@ -12,6 +13,22 @@ const parser = @import("parser");
 pub const xcb = @cImport({
     @cInclude("xcb/xcb.h");
 });
+
+// X11 keysym constants
+//
+// Centralised here so vim.zig, drun.zig, and any future key-handling
+// modules reference a single definition and cannot drift.
+// Values match <X11/keysymdef.h> (stable since X11R1).
+
+pub const XK_BackSpace : xcb.xcb_keysym_t = 0xff08;
+pub const XK_Tab       : xcb.xcb_keysym_t = 0xff09;
+pub const XK_Return    : xcb.xcb_keysym_t = 0xff0d;
+pub const XK_Escape    : xcb.xcb_keysym_t = 0xff1b;
+pub const XK_Delete    : xcb.xcb_keysym_t = 0xffff;
+pub const XK_Left      : xcb.xcb_keysym_t = 0xff51;
+pub const XK_Right     : xcb.xcb_keysym_t = 0xff53;
+pub const XK_Home      : xcb.xcb_keysym_t = 0xff50;
+pub const XK_End       : xcb.xcb_keysym_t = 0xff57;
 
 /// Type alias for XCB window identifiers.
 /// xcb_window_t is uint32_t in every version of the XCB protocol spec —
@@ -34,7 +51,7 @@ pub const Action = union(enum) {
     decrease_master,
     increase_master_count,
     decrease_master_count,
-    toggle_tiling,
+    toggle_floating,
     toggle_fullscreen,
     swap_master,
     swap_master_focus_swap,
