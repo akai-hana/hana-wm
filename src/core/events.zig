@@ -1,8 +1,8 @@
 //! X event dispatch, signal handling, config reload, and the main event loop.
 
 // Zig stdlib
-const std        = @import("std");
-const fullscreen = @import("fullscreen");
+const std           = @import("std");
+const build_options = @import("build_options");
 
 // core/
 const utils     = @import("utils");
@@ -10,7 +10,7 @@ const constants = @import("constants");
 
 // config/
 const config  = @import("config");
-const core = @import("core");
+const core    = @import("core");
     const xcb = core.xcb;
 
 // debug/
@@ -22,20 +22,16 @@ const input = @import("input");
 // window/
 const window         = @import("window");
     const focus      = @import("focus");
+    const fullscreen = @import("fullscreen");
     const minimize   = @import("minimize");
     const workspaces = @import("workspaces");
 
 // tiling/
-const has_tiling = @import("build_options").has_tiling;
-const tiling = if (has_tiling) @import("tiling") else struct {
-    pub fn init() !void {}
-    pub fn deinit() void {}
-    pub fn reloadConfig() void {}
-    pub fn retileIfDirty() void {}
-};
+const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
 
 // bar/
-const bar        = @import("bar");
+const bar = if (build_options.has_bar) @import("bar") else struct {};
+
     const prompt = @import("prompt");
 
 // Indices into the poll fd array.

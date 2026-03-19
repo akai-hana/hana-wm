@@ -53,7 +53,7 @@ transparency = 0% # [0.0 - 1.0] / [0% - 100%]
 # drun command runner prompt string (default: "run: ")
 drun_prompt = "❯ "
 
-# ── Carousel (scrolling title) ───────────────────────────────────────────────
+#  Carousel (scrolling title) 
 # carousel_enabled: set to false to disable scrolling entirely and use a
 #   static ellipsis when the title overflows.
 carousel_enabled = true

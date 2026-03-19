@@ -1,8 +1,6 @@
 //! Central location for the constants used across all files.
 
-const xcb = @cImport({
-    @cInclude("xcb/xcb.h");
-});
+const xcb = @cImport(@cInclude("xcb/xcb.h"));
 
 // Modifier masks 
 // Must be u16 per XCB API; widening to u32 breaks xcb_grab_key.

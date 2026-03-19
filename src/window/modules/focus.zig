@@ -80,13 +80,13 @@ pub inline fn historyItems() []const u32 {
 
 // Public accessors 
 
-pub inline fn getFocused()        ?u32                       { return g_focused_window; }
+pub inline fn getFocused()        ?u32                       { return g_focused_window;  }
 pub inline fn getSuppressReason() core.FocusSuppressReason   { return g_suppress_reason; }
 pub inline fn getLastEventTime()  u32                        { return g_last_event_time; }
 
-pub inline fn setFocused(win: ?u32) void                         { g_focused_window  = win; }
-pub inline fn setSuppressReason(r: core.FocusSuppressReason) void { g_suppress_reason = r; }
-pub inline fn setLastEventTime(t: u32) void                      { g_last_event_time = t; }
+pub inline fn setFocused(win: ?u32) void                          { g_focused_window  = win; }
+pub inline fn setSuppressReason(r: core.FocusSuppressReason) void { g_suppress_reason = r;   }
+pub inline fn setLastEventTime(t: u32) void                       { g_last_event_time = t;   }
 
 // Focus logic 
 
@@ -288,9 +288,9 @@ inline fn suppressionFor(reason: Reason, current: core.FocusSuppressReason) core
     // Without this, the sequence:
     //   setSuppressReason(.window_spawn)        ← fullscreen exit
     //   setFocus(win, .tiling_operation)         ← restores focus
-    //     → suppressionFor(.tiling_operation) returned .none
-    //     → g_suppress_reason clobbered to .none before the EnterNotify arrives
-    //     → spurious EnterNotify is no longer suppressed, focus goes to the wrong
+    //     -> suppressionFor(.tiling_operation) returned .none
+    //     -> g_suppress_reason clobbered to .none before the EnterNotify arrives
+    //     -> spurious EnterNotify is no longer suppressed, focus goes to the wrong
     //       window; or if setFocus hit the g_focused_window == win early-return,
     //       suppression was never cleared and all subsequent hover events are
     //       silently swallowed until the user clicks.

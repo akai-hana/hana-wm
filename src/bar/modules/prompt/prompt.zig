@@ -7,7 +7,7 @@
 //! Integration is complete: bar.zig dispatches the .title segment to drun.draw()
 //! when isActive() is true and guards drawTitleOnly() accordingly; the main event
 //! loop routes key-press events through handleKeyPress() before normal keybind
-//! dispatch; a "prompt_toggle" action calls toggle(); and bar.init/deinit call
+//! dispatch; a "toggle_prompt" action calls toggle(); and bar.init/deinit call
 //! drun.init/deinit.
 
 const std     = @import("std");
@@ -177,12 +177,43 @@ pub fn handlePromptKeypress(
 pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     if (!g.active) return false;
 
+    // Only process XCB_KEY_PRESS events.  xcb_key_press_event_t and
+    // xcb_key_release_event_t share the same struct layout, so the event loop
+    // can (and sometimes does) cast a release event and dispatch it here.
+    //
+    // Without this guard the XCB_KEY_RELEASE for Escape is a fatal trap:
+    //   1. XCB_KEY_PRESS  (Escape): handleInsert switches mode to .normal ✓
+    //   2. XCB_KEY_RELEASE(Escape): handleNormal sees XK_Escape with a clean
+    //      nsub (op=0, count=0) -> returns .deactivate -> prompt closes.
+    // The user then presses 'b' or an arrow key to start editing in normal
+    // mode, but the prompt is already gone — so those keys get the blame.
+    //
+    // Returning true (not false) for non-press events ensures the caller
+    // considers the event consumed and does not fall through to WM keybind
+    // dispatch for the release.
+    if (event.response_type & 0x7F != xcb.XCB_KEY_PRESS) return true;
+
     const syms = g.key_syms orelse return false;
 
     const shift_held = event.state & xcb.XCB_MOD_MASK_SHIFT   != 0;
     const ctrl_held  = event.state & xcb.XCB_MOD_MASK_CONTROL != 0;
     const col: c_int = if (shift_held) 1 else 0;
     const sym        = xcb_key_symbols_get_keysym(syms, event.detail, col);
+
+    // Drop bare modifier key events (Shift, Ctrl, Alt, Super, Meta, Hyper …).
+    //
+    // XCB delivers a XCB_KEY_PRESS event for every key including modifiers, so
+    // pressing Shift before typing '$' or '^' fires a key event with keysym
+    // 0xFFE1/0xFFE2 (XK_Shift_L/R) before the '$'/'^' event arrives.  If that
+    // event reaches handleNormal it falls through to resetNormalSub(), clearing
+    // any pending operator ('d', 'c', 'y') or accumulated count — which is why
+    // operator+motion sequences that require Shift (d$, d^, dW, dE, c$, y^,
+    // visual 3W, …) silently turn into bare cursor moves instead of edits.
+    //
+    // Modifier keysyms occupy the contiguous range 0xFFE1–0xFFEE; nothing in
+    // that band is a valid editing key (editing specials such as Escape/Return/
+    // BackSpace/Delete/Arrow/Home/End all live elsewhere in 0xFF00–0xFFFF).
+    if (sym >= 0xFFE0 and sym <= 0xFFEF) return true;
 
     // Ctrl-modified keys 
     if (ctrl_held) {
@@ -412,7 +443,7 @@ fn compLowerBound(prefix: []const u8) usize {
 }
 
 /// Recompute the ghost-text suggestion based on the current buffer.
-/// Priority: history (newest first) → any executable match.
+/// Priority: history (newest first) -> any executable match.
 /// Only operates in INSERT mode with cursor at end and no spaces typed.
 fn updateGhost() void {
     g.ghost_len = 0;
@@ -589,7 +620,7 @@ fn histLoadFile(fp: *c.FILE) void {
     }
 }
 
-/// Load history from drun → bash → zsh → fish (load order).
+/// Load history from drun -> bash -> zsh -> fish (load order).
 /// Because histPrepend() inserts at index 0, fish ends up with the highest
 /// suggestion priority in updateGhost.
 fn loadHistory() void {

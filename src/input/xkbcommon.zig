@@ -33,7 +33,7 @@ pub const XkbState = struct {
     keymap:      *xkb_keymap,
     state:       *xkb_state,
     device_id:   i32,
-    /// Keysym → keycode map built at init time for O(1) config-time lookups.
+    /// Keysym -> keycode map built at init time for O(1) config-time lookups.
     reverse_map: std.AutoHashMap(u32, u8),
 
     pub fn init(xcb_conn: *anyopaque, allocator: std.mem.Allocator) !XkbState {

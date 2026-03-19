@@ -327,8 +327,8 @@ const ACTION_MAP = std.StaticStringMap(core.Action).initComptime(.{
     .{ "unminimize_all",         .unminimize_all         },
     .{ "cycle_layout_variation", .cycle_layout_variation },
     .{ "cycle_variation",        .cycle_layout_variation },
-    .{ "prompt_toggle",          .prompt_toggle          },
-    .{ "drun",                   .prompt_toggle          },
+    .{ "toggle_prompt",          .toggle_prompt          },
+    .{ "drun",                   .toggle_prompt          },
     .{ "toggle_float",           .toggle_float           },
     .{ "float",                  .toggle_float           },
 });
@@ -339,7 +339,7 @@ const GlobEntry = struct {
     owned:  bool, // true when key was heap-allocated and must be freed by the caller
 };
 
-/// Expands `{…}` glob patterns in a keybind key (e.g. `Mod+{1-4,Q}` → 5 entries,
+/// Expands `{…}` glob patterns in a keybind key (e.g. `Mod+{1-4,Q}` -> 5 entries,
 /// comma-separated tokens and single-char ranges supported).  Workspace actions get a
 /// 1-based index appended; other actions are replicated unchanged.
 /// Returns a single unowned entry when no glob is present.
@@ -392,7 +392,7 @@ fn expandGlobKeys(allocator: std.mem.Allocator, key_pattern: []const u8) ![]Glob
 }
 
 const WORKSPACE_ACTION_BASES = std.StaticStringMap(void).initComptime(.{
-    .{ "workspace", {} }, .{ "move_to_workspace", {} }, .{ "tag_toggle", {} },
+    .{ "workspace", {} }, .{ "move_to_workspace", {} }, .{ "toggle_tag", {} },
 });
 
 fn resolveAndParseAction(allocator: std.mem.Allocator, cmd: []const u8, ws_idx: u8, kill_placeholder: ?[]const u8) !core.Action {
@@ -529,7 +529,7 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !core.Action {
     if (ACTION_MAP.get(cmd))                         |a| return a;
     if (tryParseWorkspace(cmd, "workspace_"))         |ws| return .{ .switch_workspace  = ws };
     if (tryParseWorkspace(cmd, "move_to_workspace_")) |ws| return .{ .move_to_workspace = ws };
-    if (tryParseWorkspace(cmd, "tag_toggle_"))        |ws| return .{ .tag_toggle        = ws };
+    if (tryParseWorkspace(cmd, "toggle_tag_"))        |ws| return .{ .toggle_tag        = ws };
     return .{ .exec = try allocator.dupe(u8, cmd) };
 }
 

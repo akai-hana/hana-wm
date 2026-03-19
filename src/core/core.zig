@@ -58,7 +58,7 @@ pub const Action = union(enum) {
     switch_workspace:  u8,
     move_to_workspace: u8,
     move_window:       u8, // exclusive move — clears all tags, sets only target
-    tag_toggle:        u8, // pure toggle — flips bit N, never moves
+    toggle_tag:        u8, // pure toggle — flips bit N, never moves
     sequence:          []Action, // ordered list of actions executed left-to-right; owned slice
     dump_state,
     minimize_window,
@@ -66,7 +66,7 @@ pub const Action = union(enum) {
     unminimize_fifo,
     unminimize_all,
     cycle_layout_variation,
-    prompt_toggle,
+    toggle_prompt,
     toggle_float,
 
     pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {

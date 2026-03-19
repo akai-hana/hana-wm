@@ -10,7 +10,7 @@ const window     = @import("window");
 const bar        = @import("bar");
 const has_tiling = @import("build_options").has_tiling;
 const tiling = if (has_tiling) @import("tiling") else struct {
-    pub const Layout = enum { master, monocle, grid, fibonacci };
+    pub const Layout = enum { master, monocle, grid, fibonacci, floating };
     var _state = struct { enabled: bool = false, layout: Layout = .master }{};
     pub fn getState() *@TypeOf(_state) { return &_state; }
     pub fn defaultLayout() Layout { return .master; }
@@ -24,6 +24,8 @@ const tiling = if (has_tiling) @import("tiling") else struct {
     pub fn syncLayoutFromWorkspace(_: anytype) void {}
     pub fn restoreWorkspaceGeom() bool { return false; }
     pub fn retileCurrentWorkspace() void {}
+    pub fn isFloatingLayout() bool { return false; }
+    pub fn retileForRestore() void {}
 };
 const Tracking   = @import("tracking").Tracking;
 const constants  = @import("constants");
@@ -429,6 +431,17 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
                 if (tiling.isWindowTiled(win)) tiling.invalidateGeomCache(win);
             }
             tiling.retileCurrentWorkspace();
+        }
+    } else if (tiling.isFloatingLayout()) {
+        // Floating layout: the tiling engine is disabled for window management
+        // but windows on inactive workspaces may have had their geometry cache
+        // zeroed the last time they were left while tiling was still active.
+        // Attempt a fast cache restore first; if that fails, run a silent retile
+        // that bypasses the !s.enabled guard to recompute the correct tiled
+        // positions without changing the active layout or moving any windows
+        // permanently.
+        if (!tiling.restoreWorkspaceGeom()) {
+            tiling.retileForRestore();
         }
     }
 
