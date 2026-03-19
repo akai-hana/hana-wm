@@ -13,7 +13,7 @@ const tiling        = if (build_options.has_tiling) @import("tiling") else struc
 const workspaces    = @import("workspaces");
 const drag          = @import("drag");
 const fullscreen    = @import("fullscreen");
-const bar           = @import("bar");
+const bar           = if (build_options.has_bar) @import("bar") else struct {};
 const window        = @import("window");
 const debug         = @import("debug");
 const minimize      = @import("minimize");
@@ -248,43 +248,62 @@ fn closeWindow(win: u32) void {
 
 fn executeAction(action: *const core.Action) !void {
     switch (action.*) {
-        .toggle_fullscreen      => fullscreen.toggleFullscreen(),
-        .close_window           => { if (focus.getFocused()) |win| closeWindow(win); },
-        .reload_config          => { utils.reload(); },
+        .toggle_fullscreen => fullscreen.toggle(),
+        .close_window      => if (focus.getFocused()) |win| closeWindow(win),
+        .reload_config     => utils.reload(),
         // Runs each action in the list in order. Stops and propagates the
         // first error encountered, leaving any remaining actions unexecuted.
-        .sequence               => |acts| { for (acts) |*a| try executeAction(a); },
-        .exec                   => |cmd| try executeShellCommand(cmd),
-        .dump_state             => dumpState(),
+        .sequence   => |acts| for (acts) |*a| try executeAction(a),
+        .exec       => |cmd| try executeShellCommand(cmd),
+        .dump_state => dumpState(),
 
-        .toggle_floating         => if (comptime build_options.has_tiling) tiling.toggleFloating(),
-        .toggle_float           => { if (comptime build_options.has_tiling) { if (focus.getFocused()) |win| tiling.toggleWindowFloat(win); } },
-        .toggle_layout          => { if (comptime build_options.has_tiling) { tiling.toggleLayout();        bar.scheduleRedraw(); } },
-        .toggle_layout_reverse  => { if (comptime build_options.has_tiling) { tiling.toggleLayoutReverse(); bar.scheduleRedraw(); } },
-        .cycle_layout_variation => if (comptime build_options.has_tiling) tiling.cycleLayoutVariation(),
+        .toggle_floating,
+        .toggle_float,
+        .toggle_layout,
+        .toggle_layout_reverse,
+        .cycle_layout_variation,
+        .increase_master,
+        .decrease_master,
+        .increase_master_count,
+        .decrease_master_count,
+        .swap_master,
+        .swap_master_focus_swap => if (comptime build_options.has_tiling) {
+            switch (action.*) {
+                .toggle_floating        => { tiling.toggleFloating();          bar.scheduleFullRedraw();  },
+                .toggle_float           => { if (focus.getFocused()) |win| tiling.toggleWindowFloat(win); },
+                .toggle_layout          => { tiling.toggleLayout();             bar.scheduleRedraw();     },
+                .toggle_layout_reverse  => { tiling.toggleLayoutReverse();      bar.scheduleRedraw();     },
+                .cycle_layout_variation => { tiling.cycleLayoutVariation();     bar.scheduleRedraw();     },
+                .increase_master        => tiling.increaseMasterWidth(),
+                .decrease_master        => tiling.decreaseMasterWidth(),
+                .increase_master_count  => tiling.increaseMasterCount(),
+                .decrease_master_count  => tiling.decreaseMasterCount(),
+                .swap_master            => { tiling.swapWithMaster();           focus.syncFocusToPointer(); bar.scheduleRedraw(); },
+                .swap_master_focus_swap => { tiling.swapWithMasterFocusSwap();  focus.syncFocusToPointer(); bar.scheduleRedraw(); },
+                else => unreachable,
+            }
+        },
 
-        .toggle_bar_visibility  => bar.setBarState(.toggle),
-        .toggle_bar_position    => bar.toggleBarPosition(),
+        .toggle_bar_visibility,
+        .toggle_bar_position => if (comptime build_options.has_bar) {
+            switch (action.*) {
+                .toggle_bar_visibility => bar.setBarState(.toggle),
+                .toggle_bar_position   => bar.toggleBarPosition(),
+                else => unreachable,
+            }
+        },
 
-        .increase_master        => if (comptime build_options.has_tiling) tiling.increaseMasterWidth(),
-        .decrease_master        => if (comptime build_options.has_tiling) tiling.decreaseMasterWidth(),
-        .increase_master_count  => if (comptime build_options.has_tiling) tiling.increaseMasterCount(),
-        .decrease_master_count  => if (comptime build_options.has_tiling) tiling.decreaseMasterCount(),
-
-        .swap_master            => { if (comptime build_options.has_tiling) { tiling.swapWithMaster();          focus.syncFocusToPointer(); bar.scheduleRedraw(); } },
-        .swap_master_focus_swap => { if (comptime build_options.has_tiling) { tiling.swapWithMasterFocusSwap(); focus.syncFocusToPointer(); bar.scheduleRedraw(); } },
-
-        .minimize_window        => minimize.minimizeWindow(),
-        .unminimize_lifo        => minimize.unminimize(.lifo),
-        .unminimize_fifo        => minimize.unminimize(.fifo),
-        .unminimize_all         => minimize.unminimizeAll(),
-
-        .switch_workspace       => |ws| workspaces.switchTo(ws),
-        .move_to_workspace      => |ws| { if (focus.getFocused()) |win| workspaces.moveWindowTo(win, ws) catch |e| debug.warnOnErr(e, "move_to_workspace"); },
-        .move_window            => |ws| { if (focus.getFocused()) |win| workspaces.moveWindowExclusive(win, ws); },
-
-        .tag_toggle             => |ws| { if (focus.getFocused()) |win| workspaces.tagToggle(win, ws, true); },
-        .prompt_toggle          => prompt.toggle(),
+        .minimize_window => minimize.minimizeWindow(),
+        .unminimize_lifo => minimize.unminimize(.lifo),
+        .unminimize_fifo => minimize.unminimize(.fifo),
+        .unminimize_all  => minimize.unminimizeAll(),
+        .switch_workspace  => |ws| workspaces.switchTo(ws),
+        .move_to_workspace => |ws| { if (focus.getFocused()) |win| workspaces.moveWindowTo(win, ws) catch |e| debug.warnOnErr(e, "move_to_workspace"); },
+        .move_window       => |ws| { if (focus.getFocused()) |win| workspaces.moveWindowExclusive(win, ws); },
+        .toggle_tag        => |ws| { if (focus.getFocused()) |win| workspaces.tagToggle(win, ws, true); },
+        //TODO: difference between .toggle_floating and .toggle_float?
+        //TODO: difference between bar.scheduleFullRedraw() vs bar.scheduleRedraw()?
+        .toggle_prompt => prompt.toggle(),
     }
 }
 

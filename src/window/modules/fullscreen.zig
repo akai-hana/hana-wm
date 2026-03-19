@@ -217,7 +217,7 @@ fn saveFloatingWindowGeoms(skip_win: u32) void {
 
 /// Restore every non-minimized, non-tiled window on the current workspace
 /// (except `skip_win`) to its saved position.
-/// Priority: g_saved_float_geoms → tiling geometry cache → floatDefaultPos fallback.
+/// Priority: g_saved_float_geoms -> tiling geometry cache -> floatDefaultPos fallback.
 /// Clears g_saved_float_geoms when done.
 fn restoreFloatingWindows(skip_win: u32) void {
     const ws_obj = workspaces.getCurrentWorkspaceObject() orelse return;
@@ -232,7 +232,7 @@ fn restoreFloatingWindows(skip_win: u32) void {
         // Resolve the best available geometry through the priority chain:
         //   1. saved float geometry (exact pre-fullscreen position)
         //   2. tiling cache (last known tiled rect)
-        //   3. null → fall through to default placement below
+        //   3. null -> fall through to default placement below
         const rect: ?utils.Rect = g_saved_float_geoms.get(w) orelse
             if (comptime build_options.has_tiling) tiling.getWindowGeom(w) else null;
 
@@ -334,7 +334,7 @@ pub fn enterFullscreen(win: u32, saved_geom: ?core.WindowGeometry) void {
     _ = xcb.xcb_flush(core.conn);
 }
 
-pub fn toggleFullscreen() void {
+pub fn toggle() void {
     const win        = focus.getFocused() orelse return;
     const current_ws = workspaces.getCurrentWorkspace() orelse return;
 

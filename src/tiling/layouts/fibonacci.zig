@@ -7,7 +7,7 @@ const layouts   = @import("layouts");
 const tiling    = @import("tiling");
 const State     = tiling.State;
 
-// Direction cycles counter-clockwise: right → down → left → up → right …
+// Direction cycles counter-clockwise: right -> down -> left -> up -> right …
 const Direction = enum {
     right, // Split vertically: window on left, remaining on right
     down,  // Split horizontally: window on top, remaining below

@@ -572,7 +572,7 @@ pub const CarouselPixmap = struct {
         cycle_w:  u16,
     ) void {
         // Copy A sits at (anchor_x - offset); copy B is one cycle_w to its right.
-        // As offset grows from 0 → cycle_w, A scrolls off left while B enters right.
+        // As offset grows from 0 -> cycle_w, A scrolls off left while B enters right.
         // Clipping to [clip_x, clip_x+clip_w) lets text scroll into the left padding
         // gap rather than disappearing at the text-start position.
         const ax: i32 = @intCast(anchor_x);

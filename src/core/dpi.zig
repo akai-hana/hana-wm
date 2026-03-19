@@ -145,7 +145,7 @@ fn calculateScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
 }
 
 /// Detect DPI, with caching keyed on the screen's pixel and physical dimensions.
-/// Priority: Xft.dpi from X resources → geometry calculation → resolution-based scaling.
+/// Priority: Xft.dpi from X resources -> geometry calculation -> resolution-based scaling.
 pub fn detect(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) DpiInfo {
     const sig =
         (@as(u64, screen.width_in_pixels)        << 48) |

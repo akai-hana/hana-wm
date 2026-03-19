@@ -508,7 +508,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
                 // one keybind by repeating the key:
                 //
                 //   Mod+Shift+1 = "move_to_workspace_1"
-                //   Mod+Shift+1 = "tag_toggle_1"
+                //   Mod+Shift+1 = "toggle_tag_1"
                 //
                 // parseKeybindings already handles array values as sequences,
                 // so no further changes are needed there.

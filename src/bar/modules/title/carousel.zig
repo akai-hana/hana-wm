@@ -6,7 +6,7 @@
 //! using a time-derived offset, producing a smooth horizontal scroll.
 //!
 //! V-sync alignment
-//! ────────────────
+//! 
 //! The scroll offset is quantised to monitor frame boundaries so that the
 //! destination pixels change at most once per frame.  This eliminates the
 //! sub-pixel drift that occurs when the bar redraws mid-frame and ensures
@@ -21,10 +21,10 @@
 //! invalidated — the hot path is always two xcb_copy_area blits.
 //!
 //! Leapfrog wrap
-//! ─────────────
+//! 
 //! Two logical copies of the text sit `cycle_w` apart in the pixmap.  As
-//! `offset` advances 0 → cycle_w the first copy exits left while the second
-//! enters right.  At cycle_w the state is identical to 0 → seamless loop.
+//! `offset` advances 0 -> cycle_w the first copy exits left while the second
+//! enters right.  At cycle_w the state is identical to 0 -> seamless loop.
 //!
 //!   cycle_w = text_w + CAROUSEL_GAP_PX
 
@@ -34,7 +34,7 @@ const drawing = @import("drawing");
 const core    = @import("core");
 const xcb     = core.xcb;
 
-// ── Hertz — monitor refresh-rate detection (inlined from hertz.zig) ──────────
+//  Hertz — monitor refresh-rate detection (inlined from hertz.zig) 
 //
 // Usage pattern (unchanged from when this lived in a separate file):
 //   carousel.ensureDetected(conn);   // once per draw cycle — cheap no-op after first call
@@ -142,7 +142,7 @@ fn hzDetect(conn: *xcb.xcb_connection_t) f64 {
     return DEFAULT_HZ;
 }
 
-// ── End of inlined hertz logic ────────────────────────────────────────────────
+//  End of inlined hertz logic 
 
 // Constants
 
