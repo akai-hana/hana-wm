@@ -69,12 +69,12 @@ const optional_subsystems = [_]OptionalSubsystem{
     },
     .{
         .name        = "tiling",
-        .entry_point = ROOT_DIR ++ "tiling/tiling.zig",
+        .entry_point = ROOT_DIR ++ "window/management/tiling/tiling.zig",
         .gate_dir    = "tiling",
     },
     .{
         .name        = "layouts",
-        .entry_point = ROOT_DIR ++ "tiling/layouts.zig",
+        .entry_point = ROOT_DIR ++ "window/management/tiling/layouts.zig",
     },
 };
 // ▲ Add new optional subsystems here ▲

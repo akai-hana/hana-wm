@@ -773,9 +773,9 @@ fn drawActive(
 ) !u16 {
     const end_x  = start_x + width;
     const pad    = config.scaledSegmentPadding(height);
-    const accent = config.getDrunPromptColor();
-    const bg     = config.getDrunBg();
-    const fg     = config.getDrunFg();
+    const accent = config.drunPromptColor();
+    const bg     = config.drunBg();
+    const fg     = config.drunFg();
     const prompt = config.drun_prompt;
 
     dc.fillRect(start_x, 0, width, height, bg);

@@ -35,6 +35,7 @@ const DpiCache = struct {
     screen_signature: u64      = 0,
 };
 
+// Not thread-safe; assumes detect() is only called from the main thread.
 var dpi_cache: DpiCache = .{};
 
 const COMMON_DPI_TABLE = [_]struct { dpi: f32, name: []const u8 }{
@@ -50,7 +51,7 @@ const ScreenDimensions = struct {
     width_mm:  f32,
     height_mm: f32,
 
-    inline fn from(screen: *xcb.xcb_screen_t) ScreenDimensions {
+    fn from(screen: *xcb.xcb_screen_t) ScreenDimensions {
         return .{
             .width_px  = @floatFromInt(screen.width_in_pixels),
             .height_px = @floatFromInt(screen.height_in_pixels),
@@ -59,7 +60,7 @@ const ScreenDimensions = struct {
         };
     }
 
-    inline fn diagonalPx(self: ScreenDimensions) f32 {
+    fn diagonalPx(self: ScreenDimensions) f32 {
         return @sqrt(self.width_px * self.width_px + self.height_px * self.height_px);
     }
 };
@@ -68,7 +69,7 @@ pub const DpiInfo = struct {
     dpi:          f32,
     scale_factor: f32,
 
-    pub inline fn fromDpi(dpi: f32) DpiInfo {
+    pub fn fromDpi(dpi: f32) DpiInfo {
         return .{ .dpi = dpi, .scale_factor = dpi / BASELINE_DPI };
     }
 };
@@ -125,7 +126,10 @@ fn snapToCommonDPI(dpi: f32) f32 {
     var min_diff = @abs(dpi - closest.dpi);
     for (COMMON_DPI_TABLE[1..]) |entry| {
         const diff = @abs(dpi - entry.dpi);
-        if (diff < min_diff) { min_diff = diff; closest = entry; }
+        if (diff < min_diff) {
+            min_diff = diff;
+            closest = entry;
+        }
     }
     if (min_diff / closest.dpi < SNAP_THRESHOLD) {
         debug.info("Snapped DPI {d:.1} to common value {d:.1} ({s})",
@@ -138,9 +142,8 @@ fn snapToCommonDPI(dpi: f32) f32 {
 fn calculateScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
     const dims             = ScreenDimensions.from(screen);
     const resolution_scale = dims.diagonalPx() / BASELINE_DIAGONAL;
-    debug.info("Resolution scaling: {d}x{d} -> {d:.2}x baseline ({d}x{d})",
-        .{ @as(u16, @intFromFloat(dims.width_px)), @as(u16, @intFromFloat(dims.height_px)),
-           resolution_scale, @as(u16, @intFromFloat(BASELINE_WIDTH)), @as(u16, @intFromFloat(BASELINE_HEIGHT)) });
+    debug.info("Resolution scaling: {d:.0}x{d:.0} -> {d:.2}x baseline ({d:.0}x{d:.0})",
+        .{ dims.width_px, dims.height_px, resolution_scale, BASELINE_WIDTH, BASELINE_HEIGHT });
     return resolution_scale;
 }
 
@@ -181,7 +184,7 @@ fn detectFresh(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) DpiInfo {
     return DpiInfo.fromDpi(snapToCommonDPI(geometry_dpi));
 }
 
-pub inline fn scaleInt(base_value: anytype, scale_factor: f32) @TypeOf(base_value) {
+pub fn scaleInt(base_value: anytype, scale_factor: f32) @TypeOf(base_value) {
     const T = @TypeOf(base_value);
     return switch (@typeInfo(T)) {
         .int, .comptime_int => @intFromFloat(@round(@as(f32, @floatFromInt(base_value)) * scale_factor)),
@@ -189,16 +192,15 @@ pub inline fn scaleInt(base_value: anytype, scale_factor: f32) @TypeOf(base_valu
     };
 }
 
-pub inline fn scaleToInt(comptime T: type, base_value: f32, scale_factor: f32) T {
+pub fn scaleToInt(comptime T: type, base_value: f32, scale_factor: f32) T {
     return @intFromFloat(@round(base_value * scale_factor));
 }
 
 /// Scale a border or gap value.
 /// Percentage values are screen-relative, so scale_factor is intentionally
-/// ignored — applying it would double-scale on HiDPI displays.
+/// excluded — applying it would double-scale on HiDPI displays.
 /// Absolute pixel values are screen-independent and used as-is.
-pub inline fn scaleBorderWidth(value: ScalableValue, scale_factor: f32, reference_dimension: u16) u16 {
-    _ = scale_factor;
+pub fn scaleBorderWidth(value: ScalableValue, reference_dimension: u16) u16 {
     if (value.is_percentage) {
         const dim_f: f32 = @floatFromInt(reference_dimension);
         return @intFromFloat(@max(0.0, @round((value.value / 100.0) * 0.5 * dim_f)));
@@ -210,11 +212,14 @@ pub inline fn scaleBorderWidth(value: ScalableValue, scale_factor: f32, referenc
 /// Alias for `scaleBorderWidth` — gaps and borders share identical scaling semantics.
 pub const scaleGaps = scaleBorderWidth;
 
-pub inline fn scaleMasterWidth(value: ScalableValue) f32 {
+/// Returns the master width as a fraction (0.0–1.0) for percentage values,
+/// or as a negative float encoding an absolute pixel value otherwise.
+/// Callers should treat negative results as `@abs(result)` pixels.
+pub fn scaleMasterWidth(value: ScalableValue) f32 {
     return if (value.is_percentage) value.value / 100.0 else -value.value;
 }
 
-pub inline fn scaleFontSize(value: ScalableValue, screen: *xcb.xcb_screen_t) u16 {
+pub fn scaleFontSize(value: ScalableValue, screen: *xcb.xcb_screen_t) u16 {
     if (value.is_percentage) {
         const screen_height: f32 = @floatFromInt(screen.height_in_pixels);
         return @intFromFloat(@max(1.0, @round(value.value * (screen_height / FONT_BASELINE_HEIGHT))));
@@ -223,11 +228,11 @@ pub inline fn scaleFontSize(value: ScalableValue, screen: *xcb.xcb_screen_t) u16
     }
 }
 
-pub inline fn scaleBarHeight(value: ScalableValue, screen_height: u16) u16 {
-    const h: f32  = @floatFromInt(screen_height);
-    const px: f32 = if (value.is_percentage)
-        h * (value.value / 100.0)
+pub fn scaleBarHeight(value: ScalableValue, screen_height: u16) u16 {
+    const screen_height_f: f32 = @floatFromInt(screen_height);
+    const scaled_px: f32 = if (value.is_percentage)
+        screen_height_f * (value.value / 100.0)
     else
         value.value;
-    return @max(BAR_MIN_HEIGHT_PX, @as(u16, @intFromFloat(@round(px))));
+    return @max(BAR_MIN_HEIGHT_PX, @as(u16, @intFromFloat(@round(scaled_px))));
 }

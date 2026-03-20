@@ -152,7 +152,7 @@ Mod+space       = "toggle_layout"          # Cycle layouts forward
 Mod+Shift+space = "toggle_layout_reverse"  # Cycle layouts backward
 Mod+Alt+space   = "cycle_layout_variation" # Cycle current layout's variation (Super+V)
 Mod+Tab         = "swap_focused_previous"  # Swap focused window with the previously focused window
-Mod+grave       = "prompt_toggle"
+Mod+grave       = "toggle_prompt"
 Mod+MiddleClick = "toggle_float"           # Toggle clicked window between tiled and floating
 
 # Layouts
@@ -169,7 +169,7 @@ Mod+{1-4,Q,W,E,R} = "workspace" #TODO: rename to "switch_to_workspace"
 
 ## Workspace window sending
 Mod+Shift+{1-4,Q,W,E,R} = "move_to_workspace"
-Mod+Alt+{1-4,Q,W,E,R} = "tag_toggle" #TODO: rename to toggle_to_workspace
+Mod+Alt+{1-4,Q,W,E,R} = "toggle_tag" #TODO: rename to toggle_to_workspace
 
 # Bar
 Mod+B       = "toggle_bar_visibility"  # shown/hidden
@@ -226,35 +226,20 @@ Mod+Shift+Escape = "emergency_recover" #TODO: remove. this is hacky and assumes 
 # 2 = ["<program_3>"]                # Workspace 2
 # ```
 
-[workspace.rules.1] # browser
-Navigator
-Firefox
-
-[workspace.rules.2] # socials
-discord
-vesktop
-equibop
-electron
-
-[workspace.rules.3] # music
-com.github.th_ch.youtube_music
-
-[workspace.rules.4] # launchers
-OpenTabletDriver.UX
-
-[workspace.rules.5] # gaming
-"osu!"
-DDNet
-isaac-ng.exe
-
-[workspace.rules.6] # editors
-emacs
-xeyes
-
-[workspace.rules.7] # media
-prismlauncher
-freetube
-gimp
-
-[workspace.rules.8] # torrenting
-deluge
+[workspace.rules]
+# Browser
+1 = ["firefox", "Navigator"]
+# Socials
+2 = ["discord", "vesktop", "equibop", "electron"]
+# Music
+3 = ["com.github.th_ch.youtube_music"]
+# Launchers
+4 = ["OpenTabletDriver.UX"]
+# Games
+5 = ["osu!", "DDNet", "isaac-ng.exe"]
+# Editors
+6 = ["emacs", "xeyes"]
+# Media
+7 = ["prismlauncher", "freetube", "gimp"]
+# Torrenting
+8 = ["deluge"]

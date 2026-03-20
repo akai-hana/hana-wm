@@ -1,6 +1,6 @@
 //! Core WM type definitions.
 //!
-//! This file has grown beyond its original intent but remains the canonical home for all
+//! This file is the canonical home for all shared types:
 //! - Config types are defined directly in this file (Action, Config, BarConfig, etc.).
 //! - Runtime constants (MOD_*, MIN_*) live in constants.zig.
 //! - Fullscreen types live in fullscreen.zig.
@@ -13,6 +13,22 @@ const parser = @import("parser");
 pub const xcb = @cImport({
     @cInclude("xcb/xcb.h");
 });
+
+// Modifier masks
+//
+// Must be u16 per XCB API; widening to u32 breaks xcb_grab_key.
+// Centralised here alongside Keybind so config parsers, input handling,
+// and keybinding matching all share a single definition.
+pub const MOD_SHIFT:    u16 = xcb.XCB_MOD_MASK_SHIFT;
+pub const MOD_CAPSLOCK:     u16 = xcb.XCB_MOD_MASK_LOCK;
+pub const MOD_CONTROL:  u16 = xcb.XCB_MOD_MASK_CONTROL;
+pub const MOD_ALT:      u16 = xcb.XCB_MOD_MASK_1;
+pub const MOD_NUM_LOCK: u16 = xcb.XCB_MOD_MASK_2;
+pub const MOD_SUPER:    u16 = xcb.XCB_MOD_MASK_4;
+
+/// The only modifier bits the WM uses for keybinding matching.
+/// Strips lock-key and pointer-button noise from raw event modifier state.
+pub const MOD_MASK_RELEVANT: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER;
 
 // X11 keysym constants
 //
@@ -36,6 +52,10 @@ pub const XK_End       : xcb.xcb_keysym_t = 0xff57;
 /// Using this alias makes window-ID fields self-documenting and gives a
 /// single canonical grep target.
 pub const WindowId = u32;
+
+/// X11 color value packed as 0x00RRGGBB into 32 bits.
+/// The high byte is unused; values match what XCB expects for pixel/color fields.
+pub const Color = u32;
 
 // Config types 
 
@@ -67,7 +87,6 @@ pub const Action = union(enum) {
     unminimize_all,
     cycle_layout_variation,
     toggle_prompt,
-    toggle_float,
 
     pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -135,18 +154,11 @@ pub const GridVariation = enum {
     relaxed, // last window in incomplete row expands to fill the row
 };
 
-/// Fibonacci has no behavioral variations today; this enum is a placeholder
-/// that lets the config and tiling systems treat all four layouts uniformly.
-pub const FibonacciVariation = enum {
-    default,
-};
-
 /// A layout variation discriminated by which layout it belongs to.
 pub const LayoutVariationOverride = union(enum) {
-    master:    MasterVariation,
-    monocle:   MonocleVariation,
-    grid:      GridVariation,
-    fibonacci: FibonacciVariation,
+    master:  MasterVariation,
+    monocle: MonocleVariation,
+    grid:    GridVariation,
 };
 
 /// Records that a specific workspace should start in a particular layout
@@ -166,17 +178,16 @@ pub const TilingConfig = struct {
     master_count: u8             = 1,
     gap_width:    parser.ScalableValue = parser.ScalableValue.absolute(10.0),
     border_width: parser.ScalableValue = parser.ScalableValue.absolute(2.0),
-    border_focused:   u32 = 0x5294E2, // 0xRRGGBB packed into 32 bits (X11 color format)
-    border_unfocused: u32 = 0x383C4A, // 0xRRGGBB packed into 32 bits (X11 color format)
+    border_focused:   Color = 0x5294E2,
+    border_unfocused: Color = 0x383C4A,
 
     // Per-layout variation preferences
     //
     // Stored as parsed enums (not raw strings) to avoid
     // dangling slices after the config document is freed.
-    master_variation:    MasterVariation    = .lifo,
-    monocle_variation:   MonocleVariation   = .gapless,
-    grid_variation:      GridVariation      = .rigid,
-    fibonacci_variation: FibonacciVariation = .default,
+    master_variation:  MasterVariation  = .lifo,
+    monocle_variation: MonocleVariation = .gapless,
+    grid_variation:    GridVariation    = .rigid,
 
     // Per-layout 3-character indicator overrides (null = derive from active variation).
     // Stored as fixed-size arrays: no allocation, no dangling pointers.
@@ -184,10 +195,6 @@ pub const TilingConfig = struct {
     master_indicator:    ?[3]u8 = null,
     monocle_indicator:   ?[3]u8 = null,
     grid_indicator:      ?[3]u8 = null,
-    // 3-char label displayed in the bar for fibonacci (which has no variations).
-    // Defaults to "FIB"; override with `indicator = "..."` in [tiling.layouts.fibonacci].
-    fibonacci_indicator: [3]u8 = "FIB".*,
-    //TODO: don't make this a default for fibonacci specifically, but for all tiling laoyuts that do not have a variation made for them. so, if the variation count for said layout is equal to zero, pass "NUL".
 
     /// Per-workspace layout assignments parsed from the layouts array.
     workspace_layout_overrides: std.ArrayListUnmanaged(WorkspaceLayoutOverride) = .empty,
@@ -217,35 +224,35 @@ pub const IndicatorLocation = enum {
     ///
     /// Accepts hyphens or underscores, and both orderings of diagonal names 
     /// (e.g. "left-up" == "up-left")
+    // Both orderings of diagonal names and both separators are pre-listed.
+    // StaticStringMap.initComptime is a compile-time perfect hash — O(1), no runtime cost.
+    const string_map = std.StaticStringMap(IndicatorLocation).initComptime(.{
+        .{ "up",          .up         },
+        .{ "down",        .down       },
+        .{ "left",        .left       },
+        .{ "right",       .right      },
+        .{ "up-left",     .up_left    },
+        .{ "up_left",     .up_left    },
+        .{ "left-up",     .up_left    },
+        .{ "left_up",     .up_left    },
+        .{ "up-right",    .up_right   },
+        .{ "up_right",    .up_right   },
+        .{ "right-up",    .up_right   },
+        .{ "right_up",    .up_right   },
+        .{ "down-left",   .down_left  },
+        .{ "down_left",   .down_left  },
+        .{ "left-down",   .down_left  },
+        .{ "left_down",   .down_left  },
+        .{ "down-right",  .down_right },
+        .{ "down_right",  .down_right },
+        .{ "right-down",  .down_right },
+        .{ "right_down",  .down_right },
+    });
     pub inline fn fromString(str: []const u8) ?IndicatorLocation {
-        // Both orderings of diagonal names and both separators are pre-listed.
-        // StaticStringMap.initComptime is a compile-time perfect hash — O(1), no runtime cost.
-        const map = std.StaticStringMap(IndicatorLocation).initComptime(.{
-            .{ "up",          .up         },
-            .{ "down",        .down       },
-            .{ "left",        .left       },
-            .{ "right",       .right      },
-            .{ "up-left",     .up_left    },
-            .{ "up_left",     .up_left    },
-            .{ "left-up",     .up_left    },
-            .{ "left_up",     .up_left    },
-            .{ "up-right",    .up_right   },
-            .{ "up_right",    .up_right   },
-            .{ "right-up",    .up_right   },
-            .{ "right_up",    .up_right   },
-            .{ "down-left",   .down_left  },
-            .{ "down_left",   .down_left  },
-            .{ "left-down",   .down_left  },
-            .{ "left_down",   .down_left  },
-            .{ "down-right",  .down_right },
-            .{ "down_right",  .down_right },
-            .{ "right-down",  .down_right },
-            .{ "right_down",  .down_right },
-        });
         var buf: [16]u8 = undefined;
         if (str.len > buf.len) return null;
         const lower = std.ascii.lowerString(&buf, str);
-        return map.get(lower);
+        return string_map.get(lower);
     }
 };
 
@@ -286,24 +293,27 @@ pub const BarConfig = struct {
     font:              []const u8             = "monospace:size=10",
     fonts:             std.ArrayListUnmanaged([]const u8),
     font_size:         parser.ScalableValue   = parser.ScalableValue.percentage(10.0),
+    // Resolved pixel value cached after DPI scaling; derived from font_size at startup.
+    // NOTE: this is runtime state, not a raw config value — consider moving it to a
+    // separate resolved-config struct if BarConfig is ever serialised or diffed.
     scaled_font_size:  u16                    = 10, // Can exceed 255 on high DPI - u16 is correct
     spacing:           parser.ScalableValue   = parser.ScalableValue.absolute(12.0),
 
     // Colors: 0xRRGGBB packed into 32 bits (X11 color format).
-    bg:          u32 = 0x222222,
-    fg:          u32 = 0xBBBBBB,
-    selected_bg: u32 = 0x005577,
-    selected_fg: u32 = 0xEEEEEE,
-    occupied_fg: u32 = 0xEEEEEE,
-    urgent_bg:   u32 = 0xFF0000,
-    urgent_fg:   u32 = 0xFFFFFF,
+    bg:          Color = 0x222222,
+    fg:          Color = 0xBBBBBB,
+    selected_bg: Color = 0x005577,
+    selected_fg: Color = 0xEEEEEE,
+    occupied_fg: Color = 0xEEEEEE,
+    urgent_bg:   Color = 0xFF0000,
+    urgent_fg:   Color = 0xFFFFFF,
 
-    accent_color:           u32 = 0x61AFEF,
-    workspaces_accent:      u32 = 0x61AFEF,
-    title_accent_color:     u32 = 0x61AFEF,
-    title_unfocused_accent: u32 = 0x222222,
-    title_minimized_accent: u32 = 0x61AFEF,
-    clock_accent:           u32 = 0x61AFEF,
+    accent_color:           Color = 0x61AFEF,
+    workspaces_accent:      Color = 0x61AFEF,
+    title_accent_color:     Color = 0x61AFEF,
+    title_unfocused_accent: Color = 0x222222,
+    title_minimized_accent: Color = 0x61AFEF,
+    clock_accent:           Color = 0x61AFEF,
 
     workspace_icons:     std.ArrayListUnmanaged([]const u8),
     indicator_size:      parser.ScalableValue = parser.ScalableValue.percentage(30.0),
@@ -313,14 +323,14 @@ pub const BarConfig = struct {
     indicator_padding:   f32               = 0.1,
     indicator_focused:   []const u8        = "■",
     indicator_unfocused: []const u8        = "□",
-    indicator_color:     ?u32              = null,
+    indicator_color:     ?Color             = null,
 
     clock_format: []const u8 = "%Y-%m-%d %H:%M:%S",
 
     // drun segment colors and prompt (all optional. Fall-back to bar-wide defaults)
-    drun_bg:           ?u32       = null,    // Background; falls back to bg
-    drun_fg:           ?u32       = null,    // Typed text color; falls back to fg
-    drun_prompt_color: ?u32       = null,    // Prompt text color; falls back to accent_color
+    drun_bg:           ?Color     = null,    // Background; falls back to bg
+    drun_fg:           ?Color     = null,    // Typed text color; falls back to fg
+    drun_prompt_color: ?Color     = null,    // Prompt text color; falls back to accent_color
     drun_prompt:       []const u8 = "run: ", // Displayed before the input field
 
     layout: std.ArrayListUnmanaged(BarLayout),
@@ -337,13 +347,13 @@ pub const BarConfig = struct {
         self.layout.deinit(allocator);
     }
 
-    pub inline fn getDrunBg(self: *const BarConfig) u32 {
+    pub inline fn drunBg(self: *const BarConfig) Color {
         return self.drun_bg orelse self.bg;
     }
-    pub inline fn getDrunFg(self: *const BarConfig) u32 {
+    pub inline fn drunFg(self: *const BarConfig) Color {
         return self.drun_fg orelse self.fg;
     }
-    pub inline fn getDrunPromptColor(self: *const BarConfig) u32 {
+    pub inline fn drunPromptColor(self: *const BarConfig) Color {
         return self.drun_prompt_color orelse self.accent_color;
     }
     /// Derives horizontal segment padding from font_size.
@@ -395,6 +405,11 @@ pub const Rule = struct {
 pub const WorkspaceConfig = struct {
     count: u8 = 9,
     rules: std.ArrayListUnmanaged(Rule) = .empty,
+
+    pub fn deinit(self: *WorkspaceConfig, allocator: std.mem.Allocator) void {
+        for (self.rules.items) |*rule| rule.deinit(allocator);
+        self.rules.deinit(allocator);
+    }
 };
 
 pub const Config = struct {
@@ -403,8 +418,16 @@ pub const Config = struct {
     tiling:      TilingConfig,
     workspaces:  WorkspaceConfig = .{},
     bar:         BarConfig,
-    allocator:   std.mem.Allocator,
 
+    // Ownership sentinels for string fields that have static defaults.
+    //
+    // Some fields (e.g. bar.font, bar.clock_format) point to string literals by default
+    // and to heap-allocated slices when the user overrides them in the config file.
+    // These nullable fields track which case applies so deinit knows what to free.
+    //
+    // FIXME: eliminate by always duping strings in the parser so every field is
+    // unconditionally owned — then deinit can free them directly and these fields go away.
+    // Requires changes in config.zig (parser) to dupe default strings on load.
     allocated_font:                ?[]const u8 = null,
     allocated_layout:              ?[]const u8 = null,
     allocated_clock_format:        ?[]const u8 = null,
@@ -412,32 +435,25 @@ pub const Config = struct {
     allocated_indicator_unfocused: ?[]const u8 = null,
     allocated_drun_prompt:         ?[]const u8 = null,
 
-    pub fn init(allocator: std.mem.Allocator) Config {
+    pub fn init() Config {
         return .{
-            .tiling    = TilingConfig{ .layouts = .empty },
-            .bar       = BarConfig{
+            .tiling = TilingConfig{ .layouts = .empty },
+            .bar    = BarConfig{
                 .workspace_icons = .empty,
                 .fonts           = .empty,
                 .layout          = .empty,
             },
-            .allocator = allocator,
         };
     }
 
-    /// Uses self.allocator
-    ///
-    /// The same allocator passed to Config.init and all subsequent 
-    /// config allocations, so callers do not need to pass it again.
-    pub fn deinit(self: *Config) void {
-        const a = self.allocator;
+    pub fn deinit(self: *Config, a: std.mem.Allocator) void {
         for (self.keybindings.items) |*kb| kb.action.deinit(a);
         self.keybindings.deinit(a);
 
         for (self.mouse_bindings.items) |*mb| mb.deinit(a);
         self.mouse_bindings.deinit(a);
 
-        for (self.workspaces.rules.items) |*rule| rule.deinit(a);
-        self.workspaces.rules.deinit(a);
+        self.workspaces.deinit(a);
 
         self.bar.deinit(a);
         self.tiling.deinit(a);
@@ -482,15 +498,14 @@ pub const FocusSuppressReason = enum {
     tiling_operation, // currently tiling: don't let cursor steal focus
 };
 
-
 // Global WM state — set once at startup by main.zig, valid for the lifetime of the process.
 // Every module accesses these via `const core = @import("core")`.
 
-const dpi_mod = @import("dpi");
+const dpi_mod = @import("scale");
 
 pub var conn:      *xcb.xcb_connection_t = undefined;
 pub var screen:    *xcb.xcb_screen_t     = undefined;
 pub var root:      WindowId              = undefined;
-pub var alloc: std.mem.Allocator     = undefined;
+pub var alloc: std.mem.Allocator = undefined; // short name intentional: avoids shadowing `allocator` params throughout this file
 pub var config:    Config                = undefined;
 pub var dpi_info:  dpi_mod.DpiInfo       = undefined;

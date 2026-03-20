@@ -58,7 +58,7 @@ const workspaces    = @import("workspaces");
 const focus         = @import("focus");
 const constants     = @import("constants");
 const minimize      = @import("minimize");
-const dpi_mod       = @import("dpi");
+const scale         = @import("scale");
 
 const workspaces_segment = if (bar_flags.has_tags) @import("tags") else struct {
     pub fn draw(_: *drawing.DrawContext, _: core.BarConfig, _: u16, x: u16, _: u8, _: []const bool) !u16 { return x; }
@@ -706,7 +706,7 @@ fn resolvePercentageFontSize(bar_height: u16) ?u16 {
 
 fn calculateBarHeight() !u16 {
     if (core.config.bar.height) |h| {
-        const height = dpi_mod.scaleBarHeight(h, core.screen.height_in_pixels);
+        const height = scale.scaleBarHeight(h, core.screen.height_in_pixels);
         if (core.config.bar.font_size.is_percentage) {
             if (resolvePercentageFontSize(height)) |sz|
                 core.config.bar.scaled_font_size = sz;
