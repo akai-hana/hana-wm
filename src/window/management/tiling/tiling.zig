@@ -1,7 +1,7 @@
 //! Tiling window management: delegates to layout modules.
 
 const std        = @import("std");
-const core = @import("core");
+const core       = @import("core");
 const xcb        = core.xcb;
 const utils      = @import("utils");
 const constants  = @import("constants");
@@ -10,7 +10,7 @@ const focus      = @import("focus");
 const bar        = @import("bar");
 const Tracking   = @import("tracking").Tracking;
 const debug      = @import("debug");
-const dpi        = @import("dpi");
+const scale      = @import("scale");
 const layouts    = @import("layouts");
 
 const build_options = @import("build_options");
@@ -143,7 +143,6 @@ pub const State = struct {
     prev_layout:      Layout,
     layout_variations: LayoutVariations,
     /// 3-character indicator shown in the bar for the fibonacci layout.
-    fibonacci_indicator: [3]u8,
     master_side:      core.MasterSide,
     master_width:     f32,
     master_count:     u8,
@@ -232,7 +231,7 @@ pub inline fn getStateOpt() ?*State {
 }
 
 fn computeMasterWidth() f32 {
-    const raw = dpi.scaleMasterWidth(core.config.tiling.master_width);
+    const raw = scale.scaleMasterWidth(core.config.tiling.master_width);
     if (raw < 0) {
         const ratio = -raw / @as(f32, @floatFromInt(core.screen.width_in_pixels));
         return @min(MAX_MASTER_WIDTH, @max(constants.MIN_MASTER_WIDTH, ratio));
@@ -272,12 +271,11 @@ fn buildState() !State {
             .monocle = core.config.tiling.monocle_variation,
             .grid    = core.config.tiling.grid_variation,
         },
-        .fibonacci_indicator = core.config.tiling.fibonacci_indicator,
         .master_side      = core.config.tiling.master_side,
         .master_width     = computeMasterWidth(),
         .master_count     = core.config.tiling.master_count,
-        .gap_width        = dpi.scaleGaps(core.config.tiling.gap_width, core.dpi_info.scale_factor, screen_height),
-        .border_width     = dpi.scaleBorderWidth(core.config.tiling.border_width, core.dpi_info.scale_factor, screen_height),
+        .gap_width        = scale.scaleBorderWidth(core.config.tiling.gap_width, screen_height),
+        .border_width     = scale.scaleBorderWidth(core.config.tiling.border_width, screen_height),
         .border_focused   = core.config.tiling.border_focused,
         .border_unfocused = core.config.tiling.border_unfocused,
         .windows          = Tracking{ .allocator = alloc },
@@ -1068,10 +1066,9 @@ pub fn syncLayoutFromWorkspace(ws: *const workspaces.Workspace) void {
     // variation means "use the global default", so leave layout_variations alone.
     if (ws.variation) |v| {
         switch (v) {
-            .master    => |mv| s.layout_variations.master  = mv,
-            .monocle   => |mv| s.layout_variations.monocle = mv,
-            .grid      => |gv| s.layout_variations.grid    = gv,
-            .fibonacci => {},
+            .master  => |mv| s.layout_variations.master  = mv,
+            .monocle => |mv| s.layout_variations.monocle = mv,
+            .grid    => |gv| s.layout_variations.grid    = gv,
         }
     }
     if (needs_retile) {

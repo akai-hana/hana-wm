@@ -104,7 +104,7 @@ pub fn setup(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t, root: u32) 
 }
 
 /// Grabs Super+Button1/2/3 on the root window.
-/// Button1 = move, Button3 = resize, Button2 = config-driven binds (e.g. toggle_float).
+/// Button1 = move, Button3 = resize, Button2 = config-driven binds (e.g. toggle_floating).
 pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
     for (MOUSE_BUTTONS) |button| {
         _ = xcb.xcb_grab_button(
@@ -144,7 +144,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
 
 /// Dispatches a button-press event using the following priority order:
 ///   1. Ignore clicks on the root window or unknown windows (replay pointer).
-///   2. Check config-driven mouse bindings (e.g. Super+MiddleClick = toggle_float).
+///   2. Check config-driven mouse bindings (e.g. Super+MiddleClick = toggle_floating).
 ///   3. Super+Left/Right drag: start a move or resize operation.
 ///   4. Any other click: focus the window under the cursor.
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
@@ -163,7 +163,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
         return;
     }
 
-    // Check config-driven mouse binds (e.g. Super+MiddleClick = "toggle_float").
+    // Check config-driven mouse binds (e.g. Super+MiddleClick = "toggle_floating").
     // These take priority over the default drag behaviour so a bind is never
     // swallowed by the drag handler.
     const super_held = (event.state & constants.MOD_SUPER) != 0;
@@ -258,7 +258,6 @@ fn executeAction(action: *const core.Action) !void {
         .dump_state => dumpState(),
 
         .toggle_floating,
-        .toggle_float,
         .toggle_layout,
         .toggle_layout_reverse,
         .cycle_layout_variation,
@@ -269,8 +268,7 @@ fn executeAction(action: *const core.Action) !void {
         .swap_master,
         .swap_master_focus_swap => if (comptime build_options.has_tiling) {
             switch (action.*) {
-                .toggle_floating        => { tiling.toggleFloating();          bar.scheduleFullRedraw();  },
-                .toggle_float           => { if (focus.getFocused()) |win| tiling.toggleWindowFloat(win); },
+                .toggle_floating        => { if (focus.getFocused()) |win| tiling.toggleWindowFloat(win); bar.scheduleFullRedraw(); },
                 .toggle_layout          => { tiling.toggleLayout();             bar.scheduleRedraw();     },
                 .toggle_layout_reverse  => { tiling.toggleLayoutReverse();      bar.scheduleRedraw();     },
                 .cycle_layout_variation => { tiling.cycleLayoutVariation();     bar.scheduleRedraw();     },
@@ -301,19 +299,17 @@ fn executeAction(action: *const core.Action) !void {
         .move_to_workspace => |ws| { if (focus.getFocused()) |win| workspaces.moveWindowTo(win, ws) catch |e| debug.warnOnErr(e, "move_to_workspace"); },
         .move_window       => |ws| { if (focus.getFocused()) |win| workspaces.moveWindowExclusive(win, ws); },
         .toggle_tag        => |ws| { if (focus.getFocused()) |win| workspaces.tagToggle(win, ws, true); },
-        //TODO: difference between .toggle_floating and .toggle_float?
-        //TODO: difference between bar.scheduleFullRedraw() vs bar.scheduleRedraw()?
         .toggle_prompt => prompt.toggle(),
     }
 }
 
 /// Like executeAction but carries the specific window that was clicked.
-/// Used by the mouse bind dispatcher so toggle_float acts on the clicked
+/// Used by the mouse bind dispatcher so toggle_floating acts on the clicked
 /// window rather than the keyboard-focused one (they may differ).
 fn executeMouseAction(action: *const core.Action, clicked_win: u32) !void {
     switch (action.*) {
-        .toggle_float => if (comptime build_options.has_tiling) tiling.toggleWindowFloat(clicked_win),
-        else          => try executeAction(action),
+        .toggle_floating => if (comptime build_options.has_tiling) tiling.toggleWindowFloat(clicked_win),
+        else             => try executeAction(action),
     }
 }
 

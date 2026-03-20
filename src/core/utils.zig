@@ -6,17 +6,21 @@
 const std = @import("std");
 
 // core/
-const constants = @import("constants");
 
 // config/
 const core = @import("core");
-    const xcb = core.xcb;
+const xcb  = core.xcb;
 
 // debug/
 const debug = @import("debug");
 
-const MAX_PROPERTY_LENGTH:   u32   = 256;
-const PROPERTY_NO_DELETE:    u8    = 0;
+const MAX_PROPERTY_LENGTH: u32 = 256;
+/// Minimum window dimension; windows thinner or shorter than this are considered invalid.
+const MIN_WINDOW_DIM: u16 = 50;
+/// Maximum depth when walking the X11 window tree in findManagedWindow.
+const MAX_WINDOW_TREE_DEPTH: usize = 10;
+/// Passed as the `delete` argument to xcb_get_property; 0 means do not consume the property.
+const PROPERTY_NO_DELETE: u8 = 0;
 const WM_HINTS_INPUT_FLAG:   u32   = 1 << 0;
 const WM_HINTS_FLAGS_FIELD:  usize = 0;
 const WM_HINTS_INPUT_FIELD:  usize = 1;
@@ -28,11 +32,10 @@ const WM_HINTS_LONG_LENGTH:  u32   = 9; // flags + 8 fields
 // Signal handlers and keybind actions write here; the main event loop reads here.
 
 /// Set to false by SIGTERM/SIGINT to break the main event loop.
-//TODO
 pub var running = std.atomic.Value(bool).init(true);
 
 /// Set to true by SIGHUP or the `reload_config` keybinding.
-/// Consumed by `maybeReload` in the main event loop. //TODO: does this refer to main.zig or event.zig?
+/// Consumed by `maybeReload` in the main event loop.
 pub var should_reload = std.atomic.Value(bool).init(false);
 
 /// Signals the main event loop to exit cleanly.
@@ -67,7 +70,7 @@ pub const Rect = struct {
     }
 
     pub inline fn isValid(self: Rect) bool {
-        return self.width >= constants.MIN_WINDOW_DIM and self.height >= constants.MIN_WINDOW_DIM;
+        return self.width >= MIN_WINDOW_DIM and self.height >= MIN_WINDOW_DIM;
     }
 };
 
@@ -80,10 +83,8 @@ pub const Margins = struct {
     pub inline fn total(self: Margins) u16 { return self.gap + 2 * self.border; }
 };
 
-/// Four-field variant. //TODO: four-field variant? variant of what? what even is four-field? what does this function do? it's not clear at all with the current comment's description; it isn't human readable for a person who's reading it on the surface to immediately know what this does.
-///
-/// Sets x, y, width, and height only; border_width is unchanged.
-/// Use configureWindowGeom when border_width must move atomically.
+/// Moves and resizes `win` without touching border_width.
+/// Use `configureWindowGeom` when border_width must change atomically.
 pub inline fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect) void {
     _ = xcb.xcb_configure_window(
         conn, win,
@@ -98,8 +99,8 @@ pub inline fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect)
     );
 }
 
-/// Five-field variant that also sets border_width atomically with geometry,
-/// preventing a one-frame flash on fullscreen enter/exit and workspace switch. //TODO: see previous TODO, also applies here.
+/// Moves, resizes, and sets border_width atomically,
+/// preventing a one-frame flash on fullscreen enter/exit or workspace switch.
 pub inline fn configureWindowGeom(conn: *xcb.xcb_connection_t, win: u32, geom: core.WindowGeometry) void {
     _ = xcb.xcb_configure_window(
         conn, win,
@@ -127,12 +128,15 @@ pub fn getGeometry(conn: *xcb.xcb_connection_t, win: u32) ?Rect {
 /// Strips lock-key and pointer-button bits from a raw event modifier state,
 /// leaving only the modifier bits the WM uses for keybinding matching.
 pub inline fn normalizeModifiers(state: u16) u16 {
-    return state & constants.MOD_MASK_RELEVANT;
+    return state & core.MOD_MASK_RELEVANT;
 }
+
+/// Screen-space position of a window's top-left corner.
+pub const Pos = struct { x: u32, y: u32 };
 
 /// Returns the default floating window position
 /// (one quarter of the screen in from the top-left).
-pub inline fn floatDefaultPos() struct { x: u32, y: u32 } {
+pub inline fn floatDefaultPos() Pos {
     return .{
         .x = @intCast(core.screen.width_in_pixels  / 4),
         .y = @intCast(core.screen.height_in_pixels / 4),
@@ -214,8 +218,6 @@ pub inline fn getAtomCached(comptime name: []const u8) error{AtomCacheNotInitial
 
 // Property helpers
 
-/// TODO: missing brief one-line of function.
-///
 /// Fetches an 8-bit X11 window property into a caller-supplied reuse buffer.
 /// Returns a slice into `buffer.items` on success, or null if the property is absent, empty, or not 8-bit encoded.
 /// The buffer is cleared before each use, so the caller can allocate it once and pass it across repeated calls.
@@ -238,7 +240,7 @@ pub fn fetchPropertyToBuffer(
     const value_ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
     try buffer.appendSlice(allocator, value_ptr[0..@intCast(reply.*.value_len)]);
     return buffer.items;
-} //TODO: the code here seems really tight. no spacing whatsoever except one blank line. it's also really verbose at first sight, i'd love it if it were more readable and understandable when skimming through this utils.zig file on a surface level.
+}
 
 // Window focus property cache
 //
@@ -274,8 +276,9 @@ pub fn initInputModelCache(allocator: std.mem.Allocator) void {
 }
 
 /// Cleans up the per-window focus property cache.
+/// Captures `input_model_cache` by pointer (`|*cache|`) so the optional can be mutated in place.
 pub fn deinitInputModelCache() void {
-    if (input_model_cache) |*cache| { //TODO: what "if (input_model_cache) |*cache|" does is unclear to me just from reading the code.
+    if (input_model_cache) |*cache| {
         cache.deinit();
         input_model_cache = null;
     }
@@ -292,9 +295,13 @@ pub fn populateFocusCacheFromCookies(
     protocols_cookie: xcb.xcb_get_property_cookie_t,
     hints_cookie:     xcb.xcb_get_property_cookie_t,
 ) void {
-    // Resolve both atoms before consuming either cookie single cleanup path.
+    // Resolve both atoms upfront so a failure on either can discard both cookies
+    // together along a single cleanup path.
+    //
+    // `catch break :blk null` exits the labeled block early with null on error;
+    // the `orelse` below then handles both discards in one place.
     const atoms = blk: {
-        const take_focus_atom = getAtomCached("WM_TAKE_FOCUS")    catch break :blk null; //TODO: why "catch break :blk null"?
+        const take_focus_atom = getAtomCached("WM_TAKE_FOCUS")    catch break :blk null;
         const wm_delete_atom  = getAtomCached("WM_DELETE_WINDOW") catch break :blk null;
 
         break :blk .{ .take_focus = take_focus_atom, .wm_delete = wm_delete_atom };
@@ -323,14 +330,17 @@ pub fn populateFocusCacheFromCookies(
 
     var accepts_input = true;
 
-    //TODO: comment?
+    // Extract the WM_HINTS input field from the pre-fired cookie reply.
+    // Same logic as queryWMHintsAcceptsInput, but operating on a cookie rather than issuing a new request.
     if (xcb.xcb_get_property_reply(conn, hints_cookie, null)) |r| {
         defer std.c.free(r);
 
         if (r.*.format == 32 and r.*.value_len >= 1) {
             const hints: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(r)));
 
-            if ((hints[WM_HINTS_FLAGS_FIELD] & WM_HINTS_INPUT_FLAG) != 0 and r.*.value_len > WM_HINTS_INPUT_FIELD) { //VERBOSE
+            const input_flag_set  = (hints[WM_HINTS_FLAGS_FIELD] & WM_HINTS_INPUT_FLAG) != 0;
+            const has_input_field = r.*.value_len > WM_HINTS_INPUT_FIELD;
+            if (input_flag_set and has_input_field) {
                 accepts_input = hints[WM_HINTS_INPUT_FIELD] != 0;
             }
         }
@@ -501,7 +511,9 @@ fn queryWMHintsAcceptsInput(conn: *xcb.xcb_connection_t, win: u32) bool {
     if (reply.*.format != 32 or reply.*.value_len < 1) return true;
 
     const hints: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
-    if ((hints[WM_HINTS_FLAGS_FIELD] & WM_HINTS_INPUT_FLAG) != 0 and reply.*.value_len > WM_HINTS_INPUT_FIELD) {
+    const input_flag_set  = (hints[WM_HINTS_FLAGS_FIELD] & WM_HINTS_INPUT_FLAG) != 0;
+    const has_input_field = reply.*.value_len > WM_HINTS_INPUT_FIELD;
+    if (input_flag_set and has_input_field) {
         return hints[WM_HINTS_INPUT_FIELD] != 0;
     }
     return true;
@@ -514,7 +526,7 @@ fn queryWMHintsAcceptsInput(conn: *xcb.xcb_connection_t, win: u32) bool {
 /// rendering, so button events may arrive on a child rather than the managed parent.
 pub fn findManagedWindow(conn: *xcb.xcb_connection_t, win: u32, is_managed: *const fn (u32) bool) u32 {
     var current = win;
-    for (0..constants.MAX_WINDOW_TREE_DEPTH) |_| {
+    for (0..MAX_WINDOW_TREE_DEPTH) |_| {
         if (is_managed(current)) return current;
 
         const tree_reply = xcb.xcb_query_tree_reply(

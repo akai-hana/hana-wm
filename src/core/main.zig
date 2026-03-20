@@ -8,25 +8,36 @@ const std     = @import("std");
 const builtin = @import("builtin");
 
 // core/
-const core    = @import("core");
-const utils   = @import("utils");
-const events  = @import("events");
-const dpi     = @import("dpi");
-const config  = @import("config");
-const xcb     = core.xcb;
+const core   = @import("core");
+const utils  = @import("utils");
+const events = @import("events");
+const scale  = @import("scale");
+const config = @import("config");
+const xcb    = core.xcb;
 
 // input/
 const input = @import("input");
-const focus = @import("focus");
+
+// window/
+const focus      = @import("focus");
+const fullscreen = @import("fullscreen");
+const minimize   = @import("minimize");
+const workspaces = @import("workspaces");
 
 // tiling/
-const has_layouts = @import("build_options").has_layouts;
+const build_options = @import("build_options");
+const has_layouts   = build_options.has_layouts;
+const tiling = if (build_options.has_tiling) @import("tiling") else struct {
+    pub fn init() !void {}
+    pub fn deinit() void {}
+};
 const layouts = if (has_layouts) @import("layouts") else struct {
     pub fn deinitSizeHintsCache(_: std.mem.Allocator) void {}
 };
 
 // bar/
-const bar = @import("bar");
+const bar    = @import("bar");
+const prompt = @import("prompt");
 
 // debug/
 const debug = @import("debug");
@@ -40,25 +51,25 @@ pub fn main() !void {
     core.screen   = x.screen;
     core.root     = x.root;
     core.alloc    = std.heap.c_allocator;
-    core.dpi_info = dpi.detect(x.conn, x.screen);
+    core.dpi_info = scale.detect(x.conn, x.screen);
 
     input.setup(x.conn, x.screen, x.root);
     try input.initXkb(x.conn, core.alloc);
     defer input.deinitXkb();
 
     core.config = try config.load(core.alloc, x.screen, input.getXkbState());
-    defer core.config.deinit();
+    defer core.config.deinit(core.alloc);
 
-    try initGlobalCaches(x.conn, core.alloc);
-    // Defers run in LIFO order: core.config.deinit() must run before deinitGlobalCaches().
-    defer deinitGlobalCaches(core.alloc);
+    try initGlobalState(x.conn, core.alloc);
+    // Defers run in LIFO order: core.config.deinit() must run before deinitGlobalState().
+    defer deinitGlobalState(core.alloc);
 
     try events.setupSignalPipe();
     defer events.deinitSignalPipe();
 
     try events.grabKeybindings();
-    try events.initModules();
-    defer events.deinitModules();
+    try initModules();
+    defer deinitModules();
 
     initBar();
     defer bar.deinit();
@@ -70,6 +81,18 @@ pub fn main() !void {
     try events.run();
     debug.info("Shutting down gracefully...", .{});
 }
+
+/// Event mask registered on the root window at startup.
+/// SubstructureRedirect is what makes hana the WM: the X server sends all
+/// MapRequest / ConfigureRequest events here instead of honoring them directly.
+const ROOT_WINDOW_EVENT_MASK: u32 =
+    xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
+    xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY   |
+    xcb.XCB_EVENT_MASK_KEY_PRESS             |
+    xcb.XCB_EVENT_MASK_BUTTON_PRESS          |
+    xcb.XCB_EVENT_MASK_ENTER_WINDOW          |
+    xcb.XCB_EVENT_MASK_LEAVE_WINDOW          |
+    xcb.XCB_EVENT_MASK_PROPERTY_CHANGE;
 
 /// X server connection context returned by connectToX.
 const X = struct {
@@ -99,7 +122,7 @@ fn connectToX() !X {
     // The X server rejects this if another WM already holds it.
     const cookie = xcb.xcb_change_window_attributes_checked(
         conn_, screen_.*.root, xcb.XCB_CW_EVENT_MASK,
-        &[_]u32{@import("constants").EventMasks.ROOT_WINDOW},
+        &[_]u32{ROOT_WINDOW_EVENT_MASK},
     );
     if (xcb.xcb_request_check(conn_, cookie)) |err| {
         debug.err("Another window manager is already running: {}", .{err});
@@ -126,15 +149,35 @@ fn initBar() void {
     };
 }
 
-/// Initializes global utility caches.
-fn initGlobalCaches(conn_: *xcb.xcb_connection_t, alloc: std.mem.Allocator) !void {
-    try utils.initAtomCache(conn_);    // Intern frequently used X atoms
-    utils.initInputModelCache(alloc);  // Build keysym to keycode lookup tables
+/// Initializes all WM modules that require explicit lifecycle management.
+fn initModules() !void {
+    try input.init();
+    fullscreen.init();
+    workspaces.init();
+    try tiling.init();
+    try minimize.init();
+    try prompt.init(core.alloc, core.conn);
+}
+
+/// Tears down all WM modules in reverse init order.
+fn deinitModules() void {
+    // minimize state is owned by WM.deinit — no separate deinit here.
+    prompt.deinit();
+    tiling.deinit();
+    workspaces.deinit();
+    fullscreen.deinit();
+    input.deinit();
+}
+
+/// Initializes global WM state: X atom cache, focus property cache, and focus tracking.
+fn initGlobalState(conn_: *xcb.xcb_connection_t, alloc: std.mem.Allocator) !void {
+    try utils.initAtomCache(conn_);   // Intern frequently used X atoms
+    utils.initInputModelCache(alloc); // Build per-window focus property cache
     focus.init(alloc);
 }
 
-/// Cleans up global utility caches.
-fn deinitGlobalCaches(alloc: std.mem.Allocator) void {
+/// Tears down global WM state initialized by initGlobalState.
+fn deinitGlobalState(alloc: std.mem.Allocator) void {
     utils.deinitInputModelCache();
     layouts.deinitSizeHintsCache(alloc); // Also frees cached ICCCM size hints
     focus.deinit();

@@ -1,21 +1,21 @@
 //! Window lifecycle — map/unmap/destroy, configure, enter/button events,
 //! and per-window property caching.
 
-const std          = @import("std");
-const core         = @import("core");
-const xcb          = core.xcb;
-const utils        = @import("utils");
-const constants    = @import("constants");
-const focus        = @import("focus");
+const std           = @import("std");
+const core          = @import("core");
+const xcb           = core.xcb;
+const utils         = @import("utils");
+const constants     = @import("constants");
+const focus         = @import("focus");
 const build_options = @import("build_options");
-const tiling       = if (build_options.has_tiling) @import("tiling") else struct {};
-const bar          = @import("bar");
-const workspaces   = @import("workspaces");
-const drag         = @import("drag");
-const dpi          = @import("dpi");
-const debug        = @import("debug");
-const minimize     = @import("minimize");
-const fullscreen   = @import("fullscreen");
+const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
+const bar           = @import("bar");
+const workspaces    = @import("workspaces");
+const drag          = @import("drag");
+const scale         = @import("scale");
+const debug         = @import("debug");
+const minimize      = @import("minimize");
+const fullscreen    = @import("fullscreen");
 
 // XSizeHints flags (ICCCM §4.1.2.3)
 const XSIZE_HINTS_P_MIN_SIZE:  u32 = 0x10;
@@ -67,17 +67,22 @@ var atoms: struct {
     net_wm_pid:   u32 = 0,
 } = .{};
 
-// The event loop is single-threaded, so a plain bool suffices here.
-// If true multi-threaded dispatch is introduced later, replace this with
-// std.Thread.Once or an explicit mutex.
-var init_done: bool = false;
-
 fn populateAtomCache() void {
     inline for (.{
         .{ .field = "wm_protocols", .atom = "WM_PROTOCOLS" },
         .{ .field = "wm_class",     .atom = "WM_CLASS"     },
         .{ .field = "net_wm_pid",   .atom = "_NET_WM_PID"  },
     }) |e| @field(atoms, e.field) = utils.getAtomCached(e.atom) catch 0;
+}
+
+pub fn init() void {
+    populateAtomCache();
+}
+
+/// Returns true when tiling is both compiled in and enabled at runtime.
+inline fn tilingActive() bool {
+    if (!comptime build_options.has_tiling) return false;
+    return core.config.tiling.enabled;
 }
 
 // Window predicates
@@ -90,10 +95,9 @@ pub inline fn isValidManagedWindow(win: u32) bool {
 }
 
 pub inline fn isOnCurrentWorkspace(win: u32) bool {
-    // Inlines both the isValidManagedWindow check and the workspace membership
-    // check to a single probe on window_to_workspaces — avoids the two separate
-    // lookups on the same key that the old two-call form produced on the hot
-    // path of every EnterNotify, history scan, and pointer-child test.
+    // Deliberate: single probe on window_to_workspaces covers both the
+    // "is managed" and "is on current workspace" checks, avoiding two
+    // lookups on the same key on every EnterNotify hot path.
     if (win == 0 or win == core.root) return false;
     if (bar.isBarWindow(win)) return false;
     const s = workspaces.getState() orelse return false;
@@ -300,11 +304,9 @@ fn commitWindowToScreen(win: u32, on_current_workspace: bool) void {
     // when the window is mapped.  Retiling here (which also pushes background
     // monocle windows offscreen) means the compositor never sees the new
     // window at its default X position or background windows still on-screen.
-    if (comptime build_options.has_tiling) {
-        if (core.config.tiling.enabled) {
-            tiling.addWindow(win);
-            if (on_current_workspace) tiling.retileCurrentWorkspace();
-        }
+    if (tilingActive()) {
+        tiling.addWindow(win);
+        if (on_current_workspace) tiling.retileCurrentWorkspace();
     }
 
     // Apply border width and initial color before mapping so the compositor
@@ -336,11 +338,6 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const win        = event.window;
     const current_ws = workspaces.getCurrentWorkspace() orelse 0;
 
-    if (!init_done) {
-        init_done = true;
-        populateAtomCache();
-    }
-
     _ = xcb.xcb_change_window_attributes(
         core.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{constants.EventMasks.MANAGED_WINDOW},
     );
@@ -354,6 +351,8 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
         xcb.xcb_discard_reply(core.conn, cookies.protocols.sequence);
         xcb.xcb_discard_reply(core.conn, cookies.hints.sequence);
         xcb.xcb_discard_reply(core.conn, cookies.normal_hints.sequence);
+        if (cookies.net_wm_pid) |c|
+            xcb.xcb_discard_reply(core.conn, c.sequence);
         _ = xcb.xcb_flush(core.conn);
         return;
     };
@@ -395,12 +394,9 @@ fn unmanageWindow(win: u32) void {
     _ = xcb.xcb_grab_server(core.conn);
 
     // Notify each module in order inside the server grab.
-    if (comptime build_options.has_tiling) {
-        // Both calls are guarded by the same runtime flag — evaluate it once.
-        if (core.config.tiling.enabled) {
-            tiling.removeWindow(win);
-            tiling.evictSizeHints(win);
-        }
+    if (tilingActive()) {
+        tiling.removeWindow(win);
+        tiling.evictSizeHints(win);
     }
     minimize.forceUntrack(win);
     workspaces.removeWindow(win);
@@ -408,20 +404,16 @@ fn unmanageWindow(win: u32) void {
     if (was_fullscreen) bar.setBarState(.show_fullscreen);
 
     if (was_focused) {
-        if (comptime build_options.has_tiling) {
-            if (core.config.tiling.enabled) tiling.retileIfDirty();
-        }
+        if (tilingActive()) tiling.retileIfDirty();
         focus.clearFocus();
         focusWindowUnderPointer(ptr_cookie.?);
     } else if (!was_fullscreen) {
-        if (comptime build_options.has_tiling) {
-            if (core.config.tiling.enabled) {
-                if (window_workspace) |ws| {
-                    if (current_ws == ws) {
-                        tiling.retileIfDirty();
-                    } else {
-                        tiling.retileInactiveWorkspace(ws);
-                    }
+        if (tilingActive()) {
+            if (window_workspace) |ws| {
+                if (current_ws == ws) {
+                    tiling.retileIfDirty();
+                } else {
+                    tiling.retileInactiveWorkspace(ws);
                 }
             }
         }
@@ -441,16 +433,11 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t) void {
     if (isValidManagedWindow(event.window)) unmanageWindow(event.window);
 }
 
-// Post-unmanage focus recovery.
-//
-// Priority order:
-//   1. Window directly under the pointer (hover-focus expectation).
-//   2. MRU history scan — the most recently focused window that is still
-//      present, on the current workspace, and not minimized.  This means
-//      closing N windows in a row always returns focus to the last window the
-//      user actually interacted with, regardless of tiling order.
-//   3. Tiling best-available fallback (master or first remaining slave) for
-//      the case where history is empty or all history entries are gone.
+/// Post-unmanage focus recovery. Priority:
+///   1. Window directly under the pointer (hover-focus expectation).
+///   2. MRU history — most recently focused window still present, on the
+///      current workspace, and not minimized.
+///   3. Tiling fallback (master or first slave) when history is exhausted.
 fn focusPrevOrBest() void {
     for (focus.historyItems()) |prev| {
         if (isOnCurrentWorkspace(prev) and !minimize.isMinimized(prev)) {
@@ -535,7 +522,7 @@ fn sendSyntheticConfigureNotify(win: u32) void {
 
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) void {
     const win = event.window;
-    const is_tiled = if (comptime build_options.has_tiling) tiling.isWindowActiveTiled(win) else false;
+    const is_tiled = tilingActive() and tiling.isWindowActiveTiled(win);
     if (is_tiled or fullscreen.isFullscreen(win)) {
         sendSyntheticConfigureNotify(win);
         return;
@@ -675,9 +662,8 @@ pub inline fn getBorderWidth() u16 {
     if (comptime build_options.has_tiling) {
         if (tiling.getStateOpt()) |s| return s.border_width;
     }
-    return dpi.scaleBorderWidth(
+    return scale.scaleBorderWidth(
         core.config.tiling.border_width,
-        core.dpi_info.scale_factor,
         core.screen.height_in_pixels,
     );
 }

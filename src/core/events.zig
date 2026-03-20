@@ -6,7 +6,6 @@ const build_options = @import("build_options");
 
 // core/
 const utils     = @import("utils");
-const constants = @import("constants");
 
 // config/
 const config  = @import("config");
@@ -30,13 +29,34 @@ const window         = @import("window");
 const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
 
 // bar/
-const bar = if (build_options.has_bar) @import("bar") else struct {};
-
-    const prompt = @import("prompt");
+const bar    = if (build_options.has_bar) @import("bar") else struct {};
+const prompt = @import("prompt");
 
 // Indices into the poll fd array.
-const FD_XCB:    usize = 0;
-const FD_SIGNAL: usize = 1;
+const FD_XCB    = 0;
+const FD_SIGNAL = 1;
+
+// Event dispatch constants
+//
+// These are scoped here rather than in a shared constants file because
+// they have exactly one consumer: the dispatch table and grabKeybindings below.
+
+/// Dispatch table size — covers all X11 event types up to XCB_FOCUS_OUT=10.
+const EVENT_DISPATCH_TABLE = 36;
+
+/// Upper bound for the XCB cookie scratch buffer in grabKeybindings
+/// (max distinct keybindings × 4 LOCK_MODIFIERS combinations).
+/// Raise if you ever exceed 128 keybindings.
+const MAX_KEYBIND_COOKIES = 512;
+
+/// Lock key combinations grabbed alongside every keybinding so binds work
+/// regardless of NumLock / CapsLock state.
+const LOCK_MODIFIERS = [_]u16{
+    0,
+    core.MOD_CAPSLOCK,
+    core.MOD_NUM_LOCK,
+    core.MOD_CAPSLOCK | core.MOD_NUM_LOCK,
+};
 
 // Self-pipe for portable signal delivery.
 // Signal handlers write to [1]; the event loop polls [0].
@@ -60,7 +80,7 @@ fn handlePropertyNotify(event: *anyopaque) void {
 
 /// O(1) dispatch via a comptime-built table indexed by XCB event type (low 7 bits).
 const dispatch_table = blk: {
-    var table = [_]?EventHandler{null} ** constants.Limits.EVENT_DISPATCH_TABLE;
+    var table = [_]?EventHandler{null} ** EVENT_DISPATCH_TABLE;
     table[xcb.XCB_KEY_PRESS]         = asHandler(input.handleKeyPress);
     table[xcb.XCB_BUTTON_PRESS]      = asHandler(input.handleButtonPress);
     table[xcb.XCB_BUTTON_RELEASE]    = asHandler(input.handleButtonRelease);
@@ -73,7 +93,7 @@ const dispatch_table = blk: {
     table[xcb.XCB_UNMAP_NOTIFY]      = asHandler(window.handleUnmapNotify);
     table[xcb.XCB_DESTROY_NOTIFY]    = asHandler(window.handleDestroyNotify);
     table[xcb.XCB_EXPOSE]            = asHandler(bar.handleExpose);
-    table[xcb.XCB_PROPERTY_NOTIFY]   = asHandler(handlePropertyNotify); // multi-target fan-out: bar + window
+    table[xcb.XCB_PROPERTY_NOTIFY]   = asHandler(handlePropertyNotify);
     break :blk table;
 };
 
@@ -82,35 +102,15 @@ pub inline fn dispatch(event_type: u8, event: *anyopaque) void {
     if (dispatch_table[idx]) |handler| handler(event);
 }
 
-// Module lifecycle
-
-pub fn initModules() !void {
-    try input.init();
-    fullscreen.init();
-    workspaces.init();
-    try tiling.init();
-    try minimize.init();
-    try prompt.init(core.alloc, core.conn);
-}
-
-pub fn deinitModules() void {
-    // minimize state is owned by WM.deinit — no separate deinit here.
-    prompt.deinit();
-    tiling.deinit();
-    workspaces.deinit();
-    fullscreen.deinit();
-    input.deinit();
-}
-
 // Signal handling
 
 /// Derive the correct signal number parameter type directly from what
 /// std.posix.Sigaction's handler field actually expects, so this stays
 /// correct regardless of future stdlib changes.
 const SigNumType = param: {
-    const handler_fn = @FieldType(@FieldType(std.posix.Sigaction, "handler"), "handler");
-    const fn_info = @typeInfo(@typeInfo(handler_fn).optional.child).pointer.child;
-    break :param @typeInfo(fn_info).@"fn".params[0].type.?;
+    const handler_field_type = @FieldType(@FieldType(std.posix.Sigaction, "handler"), "handler");
+    const handler_sig        = @typeInfo(@typeInfo(handler_field_type).optional.child).pointer.child;
+    break :param @typeInfo(handler_sig).@"fn".params[0].type.?;
 };
 
 /// Converts any signal value — enum or integer — to its raw u8 number.
@@ -175,8 +175,7 @@ fn handleSignalPipe(fd: std.posix.fd_t) void {
         const rc = std.os.linux.read(fd, &byte, 1);
         switch (std.posix.errno(rc)) {
             .SUCCESS => {},
-            .AGAIN, .INTR => break,
-            else => break,
+            else     => break,
         }
         switch (byte[0]) {
             sigToU8(std.posix.SIG.HUP)  => utils.reload(),
@@ -192,13 +191,13 @@ fn handleSignalPipe(fd: std.posix.fd_t) void {
 pub fn grabKeybindings() !void {
     _ = xcb.xcb_ungrab_key(core.conn, xcb.XCB_GRAB_ANY, core.root, xcb.XCB_MOD_MASK_ANY);
     const CookieEntry = struct { cookie: xcb.xcb_void_cookie_t, keycode: u8 };
-    var cookies: [constants.Limits.MAX_KEYBIND_COOKIES]CookieEntry = undefined;
+    var cookies: [MAX_KEYBIND_COOKIES]CookieEntry = undefined;
     var n: usize = 0;
     outer: for (core.config.keybindings.items) |kb| {
         const keycode = kb.keycode orelse continue;
-        for (constants.LOCK_MODIFIERS) |lock| {
+        for (LOCK_MODIFIERS) |lock| {
             if (n >= cookies.len) {
-                debug.warn("Too many keybindings. Increase Limits.MAX_KEYBIND_COOKIES (currently {})", .{constants.Limits.MAX_KEYBIND_COOKIES});
+                debug.warn("Too many keybindings. Increase MAX_KEYBIND_COOKIES (currently {})", .{MAX_KEYBIND_COOKIES});
                 break :outer;
             }
             cookies[n] = .{
@@ -236,7 +235,7 @@ fn handleConfigReload() !void {
         debug.err("Failed to load: {}, keeping old", .{err});
         return err;
     };
-    errdefer new_config.deinit();
+    errdefer new_config.deinit(core.alloc);
     if (new_config.tiling.master_count == 0) {
         debug.err("Invalid config: master_count must be > 0, keeping old", .{});
         return error.InvalidConfig;
@@ -247,16 +246,18 @@ fn handleConfigReload() !void {
     core.config = new_config;
     grabKeybindings() catch |err| {
         debug.err("Keybind grab failed: {}, reverting", .{err});
+        // Revert: restore the in-memory config, then re-sync X server key grabs to match.
         core.config = old_config;
         return err;
     };
     input.rebuildKeybindMap() catch |err| {
         debug.err("rebuildKeybindMap failed: {}, reverting", .{err});
+        // Revert: restore the in-memory config, then re-sync X server key grabs to match.
         core.config = old_config;
         grabKeybindings() catch {}; // restore X server state to match old config
         return err;
     };
-    old_config.deinit();
+    old_config.deinit(core.alloc);
     tiling.reloadConfig();
     window.reloadBorders();
     bar.updateTimerState();
@@ -286,6 +287,7 @@ pub fn run() !void {
 
     while (utils.running.load(.acquire)) {
         const blink_ms = prompt.blinkPollTimeoutMs();
+        const cursor_is_blinking = blink_ms >= 0;
         const poll_rc = std.os.linux.poll(&fds, fds.len, combinedTimeoutMs(blink_ms));
         const ready: usize = switch (std.posix.errno(poll_rc)) {
             .SUCCESS => @intCast(poll_rc),
@@ -298,7 +300,7 @@ pub fn run() !void {
 
         if (ready == 0) {
             bar.checkClockUpdate();
-            if (blink_ms >= 0) {
+            if (cursor_is_blinking) {
                 prompt.blinkTick();
                 bar.submitDraw(false);
             }

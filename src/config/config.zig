@@ -253,7 +253,7 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !core.Config {
 }
 
 fn getDefaultConfig(allocator: std.mem.Allocator) core.Config {
-    var cfg = core.Config.init(allocator);
+    var cfg = core.Config.init();
     const default_layout = allocator.dupe(u8, "master_left") catch "master_left";
     cfg.tiling.layouts.append(allocator, default_layout) catch |e| debug.warnOnErr(e, "default layout append");
     cfg.tiling.layout = if (cfg.tiling.layouts.items.len > 0) cfg.tiling.layouts.items[0] else default_layout;
@@ -329,8 +329,8 @@ const ACTION_MAP = std.StaticStringMap(core.Action).initComptime(.{
     .{ "cycle_variation",        .cycle_layout_variation },
     .{ "toggle_prompt",          .toggle_prompt          },
     .{ "drun",                   .toggle_prompt          },
-    .{ "toggle_float",           .toggle_float           },
-    .{ "float",                  .toggle_float           },
+    .{ "toggle_float",           .toggle_floating        },
+    .{ "float",                  .toggle_floating        },
 });
 
 const GlobEntry = struct {
@@ -535,8 +535,8 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !core.Action {
 
 /// Scales font size and other DPI-dependent fields. Call once the screen is available.
 pub inline fn finalizeConfig(cfg: *core.Config, screen: *core.xcb.xcb_screen_t) void {
-    const dpi_module = @import("dpi");
-    cfg.bar.scaled_font_size = dpi_module.scaleFontSize(cfg.bar.font_size, screen);
+    const scale_module = @import("scale");
+    cfg.bar.scaled_font_size = scale_module.scaleFontSize(cfg.bar.font_size, screen);
 }
 
 /// Resolves keysyms to keycodes and warns about duplicate bindings.
@@ -629,12 +629,6 @@ fn parseTilingVariations(doc: *const parser.Document, cfg: *core.Config) void {
         tryParseVariation(e[1], ms, e[2], &@field(cfg.tiling, e[3]));
         tryParseIndicator(ms, &@field(cfg.tiling, e[4]));
     };
-    if (doc.getSection("tiling.layouts.fibonacci")) |ms| {
-        if (ms.getString("variation")) |v|
-            if (!std.mem.eql(u8, v, "default"))
-                debug.warn("fibonacci does not support variation '{s}' (ignored)", .{v});
-        if (ms.getString("indicator")) |raw| cfg.tiling.fibonacci_indicator = parseIndicator(raw);
-    }
 }
 
 inline fn parseIndicator(raw: []const u8) [3]u8 {
@@ -697,9 +691,8 @@ fn parseLayoutVariation(layout_name: []const u8, variation_str: []const u8) ?cor
         }
     }
     if (std.mem.eql(u8, lower_layout, "fibonacci")) {
-        if (!std.mem.eql(u8, variation_str, "default"))
-            debug.warn("fibonacci does not support variation '{s}' in layouts array, ignoring", .{variation_str});
-        return .{ .fibonacci = .default };
+        debug.warn("fibonacci does not support variations; '{s}' in layouts array ignored", .{variation_str});
+        return null;
     }
     return null;
 }
