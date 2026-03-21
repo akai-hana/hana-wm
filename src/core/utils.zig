@@ -251,6 +251,7 @@ pub fn fetchPropertyToBuffer(
 //
 // `InputModel` (focus routing) and `wm_delete` (close protocol) are both derived from
 // WM_PROTOCOLS, so they are populated together in a single scan.
+// See the flat-array implementation below for rationale over AutoHashMap.
 
 /// The four ICCCM focus delivery modes (§4.1.7), determined by the combination of
 /// WM_HINTS.input and WM_TAKE_FOCUS presence in WM_PROTOCOLS.
@@ -268,20 +269,37 @@ const CachedProps = struct {
     wm_delete: bool,
 };
 
-var input_model_cache: ?std.AutoHashMap(u32, CachedProps) = null;
+// Flat-array window focus property cache
+//
+// Replaces AutoHashMap(u32, CachedProps). At realistic open-window counts (≤100 in
+// any real session, ≤300 in the most extreme case) a linear scan over 32-bit IDs beats
+// a hash table: cache-local, branch-predictor-friendly, zero heap allocation, one
+// initialization path, one teardown path, and no OOM error surface at all.
+//
+// Windows beyond MAX_WINDOW_CACHE still work correctly — they fall through to the live
+// X11 query path, which is always the safe fallback.
+const MAX_WINDOW_CACHE: usize = 512;
+
+const CacheSlot = struct {
+    id:    u32,
+    props: CachedProps,
+};
+
+var cache_slots: [MAX_WINDOW_CACHE]CacheSlot = undefined;
+var cache_len:   usize = 0;
+var cache_ready: bool  = false;
 
 /// Initializes the per-window focus property cache.
-pub fn initInputModelCache(allocator: std.mem.Allocator) void {
-    input_model_cache = std.AutoHashMap(u32, CachedProps).init(allocator);
+/// No allocator required — the backing store is a module-level static array.
+pub fn initInputModelCache() void {
+    cache_len   = 0;
+    cache_ready = true;
 }
 
 /// Cleans up the per-window focus property cache.
-/// Captures `input_model_cache` by pointer (`|*cache|`) so the optional can be mutated in place.
 pub fn deinitInputModelCache() void {
-    if (input_model_cache) |*cache| {
-        cache.deinit();
-        input_model_cache = null;
-    }
+    cache_len   = 0;
+    cache_ready = false;
 }
 
 /// Consumes pre-fired WM_PROTOCOLS and WM_HINTS cookies and stores the result.
@@ -346,12 +364,10 @@ pub fn populateFocusCacheFromCookies(
         }
     }
 
-    if (input_model_cache) |*c| c.put(win, .{
+    putCachedProps(win, .{
         .model     = inputModelFrom(take_focus, accepts_input),
         .wm_delete = wm_delete,
-        // Swallowing the OOM error is intentional: a cache miss just means
-        // the next lookup falls back to a live query, which is always safe.
-    }) catch {};
+    });
 }
 
 /// Recomputes and caches the focus properties after a WM_PROTOCOLS or WM_HINTS PropertyNotify — two round-trips, called only on rare property change events.
@@ -361,13 +377,40 @@ pub fn recacheInputModel(conn: *xcb.xcb_connection_t, win: u32) void {
 
 /// Removes `win` from the focus property cache — called on window destruction
 /// to prevent stale entries from accumulating over the session.
+/// Swap-remove keeps the live region dense so subsequent scans stay short.
 pub inline fn uncacheWindowFocusProps(win: u32) void {
-    if (input_model_cache) |*c| _ = c.remove(win);
+    if (!cache_ready) return;
+    for (cache_slots[0..cache_len], 0..) |slot, i| {
+        if (slot.id == win) {
+            cache_len -= 1;
+            cache_slots[i] = cache_slots[cache_len]; // fill gap with last entry
+            return;
+        }
+    }
 }
 
 /// Returns the cached focus properties for `win`, or null on a cache miss.
 inline fn getCachedProps(win: u32) ?CachedProps {
-    return if (input_model_cache) |*c| c.get(win) else null;
+    if (!cache_ready) return null;
+    for (cache_slots[0..cache_len]) |slot| {
+        if (slot.id == win) return slot.props;
+    }
+    return null;
+}
+
+/// Inserts or updates the cache entry for `win`.
+/// Updates in place when the entry already exists (single write path, no branching).
+/// Silently drops the entry when the cache is full — the live-query fallback is always correct.
+fn putCachedProps(win: u32, props: CachedProps) void {
+    if (!cache_ready) return;
+    for (cache_slots[0..cache_len]) |*slot| {
+        if (slot.id == win) { slot.props = props; return; }
+    }
+    if (cache_len < MAX_WINDOW_CACHE) {
+        cache_slots[cache_len] = .{ .id = win, .props = props };
+        cache_len += 1;
+    }
+    // Cache full: fall through silently — next access issues a live X11 query.
 }
 
 /// Runs both WM_PROTOCOLS and WM_HINTS queries, stores the result, and returns it.
@@ -378,9 +421,7 @@ fn queryAndCacheProps(conn: *xcb.xcb_connection_t, win: u32) CachedProps {
         .model     = inputModelFrom(protocols_props.take_focus, queryWMHintsAcceptsInput(conn, win)),
         .wm_delete = protocols_props.wm_delete,
     };
-    // Swallowing the OOM error is intentional: a cache miss just means
-    // the next lookup falls back to a live query, which is always safe.
-    if (input_model_cache) |*c| c.put(win, props) catch {};
+    putCachedProps(win, props);
     return props;
 }
 

@@ -107,4 +107,4 @@ done
 
 rm -r dev/codebase
 
-zig build --color on --error-style minimal -freference-trace=5
+zig build --color on --error-style minimal -freference-trace=0

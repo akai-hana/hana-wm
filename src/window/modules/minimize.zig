@@ -147,9 +147,7 @@ inline fn rollbackMinimize(
         fullscreen.setForWorkspace(fs_ws.?, .{
             .window         = win,
             .saved_geometry = saved_fs.?,
-        }) catch {
-            debug.err("minimize rollback: failed to re-insert fullscreen state for 0x{x}", .{win});
-        };
+        });
     }
 }
 

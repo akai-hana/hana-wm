@@ -32,34 +32,11 @@ const MOUSE_BUTTON_MIDDLE: u8 = 2;
 const MOUSE_BUTTON_RIGHT:  u8 = 3;
 const MOUSE_BUTTONS = [_]u8{ MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_RIGHT };
 
-// Keybind state
-// TODO: move KeybindState into WM to eliminate module-level mutable global.
-
-const KeybindState = struct {
-    map: std.AutoHashMap(u64, *const core.Action),
-
-    fn init(allocator: std.mem.Allocator) KeybindState {
-        return .{ .map = std.AutoHashMap(u64, *const core.Action).init(allocator) };
-    }
-
-    fn deinit(self: *KeybindState) void { self.map.deinit(); }
-
-    fn rebuild(self: *KeybindState) !void {
-        self.map.clearRetainingCapacity();
-        try self.map.ensureTotalCapacity(@intCast(core.config.keybindings.items.len));
-        for (core.config.keybindings.items) |*kb| {
-            self.map.putAssumeCapacity(makeHash(kb.modifiers, kb.keysym), &kb.action);
-        }
-    }
-};
-
-var keybind_state: ?KeybindState       = null;
-var xkb_state:     ?xkbcommon.XkbState = null;
+var xkb_state: ?xkbcommon.XkbState = null;
 
 /// Initializes XKB context, keymap, and key state from the server's current keyboard config.
-/// Must be called before init().
-pub fn initXkb(conn: *xcb.xcb_connection_t, allocator: std.mem.Allocator) !void {
-    xkb_state = try xkbcommon.XkbState.init(conn, allocator);
+pub fn initXkb(conn: *xcb.xcb_connection_t) !void {
+    xkb_state = try xkbcommon.XkbState.init(conn);
 }
 
 /// Cleans up XKB state. Must be called after deinit().
@@ -71,28 +48,6 @@ pub fn deinitXkb() void {
 /// Returns a pointer to the module-owned XkbState. Used by events.zig for config reload.
 pub fn getXkbState() *xkbcommon.XkbState {
     return &xkb_state.?;
-}
-
-pub fn init() !void {
-    var state = KeybindState.init(core.alloc);
-    errdefer state.deinit();
-    try state.rebuild();
-    keybind_state = state;
-}
-
-pub fn deinit() void {
-    if (keybind_state) |*state| state.deinit();
-    keybind_state = null;
-}
-
-/// Rebuilds the keybind lookup map from the current config (called after reload).
-pub fn rebuildKeybindMap() !void {
-    const state = &(keybind_state orelse return error.KeybindStateNotInitialized);
-    try state.rebuild();
-}
-
-inline fn makeHash(mods: u16, keysym: u32) u64 {
-    return (@as(u64, mods) << 32) | keysym;
 }
 
 // Grab setup
@@ -122,19 +77,29 @@ pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
 pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     focus.setLastEventTime(event.time);
 
-    const state  = &(keybind_state orelse return);
     const mods   = utils.normalizeModifiers(event.state);
     const keysym = xkb_state.?.keycodeToKeysym(event.detail);
-    const key    = makeHash(mods, keysym);
+
+    // Scan keybindings linearly. n is bounded by what a human can type into a
+    // config file (typically < 50, hard ceiling ~200). At that size a flat scan
+    // over contiguous memory is faster than a hash lookup due to cache locality
+    // and has no allocation, no deinit, and no sync liability.
+    var matched: ?*const core.Action = null;
+    for (core.config.keybindings.items) |*kb| {
+        if (kb.modifiers == mods and kb.keysym == keysym) {
+            matched = &kb.action;
+            break;
+        }
+    }
 
     // Prompt owns all key input when active. Routing decisions (including the
     // close_window dismiss shortcut) live entirely in prompt.handleKeyEvent.
-    if (prompt.handlePromptKeypress(event, state.map.get(key))) return;
+    if (prompt.handlePromptKeypress(event, matched)) return;
 
-    debug.info("[KEY] keycode={} state=0x{x} mods=0x{x} keysym=0x{x} hash=0x{x}",
-        .{ event.detail, event.state, mods, keysym, key });
+    debug.info("[KEY] keycode={} state=0x{x} mods=0x{x} keysym=0x{x}",
+        .{ event.detail, event.state, mods, keysym });
 
-    if (state.map.get(key)) |action| {
+    if (matched) |action| {
         debug.info("[KEY] action found: {s}", .{@tagName(action.*)});
         executeAction(action) catch |err| debug.err("Failed to execute action: {}", .{err});
     } else {
@@ -427,21 +392,18 @@ fn dumpState() void {
     debug.info("Total windows: {}",     .{win_count});
     debug.info("Suppress focus: {s}",   .{@tagName(focus.getSuppressReason())});
 
-    var maybe_fullscreen_it = fullscreen.perWorkspaceIterator();
-    var found_fullscreen = false;
-    if (maybe_fullscreen_it) |*it| {
-        while (it.next()) |entry| {
-            debug.info("Fullscreen on workspace {}: {x}", .{ entry.key_ptr.*, entry.value_ptr.window });
-            found_fullscreen = true;
+    fullscreen.forEachFullscreen(struct {
+        fn cb(ws: u8, info: fullscreen.FullscreenInfo) void {
+            debug.info("Fullscreen on workspace {}: {x}", .{ ws, info.window });
         }
-    }
-    if (!found_fullscreen) debug.info("Fullscreen: none", .{});
+    }.cb);
+    if (!fullscreen.hasAnyFullscreen()) debug.info("Fullscreen: none", .{});
     debug.info("Drag active: {}", .{drag.isDragging()});
 
     if (workspaces.getState()) |ws_state| {
         debug.info("Current workspace: {}", .{ws_state.current + 1});
         for (ws_state.workspaces, 0..) |*ws, i| {
-            debug.info("  WS{}: {} windows", .{ i + 1, ws.windows.count() });
+            debug.info("  WS{}: {} windows", .{ i + 1, ws.windows.len });
         }
     }
 
@@ -449,7 +411,7 @@ fn dumpState() void {
         if (tiling.getStateOpt()) |t_state| {
             debug.info("Tiling enabled: {}",  .{t_state.enabled});
             debug.info("Tiling layout: {s}", .{@tagName(t_state.layout)});
-            debug.info("Tiled windows: {}",  .{t_state.windows.count()});
+            debug.info("Tiled windows: {}",  .{t_state.windows.len});
             debug.info("Master count: {}",   .{t_state.master_count});
             debug.info("Master width: {d:.2}", .{t_state.master_width});
         }

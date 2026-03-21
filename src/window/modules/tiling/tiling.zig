@@ -66,14 +66,20 @@ const LAYOUT_CYCLE: []const Layout = blk: {
 
 pub inline fn defaultLayout() Layout { return LAYOUT_CYCLE[0]; }
 
-const LAYOUT_NAME_MAP = std.StaticStringMap(Layout).initComptime(.{
-    .{ "master-stack", .master }, .{ "master", .master },
-    .{ "monocle",      .monocle },
-    .{ "grid",         .grid    },
-    .{ "fibonacci",    .fibonacci },
-});
-
-inline fn layoutFromString(name: []const u8) ?Layout { return LAYOUT_NAME_MAP.get(name); }
+// layoutFromString — plain if-else over 5 fixed strings.
+//
+// StaticStringMap carries comptime build complexity for no runtime gain: at
+// n = 5 a sequential string comparison is indistinguishable from O(1) in any
+// profiler, and the if-else chain is immediately auditable without knowing the
+// StaticStringMap internals.
+inline fn layoutFromString(name: []const u8) ?Layout {
+    if (std.mem.eql(u8, name, "master-stack") or
+        std.mem.eql(u8, name, "master"))    return .master;
+    if (std.mem.eql(u8, name, "monocle"))   return .monocle;
+    if (std.mem.eql(u8, name, "grid"))      return .grid;
+    if (std.mem.eql(u8, name, "fibonacci")) return .fibonacci;
+    return null;
+}
 
 /// Build the runtime-enabled layout list from the config's `layouts` array,
 /// keeping only entries whose .zig file is present on disk. Duplicates are
@@ -134,7 +140,6 @@ pub const LayoutVariations = struct {
 };
 
 pub const State = struct {
-    allocator:        std.mem.Allocator,
     enabled:          bool,
     layout:           Layout,
     /// The layout active before floating mode was entered.
@@ -142,7 +147,6 @@ pub const State = struct {
     /// Defaults to the first entry in LAYOUT_CYCLE.
     prev_layout:      Layout,
     layout_variations: LayoutVariations,
-    /// 3-character indicator shown in the bar for the fibonacci layout.
     master_side:      core.MasterSide,
     master_width:     f32,
     master_count:     u8,
@@ -177,22 +181,21 @@ pub const State = struct {
     /// hash table. Populated by configureSafe (rect) and sendBorderColor (border).
     cache: layouts.CacheMap,
 
-    // Scratch buffers (heap-allocated, sized from max_ws_windows / max_ws) 
+    // Scratch buffers — fixed-size arrays embedded in State (BSS, zero allocation).
     //
-    // Reused across retile calls to avoid per-call stack pressure.  All four
-    // slices are allocated in buildState and freed in deinit.
+    // Reused across retile calls to avoid per-call stack pressure.
+    // Capacities are the module-level compile-time constants; no heap
+    // allocation, no deinit, no OOM error path, no save/restore on reload.
     //
-    //   scratch_wins   — [max_ws_windows]u32   single-workspace window list
-    //   scratch_rects  — [max_ws_windows]Rect  parallel rect array for restore path
-    //   retile_wins    — [max_ws * max_ws_windows]u32  flattened 2-D per-workspace lists
-    //   retile_lens    — [max_ws]usize          fill counters for retile_wins rows
+    //   scratch_wins   — [MAX_WS_WINDOWS]u32    single-workspace window list
+    //   scratch_rects  — [MAX_WS_WINDOWS]Rect   parallel rect array for restore path
+    //   retile_wins    — [MAX_WS * MAX_WS_WINDOWS]u32  flattened 2-D per-workspace lists
+    //   retile_lens    — [MAX_WS]usize           fill counters for retile_wins rows
 
-    max_ws_windows: usize,
-    max_ws:         usize,
-    scratch_wins:   []u32,
-    scratch_rects:  []utils.Rect,
-    retile_wins:    []u32,
-    retile_lens:    []usize,
+    scratch_wins:  [DEFAULT_MAX_WS_WINDOWS]u32,
+    scratch_rects: [DEFAULT_MAX_WS_WINDOWS]utils.Rect,
+    retile_wins:   [DEFAULT_MAX_WS * DEFAULT_MAX_WS_WINDOWS]u32,
+    retile_lens:   [DEFAULT_MAX_WS]usize,
 
     pub inline fn margins(self: *const State) utils.Margins {
         return .{ .gap = self.gap_width, .border = self.border_width };
@@ -203,14 +206,6 @@ pub const State = struct {
         return if (focus.getFocused() == win) self.border_focused else self.border_unfocused;
     }
 
-    pub fn deinit(self: *State) void {
-        self.windows.deinit();
-        self.cache.deinit(self.allocator);
-        self.allocator.free(self.retile_lens);
-        self.allocator.free(self.retile_wins);
-        self.allocator.free(self.scratch_rects);
-        self.allocator.free(self.scratch_wins);
-    }
 };
 
 // Module singleton -- guaranteed live after init(), never null during normal operation.
@@ -239,24 +234,11 @@ fn computeMasterWidth() f32 {
     return raw;
 }
 
-fn buildState() !State {
-    const alloc            = core.alloc;
-    const max_ws_windows   = DEFAULT_MAX_WS_WINDOWS;
-    const max_ws           = DEFAULT_MAX_WS;
-    const screen_height    = core.screen.height_in_pixels;
-    const el               = buildEnabledLayouts(core.config.tiling.layouts.items);
-
-    const scratch_wins  = try alloc.alloc(u32,         max_ws_windows);
-    errdefer alloc.free(scratch_wins);
-    const scratch_rects = try alloc.alloc(utils.Rect,  max_ws_windows);
-    errdefer alloc.free(scratch_rects);
-    const retile_wins   = try alloc.alloc(u32,         max_ws * max_ws_windows);
-    errdefer alloc.free(retile_wins);
-    const retile_lens   = try alloc.alloc(usize,       max_ws);
-    errdefer alloc.free(retile_lens);
+fn buildState() State {
+    const screen_height = core.screen.height_in_pixels;
+    const el            = buildEnabledLayouts(core.config.tiling.layouts.items);
 
     return .{
-        .allocator        = alloc,
         .enabled          = core.config.tiling.enabled,
         .layout           = blk: {
             const requested = std.meta.stringToEnum(Layout, core.config.tiling.layout)
@@ -278,28 +260,27 @@ fn buildState() !State {
         .border_width     = scale.scaleBorderWidth(core.config.tiling.border_width, screen_height),
         .border_focused   = core.config.tiling.border_focused,
         .border_unfocused = core.config.tiling.border_unfocused,
-        .windows          = Tracking{ .allocator = alloc },
+        .windows          = .{},
         .dirty            = false,
         .ws_geom_valid    = 0,
         .last_retile_screen = ZERO_RECT,
         .cache            = .{},
-        .max_ws_windows   = max_ws_windows,
-        .max_ws           = max_ws,
-        .scratch_wins     = scratch_wins,
-        .scratch_rects    = scratch_rects,
-        .retile_wins      = retile_wins,
-        .retile_lens      = retile_lens,
+        // Scratch arrays are undefined at init; every code path that reads
+        // them writes them first (filterWorkspaceWindows, moveWindowToIndex, …).
+        .scratch_wins     = undefined,
+        .scratch_rects    = undefined,
+        .retile_wins      = undefined,
+        .retile_lens      = undefined,
     };
 }
 
-pub fn init() !void {
-    g_state       = try buildState();
+pub fn init() void {
+    g_state       = buildState();
     g_initialized = true;
 }
 
 pub fn deinit() void {
-    if (!g_initialized) return;
-    g_state.deinit();
+    // State holds only fixed arrays and value types; nothing to free.
     g_initialized = false;
 }
 
@@ -308,45 +289,12 @@ pub fn reloadConfig() void {
 
     const saved_windows = s.windows;
 
-    // Clear the combined cache in-place, retaining the allocated capacity so
-    // the next retile does not pay for a fresh heap allocation. The old data
-    // is intentionally discarded: config changes (gaps, border width, colors)
-    // make every cached rect and border color stale.
-    var saved_cache = s.cache;
-    saved_cache.clearRetainingCapacity();
-    // Disown before buildState overwrites g_state; s is a dangling pointer
-    // from this point forward and must not be used.
-    s.cache = .{};
-
-    // Save scratch buffers: buildState allocates fresh ones, but we reuse the
-    // existing allocations (same capacity) to avoid needless churn.
-    const saved_scratch_wins  = s.scratch_wins;
-    const saved_scratch_rects = s.scratch_rects;
-    const saved_retile_wins   = s.retile_wins;
-    const saved_retile_lens   = s.retile_lens;
-
-    var new_state = buildState() catch |err| {
-        // buildState failed before overwriting g_state — restore what we saved.
-        s.cache   = saved_cache;
-        s.windows = saved_windows;
-        debug.err("tiling: out of memory during reload: {}", .{err});
-        return;
-    };
-
-    // Free the freshly allocated scratch bufs from new_state (same sizes as
-    // the saved ones) and replace them with the saved allocations.
-    const alloc = new_state.allocator;
-    alloc.free(new_state.retile_lens);
-    alloc.free(new_state.retile_wins);
-    alloc.free(new_state.scratch_rects);
-    alloc.free(new_state.scratch_wins);
-    new_state.scratch_wins  = saved_scratch_wins;
-    new_state.scratch_rects = saved_scratch_rects;
-    new_state.retile_wins   = saved_retile_wins;
-    new_state.retile_lens   = saved_retile_lens;
-    // Discard the empty Tracking allocated by buildState (no items, no heap).
+    // buildState is infallible: scratch buffers are fixed arrays in BSS.
+    // Config changes invalidate every cached rect and border color, so we
+    // want the fresh empty cache buildState produces.  The only field that
+    // must survive the rebuild is the live window list.
+    var new_state = buildState();
     new_state.windows = saved_windows;
-    new_state.cache   = saved_cache;
 
     g_state = new_state;
     const ns = &g_state;
@@ -387,11 +335,10 @@ pub fn addWindow(window_id: u32) void {
     const s = getState();
     if (!s.enabled) return;
 
-    const result = if (s.layout == .master and s.layout_variations.master == .fifo)
+    if (s.layout == .master and s.layout_variations.master == .fifo)
         s.windows.addFront(window_id)
     else
         s.windows.add(window_id);
-    result catch |err| { debug.logError(err, window_id); return; };
     s.dirty = true;
     s.ws_geom_valid = 0;
 
@@ -402,8 +349,8 @@ pub fn addWindow(window_id: u32) void {
         xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{s.border_width});
 
     // Pre-populate the cache so the immediately-following retile does not
-    // re-send the border pixel.
-    const gop = s.cache.getOrPut(s.allocator, window_id) catch return;
+    // re-send the border pixel. getOrPut is infallible on the flat-array cache.
+    const gop = s.cache.getOrPut(window_id);
     gop.value_ptr.border = border_color;
     if (!gop.found_existing) gop.value_ptr.rect = ZERO_RECT;
 }
@@ -526,7 +473,7 @@ pub fn toggleWindowFloat(window_id: u32) void {
 /// floating windows can be restored to their exact position on return.
 pub fn saveWindowGeom(window_id: u32, rect: utils.Rect) void {
     const s = getState();
-    const gop = s.cache.getOrPut(s.allocator, window_id) catch return;
+    const gop = s.cache.getOrPut(window_id);
     gop.value_ptr.rect = rect;
     if (!gop.found_existing) gop.value_ptr.border = 0;
 }
@@ -554,7 +501,7 @@ pub fn invalidateGeomCache(window_id: u32) void {
 /// for an inactive workspace without touching the current one.
 pub inline fn invalidateWsGeomBit(ws_idx: u8) void {
     const s = getState();
-    if (ws_idx < s.max_ws) s.ws_geom_valid &= ~wsBit(ws_idx);
+    if (ws_idx < DEFAULT_MAX_WS) s.ws_geom_valid &= ~wsBit(ws_idx);
 }
 
 pub inline fn dirty() void {
@@ -568,12 +515,12 @@ pub inline fn dirty() void {
 pub fn restoreWorkspaceGeom() bool {
     const s = getStateOpt() orelse return false;
 
-    const ws_count = filterWorkspaceWindows(s, s.scratch_wins, null);
+    const ws_count = filterWorkspaceWindows(s, &s.scratch_wins, null);
     const ws_windows = s.scratch_wins[0..ws_count];
     if (ws_windows.len == 0) return true;
 
     const current_ws = workspaces.getCurrentWorkspace() orelse return false;
-    if (current_ws >= s.max_ws) return false;
+    if (current_ws >= DEFAULT_MAX_WS) return false;
     if (s.ws_geom_valid & wsBit(current_ws) == 0) return false;
 
     const current_screen = calculateScreenArea();
@@ -633,7 +580,7 @@ inline fn resolveMasterWidth(s: *const State, ws_state: ?*workspaces.State, ws_i
 }
 
 inline fn makeLayoutCtx(s: *State) layouts.LayoutCtx {
-    return .{ .conn = core.conn, .cache = &s.cache, .allocator = s.allocator };
+    return .{ .conn = core.conn, .cache = &s.cache };
 }
 
 fn dispatchLayout(layout: Layout, ctx: *const layouts.LayoutCtx, s: *State, wins: []const u32, screen: utils.Rect) void {
@@ -672,7 +619,7 @@ pub fn retileAllWorkspaces() void {
     const ws_state_opt = if (!core.config.tiling.global_layout) workspaces.getState() else null;
 
     const ctx          = makeLayoutCtx(s);
-    const effective_ws = @min(ws_count, s.max_ws);
+    const effective_ws = @min(ws_count, DEFAULT_MAX_WS);
 
     // Zero the per-workspace fill counters.
     @memset(s.retile_lens[0..effective_ws], 0);
@@ -680,8 +627,8 @@ pub fn retileAllWorkspaces() void {
     for (s.windows.items()) |win| {
         const ws_idx = workspaces.getWorkspaceForWindow(win) orelse continue;
         if (ws_idx >= effective_ws) continue;
-        if (s.retile_lens[ws_idx] < s.max_ws_windows) {
-            s.retile_wins[ws_idx * s.max_ws_windows + s.retile_lens[ws_idx]] = win;
+        if (s.retile_lens[ws_idx] < DEFAULT_MAX_WS_WINDOWS) {
+            s.retile_wins[ws_idx * DEFAULT_MAX_WS_WINDOWS + s.retile_lens[ws_idx]] = win;
             s.retile_lens[ws_idx] += 1;
         }
     }
@@ -692,7 +639,7 @@ pub fn retileAllWorkspaces() void {
         if (fullscreen.getForWorkspace(ws_idx)) |_| continue;
 
         const n          = s.retile_lens[ws_idx];
-        const ws_windows = s.retile_wins[ws_idx * s.max_ws_windows .. ws_idx * s.max_ws_windows + n];
+        const ws_windows = s.retile_wins[ws_idx * DEFAULT_MAX_WS_WINDOWS .. ws_idx * DEFAULT_MAX_WS_WINDOWS + n];
         if (ws_windows.len == 0) continue;
 
         const saved_width  = s.master_width;
@@ -787,7 +734,7 @@ fn retile(screen: utils.Rect, for_ws: ?u8) void {
 
     if (fullscreen.getForWorkspace(target_ws)) |_| return;
 
-    const ws_count = filterWorkspaceWindows(s, s.scratch_wins, for_ws);
+    const ws_count = filterWorkspaceWindows(s, &s.scratch_wins, for_ws);
     const ws_windows = s.scratch_wins[0..ws_count];
     if (ws_windows.len == 0) return;
 
@@ -808,10 +755,7 @@ fn retile(screen: utils.Rect, for_ws: ?u8) void {
 
 // Send border pixel only if color changed since last send.
 fn sendBorderColor(s: *State, conn: *xcb.xcb_connection_t, win: u32, color: u32) void {
-    const gop = s.cache.getOrPut(s.allocator, win) catch {
-        _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
-        return;
-    };
+    const gop = s.cache.getOrPut(win);
     if (gop.found_existing and gop.value_ptr.border == color) return;
     gop.value_ptr.border = color;
     if (!gop.found_existing) gop.value_ptr.rect = ZERO_RECT;
@@ -835,8 +779,7 @@ fn moveWindowToIndex(s: *State, from_idx: usize, to_idx: usize) void {
     if (from_idx == to_idx) return;
     const current = s.windows.items();
 
-    const temp = s.scratch_wins;
-    if (current.len > temp.len) {
+    if (current.len > s.scratch_wins.len) {
         debug.warn("moveWindowToIndex: too many windows ({})", .{current.len});
         return;
     }
@@ -845,12 +788,12 @@ fn moveWindowToIndex(s: *State, from_idx: usize, to_idx: usize) void {
     var j: usize = 0;
     for (current, 0..) |w, i| {
         if (i == from_idx) continue;
-        if (j == to_idx) { temp[j] = win; j += 1; }
-        temp[j] = w;
+        if (j == to_idx) { s.scratch_wins[j] = win; j += 1; }
+        s.scratch_wins[j] = w;
         j += 1;
     }
-    if (to_idx >= j) { temp[j] = win; j += 1; }
-    s.windows.reorder(temp[0..j]);
+    if (to_idx >= j) { s.scratch_wins[j] = win; j += 1; }
+    s.windows.reorder(s.scratch_wins[0..j]);
 }
 
 /// Locates the focused window and the current workspace's master window in the
@@ -990,7 +933,7 @@ fn queryWindowRect(win: u32) ?utils.Rect {
 /// Write `rect` into the geometry cache for `win`, allocating a fresh entry if
 /// one does not already exist.  Preserves the existing border color.
 fn updateCacheRect(s: *State, win: u32, rect: utils.Rect) void {
-    const gop = s.cache.getOrPut(s.allocator, win) catch return;
+    const gop = s.cache.getOrPut(win);
     gop.value_ptr.rect = rect;
     if (!gop.found_existing) gop.value_ptr.border = 0;
 }
@@ -1166,7 +1109,7 @@ pub fn cycleLayoutVariation() void {
 }
 
 inline fn markWsGeomValid(s: *State, ws_idx: anytype) void {
-    if (ws_idx < s.max_ws) s.ws_geom_valid |= wsBit(ws_idx);
+    if (ws_idx < DEFAULT_MAX_WS) s.ws_geom_valid |= wsBit(ws_idx);
 }
 
 // Collect windows belonging to the target workspace into buf.

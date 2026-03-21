@@ -253,7 +253,7 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !core.Config {
 }
 
 fn getDefaultConfig(allocator: std.mem.Allocator) core.Config {
-    var cfg = core.Config.init();
+    var cfg: core.Config = .{};
     const default_layout = allocator.dupe(u8, "master_left") catch "master_left";
     cfg.tiling.layouts.append(allocator, default_layout) catch |e| debug.warnOnErr(e, "default layout append");
     cfg.tiling.layout = if (cfg.tiling.layouts.items.len > 0) cfg.tiling.layouts.items[0] else default_layout;

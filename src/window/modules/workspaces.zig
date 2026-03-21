@@ -9,24 +9,7 @@ const focus      = @import("focus");
 const window     = @import("window");
 const bar        = @import("bar");
 const has_tiling = @import("build_options").has_tiling;
-const tiling = if (has_tiling) @import("tiling") else struct {
-    pub const Layout = enum { master, monocle, grid, fibonacci, floating };
-    var _state = struct { enabled: bool = false, layout: Layout = .master }{};
-    pub fn getState() *@TypeOf(_state) { return &_state; }
-    pub fn defaultLayout() Layout { return .master; }
-    pub fn dirty() void {}
-    pub fn invalidateGeomCache(_: u32) void {}
-    pub fn invalidateWsGeomBit(_: u8) void {}
-    pub fn saveWindowGeom(_: u32, _: anytype) void {}
-    pub fn isWindowActiveTiled(_: u32) bool { return false; }
-    pub fn isWindowTiled(_: u32) bool { return false; }
-    pub fn getWindowGeom(_: u32) ?@import("utils").Rect { return null; }
-    pub fn syncLayoutFromWorkspace(_: anytype) void {}
-    pub fn restoreWorkspaceGeom() bool { return false; }
-    pub fn retileCurrentWorkspace() void {}
-    pub fn isFloatingLayout() bool { return false; }
-    pub fn retileForRestore() void {}
-};
+const tiling = if (has_tiling) @import("tiling") else struct {};
 const Tracking   = @import("tracking").Tracking;
 const constants  = @import("constants");
 const debug      = @import("debug");
@@ -59,11 +42,9 @@ pub const Workspace = struct {
     // Restored on re-entry when the cursor is not hovering over any window.
     last_focused: ?u32 = null,
 
-    pub fn init(allocator: std.mem.Allocator, id: u8, name: []const u8, default_layout: tiling.Layout) Workspace {
-        return .{ .id = id, .windows = .{ .allocator = allocator }, .name = name, .layout = default_layout };
+    pub fn init(id: u8, name: []const u8, default_layout: tiling.Layout) Workspace {
+        return .{ .id = id, .windows = .{}, .name = name, .layout = default_layout };
     }
-
-    pub fn deinit(self: *Workspace) void { self.windows.deinit(); }
 
     /// Removes `win` from this workspace and clears last_focused if it pointed to it.
     pub fn removeAndClearFocus(self: *Workspace, win: u32) void {
@@ -142,7 +123,7 @@ pub fn init() void {
             }
         }
 
-        ws.* = Workspace.init(core.alloc, id, name, ws_layout);
+        ws.* = Workspace.init(id, name, ws_layout);
         ws.variation = ws_variation;
     }
 
@@ -159,7 +140,6 @@ pub fn init() void {
 
 pub fn deinit() void {
     if (g_state) |*s| {
-        for (s.workspaces) |*ws| ws.deinit();
         s.allocator.free(s.workspaces);
         s.window_to_workspaces.deinit();
     }
@@ -187,7 +167,7 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
     const mask = s.window_to_workspaces.get(win) orelse {
         // Not yet tracked (new window): add directly to target workspace.
         try s.window_to_workspaces.ensureUnusedCapacity(1);
-        try s.workspaces[target_ws].windows.add(win);
+        s.workspaces[target_ws].windows.add(win);
         s.window_to_workspaces.putAssumeCapacity(win, workspaceBit(target_ws));
         return;
     };
@@ -200,10 +180,7 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
     if (new_mask == 0) new_mask = target_bit; // safety: never leave mask empty
 
     s.workspaces[current].removeAndClearFocus(win);
-    s.workspaces[target_ws].windows.add(win) catch |err| {
-        s.workspaces[current].windows.add(win) catch unreachable;
-        return err;
-    };
+    s.workspaces[target_ws].windows.add(win);
     s.window_to_workspaces.getPtr(win).?.* = new_mask;
 
     if (minimize.isMinimized(win)) minimize.moveToWorkspace(win, target_ws);
@@ -228,7 +205,7 @@ fn setWindowMask(s: *State, win: u32, new_mask: u64) void {
     // Add to newly-set workspaces.
     var added_it = setBits(new_mask & ~old_mask);
     while (added_it.next()) |idx| {
-        if (idx < s.workspaces.len) s.workspaces[idx].windows.add(win) catch {};
+        if (idx < s.workspaces.len) s.workspaces[idx].windows.add(win);
     }
 
     // Remove from cleared workspaces.

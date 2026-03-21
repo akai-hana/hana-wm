@@ -30,40 +30,10 @@ pub const BAR_MIN_HEIGHT_PX: u16 = 20;
 /// Maximum long-words to request for the RESOURCE_MANAGER property (16 KB).
 const RESOURCE_MANAGER_MAX_LEN: u32 = 4096;
 
-const DpiCache = struct {
-    result:           ?DpiInfo = null,
-    screen_signature: u64      = 0,
-};
-
 // Not thread-safe; assumes detect() is only called from the main thread.
-var dpi_cache: DpiCache = .{};
+var dpi_cache: ?DpiInfo = null;
 
-const COMMON_DPI_TABLE = [_]struct { dpi: f32, name: []const u8 }{
-    .{ .dpi =  96.0, .name = "1x (Standard)" },
-    .{ .dpi = 120.0, .name = "1.25x" },
-    .{ .dpi = 144.0, .name = "1.5x (High DPI)" },
-    .{ .dpi = 192.0, .name = "2x (Retina)" },
-};
-
-const ScreenDimensions = struct {
-    width_px:  f32,
-    height_px: f32,
-    width_mm:  f32,
-    height_mm: f32,
-
-    fn from(screen: *xcb.xcb_screen_t) ScreenDimensions {
-        return .{
-            .width_px  = @floatFromInt(screen.width_in_pixels),
-            .height_px = @floatFromInt(screen.height_in_pixels),
-            .width_mm  = @floatFromInt(screen.width_in_millimeters),
-            .height_mm = @floatFromInt(screen.height_in_millimeters),
-        };
-    }
-
-    fn diagonalPx(self: ScreenDimensions) f32 {
-        return @sqrt(self.width_px * self.width_px + self.height_px * self.height_px);
-    }
-};
+const COMMON_DPI_TABLE = [_]f32{ 96.0, 120.0, 144.0, 192.0 };
 
 pub const DpiInfo = struct {
     dpi:          f32,
@@ -109,13 +79,16 @@ fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
 }
 
 fn calculateDpiFromGeometry(screen: *xcb.xcb_screen_t) f32 {
-    const dims = ScreenDimensions.from(screen);
-    if (dims.width_mm == 0 or dims.height_mm == 0) {
+    const width_px:  f32 = @floatFromInt(screen.width_in_pixels);
+    const height_px: f32 = @floatFromInt(screen.height_in_pixels);
+    const width_mm:  f32 = @floatFromInt(screen.width_in_millimeters);
+    const height_mm: f32 = @floatFromInt(screen.height_in_millimeters);
+    if (width_mm == 0 or height_mm == 0) {
         debug.warn("Display reports 0mm dimensions, using baseline DPI", .{});
         return BASELINE_DPI;
     }
-    const dpi_x   = (dims.width_px  / dims.width_mm)  * 25.4;
-    const dpi_y   = (dims.height_px / dims.height_mm) * 25.4;
+    const dpi_x   = (width_px  / width_mm)  * 25.4;
+    const dpi_y   = (height_px / height_mm) * 25.4;
     const avg_dpi = (dpi_x + dpi_y) / 2.0;
     debug.info("Calculated DPI: X={d:.1}, Y={d:.1}, Average={d:.1}", .{ dpi_x, dpi_y, avg_dpi });
     return avg_dpi;
@@ -123,46 +96,43 @@ fn calculateDpiFromGeometry(screen: *xcb.xcb_screen_t) f32 {
 
 fn snapToCommonDPI(dpi: f32) f32 {
     var closest  = COMMON_DPI_TABLE[0];
-    var min_diff = @abs(dpi - closest.dpi);
+    var min_diff = @abs(dpi - closest);
     for (COMMON_DPI_TABLE[1..]) |entry| {
-        const diff = @abs(dpi - entry.dpi);
+        const diff = @abs(dpi - entry);
         if (diff < min_diff) {
             min_diff = diff;
             closest = entry;
         }
     }
-    if (min_diff / closest.dpi < SNAP_THRESHOLD) {
-        debug.info("Snapped DPI {d:.1} to common value {d:.1} ({s})",
-            .{ dpi, closest.dpi, closest.name });
-        return closest.dpi;
+    if (min_diff / closest < SNAP_THRESHOLD) {
+        debug.info("Snapped DPI {d:.1} to common value {d:.1}", .{ dpi, closest });
+        return closest;
     }
     return dpi;
 }
 
 fn calculateScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
-    const dims             = ScreenDimensions.from(screen);
-    const resolution_scale = dims.diagonalPx() / BASELINE_DIAGONAL;
+    const width_px:  f32 = @floatFromInt(screen.width_in_pixels);
+    const height_px: f32 = @floatFromInt(screen.height_in_pixels);
+    const diagonal         = @sqrt(width_px * width_px + height_px * height_px);
+    const resolution_scale = diagonal / BASELINE_DIAGONAL;
     debug.info("Resolution scaling: {d:.0}x{d:.0} -> {d:.2}x baseline ({d:.0}x{d:.0})",
-        .{ dims.width_px, dims.height_px, resolution_scale, BASELINE_WIDTH, BASELINE_HEIGHT });
+        .{ width_px, height_px, resolution_scale, BASELINE_WIDTH, BASELINE_HEIGHT });
     return resolution_scale;
 }
 
-/// Detect DPI, with caching keyed on the screen's pixel and physical dimensions.
+/// Invalidate the DPI cache. Call this when a screen-change event is received
+/// before the next detect() so the values are recomputed from fresh data.
+pub fn resetDpiCache() void {
+    dpi_cache = null;
+}
+
+/// Detect DPI, returning a cached result until resetDpiCache() is called.
 /// Priority: Xft.dpi from X resources -> geometry calculation -> resolution-based scaling.
 pub fn detect(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) DpiInfo {
-    const sig =
-        (@as(u64, screen.width_in_pixels)        << 48) |
-        (@as(u64, screen.height_in_pixels)        << 32) |
-        (@as(u64, screen.width_in_millimeters)    << 16) |
-         @as(u64, screen.height_in_millimeters);
-
-    if (dpi_cache.result) |cached| {
-        if (dpi_cache.screen_signature == sig) return cached;
-    }
-
-    const result               = detectFresh(conn, screen);
-    dpi_cache.result           = result;
-    dpi_cache.screen_signature = sig;
+    if (dpi_cache) |cached| return cached;
+    const result = detectFresh(conn, screen);
+    dpi_cache = result;
     return result;
 }
 

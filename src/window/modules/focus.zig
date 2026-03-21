@@ -38,11 +38,22 @@ var g_last_event_time: u32                      = 0;
 var g_history:   std.ArrayListUnmanaged(u32) = .empty;
 var g_allocator: std.mem.Allocator           = undefined;
 
+// EWMH atom for _NET_ACTIVE_WINDOW — interned once in init().
+var g_net_active_window: xcb.xcb_atom_t = xcb.XCB_ATOM_NONE;
+
 // Lifecycle 
 
 pub fn init(allocator: std.mem.Allocator) void {
     g_allocator = allocator;
     g_history   = .empty;
+
+    // Intern _NET_ACTIVE_WINDOW so setFocus can advertise the focused window
+    // on the root window — required for xev -root / xprop based external tools.
+    const ck = xcb.xcb_intern_atom(core.conn, 0, "_NET_ACTIVE_WINDOW".len, "_NET_ACTIVE_WINDOW");
+    if (xcb.xcb_intern_atom_reply(core.conn, ck, null)) |r| {
+        g_net_active_window = r.*.atom;
+        std.c.free(r);
+    }
 }
 
 pub fn deinit() void {
@@ -212,6 +223,18 @@ pub fn setFocus(win: u32, reason: Reason) void {
     // pixmap and record focus-click time before the draw cycle runs.
     carousel.notifyFocusChanged(win);
     bar.scheduleFocusRedraw(win);
+
+    // Advertise the newly focused window on the root so xev -root and any
+    // EWMH-aware external tool (compositor scripts, polybar, etc.) can observe it.
+    if (g_net_active_window != xcb.XCB_ATOM_NONE) {
+        var win_val = win;
+        _ = xcb.xcb_change_property(
+            core.conn, xcb.XCB_PROP_MODE_REPLACE,
+            core.root, g_net_active_window,
+            xcb.XCB_ATOM_WINDOW, 32,
+            1, &win_val,
+        );
+    }
 }
 
 /// Called when the X server reports a FocusIn on a managed window.
@@ -269,6 +292,17 @@ pub fn clearFocus() void {
     );
     carousel.notifyFocusChanged(null);
     bar.scheduleFocusRedraw(null);
+
+    // Clear _NET_ACTIVE_WINDOW on root to signal no window is focused.
+    if (g_net_active_window != xcb.XCB_ATOM_NONE) {
+        const none: xcb.xcb_window_t = xcb.XCB_WINDOW_NONE;
+        _ = xcb.xcb_change_property(
+            core.conn, xcb.XCB_PROP_MODE_REPLACE,
+            core.root, g_net_active_window,
+            xcb.XCB_ATOM_WINDOW, 32,
+            1, &none,
+        );
+    }
 }
 
 inline fn shouldRaise(reason: Reason) bool {
