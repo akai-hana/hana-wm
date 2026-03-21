@@ -29,14 +29,16 @@ pub const xkb_state_key_get_one_sym                  = xkb.xkb_state_key_get_one
 const MAX_ATTEMPTS: u8 = 3;
 
 pub const XkbState = struct {
-    context:     *xkb_context,
-    keymap:      *xkb_keymap,
-    state:       *xkb_state,
-    device_id:   i32,
-    /// Keysym -> keycode map built at init time for O(1) config-time lookups.
-    reverse_map: std.AutoHashMap(u32, u8),
+    context:           *xkb_context,
+    keymap:            *xkb_keymap,
+    state:             *xkb_state,
+    device_id:         i32,
+    /// Flat keycode→keysym table for the standard X11 range (indices 0..255).
+    /// Populated at init time; entries outside 8..255 hold XKB_KEY_NoSymbol.
+    /// No allocator needed — 256 × 4 bytes = 1 KiB, lives inside XkbState.
+    keysym_by_keycode: [256]u32,
 
-    pub fn init(xcb_conn: *anyopaque, allocator: std.mem.Allocator) !XkbState {
+    pub fn init(xcb_conn: *anyopaque) !XkbState {
         const ctx = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS) orelse
             return error.XkbContextFailed;
         errdefer xkb.xkb_context_unref(ctx);
@@ -51,28 +53,24 @@ pub const XkbState = struct {
 
         const st = xkb.xkb_state_new(km) orelse return error.XkbStateFailed;
 
-        var reverse_map = std.AutoHashMap(u32, u8).init(allocator);
-        errdefer reverse_map.deinit();
-
-        // Pre-size for standard keycode range (8..255 = 248 entries); best-effort.
-        reverse_map.ensureTotalCapacity(248) catch {};
+        // Populate the flat table. Keycodes below 8 are reserved by X11 and
+        // will never produce a real keysym; fill them with NoSymbol so the
+        // array is always fully initialised and index arithmetic stays trivial.
+        var table: [256]u32 = [_]u32{xkb.XKB_KEY_NoSymbol} ** 256;
         for (8..256) |kc| {
-            const keycode: u8 = @intCast(kc);
-            const keysym: u32 = xkb.xkb_state_key_get_one_sym(st, keycode);
-            if (keysym != xkb.XKB_KEY_NoSymbol) reverse_map.put(keysym, keycode) catch {};
+            table[kc] = xkb.xkb_state_key_get_one_sym(st, @intCast(kc));
         }
 
         return XkbState{
-            .context     = ctx,
-            .keymap      = km,
-            .state       = st,
-            .device_id   = device_id,
-            .reverse_map = reverse_map,
+            .context           = ctx,
+            .keymap            = km,
+            .state             = st,
+            .device_id         = device_id,
+            .keysym_by_keycode = table,
         };
     }
 
     pub fn deinit(self: *XkbState) void {
-        self.reverse_map.deinit();
         xkb.xkb_state_unref(self.state);
         xkb.xkb_keymap_unref(self.keymap);
         xkb.xkb_context_unref(self.context);
@@ -84,8 +82,17 @@ pub const XkbState = struct {
     }
 
     /// Reverse-look up a keysym to its keycode (used during config parsing).
-    pub inline fn keysymToKeycode(self: *XkbState, keysym: u32) ?u8 {
-        return self.reverse_map.get(keysym);
+    ///
+    /// Scans the flat table (248 entries, all in L1 cache). This is called
+    /// only at config-parse time — never on the hot key-press path — so the
+    /// linear scan costs nothing in practice.
+    /// When a keysym is reachable from multiple keycodes (e.g. base and
+    /// shifted variants), returns the first match in keycode order (8..255).
+    pub inline fn keysymToKeycode(self: *const XkbState, keysym: u32) ?u8 {
+        for (8..256) |kc| {
+            if (self.keysym_by_keycode[kc] == keysym) return @intCast(kc);
+        }
+        return null;
     }
 };
 

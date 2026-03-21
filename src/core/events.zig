@@ -250,13 +250,6 @@ fn handleConfigReload() !void {
         core.config = old_config;
         return err;
     };
-    input.rebuildKeybindMap() catch |err| {
-        debug.err("rebuildKeybindMap failed: {}, reverting", .{err});
-        // Revert: restore the in-memory config, then re-sync X server key grabs to match.
-        core.config = old_config;
-        grabKeybindings() catch {}; // restore X server state to match old config
-        return err;
-    };
     old_config.deinit(core.alloc);
     tiling.reloadConfig();
     window.reloadBorders();

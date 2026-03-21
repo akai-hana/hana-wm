@@ -172,7 +172,7 @@ pub const WorkspaceLayoutOverride = struct {
 pub const TilingConfig = struct {
     enabled:      bool           = true,
     layout:       []const u8     = "master_left",
-    layouts:      std.ArrayListUnmanaged([]const u8), // Available layouts in cycle order
+    layouts:      std.ArrayList([]const u8) = .empty, // Available layouts in cycle order
     master_side:  MasterSide     = .left,
     master_width: parser.ScalableValue = parser.ScalableValue.percentage(50.0),
     master_count: u8             = 1,
@@ -197,7 +197,7 @@ pub const TilingConfig = struct {
     grid_indicator:      ?[3]u8 = null,
 
     /// Per-workspace layout assignments parsed from the layouts array.
-    workspace_layout_overrides: std.ArrayListUnmanaged(WorkspaceLayoutOverride) = .empty,
+    workspace_layout_overrides: std.ArrayList(WorkspaceLayoutOverride) = .empty,
 
     /// When true, layout changes apply globally across all workspaces (legacy behavior).
     global_layout: bool = false,
@@ -277,7 +277,7 @@ pub const BarSegment = enum {
 
 pub const BarLayout = struct {
     position: BarPosition,
-    segments: std.ArrayListUnmanaged(BarSegment),
+    segments: std.ArrayList(BarSegment),
 
     pub inline fn deinit(self: *BarLayout, allocator: std.mem.Allocator) void {
         self.segments.deinit(allocator);
@@ -291,7 +291,7 @@ pub const BarConfig = struct {
     // null = auto-calculate from font metrics alone.
     height:            ?parser.ScalableValue  = null,
     font:              []const u8             = "monospace:size=10",
-    fonts:             std.ArrayListUnmanaged([]const u8),
+    fonts:             std.ArrayList([]const u8)  = .empty,
     font_size:         parser.ScalableValue   = parser.ScalableValue.percentage(10.0),
     // Resolved pixel value cached after DPI scaling; derived from font_size at startup.
     // NOTE: this is runtime state, not a raw config value — consider moving it to a
@@ -315,7 +315,7 @@ pub const BarConfig = struct {
     title_minimized_accent: Color = 0x61AFEF,
     clock_accent:           Color = 0x61AFEF,
 
-    workspace_icons:     std.ArrayListUnmanaged([]const u8),
+    workspace_icons:     std.ArrayList([]const u8) = .empty,
     indicator_size:      parser.ScalableValue = parser.ScalableValue.percentage(30.0),
     workspace_tag_width: parser.ScalableValue = parser.ScalableValue.percentage(100.0),
 
@@ -333,7 +333,7 @@ pub const BarConfig = struct {
     drun_prompt_color: ?Color     = null,    // Prompt text color; falls back to accent_color
     drun_prompt:       []const u8 = "run: ", // Displayed before the input field
 
-    layout: std.ArrayListUnmanaged(BarLayout),
+    layout: std.ArrayList(BarLayout)           = .empty,
 
     scale_factor: f32 = 1.0,
     transparency: f32 = 1.0,
@@ -404,7 +404,7 @@ pub const Rule = struct {
 
 pub const WorkspaceConfig = struct {
     count: u8 = 9,
-    rules: std.ArrayListUnmanaged(Rule) = .empty,
+    rules: std.ArrayList(Rule) = .empty,
 
     pub fn deinit(self: *WorkspaceConfig, allocator: std.mem.Allocator) void {
         for (self.rules.items) |*rule| rule.deinit(allocator);
@@ -413,11 +413,11 @@ pub const WorkspaceConfig = struct {
 };
 
 pub const Config = struct {
-    keybindings:   std.ArrayListUnmanaged(Keybind)   = .empty,
-    mouse_bindings: std.ArrayListUnmanaged(MouseBind) = .empty,
-    tiling:      TilingConfig,
+    keybindings:    std.ArrayList(Keybind)   = .empty,
+    mouse_bindings: std.ArrayList(MouseBind) = .empty,
+    tiling:      TilingConfig    = .{},
     workspaces:  WorkspaceConfig = .{},
-    bar:         BarConfig,
+    bar:         BarConfig       = .{},
 
     // Ownership sentinels for string fields that have static defaults.
     //
@@ -434,17 +434,6 @@ pub const Config = struct {
     allocated_indicator_focused:   ?[]const u8 = null,
     allocated_indicator_unfocused: ?[]const u8 = null,
     allocated_drun_prompt:         ?[]const u8 = null,
-
-    pub fn init() Config {
-        return .{
-            .tiling = TilingConfig{ .layouts = .empty },
-            .bar    = BarConfig{
-                .workspace_icons = .empty,
-                .fonts           = .empty,
-                .layout          = .empty,
-            },
-        };
-    }
 
     pub fn deinit(self: *Config, a: std.mem.Allocator) void {
         for (self.keybindings.items) |*kb| kb.action.deinit(a);

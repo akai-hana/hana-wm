@@ -4,8 +4,7 @@
 //! core.zig and is initialized here at startup. Modules import core directly.
 
 // Zig stdlib
-const std     = @import("std");
-const builtin = @import("builtin");
+const std = @import("std");
 
 // core/
 const core   = @import("core");
@@ -19,6 +18,7 @@ const xcb    = core.xcb;
 const input = @import("input");
 
 // window/
+const window     = @import("window");
 const focus      = @import("focus");
 const fullscreen = @import("fullscreen");
 const minimize   = @import("minimize");
@@ -26,14 +26,7 @@ const workspaces = @import("workspaces");
 
 // tiling/
 const build_options = @import("build_options");
-const has_layouts   = build_options.has_layouts;
-const tiling = if (build_options.has_tiling) @import("tiling") else struct {
-    pub fn init() !void {}
-    pub fn deinit() void {}
-};
-const layouts = if (has_layouts) @import("layouts") else struct {
-    pub fn deinitSizeHintsCache(_: std.mem.Allocator) void {}
-};
+const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
 
 // bar/
 const bar    = @import("bar");
@@ -54,7 +47,7 @@ pub fn main() !void {
     core.dpi_info = scale.detect(x.conn, x.screen);
 
     input.setup(x.conn, x.screen, x.root);
-    try input.initXkb(x.conn, core.alloc);
+    try input.initXkb(x.conn);
     defer input.deinitXkb();
 
     core.config = try config.load(core.alloc, x.screen, input.getXkbState());
@@ -62,7 +55,7 @@ pub fn main() !void {
 
     try initGlobalState(x.conn, core.alloc);
     // Defers run in LIFO order: core.config.deinit() must run before deinitGlobalState().
-    defer deinitGlobalState(core.alloc);
+    defer deinitGlobalState();
 
     try events.setupSignalPipe();
     defer events.deinitSignalPipe();
@@ -151,10 +144,10 @@ fn initBar() void {
 
 /// Initializes all WM modules that require explicit lifecycle management.
 fn initModules() !void {
-    try input.init();
     fullscreen.init();
+    tiling.init();      // must precede workspaces.init(): workspaces.init() calls tiling.getState()
     workspaces.init();
-    try tiling.init();
+    window.init();      // populates atom cache required by handleMapRequest
     try minimize.init();
     try prompt.init(core.alloc, core.conn);
 }
@@ -163,22 +156,20 @@ fn initModules() !void {
 fn deinitModules() void {
     // minimize state is owned by WM.deinit — no separate deinit here.
     prompt.deinit();
-    tiling.deinit();
     workspaces.deinit();
+    tiling.deinit();
     fullscreen.deinit();
-    input.deinit();
 }
 
 /// Initializes global WM state: X atom cache, focus property cache, and focus tracking.
 fn initGlobalState(conn_: *xcb.xcb_connection_t, alloc: std.mem.Allocator) !void {
     try utils.initAtomCache(conn_);   // Intern frequently used X atoms
-    utils.initInputModelCache(alloc); // Build per-window focus property cache
+    utils.initInputModelCache();      // Build per-window focus property cache (no allocator — static array)
     focus.init(alloc);
 }
 
 /// Tears down global WM state initialized by initGlobalState.
-fn deinitGlobalState(alloc: std.mem.Allocator) void {
+fn deinitGlobalState() void {
     utils.deinitInputModelCache();
-    layouts.deinitSizeHintsCache(alloc); // Also frees cached ICCCM size hints
     focus.deinit();
 }

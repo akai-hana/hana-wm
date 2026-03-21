@@ -521,7 +521,7 @@ fn captureIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot) !voi
     snap.ws_current = ws_state.current;
     try snap.ws_has_windows.resize(allocator, snap.ws_count);
     for (ws_state.workspaces, 0..) |*workspace, i|
-        snap.ws_has_windows.items[i] = workspace.windows.count() > 0;
+        snap.ws_has_windows.items[i] = workspace.windows.len > 0;
     snap.current_ws_wins.clearRetainingCapacity();
     if (ws_state.current < ws_state.workspaces.len)
         try snap.current_ws_wins.appendSlice(allocator, ws_state.workspaces[ws_state.current].windows.items());
@@ -975,7 +975,7 @@ fn retileAllWorkspacesNoGrab() void {
         if (tiling.getStateOpt()) |t| t.enabled else false;
     if (!tiling_active) { tiling.retileCurrentWorkspace(); return; }
     for (ws_state.workspaces, 0..) |*ws, idx| {
-        if (ws.windows.isEmpty()) continue;
+        if (ws.windows.len == 0) continue;
         if (fullscreen.getForWorkspace(@intCast(idx)) != null) continue;
         if (@as(u8, @intCast(idx)) == ws_state.current) {
             tiling.retileCurrentWorkspace();

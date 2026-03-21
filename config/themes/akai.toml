@@ -6,7 +6,7 @@
 [tiling.aesthetics]
 # [0%-200%] / [0-N] px
 ## 100% = Entire display; 0% = disabled
-gap_width        = 3%
+gap_width        = 2%
 border_width     = 1% #TODO: 100% doesn't cover 100% of the display.
 #TODO: make config parser accept both N% and %N values (currently %N doesn't work).
 
