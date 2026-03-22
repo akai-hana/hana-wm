@@ -34,13 +34,17 @@ fn workArea() struct { left: i32, right: i32, top: i32, bottom: i32 } {
     const sw: i32  = core.screen.width_in_pixels;
     const sh: i32  = core.screen.height_in_pixels;
     const bh: i32  = if (bar.isVisible()) bar.getBarHeight() else 0;
-    const bw: i32  = window.getBorderWidth();
+    const bw2: i32 = @as(i32, window.getBorderWidth()) * 2;
     const bar_at_bottom = core.config.bar.vertical_position == .bottom;
+    // Near edges: x,y is the outer border corner, so no offset needed —
+    // the outer border sits flush with the boundary at 0 / bar_height.
+    // Far edges: total footprint = pos + dim + 2*border_width, so to align
+    // the outer border with the far boundary we subtract 2*border_width.
     return .{
-        .left   = bw,
-        .right  = sw - bw,
-        .top    = (if (bar_at_bottom) 0 else bh) + bw,
-        .bottom = (if (bar_at_bottom) sh - bh else sh) - bw,
+        .left   = 0,
+        .right  = sw - bw2,
+        .top    = if (bar_at_bottom) 0 else bh,
+        .bottom = (if (bar_at_bottom) sh - bh else sh) - bw2,
     };
 }
 
@@ -58,14 +62,6 @@ inline fn snapAxis(pos: i32, dim: i32, near: i32, far: i32, snap: i32) i32 {
     if (@abs(pos - near) < snap) return near;
     if (@abs((pos + dim) - far) < snap) return far - dim;
     return pos;
-}
-
-// Apply an i16 delta to a u16 dimension, clamped to [MIN_WINDOW_DIM, u16_MAX].
-inline fn clampDim(base: u16, delta: i16) u16 {
-    return @intCast(@min(
-        @as(i32, std.math.maxInt(u16)),
-        @max(@as(i32, constants.MIN_WINDOW_DIM), @as(i32, base) + @as(i32, delta)),
-    ));
 }
 
 const State = struct {
@@ -151,11 +147,20 @@ pub fn updateDrag(x: i16, y: i16) void {
                 .height = drag.start_win_height,
             };
         },
-        .resize => utils.Rect{
-            .x      = drag.start_win_x,
-            .y      = drag.start_win_y,
-            .width  = clampDim(drag.start_win_width,  dx),
-            .height = clampDim(drag.start_win_height, dy),
+        .resize => blk: {
+            const raw_w: i32 = @max(constants.MIN_WINDOW_DIM, @as(i32, drag.start_win_width)  + @as(i32, dx));
+            const raw_h: i32 = @max(constants.MIN_WINDOW_DIM, @as(i32, drag.start_win_height) + @as(i32, dy));
+            const snap = snapDistance();
+            const wa   = workArea();
+            // Snap the trailing edges: right = origin_x + width, bottom = origin_y + height.
+            const snapped_w: i32 = if (snap > 0 and @abs((@as(i32, drag.start_win_x) + raw_w) - wa.right)  < snap) wa.right  - drag.start_win_x else raw_w;
+            const snapped_h: i32 = if (snap > 0 and @abs((@as(i32, drag.start_win_y) + raw_h) - wa.bottom) < snap) wa.bottom - drag.start_win_y else raw_h;
+            break :blk utils.Rect{
+                .x      = drag.start_win_x,
+                .y      = drag.start_win_y,
+                .width  = @intCast(@min(std.math.maxInt(u16), @max(constants.MIN_WINDOW_DIM, snapped_w))),
+                .height = @intCast(@min(std.math.maxInt(u16), @max(constants.MIN_WINDOW_DIM, snapped_h))),
+            };
         },
     };
     utils.configureWindow(core.conn, drag.window, rect);
