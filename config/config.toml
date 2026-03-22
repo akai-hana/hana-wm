@@ -98,6 +98,9 @@ variants = "relaxed"
 # Optionally override the 3-character indicator shown in the bar for this layout.
 # indicator = "FIB"
 
+[drag]
+snap_distance = 16
+
 [bar]
 enabled  = true
 position = "bottom" # can be switched on runtime
