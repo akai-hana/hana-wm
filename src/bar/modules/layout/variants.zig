@@ -10,7 +10,8 @@ const tiling     = if (has_tiling) @import("tiling") else struct {};
 
 /// Draws the layout variants icon on the bar.
 pub fn draw(dc: *drawing.DrawContext, config: core.BarConfig, height: u16, start_x: u16) !u16 {
-    const t_state = if (has_tiling) tiling.getStateOpt() else null orelse return start_x;
+    if (!has_tiling) return start_x;
+    const t_state = tiling.getStateOpt() orelse return start_x;
     const indicator = getIndicator(t_state);
     if (indicator.len == 0) return start_x;
     return dc.drawSegment(start_x, height, indicator, config.scaledSegmentPadding(height), config.bg, config.fg);
