@@ -419,6 +419,10 @@ pub const Config = struct {
     workspaces:  WorkspaceConfig = .{},
     bar:         BarConfig       = .{},
 
+    /// How close (in px or %) a window edge must be to a monitor/bar boundary
+    /// before it snaps. Set to 0 to disable. Percentage is relative to screen width.
+    snap_distance: parser.ScalableValue = parser.ScalableValue.absolute(8.0),
+
     // Ownership sentinels for string fields that have static defaults.
     //
     // Some fields (e.g. bar.font, bar.clock_format) point to string literals by default

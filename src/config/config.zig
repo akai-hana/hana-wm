@@ -275,6 +275,7 @@ fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *const parser.Document)
     try parseTiling(allocator, doc, &cfg);
     try parseBar(allocator, doc, &cfg);
     try parseRules(allocator, doc, &cfg);
+    parseDrag(doc, &cfg);
     return cfg;
 }
 
@@ -557,6 +558,12 @@ pub fn load(allocator: std.mem.Allocator, screen: *core.xcb.xcb_screen_t, xkb_st
     resolveKeybindings(cfg.keybindings.items, xkb_state, allocator);
     finalizeConfig(&cfg, screen);
     return cfg;
+}
+
+fn parseDrag(doc: *const parser.Document, cfg: *core.Config) void {
+    const section = doc.getSection("drag") orelse return;
+    cfg.snap_distance = section.getScalable("snap_distance")
+        orelse parser.ScalableValue.absolute(8.0);
 }
 
 fn parseWorkspaces(doc: *const parser.Document, cfg: *core.Config) void {
