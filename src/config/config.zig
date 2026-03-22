@@ -118,6 +118,8 @@ fn processIncludes(allocator: std.mem.Allocator, dst: *parser.Document, src_doc:
     }
 }
 
+fn sliceLessThan(_: void, a: []u8, b: []u8) bool { return std.mem.lessThan(u8, a, b); }
+
 /// Loads and merges all `*.toml` files directly inside `dir_path` (alphabetical order;
 /// subdirectories only via explicit `include`).  Later files win on scalar conflicts;
 /// arrays accumulate.
@@ -150,7 +152,7 @@ pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !co
         return error.FileNotFound;
     }
 
-    std.mem.sort([]u8, names.items, {}, struct { fn lt(_: void, a: []u8, b: []u8) bool { return std.mem.lessThan(u8, a, b); } }.lt);
+    std.mem.sort([]u8, names.items, {}, sliceLessThan);
     var merged = parser.Document.init(allocator);
     defer merged.deinit();
     for (names.items) |name| {
@@ -184,27 +186,27 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator) !core.Config {
     const xdg_config_home = std.c.getenv("XDG_CONFIG_HOME");
     const config_home     = if (xdg_config_home) |ch|
         std.mem.span(ch)
-        else
-            try std.fmt.allocPrint(allocator, "{s}/.config", .{home});
-        defer if (xdg_config_home == null) allocator.free(config_home);
-        const xdg_dir = try std.fs.path.join(allocator, &.{ config_home, "hana" });
-        defer allocator.free(xdg_dir);
-        if (loadConfigFromDir(allocator, xdg_dir)) |cfg| return cfg else |_| {}
-        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        _ = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.CurrentWorkingDirectoryUnlinked;
-        const cwd = try allocator.dupe(u8, std.mem.sliceTo(&cwd_buf, 0));
-        defer allocator.free(cwd);
-        const local_dir = try std.fs.path.join(allocator, &.{ cwd, "config" });
-        defer allocator.free(local_dir);
-        if (loadConfigFromDir(allocator, local_dir)) |cfg| return cfg else |_| {}
-        const xdg_path = try std.fs.path.join(allocator, &.{ xdg_dir, "config.toml" });
-        defer allocator.free(xdg_path);
-        if (loadConfig(allocator, xdg_path)) |cfg| return cfg else |_| {}
-        const local = try std.fs.path.join(allocator, &.{ cwd, "config.toml" });
-        defer allocator.free(local);
-        if (loadConfig(allocator, local)) |cfg| return cfg else |_| {}
-        debug.info("No config found, using fallback with auto-detection", .{});
-        return try loadFallbackConfig(allocator);
+    else
+        try std.fmt.allocPrint(allocator, "{s}/.config", .{home});
+    defer if (xdg_config_home == null) allocator.free(config_home);
+    const xdg_dir = try std.fs.path.join(allocator, &.{ config_home, "hana" });
+    defer allocator.free(xdg_dir);
+    if (loadConfigFromDir(allocator, xdg_dir)) |cfg| return cfg else |_| {}
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.CurrentWorkingDirectoryUnlinked;
+    const cwd = try allocator.dupe(u8, std.mem.sliceTo(&cwd_buf, 0));
+    defer allocator.free(cwd);
+    const local_dir = try std.fs.path.join(allocator, &.{ cwd, "config" });
+    defer allocator.free(local_dir);
+    if (loadConfigFromDir(allocator, local_dir)) |cfg| return cfg else |_| {}
+    const xdg_path = try std.fs.path.join(allocator, &.{ xdg_dir, "config.toml" });
+    defer allocator.free(xdg_path);
+    if (loadConfig(allocator, xdg_path)) |cfg| return cfg else |_| {}
+    const local = try std.fs.path.join(allocator, &.{ cwd, "config.toml" });
+    defer allocator.free(local);
+    if (loadConfig(allocator, local)) |cfg| return cfg else |_| {}
+    debug.info("No config found, using fallback with auto-detection", .{});
+    return try loadFallbackConfig(allocator);
 }
 
 /// Reads, parses, and returns the config at `path` (single-file entry point).
@@ -287,11 +289,11 @@ const MOD_MAP = std.StaticStringMap(u16).initComptime(.{
 });
 
 const MOUSE_BUTTON_MAP = std.StaticStringMap(u8).initComptime(.{
-    .{ "button1",     1 }, .{ "leftclick",   1 }, .{ "left",   1 },
-    .{ "button2",     2 }, .{ "middleclick", 2 }, .{ "middle", 2 },
-    .{ "button3",     3 }, .{ "rightclick",  3 }, .{ "right",  3 },
-    .{ "button4",     4 }, .{ "scrollup",    4 },
-    .{ "button5",     5 }, .{ "scrolldown",  5 },
+    .{ "button1", 1 }, .{ "left_click",   1 }, .{ "leftclick",   1 }, .{ "left",   1 },
+    .{ "button2", 2 }, .{ "middle_click", 2 }, .{ "middleclick", 2 }, .{ "middle", 2 },
+    .{ "button3", 3 }, .{ "right_click",  3 }, .{ "right",       3 },
+    .{ "button4", 4 }, .{ "scroll_up",    4 }, .{ "scrollup",    4 },
+    .{ "button5", 5 }, .{ "scroll_down",  5 }, .{ "scrolldown",  5 },
 });
 
 inline fn mouseButtonFromName(name: []const u8) ?u8 {
@@ -325,8 +327,8 @@ const ACTION_MAP = std.StaticStringMap(core.Action).initComptime(.{
     .{ "unminimize_lifo",        .unminimize_lifo        },
     .{ "unminimize_fifo",        .unminimize_fifo        },
     .{ "unminimize_all",         .unminimize_all         },
-    .{ "cycle_layout_variation", .cycle_layout_variation },
-    .{ "cycle_variation",        .cycle_layout_variation },
+    .{ "cycle_layout_variants", .cycle_layout_variants },
+    .{ "cycle_variants",        .cycle_layout_variants },
     .{ "toggle_prompt",          .toggle_prompt          },
     .{ "drun",                   .toggle_prompt          },
     .{ "toggle_float",           .toggle_floating        },
@@ -397,20 +399,15 @@ const WORKSPACE_ACTION_BASES = std.StaticStringMap(void).initComptime(.{
 
 fn resolveAndParseAction(allocator: std.mem.Allocator, cmd: []const u8, ws_idx: u8, kill_placeholder: ?[]const u8) !core.Action {
     const ws_str: ?[]u8 = if (ws_idx > 0 and WORKSPACE_ACTION_BASES.has(cmd))
-        try std.fmt.allocPrint(allocator, "{s}_{d}", .{ cmd, ws_idx })
-        else
-            null;
-        defer if (ws_str) |s| allocator.free(s);
-        const after_ws = ws_str orelse cmd;
-        const final: []const u8 = if (kill_placeholder) |kp|
-            if (std.mem.indexOf(u8, after_ws, "{kill}") != null)
-                try std.mem.replaceOwned(u8, allocator, after_ws, "{kill}", kp)
-            else
-                after_ws
-                    else
-                        after_ws;
-                    defer if (final.ptr != after_ws.ptr) allocator.free(final);
-                    return try parseAction(allocator, final);
+        try std.fmt.allocPrint(allocator, "{s}_{d}", .{ cmd, ws_idx }) else null;
+    defer if (ws_str) |s| allocator.free(s);
+    const after_ws = ws_str orelse cmd;
+    if (kill_placeholder) |kp| if (std.mem.indexOf(u8, after_ws, "{kill}") != null) {
+        const final = try std.mem.replaceOwned(u8, allocator, after_ws, "{kill}", kp);
+        defer allocator.free(final);
+        return parseAction(allocator, final);
+    };
+    return parseAction(allocator, after_ws);
 }
 
 fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *core.Config) !void {
@@ -427,14 +424,12 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, c
             allocator.free(glob_entries);
         }
         for (glob_entries) |ge| {
-            const keybind_str: []const u8 = if (mod_placeholder) |mod|
-                if (std.mem.startsWith(u8, ge.key, "Mod+"))
-                    try std.fmt.allocPrint(allocator, "{s}+{s}", .{ mod, ge.key["Mod+".len..] })
-                else
-                    ge.key
-                        else
-                            ge.key;
-                        defer if (keybind_str.ptr != ge.key.ptr) allocator.free(keybind_str);
+            const keybind_str: []const u8 = blk: {
+                if (mod_placeholder) |mod| if (std.mem.startsWith(u8, ge.key, "Mod+"))
+                    break :blk try std.fmt.allocPrint(allocator, "{s}+{s}", .{ mod, ge.key["Mod+".len..] });
+                break :blk ge.key;
+            };
+            defer if (keybind_str.ptr != ge.key.ptr) allocator.free(keybind_str);
                         const action: core.Action = act: {
                             if (entry.value_ptr.*.asArray()) |arr| {
                                 var acts: std.ArrayList(core.Action) = .empty;
@@ -598,20 +593,20 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
     cfg.tiling.master_count = get(u8, master_src, if (dedicated) "count" else "master_count", 1, 1, null);
     if (master_src.getString(if (dedicated) "side"  else "master_side"))  |s| cfg.tiling.master_side = core.MasterSide.fromStringWithAlias(s) orelse .left;
     cfg.tiling.master_width = master_src.getScalable(if (dedicated) "width" else "master_width") orelse parser.ScalableValue.percentage(50.0);
-    parseTilingVariations(doc, cfg);
+    parseTilingVariants(doc, cfg);
     cfg.tiling.global_layout = get(bool, section, "global_layout", false, null, null);
 }
 
-/// Reads `variation` from `section` into `field`; warns on unknown values.
-inline fn tryParseVariation(
+/// Reads `variants` from `section` into `field`; warns on unknown values.
+inline fn tryParseVariant(
     comptime T:   type,
     section:      *const parser.Section,
     layout_name:  []const u8,
     field:        *T,
 ) void {
-    const v = section.getString("variation") orelse return;
+    const v = section.getString("variants") orelse return;
     field.* = std.meta.stringToEnum(T, v) orelse {
-        debug.warn("Unknown {s} variation '{s}', using default", .{ layout_name, v });
+        debug.warn("Unknown {s} variants '{s}', using default", .{ layout_name, v });
         return;
     };
 }
@@ -620,13 +615,13 @@ inline fn tryParseIndicator(section: *const parser.Section, field: *?[3]u8) void
     if (section.getString("indicator")) |raw| field.* = parseIndicator(raw);
 }
 
-fn parseTilingVariations(doc: *const parser.Document, cfg: *core.Config) void {
+fn parseTilingVariants(doc: *const parser.Document, cfg: *core.Config) void {
     inline for (.{
-        .{ "tiling.layouts.master-stack", core.MasterVariation,  "master-stack", "master_variation",  "master_indicator"  },
-        .{ "tiling.layouts.monocle",      core.MonocleVariation, "monocle",      "monocle_variation", "monocle_indicator" },
-        .{ "tiling.layouts.grid",         core.GridVariation,    "grid",         "grid_variation",    "grid_indicator"    },
+        .{ "tiling.layouts.master-stack", core.MasterVariant,  "master-stack", "master_variant",  "master_indicator"  },
+        .{ "tiling.layouts.monocle",      core.MonocleVariant, "monocle",      "monocle_variant", "monocle_indicator" },
+        .{ "tiling.layouts.grid",         core.GridVariant,    "grid",         "grid_variant",    "grid_indicator"    },
     }) |e| if (doc.getSection(e[0])) |ms| {
-        tryParseVariation(e[1], ms, e[2], &@field(cfg.tiling, e[3]));
+        tryParseVariant(e[1], ms, e[2], &@field(cfg.tiling, e[3]));
         tryParseIndicator(ms, &@field(cfg.tiling, e[4]));
     };
 }
@@ -670,36 +665,32 @@ inline fn canonicalLayout(name: []const u8, buf: []u8) []const u8 {
     return lower;
 }
 
-/// Parses a variation string for the given layout name into a LayoutVariationOverride.
+/// Parses a variants string for the given layout name into a LayoutVariantOverride.
 /// Returns null and emits a warning when the string is not valid for that layout.
-fn parseLayoutVariation(layout_name: []const u8, variation_str: []const u8) ?core.LayoutVariationOverride {
+fn parseLayoutVariant(layout_name: []const u8, variants_str: []const u8) ?core.LayoutVariantOverride {
     var buf: [32]u8 = undefined;
     if (layout_name.len > buf.len) return null;
     const lower_layout = std.ascii.lowerString(buf[0..layout_name.len], layout_name);
     const typed_layouts = .{
-        .{ "master-stack", core.MasterVariation,  "master"  },
-        .{ "monocle",      core.MonocleVariation, "monocle" },
-        .{ "grid",         core.GridVariation,    "grid"    },
+        .{ "master-stack", core.MasterVariant,  "master"  },
+        .{ "monocle",      core.MonocleVariant, "monocle" },
+        .{ "grid",         core.GridVariant,    "grid"    },
     };
     inline for (typed_layouts) |entry| {
         if (std.mem.eql(u8, lower_layout, entry[0])) {
-            const v = std.meta.stringToEnum(entry[1], variation_str) orelse {
-                debug.warn("Unknown {s} variation '{s}' in layouts array, ignoring", .{ entry[0], variation_str });
+            const v = std.meta.stringToEnum(entry[1], variants_str) orelse {
+                debug.warn("Unknown {s} variants '{s}' in layouts array, ignoring", .{ entry[0], variants_str });
                 return null;
             };
-            return @unionInit(core.LayoutVariationOverride, entry[2], v);
+            return @unionInit(core.LayoutVariantOverride, entry[2], v);
         }
-    }
-    if (std.mem.eql(u8, lower_layout, "fibonacci")) {
-        debug.warn("fibonacci does not support variations; '{s}' in layouts array ignored", .{variation_str});
-        return null;
     }
     return null;
 }
 
 /// Parses the `layouts` TOML array.  A known layout name starts a new group; the
-/// optional next element is a variation word or a workspace list ("1,3,5"); a third
-/// may follow as a workspace list when the second was a variation.
+/// optional next element is a variants word or a workspace list ("1,3,5"); a third
+/// may follow as a workspace list when the second was a variants.
 /// Plain single-name format ("master-stack") is fully backward-compatible.
 fn parseLayoutsArray(
     allocator: std.mem.Allocator,
@@ -720,7 +711,7 @@ fn parseLayoutsArray(
         }
         const layout_idx: u8 = @intCast(cfg.tiling.layouts.items.len);
         try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, canonical));
-        var variation: ?core.LayoutVariationOverride = null;
+        var variants: ?core.LayoutVariantOverride = null;
         var ws_list_str: ?[]const u8 = null;
         if (i + 1 < arr.len) {
             if (arr[i + 1].asString()) |peek| {
@@ -729,7 +720,7 @@ fn parseLayoutsArray(
                         ws_list_str = peek;
                         i += 1;
                     } else {
-                        variation = parseLayoutVariation(canonical, peek);
+                        variants = parseLayoutVariant(canonical, peek);
                         i += 1;
                         if (i + 1 < arr.len) if (arr[i + 1].asString()) |peek2|
                             if (isWorkspaceList(peek2)) { ws_list_str = peek2; i += 1; };
@@ -755,7 +746,7 @@ fn parseLayoutsArray(
                 try cfg.tiling.workspace_layout_overrides.append(allocator, .{
                     .workspace_idx = ws_idx,
                     .layout_idx    = layout_idx,
-                    .variation     = variation,
+                    .variant       = variants,
                 });
             }
         }
@@ -878,9 +869,15 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *cor
     else
         @field(cfg.bar, f.fallback);
     if (colors) |c| {
-        if (c.get("drun_bg"))           |_| cfg.bar.drun_bg           = getColor(c, "drun_bg",           cfg.bar.bg);
-        if (c.get("drun_fg"))           |_| cfg.bar.drun_fg           = getColor(c, "drun_fg",           cfg.bar.fg);
-        if (c.get("drun_prompt_color")) |_| cfg.bar.drun_prompt_color = getColor(c, "drun_prompt_color", cfg.bar.accent_color);
+        const DRUN_COLOR_FIELDS = [_]struct { key: []const u8, fallback: []const u8 }{
+            .{ .key = "drun_bg",           .fallback = "bg"           },
+            .{ .key = "drun_fg",           .fallback = "fg"           },
+            .{ .key = "drun_prompt_color", .fallback = "accent_color" },
+        };
+        inline for (DRUN_COLOR_FIELDS) |f| {
+            if (c.get(f.key)) |_|
+                @field(cfg.bar, f.key) = getColor(c, f.key, @field(cfg.bar, f.fallback));
+        }
     }
     // Carousel: enabled flag, scroll_speed (px/s, min 1), carousel_refresh_rate (Hz, 0 = auto-detect via RandR).
     carousel.setCarouselEnabled(get(bool, section, "carousel_enabled", true, null, null));
@@ -974,14 +971,14 @@ fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *c
         const name   = entry.key_ptr.*;
         const ws_str = if (std.mem.startsWith(u8, name, "workspace.rules."))
             name["workspace.rules.".len..]
-            else if (std.mem.startsWith(u8, name, "rules."))
-                name["rules.".len..]
-                    else
-                        continue;
-                    const ws_num = std.fmt.parseInt(usize, ws_str, 10) catch continue;
-                    if (!validateWorkspace(ws_num, cfg.workspaces.count, name)) continue;
-                    var iter = entry.value_ptr.pairs.iterator();
-                    while (iter.next()) |class_entry|
-                        try addRule(allocator, cfg, class_entry.key_ptr.*, ws_num);
+        else if (std.mem.startsWith(u8, name, "rules."))
+            name["rules.".len..]
+        else
+            continue;
+        const ws_num = std.fmt.parseInt(usize, ws_str, 10) catch continue;
+        if (!validateWorkspace(ws_num, cfg.workspaces.count, name)) continue;
+        var iter = entry.value_ptr.pairs.iterator();
+        while (iter.next()) |class_entry|
+            try addRule(allocator, cfg, class_entry.key_ptr.*, ws_num);
     }
 }

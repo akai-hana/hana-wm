@@ -89,9 +89,7 @@ pub fn deinit() void {
 // Public state queries
 
 pub fn isFullscreen(win: u32) bool {
-    for (&g_slots) |slot|
-        if (slot) |info| if (info.window == win) return true;
-    return false;
+    return workspaceFor(win) != null;
 }
 
 pub fn getForWorkspace(ws: u8) ?FullscreenInfo {
@@ -99,8 +97,10 @@ pub fn getForWorkspace(ws: u8) ?FullscreenInfo {
 }
 
 /// Returns the workspace index that `win` is fullscreen on, or null.
+/// O(workspace_count) — scans only the live slots, not the full 256-entry array.
 pub fn workspaceFor(win: u32) ?u8 {
-    for (&g_slots, 0..) |slot, i|
+    const count = workspaces.getWorkspaceCount();
+    for (g_slots[0..count], 0..) |slot, i|
         if (slot) |info| if (info.window == win) return @intCast(i);
     return null;
 }
@@ -118,14 +118,16 @@ pub fn clear() void {
 }
 
 pub fn hasAnyFullscreen() bool {
-    for (&g_slots) |slot| if (slot != null) return true;
+    const count = workspaces.getWorkspaceCount();
+    for (g_slots[0..count]) |slot| if (slot != null) return true;
     return false;
 }
 
 /// Iterate over occupied slots. Diagnostics only.
 /// Calls `cb` with (workspace_index, FullscreenInfo) for every non-null slot.
 pub fn forEachFullscreen(cb: fn (u8, FullscreenInfo) void) void {
-    for (&g_slots, 0..) |slot, i|
+    const count = workspaces.getWorkspaceCount();
+    for (g_slots[0..count], 0..) |slot, i|
         if (slot) |info| cb(@intCast(i), info);
 }
 
@@ -146,17 +148,17 @@ pub fn forEachFullscreen(cb: fn (u8, FullscreenInfo) void) void {
 fn fetchWindowGeom(win: u32) core.WindowGeometry {
     if (comptime build_options.has_tiling) {
         if (tiling.getWindowGeom(win)) |rect| {
-            // Fast path: tiled windows have a cached rect from the last retile.
             const bw: u16 = if (tiling.getStateOpt()) |ts| ts.border_width else 0;
-            return rectToGeom(rect, bw);
+            return .{
+                .x            = rect.x,
+                .y            = rect.y,
+                .width        = rect.width,
+                .height       = rect.height,
+                .border_width = bw,
+            };
         }
     }
 
-    // Slow path: floating or newly-spawned windows are not in the tiling cache
-    // (never passed through configureSafe), so a blocking round-trip is needed.
-    // Falls back to a centred quarter-screen default if the reply fails or the
-    // window is offscreen (x/y below OFFSCREEN_THRESHOLD_MIN), which happens
-    // when a window was spawned but never placed on-screen before fullscreen.
     const default: core.WindowGeometry = .{
         .x            = @intCast(@divTrunc(@as(i32, core.screen.width_in_pixels),  4)),
         .y            = @intCast(@divTrunc(@as(i32, core.screen.height_in_pixels), 4)),
@@ -178,17 +180,6 @@ fn fetchWindowGeom(win: u32) core.WindowGeometry {
         .width        = reply.*.width,
         .height       = reply.*.height,
         .border_width = reply.*.border_width,
-    };
-}
-
-/// Convert a tiling rect + border width to a WindowGeometry.
-inline fn rectToGeom(rect: utils.Rect, border_width: u16) core.WindowGeometry {
-    return .{
-        .x            = rect.x,
-        .y            = rect.y,
-        .width        = rect.width,
-        .height       = rect.height,
-        .border_width = border_width,
     };
 }
 
@@ -230,16 +221,12 @@ fn saveFloatingWindowGeoms(skip_win: u32) void {
         // Skip windows that are already offscreen (e.g. during a fullscreen switch).
         if (reply.*.x < constants.OFFSCREEN_THRESHOLD_MIN or
             reply.*.y < constants.OFFSCREEN_THRESHOLD_MIN) continue;
-        if (g_float_saves_len < MAX_FLOAT_SAVES) {
-            g_float_saves[g_float_saves_len] = .{
-                .win  = w,
-                .rect = .{
-                    .x = reply.*.x, .y = reply.*.y,
-                    .width = reply.*.width, .height = reply.*.height,
-                },
-            };
-            g_float_saves_len += 1;
-        }
+        g_float_saves[g_float_saves_len] = .{
+            .win  = w,
+            .rect = .{ .x = reply.*.x, .y = reply.*.y,
+                       .width = reply.*.width, .height = reply.*.height },
+        };
+        g_float_saves_len += 1;
     }
 }
 
@@ -392,25 +379,20 @@ pub fn toggle() void {
     const current_ws = workspaces.getCurrentWorkspace() orelse return;
 
     if (getForWorkspace(current_ws)) |fs_info| {
+        _ = xcb.xcb_grab_server(core.conn);
+        exitFullscreenCommit(fs_info.window, current_ws);
         if (fs_info.window == win) {
-            _ = xcb.xcb_grab_server(core.conn);
-            exitFullscreenCommit(win, current_ws);
-            restoreFloatingWindows(win);
             // The retile's EnterNotify correctly updates hover focus — no suppression needed.
-            _ = xcb.xcb_ungrab_server(core.conn);
-            _ = xcb.xcb_flush(core.conn);
+            restoreFloatingWindows(win);
         } else {
             // Switching fullscreen from one window to another: share a single grab.
             // g_float_saves already holds positions from the original enter —
             // don't repopulate (windows are offscreen) and don't clear (they'll be
             // restored when the new fullscreen is eventually exited).
-            const geom = fetchWindowGeom(win);
-            _ = xcb.xcb_grab_server(core.conn);
-            exitFullscreenCommit(fs_info.window, current_ws);
-            enterFullscreenCommit(win, current_ws, geom);
-            _ = xcb.xcb_ungrab_server(core.conn);
-            _ = xcb.xcb_flush(core.conn);
+            enterFullscreenCommit(win, current_ws, fetchWindowGeom(win));
         }
+        _ = xcb.xcb_ungrab_server(core.conn);
+        _ = xcb.xcb_flush(core.conn);
     } else {
         enterFullscreen(win, null);
     }

@@ -31,8 +31,18 @@ const BATCH = 64;
 
 /// Centre any window that is still at the X default origin (0, 0).
 /// Windows the user has already moved are left untouched.
+///
+/// Cache-first optimisation: windows with a valid cached rect at a non-zero
+/// origin are skipped entirely — no geometry round-trip is needed.  This
+/// matters after a retile-to-floating transition where every window was just
+/// positioned by the tiling engine and all their rects are already cached.
+///
+/// For windows that do require centering, configureSafe is used instead of a
+/// raw xcb_configure_window so the cache is populated with the new position.
+/// This lets restoreWorkspaceGeom replay centred positions on workspace switch
+/// without a fresh geometry round-trip.
 pub fn tileWithOffset(
-    _: *const layouts.LayoutCtx,
+    ctx: *const layouts.LayoutCtx,
     _: anytype,
     windows: []const u32,
     _: u16, _: u16, _: u16,
@@ -45,24 +55,43 @@ pub fn tileWithOffset(
         const end   = @min(base + BATCH, windows.len);
         const batch = windows[base..end];
 
-        // Phase 1 — issue all geometry requests without waiting for replies.
+        // Phase 0 — cache check.
+        // A window with a valid cached rect at a non-zero origin has already
+        // been positioned (by the user or by a previous tiling pass).  Skip
+        // the geometry query entirely for those windows.
+        var needs_query: [BATCH]bool = undefined;
+        var any_needs: bool = false;
+        for (batch, 0..) |win, i| {
+            const already_placed = blk: {
+                const wd = ctx.cache.get(win) orelse break :blk false;
+                if (!wd.hasValidRect()) break :blk false;
+                break :blk (wd.rect.x != 0 or wd.rect.y != 0);
+            };
+            needs_query[i] = !already_placed;
+            if (!already_placed) any_needs = true;
+        }
+
+        if (!any_needs) { base = end; continue; }
+
+        // Phase 1 — issue geometry requests only for uncached / origin windows.
         var cookies: [BATCH]xcb.xcb_get_geometry_cookie_t = undefined;
         for (batch, 0..) |win, i| {
-            cookies[i] = xcb.xcb_get_geometry(core.conn, win);
+            if (needs_query[i])
+                cookies[i] = xcb.xcb_get_geometry(core.conn, win);
         }
 
         // Phase 2 — collect replies; the server has been working on all of
         // them since phase 1, so only the first reply incurs a round-trip.
         for (batch, 0..) |win, i| {
+            if (!needs_query[i]) continue;
             const reply = xcb.xcb_get_geometry_reply(
-                core.conn,
-                cookies[i],
-                null,
+                core.conn, cookies[i], null,
             ) orelse continue;
             defer std.c.free(reply);
 
-            // Skip windows that have already been positioned by the user or by
-            // a prior tiling pass — only the X default origin (0, 0) needs fixing.
+            // A window not at (0,0) was placed by the user before this layout
+            // pass (the cache check above missed it because the entry was
+            // absent or zeroed). Leave it untouched.
             if (reply.*.x != 0 or reply.*.y != 0) continue;
 
             const w: i32 = reply.*.width;
@@ -70,12 +99,15 @@ pub fn tileWithOffset(
             const cx: i32 = @max(0, @divTrunc(sw - w, 2));
             const cy: i32 = @max(0, @divTrunc(sh - h, 2));
 
-            const vals = [_]u32{ @bitCast(cx), @bitCast(cy) };
-            _ = xcb.xcb_configure_window(
-                core.conn, win,
-                xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
-                &vals,
-            );
+            // Use configureSafe so the centred position is stored in the cache.
+            // This ensures restoreWorkspaceGeom can replay it on workspace
+            // switch without issuing a fresh get_geometry round-trip.
+            layouts.configureSafe(ctx, win, .{
+                .x      = @intCast(cx),
+                .y      = @intCast(cy),
+                .width  = reply.*.width,
+                .height = reply.*.height,
+            });
         }
 
         base = end;

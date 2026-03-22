@@ -148,7 +148,7 @@ fn initModules() !void {
     tiling.init();      // must precede workspaces.init(): workspaces.init() calls tiling.getState()
     workspaces.init();
     window.init();      // populates atom cache required by handleMapRequest
-    try minimize.init();
+    minimize.init();
     try prompt.init(core.alloc, core.conn);
 }
 

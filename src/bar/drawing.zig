@@ -85,6 +85,12 @@ pub const FontState = struct {
     }
 };
 
+/// Unpack one 8-bit RGB channel from a packed 0xRRGGBB colour and convert
+/// to the [0.0, 1.0] float that Cairo expects.
+inline fn chan(color: u32, shift: u5) f64 {
+    return @as(f64, @floatFromInt((color >> shift) & 0xFF)) / 255.0;
+}
+
 pub const DrawContext = struct {
     font:   FontState,
     conn:   *core.xcb.xcb_connection_t,
@@ -238,11 +244,7 @@ pub const DrawContext = struct {
 
     inline fn setColor(self: *DrawContext, color: u32) void {
         if (self.last_color == color) return;
-        c.cairo_set_source_rgba(self.ctx,
-            @as(f64, @floatFromInt((color >> 16) & 0xFF)) / 255.0,
-            @as(f64, @floatFromInt((color >> 8)  & 0xFF)) / 255.0,
-            @as(f64, @floatFromInt( color         & 0xFF)) / 255.0,
-            1.0);
+        c.cairo_set_source_rgba(self.ctx, chan(color, 16), chan(color, 8), chan(color, 0), 1.0);
         self.last_color = color;
     }
 
@@ -542,11 +544,7 @@ pub const CarouselPixmap = struct {
         c.pango_layout_set_font_description(layout, dc.font.current_font_desc);
         c.pango_layout_set_text(layout, text.ptr, @intCast(text.len));
 
-        c.cairo_set_source_rgba(ctx,
-            @as(f64, @floatFromInt((fg >> 16) & 0xFF)) / 255.0,
-            @as(f64, @floatFromInt((fg >>  8) & 0xFF)) / 255.0,
-            @as(f64, @floatFromInt( fg         & 0xFF)) / 255.0,
-            1.0);
+        c.cairo_set_source_rgba(ctx, chan(fg, 16), chan(fg, 8), chan(fg, 0), 1.0);
 
         const bl = @as(f64, @floatFromInt(c.pango_layout_get_baseline(layout)))
                  / @as(f64, @floatFromInt(c.PANGO_SCALE));

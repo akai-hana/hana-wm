@@ -120,6 +120,6 @@ inline fn checkPath(buf: []u8, dir: []const u8, command: []const u8) bool {
 /// or error.FallbackMissing if config/fallback.toml was absent at build time.
 pub inline fn getFallbackToml() error{FallbackMissing}![]const u8 {
     const opts = @import("build_options");
-    if (!opts.has_fallback_toml) return error.FallbackMissing;
-    return opts.fallback_toml;
+    if (!@hasDecl(opts, "fallback_toml")) return error.FallbackMissing;
+    return @field(opts, "fallback_toml");
 }

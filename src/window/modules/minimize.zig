@@ -10,16 +10,20 @@
 //!   unminimizeAll:     restore every minimized window on the current workspace
 //!
 //! Ordering is tracked via a monotonic per-entry timestamp — no separate
-//! per-workspace ordered lists are maintained. The single `minimized_info` map is
-//! the only source of truth; scanning it for the LIFO/FIFO candidate is O(n)
-//! but n is always tiny in practice (typically < 10 minimized windows).
+//! per-workspace ordered lists are maintained.  Scanning the fixed buffer for
+//! the LIFO/FIFO candidate is O(n), but n is always tiny in practice (typically
+//! < 10 minimized windows), the entire buffer fits in cache, and there is no
+//! hashing cost, no heap pointer chase, and no allocator dependency.
 //!
 //! Fullscreen interaction: minimizing a fullscreen window tears down the
 //! fullscreen state but saves the pre-fullscreen geometry. Restoring such
 //! a window puts it back into fullscreen exactly as it was.
+//!
+//! NOTE: init() is now infallible (void return).  Callers that previously did
+//! `try minimize.init()` should change the call to `minimize.init()`.
 
 const std        = @import("std");
-const core = @import("core");
+const core       = @import("core");
 const xcb        = core.xcb;
 const utils      = @import("utils");
 const focus      = @import("focus");
@@ -37,7 +41,7 @@ const bar        = @import("bar");
 const constants  = @import("constants");
 const debug      = @import("debug");
 
-// Types 
+// Types
 
 /// Per-window minimize record.
 const MinimizedEntry = struct {
@@ -58,67 +62,81 @@ const MinimizedEntry = struct {
     tiling_index:  ?usize,
 };
 
-const State = struct {
-    minimized_info: std.AutoHashMap(u32, MinimizedEntry),
-    allocator:      std.mem.Allocator,
-    /// Incremented each time a window is minimized. Never reused.
-    next_timestamp: u64,
-
-    pub fn deinit(self: *State) void {
-        self.minimized_info.deinit();
-    }
+/// One slot in the fixed minimize buffer.
+const MinimizedRecord = struct {
+    win:   u32,
+    entry: MinimizedEntry,
 };
 
-// Module state 
+// Module state
+//
+// A fixed buffer replaces the former AutoHashMap(u32, MinimizedEntry).
+// Rationale: the realistic population is 0-10 minimized windows at any time.
+// For that range a HashMap costs more than it saves: hash computation on every
+// probe, a heap allocation up-front, a pointer chase to the backing store on
+// every access, and a failure path in init() that required callers to propagate
+// !void.  A flat array of MinimizedRecords is smaller, stays entirely in cache,
+// and has zero allocator involvement.  MAX_MINIMIZED = 32 is deliberately more
+// than any real session needs; hitting the cap produces a clear error message
+// and a rollback rather than silent corruption.
 
-// Module singleton — guaranteed live after init().
-var g_state:       State = undefined;
-var g_initialized: bool  = false;
+const MAX_MINIMIZED: usize = 32;
 
-pub inline fn getState() *State {
-    std.debug.assert(g_initialized);
-    return &g_state;
-}
+var g_buf:            [MAX_MINIMIZED]MinimizedRecord = undefined;
+var g_len:            u8  = 0;
+var g_next_timestamp: u64 = 0;
 
-pub inline fn getStateOpt() ?*State {
-    return if (g_initialized) &g_state else null;
-}
+// Lifecycle
 
-// Lifecycle 
-
-pub fn init() !void {
-    var info_map = std.AutoHashMap(u32, MinimizedEntry).init(core.alloc);
-    try info_map.ensureTotalCapacity(8);
-    g_state = .{
-        .minimized_info = info_map,
-        .allocator      = core.alloc,
-        .next_timestamp = 0,
-    };
-    g_initialized = true;
+pub fn init() void {
+    g_len            = 0;
+    g_next_timestamp = 0;
 }
 
 pub fn deinit() void {
-    if (!g_initialized) return;
-    g_state.deinit();
-    g_initialized = false;
+    g_len = 0;
 }
 
-// Public queries 
+// Internal buffer helpers
+
+/// O(1) removal by swapping the target entry with the last.
+/// Buffer order is not semantically significant — LIFO/FIFO ordering is
+/// encoded in each entry's timestamp, not its position in the buffer.
+fn removeFromBuf(win: u32) void {
+    for (g_buf[0..g_len], 0..) |rec, i| {
+        if (rec.win == win) {
+            g_len   -= 1;
+            g_buf[i] = g_buf[g_len];
+            return;
+        }
+    }
+}
+
+// Public queries
 
 pub inline fn isMinimized(win: u32) bool {
-    if (!g_initialized) return false;
-    return g_state.minimized_info.contains(win);
+    for (g_buf[0..g_len]) |rec| if (rec.win == win) return true;
+    return false;
 }
 
 inline fn hideWindow(win: u32) void {
-    _ = xcb.xcb_configure_window(
-        core.conn, win,
-        xcb.XCB_CONFIG_WINDOW_X,
-        &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))},
-    );
+    _ = xcb.xcb_configure_window(core.conn, win,
+        xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
 }
 
-pub fn focusBestAvailable() void {
+/// Focus the first non-minimized window on the current workspace in insertion
+/// order, falling back to clearFocus() if none exists.
+///
+/// This is a last-resort fallback used when the MRU history has been exhausted
+/// (e.g. after unmanaging a window with no prior focus history) or during
+/// minimize when no prior focused window is recorded.  It intentionally does
+/// not consult focus history — that is the caller's responsibility.
+///
+/// Named to distinguish it from focus.focusBestAvailable(), which walks MRU
+/// history with a caller-supplied visibility predicate.  This function uses
+/// workspace insertion order, which is not MRU, and is specifically suited
+/// to tiling fallback (master or first slave).
+pub fn focusMasterOrFirst() void {
     if (workspaces.getCurrentWorkspaceObject()) |ws| {
         if (workspaces.firstNonMinimized(ws.windows.items())) |win| {
             focus.setFocus(win, .tiling_operation);
@@ -131,30 +149,21 @@ pub fn focusBestAvailable() void {
 // Minimize
 
 /// Undo a partially-completed minimizeWindow call.
-/// Called only on hash-map allocation failure; restores tiling and fullscreen
+/// Called only on buffer-full failure; restores tiling and fullscreen
 /// state so the window remains visible and the WM stays consistent.
-inline fn rollbackMinimize(
-    win:             u32,
-    was_fullscreen:  bool,
-    fs_ws:           ?u8,
-    saved_fs:        ?core.WindowGeometry,
-) void {
+inline fn rollbackMinimize(win: u32, fs_ws: ?u8, saved_fs: ?core.WindowGeometry) void {
     if (core.config.tiling.enabled) {
         tiling.addWindow(win);
         tiling.retileCurrentWorkspace();
     }
-    if (was_fullscreen) {
-        fullscreen.setForWorkspace(fs_ws.?, .{
-            .window         = win,
-            .saved_geometry = saved_fs.?,
-        });
+    if (saved_fs) |geom| {
+        fullscreen.setForWorkspace(fs_ws.?, .{ .window = win, .saved_geometry = geom });
     }
 }
 
 pub fn minimizeWindow() void {
     const win    = focus.getFocused()               orelse return;
     const ws_idx = workspaces.getCurrentWorkspace() orelse return;
-    const s      = getState();
 
     if (isMinimized(win)) return;
 
@@ -162,37 +171,35 @@ pub fn minimizeWindow() void {
     var saved_fs: ?core.WindowGeometry = null;
     var fs_ws_for_rollback: ?u8 = null;
     if (fullscreen.workspaceFor(win)) |fs_ws| {
-        if (fullscreen.getForWorkspace(fs_ws)) |info| {
-            saved_fs = info.saved_geometry;
-            fs_ws_for_rollback = fs_ws;
-            fullscreen.removeForWorkspace(fs_ws);
-        }
+        saved_fs = fullscreen.getForWorkspace(fs_ws).?.saved_geometry;
+        fs_ws_for_rollback = fs_ws;
+        fullscreen.removeForWorkspace(fs_ws);
     }
-    const was_fullscreen = saved_fs != null;
-
-    // Capture the workspace-filtered position BEFORE removeWindow evicts the
-    // window, so restoreWindowImpl can put it back at the same master/stack slot.
     const tiling_index = tiling.getWindowFilteredIndex(win);
 
     if (core.config.tiling.enabled) tiling.removeWindow(win);
 
-    const ts = s.next_timestamp;
-    s.minimized_info.put(win, .{
+    if (g_len >= MAX_MINIMIZED) {
+        debug.err("minimize: buffer full ({d} entries), cannot minimize 0x{x} -- rolling back",
+            .{ MAX_MINIMIZED, win });
+        rollbackMinimize(win, fs_ws_for_rollback, saved_fs);
+        return;
+    }
+
+    const ts = g_next_timestamp;
+    g_buf[g_len] = .{ .win = win, .entry = .{
         .saved_fs      = saved_fs,
         .workspace_idx = ws_idx,
         .timestamp     = ts,
         .tiling_index  = tiling_index,
-    }) catch {
-        debug.err("minimize: allocation failure tracking window 0x{x} -- rolling back", .{win});
-        rollbackMinimize(win, was_fullscreen, fs_ws_for_rollback, saved_fs);
-        return;
-    };
-    s.next_timestamp = ts + 1;
+    }};
+    g_len           += 1;
+    g_next_timestamp = ts + 1;
 
     _ = xcb.xcb_grab_server(core.conn);
     hideWindow(win);
-    focusBestAvailable();
-    if (was_fullscreen) {
+    focusMasterOrFirst();
+    if (saved_fs != null) {
         bar.setBarState(.show_fullscreen);
     } else if (core.config.tiling.enabled) {
         tiling.retileCurrentWorkspace();
@@ -202,7 +209,7 @@ pub fn minimizeWindow() void {
     _ = xcb.xcb_flush(core.conn);
 }
 
-// Restore helpers 
+// Restore helpers
 
 fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?usize) void {
     if (saved_fs) |geom| {
@@ -230,11 +237,9 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
         tiling.retileCurrentWorkspace();
     } else {
         const pos = utils.floatDefaultPos();
-        _ = xcb.xcb_configure_window(
-            core.conn, win,
+        _ = xcb.xcb_configure_window(core.conn, win,
             xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
-            &[_]u32{ pos.x, pos.y },
-        );
+            &[_]u32{ pos.x, pos.y });
     }
 
     focus.setFocus(win, .window_spawn);
@@ -243,65 +248,92 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
     _ = xcb.xcb_flush(core.conn);
 }
 
-/// Remove `win` from minimized_info and restore it.
+/// Remove `win` from the buffer and restore it.
 inline fn restoreWindow(win: u32) void {
-    const s = getState();
-    const entry = s.minimized_info.fetchRemove(win) orelse return;
-    restoreWindowImpl(win, entry.value.saved_fs, entry.value.tiling_index);
+    for (g_buf[0..g_len], 0..) |rec, i| {
+        if (rec.win == win) {
+            // Capture the fields before the swap-remove invalidates this slot.
+            const saved_fs     = rec.entry.saved_fs;
+            const tiling_index = rec.entry.tiling_index;
+            g_len   -= 1;
+            g_buf[i] = g_buf[g_len];
+            restoreWindowImpl(win, saved_fs, tiling_index);
+            return;
+        }
+    }
 }
 
-// Unminimize 
+// Unminimize
 
 pub const RestoreOrder = enum { lifo, fifo };
 
 pub fn unminimize(order: RestoreOrder) void {
-    const s      = getState();
     const ws_idx = workspaces.getCurrentWorkspace() orelse return;
 
-    // Resolve the comparison direction once before the loop — `order` is a
-    // loop-invariant constant and the switch would otherwise be re-evaluated
-    // on every hash-map entry.
+    // Resolve the comparison direction once — `order` is a loop-invariant
+    // constant and the branch would otherwise be re-evaluated on every entry.
     const want_max = (order == .lifo);
-    var best_win: ?u32 = null;
-    var best_ts:  u64  = 0;
-    var it = s.minimized_info.iterator();
-    while (it.next()) |kv| {
-        if (kv.value_ptr.workspace_idx != ws_idx) continue;
-        const ts = kv.value_ptr.timestamp;
-        const better = best_win == null or
+    var best_idx: ?usize = null;
+    var best_ts:  u64    = 0;
+
+    for (g_buf[0..g_len], 0..) |rec, i| {
+        if (rec.entry.workspace_idx != ws_idx) continue;
+        const ts = rec.entry.timestamp;
+        const better = best_idx == null or
             (if (want_max) ts > best_ts else ts < best_ts);
-        if (better) { best_win = kv.key_ptr.*; best_ts = ts; }
+        if (better) { best_idx = i; best_ts = ts; }
     }
 
-    const win = best_win orelse return;
-    const entry = s.minimized_info.fetchRemove(win) orelse return;
-    restoreWindowImpl(win, entry.value.saved_fs, entry.value.tiling_index);
+    const idx = best_idx orelse return;
+
+    // Capture before the swap-remove.
+    const win          = g_buf[idx].win;
+    const saved_fs     = g_buf[idx].entry.saved_fs;
+    const tiling_index = g_buf[idx].entry.tiling_index;
+    g_len      -= 1;
+    g_buf[idx]  = g_buf[g_len];
+
+    restoreWindowImpl(win, saved_fs, tiling_index);
 }
 
 pub fn unminimizeAll() void {
-    const s      = getState();
     const ws_idx = workspaces.getCurrentWorkspace() orelse return;
 
     // Collect all windows minimized on the current workspace.
-    const Entry = struct { win: u32, ts: u64, is_fs: bool, tiling_index: ?usize };
+    // saved_fs is included so fullscreen windows can be restored directly
+    // via restoreWindowImpl without a second buffer lookup (all entries will
+    // have already been removed by the time the fullscreen loop runs).
+    const Entry = struct {
+        win:          u32,
+        ts:           u64,
+        is_fs:        bool,
+        tiling_index: ?usize,
+        saved_fs:     ?core.WindowGeometry,
+    };
     const MAX = 128;
     var entries: [MAX]Entry = undefined;
-    var count: usize = 0;
+    var count:   usize      = 0;
 
-    var it = s.minimized_info.iterator();
-    while (it.next()) |kv| {
-        if (kv.value_ptr.workspace_idx != ws_idx) continue;
+    for (g_buf[0..g_len]) |rec| {
+        if (rec.entry.workspace_idx != ws_idx) continue;
         if (count < MAX) {
             entries[count] = .{
-                .win          = kv.key_ptr.*,
-                .ts           = kv.value_ptr.timestamp,
-                .is_fs        = kv.value_ptr.saved_fs != null,
-                .tiling_index = kv.value_ptr.tiling_index,
+                .win          = rec.win,
+                .ts           = rec.entry.timestamp,
+                .is_fs        = rec.entry.saved_fs != null,
+                .tiling_index = rec.entry.tiling_index,
+                .saved_fs     = rec.entry.saved_fs,
             };
             count += 1;
         }
     }
     if (count == 0) return;
+
+    // Remove all collected windows from the buffer up-front, before any
+    // visual work begins.  removeFromBuf uses swap-with-last; since we are
+    // working from a separate snapshot (entries[]), not iterating g_buf
+    // directly, the reordering it causes is safe.
+    for (entries[0..count]) |e| removeFromBuf(e.win);
 
     // Sort plain windows before fullscreen ones; each fullscreen restore needs
     // its own server grab so they must be handled separately after the batch.
@@ -313,10 +345,8 @@ pub fn unminimizeAll() void {
     }.lt);
 
     // After sorting, all plain entries precede all fullscreen entries.
-    // Find the boundary using indexOfScalar on the is_fs field.
-    const plain_end: usize = for (entries[0..count], 0..) |e, i| {
-        if (e.is_fs) break i;
-    } else count;
+    var plain_end: usize = 0;
+    while (plain_end < count and !entries[plain_end].is_fs) plain_end += 1;
     const plain_wins = entries[0..plain_end];
     const fs_wins    = entries[plain_end..count];
 
@@ -326,7 +356,6 @@ pub fn unminimizeAll() void {
 
         if (core.config.tiling.enabled) {
             for (plain_wins) |e| {
-                _ = s.minimized_info.remove(e.win);
                 if (e.tiling_index) |ti|
                     tiling.addWindowAtFilteredIndex(e.win, ti)
                 else
@@ -336,7 +365,6 @@ pub fn unminimizeAll() void {
         } else {
             const pos = utils.floatDefaultPos();
             for (plain_wins) |e| {
-                _ = s.minimized_info.remove(e.win);
                 _ = xcb.xcb_configure_window(core.conn, e.win,
                     xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
                     &[_]u32{ pos.x, pos.y });
@@ -350,22 +378,39 @@ pub fn unminimizeAll() void {
         _ = xcb.xcb_flush(core.conn);
     }
 
-    // Each fullscreen window needs its own grab.
-    for (fs_wins) |e| restoreWindow(e.win);
+    // Each fullscreen window needs its own grab (enterFullscreen owns it).
+    // Entries were already removed from g_buf above, so restoreWindowImpl is
+    // called directly — no buffer lookup needed.
+    for (fs_wins) |e| restoreWindowImpl(e.win, e.saved_fs, e.tiling_index);
 }
 
-// State maintenance 
+// Snapshot helpers
+
+/// Fills `set` with the window ID of every currently minimized window.
+/// Called by bar.zig to build the per-frame BarSnapshot.minimized_set.
+/// The caller is responsible for clearing the set before this call.
+pub fn populateSet(
+    set:       *std.AutoHashMapUnmanaged(u32, void),
+    allocator: std.mem.Allocator,
+) !void {
+    try set.ensureTotalCapacity(allocator, g_len);
+    for (g_buf[0..g_len]) |rec|
+        set.putAssumeCapacity(rec.win, {});
+}
+
+// State maintenance
 
 /// Called by window.zig on unmap/destroy to keep state coherent.
 pub fn forceUntrack(win: u32) void {
-    const s = getState();
-    _ = s.minimized_info.remove(win);
+    removeFromBuf(win);
 }
 
 /// Called by workspaces.zig when a minimized window is moved to another workspace.
 pub fn moveToWorkspace(win: u32, new_ws: u8) void {
-    const s = getState();
-    const entry = s.minimized_info.getPtr(win) orelse return;
-    entry.workspace_idx = new_ws;
+    for (g_buf[0..g_len]) |*rec| {
+        if (rec.win == win) {
+            rec.entry.workspace_idx = new_ws;
+            return;
+        }
+    }
 }
-
