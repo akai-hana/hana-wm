@@ -127,6 +127,19 @@ fn deepCopyValue(allocator: std.mem.Allocator, val: Value) std.mem.Allocator.Err
     };
 }
 
+/// Appends `incoming` into `dst_arr`, flattening it if it is itself an array.
+/// Takes ownership of `incoming` in all cases.
+fn appendFlatOrSingle(allocator: std.mem.Allocator, dst_arr: *std.ArrayList(Value), incoming: Value) !void {
+    if (incoming == .array) {
+        for (incoming.array.items) |item|
+            try dst_arr.append(allocator, try deepCopyValue(allocator, item));
+        var inc = incoming;
+        inc.deinit(allocator);
+    } else {
+        try dst_arr.append(allocator, incoming);
+    }
+}
+
 /// Merges the key-value pairs of `src` into `dst`.
 /// Duplicate keys are accumulated into arrays, exactly like the parser does for
 /// duplicate keys within a single file — so a keybind defined in two different
@@ -144,17 +157,7 @@ fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Se
             errdefer { var v = incoming; v.deinit(allocator); }
             if (old_val.* == .array) {
                 // Existing value is already an array — append into it.
-                if (incoming == .array) {
-                    // Flatten: append each element of the incoming array.
-                    for (incoming.array.items) |item| {
-                        const item_copy = try deepCopyValue(allocator, item);
-                        try old_val.array.append(allocator, item_copy);
-                    }
-                    var inc = incoming;
-                    inc.deinit(allocator);
-                } else {
-                    try old_val.array.append(allocator, incoming);
-                }
+                try appendFlatOrSingle(allocator, &old_val.array, incoming);
             } else {
                 // First duplicate: wrap the existing scalar and the incoming
                 // value in a 2-element array (or flatten if incoming is array).
@@ -164,16 +167,7 @@ fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Se
                     arr.deinit(allocator);
                 }
                 arr.appendAssumeCapacity(old_val.*);
-                if (incoming == .array) {
-                    for (incoming.array.items) |item| {
-                        const item_copy = try deepCopyValue(allocator, item);
-                        try arr.append(allocator, item_copy);
-                    }
-                    var inc = incoming;
-                    inc.deinit(allocator);
-                } else {
-                    arr.appendAssumeCapacity(incoming);
-                }
+                try appendFlatOrSingle(allocator, &arr, incoming);
                 old_val.* = .{ .array = arr };
             }
         } else {
@@ -435,6 +429,11 @@ const Parser = struct {
 
     // Bare keys (no `=`) are treated as `key = true`, which is the only call
     // site's expectation. Workspace rule entries like `Navigator` use this.
+    fn consumeTerminator(self: *Parser, c: ?u8) void {
+        if (c == '\n') _ = self.consume();
+        if (c == '#') self.skipToNewline();
+    }
+
     fn parseKeyValuePair(self: *Parser) ParseError!struct { []const u8, Value } {
         const key = try self.parseKey();
         errdefer self.allocator.free(key);
@@ -536,16 +535,14 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
                 p.skipWhitespace();
                 const after = p.peek();
                 if (after == '\n' or after == '#' or after == null) {
-                    if (after == '\n') _ = p.consume();
-                    if (after == '#') p.skipToNewline();
+                    p.consumeTerminator(after);
                     break;
                 }
                 continue;
             }
 
             if (next == '\n' or next == '#' or next == null) {
-                if (next == '\n') _ = p.consume();
-                if (next == '#') p.skipToNewline();
+                p.consumeTerminator(next);
                 break;
             }
 

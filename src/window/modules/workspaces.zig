@@ -30,9 +30,9 @@ pub const Workspace = struct {
     // Initialized from config; updated when the user switches layouts
     // in per-workspace mode.
     layout:    tiling.Layout,
-    // Optional layout variation override set via the layouts array in config.
+    // Optional layout variants override set via the layouts array in config.
     // Applied on every workspace switch; null means use the global defaults.
-    variation: ?core.LayoutVariationOverride = null,
+    variants: ?core.LayoutVariantOverride = null,
     // Per-workspace master width override (master-stack layout).
     // null = use the global default from tiling state.
     // Set when the user adjusts master width in per-workspace layout mode;
@@ -88,6 +88,13 @@ inline fn pushOffscreen(conn: *xcb.xcb_connection_t, win: u32) void {
         &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
 }
 
+/// Push `win` offscreen and evict its geometry cache entry.
+/// Used when a window leaves the current workspace.
+inline fn evictWindow(win: u32) void {
+    pushOffscreen(core.conn, win);
+    tiling.invalidateGeomCache(win);
+}
+
 /// Resolves a layout name (e.g. "master-stack", "monocle") to tiling.Layout.
 fn layoutFromName(name: []const u8) tiling.Layout {
     return if (std.mem.eql(u8, name, "master-stack")) .master
@@ -109,22 +116,22 @@ pub fn init() void {
         const id: u8 = @intCast(i);
         const name   = if (i < WORKSPACE_NAMES.len) WORKSPACE_NAMES[i] else "?";
 
-        // Apply any workspace-specific layout + variation override from the
+        // Apply any workspace-specific layout + variants override from the
         // layouts array (e.g. `"monocle", "gapless", "4,8"` in config.toml).
         var ws_layout    = default_layout;
-        var ws_variation: ?core.LayoutVariationOverride = null;
+        var ws_variant: ?core.LayoutVariantOverride = null;
         for (cfg_tiling.workspace_layout_overrides.items) |override| {
             if (override.workspace_idx == id) {
                 if (override.layout_idx < cfg_tiling.layouts.items.len) {
                     ws_layout = layoutFromName(cfg_tiling.layouts.items[override.layout_idx]);
                 }
-                ws_variation = override.variation;
+                ws_variant = override.variant;
                 break;
             }
         }
 
         ws.* = Workspace.init(id, name, ws_layout);
-        ws.variation = ws_variation;
+        ws.variants = ws_variant;
     }
 
     var w2ws = std.AutoHashMap(u32, u64).init(core.alloc);
@@ -185,10 +192,9 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
 
     if (minimize.isMinimized(win)) minimize.moveToWorkspace(win, target_ws);
 
-    pushOffscreen(core.conn, win);
+    evictWindow(win);
     if (focus.getFocused() == win) focus.clearFocus();
     if (core.config.tiling.enabled) tiling.dirty();
-    tiling.invalidateGeomCache(win);
     bar.scheduleRedraw();
 }
 
@@ -229,8 +235,7 @@ pub fn moveWindowExclusive(win: u32, target_ws: u8) void {
     setWindowMask(s, win, workspaceBit(target_ws));
 
     if (target_ws != s.current) {
-        pushOffscreen(core.conn, win);
-        tiling.invalidateGeomCache(win);
+        evictWindow(win);
         if (focus.getFocused() == win) focus.clearFocus();
     }
 
@@ -257,8 +262,7 @@ pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
         if (@popCount(mask) <= 1) return; // last workspace — protect
         setWindowMask(s, win, mask & ~tbit);
         if (target_ws == current) {
-            pushOffscreen(core.conn, win);
-            tiling.invalidateGeomCache(win);
+            evictWindow(win);
             if (core.config.tiling.enabled) tiling.retileCurrentWorkspace();
         } else {
             tiling.invalidateWsGeomBit(target_ws);
@@ -300,7 +304,11 @@ pub inline fn getWindowWorkspaceMask(win: u32) ?u64 {
 /// True when workspace `ws_idx` is set in `win`'s tag bitmask.
 pub inline fn isWindowOnWorkspace(win: u32, ws_idx: u8) bool {
     const mask = getWindowWorkspaceMask(win) orelse return false;
-    std.debug.assert(ws_idx < 64); // cap is 20; ≥64 is unreachable
+    // ws_idx must be a valid workspace index, not just any value < 64.
+    // The shift itself is safe (workspace count is always <= 20 < 64) but
+    // catching an out-of-range index here is far more informative than
+    // silently returning false for a bit that was never allocated.
+    std.debug.assert(ws_idx < getWorkspaceCount());
     return (mask >> @intCast(ws_idx)) & 1 != 0;
 }
 
@@ -327,6 +335,15 @@ pub inline fn getCurrentWorkspace() ?u8 {
 pub inline fn isOnCurrentWorkspace(win: u32) bool {
     const s = getState() orelse return false;
     return isWindowOnWorkspace(win, s.current);
+}
+
+/// Returns true when `win` is on the current workspace and is not minimized.
+///
+/// The combined predicate used by focus.focusBestAvailable for post-unmanage
+/// and post-minimize focus recovery.  Combining the two checks into one
+/// function lets it serve as a typed *const fn(u32) bool without a closure.
+pub fn isOnCurrentWorkspaceAndVisible(win: u32) bool {
+    return isOnCurrentWorkspace(win) and !minimize.isMinimized(win);
 }
 
 pub inline fn getCurrentWorkspaceObject() ?*Workspace {
@@ -449,15 +466,10 @@ fn applyPostSwitchFocus(new_ws: u8, new_ws_obj: *const Workspace, ptr_cookie: xc
         const ptr = xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null)
             orelse break :blk lastFocusedOrFirst(new_ws_obj);
         defer std.c.free(ptr);
-
         const child = ptr.*.child;
-        if (child != 0 and child != core.root and
-            isWindowOnWorkspace(child, new_ws) and
-            !minimize.isMinimized(child))
-        {
-            break :blk child;
-        }
-        break :blk lastFocusedOrFirst(new_ws_obj);
+        break :blk if (child != 0 and child != core.root and
+            isWindowOnWorkspace(child, new_ws) and !minimize.isMinimized(child))
+            child else lastFocusedOrFirst(new_ws_obj);
     };
 
     const old_focused = focus.getFocused();

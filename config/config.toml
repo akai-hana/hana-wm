@@ -55,7 +55,7 @@ layouts = [                                 # ("default"/"alternative")
 	"master-stack",                     # "lifo"/"fifo"
 	"monocle",      "gaps",    "5",     # "gapless"/"gaps"
 	"grid",         "relaxed", "6,8",   # "rigid"/"relaxed"
-	# "fibonacci",                      # no variations
+	# "fibonacci",                      # no variants
 ]
 
 [tiling.layouts.master-stack]
@@ -65,36 +65,36 @@ width = 50%    # [5%-95%] / (0-N] px
 
 # "lifo" = Last (window remains) In (master area), First (window gets) Out (of master, and onto the stack).
 # "fifo" = First (window goes) In (master area), First (window goes) Out (of master, and onto the stack).
-variation = "lifo" # "lifo"/"fifo"
+variants = "lifo" # "lifo"/"fifo"
 
 # Override the 3-character indicator shown in the bar for this layout.
-# Defaults to the variation name ("LIF" or "FIF") when not set.
+# Defaults to the variants name ("LIF" or "FIF") when not set.
 # indicator = "M-S"
 
 ### TODO: review from here on down
 
 [tiling.layouts.monocle]
-# Behavioral variation for monocle:
+# Behavioral variants for monocle:
 #   "gaps"    = honour window gap settings like every other layout
 #   "gapless" = true fullscreen — ignore gap settings (default)
-variation = "gaps"
+variants = "gaps"
 
 # Override the 3-character indicator shown in the bar for this layout.
-# Defaults to the variation name ("GAP" or "GLS") when not set.
+# Defaults to the variants name ("GAP" or "GLS") when not set.
 # indicator = "MON"
 
 [tiling.layouts.grid]
-# Behavioral variation for grid:
+# Behavioral variants for grid:
 #   "rigid"   = strict grid; empty cells left in an incomplete last row (default)
 #   "relaxed" = last window in an incomplete row expands to fill the row
-variation = "relaxed"
+variants = "relaxed"
 
 # Override the 3-character indicator shown in the bar for this layout.
-# Defaults to the variation name ("RGD" or "RLX") when not set.
+# Defaults to the variants name ("RGD" or "RLX") when not set.
 # indicator = "GRD"
 
 [tiling.layouts.fibonacci]
-# Fibonacci has no behavioral variations.
+# Fibonacci has no behavioral variants.
 # Optionally override the 3-character indicator shown in the bar for this layout.
 # indicator = "FIB"
 
@@ -109,7 +109,7 @@ position = "bottom" # can be switched on runtime
 # Bar layout
 # Anchors: left/center/right
 [bar.layout.left]
-segments = ["workspaces", "layout", "variations"]
+segments = ["workspaces", "layout", "variants"]
 
 [bar.layout.center]
 segments = ["title"]
@@ -147,13 +147,14 @@ Mod+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-switch.sh"
 Mod+Shift+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-stop.sh"
 
 # Tiling
-Mod+N           = "toggle_floating"        # Enter/exit floating layout
-Mod+space       = "toggle_layout"          # Cycle layouts forward
-Mod+Shift+space = "toggle_layout_reverse"  # Cycle layouts backward
-Mod+Alt+space   = "cycle_layout_variation" # Cycle current layout's variation (Super+V)
-Mod+Tab         = "swap_focused_previous"  # Swap focused window with the previously focused window
-Mod+grave       = "toggle_prompt"
-Mod+MiddleClick = "toggle_float"           # Toggle clicked window between tiled and floating
+Mod+N            = "toggle_floating"        # Enter/exit floating layout
+Mod+space        = "toggle_layout"          # Cycle layouts forward
+Mod+Shift+space  = "toggle_layout_reverse"  # Cycle layouts backward
+Mod+Alt+space    = "cycle_layout_variants"  # Cycle current layout's variants (Super+V)
+Mod+Tab          = "swap_master"            # Swap focused window with the previously focused window
+Mod+Shift+Tab    = "swap_master_focus_swap" # Swap focused window with the previously focused window
+Mod+grave        = "toggle_prompt"
+Mod+Middle_click = "toggle_float"           # Toggle clicked window between tiled and floating
 
 # Layouts
 ## Master-stack

@@ -64,8 +64,8 @@ const optional_subsystems = [_]OptionalSubsystem{
         .gate_dir    = "input",
     },
     .{
-        .name        = "dpi",
-        .entry_point = ROOT_DIR ++ "core/dpi.zig",
+        .name        = "scale",
+        .entry_point = ROOT_DIR ++ "core/scale.zig",
     },
     .{
         .name        = "tiling",
@@ -77,13 +77,11 @@ const optional_subsystems = [_]OptionalSubsystem{
         .entry_point = ROOT_DIR ++ "window/modules/tiling/layouts.zig",
     },
 };
-// ▲ Add new optional subsystems here ▲
+// Add new optional subsystems here
 
 pub fn build(b: *std.Build) void {
     const target   = b.standardTargetOptions(.{});
-    const optimize = b.option(std.builtin.OptimizeMode, "optimize",
-        "Set the optimization mode (Debug, ReleaseFast, ReleaseSafe, ReleaseSmall)")
-        orelse .ReleaseFast;
+    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast });
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "enable_debug_logging", optimize == .Debug);
@@ -91,8 +89,22 @@ pub fn build(b: *std.Build) void {
     const fallback_toml = b.build_root.handle.readFileAlloc(
         b.graph.io, "config/fallback.toml", b.allocator, .limited(1024 * 1024),
     ) catch null;
-    build_options.addOption(bool,       "has_fallback_toml", fallback_toml != null);
-    build_options.addOption([]const u8, "fallback_toml",     fallback_toml orelse "");
+    build_options.addOption(bool, "has_fallback_toml", fallback_toml != null);
+
+    // Store the toml content in a dedicated module rather than build_options.
+    // build_options cannot store []const u8 without triggering a std.fmt compile
+    // error on newer Zig master (pointer formatting requires an explicit specifier).
+    // std.zig.fmtEscapes has also moved across master builds, so we use a small
+    // local helper that is stable regardless of stdlib churn.
+    const fallback_toml_src = std.fmt.allocPrint(b.allocator,
+        "pub const content: []const u8 = \"{s}\";",
+        .{zigEscape(b.allocator, fallback_toml orelse "")},
+    ) catch @panic("OOM");
+    const fallback_toml_module = b.createModule(.{
+        .root_source_file = b.addWriteFiles().add("fallback_toml.zig", fallback_toml_src),
+        .target   = target,
+        .optimize = optimize,
+    });
 
     // Emit has_<n> = true/false for every optional subsystem.
     for (optional_subsystems) |sys| {
@@ -120,61 +132,35 @@ pub fn build(b: *std.Build) void {
         std.process.exit(1);
     };
 
-    // Layout flags: moved into build_options so they are accessible project-wide
-    // (e.g. input.zig can gate master-specific actions) rather than being confined
-    // to the tiling subsystem via the old layout_flags module.
+    // Layout flags: in build_options so they are accessible project-wide.
     build_options.addOption(bool, "has_master",    all_modules.contains("master"));
     build_options.addOption(bool, "has_monocle",   all_modules.contains("monocle"));
     build_options.addOption(bool, "has_grid",      all_modules.contains("grid"));
     build_options.addOption(bool, "has_fibonacci", all_modules.contains("fibonacci"));
 
+    // Bar segment flags consolidated into build_options (no separate bar_flags module needed).
+    const has_any_segment = all_modules.contains("tags")     or
+                            all_modules.contains("layout")   or
+                            all_modules.contains("variants") or
+                            all_modules.contains("title")    or
+                            all_modules.contains("clock")    or
+                            all_modules.contains("status");
+    build_options.addOption(bool, "has_tags",        all_modules.contains("tags"));
+    build_options.addOption(bool, "has_layout",      all_modules.contains("layout"));
+    build_options.addOption(bool, "has_variants",    all_modules.contains("variants"));
+    build_options.addOption(bool, "has_title",       all_modules.contains("title"));
+    build_options.addOption(bool, "has_clock",       all_modules.contains("clock"));
+    build_options.addOption(bool, "has_status",      all_modules.contains("status"));
+    build_options.addOption(bool, "has_any_segment", has_any_segment);
+
     const build_options_module = build_options.createModule();
 
-    const has_any_segment = all_modules.contains("tags")       or
-                            all_modules.contains("layout")     or
-                            all_modules.contains("variations") or
-                            all_modules.contains("title")      or
-                            all_modules.contains("clock")      or
-                            all_modules.contains("status");
-
-    const bar_flags_src = std.fmt.allocPrint(b.allocator,
-        \\pub const has_tags        = {};
-        \\pub const has_layout      = {};
-        \\pub const has_variations  = {};
-        \\pub const has_title       = {};
-        \\pub const has_clock       = {};
-        \\pub const has_status      = {};
-        \\pub const has_any_segment = {};
-        \\
-    , .{
-        all_modules.contains("tags"),
-        all_modules.contains("layout"),
-        all_modules.contains("variations"),
-        all_modules.contains("title"),
-        all_modules.contains("clock"),
-        all_modules.contains("status"),
-        has_any_segment,
-    }) catch @panic("OOM");
-
-    const bar_flags_module = b.createModule(.{
-        .root_source_file = b.addWriteFiles().add("bar_flags.zig", bar_flags_src),
-        .target   = target,
-        .optimize = optimize,
-    });
-
     root_module.addImport("build_options", build_options_module);
-    root_module.addImport("bar_flags",     bar_flags_module);
+    root_module.addImport("fallback_toml", fallback_toml_module);
 
     wireModules(b, root_module, &all_modules,
-        build_options_module, bar_flags_module,
+        build_options_module, fallback_toml_module,
         optimize, b.allocator);
-
-    if (all_modules.get("defs")) |defs_entry| {
-        var it = all_modules.iterator();
-        while (it.next()) |entry| {
-            entry.value_ptr.module.addImport("defs", defs_entry.module);
-        }
-    }
 
     linkSystemLibraries(root_module, has_any_segment);
 
@@ -196,7 +182,7 @@ fn wireModules(
     root:                 *std.Build.Module,
     all_modules:          *std.StringHashMap(ModuleEntry),
     build_options_module: *std.Build.Module,
-    bar_flags_module:     *std.Build.Module,
+    fallback_toml_module: *std.Build.Module,
     optimize:             std.builtin.OptimizeMode,
     allocator:            std.mem.Allocator,
 ) void {
@@ -206,7 +192,7 @@ fn wireModules(
         if (optimize == .ReleaseFast or optimize == .ReleaseSmall) mod.strip = true;
 
         mod.addImport("build_options", build_options_module);
-        mod.addImport("bar_flags",     bar_flags_module);
+        mod.addImport("fallback_toml", fallback_toml_module);
 
         const imports = findModuleImports(b, allocator, entry.value_ptr.source_path, all_modules);
         for (imports) |name| {
@@ -235,6 +221,8 @@ fn findModuleImports(
         const abs = pos + rel;
 
         // Skip if this @import is on a comment line.
+        // startsWith("//") covers //, ///, and //! — all Zig line-comment forms.
+        // Block comments (/* ... */) are not handled; they are rare in practice.
         const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..abs], '\n')) |n| n + 1 else 0;
         const line_prefix = std.mem.trimStart(u8, source[line_start..abs], " \t");
         if (std.mem.startsWith(u8, line_prefix, "//")) {
@@ -252,7 +240,7 @@ fn findModuleImports(
     return results.toOwnedSlice(allocator) catch &.{};
 }
 
-fn linkSystemLibraries(root: *std.Build.Module, has_bar: bool) void {
+fn linkSystemLibraries(root: *std.Build.Module, has_any_segment: bool) void {
     root.linkSystemLibrary("X11", .{});
     root.linkSystemLibrary("xcb", .{});
     root.linkSystemLibrary("xcb-cursor", .{});
@@ -260,7 +248,7 @@ fn linkSystemLibraries(root: *std.Build.Module, has_bar: bool) void {
     root.linkSystemLibrary("xkbcommon", .{});
     root.linkSystemLibrary("xkbcommon-x11", .{});
 
-    if (has_bar) {
+    if (has_any_segment) {
         root.linkSystemLibrary("cairo", .{});
         root.linkSystemLibrary("pangocairo-1.0", .{});
         root.linkSystemLibrary("pango-1.0", .{});
@@ -272,6 +260,28 @@ fn linkSystemLibraries(root: *std.Build.Module, has_bar: bool) void {
 fn fileExists(b: *std.Build, path: []const u8) bool {
     _ = b.build_root.handle.statFile(b.graph.io, path, .{}) catch return false;
     return true;
+}
+
+/// Escape a byte string for embedding as a Zig double-quoted string literal.
+/// Handles \, ", \n, \r, \t and uses \xNN for anything else non-printable.
+/// Avoids depending on std.zig.fmtEscapes, which has moved across master builds.
+fn zigEscape(allocator: std.mem.Allocator, input: []const u8) []const u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    for (input) |c| switch (c) {
+        '\\' => out.appendSlice(allocator, "\\\\") catch @panic("OOM"),
+        '"'  => out.appendSlice(allocator, "\\\"") catch @panic("OOM"),
+        '\n' => out.appendSlice(allocator, "\\n")  catch @panic("OOM"),
+        '\r' => out.appendSlice(allocator, "\\r")  catch @panic("OOM"),
+        '\t' => out.appendSlice(allocator, "\\t")  catch @panic("OOM"),
+        ' '...'"' - 1, '"' + 1...'\\' - 1, '\\' + 1...'~'
+             => out.append(allocator, c)            catch @panic("OOM"),
+        else => {
+            var buf: [4]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "\\x{x:0>2}", .{c}) catch unreachable;
+            out.appendSlice(allocator, s) catch @panic("OOM");
+        },
+    };
+    return out.toOwnedSlice(allocator) catch @panic("OOM");
 }
 
 fn discoverModules(
@@ -318,7 +328,7 @@ fn discoverModules(
         }
 
         try all_modules.put(try allocator.dupe(u8, name), .{
-            .module = b.addModule(name, .{
+            .module = b.createModule(.{
                 .root_source_file = b.path(rel_path),
                 .target   = target,
                 .optimize = optimize,

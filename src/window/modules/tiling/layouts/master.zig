@@ -30,6 +30,22 @@ inline fn calcMarginedWidth(full_w: u16, left_margin: u16, right_margin: u16) u1
     return if (full_w > left_margin + right_margin) full_w - left_margin - right_margin else constants.MIN_WINDOW_DIM;
 }
 
+// Tile a vertical column of windows at a fixed x position with a fixed inner width.
+// Used for both the master pane and the simple stack path.
+fn tileColumn(ctx: *const layouts.LayoutCtx, windows: []const u32, x: u16, y_offset: u16, h: u16, inner_w: u16, m: utils.Margins) void {
+    const count: u16 = @intCast(windows.len);
+    const avail = calcAvailable(h, count, m);
+    for (windows, 0..) |win, i| {
+        const row: u16 = @intCast(i);
+        layouts.configureSafe(ctx, win, utils.Rect{
+            .x      = @intCast(x),
+            .y      = @intCast(windowY(row, count, avail, y_offset, m)),
+            .width  = inner_w,
+            .height = windowHeight(row, count, avail),
+        });
+    }
+}
+
 pub fn tileWithOffset(ctx: *const layouts.LayoutCtx, state: *State, windows: []const u32, screen_w: u16, screen_h: u16, y_offset: u16) void {
     const n = windows.len;
     if (n == 0) return;
@@ -51,16 +67,7 @@ pub fn tileWithOffset(ctx: *const layouts.LayoutCtx, state: *State, windows: []c
     else
         calcMarginedWidth(master_w, m.gap, m.gap + 2 * m.border);
 
-    const m_avail = calcAvailable(screen_h, m_count, m);
-    for (windows[0..m_count], 0..) |win, i| {
-        const row: u16 = @intCast(i);
-        layouts.configureSafe(ctx, win, utils.Rect{
-            .x      = @intCast(master_x +| m.gap),
-            .y      = @intCast(windowY(row, m_count, m_avail, y_offset, m)),
-            .width  = master_inner_w,
-            .height = windowHeight(row, m_count, m_avail),
-        });
-    }
+    tileColumn(ctx, windows[0..m_count], master_x +| m.gap, y_offset, screen_h, master_inner_w, m);
 
     if (s_count == 0) return;
 
@@ -77,24 +84,9 @@ fn tileStack(ctx: *const layouts.LayoutCtx, windows: []const u32, x: u16, y_offs
     const max_fit: u16          = @intCast(@max(1, available / space_per_window));
 
     if (s_count <= max_fit) {
-        tileStackSimple(ctx, windows, x, y_offset, h, calcMarginedWidth(w, m.gap / 2, m.gap + 2 * m.border), m);
+        tileColumn(ctx, windows, x +| m.gap / 2, y_offset, h, calcMarginedWidth(w, m.gap / 2, m.gap + 2 * m.border), m);
     } else {
         tileStackOverflow(ctx, windows, x, y_offset, w, h, max_fit, m);
-    }
-}
-
-fn tileStackSimple(ctx: *const layouts.LayoutCtx, windows: []const u32, x: u16, y_offset: u16, h: u16, inner_w: u16, m: utils.Margins) void {
-    const s_count: u16 = @intCast(windows.len);
-    const s_avail  = calcAvailable(h, s_count, m);
-
-    for (windows, 0..) |win, i| {
-        const row: u16 = @intCast(i);
-        layouts.configureSafe(ctx, win, utils.Rect{
-            .x      = @intCast(x +| m.gap / 2),
-            .y      = @intCast(windowY(row, s_count, s_avail, y_offset, m)),
-            .width  = inner_w,
-            .height = windowHeight(row, s_count, s_avail),
-        });
     }
 }
 

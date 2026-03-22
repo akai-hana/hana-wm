@@ -44,7 +44,7 @@ pub fn tileWithOffset(ctx: *const layouts.LayoutCtx, state: *State, windows: []c
         const col: u16 = @intCast(idx % dims.cols);
         const row: u16 = @intCast(idx / dims.cols);
 
-        const cw: u16 = switch (state.layout_variations.grid) {
+        const cw: u16 = switch (state.layout_variants.grid) {
             .rigid   => cell_w,
             .relaxed => if (last_row_count != 0 and row == dims.rows - 1) partial_cell_w else cell_w,
         };

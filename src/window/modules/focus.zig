@@ -10,7 +10,7 @@ const window   = @import("window");
 const carousel = @import("carousel");
 const xcb      = core.xcb;
 
-// Module state 
+// Module state
 //
 // These three fields were formerly on the WM struct; they belong here because
 // only focus.zig should be their primary writer.  All other modules call the
@@ -20,7 +20,7 @@ var g_focused_window:  ?u32                     = null;
 var g_suppress_reason: core.FocusSuppressReason = .none;
 var g_last_event_time: u32                      = 0;
 
-// Focus history 
+// Focus history
 //
 // Full MRU list of previously focused windows.  Index 0 is the most recently
 // focused window before the current one, index 1 the one before that, and so on.
@@ -41,7 +41,30 @@ var g_allocator: std.mem.Allocator           = undefined;
 // EWMH atom for _NET_ACTIVE_WINDOW — interned once in init().
 var g_net_active_window: xcb.xcb_atom_t = xcb.XCB_ATOM_NONE;
 
-// Lifecycle 
+// Deferred async state
+//
+// Rather than blocking on xcb_get_input_focus and xcb_query_pointer replies
+// inline, we fire the requests immediately and store the cookies.  The
+// corresponding drain functions are called from the event-dispatch loop on
+// the next iteration, keeping the hot paths non-blocking.
+//
+// g_confirm_cookie / g_confirm_win
+//   Non-compliant-client focus confirmation (passive / locally_active windows
+//   that silently drop xcb_set_input_focus when not topmost on mouse_enter).
+//   g_confirm_win is the window the query was issued for.  handleFocusIn uses
+//   it to cancel the pending reply early when the FocusIn arrives first —
+//   meaning the focus landed without needing a raise-and-retry.
+//
+// g_pointer_cookie
+//   Pending pointer-position query issued by beginPointerSync().  Drained by
+//   drainPointerSync() to route focus to whichever window is under the cursor.
+
+var g_confirm_cookie: ?xcb.xcb_get_input_focus_cookie_t = null;
+var g_confirm_win:    u32                                = 0;
+
+var g_pointer_cookie: ?xcb.xcb_query_pointer_cookie_t = null;
+
+// Lifecycle
 
 pub fn init(allocator: std.mem.Allocator) void {
     g_allocator = allocator;
@@ -65,15 +88,37 @@ pub fn deinit() void {
 /// Called internally whenever g_focused_window changes to a new value.
 /// Allocation failures are silently ignored — the history may be shorter than
 /// ideal, but focus still functions correctly.
+///
+/// Implementation note: single-pass O(n).
+///
+/// The original code called removeFromHistory (scan + orderedRemove, which
+/// shifts the tail left) followed by insert(0, …) (which shifts the whole
+/// slice right again) — two linear scans and two memmoves.
+///
+/// When `win` is already in the list, we can do the same logical operation
+/// with one scan and one memmove: locate the index, shift items[0..idx] one
+/// position to the right with copyBackwards, then write `win` at index 0.
+/// No allocation is needed because the list length is unchanged.
+///
+/// When `win` is absent, we still fall back to insert(0, …), which may
+/// allocate on growth — same as before.
 fn recordInHistory(win: u32) void {
     if (win == 0) return;
-    // Short-circuit: if win is already the most-recent entry there is nothing
-    // to do — skip the O(n) scan+shift pair entirely.
+    // Short-circuit: already the most-recent entry — nothing to do.
     if (g_history.items.len > 0 and g_history.items[0] == win) return;
-    // Remove any existing entry so each window appears exactly once.
-    removeFromHistory(win);
-    // Prepend: insert at index 0, shifting everything else right.
-    g_history.insert(g_allocator, 0, win) catch {};
+
+    if (std.mem.indexOfScalar(u32, g_history.items, win)) |idx| {
+        // Rotate [0, idx+1) left by one position:
+        //   shift items[0..idx] → items[1..idx+1]  (one copyBackwards)
+        //   write win at items[0]
+        // This replaces the old remove-then-insert pair (two shifts) with a
+        // single in-place shift.  Zero allocations, zero extra scans.
+        std.mem.copyBackwards(u32, g_history.items[1 .. idx + 1], g_history.items[0..idx]);
+        g_history.items[0] = win;
+    } else {
+        // Not present — prepend, allocating capacity if necessary.
+        g_history.insert(g_allocator, 0, win) catch {};
+    }
 }
 
 /// Remove `win` from the history (called when a window is unmanaged).
@@ -89,17 +134,44 @@ pub inline fn historyItems() []const u32 {
     return g_history.items;
 }
 
-// Public accessors 
+// Public accessors
 
 pub inline fn getFocused()        ?u32                       { return g_focused_window;  }
 pub inline fn getSuppressReason() core.FocusSuppressReason   { return g_suppress_reason; }
 pub inline fn getLastEventTime()  u32                        { return g_last_event_time; }
 
-pub inline fn setFocused(win: ?u32) void                          { g_focused_window  = win; }
-pub inline fn setSuppressReason(r: core.FocusSuppressReason) void { g_suppress_reason = r;   }
-pub inline fn setLastEventTime(t: u32) void                       { g_last_event_time = t;   }
+pub inline fn setFocused(win: ?u32) void    { g_focused_window  = win; }
+pub inline fn setLastEventTime(t: u32) void { g_last_event_time = t;   }
 
-// Focus logic 
+/// Set the suppress reason and immediately focus `win` as an atomic operation.
+///
+/// This is the correct API for callers (e.g. the fullscreen-exit path) that
+/// need to prime suppression before a programmatic focus change.  The two
+/// operations must be paired: if they are split across separate calls, a
+/// concurrent setFocus from another path (e.g. a workspace switch) can clear
+/// the suppression between the setSuppressReason write and the setFocus call,
+/// or — if setFocus returns early via the `g_focused_window == win` guard —
+/// suppression is set but focus never changes, leaving it primed permanently.
+///
+/// Replace the split pattern:
+///   focus.setSuppressReason(.window_spawn);  // fragile
+///   focus.setFocus(win, .tiling_operation);
+/// With the atomic form:
+///   focus.setFocusWithSuppression(win, .tiling_operation, .window_spawn);
+pub fn setFocusWithSuppression(win: u32, reason: Reason, suppress: core.FocusSuppressReason) void {
+    g_suppress_reason = suppress;
+    setFocus(win, reason);
+}
+
+/// Direct write to g_suppress_reason.
+///
+/// Prefer setFocusWithSuppression when suppression must be paired with a
+/// focus change.  This setter exists for cases where suppression must be
+/// cleared or set independently of any focus change — e.g. MotionNotify
+/// clearing suppression when real pointer movement is detected.
+pub inline fn setSuppressReason(r: core.FocusSuppressReason) void { g_suppress_reason = r; }
+
+// Focus logic
 
 pub const Reason = enum {
     mouse_click,
@@ -139,6 +211,14 @@ pub fn setFocus(win: u32, reason: Reason) void {
         .mouse_enter, .window_spawn, .tiling_operation, .workspace_switch => false,
     }) return;
 
+    // Cancel any pending focus-confirm from a previous hover before we mutate
+    // state.  Without this, a mouse_click on window B while a confirm cookie
+    // for window A is still live will cause drainPendingConfirm to raise A and
+    // clobber the click-focus on B, because the drain sees "focus = B, expected
+    // A → raise A".  Any prior pending confirm is stale the moment we commit to
+    // focusing a new window regardless of reason.
+    cancelPendingConfirm();
+
     const old = g_focused_window;
     if (old) |old_win| recordInHistory(old_win);
     g_focused_window = win;
@@ -147,21 +227,14 @@ pub fn setFocus(win: u32, reason: Reason) void {
     window.grabButtons(win, true);
     if (old) |old_win| window.grabButtons(old_win, false);
 
-    _ = xcb.xcb_set_input_focus(
-        core.conn,
-        xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
-        win,
-        g_last_event_time,
-    );
+    _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
+        win, g_last_event_time);
 
     // Raise on click/command, and also on hover for globally_active windows
     // (they never receive xcb_set_input_focus, so raising is the only signal).
     if (shouldRaise(reason) or (reason == .mouse_enter and input_model == .globally_active)) {
-        _ = xcb.xcb_configure_window(
-            core.conn, win,
-            xcb.XCB_CONFIG_WINDOW_STACK_MODE,
-            &[_]u32{xcb.XCB_STACK_MODE_ABOVE},
-        );
+        _ = xcb.xcb_configure_window(core.conn, win,
+            xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     }
 
     if (input_model == .locally_active or input_model == .globally_active) {
@@ -175,47 +248,29 @@ pub fn setFocus(win: u32, reason: Reason) void {
     // WM_TAKE_FOCUS) have the same problem — xcb_set_input_focus is silently
     // dropped when the window is not topmost.
     //
-    // Confirm via xcb_get_input_focus: if focus didn't land, raise and retry.
-    // The blocking reply also acts as a flush barrier, ensuring the original
-    // xcb_set_input_focus request has been processed before we check.
+    // Previously this was resolved by immediately blocking on a
+    // xcb_get_input_focus reply in this function.  The blocking reply served as
+    // a flush-and-check barrier: if focus didn't land we'd raise and retry.
     //
-    // This avoids unconditionally raising all passive/locally_active windows on
-    // hover while still self-correcting for any non-compliant client regardless
-    // of toolkit, class name, or property advertisement.
+    // The revised approach is async: we fire xcb_get_input_focus now and store
+    // the cookie.  drainPendingConfirm() is called from the event-dispatch loop
+    // on the next iteration and performs the raise-and-retry there.  This keeps
+    // the mouse_enter hot path non-blocking in the common case where the focus
+    // does land (a compliant client, or a window that's already topmost).
+    //
+    // If a FocusIn for `win` arrives before the drain fires, handleFocusIn
+    // cancels the pending confirm — focus landed without needing a retry.
     //
     // For locally_active windows (e.g. Qt), WM_TAKE_FOCUS is the real focus
     // activation trigger.  The client processes it asynchronously — potentially
-    // after our confirm check has already passed — and may redirect input focus
-    // to a child widget.  Re-sending WM_TAKE_FOCUS after the raise ensures the
-    // client processes it in the correct stacking context.
+    // after the confirm check — and may redirect input focus to a child widget.
+    // drainPendingConfirm re-sends WM_TAKE_FOCUS after the raise so the client
+    // processes it in the correct stacking context.
     if (reason == .mouse_enter and
         (input_model == .locally_active or input_model == .passive))
     {
-        const confirm_cookie = xcb.xcb_get_input_focus(core.conn);
-        const confirm = xcb.xcb_get_input_focus_reply(core.conn, confirm_cookie, null);
-        if (confirm) |c| {
-            defer std.c.free(c);
-            if (c.*.focus != win) {
-                _ = xcb.xcb_configure_window(
-                    core.conn, win,
-                    xcb.XCB_CONFIG_WINDOW_STACK_MODE,
-                    &[_]u32{xcb.XCB_STACK_MODE_ABOVE},
-                );
-                _ = xcb.xcb_set_input_focus(
-                    core.conn,
-                    xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
-                    win,
-                    g_last_event_time,
-                );
-                // Re-send WM_TAKE_FOCUS after the raise so locally_active
-                // clients (e.g. Qt) process it in the correct stacking context.
-                // Not sent for passive windows — they have no WM_TAKE_FOCUS
-                // handler and xcb_set_input_focus alone is the correct protocol.
-                if (input_model == .locally_active) {
-                    utils.sendWMTakeFocus(core.conn, win, g_last_event_time);
-                }
-            }
-        }
+        g_confirm_cookie = xcb.xcb_get_input_focus(core.conn);
+        g_confirm_win    = win;
     }
 
     if (comptime build_options.has_tiling) tiling.updateWindowFocus(old, win);
@@ -226,15 +281,61 @@ pub fn setFocus(win: u32, reason: Reason) void {
 
     // Advertise the newly focused window on the root so xev -root and any
     // EWMH-aware external tool (compositor scripts, polybar, etc.) can observe it.
-    if (g_net_active_window != xcb.XCB_ATOM_NONE) {
-        var win_val = win;
-        _ = xcb.xcb_change_property(
-            core.conn, xcb.XCB_PROP_MODE_REPLACE,
-            core.root, g_net_active_window,
-            xcb.XCB_ATOM_WINDOW, 32,
-            1, &win_val,
-        );
+    advertiseActiveWindow(win);
+}
+
+/// Drain the deferred focus-confirm reply, if one is pending.
+///
+/// Must be called from the event-dispatch loop before processing the next
+/// event.  In the common case (focus landed, compliant client, window already
+/// topmost) this completes in microseconds — the server-side work is already
+/// done, we are just collecting the reply that was queued in setFocus.
+///
+/// If focus did not land on `g_confirm_win`, the window is raised and
+/// xcb_set_input_focus is retried.  For locally_active windows, WM_TAKE_FOCUS
+/// is also re-sent so the client processes it in the new stacking context.
+///
+/// Safe to call when no confirm is pending (returns immediately).
+pub fn drainPendingConfirm() void {
+    const cookie = g_confirm_cookie orelse return;
+    const win    = g_confirm_win;
+    g_confirm_cookie = null;
+    g_confirm_win    = 0;
+
+    // Re-read the input model: the client may have updated its WM_HINTS
+    // between the setFocus call and this drain.
+    const input_model = utils.getInputModelCached(core.conn, win);
+
+    const confirm = xcb.xcb_get_input_focus_reply(core.conn, cookie, null);
+    if (confirm) |c| {
+        defer std.c.free(c);
+        if (c.*.focus != win) {
+            _ = xcb.xcb_configure_window(core.conn, win,
+                xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+            _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
+                win, g_last_event_time);
+            // Re-send WM_TAKE_FOCUS after the raise so locally_active clients
+            // (e.g. Qt) process it in the correct stacking context.
+            // Not sent for passive windows — they have no WM_TAKE_FOCUS handler
+            // and xcb_set_input_focus alone is the correct protocol.
+            if (input_model == .locally_active) {
+                utils.sendWMTakeFocus(core.conn, win, g_last_event_time);
+            }
+        }
     }
+}
+
+/// Discard a pending confirm reply without acting on it.
+///
+/// The XCB reply must always be collected to prevent the reply queue from
+/// growing unboundedly, even when we no longer care about the result.
+/// Safe to call when no confirm is pending.
+fn cancelPendingConfirm() void {
+    const cookie = g_confirm_cookie orelse return;
+    g_confirm_cookie = null;
+    g_confirm_win    = 0;
+    // Collect and discard — we only care about freeing the queued reply.
+    if (xcb.xcb_get_input_focus_reply(core.conn, cookie, null)) |r| std.c.free(r);
 }
 
 /// Called when the X server reports a FocusIn on a managed window.
@@ -251,11 +352,11 @@ pub fn setFocus(win: u32, reason: Reason) void {
 /// NotifyGrab / NotifyUngrab are skipped — they are transient and do not
 /// represent a real focus change (e.g. WM grabbing the server, key grabs).
 pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
+    // Skip transient modes: GRAB/UNGRAB are server-initiated, WHILE_GRABBED
+    // is a focus change during an active grab — none represent a real user focus event.
     if (event.mode == xcb.XCB_NOTIFY_MODE_GRAB or
-        event.mode == xcb.XCB_NOTIFY_MODE_UNGRAB) return;
-    // NotifyWhileGrabbed: focus change during an active grab — skip to avoid
-    // spurious updates during drag or key-grab sequences.
-    if (event.mode == xcb.XCB_NOTIFY_MODE_WHILE_GRABBED) return;
+        event.mode == xcb.XCB_NOTIFY_MODE_UNGRAB or
+        event.mode == xcb.XCB_NOTIFY_MODE_WHILE_GRABBED) return;
     // NotifyInferior: a child of this window received focus; the managed
     // top-level did not change focus itself.  We only track top-level granularity.
     if (event.detail == xcb.XCB_NOTIFY_DETAIL_INFERIOR) return;
@@ -269,12 +370,68 @@ pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
     if (!window.isValidManagedWindow(win)) return;
     if (g_focused_window == win) return;
 
+    // If the pending confirm was waiting to see whether focus landed on
+    // g_confirm_win, this FocusIn is our answer: it did.  Cancel the reply
+    // so drainPendingConfirm does not perform a redundant raise-and-retry.
+    if (g_confirm_win == win) cancelPendingConfirm();
+
     const old = g_focused_window;
     if (old) |old_win| recordInHistory(old_win);
     g_focused_window = win;
+
+    // Sync button grabs to the new focus owner.
+    //
+    // setFocus handles this for WM-initiated focus changes.  handleFocusIn
+    // covers application-driven focus changes (e.g. a client that calls
+    // XSetInputFocus itself after receiving a replayed button press).  Without
+    // this, the previously focused window retains its "focused" grab profile
+    // indefinitely — clicks on it are delivered sync-sync instead of
+    // async-sync until the next WM-initiated setFocus corrects the state.
+    window.grabButtons(win, true);
+    if (old) |old_win| window.grabButtons(old_win, false);
+
     if (comptime build_options.has_tiling) tiling.updateWindowFocus(old, win);
     carousel.notifyFocusChanged(win);
     bar.scheduleFocusRedraw(win);
+}
+
+/// Focus the most recently focused window satisfying `visible`, consulting
+/// the MRU history in order.  Falls back to `on_miss()` if provided, or
+/// clearFocus() if null, when no candidate is found.
+///
+/// This is the Zig equivalent of dwm's focus(NULL) idiom — callers that need
+/// to focus "whatever is best after X happened" (window close, workspace switch,
+/// unmanage, etc.) use this instead of rolling their own history-scan + setFocus
+/// sequence.
+///
+/// The `visible` predicate decouples workspace visibility from focus mechanics:
+///   • Pass workspaces.isOnCurrentWorkspaceAndVisible for the normal post-action
+///     re-focus (on current workspace and not minimized).
+///   • Pass window.isValidManagedWindow for cleanup contexts where any managed
+///     window is acceptable regardless of workspace membership.
+///
+/// The `on_miss` fallback handles callers that need specialised behaviour when
+/// history is exhausted:
+///   • Pass null (common case) to call clearFocus() on miss.
+///   • Pass minimize.focusMasterOrFirst for post-unmanage recovery, where the
+///     tiling master or first workspace window is preferred over an empty focus.
+///
+/// The explicit `reason` parameter is the one place this diverges intentionally
+/// from dwm's single-argument form: dwm cannot distinguish "refocus after close"
+/// from "refocus after workspace switch" at the call site, and that distinction
+/// drives suppression semantics here.
+pub fn focusBestAvailable(
+    reason:   Reason,
+    visible:  *const fn (u32) bool,
+    on_miss:  ?*const fn () void,
+) void {
+    for (g_history.items) |win| {
+        if (visible(win)) {
+            setFocus(win, reason);
+            return;
+        }
+    }
+    if (on_miss) |f| f() else clearFocus();
 }
 
 pub fn clearFocus() void {
@@ -282,27 +439,26 @@ pub fn clearFocus() void {
         window.grabButtons(old_win, false);
         if (comptime build_options.has_tiling) tiling.updateWindowFocus(old_win, null);
     }
+    // Any pending confirm is for a window that is about to lose focus anyway;
+    // discard it rather than letting drainPendingConfirm raise a window we
+    // are intentionally unfocusing.
+    cancelPendingConfirm();
     g_focused_window = null;
     g_suppress_reason = .none;
-    _ = xcb.xcb_set_input_focus(
-        core.conn,
-        xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
-        core.root,
-        g_last_event_time,
-    );
+    _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
+        core.root, g_last_event_time);
     carousel.notifyFocusChanged(null);
     bar.scheduleFocusRedraw(null);
 
     // Clear _NET_ACTIVE_WINDOW on root to signal no window is focused.
-    if (g_net_active_window != xcb.XCB_ATOM_NONE) {
-        const none: xcb.xcb_window_t = xcb.XCB_WINDOW_NONE;
-        _ = xcb.xcb_change_property(
-            core.conn, xcb.XCB_PROP_MODE_REPLACE,
-            core.root, g_net_active_window,
-            xcb.XCB_ATOM_WINDOW, 32,
-            1, &none,
-        );
-    }
+    advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
+}
+
+inline fn advertiseActiveWindow(win: xcb.xcb_window_t) void {
+    if (g_net_active_window == xcb.XCB_ATOM_NONE) return;
+    var val = win;
+    _ = xcb.xcb_change_property(core.conn, xcb.XCB_PROP_MODE_REPLACE,
+        core.root, g_net_active_window, xcb.XCB_ATOM_WINDOW, 32, 1, &val);
 }
 
 inline fn shouldRaise(reason: Reason) bool {
@@ -316,18 +472,19 @@ inline fn suppressionFor(reason: Reason, current: core.FocusSuppressReason) core
     // Only explicit user-driven actions clear suppression unconditionally.
     // Programmatic focus changes (tiling_operation, workspace_switch, mouse_enter)
     // must preserve any suppression that was set externally — most importantly by
-    // the fullscreen-exit path, which calls setSuppressReason directly before
-    // calling setFocus(.tiling_operation).
+    // the fullscreen-exit path, which calls setFocusWithSuppression to atomically
+    // prime suppression before the focus change.
     //
-    // Without this, the sequence:
-    //   setSuppressReason(.window_spawn)        ← fullscreen exit
-    //   setFocus(win, .tiling_operation)         ← restores focus
-    //     -> suppressionFor(.tiling_operation) returned .none
-    //     -> g_suppress_reason clobbered to .none before the EnterNotify arrives
-    //     -> spurious EnterNotify is no longer suppressed, focus goes to the wrong
-    //       window; or if setFocus hit the g_focused_window == win early-return,
-    //       suppression was never cleared and all subsequent hover events are
-    //       silently swallowed until the user clicks.
+    // Without the `else => current` branch, the sequence:
+    //   setFocusWithSuppression(win, .tiling_operation, .window_spawn)
+    //     -> g_suppress_reason = .window_spawn
+    //     -> setFocus(win, .tiling_operation)
+    //       -> suppressionFor(.tiling_operation) returned .none   ← old bug
+    //       -> g_suppress_reason clobbered to .none before the EnterNotify arrives
+    //       -> spurious EnterNotify is no longer suppressed, focus goes to the wrong
+    //          window; or if setFocus hit the g_focused_window == win early-return,
+    //          suppression was never cleared and all subsequent hover events are
+    //          silently swallowed until the user clicks.
     //
     // Rules:
     //   mouse_click / user_command — explicit user interaction: always clear.
@@ -340,30 +497,39 @@ inline fn suppressionFor(reason: Reason, current: core.FocusSuppressReason) core
     };
 }
 
-/// After a tiling operation that repositions windows, sync WM focus state to
-/// whichever managed window is currently under the pointer.  This prevents the
-/// `.tiling_operation` suppression from persisting indefinitely when there is no
-/// active pointer grab to deliver MotionNotify events that would normally clear it.
-pub fn syncFocusToPointer() void {
-    const reply = xcb.xcb_query_pointer_reply(
-        core.conn, xcb.xcb_query_pointer(core.conn, core.root), null,
-    ) orelse {
-        g_suppress_reason = .none;
-        return;
-    };
-    defer std.c.free(reply);
-
-    const child = reply.*.child;
-    if (child == 0 or child == core.root or !window.isValidManagedWindow(child)) {
-        g_suppress_reason = .none;
-        return;
+/// Fire an async pointer-position query for focus-after-tiling sync.
+///
+/// Clears suppression immediately (so subsequent EnterNotify events are no
+/// longer masked) and queues xcb_query_pointer without blocking.  The reply
+/// is handled by drainPointerSync(), called from the event-dispatch loop.
+///
+/// Split from the original syncFocusToPointer to remove the blocking reply
+/// from the tiling hot path.  Callers that previously called
+/// syncFocusToPointer() should call beginPointerSync() at the same site, and
+/// ensure drainPointerSync() is called from the event-dispatch loop.
+pub fn beginPointerSync() void {
+    g_suppress_reason = .none;
+    // Discard any stale query before issuing a fresh one.  This prevents
+    // stale replies from accumulating if tiling operations fire faster than
+    // the event loop can drain them.
+    if (g_pointer_cookie) |stale| {
+        if (xcb.xcb_query_pointer_reply(core.conn, stale, null)) |r| std.c.free(r);
     }
+    g_pointer_cookie = xcb.xcb_query_pointer(core.conn, core.root);
+}
 
-    // Use .mouse_enter so the window is not raised, just focused.
-    // If g_focused_window already equals child, setFocus returns early —
-    // that's fine, we just need the suppression cleared below.
-    setFocus(child, .mouse_enter);
-    g_suppress_reason = .none; // clear regardless of whether setFocus short-circuited
+/// Drain the deferred pointer-position reply and route focus to whichever
+/// managed window is currently under the pointer.
+///
+/// Called from the event-dispatch loop.  Safe to call when no query is pending.
+pub fn drainPointerSync() void {
+    const cookie = g_pointer_cookie orelse return;
+    g_pointer_cookie = null;
+    const reply = xcb.xcb_query_pointer_reply(core.conn, cookie, null) orelse return;
+    defer std.c.free(reply);
+    const child = reply.*.child;
+    if (child != 0 and child != core.root and window.isValidManagedWindow(child))
+        setFocus(child, .mouse_enter);
 }
 
 fn isWindowMapped(conn: *xcb.xcb_connection_t, win: u32) bool {

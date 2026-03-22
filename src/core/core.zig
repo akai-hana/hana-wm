@@ -85,7 +85,7 @@ pub const Action = union(enum) {
     unminimize_lifo,
     unminimize_fifo,
     unminimize_all,
-    cycle_layout_variation,
+    cycle_layout_variants,
     toggle_prompt,
 
     pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
@@ -135,38 +135,38 @@ pub const MasterSide = enum {
     }
 };
 
-/// Per-layout behavioral variations.
+/// Per-layout behavioral variants.
 ///
 /// Defined here and not in tiling.zig so that config.zig
 /// can parse them without creating a circular import.
-pub const MasterVariation = enum {
+pub const MasterVariant = enum {
     lifo, // new window -> stack, existing master stays (default)
     fifo, // new window -> master, existing master -> stack
 };
 
-pub const MonocleVariation = enum {
+pub const MonocleVariant = enum {
     gapless, // true fullscreen; ignore gap settings (default)
     gaps,    // honor gap settings like every other layout
 };
 
-pub const GridVariation = enum {
+pub const GridVariant = enum {
     rigid,   // strict grid: leave empty cells in incomplete last row (default)
     relaxed, // last window in incomplete row expands to fill the row
 };
 
-/// A layout variation discriminated by which layout it belongs to.
-pub const LayoutVariationOverride = union(enum) {
-    master:  MasterVariation,
-    monocle: MonocleVariation,
-    grid:    GridVariation,
+/// A layout variant discriminated by which layout it belongs to.
+pub const LayoutVariantOverride = union(enum) {
+    master:  MasterVariant,
+    monocle: MonocleVariant,
+    grid:    GridVariant,
 };
 
 /// Records that a specific workspace should start in a particular layout
-/// (and optionally a variation), overriding the first-element default.
+/// (and optionally a variant), overriding the first-element default.
 pub const WorkspaceLayoutOverride = struct {
-    workspace_idx: u8,                       // 0-indexed workspace number
-    layout_idx:    u8,                       // index into TilingConfig.layouts
-    variation:     ?LayoutVariationOverride, // null = use per-layout section default
+    workspace_idx: u8,                   // 0-indexed workspace number
+    layout_idx:    u8,                   // index into TilingConfig.layouts
+    variant:     ?LayoutVariantOverride, // null = use per-layout section default
 };
 
 pub const TilingConfig = struct {
@@ -181,15 +181,15 @@ pub const TilingConfig = struct {
     border_focused:   Color = 0x5294E2,
     border_unfocused: Color = 0x383C4A,
 
-    // Per-layout variation preferences
+    // Per-layout variant preferences
     //
     // Stored as parsed enums (not raw strings) to avoid
     // dangling slices after the config document is freed.
-    master_variation:  MasterVariation  = .lifo,
-    monocle_variation: MonocleVariation = .gapless,
-    grid_variation:    GridVariation    = .rigid,
+    master_variant:  MasterVariant  = .lifo,
+    monocle_variant: MonocleVariant = .gapless,
+    grid_variant:    GridVariant    = .rigid,
 
-    // Per-layout 3-character indicator overrides (null = derive from active variation).
+    // Per-layout 3-character indicator overrides (null = derive from active variant).
     // Stored as fixed-size arrays: no allocation, no dangling pointers.
     // Set via `indicator = "XYZ"` (3 chars) in the corresponding [tiling.layouts.*] section.
     master_indicator:    ?[3]u8 = null,
@@ -272,7 +272,7 @@ pub const BarSegment = enum {
     title,
     clock,
     layout,
-    variations,
+    variants,
 };
 
 pub const BarLayout = struct {

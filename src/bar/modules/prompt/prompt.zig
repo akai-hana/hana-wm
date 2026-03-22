@@ -756,6 +756,40 @@ inline fn drawSpan(
         try dc.drawText(draw_x, baseline, visible, color);
 }
 
+/// Draw `text` from `px` to the right edge, ellipsizing on overflow.
+/// Shared by the insert, normal, and visual branches of drawActive for post-cursor text.
+inline fn drawPostSpan(
+    dc:           *drawing.DrawContext,
+    px:           i32,
+    text_left_x:  u16,
+    scroll_end_x: u16,
+    baseline:     u16,
+    text:         []const u8,
+    color:        u32,
+) !void {
+    if (text.len == 0 or px >= @as(i32, scroll_end_x)) return;
+    const draw_x: u16    = @intCast(@max(px, @as(i32, text_left_x)));
+    const remaining: u16 = scroll_end_x -| draw_x;
+    if (remaining > 0)
+        try dc.drawTextEllipsis(draw_x, baseline, text, remaining, color);
+}
+
+/// Compute the clamped draw_x and vis_w for a block cursor or selection highlight.
+/// Returns null when the block is entirely off-screen.
+inline fn cursorBlockGeom(
+    px:           i32,
+    block_w:      u16,
+    text_left_x:  u16,
+    scroll_end_x: u16,
+) ?struct { draw_x: u16, vis_w: u16 } {
+    if (px + @as(i32, block_w) <= @as(i32, text_left_x) or px >= @as(i32, scroll_end_x))
+        return null;
+    const draw_x: u16 = @intCast(@max(px, @as(i32, text_left_x)));
+    const vis_w: u16  = @intCast(@min(@as(i32, block_w), @as(i32, scroll_end_x) - px));
+    if (vis_w == 0) return null;
+    return .{ .draw_x = draw_x, .vis_w = vis_w };
+}
+
 /// Render the active input UI.
 ///
 /// Layout:
@@ -857,26 +891,14 @@ fn drawActive(
         if (pre_sel.len > 0)
             try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, pre_sel, fg);
 
-        if (px + @as(i32, sel_w) > @as(i32, text_left_x) and px < @as(i32, scroll_end_x)) {
-            const draw_x: u16 = @intCast(@max(px, @as(i32, text_left_x)));
-            const vis_w: u16 = @intCast(@min(
-                @as(i32, sel_w),
-                @as(i32, scroll_end_x) - px,
-            ));
-            if (vis_w > 0) {
-                dc.fillRect(draw_x, CURSOR_V_PAD, vis_w, height -| CURSOR_V_PAD * 2, accent);
-                if (sel_text.len > 0)
-                    try dc.drawText(draw_x, baseline, sel_text, bg);
-            }
+        if (cursorBlockGeom(px, sel_w, text_left_x, scroll_end_x)) |g_| {
+            dc.fillRect(g_.draw_x, CURSOR_V_PAD, g_.vis_w, height -| CURSOR_V_PAD * 2, accent);
+            if (sel_text.len > 0)
+                try dc.drawText(g_.draw_x, baseline, sel_text, bg);
         }
         px += @intCast(sel_w);
 
-        if (post_sel.len > 0 and px < @as(i32, scroll_end_x)) {
-            const draw_x: u16 = @intCast(@max(px, @as(i32, text_left_x)));
-            const remaining: u16 = scroll_end_x -| draw_x;
-            if (remaining > 0)
-                try dc.drawTextEllipsis(draw_x, baseline, post_sel, remaining, fg);
-        }
+        try drawPostSpan(dc, px, text_left_x, scroll_end_x, baseline, post_sel, fg);
 
     } else if (g.vim.mode == .insert) {
         // INSERT mode: blinking 2-px caret, text NOT consumed by cursor
@@ -908,12 +930,7 @@ fn drawActive(
         }
 
         // Text from cursor onwards.
-        if (post_text.len > 0 and px < @as(i32, scroll_end_x)) {
-            const draw_x: u16 = @intCast(@max(px, @as(i32, text_left_x)));
-            const remaining: u16 = scroll_end_x -| draw_x;
-            if (remaining > 0)
-                try dc.drawTextEllipsis(draw_x, baseline, post_text, remaining, fg);
-        }
+        try drawPostSpan(dc, px, text_left_x, scroll_end_x, baseline, post_text, fg);
 
     } else {
         // NORMAL / REPLACE: full-character block cursor 
@@ -924,26 +941,14 @@ fn drawActive(
         if (pre_text.len > 0)
             try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, pre_text, fg);
 
-        if (px + @as(i32, cur_w) > @as(i32, text_left_x) and px < @as(i32, scroll_end_x)) {
-            const draw_x: u16 = @intCast(@max(px, @as(i32, text_left_x)));
-            const vis_w: u16  = @intCast(@min(
-                @as(i32, cur_w),
-                @as(i32, scroll_end_x) - px,
-            ));
-            if (vis_w > 0) {
-                dc.fillRect(draw_x, CURSOR_V_PAD, vis_w, height -| CURSOR_V_PAD * 2, accent);
-                if (g.vim.cursor < g.vim.len)
-                    try dc.drawText(draw_x, baseline, cur_text, bg);
-            }
+        if (cursorBlockGeom(px, cur_w, text_left_x, scroll_end_x)) |g_| {
+            dc.fillRect(g_.draw_x, CURSOR_V_PAD, g_.vis_w, height -| CURSOR_V_PAD * 2, accent);
+            if (g.vim.cursor < g.vim.len)
+                try dc.drawText(g_.draw_x, baseline, cur_text, bg);
         }
         px += @intCast(cur_w);
 
-        if (post_text.len > 0 and px < @as(i32, scroll_end_x)) {
-            const draw_x: u16 = @intCast(@max(px, @as(i32, text_left_x)));
-            const remaining: u16 = scroll_end_x -| draw_x;
-            if (remaining > 0)
-                try dc.drawTextEllipsis(draw_x, baseline, post_text, remaining, fg);
-        }
+        try drawPostSpan(dc, px, text_left_x, scroll_end_x, baseline, post_text, fg);
     }
 
     dc.flushRect(start_x, width);

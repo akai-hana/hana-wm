@@ -19,7 +19,8 @@ fn shouldClockRun() bool {
     return bar.isVisible() and bar.hasClockSegment();
 }
 
-fn setTimerState(enable: bool) void {
+pub fn updateTimerState() void {
+    const enable = shouldClockRun();
     if (enable != timer_enabled) {
         timer_enabled = enable;
         debug.info("Clock timer {s}", .{if (enable) "enabled" else "disabled"});
@@ -38,10 +39,6 @@ pub fn pollTimeoutMs() i32 {
     const ns_remaining: u64 = @intCast(std.time.ns_per_s - now_ts.nsec);
     // Round up to the nearest millisecond so we never fire slightly early.
     return @intCast((ns_remaining + 999_999) / 1_000_000);
-}
-
-pub fn updateTimerState() void {
-    setTimerState(shouldClockRun());
 }
 
 pub fn draw(dc: *drawing.DrawContext, config: core.BarConfig, height: u16, start_x: u16) !u16 {
@@ -65,10 +62,11 @@ pub fn draw(dc: *drawing.DrawContext, config: core.BarConfig, height: u16, start
 // localtime_r is POSIX-guaranteed reentrant (output goes into caller-supplied tm_buf),
 // making this function safe to call from the bar render thread.
 fn formatTime(buf: []u8, sec: i64) ![]const u8 {
+    const TIME_FMT = "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}";
     var raw_sec: c.time_t = @intCast(sec);
     var tm_buf: c.struct_tm = undefined;
     if (c.localtime_r(&raw_sec, &tm_buf)) |local_ts| {
-        return try std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{
+        return try std.fmt.bufPrint(buf, TIME_FMT, .{
             @as(u32, @intCast(local_ts.*.tm_year + 1900)),
             @as(u32, @intCast(local_ts.*.tm_mon  + 1)),
             @as(u32, @intCast(local_ts.*.tm_mday)),
@@ -89,7 +87,7 @@ fn formatTime(buf: []u8, sec: i64) ![]const u8 {
     const min:  u32 = @intCast(@divFloor(@mod(day_sec, std.time.s_per_hour), std.time.s_per_min));
     const secs: u32 = @intCast(@mod(day_sec, std.time.s_per_min));
 
-    return try std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{
+    return try std.fmt.bufPrint(buf, TIME_FMT, .{
         year_day.year, month_day.month.numeric(), month_day.day_index + 1, hour, min, secs,
     });
 }

@@ -232,6 +232,9 @@ var g_seg_focus_start_ms: i64 = 0;
 /// split-view title rendering fall back to ellipsis on overflow.
 var g_carousel_enabled: bool = true;
 
+inline fn clearCarousel()    void { if (g_carousel)     |*e| { e.base.cp.deinit(); g_carousel     = null; } }
+inline fn clearSegCarousel() void { if (g_seg_carousel) |*e| { e.base.cp.deinit(); g_seg_carousel = null; } }
+
 // Public API — feature toggle
 
 /// Enable or disable the carousel globally.
@@ -288,8 +291,8 @@ pub fn isCarouselActive() bool {
 
 /// Free all carousel pixmaps.  Call on bar deinit or config reload.
 pub fn deinitCarousel() void {
-    if (g_carousel)     |*e| { e.base.cp.deinit(); g_carousel     = null; }
-    if (g_seg_carousel) |*e| { e.base.cp.deinit(); g_seg_carousel = null; }
+    clearCarousel();
+    clearSegCarousel();
     g_seg_focus_start_ms = 0;
 }
 
@@ -311,7 +314,6 @@ pub fn deinitCarousel() void {
 /// Safe to call at any time; a no-op when the window is unchanged.
 pub fn notifyFocusChanged(new_window: ?u32) void {
     if (g_seg_carousel) |*e| {
-        // If the focused window is unchanged, leave the running animation alone.
         const same = if (new_window) |nw| nw == e.window else false;
         if (same) return;
         e.base.cp.deinit();
@@ -390,14 +392,14 @@ pub fn drawOrScrollTitle(
 
     if (text_w <= avail_w) {
         // Text fits — release any stale pixmap and draw normally.
-        if (g_carousel) |*e| { e.base.cp.deinit(); g_carousel = null; }
+        clearCarousel();
         try dc.drawText(x, y, text, fg);
         return;
     }
 
     // Text overflows — use ellipsis when the carousel feature is disabled.
     if (!g_carousel_enabled) {
-        if (g_carousel) |*e| { e.base.cp.deinit(); g_carousel = null; }
+        clearCarousel();
         try dc.drawTextEllipsis(x, y, text, avail_w, fg);
         return;
     }
@@ -416,7 +418,7 @@ pub fn drawOrScrollTitle(
         const preserved_start_ms: i64 =
             if (!full_stale and bg_changed) g_carousel.?.base.start_ms else nowMs();
 
-        if (g_carousel) |*e| { e.base.cp.deinit(); g_carousel = null; }
+        clearCarousel();
 
         const cycle_w = text_w + CAROUSEL_GAP_PX;
 
@@ -449,7 +451,7 @@ pub fn drawOrScrollTitle(
 /// Also frees the seg-carousel when its window is no longer in the workspace
 /// window list, so we never blit a title for a window that has been closed.
 pub fn prepareSegCarousel(win_items: []const u32) void {
-    if (g_carousel) |*e| { e.base.cp.deinit(); g_carousel = null; }
+    clearCarousel();
 
     if (g_seg_carousel) |e| {
         const still_present = for (win_items) |w| {
@@ -496,7 +498,7 @@ pub fn blitSegCarousel(
         true;
 
     if (stale) {
-        if (g_seg_carousel) |*e| { e.base.cp.deinit(); g_seg_carousel = null; }
+        clearSegCarousel();
         var cp = try drawing.CarouselPixmap.init(dc, text_w);
         errdefer cp.deinit();
         try cp.render(dc, text, accent, text_fg, baseline_y);
@@ -546,7 +548,7 @@ fn nowMs() i64 {
 /// getCached().  `px_per_frame` uses the runtime-configurable
 /// g_scroll_speed rather than a baked-in constant.
 fn carouselOffset(start_ms: i64, cycle_w: u16) u16 {
-    const hz           = if (g_refresh_rate_override > 0.0) g_refresh_rate_override else getCached();
+    const hz           = getEffectiveRefreshRate();
     const frame_ms     = 1000.0 / hz;
     const px_per_frame = g_scroll_speed / hz;
 

@@ -18,8 +18,9 @@ const minimize      = @import("minimize");
 const fullscreen    = @import("fullscreen");
 
 // XSizeHints flags (ICCCM §4.1.2.3)
-const XSIZE_HINTS_P_MIN_SIZE:  u32 = 0x10;
-const XSIZE_HINTS_P_BASE_SIZE: u32 = 0x100;
+const XSIZE_HINTS_P_MIN_SIZE:   u32 = 0x10;
+const XSIZE_HINTS_P_RESIZE_INC: u32 = 0x40;
+const XSIZE_HINTS_P_BASE_SIZE:  u32 = 0x100;
 
 // Spawn queue
 //
@@ -107,8 +108,7 @@ pub inline fn isOnCurrentWorkspace(win: u32) bool {
     // Deliberate: single probe on window_to_workspaces covers both the
     // "is managed" and "is on current workspace" checks, avoiding two
     // lookups on the same key on every EnterNotify hot path.
-    if (win == 0 or win == core.root) return false;
-    if (bar.isBarWindow(win)) return false;
+    if (win == 0 or win == core.root or bar.isBarWindow(win)) return false;
     const s = workspaces.getState() orelse return false;
     const mask = s.window_to_workspaces.get(win) orelse return false;
     return (mask >> @intCast(s.current)) & 1 != 0;
@@ -247,6 +247,27 @@ pub inline fn registerSpawn(workspace: u8, pid: u32) void {
     spawn_queue.push(.{ .workspace = workspace, .pid = pid });
 }
 
+/// Called when a child process exits (via SIGCHLD delivered through a
+/// signalfd or self-pipe in the event loop) before its window has ever
+/// mapped.  Removes the matching queue entry immediately so a later,
+/// unrelated MapRequest cannot be mis-routed to the wrong workspace.
+///
+/// Integration: in the event loop, drain the signalfd/self-pipe on
+/// SIGCHLD, call waitpid(-1, WNOHANG) in a loop, and pass each reaped
+/// PID here.  No timers, no polling, no arbitrary timeouts.
+///
+/// No-op for pid == 0: daemon-mode entries have no trackable child
+/// process, so they self-resolve on the next MapRequest.
+pub fn removeSpawnByPid(pid: u32) void {
+    if (pid == 0) return;
+    for (spawn_queue.slice(), 0..) |e, i| {
+        if (e.pid == pid) {
+            _ = spawn_queue.consume(i);
+            return;
+        }
+    }
+}
+
 fn snapshotSpawnCursor() void {
     if (focus.getSuppressReason() != .window_spawn) return;
     const ptr = xcb.xcb_query_pointer_reply(
@@ -333,6 +354,13 @@ fn commitWindowToScreen(win: u32, on_current_workspace: bool) void {
     _ = xcb.xcb_flush(core.conn);
 }
 
+fn discardPropertyCookies(cookies: PropertyCookies) void {
+    xcb.xcb_discard_reply(core.conn, cookies.protocols.sequence);
+    xcb.xcb_discard_reply(core.conn, cookies.hints.sequence);
+    xcb.xcb_discard_reply(core.conn, cookies.normal_hints.sequence);
+    if (cookies.net_wm_pid) |c| xcb.xcb_discard_reply(core.conn, c.sequence);
+}
+
 pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const win        = event.window;
     const current_ws = workspaces.getCurrentWorkspace() orelse 0;
@@ -347,11 +375,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
 
     workspaces.moveWindowTo(win, target_ws) catch |err| {
         debug.logError(err, win);
-        xcb.xcb_discard_reply(core.conn, cookies.protocols.sequence);
-        xcb.xcb_discard_reply(core.conn, cookies.hints.sequence);
-        xcb.xcb_discard_reply(core.conn, cookies.normal_hints.sequence);
-        if (cookies.net_wm_pid) |c|
-            xcb.xcb_discard_reply(core.conn, c.sequence);
+        discardPropertyCookies(cookies);
         _ = xcb.xcb_flush(core.conn);
         return;
     };
@@ -406,15 +430,10 @@ fn unmanageWindow(win: u32) void {
         if (tilingActive()) tiling.retileIfDirty();
         focus.clearFocus();
         focusWindowUnderPointer(ptr_cookie.?);
-    } else if (!was_fullscreen) {
-        if (tilingActive()) {
-            if (window_workspace) |ws| {
-                if (current_ws == ws) {
-                    tiling.retileIfDirty();
-                } else {
-                    tiling.retileInactiveWorkspace(ws);
-                }
-            }
+    } else if (!was_fullscreen and tilingActive()) {
+        if (window_workspace) |ws| {
+            if (current_ws == ws) tiling.retileIfDirty()
+            else tiling.retileInactiveWorkspace(ws);
         }
     }
 
@@ -432,33 +451,26 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t) void {
     if (isValidManagedWindow(event.window)) unmanageWindow(event.window);
 }
 
-/// Post-unmanage focus recovery. Priority:
-///   1. Window directly under the pointer (hover-focus expectation).
-///   2. MRU history — most recently focused window still present, on the
-///      current workspace, and not minimized.
-///   3. Tiling fallback (master or first slave) when history is exhausted.
-fn focusPrevOrBest() void {
-    for (focus.historyItems()) |prev| {
-        if (isOnCurrentWorkspace(prev) and !minimize.isMinimized(prev)) {
-            focus.setFocus(prev, .tiling_operation);
-            return;
-        }
-    }
-    minimize.focusBestAvailable();
-}
-
+/// Post-unmanage focus recovery.
+///
+/// Consults MRU history first (via focus.focusBestAvailable), falling back
+/// to minimize.focusMasterOrFirst when the history is exhausted or contains no
+/// window visible on the current workspace.  If a window is directly under the
+/// pointer it is preferred over history (hover-focus expectation); the
+/// pointer-position reply is pre-fired before the server grab to overlap the
+/// round-trip.
 fn focusWindowUnderPointer(ptr_cookie: xcb.xcb_query_pointer_cookie_t) void {
     const reply = xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null) orelse {
-        focusPrevOrBest();
+        focus.focusBestAvailable(.tiling_operation, workspaces.isOnCurrentWorkspaceAndVisible, minimize.focusMasterOrFirst);
         return;
     };
     defer std.c.free(reply);
     const child = reply.*.child;
-    if (isOnCurrentWorkspace(child) and !minimize.isMinimized(child)) {
+    if (workspaces.isOnCurrentWorkspaceAndVisible(child)) {
         focus.setFocus(child, .mouse_enter);
         return;
     }
-    focusPrevOrBest();
+    focus.focusBestAvailable(.tiling_operation, workspaces.isOnCurrentWorkspaceAndVisible, minimize.focusMasterOrFirst);
 }
 
 // Configure request
@@ -628,7 +640,7 @@ fn parseSizeHintsIntoCache(
 
     // Skip the cache write entirely for windows that declare no size constraints,
     // which is the common case.
-    if (flags & (XSIZE_HINTS_P_MIN_SIZE | XSIZE_HINTS_P_BASE_SIZE) == 0) return;
+    if (flags & (XSIZE_HINTS_P_MIN_SIZE | XSIZE_HINTS_P_BASE_SIZE | XSIZE_HINTS_P_RESIZE_INC) == 0) return;
 
     var min_width:  u16 = 0;
     var min_height: u16 = 0;
@@ -642,8 +654,32 @@ fn parseSizeHintsIntoCache(
         min_height = @max(min_height, clampToU16(fields[16]));
     }
 
+    // XSizeHints wire layout (ICCCM §4.1.2.3):
+    //   [0] flags  [1-4] obsolete  [5] min_w  [6] min_h
+    //   [7] max_w  [8] max_h  [9] inc_w  [10] inc_h
+    //   [11-14] aspect  [15] base_w  [16] base_h  [17] gravity
+    //
+    // inc_w/inc_h constrain window dimensions to multiples of the increment
+    // value added to the base.  Without them terminal emulators receive
+    // fractional character cells and render ragged grids.
+    var inc_width:  u16 = 0;
+    var inc_height: u16 = 0;
+    if (flags & XSIZE_HINTS_P_RESIZE_INC != 0 and field_count >= 11) {
+        inc_width  = clampToU16(fields[9]);
+        inc_height = clampToU16(fields[10]);
+    }
+
     if (comptime build_options.has_tiling)
-        tiling.cacheSizeHints(win, .{ .min_width = min_width, .min_height = min_height });
+        // NOTE: tiling.SizeHints must carry inc_width and inc_height fields.
+        // Add `inc_width: u16 = 0, inc_height: u16 = 0` to that struct and
+        // apply them in the layout pass: dimension = base + N * inc, where N
+        // is chosen so that base + N * inc ≤ available_space.
+        tiling.cacheSizeHints(win, .{
+            .min_width  = min_width,
+            .min_height = min_height,
+            .inc_width  = inc_width,
+            .inc_height = inc_height,
+        });
 }
 
 // Window borders
@@ -713,15 +749,8 @@ pub fn updateWorkspaceBorders() void {
 /// workspaces. Called on config reload so color and width changes take effect
 /// immediately on all windows, not just those on the current workspace.
 pub fn reloadBorders() void {
-    const width = getBorderWidth();
+    if (getBorderWidth() == 0) return;
     const ws_state = workspaces.getState() orelse return;
-    for (ws_state.workspaces) |*ws| {
-        for (ws.windows.items()) |win| {
-            if (width > 0)
-                _ = xcb.xcb_configure_window(core.conn, win,
-                    xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{width});
-            _ = xcb.xcb_change_window_attributes(core.conn, win,
-                xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
-        }
-    }
+    for (ws_state.workspaces) |*ws|
+        for (ws.windows.items()) |win| applyBorder(win);
 }

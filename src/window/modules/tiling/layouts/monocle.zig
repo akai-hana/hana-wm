@@ -19,33 +19,33 @@ pub fn tileWithOffset(ctx: *const layouts.LayoutCtx, state: *State, windows: []c
     // configured lazily when brought to top, keeping cost O(1).
     const top_win = windows[windows.len - 1];
 
-    const gap2b = gap * 2 + border2;
-    const rect: utils.Rect = switch (state.layout_variations.monocle) {
-        .gapless => .{
-            .x      = 0,
-            .y      = @intCast(y_offset),
-            .width  = if (screen_w > border2) screen_w - border2 else constants.MIN_WINDOW_DIM,
-            .height = if (screen_h > border2) screen_h - border2 else constants.MIN_WINDOW_DIM,
-        },
-        .gaps => .{
-            .x      = @intCast(gap),
-            .y      = @intCast(y_offset +| gap),
-            .width  = if (screen_w > gap2b) screen_w - gap2b else constants.MIN_WINDOW_DIM,
-            .height = if (screen_h > gap2b) screen_h - gap2b else constants.MIN_WINDOW_DIM,
-        },
+    const inset: u16 = if (state.layout_variants.monocle == .gaps) gap else 0;
+    const total_margin = border2 + inset * 2;
+    const rect: utils.Rect = .{
+        .x      = @intCast(inset),
+        .y      = @intCast(y_offset +| inset),
+        .width  = if (screen_w > total_margin) screen_w - total_margin else constants.MIN_WINDOW_DIM,
+        .height = if (screen_h > total_margin) screen_h - total_margin else constants.MIN_WINDOW_DIM,
     };
 
     layouts.configureSafe(ctx, top_win, rect);
     _ = xcb.xcb_configure_window(ctx.conn, top_win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 
     // Push non-top windows offscreen so they never show through a transparent
-    // top window. Their cached rects are zeroed so restoreWorkspaceGeom won't
-    // replay stale on-screen positions — it will fall back to a full retile,
-    // which repeats this offscreen push correctly.
+    // top window.
+    //
+    // Optimization: if the cache entry for a window has already been zeroed
+    // (either by a previous monocle pass or by a workspace-switch push), the
+    // window is already offscreen and sending another configure_window is
+    // redundant. We still zero any valid cached rect so restoreWorkspaceGeom
+    // does not replay a stale on-screen position for background windows.
     for (windows[0 .. windows.len - 1]) |win| {
+        if (ctx.cache.getPtr(win)) |wd| {
+            if (!wd.hasValidRect()) continue; // already offscreen — skip the round-trip
+            wd.rect = tiling.ZERO_RECT;       // invalidate before sending
+        }
         _ = xcb.xcb_configure_window(ctx.conn, win,
             xcb.XCB_CONFIG_WINDOW_X,
             &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
-        if (ctx.cache.getPtr(win)) |wd| wd.rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
     }
 }
