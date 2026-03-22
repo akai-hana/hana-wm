@@ -66,6 +66,10 @@ pub const State = struct {
     workspaces: []Workspace,
     current:    u8,
     allocator:  std.mem.Allocator,
+    /// Windows temporarily patched into the current workspace by switchToAll().
+    /// Non-empty iff all-workspaces view is active.
+    /// Cleared (and their bitmasks restored) on the next switchToAll() or switchTo().
+    all_view_temp_wins: std.ArrayListUnmanaged(u32) = .empty,
 };
 
 var g_state: ?State = null;
@@ -74,6 +78,12 @@ pub inline fn getState() ?*State { return if (g_state) |*s| s else null; }
 
 /// Returns the bitmask with only the bit for `ws_idx` set.
 inline fn workspaceBit(ws_idx: u8) u64 { return @as(u64, 1) << @intCast(ws_idx); }
+
+/// Returns a bitmask with bits set for every workspace in [0, count).
+inline fn allWorkspacesMask(count: usize) u64 {
+    if (count >= 64) return ~@as(u64, 0);
+    return (@as(u64, 1) << @intCast(count)) - 1;
+}
 
 /// Yields the index of each set bit in `mask`, lowest first.
 const SetBitIterator = struct {
@@ -152,7 +162,10 @@ pub fn init() void {
 }
 
 pub fn deinit() void {
-    if (g_state) |*s| s.allocator.free(s.workspaces);
+    if (g_state) |*s| {
+        s.all_view_temp_wins.deinit(s.allocator);
+        s.allocator.free(s.workspaces);
+    }
     g_state = null;
     tracking.setWorkspaceCount(1);
     tracking.setCurrentWorkspace(0);
@@ -321,13 +334,150 @@ pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
 pub fn switchTo(ws_id: u8) void {
     const s = getState() orelse return;
     if (ws_id >= s.workspaces.len or ws_id == s.current) return;
+    exitAllWorkspacesView(s); // no-op when list is empty
     const old = s.current;
     s.current = ws_id;
     tracking.setCurrentWorkspace(ws_id);
     executeSwitch(old, ws_id);
 }
 
-// Query helpers
+/// Strips the current_ws bit from every window in `s.all_view_temp_wins`,
+/// evicts each one, and clears the list.  No-op when the list is empty.
+fn exitAllWorkspacesView(s: *State) void {
+    if (s.all_view_temp_wins.items.len == 0) return;
+    const current = s.current;
+    for (s.all_view_temp_wins.items) |win| {
+        const mask = tracking.getWindowWorkspaceMask(win) orelse continue;
+        const restored = mask & ~workspaceBit(current);
+        if (restored == 0) continue; // shouldn't happen, but never leave mask empty
+        setWindowMask(s, win, restored);
+        evictWindow(win);
+    }
+    s.all_view_temp_wins.clearRetainingCapacity();
+}
+
+/// `all_workspaces` action — Mod+5.
+/// Toggles a view where every window from every workspace is visible at once.
+///
+/// Enter: for each non-minimized window not already on the current workspace,
+///        adds the current-workspace bit to its tracking mask and appends it
+///        to `all_view_temp_wins`.  With all windows genuinely on the current
+///        workspace, `tiling.retileCurrentWorkspace()` tiles them normally.
+///
+/// Exit:  calls `exitAllWorkspacesView` which strips the temporary bit from
+///        each saved window and evicts it, then retiles to restore normal layout.
+pub fn switchToAll() void {
+    const s = getState() orelse return;
+
+    if (s.all_view_temp_wins.items.len > 0) {
+        // ── Exit all-workspaces view ─────────────────────────────────────────
+        const ptr_cookie = xcb.xcb_query_pointer(core.conn, core.root);
+        _ = xcb.xcb_grab_server(core.conn);
+
+        exitAllWorkspacesView(s);
+
+        if (has_tiling and core.config.tiling.enabled) tiling.retileCurrentWorkspace();
+        applyPostSwitchFocus(s.current, &s.workspaces[s.current], ptr_cookie);
+        bar.raiseBar();
+        bar.redrawInsideGrab();
+        _ = xcb.xcb_ungrab_server(core.conn);
+        _ = xcb.xcb_flush(core.conn);
+    } else {
+        // ── Enter all-workspaces view ────────────────────────────────────────
+        _ = xcb.xcb_grab_server(core.conn);
+
+        for (s.workspaces) |*ws| {
+            if (ws.id == s.current) continue;
+            for (ws.windows.items()) |win| {
+                if (tracking.isWindowOnWorkspace(win, s.current)) continue; // already here
+                if (isMinimized(win)) continue;
+
+                const mask = tracking.getWindowWorkspaceMask(win) orelse continue;
+                // Patch the mask: window is now genuinely on the current workspace,
+                // so tiling, focus, and every other subsystem sees it naturally.
+                setWindowMask(s, win, mask | workspaceBit(s.current));
+                s.all_view_temp_wins.append(s.allocator, win) catch {
+                    // OOM: undo the mask patch so we stay consistent.
+                    setWindowMask(s, win, mask);
+                    continue;
+                };
+            }
+        }
+
+        // All foreign windows are now genuinely on the current workspace.
+        // Retile handles mapping + positioning for tiled windows in one pass.
+        if (has_tiling and core.config.tiling.enabled) {
+            tiling.retileCurrentWorkspace();
+        } else {
+            // Floating layout: map and restore geometry manually.
+            for (s.all_view_temp_wins.items) |win| {
+                _ = xcb.xcb_map_window(core.conn, win);
+                if (window.getWindowGeom(win)) |rect| {
+                    utils.configureWindow(core.conn, win, rect);
+                } else {
+                    const pos = utils.floatDefaultPos();
+                    _ = xcb.xcb_configure_window(core.conn, win,
+                        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
+                        &[_]u32{ pos.x, pos.y });
+                }
+            }
+        }
+
+        bar.scheduleRedraw();
+        _ = xcb.xcb_ungrab_server(core.conn);
+        _ = xcb.xcb_flush(core.conn);
+    }
+}
+
+/// `move_to_all_workspaces` action — Mod+Shift+5.
+/// Toggles the focused window between pinned-to-all-workspaces and current-workspace-only.
+/// First press: sets all workspace bits — the window appears on every workspace.
+/// Second press: clears back to just the current workspace bit.
+pub fn moveWindowToAll(win: u32) void {
+    const s = getState() orelse return;
+    if (isMinimized(win)) return;
+
+    const all_mask = allWorkspacesMask(s.workspaces.len);
+    const mask = tracking.getWindowWorkspaceMask(win) orelse return;
+
+    if (mask == all_mask) {
+        // Already pinned everywhere — shrink back to current workspace only.
+        setWindowMask(s, win, workspaceBit(s.current));
+    } else {
+        // Pin to every workspace.
+        setWindowMask(s, win, all_mask);
+        _ = xcb.xcb_map_window(core.conn, win);
+    }
+
+    if (has_tiling and core.config.tiling.enabled) tiling.retileCurrentWorkspace();
+    bar.scheduleRedraw();
+    _ = xcb.xcb_flush(core.conn);
+}
+
+/// `toggle_tag_all` action — Mod+Alt+5.
+/// Flips between "pinned to every workspace" and "current workspace only".
+pub fn tagToggleAll(win: u32) void {
+    const s = getState() orelse return;
+    if (isMinimized(win)) return;
+
+    const all_mask = allWorkspacesMask(s.workspaces.len);
+    const mask = tracking.getWindowWorkspaceMask(win) orelse return;
+
+    if (mask == all_mask) {
+        // Pinned everywhere — shrink back to current workspace only.
+        setWindowMask(s, win, workspaceBit(s.current));
+    } else {
+        // Expand to all workspaces.
+        setWindowMask(s, win, all_mask);
+        _ = xcb.xcb_map_window(core.conn, win);
+    }
+
+    if (has_tiling and core.config.tiling.enabled) tiling.retileCurrentWorkspace();
+    bar.scheduleRedraw();
+    _ = xcb.xcb_flush(core.conn);
+}
+
+
 
 /// Returns the workspace bitmask for `win`, or null if unmanaged.
 /// Delegates to tracking which owns the map.

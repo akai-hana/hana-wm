@@ -497,6 +497,58 @@ inline fn suppressionFor(reason: Reason, current: core.FocusSuppressReason) core
     };
 }
 
+/// Synchronous pointer-position query for use inside a server grab.
+///
+/// Clears suppression, queries the pointer with a blocking reply, and updates
+/// all focus state for whichever managed window is currently under the cursor —
+/// all before returning.  Must be called inside xcb_grab_server /
+/// xcb_ungrab_server so that the resulting border and focus changes are folded
+/// into the same atomic batch as the tiling operation that preceded it.
+///
+/// Deliberately does NOT call bar.scheduleFocusRedraw: the caller is expected
+/// to call bar.redrawInsideGrab() immediately after, which is the only bar
+/// update needed.  Skipping scheduleFocusRedraw means the EnterNotify that the
+/// X server queued when the swapped window moved under the cursor will arrive
+/// post-ungrab, hit the g_focused_window == win early-return in setFocus, and
+/// be a complete no-op — one flush total for the entire swap operation.
+pub fn syncPointerFocusNow() void {
+    g_suppress_reason = .none;
+    const cookie = xcb.xcb_query_pointer(core.conn, core.root);
+    const reply  = xcb.xcb_query_pointer_reply(core.conn, cookie, null) orelse return;
+    defer std.c.free(reply);
+    const child = reply.*.child;
+    if (child == 0 or child == core.root) return;
+    if (!window.isValidManagedWindow(child)) return;
+    if (g_focused_window == child) return;
+
+    const input_model = utils.getInputModelCached(core.conn, child);
+    if (input_model == .no_input) return;
+
+    cancelPendingConfirm();
+
+    const old = g_focused_window;
+    if (old) |old_win| recordInHistory(old_win);
+    g_focused_window  = child;
+    g_suppress_reason = .none;
+
+    window.grabButtons(child, true);
+    if (old) |old_win| window.grabButtons(old_win, false);
+
+    _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
+        child, g_last_event_time);
+
+    if (input_model == .locally_active or input_model == .globally_active)
+        utils.sendWMTakeFocus(core.conn, child, g_last_event_time);
+
+    if (comptime build_options.has_tiling) tiling.updateWindowFocus(old, child);
+    carousel.notifyFocusChanged(child);
+    advertiseActiveWindow(child);
+    // bar.scheduleFocusRedraw intentionally omitted — caller must call
+    // bar.redrawInsideGrab() to cover the bar update inside the grab.
+    // This prevents a second async redraw from being queued, ensuring
+    // the subsequent EnterNotify is a no-op and there is only one flush.
+}
+
 /// Fire an async pointer-position query for focus-after-tiling sync.
 ///
 /// Clears suppression immediately (so subsequent EnterNotify events are no

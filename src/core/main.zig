@@ -3,7 +3,7 @@
 //! Global WM state (conn, screen, root, allocator, config, dpi_info) lives in
 //! core.zig and is initialized here at startup. Modules import core directly.
 
-// Zig stdlib
+// zig stdlibs
 const std = @import("std");
 
 // build.zig
@@ -11,29 +11,21 @@ const build_options = @import("build_options");
 
 // core/
 const core   = @import("core");
+const xcb    = core.xcb;
 const utils  = @import("utils");
 const events = @import("events");
-const scale  = @import("scale");
 const config = @import("config");
-const xcb    = core.xcb;
+// core/modules/
+const scale  = if (build_options.has_scale) @import("scale") else struct {};
 
 // input/
 const input = @import("input");
 
 // window/
-const window     = @import("window");
-const focus      = @import("focus");
-const tracking   = @import("tracking");
-const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
-const minimize   = if (build_options.has_minimize) @import("minimize") else struct {};
-const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
-
-// tiling/
-const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
+const window = @import("window");
 
 // bar/
 const bar    = @import("bar");
-const prompt = @import("prompt");
 
 // debug/
 const debug = @import("debug");
@@ -47,7 +39,7 @@ pub fn main() !void {
     core.screen   = x.screen;
     core.root     = x.root;
     core.alloc    = std.heap.c_allocator;
-    core.dpi_info = scale.detect(x.conn, x.screen);
+    if (comptime build_options.has_scale) core.dpi_info = scale.detect(x.conn, x.screen);
 
     input.setup(x.conn, x.screen, x.root);
     try input.initXkb(x.conn);
@@ -55,8 +47,10 @@ pub fn main() !void {
 
     core.config = try config.load(core.alloc, x.screen, input.getXkbState());
     defer core.config.deinit(core.alloc);
+    if (comptime build_options.has_scale)
+        core.config.bar.scaled_font_size = scale.scaleFontSize(core.config.bar.font_size, x.screen);
 
-    try initGlobalState(x.conn, core.alloc);
+    try initGlobalState(x.conn);
     // Defers run in LIFO order: core.config.deinit() must run before deinitGlobalState().
     defer deinitGlobalState();
 
@@ -121,7 +115,7 @@ fn connectToX() !X {
         &[_]u32{ROOT_WINDOW_EVENT_MASK},
     );
     if (xcb.xcb_request_check(conn_, cookie)) |err| {
-        debug.err("Another window manager is already running: {}", .{err});
+        debug.err("Another window manager is already running: {*}", .{err});
         std.c.free(err);
         return error.AnotherWMRunning;
     }
@@ -147,33 +141,21 @@ fn initBar() void {
 
 /// Initializes all WM modules that require explicit lifecycle management.
 fn initModules() !void {
-    window.init(); // populates atom cache required by handleMapRequest
-    if (build_options.has_tiling) tiling.init(); // must precede workspaces.init(): workspaces.init() calls tiling.getState()
-    if (build_options.has_fullscreen) fullscreen.init();
-    if (build_options.has_workspaces) workspaces.init();
-    if (build_options.has_minimize) minimize.init();
-    try prompt.init(core.alloc, core.conn);
+    window.init(core.alloc);
 }
 
 /// Tears down all WM modules in reverse init order.
 fn deinitModules() void {
-    if (build_options.has_tiling) tiling.deinit();
-    if (build_options.has_fullscreen) fullscreen.deinit();
-    if (build_options.has_workspaces) workspaces.deinit();
-    prompt.deinit();
+    window.deinit();
 }
 
-/// Initializes global WM state: X atom cache, focus property cache, and focus tracking.
-fn initGlobalState(conn_: *xcb.xcb_connection_t, alloc: std.mem.Allocator) !void {
-    tracking.init(alloc);
-    try utils.initAtomCache(conn_);   // Intern frequently used X atoms
-    utils.initInputModelCache();      // Build per-window focus property cache (no allocator — static array)
-    focus.init(alloc);
+/// Initializes global WM state: X atom cache and focus property cache.
+fn initGlobalState(conn_: *xcb.xcb_connection_t) !void {
+    try utils.initAtomCache(conn_);  // Intern frequently used X atoms
+    utils.initInputModelCache();     // Build per-window focus property cache (no allocator — static array)
 }
 
 /// Tears down global WM state initialized by initGlobalState.
 fn deinitGlobalState() void {
     utils.deinitInputModelCache();
-    focus.deinit();
-    tracking.deinit();
 }

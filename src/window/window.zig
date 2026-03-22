@@ -25,7 +25,14 @@ inline fn wsRemoveWindow(win: u32) void {
     else tracking.removeWindow(win);
 }
 const drag          = @import("drag");
-const scale         = @import("scale");
+const scale         = if (build_options.has_scale) @import("scale") else struct {
+    pub fn scaleBorderWidth(value: anytype, reference_dimension: u16) u16 {
+        if (value.is_percentage) {
+            const dim_f: f32 = @floatFromInt(reference_dimension);
+            return @intFromFloat(@max(0.0, @round((value.value / 100.0) * 0.5 * dim_f)));
+        } else return @intFromFloat(@max(0.0, @round(value.value)));
+    }
+};
 const debug         = @import("debug");
 const minimize      = if (build_options.has_minimize) @import("minimize") else struct {};
 const fullscreen    = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
@@ -143,8 +150,23 @@ fn populateAtomCache() void {
     }) |e| @field(atoms, e.field) = utils.getAtomCached(e.atom) catch 0;
 }
 
-pub fn init() void {
+pub fn init(alloc: std.mem.Allocator) void {
+    tracking.init(alloc);
+    focus.init(alloc);
+    // tiling must precede workspaces: workspaces.init() calls tiling.getState().
+    if (comptime build_options.has_tiling)      tiling.init();
+    if (comptime build_options.has_fullscreen)  fullscreen.init();
+    if (comptime build_options.has_workspaces)  workspaces.init();
+    if (comptime build_options.has_minimize)    minimize.init();
     populateAtomCache();
+}
+
+pub fn deinit() void {
+    if (comptime build_options.has_tiling)     tiling.deinit();
+    if (comptime build_options.has_fullscreen) fullscreen.deinit();
+    if (comptime build_options.has_workspaces) workspaces.deinit();
+    focus.deinit();
+    tracking.deinit();
 }
 
 /// Returns true when tiling is both compiled in and enabled at runtime.
@@ -814,6 +836,7 @@ pub fn updateFocusBorders(old_focused: ?u32, new_focused: ?u32) void {
 /// Called after a retile pass: layout changes can implicitly shift which
 /// window is fullscreen or focused, making cached colors stale.
 pub fn updateWorkspaceBorders() void {
+    if (comptime !build_options.has_workspaces) return;
     const ws = wsGetCurrentWorkspaceObject() orelse return;
     for (ws.windows.items()) |win|
         _ = xcb.xcb_change_window_attributes(core.conn, win,

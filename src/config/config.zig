@@ -334,6 +334,9 @@ const ACTION_MAP = std.StaticStringMap(core.Action).initComptime(.{
     .{ "drun",                   .toggle_prompt          },
     .{ "toggle_float",           .toggle_floating        },
     .{ "float",                  .toggle_floating        },
+    .{ "all_workspaces",         .all_workspaces         },
+    .{ "move_to_all_workspaces", .move_to_all_workspaces },
+    .{ "toggle_tag_all",         .toggle_tag_all         },
 });
 
 const GlobEntry = struct {

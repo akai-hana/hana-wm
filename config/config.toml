@@ -170,10 +170,16 @@ Mod+period = "decrease_master_count"
 ## Switch to workspace N
 ### Keys are assigned workspace indices by their position in the list.
 Mod+{1-4,Q,W,E,R} = "workspace" #TODO: rename to "switch_to_workspace"
+#TODO: change to Mod+{1-4,Q,W,E,R} = "workspace" + {1-9}
+Mod+5 = "all_workspaces"
+#TODO: change to Mod+5 = "workspace_" + {1-9}
+# the difference is that i'm first matching a range against a range, so all binds get bound in pairs (e.g. Mod+1 = "workspace_1", Mod+2 = "workspace_2", etc. 
 
 ## Workspace window sending
 Mod+Shift+{1-4,Q,W,E,R} = "move_to_workspace"
-Mod+Alt+{1-4,Q,W,E,R} = "toggle_tag" #TODO: rename to toggle_to_workspace
+Mod+Alt+{1-4,Q,W,E,R}   = "toggle_tag" #TODO: rename to toggle_to_workspace
+
+Mod+Shift+5 " move_to_all_workspaces"
 
 # Bar
 Mod+B       = "toggle_bar_visibility"  # shown/hidden

@@ -143,10 +143,12 @@ inline fn hideWindow(win: u32) void {
 /// workspace insertion order, which is not MRU, and is specifically suited
 /// to tiling fallback (master or first slave).
 pub fn focusMasterOrFirst() void {
-    if (wsGetCurrentWorkspaceObject()) |ws| {
-        if (tracking.firstNonMinimized(ws.windows.items())) |win| {
-            focus.setFocus(win, .tiling_operation);
-            return;
+    if (comptime build_options.has_workspaces) {
+        if (wsGetCurrentWorkspaceObject()) |ws| {
+            if (tracking.firstNonMinimized(ws.windows.items())) |win| {
+                focus.setFocus(win, .tiling_operation);
+                return;
+            }
         }
     }
     focus.clearFocus();

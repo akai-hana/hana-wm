@@ -157,6 +157,13 @@ pub inline fn getWorkspaceForWindow(win: u32) ?u8 {
     return @intCast(@ctz(mask));
 }
 
+/// Returns a key iterator over every tracked window ID, or null if uninitialised.
+/// The map must not be modified while the iterator is live.
+pub fn allWindowsIterator() ?std.AutoHashMap(u32, u64).KeyIterator {
+    if (g_map) |*m| return m.keyIterator();
+    return null;
+}
+
 pub inline fn isWindowOnWorkspace(win: u32, ws_idx: u8) bool {
     const mask = getWindowWorkspaceMask(win) orelse return false;
     return (mask >> @intCast(ws_idx)) & 1 != 0;

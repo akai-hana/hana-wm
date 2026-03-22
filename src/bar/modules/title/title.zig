@@ -260,7 +260,7 @@ fn drawSegmentedTitles(
     if (n_infos == 0) return;
 
     const window_infos = infos_buf[0..n_infos];
-    std.mem.sort(WindowInfo, window_infos, {}, compareWindows);
+    std.mem.sort(WindowInfo, window_infos, focused_window, compareWindows);
 
     const num_windows: u32 = @intCast(window_infos.len);
     const baseline_y       = dc.baselineY(height);
@@ -318,10 +318,19 @@ fn drawSegmentedTitles(
 ///   2. Within each group, left-to-right by x position, then top-to-bottom by
 ///      y position — this preserves the spatial order of tiled windows.
 ///   3. Tie-break by window ID for deterministic ordering.
-fn compareWindows(_: void, a: WindowInfo, b: WindowInfo) bool {
+fn compareWindows(focused: ?u32, a: WindowInfo, b: WindowInfo) bool {
     if (a.minimized != b.minimized) return !a.minimized;
+    // Windows with negative x are offscreen (monocle background windows).
+    // Demote them after all on-screen windows so artificial offscreen
+    // coordinates never override real spatial ordering or focus state.
+    const a_offscreen = a.x < 0;
+    const b_offscreen = b.x < 0;
+    if (a_offscreen != b_offscreen) return !a_offscreen;
     if (a.x != b.x) return a.x < b.x;
     if (a.y != b.y) return a.y < b.y;
+    const a_focused = focused != null and a.window == focused.?;
+    const b_focused = focused != null and b.window == focused.?;
+    if (a_focused != b_focused) return a_focused;
     return a.window < b.window;
 }
 
