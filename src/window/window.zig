@@ -9,6 +9,7 @@ const constants     = @import("constants");
 const focus         = @import("focus");
 const build_options = @import("build_options");
 const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
+const layouts       = @import("layouts");
 const bar           = @import("bar");
 const workspaces    = @import("workspaces");
 const drag          = @import("drag");
@@ -76,6 +77,51 @@ var atoms: struct {
     wm_class:     u32 = 0,
     net_wm_pid:   u32 = 0,
 } = .{};
+
+// Geometry cache
+//
+// Stores last-known window geometry for workspace-switch and minimize/restore.
+// When tiling is present, all operations delegate to tiling's own cache so
+// there is exactly one source of truth. When tiling is absent, this module
+// owns the cache directly, giving workspaces.zig and minimize.zig a stable
+// save/restore API regardless of build configuration.
+
+var g_geom_cache: layouts.CacheMap = .{};
+
+/// Save `rect` as the last-known geometry for `win`.
+/// Delegates to tiling when present; writes to g_geom_cache otherwise.
+pub fn saveWindowGeom(win: u32, rect: utils.Rect) void {
+    if (comptime build_options.has_tiling) {
+        tiling.saveWindowGeom(win, rect);
+    } else {
+        g_geom_cache.getOrPut(win).value_ptr.rect = rect;
+    }
+}
+
+/// Return the last-known geometry for `win`, or null if none is cached.
+/// Delegates to tiling when present; reads from g_geom_cache otherwise.
+pub fn getWindowGeom(win: u32) ?utils.Rect {
+    if (comptime build_options.has_tiling) return tiling.getWindowGeom(win);
+    const wd = g_geom_cache.get(win) orelse return null;
+    if (!wd.hasValidRect()) return null;
+    return wd.rect;
+}
+
+/// Zero out the cached rect for `win` so the next retile recomputes it.
+pub fn invalidateWindowGeom(win: u32) void {
+    if (comptime build_options.has_tiling) {
+        tiling.invalidateGeomCache(win);
+        return;
+    }
+    if (g_geom_cache.getPtr(win)) |wd| wd.rect = .{};
+}
+
+/// Remove `win`'s entry from the cache entirely (called on unmanage).
+pub fn evictWindowGeom(win: u32) void {
+    if (comptime build_options.has_tiling) return; // tiling.removeWindow handles this
+    g_geom_cache.remove(win);
+}
+
 
 fn populateAtomCache() void {
     inline for (.{
@@ -327,6 +373,16 @@ fn commitWindowToScreen(win: u32, on_current_workspace: bool) void {
     if (tilingActive()) {
         tiling.addWindow(win);
         if (on_current_workspace) tiling.retileCurrentWorkspace();
+    } else if (on_current_workspace) {
+        // Without tiling, retileCurrentWorkspace() never runs, so we must
+        // manually push the new window offscreen when fullscreen is active —
+        // otherwise it maps on top of the fullscreen window and appears to
+        // immediately vanish when the fullscreen window is raised above it.
+        if (fullscreen.hasAnyFullscreen()) {
+            _ = xcb.xcb_configure_window(core.conn, win,
+                xcb.XCB_CONFIG_WINDOW_X,
+                &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
+        }
     }
 
     // Apply border width and initial color before mapping so the compositor

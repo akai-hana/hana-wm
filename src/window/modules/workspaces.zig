@@ -1,19 +1,20 @@
 //! Workspace management — creation, window assignment, and workspace switching.
 
-const std        = @import("std");
-const fullscreen = @import("fullscreen");
-const core = @import("core");
-const xcb        = core.xcb;
-const utils      = @import("utils");
-const focus      = @import("focus");
-const window     = @import("window");
-const bar        = @import("bar");
-const has_tiling = @import("build_options").has_tiling;
-const tiling = if (has_tiling) @import("tiling") else struct {};
-const Tracking   = @import("tracking").Tracking;
-const constants  = @import("constants");
-const debug      = @import("debug");
-const minimize   = @import("minimize");
+const std          = @import("std");
+const fullscreen   = @import("fullscreen");
+const core         = @import("core");
+const xcb          = core.xcb;
+const utils        = @import("utils");
+const focus        = @import("focus");
+const window       = @import("window");
+const bar          = @import("bar");
+const has_tiling   = @import("build_options").has_tiling;
+const tiling       = if (has_tiling) @import("tiling") else struct {};
+const TilingLayout = if (has_tiling) tiling.Layout else u0;
+const Tracking     = @import("tracking").Tracking;
+const constants    = @import("constants");
+const debug        = @import("debug");
+const minimize     = @import("minimize");
 
 // Comptime-generated workspace name strings ("1".."20"), never heap-allocated.
 const WORKSPACE_NAMES = blk: {
@@ -29,7 +30,7 @@ pub const Workspace = struct {
     // The tiling layout active on this workspace.
     // Initialized from config; updated when the user switches layouts
     // in per-workspace mode.
-    layout:    tiling.Layout,
+    layout: TilingLayout,
     // Optional layout variants override set via the layouts array in config.
     // Applied on every workspace switch; null means use the global defaults.
     variants: ?core.LayoutVariantOverride = null,
@@ -42,7 +43,7 @@ pub const Workspace = struct {
     // Restored on re-entry when the cursor is not hovering over any window.
     last_focused: ?u32 = null,
 
-    pub fn init(id: u8, name: []const u8, default_layout: tiling.Layout) Workspace {
+    pub fn init(id: u8, name: []const u8, default_layout: TilingLayout) Workspace {
         return .{ .id = id, .windows = .{}, .name = name, .layout = default_layout };
     }
 
@@ -92,11 +93,12 @@ inline fn pushOffscreen(conn: *xcb.xcb_connection_t, win: u32) void {
 /// Used when a window leaves the current workspace.
 inline fn evictWindow(win: u32) void {
     pushOffscreen(core.conn, win);
-    tiling.invalidateGeomCache(win);
+    if (has_tiling) tiling.invalidateGeomCache(win);
 }
 
 /// Resolves a layout name (e.g. "master-stack", "monocle") to tiling.Layout.
-fn layoutFromName(name: []const u8) tiling.Layout {
+fn layoutFromName(name: []const u8) TilingLayout {
+    if (!has_tiling) return 0;
     return if (std.mem.eql(u8, name, "master-stack")) .master
         else std.meta.stringToEnum(tiling.Layout, name) orelse tiling.defaultLayout();
 }
@@ -108,8 +110,7 @@ pub fn init() void {
         return;
     };
 
-    const default_layout = tiling.getState().layout;
-
+    const default_layout: TilingLayout = if (has_tiling) tiling.getState().layout else 0;
     const cfg_tiling = &core.config.tiling;
 
     for (wss, 0..) |*ws, i| {
@@ -120,13 +121,15 @@ pub fn init() void {
         // layouts array (e.g. `"monocle", "gapless", "4,8"` in config.toml).
         var ws_layout    = default_layout;
         var ws_variant: ?core.LayoutVariantOverride = null;
-        for (cfg_tiling.workspace_layout_overrides.items) |override| {
-            if (override.workspace_idx == id) {
-                if (override.layout_idx < cfg_tiling.layouts.items.len) {
-                    ws_layout = layoutFromName(cfg_tiling.layouts.items[override.layout_idx]);
+        if (has_tiling) {
+            for (cfg_tiling.workspace_layout_overrides.items) |override| {
+                if (override.workspace_idx == id) {
+                    if (override.layout_idx < cfg_tiling.layouts.items.len) {
+                        ws_layout = layoutFromName(cfg_tiling.layouts.items[override.layout_idx]);
+                    }
+                    ws_variant = override.variant;
+                    break;
                 }
-                ws_variant = override.variant;
-                break;
             }
         }
 
@@ -194,7 +197,7 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
 
     evictWindow(win);
     if (focus.getFocused() == win) focus.clearFocus();
-    if (core.config.tiling.enabled) tiling.dirty();
+    if (has_tiling and core.config.tiling.enabled) tiling.dirty();
     bar.scheduleRedraw();
 }
 
@@ -232,6 +235,14 @@ pub fn moveWindowExclusive(win: u32, target_ws: u8) void {
     const mask = s.window_to_workspaces.get(win) orelse return;
     if (mask == workspaceBit(target_ws)) return; // already exclusively on target — no-op
 
+    // Transfer fullscreen record to the target workspace so the window
+    // remains fullscreen wherever it lands, not just on the source workspace.
+    if (fullscreen.workspaceFor(win)) |src_ws| {
+        const info = fullscreen.getForWorkspace(src_ws).?;
+        fullscreen.removeForWorkspace(src_ws);
+        fullscreen.setForWorkspace(target_ws, info);
+    }
+
     setWindowMask(s, win, workspaceBit(target_ws));
 
     if (target_ws != s.current) {
@@ -239,7 +250,7 @@ pub fn moveWindowExclusive(win: u32, target_ws: u8) void {
         if (focus.getFocused() == win) focus.clearFocus();
     }
 
-    if (core.config.tiling.enabled) tiling.retileCurrentWorkspace();
+    if (has_tiling and core.config.tiling.enabled) tiling.retileCurrentWorkspace();
     bar.scheduleRedraw();
     _ = xcb.xcb_flush(core.conn);
 }
@@ -262,10 +273,22 @@ pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
         if (@popCount(mask) <= 1) return; // last workspace — protect
         setWindowMask(s, win, mask & ~tbit);
         if (target_ws == current) {
+            // Window is leaving the current workspace; if it was fullscreen here
+            // transfer the record to whichever workspace it still belongs to.
+            if (fullscreen.workspaceFor(win)) |src_ws| {
+                if (src_ws == current) {
+                    const info = fullscreen.getForWorkspace(src_ws).?;
+                    fullscreen.removeForWorkspace(src_ws);
+                    // Land on the lowest-set-bit workspace still in the new mask.
+                    const new_mask = mask & ~tbit;
+                    const dst: u8 = @intCast(@ctz(new_mask));
+                    fullscreen.setForWorkspace(dst, info);
+                }
+            }
             evictWindow(win);
-            if (core.config.tiling.enabled) tiling.retileCurrentWorkspace();
+            if (has_tiling and core.config.tiling.enabled) tiling.retileCurrentWorkspace();
         } else {
-            tiling.invalidateWsGeomBit(target_ws);
+            if (has_tiling) tiling.invalidateWsGeomBit(target_ws);
         }
     } else {
         // Add tag N. In protected mode, always keep the current workspace set too.
@@ -273,9 +296,9 @@ pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
         setWindowMask(s, win, new_mask);
         if (target_ws == current) {
             _ = xcb.xcb_map_window(core.conn, win);
-            if (core.config.tiling.enabled) tiling.retileCurrentWorkspace();
+            if (has_tiling and core.config.tiling.enabled) tiling.retileCurrentWorkspace();
         } else {
-            tiling.invalidateWsGeomBit(target_ws);
+            if (has_tiling) tiling.invalidateWsGeomBit(target_ws);
         }
     }
 
@@ -378,7 +401,7 @@ fn hideWorkspaceWindows(ws: *const Workspace, new_ws: u8) void {
 
     for (ws.windows.items()) |win| {
         if (isWindowOnWorkspace(win, new_ws)) continue; // stays visible
-        if (!tiling.isWindowActiveTiled(win) and !minimize.isMinimized(win)) {
+        if ((!has_tiling or !tiling.isWindowActiveTiled(win)) and !minimize.isMinimized(win)) {
             if (float_n < MAX_FLOAT) {
                 float_wins[float_n]    = win;
                 float_cookies[float_n] = xcb.xcb_get_geometry(core.conn, win);
@@ -394,7 +417,7 @@ fn hideWorkspaceWindows(ws: *const Workspace, new_ws: u8) void {
         if (fi < float_n and float_wins[fi] == win) {
             if (xcb.xcb_get_geometry_reply(core.conn, float_cookies[fi], null)) |geom| {
                 defer std.c.free(geom);
-                tiling.saveWindowGeom(win, .{
+                window.saveWindowGeom(win, .{
                     .x = geom.*.x, .y = geom.*.y,
                     .width = geom.*.width, .height = geom.*.height,
                 });
@@ -402,13 +425,13 @@ fn hideWorkspaceWindows(ws: *const Workspace, new_ws: u8) void {
             fi += 1;
         }
         pushOffscreen(core.conn, win);
-        if (tiling.isWindowActiveTiled(win)) tiling.invalidateGeomCache(win);
+        if (has_tiling and tiling.isWindowActiveTiled(win)) tiling.invalidateGeomCache(win);
     }
 }
 
 // Step 3b: restore geometry for the new workspace.
 fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
-    const tiling_active = tiling.getState().enabled;
+    const tiling_active = has_tiling and tiling.getState().enabled;
 
     if (tiling_active) {
         if (!core.config.tiling.global_layout) tiling.syncLayoutFromWorkspace(ws);
@@ -417,16 +440,16 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
         // their cache holds stale tiling positions from that workspace.
         for (ws.windows.items()) |win| {
             if (tiling.isWindowTiled(win) and isWindowOnWorkspace(win, old_ws))
-                tiling.invalidateGeomCache(win);
+                if (has_tiling) tiling.invalidateGeomCache(win);
         }
 
         if (!tiling.restoreWorkspaceGeom()) {
             for (ws.windows.items()) |win| {
-                if (tiling.isWindowTiled(win)) tiling.invalidateGeomCache(win);
+                if (tiling.isWindowTiled(win)) if (has_tiling) tiling.invalidateGeomCache(win);
             }
             tiling.retileCurrentWorkspace();
         }
-    } else if (tiling.isFloatingLayout()) {
+    } else if (has_tiling and tiling.isFloatingLayout()) {
         // Floating layout: the tiling engine is disabled for window management
         // but windows on inactive workspaces may have had their geometry cache
         // zeroed the last time they were left while tiling was still active.
@@ -443,12 +466,15 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
     const pos = utils.floatDefaultPos();
     for (ws.windows.items()) |win| {
         _ = xcb.xcb_map_window(core.conn, win);
-        if (!tiling.isWindowActiveTiled(win) and !minimize.isMinimized(win) and
+        if ((!has_tiling or !tiling.isWindowActiveTiled(win)) and !minimize.isMinimized(win) and
             !isWindowOnWorkspace(win, old_ws))
         {
-            if (tiling.getWindowGeom(win)) |rect| {
+            var restored = false;
+            if (window.getWindowGeom(win)) |rect| {
                 utils.configureWindow(core.conn, win, rect);
-            } else {
+                restored = true;
+            }
+            if (!restored) {
                 _ = xcb.xcb_configure_window(core.conn, win,
                     xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
                     &[_]u32{ pos.x, pos.y });

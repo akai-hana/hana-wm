@@ -35,6 +35,7 @@ const tiling = if (has_tiling) @import("tiling") else struct {
     pub fn retileCurrentWorkspace() void {}
     pub fn getWindowFilteredIndex(_: u32) ?usize { return null; }
 };
+const window     = @import("window");
 const workspaces = @import("workspaces");
 const fullscreen = @import("fullscreen");
 const bar        = @import("bar");
@@ -235,6 +236,8 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
         else
             tiling.addWindow(win);
         tiling.retileCurrentWorkspace();
+    } else if (window.getWindowGeom(win)) |rect| {
+        utils.configureWindow(core.conn, win, rect);
     } else {
         const pos = utils.floatDefaultPos();
         _ = xcb.xcb_configure_window(core.conn, win,
@@ -365,9 +368,13 @@ pub fn unminimizeAll() void {
         } else {
             const pos = utils.floatDefaultPos();
             for (plain_wins) |e| {
-                _ = xcb.xcb_configure_window(core.conn, e.win,
-                    xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
-                    &[_]u32{ pos.x, pos.y });
+                if (window.getWindowGeom(e.win)) |rect| {
+                    utils.configureWindow(core.conn, e.win, rect);
+                } else {
+                    _ = xcb.xcb_configure_window(core.conn, e.win,
+                        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
+                        &[_]u32{ pos.x, pos.y });
+                }
             }
         }
 
