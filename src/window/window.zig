@@ -11,12 +11,24 @@ const build_options = @import("build_options");
 const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
 const layouts       = @import("layouts");
 const bar           = @import("bar");
-const workspaces    = @import("workspaces");
+const tracking    = @import("tracking");
+const workspaces  = if (build_options.has_workspaces) @import("workspaces") else struct {};
+const WsWorkspace = if (build_options.has_workspaces) workspaces.Workspace else struct {};
+fn wsGetState() ?*workspaces.State             { return if (comptime build_options.has_workspaces) workspaces.getState()                 else null; }
+fn wsGetCurrentWorkspaceObject() ?*WsWorkspace { return if (comptime build_options.has_workspaces) workspaces.getCurrentWorkspaceObject() else null; }
+inline fn wsMoveWindowTo(win: u32, ws: u8) !void {
+    if (comptime build_options.has_workspaces) try workspaces.moveWindowTo(win, ws)
+    else try tracking.registerWindow(win, 0);
+}
+inline fn wsRemoveWindow(win: u32) void {
+    if (comptime build_options.has_workspaces) workspaces.removeWindow(win)
+    else tracking.removeWindow(win);
+}
 const drag          = @import("drag");
 const scale         = @import("scale");
 const debug         = @import("debug");
-const minimize      = @import("minimize");
-const fullscreen    = @import("fullscreen");
+const minimize      = if (build_options.has_minimize) @import("minimize") else struct {};
+const fullscreen    = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 
 // XSizeHints flags (ICCCM §4.1.2.3)
 const XSIZE_HINTS_P_MIN_SIZE:   u32 = 0x10;
@@ -147,17 +159,12 @@ pub inline fn isValidManagedWindow(win: u32) bool {
     return win != 0 and
            win != core.root and
            !bar.isBarWindow(win) and
-           workspaces.getWorkspaceForWindow(win) != null;
+           tracking.isManaged(win);
 }
 
 pub inline fn isOnCurrentWorkspace(win: u32) bool {
-    // Deliberate: single probe on window_to_workspaces covers both the
-    // "is managed" and "is on current workspace" checks, avoiding two
-    // lookups on the same key on every EnterNotify hot path.
     if (win == 0 or win == core.root or bar.isBarWindow(win)) return false;
-    const s = workspaces.getState() orelse return false;
-    const mask = s.window_to_workspaces.get(win) orelse return false;
-    return (mask >> @intCast(s.current)) & 1 != 0;
+    return tracking.isOnCurrentWorkspace(win);
 }
 
 // Button grab management
@@ -177,8 +184,7 @@ pub fn grabButtons(win: u32, focused: bool) void {
 
 /// Returns `target` if it is a valid workspace index, otherwise `fallback`.
 inline fn clampToValidWorkspace(target: u8, fallback: u8) u8 {
-    const s = workspaces.getState() orelse return fallback;
-    return if (target < s.workspaces.len) target else fallback;
+    return if (target < tracking.getWorkspaceCount()) target else fallback;
 }
 
 /// Resolves a pre-fired WM_CLASS property cookie against workspace rules.
@@ -378,10 +384,12 @@ fn commitWindowToScreen(win: u32, on_current_workspace: bool) void {
         // manually push the new window offscreen when fullscreen is active —
         // otherwise it maps on top of the fullscreen window and appears to
         // immediately vanish when the fullscreen window is raised above it.
-        if (fullscreen.hasAnyFullscreen()) {
-            _ = xcb.xcb_configure_window(core.conn, win,
-                xcb.XCB_CONFIG_WINDOW_X,
-                &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
+        if (comptime build_options.has_fullscreen) {
+            if (fullscreen.hasAnyFullscreen()) {
+                _ = xcb.xcb_configure_window(core.conn, win,
+                    xcb.XCB_CONFIG_WINDOW_X,
+                    &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
+            }
         }
     }
 
@@ -419,7 +427,7 @@ fn discardPropertyCookies(cookies: PropertyCookies) void {
 
 pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const win        = event.window;
-    const current_ws = workspaces.getCurrentWorkspace() orelse 0;
+    const current_ws: u8 = @intCast(tracking.getCurrentWorkspace() orelse 0);
 
     _ = xcb.xcb_change_window_attributes(
         core.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{constants.EventMasks.MANAGED_WINDOW},
@@ -429,7 +437,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const target_ws = resolveTargetWorkspace(win, current_ws, cookies.net_wm_pid);
     const on_current = target_ws == current_ws;
 
-    workspaces.moveWindowTo(win, target_ws) catch |err| {
+    wsMoveWindowTo(win, target_ws) catch |err| {
         debug.logError(err, win);
         discardPropertyCookies(cookies);
         _ = xcb.xcb_flush(core.conn);
@@ -450,14 +458,16 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
 // Unmap / destroy
 
 fn unmanageWindow(win: u32) void {
-    const fs_ws = fullscreen.workspaceFor(win);
-    if (fs_ws) |ws| fullscreen.removeForWorkspace(ws);
-    const was_fullscreen = fs_ws != null;
+    const was_fullscreen = if (comptime build_options.has_fullscreen) blk: {
+        const fs_ws = fullscreen.workspaceFor(win);
+        if (fs_ws) |ws| fullscreen.removeForWorkspace(ws);
+        break :blk fs_ws != null;
+    } else false;
 
     const was_focused = (focus.getFocused() == win);
 
-    const window_workspace = workspaces.getWorkspaceForWindow(win);
-    const current_ws       = workspaces.getCurrentWorkspace();
+    const window_workspace = tracking.getWorkspaceForWindow(win);
+    const current_ws       = tracking.getCurrentWorkspace();
 
     utils.uncacheWindowFocusProps(win);
 
@@ -477,8 +487,8 @@ fn unmanageWindow(win: u32) void {
         tiling.removeWindow(win);
         tiling.evictSizeHints(win);
     }
-    minimize.forceUntrack(win);
-    workspaces.removeWindow(win);
+    if (comptime build_options.has_minimize) minimize.forceUntrack(win);
+    wsRemoveWindow(win);
 
     if (was_fullscreen) bar.setBarState(.show_fullscreen);
 
@@ -516,17 +526,21 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t) void {
 /// pointer-position reply is pre-fired before the server grab to overlap the
 /// round-trip.
 fn focusWindowUnderPointer(ptr_cookie: xcb.xcb_query_pointer_cookie_t) void {
+    const fallback: ?*const fn () void = if (comptime build_options.has_minimize)
+        minimize.focusMasterOrFirst
+    else
+        null;
     const reply = xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null) orelse {
-        focus.focusBestAvailable(.tiling_operation, workspaces.isOnCurrentWorkspaceAndVisible, minimize.focusMasterOrFirst);
+        focus.focusBestAvailable(.tiling_operation, tracking.isOnCurrentWorkspaceAndVisible, fallback);
         return;
     };
     defer std.c.free(reply);
     const child = reply.*.child;
-    if (workspaces.isOnCurrentWorkspaceAndVisible(child)) {
+    if (tracking.isOnCurrentWorkspaceAndVisible(child)) {
         focus.setFocus(child, .mouse_enter);
         return;
     }
-    focus.focusBestAvailable(.tiling_operation, workspaces.isOnCurrentWorkspaceAndVisible, minimize.focusMasterOrFirst);
+    focus.focusBestAvailable(.tiling_operation, tracking.isOnCurrentWorkspaceAndVisible, fallback);
 }
 
 // Configure request
@@ -590,7 +604,8 @@ fn sendSyntheticConfigureNotify(win: u32) void {
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) void {
     const win = event.window;
     const is_tiled = tilingActive() and tiling.isWindowActiveTiled(win);
-    if (is_tiled or fullscreen.isFullscreen(win)) {
+    const is_fullscreen = if (comptime build_options.has_fullscreen) fullscreen.isFullscreen(win) else false;
+    if (is_tiled or is_fullscreen) {
         sendSyntheticConfigureNotify(win);
         return;
     }
@@ -629,7 +644,9 @@ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
 inline fn maybeFocusWindow(win: u32) void {
     if (focus.getFocused() == win) return;
     if (!isOnCurrentWorkspace(win)) return;
-    if (minimize.isMinimized(win)) return;
+    if (comptime build_options.has_minimize) {
+        if (minimize.isMinimized(win)) return;
+    }
     focus.setFocus(win, .mouse_enter);
 }
 
@@ -650,7 +667,7 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t) void {
         event.child
     else
         event.event;
-    maybeFocusWindow(utils.findManagedWindow(core.conn, win, workspaces.isManaged));
+    maybeFocusWindow(utils.findManagedWindow(core.conn, win, tracking.isManaged));
 }
 
 pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t) void {
@@ -764,7 +781,9 @@ pub inline fn getBorderWidth() u16 {
 ///   border_focused  — the currently focused window
 ///   border_unfocused — everything else
 inline fn borderColor(win: u32) u32 {
-    if (fullscreen.isFullscreen(win)) return 0;
+    if (comptime build_options.has_fullscreen) {
+        if (fullscreen.isFullscreen(win)) return 0;
+    }
     const cfg = &core.config.tiling;
     return if (focus.getFocused() == win) cfg.border_focused else cfg.border_unfocused;
 }
@@ -795,7 +814,7 @@ pub fn updateFocusBorders(old_focused: ?u32, new_focused: ?u32) void {
 /// Called after a retile pass: layout changes can implicitly shift which
 /// window is fullscreen or focused, making cached colors stale.
 pub fn updateWorkspaceBorders() void {
-    const ws = workspaces.getCurrentWorkspaceObject() orelse return;
+    const ws = wsGetCurrentWorkspaceObject() orelse return;
     for (ws.windows.items()) |win|
         _ = xcb.xcb_change_window_attributes(core.conn, win,
             xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
@@ -806,7 +825,8 @@ pub fn updateWorkspaceBorders() void {
 /// immediately on all windows, not just those on the current workspace.
 pub fn reloadBorders() void {
     if (getBorderWidth() == 0) return;
-    const ws_state = workspaces.getState() orelse return;
-    for (ws_state.workspaces) |*ws|
+    if (comptime !build_options.has_workspaces) return;
+    const ws_state = wsGetState() orelse return;
+    if (comptime build_options.has_workspaces) for (ws_state.workspaces) |*ws|
         for (ws.windows.items()) |win| applyBorder(win);
 }

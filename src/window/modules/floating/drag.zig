@@ -1,16 +1,16 @@
 //! Window dragging and resizing via pointer button grabs.
 
-const std        = @import("std");
-const constants  = @import("constants");
-const core       = @import("core");
-const xcb        = core.xcb;
-const utils      = @import("utils");
-const focus      = @import("focus");
+const std           = @import("std");
+const constants     = @import("constants");
+const core          = @import("core");
+const xcb           = core.xcb;
+const utils         = @import("utils");
+const focus         = @import("focus");
 const build_options = @import("build_options");
 const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
-const bar        = @import("bar");
-const fullscreen = @import("fullscreen");
-const window     = @import("window");
+const bar           = @import("bar");
+const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
+const window        = @import("window");
 
 /// Resolve snap_distance from config against screen width.
 /// Percentage values are relative to screen width (the primary drag axis).
@@ -75,7 +75,9 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     if (bar.isBarWindow(win)) return;
     // Fullscreen windows must not be drag-resized: they occupy the entire
     // screen and resizing them would corrupt their fullscreen geometry record.
-    if (fullscreen.isFullscreen(win)) return;
+    if (comptime build_options.has_fullscreen) {
+        if (fullscreen.isFullscreen(win)) return;
+    }
     const geom = blk: {
         if (comptime build_options.has_tiling) {
             if (tiling.getWindowGeom(win)) |g| break :blk g;

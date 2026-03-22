@@ -8,7 +8,7 @@ fi
 SEARCH="$1"
 REPLACE="$2"
 
-grep -rl "$SEARCH" . | while read -r file; do
-  sed -i '' "s|$SEARCH|$REPLACE|g" "$file"
+grep -rlE "$SEARCH" . | while read -r file; do
+  sed -i '' -E "s|$SEARCH|$REPLACE|g" "$file"
   echo "Updated: $file"
 done

@@ -1,7 +1,9 @@
 //! Workspace management — creation, window assignment, and workspace switching.
 
 const std          = @import("std");
-const fullscreen   = @import("fullscreen");
+const tracking     = @import("tracking");
+const build_options = @import("build_options");
+const fullscreen   = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const core         = @import("core");
 const xcb          = core.xcb;
 const utils        = @import("utils");
@@ -14,7 +16,13 @@ const TilingLayout = if (has_tiling) tiling.Layout else u0;
 const Tracking     = @import("tracking").Tracking;
 const constants    = @import("constants");
 const debug        = @import("debug");
-const minimize     = @import("minimize");
+const minimize     = if (build_options.has_minimize) @import("minimize") else struct {};
+
+/// Shim so call-sites don't need to repeat the has_minimize comptime guard.
+/// Returns false when minimize is absent — windows are never considered minimized.
+inline fn isMinimized(win: u32) bool {
+    return if (comptime build_options.has_minimize) minimize.isMinimized(win) else false;
+}
 
 // Comptime-generated workspace name strings ("1".."20"), never heap-allocated.
 const WORKSPACE_NAMES = blk: {
@@ -55,13 +63,9 @@ pub const Workspace = struct {
 };
 
 pub const State = struct {
-    workspaces:           []Workspace,
-    current:              u8,
-    /// Maps each managed window to a u64 bitmask of workspaces it belongs to.
-    /// Bit N is set when the window is tagged to workspace N (0-indexed).
-    /// A window must always have at least one bit set while managed.
-    window_to_workspaces: std.AutoHashMap(u32, u64),
-    allocator:            std.mem.Allocator,
+    workspaces: []Workspace,
+    current:    u8,
+    allocator:  std.mem.Allocator,
 };
 
 var g_state: ?State = null;
@@ -137,34 +141,36 @@ pub fn init() void {
         ws.variants = ws_variant;
     }
 
-    var w2ws = std.AutoHashMap(u32, u64).init(core.alloc);
-    w2ws.ensureTotalCapacity(32) catch |err| debug.err("workspaces: capacity pre-alloc failed: {}", .{err});
+    tracking.setWorkspaceCount(count);
+    tracking.setCurrentWorkspace(0);
 
     g_state = .{
-        .workspaces           = wss,
-        .current              = 0,
-        .window_to_workspaces = w2ws,
-        .allocator            = core.alloc,
+        .workspaces = wss,
+        .current    = 0,
+        .allocator  = core.alloc,
     };
 }
 
 pub fn deinit() void {
-    if (g_state) |*s| {
-        s.allocator.free(s.workspaces);
-        s.window_to_workspaces.deinit();
-    }
+    if (g_state) |*s| s.allocator.free(s.workspaces);
     g_state = null;
+    tracking.setWorkspaceCount(1);
+    tracking.setCurrentWorkspace(0);
 }
 
 pub fn removeWindow(win: u32) void {
-    const s = getState() orelse return;
-    if (s.window_to_workspaces.fetchRemove(win)) |entry| {
-        var it = setBits(entry.value);
+    const s = getState() orelse {
+        tracking.removeWindow(win);
+        return;
+    };
+    if (tracking.getWindowWorkspaceMask(win)) |mask| {
+        var it = setBits(mask);
         while (it.next()) |ws_idx| {
             if (ws_idx < s.workspaces.len)
                 s.workspaces[ws_idx].removeAndClearFocus(win);
         }
     }
+    tracking.removeWindow(win);
 }
 
 pub fn moveWindowTo(win: u32, target_ws: u8) !void {
@@ -174,26 +180,27 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
         return;
     }
 
-    const mask = s.window_to_workspaces.get(win) orelse {
-        // Not yet tracked (new window): add directly to target workspace.
-        try s.window_to_workspaces.ensureUnusedCapacity(1);
+    const mask = tracking.getWindowWorkspaceMask(win) orelse {
+        // Not yet tracked (new window): register in tracking and workspace list.
+        try tracking.registerWindow(win, target_ws);
         s.workspaces[target_ws].windows.add(win);
-        s.window_to_workspaces.putAssumeCapacity(win, workspaceBit(target_ws));
         return;
     };
 
     const target_bit = workspaceBit(target_ws);
     if (mask == target_bit) return;
 
-    const current     = s.current;
+    const current = s.current;
     var new_mask = (mask & ~workspaceBit(current)) | target_bit;
     if (new_mask == 0) new_mask = target_bit; // safety: never leave mask empty
 
     s.workspaces[current].removeAndClearFocus(win);
     s.workspaces[target_ws].windows.add(win);
-    s.window_to_workspaces.getPtr(win).?.* = new_mask;
+    tracking.setWindowMask(win, new_mask);
 
-    if (minimize.isMinimized(win)) minimize.moveToWorkspace(win, target_ws);
+    if (isMinimized(win)) {
+        if (comptime build_options.has_minimize) minimize.moveToWorkspace(win, target_ws);
+    }
 
     evictWindow(win);
     if (focus.getFocused() == win) focus.clearFocus();
@@ -207,9 +214,8 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
 /// Tracking consistent. Does NOT handle screen visibility or tiling.
 fn setWindowMask(s: *State, win: u32, new_mask: u64) void {
     std.debug.assert(new_mask != 0);
-    const ptr = s.window_to_workspaces.getPtr(win).?;
-    const old_mask = ptr.*;
-    ptr.* = new_mask;
+    const old_mask = tracking.getWindowWorkspaceMask(win) orelse 0;
+    tracking.setWindowMask(win, new_mask);
 
     // Add to newly-set workspaces.
     var added_it = setBits(new_mask & ~old_mask);
@@ -230,17 +236,19 @@ fn setWindowMask(s: *State, win: u32, new_mask: u64) void {
 pub fn moveWindowExclusive(win: u32, target_ws: u8) void {
     const s = getState() orelse return;
     if (target_ws >= s.workspaces.len) return;
-    if (minimize.isMinimized(win)) return;
+    if (isMinimized(win)) return;
 
-    const mask = s.window_to_workspaces.get(win) orelse return;
+    const mask = tracking.getWindowWorkspaceMask(win) orelse return;
     if (mask == workspaceBit(target_ws)) return; // already exclusively on target — no-op
 
     // Transfer fullscreen record to the target workspace so the window
     // remains fullscreen wherever it lands, not just on the source workspace.
-    if (fullscreen.workspaceFor(win)) |src_ws| {
-        const info = fullscreen.getForWorkspace(src_ws).?;
-        fullscreen.removeForWorkspace(src_ws);
-        fullscreen.setForWorkspace(target_ws, info);
+    if (comptime build_options.has_fullscreen) {
+        if (fullscreen.workspaceFor(win)) |src_ws| {
+            const info = fullscreen.getForWorkspace(src_ws).?;
+            fullscreen.removeForWorkspace(src_ws);
+            fullscreen.setForWorkspace(target_ws, info);
+        }
     }
 
     setWindowMask(s, win, workspaceBit(target_ws));
@@ -262,10 +270,10 @@ pub fn moveWindowExclusive(win: u32, target_ws: u8) void {
 pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
     const s = getState() orelse return;
     if (target_ws >= s.workspaces.len) return;
-    if (minimize.isMinimized(win)) return;
+    if (isMinimized(win)) return;
 
     const current = s.current;
-    const mask = s.window_to_workspaces.get(win) orelse return;
+    const mask = tracking.getWindowWorkspaceMask(win) orelse return;
     const tbit = workspaceBit(target_ws);
 
     if (mask & tbit != 0) {
@@ -275,14 +283,16 @@ pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
         if (target_ws == current) {
             // Window is leaving the current workspace; if it was fullscreen here
             // transfer the record to whichever workspace it still belongs to.
-            if (fullscreen.workspaceFor(win)) |src_ws| {
-                if (src_ws == current) {
-                    const info = fullscreen.getForWorkspace(src_ws).?;
-                    fullscreen.removeForWorkspace(src_ws);
-                    // Land on the lowest-set-bit workspace still in the new mask.
-                    const new_mask = mask & ~tbit;
-                    const dst: u8 = @intCast(@ctz(new_mask));
-                    fullscreen.setForWorkspace(dst, info);
+            if (comptime build_options.has_fullscreen) {
+                if (fullscreen.workspaceFor(win)) |src_ws| {
+                    if (src_ws == current) {
+                        const info = fullscreen.getForWorkspace(src_ws).?;
+                        fullscreen.removeForWorkspace(src_ws);
+                        // Land on the lowest-set-bit workspace still in the new mask.
+                        const new_mask = mask & ~tbit;
+                        const dst: u8 = @intCast(@ctz(new_mask));
+                        fullscreen.setForWorkspace(dst, info);
+                    }
                 }
             }
             evictWindow(win);
@@ -313,51 +323,41 @@ pub fn switchTo(ws_id: u8) void {
     if (ws_id >= s.workspaces.len or ws_id == s.current) return;
     const old = s.current;
     s.current = ws_id;
+    tracking.setCurrentWorkspace(ws_id);
     executeSwitch(old, ws_id);
 }
 
 // Query helpers
 
 /// Returns the workspace bitmask for `win`, or null if unmanaged.
+/// Delegates to tracking which owns the map.
 pub inline fn getWindowWorkspaceMask(win: u32) ?u64 {
-    const s = getState() orelse return null;
-    return s.window_to_workspaces.get(win);
+    return tracking.getWindowWorkspaceMask(win);
 }
 
 /// True when workspace `ws_idx` is set in `win`'s tag bitmask.
 pub inline fn isWindowOnWorkspace(win: u32, ws_idx: u8) bool {
-    const mask = getWindowWorkspaceMask(win) orelse return false;
-    // ws_idx must be a valid workspace index, not just any value < 64.
-    // The shift itself is safe (workspace count is always <= 20 < 64) but
-    // catching an out-of-range index here is far more informative than
-    // silently returning false for a bit that was never allocated.
-    std.debug.assert(ws_idx < getWorkspaceCount());
-    return (mask >> @intCast(ws_idx)) & 1 != 0;
+    return tracking.isWindowOnWorkspace(win, ws_idx);
 }
 
-/// Returns the first non-minimized window in `windows`, or null if all are minimized.
+/// Returns the first non-minimized window in `windows`, or null if all minimized.
 pub inline fn firstNonMinimized(windows: []const u32) ?u32 {
-    for (windows) |win| {
-        if (!minimize.isMinimized(win)) return win;
-    }
-    return null;
+    return tracking.firstNonMinimized(windows);
 }
 
 // Prefer the workspace's remembered focus target; fall back to firstNonMinimized.
 inline fn lastFocusedOrFirst(ws: *const Workspace) ?u32 {
     if (ws.last_focused) |win|
-        if (!minimize.isMinimized(win)) return win;
+        if (!isMinimized(win)) return win;
     return firstNonMinimized(ws.windows.items());
 }
 
 pub inline fn getCurrentWorkspace() ?u8 {
-    const s = getState() orelse return null;
-    return s.current;
+    return tracking.getCurrentWorkspace();
 }
 
 pub inline fn isOnCurrentWorkspace(win: u32) bool {
-    const s = getState() orelse return false;
-    return isWindowOnWorkspace(win, s.current);
+    return tracking.isOnCurrentWorkspace(win);
 }
 
 /// Returns true when `win` is on the current workspace and is not minimized.
@@ -366,7 +366,7 @@ pub inline fn isOnCurrentWorkspace(win: u32) bool {
 /// and post-minimize focus recovery.  Combining the two checks into one
 /// function lets it serve as a typed *const fn(u32) bool without a closure.
 pub fn isOnCurrentWorkspaceAndVisible(win: u32) bool {
-    return isOnCurrentWorkspace(win) and !minimize.isMinimized(win);
+    return tracking.isOnCurrentWorkspaceAndVisible(win);
 }
 
 pub inline fn getCurrentWorkspaceObject() ?*Workspace {
@@ -380,14 +380,12 @@ pub inline fn getWorkspaceCount() usize {
 }
 
 /// Returns the lowest-set-bit workspace index for `win`.
-/// Used by code that needs a single canonical workspace (e.g. tiling bucket).
 pub inline fn getWorkspaceForWindow(win: u32) ?u8 {
-    const mask = getWindowWorkspaceMask(win) orelse return null;
-    return @intCast(@ctz(mask));
+    return tracking.getWorkspaceForWindow(win);
 }
 
 pub fn isManaged(win: u32) bool {
-    return getWindowWorkspaceMask(win) != null;
+    return tracking.isManaged(win);
 }
 
 // Step 1: move old-workspace windows offscreen.
@@ -400,8 +398,8 @@ fn hideWorkspaceWindows(ws: *const Workspace, new_ws: u8) void {
     var float_n: usize = 0;
 
     for (ws.windows.items()) |win| {
-        if (isWindowOnWorkspace(win, new_ws)) continue; // stays visible
-        if ((!has_tiling or !tiling.isWindowActiveTiled(win)) and !minimize.isMinimized(win)) {
+        if (tracking.isWindowOnWorkspace(win, new_ws)) continue; // stays visible
+        if ((!has_tiling or !tiling.isWindowActiveTiled(win)) and !isMinimized(win)) {
             if (float_n < MAX_FLOAT) {
                 float_wins[float_n]    = win;
                 float_cookies[float_n] = xcb.xcb_get_geometry(core.conn, win);
@@ -413,7 +411,7 @@ fn hideWorkspaceWindows(ws: *const Workspace, new_ws: u8) void {
     // Consume geometry replies and push all leaving windows offscreen in one pass.
     var fi: usize = 0;
     for (ws.windows.items()) |win| {
-        if (isWindowOnWorkspace(win, new_ws)) continue;
+        if (tracking.isWindowOnWorkspace(win, new_ws)) continue;
         if (fi < float_n and float_wins[fi] == win) {
             if (xcb.xcb_get_geometry_reply(core.conn, float_cookies[fi], null)) |geom| {
                 defer std.c.free(geom);
@@ -439,7 +437,7 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
         // Invalidate geometry for windows also on the old workspace —
         // their cache holds stale tiling positions from that workspace.
         for (ws.windows.items()) |win| {
-            if (tiling.isWindowTiled(win) and isWindowOnWorkspace(win, old_ws))
+            if (tiling.isWindowTiled(win) and tracking.isWindowOnWorkspace(win, old_ws))
                 if (has_tiling) tiling.invalidateGeomCache(win);
         }
 
@@ -466,8 +464,8 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
     const pos = utils.floatDefaultPos();
     for (ws.windows.items()) |win| {
         _ = xcb.xcb_map_window(core.conn, win);
-        if ((!has_tiling or !tiling.isWindowActiveTiled(win)) and !minimize.isMinimized(win) and
-            !isWindowOnWorkspace(win, old_ws))
+        if ((!has_tiling or !tiling.isWindowActiveTiled(win)) and !isMinimized(win) and
+            !tracking.isWindowOnWorkspace(win, old_ws))
         {
             var restored = false;
             if (window.getWindowGeom(win)) |rect| {
@@ -494,7 +492,7 @@ fn applyPostSwitchFocus(new_ws: u8, new_ws_obj: *const Workspace, ptr_cookie: xc
         defer std.c.free(ptr);
         const child = ptr.*.child;
         break :blk if (child != 0 and child != core.root and
-            isWindowOnWorkspace(child, new_ws) and !minimize.isMinimized(child))
+            tracking.isWindowOnWorkspace(child, new_ws) and !isMinimized(child))
             child else lastFocusedOrFirst(new_ws_obj);
     };
 
@@ -521,7 +519,7 @@ fn applyPostSwitchFocus(new_ws: u8, new_ws_obj: *const Workspace, ptr_cookie: xc
 fn executeSwitch(old_ws: u8, new_ws: u8) void {
     const s          = getState().?;
     const new_ws_obj = &s.workspaces[new_ws];
-    const fs_info    = fullscreen.getForWorkspace(new_ws);
+    const fs_info    = if (comptime build_options.has_fullscreen) fullscreen.getForWorkspace(new_ws) else null;
 
     focus.setSuppressReason(.none);
     s.workspaces[old_ws].last_focused = focus.getFocused();

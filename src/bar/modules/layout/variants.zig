@@ -5,12 +5,12 @@
 
 const core       = @import("core");
 const drawing    = @import("drawing");
-const has_tiling = @import("build_options").has_tiling;
-const tiling     = if (has_tiling) @import("tiling") else struct {};
+const tiling     = if (build_options.has_tiling) @import("tiling") else struct {};
+const build_options = @import("build_options");
 
 /// Draws the layout variants icon on the bar.
 pub fn draw(dc: *drawing.DrawContext, config: core.BarConfig, height: u16, start_x: u16) !u16 {
-    if (!has_tiling) return start_x;
+    if (!build_options.has_tiling) return start_x;
     const t_state = tiling.getStateOpt() orelse return start_x;
     const indicator = getIndicator(t_state);
     if (indicator.len == 0) return start_x;

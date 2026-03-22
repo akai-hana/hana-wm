@@ -23,9 +23,10 @@ const input = @import("input");
 // window/
 const window     = @import("window");
 const focus      = @import("focus");
-const fullscreen = @import("fullscreen");
-const minimize   = @import("minimize");
-const workspaces = @import("workspaces");
+const tracking   = @import("tracking");
+const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
+const minimize   = if (build_options.has_minimize) @import("minimize") else struct {};
+const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
 
 // tiling/
 const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
@@ -148,22 +149,23 @@ fn initBar() void {
 fn initModules() !void {
     window.init(); // populates atom cache required by handleMapRequest
     if (build_options.has_tiling) tiling.init(); // must precede workspaces.init(): workspaces.init() calls tiling.getState()
-    fullscreen.init();
-    workspaces.init();
-    minimize.init();
+    if (build_options.has_fullscreen) fullscreen.init();
+    if (build_options.has_workspaces) workspaces.init();
+    if (build_options.has_minimize) minimize.init();
     try prompt.init(core.alloc, core.conn);
 }
 
 /// Tears down all WM modules in reverse init order.
 fn deinitModules() void {
     if (build_options.has_tiling) tiling.deinit();
-    fullscreen.deinit();
-    workspaces.deinit();
+    if (build_options.has_fullscreen) fullscreen.deinit();
+    if (build_options.has_workspaces) workspaces.deinit();
     prompt.deinit();
 }
 
 /// Initializes global WM state: X atom cache, focus property cache, and focus tracking.
 fn initGlobalState(conn_: *xcb.xcb_connection_t, alloc: std.mem.Allocator) !void {
+    tracking.init(alloc);
     try utils.initAtomCache(conn_);   // Intern frequently used X atoms
     utils.initInputModelCache();      // Build per-window focus property cache (no allocator — static array)
     focus.init(alloc);
@@ -173,4 +175,5 @@ fn initGlobalState(conn_: *xcb.xcb_connection_t, alloc: std.mem.Allocator) !void
 fn deinitGlobalState() void {
     utils.deinitInputModelCache();
     focus.deinit();
+    tracking.deinit();
 }

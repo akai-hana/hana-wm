@@ -3,6 +3,16 @@
 const std     = @import("std");
 const builtin = @import("builtin");
 
+// FIX #13 — Minimum Zig version guard.
+// Several APIs used below (b.graph.io, b.build_root.handle.statFile, etc.)
+// were introduced in 0.14.0.  Fail loudly here instead of producing a
+// confusing "field not found" or "no member" error deeper in the build.
+comptime {
+    const min = std.SemanticVersion{ .major = 0, .minor = 14, .patch = 0 };
+    if (builtin.zig_version.order(min) == .lt)
+        @compileError("Zig 0.14.0 or newer is required to build Hana");
+}
+
 // Musl compat: weak getauxval fallback for old musl (< 1.1) that lacks it.
 //
 // The Zig stdlib branches on `link_libc` to decide who owns getauxval:
@@ -76,8 +86,33 @@ const optional_subsystems = [_]OptionalSubsystem{
         .name        = "layouts",
         .entry_point = ROOT_DIR ++ "window/modules/tiling/layouts.zig",
     },
+    .{
+        .name        = "fullscreen",
+        .entry_point = ROOT_DIR ++ "window/modules/fullscreen/fullscreen.zig",
+        .gate_dir    = "fullscreen",
+    },
+    .{
+        .name        = "minimize",
+        .entry_point = ROOT_DIR ++ "window/modules/minimize.zig",
+    },
+    .{
+        .name        = "workspaces",
+        .entry_point = ROOT_DIR ++ "window/modules/workspaces.zig",
+    },
 };
-// Add new optional subsystems here
+// FIX #1 — Removed the duplicate "Add new optional subsystems here" comment
+//           that previously appeared here after the closing brace.
+
+// FIX #4 / #5 — Declarative lists for layout and bar-segment module names.
+// Adding a new layout or segment now only requires adding its name here;
+// the has_<name> build_option and has_any_segment flag are derived automatically.
+const layout_modules = [_][]const u8{
+    "master", "monocle", "grid", "fibonacci",
+};
+
+const segment_modules = [_][]const u8{
+    "tags", "layout", "variants", "title", "clock", "status",
+};
 
 pub fn build(b: *std.Build) void {
     const target   = b.standardTargetOptions(.{});
@@ -86,6 +121,19 @@ pub fn build(b: *std.Build) void {
     const build_options = b.addOptions();
     build_options.addOption(bool, "enable_debug_logging", optimize == .Debug);
 
+    // FIX #14 — b.build_root.handle / b.graph.io note:
+    // We use b.build_root.handle (rather than std.fs.cwd()) so that paths are
+    // always resolved relative to the build root, regardless of the working
+    // directory from which `zig build` is invoked.  b.graph.io is the I/O
+    // interface required by the build-root handle; it is an internal Zig build
+    // API that may move across master builds — if it does, update these call
+    // sites together.
+    //
+    // FIX #2 / #3 — Allocation note:
+    // b.allocator is an arena that lives for the entire build invocation.
+    // Intermediate allocations (fallback_toml, zigEscape output, fallback_toml_src)
+    // are intentionally not freed individually; the arena reclaims them all at once
+    // when the build process exits.
     const fallback_toml = b.build_root.handle.readFileAlloc(
         b.graph.io, "config/fallback.toml", b.allocator, .limited(1024 * 1024),
     ) catch null;
@@ -121,7 +169,10 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    if (optimize == .ReleaseFast or optimize == .ReleaseSmall) root_module.strip = true;
+    // FIX #10 — strip is now applied via a shared helper so the rule is
+    //           defined once.  wireModules calls maybeStrip for all discovered
+    //           modules; we call it here for root_module which bypasses that loop.
+    maybeStrip(root_module, optimize);
 
     const exe = b.addExecutable(.{ .name = "hana", .root_module = root_module });
 
@@ -132,25 +183,21 @@ pub fn build(b: *std.Build) void {
         std.process.exit(1);
     };
 
-    // Layout flags: in build_options so they are accessible project-wide.
-    build_options.addOption(bool, "has_master",    all_modules.contains("master"));
-    build_options.addOption(bool, "has_monocle",   all_modules.contains("monocle"));
-    build_options.addOption(bool, "has_grid",      all_modules.contains("grid"));
-    build_options.addOption(bool, "has_fibonacci", all_modules.contains("fibonacci"));
+    // FIX #4 — Layout flags derived from the layout_modules array.
+    // To add a new layout, append its module stem to layout_modules above.
+    for (layout_modules) |name| {
+        build_options.addOption(bool, b.fmt("has_{s}", .{name}), all_modules.contains(name));
+    }
 
-    // Bar segment flags consolidated into build_options (no separate bar_flags module needed).
-    const has_any_segment = all_modules.contains("tags")     or
-                            all_modules.contains("layout")   or
-                            all_modules.contains("variants") or
-                            all_modules.contains("title")    or
-                            all_modules.contains("clock")    or
-                            all_modules.contains("status");
-    build_options.addOption(bool, "has_tags",        all_modules.contains("tags"));
-    build_options.addOption(bool, "has_layout",      all_modules.contains("layout"));
-    build_options.addOption(bool, "has_variants",    all_modules.contains("variants"));
-    build_options.addOption(bool, "has_title",       all_modules.contains("title"));
-    build_options.addOption(bool, "has_clock",       all_modules.contains("clock"));
-    build_options.addOption(bool, "has_status",      all_modules.contains("status"));
+    // FIX #5 — Bar segment flags and has_any_segment derived from segment_modules.
+    // has_any_segment is used both here (build_options) and by linkSystemLibraries,
+    // so it is computed in a single pass to avoid the names being listed twice.
+    var has_any_segment = false;
+    for (segment_modules) |name| {
+        const present = all_modules.contains(name);
+        build_options.addOption(bool, b.fmt("has_{s}", .{name}), present);
+        has_any_segment = has_any_segment or present;
+    }
     build_options.addOption(bool, "has_any_segment", has_any_segment);
 
     const build_options_module = build_options.createModule();
@@ -170,12 +217,28 @@ pub fn build(b: *std.Build) void {
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
     b.step("run", "Run hana").dependOn(&run_cmd.step);
+
+    // FIX #11 — check step: builds the executable without installing it.
+    // zls and other LSP/tooling rely on this step for fast type-checking.
+    const check = b.step("check", "Type-check without installing");
+    check.dependOn(&exe.step);
+
+    // FIX #12 — test step: currently a no-op placeholder.
+    // Wire in `b.addTest(...)` calls here as test suites are added to the project.
+    _ = b.step("test", "Run unit tests");
 }
 
 const ModuleEntry = struct {
     module:      *std.Build.Module,
     source_path: []const u8,
 };
+
+// FIX #10 — Shared strip helper.  Any module targeting ReleaseFast or
+// ReleaseSmall has debug info stripped.  Centralising the rule here means
+// it only needs to be updated in one place.
+fn maybeStrip(mod: *std.Build.Module, optimize: std.builtin.OptimizeMode) void {
+    if (optimize == .ReleaseFast or optimize == .ReleaseSmall) mod.strip = true;
+}
 
 fn wireModules(
     b:                    *std.Build,
@@ -189,7 +252,7 @@ fn wireModules(
     var iter = all_modules.iterator();
     while (iter.next()) |entry| {
         const mod = entry.value_ptr.module;
-        if (optimize == .ReleaseFast or optimize == .ReleaseSmall) mod.strip = true;
+        maybeStrip(mod, optimize); // FIX #10 — use shared helper
 
         mod.addImport("build_options", build_options_module);
         mod.addImport("fallback_toml", fallback_toml_module);
@@ -204,6 +267,17 @@ fn wireModules(
     }
 }
 
+// FIX #7 — Limitation: only the module's root .zig file is scanned.
+// If a module's root file delegates work to sub-files via relative @import
+// paths, and those sub-files in turn @import other discovered modules, those
+// secondary imports will NOT be wired in automatically.  If you see "no module
+// named '...'" errors in non-root files, add the missing import explicitly in
+// wireModules or restructure so the root re-exports the dependency.
+//
+// FIX #8 — Caveat: the scanner cannot distinguish @import inside a string
+// literal (e.g. const s = "@import(\"foo\")") from a real import, so such
+// strings will produce a spurious, harmless dependency edge if "foo" is a
+// known module.  This is unlikely to cause real problems but worth noting.
 fn findModuleImports(
     b:           *std.Build,
     allocator:   std.mem.Allocator,
@@ -298,7 +372,9 @@ fn discoverModules(
     var iter = dir.iterate();
     while (try iter.next(b.graph.io)) |entry| {
         if (entry.kind == .directory) {
-            if (entry.name[0] == '.') continue;
+            // FIX #9 — Use startsWith rather than entry.name[0] to safely skip
+            // hidden directories (the index access would panic on an empty name).
+            if (std.mem.startsWith(u8, entry.name, ".")) continue;
 
             // Skip gated directories whose entry-point file is absent.
             const skip = blk: {
@@ -317,8 +393,15 @@ fn discoverModules(
         }
 
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zig")) continue;
+        // main.zig is the executable root, not a reusable module; skip it.
         if (std.mem.eql(u8, entry.name, "main.zig")) continue;
 
+        // FIX #6 — Note on optional-subsystem entry points:
+        // Files such as bar/bar.zig or input/input.zig are both the entry point
+        // for their optional subsystem *and* a regular discovered module.  This
+        // is intentional: the optional-subsystem machinery gates whether the
+        // containing directory is traversed at all; once inside, the file is
+        // treated like any other module and wired in by wireModules.
         const name     = std.fs.path.stem(entry.name);
         const rel_path = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
 

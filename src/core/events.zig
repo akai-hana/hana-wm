@@ -22,8 +22,8 @@ const input = @import("input");
 const window         = @import("window");
     const focus      = @import("focus");
     const fullscreen = @import("fullscreen");
-    const minimize   = @import("minimize");
-    const workspaces = @import("workspaces");
+    const minimize   = if (build_options.has_minimize) @import("minimize") else struct {};
+    const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
 
 // tiling/
 const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
