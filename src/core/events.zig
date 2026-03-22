@@ -251,7 +251,7 @@ fn handleConfigReload() !void {
         return err;
     };
     old_config.deinit(core.alloc);
-    tiling.reloadConfig();
+    if (build_options.has_tiling) tiling.reloadConfig();
     window.reloadBorders();
     bar.updateTimerState();
     bar.reload();
@@ -310,7 +310,7 @@ pub fn run() !void {
                 defer std.c.free(event);
                 dispatch(@as(*u8, @ptrCast(event)).*, event);
             }
-            tiling.retileIfDirty();
+            if (build_options.has_tiling) tiling.retileIfDirty();
             window.updateWorkspaceBorders();
             bar.updateIfDirty() catch |err| debug.err("Failed to update bar: {}", .{err});
             _ = xcb.xcb_flush(core.conn);

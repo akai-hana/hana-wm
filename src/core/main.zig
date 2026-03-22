@@ -6,6 +6,9 @@
 // Zig stdlib
 const std = @import("std");
 
+// build.zig
+const build_options = @import("build_options");
+
 // core/
 const core   = @import("core");
 const utils  = @import("utils");
@@ -25,8 +28,7 @@ const minimize   = @import("minimize");
 const workspaces = @import("workspaces");
 
 // tiling/
-const build_options = @import("build_options");
-const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
+const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
 
 // bar/
 const bar    = @import("bar");
@@ -144,21 +146,20 @@ fn initBar() void {
 
 /// Initializes all WM modules that require explicit lifecycle management.
 fn initModules() !void {
+    window.init(); // populates atom cache required by handleMapRequest
+    if (build_options.has_tiling) tiling.init(); // must precede workspaces.init(): workspaces.init() calls tiling.getState()
     fullscreen.init();
-    tiling.init();      // must precede workspaces.init(): workspaces.init() calls tiling.getState()
     workspaces.init();
-    window.init();      // populates atom cache required by handleMapRequest
     minimize.init();
     try prompt.init(core.alloc, core.conn);
 }
 
 /// Tears down all WM modules in reverse init order.
 fn deinitModules() void {
-    // minimize state is owned by WM.deinit — no separate deinit here.
-    prompt.deinit();
-    workspaces.deinit();
-    tiling.deinit();
+    if (build_options.has_tiling) tiling.deinit();
     fullscreen.deinit();
+    workspaces.deinit();
+    prompt.deinit();
 }
 
 /// Initializes global WM state: X atom cache, focus property cache, and focus tracking.

@@ -9,18 +9,19 @@
 //! grab/ungrab/flush so paired exit+enter transitions can share one
 //! grab with no intermediate composited frame.
 
-const std        = @import("std");
-const core = @import("core");
-const xcb        = core.xcb;
-const utils      = @import("utils");
+const std           = @import("std");
+const core          = @import("core");
+const xcb           = core.xcb;
+const utils         = @import("utils");
 const build_options = @import("build_options");
 const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
-const workspaces = @import("workspaces");
-const focus    = @import("focus");
-const bar        = @import("bar");
-const constants  = @import("constants");
-const debug      = @import("debug");
-const minimize   = @import("minimize");
+const workspaces    = @import("workspaces");
+const focus         = @import("focus");
+const bar           = @import("bar");
+const constants     = @import("constants");
+const debug         = @import("debug");
+const minimize      = @import("minimize");
+const window        = @import("window");
 
 // Fullscreen types
 
@@ -255,8 +256,7 @@ fn restoreFloatingWindows(skip_win: u32) void {
         //   1. saved float geometry (exact pre-fullscreen position)
         //   2. tiling cache (last known tiled rect)
         //   3. null -> fall through to default placement below
-        const rect: ?utils.Rect = getSavedFloatGeom(w) orelse
-            if (comptime build_options.has_tiling) tiling.getWindowGeom(w) else null;
+        const rect: ?utils.Rect = getSavedFloatGeom(w) orelse window.getWindowGeom(w);
 
         if (rect) |r| {
             utils.configureWindow(core.conn, w, r);
@@ -339,13 +339,7 @@ inline fn exitFullscreenCommit(win: u32, ws: u8) void {
         utils.configureWindowGeom(core.conn, win, saved);
     }
 
-    if (comptime build_options.has_tiling) {
-        _ = xcb.xcb_change_window_attributes(core.conn, win,
-            xcb.XCB_CW_BORDER_PIXEL, &[_]u32{
-                if (focus.getFocused() == win) core.config.tiling.border_focused
-                else core.config.tiling.border_unfocused,
-            });
-    }
+    window.applyBorder(win);
 
     // Clear EWMH fullscreen state so external tools see the window is no longer fullscreen.
     if (g_net_wm_state != xcb.XCB_ATOM_NONE) {
@@ -385,10 +379,11 @@ pub fn toggle() void {
             // The retile's EnterNotify correctly updates hover focus — no suppression needed.
             restoreFloatingWindows(win);
         } else {
-            // Switching fullscreen from one window to another: share a single grab.
-            // g_float_saves already holds positions from the original enter —
-            // don't repopulate (windows are offscreen) and don't clear (they'll be
-            // restored when the new fullscreen is eventually exited).
+            // Switching fullscreen from one window to another: restore all background
+            // windows first, then push them offscreen again via enterFullscreenCommit.
+            // Without this they remain invisible after the transition.
+            restoreFloatingWindows(win);
+            saveFloatingWindowGeoms(win);
             enterFullscreenCommit(win, current_ws, fetchWindowGeom(win));
         }
         _ = xcb.xcb_ungrab_server(core.conn);
