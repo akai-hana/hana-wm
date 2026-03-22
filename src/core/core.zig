@@ -7,7 +7,10 @@
 //! - SpawnQueue lives in window.zig.
 //! - X11 keysym constants (XK_*) are defined here; values match <X11/keysymdef.h>.
 
+// Zig stdlibs
 const std    = @import("std");
+
+// config/
 const parser = @import("parser");
 
 pub const xcb = @cImport({
@@ -87,6 +90,9 @@ pub const Action = union(enum) {
     unminimize_all,
     cycle_layout_variants,
     toggle_prompt,
+    all_workspaces,          // map all windows from every workspace simultaneously (toggle)
+    move_to_all_workspaces,  // pin focused window to every workspace
+    toggle_tag_all,          // flip between pinned-to-all and current-workspace-only
 
     pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -494,11 +500,23 @@ pub const FocusSuppressReason = enum {
 // Global WM state — set once at startup by main.zig, valid for the lifetime of the process.
 // Every module accesses these via `const core = @import("core")`.
 
-const dpi_mod = @import("scale");
+/// DPI and scale factor detected at startup.
+/// Defined here so all modules can reference the type via core without
+/// importing scale. scale.zig re-exports this and populates it via detect().
+pub const DpiInfo = struct {
+    dpi:          f32,
+    scale_factor: f32,
+
+    pub fn fromDpi(dpi: f32) DpiInfo {
+        const baseline_dpi: f32 = 96.0;
+        return .{ .dpi = dpi, .scale_factor = dpi / baseline_dpi };
+    }
+};
 
 pub var conn:      *xcb.xcb_connection_t = undefined;
 pub var screen:    *xcb.xcb_screen_t     = undefined;
 pub var root:      WindowId              = undefined;
-pub var alloc: std.mem.Allocator = undefined; // short name intentional: avoids shadowing `allocator` params throughout this file
+pub var alloc:     std.mem.Allocator     = undefined; // short name intentional: avoids shadowing `allocator` params throughout this file
 pub var config:    Config                = undefined;
-pub var dpi_info:  dpi_mod.DpiInfo       = undefined;
+/// Defaults to 1× (96 DPI). Overwritten by scale.detect() at startup when has_scale is true.
+pub var dpi_info:  DpiInfo               = .{ .dpi = 96.0, .scale_factor = 1.0 };

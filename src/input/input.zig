@@ -18,6 +18,9 @@ inline fn wsSwitchTo(ws_arg: u8) void                       {        if (comptim
 inline fn wsMoveWindowTo(win: u32, ws_arg: u8) !void        {        if (comptime build_options.has_workspaces) try workspaces.moveWindowTo(win, ws_arg);          }
 inline fn wsMoveWindowExclusive(win: u32, ws_arg: u8) void  {        if (comptime build_options.has_workspaces) workspaces.moveWindowExclusive(win, ws_arg);       }
 inline fn wsTagToggle(win: u32, ws_arg: u8, p: bool) void   {        if (comptime build_options.has_workspaces) workspaces.tagToggle(win, ws_arg, p);              }
+inline fn wsSwitchToAll() void                              {        if (comptime build_options.has_workspaces) workspaces.switchToAll();                           }
+inline fn wsMoveWindowToAll(win: u32) void                  {        if (comptime build_options.has_workspaces) workspaces.moveWindowToAll(win);                   }
+inline fn wsTagToggleAll(win: u32) void                     {        if (comptime build_options.has_workspaces) workspaces.tagToggleAll(win);                      }
 const drag          = @import("drag");
 const fullscreen    = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const bar           = if (build_options.has_bar) @import("bar") else struct {};
@@ -248,8 +251,22 @@ fn executeAction(action: *const core.Action) !void {
                 .decrease_master        => tiling.decreaseMasterWidth(),
                 .increase_master_count  => tiling.increaseMasterCount(),
                 .decrease_master_count  => tiling.decreaseMasterCount(),
-                .swap_master            => { tiling.swapWithMaster();           focus.beginPointerSync(); bar.scheduleRedraw(); },
-                .swap_master_focus_swap => { tiling.swapWithMasterFocusSwap();  focus.beginPointerSync(); bar.scheduleRedraw(); },
+                .swap_master => {
+                    _ = xcb.xcb_grab_server(core.conn);
+                    tiling.swapWithMaster();
+                    focus.syncPointerFocusNow();
+                    bar.redrawInsideGrab();
+                    _ = xcb.xcb_ungrab_server(core.conn);
+                    _ = xcb.xcb_flush(core.conn);
+                },
+                .swap_master_focus_swap => {
+                    _ = xcb.xcb_grab_server(core.conn);
+                    tiling.swapWithMasterFocusSwap();
+                    focus.syncPointerFocusNow();
+                    bar.redrawInsideGrab();
+                    _ = xcb.xcb_ungrab_server(core.conn);
+                    _ = xcb.xcb_flush(core.conn);
+                },
                 else => unreachable,
             }
         },
@@ -279,6 +296,9 @@ fn executeAction(action: *const core.Action) !void {
         .move_to_workspace => |ws| { if (focus.getFocused()) |win| wsMoveWindowTo(win, ws) catch |e| debug.warnOnErr(e, "move_to_workspace"); },
         .move_window       => |ws| { if (focus.getFocused()) |win| wsMoveWindowExclusive(win, ws); },
         .toggle_tag        => |ws| { if (focus.getFocused()) |win| wsTagToggle(win, ws, true); },
+        .all_workspaces         => wsSwitchToAll(),
+        .move_to_all_workspaces => { if (focus.getFocused()) |win| wsMoveWindowToAll(win); },
+        .toggle_tag_all         => { if (focus.getFocused()) |win| wsTagToggleAll(win); },
         .toggle_prompt => prompt.toggle(),
     }
 }
@@ -497,7 +517,7 @@ const XcbCursor = struct {
         );
 
         if (xcb.xcb_request_check(conn, cookie)) |err| {
-            debug.err("Failed to set custom cursor onto hana's root window: {}", .{err});
+            debug.err("Failed to set custom cursor onto hana's root window: {*}", .{err});
             std.c.free(err);
         }
 

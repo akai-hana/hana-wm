@@ -107,6 +107,7 @@ pub fn draw(
     start_x:        u16,
     ws_current:     u8,
     ws_has_windows: []const bool,
+    ws_all_active:  bool,
 ) !u16 {
     if (ws_has_windows.len == 0) return start_x;
     ensureCache(dc, config, height);
@@ -117,7 +118,7 @@ pub fn draw(
     const baseline_y = dc.baselineY(height);
 
     for (ws_has_windows, 0..) |has_windows, i| {
-        const is_current = i == ws_current;
+        const is_current = ws_all_active or (i == ws_current);
         const bg         = if (is_current) config.selected_bg else config.bg;
         const fg         = if (is_current) config.selected_fg else config.fg;
 

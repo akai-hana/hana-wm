@@ -35,14 +35,8 @@ var dpi_cache: ?DpiInfo = null;
 
 const COMMON_DPI_TABLE = [_]f32{ 96.0, 120.0, 144.0, 192.0 };
 
-pub const DpiInfo = struct {
-    dpi:          f32,
-    scale_factor: f32,
-
-    pub fn fromDpi(dpi: f32) DpiInfo {
-        return .{ .dpi = dpi, .scale_factor = dpi / BASELINE_DPI };
-    }
-};
+/// Re-exported from core so callers that only import scale still get the type.
+pub const DpiInfo = core.DpiInfo;
 
 fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
     const atom_cookie = xcb.xcb_intern_atom(conn, 0, "RESOURCE_MANAGER".len, "RESOURCE_MANAGER");

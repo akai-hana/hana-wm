@@ -62,10 +62,16 @@ inline fn wsSwitchTo(ws_arg: u8) void  { if (comptime build_options.has_workspac
 const focus      = @import("focus");
 const constants  = @import("constants");
 const minimize   = if (build_options.has_minimize) @import("minimize") else struct {};
-const scale      = @import("scale");
+const scale      = if (build_options.has_scale) @import("scale") else struct {
+    pub fn scaleBarHeight(value: anytype, screen_height: u16) u16 {
+        const h: f32 = @floatFromInt(screen_height);
+        const px: f32 = if (value.is_percentage) h * (value.value / 100.0) else value.value;
+        return @max(20, @as(u16, @intFromFloat(@round(px))));
+    }
+};
 
 const workspaces_segment = if (build_options.has_tags) @import("tags") else struct {
-    pub fn draw(_: *drawing.DrawContext, _: core.BarConfig, _: u16, x: u16, _: u8, _: []const bool) !u16 { return x; }
+    pub fn draw(_: *drawing.DrawContext, _: core.BarConfig, _: u16, x: u16, _: u8, _: []const bool, _: bool) !u16 { return x; }
     pub fn invalidate() void {}
     pub fn getCachedWorkspaceWidth() u16 { return 0; }
 };
@@ -122,6 +128,7 @@ const BarSnapshot = struct {
     ws_has_windows:    std.ArrayListUnmanaged(bool)  = .empty,
     ws_current:        u8                            = 0,
     ws_count:          u32                           = 0,
+    ws_all_active:     bool                          = false,
     status_text:       std.ArrayListUnmanaged(u8)    = .empty,
     title_invalidated: bool                          = false,
     dirty_all:   bool = true,  // ws_count changed or full-redraw forced
@@ -255,7 +262,7 @@ const State = struct {
         return switch (segment) {
             .workspaces => try workspaces_segment.draw(
                 self.dc, self.config, self.height, x,
-                snap.ws_current, snap.ws_has_windows.items),
+                snap.ws_current, snap.ws_has_windows.items, snap.ws_all_active),
             .layout   => try layout_segment.draw(self.dc, self.config, self.height, x),
             .variants => try variants_segment.draw(self.dc, self.config, self.height, x),
             .title    => try prompt.draw(
@@ -515,12 +522,23 @@ fn captureIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot) !voi
         const ws_state = wsGetState() orelse return;
         snap.ws_count   = @intCast(ws_state.workspaces.len);
         snap.ws_current = ws_state.current;
+        snap.ws_all_active = ws_state.all_view_temp_wins.items.len > 0;
         try snap.ws_has_windows.resize(allocator, snap.ws_count);
         for (ws_state.workspaces, 0..) |*workspace, i|
             snap.ws_has_windows.items[i] = workspace.windows.len > 0;
         snap.current_ws_wins.clearRetainingCapacity();
         if (ws_state.current < ws_state.workspaces.len)
             try snap.current_ws_wins.appendSlice(allocator, ws_state.workspaces[ws_state.current].windows.items());
+    } else {
+        // No workspace subsystem — treat as single workspace so ws_count
+        // differs from prev.ws_count (0) on the first draw, ensuring dirty_all
+        // fires and the background is cleared before any segments are drawn.
+        snap.ws_count = 1;
+        snap.current_ws_wins.clearRetainingCapacity();
+        if (tracking.allWindowsIterator()) |it| {
+            var iter = it;
+            while (iter.next()) |wp| try snap.current_ws_wins.append(allocator, wp.*);
+        }
     }
     snap.focused_window = focus.getFocused();
     snap.title_invalidated = s.title_invalidated;
@@ -539,6 +557,7 @@ fn captureIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot) !voi
     snap.dirty_all = forced or (snap.ws_count != prev.ws_count);
     snap.dirty_ws  = snap.dirty_all or
         snap.ws_current != prev.ws_current or
+        snap.ws_all_active != prev.ws_all_active or
         !std.mem.eql(bool, snap.ws_has_windows.items, prev.ws_has_windows.items);
     snap.dirty_title =
         prompt.isActive() or
@@ -741,9 +760,11 @@ pub fn init() !void {
     submitDraw(true);
     _ = xcb.xcb_map_window(core.conn, setup.window);
     _ = xcb.xcb_flush(core.conn);
+    try prompt.init(core.alloc, core.conn);
 }
 
 pub fn deinit() void {
+    prompt.deinit();
     stopBarThread();
     if (state) |s| {
         carousel.deinitCarousel();
