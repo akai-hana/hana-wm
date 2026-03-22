@@ -1,59 +1,53 @@
-//! Efficient window tracking backed by a fixed-size stack array.
+//! Core window tracking — always present, no optionality.
 //!
-//! A linear scan over a small array of u32s is cache-friendly enough to
-//! outperform a HashSet at any window count a window manager realistically
-//! reaches. No dual-mode switching, no arbitrary promotion thresholds,
-//! no heap allocation, no deinit.
+//! Owns the window→workspace bitmask map and the current-workspace cursor.
+//! Every other module queries window membership and focus eligibility through
+//! this module, which means those predicates work correctly even when the full
+//! workspace-switching subsystem (workspaces.zig) is not compiled in.
+//!
+//! workspaces.zig calls setCurrentWorkspace() and setWorkspaceCount() on every
+//! switch and init respectively, keeping the state here in sync with the
+//! multi-workspace feature when it is present.  When workspaces.zig is absent
+//! the WM operates as a single-workspace session: all windows land on
+//! workspace 0 and getCurrentWorkspace() always returns 0.
 
-const std = @import("std");
+const std           = @import("std");
+const build_options = @import("build_options");
+const minimize      = if (build_options.has_minimize) @import("minimize") else struct {};
+
+// ── Fixed-size ordered window list ────────────────────────────────────────────
+// Used by Workspace in workspaces.zig; kept here so it can be imported from
+// the always-present tracking module rather than the optional workspaces module.
 
 pub const Tracking = struct {
-    // 64 windows is already a pathological session. A u8 len field keeps
-    // the struct to 256 + 1 bytes, well within a few cache lines.
     const capacity = 64;
 
     buf: [capacity]u32 = undefined,
     len: u8            = 0,
 
-    // No init needed — zero-initialise with `.{}` or `Tracking{}`.
-    // No deinit — nothing to free.
-
     pub fn contains(self: *const Tracking, win: u32) bool {
         return std.mem.indexOfScalar(u32, self.buf[0..self.len], win) != null;
     }
 
-    /// Returns false if win is already tracked or if the buffer is full.
-    /// The capacity check is an explicit runtime guard in all build modes —
-    /// not an assert — so a full buffer silently drops the add rather than
-    /// corrupting the length field in release builds.
     fn prepareAdd(self: *Tracking, win: u32) bool {
         if (self.contains(win)) return false;
         if (self.len >= capacity) return false;
         return true;
     }
 
-    /// Appends win to the back. No-op if win is already present or the
-    /// buffer is full. Infallible — no allocator, no OOM path.
     pub fn add(self: *Tracking, win: u32) void {
         if (!self.prepareAdd(win)) return;
         self.buf[self.len] = win;
         self.len += 1;
     }
 
-    /// Prepends win to the front, shifting existing entries right.
-    /// No-op if win is already present or the buffer is full.
-    /// Infallible — no allocator, no OOM path.
     pub fn addFront(self: *Tracking, win: u32) void {
         if (!self.prepareAdd(win)) return;
-        // Shift right from the end to avoid clobbering elements.
         std.mem.copyBackwards(u32, self.buf[1 .. self.len + 1], self.buf[0..self.len]);
         self.buf[0] = win;
         self.len += 1;
     }
 
-    /// Removes win, preserving the order of remaining entries.
-    /// Use this when list order is semantically significant (e.g. MRU traversal).
-    /// Returns true if win was present, false otherwise.
     pub fn remove(self: *Tracking, win: u32) bool {
         const i = std.mem.indexOfScalar(u32, self.buf[0..self.len], win) orelse return false;
         std.mem.copyForwards(u32, self.buf[i .. self.len - 1], self.buf[i + 1 .. self.len]);
@@ -61,10 +55,6 @@ pub const Tracking = struct {
         return true;
     }
 
-    /// Removes win in O(1) by swapping it with the last entry.
-    /// Use this over `remove` when the relative order of remaining entries
-    /// does not matter (e.g. tearing down a workspace).
-    /// Returns true if win was present, false otherwise.
     pub fn removeUnordered(self: *Tracking, win: u32) bool {
         const i = std.mem.indexOfScalar(u32, self.buf[0..self.len], win) orelse return false;
         self.buf[i] = self.buf[self.len - 1];
@@ -72,21 +62,12 @@ pub const Tracking = struct {
         return true;
     }
 
-    /// Reorders contents to match new_order.
-    /// new_order must have the same length as the current list.
-    /// In safety builds, asserts that new_order is a valid permutation of
-    /// the current elements — both directions — so silent overwrites with
-    /// arbitrary IDs are caught at the earliest possible moment.
     pub fn reorder(self: *Tracking, new_order: []const u32) void {
         std.debug.assert(new_order.len == self.len);
-        // Permutation check: every element in new_order must exist in the
-        // current list, and vice versa. O(n²) at n ≤ 64 — negligible in
-        // debug builds, stripped entirely in release.
         for (new_order) |w|
             std.debug.assert(self.contains(w));
         for (self.buf[0..self.len]) |w|
             std.debug.assert(std.mem.indexOfScalar(u32, new_order, w) != null);
-
         @memcpy(self.buf[0..self.len], new_order);
     }
 
@@ -94,3 +75,110 @@ pub const Tracking = struct {
         return self.buf[0..self.len];
     }
 };
+
+// ── Global tracking state ─────────────────────────────────────────────────────
+
+var g_map:             ?std.AutoHashMap(u32, u64) = null;
+var g_current:         u8                         = 0;
+var g_workspace_count: usize                      = 1;
+
+pub fn init(allocator: std.mem.Allocator) void {
+    var map = std.AutoHashMap(u32, u64).init(allocator);
+    map.ensureTotalCapacity(32) catch {};
+    g_map = map;
+}
+
+pub fn deinit() void {
+    if (g_map) |*m| m.deinit();
+    g_map             = null;
+    g_current         = 0;
+    g_workspace_count = 1;
+}
+
+/// Called by workspaces.init — tells tracking how many workspaces exist.
+pub fn setWorkspaceCount(count: usize) void { g_workspace_count = count; }
+
+/// Called by workspaces.switchTo so getCurrentWorkspace() stays correct
+/// even when code queries tracking directly.
+pub fn setCurrentWorkspace(ws: u8) void { g_current = ws; }
+
+// ── Window registration ───────────────────────────────────────────────────────
+
+/// Register `win` on workspace `ws`. No-op if already tracked.
+/// Called directly when workspaces.zig is absent; workspaces.moveWindowTo
+/// handles the full registration path (screen effects etc.) when present.
+pub fn registerWindow(win: u32, ws: u8) !void {
+    var map = &(g_map orelse return);
+    if (map.contains(win)) return;
+    try map.ensureUnusedCapacity(1);
+    map.putAssumeCapacity(win, @as(u64, 1) << @intCast(ws));
+}
+
+/// Remove `win` from the tracking map.
+/// When workspaces.zig is present it calls this after cleaning up workspace
+/// Tracking arrays; when absent, window.zig calls this directly.
+pub fn removeWindow(win: u32) void {
+    if (g_map) |*m| _ = m.remove(win);
+}
+
+/// Update the workspace bitmask for `win`. Called by workspaces.zig for
+/// tag and move operations; keeps the hashmap in sync with workspace arrays.
+pub fn setWindowMask(win: u32, mask: u64) void {
+    std.debug.assert(mask != 0);
+    if (g_map) |*m| if (m.getPtr(win)) |p| { p.* = mask; };
+}
+
+// ── Query predicates ─────────────────────────────────────────────────────────
+
+pub inline fn getWindowWorkspaceMask(win: u32) ?u64 {
+    const m = g_map orelse return null;
+    return m.get(win);
+}
+
+pub fn isManaged(win: u32) bool {
+    return getWindowWorkspaceMask(win) != null;
+}
+
+pub inline fn windowCount() usize {
+    return if (g_map) |m| m.count() else 0;
+}
+
+pub inline fn getCurrentWorkspace() ?u8 {
+    if (g_map == null) return null;
+    return g_current;
+}
+
+pub inline fn getWorkspaceCount() usize {
+    return g_workspace_count;
+}
+
+pub inline fn getWorkspaceForWindow(win: u32) ?u8 {
+    const mask = getWindowWorkspaceMask(win) orelse return null;
+    return @intCast(@ctz(mask));
+}
+
+pub inline fn isWindowOnWorkspace(win: u32, ws_idx: u8) bool {
+    const mask = getWindowWorkspaceMask(win) orelse return false;
+    return (mask >> @intCast(ws_idx)) & 1 != 0;
+}
+
+pub inline fn isOnCurrentWorkspace(win: u32) bool {
+    return isWindowOnWorkspace(win, g_current);
+}
+
+/// Combined predicate for focus recovery: on current workspace and not minimized.
+/// Declared as a plain fn (not inline) so it can be passed as a *const fn(u32)bool.
+pub fn isOnCurrentWorkspaceAndVisible(win: u32) bool {
+    if (!isOnCurrentWorkspace(win)) return false;
+    return if (comptime build_options.has_minimize) !minimize.isMinimized(win) else true;
+}
+
+/// Returns the first non-minimized window in `windows`, or null if all minimized.
+/// Declared as a plain fn so minimize.zig can store it as a function pointer.
+pub fn firstNonMinimized(windows: []const u32) ?u32 {
+    for (windows) |win| {
+        const is_min = if (comptime build_options.has_minimize) minimize.isMinimized(win) else false;
+        if (!is_min) return win;
+    }
+    return null;
+}

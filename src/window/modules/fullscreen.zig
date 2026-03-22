@@ -15,12 +15,12 @@ const xcb           = core.xcb;
 const utils         = @import("utils");
 const build_options = @import("build_options");
 const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
-const workspaces    = @import("workspaces");
+const workspaces    = if (build_options.has_workspaces) @import("workspaces") else struct {};
 const focus         = @import("focus");
 const bar           = @import("bar");
 const constants     = @import("constants");
 const debug         = @import("debug");
-const minimize      = @import("minimize");
+const minimize      = if (build_options.has_minimize) @import("minimize") else struct {};
 const window        = @import("window");
 
 // Fullscreen types

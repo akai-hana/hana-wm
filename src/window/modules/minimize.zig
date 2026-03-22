@@ -22,25 +22,30 @@
 //! NOTE: init() is now infallible (void return).  Callers that previously did
 //! `try minimize.init()` should change the call to `minimize.init()`.
 
-const std        = @import("std");
-const core       = @import("core");
-const xcb        = core.xcb;
-const utils      = @import("utils");
-const focus      = @import("focus");
-const has_tiling = @import("build_options").has_tiling;
-const tiling = if (has_tiling) @import("tiling") else struct {
+const std           = @import("std");
+const core          = @import("core");
+const xcb           = core.xcb;
+const utils         = @import("utils");
+const focus         = @import("focus");
+const has_tiling    = @import("build_options").has_tiling;
+const tiling        = if (has_tiling) @import("tiling") else struct {
     pub fn addWindow(_: u32) void {}
     pub fn addWindowAtFilteredIndex(_: u32, _: usize) void {}
     pub fn removeWindow(_: u32) void {}
     pub fn retileCurrentWorkspace() void {}
     pub fn getWindowFilteredIndex(_: u32) ?usize { return null; }
 };
-const window     = @import("window");
-const workspaces = @import("workspaces");
-const fullscreen = @import("fullscreen");
-const bar        = @import("bar");
-const constants  = @import("constants");
-const debug      = @import("debug");
+const window        = @import("window");
+const tracking    = @import("tracking");
+const workspaces  = if (build_options.has_workspaces) @import("workspaces") else struct {};
+const WsWorkspace = if (build_options.has_workspaces) workspaces.Workspace else struct {};
+fn wsGetCurrentWorkspaceObject() ?*WsWorkspace { return if (comptime build_options.has_workspaces) workspaces.getCurrentWorkspaceObject() else null; }
+
+const build_options = @import ("build_options");
+const fullscreen    = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
+const bar           = @import("bar");
+const constants     = @import("constants");
+const debug         = @import("debug");
 
 // Types
 
@@ -138,8 +143,8 @@ inline fn hideWindow(win: u32) void {
 /// workspace insertion order, which is not MRU, and is specifically suited
 /// to tiling fallback (master or first slave).
 pub fn focusMasterOrFirst() void {
-    if (workspaces.getCurrentWorkspaceObject()) |ws| {
-        if (workspaces.firstNonMinimized(ws.windows.items())) |win| {
+    if (wsGetCurrentWorkspaceObject()) |ws| {
+        if (tracking.firstNonMinimized(ws.windows.items())) |win| {
             focus.setFocus(win, .tiling_operation);
             return;
         }
@@ -157,24 +162,28 @@ inline fn rollbackMinimize(win: u32, fs_ws: ?u8, saved_fs: ?core.WindowGeometry)
         tiling.addWindow(win);
         tiling.retileCurrentWorkspace();
     }
-    if (saved_fs) |geom| {
-        fullscreen.setForWorkspace(fs_ws.?, .{ .window = win, .saved_geometry = geom });
+    if (comptime build_options.has_fullscreen) {
+        if (saved_fs) |geom| {
+            fullscreen.setForWorkspace(fs_ws.?, .{ .window = win, .saved_geometry = geom });
+        }
     }
 }
 
 pub fn minimizeWindow() void {
     const win    = focus.getFocused()               orelse return;
-    const ws_idx = workspaces.getCurrentWorkspace() orelse return;
+    const ws_idx = tracking.getCurrentWorkspace() orelse return;
 
     if (isMinimized(win)) return;
 
     // Tear down fullscreen state if needed, saving geometry for later restore.
     var saved_fs: ?core.WindowGeometry = null;
     var fs_ws_for_rollback: ?u8 = null;
-    if (fullscreen.workspaceFor(win)) |fs_ws| {
-        saved_fs = fullscreen.getForWorkspace(fs_ws).?.saved_geometry;
-        fs_ws_for_rollback = fs_ws;
-        fullscreen.removeForWorkspace(fs_ws);
+    if (comptime build_options.has_fullscreen) {
+        if (fullscreen.workspaceFor(win)) |fs_ws| {
+            saved_fs = fullscreen.getForWorkspace(fs_ws).?.saved_geometry;
+            fs_ws_for_rollback = fs_ws;
+            fullscreen.removeForWorkspace(fs_ws);
+        }
     }
     const tiling_index = tiling.getWindowFilteredIndex(win);
 
@@ -220,7 +229,7 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
         // choice — it queues the redraw to the next event-loop iteration after
         // the grab has been fully released.
         focus.setFocus(win, .window_spawn);
-        fullscreen.enterFullscreen(win, geom);
+        if (comptime build_options.has_fullscreen) fullscreen.enterFullscreen(win, geom);
         bar.scheduleRedraw();
         return;
     }
@@ -271,7 +280,7 @@ inline fn restoreWindow(win: u32) void {
 pub const RestoreOrder = enum { lifo, fifo };
 
 pub fn unminimize(order: RestoreOrder) void {
-    const ws_idx = workspaces.getCurrentWorkspace() orelse return;
+    const ws_idx = tracking.getCurrentWorkspace() orelse return;
 
     // Resolve the comparison direction once — `order` is a loop-invariant
     // constant and the branch would otherwise be re-evaluated on every entry.
@@ -300,7 +309,7 @@ pub fn unminimize(order: RestoreOrder) void {
 }
 
 pub fn unminimizeAll() void {
-    const ws_idx = workspaces.getCurrentWorkspace() orelse return;
+    const ws_idx = tracking.getCurrentWorkspace() orelse return;
 
     // Collect all windows minimized on the current workspace.
     // saved_fs is included so fullscreen windows can be restored directly

@@ -10,13 +10,20 @@ const utils         = @import("utils");
 const focus         = @import("focus");
 const build_options = @import("build_options");
 const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
-const workspaces    = @import("workspaces");
+const tracking   = @import("tracking");
+const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
+const WsState    = if (build_options.has_workspaces) workspaces.State else struct {};
+fn wsGetState() ?*WsState                                   { return if (comptime build_options.has_workspaces) workspaces.getState()                   else null; }
+inline fn wsSwitchTo(ws_arg: u8) void                       {        if (comptime build_options.has_workspaces) workspaces.switchTo(ws_arg);                       }
+inline fn wsMoveWindowTo(win: u32, ws_arg: u8) !void        {        if (comptime build_options.has_workspaces) try workspaces.moveWindowTo(win, ws_arg);          }
+inline fn wsMoveWindowExclusive(win: u32, ws_arg: u8) void  {        if (comptime build_options.has_workspaces) workspaces.moveWindowExclusive(win, ws_arg);       }
+inline fn wsTagToggle(win: u32, ws_arg: u8, p: bool) void   {        if (comptime build_options.has_workspaces) workspaces.tagToggle(win, ws_arg, p);              }
 const drag          = @import("drag");
-const fullscreen    = @import("fullscreen");
+const fullscreen    = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const bar           = if (build_options.has_bar) @import("bar") else struct {};
 const window        = @import("window");
 const debug         = @import("debug");
-const minimize      = @import("minimize");
+const minimize      = if (build_options.has_minimize) @import("minimize") else struct {};
 const prompt        = @import("prompt");
 const xcb           = core.xcb;
 
@@ -122,7 +129,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
         return;
     }
 
-    const managed_window = utils.findManagedWindow(core.conn, clicked_window, workspaces.isManaged);
+    const managed_window = utils.findManagedWindow(core.conn, clicked_window, tracking.isManaged);
     if (managed_window == 0) {
         replayPointer(event.time);
         return;
@@ -213,7 +220,7 @@ fn closeWindow(win: u32) void {
 
 fn executeAction(action: *const core.Action) !void {
     switch (action.*) {
-        .toggle_fullscreen => fullscreen.toggle(),
+        .toggle_fullscreen => if (comptime build_options.has_fullscreen) fullscreen.toggle(),
         .close_window      => if (focus.getFocused()) |win| closeWindow(win),
         .reload_config     => utils.reload(),
         // Runs each action in the list in order. Stops and propagates the
@@ -256,14 +263,22 @@ fn executeAction(action: *const core.Action) !void {
             }
         },
 
-        .minimize_window => minimize.minimizeWindow(),
-        .unminimize_lifo => minimize.unminimize(.lifo),
-        .unminimize_fifo => minimize.unminimize(.fifo),
-        .unminimize_all  => minimize.unminimizeAll(),
-        .switch_workspace  => |ws| workspaces.switchTo(ws),
-        .move_to_workspace => |ws| { if (focus.getFocused()) |win| workspaces.moveWindowTo(win, ws) catch |e| debug.warnOnErr(e, "move_to_workspace"); },
-        .move_window       => |ws| { if (focus.getFocused()) |win| workspaces.moveWindowExclusive(win, ws); },
-        .toggle_tag        => |ws| { if (focus.getFocused()) |win| workspaces.tagToggle(win, ws, true); },
+        .minimize_window,
+        .unminimize_lifo,
+        .unminimize_fifo,
+        .unminimize_all  => if (comptime build_options.has_minimize) {
+            switch (action.*) {
+                .minimize_window => minimize.minimizeWindow(),
+                .unminimize_lifo => minimize.unminimize(.lifo),
+                .unminimize_fifo => minimize.unminimize(.fifo),
+                .unminimize_all  => minimize.unminimizeAll(),
+                else => unreachable,
+            }
+        },
+        .switch_workspace  => |ws| wsSwitchTo(ws),
+        .move_to_workspace => |ws| { if (focus.getFocused()) |win| wsMoveWindowTo(win, ws) catch |e| debug.warnOnErr(e, "move_to_workspace"); },
+        .move_window       => |ws| { if (focus.getFocused()) |win| wsMoveWindowExclusive(win, ws); },
+        .toggle_tag        => |ws| { if (focus.getFocused()) |win| wsTagToggle(win, ws, true); },
         .toggle_prompt => prompt.toggle(),
     }
 }
@@ -375,7 +390,7 @@ fn executeShellCommand(cmd: []const u8) !void {
             _ = c.close(exec_pipe[0]);
             if (n > 0) return;
 
-            if (workspaces.getCurrentWorkspace()) |ws| {
+            if (tracking.getCurrentWorkspace()) |ws| {
                 const pid_u32: u32 = if (grandchild_pid > 0) @intCast(grandchild_pid) else 0;
                 window.registerSpawn(ws, pid_u32);
             }
@@ -388,22 +403,26 @@ fn executeShellCommand(cmd: []const u8) !void {
 fn dumpState() void {
     debug.info("========== STATE DUMP ==========", .{});
     debug.info("Focused: {?x}",         .{focus.getFocused()});
-    const win_count = if (workspaces.getState()) |s| s.window_to_workspaces.count() else 0;
+    const win_count = tracking.windowCount();
     debug.info("Total windows: {}",     .{win_count});
     debug.info("Suppress focus: {s}",   .{@tagName(focus.getSuppressReason())});
 
-    fullscreen.forEachFullscreen(struct {
-        fn cb(ws: u8, info: fullscreen.FullscreenInfo) void {
-            debug.info("Fullscreen on workspace {}: {x}", .{ ws, info.window });
-        }
-    }.cb);
-    if (!fullscreen.hasAnyFullscreen()) debug.info("Fullscreen: none", .{});
+    if (comptime build_options.has_fullscreen) {
+        fullscreen.forEachFullscreen(struct {
+            fn cb(ws: u8, info: fullscreen.FullscreenInfo) void {
+                debug.info("Fullscreen on workspace {}: {x}", .{ ws, info.window });
+            }
+        }.cb);
+        if (!fullscreen.hasAnyFullscreen()) debug.info("Fullscreen: none", .{});
+    } else debug.info("Fullscreen: none", .{});
     debug.info("Drag active: {}", .{drag.isDragging()});
 
-    if (workspaces.getState()) |ws_state| {
-        debug.info("Current workspace: {}", .{ws_state.current + 1});
-        for (ws_state.workspaces, 0..) |*ws, i| {
-            debug.info("  WS{}: {} windows", .{ i + 1, ws.windows.len });
+    if (comptime build_options.has_workspaces) {
+        if (wsGetState()) |ws_state| {
+            debug.info("Current workspace: {}", .{ws_state.current + 1});
+            for (ws_state.workspaces, 0..) |*ws, i| {
+                debug.info("  WS{}: {} windows", .{ i + 1, ws.windows.len });
+            }
         }
     }
 

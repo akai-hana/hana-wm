@@ -9,7 +9,7 @@
 //! clock segment using its cached x-position.
 
 const std   = @import("std");
-const core = @import("core");
+const core  = @import("core");
 const xcb   = core.xcb;
 const debug = @import("debug");
 
@@ -49,15 +49,20 @@ const Condition = struct {
 const build_options = @import("build_options");
 
 pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
-const drawing       = @import("drawing");
-const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
-const drag          = @import("drag");
-const utils         = @import("utils");
-const workspaces    = @import("workspaces");
-const focus         = @import("focus");
-const constants     = @import("constants");
-const minimize      = @import("minimize");
-const scale         = @import("scale");
+
+const drawing    = @import("drawing");
+const tiling     = if (build_options.has_tiling) @import("tiling") else struct {};
+const drag       = @import("drag");
+const utils      = @import("utils");
+const tracking   = @import("tracking");
+const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
+const WsState    = if (build_options.has_workspaces) workspaces.State else struct {};
+fn wsGetState() ?*WsState              { return if (comptime build_options.has_workspaces) workspaces.getState() else null; }
+inline fn wsSwitchTo(ws_arg: u8) void  { if (comptime build_options.has_workspaces) workspaces.switchTo(ws_arg); }
+const focus      = @import("focus");
+const constants  = @import("constants");
+const minimize   = if (build_options.has_minimize) @import("minimize") else struct {};
+const scale      = @import("scale");
 
 const workspaces_segment = if (build_options.has_tags) @import("tags") else struct {
     pub fn draw(_: *drawing.DrawContext, _: core.BarConfig, _: u16, x: u16, _: u8, _: []const bool) !u16 { return x; }
@@ -72,7 +77,7 @@ const layout_segment   = if (build_options.has_layout)   @import("layout")   els
 const variants_segment = if (build_options.has_variants) @import("variants") else drawStub;
 
 const prompt     = @import("prompt");
-const fullscreen = @import("fullscreen");
+const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const carousel   = @import("carousel");
 
 const title_segment = if (build_options.has_title) @import("title") else struct {
@@ -503,17 +508,20 @@ fn captureIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot) !voi
     snap.status_text.clearRetainingCapacity();
     try snap.status_text.appendSlice(allocator, s.status_text.items);
     snap.minimized_set.clearRetainingCapacity();
-    try minimize.populateSet(&snap.minimized_set, allocator);
+    if (comptime build_options.has_minimize)
+        try minimize.populateSet(&snap.minimized_set, allocator);
 
-    const ws_state = workspaces.getState() orelse return;
-    snap.ws_count   = @intCast(ws_state.workspaces.len);
-    snap.ws_current = ws_state.current;
-    try snap.ws_has_windows.resize(allocator, snap.ws_count);
-    for (ws_state.workspaces, 0..) |*workspace, i|
-        snap.ws_has_windows.items[i] = workspace.windows.len > 0;
-    snap.current_ws_wins.clearRetainingCapacity();
-    if (ws_state.current < ws_state.workspaces.len)
-        try snap.current_ws_wins.appendSlice(allocator, ws_state.workspaces[ws_state.current].windows.items());
+    if (comptime build_options.has_workspaces) {
+        const ws_state = wsGetState() orelse return;
+        snap.ws_count   = @intCast(ws_state.workspaces.len);
+        snap.ws_current = ws_state.current;
+        try snap.ws_has_windows.resize(allocator, snap.ws_count);
+        for (ws_state.workspaces, 0..) |*workspace, i|
+            snap.ws_has_windows.items[i] = workspace.windows.len > 0;
+        snap.current_ws_wins.clearRetainingCapacity();
+        if (ws_state.current < ws_state.workspaces.len)
+            try snap.current_ws_wins.appendSlice(allocator, ws_state.workspaces[ws_state.current].windows.items());
+    }
     snap.focused_window = focus.getFocused();
     snap.title_invalidated = s.title_invalidated;
     s.title_invalidated    = false;
@@ -798,11 +806,15 @@ pub fn toggleBarPosition() void {
     _ = xcb.xcb_grab_server(core.conn);
     _ = xcb.xcb_configure_window(core.conn, s.window, xcb.XCB_CONFIG_WINDOW_Y,
         &[_]u32{@as(u32, @bitCast(@as(i32, new_y)))});
-    const current_ws = workspaces.getCurrentWorkspace() orelse {
+    const current_ws = tracking.getCurrentWorkspace() orelse {
         ungrabAndFlush();
         return;
     };
-    if (fullscreen.getForWorkspace(current_ws) == null)
+    const no_fullscreen = if (comptime build_options.has_fullscreen)
+        fullscreen.getForWorkspace(current_ws) == null
+    else
+        true;
+    if (no_fullscreen)
         if (comptime build_options.has_tiling) tiling.retileCurrentWorkspace();
     ungrabAndFlush();
     debug.info("Bar position toggled to: {s}", .{@tagName(core.config.bar.vertical_position)});
@@ -854,9 +866,9 @@ pub fn raiseBar() void {
 pub fn setBarState(action: BarAction) void {
     const s = state orelse return;
     if (action == .toggle) s.global_visible = !s.global_visible;
-    const current_ws    = workspaces.getCurrentWorkspace() orelse 0;
+    const current_ws    = tracking.getCurrentWorkspace() orelse 0;
     const is_fullscreen = action != .hide_fullscreen and
-        fullscreen.getForWorkspace(current_ws) != null;
+        (comptime build_options.has_fullscreen) and fullscreen.getForWorkspace(current_ws) != null;
     const show = !is_fullscreen and s.global_visible and action != .hide_fullscreen;
     if (s.visible == show and action != .toggle) return;
     s.visible = show;
@@ -945,13 +957,14 @@ pub fn monitorFocusedWindow() void {
 
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     if (state) |s| if (event.event == s.window) {
-        const ws_state = workspaces.getState() orelse return;
+        if (comptime !build_options.has_workspaces) return;
+        const ws_state = wsGetState() orelse return;
         const ws_w     = workspaces_segment.getCachedWorkspaceWidth();
         if (ws_w == 0) return;
         const click_x           = @max(0, event.event_x - s.cached_workspace_x);
         const clicked_ws: usize = @intCast(@divFloor(click_x, ws_w));
         if (clicked_ws < ws_state.workspaces.len) {
-            workspaces.switchTo(clicked_ws);
+            wsSwitchTo(clicked_ws);
             s.setDirty();
         }
     };
@@ -959,13 +972,16 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
 
 fn retileAllWorkspacesNoGrab() void {
     if (comptime !build_options.has_tiling) return;
-    const ws_state = workspaces.getState() orelse return;
+    const ws_state = wsGetState() orelse return;
     const tiling_active = core.config.tiling.enabled and
         if (tiling.getStateOpt()) |t| t.enabled else false;
     if (!tiling_active) { tiling.retileCurrentWorkspace(); return; }
+    if (comptime !build_options.has_workspaces) return;
     for (ws_state.workspaces, 0..) |*ws, idx| {
         if (ws.windows.len == 0) continue;
-        if (fullscreen.getForWorkspace(@intCast(idx)) != null) continue;
+        if (comptime build_options.has_fullscreen) {
+            if (fullscreen.getForWorkspace(@intCast(idx)) != null) continue;
+        }
         if (@as(u8, @intCast(idx)) == ws_state.current) {
             tiling.retileCurrentWorkspace();
         } else {
