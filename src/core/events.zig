@@ -94,6 +94,7 @@ const dispatch_table = blk: {
     table[xcb.XCB_DESTROY_NOTIFY]    = asHandler(window.handleDestroyNotify);
     table[xcb.XCB_EXPOSE]            = asHandler(bar.handleExpose);
     table[xcb.XCB_PROPERTY_NOTIFY]   = asHandler(handlePropertyNotify);
+    table[xcb.XCB_CLIENT_MESSAGE]    = asHandler(window.handleClientMessage);
     break :blk table;
 };
 

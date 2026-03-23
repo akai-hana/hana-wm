@@ -160,6 +160,7 @@ const AtomCache = struct {
     @"_NET_WM_WINDOW_TYPE":      u32,
     @"_NET_WM_WINDOW_TYPE_DOCK": u32,
     @"_NET_WM_STATE":            u32,
+    @"_NET_WM_STATE_FULLSCREEN": u32,
     @"_NET_WM_STATE_ABOVE":      u32,
     @"_NET_WM_STATE_STICKY":     u32,
     @"_NET_WM_ALLOWED_ACTIONS":  u32,
