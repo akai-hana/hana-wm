@@ -216,7 +216,6 @@ fn closeWindow(win: u32) void {
         // The window does not support WM_DELETE_WINDOW, so destroy it forcefully.
         _ = xcb.xcb_destroy_window(core.conn, win);
     }
-    _ = xcb.xcb_flush(core.conn);
 }
 
 // Action dispatch
@@ -255,6 +254,8 @@ fn executeAction(action: *const core.Action) !void {
                     _ = xcb.xcb_grab_server(core.conn);
                     tiling.swapWithMaster();
                     focus.syncPointerFocusNow();
+                    window.updateWorkspaceBorders();
+                    window.markBordersFlushed();
                     bar.redrawInsideGrab();
                     _ = xcb.xcb_ungrab_server(core.conn);
                     _ = xcb.xcb_flush(core.conn);
@@ -263,6 +264,8 @@ fn executeAction(action: *const core.Action) !void {
                     _ = xcb.xcb_grab_server(core.conn);
                     tiling.swapWithMasterFocusSwap();
                     focus.syncPointerFocusNow();
+                    window.updateWorkspaceBorders();
+                    window.markBordersFlushed();
                     bar.redrawInsideGrab();
                     _ = xcb.xcb_ungrab_server(core.conn);
                     _ = xcb.xcb_flush(core.conn);

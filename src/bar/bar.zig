@@ -12,6 +12,7 @@ const std   = @import("std");
 const core  = @import("core");
 const xcb   = core.xcb;
 const debug = @import("debug");
+const windowTest = @import("window");
 
 /// Blocking mutex backed by pthread_mutex_t; `.{}` is safe (= PTHREAD_MUTEX_INITIALIZER).
 const Mutex = struct {
@@ -828,6 +829,10 @@ pub fn toggleBarPosition() void {
     _ = xcb.xcb_configure_window(core.conn, s.window, xcb.XCB_CONFIG_WINDOW_Y,
         &[_]u32{@as(u32, @bitCast(@as(i32, new_y)))});
     const current_ws = tracking.getCurrentWorkspace() orelse {
+        // No active workspace — border sweep is a no-op, but mark it done so
+        // the event loop does not fire a redundant second sweep.
+        windowTest.updateWorkspaceBorders();
+        windowTest.markBordersFlushed();
         ungrabAndFlush();
         return;
     };
@@ -837,6 +842,10 @@ pub fn toggleBarPosition() void {
         true;
     if (no_fullscreen)
         if (comptime build_options.has_tiling) tiling.retileCurrentWorkspace();
+    // Sweep border colors inside the grab so they land in the same atomic
+    // batch as the configure and retile commands above.
+    windowTest.updateWorkspaceBorders();
+    windowTest.markBordersFlushed();
     ungrabAndFlush();
     debug.info("Bar position toggled to: {s}", .{@tagName(core.config.bar.vertical_position)});
 }
@@ -902,6 +911,10 @@ pub fn setBarState(action: BarAction) void {
         if (is_fullscreen) s.visible = s.global_visible;
         retileAllWorkspacesNoGrab();
         if (is_fullscreen) s.visible = saved;
+        // Sweep border colors inside the grab so they land in the same atomic
+        // batch as the map/unmap and retile commands above.
+        windowTest.updateWorkspaceBorders();
+        windowTest.markBordersFlushed();
         ungrabAndFlush();
     } else {
         if (show) {
@@ -910,7 +923,6 @@ pub fn setBarState(action: BarAction) void {
         } else {
             _ = xcb.xcb_unmap_window(core.conn, s.window);
         }
-        _ = xcb.xcb_flush(core.conn);
         if (comptime build_options.has_tiling) tiling.retileCurrentWorkspace();
     }
 

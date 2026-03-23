@@ -107,6 +107,12 @@ var atoms: struct {
 
 var g_geom_cache: layouts.CacheMap = .{};
 
+/// Set by grab-flush paths that already called updateWorkspaceBorders() inside
+/// their server grab, so the event loop can skip the redundant second sweep.
+/// Reset unconditionally by updateWorkspaceBordersIfNeeded() at the end of each
+/// event batch regardless of whether the flag was set.
+var borders_flushed_this_batch: bool = false;
+
 /// Save `rect` as the last-known geometry for `win`.
 /// Delegates to tiling when present; writes to g_geom_cache otherwise.
 pub fn saveWindowGeom(win: u32, rect: utils.Rect) void {
@@ -427,16 +433,24 @@ fn commitWindowToScreen(win: u32, on_current_workspace: bool) void {
         grabButtons(win, false);
     }
 
-    bar.scheduleRedraw();
     if (on_current_workspace) {
         const old_focused = focus.getFocused();
         focus.setFocus(win, .window_spawn);
         // Correct the new window to focused and strip focus from the old one,
         // still inside the server grab so no intermediate frame is visible.
         updateFocusBorders(old_focused, win);
+        // Sweep all workspace border colors inside the grab so they land in the
+        // same atomic batch as the layout, map, and focus commands above.
+        // markBordersFlushed() prevents the event loop from queuing a second sweep.
+        updateWorkspaceBorders();
+        bar.redrawInsideGrab();
+        borders_flushed_this_batch = true;
+        _ = xcb.xcb_ungrab_server(core.conn);
+    } else {
+        // Off-workspace window: no grab was taken, schedule bar update for the
+        // event loop's normal end-of-batch flush.
+        bar.scheduleRedraw();
     }
-
-    if (on_current_workspace) _ = xcb.xcb_ungrab_server(core.conn);
     _ = xcb.xcb_flush(core.conn);
 }
 
@@ -525,7 +539,11 @@ fn unmanageWindow(win: u32) void {
         }
     }
 
+    // Sweep border colors inside the grab so the repaint lands in the same
+    // atomic batch as the layout and focus changes above.
+    updateWorkspaceBorders();
     bar.redrawInsideGrab();
+    borders_flushed_this_batch = true;
 
     _ = xcb.xcb_ungrab_server(core.conn);
     _ = xcb.xcb_flush(core.conn);
@@ -649,7 +667,6 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
         if (mask & f.bit != 0) { values[n] = f.value; n += 1; }
     }
     _ = xcb.xcb_configure_window(core.conn, win, mask, &values);
-    _ = xcb.xcb_flush(core.conn);
 }
 
 // Focus / crossing events
@@ -841,6 +858,20 @@ pub fn updateWorkspaceBorders() void {
     for (ws.windows.items()) |win|
         _ = xcb.xcb_change_window_attributes(core.conn, win,
             xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
+}
+
+/// Mark that the current event batch already swept all workspace border colors
+/// inside a server grab, so the event loop does not need to do it again.
+/// Called by grab-flush paths in this module (and exposed to input.zig for the
+/// swap_master handlers) immediately after calling updateWorkspaceBorders().
+pub fn markBordersFlushed() void { borders_flushed_this_batch = true; }
+
+/// Event-loop entry point for the per-batch border sweep.
+/// Calls updateWorkspaceBorders() only when no grab-flush path already did so,
+/// then unconditionally resets the flag for the next batch.
+pub fn updateWorkspaceBordersIfNeeded() void {
+    if (!borders_flushed_this_batch) updateWorkspaceBorders();
+    borders_flushed_this_batch = false;
 }
 
 /// Push updated border width and colors to every managed window across all
