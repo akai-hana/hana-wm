@@ -171,6 +171,7 @@ pub fn deinit() void {
     if (comptime build_options.has_tiling)     tiling.deinit();
     if (comptime build_options.has_fullscreen) fullscreen.deinit();
     if (comptime build_options.has_workspaces) workspaces.deinit();
+    if (comptime build_options.has_minimize)   minimize.deinit();
     focus.deinit();
     tracking.deinit();
 }
@@ -817,7 +818,46 @@ pub inline fn getBorderWidth() u16 {
 
 /// Returns the correct border color for `win`:
 ///   0               — fullscreen windows (compositor owns the frame)
-///   border_focused  — the currently focused window
+// ClientMessage — EWMH fullscreen requests from applications
+
+/// Handles _NET_WM_STATE ClientMessage events sent by applications requesting
+/// fullscreen transitions (e.g. browsers pressing F11, SDL games, video players).
+/// Per EWMH §5.6.1: data32[0] = action (0=remove,1=add,2=toggle),
+///                   data32[1]/[2] = the state atoms to change.
+pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
+    if (event.format != 32) return;
+
+    const net_wm_state = utils.getAtomCached("_NET_WM_STATE") catch return;
+    if (event.type != net_wm_state) return;
+
+    const fs_atom = utils.getAtomCached("_NET_WM_STATE_FULLSCREEN") catch return;
+    const prop1   = event.data.data32[1];
+    const prop2   = event.data.data32[2];
+    if (prop1 != fs_atom and prop2 != fs_atom) return;
+
+    const win = event.window;
+    if (!isValidManagedWindow(win)) return;
+
+    if (comptime build_options.has_fullscreen) {
+        const action = event.data.data32[0];
+        const is_fs  = fullscreen.isFullscreen(win);
+        const should_enter = switch (action) {
+            1 => !is_fs, // _NET_WM_STATE_ADD
+            0 => false,  // _NET_WM_STATE_REMOVE
+            2 => !is_fs, // _NET_WM_STATE_TOGGLE
+            else => return,
+        };
+        if (should_enter and !is_fs) {
+            fullscreen.enterFullscreen(win, null);
+        } else if (!should_enter and is_fs) {
+            // enterFullscreen takes null saved_geom for a fresh exit path; re-use toggle()
+            // which resolves the correct workspace and restores floating windows.
+            fullscreen.toggle();
+        }
+    }
+}
+
+
 ///   border_unfocused — everything else
 inline fn borderColor(win: u32) u32 {
     if (comptime build_options.has_fullscreen) {
