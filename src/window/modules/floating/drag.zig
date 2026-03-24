@@ -9,13 +9,25 @@ const focus         = @import("focus");
 const build_options = @import("build_options");
 const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
 const bar           = @import("bar");
-const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
+const fullscreen    = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const window        = @import("window");
 
-/// Resolve snap_distance from config against screen width.
+// ── Named work-area type ────────────────────────────────────────────────────
+// A named struct makes the return type of workArea() referenceable in
+// variable declarations and future doc-comments, unlike an anonymous return
+// struct whose type cannot be spelled anywhere else in the code.
+const WorkArea = struct { left: i32, right: i32, top: i32, bottom: i32 };
+
+// ── Snap helpers ─────────────────────────────────────────────────────────────
+
+/// Resolve snap_distance from config into pixels.
 /// Percentage values are relative to screen width (the primary drag axis).
 /// Returns 0 when snapping is disabled.
-inline fn snapDistance() i32 {
+///
+/// Note: a misconfigured negative value degrades safely — snapAxis's
+/// abs-comparison is never satisfied when snap < 0, so no snap fires.
+/// Zero is the canonical "disabled" sentinel.
+fn snapDistance() i32 {
     const sv = core.config.snap_distance;
     if (sv.value == 0) return 0;
     if (sv.is_percentage) {
@@ -26,20 +38,20 @@ inline fn snapDistance() i32 {
 }
 
 /// Compute the work area edges accounting for bar height/position.
-/// The border width is subtracted from far edges and added to near edges so
-/// that snap aligns the window's outer border flush with the boundary — X
-/// positions the content area, so without this correction the window overlaps
-/// the bar or screen edge by exactly one border width.
-fn workArea() struct { left: i32, right: i32, top: i32, bottom: i32 } {
+///
+/// Border correction: X positions the window's content area, not its outer
+/// border. To align the outer border flush with a far boundary, we subtract
+/// 2 * border_width from that edge (total footprint = pos + dim + 2*bw).
+/// Near edges need no correction because the outer border is already at pos.
+fn workArea() WorkArea {
     const sw: i32  = core.screen.width_in_pixels;
     const sh: i32  = core.screen.height_in_pixels;
     const bh: i32  = if (bar.isVisible()) bar.getBarHeight() else 0;
     const bw2: i32 = @as(i32, window.getBorderWidth()) * 2;
+    // bar_at_bottom only has observable effect when bh > 0 (bar is visible).
+    // When bh == 0 both branches of the ternaries below produce identical
+    // results, so evaluating it unconditionally is harmless.
     const bar_at_bottom = core.config.bar.vertical_position == .bottom;
-    // Near edges: x,y is the outer border corner, so no offset needed —
-    // the outer border sits flush with the boundary at 0 / bar_height.
-    // Far edges: total footprint = pos + dim + 2*border_width, so to align
-    // the outer border with the far boundary we subtract 2*border_width.
     return .{
         .left   = 0,
         .right  = sw - bw2,
@@ -48,11 +60,16 @@ fn workArea() struct { left: i32, right: i32, top: i32, bottom: i32 } {
     };
 }
 
-/// Snap a window position on one axis.
+/// Snap a window origin on one axis toward the near or far work-area boundary.
 ///
 /// Snapping engages when a window edge comes within `snap` pixels of a
-/// work-area boundary. It disengages as soon as the raw position would push
-/// the window edge past the boundary — the user is intentionally crossing it.
+/// boundary.  It disengages as soon as the raw position would push the edge
+/// past the boundary — the user is intentionally crossing it.
+///
+/// Precondition: all inputs are within normal window-coordinate range
+/// (i.e. well within ±32 767).  The subtractions `pos - near` and
+/// `(pos + dim) - far` are not overflow-guarded; wrapping cannot occur
+/// for any real screen geometry.
 ///
 /// `pos`  — raw window origin on this axis
 /// `dim`  — window size on this axis (width or height), excluding borders
@@ -64,11 +81,26 @@ inline fn snapAxis(pos: i32, dim: i32, near: i32, far: i32, snap: i32) i32 {
     return pos;
 }
 
+/// Snap a single edge position toward one far boundary only.
+///
+/// Used during resize to snap the trailing (right / bottom) edge without
+/// also snapping toward the near boundary — near-edge snap during resize
+/// would collapse the window toward zero width / height, which is
+/// unintuitive and handled separately by the MIN_WINDOW_DIM clamp.
+inline fn snapFarEdge(edge: i32, boundary: i32, snap: i32) i32 {
+    if (snap > 0 and @abs(edge - boundary) < snap) return boundary;
+    return edge;
+}
+
+// ── Module state ─────────────────────────────────────────────────────────────
+
 const State = struct {
     drag:          core.DragState = .{},
     pending_float: bool           = false,
 };
 var g_state: State = .{};
+
+// ── Public API ────────────────────────────────────────────────────────────────
 
 pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     if (g_state.drag.active) return;
@@ -78,12 +110,23 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     if (comptime build_options.has_fullscreen) {
         if (fullscreen.isFullscreen(win)) return;
     }
+    // Geometry source priority: prefer the tiling-cached geometry over a live
+    // XCB round-trip.  The tiling engine keeps this up-to-date after every
+    // retile, so it reflects the window's current position without a server
+    // round-trip.  The live fallback covers purely floating windows that were
+    // never tracked by the tiling engine.
     const geom = blk: {
         if (comptime build_options.has_tiling) {
             if (tiling.getWindowGeom(win)) |g| break :blk g;
         }
         break :blk utils.getGeometry(core.conn, win) orelse return;
     };
+    // pending_float is set for any drag (move *or* resize) on a tiled window
+    // in a non-floating layout.  On the first motion event it triggers tiling
+    // detach and a full retile of the workspace.
+    // For .move specifically, the first event after detach also skips snap to
+    // prevent the window appearing frozen when its tiled position coincides
+    // with a screen edge (see updateDrag's was_pending_float guard).
     g_state = .{
         .drag = .{
             .active           = true,
@@ -102,6 +145,9 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
             false,
     };
     focus.setFocus(win, .user_command);
+    // Raise the window to the top of the stack.  The cookie is intentionally
+    // discarded — XCB errors surface only via xcb_request_check, which we do
+    // not call here; a stack-raise failure is non-fatal.
     _ = xcb.xcb_configure_window(core.conn, win,
         xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     _ = xcb.xcb_flush(core.conn);
@@ -114,6 +160,10 @@ pub fn updateDrag(x: i16, y: i16) void {
     const was_pending_float = g_state.pending_float;
     if (g_state.pending_float) {
         g_state.pending_float = false;
+        // Grab the server to suppress intermediate renders during the detach +
+        // retile sequence.  A failed grab is intentionally ignored — it is a
+        // visual nicety, not a correctness requirement; the retile proceeds
+        // regardless.
         _ = xcb.xcb_grab_server(core.conn);
         if (comptime build_options.has_tiling) {
             tiling.removeWindow(drag.window);
@@ -125,6 +175,13 @@ pub fn updateDrag(x: i16, y: i16) void {
 
     const dx = x - drag.start_x;
     const dy = y - drag.start_y;
+
+    // Compute snap threshold and work area once, shared by both switch arms.
+    // workArea() is only evaluated when snapping is active; when snap == 0
+    // the zero-value sentinel is never read (all snap logic short-circuits).
+    const snap = snapDistance();
+    const wa: WorkArea = if (snap > 0) workArea() else .{ .left = 0, .right = 0, .top = 0, .bottom = 0 };
+
     const rect = switch (drag.mode) {
         .move => blk: {
             const raw_x: i32 = @as(i32, drag.start_win_x) + @as(i32, dx);
@@ -138,8 +195,6 @@ pub fn updateDrag(x: i16, y: i16) void {
                 .width  = drag.start_win_width,
                 .height = drag.start_win_height,
             };
-            const snap = snapDistance();
-            const wa   = workArea();
             const win_w: i32 = drag.start_win_width;
             const win_h: i32 = drag.start_win_height;
             break :blk utils.Rect{
@@ -150,18 +205,30 @@ pub fn updateDrag(x: i16, y: i16) void {
             };
         },
         .resize => blk: {
-            const raw_w: i32 = @max(constants.MIN_WINDOW_DIM, @as(i32, drag.start_win_width)  + @as(i32, dx));
-            const raw_h: i32 = @max(constants.MIN_WINDOW_DIM, @as(i32, drag.start_win_height) + @as(i32, dy));
-            const snap = snapDistance();
-            const wa   = workArea();
-            // Snap the trailing edges: right = origin_x + width, bottom = origin_y + height.
-            const snapped_w: i32 = if (snap > 0 and @abs((@as(i32, drag.start_win_x) + raw_w) - wa.right)  < snap) wa.right  - drag.start_win_x else raw_w;
-            const snapped_h: i32 = if (snap > 0 and @abs((@as(i32, drag.start_win_y) + raw_h) - wa.bottom) < snap) wa.bottom - drag.start_win_y else raw_h;
+            // was_pending_float triggered the tiling detach above.  No
+            // snap-skip is needed here: the "frozen at edge" problem only
+            // arises during move (window origin snaps to a tiled edge);
+            // resize starts from the current size and is unaffected.
+            const raw_w: i32 = @as(i32, drag.start_win_width)  + @as(i32, dx);
+            const raw_h: i32 = @as(i32, drag.start_win_height) + @as(i32, dy);
+            // Snap the trailing edges toward the far work-area boundaries.
+            // snapFarEdge suppresses near-edge snap, which would otherwise
+            // collapse the window toward zero size.  The final clamp enforces
+            // the minimum window dimension and the u16 ceiling in one place,
+            // covering both the unsnapped path and the case where the snap
+            // target itself is smaller than MIN_WINDOW_DIM (window origin near
+            // the far boundary).
+            const snapped_w = snapFarEdge(
+                @as(i32, drag.start_win_x) + raw_w, wa.right, snap,
+            ) - drag.start_win_x;
+            const snapped_h = snapFarEdge(
+                @as(i32, drag.start_win_y) + raw_h, wa.bottom, snap,
+            ) - drag.start_win_y;
             break :blk utils.Rect{
                 .x      = drag.start_win_x,
                 .y      = drag.start_win_y,
-                .width  = @intCast(@min(std.math.maxInt(u16), @max(constants.MIN_WINDOW_DIM, snapped_w))),
-                .height = @intCast(@min(std.math.maxInt(u16), @max(constants.MIN_WINDOW_DIM, snapped_h))),
+                .width  = @intCast(std.math.clamp(snapped_w, constants.MIN_WINDOW_DIM, std.math.maxInt(u16))),
+                .height = @intCast(std.math.clamp(snapped_h, constants.MIN_WINDOW_DIM, std.math.maxInt(u16))),
             };
         },
     };
@@ -170,6 +237,8 @@ pub fn updateDrag(x: i16, y: i16) void {
 }
 
 pub fn stopDrag() void {
+    // No flush needed: the last updateDrag call already flushed all pending
+    // geometry changes before this function is reached.
     g_state = .{};
 }
 

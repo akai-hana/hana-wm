@@ -156,13 +156,13 @@ fn populateAtomCache() void {
     }) |e| @field(atoms, e.field) = utils.getAtomCached(e.atom) catch 0;
 }
 
-pub fn init(alloc: std.mem.Allocator) void {
+pub fn init(alloc: std.mem.Allocator) !void {
     tracking.init(alloc);
     focus.init(alloc);
     // tiling must precede workspaces: workspaces.init() calls tiling.getState().
     if (comptime build_options.has_tiling)      tiling.init();
     if (comptime build_options.has_fullscreen)  fullscreen.init();
-    if (comptime build_options.has_workspaces)  workspaces.init();
+    if (comptime build_options.has_workspaces) try workspaces.init();
     if (comptime build_options.has_minimize)    minimize.init();
     populateAtomCache();
 }

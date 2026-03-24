@@ -141,7 +141,7 @@ fn initBar() void {
 
 /// Initializes all WM modules that require explicit lifecycle management.
 fn initModules() !void {
-    window.init(core.alloc);
+    try window.init(core.alloc);
 }
 
 /// Tears down all WM modules in reverse init order.
