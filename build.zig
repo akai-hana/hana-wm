@@ -45,7 +45,7 @@ const optional_subsystems = [_]OptionalSubsystem{
     .{ .name = "scale",      .entry_point = ROOT_DIR ++ "core/scale.zig"                                                     },
     .{ .name = "tiling",     .entry_point = ROOT_DIR ++ "window/modules/tiling/tiling.zig",         .gate_dir = "tiling"     },
     .{ .name = "layouts",    .entry_point = ROOT_DIR ++ "window/modules/tiling/layouts.zig"                                  },
-    .{ .name = "fullscreen", .entry_point = ROOT_DIR ++ "window/modules/fullscreen/fullscreen.zig", .gate_dir = "fullscreen" },
+    .{ .name = "fullscreen", .entry_point = ROOT_DIR ++ "window/modules/fullscreen.zig", .gate_dir = "fullscreen" },
     .{ .name = "minimize",   .entry_point = ROOT_DIR ++ "window/modules/minimize.zig"                                       },
     .{ .name = "workspaces", .entry_point = ROOT_DIR ++ "window/modules/workspaces.zig"                                     },
 };

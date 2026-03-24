@@ -1,4 +1,4 @@
-//! Central location for the constants used across all files.
+//! Central location for core constants used across multiple files.
 
 const xcb = @cImport(@cInclude("xcb/xcb.h"));
 
@@ -17,11 +17,7 @@ pub const MOD_SUPER:    u16 = xcb.XCB_MOD_MASK_4;
 pub const MOD_MASK_BINDING: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER;
 
 // Window constraints
-// 50 px is the smallest size at which a window remains interactive — it still
-// exposes enough of the title bar and resize handle to grab with a mouse.
 pub const MIN_WINDOW_DIM:   u16 = 50;
-// 5 % prevents the master pane from collapsing to zero/invisible while still
-// allowing very narrow splits in a tiling layout.
 pub const MIN_MASTER_WIDTH: f32 = 0.05;
 
 // XKB retry parameters

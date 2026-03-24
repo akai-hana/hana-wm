@@ -10,7 +10,13 @@
 //! floating follows the same tileWithOffset interface as every other layout
 //! module.  Windows that have already been positioned (x or y ≠ 0) are left
 //! untouched.  Windows still at the X default origin (0, 0) — i.e. freshly
-//! spawned while floating was active — are centred on the screen.
+//! spawned while floating was active — are centred on the work area.
+//!
+//! Heuristic limitation: a window the user has intentionally dragged to
+//! position (0, 0) is indistinguishable from an unplaced window and will be
+//! re-centred on the next layout pass.  The correct fix is a `manually_placed`
+//! flag in the window cache; until that is added, (0, 0) remains the
+//! "unplaced" sentinel.
 //!
 //! Prev-layout state
 //!
@@ -22,15 +28,23 @@ const std     = @import("std");
 const layouts = @import("layouts");
 const core    = @import("core");
 const xcb     = core.xcb;
+const bar     = @import("bar");
 
 // Geometry requests are batched so that all cookies are issued before any
 // reply is awaited. This turns n sequential X round-trips into one flight of
 // n requests followed by n local reads — important on forwarded connections
 // where each round-trip carries non-trivial latency.
+//
+// 64 covers the typical maximum window count on a single workspace while
+// keeping the two per-batch stack arrays (needs_query + cookies) well under
+// 1 KB of combined stack space.
 const BATCH = 64;
 
 /// Centre any window that is still at the X default origin (0, 0).
 /// Windows the user has already moved are left untouched.
+///
+/// Centring is relative to the work area (screen minus bar height) so that
+/// freshly spawned windows are not obscured by the bar.
 ///
 /// Cache-first optimisation: windows with a valid cached rect at a non-zero
 /// origin are skipped entirely — no geometry round-trip is needed.  This
@@ -50,6 +64,13 @@ pub fn tileWithOffset(
     const sw: i32 = core.screen.width_in_pixels;
     const sh: i32 = core.screen.height_in_pixels;
 
+    // Work-area geometry: exclude the bar so that centred windows land in
+    // the visible portion of the screen rather than behind the bar.
+    const bh: i32       = if (bar.isVisible()) bar.getBarHeight() else 0;
+    const bar_at_bottom = core.config.bar.vertical_position == .bottom;
+    const work_top: i32 = if (bar_at_bottom) 0 else bh;
+    const work_h: i32   = sh - bh;
+
     var base: usize = 0;
     while (base < windows.len) {
         const end   = @min(base + BATCH, windows.len);
@@ -59,7 +80,9 @@ pub fn tileWithOffset(
         // A window with a valid cached rect at a non-zero origin has already
         // been positioned (by the user or by a previous tiling pass).  Skip
         // the geometry query entirely for those windows.
-        var needs_query: [BATCH]bool = undefined;
+        // Default false: a window is assumed to need a query until the cache
+        // check below proves otherwise.
+        var needs_query = [_]bool{false} ** BATCH;
         var any_needs: bool = false;
         for (batch, 0..) |win, i| {
             const already_placed = blk: {
@@ -68,6 +91,8 @@ pub fn tileWithOffset(
                 break :blk (wd.rect.x != 0 or wd.rect.y != 0);
             };
             needs_query[i] = !already_placed;
+            // any_needs lets us skip the phase-1/2 loops entirely when every
+            // window in this batch is already cached and placed.
             if (!already_placed) any_needs = true;
         }
 
@@ -94,10 +119,16 @@ pub fn tileWithOffset(
             // absent or zeroed). Leave it untouched.
             if (reply.*.x != 0 or reply.*.y != 0) continue;
 
+            // Use w/h throughout to avoid re-reading the reply fields after
+            // the widening conversion.  @intCast back to u16 is safe: XCB
+            // width/height are u16 so w and h are always in [1, 65535].
             const w: i32 = reply.*.width;
             const h: i32 = reply.*.height;
-            const cx: i32 = @max(0, @divTrunc(sw - w, 2));
-            const cy: i32 = @max(0, @divTrunc(sh - h, 2));
+
+            // Centre within the work area.  @max(0, …) clamps windows larger
+            // than the work area to the near edge instead of going negative.
+            const cx: i32 = @max(0, @divTrunc(sw     - w, 2));
+            const cy: i32 = work_top + @max(0, @divTrunc(work_h - h, 2));
 
             // Use configureSafe so the centred position is stored in the cache.
             // This ensures restoreWorkspaceGeom can replay it on workspace
@@ -105,8 +136,8 @@ pub fn tileWithOffset(
             layouts.configureSafe(ctx, win, .{
                 .x      = @intCast(cx),
                 .y      = @intCast(cy),
-                .width  = reply.*.width,
-                .height = reply.*.height,
+                .width  = @intCast(w),
+                .height = @intCast(h),
             });
         }
 

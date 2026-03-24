@@ -8,14 +8,12 @@
 //! - X11 keysym constants (XK_*) are defined here; values match <X11/keysymdef.h>.
 
 // Zig stdlibs
-const std    = @import("std");
+const std = @import("std");
 
 // config/
 const parser = @import("parser");
 
-pub const xcb = @cImport({
-    @cInclude("xcb/xcb.h");
-});
+pub const xcb = @cImport(@cInclude("xcb/xcb.h"));
 
 // Modifier masks
 //
@@ -23,7 +21,7 @@ pub const xcb = @cImport({
 // Centralised here alongside Keybind so config parsers, input handling,
 // and keybinding matching all share a single definition.
 pub const MOD_SHIFT:    u16 = xcb.XCB_MOD_MASK_SHIFT;
-pub const MOD_CAPSLOCK:     u16 = xcb.XCB_MOD_MASK_LOCK;
+pub const MOD_CAPSLOCK: u16 = xcb.XCB_MOD_MASK_LOCK;
 pub const MOD_CONTROL:  u16 = xcb.XCB_MOD_MASK_CONTROL;
 pub const MOD_ALT:      u16 = xcb.XCB_MOD_MASK_1;
 pub const MOD_NUM_LOCK: u16 = xcb.XCB_MOD_MASK_2;

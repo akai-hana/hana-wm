@@ -397,14 +397,23 @@ const State = struct {
             if (carousel.drawCarouselTick(self.dc, accent, self.height,
                     self.cached_title_x, self.cached_title_w)) return;
         }
-        _ = title_segment.draw(
-            self.dc, self.config, self.height,
-            self.cached_title_x, self.cached_title_w,
-            self.conn, new_focused,
-            self.cached_title.items,
-            self.cached_ws_wins.items, &self.cached_minimized_set,
-            &self.cached_title, &self.cached_title_window,
-            false, self.allocator,
+        _ = title_segment.drawCached(
+            .{
+                .dc      = self.dc,
+                .config  = self.config,
+                .height  = self.height,
+                .start_x = self.cached_title_x,
+                .width   = self.cached_title_w,
+                .conn    = self.conn,
+            },
+            .{
+                .focused_window  = new_focused,
+                .focused_title   = self.cached_title.items,
+                .minimized_title = "",
+                .current_ws_wins = self.cached_ws_wins.items,
+                .minimized_set   = &self.cached_minimized_set,
+            },
+            self.allocator,
         ) catch |e| { debug.warnOnErr(e, "drawTitleOnly"); return; };
         self.dc.flush();
     }
@@ -547,7 +556,7 @@ fn captureIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot) !voi
     snap.focused_title.clearRetainingCapacity();
     if (snap.focused_window) |fw| {
         if (snap.focused_window != prev.focused_window or snap.title_invalidated) {
-            title_segment.fetchFocusedTitleInto(core.conn, fw, &snap.focused_title, allocator) catch {};
+            title_segment.fetchWindowTitleInto(core.conn, fw, &snap.focused_title, allocator) catch {};
         } else {
             snap.focused_title.appendSlice(allocator, prev.focused_title.items) catch {};
         }
