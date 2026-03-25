@@ -1,38 +1,12 @@
-//! Build configuration for Hana window manager
+///! Build configuration for Hana window manager
 
 const std     = @import("std");
 const builtin = @import("builtin");
 
-// Several APIs used below (b.graph.io, b.build_root.handle.statFile, etc.)
-// require Zig 0.14.0+.
-comptime {
-    const min = std.SemanticVersion{ .major = 0, .minor = 14, .patch = 0 };
-    if (builtin.zig_version.order(min) == .lt)
-        @compileError("Zig 0.14.0 or newer is required to build Hana");
-}
-
-// Weak getauxval fallback for old musl (< 1.1).
-// Only emitted when link_libc = true — the stdlib exports its own weak symbol
-// otherwise, and a second export would cause a collision error.
-// Returning 0 disables the VDSO fast-path; syscalls fall back to the kernel
-// entry point. A strong symbol in libc wins at link time.
-comptime {
-    if (builtin.os.tag == .linux and builtin.link_libc) {
-        const S = struct {
-            fn getauxvalFallback(_: usize) callconv(.c) usize { return 0; }
-        };
-        @export(&S.getauxvalFallback, .{ .name = "getauxval", .linkage = .weak });
-    }
-}
-
-/// Root source directory. Change this one constant to relocate the entire source tree.
 const ROOT_DIR = "src/";
 
-// An optional subsystem is gated on the presence of its entry_point file.
-// Absence sets has_<n> = false in build_options, and gate_dir is skipped
-// by discoverModules. Guard usage in source with:
-//
-//   const has_foo = @import("build_options").has_foo;
+// An optional subsystem is gated on presence of its entry_point file
+// Absence sets `has_<thing> = false` in build_options, and gate_dir is skipped by discoverModules.
 const OptionalSubsystem = struct {
     name:        []const u8,
     entry_point: []const u8,
@@ -40,14 +14,13 @@ const OptionalSubsystem = struct {
 };
 
 const optional_subsystems = [_]OptionalSubsystem{
-    .{ .name = "bar",        .entry_point = ROOT_DIR ++ "bar/bar.zig",                              .gate_dir = "bar"        },
-    .{ .name = "input",      .entry_point = ROOT_DIR ++ "input/input.zig",                          .gate_dir = "input"      },
-    .{ .name = "scale",      .entry_point = ROOT_DIR ++ "core/scale.zig"                                                     },
-    .{ .name = "tiling",     .entry_point = ROOT_DIR ++ "window/modules/tiling/tiling.zig",         .gate_dir = "tiling"     },
-    .{ .name = "layouts",    .entry_point = ROOT_DIR ++ "window/modules/tiling/layouts.zig"                                  },
-    .{ .name = "fullscreen", .entry_point = ROOT_DIR ++ "window/modules/fullscreen.zig", .gate_dir = "fullscreen" },
-    .{ .name = "minimize",   .entry_point = ROOT_DIR ++ "window/modules/minimize.zig"                                       },
-    .{ .name = "workspaces", .entry_point = ROOT_DIR ++ "window/modules/workspaces.zig"                                     },
+    .{ .name = "scale",      .entry_point = ROOT_DIR ++ "core/scale.zig"                                             },
+    .{ .name = "bar",        .entry_point = ROOT_DIR ++ "bar/bar.zig",                      .gate_dir = "bar"        },
+    .{ .name = "tiling",     .entry_point = ROOT_DIR ++ "window/modules/tiling/tiling.zig", .gate_dir = "tiling"     },
+    .{ .name = "layouts",    .entry_point = ROOT_DIR ++ "window/modules/tiling/layouts.zig"                          },
+    .{ .name = "fullscreen", .entry_point = ROOT_DIR ++ "window/modules/fullscreen.zig",                             },
+    .{ .name = "minimize",   .entry_point = ROOT_DIR ++ "window/modules/minimize.zig"                                },
+    .{ .name = "workspaces", .entry_point = ROOT_DIR ++ "window/modules/workspaces.zig"                              },
 };
 
 // Append to these lists to add new layouts or bar segments.
@@ -61,6 +34,14 @@ const segment_modules = [_][]const u8{
 };
 
 pub fn build(b: *std.Build) void {
+    if (builtin.zig_version.pre == null) {
+        @compileError(
+            \\Please compile hana with Zig's master branch.
+            \\If your package manager doesn't have it, you can try using ZVM:
+            \\$ curl https://raw.githubusercontent.com/tristanisham/zvm/master/install.sh | bash
+        );
+    }
+
     const target   = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast });
 
@@ -254,13 +235,13 @@ fn zigEscape(allocator: std.mem.Allocator, input: []const u8) []const u8 {
         '\r' => out.appendSlice(allocator, "\\r")  catch @panic("OOM"),
         '\t' => out.appendSlice(allocator, "\\t")  catch @panic("OOM"),
         ' '...'"' - 1, '"' + 1...'\\' - 1, '\\' + 1...'~'
-             => out.append(allocator, c)            catch @panic("OOM"),
-        else => {
-            var buf: [4]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "\\x{x:0>2}", .{c}) catch unreachable;
-            out.appendSlice(allocator, s) catch @panic("OOM");
-        },
-    };
+            => out.append(allocator, c)            catch @panic("OOM"),
+            else => {
+                var buf: [4]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, "\\x{x:0>2}", .{c}) catch unreachable;
+                out.appendSlice(allocator, s) catch @panic("OOM");
+            },
+        };
     return out.toOwnedSlice(allocator) catch @panic("OOM");
 }
 
