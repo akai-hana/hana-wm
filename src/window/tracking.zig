@@ -15,7 +15,7 @@ const std           = @import("std");
 const build_options = @import("build_options");
 const minimize      = if (build_options.has_minimize) @import("minimize") else struct {};
 
-// ── Fixed-size ordered window list ────────────────────────────────────────────
+// Fixed-size ordered window list.
 // Used by Workspace in workspaces.zig; kept here so it can be imported from
 // the always-present tracking module rather than the optional workspaces module.
 
@@ -23,24 +23,44 @@ pub const Tracking = struct {
     const capacity = 64;
 
     buf: [capacity]u32 = undefined,
-    len: u8            = 0,
+
+    /// Number of live entries in buf[0..len].  Never exceeds `capacity`.
+    /// The type u8 is wider than strictly necessary for a maximum of 64;
+    /// the invariant is enforced by prepareAdd rather than the type alone.
+    len: u8 = 0,
 
     pub fn contains(self: *const Tracking, win: u32) bool {
         return std.mem.indexOfScalar(u32, self.buf[0..self.len], win) != null;
     }
 
+    /// Returns true if `win` may be safely appended or prepended.
+    /// Emits a warning and triggers a debug assertion if the list is already
+    /// at capacity, making overflow visible rather than silently dropping the
+    /// window (which would cause it to become invisible to tiling, workspace
+    /// membership queries, and focus history with no diagnostic output).
     fn prepareAdd(self: *Tracking, win: u32) bool {
         if (self.contains(win)) return false;
-        if (self.len >= capacity) return false;
+        if (self.len >= capacity) {
+            std.log.warn(
+                "tracking: workspace capacity ({d}) reached; window 0x{x} will not be tracked",
+                .{ capacity, win },
+            );
+            std.debug.assert(false); // catch in debug/releaseSafe builds
+            return false;
+        }
         return true;
     }
 
+    /// Append `win` to the back of the list.
+    /// No-op if `win` is already present or the list is at capacity (see prepareAdd).
     pub fn add(self: *Tracking, win: u32) void {
         if (!self.prepareAdd(win)) return;
         self.buf[self.len] = win;
         self.len += 1;
     }
 
+    /// Prepend `win` to the front of the list, shifting all existing entries right.
+    /// No-op if `win` is already present or the list is at capacity (see prepareAdd).
     pub fn addFront(self: *Tracking, win: u32) void {
         if (!self.prepareAdd(win)) return;
         std.mem.copyBackwards(u32, self.buf[1 .. self.len + 1], self.buf[0..self.len]);
@@ -48,6 +68,13 @@ pub const Tracking = struct {
         self.len += 1;
     }
 
+    /// Remove `win`, preserving the relative order of all other entries.
+    ///
+    /// Use this variant when window order is semantically meaningful — e.g.
+    /// tiling layouts that derive master/slave assignment from positional index.
+    /// O(n) due to the left-shift of the tail.
+    ///
+    /// Returns true if `win` was found and removed, false if it was not present.
     pub fn remove(self: *Tracking, win: u32) bool {
         const i = std.mem.indexOfScalar(u32, self.buf[0..self.len], win) orelse return false;
         std.mem.copyForwards(u32, self.buf[i .. self.len - 1], self.buf[i + 1 .. self.len]);
@@ -55,6 +82,15 @@ pub const Tracking = struct {
         return true;
     }
 
+    /// Remove `win` by swapping it with the last entry.
+    ///
+    /// Use this variant only when window order is irrelevant — e.g. tag cleanup
+    /// where the workspace is being emptied, or when the tiling layout will be
+    /// fully recomputed immediately after.  Calling this when order matters will
+    /// silently corrupt positional semantics.
+    /// O(1) after the initial scan.
+    ///
+    /// Returns true if `win` was found and removed, false if it was not present.
     pub fn removeUnordered(self: *Tracking, win: u32) bool {
         const i = std.mem.indexOfScalar(u32, self.buf[0..self.len], win) orelse return false;
         self.buf[i] = self.buf[self.len - 1];
@@ -62,12 +98,33 @@ pub const Tracking = struct {
         return true;
     }
 
+    /// Replace the current window order with `new_order`.
+    ///
+    /// Asserts (in debug/releaseSafe builds) that `new_order` contains exactly
+    /// the same set of windows as the current list — no additions, no removals,
+    /// no duplicates.
+    ///
+    /// Validation is O(n) via a stack-allocated bitset: one pass builds a
+    /// presence bitmap over current buf indices, then verifies that new_order
+    /// hits every slot exactly once.
     pub fn reorder(self: *Tracking, new_order: []const u32) void {
         std.debug.assert(new_order.len == self.len);
-        for (new_order) |w|
-            std.debug.assert(self.contains(w));
-        for (self.buf[0..self.len]) |w|
-            std.debug.assert(std.mem.indexOfScalar(u32, new_order, w) != null);
+
+        // Build a presence bitmap over the *current* buf indices in one O(n)
+        // pass, then verify new_order hits every slot exactly once.
+        var seen = std.StaticBitSet(capacity).initEmpty();
+        for (new_order) |w| {
+            const slot = std.mem.indexOfScalar(u32, self.buf[0..self.len], w);
+            // Every entry in new_order must exist in the current list.
+            std.debug.assert(slot != null);
+            const idx = slot.?;
+            // No duplicates in new_order.
+            std.debug.assert(!seen.isSet(idx));
+            seen.set(idx);
+        }
+        // Every current window must appear in new_order.
+        std.debug.assert(seen.count() == self.len);
+
         @memcpy(self.buf[0..self.len], new_order);
     }
 
@@ -76,7 +133,7 @@ pub const Tracking = struct {
     }
 };
 
-// ── Global tracking state ─────────────────────────────────────────────────────
+// Global tracking state
 
 var g_map:             ?std.AutoHashMap(u32, u64) = null;
 var g_current:         u8                         = 0;
@@ -102,7 +159,7 @@ pub fn setWorkspaceCount(count: usize) void { g_workspace_count = count; }
 /// even when code queries tracking directly.
 pub fn setCurrentWorkspace(ws: u8) void { g_current = ws; }
 
-// ── Window registration ───────────────────────────────────────────────────────
+// Window registration
 
 /// Register `win` on workspace `ws`. No-op if already tracked.
 /// Called directly when workspaces.zig is absent; workspaces.moveWindowTo
@@ -121,14 +178,27 @@ pub fn removeWindow(win: u32) void {
     if (g_map) |*m| _ = m.remove(win);
 }
 
-/// Update the workspace bitmask for `win`. Called by workspaces.zig for
-/// tag and move operations; keeps the hashmap in sync with workspace arrays.
+/// Update the workspace bitmask for `win`.
+///
+/// Called by workspaces.zig for tag and move operations; keeps the hashmap in
+/// sync with workspace arrays.
+///
+/// Panics in debug/releaseSafe builds if `win` is not already in the map —
+/// registerWindow must be called before any mask update.
 pub fn setWindowMask(win: u32, mask: u64) void {
     std.debug.assert(mask != 0);
-    if (g_map) |*m| if (m.getPtr(win)) |p| { p.* = mask; };
+    if (g_map) |*m| {
+        if (m.getPtr(win)) |p| {
+            p.* = mask;
+        } else {
+            // setWindowMask called on an unregistered (or already-removed) window.
+            // This is always a caller bug: registerWindow must precede any mask update.
+            std.debug.assert(false);
+        }
+    }
 }
 
-// ── Query predicates ─────────────────────────────────────────────────────────
+// Query predicates
 
 pub inline fn getWindowWorkspaceMask(win: u32) ?u64 {
     const m = g_map orelse return null;
@@ -152,6 +222,15 @@ pub inline fn getWorkspaceCount() usize {
     return g_workspace_count;
 }
 
+/// Returns the lowest-indexed workspace this window belongs to, or null if
+/// the window is not tracked.
+///
+/// For windows on exactly one workspace (the common case) this is the
+/// definitive workspace index.  For tag-based multi-workspace windows the
+/// bitmask may have several bits set; this function returns the lowest set bit,
+/// which is not necessarily the *current* workspace.  Callers that need
+/// "is this window on the current workspace?" should use
+/// isOnCurrentWorkspace(win) instead.
 pub inline fn getWorkspaceForWindow(win: u32) ?u8 {
     const mask = getWindowWorkspaceMask(win) orelse return null;
     return @intCast(@ctz(mask));
@@ -180,7 +259,14 @@ pub fn isOnCurrentWorkspaceAndVisible(win: u32) bool {
     return if (comptime build_options.has_minimize) !minimize.isMinimized(win) else true;
 }
 
-/// Returns the first non-minimized window in `windows`, or null if all minimized.
+/// Returns the first non-minimized window in `windows`, or null if all are minimized.
+///
+/// This function lives in tracking.zig rather than minimize.zig because
+/// tracking.zig is always compiled in, making it safely importable by modules
+/// such as focus.zig that need to store a *const fn pointer without a comptime
+/// gate at every storage site.  minimize.zig is optional and cannot be
+/// unconditionally imported.
+///
 /// Declared as a plain fn so minimize.zig can store it as a function pointer.
 pub fn firstNonMinimized(windows: []const u32) ?u32 {
     for (windows) |win| {

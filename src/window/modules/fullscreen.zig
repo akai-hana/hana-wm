@@ -8,6 +8,10 @@
 //! The two commit helpers only queue XCB requests; the caller owns
 //! grab/ungrab/flush so paired exit+enter transitions can share one
 //! grab with no intermediate composited frame.
+//!
+//! Internal window iteration is centralised in forEachWindowOnCurrentWorkspace,
+//! which dispatches to the workspace window list (has_workspaces) or the
+//! global tracking iterator, eliminating three separate copies of that branch.
 
 const std           = @import("std");
 const core          = @import("core");
@@ -58,16 +62,25 @@ var g_slots: [MAX_WORKSPACES]?FullscreenInfo = @splat(null);
 const FloatSave = struct { win: u32, rect: utils.Rect };
 /// Floating window positions saved just before a fullscreen enter. Populated
 /// by saveFloatingWindowGeoms, consumed and cleared by restoreFloatingWindows.
-var g_float_saves:     [MAX_FLOAT_SAVES]FloatSave = undefined;
+// Improvement #7: zero-initialised instead of `undefined` — eliminates the
+// footgun where a length-tracking bug would silently yield garbage data.
+var g_float_saves:     [MAX_FLOAT_SAVES]FloatSave = std.mem.zeroes([MAX_FLOAT_SAVES]FloatSave);
 var g_float_saves_len: usize = 0;
 
 // EWMH atoms for _NET_WM_STATE_FULLSCREEN — interned once in init().
 var g_net_wm_state:            xcb.xcb_atom_t = xcb.XCB_ATOM_NONE;
 var g_net_wm_state_fullscreen: xcb.xcb_atom_t = xcb.XCB_ATOM_NONE;
 
-pub fn init() void {
+// Improvement #6: single source of truth for the reset sequence shared by
+// init() and deinit(), so adding a new state field can never cause one to
+// fall out of sync with the other.
+fn resetState() void {
     g_slots           = @splat(null);
     g_float_saves_len = 0;
+}
+
+pub fn init() void {
+    resetState();
 
     // Intern EWMH atoms needed for _NET_WM_STATE_FULLSCREEN.
     // Batch both requests before consuming either reply so the round-trips overlap.
@@ -84,8 +97,7 @@ pub fn init() void {
 }
 
 pub fn deinit() void {
-    g_slots           = @splat(null);
-    g_float_saves_len = 0;
+    resetState();
 }
 
 // Public state queries
@@ -99,7 +111,9 @@ pub fn getForWorkspace(ws: u8) ?FullscreenInfo {
 }
 
 /// Returns the workspace index that `win` is fullscreen on, or null.
-/// O(workspace_count) — scans only the live slots, not the full 256-entry array.
+// Improvement #14: reworded from "scans only the live slots, not the full
+// 256-entry array" — that claim is only true for typical workspace counts.
+/// Scans up to getWorkspaceCount() slots; O(workspace_count).
 pub fn workspaceFor(win: u32) ?u8 {
     const count = tracking.getWorkspaceCount();
     for (g_slots[0..count], 0..) |slot, i|
@@ -115,8 +129,12 @@ pub fn removeForWorkspace(ws: u8) void {
     g_slots[ws] = null;
 }
 
+// Improvement #13: clear() previously only zeroed g_slots, leaving a stale
+// g_float_saves_len that could cause restoreFloatingWindows to act on data
+// from a prior session if clear() was called mid-session.
 pub fn clear() void {
-    g_slots = @splat(null);
+    g_slots           = @splat(null);
+    g_float_saves_len = 0;
 }
 
 pub fn hasAnyFullscreen() bool {
@@ -127,10 +145,45 @@ pub fn hasAnyFullscreen() bool {
 
 /// Iterate over occupied slots. Diagnostics only.
 /// Calls `cb` with (workspace_index, FullscreenInfo) for every non-null slot.
-pub fn forEachFullscreen(cb: fn (u8, FullscreenInfo) void) void {
+// Improvement #9: accepts anytype instead of a bare fn pointer so the caller
+// can pass a struct with a `call` method that captures local state, or any
+// other callable — all resolved and inlined at compile time, zero cost.
+pub fn forEachFullscreen(cb: anytype) void {
     const count = tracking.getWorkspaceCount();
     for (g_slots[0..count], 0..) |slot, i|
         if (slot) |info| cb(@intCast(i), info);
+}
+
+// Internal iteration helper
+//
+// Calls `ctx.call(window_id)` for every window on the current workspace
+// except `skip`, dispatching to the workspace window list when workspaces
+// are compiled in and falling back to the global tracking iterator otherwise.
+// `ctx` is anytype so each call site is monomorphised over its specific
+// context struct; the resulting code is equivalent to a hand-written branch
+// at each site with zero overhead.
+//
+// This helper is the single place that knows about the has_workspaces
+// dispatch, replacing three separate copies of the same branching pattern
+// that formerly lived inside saveFloatingWindowGeoms, restoreFloatingWindows,
+// and enterFullscreenCommit.
+fn forEachWindowOnCurrentWorkspace(skip: u32, ctx: anytype) void {
+    if (comptime build_options.has_workspaces) {
+        const ws_obj = workspaces.getCurrentWorkspaceObject() orelse return;
+        for (ws_obj.windows.items()) |w| {
+            if (w == skip) continue;
+            ctx.call(w);
+        }
+    } else {
+        if (tracking.allWindowsIterator()) |it| {
+            var iter = it;
+            while (iter.next()) |wp| {
+                const w = wp.*;
+                if (w == skip) continue;
+                ctx.call(w);
+            }
+        }
+    }
 }
 
 // Geometry helpers
@@ -144,9 +197,9 @@ pub fn forEachFullscreen(cb: fn (u8, FullscreenInfo) void) void {
 /// Slow path — floating or newly-spawned windows: these are not in the tiling
 /// cache (they were never passed through `configureSafe`), so a blocking
 /// xcb_get_geometry round-trip is unavoidable.  Falls back to a centred
-/// quarter-screen default if the reply fails or the window is offscreen
-/// (x/y below OFFSCREEN_THRESHOLD_MIN), which happens when a window was
-/// spawned but never placed on-screen before the user triggered fullscreen.
+/// quarter-screen default if the reply fails, the window is offscreen
+/// (x/y below OFFSCREEN_THRESHOLD_MIN), or the window reports a zero-size
+/// geometry (mapped but not yet sized).
 fn fetchWindowGeom(win: u32) core.WindowGeometry {
     if (comptime build_options.has_tiling) {
         if (tiling.getWindowGeom(win)) |rect| {
@@ -161,11 +214,14 @@ fn fetchWindowGeom(win: u32) core.WindowGeometry {
         }
     }
 
+    // Improvement #10: screen dimensions are u16; dividing by a power of two
+    // on an unsigned value is unambiguous — the former @as(i32, ...) cast and
+    // @divTrunc were unnecessary and misleading.
     const default: core.WindowGeometry = .{
-        .x            = @intCast(@divTrunc(@as(i32, core.screen.width_in_pixels),  4)),
-        .y            = @intCast(@divTrunc(@as(i32, core.screen.height_in_pixels), 4)),
-        .width        = @divTrunc(core.screen.width_in_pixels,  2),
-        .height       = @divTrunc(core.screen.height_in_pixels, 2),
+        .x            = @intCast(core.screen.width_in_pixels  / 4),
+        .y            = @intCast(core.screen.height_in_pixels / 4),
+        .width        = core.screen.width_in_pixels  / 2,
+        .height       = core.screen.height_in_pixels / 2,
         .border_width = 0,
     };
 
@@ -174,8 +230,14 @@ fn fetchWindowGeom(win: u32) core.WindowGeometry {
     ) orelse return default;
     defer std.c.free(reply);
 
+    // Improvement #11: also reject zero-size geometry.  A window that has
+    // been mapped but not yet sized reports width=0/height=0; saving those
+    // dimensions and restoring them on exit would leave the window invisible.
     if (reply.*.x < constants.OFFSCREEN_THRESHOLD_MIN or
-        reply.*.y < constants.OFFSCREEN_THRESHOLD_MIN) return default;
+        reply.*.y < constants.OFFSCREEN_THRESHOLD_MIN or
+        reply.*.width  == 0 or
+        reply.*.height == 0) return default;
+
     return .{
         .x            = reply.*.x,
         .y            = reply.*.y,
@@ -197,42 +259,46 @@ fn fetchWindowGeom(win: u32) core.WindowGeometry {
 /// Must be called BEFORE xcb_grab_server so the geometry round-trips do not
 /// block inside a grab.
 fn saveFloatingWindowGeoms(skip_win: u32) void {
-    var wins:    [MAX_FLOAT_SAVES]u32                            = undefined;
-    var cookies: [MAX_FLOAT_SAVES]xcb.xcb_get_geometry_cookie_t = undefined;
-    var n: usize = 0;
+    var wins:      [MAX_FLOAT_SAVES]u32                            = undefined;
+    var cookies:   [MAX_FLOAT_SAVES]xcb.xcb_get_geometry_cookie_t = undefined;
+    var n:         usize = 0;
+    var truncated: bool  = false;
 
-    if (comptime build_options.has_workspaces) {
-        const ws_obj = workspaces.getCurrentWorkspaceObject() orelse {
-            g_float_saves_len = 0; return;
-        };
-        for (ws_obj.windows.items()) |w| {
-            if (w == skip_win) continue;
-            if (minimize.isMinimized(w)) continue;
-            const is_tiled = if (comptime build_options.has_tiling) tiling.isWindowTiled(w) else false;
-            if (is_tiled) continue;
-            if (n < MAX_FLOAT_SAVES) {
-                wins[n]    = w;
-                cookies[n] = xcb.xcb_get_geometry(core.conn, w);
-                n += 1;
+    // Improvement #3 (iteration) + #8 (truncation log):
+    // The collection step now uses forEachWindowOnCurrentWorkspace so the
+    // has_workspaces dispatch is not repeated here.  Overflow past
+    // MAX_FLOAT_SAVES is logged rather than silently dropped.
+    const CollectCtx = struct {
+        n:         *usize,
+        truncated: *bool,
+        wins:      *[MAX_FLOAT_SAVES]u32,
+        cookies:   *[MAX_FLOAT_SAVES]xcb.xcb_get_geometry_cookie_t,
+
+        fn call(self: @This(), w: u32) void {
+            if (minimize.isMinimized(w)) return;
+            if (comptime build_options.has_tiling) if (tiling.isWindowTiled(w)) return;
+            if (self.n.* >= MAX_FLOAT_SAVES) {
+                self.truncated.* = true;
+                return;
             }
+            self.wins[self.n.*]    = w;
+            self.cookies[self.n.*] = xcb.xcb_get_geometry(core.conn, w);
+            self.n.* += 1;
         }
-    } else {
-        if (tracking.allWindowsIterator()) |it| {
-            var iter = it;
-            while (iter.next()) |wp| {
-                const w = wp.*;
-                if (w == skip_win) continue;
-                if (minimize.isMinimized(w)) continue;
-                const is_tiled = if (comptime build_options.has_tiling) tiling.isWindowTiled(w) else false;
-                if (is_tiled) continue;
-                if (n < MAX_FLOAT_SAVES) {
-                    wins[n]    = w;
-                    cookies[n] = xcb.xcb_get_geometry(core.conn, w);
-                    n += 1;
-                }
-            }
-        }
-    }
+    };
+
+    forEachWindowOnCurrentWorkspace(skip_win, CollectCtx{
+        .n         = &n,
+        .truncated = &truncated,
+        .wins      = &wins,
+        .cookies   = &cookies,
+    });
+
+    if (truncated) debug.warn(
+        "saveFloatingWindowGeoms: more than {d} floating windows on workspace; " ++
+        "excess positions will not be restored on fullscreen exit",
+        .{MAX_FLOAT_SAVES},
+    );
 
     g_float_saves_len = 0;
 
@@ -265,85 +331,63 @@ fn getSavedFloatGeom(win: u32) ?utils.Rect {
 fn restoreFloatingWindows(skip_win: u32) void {
     const pos = utils.floatDefaultPos();
 
-    if (comptime build_options.has_workspaces) {
-        const ws_obj = workspaces.getCurrentWorkspaceObject() orelse {
-            g_float_saves_len = 0; return;
-        };
-        for (ws_obj.windows.items()) |w| {
-            if (w == skip_win) continue;
-            if (minimize.isMinimized(w)) continue;
-            const is_tiled = if (comptime build_options.has_tiling) tiling.isWindowTiled(w) else false;
-            if (is_tiled) continue;
+    // Improvement #3: the has_workspaces dispatch now lives only in
+    // forEachWindowOnCurrentWorkspace.  We capture pos by its component
+    // values (x, y as u32) to avoid needing to know its concrete type inside
+    // the context struct declaration.
+    const RestoreCtx = struct {
+        pos_x: u32,
+        pos_y: u32,
+
+        fn call(self: @This(), w: u32) void {
+            if (minimize.isMinimized(w)) return;
+            if (comptime build_options.has_tiling) if (tiling.isWindowTiled(w)) return;
             const rect: ?utils.Rect = getSavedFloatGeom(w) orelse window.getWindowGeom(w);
             if (rect) |r| {
                 utils.configureWindow(core.conn, w, r);
             } else {
                 _ = xcb.xcb_configure_window(core.conn, w,
                     xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
-                    &[_]u32{ pos.x, pos.y });
+                    &[_]u32{ self.pos_x, self.pos_y });
             }
         }
-    } else {
-        if (tracking.allWindowsIterator()) |it| {
-            var iter = it;
-            while (iter.next()) |wp| {
-                const w = wp.*;
-                if (w == skip_win) continue;
-                if (minimize.isMinimized(w)) continue;
-                const is_tiled = if (comptime build_options.has_tiling) tiling.isWindowTiled(w) else false;
-                if (is_tiled) continue;
-                const rect: ?utils.Rect = getSavedFloatGeom(w) orelse window.getWindowGeom(w);
-                if (rect) |r| {
-                    utils.configureWindow(core.conn, w, r);
-                } else {
-                    _ = xcb.xcb_configure_window(core.conn, w,
-                        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
-                        &[_]u32{ pos.x, pos.y });
-                }
-            }
-        }
-    }
+    };
+
+    forEachWindowOnCurrentWorkspace(skip_win, RestoreCtx{ .pos_x = pos.x, .pos_y = pos.y });
 
     g_float_saves_len = 0;
 }
 
 // Commit helpers (XCB-only; caller owns grab/ungrab/flush)
+//
+// Improvement #4: `inline` removed from both helpers.  These functions contain
+// array loops, multiple conditional branches, several XCB calls, and a bar
+// state update (which may trigger a tiling retile).  Forcing inlining at every
+// call site produces larger binary output and misleads readers into thinking
+// these are trivial leaf functions.  The compiler will inline them on its own
+// if it determines the trade-off is worthwhile.
 
-inline fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
+fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
     setForWorkspace(ws, .{
         .window         = win,
         .saved_geometry = geom,
     });
 
-    if (comptime build_options.has_workspaces) {
-        if (workspaces.getCurrentWorkspaceObject()) |ws_obj| {
-            for (ws_obj.windows.items()) |other_win| {
-                if (other_win == win) continue;
-                _ = xcb.xcb_configure_window(core.conn, other_win,
-                    xcb.XCB_CONFIG_WINDOW_X,
-                    &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
-                if (comptime build_options.has_tiling) {
-                    // Only invalidate tiled windows — floating windows' cache entries
-                    // hold the geometry we need to restore on exit.
-                    if (tiling.isWindowTiled(other_win)) tiling.invalidateGeomCache(other_win);
-                }
+    // Push every other window offscreen.
+    // Improvement #3: iteration dispatched through the shared helper.
+    const PushCtx = struct {
+        fn call(_: @This(), w: u32) void {
+            _ = xcb.xcb_configure_window(core.conn, w,
+                xcb.XCB_CONFIG_WINDOW_X,
+                &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
+            if (comptime build_options.has_tiling) {
+                // Only invalidate tiled windows — floating windows' cache entries
+                // hold the geometry we need to restore on exit.
+                if (tiling.isWindowTiled(w)) tiling.invalidateGeomCache(w);
             }
         }
-    } else {
-        if (tracking.allWindowsIterator()) |it| {
-            var iter = it;
-            while (iter.next()) |wp| {
-                const other_win = wp.*;
-                if (other_win == win) continue;
-                _ = xcb.xcb_configure_window(core.conn, other_win,
-                    xcb.XCB_CONFIG_WINDOW_X,
-                    &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
-                if (comptime build_options.has_tiling) {
-                    if (tiling.isWindowTiled(other_win)) tiling.invalidateGeomCache(other_win);
-                }
-            }
-        }
-    }
+    };
+    forEachWindowOnCurrentWorkspace(win, PushCtx{});
 
     // Configure the fullscreen window and raise it BEFORE calling setBarState.
     // setBarState(.hide_fullscreen) triggers tiling.retileCurrentWorkspace() when
@@ -382,7 +426,7 @@ inline fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) voi
     }
 }
 
-inline fn exitFullscreenCommit(win: u32, ws: u8) void {
+fn exitFullscreenCommit(win: u32, ws: u8) void {
     const fs_info = getForWorkspace(ws) orelse return;
     if (fs_info.window != win) return;
 
@@ -403,7 +447,10 @@ inline fn exitFullscreenCommit(win: u32, ws: u8) void {
     window.applyBorder(win);
 
     // Clear EWMH fullscreen state so external tools see the window is no longer fullscreen.
-    if (g_net_wm_state != xcb.XCB_ATOM_NONE) {
+    // Improvement #2: guard now checks both atoms, mirroring the enter path.
+    // Previously only g_net_wm_state was checked; if atom interning had partially
+    // failed, the clear would still fire and write against an unexpected atom value.
+    if (g_net_wm_state != xcb.XCB_ATOM_NONE and g_net_wm_state_fullscreen != xcb.XCB_ATOM_NONE) {
         _ = xcb.xcb_change_property(
             core.conn, xcb.XCB_PROP_MODE_REPLACE,
             win, g_net_wm_state,
@@ -429,27 +476,63 @@ pub fn enterFullscreen(win: u32, saved_geom: ?core.WindowGeometry) void {
     _ = xcb.xcb_flush(core.conn);
 }
 
+// Improvement #1 (bug fix) + #5 (uniform grab ownership):
+//
+// Former toggle() had two problems:
+//
+//   1. In the "switch fullscreen to a different window" branch,
+//      saveFloatingWindowGeoms() and fetchWindowGeom() were called INSIDE
+//      xcb_grab_server/xcb_ungrab_server.  Both functions issue
+//      xcb_get_geometry requests and then read their replies.  Those replies
+//      cannot be delivered while the same client holds the server grab —
+//      xcb_get_geometry_reply blocks indefinitely, hanging the WM.
+//      (saveFloatingWindowGeoms' own doc comment says "must be called BEFORE
+//      xcb_grab_server".)  Fix: hoist all round-trip work before the grab.
+//
+//   2. The not-fullscreen branch delegated to enterFullscreen(), which owns
+//      its own grab internally.  This made toggle() partly an orchestrator
+//      and partly a thin wrapper depending on runtime state.  All three
+//      branches now own the grab uniformly, calling enterFullscreenCommit
+//      (rather than enterFullscreen) in the not-fullscreen case.
 pub fn toggle() void {
     const win        = focus.getFocused() orelse return;
     const current_ws = tracking.getCurrentWorkspace() orelse return;
 
     if (getForWorkspace(current_ws)) |fs_info| {
-        _ = xcb.xcb_grab_server(core.conn);
-        exitFullscreenCommit(fs_info.window, current_ws);
         if (fs_info.window == win) {
-            // The retile's EnterNotify correctly updates hover focus — no suppression needed.
+            // Toggle off: exit fullscreen for the focused window.
+            _ = xcb.xcb_grab_server(core.conn);
+            exitFullscreenCommit(win, current_ws);
             restoreFloatingWindows(win);
+            _ = xcb.xcb_ungrab_server(core.conn);
+            _ = xcb.xcb_flush(core.conn);
         } else {
-            // Switching fullscreen from one window to another: restore all background
-            // windows first, then push them offscreen again via enterFullscreenCommit.
-            // Without this they remain invisible after the transition.
-            restoreFloatingWindows(win);
+            // Switch: a different window is currently fullscreen.
+            // Hoist both round-trip operations (fetchWindowGeom issues a
+            // synchronous xcb_get_geometry; saveFloatingWindowGeoms batches
+            // several) before acquiring the grab so their replies can be
+            // delivered by the server.
+            const new_geom = fetchWindowGeom(win);
             saveFloatingWindowGeoms(win);
-            enterFullscreenCommit(win, current_ws, fetchWindowGeom(win));
+            _ = xcb.xcb_grab_server(core.conn);
+            exitFullscreenCommit(fs_info.window, current_ws);
+            // Restore background windows to their positions before pushing
+            // them offscreen again for the new fullscreen window.  Without
+            // this step they remain invisible after the transition.
+            restoreFloatingWindows(win);
+            enterFullscreenCommit(win, current_ws, new_geom);
+            _ = xcb.xcb_ungrab_server(core.conn);
+            _ = xcb.xcb_flush(core.conn);
         }
+    } else {
+        // Nothing fullscreen on this workspace — enter fullscreen.
+        // Round-trip work is hoisted before the grab, consistent with the
+        // switch branch above.
+        const geom = fetchWindowGeom(win);
+        saveFloatingWindowGeoms(win);
+        _ = xcb.xcb_grab_server(core.conn);
+        enterFullscreenCommit(win, current_ws, geom);
         _ = xcb.xcb_ungrab_server(core.conn);
         _ = xcb.xcb_flush(core.conn);
-    } else {
-        enterFullscreen(win, null);
     }
 }
