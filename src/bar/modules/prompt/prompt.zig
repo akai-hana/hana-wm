@@ -854,6 +854,10 @@ fn drawActive(
     }
 
     const scroll_end_x: u16 = if (text_end_x >= mode_w) text_end_x - mode_w else text_left_x;
+    // Clip the ellipsis 2 px before the mode label so its ink never bleeds
+    // into the '[' bracket.  Only used for drawPostSpan; scroll math stays on
+    // the full scroll_end_x so the cursor position is unaffected.
+    const ellipsis_end_x: u16 = scroll_end_x -| 2;
     if (text_left_x >= scroll_end_x) return end_x;
 
     const max_scroll_px: u16 = scroll_end_x - text_left_x;
@@ -886,8 +890,22 @@ fn drawActive(
 
     var scroll_x: u16 = 0;
     const cursor_right = prompt_w + pre_w_cur + caret_w;
-    if (cursor_right > max_scroll_px)
-        scroll_x = cursor_right -| max_scroll_px +| caret_w;
+    if (cursor_right > max_scroll_px) {
+        const min_scroll: u16 = cursor_right -| max_scroll_px;
+        // Snap scroll_x to the nearest character boundary at or past min_scroll.
+        // Without snapping, drawSpan draws text[start..] at text_left_x even though
+        // character `start` begins some pixels past text_left_x in virtual space.
+        // That shift creates a gap between the rendered text and the caret that
+        // looks like a phantom extra character to the right of the cursor.
+        if (min_scroll <= prompt_w) {
+            const idx = textOffsetAtPx(dc, prompt, min_scroll);
+            scroll_x = dc.textWidth(prompt[0..idx]);
+        } else {
+            const min_in_pre: u16 = min_scroll - prompt_w;
+            const idx = textOffsetAtPx(dc, pre_cur_text, min_in_pre);
+            scroll_x = prompt_w + dc.textWidth(pre_cur_text[0..idx]);
+        }
+    }
 
     // Draw prompt 
     var px: i32 = @as(i32, text_left_x) - @as(i32, scroll_x);
@@ -916,7 +934,7 @@ fn drawActive(
         }
         px += @intCast(sel_w);
 
-        try drawPostSpan(dc, px, text_left_x, scroll_end_x, baseline, post_sel, fg);
+        try drawPostSpan(dc, px, text_left_x, ellipsis_end_x, baseline, post_sel, fg);
 
     } else if (g.vim.mode == .insert) {
         // INSERT mode: blinking 2-px caret, text NOT consumed by cursor
@@ -948,7 +966,7 @@ fn drawActive(
         }
 
         // Text from cursor onwards.
-        try drawPostSpan(dc, px, text_left_x, scroll_end_x, baseline, post_text, fg);
+        try drawPostSpan(dc, px, text_left_x, ellipsis_end_x, baseline, post_text, fg);
 
     } else {
         // NORMAL / REPLACE: full-character block cursor 
@@ -966,7 +984,7 @@ fn drawActive(
         }
         px += @intCast(cur_w);
 
-        try drawPostSpan(dc, px, text_left_x, scroll_end_x, baseline, post_text, fg);
+        try drawPostSpan(dc, px, text_left_x, ellipsis_end_x, baseline, post_text, fg);
     }
 
     dc.flushRect(start_x, width);

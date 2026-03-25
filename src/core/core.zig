@@ -10,10 +10,11 @@
 // Zig stdlibs
 const std = @import("std");
 
+// Central xcb import passed throughout all files
+pub const xcb = @cImport(@cInclude("xcb/xcb.h"));
+
 // config/
 const parser = @import("parser");
-
-pub const xcb = @cImport(@cInclude("xcb/xcb.h"));
 
 // Modifier masks
 //
@@ -36,7 +37,6 @@ pub const MOD_MASK_RELEVANT: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER
 // Centralised here so vim.zig, drun.zig, and any future key-handling
 // modules reference a single definition and cannot drift.
 // Values match <X11/keysymdef.h> (stable since X11R1).
-
 pub const XK_BackSpace : xcb.xcb_keysym_t = 0xff08;
 pub const XK_Tab       : xcb.xcb_keysym_t = 0xff09;
 pub const XK_Return    : xcb.xcb_keysym_t = 0xff0d;
