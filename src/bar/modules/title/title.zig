@@ -14,17 +14,23 @@
 //! Carousel logic lives in carousel.zig.
 //! Monitor refresh-rate detection lives in carousel.zig.
 
-const std      = @import("std");
-const core     = @import("core");
-const xcb      = core.xcb;
-const drawing  = @import("drawing");
+// Zig stdlibs
+const std = @import("std");
+
+// core/
+const core    = @import("core");
+    const xcb = core.xcb;
 const utils    = @import("utils");
+
+// bar/
+const drawing  = @import("drawing");
+// bar/modules/
 const carousel = @import("carousel");
 
-// ── Atom cache ────────────────────────────────────────────────────────────────
+// Atom cache 
 
 const Atoms = struct {
-    /// null until successfully resolved; avoids the XCB_ATOM_NONE (0) sentinel.
+    /// null until successfully resolved to avoid XCB_ATOM_NONE's sentinel (0).
     net_wm_name: ?u32 = null,
     utf8_string: ?u32 = null,
     initialized: bool = false,
@@ -44,7 +50,7 @@ const Atoms = struct {
 
 var atoms: Atoms = .{};
 
-// ── Internal types ────────────────────────────────────────────────────────────
+// Internal types 
 
 const WindowInfo = struct {
     window:    u32,
@@ -56,7 +62,7 @@ const WindowInfo = struct {
 
 /// Fixed left indent, independent of scaledSegmentPadding.
 /// Provides visual breathing room between the segment edge and the title text.
-const TITLE_LEAD_PX: u16 = 4;
+const TITLE_LEAD_PX: u16 = 4; //TODO: i feel like this is a very ugly solution, creating a constant with a fixed left indent, to band-aid a problem.
 
 /// Maximum number of windows rendered in split-view.
 /// Stack-allocated arrays in drawSegmentedTitles are bounded by this value.
@@ -64,7 +70,7 @@ const TITLE_LEAD_PX: u16 = 4;
 /// 128 covers any practical workspace size while keeping stack usage bounded.
 const MAX_WINS: usize = 128;
 
-// ── Public input types ────────────────────────────────────────────────────────
+// Public input types 
 
 /// Stable per-call rendering context: geometry, draw state, and connection.
 /// Constructed once per bar frame and shared between draw() and drawCached().
@@ -106,7 +112,7 @@ pub const TitleCache = struct {
     cached_title_window: *?u32,
 };
 
-// ── draw — main entry point ───────────────────────────────────────────────────
+// draw — main entry point 
 
 /// Draw the title segment.
 ///
@@ -132,7 +138,7 @@ pub fn draw(
         // No windows on this workspace — tear down any live carousel immediately
         // so it does not keep scrolling invisibly in the background.
         carousel.deinitCarousel();
-        ctx.dc.fillRect(ctx.start_x, 0, ctx.width, ctx.height, ctx.config.bg);
+        ctx.dc.createRectangle(ctx.start_x, 0, ctx.width, ctx.height, ctx.config.bg);
         return ctx.start_x + ctx.width;
     }
 
@@ -145,7 +151,7 @@ pub fn draw(
     return ctx.start_x + ctx.width;
 }
 
-// ── drawCached — fast-path redraw ─────────────────────────────────────────────
+// drawCached — fast-path redraw 
 
 /// Draw the title segment using already-cached state.
 ///
@@ -170,7 +176,7 @@ pub fn drawCached(
 
     if (window_count == 0) {
         carousel.deinitCarousel();
-        ctx.dc.fillRect(ctx.start_x, 0, ctx.width, ctx.height, ctx.config.bg);
+        ctx.dc.createRectangle(ctx.start_x, 0, ctx.width, ctx.height, ctx.config.bg);
         return ctx.start_x + ctx.width;
     }
 
@@ -184,7 +190,7 @@ pub fn drawCached(
     return ctx.start_x + ctx.width;
 }
 
-// ── Private — shared single-window rendering ──────────────────────────────────
+// Private — shared single-window rendering 
 
 /// Shared rendering logic for both draw() and drawCached().
 ///
@@ -208,7 +214,7 @@ fn drawSingleWindow(
         ctx.config.title_accent_color
     else
         ctx.config.bg;
-    ctx.dc.fillRect(ctx.start_x, 0, ctx.width, ctx.height, accent);
+    ctx.dc.createRectangle(ctx.start_x, 0, ctx.width, ctx.height, accent);
 
     const scaled_padding = ctx.config.scaledSegmentPadding(ctx.height);
     const baseline_y     = ctx.dc.baselineY(ctx.height);
@@ -252,7 +258,7 @@ fn drawSingleWindow(
     }
 }
 
-// ── Private — split-view segmented titles ─────────────────────────────────────
+// Private — split-view segmented titles 
 
 fn drawSegmentedTitles(
     ctx:               TitleRenderContext,
@@ -394,7 +400,7 @@ fn drawSegmentedTitles(
             else if (info.minimized)         ctx.config.title_minimized_accent
             else                             ctx.config.title_unfocused_accent;
 
-        ctx.dc.fillRect(segment_x, 0, segment_width, ctx.height, accent);
+        ctx.dc.createRectangle(segment_x, 0, segment_width, ctx.height, accent);
 
         if (info.title.len > 0 and segment_width > scaled_padding *| 2) {
             const text_x  = segment_x + scaled_padding + TITLE_LEAD_PX;
@@ -430,7 +436,7 @@ fn drawSegmentedTitles(
     }
 }
 
-// ── Private helpers — sorting ─────────────────────────────────────────────────
+// Private helpers — sorting 
 
 /// Sort order for the split-view segment layout:
 ///
@@ -458,7 +464,7 @@ fn compareWindows(_: void, a: WindowInfo, b: WindowInfo) bool {
     return a.window < b.window;
 }
 
-// ── Private helpers — title fetching ─────────────────────────────────────────
+// Private helpers — title fetching 
 
 fn fetchProperty(
     conn:      *xcb.xcb_connection_t,
@@ -491,7 +497,7 @@ fn getWindowTitle(
     return try fetchProperty(conn, window, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, allocator);
 }
 
-// ── Public — title pre-fetch ──────────────────────────────────────────────────
+// Public — title pre-fetch 
 
 /// Fetch the title of `win` into `buf`, reusing its existing capacity.
 ///

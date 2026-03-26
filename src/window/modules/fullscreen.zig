@@ -22,7 +22,9 @@ const tiling        = if (build_options.has_tiling) @import("tiling") else struc
 const workspaces    = if (build_options.has_workspaces) @import("workspaces") else struct {};
 const tracking      = @import("tracking");
 const focus         = @import("focus");
-const bar           = @import("bar");
+const bar           = if (build_options.has_bar) @import("bar") else struct {
+    pub fn setBarState(_: anytype) void {}
+};
 const constants     = @import("constants");
 const debug         = @import("debug");
 const minimize      = if (build_options.has_minimize) @import("minimize") else struct {};

@@ -122,7 +122,7 @@ pub fn draw(
         const bg         = if (is_current) config.selected_bg else config.bg;
         const fg         = if (is_current) config.selected_fg else config.fg;
 
-        dc.fillRect(x, 0, ws_width, height, bg);
+        dc.createRectangle(x, 0, ws_width, height, bg);
 
         const label   = getLabel(i, config);
         const label_w = if (i < label_widths.len) label_widths[i] else dc.textWidth(label);

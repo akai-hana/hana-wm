@@ -6,7 +6,12 @@ const debug     = @import("debug");
 const parser    = @import("parser");
 const xkbcommon = @import("xkbcommon");
 const constants = @import("constants");
-const carousel  = @import("carousel");
+const build_options = @import("build_options");
+const carousel  = if (build_options.has_carousel) @import("carousel") else struct {
+    pub fn setCarouselEnabled(_: bool)  void {}
+    pub fn setScrollSpeed(_: f64)       void {}
+    pub fn setRefreshRateOverride(_: f64) void {}
+};
 
 const parseColor = parser.parseColor;
 
@@ -59,7 +64,7 @@ inline fn addRule(allocator: std.mem.Allocator, cfg: *core.Config, class_name: [
 }
 
 fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *core.Config) !void {
-    const defaults = [_]struct { pos: core.BarPosition, seg: core.BarSegment }{
+    const defaults = [_]struct { pos: core.BarSegmentAnchor, seg: core.BarSegment }{
         .{ .pos = .left,   .seg = .workspaces },
         .{ .pos = .center, .seg = .title      },
         .{ .pos = .right,  .seg = .clock      },
@@ -809,7 +814,7 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *cor
     const section = doc.getSection("bar") orelse return;
     cfg.bar.enabled = get(bool, section, "enabled", true, null, null);
     if (section.getString("position")) |pos_str|
-        cfg.bar.vertical_position = std.meta.stringToEnum(core.BarVerticalPosition, pos_str) orelse .top;
+        cfg.bar.bar_position = std.meta.stringToEnum(core.BarScreenPosition, pos_str) orelse .top;
     cfg.bar.height = section.getScalable("height"); // null = auto from font metrics
     try set.str(allocator, &cfg.allocated_font, &cfg.bar.font,
         get([]const u8, section, "font", "monospace:size=10", null, null));
@@ -924,7 +929,7 @@ fn parseWorkspaceIcons(allocator: std.mem.Allocator, section: *const parser.Sect
 fn parseBarLayout(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *core.Config) !void {
     for (cfg.bar.layout.items) |*item| item.deinit(allocator);
     cfg.bar.layout.clearRetainingCapacity();
-    const positions = [_]struct { name: []const u8, pos: core.BarPosition }{
+    const positions = [_]struct { name: []const u8, pos: core.BarSegmentAnchor }{
         .{ .name = "bar.layout.left",   .pos = .left   },
         .{ .name = "bar.layout.center", .pos = .center },
         .{ .name = "bar.layout.right",  .pos = .right  },

@@ -9,7 +9,12 @@ const xcb          = core.xcb;
 const utils        = @import("utils");
 const focus        = @import("focus");
 const window       = @import("window");
-const bar          = @import("bar");
+const bar          = if (build_options.has_bar) @import("bar") else struct {
+    pub fn scheduleRedraw() void {}
+    pub fn raiseBar() void {}
+    pub fn redrawInsideGrab() void {}
+    pub fn setBarState(_: anytype) void {}
+};
 const has_tiling   = @import("build_options").has_tiling;
 const tiling       = if (has_tiling) @import("tiling") else struct {};
 const TilingLayout = if (has_tiling) tiling.Layout else u0;
@@ -695,7 +700,7 @@ fn executeSwitch(old_ws: u8, new_ws: u8) void {
 
     hideWorkspaceWindows(&s.workspaces[old_ws], new_ws);
 
-    bar.setBarState(if (fs_info != null) .hide_fullscreen else .show_fullscreen);
+    if (fs_info != null) bar.setBarState(.hide_fullscreen) else bar.setBarState(.show_fullscreen);
 
     if (fs_info) |info| {
         utils.configureWindowGeom(core.conn, info.window, .{

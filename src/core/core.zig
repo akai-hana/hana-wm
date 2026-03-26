@@ -1,11 +1,4 @@
-//! Core WM type definitions.
-//!
-//! This file is the canonical home for all shared types:
-//! - Config types are defined directly in this file (Action, Config, BarConfig, etc.).
-//! - Runtime constants (MOD_*, MIN_*) live in constants.zig.
-//! - Fullscreen types live in fullscreen.zig.
-//! - SpawnQueue lives in window.zig.
-//! - X11 keysym constants (XK_*) are defined here; values match <X11/keysymdef.h>.
+//! Home of all shared type definitions.
 
 // Zig stdlibs
 const std = @import("std");
@@ -34,8 +27,7 @@ pub const MOD_MASK_RELEVANT: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER
 
 // X11 keysym constants
 //
-// Centralised here so vim.zig, drun.zig, and any future key-handling
-// modules reference a single definition and cannot drift.
+// Centralised here so key-handling modules reference a single definition and cannot drift.
 // Values match <X11/keysymdef.h> (stable since X11R1).
 pub const XK_BackSpace : xcb.xcb_keysym_t = 0xff08;
 pub const XK_Tab       : xcb.xcb_keysym_t = 0xff09;
@@ -129,9 +121,13 @@ pub const MasterSide = enum {
     // alias_map covers all full names (case-insensitively) and short aliases;
     // fromStringWithAlias is the canonical parse entry point.
     const alias_map = std.StaticStringMap(MasterSide).initComptime(.{
-        .{ "l", .left }, .{ "left", .left },
-        .{ "r", .right }, .{ "right", .right },
+        .{ "l",     .left  },
+        .{ "left",  .left  },
+        .{ "r",     .right },
+        .{ "right", .right },
     });
+
+    //TODO: the purpose of this function is a bit difficult to make out due to its verbosity.
     pub inline fn fromStringWithAlias(str: []const u8) ?MasterSide {
         var buf: [16]u8 = undefined;
         if (str.len > buf.len) return null;
@@ -231,26 +227,26 @@ pub const IndicatorLocation = enum {
     // Both orderings of diagonal names and both separators are pre-listed.
     // StaticStringMap.initComptime is a compile-time perfect hash — O(1), no runtime cost.
     const string_map = std.StaticStringMap(IndicatorLocation).initComptime(.{
-        .{ "up",          .up         },
-        .{ "down",        .down       },
-        .{ "left",        .left       },
-        .{ "right",       .right      },
-        .{ "up-left",     .up_left    },
-        .{ "up_left",     .up_left    },
-        .{ "left-up",     .up_left    },
-        .{ "left_up",     .up_left    },
-        .{ "up-right",    .up_right   },
-        .{ "up_right",    .up_right   },
-        .{ "right-up",    .up_right   },
-        .{ "right_up",    .up_right   },
-        .{ "down-left",   .down_left  },
-        .{ "down_left",   .down_left  },
-        .{ "left-down",   .down_left  },
-        .{ "left_down",   .down_left  },
-        .{ "down-right",  .down_right },
-        .{ "down_right",  .down_right },
-        .{ "right-down",  .down_right },
-        .{ "right_down",  .down_right },
+        .{ "up",         .up         },
+        .{ "down",       .down       },
+        .{ "left",       .left       },
+        .{ "right",      .right      },
+        .{ "up-left",    .up_left    },
+        .{ "up_left",    .up_left    },
+        .{ "left-up",    .up_left    },
+        .{ "left_up",    .up_left    },
+        .{ "up-right",   .up_right   },
+        .{ "up_right",   .up_right   },
+        .{ "right-up",   .up_right   },
+        .{ "right_up",   .up_right   },
+        .{ "down-left",  .down_left  },
+        .{ "down_left",  .down_left  },
+        .{ "left-down",  .down_left  },
+        .{ "left_down",  .down_left  },
+        .{ "down-right", .down_right },
+        .{ "down_right", .down_right },
+        .{ "right-down", .down_right },
+        .{ "right_down", .down_right },
     });
     pub inline fn fromString(str: []const u8) ?IndicatorLocation {
         var buf: [16]u8 = undefined;
@@ -260,17 +256,7 @@ pub const IndicatorLocation = enum {
     }
 };
 
-pub const BarVerticalPosition = enum {
-    top,
-    bottom,
-};
-
-pub const BarPosition = enum {
-    left,
-    center,
-    right,
-};
-
+// List of available bar segments
 pub const BarSegment = enum {
     workspaces,
     title,
@@ -279,8 +265,22 @@ pub const BarSegment = enum {
     variants,
 };
 
+/// Possible positions of bar within the screen
+pub const BarScreenPosition = enum {
+    top,
+    bottom,
+};
+
+/// Possible possitions of segments within the bar
+pub const BarSegmentAnchor = enum {
+    left,
+    center,
+    right,
+};
+
+//TODO: comment
 pub const BarLayout = struct {
-    position: BarPosition,
+    position: BarSegmentAnchor,
     segments: std.ArrayList(BarSegment),
 
     pub inline fn deinit(self: *BarLayout, allocator: std.mem.Allocator) void {
@@ -289,8 +289,9 @@ pub const BarLayout = struct {
 };
 
 pub const BarConfig = struct {
-    enabled:           bool                   = true,
-    vertical_position: BarVerticalPosition    = .top,
+    enabled: bool = true,
+
+    bar_position: BarScreenPosition = .top,
     // Configured bar height: absolute pixel value or percentage of screen height.
     // null = auto-calculate from font metrics alone.
     height:            ?parser.ScalableValue  = null,

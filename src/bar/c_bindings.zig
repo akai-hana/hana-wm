@@ -54,7 +54,7 @@ pub extern fn cairo_move_to(cr: *cairo_t, x: f64, y: f64) void;
 pub extern fn cairo_set_operator(cr: *cairo_t, op: cairo_operator_t) void;
 pub extern fn cairo_paint(cr: *cairo_t) void;
 
-// Clip / state save-restore — used by the carousel text scroller.
+// Clip/state save-restore (used by the carousel text scroller)
 pub extern fn cairo_save(cr: *cairo_t) void;
 pub extern fn cairo_restore(cr: *cairo_t) void;
 pub extern fn cairo_rectangle(cr: *cairo_t, x: f64, y: f64, width: f64, height: f64) void;
@@ -68,7 +68,8 @@ pub const PangoFontDescription = opaque {};
 pub const PangoFontMetrics     = opaque {};
 pub const PangoLayoutLine      = opaque {};
 
-/// Internal Pango unit divisor — 1 pixel = PANGO_SCALE pango units.
+/// Internal Pango unit divisor
+/// 1 pixel = PANGO_SCALE pango units.
 pub const PANGO_SCALE: c_int = 1024;
 
 pub const PangoEllipsizeMode = enum(c_int) {

@@ -1,8 +1,8 @@
 //! XKB (X Keyboard Extension) bindings and keyboard state management.
 
-const std       = @import("std");
-const constants = @import("constants");
-const defs      = @import("defs");
+const std  = @import("std");
+
+const defs = @import("defs");
 
 pub const xkb = @cImport({
     @cInclude("xkbcommon/xkbcommon.h");
@@ -101,10 +101,12 @@ pub const XkbState = struct {
 /// Uses the global blocking Io instance — retryDelay runs during init before
 /// any Io context is threaded through. Failure (e.g. unsupported clock) just
 /// retries sooner.
+pub const XKB_RETRY_DELAY_MS: u64 = 20;
+
 inline fn retryDelay(attempt: u8) void {
     if (attempt < MAX_ATTEMPTS - 1)
         std.Io.Clock.Duration.sleep(
-            .{ .clock = .awake, .raw = .fromMilliseconds(constants.XKB_RETRY_DELAY_MS) },
+            .{ .clock = .awake, .raw = .fromMilliseconds(XKB_RETRY_DELAY_MS) },
             std.Options.debug_io,
         ) catch {};
 }

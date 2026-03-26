@@ -830,7 +830,7 @@ fn drawActive(
     const fg     = config.drunFg();
     const prompt = config.drun_prompt;
 
-    dc.fillRect(start_x, 0, width, height, bg);
+    dc.createRectangle(start_x, 0, width, height, bg);
 
     const baseline    = dc.baselineY(height);
     const text_left_x = start_x + pad;
@@ -928,7 +928,7 @@ fn drawActive(
             try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, pre_sel, fg);
 
         if (cursorBlockGeom(px, sel_w, text_left_x, scroll_end_x)) |g_| {
-            dc.fillRect(g_.draw_x, CURSOR_V_PAD, g_.vis_w, height -| CURSOR_V_PAD * 2, accent);
+            dc.createRectangle(g_.draw_x, CURSOR_V_PAD, g_.vis_w, height -| CURSOR_V_PAD * 2, accent);
             if (sel_text.len > 0)
                 try dc.drawText(g_.draw_x, baseline, sel_text, bg);
         }
@@ -953,7 +953,7 @@ fn drawActive(
         const caret_h   = g.cached_caret_h.?;
 
         if (g.blink_visible and px >= @as(i32, text_left_x) and px < @as(i32, scroll_end_x)) {
-            dc.fillRect(@intCast(px), caret_top, CURSOR_WIDTH, caret_h, accent);
+            dc.createRectangle(@intCast(px), caret_top, CURSOR_WIDTH, caret_h, accent);
         }
 
         // Ghost text (only when cursor is at end).
@@ -978,7 +978,7 @@ fn drawActive(
             try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, pre_text, fg);
 
         if (cursorBlockGeom(px, cur_w, text_left_x, scroll_end_x)) |g_| {
-            dc.fillRect(g_.draw_x, CURSOR_V_PAD, g_.vis_w, height -| CURSOR_V_PAD * 2, accent);
+            dc.createRectangle(g_.draw_x, CURSOR_V_PAD, g_.vis_w, height -| CURSOR_V_PAD * 2, accent);
             if (g.vim.cursor < g.vim.len)
                 try dc.drawText(g_.draw_x, baseline, cur_text, bg);
         }
