@@ -53,7 +53,11 @@ fn wsGetCurrentWorkspaceObject() ?*WsWorkspace {
         null;
 }
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
-const bar        = @import("bar");
+const bar        = if (build_options.has_bar) @import("bar") else struct {
+    pub fn setBarState(_: anytype) void {}
+    pub fn redrawInsideGrab() void {}
+    pub fn scheduleRedraw() void {}
+};
 const constants  = @import("constants");
 const debug      = @import("debug");
 

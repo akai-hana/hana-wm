@@ -396,7 +396,7 @@ pub fn notifyFocusChanged(new_window: ?u32) void {
 ///   • the segment geometry changed since the pixmap was built (e.g. bar resize).
 ///     The caller's full draw will rebuild the pixmap with correct coordinates.
 ///
-/// Hot path: fillRect + blitFrame + flushRect — no Pango, no Cairo, no X11 I/O.
+/// Hot path: createRectangle + blitFrame + flushRect — no Pango, no Cairo, no X11 I/O.
 pub fn drawCarouselTick(
     dc:      *drawing.DrawContext,
     bg:      u32,
@@ -410,9 +410,9 @@ pub fn drawCarouselTick(
     // Signal the caller to run a full draw, which will rebuild the pixmap.
     if (x != e.geom.seg_x or avail_w != e.geom.seg_w) return false;
 
-    // fillRect and flushRect use the full segment coords to cover the
+    // createRectangle and flushRect use the full segment coords to cover the
     // background including the left padding gap.
-    dc.fillRect(x, 0, avail_w, height, bg);
+    dc.createRectangle(x, 0, avail_w, height, bg);
     const now    = nowMs();
     const offset = carouselOffset(e.base.start_ms, e.base.cycle_w, now);
     e.base.cp.blitFrame(dc.drawable, dc.gc, e.geom.text_x, x, avail_w, offset, e.base.cycle_w);

@@ -23,11 +23,20 @@ inline fn wsMoveWindowToAll(win: u32) void                  {        if (comptim
 inline fn wsTagToggleAll(win: u32) void                     {        if (comptime build_options.has_workspaces) workspaces.tagToggleAll(win);                      }
 const drag          = @import("drag");
 const fullscreen    = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
-const bar           = if (build_options.has_bar) @import("bar") else struct {};
+const bar           = if (build_options.has_bar) @import("bar") else struct {
+    pub fn scheduleFullRedraw() void {}
+    pub fn scheduleRedraw() void {}
+    pub fn redrawInsideGrab() void {}
+    pub fn setBarState(_: anytype) void {}
+    pub fn toggleBarSegmentAnchor() void {}
+};
 const window        = @import("window");
 const debug         = @import("debug");
 const minimize      = if (build_options.has_minimize) @import("minimize") else struct {};
-const prompt        = @import("prompt");
+const prompt        = if (build_options.has_bar and build_options.has_prompt) @import("prompt") else struct {
+    pub fn handlePromptKeypress(_: anytype, _: anytype) bool { return false; }
+    pub fn toggle() void {}
+};
 const xcb           = core.xcb;
 
 const c = @cImport({
@@ -278,7 +287,7 @@ fn executeAction(action: *const core.Action) !void {
         .toggle_bar_position => if (comptime build_options.has_bar) {
             switch (action.*) {
                 .toggle_bar_visibility => bar.setBarState(.toggle),
-                .toggle_bar_position   => bar.toggleBarPosition(),
+                .toggle_bar_position   => bar.toggleBarSegmentAnchor(),
                 else => unreachable,
             }
         },

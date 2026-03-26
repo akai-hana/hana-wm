@@ -12,7 +12,12 @@ const WsWorkspace = if (build_options.has_workspaces) workspaces.Workspace else 
 fn wsGetState() ?*WsState                              { return if (comptime build_options.has_workspaces) workspaces.getState()                 else null; }
 fn wsGetCurrentWorkspaceObject() ?*WsWorkspace         { return if (comptime build_options.has_workspaces) workspaces.getCurrentWorkspaceObject() else null; }
 
-const bar        = @import("bar");
+const bar        = if (build_options.has_bar) @import("bar") else struct {
+    pub fn redrawInsideGrab() void {}
+    pub fn isVisible() bool { return false; }
+    pub fn getBarHeight() u16 { return 0; }
+    pub fn scheduleFullRedraw() void {}
+};
 const focus      = @import("focus");
 const Tracking   = @import("tracking").Tracking;
 const debug      = @import("debug");
@@ -649,7 +654,7 @@ fn dispatchLayout(layout: Layout, ctx: *const layouts.LayoutCtx, s: *State, wins
 
 inline fn calculateScreenArea() utils.Rect {
     const bar_height: u16 = if (bar.isVisible()) bar.getBarHeight() else 0;
-    const bar_at_bottom   = core.config.bar.vertical_position == .bottom;
+    const bar_at_bottom   = core.config.bar.bar_position == .bottom;
     return .{
         .x      = 0,
         .y      = if (bar_at_bottom) 0 else @intCast(bar_height),

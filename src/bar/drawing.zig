@@ -1,16 +1,18 @@
-//! Drawing context for the status bar.
+//! Drawing context for hana's status bar.
 //!
-//! Rectangle fills use XCB core drawing (xcb_poly_fill_rectangle) so that
-//! straight-alpha ARGB pixels are written directly into the pixmap — the format
-//! picom and the X11 Composite extension expect from a core-protocol drawable.
-//! Cairo's XRender backend always writes premultiplied pixels, which picom would
-//! interpret as straight-alpha, rendering colours far too dark at any transparency.
-//! Cairo + Pango handle all text layout and glyph rendering.
+//! Rectangle fills use XCB core drawing instead of Cairo's XRender, 
+//! since the latter always pre-multiplies alpha pixels,
+//! which makes the rectangle's color look incorrect and way too dark.
+//! Cairo + Pango then handle all text layout and glyph rendering on top of these.
 
-const std   = @import("std");
+// Zig stdlibs
+const std = @import("std");
+
+// core/
+const core = @import("core");
+const c    = @import("c_bindings");
+// core/modules/
 const debug = @import("debug");
-const core  = @import("core");
-const c     = @import("c_bindings");
 
 pub const VisualInfo = struct {
     visual_type: ?*core.xcb.xcb_visualtype_t,
@@ -103,14 +105,14 @@ pub const DrawContext = struct {
 
     surface:  *c.cairo_surface_t,
     ctx:      *c.cairo_t,
-    /// GC used by fillRect (xcb_poly_fill_rectangle).
+    /// GC used by createRectangle (xcb_poly_fill_rectangle).
     gc:       u32,
     /// Separate GC used exclusively for the xcb_copy_area blit in flush().
     copy_gc:  u32,
 
     is_argb:             bool = false,
     /// Pre-computed alpha byte for XCB pixel packing: round(clamp(transparency)*255).
-    /// Computed once at init so fillRect pays zero floating-point cost per call.
+    /// Computed once at init so createRectangle pays zero floating-point cost per call.
     alpha_u8:            u8   = 0xFF,
     last_color:          ?u32 = null,
     /// Cached GC foreground — skips xcb_change_gc when the packed ARGB pixel is unchanged.
@@ -242,13 +244,16 @@ pub const DrawContext = struct {
         if (font_names.len > 1) debug.info("Loaded {} fonts with fallback support", .{font_names.len});
     }
 
+    //TODO: why are there two functions that load fonts, one in singular and another one in plural?
+    // is it not possible to have a single function that takes care of font loading?
+
     inline fn setColor(self: *DrawContext, color: u32) void {
         if (self.last_color == color) return;
         c.cairo_set_source_rgba(self.ctx, chan(color, 16), chan(color, 8), chan(color, 0), 1.0);
         self.last_color = color;
     }
 
-    pub inline fn applyTransparency(self: *DrawContext, color: u32) u32 {
+    pub inline fn setTransparency(self: *DrawContext, color: u32) u32 {
         if (!self.is_argb) return color;
         return (@as(u32, self.alpha_u8) << 24) | (color & 0x00FFFFFF);
     }
@@ -285,15 +290,17 @@ pub const DrawContext = struct {
     /// premultiplied pixels instead, which is why fills bypass Cairo entirely.
     /// last_gc_color guards xcb_change_gc: skips the call when the color is
     /// unchanged, which is the common case when adjacent segments share a background.
-    pub fn fillRect(self: *DrawContext, x: u16, y: u16, width: u16, height: u16, color: u32) void {
-        const final_color: u32 = self.applyTransparency(color);
+    pub fn createRectangle(self: *DrawContext, x: u16, y: u16, width: u16, height: u16, color: u32) void {
+        const final_color: u32 = self.setTransparency(color);
         if (self.last_gc_color != final_color) {
             _ = core.xcb.xcb_change_gc(self.conn, self.gc, core.xcb.XCB_GC_FOREGROUND, &[_]u32{final_color});
             self.last_gc_color = final_color;
         }
+
         const rect = core.xcb.xcb_rectangle_t{
             .x = @intCast(x), .y = @intCast(y), .width = width, .height = height,
         };
+
         _ = core.xcb.xcb_poly_fill_rectangle(self.conn, self.drawable, self.gc, 1, &rect);
     }
 
@@ -363,6 +370,9 @@ pub const DrawContext = struct {
         c.pango_layout_set_ellipsize(self.font.pango_layout, c.PangoEllipsizeMode.NONE);
     }
 
+    //TODO: what's the purpose of having two functions, "drawText" and "drawTextEllipsis", in particular the latter one?
+
+    //TODO: textWidth... what? get? set?
     pub fn textWidth(self: *DrawContext, text: []const u8) u16 {
         self.setPangoText(text);
         var width: c_int = undefined;
@@ -430,7 +440,7 @@ pub const DrawContext = struct {
         var tw: c_int = undefined;
         c.pango_layout_get_pixel_size(self.font.pango_layout, &tw, null);
         const width: u16 = @as(u16, @intCast(tw)) + padding * 2;
-        self.fillRect(x, 0, width, height, bg);
+        self.createRectangle(x, 0, width, height, bg);
         self.setColor(fg);
         self.moveToTextBaseline(x + padding, self.baselineY(height));
         c.pango_cairo_show_layout(self.ctx, self.font.pango_layout);
@@ -528,8 +538,8 @@ pub const CarouselPixmap = struct {
         fg:       u32,
         baseline: u16,
     ) !void {
-        // Background fill (XCB, straight-alpha, matches fillRect)
-        const packed_bg = dc.applyTransparency(bg);
+        // Background fill (XCB, straight-alpha, matches createRectangle)
+        const packed_bg = dc.setTransparency(bg);
         _ = core.xcb.xcb_change_gc(self.conn, self.gc, core.xcb.XCB_GC_FOREGROUND, &[_]u32{packed_bg});
         _ = core.xcb.xcb_poly_fill_rectangle(self.conn, self.pixmap, self.gc, 1,
             &core.xcb.xcb_rectangle_t{ .x = 0, .y = 0, .width = self.text_w, .height = self.height });
@@ -605,6 +615,8 @@ fn createPangoLayout(ctx: *c.cairo_t, dpi: f32) !*c.PangoLayout {
     return layout;
 }
 
+//TODO: findVisualType has verbose code, no separation inside, no clear intent/purpose, no commenting...
+// i can barely grasp what it even does.
 fn findVisualType(conn: *core.xcb.xcb_connection_t, visual_id: u32) ?*core.xcb.xcb_visualtype_t {
     const setup = core.xcb.xcb_get_setup(conn);
     var screen_iter = core.xcb.xcb_setup_roots_iterator(setup);
@@ -620,6 +632,7 @@ fn findVisualType(conn: *core.xcb.xcb_connection_t, visual_id: u32) ?*core.xcb.x
     return null;
 }
 
+//TODO: what does this function below do?
 fn getDefaultVisualType(screen: *core.xcb.xcb_screen_t) *core.xcb.xcb_visualtype_t {
     var depth_iter = core.xcb.xcb_screen_allowed_depths_iterator(screen);
     while (depth_iter.rem > 0) : (core.xcb.xcb_depth_next(&depth_iter)) {
@@ -629,6 +642,7 @@ fn getDefaultVisualType(screen: *core.xcb.xcb_screen_t) *core.xcb.xcb_visualtype
     unreachable;
 }
 
+//TODO: what does this function below do?
 inline fn appendStyle(result: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, token: []const u8) !void {
     try result.append(allocator, ' ');
     try result.appendSlice(allocator, token);

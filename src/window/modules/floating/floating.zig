@@ -28,7 +28,11 @@ const std     = @import("std");
 const layouts = @import("layouts");
 const core    = @import("core");
 const xcb     = core.xcb;
-const bar     = @import("bar");
+const build_options = @import("build_options");
+const bar     = if (build_options.has_bar) @import("bar") else struct {
+    pub fn isVisible() bool { return false; }
+    pub fn getBarHeight() u16 { return 0; }
+};
 
 // Geometry requests are batched so that all cookies are issued before any
 // reply is awaited. This turns n sequential X round-trips into one flight of
@@ -67,7 +71,7 @@ pub fn tileWithOffset(
     // Work-area geometry: exclude the bar so that centred windows land in
     // the visible portion of the screen rather than behind the bar.
     const bh: i32       = if (bar.isVisible()) bar.getBarHeight() else 0;
-    const bar_at_bottom = core.config.bar.vertical_position == .bottom;
+    const bar_at_bottom = core.config.bar.bar_position == .bottom;
     const work_top: i32 = if (bar_at_bottom) 0 else bh;
     const work_h: i32   = sh - bh;
 

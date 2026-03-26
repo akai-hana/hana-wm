@@ -8,7 +8,11 @@ const utils         = @import("utils");
 const focus         = @import("focus");
 const build_options = @import("build_options");
 const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
-const bar           = @import("bar");
+const bar           = if (build_options.has_bar) @import("bar") else struct {
+    pub fn isVisible() bool { return false; }
+    pub fn getBarHeight() u16 { return 0; }
+    pub fn isBarWindow(_: u32) bool { return false; }
+};
 const fullscreen    = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const window        = @import("window");
 
@@ -51,7 +55,7 @@ fn workArea() WorkArea {
     // bar_at_bottom only has observable effect when bh > 0 (bar is visible).
     // When bh == 0 both branches of the ternaries below produce identical
     // results, so evaluating it unconditionally is harmless.
-    const bar_at_bottom = core.config.bar.vertical_position == .bottom;
+    const bar_at_bottom = core.config.bar.bar_position == .bottom;
     return .{
         .left   = 0,
         .right  = sw - bw2,

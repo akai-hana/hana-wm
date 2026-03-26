@@ -1,7 +1,4 @@
 //! hana's entry point and main loop.
-//!
-//! Global WM state (conn, screen, root, allocator, config, dpi_info) lives in
-//! core.zig and is initialized here at startup. Modules import core directly.
 
 // zig stdlibs
 const std = @import("std");
@@ -10,13 +7,15 @@ const std = @import("std");
 const build_options = @import("build_options");
 
 // core/
-const core   = @import("core");
-const xcb    = core.xcb;
-const utils  = @import("utils");
-const events = @import("events");
-const config = @import("config");
+const core    = @import("core");
+    const xcb = core.xcb;
+const utils   = @import("utils");
+const events  = @import("events");
+const config  = @import("config");
+
 // core/modules/
-const scale  = if (build_options.has_scale) @import("scale") else struct {};
+const scale = if (build_options.has_scale) @import("scale") else struct {};
+const debug = if (build_options.has_debug) @import("debug") else struct {};
 
 // input/
 const input = @import("input");
@@ -25,20 +24,23 @@ const input = @import("input");
 const window = @import("window");
 
 // bar/
-const bar    = @import("bar");
+const bar = if (build_options.has_bar) @import("bar") else struct {
+    pub fn init() !void {}
+    pub fn deinit() void {}
+    pub fn updateTimerState() void {}
+};
 
-// debug/
-const debug = @import("debug");
 
 /// hana's startup sequence and event-loop entry point.
 pub fn main() !void {
     const x = try connectToX();
     defer xcb.xcb_disconnect(x.conn);
 
-    core.conn     = x.conn;
-    core.screen   = x.screen;
-    core.root     = x.root;
-    core.alloc    = std.heap.c_allocator;
+    //TODO: is this core.thing = x.thing necessary? 
+    core.conn   = x.conn;
+    core.screen = x.screen;
+    core.root   = x.root;
+    core.alloc  = std.heap.c_allocator;
     if (comptime build_options.has_scale) core.dpi_info = scale.detect(x.conn, x.screen);
 
     input.setup(x.conn, x.screen, x.root);

@@ -1,36 +1,49 @@
 //! X event dispatch, signal handling, config reload, and the main event loop.
 
 // Zig stdlib
-const std           = @import("std");
+const std = @import("std");
+
+// build.zig
 const build_options = @import("build_options");
 
 // core/
-const utils     = @import("utils");
-
-// config/
-const config  = @import("config");
 const core    = @import("core");
     const xcb = core.xcb;
+const utils   = @import("utils");
 
-// debug/
+// core/modules/
 const debug = @import("debug");
+
+// config/
+const config = @import("config");
 
 // input/
 const input = @import("input");
 
 // window/
-const window         = @import("window");
-    const focus      = @import("focus");
-    const fullscreen = @import("fullscreen");
-    const minimize   = if (build_options.has_minimize) @import("minimize") else struct {};
-    const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
+const window = @import("window");
+const focus  = @import("focus");
 
 // tiling/
 const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
 
 // bar/
-const bar    = if (build_options.has_bar) @import("bar") else struct {};
-const prompt = @import("prompt");
+const bar    = if (build_options.has_bar) @import("bar") else struct {
+    pub fn pollTimeoutMs() i32 { return -1; }
+    pub fn checkClockUpdate() void {}
+    pub fn submitDraw(_: bool) void {}
+    pub fn handleExpose(_: *anyopaque) void {}
+    pub fn handlePropertyNotify(_: *anyopaque) void {}
+    pub fn updateIfDirty() !void {}
+    pub fn updateTimerState() void {}
+    pub fn reload() void {}
+};
+
+// bar/modules/
+const prompt = if (build_options.has_bar and build_options.has_prompt) @import("prompt") else struct {
+    pub fn blinkPollTimeoutMs() i32 { return -1; }
+    pub fn blinkTick() void {}
+};
 
 // Indices into the poll fd array.
 const FD_XCB    = 0;

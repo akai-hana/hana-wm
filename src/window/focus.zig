@@ -5,9 +5,15 @@ const core   = @import("core");
 const build_options = @import("build_options");
 const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
 const utils  = @import("utils");
-const bar    = @import("bar");
+const bar    = if (build_options.has_bar) @import("bar") else struct {
+    pub fn scheduleFocusRedraw(_: anytype) void {}
+    pub fn isBarWindow(_: u32) bool { return false; }
+    pub fn redrawInsideGrab() void {}
+};
 const window = @import("window");
-const carousel = @import("carousel");
+const carousel = if (build_options.has_bar and build_options.has_carousel) @import("carousel") else struct {
+    pub fn notifyFocusChanged(_: anytype) void {}
+};
 const xcb    = core.xcb;
 
 // Module state

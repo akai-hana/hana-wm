@@ -10,7 +10,12 @@ const focus         = @import("focus");
 const build_options = @import("build_options");
 const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
 const layouts       = @import("layouts");
-const bar           = @import("bar");
+const bar           = if (build_options.has_bar) @import("bar") else struct {
+    pub fn isBarWindow(_: u32) bool { return false; }
+    pub fn redrawInsideGrab() void {}
+    pub fn scheduleRedraw() void {}
+    pub fn setBarState(_: anytype) void {}
+};
 const tracking    = @import("tracking");
 const workspaces  = if (build_options.has_workspaces) @import("workspaces") else struct {};
 const WsWorkspace = if (build_options.has_workspaces) workspaces.Workspace else struct {};
