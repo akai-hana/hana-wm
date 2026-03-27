@@ -29,6 +29,7 @@ const optional_subsystems = [_]OptionalSubsystem{
     // tiling/
     .{ .name = "tiling"  },
     .{ .name = "layouts" },
+
     // tiling/modules/
     .{ .name = "master"    },
     .{ .name = "monocle"   },
@@ -37,8 +38,9 @@ const optional_subsystems = [_]OptionalSubsystem{
 
     // bar/
     .{ .name = "bar" },
+
     // bar/modules/
-    .{ .name = "prompt"    },
+    .{ .name = "prompt" },
     .{ .name = "tags",     .is_segment = true },
     .{ .name = "layout",   .is_segment = true },
     .{ .name = "variants", .is_segment = true },
@@ -56,10 +58,13 @@ pub fn build(b: *std.Build) void {
         );
     }
 
-    const target   = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast });
-
     const build_options = b.addOptions();
+
+    // Release
+    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast });
+    const target   = b.standardTargetOptions(.{});
+
+    // Debug
     build_options.addOption(bool, "enable_debug_logging", optimize == .Debug);
 
     // b.allocator is a build-lifetime arena; intermediate allocations are not freed individually.
@@ -68,8 +73,7 @@ pub fn build(b: *std.Build) void {
     ) catch null;
     build_options.addOption(bool, "has_fallback_toml", fallback_toml != null);
 
-    // Write the raw TOML alongside the module so @embedFile can reference it —
-    // no manual escaping needed.
+    // Write the raw TOML alongside the module so @embedFile can reference it
     const wf = b.addWriteFiles();
     if (fallback_toml) |content| _ = wf.add("fallback.toml", content);
     const fallback_toml_module = b.createModule(.{

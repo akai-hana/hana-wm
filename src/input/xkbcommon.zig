@@ -96,19 +96,15 @@ pub const XkbState = struct {
     }
 };
 
-/// Sleep between retry attempts; skips the sleep on the final attempt to avoid
-/// a pointless wait before the error propagates to the caller.
-/// Uses the global blocking Io instance — retryDelay runs during init before
-/// any Io context is threaded through. Failure (e.g. unsupported clock) just
-/// retries sooner.
 pub const XKB_RETRY_DELAY_MS: u64 = 20;
 
+/// Sleep between retry attempts; skips the sleep on the final attempt to avoid
+/// a pointless wait before the error propagates to the caller.
+/// Failure is benign — retries simply happen sooner.
 inline fn retryDelay(attempt: u8) void {
-    if (attempt < MAX_ATTEMPTS - 1)
-        std.Io.Clock.Duration.sleep(
-            .{ .clock = .awake, .raw = .fromMilliseconds(XKB_RETRY_DELAY_MS) },
-            std.Options.debug_io,
-        ) catch {};
+    if (attempt < MAX_ATTEMPTS - 1) {
+        std.time.sleep(XKB_RETRY_DELAY_MS * std.time.ns_per_ms);
+    }
 }
 
 fn retrySetup(xcb_conn: *anyopaque) !void {
