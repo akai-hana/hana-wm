@@ -1,12 +1,16 @@
-.zig-cache/
+# single-dir codebase
+dev/codebase/*
 
 # temporary location, but for now let's ignore zig's binary output
 zig-out/
 
-# single-dir codebase
-dev/codebase/*
+# zig garbage
+.zig-cache/
 
+# make garbage
 *.orig
 *.rej
+
+# vim garbage
 *.swp
 *.swo
