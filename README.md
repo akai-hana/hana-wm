@@ -1,7 +1,7 @@
 <div align="center">
 
 # hana【花】
-###### An idyllic X11 Window Manager written in Zig.
+###### A comfy X11 Window Manager written in Zig.
 
 ![](https://raw.githubusercontent.com/akai-hana/assets/main/flower-banner.png)
 
@@ -30,20 +30,19 @@ It supports tiling/floating window management, and includes a bar/prompt integra
 
 It is designed with the objective to be comfortable to use, highly configurable and easily modifiable.
 
-
 ---
 
 hana's main strength is its ability to be molded like Play-Doh™ (not sponsored).
 
-In specific, hana's main offerings are the following:
+In particular, hana's main offerings are the following:
 
 ## Architecture 
 
-hana counts with a modular codebase architecture, split into single-responsibility code files, written with the goal of being easily extendable and trimmable by any user.
+hana counts with a modular codebase architecture, split into single-responsibility code files, written with the goal of making the codebase tidy and easily modifiable by any user. Any file or directory that isn't essential to this WM working/booting up can be just removed, and hana will recompile just fine. 
 
-Don't want hana's bar? Simply remove `src/bar/`. Don't want tiling/floating? Remove `src/tiling/` or `src/window/modules/floating.zig`. Want the bar's command prompt, but without vim motions? Keep `src/bar/modules/prompt/prompt.zig` and remove `src/bar/modules/prompt/vim.zig`.
+Don't want hana's bar? Simply remove `src/bar/`. Don't want tiling/floating? Remove `src/window/modules/tiling/` or `src/window/modules/floating`. Want the bar's inline command prompt, but without vim motions? Keep `src/bar/modules/prompt/prompt.zig` and remove `src/bar/modules/prompt/vim.zig`.
 
-By default, hana's codebase is categorized into directories and sub-directories, although these only serve a purely decorative function; the user is free to re-organize the files in any way they see fit.
+By default, hana's codebase is categorized into directories and sub-directories, although these are purely decorative; the user is free to re-organize the files in any way they prefer.
 
 The main directory categories are: 
 
@@ -53,17 +52,16 @@ src
 ├── bar
 ├── config
 ├── core
-├── debug
-├── input
-├── tiling
 └── window
 ```
 
-`core/`, `window/`, `config/` and `input/` are the four directory categories essential to hana's workings. `tiling/`, `bar/` and `debug/` are optional, and can be entirely removed if wished.
+`core/`, `window/`, `config/` are directory categories essential to hana's workings, each containing optional sub-directories inside. `bar/` is its own thing entirely, and can be entirely removed if the user wants to use another bar (though none will have better integration with hana).
 
-On the first level of directories there's the essential files to that specific category. Some directories contain a `modules/` sub-directory, containing single-role files/directories that extend their category, modularly adding one feature each. This way, the user can choose to keep and discard any combination of modules at preference.
+On the first level of directories there's the essential files to that specific category. Some directories contain a `modules/` sub-directory, containing single-role files/directories that extend their category, modularly adding one feature each. This way, the user can choose to keep and discard any combination of modules at will.
 
-`window/` includes a `window/management/`, sub-directory, where both `tiling/` and `floating/` can be found. Both are included by default, making hana a dynamic window manager. At minimum, either one of them must be included in order to compile hana. 
+`tiling/` and `floating/` can be found inside `window/modules`. Both are included by default, making hana a dynamic window manager. At minimum, either one of them must be included in order to compile hana. 
+
+This clear codebase structuring might even help an advanced user navigate through the code easier, and modifying it more comfortable.
 
 `# TODO: mention codebase encapsulation`
 
@@ -71,15 +69,17 @@ On the first level of directories there's the essential files to that specific c
 
 hana has dedicated, hot-reloadable config files, written in TOML.
 
-Configuration can be self-contained on any arrangement of one or more `config/<any-name>.toml` file(s). By default, hana provides a configuration split into two segments: **functional** and **visual**.
+Configuration can be self-contained on any arrangement of one or more `config/<any-name>.toml` file(s), but by default, hana provides a configuration split into two categories: **functional** and **visual**.
 
-**Functional** configuration can be done through `config/config.toml`, while different **visual** configurations (both color palette and other visual details) can be written (also on TOML) and placed on `themes/`, then selected from the config. This means general behavior is separated from visual appearance, allowing different themes to be written and swapped around from the config, while retaining functional preferences, like tiling behavior, keybindings, workspace rules, etc.
+**Functional** configuration can be done through `config/config.toml`, while different **visual** configurations (both color palette and other visual details) can be written (also on TOML) and placed on `config/themes/`, then selected from the config. This means general behavior is separated from visual appearance, allowing different themes to be written and swapped around from the config, while retaining functional preferences, like window rules, tiling behavior, keybindings, workspace layouts, etc.
 
 Selecting a file from the config simply merges the contents from that TOML file with `config/config.toml`. This means the user is free to divide their configuration into any layout of files they want: from one with an individual keybinds vocab file, color palette, visual aspects, tiling config, etc, to just placing everything inside this single `config.toml`.
 
 By default, hana ships a red theme, `config/themes/akai.toml`. When hana is ran, both TOML files' contents are joined, then read through with a custom config parser. This means it's very easy for a user to further divide the config into different files, or just place everything inside a single .toml file.
 
-hana automatically reads all `.toml` files inside `config/.`, meaning the name of the `.toml` file doesn't really matter. Likewise, multiple `.toml` files can be placed inside `config/.`, and they'll be joined automatically. Any sub-directories within `config/` are ignored, and instead must be manually joined through a `.toml` file in the `config/` level. This is in the case the user wants to store multiple TOML files but doesn't necessarily want to use all of them at the same time; think the previous example, of different themes that can be swapped around in the config.
+hana automatically reads all `.toml` files inside `config/.`, meaning the name of the `.toml` file doesn't really matter. Likewise, multiple `.toml` files can be placed inside `config/.`, and they'll be joined automatically. Any sub-directories within `config/` are ignored, and instead must be manually joined through a `.toml` file in the `config/` level, in the case the user wants to store multiple TOML files but doesn't necessarily want to use all of them at the same time; think the previous example, of different themes that can be swapped around in the config.
+
+Since this is all an arbitrary design choice, it is optional and re-categorizable by the user, so one could do `config/config.toml` and `config/others/<binds.toml/rules.toml/tiling.toml>`, or whatever the heck else.
 
 > BTW, pull requests with custom themes are very much welcome. :-)
 
@@ -101,13 +101,12 @@ Here's the full set of features/characteristics hana offers by default.
 - Advanced binding: Ranged-key & array bindings, multi-action keybindings, keybind nesting
 - WM scaling across any display resolution `# TODO: working, but pending to finish/polish`
 
-
 ---
-
 
 # Installation
 ```sh
 zig build
+# yeah... that's pretty much it
 ```
 
 ## Dependencies
