@@ -329,8 +329,8 @@ fn executeMouseAction(action: *const core.Action, clicked_win: u32) !void {
 /// Grandchild process: detach from the session and exec the command.
 /// Writes a sentinel byte to exec_pipe_write if execvp fails, so the WM
 /// can distinguish exec failure from success (which closes the pipe via CLOEXEC).
-fn grandchildExec(exec_pipe_write: std.posix.fd_t, cmd_z: [*:0]const u8) noreturn {
-    _ = std.posix.setsid();
+fn grandchildExec(exec_pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
+    _ = c.setsid();
     _ = c.execvp("/bin/sh", @ptrCast(&[_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z, null }));
     // execvp only returns on failure; signal this to the WM via exec_pipe.
     const sentinel: u8 = 1;
@@ -342,17 +342,17 @@ fn grandchildExec(exec_pipe_write: std.posix.fd_t, cmd_z: [*:0]const u8) noretur
 /// pid_pipe, then exits so the grandchild is re-parented to init.
 /// Closing exec_pipe_write before exit is required — without it the WM's
 /// read would block indefinitely waiting for an EOF that never comes.
-fn intermediateChild(exec_pipe_write: std.posix.fd_t, pid_pipe_write: std.posix.fd_t, cmd_z: [*:0]const u8) noreturn {
-    const grandchild_pid = std.posix.fork() catch {
+fn intermediateChild(exec_pipe_write: c_int, pid_pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
+    const grandchild_pid = c.fork();
+    if (grandchild_pid < 0) {
         debug.err("Second fork failed", .{});
         std.process.exit(1);
-    };
+    }
     if (grandchild_pid == 0) grandchildExec(exec_pipe_write, cmd_z);
-    // Cast to c_int so the parent can read it back as c_int via c.read().
-    const gp: c_int = @intCast(grandchild_pid);
+    const gp: c_int = grandchild_pid;
     _ = c.write(pid_pipe_write, &gp, @sizeOf(c_int));
-    std.posix.close(pid_pipe_write);
-    std.posix.close(exec_pipe_write);
+    _ = c.close(pid_pipe_write);
+    _ = c.close(exec_pipe_write);
     std.process.exit(0);
 }
 
@@ -365,42 +365,47 @@ fn executeShellCommand(cmd: []const u8) !void {
     const cmd_z = try core.alloc.dupeZ(u8, cmd);
     defer core.alloc.free(cmd_z);
 
-    const exec_pipe = std.posix.pipe() catch {
+    var exec_fds: [2]c_int = undefined;
+    if (c.pipe(&exec_fds) != 0) {
         debug.err("pipe() failed (exec_pipe) for command: {s}", .{cmd});
         return error.PipeFailed;
-    };
-    const pid_pipe = std.posix.pipe() catch {
-        closePipe(exec_pipe);
+    }
+    const exec_pipe = exec_fds;
+    var pid_fds: [2]c_int = undefined;
+    if (c.pipe(&pid_fds) != 0) {
+        _ = c.close(exec_pipe[0]); _ = c.close(exec_pipe[1]);
         debug.err("pipe() failed (pid_pipe) for command: {s}", .{cmd});
         return error.PipeFailed;
-    };
+    }
+    const pid_pipe = pid_fds;
     // exec_pipe write end is CLOEXEC: exec success silently closes it (EOF to WM).
     _ = c.fcntl(exec_pipe[1], c.F_SETFD, c.FD_CLOEXEC);
 
-    const pid = std.posix.fork() catch {
-        closePipe(exec_pipe);
-        closePipe(pid_pipe);
+    const pid = c.fork();
+    if (pid < 0) {
+        _ = c.close(exec_pipe[0]); _ = c.close(exec_pipe[1]);
+        _ = c.close(pid_pipe[0]);  _ = c.close(pid_pipe[1]);
         debug.err("First fork failed for command: {s}", .{cmd});
         return error.ForkFailed;
-    };
+    }
 
     if (pid == 0) {
         // Intermediate child process. Close the read ends we don't need,
         // then hand off to the named helper.
-        std.posix.close(exec_pipe[0]);
-        std.posix.close(pid_pipe[0]);
+        _ = c.close(exec_pipe[0]);
+        _ = c.close(pid_pipe[0]);
         intermediateChild(exec_pipe[1], pid_pipe[1], cmd_z.ptr);
     }
 
     // WM (parent) process: close write ends we don't own, then wait
     // for the intermediate child so it doesn't become a zombie.
-    std.posix.close(exec_pipe[1]);
-    std.posix.close(pid_pipe[1]);
+    _ = c.close(exec_pipe[1]);
+    _ = c.close(pid_pipe[1]);
 
     var status: c_int = 0;
     if (c.waitpid(pid, &status, 0) == -1) {
-        std.posix.close(exec_pipe[0]);
-        std.posix.close(pid_pipe[0]);
+        _ = c.close(exec_pipe[0]);
+        _ = c.close(pid_pipe[0]);
         debug.err("waitpid failed", .{});
         return error.WaitpidFailed;
     }
@@ -409,13 +414,13 @@ fn executeShellCommand(cmd: []const u8) !void {
     // written the grandchild PID into pid_pipe, so this read won't block.
     var grandchild_pid: c_int = -1;
     _ = c.read(pid_pipe[0], &grandchild_pid, @sizeOf(c_int));
-    std.posix.close(pid_pipe[0]);
+    _ = c.close(pid_pipe[0]);
 
     // EOF (n == 0) on exec_pipe means exec succeeded (CLOEXEC closed it).
     // A sentinel byte (n == 1) means execvp failed; skip spawn registration.
     var sentinel: u8 = 0;
     const n = c.read(exec_pipe[0], &sentinel, 1);
-    std.posix.close(exec_pipe[0]);
+    _ = c.close(exec_pipe[0]);
     if (n > 0) return;
 
     if (tracking.getCurrentWorkspace()) |ws| {
@@ -482,9 +487,9 @@ inline fn releaseGrab(time: u32) void {
 }
 
 /// Closes both ends of a pipe pair.
-inline fn closePipe(p: [2]std.posix.fd_t) void {
-    std.posix.close(p[0]);
-    std.posix.close(p[1]);
+inline fn closePipe(p: [2]c_int) void {
+    _ = c.close(p[0]);
+    _ = c.close(p[1]);
 }
 
 /// xcb-cursor extern declarations and helpers.

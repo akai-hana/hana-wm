@@ -103,7 +103,13 @@ pub const XKB_RETRY_DELAY_MS: u64 = 20;
 /// Failure is benign — retries simply happen sooner.
 inline fn retryDelay(attempt: u8) void {
     if (attempt < MAX_ATTEMPTS - 1) {
-        std.time.sleep(XKB_RETRY_DELAY_MS * std.time.ns_per_ms);
+        const ns = XKB_RETRY_DELAY_MS * std.time.ns_per_ms;
+        var req = std.os.linux.timespec{
+            .sec  = @intCast(ns / std.time.ns_per_s),
+            .nsec = @intCast(ns % std.time.ns_per_s),
+        };
+        var rem = std.os.linux.timespec{ .sec = 0, .nsec = 0 };
+        _ = std.os.linux.nanosleep(&req, &rem);
     }
 }
 
