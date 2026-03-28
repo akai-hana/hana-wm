@@ -16,13 +16,13 @@ const bar           = if (build_options.has_bar) @import("bar") else struct {
 const fullscreen    = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const window        = @import("window");
 
-// ── Named work-area type ────────────────────────────────────────────────────
+// Named work-area type 
 // A named struct makes the return type of workArea() referenceable in
 // variable declarations and future doc-comments, unlike an anonymous return
 // struct whose type cannot be spelled anywhere else in the code.
 const WorkArea = struct { left: i32, right: i32, top: i32, bottom: i32 };
 
-// ── Snap helpers ─────────────────────────────────────────────────────────────
+// Snap helpers 
 
 /// Resolve snap_distance from config into pixels.
 /// Percentage values are relative to screen width (the primary drag axis).
@@ -96,7 +96,7 @@ inline fn snapFarEdge(edge: i32, boundary: i32, snap: i32) i32 {
     return edge;
 }
 
-// ── Module state ─────────────────────────────────────────────────────────────
+// Module state 
 
 const State = struct {
     drag:          core.DragState = .{},
@@ -104,7 +104,7 @@ const State = struct {
 };
 var g_state: State = .{};
 
-// ── Public API ────────────────────────────────────────────────────────────────
+// Public API 
 
 pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     if (g_state.drag.active) return;

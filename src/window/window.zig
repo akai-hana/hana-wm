@@ -205,13 +205,12 @@ pub inline fn isOnCurrentWorkspace(win: u32) bool {
 
 pub fn grabButtons(win: u32, focused: bool) void {
     _ = xcb.xcb_ungrab_button(core.conn, xcb.XCB_BUTTON_INDEX_ANY, win, xcb.XCB_MOD_MASK_ANY);
-    if (!focused) {
-        _ = xcb.xcb_grab_button(
-            core.conn, 0, win, xcb.XCB_EVENT_MASK_BUTTON_PRESS,
-            xcb.XCB_GRAB_MODE_SYNC, xcb.XCB_GRAB_MODE_SYNC,
-            xcb.XCB_NONE, xcb.XCB_NONE, xcb.XCB_BUTTON_INDEX_ANY, xcb.XCB_MOD_MASK_ANY,
-        );
-    }
+    if (focused) return;
+    _ = xcb.xcb_grab_button(
+        core.conn, 0, win, xcb.XCB_EVENT_MASK_BUTTON_PRESS,
+        xcb.XCB_GRAB_MODE_SYNC, xcb.XCB_GRAB_MODE_SYNC,
+        xcb.XCB_NONE, xcb.XCB_NONE, xcb.XCB_BUTTON_INDEX_ANY, xcb.XCB_MOD_MASK_ANY,
+    );
 }
 
 // Workspace rule matching
@@ -731,9 +730,8 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t) void {
 
 pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void {
     if (!isValidManagedWindow(event.window)) return;
-    if (event.atom == atoms.wm_protocols or event.atom == xcb.XCB_ATOM_WM_HINTS) {
-        utils.recacheInputModel(core.conn, event.window);
-    }
+    if (event.atom != atoms.wm_protocols and event.atom != xcb.XCB_ATOM_WM_HINTS) return;
+    utils.recacheInputModel(core.conn, event.window);
 }
 
 // Size-hint parsing

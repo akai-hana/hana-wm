@@ -1,4 +1,5 @@
-//! Configuration interpreter — loads, parses, and validates TOML config files.
+//! Configuration interpreter
+//! Loads, parses, and validates TOML config files.
 
 const std       = @import("std");
 const core      = @import("core");
@@ -604,7 +605,7 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
     const master_src = doc.getSection("tiling.layouts.master-stack") orelse section;
     const dedicated = master_src != section; // true when [tiling.layouts.master-stack] exists
     cfg.tiling.master_count = get(u8, master_src, if (dedicated) "count" else "master_count", 1, 1, null);
-    if (master_src.getString(if (dedicated) "side"  else "master_side"))  |s| cfg.tiling.master_side = core.MasterSide.fromStringWithAlias(s) orelse .left;
+    if (master_src.getString(if (dedicated) "side"  else "master_side"))  |s| cfg.tiling.master_side = core.MasterSide.fromString(s) orelse .left;
     cfg.tiling.master_width = master_src.getScalable(if (dedicated) "width" else "master_width") orelse parser.ScalableValue.percentage(50.0);
     parseTilingVariants(doc, cfg);
     cfg.tiling.global_layout = get(bool, section, "global_layout", false, null, null);

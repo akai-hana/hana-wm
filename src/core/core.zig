@@ -1,13 +1,16 @@
-//! Home of all shared type definitions.
+//! Shared type definitions
+//! Config structs, input bindings, geometry, and process-wide globals.
 
-// Zig stdlibs
 const std = @import("std");
 
-// Central xcb import passed throughout all files
+// On every @cImport, C code has to be translated to Zig.
+// Importing xcb here, and then making other files import it
+// through this file, is a tiny bit more efficient.
 pub const xcb = @cImport(@cInclude("xcb/xcb.h"));
 
 // config/
 const parser = @import("parser");
+
 
 // Modifier masks
 //
@@ -18,7 +21,7 @@ pub const MOD_SHIFT:    u16 = xcb.XCB_MOD_MASK_SHIFT;
 pub const MOD_CAPSLOCK: u16 = xcb.XCB_MOD_MASK_LOCK;
 pub const MOD_CONTROL:  u16 = xcb.XCB_MOD_MASK_CONTROL;
 pub const MOD_ALT:      u16 = xcb.XCB_MOD_MASK_1;
-pub const MOD_NUM_LOCK: u16 = xcb.XCB_MOD_MASK_2;
+pub const MOD_NUMLOCK: u16 = xcb.XCB_MOD_MASK_2;
 pub const MOD_SUPER:    u16 = xcb.XCB_MOD_MASK_4;
 
 /// The only modifier bits the WM uses for keybinding matching.
@@ -50,7 +53,7 @@ pub const WindowId = u32;
 /// The high byte is unused; values match what XCB expects for pixel/color fields.
 pub const Color = u32;
 
-// Config types 
+// Config types
 
 pub const Action = union(enum) {
     exec: []const u8,
@@ -80,7 +83,7 @@ pub const Action = union(enum) {
     unminimize_all,
     cycle_layout_variants,
     toggle_prompt,
-    all_workspaces,          // map all windows from every workspace simultaneously (toggle)
+    all_workspaces,          // shows all windows from every workspace at once; toggled on/off
     move_to_all_workspaces,  // pin focused window to every workspace
     toggle_tag_all,          // flip between pinned-to-all and current-workspace-only
 
@@ -97,8 +100,8 @@ pub const Action = union(enum) {
 };
 
 pub const Keybind = struct {
-    modifiers: u16, // XCB API requirement
-    keysym:    u32, // xcb_keysym_t is uint32_t in every version of the X11 protocol spec
+    modifiers: u16, // u16 per XCB spec; xcb_grab_key rejects wider types
+    keysym:    u32, // xcb_keysym_t is u32 by X11 protocol spec; never narrowed
     keycode:   ?u8 = null,
     action:    Action,
 };
@@ -108,18 +111,14 @@ pub const MouseBind = struct {
     modifiers: u16,
     button:    u8,
     action:    Action,
-
-    pub inline fn deinit(self: *MouseBind, allocator: std.mem.Allocator) void {
-        self.action.deinit(allocator);
-    }
 };
 
 pub const MasterSide = enum {
     left,
     right,
 
-    // alias_map covers all full names (case-insensitively) and short aliases;
-    // fromStringWithAlias is the canonical parse entry point.
+    // Both orderings of diagonal names and both separators are pre-listed in alias_map;
+    // fromString is the canonical parse entry point.
     const alias_map = std.StaticStringMap(MasterSide).initComptime(.{
         .{ "l",     .left  },
         .{ "left",  .left  },
@@ -127,18 +126,19 @@ pub const MasterSide = enum {
         .{ "right", .right },
     });
 
-    //TODO: the purpose of this function is a bit difficult to make out due to its verbosity.
-    pub inline fn fromStringWithAlias(str: []const u8) ?MasterSide {
+    /// Lowercases str into a stack buffer and looks it up in alias_map.
+    /// Returns null if str exceeds 16 bytes or is unrecognized.
+    pub inline fn fromString(str: []const u8) ?MasterSide {
         var buf: [16]u8 = undefined;
         if (str.len > buf.len) return null;
         return alias_map.get(std.ascii.lowerString(&buf, str));
     }
 };
 
-/// Per-layout behavioral variants.
+/// Window placement policy for the master-stack layout.
 ///
 /// Defined here and not in tiling.zig so that config.zig
-/// can parse them without creating a circular import.
+/// can parse it without creating a circular import.
 pub const MasterVariant = enum {
     lifo, // new window -> stack, existing master stays (default)
     fifo, // new window -> master, existing master -> stack
@@ -154,15 +154,15 @@ pub const GridVariant = enum {
     relaxed, // last window in incomplete row expands to fill the row
 };
 
-/// A layout variant discriminated by which layout it belongs to.
+/// Tagged union pairing a variant value with its owning layout type.
 pub const LayoutVariantOverride = union(enum) {
     master:  MasterVariant,
     monocle: MonocleVariant,
     grid:    GridVariant,
 };
 
-/// Records that a specific workspace should start in a particular layout
-/// (and optionally a variant), overriding the first-element default.
+/// Per-workspace startup layout assignment, overriding the global default.
+/// variant is null → use the per-layout section default.
 pub const WorkspaceLayoutOverride = struct {
     workspace_idx: u8,                   // 0-indexed workspace number
     layout_idx:    u8,                   // index into TilingConfig.layouts
@@ -220,11 +220,7 @@ pub const IndicatorLocation = enum {
     down_left,
     down_right,
 
-    /// Case-insensitive parse.
-    ///
-    /// Accepts hyphens or underscores, and both orderings of diagonal names 
-    /// (e.g. "left-up" == "up-left")
-    // Both orderings of diagonal names and both separators are pre-listed.
+    // Accepts hyphens or underscores and both orderings of diagonal names (e.g. "left-up" == "up-left").
     // StaticStringMap.initComptime is a compile-time perfect hash — O(1), no runtime cost.
     const string_map = std.StaticStringMap(IndicatorLocation).initComptime(.{
         .{ "up",         .up         },
@@ -248,15 +244,15 @@ pub const IndicatorLocation = enum {
         .{ "right-down", .down_right },
         .{ "right_down", .down_right },
     });
+    /// Case-insensitive parse. Returns null if str exceeds 16 bytes or is unrecognized.
     pub inline fn fromString(str: []const u8) ?IndicatorLocation {
         var buf: [16]u8 = undefined;
         if (str.len > buf.len) return null;
-        const lower = std.ascii.lowerString(&buf, str);
-        return string_map.get(lower);
+        return string_map.get(std.ascii.lowerString(&buf, str));
     }
 };
 
-// List of available bar segments
+// Content segments that can be placed into a BarLayout column.
 pub const BarSegment = enum {
     workspaces,
     title,
@@ -265,20 +261,20 @@ pub const BarSegment = enum {
     variants,
 };
 
-/// Possible positions of bar within the screen
+/// Vertical placement of the bar on screen: top or bottom edge.
 pub const BarScreenPosition = enum {
     top,
     bottom,
 };
 
-/// Possible possitions of segments within the bar
+/// Horizontal anchor for a BarLayout column within the bar.
 pub const BarSegmentAnchor = enum {
     left,
     center,
     right,
 };
 
-//TODO: comment
+/// One column of the bar: an anchor position and an ordered list of segments to display.
 pub const BarLayout = struct {
     position: BarSegmentAnchor,
     segments: std.ArrayList(BarSegment),
@@ -304,7 +300,7 @@ pub const BarConfig = struct {
     scaled_font_size:  u16                    = 10, // Can exceed 255 on high DPI - u16 is correct
     spacing:           parser.ScalableValue   = parser.ScalableValue.absolute(12.0),
 
-    // Colors: 0xRRGGBB packed into 32 bits (X11 color format).
+    // Bar color scheme; all values are 0xRRGGBB (see Color type alias).
     bg:          Color = 0x222222,
     fg:          Color = 0xBBBBBB,
     selected_bg: Color = 0x005577,
@@ -332,11 +328,11 @@ pub const BarConfig = struct {
 
     clock_format: []const u8 = "%Y-%m-%d %H:%M:%S",
 
-    // drun segment colors and prompt (all optional. Fall-back to bar-wide defaults)
+    // drun segment colors and prompt; all nullable, falling back to bar-wide defaults.
     drun_bg:           ?Color     = null,    // Background; falls back to bg
     drun_fg:           ?Color     = null,    // Typed text color; falls back to fg
     drun_prompt_color: ?Color     = null,    // Prompt text color; falls back to accent_color
-    drun_prompt:       []const u8 = "run: ", // Displayed before the input field
+    drun_prompt:       []const u8 = "run: ", // Prefix rendered left of the text input cursor
 
     layout: std.ArrayList(BarLayout)           = .empty,
 
@@ -361,18 +357,20 @@ pub const BarConfig = struct {
     pub inline fn drunPromptColor(self: *const BarConfig) Color {
         return self.drun_prompt_color orelse self.accent_color;
     }
+
     /// Derives horizontal segment padding from font_size.
     /// Percentage path: margin = (bar_height - font_height) / 2, scaled.
     /// Absolute path:   margin = (bar_height - font_px * scale_factor) / 2.
     pub inline fn scaledSegmentPadding(self: *const BarConfig, bar_height: u16) u16 {
         const h: f32 = @floatFromInt(bar_height);
+        // Percentage path: margin = (bar_height - font_height) / 2, scaled.
         if (self.font_size.is_percentage) {
             const margin_ratio = (1.0 - self.font_size.value / 100.0) / 2.0;
             return @as(u16, @intFromFloat(@round(@max(0.0, h * margin_ratio * self.scale_factor))));
-        } else {
-            const font_px = self.font_size.value * self.scale_factor;
-            return @as(u16, @intFromFloat(@round(@max(0.0, (h - font_px) / 2.0))));
         }
+        // Absolute path: margin = (bar_height - font_px * scale_factor) / 2.
+        const font_px = self.font_size.value * self.scale_factor;
+        return @as(u16, @intFromFloat(@round(@max(0.0, (h - font_px) / 2.0))));
     }
 
     /// Scales a ScalableValue to pixels. `factor` multiplies the percentage path;
@@ -382,14 +380,17 @@ pub const BarConfig = struct {
         return if (sv.is_percentage) h * factor * (sv.value / 100.0) * scale else sv.value * scale;
     }
 
+    inline fn scaleToU16(val: f32) u16 {
+        return @as(u16, @intFromFloat(@round(@max(0.0, val))));
+    }
     pub inline fn scaledSpacing(self: *const BarConfig, bar_height: u16) u16 {
-        return @as(u16, @intFromFloat(@round(@max(0.0, scaleValue(self.spacing, bar_height, 5.0, self.scale_factor)))));
+        return scaleToU16(scaleValue(self.spacing, bar_height, 5.0, self.scale_factor));
     }
     pub inline fn scaledIndicatorSize(self: *const BarConfig, bar_height: u16) u16 {
-        return @max(1, @as(u16, @intFromFloat(@round(scaleValue(self.indicator_size, bar_height, 1.0, self.scale_factor)))));
+        return @max(1, scaleToU16(scaleValue(self.indicator_size, bar_height, 1.0, self.scale_factor)));
     }
     pub inline fn scaledWorkspaceWidth(self: *const BarConfig, bar_height: u16) u16 {
-        return @max(1, @as(u16, @intFromFloat(@round(scaleValue(self.workspace_tag_width, bar_height, 1.0, self.scale_factor)))));
+        return @max(1, scaleToU16(scaleValue(self.workspace_tag_width, bar_height, 1.0, self.scale_factor)));
     }
 
     /// Returns the bar's alpha in 16-bit format (0x0000–0xFFFF).
@@ -401,10 +402,6 @@ pub const BarConfig = struct {
 pub const Rule = struct {
     class_name: []const u8,
     workspace:  u8,
-
-    pub inline fn deinit(self: *Rule, allocator: std.mem.Allocator) void {
-        allocator.free(self.class_name);
-    }
 };
 
 pub const WorkspaceConfig = struct {
@@ -412,7 +409,7 @@ pub const WorkspaceConfig = struct {
     rules: std.ArrayList(Rule) = .empty,
 
     pub fn deinit(self: *WorkspaceConfig, allocator: std.mem.Allocator) void {
-        for (self.rules.items) |*rule| rule.deinit(allocator);
+        for (self.rules.items) |rule| allocator.free(rule.class_name);
         self.rules.deinit(allocator);
     }
 };
@@ -448,7 +445,7 @@ pub const Config = struct {
         for (self.keybindings.items) |*kb| kb.action.deinit(a);
         self.keybindings.deinit(a);
 
-        for (self.mouse_bindings.items) |*mb| mb.deinit(a);
+        for (self.mouse_bindings.items) |*mb| mb.action.deinit(a);
         self.mouse_bindings.deinit(a);
 
         self.workspaces.deinit(a);
@@ -477,10 +474,12 @@ pub const WindowGeometry = struct {
 
 // Input model types 
 
+pub const DragMode = enum { move, resize };
+
 pub const DragState = struct {
-    active:           bool  = false,
+    active:           bool     = false,
     window:           WindowId = 0,
-    mode:             enum { move, resize } = .move,
+    mode:             DragMode = .move,
     start_x:          i16   = 0,
     start_y:          i16   = 0,
     start_win_x:      i16   = 0,

@@ -49,10 +49,10 @@ The main directory categories are:
 ```bash
 $ tree src -L 1
 src
-├── bar
-├── config
-├── core
-└── window
+├ bar
+├ config
+├ core
+└ window
 ```
 
 `core/`, `window/`, `config/` are directory categories essential to hana's workings, each containing optional sub-directories inside. `bar/` is its own thing entirely, and can be entirely removed if the user wants to use another bar (though none will have better integration with hana).

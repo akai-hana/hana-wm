@@ -336,33 +336,29 @@ pub fn populateFocusCacheFromCookies(
     var take_focus = false;
     var wm_delete  = false;
 
-    if (xcb.xcb_get_property_reply(conn, protocols_cookie, null)) |r| {
+    protocols: {
+        const r = xcb.xcb_get_property_reply(conn, protocols_cookie, null) orelse break :protocols;
         defer std.c.free(r);
-
-        if (r.*.format == 32 and r.*.value_len > 0) {
-            const raw: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(r)));
-            const result = scanProtocolAtoms(raw[0..@intCast(r.*.value_len)], atoms.take_focus, atoms.wm_delete);
-            take_focus = result.take_focus;
-            wm_delete  = result.wm_delete;
-        }
+        if (r.*.format != 32 or r.*.value_len == 0) break :protocols;
+        const raw: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(r)));
+        const result = scanProtocolAtoms(raw[0..@intCast(r.*.value_len)], atoms.take_focus, atoms.wm_delete);
+        take_focus = result.take_focus;
+        wm_delete  = result.wm_delete;
     }
 
     var accepts_input = true;
 
     // Extract the WM_HINTS input field from the pre-fired cookie reply.
     // Same logic as queryWMHintsAcceptsInput, but operating on a cookie rather than issuing a new request.
-    if (xcb.xcb_get_property_reply(conn, hints_cookie, null)) |r| {
+    hints: {
+        const r = xcb.xcb_get_property_reply(conn, hints_cookie, null) orelse break :hints;
         defer std.c.free(r);
-
-        if (r.*.format == 32 and r.*.value_len >= 1) {
-            const hints: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(r)));
-
-            const input_flag_set  = (hints[WM_HINTS_FLAGS_FIELD] & WM_HINTS_INPUT_FLAG) != 0;
-            const has_input_field = r.*.value_len > WM_HINTS_INPUT_FIELD;
-            if (input_flag_set and has_input_field) {
-                accepts_input = hints[WM_HINTS_INPUT_FIELD] != 0;
-            }
-        }
+        if (r.*.format != 32 or r.*.value_len < 1) break :hints;
+        const hints: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(r)));
+        const input_flag_set  = (hints[WM_HINTS_FLAGS_FIELD] & WM_HINTS_INPUT_FLAG) != 0;
+        const has_input_field = r.*.value_len > WM_HINTS_INPUT_FIELD;
+        if (!input_flag_set or !has_input_field) break :hints;
+        accepts_input = hints[WM_HINTS_INPUT_FIELD] != 0;
     }
 
     putCachedProps(win, .{
@@ -555,10 +551,8 @@ fn queryWMHintsAcceptsInput(conn: *xcb.xcb_connection_t, win: u32) bool {
     const hints: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
     const input_flag_set  = (hints[WM_HINTS_FLAGS_FIELD] & WM_HINTS_INPUT_FLAG) != 0;
     const has_input_field = reply.*.value_len > WM_HINTS_INPUT_FIELD;
-    if (input_flag_set and has_input_field) {
-        return hints[WM_HINTS_INPUT_FIELD] != 0;
-    }
-    return true;
+    if (!input_flag_set or !has_input_field) return true;
+    return hints[WM_HINTS_INPUT_FIELD] != 0;
 }
 
 // Child window resolution

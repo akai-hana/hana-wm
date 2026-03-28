@@ -233,6 +233,21 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
         if (comptime build_options.has_minimize) minimize.moveToWorkspace(win, target_ws);
     }
 
+    // If this window is fullscreen on the current workspace, clean up the
+    // fullscreen side-effects on the source workspace (bar, floating windows,
+    // border) and transfer the record to target_ws so the window is still
+    // fullscreen when you switch there.
+    if (comptime build_options.has_fullscreen) {
+        if (fullscreen.workspaceFor(win)) |src_ws| {
+            if (src_ws == s.current) {
+                const info = fullscreen.getForWorkspace(src_ws).?;
+                fullscreen.cleanupFullscreenForMove(win, src_ws);
+                fullscreen.removeForWorkspace(src_ws);
+                fullscreen.setForWorkspace(target_ws, info);
+            }
+        }
+    }
+
     evictWindow(win);
     if (focus.getFocused() == win) focus.clearFocus();
     if (has_tiling and core.config.tiling.enabled) tiling.dirty();
@@ -275,8 +290,16 @@ pub fn moveWindowExclusive(win: u32, target_ws: u8) void {
 
     // Transfer fullscreen record to the target workspace so the window
     // remains fullscreen wherever it lands, not just on the source workspace.
+    // When the window is actually leaving the current workspace (src_ws !=
+    // target_ws), also run the cleanup that exitFullscreenCommit would have
+    // done: restore the bar, bring back offscreen floating windows, and
+    // restore the window's border. Without this the bar stays hidden on the
+    // source workspace and floating peers remain invisible there indefinitely.
     if (comptime build_options.has_fullscreen) {
         if (fullscreen.workspaceFor(win)) |src_ws| {
+            if (src_ws != target_ws) {
+                fullscreen.cleanupFullscreenForMove(win, src_ws);
+            }
             const info = fullscreen.getForWorkspace(src_ws).?;
             fullscreen.removeForWorkspace(src_ws);
             fullscreen.setForWorkspace(target_ws, info);
@@ -389,7 +412,7 @@ pub fn switchToAll() void {
     const s = getState() orelse return;
 
     if (s.all_view_temp_wins.items.len > 0) {
-        // ── Exit all-workspaces view ─────────────────────────────────────────
+        // Exit all-workspaces view 
         const ptr_cookie = xcb.xcb_query_pointer(core.conn, core.root);
         _ = xcb.xcb_grab_server(core.conn);
 
@@ -402,7 +425,7 @@ pub fn switchToAll() void {
         _ = xcb.xcb_ungrab_server(core.conn);
         _ = xcb.xcb_flush(core.conn);
     } else {
-        // ── Enter all-workspaces view ────────────────────────────────────────
+        // Enter all-workspaces view 
         _ = xcb.xcb_grab_server(core.conn);
 
         for (s.workspaces) |*ws| {

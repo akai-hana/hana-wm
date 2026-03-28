@@ -397,21 +397,20 @@ pub fn drainPendingConfirm() void {
     // between the setFocus call and this drain.
     const input_model = utils.getInputModelCached(core.conn, win);
 
-    const confirm = xcb.xcb_get_input_focus_reply(core.conn, cookie, null);
-    if (confirm) |c| {
+    confirm: {
+        const c = xcb.xcb_get_input_focus_reply(core.conn, cookie, null) orelse break :confirm;
         defer std.c.free(c);
-        if (c.*.focus != win) {
-            _ = xcb.xcb_configure_window(core.conn, win,
-                xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
-            _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
-                win, g_last_event_time);
-            // Re-send WM_TAKE_FOCUS after the raise so locally_active clients
-            // (e.g. Qt) process it in the correct stacking context.
-            // Not sent for passive windows — they have no WM_TAKE_FOCUS handler
-            // and xcb_set_input_focus alone is the correct protocol.
-            if (input_model == .locally_active) {
-                utils.sendWMTakeFocus(core.conn, win, g_last_event_time);
-            }
+        if (c.*.focus == win) break :confirm;
+        _ = xcb.xcb_configure_window(core.conn, win,
+            xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+        _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
+            win, g_last_event_time);
+        // Re-send WM_TAKE_FOCUS after the raise so locally_active clients
+        // (e.g. Qt) process it in the correct stacking context.
+        // Not sent for passive windows — they have no WM_TAKE_FOCUS handler
+        // and xcb_set_input_focus alone is the correct protocol.
+        if (input_model == .locally_active) {
+            utils.sendWMTakeFocus(core.conn, win, g_last_event_time);
         }
     }
 }
@@ -464,7 +463,7 @@ pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
     // If the pending confirm was waiting to see whether focus landed on
     // g_confirm_win, this FocusIn is our answer: it did.  Cancel the reply
     // so drainPendingConfirm does not perform a redundant raise-and-retry.
-    if (g_confirm_win) |cw| { if (cw == win) cancelPendingConfirm(); }
+    if (g_confirm_win) |cw| if (cw == win) cancelPendingConfirm();
 
     const old = g_focused_window;
 
@@ -671,8 +670,8 @@ pub fn drainPointerSync() void {
     const reply = xcb.xcb_query_pointer_reply(core.conn, cookie, null) orelse return;
     defer std.c.free(reply);
     const child = reply.*.child;
-    if (child != 0 and child != core.root and window.isValidManagedWindow(child))
-        setFocus(child, .mouse_enter);
+    if (child == 0 or child == core.root or !window.isValidManagedWindow(child)) return;
+    setFocus(child, .mouse_enter);
 }
 
 fn isWindowMapped(conn: *xcb.xcb_connection_t, win: u32) bool {
