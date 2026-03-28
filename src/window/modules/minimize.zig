@@ -61,7 +61,7 @@ const bar        = if (build_options.has_bar) @import("bar") else struct {
 const constants  = @import("constants");
 const debug      = @import("debug");
 
-// ── Types ────────────────────────────────────────────────────────────────────
+// Types 
 
 /// Per-window minimize record.
 const MinimizedEntry = struct {
@@ -88,7 +88,7 @@ const MinimizedRecord = struct {
     entry: MinimizedEntry,
 };
 
-// ── Module state ─────────────────────────────────────────────────────────────
+// Module state 
 //
 // A fixed buffer replaces the former AutoHashMap(u32, MinimizedEntry).
 // Rationale: the realistic population is 0-10 minimized windows at any time.
@@ -108,7 +108,7 @@ var g_buf:            [MAX_MINIMIZED]MinimizedRecord = std.mem.zeroes([MAX_MINIM
 var g_len:            u8  = 0;
 var g_next_timestamp: u64 = 0;
 
-// ── Lifecycle ─────────────────────────────────────────────────────────────────
+// Lifecycle 
 
 pub fn init() void {
     g_len            = 0;
@@ -122,7 +122,7 @@ pub fn deinit() void {
     g_next_timestamp = 0;
 }
 
-// ── Low-level buffer helpers ──────────────────────────────────────────────────
+// Low-level buffer helpers 
 
 /// Reinterpret a signed screen coordinate as the u32 value XCB expects on its
 /// wire format.  XCB takes geometry arguments as u32 but interprets them as i32
@@ -157,7 +157,7 @@ fn removeFromBuf(win: u32) bool {
     return false;
 }
 
-// ── Public queries ────────────────────────────────────────────────────────────
+// Public queries 
 
 // [#15] `inline` removed — the function contains a loop and force-inlining it
 // at every call site would bloat the binary.  The compiler inlines trivial
@@ -177,7 +177,7 @@ pub fn minimizedSlice() []const MinimizedRecord {
     return g_buf[0..g_len];
 }
 
-// ── Private helpers ───────────────────────────────────────────────────────────
+// Private helpers 
 
 // [#11] Both X and Y are now moved offscreen so no partial window exposure is
 // possible regardless of the window's prior Y coordinate.  The same constant
@@ -217,7 +217,7 @@ pub fn focusMasterOrFirst() void {
     focus.clearFocus();
 }
 
-// ── Minimize ──────────────────────────────────────────────────────────────────
+// Minimize 
 
 /// Undo a partially-completed minimizeWindow call.
 /// Called only on buffer-full failure; restores tiling and fullscreen state so
@@ -310,7 +310,7 @@ pub fn minimizeWindow() void {
     _ = xcb.xcb_flush(core.conn);
 }
 
-// ── Restore helpers ───────────────────────────────────────────────────────────
+// Restore helpers 
 
 /// Restore a window that has already been removed from g_buf.
 ///
@@ -367,7 +367,7 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
     _ = xcb.xcb_flush(core.conn);
 }
 
-// ── Unminimize ────────────────────────────────────────────────────────────────
+// Unminimize 
 
 pub const RestoreOrder = enum { lifo, fifo };
 
@@ -513,7 +513,7 @@ pub fn unminimizeAll() void {
     for (fs_wins) |rec| restoreWindowImpl(rec.win, rec.entry.saved_fs, rec.entry.tiling_index);
 }
 
-// ── Snapshot helpers ──────────────────────────────────────────────────────────
+// Snapshot helpers 
 
 /// Fills `set` with the window ID of every currently minimized window.
 /// Called by bar.zig to build the per-frame BarSnapshot.minimized_set.
@@ -533,7 +533,7 @@ pub fn populateSet(
         set.putAssumeCapacity(rec.win, {});
 }
 
-// ── State maintenance ─────────────────────────────────────────────────────────
+// State maintenance 
 
 /// Called by window.zig on unmap/destroy to keep state coherent.
 pub fn forceUntrack(win: u32) void {

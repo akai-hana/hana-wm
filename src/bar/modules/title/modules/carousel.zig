@@ -62,7 +62,7 @@ const drawing = @import("drawing");
 const core    = @import("core");
 const xcb     = core.xcb;
 
-// ── Hertz detection ──────────────────────────────────────────────────────────
+// Hertz detection 
 //
 // Usage:
 //   carousel.ensureDetected(conn);  // once per draw cycle — no-op after first
@@ -178,7 +178,7 @@ fn hzDetect(conn: *xcb.xcb_connection_t) f64 {
     return DEFAULT_HZ;
 }
 
-// ── Constants ────────────────────────────────────────────────────────────────
+// Constants 
 
 /// Default horizontal scroll speed in pixels per second.
 /// Overridable at runtime via setScrollSpeed().
@@ -187,7 +187,7 @@ pub const DEFAULT_SCROLL_SPEED: f64 = 125.0;
 /// Pixel gap between the end of one text copy and the start of the next.
 pub const CAROUSEL_GAP_PX: u16 = 60;
 
-// ── Public geometry type ─────────────────────────────────────────────────────
+// Public geometry type 
 
 /// All segment geometry passed to carousel functions, replacing the six
 /// positional parameters (x, avail_w, blit_x, blit_w, seg_x, seg_w) that
@@ -205,7 +205,7 @@ pub const SegmentGeometry = struct {
     avail_w: u16,
 };
 
-// ── Internal types ────────────────────────────────────────────────────────────
+// Internal types 
 
 const CarouselBase = struct {
     cp:       drawing.CarouselPixmap,
@@ -241,12 +241,12 @@ const SegEntry = struct {
     last_bg: u32,
 };
 
-// ── Runtime-configurable parameters ──────────────────────────────────────────
+// Runtime-configurable parameters 
 
 var g_scroll_speed:          f64 = DEFAULT_SCROLL_SPEED;
 var g_refresh_rate_override: f64 = 0.0;
 
-// ── Render-thread state ──────────────────────────────────────────────────────
+// Render-thread state 
 //
 // Exclusively owned by the render thread.  The main thread never reads or
 // writes these variables directly; it communicates only via the atomics below.
@@ -255,7 +255,7 @@ var g_carousel:         ?SingleEntry = null;
 var g_seg_carousel:     ?SegEntry    = null;
 var g_carousel_enabled: bool         = true;
 
-// ── Cross-thread atomics ─────────────────────────────────────────────────────
+// Cross-thread atomics 
 //
 // Written by the main thread in notifyFocusChanged; read and cleared by the
 // render thread in blitSegCarousel.  Using atomics here avoids a mutex on the
@@ -275,7 +275,7 @@ var g_seg_invalidated: std.atomic.Value(bool) =
 var g_seg_focus_start_ms: std.atomic.Value(i64) =
     std.atomic.Value(i64).init(0);
 
-// ── Private helpers ───────────────────────────────────────────────────────────
+// Private helpers 
 
 /// Free the single-window carousel pixmap.  Render thread only.
 pub fn deinitSingleCarousel() void {
@@ -287,7 +287,7 @@ pub fn deinitSegCarousel() void {
     if (g_seg_carousel) |*e| { e.base.cp.deinit(); g_seg_carousel = null; }
 }
 
-// ── Public API — feature toggle ───────────────────────────────────────────────
+// Public API — feature toggle 
 
 /// Enable or disable the carousel globally.
 ///
@@ -328,7 +328,7 @@ pub fn getEffectiveRefreshRate() f64 {
     return if (g_refresh_rate_override > 0.0) g_refresh_rate_override else getCached();
 }
 
-// ── Public API — lifecycle ────────────────────────────────────────────────────
+// Public API — lifecycle 
 
 /// True when either a single-window or segmented carousel pixmap is live.
 /// The bar thread polls this to decide whether to schedule carousel ticks.
@@ -352,7 +352,7 @@ pub fn deinitCarousel() void {
     g_seg_invalidated.store(false, .monotonic);
 }
 
-// ── Public API — focus notification ──────────────────────────────────────────
+// Public API — focus notification 
 
 /// Called by the focus system the instant the focused window changes.
 /// MUST be called from the MAIN thread only.
@@ -387,7 +387,7 @@ pub fn notifyFocusChanged(new_window: ?u32) void {
     g_seg_invalidated.store(true, .release);
 }
 
-// ── Public API — hot-path tick ────────────────────────────────────────────────
+// Public API — hot-path tick 
 
 /// Fast per-tick single-window carousel redraw.
 ///
@@ -420,7 +420,7 @@ pub fn drawCarouselTick(
     return true;
 }
 
-// ── Public API — single-window title rendering ────────────────────────────────
+// Public API — single-window title rendering 
 
 /// Render `text` into the segment described by `geom`.
 ///
@@ -500,7 +500,7 @@ pub fn drawOrScrollTitle(
     e.base.cp.blitFrame(dc.drawable, dc.gc, geom.text_x, geom.seg_x, geom.seg_w, offset, e.base.cycle_w);
 }
 
-// ── Public API — split-view segmented carousel ────────────────────────────────
+// Public API — split-view segmented carousel 
 
 /// Render the focused window's title for a split-view segment.
 ///
@@ -581,7 +581,7 @@ pub fn blitSegCarousel(
     return true;
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
+// Internal helpers 
 
 /// Return the current monotonic clock in milliseconds.
 ///

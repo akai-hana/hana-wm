@@ -2,10 +2,11 @@
 //! XCB types come from core.zig via @cImport.
 
 const core = @import("core");
+    const xcb = core.xcb;
 
-const xcb_connection_t = core.xcb.xcb_connection_t;
-const xcb_drawable_t   = core.xcb.xcb_drawable_t;
-const xcb_visualtype_t = core.xcb.xcb_visualtype_t;
+const xcb_connection_t = xcb.xcb_connection_t;
+const xcb_drawable_t   = xcb.xcb_drawable_t;
+const xcb_visualtype_t = xcb.xcb_visualtype_t;
 
 // Cairo 
 

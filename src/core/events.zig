@@ -67,8 +67,8 @@ const MAX_KEYBIND_COOKIES = 512;
 const LOCK_MODIFIERS = [_]u16{
     0,
     core.MOD_CAPSLOCK,
-    core.MOD_NUM_LOCK,
-    core.MOD_CAPSLOCK | core.MOD_NUM_LOCK,
+    core.MOD_NUMLOCK,
+    core.MOD_CAPSLOCK | core.MOD_NUMLOCK,
 };
 
 // Self-pipe for portable signal delivery.
@@ -175,10 +175,9 @@ pub fn setupSignalPipe() !void {
 /// Closes both ends of the signal pipe.
 pub fn deinitSignalPipe() void {
     for (&signal_pipe) |*fd| {
-        if (fd.* != -1) {
-            _ = std.os.linux.close(fd.*);
-            fd.* = -1;
-        }
+        if (fd.* == -1) continue;
+        _ = std.os.linux.close(fd.*);
+        fd.* = -1;
     }
 }
 

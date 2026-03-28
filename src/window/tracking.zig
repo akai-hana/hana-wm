@@ -187,15 +187,14 @@ pub fn removeWindow(win: u32) void {
 /// registerWindow must be called before any mask update.
 pub fn setWindowMask(win: u32, mask: u64) void {
     std.debug.assert(mask != 0);
-    if (g_map) |*m| {
-        if (m.getPtr(win)) |p| {
-            p.* = mask;
-        } else {
-            // setWindowMask called on an unregistered (or already-removed) window.
-            // This is always a caller bug: registerWindow must precede any mask update.
-            std.debug.assert(false);
-        }
-    }
+    const m = &(g_map orelse return);
+    const p = m.getPtr(win) orelse {
+        // setWindowMask called on an unregistered (or already-removed) window.
+        // This is always a caller bug: registerWindow must precede any mask update.
+        std.debug.assert(false);
+        return;
+    };
+    p.* = mask;
 }
 
 // Query predicates
