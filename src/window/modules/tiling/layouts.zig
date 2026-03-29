@@ -291,12 +291,10 @@ pub fn configureSafe(
     // When a border-color provider is available, update the border in the same
     // scan rather than in a separate updateBorders pass. This halves the number
     // of linear searches over the CacheMap per window per retile.
-    if (ctx.get_border_color) |f| {
-        const color = f(win);
-        if (!gop.found_existing or gop.value_ptr.border != color) {
-            gop.value_ptr.border = color;
-            _ = xcb.xcb_change_window_attributes(ctx.conn, win,
-                xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
-        }
-    }
+    const getBorderColor = ctx.get_border_color orelse return;
+    const color = getBorderColor(win);
+    if (gop.found_existing and gop.value_ptr.border == color) return;
+    gop.value_ptr.border = color;
+    _ = xcb.xcb_change_window_attributes(ctx.conn, win,
+        xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
 }

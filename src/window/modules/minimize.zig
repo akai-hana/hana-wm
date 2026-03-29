@@ -206,12 +206,12 @@ inline fn hideWindow(win: u32) void {
 // public contract.  External callers should use focus.focusBestAvailable()
 // directly.
 pub fn focusMasterOrFirst() void {
-    if (comptime build_options.has_workspaces) {
-        if (wsGetCurrentWorkspaceObject()) |ws| {
-            if (tracking.firstNonMinimized(ws.windows.items())) |win| {
-                focus.setFocus(win, .tiling_operation);
-                return;
-            }
+    found: {
+        if (comptime build_options.has_workspaces) {
+            const ws  = wsGetCurrentWorkspaceObject() orelse break :found;
+            const win = tracking.firstNonMinimized(ws.windows.items()) orelse break :found;
+            focus.setFocus(win, .tiling_operation);
+            return;
         }
     }
     focus.clearFocus();
@@ -254,12 +254,11 @@ pub fn minimizeWindow() void {
     // Tear down fullscreen state if needed, saving geometry for later restore.
     var saved_fs: ?core.WindowGeometry = null;
     var fs_ws_for_rollback: ?u8 = null;
-    if (comptime build_options.has_fullscreen) {
-        if (fullscreen.workspaceFor(win)) |fs_ws| {
-            saved_fs = fullscreen.getForWorkspace(fs_ws).?.saved_geometry;
-            fs_ws_for_rollback = fs_ws;
-            fullscreen.removeForWorkspace(fs_ws);
-        }
+    if (comptime build_options.has_fullscreen) fs_blk: {
+        const fs_ws = fullscreen.workspaceFor(win) orelse break :fs_blk;
+        saved_fs = fullscreen.getForWorkspace(fs_ws).?.saved_geometry;
+        fs_ws_for_rollback = fs_ws;
+        fullscreen.removeForWorkspace(fs_ws);
     }
     const tiling_index = tiling.getWindowFilteredIndex(win);
 

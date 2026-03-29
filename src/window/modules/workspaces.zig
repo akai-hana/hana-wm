@@ -237,15 +237,13 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
     // fullscreen side-effects on the source workspace (bar, floating windows,
     // border) and transfer the record to target_ws so the window is still
     // fullscreen when you switch there.
-    if (comptime build_options.has_fullscreen) {
-        if (fullscreen.workspaceFor(win)) |src_ws| {
-            if (src_ws == s.current) {
-                const info = fullscreen.getForWorkspace(src_ws).?;
-                fullscreen.cleanupFullscreenForMove(win, src_ws);
-                fullscreen.removeForWorkspace(src_ws);
-                fullscreen.setForWorkspace(target_ws, info);
-            }
-        }
+    if (comptime build_options.has_fullscreen) fs_blk: {
+        const src_ws = fullscreen.workspaceFor(win) orelse break :fs_blk;
+        if (src_ws != s.current) break :fs_blk;
+        const info = fullscreen.getForWorkspace(src_ws).?;
+        fullscreen.cleanupFullscreenForMove(win, src_ws);
+        fullscreen.removeForWorkspace(src_ws);
+        fullscreen.setForWorkspace(target_ws, info);
     }
 
     evictWindow(win);
@@ -295,15 +293,12 @@ pub fn moveWindowExclusive(win: u32, target_ws: u8) void {
     // done: restore the bar, bring back offscreen floating windows, and
     // restore the window's border. Without this the bar stays hidden on the
     // source workspace and floating peers remain invisible there indefinitely.
-    if (comptime build_options.has_fullscreen) {
-        if (fullscreen.workspaceFor(win)) |src_ws| {
-            if (src_ws != target_ws) {
-                fullscreen.cleanupFullscreenForMove(win, src_ws);
-            }
-            const info = fullscreen.getForWorkspace(src_ws).?;
-            fullscreen.removeForWorkspace(src_ws);
-            fullscreen.setForWorkspace(target_ws, info);
-        }
+    if (comptime build_options.has_fullscreen) fs_blk: {
+        const src_ws = fullscreen.workspaceFor(win) orelse break :fs_blk;
+        if (src_ws != target_ws) fullscreen.cleanupFullscreenForMove(win, src_ws);
+        const info = fullscreen.getForWorkspace(src_ws).?;
+        fullscreen.removeForWorkspace(src_ws);
+        fullscreen.setForWorkspace(target_ws, info);
     }
 
     setWindowMask(s, win, workspaceBit(target_ws));
@@ -659,12 +654,9 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
         if ((!has_tiling or !tiling.isWindowActiveTiled(win)) and !isMinimized(win) and
             !tracking.isWindowOnWorkspace(win, old_ws))
         {
-            var restored = false;
             if (window.getWindowGeom(win)) |rect| {
                 utils.configureWindow(core.conn, win, rect);
-                restored = true;
-            }
-            if (!restored) {
+            } else {
                 _ = xcb.xcb_configure_window(core.conn, win,
                     xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
                     &[_]u32{ pos.x, pos.y });
