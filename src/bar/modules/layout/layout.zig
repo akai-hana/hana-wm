@@ -20,11 +20,11 @@ pub fn getIcon(layout: anytype) []const u8 {
 }
 
 pub fn draw(dc: *drawing.DrawContext, config: core.BarConfig, height: u16, start_x: u16) !u16 {
-    if (comptime build_options.has_tiling) {
-        const t_state = tiling.getStateOpt() orelse return start_x;
-        const icon    = getIcon(t_state.layout);
-        return dc.drawSegment(start_x, height, icon, config.scaledSegmentPadding(height), config.bg, config.fg);
-    }
     // Without tiling all windows are floating by definition.
-    return dc.drawSegment(start_x, height, "><>", config.scaledSegmentPadding(height), config.bg, config.fg);
+    if (comptime !build_options.has_tiling)
+        return dc.drawSegment(start_x, height, "><>", config.scaledSegmentPadding(height), config.bg, config.fg);
+
+    const t_state = tiling.getStateOpt() orelse return start_x;
+    const icon    = getIcon(t_state.layout);
+    return dc.drawSegment(start_x, height, icon, config.scaledSegmentPadding(height), config.bg, config.fg);
 }

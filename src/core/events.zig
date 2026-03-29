@@ -312,7 +312,7 @@ pub fn run() !void {
             bar.checkClockUpdate();
             if (cursor_is_blinking) {
                 prompt.blinkTick();
-                bar.submitDraw(false);
+                bar.submitDraw();
             }
             continue;
         }

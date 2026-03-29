@@ -3,7 +3,7 @@
 //! A dedicated bar thread owns the DrawContext and all rendering. The main thread
 //! captures a lightweight BarSnapshot and posts it to a BarChannel; the bar thread
 //! wakes, draws, and loops. Draws that must complete before the caller returns (e.g.
-//! inside xcb_grab_server) use redrawInsideGrab(), which blocks until done.
+//! inside xcb_grab_server) use submitDrawBlocking(), which blocks until done.
 //!
 //! Clock-only updates bypass the snapshot path: the bar thread redraws just the
 //! clock segment using its cached x-position.
@@ -14,35 +14,34 @@
 //!   not crash; the next frame will retry).
 //! - Allocation errors during snapshot capture are propagated to submitDraw, which
 //!   logs them and skips the frame.
-//! - Cache-update failures leave the cache stale, never empty (see updateTitleCache).
+//! - Cache-update failures leave the cache stale, never empty (see syncTitleCache).
 const std        = @import("std");
 const core       = @import("core");
 const xcb        = core.xcb;
 const debug      = @import("debug");
 const windowTest = @import("window");
 
-
 const build_options = @import("build_options");
+
+// ─── Low-level threading primitives ──────────────────────────────────────────
 
 /// Blocking mutex backed by pthread_mutex_t; `.{}` is safe (= PTHREAD_MUTEX_INITIALIZER).
 const Mutex = struct {
     inner: std.c.pthread_mutex_t = .{},
-    pub fn lock(m: *Mutex) void {
-        _ = std.c.pthread_mutex_lock(&m.inner);
-    }
-    pub fn unlock(m: *Mutex) void {
-        _ = std.c.pthread_mutex_unlock(&m.inner);
-    }
+    pub fn lock(m: *Mutex) void   { _ = std.c.pthread_mutex_lock(&m.inner); }
+    pub fn unlock(m: *Mutex) void { _ = std.c.pthread_mutex_unlock(&m.inner); }
 };
 
 /// Condition variable backed by pthread_cond_t; `.{}` is safe (= PTHREAD_COND_INITIALIZER).
 const Condition = struct {
     inner: std.c.pthread_cond_t = .{},
+
     pub fn wait(c: *Condition, m: *Mutex) void {
         _ = std.c.pthread_cond_wait(&c.inner, &m.inner);
     }
 
-    /// Waits up to `timeout_ns` ns; returns error.Timeout on expiry (CLOCK_REALTIME absolute deadline).
+    /// Waits up to `timeout_ns` nanoseconds; returns error.Timeout on expiry
+    /// (CLOCK_REALTIME absolute deadline).
     pub fn timedWait(c: *Condition, m: *Mutex, timeout_ns: u64) error{Timeout}!void {
         var ts: std.os.linux.timespec = undefined;
         _ = std.os.linux.clock_gettime(.REALTIME, &ts);
@@ -57,7 +56,11 @@ const Condition = struct {
     pub fn broadcast(c: *Condition) void { _ = std.c.pthread_cond_broadcast(&c.inner); }
 };
 
+// ─── Public API types ─────────────────────────────────────────────────────────
+
 pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
+
+// ─── Optional segment imports ─────────────────────────────────────────────────
 
 const drawing    = @import("drawing");
 const tiling     = if (build_options.has_tiling) @import("tiling") else struct {};
@@ -65,9 +68,17 @@ const drag       = @import("drag");
 const utils      = @import("utils");
 const tracking   = @import("tracking");
 const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
-const WsState    = if (build_options.has_workspaces) workspaces.State else struct {};
-fn wsGetState() ?*WsState              { return if (comptime build_options.has_workspaces) workspaces.getState() else null; }
-inline fn wsSwitchTo(ws_arg: u8) void  { if (comptime build_options.has_workspaces) workspaces.switchTo(ws_arg); }
+
+const WorkspaceState = if (build_options.has_workspaces) workspaces.State else struct {};
+
+fn getWorkspaceState() ?*WorkspaceState {
+    return if (comptime build_options.has_workspaces) workspaces.getState() else null;
+}
+
+inline fn switchToWorkspace(ws_arg: u8) void {
+    if (comptime build_options.has_workspaces) workspaces.switchTo(ws_arg);
+}
+
 const focus      = @import("focus");
 const constants  = @import("constants");
 const minimize   = if (build_options.has_minimize) @import("minimize") else struct {};
@@ -79,23 +90,25 @@ const scale      = if (build_options.has_scale) @import("scale") else struct {
     }
 };
 
-const workspaces_segment = if (build_options.has_tags) @import("tags") else struct {
+/// When workspaces are disabled, all workspace-segment calls are no-ops.
+const DisabledSegment = struct {
+    pub fn draw(_: *drawing.DrawContext, _: core.BarConfig, _: u16, x: u16) !u16 { return x; }
+};
+
+const workspacesSegment = if (build_options.has_tags) @import("tags") else struct {
     pub fn draw(_: *drawing.DrawContext, _: core.BarConfig, _: u16, x: u16, _: u8, _: []const bool, _: bool) !u16 { return x; }
     pub fn invalidate() void {}
     pub fn getCachedWorkspaceWidth() u16 { return 0; }
 };
 
-const drawStub = struct {
-    pub fn draw(_: *drawing.DrawContext, _: core.BarConfig, _: u16, x: u16) !u16 { return x; }
-};
-const layout_segment   = if (build_options.has_layout)   @import("layout")   else drawStub;
-const variants_segment = if (build_options.has_variants) @import("variants") else drawStub;
+const layoutSegment   = if (build_options.has_layout)   @import("layout")   else DisabledSegment;
+const variantsSegment = if (build_options.has_variants) @import("variants") else DisabledSegment;
 
 const prompt     = @import("prompt");
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const carousel   = @import("carousel");
 
-const title_segment = if (build_options.has_title) @import("title") else struct {
+const titleSegment = if (build_options.has_title) @import("title") else struct {
     pub fn draw(
         _: *drawing.DrawContext, _: core.BarConfig, _: u16,
         x: u16, w: u16,
@@ -106,7 +119,7 @@ const title_segment = if (build_options.has_title) @import("title") else struct 
     ) !u16 { return x + w; }
 };
 
-const clock_segment = if (build_options.has_clock) @import("clock") else struct {
+const clockSegment = if (build_options.has_clock) @import("clock") else struct {
     pub const SAMPLE_STRING: []const u8 = "";
     pub fn draw(_: *drawing.DrawContext, _: core.BarConfig, _: u16, x: u16) !u16 { return x; }
     pub fn setTimerFd(_: i32) void {}
@@ -114,89 +127,106 @@ const clock_segment = if (build_options.has_clock) @import("clock") else struct 
     pub fn pollTimeoutMs() i32 { return -1; }
 };
 
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-const MIN_BAR_HEIGHT:            u32 = 20;
-const MAX_BAR_HEIGHT:            u32 = 200;
-const DEFAULT_BAR_HEIGHT:        u16 = 24;
-const FALLBACK_WORKSPACES_WIDTH: u16 = 270;
-const LAYOUT_SEGMENT_WIDTH:      u16 = 60;
-const TITLE_SEGMENT_MIN_WIDTH:   u16 = 100;
+const minBarHeight:            u32 = 20;
+const maxBarHeight:            u32 = 200;
+const defaultBarHeight:        u16 = 24;
+const fallbackWorkspacesWidth: u16 = 270;
+const layoutSegmentWidth:      u16 = 60;
+const titleSegmentMinWidth:    u16 = 100;
+
+/// Carousel frame interval — 165 Hz (1_000_000_000 / 165 ≈ 6_060_606 ns).
+const carouselWakeNs: u64 = 6_060_606;
+
+// ─── Core data structures ─────────────────────────────────────────────────────
 
 /// Point-in-time bar state captured by the main thread and consumed by the bar thread.
-/// Variable-length fields use ArrayListUnmanaged; buffers grow only when needed and are
-/// reused across frames.
+///
+/// Variable-length fields use ArrayListUnmanaged; buffers grow only when needed
+/// and are reused across frames to minimise allocator pressure.
 const BarSnapshot = struct {
-    focused_window:    ?u32                          = null,
-    focused_title:     std.ArrayListUnmanaged(u8)    = .empty,
-    current_ws_wins:   std.ArrayListUnmanaged(u32)   = .empty,
-    minimized_set:     std.AutoHashMapUnmanaged(u32, void)  = .{},
-    ws_has_windows:    std.ArrayListUnmanaged(bool)  = .empty,
-    ws_current:        u8                            = 0,
-    ws_count:          u32                           = 0,
-    ws_all_active:     bool                          = false,
-    title_invalidated: bool                          = false,
-    dirty_all:   bool = true,  // ws_count changed or full-redraw forced
-    dirty_ws:    bool = true,  // workspace state changed
-    dirty_title: bool = true,  // title / focus / minimized state changed
+    focused_window:           ?u32                                = null,
+    focused_title:            std.ArrayListUnmanaged(u8)          = .empty,
+    current_workspace_windows: std.ArrayListUnmanaged(u32)        = .empty,
+    minimized_windows:        std.AutoHashMapUnmanaged(u32, void) = .{},
+    workspace_has_windows:    std.ArrayListUnmanaged(bool)        = .empty,
+    current_workspace:        u8                                  = 0,
+    workspace_count:          u32                                 = 0,
+    is_all_view_active:       bool                                = false,
+    is_title_invalidated:     bool                                = false,
+    is_full_redraw:    bool = true,  // workspace_count changed or full-redraw forced
+    is_workspace_dirty: bool = true, // workspace state changed
+    is_title_dirty:    bool = true,  // title / focus / minimised state changed
+
     fn deinit(snap: *BarSnapshot, allocator: std.mem.Allocator) void {
         snap.focused_title.deinit(allocator);
-        snap.current_ws_wins.deinit(allocator);
-        snap.minimized_set.deinit(allocator);
-        snap.ws_has_windows.deinit(allocator);
+        snap.current_workspace_windows.deinit(allocator);
+        snap.minimized_windows.deinit(allocator);
+        snap.workspace_has_windows.deinit(allocator);
     }
 };
 
-/// Explicit work-item model for the bar render thread.  All fields are read/written
-/// under BarChannel.mutex.  `kind` encodes the primary action (mutually exclusive
-/// states); `clock` is additive and may accompany any non-snap primary action.
+/// Explicit work-item model for the bar render thread.
+///
+/// All fields are read/written under BarChannel.mutex. `kind` encodes the
+/// primary action (mutually exclusive states); `has_clock_tick` is additive
+/// and may accompany any non-snap primary action.
 const BarWork = struct {
-    kind:      Kind  = .idle,
-    focus_win: ?u32  = null,  // valid only when kind == .focus_only
-    clock:     bool  = false, // additive clock tick; ignored when kind == .snap_ready
+    kind:          Kind = .idle,
+    focused_window: ?u32 = null,  // valid only when kind == .focusOnly
+    has_clock_tick: bool = false, // additive clock tick; ignored when kind == .snapReady
 
-    const Kind = enum { idle, snap_ready, focus_only, quit };
+    const Kind = enum { idle, snapReady, focusOnly, quit };
 
     /// True when there is at least one unit of work pending.
     fn hasPending(w: BarWork) bool {
-        return w.kind != .idle or w.clock;
+        return w.kind != .idle or w.has_clock_tick;
     }
 };
 
 /// Double-buffered lock channel between main thread (producer) and bar thread (consumer).
-/// Main writes into slots[write_idx] then flips write_idx under mutex;
-/// bar reads from slots[1 - write_idx].
+///
+/// Main writes into slots[write_index] then flips write_index under mutex;
+/// the bar thread reads from slots[1 - write_index].
 const BarChannel = struct {
     mutex:     Mutex     = .{},
-    work_cond: Condition = .{},
-    done_cond: Condition = .{},
-    slots:     [2]BarSnapshot = .{ .{}, .{} },
-    write_idx: u1             = 0,
-    work:      BarWork        = .{},
-    draw_gen:  u64            = 0,
+    work_ready: Condition = .{},
+    draw_done:  Condition = .{},
+    slots:      [2]BarSnapshot = .{ .{}, .{} },
+    write_index: u1  = 0,
+    work:        BarWork = .{},
+    draw_generation: u64  = 0,
     /// Forces a full bar redraw on the next submitDraw (expose, reload, position toggle, show).
-    force_dirty_all: bool = false,
+    pending_force_full_redraw: bool = false,
 };
 
-/// Owns all live bar state; a single var replaces the previous four module-level globals.
+/// All atoms needed to declare the bar window as a dock to the compositor.
+const BarAtoms = struct {
+    strut_partial:    xcb.xcb_atom_t = 0,
+    window_type:      xcb.xcb_atom_t = 0,
+    window_type_dock: xcb.xcb_atom_t = 0,
+    wm_state:         xcb.xcb_atom_t = 0,
+    state_above:      xcb.xcb_atom_t = 0,
+    state_sticky:     xcb.xcb_atom_t = 0,
+    allowed_actions:  xcb.xcb_atom_t = 0,
+    action_close:     xcb.xcb_atom_t = 0,
+    action_above:     xcb.xcb_atom_t = 0,
+    action_stick:     xcb.xcb_atom_t = 0,
+};
+
+/// Owns all live bar state. A single global instance replaces the previous four
+/// module-level globals.
 const Bar = struct {
-    channel: BarChannel  = .{},
+    channel: BarChannel = .{},
     thread:  ?std.Thread = null,
-    state:   ?*State     = null,
-    atoms: struct {
-        strut_partial:    xcb.xcb_atom_t = 0,
-        window_type:      xcb.xcb_atom_t = 0,
-        window_type_dock: xcb.xcb_atom_t = 0,
-        wm_state:         xcb.xcb_atom_t = 0,
-        state_above:      xcb.xcb_atom_t = 0,
-        state_sticky:     xcb.xcb_atom_t = 0,
-        allowed_actions:  xcb.xcb_atom_t = 0,
-        action_close:     xcb.xcb_atom_t = 0,
-        action_above:     xcb.xcb_atom_t = 0,
-        action_stick:     xcb.xcb_atom_t = 0,
-    } = .{},
+    state:   ?*State    = null,
+    atoms:   BarAtoms   = .{},
 };
 
-var g_bar: Bar = .{};
+var gBar: Bar = .{};
+
+// ─── Sub-state types ──────────────────────────────────────────────────────────
 
 /// X11 connection and window handle; stable for the bar's lifetime.
 const WindowCtx = struct {
@@ -223,42 +253,45 @@ const RenderCtx = struct {
     allocator: std.mem.Allocator,
 };
 
-/// Per-draw layout geometry; invalidated when ws_count changes or the clock position resets.
+/// Per-draw layout geometry; invalidated when workspace_count changes or the
+/// clock position is reset.
 const LayoutCache = struct {
-    clock_width:          u16  = 0,
-    clock_x:              ?u16 = null,
-    workspace_x:          u16  = 0,
-    right_total:          u16  = 0,
-    right_total_ws_count: u32  = std.math.maxInt(u32),
+    clock_width:           u16  = 0,
+    clock_x:               ?u16 = null,
+    workspace_x:           u16  = 0,
+    right_section_width:   u16  = 0,
+    cached_workspace_count: u32 = std.math.maxInt(u32),
 };
 
 /// Focus/title/workspace rendering cache; updated after each full draw.
 const TitleCache = struct {
-    title:          std.ArrayList(u8)                   = std.ArrayList(u8).empty,
-    title_window:   ?u32                                = null,
-    focused_window: ?u32                                = null,
-    ws_wins:        std.ArrayListUnmanaged(u32)         = .empty,
-    minimized_set:  std.AutoHashMapUnmanaged(u32, void) = .{},
-    title_x:        u16  = 0,
-    title_w:        u16  = 0,
-    layout_valid:   bool = false,
-    invalidated:    bool = false,
+    title:              std.ArrayList(u8)                   = std.ArrayList(u8).empty,
+    title_window:       ?u32                                = null,
+    focused_window:     ?u32                                = null,
+    workspace_windows:  std.ArrayListUnmanaged(u32)         = .empty,
+    minimized_windows:  std.AutoHashMapUnmanaged(u32, void) = .{},
+    title_x:            u16  = 0,
+    title_width:        u16  = 0,
+    is_layout_valid:    bool = false,
+    is_invalidated:     bool = false,
 
     fn deinit(self: *TitleCache, allocator: std.mem.Allocator) void {
         self.title.deinit(allocator);
-        self.ws_wins.deinit(allocator);
-        self.minimized_set.deinit(allocator);
+        self.workspace_windows.deinit(allocator);
+        self.minimized_windows.deinit(allocator);
     }
 };
 
+// ─── State ────────────────────────────────────────────────────────────────────
+
 const State = struct {
-    win:    WindowCtx,
-    render: RenderCtx,
-    layout: LayoutCache = .{},
-    title:  TitleCache  = .{},
-    visible:           bool = true,
-    global_visible:    bool = true,
-    dirty:             bool = false,
+    win:               WindowCtx,
+    render:            RenderCtx,
+    layout_cache:      LayoutCache = .{},
+    title_cache:       TitleCache  = .{},
+    is_visible:        bool = true,
+    is_globally_visible: bool = true,
+    is_dirty:          bool = false,
     has_clock_segment: bool,
 
     fn init(
@@ -286,8 +319,8 @@ const State = struct {
                 .height    = height,
                 .allocator = allocator,
             },
-            .layout = .{
-                .clock_width = dc.textWidth(clock_segment.SAMPLE_STRING) + 2 * config.scaledSegmentPadding(height),
+            .layout_cache = .{
+                .clock_width = dc.measureTextWidth(clockSegment.SAMPLE_STRING) + 2 * config.scaledSegmentPadding(height),
             },
             .has_clock_segment = blk: {
                 if (comptime !build_options.has_clock) break :blk false;
@@ -297,56 +330,62 @@ const State = struct {
                 break :blk false;
             },
         };
-        try s.title.title.ensureTotalCapacity(allocator, 256);
-        workspaces_segment.invalidate();
+        try s.title_cache.title.ensureTotalCapacity(allocator, 256);
+        workspacesSegment.invalidate();
         return s;
     }
 
     fn deinit(self: *State) void {
         self.win.deinit();
-        self.title.deinit(self.render.allocator);
+        self.title_cache.deinit(self.render.allocator);
         self.render.allocator.destroy(self);
     }
 
-    fn setDirty(self: *State) void { self.dirty = true; }
-    fn invalidateLayout(self: *State) void { self.dirty = true; self.layout.clock_x = null; }
+    fn markDirty(self: *State) void { self.is_dirty = true; }
 
-    fn calculateSegmentWidth(self: *State, snap: *const BarSnapshot, segment: core.BarSegment) u16 {
+    fn invalidateLayoutCache(self: *State) void {
+        self.is_dirty             = true;
+        self.layout_cache.clock_x = null;
+    }
+
+    fn measureSegmentWidth(self: *State, snap: *const BarSnapshot, segment: core.BarSegment) u16 {
         return switch (segment) {
-            .workspaces => if (snap.ws_count > 0)
-                @intCast(snap.ws_count * workspaces_segment.getCachedWorkspaceWidth())
+            .workspaces => if (snap.workspace_count > 0)
+                @intCast(snap.workspace_count * workspacesSegment.getCachedWorkspaceWidth())
             else
-                FALLBACK_WORKSPACES_WIDTH,
-            .layout, .variants => LAYOUT_SEGMENT_WIDTH,
-            .title             => TITLE_SEGMENT_MIN_WIDTH,
-            .clock             => self.layout.clock_width,
+                fallbackWorkspacesWidth,
+            .layout, .variants => layoutSegmentWidth,
+            .title             => titleSegmentMinWidth,
+            .clock             => self.layout_cache.clock_width,
         };
     }
 
     fn drawSegment(self: *State, snap: *const BarSnapshot, segment: core.BarSegment, x: u16, width: ?u16) !u16 {
-        if (segment == .workspaces) self.layout.workspace_x = x;
+        if (segment == .workspaces) self.layout_cache.workspace_x = x;
         return switch (segment) {
-            .workspaces => try workspaces_segment.draw(
+            .workspaces => try workspacesSegment.draw(
                 self.render.dc, self.render.config, self.render.height, x,
-                snap.ws_current, snap.ws_has_windows.items, snap.ws_all_active),
-            .layout   => try layout_segment.draw(self.render.dc, self.render.config, self.render.height, x),
-            .variants => try variants_segment.draw(self.render.dc, self.render.config, self.render.height, x),
+                snap.current_workspace, snap.workspace_has_windows.items, snap.is_all_view_active),
+            .layout   => try layoutSegment.draw(self.render.dc, self.render.config, self.render.height, x),
+            .variants => try variantsSegment.draw(self.render.dc, self.render.config, self.render.height, x),
             .title    => try prompt.draw(
                 self.render.dc, self.render.config, self.render.height, x, width orelse 100,
                 self.win.conn, snap.focused_window,
                 snap.focused_title.items,
-                snap.current_ws_wins.items, &snap.minimized_set,
-                &self.title.title, &self.title.title_window,
-                snap.title_invalidated, self.render.allocator),
-            .clock    => try clock_segment.draw(self.render.dc, self.render.config, self.render.height, x),
+                snap.current_workspace_windows.items, &snap.minimized_windows,
+                &self.title_cache.title, &self.title_cache.title_window,
+                snap.is_title_invalidated, self.render.allocator),
+            .clock    => try clockSegment.draw(self.render.dc, self.render.config, self.render.height, x),
         };
     }
 
-    inline fn segmentSkip(snap: *const BarSnapshot, seg: core.BarSegment) bool {
-        if (snap.dirty_all) return false;
+    /// Returns true when `seg` should be skipped because its data has not changed
+    /// since the last frame and a full redraw is not required.
+    inline fn shouldSkipSegment(snap: *const BarSnapshot, seg: core.BarSegment) bool {
+        if (snap.is_full_redraw) return false;
         return switch (seg) {
-            .workspaces => !snap.dirty_ws,
-            .title      => !snap.dirty_title,
+            .workspaces => !snap.is_workspace_dirty,
+            .title      => !snap.is_title_dirty,
             else        => false,
         };
     }
@@ -361,230 +400,251 @@ const State = struct {
         var i = segments.len;
         while (i > 0) {
             i -= 1;
-            right_x -= self.calculateSegmentWidth(snap, segments[i]);
-            if (segments[i] == .clock) self.layout.clock_x = right_x;
+            right_x -= self.measureSegmentWidth(snap, segments[i]);
+            if (segments[i] == .clock) self.layout_cache.clock_x = right_x;
             const drew_to = try self.drawSegment(snap, segments[i], right_x, null);
-            const drew = drew_to != right_x;
+            const drew    = drew_to != right_x;
+
             if (drew and pending_gap) {
-                // Both neighbours are non-empty: paint the gap between them.
-                // It sits immediately to the right of this segment's allocated width.
-                const gap_x = right_x + self.calculateSegmentWidth(snap, segments[i]);
-                self.render.dc.createRectangle(gap_x, 0, scaled_spacing, self.render.height, self.render.config.bg);
+                const gap_x = right_x + self.measureSegmentWidth(snap, segments[i]);
+                self.render.dc.fillRect(gap_x, 0, scaled_spacing, self.render.height, self.render.config.bg);
                 right_x -= scaled_spacing;
             } else if (drew and !pending_gap and i < segments.len - 1) {
-                // We drew but the right neighbour was empty: subtract spacing so
-                // the next segment is spaced from us correctly.
                 right_x -= scaled_spacing;
-                self.render.dc.createRectangle(right_x, 0, scaled_spacing, self.render.height, self.render.config.bg);
+                self.render.dc.fillRect(right_x, 0, scaled_spacing, self.render.height, self.render.config.bg);
             }
             pending_gap = drew;
         }
     }
 
     fn drawAll(self: *State, snap: *const BarSnapshot) !void {
-        if (snap.title_invalidated) self.title.title_window = null;
-        if (snap.dirty_all) self.render.dc.createRectangle(0, 0, self.render.width, self.render.height, self.render.config.bg);
+        if (snap.is_title_invalidated) self.title_cache.title_window = null;
+        if (snap.is_full_redraw) self.render.dc.fillRect(0, 0, self.render.width, self.render.height, self.render.config.bg);
+
         const scaled_spacing = self.render.config.scaledSpacing(self.render.height);
-        // Recompute right_total only when ws_count changes.
-        if (snap.ws_count != self.layout.right_total_ws_count) {
+
+        // Recompute right_section_width only when workspace_count changes.
+        if (snap.workspace_count != self.layout_cache.cached_workspace_count) {
             var right_total: u16 = 0;
             for (self.render.config.layout.items) |layout| {
                 if (layout.position != .right) continue;
-                for (layout.segments.items) |seg| right_total += self.calculateSegmentWidth(snap, seg) + scaled_spacing;
+                for (layout.segments.items) |seg| right_total += self.measureSegmentWidth(snap, seg) + scaled_spacing;
                 if (layout.segments.items.len > 0) right_total -= scaled_spacing;
             }
-            self.layout.right_total          = right_total;
-            self.layout.right_total_ws_count = snap.ws_count;
+            self.layout_cache.right_section_width    = right_total;
+            self.layout_cache.cached_workspace_count = snap.workspace_count;
         }
-        const right_total = self.layout.right_total;
+
+        const right_total = self.layout_cache.right_section_width;
         var title_seg_x: u16 = 0;
         var title_seg_w: u16 = 0;
         var x: u16 = 0;
+
         for (self.render.config.layout.items) |layout| {
             switch (layout.position) {
                 .left => for (layout.segments.items) |seg| {
-                    const seg_w = self.calculateSegmentWidth(snap, seg);
+                    const seg_w = self.measureSegmentWidth(snap, seg);
                     if (seg == .title) { title_seg_x = x; title_seg_w = seg_w; }
-                    if (segmentSkip(snap, seg)) {
+                    if (shouldSkipSegment(snap, seg)) {
                         x += seg_w + scaled_spacing;
-                    } else {
-                        const x_before = x;
-                        x = try self.drawSegment(snap, seg, x, null);
-                        if (x != x_before) {
-                            self.render.dc.createRectangle(x, 0, scaled_spacing, self.render.height, self.render.config.bg);
-                            x += scaled_spacing;
-                        }
+                        continue;
+                    }
+                    const x_before = x;
+                    x = try self.drawSegment(snap, seg, x, null);
+                    if (x != x_before) {
+                        self.render.dc.fillRect(x, 0, scaled_spacing, self.render.height, self.render.config.bg);
+                        x += scaled_spacing;
                     }
                 },
                 .center => {
                     const remaining = @max(100, self.render.width -| x -| right_total -| scaled_spacing);
                     for (layout.segments.items) |seg| {
-                        const w = if (seg == .title) remaining else self.calculateSegmentWidth(snap, seg);
+                        const w = if (seg == .title) remaining else self.measureSegmentWidth(snap, seg);
                         if (seg == .title) { title_seg_x = x; title_seg_w = w; }
-                        if (segmentSkip(snap, seg)) {
+                        if (shouldSkipSegment(snap, seg)) {
                             x += w;
                             if (seg != .title) x += scaled_spacing;
-                        } else {
-                            const x_before = x;
-                            x = try self.drawSegment(snap, seg, x, w);
-                            if (seg != .title and x != x_before) {
-                                self.render.dc.createRectangle(x, 0, scaled_spacing, self.render.height, self.render.config.bg);
-                                x += scaled_spacing;
-                            }
+                            continue;
+                        }
+                        const x_before = x;
+                        x = try self.drawSegment(snap, seg, x, w);
+                        if (seg != .title and x != x_before) {
+                            self.render.dc.fillRect(x, 0, scaled_spacing, self.render.height, self.render.config.bg);
+                            x += scaled_spacing;
                         }
                     }
                 },
                 .right => try self.drawRightSegments(snap, layout.segments.items),
             }
         }
+
         self.render.dc.flush();
-        if (title_seg_w > 0) self.updateTitleCache(snap, title_seg_x, title_seg_w);
+        if (title_seg_w > 0) self.syncTitleCache(snap, title_seg_x, title_seg_w);
     }
 
     fn drawClockOnly(self: *State) void {
-        const clock_x = self.layout.clock_x orelse return;
-        _ = clock_segment.draw(self.render.dc, self.render.config, self.render.height, clock_x) catch |e| debug.warnOnErr(e, "drawClockOnly");
+        const clock_x = self.layout_cache.clock_x orelse return;
+        _ = clockSegment.draw(self.render.dc, self.render.config, self.render.height, clock_x) catch |e|
+            debug.warnOnErr(e, "drawClockOnly");
         self.render.dc.flush();
     }
 
     fn drawTitleOnly(self: *State, new_focused: ?u32) void {
         if (prompt.isActive()) return;
-        if (!self.title.layout_valid or self.title.title_w == 0) return;
-        self.title.focused_window = new_focused;
+        if (!self.title_cache.is_layout_valid or self.title_cache.title_width == 0) return;
+        self.title_cache.focused_window = new_focused;
+
         // Fast path: carousel.drawCarouselTick handles its own flush and returns true on success.
-        // Use minimized accent when the sole workspace window is minimized.
+        // Use minimised accent when the sole workspace window is minimised.
         if (carousel.isCarouselActive()) {
-            const accent: u32 = if (self.title.ws_wins.items.len == 1 and
-                self.title.minimized_set.contains(self.title.ws_wins.items[0]))
+            const accent: u32 = if (self.title_cache.workspace_windows.items.len == 1 and
+                self.title_cache.minimized_windows.contains(self.title_cache.workspace_windows.items[0]))
                 self.render.config.title_minimized_accent
             else
                 self.render.config.title_accent_color;
             if (carousel.drawCarouselTick(self.render.dc, accent, self.render.height,
-                    self.title.title_x, self.title.title_w)) return;
+                    self.title_cache.title_x, self.title_cache.title_width)) return;
         }
-        _ = title_segment.drawCached(
+
+        _ = titleSegment.drawCached(
             .{
                 .dc      = self.render.dc,
                 .config  = self.render.config,
                 .height  = self.render.height,
-                .start_x = self.title.title_x,
-                .width   = self.title.title_w,
+                .start_x = self.title_cache.title_x,
+                .width   = self.title_cache.title_width,
                 .conn    = self.win.conn,
             },
             .{
                 .focused_window  = new_focused,
-                .focused_title   = self.title.title.items,
+                .focused_title   = self.title_cache.title.items,
                 .minimized_title = "",
-                .current_ws_wins = self.title.ws_wins.items,
-                .minimized_set   = &self.title.minimized_set,
+                .current_ws_wins = self.title_cache.workspace_windows.items,
+                .minimized_set   = &self.title_cache.minimized_windows,
             },
             self.render.allocator,
         ) catch |e| { debug.warnOnErr(e, "drawTitleOnly"); return; };
         self.render.dc.flush();
     }
 
-    fn updateTitleCache(self: *State, snap: *const BarSnapshot, x: u16, w: u16) void {
-        // Build replacements first; only swap into the live cache on success so a
-        // failed allocation leaves it stale (showing old data) rather than silently empty.
+    /// Update the title geometry and window-list caches after a successful full draw.
+    ///
+    /// Replacements are built before the swap so that a failed allocation leaves
+    /// the cache showing old data rather than silently going empty.
+    fn syncTitleCache(self: *State, snap: *const BarSnapshot, x: u16, w: u16) void {
         var new_wins: std.ArrayListUnmanaged(u32) = .empty;
-        if (new_wins.appendSlice(self.render.allocator, snap.current_ws_wins.items)) {
-            self.title.ws_wins.deinit(self.render.allocator);
-            self.title.ws_wins = new_wins;
+        if (new_wins.appendSlice(self.render.allocator, snap.current_workspace_windows.items)) {
+            self.title_cache.workspace_windows.deinit(self.render.allocator);
+            self.title_cache.workspace_windows = new_wins;
         } else |_| {
             new_wins.deinit(self.render.allocator);
-            // title.ws_wins left as-is; stale data is preferable to an empty list.
         }
-        if (snap.minimized_set.clone(self.render.allocator)) |new_set| {
-            self.title.minimized_set.deinit(self.render.allocator);
-            self.title.minimized_set = new_set;
+        if (snap.minimized_windows.clone(self.render.allocator)) |new_set| {
+            self.title_cache.minimized_windows.deinit(self.render.allocator);
+            self.title_cache.minimized_windows = new_set;
         } else |_| {
-            // title.minimized_set left stale rather than cleared.
+            // minimized_windows left stale rather than cleared.
         }
-        self.title.focused_window = snap.focused_window;
-        self.title.title_x        = x;
-        self.title.title_w        = w;
-        self.title.layout_valid   = true;
+        self.title_cache.focused_window  = snap.focused_window;
+        self.title_cache.title_x         = x;
+        self.title_cache.title_width     = w;
+        self.title_cache.is_layout_valid = true;
     }
 };
 
-/// Carousel frame interval — 165 Hz (1_000_000_000 / 165 ≈ 6_060_606 ns).
-const CAROUSEL_WAKE_NS: u64 = 6_060_606;
+// ─── Bar thread ───────────────────────────────────────────────────────────────
 
-fn barThreadFn(s: *State) void {
-    // Absolute monotonic deadline for next carousel frame; late wakes don't compound.
+fn runBarThread(s: *State) void {
     var next_carousel_ns: u64 = 0;
     while (true) {
-        g_bar.channel.mutex.lock();
+        gBar.channel.mutex.lock();
+
         // Sleep until there is something to do or the carousel timer fires.
-        while (!g_bar.channel.work.hasPending()) {
+        while (!gBar.channel.work.hasPending()) {
             if (carousel.isCarouselActive()) {
-                const now_ns = monoNowNs();
+                const now_ns = monotonicNowNs();
                 if (now_ns >= next_carousel_ns) break;
                 const remaining = next_carousel_ns - now_ns;
-                g_bar.channel.work_cond.timedWait(&g_bar.channel.mutex, remaining) catch {};
+                gBar.channel.work_ready.timedWait(&gBar.channel.mutex, remaining) catch {};
                 break;
-            } else {
-                next_carousel_ns = 0;
-                g_bar.channel.work_cond.wait(&g_bar.channel.mutex);
             }
+            next_carousel_ns = 0;
+            gBar.channel.work_ready.wait(&gBar.channel.mutex);
         }
-        if (g_bar.channel.work.kind == .quit) { g_bar.channel.mutex.unlock(); return; }
+
+        if (gBar.channel.work.kind == .quit) { gBar.channel.mutex.unlock(); return; }
+
         // Snapshot the pending work and clear it atomically under the mutex.
-        const work      = g_bar.channel.work;
-        const read_idx: u1 = 1 - g_bar.channel.write_idx;
-        g_bar.channel.work = .{};
-        g_bar.channel.mutex.unlock();
+        const work      = gBar.channel.work;
+        const read_idx: u1 = 1 - gBar.channel.write_index;
+        gBar.channel.work = .{};
+        gBar.channel.mutex.unlock();
 
         switch (work.kind) {
-            .snap_ready => {
-                // Full draw covers the clock too — ignore work.clock.
-                s.drawAll(&g_bar.channel.slots[read_idx]) catch |e| debug.warnOnErr(e, "bar thread drawAll");
-                g_bar.channel.mutex.lock();
-                g_bar.channel.draw_gen += 1;
-                g_bar.channel.done_cond.broadcast();
-                g_bar.channel.mutex.unlock();
+            .snapReady => {
+                // Full draw covers the clock too — ignore work.has_clock_tick.
+                s.drawAll(&gBar.channel.slots[read_idx]) catch |e|
+                    debug.warnOnErr(e, "bar thread drawAll");
+                gBar.channel.mutex.lock();
+                gBar.channel.draw_generation +%= 1;
+                gBar.channel.draw_done.broadcast();
+                gBar.channel.mutex.unlock();
             },
-            .focus_only => {
-                s.drawTitleOnly(work.focus_win);
-                if (work.clock) s.drawClockOnly();
+            .focusOnly => {
+                s.drawTitleOnly(work.focused_window);
+                if (carousel.isCarouselActive()) {
+                    const now_ns = monotonicNowNs();
+                    if (now_ns >= next_carousel_ns) {
+                        next_carousel_ns = now_ns + carouselWakeNs;
+                    } else {
+                        next_carousel_ns +%= carouselWakeNs;
+                    }
+                }
+                if (work.has_clock_tick) s.drawClockOnly();
             },
             .idle => {
-                // No primary work — service a carousel tick if active.
+                // Carousel tick or clock-only wakeup with no focus change.
                 if (carousel.isCarouselActive()) {
-                    s.drawTitleOnly(s.title.focused_window);
-                    if (next_carousel_ns == 0) next_carousel_ns = monoNowNs();
-                    next_carousel_ns +%= CAROUSEL_WAKE_NS;
+                    s.drawTitleOnly(s.title_cache.focused_window);
+                    const now_ns = monotonicNowNs();
+                    if (now_ns >= next_carousel_ns) {
+                        next_carousel_ns = now_ns + carouselWakeNs;
+                    } else {
+                        next_carousel_ns +%= carouselWakeNs;
+                    }
                 }
-                if (work.clock) s.drawClockOnly();
+                if (work.has_clock_tick) s.drawClockOnly();
             },
             .quit => unreachable,
         }
     }
 }
 
-inline fn monoNowNs() u64 {
+inline fn monotonicNowNs() u64 {
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 
-inline fn startBarThread(s: *State) void {
-    g_bar.thread = std.Thread.spawn(.{}, barThreadFn, .{s}) catch |e| {
+inline fn spawnBarThread(s: *State) void {
+    gBar.thread = std.Thread.spawn(.{}, runBarThread, .{s}) catch |e| {
         debug.warnOnErr(e, "Failed to start bar render thread"); return;
     };
 }
 
-fn stopBarThread() void {
-    g_bar.channel.mutex.lock();
-    g_bar.channel.work = .{ .kind = .quit };
-    g_bar.channel.work_cond.signal();
-    g_bar.channel.mutex.unlock();
-    if (g_bar.thread) |t| { t.join(); g_bar.thread = null; }
-    g_bar.channel.work = .{};  // reset for potential re-use after reload
+fn joinBarThread() void {
+    gBar.channel.mutex.lock();
+    gBar.channel.work = .{ .kind = .quit };
+    gBar.channel.work_ready.signal();
+    gBar.channel.mutex.unlock();
+    if (gBar.thread) |t| { t.join(); gBar.thread = null; }
+    gBar.channel.work = .{};  // reset for potential re-use after reload
 }
 
-/// Returns true when the two minimized sets differ in membership (not just count).
-fn minimizedSetChanged(
+// ─── Snapshot capture ─────────────────────────────────────────────────────────
+
+/// Returns true when the two minimised sets differ in membership (not just count).
+fn hasMinimizedSetChanged(
     a: *const std.AutoHashMapUnmanaged(u32, void),
     b: *const std.AutoHashMapUnmanaged(u32, void),
 ) bool {
@@ -595,93 +655,117 @@ fn minimizedSetChanged(
 }
 
 /// Populates a pre-allocated BarSnapshot slot in-place from current WM state.
-fn captureIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot) !void {
+fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot) !void {
     const allocator = s.render.allocator;
-    snap.minimized_set.clearRetainingCapacity();
+    snap.minimized_windows.clearRetainingCapacity();
     if (comptime build_options.has_minimize)
-        try minimize.populateSet(&snap.minimized_set, allocator);
+        try minimize.populateSet(&snap.minimized_windows, allocator);
 
     if (comptime build_options.has_workspaces) {
-        const ws_state = wsGetState() orelse return;
-        snap.ws_count   = @intCast(ws_state.workspaces.len);
-        snap.ws_current = ws_state.current;
-        snap.ws_all_active = ws_state.all_view_temp_wins.items.len > 0;
-        try snap.ws_has_windows.resize(allocator, snap.ws_count);
+        const ws_state = getWorkspaceState() orelse return;
+        snap.workspace_count      = @intCast(ws_state.workspaces.len);
+        snap.current_workspace    = ws_state.current;
+        snap.is_all_view_active   = ws_state.all_view_temp_wins.items.len > 0;
+        try snap.workspace_has_windows.resize(allocator, snap.workspace_count);
         for (ws_state.workspaces, 0..) |*workspace, i|
-            snap.ws_has_windows.items[i] = workspace.windows.len > 0;
-        snap.current_ws_wins.clearRetainingCapacity();
+            snap.workspace_has_windows.items[i] = workspace.windows.len > 0;
+        snap.current_workspace_windows.clearRetainingCapacity();
         if (ws_state.current < ws_state.workspaces.len)
-            try snap.current_ws_wins.appendSlice(allocator, ws_state.workspaces[ws_state.current].windows.items());
+            try snap.current_workspace_windows.appendSlice(allocator, ws_state.workspaces[ws_state.current].windows.items());
     } else {
-        // No workspace subsystem — treat as single workspace so ws_count
-        // differs from prev.ws_count (0) on the first draw, ensuring dirty_all
-        // fires and the background is cleared before any segments are drawn.
-        snap.ws_count = 1;
-        snap.current_ws_wins.clearRetainingCapacity();
+        // No workspace subsystem — treat as single workspace so workspace_count
+        // differs from prev.workspace_count (0) on the first draw, ensuring
+        // is_full_redraw fires and the background is cleared before any segments
+        // are drawn.
+        snap.workspace_count = 1;
+        snap.current_workspace_windows.clearRetainingCapacity();
         if (tracking.allWindowsIterator()) |it| {
             var iter = it;
-            while (iter.next()) |wp| try snap.current_ws_wins.append(allocator, wp.*);
+            while (iter.next()) |wp| try snap.current_workspace_windows.append(allocator, wp.*);
         }
     }
-    snap.focused_window = focus.getFocused();
-    snap.title_invalidated = s.title.invalidated;
-    s.title.invalidated    = false;
+
+    snap.focused_window      = focus.getFocused();
+    snap.is_title_invalidated = s.title_cache.is_invalidated;
+    s.title_cache.is_invalidated = false;
+
     snap.focused_title.clearRetainingCapacity();
     if (snap.focused_window) |fw| {
-        if (snap.focused_window != prev.focused_window or snap.title_invalidated) {
-            title_segment.fetchWindowTitleInto(core.conn, fw, &snap.focused_title, allocator) catch {};
+        if (snap.focused_window != prev.focused_window or snap.is_title_invalidated) {
+            titleSegment.fetchWindowTitleInto(core.conn, fw, &snap.focused_title, allocator) catch {};
         } else {
             snap.focused_title.appendSlice(allocator, prev.focused_title.items) catch {};
         }
     }
 
-    const forced = g_bar.channel.force_dirty_all;
-    g_bar.channel.force_dirty_all = false;
-    snap.dirty_all = forced or (snap.ws_count != prev.ws_count);
-    snap.dirty_ws  = snap.dirty_all or
-        snap.ws_current != prev.ws_current or
-        snap.ws_all_active != prev.ws_all_active or
-        !std.mem.eql(bool, snap.ws_has_windows.items, prev.ws_has_windows.items);
-    snap.dirty_title =
+    const forced = gBar.channel.pending_force_full_redraw;
+    gBar.channel.pending_force_full_redraw = false;
+
+    snap.is_full_redraw = forced or (snap.workspace_count != prev.workspace_count);
+    snap.is_workspace_dirty = snap.is_full_redraw or
+        snap.current_workspace  != prev.current_workspace   or
+        snap.is_all_view_active != prev.is_all_view_active  or
+        !std.mem.eql(bool, snap.workspace_has_windows.items, prev.workspace_has_windows.items);
+    snap.is_title_dirty =
         prompt.isActive() or
-        snap.focused_window != prev.focused_window or
-        snap.title_invalidated or
-        !std.mem.eql(u8,  snap.focused_title.items,  prev.focused_title.items)   or
-        !std.mem.eql(u32, snap.current_ws_wins.items, prev.current_ws_wins.items) or
-        minimizedSetChanged(&snap.minimized_set, &prev.minimized_set);
+        snap.focused_window        != prev.focused_window        or
+        snap.is_title_invalidated                                or
+        !std.mem.eql(u8,  snap.focused_title.items,              prev.focused_title.items)             or
+        !std.mem.eql(u32, snap.current_workspace_windows.items,  prev.current_workspace_windows.items) or
+        hasMinimizedSetChanged(&snap.minimized_windows, &prev.minimized_windows);
 }
 
-/// Forces a full redraw: sets force_dirty_all and blocks until the bar thread finishes.
-fn forceRedraw() void { g_bar.channel.force_dirty_all = true; submitDraw(true); }
+// ─── Draw submission ──────────────────────────────────────────────────────────
 
-/// Ungrab the X server and flush. Always called as a pair.
+/// Forces a full bar clear+redraw and blocks until the bar thread has finished.
+fn submitBlockingFullRedraw() void {
+    gBar.channel.pending_force_full_redraw = true;
+    submitDrawBlocking();
+}
+
+/// Ungrab the X server and flush pending requests. Always called as a pair.
 inline fn ungrabAndFlush() void {
     _ = xcb.xcb_ungrab_server(core.conn);
     _ = xcb.xcb_flush(core.conn);
 }
 
-/// Posts a snapshot to the bar thread; `wait = true` blocks until the draw completes.
-pub fn submitDraw(wait: bool) void {
-    const s = g_bar.state orelse return;
-    if (!s.visible) return;
-    const idx = g_bar.channel.write_idx;
-    captureIntoSlot(s, &g_bar.channel.slots[idx], &g_bar.channel.slots[1 - idx]) catch |e| {
-        debug.warnOnErr(e, "bar captureIntoSlot");
+/// Posts a snapshot to the bar thread and returns immediately.
+pub fn submitDraw() void {
+    const s = gBar.state orelse return;
+    if (!s.is_visible) return;
+    const idx = gBar.channel.write_index;
+    captureStateIntoSlot(s, &gBar.channel.slots[idx], &gBar.channel.slots[1 - idx]) catch |e| {
+        debug.warnOnErr(e, "bar captureStateIntoSlot");
         return;
     };
-    g_bar.channel.mutex.lock();
-    defer g_bar.channel.mutex.unlock();
-    g_bar.channel.write_idx ^= 1;
-    g_bar.channel.work.kind = .snap_ready;
-    const gen_before = g_bar.channel.draw_gen;
-    g_bar.channel.work_cond.signal();
-    if (wait) {
-        while (g_bar.channel.draw_gen == gen_before)
-            g_bar.channel.done_cond.wait(&g_bar.channel.mutex);
-    }
+    gBar.channel.mutex.lock();
+    defer gBar.channel.mutex.unlock();
+    gBar.channel.write_index  ^= 1;
+    gBar.channel.work.kind     = .snapReady;
+    gBar.channel.work_ready.signal();
 }
 
+/// Posts a snapshot to the bar thread and blocks until the draw completes.
+/// Use only inside or immediately before xcb_ungrab_server.
+pub fn submitDrawBlocking() void {
+    const s = gBar.state orelse return;
+    if (!s.is_visible) return;
+    const idx = gBar.channel.write_index;
+    captureStateIntoSlot(s, &gBar.channel.slots[idx], &gBar.channel.slots[1 - idx]) catch |e| {
+        debug.warnOnErr(e, "bar captureStateIntoSlot");
+        return;
+    };
+    gBar.channel.mutex.lock();
+    defer gBar.channel.mutex.unlock();
+    gBar.channel.write_index ^= 1;
+    gBar.channel.work.kind    = .snapReady;
+    const gen_before = gBar.channel.draw_generation;
+    gBar.channel.work_ready.signal();
+    while (gBar.channel.draw_generation == gen_before)
+        gBar.channel.draw_done.wait(&gBar.channel.mutex);
+}
 
+// ─── Window and atom setup ────────────────────────────────────────────────────
 
 fn initAtoms() void {
     const entries = .{
@@ -697,10 +781,10 @@ fn initAtoms() void {
         .{ "action_stick",     "_NET_WM_ACTION_STICK"     },
     };
     inline for (entries) |e|
-        @field(g_bar.atoms, e[0]) = utils.getAtomCached(e[1]) catch 0;
+        @field(gBar.atoms, e[0]) = utils.getAtomCached(e[1]) catch 0;
 }
 
-fn barYPos(height: u16) i16 {
+fn computeBarYPos(height: u16) i16 {
     return if (core.config.bar.bar_position == .bottom)
         @intCast(@as(i32, core.screen.height_in_pixels) - height)
     else
@@ -715,9 +799,9 @@ fn createBarWindow(height: u16, y_pos: i16) BarWindowSetup {
         drawing.findVisualByDepth(core.screen, 32)
     else
         drawing.VisualInfo{ .visual_type = null, .visual_id = core.screen.root_visual };
-    const depth: u8 = if (want_transparency) 32 else xcb.XCB_COPY_FROM_PARENT;
-    const visual_id = visual_info.visual_id;
-    const colormap: u32 = if (want_transparency) blk: {
+    const depth: u8      = if (want_transparency) 32 else xcb.XCB_COPY_FROM_PARENT;
+    const visual_id      = visual_info.visual_id;
+    const colormap: u32  = if (want_transparency) blk: {
         const cmap = xcb.xcb_generate_id(core.conn);
         _ = xcb.xcb_create_colormap(core.conn, xcb.XCB_COLORMAP_ALLOC_NONE, cmap, core.screen.root, visual_id);
         break :blk cmap;
@@ -727,7 +811,7 @@ fn createBarWindow(height: u16, y_pos: i16) BarWindowSetup {
                        xcb.XCB_CW_OVERRIDE_REDIRECT | xcb.XCB_CW_EVENT_MASK |
                        if (want_transparency) xcb.XCB_CW_COLORMAP else 0;
     const base_events = xcb.XCB_EVENT_MASK_EXPOSURE | xcb.XCB_EVENT_MASK_BUTTON_PRESS;
-    const value_list = [5]u32{ 0, 0, 1, base_events, colormap };
+    const value_list  = [5]u32{ 0, 0, 1, base_events, colormap };
     _ = xcb.xcb_create_window(core.conn, depth, window, core.screen.root,
         0, y_pos, core.screen.width_in_pixels, height, 0,
         xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, visual_id,
@@ -755,7 +839,8 @@ fn loadBarFonts(dc: anytype) !void {
     return dc.loadFonts(sized);
 }
 
-fn setPropAtom(conn: *xcb.xcb_connection_t, window: u32, prop: u32, atom_type: u32, values: anytype) void {
+/// Set an EWMH atom property on the bar window.
+fn setAtomProperty(conn: *xcb.xcb_connection_t, window: u32, prop: u32, atom_type: u32, values: anytype) void {
     _ = xcb.xcb_change_property(conn, xcb.XCB_PROP_MODE_REPLACE, window, prop, atom_type,
         32, @intCast(values.len), values.ptr);
 }
@@ -765,10 +850,10 @@ fn setWindowProperties(window: u32, height: u16) void {
         .{ 0, 0, 0, height, 0, 0, 0, 0, 0, 0, 0, core.screen.width_in_pixels }
     else
         .{ 0, 0, height, 0, 0, 0, 0, 0, 0, core.screen.width_in_pixels, 0, 0 };
-    if (g_bar.atoms.strut_partial    != 0) setPropAtom(core.conn, window, g_bar.atoms.strut_partial,    xcb.XCB_ATOM_CARDINAL, &strut);
-    if (g_bar.atoms.window_type      != 0) setPropAtom(core.conn, window, g_bar.atoms.window_type,      xcb.XCB_ATOM_ATOM, &[_]u32{g_bar.atoms.window_type_dock});
-    if (g_bar.atoms.wm_state         != 0) setPropAtom(core.conn, window, g_bar.atoms.wm_state,         xcb.XCB_ATOM_ATOM, &[_]u32{g_bar.atoms.state_above, g_bar.atoms.state_sticky});
-    if (g_bar.atoms.allowed_actions  != 0) setPropAtom(core.conn, window, g_bar.atoms.allowed_actions,  xcb.XCB_ATOM_ATOM, &[_]u32{g_bar.atoms.action_close, g_bar.atoms.action_above, g_bar.atoms.action_stick});
+    if (gBar.atoms.strut_partial    != 0) setAtomProperty(core.conn, window, gBar.atoms.strut_partial,    xcb.XCB_ATOM_CARDINAL, &strut);
+    if (gBar.atoms.window_type      != 0) setAtomProperty(core.conn, window, gBar.atoms.window_type,      xcb.XCB_ATOM_ATOM, &[_]u32{gBar.atoms.window_type_dock});
+    if (gBar.atoms.wm_state         != 0) setAtomProperty(core.conn, window, gBar.atoms.wm_state,         xcb.XCB_ATOM_ATOM, &[_]u32{gBar.atoms.state_above, gBar.atoms.state_sticky});
+    if (gBar.atoms.allowed_actions  != 0) setAtomProperty(core.conn, window, gBar.atoms.allowed_actions,  xcb.XCB_ATOM_ATOM, &[_]u32{gBar.atoms.action_close, gBar.atoms.action_above, gBar.atoms.action_stick});
 }
 
 fn measureFontMetrics() ?struct { asc: i32, desc: i32 } {
@@ -780,12 +865,12 @@ fn measureFontMetrics() ?struct { asc: i32, desc: i32 } {
 }
 
 fn resolvePercentageFontSize(bar_height: u16) ?u16 {
-    const TRIAL_PT: u16 = 100;
+    const trialPt: u16 = 100;
     const saved_size = core.config.bar.scaled_font_size;
-    core.config.bar.scaled_font_size = TRIAL_PT;
+    core.config.bar.scaled_font_size = trialPt;
     defer core.config.bar.scaled_font_size = saved_size;
     const m = measureFontMetrics() orelse return null;
-    const px_per_pt: f32 = @as(f32, @floatFromInt(@max(1, m.asc + m.desc))) / @as(f32, @floatFromInt(TRIAL_PT));
+    const px_per_pt: f32 = @as(f32, @floatFromInt(@max(1, m.asc + m.desc))) / @as(f32, @floatFromInt(trialPt));
     const max_size_pt    = @as(f32, @floatFromInt(bar_height)) / px_per_pt;
     return @max(1, @as(u16, @intFromFloat(@round(max_size_pt * (core.config.bar.font_size.value / 100.0)))));
 }
@@ -799,11 +884,11 @@ fn calculateBarHeight() !u16 {
         }
         return height;
     }
-    const m = measureFontMetrics() orelse return DEFAULT_BAR_HEIGHT;
-    return @intCast(std.math.clamp(@as(u32, @intCast(m.asc + m.desc)), MIN_BAR_HEIGHT, MAX_BAR_HEIGHT));
+    const m = measureFontMetrics() orelse return defaultBarHeight;
+    return @intCast(std.math.clamp(@as(u32, @intCast(m.asc + m.desc)), minBarHeight, maxBarHeight));
 }
 
-fn createDC(setup: BarWindowSetup, height: u16) !*drawing.DrawContext {
+fn createDrawContext(setup: BarWindowSetup, height: u16) !*drawing.DrawContext {
     const dc = try drawing.DrawContext.initWithVisual(
         core.alloc, core.conn, setup.window, core.screen.width_in_pixels, height,
         setup.visual_id, core.dpi_info.dpi, setup.has_argb, core.config.bar.transparency,
@@ -813,21 +898,26 @@ fn createDC(setup: BarWindowSetup, height: u16) !*drawing.DrawContext {
     return dc;
 }
 
+// ─── Lifecycle ────────────────────────────────────────────────────────────────
+
 pub fn init() !void {
     std.debug.assert(core.config.bar.enabled);
     initAtoms();
     const height = try calculateBarHeight();
-    const y_pos  = barYPos(height);
+    const y_pos  = computeBarYPos(height);
     const setup  = createBarWindow(height, y_pos);
-    errdefer { _ = xcb.xcb_destroy_window(core.conn, setup.window); if (setup.colormap != 0) _ = xcb.xcb_free_colormap(core.conn, setup.colormap); }
+    errdefer {
+        _ = xcb.xcb_destroy_window(core.conn, setup.window);
+        if (setup.colormap != 0) _ = xcb.xcb_free_colormap(core.conn, setup.colormap);
+    }
     setWindowProperties(setup.window, height);
-    const dc = try createDC(setup, height);
+    const dc = try createDrawContext(setup, height);
     errdefer dc.deinit();
     debug.info("Bar transparency: {s}", .{if (setup.has_argb) "enabled (ARGB)" else "disabled (opaque)"});
-    g_bar.state = try State.init(core.alloc, core.conn, setup.window, setup.colormap,
+    gBar.state = try State.init(core.alloc, core.conn, setup.window, setup.colormap,
         core.screen.width_in_pixels, height, dc, core.config.bar);
-    startBarThread(g_bar.state.?);
-    submitDraw(true);
+    spawnBarThread(gBar.state.?);
+    submitDrawBlocking();
     _ = xcb.xcb_map_window(core.conn, setup.window);
     _ = xcb.xcb_flush(core.conn);
     try prompt.init(core.alloc, core.conn);
@@ -835,71 +925,71 @@ pub fn init() !void {
 
 pub fn deinit() void {
     prompt.deinit();
-    stopBarThread();
-    if (g_bar.state) |s| {
+    joinBarThread();
+    if (gBar.state) |s| {
         carousel.deinitCarousel();
-        for (&g_bar.channel.slots) |*slot| slot.deinit(s.render.allocator);
+        for (&gBar.channel.slots) |*slot| slot.deinit(s.render.allocator);
         _ = xcb.xcb_destroy_window(s.win.conn, s.win.window);
         s.render.dc.deinit();
         drawing.deinitFontCache(s.render.allocator);
         s.deinit();
-        g_bar.state = null;
+        gBar.state = null;
     }
 }
 
 pub fn reload() void {
-    const old = g_bar.state orelse {
+    const old = gBar.state orelse {
         if (core.config.bar.enabled) {
             init() catch |err| debug.err("Bar init failed: {}", .{err});
         }
         return;
     };
     if (!core.config.bar.enabled) { deinit(); return; }
-    const height = calculateBarHeight() catch DEFAULT_BAR_HEIGHT;
-    const y_pos  = barYPos(height);
+    const height = calculateBarHeight() catch defaultBarHeight;
+    const y_pos  = computeBarYPos(height);
     const setup  = createBarWindow(height, y_pos);
-    reloadImpl(old, setup, height) catch |err| {
+    performReload(old, setup, height) catch |err| {
         _ = xcb.xcb_destroy_window(core.conn, setup.window);
         if (setup.colormap != 0) _ = xcb.xcb_free_colormap(core.conn, setup.colormap);
         debug.err("Bar reload failed ({s}), keeping old bar", .{@errorName(err)});
     };
 }
 
-fn reloadImpl(old: *State, setup: BarWindowSetup, height: u16) !void {
+fn performReload(old: *State, setup: BarWindowSetup, height: u16) !void {
     setWindowProperties(setup.window, height);
-    const new_dc = try createDC(setup, height);
+    const new_dc = try createDrawContext(setup, height);
     errdefer new_dc.deinit();
     const new_state = try State.init(core.alloc, core.conn, setup.window, setup.colormap,
         core.screen.width_in_pixels, height, new_dc, core.config.bar);
-    new_state.visible        = old.visible;
-    new_state.global_visible = old.global_visible;
-    stopBarThread();
-    g_bar.state = new_state;
-    startBarThread(new_state);
-    forceRedraw();
-    if (new_state.visible) _ = xcb.xcb_map_window(core.conn, setup.window);
+    new_state.is_visible          = old.is_visible;
+    new_state.is_globally_visible = old.is_globally_visible;
+    joinBarThread();
+    gBar.state = new_state;
+    spawnBarThread(new_state);
+    submitBlockingFullRedraw();
+    if (new_state.is_visible) _ = xcb.xcb_map_window(core.conn, setup.window);
     _ = xcb.xcb_destroy_window(core.conn, old.win.window);
     ungrabAndFlush();
     old.render.dc.deinit();
     old.deinit();
 }
 
+// ─── Public event handlers & queries ─────────────────────────────────────────
+
 pub fn toggleBarSegmentAnchor() void {
-    const s = g_bar.state orelse return;
+    const s = gBar.state orelse return;
     core.config.bar.bar_position = switch (core.config.bar.bar_position) {
         .top    => .bottom,
         .bottom => .top,
     };
-    const new_y = barYPos(s.render.height);
+    const new_y = computeBarYPos(s.render.height);
     setWindowProperties(s.win.window, s.render.height);
-    g_bar.channel.force_dirty_all = true;
-    s.invalidateLayout();
+    gBar.channel.pending_force_full_redraw = true;
+    s.invalidateLayoutCache();
     _ = xcb.xcb_grab_server(core.conn);
     _ = xcb.xcb_configure_window(core.conn, s.win.window, xcb.XCB_CONFIG_WINDOW_Y,
         &[_]u32{@as(u32, @bitCast(@as(i32, new_y)))});
     const current_ws = tracking.getCurrentWorkspace() orelse {
-        // No active workspace — border sweep is a no-op, but mark it done so
-        // the event loop does not fire a redundant second sweep.
         windowTest.updateWorkspaceBorders();
         windowTest.markBordersFlushed();
         ungrabAndFlush();
@@ -911,8 +1001,6 @@ pub fn toggleBarSegmentAnchor() void {
         true;
     if (no_fullscreen)
         if (comptime build_options.has_tiling) tiling.retileCurrentWorkspace();
-    // Sweep border colors inside the grab so they land in the same atomic
-    // batch as the configure and retile commands above.
     windowTest.updateWorkspaceBorders();
     windowTest.markBordersFlushed();
     ungrabAndFlush();
@@ -921,126 +1009,132 @@ pub fn toggleBarSegmentAnchor() void {
 
 /// Lightweight focus-only redraw; skipped when a full redraw is already pending.
 pub fn scheduleFocusRedraw(new_win: ?u32) void {
-    const s = g_bar.state orelse return;
-    if (!s.visible or s.dirty) return;
-    g_bar.channel.mutex.lock();
+    const s = gBar.state orelse return;
+    if (!s.is_visible or s.is_dirty) return;
+    gBar.channel.mutex.lock();
     // Only post a focus update when no higher-priority work is already queued.
-    if (g_bar.channel.work.kind == .idle) {
-        g_bar.channel.work = .{ .kind = .focus_only, .focus_win = new_win };
-        g_bar.channel.work_cond.signal();
+    if (gBar.channel.work.kind == .idle) {
+        gBar.channel.work = .{ .kind = .focusOnly, .focused_window = new_win };
+        gBar.channel.work_ready.signal();
     }
-    g_bar.channel.mutex.unlock();
+    gBar.channel.mutex.unlock();
 }
 
-pub fn getBarWindow() u32        { return if (g_bar.state) |s| s.win.window else 0; }
-pub fn isBarWindow(win: u32) bool { return if (g_bar.state) |s| s.win.window == win else false; }
-pub fn getBarHeight() u16         { return if (g_bar.state) |s| s.render.height else 0; }
-pub fn isBarInitialized() bool    { return g_bar.state != null; }
-pub fn hasClockSegment() bool     { return if (g_bar.state) |s| s.has_clock_segment else false; }
-/// Schedules a full bar redraw, coalesced via updateIfDirty. Zero X11 I/O on caller.
-pub fn scheduleRedraw() void        { if (g_bar.state) |s| if (s.visible) s.setDirty(); }
+pub fn getBarWindow() u32         { return if (gBar.state) |s| s.win.window else 0; }
+pub fn isBarWindow(win: u32) bool  { return if (gBar.state) |s| s.win.window == win else false; }
+pub fn getBarHeight() u16          { return if (gBar.state) |s| s.render.height else 0; }
+pub fn isBarInitialized() bool     { return gBar.state != null; }
+pub fn hasClockSegment() bool      { return if (gBar.state) |s| s.has_clock_segment else false; }
+
+/// Schedules a full bar redraw, coalesced via updateIfDirty. Zero X11 I/O on the caller.
+pub fn scheduleRedraw() void       { if (gBar.state) |s| if (s.is_visible) s.markDirty(); }
+
 /// Like scheduleRedraw but forces a full bar clear+redraw regardless of dirty flags.
+///
 /// Use when a segment's presence or width changes (e.g. layout switch) so stale
 /// pixels from the previous render are guaranteed to be erased.
 pub fn scheduleFullRedraw() void {
-    if (g_bar.state) |s| if (s.visible) {
-        g_bar.channel.force_dirty_all = true;
-        s.setDirty();
+    if (gBar.state) |s| if (s.is_visible) {
+        gBar.channel.pending_force_full_redraw = true;
+        s.markDirty();
     };
 }
-pub fn isVisible() bool             { return if (g_bar.state) |s| s.visible else false; }
-pub fn getGlobalVisibility() bool   { return if (g_bar.state) |s| s.global_visible else false; }
-pub fn setGlobalVisibility(visible: bool) void { if (g_bar.state) |s| s.global_visible = visible; }
+
+pub fn isVisible() bool              { return if (gBar.state) |s| s.is_visible else false; }
+pub fn getGlobalVisibility() bool    { return if (gBar.state) |s| s.is_globally_visible else false; }
+pub fn setGlobalVisibility(visible: bool) void {
+    if (gBar.state) |s| s.is_globally_visible = visible;
+}
 
 /// Synchronous redraw — blocks until done. Use only inside/before xcb_ungrab_server.
 pub fn redrawInsideGrab() void {
-    const s = g_bar.state orelse return;
-    if (s.visible) { submitDraw(true); s.dirty = false; }
+    const s = gBar.state orelse return;
+    if (s.is_visible) { submitDrawBlocking(); s.is_dirty = false; }
 }
 
 pub fn raiseBar() void {
-    if (g_bar.state) |s| _ = xcb.xcb_configure_window(s.win.conn, s.win.window, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+    if (gBar.state) |s|
+        _ = xcb.xcb_configure_window(s.win.conn, s.win.window,
+            xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 }
 
 pub fn setBarState(action: BarAction) void {
-    const s = g_bar.state orelse return;
-    if (action == .toggle) s.global_visible = !s.global_visible;
+    const s = gBar.state orelse return;
+    if (action == .toggle) s.is_globally_visible = !s.is_globally_visible;
     const current_ws    = tracking.getCurrentWorkspace() orelse 0;
     const is_fullscreen = action != .hide_fullscreen and
         (comptime build_options.has_fullscreen) and fullscreen.getForWorkspace(current_ws) != null;
-    const show = !is_fullscreen and s.global_visible and action != .hide_fullscreen;
-    if (s.visible == show and action != .toggle) return;
-    s.visible = show;
+    const show = !is_fullscreen and s.is_globally_visible and action != .hide_fullscreen;
+    if (s.is_visible == show and action != .toggle) return;
+    s.is_visible = show;
     if (action == .toggle) {
-        if (show) forceRedraw();
+        if (show) submitBlockingFullRedraw();
         _ = xcb.xcb_grab_server(core.conn);
         if (show) _ = xcb.xcb_map_window(core.conn, s.win.window)
         else      _ = xcb.xcb_unmap_window(core.conn, s.win.window);
-        const saved = s.visible;
-        if (is_fullscreen) s.visible = s.global_visible;
+        const saved = s.is_visible;
+        if (is_fullscreen) s.is_visible = s.is_globally_visible;
         retileAllWorkspaces();
-        if (is_fullscreen) s.visible = saved;
-        // Sweep border colors inside the grab so they land in the same atomic
-        // batch as the map/unmap and retile commands above.
+        if (is_fullscreen) s.is_visible = saved;
         windowTest.updateWorkspaceBorders();
         windowTest.markBordersFlushed();
         ungrabAndFlush();
     } else {
         if (show) {
-            forceRedraw();
+            submitBlockingFullRedraw();
             _ = xcb.xcb_map_window(core.conn, s.win.window);
         } else {
             _ = xcb.xcb_unmap_window(core.conn, s.win.window);
         }
         if (comptime build_options.has_tiling) tiling.retileCurrentWorkspace();
     }
-
     debug.info("Bar {s} ({s})", .{ if (show) "shown" else "hidden", @tagName(action) });
-    clock_segment.updateTimerState();
+    clockSegment.updateTimerState();
 }
 
 pub fn updateIfDirty() !void {
-    const s = g_bar.state orelse return;
-    if (!s.visible) return;
-    if (prompt.consumeRedrawRequest()) { g_bar.channel.force_dirty_all = true; s.dirty = true; }
-    if (s.dirty) { submitDraw(false); s.dirty = false; }
+    const s = gBar.state orelse return;
+    if (!s.is_visible) return;
+    if (prompt.consumeRedrawRequest()) {
+        gBar.channel.pending_force_full_redraw = true;
+        s.is_dirty = true;
+    }
+    if (s.is_dirty) { submitDraw(); s.is_dirty = false; }
 }
 
 pub fn checkClockUpdate() void {
-    const s = g_bar.state orelse return;
-    if (!s.visible) return;
-    // Acquire the mutex before writing work.clock to avoid the data race that
-    // the previous bare `clock_dirty = true` outside the lock introduced.
-    g_bar.channel.mutex.lock();
-    g_bar.channel.work.clock = true;
-    g_bar.channel.work_cond.signal();
-    g_bar.channel.mutex.unlock();
+    const s = gBar.state orelse return;
+    if (!s.is_visible) return;
+    gBar.channel.mutex.lock();
+    gBar.channel.work.has_clock_tick = true;
+    gBar.channel.work_ready.signal();
+    gBar.channel.mutex.unlock();
 }
 
-pub fn pollTimeoutMs() i32     { return clock_segment.pollTimeoutMs(); }
-pub fn updateTimerState() void { clock_segment.updateTimerState(); }
+pub fn pollTimeoutMs() i32     { return clockSegment.pollTimeoutMs(); }
+pub fn updateTimerState() void { clockSegment.updateTimerState(); }
 
 pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {
-    if (g_bar.state) |s| if (event.window == s.win.window and event.count == 0) {
-        g_bar.channel.force_dirty_all = true; if (drag.isDragging()) s.dirty = true else submitDraw(false);
+    if (gBar.state) |s| if (event.window == s.win.window and event.count == 0) {
+        gBar.channel.pending_force_full_redraw = true;
+        if (drag.isDragging()) s.is_dirty = true else submitDraw();
     };
 }
 
 pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void {
-    const s = g_bar.state orelse return;
+    const s           = gBar.state orelse return;
     const focused_win = focus.getFocused() orelse return;
     if (event.window != focused_win) return;
-
     const net_wm_name = s.win.net_wm_name_atom;
     if (event.atom == xcb.XCB_ATOM_WM_NAME or (net_wm_name != 0 and event.atom == net_wm_name)) {
-        s.title.invalidated = true;
-        s.setDirty();
+        s.title_cache.is_invalidated = true;
+        s.markDirty();
     }
 }
 
 pub fn monitorFocusedWindow() void {
     const win = focus.getFocused() orelse return;
-    const s   = g_bar.state orelse return;
+    const s   = gBar.state orelse return;
     if (s.win.last_monitored_window == win) return;
     if (s.win.last_monitored_window) |old_win|
         _ = xcb.xcb_change_window_attributes(core.conn, old_win,
@@ -1052,19 +1146,20 @@ pub fn monitorFocusedWindow() void {
 }
 
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
-    if (g_bar.state) |s| if (event.event == s.win.window) {
-        if (comptime !build_options.has_workspaces) return;
-        const ws_state = wsGetState() orelse return;
-        const ws_w     = workspaces_segment.getCachedWorkspaceWidth();
-        if (ws_w == 0) return;
-        const click_x           = @max(0, event.event_x - s.layout.workspace_x);
-        const clicked_ws: usize = @intCast(@divFloor(click_x, ws_w));
-        if (clicked_ws < ws_state.workspaces.len) {
-            wsSwitchTo(clicked_ws);
-            s.setDirty();
-        }
-    };
+    const s = gBar.state orelse return;
+    if (event.event != s.win.window) return;
+    if (comptime !build_options.has_workspaces) return;
+    const ws_state = getWorkspaceState() orelse return;
+    const ws_w     = workspacesSegment.getCachedWorkspaceWidth();
+    if (ws_w == 0) return;
+    const click_x           = @max(0, event.event_x - s.layout_cache.workspace_x);
+    const clicked_ws: usize = @intCast(@divFloor(click_x, ws_w));
+    if (clicked_ws >= ws_state.workspaces.len) return;
+    switchToWorkspace(clicked_ws);
+    s.markDirty();
 }
+
+// ─── Private helpers ──────────────────────────────────────────────────────────
 
 /// Returns true when tiling is both globally enabled and currently active.
 inline fn isTilingActive() bool {
@@ -1074,22 +1169,22 @@ inline fn isTilingActive() bool {
 }
 
 /// Retiles every workspace that has windows, honouring fullscreen guards.
-/// Must be called without holding the X server grab (grab is the caller's responsibility).
+///
+/// Must be called without holding the X server grab — the grab is the caller's
+/// responsibility.
 fn retileAllWorkspaces() void {
     if (comptime !build_options.has_tiling) return;
-    // wsGetState() already returns null when !has_workspaces, so no second
-    // comptime guard is needed here.
-    const ws_state = wsGetState() orelse return;
+    const ws_state = getWorkspaceState() orelse return;
     if (!isTilingActive()) { tiling.retileCurrentWorkspace(); return; }
     for (ws_state.workspaces, 0..) |*ws, idx| {
         if (ws.windows.len == 0) continue;
         if (comptime build_options.has_fullscreen) {
             if (fullscreen.getForWorkspace(@intCast(idx)) != null) continue;
         }
-        if (@as(u8, @intCast(idx)) == ws_state.current) {
-            tiling.retileCurrentWorkspace();
-        } else {
+        if (@as(u8, @intCast(idx)) != ws_state.current) {
             tiling.retileInactiveWorkspace(@intCast(idx));
+            continue;
         }
+        tiling.retileCurrentWorkspace();
     }
 }

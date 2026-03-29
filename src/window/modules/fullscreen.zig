@@ -177,13 +177,11 @@ fn forEachWindowOnCurrentWorkspace(skip: u32, ctx: anytype) void {
             ctx.call(w);
         }
     } else {
-        if (tracking.allWindowsIterator()) |it| {
-            var iter = it;
-            while (iter.next()) |wp| {
-                const w = wp.*;
-                if (w == skip) continue;
-                ctx.call(w);
-            }
+        var iter = tracking.allWindowsIterator() orelse return;
+        while (iter.next()) |wp| {
+            const w = wp.*;
+            if (w == skip) continue;
+            ctx.call(w);
         }
     }
 }

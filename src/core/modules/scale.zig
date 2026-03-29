@@ -168,9 +168,8 @@ pub fn scaleBorderWidth(value: ScalableValue, reference_dimension: u16) u16 {
     if (value.is_percentage) {
         const dim_f: f32 = @floatFromInt(reference_dimension);
         return @intFromFloat(@max(0.0, @round((value.value / 100.0) * 0.5 * dim_f)));
-    } else {
-        return @intFromFloat(@max(0.0, @round(value.value)));
     }
+    return @intFromFloat(@max(0.0, @round(value.value)));
 }
 
 /// Alias for `scaleBorderWidth` — gaps and borders share identical scaling semantics.
@@ -187,9 +186,8 @@ pub fn scaleFontSize(value: ScalableValue, screen: *xcb.xcb_screen_t) u16 {
     if (value.is_percentage) {
         const screen_height: f32 = @floatFromInt(screen.height_in_pixels);
         return @intFromFloat(@max(1.0, @round(value.value * (screen_height / FONT_BASELINE_HEIGHT))));
-    } else {
-        return @intFromFloat(@max(1.0, @round(value.value)));
     }
+    return @intFromFloat(@max(1.0, @round(value.value)));
 }
 
 pub fn scaleBarHeight(value: ScalableValue, screen_height: u16) u16 {

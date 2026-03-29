@@ -46,6 +46,8 @@ pub fn draw(dc: *drawing.DrawContext, config: core.BarConfig, height: u16, start
     var now_ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(.REALTIME, &now_ts);
     const sec: i64 = now_ts.sec;
+
+    // Re-use the cached string when the second hasn't changed; format otherwise.
     const time_str = if (sec == last_formatted_sec)
         last_formatted_time[0..19]
     else blk: {

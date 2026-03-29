@@ -85,9 +85,9 @@ fn tileStack(ctx: *const layouts.LayoutCtx, windows: []const u32, x: u16, y_offs
 
     if (s_count <= max_fit) {
         tileColumn(ctx, windows, x +| m.gap / 2, y_offset, h, calcMarginedWidth(w, m.gap / 2, m.gap + 2 * m.border), m);
-    } else {
-        tileStackOverflow(ctx, windows, x, y_offset, w, h, max_fit, m);
+        return;
     }
+    tileStackOverflow(ctx, windows, x, y_offset, w, h, max_fit, m);
 }
 
 // Column-major overflow grid: row r contains windows at indices r, r+max_fit,

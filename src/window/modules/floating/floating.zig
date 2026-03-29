@@ -92,12 +92,15 @@ pub fn tileWithOffset(
             const already_placed = blk: {
                 const wd = ctx.cache.get(win) orelse break :blk false;
                 if (!wd.hasValidRect()) break :blk false;
-                break :blk (wd.rect.x != 0 or wd.rect.y != 0);
+                break :blk wd.rect.x != 0 or wd.rect.y != 0;
             };
-            needs_query[i] = !already_placed;
+            // Guard: nothing more to do for windows that are already placed.
+            // needs_query[i] stays false (pre-initialised above).
+            if (already_placed) continue;
+            needs_query[i] = true;
             // any_needs lets us skip the phase-1/2 loops entirely when every
             // window in this batch is already cached and placed.
-            if (!already_placed) any_needs = true;
+            any_needs = true;
         }
 
         if (!any_needs) { base = end; continue; }

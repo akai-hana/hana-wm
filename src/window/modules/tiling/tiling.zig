@@ -613,9 +613,8 @@ inline fn resolveMasterWidth(s: *const State, ws_state: ?*WsState, ws_idx: u8) f
     if (comptime !build_options.has_workspaces) return s.master_width;
     if (core.config.tiling.global_layout) return s.master_width;
     const wss = ws_state orelse return s.master_width;
-    if (ws_idx < wss.workspaces.len) {
-        if (wss.workspaces[ws_idx].master_width) |mw| return mw;
-    }
+    if (ws_idx >= wss.workspaces.len) return s.master_width;
+    if (wss.workspaces[ws_idx].master_width) |mw| return mw;
     return s.master_width;
 }
 
@@ -937,28 +936,29 @@ pub fn swapFocusedWithPrevious() void {
     const focused_tiled = s.enabled and s.windows.contains(focused);
     const prev_tiled    = s.enabled and s.windows.contains(prev);
 
-    if (focused_tiled and prev_tiled) {
-        // Both are under tiler control: swap their positions in the tracking
-        // list so the next retile assigns each window to the other's cell.
-        //
-        // Single-pass scan: find both indices simultaneously rather than
-        // calling findWinIdx twice (two O(n) passes over the same slice).
-        const all = s.windows.items();
-        var idx_focused: ?usize = null;
-        var idx_prev:    ?usize = null;
-        for (all, 0..) |w, i| {
-            if (w == focused) idx_focused = i;
-            if (w == prev)    idx_prev    = i;
-            if (idx_focused != null and idx_prev != null) break;
-        }
-        swapWindowsInList(s, idx_focused orelse return, idx_prev orelse return);
-        retileCurrentWorkspace();
-    } else {
+    if (!focused_tiled or !prev_tiled) {
         // One or both windows are floating: exchange their on-screen geometries
         // directly without touching the tiling list.
         swapWindowGeometriesDirectly(s, focused, prev);
         _ = xcb.xcb_flush(core.conn);
+        return;
     }
+
+    // Both are under tiler control: swap their positions in the tracking
+    // list so the next retile assigns each window to the other's cell.
+    //
+    // Single-pass scan: find both indices simultaneously rather than
+    // calling findWinIdx twice (two O(n) passes over the same slice).
+    const all = s.windows.items();
+    var idx_focused: ?usize = null;
+    var idx_prev:    ?usize = null;
+    for (all, 0..) |w, i| {
+        if (w == focused) idx_focused = i;
+        if (w == prev)    idx_prev    = i;
+        if (idx_focused != null and idx_prev != null) break;
+    }
+    swapWindowsInList(s, idx_focused orelse return, idx_prev orelse return);
+    retileCurrentWorkspace();
 }
 
 /// Swap the two elements at `idx_a` and `idx_b` inside the tracking list.
@@ -1032,25 +1032,25 @@ fn swapWindowGeometriesDirectly(s: *State, win_a: u32, win_b: u32) void {
 /// prev_layout in global mode), and retiles.
 pub fn toggleFloating() void {
     const s = getState();
-    if (s.layout == .floating) {
-        s.enabled = true;
-        // In per-workspace mode read the layout from the workspace we are
-        // currently on, so the bar stays correct even if the user switched
-        // workspaces while floating.  Fall back to prev_layout in global mode.
-        const restore: Layout = if (!core.config.tiling.global_layout)
-            if (comptime build_options.has_workspaces) (if (wsGetCurrentWorkspaceObject()) |ws| ws.layout else s.prev_layout) else s.prev_layout
-        else
-            s.prev_layout;
-        s.layout = restore;
-        retileCurrentWorkspace();
-        bar.scheduleFullRedraw();
-        debug.info("Floating disabled, restored layout: {s}", .{@tagName(restore)});
-    } else {
+    if (s.layout != .floating) {
         s.prev_layout = s.layout;
         s.layout      = .floating;
         s.enabled     = false;
         debug.info("Floating enabled (was: {s})", .{@tagName(s.prev_layout)});
+        return;
     }
+    s.enabled = true;
+    // In per-workspace mode read the layout from the workspace we are
+    // currently on, so the bar stays correct even if the user switched
+    // workspaces while floating.  Fall back to prev_layout in global mode.
+    const restore: Layout = if (!core.config.tiling.global_layout)
+        if (comptime build_options.has_workspaces) (if (wsGetCurrentWorkspaceObject()) |ws| ws.layout else s.prev_layout) else s.prev_layout
+    else
+        s.prev_layout;
+    s.layout = restore;
+    retileCurrentWorkspace();
+    bar.scheduleFullRedraw();
+    debug.info("Floating disabled, restored layout: {s}", .{@tagName(restore)});
 }
 
 pub fn syncLayoutFromWorkspace(ws: *const WsWorkspace) void {
