@@ -524,7 +524,14 @@ fn unmanageWindow(win: u32) void {
     _ = xcb.xcb_grab_server(core.conn);
 
     // Notify each module in order inside the server grab.
-    if (tilingActive()) {
+    // Use a comptime guard here, NOT the runtime tilingActive() check.
+    // tilingActive() reads core.config.tiling.enabled, which can change on a
+    // config reload *after* a window was added to the tiling pool.  If
+    // enabled flips false between addWindow and this unmanage call, the
+    // runtime guard would skip removeWindow and leave the window as a zombie
+    // in tiling.State.windows — causing ghost tiles on the next retile.
+    // tiling.removeWindow is a safe no-op if the window was never added.
+    if (comptime build_options.has_tiling) {
         tiling.removeWindow(win);
         tiling.evictSizeHints(win);
     }
@@ -698,6 +705,16 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t) void {
     focus.setLastEventTime(event.time);
     if (event.mode == xcb.XCB_NOTIFY_MODE_GRAB or
         event.mode == xcb.XCB_NOTIFY_MODE_UNGRAB) return;
+    // NotifyInferior means the pointer entered this window from one of its own
+    // child windows (e.g. Electron moving internal focus back to the top-level
+    // frame area).  DWM filters these for all non-root windows:
+    //   if ((ev->mode != NotifyNormal || ev->detail == NotifyInferior) && ev->window != root)
+    //       return;
+    // Without this guard, a spurious EnterNotify with detail=NotifyInferior
+    // updates g_last_event_time and may re-trigger maybeFocusWindow on an
+    // already-focused window, which is a no-op in the common case but can
+    // interfere with the confirm/retry machinery for borderline apps.
+    if (event.detail == xcb.XCB_NOTIFY_DETAIL_INFERIOR and event.event != core.root) return;
     if (drag.isDragging()) return;
     if (suppressSpawnCrossing(event.root_x, event.root_y)) return;
     // A tiling operation (e.g. fullscreen exit) just repositioned windows,

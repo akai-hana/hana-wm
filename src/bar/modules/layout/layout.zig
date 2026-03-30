@@ -2,6 +2,7 @@
 //! For the variants indicator see variantss.zig.
 
 const core          = @import("core");
+const types         = @import("types");
 const drawing       = @import("drawing");
 const build_options = @import("build_options");
 const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
@@ -19,7 +20,7 @@ pub fn getIcon(layout: anytype) []const u8 {
     };
 }
 
-pub fn draw(dc: *drawing.DrawContext, config: core.BarConfig, height: u16, start_x: u16) !u16 {
+pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
     // Without tiling all windows are floating by definition.
     if (comptime !build_options.has_tiling)
         return dc.drawSegment(start_x, height, "><>", config.scaledSegmentPadding(height), config.bg, config.fg);

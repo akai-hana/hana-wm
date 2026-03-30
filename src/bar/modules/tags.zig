@@ -10,6 +10,7 @@
 
 const std     = @import("std");
 const core    = @import("core");
+const types   = @import("types");
 const drawing = @import("drawing");
 
 /// Comptime-generated label strings "1".."20". Never heap-allocated.
@@ -32,7 +33,7 @@ var cached_ind_x_off:  u16     = 0;
 /// Cached vertical top position of the indicator glyph. Constant for all cells.
 var cached_ind_y:      u16     = 0;
 
-inline fn getLabel(i: usize, config: core.BarConfig) []const u8 {
+inline fn getLabel(i: usize, config: types.BarConfig) []const u8 {
     if (i < config.workspace_icons.items.len) return config.workspace_icons.items[i];
     if (i < static_numbers.len)               return static_numbers[i];
     return "?";
@@ -42,7 +43,7 @@ pub fn invalidate() void { cache_valid = false; }
 
 pub fn getCachedWorkspaceWidth() u16 { return ws_width; }
 
-fn ensureCache(dc: *drawing.DrawContext, config: core.BarConfig, height: u16) void {
+fn ensureCache(dc: *drawing.DrawContext, config: types.BarConfig, height: u16) void {
     if (cache_valid) return;
     for (&label_widths, 0..) |*w, i| w.* = dc.measureTextWidth(getLabel(i, config));
     ws_width    = config.scaledWorkspaceWidth(height);
@@ -67,7 +68,7 @@ fn indicatorPos(
     bar_height: u16,
     item_w:     u16,
     item_h:     u16,
-    location:   core.IndicatorLocation,
+    location:   types.IndicatorLocation,
     padding:    f32,
 ) struct { x: u16, y: u16 } {
     const cw: f32 = @floatFromInt(cell_w);
@@ -102,7 +103,7 @@ fn indicatorPos(
 ///                    at least one window (used to draw the indicator glyph).
 pub fn draw(
     dc:             *drawing.DrawContext,
-    config:         core.BarConfig,
+    config:         types.BarConfig,
     height:         u16,
     start_x:        u16,
     ws_current:     u8,

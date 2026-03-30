@@ -14,6 +14,7 @@
 
 const std     = @import("std");
 const core    = @import("core");
+const types   = @import("types");
 const xcb     = core.xcb;
 const drawing = @import("drawing");
 const title   = @import("title");
@@ -184,7 +185,7 @@ pub fn toggle() void {
 /// `state.map.get(key)` directly — null is fine when there is no binding.
 pub fn handlePromptKeypress(
     event:        *const xcb.xcb_key_press_event_t,
-    bound_action: ?*const core.Action,
+    bound_action: ?*const types.Action,
 ) bool {
     if (!g.is_active) return false;
     if (bound_action) |action| if (action.* == .close_window) {
@@ -285,7 +286,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
 
 pub fn draw(
     dc:                  *drawing.DrawContext,
-    config:              core.BarConfig,
+    config:              types.BarConfig,
     height:              u16,
     start_x:             u16,
     width:               u16,
@@ -862,7 +863,7 @@ inline fn cursorBlockGeom(
 /// The scrollable region keeps the cursor in view.
 fn drawActive(
     dc:      *drawing.DrawContext,
-    config:  core.BarConfig,
+    config:  types.BarConfig,
     height:  u16,
     start_x: u16,
     width:   u16,
