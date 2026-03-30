@@ -1,27 +1,28 @@
 //! Workspace management — creation, window assignment, and workspace switching.
 
-const std          = @import("std");
-const tracking     = @import("tracking");
+const std           = @import("std");
+const tracking      = @import("tracking");
 const build_options = @import("build_options");
-const fullscreen   = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
-const core         = @import("core");
-const xcb          = core.xcb;
-const utils        = @import("utils");
-const focus        = @import("focus");
-const window       = @import("window");
-const bar          = if (build_options.has_bar) @import("bar") else struct {
+const fullscreen    = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
+const core          = @import("core");
+const types         = @import("types");
+const xcb           = core.xcb;
+const utils         = @import("utils");
+const focus         = @import("focus");
+const window        = @import("window");
+const bar           = if (build_options.has_bar) @import("bar") else struct {
     pub fn scheduleRedraw() void {}
     pub fn raiseBar() void {}
     pub fn redrawInsideGrab() void {}
     pub fn setBarState(_: anytype) void {}
 };
-const has_tiling   = @import("build_options").has_tiling;
-const tiling       = if (has_tiling) @import("tiling") else struct {};
-const TilingLayout = if (has_tiling) tiling.Layout else u0;
-const Tracking     = @import("tracking").Tracking;
-const constants    = @import("constants");
-const debug        = @import("debug");
-const minimize     = if (build_options.has_minimize) @import("minimize") else struct {};
+const has_tiling    = @import("build_options").has_tiling;
+const tiling        = if (has_tiling) @import("tiling") else struct {};
+const TilingLayout  = if (has_tiling) tiling.Layout else u0;
+const Tracking      = @import("tracking").Tracking;
+const constants     = @import("constants");
+const debug         = @import("debug");
+const minimize      = if (build_options.has_minimize) @import("minimize") else struct {};
 
 /// Shim so call-sites don't need to repeat the has_minimize comptime guard.
 /// Returns false when minimize is absent — windows are never considered minimized.
@@ -46,7 +47,7 @@ pub const Workspace = struct {
     layout: TilingLayout,
     // Optional layout variants override set via the layouts array in config.
     // Applied on every workspace switch; null means use the global defaults.
-    variants: ?core.LayoutVariantOverride = null,
+    variants: ?types.LayoutVariantOverride = null,
     // Per-workspace master width override (master-stack layout).
     // null = use the global default from tiling state.
     // Set when the user adjusts master width in per-workspace layout mode;
@@ -137,7 +138,7 @@ pub fn init() !void {
     const MAX_WS = 64;
     const OverrideLookup = struct {
         layout_idx: usize,
-        variant:    ?core.LayoutVariantOverride,
+        variant:    ?types.LayoutVariantOverride,
     };
     var override_lookup: [MAX_WS]?OverrideLookup = .{null} ** MAX_WS;
     if (has_tiling) {
@@ -157,7 +158,7 @@ pub fn init() !void {
         // Apply any workspace-specific layout + variants override from the
         // layouts array (e.g. `"monocle", "gapless", "4,8"` in config.toml).
         var ws_layout   = default_layout;
-        var ws_variant: ?core.LayoutVariantOverride = null;
+        var ws_variant: ?types.LayoutVariantOverride = null;
         if (has_tiling) {
             if (override_lookup[id]) |o| {
                 if (o.layout_idx < cfg_tiling.layouts.items.len)
@@ -248,7 +249,7 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
 
     evictWindow(win);
     if (focus.getFocused() == win) focus.clearFocus();
-    if (has_tiling and core.config.tiling.enabled) tiling.dirty();
+    if (has_tiling and core.config.tiling.enabled) tiling.markDirty();
     bar.scheduleRedraw();
     _ = xcb.xcb_flush(core.conn);
 }
@@ -613,7 +614,7 @@ fn hideWorkspaceWindows(ws: *const Workspace, new_ws: u8) void {
 
 // Step 3b: restore geometry for the new workspace.
 fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
-    const tiling_active = has_tiling and tiling.getState().enabled;
+    const tiling_active = has_tiling and tiling.getState().is_enabled;
 
     if (tiling_active) {
         if (!core.config.tiling.global_layout) tiling.syncLayoutFromWorkspace(ws);
@@ -680,24 +681,29 @@ fn applyPostSwitchFocus(new_ws: u8, new_ws_obj: *Workspace, ptr_cookie: xcb.xcb_
             child else lastFocusedOrFirst(new_ws_obj);
     };
 
-    const old_focused = focus.getFocused();
-    focus.setFocused(focus_target);
-
-    window.updateFocusBorders(old_focused, focus_target);
-
-    if (old_focused) |old_win| window.grabButtons(old_win, false);
-
+    // Route through focus.setFocus / focus.clearFocus so that
+    // commitFocusTransition runs its full side-effect list:
+    //   • recordInHistory(old)       — MRU history kept correct for recovery
+    //   • tiling.updateWindowFocus   — tiling border state updated
+    //   • carousel.notifyFocusChanged — carousel UI notified
+    //   • advertiseActiveWindow      — _NET_ACTIVE_WINDOW on root updated
+    //   • grabButtons on old/new     — button grab ownership transferred
+    //   • xcb_set_input_focus        — X server notified
+    //
+    // The previous direct focus.setFocused() call bypassed all of these,
+    // leaving the MRU history stale and focus recovery broken after every
+    // workspace switch.
+    //
+    // .workspace_switch skips the mapped-check round-trip and never raises
+    // the window — both correct for this path since all windows are already
+    // mapped and the stacking order is set by hide/restoreWorkspaceWindows.
+    // bar.scheduleFocusRedraw() sets only a dirty bit here; the caller
+    // calls bar.redrawInsideGrab() for the actual synchronous redraw.
     if (focus_target) |new_win| {
-        window.grabButtons(new_win, true);
-
-        const input_model = utils.getInputModelCached(core.conn, new_win);
-        if (input_model == .locally_active or input_model == .globally_active) {
-            utils.sendWMTakeFocus(core.conn, new_win, focus.getLastEventTime());
-        }
+        focus.setFocus(new_win, .workspace_switch);
+    } else {
+        focus.clearFocus();
     }
-
-    _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
-        focus_target orelse core.root, focus.getLastEventTime());
 }
 
 fn executeSwitch(old_ws: u8, new_ws: u8) void {

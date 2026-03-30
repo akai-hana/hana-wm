@@ -15,23 +15,24 @@ const c = @cImport({
 // core/
 const core      = @import("core");
     const xcb   = core.xcb;
+const types     = @import("types");
 const utils     = @import("utils");
 const constants = @import("constants");
-// modules/
+
+// core/modules/
 const debug = @import("debug");
 
 // window/
 const window   = @import("window");
 const tracking = @import("tracking");
 const focus    = @import("focus");
-// modules/
+
+// window/modules/
 const fullscreen = if (build.has_fullscreen) @import("fullscreen") else struct {};
 const minimize   = if (build.has_minimize) @import("minimize") else struct {};
 const workspaces = if (build.has_workspaces) @import("workspaces") else struct {};
-// tiling
-const drag = @import("drag");
-// floating
-const tiling = if (build.has_tiling) @import("tiling") else struct {};
+const tiling     = if (build.has_tiling) @import("tiling") else struct {};
+const drag       = @import("drag");
 
 // input
 const xkbcommon = @import("xkbcommon");
@@ -144,7 +145,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     // Linear scan over keybindings. In practice the list is < 50 entries and
     // bounded by what a human can type in a config file, so a flat scan over
     // contiguous memory beats a hash lookup (cache locality, zero allocation).
-    var matched: ?*const core.Action = null;
+    var matched: ?*const types.Action = null;
     for (core.config.keybindings.items) |*kb| {
         if (kb.modifiers == mods and kb.keysym == keysym) {
             matched = &kb.action;
@@ -257,7 +258,7 @@ fn closeWindow(win: u32) void {
 
 // Action dispatch 
 
-fn executeAction(action: *const core.Action) !void {
+fn executeAction(action: *const types.Action) !void {
     switch (action.*) {
         // Core 
         .close_window  => if (focus.getFocused()) |win| closeWindow(win),
@@ -323,7 +324,7 @@ fn executeAction(action: *const core.Action) !void {
 /// Like executeAction but acts on the clicked window rather than the
 /// keyboard-focused one. Used by the mouse bind dispatcher so that e.g.
 /// toggle_floating affects whichever window was actually clicked.
-fn executeMouseAction(action: *const core.Action, clicked_win: u32) !void {
+fn executeMouseAction(action: *const types.Action, clicked_win: u32) !void {
     switch (action.*) {
         .toggle_floating => if (comptime build.has_tiling) tiling.toggleWindowFloat(clicked_win),
         else             => try executeAction(action),
@@ -466,7 +467,7 @@ fn dumpState() void {
 
     if (comptime build.has_tiling) {
         if (tiling.getStateOpt()) |t| {
-            debug.info("Tiling enabled: {}",     .{t.enabled});
+            debug.info("Tiling enabled: {}",     .{t.is_enabled});
             debug.info("Tiling layout:  {s}",    .{@tagName(t.layout)});
             debug.info("Tiled windows:  {}",     .{t.windows.len});
             debug.info("Master count:   {}",     .{t.master_count});

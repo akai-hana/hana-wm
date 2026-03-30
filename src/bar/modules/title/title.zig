@@ -15,11 +15,12 @@
 //! Carousel logic lives in carousel.zig.
 //! Monitor refresh-rate detection lives in carousel.zig.
 
-const std     = @import("std");
-const core    = @import("core");
-const xcb     = core.xcb;
-const utils   = @import("utils");
-const drawing = @import("drawing");
+const std      = @import("std");
+const core     = @import("core");
+const types    = @import("types");
+const xcb      = core.xcb;
+const utils    = @import("utils");
+const drawing  = @import("drawing");
 const carousel = @import("carousel");
 
 // ---------------------------------------------------------------------------
@@ -86,7 +87,7 @@ const WindowInfo = struct {
 /// Constructed once per bar frame and shared between `draw()` and `drawCached()`.
 pub const TitleRenderContext = struct {
     dc:      *drawing.DrawContext,
-    config:  core.BarConfig,
+    config:  types.BarConfig,
     height:  u16,
     start_x: u16,
     width:   u16,

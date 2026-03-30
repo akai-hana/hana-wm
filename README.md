@@ -25,7 +25,7 @@
 
 **hana** is an _(optionally)_ dynamic window manager for X11, written in Zig.
 
-It supports tiling/floating window management, and includes a bar/prompt integrated to the WM.
+It supports tiling/floating window management, and includes its own bar, integrated to the WM.
 <!-- TODO: do widgets, like volume -->
 
 It is designed with the objective to be comfortable to use, highly configurable and easily modifiable.
@@ -55,13 +55,11 @@ src
 └ window
 ```
 
-`core/`, `window/`, `config/` are directory categories essential to hana's workings, each containing optional sub-directories inside. `bar/` is its own thing entirely, and can be entirely removed if the user wants to use another bar (though none will have better integration with hana).
+`core/`, `window/`, `config/` are hana's main directories. `bar/` contains the code for hana's bar, which is optional to compilation, so it can be removed if the user wants to use another bar, or none at all. `#TODO: improve support with external bars`
 
-On the first level of directories there's the essential files to that specific category. Some directories contain a `modules/` sub-directory, containing single-role files/directories that extend their category, modularly adding one feature each. This way, the user can choose to keep and discard any combination of modules at will.
+By default, hana's codebase is organized so that any optional code which extends a particular sub-system is located inside a `modules/` directory, modularly coded so that each individual addition has its own file, or set of files if needed (e.g. `src/bar/title/<title.zig/carousel.zig>`). This is to make a clear hierarchy, as to which files are mandatory and which ones are optional, and what does every module add onto.
 
 `tiling/` and `floating/` can be found inside `window/modules`. Both are included by default, making hana a dynamic window manager. At minimum, either one of them must be included in order to compile hana. 
-
-This clear codebase structuring might even help an advanced user navigate through the code easier, and modifying it more comfortable.
 
 `# TODO: mention codebase encapsulation`
 

@@ -16,6 +16,22 @@ const bar           = if (build_options.has_bar) @import("bar") else struct {
 const fullscreen    = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const window        = @import("window");
 
+// Drag state types
+
+pub const DragMode = enum { move, resize };
+
+pub const DragState = struct {
+    active:           bool     = false,
+    window:           core.WindowId = 0,
+    mode:             DragMode = .move,
+    start_x:          i16      = 0,
+    start_y:          i16      = 0,
+    start_win_x:      i16      = 0,
+    start_win_y:      i16      = 0,
+    start_win_width:  u16      = 0,
+    start_win_height: u16      = 0,
+};
+
 // Named work-area type 
 // A named struct makes the return type of workArea() referenceable in
 // variable declarations and future doc-comments, unlike an anonymous return
@@ -99,8 +115,8 @@ inline fn snapFarEdge(edge: i32, boundary: i32, snap: i32) i32 {
 // Module state 
 
 const State = struct {
-    drag:          core.DragState = .{},
-    pending_float: bool           = false,
+    drag:          DragState = .{},
+    pending_float: bool      = false,
 };
 var g_state: State = .{};
 
