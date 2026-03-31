@@ -119,14 +119,19 @@ pub fn isActive() bool { return g.is_active; }
 
 /// Returns true when the prompt is active in insert mode, signalling that
 /// the bar should schedule a periodic redraw for the cursor blink animation.
-pub fn needsRedraw() bool { return g.is_active and g.vim_state.mode == .insert; }
+pub fn needsRedraw() bool {
+    if (!g.is_active) return false;
+    return g.vim_state.mode == .insert or vim.colonInput(&g.vim_state) != null;
+}
 
 /// Returns the milliseconds until the next blink toggle, or -1 if the cursor
 /// blink animation is not running.  Pass this (combined with the clock timeout)
 /// to poll() so the event loop wakes up exactly when a redraw is needed.
 pub fn blinkPollTimeoutMs() i32 {
-    if (!g.is_active or g.vim_state.mode != .insert) return -1;
-    return cursor_blink_ms;
+    if (!g.is_active) return -1;
+    if (g.vim_state.mode == .insert or vim.colonInput(&g.vim_state) != null)
+        return cursor_blink_ms;
+    return -1;
 }
 
 /// Toggle cursor visibility.  Call from the event loop on every poll timeout
@@ -338,6 +343,17 @@ fn handleAction(action: vim.Action) void {
             const cmd = g.vim_state.buf[0..g.vim_state.len];
             if (cmd.len > 0) spawnCommand(cmd);
             deactivate();
+        },
+        // :w — execute the current command but keep the prompt open so the
+        // user can immediately type a new one.  The buffer is cleared and the
+        // mode is reset to INSERT, mirroring what activate() does without the
+        // keyboard-grab overhead (the grab is already held).
+        .spawn_keep => {
+            const cmd = g.vim_state.buf[0..g.vim_state.len];
+            if (cmd.len > 0) spawnCommand(cmd);
+            resetVimEditing(&g.vim_state);
+            g.ghost_len = 0;
+            g.has_space = false;
         },
     }
 }
@@ -882,7 +898,18 @@ fn drawActive(
     const text_end_x  = end_x   -| pad;
     if (text_left_x >= text_end_x) return end_x;
 
-    // Mode label — pinned to the right edge; does not scroll.
+    // Mode widget — pinned to the right edge; does not scroll.
+    //
+    // Rendered as a filled pill: accent-coloured background, white text.
+    // Horizontal padding of `pill_h_pad` is applied on both sides so the text
+    // never touches the pill edge and there is a natural gap between the pill
+    // and the scrollable text region.
+    //
+    // In colon-command mode the mode label is replaced by an ex-command input
+    // field that shows ":typed_chars" followed by a block cursor.
+    const pill_h_pad: u16 = 6;
+    const white: u32 = 0xFFFFFFFF;
+
     const mode_label = g.vim_state.mode.label();
     const mode_idx: usize = @intFromEnum(g.vim_state.mode);
 
@@ -892,17 +919,51 @@ fn drawActive(
         break :blk w;
     };
 
-    if (mode_w > 0 and text_end_x >= mode_w) {
-        const label_x = text_end_x - mode_w;
-        if (label_x >= text_left_x)
-            try dc.drawText(label_x, baseline, mode_label, accent);
+    // Total pill width = inner text width + left pad + right pad.
+    const pill_w: u16 = mode_w + pill_h_pad * 2;
+
+    // Reserve the pill width on the right; the scrollable region ends here.
+    const scroll_end_x: u16 = if (text_end_x >= pill_w) text_end_x - pill_w else text_left_x;
+    // Clip post-cursor text 2 px before the pill so ink never bleeds into it.
+    const ellipsis_end_x: u16 = scroll_end_x -| 2;
+
+    if (pill_w > 0 and text_end_x >= pill_w) {
+        const pill_x: u16 = text_end_x - pill_w;
+        if (pill_x >= text_left_x) {
+            // Filled pill background.
+            dc.fillRect(pill_x, cursor_v_pad, pill_w, height -| cursor_v_pad * 2, accent);
+
+            if (vim.colonInput(&g.vim_state)) |ct| {
+                // Ex-command input: ":typed_chars" + blinking insert-style caret.
+                var ppx: i32 = @as(i32, pill_x) + @as(i32, pill_h_pad);
+                const colon_w: i32 = @intCast(dc.measureTextWidth(":"));
+                try dc.drawText(@intCast(ppx), baseline, ":", white);
+                ppx += colon_w;
+                if (ct.len > 0) {
+                    try dc.drawText(@intCast(ppx), baseline, ct, white);
+                    ppx += @intCast(dc.measureTextWidth(ct));
+                }
+                // Blinking thin caret — same geometry as the insert-mode caret
+                // in the main text area so both look identical.
+                if (g.cached_caret_top == null) {
+                    const asc, const desc = dc.getMetrics();
+                    const font_h: u16 = @intCast(@max(0, @as(i32, asc) + @as(i32, desc)));
+                    g.cached_caret_top = (height -| font_h) / 2;
+                    g.cached_caret_h   = @min(font_h, height);
+                }
+                const caret_top = g.cached_caret_top.?;
+                const caret_h   = g.cached_caret_h.?;
+                const pill_inner_end: i32 = @as(i32, pill_x) + @as(i32, pill_w) - @as(i32, pill_h_pad);
+                if (g.is_blink_visible and ppx < pill_inner_end) {
+                    dc.fillRect(@intCast(ppx), caret_top, cursor_width, caret_h, white);
+                }
+            } else {
+                // Normal mode label centred (left-padded) inside the pill.
+                try dc.drawText(pill_x + pill_h_pad, baseline, mode_label, white);
+            }
+        }
     }
 
-    const scroll_end_x: u16 = if (text_end_x >= mode_w) text_end_x - mode_w else text_left_x;
-    // Clip 2 px before the mode label so its ink never bleeds into the '[' bracket.
-    // Only used for `drawPostSpan`; scroll math uses the full `scroll_end_x` so
-    // the cursor position is unaffected.
-    const ellipsis_end_x: u16 = scroll_end_x -| 2;
     if (text_left_x >= scroll_end_x) return end_x;
 
     const max_scroll_px: u16 = scroll_end_x - text_left_x;
@@ -963,7 +1024,11 @@ fn drawActive(
     var px: i32 = @as(i32, text_left_x) - @as(i32, scroll_x);
     try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, prompt, accent);
 
-    // Mode-specific text rendering
+    // Mode-specific text rendering.
+    // When colon-command mode is active the cursor lives in the pill widget,
+    // not here — so we skip all cursor drawing in the main text area.
+    const colon_active = vim.colonInput(&g.vim_state) != null;
+
     if (g.vim_state.mode == .visual) {
         const sel      = vim.visualRange(&g.vim_state);
         const sel_lo   = sel[0];
@@ -1002,7 +1067,7 @@ fn drawActive(
         const caret_top = g.cached_caret_top.?;
         const caret_h   = g.cached_caret_h.?;
 
-        if (g.is_blink_visible and px >= @as(i32, text_left_x) and px < @as(i32, scroll_end_x)) {
+        if (g.is_blink_visible and !colon_active and px >= @as(i32, text_left_x) and px < @as(i32, scroll_end_x)) {
             dc.fillRect(@intCast(px), caret_top, cursor_width, caret_h, accent);
         }
 
@@ -1028,10 +1093,19 @@ fn drawActive(
         if (pre_text.len > 0)
             try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, pre_text, fg);
 
-        if (cursorBlockGeom(px, cur_w, text_left_x, scroll_end_x)) |block| {
-            dc.fillRect(block.draw_x, cursor_v_pad, block.vis_w, height -| cursor_v_pad * 2, accent);
-            if (g.vim_state.cursor < g.vim_state.len)
-                try dc.drawText(block.draw_x, baseline, cur_text, bg);
+        if (colon_active) {
+            // No cursor box — draw the character under the cursor as plain text
+            // so it isn't swallowed when the cursor moves to the pill widget.
+            if (g.vim_state.cursor < g.vim_state.len) {
+                if (cursorBlockGeom(px, cur_w, text_left_x, scroll_end_x)) |block|
+                    try dc.drawText(block.draw_x, baseline, cur_text, fg);
+            }
+        } else {
+            if (cursorBlockGeom(px, cur_w, text_left_x, scroll_end_x)) |block| {
+                dc.fillRect(block.draw_x, cursor_v_pad, block.vis_w, height -| cursor_v_pad * 2, accent);
+                if (g.vim_state.cursor < g.vim_state.len)
+                    try dc.drawText(block.draw_x, baseline, cur_text, bg);
+            }
         }
         px += @intCast(cur_w);
 

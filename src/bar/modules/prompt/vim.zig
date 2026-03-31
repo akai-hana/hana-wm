@@ -62,7 +62,12 @@ pub const mark_count: usize = 26;
 // ---------------------------------------------------------------------------
 
 /// What the caller should do after handling a key.
-pub const Action = enum { none, deactivate, spawn };
+///
+///   .none        — nothing special; caller should just redraw
+///   .deactivate  — close the prompt without executing (`:q`, Escape, Ctrl+C)
+///   .spawn       — execute buf[0..len] and close the prompt (Return, `:wq`, `:x`)
+///   .spawn_keep  — execute buf[0..len] but keep the prompt open (`:w`)
+pub const Action = enum { none, deactivate, spawn, spawn_keep };
 
 /// Editing modes, reflected live in the mode label.
 /// The integer value is the index into the cached mode-width array in prompt.zig.
@@ -167,6 +172,11 @@ const PendingCmd = struct {
     is_awaiting_mark_set:     bool = false,
     /// True after `'` is pressed; the next letter names the mark to jump to.
     is_awaiting_mark_jump:    bool = false,
+    /// True after ':' is pressed; subsequent keys build the ex command.
+    /// Recognised commands: w (spawn_keep), q (deactivate), wq (spawn), x (spawn).
+    is_colon_cmd: bool  = false,
+    colon_buf:    [4]u8 = .{ 0, 0, 0, 0 },
+    colon_len:    u8    = 0,
 };
 
 // ---------------------------------------------------------------------------
@@ -280,6 +290,15 @@ pub fn visualRange(vs: *VimState) [2]usize {
     return .{ lo, hi };
 }
 
+/// Returns the ex-command characters typed so far after `:` in normal mode,
+/// or null when the prompt is not in colon-command mode.
+/// The returned slice aliases internal `PendingCmd` storage and is valid only
+/// until the next call that mutates `VimState`.
+pub fn colonInput(vs: *const VimState) ?[]const u8 {
+    if (!vs.pending.is_colon_cmd) return null;
+    return vs.pending.colon_buf[0..vs.pending.colon_len];
+}
+
 pub fn insertSlice(vs: *VimState, slice: []const u8) void {
     const n = @min(slice.len, vs.max_input - 1 - vs.len);
     if (n == 0) return;
@@ -368,7 +387,55 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         return .none;
     }
 
-    // Shared: pending find/g, digits, ;/,, simple motions, prefix arming.
+    // Colon ex-command mode: :w  → spawn_keep (execute, keep open)
+    //                         :q  → deactivate (cancel)
+    //                         :wq → spawn      (execute, close)
+    //                         :x  → spawn      (execute, close)
+    // Escape cancels; any unrecognised command is silently discarded.
+    if (vs.pending.is_colon_cmd) {
+        switch (sym) {
+            XK_Escape => {
+                resetPendingCmd(vs);
+                return .none;
+            },
+            XK_BackSpace => {
+                if (vs.pending.colon_len > 0) {
+                    vs.pending.colon_len -= 1;
+                } else {
+                    resetPendingCmd(vs); // nothing typed → cancel back to normal
+                }
+                return .none;
+            },
+            XK_Return => {
+                // Copy command bytes locally before resetPendingCmd zeroes colon_buf.
+                var cmd_buf: [4]u8 = vs.pending.colon_buf;
+                const cmd_len: u8  = vs.pending.colon_len;
+                const cmd = cmd_buf[0..cmd_len];
+                resetPendingCmd(vs);
+                if (std.mem.eql(u8, cmd, "q"))  return .deactivate;
+                if (std.mem.eql(u8, cmd, "w"))  return .spawn_keep;
+                if (std.mem.eql(u8, cmd, "wq")) return .spawn;
+                if (std.mem.eql(u8, cmd, "x"))  return .spawn;
+                return .none;
+            },
+            else => {
+                if (sym >= 0x20 and sym <= 0x7e and vs.pending.colon_len < vs.pending.colon_buf.len) {
+                    vs.pending.colon_buf[vs.pending.colon_len] = @truncate(sym);
+                    vs.pending.colon_len += 1;
+                }
+                return .none;
+            },
+        }
+    }
+
+    // ':' with no pending operator arms colon command mode.
+    if (sym == ':' and vs.pending.op == 0) {
+        vs.pending.is_colon_cmd = true;
+        vs.pending.colon_len    = 0;
+        return .none;
+    }
+
+
     if (resolveMotionKey(vs, sym)) |mkr| {
         switch (mkr) {
             .consumed => return .none,
