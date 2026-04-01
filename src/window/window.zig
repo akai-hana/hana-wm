@@ -19,6 +19,7 @@ const bar           = if (build_options.has_bar) @import("bar") else struct {
 const tracking    = @import("tracking");
 const workspaces  = if (build_options.has_workspaces) @import("workspaces") else struct {};
 const WsWorkspace = if (build_options.has_workspaces) workspaces.Workspace else struct {};
+// Workspace module shims — no-op stubs used when has_workspaces is false.
 fn wsGetState() ?*workspaces.State             { return if (comptime build_options.has_workspaces) workspaces.getState()                 else null; }
 fn wsGetCurrentWorkspaceObject() ?*WsWorkspace { return if (comptime build_options.has_workspaces) workspaces.getCurrentWorkspaceObject() else null; }
 inline fn wsMoveWindowTo(win: u32, ws: u8) !void {
@@ -65,6 +66,9 @@ const SpawnQueue = struct {
     buf: [capacity]SpawnEntry = undefined,
     len: u8 = 0,
 
+    /// Appends `entry` to the queue.  When full, the oldest entry is silently
+    /// evicted to make room; a capacity of 16 is ample for any realistic burst
+    /// of concurrent spawns.
     fn push(self: *SpawnQueue, entry: SpawnEntry) void {
         if (self.len == capacity) {
             std.mem.copyForwards(SpawnEntry, self.buf[0 .. capacity - 1], self.buf[1..capacity]);
@@ -131,25 +135,31 @@ pub fn saveWindowGeom(win: u32, rect: utils.Rect) void {
 /// Return the last-known geometry for `win`, or null if none is cached.
 /// Delegates to tiling when present; reads from g_geom_cache otherwise.
 pub fn getWindowGeom(win: u32) ?utils.Rect {
-    if (comptime build_options.has_tiling) return tiling.getWindowGeom(win);
-    const wd = g_geom_cache.get(win) orelse return null;
-    if (!wd.hasValidRect()) return null;
-    return wd.rect;
+    if (comptime build_options.has_tiling) {
+        return tiling.getWindowGeom(win);
+    } else {
+        const wd = g_geom_cache.get(win) orelse return null;
+        if (!wd.hasValidRect()) return null;
+        return wd.rect;
+    }
 }
 
 /// Zero out the cached rect for `win` so the next retile recomputes it.
 pub fn invalidateWindowGeom(win: u32) void {
     if (comptime build_options.has_tiling) {
         tiling.invalidateGeomCache(win);
-        return;
+    } else {
+        if (g_geom_cache.getPtr(win)) |wd| wd.rect = .{};
     }
-    if (g_geom_cache.getPtr(win)) |wd| wd.rect = .{};
 }
 
 /// Remove `win`'s entry from the cache entirely (called on unmanage).
 pub fn evictWindowGeom(win: u32) void {
-    if (comptime build_options.has_tiling) return; // tiling.removeWindow handles this
-    g_geom_cache.remove(win);
+    if (comptime build_options.has_tiling) {
+        // tiling.removeWindow handles this
+    } else {
+        g_geom_cache.remove(win);
+    }
 }
 
 
@@ -173,6 +183,7 @@ pub fn init(alloc: std.mem.Allocator) !void {
 }
 
 pub fn deinit() void {
+    // Teardown in reverse-init order.
     if (comptime build_options.has_tiling)     tiling.deinit();
     if (comptime build_options.has_fullscreen) fullscreen.deinit();
     if (comptime build_options.has_workspaces) workspaces.deinit();
@@ -228,6 +239,7 @@ fn findWorkspaceRuleByClass(cookie: xcb.xcb_get_property_cookie_t) ?u8 {
     if (reply.*.format != 8 or reply.*.value_len == 0) return null;
 
     const raw: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
+    // WM_CLASS may be NUL-padded; trim so the final class string has no trailing NUL.
     const data = std.mem.trimEnd(u8, raw[0..reply.*.value_len], "\x00");
 
     const sep = std.mem.indexOfScalar(u8, data, 0) orelse return null;
@@ -268,6 +280,11 @@ fn findClassRuleWorkspace(win: u32) ?u8 {
 /// the oldest pending entry — the correct heuristic when an app re-execs or
 /// forks internally and its window PID differs from the registered grandchild.
 /// Returns null when the spawn queue was empty (c_net_wm_pid == null).
+///
+/// Precondition: when c_net_wm_pid is non-null, the spawn queue is provably
+/// non-empty — firePropertyCookies only fires the PID cookie when
+/// spawn_queue.len > 0.  No branch above consumes an entry without returning,
+/// so the oldest-entry fallback is always reached with at least one entry present.
 fn findSpawnQueueWorkspace(c_net_wm_pid: ?xcb.xcb_get_property_cookie_t) ?u8 {
     const pid_cookie = c_net_wm_pid orelse return null;
 
@@ -295,11 +312,7 @@ fn findSpawnQueueWorkspace(c_net_wm_pid: ?xcb.xcb_get_property_cookie_t) ?u8 {
         }
     }
 
-    // Oldest-entry fallback: any pending entry is almost certainly the source
-    // of this window (the queue is only populated by explicit user exec actions).
-    // The queue is provably non-empty here: this function is only entered when
-    // c_net_wm_pid is non-null, which firePropertyCookies guarantees only when
-    // spawn_queue.len > 0, and no branch above removes an entry without returning.
+    // Oldest-entry fallback — queue is non-empty per precondition (see doc comment).
     return spawn_queue.consume(0);
 }
 

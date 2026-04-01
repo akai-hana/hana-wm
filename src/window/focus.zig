@@ -22,9 +22,9 @@ const xcb    = core.xcb;
 // only focus.zig should be their primary writer.  All other modules call the
 // typed accessors below rather than reaching into WM.
 
-var g_focused_window:  ?u32                     = null;
+var g_focused_window: ?u32 = null;
 var g_suppress_reason: core.FocusSuppressReason = .none;
-var g_last_event_time: u32                      = 0;
+var g_last_event_time: u32 = 0;
 
 // Focus history
 //
@@ -41,8 +41,8 @@ var g_last_event_time: u32                      = 0;
 // freed by focus.deinit.  There is no artificial cap — the list will never
 // hold more entries than there are managed windows.
 
-var g_history:   std.ArrayListUnmanaged(u32) = .empty;
-var g_allocator: std.mem.Allocator           = undefined;
+var g_history: std.ArrayListUnmanaged(u32) = .empty;
+var g_allocator: std.mem.Allocator = undefined;
 
 // EWMH atom for _NET_ACTIVE_WINDOW — interned once in init().
 var g_net_active_window: xcb.xcb_atom_t = xcb.XCB_ATOM_NONE;
@@ -66,20 +66,17 @@ var g_net_active_window: xcb.xcb_atom_t = xcb.XCB_ATOM_NONE;
 //   drainPointerSync() to route focus to whichever window is under the cursor.
 
 var g_confirm_cookie: ?xcb.xcb_get_input_focus_cookie_t = null;
-// Improvement #2: typed as ?u32 so "no pending confirm" is expressed with null
-// rather than a sentinel value.  g_confirm_cookie and g_confirm_win are always
-// set and cleared together; the optionality of both is now consistent.
-var g_confirm_win:    ?u32                              = null;
+var g_confirm_win: ?u32 = null;
 
 var g_pointer_cookie: ?xcb.xcb_query_pointer_cookie_t = null;
 
 // Lifecycle
 
 pub fn init(allocator: std.mem.Allocator) void {
-    // Improvement #1: reset every module global explicitly so that a
-    // deinit() + init() cycle (test harness, session restart) starts from a
-    // clean slate.  The linker zero-inits them on first load, but subsequent
-    // reinits would otherwise inherit stale state from the previous session.
+    // Reset every module global so that a deinit() + init() cycle (test
+    // harness, session restart) starts from a clean slate.  The linker
+    // zero-inits them on first load, but subsequent reinits would otherwise
+    // inherit stale state from the previous session.
     g_allocator         = allocator;
     g_history           = .empty;
     g_focused_window    = null;
@@ -92,6 +89,7 @@ pub fn init(allocator: std.mem.Allocator) void {
 
     // Intern _NET_ACTIVE_WINDOW so setFocus can advertise the focused window
     // on the root window — required for xev -root / xprop based external tools.
+    // null reply → stays XCB_ATOM_NONE; advertiseActiveWindow no-ops.
     const ck = xcb.xcb_intern_atom(core.conn, 0, "_NET_ACTIVE_WINDOW".len, "_NET_ACTIVE_WINDOW");
     if (xcb.xcb_intern_atom_reply(core.conn, ck, null)) |r| {
         g_net_active_window = r.*.atom;
@@ -109,26 +107,15 @@ pub fn deinit() void {
 /// Allocation failures are silently ignored — the history may be shorter than
 /// ideal, but focus still functions correctly.
 ///
-/// Implementation note: single-pass O(n).
-///
-/// The original code called removeFromHistory (scan + orderedRemove, which
-/// shifts the tail left) followed by insert(0, …) (which shifts the whole
-/// slice right again) — two linear scans and two memmoves.
-///
-/// When `win` is already in the list, we can do the same logical operation
-/// with one scan and one memmove: locate the index, shift items[0..idx] one
-/// position to the right with copyBackwards, then write `win` at index 0.
-/// No allocation is needed because the list length is unchanged.
-///
-/// When `win` is absent, we still fall back to insert(0, …), which may
-/// allocate on growth — same as before.
+/// O(n) single-pass: when `win` is already present, one scan and one in-place
+/// memmove (copyBackwards) moves items[0..idx] right by one and writes `win` at
+/// index 0, with no allocation.  When absent, falls back to insert(0, …), which
+/// may allocate on growth.
 fn recordInHistory(win: u32) void {
     if (win == 0) return;
-    // Improvement #15: assert the invariant that g_focused_window is never in
-    // the history.  recordInHistory is always called with the *previous* focused
-    // window (old_win), captured before g_focused_window is overwritten.  If
-    // this fires, a caller has passed the post-transition value instead.
-    std.debug.assert(g_focused_window != @as(?u32, win));
+    // Invariant: recordInHistory is always called with the pre-transition window.
+    // If this fires, a caller passed the post-transition value instead.
+    std.debug.assert(g_focused_window != win);
     // Short-circuit: already the most-recent entry — nothing to do.
     if (g_history.items.len > 0 and g_history.items[0] == win) return;
 
@@ -165,36 +152,44 @@ pub inline fn getFocused()        ?u32                       { return g_focused_
 pub inline fn getSuppressReason() core.FocusSuppressReason   { return g_suppress_reason; }
 pub inline fn getLastEventTime()  u32                        { return g_last_event_time; }
 
+/// Raw write to g_focused_window, bypassing all side effects: history recording,
+/// grab management, XCB protocol calls, bar/carousel notifications, and
+/// _NET_ACTIVE_WINDOW updates.  All of those invariants are the responsibility
+/// of commitFocusTransition.  Callers must ensure they maintain every invariant
+/// that commitFocusTransition normally enforces.
 pub inline fn setFocused(win: ?u32) void    { g_focused_window  = win; }
 
-/// Update the X11 event timestamp used for xcb_set_input_focus and
-/// WM_TAKE_FOCUS messages.
-///
-/// CRITICAL: this MUST be called for EnterNotify events (with enter_event.time)
-/// BEFORE calling setFocus(.mouse_enter).  If it is only called for button and
-/// key events, g_last_event_time will be from the last click/keystroke, not
-/// the current hover event.
-///
-/// Why this matters:
-///   1. The WM sends xcb_set_input_focus(win, T_enter).
-///      X server: last-focus-change-time = T_enter.
-///   2. The WM sends WM_TAKE_FOCUS(win, g_last_event_time).
-///      If g_last_event_time is an old button-press timestamp T_old < T_enter,
-///      the app (e.g. Discord, Prism Launcher) receives WM_TAKE_FOCUS with T_old
-///      and calls XSetInputFocus(internal_widget, T_old).
-///   3. X server: T_old < last-focus-change-time (T_enter) → request IGNORED.
-///   4. The app's internal focus widget never gets focus; the app appears
-///      unresponsive to hover even though the X server reported success for
-///      the WM's own xcb_set_input_focus.
-///
-/// Terminals and Firefox are often immune: terminals are passive (no
-/// WM_TAKE_FOCUS, so no app-side XSetInputFocus to fail), and Firefox may use
-/// CurrentTime rather than the WM-provided timestamp.  Electron apps (Discord)
-/// and Qt apps (Prism Launcher) strictly use the provided timestamp per ICCCM.
-///
-/// dwm avoids this entirely by always passing CurrentTime (0) everywhere,
-/// which the X server interprets as "now" and bypasses the ordering check.
+/// Update the X11 event timestamp used for xcb_set_input_focus and WM_TAKE_FOCUS
+/// messages.  See "Timestamp handling" below for why this must be called for
+/// EnterNotify events before setFocus(.mouse_enter).
 pub inline fn setLastEventTime(t: u32) void { g_last_event_time = t;   }
+
+// Timestamp handling
+//
+// CRITICAL: setLastEventTime MUST be called with enter_event.time BEFORE
+// calling setFocus(.mouse_enter).  If it is only called for button and key
+// events, g_last_event_time will be from the last click/keystroke, not the
+// current hover event.
+//
+// Why this matters:
+//   1. The WM sends xcb_set_input_focus(win, T_enter).
+//      X server: last-focus-change-time = T_enter.
+//   2. The WM sends WM_TAKE_FOCUS(win, g_last_event_time).
+//      If g_last_event_time is an old button-press timestamp T_old < T_enter,
+//      the app (e.g. Discord, Prism Launcher) receives WM_TAKE_FOCUS with T_old
+//      and calls XSetInputFocus(internal_widget, T_old).
+//   3. X server: T_old < last-focus-change-time (T_enter) → request IGNORED.
+//   4. The app's internal focus widget never gets focus; the app appears
+//      unresponsive to hover even though the X server reported success for
+//      the WM's own xcb_set_input_focus.
+//
+// Terminals and Firefox are often immune: terminals are passive (no
+// WM_TAKE_FOCUS, so no app-side XSetInputFocus to fail), and Firefox may use
+// CurrentTime rather than the WM-provided timestamp.  Electron apps (Discord)
+// and Qt apps (Prism Launcher) strictly use the provided timestamp per ICCCM.
+//
+// dwm avoids this entirely by always passing CurrentTime (0) everywhere,
+// which the X server interprets as "now" and bypasses the ordering check.
 
 /// Set the suppress reason and immediately focus `win` as an atomic operation.
 ///
@@ -273,20 +268,17 @@ const CommitFlags = struct {
     schedule_bar:       bool = false,
 
     /// New value for g_suppress_reason after the transition.
-    /// setFocus computes this via suppressionFor(); all other callers use .none.
+    /// `setFocus` derives this from reason + current state via suppressionFor();
+    /// all direct callers of `commitFocusTransition` hardcode `.none`.
     new_suppress: core.FocusSuppressReason = .none,
 };
 
 /// Core focus-transition implementation shared by setFocus, syncPointerFocusNow,
-/// and handleFocusIn.
+/// dwmFocus, bruteForceMouseEnterFocus, and handleFocusIn.
 ///
-/// Improvement #3: all three focus paths perform the same logical sequence —
-///   record history → update global state → sync button grabs →
-///   X protocol requests → notify downstream observers
-///
-/// They differ only in which side effects apply, encoded in `flags`.  Pulling
-/// the shared body into one function eliminates the three-way duplication,
-/// ensuring all paths remain in sync as protocol handling evolves.
+/// All focus paths perform the same logical sequence — record history → update
+/// global state → sync button grabs → X protocol requests → notify downstream
+/// observers — and differ only in which side effects apply, encoded in `flags`.
 ///
 /// Preconditions (enforced by callers):
 ///   • `win` is a valid managed window (non-zero, not root, not bar).
@@ -305,12 +297,12 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
     if (old) |o| window.grabButtons(o, false);
 
     if (flags.set_input_focus)
-        // DWM: XSetInputFocus(dpy, c->win, RevertToPointerRoot, CurrentTime)
-        // Always CurrentTime (0) — never rejected by the X server's timestamp
-        // ordering check, and prevents Electron/Qt apps from receiving a stale
-        // WM timestamp that they then pass back to XSetInputFocus on their own
-        // internal widget (which would be rejected because it predates the
-        // server's last-focus-change-time).
+        // Always CurrentTime (0): the X server interprets CurrentTime as "now"
+        // and bypasses its timestamp-ordering check entirely.  Passing a real
+        // event timestamp risks rejection if it predates the server's last
+        // focus-change time, and also risks Electron/Qt apps forwarding a stale
+        // timestamp back to XSetInputFocus on their internal widget — which the
+        // server would then reject, leaving the renderer widget without focus.
         _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
             win, 0); // CurrentTime
 
@@ -319,11 +311,7 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
             xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 
     if (flags.send_wm_take_focus)
-        // DWM: ev.xclient.data.l[1] = CurrentTime
-        // The timestamp in the WM_TAKE_FOCUS message is what Electron/Qt apps
-        // use when they call XSetInputFocus on their internal renderer widget.
-        // If this is a real (older) event timestamp the X server rejects the
-        // app's internal call, leaving the renderer widget without focus.
+        // CurrentTime (0) — same reason as xcb_set_input_focus above.
         utils.sendWMTakeFocus(core.conn, win, 0); // CurrentTime
 
     if (flags.arm_confirm) {
@@ -342,40 +330,48 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
     advertiseActiveWindow(win);
 }
 
-/// Brute-force hover focus — ignores all caching, input model checks, and
-/// timestamp logic.  Uses CurrentTime (0) for all X calls so the X server
-/// never rejects them due to timestamp ordering.  Always raises, always sends
-/// XSetInputFocus, always sends WM_TAKE_FOCUS.  Does not arm the confirm/retry
-/// machinery.  This is intentionally dumb — correctness comes later.
+/// Hover focus with unconditional protocol resend.
 ///
-/// Importantly, this function does NOT short-circuit when g_focused_window == win.
-/// Electron/Qt apps call XSetInputFocus spontaneously; handleFocusIn accepts that
-/// grab (when nothing was focused), setting g_focused_window = discord WITHOUT
-/// sending WM_TAKE_FOCUS. The renderer widget never activates. Re-sending the
-/// protocol on every hover is harmless and fixes that case.
+/// Unlike dwmFocus, this does NOT short-circuit when `win` is already
+/// g_focused_window.  Some Electron/Qt builds call XSetInputFocus spontaneously;
+/// handleFocusIn accepts that grab (when nothing was focused), setting
+/// g_focused_window without sending WM_TAKE_FOCUS, so the renderer widget never
+/// activates.  Re-sending the protocol on every hover fixes that case without
+/// harm to compliant clients.
+///
+/// When `win` differs from g_focused_window, delegates to commitFocusTransition
+/// for all WM bookkeeping (history, grabs, tiling, bar, _NET_ACTIVE_WINDOW).
+/// The X protocol signals — raise, xcb_set_input_focus, WM_TAKE_FOCUS — are
+/// then issued unconditionally with CurrentTime (0), bypassing input-model
+/// checks entirely.
+///
+/// Use dwmFocus for the common hover path; reserve this for clients known to
+/// silently drop the initial WM_TAKE_FOCUS.
 pub fn bruteForceMouseEnterFocus(win: u32) void {
     if (win == 0 or win == core.root) return;
     if (bar.isBarWindow(win)) return;
 
     cancelPendingConfirm();
-    g_suppress_reason = .none;
 
-    // Only update WM bookkeeping when this is a real focus change.
-    // When g_focused_window already == win we skip history/grabs but still
-    // re-send the X protocol below — that's the whole point.
+    // Update WM bookkeeping only when this is a real focus change.
+    // When g_focused_window already == win, skip history/grabs but still
+    // re-send the X protocol below — that is the whole point of this path.
     if (g_focused_window != win) {
         const old = g_focused_window;
-        g_focused_window = win;
-        if (old) |o| recordInHistory(o);
-        window.grabButtons(win, true);
-        if (old) |o| window.grabButtons(o, false);
-        if (comptime build_options.has_tiling) tiling.updateWindowFocus(old, win);
-        carousel.notifyFocusChanged(win);
-        bar.scheduleFocusRedraw(win);
-        advertiseActiveWindow(win);
+        commitFocusTransition(old, win, .{
+            .set_input_focus    = false, // sent unconditionally below
+            .raise              = false, // raised unconditionally below
+            .send_wm_take_focus = false, // sent unconditionally below
+            .arm_confirm        = false,
+            .schedule_bar       = true,
+            .new_suppress       = .none,
+        });
+    } else {
+        // Already focused: bookkeeping skipped, but suppression must still clear.
+        g_suppress_reason = .none;
     }
 
-    // Always re-send — raise, XSetInputFocus, WM_TAKE_FOCUS — with CurrentTime=0.
+    // Always re-send — raise, XSetInputFocus, WM_TAKE_FOCUS — with CurrentTime (0).
     _ = xcb.xcb_configure_window(core.conn, win,
         xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
@@ -388,24 +384,19 @@ pub fn setFocus(win: u32, reason: Reason) void {
     if (g_focused_window == win) return;
     if (bar.isBarWindow(win)) return;
 
-    // Skip the blocking xcb_get_window_attributes round-trip when we can
-    // guarantee the window is mapped without asking the server:
-    //
-    //  mouse_enter / mouse_leave — only delivered for mapped windows.
-    //  window_spawn              — map was queued on this connection moments ago.
-    //  tiling_operation          — window is in the tiling tracking set, which is
-    //                              populated at map time and kept coherent by
-    //                              removeWindow on unmap/destroy.
-    //
-    // For all other reasons (click, command) a race with destroy is possible,
-    // so we guard with a live attribute query.
+    // For click and command, a destroy race is possible between the user action
+    // and this call.  Guard with a live xcb_get_window_attributes round-trip.
+    // All other reasons guarantee the window is mapped without asking the server:
+    //   mouse_enter        — EnterNotify is only delivered for mapped windows.
+    //   window_spawn       — MapNotify was queued on this connection moments ago.
+    //   tiling_operation   — window is in the tiling set, populated at map time
+    //                        and kept coherent by removeWindow on unmap/destroy.
+    //   workspace_switch   — workspace manager only exposes mapped windows.
+    if ((reason == .mouse_click or reason == .user_command) and
+        !isWindowMapped(core.conn, win)) return;
+
     const input_model = utils.getInputModelCached(core.conn, win);
     if (input_model == .no_input) return;
-
-    if (switch (reason) {
-        .mouse_click, .user_command => !isWindowMapped(core.conn, win),
-        .mouse_enter, .window_spawn, .tiling_operation, .workspace_switch => false,
-    }) return;
 
     // Cancel any pending focus-confirm from a previous hover before we mutate
     // state.  Without this, a mouse_click on window B while a confirm cookie
@@ -436,24 +427,18 @@ pub fn setFocus(win: u32, reason: Reason) void {
         // already topmost.  Raising upfront makes the initial attempt land correctly
         // for all models, not just globally_active.
         .raise              = shouldRaise(reason) or reason == .mouse_enter,
-        // Attempt WM_TAKE_FOCUS for any focusable window, not just cached
-        // locally_active/globally_active.  sendWMTakeFocus now performs a live
-        // WM_PROTOCOLS check before sending (matching DWM's sendevent), so this
-        // is a safe no-op for truly passive windows.  The broader call is
-        // necessary because the cached input_model may be stale: Electron apps
-        // (Discord/Equibop, VS Code, etc.) commonly set WM_PROTOCOLS before or
-        // around XMapWindow.  If the PropertyNotify fires before the WM
-        // subscribes to PropertyChangeMask (i.e. before handleMapRequest sets the
-        // event mask), the notification is lost and the cache stays `passive`
-        // permanently, even though the window actually advertises WM_TAKE_FOCUS.
-        // Without sending WM_TAKE_FOCUS, Electron's renderer widget never
-        // activates internally despite XSetInputFocus succeeding on the top-level.
+        // Send WM_TAKE_FOCUS for all focusable windows, not just those cached
+        // as locally_active/globally_active.  sendWMTakeFocus performs a live
+        // WM_PROTOCOLS check and is a no-op for windows that do not advertise
+        // it, so this is always safe.  Sending unconditionally guards against a
+        // stale cache: apps that register WM_TAKE_FOCUS after mapping (Electron,
+        // Qt) may still be cached as .passive, but still require the message for
+        // their internal renderer widget to activate.
         .send_wm_take_focus = input_model != .no_input,
-        // Arm the async confirm for all mouse_enter focus attempts.
-        // Previously excluded globally_active on the assumption that raise+WM_TAKE_FOCUS
-        // is sufficient, but if WM_TAKE_FOCUS is silently dropped (broken Electron/Qt
-        // builds, or stale cached model), there is no retry path.  Extending arm_confirm
-        // to cover globally_active gives every hover attempt a fallback raise-and-retry.
+        // Arm the async confirm for all mouse_enter attempts regardless of
+        // input model.  Every hover path needs a fallback raise-and-retry in
+        // case WM_TAKE_FOCUS is silently dropped by a broken client or the
+        // cached model is stale.
         .arm_confirm        = reason == .mouse_enter,
         .schedule_bar       = true,
         .new_suppress       = suppressionFor(reason, g_suppress_reason),
@@ -474,62 +459,58 @@ pub fn setFocus(win: u32, reason: Reason) void {
 /// Safe to call when no confirm is pending (returns immediately).
 pub fn drainPendingConfirm() void {
     const cookie = g_confirm_cookie orelse return;
-    // g_confirm_cookie and g_confirm_win are always set together via arm_confirm.
-    // If win is somehow null here, drain the reply to prevent queue growth
-    // and bail without attempting the raise-and-retry.
-    const win = g_confirm_win orelse {
-        if (xcb.xcb_get_input_focus_reply(core.conn, cookie, null)) |r| std.c.free(r);
-        return;
-    };
+    // Capture win and clear both fields together before any branching.
+    // Draining at the top makes the invariant self-evident: the cookie is
+    // consumed exactly once regardless of which exit path is taken.
+    const win_opt = g_confirm_win;
     g_confirm_cookie = null;
     g_confirm_win    = null;
 
-    // Improvement #4: guard against the window being destroyed between the
-    // setFocus call that armed the cookie and this drain.  Sending
-    // xcb_configure_window / xcb_set_input_focus to a dead XID would generate
-    // a BadWindow error on the connection.  Drain the reply regardless to
-    // prevent XCB queue growth, but skip the raise-and-retry.
-    if (!window.isValidManagedWindow(win)) {
-        if (xcb.xcb_get_input_focus_reply(core.conn, cookie, null)) |r| std.c.free(r);
-        return;
-    }
+    // Reply must be consumed before any return to drain the XCB queue.
+    // defer frees the reply on every exit path.
+    const focus_reply = xcb.xcb_get_input_focus_reply(core.conn, cookie, null);
+    defer if (focus_reply) |r| std.c.free(r);
 
-    // Re-read the input model: the client may have updated its WM_HINTS
-    // between the setFocus call and this drain.
+    // g_confirm_cookie and g_confirm_win are always set and cleared together;
+    // a null win here should never happen, but we handle it gracefully.
+    const win = win_opt orelse return;
+
+    // Guard against the window being destroyed between the setFocus call that
+    // armed the cookie and this drain.  Sending xcb_set_input_focus to a dead
+    // XID generates a BadWindow error on the connection.
+    if (!window.isValidManagedWindow(win)) return;
+
+    // Re-read the input model: the client may have updated WM_HINTS since the
+    // cookie was armed.
     const input_model = utils.getInputModelCached(core.conn, win);
+    if (input_model == .no_input) return;
 
-    // No point raising and retrying focus on a window that won't accept input.
-    if (input_model == .no_input) {
-        if (xcb.xcb_get_input_focus_reply(core.conn, cookie, null)) |r| std.c.free(r);
-        return;
-    }
+    const c = focus_reply orelse return;
 
-    confirm: {
-        const c = xcb.xcb_get_input_focus_reply(core.conn, cookie, null) orelse break :confirm;
-        defer std.c.free(c);
-        // Consider focus successfully landed if ANY window has it (c.*.focus > 1).
-        // Electron (Discord, VS Code) and Qt (PrismLauncher) respond to WM_TAKE_FOCUS
-        // by calling XSetInputFocus on an internal child widget, not the managed toplevel.
-        // So xcb_get_input_focus returns the child XID, and the old `== win` check always
-        // failed — triggering a raise-and-retry that re-sends XSetInputFocus+WM_TAKE_FOCUS
-        // and resets Electron's internal focus state machine, leaving the window permanently
-        // unfocused.  Special X11 values: 0 = None, 1 = PointerRoot.  Any value > 1 means
-        // a real window has focus; if that window is a child of `win` the focus landed
-        // correctly.  If it is a different toplevel, the user moved on and we must not
-        // steal focus back.  Only retry when focus is completely absent (None/PointerRoot).
-        if (c.*.focus == win or c.*.focus > 1) break :confirm;
-        // Retry with CurrentTime (0), not g_last_event_time.
-        // After dwmSetFocus ran CurrentTime earlier, the server's internal
-        // focus-change-time is "server now".  Any real (older) timestamp here
-        // would be rejected by the X server's ordering check, making the retry
-        // silently fail for apps that strictly check timestamps.
-        //
-        // No raise on retry — DWM's setfocus never raises; raising generates
-        // synthetic FocusOut/FocusIn events that confuse Electron's focus FSM.
-        _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
-            win, 0); // CurrentTime
-        utils.sendWMTakeFocus(core.conn, win, 0); // CurrentTime
-    }
+    // Consider focus successfully landed if ANY real window has it (focus > 1).
+    // Electron and Qt respond to WM_TAKE_FOCUS by calling XSetInputFocus on an
+    // internal child widget, so xcb_get_input_focus returns the child XID —
+    // not the managed toplevel.  Checking `== win` alone would always fail for
+    // these apps and trigger a raise-and-retry that resets Electron's internal
+    // focus state machine.  X11 special values: 0 = None, 1 = PointerRoot.
+    // Any value > 1 means a real window has focus; we must not steal it back.
+    // Only retry when focus is completely absent (None or PointerRoot).
+    if (c.*.focus == win or c.*.focus > 1) return;
+
+    // Retry using CurrentTime (0).  The server's focus-change-time is already
+    // "server now" from the earlier xcb_set_input_focus; passing an older real
+    // timestamp here would be rejected by the X server's ordering check.
+    // No raise — raising generates synthetic FocusOut/FocusIn events that
+    // confuse Electron's internal focus state machine.
+    _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
+        win, 0); // CurrentTime
+    utils.sendWMTakeFocus(core.conn, win, 0); // CurrentTime
+}
+
+/// Drain an XCB reply and immediately free it without acting on the contents.
+/// Prevents the XCB reply queue from growing unboundedly for spent cookies.
+inline fn drainAndFree(reply_fn: anytype, cookie: anytype) void {
+    if (reply_fn(core.conn, cookie, null)) |r| std.c.free(r);
 }
 
 /// Discard a pending confirm reply without acting on it.
@@ -541,8 +522,7 @@ fn cancelPendingConfirm() void {
     const cookie = g_confirm_cookie orelse return;
     g_confirm_cookie = null;
     g_confirm_win    = null;
-    // Collect and discard — we only care about freeing the queued reply.
-    if (xcb.xcb_get_input_focus_reply(core.conn, cookie, null)) |r| std.c.free(r);
+    drainAndFree(xcb.xcb_get_input_focus_reply, cookie);
 }
 
 /// Invalidate the cached input model for `win`.
@@ -572,89 +552,74 @@ pub fn invalidateInputModelCache(win: u32) void {
     utils.invalidateInputModelCache(win);
 }
 
-/// DWM's setfocus(c) — translated exactly.
+/// Send the X protocol focus signals for `win` using CurrentTime (0).
 ///
-/// Uses CurrentTime (0) for both XSetInputFocus and the WM_TAKE_FOCUS
-/// timestamp. This bypasses the X server's timestamp-ordering check entirely,
-/// which is why DWM never hits the "T_old < last-focus-change-time → ignored"
-/// failure mode that plagues our timestamped paths.
+/// Skips xcb_set_input_focus for windows whose ICCCM input field is False
+/// (.no_input and .globally_active), since sending it to those windows delivers
+/// an unsolicited FocusIn that some Electron/Chromium builds use as a signal to
+/// reset their internal focus state machine.  WM_TAKE_FOCUS is always sent;
+/// sendWMTakeFocus performs a live WM_PROTOCOLS check and is a no-op for
+/// windows that do not advertise it.
 ///
-/// No raise. No confirm/retry machinery. Just the two protocol sends.
-///
-/// DWM source:
-///   void setfocus(Client *c) {
-///       if (!c->neverfocus) {
-///           XSetInputFocus(dpy, c->win, RevertToPointerRoot, CurrentTime);
-///           XChangeProperty(dpy, root, netatom[NetActiveWindow], ...);
-///       }
-///       sendevent(c, wmatom[WMTakeFocus]);
-///   }
-/// DWM's setfocus(c) — verbatim translation.
-fn dwmSetFocus(win: u32) void {
-    if (!wmHintsNeverFocus(win)) {
+/// Uses CurrentTime (0) throughout so the X server's timestamp-ordering check
+/// never rejects the request.  No raise, no confirm/retry machinery.
+fn sendFocusProtocol(win: u32) void {
+    // Use the cached input model rather than issuing a blocking xcb_get_property
+    // round-trip.  Both .no_input and .globally_active have ICCCM input=False,
+    // so xcb_set_input_focus must be skipped for both.
+    const model = utils.getInputModelCached(core.conn, win);
+    if (model == .passive or model == .locally_active) {
         _ = xcb.xcb_set_input_focus(core.conn,
             xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, 0); // CurrentTime
         advertiseActiveWindow(win);
     }
+    // _NET_ACTIVE_WINDOW is intentionally not updated for .globally_active windows:
+    // they manage their own input focus and never receive xcb_set_input_focus, so
+    // advertising them here could mislead EWMH-aware tools about which window
+    // actually holds X focus.
     utils.sendWMTakeFocus(core.conn, win, 0); // CurrentTime
 }
 
-fn wmHintsNeverFocus(win: u32) bool {
-    const InputHint: u32 = 1;
-    const cookie = xcb.xcb_get_property(
-        core.conn, 0, win,
-        xcb.XCB_ATOM_WM_HINTS, xcb.XCB_ATOM_WM_HINTS, 0, 9,
-    );
-    const reply = xcb.xcb_get_property_reply(core.conn, cookie, null) orelse return false;
-    defer std.c.free(reply);
-    if (reply.*.format != 32 or reply.*.value_len < 2) return false;
-    const fields: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
-    if (fields[0] & InputHint == 0) return false; // InputHint absent → default input=True → neverfocus=False
-    return fields[1] == 0; // input=0 → neverfocus=True
-}
-
-/// DWM's focus(c) for the EnterNotify / hover path — translated exactly.
+/// Hover focus following DWM's focus(c) semantics.
 ///
-/// Key differences from bruteForceMouseEnterFocus:
+/// Returns early when `win` is already focused — re-sending WM_TAKE_FOCUS on
+/// every hover over an already-focused Electron window causes it to re-evaluate
+/// its internal focus routing continuously, resetting the renderer widget on
+/// each mouse movement.
 ///
-///   • Returns early when win == g_focused_window.
-///     DWM enternotify: "else if (!c || c == selmon->sel) return;"
-///     Re-sending WM_TAKE_FOCUS on every hover over an already-focused Electron
-///     window causes Electron to re-evaluate its internal focus routing
-///     continuously, resetting the renderer widget on each mouse movement.
+/// Does NOT raise the window.  DWM's focus() contains no XRaiseWindow call;
+/// raising happens only on click (buttonpress → restack).  Raising on hover
+/// generates synthetic FocusOut/FocusIn events that confuse Electron's internal
+/// focus state machine.
 ///
-///   • Does NOT raise.
-///     DWM's focus() contains no XRaiseWindow / restack call; raising happens
-///     only in buttonpress → restack(), i.e. on click.  Raising on hover
-///     generates synthetic FocusOut/FocusIn events that confuse Electron's
-///     internal focus state machine — this was the primary reason brute force
-///     also failed.
+/// Uses CurrentTime (0) for all X protocol calls so the X server's timestamp
+/// ordering check never rejects them.  No confirm/retry machinery.
 ///
-///   • Delegates to dwmSetFocus, which uses CurrentTime (0) everywhere.
+/// Contrast with bruteForceMouseEnterFocus, which re-sends the X protocol even
+/// when the window is already g_focused_window.  Use that path only when a
+/// client is known to silently drop the initial WM_TAKE_FOCUS and needs the
+/// resend to activate its internal focus state.
 pub fn dwmFocus(win: u32) void {
     if (win == 0 or win == core.root) return;
     if (bar.isBarWindow(win)) return;
-
-    // DWM enternotify: else if (!c || c == selmon->sel) return;
     if (g_focused_window == win) return;
 
     cancelPendingConfirm();
-    g_suppress_reason = .none;
 
-    const old = g_focused_window;
-    g_focused_window = win;
-    if (old) |o| recordInHistory(o);
-
-    // DWM focus(): grabbuttons(c, 1)  +  unfocus old → grabbuttons(old, 0)
-    window.grabButtons(win, true);
-    if (old) |o| window.grabButtons(o, false);
-
-    if (comptime build_options.has_tiling) tiling.updateWindowFocus(old, win);
-    carousel.notifyFocusChanged(win);
-    bar.scheduleFocusRedraw(win);
-
-    // DWM focus(): setfocus(c)
-    dwmSetFocus(win);
+    // Determine the X protocol to send.  .globally_active windows manage their
+    // own input focus (ICCCM §4.1.7); xcb_set_input_focus must be skipped for
+    // them.  WM_TAKE_FOCUS is sent unconditionally — sendWMTakeFocus performs a
+    // live WM_PROTOCOLS check and is a no-op for windows that don't advertise it.
+    const model = utils.getInputModelCached(core.conn, win);
+    const old   = g_focused_window;
+    commitFocusTransition(old, win, .{
+        .set_input_focus    = model == .passive or model == .locally_active,
+        .raise              = false,
+        .send_wm_take_focus = true,
+        .arm_confirm        = false,
+        .schedule_bar       = true,
+        .new_suppress       = .none,
+    });
 }
 
 /// DWM's focusin — translated exactly. No mode/detail/managed filtering.
@@ -674,12 +639,12 @@ pub fn dwmFocus(win: u32) void {
 /// g_focused_window pointing at a window that had quietly lost focus.
 ///
 /// DWM's approach is simpler and correct: every FocusIn that doesn't match the
-/// intended window triggers an immediate re-assertion via dwmSetFocus, which
+/// intended window triggers an immediate re-assertion via sendFocusProtocol, which
 /// uses CurrentTime so the X server never rejects it.
 pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
     if (g_focused_window) |sel| {
         if (event.event != sel) {
-            dwmSetFocus(sel);
+            sendFocusProtocol(sel);
         }
     }
 }
@@ -735,7 +700,7 @@ pub fn clearFocus() void {
     g_focused_window  = null;
     g_suppress_reason = .none;
     _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
-        core.root, 0); // CurrentTime — DWM: XSetInputFocus(dpy, root, RevertToPointerRoot, CurrentTime)
+        core.root, 0); // CurrentTime — bypasses the X server's timestamp ordering check.
     carousel.notifyFocusChanged(null);
     bar.scheduleFocusRedraw(null);
 
@@ -743,17 +708,18 @@ pub fn clearFocus() void {
     advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
 }
 
-// Improvement #7: parameter changed from xcb.xcb_window_t to u32, matching
-// every other window-ID parameter in this file.  xcb_window_t is a u32
-// typedef; this is a transparent change that removes the type inconsistency.
 inline fn advertiseActiveWindow(win: u32) void {
     if (g_net_active_window == xcb.XCB_ATOM_NONE) return;
-    var val = win;
     _ = xcb.xcb_change_property(core.conn, xcb.XCB_PROP_MODE_REPLACE,
-        core.root, g_net_active_window, xcb.XCB_ATOM_WINDOW, 32, 1, &val);
+        core.root, g_net_active_window, xcb.XCB_ATOM_WINDOW, 32, 1, &win);
 }
 
 inline fn shouldRaise(reason: Reason) bool {
+    // Note: mouse_enter returns false here but is OR-ed in setFocus as
+    // `shouldRaise(reason) or reason == .mouse_enter`.  It is kept separate
+    // because the raise is tied to Electron/input-model interaction rather than
+    // being a blanket policy; any new reason must check both this switch and
+    // that inline condition.
     return switch (reason) {
         .mouse_click, .user_command => true,
         .mouse_enter, .tiling_operation, .window_spawn, .workspace_switch => false,
@@ -807,10 +773,6 @@ pub fn syncPointerFocusNow() void {
     // Clear suppression unconditionally at entry — even if no window is under
     // the pointer, the tiling operation that triggered this call has settled
     // and EnterNotify events should no longer be masked afterward.
-    // Improvement #6: the previous duplicate assignment of g_suppress_reason
-    // inside the transition body is gone; this single entry-point clear is
-    // the authoritative reset; CommitFlags.new_suppress = .none below is
-    // consistent with it.
     g_suppress_reason = .none;
     const cookie = xcb.xcb_query_pointer(core.conn, core.root);
     const reply  = xcb.xcb_query_pointer_reply(core.conn, cookie, null) orelse return;
@@ -829,7 +791,7 @@ pub fn syncPointerFocusNow() void {
     commitFocusTransition(old, child, .{
         .set_input_focus    = true,
         .raise              = false,
-        .send_wm_take_focus = input_model != .no_input,
+        .send_wm_take_focus = true, // input_model != .no_input guaranteed by early-return above
         .arm_confirm        = false,
         // schedule_bar is false — caller must call bar.redrawInsideGrab() instead.
         // This prevents a second async redraw from being queued, ensuring the
@@ -851,11 +813,14 @@ pub fn syncPointerFocusNow() void {
 /// ensure drainPointerSync() is called from the event-dispatch loop.
 pub fn beginPointerSync() void {
     g_suppress_reason = .none;
-    // Discard any stale query before issuing a fresh one.  This prevents
-    // stale replies from accumulating if tiling operations fire faster than
-    // the event loop can drain them.
+    // If a previous query is still pending, discard it non-blockingly rather
+    // than draining the reply synchronously.  xcb_discard_reply instructs XCB
+    // to silently drop the reply when it arrives; it never blocks.  Draining
+    // synchronously here would re-introduce the latency this async split was
+    // designed to remove, particularly when tiling operations fire in rapid
+    // succession before the event loop can catch up.
     if (g_pointer_cookie) |stale| {
-        if (xcb.xcb_query_pointer_reply(core.conn, stale, null)) |r| std.c.free(r);
+        xcb.xcb_discard_reply(core.conn, stale.sequence);
     }
     g_pointer_cookie = xcb.xcb_query_pointer(core.conn, core.root);
 }
