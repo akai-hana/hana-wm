@@ -436,13 +436,56 @@ pub fn supportsWMDeleteCached(conn: *xcb.xcb_connection_t, win: u32) bool {
     return queryAndCacheProps(conn, win).wm_delete;
 }
 
-/// Sends a WM_TAKE_FOCUS client message (ICCCM §4.1.7).
-/// `time` must be the timestamp of the triggering event — globally_active
-/// windows (e.g. Electron/Chromium) validate this and silently ignore the
-/// message when it is XCB_CURRENT_TIME (0).
+/// Sends a WM_TAKE_FOCUS client message (ICCCM §4.1.7) if and only if the
+/// window actually advertises WM_TAKE_FOCUS support in its WM_PROTOCOLS.
+///
+/// The check is performed live against the X server on every call — matching
+/// DWM's sendevent(c, wmatom[WMTakeFocus]) exactly:
+///
+///   int sendevent(Client *c, Atom proto) {
+///       if (XGetWMProtocols(dpy, c->win, &protocols, &n)) {
+///           while (!exists && n--)
+///               exists = protocols[n] == proto;
+///           XFree(protocols);
+///       }
+///       if (exists) { ... XSendEvent ... }
+///   }
+///
+/// Why live instead of cached:
+///   Electron (Discord, VS Code, Equibop, etc.) and many GTK/Qt apps set
+///   WM_PROTOCOLS BEFORE or around the time they call XMapWindow.  The WM
+///   reads WM_PROTOCOLS at MapRequest time and caches the result.  If Electron
+///   sets WM_PROTOCOLS before the WM subscribes to PropertyNotify (i.e. before
+///   the MapRequest fires and handleMapRequest sets the event mask), the
+///   PropertyNotify is lost and the cache remains stale forever, recording the
+///   window as `passive` even though it actually advertises WM_TAKE_FOCUS.
+///
+///   Without WM_TAKE_FOCUS the app's Electron/Chromium renderer widget never
+///   activates its internal focus state (text caret, keyboard routing), even
+///   though XSetInputFocus technically succeeds on the top-level window.  DWM
+///   works around this by never trusting a cache — it re-reads WM_PROTOCOLS
+///   on every call.  We do the same here.
+///
+///   The XCB round-trip cost is one xcb_get_property per focus change event,
+///   which is imperceptible at human interaction speed and is pipelined on the
+///   same Unix-domain socket as xcb_set_input_focus.
 pub fn sendWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32, time: u32) void {
     const protocols_atom  = getAtomCached("WM_PROTOCOLS")  catch return;
     const take_focus_atom = getAtomCached("WM_TAKE_FOCUS") catch return;
+
+    // Live WM_PROTOCOLS scan — same logic as DWM's sendevent.
+    const proto_reply = xcb.xcb_get_property_reply(conn,
+        xcb.xcb_get_property(conn, 0, win, protocols_atom, xcb.XCB_ATOM_ATOM, 0, MAX_PROPERTY_LENGTH),
+        null,
+    ) orelse return;
+    defer std.c.free(proto_reply);
+    if (proto_reply.*.format != 32 or proto_reply.*.value_len == 0) return;
+    const proto_list: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(proto_reply)));
+    var has_take_focus = false;
+    for (proto_list[0..@intCast(proto_reply.*.value_len)]) |a| {
+        if (a == take_focus_atom) { has_take_focus = true; break; }
+    }
+    if (!has_take_focus) return;
 
     var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
     event.response_type  = xcb.XCB_CLIENT_MESSAGE;

@@ -433,7 +433,6 @@ fn commitWindowToScreen(win: u32, on_current_workspace: bool) void {
 
     if (on_current_workspace) {
         _ = xcb.xcb_map_window(core.conn, win);
-        snapshotSpawnCursor();
     } else {
         grabButtons(win, false);
     }
@@ -441,6 +440,15 @@ fn commitWindowToScreen(win: u32, on_current_workspace: bool) void {
     if (on_current_workspace) {
         const old_focused = focus.getFocused();
         focus.setFocus(win, .window_spawn);
+        // snapshotSpawnCursor must run AFTER setFocus(.window_spawn) because it
+        // opens with `if (focus.getSuppressReason() != .window_spawn) return`.
+        // The previous order called snapshotSpawnCursor() before setFocus, so
+        // the suppress reason was always .none at that point and the function
+        // returned immediately every time — spawn_cursor was never captured and
+        // stayed at {0,0}.  As a result, suppressSpawnCrossing compared real
+        // pointer coordinates against {0,0}, which only suppressed EnterNotify
+        // when the cursor happened to be at the top-left corner of the screen.
+        snapshotSpawnCursor();
         // Correct the new window to focused and strip focus from the old one,
         // still inside the server grab so no intermediate frame is visible.
         updateFocusBorders(old_focused, win);
@@ -690,45 +698,60 @@ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
     return false;
 }
 
-// Guards are ordered cheapest-first: `getFocused() == win` is a single field
-// read that short-circuits the rest for the common re-entry (mouse jitter) case.
 inline fn maybeFocusWindow(win: u32) void {
-    if (focus.getFocused() == win) return;
-    if (!isOnCurrentWorkspace(win)) return;
-    if (comptime build_options.has_minimize) {
-        if (minimize.isMinimized(win)) return;
+    if (!isOnCurrentWorkspace(win)) {
+        debug.info("[MAYBE_FOCUS] 0x{x} -> not on current workspace", .{win});
+        return;
     }
-    focus.setFocus(win, .mouse_enter);
+    if (comptime build_options.has_minimize) {
+        if (minimize.isMinimized(win)) {
+            debug.info("[MAYBE_FOCUS] 0x{x} -> minimized", .{win});
+            return;
+        }
+    }
+    debug.info("[MAYBE_FOCUS] 0x{x} -> calling dwmFocus", .{win});
+    focus.dwmFocus(win);
 }
 
 pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t) void {
     focus.setLastEventTime(event.time);
-    if (event.mode == xcb.XCB_NOTIFY_MODE_GRAB or
-        event.mode == xcb.XCB_NOTIFY_MODE_UNGRAB) return;
-    // NotifyInferior means the pointer entered this window from one of its own
-    // child windows (e.g. Electron moving internal focus back to the top-level
-    // frame area).  DWM filters these for all non-root windows:
-    //   if ((ev->mode != NotifyNormal || ev->detail == NotifyInferior) && ev->window != root)
-    //       return;
-    // Without this guard, a spurious EnterNotify with detail=NotifyInferior
-    // updates g_last_event_time and may re-trigger maybeFocusWindow on an
-    // already-focused window, which is a no-op in the common case but can
-    // interfere with the confirm/retry machinery for borderline apps.
-    if (event.detail == xcb.XCB_NOTIFY_DETAIL_INFERIOR and event.event != core.root) return;
-    if (drag.isDragging()) return;
-    if (suppressSpawnCrossing(event.root_x, event.root_y)) return;
-    // A tiling operation (e.g. fullscreen exit) just repositioned windows,
-    // potentially sliding one under the cursor.  Suppress focus-follow-mouse
-    // until the user actually moves the cursor; cleared by handleMotionNotify.
-    if (focus.getSuppressReason() == .tiling_operation) return;
-
-    // EnterNotify on the root window names the entered child in event.child.
-    // For all other windows the event window is the target directly.
-    const win: u32 = if (event.event == core.root and event.child != 0)
-        event.child
-    else
-        event.event;
-    maybeFocusWindow(utils.findManagedWindow(core.conn, win, tracking.isManaged));
+    debug.info("[ENTER] win=0x{x} mode={} detail={} root_x={} root_y={}", .{
+        event.event, event.mode, event.detail, event.root_x, event.root_y,
+    });
+    // DWM: if ((ev->mode != NotifyNormal || ev->detail == NotifyInferior) && ev->window != root) return;
+    //
+    // The `&& ev->window != root` clause is omitted here — root is never a
+    // managed window so maybeFocusWindow would return early for it anyway.
+    // This filters three cases DWM rejects:
+    //   • mode != Normal  (GRAB, UNGRAB, WHILE_GRABBED — events during grabs)
+    //   • detail == Inferior  (pointer moved to a child of this window; the
+    //     managed window itself did not change — no focus action needed)
+    if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL or
+        event.detail == xcb.XCB_NOTIFY_DETAIL_INFERIOR)
+    {
+        debug.info("[ENTER] -> filtered: mode={} detail={}", .{ event.mode, event.detail });
+        return;
+    }
+    if (drag.isDragging()) {
+        debug.info("[ENTER] -> filtered: dragging", .{});
+        return;
+    }
+    if (suppressSpawnCrossing(event.root_x, event.root_y)) {
+        debug.info("[ENTER] -> filtered: spawn crossing suppressed", .{});
+        return;
+    }
+    if (focus.getSuppressReason() == .tiling_operation) {
+        debug.info("[ENTER] -> filtered: tiling_operation suppressed", .{});
+        return;
+    }
+    // DWM: c = wintoclient(ev->window) — direct lookup, no tree walk.
+    // We use findManagedWindow so child-window EnterNotify events (e.g. from
+    // apps that create subwindows) resolve to their managed parent, but the
+    // root redirect that was here previously is removed: DWM's wintoclient
+    // returns NULL for root and exits early, so we should do the same.
+    const managed = utils.findManagedWindow(core.conn, event.event, tracking.isManaged);
+    debug.info("[ENTER] -> resolved managed=0x{x}", .{managed});
+    maybeFocusWindow(managed);
 }
 
 pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t) void {

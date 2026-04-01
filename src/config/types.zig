@@ -29,7 +29,7 @@ pub const Action = union(enum) {
     decrease_master,
     increase_master_count,
     decrease_master_count,
-    toggle_floating,
+    toggle_floating_window,
     toggle_fullscreen,
     swap_master,
     swap_master_focus_swap,
