@@ -589,31 +589,28 @@ pub fn invalidateInputModelCache(win: u32) void {
 ///       }
 ///       sendevent(c, wmatom[WMTakeFocus]);
 ///   }
+/// DWM's setfocus(c) — verbatim translation.
 fn dwmSetFocus(win: u32) void {
-    const input_model = utils.getInputModelCached(core.conn, win);
-
-    // DWM: if (!c->neverfocus) { XSetInputFocus; XChangeProperty(NetActiveWindow); }
-    //
-    // neverfocus = !wmh->input, so neverfocus=True when input=False.
-    // input=False covers TWO ICCCM models:
-    //   • no_input        (input=False, no WM_TAKE_FOCUS)
-    //   • globally_active (input=False, WM_TAKE_FOCUS)
-    //
-    // The previous code only skipped XSetInputFocus for globally_active,
-    // incorrectly sending it to no_input windows as well.
-    // Correct mapping: send XSetInputFocus only when input=True,
-    // i.e. only for passive and locally_active.
-    if (input_model == .passive or input_model == .locally_active) {
+    if (!wmHintsNeverFocus(win)) {
         _ = xcb.xcb_set_input_focus(core.conn,
-            xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win,
-            0); // CurrentTime
+            xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, 0); // CurrentTime
         advertiseActiveWindow(win);
     }
-
-    // DWM: sendevent(c, wmatom[WMTakeFocus])
-    // sendWMTakeFocus performs the same live XGetWMProtocols check as DWM's
-    // sendevent, and passes CurrentTime (0) as the client-message timestamp.
     utils.sendWMTakeFocus(core.conn, win, 0); // CurrentTime
+}
+
+fn wmHintsNeverFocus(win: u32) bool {
+    const InputHint: u32 = 1;
+    const cookie = xcb.xcb_get_property(
+        core.conn, 0, win,
+        xcb.XCB_ATOM_WM_HINTS, xcb.XCB_ATOM_WM_HINTS, 0, 9,
+    );
+    const reply = xcb.xcb_get_property_reply(core.conn, cookie, null) orelse return false;
+    defer std.c.free(reply);
+    if (reply.*.format != 32 or reply.*.value_len < 2) return false;
+    const fields: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
+    if (fields[0] & InputHint == 0) return false; // InputHint absent → default input=True → neverfocus=False
+    return fields[1] == 0; // input=0 → neverfocus=True
 }
 
 /// DWM's focus(c) for the EnterNotify / hover path — translated exactly.

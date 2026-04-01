@@ -43,24 +43,42 @@ pub const MAX_WINDOW_TREE_DEPTH: usize = 10;
 
 // Event masks
 pub const EventMasks = struct {
+    // DWM verbatim (setup() in dwm.c):
+    //   wa.event_mask = SubstructureRedirectMask|SubstructureNotifyMask
+    //       |ButtonPressMask|PointerMotionMask|EnterWindowMask
+    //       |LeaveWindowMask|StructureNotifyMask|PropertyChangeMask;
+    //   XChangeWindowAttributes(dpy, root, CWEventMask|CWCursor, &wa);
+    //   XSelectInput(dpy, root, wa.event_mask);
+    // KEY_PRESS is kept (not in DWM's root mask) because our keybinding grabs
+    // land on root via xcb_grab_key and the events are dispatched here.
+    // POINTER_MOTION_HINT is used instead of plain POINTER_MOTION so the X
+    // server coalesces motion events and we re-arm with xcb_query_pointer,
+    // matching the drag/suppression logic in input.zig.
     pub const ROOT_WINDOW = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
                             xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
                             xcb.XCB_EVENT_MASK_KEY_PRESS |
                             xcb.XCB_EVENT_MASK_BUTTON_PRESS |
+                            xcb.XCB_EVENT_MASK_POINTER_MOTION_HINT | // DWM: PointerMotionMask
                             xcb.XCB_EVENT_MASK_ENTER_WINDOW |
                             xcb.XCB_EVENT_MASK_LEAVE_WINDOW |
+                            xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY | // DWM: StructureNotifyMask
                             xcb.XCB_EVENT_MASK_PROPERTY_CHANGE;
 
-    // LEAVE_WINDOW is omitted: handleLeaveNotify only acts on root events and
-    // immediately returns for all others, so subscribing managed windows would
-    // generate traffic that is always discarded.
-    // FOCUS_CHANGE is included so XCB_FOCUS_IN fires when an app focuses itself
-    // (e.g. via a replayed click), keeping g_focused_window in sync.
-    pub const MANAGED_WINDOW = xcb.XCB_EVENT_MASK_ENTER_WINDOW |
-                               xcb.XCB_EVENT_MASK_FOCUS_CHANGE |
-                               xcb.XCB_EVENT_MASK_BUTTON_PRESS |
-                               xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY |
-                               xcb.XCB_EVENT_MASK_PROPERTY_CHANGE;
+    // DWM verbatim (manage() in dwm.c):
+    //   XSelectInput(dpy, w, EnterWindowMask|FocusChangeMask|PropertyChangeMask
+    //                        |StructureNotifyMask);
+    //   grabbuttons(c, 0);
+    //
+    // DWM does NOT subscribe managed windows to ButtonPressMask via XSelectInput.
+    // Button events on unfocused windows arrive via XGrabButton (grabbuttons),
+    // and button events on the focused window arrive via the focused-specific
+    // grabs set in grabbuttons(c, 1).  Adding BUTTON_PRESS here would mean the
+    // WM receives button events through *both* the grab mechanism and the event
+    // mask, creating duplicates and interfering with SYNC-mode grab sequencing.
+    pub const MANAGED_WINDOW = xcb.XCB_EVENT_MASK_ENTER_WINDOW |       // DWM: EnterWindowMask
+                               xcb.XCB_EVENT_MASK_FOCUS_CHANGE |        // DWM: FocusChangeMask
+                               xcb.XCB_EVENT_MASK_PROPERTY_CHANGE |     // DWM: PropertyChangeMask
+                               xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY;     // DWM: StructureNotifyMask
 };
 
 /// Lock key combinations grabbed alongside every keybinding so binds work
