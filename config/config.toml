@@ -134,7 +134,7 @@ kill = "pkill -9" # program kill value placeholder
 
 # WM interactions
 Mod+F = "toggle_fullscreen"
-Mod+Shift+Return = "{kill} Xorg; sleep 1s; {kill} hana" # quit wm
+Mod+Shift+Return = "{kill} Xorg; {kill} hana" # quit wm
 Mod+Shift+F = "close_window"     # Close focused window
 Mod+Shift+Y = "reload"           # Config hot-reload
 
