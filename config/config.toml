@@ -134,7 +134,7 @@ kill = "pkill -9" # program kill value placeholder
 
 # WM interactions
 Mod+F = "toggle_fullscreen"
-Mod+Shift+Return = "{kill} Xorg" # quit wm
+Mod+Shift+Return = "{kill} Xorg; sleep 1s; {kill} hana" # quit wm
 Mod+Shift+F = "close_window"     # Close focused window
 Mod+Shift+Y = "reload"           # Config hot-reload
 
@@ -150,14 +150,14 @@ Mod+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-switch.sh"
 Mod+Shift+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-stop.sh"
 
 # Tiling
-Mod+N            = "toggle_floating"        # Enter/exit floating layout
+#Mod+?           = "?"                      # Enter/exit floating layout
 Mod+space        = "toggle_layout"          # Cycle layouts forward
 Mod+Shift+space  = "toggle_layout_reverse"  # Cycle layouts backward
 Mod+Alt+space    = "cycle_layout_variants"  # Cycle current layout's variants (Super+V)
 Mod+Tab          = "swap_master"            # Swap focused window with the previously focused window
 Mod+Shift+Tab    = "swap_master_focus_swap" # Swap focused window with the previously focused window
 Mod+grave        = "toggle_prompt"
-Mod+Middle_click = "toggle_float"           # Toggle clicked window between tiled and floating
+Mod+Middle_click = "toggle_floating_window" # Toggle clicked window between tiled and floating
 
 # Layouts
 ## Master-stack

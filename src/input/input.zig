@@ -271,7 +271,7 @@ fn executeAction(action: *const types.Action) !void {
         .toggle_fullscreen => if (comptime build.has_fullscreen) fullscreen.toggle(),
 
         // Tiling 
-        .toggle_floating => if (comptime build.has_tiling) {
+        .toggle_floating_window => if (comptime build.has_tiling) {
             if (focus.getFocused()) |win| tiling.toggleWindowFloat(win);
             bar.scheduleFullRedraw();
         },
@@ -323,10 +323,10 @@ fn executeAction(action: *const types.Action) !void {
 
 /// Like executeAction but acts on the clicked window rather than the
 /// keyboard-focused one. Used by the mouse bind dispatcher so that e.g.
-/// toggle_floating affects whichever window was actually clicked.
+/// toggle_floating_window affects whichever window was actually clicked.
 fn executeMouseAction(action: *const types.Action, clicked_win: u32) !void {
     switch (action.*) {
-        .toggle_floating => if (comptime build.has_tiling) tiling.toggleWindowFloat(clicked_win),
+        .toggle_floating_window => if (comptime build.has_tiling) tiling.toggleWindowFloat(clicked_win),
         else             => try executeAction(action),
     }
 }
