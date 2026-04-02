@@ -33,10 +33,10 @@ pub const XKB_RETRY_DELAY_MS: u64 = 20;
 // a small margin; increase if ultra-wide support beyond 4000 px is ever needed.
 pub const OFFSCREEN_X_POSITION: i32 = -4000;
 
-// Lower bound for detecting whether a window is parked offscreen.
-// A fixed upper bound is intentionally absent: multi-monitor desktops can
-// exceed 10 000 px, so only the sentinel minimum is safe to check against.
-pub const OFFSCREEN_THRESHOLD_MIN: i32 = -1000;
+/// Lower bound for detecting whether a window is parked offscreen.
+/// A fixed upper bound is intentionally absent: multi-monitor desktops can
+/// exceed 10 000 px, so only the sentinel minimum is safe to check against.
+pub const OFFSCREEN_SENTINEL_MIN: i32 = -1000;
 
 /// Maximum depth when walking the X11 window tree in findManagedWindow.
 pub const MAX_WINDOW_TREE_DEPTH: usize = 10;

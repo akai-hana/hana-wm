@@ -242,28 +242,51 @@ inline fn maybeReload() void {
         handleConfigReload() catch |err| debug.err("Reload failed: {}", .{err});
 }
 
+/// Loads and validates a new config, then applies it atomically.
+/// On failure, the old config remains active.
 fn handleConfigReload() !void {
     debug.info("Reload requested", .{});
+    
+    // Load new config
     var new_config = config.loadConfigDefault(core.alloc) catch |err| {
         debug.err("Failed to load: {}, keeping old", .{err});
         return err;
     };
     errdefer new_config.deinit(core.alloc);
-    if (new_config.tiling.master_count == 0) {
+    
+    // Validate
+    try validateConfig(&new_config);
+    
+    // Apply atomically
+    try applyConfig(&new_config);
+    
+    // Clean up old config
+    var old_config = core.config;
+    core.config = new_config;
+    old_config.deinit(core.alloc);
+    
+    debug.info("Reload complete", .{});
+}
+
+/// Validates config constraints that cannot be checked at parse time.
+fn validateConfig(cfg: *const @import("types").Config) !void {
+    if (cfg.tiling.master_count == 0) {
         debug.err("Invalid config: master_count must be > 0, keeping old", .{});
         return error.InvalidConfig;
     }
+}
+
+/// Applies a validated config: resolves keybindings, swaps globals, re-grabs keys,
+/// and notifies all subsystems of the change.
+fn applyConfig(new_config: *@import("types").Config) !void {
     config.resolveKeybindings(new_config.keybindings.items, input.getXkbState(), core.alloc);
-    config.finalizeConfig(&new_config, core.screen);
-    var old_config = core.config;
-    core.config = new_config;
+    config.finalizeConfig(new_config, core.screen);
+    
     grabKeybindings() catch |err| {
         debug.err("Keybind grab failed: {}, reverting", .{err});
-        // Revert: restore the in-memory config, then re-sync X server key grabs to match.
-        core.config = old_config;
         return err;
     };
-    old_config.deinit(core.alloc);
+    
     if (build_options.has_tiling) tiling.reloadConfig();
     window.reloadBorders();
     bar.updateTimerState();
@@ -272,7 +295,6 @@ fn handleConfigReload() !void {
     // and reloadConfig() are sent even when bar.reload() takes an early-return path
     // (e.g. bar disabled) that does not call its own ungrabAndFlush().
     _ = xcb.xcb_flush(core.conn);
-    debug.info("Reload complete", .{});
 }
 
 // Event loop

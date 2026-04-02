@@ -10,14 +10,15 @@
 </div>
 
 > [!NOTE]
-> hana is on a very early development phase. it is already fully functioning, but some of the details mentioned in this `README.md` may only be planned features for now; a "`#TODO`" comment will be visible on such cases.
+> hana is on a very early development phase. it is already fully functioning, but some of the details mentioned in this `README.md` may only be planned features for now; a "`TODO`" comment will be visible on such cases.
 
 ---
 
 ### Quick anchors
 
 - [Installation](#Installation)
-<!-- TODO: documentation -->
+
+`TODO: documentation section`
 
 ---
 
@@ -26,7 +27,6 @@
 **hana** is an _(optionally)_ dynamic window manager for X11, written in Zig.
 
 It supports tiling/floating window management, and includes its own bar, integrated to the WM.
-<!-- TODO: do widgets, like volume -->
 
 It is designed with the objective to be comfortable to use, highly configurable and easily modifiable.
 
@@ -55,13 +55,13 @@ src
 └ window
 ```
 
-`core/`, `window/`, `config/` are hana's main directories. `bar/` contains the code for hana's bar, which is optional to compilation, so it can be removed if the user wants to use another bar, or none at all. `#TODO: improve support with external bars`
+`core/`, `window/`, `config/` are hana's main directories. `bar/` contains the code for hana's bar, which is optional to compilation, so it can be removed if the user wants to use another bar, or none at all. `TODO: improve support with external bars`
 
 By default, hana's codebase is organized so that any optional code which extends a particular sub-system is located inside a `modules/` directory, modularly coded so that each individual addition has its own file, or set of files if needed (e.g. `src/bar/title/<title.zig/carousel.zig>`). This is to make a clear hierarchy, as to which files are mandatory and which ones are optional, and what does every module add onto.
 
 `tiling/` and `floating/` can be found inside `window/modules`. Both are included by default, making hana a dynamic window manager. At minimum, either one of them must be included in order to compile hana. 
 
-`# TODO: mention codebase encapsulation`
+`TODO: mention codebase encapsulation`
 
 ## Configuration
 
@@ -86,18 +86,18 @@ Since this is all an arbitrary design choice, it is optional and re-categorizabl
 Here's the full set of features/characteristics hana offers by default.
 
 - Various window layouts by default: master-stack, monocle, grid, fibonacci, floating
-- Per-window tiling/floating _(togglable AND configurable)_ `# TODO: configurable pending; togglable ready`
+- Per-window tiling/floating _(togglable AND configurable)_ `TODO: configurable pending; togglable ready`
 - Fullscreening/Minimizing
 - Workspaces _(window tags, multi-workspace tagging)_
-- Per-program window rules `# TODO: not entirely done yet`
-- Per-workspace configurations & window rules `# TODO: no workspace-specific window rules yet`
+- Per-program window rules `TODO: not entirely done yet`
+- Per-workspace configurations & window rules `TODO: no workspace-specific window rules yet`
 - Modular bar _(inspired by dwm)_
-- Various bar widgets _(workspace/layout indicators, window status, clock)_ `# TODO: Add system status, volume display & manager widgets`
+- Various bar widgets _(workspace/layout indicators, window status, clock)_ `TODO: Add system status, volume display & manager widgets`
 - Carousel 
 - Inline bar command prompt, vim-modal motions
 - TOML Config file & file joining _(split config across multiple files)_
 - Advanced binding: Ranged-key & array bindings, multi-action keybindings, keybind nesting
-- WM scaling across any display resolution `# TODO: working, but pending to finish/polish`
+- WM scaling across any display resolution `TODO: working, but pending to finish/polish`
 
 ---
 
@@ -114,7 +114,14 @@ zig build
 - xcb-util-cursor (for custom cursor support)
 - xkbcommon (keyboard input handling library)
 
-`# TODO: maybe i missed some dependency. will revise later`
+`TODO: maybe i missed some dependency. will revise later`
+
+### Ubuntu/Debian-based
+```sh
+apt install libgtk-3-dev xorg-dev libxcb-cursor-dev libxcb-keysyms1-dev libxkbcommon-x11-dev
+```
+
+`#`
 
 ---
 
