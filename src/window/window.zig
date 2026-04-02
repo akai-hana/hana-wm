@@ -1,37 +1,48 @@
 //! Window lifecycle — map/unmap/destroy, configure, enter/button events,
 //! and per-window property caching.
 
-const std           = @import("std");
-const core          = @import("core");
-const xcb           = core.xcb;
-const utils         = @import("utils");
-const constants     = @import("constants");
-const focus         = @import("focus");
-const build_options = @import("build_options");
-const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
-const layouts       = @import("layouts");
-const bar           = if (build_options.has_bar) @import("bar") else struct {
+const std   = @import("std");
+const build = @import("build_options");
+
+const core      = @import("core");
+    const xcb   = core.xcb;
+const utils     = @import("utils");
+const constants = @import("constants");
+const debug     = @import("debug");
+
+const tracking = @import("tracking");
+const focus    = @import("focus");
+
+const fullscreen = if (build.has_fullscreen) @import("fullscreen") else struct {};
+const minimize   = if (build.has_minimize)   @import("minimize")   else struct {};
+const workspaces = if (build.has_workspaces) @import("workspaces") else struct {};
+
+const tiling  = if (build.has_tiling) @import("tiling") else struct {};
+const layouts = @import("layouts");
+
+const drag = @import("drag");
+
+const bar = if (build.has_bar) @import("bar") else struct {
     pub fn isBarWindow(_: u32) bool { return false; }
     pub fn redrawInsideGrab() void {}
     pub fn scheduleRedraw() void {}
     pub fn setBarState(_: anytype) void {}
 };
-const tracking    = @import("tracking");
-const workspaces  = if (build_options.has_workspaces) @import("workspaces") else struct {};
-const WsWorkspace = if (build_options.has_workspaces) workspaces.Workspace else struct {};
-// Workspace module shims — no-op stubs used when has_workspaces is false.
-fn wsGetState() ?*workspaces.State             { return if (comptime build_options.has_workspaces) workspaces.getState()                 else null; }
-fn wsGetCurrentWorkspaceObject() ?*WsWorkspace { return if (comptime build_options.has_workspaces) workspaces.getCurrentWorkspaceObject() else null; }
+
+const WsWorkspace = if (build.has_workspaces) workspaces.Workspace else struct {};
+
+fn wsGetState() ?*workspaces.State { return if (build.has_workspaces) workspaces.getState() else null; }
+fn wsGetCurrentWorkspaceObject() ?*WsWorkspace { return if (build.has_workspaces) workspaces.getCurrentWorkspaceObject() else null; }
 inline fn wsMoveWindowTo(win: u32, ws: u8) !void {
-    if (comptime build_options.has_workspaces) try workspaces.moveWindowTo(win, ws)
+    if (build.has_workspaces) try workspaces.moveWindowTo(win, ws)
     else try tracking.registerWindow(win, 0);
 }
 inline fn wsRemoveWindow(win: u32) void {
-    if (comptime build_options.has_workspaces) workspaces.removeWindow(win)
+    if (build.has_workspaces) workspaces.removeWindow(win)
     else tracking.removeWindow(win);
 }
-const drag          = @import("drag");
-const scale         = if (build_options.has_scale) @import("scale") else struct {
+
+const scale = if (build.has_scale) @import("scale") else struct {
     pub fn scaleBorderWidth(value: anytype, reference_dimension: u16) u16 {
         if (value.is_percentage) {
             const dim_f: f32 = @floatFromInt(reference_dimension);
@@ -39,9 +50,7 @@ const scale         = if (build_options.has_scale) @import("scale") else struct 
         } else return @intFromFloat(@max(0.0, @round(value.value)));
     }
 };
-const debug         = @import("debug");
-const minimize      = if (build_options.has_minimize) @import("minimize") else struct {};
-const fullscreen    = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
+
 
 // XSizeHints flags (ICCCM §4.1.2.3)
 const XSIZE_HINTS_P_MIN_SIZE:   u32 = 0x10;
@@ -125,7 +134,7 @@ var borders_flushed_this_batch: bool = false;
 /// Save `rect` as the last-known geometry for `win`.
 /// Delegates to tiling when present; writes to g_geom_cache otherwise.
 pub fn saveWindowGeom(win: u32, rect: utils.Rect) void {
-    if (comptime build_options.has_tiling) {
+    if (build.has_tiling) {
         tiling.saveWindowGeom(win, rect);
     } else {
         g_geom_cache.getOrPut(win).value_ptr.rect = rect;
@@ -135,7 +144,7 @@ pub fn saveWindowGeom(win: u32, rect: utils.Rect) void {
 /// Return the last-known geometry for `win`, or null if none is cached.
 /// Delegates to tiling when present; reads from g_geom_cache otherwise.
 pub fn getWindowGeom(win: u32) ?utils.Rect {
-    if (comptime build_options.has_tiling) {
+    if (build.has_tiling) {
         return tiling.getWindowGeom(win);
     } else {
         const wd = g_geom_cache.get(win) orelse return null;
@@ -146,7 +155,7 @@ pub fn getWindowGeom(win: u32) ?utils.Rect {
 
 /// Zero out the cached rect for `win` so the next retile recomputes it.
 pub fn invalidateWindowGeom(win: u32) void {
-    if (comptime build_options.has_tiling) {
+    if (build.has_tiling) {
         tiling.invalidateGeomCache(win);
     } else {
         if (g_geom_cache.getPtr(win)) |wd| wd.rect = .{};
@@ -155,7 +164,7 @@ pub fn invalidateWindowGeom(win: u32) void {
 
 /// Remove `win`'s entry from the cache entirely (called on unmanage).
 pub fn evictWindowGeom(win: u32) void {
-    if (comptime build_options.has_tiling) {
+    if (build.has_tiling) {
         // tiling.removeWindow handles this
     } else {
         g_geom_cache.remove(win);
@@ -175,26 +184,26 @@ pub fn init(alloc: std.mem.Allocator) !void {
     tracking.init(alloc);
     focus.init(alloc);
     // tiling must precede workspaces: workspaces.init() calls tiling.getState().
-    if (comptime build_options.has_tiling)      tiling.init();
-    if (comptime build_options.has_fullscreen)  fullscreen.init();
-    if (comptime build_options.has_workspaces) try workspaces.init();
-    if (comptime build_options.has_minimize)    minimize.init();
+    if (build.has_tiling)      tiling.init();
+    if (build.has_fullscreen)  fullscreen.init();
+    if (build.has_workspaces) try workspaces.init();
+    if (build.has_minimize)    minimize.init();
     populateAtomCache();
 }
 
 pub fn deinit() void {
     // Teardown in reverse-init order.
-    if (comptime build_options.has_tiling)     tiling.deinit();
-    if (comptime build_options.has_fullscreen) fullscreen.deinit();
-    if (comptime build_options.has_workspaces) workspaces.deinit();
-    if (comptime build_options.has_minimize)   minimize.deinit();
+    if (build.has_tiling)     tiling.deinit();
+    if (build.has_fullscreen) fullscreen.deinit();
+    if (build.has_workspaces) workspaces.deinit();
+    if (build.has_minimize)   minimize.deinit();
     focus.deinit();
     tracking.deinit();
 }
 
 /// Returns true when tiling is both compiled in and enabled at runtime.
 inline fn tilingActive() bool {
-    if (!comptime build_options.has_tiling) return false;
+    if (!build.has_tiling) return false;
     return core.config.tiling.enabled;
 }
 
@@ -212,17 +221,8 @@ pub inline fn isOnCurrentWorkspace(win: u32) bool {
     return tracking.isOnCurrentWorkspace(win);
 }
 
-// Button grab management
-
-pub fn grabButtons(win: u32, focused: bool) void {
-    _ = xcb.xcb_ungrab_button(core.conn, xcb.XCB_BUTTON_INDEX_ANY, win, xcb.XCB_MOD_MASK_ANY);
-    if (focused) return;
-    _ = xcb.xcb_grab_button(
-        core.conn, 0, win, xcb.XCB_EVENT_MASK_BUTTON_PRESS,
-        xcb.XCB_GRAB_MODE_SYNC, xcb.XCB_GRAB_MODE_SYNC,
-        xcb.XCB_NONE, xcb.XCB_NONE, xcb.XCB_BUTTON_INDEX_ANY, xcb.XCB_MOD_MASK_ANY,
-    );
-}
+// Button grab management is owned by focus.zig (a focus-protocol concern).
+// Off-workspace windows that need initial grab setup call focus.initWindowGrabs.
 
 // Workspace rule matching
 
@@ -366,11 +366,16 @@ pub fn removeSpawnByPid(pid: u32) void {
     }
 }
 
-fn snapshotSpawnCursor() void {
-    if (focus.getSuppressReason() != .window_spawn) return;
-    const ptr = xcb.xcb_query_pointer_reply(
-        core.conn, xcb.xcb_query_pointer(core.conn, core.root), null,
-    ) orelse return;
+/// Drain a pre-fired xcb_query_pointer cookie (fired before the server grab)
+/// and record the cursor position for later spawn-crossing suppression checks.
+/// The cookie is always consumed here — either drained if suppression is active,
+/// or discarded if not — so the caller never holds an outstanding reply.
+fn snapshotSpawnCursor(ptr_cookie: xcb.xcb_query_pointer_cookie_t, suppress_reason: core.FocusSuppressReason) void {
+    if (suppress_reason != .window_spawn) {
+        xcb.xcb_discard_reply(core.conn, ptr_cookie.sequence);
+        return;
+    }
+    const ptr = xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null) orelse return;
     defer std.c.free(ptr);
     spawn_cursor.x = ptr.*.root_x;
     spawn_cursor.y = ptr.*.root_y;
@@ -412,10 +417,20 @@ fn firePropertyCookies(win: u32) PropertyCookies {
     };
 }
 
-/// Performs all visual work for a newly adopted window inside a server grab:
-/// tiling registration, geometry configuration, map, focus, and bar redraw.
-fn commitWindowToScreen(win: u32, on_current_workspace: bool) void {
-    if (on_current_workspace) _ = xcb.xcb_grab_server(core.conn);
+/// Map a newly adopted window that is on the current workspace.
+///
+/// Runs inside a server grab: tiling registration + retile, geometry
+/// configuration, map, focus, border sweep, and bar redraw all land in a
+/// single atomic batch.  The pointer query is pre-fired before the grab
+/// (analogous to unmanageWindow's pre-fire pattern) so the round-trip
+/// overlaps with grab setup and tiling work.
+fn mapWindowToScreen(win: u32) void {
+    // Pre-fire pointer query before taking the grab so its round-trip overlaps
+    // with grab setup and tiling work.  snapshotSpawnCursor drains or discards
+    // it inside the grab depending on the suppress reason at that point.
+    const ptr_cookie = xcb.xcb_query_pointer(core.conn, core.root);
+
+    _ = xcb.xcb_grab_server(core.conn);
 
     // Configure geometry BEFORE mapping.  xcb_configure_window is valid on
     // an unmapped window — the geometry is stored and takes effect atomically
@@ -424,13 +439,13 @@ fn commitWindowToScreen(win: u32, on_current_workspace: bool) void {
     // window at its default X position or background windows still on-screen.
     if (tilingActive()) {
         tiling.addWindow(win);
-        if (on_current_workspace) tiling.retileCurrentWorkspace();
-    } else if (on_current_workspace) {
+        tiling.retileCurrentWorkspace();
+    } else {
         // Without tiling, retileCurrentWorkspace() never runs, so we must
         // manually push the new window offscreen when fullscreen is active —
         // otherwise it maps on top of the fullscreen window and appears to
         // immediately vanish when the fullscreen window is raised above it.
-        if (comptime build_options.has_fullscreen) {
+        if (build.has_fullscreen) {
             if (fullscreen.hasAnyFullscreen()) {
                 _ = xcb.xcb_configure_window(core.conn, win,
                     xcb.XCB_CONFIG_WINDOW_X,
@@ -440,43 +455,50 @@ fn commitWindowToScreen(win: u32, on_current_workspace: bool) void {
     }
 
     // Apply border width and initial color before mapping so the compositor
-    // never sees a borderless first frame. Color is corrected to focused below
-    // after setFocus, still inside the server grab.
+    // never sees a borderless first frame.  The color is swept to its correct
+    // focused value below by updateWorkspaceBorders(), still inside the grab.
     applyBorder(win);
+    _ = xcb.xcb_map_window(core.conn, win);
 
-    if (on_current_workspace) {
-        _ = xcb.xcb_map_window(core.conn, win);
-    } else {
-        grabButtons(win, false);
-    }
+    focus.setFocus(win, .window_spawn);
+    // Capture the suppress reason written by setFocus(.window_spawn) and pass
+    // it explicitly to snapshotSpawnCursor so its temporal dependency on
+    // getSuppressReason() is structural (visible in the signature) rather than
+    // implicit (hidden inside the function body).
+    snapshotSpawnCursor(ptr_cookie, focus.getSuppressReason());
 
-    if (on_current_workspace) {
-        const old_focused = focus.getFocused();
-        focus.setFocus(win, .window_spawn);
-        // snapshotSpawnCursor must run AFTER setFocus(.window_spawn) because it
-        // opens with `if (focus.getSuppressReason() != .window_spawn) return`.
-        // The previous order called snapshotSpawnCursor() before setFocus, so
-        // the suppress reason was always .none at that point and the function
-        // returned immediately every time — spawn_cursor was never captured and
-        // stayed at {0,0}.  As a result, suppressSpawnCrossing compared real
-        // pointer coordinates against {0,0}, which only suppressed EnterNotify
-        // when the cursor happened to be at the top-left corner of the screen.
-        snapshotSpawnCursor();
-        // Correct the new window to focused and strip focus from the old one,
-        // still inside the server grab so no intermediate frame is visible.
-        updateFocusBorders(old_focused, win);
-        // Sweep all workspace border colors inside the grab so they land in the
-        // same atomic batch as the layout, map, and focus commands above.
-        // markBordersFlushed() prevents the event loop from queuing a second sweep.
-        updateWorkspaceBorders();
-        bar.redrawInsideGrab();
-        borders_flushed_this_batch = true;
-        _ = xcb.xcb_ungrab_server(core.conn);
-    } else {
-        // Off-workspace window: no grab was taken, schedule bar update for the
-        // event loop's normal end-of-batch flush.
-        bar.scheduleRedraw();
-    }
+    // Sweep all workspace border colors inside the grab so they land in the
+    // same atomic batch as the layout, map, and focus commands above.
+    // updateWorkspaceBorders() already covers every window on the workspace —
+    // including the newly focused one and the previously focused one — so a
+    // separate updateFocusBorders() call here would be redundant.
+    // markBordersFlushed() prevents the event loop from queuing a second sweep.
+    updateWorkspaceBorders();
+    bar.redrawInsideGrab();
+    markBordersFlushed();
+
+    _ = xcb.xcb_ungrab_server(core.conn);
+    _ = xcb.xcb_flush(core.conn);
+}
+
+/// Register a newly adopted window that is on a non-current workspace.
+///
+/// No server grab is taken — the window is not mapped and no visual work
+/// is needed.  Tiling registration and border setup run ungrabbed; the bar
+/// is scheduled for a normal end-of-batch redraw.
+fn registerWindowOffscreen(win: u32) void {
+    // Register with tiling (no retile — the window is not visible yet and
+    // will be retiled when its workspace is switched to).
+    if (tilingActive()) tiling.addWindow(win);
+
+    // Apply border width and initial color so the window is styled correctly
+    // when its workspace is eventually switched to.
+    applyBorder(win);
+    focus.initWindowGrabs(win);
+
+    // Off-workspace window: schedule bar update for the event loop's normal
+    // end-of-batch flush.
+    bar.scheduleRedraw();
     _ = xcb.xcb_flush(core.conn);
 }
 
@@ -514,18 +536,21 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     // visible when the flush preceded these round-trips.
     utils.populateFocusCacheFromCookies(core.conn, win, cookies.protocols, cookies.hints);
 
-    commitWindowToScreen(win, on_current);
+    if (on_current) mapWindowToScreen(win) else registerWindowOffscreen(win);
 }
 
 // Unmap / destroy
 
 fn unmanageWindow(win: u32) void {
-    const was_fullscreen = if (comptime build_options.has_fullscreen) blk: {
+    const was_fullscreen = if (build.has_fullscreen) blk: {
         const fs_ws = fullscreen.workspaceFor(win);
         if (fs_ws) |ws| fullscreen.removeForWorkspace(ws);
         break :blk fs_ws != null;
     } else false;
 
+    // Capture before clearFocus/focusWindowUnderPointer commits any transition.
+    // Both values depend on state that this function is about to mutate; reading
+    // them after the mutation would give incorrect results.
     const was_focused = (focus.getFocused() == win);
 
     const window_workspace = tracking.getWorkspaceForWindow(win);
@@ -545,18 +570,17 @@ fn unmanageWindow(win: u32) void {
     _ = xcb.xcb_grab_server(core.conn);
 
     // Notify each module in order inside the server grab.
-    // Use a comptime guard here, NOT the runtime tilingActive() check.
     // tilingActive() reads core.config.tiling.enabled, which can change on a
     // config reload *after* a window was added to the tiling pool.  If
     // enabled flips false between addWindow and this unmanage call, the
     // runtime guard would skip removeWindow and leave the window as a zombie
     // in tiling.State.windows — causing ghost tiles on the next retile.
     // tiling.removeWindow is a safe no-op if the window was never added.
-    if (comptime build_options.has_tiling) {
+    if (build.has_tiling) {
         tiling.removeWindow(win);
         tiling.evictSizeHints(win);
     }
-    if (comptime build_options.has_minimize) minimize.forceUntrack(win);
+    if (build.has_minimize) minimize.forceUntrack(win);
     wsRemoveWindow(win);
 
     if (was_fullscreen) bar.setBarState(.show_fullscreen);
@@ -576,7 +600,7 @@ fn unmanageWindow(win: u32) void {
     // atomic batch as the layout and focus changes above.
     updateWorkspaceBorders();
     bar.redrawInsideGrab();
-    borders_flushed_this_batch = true;
+    markBordersFlushed();
 
     _ = xcb.xcb_ungrab_server(core.conn);
     _ = xcb.xcb_flush(core.conn);
@@ -599,7 +623,7 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t) void {
 /// pointer-position reply is pre-fired before the server grab to overlap the
 /// round-trip.
 fn focusWindowUnderPointer(ptr_cookie: xcb.xcb_query_pointer_cookie_t) void {
-    const fallback: ?*const fn () void = if (comptime build_options.has_minimize)
+    const fallback: ?*const fn () void = if (build.has_minimize)
         minimize.focusMasterOrFirst
     else
         null;
@@ -652,7 +676,7 @@ fn sendConfigureNotify(win: u32, geom: WindowGeometry) void {
 
 fn sendSyntheticConfigureNotify(win: u32) void {
     // Fast path: serve the geometry from the tiling cache — zero round-trips.
-    if (comptime build_options.has_tiling) {
+    if (build.has_tiling) {
         if (tiling.getWindowGeom(win)) |rect| {
             const border: u16 = if (tiling.getStateOpt()) |s| s.border_width else 0;
             sendConfigureNotify(win, .{
@@ -677,7 +701,7 @@ fn sendSyntheticConfigureNotify(win: u32) void {
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) void {
     const win = event.window;
     const is_tiled = tilingActive() and tiling.isWindowActiveTiled(win);
-    const is_fullscreen = if (comptime build_options.has_fullscreen) fullscreen.isFullscreen(win) else false;
+    const is_fullscreen = if (build.has_fullscreen) fullscreen.isFullscreen(win) else false;
     if (is_tiled or is_fullscreen) {
         sendSyntheticConfigureNotify(win);
         return;
@@ -716,7 +740,7 @@ inline fn maybeFocusWindow(win: u32) void {
         debug.info("[MAYBE_FOCUS] 0x{x} -> not on current workspace", .{win});
         return;
     }
-    if (comptime build_options.has_minimize) {
+    if (build.has_minimize) {
         if (minimize.isMinimized(win)) {
             debug.info("[MAYBE_FOCUS] 0x{x} -> minimized", .{win});
             return;
@@ -753,8 +777,8 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t) void {
         debug.info("[ENTER] -> filtered: spawn crossing suppressed", .{});
         return;
     }
-    if (focus.getSuppressReason() == .tiling_operation) {
-        debug.info("[ENTER] -> filtered: tiling_operation suppressed", .{});
+    if (focus.shouldSuppressEnterNotify()) {
+        debug.info("[ENTER] -> filtered: focus suppressed for hover", .{});
         return;
     }
     // DWM: c = wintoclient(ev->window) — direct lookup, no tree walk.
@@ -783,8 +807,12 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t) void {
 
 pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void {
     if (!isValidManagedWindow(event.window)) return;
+    // Invalidate the focus-model cache on either WM_HINTS or WM_PROTOCOLS changes.
+    // WM_HINTS carries the ICCCM input flag (passive/locally_active/globally_active/
+    // no_input); WM_PROTOCOLS carries WM_TAKE_FOCUS advertisement.  Both can change
+    // after a window is mapped — see focus.invalidateInputModelCache for details.
     if (event.atom != atoms.wm_protocols and event.atom != xcb.XCB_ATOM_WM_HINTS) return;
-    utils.recacheInputModel(core.conn, event.window);
+    focus.invalidateInputModelCache(event.window);
 }
 
 // Size-hint parsing
@@ -838,7 +866,7 @@ fn parseSizeHintsIntoCache(
         inc_height = clampToU16(fields[10]);
     }
 
-    if (comptime build_options.has_tiling)
+    if (build.has_tiling)
         // NOTE: tiling.SizeHints must carry inc_width and inc_height fields.
         // Add `inc_width: u16 = 0, inc_height: u16 = 0` to that struct and
         // apply them in the layout pass: dimension = base + N * inc, where N
@@ -863,7 +891,7 @@ fn parseSizeHintsIntoCache(
 /// Returns the DPI-scaled border width. Reads the pre-computed value from
 /// tiling state when tiling is present, avoids redundant DPI arithmetic.
 pub inline fn getBorderWidth() u16 {
-    if (comptime build_options.has_tiling) {
+    if (build.has_tiling) {
         if (tiling.getStateOpt()) |s| return s.border_width;
     }
     return scale.scaleBorderWidth(
@@ -874,49 +902,10 @@ pub inline fn getBorderWidth() u16 {
 
 /// Returns the correct border color for `win`:
 ///   0               — fullscreen windows (compositor owns the frame)
-// ClientMessage — EWMH fullscreen requests from applications
-
-/// Handles _NET_WM_STATE ClientMessage events sent by applications requesting
-/// fullscreen transitions (e.g. browsers pressing F11, SDL games, video players).
-/// Per EWMH §5.6.1: data32[0] = action (0=remove,1=add,2=toggle),
-///                   data32[1]/[2] = the state atoms to change.
-pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
-    if (event.format != 32) return;
-
-    const net_wm_state = utils.getAtomCached("_NET_WM_STATE") catch return;
-    if (event.type != net_wm_state) return;
-
-    const fs_atom = utils.getAtomCached("_NET_WM_STATE_FULLSCREEN") catch return;
-    const prop1   = event.data.data32[1];
-    const prop2   = event.data.data32[2];
-    if (prop1 != fs_atom and prop2 != fs_atom) return;
-
-    const win = event.window;
-    if (!isValidManagedWindow(win)) return;
-
-    if (comptime build_options.has_fullscreen) {
-        const action = event.data.data32[0];
-        const is_fs  = fullscreen.isFullscreen(win);
-        const should_enter = switch (action) {
-            1 => !is_fs, // _NET_WM_STATE_ADD
-            0 => false,  // _NET_WM_STATE_REMOVE
-            2 => !is_fs, // _NET_WM_STATE_TOGGLE
-            else => return,
-        };
-        if (should_enter and !is_fs) {
-            fullscreen.enterFullscreen(win, null);
-        } else if (!should_enter and is_fs) {
-            // enterFullscreen takes null saved_geom for a fresh exit path; re-use toggle()
-            // which resolves the correct workspace and restores floating windows.
-            fullscreen.toggle();
-        }
-    }
-}
-
-
+///   border_focused  — the currently focused window
 ///   border_unfocused — everything else
 inline fn borderColor(win: u32) u32 {
-    if (comptime build_options.has_fullscreen) {
+    if (build.has_fullscreen) {
         if (fullscreen.isFullscreen(win)) return 0;
     }
     const cfg = &core.config.tiling;
@@ -937,6 +926,11 @@ pub fn applyBorder(win: u32) void {
 /// Refresh border color for `old_focused` and `new_focused` after a focus
 /// change. Pass null for either when no window held or will hold focus.
 /// Does NOT flush — callers are responsible for flushing at the right time.
+///
+/// Do NOT call this when updateWorkspaceBorders() is also being called in
+/// the same batch — the workspace sweep already covers both windows, and
+/// calling this first generates two redundant xcb_change_window_attributes
+/// requests that are immediately overwritten before the server flushes them.
 pub fn updateFocusBorders(old_focused: ?u32, new_focused: ?u32) void {
     for ([2]?u32{ old_focused, new_focused }) |opt| {
         const win = opt orelse continue;
@@ -949,7 +943,7 @@ pub fn updateFocusBorders(old_focused: ?u32, new_focused: ?u32) void {
 /// Called after a retile pass: layout changes can implicitly shift which
 /// window is fullscreen or focused, making cached colors stale.
 pub fn updateWorkspaceBorders() void {
-    if (comptime !build_options.has_workspaces) return;
+    if (!build.has_workspaces) return;
     const ws = wsGetCurrentWorkspaceObject() orelse return;
     for (ws.windows.items()) |win|
         _ = xcb.xcb_change_window_attributes(core.conn, win,
@@ -970,13 +964,57 @@ pub fn updateWorkspaceBordersIfNeeded() void {
     borders_flushed_this_batch = false;
 }
 
+// ClientMessage — EWMH fullscreen requests from applications
+
+/// Handles _NET_WM_STATE ClientMessage events sent by applications requesting
+/// fullscreen transitions (e.g. browsers pressing F11, SDL games, video players).
+/// Per EWMH §5.6.1: data32[0] = action (0=remove,1=add,2=toggle),
+///                   data32[1]/[2] = the state atoms to change.
+pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
+    if (event.format != 32) return;
+
+    const net_wm_state = utils.getAtomCached("_NET_WM_STATE") catch return;
+    if (event.type != net_wm_state) return;
+
+    const fs_atom = utils.getAtomCached("_NET_WM_STATE_FULLSCREEN") catch return;
+    const prop1   = event.data.data32[1];
+    const prop2   = event.data.data32[2];
+    if (prop1 != fs_atom and prop2 != fs_atom) return;
+
+    const win = event.window;
+    if (!isValidManagedWindow(win)) return;
+
+    if (build.has_fullscreen) {
+        const action = event.data.data32[0];
+        const is_fs  = fullscreen.isFullscreen(win);
+        const should_enter = switch (action) {
+            // ADD: unconditionally want fullscreen; the `should_enter and !is_fs`
+            // guard below prevents a double-enter when already fullscreen.
+            // Using `!is_fs` here was wrong: it made should_enter=false when
+            // is_fs=true, causing `else if (!should_enter and is_fs)` to fire
+            // and incorrectly exit fullscreen on a redundant ADD request.
+            1 => true,   // _NET_WM_STATE_ADD
+            0 => false,  // _NET_WM_STATE_REMOVE
+            2 => !is_fs, // _NET_WM_STATE_TOGGLE
+            else => return,
+        };
+        if (should_enter and !is_fs) {
+            fullscreen.enterFullscreen(win, null);
+        } else if (!should_enter and is_fs) {
+            // enterFullscreen takes null saved_geom for a fresh exit path; re-use toggle()
+            // which resolves the correct workspace and restores floating windows.
+            fullscreen.toggle();
+        }
+    }
+}
+
 /// Push updated border width and colors to every managed window across all
 /// workspaces. Called on config reload so color and width changes take effect
 /// immediately on all windows, not just those on the current workspace.
 pub fn reloadBorders() void {
     if (getBorderWidth() == 0) return;
-    if (comptime !build_options.has_workspaces) return;
+    if (!build.has_workspaces) return;
     const ws_state = wsGetState() orelse return;
-    if (comptime build_options.has_workspaces) for (ws_state.workspaces) |*ws|
+    for (ws_state.workspaces) |*ws|
         for (ws.windows.items()) |win| applyBorder(win);
 }
