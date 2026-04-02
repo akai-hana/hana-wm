@@ -6,19 +6,18 @@
 const std = @import("std");
 
 // core/
-
-// config/
 const core = @import("core");
 const xcb  = core.xcb;
+const constants = @import("constants");
 
 // debug/
 const debug = @import("debug");
 
 const MAX_PROPERTY_LENGTH: u32 = 256;
 /// Minimum window dimension; windows thinner or shorter than this are considered invalid.
-const MIN_WINDOW_DIM: u16 = 50;
+const MIN_WINDOW_DIM = constants.MIN_WINDOW_DIM;
 /// Maximum depth when walking the X11 window tree in findManagedWindow.
-const MAX_WINDOW_TREE_DEPTH: usize = 10;
+const MAX_WINDOW_TREE_DEPTH = constants.MAX_WINDOW_TREE_DEPTH;
 /// Passed as the `delete` argument to xcb_get_property; 0 means do not consume the property.
 const PROPERTY_NO_DELETE: u8 = 0;
 const WM_HINTS_INPUT_FLAG:   u32   = 1 << 0;
@@ -316,18 +315,9 @@ pub fn populateFocusCacheFromCookies(
 ) void {
     // Resolve both atoms upfront so a failure on either can discard both cookies
     // together along a single cleanup path.
-    //
-    // `catch break :blk null` exits the labeled block early with null on error;
-    // the `orelse` below then handles both discards in one place.
-    const atoms = blk: {
-        const take_focus_atom = getAtomCached("WM_TAKE_FOCUS")    catch break :blk null;
-        const wm_delete_atom  = getAtomCached("WM_DELETE_WINDOW") catch break :blk null;
-
-        break :blk .{ .take_focus = take_focus_atom, .wm_delete = wm_delete_atom };
-    } orelse {
+    const atoms = resolveFocusAtoms() orelse {
         xcb.xcb_discard_reply(conn, protocols_cookie.sequence);
         xcb.xcb_discard_reply(conn, hints_cookie.sequence);
-
         return;
     };
 
@@ -346,25 +336,36 @@ pub fn populateFocusCacheFromCookies(
         wm_delete  = result.wm_delete;
     }
 
-    var accepts_input = true;
-
-    // Extract the WM_HINTS input field from the pre-fired cookie reply.
-    // Same logic as queryWMHintsAcceptsInput, but operating on a cookie rather than issuing a new request.
-    hints: {
-        const r = xcb.xcb_get_property_reply(conn, hints_cookie, null) orelse break :hints;
-        defer std.c.free(r);
-        if (r.*.format != 32 or r.*.value_len < 1) break :hints;
-        const hints: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(r)));
-        const input_flag_set  = (hints[WM_HINTS_FLAGS_FIELD] & WM_HINTS_INPUT_FLAG) != 0;
-        const has_input_field = r.*.value_len > WM_HINTS_INPUT_FIELD;
-        if (!input_flag_set or !has_input_field) break :hints;
-        accepts_input = hints[WM_HINTS_INPUT_FIELD] != 0;
-    }
+    const accepts_input = extractWMHintsInput(conn, hints_cookie);
 
     putCachedProps(win, .{
         .model     = inputModelFrom(take_focus, accepts_input),
         .wm_delete = wm_delete,
     });
+}
+
+/// Resolves WM_TAKE_FOCUS and WM_DELETE_WINDOW atoms from cache.
+/// Returns null if either atom is not cached (should not happen after initAtomCache).
+inline fn resolveFocusAtoms() ?struct { take_focus: u32, wm_delete: u32 } {
+    const take_focus = getAtomCached("WM_TAKE_FOCUS")    catch return null;
+    const wm_delete  = getAtomCached("WM_DELETE_WINDOW") catch return null;
+    return .{ .take_focus = take_focus, .wm_delete = wm_delete };
+}
+
+/// Extracts the WM_HINTS input field from a pre-fired cookie reply.
+/// Returns true when absent (assume True per ICCCM) or explicitly True.
+fn extractWMHintsInput(
+    conn: *xcb.xcb_connection_t,
+    hints_cookie: xcb.xcb_get_property_cookie_t,
+) bool {
+    const r = xcb.xcb_get_property_reply(conn, hints_cookie, null) orelse return true;
+    defer std.c.free(r);
+    if (r.*.format != 32 or r.*.value_len < 1) return true;
+    const hints: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(r)));
+    const input_flag_set  = (hints[WM_HINTS_FLAGS_FIELD] & WM_HINTS_INPUT_FLAG) != 0;
+    const has_input_field = r.*.value_len > WM_HINTS_INPUT_FIELD;
+    if (!input_flag_set or !has_input_field) return true;
+    return hints[WM_HINTS_INPUT_FIELD] != 0;
 }
 
 /// Recomputes and caches the focus properties after a WM_PROTOCOLS or WM_HINTS PropertyNotify — two round-trips, called only on rare property change events.
@@ -406,8 +407,10 @@ fn putCachedProps(win: u32, props: CachedProps) void {
     if (cache_len < MAX_WINDOW_CACHE) {
         cache_slots[cache_len] = .{ .id = win, .props = props };
         cache_len += 1;
+    } else {
+        // Cache full: fall through silently — next access issues a live X11 query.
+        debug.warn("Focus cache full, falling back to live queries", .{});
     }
-    // Cache full: fall through silently — next access issues a live X11 query.
 }
 
 /// Runs both WM_PROTOCOLS and WM_HINTS queries, stores the result, and returns it.

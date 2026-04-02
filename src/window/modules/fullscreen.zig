@@ -233,8 +233,8 @@ fn fetchWindowGeom(win: u32) core.WindowGeometry {
     // Improvement #11: also reject zero-size geometry.  A window that has
     // been mapped but not yet sized reports width=0/height=0; saving those
     // dimensions and restoring them on exit would leave the window invisible.
-    if (reply.*.x < constants.OFFSCREEN_THRESHOLD_MIN or
-        reply.*.y < constants.OFFSCREEN_THRESHOLD_MIN or
+    if (reply.*.x < constants.OFFSCREEN_SENTINEL_MIN or
+        reply.*.y < constants.OFFSCREEN_SENTINEL_MIN or
         reply.*.width  == 0 or
         reply.*.height == 0) return default;
 
@@ -306,8 +306,8 @@ fn saveFloatingWindowGeoms(skip_win: u32) void {
         const reply = xcb.xcb_get_geometry_reply(core.conn, cookie, null) orelse continue;
         defer std.c.free(reply);
         // Skip windows that are already offscreen (e.g. during a fullscreen switch).
-        if (reply.*.x < constants.OFFSCREEN_THRESHOLD_MIN or
-            reply.*.y < constants.OFFSCREEN_THRESHOLD_MIN) continue;
+        if (reply.*.x < constants.OFFSCREEN_SENTINEL_MIN or
+            reply.*.y < constants.OFFSCREEN_SENTINEL_MIN) continue;
         g_float_saves[g_float_saves_len] = .{
             .win  = w,
             .rect = .{ .x = reply.*.x, .y = reply.*.y,

@@ -68,27 +68,54 @@ const SpawnEntry = struct {
     pid: u32,
 };
 
-/// Module-level spawn state.
+/// Module-level spawn queue — dynamically allocated to handle bursty concurrent spawns.
+///
+/// X11 applications may spawn unpredictably (e.g., terminal emulators that F11 or re-exec).
+/// A fixed-size array would silently lose registrations and misroute windows.
+/// The queue grows on first-use and shrinks on config reload.
+
 const SpawnQueue = struct {
-    const capacity = 16;
+    buf: []SpawnEntry,
+    len: usize,
+    alloc: std.mem.Allocator,
 
-    buf: [capacity]SpawnEntry = undefined,
-    len: u8 = 0,
+    fn init(self: *SpawnQueue, alloc: std.mem.Allocator) !void {
+        self.alloc = alloc;
+        self.buf = try alloc.alloc(SpawnEntry, 16);
+        self.len = 0;
+    }
 
-    /// Appends `entry` to the queue.  When full, the oldest entry is silently
-    /// evicted to make room; a capacity of 16 is ample for any realistic burst
-    /// of concurrent spawns.
-    fn push(self: *SpawnQueue, entry: SpawnEntry) void {
-        if (self.len == capacity) {
-            std.mem.copyForwards(SpawnEntry, self.buf[0 .. capacity - 1], self.buf[1..capacity]);
-            self.len -= 1;
+    fn deinit(self: *const SpawnQueue) void {
+        self.alloc.free(self.buf);
+    }
+
+    /// Appends `entry` to the queue.
+    ///
+    /// If we would overflow `len`, double-capacity and realloc.  Never loses data.
+    fn push(self: *SpawnQueue, entry: SpawnEntry) !void {
+        const new_len = self.len + 1;
+
+        // Double buffer when needed; keep 64 as a soft ceiling to avoid excessive growth.
+        if (new_len > self.buf.len) {
+            const doubled = self.buf.len * 2;
+            if (doubled < 64) {
+                self.buf = try self.alloc.alloc(SpawnEntry, doubled);
+                std.mem.copyForwards(SpawnEntry, self.buf[0..doubled], self.buf[0..doubled - 1]);
+            } else {
+                // Hit ceiling: reallocate at ceiling size.
+                const ceiling = 64;
+                self.buf = try self.alloc.alloc(SpawnEntry, ceiling);
+                const to_copy = @min(new_len, ceiling);
+                std.mem.copyForwards(SpawnEntry, self.buf[0..to_copy], self.buf[0..to_copy]);
+            }
+            self.len = 0;
         }
+
         self.buf[self.len] = entry;
         self.len += 1;
     }
 
-    /// Removes the entry at index i, shifting later entries left, and returns
-    /// its workspace.
+    /// Removes the entry at index i, shifting later entries left, and returns its workspace.
     fn consume(self: *SpawnQueue, i: usize) u8 {
         const ws = self.buf[i].workspace;
         std.mem.copyForwards(SpawnEntry, self.buf[i .. self.len - 1], self.buf[i + 1 .. self.len]);
@@ -96,11 +123,12 @@ const SpawnQueue = struct {
         return ws;
     }
 
-    fn slice(self: *SpawnQueue) []SpawnEntry { return self.buf[0..self.len]; }
+    fn slice(self: *const SpawnQueue) []SpawnEntry { return self.buf[0..self.len]; }
 };
 
-var spawn_queue: SpawnQueue = .{};
 var spawn_cursor: struct { x: i16 = 0, y: i16 = 0 } = .{};
+
+var g_spawn_queue: ?*SpawnQueue = null;
 
 // Module-level atom cache
 //
@@ -188,6 +216,18 @@ pub fn init(alloc: std.mem.Allocator) !void {
     if (build.has_fullscreen)  fullscreen.init();
     if (build.has_workspaces) try workspaces.init();
     if (build.has_minimize)    minimize.init();
+    if (build.has_minimize or build.has_workspaces) {
+        // Only allocate spawn queue if we have workspaces or minimize.
+        // Pure tiling mode never needs spawn queue.
+        if (g_spawn_queue == null) {
+            g_spawn_queue = try alloc.create(SpawnQueue);
+            if (g_spawn_queue) |sq| {
+                sq.alloc = alloc;
+                sq.buf = try alloc.alloc(SpawnEntry, 16);
+                sq.len = 0;
+            }
+        }
+    }
     populateAtomCache();
 }
 
@@ -197,6 +237,10 @@ pub fn deinit() void {
     if (build.has_fullscreen) fullscreen.deinit();
     if (build.has_workspaces) workspaces.deinit();
     if (build.has_minimize)   minimize.deinit();
+    if (g_spawn_queue) |sq| {
+        sq.deinit();
+        g_spawn_queue = null;
+    }
     focus.deinit();
     tracking.deinit();
 }
@@ -282,10 +326,13 @@ fn findClassRuleWorkspace(win: u32) ?u8 {
 /// Returns null when the spawn queue was empty (c_net_wm_pid == null).
 ///
 /// Precondition: when c_net_wm_pid is non-null, the spawn queue is provably
-/// non-empty — firePropertyCookies only fires the PID cookie when
-/// spawn_queue.len > 0.  No branch above consumes an entry without returning,
+/// non-empty — firePropertyCookies only fires the PID cookie when spawn queue
+/// is non-empty.  No branch above consumes an entry without returning,
 /// so the oldest-entry fallback is always reached with at least one entry present.
-fn findSpawnQueueWorkspace(c_net_wm_pid: ?xcb.xcb_get_property_cookie_t) ?u8 {
+fn findSpawnQueueWorkspace(
+    c_net_wm_pid: ?xcb.xcb_get_property_cookie_t,
+    current_ws: u8,
+) ?u8 {
     const pid_cookie = c_net_wm_pid orelse return null;
 
     const win_pid: u32 = pid: {
@@ -296,24 +343,31 @@ fn findSpawnQueueWorkspace(c_net_wm_pid: ?xcb.xcb_get_property_cookie_t) ?u8 {
         break :pid @as([*]const u32, @ptrCast(@alignCast(xcb.xcb_get_property_value(pid_reply))))[0];
     };
 
-    const entries = spawn_queue.slice();
+    if (g_spawn_queue) |sq| {
+        const entries = sq.slice();
 
-    // Exact PID match.
-    if (win_pid != 0) {
-        for (entries, 0..) |e, i| {
-            if (e.pid == win_pid) return spawn_queue.consume(i);
+        // Exact PID match.
+        if (win_pid != 0) {
+            for (entries, 0..) |e, i| {
+                if (e.pid == win_pid) return sq.consume(i);
+            }
         }
-    }
 
-    // Daemon match (pid == 0 in both window and queue entry).
-    if (win_pid == 0) {
-        for (entries, 0..) |e, i| {
-            if (e.pid == 0) return spawn_queue.consume(i);
+        // Daemon match (pid == 0 in both window and queue entry).
+        if (win_pid == 0) {
+            for (entries, 0..) |e, i| {
+                if (e.pid == 0) return sq.consume(i);
+            }
         }
-    }
 
-    // Oldest-entry fallback — queue is non-empty per precondition (see doc comment).
-    return spawn_queue.consume(0);
+        // Oldest-entry fallback — queue is non-empty per precondition (see doc comment).
+        return sq.consume(0);
+    }
+    // spawn_queue is provably non-empty per firePropertyCookies logic
+
+    // This branch should never be reached (atom 0 means empty queue),
+    // but handle it conservatively: return current_ws as fallback.
+    return current_ws;
 }
 
 /// Resolves the target workspace for a newly mapped window.
@@ -333,7 +387,7 @@ fn resolveTargetWorkspace(
         return clampToValidWorkspace(target, current_ws);
     }
 
-    if (findSpawnQueueWorkspace(c_net_wm_pid)) |spawn_ws|
+    if (findSpawnQueueWorkspace(c_net_wm_pid, current_ws)) |spawn_ws|
         return clampToValidWorkspace(spawn_ws, current_ws);
 
     return current_ws;
@@ -342,7 +396,11 @@ fn resolveTargetWorkspace(
 // Map request
 
 pub inline fn registerSpawn(workspace: u8, pid: u32) void {
-    spawn_queue.push(.{ .workspace = workspace, .pid = pid });
+    if (g_spawn_queue) |sq| {
+        sq.push(.{ .workspace = workspace, .pid = pid }) catch |err| {
+            debug.warn("registerSpawn: failed to queue spawn entry: {}", .{err});
+        };
+    }
 }
 
 /// Called when a child process exits (via SIGCHLD delivered through a
@@ -358,10 +416,12 @@ pub inline fn registerSpawn(workspace: u8, pid: u32) void {
 /// process, so they self-resolve on the next MapRequest.
 pub fn removeSpawnByPid(pid: u32) void {
     if (pid == 0) return;
-    for (spawn_queue.slice(), 0..) |e, i| {
-        if (e.pid == pid) {
-            _ = spawn_queue.consume(i);
-            return;
+    if (g_spawn_queue) |sq| {
+        for (sq.slice(), 0..) |e, i| {
+            if (e.pid == pid) {
+                _ = sq.consume(i);
+                return;
+            }
         }
     }
 }
@@ -409,11 +469,13 @@ fn firePropertyCookies(win: u32) PropertyCookies {
         ),
         // Only fired when the spawn queue is non-empty so the type system
         // enforces this cookie is never accessed on an idle queue.
-        .net_wm_pid = if (spawn_queue.len > 0) xcb.xcb_get_property(
-            core.conn, 0, win,
-            atoms.net_wm_pid,
-            xcb.XCB_ATOM_CARDINAL, 0, 1,
-        ) else null,
+        .net_wm_pid = if (g_spawn_queue) |sq| if (sq.len > 0)
+            xcb.xcb_get_property(
+                core.conn, 0, win,
+                atoms.net_wm_pid,
+                xcb.XCB_ATOM_CARDINAL, 0, 1,
+            )
+            else null else null,
     };
 }
 
