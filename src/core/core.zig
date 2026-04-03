@@ -2,6 +2,7 @@
 //! Includes XCB handles, geometry, input state, DPI info, and process-wide globals.
 
 const std = @import("std");
+
 const constants = @import("constants");
 
 // On every @cImport, C code has to be translated to Zig on every compilation.
@@ -9,17 +10,6 @@ const constants = @import("constants");
 // through this file is a tiny bit more efficient.
 pub const xcb = @cImport(@cInclude("xcb/xcb.h"));
 
-// Re-export modifier masks from constants for backward compatibility
-pub const MOD_SHIFT = constants.MOD_SHIFT;
-pub const MOD_CAPSLOCK = constants.MOD_CAPSLOCK;
-pub const MOD_CONTROL = constants.MOD_CONTROL;
-pub const MOD_ALT = constants.MOD_ALT;
-pub const MOD_NUMLOCK = constants.MOD_NUMLOCK;
-pub const MOD_SUPER = constants.MOD_SUPER;
-
-/// The only modifier bits the WM uses for keybinding matching.
-/// Strips lock-key and pointer-button noise from raw event modifier state.
-pub const MOD_MASK_RELEVANT = constants.MOD_MASK_BINDING;
 
 // X11 keysym constants
 //

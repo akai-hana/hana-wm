@@ -2,14 +2,18 @@
 //! Loads, parses, and validates TOML config files.
 
 const std           = @import("std");
-const core          = @import("core");
-const types         = @import("types");
-const debug         = @import("debug");
-const parser        = @import("parser");
+const build = @import("build_options");
+
+const core      = @import("core");
+const types     = @import("types");
+const constants = @import("constants");
+const debug     = @import("debug");
+
 const xkbcommon     = @import("xkbcommon");
-const constants     = @import("constants");
-const build_options = @import("build_options");
-const carousel      = if (build_options.has_carousel) @import("carousel") else struct {
+
+const parser        = @import("parser");
+
+const carousel      = if (build.has_carousel) @import("carousel") else struct {
     pub fn setCarouselEnabled(_: bool)  void {}
     pub fn setScrollSpeed(_: f64)       void {}
     pub fn setRefreshRateOverride(_: f64) void {}
@@ -591,10 +595,16 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
             if (cfg.tiling.layouts.items.len > 0) cfg.tiling.layout = cfg.tiling.layouts.items[0];
         }
     } else {
+        // Single-layout path.  Clear the default set by getDefaultConfig so
+        // layouts contains exactly one entry and there is no stale "master_left"
+        // accumulating alongside the user's choice (Issue #11).
+        // `cfg.tiling.layout` points into layouts[0]; TilingConfig.deinit frees
+        // it — no separate `allocated_layout` sentinel is needed.
+        for (cfg.tiling.layouts.items) |l| allocator.free(l);
+        cfg.tiling.layouts.clearRetainingCapacity();
         const layout_str = get([]const u8, section, "layout", "master_left", null, null);
-        cfg.allocated_layout = try allocator.dupe(u8, layout_str);
-        cfg.tiling.layout    = cfg.allocated_layout.?;
         try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, layout_str));
+        cfg.tiling.layout = cfg.tiling.layouts.items[0];
     }
 
     const aesthetic_src = doc.getSection("tiling.aesthetics") orelse section;
@@ -722,6 +732,18 @@ fn parseLayoutsArray(
         const canonical = canonicalLayout(name_str, &name_buf);
         if (!isKnownLayout(canonical)) {
             debug.warn("layouts array: unknown layout name '{s}' at index {}, skipping", .{ name_str, i });
+            continue;
+        }
+        // Deduplicate: skip if this exact canonical name is already in the list.
+        // Prevents pointless cycle entries when the user lists the same layout
+        // twice, while still allowing distinct variant entries for the same layout
+        // through separate [tiling.layouts.*] sections.
+        var already_present = false;
+        for (cfg.tiling.layouts.items) |existing| {
+            if (std.mem.eql(u8, existing, canonical)) { already_present = true; break; }
+        }
+        if (already_present) {
+            debug.warn("layouts array: duplicate layout '{s}' at index {}, skipping", .{ canonical, i });
             continue;
         }
         const layout_idx: u8 = @intCast(cfg.tiling.layouts.items.len);

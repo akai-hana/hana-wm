@@ -1,34 +1,25 @@
 //! X event dispatch, signal handling, config reload, and the main event loop.
 
-// Zig stdlib
-const std = @import("std");
+const std   = @import("std");
+const build = @import("build_options");
 
-// build.zig
-const build_options = @import("build_options");
+const core      = @import("core");
+    const xcb   = core.xcb;
+const utils     = @import("utils");
+const constants = @import("constants");
 
-// core/
-const core    = @import("core");
-    const xcb = core.xcb;
-const utils   = @import("utils");
-
-// core/modules/
 const debug = @import("debug");
 
-// config/
 const config = @import("config");
 
-// input/
 const input = @import("input");
 
-// window/
 const window = @import("window");
 const focus  = @import("focus");
 
-// tiling/
-const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
+const tiling = if (build.has_tiling) @import("tiling") else struct {};
 
-// bar/
-const bar    = if (build_options.has_bar) @import("bar") else struct {
+const bar = if (build.has_bar) @import("bar") else struct {
     pub fn pollTimeoutMs() i32 { return -1; }
     pub fn checkClockUpdate() void {}
     pub fn submitDraw(_: bool) void {}
@@ -39,11 +30,11 @@ const bar    = if (build_options.has_bar) @import("bar") else struct {
     pub fn reload() void {}
 };
 
-// bar/modules/
-const prompt = if (build_options.has_bar and build_options.has_prompt) @import("prompt") else struct {
+const prompt = if (build.has_bar and build.has_prompt) @import("prompt") else struct {
     pub fn blinkPollTimeoutMs() i32 { return -1; }
     pub fn blinkTick() void {}
 };
+
 
 // Indices into the poll fd array.
 const FD_XCB    = 0;
@@ -66,9 +57,9 @@ const MAX_KEYBIND_COOKIES = 512;
 /// regardless of NumLock / CapsLock state.
 const LOCK_MODIFIERS = [_]u16{
     0,
-    core.MOD_CAPSLOCK,
-    core.MOD_NUMLOCK,
-    core.MOD_CAPSLOCK | core.MOD_NUMLOCK,
+    constants.MOD_CAPSLOCK,
+    constants.MOD_NUMLOCK,
+    constants.MOD_CAPSLOCK | constants.MOD_NUMLOCK,
 };
 
 // Self-pipe for portable signal delivery.
@@ -287,7 +278,7 @@ fn applyConfig(new_config: *@import("types").Config) !void {
         return err;
     };
     
-    if (build_options.has_tiling) tiling.reloadConfig();
+    if (build.has_tiling) tiling.reloadConfig();
     window.reloadBorders();
     bar.updateTimerState();
     bar.reload();
@@ -349,7 +340,7 @@ pub fn run() !void {
                 defer std.c.free(event);
                 dispatch(@as(*u8, @ptrCast(event)).*, event);
             }
-            if (build_options.has_tiling) tiling.retileIfDirty();
+            if (build.has_tiling) tiling.retileIfDirty();
             focus.drainPendingConfirm();
             focus.drainPointerSync();
             window.updateWorkspaceBordersIfNeeded();

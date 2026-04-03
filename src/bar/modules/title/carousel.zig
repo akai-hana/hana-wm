@@ -159,10 +159,12 @@ const ScrollConfig = struct {
 
 /// All state exclusively owned by the render thread.
 /// Never touched by the main thread — no locking required.
+/// Exception: `is_enabled` is also written by the main thread (setCarouselEnabled)
+/// and is therefore an atomic; all other fields remain non-atomic.
 const RenderState = struct {
     single_carousel: ?SingleEntry = null,
     seg_carousel:    ?SegEntry    = null,
-    is_enabled:      bool         = true,
+    is_enabled:      std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
 };
 
 /// Cross-thread signal written by the main thread in `notifyFocusChanged`
@@ -212,13 +214,18 @@ pub fn invalidate() void { hz_state.is_ready = false; }
 ///
 /// Disabling immediately frees all carousel pixmaps so no stale pixmap
 /// lingers while the feature is off.
+///
+/// NOTE: `deinitCarousel()` is documented as render-thread-only, but is called
+/// here from either thread.  This is a pre-existing design limitation; making
+/// `is_enabled` atomic prevents the data race on the flag itself.  A proper fix
+/// would defer pixmap freeing to the render thread.
 pub fn setCarouselEnabled(enabled: bool) void {
-    if (!enabled and render.is_enabled) deinitCarousel();
-    render.is_enabled = enabled;
+    if (!enabled and render.is_enabled.load(.acquire)) deinitCarousel();
+    render.is_enabled.store(enabled, .release);
 }
 
 /// Returns true when the carousel feature is currently enabled.
-pub fn isCarouselEnabled() bool { return render.is_enabled; }
+pub fn isCarouselEnabled() bool { return render.is_enabled.load(.acquire); }
 
 /// Set the scroll speed in pixels per second.
 ///
@@ -393,7 +400,7 @@ pub fn drawOrScrollTitle(
         return;
     }
 
-    if (!render.is_enabled) {
+    if (!render.is_enabled.load(.acquire)) {
         deinitSingleCarousel();
         try dc.drawTextEllipsis(geom.text_x, y, text, geom.avail_w, fg);
         return;

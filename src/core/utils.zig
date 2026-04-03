@@ -1,17 +1,14 @@
 //! hana core utilities
-//!
 //! Includes X11 geometry helpers, atom caching, ICCCM input model caching, and process lifecycle signals.
 
-// Zig stdlib
 const std = @import("std");
 
-// core/
-const core = @import("core");
-const xcb  = core.xcb;
+const core      = @import("core"); //TODO: pending to deprecate
+    const xcb   = core.xcb;
 const constants = @import("constants");
 
-// debug/
 const debug = @import("debug");
+
 
 const MAX_PROPERTY_LENGTH: u32 = 256;
 /// Minimum window dimension; windows thinner or shorter than this are considered invalid.
@@ -127,7 +124,7 @@ pub fn getGeometry(conn: *xcb.xcb_connection_t, win: u32) ?Rect {
 /// Strips lock-key and pointer-button bits from a raw event modifier state,
 /// leaving only the modifier bits the WM uses for keybinding matching.
 pub inline fn normalizeModifiers(state: u16) u16 {
-    return state & core.MOD_MASK_RELEVANT;
+    return state & constants.MOD_MASK_BINDING;
 }
 
 /// Screen-space position of a window's top-left corner.

@@ -34,9 +34,7 @@ const std  = @import("std");
 const core = @import("core");
 const xcb  = core.xcb;
 
-// ---------------------------------------------------------------------------
 // Re-exported keysyms (convenience for callers)
-// ---------------------------------------------------------------------------
 
 pub const XK_BackSpace = core.XK_BackSpace;
 pub const XK_Tab       = core.XK_Tab;
@@ -48,18 +46,14 @@ pub const XK_Right     = core.XK_Right;
 pub const XK_Home      = core.XK_Home;
 pub const XK_End       = core.XK_End;
 
-// ---------------------------------------------------------------------------
 // Public constants
-// ---------------------------------------------------------------------------
 
 pub const default_max_input: usize = 512;
 pub const default_undo_max:  usize = 32;
 /// Number of named marks supported (a–z).
 pub const mark_count: usize = 26;
 
-// ---------------------------------------------------------------------------
 // Public enums and types
-// ---------------------------------------------------------------------------
 
 /// What the caller should do after handling a key.
 ///
@@ -151,9 +145,7 @@ pub const RingStack = struct {
     base:    usize       = 0,
 };
 
-// ---------------------------------------------------------------------------
 // Internal types
-// ---------------------------------------------------------------------------
 
 /// Accumulated state for the in-progress normal-mode command.
 /// Reset atomically between commands via `resetPendingCmd`.
@@ -179,9 +171,7 @@ const PendingCmd = struct {
     colon_len:    u8    = 0,
 };
 
-// ---------------------------------------------------------------------------
 // Public state type
-// ---------------------------------------------------------------------------
 
 /// All state for the vim editing engine.
 /// Create with `VimState.init` and release with `VimState.deinit`.
@@ -265,9 +255,7 @@ pub const VimState = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Public helpers
-// ---------------------------------------------------------------------------
 
 /// Reset all in-progress command state (counts, pending operators, prefix flags).
 pub fn resetPendingCmd(vs: *VimState) void { vs.pending = .{}; }
@@ -312,9 +300,7 @@ pub fn insertSlice(vs: *VimState, slice: []const u8) void {
     vs.cursor += n;
 }
 
-// ---------------------------------------------------------------------------
 // Public mode handlers
-// ---------------------------------------------------------------------------
 
 /// Handle a Ctrl-modified key.  Call this before dispatching to mode handlers.
 /// Returns `.deactivate` for Ctrl+C; `.none` for all others (mutations applied
@@ -387,10 +373,10 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         return .none;
     }
 
-    // Colon ex-command mode: :w  → spawn_keep (execute, keep open)
-    //                         :q  → deactivate (cancel)
-    //                         :wq → spawn      (execute, close)
-    //                         :x  → spawn      (execute, close)
+    // Colon ex-command mode: :w  -> spawn_keep (execute, keep open)
+    //                         :q  -> deactivate (cancel)
+    //                         :wq -> spawn      (execute, close)
+    //                         :x  -> spawn      (execute, close)
     // Escape cancels; any unrecognised command is silently discarded.
     if (vs.pending.is_colon_cmd) {
         switch (sym) {
@@ -402,7 +388,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
                 if (vs.pending.colon_len > 0) {
                     vs.pending.colon_len -= 1;
                 } else {
-                    resetPendingCmd(vs); // nothing typed → cancel back to normal
+                    resetPendingCmd(vs); // nothing typed -> cancel back to normal
                 }
                 return .none;
             },
@@ -701,9 +687,7 @@ pub fn handleReplace(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
-// ---------------------------------------------------------------------------
 // Private — normal-mode motion resolution
-// ---------------------------------------------------------------------------
 
 /// Clamp cursor to the last valid position for normal mode.
 /// In normal mode the cursor must sit on a character, not past the end.
@@ -715,13 +699,16 @@ inline fn exitVisual(vs: *VimState) void { vs.mode = .normal; resetPendingCmd(vs
 
 /// Digit accumulation helper: returns true and updates `pending.count` if
 /// `sym` is a digit (1–9 always; 0 only when count is already non-zero).
+/// Counts are clamped at 1_000_000 — the vim convention — so an accidental
+/// run of digits never wraps silently to a small, unexpected repeat count.
 fn tryAccumulateDigit(vs: *VimState, sym: xcb.xcb_keysym_t) bool {
     if (sym >= '1' and sym <= '9') {
-        vs.pending.count = vs.pending.count *% 10 +% @as(u32, @truncate(sym - '0'));
+        const next = vs.pending.count *% 10 +% @as(u32, @truncate(sym - '0'));
+        vs.pending.count = @min(next, 1_000_000);
         return true;
     }
     if (sym == '0' and vs.pending.count > 0) {
-        vs.pending.count = vs.pending.count *% 10;
+        vs.pending.count = @min(vs.pending.count *% 10, 1_000_000);
         return true;
     }
     return false;
@@ -865,9 +852,7 @@ fn resolveSimpleMotion(vs: *VimState, sym: xcb.xcb_keysym_t, cnt: u32) ?MotionRe
     };
 }
 
-// ---------------------------------------------------------------------------
 // Private — text operations
-// ---------------------------------------------------------------------------
 
 /// Move cursor (normal mode: clamp to last valid position).
 fn setCursor(vs: *VimState, mr: MotionResult) void {
@@ -1022,9 +1007,7 @@ fn execDirectSym(vs: *VimState, sym: u8, cnt: u32) u8 {
     return op;
 }
 
-// ---------------------------------------------------------------------------
 // Private — undo / redo ring stacks
-// ---------------------------------------------------------------------------
 
 /// Push the current editor state onto `ring`.  When the ring is full, the
 /// oldest slot is overwritten rather than silently dropping the save.
@@ -1059,9 +1042,7 @@ fn undoPush(vs: *VimState) void {
     vs.redo = .{ .entries = vs.redo.entries };
 }
 
-// ---------------------------------------------------------------------------
 // Private — dot repeat
-// ---------------------------------------------------------------------------
 
 fn dotReplay(vs: *VimState) void {
     if (vs.dot == .none) return;
@@ -1130,9 +1111,7 @@ fn dotReplay(vs: *VimState) void {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Private — count helpers and dot record building
-// ---------------------------------------------------------------------------
 
 /// Treat a count of 0 as 1 (vim convention: no count = repeat once).
 inline fn resolveCount(n: u32) u32 { return if (n == 0) 1 else n; }
@@ -1155,9 +1134,7 @@ inline fn buildOpMotionRecord(vs: *VimState, sym: xcb.xcb_keysym_t) DotRecord {
     }};
 }
 
-// ---------------------------------------------------------------------------
 // Private — word and find motions
-// ---------------------------------------------------------------------------
 
 inline fn isWordChar(ch: u8) bool {
     return std.ascii.isAlphanumeric(ch) or ch == '_';
@@ -1265,9 +1242,7 @@ fn reverseFindKind(kind: u8) u8 {
     };
 }
 
-// ---------------------------------------------------------------------------
 // Private — bracket matching and text objects
-// ---------------------------------------------------------------------------
 
 /// Jump to the bracket that matches the one under the cursor.
 fn motionMatchBracket(vs: *VimState) usize {
@@ -1314,6 +1289,10 @@ fn resolveTextObject(vs: *VimState, kind: u8, delim: u8) ?MotionResult {
         '(', ')', 'b'  => textObjBracket(vs, '(', ')', inner),
         '[', ']'        => textObjBracket(vs, '[', ']', inner),
         '{', '}', 'B'   => textObjBracket(vs, '{', '}', inner),
+        // '<' and '>' are treated symmetrically (same open/close pair) so that
+        // `i<` and `a<` select tag-like content.  Note that in a single-line
+        // prompt buffer these are rare; the behaviour matches vim's `it`/`at`
+        // in spirit without full XML awareness.
         '<', '>'        => textObjBracket(vs, '<', '>', inner),
         else            => null,
     };

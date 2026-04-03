@@ -5,12 +5,13 @@
 //! types and helpers that are *passed into* layout modules, keeping each layout
 //! decoupled from both each other and from the tiling state.
 
-const core  = @import("core");
-const xcb   = core.xcb;
-const utils = @import("utils");
+const core    = @import("core");
+    const xcb = core.xcb;
+const utils   = @import("utils");
+
 const debug = @import("debug");
 
-// ============================================================================
+
 // WM_NORMAL_HINTS size constraint cache
 //
 // Populated from WM_NORMAL_HINTS during handleMapRequest; evicted on unmanage.
@@ -21,7 +22,6 @@ const debug = @import("debug");
 // (10–80) make a HashMap's O(1) lookup theoretical rather than measurable:
 // a linear scan over a handful of cache lines is faster in practice and
 // carries zero allocation overhead, no deinit, and no partial-failure states.
-// ============================================================================
 
 /// ICCCM WM_NORMAL_HINTS geometry constraints for a single window.
 pub const SizeHints = struct {
@@ -75,7 +75,6 @@ pub fn evictSizeHints(win: u32) void {
     }
 }
 
-// ============================================================================
 // Per-window geometry and border-color cache
 //
 // Stores the last-applied geometry and border color for each window in a single
@@ -91,7 +90,6 @@ pub fn evictSizeHints(win: u32) void {
 //     - No heap allocation; no deinit; no error path in getOrPut.
 //     - clearRetainingCapacity reduces to a single `len = 0` assignment.
 //     - No allocation-failure fallback paths that leave cache partially filled.
-// ============================================================================
 
 /// Combined per-window cache entry holding last geometry and last border color.
 pub const WindowData = struct {
@@ -116,6 +114,13 @@ const cache_capacity: usize = 256;
 /// without a null-check while guaranteeing no live cache entry is corrupted.
 /// The affected window simply misses the dedup check and receives a redundant
 /// configure_window on the next retile — an unconditionally correct outcome.
+///
+/// SINGLE-THREADED ASSUMPTION: two concurrent overflows would alias to the same
+/// pointer.  The WM is single-threaded for all geometry operations; the bar
+/// render thread calls `configureSafe` (and thus `getOrPut`) only on the
+/// render thread, never concurrently with tiling retile calls on the main
+/// thread.  If that invariant ever changes, this sentinel must become per-call
+/// or the overflow path must return an error.
 var overflow_sentinel: WindowData = .{};
 
 /// Fixed-capacity cache mapping window IDs to their last geometry and border color.
@@ -180,9 +185,7 @@ pub const CacheMap = struct {
     }
 };
 
-// ============================================================================
 // Layout context and the configureSafe entry point
-// ============================================================================
 
 /// Context passed into every layout module's `tileWithOffset` call.
 ///
@@ -241,9 +244,7 @@ pub fn configureSafe(
         xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
 }
 
-// ============================================================================
 // Private helpers
-// ============================================================================
 
 /// Clamp `rect` to the stored WM_NORMAL_HINTS for `win`.
 /// Returns `rect` unchanged when no hints are stored for `win`.

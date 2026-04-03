@@ -1,20 +1,24 @@
 //! Window dragging and resizing via pointer button grabs.
 
-const std           = @import("std");
-const constants     = @import("constants");
-const core          = @import("core");
-const xcb           = core.xcb;
-const utils         = @import("utils");
-const focus         = @import("focus");
-const build_options = @import("build_options");
-const tiling        = if (build_options.has_tiling) @import("tiling") else struct {};
-const bar           = if (build_options.has_bar) @import("bar") else struct {
+const std   = @import("std");
+const build = @import("build_options");
+
+const core      = @import("core");
+    const xcb   = core.xcb;
+const constants = @import("constants");
+const utils     = @import("utils");
+
+const window = @import("window");
+const focus  = @import("focus");
+
+const tiling     = if (build.has_tiling) @import("tiling") else struct {};
+const fullscreen = if (build.has_fullscreen) @import("fullscreen") else struct {};
+
+const bar = if (build.has_bar) @import("bar") else struct {
     pub fn isVisible() bool { return false; }
     pub fn getBarHeight() u16 { return 0; }
     pub fn isBarWindow(_: u32) bool { return false; }
 };
-const fullscreen    = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
-const window        = @import("window");
 
 // Drag state types
 
@@ -127,7 +131,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     if (bar.isBarWindow(win)) return;
     // Fullscreen windows must not be drag-resized: they occupy the entire
     // screen and resizing them would corrupt their fullscreen geometry record.
-    if (comptime build_options.has_fullscreen) {
+    if (comptime build.has_fullscreen) {
         if (fullscreen.isFullscreen(win)) return;
     }
     // Geometry source priority: prefer the tiling-cached geometry over a live
@@ -136,7 +140,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     // round-trip.  The live fallback covers purely floating windows that were
     // never tracked by the tiling engine.
     const geom = blk: {
-        if (comptime build_options.has_tiling) {
+        if (comptime build.has_tiling) {
             if (tiling.getWindowGeom(win)) |g| break :blk g;
         }
         break :blk utils.getGeometry(core.conn, win) orelse return;
@@ -159,7 +163,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
             .start_win_width  = geom.width,
             .start_win_height = geom.height,
         },
-        .pending_float = if (comptime build_options.has_tiling)
+        .pending_float = if (comptime build.has_tiling)
             tiling.isWindowTiled(win) and !tiling.isFloatingLayout()
         else
             false,
@@ -185,7 +189,7 @@ pub fn updateDrag(x: i16, y: i16) void {
         // visual nicety, not a correctness requirement; the retile proceeds
         // regardless.
         _ = xcb.xcb_grab_server(core.conn);
-        if (comptime build_options.has_tiling) {
+        if (comptime build.has_tiling) {
             tiling.removeWindow(drag.window);
             tiling.retileCurrentWorkspace();
         }

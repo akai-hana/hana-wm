@@ -10,16 +10,35 @@
 //! multi-workspace feature when it is present.  When workspaces.zig is absent
 //! the WM operates as a single-workspace session: all windows land on
 //! workspace 0 and getCurrentWorkspace() always returns 0.
+//!
+//! Memory conventions
+//! ------------------
+//! g_map entries are managed by the Zig allocator supplied to init().
+//! XCB reply buffers (xcb_*_reply_t*) are allocated by the C library and must
+//! be freed with std.c.free, never with the Zig allocator.  The two memory
+//! systems must never be confused; callers that interact with both in the same
+//! function should add a comment at each free site.
 
-const std           = @import("std");
-const build_options = @import("build_options");
-const minimize      = if (build_options.has_minimize) @import("minimize") else struct {};
+const std   = @import("std");
+const build = @import("build_options");
+
+const minimize      = if (build.has_minimize) @import("minimize") else struct {};
+
 
 // Fixed-size ordered window list.
 // Used by Workspace in workspaces.zig; kept here so it can be imported from
 // the always-present tracking module rather than the optional workspaces module.
 
 pub const Tracking = struct {
+    /// Maximum windows tracked per workspace.
+    ///
+    /// This is a hard compile-time cap, not a tuneable.  Power users with many
+    /// terminal instances or IDE popups can hit it; windows beyond the cap are
+    /// silently dropped from tiling and workspace membership with an error log.
+    ///
+    /// If 64 is regularly too small for your workflow, increase this value and
+    /// rebuild.  The struct is stack-allocated, so the cost is 4 × capacity bytes
+    /// per Workspace instance — 256 bytes at capacity = 64, 512 bytes at 128.
     const capacity = 64;
 
     buf: [capacity]u32 = undefined,
@@ -34,18 +53,22 @@ pub const Tracking = struct {
     }
 
     /// Returns true if `win` may be safely appended or prepended.
-    /// Emits a warning and triggers a debug assertion if the list is already
-    /// at capacity, making overflow visible rather than silently dropping the
-    /// window (which would cause it to become invisible to tiling, workspace
-    /// membership queries, and focus history with no diagnostic output).
+    ///
+    /// When the list is already at capacity, logs an error and returns false.
+    /// The window is NOT tracked — it becomes invisible to tiling, workspace
+    /// membership queries, and focus history with no further diagnostic output.
+    ///
+    /// NOTE: reaching capacity is a runtime condition that can happen in
+    /// production (many terminal windows, browser instances, etc.).  It is
+    /// handled with a log message and graceful degradation rather than an
+    /// assertion, so ReleaseFast builds remain safe.
     fn prepareAdd(self: *Tracking, win: u32) bool {
         if (self.contains(win)) return false;
         if (self.len >= capacity) {
-            std.log.warn(
+            std.log.err(
                 "tracking: workspace capacity ({d}) reached; window 0x{x} will not be tracked",
                 .{ capacity, win },
             );
-            std.debug.assert(false); // catch in debug/releaseSafe builds
             return false;
         }
         return true;
@@ -104,14 +127,15 @@ pub const Tracking = struct {
     /// the same set of windows as the current list — no additions, no removals,
     /// no duplicates.
     ///
-    /// Validation is O(n) via a stack-allocated bitset: one pass builds a
-    /// presence bitmap over current buf indices, then verifies that new_order
-    /// hits every slot exactly once.
+    /// Validation is O(n²) in debug/releaseSafe builds: each entry in new_order
+    /// requires an O(n) linear scan (indexOfScalar) to locate its slot in
+    /// self.buf, and the resulting slot index is marked in a stack-allocated
+    /// bitset to detect duplicates.  For capacity = 64 this is at most 4,096
+    /// operations — acceptable for debug-only code.  The bitset operations
+    /// themselves are O(1) per entry; the dominant cost is the linear scan.
     pub fn reorder(self: *Tracking, new_order: []const u32) void {
         std.debug.assert(new_order.len == self.len);
 
-        // Build a presence bitmap over the *current* buf indices in one O(n)
-        // pass, then verify new_order hits every slot exactly once.
         var seen = std.StaticBitSet(capacity).initEmpty();
         for (new_order) |w| {
             const slot = std.mem.indexOfScalar(u32, self.buf[0..self.len], w);
@@ -122,9 +146,6 @@ pub const Tracking = struct {
             std.debug.assert(!seen.isSet(idx));
             seen.set(idx);
         }
-        // Every current window must appear in new_order.
-        std.debug.assert(seen.count() == self.len);
-
         @memcpy(self.buf[0..self.len], new_order);
     }
 
@@ -141,7 +162,12 @@ var g_workspace_count: usize                      = 1;
 
 pub fn init(allocator: std.mem.Allocator) void {
     var map = std.AutoHashMap(u32, u64).init(allocator);
-    map.ensureTotalCapacity(32) catch {};
+    // Pre-allocate to avoid early growth under normal workloads.  Failure is
+    // non-fatal: the map still works correctly, just with more incremental
+    // allocations as windows are added.
+    map.ensureTotalCapacity(32) catch |err| {
+        std.log.warn("tracking: initial map pre-allocation failed ({s}); map will grow on demand", .{@errorName(err)});
+    };
     g_map = map;
 }
 
@@ -157,7 +183,15 @@ pub fn setWorkspaceCount(count: usize) void { g_workspace_count = count; }
 
 /// Called by workspaces.switchTo so getCurrentWorkspace() stays correct
 /// even when code queries tracking directly.
-pub fn setCurrentWorkspace(ws: u8) void { g_current = ws; }
+///
+/// Asserts that `ws` is within the valid range [0, g_workspace_count).
+/// An out-of-range value (e.g. from a config reload that reduces the workspace
+/// count) would cause isOnCurrentWorkspace to return false for all windows,
+/// making every window appear off-workspace and silently breaking focus.
+pub fn setCurrentWorkspace(ws: u8) void {
+    std.debug.assert(ws < g_workspace_count);
+    g_current = ws;
+}
 
 // Window registration
 
@@ -165,10 +199,11 @@ pub fn setCurrentWorkspace(ws: u8) void { g_current = ws; }
 /// Called directly when workspaces.zig is absent; workspaces.moveWindowTo
 /// handles the full registration path (screen effects etc.) when present.
 pub fn registerWindow(win: u32, ws: u8) !void {
-    var map = &(g_map orelse return);
-    if (map.contains(win)) return;
-    try map.ensureUnusedCapacity(1);
-    map.putAssumeCapacity(win, @as(u64, 1) << @intCast(ws));
+    const map = &(g_map orelse return);
+    const gop = try map.getOrPut(win);
+    if (!gop.found_existing) {
+        gop.value_ptr.* = @as(u64, 1) << @intCast(ws);
+    }
 }
 
 /// Remove `win` from the tracking map.
@@ -183,15 +218,18 @@ pub fn removeWindow(win: u32) void {
 /// Called by workspaces.zig for tag and move operations; keeps the hashmap in
 /// sync with workspace arrays.
 ///
-/// Panics in debug/releaseSafe builds if `win` is not already in the map —
-/// registerWindow must be called before any mask update.
+/// Logs an error and returns (rather than asserting) if `win` is not in the map,
+/// because this is a runtime condition that can occur in production (e.g. a
+/// race between removeWindow and a delayed mask update), not a programmer
+/// invariant that can be checked at compile time.
 pub fn setWindowMask(win: u32, mask: u64) void {
     std.debug.assert(mask != 0);
     const m = &(g_map orelse return);
     const p = m.getPtr(win) orelse {
-        // setWindowMask called on an unregistered (or already-removed) window.
-        // This is always a caller bug: registerWindow must precede any mask update.
-        std.debug.assert(false);
+        std.log.err(
+            "tracking: setWindowMask called on unregistered window 0x{x}; registerWindow must precede any mask update",
+            .{win},
+        );
         return;
     };
     p.* = mask;
@@ -199,9 +237,13 @@ pub fn setWindowMask(win: u32, mask: u64) void {
 
 // Query predicates
 
+/// Returns the workspace bitmask for `win`, or null if not tracked.
+///
+/// Uses a pointer capture (`|*m|`) to avoid copying the AutoHashMap header
+/// on every call, which would be unnecessary given that .get() only reads.
 pub inline fn getWindowWorkspaceMask(win: u32) ?u64 {
-    const m = g_map orelse return null;
-    return m.get(win);
+    if (g_map) |*m| return m.get(win);
+    return null;
 }
 
 pub fn isManaged(win: u32) bool {
@@ -213,8 +255,7 @@ pub inline fn windowCount() usize {
 }
 
 pub inline fn getCurrentWorkspace() ?u8 {
-    if (g_map == null) return null;
-    return g_current;
+    return if (g_map != null) g_current else null;
 }
 
 pub inline fn getWorkspaceCount() usize {
@@ -255,7 +296,7 @@ pub inline fn isOnCurrentWorkspace(win: u32) bool {
 /// Declared as a plain fn (not inline) so it can be passed as a *const fn(u32)bool.
 pub fn isOnCurrentWorkspaceAndVisible(win: u32) bool {
     if (!isOnCurrentWorkspace(win)) return false;
-    return if (comptime build_options.has_minimize) !minimize.isMinimized(win) else true;
+    return if (comptime build.has_minimize) !minimize.isMinimized(win) else true;
 }
 
 /// Returns the first non-minimized window in `windows`, or null if all are minimized.
@@ -269,7 +310,7 @@ pub fn isOnCurrentWorkspaceAndVisible(win: u32) bool {
 /// Declared as a plain fn so minimize.zig can store it as a function pointer.
 pub fn firstNonMinimized(windows: []const u32) ?u32 {
     for (windows) |win| {
-        const is_min = if (comptime build_options.has_minimize) minimize.isMinimized(win) else false;
+        const is_min = if (comptime build.has_minimize) minimize.isMinimized(win) else false;
         if (!is_min) return win;
     }
     return null;
