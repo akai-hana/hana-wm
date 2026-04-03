@@ -418,13 +418,21 @@ const Parser = struct {
         if (looks_like_color) {
             if (parseColor(raw)) |color| return .{ .color = color } else |_| {
                 if (std.fmt.parseInt(i64, raw, 10)) |int_val| return .{ .integer = int_val } else |_| {
-                    debug.warn("Invalid color '{s}' at line {}", .{ raw, self.line });
-                    return ParseError.InvalidColor;
+                    // Not a valid color or integer: treat as an unquoted string.
+                    // This allows bare identifiers (e.g. layout names, action
+                    // names) to appear without quotes in unusual positions.
+                    return .{ .string = try self.allocator.dupe(u8, raw) };
                 }
             }
         }
 
-        return .{ .integer = std.fmt.parseInt(i64, raw, 10) catch return ParseError.InvalidValue };
+        if (std.fmt.parseInt(i64, raw, 10)) |int_val| return .{ .integer = int_val } else |_| {
+            // Not a color, not an integer, not a boolean or percentage: treat
+            // as an unquoted bare string so the caller sees a Value rather than
+            // an error.  This avoids ParseError.InvalidValue for tokens like
+            // layout or action names that appear without quotes.
+            return .{ .string = try self.allocator.dupe(u8, raw) };
+        }
     }
 
     // Bare keys (no `=`) are treated as `key = true`, which is the only call

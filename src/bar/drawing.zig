@@ -659,15 +659,16 @@ fn findVisualType(conn: *core.xcb.xcb_connection_t, visual_id: u32) ?*core.xcb.x
 ///
 /// Walks the screen's depth iterator and returns on the very first visual
 /// entry found. This is the safe unconditional fallback used when a specific
-/// visual ID cannot be located. Reaching `unreachable` would mean the X
-/// server reported zero visuals — a pathological server state.
+/// visual ID cannot be located.  Panics in all build modes rather than invoking
+/// undefined behaviour if the X server reports zero visuals — a condition that
+/// cannot occur on any real server.
 fn getDefaultVisualType(screen: *core.xcb.xcb_screen_t) *core.xcb.xcb_visualtype_t {
     var depth_iter = core.xcb.xcb_screen_allowed_depths_iterator(screen);
     while (depth_iter.rem > 0) : (core.xcb.xcb_depth_next(&depth_iter)) {
         var visual_iter = core.xcb.xcb_depth_visuals_iterator(depth_iter.data);
         if (visual_iter.rem > 0) return visual_iter.data;
     }
-    unreachable;
+    @panic("X server reported zero visuals — cannot create a drawing context");
 }
 
 /// Append a single whitespace-separated Pango style token (e.g. "Bold", "Italic", "12")
@@ -681,6 +682,9 @@ inline fn appendFontStyleToken(result: *std.ArrayListUnmanaged(u8), allocator: s
 /// Pango `"FontName Bold N"` format that pango_font_description_from_string
 /// expects. Returns `xft_name` unchanged when no `:` separator is present.
 /// Results are memoised in `font_conversion_cache` to avoid repeated work.
+///
+/// ALLOCATOR CONTRACT: the same `allocator` must be passed on every call and
+/// to `deinitFontCache`.  Mixing allocators produces use-after-free bugs.
 fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const u8 {
     if (font_conversion_cache == null)
         font_conversion_cache = std.StringHashMap([]const u8).init(allocator);
@@ -726,17 +730,19 @@ fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const 
 }
 
 /// Release the font-name conversion cache. Call once at shutdown.
+///
+/// Ownership invariant: every cache entry was inserted by `convertFontName`,
+/// which always heap-allocates both the key (`allocator.dupe(xft_name)`) and
+/// the value (`result.toOwnedSlice()`).  These are always distinct allocations,
+/// so both can be freed unconditionally without a pointer-equality guard.
+/// Callers that pass a no-conversion name (no `:` separator) take an early
+/// return before any cache insertion, so no aliased key/value pairs exist.
 pub fn deinitFontCache(allocator: std.mem.Allocator) void {
     if (font_conversion_cache) |*cache| {
         var iter = cache.iterator();
         while (iter.next()) |entry| {
-            // Both keys and values (when converted) are owned allocations.
-            // Keys are always duped on insertion; values share the key pointer
-            // only when no conversion was needed (i.e. no ':' separator), in
-            // which case the converted string IS the key — skip the double-free.
             allocator.free(entry.key_ptr.*);
-            if (entry.value_ptr.*.ptr != entry.key_ptr.*.ptr)
-                allocator.free(entry.value_ptr.*);
+            allocator.free(entry.value_ptr.*);
         }
         cache.deinit();
         font_conversion_cache = null;

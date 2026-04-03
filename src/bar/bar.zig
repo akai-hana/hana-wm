@@ -154,11 +154,31 @@ const BarSnapshot = struct {
     is_workspace_dirty: bool = true, // workspace state changed
     is_title_dirty:    bool = true,  // title / focus / minimised state changed
 
+    /// Flat byte buffer containing concatenated titles for every window in
+    /// `current_workspace_windows`, fetched on the main thread so the render
+    /// thread never needs to make X11 calls for the segmented-title path.
+    ///
+    /// `window_title_ends[i]` is the exclusive byte offset of the i-th title
+    /// inside `window_title_data`.  Use `windowTitle(i)` to slice it out.
+    window_title_data: std.ArrayListUnmanaged(u8)  = .empty,
+    window_title_ends: std.ArrayListUnmanaged(u32) = .empty,
+
     fn deinit(snap: *BarSnapshot, allocator: std.mem.Allocator) void {
         snap.focused_title.deinit(allocator);
         snap.current_workspace_windows.deinit(allocator);
         snap.minimized_windows.deinit(allocator);
         snap.workspace_has_windows.deinit(allocator);
+        snap.window_title_data.deinit(allocator);
+        snap.window_title_ends.deinit(allocator);
+    }
+
+    /// Returns the pre-fetched title for `current_workspace_windows.items[idx]`.
+    /// Returns an empty slice when `idx` is out of range.
+    pub fn windowTitle(snap: *const BarSnapshot, idx: usize) []const u8 {
+        if (idx >= snap.window_title_ends.items.len) return "";
+        const end: usize   = snap.window_title_ends.items[idx];
+        const start: usize = if (idx == 0) 0 else snap.window_title_ends.items[idx - 1];
+        return snap.window_title_data.items[start..end];
     }
 };
 
@@ -388,25 +408,33 @@ const State = struct {
     fn drawRightSegments(self: *State, snap: *const BarSnapshot, segments: []const types.BarSegment) !void {
         var right_x          = self.render.width;
         const scaled_spacing = self.render.config.scaledSpacing(self.render.height);
-        // pending_gap: when true the segment to our right drew something and
-        // "earned" a gap — we emit it only if the current segment also draws,
-        // so gaps only appear between two non-empty neighbours.
+        // pending_gap: when true the segment immediately to our right drew
+        // something and "earned" a gap.  We reserve the gap space BEFORE
+        // drawing the current segment so its pixel position is correct, then
+        // paint the background gap after confirming the current segment also
+        // drew.  If the current segment draws nothing we reclaim the reserved
+        // space so the next leftward segment is not pushed unnecessarily far.
         var pending_gap = false;
         var i = segments.len;
         while (i > 0) {
             i -= 1;
             right_x -= self.measureSegmentWidth(snap, segments[i]);
+            // Reserve gap space before drawing so the segment lands at the
+            // correct position when its right neighbour produced output.
+            if (pending_gap) right_x -= scaled_spacing;
             if (segments[i] == .clock) self.layout_cache.clock_x = right_x;
             const drew_to = try self.drawSegment(snap, segments[i], right_x, null);
             const drew    = drew_to != right_x;
 
             if (drew and pending_gap) {
+                // Paint background in the gap we reserved between this
+                // segment and the one to its right.
                 const gap_x = right_x + self.measureSegmentWidth(snap, segments[i]);
                 self.render.dc.fillRect(gap_x, 0, scaled_spacing, self.render.height, self.render.config.bg);
-                right_x -= scaled_spacing;
-            } else if (drew and !pending_gap and i < segments.len - 1) {
-                right_x -= scaled_spacing;
-                self.render.dc.fillRect(right_x, 0, scaled_spacing, self.render.height, self.render.config.bg);
+            } else if (!drew and pending_gap) {
+                // Nothing was drawn — reclaim the reserved gap so the next
+                // segment is not shifted further left than necessary.
+                right_x += scaled_spacing;
             }
             pending_gap = drew;
         }
@@ -650,7 +678,11 @@ fn hasMinimizedSetChanged(
 }
 
 /// Populates a pre-allocated BarSnapshot slot in-place from current WM state.
-fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot) !void {
+///
+/// `forced` must be read from `gBar.channel.pending_force_full_redraw` (and
+/// that flag cleared) by the caller before invoking this function, so that
+/// `captureStateIntoSlot` has no dependency on global channel state.
+fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot, forced: bool) !void {
     const allocator = s.render.allocator;
     snap.minimized_windows.clearRetainingCapacity();
     if (comptime build.has_minimize)
@@ -693,8 +725,23 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot)
         }
     }
 
-    const forced = gBar.channel.pending_force_full_redraw;
-    gBar.channel.pending_force_full_redraw = false;
+    // Pre-fetch titles for every workspace window on the main thread so the
+    // render thread's segmented-title path never issues X11 calls (Issue #2).
+    // Titles are stored in a flat byte buffer; window_title_ends[i] holds the
+    // exclusive end offset of the i-th title.
+    snap.window_title_data.clearRetainingCapacity();
+    snap.window_title_ends.clearRetainingCapacity();
+    for (snap.current_workspace_windows.items) |win| {
+        if (snap.focused_window != null and win == snap.focused_window.?) {
+            // Reuse the already-fetched focused title to avoid a redundant round-trip.
+            snap.window_title_data.appendSlice(allocator, snap.focused_title.items) catch {};
+        } else {
+            // fetchWindowTitleInto appends directly into the flat buffer.
+            titleSegment.fetchWindowTitleInto(core.conn, win, &snap.window_title_data, allocator) catch {};
+        }
+        const end: u32 = @intCast(snap.window_title_data.items.len);
+        snap.window_title_ends.append(allocator, end) catch {};
+    }
 
     snap.is_full_redraw = forced or (snap.workspace_count != prev.workspace_count);
     snap.is_workspace_dirty = snap.is_full_redraw or
@@ -729,7 +776,11 @@ pub fn submitDraw() void {
     const s = gBar.state orelse return;
     if (!s.is_visible) return;
     const idx = gBar.channel.write_index;
-    captureStateIntoSlot(s, &gBar.channel.slots[idx], &gBar.channel.slots[1 - idx]) catch |e| {
+    // Read and clear the force-full-redraw flag here, outside captureStateIntoSlot,
+    // so that function has no dependency on global channel state (Issue #13).
+    const forced = gBar.channel.pending_force_full_redraw;
+    gBar.channel.pending_force_full_redraw = false;
+    captureStateIntoSlot(s, &gBar.channel.slots[idx], &gBar.channel.slots[1 - idx], forced) catch |e| {
         debug.warnOnErr(e, "bar captureStateIntoSlot");
         return;
     };
@@ -746,7 +797,9 @@ pub fn submitDrawBlocking() void {
     const s = gBar.state orelse return;
     if (!s.is_visible) return;
     const idx = gBar.channel.write_index;
-    captureStateIntoSlot(s, &gBar.channel.slots[idx], &gBar.channel.slots[1 - idx]) catch |e| {
+    const forced = gBar.channel.pending_force_full_redraw;
+    gBar.channel.pending_force_full_redraw = false;
+    captureStateIntoSlot(s, &gBar.channel.slots[idx], &gBar.channel.slots[1 - idx], forced) catch |e| {
         debug.warnOnErr(e, "bar captureStateIntoSlot");
         return;
     };

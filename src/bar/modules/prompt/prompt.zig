@@ -216,7 +216,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     // Without this guard the XCB_KEY_RELEASE for Escape is a fatal trap:
     //   1. XCB_KEY_PRESS  (Escape): handleInsert switches mode to .normal ✓
     //   2. XCB_KEY_RELEASE(Escape): handleNormal sees XK_Escape with a clean
-    //      pending (op=0, count=0) → returns .deactivate → prompt closes.
+    //      pending (op=0, count=0) -> returns .deactivate -> prompt closes.
     // The user then presses 'b' or an arrow key to start editing in normal
     // mode, but the prompt is already gone — so those keys get the blame.
     //
@@ -509,7 +509,7 @@ fn compLowerBound(prefix: []const u8) usize {
 }
 
 /// Recompute the ghost-text suggestion based on the current buffer.
-/// Priority: history (newest first) → any executable match.
+/// Priority: history (newest first) -> any executable match.
 /// Only operates in INSERT mode with cursor at end and no spaces typed.
 fn updateGhost() void {
     g.ghost_len = 0;
@@ -689,7 +689,7 @@ fn histLoadFile(fp: *c.FILE) void {
     }
 }
 
-/// Load history from drun → bash → zsh → fish (load order).
+/// Load history from drun -> bash -> zsh -> fish (load order).
 /// Because `histPrepend()` inserts at index 0, fish ends up with the highest
 /// suggestion priority in `updateGhost`.
 fn loadHistory() void {

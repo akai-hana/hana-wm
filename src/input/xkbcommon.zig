@@ -33,7 +33,7 @@ pub const XkbState = struct {
     keymap:            *xkb_keymap,
     state:             *xkb_state,
     device_id:         i32,
-    /// Flat keycode→keysym table for the standard X11 range (indices 0..255).
+    /// Flat keycode->keysym table for the standard X11 range (indices 0..255).
     /// Populated at init time; entries outside 8..255 hold XKB_KEY_NoSymbol.
     /// No allocator needed — 256 × 4 bytes = 1 KiB, lives inside XkbState.
     keysym_by_keycode: [256]u32,
@@ -154,3 +154,4 @@ fn retryKeymap(ctx: *xkb_context, xcb_conn: *anyopaque, device_id: i32) !*xkb_ke
     }
     return error.XkbKeymapFailed;
 }
+

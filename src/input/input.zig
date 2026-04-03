@@ -1,5 +1,4 @@
 //! User input handling
-//!
 //! Handles keyboard, mouse buttons, pointer motion, and drag operations.
 
 const std   = @import("std");
@@ -12,32 +11,26 @@ const c = @cImport({
     @cInclude("fcntl.h");
 });
 
-// core/
 const core      = @import("core");
     const xcb   = core.xcb;
 const types     = @import("types");
 const utils     = @import("utils");
 const constants = @import("constants");
 
-// core/modules/
 const debug = @import("debug");
 
-// window/
 const window   = @import("window");
 const tracking = @import("tracking");
 const focus    = @import("focus");
 
-// window/modules/
 const fullscreen = if (build.has_fullscreen) @import("fullscreen") else struct {};
 const minimize   = if (build.has_minimize) @import("minimize") else struct {};
 const workspaces = if (build.has_workspaces) @import("workspaces") else struct {};
 const tiling     = if (build.has_tiling) @import("tiling") else struct {};
 const drag       = @import("drag");
 
-// input
 const xkbcommon = @import("xkbcommon");
 
-// bar
 const bar = if (build.has_bar) @import("bar") else struct {
     pub fn scheduleFullRedraw() void {}
     pub fn scheduleRedraw() void {}
@@ -50,9 +43,6 @@ const prompt = if (build.has_bar and build.has_prompt) @import("prompt") else st
     pub fn handlePromptKeypress(_: anytype, _: anytype) bool { return false; }
     pub fn toggle() void {}
 };
-
-// Workspace shims 
-// Thin wrappers that compile away entirely when the workspaces feature is off.
 
 fn wsGetState() ?*workspaces.State {
     return if (comptime build.has_workspaces) workspaces.getState() else null;
@@ -78,6 +68,7 @@ inline fn wsMoveWindowToAll(win: u32) void {
 inline fn wsTagToggleAll(win: u32) void {
     if (comptime build.has_workspaces) workspaces.tagToggleAll(win);
 }
+
 
 // Constants 
 

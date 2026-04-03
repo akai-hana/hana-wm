@@ -24,12 +24,15 @@
 //! (State.prev_layout) rather than here, so this module stays free of a
 //! circular dependency with tiling.zig.
 
-const std     = @import("std");
-const layouts = @import("layouts");
+const std   = @import("std");
+const build = @import("build_options");
+
 const core    = @import("core");
-const xcb     = core.xcb;
-const build_options = @import("build_options");
-const bar     = if (build_options.has_bar) @import("bar") else struct {
+    const xcb = core.xcb;
+
+const layouts = @import("layouts");
+
+const bar = if (build.has_bar) @import("bar") else struct {
     pub fn isVisible() bool { return false; }
     pub fn getBarHeight() u16 { return 0; }
 };

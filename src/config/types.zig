@@ -126,7 +126,7 @@ pub const LayoutVariantOverride = union(enum) {
 };
 
 /// Per-workspace startup layout assignment, overriding the global default.
-/// variant is null → use the per-layout section default.
+/// variant is null -> use the per-layout section default.
 pub const WorkspaceLayoutOverride = struct {
     workspace_idx: u8,                   // 0-indexed workspace number
     layout_idx:    u8,                   // index into TilingConfig.layouts
@@ -400,8 +400,11 @@ pub const Config = struct {
     // Some fields (e.g. bar.font, bar.clock_format) point to string literals by default
     // and to heap-allocated slices when the user overrides them in the config file.
     // These nullable fields track which case applies so deinit knows what to free.
+    //
+    // NOTE: `tiling.layout` is intentionally absent here — it always points into
+    // `tiling.layouts.items[0]`, which is freed by `TilingConfig.deinit`.  A
+    // separate sentinel would create a redundant allocation and a double-free risk.
     allocated_font:                ?[]const u8 = null,
-    allocated_layout:              ?[]const u8 = null,
     allocated_clock_format:        ?[]const u8 = null,
     allocated_indicator_focused:   ?[]const u8 = null,
     allocated_indicator_unfocused: ?[]const u8 = null,
@@ -420,7 +423,7 @@ pub const Config = struct {
         self.tiling.deinit(a);
 
         inline for (.{
-            "allocated_font", "allocated_layout", "allocated_clock_format",
+            "allocated_font", "allocated_clock_format",
             "allocated_indicator_focused", "allocated_indicator_unfocused",
             "allocated_drun_prompt",
         }) |field| if (@field(self, field)) |s| a.free(s);

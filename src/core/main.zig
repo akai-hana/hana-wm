@@ -1,26 +1,22 @@
 //! hana's entry point and main loop.
+//! Entry point and orchestrator of all hana's module sub-systems //TODO: can this line description be improved?
 
 const std   = @import("std");
 const build = @import("build_options");
 
-// core/
 const core    = @import("core");
     const xcb = core.xcb;
 const utils   = @import("utils");
 const events  = @import("events");
 const config  = @import("config");
 
-// core/modules/
 const scale = if (build.has_scale) @import("scale") else struct {};
 const debug = if (build.has_debug) @import("debug") else struct {};
 
-// input/
 const input = @import("input");
 
-// window/
 const window = @import("window");
 
-// bar/
 const bar = if (build.has_bar) @import("bar") else struct {
     pub fn init() !void {}
     pub fn deinit() void {}

@@ -5,8 +5,9 @@
 //! inside each function captures the *call site* source location, so the
 //! module tag printed in log output is always the caller's file, not debug.zig.
 
-const std = @import("std");
-const build_options = @import("build_options");
+const std   = @import("std");
+const build = @import("build_options");
+
 
 fn moduleFromSrc(src: std.builtin.SourceLocation) []const u8 {
     const basename = std.fs.path.basename(src.file);
@@ -17,7 +18,7 @@ fn moduleFromSrc(src: std.builtin.SourceLocation) []const u8 {
 }
 
 inline fn debug_enabled() bool {
-    return build_options.enable_debug_logging;
+    return build.enable_debug_logging;
 }
 
 pub inline fn err(comptime fmt: []const u8, args: anytype) void {
