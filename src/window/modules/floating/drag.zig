@@ -143,7 +143,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
         if (comptime build.has_tiling) {
             if (tiling.getWindowGeom(win)) |g| break :blk g;
         }
-        break :blk utils.getGeometry(core.conn, win) orelse return;
+        break :blk window.getGeometry(core.conn, win) orelse return;
     };
     // pending_float is set for any drag (move *or* resize) on a tiled window
     // in a non-floating layout.  On the first motion event it triggers tiling

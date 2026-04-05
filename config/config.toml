@@ -44,17 +44,18 @@ include = ["themes/akai.toml"]
 
 [tiling]
 enabled       = true
-global_layout = false # Per-workspace tiling layouts
+global_layout = false # Are layouts global or per-workspace?
 
 # Enabled layouts
 ## Layouts not defined on the array will not be available in runtime.
 ## Not defining the array at all enables all layouts in `src/tiling/layouts/.`
 
 #       Layout          Variation  Workspaces
-layouts = [                                 # ("default"/"alternative") 
+layouts = [                                 # (default/alternative) 
 	"master-stack",                     # "lifo"/"fifo"
-	"monocle",      "gaps",    "5",     # "gapless"/"gaps"
-	"grid",         "relaxed", "6,8",   # "rigid"/"relaxed"
+	"monocle",      "gaps",    # "5",   # "gapless"/"gaps"
+	"grid",         "relaxed", # "6,8", # "rigid"/"relaxed"
+	"floating",
 	# "fibonacci",                      # no variants
 ]
 
@@ -163,8 +164,15 @@ Mod+Middle_click = "toggle_floating_window" # Toggle clicked window between tile
 ## Master-stack
 Mod+H      = "decrease_master" 
 Mod+L      = "increase_master" # Increase master area width
-Mod+comma  = "increase_master_count"
-Mod+period = "decrease_master_count" 
+Mod+Shift+L    = "increase_master_count"
+Mod+Shift+H    = "decrease_master_count"
+
+# Focus cycling (dwm-style)
+## k = next/right (master → stack → ... → wrap), j = prev/left
+Mod+k = "focus_next_window"
+Mod+j = "focus_prev_window"
+Mod+Shift+k = "move_window_next"
+Mod+Shift+j = "move_window_prev"
 
 # Workspaces
 ## Switch to workspace N

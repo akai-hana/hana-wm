@@ -1,5 +1,5 @@
 //! hana's entry point and main loop.
-//! Initialises all sub-systems in dependency order and hands off to the event loop.
+//! Entry point and orchestrator of all hana's module sub-systems //TODO: can this line description be improved?
 
 const std   = @import("std");
 const build = @import("build_options");
@@ -29,9 +29,11 @@ pub fn main() !void {
     const x = try connectToX();
     defer xcb.xcb_disconnect(x.conn);
 
-    // Written once at startup and then read-only for the lifetime of the process.
-    // Stored on core so every module can access them without threading them
-    // through every call site.
+    // TODO: can we pass conn/screen/root directly as function args instead of
+    // writing to core globals here?
+    // These globals are written once at startup and then read-only for the
+    // lifetime of the process. They're stored on core so every module can
+    // access them without threading them through every call site.
     core.conn   = x.conn;
     core.screen = x.screen;
     core.root   = x.root;
@@ -150,13 +152,11 @@ fn deinitModules() void {
     window.deinit();
 }
 
-/// Initializes global WM state: X atom cache and focus property cache.
+/// Initializes global WM state: X atom cache.
 fn initGlobalState(conn: *xcb.xcb_connection_t) !void {
     try utils.initAtomCache(conn);  // Intern frequently used X atoms
-    utils.initInputModelCache();     // Build per-window focus property cache (no allocator — static array)
 }
 
 /// Tears down global WM state initialized by initGlobalState.
 fn deinitGlobalState() void {
-    utils.deinitInputModelCache();
 }

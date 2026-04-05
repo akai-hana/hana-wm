@@ -48,6 +48,10 @@ pub const Action = union(enum) {
     all_workspaces,          // shows all windows from every workspace at once; toggled on/off
     move_to_all_workspaces,  // pin focused window to every workspace
     toggle_tag_all,          // flip between pinned-to-all and current-workspace-only
+    focus_next_window,       // cycle focus forward / right  (dwm-style Mod+k)
+    focus_prev_window,       // cycle focus backward / left  (dwm-style Mod+j)
+    move_window_next,        // move focused window forward  (dwm-style Mod+Shift+k)
+    move_window_prev,        // move focused window backward (dwm-style Mod+Shift+j)
 
     pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -133,6 +137,12 @@ pub const WorkspaceLayoutOverride = struct {
     variant:     ?LayoutVariantOverride, // null = use per-layout section default
 };
 
+/// Per-workspace master count override, parsed from [tiling.layouts.master-stack.counts].
+pub const WorkspaceMasterCountOverride = struct {
+    workspace_idx: u8, // 0-indexed workspace number
+    count:         u8,
+};
+
 pub const TilingConfig = struct {
     enabled:      bool           = true,
     layout:       []const u8     = "master_left",
@@ -163,6 +173,10 @@ pub const TilingConfig = struct {
     /// Per-workspace layout assignments parsed from the layouts array.
     workspace_layout_overrides: std.ArrayList(WorkspaceLayoutOverride) = .empty,
 
+    /// Per-workspace master count overrides parsed from [tiling.layouts.master-stack.counts].
+    /// Only applied when global_layout = false.
+    workspace_master_count_overrides: std.ArrayList(WorkspaceMasterCountOverride) = .empty,
+
     /// When true, layout changes apply globally across all workspaces (legacy behavior).
     global_layout: bool = false,
 
@@ -170,6 +184,7 @@ pub const TilingConfig = struct {
         for (self.layouts.items) |layout| allocator.free(layout);
         self.layouts.deinit(allocator);
         self.workspace_layout_overrides.deinit(allocator);
+        self.workspace_master_count_overrides.deinit(allocator);
     }
 };
 

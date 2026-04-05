@@ -7,8 +7,11 @@ const core    = @import("core");
     const xcb = core.xcb;
 const utils   = @import("utils");
 
-const window = @import("window");
-const tiling = if (build.has_tiling) @import("tiling") else struct {};
+const window   = @import("window");
+const tracking = @import("tracking");
+const tiling   = if (build.has_tiling) @import("tiling") else struct {
+    pub fn getStateOpt() ?*anyopaque { return null; }
+};
 
 const bar = if (build.has_bar) @import("bar") else struct {
     pub fn scheduleFocusRedraw(_: anytype) void {}
@@ -389,7 +392,7 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
 
     if (flags.send_wm_take_focus)
         // CurrentTime (0) — same reason as xcb_set_input_focus above.
-        utils.sendWMTakeFocus(core.conn, win, 0); // CurrentTime
+        window.sendWMTakeFocus(core.conn, win, 0); // CurrentTime
 
     if (flags.arm_confirm) {
         state.confirm_cookie = xcb.xcb_get_input_focus(core.conn);
@@ -451,7 +454,7 @@ pub fn bruteForceMouseEnterFocus(win: u32) void {
         xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
         win, 0);
-    utils.sendWMTakeFocus(core.conn, win, 0);
+    window.sendWMTakeFocus(core.conn, win, 0);
 }
 
 pub fn setFocus(win: u32, reason: Reason) void {
@@ -464,7 +467,7 @@ pub fn setFocus(win: u32, reason: Reason) void {
     if ((reason == .mouse_click or reason == .user_command) and
         !isWindowMapped(core.conn, win)) return;
 
-    const input_model = utils.getInputModelCached(core.conn, win);
+    const input_model = window.getInputModelCached(core.conn, win);
     if (input_model == .no_input) return;
 
     cancelPendingConfirm();
@@ -512,7 +515,7 @@ pub fn drainPendingConfirm() void {
 
     if (!window.isValidManagedWindow(win)) return;
 
-    const input_model = utils.getInputModelCached(core.conn, win);
+    const input_model = window.getInputModelCached(core.conn, win);
     if (input_model == .no_input) return;
 
     const c = focus_reply orelse return;
@@ -530,7 +533,7 @@ pub fn drainPendingConfirm() void {
 
     _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
         win, 0); // CurrentTime
-    utils.sendWMTakeFocus(core.conn, win, 0); // CurrentTime
+    window.sendWMTakeFocus(core.conn, win, 0); // CurrentTime
 }
 
 /// Discard a pending confirm reply without acting on it.
@@ -565,7 +568,7 @@ fn cancelPendingConfirm() void {
 /// A stale cache would skip the message, leaving the app's internal widget
 /// inactive.
 pub fn invalidateInputModelCache(win: u32) void {
-    utils.recacheInputModel(core.conn, win);
+    window.recacheInputModel(core.conn, win);
 }
 
 /// Send the X protocol focus signals for `win` using CurrentTime (0).
@@ -574,14 +577,14 @@ pub fn invalidateInputModelCache(win: u32) void {
 /// WM_TAKE_FOCUS is always sent; sendWMTakeFocus is a no-op for windows that
 /// do not advertise it.  No raise, no confirm/retry machinery.
 fn sendFocusProtocol(win: u32) void {
-    const model = utils.getInputModelCached(core.conn, win);
+    const model = window.getInputModelCached(core.conn, win);
     if (model == .no_input) return;
     if (model == .passive or model == .locally_active) {
         _ = xcb.xcb_set_input_focus(core.conn,
             xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, 0); // CurrentTime
         advertiseActiveWindow(win);
     }
-    utils.sendWMTakeFocus(core.conn, win, 0); // CurrentTime
+    window.sendWMTakeFocus(core.conn, win, 0); // CurrentTime
 }
 
 /// Hover focus following DWM's focus(c) semantics.
@@ -606,7 +609,7 @@ pub fn dwmFocus(win: u32) void {
 
     cancelPendingConfirm();
 
-    const model = utils.getInputModelCached(core.conn, win);
+    const model = window.getInputModelCached(core.conn, win);
     if (model == .no_input) return;
     const old = state.focused_window;
     commitFocusTransition(old, win, .{
@@ -730,7 +733,7 @@ pub fn syncPointerFocusNow() void {
 
     cancelPendingConfirm();
 
-    const input_model = utils.getInputModelCached(core.conn, child);
+    const input_model = window.getInputModelCached(core.conn, child);
     if (input_model == .no_input) return;
 
     const old = state.focused_window;
@@ -777,4 +780,121 @@ fn isWindowMapped(conn: *xcb.xcb_connection_t, win: u32) bool {
     ) orelse return false;
     defer std.c.free(reply);
     return reply.*.map_state == xcb.XCB_MAP_STATE_VIEWABLE;
+}
+
+// ---------------------------------------------------------------------------
+// Window focus cycling — dwm-style Mod+j / Mod+k
+// ---------------------------------------------------------------------------
+//
+// Scratch buffer for collectVisibleWindows.  Module-level so it is not
+// stack-allocated on every key press.  Safe in a single-threaded WM.
+
+var cycle_buf: [64]u32 = undefined;
+
+/// Build an ordered list of visible windows for cycling.
+///
+/// When tiling is active the tiling module's window list is used — it matches
+/// the order windows appear on screen (master first, then stack), which is
+/// exactly what dwm's focusstack() walks.
+///
+/// Falls back to a list built from the focus MRU history (current focus first,
+/// then history) when tiling is disabled or has no windows.
+///
+/// Returns the number of windows written into `cycle_buf`, or 0 if none.
+fn collectVisibleWindows() usize {
+    var len: usize = 0;
+
+    if (comptime build.has_tiling) {
+        if (tiling.getStateOpt()) |t| {
+            if (t.is_enabled) {
+                for (t.windows.items()) |w| {
+                    if (len >= cycle_buf.len) break;
+                    if (tracking.isOnCurrentWorkspaceAndVisible(w)) {
+                        cycle_buf[len] = w;
+                        len += 1;
+                    }
+                }
+                if (len > 0) return len;
+            }
+        }
+    }
+
+    // Fallback: MRU order — current focus first, then history.
+    if (state.focused_window) |w| {
+        cycle_buf[len] = w;
+        len += 1;
+    }
+    for (state.history.items) |w| {
+        if (len >= cycle_buf.len) break;
+        if (!tracking.isOnCurrentWorkspaceAndVisible(w)) continue;
+        // Skip if already added (avoids duplicating focused_window).
+        var dup = false;
+        for (cycle_buf[0..len]) |existing| {
+            if (existing == w) { dup = true; break; }
+        }
+        if (!dup) {
+            cycle_buf[len] = w;
+            len += 1;
+        }
+    }
+    return len;
+}
+
+/// Cycle focus to the next visible window (dwm Mod+k — moves right/forward).
+///
+/// Walks the tiling window list in ascending order so the focus follows the
+/// visual layout: master → first stack slot → second stack slot → … → master.
+pub fn focusNext() void {
+    const len = collectVisibleWindows();
+    if (len == 0) return;
+    const wins = cycle_buf[0..len];
+    const idx = if (state.focused_window) |w|
+        std.mem.indexOfScalar(u32, wins, w) orelse 0
+    else
+        0;
+    setFocus(wins[(idx + 1) % len], .user_command);
+}
+
+/// Cycle focus to the previous visible window (dwm Mod+j — moves left/backward).
+///
+/// Walks the tiling window list in descending order.
+pub fn focusPrev() void {
+    const len = collectVisibleWindows();
+    if (len == 0) return;
+    const wins = cycle_buf[0..len];
+    const idx = if (state.focused_window) |w|
+        std.mem.indexOfScalar(u32, wins, w) orelse 0
+    else
+        0;
+    setFocus(wins[(idx + len - 1) % len], .user_command);
+}
+/// Move the focused window one step forward in the cycle (Mod+Shift+k).
+///
+/// Swaps the focused window with the window that would receive focus on
+/// Mod+k, keeping focus on the moved window.  Only has an effect when
+/// tiling is active and at least two windows are visible.
+pub fn moveWindowNext() void {
+    if (comptime !build.has_tiling) return;
+    const len = collectVisibleWindows();
+    if (len < 2) return;
+    const wins = cycle_buf[0..len];
+    const focused = state.focused_window orelse return;
+    const idx = std.mem.indexOfScalar(u32, wins, focused) orelse return;
+    const target = wins[(idx + 1) % len];
+    tiling.swapWindowsById(focused, target);
+}
+
+/// Move the focused window one step backward in the cycle (Mod+Shift+j).
+///
+/// Swaps the focused window with the window that would receive focus on
+/// Mod+j, keeping focus on the moved window.
+pub fn moveWindowPrev() void {
+    if (comptime !build.has_tiling) return;
+    const len = collectVisibleWindows();
+    if (len < 2) return;
+    const wins = cycle_buf[0..len];
+    const focused = state.focused_window orelse return;
+    const idx = std.mem.indexOfScalar(u32, wins, focused) orelse return;
+    const target = wins[(idx + len - 1) % len];
+    tiling.swapWindowsById(focused, target);
 }

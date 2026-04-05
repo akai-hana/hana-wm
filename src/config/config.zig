@@ -328,7 +328,7 @@ const ACTION_MAP = std.StaticStringMap(types.Action).initComptime(.{
     .{ "decrease_master",        .decrease_master        },
     .{ "increase_master_count",  .increase_master_count  },
     .{ "decrease_master_count",  .decrease_master_count  },
-    .{ "toggle_floating_window",        .toggle_floating_window        },
+    .{ "toggle_floating_window", .toggle_floating_window },
     .{ "toggle_fullscreen",      .toggle_fullscreen      },
     .{ "fullscreen",             .toggle_fullscreen      },
     .{ "swap_master",            .swap_master            },
@@ -339,13 +339,19 @@ const ACTION_MAP = std.StaticStringMap(types.Action).initComptime(.{
     .{ "unminimize_lifo",        .unminimize_lifo        },
     .{ "unminimize_fifo",        .unminimize_fifo        },
     .{ "unminimize_all",         .unminimize_all         },
-    .{ "cycle_layout_variants", .cycle_layout_variants },
-    .{ "cycle_variants",        .cycle_layout_variants },
+    .{ "cycle_layout_variants",  .cycle_layout_variants  },
+    .{ "cycle_variants",         .cycle_layout_variants  },
     .{ "toggle_prompt",          .toggle_prompt          },
-    .{ "drun",                   .toggle_prompt          },
+    .{ "prompt",                 .toggle_prompt          },
     .{ "all_workspaces",         .all_workspaces         },
     .{ "move_to_all_workspaces", .move_to_all_workspaces },
     .{ "toggle_tag_all",         .toggle_tag_all         },
+    .{ "focus_next_window",      .focus_next_window      },
+    .{ "focus_next",             .focus_next_window      },
+    .{ "focus_prev_window",      .focus_prev_window      },
+    .{ "focus_prev",             .focus_prev_window      },
+    .{ "move_window_next",       .move_window_next       },
+    .{ "move_window_prev",       .move_window_prev       },
 });
 
 const GlobEntry = struct {
@@ -620,6 +626,37 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
     cfg.tiling.master_width = master_src.getScalable(if (dedicated) "width" else "master_width") orelse parser.ScalableValue.percentage(50.0);
     parseTilingVariants(doc, cfg);
     cfg.tiling.global_layout = get(bool, section, "global_layout", false, null, null);
+
+    // Per-workspace master count overrides: [tiling.layouts.master-stack.counts]
+    // workspace_number (1-based) = count
+    // Only meaningful when global_layout = false.
+    if (doc.getSection("tiling.layouts.master-stack.counts")) |counts_sec| {
+        cfg.tiling.workspace_master_count_overrides.clearRetainingCapacity();
+        var iter = counts_sec.pairs.iterator();
+        while (iter.next()) |entry| {
+            const ws_1based = std.fmt.parseInt(usize, entry.key_ptr.*, 10) catch {
+                debug.warn("master-stack.counts: invalid workspace key '{s}', skipping", .{entry.key_ptr.*});
+                continue;
+            };
+            if (ws_1based < 1 or ws_1based > 255) {
+                debug.warn("master-stack.counts: workspace {} out of range, skipping", .{ws_1based});
+                continue;
+            }
+            const count_val = entry.value_ptr.*.asInt() orelse {
+                debug.warn("master-stack.counts: non-integer count for workspace {}, skipping", .{ws_1based});
+                continue;
+            };
+            if (count_val < 0 or count_val > 10) {
+                debug.warn("master-stack.counts: count {} for workspace {} out of range [0,10], skipping",
+                    .{ count_val, ws_1based });
+                continue;
+            }
+            try cfg.tiling.workspace_master_count_overrides.append(allocator, .{
+                .workspace_idx = @intCast(ws_1based - 1),
+                .count         = @intCast(count_val),
+            });
+        }
+    }
 }
 
 /// Reads `variants` from `section` into `field`; warns on unknown values.
