@@ -30,8 +30,6 @@ const carousel = @import("carousel");
 /// Fixed left indent applied inside every title cell, independent of
 /// `scaledSegmentPadding`.  Provides visual breathing room between the
 /// segment edge and the title text.
-///
-/// TODO: Replace with a config-driven value so users can tune the inset.
 const title_lead_px: u16 = 4;
 
 /// Maximum number of windows rendered in split-view.

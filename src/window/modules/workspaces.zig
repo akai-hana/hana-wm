@@ -13,14 +13,14 @@ const debug = @import("debug");
 
 const window   = @import("window");
 const tracking = @import("tracking");
-const Tracking = @import("tracking").Tracking; //TODO: this and the previous line is confusing
+const Tracking = @import("tracking").Tracking; // re-exported for use as a type alias at call sites
 const focus    = @import("focus");
 
 const fullscreen = if (build.has_fullscreen) @import("fullscreen") else struct {};
 const minimize   = if (build.has_minimize) @import("minimize") else struct {};
 
 const tiling       = if (build.has_tiling) @import("tiling") else struct {};
-const TilingLayout = if (build.has_tiling) tiling.Layout else u0; //TODO: this and the previous line is confusing
+const TilingLayout = if (build.has_tiling) tiling.Layout else u0; // u0 stub satisfies the type when tiling is absent
 
 const bar = if (build.has_bar) @import("bar") else struct {
     pub fn scheduleRedraw() void {}

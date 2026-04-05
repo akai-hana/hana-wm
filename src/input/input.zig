@@ -364,6 +364,14 @@ fn intermediateChild(exec_pipe_write: c_int, pid_pipe_write: c_int, cmd_z: [*:0]
 }
 
 fn executeShellCommand(cmd: []const u8) !void {
+    // Snapshot the target workspace before any blocking syscalls.  In a
+    // single-threaded WM the value cannot change while we are blocked in
+    // waitpid/read, but capturing it here makes the intent explicit and
+    // correctly handles sequence actions of the form [exec, switch_workspace]
+    // where a later action in the same sequence mutates g_current before
+    // registerSpawn is called.
+    const spawn_ws = tracking.getCurrentWorkspace();
+
     const cmd_z = try core.alloc.dupeZ(u8, cmd);
     defer core.alloc.free(cmd_z);
 
@@ -421,7 +429,7 @@ fn executeShellCommand(cmd: []const u8) !void {
     _ = c.close(exec_fds[0]);
     if (n > 0) return; // exec failed; skip spawn registration
 
-    if (tracking.getCurrentWorkspace()) |ws| {
+    if (spawn_ws) |ws| {
         const pid_u32: u32 = if (grandchild_pid > 0) @intCast(grandchild_pid) else 0;
         window.registerSpawn(ws, pid_u32);
     }

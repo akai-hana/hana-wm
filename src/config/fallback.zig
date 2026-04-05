@@ -30,9 +30,8 @@ extern fn pclose(stream: *FILE) c_int;
 extern fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *FILE) usize;
 extern fn feof(stream: *FILE) c_int;
 
-// Iter 1: removed unused `allocator` parameter — detectTerminal is a pure PATH
-// scan that does not allocate and returns a static string slice.
 /// Returns the first available terminal from TERMINALS, or "xterm".
+/// Pure PATH scan — does not allocate; returns a static string slice.
 pub fn detectTerminal() []const u8 {
     for (TERMINALS) |cmd| {
         if (isCommandAvailable(cmd)) {

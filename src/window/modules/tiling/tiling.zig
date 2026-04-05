@@ -1,18 +1,5 @@
 //! Tiling window manager: orchestrates layout, window tracking, and the
 //! geometry/border cache. Delegates pixel arithmetic to the per-layout modules.
-//!
-//! Suggested future split 
-//! This file is ~1 200 lines; the single-responsibility boundary is between
-//! *state + public API* and *retile dispatch + screen geometry*.  When the
-//! retile surface grows further, extract the following into `retile.zig`:
-//!
-//!   retileCurrentWorkspace, retileAllWorkspaces, retileInactiveWorkspace,
-//!   retileForRestore, retileIfDirty, retile (core), dispatchLayout,
-//!   calcScreenArea, collectWorkspaceWindows, resolveLayout, resolveMasterWidth,
-//!   buildLayoutCtx, applyBorderColor, updateBorders.
-//!
-//! `retile.zig` would `@import("tiling")` for State/getState, and tiling.zig's
-//! internal callers would `@import("retile")`. State is the shared boundary.
 
 const std   = @import("std");
 const build = @import("build_options");
@@ -34,8 +21,8 @@ const floating = @import("floating");
 
 const fullscreen  = if (build.has_fullscreen) @import("fullscreen") else struct {};
 const workspaces  = if (build.has_workspaces) @import("workspaces") else struct {};
-const WsState     = if (build.has_workspaces) workspaces.State     else struct {}; //TODO: is this necessary?
-const WsWorkspace = if (build.has_workspaces) workspaces.Workspace else struct {}; //TODO: is this necessary?
+const WsState     = if (build.has_workspaces) workspaces.State     else struct {};
+const WsWorkspace = if (build.has_workspaces) workspaces.Workspace else struct {};
 
 const bar = if (build.has_bar) @import("bar") else struct {
     pub fn redrawInsideGrab() void {}

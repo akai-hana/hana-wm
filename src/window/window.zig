@@ -42,11 +42,8 @@ inline fn wsRemoveWindow(win: u32) void {
     else tracking.removeWindow(win);
 }
 
-// NOTE: This fallback stub must stay in sync with the real implementation in
-// scale.zig (scaleBorderWidth).  If the formula changes there, update this stub
-// too.  Ideally scaleBorderWidth would be moved to a file that is always
-// compiled (not gated on has_scale), eliminating this duplication entirely.
-// There is no compile-time enforcement of that sync; update both sites together.
+// Stub must use the same formula as scale.zig:scaleBorderWidth for builds
+// without the scale module. Both sites must be updated together.
 const scale = if (build.has_scale) @import("scale") else struct {
     /// Stub matching scale.scaleBorderWidth for builds without the scale module.
     /// Formula must stay identical to scale.zig:scaleBorderWidth.
@@ -73,11 +70,9 @@ const XSizeHintsFlags = struct {
 // Tracks pending (workspace, pid) assignments for newly-mapped windows.
 // Lives here (window.zig) because it is exclusively accessed by this module.
 //
-// Implemented as a module-level std.ArrayListUnmanaged so there is one logical
-// allocation rather than two (the old design heap-allocated a SpawnQueue node
-// that itself heap-allocated its backing slice, plus stored a redundant alloc
-// field).  The allocator is stored once at module level (g_alloc) and used for
-// both the spawn queue and any other window-module lifetime allocations.
+// Implemented as a module-level std.ArrayListUnmanaged with a single backing
+// allocation. The allocator is stored once at module level (g_alloc) and used
+// for both the spawn queue and any other window-module lifetime allocations.
 //
 // The list is capped at SPAWN_QUEUE_CAP entries.  Exceeding the cap logs an
 // error and drops the entry; it never terminates the process.
@@ -112,6 +107,12 @@ var atoms: struct {
     net_wm_state:            u32 = 0,
     net_wm_state_fullscreen: u32 = 0,
 } = .{};
+
+/// Returns the cached WM_PROTOCOLS atom for use by other modules.
+/// Avoids exposing the full atoms struct across module boundaries.
+pub fn wmProtocolsAtom() u32 {
+    return atoms.wm_protocols;
+}
 
 // Geometry cache
 //
@@ -316,11 +317,27 @@ fn findSpawnQueueWorkspace(
         return ws;
     }
 
-    // Oldest-entry fallback — queue is non-empty per precondition: firePropertyCookies
-    // only sets net_wm_pid when the spawn queue is non-empty.
-    if (g_spawn_queue.items.len == 0) return null;
+    // Oldest-entry fallback — only safe when there is exactly one pending entry.
+    // Common case: the app was launched via `sh -c "cmd"` and the window reports
+    // a PID that is a grandchild of the tracked sh process (sh exec-optimised into
+    // cmd, or cmd forked a subprocess for its UI).  With a single entry there is
+    // no ambiguity: it must belong to this window.
+    //
+    // With multiple entries we cannot know which entry belongs to this window.
+    // Consuming items[0] would mis-route the window to whatever workspace the
+    // *oldest* pending spawn was registered on — which may be a completely
+    // different workspace than where the user currently is (the classic symptom:
+    // "window spawns on the workspace I was previously on").  Return null so
+    // handleMapRequest falls back to current_ws instead.
+    if (g_spawn_queue.items.len != 1) {
+        std.log.debug(
+            "spawn: no exact PID match for pid={d}, {d} entries pending — ambiguous, routing to current workspace",
+            .{ win_pid, g_spawn_queue.items.len },
+        );
+        return null;
+    }
     std.log.debug(
-        "spawn: no exact PID match for pid={d}, using oldest entry ws={d}",
+        "spawn: no exact PID match for pid={d}, sole entry ws={d} — using heuristic",
         .{ win_pid, g_spawn_queue.items[0].workspace },
     );
     const ws = g_spawn_queue.items[0].workspace;

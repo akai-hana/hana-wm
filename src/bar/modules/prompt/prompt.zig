@@ -119,10 +119,6 @@ pub fn isActive() bool { return g.is_active; }
 
 /// Returns true when the prompt is active in insert mode, signalling that
 /// the bar should schedule a periodic redraw for the cursor blink animation.
-pub fn needsRedraw() bool {
-    if (!g.is_active) return false;
-    return g.vim_state.mode == .insert or vim.colonInput(&g.vim_state) != null;
-}
 
 /// Returns the milliseconds until the next blink toggle, or -1 if the cursor
 /// blink animation is not running.  Pass this (combined with the clock timeout)
@@ -298,6 +294,7 @@ pub fn draw(
     conn:                *xcb.xcb_connection_t,
     focused_window:      ?u32,
     focused_title:       []const u8,
+    minimized_title:     []const u8,
     current_ws_wins:     []const u32,
     minimized_set:       *const std.AutoHashMapUnmanaged(u32, void),
     cached_title:        *std.ArrayList(u8),
@@ -317,7 +314,7 @@ pub fn draw(
         .{
             .focused_window  = focused_window,
             .focused_title   = focused_title,
-            .minimized_title = "",
+            .minimized_title = minimized_title,
             .current_ws_wins = current_ws_wins,
             .minimized_set   = minimized_set,
         },

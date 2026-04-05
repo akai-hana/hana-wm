@@ -3,18 +3,21 @@
 
 const std = @import("std");
 
-const core      = @import("core"); //TODO: pending to deprecate
+const core      = @import("core");
     const xcb   = core.xcb;
 const constants = @import("constants");
 
 const debug = @import("debug");
 
 
-const MAX_PROPERTY_LENGTH: u32 = 256;
+const MAX_PROPERTY_LENGTH: u32 = 256; //TODO: what does this do?
+
 /// Minimum window dimension; windows thinner or shorter than this are considered invalid.
 const MIN_WINDOW_DIM = constants.MIN_WINDOW_DIM;
+
 /// Maximum depth when walking the X11 window tree in findManagedWindow.
 const MAX_WINDOW_TREE_DEPTH = constants.MAX_WINDOW_TREE_DEPTH;
+
 /// Passed as the `delete` argument to xcb_get_property; 0 means do not consume the property.
 const PROPERTY_NO_DELETE: u8 = 0;
 const WM_HINTS_INPUT_FLAG:   u32   = 1 << 0;

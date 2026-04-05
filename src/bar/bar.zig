@@ -383,13 +383,22 @@ const State = struct {
                 snap.current_workspace, snap.workspace_has_windows.items, snap.is_all_view_active),
             .layout   => try layoutSegment.draw(self.render.dc, self.render.config, self.render.height, x),
             .variants => try variantsSegment.draw(self.render.dc, self.render.config, self.render.height, x),
-            .title    => try prompt.draw(
-                self.render.dc, self.render.config, self.render.height, x, width orelse 100,
-                self.win.conn, snap.focused_window,
-                snap.focused_title.items,
-                snap.current_workspace_windows.items, &snap.minimized_windows,
-                &self.title_cache.title, &self.title_cache.title_window,
-                snap.is_title_invalidated, self.render.allocator),
+            .title    => blk: {
+                const wins = snap.current_workspace_windows.items;
+                const minimized_title: []const u8 =
+                    if (wins.len > 0 and snap.minimized_windows.contains(wins[0]))
+                        snap.windowTitle(0)
+                    else
+                        "";
+                break :blk try prompt.draw(
+                    self.render.dc, self.render.config, self.render.height, x, width orelse 100,
+                    self.win.conn, snap.focused_window,
+                    snap.focused_title.items,
+                    minimized_title,
+                    snap.current_workspace_windows.items, &snap.minimized_windows,
+                    &self.title_cache.title, &self.title_cache.title_window,
+                    snap.is_title_invalidated, self.render.allocator);
+            },
             .clock    => try clockSegment.draw(self.render.dc, self.render.config, self.render.height, x),
         };
     }
@@ -1068,10 +1077,8 @@ pub fn scheduleFocusRedraw(new_win: ?u32) void {
     gBar.channel.mutex.unlock();
 }
 
-pub fn getBarWindow() u32         { return if (gBar.state) |s| s.win.win_id else 0; }
 pub fn isBarWindow(win: u32) bool  { return if (gBar.state) |s| s.win.win_id == win else false; }
 pub fn getBarHeight() u16          { return if (gBar.state) |s| s.render.height else 0; }
-pub fn isBarInitialized() bool     { return gBar.state != null; }
 pub fn hasClockSegment() bool      { return if (gBar.state) |s| s.has_clock_segment else false; }
 
 /// Schedules a full bar redraw, coalesced via updateIfDirty. Zero X11 I/O on the caller.
@@ -1089,10 +1096,6 @@ pub fn scheduleFullRedraw() void {
 }
 
 pub fn isVisible() bool              { return if (gBar.state) |s| s.is_visible else false; }
-pub fn getGlobalVisibility() bool    { return if (gBar.state) |s| s.is_globally_visible else false; }
-pub fn setGlobalVisibility(visible: bool) void {
-    if (gBar.state) |s| s.is_globally_visible = visible;
-}
 
 /// Synchronous redraw — blocks until done. Use only inside/before xcb_ungrab_server.
 pub fn redrawInsideGrab() void {
