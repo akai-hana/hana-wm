@@ -165,7 +165,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
 
     // Ignore clicks on root / unknown windows
     const clicked_window = if (event.child != 0) event.child else event.event;
-    const managed_window = utils.findManagedWindow(core.conn, clicked_window, tracking.isManaged);
+    const managed_window = window.findManagedWindow(core.conn, clicked_window, tracking.isManaged);
 
     if (clicked_window == 0 or clicked_window == core.root or managed_window == 0) {
         replayPointer(event.time);
@@ -194,7 +194,18 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
         return;
     }
 
-    // Fallback: Any other click focuses the window
+    // Fallback: Any other click focuses and raises the window.
+    //
+    // The raise must be issued unconditionally here, before setFocus, because
+    // setFocus short-circuits when managed_window is already focused_window
+    // (the common case after hover-focus) and never reaches the raise inside
+    // commitFocusTransition.  Without this explicit raise, a window that holds
+    // focus but has been visually covered — by a newly-spawned window, a
+    // floating peer, or any stacking change that bypasses the focus path —
+    // stays buried despite the click.  The double-raise when setFocus also
+    // raises is a no-op from the server's perspective.
+    _ = xcb.xcb_configure_window(core.conn, managed_window,
+        xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     focus.setFocus(managed_window, .mouse_click);
     releaseGrab(event.time);
 }
@@ -226,7 +237,7 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
 /// Closes a window gracefully via WM_DELETE_WINDOW (ICCCM §4.1.2.7), falling
 /// back to xcb_destroy_window for clients that don't advertise the protocol.
 fn closeWindow(win: u32) void {
-    if (!utils.supportsWMDeleteCached(core.conn, win)) {
+    if (!window.supportsWMDeleteCached(core.conn, win)) {
         _ = xcb.xcb_destroy_window(core.conn, win);
         return;
     }
@@ -309,6 +320,13 @@ fn executeAction(action: *const types.Action) !void {
 
         // Prompt 
         .toggle_prompt => prompt.toggle(),
+
+        // Window focus cycling (dwm-style Mod+k / Mod+j)
+        .focus_next_window => focus.focusNext(),
+        .focus_prev_window => focus.focusPrev(),
+        // Window move in cycle (dwm-style Mod+Shift+k / Mod+Shift+j)
+        .move_window_next  => focus.moveWindowNext(),
+        .move_window_prev  => focus.moveWindowPrev(),
     }
 }
 

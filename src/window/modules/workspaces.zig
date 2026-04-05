@@ -13,14 +13,14 @@ const debug = @import("debug");
 
 const window   = @import("window");
 const tracking = @import("tracking");
-const Tracking = @import("tracking").Tracking; // re-exported for use as a type alias at call sites
+const Tracking = @import("tracking").Tracking; //TODO: this and the previous line is confusing
 const focus    = @import("focus");
 
 const fullscreen = if (build.has_fullscreen) @import("fullscreen") else struct {};
 const minimize   = if (build.has_minimize) @import("minimize") else struct {};
 
 const tiling       = if (build.has_tiling) @import("tiling") else struct {};
-const TilingLayout = if (build.has_tiling) tiling.Layout else u0; // u0 stub satisfies the type when tiling is absent
+const TilingLayout = if (build.has_tiling) tiling.Layout else u0; //TODO: this and the previous line is confusing
 
 const bar = if (build.has_bar) @import("bar") else struct {
     pub fn scheduleRedraw() void {}
@@ -59,6 +59,11 @@ pub const Workspace = struct {
     // Set when the user adjusts master width in per-workspace layout mode;
     // loaded back into tiling state on every workspace switch-in.
     master_width: ?f32 = null,
+    // Per-workspace master count override (master-stack layout).
+    // null = use the global default from config / tiling state.
+    // Populated at init from [tiling.layouts.master-stack.counts] and updated
+    // when the user adjusts the count via keybind in per-workspace layout mode.
+    master_count: ?u8 = null,
     // Last window that held focus on this workspace before the user left it.
     // Restored on re-entry when the cursor is not hovering over any window.
     last_focused: ?u32 = null,
@@ -157,6 +162,15 @@ pub fn init() !void {
         }
     }
 
+    // Per-workspace master count overrides from [tiling.layouts.master-stack.counts].
+    var master_count_lookup: [MAX_WS]?u8 = .{null} ** MAX_WS;
+    if (build.has_tiling) {
+        for (cfg_tiling.workspace_master_count_overrides.items) |o| {
+            if (o.workspace_idx < MAX_WS)
+                master_count_lookup[o.workspace_idx] = o.count;
+        }
+    }
+
     for (wss, 0..) |*ws, i| {
         const id: u8 = @intCast(i);
         const name   = if (i < WORKSPACE_NAMES.len) WORKSPACE_NAMES[i] else "?";
@@ -175,6 +189,9 @@ pub fn init() !void {
 
         ws.* = Workspace.init(id, name, ws_layout);
         ws.variants = ws_variant;
+        if (build.has_tiling) {
+            if (master_count_lookup[id]) |mc| ws.master_count = mc;
+        }
     }
 
     tracking.setWorkspaceCount(count);
@@ -459,10 +476,12 @@ pub fn switchToAll() void {
                 if (window.getWindowGeom(win)) |rect| {
                     utils.configureWindow(core.conn, win, rect);
                 } else {
-                    const pos = utils.floatDefaultPos();
                     _ = xcb.xcb_configure_window(core.conn, win,
                         xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
-                        &[_]u32{ pos.x, pos.y });
+                        &[_]u32{
+                            @intCast(core.screen.width_in_pixels  / 4),
+                            @intCast(core.screen.height_in_pixels / 4),
+                        });
                 }
             }
         }
@@ -660,7 +679,8 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
     }
 
     // Map every window; restore floating geometry for those not already on screen.
-    const pos = utils.floatDefaultPos();
+    const default_x: u32 = @intCast(core.screen.width_in_pixels  / 4);
+    const default_y: u32 = @intCast(core.screen.height_in_pixels / 4);
     for (ws.windows.items()) |win| {
         _ = xcb.xcb_map_window(core.conn, win);
         if ((!build.has_tiling or !tiling.isWindowActiveTiled(win)) and !isMinimized(win) and
@@ -671,7 +691,7 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
             } else {
                 _ = xcb.xcb_configure_window(core.conn, win,
                     xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
-                    &[_]u32{ pos.x, pos.y });
+                    &[_]u32{ default_x, default_y });
             }
         }
     }
@@ -735,12 +755,37 @@ fn executeSwitch(old_ws: u8, new_ws: u8) void {
     if (fs_info != null) bar.setBarState(.hide_fullscreen) else bar.setBarState(.show_fullscreen);
 
     if (fs_info) |info| {
-        utils.configureWindowGeom(core.conn, info.window, .{
-            .x = 0, .y = 0,
-            .width        = @intCast(core.screen.width_in_pixels),
-            .height       = @intCast(core.screen.height_in_pixels),
-            .border_width = 0,
-        });
+        // Map and push offscreen every non-fullscreen window on this workspace.
+        //
+        // When a window is spawned onto an inactive workspace that already has
+        // an active fullscreen, executeSwitch takes this branch and skips
+        // restoreWorkspaceWindows — the only place that calls xcb_map_window
+        // on switch-in. The spawned window therefore stays unmapped. On
+        // fullscreen exit, tiling allocates a tile cell for it (it is in
+        // s.windows and on this workspace) but the cell is invisible, leaving
+        // an empty gap until the next workspace round-trip triggers a normal
+        // restoreWorkspaceWindows path.
+        //
+        // Fix: map every non-fullscreen workspace window here, then push it
+        // offscreen so it is hidden behind the fullscreen window. Invalidate
+        // the tiling cache entry for tiled windows so the next retile after
+        // fullscreen exit does not find a stale zero-rect and skip configure.
+        for (new_ws_obj.windows.items()) |win| {
+            if (win == info.window) continue;
+            _ = xcb.xcb_map_window(core.conn, win);
+            pushOffscreen(core.conn, win);
+            if (comptime build.has_tiling) {
+                if (tiling.isWindowActiveTiled(win)) tiling.invalidateGeomCache(win);
+            }
+        }
+        _ = xcb.xcb_configure_window(core.conn, info.window,
+            xcb.XCB_CONFIG_WINDOW_X     | xcb.XCB_CONFIG_WINDOW_Y     |
+            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
+            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
+            &[_]u32{ 0, 0,
+                @intCast(core.screen.width_in_pixels),
+                @intCast(core.screen.height_in_pixels),
+                0 });
         _ = xcb.xcb_configure_window(core.conn, info.window,
             xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     } else {

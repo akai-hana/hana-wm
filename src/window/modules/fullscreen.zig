@@ -1,5 +1,17 @@
-//! Fullscreen management module
-//! Enables fullscreening capabilities onto hana.
+//! Fullscreen management — enter, exit, toggle, and state queries.
+//!
+//! All fullscreen state lives in the module-level g_state singleton.
+//! WM no longer carries a fullscreen field.
+//! Callers use the module-level query functions (isFullscreen,
+//! getForWorkspace, etc.) rather than going through WM.
+//!
+//! The two commit helpers only queue XCB requests; the caller owns
+//! grab/ungrab/flush so paired exit+enter transitions can share one
+//! grab with no intermediate composited frame.
+//!
+//! Internal window iteration is centralised in forEachWindowOnCurrentWorkspace,
+//! which dispatches to the workspace window list (has_workspaces) or the
+//! global tracking iterator, eliminating three separate copies of that branch.
 
 const std   = @import("std");
 const build = @import("build_options");
@@ -59,7 +71,8 @@ var g_slots: [MAX_WORKSPACES]?FullscreenInfo = @splat(null);
 const FloatSave = struct { win: u32, rect: utils.Rect };
 /// Floating window positions saved just before a fullscreen enter. Populated
 /// by saveFloatingWindowGeoms, consumed and cleared by restoreFloatingWindows.
-// Zero-initialised so that a length-tracking bug cannot silently yield garbage data.
+// Improvement #7: zero-initialised instead of `undefined` — eliminates the
+// footgun where a length-tracking bug would silently yield garbage data.
 var g_float_saves:     [MAX_FLOAT_SAVES]FloatSave = std.mem.zeroes([MAX_FLOAT_SAVES]FloatSave);
 var g_float_saves_len: usize = 0;
 
@@ -67,8 +80,9 @@ var g_float_saves_len: usize = 0;
 var g_net_wm_state:            xcb.xcb_atom_t = xcb.XCB_ATOM_NONE;
 var g_net_wm_state_fullscreen: xcb.xcb_atom_t = xcb.XCB_ATOM_NONE;
 
-// Single source of truth for the reset sequence shared by init() and deinit(),
-// so adding a new state field keeps both in sync automatically.
+// Improvement #6: single source of truth for the reset sequence shared by
+// init() and deinit(), so adding a new state field can never cause one to
+// fall out of sync with the other.
 fn resetState() void {
     g_slots           = @splat(null);
     g_float_saves_len = 0;
@@ -106,6 +120,8 @@ pub fn getForWorkspace(ws: u8) ?FullscreenInfo {
 }
 
 /// Returns the workspace index that `win` is fullscreen on, or null.
+// Improvement #14: reworded from "scans only the live slots, not the full
+// 256-entry array" — that claim is only true for typical workspace counts.
 /// Scans up to getWorkspaceCount() slots; O(workspace_count).
 pub fn workspaceFor(win: u32) ?u8 {
     const count = tracking.getWorkspaceCount();
@@ -122,8 +138,9 @@ pub fn removeForWorkspace(ws: u8) void {
     g_slots[ws] = null;
 }
 
-// Resets both g_slots and g_float_saves_len so no stale save data can
-// bleed into a subsequent fullscreen enter after a mid-session reload.
+// Improvement #13: clear() previously only zeroed g_slots, leaving a stale
+// g_float_saves_len that could cause restoreFloatingWindows to act on data
+// from a prior session if clear() was called mid-session.
 pub fn clear() void {
     g_slots           = @splat(null);
     g_float_saves_len = 0;
@@ -137,9 +154,9 @@ pub fn hasAnyFullscreen() bool {
 
 /// Iterate over occupied slots. Diagnostics only.
 /// Calls `cb` with (workspace_index, FullscreenInfo) for every non-null slot.
-// Accepts anytype so the caller can pass any callable — a plain function,
-// a struct with a `call` method capturing local state, etc. — all resolved
-// and inlined at compile time with zero runtime cost.
+// Improvement #9: accepts anytype instead of a bare fn pointer so the caller
+// can pass a struct with a `call` method that captures local state, or any
+// other callable — all resolved and inlined at compile time, zero cost.
 pub fn forEachFullscreen(cb: anytype) void {
     const count = tracking.getWorkspaceCount();
     for (g_slots[0..count], 0..) |slot, i|
@@ -204,8 +221,9 @@ fn fetchWindowGeom(win: u32) core.WindowGeometry {
         }
     }
 
-    // Screen dimensions are u16; dividing an unsigned value by a power of two
-    // is unambiguous — no signed cast or @divTrunc required.
+    // Improvement #10: screen dimensions are u16; dividing by a power of two
+    // on an unsigned value is unambiguous — the former @as(i32, ...) cast and
+    // @divTrunc were unnecessary and misleading.
     const default: core.WindowGeometry = .{
         .x            = @intCast(core.screen.width_in_pixels  / 4),
         .y            = @intCast(core.screen.height_in_pixels / 4),
@@ -219,9 +237,9 @@ fn fetchWindowGeom(win: u32) core.WindowGeometry {
     ) orelse return default;
     defer std.c.free(reply);
 
-    // Also reject zero-size geometry: a window that has been mapped but not
-    // yet sized reports width=0/height=0, and restoring those dimensions on
-    // exit would leave the window invisible.
+    // Improvement #11: also reject zero-size geometry.  A window that has
+    // been mapped but not yet sized reports width=0/height=0; saving those
+    // dimensions and restoring them on exit would leave the window invisible.
     if (reply.*.x < constants.OFFSCREEN_SENTINEL_MIN or
         reply.*.y < constants.OFFSCREEN_SENTINEL_MIN or
         reply.*.width  == 0 or
@@ -253,9 +271,10 @@ fn saveFloatingWindowGeoms(skip_win: u32) void {
     var n:         usize = 0;
     var truncated: bool  = false;
 
-    // Collect windows via forEachWindowOnCurrentWorkspace so the has_workspaces
-    // dispatch is centralised. Overflow past MAX_FLOAT_SAVES is logged rather
-    // than silently dropped.
+    // Improvement #3 (iteration) + #8 (truncation log):
+    // The collection step now uses forEachWindowOnCurrentWorkspace so the
+    // has_workspaces dispatch is not repeated here.  Overflow past
+    // MAX_FLOAT_SAVES is logged rather than silently dropped.
     const CollectCtx = struct {
         n:         *usize,
         truncated: *bool,
@@ -317,11 +336,12 @@ fn getSavedFloatGeom(win: u32) ?utils.Rect {
 /// Priority: g_float_saves -> tiling geometry cache -> floatDefaultPos fallback.
 /// Clears g_float_saves when done.
 fn restoreFloatingWindows(skip_win: u32) void {
-    const pos = utils.floatDefaultPos();
+    const pos = window.floatDefaultPos();
 
-    // has_workspaces dispatch is centralised in forEachWindowOnCurrentWorkspace.
-    // pos is captured by its component values (x, y as u32) to avoid
-    // referencing its concrete type inside the context struct declaration.
+    // Improvement #3: the has_workspaces dispatch now lives only in
+    // forEachWindowOnCurrentWorkspace.  We capture pos by its component
+    // values (x, y as u32) to avoid needing to know its concrete type inside
+    // the context struct declaration.
     const RestoreCtx = struct {
         pos_x: u32,
         pos_y: u32,
@@ -347,9 +367,12 @@ fn restoreFloatingWindows(skip_win: u32) void {
 
 // Commit helpers (XCB-only; caller owns grab/ungrab/flush)
 //
-// These functions contain array loops, multiple conditional branches, and
-// several XCB calls. They are not marked `inline` — the compiler will inline
-// them where profitable; forcing it at every call site bloats the binary.
+// Improvement #4: `inline` removed from both helpers.  These functions contain
+// array loops, multiple conditional branches, several XCB calls, and a bar
+// state update (which may trigger a tiling retile).  Forcing inlining at every
+// call site produces larger binary output and misleads readers into thinking
+// these are trivial leaf functions.  The compiler will inline them on its own
+// if it determines the trade-off is worthwhile.
 
 fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
     setForWorkspace(ws, .{
@@ -357,7 +380,8 @@ fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
         .saved_geometry = geom,
     });
 
-    // Push every other window offscreen via the shared iteration helper.
+    // Push every other window offscreen.
+    // Improvement #3: iteration dispatched through the shared helper.
     const PushCtx = struct {
         fn call(_: @This(), w: u32) void {
             _ = xcb.xcb_configure_window(core.conn, w,
@@ -380,7 +404,7 @@ fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
     // that fires inside setBarState sees a fully-committed fullscreen state and
     // skips (or correctly handles) the fullscreen window, leaving everything else
     // offscreen where we placed it.
-    utils.configureWindowGeom(core.conn, win, .{
+    window.configureWindowGeom(core.conn, win, .{
         .x            = 0,
         .y            = 0,
         .width        = @intCast(core.screen.width_in_pixels),
@@ -424,14 +448,15 @@ fn exitFullscreenCommit(win: u32, ws: u8) void {
         _ = xcb.xcb_configure_window(core.conn, win,
             xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{saved.border_width});
     } else {
-        utils.configureWindowGeom(core.conn, win, saved);
+        window.configureWindowGeom(core.conn, win, saved);
     }
 
     window.applyBorder(win);
 
     // Clear EWMH fullscreen state so external tools see the window is no longer fullscreen.
-    // Guard checks both atoms: if atom interning partially failed, writing
-    // against XCB_ATOM_NONE would corrupt an unrelated property.
+    // Improvement #2: guard now checks both atoms, mirroring the enter path.
+    // Previously only g_net_wm_state was checked; if atom interning had partially
+    // failed, the clear would still fire and write against an unexpected atom value.
     if (g_net_wm_state != xcb.XCB_ATOM_NONE and g_net_wm_state_fullscreen != xcb.XCB_ATOM_NONE) {
         _ = xcb.xcb_change_property(
             core.conn, xcb.XCB_PROP_MODE_REPLACE,
@@ -500,10 +525,24 @@ pub fn enterFullscreen(win: u32, saved_geom: ?core.WindowGeometry) void {
     _ = xcb.xcb_flush(core.conn);
 }
 
-// All three branches own their server grab directly via enterFullscreenCommit /
-// exitFullscreenCommit. Round-trip XCB calls (fetchWindowGeom,
-// saveFloatingWindowGeoms) are hoisted before xcb_grab_server in every branch
-// because xcb_get_geometry_reply cannot be delivered while the grab is held.
+// Improvement #1 (bug fix) + #5 (uniform grab ownership):
+//
+// Former toggle() had two problems:
+//
+//   1. In the "switch fullscreen to a different window" branch,
+//      saveFloatingWindowGeoms() and fetchWindowGeom() were called INSIDE
+//      xcb_grab_server/xcb_ungrab_server.  Both functions issue
+//      xcb_get_geometry requests and then read their replies.  Those replies
+//      cannot be delivered while the same client holds the server grab —
+//      xcb_get_geometry_reply blocks indefinitely, hanging the WM.
+//      (saveFloatingWindowGeoms' own doc comment says "must be called BEFORE
+//      xcb_grab_server".)  Fix: hoist all round-trip work before the grab.
+//
+//   2. The not-fullscreen branch delegated to enterFullscreen(), which owns
+//      its own grab internally.  This made toggle() partly an orchestrator
+//      and partly a thin wrapper depending on runtime state.  All three
+//      branches now own the grab uniformly, calling enterFullscreenCommit
+//      (rather than enterFullscreen) in the not-fullscreen case.
 pub fn toggle() void {
     const win        = focus.getFocused() orelse return;
     const current_ws = tracking.getCurrentWorkspace() orelse return;

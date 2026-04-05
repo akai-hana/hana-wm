@@ -36,7 +36,7 @@ pub inline fn warn(comptime fmt: []const u8, args: anytype) void {
 pub inline fn info(comptime fmt: []const u8, args: anytype) void {
     if (!debug_enabled()) return;
     const module = moduleFromSrc(@src());
-    std.log.info("[{s}] " ++ fmt, .{module} ++ args);
+    std.debug.print("\x1b[32m[{s}]\x1b[0m " ++ fmt ++ "\n", .{module} ++ args);
 }
 
 pub inline fn debug(comptime fmt: []const u8, args: anytype) void {
@@ -60,7 +60,7 @@ pub inline fn warnIf(condition: bool, comptime fmt: []const u8, args: anytype) v
 pub inline fn infoIf(condition: bool, comptime fmt: []const u8, args: anytype) void {
     if (!debug_enabled() or !condition) return;
     const module = moduleFromSrc(@src());
-    std.log.info("[{s}] " ++ fmt, .{module} ++ args);
+    std.debug.print("\x1b[32m[{s}]\x1b[0m " ++ fmt ++ "\n", .{module} ++ args);
 }
 
 pub inline fn debugIf(condition: bool, comptime fmt: []const u8, args: anytype) void {
