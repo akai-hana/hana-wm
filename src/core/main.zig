@@ -1,5 +1,5 @@
 //! hana's entry point and main loop.
-//! Entry point and orchestrator of all hana's module sub-systems //TODO: can this line description be improved?
+//! Initialises all sub-systems in dependency order and hands off to the event loop.
 
 const std   = @import("std");
 const build = @import("build_options");
@@ -29,11 +29,9 @@ pub fn main() !void {
     const x = try connectToX();
     defer xcb.xcb_disconnect(x.conn);
 
-    // TODO: can we pass conn/screen/root directly as function args instead of
-    // writing to core globals here?
-    // These globals are written once at startup and then read-only for the
-    // lifetime of the process. They're stored on core so every module can
-    // access them without threading them through every call site.
+    // Written once at startup and then read-only for the lifetime of the process.
+    // Stored on core so every module can access them without threading them
+    // through every call site.
     core.conn   = x.conn;
     core.screen = x.screen;
     core.root   = x.root;

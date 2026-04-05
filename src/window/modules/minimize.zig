@@ -1,33 +1,6 @@
-//! Window minimization: hide/restore with LIFO, FIFO, or bulk restore.
-//!
-//! Minimized windows remain in their workspace's window list so the bar
-//! keeps rendering them, but they are moved offscreen and removed from
-//! tiling so remaining windows fill the freed space.
-//!
-//! Three restore operations are provided, all scoped to the current workspace:
-//!   unminimize(.lifo): restore the most recently minimized window (stack pop)
-//!   unminimize(.fifo): restore the least recently minimized window (queue dequeue)
-//!   unminimizeAll:     restore every minimized window on the current workspace
-//!
-//! Ordering is tracked via a monotonic per-entry timestamp — no separate
-//! per-workspace ordered lists are maintained.  Scanning the fixed buffer for
-//! the LIFO/FIFO candidate is O(n), but n is always tiny in practice (typically
-//! < 10 minimized windows), the entire buffer fits in cache, and there is no
-//! hashing cost, no heap pointer chase, and no allocator dependency.
-//!
-//! Fullscreen interaction: minimizing a fullscreen window tears down the
-//! fullscreen state but saves the pre-fullscreen geometry. Restoring such
-//! a window puts it back into fullscreen exactly as it was.
-//!
-//! Thread safety: this module is NOT thread-safe.  All callers are assumed to
-//! run on the single WM event-loop thread.  No internal synchronization is
-//! performed; adding concurrent callers requires external locking.
-//!
-//! NOTE: init() is now infallible (void return).  Callers that previously did
-//! `try minimize.init()` should change the call to `minimize.init()`.
+//! Window minimization
+//! Enables minimization (hiding/un-hiding) capabilities onto hana.
 
-// [#10] build moved to the top of the import block — it is referenced
-// by several declarations below and must be visible before those lines.
 const std   = @import("std");
 const build = @import("build_options");
 
@@ -109,8 +82,7 @@ const MinimizedRecord = struct {
 
 const MAX_MINIMIZED: usize = 32;
 
-// [#16] Zero-initialize the buffer so slots beyond g_len never contain
-// garbage values, making any accidental out-of-bounds read predictable.
+// Zero-initialised so out-of-bounds reads on slots beyond g_len are predictable.
 var g_buf:            [MAX_MINIMIZED]MinimizedRecord = std.mem.zeroes([MAX_MINIMIZED]MinimizedRecord);
 var g_len:            u8  = 0;
 var g_next_timestamp: u64 = 0;
@@ -122,8 +94,7 @@ pub fn init() void {
     g_next_timestamp = 0;
 }
 
-// [#14] deinit now resets g_next_timestamp to mirror init(), making a
-// deinit->init sequence fully idempotent.
+// Resets all state to match init(), making deinit->init sequences fully idempotent.
 pub fn deinit() void {
     g_len            = 0;
     g_next_timestamp = 0;
@@ -135,13 +106,11 @@ pub fn deinit() void {
 /// wire format.  XCB takes geometry arguments as u32 but interprets them as i32
 /// internally; @bitCast is the correct conversion and this wrapper names the
 /// intent at every call site.
-// [#18]
 inline fn toXcbCoord(v: i32) u32 { return @bitCast(v); }
 
 /// Return the index into g_buf[0..g_len] of the slot whose .win field matches,
 /// or null if not found.  All buffer scans are centralised here to give a single
 /// implementation that is easy to audit and covers all search paths.
-// [#5]
 fn findInBuf(win: u32) ?usize {
     for (g_buf[0..g_len], 0..) |rec, i| {
         if (rec.win == win) return i;
@@ -153,7 +122,7 @@ fn findInBuf(win: u32) ?usize {
 /// Buffer order is not semantically significant — LIFO/FIFO ordering is
 /// encoded in each entry's timestamp, not its position in the buffer.
 /// Returns true if the window was found and removed, false if absent (no-op).
-// [#5] single scan via findInBuf; [#returnbool] return value lets callers
+// Uses findInBuf for a single centralised scan; the bool return lets callers
 // distinguish "was tracked" from "was not tracked" without a second lookup.
 fn removeFromBuf(win: u32) bool {
     if (findInBuf(win)) |i| {
@@ -166,11 +135,10 @@ fn removeFromBuf(win: u32) bool {
 
 // Public queries 
 
-// [#15] `inline` removed — the function contains a loop and force-inlining it
-// at every call site would bloat the binary.  The compiler inlines trivial
-// callers on its own.
+// Not marked `inline` — the function contains a loop; the compiler inlines
+// trivial callers on its own without bloating every call site.
 pub fn isMinimized(win: u32) bool {
-    return findInBuf(win) != null; // [#5] single centralised scan
+    return findInBuf(win) != null;
 }
 
 /// Returns a read-only view of the current minimize buffer.
@@ -179,19 +147,16 @@ pub fn isMinimized(win: u32) bool {
 /// Prefer this over populateSet() — it lets the caller (e.g. bar.zig) build
 /// whatever secondary structure it needs without introducing an allocator
 /// dependency into this module.  See populateSet() for migration notes.
-// [#8]
 pub fn minimizedSlice() []const MinimizedRecord {
     return g_buf[0..g_len];
 }
 
 // Private helpers 
 
-// [#11] Both X and Y are now moved offscreen so no partial window exposure is
-// possible regardless of the window's prior Y coordinate.  The same constant
-// is reused for Y; add constants.OFFSCREEN_Y_POSITION if the axes ever need
-// independent values.
+// Both X and Y are moved offscreen so no partial window exposure is possible
+// regardless of the window's prior Y coordinate.
 inline fn hideWindow(win: u32) void {
-    const off = toXcbCoord(constants.OFFSCREEN_X_POSITION); // [#18] named conversion
+    const off = toXcbCoord(constants.OFFSCREEN_X_POSITION);
     _ = xcb.xcb_configure_window(core.conn, win,
         xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
         &[_]u32{ off, off });
@@ -209,9 +174,8 @@ inline fn hideWindow(win: u32) void {
 /// history with a caller-supplied visibility predicate.  This function uses
 /// workspace insertion order, which is not MRU, and is specifically suited
 /// to tiling fallback (master or first slave).
-// [#6] `pub` removed — this is an internal fallback, not part of the module's
-// public contract.  External callers should use focus.focusBestAvailable()
-// directly.
+// Internal fallback — not part of the public API. External callers should
+// use focus.focusBestAvailable() which walks MRU history.
 pub fn focusMasterOrFirst() void {
     found: {
         if (comptime build.has_workspaces) {
@@ -232,11 +196,10 @@ pub fn focusMasterOrFirst() void {
 ///
 /// tiling_index is the slot captured before the failed tiling.removeWindow so
 /// the window is re-inserted at its original position rather than appended.
-// [#15] `inline` removed — the function has branching conditional logic and
-// is called only on the rare buffer-full error path; bloating callers with an
-// inlined copy is not justified.
-// [#1] tiling_index parameter added so rollback uses addWindowAtFilteredIndex
-// instead of addWindow, preserving the window's original tiling position.
+// Not marked `inline` — contains branching conditional logic and is only
+// called on the rare buffer-full error path.
+// tiling_index is passed so rollback uses addWindowAtFilteredIndex,
+// preserving the window's original tiling slot rather than appending it.
 fn rollbackMinimize(win: u32, tiling_index: ?usize, fs_ws: ?u8, saved_fs: ?core.WindowGeometry) void {
     if (core.config.tiling.enabled) {
         if (tiling_index) |ti|
@@ -274,15 +237,12 @@ pub fn minimizeWindow() void {
     if (g_len >= MAX_MINIMIZED) {
         debug.err("minimize: buffer full ({d} entries), cannot minimize 0x{x} -- rolling back",
             .{ MAX_MINIMIZED, win });
-        // [#1] pass tiling_index so rollback re-inserts at the original slot.
         rollbackMinimize(win, tiling_index, fs_ws_for_rollback, saved_fs);
         return;
     }
 
-    // [#12] Timestamp overflow guard.  g_next_timestamp is u64; wrapping to 0
-    // would silently corrupt LIFO/FIFO ordering.  In a WM session this is
-    // unreachable (~1.8e19 minimize operations), but an assertion makes any
-    // future regression loud rather than silent.
+    // Overflow guard: wrapping g_next_timestamp to 0 would silently corrupt
+    // LIFO/FIFO ordering. Unreachable in practice but asserted to catch regressions.
     std.debug.assert(g_next_timestamp != std.math.maxInt(u64));
 
     const ts = g_next_timestamp;
@@ -298,10 +258,8 @@ pub fn minimizeWindow() void {
     _ = xcb.xcb_grab_server(core.conn);
     hideWindow(win);
 
-    // [#9] Try MRU history first so focus returns to the previously active
-    // window.  focusBestAvailable() walks the MRU list and focuses the first
-    // window for which the predicate returns true (i.e. not minimized).
-    // Only fall back to workspace insertion order when history is exhausted.
+    // Try MRU history first so focus returns to the previously active window.
+    // Falls back to workspace insertion order when history is exhausted.
     focus.focusBestAvailable(.tiling_operation, struct {
         fn visible(w: u32) bool { return !isMinimized(w); }
     }.visible, focusMasterOrFirst);
@@ -323,11 +281,8 @@ pub fn minimizeWindow() void {
 /// Precondition: the caller MUST remove the window's record from g_buf before
 /// calling this function.  This invariant is verified by assertion so any
 /// future call site that forgets the removal is caught immediately.
-// [#7] The former `restoreWindow` wrapper (inline fn, never called) has been
-// deleted.  All call sites either do the swap-remove inline (unminimize) or
-// batch-remove up-front (unminimizeAll) and then call this directly.
 fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?usize) void {
-    // [#3] Precondition check: the entry must have been removed before restore.
+    // Precondition: the caller must remove the entry from g_buf before calling.
     std.debug.assert(!isMinimized(win));
 
     if (saved_fs) |geom| {
@@ -356,9 +311,7 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
     } else if (window.getWindowGeom(win)) |rect| {
         utils.configureWindow(core.conn, win, rect);
     } else {
-        // [#13] Log the geometry miss so silent repositioning is observable
-        // during debugging.  This is not fatal — floatDefaultPos() provides
-        // a sensible fallback.
+        // Log the geometry miss so silent repositioning is observable during debugging.
         debug.warn("minimize: no saved geometry for 0x{x}, placing at float default position",
             .{win});
         const pos = utils.floatDefaultPos();
@@ -410,12 +363,8 @@ pub fn unminimizeAll() void {
     const ws_idx = tracking.getCurrentWorkspace() orelse return;
 
     // Snapshot all records for this workspace before mutating the buffer.
-    // [#20] MinimizedRecord is used directly — a parallel local Entry struct
-    //       that duplicated its fields has been removed.
-    // [#4]  The snapshot array is sized to MAX_MINIMIZED, which is also the
-    //       buffer cap, so the snapshot can never overflow and no entries are
-    //       silently dropped.  The former local MAX = 128 constant has been
-    //       removed; it was larger than needed and lacked an overflow log.
+    // Array sized to MAX_MINIMIZED (the buffer cap) so the snapshot can never
+    // overflow and no entries are silently dropped.
     comptime std.debug.assert(MAX_MINIMIZED <= 256); // sanity: fits on the stack
     var snapshot: [MAX_MINIMIZED]MinimizedRecord = undefined;
     var count: usize = 0;
@@ -451,10 +400,9 @@ pub fn unminimizeAll() void {
     const fs_wins    = snapshot[plain_end..count];
 
     if (plain_wins.len > 0) {
-        // [#19] Focus target: the window with the highest timestamp (most
-        // recently minimized).  This gives unminimizeAll the same focus
-        // semantic as repeated LIFO unminimize calls.  Captured here because
-        // plain_wins is re-sorted below for tiling insertion order.
+        // Focus the most recently minimized plain window (highest timestamp),
+        // matching the focus semantic of repeated LIFO unminimize calls.
+        // Captured here because plain_wins is re-sorted below for tiling insertion order.
         var focus_target = plain_wins[0].win;
         var focus_ts     = plain_wins[0].entry.timestamp;
         for (plain_wins[1..]) |rec| {
@@ -467,11 +415,9 @@ pub fn unminimizeAll() void {
         _ = xcb.xcb_grab_server(core.conn);
 
         if (core.config.tiling.enabled) {
-            // [#2] Re-sort plain_wins by tiling_index ascending (nulls last)
-            // before inserting.  This is required for correctness: inserting a
-            // window at index i shifts every slot > i by 1, so lower-index
-            // windows must be inserted first to avoid displacing the target
-            // positions of higher-index windows.
+            // Re-sort plain_wins by tiling_index ascending (nulls last) before
+            // inserting. Inserting at index i shifts every slot > i by 1, so
+            // lower-index windows must be inserted first to land at the correct slots.
             //
             // Example (original list [X, A, B, Z], A at ti=1, B at ti=2):
             //   after minimizing: [X, Z]
@@ -505,7 +451,7 @@ pub fn unminimizeAll() void {
             }
         }
 
-        // [#19] Focus the most recently minimized plain window (see comment above).
+        // Focus the most recently minimized plain window.
         focus.setFocus(focus_target, .window_spawn);
 
         bar.redrawInsideGrab();
@@ -529,7 +475,6 @@ pub fn unminimizeAll() void {
 /// only allocator-dependent (!void) function from this module and lets bar.zig
 /// control its own memory strategy.  This function can be deleted once bar.zig
 /// has been migrated.
-// [#8]
 pub fn populateSet(
     set:       *std.AutoHashMapUnmanaged(u32, void),
     allocator: std.mem.Allocator,
@@ -547,7 +492,6 @@ pub fn forceUntrack(win: u32) void {
 }
 
 /// Called by workspaces.zig when a minimized window is moved to another workspace.
-// [#5] findInBuf replaces an open-coded scan.
 pub fn moveToWorkspace(win: u32, new_ws: u8) void {
     if (findInBuf(win)) |i| {
         g_buf[i].entry.workspace_idx = new_ws;
