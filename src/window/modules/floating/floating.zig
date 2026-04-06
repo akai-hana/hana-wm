@@ -58,7 +58,7 @@ const BATCH = 64;
 /// matters after a retile-to-floating transition where every window was just
 /// positioned by the tiling engine and all their rects are already cached.
 ///
-/// For windows that do require centering, configureSafe is used instead of a
+/// For windows that do require centering, configureWithHints is used instead of a
 /// raw xcb_configure_window so the cache is populated with the new position.
 /// This lets restoreWorkspaceGeom replay centred positions on workspace switch
 /// without a fresh geometry round-trip.
@@ -140,10 +140,10 @@ pub fn tileWithOffset(
             const cx: i32 = @max(0, @divTrunc(sw     - w, 2));
             const cy: i32 = work_top + @max(0, @divTrunc(work_h - h, 2));
 
-            // Use configureSafe so the centred position is stored in the cache.
+            // Use configureWithHints so the centred position is stored in the cache.
             // This ensures restoreWorkspaceGeom can replay it on workspace
             // switch without issuing a fresh get_geometry round-trip.
-            layouts.configureSafe(ctx, win, .{
+            layouts.configureWithHints(ctx, win, .{
                 .x      = @intCast(cx),
                 .y      = @intCast(cy),
                 .width  = @intCast(w),

@@ -41,7 +41,7 @@ pub fn tileWithOffset(
         .height = if (screen_h > total_margin) screen_h - total_margin else constants.MIN_WINDOW_DIM,
     };
 
-    layouts.configureSafe(ctx, top_win, top_rect);
+    layouts.configureWithHints(ctx, top_win, top_rect);
     _ = xcb.xcb_configure_window(ctx.conn, top_win,
         xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 

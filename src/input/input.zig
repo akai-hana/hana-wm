@@ -44,13 +44,13 @@ const prompt = if (build.has_bar and build.has_prompt) @import("prompt") else st
     pub fn toggle() void {}
 };
 
-fn wsGetState() ?*workspaces.State {
+fn getWsState() ?*workspaces.State {
     return if (comptime build.has_workspaces) workspaces.getState() else null;
 }
-inline fn wsSwitchTo(ws: u8) void {
+inline fn switchToWs(ws: u8) void {
     if (comptime build.has_workspaces) workspaces.switchTo(ws);
 }
-inline fn wsMoveWindowTo(win: u32, ws: u8) !void {
+inline fn moveWindowToWs(win: u32, ws: u8) !void {
     if (comptime build.has_workspaces) try workspaces.moveWindowTo(win, ws);
 }
 inline fn wsMoveWindowExclusive(win: u32, ws: u8) void {
@@ -279,7 +279,7 @@ fn executeAction(action: *const types.Action) !void {
         },
         .toggle_layout         => if (comptime build.has_tiling) { tiling.toggleLayout();        bar.scheduleRedraw(); },
         .toggle_layout_reverse => if (comptime build.has_tiling) { tiling.toggleLayoutReverse(); bar.scheduleRedraw(); },
-        .cycle_layout_variants => if (comptime build.has_tiling) { tiling.cycleLayoutVariants(); bar.scheduleRedraw(); },
+        .cycle_layout_variants => if (comptime build.has_tiling) { tiling.stepLayoutVariant(); bar.scheduleRedraw(); },
         .increase_master       => if (comptime build.has_tiling) tiling.increaseMasterWidth(),
         .decrease_master       => if (comptime build.has_tiling) tiling.decreaseMasterWidth(),
         .increase_master_count => if (comptime build.has_tiling) tiling.increaseMasterCount(),
@@ -290,7 +290,7 @@ fn executeAction(action: *const types.Action) !void {
             if (action.* == .swap_master)
                 tiling.swapWithMaster()
             else
-                tiling.swapWithMasterFocusSwap();
+                tiling.swapWithMasterFollowFocus();
             focus.syncPointerFocusNow();
             window.updateWorkspaceBorders();
             window.markBordersFlushed();
@@ -310,8 +310,8 @@ fn executeAction(action: *const types.Action) !void {
         .unminimize_all  => if (comptime build.has_minimize) minimize.unminimizeAll(),
 
         // Workspaces 
-        .switch_workspace       => |ws| wsSwitchTo(ws),
-        .move_to_workspace      => |ws| if (focus.getFocused()) |win| wsMoveWindowTo(win, ws) catch |e| debug.warnOnErr(e, "move_to_workspace"),
+        .switch_workspace       => |ws| switchToWs(ws),
+        .move_to_workspace      => |ws| if (focus.getFocused()) |win| moveWindowToWs(win, ws) catch |e| debug.warnOnErr(e, "move_to_workspace"),
         .move_window            => |ws| if (focus.getFocused()) |win| wsMoveWindowExclusive(win, ws),
         .toggle_tag             => |ws| if (focus.getFocused()) |win| wsTagToggle(win, ws, true),
         .all_workspaces         => wsSwitchToAll(),
@@ -353,7 +353,7 @@ fn executeMouseAction(action: *const types.Action, clicked_win: u32) !void {
 
 /// Grandchild: detaches from the session and execs the command.
 /// Writes a sentinel byte to exec_pipe_write on execvp failure.
-fn grandchildExec(exec_pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
+fn execAsGrandchild(exec_pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
     _ = c.setsid();
     _ = c.execvp("/bin/sh", @ptrCast(&[_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z, null }));
     const sentinel: u8 = 1;
@@ -363,7 +363,7 @@ fn grandchildExec(exec_pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
 
 /// Intermediate child: forks the grandchild, forwards its PID over pid_pipe,
 /// then exits so the grandchild is re-parented to init.
-fn intermediateChild(exec_pipe_write: c_int, pid_pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
+fn forkIntermediate(exec_pipe_write: c_int, pid_pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
     const grandchild_pid = c.fork();
     if (grandchild_pid < 0) {
         debug.err("Second fork failed", .{});
@@ -371,7 +371,7 @@ fn intermediateChild(exec_pipe_write: c_int, pid_pipe_write: c_int, cmd_z: [*:0]
     }
     if (grandchild_pid == 0) {
         _ = c.close(pid_pipe_write); // don't leak into the spawned process
-        grandchildExec(exec_pipe_write, cmd_z);
+        execAsGrandchild(exec_pipe_write, cmd_z);
     }
 
     const gp: c_int = grandchild_pid;
@@ -420,7 +420,7 @@ fn executeShellCommand(cmd: []const u8) !void {
     if (pid == 0) {
         _ = c.close(exec_fds[0]);
         _ = c.close(pid_fds[0]);
-        intermediateChild(exec_fds[1], pid_fds[1], cmd_z.ptr);
+        forkIntermediate(exec_fds[1], pid_fds[1], cmd_z.ptr);
     }
 
     // WM: close write ends, then reap the intermediate child.
@@ -474,7 +474,7 @@ fn dumpState() void {
     }
 
     if (comptime build.has_workspaces) {
-        if (wsGetState()) |ws_state| {
+        if (getWsState()) |ws_state| {
             debug.info("Current workspace: {}", .{ws_state.current + 1});
             for (ws_state.workspaces, 0..) |*ws, i| {
                 debug.info("  WS{}: {} windows", .{ i + 1, ws.windows.len });

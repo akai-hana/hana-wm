@@ -1,3 +1,4 @@
+
 //! Minimal TOML-inspired parser for hana WM configuration files.
 //!
 //! The format extends TOML with WM-specific conveniences: bare keys (treated
@@ -380,7 +381,7 @@ const Parser = struct {
         return array;
     }
 
-    const BOOLEANS = std.StaticStringMap(bool).initComptime(.{
+    const BOOLEAN_KEYWORDS = std.StaticStringMap(bool).initComptime(.{
         .{ "true", true }, .{ "false", false },
     });
 
@@ -401,7 +402,7 @@ const Parser = struct {
         const raw = std.mem.trim(u8, self.content[start..self.pos], " \t\r");
         if (raw.len == 0) return ParseError.InvalidValue;
 
-        if (BOOLEANS.get(raw)) |b| return .{ .boolean = b };
+        if (BOOLEAN_KEYWORDS.get(raw)) |b| return .{ .boolean = b };
 
         if (raw.len > 1 and raw[raw.len - 1] == '%') {
             const f = std.fmt.parseFloat(f32, raw[0..raw.len - 1]) catch return ParseError.InvalidValue;
@@ -437,7 +438,7 @@ const Parser = struct {
 
     // Bare keys (no `=`) are treated as `key = true`, which is the only call
     // site's expectation. Workspace rule entries like `Navigator` use this.
-    fn consumeTerminator(self: *Parser, c: ?u8) void {
+    fn skipLineEnd(self: *Parser, c: ?u8) void {
         if (c == '\n') _ = self.consume();
         if (c == '#') self.skipToNewline();
     }
@@ -543,14 +544,14 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
                 p.skipWhitespace();
                 const after = p.peek();
                 if (after == '\n' or after == '#' or after == null) {
-                    p.consumeTerminator(after);
+                    p.skipLineEnd(after);
                     break;
                 }
                 continue;
             }
 
             if (next == '\n' or next == '#' or next == null) {
-                p.consumeTerminator(next);
+                p.skipLineEnd(next);
                 break;
             }
 

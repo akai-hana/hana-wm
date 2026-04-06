@@ -40,27 +40,10 @@ const prompt = if (build.has_bar and build.has_prompt) @import("prompt") else st
 const FD_XCB    = 0;
 const FD_SIGNAL = 1;
 
-// Event dispatch constants
-//
-// These are scoped here rather than in a shared constants file because
-// they have exactly one consumer: the dispatch table and grabKeybindings below.
-
-/// Dispatch table size — covers all X11 event types up to XCB_FOCUS_OUT=10.
-const EVENT_DISPATCH_TABLE = 36;
-
-/// Upper bound for the XCB cookie scratch buffer in grabKeybindings
-/// (max distinct keybindings × 4 LOCK_MODIFIERS combinations).
-/// Raise if you ever exceed 128 keybindings.
-const MAX_KEYBIND_COOKIES = 512;
-
-/// Lock key combinations grabbed alongside every keybinding so binds work
-/// regardless of NumLock / CapsLock state.
-const LOCK_MODIFIERS = [_]u16{
-    0,
-    constants.MOD_CAPSLOCK,
-    constants.MOD_NUMLOCK,
-    constants.MOD_CAPSLOCK | constants.MOD_NUMLOCK,
-};
+// Event dispatch constants — alias to the canonical definitions in constants.zig.
+const EVENT_DISPATCH_TABLE = constants.Limits.EVENT_DISPATCH_TABLE;
+const MAX_KEYBIND_COOKIES  = constants.Limits.MAX_KEYBIND_COOKIES;
+const LOCK_MODIFIERS       = constants.LOCK_MODIFIERS;
 
 // Self-pipe for portable signal delivery.
 // Signal handlers write to [1]; the event loop polls [0].

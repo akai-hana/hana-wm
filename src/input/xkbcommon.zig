@@ -1,8 +1,10 @@
+
 //! XKB (X Keyboard Extension) bindings and keyboard state management.
 
 const std  = @import("std");
 
-const defs = @import("defs");
+const defs      = @import("defs");
+const constants = @import("constants");
 
 pub const xkb = @cImport({
     @cInclude("xkbcommon/xkbcommon.h");
@@ -96,7 +98,7 @@ pub const XkbState = struct {
     }
 };
 
-pub const XKB_RETRY_DELAY_MS: u64 = 20;
+const XKB_RETRY_DELAY_MS = constants.XKB_RETRY_DELAY_MS;
 
 /// Sleep between retry attempts; skips the sleep on the final attempt to avoid
 /// a pointless wait before the error propagates to the caller.
@@ -154,4 +156,3 @@ fn retryKeymap(ctx: *xkb_context, xcb_conn: *anyopaque, device_id: i32) !*xkb_ke
     }
     return error.XkbKeymapFailed;
 }
-

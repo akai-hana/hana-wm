@@ -4,7 +4,7 @@
 #   "#RRGGBB" / RRGGBB / 0xRRGGBB
 
 [tiling.aesthetics]
-# [0%-200%] / [0-N] px
+# [0% - 200%] / [0 - N] px
 ## 100% = Entire display; 0% = disabled
 gap_width        = 2%
 border_width     = 1% #TODO: 100% doesn't cover 100% of the display.

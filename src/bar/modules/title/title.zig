@@ -277,7 +277,7 @@ fn drawSingleWindow(
         // Pre-fetched on the main thread via fetchWindowTitleInto — zero X11
         // I/O here, upholding the render-thread threading contract.
         if (snapshot.minimized_title.len > 0)
-            try carousel.drawOrScrollTitle(
+            try carousel.drawScrollingTitle(
                 ctx.dc, baseline_y, geom,
                 snapshot.minimized_title, accent, ctx.config.fg,
                 single_win, false,
@@ -298,7 +298,7 @@ fn drawSingleWindow(
     }
 
     const fg = if (has_focus) ctx.config.selected_fg else ctx.config.fg;
-    try carousel.drawOrScrollTitle(
+    try carousel.drawScrollingTitle(
         ctx.dc, baseline_y, geom,
         snapshot.focused_title, accent, fg,
         snapshot.focused_window, title_invalidated,
@@ -327,11 +327,11 @@ fn drawSegmentedTitles(
 
     // Prune the seg-carousel if its window has left the workspace so we never
     // blit a title for a window that was closed or moved to another workspace.
-    if (carousel.segCarouselWindow()) |tracked_win| {
+    if (carousel.getSegmentedCarouselWindow()) |tracked_win| {
         const still_present = for (windows[0..win_count]) |w| {
             if (w == tracked_win) break true;
         } else false;
-        if (!still_present) carousel.deinitSegCarousel();
+        if (!still_present) carousel.deinitSegmentedCarousel();
     }
 
     atoms.ensureResolved();
@@ -467,7 +467,7 @@ fn drawSegmentedTitles(
         if (is_focused_win and carousel.isCarouselEnabled()) {
             // Focused + carousel enabled: pass full segment bounds so
             // the scroll covers the entire segment width.
-            const scrolled = try carousel.blitSegCarousel(
+            const scrolled = try carousel.drawSegmentedCarousel(
                 ctx.dc, baseline_y, geom, text_w,
                 info.title, accent, text_fg, info.window, title_invalidated,
             );

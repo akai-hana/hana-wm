@@ -1,3 +1,4 @@
+
 //! Clock segment
 //! Displays the current time and manages the update timer.
 
@@ -10,7 +11,7 @@ const debug   = @import("debug");
 
 const c = @cImport(@cInclude("time.h"));
 
-pub const SAMPLE_STRING: []const u8 = "0000-00-00 00:00:00";
+pub const CLOCK_MEASURE_STRING: []const u8 = "0000-00-00 00:00:00";
 
 var timer_enabled:       bool    = false;
 var last_formatted_time: [20]u8  = undefined;

@@ -1,3 +1,4 @@
+
 //! Carousel / ticker logic for the title segment, including monitor
 //! refresh-rate detection.
 //!
@@ -35,25 +36,25 @@
 //!
 //!   focus_signal.is_invalidated — stored true on focus change; the render
 //!                                  thread swaps it to false at the start of
-//!                                  blitSegCarousel and rebuilds the pixmap
+//!                                  drawSegmentedCarousel and rebuilds the pixmap
 //!                                  when it was true.
 //!   focus_signal.start_ms       — stores monotonicMs() at the focus-change
 //!                                  instant so the animation is anchored to
 //!                                  click time, not draw time; consumed
-//!                                  (swapped to 0) by blitSegCarousel once.
+//!                                  (swapped to 0) by drawSegmentedCarousel once.
 //!
 //! Functions that must only be called from the RENDER thread:
-//!   ensureDetected, drawOrScrollTitle, blitSegCarousel, drawCarouselTick,
-//!   deinitSingleCarousel, deinitSegCarousel, deinitCarousel, isCarouselActive,
-//!   segCarouselWindow.
+//!   ensureDetected, drawScrollingTitle, drawSegmentedCarousel, drawCarouselTick,
+//!   deinitSingleCarousel, deinitSegmentedCarousel, deinitCarousel, isCarouselActive,
+//!   getSegmentedCarouselWindow.
 //!
 //! Functions that must only be called from the MAIN thread (or before the
 //! render thread starts):
 //!   notifyFocusChanged.
 //!
 //! Functions safe to call from EITHER thread:
-//!   cachedRefreshRate, invalidate, setCarouselEnabled, isCarouselEnabled,
-//!   setScrollSpeed, scrollSpeed, setRefreshRateOverride,
+//!   cachedRefreshRate, invalidateRefreshRate, setCarouselEnabled, isCarouselEnabled,
+//!   setScrollSpeed, getScrollSpeed, setRefreshRateOverride,
 //!   effectiveRefreshRate.
 //!
 //! Calling render-thread-only functions from the main thread is a data race.
@@ -112,7 +113,7 @@ const CarouselBase = struct {
 /// Single-window carousel entry.
 ///
 /// `geom`    — segment geometry baked in at build time and compared on every
-///             `drawOrScrollTitle` call.  A mismatch (e.g. bar resize) triggers
+///             `drawScrollingTitle` call.  A mismatch (e.g. bar resize) triggers
 ///             a rebuild with `start_ms` preserved so the animation is seamless.
 /// `last_bg` — background colour baked into the pixmap.  A mismatch triggers
 ///             a rebuild with `start_ms` preserved so the accent change (e.g.
@@ -131,7 +132,7 @@ const SingleEntry = struct {
 ///             focused window in a split view.
 /// `last_bg` — same bg-change tracking as `SingleEntry`, applied when the
 ///             focused segment's accent colour changes.
-const SegEntry = struct {
+const SegmentEntry = struct {
     base:    CarouselBase,
     window:  u32,
     last_bg: u32,
@@ -163,12 +164,12 @@ const ScrollConfig = struct {
 /// and is therefore an atomic; all other fields remain non-atomic.
 const RenderState = struct {
     single_carousel: ?SingleEntry = null,
-    seg_carousel:    ?SegEntry    = null,
+    seg_carousel:    ?SegmentEntry    = null,
     is_enabled:      std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
 };
 
 /// Cross-thread signal written by the main thread in `notifyFocusChanged`
-/// and consumed by the render thread in `blitSegCarousel`.
+/// and consumed by the render thread in `drawSegmentedCarousel`.
 /// Atomic access avoids a mutex on the hot blit path.
 const FocusSignal = struct {
     /// Set to true when focus moved to a different window; the render thread
@@ -204,7 +205,7 @@ pub fn ensureDetected(conn: *xcb.xcb_connection_t) void {
 /// Force re-detection on the next `ensureDetected()` call.
 /// Call this when handling an `RRScreenChangeNotify` event so that a monitor
 /// hotplug or mode switch is picked up on the next draw cycle.
-pub fn invalidate() void { hz_state.is_ready = false; }
+pub fn invalidateRefreshRate() void { hz_state.is_ready = false; }
 
 // ---------------------------------------------------------------------------
 // Public API — feature toggles and scroll config
@@ -237,7 +238,7 @@ pub fn setScrollSpeed(px_per_s: f64) void {
 }
 
 /// Returns the current scroll speed in pixels per second.
-pub fn scrollSpeed() f64 { return scroll_config.speed; }
+pub fn getScrollSpeed() f64 { return scroll_config.speed; }
 
 /// Override the refresh rate used for carousel frame quantisation.
 ///
@@ -267,7 +268,7 @@ pub fn isCarouselActive() bool {
 /// Return the window ID the segmented carousel was built for, or null if none
 /// is live.  Used by `title.zig` to determine whether the seg-carousel's window
 /// is still present in the workspace window list.
-pub fn segCarouselWindow() ?u32 {
+pub fn getSegmentedCarouselWindow() ?u32 {
     return if (render.seg_carousel) |e| e.window else null;
 }
 
@@ -275,7 +276,7 @@ pub fn segCarouselWindow() ?u32 {
 /// Call on bar deinit or config reload.  Render thread only.
 pub fn deinitCarousel() void {
     deinitSingleCarousel();
-    deinitSegCarousel();
+    deinitSegmentedCarousel();
     focus_signal.start_ms.store(0, .monotonic);
     focus_signal.is_invalidated.store(false, .monotonic);
 }
@@ -286,7 +287,7 @@ pub fn deinitSingleCarousel() void {
 }
 
 /// Free the segmented carousel pixmap.  Render thread only.
-pub fn deinitSegCarousel() void {
+pub fn deinitSegmentedCarousel() void {
     if (render.seg_carousel) |*e| { e.base.cp.deinit(); render.seg_carousel = null; }
 }
 
@@ -381,7 +382,7 @@ pub fn drawCarouselTick(
 ///                  `start_ms` for a seamless visual update.
 ///   geom_changed — segment geometry changed (bar resize / DPI change); preserves
 ///                  `start_ms` so the animation continues without interruption.
-pub fn drawOrScrollTitle(
+pub fn drawScrollingTitle(
     dc:                *drawing.DrawContext,
     y:                 u16,
     geom:              SegmentGeometry,
@@ -465,7 +466,7 @@ pub fn drawOrScrollTitle(
 ///   window ID changed      — window replaced; resets `start_ms` to `monotonicMs()`.
 ///   title_invalidated      — title text changed; resets `start_ms` to `monotonicMs()`.
 ///   cycle_w mismatch       — available area changed; resets `start_ms` to `monotonicMs()`.
-pub fn blitSegCarousel(
+pub fn drawSegmentedCarousel(
     dc:                *drawing.DrawContext,
     baseline_y:        u16,
     geom:              SegmentGeometry,
@@ -504,7 +505,7 @@ pub fn blitSegCarousel(
             break :blk if (t != 0) t else monotonicMs();
         };
 
-        deinitSegCarousel();
+        deinitSegmentedCarousel();
 
         const cycle_w: u16 = expected_cycle_w;
         std.debug.assert(cycle_w > 0); // text_w >= 1 and carousel_gap_px >= 1

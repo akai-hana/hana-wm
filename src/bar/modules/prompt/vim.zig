@@ -1,3 +1,4 @@
+
 //! vim — modal editing engine for the prompt segment.
 //!
 //! Implements a vim-style modal editing layer over a single-line text buffer.
@@ -436,7 +437,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
                     .find_ch      = m.find_ch,
                     .has_g_prefix = m.has_g_prefix,
                 }};
-                doOp(vs, m.op, m.mr);
+                applyOperator(vs, m.op, m.mr);
                 return .none;
             },
         }
@@ -451,7 +452,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
                 vs.dot = buildOpMotionRecord(vs, 0);
                 vs.dot.op_motion.tobj_kind  = vs.pending.text_obj_prefix;
                 vs.dot.op_motion.tobj_delim = ch;
-                doOp(vs, vs.pending.op, mr);
+                applyOperator(vs, vs.pending.op, mr);
             }
         }
         resetPendingCmd(vs);
@@ -467,7 +468,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         if (sym >= 'a' and sym <= 'z') {
             if (vs.marks[@as(usize, @intCast(sym - 'a'))]) |pos| {
                 const mr = MotionResult{ .pos = pos };
-                if (vs.pending.op != 0) doOp(vs, vs.pending.op, mr) else setCursor(vs, mr);
+                if (vs.pending.op != 0) applyOperator(vs, vs.pending.op, mr) else setCursor(vs, mr);
             }
         }
         resetPendingCmd(vs);
@@ -487,7 +488,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         }
         if (vs.pending.op == op) {
             vs.dot = .{ .op_line = .{ .op = op, .op_count = vs.pending.op_count, .motion_count = vs.pending.count } };
-            doOp(vs, op, .{ .pos = vs.len, .range_start_override = 0 });
+            applyOperator(vs, op, .{ .pos = vs.len, .range_start_override = 0 });
         }
         resetPendingCmd(vs);
         return .none;
@@ -579,14 +580,14 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
             const pos = motionMatchBracket(vs);
             if (vs.pending.op != 0) {
                 vs.dot = buildOpMotionRecord(vs, '%');
-                doOp(vs, vs.pending.op, MotionResult{ .pos = pos, .inclusive = true });
+                applyOperator(vs, vs.pending.op, MotionResult{ .pos = pos, .inclusive = true });
             } else {
                 setCursor(vs, MotionResult{ .pos = pos });
             }
         },
 
         'u' => applyHistoryStep(vs, &vs.undo, &vs.redo),
-        '.' => { dotReplay(vs); resetPendingCmd(vs); return .none; },
+        '.' => { replayDot(vs); resetPendingCmd(vs); return .none; },
 
         else => {},
     }
@@ -728,8 +729,8 @@ fn tryArmFindPrefix(vs: *VimState, sym: xcb.xcb_keysym_t) bool {
 /// Returns the destination position, or null for unrecognised symbols.
 fn resolveGPrefixPos(vs: *VimState, sym: xcb.xcb_keysym_t, cnt: u32) ?usize {
     return switch (sym) {
-        'e'                => motionWordEndBack(vs, false, cnt),
-        'E'                => motionWordEndBack(vs, true,  cnt),
+        'e'                => motionWordEndBackward(vs, false, cnt),
+        'E'                => motionWordEndBackward(vs, true,  cnt),
         'g', '0', XK_Home => @as(usize, 0),
         '$', XK_End        => vs.len,
         else               => null,
@@ -968,7 +969,7 @@ fn ctrlAdjustNumber(vs: *VimState, delta: i64) void {
 }
 
 /// Apply an operator to the range described by `mr`.
-fn doOp(vs: *VimState, op: u8, mr: MotionResult) void {
+fn applyOperator(vs: *VimState, op: u8, mr: MotionResult) void {
     var from: usize = undefined;
     var to:   usize = undefined;
 
@@ -1003,7 +1004,7 @@ fn execDirectSym(vs: *VimState, sym: u8, cnt: u32) u8 {
         'D', 'C' => vs.len,
         else     => @min(vs.cursor + @as(usize, cnt), vs.len), // x, s
     };
-    doOp(vs, op, .{ .pos = pos });
+    applyOperator(vs, op, .{ .pos = pos });
     return op;
 }
 
@@ -1044,7 +1045,7 @@ fn undoPush(vs: *VimState) void {
 
 // Private — dot repeat
 
-fn dotReplay(vs: *VimState) void {
+fn replayDot(vs: *VimState) void {
     if (vs.dot == .none) return;
 
     ringPush(&vs.undo, vs);
@@ -1089,19 +1090,19 @@ fn dotReplay(vs: *VimState) void {
                     resolveTextObject(vs, om.tobj_kind, om.tobj_delim)
                 else if (om.has_g_prefix) blk: {
                     break :blk switch (om.motion_sym) {
-                        'e'  => MotionResult{ .pos = motionWordEndBack(vs, false, cnt), .inclusive = true },
-                        'E'  => MotionResult{ .pos = motionWordEndBack(vs, true,  cnt), .inclusive = true },
+                        'e'  => MotionResult{ .pos = motionWordEndBackward(vs, false, cnt), .inclusive = true },
+                        'E'  => MotionResult{ .pos = motionWordEndBackward(vs, true,  cnt), .inclusive = true },
                         else => null,
                     };
                 } else resolveSimpleMotion(vs, om.motion_sym, cnt);
             if (mr_opt) |mr| {
-                doOp(vs, om.op, mr);
+                applyOperator(vs, om.op, mr);
                 if (om.op == 'c') insertSlice(vs, vs.dot_insert_buf[0..vs.dot_insert_len]);
             }
         },
 
         .op_line => |ol| {
-            doOp(vs, ol.op, .{ .pos = vs.len, .range_start_override = 0 });
+            applyOperator(vs, ol.op, .{ .pos = vs.len, .range_start_override = 0 });
             if (ol.op == 'c') insertSlice(vs, vs.dot_insert_buf[0..vs.dot_insert_len]);
         },
 
@@ -1193,7 +1194,7 @@ fn motionWordEnd(vs: *VimState, big: bool, cnt: u32) usize {
     return @min(p, vs.len -| 1);
 }
 
-fn motionWordEndBack(vs: *VimState, big: bool, cnt: u32) usize {
+fn motionWordEndBackward(vs: *VimState, big: bool, cnt: u32) usize {
     var p = vs.cursor;
     var i: u32 = 0;
     while (i < cnt) : (i += 1) {

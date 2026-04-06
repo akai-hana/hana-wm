@@ -697,12 +697,12 @@ fn loadHistory() void {
 
     // Local helper: format a path and open it for reading.
     const tryOpen = struct {
-        fn f(buf: []u8, comptime fmt: []const u8, args: anytype) ?*c.FILE {
+        fn tryOpenFormatted(buf: []u8, comptime fmt: []const u8, args: anytype) ?*c.FILE {
             const s = std.fmt.bufPrint(buf[0..buf.len-1], fmt, args) catch return null;
             buf[s.len] = 0;
             return c.fopen(@ptrCast(buf.ptr), "r");
         }
-    }.f;
+    }.tryOpenFormatted;
 
     if (tryOpen(&path_buf, "{s}/.local/share/drun/history",          .{home})) |fp| {
         defer _ = c.fclose(fp);

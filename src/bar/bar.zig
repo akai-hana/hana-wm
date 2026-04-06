@@ -335,7 +335,7 @@ const State = struct {
                 .allocator = allocator,
             },
             .layout_cache = .{
-                .clock_width = dc.measureTextWidth(clockSegment.SAMPLE_STRING) + 2 * config.scaledSegmentPadding(height),
+                .clock_width = dc.measureTextWidth(clockSegment.CLOCK_MEASURE_STRING) + 2 * config.scaledSegmentPadding(height),
             },
             .has_clock_segment = blk: {
                 if (comptime !build.has_clock) break :blk false;
@@ -695,7 +695,7 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot,
     const allocator = s.render.allocator;
     snap.minimized_windows.clearRetainingCapacity();
     if (comptime build.has_minimize)
-        try minimize.populateSet(&snap.minimized_windows, allocator);
+        try minimize.collectMinimizedIntoSet(&snap.minimized_windows, allocator);
 
     if (comptime build.has_workspaces) {
         const ws_state = getWorkspaceState() orelse return;
@@ -769,7 +769,7 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot,
 // Draw submission 
 
 /// Forces a full bar clear+redraw and blocks until the bar thread has finished.
-fn submitBlockingFullRedraw() void {
+fn submitDrawBlockingFull() void {
     gBar.channel.pending_force_full_redraw = true;
     submitDrawBlocking();
 }
@@ -841,7 +841,7 @@ fn initAtoms() void {
         @field(gBar.atoms, e[0]) = utils.getAtomCached(e[1]) catch 0;
 }
 
-fn computeBarYPos(height: u16) i16 {
+fn calcBarYPos(height: u16) i16 {
     return if (core.config.bar.bar_position == .bottom)
         @intCast(@as(i32, core.screen.height_in_pixels) - height)
     else
@@ -932,7 +932,7 @@ fn resolvePercentageFontSize(bar_height: u16) ?u16 {
     return @max(1, @as(u16, @intFromFloat(@round(max_size_pt * (core.config.bar.font_size.value / 100.0)))));
 }
 
-fn calculateBarHeight() !u16 {
+fn calcBarHeight() !u16 {
     if (core.config.bar.height) |h| {
         const height = scale.scaleBarHeight(h, core.screen.height_in_pixels);
         if (core.config.bar.font_size.is_percentage) {
@@ -960,8 +960,8 @@ fn createDrawContext(setup: BarWindowSetup, height: u16) !*drawing.DrawContext {
 pub fn init() !void {
     std.debug.assert(core.config.bar.enabled);
     initAtoms();
-    const height = try calculateBarHeight();
-    const y_pos  = computeBarYPos(height);
+    const height = try calcBarHeight();
+    const y_pos  = calcBarYPos(height);
     const setup  = createBarWindow(height, y_pos);
     errdefer {
         _ = xcb.xcb_destroy_window(core.conn, setup.win_id);
@@ -1002,17 +1002,17 @@ pub fn reload() void {
         return;
     };
     if (!core.config.bar.enabled) { deinit(); return; }
-    const height = calculateBarHeight() catch defaultBarHeight;
-    const y_pos  = computeBarYPos(height);
+    const height = calcBarHeight() catch defaultBarHeight;
+    const y_pos  = calcBarYPos(height);
     const setup  = createBarWindow(height, y_pos);
-    performReload(old, setup, height) catch |err| {
+    applyReload(old, setup, height) catch |err| {
         _ = xcb.xcb_destroy_window(core.conn, setup.win_id);
         if (setup.colormap != 0) _ = xcb.xcb_free_colormap(core.conn, setup.colormap);
         debug.err("Bar reload failed ({s}), keeping old bar", .{@errorName(err)});
     };
 }
 
-fn performReload(old: *State, setup: BarWindowSetup, height: u16) !void {
+fn applyReload(old: *State, setup: BarWindowSetup, height: u16) !void {
     setWindowProperties(setup.win_id, height);
     const new_dc = try createDrawContext(setup, height);
     errdefer new_dc.deinit();
@@ -1023,7 +1023,7 @@ fn performReload(old: *State, setup: BarWindowSetup, height: u16) !void {
     joinBarThread();
     gBar.state = new_state;
     spawnBarThread(new_state);
-    submitBlockingFullRedraw();
+    submitDrawBlockingFull();
     if (new_state.is_visible) _ = xcb.xcb_map_window(core.conn, setup.win_id);
     _ = xcb.xcb_destroy_window(core.conn, old.win.win_id);
     ungrabAndFlush();
@@ -1039,7 +1039,7 @@ pub fn toggleBarSegmentAnchor() void {
         .top    => .bottom,
         .bottom => .top,
     };
-    const new_y = computeBarYPos(s.render.height);
+    const new_y = calcBarYPos(s.render.height);
     setWindowProperties(s.win.win_id, s.render.height);
     gBar.channel.pending_force_full_redraw = true;
     s.invalidateLayoutCache();
@@ -1119,7 +1119,7 @@ pub fn setBarState(action: BarAction) void {
     if (s.is_visible == show and action != .toggle) return;
     s.is_visible = show;
     if (action == .toggle) {
-        if (show) submitBlockingFullRedraw();
+        if (show) submitDrawBlockingFull();
         _ = xcb.xcb_grab_server(core.conn);
         if (show) _ = xcb.xcb_map_window(core.conn, s.win.win_id)
         else      _ = xcb.xcb_unmap_window(core.conn, s.win.win_id);
@@ -1132,7 +1132,7 @@ pub fn setBarState(action: BarAction) void {
         ungrabAndFlush();
     } else {
         if (show) {
-            submitBlockingFullRedraw();
+            submitDrawBlockingFull();
             _ = xcb.xcb_map_window(core.conn, s.win.win_id);
         } else {
             _ = xcb.xcb_unmap_window(core.conn, s.win.win_id);

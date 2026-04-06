@@ -117,7 +117,7 @@ pub const State = struct {
     is_dirty:         bool,
 
     /// Runtime layout cycle: intersection of config `layouts` and disk-present
-    /// layout files. `stepLayoutCycle` walks this so layouts omitted from the
+    /// layout files. `stepLayout` walks this so layouts omitted from the
     /// config are invisible at runtime even if their .zig file exists on disk.
     enabled_layouts:       [4]Layout,
     enabled_layout_count:  u8,
@@ -127,7 +127,7 @@ pub const State = struct {
     /// Bit N is set when workspace N's geometry has been pre-computed and the
     /// cache holds correct on-screen positions for all its windows.
     ///
-    /// Cleared by: addWindow, removeWindow, adjustMasterWidth, syncLayoutFromWorkspace.
+    /// Cleared by: addWindow, removeWindow, adjustMasterWidth, applyWorkspaceLayout.
     /// Set by the retile call that immediately follows each of those.
     workspace_geom_valid_bits: u64,
 
@@ -137,7 +137,7 @@ pub const State = struct {
     last_retile_area: utils.Rect,
 
     /// Per-window cache storing last geometry AND last border color in a single
-    /// flat array. Populated by configureSafe (rect) and applyBorderColor (border).
+    /// flat array. Populated by configureWithHints (rect) and applyBorderColor (border).
     cache: layouts.CacheMap,
 
     // Scratch buffers — fixed-size arrays embedded in State (BSS, zero allocation).
@@ -188,7 +188,7 @@ pub inline fn getStateOpt() ?*State {
 // Lifecycle 
 
 pub fn init() void {
-    state = buildState();
+    state = initState();
 }
 
 pub fn deinit() void {
@@ -200,11 +200,11 @@ pub fn reloadConfig() void {
     const s = getState();
     const saved_windows = s.windows;
 
-    // buildState is infallible: scratch buffers are fixed arrays in BSS.
+    // initState is infallible: scratch buffers are fixed arrays in BSS.
     // Config changes invalidate every cached rect and border color, so we
-    // want the fresh empty cache buildState produces. The only field that
+    // want the fresh empty cache initState produces. The only field that
     // must survive the rebuild is the live window list.
-    var new_state = buildState();
+    var new_state = initState();
     new_state.windows = saved_windows;
     state = new_state;
 
@@ -411,7 +411,7 @@ pub fn retileAllWorkspaces() void {
     const ws_count    = tracking.getWorkspaceCount();
     const current_ws  = tracking.getCurrentWorkspace() orelse return;
     const ws_state_opt = if (!core.config.tiling.global_layout) getWsState() else null;
-    const ctx         = buildLayoutCtx(s);
+    const ctx         = makeLayoutCtx(s);
     const effective_ws = @min(ws_count, max_workspaces);
 
     @memset(s.retile_lens[0..effective_ws], 0);
@@ -451,7 +451,7 @@ pub fn retileAllWorkspaces() void {
         defer s.master_width = saved_width;
         defer s.master_count = saved_count;
 
-        dispatchLayout(resolveLayout(s, ws_state_opt, ws_idx, core.config.tiling.global_layout), &ctx, s, ws_windows, screen);
+        invokeLayout(selectLayout(s, ws_state_opt, ws_idx, core.config.tiling.global_layout), &ctx, s, ws_windows, screen);
         markWorkspaceGeomValid(s, ws_idx);
     }
 
@@ -528,7 +528,7 @@ pub fn restoreWorkspaceGeom() bool {
         utils.configureWindow(core.conn, win, rect);
     }
     // updateBorders is required here: restoreWorkspaceGeom replays cached
-    // positions via utils.configureWindow directly, bypassing configureSafe
+    // positions via utils.configureWindow directly, bypassing configureWithHints
     // and its get_border_color callback. Border colors must therefore be
     // applied as a separate pass on this fast path.
     updateBorders(s, ws_windows);
@@ -574,7 +574,7 @@ pub fn toggleLayout()        void { applyLayoutStep(true);  }
 pub fn toggleLayoutReverse() void { applyLayoutStep(false); }
 
 /// Cycle through the per-layout variants for the currently active layout.
-pub fn cycleLayoutVariants() void {
+pub fn stepLayoutVariant() void {
     const s = getState();
     switch (s.layout) {
         .master  => {
@@ -597,7 +597,7 @@ pub fn cycleLayoutVariants() void {
     retileCurrentWorkspace();
 }
 
-pub fn syncLayoutFromWorkspace(ws: *const WsWorkspace) void {
+pub fn applyWorkspaceLayout(ws: *const WsWorkspace) void {
     const s = getState();
     const needs_retile = s.layout != ws.layout or ws.variants != null;
     s.layout = ws.layout;
@@ -672,15 +672,15 @@ pub inline fn decreaseMasterWidth() void { adjustMasterWidth(-0.025); }
 /// workspace window.
 pub fn swapWithMaster() void {
     const s = getState();
-    _ = doSwapWithMaster(s, findFocusMasterPos(s) orelse return);
+    _ = swapWithMasterCore(s, findFocusMasterPos(s) orelse return);
     retileCurrentWorkspace();
 }
 
 /// Like `swapWithMaster`, but focus transfers to the displaced window rather
 /// than staying on the window that was moved.
-pub fn swapWithMasterFocusSwap() void {
+pub fn swapWithMasterFollowFocus() void {
     const s = getState();
-    const other = doSwapWithMaster(s, findFocusMasterPos(s) orelse return);
+    const other = swapWithMasterCore(s, findFocusMasterPos(s) orelse return);
     retileCurrentWorkspace();
     if (other) |win| focus.setFocus(win, .tiling_operation);
 }
@@ -810,7 +810,7 @@ fn parseEnabledLayouts(layouts_cfg: []const []const u8) struct { arr: [4]Layout,
 
 /// Walk the runtime-enabled layout list to find `current`, then step forward or
 /// backward. Falls back to `layout_cycle` if state has no enabled layouts.
-inline fn stepLayoutCycle(s: *const State, current: Layout, comptime forward: bool) Layout {
+inline fn stepLayout(s: *const State, current: Layout, comptime forward: bool) Layout {
     const cycle: []const Layout = if (s.enabled_layout_count > 0)
         s.enabled_layouts[0..s.enabled_layout_count]
     else
@@ -822,7 +822,7 @@ inline fn stepLayoutCycle(s: *const State, current: Layout, comptime forward: bo
     return cycle[0]; // current not in list (disabled at reload) — jump to first
 }
 
-fn computeMasterWidth() f32 {
+fn calcMasterWidth() f32 {
     const raw = scale.scaleMasterWidth(core.config.tiling.master_width);
     if (raw < 0) {
         const ratio = -raw / @as(f32, @floatFromInt(core.screen.width_in_pixels));
@@ -831,7 +831,7 @@ fn computeMasterWidth() f32 {
     return raw;
 }
 
-fn buildState() State {
+fn initState() State {
     const screen_height = core.screen.height_in_pixels;
     const el            = parseEnabledLayouts(core.config.tiling.layouts.items);
 
@@ -851,7 +851,7 @@ fn buildState() State {
             .grid    = core.config.tiling.grid_variant,
         },
         .master_side      = core.config.tiling.master_side,
-        .master_width     = computeMasterWidth(),
+        .master_width     = calcMasterWidth(),
         .master_count     = core.config.tiling.master_count,
         .gap_width        = scale.scaleBorderWidth(core.config.tiling.gap_width, screen_height),
         .border_width     = scale.scaleBorderWidth(core.config.tiling.border_width, screen_height),
@@ -876,7 +876,7 @@ fn getBorderColorForWindow(win: u32) u32 {
     return getState().borderColor(win);
 }
 
-inline fn buildLayoutCtx(s: *State) layouts.LayoutCtx {
+inline fn makeLayoutCtx(s: *State) layouts.LayoutCtx {
     return .{
         .conn             = core.conn,
         .cache            = &s.cache,
@@ -884,7 +884,7 @@ inline fn buildLayoutCtx(s: *State) layouts.LayoutCtx {
     };
 }
 
-fn dispatchLayout(
+fn invokeLayout(
     layout: Layout,
     ctx:    *const layouts.LayoutCtx,
     s:      *State,
@@ -914,7 +914,7 @@ inline fn calcScreenArea() utils.Rect {
     };
 }
 
-fn resolveLayout(s: *State, ws_state: ?*WsState, ws_idx: u8, is_global: bool) Layout {
+fn selectLayout(s: *State, ws_state: ?*WsState, ws_idx: u8, is_global: bool) Layout {
     if (comptime !build.has_workspaces) return s.layout;
     if (is_global) return s.layout;
     const wss = ws_state orelse return s.layout;
@@ -962,7 +962,7 @@ fn retile(screen: utils.Rect, for_ws: ?u8) void {
     const ws_windows = s.scratch_wins[0..ws_count];
     if (ws_windows.len == 0) return;
 
-    const ctx = buildLayoutCtx(s);
+    const ctx = makeLayoutCtx(s);
 
     const saved_width = s.master_width;
     const saved_count = s.master_count;
@@ -973,8 +973,8 @@ fn retile(screen: utils.Rect, for_ws: ?u8) void {
     defer s.master_width = saved_width;
     defer s.master_count = saved_count;
 
-    dispatchLayout(
-        resolveLayout(s, getWsState(), target_ws, core.config.tiling.global_layout),
+    invokeLayout(
+        selectLayout(s, getWsState(), target_ws, core.config.tiling.global_layout),
         &ctx, s, ws_windows, screen,
     );
 
@@ -1014,7 +1014,7 @@ fn collectWorkspaceWindows(s: *State, buf: []u32, for_ws: ?u8) usize {
     return n;
 }
 
-inline fn hasScratchCapacity(s: *const State, n: usize, comptime caller: []const u8) bool {
+inline fn hasWindowBufCapacity(s: *const State, n: usize, comptime caller: []const u8) bool {
     if (n <= s.scratch_wins.len) return true;
     debug.warn(caller ++ ": too many windows ({})", .{n});
     return false;
@@ -1028,7 +1028,7 @@ fn findWindowIndex(items: []const u32, win: u32) ?usize {
 fn moveWindowToIndex(s: *State, from_idx: usize, to_idx: usize) void {
     if (from_idx == to_idx) return;
     const current = s.windows.items();
-    if (!hasScratchCapacity(s, current.len, "moveWindowToIndex")) return;
+    if (!hasWindowBufCapacity(s, current.len, "moveWindowToIndex")) return;
 
     const win = current[from_idx];
     var j: usize = 0;
@@ -1072,7 +1072,7 @@ fn moveWindowToFilteredSlot(s: *State, win: u32, target: usize) void {
 fn swapWindowsInList(s: *State, idx_a: usize, idx_b: usize) void {
     if (idx_a == idx_b) return;
     const current = s.windows.items();
-    if (!hasScratchCapacity(s, current.len, "swapWindowsInList")) return;
+    if (!hasWindowBufCapacity(s, current.len, "swapWindowsInList")) return;
     @memcpy(s.scratch_wins[0..current.len], current);
     const tmp              = s.scratch_wins[idx_a];
     s.scratch_wins[idx_a]  = s.scratch_wins[idx_b];
@@ -1116,7 +1116,7 @@ fn findFocusMasterPos(s: *State) ?FocusMasterPos {
 }
 
 /// Shared core for both swap-with-master variants.
-fn doSwapWithMaster(s: *State, pos: FocusMasterPos) ?u32 {
+fn swapWithMasterCore(s: *State, pos: FocusMasterPos) ?u32 {
     if (pos.fp == pos.mp) {
         // Focused is already master — promote the next workspace window.
         for (pos.all[pos.mp + 1..], pos.mp + 1..) |win, i| {
@@ -1180,7 +1180,7 @@ inline fn markWorkspaceGeomValid(s: *State, ws_idx: anytype) void {
 inline fn applyLayoutStep(comptime forward: bool) void {
     const s = getState();
     if (s.layout == .floating) return;
-    applyLayout(s, stepLayoutCycle(s, s.layout, forward));
+    applyLayout(s, stepLayout(s, s.layout, forward));
 }
 
 fn applyLayout(s: *State, layout: Layout) void {

@@ -1,3 +1,4 @@
+
 //! Drawing context for hana's status bar.
 //!
 //! Rectangle fills use XCB core drawing instead of Cairo's XRender, since the
@@ -285,7 +286,7 @@ pub const DrawContext = struct {
         c.cairo_move_to(self.ctx, @floatFromInt(x), @as(f64, @floatFromInt(y)) - baseline);
     }
 
-    pub fn clearTransparent(self: *DrawContext) void {
+    pub fn clearToTransparent(self: *DrawContext) void {
         if (!self.is_argb) return;
         // Skip cairo_save/cairo_restore: we only change the operator temporarily
         // and always want to end at OVER. Direct set/reset is cheaper than a
