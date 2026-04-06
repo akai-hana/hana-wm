@@ -50,7 +50,7 @@ pub fn tileWithOffset(
             .relaxed => if (is_partial_row) partial_cell_w else cell_w,
         };
 
-        layouts.configureSafe(ctx, win, utils.Rect{
+        layouts.configureWithHints(ctx, win, utils.Rect{
             .x      = @intCast(m.gap +| col *| (effective_cell_w + m.gap)),
             .y      = @intCast(y_offset +| m.gap +| row *| (cell_h + m.gap)),
             .width  = cellToWindowSize(effective_cell_w, bm),

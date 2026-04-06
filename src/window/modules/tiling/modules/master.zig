@@ -69,7 +69,7 @@ fn tileColumn(
     const avail = calcAvailableHeight(h, count, m);
     for (windows, 0..) |win, i| {
         const row: u16 = @intCast(i);
-        layouts.configureSafe(ctx, win, utils.Rect{
+        layouts.configureWithHints(ctx, win, utils.Rect{
             .x      = @intCast(x),
             .y      = @intCast(windowY(row, count, avail, y_offset, m)),
             .width  = inner_w,
@@ -100,12 +100,12 @@ fn tileStack(
             calcInnerWidth(w, m.gap / 2, m.gap + 2 * m.border), m);
         return;
     }
-    tileStackOverflow(ctx, windows, x, y_offset, w, h, max_fit, m);
+    tileStackExtra(ctx, windows, x, y_offset, w, h, max_fit, m);
 }
 
 /// Column-major overflow grid: row `r` holds windows at indices r, r+max_fit,
 /// r+2*max_fit, … Each row's column count is ceil((stack_n - r) / max_fit).
-fn tileStackOverflow(
+fn tileStackExtra(
     ctx:      *const layouts.LayoutCtx,
     windows:  []const u32,
     x:        u16,
@@ -133,7 +133,7 @@ fn tileStackOverflow(
         var win_idx: u16 = row;
         while (win_idx < stack_n) : (win_idx += max_fit) {
             const col: u16 = (win_idx - row) / max_fit;
-            layouts.configureSafe(ctx, windows[win_idx], utils.Rect{
+            layouts.configureWithHints(ctx, windows[win_idx], utils.Rect{
                 .x      = @intCast(x +| m.gap / 2 +| col *| (col_w +| m.gap)),
                 .y      = @intCast(y_pos),
                 .width  = col_inner_w,

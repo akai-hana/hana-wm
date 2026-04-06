@@ -366,16 +366,16 @@ const GlobEntry = struct {
 /// Returns a single unowned entry when no glob is present.
 fn expandGlobKeys(allocator: std.mem.Allocator, key_pattern: []const u8) ![]GlobEntry {
     const literal = struct {
-        fn one(a: std.mem.Allocator, key: []const u8) ![]GlobEntry {
+        fn singleEntry(a: std.mem.Allocator, key: []const u8) ![]GlobEntry {
             const e = try a.alloc(GlobEntry, 1);
             e[0] = .{ .key = key, .ws_idx = 0, .owned = false };
             return e;
         }
     };
-    const lbrace = std.mem.indexOfScalar(u8, key_pattern, '{') orelse return literal.one(allocator, key_pattern);
+    const lbrace = std.mem.indexOfScalar(u8, key_pattern, '{') orelse return literal.singleEntry(allocator, key_pattern);
     const rbrace = std.mem.indexOfScalarPos(u8, key_pattern, lbrace + 1, '}') orelse {
         debug.warn("Keybind glob missing closing '}}\' in '{s}', treating as literal", .{key_pattern});
-        return literal.one(allocator, key_pattern);
+        return literal.singleEntry(allocator, key_pattern);
     };
     const prefix = key_pattern[0..lbrace];
     const suffix = key_pattern[rbrace + 1..];
@@ -402,7 +402,7 @@ fn expandGlobKeys(allocator: std.mem.Allocator, key_pattern: []const u8) ![]Glob
 
     if (keys.items.len == 0) {
         keys.deinit(allocator);
-        return literal.one(allocator, key_pattern);
+        return literal.singleEntry(allocator, key_pattern);
     }
 
     const entries = try allocator.alloc(GlobEntry, keys.items.len);
@@ -867,7 +867,7 @@ fn parseTransparency(value: parser.Value) f32 {
 fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *types.Config) !void {
     // Dupes `val` into `slot` and points `view` at the result.
     const set = struct {
-        fn str(a: std.mem.Allocator, slot: *?[]const u8, view: *[]const u8, val: []const u8) !void {
+        fn assignStr(a: std.mem.Allocator, slot: *?[]const u8, view: *[]const u8, val: []const u8) !void {
             slot.* = try a.dupe(u8, val);
             view.* = slot.*.?;
         }
@@ -877,7 +877,7 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *typ
     if (section.getString("position")) |pos_str|
         cfg.bar.bar_position = std.meta.stringToEnum(types.BarScreenPosition, pos_str) orelse .top;
     cfg.bar.height = section.getScalable("height"); // null = auto from font metrics
-    try set.str(allocator, &cfg.allocated_font, &cfg.bar.font,
+    try set.assignStr(allocator, &cfg.allocated_font, &cfg.bar.font,
         get([]const u8, section, "font", "monospace:size=10", null, null));
     if (section.get("fonts")) |v| if (v.asArray()) |arr| {
         for (cfg.bar.fonts.items) |font| allocator.free(font);
@@ -890,9 +890,9 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *typ
     cfg.bar.spacing   = section.getScalable("segment_spacing") orelse parser.ScalableValue.absolute(12.0);
     inline for (BAR_COLOR_FIELDS) |field|
         @field(cfg.bar, field.name) = getColor(section, field.name, field.default);
-    try set.str(allocator, &cfg.allocated_clock_format, &cfg.bar.clock_format,
+    try set.assignStr(allocator, &cfg.allocated_clock_format, &cfg.bar.clock_format,
         get([]const u8, section, "clock_format", "%Y-%m-%d %H:%M:%S", null, null));
-    try set.str(allocator, &cfg.allocated_drun_prompt, &cfg.bar.drun_prompt,
+    try set.assignStr(allocator, &cfg.allocated_drun_prompt, &cfg.bar.drun_prompt,
         get([]const u8, section, "drun_prompt", "run: ", null, null));
     cfg.bar.indicator_size      = section.getScalable("indicator_size")      orelse parser.ScalableValue.percentage(20.0);
     cfg.bar.workspace_tag_width = section.getScalable("workspace_tag_width") orelse parser.ScalableValue.percentage(100.0);

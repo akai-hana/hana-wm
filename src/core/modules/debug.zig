@@ -1,3 +1,4 @@
+
 //! Debug logging and error helpers.
 //!
 //! All functions are no-ops in non-debug builds (controlled by the
@@ -17,72 +18,72 @@ fn moduleFromSrc(src: std.builtin.SourceLocation) []const u8 {
         basename;
 }
 
-inline fn debug_enabled() bool {
+inline fn debugEnabled() bool {
     return build.enable_debug_logging;
 }
 
 pub inline fn err(comptime fmt: []const u8, args: anytype) void {
-    if (!debug_enabled()) return;
+    if (!debugEnabled()) return;
     const module = moduleFromSrc(@src());
     std.log.err("[{s}] " ++ fmt, .{module} ++ args);
 }
 
 pub inline fn warn(comptime fmt: []const u8, args: anytype) void {
-    if (!debug_enabled()) return;
+    if (!debugEnabled()) return;
     const module = moduleFromSrc(@src());
     std.log.warn("[{s}] " ++ fmt, .{module} ++ args);
 }
 
 pub inline fn info(comptime fmt: []const u8, args: anytype) void {
-    if (!debug_enabled()) return;
+    if (!debugEnabled()) return;
     const module = moduleFromSrc(@src());
     std.debug.print("\x1b[32m[{s}]\x1b[0m " ++ fmt ++ "\n", .{module} ++ args);
 }
 
 pub inline fn debug(comptime fmt: []const u8, args: anytype) void {
-    if (!debug_enabled()) return;
+    if (!debugEnabled()) return;
     const module = moduleFromSrc(@src());
     std.log.debug("[{s}] " ++ fmt, .{module} ++ args);
 }
 
 pub inline fn errIf(condition: bool, comptime fmt: []const u8, args: anytype) void {
-    if (!debug_enabled() or !condition) return;
+    if (!debugEnabled() or !condition) return;
     const module = moduleFromSrc(@src());
     std.log.err("[{s}] " ++ fmt, .{module} ++ args);
 }
 
 pub inline fn warnIf(condition: bool, comptime fmt: []const u8, args: anytype) void {
-    if (!debug_enabled() or !condition) return;
+    if (!debugEnabled() or !condition) return;
     const module = moduleFromSrc(@src());
     std.log.warn("[{s}] " ++ fmt, .{module} ++ args);
 }
 
 pub inline fn infoIf(condition: bool, comptime fmt: []const u8, args: anytype) void {
-    if (!debug_enabled() or !condition) return;
+    if (!debugEnabled() or !condition) return;
     const module = moduleFromSrc(@src());
     std.debug.print("\x1b[32m[{s}]\x1b[0m " ++ fmt ++ "\n", .{module} ++ args);
 }
 
 pub inline fn debugIf(condition: bool, comptime fmt: []const u8, args: anytype) void {
-    if (!debug_enabled() or !condition) return;
+    if (!debugEnabled() or !condition) return;
     const module = moduleFromSrc(@src());
     std.log.debug("[{s}] " ++ fmt, .{module} ++ args);
 }
 
 pub inline fn assert(condition: bool, comptime message: []const u8) void {
-    if (!debug_enabled() or condition) return;
+    if (!debugEnabled() or condition) return;
     const module = moduleFromSrc(@src());
     std.debug.panic("[{s}] Assertion failed: {s}", .{ module, message });
 }
 
 pub inline fn trace(comptime func_name: []const u8) void {
-    if (!debug_enabled()) return;
+    if (!debugEnabled()) return;
     const module = moduleFromSrc(@src());
     std.log.debug("[{s}] -> {s}", .{ module, func_name });
 }
 
 pub inline fn print(comptime label: []const u8, value: anytype) void {
-    if (!debug_enabled()) return;
+    if (!debugEnabled()) return;
     const module = moduleFromSrc(@src());
     std.log.debug("[{s}] {s} = {any}", .{ module, label, value });
 }
@@ -93,7 +94,7 @@ pub inline fn print(comptime label: []const u8, value: anytype) void {
 ///   s.windows.add(win) catch |e| { debug.logError(e, win); return; };
 ///   StateManager.init(...) catch |e| { debug.logError(e, null); return; };
 pub inline fn logError(e: anyerror, window: ?u32) void {
-    if (!debug_enabled()) return;
+    if (!debugEnabled()) return;
     if (window) |win| {
         std.log.err("[error] Failed: {} (window: 0x{x})", .{ e, win });
     } else {
@@ -109,6 +110,6 @@ pub inline fn logError(e: anyerror, window: ?u32) void {
 /// Truly inconsequential capacity hints (ensureTotalCapacity etc.) may keep
 /// bare `catch {}` — they produce no actionable diagnostic information.
 pub inline fn warnOnErr(e: anyerror, comptime context: []const u8) void {
-    if (!debug_enabled()) return;
+    if (!debugEnabled()) return;
     std.log.warn("[warn] Best-effort op failed (" ++ context ++ "): {}", .{e});
 }

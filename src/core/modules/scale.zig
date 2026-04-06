@@ -1,3 +1,4 @@
+
 //! DPI detection and scaling utilities for consistent bar appearance across display resolutions.
 
 const std   = @import("std");
@@ -30,7 +31,7 @@ pub const BAR_MIN_HEIGHT_PX: u16 = 20;
 /// Maximum long-words to request for the RESOURCE_MANAGER property (16 KB).
 const RESOURCE_MANAGER_MAX_LEN: u32 = 4096;
 
-// Not thread-safe; assumes detect() is only called from the main thread.
+// Not thread-safe; assumes detectDpi() is only called from the main thread.
 var dpi_cache: ?DpiInfo = null;
 
 const COMMON_DPI_TABLE = [_]f32{ 96.0, 120.0, 144.0, 192.0 };
@@ -72,7 +73,7 @@ fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
     return null;
 }
 
-fn calculateDpiFromGeometry(screen: *xcb.xcb_screen_t) f32 {
+fn calcDpiFromGeometry(screen: *xcb.xcb_screen_t) f32 {
     const width_px:  f32 = @floatFromInt(screen.width_in_pixels);
     const height_px: f32 = @floatFromInt(screen.height_in_pixels);
     const width_mm:  f32 = @floatFromInt(screen.width_in_millimeters);
@@ -88,7 +89,7 @@ fn calculateDpiFromGeometry(screen: *xcb.xcb_screen_t) f32 {
     return avg_dpi;
 }
 
-fn snapToCommonDPI(dpi: f32) f32 {
+fn snapToCommonDpi(dpi: f32) f32 {
     var closest  = COMMON_DPI_TABLE[0];
     var min_diff = @abs(dpi - closest);
     for (COMMON_DPI_TABLE[1..]) |entry| {
@@ -105,7 +106,7 @@ fn snapToCommonDPI(dpi: f32) f32 {
     return dpi;
 }
 
-fn calculateScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
+fn calcScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
     const width_px:  f32 = @floatFromInt(screen.width_in_pixels);
     const height_px: f32 = @floatFromInt(screen.height_in_pixels);
     const diagonal         = @sqrt(width_px * width_px + height_px * height_px);
@@ -116,36 +117,36 @@ fn calculateScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
 }
 
 /// Invalidate the DPI cache. Call this when a screen-change event is received
-/// before the next detect() so the values are recomputed from fresh data.
+/// before the next detectDpi() so the values are recomputed from fresh data.
 pub fn resetDpiCache() void {
     dpi_cache = null;
 }
 
 /// Detect DPI, returning a cached result until resetDpiCache() is called.
 /// Priority: Xft.dpi from X resources -> geometry calculation -> resolution-based scaling.
-pub fn detect(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) DpiInfo {
+pub fn detectDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) DpiInfo {
     if (dpi_cache) |cached| return cached;
-    const result = detectFresh(conn, screen);
+    const result = detectDpiUncached(conn, screen);
     dpi_cache = result;
     return result;
 }
 
-fn detectFresh(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) DpiInfo {
+fn detectDpiUncached(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) DpiInfo {
     if (readXftDpi(conn, screen)) |xft_dpi| {
         debug.info("Using DPI from X resources (Xft.dpi): {d:.1}", .{xft_dpi});
-        return DpiInfo.fromDpi(snapToCommonDPI(xft_dpi));
+        return DpiInfo.fromDpi(snapToCommonDpi(xft_dpi));
     }
 
-    var geometry_dpi = calculateDpiFromGeometry(screen);
+    var geometry_dpi = calcDpiFromGeometry(screen);
     if (geometry_dpi < 50.0 or geometry_dpi > 300.0) {
         debug.warn("Calculated DPI {d:.1} seems unreasonable, using resolution-based scaling", .{geometry_dpi});
-        geometry_dpi = BASELINE_DPI * calculateScaleFromResolution(screen);
+        geometry_dpi = BASELINE_DPI * calcScaleFromResolution(screen);
         debug.info("Using resolution-based DPI: {d:.1}", .{geometry_dpi});
     } else {
         debug.info("Using geometry-calculated DPI: {d:.1}", .{geometry_dpi});
     }
 
-    return DpiInfo.fromDpi(snapToCommonDPI(geometry_dpi));
+    return DpiInfo.fromDpi(snapToCommonDpi(geometry_dpi));
 }
 
 pub fn scaleInt(base_value: anytype, scale_factor: f32) @TypeOf(base_value) {

@@ -1,3 +1,4 @@
+
 //! Config type definitions — structs, enums, and unions that model the WM configuration schema.
 //!
 //! This file is the single source of truth for all config-related types.
@@ -85,21 +86,21 @@ pub const MasterSide = enum {
     left,
     right,
 
-    // Both orderings of diagonal names and both separators are pre-listed in alias_map;
+    // Both orderings of diagonal names and both separators are pre-listed in string_map;
     // fromString is the canonical parse entry point.
-    const alias_map = std.StaticStringMap(MasterSide).initComptime(.{
+    const string_map = std.StaticStringMap(MasterSide).initComptime(.{
         .{ "l",     .left  },
         .{ "left",  .left  },
         .{ "r",     .right },
         .{ "right", .right },
     });
 
-    /// Lowercases str into a stack buffer and looks it up in alias_map.
+    /// Lowercases str into a stack buffer and looks it up in string_map.
     /// Returns null if str exceeds 16 bytes or is unrecognized.
     pub inline fn fromString(str: []const u8) ?MasterSide {
         var buf: [16]u8 = undefined;
         if (str.len > buf.len) return null;
-        return alias_map.get(std.ascii.lowerString(&buf, str));
+        return string_map.get(std.ascii.lowerString(&buf, str));
     }
 };
 

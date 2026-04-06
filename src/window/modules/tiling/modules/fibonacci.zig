@@ -58,13 +58,13 @@ pub fn tileWithOffset(
                 .width  = if (w > b2) w - b2 else constants.MIN_WINDOW_DIM,
                 .height = if (h > b2) h - b2 else constants.MIN_WINDOW_DIM,
             };
-            for (windows[i..]) |overflow_win| layouts.configureSafe(ctx, overflow_win, overflow_rect);
+            for (windows[i..]) |overflow_win| layouts.configureWithHints(ctx, overflow_win, overflow_rect);
             return;
         }
 
         // Last window takes the entire remaining area.
         if (i == windows.len - 1) {
-            layouts.configureSafe(ctx, win, .{
+            layouts.configureWithHints(ctx, win, .{
                 .x      = @intCast(x),
                 .y      = @intCast(y),
                 .width  = w -| b2,
@@ -94,7 +94,7 @@ inline fn splitAndAdvance(
     switch (dir) {
         .right => {
             const win_w = (w.* -| gap) / 2;
-            layouts.configureSafe(ctx, win, .{
+            layouts.configureWithHints(ctx, win, .{
                 .x = @intCast(x.*), .y = @intCast(y.*),
                 .width = win_w -| b2, .height = h.* -| b2,
             });
@@ -103,7 +103,7 @@ inline fn splitAndAdvance(
         },
         .down => {
             const win_h = (h.* -| gap) / 2;
-            layouts.configureSafe(ctx, win, .{
+            layouts.configureWithHints(ctx, win, .{
                 .x = @intCast(x.*), .y = @intCast(y.*),
                 .width = w.* -| b2, .height = win_h -| b2,
             });
@@ -112,7 +112,7 @@ inline fn splitAndAdvance(
         },
         .left => {
             const win_w = (w.* -| gap) / 2;
-            layouts.configureSafe(ctx, win, .{
+            layouts.configureWithHints(ctx, win, .{
                 .x = @intCast(x.* + @as(i32, @intCast(w.* - win_w))),
                 .y = @intCast(y.*),
                 .width = win_w -| b2, .height = h.* -| b2,
@@ -121,7 +121,7 @@ inline fn splitAndAdvance(
         },
         .up => {
             const win_h = (h.* -| gap) / 2;
-            layouts.configureSafe(ctx, win, .{
+            layouts.configureWithHints(ctx, win, .{
                 .x = @intCast(x.*),
                 .y = @intCast(y.* + @as(i32, @intCast(h.* - win_h))),
                 .width = w.* -| b2, .height = win_h -| b2,

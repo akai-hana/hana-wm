@@ -197,12 +197,12 @@ fn forEachWindowOnCurrentWorkspace(skip: u32, ctx: anytype) void {
 
 /// Retrieve the pre-fullscreen geometry for `win` before entering fullscreen.
 ///
-/// Fast path — tiled windows: `configureSafe` stores the most recent tiled
+/// Fast path — tiled windows: `configureWithHints` stores the most recent tiled
 /// rect in the geometry cache after every retile.  Reading from the cache
 /// avoids a blocking xcb_get_geometry round-trip.
 ///
 /// Slow path — floating or newly-spawned windows: these are not in the tiling
-/// cache (they were never passed through `configureSafe`), so a blocking
+/// cache (they were never passed through `configureWithHints`), so a blocking
 /// xcb_get_geometry round-trip is unavoidable.  Falls back to a centred
 /// quarter-screen default if the reply fails, the window is offscreen
 /// (x/y below OFFSCREEN_THRESHOLD_MIN), or the window reports a zero-size

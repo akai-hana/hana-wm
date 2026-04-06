@@ -31,9 +31,9 @@ const bar = if (build.has_bar) @import("bar") else struct {
 
 const WsWorkspace = if (build.has_workspaces) workspaces.Workspace else struct {};
 
-fn wsGetState() ?*workspaces.State { return if (build.has_workspaces) workspaces.getState() else null; }
-fn wsGetCurrentWorkspaceObject() ?*WsWorkspace { return if (build.has_workspaces) workspaces.getCurrentWorkspaceObject() else null; }
-inline fn wsMoveWindowTo(win: u32, ws: u8) !void {
+fn getWsState() ?*workspaces.State { return if (build.has_workspaces) workspaces.getState() else null; }
+fn getWsCurrentWorkspace() ?*WsWorkspace { return if (build.has_workspaces) workspaces.getCurrentWorkspaceObject() else null; }
+inline fn moveWindowToWs(win: u32, ws: u8) !void {
     if (build.has_workspaces) try workspaces.moveWindowTo(win, ws)
     else try tracking.registerWindow(win, 0);
 }
@@ -971,7 +971,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const target_ws = resolveTargetWorkspace(current_ws, cookies.wm_class, cookies.net_wm_pid);
     const on_current = target_ws == current_ws;
 
-    wsMoveWindowTo(win, target_ws) catch |err| {
+    moveWindowToWs(win, target_ws) catch |err| {
         debug.logError(err, win);
         discardPropertyCookies(cookies);
         _ = xcb.xcb_flush(core.conn);
@@ -1012,7 +1012,7 @@ fn unmanageWindow(win: u32) void {
         tiling.removeWindow(win);
         tiling.evictSizeHints(win);
     }
-    if (build.has_minimize) minimize.forceUntrack(win);
+    if (build.has_minimize) minimize.untrackWindow(win);
     wsRemoveWindow(win);
 
     if (was_fullscreen) bar.setBarState(.show_fullscreen);
@@ -1337,7 +1337,7 @@ pub fn updateFocusBorders(old_focused: ?u32, new_focused: ?u32) void {
 /// Refresh border colors for every window on the current workspace.
 pub fn updateWorkspaceBorders() void {
     if (!build.has_workspaces) return;
-    const ws = wsGetCurrentWorkspaceObject() orelse return;
+    const ws = getWsCurrentWorkspace() orelse return;
     for (ws.windows.items()) |win|
         _ = xcb.xcb_change_window_attributes(core.conn, win,
             xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
@@ -1399,7 +1399,7 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
 /// workspaces. Called on config reload.
 pub fn reloadBorders() void {
     if (!build.has_workspaces) return;
-    const ws_state = wsGetState() orelse return;
+    const ws_state = getWsState() orelse return;
     for (ws_state.workspaces) |*ws|
         for (ws.windows.items()) |win| applyBorder(win);
 }

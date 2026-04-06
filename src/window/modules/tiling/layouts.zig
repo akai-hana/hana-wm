@@ -1,5 +1,5 @@
 //! Shared layout infrastructure: geometry constraints, window data cache, and
-//! the `configureSafe` entry point used by every layout module.
+//! the `configureWithHints` entry point used by every layout module.
 //!
 //! This file is deliberately free of layout-specific knowledge. It defines the
 //! types and helpers that are *passed into* layout modules, keeping each layout
@@ -15,7 +15,7 @@ const debug = @import("debug");
 // WM_NORMAL_HINTS size constraint cache
 //
 // Populated from WM_NORMAL_HINTS during handleMapRequest; evicted on unmanage.
-// `configureSafe` clamps every rect to stored minimums so terminals always
+// `configureWithHints` clamps every rect to stored minimums so terminals always
 // receive a geometry they can render.
 //
 // Implemented as a flat array with a linear scan. Realistic window counts
@@ -78,7 +78,7 @@ pub fn evictSizeHints(win: u32) void {
 // Per-window geometry and border-color cache
 //
 // Stores the last-applied geometry and border color for each window in a single
-// flat array. `configureSafe` writes `.rect`; `applyBorderColor` writes
+// flat array. `configureWithHints` writes `.rect`; `applyBorderColor` writes
 // `.border`. Both fields share one entry and one linear scan, eliminating
 // any two-path synchronisation concern.
 //
@@ -117,7 +117,7 @@ const cache_capacity: usize = 256;
 ///
 /// SINGLE-THREADED ASSUMPTION: two concurrent overflows would alias to the same
 /// pointer.  The WM is single-threaded for all geometry operations; the bar
-/// render thread calls `configureSafe` (and thus `getOrPut`) only on the
+/// render thread calls `configureWithHints` (and thus `getOrPut`) only on the
 /// render thread, never concurrently with tiling retile calls on the main
 /// thread.  If that invariant ever changes, this sentinel must become per-call
 /// or the overflow path must return an error.
@@ -185,7 +185,7 @@ pub const CacheMap = struct {
     }
 };
 
-// Layout context and the configureSafe entry point
+// Layout context and the configureWithHints entry point
 
 /// Context passed into every layout module's `tileWithOffset` call.
 ///
@@ -196,10 +196,10 @@ pub const LayoutCtx = struct {
     conn: *xcb.xcb_connection_t,
     /// Pointer into tiling.State.cache. Always non-null during a retile pass.
     cache: *CacheMap,
-    /// When non-null, `configureSafe` emits a border-color change in the same
+    /// When non-null, `configureWithHints` emits a border-color change in the same
     /// cache scan, eliminating the separate updateBorders pass and halving the
     /// number of linear searches over CacheMap per window per retile.
-    /// Set by `buildLayoutCtx` during a normal retile; null in contexts that
+    /// Set by `makeLayoutCtx` during a normal retile; null in contexts that
     /// do not have focus/border information (e.g. direct utils.configureWindow
     /// calls in restoreWorkspaceGeom).
     get_border_color: ?*const fn (win: u32) u32 = null,
@@ -216,7 +216,7 @@ pub inline fn rectsEqual(a: utils.Rect, b: utils.Rect) bool {
 /// deduplicating configure_window calls across retile passes. When the
 /// LayoutCtx provides a `get_border_color` callback, the border color is also
 /// updated in the same cache scan at zero additional search cost.
-pub fn configureSafe(
+pub fn configureWithHints(
     ctx: *const LayoutCtx,
     win: u32,
     rect: utils.Rect,

@@ -60,7 +60,7 @@ const bar = if (build.has_bar) @import("bar") else struct {
     pub fn scheduleRedraw() void {}
 };
 
-fn wsGetCurrentWorkspaceObject() ?*WsWorkspace {
+fn getWsCurrentWorkspace() ?*WsWorkspace {
     return if (comptime build.has_workspaces)
         workspaces.getCurrentWorkspaceObject()
     else
@@ -174,11 +174,11 @@ pub fn isMinimized(win: u32) bool {
 }
 
 /// Returns a read-only view of the current minimize buffer.
-/// Valid until the next minimizeWindow / unminimize / forceUntrack call.
+/// Valid until the next minimizeWindow / unminimize / untrackWindow call.
 ///
-/// Prefer this over populateSet() — it lets the caller (e.g. bar.zig) build
+/// Prefer this over collectMinimizedIntoSet() — it lets the caller (e.g. bar.zig) build
 /// whatever secondary structure it needs without introducing an allocator
-/// dependency into this module.  See populateSet() for migration notes.
+/// dependency into this module.  See collectMinimizedIntoSet() for migration notes.
 // [#8]
 pub fn minimizedSlice() []const MinimizedRecord {
     return g_buf[0..g_len];
@@ -215,7 +215,7 @@ inline fn hideWindow(win: u32) void {
 pub fn focusMasterOrFirst() void {
     found: {
         if (comptime build.has_workspaces) {
-            const ws  = wsGetCurrentWorkspaceObject() orelse break :found;
+            const ws  = getWsCurrentWorkspace() orelse break :found;
             const win = tracking.firstNonMinimized(ws.windows.items()) orelse break :found;
             focus.setFocus(win, .tiling_operation);
             return;
@@ -530,7 +530,7 @@ pub fn unminimizeAll() void {
 /// control its own memory strategy.  This function can be deleted once bar.zig
 /// has been migrated.
 // [#8]
-pub fn populateSet(
+pub fn collectMinimizedIntoSet(
     set:       *std.AutoHashMapUnmanaged(u32, void),
     allocator: std.mem.Allocator,
 ) !void {
@@ -542,7 +542,7 @@ pub fn populateSet(
 // State maintenance 
 
 /// Called by window.zig on unmap/destroy to keep state coherent.
-pub fn forceUntrack(win: u32) void {
+pub fn untrackWindow(win: u32) void {
     _ = removeFromBuf(win); // return value intentionally ignored here
 }
 

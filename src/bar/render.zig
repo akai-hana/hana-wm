@@ -13,7 +13,7 @@ const core = @import("core");
 const xcb  = core.xcb;
 
 const xcb_connection_t       = xcb.xcb_connection_t;
-const xcb_offscreen_pixmap_t = xcb.xcb_offscreen_pixmap_t;
+const xcb_pixmap_t = xcb.xcb_pixmap_t;
 const xcb_visualtype_t       = xcb.xcb_visualtype_t;
 
 // Cairo 
@@ -44,7 +44,7 @@ pub const cairo_operator_t = enum(c_int) {
 /// The pixmap must outlive the surface; destroy the surface before freeing it.
 pub extern fn cairo_xcb_surface_create(
     connection: *xcb_connection_t,
-    pixmap:     xcb_offscreen_pixmap_t,
+    pixmap:     xcb_pixmap_t,
     visual:     *xcb_visualtype_t,
     width:      c_int,
     height:     c_int,

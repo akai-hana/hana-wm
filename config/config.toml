@@ -52,11 +52,10 @@ global_layout = false # Are layouts global or per-workspace?
 
 #       Layout          Variation  Workspaces
 layouts = [                                 # (default/alternative) 
-	"master-stack",                     # "lifo"/"fifo"
-	"monocle",      "gaps",    # "5",   # "gapless"/"gaps"
-	"grid",         "relaxed", # "6,8", # "rigid"/"relaxed"
-	"floating",
-	# "fibonacci",                      # no variants
+"master-stack",                     # "lifo"/"fifo"
+"monocle",      "gaps",    # "5",   # "gapless"/"gaps"
+"grid",         "relaxed", # "6,8", # "rigid"/"relaxed"
+# "fibonacci",                      # no variants
 ]
 
 [tiling.layouts.master-stack]

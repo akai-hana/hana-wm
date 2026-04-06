@@ -595,7 +595,7 @@ pub fn isManaged(win: u32) bool {
 
 // Step 1 (of the workspace-switch pipeline): move old-workspace windows offscreen.
 // Windows ALSO tagged to `new_ws` stay on screen — they're visible on both.
-// Steps 2/3a are performed inside tiling.syncLayoutFromWorkspace and
+// Steps 2/3a are performed inside tiling.applyWorkspaceLayout and
 // tiling.restoreWorkspaceGeom, called from restoreWorkspaceWindows below.
 fn hideWorkspaceWindows(ws: *const Workspace, new_ws: u8) void {
     // For each floating window leaving this workspace we need to save its geometry
@@ -647,7 +647,7 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
     const tiling_active = build.has_tiling and tiling.getState().is_enabled;
 
     if (tiling_active) {
-        if (!core.config.tiling.global_layout) tiling.syncLayoutFromWorkspace(ws);
+        if (!core.config.tiling.global_layout) tiling.applyWorkspaceLayout(ws);
 
         if (tiling.restoreWorkspaceGeom()) {
             // Restore succeeded: invalidate only windows shared with the old workspace —

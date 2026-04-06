@@ -32,7 +32,7 @@ It is designed with the objective to be comfortable to use, highly configurable 
 
 ---
 
-hana's main strength is its ability to be molded like Play-Doh™ (not sponsored).
+hana's biggest strength is its ability to be molded like Play-Doh™ (not sponsored).
 
 In particular, hana's main offerings are the following:
 
@@ -40,11 +40,11 @@ In particular, hana's main offerings are the following:
 
 hana counts with a modular codebase architecture, split into single-responsibility code files, written with the goal of making the codebase tidy and easily modifiable by any user. Any file or directory that isn't essential to this WM working/booting up can be just removed, and hana will recompile just fine. 
 
-Don't want hana's bar? Simply remove `src/bar/`. Don't want tiling/floating? Remove `src/window/modules/tiling/` or `src/window/modules/floating`. Want the bar's inline command prompt, but without vim motions? Keep `src/bar/modules/prompt/prompt.zig` and remove `src/bar/modules/prompt/vim.zig`.
+Don't want hana's bar? Simply remove `src/bar/` and recompile. Don't want tiling/floating? Remove `src/window/modules/tiling/` or `src/window/modules/floating`. Want the bar's inline command prompt, but without vim motions? Keep `src/bar/modules/prompt/prompt.zig` and remove `src/bar/modules/prompt/vim.zig`.
 
-By default, hana's codebase is categorized into directories and sub-directories, although these are purely decorative; the user is free to re-organize the files in any way they prefer.
+By default, hana's codebase is categorized into directories and sub-directories, although these are purely decorative; the user is free to re-organize the files in any way and hierarchy they prefer.
 
-The main directory categories are: 
+The main directories are: 
 
 ```bash
 $ tree src -L 1

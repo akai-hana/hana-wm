@@ -317,7 +317,7 @@ pub const Reason = enum {
 // An accidental zero-flags call (e.g. CommitFlags{}) will fail to compile,
 // preventing silent no-protocol transitions that are extremely hard to debug.
 //
-// Note: bruteForceMouseEnterFocus intentionally calls commitFocusTransition
+// Note: syncPointerFocusBlocking intentionally calls commitFocusTransition
 // with set_input_focus/raise/send_wm_take_focus all false when the window is
 // changing — those signals are sent unconditionally after the call returns.
 // This is not a bug; the flags are still fully explicit at the call site.
@@ -354,7 +354,7 @@ const CommitFlags = struct {
 };
 
 /// Core focus-transition implementation shared by setFocus, syncPointerFocusNow,
-/// dwmFocus, and bruteForceMouseEnterFocus.
+/// dwmFocus, and syncPointerFocusBlocking.
 /// NOTE: handleFocusIn does NOT call this function — it delegates to
 /// sendFocusProtocol, which operates on a different set of invariants (no
 /// history recording, no grab management, no suppression update).
@@ -407,7 +407,7 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
 }
 
 /// Returns true when `win` must never receive focus from any focus-granting
-/// path (setFocus, dwmFocus, bruteForceMouseEnterFocus).
+/// path (setFocus, dwmFocus, syncPointerFocusBlocking).
 /// NOTE: handleFocusIn intentionally does NOT use this guard.
 inline fn isInvalidFocusTarget(win: u32) bool {
     return win == 0 or win == core.root or bar.isBarWindow(win);
@@ -429,7 +429,7 @@ inline fn isInvalidFocusTarget(win: u32) bool {
 ///
 /// Use dwmFocus for the common hover path; reserve this for clients known to
 /// silently drop the initial WM_TAKE_FOCUS.
-pub fn bruteForceMouseEnterFocus(win: u32) void {
+pub fn syncPointerFocusBlocking(win: u32) void {
     if (isInvalidFocusTarget(win)) return;
 
     cancelPendingConfirm();
@@ -600,7 +600,7 @@ fn sendFocusProtocol(win: u32) void {
 /// Uses CurrentTime (0) so the X server's timestamp ordering check never
 /// rejects requests.  No confirm/retry machinery.
 ///
-/// Contrast with bruteForceMouseEnterFocus, which re-sends the X protocol even
+/// Contrast with syncPointerFocusBlocking, which re-sends the X protocol even
 /// when the window is already focused_window.  Use that path only when a client
 /// is known to silently drop the initial WM_TAKE_FOCUS.
 pub fn dwmFocus(win: u32) void {

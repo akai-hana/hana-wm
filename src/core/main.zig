@@ -38,7 +38,7 @@ pub fn main() !void {
     core.screen = x.screen;
     core.root   = x.root;
     core.alloc  = std.heap.c_allocator;
-    if (comptime build.has_scale) core.dpi_info = scale.detect(x.conn, x.screen);
+    if (comptime build.has_scale) core.dpi_info = scale.detectDpi(x.conn, x.screen);
 
     input.setup(x.conn, x.screen, x.root);
     try input.initXkb(x.conn);

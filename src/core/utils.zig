@@ -10,17 +10,9 @@ const constants = @import("constants");
 const debug = @import("debug");
 
 
-const MAX_PROPERTY_LENGTH: u32 = 256;
-/// Minimum window dimension; windows thinner or shorter than this are considered invalid.
-const MIN_WINDOW_DIM = constants.MIN_WINDOW_DIM;
-/// Maximum depth when walking the X11 window tree in findManagedWindow.
-const MAX_WINDOW_TREE_DEPTH = constants.MAX_WINDOW_TREE_DEPTH;
+const max_property_length: u32 = 256;
 /// Passed as the `delete` argument to xcb_get_property; 0 means do not consume the property.
-const PROPERTY_NO_DELETE: u8 = 0;
-const WM_HINTS_INPUT_FLAG:   u32   = 1 << 0;
-const WM_HINTS_FLAGS_FIELD:  usize = 0;
-const WM_HINTS_INPUT_FIELD:  usize = 1;
-const WM_HINTS_LONG_LENGTH:  u32   = 9; // flags + 8 fields
+const property_no_delete: u8 = 0;
 
 // Process lifecycle signals
 //
@@ -61,7 +53,7 @@ pub const Rect = struct {
     }
 
     pub inline fn isValid(self: Rect) bool {
-        return self.width >= MIN_WINDOW_DIM and self.height >= MIN_WINDOW_DIM;
+        return self.width >= constants.MIN_WINDOW_DIM and self.height >= constants.MIN_WINDOW_DIM;
     }
 };
 
@@ -184,7 +176,7 @@ pub fn fetchPropertyToBuffer(
     allocator: std.mem.Allocator,
 ) !?[]const u8 {
     const reply = xcb.xcb_get_property_reply(conn,
-        xcb.xcb_get_property(conn, PROPERTY_NO_DELETE, window, atom, atom_type, 0, MAX_PROPERTY_LENGTH),
+        xcb.xcb_get_property(conn, property_no_delete, window, atom, atom_type, 0, max_property_length),
         null,
     ) orelse return null;
     defer std.c.free(reply);
