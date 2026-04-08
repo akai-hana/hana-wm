@@ -202,6 +202,7 @@ Mod+S       = "flatpak run org.equicord.equibop"
 Mod+Shift+S = "{kill} equibop"
 
 Mod+D       = "ghostty"
+Mod+i = "xeyes"
 Mod+Shift+D = "{kill} ghostty"
 
 Mod+Z       = "cd ~/Games/isaac-repentance+; wine isaac-ng.exe"
@@ -255,7 +256,7 @@ Mod+Shift+Escape = "emergency_recover" #TODO: remove. this is hacky and assumes 
 # Games
 5 = ["osu!", "DDNet", "isaac-ng.exe"]
 # Editors
-6 = ["emacs", "xeyes"]
+6 = ["emacs"]
 # Media
 7 = ["prismlauncher", "freetube", "gimp"]
 # Torrenting
