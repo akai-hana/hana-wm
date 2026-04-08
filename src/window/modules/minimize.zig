@@ -336,18 +336,8 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
         else
             tiling.addWindow(win);
         tiling.retileCurrentWorkspace();
-    } else if (window.getWindowGeom(win)) |rect| {
-        utils.configureWindow(core.conn, win, rect);
     } else {
-        // [#13] Log the geometry miss so silent repositioning is observable
-        // during debugging.  This is not fatal — floatDefaultPos() provides
-        // a sensible fallback.
-        debug.warn("minimize: no saved geometry for 0x{x}, placing at float default position",
-            .{win});
-        const pos = window.floatDefaultPos();
-        _ = xcb.xcb_configure_window(core.conn, win,
-            xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
-            &[_]u32{ pos.x, pos.y });
+        window.restoreFloatGeom(win);
     }
 
     focus.setFocus(win, .window_spawn);
@@ -475,16 +465,7 @@ pub fn unminimizeAll() void {
             }
             tiling.retileCurrentWorkspace();
         } else {
-            const pos = window.floatDefaultPos();
-            for (plain_wins) |rec| {
-                if (window.getWindowGeom(rec.win)) |rect| {
-                    utils.configureWindow(core.conn, rec.win, rect);
-                } else {
-                    _ = xcb.xcb_configure_window(core.conn, rec.win,
-                        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
-                        &[_]u32{ pos.x, pos.y });
-                }
-            }
+            for (plain_wins) |rec| window.restoreFloatGeom(rec.win);
         }
 
         // [#19] Focus the most recently minimized plain window (see comment above).

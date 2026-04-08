@@ -6,9 +6,10 @@ const build = @import("build_options");
 
 const core    = @import("core");
     const xcb = core.xcb;
-const utils   = @import("utils");
-const events  = @import("events");
-const config  = @import("config");
+const utils     = @import("utils");
+const events    = @import("events");
+const config    = @import("config");
+const constants = @import("constants");
 
 const scale = if (build.has_scale) @import("scale") else struct {};
 const debug = if (build.has_debug) @import("debug") else struct {};
@@ -71,18 +72,6 @@ pub fn main() !void {
     debug.info("Shutting down gracefully...", .{});
 }
 
-/// Event mask registered on the root window at startup.
-/// SubstructureRedirect is what makes hana the WM: the X server sends all
-/// MapRequest / ConfigureRequest events here instead of honoring them directly.
-const ROOT_WINDOW_EVENT_MASK: u32 =
-    xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
-    xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY   |
-    xcb.XCB_EVENT_MASK_KEY_PRESS             |
-    xcb.XCB_EVENT_MASK_BUTTON_PRESS          |
-    xcb.XCB_EVENT_MASK_ENTER_WINDOW          |
-    xcb.XCB_EVENT_MASK_LEAVE_WINDOW          |
-    xcb.XCB_EVENT_MASK_PROPERTY_CHANGE;
-
 /// X server connection context returned by connectToX.
 const X = struct {
     conn:   *xcb.xcb_connection_t,
@@ -111,7 +100,7 @@ fn connectToX() !X {
     // The X server rejects this if another WM already holds it.
     const cookie = xcb.xcb_change_window_attributes_checked(
         conn, screen.*.root, xcb.XCB_CW_EVENT_MASK,
-        &[_]u32{ROOT_WINDOW_EVENT_MASK},
+        &[_]u32{constants.EventMasks.ROOT_WINDOW},
     );
     if (xcb.xcb_request_check(conn, cookie)) |err| {
         debug.err("Another window manager is already running: {*}", .{err});

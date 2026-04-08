@@ -1,4 +1,3 @@
-
 //! XKB (X Keyboard Extension) bindings and keyboard state management.
 
 const std  = @import("std");

@@ -241,10 +241,8 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
     if (comptime build.has_fullscreen) fs_blk: {
         const src_ws = fullscreen.workspaceFor(win) orelse break :fs_blk;
         if (src_ws != s.current) break :fs_blk;
-        const info = fullscreen.getForWorkspace(src_ws).?;
         fullscreen.cleanupFullscreenForMove(win, src_ws);
-        fullscreen.removeForWorkspace(src_ws);
-        fullscreen.setForWorkspace(target_ws, info);
+        fullscreen.moveRecord(src_ws, target_ws);
     }
 
     evictWindow(win);
@@ -277,6 +275,15 @@ fn setWindowMask(s: *State, win: u32, new_mask: u64) void {
     }
 }
 
+/// Retile the current workspace (when tiling is active), schedule a bar redraw,
+/// and flush pending XCB requests. Called at the tail of actions that modify
+/// workspace masks and need the display to reflect the change immediately.
+inline fn retileAndScheduleFlush() void {
+    if (build.has_tiling and core.config.tiling.enabled) tiling.retileCurrentWorkspace();
+    bar.scheduleRedraw();
+    _ = xcb.xcb_flush(core.conn);
+}
+
 /// `move_window` action — Mod+Shift+N. Hard-moves `win` to `target_ws` exclusively,
 /// clearing all other workspace bits. Pair with tagToggle (Mod+Alt+N) to add more.
 pub fn moveWindowExclusive(win: u32, target_ws: u8) void {
@@ -297,9 +304,7 @@ pub fn moveWindowExclusive(win: u32, target_ws: u8) void {
     if (comptime build.has_fullscreen) fs_blk: {
         const src_ws = fullscreen.workspaceFor(win) orelse break :fs_blk;
         if (src_ws != target_ws) fullscreen.cleanupFullscreenForMove(win, src_ws);
-        const info = fullscreen.getForWorkspace(src_ws).?;
-        fullscreen.removeForWorkspace(src_ws);
-        fullscreen.setForWorkspace(target_ws, info);
+        fullscreen.moveRecord(src_ws, target_ws);
     }
 
     setWindowMask(s, win, tracking.workspaceBit(target_ws));
@@ -309,9 +314,7 @@ pub fn moveWindowExclusive(win: u32, target_ws: u8) void {
         if (focus.getFocused() == win) focus.clearFocus();
     }
 
-    if (build.has_tiling and core.config.tiling.enabled) tiling.retileCurrentWorkspace();
-    bar.scheduleRedraw();
-    _ = xcb.xcb_flush(core.conn);
+    retileAndScheduleFlush();
 }
 
 /// Toggle workspace tag N on `win` (Mod+Alt+N). Flips bit N in the window's mask;
@@ -338,11 +341,9 @@ pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
             if (comptime build.has_fullscreen) {
                 if (fullscreen.workspaceFor(win)) |src_ws| {
                     if (src_ws == current) {
-                        const info = fullscreen.getForWorkspace(src_ws).?;
-                        fullscreen.removeForWorkspace(src_ws);
                         // Land on the lowest-set-bit workspace still in the new mask.
                         const dst: u8 = @intCast(@ctz(new_mask));
-                        fullscreen.setForWorkspace(dst, info);
+                        fullscreen.moveRecord(src_ws, dst);
                     }
                 }
             }
@@ -449,16 +450,7 @@ pub fn switchToAll() void {
             // Floating layout: map and restore geometry manually.
             for (s.all_view_temp_wins.items) |win| {
                 _ = xcb.xcb_map_window(core.conn, win);
-                if (window.getWindowGeom(win)) |rect| {
-                    utils.configureWindow(core.conn, win, rect);
-                } else {
-                    _ = xcb.xcb_configure_window(core.conn, win,
-                        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
-                        &[_]u32{
-                            @intCast(core.screen.width_in_pixels  / 4),
-                            @intCast(core.screen.height_in_pixels / 4),
-                        });
-                }
+                window.restoreFloatGeom(win);
             }
         }
 
@@ -482,9 +474,7 @@ fn pinToAllWorkspacesToggle(s: *State, win: u32) void {
         _ = xcb.xcb_map_window(core.conn, win);
     }
 
-    if (build.has_tiling and core.config.tiling.enabled) tiling.retileCurrentWorkspace();
-    bar.scheduleRedraw();
-    _ = xcb.xcb_flush(core.conn);
+    retileAndScheduleFlush();
 }
 
 /// `move_to_all_workspaces` action — Mod+Shift+5.
@@ -654,20 +644,12 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
     }
 
     // Map every window; restore floating geometry for those not already on screen.
-    const default_x: u32 = @intCast(core.screen.width_in_pixels  / 4);
-    const default_y: u32 = @intCast(core.screen.height_in_pixels / 4);
     for (ws.windows.items()) |win| {
         _ = xcb.xcb_map_window(core.conn, win);
         if ((!build.has_tiling or !tiling.isWindowActiveTiled(win)) and !isMinimized(win) and
             !tracking.isWindowOnWorkspace(win, old_ws))
         {
-            if (window.getWindowGeom(win)) |rect| {
-                utils.configureWindow(core.conn, win, rect);
-            } else {
-                _ = xcb.xcb_configure_window(core.conn, win,
-                    xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
-                    &[_]u32{ default_x, default_y });
-            }
+            window.restoreFloatGeom(win);
         }
     }
 }

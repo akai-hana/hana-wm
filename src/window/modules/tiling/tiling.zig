@@ -167,10 +167,7 @@ pub inline fn getState() *State {
 
 /// Safe pre-init query for code that may run before the event loop starts.
 /// Returns null only during the narrow startup window before `init()` is called.
-pub inline fn getStateOpt() ?*State {
-    if (state) |*s| return s;
-    return null;
-}
+pub inline fn getStateOpt() ?*State { return if (state) |*s| s else null; }
 
 // Lifecycle 
 
@@ -464,9 +461,7 @@ pub fn retileInactiveWorkspace(ws_idx: u8) void {
     // Do NOT invalidate the cache: restoreWorkspaceGeom will find the
     // valid bit set and replay positions in one batch.
     for (ws_state.workspaces[ws_idx].windows.items()) |win| {
-        _ = xcb.xcb_configure_window(core.conn, win,
-            xcb.XCB_CONFIG_WINDOW_X,
-            &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
+        utils.pushWindowOffscreen(core.conn, win);
     }
 }
 
@@ -701,16 +696,11 @@ pub fn swapFocusedWithPrevious() void {
     }
 
     // Both are under tiler control: swap their positions in the tracking list
-    // in a single pass so the next retile assigns each window to the other's cell.
-    const all = s.windows.items();
-    var idx_focused: ?usize = null;
-    var idx_prev:    ?usize = null;
-    for (all, 0..) |w, i| {
-        if (w == focused) idx_focused = i;
-        if (w == prev)    idx_prev    = i;
-        if (idx_focused != null and idx_prev != null) break;
-    }
-    swapWindowsInList(s, idx_focused orelse return, idx_prev orelse return);
+    // so the next retile assigns each window to the other's cell.
+    const all       = s.windows.items();
+    const idx_focused = std.mem.indexOfScalar(u32, all, focused) orelse return;
+    const idx_prev    = std.mem.indexOfScalar(u32, all, prev)    orelse return;
+    swapWindowsInList(s, idx_focused, idx_prev);
     retileCurrentWorkspace();
 }
 
@@ -789,7 +779,8 @@ fn parseEnabledLayouts(layouts_cfg: []const []const u8) struct { arr: [4]Layout,
         len += 1;
     }
     if (len == 0) {
-        for (layout_cycle) |l| { arr[len] = l; len += 1; }
+        @memcpy(arr[0..layout_cycle.len], layout_cycle);
+        len = @intCast(layout_cycle.len);
     }
     return .{ .arr = arr, .len = len };
 }
@@ -1006,11 +997,6 @@ inline fn hasWindowBufCapacity(s: *const State, n: usize, comptime caller: []con
     return false;
 }
 
-fn findWindowIndex(items: []const u32, win: u32) ?usize {
-    for (items, 0..) |w, i| if (w == win) return i;
-    return null;
-}
-
 fn moveWindowToIndex(s: *State, from_idx: usize, to_idx: usize) void {
     if (from_idx == to_idx) return;
     const current = s.windows.items();
@@ -1038,7 +1024,7 @@ fn moveWindowToIndex(s: *State, from_idx: usize, to_idx: usize) void {
 ///   insertion point is `tg - 1`. When `from` lies after `to` no shift occurs.
 fn moveWindowToFilteredSlot(s: *State, win: u32, target: usize) void {
     const items = s.windows.items();
-    const from_global = findWindowIndex(items, win) orelse return;
+    const from_global = std.mem.indexOfScalar(u32, items, win) orelse return;
 
     var filtered_count: usize = 0;
     var to_global: ?usize = null;
@@ -1057,28 +1043,17 @@ fn moveWindowToFilteredSlot(s: *State, win: u32, target: usize) void {
 /// Swap the two elements at `idx_a` and `idx_b` inside the tracking list.
 fn swapWindowsInList(s: *State, idx_a: usize, idx_b: usize) void {
     if (idx_a == idx_b) return;
-    const current = s.windows.items();
-    if (!hasWindowBufCapacity(s, current.len, "swapWindowsInList")) return;
-    @memcpy(s.scratch_wins[0..current.len], current);
-    const tmp              = s.scratch_wins[idx_a];
-    s.scratch_wins[idx_a]  = s.scratch_wins[idx_b];
-    s.scratch_wins[idx_b]  = tmp;
-    s.windows.reorder(s.scratch_wins[0..current.len]);
+    std.mem.swap(u32, &s.windows.buf[idx_a], &s.windows.buf[idx_b]);
 }
 
 /// Swap two tiled windows by their IDs.  Used by focus.zig to implement
 /// Mod+Shift+j / Mod+Shift+k — move the focused window in cycle order.
 pub fn swapWindowsById(win_a: u32, win_b: u32) void {
-    const s = getState();
+    const s   = getState();
     const all = s.windows.items();
-    var idx_a: ?usize = null;
-    var idx_b: ?usize = null;
-    for (all, 0..) |w, i| {
-        if (w == win_a) idx_a = i;
-        if (w == win_b) idx_b = i;
-        if (idx_a != null and idx_b != null) break;
-    }
-    swapWindowsInList(s, idx_a orelse return, idx_b orelse return);
+    const idx_a = std.mem.indexOfScalar(u32, all, win_a) orelse return;
+    const idx_b = std.mem.indexOfScalar(u32, all, win_b) orelse return;
+    swapWindowsInList(s, idx_a, idx_b);
     retileCurrentWorkspace();
 }
 

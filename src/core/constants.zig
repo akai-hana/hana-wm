@@ -41,6 +41,17 @@ pub const OFFSCREEN_SENTINEL_MIN: i32 = -1000;
 /// Maximum depth when walking the X11 window tree in findManagedWindow.
 pub const MAX_WINDOW_TREE_DEPTH: usize = 10;
 
+// XCB property helpers
+/// Maximum number of 32-bit words to request when fetching an XCB window property.
+/// 256 words = 1 KiB, sufficient for all fixed-size properties the WM reads.
+pub const PROPERTY_MAX_LENGTH: u32 = 256;
+/// Value for the `delete` argument to xcb_get_property that leaves the property intact.
+pub const PROPERTY_NO_DELETE: u8 = 0;
+
+// DPI / scaling
+/// Standard DPI for a 1× display. All scale factors are computed relative to this value.
+pub const BASELINE_DPI: f32 = 96.0;
+
 // Event masks
 pub const EventMasks = struct {
     // DWM verbatim (setup() in dwm.c):

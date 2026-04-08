@@ -10,9 +10,9 @@ const constants = @import("constants");
 const debug = @import("debug");
 
 
-const max_property_length: u32 = 256;
+const max_property_length = constants.PROPERTY_MAX_LENGTH;
 /// Passed as the `delete` argument to xcb_get_property; 0 means do not consume the property.
-const property_no_delete: u8 = 0;
+const property_no_delete  = constants.PROPERTY_NO_DELETE;
 
 // Process lifecycle signals
 //
