@@ -1,5 +1,6 @@
-//! Tiling window manager: orchestrates layout, window tracking, and the
-//! geometry/border cache. Delegates pixel arithmetic to the per-layout modules.
+//! Tiling window manager
+//! Orchestrates layout, window tracking, and geometry/border cache. Delegates pixel arithmetic to the per-layout modules.
+//TODO: maybe pixel arithmetic could be centralized within tiling.zig?
 
 const std   = @import("std");
 const build = @import("build_options");
@@ -13,16 +14,19 @@ const constants = @import("constants");
 const debug = @import("debug");
 
 const tracking = @import("tracking");
-const Tracking = @import("tracking").Tracking;
 const focus    = @import("focus");
 
 const layouts  = @import("layouts");
 const floating = @import("floating");
 
-const fullscreen  = if (build.has_fullscreen) @import("fullscreen") else struct {};
-const workspaces  = if (build.has_workspaces) @import("workspaces") else struct {};
-const WsState     = if (build.has_workspaces) workspaces.State     else struct {};
-const WsWorkspace = if (build.has_workspaces) workspaces.Workspace else struct {};
+const fullscreen = if (build.has_fullscreen) @import("fullscreen") else struct {};
+const workspaces = if (build.has_workspaces) @import("workspaces") else struct {
+    pub const Workspace = struct {};
+    pub inline fn getState() ?*State { return null; }
+    pub inline fn getCurrentWorkspaceObject() ?*Workspace { return null; }
+};
+const WsState     = workspaces.State;
+const WsWorkspace = workspaces.Workspace;
 
 const bar = if (build.has_bar) @import("bar") else struct {
     pub fn redrawInsideGrab() void {}
@@ -31,25 +35,8 @@ const bar = if (build.has_bar) @import("bar") else struct {
     pub fn scheduleFullRedraw() void {}
 };
 
-const scale = if (build.has_scale) @import("scale") else struct {
-    pub fn scaleMasterWidth(value: anytype) f32 {
-        return if (value.is_percentage) value.value / 100.0 else -value.value;
-    }
-    pub fn scaleBorderWidth(value: anytype, reference_dimension: u16) u16 {
-        if (value.is_percentage) {
-            const dim_f: f32 = @floatFromInt(reference_dimension);
-            return @intFromFloat(@max(0.0, @round((value.value / 100.0) * 0.5 * dim_f)));
-        } else return @intFromFloat(@max(0.0, @round(value.value)));
-    }
-};
+const scale = if (build.has_scale) @import("scale") else utils.scale_fallback;
 
-
-fn getWsState() ?*WsState {
-    return if (comptime build.has_workspaces) workspaces.getState() else null;
-}
-fn getWsCurrentWorkspace() ?*WsWorkspace {
-    return if (comptime build.has_workspaces) workspaces.getCurrentWorkspaceObject() else null;
-}
 
 const LayoutStub = struct {
     pub fn tileWithOffset(
@@ -113,7 +100,7 @@ pub const State = struct {
     border_width:     u16,
     border_focused:   u32,
     border_unfocused: u32,
-    windows:          Tracking,
+    windows:          tracking.Tracking,
     is_dirty:         bool,
 
     /// Runtime layout cycle: intersection of config `layouts` and disk-present
@@ -215,7 +202,7 @@ pub fn reloadConfig() void {
     // Per-workspace adjustments made at runtime are intentionally discarded so
     // the reloaded config values take effect immediately.
     if (comptime build.has_workspaces) {
-        if (getWsState()) |ws_state| {
+        if (workspaces.getState()) |ws_state| {
             for (ws_state.workspaces) |*ws| {
                 ws.layout       = ns.layout;
                 ws.master_width = null;
@@ -235,8 +222,7 @@ pub fn reloadConfig() void {
         }
         retileCurrentWorkspace();
         bar.redrawInsideGrab();
-        _ = xcb.xcb_ungrab_server(core.conn);
-        _ = xcb.xcb_flush(core.conn);
+        utils.ungrabAndFlush(core.conn);
     }
 }
 
@@ -371,7 +357,7 @@ pub fn invalidateGeomCache(window_id: u32) void {
 /// for that workspace triggers a full retile.
 pub inline fn invalidateWsGeomBit(ws_idx: u8) void {
     const s = getState();
-    if (ws_idx < max_workspaces) s.workspace_geom_valid_bits &= ~workspaceBit(ws_idx);
+    if (ws_idx < max_workspaces) s.workspace_geom_valid_bits &= ~tracking.workspaceBit(ws_idx);
 }
 
 pub inline fn markDirty() void {
@@ -410,7 +396,7 @@ pub fn retileAllWorkspaces() void {
     const screen      = calcScreenArea();
     const ws_count    = tracking.getWorkspaceCount();
     const current_ws  = tracking.getCurrentWorkspace() orelse return;
-    const ws_state_opt = if (!core.config.tiling.global_layout) getWsState() else null;
+    const ws_state_opt = if (!core.config.tiling.global_layout) workspaces.getState() else null;
     const ctx         = makeLayoutCtx(s);
     const effective_ws = @min(ws_count, max_workspaces);
 
@@ -465,7 +451,7 @@ pub fn retileInactiveWorkspace(ws_idx: u8) void {
     if (!s.is_enabled) return;
     if (comptime !build.has_workspaces) return;
 
-    const ws_state = getWsState() orelse return;
+    const ws_state = workspaces.getState() orelse return;
 
     if (ws_idx == ws_state.current) {
         retileCurrentWorkspace();
@@ -511,7 +497,7 @@ pub fn restoreWorkspaceGeom() bool {
 
     const current_ws = tracking.getCurrentWorkspace() orelse return false;
     if (current_ws >= max_workspaces) return false;
-    if (s.workspace_geom_valid_bits & workspaceBit(current_ws) == 0) return false;
+    if (s.workspace_geom_valid_bits & tracking.workspaceBit(current_ws) == 0) return false;
 
     const current_screen = calcScreenArea();
     if (!layouts.rectsEqual(current_screen, s.last_retile_area)) return false;
@@ -558,7 +544,7 @@ pub fn toggleFloating() void {
     s.is_enabled = true;
     const restore: Layout = if (!core.config.tiling.global_layout)
         if (comptime build.has_workspaces)
-            (if (getWsCurrentWorkspace()) |ws| ws.layout else s.prev_layout)
+            (if (workspaces.getCurrentWorkspaceObject()) |ws| ws.layout else s.prev_layout)
         else s.prev_layout
     else
         s.prev_layout;
@@ -639,7 +625,7 @@ pub fn adjustMasterCount(delta: i8) void {
     s.master_count = clamped;
     if (!core.config.tiling.global_layout) {
         if (comptime build.has_workspaces) {
-            if (getWsCurrentWorkspace()) |ws| ws.master_count = s.master_count;
+            if (workspaces.getCurrentWorkspaceObject()) |ws| ws.master_count = s.master_count;
         }
     }
     retileCurrentWorkspace();
@@ -654,7 +640,7 @@ pub fn adjustMasterWidth(delta: f32) void {
         @min(max_master_width_ratio, s.master_width + delta));
     if (!core.config.tiling.global_layout) {
         if (comptime build.has_workspaces) {
-            if (getWsCurrentWorkspace()) |ws| ws.master_width = s.master_width;
+            if (workspaces.getCurrentWorkspaceObject()) |ws| ws.master_width = s.master_width;
         }
     }
     s.is_dirty = true;
@@ -967,14 +953,14 @@ fn retile(screen: utils.Rect, for_ws: ?u8) void {
     const saved_width = s.master_width;
     const saved_count = s.master_count;
     if (for_ws != null) {
-        s.master_width = resolveMasterWidth(s, getWsState(), target_ws);
-        s.master_count = resolveMasterCount(s, getWsState(), target_ws);
+        s.master_width = resolveMasterWidth(s, workspaces.getState(), target_ws);
+        s.master_count = resolveMasterCount(s, workspaces.getState(), target_ws);
     }
     defer s.master_width = saved_width;
     defer s.master_count = saved_count;
 
     invokeLayout(
-        selectLayout(s, getWsState(), target_ws, core.config.tiling.global_layout),
+        selectLayout(s, workspaces.getState(), target_ws, core.config.tiling.global_layout),
         &ctx, s, ws_windows, screen,
     );
 
@@ -1169,12 +1155,10 @@ fn swapWindowGeometriesDirectly(s: *State, win_a: u32, win_b: u32) void {
     updateCacheRect(s, win_b, rect_a);
 }
 
-// Misc private helpers 
-
-inline fn workspaceBit(ws_idx: anytype) u64 { return @as(u64, 1) << @intCast(ws_idx); }
+// Misc private helpers
 
 inline fn markWorkspaceGeomValid(s: *State, ws_idx: anytype) void {
-    if (ws_idx < max_workspaces) s.workspace_geom_valid_bits |= workspaceBit(ws_idx);
+    if (ws_idx < max_workspaces) s.workspace_geom_valid_bits |= tracking.workspaceBit(ws_idx);
 }
 
 inline fn applyLayoutStep(comptime forward: bool) void {
@@ -1187,7 +1171,7 @@ fn applyLayout(s: *State, layout: Layout) void {
     s.layout = layout;
     if (!core.config.tiling.global_layout) {
         if (comptime build.has_workspaces) {
-            if (getWsCurrentWorkspace()) |ws| ws.layout = layout;
+            if (workspaces.getCurrentWorkspaceObject()) |ws| ws.layout = layout;
         }
     }
     retileCurrentWorkspace();

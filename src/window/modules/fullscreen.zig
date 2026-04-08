@@ -365,6 +365,26 @@ fn restoreFloatingWindows(skip_win: u32) void {
     g_float_saves_len = 0;
 }
 
+/// Advertise or clear the EWMH _NET_WM_STATE_FULLSCREEN property on `win`.
+///
+/// Guards on both atoms being valid so a partial atom-intern failure cannot
+/// corrupt the property (matches the enter-path guard that was already
+/// dual-checking both atoms; exit paths now do the same).
+///
+/// `is_fullscreen = true`  → sets count=1, data=&g_net_wm_state_fullscreen
+/// `is_fullscreen = false` → sets count=0, data=null  (clears the property)
+fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
+    if (g_net_wm_state == xcb.XCB_ATOM_NONE or
+        g_net_wm_state_fullscreen == xcb.XCB_ATOM_NONE) return;
+    const count: u32 = if (is_fullscreen) 1 else 0;
+    _ = xcb.xcb_change_property(
+        core.conn, xcb.XCB_PROP_MODE_REPLACE,
+        win, g_net_wm_state,
+        xcb.XCB_ATOM_ATOM, 32,
+        count, if (is_fullscreen) &g_net_wm_state_fullscreen else null,
+    );
+}
+
 // Commit helpers (XCB-only; caller owns grab/ungrab/flush)
 //
 // Improvement #4: `inline` removed from both helpers.  These functions contain
@@ -384,9 +404,7 @@ fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
     // Improvement #3: iteration dispatched through the shared helper.
     const PushCtx = struct {
         fn call(_: @This(), w: u32) void {
-            _ = xcb.xcb_configure_window(core.conn, w,
-                xcb.XCB_CONFIG_WINDOW_X,
-                &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
+            utils.pushWindowOffscreen(core.conn, w);
             if (comptime build.has_tiling) {
                 // Only invalidate tiled windows — floating windows' cache entries
                 // hold the geometry we need to restore on exit.
@@ -423,14 +441,7 @@ fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
 
     // Advertise fullscreen state via EWMH so external tools (e.g. compositor
     // scripts) can detect it with xprop / xev.
-    if (g_net_wm_state != xcb.XCB_ATOM_NONE and g_net_wm_state_fullscreen != xcb.XCB_ATOM_NONE) {
-        _ = xcb.xcb_change_property(
-            core.conn, xcb.XCB_PROP_MODE_REPLACE,
-            win, g_net_wm_state,
-            xcb.XCB_ATOM_ATOM, 32,
-            1, &g_net_wm_state_fullscreen,
-        );
-    }
+    setEwmhFullscreenState(win, true);
 }
 
 fn exitFullscreenCommit(win: u32, ws: u8) void {
@@ -454,17 +465,7 @@ fn exitFullscreenCommit(win: u32, ws: u8) void {
     window.applyBorder(win);
 
     // Clear EWMH fullscreen state so external tools see the window is no longer fullscreen.
-    // Improvement #2: guard now checks both atoms, mirroring the enter path.
-    // Previously only g_net_wm_state was checked; if atom interning had partially
-    // failed, the clear would still fire and write against an unexpected atom value.
-    if (g_net_wm_state != xcb.XCB_ATOM_NONE and g_net_wm_state_fullscreen != xcb.XCB_ATOM_NONE) {
-        _ = xcb.xcb_change_property(
-            core.conn, xcb.XCB_PROP_MODE_REPLACE,
-            win, g_net_wm_state,
-            xcb.XCB_ATOM_ATOM, 32,
-            0, null,
-        );
-    }
+    setEwmhFullscreenState(win, false);
 }
 
 // Public actions
@@ -501,14 +502,7 @@ pub fn cleanupFullscreenForMove(win: u32, src_ws: u8) void {
 
     // Clear the EWMH fullscreen property so external tools (compositors, etc.)
     // see the window is no longer fullscreen.
-    if (g_net_wm_state != xcb.XCB_ATOM_NONE and g_net_wm_state_fullscreen != xcb.XCB_ATOM_NONE) {
-        _ = xcb.xcb_change_property(
-            core.conn, xcb.XCB_PROP_MODE_REPLACE,
-            win, g_net_wm_state,
-            xcb.XCB_ATOM_ATOM, 32,
-            0, null,
-        );
-    }
+    setEwmhFullscreenState(win, false);
 }
 
 /// Enter fullscreen for `win` on the current workspace.
@@ -521,8 +515,7 @@ pub fn enterFullscreen(win: u32, saved_geom: ?core.WindowGeometry) void {
     saveFloatingWindowGeoms(win);
     _ = xcb.xcb_grab_server(core.conn);
     enterFullscreenCommit(win, ws, geom);
-    _ = xcb.xcb_ungrab_server(core.conn);
-    _ = xcb.xcb_flush(core.conn);
+    utils.ungrabAndFlush(core.conn);
 }
 
 // Improvement #1 (bug fix) + #5 (uniform grab ownership):
@@ -553,8 +546,7 @@ pub fn toggle() void {
             _ = xcb.xcb_grab_server(core.conn);
             exitFullscreenCommit(win, current_ws);
             restoreFloatingWindows(win);
-            _ = xcb.xcb_ungrab_server(core.conn);
-            _ = xcb.xcb_flush(core.conn);
+            utils.ungrabAndFlush(core.conn);
         } else {
             // Switch: a different window is currently fullscreen.
             // Hoist both round-trip operations (fetchWindowGeom issues a
@@ -570,8 +562,7 @@ pub fn toggle() void {
             // this step they remain invisible after the transition.
             restoreFloatingWindows(win);
             enterFullscreenCommit(win, current_ws, new_geom);
-            _ = xcb.xcb_ungrab_server(core.conn);
-            _ = xcb.xcb_flush(core.conn);
+            utils.ungrabAndFlush(core.conn);
         }
     } else {
         // Nothing fullscreen on this workspace — enter fullscreen.
@@ -581,7 +572,6 @@ pub fn toggle() void {
         saveFloatingWindowGeoms(win);
         _ = xcb.xcb_grab_server(core.conn);
         enterFullscreenCommit(win, current_ws, geom);
-        _ = xcb.xcb_ungrab_server(core.conn);
-        _ = xcb.xcb_flush(core.conn);
+        utils.ungrabAndFlush(core.conn);
     }
 }

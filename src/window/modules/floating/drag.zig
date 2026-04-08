@@ -193,8 +193,7 @@ pub fn updateDrag(x: i16, y: i16) void {
             tiling.removeWindow(drag.window);
             tiling.retileCurrentWorkspace();
         }
-        _ = xcb.xcb_ungrab_server(core.conn);
-        _ = xcb.xcb_flush(core.conn);
+        utils.ungrabAndFlush(core.conn);
     }
 
     const dx = x - drag.start_x;

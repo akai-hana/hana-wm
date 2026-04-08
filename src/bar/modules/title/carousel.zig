@@ -1,4 +1,3 @@
-
 //! Carousel / ticker logic for the title segment, including monitor
 //! refresh-rate detection.
 //!
@@ -38,7 +37,7 @@
 //!                                  thread swaps it to false at the start of
 //!                                  drawSegmentedCarousel and rebuilds the pixmap
 //!                                  when it was true.
-//!   focus_signal.start_ms       — stores monotonicMs() at the focus-change
+//!   focus_signal.start_ms       — stores utils.monotonicMs() at the focus-change
 //!                                  instant so the animation is anchored to
 //!                                  click time, not draw time; consumed
 //!                                  (swapped to 0) by drawSegmentedCarousel once.
@@ -63,11 +62,10 @@ const std     = @import("std");
 const defs    = @import("defs");
 const drawing = @import("drawing");
 const core    = @import("core");
+const utils   = @import("utils");
 const xcb     = core.xcb;
 
-// ---------------------------------------------------------------------------
 // Public constants
-// ---------------------------------------------------------------------------
 
 /// Fallback refresh rate used when RandR is unavailable or returns an invalid value.
 pub const default_hz: f64 = 60.0;
@@ -80,9 +78,7 @@ pub const default_scroll_speed: f64 = 125.0;
 /// the leapfrog pixmap layout.
 pub const carousel_gap_px: u16 = 60;
 
-// ---------------------------------------------------------------------------
 // Public geometry type
-// ---------------------------------------------------------------------------
 
 /// All segment geometry passed to carousel functions, replacing the six
 /// positional parameters (x, avail_w, blit_x, blit_w, seg_x, seg_w) that
@@ -100,9 +96,7 @@ pub const SegmentGeometry = struct {
     avail_w: u16,
 };
 
-// ---------------------------------------------------------------------------
 // Internal types
-// ---------------------------------------------------------------------------
 
 const CarouselBase = struct {
     cp:       drawing.CarouselPixmap,
@@ -138,9 +132,7 @@ const SegmentEntry = struct {
     last_bg: u32,
 };
 
-// ---------------------------------------------------------------------------
 // Module state
-// ---------------------------------------------------------------------------
 
 /// Refresh-rate detection state.  Written once by `ensureDetected`; read on
 /// every carousel frame.  Both fields are touched only on the render thread
@@ -186,9 +178,7 @@ var scroll_config: ScrollConfig = .{};
 var render:       RenderState  = .{};
 var focus_signal: FocusSignal  = .{};
 
-// ---------------------------------------------------------------------------
 // Public API — Hz detection
-// ---------------------------------------------------------------------------
 
 /// Return the cached refresh rate (Hz).
 /// Always safe to call; returns `default_hz` if detection has not yet run.
@@ -207,9 +197,7 @@ pub fn ensureDetected(conn: *xcb.xcb_connection_t) void {
 /// hotplug or mode switch is picked up on the next draw cycle.
 pub fn invalidateRefreshRate() void { hz_state.is_ready = false; }
 
-// ---------------------------------------------------------------------------
 // Public API — feature toggles and scroll config
-// ---------------------------------------------------------------------------
 
 /// Enable or disable the carousel globally.
 ///
@@ -255,9 +243,7 @@ pub fn effectiveRefreshRate() f64 {
     return if (scroll_config.rate_override > 0.0) scroll_config.rate_override else cachedRefreshRate();
 }
 
-// ---------------------------------------------------------------------------
 // Public API — lifecycle
-// ---------------------------------------------------------------------------
 
 /// True when either a single-window or segmented carousel pixmap is live.
 /// The bar thread polls this to decide whether to schedule carousel ticks.
@@ -291,9 +277,7 @@ pub fn deinitSegmentedCarousel() void {
     if (render.seg_carousel) |*e| { e.base.cp.deinit(); render.seg_carousel = null; }
 }
 
-// ---------------------------------------------------------------------------
 // Public API — focus notification (main thread only)
-// ---------------------------------------------------------------------------
 
 /// Called by the focus system the instant the focused window changes.
 /// MUST be called from the MAIN thread only.
@@ -325,13 +309,11 @@ pub fn notifyFocusChanged(new_window: ?u32) void {
     // .release ordering ensures focus_signal.start_ms is visible to the render
     // thread before focus_signal.is_invalidated, so when the render thread
     // sees invalidated=true it also sees the correct timestamp.
-    focus_signal.start_ms.store(monotonicMs(), .release);
+    focus_signal.start_ms.store(utils.monotonicMs(), .release);
     focus_signal.is_invalidated.store(true, .release);
 }
 
-// ---------------------------------------------------------------------------
 // Public API — hot-path tick
-// ---------------------------------------------------------------------------
 
 /// Fast per-tick single-window carousel redraw.
 ///
@@ -357,16 +339,14 @@ pub fn drawCarouselTick(
     // fillRect and flushRect use the full segment coords to cover the
     // background including the left padding gap.
     dc.fillRect(x, 0, avail_w, height, bg);
-    const now    = monotonicMs();
+    const now    = utils.monotonicMs();
     const offset = carouselOffset(e.base.start_ms, e.base.cycle_w, now);
     e.base.cp.blitFrame(dc.offscreen_pixmap, dc.gc, e.geom.text_x, x, avail_w, offset, e.base.cycle_w);
     dc.flushRect(x, avail_w);
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Public API — single-window title rendering
-// ---------------------------------------------------------------------------
 
 /// Render `text` into the segment described by `geom`.
 ///
@@ -419,9 +399,9 @@ pub fn drawScrollingTitle(
 
     if (full_stale or bg_changed or geom_changed) {
         // Read start_ms before freeing the old entry (full_stale may set it to
-        // monotonicMs(); the other two cases preserve the running animation clock).
+        // utils.monotonicMs(); the other two cases preserve the running animation clock).
         const preserved_start_ms: i64 =
-            if (full_stale) monotonicMs() else render.single_carousel.?.base.start_ms;
+            if (full_stale) utils.monotonicMs() else render.single_carousel.?.base.start_ms;
 
         deinitSingleCarousel();
 
@@ -441,14 +421,12 @@ pub fn drawScrollingTitle(
     }
 
     const e      = render.single_carousel.?;
-    const now    = monotonicMs();
+    const now    = utils.monotonicMs();
     const offset = carouselOffset(e.base.start_ms, e.base.cycle_w, now);
     e.base.cp.blitFrame(dc.offscreen_pixmap, dc.gc, geom.text_x, geom.seg_x, geom.seg_w, offset, e.base.cycle_w);
 }
 
-// ---------------------------------------------------------------------------
 // Public API — split-view segmented carousel
-// ---------------------------------------------------------------------------
 
 /// Render the focused window's title for a split-view segment.
 ///
@@ -463,9 +441,9 @@ pub fn drawScrollingTitle(
 ///                            consumes `focus_signal.start_ms` so the animation
 ///                            is anchored to click time.
 ///   bg_changed             — accent colour changed; preserves `start_ms`.
-///   window ID changed      — window replaced; resets `start_ms` to `monotonicMs()`.
-///   title_invalidated      — title text changed; resets `start_ms` to `monotonicMs()`.
-///   cycle_w mismatch       — available area changed; resets `start_ms` to `monotonicMs()`.
+///   window ID changed      — window replaced; resets `start_ms` to `utils.monotonicMs()`.
+///   title_invalidated      — title text changed; resets `start_ms` to `utils.monotonicMs()`.
+///   cycle_w mismatch       — available area changed; resets `start_ms` to `utils.monotonicMs()`.
 pub fn drawSegmentedCarousel(
     dc:                *drawing.DrawContext,
     baseline_y:        u16,
@@ -497,12 +475,12 @@ pub fn drawSegmentedCarousel(
         // Determine start_ms before freeing the old entry.
         // bg_changed-only: preserve the running clock so the colour update is
         // seamless.  content_stale: consume the focus-event timestamp when
-        // available, otherwise fall back to monotonicMs().
+        // available, otherwise fall back to utils.monotonicMs().
         const preserved_start_ms: i64 = if (!content_stale and bg_changed)
             render.seg_carousel.?.base.start_ms
         else blk: {
             const t = focus_signal.start_ms.swap(0, .acq_rel);
-            break :blk if (t != 0) t else monotonicMs();
+            break :blk if (t != 0) t else utils.monotonicMs();
         };
 
         deinitSegmentedCarousel();
@@ -522,15 +500,13 @@ pub fn drawSegmentedCarousel(
     }
 
     const e      = render.seg_carousel.?;
-    const now    = monotonicMs();
+    const now    = utils.monotonicMs();
     const offset = carouselOffset(e.base.start_ms, e.base.cycle_w, now);
     e.base.cp.blitFrame(dc.offscreen_pixmap, dc.gc, geom.text_x, geom.seg_x, geom.seg_w, offset, e.base.cycle_w);
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Private helpers — Hz detection
-// ---------------------------------------------------------------------------
 
 fn xcbRootWindow(conn: *xcb.xcb_connection_t) u32 {
     const setup = xcb.xcb_get_setup(conn);
@@ -618,20 +594,7 @@ fn detectRefreshRate(conn: *xcb.xcb_connection_t) f64 {
     return default_hz;
 }
 
-// ---------------------------------------------------------------------------
 // Private helpers — scroll math
-// ---------------------------------------------------------------------------
-
-/// Return the current monotonic clock in milliseconds.
-///
-/// Uses `std.os.linux.clock_gettime` with `MONOTONIC` — resolved via the VDSO
-/// on Linux, making this a pure memory read with no syscall overhead on
-/// kernels that support it.
-fn monotonicMs() i64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
-    return ts.sec * 1000 + @divTrunc(ts.nsec, 1_000_000);
-}
 
 /// Compute the v-synced scroll offset for a carousel with the given cycle width.
 ///
@@ -645,7 +608,7 @@ fn monotonicMs() i64 {
 /// sub-frame moment.
 ///
 /// `now_ms` is passed in by the caller (computed once per function invocation
-/// via `monotonicMs()`) to avoid redundant clock calls and to keep this
+/// via `utils.monotonicMs()`) to avoid redundant clock calls and to keep this
 /// function pure.
 fn carouselOffset(start_ms: i64, cycle_w: u16, now_ms: i64) u16 {
     // cycle_w = text_w + carousel_gap_px; both are always >= 1.

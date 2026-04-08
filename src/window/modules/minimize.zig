@@ -43,8 +43,11 @@ const tracking = @import("tracking");
 const focus    = @import("focus");
 
 const fullscreen  = if (build.has_fullscreen) @import("fullscreen") else struct {};
-const workspaces  = if (build.has_workspaces) @import("workspaces") else struct {};
-const WsWorkspace = if (build.has_workspaces) workspaces.Workspace else struct {}; //TODO: is this necessary?
+const workspaces  = if (build.has_workspaces) @import("workspaces") else struct {
+    pub const Workspace = struct {};
+    pub fn getCurrentWorkspaceObject() ?*Workspace { return null; }
+};
+const WsWorkspace = workspaces.Workspace;
 
 const tiling = if (build.has_tiling) @import("tiling") else struct {
     pub fn addWindow(_: u32) void {}
@@ -59,14 +62,6 @@ const bar = if (build.has_bar) @import("bar") else struct {
     pub fn redrawInsideGrab() void {}
     pub fn scheduleRedraw() void {}
 };
-
-fn getWsCurrentWorkspace() ?*WsWorkspace {
-    return if (comptime build.has_workspaces)
-        workspaces.getCurrentWorkspaceObject()
-    else
-        null;
-}
-
 
 // Types 
 
@@ -186,17 +181,6 @@ pub fn minimizedSlice() []const MinimizedRecord {
 
 // Private helpers 
 
-// [#11] Both X and Y are now moved offscreen so no partial window exposure is
-// possible regardless of the window's prior Y coordinate.  The same constant
-// is reused for Y; add constants.OFFSCREEN_Y_POSITION if the axes ever need
-// independent values.
-inline fn hideWindow(win: u32) void {
-    const off = toXcbCoord(constants.OFFSCREEN_X_POSITION); // [#18] named conversion
-    _ = xcb.xcb_configure_window(core.conn, win,
-        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
-        &[_]u32{ off, off });
-}
-
 /// Focus the first non-minimized window on the current workspace in insertion
 /// order, falling back to clearFocus() if none exists.
 ///
@@ -215,7 +199,7 @@ inline fn hideWindow(win: u32) void {
 pub fn focusMasterOrFirst() void {
     found: {
         if (comptime build.has_workspaces) {
-            const ws  = getWsCurrentWorkspace() orelse break :found;
+            const ws  = workspaces.getCurrentWorkspaceObject() orelse break :found;
             const win = tracking.firstNonMinimized(ws.windows.items()) orelse break :found;
             focus.setFocus(win, .tiling_operation);
             return;
@@ -296,7 +280,7 @@ pub fn minimizeWindow() void {
     g_next_timestamp = ts + 1;
 
     _ = xcb.xcb_grab_server(core.conn);
-    hideWindow(win);
+    utils.pushWindowOffscreen(core.conn, win);
 
     // [#9] Try MRU history first so focus returns to the previously active
     // window.  focusBestAvailable() walks the MRU list and focuses the first
@@ -312,8 +296,7 @@ pub fn minimizeWindow() void {
         tiling.retileCurrentWorkspace();
     }
     bar.redrawInsideGrab();
-    _ = xcb.xcb_ungrab_server(core.conn);
-    _ = xcb.xcb_flush(core.conn);
+    utils.ungrabAndFlush(core.conn);
 }
 
 // Restore helpers 
@@ -369,8 +352,7 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
 
     focus.setFocus(win, .window_spawn);
     bar.redrawInsideGrab();
-    _ = xcb.xcb_ungrab_server(core.conn);
-    _ = xcb.xcb_flush(core.conn);
+    utils.ungrabAndFlush(core.conn);
 }
 
 // Unminimize 
@@ -509,8 +491,7 @@ pub fn unminimizeAll() void {
         focus.setFocus(focus_target, .window_spawn);
 
         bar.redrawInsideGrab();
-        _ = xcb.xcb_ungrab_server(core.conn);
-        _ = xcb.xcb_flush(core.conn);
+        utils.ungrabAndFlush(core.conn);
     }
 
     // Each fullscreen window needs its own grab (enterFullscreen owns it).

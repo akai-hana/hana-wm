@@ -62,8 +62,6 @@ fn pushBackgroundWindowsOffscreen(ctx: *const layouts.LayoutCtx, background: []c
             if (!wd.hasValidRect()) continue; // already offscreen — skip round-trip
             wd.rect = tiling.zero_rect;       // invalidate before sending
         }
-        _ = xcb.xcb_configure_window(ctx.conn, win,
-            xcb.XCB_CONFIG_WINDOW_X,
-            &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
+        utils.pushWindowOffscreen(ctx.conn, win);
     }
 }

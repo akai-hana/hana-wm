@@ -1,4 +1,5 @@
-//! Focus management — set, clear, and reason-aware focus routing.
+//! Focus management
+//! Routes windows' focus. Reason-aware sets/clears.
 
 const std   = @import("std");
 const build = @import("build_options");
@@ -18,14 +19,13 @@ const bar = if (build.has_bar) @import("bar") else struct {
     pub fn isBarWindow(_: u32) bool { return false; }
     pub fn redrawInsideGrab() void {}
 };
-const carousel      = if (build.has_bar and build.has_carousel) @import("carousel") else struct {
+
+const carousel = if (build.has_bar and build.has_carousel) @import("carousel") else struct {
     pub fn notifyFocusChanged(_: anytype) void {}
 };
 
 
-// ---------------------------------------------------------------------------
 // Module state
-// ---------------------------------------------------------------------------
 //
 // All mutable focus state is grouped into a single State struct so that:
 //   • init() can reset everything in one assignment (no scattered field resets).
@@ -782,9 +782,7 @@ fn isWindowMapped(conn: *xcb.xcb_connection_t, win: u32) bool {
     return reply.*.map_state == xcb.XCB_MAP_STATE_VIEWABLE;
 }
 
-// ---------------------------------------------------------------------------
 // Window focus cycling — dwm-style Mod+j / Mod+k
-// ---------------------------------------------------------------------------
 //
 // Scratch buffer for collectVisibleWindows.  Module-level so it is not
 // stack-allocated on every key press.  Safe in a single-threaded WM.

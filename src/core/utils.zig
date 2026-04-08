@@ -164,6 +164,52 @@ pub inline fn getAtomCached(comptime name: []const u8) error{AtomCacheNotInitial
 
 // Property helpers
 
+/// Fallback scale helpers used when `build.has_scale` is false.
+/// Formula must stay identical to scale.zig; this is now the single
+/// source of truth for no-scale builds.
+pub const scale_fallback = struct {
+    pub fn scaleMasterWidth(value: anytype) f32 {
+        return if (value.is_percentage) value.value / 100.0 else -value.value;
+    }
+    pub fn scaleBorderWidth(value: anytype, reference_dimension: u16) u16 {
+        if (value.is_percentage) {
+            const dim_f: f32 = @floatFromInt(reference_dimension);
+            return @intFromFloat(@max(0.0, @round((value.value / 100.0) * 0.5 * dim_f)));
+        } else return @intFromFloat(@max(0.0, @round(value.value)));
+    }
+};
+
+/// Returns the current monotonic clock time in milliseconds.
+/// Uses the VDSO-accelerated clock_gettime on supported kernels.
+pub fn monotonicMs() i64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+    return ts.sec * 1000 + @divTrunc(ts.nsec, 1_000_000);
+}
+
+/// Returns the current monotonic clock time in nanoseconds.
+pub fn monotonicNs() u64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+}
+
+// XCB grab helpers
+
+/// Moves `win` to the offscreen holding area (outside visible display bounds).
+/// Uses only XCB_CONFIG_WINDOW_X.
+pub inline fn pushWindowOffscreen(conn: *xcb.xcb_connection_t, win: u32) void {
+    _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_X,
+        &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
+}
+
+/// Ungrabs the X server and flushes pending requests.
+/// Always called as a pair; defined here so every module can share one copy.
+pub inline fn ungrabAndFlush(conn: *xcb.xcb_connection_t) void {
+    _ = xcb.xcb_ungrab_server(conn);
+    _ = xcb.xcb_flush(conn);
+}
+
 /// Fetches an 8-bit X11 window property into a caller-supplied reuse buffer.
 /// Returns a slice into `buffer.items` on success, or null if the property is absent, empty, or not 8-bit encoded.
 /// The buffer is cleared before each use, so the caller can allocate it once and pass it across repeated calls.
