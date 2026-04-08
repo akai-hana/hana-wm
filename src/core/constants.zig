@@ -2,7 +2,6 @@
 
 const xcb = @cImport(@cInclude("xcb/xcb.h"));
 
-
 // Modifier masks
 // Must be u16 as per XCB API
 pub const MOD_SHIFT:    u16 = xcb.XCB_MOD_MASK_SHIFT;

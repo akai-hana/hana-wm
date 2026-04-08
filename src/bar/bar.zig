@@ -62,13 +62,12 @@ const tiling     = if (build.has_tiling) @import("tiling") else struct {};
 const drag       = @import("drag");
 const utils      = @import("utils");
 const tracking   = @import("tracking");
-const workspaces = if (build.has_workspaces) @import("workspaces") else struct {};
+const workspaces = if (build.has_workspaces) @import("workspaces") else struct {
+    pub inline fn getState() ?*State { return null; }
+    pub inline fn switchTo(_: u8) void {}
+};
 
-const WorkspaceState = if (build.has_workspaces) workspaces.State else struct {};
-
-fn getWorkspaceState() ?*WorkspaceState {
-    return if (comptime build.has_workspaces) workspaces.getState() else null;
-}
+const WorkspaceState = workspaces.State;
 
 inline fn switchToWorkspace(ws_arg: u8) void {
     if (comptime build.has_workspaces) workspaces.switchTo(ws_arg);
@@ -594,7 +593,7 @@ fn runBarThread(s: *State) void {
         // Sleep until there is something to do or the carousel timer fires.
         while (!gBar.channel.work.hasPending()) {
             if (carousel.isCarouselActive()) {
-                const now_ns = monotonicNowNs();
+                const now_ns = utils.monotonicNs();
                 if (now_ns >= next_carousel_ns) break;
                 const remaining = next_carousel_ns - now_ns;
                 gBar.channel.work_ready.timedWait(&gBar.channel.mutex, remaining) catch {};
@@ -625,7 +624,7 @@ fn runBarThread(s: *State) void {
             .focusOnly => {
                 s.drawTitleOnly(work.focused_window);
                 if (carousel.isCarouselActive()) {
-                    const now_ns = monotonicNowNs();
+                    const now_ns = utils.monotonicNs();
                     if (now_ns >= next_carousel_ns) {
                         next_carousel_ns = now_ns + carouselWakeNs;
                     } else {
@@ -638,7 +637,7 @@ fn runBarThread(s: *State) void {
                 // Carousel tick or clock-only wakeup with no focus change.
                 if (carousel.isCarouselActive()) {
                     s.drawTitleOnly(s.title_cache.focused_window);
-                    const now_ns = monotonicNowNs();
+                    const now_ns = utils.monotonicNs();
                     if (now_ns >= next_carousel_ns) {
                         next_carousel_ns = now_ns + carouselWakeNs;
                     } else {
@@ -650,12 +649,6 @@ fn runBarThread(s: *State) void {
             .quit => unreachable,
         }
     }
-}
-
-inline fn monotonicNowNs() u64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
-    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 
 inline fn spawnBarThread(s: *State) void {
@@ -698,7 +691,7 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot,
         try minimize.collectMinimizedIntoSet(&snap.minimized_windows, allocator);
 
     if (comptime build.has_workspaces) {
-        const ws_state = getWorkspaceState() orelse return;
+        const ws_state = workspaces.getState() orelse return;
         snap.workspace_count      = @intCast(ws_state.workspaces.len);
         snap.current_workspace    = ws_state.current;
         snap.is_all_view_active   = ws_state.all_view_temp_wins.items.len > 0;
@@ -775,43 +768,38 @@ fn submitDrawBlockingFull() void {
 }
 
 /// Ungrab the X server and flush pending requests. Always called as a pair.
-inline fn ungrabAndFlush() void {
-    _ = xcb.xcb_ungrab_server(core.conn);
-    _ = xcb.xcb_flush(core.conn);
-}
+inline fn ungrabAndFlush() void { utils.ungrabAndFlush(core.conn); }
 
-/// Posts a snapshot to the bar thread and returns immediately.
-pub fn submitDraw() void {
-    const s = gBar.state orelse return;
-    if (!s.is_visible) return;
+// Returns the write_index that was captured (and already flipped into the slot)
+// on success, or null if the bar is not visible or capture failed.
+fn prepareSnapshot() ?u1 {
+    const s = gBar.state orelse return null;
+    if (!s.is_visible) return null;
     const idx = gBar.channel.write_index;
-    // Read and clear the force-full-redraw flag here, outside captureStateIntoSlot,
-    // so that function has no dependency on global channel state (Issue #13).
     const forced = gBar.channel.pending_force_full_redraw;
     gBar.channel.pending_force_full_redraw = false;
     captureStateIntoSlot(s, &gBar.channel.slots[idx], &gBar.channel.slots[1 - idx], forced) catch |e| {
         debug.warnOnErr(e, "bar captureStateIntoSlot");
-        return;
+        return null;
     };
+    return idx;
+}
+
+/// Posts a snapshot to the bar thread and returns immediately.
+pub fn submitDraw() void {
+    const idx = prepareSnapshot() orelse return;
     gBar.channel.mutex.lock();
     defer gBar.channel.mutex.unlock();
     gBar.channel.write_index  ^= 1;
     gBar.channel.work.kind     = .snapReady;
     gBar.channel.work_ready.signal();
+    _ = idx;
 }
 
 /// Posts a snapshot to the bar thread and blocks until the draw completes.
 /// Use only inside or immediately before xcb_ungrab_server.
 pub fn submitDrawBlocking() void {
-    const s = gBar.state orelse return;
-    if (!s.is_visible) return;
-    const idx = gBar.channel.write_index;
-    const forced = gBar.channel.pending_force_full_redraw;
-    gBar.channel.pending_force_full_redraw = false;
-    captureStateIntoSlot(s, &gBar.channel.slots[idx], &gBar.channel.slots[1 - idx], forced) catch |e| {
-        debug.warnOnErr(e, "bar captureStateIntoSlot");
-        return;
-    };
+    const idx = prepareSnapshot() orelse return;
     gBar.channel.mutex.lock();
     defer gBar.channel.mutex.unlock();
     gBar.channel.write_index ^= 1;
@@ -820,6 +808,7 @@ pub fn submitDrawBlocking() void {
     gBar.channel.work_ready.signal();
     while (gBar.channel.draw_generation == gen_before)
         gBar.channel.draw_done.wait(&gBar.channel.mutex);
+    _ = idx;
 }
 
 // Window and atom setup 
@@ -1200,7 +1189,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     const s = gBar.state orelse return;
     if (event.event != s.win.win_id) return;
     if (comptime !build.has_workspaces) return;
-    const ws_state = getWorkspaceState() orelse return;
+    const ws_state = workspaces.getState() orelse return;
     const ws_w     = workspacesSegment.getCachedWorkspaceWidth();
     if (ws_w == 0) return;
     const click_x           = @max(0, event.event_x - s.layout_cache.workspace_x);
@@ -1225,7 +1214,7 @@ inline fn isTilingActive() bool {
 /// responsibility.
 fn retileAllWorkspaces() void {
     if (comptime !build.has_tiling) return;
-    const ws_state = getWorkspaceState() orelse return;
+    const ws_state = workspaces.getState() orelse return;
     if (!isTilingActive()) { tiling.retileCurrentWorkspace(); return; }
     for (ws_state.workspaces, 0..) |*ws, idx| {
         if (ws.windows.len == 0) continue;

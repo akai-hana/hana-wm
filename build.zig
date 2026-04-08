@@ -48,16 +48,15 @@ const optional_subsystems = [_]OptionalSubsystem{
     // bar/
     .{ .name = "bar" },
 
-    // bar/modules/ (segments)
-    .{ .name = "tags",     .is_segment = true },
-    .{ .name = "layout",   .is_segment = true },
-    .{ .name = "variants", .is_segment = true },
-    .{ .name = "title",    .is_segment = true },
-    .{ .name = "carousel", .is_segment = true },
-    .{ .name = "clock",    .is_segment = true },
-
-    // bar/modules/ (non-segment: replaces title as active segment) -----
-    .{ .name = "prompt" },
+    // bar/modules/
+    .{ .name = "tags",     .is_segment = true  },
+    .{ .name = "layout",   .is_segment = true  },
+    .{ .name = "variants", .is_segment = true  },
+    .{ .name = "title",    .is_segment = true  },
+    .{ .name = "prompt",   .is_segment = false },
+    .{ .name = "vim",      .is_segment = false },
+    .{ .name = "carousel", .is_segment = true  },
+    .{ .name = "clock",    .is_segment = true  },
 };
 
 // Entry point

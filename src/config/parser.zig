@@ -1,4 +1,3 @@
-
 //! Minimal TOML-inspired parser for hana WM configuration files.
 //!
 //! The format extends TOML with WM-specific conveniences: bare keys (treated
@@ -141,6 +140,47 @@ fn appendFlatOrSingle(allocator: std.mem.Allocator, dst_arr: *std.ArrayList(Valu
     }
 }
 
+/// Accumulate `incoming` into the existing value at `old_val`.
+///
+/// If `old_val` is already an array the new value is appended (or flattened)
+/// into it.  Otherwise both the existing scalar and `incoming` are wrapped in
+/// a fresh 2-element array.
+///
+/// `flatten`: when true, an array-valued `incoming` is exploded into individual
+/// elements rather than nested.  Set true for the merge path, false for the
+/// single-file parse path.
+///
+/// Takes ownership of `incoming`; `old_val` is updated in place.
+fn accumulateIntoExisting(
+    allocator: std.mem.Allocator,
+    old_val:   *Value,
+    incoming:  Value,
+    flatten:   bool,
+) !void {
+    if (old_val.* == .array) {
+        if (flatten) {
+            try appendFlatOrSingle(allocator, &old_val.array, incoming);
+        } else {
+            try old_val.array.append(allocator, incoming);
+        }
+    } else {
+        // First duplicate: wrap the existing scalar and the incoming value in
+        // a 2-element array.  initCapacity(2) guarantees both appends cannot fail.
+        var arr = try std.ArrayList(Value).initCapacity(allocator, 2);
+        errdefer {
+            for (arr.items) |*item| item.deinit(allocator);
+            arr.deinit(allocator);
+        }
+        arr.appendAssumeCapacity(old_val.*);
+        if (flatten) {
+            try appendFlatOrSingle(allocator, &arr, incoming);
+        } else {
+            arr.appendAssumeCapacity(incoming);
+        }
+        old_val.* = .{ .array = arr };
+    }
+}
+
 /// Merges the key-value pairs of `src` into `dst`.
 /// Duplicate keys are accumulated into arrays, exactly like the parser does for
 /// duplicate keys within a single file — so a keybind defined in two different
@@ -153,24 +193,12 @@ fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Se
         const src_val = entry.value_ptr.*;
         if (dst.pairs.getPtr(src_key)) |old_val| {
             // Duplicate key: accumulate into an array, same as the single-file
-            // parser does at parse time.
+            // parser does at parse time.  The merge path flattens incoming arrays
+            // so that two files each declaring an array value produce a single
+            // flat array rather than an array-of-arrays.
             const incoming = try deepCopyValue(allocator, src_val);
             errdefer { var v = incoming; v.deinit(allocator); }
-            if (old_val.* == .array) {
-                // Existing value is already an array — append into it.
-                try appendFlatOrSingle(allocator, &old_val.array, incoming);
-            } else {
-                // First duplicate: wrap the existing scalar and the incoming
-                // value in a 2-element array (or flatten if incoming is array).
-                var arr = try std.ArrayList(Value).initCapacity(allocator, 2);
-                errdefer {
-                    for (arr.items) |*item| item.deinit(allocator);
-                    arr.deinit(allocator);
-                }
-                arr.appendAssumeCapacity(old_val.*);
-                try appendFlatOrSingle(allocator, &arr, incoming);
-                old_val.* = .{ .array = arr };
-            }
+            try accumulateIntoExisting(allocator, old_val, incoming, true);
         } else {
             const key_copy = try allocator.dupe(u8, src_key);
             errdefer allocator.free(key_copy);
@@ -520,17 +548,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
                 //
                 // parseKeybindings already handles array values as sequences,
                 // so no further changes are needed there.
-                if (old.* == .array) {
-                    try old.array.append(allocator, kv[1]);
-                } else {
-                    // First duplicate: wrap the original scalar and new value
-                    // in a 2-element array. initCapacity(2) guarantees both
-                    // appendAssumeCapacity calls cannot fail.
-                    var arr = try std.ArrayList(Value).initCapacity(allocator, 2);
-                    arr.appendAssumeCapacity(old.*);
-                    arr.appendAssumeCapacity(kv[1]);
-                    old.* = .{ .array = arr };
-                }
+                try accumulateIntoExisting(allocator, old, kv[1], false);
                 allocator.free(kv[0]);
             } else {
                 try current_section.pairs.put(kv[0], kv[1]);

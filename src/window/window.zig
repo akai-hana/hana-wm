@@ -15,7 +15,12 @@ const focus    = @import("focus");
 
 const fullscreen = if (build.has_fullscreen) @import("fullscreen") else struct {};
 const minimize   = if (build.has_minimize)   @import("minimize")   else struct {};
-const workspaces = if (build.has_workspaces) @import("workspaces") else struct {};
+const workspaces = if (build.has_workspaces) @import("workspaces") else struct {
+    pub const State     = struct {};
+    pub const Workspace = struct {};
+    pub fn getState() ?*State { return null; }
+    pub fn getCurrentWorkspaceObject() ?*Workspace { return null; }
+};
 
 const tiling  = if (build.has_tiling) @import("tiling") else struct {};
 const layouts = @import("layouts");
@@ -29,10 +34,7 @@ const bar = if (build.has_bar) @import("bar") else struct {
     pub fn setBarState(_: anytype) void {}
 };
 
-const WsWorkspace = if (build.has_workspaces) workspaces.Workspace else struct {};
-
-fn getWsState() ?*workspaces.State { return if (build.has_workspaces) workspaces.getState() else null; }
-fn getWsCurrentWorkspace() ?*WsWorkspace { return if (build.has_workspaces) workspaces.getCurrentWorkspaceObject() else null; }
+const WsWorkspace = workspaces.Workspace;
 inline fn moveWindowToWs(win: u32, ws: u8) !void {
     if (build.has_workspaces) try workspaces.moveWindowTo(win, ws)
     else try tracking.registerWindow(win, 0);
@@ -42,21 +44,7 @@ inline fn wsRemoveWindow(win: u32) void {
     else tracking.removeWindow(win);
 }
 
-// NOTE: This fallback stub must stay in sync with the real implementation in
-// scale.zig (scaleBorderWidth).  If the formula changes there, update this stub
-// too.  Ideally scaleBorderWidth would be moved to a file that is always
-// compiled (not gated on has_scale), eliminating this duplication entirely.
-// There is no compile-time enforcement of that sync; update both sites together.
-const scale = if (build.has_scale) @import("scale") else struct {
-    /// Stub matching scale.scaleBorderWidth for builds without the scale module.
-    /// Formula must stay identical to scale.zig:scaleBorderWidth.
-    pub fn scaleBorderWidth(value: anytype, reference_dimension: u16) u16 {
-        if (value.is_percentage) {
-            const dim_f: f32 = @floatFromInt(reference_dimension);
-            return @intFromFloat(@max(0.0, @round((value.value / 100.0) * 0.5 * dim_f)));
-        } else return @intFromFloat(@max(0.0, @round(value.value)));
-    }
-};
+const scale = if (build.has_scale) @import("scale") else utils.scale_fallback;
 
 
 // XSizeHints flags (ICCCM §4.1.2.3)
@@ -456,8 +444,9 @@ pub fn supportsWMDeleteCached(conn: *xcb.xcb_connection_t, win: u32) bool {
 ///   which is imperceptible at human interaction speed and is pipelined on the
 ///   same Unix-domain socket as xcb_set_input_focus.
 pub fn sendWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32, time: u32) void {
-    const protocols_atom  = utils.getAtomCached("WM_PROTOCOLS")  catch return;
-    const take_focus_atom = utils.getAtomCached("WM_TAKE_FOCUS") catch return;
+    const protocols_atom  = utils.getAtomCached("WM_PROTOCOLS")    catch return;
+    const take_focus_atom = utils.getAtomCached("WM_TAKE_FOCUS")   catch return;
+    const wm_delete_atom  = utils.getAtomCached("WM_DELETE_WINDOW") catch return;
 
     // Live WM_PROTOCOLS scan — same logic as DWM's sendevent.
     const proto_reply = xcb.xcb_get_property_reply(conn,
@@ -467,11 +456,12 @@ pub fn sendWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32, time: u32) void {
     defer std.c.free(proto_reply);
     if (proto_reply.*.format != 32 or proto_reply.*.value_len == 0) return;
     const proto_list: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(proto_reply)));
-    var has_take_focus = false;
-    for (proto_list[0..@intCast(proto_reply.*.value_len)]) |a| {
-        if (a == take_focus_atom) { has_take_focus = true; break; }
-    }
-    if (!has_take_focus) return;
+    const props = scanProtocolAtoms(
+        proto_list[0..@intCast(proto_reply.*.value_len)],
+        take_focus_atom,
+        wm_delete_atom,
+    );
+    if (!props.take_focus) return;
 
     var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
     event.response_type  = xcb.XCB_CLIENT_MESSAGE;
@@ -1337,7 +1327,7 @@ pub fn updateFocusBorders(old_focused: ?u32, new_focused: ?u32) void {
 /// Refresh border colors for every window on the current workspace.
 pub fn updateWorkspaceBorders() void {
     if (!build.has_workspaces) return;
-    const ws = getWsCurrentWorkspace() orelse return;
+    const ws = workspaces.getCurrentWorkspaceObject() orelse return;
     for (ws.windows.items()) |win|
         _ = xcb.xcb_change_window_attributes(core.conn, win,
             xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
@@ -1399,7 +1389,7 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
 /// workspaces. Called on config reload.
 pub fn reloadBorders() void {
     if (!build.has_workspaces) return;
-    const ws_state = getWsState() orelse return;
+    const ws_state = workspaces.getState() orelse return;
     for (ws_state.workspaces) |*ws|
         for (ws.windows.items()) |win| applyBorder(win);
 }

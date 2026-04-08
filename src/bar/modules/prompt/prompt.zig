@@ -1,25 +1,23 @@
-//! Prompt segment — dwm-style command runner embedded in the status bar.
+//! Prompt bar segment
+//! In-line command runner embedded in hana's bar
 //!
-//! When active, the title segment area becomes a text input field. The user
-//! can type a shell command and press Return to execute it via sh(1). A full
-//! vim-style modal editing layer is built in; see vim.zig for details.
-//!
-//! Integration points:
-//!   - `bar.zig` dispatches the `.title` segment to `prompt.draw()` when
-//!     `isActive()` is true and guards `drawTitleOnly()` accordingly.
-//!   - The main event loop routes key-press events through
-//!     `handlePromptKeypress()` before normal keybind dispatch.
-//!   - A "toggle_prompt" action calls `toggle()`.
-//!   - `bar.init` / `bar.deinit` call `prompt.init` / `prompt.deinit`.
+//! Borrows title's segment space to integrate seamlessly into the bar
 
-const std     = @import("std");
+const std   = @import("std");
+const build = @import("build_options");
+
 const core    = @import("core");
-const types   = @import("types");
-const xcb     = core.xcb;
+    const xcb = core.xcb;
+
+const types = @import("types");
+
 const drawing = @import("drawing");
-const title   = @import("title");
-const debug   = @import("debug");
-pub const vim = @import("vim");
+const title   = if (build.has_title) @import("title") else struct {};
+const vim     = if (build.has_vim)   @import("vim")   else struct {
+    const VimState = struct {};
+};
+
+const debug = @import("debug");
 
 const c = @cImport({
     @cInclude("unistd.h");
@@ -31,9 +29,8 @@ const c = @cImport({
     @cInclude("sys/wait.h");
 });
 
-// ---------------------------------------------------------------------------
+
 // xcb-keysyms bindings (link with -lxcb-keysyms)
-// ---------------------------------------------------------------------------
 
 const xcb_key_symbols_t = opaque {};
 
@@ -41,9 +38,7 @@ extern fn xcb_key_symbols_alloc(conn: *xcb.xcb_connection_t) ?*xcb_key_symbols_t
 extern fn xcb_key_symbols_free(syms: *xcb_key_symbols_t) void;
 extern fn xcb_key_symbols_get_keysym(syms: *xcb_key_symbols_t, code: xcb.xcb_keycode_t, col: c_int) xcb.xcb_keysym_t;
 
-// ---------------------------------------------------------------------------
 // Module constants
-// ---------------------------------------------------------------------------
 
 /// Minimum pixel width of the block cursor; ensures it is visible even on
 /// the narrowest glyphs (e.g. '.', '!').
@@ -64,9 +59,7 @@ const max_history: usize = 512;
 /// Maximum byte length of a single history entry.
 const max_history_line: usize = vim.default_max_input;
 
-// ---------------------------------------------------------------------------
 // Module state
-// ---------------------------------------------------------------------------
 
 /// All mutable state owned by this module.
 const PromptState = struct {
@@ -111,9 +104,7 @@ const PromptState = struct {
 
 var g: PromptState = .{};
 
-// ---------------------------------------------------------------------------
 // Public API
-// ---------------------------------------------------------------------------
 
 pub fn isActive() bool { return g.is_active; }
 
@@ -189,6 +180,22 @@ pub fn handlePromptKeypress(
     bound_action: ?*const types.Action,
 ) bool {
     if (!g.is_active) return false;
+
+    // When the mod key (Super) is held and a WM action is bound to this key,
+    // let the normal keybind dispatcher handle it so the user can perform
+    // window-manager operations without cancelling the prompt.
+    // The close_window action is still routed through here so it dismisses
+    // the prompt rather than closing a window.
+    if (event.state & xcb.XCB_MOD_MASK_4 != 0) {
+        if (bound_action) |action| {
+            if (action.* == .close_window) {
+                deactivate();
+                return true;
+            }
+            return false; // let WM dispatch execute the bind; prompt stays open
+        }
+    }
+
     if (bound_action) |action| if (action.* == .close_window) {
         deactivate();
         return true;
@@ -328,9 +335,7 @@ pub fn draw(
     return drawActive(dc, config, height, start_x, width);
 }
 
-// ---------------------------------------------------------------------------
 // Private — action handling
-// ---------------------------------------------------------------------------
 
 fn handleAction(action: vim.Action) void {
     switch (action) {
@@ -355,9 +360,7 @@ fn handleAction(action: vim.Action) void {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Private — activate / deactivate
-// ---------------------------------------------------------------------------
 
 /// Reset all `VimState` editing fields to their defaults without touching the
 /// heap-allocated buffers (buf, yank_buf, undo/redo stacks, etc.).
@@ -425,9 +428,7 @@ fn deactivate() void {
     g.redraw_pending = true;
 }
 
-// ---------------------------------------------------------------------------
 // Private — PATH completion
-// ---------------------------------------------------------------------------
 
 /// Scan every directory in $PATH and collect executable names into the static
 /// completion table.  Called once on first activation.
@@ -555,9 +556,7 @@ fn updateGhost() void {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Private — history
-// ---------------------------------------------------------------------------
 
 /// Prepend `cmd` to the in-memory history ring (newest at index 0).
 fn histPrepend(cmd: []const u8) void {
@@ -722,9 +721,7 @@ fn loadHistory() void {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Private — command spawning
-// ---------------------------------------------------------------------------
 
 fn spawnCommand(cmd: []const u8) void {
     histPrepend(cmd);
@@ -752,9 +749,7 @@ fn spawnCommand(cmd: []const u8) void {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Private — rendering helpers
-// ---------------------------------------------------------------------------
 
 /// Binary search: first byte offset where `measureTextWidth(text[0..offset])
 /// >= target_px`.  Returns `text.len` if the whole string is narrower.
@@ -862,9 +857,7 @@ inline fn cursorBlockGeom(
     return .{ .draw_x = draw_x, .vis_w = vis_w };
 }
 
-// ---------------------------------------------------------------------------
 // Private — active-mode rendering
-// ---------------------------------------------------------------------------
 
 /// Render the active input UI.
 ///

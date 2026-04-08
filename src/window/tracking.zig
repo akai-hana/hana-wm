@@ -1,28 +1,10 @@
-//! Core window tracking — always present, no optionality.
-//!
-//! Owns the window→workspace bitmask map and the current-workspace cursor.
-//! Every other module queries window membership and focus eligibility through
-//! this module, which means those predicates work correctly even when the full
-//! workspace-switching subsystem (workspaces.zig) is not compiled in.
-//!
-//! workspaces.zig calls setCurrentWorkspace() and setWorkspaceCount() on every
-//! switch and init respectively, keeping the state here in sync with the
-//! multi-workspace feature when it is present.  When workspaces.zig is absent
-//! the WM operates as a single-workspace session: all windows land on
-//! workspace 0 and getCurrentWorkspace() always returns 0.
-//!
-//! Memory conventions
-//! ------------------
-//! g_map entries are managed by the Zig allocator supplied to init().
-//! XCB reply buffers (xcb_*_reply_t*) are allocated by the C library and must
-//! be freed with std.c.free, never with the Zig allocator.  The two memory
-//! systems must never be confused; callers that interact with both in the same
-//! function should add a comment at each free site.
+//! Core window tracking
+//! Tracks windows' focus eligibility through workspaces.
 
 const std   = @import("std");
 const build = @import("build_options");
 
-const minimize      = if (build.has_minimize) @import("minimize") else struct {};
+const minimize = if (build.has_minimize) @import("minimize") else struct {};
 
 
 // Fixed-size ordered window list.
@@ -261,6 +243,31 @@ pub inline fn getCurrentWorkspace() ?u8 {
 pub inline fn getWorkspaceCount() usize {
     return g_workspace_count;
 }
+
+// Workspace bitmask helpers
+
+/// Returns a u64 bitmask with only the bit for `ws_idx` set.
+/// `ws_idx` may be any integer type; the cast is checked in debug builds.
+pub inline fn workspaceBit(ws_idx: anytype) u64 {
+    return @as(u64, 1) << @intCast(ws_idx);
+}
+
+/// Returns a bitmask with bits set for every workspace in [0, count).
+/// Returns all-ones for count ≥ 64 (saturating at the u64 width).
+pub inline fn allWorkspacesMask(count: usize) u64 {
+    if (count >= 64) return ~@as(u64, 0);
+    return (@as(u64, 1) << @intCast(count)) - 1;
+}
+
+// Comptime workspace label table
+
+/// Comptime-generated number strings "1".."20" for workspace display labels.
+/// Never heap-allocated; slices remain valid for the lifetime of the program.
+pub const WORKSPACE_LABELS: [20][]const u8 = blk: {
+    var labels: [20][]const u8 = undefined;
+    for (&labels, 1..) |*label, i| label.* = std.fmt.comptimePrint("{d}", .{i});
+    break :blk labels;
+};
 
 /// Returns the lowest-indexed workspace this window belongs to, or null if
 /// the window is not tracked.

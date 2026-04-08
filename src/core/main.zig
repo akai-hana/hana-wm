@@ -1,4 +1,4 @@
-//! hana's entry point and main loop.
+//! Hana's main loop.
 //! Entry point and orchestrator of all hana's module sub-systems //TODO: can this line description be improved?
 
 const std   = @import("std");

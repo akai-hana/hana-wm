@@ -1,4 +1,3 @@
-
 //! Config type definitions — structs, enums, and unions that model the WM configuration schema.
 //!
 //! This file is the single source of truth for all config-related types.
@@ -82,6 +81,16 @@ pub const MouseBind = struct {
 
 // Tiling layout types
 
+/// Case-insensitive enum lookup shared by enums that expose a `string_map` decl.
+/// Lowercases `str` into a 32-byte stack buffer and probes the map.
+/// Returns null when `str` exceeds the buffer or the key is not found.
+fn fromStringCI(comptime T: type, str: []const u8) ?T {
+    const map = T.string_map;
+    var buf: [32]u8 = undefined;
+    if (str.len > buf.len) return null;
+    return map.get(std.ascii.lowerString(buf[0..str.len], str));
+}
+
 pub const MasterSide = enum {
     left,
     right,
@@ -96,11 +105,9 @@ pub const MasterSide = enum {
     });
 
     /// Lowercases str into a stack buffer and looks it up in string_map.
-    /// Returns null if str exceeds 16 bytes or is unrecognized.
+    /// Returns null if str exceeds 32 bytes or is unrecognized.
     pub inline fn fromString(str: []const u8) ?MasterSide {
-        var buf: [16]u8 = undefined;
-        if (str.len > buf.len) return null;
-        return string_map.get(std.ascii.lowerString(&buf, str));
+        return fromStringCI(MasterSide, str);
     }
 };
 
@@ -226,11 +233,9 @@ pub const IndicatorLocation = enum {
         .{ "right-down", .down_right },
         .{ "right_down", .down_right },
     });
-    /// Case-insensitive parse. Returns null if str exceeds 16 bytes or is unrecognized.
+    /// Case-insensitive parse. Returns null if str exceeds 32 bytes or is unrecognized.
     pub inline fn fromString(str: []const u8) ?IndicatorLocation {
-        var buf: [16]u8 = undefined;
-        if (str.len > buf.len) return null;
-        return string_map.get(std.ascii.lowerString(&buf, str));
+        return fromStringCI(IndicatorLocation, str);
     }
 };
 

@@ -9,12 +9,12 @@
 //! xcb-cursor bindings live in `window/cursor_bindings.zig` — they serve
 //! the window/floating layer, not the rendering stack.
 
-const core = @import("core");
-const xcb  = core.xcb;
+const core    = @import("core");
+    const xcb = core.xcb;
 
-const xcb_connection_t       = xcb.xcb_connection_t;
-const xcb_pixmap_t = xcb.xcb_pixmap_t;
-const xcb_visualtype_t       = xcb.xcb_visualtype_t;
+const xcb_connection_t = xcb.xcb_connection_t;
+const xcb_pixmap_t     = xcb.xcb_pixmap_t;
+const xcb_visualtype_t = xcb.xcb_visualtype_t;
 
 // Cairo 
 

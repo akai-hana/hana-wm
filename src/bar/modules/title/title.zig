@@ -23,9 +23,7 @@ const utils    = @import("utils");
 const drawing  = @import("drawing");
 const carousel = @import("carousel");
 
-// ---------------------------------------------------------------------------
 // Module constants
-// ---------------------------------------------------------------------------
 
 /// Fixed left indent applied inside every title cell, independent of
 /// `scaledSegmentPadding`.  Provides visual breathing room between the
@@ -38,9 +36,7 @@ const title_lead_px: u16 = 4;
 /// 128 covers any practical workspace size while keeping stack usage bounded.
 const max_visible_windows: usize = 128;
 
-// ---------------------------------------------------------------------------
 // Atom cache
-// ---------------------------------------------------------------------------
 
 const Atoms = struct {
     /// null until successfully resolved, to avoid XCB_ATOM_NONE's sentinel (0).
@@ -65,9 +61,7 @@ const Atoms = struct {
 
 var atoms: Atoms = .{};
 
-// ---------------------------------------------------------------------------
 // Internal types
-// ---------------------------------------------------------------------------
 
 const WindowInfo = struct {
     window:    u32,
@@ -77,9 +71,7 @@ const WindowInfo = struct {
     minimized: bool,
 };
 
-// ---------------------------------------------------------------------------
 // Public input types
-// ---------------------------------------------------------------------------
 
 /// Stable per-call rendering context: geometry, draw state, and connection.
 /// Constructed once per bar frame and shared between `draw()` and `drawCached()`.
@@ -121,9 +113,7 @@ pub const TitleCache = struct {
     cached_title_window: *?u32,
 };
 
-// ---------------------------------------------------------------------------
 // Public API — draw entry points
-// ---------------------------------------------------------------------------
 
 /// Draw the title segment.
 ///
@@ -198,9 +188,7 @@ pub fn drawCached(
     return ctx.start_x + ctx.width;
 }
 
-// ---------------------------------------------------------------------------
 // Public API — title pre-fetch (main thread only)
-// ---------------------------------------------------------------------------
 
 /// Fetch the title of `win` into `buf`, reusing its existing capacity.
 ///
@@ -230,9 +218,7 @@ pub fn fetchWindowTitleInto(
     ) catch {};
 }
 
-// ---------------------------------------------------------------------------
 // Private — single-window rendering
-// ---------------------------------------------------------------------------
 
 /// Shared rendering logic for both `draw()` and `drawCached()`.
 ///
@@ -305,9 +291,7 @@ fn drawSingleWindow(
     );
 }
 
-// ---------------------------------------------------------------------------
 // Private — split-view segmented titles
-// ---------------------------------------------------------------------------
 
 fn drawSegmentedTitles(
     ctx:               TitleRenderContext,
@@ -485,9 +469,7 @@ fn drawSegmentedTitles(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Private helpers — window sorting
-// ---------------------------------------------------------------------------
 
 /// Sort order for the split-view segment layout:
 ///
@@ -515,9 +497,7 @@ fn compareWindows(_: void, a: WindowInfo, b: WindowInfo) bool {
     return a.window < b.window;
 }
 
-// ---------------------------------------------------------------------------
 // Private helpers — title fetching (main thread only)
-// ---------------------------------------------------------------------------
 
 fn fetchProperty(
     conn:      *xcb.xcb_connection_t,

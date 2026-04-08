@@ -295,8 +295,7 @@ fn executeAction(action: *const types.Action) !void {
             window.updateWorkspaceBorders();
             window.markBordersFlushed();
             bar.redrawInsideGrab();
-            _ = xcb.xcb_ungrab_server(core.conn);
-            _ = xcb.xcb_flush(core.conn);
+            utils.ungrabAndFlush(core.conn);
         },
 
         // Bar 
