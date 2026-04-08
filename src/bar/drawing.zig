@@ -1,4 +1,3 @@
-
 //! Drawing context for hana's status bar.
 //!
 //! Rectangle fills use XCB core drawing instead of Cairo's XRender, since the

@@ -54,8 +54,7 @@ pub const DpiInfo = struct {
     scale_factor: f32,
 
     pub fn fromDpi(dpi: f32) DpiInfo {
-        const baseline_dpi: f32 = 96.0;
-        return .{ .dpi = dpi, .scale_factor = dpi / baseline_dpi };
+        return .{ .dpi = dpi, .scale_factor = dpi / @import("constants").BASELINE_DPI };
     }
 };
 

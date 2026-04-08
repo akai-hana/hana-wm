@@ -1,4 +1,3 @@
-
 //! Debug logging and error helpers.
 //!
 //! All functions are no-ops in non-debug builds (controlled by the
@@ -22,53 +21,31 @@ inline fn debugEnabled() bool {
     return build.enable_debug_logging;
 }
 
-pub inline fn err(comptime fmt: []const u8, args: anytype) void {
+/// Log output target — controls which std.log level (or print) to use.
+const LogKind = enum { err, warn, info, debug_log };
+
+/// Shared log emitter. `src` must come from @src() in the caller's inline
+/// wrapper so it reflects the actual call site, not this function's location.
+fn emitLog(src: std.builtin.SourceLocation, comptime kind: LogKind, comptime fmt: []const u8, args: anytype) void {
     if (!debugEnabled()) return;
-    const module = moduleFromSrc(@src());
-    std.log.err("[{s}] " ++ fmt, .{module} ++ args);
+    const module = moduleFromSrc(src);
+    switch (kind) {
+        .err       => std.log.err  ("[{s}] " ++ fmt, .{module} ++ args),
+        .warn      => std.log.warn ("[{s}] " ++ fmt, .{module} ++ args),
+        .debug_log => std.log.debug("[{s}] " ++ fmt, .{module} ++ args),
+        .info      => std.debug.print("\x1b[32m[{s}]\x1b[0m " ++ fmt ++ "\n", .{module} ++ args),
+    }
 }
 
-pub inline fn warn(comptime fmt: []const u8, args: anytype) void {
-    if (!debugEnabled()) return;
-    const module = moduleFromSrc(@src());
-    std.log.warn("[{s}] " ++ fmt, .{module} ++ args);
-}
+pub inline fn err  (comptime fmt: []const u8, args: anytype) void { emitLog(@src(), .err,       fmt, args); }
+pub inline fn warn (comptime fmt: []const u8, args: anytype) void { emitLog(@src(), .warn,      fmt, args); }
+pub inline fn info (comptime fmt: []const u8, args: anytype) void { emitLog(@src(), .info,      fmt, args); }
+pub inline fn debug(comptime fmt: []const u8, args: anytype) void { emitLog(@src(), .debug_log, fmt, args); }
 
-pub inline fn info(comptime fmt: []const u8, args: anytype) void {
-    if (!debugEnabled()) return;
-    const module = moduleFromSrc(@src());
-    std.debug.print("\x1b[32m[{s}]\x1b[0m " ++ fmt ++ "\n", .{module} ++ args);
-}
-
-pub inline fn debug(comptime fmt: []const u8, args: anytype) void {
-    if (!debugEnabled()) return;
-    const module = moduleFromSrc(@src());
-    std.log.debug("[{s}] " ++ fmt, .{module} ++ args);
-}
-
-pub inline fn errIf(condition: bool, comptime fmt: []const u8, args: anytype) void {
-    if (!debugEnabled() or !condition) return;
-    const module = moduleFromSrc(@src());
-    std.log.err("[{s}] " ++ fmt, .{module} ++ args);
-}
-
-pub inline fn warnIf(condition: bool, comptime fmt: []const u8, args: anytype) void {
-    if (!debugEnabled() or !condition) return;
-    const module = moduleFromSrc(@src());
-    std.log.warn("[{s}] " ++ fmt, .{module} ++ args);
-}
-
-pub inline fn infoIf(condition: bool, comptime fmt: []const u8, args: anytype) void {
-    if (!debugEnabled() or !condition) return;
-    const module = moduleFromSrc(@src());
-    std.debug.print("\x1b[32m[{s}]\x1b[0m " ++ fmt ++ "\n", .{module} ++ args);
-}
-
-pub inline fn debugIf(condition: bool, comptime fmt: []const u8, args: anytype) void {
-    if (!debugEnabled() or !condition) return;
-    const module = moduleFromSrc(@src());
-    std.log.debug("[{s}] " ++ fmt, .{module} ++ args);
-}
+pub inline fn errIf  (condition: bool, comptime fmt: []const u8, args: anytype) void { if (condition) emitLog(@src(), .err,       fmt, args); }
+pub inline fn warnIf (condition: bool, comptime fmt: []const u8, args: anytype) void { if (condition) emitLog(@src(), .warn,      fmt, args); }
+pub inline fn infoIf (condition: bool, comptime fmt: []const u8, args: anytype) void { if (condition) emitLog(@src(), .info,      fmt, args); }
+pub inline fn debugIf(condition: bool, comptime fmt: []const u8, args: anytype) void { if (condition) emitLog(@src(), .debug_log, fmt, args); }
 
 pub inline fn assert(condition: bool, comptime message: []const u8) void {
     if (!debugEnabled() or condition) return;

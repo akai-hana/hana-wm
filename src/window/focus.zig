@@ -826,11 +826,7 @@ fn collectVisibleWindows() usize {
         if (len >= cycle_buf.len) break;
         if (!tracking.isOnCurrentWorkspaceAndVisible(w)) continue;
         // Skip if already added (avoids duplicating focused_window).
-        var dup = false;
-        for (cycle_buf[0..len]) |existing| {
-            if (existing == w) { dup = true; break; }
-        }
-        if (!dup) {
+        if (std.mem.indexOfScalar(u32, cycle_buf[0..len], w) == null) {
             cycle_buf[len] = w;
             len += 1;
         }
@@ -838,61 +834,41 @@ fn collectVisibleWindows() usize {
     return len;
 }
 
+/// Shared implementation for focus cycling.
+/// forward=true  → next  (Mod+k, ascending  order)
+/// forward=false → prev  (Mod+j, descending order)
+fn focusCycle(comptime forward: bool) void {
+    const len = collectVisibleWindows();
+    if (len == 0) return;
+    const wins = cycle_buf[0..len];
+    const idx = if (state.focused_window) |w|
+        std.mem.indexOfScalar(u32, wins, w) orelse 0
+    else
+        0;
+    const next_idx = if (forward) (idx + 1) % len else (idx + len - 1) % len;
+    setFocus(wins[next_idx], .user_command);
+}
+
 /// Cycle focus to the next visible window (dwm Mod+k — moves right/forward).
-///
-/// Walks the tiling window list in ascending order so the focus follows the
-/// visual layout: master → first stack slot → second stack slot → … → master.
-pub fn focusNext() void {
-    const len = collectVisibleWindows();
-    if (len == 0) return;
-    const wins = cycle_buf[0..len];
-    const idx = if (state.focused_window) |w|
-        std.mem.indexOfScalar(u32, wins, w) orelse 0
-    else
-        0;
-    setFocus(wins[(idx + 1) % len], .user_command);
-}
-
+pub fn focusNext() void { focusCycle(true);  }
 /// Cycle focus to the previous visible window (dwm Mod+j — moves left/backward).
-///
-/// Walks the tiling window list in descending order.
-pub fn focusPrev() void {
-    const len = collectVisibleWindows();
-    if (len == 0) return;
-    const wins = cycle_buf[0..len];
-    const idx = if (state.focused_window) |w|
-        std.mem.indexOfScalar(u32, wins, w) orelse 0
-    else
-        0;
-    setFocus(wins[(idx + len - 1) % len], .user_command);
-}
-/// Move the focused window one step forward in the cycle (Mod+Shift+k).
-///
-/// Swaps the focused window with the window that would receive focus on
-/// Mod+k, keeping focus on the moved window.  Only has an effect when
-/// tiling is active and at least two windows are visible.
-pub fn moveWindowNext() void {
+pub fn focusPrev() void { focusCycle(false); }
+
+/// Shared implementation for moving the focused window through the cycle.
+/// Swaps it with the neighbour in the given direction.
+/// Only has an effect when tiling is active and at least two windows are visible.
+fn moveWindowCycle(comptime forward: bool) void {
     if (comptime !build.has_tiling) return;
     const len = collectVisibleWindows();
     if (len < 2) return;
     const wins = cycle_buf[0..len];
     const focused = state.focused_window orelse return;
     const idx = std.mem.indexOfScalar(u32, wins, focused) orelse return;
-    const target = wins[(idx + 1) % len];
+    const target = if (forward) wins[(idx + 1) % len] else wins[(idx + len - 1) % len];
     tiling.swapWindowsById(focused, target);
 }
 
+/// Move the focused window one step forward in the cycle (Mod+Shift+k).
+pub fn moveWindowNext() void { moveWindowCycle(true);  }
 /// Move the focused window one step backward in the cycle (Mod+Shift+j).
-///
-/// Swaps the focused window with the window that would receive focus on
-/// Mod+j, keeping focus on the moved window.
-pub fn moveWindowPrev() void {
-    if (comptime !build.has_tiling) return;
-    const len = collectVisibleWindows();
-    if (len < 2) return;
-    const wins = cycle_buf[0..len];
-    const focused = state.focused_window orelse return;
-    const idx = std.mem.indexOfScalar(u32, wins, focused) orelse return;
-    const target = wins[(idx + len - 1) % len];
-    tiling.swapWindowsById(focused, target);
-}
+pub fn moveWindowPrev() void { moveWindowCycle(false); }

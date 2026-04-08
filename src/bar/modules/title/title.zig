@@ -129,19 +129,9 @@ pub fn draw(
     allocator:         std.mem.Allocator,
     title_invalidated: bool,
 ) !u16 {
-    // Ensure the monitor refresh rate is detected before any carousel call.
-    // This is a no-op on every call after the first.
     carousel.ensureDetected(ctx.conn);
-
     const window_count = snapshot.current_ws_wins.len;
-
-    if (window_count == 0) {
-        // No windows on this workspace — tear down any live carousel immediately
-        // so it does not keep scrolling invisibly in the background.
-        carousel.deinitCarousel();
-        ctx.dc.fillRect(ctx.start_x, 0, ctx.width, ctx.height, ctx.config.bg);
-        return ctx.start_x + ctx.width;
-    }
+    if (emptyWorkspace(ctx, window_count)) |end_x| return end_x;
 
     if (window_count == 1) {
         try drawSingleWindow(ctx, snapshot, cache, allocator, title_invalidated);
@@ -169,14 +159,8 @@ pub fn drawCached(
     allocator: std.mem.Allocator,
 ) !u16 {
     carousel.ensureDetected(ctx.conn);
-
     const window_count = snapshot.current_ws_wins.len;
-
-    if (window_count == 0) {
-        carousel.deinitCarousel();
-        ctx.dc.fillRect(ctx.start_x, 0, ctx.width, ctx.height, ctx.config.bg);
-        return ctx.start_x + ctx.width;
-    }
+    if (emptyWorkspace(ctx, window_count)) |end_x| return end_x;
 
     if (window_count == 1) {
         // null cache — this path never updates the cache.
@@ -216,6 +200,20 @@ pub fn fetchWindowTitleInto(
     _ = utils.fetchPropertyToBuffer(
         conn, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, buf, allocator,
     ) catch {};
+}
+
+// Private — empty workspace fast path
+
+/// If `count` is zero: tears down the carousel, fills the segment background,
+/// and returns the segment's end x so the caller can return immediately.
+/// Returns null when there are windows present and rendering should proceed.
+inline fn emptyWorkspace(ctx: TitleRenderContext, count: usize) ?u16 {
+    if (count != 0) return null;
+    // No windows on this workspace — tear down any live carousel immediately
+    // so it does not keep scrolling invisibly in the background.
+    carousel.deinitCarousel();
+    ctx.dc.fillRect(ctx.start_x, 0, ctx.width, ctx.height, ctx.config.bg);
+    return ctx.start_x + ctx.width;
 }
 
 // Private — single-window rendering
@@ -312,10 +310,8 @@ fn drawSegmentedTitles(
     // Prune the seg-carousel if its window has left the workspace so we never
     // blit a title for a window that was closed or moved to another workspace.
     if (carousel.getSegmentedCarouselWindow()) |tracked_win| {
-        const still_present = for (windows[0..win_count]) |w| {
-            if (w == tracked_win) break true;
-        } else false;
-        if (!still_present) carousel.deinitSegmentedCarousel();
+        if (std.mem.indexOfScalar(u32, windows[0..win_count], tracked_win) == null)
+            carousel.deinitSegmentedCarousel();
     }
 
     atoms.ensureResolved();

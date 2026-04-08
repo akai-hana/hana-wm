@@ -60,8 +60,8 @@ const WM_HINTS_FLAGS_FIELD: usize = 0;
 const WM_HINTS_INPUT_FIELD: usize = 1;
 const WM_HINTS_LONG_LENGTH: u32   = 9; // flags + 8 fields
 
-const MAX_PROPERTY_LENGTH: u32 = 256;
-const PROPERTY_NO_DELETE:  u8  = 0; // `delete` arg to xcb_get_property; 0 = do not consume
+const MAX_PROPERTY_LENGTH = constants.PROPERTY_MAX_LENGTH;
+const PROPERTY_NO_DELETE  = constants.PROPERTY_NO_DELETE;
 
 /// Minimum window dimension; windows thinner or shorter than this are considered invalid.
 const MIN_WINDOW_DIM = constants.MIN_WINDOW_DIM;
@@ -186,6 +186,23 @@ pub inline fn floatDefaultPos() Pos {
         .x = @intCast(core.screen.width_in_pixels  / 4),
         .y = @intCast(core.screen.height_in_pixels / 4),
     };
+}
+
+/// Restore `win` to its saved geometry, or move it to the float default
+/// position when no geometry has been saved.  Only X/Y are updated in the
+/// fallback case — the window keeps whatever size the server already knows.
+///
+/// This is the shared implementation of the "restore floating window"
+/// pattern that appears in minimize, workspaces, and fullscreen modules.
+pub fn restoreFloatGeom(win: u32) void {
+    if (getWindowGeom(win)) |rect| {
+        utils.configureWindow(core.conn, win, rect);
+    } else {
+        const pos = floatDefaultPos();
+        _ = xcb.xcb_configure_window(core.conn, win,
+            xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
+            &[_]u32{ pos.x, pos.y });
+    }
 }
 
 /// Moves, resizes, and sets border_width atomically,
@@ -900,9 +917,7 @@ fn mapWindowToScreen(win: u32) void {
     } else {
         if (build.has_fullscreen) {
             if (fullscreen.hasAnyFullscreen()) {
-                _ = xcb.xcb_configure_window(core.conn, win,
-                    xcb.XCB_CONFIG_WINDOW_X,
-                    &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
+                utils.pushWindowOffscreen(core.conn, win);
             }
         }
     }

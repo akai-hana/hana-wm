@@ -1,4 +1,3 @@
-
 //! vim — modal editing engine for the prompt segment.
 //!
 //! Implements a vim-style modal editing layer over a single-line text buffer.
@@ -1157,8 +1156,7 @@ fn firstNonBlank(vs: *VimState) usize {
 
 fn motionWordNext(vs: *VimState, big: bool, cnt: u32) usize {
     var p = vs.cursor;
-    var i: u32 = 0;
-    while (i < cnt) : (i += 1) {
+    for (0..cnt) |_| {
         if (p >= vs.len) break;
         const cls = charClass(big, vs.buf[p]);
         while (p < vs.len and charClass(big, vs.buf[p]) == cls) p += 1;
@@ -1169,8 +1167,7 @@ fn motionWordNext(vs: *VimState, big: bool, cnt: u32) usize {
 
 fn motionWordPrev(vs: *VimState, big: bool, cnt: u32) usize {
     var p = vs.cursor;
-    var i: u32 = 0;
-    while (i < cnt) : (i += 1) {
+    for (0..cnt) |_| {
         if (p == 0) break;
         while (p > 0 and vs.buf[p - 1] == ' ') p -= 1;
         if (p == 0) break;
@@ -1182,8 +1179,7 @@ fn motionWordPrev(vs: *VimState, big: bool, cnt: u32) usize {
 
 fn motionWordEnd(vs: *VimState, big: bool, cnt: u32) usize {
     var p = vs.cursor;
-    var i: u32 = 0;
-    while (i < cnt) : (i += 1) {
+    for (0..cnt) |_| {
         if (p >= vs.len) break;
         p += 1;
         while (p < vs.len and vs.buf[p] == ' ') p += 1;
@@ -1196,8 +1192,7 @@ fn motionWordEnd(vs: *VimState, big: bool, cnt: u32) usize {
 
 fn motionWordEndBackward(vs: *VimState, big: bool, cnt: u32) usize {
     var p = vs.cursor;
-    var i: u32 = 0;
-    while (i < cnt) : (i += 1) {
+    for (0..cnt) |_| {
         if (p == 0) break;
         const cls0 = charClass(big, vs.buf[p]);
         if (cls0 != 0) {
@@ -1212,8 +1207,7 @@ fn motionWordEndBackward(vs: *VimState, big: bool, cnt: u32) usize {
 
 fn motionFind(vs: *VimState, kind: u8, ch: u8, cnt: u32) MotionResult {
     var p: usize = vs.cursor;
-    var i: u32 = 0;
-    while (i < cnt) : (i += 1) {
+    for (0..cnt) |_| {
         switch (kind) {
             'f', 't' => {
                 var q = p + 1;

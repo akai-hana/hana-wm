@@ -13,19 +13,14 @@ const tiling    = @import("tiling");
 const State     = tiling.State;
 
 /// Counter-clockwise spiral direction for the next window split.
-const SpiralDirection = enum {
+const SpiralDirection = enum(u2) {
     right, // Split vertically:   window on left,   remainder on right.
     down,  // Split horizontally: window on top,    remainder below.
     left,  // Split vertically:   window on right,  remainder on left.
     up,    // Split horizontally: window on bottom, remainder above.
 
     inline fn next(self: SpiralDirection) SpiralDirection {
-        return switch (self) {
-            .right => .down,
-            .down  => .left,
-            .left  => .up,
-            .up    => .right,
-        };
+        return @enumFromInt(@intFromEnum(self) +% 1);
     }
 };
 

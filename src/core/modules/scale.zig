@@ -1,9 +1,9 @@
-
 //! DPI detection and scaling utilities for consistent bar appearance across display resolutions.
 
-const std   = @import("std");
-const core  = @import("core");
-const debug = @import("debug");
+const std       = @import("std");
+const core      = @import("core");
+const constants = @import("constants");
+const debug     = @import("debug");
 
 const xcb           = core.xcb;
 const ScalableValue = @import("parser").ScalableValue;
@@ -12,7 +12,7 @@ const ScalableValue = @import("parser").ScalableValue;
 // are computed relative to this reference display.
 const BASELINE_WIDTH:  f32 = 2560.0;
 const BASELINE_HEIGHT: f32 = 1600.0;
-const BASELINE_DPI:    f32 = 96.0;
+const BASELINE_DPI          = constants.BASELINE_DPI;
 
 // Font size percentages are relative to 1080 p height, not the baseline display,
 // so font sizing degrades more gracefully on smaller screens.
@@ -89,17 +89,14 @@ fn calcDpiFromGeometry(screen: *xcb.xcb_screen_t) f32 {
     return avg_dpi;
 }
 
+/// Returns the entry in COMMON_DPI_TABLE nearest to `dpi`, snapping only when
+/// within SNAP_THRESHOLD of it to avoid rendering at odd intermediate DPIs.
 fn snapToCommonDpi(dpi: f32) f32 {
-    var closest  = COMMON_DPI_TABLE[0];
-    var min_diff = @abs(dpi - closest);
+    var closest = COMMON_DPI_TABLE[0];
     for (COMMON_DPI_TABLE[1..]) |entry| {
-        const diff = @abs(dpi - entry);
-        if (diff < min_diff) {
-            min_diff = diff;
-            closest = entry;
-        }
+        if (@abs(dpi - entry) < @abs(dpi - closest)) closest = entry;
     }
-    if (min_diff / closest < SNAP_THRESHOLD) {
+    if (@abs(dpi - closest) / closest < SNAP_THRESHOLD) {
         debug.info("Snapped DPI {d:.1} to common value {d:.1}", .{ dpi, closest });
         return closest;
     }

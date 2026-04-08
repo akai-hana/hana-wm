@@ -376,12 +376,13 @@ const State = struct {
 
     fn drawSegment(self: *State, snap: *const BarSnapshot, segment: types.BarSegment, x: u16, width: ?u16) !u16 {
         if (segment == .workspaces) self.layout_cache.workspace_x = x;
+        const r = &self.render;
         return switch (segment) {
             .workspaces => try workspacesSegment.draw(
-                self.render.dc, self.render.config, self.render.height, x,
+                r.dc, r.config, r.height, x,
                 snap.current_workspace, snap.workspace_has_windows.items, snap.is_all_view_active),
-            .layout   => try layoutSegment.draw(self.render.dc, self.render.config, self.render.height, x),
-            .variants => try variantsSegment.draw(self.render.dc, self.render.config, self.render.height, x),
+            .layout   => try layoutSegment.draw(r.dc, r.config, r.height, x),
+            .variants => try variantsSegment.draw(r.dc, r.config, r.height, x),
             .title    => blk: {
                 const wins = snap.current_workspace_windows.items;
                 const minimized_title: []const u8 =
@@ -390,15 +391,15 @@ const State = struct {
                     else
                         "";
                 break :blk try prompt.draw(
-                    self.render.dc, self.render.config, self.render.height, x, width orelse 100,
+                    r.dc, r.config, r.height, x, width orelse 100,
                     self.win.conn, snap.focused_window,
                     snap.focused_title.items,
                     minimized_title,
                     snap.current_workspace_windows.items, &snap.minimized_windows,
                     &self.title_cache.title, &self.title_cache.title_window,
-                    snap.is_title_invalidated, self.render.allocator);
+                    snap.is_title_invalidated, r.allocator);
             },
-            .clock    => try clockSegment.draw(self.render.dc, self.render.config, self.render.height, x),
+            .clock    => try clockSegment.draw(r.dc, r.config, r.height, x),
         };
     }
 
@@ -426,7 +427,8 @@ const State = struct {
         var i = segments.len;
         while (i > 0) {
             i -= 1;
-            right_x -= self.measureSegmentWidth(snap, segments[i]);
+            const seg_w = self.measureSegmentWidth(snap, segments[i]);
+            right_x -= seg_w;
             // Reserve gap space before drawing so the segment lands at the
             // correct position when its right neighbour produced output.
             if (pending_gap) right_x -= scaled_spacing;
@@ -437,8 +439,7 @@ const State = struct {
             if (drew and pending_gap) {
                 // Paint background in the gap we reserved between this
                 // segment and the one to its right.
-                const gap_x = right_x + self.measureSegmentWidth(snap, segments[i]);
-                self.render.dc.fillRect(gap_x, 0, scaled_spacing, self.render.height, self.render.config.bg);
+                self.render.dc.fillRect(right_x + seg_w, 0, scaled_spacing, self.render.height, self.render.config.bg);
             } else if (!drew and pending_gap) {
                 // Nothing was drawn — reclaim the reserved gap so the next
                 // segment is not shifted further left than necessary.
@@ -734,7 +735,7 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot,
     snap.window_title_data.clearRetainingCapacity();
     snap.window_title_ends.clearRetainingCapacity();
     for (snap.current_workspace_windows.items) |win| {
-        if (snap.focused_window != null and win == snap.focused_window.?) {
+        if (snap.focused_window == win) {
             // Reuse the already-fetched focused title to avoid a redundant round-trip.
             snap.window_title_data.appendSlice(allocator, snap.focused_title.items) catch {};
         } else {

@@ -475,25 +475,9 @@ fn loadCompletions() void {
     }.lt);
 }
 
-/// Binary search `comp_names` (which must be sorted) for an exact match.
-fn compExistsExact(name: []const u8) bool {
-    var lo: usize = 0;
-    var hi: usize = g.comp_count;
-    while (lo < hi) {
-        const mid  = lo + (hi - lo) / 2;
-        const slot = mid * (max_completion_len + 1);
-        const entry = std.mem.sliceTo(g.comp_names[slot .. slot + max_completion_len + 1], 0);
-        switch (std.mem.order(u8, entry, name)) {
-            .lt => lo = mid + 1,
-            .gt => hi = mid,
-            .eq => return true,
-        }
-    }
-    return false;
-}
-
 /// Binary search for the first `comp_names` entry >= prefix.
-/// Used as the starting point for prefix scanning in `updateGhost`.
+/// Used as the starting point for prefix scanning in `updateGhost`,
+/// and as the basis for `compExistsExact`.
 fn compLowerBound(prefix: []const u8) usize {
     var lo: usize = 0;
     var hi: usize = g.comp_count;
@@ -504,6 +488,16 @@ fn compLowerBound(prefix: []const u8) usize {
         if (std.mem.order(u8, entry, prefix) == .lt) lo = mid + 1 else hi = mid;
     }
     return lo;
+}
+
+/// Returns true when `name` exists verbatim in the sorted completion table.
+/// Delegates to `compLowerBound` to avoid duplicating the binary-search logic.
+fn compExistsExact(name: []const u8) bool {
+    const idx = compLowerBound(name);
+    if (idx >= g.comp_count) return false;
+    const slot = idx * (max_completion_len + 1);
+    const entry = std.mem.sliceTo(g.comp_names[slot .. slot + max_completion_len + 1], 0);
+    return std.mem.eql(u8, entry, name);
 }
 
 /// Recompute the ghost-text suggestion based on the current buffer.

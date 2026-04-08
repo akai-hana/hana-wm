@@ -155,8 +155,10 @@ pub const CacheMap = struct {
         return .{ .found_existing = false, .value_ptr = &overflow_sentinel };
     }
 
+    /// Returns a copy of the cached WindowData for `win`, or null if absent.
     pub fn get(self: *const CacheMap, win: u32) ?WindowData {
-        return if (@constCast(self).findEntry(win)) |e| e.data else null;
+        for (self.buf[0..self.len]) |e| if (e.win == win) return e.data;
+        return null;
     }
 
     pub fn getPtr(self: *CacheMap, win: u32) ?*WindowData {

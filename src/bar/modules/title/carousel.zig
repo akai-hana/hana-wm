@@ -543,8 +543,8 @@ fn detectRefreshRateViaCrtc(conn: *xcb.xcb_connection_t, root: u32) ?f64 {
     const max_crtcs: usize = 16;
     const n_crtcs          = @min(crtcs.len, max_crtcs);
     var crtc_cookies: [max_crtcs]xcb.xcb_randr_get_crtc_info_cookie_t = undefined;
-    for (crtcs[0..n_crtcs], 0..) |crtc, i| {
-        crtc_cookies[i] = xcb.xcb_randr_get_crtc_info(conn, crtc, rr.*.config_timestamp);
+    for (crtcs[0..n_crtcs], crtc_cookies[0..n_crtcs]) |crtc, *cookie| {
+        cookie.* = xcb.xcb_randr_get_crtc_info(conn, crtc, rr.*.config_timestamp);
     }
 
     // Phase 2 — collect replies; track the highest Hz among all active CRTCs.

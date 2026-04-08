@@ -138,6 +138,17 @@ pub fn removeForWorkspace(ws: u8) void {
     g_slots[ws] = null;
 }
 
+/// Atomically transfer the fullscreen record from `src_ws` to `dst_ws`.
+/// Callers are responsible for any visual cleanup (bar, floating windows,
+/// border restoration) before calling this.
+/// Asserts that a record exists at `src_ws`; call `getForWorkspace` to verify
+/// first if that is not guaranteed by the call-site invariants.
+pub fn moveRecord(src_ws: u8, dst_ws: u8) void {
+    const info = g_slots[src_ws].?;
+    g_slots[src_ws] = null;
+    g_slots[dst_ws] = info;
+}
+
 // Improvement #13: clear() previously only zeroed g_slots, leaving a stale
 // g_float_saves_len that could cause restoreFloatingWindows to act on data
 // from a prior session if clear() was called mid-session.
@@ -455,12 +466,11 @@ fn exitFullscreenCommit(win: u32, ws: u8) void {
     bar.setBarState(.show_fullscreen);
 
     const win_is_tiled = if (comptime build.has_tiling) tiling.isWindowTiled(win) else false;
-    if (win_is_tiled) {
-        _ = xcb.xcb_configure_window(core.conn, win,
-            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{saved.border_width});
-    } else {
-        window.configureWindowGeom(core.conn, win, saved);
-    }
+    // Tiled windows: geometry is managed by the tiling engine; applyBorder below
+    // restores the border width and colour in one pass.
+    // Floating windows: restore position + size + border_width atomically via
+    // configureWindowGeom to avoid a visible intermediate frame.
+    if (!win_is_tiled) window.configureWindowGeom(core.conn, win, saved);
 
     window.applyBorder(win);
 
@@ -495,9 +505,8 @@ pub fn cleanupFullscreenForMove(win: u32, src_ws: u8) void {
     // restoreFloatingWindows also clears g_float_saves_len.
     restoreFloatingWindows(win);
 
-    // Restore the border width that was zeroed by enterFullscreenCommit.
-    _ = xcb.xcb_configure_window(core.conn, win,
-        xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{fs_info.saved_geometry.border_width});
+    // Restore border width (zeroed on enter) and colour. applyBorder handles
+    // both in one pass via applyBorderWidth + xcb_change_window_attributes.
     window.applyBorder(win);
 
     // Clear the EWMH fullscreen property so external tools (compositors, etc.)
