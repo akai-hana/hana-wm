@@ -1,74 +1,20 @@
-//! Carousel / ticker logic for the title segment, including monitor
-//! refresh-rate detection.
-//!
-//! A "carousel" is a pre-rendered XCB pixmap wider than the available area.
-//! Every frame a window into that pixmap is blitted via xcb_copy_area using a
-//! time-derived offset, producing a smooth horizontal scroll.
-//!
-//! V-sync alignment
-//!
-//! The scroll offset is quantised to monitor frame boundaries so that
-//! destination pixels change at most once per frame, eliminating sub-pixel
-//! drift and aligning every visible update with a v-blank interval.
-//!
-//!   frame_duration = 1 000 ms / hz
-//!   pixels_per_frame = scroll_speed / hz
-//!   frame_number = floor(elapsed_ms / frame_duration)
-//!   offset = (frame_number × pixels_per_frame)  mod  cycle_w
-//!
-//! The pixmap is rebuilt only when the window ID, title, accent colour, or
-//! segment geometry changes — the hot path is always two xcb_copy_area blits.
-//!
-//! Leapfrog wrap
-//!
-//! Two logical copies of the text sit `cycle_w` apart in the pixmap.  As
-//! `offset` advances 0 -> cycle_w the first copy exits left while the second
-//! enters right.  At cycle_w the state is identical to 0 — seamless loop.
-//!
-//!   cycle_w = text_w + carousel_gap_px
-//!
-//! Threading model
-//!
-//! The render thread (bar thread) is the SOLE OWNER of all carousel pixmaps.
-//! It is the only thread that creates, blits, or frees them.  The main thread
-//! (focus / event loop) communicates exclusively via two lock-free atomics:
-//!
-//!   focus_signal.is_invalidated — stored true on focus change; the render
-//!                                  thread swaps it to false at the start of
-//!                                  drawSegmentedCarousel and rebuilds the pixmap
-//!                                  when it was true.
-//!   focus_signal.start_ms       — stores utils.monotonicMs() at the focus-change
-//!                                  instant so the animation is anchored to
-//!                                  click time, not draw time; consumed
-//!                                  (swapped to 0) by drawSegmentedCarousel once.
-//!
-//! Functions that must only be called from the RENDER thread:
-//!   ensureDetected, drawScrollingTitle, drawSegmentedCarousel, drawCarouselTick,
-//!   deinitSingleCarousel, deinitSegmentedCarousel, deinitCarousel, isCarouselActive,
-//!   getSegmentedCarouselWindow.
-//!
-//! Functions that must only be called from the MAIN thread (or before the
-//! render thread starts):
-//!   notifyFocusChanged.
-//!
-//! Functions safe to call from EITHER thread:
-//!   cachedRefreshRate, invalidateRefreshRate, setCarouselEnabled, isCarouselEnabled,
-//!   setScrollSpeed, getScrollSpeed, setRefreshRateOverride,
-//!   effectiveRefreshRate.
-//!
-//! Calling render-thread-only functions from the main thread is a data race.
+//! Carousel title extension
+//! Extends title by adding a carousel effect for titles that don't fully fit the screen.
 
-const std     = @import("std");
-const defs    = @import("defs");
-const drawing = @import("drawing");
+const std = @import("std");
+
 const core    = @import("core");
+    const xcb = core.xcb;
 const utils   = @import("utils");
-const xcb     = core.xcb;
+
+const scale = @import("scale");
+
+const drawing = @import("drawing");
 
 // Public constants
 
 /// Fallback refresh rate used when RandR is unavailable or returns an invalid value.
-pub const default_hz: f64 = 60.0;
+pub const default_hz: f64 = scale.default_hz;
 
 /// Default horizontal scroll speed in pixels per second.
 /// Overridable at runtime via `setScrollSpeed()`.
@@ -134,9 +80,7 @@ const SegmentEntry = struct {
 
 // Module state
 
-/// Refresh-rate detection state.  Written once by `ensureDetected`; read on
-/// every carousel frame.  Both fields are touched only on the render thread
-/// (and before the render thread starts), so no atomics are needed.
+/// Refresh-rate detection state.
 const HzState = struct {
     hz:       f64  = default_hz,
     is_ready: bool = false,
@@ -177,25 +121,6 @@ var hz_state:     HzState     = .{};
 var scroll_config: ScrollConfig = .{};
 var render:       RenderState  = .{};
 var focus_signal: FocusSignal  = .{};
-
-// Public API — Hz detection
-
-/// Return the cached refresh rate (Hz).
-/// Always safe to call; returns `default_hz` if detection has not yet run.
-pub fn cachedRefreshRate() f64 { return hz_state.hz; }
-
-/// Detect and cache the monitor refresh rate.
-/// Subsequent calls are a single branch and a return — zero X11 I/O.
-pub fn ensureDetected(conn: *xcb.xcb_connection_t) void {
-    if (hz_state.is_ready) return;
-    hz_state.is_ready = true;
-    hz_state.hz       = detectRefreshRate(conn);
-}
-
-/// Force re-detection on the next `ensureDetected()` call.
-/// Call this when handling an `RRScreenChangeNotify` event so that a monitor
-/// hotplug or mode switch is picked up on the next draw cycle.
-pub fn invalidateRefreshRate() void { hz_state.is_ready = false; }
 
 // Public API — feature toggles and scroll config
 
@@ -240,7 +165,7 @@ pub fn setRefreshRateOverride(hz: f64) void {
 /// Returns the active refresh rate: the override when set, otherwise the
 /// auto-detected monitor rate.
 pub fn effectiveRefreshRate() f64 {
-    return if (scroll_config.rate_override > 0.0) scroll_config.rate_override else cachedRefreshRate();
+    return if (scroll_config.rate_override > 0.0) scroll_config.rate_override else scale.cachedRefreshRate();
 }
 
 // Public API — lifecycle

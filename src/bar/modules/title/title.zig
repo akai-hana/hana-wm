@@ -15,13 +15,18 @@
 //! Carousel logic lives in carousel.zig.
 //! Monitor refresh-rate detection lives in carousel.zig.
 
-const std      = @import("std");
-const core     = @import("core");
-const types    = @import("types");
-const xcb      = core.xcb;
-const utils    = @import("utils");
+const std = @import("std");
+
+const core    = @import("core");
+    const xcb = core.xcb;
+const utils   = @import("utils");
+const scale   = @import("scale");
+
+const types = @import("types");
+
 const drawing  = @import("drawing");
 const carousel = @import("carousel");
+
 
 // Module constants
 
@@ -129,7 +134,7 @@ pub fn draw(
     allocator:         std.mem.Allocator,
     title_invalidated: bool,
 ) !u16 {
-    carousel.ensureDetected(ctx.conn);
+    scale.ensureRefreshRateDetected(ctx.conn);
     const window_count = snapshot.current_ws_wins.len;
     if (emptyWorkspace(ctx, window_count)) |end_x| return end_x;
 
@@ -158,7 +163,7 @@ pub fn drawCached(
     snapshot:  TitleSnapshot,
     allocator: std.mem.Allocator,
 ) !u16 {
-    carousel.ensureDetected(ctx.conn);
+    scale.ensureRefreshRateDetected(ctx.conn);
     const window_count = snapshot.current_ws_wins.len;
     if (emptyWorkspace(ctx, window_count)) |end_x| return end_x;
 

@@ -2,7 +2,6 @@
 
 const std  = @import("std");
 
-const defs      = @import("defs");
 const constants = @import("constants");
 
 pub const xkb = @cImport({
