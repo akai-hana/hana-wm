@@ -1,12 +1,13 @@
 //! DPI detection and scaling utilities for consistent bar appearance across display resolutions.
 
-const std       = @import("std");
+const std = @import("std");
+
 const core      = @import("core");
+    const xcb   = core.xcb;
 const constants = @import("constants");
 const debug     = @import("debug");
 
-const xcb           = core.xcb;
-const ScalableValue = @import("parser").ScalableValue;
+const parser = @import("parser");
 
 // Baseline screen used to define "1× scale". All percentage-based values
 // are computed relative to this reference display.
@@ -162,7 +163,7 @@ pub fn scaleToInt(comptime T: type, base_value: f32, scale_factor: f32) T {
 /// Percentage values are screen-relative, so scale_factor is intentionally
 /// excluded — applying it would double-scale on HiDPI displays.
 /// Absolute pixel values are screen-independent and used as-is.
-pub fn scaleBorderWidth(value: ScalableValue, reference_dimension: u16) u16 {
+pub fn scaleBorderWidth(value: parser.ScalableValue, reference_dimension: u16) u16 {
     if (value.is_percentage) {
         const dim_f: f32 = @floatFromInt(reference_dimension);
         return @intFromFloat(@max(0.0, @round((value.value / 100.0) * 0.5 * dim_f)));
@@ -176,11 +177,11 @@ pub const scaleGaps = scaleBorderWidth;
 /// Returns the master width as a fraction (0.0–1.0) for percentage values,
 /// or as a negative float encoding an absolute pixel value otherwise.
 /// Callers should treat negative results as `@abs(result)` pixels.
-pub fn scaleMasterWidth(value: ScalableValue) f32 {
+pub fn scaleMasterWidth(value: parser.ScalableValue) f32 {
     return if (value.is_percentage) value.value / 100.0 else -value.value;
 }
 
-pub fn scaleFontSize(value: ScalableValue, screen: *xcb.xcb_screen_t) u16 {
+pub fn scaleFontSize(value: parser.ScalableValue, screen: *xcb.xcb_screen_t) u16 {
     if (value.is_percentage) {
         const screen_height: f32 = @floatFromInt(screen.height_in_pixels);
         return @intFromFloat(@max(1.0, @round(value.value * (screen_height / FONT_BASELINE_HEIGHT))));
@@ -188,11 +189,121 @@ pub fn scaleFontSize(value: ScalableValue, screen: *xcb.xcb_screen_t) u16 {
     return @intFromFloat(@max(1.0, @round(value.value)));
 }
 
-pub fn scaleBarHeight(value: ScalableValue, screen_height: u16) u16 {
+pub fn scaleBarHeight(value: parser.ScalableValue, screen_height: u16) u16 {
     const screen_height_f: f32 = @floatFromInt(screen_height);
     const scaled_px: f32 = if (value.is_percentage)
         screen_height_f * (value.value / 100.0)
     else
         value.value;
     return @max(BAR_MIN_HEIGHT_PX, @as(u16, @intFromFloat(@round(scaled_px))));
+}
+
+// Refresh-rate detection
+
+/// Fallback refresh rate used when RandR is unavailable or returns an invalid value.
+pub const default_hz: f64 = 60.0;
+
+const HzCache = struct {
+    hz:       f64  = default_hz,
+    is_ready: bool = false,
+};
+var hz_cache: HzCache = .{};
+
+/// Return the cached refresh rate (Hz).
+/// Always safe to call; returns `default_hz` if detection has not yet run.
+pub fn cachedRefreshRate() f64 { return hz_cache.hz; }
+
+/// Detect and cache the monitor refresh rate.
+/// Subsequent calls are a single branch and a return — zero X11 I/O.
+pub fn ensureRefreshRateDetected(conn: *xcb.xcb_connection_t) void {
+    if (hz_cache.is_ready) return;
+    hz_cache.is_ready = true;
+    hz_cache.hz       = detectRefreshRate(conn);
+}
+
+/// Force re-detection on the next `ensureRefreshRateDetected()` call.
+/// Call this when handling an `RRScreenChangeNotify` event so that a monitor
+/// hotplug or mode switch is picked up on the next draw cycle.
+pub fn invalidateRefreshRate() void { hz_cache.is_ready = false; }
+
+fn xcbRootWindow(conn: *xcb.xcb_connection_t) u32 {
+    const setup = xcb.xcb_get_setup(conn);
+    var it      = xcb.xcb_setup_roots_iterator(setup);
+    return if (it.rem > 0) it.data.*.root else 0;
+}
+
+/// Read the refresh rate of all active CRTCs and return the highest value.
+///
+/// All `xcb_randr_get_crtc_info` cookies are fired before any reply is read,
+/// reducing round-trips from O(crtcs) to O(1).
+///
+/// Returning the maximum rate rather than the first ensures correct behaviour
+/// on multi-monitor setups where each display has a different refresh rate.
+///
+/// Returns null on any failure.
+fn detectRefreshRateViaCrtc(conn: *xcb.xcb_connection_t, root: u32) ?f64 {
+    const rc = xcb.xcb_randr_get_screen_resources_current(conn, root);
+    const rr = xcb.xcb_randr_get_screen_resources_current_reply(conn, rc, null) orelse
+        return null;
+    defer std.c.free(rr);
+
+    const mode_it_len = xcb.xcb_randr_get_screen_resources_current_modes_length(rr);
+    const mode_it_ptr = xcb.xcb_randr_get_screen_resources_current_modes(rr);
+    if (mode_it_len <= 0 or mode_it_ptr == null) return null;
+    const modes = mode_it_ptr.?[0..@intCast(mode_it_len)];
+
+    const crtc_it_len = xcb.xcb_randr_get_screen_resources_current_crtcs_length(rr);
+    const crtc_it_ptr = xcb.xcb_randr_get_screen_resources_current_crtcs(rr);
+    if (crtc_it_len <= 0 or crtc_it_ptr == null) return null;
+    const crtcs = crtc_it_ptr.?[0..@intCast(crtc_it_len)];
+
+    const max_crtcs: usize = 16;
+    const n_crtcs          = @min(crtcs.len, max_crtcs);
+    var crtc_cookies: [max_crtcs]xcb.xcb_randr_get_crtc_info_cookie_t = undefined;
+    for (crtcs[0..n_crtcs], crtc_cookies[0..n_crtcs]) |crtc, *cookie| {
+        cookie.* = xcb.xcb_randr_get_crtc_info(conn, crtc, rr.*.config_timestamp);
+    }
+
+    var best_hz: f64 = 0.0;
+    for (0..n_crtcs) |i| {
+        const cr = xcb.xcb_randr_get_crtc_info_reply(conn, crtc_cookies[i], null) orelse continue;
+        defer std.c.free(cr);
+
+        const mode_id = cr.*.mode;
+        if (mode_id == 0) continue;
+
+        for (modes) |m| {
+            if (m.id != mode_id) continue;
+            const htotal: u64 = m.htotal;
+            const vtotal: u64 = m.vtotal;
+            if (htotal == 0 or vtotal == 0) break;
+            const hz: f64 = @as(f64, @floatFromInt(m.dot_clock)) /
+                @as(f64, @floatFromInt(htotal * vtotal));
+            if (hz > best_hz) best_hz = hz;
+            break;
+        }
+    }
+    return if (best_hz > 0.0) best_hz else null;
+}
+
+/// Attempt to read the current refresh rate via `xcb_randr_get_screen_info`.
+/// Falls back to CRTC mode data when rate == 0, then to `default_hz`.
+fn detectRefreshRate(conn: *xcb.xcb_connection_t) f64 {
+    if (!@hasDecl(xcb, "xcb_randr_get_screen_info")) return default_hz;
+
+    const root = xcbRootWindow(conn);
+    if (root == 0) return default_hz;
+
+    const cookie = xcb.xcb_randr_get_screen_info(conn, root);
+    const reply  = xcb.xcb_randr_get_screen_info_reply(conn, cookie, null) orelse
+        return default_hz;
+    defer std.c.free(reply);
+
+    const rate = reply.*.rate;
+    if (rate > 0) return @floatFromInt(rate);
+
+    if (@hasDecl(xcb, "xcb_randr_get_screen_resources_current"))
+        if (detectRefreshRateViaCrtc(conn, root)) |hz| return hz;
+
+    return default_hz;
 }

@@ -14,6 +14,10 @@ const focus  = @import("focus");
 const tiling     = if (build.has_tiling) @import("tiling") else struct {};
 const fullscreen = if (build.has_fullscreen) @import("fullscreen") else struct {};
 
+const scale = if (build.has_scale) @import("scale") else struct {
+    pub fn cachedRefreshRate() f64 { return 60.0; }
+};
+
 const bar = if (build.has_bar) @import("bar") else struct {
     pub fn isVisible() bool { return false; }
     pub fn getBarHeight() u16 { return 0; }
@@ -24,16 +28,35 @@ const bar = if (build.has_bar) @import("bar") else struct {
 
 pub const DragMode = enum { move, resize };
 
+/// Which corner of the window is being dragged during a resize.
+///
+/// Determined at drag-start by comparing the cursor position to the window
+/// centre.  The chosen corner is the one closest to the cursor:
+///
+///   top_left     | top_right
+///   -------------|------------
+///   bottom_left  | bottom_right   ← was the only option before
+///
+/// During updateDrag the deltas (dx, dy) are applied to the appropriate
+/// edges so the window follows the corner under the cursor:
+///
+///   bottom_right  →  x/y fixed,    w += dx, h += dy   (original behaviour)
+///   bottom_left   →  x += dx,      w -= dx, h += dy
+///   top_right     →  y += dy,      w += dx, h -= dy
+///   top_left      →  x += dx, y += dy, w -= dx, h -= dy
+pub const ResizeCorner = enum { top_left, top_right, bottom_left, bottom_right };
+
 pub const DragState = struct {
-    active:           bool     = false,
+    active:           bool         = false,
     window:           core.WindowId = 0,
-    mode:             DragMode = .move,
-    start_x:          i16      = 0,
-    start_y:          i16      = 0,
-    start_win_x:      i16      = 0,
-    start_win_y:      i16      = 0,
-    start_win_width:  u16      = 0,
-    start_win_height: u16      = 0,
+    mode:             DragMode     = .move,
+    resize_corner:    ResizeCorner = .bottom_right,
+    start_x:          i16         = 0,
+    start_y:          i16         = 0,
+    start_win_x:      i16         = 0,
+    start_win_y:      i16         = 0,
+    start_win_width:  u16         = 0,
+    start_win_height: u16         = 0,
 };
 
 // Named work-area type 
@@ -116,12 +139,25 @@ inline fn snapFarEdge(edge: i32, boundary: i32, snap: i32) i32 {
     return edge;
 }
 
+/// Snap a single edge position toward one near boundary only.
+///
+/// Mirror of snapFarEdge, used when resizing from the left or top edge so
+/// that the leading edge snaps to the near work-area boundary without also
+/// snapping toward the far boundary.
+inline fn snapNearEdge(edge: i32, boundary: i32, snap: i32) i32 {
+    if (snap > 0 and @abs(edge - boundary) < snap) return boundary;
+    return edge;
+}
+
 // Module state 
 
 const State = struct {
     drag:          DragState = .{},
     pending_float: bool      = false,
+    frame_ms:       f64      = 0.0,
+    last_update_ms: u32      = 0,
 };
+
 var g_state: State = .{};
 
 // Public API 
@@ -145,6 +181,22 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
         }
         break :blk window.getGeometry(core.conn, win) orelse return;
     };
+
+    // For resize drags, determine which corner of the window is closest to the
+    // cursor.  Comparing the cursor to the window centre gives four quadrants
+    // that map cleanly onto the four corners.
+    const resize_corner: ResizeCorner = corner: {
+        if (button == 1) break :corner .bottom_right; // move — corner unused
+        const cx: i32 = @as(i32, geom.x) + @divTrunc(@as(i32, geom.width),  2);
+        const cy: i32 = @as(i32, geom.y) + @divTrunc(@as(i32, geom.height), 2);
+        const cursor_x: i32 = x;
+        const cursor_y: i32 = y;
+        if (cursor_x < cx and cursor_y < cy) break :corner .top_left;
+        if (cursor_x >= cx and cursor_y < cy) break :corner .top_right;
+        if (cursor_x < cx and cursor_y >= cy) break :corner .bottom_left;
+        break :corner .bottom_right;
+    };
+
     // pending_float is set for any drag (move *or* resize) on a tiled window
     // in a non-floating layout.  On the first motion event it triggers tiling
     // detach and a full retile of the workspace.
@@ -156,6 +208,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
             .active           = true,
             .window           = win,
             .mode             = if (button == 1) .move else .resize,
+            .resize_corner    = resize_corner,
             .start_x          = x,
             .start_y          = y,
             .start_win_x      = geom.x,
@@ -168,6 +221,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
         else
             false,
     };
+    g_state.frame_ms = 1000.0 / scale.cachedRefreshRate();
     focus.setFocus(win, .user_command);
     // Raise the window to the top of the stack.  The cookie is intentionally
     // discarded — XCB errors surface only via xcb_request_check, which we do
@@ -232,26 +286,70 @@ pub fn updateDrag(x: i16, y: i16) void {
             // snap-skip is needed here: the "frozen at edge" problem only
             // arises during move (window origin snaps to a tiled edge);
             // resize starts from the current size and is unaffected.
-            const raw_w: i32 = @as(i32, drag.start_win_width)  + @as(i32, dx);
-            const raw_h: i32 = @as(i32, drag.start_win_height) + @as(i32, dy);
-            // Snap the trailing edges toward the far work-area boundaries.
-            // snapFarEdge suppresses near-edge snap, which would otherwise
-            // collapse the window toward zero size.  The final clamp enforces
-            // the minimum window dimension and the u16 ceiling in one place,
-            // covering both the unsnapped path and the case where the snap
-            // target itself is smaller than MIN_WINDOW_DIM (window origin near
-            // the far boundary).
-            const snapped_w = snapFarEdge(
-                @as(i32, drag.start_win_x) + raw_w, wa.right, snap,
-            ) - drag.start_win_x;
-            const snapped_h = snapFarEdge(
-                @as(i32, drag.start_win_y) + raw_h, wa.bottom, snap,
-            ) - drag.start_win_y;
+            //
+            // The corner determines which edges move with the cursor:
+            //
+            //   bottom_right  x/y fixed,    right  += dx, bottom += dy
+            //   bottom_left   left  += dx,  right  fixed, bottom += dy
+            //   top_right     x/y fixed*,   right  += dx, top    += dy
+            //   top_left      left  += dx,  right  fixed, top    += dy
+            //
+            // "left += dx" means: new_x = start_x + dx, new_w = start_w - dx
+            // "top  += dy" means: new_y = start_y + dy, new_h = start_h - dy
+            //
+            // Snapping: far edges snap toward the far work-area boundary
+            // (snapFarEdge); near edges snap toward the near boundary
+            // (snapNearEdge).  Each direction is handled independently so
+            // that a top-left drag snaps both the left and top edges.
+
+            const start_x: i32 = drag.start_win_x;
+            const start_y: i32 = drag.start_win_y;
+            const start_w: i32 = drag.start_win_width;
+            const start_h: i32 = drag.start_win_height;
+
+            // Compute raw new edges for each side.
+            const raw_left:   i32 = start_x;
+            const raw_top:    i32 = start_y;
+            const raw_right:  i32 = start_x + start_w + @as(i32, dx); // used by right-side corners
+            const raw_bottom: i32 = start_y + start_h + @as(i32, dy); // used by bottom corners
+            const raw_left_m: i32 = start_x             + @as(i32, dx); // used by left-side corners
+            const raw_top_m:  i32 = start_y             + @as(i32, dy); // used by top corners
+
+            // Resolve which x/y origin and width/height to use.
+            const new_left: i32 = switch (drag.resize_corner) {
+                .top_left, .bottom_left =>
+                    snapNearEdge(raw_left_m, wa.left, snap),
+                .top_right, .bottom_right => raw_left,
+            };
+            const new_top: i32 = switch (drag.resize_corner) {
+                .top_left, .top_right =>
+                    snapNearEdge(raw_top_m, wa.top, snap),
+                .bottom_left, .bottom_right => raw_top,
+            };
+            const new_right: i32 = switch (drag.resize_corner) {
+                .top_right, .bottom_right =>
+                    snapFarEdge(raw_right, wa.right, snap),
+                .top_left, .bottom_left =>
+                    // Right edge is fixed; derive from start so width shrinks
+                    // correctly when the left edge moves right.
+                    start_x + start_w,
+            };
+            const new_bottom: i32 = switch (drag.resize_corner) {
+                .bottom_left, .bottom_right =>
+                    snapFarEdge(raw_bottom, wa.bottom, snap),
+                .top_left, .top_right =>
+                    // Bottom edge is fixed.
+                    start_y + start_h,
+            };
+
+            const new_w = new_right  - new_left;
+            const new_h = new_bottom - new_top;
+
             break :blk utils.Rect{
-                .x      = drag.start_win_x,
-                .y      = drag.start_win_y,
-                .width  = @intCast(std.math.clamp(snapped_w, constants.MIN_WINDOW_DIM, std.math.maxInt(u16))),
-                .height = @intCast(std.math.clamp(snapped_h, constants.MIN_WINDOW_DIM, std.math.maxInt(u16))),
+                .x      = @intCast(new_left),
+                .y      = @intCast(new_top),
+                .width  = @intCast(std.math.clamp(new_w, constants.MIN_WINDOW_DIM, std.math.maxInt(u16))),
+                .height = @intCast(std.math.clamp(new_h, constants.MIN_WINDOW_DIM, std.math.maxInt(u16))),
             };
         },
     };
