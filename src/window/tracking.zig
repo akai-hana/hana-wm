@@ -30,6 +30,7 @@ pub const Tracking = struct {
     /// the invariant is enforced by prepareAdd rather than the type alone.
     len: u8 = 0,
 
+    /// Returns true if `win` is present in the list.
     pub fn contains(self: *const Tracking, win: u32) bool {
         return std.mem.indexOfScalar(u32, self.buf[0..self.len], win) != null;
     }
@@ -131,6 +132,7 @@ pub const Tracking = struct {
         @memcpy(self.buf[0..self.len], new_order);
     }
 
+    /// Returns a slice of the live entries in insertion order.
     pub fn items(self: *const Tracking) []const u32 {
         return self.buf[0..self.len];
     }
@@ -142,6 +144,7 @@ var g_map:             ?std.AutoHashMap(u32, u64) = null;
 var g_current:         u8                         = 0;
 var g_workspace_count: usize                      = 1;
 
+/// Initialises the global window-tracking map. Must be called once at startup before any windows are managed.
 pub fn init(allocator: std.mem.Allocator) void {
     var map = std.AutoHashMap(u32, u64).init(allocator);
     // Pre-allocate to avoid early growth under normal workloads.  Failure is
@@ -153,6 +156,7 @@ pub fn init(allocator: std.mem.Allocator) void {
     g_map = map;
 }
 
+/// Frees the global window-tracking map and resets all state.
 pub fn deinit() void {
     if (g_map) |*m| m.deinit();
     g_map             = null;

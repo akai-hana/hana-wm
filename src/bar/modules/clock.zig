@@ -16,10 +16,13 @@ var timer_enabled:       bool    = false;
 var last_formatted_time: [20]u8  = undefined;
 var last_formatted_sec:  i64     = -1;
 
+/// Returns true when the bar is visible and has a clock segment configured.
 fn shouldClockRun() bool {
     return bar.isVisible() and bar.hasClockSegment();
 }
 
+/// Enables or disables the clock timer based on whether the clock segment is active.
+/// Called whenever bar visibility or segment configuration changes.
 pub fn updateTimerState() void {
     const enable = shouldClockRun();
     if (enable != timer_enabled) {
@@ -42,6 +45,7 @@ pub fn pollTimeoutMs() i32 {
     return @intCast((ns_remaining + 999_999) / 1_000_000);
 }
 
+/// Draws the current time string on the bar. Returns the x position after the segment.
 pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
     // Derive seconds from clock_gettime(REALTIME); sub-second precision is not needed for display.
     var now_ts: std.os.linux.timespec = undefined;
@@ -59,11 +63,10 @@ pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, star
     return dc.drawSegment(start_x, height, time_str, config.scaledSegmentPadding(height), config.bg, config.fg);
 }
 
-// localtime_r() is tried first; if it returns null we fall back to inline UTC arithmetic.
-// Parameter is plain i64 seconds since the epoch — derived from std.time.nanoTimestamp()
-// by the callers above.
-// localtime_r is POSIX-guaranteed reentrant (output goes into caller-supplied tm_buf),
-// making this function safe to call from the bar render thread.
+/// Formats `sec` (seconds since the Unix epoch) into `buf` as "YYYY-MM-DD HH:MM:SS".
+/// Tries localtime_r first for local timezone; falls back to inline UTC arithmetic if it
+/// returns null (e.g. timezone data unavailable). localtime_r is POSIX-guaranteed reentrant,
+/// making this safe to call from the bar render thread.
 fn formatTime(buf: []u8, sec: i64) ![]const u8 {
     const TIME_FMT = "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}";
     var raw_sec: c.time_t = @intCast(sec);

@@ -51,6 +51,7 @@ pub const FontState = struct {
     current_font_desc: ?*c.PangoFontDescription         = null,
     cached_metrics:    ?struct { ascent: i16, descent: i16 } = null,
 
+    /// Frees the current Pango font description, if one has been loaded.
     fn deinit(self: *FontState) void {
         if (self.current_font_desc) |desc| c.pango_font_description_free(desc);
     }
@@ -84,6 +85,8 @@ pub const FontState = struct {
         try self.loadFont(font_list);
     }
 
+    /// Returns (ascent, descent) in pixels for the current font. Cached after the first call;
+    /// invalidated by loadFont. Result is in pixels, converted from Pango units via PANGO_SCALE.
     pub fn getMetrics(self: *FontState) struct { i16, i16 } {
         if (self.cached_metrics) |m| return .{ m.ascent, m.descent };
         const metrics = c.pango_context_get_metrics(
@@ -231,6 +234,7 @@ pub const DrawContext = struct {
         return dc;
     }
 
+    /// Frees all Cairo/Pango resources and the pixmap, then deallocates the DrawContext itself.
     pub fn deinit(self: *DrawContext) void {
         self.font.deinit();
         if (self.cached_sized_desc) |desc| c.pango_font_description_free(desc);
@@ -244,6 +248,7 @@ pub const DrawContext = struct {
         self.font.allocator.destroy(self);
     }
 
+    /// Loads a single font and clears the sized-font cache. Delegates to FontState.loadFont.
     pub fn loadFont(self: *DrawContext, font_name: []const u8) !void {
         try self.font.loadFont(font_name);
         if (self.cached_sized_desc) |old| c.pango_font_description_free(old);
@@ -251,6 +256,7 @@ pub const DrawContext = struct {
         debug.info("Cairo/Pango font loaded: {s}", .{font_name});
     }
 
+    /// Loads a comma-separated Pango font fallback list. Delegates to FontState.loadFonts.
     pub fn loadFonts(self: *DrawContext, font_names: []const []const u8) !void {
         try self.font.loadFonts(font_names);
         if (font_names.len > 1) debug.info("Loaded {} fonts with fallback support", .{font_names.len});
@@ -279,12 +285,14 @@ pub const DrawContext = struct {
     // baseline changes when font fallback is active (different scripts trigger
     // different fonts with different ascents), so caching it would silently
     // misalign text in multi-font configurations.
+    /// Positions the Cairo cursor so that Pango text rendered at (x, y_top) lands on its baseline.
     inline fn moveToTextBaseline(self: *DrawContext, x: u16, y: u16) void {
         const baseline = @as(f64, @floatFromInt(c.pango_layout_get_baseline(self.font.pango_layout)))
             / @as(f64, @floatFromInt(c.PANGO_SCALE));
         c.cairo_move_to(self.ctx, @floatFromInt(x), @as(f64, @floatFromInt(y)) - baseline);
     }
 
+    /// Clears the offscreen pixmap to fully transparent. No-op on non-ARGB surfaces.
     pub fn clearToTransparent(self: *DrawContext) void {
         if (!self.is_argb) return;
         // Skip cairo_save/cairo_restore: we only change the operator temporarily
@@ -487,6 +495,7 @@ pub const MeasureContext = struct {
         return .{ .font = .{ .allocator = allocator, .pango_layout = layout }, .surface = surface, .ctx = ctx };
     }
 
+    /// Frees all Cairo/Pango resources owned by this MeasureContext.
     pub fn deinit(self: *MeasureContext) void {
         self.font.deinit();
         c.g_object_unref(self.font.pango_layout);
@@ -499,18 +508,14 @@ pub const MeasureContext = struct {
     pub fn getMetrics(self: *MeasureContext) struct { i16, i16 }                  { return self.font.getMetrics(); }
 };
 
-// CarouselPixmap 
-//
-// Pre-renders a window title (background + glyphs) into a dedicated XCB pixmap
-// exactly once. Every subsequent carousel tick is two xcb_copy_area calls —
-// raw pixel blits with zero Pango/Cairo involvement.
-//
-// Leapfrog model: two logical copies of the pixmap exist side-by-side,
-// `cycle_w` pixels apart (cycle_w = text_w + gap). As `offset` advances from
-// 0 to cycle_w the first copy scrolls out of the left edge while the second
-// enters from the right. At offset == cycle_w the state is identical to
-// offset == 0, giving a perfectly seamless loop.
-
+/// Pre-renders a window title (background + glyphs) into a dedicated XCB pixmap exactly once.
+/// Every subsequent carousel tick is two xcb_copy_area calls — raw pixel blits with zero
+/// Pango/Cairo involvement.
+///
+/// Leapfrog model: two logical copies of the pixmap exist side-by-side, `cycle_w` pixels apart
+/// (cycle_w = text_w + gap). As `offset` advances from 0 to cycle_w the first copy scrolls out
+/// of the left edge while the second enters from the right. At offset == cycle_w the state is
+/// identical to offset == 0, giving a perfectly seamless loop.
 pub const CarouselPixmap = struct {
     conn:    *core.xcb.xcb_connection_t,
     pixmap:  u32,
@@ -519,6 +524,8 @@ pub const CarouselPixmap = struct {
     text_w:  u16,
     height:  u16,
 
+    /// Allocates an XCB pixmap of size (text_w × bar_height) and a Cairo surface over it.
+    /// The pixmap is uninitialised until render() is called.
     pub fn init(dc: *const DrawContext, text_w: u16) !CarouselPixmap {
         const pixmap = core.xcb.xcb_generate_id(dc.conn);
         _ = core.xcb.xcb_create_pixmap(dc.conn, dc.depth, pixmap, dc.offscreen_pixmap, text_w, dc.height);
@@ -541,6 +548,7 @@ pub const CarouselPixmap = struct {
                    .surface = surface, .text_w = text_w, .height = dc.height };
     }
 
+    /// Frees the GC, Cairo surface, and XCB pixmap.
     pub fn deinit(self: *CarouselPixmap) void {
         _ = core.xcb.xcb_free_gc(self.conn, self.gc);
         c.cairo_surface_destroy(self.surface);

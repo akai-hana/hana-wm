@@ -1,3 +1,4 @@
+
 //! Focus management
 //! Routes windows' focus. Reason-aware sets/clears.
 
@@ -83,9 +84,20 @@ const State = struct {
     //   Pending pointer-position query from beginPointerSync().
     //   Cancelled non-blockingly via xcb_discard_reply in beginPointerSync
     //   when superseded by a new query.
-    confirm_cookie:    ?xcb.xcb_get_input_focus_cookie_t  = null,
-    confirm_win:       ?u32                               = null,
-    pointer_cookie:    ?xcb.xcb_query_pointer_cookie_t    = null,
+    //
+    // pre_protocols_cookie
+    //   WM_PROTOCOLS get_property request fired at the START of setFocus /
+    //   dwmFocus, before commitFocusTransition runs its bookkeeping.  This
+    //   lets the X server process the property request in parallel with
+    //   history recording, grab management, tiling border updates, and bar
+    //   scheduling.  By the time commitFocusTransition calls sendWMTakeFocus,
+    //   the reply is typically already sitting in the XCB receive buffer,
+    //   turning a synchronous round-trip into a near-zero-cost buffer drain.
+    //   null when not in use (most call paths do not pre-fire).
+    confirm_cookie:        ?xcb.xcb_get_input_focus_cookie_t  = null,
+    confirm_win:           ?u32                               = null,
+    pointer_cookie:        ?xcb.xcb_query_pointer_cookie_t    = null,
+    pre_protocols_cookie:  ?xcb.xcb_get_property_cookie_t     = null,
 };
 
 var state: State = .{};
@@ -390,9 +402,25 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
         _ = xcb.xcb_configure_window(core.conn, win,
             xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 
-    if (flags.send_wm_take_focus)
-        // CurrentTime (0) — same reason as xcb_set_input_focus above.
-        window.sendWMTakeFocus(core.conn, win, 0); // CurrentTime
+    if (flags.send_wm_take_focus) {
+        // If setFocus / dwmFocus pre-fired the WM_PROTOCOLS cookie before
+        // entering this function, consume it now — the server has been
+        // processing it while we did bookkeeping above, so this drain is
+        // typically a near-zero-cost buffer read rather than a round-trip.
+        // Fall back to the blocking sendWMTakeFocus for callers that don't
+        // pre-fire (syncPointerFocusBlocking, drainPendingConfirm).
+        if (state.pre_protocols_cookie) |ck| {
+            state.pre_protocols_cookie = null;
+            window.sendWMTakeFocusWithCookie(core.conn, win, 0, ck); // CurrentTime
+        } else {
+            window.sendWMTakeFocus(core.conn, win, 0); // CurrentTime
+        }
+    } else if (state.pre_protocols_cookie) |ck| {
+        // send_wm_take_focus is false (e.g. no_input model) but a cookie was
+        // pre-fired — discard it to keep the XCB reply queue drained.
+        xcb.xcb_discard_reply(core.conn, ck.sequence);
+        state.pre_protocols_cookie = null;
+    }
 
     if (flags.arm_confirm) {
         state.confirm_cookie = xcb.xcb_get_input_focus(core.conn);
@@ -470,6 +498,20 @@ pub fn setFocus(win: u32, reason: Reason) void {
     const input_model = window.getInputModelCached(core.conn, win);
     if (input_model == .no_input) return;
 
+    // Pipeline: fire the WM_PROTOCOLS get_property cookie NOW, before
+    // cancelPendingConfirm and commitFocusTransition do their bookkeeping.
+    // The X server processes the property request while we record history,
+    // swap button grabs, update tiling borders, and notify the bar.  By the
+    // time commitFocusTransition calls sendWMTakeFocusWithCookie, the reply
+    // is typically already in the XCB receive buffer.
+    // Only fire when we know we'll need it (input_model != .no_input, which
+    // we just confirmed above, and send_wm_take_focus = input_model != .no_input).
+    if (state.pre_protocols_cookie) |stale| {
+        // Discard any leftover cookie from a previous interrupted path.
+        xcb.xcb_discard_reply(core.conn, stale.sequence);
+    }
+    state.pre_protocols_cookie = window.fireTakeFocusCookie(core.conn, win);
+
     cancelPendingConfirm();
 
     const old = state.focused_window;
@@ -502,16 +544,13 @@ pub fn setFocus(win: u32, reason: Reason) void {
 /// Safe to call when no confirm is pending (returns immediately).
 pub fn drainPendingConfirm() void {
     const cookie = state.confirm_cookie orelse return;
-    const win_opt = state.confirm_win;
+    const win    = state.confirm_win.?;  // invariant: always set/cleared together with confirm_cookie
     state.confirm_cookie = null;
     state.confirm_win    = null;
 
     // Reply must be consumed before any return to drain the XCB queue.
     const focus_reply = xcb.xcb_get_input_focus_reply(core.conn, cookie, null);
     defer if (focus_reply) |r| std.c.free(r);
-
-    std.debug.assert(win_opt != null);
-    const win = win_opt orelse return;
 
     if (!window.isValidManagedWindow(win)) return;
 
@@ -611,6 +650,12 @@ pub fn dwmFocus(win: u32) void {
 
     const model = window.getInputModelCached(core.conn, win);
     if (model == .no_input) return;
+
+    // Pipeline: fire WM_PROTOCOLS cookie before commitFocusTransition so the
+    // round-trip overlaps with bookkeeping (same rationale as setFocus).
+    if (state.pre_protocols_cookie) |stale| xcb.xcb_discard_reply(core.conn, stale.sequence);
+    state.pre_protocols_cookie = window.fireTakeFocusCookie(core.conn, win);
+
     const old = state.focused_window;
     commitFocusTransition(old, win, .{
         .set_input_focus    = model == .passive or model == .locally_active,

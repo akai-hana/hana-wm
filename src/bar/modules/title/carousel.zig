@@ -433,6 +433,7 @@ pub fn drawSegmentedCarousel(
 
 // Private helpers — Hz detection
 
+/// Returns the root window ID of the first screen, or 0 if no screens are available.
 fn xcbRootWindow(conn: *xcb.xcb_connection_t) u32 {
     const setup = xcb.xcb_get_setup(conn);
     var it      = xcb.xcb_setup_roots_iterator(setup);

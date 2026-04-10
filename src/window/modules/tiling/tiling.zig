@@ -1,6 +1,5 @@
 //! Tiling window manager
 //! Orchestrates layout, window tracking, and geometry/border cache. Delegates pixel arithmetic to the per-layout modules.
-//TODO: maybe pixel arithmetic could be centralized within tiling.zig?
 
 const std   = @import("std");
 const build = @import("build_options");
@@ -223,15 +222,20 @@ pub fn reloadConfig() void {
     }
 }
 
-// Size hints (delegated to layouts.zig) 
+// Size hints (delegated to layouts.zig via the combined cache) 
 
-/// Cache WM_NORMAL_HINTS minimum size constraints for `win`.
-/// Called from window.zig at MapRequest time.
-pub const cacheSizeHints = layouts.cacheSizeHints;
+/// Cache WM_NORMAL_HINTS minimum size constraints for `win` in its CacheMap entry.
+/// Called from window.zig at MapRequest time after the property cookie is drained.
+/// The hints live inside the same flat-array entry as the window's geometry and
+/// border color, so no separate table scan is needed inside configureWithHints.
+pub fn cacheSizeHints(win: u32, hints: layouts.SizeHints) void {
+    getState().cache.cacheHints(win, hints);
+}
 
-/// Evict the size-hint entry for `win`.
-/// Called from window.zig at unmanage time.
-pub const evictSizeHints = layouts.evictSizeHints;
+/// No-op: size-hint eviction now happens automatically inside `removeWindow`
+/// when the combined cache entry is removed via `s.cache.remove(window_id)`.
+/// Kept as a named symbol so call-sites in window.zig do not need to change.
+pub fn evictSizeHints(_: u32) void {}
 
 // Window management 
 
@@ -274,8 +278,13 @@ pub fn removeWindow(window_id: u32) void {
     if (s.windows.remove(window_id)) {
         s.is_dirty = true;
         s.workspace_geom_valid_bits = 0;
-        _ = s.cache.remove(window_id);
     }
+    // Always evict the cache entry — this removes geometry, border dedup data,
+    // AND the embedded WM_NORMAL_HINTS in one operation, replacing the previous
+    // two-step design (s.cache.remove + layouts.evictSizeHints on a separate
+    // hints_buf).  No-op when the window was never cached (e.g. floating windows
+    // that opened while tiling was disabled).
+    _ = s.cache.remove(window_id);
 }
 
 /// Toggle a window between tiled and floating.
@@ -399,16 +408,23 @@ pub fn retileAllWorkspaces() void {
 
     @memset(s.retile_lens[0..effective_ws], 0);
 
-    // Use a per-bit membership check (matching collectWorkspaceWindows) so
-    // windows tagged to multiple workspaces are added to EVERY workspace they
-    // belong to.  The previous getWorkspaceForWindow call returned only the
-    // lowest-set-bit workspace, causing higher-indexed workspaces to be tiled
-    // with an incomplete window list and their geometry cache to be marked valid
-    // for the wrong set of windows.
+    // Build per-workspace window lists in one pass.  For each window, obtain
+    // its workspace bitmask and iterate only over set bits using @ctz (count
+    // trailing zeros) — for the common case of one workspace per window this
+    // performs exactly one iteration rather than up to max_workspaces (64).
+    // Windows on multiple workspaces (tags) still visit each workspace exactly
+    // once via the bit-clear loop idiom (bits &= bits - 1).
+    const ws_range_mask: u64 = if (effective_ws >= 64)
+        ~@as(u64, 0)
+    else
+        (@as(u64, 1) << @intCast(effective_ws)) - 1;
+
     for (s.windows.items()) |win| {
-        var ws_bit: u8 = 0;
-        while (ws_bit < effective_ws) : (ws_bit += 1) {
-            if (!tracking.isWindowOnWorkspace(win, ws_bit)) continue;
+        const mask = tracking.getWindowWorkspaceMask(win) orelse continue;
+        var bits = mask & ws_range_mask;
+        while (bits != 0) {
+            const ws_bit: u8 = @intCast(@ctz(bits));
+            bits &= bits - 1; // clear lowest set bit
             if (s.retile_lens[ws_bit] < max_workspace_windows) {
                 s.retile_wins[ws_bit * max_workspace_windows + s.retile_lens[ws_bit]] = win;
                 s.retile_lens[ws_bit] += 1;
@@ -941,17 +957,20 @@ fn retile(screen: utils.Rect, for_ws: ?u8) void {
 
     const ctx = makeLayoutCtx(s);
 
+    // Hoist getState() once — used by resolve* and selectLayout below.
+    const wss = workspaces.getState();
+
     const saved_width = s.master_width;
     const saved_count = s.master_count;
     if (for_ws != null) {
-        s.master_width = resolveMasterWidth(s, workspaces.getState(), target_ws);
-        s.master_count = resolveMasterCount(s, workspaces.getState(), target_ws);
+        s.master_width = resolveMasterWidth(s, wss, target_ws);
+        s.master_count = resolveMasterCount(s, wss, target_ws);
     }
     defer s.master_width = saved_width;
     defer s.master_count = saved_count;
 
     invokeLayout(
-        selectLayout(s, workspaces.getState(), target_ws, core.config.tiling.global_layout),
+        selectLayout(s, wss, target_ws, core.config.tiling.global_layout),
         &ctx, s, ws_windows, screen,
     );
 

@@ -40,6 +40,8 @@ const COMMON_DPI_TABLE = [_]f32{ 96.0, 120.0, 144.0, 192.0 };
 /// Re-exported from core so callers that only import scale still get the type.
 pub const DpiInfo = core.DpiInfo;
 
+/// Reads the Xft.dpi value from the X RESOURCE_MANAGER property, if present.
+/// Returns null when the property is absent, empty, or does not contain an Xft.dpi entry.
 fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
     const atom_cookie = xcb.xcb_intern_atom(conn, 0, "RESOURCE_MANAGER".len, "RESOURCE_MANAGER");
     const atom_reply  = xcb.xcb_intern_atom_reply(conn, atom_cookie, null) orelse return null;
@@ -74,6 +76,8 @@ fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
     return null;
 }
 
+/// Computes DPI from the screen's physical dimensions reported by X.
+/// Returns BASELINE_DPI if the screen reports 0mm dimensions (e.g. virtual displays).
 fn calcDpiFromGeometry(screen: *xcb.xcb_screen_t) f32 {
     const width_px:  f32 = @floatFromInt(screen.width_in_pixels);
     const height_px: f32 = @floatFromInt(screen.height_in_pixels);
@@ -104,6 +108,8 @@ fn snapToCommonDpi(dpi: f32) f32 {
     return dpi;
 }
 
+/// Computes a scale factor from the screen's pixel diagonal relative to the baseline display.
+/// Used as a fallback when geometry-based DPI is out of a plausible range.
 fn calcScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
     const width_px:  f32 = @floatFromInt(screen.width_in_pixels);
     const height_px: f32 = @floatFromInt(screen.height_in_pixels);
@@ -129,6 +135,7 @@ pub fn detectDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) DpiInfo
     return result;
 }
 
+/// Performs the actual DPI detection without consulting or updating the cache.
 fn detectDpiUncached(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) DpiInfo {
     if (readXftDpi(conn, screen)) |xft_dpi| {
         debug.info("Using DPI from X resources (Xft.dpi): {d:.1}", .{xft_dpi});
@@ -147,6 +154,7 @@ fn detectDpiUncached(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) Dpi
     return DpiInfo.fromDpi(snapToCommonDpi(geometry_dpi));
 }
 
+/// Scales an integer value by `scale_factor`, rounding to the nearest integer.
 pub fn scaleInt(base_value: anytype, scale_factor: f32) @TypeOf(base_value) {
     const T = @TypeOf(base_value);
     return switch (@typeInfo(T)) {
@@ -155,6 +163,7 @@ pub fn scaleInt(base_value: anytype, scale_factor: f32) @TypeOf(base_value) {
     };
 }
 
+/// Scales a float value by `scale_factor` and rounds to the nearest integer of type `T`.
 pub fn scaleToInt(comptime T: type, base_value: f32, scale_factor: f32) T {
     return @intFromFloat(@round(base_value * scale_factor));
 }
@@ -181,6 +190,9 @@ pub fn scaleMasterWidth(value: parser.ScalableValue) f32 {
     return if (value.is_percentage) value.value / 100.0 else -value.value;
 }
 
+/// Scales a font size value against the screen height, clamped to a minimum of 1px.
+/// Percentage values are relative to FONT_BASELINE_HEIGHT (1080px) rather than the
+/// screen baseline, so font sizes degrade more gracefully on smaller screens.
 pub fn scaleFontSize(value: parser.ScalableValue, screen: *xcb.xcb_screen_t) u16 {
     if (value.is_percentage) {
         const screen_height: f32 = @floatFromInt(screen.height_in_pixels);
@@ -189,6 +201,7 @@ pub fn scaleFontSize(value: parser.ScalableValue, screen: *xcb.xcb_screen_t) u16
     return @intFromFloat(@max(1.0, @round(value.value)));
 }
 
+/// Converts a scalable bar height value to pixels, clamped to BAR_MIN_HEIGHT_PX.
 pub fn scaleBarHeight(value: parser.ScalableValue, screen_height: u16) u16 {
     const screen_height_f: f32 = @floatFromInt(screen_height);
     const scaled_px: f32 = if (value.is_percentage)
@@ -226,6 +239,7 @@ pub fn ensureRefreshRateDetected(conn: *xcb.xcb_connection_t) void {
 /// hotplug or mode switch is picked up on the next draw cycle.
 pub fn invalidateRefreshRate() void { hz_cache.is_ready = false; }
 
+/// Returns the root window ID of the first screen, or 0 if no screens are available.
 fn xcbRootWindow(conn: *xcb.xcb_connection_t) u32 {
     const setup = xcb.xcb_get_setup(conn);
     var it      = xcb.xcb_setup_roots_iterator(setup);

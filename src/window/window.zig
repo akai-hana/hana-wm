@@ -1,5 +1,5 @@
-//! Window lifecycle — map/unmap/destroy, configure, enter/button events,
-//! and per-window property caching.
+//! Window lifecycle
+//! Handles window mapping/unmapping/destroy, configure, enter/button events, and per-window property caching.
 
 const std   = @import("std");
 const build = @import("build_options");
@@ -23,7 +23,9 @@ const workspaces = if (build.has_workspaces) @import("workspaces") else struct {
 };
 
 const tiling  = if (build.has_tiling) @import("tiling") else struct {};
-const layouts = @import("layouts");
+const layouts = if (build.has_tiling) @import("layouts") else struct {
+    pub const CacheMap = struct {};
+};
 
 const drag = @import("drag");
 
@@ -99,6 +101,20 @@ var g_alloc: ?std.mem.Allocator = null;
 var g_spawn_queue: std.ArrayListUnmanaged(SpawnEntry) = .empty;
 
 var spawn_cursor: struct { x: i16 = 0, y: i16 = 0 } = .{};
+
+// Workspace-rule fast-lookup map
+//
+// Rebuilt from core.config.workspaces.rules at init() and after every config
+// reload.  Maps a WM_CLASS name (class or instance component) to the target
+// workspace index (0-based), so `findWorkspaceRuleByClass` can do an O(1)
+// hash lookup instead of an O(R) linear scan on every MapRequest.
+//
+// Keys borrow slices from the config's allocations and are valid until the
+// next rebuild (triggered by a config reload via `rebuildRulesMap`).
+// Because rebuilding always happens *after* the new config is committed to
+// core.config, the borrowed slices are always live.
+
+var g_rules_map: std.StringHashMapUnmanaged(u8) = .{};
 
 // Module-level atom cache
 //
@@ -427,6 +443,62 @@ pub fn supportsWMDeleteCached(conn: *xcb.xcb_connection_t, win: u32) bool {
     return queryAndCacheProps(conn, win).wm_delete;
 }
 
+/// Fires the WM_PROTOCOLS get_property request for `win` and returns the cookie
+/// immediately, without blocking.  Used by focus.zig to overlap the round-trip
+/// latency of the WM_TAKE_FOCUS check with local focus-transition bookkeeping.
+/// Returns null when the WM_PROTOCOLS atom is not yet interned (should not happen
+/// after startup but handled gracefully).
+pub fn fireTakeFocusCookie(
+    conn: *xcb.xcb_connection_t,
+    win:  u32,
+) ?xcb.xcb_get_property_cookie_t {
+    const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch return null;
+    return xcb.xcb_get_property(conn, 0, win, protocols_atom,
+        xcb.XCB_ATOM_ATOM, 0, MAX_PROPERTY_LENGTH);
+}
+
+/// Like sendWMTakeFocus but drains an already-fired WM_PROTOCOLS cookie instead
+/// of issuing a new round-trip.  The X server has been processing the property
+/// request since before commitFocusTransition ran its bookkeeping, so by the time
+/// this function is called the reply is typically already in the XCB receive buffer.
+pub fn sendWMTakeFocusWithCookie(
+    conn:   *xcb.xcb_connection_t,
+    win:    u32,
+    time:   u32,
+    cookie: xcb.xcb_get_property_cookie_t,
+) void {
+    const protocols_atom  = utils.getAtomCached("WM_PROTOCOLS")  catch {
+        xcb.xcb_discard_reply(conn, cookie.sequence);
+        return;
+    };
+    const take_focus_atom = utils.getAtomCached("WM_TAKE_FOCUS") catch {
+        xcb.xcb_discard_reply(conn, cookie.sequence);
+        return;
+    };
+
+    const proto_reply = xcb.xcb_get_property_reply(conn, cookie, null) orelse return;
+    defer std.c.free(proto_reply);
+    if (proto_reply.*.format != 32 or proto_reply.*.value_len == 0) return;
+    const proto_list: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(proto_reply)));
+    const len: usize = @intCast(proto_reply.*.value_len);
+
+    var has_take_focus = false;
+    for (proto_list[0..len]) |atom| {
+        if (atom == take_focus_atom) { has_take_focus = true; break; }
+    }
+    if (!has_take_focus) return;
+
+    var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
+    event.response_type  = xcb.XCB_CLIENT_MESSAGE;
+    event.window         = win;
+    event.type           = protocols_atom;
+    event.format         = 32;
+    event.data.data32[0] = take_focus_atom;
+    event.data.data32[1] = time;
+
+    _ = xcb.xcb_send_event(conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
+}
+
 /// Sends a WM_TAKE_FOCUS client message (ICCCM §4.1.7) if and only if the
 /// window actually advertises WM_TAKE_FOCUS support in its WM_PROTOCOLS.
 ///
@@ -457,13 +529,12 @@ pub fn supportsWMDeleteCached(conn: *xcb.xcb_connection_t, win: u32) bool {
 ///   works around this by never trusting a cache — it re-reads WM_PROTOCOLS
 ///   on every call.  We do the same here.
 ///
-///   The XCB round-trip cost is one xcb_get_property per focus change event,
-///   which is imperceptible at human interaction speed and is pipelined on the
-///   same Unix-domain socket as xcb_set_input_focus.
+///   Hot paths (setFocus) use fireTakeFocusCookie / sendWMTakeFocusWithCookie
+///   to pipeline this round-trip.  This fallback is retained for callers that
+///   do not pre-fire the cookie (syncPointerFocusBlocking, drainPendingConfirm).
 pub fn sendWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32, time: u32) void {
-    const protocols_atom  = utils.getAtomCached("WM_PROTOCOLS")    catch return;
-    const take_focus_atom = utils.getAtomCached("WM_TAKE_FOCUS")   catch return;
-    const wm_delete_atom  = utils.getAtomCached("WM_DELETE_WINDOW") catch return;
+    const protocols_atom  = utils.getAtomCached("WM_PROTOCOLS")  catch return;
+    const take_focus_atom = utils.getAtomCached("WM_TAKE_FOCUS") catch return;
 
     // Live WM_PROTOCOLS scan — same logic as DWM's sendevent.
     const proto_reply = xcb.xcb_get_property_reply(conn,
@@ -473,12 +544,14 @@ pub fn sendWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32, time: u32) void {
     defer std.c.free(proto_reply);
     if (proto_reply.*.format != 32 or proto_reply.*.value_len == 0) return;
     const proto_list: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(proto_reply)));
-    const props = scanProtocolAtoms(
-        proto_list[0..@intCast(proto_reply.*.value_len)],
-        take_focus_atom,
-        wm_delete_atom,
-    );
-    if (!props.take_focus) return;
+    const len: usize = @intCast(proto_reply.*.value_len);
+
+    // Only take_focus matters here — skip building the full WMProtocolsProps.
+    var has_take_focus = false;
+    for (proto_list[0..len]) |atom| {
+        if (atom == take_focus_atom) { has_take_focus = true; break; }
+    }
+    if (!has_take_focus) return;
 
     var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
     event.response_type  = xcb.XCB_CLIENT_MESSAGE;
@@ -626,6 +699,25 @@ fn populateAtomCache() void {
     }) |e| @field(atoms, e.field) = utils.getAtomCached(e.atom) catch 0;
 }
 
+/// (Re)build the workspace-rule fast-lookup map from the current core.config.
+/// Keys are borrowed slices pointing into the config's allocations and remain
+/// valid until the next rebuild.  If a class name appears in multiple rules,
+/// the first rule wins (consistent with the old linear scan).
+fn buildRulesMap() void {
+    const alloc = g_alloc orelse return;
+    g_rules_map.clearRetainingCapacity();
+    for (core.config.workspaces.rules.items) |rule| {
+        // putNoClobber: first occurrence wins; ignore OOM (map stays usable,
+        // the affected rule falls back to the O(n) scan path via null return).
+        g_rules_map.putNoClobber(alloc, rule.class_name, rule.workspace) catch {};
+    }
+}
+
+/// Rebuild the workspace-rule map after a config reload.
+/// Must be called AFTER core.config has been swapped to the new config so
+/// the borrowed key slices point into the new config's allocations.
+pub fn rebuildRulesMap() void { buildRulesMap(); }
+
 pub fn init(alloc: std.mem.Allocator) !void {
     g_alloc = alloc;
     tracking.init(alloc);
@@ -644,6 +736,7 @@ pub fn init(alloc: std.mem.Allocator) !void {
     }
     populateAtomCache();
     initInputModelCache();
+    buildRulesMap();
 }
 
 pub fn deinit() void {
@@ -655,6 +748,8 @@ pub fn deinit() void {
     if (g_alloc) |a| {
         g_spawn_queue.deinit(a);
         g_spawn_queue = .empty;
+        g_rules_map.deinit(a);
+        g_rules_map = .{};
     }
     focus.deinit();
     tracking.deinit();
@@ -692,7 +787,10 @@ inline fn clampToValidWorkspace(target: u8, fallback: u8) u8 {
 }
 
 /// Resolves a pre-fired WM_CLASS property cookie against workspace rules.
-/// Parses instance/class directly from the reply buffer — no allocation.
+/// Parses the WM_CLASS reply inline (no allocation) then does two O(1) hash
+/// lookups in g_rules_map — one for the class component and one for the
+/// instance component.  The map is built at init() and after every config
+/// reload, so no linear scan over the rules list happens at spawn time.
 fn findWorkspaceRuleByClass(cookie: xcb.xcb_get_property_cookie_t) ?u8 {
     const reply = xcb.xcb_get_property_reply(core.conn, cookie, null) orelse return null;
     defer std.c.free(reply);
@@ -708,13 +806,9 @@ fn findWorkspaceRuleByClass(cookie: xcb.xcb_get_property_cookie_t) ?u8 {
     const instance = data[0..sep];
     const class    = data[class_start..];
 
-    for (core.config.workspaces.rules.items) |rule| {
-        if (std.mem.eql(u8, rule.class_name, class) or
-            std.mem.eql(u8, rule.class_name, instance))
-        {
-            return rule.workspace;
-        }
-    }
+    // O(1) hash lookups — class component first, then instance.
+    if (g_rules_map.get(class))    |ws| return ws;
+    if (g_rules_map.get(instance)) |ws| return ws;
     return null;
 }
 
@@ -928,12 +1022,18 @@ fn mapWindowToScreen(win: u32) void {
     focus.setFocus(win, .window_spawn);
     snapshotSpawnCursor(ptr_cookie, focus.getSuppressReason());
 
-    updateWorkspaceBorders();
+    // Use the post-retile border sweep: tiled-window borders were already
+    // updated by configureWithHints during retileCurrentWorkspace above (via
+    // the get_border_color callback), so only floating windows need sweeping
+    // here.  updateWorkspaceBorders would re-send change_window_attributes
+    // to every tiled window redundantly, doubling XCB traffic inside the grab.
+    updateWorkspaceBordersPostRetile();
     bar.redrawInsideGrab();
     markBordersFlushed();
 
+    // No xcb_flush here: the event-loop end-of-batch flush covers this.
+    // Removing the extra flush eliminates one syscall per spawn.
     _ = xcb.xcb_ungrab_server(core.conn);
-    _ = xcb.xcb_flush(core.conn);
 }
 
 /// Register a newly adopted window that is on a non-current workspace.
@@ -943,8 +1043,8 @@ fn registerWindowOffscreen(win: u32) void {
     applyBorder(win);
     focus.initWindowGrabs(win);
 
+    // No xcb_flush here: the event-loop end-of-batch flush covers this.
     bar.scheduleRedraw();
-    _ = xcb.xcb_flush(core.conn);
 }
 
 fn discardPropertyCookies(cookies: PropertyCookies) void {
@@ -1014,8 +1114,10 @@ fn unmanageWindow(win: u32) void {
     _ = xcb.xcb_grab_server(core.conn);
 
     if (build.has_tiling) {
+        // tiling.removeWindow now unconditionally evicts the combined cache entry
+        // (geometry + border + size hints), so the separate evictSizeHints call
+        // that previously existed here is no longer needed.
         tiling.removeWindow(win);
-        tiling.evictSizeHints(win);
     }
     if (build.has_minimize) minimize.untrackWindow(win);
     wsRemoveWindow(win);
@@ -1032,12 +1134,16 @@ fn unmanageWindow(win: u32) void {
             else tiling.retileInactiveWorkspace(ws);
     }
 
-    updateWorkspaceBorders();
+    // Post-retile border sweep: tiled-window borders are already current after
+    // retileIfDirty (handled by configureWithHints), so only float windows need
+    // a sweep here.  The full updateWorkspaceBorders would re-send
+    // change_window_attributes to every tiled window redundantly.
+    updateWorkspaceBordersPostRetile();
     bar.redrawInsideGrab();
     markBordersFlushed();
 
+    // No xcb_flush here: the event-loop end-of-batch flush covers this.
     _ = xcb.xcb_ungrab_server(core.conn);
-    _ = xcb.xcb_flush(core.conn);
 }
 
 pub fn handleUnmapNotify(event: *const xcb.xcb_unmap_notify_event_t) void {
@@ -1340,9 +1446,41 @@ pub fn updateFocusBorders(old_focused: ?u32, new_focused: ?u32) void {
 }
 
 /// Refresh border colors for every window on the current workspace.
+/// Used by `updateWorkspaceBordersIfNeeded` (event-loop end-of-batch sweep)
+/// and by `reloadBorders` (config reload, needs all windows).
 pub fn updateWorkspaceBorders() void {
     if (!build.has_workspaces) return;
     const ws = workspaces.getCurrentWorkspaceObject() orelse return;
+    for (ws.windows.items()) |win|
+        _ = xcb.xcb_change_window_attributes(core.conn, win,
+            xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
+}
+
+/// Refresh border colors for only the FLOATING (non-tiled) windows on the
+/// current workspace.  Called inside grab-flush paths that just ran a full
+/// retile: `configureWithHints` already updated all tiled-window borders via
+/// the `get_border_color` callback during the retile, so re-sending them here
+/// would be a no-op that costs one `xcb_change_window_attributes` per tiled
+/// window per spawn/close inside the server grab.
+///
+/// Floating windows are not touched by the retile pass and must be swept here.
+/// When tiling is absent or disabled, this falls back to the full sweep because
+/// there are no tiled windows to skip.
+fn updateWorkspaceBordersPostRetile() void {
+    if (!build.has_workspaces) return;
+    const ws = workspaces.getCurrentWorkspaceObject() orelse return;
+    if (comptime build.has_tiling) {
+        if (core.config.tiling.enabled) {
+            for (ws.windows.items()) |win| {
+                // Tiled windows: already handled by configureWithHints during retile.
+                if (tiling.isWindowTiled(win)) continue;
+                _ = xcb.xcb_change_window_attributes(core.conn, win,
+                    xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
+            }
+            return;
+        }
+    }
+    // Tiling absent or disabled: no tiled windows, sweep everything.
     for (ws.windows.items()) |win|
         _ = xcb.xcb_change_window_attributes(core.conn, win,
             xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});

@@ -4,7 +4,7 @@
 const std   = @import("std");
 const build = @import("build_options");
 
-// No Zig stdlibs wrap these AFAIK due to them being so low-level
+// libc bindings for fork/exec/wait — no Zig stdlib wrappers exist for these low-level syscalls.
 const c = @cImport({
     @cInclude("unistd.h");
     @cInclude("sys/wait.h");
@@ -44,6 +44,7 @@ const prompt = if (build.has_bar and build.has_prompt) @import("prompt") else st
     pub fn toggle() void {}
 };
 
+/// Returns the workspaces.State pointer, or null when workspaces are compiled out.
 fn getWsState() ?*workspaces.State {
     return if (comptime build.has_workspaces) workspaces.getState() else null;
 }
@@ -210,11 +211,13 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     releaseGrab(event.time);
 }
 
+/// Stops any active drag and updates the last event timestamp.
 pub fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t) void {
     focus.setLastEventTime(event.time);
     if (drag.isDragging()) drag.stopDrag();
 }
 
+/// Forwards motion to the drag engine, clears focus suppression, and re-arms POINTER_MOTION_HINT.
 pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
     focus.setLastEventTime(event.time);
 
@@ -380,6 +383,7 @@ fn forkIntermediate(exec_pipe_write: c_int, pid_pipe_write: c_int, cmd_z: [*:0]c
     std.process.exit(0);
 }
 
+/// Spawns `cmd` as a detached grandchild (double-fork) so the WM never accumulates zombie processes.
 fn executeShellCommand(cmd: []const u8) !void {
     // Snapshot the target workspace before any blocking syscalls.  In a
     // single-threaded WM the value cannot change while we are blocked in
@@ -454,6 +458,7 @@ fn executeShellCommand(cmd: []const u8) !void {
 
 // Diagnostics 
 
+/// Logs a full WM state snapshot at info level. Used for diagnostics only.
 fn dumpState() void {
     debug.info("========== STATE DUMP ==========", .{});
     debug.info("Focused:        {?x}", .{focus.getFocused()});

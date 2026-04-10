@@ -4,6 +4,12 @@
 //! This file is deliberately free of layout-specific knowledge. It defines the
 //! types and helpers that are *passed into* layout modules, keeping each layout
 //! decoupled from both each other and from the tiling state.
+//!
+//! Performance note: WM_NORMAL_HINTS constraints (SizeHints) are embedded
+//! directly inside each CacheMap entry alongside the geometry and border color.
+//! This means `configureWithHints` performs a single linear scan per window per
+//! retile instead of two (one for geometry dedup, one for size-hint lookup),
+//! halving the O(N²) scan cost for a full retile pass.
 
 const core    = @import("core");
     const xcb = core.xcb;
@@ -41,46 +47,17 @@ pub const SizeHints = struct {
     max_aspect: f32 = 0.0,
 };
 
-const hint_table_capacity: usize = 256;
-const HintEntry = struct { win: u32, hints: SizeHints };
-
-var hints_buf: [hint_table_capacity]HintEntry = undefined;
-var hints_len: usize = 0;
-
-/// Store WM_NORMAL_HINTS constraints for `win`.
-/// No-ops when all hint fields are zero — the client published an empty atom.
-/// Updates in-place when an entry already exists (e.g. the client re-set hints).
-pub fn cacheSizeHints(win: u32, hints: SizeHints) void {
-    if (isEmptySizeHints(hints)) return;
-
-    for (hints_buf[0..hints_len]) |*e| {
-        if (e.win == win) { e.hints = hints; return; }
-    }
-    if (hints_len >= hint_table_capacity) {
-        debug.err("cacheSizeHints: hint table full, dropping hints for 0x{x}", .{win});
-        return;
-    }
-    hints_buf[hints_len] = .{ .win = win, .hints = hints };
-    hints_len += 1;
-}
-
-/// Remove the size-hint entry for `win`. Called at unmanage time.
-pub fn evictSizeHints(win: u32) void {
-    for (hints_buf[0..hints_len], 0..) |e, i| {
-        if (e.win != win) continue;
-        // Swap-and-decrement: O(1), order-independent.
-        hints_buf[i] = hints_buf[hints_len - 1];
-        hints_len -= 1;
-        return;
-    }
-}
-
-// Per-window geometry and border-color cache
+// Per-window geometry, border-color, and size-hint cache
 //
-// Stores the last-applied geometry and border color for each window in a single
-// flat array. `configureWithHints` writes `.rect`; `applyBorderColor` writes
-// `.border`. Both fields share one entry and one linear scan, eliminating
-// any two-path synchronisation concern.
+// Stores the last-applied geometry, border color, AND WM_NORMAL_HINTS
+// constraints for each window in a single flat array.  All three fields share
+// one entry so `configureWithHints` performs ONE linear scan per window per
+// retile — down from two (one for geometry dedup, one for size-hint lookup).
+// This halves the per-retile scan cost, which was O(2N²) in the number of
+// open windows.
+//
+// `configureWithHints` writes `.rect`; `applyBorderColor` writes `.border`;
+// `CacheMap.cacheHints` writes `.hints` at map time.
 //
 // Why not AutoHashMap?
 //   n is bounded by open windows — realistic: 10–80; hard cap: cache_capacity.
@@ -91,13 +68,19 @@ pub fn evictSizeHints(win: u32) void {
 //     - clearRetainingCapacity reduces to a single `len = 0` assignment.
 //     - No allocation-failure fallback paths that leave cache partially filled.
 
-/// Combined per-window cache entry holding last geometry and last border color.
+/// Combined per-window cache entry: last geometry, last border color, and
+/// WM_NORMAL_HINTS size constraints.
 pub const WindowData = struct {
     /// A zeroed rect is the sentinel for "stale / not yet computed".
     /// The layout engine never produces a 0×0 rect, so the sentinel is
     /// unambiguous. Prefer `hasValidRect()` over open-coding the checks.
-    rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    rect:   utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
     border: u32 = 0,
+    /// WM_NORMAL_HINTS constraints populated at map time via `CacheMap.cacheHints`.
+    /// All-zero (the default) means unconstrained — `applyHintsToRect` is a
+    /// no-op when every field is zero, so windows without declared hints are
+    /// handled correctly with zero branches on the hot retile path.
+    hints:  SizeHints = .{},
 
     /// Returns false when the rect is zeroed, indicating the entry is stale or
     /// has not yet been populated by a retile pass.
@@ -123,7 +106,8 @@ const cache_capacity: usize = 256;
 /// or the overflow path must return an error.
 var overflow_sentinel: WindowData = .{};
 
-/// Fixed-capacity cache mapping window IDs to their last geometry and border color.
+/// Fixed-capacity cache mapping window IDs to their last geometry, border color,
+/// and WM_NORMAL_HINTS constraints — all three in a single flat-array entry.
 pub const CacheMap = struct {
     const Entry = struct { win: u32, data: WindowData };
 
@@ -157,12 +141,13 @@ pub const CacheMap = struct {
 
     /// Returns a copy of the cached WindowData for `win`, or null if absent.
     pub fn get(self: *const CacheMap, win: u32) ?WindowData {
-        for (self.buf[0..self.len]) |e| if (e.win == win) return e.data;
+        for (self.buf[0..self.len]) |*e| if (e.win == win) return e.data;
         return null;
     }
 
+    /// Returns a mutable pointer to the cached WindowData for `win`, or null if absent.
     pub fn getPtr(self: *CacheMap, win: u32) ?*WindowData {
-        return if (self.findEntry(win)) |e| &e.data else null;
+        return if (findEntry(self, win)) |e| &e.data else null;
     }
 
     /// Swap-and-decrement removal: O(1), order-independent.
@@ -175,10 +160,17 @@ pub const CacheMap = struct {
         }
     }
 
-    /// Reset the cache to empty. The backing buffer is left untouched;
-    /// only the fill counter is zeroed. O(1).
-    pub fn clearRetainingCapacity(self: *CacheMap) void {
-        self.len = 0;
+    /// Reset the cache to empty: single counter write, O(1).
+    pub fn clearRetainingCapacity(self: *CacheMap) void { self.len = 0; }
+
+    /// Store WM_NORMAL_HINTS constraints for `win` in its cache entry.
+    /// No-op when all hint fields are zero (client published an empty atom).
+    /// Creates the entry if absent; updates in-place if already present.
+    /// Eviction happens automatically with `remove()` at unmanage time, so no
+    /// separate `evictSizeHints` call is required.
+    pub fn cacheHints(self: *CacheMap, win: u32, hints: SizeHints) void {
+        if (isEmptySizeHints(hints)) return;
+        self.getOrPut(win).value_ptr.hints = hints;
     }
 
     fn findEntry(self: *CacheMap, win: u32) ?*Entry {
@@ -214,6 +206,11 @@ pub inline fn rectsEqual(a: utils.Rect, b: utils.Rect) bool {
 
 /// Apply geometry to `win`, clamped to its WM_NORMAL_HINTS constraints.
 ///
+/// Performs a SINGLE linear scan of the cache per window per retile:
+/// the same `getOrPut` call that retrieves the geometry and border dedup data
+/// also supplies the embedded SizeHints, replacing the previous two-scan design
+/// (one scan of hints_buf + one scan of CacheMap).
+///
 /// Skips the XCB round-trip when the computed rect matches the cached value,
 /// deduplicating configure_window calls across retile passes. When the
 /// LayoutCtx provides a `get_border_color` callback, the border color is also
@@ -223,7 +220,10 @@ pub fn configureWithHints(
     win: u32,
     rect: utils.Rect,
 ) void {
-    const effective = clampRectToSizeHints(win, rect);
+    // Single scan: gop.value_ptr.hints holds any cached WM_NORMAL_HINTS
+    // constraints alongside the geometry and border dedup data.
+    const gop = ctx.cache.getOrPut(win);
+    const effective = applyHintsToRect(rect, gop.value_ptr.hints);
 
     if (!effective.isValid()) {
         debug.err("Invalid rect for window 0x{x}: {}x{} at {},{}",
@@ -231,7 +231,6 @@ pub fn configureWithHints(
         return;
     }
 
-    const gop = ctx.cache.getOrPut(win);
     const is_rect_changed = !gop.found_existing or !rectsEqual(gop.value_ptr.rect, effective);
     if (is_rect_changed) {
         gop.value_ptr.rect = effective;
@@ -247,15 +246,6 @@ pub fn configureWithHints(
 }
 
 // Private helpers
-
-/// Clamp `rect` to the stored WM_NORMAL_HINTS for `win`.
-/// Returns `rect` unchanged when no hints are stored for `win`.
-fn clampRectToSizeHints(win: u32, rect: utils.Rect) utils.Rect {
-    for (hints_buf[0..hints_len]) |e| {
-        if (e.win == win) return applyHintsToRect(rect, e.hints);
-    }
-    return rect;
-}
 
 /// Apply all ICCCM §4.1.2.3 hint passes in order to a raw rect.
 fn applyHintsToRect(rect: utils.Rect, h: SizeHints) utils.Rect {
@@ -299,6 +289,7 @@ inline fn snapDimToIncrement(dim: u16, base: u16, inc: u16) u16 {
     return base + (excess / inc) * inc;
 }
 
+/// Returns true when all hint fields are zero, indicating the client published no constraints.
 inline fn isEmptySizeHints(h: SizeHints) bool {
     return h.min_width == 0 and h.min_height == 0 and
            h.max_width == 0 and h.max_height == 0 and
