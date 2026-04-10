@@ -106,6 +106,7 @@ var g: PromptState = .{};
 
 // Public API
 
+/// Returns true when the prompt is currently active and accepting key input.
 pub fn isActive() bool { return g.is_active; }
 
 /// Returns true when the prompt is active in insert mode, signalling that
@@ -135,6 +136,8 @@ pub fn consumeRedrawRequest() bool {
     return pending;
 }
 
+/// Initialises all prompt state: vim engine, key-symbol table, completions, and history buffers.
+/// No-op if already initialised (idempotent).
 pub fn init(allocator: std.mem.Allocator, conn: *xcb.xcb_connection_t) !void {
     if (g.vim_state.buf.len != 0) return; // already initialised
     g.allocator   = allocator;
@@ -147,6 +150,7 @@ pub fn init(allocator: std.mem.Allocator, conn: *xcb.xcb_connection_t) !void {
         debug.warn("prompt: xcb_key_symbols_alloc failed — key input will not work", .{});
 }
 
+/// Frees all prompt resources and resets state to zero. Safe to call multiple times.
 pub fn deinit() void {
     if (g.key_syms) |ks| {
         xcb_key_symbols_free(ks);
@@ -159,6 +163,7 @@ pub fn deinit() void {
     g = .{};
 }
 
+/// Activates the prompt if inactive, or deactivates it if active.
 pub fn toggle() void {
     if (g.is_active) deactivate() else activate();
 }
@@ -337,6 +342,8 @@ pub fn draw(
 
 // Private — action handling
 
+/// Dispatches a vim.Action returned by a mode handler: executes/closes on spawn,
+/// resets and keeps open on spawn_keep, deactivates on deactivate, no-ops on none.
 fn handleAction(action: vim.Action) void {
     switch (action) {
         .none       => {},
@@ -390,6 +397,7 @@ fn resetVimEditing(vs: *vim.VimState) void {
     };
 }
 
+/// Grabs the keyboard, resets editing state, and marks the prompt active.
 fn activate() void {
     resetVimEditing(&g.vim_state); // reset editing state, preserve heap allocations
     g.ghost_len = 0;
@@ -418,6 +426,7 @@ fn activate() void {
     _ = xcb.xcb_flush(core.conn);
 }
 
+/// Ungrabs the keyboard and marks the prompt inactive.
 fn deactivate() void {
     g.is_active                   = false;
     g.vim_state.is_replaying_dot  = false;
@@ -478,6 +487,8 @@ fn loadCompletions() void {
 /// Binary search for the first `comp_names` entry >= prefix.
 /// Used as the starting point for prefix scanning in `updateGhost`,
 /// and as the basis for `compExistsExact`.
+/// Binary searches the sorted completion table for the first entry ≥ `prefix`.
+/// Returns the insertion index (0..comp_count) — use with compExistsExact for lookup.
 fn compLowerBound(prefix: []const u8) usize {
     var lo: usize = 0;
     var hi: usize = g.comp_count;
@@ -553,6 +564,8 @@ fn updateGhost() void {
 // Private — history
 
 /// Prepend `cmd` to the in-memory history ring (newest at index 0).
+/// Shifts all history entries right by one slot and inserts `cmd` at index 0 (newest first).
+/// Silently no-ops when cmd is empty or exceeds max_history_line.
 fn histPrepend(cmd: []const u8) void {
     if (cmd.len == 0 or cmd.len > max_history_line) return;
 
@@ -747,6 +760,8 @@ fn spawnCommand(cmd: []const u8) void {
 
 /// Binary search: first byte offset where `measureTextWidth(text[0..offset])
 /// >= target_px`.  Returns `text.len` if the whole string is narrower.
+/// Binary-searches `text` for the byte offset whose rendered width first reaches `target_px`.
+/// Used to map a pixel scroll offset back to a character boundary.
 fn textOffsetAtPx(dc: *drawing.DrawContext, text: []const u8, target_px: u16) usize {
     var lo: usize = 0;
     var hi: usize = text.len;

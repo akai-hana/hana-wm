@@ -1,0 +1,7 @@
+i want you to systematically look through my linux window manager's codebase, locate any complex code that could be simplified, and perform the necessary changes to the necessary files.
+
+ look for simplification opportunities, that either make the codebase leaner by re-writing a solution to be shorter, or simplifications that have a positive impact on the performance/efficiency of the window manager, or even simplifications that do neither but make the code more readable and clean.
+
+ i want you to work on an agile manner: once you identify a single possible change, perform it immediately before looking for more things to change.
+
+please work entirely on the directory meant for files to present; this way, i will always be able to download files even if the process gets interrupted for any reason. 

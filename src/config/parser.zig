@@ -259,6 +259,7 @@ pub fn parseColor(value: []const u8) !u32 {
     return color;
 }
 
+/// Frees all key strings and recursively deinits all values in `pairs`, then deinits the map.
 fn cleanPairs(alloc: std.mem.Allocator, pairs: *std.StringHashMap(Value)) void {
     var iter = pairs.iterator();
     while (iter.next()) |entry| {
@@ -464,13 +465,14 @@ const Parser = struct {
         }
     }
 
-    // Bare keys (no `=`) are treated as `key = true`, which is the only call
-    // site's expectation. Workspace rule entries like `Navigator` use this.
+    /// Advances past a trailing newline or comment character at line end.
     fn skipLineEnd(self: *Parser, c: ?u8) void {
         if (c == '\n') _ = self.consume();
         if (c == '#') self.skipToNewline();
     }
 
+    /// Parses one `key = value` pair, or a bare `key` (treated as `key = true`).
+    /// Workspace rule entries like `Navigator` rely on the bare-key shorthand.
     fn parseKeyValuePair(self: *Parser) ParseError!struct { []const u8, Value } {
         const key = try self.parseKey();
         errdefer self.allocator.free(key);

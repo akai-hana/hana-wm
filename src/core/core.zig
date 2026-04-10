@@ -5,9 +5,8 @@ const std = @import("std");
 
 const constants = @import("constants");
 
-// On every @cImport, C code has to be translated to Zig on every compilation.
-// That's why importing xcb here, and then making other files import it
-// through this file is a tiny bit more efficient.
+// Importing xcb centrally and re-exporting it avoids repeated @cImport translation
+// on every compilation unit that needs XCB types.
 pub const xcb = @cImport(@cInclude("xcb/xcb.h"));
 
 
@@ -53,11 +52,13 @@ pub const DpiInfo = struct {
     dpi:          f32,
     scale_factor: f32,
 
+    /// Constructs a DpiInfo from a raw DPI value, computing scale_factor relative to BASELINE_DPI.
     pub fn fromDpi(dpi: f32) DpiInfo {
         return .{ .dpi = dpi, .scale_factor = dpi / @import("constants").BASELINE_DPI };
     }
 };
 
+// Process-wide singletons, initialised in main before any other module runs.
 pub var conn:     *xcb.xcb_connection_t   = undefined;
 pub var screen:   *xcb.xcb_screen_t       = undefined;
 pub var root:     WindowId                = undefined;

@@ -128,26 +128,14 @@ inline fn snapAxis(pos: i32, dim: i32, near: i32, far: i32, snap: i32) i32 {
     return pos;
 }
 
-/// Snap a single edge position toward one far boundary only.
-///
-/// Used during resize to snap the trailing (right / bottom) edge without
-/// also snapping toward the near boundary — near-edge snap during resize
-/// would collapse the window toward zero width / height, which is
-/// unintuitive and handled separately by the MIN_WINDOW_DIM clamp.
-inline fn snapFarEdge(edge: i32, boundary: i32, snap: i32) i32 {
+/// Snap a single edge position toward `boundary` if within `snap` pixels of it.
+/// Used for both near (left/top) and far (right/bottom) edges during resize.
+inline fn snapEdge(edge: i32, boundary: i32, snap: i32) i32 {
     if (snap > 0 and @abs(edge - boundary) < snap) return boundary;
     return edge;
 }
 
-/// Snap a single edge position toward one near boundary only.
-///
-/// Mirror of snapFarEdge, used when resizing from the left or top edge so
-/// that the leading edge snaps to the near work-area boundary without also
-/// snapping toward the far boundary.
-inline fn snapNearEdge(edge: i32, boundary: i32, snap: i32) i32 {
-    if (snap > 0 and @abs(edge - boundary) < snap) return boundary;
-    return edge;
-}
+// snapNearEdge and snapFarEdge are identical in implementation; use snapEdge directly.
 
 // Module state 
 
@@ -162,6 +150,8 @@ var g_state: State = .{};
 
 // Public API 
 
+/// Begins a move (button 1) or resize (button 3) drag on `win` at pointer position (x, y).
+/// No-op when a drag is already active, or for bar/fullscreen windows.
 pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     if (g_state.drag.active) return;
     if (bar.isBarWindow(win)) return;
@@ -231,6 +221,8 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     _ = xcb.xcb_flush(core.conn);
 }
 
+/// Applies pointer motion to the active drag, updating window position or size.
+/// No-op when no drag is active.
 pub fn updateDrag(x: i16, y: i16) void {
     if (!g_state.drag.active) return;
     const drag = &g_state.drag;
@@ -318,17 +310,17 @@ pub fn updateDrag(x: i16, y: i16) void {
             // Resolve which x/y origin and width/height to use.
             const new_left: i32 = switch (drag.resize_corner) {
                 .top_left, .bottom_left =>
-                    snapNearEdge(raw_left_m, wa.left, snap),
+                    snapEdge(raw_left_m, wa.left, snap),
                 .top_right, .bottom_right => raw_left,
             };
             const new_top: i32 = switch (drag.resize_corner) {
                 .top_left, .top_right =>
-                    snapNearEdge(raw_top_m, wa.top, snap),
+                    snapEdge(raw_top_m, wa.top, snap),
                 .bottom_left, .bottom_right => raw_top,
             };
             const new_right: i32 = switch (drag.resize_corner) {
                 .top_right, .bottom_right =>
-                    snapFarEdge(raw_right, wa.right, snap),
+                    snapEdge(raw_right, wa.right, snap),
                 .top_left, .bottom_left =>
                     // Right edge is fixed; derive from start so width shrinks
                     // correctly when the left edge moves right.
@@ -336,7 +328,7 @@ pub fn updateDrag(x: i16, y: i16) void {
             };
             const new_bottom: i32 = switch (drag.resize_corner) {
                 .bottom_left, .bottom_right =>
-                    snapFarEdge(raw_bottom, wa.bottom, snap),
+                    snapEdge(raw_bottom, wa.bottom, snap),
                 .top_left, .top_right =>
                     // Bottom edge is fixed.
                     start_y + start_h,
@@ -357,6 +349,7 @@ pub fn updateDrag(x: i16, y: i16) void {
     _ = xcb.xcb_flush(core.conn);
 }
 
+/// Ends the active drag and resets all drag state.
 pub fn stopDrag() void {
     // No flush needed: the last updateDrag call already flushed all pending
     // geometry changes before this function is reached.

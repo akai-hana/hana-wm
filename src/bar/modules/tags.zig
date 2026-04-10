@@ -27,16 +27,20 @@ var cached_ind_x_off:  u16     = 0;
 /// Cached vertical top position of the indicator glyph. Constant for all cells.
 var cached_ind_y:      u16     = 0;
 
+/// Returns the display label for workspace `i`, falling back through icons, labels, and "?".
 inline fn getLabel(i: usize, config: types.BarConfig) []const u8 {
     if (i < config.workspace_icons.items.len) return config.workspace_icons.items[i];
     if (i < tracking.WORKSPACE_LABELS.len)    return tracking.WORKSPACE_LABELS[i];
     return "?";
 }
 
+/// Invalidates the segment cache; next draw() call will remeasure labels and cell widths.
 pub fn invalidate() void { cache_valid = false; }
 
+/// Returns the last-computed workspace cell width in pixels (0 until first draw).
 pub fn getCachedWorkspaceWidth() u16 { return ws_width; }
 
+/// Rebuilds the label-width and geometry cache if stale. No-op if cache_valid is true.
 fn ensureCache(dc: *drawing.DrawContext, config: types.BarConfig, height: u16) void {
     if (cache_valid) return;
     for (&label_widths, 0..) |*w, i| w.* = dc.measureTextWidth(getLabel(i, config));

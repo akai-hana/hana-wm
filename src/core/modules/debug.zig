@@ -9,6 +9,7 @@ const std   = @import("std");
 const build = @import("build_options");
 
 
+/// Strips the directory and ".zig" extension from a source file path, returning a short module tag.
 fn moduleFromSrc(src: std.builtin.SourceLocation) []const u8 {
     const basename = std.fs.path.basename(src.file);
     return if (std.mem.endsWith(u8, basename, ".zig"))
@@ -47,18 +48,21 @@ pub inline fn warnIf (condition: bool, comptime fmt: []const u8, args: anytype) 
 pub inline fn infoIf (condition: bool, comptime fmt: []const u8, args: anytype) void { if (condition) emitLog(@src(), .info,      fmt, args); }
 pub inline fn debugIf(condition: bool, comptime fmt: []const u8, args: anytype) void { if (condition) emitLog(@src(), .debug_log, fmt, args); }
 
+/// Panics with a module-tagged message when `condition` is false, in debug builds only.
 pub inline fn assert(condition: bool, comptime message: []const u8) void {
     if (!debugEnabled() or condition) return;
     const module = moduleFromSrc(@src());
     std.debug.panic("[{s}] Assertion failed: {s}", .{ module, message });
 }
 
+/// Emits a debug-level trace line showing the caller module and function name.
 pub inline fn trace(comptime func_name: []const u8) void {
     if (!debugEnabled()) return;
     const module = moduleFromSrc(@src());
     std.log.debug("[{s}] -> {s}", .{ module, func_name });
 }
 
+/// Emits a debug-level line showing `label = value` with the caller's module tag.
 pub inline fn print(comptime label: []const u8, value: anytype) void {
     if (!debugEnabled()) return;
     const module = moduleFromSrc(@src());

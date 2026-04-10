@@ -71,8 +71,7 @@ var g_slots: [MAX_WORKSPACES]?FullscreenInfo = @splat(null);
 const FloatSave = struct { win: u32, rect: utils.Rect };
 /// Floating window positions saved just before a fullscreen enter. Populated
 /// by saveFloatingWindowGeoms, consumed and cleared by restoreFloatingWindows.
-// Improvement #7: zero-initialised instead of `undefined` — eliminates the
-// footgun where a length-tracking bug would silently yield garbage data.
+/// Zero-initialised so a length-tracking bug never silently yields garbage data.
 var g_float_saves:     [MAX_FLOAT_SAVES]FloatSave = std.mem.zeroes([MAX_FLOAT_SAVES]FloatSave);
 var g_float_saves_len: usize = 0;
 
@@ -80,9 +79,7 @@ var g_float_saves_len: usize = 0;
 var g_net_wm_state:            xcb.xcb_atom_t = xcb.XCB_ATOM_NONE;
 var g_net_wm_state_fullscreen: xcb.xcb_atom_t = xcb.XCB_ATOM_NONE;
 
-// Improvement #6: single source of truth for the reset sequence shared by
-// init() and deinit(), so adding a new state field can never cause one to
-// fall out of sync with the other.
+/// Shared reset sequence used by both init() and deinit() to keep them in sync.
 fn resetState() void {
     g_slots           = @splat(null);
     g_float_saves_len = 0;
@@ -120,8 +117,6 @@ pub fn getForWorkspace(ws: u8) ?FullscreenInfo {
 }
 
 /// Returns the workspace index that `win` is fullscreen on, or null.
-// Improvement #14: reworded from "scans only the live slots, not the full
-// 256-entry array" — that claim is only true for typical workspace counts.
 /// Scans up to getWorkspaceCount() slots; O(workspace_count).
 pub fn workspaceFor(win: u32) ?u8 {
     const count = tracking.getWorkspaceCount();
@@ -149,9 +144,7 @@ pub fn moveRecord(src_ws: u8, dst_ws: u8) void {
     g_slots[dst_ws] = info;
 }
 
-// Improvement #13: clear() previously only zeroed g_slots, leaving a stale
-// g_float_saves_len that could cause restoreFloatingWindows to act on data
-// from a prior session if clear() was called mid-session.
+/// Resets all fullscreen state, including float saves. Safe to call mid-session.
 pub fn clear() void {
     g_slots           = @splat(null);
     g_float_saves_len = 0;
@@ -165,9 +158,7 @@ pub fn hasAnyFullscreen() bool {
 
 /// Iterate over occupied slots. Diagnostics only.
 /// Calls `cb` with (workspace_index, FullscreenInfo) for every non-null slot.
-// Improvement #9: accepts anytype instead of a bare fn pointer so the caller
-// can pass a struct with a `call` method that captures local state, or any
-// other callable — all resolved and inlined at compile time, zero cost.
+/// `cb` may be any callable — resolved and inlined at compile time, zero runtime cost.
 pub fn forEachFullscreen(cb: anytype) void {
     const count = tracking.getWorkspaceCount();
     for (g_slots[0..count], 0..) |slot, i|
@@ -232,9 +223,7 @@ fn fetchWindowGeom(win: u32) core.WindowGeometry {
         }
     }
 
-    // Improvement #10: screen dimensions are u16; dividing by a power of two
-    // on an unsigned value is unambiguous — the former @as(i32, ...) cast and
-    // @divTrunc were unnecessary and misleading.
+    // Screen dimensions are u16; dividing by a power of two is unambiguous on unsigned values.
     const default: core.WindowGeometry = .{
         .x            = @intCast(core.screen.width_in_pixels  / 4),
         .y            = @intCast(core.screen.height_in_pixels / 4),
@@ -248,9 +237,8 @@ fn fetchWindowGeom(win: u32) core.WindowGeometry {
     ) orelse return default;
     defer std.c.free(reply);
 
-    // Improvement #11: also reject zero-size geometry.  A window that has
-    // been mapped but not yet sized reports width=0/height=0; saving those
-    // dimensions and restoring them on exit would leave the window invisible.
+    // Also reject zero-size geometry: a window mapped but not yet sized reports
+    // width=0/height=0; saving and restoring those dimensions would leave it invisible.
     if (reply.*.x < constants.OFFSCREEN_SENTINEL_MIN or
         reply.*.y < constants.OFFSCREEN_SENTINEL_MIN or
         reply.*.width  == 0 or
@@ -282,10 +270,8 @@ fn saveFloatingWindowGeoms(skip_win: u32) void {
     var n:         usize = 0;
     var truncated: bool  = false;
 
-    // Improvement #3 (iteration) + #8 (truncation log):
-    // The collection step now uses forEachWindowOnCurrentWorkspace so the
-    // has_workspaces dispatch is not repeated here.  Overflow past
-    // MAX_FLOAT_SAVES is logged rather than silently dropped.
+    // Uses forEachWindowOnCurrentWorkspace for workspace dispatch.
+    // Overflow past MAX_FLOAT_SAVES is logged rather than silently dropped.
     const CollectCtx = struct {
         n:         *usize,
         truncated: *bool,
@@ -349,10 +335,7 @@ fn getSavedFloatGeom(win: u32) ?utils.Rect {
 fn restoreFloatingWindows(skip_win: u32) void {
     const pos = window.floatDefaultPos();
 
-    // Improvement #3: the has_workspaces dispatch now lives only in
-    // forEachWindowOnCurrentWorkspace.  We capture pos by its component
-    // values (x, y as u32) to avoid needing to know its concrete type inside
-    // the context struct declaration.
+    // Workspace dispatch is handled by forEachWindowOnCurrentWorkspace.
     const RestoreCtx = struct {
         pos_x: u32,
         pos_y: u32,
@@ -397,13 +380,6 @@ fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
 }
 
 // Commit helpers (XCB-only; caller owns grab/ungrab/flush)
-//
-// Improvement #4: `inline` removed from both helpers.  These functions contain
-// array loops, multiple conditional branches, several XCB calls, and a bar
-// state update (which may trigger a tiling retile).  Forcing inlining at every
-// call site produces larger binary output and misleads readers into thinking
-// these are trivial leaf functions.  The compiler will inline them on its own
-// if it determines the trade-off is worthwhile.
 
 fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
     setForWorkspace(ws, .{
@@ -411,8 +387,7 @@ fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
         .saved_geometry = geom,
     });
 
-    // Push every other window offscreen.
-    // Improvement #3: iteration dispatched through the shared helper.
+    // Push every other window offscreen; workspace dispatch is through the shared helper.
     const PushCtx = struct {
         fn call(_: @This(), w: u32) void {
             utils.pushWindowOffscreen(core.conn, w);
@@ -527,24 +502,13 @@ pub fn enterFullscreen(win: u32, saved_geom: ?core.WindowGeometry) void {
     utils.ungrabAndFlush(core.conn);
 }
 
-// Improvement #1 (bug fix) + #5 (uniform grab ownership):
+// toggle() design note:
 //
-// Former toggle() had two problems:
-//
-//   1. In the "switch fullscreen to a different window" branch,
-//      saveFloatingWindowGeoms() and fetchWindowGeom() were called INSIDE
-//      xcb_grab_server/xcb_ungrab_server.  Both functions issue
-//      xcb_get_geometry requests and then read their replies.  Those replies
-//      cannot be delivered while the same client holds the server grab —
-//      xcb_get_geometry_reply blocks indefinitely, hanging the WM.
-//      (saveFloatingWindowGeoms' own doc comment says "must be called BEFORE
-//      xcb_grab_server".)  Fix: hoist all round-trip work before the grab.
-//
-//   2. The not-fullscreen branch delegated to enterFullscreen(), which owns
-//      its own grab internally.  This made toggle() partly an orchestrator
-//      and partly a thin wrapper depending on runtime state.  All three
-//      branches now own the grab uniformly, calling enterFullscreenCommit
-//      (rather than enterFullscreen) in the not-fullscreen case.
+// All round-trip work (saveFloatingWindowGeoms, fetchWindowGeom) is hoisted
+// before xcb_grab_server because replies cannot be delivered while the same
+// client holds the server grab — xcb_get_geometry_reply would block indefinitely.
+// All three branches own the grab uniformly via enterFullscreenCommit /
+// exitFullscreenCommit rather than delegating to enterFullscreen().
 pub fn toggle() void {
     const win        = focus.getFocused() orelse return;
     const current_ws = tracking.getCurrentWorkspace() orelse return;

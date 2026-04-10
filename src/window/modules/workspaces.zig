@@ -19,7 +19,7 @@ const fullscreen = if (build.has_fullscreen) @import("fullscreen") else struct {
 const minimize   = if (build.has_minimize) @import("minimize") else struct {};
 
 const tiling       = if (build.has_tiling) @import("tiling") else struct {};
-const TilingLayout = if (build.has_tiling) tiling.Layout else u0; //TODO: this and the previous line is confusing
+const TilingLayout = if (build.has_tiling) tiling.Layout else u0; // u0 sentinel when tiling is absent: zero-size, never stored
 
 const bar = if (build.has_bar) @import("bar") else struct {
     pub fn scheduleRedraw() void {}
@@ -487,13 +487,8 @@ pub fn moveWindowToAll(win: u32) void {
     pinToAllWorkspacesToggle(s, win);
 }
 
-/// `toggle_tag_all` action — Mod+Alt+5.
-/// Flips between "pinned to every workspace" and "current workspace only".
-pub fn tagToggleAll(win: u32) void {
-    const s = getState() orelse return;
-    if (isMinimized(win)) return;
-    pinToAllWorkspacesToggle(s, win);
-}
+/// `toggle_tag_all` action — Mod+Alt+5.  Identical semantics to moveWindowToAll.
+pub fn tagToggleAll(win: u32) void { moveWindowToAll(win); }
 
 /// Returns the workspace bitmask for `win`, or null if unmanaged.
 /// Delegates to tracking which owns the map.

@@ -586,8 +586,18 @@ const State = struct {
 
 // Bar thread 
 
+/// Entry point for the bar render thread. Runs until a .quit work item is received.
 fn runBarThread(s: *State) void {
     var next_carousel_ns: u64 = 0;
+
+    // Advance the carousel wake deadline by one frame interval.
+    const advanceCarouselTimer = struct {
+        inline fn f(next: *u64) void {
+            const now = utils.monotonicNs();
+            next.* = if (now >= next.*) now + carouselWakeNs else next.* +% carouselWakeNs;
+        }
+    }.f;
+
     while (true) {
         gBar.channel.mutex.lock();
 
@@ -624,26 +634,14 @@ fn runBarThread(s: *State) void {
             },
             .focusOnly => {
                 s.drawTitleOnly(work.focused_window);
-                if (carousel.isCarouselActive()) {
-                    const now_ns = utils.monotonicNs();
-                    if (now_ns >= next_carousel_ns) {
-                        next_carousel_ns = now_ns + carouselWakeNs;
-                    } else {
-                        next_carousel_ns +%= carouselWakeNs;
-                    }
-                }
+                if (carousel.isCarouselActive()) advanceCarouselTimer(&next_carousel_ns);
                 if (work.has_clock_tick) s.drawClockOnly();
             },
             .idle => {
                 // Carousel tick or clock-only wakeup with no focus change.
                 if (carousel.isCarouselActive()) {
                     s.drawTitleOnly(s.title_cache.focused_window);
-                    const now_ns = utils.monotonicNs();
-                    if (now_ns >= next_carousel_ns) {
-                        next_carousel_ns = now_ns + carouselWakeNs;
-                    } else {
-                        next_carousel_ns +%= carouselWakeNs;
-                    }
+                    advanceCarouselTimer(&next_carousel_ns);
                 }
                 if (work.has_clock_tick) s.drawClockOnly();
             },
@@ -658,6 +656,7 @@ inline fn spawnBarThread(s: *State) void {
     };
 }
 
+/// Signals the bar thread to quit and waits for it to exit.
 fn joinBarThread() void {
     gBar.channel.mutex.lock();
     gBar.channel.work = .{ .kind = .quit };
@@ -685,6 +684,8 @@ fn hasMinimizedSetChanged(
 /// `forced` must be read from `gBar.channel.pending_force_full_redraw` (and
 /// that flag cleared) by the caller before invoking this function, so that
 /// `captureStateIntoSlot` has no dependency on global channel state.
+/// Captures main-thread WM state into `snap`, diffing against `prev` to set dirty flags.
+/// `forced` overrides dirty checks and requests a full redraw.
 fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot, forced: bool) !void {
     const allocator = s.render.allocator;
     snap.minimized_windows.clearRetainingCapacity();
@@ -788,19 +789,18 @@ fn prepareSnapshot() ?u1 {
 
 /// Posts a snapshot to the bar thread and returns immediately.
 pub fn submitDraw() void {
-    const idx = prepareSnapshot() orelse return;
+    if (prepareSnapshot() == null) return;
     gBar.channel.mutex.lock();
     defer gBar.channel.mutex.unlock();
     gBar.channel.write_index  ^= 1;
     gBar.channel.work.kind     = .snapReady;
     gBar.channel.work_ready.signal();
-    _ = idx;
 }
 
 /// Posts a snapshot to the bar thread and blocks until the draw completes.
 /// Use only inside or immediately before xcb_ungrab_server.
 pub fn submitDrawBlocking() void {
-    const idx = prepareSnapshot() orelse return;
+    if (prepareSnapshot() == null) return;
     gBar.channel.mutex.lock();
     defer gBar.channel.mutex.unlock();
     gBar.channel.write_index ^= 1;
@@ -809,7 +809,6 @@ pub fn submitDrawBlocking() void {
     gBar.channel.work_ready.signal();
     while (gBar.channel.draw_generation == gen_before)
         gBar.channel.draw_done.wait(&gBar.channel.mutex);
-    _ = idx;
 }
 
 // Window and atom setup 

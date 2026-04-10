@@ -38,6 +38,8 @@ pub const XkbState = struct {
     /// No allocator needed — 256 × 4 bytes = 1 KiB, lives inside XkbState.
     keysym_by_keycode: [256]u32,
 
+    /// Initialises an XKB context, keymap, and state from the live X connection.
+    /// Retries up to MAX_ATTEMPTS times to handle early-startup races.
     pub fn init(xcb_conn: *anyopaque) !XkbState {
         const ctx = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS) orelse
             return error.XkbContextFailed;
@@ -70,6 +72,7 @@ pub const XkbState = struct {
         };
     }
 
+    /// Releases the XKB state, keymap, and context in reverse-init order.
     pub fn deinit(self: *XkbState) void {
         xkb.xkb_state_unref(self.state);
         xkb.xkb_keymap_unref(self.keymap);
@@ -112,6 +115,8 @@ inline fn retryDelay(attempt: u8) void {
     _ = std.os.linux.nanosleep(&req, &rem);
 }
 
+/// Calls xkb_x11_setup_xkb_extension, retrying up to MAX_ATTEMPTS times with a brief delay.
+/// The extension may not be ready immediately at WM startup.
 fn retrySetup(xcb_conn: *anyopaque) !void {
     for (0..MAX_ATTEMPTS) |i| {
         const ok = xkb.xkb_x11_setup_xkb_extension(

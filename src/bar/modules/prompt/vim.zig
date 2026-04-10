@@ -319,6 +319,7 @@ pub fn handleCtrl(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
+/// Handles a key press in insert mode. Returns the Action the caller should take.
 pub fn handleInsert(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     switch (sym) {
         XK_Escape => {
@@ -357,6 +358,7 @@ pub fn handleInsert(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
+/// Handles a key press in normal mode. Returns the Action the caller should take.
 pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     // Pending r{c}: replace `count` chars with a single character.
     if (vs.pending.is_awaiting_replace_char) {
@@ -595,6 +597,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
+/// Handles a key press in visual mode. Returns the Action the caller should take.
 pub fn handleVisual(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     // Shared: pending find/g, digits, ;/,, simple motions, prefix arming.
     if (resolveMotionKey(vs, sym)) |mkr| {
@@ -649,6 +652,7 @@ pub fn handleVisual(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
+/// Handles a key press in replace mode. Returns the Action the caller should take.
 pub fn handleReplace(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     switch (sym) {
         XK_Escape => {

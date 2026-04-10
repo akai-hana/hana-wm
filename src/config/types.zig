@@ -282,8 +282,8 @@ pub const BarConfig = struct {
     fonts:             std.ArrayList([]const u8)  = .empty,
     font_size:         parser.ScalableValue   = parser.ScalableValue.percentage(10.0),
     // Resolved pixel value cached after DPI scaling; derived from font_size at startup.
-    // NOTE: this is runtime state, not a raw config value — consider moving it to a
-    // separate resolved-config struct if BarConfig is ever serialised or diffed.
+    // Mixed into BarConfig for convenience; keep in mind it is runtime state, not a raw
+    // config value — separate it if BarConfig is ever serialised or structurally diffed.
     scaled_font_size:  u16                    = 10, // Can exceed 255 on high DPI - u16 is correct
     spacing:           parser.ScalableValue   = parser.ScalableValue.absolute(12.0),
 

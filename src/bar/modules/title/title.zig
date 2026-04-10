@@ -296,6 +296,8 @@ fn drawSingleWindow(
 
 // Private — split-view segmented titles
 
+/// Renders one title segment per window in a horizontal split-view layout.
+/// Windows are sorted spatially so each segment position is stable across focus changes.
 fn drawSegmentedTitles(
     ctx:               TitleRenderContext,
     snapshot:          TitleSnapshot,
@@ -514,19 +516,4 @@ fn fetchProperty(
     if (len <= 0) return null;
     const value: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
     return try allocator.dupe(u8, value[0..@intCast(len)]);
-}
-
-/// Fetch the title of `window`, trying `_NET_WM_NAME` then `WM_NAME`.
-/// Makes blocking X11 round-trips — MAIN THREAD ONLY.
-fn fetchWindowTitle(
-    conn:      *xcb.xcb_connection_t,
-    window:    u32,
-    allocator: std.mem.Allocator,
-) !?[]const u8 {
-    atoms.ensureResolved();
-    if (atoms.net_wm_name) |na| {
-        if (try fetchProperty(conn, window, na, atoms.utf8AtomType(), allocator)) |t|
-            return t;
-    }
-    return try fetchProperty(conn, window, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, allocator);
 }
