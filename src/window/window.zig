@@ -669,15 +669,89 @@ pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allo
 // ---------------------------------------------------------------------------
 // Child window resolution
 // ---------------------------------------------------------------------------
+//
+// Electron, Qt, GTK, and similar toolkits create one or more child windows
+// beneath their managed toplevel for rendering.  When a ButtonPress or
+// EnterNotify arrives on such a child, `findManagedWindow` walks the X11
+// window tree upward (via xcb_query_tree) to find the managed ancestor.
+//
+// Each xcb_query_tree call is a blocking round-trip.  For Electron apps that
+// nest 2–3 child windows, the first hover over the window costs 2–3 round-
+// trips.  Subsequent hovers over the same child paid the same cost again.
+//
+// Child-window cache:
+//   Maps child XID → managed toplevel XID for previously resolved children.
+//   On a cache hit, findManagedWindow returns immediately with zero XCB calls.
+//   On a miss the tree walk runs as before, and the result is stored.
+//   Entries are evicted when the managed toplevel is unmanaged (called from
+//   unmanageWindow via evictChildCache).
+//
+// Implementation: fixed flat array with linear scan.  Electron creates at
+// most 3–5 child windows per app; with 5 open Electron apps that's ≤25
+// entries.  A linear scan over 25 × 8-byte pairs is ~200 bytes — two cache
+// lines.  No allocator, no deinit, no error surface.
+
+const CHILD_CACHE_CAP: usize = 64;
+
+const ChildEntry = struct { child: u32, managed: u32 };
+
+var child_cache: [CHILD_CACHE_CAP]ChildEntry = undefined;
+var child_cache_len: usize = 0;
+
+/// Record that `child` resolves to `managed` so future tree walks are skipped.
+fn cacheChildWindow(child: u32, managed: u32) void {
+    if (child == managed) return; // direct hit — not a child, nothing to cache
+    for (child_cache[0..child_cache_len]) |*e| {
+        if (e.child == child) { e.managed = managed; return; } // update in place
+    }
+    if (child_cache_len < CHILD_CACHE_CAP) {
+        child_cache[child_cache_len] = .{ .child = child, .managed = managed };
+        child_cache_len += 1;
+    }
+    // At cap: silently drop — the tree walk fallback is always correct.
+}
+
+/// Remove all entries whose managed toplevel is `managed_win`.
+/// Called from unmanageWindow so stale child entries don't linger.
+pub fn evictChildCache(managed_win: u32) void {
+    var i: usize = 0;
+    while (i < child_cache_len) {
+        if (child_cache[i].managed == managed_win) {
+            child_cache_len -= 1;
+            child_cache[i] = child_cache[child_cache_len];
+        } else {
+            i += 1;
+        }
+    }
+}
 
 /// Walks up the X11 window tree from `win` to find the top-level window the WM
 /// manages. Electron apps and other toolkits often use child windows for
 /// rendering, so button events may arrive on a child rather than the managed parent.
+///
+/// Fast path: checks the child-window cache first. On a hit, returns the cached
+/// managed ancestor with zero XCB calls — eliminating the 2–3 blocking
+/// xcb_query_tree round-trips that previously fired on every hover over an
+/// Electron/Qt child window.
 pub fn findManagedWindow(conn: *xcb.xcb_connection_t, win: u32, is_managed: *const fn (u32) bool) u32 {
+    // Fast path: direct managed window (most common case — no child involved).
+    if (is_managed(win)) return win;
+
+    // Fast path: child-window cache hit (common for Electron/Qt after first hover).
+    for (child_cache[0..child_cache_len]) |e| {
+        if (e.child == win) {
+            // Validate: if the cached managed window was since unmanaged (race),
+            // is_managed will return false and we fall through to the tree walk.
+            if (is_managed(e.managed)) return e.managed;
+            break; // stale entry — fall through to tree walk
+        }
+    }
+
+    // Slow path: walk the X11 window tree. Each iteration is one blocking
+    // round-trip. Electron typically nests 2–3 levels, so this runs 2–3 times
+    // on the first hover over a new Electron window, then never again.
     var current = win;
     for (0..MAX_WINDOW_TREE_DEPTH) |_| {
-        if (is_managed(current)) return current;
-
         const tree_reply = xcb.xcb_query_tree_reply(
             conn, xcb.xcb_query_tree(conn, current), null,
         ) orelse return win;
@@ -685,6 +759,10 @@ pub fn findManagedWindow(conn: *xcb.xcb_connection_t, win: u32, is_managed: *con
 
         if (tree_reply.*.parent == tree_reply.*.root or tree_reply.*.parent == 0) return win;
         current = tree_reply.*.parent;
+        if (is_managed(current)) {
+            cacheChildWindow(win, current);
+            return current;
+        }
     }
     return win;
 }
@@ -1106,6 +1184,11 @@ fn unmanageWindow(win: u32) void {
 
     uncacheWindowFocusProps(win);
 
+    // Evict any child-window cache entries pointing at this managed toplevel.
+    // Without this, a new window reusing the same XID could be mis-identified
+    // as the old toplevel's child on the next hover event.
+    evictChildCache(win);
+
     focus.removeFromHistory(win);
 
     const ptr_cookie: ?xcb.xcb_query_pointer_cookie_t =
@@ -1209,19 +1292,25 @@ fn sendConfigureNotify(win: u32, geom: WindowGeometry) void {
 
 /// Synthesize and send a ConfigureNotify event with the window's current geometry.
 ///
-/// Fast path: serves geometry from the tiling cache — zero round-trips.
+/// Three paths, in order of cost:
 ///
-/// Slow path: for fullscreen windows or cache misses, issues a blocking
-/// xcb_get_geometry round-trip.
+///   1. Tiling cache hit — zero round-trips.  The geometry for tiled windows is
+///      always up-to-date in the tiling CacheMap after a retile pass.
 ///
-/// NOTE — slow-path latency: a fullscreen window that generates many
-/// ConfigureRequest events (e.g. a video player attempting to resize while
-/// locked) will block the event loop on one round-trip per event.  Fullscreen
-/// geometry is deterministic (screen dimensions), so this could be replaced by
-/// returning the screen geometry directly.  The blocking call is retained for
-/// simplicity; optimize if profiling reveals this path is hot.
+///   2. Fullscreen fast path — zero round-trips.  Fullscreen geometry is fully
+///      determined by the screen dimensions written in enterFullscreen:
+///      (x=0, y=0, width=screen_width, height=screen_height, border_width=0).
+///      The tiling cache for a fullscreen window is intentionally invalidated on
+///      enter (so retile skips it), so path 1 misses and we arrive here.
+///      Previously this fell through to the blocking xcb_get_geometry path,
+///      costing one server round-trip per ConfigureRequest — a problem for
+///      video players and screensavers that poll their size continuously.
+///
+///   3. True cache miss — one blocking xcb_get_geometry round-trip.  This should
+///      only occur for floating windows that have never been retiled and are not
+///      fullscreen.  It is a genuine fallback, not a hot path.
 fn sendSyntheticConfigureNotify(win: u32) void {
-    // Fast path: serve the geometry from the tiling cache — zero round-trips.
+    // Path 1: tiling cache — zero round-trips.
     if (build.has_tiling) {
         if (tiling.getWindowGeom(win)) |rect| {
             const border: u16 = if (tiling.getStateOpt()) |s| s.border_width else 0;
@@ -1233,7 +1322,24 @@ fn sendSyntheticConfigureNotify(win: u32) void {
         }
     }
 
-    // Slow path: fullscreen windows or a cache miss. One blocking round-trip.
+    // Path 2: fullscreen — geometry is always (0, 0, screen_w, screen_h, bw=0).
+    // enterFullscreen writes exactly these values and invalidates the tiling
+    // cache entry, so this window will always miss path 1 while fullscreen.
+    if (build.has_fullscreen) {
+        if (fullscreen.isFullscreen(win)) {
+            sendConfigureNotify(win, .{
+                .x            = 0,
+                .y            = 0,
+                .width        = @intCast(core.screen.width_in_pixels),
+                .height       = @intCast(core.screen.height_in_pixels),
+                .border_width = 0,
+            });
+            return;
+        }
+    }
+
+    // Path 3: true cache miss — floating window, no retile yet. One blocking
+    // round-trip.  Rare in practice; not a hot path.
     const reply = xcb.xcb_get_geometry_reply(
         core.conn, xcb.xcb_get_geometry(core.conn, win), null,
     ) orelse return;
@@ -1448,12 +1554,30 @@ pub fn updateFocusBorders(old_focused: ?u32, new_focused: ?u32) void {
 /// Refresh border colors for every window on the current workspace.
 /// Used by `updateWorkspaceBordersIfNeeded` (event-loop end-of-batch sweep)
 /// and by `reloadBorders` (config reload, needs all windows).
+///
+/// When tiling is compiled in, tiled windows are deduped via the tiling
+/// geometry cache (same `CacheMap.border` field that `configureWithHints` uses),
+/// skipping `xcb_change_window_attributes` entirely when the color has not
+/// changed since the last send.  This eliminates one XCB request per tiled
+/// window per event batch in the common steady-state (focused window unchanged):
+/// idle typing, scrolling, or cursor movement inside a window no longer
+/// generates any border protocol traffic.
+///
+/// Floating windows with no tiling cache entry are sent unconditionally (they
+/// are typically few in number and do not benefit from tiling-cache dedup).
 pub fn updateWorkspaceBorders() void {
     if (!build.has_workspaces) return;
     const ws = workspaces.getCurrentWorkspaceObject() orelse return;
-    for (ws.windows.items()) |win|
+    for (ws.windows.items()) |win| {
+        const color = borderColor(win);
+        // Tiled windows: dedup via the tiling CacheMap — skip XCB if unchanged.
+        if (comptime build.has_tiling) {
+            if (tiling.sendBorderColorIfChanged(win, color)) continue;
+        }
+        // Floating windows (no cache entry): send unconditionally.
         _ = xcb.xcb_change_window_attributes(core.conn, win,
-            xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
+            xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
+    }
 }
 
 /// Refresh border colors for only the FLOATING (non-tiled) windows on the
@@ -1466,6 +1590,10 @@ pub fn updateWorkspaceBorders() void {
 /// Floating windows are not touched by the retile pass and must be swept here.
 /// When tiling is absent or disabled, this falls back to the full sweep because
 /// there are no tiled windows to skip.
+///
+/// Dedup strategy mirrors updateWorkspaceBorders: tiling-cache hits skip the
+/// XCB call; windows absent from the cache (pure floating, never retiled) are
+/// sent unconditionally.
 fn updateWorkspaceBordersPostRetile() void {
     if (!build.has_workspaces) return;
     const ws = workspaces.getCurrentWorkspaceObject() orelse return;
@@ -1474,16 +1602,26 @@ fn updateWorkspaceBordersPostRetile() void {
             for (ws.windows.items()) |win| {
                 // Tiled windows: already handled by configureWithHints during retile.
                 if (tiling.isWindowTiled(win)) continue;
+                const color = borderColor(win);
+                // Floating windows may still have a tiling cache entry (e.g. they
+                // were individually floated via toggleWindowFloat).  Use the cache
+                // for dedup when available; fall through otherwise.
+                if (tiling.sendBorderColorIfChanged(win, color)) continue;
                 _ = xcb.xcb_change_window_attributes(core.conn, win,
-                    xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
+                    xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
             }
             return;
         }
     }
     // Tiling absent or disabled: no tiled windows, sweep everything.
-    for (ws.windows.items()) |win|
+    for (ws.windows.items()) |win| {
+        const color = borderColor(win);
+        if (comptime build.has_tiling) {
+            if (tiling.sendBorderColorIfChanged(win, color)) continue;
+        }
         _ = xcb.xcb_change_window_attributes(core.conn, win,
-            xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
+            xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
+    }
 }
 
 /// Mark that the current event batch already swept all workspace border colors
