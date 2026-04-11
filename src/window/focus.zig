@@ -1,6 +1,5 @@
-
 //! Focus management
-//! Routes windows' focus. Reason-aware sets/clears.
+//! Routes windows' focus with reason-aware sets/clears.
 
 const std   = @import("std");
 const build = @import("build_options");
@@ -517,7 +516,7 @@ pub fn setFocus(win: u32, reason: Reason) void {
     const old = state.focused_window;
     commitFocusTransition(old, win, .{
         .set_input_focus    = input_model != .globally_active,
-        .raise              = shouldRaise(reason),
+        .raise              = shouldRaise(reason, win),
         .send_wm_take_focus = input_model != .no_input,
         .arm_confirm        = reason == .mouse_enter,
         .schedule_bar       = true,
@@ -741,9 +740,15 @@ inline fn advertiseActiveWindow(win: u32) void {
         core.root, state.net_active_window, xcb.XCB_ATOM_WINDOW, 32, 1, &win);
 }
 
-inline fn shouldRaise(reason: Reason) bool {
+inline fn shouldRaise(reason: Reason, win: u32) bool {
     return switch (reason) {
-        .mouse_click, .user_command, .mouse_enter => true,
+        .mouse_click, .user_command, .mouse_enter =>
+            // Tiled windows: the tiling retile owns their stacking order and
+            // will raise top_win atomically via configureWithHintsAndRaise.
+            // A pre-raise here would produce a redundant XCB request that
+            // creates an intermediate compositor frame when a retile also runs
+            // in the same batch.
+            if (comptime build.has_tiling) !tiling.isWindowActiveTiled(win) else true,
         .tiling_operation, .window_spawn, .workspace_switch => false,
     };
 }

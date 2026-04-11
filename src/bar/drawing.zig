@@ -423,6 +423,36 @@ pub const DrawContext = struct {
         );
     }
 
+    /// Flush the Cairo surface to the off-screen pixmap (pure Cairo/SHM op)
+    /// WITHOUT issuing xcb_copy_area or xcb_flush on the shared connection.
+    ///
+    /// Use this inside xcb_grab_server sections so that the bar thread's render
+    /// work does not trigger an early XCB flush that would let the compositor
+    /// sneak in an intermediate frame.  After the grab, call blitQueued() to
+    /// enqueue the xcb_copy_area, then let ungrabAndFlush() drain everything
+    /// atomically with xcb_ungrab_server.
+    pub fn renderOnly(self: *DrawContext) void {
+        c.cairo_surface_flush(self.surface);
+        // Deliberately no xcb_copy_area and no xcb_flush here.
+    }
+
+    /// Queue an xcb_copy_area from the off-screen pixmap to the bar window
+    /// WITHOUT calling xcb_flush.  Safe to call inside xcb_grab_server because
+    /// no flush is issued; the request will be sent together with all other
+    /// queued geometry changes when ungrabAndFlush() calls xcb_flush.
+    pub fn blitQueued(self: *DrawContext) void {
+        if (self.copy_gc == 0) return;
+        _ = core.xcb.xcb_copy_area(
+            self.conn,
+            self.offscreen_pixmap,
+            self.window,
+            self.copy_gc,
+            0, 0, 0, 0,
+            self.width, self.height,
+        );
+        // No xcb_flush — caller owns the flush (ungrabAndFlush).
+    }
+
     /// Blit only the rectangle [x, x+w) from the off-screen pixmap to the window.
     ///
     /// Does NOT call cairo_surface_flush — use this when only XCB (not Cairo) has

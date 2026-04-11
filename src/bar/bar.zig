@@ -191,7 +191,7 @@ const BarWork = struct {
     focused_window: ?u32 = null,  // valid only when kind == .focusOnly
     has_clock_tick: bool = false, // additive clock tick; ignored when kind == .snapReady
 
-    const Kind = enum { idle, snapReady, focusOnly, quit };
+    const Kind = enum { idle, snapReady, renderOnly, focusOnly, quit };
 
     /// True when there is at least one unit of work pending.
     fn hasPending(w: BarWork) bool {
@@ -307,6 +307,10 @@ const State = struct {
     is_globally_visible: bool = true,
     is_dirty:          bool = false,
     has_clock_segment: bool,
+    /// Title geometry captured by drawAllInner; consumed by drawAll/drawAllNoFlush
+    /// to call syncTitleCache after the flush decision.
+    title_cache_pending_x: ?u16 = null,
+    title_cache_pending_w: u16  = 0,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -450,6 +454,30 @@ const State = struct {
     }
 
     fn drawAll(self: *State, snap: *const BarSnapshot) !void {
+        try self.drawAllInner(snap);
+        self.render.dc.flush();
+        if (self.title_cache_pending_x) |x|
+            self.syncTitleCache(snap, x, self.title_cache_pending_w);
+        self.title_cache_pending_x = null;
+    }
+
+    /// Like drawAll but does NOT call dc.flush() (no xcb_copy_area, no xcb_flush).
+    /// Safe to call from inside an xcb_grab_server section via submitRenderBlocking.
+    /// The caller must queue a blit with dc.blitQueued() and flush at ungrab time.
+    fn drawAllNoFlush(self: *State, snap: *const BarSnapshot) !void {
+        try self.drawAllInner(snap);
+        // Cairo surface is flushed to the off-screen pixmap here (pure Cairo op,
+        // no XCB traffic on the shared connection).
+        self.render.dc.renderOnly();
+        if (self.title_cache_pending_x) |x|
+            self.syncTitleCache(snap, x, self.title_cache_pending_w);
+        self.title_cache_pending_x = null;
+    }
+
+    /// Core drawing logic shared by drawAll and drawAllNoFlush.
+    /// Populates the off-screen pixmap via Cairo/XCB rectangle fills.
+    /// Does NOT flush to the bar window — caller decides when to blit.
+    fn drawAllInner(self: *State, snap: *const BarSnapshot) !void {
         if (snap.is_title_invalidated) self.title_cache.title_window = null;
         if (snap.is_full_redraw) self.render.dc.fillRect(0, 0, self.render.width, self.render.height, self.render.config.bg);
 
@@ -510,8 +538,10 @@ const State = struct {
             }
         }
 
-        self.render.dc.flush();
-        if (title_seg_w > 0) self.syncTitleCache(snap, title_seg_x, title_seg_w);
+        // Store title geometry for the caller (drawAll / drawAllNoFlush) to
+        // pass to syncTitleCache after the blit decision has been made.
+        self.title_cache_pending_x = if (title_seg_w > 0) title_seg_x else null;
+        self.title_cache_pending_w = title_seg_w;
     }
 
     fn drawClockOnly(self: *State) void {
@@ -627,6 +657,18 @@ fn runBarThread(s: *State) void {
                 // Full draw covers the clock too — ignore work.has_clock_tick.
                 s.drawAll(&gBar.channel.slots[read_idx]) catch |e|
                     debug.warnOnErr(e, "bar thread drawAll");
+                gBar.channel.mutex.lock();
+                gBar.channel.draw_generation +%= 1;
+                gBar.channel.draw_done.broadcast();
+                gBar.channel.mutex.unlock();
+            },
+            .renderOnly => {
+                // Render to the off-screen pixmap only — no xcb_copy_area,
+                // no xcb_flush.  The main thread will queue the blit itself
+                // (dc.blitQueued) so it is sent atomically with the geometry
+                // changes and xcb_ungrab_server inside ungrabAndFlush().
+                s.drawAllNoFlush(&gBar.channel.slots[read_idx]) catch |e|
+                    debug.warnOnErr(e, "bar thread drawAllNoFlush");
                 gBar.channel.mutex.lock();
                 gBar.channel.draw_generation +%= 1;
                 gBar.channel.draw_done.broadcast();
@@ -805,6 +847,25 @@ pub fn submitDrawBlocking() void {
     defer gBar.channel.mutex.unlock();
     gBar.channel.write_index ^= 1;
     gBar.channel.work.kind    = .snapReady;
+    const gen_before = gBar.channel.draw_generation;
+    gBar.channel.work_ready.signal();
+    while (gBar.channel.draw_generation == gen_before)
+        gBar.channel.draw_done.wait(&gBar.channel.mutex);
+}
+
+/// Posts a snapshot to the bar thread and blocks until the bar thread has
+/// rendered into the off-screen pixmap — but does NOT issue xcb_copy_area or
+/// xcb_flush on the shared XCB connection.
+///
+/// Use this INSIDE xcb_grab_server.  After this returns, call dc.blitQueued()
+/// to enqueue the xcb_copy_area, then let ungrabAndFlush() send everything
+/// (geometry changes + blit + ungrab) atomically.
+fn submitRenderBlocking() void {
+    if (prepareSnapshot() == null) return;
+    gBar.channel.mutex.lock();
+    defer gBar.channel.mutex.unlock();
+    gBar.channel.write_index ^= 1;
+    gBar.channel.work.kind    = .renderOnly;
     const gen_before = gBar.channel.draw_generation;
     gBar.channel.work_ready.signal();
     while (gBar.channel.draw_generation == gen_before)
@@ -1086,10 +1147,32 @@ pub fn scheduleFullRedraw() void {
 
 pub fn isVisible() bool              { return if (gBar.state) |s| s.is_visible else false; }
 
-/// Synchronous redraw — blocks until done. Use only inside/before xcb_ungrab_server.
+/// Synchronous bar update safe to call inside xcb_grab_server.
+///
+/// Two-phase approach that keeps the shared XCB connection quiet until
+/// ungrabAndFlush() drains everything atomically:
+///
+///   Phase 1 — render (inside grab, no XCB traffic on shared connection):
+///     Tell the bar thread to render the current snapshot into the off-screen
+///     pixmap.  The thread calls cairo_surface_flush (pure Cairo/SHM) but
+///     issues NO xcb_copy_area and NO xcb_flush.  The compositor therefore
+///     cannot observe an intermediate frame.
+///
+///   Phase 2 — queue blit (still inside grab):
+///     Call dc.blitQueued() to enqueue a single xcb_copy_area request in the
+///     XCB client buffer.  This does not flush; the request sits alongside all
+///     pending configure_window calls until the caller invokes ungrabAndFlush().
+///
+/// The net effect: the X server receives configure_window + xcb_copy_area +
+/// xcb_ungrab_server in one flush, producing exactly one compositor frame.
 pub fn redrawInsideGrab() void {
     const s = gBar.state orelse return;
-    if (s.is_visible) { submitDrawBlocking(); s.is_dirty = false; }
+    if (!s.is_visible) return;
+    // Phase 1: render to pixmap without any XCB flush.
+    submitRenderBlocking();
+    // Phase 2: queue the blit — will be sent with ungrabAndFlush().
+    s.render.dc.blitQueued();
+    s.is_dirty = false;
 }
 
 pub fn raiseBar() void {
