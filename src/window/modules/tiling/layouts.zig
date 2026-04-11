@@ -6,11 +6,11 @@
 //! decoupled from both each other and from the tiling state.
 //!
 //! Performance note: WM_NORMAL_HINTS constraints (SizeHints) are embedded
-//! directly inside each CacheMap entry alongside the geometry and border color.
-//! This means `configureWithHints` performs a single linear scan per window per
-//! retile instead of two (one for geometry dedup, one for size-hint lookup),
-//! halving the O(N²) scan cost for a full retile pass.
+//! directly inside each CacheMap slot alongside the geometry and border color.
+//! `configureWithHints` performs a single O(1) hash probe per window per retile,
+//! making the full retile pass O(N) in the number of open windows.
 
+const std     = @import("std");
 const core    = @import("core");
     const xcb = core.xcb;
 const utils   = @import("utils");
@@ -50,23 +50,29 @@ pub const SizeHints = struct {
 // Per-window geometry, border-color, and size-hint cache
 //
 // Stores the last-applied geometry, border color, AND WM_NORMAL_HINTS
-// constraints for each window in a single flat array.  All three fields share
-// one entry so `configureWithHints` performs ONE linear scan per window per
-// retile — down from two (one for geometry dedup, one for size-hint lookup).
-// This halves the per-retile scan cost, which was O(2N²) in the number of
-// open windows.
+// constraints for each window in a single open-addressing hash table.  All
+// three fields share one slot so `configureWithHints` performs ONE O(1) hash
+// probe per window per retile — down from O(N) linear scan, making the full
+// retile pass O(N) total instead of O(N²).
 //
 // `configureWithHints` writes `.rect`; `applyBorderColor` writes `.border`;
 // `CacheMap.cacheHints` writes `.hints` at map time.
 //
-// Why not AutoHashMap?
-//   n is bounded by open windows — realistic: 10–80; hard cap: cache_capacity.
-//   At that scale a linear scan over contiguous memory is faster than a hash
-//   probe (cache locality beats asymptotic complexity). The flat array also
-//   eliminates every structural cost HashMap carries:
-//     - No heap allocation; no deinit; no error path in getOrPut.
-//     - clearRetainingCapacity reduces to a single `len = 0` assignment.
-//     - No allocation-failure fallback paths that leave cache partially filled.
+// Hash table design:
+//   • Open addressing with linear probing.  Hash table avoids heap allocation,
+//     keeps no allocator reference, has no deinit, and has no partial-failure
+//     states — all the properties the previous flat array offered.
+//   • Table capacity = 512 (power of two).  Max live entries = 256 (load ≤ 0.5).
+//     At load 0.5 the expected probe chain length is 1.5; worst case is bounded.
+//   • Hash: Knuth's multiplicative constant (2654435761 ≈ 2³² / φ).
+//     XCB allocates window IDs as near-sequential integers; the multiplicative
+//     hash spreads them across all 9 index bits with minimal collision.
+//   • Deletion: backward-shift (no tombstones).  When an entry is removed,
+//     subsequent entries in the same probe run are pulled back one step so that
+//     lookup probes never skip over a gap left by a deletion.  This keeps probe
+//     chains short without any bookkeeping beyond the shift itself.
+//   • EMPTY_WIN = 0 is the empty-slot sentinel.  XCB never allocates ID 0
+//     (it is XCB_NONE), so this is safe for the lifetime of the process.
 
 /// Combined per-window cache entry: last geometry, last border color, and
 /// WM_NORMAL_HINTS size constraints.
@@ -89,7 +95,12 @@ pub const WindowData = struct {
     }
 };
 
-const cache_capacity: usize = 256;
+// Hash table parameters
+const cache_capacity:  usize = 256; // max live entries; overflow_sentinel fires above this
+const hash_table_cap:  usize = 512; // power-of-two slot count; load factor ≤ 0.5
+const hash_table_mask: usize = hash_table_cap - 1;
+const hash_shift:      u5    = 23;  // 32 - log2(512)
+const EMPTY_WIN:       u32   = 0;   // XCB_NONE; never a real window ID
 
 /// Overflow sentinel used by `CacheMap.getOrPut` when the hard cap is exceeded.
 ///
@@ -99,69 +110,129 @@ const cache_capacity: usize = 256;
 /// configure_window on the next retile — an unconditionally correct outcome.
 ///
 /// SINGLE-THREADED ASSUMPTION: two concurrent overflows would alias to the same
-/// pointer.  The WM is single-threaded for all geometry operations; the bar
-/// render thread calls `configureWithHints` (and thus `getOrPut`) only on the
-/// render thread, never concurrently with tiling retile calls on the main
-/// thread.  If that invariant ever changes, this sentinel must become per-call
-/// or the overflow path must return an error.
+/// pointer.  The WM is single-threaded for all geometry operations.
+/// If that invariant ever changes, this sentinel must become per-call or the
+/// overflow path must return an error.
 var overflow_sentinel: WindowData = .{};
 
-/// Fixed-capacity cache mapping window IDs to their last geometry, border color,
-/// and WM_NORMAL_HINTS constraints — all three in a single flat-array entry.
+/// Open-addressing hash table mapping window IDs to their last geometry,
+/// border color, and WM_NORMAL_HINTS constraints — all three in one slot.
+///
+/// Public API is identical to the previous flat-array CacheMap; callers need
+/// no changes.  The struct is zero-initializable: `CacheMap{}` or `.{}` in
+/// tiling.State produces an empty table because EMPTY_WIN = 0.
 pub const CacheMap = struct {
-    const Entry = struct { win: u32, data: WindowData };
+    const Slot = struct {
+        win:  u32        = EMPTY_WIN,
+        data: WindowData = .{},
+    };
 
     pub const GetOrPutResult = struct {
         found_existing: bool,
         value_ptr: *WindowData,
     };
 
-    buf: [cache_capacity]Entry = undefined,
-    len: usize = 0,
+    slots: [hash_table_cap]Slot = std.mem.zeroes([hash_table_cap]Slot),
+    count: usize = 0,
 
-    /// Locate the entry for `win`, creating one if absent. Always succeeds —
-    /// no allocator, no error union. When the buffer is full the write is
-    /// routed to the module-level overflow sentinel (no live entry is corrupted)
-    /// and a debug error is logged; this is a hard-cap violation that should
-    /// never occur in normal use.
+    /// Knuth's multiplicative hash for 32-bit keys, producing a 9-bit index
+    /// (log2(512) = 9) into the hash table.  Distributes XCB's near-sequential
+    /// window IDs uniformly across all slots.
+    inline fn hashSlot(win: u32) usize {
+        return @intCast((win *% 2654435761) >> hash_shift);
+    }
+
+    /// Locate or insert the entry for `win`. Always succeeds — no allocator,
+    /// no error union.  When the live-entry count reaches cache_capacity the
+    /// insertion is routed to the module-level overflow sentinel (no live entry
+    /// is corrupted) and a debug error is logged.
     pub fn getOrPut(self: *CacheMap, win: u32) GetOrPutResult {
-        for (self.buf[0..self.len]) |*e| {
-            if (e.win == win) return .{ .found_existing = true, .value_ptr = &e.data };
+        std.debug.assert(win != EMPTY_WIN); // XCB never assigns ID 0
+        var idx = hashSlot(win);
+        while (true) : (idx = (idx + 1) & hash_table_mask) {
+            const slot = &self.slots[idx];
+            if (slot.win == win)
+                return .{ .found_existing = true, .value_ptr = &slot.data };
+            if (slot.win == EMPTY_WIN) {
+                if (self.count >= cache_capacity) {
+                    debug.err("CacheMap: capacity exceeded, dropping cache for 0x{x}", .{win});
+                    overflow_sentinel = .{};
+                    return .{ .found_existing = false, .value_ptr = &overflow_sentinel };
+                }
+                slot.* = .{ .win = win, .data = .{} };
+                self.count += 1;
+                return .{ .found_existing = false, .value_ptr = &slot.data };
+            }
         }
-        if (self.len < cache_capacity) {
-            self.buf[self.len] = .{ .win = win, .data = .{} };
-            const value_ptr = &self.buf[self.len].data;
-            self.len += 1;
-            return .{ .found_existing = false, .value_ptr = value_ptr };
-        }
-        debug.err("CacheMap: capacity exceeded, dropping cache for 0x{x}", .{win});
-        overflow_sentinel = .{};
-        return .{ .found_existing = false, .value_ptr = &overflow_sentinel };
     }
 
     /// Returns a copy of the cached WindowData for `win`, or null if absent.
     pub fn get(self: *const CacheMap, win: u32) ?WindowData {
-        for (self.buf[0..self.len]) |*e| if (e.win == win) return e.data;
-        return null;
+        var idx = hashSlot(win);
+        while (true) : (idx = (idx + 1) & hash_table_mask) {
+            const slot = &self.slots[idx];
+            if (slot.win == win)  return slot.data;
+            if (slot.win == EMPTY_WIN) return null;
+        }
     }
 
     /// Returns a mutable pointer to the cached WindowData for `win`, or null if absent.
     pub fn getPtr(self: *CacheMap, win: u32) ?*WindowData {
-        return if (findEntry(self, win)) |e| &e.data else null;
-    }
-
-    /// Swap-and-decrement removal: O(1), order-independent.
-    pub fn remove(self: *CacheMap, win: u32) void {
-        for (self.buf[0..self.len], 0..) |e, i| {
-            if (e.win != win) continue;
-            self.buf[i] = self.buf[self.len - 1];
-            self.len -= 1;
-            return;
+        var idx = hashSlot(win);
+        while (true) : (idx = (idx + 1) & hash_table_mask) {
+            const slot = &self.slots[idx];
+            if (slot.win == win)       return &slot.data;
+            if (slot.win == EMPTY_WIN) return null;
         }
     }
 
-    /// Reset the cache to empty: single counter write, O(1).
-    pub fn clearRetainingCapacity(self: *CacheMap) void { self.len = 0; }
+    /// Remove the entry for `win` (no-op when absent).
+    ///
+    /// Uses backward-shift deletion to maintain the linear-probe invariant
+    /// (every entry sits in the contiguous run that starts at its ideal slot)
+    /// without tombstones.  After the deleted slot becomes a hole, subsequent
+    /// entries in the same run are pulled back one step as long as doing so
+    /// does not move them before their ideal slot.  This keeps probe chains
+    /// compact and avoids the lookup degradation that tombstones cause over time.
+    ///
+    /// Correctness condition for shifting entry at `j` into the hole at `h`:
+    ///   An entry with ideal slot `r` can move from `j` to `h` when the probe
+    ///   chain from `r` passes through `h` before `j`, i.e. when h is not
+    ///   strictly between r and j in the modular sense.  Equivalently:
+    ///     (j − r) mod cap ≥ (j − h) mod cap
+    pub fn remove(self: *CacheMap, win: u32) void {
+        // Locate the entry.
+        var hole: usize = hashSlot(win);
+        while (true) : (hole = (hole + 1) & hash_table_mask) {
+            if (self.slots[hole].win == EMPTY_WIN) return; // not present
+            if (self.slots[hole].win == win)       break;
+        }
+        self.count -= 1;
+
+        // Backward-shift: pull subsequent entries toward the hole until we
+        // reach an empty slot.  Each iteration either shifts an entry back
+        // (advancing the hole) or leaves it in place (non-moveable entry) and
+        // keeps scanning — both paths advance j, so the loop always terminates.
+        var j = (hole + 1) & hash_table_mask;
+        while (self.slots[j].win != EMPTY_WIN) {
+            const r = hashSlot(self.slots[j].win);
+            // Can entry at j (ideal r) move to hole?
+            // Yes when (j-r) mod cap >= (j-hole) mod cap.
+            if (((j -% r) & hash_table_mask) >= ((j -% hole) & hash_table_mask)) {
+                self.slots[hole] = self.slots[j];
+                hole = j;
+            }
+            j = (j + 1) & hash_table_mask;
+        }
+        self.slots[hole] = .{}; // clear the final hole (original or shifted)
+    }
+
+    /// Reset the cache to empty in O(table_size) time.
+    /// Zeroes all slots since EMPTY_WIN = 0 and WindowData default is all-zero.
+    pub fn clearRetainingCapacity(self: *CacheMap) void {
+        self.slots = std.mem.zeroes([hash_table_cap]Slot);
+        self.count = 0;
+    }
 
     /// Store WM_NORMAL_HINTS constraints for `win` in its cache entry.
     /// No-op when all hint fields are zero (client published an empty atom).
@@ -171,11 +242,6 @@ pub const CacheMap = struct {
     pub fn cacheHints(self: *CacheMap, win: u32, hints: SizeHints) void {
         if (isEmptySizeHints(hints)) return;
         self.getOrPut(win).value_ptr.hints = hints;
-    }
-
-    fn findEntry(self: *CacheMap, win: u32) ?*Entry {
-        for (self.buf[0..self.len]) |*e| if (e.win == win) return e;
-        return null;
     }
 };
 
@@ -197,6 +263,15 @@ pub const LayoutCtx = struct {
     /// do not have focus/border information (e.g. direct utils.configureWindow
     /// calls in restoreWorkspaceGeom).
     get_border_color: ?*const fn (win: u32) u32 = null,
+    /// When non-null, layout modules should emit this window's configure_window
+    /// call LAST within each column or stack group it belongs to.
+    ///
+    /// Used by swap_master to avoid a one-frame wallpaper gap: after swapping
+    /// the focused window into the master slot the growing window (new master)
+    /// must not vacate its old stack slot until the shrinking window (old master)
+    /// has already been configured into that slot.  Setting defer_configure to
+    /// the new master achieves this ordering without changing geometry arithmetic.
+    defer_configure: ?u32 = null,
 };
 
 /// Returns true when both rects have identical coordinates and dimensions.
@@ -235,6 +310,56 @@ pub fn configureWithHints(
     if (is_rect_changed) {
         gop.value_ptr.rect = effective;
         utils.configureWindow(ctx.conn, win, effective);
+    }
+
+    const getBorderColor = ctx.get_border_color orelse return;
+    const color = getBorderColor(win);
+    if (gop.found_existing and gop.value_ptr.border == color) return;
+    gop.value_ptr.border = color;
+    _ = xcb.xcb_change_window_attributes(ctx.conn, win,
+        xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
+}
+
+/// Like configureWithHints, but also raises the window atomically.
+/// Combines XCB_CONFIG_WINDOW_{X,Y,WIDTH,HEIGHT} with XCB_CONFIG_WINDOW_STACK_MODE
+/// in a single request when geometry changes, so the compositor never sees an
+/// intermediate frame between the reposition/resize and the raise.
+pub fn configureWithHintsAndRaise(
+    ctx: *const LayoutCtx,
+    win: u32,
+    rect: utils.Rect,
+) void {
+    const gop = ctx.cache.getOrPut(win);
+    const effective = applyHintsToRect(rect, gop.value_ptr.hints);
+
+    if (!effective.isValid()) {
+        debug.err("Invalid rect for window 0x{x}: {}x{} at {},{}",
+            .{ win, effective.width, effective.height, effective.x, effective.y });
+        // Still raise even if geometry is invalid.
+        _ = xcb.xcb_configure_window(ctx.conn, win,
+            xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+        return;
+    }
+
+    const is_rect_changed = !gop.found_existing or !rectsEqual(gop.value_ptr.rect, effective);
+    if (is_rect_changed) {
+        gop.value_ptr.rect = effective;
+        // Combine geometry + raise into one request — one ConfigureNotify to the compositor.
+        _ = xcb.xcb_configure_window(ctx.conn, win,
+            xcb.XCB_CONFIG_WINDOW_X     | xcb.XCB_CONFIG_WINDOW_Y     |
+            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
+            xcb.XCB_CONFIG_WINDOW_STACK_MODE,
+            &[_]u32{
+                @bitCast(@as(i32, effective.x)),
+                @bitCast(@as(i32, effective.y)),
+                effective.width,
+                effective.height,
+                xcb.XCB_STACK_MODE_ABOVE,
+            });
+    } else {
+        // Geometry unchanged (cache hit) — only raise; no intermediate state possible.
+        _ = xcb.xcb_configure_window(ctx.conn, win,
+            xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     }
 
     const getBorderColor = ctx.get_border_color orelse return;

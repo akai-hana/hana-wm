@@ -123,7 +123,8 @@ pub const State = struct {
     last_retile_area: utils.Rect,
 
     /// Per-window cache storing last geometry AND last border color in a single
-    /// flat array. Populated by configureWithHints (rect) and applyBorderColor (border).
+    /// open-addressing hash table. Populated by configureWithHints (rect) and
+    /// applyBorderColor (border). O(1) lookup per window per retile.
     cache: layouts.CacheMap,
 
     // Scratch buffers — fixed-size arrays embedded in State (BSS, zero allocation).
@@ -264,8 +265,20 @@ pub fn addWindow(window_id: u32) void {
     const border_color = s.borderColor(window_id);
     _ = xcb.xcb_change_window_attributes(core.conn, window_id,
         xcb.XCB_CW_BORDER_PIXEL, &[_]u32{border_color});
-    _ = xcb.xcb_configure_window(core.conn, window_id,
-        xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{s.border_width});
+
+    // NOTE: BORDER_WIDTH is intentionally NOT sent here.
+    //
+    // Every code path that calls addWindow is immediately followed by a call
+    // that owns the BORDER_WIDTH send:
+    //   • mapWindowToScreen      → applyBorderWidth(win)   (on-screen spawn)
+    //   • registerWindowOffscreen → applyBorder(win)        (off-screen spawn)
+    //   • toggleWindowFloat       (float→tiled)             border width already
+    //   • addWindowAtFilteredIndex (unminimize)              set at initial map
+    //
+    // The X server retains BORDER_WIDTH between configure_window calls, so the
+    // value from the initial map remains correct for toggle and unminimize paths.
+    // Sending it here duplicated the request from applyBorderWidth in the common
+    // spawn path, costing one extra XCB round-trip per window open.
 
     // Pre-populate the cache so the immediately-following retile does not
     // re-send the border pixel. getOrPut is infallible on the flat-array cache.
@@ -383,6 +396,21 @@ pub fn retileCurrentWorkspace() void {
         return;
     }
     retile(calcScreenArea(), null);
+    s.is_dirty = false;
+}
+
+/// Like retileCurrentWorkspace, but passes `defer_win` through to the layout
+/// context so that window is configured LAST inside every column/stack it
+/// appears in.  Used by swap_master to ensure the shrinking window (old master
+/// moving into the stack) fills its new slot before the growing window (new
+/// master) vacates its old one — eliminating the one-frame wallpaper gap.
+pub fn retileCurrentWorkspaceDeferred(defer_win: ?u32) void {
+    const s = getState();
+    if (!s.is_enabled) {
+        _ = restoreWorkspaceGeom();
+        return;
+    }
+    retileDeferred(calcScreenArea(), null, defer_win);
     s.is_dirty = false;
 }
 
@@ -667,19 +695,22 @@ pub inline fn decreaseMasterWidth() void { adjustMasterWidth(-0.025); }
 /// Swap the focused window into the master slot (index 0 of the current
 /// workspace window list). If it is already the master, promotes the next
 /// workspace window.
+///
+/// NOTE: Does NOT call retileCurrentWorkspace(). The caller (action handler)
+/// is responsible for retiling inside the server grab so that the list
+/// reorder and the geometry flush are part of the same atomic batch.
 pub fn swapWithMaster() void {
     const s = getState();
     _ = swapWithMasterCore(s, findFocusMasterPos(s) orelse return);
-    retileCurrentWorkspace();
 }
 
-/// Like `swapWithMaster`, but focus transfers to the displaced window rather
-/// than staying on the window that was moved.
-pub fn swapWithMasterFollowFocus() void {
+/// Like `swapWithMaster`, but returns the displaced window so the caller can
+/// transfer focus to it after retiling, still inside the server grab.
+///
+/// NOTE: Does NOT call retileCurrentWorkspace(). See swapWithMaster().
+pub fn swapWithMasterFollowFocus() ?u32 {
     const s = getState();
-    const other = swapWithMasterCore(s, findFocusMasterPos(s) orelse return);
-    retileCurrentWorkspace();
-    if (other) |win| focus.setFocus(win, .tiling_operation);
+    return swapWithMasterCore(s, findFocusMasterPos(s) orelse return null);
 }
 
 /// Swap the on-screen positions of the currently focused window and the most
@@ -874,6 +905,19 @@ inline fn makeLayoutCtx(s: *State) layouts.LayoutCtx {
         .conn             = core.conn,
         .cache            = &s.cache,
         .get_border_color = getBorderColorForWindow,
+        .defer_configure  = null,
+    };
+}
+
+/// Like makeLayoutCtx but sets defer_configure so the named window is emitted
+/// last in every column/stack, preventing it from vacating its slot before the
+/// shrinking window has filled the adjacent slot.
+inline fn makeLayoutCtxDeferred(s: *State, defer_win: ?u32) layouts.LayoutCtx {
+    return .{
+        .conn             = core.conn,
+        .cache            = &s.cache,
+        .get_border_color = getBorderColorForWindow,
+        .defer_configure  = defer_win,
     };
 }
 
@@ -942,6 +986,12 @@ inline fn resolveMasterCount(s: *const State, ws_state: ?*WsState, ws_idx: u8) u
 /// Core retile. `for_ws`: when non-null, process that specific workspace instead
 /// of the current one.
 fn retile(screen: utils.Rect, for_ws: ?u8) void {
+    retileDeferred(screen, for_ws, null);
+}
+
+/// Like retile but sets LayoutCtx.defer_configure = defer_win.
+/// The named window is configured last inside every column/stack it appears in.
+fn retileDeferred(screen: utils.Rect, for_ws: ?u8, defer_win: ?u32) void {
     const s = getState();
 
     const target_ws: u8 = for_ws orelse
@@ -955,7 +1005,7 @@ fn retile(screen: utils.Rect, for_ws: ?u8) void {
     const ws_windows = s.scratch_wins[0..ws_count];
     if (ws_windows.len == 0) return;
 
-    const ctx = makeLayoutCtx(s);
+    const ctx = makeLayoutCtxDeferred(s, defer_win);
 
     // Hoist getState() once — used by resolve* and selectLayout below.
     const wss = workspaces.getState();
@@ -990,6 +1040,28 @@ fn applyBorderColor(s: *State, conn: *xcb.xcb_connection_t, win: u32, color: u32
 
 inline fn updateBorders(s: *State, ws_windows: []const u32) void {
     for (ws_windows) |win| applyBorderColor(s, core.conn, win, s.borderColor(win));
+}
+
+/// Public dedup helper for window.zig's border-sweep functions.
+///
+/// Checks the tiling geometry cache for `win` and sends
+/// `xcb_change_window_attributes BORDER_PIXEL` only when `color` differs from
+/// the stored value.  Returns true when the window was found in the cache
+/// (caller should `continue` and not send again).  Returns false when the
+/// window has no cache entry (pure floating window never retiled), so the
+/// caller falls back to an unconditional send.
+///
+/// This eliminates one `xcb_change_window_attributes` per tiled window per
+/// event batch when the focused window has not changed — the most common case
+/// during idle scroll, typing, or cursor movement inside a window.
+pub fn sendBorderColorIfChanged(win: u32, color: u32) bool {
+    const s = getStateOpt() orelse return false;
+    const wd = s.cache.getPtr(win) orelse return false;
+    if (wd.border == color) return true; // cached, color unchanged — skip XCB
+    wd.border = color;
+    _ = xcb.xcb_change_window_attributes(core.conn, win,
+        xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
+    return true;
 }
 
 // Window list helpers 
@@ -1096,19 +1168,28 @@ fn findFocusMasterPos(s: *State) ?FocusMasterPos {
 }
 
 /// Shared core for both swap-with-master variants.
+///
+/// Uses swapWindowsInList (O(1) std.mem.swap) instead of moveWindowToIndex
+/// (O(n) remove-then-insert) so that only the two swapping windows receive new
+/// geometry during the subsequent retile.  Every other window's slot is
+/// unchanged → same rect → cache hit → no configure_window call → no
+/// intermediate frames visible to the compositor.
 fn swapWithMasterCore(s: *State, pos: FocusMasterPos) ?u32 {
     if (pos.fp == pos.mp) {
         // Focused is already master — promote the next workspace window.
+        // A swap is sufficient: brings the target to index mp, demotes the
+        // current master to that target's slot.  Stack order differs from the
+        // old rotate but the visual result is identical for single-master layouts.
         for (pos.all[pos.mp + 1..], pos.mp + 1..) |win, i| {
             if (tracking.isOnCurrentWorkspace(win)) {
-                moveWindowToIndex(s, i, pos.mp);
+                swapWindowsInList(s, pos.mp, i);
                 return win;
             }
         }
         return null;
     }
     const other = pos.all[pos.mp];
-    moveWindowToIndex(s, pos.fp, pos.mp);
+    swapWindowsInList(s, pos.fp, pos.mp);
     return other;
 }
 
