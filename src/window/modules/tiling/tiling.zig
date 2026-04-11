@@ -1,3 +1,4 @@
+
 //! Tiling window manager
 //! Orchestrates layout, window tracking, and geometry/border cache. Delegates pixel arithmetic to the per-layout modules.
 
@@ -356,7 +357,7 @@ pub fn saveWindowGeom(window_id: u32, rect: utils.Rect) void {
 
 /// Return the cached geometry for any window. Returns null when no entry exists
 /// or the entry has been invalidated (zeroed rect).
-pub inline fn getWindowGeom(window_id: u32) ?utils.Rect {
+pub fn getWindowGeom(window_id: u32) ?utils.Rect {
     const s = getStateOpt() orelse return null;
     const wd = s.cache.get(window_id) orelse return null;
     if (!wd.hasValidRect()) return null;
@@ -1070,6 +1071,30 @@ pub fn sendBorderColorIfChanged(win: u32, color: u32) bool {
 /// `for_ws`: when non-null, filter by that index; when null, use current workspace.
 /// Returns the number of windows written.
 fn collectWorkspaceWindows(s: *State, buf: []u32, for_ws: ?u8) usize {
+    // Optimization: iterate the per-workspace window list (typically 5–15
+    // entries) and filter for tiling-managed windows, rather than scanning
+    // the global s.windows list (up to 64 entries across all workspaces) and
+    // probing the workspace hash-map for every entry.  The outer loop is 5–15
+    // iterations instead of 64; each body just calls Tracking.contains(), which
+    // is a linear scan of a 64-element contiguous u32 array that fits in L1.
+    if (comptime build.has_workspaces) {
+        const ws_obj = if (for_ws) |idx| blk: {
+            const ws_state = workspaces.getState() orelse break :blk null;
+            if (idx >= ws_state.workspaces.len) break :blk null;
+            break :blk &ws_state.workspaces[idx];
+        } else workspaces.getCurrentWorkspaceObject();
+
+        if (ws_obj) |ws| {
+            var n: usize = 0;
+            for (ws.windows.items()) |win| {
+                if (n >= buf.len) break;
+                if (s.windows.contains(win)) { buf[n] = win; n += 1; }
+            }
+            return n;
+        }
+    }
+
+    // Fallback: no workspace subsystem or workspace lookup failed — scan all.
     var n: usize = 0;
     for (s.windows.items()) |win| {
         if (n >= buf.len) break;

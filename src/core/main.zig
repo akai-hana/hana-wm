@@ -43,6 +43,9 @@ pub fn main() !void {
 
     core.config = try config.load(core.alloc, x.screen, input.getXkbState());
     defer core.config.deinit(core.alloc);
+    // Defers are LIFO: deinitKeybindMap runs before core.config.deinit, so the
+    // map is cleared (backing array freed) while its action pointers are still valid.
+    defer config.deinitKeybindMap(core.alloc);
     if (comptime build.has_scale)
         core.config.bar.scaled_font_size = scale.scaleFontSize(core.config.bar.font_size, x.screen);
 

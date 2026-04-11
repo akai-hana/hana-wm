@@ -1,3 +1,4 @@
+
 //! Prompt bar segment
 //! In-line command runner embedded in hana's bar
 //!
@@ -309,6 +310,8 @@ pub fn draw(
     minimized_title:     []const u8,
     current_ws_wins:     []const u32,
     minimized_set:       *const std.AutoHashMapUnmanaged(u32, void),
+    window_title_data:   []const u8,
+    window_title_ends:   []const u32,
     cached_title:        *std.ArrayList(u8),
     cached_title_window: *?u32,
     title_invalidated:   bool,
@@ -324,11 +327,13 @@ pub fn draw(
             .conn    = conn,
         },
         .{
-            .focused_window  = focused_window,
-            .focused_title   = focused_title,
-            .minimized_title = minimized_title,
-            .current_ws_wins = current_ws_wins,
-            .minimized_set   = minimized_set,
+            .focused_window    = focused_window,
+            .focused_title     = focused_title,
+            .minimized_title   = minimized_title,
+            .current_ws_wins   = current_ws_wins,
+            .minimized_set     = minimized_set,
+            .window_title_data = window_title_data,
+            .window_title_ends = window_title_ends,
         },
         .{
             .cached_title        = cached_title,

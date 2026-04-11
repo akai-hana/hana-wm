@@ -1,3 +1,4 @@
+
 //! Configuration interpreter
 //! Loads, parses, and validates TOML config files.
 
@@ -554,8 +555,16 @@ pub inline fn finalizeConfig(cfg: *types.Config, screen: *core.xcb.xcb_screen_t)
 }
 
 /// Resolves keysyms to keycodes and warns about duplicate bindings.
+// Persistent O(1) dispatch table: (modifiers << 32 | keysym) → *const Action.
+// Built by resolveKeybindings and retained across the lifetime of each config.
+// Cleared and rebuilt on every config reload before the old config is freed,
+// so pointers remain valid for the lifetime of the current types.Config.
+var g_keybind_map: std.AutoHashMapUnmanaged(u64, *const types.Action) = .empty;
+
 pub fn resolveKeybindings(keybindings: anytype, xkb_state: *xkbcommon.XkbState, allocator: std.mem.Allocator) void {
     for (keybindings) |*kb| kb.keycode = xkb_state.keysymToKeycode(kb.keysym);
+
+    // Conflict detection (keycode-keyed, unchanged from before).
     var seen = std.AutoHashMap(u64, usize).init(allocator);
     defer seen.deinit();
     for (keybindings, 0..) |*kb, i| {
@@ -568,6 +577,28 @@ pub fn resolveKeybindings(keybindings: anytype, xkb_state: *xkbcommon.XkbState, 
             seen.put(key, i) catch |e| debug.warnOnErr(e, "keybind dedup");
         }
     }
+
+    // Rebuild the persistent keysym-keyed dispatch map.
+    // Last binding wins (matches the linear-scan fallback ordering above).
+    g_keybind_map.clearRetainingCapacity();
+    for (keybindings) |*kb| {
+        const key: u64 = (@as(u64, kb.modifiers) << 32) | kb.keysym;
+        g_keybind_map.put(allocator, key, &kb.action)
+            catch |e| debug.warnOnErr(e, "keybind map build");
+    }
+}
+
+/// O(1) keybinding lookup for use on the hot key-press path.
+/// Returns a pointer into the current config's keybindings slice, or null.
+pub inline fn lookupKeybinding(mods: u16, keysym: u32) ?*const types.Action {
+    const key: u64 = (@as(u64, mods) << 32) | keysym;
+    return g_keybind_map.get(key);
+}
+
+/// Releases the persistent dispatch map.  Call after the owning config is freed.
+pub fn deinitKeybindMap(allocator: std.mem.Allocator) void {
+    g_keybind_map.deinit(allocator);
+    g_keybind_map = .empty;
 }
 
 /// Canonical startup/reload entry point: load, resolve keybindings, finalize.
