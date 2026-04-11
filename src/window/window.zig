@@ -457,6 +457,33 @@ pub fn fireTakeFocusCookie(
         xcb.XCB_ATOM_ATOM, 0, MAX_PROPERTY_LENGTH);
 }
 
+/// Shared implementation: scans `proto_list` for `take_focus_atom` and, when
+/// found, sends a WM_TAKE_FOCUS ClientMessage to `win`.
+/// Called by both `sendWMTakeFocusWithCookie` (pre-fired cookie path) and
+/// `sendWMTakeFocus` (live round-trip path) to keep the send logic in one place.
+fn dispatchTakeFocusMessage(
+    conn:             *xcb.xcb_connection_t,
+    win:              u32,
+    time:             u32,
+    protocols_atom:   u32,
+    take_focus_atom:  u32,
+    proto_list:       []const u32,
+) void {
+    for (proto_list) |atom| {
+        if (atom == take_focus_atom) break;
+    } else return; // window does not advertise WM_TAKE_FOCUS
+
+    var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
+    event.response_type  = xcb.XCB_CLIENT_MESSAGE;
+    event.window         = win;
+    event.type           = protocols_atom;
+    event.format         = 32;
+    event.data.data32[0] = take_focus_atom;
+    event.data.data32[1] = time;
+
+    _ = xcb.xcb_send_event(conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
+}
+
 /// Like sendWMTakeFocus but drains an already-fired WM_PROTOCOLS cookie instead
 /// of issuing a new round-trip.  The X server has been processing the property
 /// request since before commitFocusTransition ran its bookkeeping, so by the time
@@ -482,21 +509,7 @@ pub fn sendWMTakeFocusWithCookie(
     const proto_list: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(proto_reply)));
     const len: usize = @intCast(proto_reply.*.value_len);
 
-    var has_take_focus = false;
-    for (proto_list[0..len]) |atom| {
-        if (atom == take_focus_atom) { has_take_focus = true; break; }
-    }
-    if (!has_take_focus) return;
-
-    var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
-    event.response_type  = xcb.XCB_CLIENT_MESSAGE;
-    event.window         = win;
-    event.type           = protocols_atom;
-    event.format         = 32;
-    event.data.data32[0] = take_focus_atom;
-    event.data.data32[1] = time;
-
-    _ = xcb.xcb_send_event(conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
+    dispatchTakeFocusMessage(conn, win, time, protocols_atom, take_focus_atom, proto_list[0..len]);
 }
 
 /// Sends a WM_TAKE_FOCUS client message (ICCCM §4.1.7) if and only if the
@@ -546,22 +559,7 @@ pub fn sendWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32, time: u32) void {
     const proto_list: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(proto_reply)));
     const len: usize = @intCast(proto_reply.*.value_len);
 
-    // Only take_focus matters here — skip building the full WMProtocolsProps.
-    var has_take_focus = false;
-    for (proto_list[0..len]) |atom| {
-        if (atom == take_focus_atom) { has_take_focus = true; break; }
-    }
-    if (!has_take_focus) return;
-
-    var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
-    event.response_type  = xcb.XCB_CLIENT_MESSAGE;
-    event.window         = win;
-    event.type           = protocols_atom;
-    event.format         = 32;
-    event.data.data32[0] = take_focus_atom;
-    event.data.data32[1] = time;
-
-    _ = xcb.xcb_send_event(conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
+    dispatchTakeFocusMessage(conn, win, time, protocols_atom, take_focus_atom, proto_list[0..len]);
 }
 
 // Private ICCCM helpers
@@ -929,7 +927,7 @@ fn findSpawnQueueWorkspace(
     for (entries, 0..) |e, i| {
         if (win_pid != 0 and e.pid == win_pid) {
             const ws = entries[i].workspace;
-            _ = g_spawn_queue.orderedRemove(i);
+            _ = g_spawn_queue.swapRemove(i); // order has no semantic meaning
             return ws;
         }
         if (daemon_idx == null and e.pid == 0 and win_pid == 0) daemon_idx = i;
@@ -938,7 +936,7 @@ fn findSpawnQueueWorkspace(
     if (daemon_idx) |i| {
         std.log.debug("spawn: daemon-mode PID match at entry={d}, ws={d}", .{ i, g_spawn_queue.items[i].workspace });
         const ws = g_spawn_queue.items[i].workspace;
-        _ = g_spawn_queue.orderedRemove(i);
+        _ = g_spawn_queue.swapRemove(i); // order has no semantic meaning
         return ws;
     }
 
@@ -966,7 +964,7 @@ fn findSpawnQueueWorkspace(
         .{ win_pid, g_spawn_queue.items[0].workspace },
     );
     const ws = g_spawn_queue.items[0].workspace;
-    _ = g_spawn_queue.orderedRemove(0);
+    _ = g_spawn_queue.swapRemove(0); // order has no semantic meaning
     return ws;
 }
 
@@ -1011,7 +1009,7 @@ pub fn removeSpawnByPid(pid: u32) void {
     if (pid == 0) return;
     for (g_spawn_queue.items, 0..) |e, i| {
         if (e.pid == pid) {
-            _ = g_spawn_queue.orderedRemove(i);
+            _ = g_spawn_queue.swapRemove(i); // order has no semantic meaning
             return;
         }
     }
@@ -1352,15 +1350,20 @@ fn sendSyntheticConfigureNotify(win: u32) void {
 
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) void {
     const win = event.window;
+
+    // Fast exit: no geometry fields requested — nothing for the WM to act on.
+    // Checked before the tiling/fullscreen predicates to avoid two hash probes
+    // on stacking-order-only requests (e.g. from compositors or override-redirect
+    // games) that carry no geometry mask bits.
+    const mask = event.value_mask & GEOMETRY_MASK;
+    if (mask == 0) return;
+
     const is_tiled = tilingActive() and tiling.isWindowActiveTiled(win);
     const is_fullscreen = if (build.has_fullscreen) fullscreen.isFullscreen(win) else false;
     if (is_tiled or is_fullscreen) {
         sendSyntheticConfigureNotify(win);
         return;
     }
-
-    const mask = event.value_mask & GEOMETRY_MASK;
-    if (mask == 0) return;
 
     const GeomField = struct { bit: u16, value: u32 };
     const geom_fields = [_]GeomField{
@@ -1552,32 +1555,55 @@ pub fn updateFocusBorders(old_focused: ?u32, new_focused: ?u32) void {
 }
 
 /// Refresh border colors for every window on the current workspace.
+/// Shared implementation for workspace border sweeps.
+///
+/// When `skip_tiled` is true (post-retile path): tiled windows are skipped
+/// because `configureWithHints` already updated their border color via the
+/// `get_border_color` callback during the retile pass.  Only floating windows
+/// need sweeping here.
+///
+/// When `skip_tiled` is false (end-of-batch path): all windows are visited.
+/// Tiled windows are still deduped via the tiling CacheMap and only receive an
+/// XCB call when the color has changed since the last send, so the common
+/// steady-state (focused window unchanged) generates zero XCB traffic.
+///
+/// When tiling is absent or disabled there are no tiled windows to skip, so
+/// both paths fall through to the full unconditional sweep.
+fn updateWorkspaceBordersImpl(comptime skip_tiled: bool) void {
+    if (!build.has_workspaces) return;
+    const ws = workspaces.getCurrentWorkspaceObject() orelse return;
+    for (ws.windows.items()) |win| {
+        if (comptime build.has_tiling) {
+            if (skip_tiled and core.config.tiling.enabled) {
+                // Post-retile: tiled windows already updated by configureWithHints.
+                if (tiling.isWindowTiled(win)) continue;
+            }
+        }
+        const color = borderColor(win);
+        // Dedup via the tiling CacheMap: skip the XCB call when color is unchanged.
+        if (comptime build.has_tiling) {
+            if (tiling.sendBorderColorIfChanged(win, color)) continue;
+        }
+        _ = xcb.xcb_change_window_attributes(core.conn, win,
+            xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
+    }
+}
+
+/// Refresh border colors for every window on the current workspace.
 /// Used by `updateWorkspaceBordersIfNeeded` (event-loop end-of-batch sweep)
 /// and by `reloadBorders` (config reload, needs all windows).
 ///
-/// When tiling is compiled in, tiled windows are deduped via the tiling
-/// geometry cache (same `CacheMap.border` field that `configureWithHints` uses),
-/// skipping `xcb_change_window_attributes` entirely when the color has not
-/// changed since the last send.  This eliminates one XCB request per tiled
-/// window per event batch in the common steady-state (focused window unchanged):
-/// idle typing, scrolling, or cursor movement inside a window no longer
-/// generates any border protocol traffic.
+/// Tiled windows are deduped via the tiling geometry cache, skipping
+/// `xcb_change_window_attributes` entirely when the color has not changed
+/// since the last send.  This eliminates one XCB request per tiled window per
+/// event batch in the common steady-state (focused window unchanged): idle
+/// typing, scrolling, or cursor movement inside a window no longer generates
+/// any border protocol traffic.
 ///
 /// Floating windows with no tiling cache entry are sent unconditionally (they
 /// are typically few in number and do not benefit from tiling-cache dedup).
 pub fn updateWorkspaceBorders() void {
-    if (!build.has_workspaces) return;
-    const ws = workspaces.getCurrentWorkspaceObject() orelse return;
-    for (ws.windows.items()) |win| {
-        const color = borderColor(win);
-        // Tiled windows: dedup via the tiling CacheMap — skip XCB if unchanged.
-        if (comptime build.has_tiling) {
-            if (tiling.sendBorderColorIfChanged(win, color)) continue;
-        }
-        // Floating windows (no cache entry): send unconditionally.
-        _ = xcb.xcb_change_window_attributes(core.conn, win,
-            xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
-    }
+    updateWorkspaceBordersImpl(false);
 }
 
 /// Refresh border colors for only the FLOATING (non-tiled) windows on the
@@ -1590,38 +1616,8 @@ pub fn updateWorkspaceBorders() void {
 /// Floating windows are not touched by the retile pass and must be swept here.
 /// When tiling is absent or disabled, this falls back to the full sweep because
 /// there are no tiled windows to skip.
-///
-/// Dedup strategy mirrors updateWorkspaceBorders: tiling-cache hits skip the
-/// XCB call; windows absent from the cache (pure floating, never retiled) are
-/// sent unconditionally.
 fn updateWorkspaceBordersPostRetile() void {
-    if (!build.has_workspaces) return;
-    const ws = workspaces.getCurrentWorkspaceObject() orelse return;
-    if (comptime build.has_tiling) {
-        if (core.config.tiling.enabled) {
-            for (ws.windows.items()) |win| {
-                // Tiled windows: already handled by configureWithHints during retile.
-                if (tiling.isWindowTiled(win)) continue;
-                const color = borderColor(win);
-                // Floating windows may still have a tiling cache entry (e.g. they
-                // were individually floated via toggleWindowFloat).  Use the cache
-                // for dedup when available; fall through otherwise.
-                if (tiling.sendBorderColorIfChanged(win, color)) continue;
-                _ = xcb.xcb_change_window_attributes(core.conn, win,
-                    xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
-            }
-            return;
-        }
-    }
-    // Tiling absent or disabled: no tiled windows, sweep everything.
-    for (ws.windows.items()) |win| {
-        const color = borderColor(win);
-        if (comptime build.has_tiling) {
-            if (tiling.sendBorderColorIfChanged(win, color)) continue;
-        }
-        _ = xcb.xcb_change_window_attributes(core.conn, win,
-            xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
-    }
+    updateWorkspaceBordersImpl(true);
 }
 
 /// Mark that the current event batch already swept all workspace border colors
