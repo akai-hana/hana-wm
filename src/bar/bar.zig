@@ -284,6 +284,12 @@ const TitleCache = struct {
     focused_window:     ?u32                                = null,
     workspace_windows:  std.ArrayListUnmanaged(u32)         = .empty,
     minimized_windows:  std.AutoHashMapUnmanaged(u32, void) = .{},
+    /// Cached pre-fetched window titles for the drawCached fast path.
+    /// Mirrors BarSnapshot.window_title_data / window_title_ends; updated by
+    /// syncTitleCache after each full draw so drawTitleOnly can pass them into
+    /// TitleSnapshot without re-fetching from the server.
+    window_title_data:  std.ArrayListUnmanaged(u8)          = .empty,
+    window_title_ends:  std.ArrayListUnmanaged(u32)         = .empty,
     title_x:            u16  = 0,
     title_width:        u16  = 0,
     is_layout_valid:    bool = false,
@@ -293,6 +299,8 @@ const TitleCache = struct {
         self.title.deinit(allocator);
         self.workspace_windows.deinit(allocator);
         self.minimized_windows.deinit(allocator);
+        self.window_title_data.deinit(allocator);
+        self.window_title_ends.deinit(allocator);
     }
 };
 
@@ -400,6 +408,7 @@ const State = struct {
                     snap.focused_title.items,
                     minimized_title,
                     snap.current_workspace_windows.items, &snap.minimized_windows,
+                    snap.window_title_data.items, snap.window_title_ends.items,
                     &self.title_cache.title, &self.title_cache.title_window,
                     snap.is_title_invalidated, r.allocator);
             },
@@ -557,14 +566,15 @@ const State = struct {
         self.title_cache.focused_window = new_focused;
 
         // Fast path: carousel.drawCarouselTick handles its own flush and returns true on success.
-        // Use minimised accent when the sole workspace window is minimised.
+        // Passes the current accent so the carousel can detect a bg change (minimize/unminimize)
+        // and return false, letting the full draw path rebuild the pixmap.
         if (carousel.isCarouselActive()) {
             const accent: u32 = if (self.title_cache.workspace_windows.items.len == 1 and
                 self.title_cache.minimized_windows.contains(self.title_cache.workspace_windows.items[0]))
                 self.render.config.title_minimized_accent
             else
                 self.render.config.title_accent_color;
-            if (carousel.drawCarouselTick(self.render.dc, accent, self.render.height,
+            if (carousel.drawCarouselTick(self.render.dc, accent,
                     self.title_cache.title_x, self.title_cache.title_width)) return;
         }
 
@@ -578,11 +588,15 @@ const State = struct {
                 .conn    = self.win.conn,
             },
             .{
-                .focused_window  = new_focused,
-                .focused_title   = self.title_cache.title.items,
-                .minimized_title = "",
-                .current_ws_wins = self.title_cache.workspace_windows.items,
-                .minimized_set   = &self.title_cache.minimized_windows,
+                .focused_window    = new_focused,
+                .focused_title     = self.title_cache.title.items,
+                .minimized_title   = "",
+                .current_ws_wins   = self.title_cache.workspace_windows.items,
+                .minimized_set     = &self.title_cache.minimized_windows,
+                // Supply cached pre-fetched titles so drawSegmentedTitles skips
+                // xcb_get_property calls on this fast-path redraw too.
+                .window_title_data = self.title_cache.window_title_data.items,
+                .window_title_ends = self.title_cache.window_title_ends.items,
             },
             self.render.allocator,
         ) catch |e| { debug.warnOnErr(e, "drawTitleOnly"); return; };
@@ -607,6 +621,16 @@ const State = struct {
         } else |_| {
             // minimized_windows left stale rather than cleared.
         }
+
+        // Cache the pre-fetched titles so drawTitleOnly (drawCached path) can
+        // pass them into TitleSnapshot without re-fetching from the X server.
+        self.title_cache.window_title_data.clearRetainingCapacity();
+        self.title_cache.window_title_data.appendSlice(
+            self.render.allocator, snap.window_title_data.items) catch {};
+        self.title_cache.window_title_ends.clearRetainingCapacity();
+        self.title_cache.window_title_ends.appendSlice(
+            self.render.allocator, snap.window_title_ends.items) catch {};
+
         self.title_cache.focused_window  = snap.focused_window;
         self.title_cache.title_x         = x;
         self.title_cache.title_width     = w;
@@ -1191,7 +1215,10 @@ pub fn setBarState(action: BarAction) void {
     if (s.is_visible == show and action != .toggle) return;
     s.is_visible = show;
     if (action == .toggle) {
-        if (show) submitDrawBlockingFull();
+        if (show) {
+            s.title_cache.is_invalidated = true; // force carousel reset from pos 0 on re-show
+            submitDrawBlockingFull();
+        }
         _ = xcb.xcb_grab_server(core.conn);
         if (show) _ = xcb.xcb_map_window(core.conn, s.win.win_id)
         else      _ = xcb.xcb_unmap_window(core.conn, s.win.win_id);
@@ -1204,6 +1231,7 @@ pub fn setBarState(action: BarAction) void {
         ungrabAndFlush();
     } else {
         if (show) {
+            s.title_cache.is_invalidated = true; // force carousel reset from pos 0 on re-show
             submitDrawBlockingFull();
             _ = xcb.xcb_map_window(core.conn, s.win.win_id);
         } else {

@@ -1,3 +1,4 @@
+
 //! User input handling
 //! Handles keyboard, mouse buttons, pointer motion, and drag operations.
 
@@ -8,7 +9,6 @@ const build = @import("build_options");
 const c = @cImport({
     @cInclude("unistd.h");
     @cInclude("sys/wait.h");
-    @cInclude("fcntl.h");
 });
 
 const core      = @import("core");
@@ -17,7 +17,8 @@ const types     = @import("types");
 const utils     = @import("utils");
 const constants = @import("constants");
 
-const debug = @import("debug");
+const debug  = @import("debug");
+const config = @import("config");
 
 const window   = @import("window");
 const tracking = @import("tracking");
@@ -134,16 +135,10 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     const mods = utils.normalizeModifiers(event.state);
     const keysym = xkb_state.?.keycodeToKeysym(event.detail);
 
-    // Linear scan over keybindings. In practice the list is < 50 entries and
-    // bounded by what a human can type in a config file, so a flat scan over
-    // contiguous memory beats a hash lookup (cache locality, zero allocation).
-    var matched: ?*const types.Action = null;
-    for (core.config.keybindings.items) |*kb| {
-        if (kb.modifiers == mods and kb.keysym == keysym) {
-            matched = &kb.action;
-            break;
-        }
-    }
+    // O(1) keybinding dispatch via the persistent (modifiers << 32 | keysym) map
+    // built by config.resolveKeybindings.  Replaces the previous O(n) linear
+    // scan, eliminating up to 50 comparisons per key press.
+    const matched: ?*const types.Action = config.lookupKeybinding(mods, keysym);
 
     // The prompt owns all key input while active; routing (including the
     // close_window dismiss shortcut) is handled entirely inside it.
@@ -423,18 +418,29 @@ fn executeShellCommand(cmd: []const u8) !void {
     var exec_fds: [2]c_int = undefined;
     var pid_fds: [2]c_int = undefined;
 
-    if (c.pipe(&exec_fds) != 0) {
-        debug.err("pipe() failed (exec_pipe): {s}", .{cmd});
-        return error.PipeFailed;
+    // pipe2(O_CLOEXEC) sets close-on-exec atomically on both ends in a single
+    // syscall, closing the TOCTOU window that existed between the old pipe()
+    // and the subsequent fcntl(F_SETFD, FD_CLOEXEC) call.  Another thread
+    // could have fork()ed between those two calls, inheriting the write end
+    // of the exec pipe in the child before the flag was set.
+    const pipe2_flags = std.os.linux.O{ .CLOEXEC = true };
+    switch (std.posix.errno(std.os.linux.pipe2(&exec_fds, pipe2_flags))) {
+        .SUCCESS => {},
+        else => {
+            debug.err("pipe2() failed (exec_pipe): {s}", .{cmd});
+            return error.PipeFailed;
+        },
     }
-    if (c.pipe(&pid_fds) != 0) {
-        closePipe(exec_fds);
-        debug.err("pipe() failed (pid_pipe): {s}", .{cmd});
-        return error.PipeFailed;
+    switch (std.posix.errno(std.os.linux.pipe2(&pid_fds, pipe2_flags))) {
+        .SUCCESS => {},
+        else => {
+            closePipe(exec_fds);
+            debug.err("pipe2() failed (pid_pipe): {s}", .{cmd});
+            return error.PipeFailed;
+        },
     }
-
-    // exec_pipe write end is CLOEXEC: exec success silently closes it (EOF).
-    _ = c.fcntl(exec_fds[1], c.F_SETFD, c.FD_CLOEXEC);
+    // exec_pipe write end is CLOEXEC via pipe2 — no separate fcntl needed.
+    // exec success silently closes it (EOF); exec failure writes a sentinel byte.
 
     const pid = c.fork();
     if (pid < 0) {
