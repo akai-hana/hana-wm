@@ -1,8 +1,7 @@
-
 //! Configuration interpreter
 //! Loads, parses, and validates TOML config files.
 
-const std           = @import("std");
+const std   = @import("std");
 const build = @import("build_options");
 
 const core      = @import("core");
@@ -10,11 +9,11 @@ const types     = @import("types");
 const constants = @import("constants");
 const debug     = @import("debug");
 
-const xkbcommon     = @import("xkbcommon");
+const xkbcommon = @import("xkbcommon");
 
-const parser        = @import("parser");
+const parser = @import("parser");
 
-const carousel      = if (build.has_carousel) @import("carousel") else struct {
+const carousel = if (build.has_carousel) @import("carousel") else struct {
     pub fn setCarouselEnabled(_: bool)  void {}
     pub fn setScrollSpeed(_: f64)       void {}
     pub fn setRefreshRateOverride(_: f64) void {}
@@ -292,13 +291,13 @@ fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *const parser.Document)
 }
 
 const MOD_MAP = std.StaticStringMap(u16).initComptime(.{
-    .{ "Super",   constants.MOD_SUPER   },
-    .{ "Mod4",    constants.MOD_SUPER   },
-    .{ "Alt",     constants.MOD_ALT     },
-    .{ "Mod1",    constants.MOD_ALT     },
-    .{ "Control", constants.MOD_CONTROL },
-    .{ "Ctrl",    constants.MOD_CONTROL },
-    .{ "Shift",   constants.MOD_SHIFT   },
+    .{ "super",   constants.MOD_SUPER   },
+    .{ "mod4",    constants.MOD_SUPER   },
+    .{ "alt",     constants.MOD_ALT     },
+    .{ "mod1",    constants.MOD_ALT     },
+    .{ "control", constants.MOD_CONTROL },
+    .{ "ctrl",    constants.MOD_CONTROL },
+    .{ "shift",   constants.MOD_SHIFT   },
 });
 
 const MOUSE_BUTTON_MAP = std.StaticStringMap(u8).initComptime(.{
@@ -432,12 +431,23 @@ fn resolveAndParseAction(allocator: std.mem.Allocator, cmd: []const u8, ws_idx: 
 
 fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *types.Config) !void {
     const section          = doc.getSection("binds") orelse doc.getSection("Keybindings") orelse return;
-    const mod_placeholder  = section.getString("Mod");
-    const kill_placeholder = section.getString("kill");
+    // Find Mod and kill placeholders with a single pass over the pairs so that
+    // casing in the config file doesn't matter (e.g. "mod", "Mod", "MOD" all work).
+    var mod_placeholder:  ?[]const u8 = null;
+    var kill_placeholder: ?[]const u8 = null;
+    {
+        var scan = section.pairs.iterator();
+        while (scan.next()) |e| {
+            if (std.ascii.eqlIgnoreCase(e.key_ptr.*, "Mod"))
+                mod_placeholder  = e.value_ptr.*.asString()
+            else if (std.ascii.eqlIgnoreCase(e.key_ptr.*, "kill"))
+                kill_placeholder = e.value_ptr.*.asString();
+        }
+    }
     var iter = section.pairs.iterator();
     while (iter.next()) |entry| {
-        if (std.mem.eql(u8, entry.key_ptr.*, "Mod"))  continue;
-        if (std.mem.eql(u8, entry.key_ptr.*, "kill")) continue;
+        if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, "Mod"))  continue;
+        if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, "kill")) continue;
         const glob_entries = try expandGlobKeys(allocator, entry.key_ptr.*);
         defer {
             for (glob_entries) |ge| if (ge.owned) allocator.free(ge.key);
@@ -445,8 +455,8 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *const parser.Document, c
         }
         for (glob_entries) |ge| {
             const keybind_str: []const u8 = blk: {
-                if (mod_placeholder) |mod| if (std.mem.startsWith(u8, ge.key, "Mod+"))
-                    break :blk try std.fmt.allocPrint(allocator, "{s}+{s}", .{ mod, ge.key["Mod+".len..] });
+                if (mod_placeholder) |mod| if (std.ascii.startsWithIgnoreCase(ge.key, "mod+"))
+                    break :blk try std.fmt.allocPrint(allocator, "{s}+{s}", .{ mod, ge.key["mod+".len..] });
                 break :blk ge.key;
             };
             defer if (keybind_str.ptr != ge.key.ptr) allocator.free(keybind_str);
@@ -506,7 +516,12 @@ fn parseBindString(str: []const u8) !BindResult {
     var parts = std.mem.splitScalar(u8, str, '+');
     while (parts.next()) |part| {
         const trimmed = std.mem.trim(u8, part, " \t");
-        if (MOD_MAP.get(trimmed)) |mod| {
+        // Normalise to lowercase so modifier names are case-insensitive.
+        // The buffer is 16 bytes — longer than any modifier name we recognise.
+        var mod_buf: [16]u8 = undefined;
+        const trimmed_lc = std.ascii.lowerString(
+            mod_buf[0..@min(trimmed.len, mod_buf.len)], trimmed);
+        if (MOD_MAP.get(trimmed_lc)) |mod| {
             modifiers |= mod;
         } else if (mouseButtonFromName(trimmed)) |btn| {
             if (button != null) return error.MultipleButtons;

@@ -1,4 +1,3 @@
-
 //! Status bar
 //! Renders segments via Cairo/Pango into an XCB override-redirect window.
 

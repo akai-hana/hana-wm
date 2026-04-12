@@ -369,3 +369,16 @@ pub fn stopDrag() void {
 }
 
 pub inline fn isDragging() bool { return g_state.drag.active; }
+
+/// Returns true when a resize drag is active on the given window.
+/// Use this in handleConfigureRequest to deny min-size requests from the
+/// window being resized, preventing flicker between the client minimum and
+/// the WM-enforced size.
+pub inline fn isResizingWindow(win: u32) bool {
+    return g_state.drag.active and g_state.drag.mode == .resize and g_state.drag.window == win;
+}
+
+/// Returns the rect last applied during the active drag.
+/// Only meaningful when isDragging() is true and at least one motion event
+/// has arrived (last_rect.width != 0).
+pub inline fn getDragLastRect() utils.Rect { return g_state.drag.last_rect; }

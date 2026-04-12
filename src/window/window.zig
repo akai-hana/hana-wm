@@ -1,4 +1,3 @@
-
 //! Window lifecycle
 //! Handles window mapping/unmapping/destroy, configure, enter/button events, and per-window property caching.
 
@@ -1363,6 +1362,30 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
     const is_fullscreen = if (build.has_fullscreen) fullscreen.isFullscreen(win) else false;
     if (is_tiled or is_fullscreen) {
         sendSyntheticConfigureNotify(win);
+        return;
+    }
+
+    // Deny min-size ConfigureRequests from the window being drag-resized.
+    // When the WM sizes a floating window below its WM_NORMAL_HINTS minimum,
+    // the client fires a ConfigureRequest back with its minimum dimensions.
+    // Honouring that request races with the next MotionNotify and causes
+    // visible flicker.  Instead, echo the geometry the WM already applied so
+    // the client settles without fighting the drag.
+    if (drag.isResizingWindow(win)) {
+        const last = drag.getDragLastRect();
+        if (last.width != 0) {
+            sendConfigureNotify(win, .{
+                .x            = last.x,
+                .y            = last.y,
+                .width        = last.width,
+                .height       = last.height,
+                .border_width = 0,
+            });
+        } else {
+            // No motion event has arrived yet in this drag — fall back to a
+            // get_geometry round-trip so we echo an accurate current size.
+            sendSyntheticConfigureNotify(win);
+        }
         return;
     }
 
