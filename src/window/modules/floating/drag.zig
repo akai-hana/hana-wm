@@ -32,15 +32,13 @@ pub const DragMode = enum { move, resize };
 ///
 ///   top_left     | top_right
 ///   -------------|------------
-///   bottom_left  | bottom_right   ← was the only option before
+///   bottom_left  | bottom_right
 ///
-/// During updateDrag the deltas (dx, dy) are applied to the appropriate
-/// edges so the window follows the corner under the cursor:
-///
-///   bottom_right  →  x/y fixed,    w += dx, h += dy   (original behaviour)
-///   bottom_left   →  x += dx,      w -= dx, h += dy
-///   top_right     →  y += dy,      w += dx, h -= dy
-///   top_left      →  x += dx, y += dy, w -= dx, h -= dy
+/// During updateDrag the opposite (anchor) corner is held fixed.  The window
+/// always spans from min→max of anchor and current cursor, so when the cursor
+/// crosses the anchor horizontally or vertically the resize wraps: the window
+/// begins growing toward the opposite side instead of collapsing.  The
+/// effective dragged corner therefore mirrors itself across the midpoint.
 pub const ResizeCorner = enum { top_left, top_right, bottom_left, bottom_right };
 
 pub const DragState = struct {
@@ -277,60 +275,67 @@ pub fn updateDrag(x: i16, y: i16) void {
             // arises during move (window origin snaps to a tiled edge);
             // resize starts from the current size and is unaffected.
             //
-            // The corner determines which edges move with the cursor:
+            // Anchor-based resizing with automatic corner wrapping.
             //
-            //   bottom_right  x/y fixed,    right  += dx, bottom += dy
-            //   bottom_left   left  += dx,  right  fixed, bottom += dy
-            //   top_right     x/y fixed*,   right  += dx, top    += dy
-            //   top_left      left  += dx,  right  fixed, top    += dy
+            // The anchor is the corner diagonally opposite the one being
+            // dragged; it stays fixed throughout the drag.  The moving corner
+            // follows the cursor.  The window always spans min→max of anchor
+            // and moving on each axis, so:
             //
-            // "left += dx" means: new_x = start_x + dx, new_w = start_w - dx
-            // "top  += dy" means: new_y = start_y + dy, new_h = start_h - dy
+            //   • While the cursor is on the same side as the original corner
+            //     the behaviour is identical to the old per-corner code.
             //
-            // Snapping: far edges snap toward the far work-area boundary
-            // (snapFarEdge); near edges snap toward the near boundary
-            // (snapNearEdge).  Each direction is handled independently so
-            // that a top-left drag snaps both the left and top edges.
+            //   • When the cursor crosses the anchor horizontally the
+            //     left/right roles swap automatically — the window begins
+            //     growing toward the opposite horizontal side.
+            //
+            //   • The same applies vertically, and both axes are independent,
+            //     so all four quadrant transitions are handled.
+            //
+            // Snapping is applied to the moving edge toward whichever
+            // work-area boundary (near or far) it is closest to.  The anchor
+            // edge is fixed and never snapped.
 
             const start_x: i32 = drag.start_win_x;
             const start_y: i32 = drag.start_win_y;
             const start_w: i32 = drag.start_win_width;
             const start_h: i32 = drag.start_win_height;
 
-            // Compute raw new edges for each side.
-            const raw_left:   i32 = start_x;
-            const raw_top:    i32 = start_y;
-            const raw_right:  i32 = start_x + start_w + @as(i32, dx); // used by right-side corners
-            const raw_bottom: i32 = start_y + start_h + @as(i32, dy); // used by bottom corners
-            const raw_left_m: i32 = start_x             + @as(i32, dx); // used by left-side corners
-            const raw_top_m:  i32 = start_y             + @as(i32, dy); // used by top corners
+            // Anchor: the edge that stays fixed (opposite side from the
+            // initially-dragged corner).
+            const anchor_x: i32 = switch (drag.resize_corner) {
+                .top_left,    .bottom_left  => start_x + start_w, // anchor = right edge
+                .top_right,   .bottom_right => start_x,            // anchor = left  edge
+            };
+            const anchor_y: i32 = switch (drag.resize_corner) {
+                .top_left,    .top_right    => start_y + start_h, // anchor = bottom edge
+                .bottom_left, .bottom_right => start_y,            // anchor = top   edge
+            };
 
-            // Resolve which x/y origin and width/height to use.
-            const new_left: i32 = switch (drag.resize_corner) {
-                .top_left, .bottom_left =>
-                    snapEdge(raw_left_m, wa.left, snap),
-                .top_right, .bottom_right => raw_left,
+            // Moving corner: initial position of the edge under the cursor.
+            const moving_x0: i32 = switch (drag.resize_corner) {
+                .top_left,    .bottom_left  => start_x,            // moving = left  edge
+                .top_right,   .bottom_right => start_x + start_w, // moving = right edge
             };
-            const new_top: i32 = switch (drag.resize_corner) {
-                .top_left, .top_right =>
-                    snapEdge(raw_top_m, wa.top, snap),
-                .bottom_left, .bottom_right => raw_top,
+            const moving_y0: i32 = switch (drag.resize_corner) {
+                .top_left,    .top_right    => start_y,            // moving = top    edge
+                .bottom_left, .bottom_right => start_y + start_h, // moving = bottom edge
             };
-            const new_right: i32 = switch (drag.resize_corner) {
-                .top_right, .bottom_right =>
-                    snapEdge(raw_right, wa.right, snap),
-                .top_left, .bottom_left =>
-                    // Right edge is fixed; derive from start so width shrinks
-                    // correctly when the left edge moves right.
-                    start_x + start_w,
-            };
-            const new_bottom: i32 = switch (drag.resize_corner) {
-                .bottom_left, .bottom_right =>
-                    snapEdge(raw_bottom, wa.bottom, snap),
-                .top_left, .top_right =>
-                    // Bottom edge is fixed.
-                    start_y + start_h,
-            };
+
+            // Apply cursor delta then snap toward whichever work-area
+            // boundary the moving edge is closest to.
+            const raw_moving_x: i32 = moving_x0 + @as(i32, dx);
+            const raw_moving_y: i32 = moving_y0 + @as(i32, dy);
+
+            const moving_x: i32 = snapEdge(snapEdge(raw_moving_x, wa.left, snap), wa.right,  snap);
+            const moving_y: i32 = snapEdge(snapEdge(raw_moving_y, wa.top,  snap), wa.bottom, snap);
+
+            // The four edges are simply the min/max of anchor and moving on
+            // each axis.  Crossing the anchor wraps the resize direction.
+            const new_left:   i32 = @min(anchor_x, moving_x);
+            const new_right:  i32 = @max(anchor_x, moving_x);
+            const new_top:    i32 = @min(anchor_y, moving_y);
+            const new_bottom: i32 = @max(anchor_y, moving_y);
 
             const new_w = new_right  - new_left;
             const new_h = new_bottom - new_top;
