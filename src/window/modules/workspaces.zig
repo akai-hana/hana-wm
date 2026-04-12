@@ -347,25 +347,38 @@ pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
                     }
                 }
             }
+            // Grab the server so the evict (offscreen move) and retile land in
+            // the same atomic batch — the compositor never sees a frame where
+            // the window has vanished but the remaining windows haven't reflowed.
+            _ = xcb.xcb_grab_server(core.conn);
             evictWindow(win);
             if (build.has_tiling and core.config.tiling.enabled) tiling.retileCurrentWorkspace();
+            bar.redrawInsideGrab();
+            utils.ungrabAndFlush(core.conn);
         } else {
             if (build.has_tiling) tiling.invalidateWsGeomBit(target_ws);
+            bar.scheduleRedraw();
+            _ = xcb.xcb_flush(core.conn);
         }
     } else {
         // Add tag N. In protected mode, always keep the current workspace set too.
         const new_mask = if (protect_current) mask | tbit | tracking.workspaceBit(current) else mask | tbit;
         setWindowMask(s, win, new_mask);
         if (target_ws == current) {
+            // Grab the server so the map and retile land in the same atomic
+            // batch — the compositor never sees a frame where the window is
+            // mapped but not yet positioned by the tiling engine.
+            _ = xcb.xcb_grab_server(core.conn);
             _ = xcb.xcb_map_window(core.conn, win);
             if (build.has_tiling and core.config.tiling.enabled) tiling.retileCurrentWorkspace();
+            bar.redrawInsideGrab();
+            utils.ungrabAndFlush(core.conn);
         } else {
             if (build.has_tiling) tiling.invalidateWsGeomBit(target_ws);
+            bar.scheduleRedraw();
+            _ = xcb.xcb_flush(core.conn);
         }
     }
-
-    bar.scheduleRedraw();
-    _ = xcb.xcb_flush(core.conn);
 }
 
 // Workspace switch
@@ -567,6 +580,7 @@ fn hideWorkspaceWindows(ws: *const Workspace, new_ws: u8) void {
     const GeomEntry = struct { win: u32, cookie: xcb.xcb_get_geometry_cookie_t };
     var pending:   [MAX_FLOAT]GeomEntry = undefined;
     var pending_n: usize                = 0;
+    var cap_warned                      = false;
 
     for (ws.windows.items()) |win| {
         if (tracking.isWindowOnWorkspace(win, new_ws)) continue; // stays visible
@@ -575,14 +589,10 @@ fn hideWorkspaceWindows(ws: *const Workspace, new_ws: u8) void {
             if (pending_n < MAX_FLOAT) {
                 pending[pending_n] = .{ .win = win, .cookie = xcb.xcb_get_geometry(core.conn, win) };
                 pending_n += 1;
-            } else {
-                // Warn exactly once — when the first window is being skipped,
-                // not when the last slot is filled (Issue: cap warning per-window).
-                if (pending_n == MAX_FLOAT) {
-                    debug.warn("hideWorkspaceWindows: geometry-save cap ({d}) reached; " ++
-                        "additional floating windows will not have geometry saved", .{MAX_FLOAT});
-                    pending_n += 1; // advance past MAX_FLOAT so the warning fires only once
-                }
+            } else if (!cap_warned) {
+                debug.warn("hideWorkspaceWindows: geometry-save cap ({d}) reached; " ++
+                    "additional floating windows will not have geometry saved", .{MAX_FLOAT});
+                cap_warned = true;
             }
         }
 

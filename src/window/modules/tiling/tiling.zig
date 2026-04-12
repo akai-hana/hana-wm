@@ -1,4 +1,3 @@
-
 //! Tiling window manager
 //! Orchestrates layout, window tracking, and geometry/border cache. Delegates pixel arithmetic to the per-layout modules.
 
@@ -683,7 +682,10 @@ pub fn adjustMasterWidth(delta: f32) void {
             if (workspaces.getCurrentWorkspaceObject()) |ws| ws.master_width = s.master_width;
         }
     }
-    s.is_dirty = true;
+    // Invalidate inactive workspace caches so their next switch-in forces a
+    // full retile with the new width, rather than replaying stale positions.
+    // is_dirty is NOT set here: retileCurrentWorkspace() immediately below
+    // sets is_dirty = false unconditionally, making the write a no-op.
     s.workspace_geom_valid_bits = 0;
     retileCurrentWorkspace();
 }
