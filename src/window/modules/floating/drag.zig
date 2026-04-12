@@ -14,9 +14,6 @@ const focus  = @import("focus");
 const tiling     = if (build.has_tiling) @import("tiling") else struct {};
 const fullscreen = if (build.has_fullscreen) @import("fullscreen") else struct {};
 
-const scale = if (build.has_scale) @import("scale") else struct {
-    pub fn cachedRefreshRate() f64 { return 60.0; }
-};
 
 const bar = if (build.has_bar) @import("bar") else struct {
     pub fn isVisible() bool { return false; }
@@ -47,16 +44,20 @@ pub const DragMode = enum { move, resize };
 pub const ResizeCorner = enum { top_left, top_right, bottom_left, bottom_right };
 
 pub const DragState = struct {
-    active:           bool         = false,
+    active:           bool          = false,
     window:           core.WindowId = 0,
-    mode:             DragMode     = .move,
-    resize_corner:    ResizeCorner = .bottom_right,
-    start_x:          i16         = 0,
-    start_y:          i16         = 0,
-    start_win_x:      i16         = 0,
-    start_win_y:      i16         = 0,
-    start_win_width:  u16         = 0,
-    start_win_height: u16         = 0,
+    mode:             DragMode      = .move,
+    resize_corner:    ResizeCorner  = .bottom_right,
+    start_x:          i16           = 0,
+    start_y:          i16           = 0,
+    start_win_x:      i16           = 0,
+    start_win_y:      i16           = 0,
+    start_win_width:  u16           = 0,
+    start_win_height: u16           = 0,
+    /// Last geometry applied by updateDrag; saved to the geometry cache by
+    /// stopDrag so workspace-switch float-restore finds the post-drag position.
+    /// Zero (default) means no motion event arrived during this drag.
+    last_rect:        utils.Rect    = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
 };
 
 // Named work-area type 
@@ -142,8 +143,6 @@ inline fn snapEdge(edge: i32, boundary: i32, snap: i32) i32 {
 const State = struct {
     drag:          DragState = .{},
     pending_float: bool      = false,
-    frame_ms:       f64      = 0.0,
-    last_update_ms: u32      = 0,
 };
 
 var g_state: State = .{};
@@ -211,7 +210,6 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
         else
             false,
     };
-    g_state.frame_ms = 1000.0 / scale.cachedRefreshRate();
     focus.setFocus(win, .user_command);
     // Raise the window to the top of the stack.  The cookie is intentionally
     // discarded — XCB errors surface only via xcb_request_check, which we do
@@ -345,12 +343,21 @@ pub fn updateDrag(x: i16, y: i16) void {
             };
         },
     };
+    drag.last_rect = rect;
     utils.configureWindow(core.conn, drag.window, rect);
     _ = xcb.xcb_flush(core.conn);
 }
 
 /// Ends the active drag and resets all drag state.
 pub fn stopDrag() void {
+    // Save the final geometry so workspace-switch float-restore finds the
+    // drag-moved position rather than the pre-drag tiling or default position.
+    // last_rect is zero when no motion event arrived during this drag (a bare
+    // click-and-release), in which case the cached geometry is already correct.
+    const drag = &g_state.drag;
+    if (drag.active and drag.last_rect.width != 0) {
+        window.saveWindowGeom(drag.window, drag.last_rect);
+    }
     // No flush needed: the last updateDrag call already flushed all pending
     // geometry changes before this function is reached.
     g_state = .{};
