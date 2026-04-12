@@ -91,8 +91,13 @@ const RenderState = struct {
 
 /// Cross-thread signal: main thread sets is_invalidated when focus changes;
 /// render thread consumes it on the next seg-carousel blit.
+///
+/// `seg_window` is the window the render thread last built the seg carousel
+/// for (0 = none).  The render thread writes it atomically after updating
+/// render.seg so the main thread never has to read the non-atomic render.seg.
 const FocusSignal = struct {
     is_invalidated: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    seg_window:     std.atomic.Value(u32)  = std.atomic.Value(u32).init(0),
 };
 
 var scroll_config: ScrollConfig = .{};
@@ -143,6 +148,7 @@ pub fn isCarouselActive() bool {
 }
 
 /// Returns the window ID the segmented carousel was built for, or null.
+/// Render thread only — reading render.seg here is safe.
 pub fn getSegmentedCarouselWindow() ?u32 {
     return if (render.seg) |e| e.window else null;
 }
@@ -163,6 +169,7 @@ pub fn deinitSingleCarousel() void {
 /// Free the segmented carousel pixmap.  Render thread only.
 pub fn deinitSegmentedCarousel() void {
     if (render.seg) |*e| { e.cp.deinit(); render.seg = null; }
+    focus_signal.seg_window.store(0, .release);
 }
 
 // ── Public API — focus notification (main thread only) ───────────────────────
@@ -172,11 +179,8 @@ pub fn deinitSegmentedCarousel() void {
 /// Sets focus_signal.is_invalidated so the render thread rebuilds the
 /// seg-carousel on the next blit.
 pub fn notifyFocusChanged(new_window: ?u32) void {
-    const changed = if (render.seg) |e|
-        if (new_window) |nw| nw != e.window else true
-    else
-        new_window != null;
-
+    const tracked = focus_signal.seg_window.load(.acquire);
+    const changed = if (new_window) |nw| nw != tracked else tracked != 0;
     if (!changed) return;
     focus_signal.is_invalidated.store(true, .release);
 }
@@ -206,6 +210,55 @@ pub fn drawCarouselTick(
     const off = carouselOffset(e.start_ms, e.cycle_w, utils.monotonicMs());
     e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, seg_x, off, seg_w);
     dc.flushRect(seg_x, seg_w);
+    return true;
+}
+
+/// Fast per-tick segmented carousel blit.
+///
+/// Mirrors drawCarouselTick for the segmented (multi-window) case.
+/// Returns false when:
+///   • no segmented carousel is live,
+///   • segment geometry changed (bar resize), or
+///   • accent colour changed.
+///
+/// When it returns false the caller must fall through to a full
+/// drawCached() / draw() frame to rebuild or re-draw everything.
+///
+/// When it returns true only the carousel segment was updated; the caller
+/// must NOT redraw the rest of the bar this tick (non-focused segments
+/// were already rendered on the previous full frame and are unchanged).
+pub fn drawSegCarouselTick(
+    dc:       *drawing.DrawContext,
+    accent:   u32,
+    seg_x:    u16,
+    seg_w:    u16,
+) bool {
+    const e = render.seg orelse return false;
+    if (seg_x != e.geom.seg_x or seg_w != e.geom.seg_w or accent != e.last_bg)
+        return false;
+
+    const off = carouselOffset(e.start_ms, e.cycle_w, utils.monotonicMs());
+    e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, seg_x, off, seg_w);
+    dc.flushRect(seg_x, seg_w);
+    return true;
+}
+
+/// Parameterless segmented carousel tick for use from the bar's drawTitleOnly path.
+///
+/// Reads seg_x, seg_w, and last_bg directly from the live render.seg entry so
+/// the caller does not need to cache or re-derive the focused segment's bounds.
+/// Returns false when no segmented carousel is live or the accent colour changed
+/// (indicating a minimize/unminimize that requires a full rebuild).
+pub fn drawSegCarouselTickAuto(dc: *drawing.DrawContext, accent: u32) bool {
+    const e = render.seg orelse return false;
+    if (accent != e.last_bg) return false;
+    // If a focus change is pending, bail out so the caller falls through to
+    // drawCached → drawSegmentedTitles, which redraws ALL segments with the
+    // correct accent colours (old focused → unfocused, new focused → focused).
+    if (focus_signal.is_invalidated.load(.acquire)) return false;
+    const off = carouselOffset(e.start_ms, e.cycle_w, utils.monotonicMs());
+    e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, e.geom.seg_x, off, e.geom.seg_w);
+    dc.flushRect(e.geom.seg_x, e.geom.seg_w);
     return true;
 }
 
@@ -309,7 +362,14 @@ pub fn drawSegmentedCarousel(
     window:            u32,
     title_invalidated: bool,
 ) !bool {
-    if (text_w <= geom.avail_w) return false;
+    if (text_w <= geom.avail_w) {
+        // Text fits — free any live seg-carousel pixmap so the tick fast-path
+        // (drawSegCarouselTickAuto) cannot blit stale scrolling content over
+        // the static text that the caller is about to draw.  Mirrors the
+        // deinitSingleCarousel() call in drawScrollingTitle for the same case.
+        deinitSegmentedCarousel();
+        return false;
+    }
 
     // Consume the focus-change signal atomically.
     const externally_invalidated = focus_signal.is_invalidated.swap(false, .acq_rel);
@@ -348,6 +408,9 @@ pub fn drawSegmentedCarousel(
             .window   = window,
             .geom     = geom,
         };
+        // Publish the window atomically so notifyFocusChanged on the main
+        // thread can check it without touching render.seg.
+        focus_signal.seg_window.store(window, .release);
     }
 
     const e   = render.seg.?;

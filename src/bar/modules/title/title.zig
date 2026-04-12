@@ -1,4 +1,3 @@
-
 //! Title segment — shows the focused window title, or a split view for
 //! multiple windows.
 //!
@@ -344,10 +343,9 @@ fn drawSegmentedTitles(
     }
 
     // Determine whether pre-fetched title data is available.
-    // When window_title_ends is populated, all N title round-trips are skipped
-    // on the render thread (they were already fetched on the main thread in
-    // captureStateIntoSlot).  When it is empty (e.g. first drawCached frame
-    // before the TitleCache has been populated), we fall back to XCB calls.
+    // When window_title_ends is populated with the correct count of entries,
+    // all N title round-trips are skipped on the render thread (they were
+    // already fetched on the main thread in captureStateIntoSlot).
     const has_prefetched_titles = snapshot.window_title_ends.len >= win_count;
 
     atoms.ensureResolved();

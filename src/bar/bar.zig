@@ -1,3 +1,4 @@
+
 //! Status bar
 //! Renders segments via Cairo/Pango into an XCB override-redirect window.
 
@@ -565,17 +566,27 @@ const State = struct {
         if (!self.title_cache.is_layout_valid or self.title_cache.title_width == 0) return;
         self.title_cache.focused_window = new_focused;
 
-        // Fast path: carousel.drawCarouselTick handles its own flush and returns true on success.
-        // Passes the current accent so the carousel can detect a bg change (minimize/unminimize)
-        // and return false, letting the full draw path rebuild the pixmap.
+        // Fast path: try to blit just the live carousel pixmap without a full Pango layout pass.
         if (carousel.isCarouselActive()) {
-            const accent: u32 = if (self.title_cache.workspace_windows.items.len == 1 and
-                self.title_cache.minimized_windows.contains(self.title_cache.workspace_windows.items[0]))
-                self.render.config.title_minimized_accent
-            else
-                self.render.config.title_accent_color;
-            if (carousel.drawCarouselTick(self.render.dc, accent,
-                    self.title_cache.title_x, self.title_cache.title_width)) return;
+            const win_count = self.title_cache.workspace_windows.items.len;
+            if (win_count > 1) {
+                // Segmented mode: blit the focused segment directly from render.seg.
+                // drawSegCarouselTickAuto reads seg_x/seg_w from the stored entry, so no
+                // separate coordinate cache is needed here.
+                if (carousel.drawSegCarouselTickAuto(self.render.dc,
+                        self.render.config.title_accent_color)) return;
+            } else {
+                // Single-window mode: pass accent so the tick detects a bg change
+                // (minimize/unminimize) and returns false to force a full rebuild.
+                const accent: u32 = if (win_count == 1 and
+                    self.title_cache.minimized_windows.contains(
+                        self.title_cache.workspace_windows.items[0]))
+                    self.render.config.title_minimized_accent
+                else
+                    self.render.config.title_accent_color;
+                if (carousel.drawCarouselTick(self.render.dc, accent,
+                        self.title_cache.title_x, self.title_cache.title_width)) return;
+            }
         }
 
         _ = titleSegment.drawCached(
@@ -799,18 +810,29 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot,
     // render thread's segmented-title path never issues X11 calls (Issue #2).
     // Titles are stored in a flat byte buffer; window_title_ends[i] holds the
     // exclusive end offset of the i-th title.
+    //
+    // IMPORTANT: fetchWindowTitleInto replaces the buffer it is given (it was
+    // designed for single-window use).  Passing window_title_data directly would
+    // cause each non-focused window to overwrite all previously stored titles.
+    // We therefore fetch into a per-window temporary buffer and appendSlice the
+    // result, preserving all earlier entries in the flat buffer.
     snap.window_title_data.clearRetainingCapacity();
     snap.window_title_ends.clearRetainingCapacity();
-    for (snap.current_workspace_windows.items) |win| {
-        if (snap.focused_window == win) {
-            // Reuse the already-fetched focused title to avoid a redundant round-trip.
-            snap.window_title_data.appendSlice(allocator, snap.focused_title.items) catch {};
-        } else {
-            // fetchWindowTitleInto appends directly into the flat buffer.
-            titleSegment.fetchWindowTitleInto(core.conn, win, &snap.window_title_data, allocator) catch {};
+    {
+        var title_tmp: std.ArrayListUnmanaged(u8) = .empty;
+        defer title_tmp.deinit(allocator);
+        for (snap.current_workspace_windows.items) |win| {
+            if (snap.focused_window == win) {
+                // Reuse the already-fetched focused title — no extra round-trip.
+                snap.window_title_data.appendSlice(allocator, snap.focused_title.items) catch {};
+            } else {
+                title_tmp.clearRetainingCapacity();
+                titleSegment.fetchWindowTitleInto(core.conn, win, &title_tmp, allocator) catch {};
+                snap.window_title_data.appendSlice(allocator, title_tmp.items) catch {};
+            }
+            const end: u32 = @intCast(snap.window_title_data.items.len);
+            snap.window_title_ends.append(allocator, end) catch {};
         }
-        const end: u32 = @intCast(snap.window_title_data.items.len);
-        snap.window_title_ends.append(allocator, end) catch {};
     }
 
     snap.is_full_redraw = forced or (snap.workspace_count != prev.workspace_count);
