@@ -1,8 +1,5 @@
-
-//! Prompt bar segment
-//! In-line command runner embedded in hana's bar
-//!
-//! Borrows title's segment space to integrate seamlessly into the bar
+//! Prompt bar in-line command runner
+//! Borrows title's segment space to embed into the bar
 
 const std   = @import("std");
 const build = @import("build_options");
@@ -10,6 +7,7 @@ const build = @import("build_options");
 const core    = @import("core");
     const xcb = core.xcb;
 
+const bar   = @import("bar");
 const types = @import("types");
 
 const drawing = @import("drawing");
@@ -29,7 +27,6 @@ const c = @cImport({
     @cInclude("sys/stat.h");
     @cInclude("sys/wait.h");
 });
-
 
 // xcb-keysyms bindings (link with -lxcb-keysyms)
 
@@ -169,14 +166,40 @@ pub fn toggle() void {
     if (g.is_active) deactivate() else activate();
 }
 
+/// Query the X pointer and decide what close_window should do while the
+/// prompt is active:
+///   • cursor over bar window → kill the prompt, swallow the event
+///   • cursor over a program  → let WM close that window (return false)
+///   • cursor over nothing    → swallow the event silently, do nothing
+fn closeWindowOrPromptUnderCursor() bool {
+    const ptr_cookie = xcb.xcb_query_pointer(core.conn, core.root);
+    const ptr_reply  = xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null);
+    defer if (ptr_reply) |r| std.c.free(r);
+
+    const child: u32 = if (ptr_reply) |r| r.*.child else 0;
+
+    if (bar.isBarWindow(child)) {
+        // Cursor is on the bar — kill the prompt.
+        deactivate();
+        return true;
+    }
+    if (child == 0 or child == core.root) {
+        // Cursor is over the desktop / no window — do nothing, swallow key.
+        return true;
+    }
+    // Cursor is over a real program window — let the WM close it.
+    return false;
+}
+
 /// Complete key-event routing entry point called by `input.zig`.
 ///
 /// Owns all prompt-specific routing decisions so `input.zig` stays free of
 /// prompt internals:
 ///   - Returns false immediately when the prompt is inactive, so the caller
 ///     falls through to normal keybind dispatch without any special-casing.
-///   - If the key is bound to `close_window`, dismisses the prompt instead of
-///     closing a window or silently swallowing the keystroke.
+///   - If the key is bound to `close_window`, checks where the cursor is:
+///     over the bar kills the prompt, over a window lets the WM close it,
+///     over the desktop swallows the key silently.
 ///   - Otherwise delegates to `handleKeyPress` which processes the raw key.
 ///
 /// `bound_action` is whatever the keybind map resolved for this key; pass
@@ -190,21 +213,19 @@ pub fn handlePromptKeypress(
     // When the mod key (Super) is held and a WM action is bound to this key,
     // let the normal keybind dispatcher handle it so the user can perform
     // window-manager operations without cancelling the prompt.
-    // The close_window action is still routed through here so it dismisses
-    // the prompt rather than closing a window.
+    // The close_window action is still routed through here so it can dismiss
+    // the prompt — but only when the cursor is over the bar itself.
     if (event.state & xcb.XCB_MOD_MASK_4 != 0) {
         if (bound_action) |action| {
             if (action.* == .close_window) {
-                deactivate();
-                return true;
+                return closeWindowOrPromptUnderCursor();
             }
             return false; // let WM dispatch execute the bind; prompt stays open
         }
     }
 
     if (bound_action) |action| if (action.* == .close_window) {
-        deactivate();
-        return true;
+        return closeWindowOrPromptUnderCursor();
     };
     return handleKeyPress(event);
 }
