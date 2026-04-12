@@ -679,7 +679,38 @@ pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
     // xcb_discard_reply (non-blocking), releasing the reply-queue entry
     // immediately without a blocking drain.
     if (state.confirm_win)    |exp| if (event.event == exp)  cancelPendingConfirm();
-    if (state.focused_window) |sel| if (event.event != sel) sendFocusProtocol(sel);
+    if (state.focused_window) |sel| {
+        // Common path: a window other than the one we intend to hold focus
+        // (Electron steal, Wine, game) fired XSetInputFocus.  Re-assert.
+        if (event.event != sel) sendFocusProtocol(sel);
+    } else {
+        // focused_window is null — the current workspace is empty or clearFocus()
+        // was called (e.g. after switching to a workspace with no windows).
+        //
+        // Bug: Wine windows and some games continuously call XSetInputFocus on
+        // themselves even after their workspace has been hidden.  With
+        // focused_window == null the outer `if` was a no-op, so these off-screen
+        // windows kept winning every focus-steal attempt unchallenged.
+        //
+        // Fix: if the FocusIn is for a window that is NOT on the current
+        // workspace (i.e. an off-workspace window from a previous workspace),
+        // immediately drive X focus back to PointerRoot so the stale window
+        // cannot hold keyboard input.
+        //
+        // We deliberately do NOT call clearFocus() or setFocus() here — those
+        // update focused_window and trigger bar/carousel/tiling side-effects that
+        // are unnecessary for what is essentially a defensive re-assertion.
+        // A bare xcb_set_input_focus to root is the minimal correct action:
+        // it evicts the offending window from X focus without touching any WM
+        // bookkeeping that the workspace switch already completed correctly.
+        if (!isInvalidFocusTarget(event.event) and
+            !tracking.isOnCurrentWorkspace(event.event))
+        {
+            _ = xcb.xcb_set_input_focus(core.conn,
+                xcb.XCB_INPUT_FOCUS_POINTER_ROOT, core.root, 0); // CurrentTime
+            advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
+        }
+    }
 }
 
 /// Focus the most recently focused window satisfying `visible`, consulting

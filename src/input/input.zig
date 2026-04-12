@@ -1,4 +1,3 @@
-
 //! User input handling
 //! Handles keyboard, mouse buttons, pointer motion, and drag operations.
 

@@ -1,4 +1,3 @@
-
 //! X event dispatch, signal handling, config reload, and the main event loop.
 
 const std   = @import("std");
