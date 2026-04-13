@@ -1,3 +1,4 @@
+
 //! Title segment — shows the focused window title, or a split view for
 //! multiple windows.
 //!
@@ -543,22 +544,4 @@ fn compareWindows(_: void, a: WindowInfo, b: WindowInfo) bool {
     if (a.x != b.x) return a.x < b.x;
     if (a.y != b.y) return a.y < b.y;
     return a.window < b.window;
-}
-
-// Private helpers — title fetching (main thread only)
-
-fn fetchProperty(
-    conn:      *xcb.xcb_connection_t,
-    win:       u32,
-    atom:      u32,
-    atom_type: u32,
-    allocator: std.mem.Allocator,
-) !?[]const u8 {
-    const cookie = xcb.xcb_get_property(conn, 0, win, atom, atom_type, 0, 8192);
-    const reply  = xcb.xcb_get_property_reply(conn, cookie, null) orelse return null;
-    defer std.c.free(reply);
-    const len = xcb.xcb_get_property_value_length(reply);
-    if (len <= 0) return null;
-    const value: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
-    return try allocator.dupe(u8, value[0..@intCast(len)]);
 }

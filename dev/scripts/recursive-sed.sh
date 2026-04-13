@@ -1,4 +1,5 @@
 #!/bin/bash
+# Invokes a sed command recursively across all files, relative from current path.
 
 if [ "$#" -ne 2 ]; then
   echo "Usage: $0 <search> <replace>"

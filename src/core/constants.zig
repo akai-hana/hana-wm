@@ -1,3 +1,4 @@
+
 //! Central location for core constants used across multiple files.
 
 const xcb = @cImport(@cInclude("xcb/xcb.h"));
@@ -100,10 +101,6 @@ pub const LOCK_MODIFIERS = [_]u16{
     MOD_NUMLOCK,
     MOD_CAPSLOCK | MOD_NUMLOCK,
 };
-
-/// X11 cursor glyph IDs (mask is always source + 1 by convention).
-pub const CURSOR_LEFT_PTR      = 68;
-pub const CURSOR_LEFT_PTR_MASK = CURSOR_LEFT_PTR + 1;
 
 pub const Limits = struct {
     /// Dispatch table size — covers all X11 event types up to XCB_FOCUS_OUT=10.

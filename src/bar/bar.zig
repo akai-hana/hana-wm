@@ -1,3 +1,4 @@
+
 //! Status bar
 //! Renders segments via Cairo/Pango into an XCB override-redirect window.
 
@@ -67,8 +68,6 @@ const workspaces = if (build.has_workspaces) @import("workspaces") else struct {
     pub inline fn switchTo(_: u8) void {}
 };
 
-const WorkspaceState = workspaces.State;
-
 inline fn switchToWorkspace(ws_arg: u8) void {
     if (comptime build.has_workspaces) workspaces.switchTo(ws_arg);
 }
@@ -114,9 +113,7 @@ const titleSegment = if (build.has_title) @import("title") else struct {
 };
 
 const clockSegment = if (build.has_clock) @import("clock") else struct {
-    pub const SAMPLE_STRING: []const u8 = "";
     pub fn draw(_: *drawing.DrawContext, _: types.BarConfig, _: u16, x: u16) !u16 { return x; }
-    pub fn setTimerFd(_: i32) void {}
     pub fn updateTimerState() void {}
     pub fn pollTimeoutMs() i32 { return -1; }
 };
@@ -1302,19 +1299,6 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
         s.title_cache.is_invalidated = true;
         s.markDirty();
     }
-}
-
-pub fn monitorFocusedWindow() void {
-    const win = focus.getFocused() orelse return;
-    const s   = gBar.state orelse return;
-    if (s.win.last_monitored_window == win) return;
-    if (s.win.last_monitored_window) |old_win|
-        _ = xcb.xcb_change_window_attributes(core.conn, old_win,
-            xcb.XCB_CW_EVENT_MASK, &[_]u32{constants.EventMasks.MANAGED_WINDOW});
-    s.win.last_monitored_window = win;
-    _ = xcb.xcb_change_window_attributes(core.conn, win,
-        xcb.XCB_CW_EVENT_MASK,
-        &[_]u32{constants.EventMasks.MANAGED_WINDOW | xcb.XCB_EVENT_MASK_PROPERTY_CHANGE});
 }
 
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {

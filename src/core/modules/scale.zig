@@ -120,13 +120,7 @@ fn calcScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
     return resolution_scale;
 }
 
-/// Invalidate the DPI cache. Call this when a screen-change event is received
-/// before the next detectDpi() so the values are recomputed from fresh data.
-pub fn resetDpiCache() void {
-    dpi_cache = null;
-}
-
-/// Detect DPI, returning a cached result until resetDpiCache() is called.
+/// Detect DPI, returning a cached result until the DPI cache is invalidated.
 /// Priority: Xft.dpi from X resources -> geometry calculation -> resolution-based scaling.
 pub fn detectDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) DpiInfo {
     if (dpi_cache) |cached| return cached;
@@ -180,9 +174,6 @@ pub fn scaleBorderWidth(value: parser.ScalableValue, reference_dimension: u16) u
     return @intFromFloat(@max(0.0, @round(value.value)));
 }
 
-/// Alias for `scaleBorderWidth` — gaps and borders share identical scaling semantics.
-pub const scaleGaps = scaleBorderWidth;
-
 /// Returns the master width as a fraction (0.0–1.0) for percentage values,
 /// or as a negative float encoding an absolute pixel value otherwise.
 /// Callers should treat negative results as `@abs(result)` pixels.
@@ -222,10 +213,6 @@ const HzCache = struct {
 };
 var hz_cache: HzCache = .{};
 
-/// Return the cached refresh rate (Hz).
-/// Always safe to call; returns `default_hz` if detection has not yet run.
-pub fn cachedRefreshRate() f64 { return hz_cache.hz; }
-
 /// Detect and cache the monitor refresh rate.
 /// Subsequent calls are a single branch and a return — zero X11 I/O.
 pub fn ensureRefreshRateDetected(conn: *xcb.xcb_connection_t) void {
@@ -233,11 +220,6 @@ pub fn ensureRefreshRateDetected(conn: *xcb.xcb_connection_t) void {
     hz_cache.is_ready = true;
     hz_cache.hz       = detectRefreshRate(conn);
 }
-
-/// Force re-detection on the next `ensureRefreshRateDetected()` call.
-/// Call this when handling an `RRScreenChangeNotify` event so that a monitor
-/// hotplug or mode switch is picked up on the next draw cycle.
-pub fn invalidateRefreshRate() void { hz_cache.is_ready = false; }
 
 /// Returns the root window ID of the first screen, or 0 if no screens are available.
 fn xcbRootWindow(conn: *xcb.xcb_connection_t) u32 {

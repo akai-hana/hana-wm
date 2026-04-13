@@ -165,12 +165,6 @@ pub fn removeFromHistory(win: u32) void {
     _ = state.history.orderedRemove(idx);
 }
 
-/// Returns a slice of previously focused windows in MRU order.
-/// The slice is valid until the next call to any focus mutator.
-pub inline fn historyItems() []const u32 {
-    return state.history.items;
-}
-
 // Public accessors
 
 pub inline fn getFocused()        ?u32                       { return state.focused_window;  }
@@ -192,18 +186,6 @@ pub inline fn shouldSuppressEnterNotify() bool {
     return state.suppress_reason == .tiling_operation;
 }
 pub inline fn getLastEventTime() u32 { return state.last_event_time; }
-
-/// Raw write to focused_window, bypassing all side effects: history recording,
-/// grab management, XCB protocol calls, bar/carousel notifications, and
-/// _NET_ACTIVE_WINDOW updates.  All of those invariants are the responsibility
-/// of commitFocusTransition.  Callers must ensure they maintain every invariant
-/// that commitFocusTransition normally enforces.
-///
-/// NOTE — escape hatch: this function exists for the one caller (the fullscreen
-/// exit path) that cannot use commitFocusTransition directly.  If that caller is
-/// ever refactored to call commitFocusTransition with an appropriate CommitFlags,
-/// this function should be removed.  Do not add new callers.
-pub inline fn setFocused(win: ?u32) void { state.focused_window = win; }
 
 /// Update the X11 event timestamp used for xcb_set_input_focus and WM_TAKE_FOCUS
 /// messages.  See "Timestamp handling" below for why this must be called for
@@ -240,44 +222,11 @@ pub inline fn setLastEventTime(t: u32) void { state.last_event_time = t; }
 // maintained for external consumers (e.g. subsystems that forward timestamps
 // to input-method frameworks) rather than for use inside this module.
 
-/// Set the suppress reason and immediately focus `win` as an atomic operation.
-///
-/// This is the correct API for callers (e.g. the fullscreen-exit path) that
-/// need to prime suppression before a programmatic focus change.  The two
-/// operations must be paired: if they are split across separate calls, a
-/// concurrent setFocus from another path can clear the suppression between the
-/// setSuppressReason write and the setFocus call, or — if setFocus returns
-/// early via the `focused_window == win` guard — suppression is set but focus
-/// never changes, leaving it primed permanently.
-///
-/// Replace the split pattern:
-///   focus.setSuppressReason(.window_spawn);  // fragile
-///   focus.setFocus(win, .tiling_operation);
-/// With the atomic form:
-///   focus.setFocusWithSuppression(win, .tiling_operation, .window_spawn);
-///
-/// Edge case: if `win` equals focused_window, this function returns without
-/// calling setFocus, so `suppress` is never applied.  The caller need not
-/// guard against this — the early return is the safe outcome.
-pub fn setFocusWithSuppression(win: u32, reason: Reason, suppress: core.FocusSuppressReason) void {
-    // Runtime guard (not assert): if win is already focused, setFocus would
-    // return early without committing a transition, leaving suppress permanently
-    // set.  Bail out safely instead — the caller's intent (focus win) is already
-    // satisfied and no suppression is needed.
-    if (state.focused_window == win) return;
-    state.suppress_reason = suppress;
-    setFocus(win, reason);
-}
-
 /// Direct write to suppress_reason.
 ///
-/// Prefer setFocusWithSuppression when suppression must be paired with a
-/// focus change.  This setter exists for cases where suppression must be
-/// cleared or set independently of any focus change — e.g. MotionNotify
-/// clearing suppression when real pointer movement is detected.
-///
-/// NOTE — escape hatch: like setFocused, this bypasses commitFocusTransition
-/// invariants and should only be used when a full transition is not appropriate.
+/// Use this for cases where suppression must be cleared or set independently
+/// of any focus change — e.g. MotionNotify clearing suppression when real
+/// pointer movement is detected.
 pub inline fn setSuppressReason(r: core.FocusSuppressReason) void { state.suppress_reason = r; }
 
 // Button grab management
@@ -323,15 +272,9 @@ pub const Reason = enum {
 };
 
 // CommitFlags — controls which side effects commitFocusTransition applies.
-//
 // All fields are non-defaulted so that every call site must be explicit.
 // An accidental zero-flags call (e.g. CommitFlags{}) will fail to compile,
 // preventing silent no-protocol transitions that are extremely hard to debug.
-//
-// Note: syncPointerFocusBlocking intentionally calls commitFocusTransition
-// with set_input_focus/raise/send_wm_take_focus all false when the window is
-// changing — those signals are sent unconditionally after the call returns.
-// This is not a bug; the flags are still fully explicit at the call site.
 const CommitFlags = struct {
     /// Send xcb_set_input_focus to the new window.
     /// False for no_input and globally_active windows: no_input never receives
@@ -354,8 +297,8 @@ const CommitFlags = struct {
     arm_confirm:        bool,
 
     /// Call bar.scheduleFocusRedraw after the transition.
-    /// False only for syncPointerFocusNow, which runs inside a server grab;
-    /// its caller is responsible for calling bar.redrawInsideGrab() instead.
+    /// False only when running inside a server grab; the caller is then
+    /// responsible for calling bar.redrawInsideGrab() instead.
     schedule_bar:       bool,
 
     /// New value for suppress_reason after the transition.
@@ -364,8 +307,7 @@ const CommitFlags = struct {
     new_suppress: core.FocusSuppressReason,
 };
 
-/// Core focus-transition implementation shared by setFocus, syncPointerFocusNow,
-/// dwmFocus, and syncPointerFocusBlocking.
+/// Core focus-transition implementation shared by setFocus and dwmFocus.
 /// NOTE: handleFocusIn does NOT call this function — it delegates to
 /// sendFocusProtocol, which operates on a different set of invariants (no
 /// history recording, no grab management, no suppression update).
@@ -407,7 +349,7 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
         // processing it while we did bookkeeping above, so this drain is
         // typically a near-zero-cost buffer read rather than a round-trip.
         // Fall back to the blocking sendWMTakeFocus for callers that don't
-        // pre-fire (syncPointerFocusBlocking, drainPendingConfirm).
+        // pre-fire (drainPendingConfirm).
         if (state.pre_protocols_cookie) |ck| {
             state.pre_protocols_cookie = null;
             window.sendWMTakeFocusWithCookie(core.conn, win, 0, ck); // CurrentTime
@@ -434,54 +376,10 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
 }
 
 /// Returns true when `win` must never receive focus from any focus-granting
-/// path (setFocus, dwmFocus, syncPointerFocusBlocking).
+/// path (setFocus, dwmFocus).
 /// NOTE: handleFocusIn intentionally does NOT use this guard.
 inline fn isInvalidFocusTarget(win: u32) bool {
     return win == 0 or win == core.root or bar.isBarWindow(win);
-}
-
-/// Hover focus with unconditional protocol resend.
-///
-/// Unlike dwmFocus, this does NOT short-circuit when `win` is already
-/// focused_window.  Some Electron/Qt builds call XSetInputFocus spontaneously;
-/// handleFocusIn accepts that grab (when nothing was focused), setting
-/// focused_window without sending WM_TAKE_FOCUS, so the renderer widget never
-/// activates.  Re-sending the protocol on every hover fixes that case without
-/// harm to compliant clients.
-///
-/// When `win` differs from focused_window, delegates to commitFocusTransition
-/// for all WM bookkeeping (history, grabs, tiling, bar, _NET_ACTIVE_WINDOW).
-/// The X protocol signals are then issued unconditionally with CurrentTime (0),
-/// bypassing input-model checks entirely.
-///
-/// Use dwmFocus for the common hover path; reserve this for clients known to
-/// silently drop the initial WM_TAKE_FOCUS.
-pub fn syncPointerFocusBlocking(win: u32) void {
-    if (isInvalidFocusTarget(win)) return;
-
-    cancelPendingConfirm();
-
-    if (state.focused_window != win) {
-        const old = state.focused_window;
-        commitFocusTransition(old, win, .{
-            .set_input_focus    = false, // sent unconditionally below
-            .raise              = false, // raised unconditionally below
-            .send_wm_take_focus = false, // sent unconditionally below
-            .arm_confirm        = false,
-            .schedule_bar       = true,
-            .new_suppress       = .none,
-        });
-    } else {
-        // Already focused: bookkeeping skipped, but suppression must still clear.
-        state.suppress_reason = .none;
-    }
-
-    // Always re-send — raise, XSetInputFocus, WM_TAKE_FOCUS — with CurrentTime (0).
-    _ = xcb.xcb_configure_window(core.conn, win,
-        xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
-    _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
-        win, 0);
-    window.sendWMTakeFocus(core.conn, win, 0);
 }
 
 pub fn setFocus(win: u32, reason: Reason) void {
@@ -637,10 +535,6 @@ fn sendFocusProtocol(win: u32) void {
 ///
 /// Uses CurrentTime (0) so the X server's timestamp ordering check never
 /// rejects requests.  No confirm/retry machinery.
-///
-/// Contrast with syncPointerFocusBlocking, which re-sends the X protocol even
-/// when the window is already focused_window.  Use that path only when a client
-/// is known to silently drop the initial WM_TAKE_FOCUS.
 pub fn dwmFocus(win: u32) void {
     if (isInvalidFocusTarget(win)) return;
     if (state.focused_window == win) return;
@@ -790,42 +684,6 @@ inline fn suppressionFor(reason: Reason, current: core.FocusSuppressReason) core
         .window_spawn               => .window_spawn,
         else                        => current,
     };
-}
-
-/// Synchronous pointer-position query for use inside a server grab.
-///
-/// Clears suppression, queries the pointer with a blocking reply, and updates
-/// all focus state for whichever managed window is currently under the cursor —
-/// all before returning.  Must be called inside xcb_grab_server /
-/// xcb_ungrab_server so that the resulting border and focus changes are folded
-/// into the same atomic batch as the tiling operation that preceded it.
-///
-/// Deliberately does NOT call bar.scheduleFocusRedraw: the caller is expected
-/// to call bar.redrawInsideGrab() immediately after.
-pub fn syncPointerFocusNow() void {
-    state.suppress_reason = .none;
-    const cookie = xcb.xcb_query_pointer(core.conn, core.root);
-    const reply  = xcb.xcb_query_pointer_reply(core.conn, cookie, null) orelse return;
-    defer std.c.free(reply);
-    const child = reply.*.child;
-    if (child == 0 or child == core.root) return;
-    if (!window.isValidManagedWindow(child)) return;
-    if (state.focused_window == child) return;
-
-    cancelPendingConfirm();
-
-    const input_model = window.getInputModelCached(core.conn, child);
-    if (input_model == .no_input) return;
-
-    const old = state.focused_window;
-    commitFocusTransition(old, child, .{
-        .set_input_focus    = input_model != .globally_active,
-        .raise              = false,
-        .send_wm_take_focus = true,
-        .arm_confirm        = false,
-        .schedule_bar       = false,
-        .new_suppress       = .none,
-    });
 }
 
 /// Fire an async pointer-position query for focus-after-tiling sync.

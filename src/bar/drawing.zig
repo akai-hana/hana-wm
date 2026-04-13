@@ -1,3 +1,4 @@
+
 //! Drawing context for hana's status bar.
 //!
 //! Rectangle fills use XCB core drawing instead of Cairo's XRender, since the
@@ -297,18 +298,6 @@ pub const DrawContext = struct {
         const baseline = @as(f64, @floatFromInt(c.pango_layout_get_baseline(self.font.pango_layout)))
             / @as(f64, @floatFromInt(c.PANGO_SCALE));
         c.cairo_move_to(self.ctx, @floatFromInt(x), @as(f64, @floatFromInt(y)) - baseline);
-    }
-
-    /// Clears the offscreen pixmap to fully transparent. No-op on non-ARGB surfaces.
-    pub fn clearToTransparent(self: *DrawContext) void {
-        if (!self.is_argb) return;
-        // Skip cairo_save/cairo_restore: we only change the operator temporarily
-        // and always want to end at OVER. Direct set/reset is cheaper than a
-        // full graphics-state push/pop. The source pattern (last_color) is
-        // unaffected by the operator change or cairo_paint, so no cache reset.
-        c.cairo_set_operator(self.ctx, c.cairo_operator_t.CLEAR);
-        c.cairo_paint(self.ctx);
-        c.cairo_set_operator(self.ctx, c.cairo_operator_t.OVER);
     }
 
     /// Fill a rectangle using XCB core drawing (xcb_poly_fill_rectangle).

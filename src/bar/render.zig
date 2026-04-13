@@ -1,3 +1,4 @@
+
 //! Manual C bindings for the bar's rendering stack: Cairo, Pango, and GLib.
 //!
 //! Cairo and Pango are bound together because `pango_cairo_*` functions
@@ -84,7 +85,6 @@ pub const PangoLayout          = opaque {};
 pub const PangoContext         = opaque {};
 pub const PangoFontDescription = opaque {};
 pub const PangoFontMetrics     = opaque {};
-pub const PangoLayoutLine      = opaque {};
 
 /// Conversion factor between Pango's internal fixed-point units and pixels.
 /// Divide a Pango unit value by PANGO_SCALE to get pixels.

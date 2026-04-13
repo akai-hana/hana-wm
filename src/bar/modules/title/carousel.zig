@@ -35,11 +35,6 @@ const drawing = @import("drawing");
 
 // ── Public constants ────────────────────────────────────────────────────────
 
-/// Fallback refresh rate used when RandR is unavailable or returns an
-/// invalid value.  No longer used internally for carousel math; retained
-/// for callers that call effectiveRefreshRate().
-pub const default_hz: f64 = scale.default_hz;
-
 /// Default scroll speed in pixels per second.
 pub const default_scroll_speed: f64 = 125.0;
 
@@ -122,22 +117,10 @@ pub fn setScrollSpeed(px_per_s: f64) void {
     scroll_config.speed = if (px_per_s > 0.0) px_per_s else default_scroll_speed;
 }
 
-/// Returns the current scroll speed in pixels per second.
-pub fn getScrollSpeed() f64 { return scroll_config.speed; }
-
 /// Override the refresh rate used for frame cadence calculations.
 /// Retained for API compatibility; the offset formula no longer uses Hz.
 pub fn setRefreshRateOverride(hz: f64) void {
     scroll_config.rate_override = if (hz > 0.0) hz else 0.0;
-}
-
-/// Returns the active refresh rate (override when set, else auto-detected).
-/// Retained for callers that need the Hz value for their own purposes.
-pub fn effectiveRefreshRate() f64 {
-    return if (scroll_config.rate_override > 0.0)
-        scroll_config.rate_override
-    else
-        scale.cachedRefreshRate();
 }
 
 // ── Public API — lifecycle ───────────────────────────────────────────────────
@@ -205,36 +188,6 @@ pub fn drawCarouselTick(
 ) bool {
     const e = render.single orelse return false;
     if (seg_x != e.geom.seg_x or seg_w != e.geom.seg_w or bg != e.last_bg)
-        return false;
-
-    const off = carouselOffset(e.start_ms, e.cycle_w, utils.monotonicMs());
-    e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, seg_x, off, seg_w);
-    dc.flushRect(seg_x, seg_w);
-    return true;
-}
-
-/// Fast per-tick segmented carousel blit.
-///
-/// Mirrors drawCarouselTick for the segmented (multi-window) case.
-/// Returns false when:
-///   • no segmented carousel is live,
-///   • segment geometry changed (bar resize), or
-///   • accent colour changed.
-///
-/// When it returns false the caller must fall through to a full
-/// drawCached() / draw() frame to rebuild or re-draw everything.
-///
-/// When it returns true only the carousel segment was updated; the caller
-/// must NOT redraw the rest of the bar this tick (non-focused segments
-/// were already rendered on the previous full frame and are unchanged).
-pub fn drawSegCarouselTick(
-    dc:       *drawing.DrawContext,
-    accent:   u32,
-    seg_x:    u16,
-    seg_w:    u16,
-) bool {
-    const e = render.seg orelse return false;
-    if (seg_x != e.geom.seg_x or seg_w != e.geom.seg_w or accent != e.last_bg)
         return false;
 
     const off = carouselOffset(e.start_ms, e.cycle_w, utils.monotonicMs());
@@ -435,69 +388,4 @@ fn carouselOffset(start_ms: i64, cycle_w: u16, now_ms: i64) u16 {
     const elapsed = @as(f64, @floatFromInt(@max(0, now_ms - start_ms)));
     const raw_px  = elapsed * scroll_config.speed / 1000.0;
     return @intFromFloat(@mod(raw_px, @as(f64, @floatFromInt(cycle_w))));
-}
-
-// ── Private — Hz detection (kept for effectiveRefreshRate API) ───────────────
-
-fn xcbRootWindow(conn: *xcb.xcb_connection_t) u32 {
-    const setup = xcb.xcb_get_setup(conn);
-    var it      = xcb.xcb_setup_roots_iterator(setup);
-    return if (it.rem > 0) it.data.*.root else 0;
-}
-
-fn detectRefreshRateViaCrtc(conn: *xcb.xcb_connection_t, root: u32) ?f64 {
-    const rc = xcb.xcb_randr_get_screen_resources_current(conn, root);
-    const rr = xcb.xcb_randr_get_screen_resources_current_reply(conn, rc, null) orelse
-        return null;
-    defer std.c.free(rr);
-
-    const mode_it_len = xcb.xcb_randr_get_screen_resources_current_modes_length(rr);
-    const mode_it_ptr = xcb.xcb_randr_get_screen_resources_current_modes(rr);
-    if (mode_it_len <= 0 or mode_it_ptr == null) return null;
-    const modes = mode_it_ptr.?[0..@intCast(mode_it_len)];
-
-    const crtc_it_len = xcb.xcb_randr_get_screen_resources_current_crtcs_length(rr);
-    const crtc_it_ptr = xcb.xcb_randr_get_screen_resources_current_crtcs(rr);
-    if (crtc_it_len <= 0 or crtc_it_ptr == null) return null;
-    const crtcs = crtc_it_ptr.?[0..@intCast(crtc_it_len)];
-
-    const max_crtcs: usize = 16;
-    const n_crtcs          = @min(crtcs.len, max_crtcs);
-    var crtc_cookies: [max_crtcs]xcb.xcb_randr_get_crtc_info_cookie_t = undefined;
-    for (crtcs[0..n_crtcs], crtc_cookies[0..n_crtcs]) |crtc, *cookie|
-        cookie.* = xcb.xcb_randr_get_crtc_info(conn, crtc, rr.*.config_timestamp);
-
-    var best_hz: f64 = 0.0;
-    for (0..n_crtcs) |i| {
-        const cr = xcb.xcb_randr_get_crtc_info_reply(conn, crtc_cookies[i], null) orelse continue;
-        defer std.c.free(cr);
-        const mode_id = cr.*.mode;
-        if (mode_id == 0) continue;
-        for (modes) |m| {
-            if (m.id != mode_id) continue;
-            const htotal: u64 = m.htotal;
-            const vtotal: u64 = m.vtotal;
-            if (htotal == 0 or vtotal == 0) break;
-            const hz: f64 = @as(f64, @floatFromInt(m.dot_clock)) /
-                            @as(f64, @floatFromInt(htotal * vtotal));
-            if (hz > best_hz) best_hz = hz;
-            break;
-        }
-    }
-    return if (best_hz > 0.0) best_hz else null;
-}
-
-fn detectRefreshRate(conn: *xcb.xcb_connection_t) f64 {
-    if (!@hasDecl(xcb, "xcb_randr_get_screen_info")) return default_hz;
-    const root = xcbRootWindow(conn);
-    if (root == 0) return default_hz;
-    const cookie = xcb.xcb_randr_get_screen_info(conn, root);
-    const reply  = xcb.xcb_randr_get_screen_info_reply(conn, cookie, null) orelse
-        return default_hz;
-    defer std.c.free(reply);
-    const rate = reply.*.rate;
-    if (rate > 0) return @floatFromInt(rate);
-    if (@hasDecl(xcb, "xcb_randr_get_screen_resources_current"))
-        if (detectRefreshRateViaCrtc(conn, root)) |hz| return hz;
-    return default_hz;
 }

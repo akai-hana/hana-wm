@@ -63,9 +63,6 @@ pub const Rect = struct {
 pub const Margins = struct {
     gap:    u16,
     border: u16,
-
-    /// Returns the total space consumed on one axis (gap + border on each side).
-    pub inline fn total(self: Margins) u16 { return self.gap + 2 * self.border; }
 };
 
 /// Moves and resizes `win` without touching border_width.
@@ -139,21 +136,6 @@ pub fn initAtomCache(conn: *xcb.xcb_connection_t) !void {
         @field(cache, f.name) = reply.*.atom;
     }
     atom_cache = cache;
-}
-
-/// Interns a single atom by name, always making a server round-trip.
-/// Prefer `getAtomCached` for atoms known at compile time.
-pub fn getAtom(conn: *xcb.xcb_connection_t, name: []const u8) !u32 {
-    const reply = xcb.xcb_intern_atom_reply(
-        conn,
-        xcb.xcb_intern_atom(conn, 0, @intCast(name.len), name.ptr),
-        null,
-    ) orelse {
-        debug.err("Failed to intern atom: {s}", .{name});
-        return error.AtomFailed;
-    };
-    defer std.c.free(reply);
-    return reply.*.atom;
 }
 
 /// Looks up a cached atom by name.

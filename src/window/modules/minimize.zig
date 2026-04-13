@@ -123,13 +123,6 @@ pub fn deinit() void {
 
 // Low-level buffer helpers 
 
-/// Reinterpret a signed screen coordinate as the u32 value XCB expects on its
-/// wire format.  XCB takes geometry arguments as u32 but interprets them as i32
-/// Reinterprets a signed screen coordinate as the u32 XCB expects on the wire.
-/// XCB takes geometry arguments as u32 but interprets them as i32 internally;
-/// @bitCast is the correct conversion and this wrapper names the intent at every call site.
-inline fn toXcbCoord(v: i32) u32 { return @bitCast(v); }
-
 /// Returns the index into g_buf[0..g_len] of the slot whose .win field matches,
 /// or null if not found. Centralised so all buffer scans share one auditable implementation.
 fn findInBuf(win: u32) ?usize {
@@ -157,16 +150,6 @@ fn removeFromBuf(win: u32) bool {
 /// Returns true when `win` is currently minimized.
 pub fn isMinimized(win: u32) bool {
     return findInBuf(win) != null;
-}
-
-/// Returns a read-only view of the current minimize buffer.
-/// Valid until the next minimizeWindow / unminimize / untrackWindow call.
-///
-/// Prefer this over collectMinimizedIntoSet() — it lets the caller (e.g. bar.zig) build
-/// whatever secondary structure it needs without introducing an allocator
-/// dependency into this module.
-pub fn minimizedSlice() []const MinimizedRecord {
-    return g_buf[0..g_len];
 }
 
 // Private helpers 
@@ -460,11 +443,6 @@ pub fn unminimizeAll() void {
 /// Fills `set` with the window ID of every currently minimized window.
 /// Called by bar.zig to build the per-frame BarSnapshot.minimized_set.
 /// The caller is responsible for clearing the set before this call.
-///
-/// Deprecated: prefer iterating minimizedSlice() directly.  That removes the
-/// only allocator-dependent (!void) function from this module and lets bar.zig
-/// control its own memory strategy.  This function can be deleted once bar.zig
-/// has been migrated.
 pub fn collectMinimizedIntoSet(
     set:       *std.AutoHashMapUnmanaged(u32, void),
     allocator: std.mem.Allocator,

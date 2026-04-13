@@ -1,3 +1,4 @@
+
 //! Core window tracking
 //! Tracks windows' focus eligibility through workspaces.
 
@@ -85,22 +86,6 @@ pub const Tracking = struct {
         const i = std.mem.indexOfScalar(u32, self.buf[0..self.len], win) orelse return false;
         std.mem.copyForwards(u32, self.buf[i .. self.len - 1], self.buf[i + 1 .. self.len]);
         self.len -= 1;
-        return true;
-    }
-
-    /// Remove `win` by swapping it with the last entry.
-    ///
-    /// Use this variant only when window order is irrelevant — e.g. tag cleanup
-    /// where the workspace is being emptied, or when the tiling layout will be
-    /// fully recomputed immediately after.  Calling this when order matters will
-    /// silently corrupt positional semantics.
-    /// O(1) after the initial scan.
-    ///
-    /// Returns true if `win` was found and removed, false if it was not present.
-    pub fn removeUnordered(self: *Tracking, win: u32) bool {
-        const i = std.mem.indexOfScalar(u32, self.buf[0..self.len], win) orelse return false;
-        self.buf[i] = self.buf[self.len - 1];
-        self.len   -= 1;
         return true;
     }
 
