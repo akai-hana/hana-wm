@@ -43,23 +43,11 @@ pub inline fn warn (comptime fmt: []const u8, args: anytype) void { emitLog(@src
 pub inline fn info (comptime fmt: []const u8, args: anytype) void { emitLog(@src(), .info,      fmt, args); }
 pub inline fn debug(comptime fmt: []const u8, args: anytype) void { emitLog(@src(), .debug_log, fmt, args); }
 
-pub inline fn errIf  (condition: bool, comptime fmt: []const u8, args: anytype) void { if (condition) emitLog(@src(), .err,       fmt, args); }
-pub inline fn warnIf (condition: bool, comptime fmt: []const u8, args: anytype) void { if (condition) emitLog(@src(), .warn,      fmt, args); }
-pub inline fn infoIf (condition: bool, comptime fmt: []const u8, args: anytype) void { if (condition) emitLog(@src(), .info,      fmt, args); }
-pub inline fn debugIf(condition: bool, comptime fmt: []const u8, args: anytype) void { if (condition) emitLog(@src(), .debug_log, fmt, args); }
-
 /// Panics with a module-tagged message when `condition` is false, in debug builds only.
 pub inline fn assert(condition: bool, comptime message: []const u8) void {
     if (!debugEnabled() or condition) return;
     const module = moduleFromSrc(@src());
     std.debug.panic("[{s}] Assertion failed: {s}", .{ module, message });
-}
-
-/// Emits a debug-level trace line showing the caller module and function name.
-pub inline fn trace(comptime func_name: []const u8) void {
-    if (!debugEnabled()) return;
-    const module = moduleFromSrc(@src());
-    std.log.debug("[{s}] -> {s}", .{ module, func_name });
 }
 
 /// Emits a debug-level line showing `label = value` with the caller's module tag.

@@ -1,6 +1,5 @@
 #!/bin/sh
-# Sequentially pipe all files inside dev/files/ onto dev/codebase/.
-# The purpose of this is to be able to write and replace files more easily.
+# Sequentially pipes all files inside dev/files/ onto dev/codebase/.
 
 mkdir -p dev/files
 mkdir -p dev/codebase

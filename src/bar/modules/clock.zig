@@ -1,3 +1,4 @@
+
 //! Clock segment
 //! Displays the current time and manages the update timer.
 

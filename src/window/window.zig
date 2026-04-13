@@ -1,3 +1,4 @@
+
 //! Window lifecycle
 //! Handles window mapping/unmapping/destroy, configure, enter/button events, and per-window property caching.
 
@@ -131,12 +132,6 @@ var atoms: struct {
     net_wm_state_fullscreen: u32 = 0,
 } = .{};
 
-/// Returns the cached WM_PROTOCOLS atom for use by other modules.
-/// Avoids exposing the full atoms struct across module boundaries.
-pub fn wmProtocolsAtom() u32 {
-    return atoms.wm_protocols;
-}
-
 // Geometry cache
 //
 // Stores last-known window geometry for workspace-switch and minimize/restore.
@@ -171,22 +166,6 @@ pub fn getWindowGeom(win: u32) ?utils.Rect {
         return wd.rect;
     }
 }
-
-/// Zero out the cached rect for `win` so the next retile recomputes it.
-pub fn invalidateWindowGeom(win: u32) void {
-    if (build.has_tiling) {
-        tiling.invalidateGeomCache(win);
-    } else {
-        if (g_geom_cache.getPtr(win)) |wd| wd.rect = .{};
-    }
-}
-
-/// Remove `win`'s entry from the cache entirely (called on unmanage).
-pub fn evictWindowGeom(win: u32) void {
-    if (build.has_tiling) return;
-    g_geom_cache.remove(win);
-}
-
 
 // ---------------------------------------------------------------------------
 // Geometry helpers
@@ -638,32 +617,6 @@ pub const WMClass = struct {
     }
 };
 
-/// Reads and parses the WM_CLASS property for `win`. The raw value is two
-/// null-terminated strings concatenated: instance name then class name.
-/// Returns null if the property is absent, malformed, or allocation fails.
-pub fn getWMClass(conn: *xcb.xcb_connection_t, win: u32, allocator: std.mem.Allocator) ?WMClass {
-    const class_atom = utils.getAtomCached("WM_CLASS") catch return null;
-    const reply = xcb.xcb_get_property_reply(conn,
-        xcb.xcb_get_property(conn, PROPERTY_NO_DELETE, win, class_atom, xcb.XCB_ATOM_STRING, 0, MAX_PROPERTY_LENGTH), null,
-    ) orelse return null;
-    defer std.c.free(reply);
-    if (reply.*.format != 8 or reply.*.value_len == 0) return null;
-
-    const data: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
-    const len: usize = @intCast(reply.*.value_len);
-
-    const sep = std.mem.indexOfScalar(u8, data[0..len], 0) orelse return null;
-    if (sep + 1 >= len) return null;
-
-    const instance  = allocator.dupe(u8, data[0..sep]) catch return null;
-    const class_str = std.mem.sliceTo(data[sep + 1 .. len], 0);
-    const class     = allocator.dupe(u8, class_str) catch {
-        allocator.free(instance);
-        return null;
-    };
-    return .{ .instance = instance, .class = class };
-}
-
 // ---------------------------------------------------------------------------
 // Child window resolution
 // ---------------------------------------------------------------------------
@@ -997,22 +950,6 @@ pub fn registerSpawn(workspace: u8, pid: u32) void {
     g_spawn_queue.append(alloc, .{ .workspace = workspace, .pid = pid }) catch |err| {
         debug.warn("registerSpawn: failed to queue spawn entry: {}", .{err});
     };
-}
-
-/// Called when a child process exits (via SIGCHLD) before its window has
-/// ever mapped.  Removes the matching queue entry immediately so a later,
-/// unrelated MapRequest cannot be mis-routed to the wrong workspace.
-///
-/// No-op for pid == 0: daemon-mode entries have no trackable child process,
-/// so they self-resolve on the next MapRequest.
-pub fn removeSpawnByPid(pid: u32) void {
-    if (pid == 0) return;
-    for (g_spawn_queue.items, 0..) |e, i| {
-        if (e.pid == pid) {
-            _ = g_spawn_queue.swapRemove(i); // order has no semantic meaning
-            return;
-        }
-    }
 }
 
 /// Drain a pre-fired xcb_query_pointer cookie and record the cursor position
@@ -1575,15 +1512,6 @@ pub fn applyBorder(win: u32) void {
     applyBorderWidth(win);
     _ = xcb.xcb_change_window_attributes(core.conn, win,
         xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
-}
-
-/// Refresh border color for `old_focused` and `new_focused` after a focus change.
-pub fn updateFocusBorders(old_focused: ?u32, new_focused: ?u32) void {
-    for ([2]?u32{ old_focused, new_focused }) |opt| {
-        const win = opt orelse continue;
-        _ = xcb.xcb_change_window_attributes(core.conn, win,
-            xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
-    }
 }
 
 /// Refresh border colors for every window on the current workspace.

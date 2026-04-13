@@ -69,7 +69,7 @@ pub const Layout = enum {
     grid,
     fibonacci,
     /// Windows are left at their current positions; no tiling is applied.
-    /// Entered and exited via `toggleFloating()`; never part of the normal cycle.
+    /// Windows are left at their current positions; never part of the normal layout cycle.
     floating,
 };
 
@@ -89,7 +89,7 @@ pub const State = struct {
     is_enabled:       bool,
     layout:           Layout,
     /// The layout active before floating mode was entered.
-    /// Restored by `toggleFloating()` when exiting floating.
+    /// Used by retileForRestore and addWindow when the current layout is .floating.
     prev_layout:      Layout,
     layout_variants:  LayoutVariants,
     master_side:      types.MasterSide,
@@ -233,11 +233,6 @@ pub fn cacheSizeHints(win: u32, hints: layouts.SizeHints) void {
     getState().cache.cacheHints(win, hints);
 }
 
-/// No-op: size-hint eviction now happens automatically inside `removeWindow`
-/// when the combined cache entry is removed via `s.cache.remove(window_id)`.
-/// Kept as a named symbol so call-sites in window.zig do not need to change.
-pub fn evictSizeHints(_: u32) void {}
-
 // Window management 
 
 pub fn addWindow(window_id: u32) void {
@@ -246,7 +241,7 @@ pub fn addWindow(window_id: u32) void {
 
     // Always add to the tracking list, even when the floating layout is active
     // (s.is_enabled == false). Windows opened during floating mode must be tracked
-    // so they enter the tiling pool when toggleFloating() restores a tiling layout.
+    // so they enter the tiling pool when floating is later exited.
     // Use prev_layout to resolve FIFO/LIFO when the current layout is .floating,
     // so new windows land in the correct slot once floating is exited.
     const effective_layout = if (s.layout == .floating) s.prev_layout else s.layout;
@@ -293,10 +288,8 @@ pub fn removeWindow(window_id: u32) void {
         s.workspace_geom_valid_bits = 0;
     }
     // Always evict the cache entry — this removes geometry, border dedup data,
-    // AND the embedded WM_NORMAL_HINTS in one operation, replacing the previous
-    // two-step design (s.cache.remove + layouts.evictSizeHints on a separate
-    // hints_buf).  No-op when the window was never cached (e.g. floating windows
-    // that opened while tiling was disabled).
+    // AND the embedded WM_NORMAL_HINTS in one operation.  No-op when the window
+    // was never cached (e.g. floating windows that opened while tiling was disabled).
     _ = s.cache.remove(window_id);
 }
 
@@ -562,37 +555,6 @@ pub fn restoreWorkspaceGeom() bool {
 
 // Layout control 
 
-/// Toggle the floating layout.
-///
-/// Entering floating: sets `s.is_enabled = false` so every existing
-/// `!s.is_enabled` guard fires automatically. `s.layout` is set to `.floating`
-/// purely for bar display.
-///
-/// Exiting floating: re-enables the tiling engine, restores the correct layout
-/// (from the current workspace in per-workspace mode, or from `prev_layout` in
-/// global mode), and retiles.
-pub fn toggleFloating() void {
-    const s = getState();
-    if (s.layout != .floating) {
-        s.prev_layout = s.layout;
-        s.layout      = .floating;
-        s.is_enabled  = false;
-        debug.info("Floating enabled (was: {s})", .{@tagName(s.prev_layout)});
-        return;
-    }
-    s.is_enabled = true;
-    const restore: Layout = if (!core.config.tiling.global_layout)
-        if (comptime build.has_workspaces)
-            (if (workspaces.getCurrentWorkspaceObject()) |ws| ws.layout else s.prev_layout)
-        else s.prev_layout
-    else
-        s.prev_layout;
-    s.layout = restore;
-    retileCurrentWorkspace();
-    bar.scheduleFullRedraw();
-    debug.info("Floating disabled, restored layout: {s}", .{@tagName(restore)});
-}
-
 /// Cycle to the next layout in the enabled-layout list.
 pub fn toggleLayout()        void { applyLayoutStep(true);  }
 /// Cycle to the previous layout in the enabled-layout list.
@@ -714,44 +676,6 @@ pub fn swapWithMaster() void {
 pub fn swapWithMasterFollowFocus() ?u32 {
     const s = getState();
     return swapWithMasterCore(s, findFocusMasterPos(s) orelse return null);
-}
-
-/// Swap the on-screen positions of the currently focused window and the most
-/// recently previously focused window.
-///
-/// In tiling mode both windows exchange their slots in the tracking list so the
-/// layout engine places each one exactly where the other was. In floating mode
-/// (or when either window is individually floated) the actual X11 geometries are
-/// exchanged directly and the cache is kept coherent for workspace-switch restore.
-pub fn swapFocusedWithPrevious() void {
-    const s       = getState();
-    const focused = focus.getFocused() orelse return;
-    const history = focus.historyItems();
-    if (history.len == 0) return;
-    const prev = history[0];
-    if (prev == focused) return;
-
-    if (!tracking.isOnCurrentWorkspace(focused)) return;
-    if (!tracking.isOnCurrentWorkspace(prev))    return;
-
-    const is_focused_tiled = s.is_enabled and s.windows.contains(focused);
-    const is_prev_tiled    = s.is_enabled and s.windows.contains(prev);
-
-    if (!is_focused_tiled or !is_prev_tiled) {
-        // One or both windows are floating: exchange their on-screen geometries
-        // directly without touching the tiling list.
-        swapWindowGeometriesDirectly(s, focused, prev);
-        _ = xcb.xcb_flush(core.conn);
-        return;
-    }
-
-    // Both are under tiler control: swap their positions in the tracking list
-    // so the next retile assigns each window to the other's cell.
-    const all       = s.windows.items();
-    const idx_focused = std.mem.indexOfScalar(u32, all, focused) orelse return;
-    const idx_prev    = std.mem.indexOfScalar(u32, all, prev)    orelse return;
-    swapWindowsInList(s, idx_focused, idx_prev);
-    retileCurrentWorkspace();
 }
 
 // Query functions 
@@ -1220,41 +1144,8 @@ fn swapWithMasterCore(s: *State, pos: FocusMasterPos) ?u32 {
     return other;
 }
 
-/// Query the current geometry of `win` from the X server.
-/// Returns null when the window no longer exists or the server returns an error.
-fn queryWindowRect(win: u32) ?utils.Rect {
-    const cookie = xcb.xcb_get_geometry(core.conn, win);
-    const reply  = xcb.xcb_get_geometry_reply(core.conn, cookie, null) orelse return null;
-    defer std.c.free(reply);
-    return .{
-        .x      = reply.*.x,
-        .y      = reply.*.y,
-        .width  = reply.*.width,
-        .height = reply.*.height,
-    };
-}
-
 fn updateCacheRect(s: *State, win: u32, rect: utils.Rect) void {
     s.cache.getOrPut(win).value_ptr.rect = rect;
-}
-
-/// Exchange the on-screen positions of `win_a` and `win_b`.
-fn swapWindowGeometriesDirectly(s: *State, win_a: u32, win_b: u32) void {
-    const rect_a: utils.Rect = blk: {
-        if (s.cache.get(win_a)) |wd| if (wd.hasValidRect()) break :blk wd.rect;
-        break :blk queryWindowRect(win_a) orelse return;
-    };
-    const rect_b: utils.Rect = blk: {
-        if (s.cache.get(win_b)) |wd| if (wd.hasValidRect()) break :blk wd.rect;
-        break :blk queryWindowRect(win_b) orelse return;
-    };
-
-    if (layouts.rectsEqual(rect_a, rect_b)) return;
-
-    utils.configureWindow(core.conn, win_a, rect_b);
-    utils.configureWindow(core.conn, win_b, rect_a);
-    updateCacheRect(s, win_a, rect_b);
-    updateCacheRect(s, win_b, rect_a);
 }
 
 // Misc private helpers

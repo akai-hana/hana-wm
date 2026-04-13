@@ -144,12 +144,6 @@ pub fn moveRecord(src_ws: u8, dst_ws: u8) void {
     g_slots[dst_ws] = info;
 }
 
-/// Resets all fullscreen state, including float saves. Safe to call mid-session.
-pub fn clear() void {
-    g_slots           = @splat(null);
-    g_float_saves_len = 0;
-}
-
 pub fn hasAnyFullscreen() bool {
     const count = tracking.getWorkspaceCount();
     for (g_slots[0..count]) |slot| if (slot != null) return true;
