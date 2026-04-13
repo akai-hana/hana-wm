@@ -1,4 +1,3 @@
-
 //! Window lifecycle
 //! Handles window mapping/unmapping/destroy, configure, enter/button events, and per-window property caching.
 
@@ -750,7 +749,7 @@ pub fn rebuildRulesMap() void { buildRulesMap(); }
 pub fn init(alloc: std.mem.Allocator) !void {
     g_alloc = alloc;
     tracking.init(alloc);
-    focus.init(alloc);
+    focus.init();
     // tiling must precede workspaces: workspaces.init() calls tiling.getState().
     if (build.has_tiling)      tiling.init();
     if (build.has_fullscreen)  fullscreen.init();
@@ -1123,8 +1122,6 @@ fn unmanageWindow(win: u32) void {
     // Without this, a new window reusing the same XID could be mis-identified
     // as the old toplevel's child on the next hover event.
     evictChildCache(win);
-
-    focus.removeFromHistory(win);
 
     const ptr_cookie: ?xcb.xcb_query_pointer_cookie_t =
         if (was_focused) xcb.xcb_query_pointer(core.conn, core.root) else null;
@@ -1640,3 +1637,4 @@ pub fn reloadBorders() void {
     for (ws_state.workspaces) |*ws|
         for (ws.windows.items()) |win| applyBorder(win);
 }
+
