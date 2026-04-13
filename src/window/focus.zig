@@ -49,21 +49,6 @@ const State = struct {
     // broken; it should be documented at any future call site that reads it.
     last_event_time:   u32                                 = 0,
 
-    // Full MRU list of previously focused windows.  Index 0 is the most
-    // recently focused window before the current one.
-    //
-    // Invariants:
-    //   • focused_window is never present in the history.
-    //   • Each window appears at most once.
-    //   • Entries are never left pointing at destroyed windows; callers must
-    //     call removeFromHistory(win) when a window is unmanaged.
-    history:           std.ArrayListUnmanaged(u32)         = .empty,
-
-    // Optional so that deinit() called before init() (e.g. a defensive deinit
-    // in an error-path test) is a safe no-op.  A null allocator means the
-    // history list has never been populated; .deinit() skips the free.
-    allocator:         ?std.mem.Allocator                  = null,
-
     // EWMH atom for _NET_ACTIVE_WINDOW — interned once in init().
     net_active_window: xcb.xcb_atom_t                     = xcb.XCB_ATOM_NONE,
 
@@ -88,10 +73,10 @@ const State = struct {
     //   WM_PROTOCOLS get_property request fired at the START of setFocus /
     //   dwmFocus, before commitFocusTransition runs its bookkeeping.  This
     //   lets the X server process the property request in parallel with
-    //   history recording, grab management, tiling border updates, and bar
-    //   scheduling.  By the time commitFocusTransition calls sendWMTakeFocus,
-    //   the reply is typically already sitting in the XCB receive buffer,
-    //   turning a synchronous round-trip into a near-zero-cost buffer drain.
+    //   grab management, tiling border updates, and bar scheduling.  By the
+    //   time commitFocusTransition calls sendWMTakeFocus, the reply is
+    //   typically already sitting in the XCB receive buffer, turning a
+    //   synchronous round-trip into a near-zero-cost buffer drain.
     //   null when not in use (most call paths do not pre-fire).
     confirm_cookie:        ?xcb.xcb_get_input_focus_cookie_t  = null,
     confirm_win:           ?u32                               = null,
@@ -103,16 +88,10 @@ var state: State = .{};
 
 // Lifecycle
 
-pub fn init(allocator: std.mem.Allocator) void {
-    // Deinit any existing history before overwriting the allocator, so we
-    // never leak the old buffer.  A null allocator means no history was ever
-    // allocated, so the deinit is a safe no-op.
-    if (state.allocator) |old_alloc| state.history.deinit(old_alloc);
-
-    // Reset every field to its zero value, then set the allocator.  This
-    // covers all module globals so that a deinit() + init() cycle (test
-    // harness, session restart) starts from a clean slate.
-    state = .{ .allocator = allocator };
+pub fn init() void {
+    // Reset every field to its zero value so that a deinit() + init() cycle
+    // (test harness, session restart) starts from a clean slate.
+    state = .{};
 
     // Intern _NET_ACTIVE_WINDOW so setFocus can advertise the focused window
     // on the root.  null reply -> stays XCB_ATOM_NONE; advertiseActiveWindow
@@ -124,46 +103,7 @@ pub fn init(allocator: std.mem.Allocator) void {
     }
 }
 
-pub fn deinit() void {
-    // Guard: if init() was never called, allocator is null and there is
-    // nothing to free.  This makes a defensive deinit() before init() safe.
-    if (state.allocator) |alloc| state.history.deinit(alloc);
-    state.history  = .empty;
-    state.allocator = null;
-}
-
-/// Push `win` to the front of the history, deduplicating if already present.
-/// Called internally whenever focused_window changes to a new value.
-/// Allocation failures are silently ignored — the history may be shorter than
-/// ideal, but focus still functions correctly.
-///
-/// O(n) single-pass: when `win` is already present, one scan and one in-place
-/// memmove moves items[0..idx] right by one and writes `win` at index 0, with
-/// no allocation.  When absent, falls back to insert(0, …), which may allocate.
-fn recordInHistory(win: u32) void {
-    if (win == 0) return;
-    // Invariant: recordInHistory is always called with the pre-transition window.
-    // If this fires, a caller passed the post-transition value instead.
-    std.debug.assert(state.focused_window != win);
-    // Short-circuit: already the most-recent entry — nothing to do.
-    if (state.history.items.len > 0 and state.history.items[0] == win) return;
-
-    const alloc = state.allocator orelse return;
-
-    if (std.mem.indexOfScalar(u32, state.history.items, win)) |idx| {
-        std.mem.copyBackwards(u32, state.history.items[1 .. idx + 1], state.history.items[0..idx]);
-        state.history.items[0] = win;
-    } else {
-        state.history.insert(alloc, 0, win) catch {};
-    }
-}
-
-/// Remove `win` from the history (called when a window is unmanaged).
-/// Safe to call even if `win` is not present.
-pub fn removeFromHistory(win: u32) void {
-    const idx = std.mem.indexOfScalar(u32, state.history.items, win) orelse return;
-    _ = state.history.orderedRemove(idx);
-}
+pub fn deinit() void {}
 
 // Public accessors
 
@@ -310,22 +250,19 @@ const CommitFlags = struct {
 /// Core focus-transition implementation shared by setFocus and dwmFocus.
 /// NOTE: handleFocusIn does NOT call this function — it delegates to
 /// sendFocusProtocol, which operates on a different set of invariants (no
-/// history recording, no grab management, no suppression update).
+/// grab management, no suppression update).
 ///
-/// All focus paths perform the same logical sequence — record history -> update
-/// global state -> sync button grabs -> X protocol requests -> notify downstream
-/// observers — and differ only in which side effects apply, encoded in `flags`.
+/// All focus paths perform the same logical sequence — update global state ->
+/// sync button grabs -> X protocol requests -> notify downstream observers —
+/// and differ only in which side effects apply, encoded in `flags`.
 ///
 /// Preconditions (enforced by callers):
 ///   • `win` is a valid managed window (non-zero, not root, not bar).
 ///   • `win` != focused_window (no-op transitions are filtered upstream).
 ///   • Any stale confirm cookie has been cancelled or consumed by the caller.
 fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
-    // Update focused_window BEFORE calling recordInHistory so the assertion
-    // inside recordInHistory (focused_window != old) holds.
     state.focused_window  = win;
     state.suppress_reason = flags.new_suppress;
-    if (old) |o| recordInHistory(o);
 
     grabButtons(win, true);
     if (old) |o| grabButtons(o, false);
@@ -397,10 +334,10 @@ pub fn setFocus(win: u32, reason: Reason) void {
 
     // Pipeline: fire the WM_PROTOCOLS get_property cookie NOW, before
     // cancelPendingConfirm and commitFocusTransition do their bookkeeping.
-    // The X server processes the property request while we record history,
-    // swap button grabs, update tiling borders, and notify the bar.  By the
-    // time commitFocusTransition calls sendWMTakeFocusWithCookie, the reply
-    // is typically already in the XCB receive buffer.
+    // The X server processes the property request while we swap button grabs,
+    // update tiling borders, and notify the bar.  By the time
+    // commitFocusTransition calls sendWMTakeFocusWithCookie, the reply is
+    // typically already in the XCB receive buffer.
     // Only fire when we know we'll need it (input_model != .no_input, which
     // we just confirmed above, and send_wm_take_focus = input_model != .no_input).
     if (state.pre_protocols_cookie) |stale| {
@@ -607,39 +544,30 @@ pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
     }
 }
 
-/// Focus the most recently focused window satisfying `visible`, consulting
-/// the MRU history in order.  Falls back to `on_miss()` if provided, or
-/// clearFocus() if null, when no candidate is found.
+/// Focus any visible window satisfying `visible`, walking the tracking list.
+/// Falls back to `on_miss()` if provided, or clearFocus() if null, when no
+/// candidate is found.
 ///
 /// This is the Zig equivalent of dwm's focus(NULL) idiom — callers that need
 /// to focus "whatever is best after X happened" (window close, workspace switch,
-/// unmanage, etc.) use this instead of rolling their own history-scan + setFocus
-/// sequence.
+/// unmanage, etc.) use this instead of rolling their own scan + setFocus sequence.
 ///
 /// The `visible` predicate decouples workspace visibility from focus mechanics:
 ///   • Pass tracking.isOnCurrentWorkspaceAndVisible for normal post-action
 ///     re-focus (on current workspace and not minimized).
 ///   • Pass window.isValidManagedWindow for cleanup contexts where any managed
 ///     window is acceptable regardless of workspace membership.
-///
-/// NOTE — predicate provides the primary runtime filter.  Destroyed windows are
-/// pruned from the history by removeFromHistory() at unmanage time, but there is
-/// a narrow race between unmanage and history pruning.  The `visible` predicate
-/// is therefore the definitive guard: callers must use a predicate that returns
-/// false for unmanaged windows (e.g. tracking.isOnCurrentWorkspaceAndVisible,
-/// which implicitly checks isManaged via the workspace-mask lookup).  Stale XIDs
-/// that slip through a predicate that does not check isManaged may reach setFocus
-/// and generate a BadWindow error on the XCB connection.
 pub fn focusBestAvailable(
-    reason:   Reason,
-    visible:  *const fn (u32) bool,
-    on_miss:  ?*const fn () void,
+    reason:  Reason,
+    visible: *const fn (u32) bool,
+    on_miss: ?*const fn () void,
 ) void {
-    for (state.history.items) |win| {
-        if (visible(win)) {
-            setFocus(win, reason);
-            return;
-        }
+    var it = tracking.allWindowsIterator() orelse {
+        if (on_miss) |f| f() else clearFocus();
+        return;
+    };
+    while (it.next()) |win_ptr| {
+        if (visible(win_ptr.*)) { setFocus(win_ptr.*, reason); return; }
     }
     if (on_miss) |f| f() else clearFocus();
 }
@@ -734,8 +662,9 @@ var cycle_buf: [64]u32 = undefined;
 /// the order windows appear on screen (master first, then stack), which is
 /// exactly what dwm's focusstack() walks.
 ///
-/// Falls back to a list built from the focus MRU history (current focus first,
-/// then history) when tiling is disabled or has no windows.
+/// Falls back to a list built from the tracking table (current focus first,
+/// then all other visible windows in iteration order) when tiling is disabled
+/// or has no windows.
 ///
 /// Returns the number of windows written into `cycle_buf`, or 0 if none.
 fn collectVisibleWindows() usize {
@@ -756,15 +685,17 @@ fn collectVisibleWindows() usize {
         }
     }
 
-    // Fallback: MRU order — current focus first, then history.
+    // Fallback: current focus first, then remaining visible windows in
+    // tracking-table iteration order.
     if (state.focused_window) |w| {
         cycle_buf[len] = w;
         len += 1;
     }
-    for (state.history.items) |w| {
+    var it = tracking.allWindowsIterator() orelse return len;
+    while (it.next()) |win_ptr| {
         if (len >= cycle_buf.len) break;
+        const w = win_ptr.*;
         if (!tracking.isOnCurrentWorkspaceAndVisible(w)) continue;
-        // Skip if already added (avoids duplicating focused_window).
         if (std.mem.indexOfScalar(u32, cycle_buf[0..len], w) == null) {
             cycle_buf[len] = w;
             len += 1;
