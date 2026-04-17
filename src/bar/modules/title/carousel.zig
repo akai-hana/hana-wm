@@ -1,3 +1,4 @@
+
 //! Carousel title extension.
 //! Extends title by adding a smooth-scroll carousel effect for titles that
 //! don't fully fit the segment.
@@ -72,7 +73,9 @@ const CarouselEntry = struct {
 /// Runtime-configurable scroll parameters.
 const ScrollConfig = struct {
     speed:         f64 = default_scroll_speed,
-    rate_override: f64 = 0.0,   // kept for API compat; not used in offset math
+    /// When > 0, overrides the monitor's detected refresh rate for the wake
+    /// interval. Set via `carousel_refresh_rate` in the config file.
+    rate_override: f64 = 0.0,
 };
 
 /// All state exclusively owned by the render thread.
@@ -117,10 +120,27 @@ pub fn setScrollSpeed(px_per_s: f64) void {
     scroll_config.speed = if (px_per_s > 0.0) px_per_s else default_scroll_speed;
 }
 
-/// Override the refresh rate used for frame cadence calculations.
-/// Retained for API compatibility; the offset formula no longer uses Hz.
+/// Override the refresh rate used for the wake interval.
+/// Pass 0 (the default) to use the monitor's auto-detected rate.
 pub fn setRefreshRateOverride(hz: f64) void {
     scroll_config.rate_override = if (hz > 0.0) hz else 0.0;
+}
+
+/// Returns the bar thread's carousel wake interval in nanoseconds.
+///
+/// Priority:
+///   1. User-configured `carousel_refresh_rate` (rate_override > 0).
+///   2. Monitor refresh rate detected via RandR at startup.
+///   3. 60 Hz fallback when detection has not yet run.
+///
+/// Called once per bar-thread sleep cycle; the division is cheap relative
+/// to the timedWait syscall that follows.
+pub fn wakeIntervalNs() u64 {
+    const hz: f64 = if (scroll_config.rate_override > 0.0)
+        scroll_config.rate_override
+    else
+        scale.getDetectedRateHz();
+    return @intFromFloat(1_000_000_000.0 / hz);
 }
 
 // ── Public API — lifecycle ───────────────────────────────────────────────────

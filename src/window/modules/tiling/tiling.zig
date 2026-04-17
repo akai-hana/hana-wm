@@ -497,8 +497,9 @@ pub fn retileInactiveWorkspace(ws_idx: u8) void {
     // Push windows back offscreen while their workspace is inactive.
     // Do NOT invalidate the cache: restoreWorkspaceGeom will find the
     // valid bit set and replay positions in one batch.
-    for (ws_state.workspaces[ws_idx].windows.items()) |win| {
-        utils.pushWindowOffscreen(core.conn, win);
+    const bit = tracking.workspaceBit(ws_idx);
+    for (tracking.allWindows()) |entry| {
+        if (entry.mask & bit != 0) utils.pushWindowOffscreen(core.conn, entry.win);
     }
 }
 
@@ -997,30 +998,14 @@ pub fn sendBorderColorIfChanged(win: u32, color: u32) bool {
 /// `for_ws`: when non-null, filter by that index; when null, use current workspace.
 /// Returns the number of windows written.
 fn collectWorkspaceWindows(s: *State, buf: []u32, for_ws: ?u8) usize {
-    // Optimization: iterate the per-workspace window list (typically 5–15
-    // entries) and filter for tiling-managed windows, rather than scanning
-    // the global s.windows list (up to 64 entries across all workspaces) and
-    // probing the workspace hash-map for every entry.  The outer loop is 5–15
-    // iterations instead of 64; each body just calls Tracking.contains(), which
-    // is a linear scan of a 64-element contiguous u32 array that fits in L1.
-    if (comptime build.has_workspaces) {
-        const ws_obj = if (for_ws) |idx| blk: {
-            const ws_state = workspaces.getState() orelse break :blk null;
-            if (idx >= ws_state.workspaces.len) break :blk null;
-            break :blk &ws_state.workspaces[idx];
-        } else workspaces.getCurrentWorkspaceObject();
-
-        if (ws_obj) |ws| {
-            var n: usize = 0;
-            for (ws.windows.items()) |win| {
-                if (n >= buf.len) break;
-                if (s.windows.contains(win)) { buf[n] = win; n += 1; }
-            }
-            return n;
-        }
-    }
-
-    // Fallback: no workspace subsystem or workspace lookup failed — scan all.
+    // Always iterate s.windows.items() — the tiling-ordered list — and filter
+    // by workspace membership.  This must be the single source of ordering for
+    // the layout because swapWindowsInList, moveWindowToIndex, and
+    // retileAllWorkspaces all read/write s.windows.buf.  Using a different
+    // iteration source (e.g. tracking.allWindows(), which is ordered by global
+    // registration time via an ArrayList that uses swapRemove) would make the
+    // window order seen by retile diverge from the order those functions
+    // manipulate, causing swaps and moves to have no visual effect.
     var n: usize = 0;
     for (s.windows.items()) |win| {
         if (n >= buf.len) break;
@@ -1102,20 +1087,49 @@ pub fn swapWindowsById(win_a: u32, win_b: u32) void {
 /// Locates the focused window and the current workspace's master window in the
 /// ordered window list. Returns null when preconditions are not met (nothing
 /// focused, not tiled, not on current workspace, or fewer than 2 windows).
-const FocusMasterPos = struct { fp: usize, mp: usize, all: []const u32 };
+/// fp_global   — index of the focused window in s.windows.buf
+/// mp_global   — index of the master window (ws_wins[0]) in s.windows.buf
+/// fp_filtered — index of the focused window in the per-workspace ordered list
+///               (0 means the focused window IS the current master)
+/// ws_wins     — per-workspace filtered window slice, matching the order the
+///               layout module receives; ws_wins[0] is always the layout master.
+///               Points into s.scratch_wins; valid until the next call that
+///               overwrites that buffer.
+const FocusMasterPos = struct {
+    fp_global:   usize,
+    mp_global:   usize,
+    fp_filtered: usize,
+    ws_wins:     []const u32,
+};
+
 fn findFocusMasterPos(s: *State) ?FocusMasterPos {
     const focused = focus.getFocused() orelse return null;
     if (!s.windows.contains(focused) or !tracking.isOnCurrentWorkspace(focused)) return null;
-    const all = s.windows.items();
-    if (all.len < 2) return null;
-    var fp: ?usize = null;
-    var mp: ?usize = null;
-    for (all, 0..) |win, i| {
-        if (win == focused) fp = i;
-        if (mp == null and tracking.isOnCurrentWorkspace(win)) mp = i;
-        if (fp != null and mp != null) break;
-    }
-    return .{ .fp = fp orelse return null, .mp = mp orelse return null, .all = all };
+
+    // Build the per-workspace filtered list exactly as retile does, so that
+    // ws_wins[0] is the true layout master regardless of s.windows.buf
+    // insertion order across workspaces.
+    const ws_count = collectWorkspaceWindows(s, &s.scratch_wins, null);
+    const ws_wins  = s.scratch_wins[0..ws_count];
+
+    // Need at least two windows on this workspace for a meaningful swap.
+    if (ws_wins.len < 2) return null;
+
+    // Locate the focused window inside the filtered list.
+    const fp_filtered = std.mem.indexOfScalar(u32, ws_wins, focused) orelse return null;
+
+    // Translate the master (ws_wins[0]) and the focused window to their global
+    // positions in s.windows.buf so swapWindowsInList operates on the right slots.
+    const all       = s.windows.items();
+    const fp_global = std.mem.indexOfScalar(u32, all, focused)    orelse return null;
+    const mp_global = std.mem.indexOfScalar(u32, all, ws_wins[0]) orelse return null;
+
+    return .{
+        .fp_global   = fp_global,
+        .mp_global   = mp_global,
+        .fp_filtered = fp_filtered,
+        .ws_wins     = ws_wins,
+    };
 }
 
 /// Shared core for both swap-with-master variants.
@@ -1126,22 +1140,25 @@ fn findFocusMasterPos(s: *State) ?FocusMasterPos {
 /// unchanged → same rect → cache hit → no configure_window call → no
 /// intermediate frames visible to the compositor.
 fn swapWithMasterCore(s: *State, pos: FocusMasterPos) ?u32 {
-    if (pos.fp == pos.mp) {
-        // Focused is already master — promote the next workspace window.
-        // A swap is sufficient: brings the target to index mp, demotes the
+    if (pos.fp_filtered == 0) {
+        // Focused is already the master — promote the next window in the
+        // per-workspace list into the master slot.  ws_wins[1] is the first
+        // stack window in layout order, guaranteed to be on the current
+        // workspace (collectWorkspaceWindows only returns current-workspace
+        // windows), so no extra isOnCurrentWorkspace check is needed.
+        //
+        // A swap is sufficient: brings ws_wins[1] to mp_global, demotes the
         // current master to that target's slot.  Stack order differs from the
         // old rotate but the visual result is identical for single-master layouts.
-        for (pos.all[pos.mp + 1..], pos.mp + 1..) |win, i| {
-            if (tracking.isOnCurrentWorkspace(win)) {
-                swapWindowsInList(s, pos.mp, i);
-                return win;
-            }
-        }
-        return null;
+        if (pos.ws_wins.len < 2) return null;
+        const next_win    = pos.ws_wins[1];
+        const next_global = std.mem.indexOfScalar(u32, s.windows.items(), next_win) orelse return null;
+        swapWindowsInList(s, pos.mp_global, next_global);
+        return next_win;
     }
-    const other = pos.all[pos.mp];
-    swapWindowsInList(s, pos.fp, pos.mp);
-    return other;
+    const master_win = pos.ws_wins[0];
+    swapWindowsInList(s, pos.fp_global, pos.mp_global);
+    return master_win;
 }
 
 fn updateCacheRect(s: *State, win: u32, rect: utils.Rect) void {

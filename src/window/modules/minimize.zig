@@ -172,8 +172,14 @@ pub fn isMinimized(win: u32) bool {
 pub fn focusMasterOrFirst() void {
     found: {
         if (comptime build.has_workspaces) {
-            const ws  = workspaces.getCurrentWorkspaceObject() orelse break :found;
-            const win = tracking.firstNonMinimized(ws.windows.items()) orelse break :found;
+            const cur = tracking.getCurrentWorkspace() orelse break :found;
+            const bit = tracking.workspaceBit(cur);
+            var first_win: ?u32 = null;
+            for (tracking.allWindows()) |entry| {
+                if (entry.mask & bit == 0) continue;
+                if (!isMinimized(entry.win)) { first_win = entry.win; break; }
+            }
+            const win = first_win orelse break :found;
             focus.setFocus(win, .tiling_operation);
             return;
         }

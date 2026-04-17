@@ -147,3 +147,4 @@ fn initGlobalState(conn: *xcb.xcb_connection_t) !void {
 
 /// Tears down global WM state initialized by initGlobalState.
 fn deinitGlobalState() void {}
+

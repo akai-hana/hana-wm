@@ -1,3 +1,4 @@
+
 //! DPI detection and scaling utilities for consistent bar appearance across display resolutions.
 
 const std = @import("std");
@@ -219,6 +220,12 @@ pub fn ensureRefreshRateDetected(conn: *xcb.xcb_connection_t) void {
     if (hz_cache.is_ready) return;
     hz_cache.is_ready = true;
     hz_cache.hz       = detectRefreshRate(conn);
+}
+
+/// Returns the detected monitor refresh rate in Hz.
+/// Returns `default_hz` (60.0) when called before `ensureRefreshRateDetected`.
+pub fn getDetectedRateHz() f64 {
+    return if (hz_cache.is_ready) hz_cache.hz else default_hz;
 }
 
 /// Returns the root window ID of the first screen, or 0 if no screens are available.
