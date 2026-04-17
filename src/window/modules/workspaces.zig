@@ -37,7 +37,6 @@ inline fn isMinimized(win: u32) bool {
 
 pub const Workspace = struct {
     id:      u8,
-    windows: tracking.Tracking,
     name:    []const u8,
     // The tiling layout active on this workspace.
     // Initialized from config; updated when the user switches layouts
@@ -61,12 +60,11 @@ pub const Workspace = struct {
     last_focused: ?u32 = null,
 
     pub fn init(id: u8, name: []const u8, default_layout: TilingLayout) Workspace {
-        return .{ .id = id, .windows = .{}, .name = name, .layout = default_layout };
+        return .{ .id = id, .name = name, .layout = default_layout };
     }
 
-    /// Removes `win` from this workspace and clears last_focused if it pointed to it.
+    /// Clears last_focused if it pointed to `win`.
     pub fn removeAndClearFocus(self: *Workspace, win: u32) void {
-        _ = self.windows.remove(win);
         if (self.last_focused == win) self.last_focused = null;
     }
 };
@@ -214,9 +212,8 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
     }
 
     const mask = tracking.getWindowWorkspaceMask(win) orelse {
-        // Not yet tracked (new window): register in tracking and workspace list.
+        // Not yet tracked (new window): register in tracking.
         try tracking.registerWindow(win, target_ws);
-        s.workspaces[target_ws].windows.add(win);
         return;
     };
 
@@ -254,20 +251,14 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
 
 // Tag operations
 
-/// Low-level: set a window's workspace bitmask and keep every workspace
-/// Tracking consistent. Does NOT handle screen visibility or tiling.
+/// Low-level: set a window's workspace bitmask and clear last_focused on
+/// workspaces the window just left. Does NOT handle screen visibility or tiling.
 fn setWindowMask(s: *State, win: u32, new_mask: u64) void {
     std.debug.assert(new_mask != 0);
     const old_mask = tracking.getWindowWorkspaceMask(win) orelse 0;
     tracking.setWindowMask(win, new_mask);
 
-    // Add to newly-set workspaces.
-    var added_it = setBits(new_mask & ~old_mask);
-    while (added_it.next()) |idx| {
-        if (idx < s.workspaces.len) s.workspaces[idx].windows.add(win);
-    }
-
-    // Remove from cleared workspaces.
+    // Clear last_focused on workspaces the window just left.
     var removed_it = setBits(old_mask & ~new_mask);
     while (removed_it.next()) |idx| {
         if (idx < s.workspaces.len)
@@ -437,22 +428,16 @@ pub fn switchToAll() void {
         // Enter all-workspaces view 
         _ = xcb.xcb_grab_server(core.conn);
 
-        for (s.workspaces) |*ws| {
-            if (ws.id == s.current) continue;
-            for (ws.windows.items()) |win| {
-                if (tracking.isWindowOnWorkspace(win, s.current)) continue; // already here
-                if (isMinimized(win)) continue;
-
-                const mask = tracking.getWindowWorkspaceMask(win) orelse continue;
-                // Patch the mask: window is now genuinely on the current workspace,
-                // so tiling, focus, and every other subsystem sees it naturally.
-                setWindowMask(s, win, mask | tracking.workspaceBit(s.current));
-                s.all_view_temp_wins.append(s.allocator, win) catch {
-                    // OOM: undo the mask patch so we stay consistent.
-                    setWindowMask(s, win, mask);
-                    continue;
-                };
-            }
+        for (tracking.allWindows()) |entry| {
+            if (tracking.isWindowOnWorkspace(entry.win, s.current)) continue;
+            if (isMinimized(entry.win)) continue;
+            const win  = entry.win;
+            const mask = entry.mask;
+            setWindowMask(s, win, mask | tracking.workspaceBit(s.current));
+            s.all_view_temp_wins.append(s.allocator, win) catch {
+                setWindowMask(s, win, mask);
+                continue;
+            };
         }
 
         // All foreign windows are now genuinely on the current workspace.
@@ -527,7 +512,12 @@ inline fn lastFocusedOrFirst(ws: *Workspace) ?u32 {
         if (!isMinimized(win)) return win;
         ws.last_focused = null; // stale — clear so future calls skip it
     }
-    return firstNonMinimized(ws.windows.items());
+    const bit = tracking.workspaceBit(ws.id);
+    for (tracking.allWindows()) |entry| {
+        if (entry.mask & bit == 0) continue;
+        if (!isMinimized(entry.win)) return entry.win;
+    }
+    return null;
 }
 
 pub inline fn getCurrentWorkspace() ?u8 {
@@ -582,7 +572,10 @@ fn hideWorkspaceWindows(ws: *const Workspace, new_ws: u8) void {
     var pending_n: usize                = 0;
     var cap_warned                      = false;
 
-    for (ws.windows.items()) |win| {
+    const bit = tracking.workspaceBit(ws.id);
+    for (tracking.allWindows()) |entry| {
+        const win = entry.win;
+        if (entry.mask & bit == 0) continue;
         if (tracking.isWindowOnWorkspace(win, new_ws)) continue; // stays visible
 
         if ((!build.has_tiling or !tiling.isWindowActiveTiled(win)) and !isMinimized(win)) {
@@ -622,15 +615,19 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
         if (tiling.restoreWorkspaceGeom()) {
             // Restore succeeded: invalidate only windows shared with the old workspace —
             // their cache holds stale tiling positions from that workspace.
-            for (ws.windows.items()) |win| {
+            const bit = tracking.workspaceBit(ws.id);
+            for (tracking.allWindows()) |entry| {
+                const win = entry.win;
+                if (entry.mask & bit == 0) continue;
                 if (tiling.isWindowTiled(win) and tracking.isWindowOnWorkspace(win, old_ws))
                     tiling.invalidateGeomCache(win);
             }
         } else {
             // Restore failed: invalidate all tiled windows and force a full retile.
-            // (The shared-window subset above is a strict subset of this, so doing
-            // it unconditionally up-front would be wasted work on the success path.)
-            for (ws.windows.items()) |win| {
+            const bit = tracking.workspaceBit(ws.id);
+            for (tracking.allWindows()) |entry| {
+                const win = entry.win;
+                if (entry.mask & bit == 0) continue;
                 if (tiling.isWindowTiled(win)) tiling.invalidateGeomCache(win);
             }
             tiling.retileCurrentWorkspace();
@@ -649,7 +646,10 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
     }
 
     // Map every window; restore floating geometry for those not already on screen.
-    for (ws.windows.items()) |win| {
+    const bit_map = tracking.workspaceBit(ws.id);
+    for (tracking.allWindows()) |entry| {
+        const win = entry.win;
+        if (entry.mask & bit_map == 0) continue;
         _ = xcb.xcb_map_window(core.conn, win);
         if ((!build.has_tiling or !tiling.isWindowActiveTiled(win)) and !isMinimized(win) and
             !tracking.isWindowOnWorkspace(win, old_ws))
@@ -732,7 +732,10 @@ fn executeSwitch(old_ws: u8, new_ws: u8) void {
         // offscreen so it is hidden behind the fullscreen window. Invalidate
         // the tiling cache entry for tiled windows so the next retile after
         // fullscreen exit does not find a stale zero-rect and skip configure.
-        for (new_ws_obj.windows.items()) |win| {
+        const exec_bit = tracking.workspaceBit(new_ws);
+        for (tracking.allWindows()) |entry| {
+            if (entry.mask & exec_bit == 0) continue;
+            const win = entry.win;
             if (win == info.window) continue;
             _ = xcb.xcb_map_window(core.conn, win);
             utils.pushWindowOffscreen(core.conn, win);

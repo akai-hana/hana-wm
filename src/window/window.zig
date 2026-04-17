@@ -1528,8 +1528,11 @@ pub fn applyBorder(win: u32) void {
 /// both paths fall through to the full unconditional sweep.
 fn updateWorkspaceBordersImpl(comptime skip_tiled: bool) void {
     if (!build.has_workspaces) return;
-    const ws = workspaces.getCurrentWorkspaceObject() orelse return;
-    for (ws.windows.items()) |win| {
+    const cur = tracking.getCurrentWorkspace() orelse return;
+    const cur_bit = tracking.workspaceBit(cur);
+    for (tracking.allWindows()) |_entry| {
+        const win = _entry.win;
+        if (_entry.mask & cur_bit == 0) continue;
         if (comptime build.has_tiling) {
             if (skip_tiled and core.config.tiling.enabled) {
                 // Post-retile: tiled windows already updated by configureWithHints.
@@ -1633,8 +1636,5 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
 /// workspaces. Called on config reload.
 pub fn reloadBorders() void {
     if (!build.has_workspaces) return;
-    const ws_state = workspaces.getState() orelse return;
-    for (ws_state.workspaces) |*ws|
-        for (ws.windows.items()) |win| applyBorder(win);
+    for (tracking.allWindows()) |entry| applyBorder(entry.win);
 }
-

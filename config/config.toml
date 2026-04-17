@@ -37,25 +37,25 @@
 #   - More conveniently, arrays of actions can be set onto a bind:
 #     `Mod+A = ["foo", "bar"]`
 
-# TOML File(s) to load (relative to config/).
-# Sub-directories are ignored by auto-loading, so themes must be listed here.
-# Multiple files can be included and will all be merged.
+# TOML config files to load.
+# - Sub-directories are ignored, so themes must be listed explicitly.
+# - Multiple files can be included and will all be unified on runtime.
 include = ["themes/akai.toml"]
 
 [tiling]
-enabled       = true
-global_layout = false # Are layouts global or per-workspace?
+enabled = true
+global_layout = false # Global or per-workspace layouts?
 
 # Enabled layouts
-## Layouts not defined on the array will not be available in runtime.
-## Not defining the array at all enables all layouts in `src/tiling/layouts/.`
+# - Layouts not defined on the array will not be available in runtime.
+# - Not defining the array at all enables all layouts in `src/tiling/layouts/.`
 
 #       Layout          Variation  Workspaces
 layouts = [                                 # (default/alternative) 
-"master-stack",                     # "lifo"/"fifo"
-"monocle",      "gaps",    # "5",   # "gapless"/"gaps"
-"grid",         "relaxed", # "6,8", # "rigid"/"relaxed"
-# "fibonacci",                      # no variants
+	"master-stack",                     # "lifo"/"fifo"
+	"monocle",      "gaps",    # "5",   # "gapless"/"gaps"
+	"grid",         "relaxed", # "6,8", # "rigid"/"relaxed"
+	# "fibonacci",                      # no variants
 ]
 
 [tiling.layouts.master-stack]

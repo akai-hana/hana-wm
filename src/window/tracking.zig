@@ -1,4 +1,3 @@
-
 //! Core window tracking
 //! Tracks windows' focus eligibility through workspaces.
 
@@ -125,26 +124,31 @@ pub const Tracking = struct {
 
 // Global tracking state
 
-var g_map:             ?std.AutoHashMap(u32, u64) = null;
-var g_current:         u8                         = 0;
-var g_workspace_count: usize                      = 1;
+pub const Entry = struct {
+    win:  u32,
+    mask: u64,
+};
 
-/// Initialises the global window-tracking map. Must be called once at startup before any windows are managed.
+var g_windows:         std.ArrayListUnmanaged(Entry) = .empty;
+var g_alloc:           std.mem.Allocator             = undefined;
+var g_initialized:     bool                          = false;
+var g_current:         u8                            = 0;
+var g_workspace_count: usize                         = 1;
+
+/// Initialises the global window-tracking list. Must be called once at startup before any windows are managed.
 pub fn init(allocator: std.mem.Allocator) void {
-    var map = std.AutoHashMap(u32, u64).init(allocator);
-    // Pre-allocate to avoid early growth under normal workloads.  Failure is
-    // non-fatal: the map still works correctly, just with more incremental
-    // allocations as windows are added.
-    map.ensureTotalCapacity(32) catch |err| {
-        std.log.warn("tracking: initial map pre-allocation failed ({s}); map will grow on demand", .{@errorName(err)});
+    g_alloc       = allocator;
+    g_initialized = true;
+    g_windows.ensureTotalCapacity(allocator, 32) catch |err| {
+        std.log.warn("tracking: initial pre-allocation failed ({s}); list will grow on demand", .{@errorName(err)});
     };
-    g_map = map;
 }
 
-/// Frees the global window-tracking map and resets all state.
+/// Frees the global window-tracking list and resets all state.
 pub fn deinit() void {
-    if (g_map) |*m| m.deinit();
-    g_map             = null;
+    if (g_initialized) g_windows.deinit(g_alloc);
+    g_windows         = .empty;
+    g_initialized     = false;
     g_current         = 0;
     g_workspace_count = 1;
 }
@@ -170,50 +174,45 @@ pub fn setCurrentWorkspace(ws: u8) void {
 /// Called directly when workspaces.zig is absent; workspaces.moveWindowTo
 /// handles the full registration path (screen effects etc.) when present.
 pub fn registerWindow(win: u32, ws: u8) !void {
-    const map = &(g_map orelse return);
-    const gop = try map.getOrPut(win);
-    if (!gop.found_existing) {
-        gop.value_ptr.* = @as(u64, 1) << @intCast(ws);
-    }
+    if (!g_initialized) return;
+    for (g_windows.items) |e| { if (e.win == win) return; }
+    try g_windows.append(g_alloc, .{ .win = win, .mask = @as(u64, 1) << @intCast(ws) });
 }
 
-/// Remove `win` from the tracking map.
+/// Remove `win` from the tracking list.
+/// Swap-remove: O(1) after the linear find; order doesn't matter for WM ops.
 /// When workspaces.zig is present it calls this after cleaning up workspace
-/// Tracking arrays; when absent, window.zig calls this directly.
+/// last_focused; when absent, window.zig calls this directly.
 pub fn removeWindow(win: u32) void {
-    if (g_map) |*m| _ = m.remove(win);
+    for (g_windows.items, 0..) |e, i| {
+        if (e.win == win) { _ = g_windows.swapRemove(i); return; }
+    }
 }
 
 /// Update the workspace bitmask for `win`.
 ///
-/// Called by workspaces.zig for tag and move operations; keeps the hashmap in
-/// sync with workspace arrays.
+/// Called by workspaces.zig for tag and move operations.
 ///
-/// Logs an error and returns (rather than asserting) if `win` is not in the map,
+/// Logs an error and returns (rather than asserting) if `win` is not in the list,
 /// because this is a runtime condition that can occur in production (e.g. a
 /// race between removeWindow and a delayed mask update), not a programmer
 /// invariant that can be checked at compile time.
 pub fn setWindowMask(win: u32, mask: u64) void {
     std.debug.assert(mask != 0);
-    const m = &(g_map orelse return);
-    const p = m.getPtr(win) orelse {
-        std.log.err(
-            "tracking: setWindowMask called on unregistered window 0x{x}; registerWindow must precede any mask update",
-            .{win},
-        );
-        return;
-    };
-    p.* = mask;
+    for (g_windows.items) |*e| {
+        if (e.win == win) { e.mask = mask; return; }
+    }
+    std.log.err(
+        "tracking: setWindowMask called on unregistered window 0x{x}",
+        .{win},
+    );
 }
 
 // Query predicates
 
 /// Returns the workspace bitmask for `win`, or null if not tracked.
-///
-/// Uses a pointer capture (`|*m|`) to avoid copying the AutoHashMap header
-/// on every call, which would be unnecessary given that .get() only reads.
 pub inline fn getWindowWorkspaceMask(win: u32) ?u64 {
-    if (g_map) |*m| return m.get(win);
+    for (g_windows.items) |e| { if (e.win == win) return e.mask; }
     return null;
 }
 
@@ -221,16 +220,32 @@ pub fn isManaged(win: u32) bool {
     return getWindowWorkspaceMask(win) != null;
 }
 
-pub inline fn windowCount() usize {
-    return if (g_map) |m| m.count() else 0;
-}
+pub inline fn windowCount() usize { return g_windows.items.len; }
 
 pub inline fn getCurrentWorkspace() ?u8 {
-    return if (g_map != null) g_current else null;
+    return if (g_initialized) g_current else null;
 }
 
-pub inline fn getWorkspaceCount() usize {
-    return g_workspace_count;
+pub inline fn getWorkspaceCount() usize { return g_workspace_count; }
+
+/// Returns a read-only slice of all tracked (win, mask) pairs.
+/// Callers filter by mask bit as needed; do not retain the slice across
+/// any call that may add or remove windows.
+pub fn allWindows() []const Entry { return g_windows.items; }
+
+/// True when at least one window has ws_idx set in its mask.
+pub fn hasWindowsOnWorkspace(ws_idx: u8) bool {
+    const bit = workspaceBit(ws_idx);
+    for (g_windows.items) |e| { if (e.mask & bit != 0) return true; }
+    return false;
+}
+
+/// Count of windows that have ws_idx set in their mask.
+pub fn countWindowsOnWorkspace(ws_idx: u8) usize {
+    const bit = workspaceBit(ws_idx);
+    var n: usize = 0;
+    for (g_windows.items) |e| { if (e.mask & bit != 0) n += 1; }
+    return n;
 }
 
 // Workspace bitmask helpers
@@ -270,13 +285,6 @@ pub const WORKSPACE_LABELS: [20][]const u8 = blk: {
 pub inline fn getWorkspaceForWindow(win: u32) ?u8 {
     const mask = getWindowWorkspaceMask(win) orelse return null;
     return @intCast(@ctz(mask));
-}
-
-/// Returns a key iterator over every tracked window ID, or null if uninitialised.
-/// The map must not be modified while the iterator is live.
-pub fn allWindowsIterator() ?std.AutoHashMap(u32, u64).KeyIterator {
-    if (g_map) |*m| return m.keyIterator();
-    return null;
 }
 
 pub inline fn isWindowOnWorkspace(win: u32, ws_idx: u8) bool {

@@ -174,17 +174,17 @@ pub fn forEachFullscreen(cb: anytype) void {
 // and enterFullscreenCommit.
 fn forEachWindowOnCurrentWorkspace(skip: u32, ctx: anytype) void {
     if (comptime build.has_workspaces) {
-        const ws_obj = workspaces.getCurrentWorkspaceObject() orelse return;
-        for (ws_obj.windows.items()) |w| {
-            if (w == skip) continue;
-            ctx.call(w);
+        const cur = tracking.getCurrentWorkspace() orelse return;
+        const bit = tracking.workspaceBit(cur);
+        for (tracking.allWindows()) |entry| {
+            if (entry.mask & bit == 0) continue;
+            if (entry.win == skip) continue;
+            ctx.call(entry.win);
         }
     } else {
-        var iter = tracking.allWindowsIterator() orelse return;
-        while (iter.next()) |wp| {
-            const w = wp.*;
-            if (w == skip) continue;
-            ctx.call(w);
+        for (tracking.allWindows()) |entry| {
+            if (entry.win == skip) continue;
+            ctx.call(entry.win);
         }
     }
 }

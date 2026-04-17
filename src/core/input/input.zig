@@ -509,8 +509,8 @@ fn dumpState() void {
     if (comptime build.has_workspaces) {
         if (getWsState()) |ws_state| {
             debug.info("Current workspace: {}", .{ws_state.current + 1});
-            for (ws_state.workspaces, 0..) |*ws, i| {
-                debug.info("  WS{}: {} windows", .{ i + 1, ws.windows.len });
+            for (ws_state.workspaces, 0..) |_, i| {
+                debug.info("  WS{}: {} windows", .{ i + 1, tracking.countWindowsOnWorkspace(@intCast(i)) });
             }
         }
     }

@@ -1,4 +1,3 @@
-
 //! Status bar
 //! Renders segments via Cairo/Pango into an XCB override-redirect window.
 
@@ -81,6 +80,7 @@ const scale      = if (build.has_scale) @import("scale") else struct {
         const px: f32 = if (value.is_percentage) h * (value.value / 100.0) else value.value;
         return @max(20, @as(u16, @intFromFloat(@round(px))));
     }
+    pub fn ensureRefreshRateDetected(_: anytype) void {}
 };
 
 /// When workspaces are disabled, all workspace-segment calls are no-ops.
@@ -126,9 +126,6 @@ const defaultBarHeight:        u16 = 24;
 const fallbackWorkspacesWidth: u16 = 270;
 const layoutSegmentWidth:      u16 = 60;
 const titleSegmentMinWidth:    u16 = 100;
-
-/// Carousel frame interval — 165 Hz (1_000_000_000 / 165 ≈ 6_060_606 ns).
-const carouselWakeNs: u64 = 6_060_606;
 
 // Core data structures 
 
@@ -651,11 +648,16 @@ const State = struct {
 fn runBarThread(s: *State) void {
     var next_carousel_ns: u64 = 0;
 
-    // Advance the carousel wake deadline by one frame interval.
+    // Advance the carousel wake deadline by one frame interval, derived from
+    // the monitor's detected refresh rate (via carousel.wakeIntervalNs()).
+    // Calling wakeIntervalNs() each advance is cheap (one division) and
+    // ensures a config reload that changes carousel_refresh_rate takes effect
+    // without restarting the bar thread.
     const advanceCarouselTimer = struct {
         inline fn f(next: *u64) void {
+            const interval = carousel.wakeIntervalNs();
             const now = utils.monotonicNs();
-            next.* = if (now >= next.*) now + carouselWakeNs else next.* +% carouselWakeNs;
+            next.* = if (now >= next.*) now + interval else next.* +% interval;
         }
     }.f;
 
@@ -771,11 +773,16 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot,
         snap.current_workspace    = ws_state.current;
         snap.is_all_view_active   = ws_state.all_view_temp_wins.items.len > 0;
         try snap.workspace_has_windows.resize(allocator, snap.workspace_count);
-        for (ws_state.workspaces, 0..) |*workspace, i|
-            snap.workspace_has_windows.items[i] = workspace.windows.len > 0;
+        for (ws_state.workspaces, 0..) |_, i|
+            snap.workspace_has_windows.items[i] = tracking.hasWindowsOnWorkspace(@intCast(i));
         snap.current_workspace_windows.clearRetainingCapacity();
-        if (ws_state.current < ws_state.workspaces.len)
-            try snap.current_workspace_windows.appendSlice(allocator, ws_state.workspaces[ws_state.current].windows.items());
+        if (ws_state.current < ws_state.workspaces.len) {
+            const cur_bit = tracking.workspaceBit(ws_state.current);
+            for (tracking.allWindows()) |entry| {
+                if (entry.mask & cur_bit != 0)
+                    try snap.current_workspace_windows.append(allocator, entry.win);
+            }
+        }
     } else {
         // No workspace subsystem — treat as single workspace so workspace_count
         // differs from prev.workspace_count (0) on the first draw, ensuring
@@ -783,10 +790,8 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot,
         // are drawn.
         snap.workspace_count = 1;
         snap.current_workspace_windows.clearRetainingCapacity();
-        if (tracking.allWindowsIterator()) |it| {
-            var iter = it;
-            while (iter.next()) |wp| try snap.current_workspace_windows.append(allocator, wp.*);
-        }
+        for (tracking.allWindows()) |entry|
+            try snap.current_workspace_windows.append(allocator, entry.win);
     }
 
     snap.focused_window      = focus.getFocused();
@@ -1052,6 +1057,11 @@ fn createDrawContext(setup: BarWindowSetup, height: u16) !*drawing.DrawContext {
 pub fn init() !void {
     std.debug.assert(core.config.bar.enabled);
     initAtoms();
+    // Detect the monitor refresh rate now, before the bar thread spawns,
+    // so carousel.wakeIntervalNs() returns the real rate from the first tick.
+    // ensureRefreshRateDetected is idempotent; if title.zig already triggered
+    // it this is a fast cache-hit return.
+    scale.ensureRefreshRateDetected(core.conn);
     const height = try calcBarHeight();
     const y_pos  = calcBarYPos(height);
     const setup  = createBarWindow(height, y_pos);
@@ -1332,8 +1342,8 @@ fn retileAllWorkspaces() void {
     if (comptime !build.has_tiling) return;
     const ws_state = workspaces.getState() orelse return;
     if (!isTilingActive()) { tiling.retileCurrentWorkspace(); return; }
-    for (ws_state.workspaces, 0..) |*ws, idx| {
-        if (ws.windows.len == 0) continue;
+    for (ws_state.workspaces, 0..) |_, idx| {
+        if (!tracking.hasWindowsOnWorkspace(@intCast(idx))) continue;
         if (comptime build.has_fullscreen) {
             if (fullscreen.getForWorkspace(@intCast(idx)) != null) continue;
         }

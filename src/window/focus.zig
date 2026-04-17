@@ -562,12 +562,8 @@ pub fn focusBestAvailable(
     visible: *const fn (u32) bool,
     on_miss: ?*const fn () void,
 ) void {
-    var it = tracking.allWindowsIterator() orelse {
-        if (on_miss) |f| f() else clearFocus();
-        return;
-    };
-    while (it.next()) |win_ptr| {
-        if (visible(win_ptr.*)) { setFocus(win_ptr.*, reason); return; }
+    for (tracking.allWindows()) |entry| {
+        if (visible(entry.win)) { setFocus(entry.win, reason); return; }
     }
     if (on_miss) |f| f() else clearFocus();
 }
@@ -691,10 +687,9 @@ fn collectVisibleWindows() usize {
         cycle_buf[len] = w;
         len += 1;
     }
-    var it = tracking.allWindowsIterator() orelse return len;
-    while (it.next()) |win_ptr| {
+    for (tracking.allWindows()) |entry| {
         if (len >= cycle_buf.len) break;
-        const w = win_ptr.*;
+        const w = entry.win;
         if (!tracking.isOnCurrentWorkspaceAndVisible(w)) continue;
         if (std.mem.indexOfScalar(u32, cycle_buf[0..len], w) == null) {
             cycle_buf[len] = w;
