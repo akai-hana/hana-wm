@@ -1,4 +1,5 @@
-//! Hana's main loop — entry point and orchestrator of all subsystems.
+//! hana's main loop
+//! Entry point to and orchestrator of all hana's subsystems.
 
 const std   = @import("std");
 const build = @import("build_options");

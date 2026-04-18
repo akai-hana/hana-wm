@@ -34,7 +34,7 @@ pub const cairo_format_t = enum(c_int) {
 };
 
 /// Compositing operators used during painting.
-/// Trimmed to the two operators Hana actually uses (CLEAR, OVER);
+/// Trimmed to the two operators hana actually uses (CLEAR, OVER);
 /// the full C enum has 29 variants.  Numeric values are unchanged.
 pub const cairo_operator_t = enum(c_int) {
     CLEAR = 0,

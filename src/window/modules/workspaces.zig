@@ -1,3 +1,4 @@
+
 //! Workspace management — creation, window assignment, and workspace switching.
 
 const std   = @import("std");
@@ -705,6 +706,7 @@ fn executeSwitch(old_ws: u8, new_ws: u8) void {
     const fs_info    = if (comptime build.has_fullscreen) fullscreen.getForWorkspace(new_ws) else null;
 
     focus.setSuppressReason(.none);
+    focus.cancelPointerSync(); // discard any stale beginPointerSync cookie from before this switch
     s.workspaces[old_ws].last_focused = focus.getFocused();
 
     // Pre-fire before the grab so the round-trip overlaps with hide+restore.
