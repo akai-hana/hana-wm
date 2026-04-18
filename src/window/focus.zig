@@ -1,3 +1,4 @@
+
 //! Focus management
 //! Routes windows' focus with reason-aware sets/clears.
 
@@ -323,10 +324,11 @@ pub fn setFocus(win: u32, reason: Reason) void {
     if (isInvalidFocusTarget(win)) return;
     if (state.focused_window == win) return;
 
-    // For click and command, a destroy race is possible between the user action
-    // and this call.  Guard with a live xcb_get_window_attributes round-trip.
+    // For click, command, and mouse_enter (drainPointerSync), a destroy/unmap
+    // race is possible between the event and this call.  Guard with a live
+    // xcb_get_window_attributes round-trip.
     // All other reasons guarantee the window is mapped without asking the server.
-    if ((reason == .mouse_click or reason == .user_command) and
+    if ((reason == .mouse_click or reason == .user_command or reason == .mouse_enter) and
         !isWindowMapped(core.conn, win)) return;
 
     const input_model = window.getInputModelCached(core.conn, win);
@@ -505,35 +507,35 @@ pub fn dwmFocus(win: u32) void {
 /// NotifyInferior) was incorrect: it allowed Electron's internal focus steals
 /// to slip through unchallenged.
 pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
-    // Early-cancel the pending confirm cookie when the FocusIn we were waiting
-    // for arrives before drainPendingConfirm() runs.  cancelPendingConfirm uses
-    // xcb_discard_reply (non-blocking), releasing the reply-queue entry
-    // immediately without a blocking drain.
     if (state.confirm_win)    |exp| if (event.event == exp)  cancelPendingConfirm();
     if (state.focused_window) |sel| {
-        // Common path: a window other than the one we intend to hold focus
-        // (Electron steal, Wine, game) fired XSetInputFocus.  Re-assert.
-        if (event.event != sel) sendFocusProtocol(sel);
+        if (event.event != sel) {
+            // If the stealing window is not on the current workspace, first
+            // redirect X focus to root — the same defocus used in the null
+            // branch below — before re-asserting `sel`.
+            //
+            // Without this, an off-workspace window (Wine, Electron, a game)
+            // that reacts to every FocusOut with XSetInputFocus(itself) creates
+            // a three-way fight: WM→sel, sel's app→child, thief→itself.
+            // That loop never converges because sendFocusProtocol(sel) for
+            // .globally_active windows only sends WM_TAKE_FOCUS (no direct
+            // xcb_set_input_focus), and for passive/locally_active it creates
+            // a ping-pong that Wine's internal focus manager feeds indefinitely.
+            //
+            // Redirecting to root first breaks the cycle: the thief fights root
+            // (which never replies), exhausting its retry budget.  Then
+            // sendFocusProtocol(sel) reclaims focus with no active opponent.
+            // This replicates exactly what "switch to empty workspace, then
+            // back" achieves via clearFocus() + the null branch below.
+            if (!isInvalidFocusTarget(event.event) and
+                !tracking.isOnCurrentWorkspace(event.event))
+            {
+                _ = xcb.xcb_set_input_focus(core.conn,
+                    xcb.XCB_INPUT_FOCUS_POINTER_ROOT, core.root, 0); // CurrentTime
+            }
+            sendFocusProtocol(sel);
+        }
     } else {
-        // focused_window is null — the current workspace is empty or clearFocus()
-        // was called (e.g. after switching to a workspace with no windows).
-        //
-        // Bug: Wine windows and some games continuously call XSetInputFocus on
-        // themselves even after their workspace has been hidden.  With
-        // focused_window == null the outer `if` was a no-op, so these off-screen
-        // windows kept winning every focus-steal attempt unchallenged.
-        //
-        // Fix: if the FocusIn is for a window that is NOT on the current
-        // workspace (i.e. an off-workspace window from a previous workspace),
-        // immediately drive X focus back to PointerRoot so the stale window
-        // cannot hold keyboard input.
-        //
-        // We deliberately do NOT call clearFocus() or setFocus() here — those
-        // update focused_window and trigger bar/carousel/tiling side-effects that
-        // are unnecessary for what is essentially a defensive re-assertion.
-        // A bare xcb_set_input_focus to root is the minimal correct action:
-        // it evicts the offending window from X focus without touching any WM
-        // bookkeeping that the workspace switch already completed correctly.
         if (!isInvalidFocusTarget(event.event) and
             !tracking.isOnCurrentWorkspace(event.event))
         {
@@ -610,6 +612,16 @@ inline fn suppressionFor(reason: Reason, current: core.FocusSuppressReason) core
     };
 }
 
+/// Cancel a pending pointer-sync cookie without consuming the reply.
+/// Call this on workspace switches so a stale pre-switch pointer position
+/// cannot redirect focus back to an off-workspace window via drainPointerSync.
+pub fn cancelPointerSync() void {
+    if (state.pointer_cookie) |stale| {
+        xcb.xcb_discard_reply(core.conn, stale.sequence);
+        state.pointer_cookie = null;
+    }
+}
+
 /// Fire an async pointer-position query for focus-after-tiling sync.
 ///
 /// Clears suppression immediately (so subsequent EnterNotify events are no
@@ -634,6 +646,10 @@ pub fn drainPointerSync() void {
     defer std.c.free(reply);
     const child = reply.*.child;
     if (child == 0 or child == core.root or !window.isValidManagedWindow(child)) return;
+    // BUG FIX: if the stale pointer reply contains a window from a workspace
+    // that is no longer current (e.g., the reply was fired before a workspace
+    // switch), silently discard it — do not redirect focus to an offscreen window.
+    if (!tracking.isOnCurrentWorkspace(child)) return;
     setFocus(child, .mouse_enter);
 }
 
