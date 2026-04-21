@@ -1,4 +1,3 @@
-
 //! Drawing context for hana's status bar.
 //!
 //! Rectangle fills use XCB core drawing instead of Cairo's XRender, since the
@@ -408,9 +407,14 @@ pub const DrawContext = struct {
 
     pub fn getMetrics(self: *DrawContext) struct { i16, i16 } { return self.font.getMetrics(); }
 
-    /// Flush the off-screen pixmap to the window in a single xcb_copy_area call.
+    /// Blit the off-screen pixmap to the window in a single xcb_copy_area call.
     /// The compositor only ever sees fully-rendered frames — no partial-draw flicker.
-    pub fn flush(self: *DrawContext) void {
+    ///
+    /// NOTE: This does NOT call xcb_flush.  The caller is responsible for flushing:
+    /// - On X-event-driven paths, the event loop's end-of-batch xcb_flush covers it.
+    /// - On timer-driven paths (clock tick, cursor blink), the caller must flush
+    ///   explicitly — see events.run() ready == 0 branch.
+    pub fn blit(self: *DrawContext) void {
         c.cairo_surface_flush(self.surface);
         if (self.copy_gc == 0) return;
         _ = core.xcb.xcb_copy_area(
@@ -453,11 +457,15 @@ pub const DrawContext = struct {
         // No xcb_flush — caller owns the flush (ungrabAndFlush).
     }
 
-    /// Blit only the rectangle [x, x+w) from the off-screen pixmap to the window.
+    /// Blit only the rectangle [x, x+w) from the off-screen pixmap to the window,
+    /// then flush the XCB connection immediately.
+    ///
+    /// Unlike blit(), this DOES call xcb_flush.  Use on timer-driven paths (e.g.
+    /// carousel ticks) where no event-loop batch flush is coming to drain the queue.
     ///
     /// Does NOT call cairo_surface_flush — use this when only XCB (not Cairo) has
     /// written to the pixmap in the current frame, e.g. carousel blits.
-    pub fn flushRect(self: *DrawContext, x: u16, w: u16) void {
+    pub fn blitAndFlush(self: *DrawContext, x: u16, w: u16) void {
         if (self.copy_gc == 0) return;
         _ = core.xcb.xcb_copy_area(
             self.conn,

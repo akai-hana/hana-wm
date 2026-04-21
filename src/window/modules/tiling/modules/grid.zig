@@ -26,10 +26,10 @@ pub fn tileWithOffset(
 
     const m    = state.margins();
     const grid = calcGridShape(n);
-    const bm   = 2 * m.border;
+    const bm   = 2 *| m.border;
 
-    const cell_w = (screen_w -| (grid.cols + 1) * m.gap) / grid.cols;
-    const cell_h = (screen_h -| (grid.rows + 1) * m.gap) / grid.rows;
+    const cell_w = (screen_w -| (grid.cols + 1) *| m.gap) / grid.cols;
+    const cell_h = (screen_h -| (grid.rows + 1) *| m.gap) / grid.rows;
     const win_h  = cellToWindowSize(cell_h, bm);
 
     // In relaxed mode, windows on a partial last row divide the full screen

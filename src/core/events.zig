@@ -7,40 +7,23 @@ const core      = @import("core");
     const xcb   = core.xcb;
 const utils     = @import("utils");
 const constants = @import("constants");
+const types     = @import("types");
 
-const debug = @import("debug");
-
+const debug  = @import("debug");
 const config = @import("config");
-
-const input = @import("input");
-
+const input  = @import("input");
 const window = @import("window");
 const focus  = @import("focus");
 
-const tiling = if (build.has_tiling) @import("tiling") else struct {};
-
-const bar = if (build.has_bar) @import("bar") else struct {
-    pub fn pollTimeoutMs() i32 { return -1; }
-    pub fn checkClockUpdate() void {}
-    pub fn submitDraw(_: bool) void {}
-    pub fn handleExpose(_: *anyopaque) void {}
-    pub fn handlePropertyNotify(_: *anyopaque) void {}
-    pub fn updateIfDirty() !void {}
-    pub fn updateTimerState() void {}
-    pub fn reload() void {}
-};
-
-const prompt = if (build.has_bar and build.has_prompt) @import("prompt") else struct {
-    pub fn blinkPollTimeoutMs() i32 { return -1; }
-    pub fn blinkTick() void {}
-};
-
+const tiling = if (build.has_tiling) @import("tiling");
+const bar    = if (build.has_bar) @import("bar");
+const prompt = if (build.has_prompt and build.has_bar) @import("prompt");
 
 // Indices into the poll fd array.
 const FD_XCB    = 0;
 const FD_SIGNAL = 1;
 
-// Event dispatch constants — alias to the canonical definitions in constants.zig.
+// Aliases to canonical definitions in constants.zig.
 const EVENT_DISPATCH_TABLE = constants.Limits.EVENT_DISPATCH_TABLE;
 const MAX_KEYBIND_COOKIES  = constants.Limits.MAX_KEYBIND_COOKIES;
 const LOCK_MODIFIERS       = constants.LOCK_MODIFIERS;
@@ -53,7 +36,6 @@ var signal_pipe: [2]std.posix.fd_t = .{ -1, -1 };
 
 const EventHandler = *const fn (event: *anyopaque) void;
 
-/// Coerces a concrete handler fn to EventHandler at comptime with zero runtime cost.
 inline fn asHandler(comptime f: anytype) EventHandler {
     return @ptrCast(&f);
 }
@@ -61,48 +43,43 @@ inline fn asHandler(comptime f: anytype) EventHandler {
 /// Fans out PropertyNotify to both bar (title) and window (WM_PROTOCOLS cache).
 fn handlePropertyNotify(event: *anyopaque) void {
     const e: *xcb.xcb_property_notify_event_t = @ptrCast(@alignCast(event));
-    bar.handlePropertyNotify(e);
+    if (build.has_bar) bar.handlePropertyNotify(e);
     window.handlePropertyNotify(e);
 }
 
 /// O(1) dispatch via a comptime-built table indexed by XCB event type (low 7 bits).
 const dispatch_table = blk: {
     var table = [_]?EventHandler{null} ** EVENT_DISPATCH_TABLE;
-    table[xcb.XCB_KEY_PRESS]         = asHandler(input.handleKeyPress);
-    table[xcb.XCB_BUTTON_PRESS]      = asHandler(input.handleButtonPress);
-    table[xcb.XCB_BUTTON_RELEASE]    = asHandler(input.handleButtonRelease);
-    table[xcb.XCB_MOTION_NOTIFY]     = asHandler(input.handleMotionNotify);
-    table[xcb.XCB_ENTER_NOTIFY]      = asHandler(window.handleEnterNotify);
-    table[xcb.XCB_LEAVE_NOTIFY]      = asHandler(window.handleLeaveNotify);
-    table[xcb.XCB_FOCUS_IN]          = asHandler(focus.handleFocusIn);
+
+    table[xcb.XCB_ENTER_NOTIFY] = asHandler(window.handleEnterNotify);
+    table[xcb.XCB_LEAVE_NOTIFY] = asHandler(window.handleLeaveNotify);
+
     table[xcb.XCB_MAP_REQUEST]       = asHandler(window.handleMapRequest);
     table[xcb.XCB_CONFIGURE_REQUEST] = asHandler(window.handleConfigureRequest);
     table[xcb.XCB_UNMAP_NOTIFY]      = asHandler(window.handleUnmapNotify);
     table[xcb.XCB_DESTROY_NOTIFY]    = asHandler(window.handleDestroyNotify);
-    table[xcb.XCB_EXPOSE]            = asHandler(bar.handleExpose);
-    table[xcb.XCB_PROPERTY_NOTIFY]   = asHandler(handlePropertyNotify);
     table[xcb.XCB_CLIENT_MESSAGE]    = asHandler(window.handleClientMessage);
+
+    table[xcb.XCB_KEY_PRESS]       = asHandler(input.handleKeyPress);
+    table[xcb.XCB_BUTTON_PRESS]    = asHandler(input.handleButtonPress);
+    table[xcb.XCB_BUTTON_RELEASE]  = asHandler(input.handleButtonRelease);
+    table[xcb.XCB_MOTION_NOTIFY]   = asHandler(input.handleMotionNotify);
+    table[xcb.XCB_FOCUS_IN]        = asHandler(focus.handleFocusIn);
+    table[xcb.XCB_PROPERTY_NOTIFY] = asHandler(handlePropertyNotify);
+
+    if (build.has_bar) table[xcb.XCB_EXPOSE] = asHandler(bar.handleExpose);
+
     break :blk table;
 };
 
-pub inline fn dispatch(event_type: u8, event: *anyopaque) void {
+pub fn dispatch(event_type: u8, event: *anyopaque) void {
     const idx = event_type & 0x7F; // strip XCB synthetic-event bit
     if (dispatch_table[idx]) |handler| handler(event);
 }
 
 // Signal handling
 
-/// Derive the correct signal number parameter type directly from what
-/// std.posix.Sigaction's handler field actually expects, so this stays
-/// correct regardless of future stdlib changes.
-const SigNumType = param: {
-    const handler_field_type = @FieldType(@FieldType(std.posix.Sigaction, "handler"), "handler");
-    const handler_sig        = @typeInfo(@typeInfo(handler_field_type).optional.child).pointer.child;
-    break :param @typeInfo(handler_sig).@"fn".params[0].type.?;
-};
-
 /// Converts any signal value — enum or integer — to its raw u8 number.
-/// Used by both signalHandler (runtime) and handleSignalPipe (comptime prongs).
 inline fn sigToU8(sig: anytype) u8 {
     return switch (@typeInfo(@TypeOf(sig))) {
         .@"enum" => @intCast(@intFromEnum(sig)),
@@ -111,15 +88,14 @@ inline fn sigToU8(sig: anytype) u8 {
 }
 
 /// Async-signal-safe handler: writes the signal number as a byte to the pipe.
-/// write(2) is async-signal-safe on all POSIX platforms.
-fn signalHandler(signo: SigNumType) callconv(.c) void {
+/// sigToU8 accepts the SIG enum used by Zig master's Sigaction signature.
+fn signalHandler(signo: std.os.linux.SIG) callconv(.c) void {
     _ = std.os.linux.write(signal_pipe[1], &[_]u8{sigToU8(signo)}, 1);
 }
 
-/// Creates a pipe with O_NONBLOCK | O_CLOEXEC set on both ends atomically via pipe2(2).
+/// Creates a pipe with O_NONBLOCK | O_CLOEXEC on both ends via pipe2(2).
 fn createPipe() ![2]std.posix.fd_t {
     var fds: [2]std.posix.fd_t = undefined;
-
     const flags = std.os.linux.O{ .CLOEXEC = true, .NONBLOCK = true };
     switch (std.posix.errno(std.os.linux.pipe2(&fds, flags))) {
         .SUCCESS => {},
@@ -127,7 +103,6 @@ fn createPipe() ![2]std.posix.fd_t {
         .NFILE   => return error.SystemFdQuotaExceeded,
         else     => |err| return std.posix.unexpectedErrno(err),
     }
-
     return fds;
 }
 
@@ -155,40 +130,48 @@ pub fn deinitSignalPipe() void {
     }
 }
 
+/// Dispatches a single signal byte to the appropriate handler.
+inline fn dispatchSignal(byte: u8) void {
+    switch (byte) {
+        sigToU8(std.posix.SIG.HUP)  => utils.reload(),
+        sigToU8(std.posix.SIG.TERM),
+        sigToU8(std.posix.SIG.INT)  => utils.quit(),
+        else => {},
+    }
+}
+
+const SIGNAL_DRAIN_BUF = 16; // drain a burst in one syscall rather than one per byte
+
 /// Drains the non-blocking signal pipe and dispatches each signal.
 fn handleSignalPipe(fd: std.posix.fd_t) void {
-    var byte: [1]u8 = undefined;
+    var buf: [SIGNAL_DRAIN_BUF]u8 = undefined;
     while (true) {
-        const rc = std.os.linux.read(fd, &byte, 1);
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => {},
-            else     => break,
-        }
-        switch (byte[0]) {
-            sigToU8(std.posix.SIG.HUP)  => utils.reload(),
-            sigToU8(std.posix.SIG.TERM),
-            sigToU8(std.posix.SIG.INT)  => utils.quit(),
-            else => {},
-        }
+        const rc = std.os.linux.read(fd, &buf, buf.len);
+        if (std.posix.errno(rc) != .SUCCESS) break;
+        const n: usize = @intCast(rc);
+        for (buf[0..n]) |byte| dispatchSignal(byte);
     }
 }
 
 // Keybindings
 
-/// Ungrabs all keys, then re-grabs every configured keybinding across all LOCK_MODIFIERS combinations.
-/// Fires all xcb_grab_key cookies before reading any reply to reduce round-trips.
-pub fn grabKeybindings() !void {
-    _ = xcb.xcb_ungrab_key(core.conn, xcb.XCB_GRAB_ANY, core.root, xcb.XCB_MOD_MASK_ANY);
-    const CookieEntry = struct { cookie: xcb.xcb_void_cookie_t, keycode: u8 };
-    var cookies: [MAX_KEYBIND_COOKIES]CookieEntry = undefined;
+const CookieEntry = struct { cookie: xcb.xcb_void_cookie_t, keycode: u8 };
+
+/// Fills `cookies` with one grab request per (keybinding × lock modifier) pair.
+/// Returns the number of entries written.
+fn fillGrabCookies(cookies: []CookieEntry) usize {
     var n: usize = 0;
-    outer: for (core.config.keybindings.items) |kb| {
+    for (core.config.keybindings.items) |kb| {
         const keycode = kb.keycode orelse continue;
+
+        // Check once per keybinding that the full lock-modifier set fits.
+        // Avoids a per-lock branch and prevents partial grabs if the buffer is nearly full.
+        if (n + LOCK_MODIFIERS.len > cookies.len) {
+            debug.warn("Too many keybindings. Increase MAX_KEYBIND_COOKIES (currently {})", .{MAX_KEYBIND_COOKIES});
+            break;
+        }
+
         for (LOCK_MODIFIERS) |lock| {
-            if (n >= cookies.len) {
-                debug.warn("Too many keybindings. Increase MAX_KEYBIND_COOKIES (currently {})", .{MAX_KEYBIND_COOKIES});
-                break :outer;
-            }
             cookies[n] = .{
                 .cookie = xcb.xcb_grab_key_checked(
                     core.conn, 0, core.root, @intCast(kb.modifiers | lock), keycode,
@@ -199,24 +182,60 @@ pub fn grabKeybindings() !void {
             n += 1;
         }
     }
+    return n;
+}
+
+/// Checks each cookie for an XCB error. Returns the number of failures.
+fn checkGrabCookies(cookies: []const CookieEntry) usize {
     var failed: usize = 0;
-    for (cookies[0..n]) |entry| {
+    for (cookies) |entry| {
         if (xcb.xcb_request_check(core.conn, entry.cookie)) |err| {
             std.c.free(err);
             debug.warn("Failed to grab keycode: {}", .{entry.keycode});
             failed += 1;
         }
     }
+    return failed;
+}
+
+/// Ungrabs all keys, then re-grabs every configured keybinding across all lock modifier combinations.
+/// Fires all grab cookies before reading any reply to reduce round-trips.
+pub fn grabKeybindings() !void {
+    _ = xcb.xcb_ungrab_key(core.conn, xcb.XCB_GRAB_ANY, core.root, xcb.XCB_MOD_MASK_ANY);
+
+    var cookies: [MAX_KEYBIND_COOKIES]CookieEntry = undefined;
+    const n = fillGrabCookies(&cookies);
+
+    const failed = checkGrabCookies(cookies[0..n]);
     if (failed > 0) debug.warn("{} keybinding(s) failed to grab", .{failed});
+
     _ = xcb.xcb_flush(core.conn);
 }
 
 // Config reload
 
-/// Triggers a config reload if one has been requested via the signal pipe. No-op otherwise.
-inline fn maybeReload() void {
-    if (utils.consumeReload())
-        handleConfigReload() catch |err| debug.err("Reload failed: {}", .{err});
+/// Validates config constraints that cannot be checked at parse time.
+fn validateConfig(cfg: *const types.Config) !void {
+    if (cfg.tiling.master_count == 0) {
+        debug.err("Invalid config: master_count must be > 0, keeping old", .{});
+        return error.InvalidConfig;
+    }
+}
+
+/// Applies a validated config: resolves keybindings, re-grabs keys,
+/// and notifies all subsystems of the change.
+fn applyConfig(new_config: *types.Config) !void {
+    config.resolveKeybindings(new_config.keybindings.items, input.getXkbState(), core.alloc);
+    config.finalizeConfig(new_config, core.screen);
+
+    try grabKeybindings();
+
+    window.reloadBorders();
+    if (build.has_tiling) tiling.reloadConfig();
+    if (build.has_bar) {
+        bar.updateTimerState();
+        bar.reload();
+    }
 }
 
 /// Loads and validates a new config, then applies it atomically.
@@ -237,54 +256,56 @@ fn handleConfigReload() !void {
     core.config = new_config;
     old_config.deinit(core.alloc);
 
-    // Rebuild the workspace-rule fast-lookup map now that core.config points
-    // at the new config.  Must happen AFTER the swap so the borrowed key slices
-    // in g_rules_map point into the new config's allocations, not the freed old ones.
+    // Rebuild after the swap so borrowed key slices point into the new config's memory.
     window.rebuildRulesMap();
 
     debug.info("Reload complete", .{});
 }
 
-/// Validates config constraints that cannot be checked at parse time.
-fn validateConfig(cfg: *const @import("types").Config) !void {
-    if (cfg.tiling.master_count == 0) {
-        debug.err("Invalid config: master_count must be > 0, keeping old", .{});
-        return error.InvalidConfig;
-    }
-}
-
-/// Applies a validated config: resolves keybindings, swaps globals, re-grabs keys,
-/// and notifies all subsystems of the change.  window.rebuildRulesMap() is called
-/// by the caller (handleConfigReload) after core.config is swapped, not here,
-/// because the map borrows key slices from the live config allocation.
-fn applyConfig(new_config: *@import("types").Config) !void {
-    config.resolveKeybindings(new_config.keybindings.items, input.getXkbState(), core.alloc);
-    config.finalizeConfig(new_config, core.screen);
-    
-    grabKeybindings() catch |err| {
-        debug.err("Keybind grab failed: {}, reverting", .{err});
-        return err;
-    };
-    
-    if (build.has_tiling) tiling.reloadConfig();
-    window.reloadBorders();
-    bar.updateTimerState();
-    bar.reload();
-    // Unconditional flush: ensures border and tiling commands from reloadBorders()
-    // and reloadConfig() are sent even when bar.reload() takes an early-return path
-    // (e.g. bar disabled) that does not call its own ungrabAndFlush().
-    _ = xcb.xcb_flush(core.conn);
-}
-
 // Event loop
 
-/// Returns the shortest timeout across all subsystems that need periodic wakeups,
-/// or -1 if nothing needs one right now (block indefinitely).
+/// Returns the shortest timeout across all subsystems, or -1 to block indefinitely.
 fn combinedTimeoutMs(blink_ms: i32) i32 {
+    if (!build.has_bar) return -1;
+
     const clock_ms = bar.pollTimeoutMs();
     if (clock_ms < 0) return blink_ms;
     if (blink_ms < 0) return clock_ms;
+
     return @min(clock_ms, blink_ms);
+}
+
+/// Ticks the clock and cursor blink on poll timeout, then flushes to the compositor.
+fn handleTimerEvents(cursor_is_blinking: bool) void {
+    if (build.has_bar) {
+        var drew = false;
+
+        if (bar.checkClockUpdate()) drew = true;
+
+        if (cursor_is_blinking) {
+            prompt.blinkTick();
+            bar.submitDraw();
+            drew = true;
+        }
+
+        if (drew) _ = xcb.xcb_flush(core.conn);
+    }
+}
+
+/// Drains all pending XCB events for this batch, then runs post-batch housekeeping.
+fn handleXcbEvents() void {
+    while (xcb.xcb_poll_for_event(core.conn)) |event| {
+        defer std.c.free(event);
+        dispatch(@as(*u8, @ptrCast(event)).*, event);
+    }
+
+    if (build.has_tiling) tiling.retileIfDirty();
+    focus.drainPendingConfirm();
+    focus.drainPointerSync();
+    window.updateWorkspaceBordersIfNeeded();
+    if (build.has_bar) bar.updateIfDirty() catch |err| debug.err("Failed to update bar: {}", .{err});
+
+    _ = xcb.xcb_flush(core.conn);
 }
 
 pub fn run() !void {
@@ -297,7 +318,7 @@ pub fn run() !void {
     };
 
     while (utils.running.load(.acquire)) {
-        const blink_ms = prompt.blinkPollTimeoutMs();
+        const blink_ms = if (build.has_prompt) prompt.blinkPollTimeoutMs() else -1;
         const cursor_is_blinking = blink_ms >= 0;
         const poll_rc = std.os.linux.poll(&fds, fds.len, combinedTimeoutMs(blink_ms));
         const ready: usize = switch (std.posix.errno(poll_rc)) {
@@ -310,11 +331,7 @@ pub fn run() !void {
         };
 
         if (ready == 0) {
-            bar.checkClockUpdate();
-            if (cursor_is_blinking) {
-                prompt.blinkTick();
-                bar.submitDraw();
-            }
+            handleTimerEvents(cursor_is_blinking);
             continue;
         }
 
@@ -323,22 +340,12 @@ pub fn run() !void {
             break;
         }
 
-        if ((fds[FD_XCB].revents & std.posix.POLL.IN) != 0) {
-            while (xcb.xcb_poll_for_event(core.conn)) |event| {
-                defer std.c.free(event);
-                dispatch(@as(*u8, @ptrCast(event)).*, event);
-            }
-            if (build.has_tiling) tiling.retileIfDirty();
-            focus.drainPendingConfirm();
-            focus.drainPointerSync();
-            window.updateWorkspaceBordersIfNeeded();
-            bar.updateIfDirty() catch |err| debug.err("Failed to update bar: {}", .{err});
-            _ = xcb.xcb_flush(core.conn);
-        }
+        if ((fds[FD_XCB].revents & std.posix.POLL.IN) != 0) handleXcbEvents();
 
         if ((fds[FD_SIGNAL].revents & std.posix.POLL.IN) != 0) {
             handleSignalPipe(signal_fd);
-            maybeReload();
+            if (utils.consumeReload())
+                handleConfigReload() catch |err| debug.err("Reload failed: {}", .{err});
         }
     }
 }

@@ -1,38 +1,9 @@
-//! vim — modal editing engine for the prompt segment.
-//!
+//! vim modal editing engine for the prompt segment.
 //! Implements a vim-style modal editing layer over a single-line text buffer.
-//! All state is contained in `VimState`.  Buffers are heap-allocated; create
-//! and destroy instances with `VimState.init` / `VimState.deinit`:
-//!
-//!   var vs = try VimState.init(allocator, 512, 32);
-//!   defer vs.deinit();
-//!
-//! The four mode handlers each return an `Action` value so the caller can
-//! react without a circular dependency:
-//!
-//!   .none       — nothing special; caller should just redraw
-//!   .deactivate — user pressed Escape / Ctrl+C to close
-//!   .spawn      — user pressed Return; execute buf[0..len] and close
-//!
-//! Typical integration in a key-press handler:
-//!
-//!   const action = switch (vs.mode) {
-//!       .insert  => vim.handleInsert(&vs, sym),
-//!       .normal  => vim.handleNormal(&vs, sym),
-//!       .visual  => vim.handleVisual(&vs, sym),
-//!       .replace => vim.handleReplace(&vs, sym),
-//!   };
-//!   switch (action) {
-//!       .none       => {},
-//!       .deactivate => ...,
-//!       .spawn      => { runCmd(vs.buf[0..vs.len]); ... },
-//!   }
-//!
-//! Ctrl-modified keys should be pre-handled and routed to `handleCtrl()`.
 
-const std  = @import("std");
-const core = @import("core");
-const xcb  = core.xcb;
+const std     = @import("std");
+const core    = @import("core");
+    const xcb = core.xcb;
 
 // Re-exported keysyms (convenience for callers)
 
@@ -55,12 +26,6 @@ pub const mark_count: usize = 26;
 
 // Public enums and types
 
-/// What the caller should do after handling a key.
-///
-///   .none        — nothing special; caller should just redraw
-///   .deactivate  — close the prompt without executing (`:q`, Escape, Ctrl+C)
-///   .spawn       — execute buf[0..len] and close the prompt (Return, `:wq`, `:x`)
-///   .spawn_keep  — execute buf[0..len] but keep the prompt open (`:w`)
 pub const Action = enum { none, deactivate, spawn, spawn_keep };
 
 /// Editing modes, reflected live in the mode label.
@@ -91,39 +56,45 @@ pub const DotKind = enum { none, direct, op_motion, op_line, insert_session };
 /// with a union literal.
 pub const DotRecord = union(DotKind) {
     none: void,
+
     direct: struct {
+        count:        u32 = 1,
+        replace_char: u8  = 0, // used by 'r'
+
         sym:          xcb.xcb_keysym_t = 0,
-        count:        u32              = 1,
-        replace_char: u8               = 0,   // used by 'r'
     },
+
     op_motion: struct {
-        op:           u8               = 0,
-        op_count:     u32              = 1,
+        op:           u8   = 0,
+        op_count:     u32  = 1,
+        motion_count: u32  = 1,
+        has_g_prefix: bool = false, // ge / gE
+        find_kind:    u8   = 0, // f/F/t/T motion (0 = none)
+        find_ch:      u8   = 0,
+        tobj_kind:    u8   = 0,
+        tobj_delim:   u8   = 0,
+
         motion_sym:   xcb.xcb_keysym_t = 0,
-        motion_count: u32              = 1,
-        has_g_prefix: bool             = false, // ge / gE
-        find_kind:    u8               = 0,     // f/F/t/T motion (0 = none)
-        find_ch:      u8               = 0,
-        tobj_kind:    u8               = 0,
-        tobj_delim:   u8               = 0,
     },
+
     op_line: struct {
         op:           u8  = 0,
         op_count:     u32 = 1,
         motion_count: u32 = 1,
     },
+
     insert_session: void,
 };
 
 /// Result returned by motion functions.
-///
-/// `pos`                — destination cursor position.
-/// `inclusive`          — when true the char at `pos` is included in operator ranges.
-/// `range_start_override` — when set (text objects), this is the range start
-///                          instead of the cursor.
 pub const MotionResult = struct {
-    pos:                  usize,
-    inclusive:            bool   = false,
+    // Destination cursor position
+    pos: usize, 
+
+    // When true, char at `pos` is included in operator ranges
+    inclusive: bool = false,
+
+    // When set, serves as range start instead of cursor
     range_start_override: ?usize = null,
 };
 
@@ -150,25 +121,32 @@ pub const RingStack = struct {
 /// Accumulated state for the in-progress normal-mode command.
 /// Reset atomically between commands via `resetPendingCmd`.
 const PendingCmd = struct {
-    count:                 u32  = 0,   // digit accumulator
-    op:                    u8   = 0,   // pending operator ('d'/'c'/'y')
-    op_count:              u32  = 0,   // count when operator was armed
-    find_kind:             u8   = 0,   // pending f/F/t/T target (0 = none)
+    count:     u32  = 0, // Digit accumulator
+    op:        u8   = 0, // Pending operator ('d'/'c'/'y')
+    op_count:  u32  = 0, // Count when operator was armed
+    find_kind: u8   = 0, // Pending f/F/t/T target (0 = none)
+
     /// True after 'r' is pressed; the next printable char replaces `count` chars.
     is_awaiting_replace_char: bool = false,
+
     /// True after 'g' is pressed; the next key completes a g-prefix motion.
-    is_g_prefix_active:       bool = false,
+    is_g_prefix_active: bool = false,
+
     /// The 'i' or 'a' pressed before a text-object delimiter (0 = none).
-    text_obj_prefix:          u8   = 0,
+    text_obj_prefix: u8 = 0,
+
     /// True after 'm' is pressed; the next letter names the mark to set.
-    is_awaiting_mark_set:     bool = false,
+    is_awaiting_mark_set: bool = false,
+
     /// True after `'` is pressed; the next letter names the mark to jump to.
-    is_awaiting_mark_jump:    bool = false,
+    is_awaiting_mark_jump: bool = false,
+
     /// True after ':' is pressed; subsequent keys build the ex command.
     /// Recognised commands: w (spawn_keep), q (deactivate), wq (spawn), x (spawn).
-    is_colon_cmd: bool  = false,
-    colon_buf:    [4]u8 = .{ 0, 0, 0, 0 },
-    colon_len:    u8    = 0,
+    is_colon_cmd: bool = false,
+
+    colon_buf: [4]u8 = .{ 0, 0, 0, 0 },
+    colon_len: u8    = 0,
 };
 
 // Public state type
@@ -228,6 +206,7 @@ pub const VimState = struct {
             .max_input = max_input,
             .undo_max  = undo_max,
         };
+
         vs.buf                = try allocator.alloc(u8, max_input);
         vs.yank_buf           = try allocator.alloc(u8, max_input);
         vs.replace_origin_buf = try allocator.alloc(u8, max_input);
@@ -235,17 +214,50 @@ pub const VimState = struct {
         vs.dot_insert_buf     = try allocator.alloc(u8, max_input);
         vs.undo.entries       = try allocator.alloc(UndoEntry, undo_max);
         vs.redo.entries       = try allocator.alloc(UndoEntry, undo_max);
+
         for (vs.undo.entries) |*e| e.buf = try allocator.alloc(u8, max_input);
         for (vs.redo.entries) |*e| e.buf = try allocator.alloc(u8, max_input);
+
         return vs;
+    }
+
+    /// Reset all editing state for a new editing session, preserving heap
+    /// allocations (buf, yank_buf, undo/redo entries, etc.).
+    /// Equivalent to the old `resetVimEditing` in prompt.zig.
+    pub fn reset(vs: *VimState) void {
+        const allocator          = vs.allocator;
+        const max_input          = vs.max_input;
+        const undo_max           = vs.undo_max;
+        const buf                = vs.buf;
+        const yank_buf           = vs.yank_buf;
+        const replace_origin_buf = vs.replace_origin_buf;
+        const insert_rec_buf     = vs.insert_rec_buf;
+        const dot_insert_buf     = vs.dot_insert_buf;
+        const undo_entries       = vs.undo.entries;
+        const redo_entries       = vs.redo.entries;
+
+        vs.* = .{
+            .allocator          = allocator,
+            .max_input          = max_input,
+            .undo_max           = undo_max,
+            .buf                = buf,
+            .yank_buf           = yank_buf,
+            .replace_origin_buf = replace_origin_buf,
+            .insert_rec_buf     = insert_rec_buf,
+            .dot_insert_buf     = dot_insert_buf,
+            .undo = .{ .entries = undo_entries },
+            .redo = .{ .entries = redo_entries },
+        };
     }
 
     /// Free all heap buffers.  The `VimState` must not be used after this call.
     pub fn deinit(vs: *VimState) void {
         for (vs.undo.entries) |*e| vs.allocator.free(e.buf);
         vs.allocator.free(vs.undo.entries);
+
         for (vs.redo.entries) |*e| vs.allocator.free(e.buf);
         vs.allocator.free(vs.redo.entries);
+
         vs.allocator.free(vs.dot_insert_buf);
         vs.allocator.free(vs.insert_rec_buf);
         vs.allocator.free(vs.replace_origin_buf);
@@ -259,6 +271,15 @@ pub const VimState = struct {
 
 /// Reset all in-progress command state (counts, pending operators, prefix flags).
 pub fn resetPendingCmd(vs: *VimState) void { vs.pending = .{}; }
+
+/// Called by prompt.zig when the prompt is deactivated.
+/// Clears transient recording/replay flags and pending command state so the
+/// engine is in a clean state when the prompt is next activated.
+pub fn onDeactivate(vs: *VimState) void {
+    vs.is_replaying_dot    = false;
+    vs.is_recording_insert = false;
+    resetPendingCmd(vs);
+}
 
 /// Enter INSERT mode.  `push_undo` = true for standalone commands (i/a/I/A/S);
 /// false for c-operators that already pushed an undo snapshot before deleting.
@@ -400,13 +421,16 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
                 const cmd_len: u8  = vs.pending.colon_len;
                 const cmd = cmd_buf[0..cmd_len];
                 resetPendingCmd(vs);
+
                 if (std.mem.eql(u8, cmd, "q"))  return .deactivate;
                 if (std.mem.eql(u8, cmd, "w"))  return .spawn_keep;
                 if (std.mem.eql(u8, cmd, "wq")) return .spawn;
                 if (std.mem.eql(u8, cmd, "x"))  return .spawn;
+
                 return .none;
             },
             else => {
+                //TODO: why 0x20 and 0x7e?
                 if (sym >= 0x20 and sym <= 0x7e and vs.pending.colon_len < vs.pending.colon_buf.len) {
                     vs.pending.colon_buf[vs.pending.colon_len] = @truncate(sym);
                     vs.pending.colon_len += 1;
@@ -691,7 +715,7 @@ pub fn handleReplace(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
-// Private — normal-mode motion resolution
+// Normal-mode motion resolution
 
 /// Clamp cursor to the last valid position for normal mode.
 /// In normal mode the cursor must sit on a character, not past the end.

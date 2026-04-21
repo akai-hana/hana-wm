@@ -30,7 +30,7 @@ pub fn main() !void {
     const x = try connectToX();
     defer xcb.xcb_disconnect(x.conn);
 
-    // Written once at startup and then read-only for the lifetime of the process.
+    // Written at startup and then read-only for the processes' lifetime.
     // Stored on core so every module can access them without threading them through every call site.
     core.conn   = x.conn;
     core.screen = x.screen;
@@ -44,15 +44,16 @@ pub fn main() !void {
 
     core.config = try config.load(core.alloc, x.screen, input.getXkbState());
     defer core.config.deinit(core.alloc);
-    // Defers are LIFO: deinitKeybindMap runs before core.config.deinit, so the
-    // map is cleared (backing array freed) while its action pointers are still valid.
+    // Defers are LIFO: deinitKeybindMap runs before core.config.deinit, so the map
+    // is cleared (backing array freed) while its action pointers are still valid.
     defer config.deinitKeybindMap(core.alloc);
     if (comptime build.has_scale)
         core.config.bar.scaled_font_size = scale.scaleFontSize(core.config.bar.font_size, x.screen);
 
+    // Defers run in LIFO order
+
     try initGlobalState(x.conn);
-    // Defers run in LIFO order: core.config.deinit() must run before deinitGlobalState().
-    defer deinitGlobalState();
+    //TODO: make sure this doesn't need a defer
 
     try events.setupSignalPipe();
     defer events.deinitSignalPipe();
@@ -69,6 +70,7 @@ pub fn main() !void {
     debug.info("hana booted up successfully!", .{});
 
     try events.run();
+    // When event loop exits, it must mean hana's shutting down
     debug.info("Shutting down gracefully...", .{});
 }
 
@@ -122,9 +124,9 @@ const BAR_NOT_FOUND_MSG =
 fn initBar() void {
     bar.init() catch |err| {
         if (err == error.BarDisabled) {
-            debug.info("Bar disabled on user config.", .{});
+            debug.info("Bar disabled on user config: {}", .{err});
         } else if (err == error.BarNotFound) {
-            debug.info(BAR_NOT_FOUND_MSG, .{});
+            debug.info("Bar not found (src/bar/bar.zig): {}", .{err});
         } else {
             debug.err("Bar init failed: {}", .{err});
         }
@@ -145,7 +147,3 @@ fn deinitModules() void {
 fn initGlobalState(conn: *xcb.xcb_connection_t) !void {
     try utils.initAtomCache(conn);
 }
-
-/// Tears down global WM state initialized by initGlobalState.
-fn deinitGlobalState() void {}
-

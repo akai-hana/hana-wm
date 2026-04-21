@@ -12,8 +12,53 @@ const types = @import("types");
 
 const drawing = @import("drawing");
 const title   = if (build.has_title) @import("title") else struct {};
-const vim     = if (build.has_vim)   @import("vim")   else struct {
-    const VimState = struct {};
+const vim = if (build.has_vim) @import("vim") else struct {
+    pub const default_max_input: usize = 512;
+    pub const default_undo_max:  usize = 32;
+    pub const XK_Tab: xcb.xcb_keysym_t = 0xff09;
+
+    pub const Action = enum { none, deactivate, spawn, spawn_keep };
+
+    pub const Mode = enum(u2) {
+        insert  = 0,
+        normal  = 1,
+        visual  = 2,
+        replace = 3,
+        pub fn label(self: Mode) []const u8 {
+            return switch (self) {
+                .insert  => "[INSERT]",
+                .normal  => "[NORMAL]",
+                .visual  => "[VISUAL]",
+                .replace => "[REPLACE]",
+            };
+        }
+    };
+
+    pub const VimState = struct {
+        allocator: std.mem.Allocator = undefined,
+        max_input: usize             = 0,
+        buf:       []u8              = &.{},
+        len:       usize             = 0,
+        cursor:    usize             = 0,
+        mode:      Mode              = .insert,
+
+        pub fn init(a: std.mem.Allocator, max_input: usize, _: usize) !VimState {
+            return .{ .allocator = a, .max_input = max_input,
+                      .buf = try a.alloc(u8, max_input) };
+        }
+        pub fn deinit(vs: *VimState) void { vs.allocator.free(vs.buf); vs.* = .{}; }
+        pub fn reset(vs: *VimState) void { vs.len = 0; vs.cursor = 0; vs.mode = .insert; }
+    };
+
+    pub fn colonInput(_: *const VimState) ?[]const u8 { return null; }
+    pub fn visualRange(vs: *const VimState) [2]usize {
+        return .{ vs.cursor, @min(vs.cursor + 1, vs.len) };
+    }
+    pub fn onDeactivate (_: *VimState) void {}
+    pub fn handleCtrl   (_: *VimState, _: xcb.xcb_keysym_t) Action { return .none; }
+    pub fn handleNormal (_: *VimState, _: xcb.xcb_keysym_t) Action { return .none; }
+    pub fn handleVisual (_: *VimState, _: xcb.xcb_keysym_t) Action { return .none; }
+    pub fn handleReplace(_: *VimState, _: xcb.xcb_keysym_t) Action { return .none; }
 };
 
 const debug = @import("debug");
@@ -294,7 +339,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
             @min(g.ghost_len, g.vim_state.max_input - 1 - g.vim_state.len)
         else 0;
         if (n_ghost > 0) {
-            vim.insertSlice(&g.vim_state, g.ghost_buf[0..n_ghost]);
+            insertBasic(&g.vim_state, g.ghost_buf[0..n_ghost]);
             g.ghost_len = 0;
         }
         g.is_blink_visible = true;
@@ -302,9 +347,9 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
         return true;
     }
 
-    // Dispatch to mode handler
     const action = switch (g.vim_state.mode) {
-        .insert  => vim.handleInsert(&g.vim_state, sym),
+        .insert  => if (build.has_vim) vim.handleInsert(&g.vim_state, sym)
+                    else               handleInsertBasic(&g.vim_state, sym),
         .normal  => vim.handleNormal(&g.vim_state, sym),
         .visual  => vim.handleVisual(&g.vim_state, sym),
         .replace => vim.handleReplace(&g.vim_state, sym),
@@ -386,7 +431,7 @@ fn handleAction(action: vim.Action) void {
         .spawn_keep => {
             const cmd = g.vim_state.buf[0..g.vim_state.len];
             if (cmd.len > 0) spawnCommand(cmd);
-            resetVimEditing(&g.vim_state);
+            g.vim_state.reset();
             g.ghost_len = 0;
             g.has_space = false;
         },
@@ -397,35 +442,11 @@ fn handleAction(action: vim.Action) void {
 
 /// Reset all `VimState` editing fields to their defaults without touching the
 /// heap-allocated buffers (buf, yank_buf, undo/redo stacks, etc.).
-fn resetVimEditing(vs: *vim.VimState) void {
-    const allocator         = vs.allocator;
-    const max_input         = vs.max_input;
-    const undo_max          = vs.undo_max;
-    const buf               = vs.buf;
-    const yank_buf          = vs.yank_buf;
-    const replace_origin_buf= vs.replace_origin_buf;
-    const insert_rec_buf    = vs.insert_rec_buf;
-    const dot_insert_buf    = vs.dot_insert_buf;
-    const undo_entries      = vs.undo.entries;
-    const redo_entries      = vs.redo.entries;
-    vs.* = .{
-        .allocator          = allocator,
-        .max_input          = max_input,
-        .undo_max           = undo_max,
-        .buf                = buf,
-        .yank_buf           = yank_buf,
-        .replace_origin_buf = replace_origin_buf,
-        .insert_rec_buf     = insert_rec_buf,
-        .dot_insert_buf     = dot_insert_buf,
-        // Preserve heap allocations; top and base default to 0 (history cleared).
-        .undo = .{ .entries = undo_entries },
-        .redo = .{ .entries = redo_entries },
-    };
-}
+
 
 /// Grabs the keyboard, resets editing state, and marks the prompt active.
 fn activate() void {
-    resetVimEditing(&g.vim_state); // reset editing state, preserve heap allocations
+    g.vim_state.reset(); // reset editing state, preserve heap allocations
     g.ghost_len = 0;
     g.has_space = false;
     // Load completions and history on first activation.
@@ -449,15 +470,17 @@ fn activate() void {
     }
     g.is_active      = true;
     g.redraw_pending = true;
-    _ = xcb.xcb_flush(core.conn);
+    // No xcb_flush: xcb_grab_keyboard_reply already drained the XCB output
+    // buffer to deliver the preceding grab request.  The two assignments above
+    // are pure struct-field writes; no XCB requests are pending here.
+    // Contrast with deactivate(), where the flush is correct because
+    // xcb_ungrab_keyboard sends a new request that must arrive promptly.
 }
 
 /// Ungrabs the keyboard and marks the prompt inactive.
 fn deactivate() void {
-    g.is_active                   = false;
-    g.vim_state.is_replaying_dot  = false;
-    g.vim_state.is_recording_insert = false;
-    vim.resetPendingCmd(&g.vim_state);
+    g.is_active = false;
+    vim.onDeactivate(&g.vim_state);
     _ = xcb.xcb_ungrab_keyboard(core.conn, xcb.XCB_CURRENT_TIME);
     _ = xcb.xcb_flush(core.conn);
     g.redraw_pending = true;
@@ -780,6 +803,52 @@ fn spawnCommand(cmd: []const u8) void {
         var status: c_int = 0;
         _ = c.waitpid(pid, &status, 0);
     }
+}
+
+// Private — basic insert-mode editing (used when build.has_vim = false)
+
+/// Insert `slice` at the cursor position, advancing cursor by the bytes written.
+fn insertBasic(vs: *vim.VimState, slice: []const u8) void {
+    const n = @min(slice.len, vs.max_input - 1 - vs.len);
+    if (n == 0) return;
+    if (vs.cursor < vs.len)
+        std.mem.copyBackwards(u8,
+            vs.buf[vs.cursor + n .. vs.len + n],
+            vs.buf[vs.cursor     .. vs.len]);
+    @memcpy(vs.buf[vs.cursor .. vs.cursor + n], slice[0..n]);
+    vs.len    += n;
+    vs.cursor += n;
+}
+
+/// Minimal insert-mode handler used when vim.zig is absent.
+/// Handles printable ASCII, cursor keys, Backspace, Delete,
+/// Return (spawn), and Escape (deactivate).
+fn handleInsertBasic(vs: *vim.VimState, sym: xcb.xcb_keysym_t) vim.Action {
+    switch (sym) {
+        0xff1b => return .deactivate,               // Escape
+        0xff0d => return .spawn,                    // Return
+        0xff08 => { if (vs.cursor > 0) {            // BackSpace
+            std.mem.copyForwards(u8,
+                vs.buf[vs.cursor - 1 .. vs.len - 1],
+                vs.buf[vs.cursor     .. vs.len]);
+            vs.len    -= 1;
+            vs.cursor -= 1;
+        }},
+        0xffff => { if (vs.cursor < vs.len) {       // Delete
+            std.mem.copyForwards(u8,
+                vs.buf[vs.cursor     .. vs.len - 1],
+                vs.buf[vs.cursor + 1 .. vs.len]);
+            vs.len -= 1;
+        }},
+        0xff51 => { if (vs.cursor > 0)       vs.cursor -= 1; }, // Left
+        0xff53 => { if (vs.cursor < vs.len)  vs.cursor += 1; }, // Right
+        0xff50 => { vs.cursor = 0; },               // Home
+        0xff57 => { vs.cursor = vs.len; },           // End
+        else   => { if (sym >= 0x20 and sym <= 0x7e)
+            insertBasic(vs, &[1]u8{@truncate(sym)});
+        },
+    }
+    return .none;
 }
 
 // Private — rendering helpers
@@ -1137,6 +1206,6 @@ fn drawActive(
         try drawPostSpan(dc, px, text_left_x, ellipsis_end_x, baseline, post_text, fg);
     }
 
-    dc.flushRect(start_x, width);
+    dc.blitAndFlush(start_x, width);
     return end_x;
 }

@@ -1,4 +1,3 @@
-
 //! Title segment — shows the focused window title, or a split view for
 //! multiple windows.
 //!
@@ -257,6 +256,17 @@ fn drawSingleWindow(
     allocator:         std.mem.Allocator,
     title_invalidated: bool,
 ) !void {
+    // Free the segmented carousel: the single and segmented paths are
+    // mutually exclusive.  Leaving render.seg alive after a workspace switch
+    // from a multi-window workspace keeps carousel.isCarouselActive() true,
+    // which drives the bar thread to call drawCached on every carousel tick.
+    // drawCached passes minimized_title = "" (it has no cache for it), so
+    // drawSingleWindow would fill the accent background but draw no text —
+    // erasing the correctly rendered minimized title after the first full draw
+    // and leaving a blank rectangle for as long as render.seg survives.
+    // Mirrors the deinitSingleCarousel() call in drawSegmentedTitles.
+    carousel.deinitSegmentedCarousel();
+
     const single_win   = snapshot.current_ws_wins[0];
     const is_minimized = snapshot.minimized_set.contains(single_win);
     // `has_focus` is true when any window on this workspace is focused,

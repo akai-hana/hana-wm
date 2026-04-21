@@ -1,3 +1,4 @@
+
 //! Floating layout — windows are left at their current positions.
 //!
 //! Switching to this layout lets windows be moved and resized freely without
@@ -93,7 +94,7 @@ pub fn tileWithOffset(
         var any_needs: bool = false;
         for (batch, 0..) |win, i| {
             const already_placed = blk: {
-                const wd = ctx.cache.get(win) orelse break :blk false;
+                const wd = ctx.cache.getPtr(win) orelse break :blk false;
                 if (!wd.hasValidRect()) break :blk false;
                 break :blk wd.rect.x != 0 or wd.rect.y != 0;
             };

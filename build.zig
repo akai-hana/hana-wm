@@ -372,20 +372,13 @@ const SystemLibraries = struct {
 
     // Core libraries
     fn linkXcb(root: *std.Build.Module) void {
-        root.linkSystemLibrary("X11",           .{});
-        root.linkSystemLibrary("xcb",           .{});
-        root.linkSystemLibrary("xcb-cursor",    .{}); // Makes hana's root window respect custom cursor settings.
         root.linkSystemLibrary("xcb-keysyms",   .{});
-        root.linkSystemLibrary("xkbcommon",     .{});
         root.linkSystemLibrary("xkbcommon-x11", .{});
+        root.linkSystemLibrary("xcb-cursor",    .{}); // Makes hana's root window respect custom cursor settings.
     }
 
     // Bar libraries
     fn linkCairoPango(root: *std.Build.Module) void {
-        root.linkSystemLibrary("cairo",          .{});
         root.linkSystemLibrary("pangocairo-1.0", .{});
-        root.linkSystemLibrary("pango-1.0",      .{});
-        root.linkSystemLibrary("glib-2.0",       .{});
-        root.linkSystemLibrary("gobject-2.0",    .{});
     }
 };

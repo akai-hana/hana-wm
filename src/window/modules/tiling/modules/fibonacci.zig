@@ -36,7 +36,7 @@ pub fn tileWithOffset(
     if (windows.len == 0) return;
 
     const m  = state.margins();
-    const b2 = m.border * 2;
+    const b2 = 2 *| m.border;
 
     var x: i32 = @intCast(m.gap);
     var y: i32 = @intCast(y_offset +| m.gap);

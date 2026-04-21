@@ -5,14 +5,14 @@ const std   = @import("std");
 const build = @import("build_options");
 
 // core/
-const core       = @import("core");
-    const xcb    = core.xcb;
+const core    = @import("core");
+    const xcb = core.xcb;
 
 // core/modules/
-const debug      = @import("debug");
+const debug = @import("debug");
 
 // config/
-const types  = @import("types");
+const types = @import("types");
 
 // window/
 const window = @import("window");
@@ -458,13 +458,13 @@ const State = struct {
 
     fn drawAll(self: *State, snap: *const BarSnapshot) !void {
         try self.drawAllInner(snap);
-        self.render.dc.flush();
+        self.render.dc.blit();
         if (self.title_cache_pending_x) |x|
             self.syncTitleCache(snap, x, self.title_cache_pending_w);
         self.title_cache_pending_x = null;
     }
 
-    /// Like drawAll but does NOT call dc.flush() (no xcb_copy_area, no xcb_flush).
+    /// Like drawAll but does NOT call dc.blit() (no xcb_copy_area, no xcb_flush).
     /// Safe to call from inside an xcb_grab_server section via submitRenderBlocking.
     /// The caller must queue a blit with dc.blitQueued() and flush at ungrab time.
     fn drawAllNoFlush(self: *State, snap: *const BarSnapshot) !void {
@@ -551,7 +551,7 @@ const State = struct {
         const clock_x = self.layout_cache.clock_x orelse return;
         _ = clockSegment.draw(self.render.dc, self.render.config, self.render.height, clock_x) catch |e|
             debug.warnOnErr(e, "drawClockOnly");
-        self.render.dc.flush();
+        self.render.dc.blit();
     }
 
     fn drawTitleOnly(self: *State, new_focused: ?u32) void {
@@ -582,6 +582,21 @@ const State = struct {
             }
         }
 
+        // Guard: title_cache.title holds text for the window of the last full
+        // draw (title_cache.title_window).  If new_focused differs, that text
+        // is stale.  Calling drawCached here would pass the wrong title into
+        // drawScrollingTitle, which would see a window-ID mismatch, rebuild the
+        // carousel pixmap with incorrect content, and reset start_ms — causing
+        // the carousel to visibly start once with the wrong text and then
+        // restart from the beginning when the full snapReady draw arrives
+        // moments later with the correct title.
+        //
+        // scheduleFocusRedraw marks the bar dirty after posting this focusOnly
+        // work item, so a snapReady draw is guaranteed to follow.  Returning
+        // here leaves the current frame unchanged for that one extra iteration,
+        // which is imperceptible.
+        if (new_focused != self.title_cache.title_window) return;
+
         _ = titleSegment.drawCached(
             .{
                 .dc      = self.render.dc,
@@ -604,7 +619,7 @@ const State = struct {
             },
             self.render.allocator,
         ) catch |e| { debug.warnOnErr(e, "drawTitleOnly"); return; };
-        self.render.dc.flush();
+        self.render.dc.blit();
     }
 
     /// Update the title geometry and window-list caches after a successful full draw.
@@ -1177,6 +1192,15 @@ pub fn scheduleFocusRedraw(new_win: ?u32) void {
         gBar.channel.work_ready.signal();
     }
     gBar.channel.mutex.unlock();
+    // Mark dirty so updateIfDirty issues a full snapReady draw on the next main-loop
+    // iteration.  The focusOnly work item above provides an immediate visual update
+    // for accent-colour changes and carousel ticks on same-window redraws; the
+    // following snapReady fetches the new window's title from the X server and
+    // performs a single correct carousel build.  Without this, a cross-window focus
+    // change that arrives when nothing else is dirty would rely solely on the focusOnly
+    // path, which only has stale cached title text — the combination that produces
+    // the double-start flicker that the drawTitleOnly title_window guard prevents.
+    s.markDirty();
 }
 
 pub fn isBarWindow(win: u32) bool  { return if (gBar.state) |s| s.win.win_id == win else false; }
@@ -1281,13 +1305,14 @@ pub fn updateIfDirty() !void {
     if (s.is_dirty) { submitDraw(); s.is_dirty = false; }
 }
 
-pub fn checkClockUpdate() void {
-    const s = gBar.state orelse return;
-    if (!s.is_visible) return;
+pub fn checkClockUpdate() bool {
+    const s = gBar.state orelse return false;
+    if (!s.is_visible) return false;
     gBar.channel.mutex.lock();
     gBar.channel.work.has_clock_tick = true;
     gBar.channel.work_ready.signal();
     gBar.channel.mutex.unlock();
+    return true;
 }
 
 pub fn pollTimeoutMs() i32     { return clockSegment.pollTimeoutMs(); }
