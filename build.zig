@@ -1,21 +1,11 @@
 //! hana's build configuration
 //! Includes module auto-discovery and sub-system gating.
-//!
-//! Module auto-discovery:
-//! - Every `.zig` file under `src/` (except `main.zig`) becomes an import
-//!   by the key of its own file stem.
-//! - Optional subsystems are exposed as `has_<filestem>` build-options,
-//!   so source code can import import build options and branch at comptime.
-//!
-//! Sub-system gating:
-//! - If a subsystem directory lacks its own entry-point/central file
-//!   (`<dir>/<dir>.zig`), the entire dir is skipped over during discovery.
 
 const std     = @import("std");
 const builtin = @import("builtin");
 
-// Compile-time version guard — must be top-level so it fires before the
-// compiler analyses any function body that uses master-only APIs.
+// Compile-time version guard
+// Must be top-level so it fires before the compiler analyses any other functions
 comptime {
     if (builtin.zig_version.pre == null) @compileError(
         \\!!! Hana requires Zig's master branch. !!!
@@ -25,6 +15,7 @@ comptime {
         \\# And then install Zig's master branch:
         \\zvm i master
         \\
+        // ^ Intended to leave a blank gap
     );
 }
 
