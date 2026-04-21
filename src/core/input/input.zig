@@ -27,7 +27,12 @@ const fullscreen = if (build.has_fullscreen) @import("fullscreen") else struct {
 const minimize   = if (build.has_minimize) @import("minimize") else struct {};
 const workspaces = if (build.has_workspaces) @import("workspaces") else struct {};
 const tiling     = if (build.has_tiling) @import("tiling") else struct {};
-const drag       = @import("drag");
+const drag = if (build.has_tiling) @import("drag") else struct {
+    pub fn isDragging() bool { return false; }
+    pub fn stopDrag() void {}
+    pub fn updateDrag(_: i16, _: i16) void {}
+    pub fn startDrag(_: u32, _: u8, _: i16, _: i16) void {}
+};
 
 const xkbcommon = @import("xkbcommon");
 
@@ -403,7 +408,7 @@ fn executeMouseAction(action: *const types.Action, clicked_win: u32) !void {
     }
 }
 
-// Shell execution 
+// Shell execution
 //
 // Commands are launched via a double-fork so the grandchild is re-parented to
 // init and the WM never accumulates zombie processes.
@@ -413,6 +418,17 @@ fn executeMouseAction(action: *const types.Action, clicked_win: u32) !void {
 //                (EOF), exec failure writes a sentinel byte.
 //   pid_pipe   – intermediate child writes the grandchild PID before exiting,
 //                so the WM can register the spawn without racing.
+//
+// Previously the WM blocked on waitpid()+read() in the main event loop,
+// stalling input and X-event processing for the duration of two fork() calls
+// (typically 2–30 ms on weak hardware where page-table copying is slow).
+//
+// Now executeShellCommand returns immediately after fork().  The pending entry
+// is stored in g_pending and resolved asynchronously:
+//   • drainPendingSpawns()  – called every event batch; does O_NONBLOCK reads
+//   • reapPendingChildren() – called on SIGCHLD; targeted waitpid(WNOHANG)
+//
+// All pipe FDs are created O_CLOEXEC|O_NONBLOCK so reads never stall the loop.
 
 /// Grandchild: detaches from the session and execs the command.
 /// Writes a sentinel byte to exec_pipe_write on execvp failure.
@@ -444,12 +460,15 @@ fn forkIntermediate(exec_pipe_write: c_int, pid_pipe_write: c_int, cmd_z: [*:0]c
     std.process.exit(0);
 }
 
-/// Creates an O_CLOEXEC pipe pair atomically via pipe2.
-/// pipe2(O_CLOEXEC) sets close-on-exec on both ends in a single syscall,
-/// closing the TOCTOU window that existed between the old pipe() and the
-/// subsequent fcntl(F_SETFD, FD_CLOEXEC) call.
+/// Creates an O_CLOEXEC|O_NONBLOCK pipe pair atomically via pipe2.
+///
+/// O_NONBLOCK on the read ends prevents the WM's event loop from stalling
+/// when drainPendingSpawns() polls pipes whose data is not yet ready.
+/// O_NONBLOCK on the write ends is harmless: the payloads are ≤4 bytes,
+/// well within the PIPE_BUF atomic-write guarantee, so partial writes cannot
+/// occur regardless of the non-blocking flag.
 fn makePipe() ![2]c_int {
-    const flags = std.os.linux.O{ .CLOEXEC = true };
+    const flags = std.os.linux.O{ .CLOEXEC = true, .NONBLOCK = true };
     var fds: [2]c_int = undefined;
     return switch (std.posix.errno(std.os.linux.pipe2(&fds, flags))) {
         .SUCCESS => fds,
@@ -457,21 +476,72 @@ fn makePipe() ![2]c_int {
     };
 }
 
-/// Spawns `cmd` as a detached grandchild (double-fork) so the WM never accumulates zombie processes.
+// Pending spawn table
+//
+// executeShellCommand stores one entry per fork() and returns immediately.
+// drainPendingSpawns() is called from the event loop and from the SIGCHLD
+// handler to process entries non-blockingly.
+//
+// Capacity: 16 is more than enough.  Firing 16 exec keybindings in the
+// ~100 ms window before /bin/sh finishes exec-ing would require inhuman speed.
+
+const MAX_PENDING_SPAWNS: usize = 16;
+
+/// Lifecycle state for a single double-fork spawn.
+const PendingSpawn = struct {
+    /// PID of the intermediate (first) child.  Used for targeted waitpid.
+    pid:        c_int,
+    /// Read end of pid_pipe (O_NONBLOCK).  -1 after closed.
+    pid_fd:     c_int,
+    /// Read end of exec_pipe (O_NONBLOCK).  -1 after closed.
+    exec_fd:    c_int,
+    /// Grandchild PID read from pid_pipe.  -1 until known.
+    grandchild: c_int,
+    /// Target workspace for window.registerSpawn.
+    spawn_ws:   ?u8,
+};
+
+fn BoundedArray(comptime T: type, comptime cap: usize) type {
+    return struct {
+        buffer: [cap]T = undefined,
+        len: usize = 0,
+        pub fn appendAssumeCapacity(self: *@This(), item: T) void {
+            self.buffer[self.len] = item;
+            self.len += 1;
+        }
+        pub fn slice(self: *@This()) []T { return self.buffer[0..self.len]; }
+        pub fn swapRemove(self: *@This(), i: usize) T {
+            const val = self.buffer[i];
+            self.len -= 1;
+            if (i != self.len) self.buffer[i] = self.buffer[self.len];
+            return val;
+        }
+    };
+}
+
+var g_pending: BoundedArray(PendingSpawn, MAX_PENDING_SPAWNS) = .{};
+
+/// Spawns `cmd` as a detached grandchild (double-fork).
+/// Returns immediately — lifecycle is tracked in g_pending and resolved
+/// by drainPendingSpawns() / reapPendingChildren() without blocking the loop.
 fn executeShellCommand(cmd: []const u8) !void {
-    // Snapshot the target workspace before any blocking syscalls.  In a
-    // single-threaded WM the value cannot change while we are blocked in
-    // waitpid/read, but capturing it here makes the intent explicit and
-    // correctly handles sequence actions of the form [exec, switch_workspace]
-    // where a later action in the same sequence mutates g_current before
-    // registerSpawn is called.
+    // Snapshot the workspace now.  The event loop is single-threaded so
+    // g_current cannot change while we run, but capturing it here is correct
+    // for sequence actions of the form [exec, switch_workspace] where a later
+    // action in the same sequence mutates g_current before registerSpawn fires.
     const spawn_ws = tracking.getCurrentWorkspace();
 
     const cmd_z = try core.alloc.dupeZ(u8, cmd);
     defer core.alloc.free(cmd_z);
 
-    // exec_pipe write end is CLOEXEC via makePipe — no separate fcntl needed.
-    // exec success silently closes it (EOF); exec failure writes a sentinel byte.
+    if (g_pending.len >= MAX_PENDING_SPAWNS) {
+        // Extremely rare: 16 concurrent unresolved spawns.  Fall back to a
+        // fire-and-forget spawn with no workspace routing rather than dropping
+        // the user's command.
+        debug.warn("spawn: pending table full, spawning '{s}' without workspace routing", .{cmd});
+    }
+
+    // Both pipes are O_CLOEXEC|O_NONBLOCK (see makePipe).
     const exec_fds = makePipe() catch {
         debug.err("pipe2() failed (exec_pipe): {s}", .{cmd});
         return error.PipeFailed;
@@ -496,34 +566,119 @@ fn executeShellCommand(cmd: []const u8) !void {
         forkIntermediate(exec_fds[1], pid_fds[1], cmd_z.ptr);
     }
 
-    // WM: close write ends, then reap the intermediate child.
+    // Parent: close write ends so our read ends eventually see EOF.
     _ = c.close(exec_fds[1]);
     _ = c.close(pid_fds[1]);
 
-    var status: c_int = 0;
-    if (c.waitpid(pid, &status, 0) == -1) {
-        _ = c.close(exec_fds[0]);
+    // Pre-snapshot the pointer position for spawn-crossing suppression.
+    // Firing and draining the cookie here — during the key-press handler —
+    // is a single fast round-trip.  mapWindowToScreen can then drain the
+    // cached reply with zero additional latency.
+    window.prefetchSpawnPointer();
+
+    if (g_pending.len < MAX_PENDING_SPAWNS) {
+        g_pending.appendAssumeCapacity(.{
+            .pid        = pid,
+            .pid_fd     = pid_fds[0],
+            .exec_fd    = exec_fds[0],
+            .grandchild = -1,
+            .spawn_ws   = spawn_ws,
+        });
+    } else {
+        // Table full: close the read ends we won't track; intermediate child
+        // will be reaped by the SIGCHLD handler's waitpid loop.
         _ = c.close(pid_fds[0]);
-        debug.err("waitpid failed", .{});
-        return error.WaitpidFailed;
+        _ = c.close(exec_fds[0]);
     }
+}
 
-    // The intermediate child writes the grandchild PID before exiting, so
-    // this read is guaranteed not to block by the time waitpid returns.
-    var grandchild_pid: c_int = -1;
-    _ = c.read(pid_fds[0], &grandchild_pid, @sizeOf(c_int));
-    _ = c.close(pid_fds[0]);
+/// Drain pending spawn entries non-blockingly.
+///
+/// Called every event batch and on SIGCHLD.  For each entry:
+///   1. If pid_fd is still open, attempt a non-blocking read to obtain the
+///      grandchild PID written by the intermediate child.
+///   2. If exec_fd is still open, attempt a non-blocking read:
+///        EOF (n == 0)    → exec succeeded; call registerSpawn; remove entry.
+///        sentinel byte   → exec failed;    skip registration; remove entry.
+///        EAGAIN          → grandchild has not exec'd yet; retry next call.
+///
+/// The intermediate child is reaped via reapPendingChildren() (SIGCHLD path),
+/// keeping this function free of any blocking syscall.
+pub fn drainPendingSpawns() void {
+    var i: usize = 0;
+    while (i < g_pending.len) {
+        const entry = &g_pending.slice()[i];
 
-    // EOF (n == 0) means exec succeeded; a sentinel byte means it failed.
-    var sentinel: u8 = 0;
-    const n = c.read(exec_fds[0], &sentinel, 1);
-    _ = c.close(exec_fds[0]);
-    if (n > 0) return; // exec failed; skip spawn registration
+        // Step 1: read grandchild PID from pid_pipe (written before the
+        // intermediate child exits, so it becomes available shortly after fork).
+        if (entry.pid_fd >= 0) {
+            var gcp: c_int = -1;
+            const nr = c.read(entry.pid_fd, &gcp, @sizeOf(c_int));
+            if (nr == @sizeOf(c_int)) {
+                entry.grandchild = gcp;
+                _ = c.close(entry.pid_fd);
+                entry.pid_fd = -1;
+            } else if (nr < 0 and
+                std.posix.errno(nr) == .AGAIN)
+            {
+                // Not ready yet — pid_pipe stays open; retry on next call.
+            } else {
+                // EOF without data or hard error: intermediate fork failed.
+                _ = c.close(entry.pid_fd);
+                entry.pid_fd = -1;
+            }
+        }
 
-    if (spawn_ws) |ws| {
-        const pid_u32: u32 = if (grandchild_pid > 0) @intCast(grandchild_pid) else 0;
-        window.registerSpawn(ws, pid_u32);
+        // Step 2: read exec result from exec_pipe.
+        // The write end is CLOEXEC in the grandchild: exec success closes it
+        // (EOF); exec failure writes a sentinel byte then exits.
+        if (entry.exec_fd >= 0) {
+            var sentinel: u8 = 0;
+            const ne = c.read(entry.exec_fd, &sentinel, 1);
+            if (ne == 0) {
+                // EOF: exec succeeded.
+                if (entry.spawn_ws) |ws| {
+                    const pid_u32: u32 = if (entry.grandchild > 0) @intCast(entry.grandchild) else 0;
+                    window.registerSpawn(ws, pid_u32);
+                }
+                _ = c.close(entry.exec_fd);
+                _ = g_pending.swapRemove(i);
+                continue; // slot i now holds the swapped-in tail entry
+            } else if (ne == 1) {
+                // Sentinel byte: exec failed — skip registerSpawn.
+                _ = c.close(entry.exec_fd);
+                _ = g_pending.swapRemove(i);
+                continue;
+            } else if (ne < 0 and
+                std.posix.errno(ne) == .AGAIN)
+            {
+                // Grandchild has not exec'd yet — retry next call.
+            } else {
+                // Hard read error — treat as exec failure.
+                _ = c.close(entry.exec_fd);
+                _ = g_pending.swapRemove(i);
+                continue;
+            }
+        }
+
+        i += 1;
     }
+}
+
+/// Reap zombie intermediate children without blocking.
+/// Called from the SIGCHLD signal handler (via the signal self-pipe).
+/// Uses targeted waitpid so we only reap the PIDs we forked, leaving any
+/// other children (e.g., popen) to their own reaping paths.
+pub fn reapPendingChildren() void {
+    for (g_pending.slice()) |*entry| {
+        if (entry.pid > 0) {
+            if (c.waitpid(entry.pid, null, c.WNOHANG) > 0) {
+                entry.pid = -1; // reaped; pipe draining continues independently
+            }
+        }
+    }
+    // Drain any pipe data that just became available due to the child exiting.
+    drainPendingSpawns();
 }
 
 // Diagnostics 
