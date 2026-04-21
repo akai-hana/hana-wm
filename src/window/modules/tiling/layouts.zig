@@ -31,13 +31,11 @@ const debug = @import("debug");
 
 /// ICCCM WM_NORMAL_HINTS geometry constraints for a single window.
 pub const SizeHints = struct {
-    min_width:  u16 = 0,
-    min_height: u16 = 0,
     /// PMaxSize: upper bounds on window dimensions.
     /// 0 means unconstrained (no max declared by the client).
     max_width:  u16 = 0,
     max_height: u16 = 0,
-    /// PResizeInc: dimensions must satisfy w = min_width + N * inc_width.
+    /// PResizeInc: dimensions must satisfy w = base_width + N * inc_width.
     /// 0 means unconstrained (no increment declared by the client).
     inc_width:  u16 = 0,
     inc_height: u16 = 0,
@@ -166,16 +164,6 @@ pub const CacheMap = struct {
         }
     }
 
-    /// Returns a copy of the cached WindowData for `win`, or null if absent.
-    pub fn get(self: *const CacheMap, win: u32) ?WindowData {
-        var idx = hashSlot(win);
-        while (true) : (idx = (idx + 1) & hash_table_mask) {
-            const slot = &self.slots[idx];
-            if (slot.win == win)  return slot.data;
-            if (slot.win == EMPTY_WIN) return null;
-        }
-    }
-
     /// Returns a mutable pointer to the cached WindowData for `win`, or null if absent.
     pub fn getPtr(self: *CacheMap, win: u32) ?*WindowData {
         var idx = hashSlot(win);
@@ -272,6 +260,10 @@ pub const LayoutCtx = struct {
     /// has already been configured into that slot.  Setting defer_configure to
     /// the new master achieves this ordering without changing geometry arithmetic.
     defer_configure: ?u32 = null,
+    /// When non-null, `configureWithHints` merges XCB_CONFIG_WINDOW_BORDER_WIDTH
+    /// into the geometry configure_window call, reducing 3 requests/window to 2.
+    /// Set only during reloadConfig retile; null for all normal retile passes.
+    border_width: ?u16 = null,
 };
 
 /// Returns true when both rects have identical coordinates and dimensions.
@@ -279,22 +271,16 @@ pub inline fn rectsEqual(a: utils.Rect, b: utils.Rect) bool {
     return a.x == b.x and a.y == b.y and a.width == b.width and a.height == b.height;
 }
 
-/// Apply geometry to `win`, clamped to its WM_NORMAL_HINTS constraints.
+/// Shared implementation for configureWithHints and configureWithHintsAndRaise.
 ///
-/// Performs a SINGLE linear scan of the cache per window per retile:
-/// the same `getOrPut` call that retrieves the geometry and border dedup data
-/// also supplies the embedded SizeHints, replacing the previous two-scan design
-/// (one scan of hints_buf + one scan of CacheMap).
+/// `raise` is a comptime bool — the compiler eliminates the dead branch, so
+/// codegen is identical to the previous two-function approach with zero runtime
+/// cost. The two public entry points are thin wrappers that instantiate this.
 ///
-/// Skips the XCB round-trip when the computed rect matches the cached value,
-/// deduplicating configure_window calls across retile passes. When the
-/// LayoutCtx provides a `get_border_color` callback, the border color is also
-/// updated in the same cache scan at zero additional search cost.
-pub fn configureWithHints(
-    ctx: *const LayoutCtx,
-    win: u32,
-    rect: utils.Rect,
-) void {
+/// When `ctx.border_width` is non-null, the BORDER_WIDTH value is merged into
+/// the geometry configure_window call, reducing 3 XCB requests per window to 2.
+/// This is only set during reloadConfig; it is null for all normal retile passes.
+fn configureWithHintsImpl(comptime raise: bool, ctx: *const LayoutCtx, win: u32, rect: utils.Rect) void {
     // Single scan: gop.value_ptr.hints holds any cached WM_NORMAL_HINTS
     // constraints alongside the geometry and border dedup data.
     const gop = ctx.cache.getOrPut(win);
@@ -303,60 +289,46 @@ pub fn configureWithHints(
     if (!effective.isValid()) {
         debug.err("Invalid rect for window 0x{x}: {}x{} at {},{}",
             .{ win, effective.width, effective.height, effective.x, effective.y });
+        if (comptime raise) {
+            _ = xcb.xcb_configure_window(ctx.conn, win,
+                xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+        }
         return;
     }
 
     const is_rect_changed = !gop.found_existing or !rectsEqual(gop.value_ptr.rect, effective);
     if (is_rect_changed) {
         gop.value_ptr.rect = effective;
-        utils.configureWindow(ctx.conn, win, effective);
-    }
-
-    const getBorderColor = ctx.get_border_color orelse return;
-    const color = getBorderColor(win);
-    if (gop.found_existing and gop.value_ptr.border == color) return;
-    gop.value_ptr.border = color;
-    _ = xcb.xcb_change_window_attributes(ctx.conn, win,
-        xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
-}
-
-/// Like configureWithHints, but also raises the window atomically.
-/// Combines XCB_CONFIG_WINDOW_{X,Y,WIDTH,HEIGHT} with XCB_CONFIG_WINDOW_STACK_MODE
-/// in a single request when geometry changes, so the compositor never sees an
-/// intermediate frame between the reposition/resize and the raise.
-pub fn configureWithHintsAndRaise(
-    ctx: *const LayoutCtx,
-    win: u32,
-    rect: utils.Rect,
-) void {
-    const gop = ctx.cache.getOrPut(win);
-    const effective = applyHintsToRect(rect, gop.value_ptr.hints);
-
-    if (!effective.isValid()) {
-        debug.err("Invalid rect for window 0x{x}: {}x{} at {},{}",
-            .{ win, effective.width, effective.height, effective.x, effective.y });
-        // Still raise even if geometry is invalid.
-        _ = xcb.xcb_configure_window(ctx.conn, win,
-            xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
-        return;
-    }
-
-    const is_rect_changed = !gop.found_existing or !rectsEqual(gop.value_ptr.rect, effective);
-    if (is_rect_changed) {
-        gop.value_ptr.rect = effective;
-        // Combine geometry + raise into one request — one ConfigureNotify to the compositor.
-        _ = xcb.xcb_configure_window(ctx.conn, win,
-            xcb.XCB_CONFIG_WINDOW_X     | xcb.XCB_CONFIG_WINDOW_Y     |
-            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
-            xcb.XCB_CONFIG_WINDOW_STACK_MODE,
-            &[_]u32{
-                @bitCast(@as(i32, effective.x)),
-                @bitCast(@as(i32, effective.y)),
-                effective.width,
-                effective.height,
-                xcb.XCB_STACK_MODE_ABOVE,
-            });
-    } else {
+        if (comptime raise) {
+            _ = xcb.xcb_configure_window(ctx.conn, win,
+                xcb.XCB_CONFIG_WINDOW_X     | xcb.XCB_CONFIG_WINDOW_Y     |
+                xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
+                xcb.XCB_CONFIG_WINDOW_STACK_MODE,
+                &[_]u32{
+                    @bitCast(@as(i32, effective.x)),
+                    @bitCast(@as(i32, effective.y)),
+                    effective.width,
+                    effective.height,
+                    xcb.XCB_STACK_MODE_ABOVE,
+                });
+        } else if (ctx.border_width) |bw| {
+            // Merge BORDER_WIDTH into the geometry request — saves one XCB round-trip
+            // per window during reloadConfig (the only caller that sets border_width).
+            _ = xcb.xcb_configure_window(ctx.conn, win,
+                xcb.XCB_CONFIG_WINDOW_X     | xcb.XCB_CONFIG_WINDOW_Y     |
+                xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
+                xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
+                &[_]u32{
+                    @bitCast(@as(i32, effective.x)),
+                    @bitCast(@as(i32, effective.y)),
+                    effective.width,
+                    effective.height,
+                    bw,
+                });
+        } else {
+            utils.configureWindow(ctx.conn, win, effective);
+        }
+    } else if (comptime raise) {
         // Geometry unchanged (cache hit) — only raise; no intermediate state possible.
         _ = xcb.xcb_configure_window(ctx.conn, win,
             xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
@@ -370,18 +342,50 @@ pub fn configureWithHintsAndRaise(
         xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
 }
 
+/// Apply geometry to `win`, clamped to its WM_NORMAL_HINTS constraints.
+///
+/// Performs a SINGLE hash probe per window per retile (getOrPut supplies
+/// geometry, border dedup data, and SizeHints in one lookup).
+///
+/// Skips the XCB round-trip when the computed rect matches the cached value.
+/// When `ctx.get_border_color` is set, border color is also updated in the same
+/// probe at zero additional search cost.  When `ctx.border_width` is set,
+/// BORDER_WIDTH is merged into the geometry request (reloadConfig path only).
+pub fn configureWithHints(ctx: *const LayoutCtx, win: u32, rect: utils.Rect) void {
+    configureWithHintsImpl(false, ctx, win, rect);
+}
+
+/// Like configureWithHints, but also raises the window atomically.
+/// Combines XCB_CONFIG_WINDOW_{X,Y,WIDTH,HEIGHT} with XCB_CONFIG_WINDOW_STACK_MODE
+/// in a single request when geometry changes, so the compositor never sees an
+/// intermediate frame between the reposition/resize and the raise.
+pub fn configureWithHintsAndRaise(ctx: *const LayoutCtx, win: u32, rect: utils.Rect) void {
+    configureWithHintsImpl(true, ctx, win, rect);
+}
+
 // Private helpers
 
-/// Apply all ICCCM §4.1.2.3 hint passes in order to a raw rect.
+/// Apply ICCCM §4.1.2.3 hint passes to a raw rect.
+///
+/// Pass 1 (min-size clamping) is intentionally omitted for tiling: the layout
+/// engine owns the window's dimensions, and honouring a client's declared
+/// minimum would silently pin the effective rect to that minimum on every
+/// retile — making the dedup check always a cache hit and preventing
+/// mod_h/mod_l from resizing the window at all.  Floating drag already
+/// ignores minimums (the drag handler echoes back whatever size the user
+/// dragged to), so this makes tiling consistent with floating behaviour.
+///
+/// Pass 2 (resize-increment snap) is retained so terminal emulators still
+/// snap to whole character cells; the base is 0 rather than min_width since
+/// we are no longer enforcing the declared minimum.
 fn applyHintsToRect(rect: utils.Rect, h: SizeHints) utils.Rect {
-    // Pass 1: Clamp to declared minimum.
-    var w:  u16 = @max(rect.width,  h.min_width);
-    var ht: u16 = @max(rect.height, h.min_height);
+    var w:  u16 = rect.width;
+    var ht: u16 = rect.height;
 
-    // Pass 2: Snap to resize increments.
-    //   effective = base + floor((dim - base) / inc) * inc
-    w  = snapDimToIncrement(w,  h.min_width,  h.inc_width);
-    ht = snapDimToIncrement(ht, h.min_height, h.inc_height);
+    // Pass 2: Snap to resize increments (base = 0; min-size not enforced).
+    //   effective = floor(dim / inc) * inc
+    w  = snapDimToIncrement(w,  0, h.inc_width);
+    ht = snapDimToIncrement(ht, 0, h.inc_height);
 
     // Pass 3: Clamp to declared maximum (after increment snap so we never
     //   exceed the max even after rounding up to the next increment).
@@ -416,8 +420,7 @@ inline fn snapDimToIncrement(dim: u16, base: u16, inc: u16) u16 {
 
 /// Returns true when all hint fields are zero, indicating the client published no constraints.
 inline fn isEmptySizeHints(h: SizeHints) bool {
-    return h.min_width == 0 and h.min_height == 0 and
-           h.max_width == 0 and h.max_height == 0 and
+    return h.max_width == 0 and h.max_height == 0 and
            h.inc_width == 0 and h.inc_height == 0 and
            h.min_aspect == 0.0 and h.max_aspect == 0.0;
 }

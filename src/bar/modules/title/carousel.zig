@@ -1,10 +1,9 @@
-
 //! Carousel title extension.
 //! Extends title by adding a smooth-scroll carousel effect for titles that
 //! don't fully fit the segment.
 //!
 //! Design
-//! ──────
+//! 
 //! A wide XCB pixmap is pre-rendered once per title change:
 //!
 //!   [ bg * left_pad | text A | bg * gap | text B ]
@@ -13,7 +12,7 @@
 //! where left_pad = text_x − seg_x (the segment's left inset).
 //! cycle_w = text_w + gap.  At scroll offset O the hot-path blit is a
 //! single xcb_copy_area of seg_w pixels from pixmap position O into the
-//! offscreen pixmap, then a flushRect.  Two XCB calls total per tick —
+//! offscreen pixmap, then a blitAndFlush.  Two XCB calls total per tick —
 //! no fill, no clipping arithmetic, no second copy.
 //!
 //! Offset formula: O = (elapsed_ms × speed / 1000) mod cycle_w.
@@ -34,7 +33,7 @@ const utils   = @import("utils");
 const scale   = @import("scale");
 const drawing = @import("drawing");
 
-// ── Public constants ────────────────────────────────────────────────────────
+// Public constants
 
 /// Default scroll speed in pixels per second.
 pub const default_scroll_speed: f64 = 125.0;
@@ -43,7 +42,7 @@ pub const default_scroll_speed: f64 = 125.0;
 /// pre-rendered pixmap.
 pub const carousel_gap_px: u16 = 60;
 
-// ── Public geometry type ────────────────────────────────────────────────────
+// Public geometry type
 
 /// Segment geometry passed to carousel draw functions.
 ///
@@ -57,7 +56,7 @@ pub const SegmentGeometry = struct {
     avail_w: u16,
 };
 
-// ── Internal types ──────────────────────────────────────────────────────────
+// Internal types
 
 /// All state for one live carousel (single-window or segmented).
 const CarouselEntry = struct {
@@ -102,7 +101,7 @@ var scroll_config: ScrollConfig = .{};
 var render:        RenderState  = .{};
 var focus_signal:  FocusSignal  = .{};
 
-// ── Public API — feature toggles and scroll config ──────────────────────────
+// Public API — feature toggles and scroll config
 
 /// Enable or disable the carousel globally.
 /// Disabling immediately frees all carousel pixmaps.
@@ -143,7 +142,7 @@ pub fn wakeIntervalNs() u64 {
     return @intFromFloat(1_000_000_000.0 / hz);
 }
 
-// ── Public API — lifecycle ───────────────────────────────────────────────────
+// Public API — lifecycle
 
 /// True when either carousel pixmap is live.
 pub fn isCarouselActive() bool {
@@ -175,7 +174,7 @@ pub fn deinitSegmentedCarousel() void {
     focus_signal.seg_window.store(0, .release);
 }
 
-// ── Public API — focus notification (main thread only) ───────────────────────
+// Public API — focus notification (main thread only)
 
 /// Called by the focus system when the focused window changes.
 /// MUST be called from the main thread only.
@@ -188,7 +187,7 @@ pub fn notifyFocusChanged(new_window: ?u32) void {
     focus_signal.is_invalidated.store(true, .release);
 }
 
-// ── Public API — hot-path carousel tick ─────────────────────────────────────
+// Public API — hot-path carousel tick
 
 /// Fast per-tick single-window carousel blit.
 ///
@@ -198,7 +197,7 @@ pub fn notifyFocusChanged(new_window: ?u32) void {
 ///   • the accent colour changed (minimize/unminimize — caller triggers a full draw
 ///     which rebuilds the pixmap with the new bg baked in).
 ///
-/// Hot path: one xcb_copy_area (wide pixmap → offscreen) + flushRect.
+/// Hot path: one xcb_copy_area (wide pixmap → offscreen) + blitAndFlush.
 /// No fill, no Cairo, no Pango.
 pub fn drawCarouselTick(
     dc:    *drawing.DrawContext,
@@ -212,7 +211,7 @@ pub fn drawCarouselTick(
 
     const off = carouselOffset(e.start_ms, e.cycle_w, utils.monotonicMs());
     e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, seg_x, off, seg_w);
-    dc.flushRect(seg_x, seg_w);
+    dc.blitAndFlush(seg_x, seg_w);
     return true;
 }
 
@@ -231,11 +230,11 @@ pub fn drawSegCarouselTickAuto(dc: *drawing.DrawContext, accent: u32) bool {
     if (focus_signal.is_invalidated.load(.acquire)) return false;
     const off = carouselOffset(e.start_ms, e.cycle_w, utils.monotonicMs());
     e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, e.geom.seg_x, off, e.geom.seg_w);
-    dc.flushRect(e.geom.seg_x, e.geom.seg_w);
+    dc.blitAndFlush(e.geom.seg_x, e.geom.seg_w);
     return true;
 }
 
-// ── Public API — single-window title rendering ───────────────────────────────
+// Public API — single-window title rendering
 
 /// Render `text` into the segment described by `geom`.
 ///
@@ -315,7 +314,7 @@ pub fn drawScrollingTitle(
     e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, geom.seg_x, off, geom.seg_w);
 }
 
-// ── Public API — segmented carousel ─────────────────────────────────────────
+// Public API — segmented carousel
 
 /// Render the focused window's title for a split-view segment.
 ///
@@ -392,7 +391,7 @@ pub fn drawSegmentedCarousel(
     return true;
 }
 
-// ── Private — scroll math ────────────────────────────────────────────────────
+// Private — scroll math
 
 /// Smooth continuous scroll offset.
 ///

@@ -141,7 +141,7 @@ fn tileStackExtra(
     while (row < max_fit) : (row += 1) {
         const cols_in_row: u16 = (stack_n - row + max_fit - 1) / max_fit;
 
-        const gaps_in_row = m.gap / 2 + m.gap * cols_in_row;
+        const gaps_in_row = m.gap / 2 +| m.gap *| cols_in_row;
         const row_total_w = if (w > gaps_in_row) w - gaps_in_row else cols_in_row * constants.MIN_WINDOW_DIM;
         const col_w       = row_total_w / cols_in_row;
         const col_inner_w = calcInnerWidth(col_w, 0, 2 * m.border);
@@ -172,7 +172,7 @@ fn tileStackExtra(
 /// Total pixel height available for window content after gaps and borders.
 /// Falls back to count * MIN_WINDOW_DIM when margins exceed total_h.
 inline fn calcAvailableHeight(total_h: u16, count: u16, m: utils.Margins) u16 {
-    const overhead = m.gap * (count + 1) + m.border * 2 * count;
+    const overhead = m.gap *| (count + 1) +| m.border *| 2 *| count;
     return if (total_h > overhead) total_h - overhead else count * constants.MIN_WINDOW_DIM;
 }
 
@@ -186,7 +186,7 @@ inline fn windowHeight(i: u16, count: u16, available: u16) u16 {
 /// Y position of window `i`, derived from the same cumulative formula so that
 /// preceding windows' heights (which may vary by 1 px) are accounted for.
 inline fn windowY(i: u16, count: u16, available: u16, y_offset: u16, m: utils.Margins) u16 {
-    return y_offset +| m.gap +| (i * available / count) +| i *| (m.gap +| 2 * m.border);
+    return y_offset +| m.gap +| (i * available / count) +| i *| (m.gap +| 2 *| m.border);
 }
 
 /// Width available for window content after subtracting left and right margins.

@@ -110,18 +110,21 @@ pub fn setup(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t, root: u32) 
     XcbCursor.setupRoot(conn, screen);
 }
 
-/// Grabs Super+Button{1,2,3} on the root window.
+/// Grabs Super+Button{1,2,3} on the root window for all LOCK_MODIFIERS
+/// combinations (NumLock, CapsLock, ScrollLock, and their combinations).
 /// Button1 = move, Button3 = resize, Button2 = config-driven mouse binds.
 pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
     for (mouse_buttons) |button| {
-        _ = xcb.xcb_grab_button(
-            conn, 0, root,
-            xcb.XCB_EVENT_MASK_BUTTON_PRESS |
-                xcb.XCB_EVENT_MASK_BUTTON_RELEASE |
-                xcb.XCB_EVENT_MASK_POINTER_MOTION,
-            xcb.XCB_GRAB_MODE_ASYNC, xcb.XCB_GRAB_MODE_ASYNC,
-            root, xcb.XCB_NONE, button, constants.MOD_SUPER,
-        );
+        for (constants.LOCK_MODIFIERS) |lock| {
+            _ = xcb.xcb_grab_button(
+                conn, 0, root,
+                xcb.XCB_EVENT_MASK_BUTTON_PRESS |
+                    xcb.XCB_EVENT_MASK_BUTTON_RELEASE |
+                    xcb.XCB_EVENT_MASK_POINTER_MOTION,
+                xcb.XCB_GRAB_MODE_ASYNC, xcb.XCB_GRAB_MODE_ASYNC,
+                root, xcb.XCB_NONE, button, @intCast(constants.MOD_SUPER | lock),
+            );
+        }
     }
     _ = xcb.xcb_flush(conn);
 }
@@ -154,7 +157,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     }
 }
 
-/// Dispatches a priority order button-press event
+/// Dispatches a priority order button-press event.
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     focus.setLastEventTime(event.time);
 
@@ -172,14 +175,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     // Config-driven mouse binds (Super + Key)
     if (super_held) {
         const mods = utils.normalizeModifiers(event.state);
-        for (core.config.mouse_bindings.items) |*mb| {
-            if (mb.modifiers == mods and mb.button == event.detail) {
-                executeMouseAction(&mb.action, managed_window) 
-                    catch |err| debug.err("mouse bind error: {}", .{err});
-                releaseGrab(event.time);
-                return;
-            }
-        }
+        if (tryConfigMouseBind(mods, event.detail, managed_window, event.time)) return;
     }
 
     // Super + Left/Right: Move or Resize
@@ -257,96 +253,140 @@ fn closeWindow(win: u32) void {
 
 // Action dispatch 
 
+/// Top-level action dispatcher.  Routes each action tag to the appropriate
+/// domain helper.  Only the two error-producing cases (exec and sequence) are
+/// handled here directly; all others delegate to void sub-dispatchers.
 fn executeAction(action: *const types.Action) !void {
     switch (action.*) {
-        // Core 
+        // Core
         .close_window  => if (focus.getFocused()) |win| closeWindow(win),
         .reload_config => utils.reload(),
         .dump_state    => dumpState(),
         .exec          => |cmd| try executeShellCommand(cmd),
         .sequence      => |acts| for (acts) |*a| try executeAction(a),
 
-        // Fullscreen 
+        // Fullscreen
         .toggle_fullscreen => if (comptime build.has_fullscreen) fullscreen.toggle(),
 
-        // Tiling 
-        .toggle_floating_window => if (comptime build.has_tiling) {
-            if (focus.getFocused()) |win| tiling.toggleWindowFloat(win);
-            bar.scheduleFullRedraw();
-        },
-        .toggle_layout         => if (comptime build.has_tiling) { tiling.toggleLayout();        bar.scheduleRedraw(); },
-        .toggle_layout_reverse => if (comptime build.has_tiling) { tiling.toggleLayoutReverse(); bar.scheduleRedraw(); },
-        .cycle_layout_variants => if (comptime build.has_tiling) { tiling.stepLayoutVariant(); bar.scheduleRedraw(); },
-        .increase_master       => if (comptime build.has_tiling) tiling.increaseMasterWidth(),
-        .decrease_master       => if (comptime build.has_tiling) tiling.decreaseMasterWidth(),
-        .increase_master_count => if (comptime build.has_tiling) tiling.increaseMasterCount(),
-        .decrease_master_count => if (comptime build.has_tiling) tiling.decreaseMasterCount(),
+        // Tiling — delegated to executeTilingAction
+        .toggle_floating_window,
+        .toggle_layout, .toggle_layout_reverse, .cycle_layout_variants,
+        .increase_master, .decrease_master, .increase_master_count, .decrease_master_count,
+        .swap_master, .swap_master_focus_swap,
+        .move_window_next, .move_window_prev,
+            => executeTilingAction(action),
 
-        .swap_master, .swap_master_focus_swap => if (comptime build.has_tiling) {
-            _ = xcb.xcb_grab_server(core.conn);
-            if (action.* == .swap_master) {
-                // Capture the focused window ID *before* the swap so we can
-                // pass it as defer_configure.  After swapWithMaster() the
-                // focused window is the new master (the growing window); by
-                // deferring its configure_window call to last inside every
-                // column/stack, the shrinking window (old master) fills its new
-                // stack slot before the growing window vacates its old one —
-                // eliminating the one-frame wallpaper gap (Fix 3).
-                const new_master = focus.getFocused();
-                tiling.swapWithMaster();
-                tiling.retileCurrentWorkspaceDeferred(new_master);
-            } else {
-                // For follow-focus: capture focused window, reorder, retile
-                // with deferred configure, then transfer focus — all inside
-                // the grab so the focus border change is part of the same flush.
-                const new_master = focus.getFocused();
-                const displaced = tiling.swapWithMasterFollowFocus();
-                tiling.retileCurrentWorkspaceDeferred(new_master);
-                if (displaced) |win| focus.setFocus(win, .tiling_operation);
-            }
-            // Use the async pointer-sync variant: it queues the xcb_query_pointer
-            // cookie without blocking, so no premature XCB buffer flush occurs
-            // inside the grab.  drainPointerSync() in the event loop will
-            // consume the reply and route focus on the next iteration.
-            focus.beginPointerSync();
-            window.updateWorkspaceBorders();
-            window.markBordersFlushed();
-            // redrawInsideGrab now renders to the off-screen pixmap via the bar
-            // thread (no xcb_flush) and queues xcb_copy_area without flushing.
-            // The blit is sent atomically with configure_window + xcb_ungrab_server
-            // by ungrabAndFlush() below — one compositor frame, no wallpaper flash.
-            bar.redrawInsideGrab();
-            utils.ungrabAndFlush(core.conn);
-        },
-
-        // Bar 
+        // Bar
         .toggle_bar_visibility => if (comptime build.has_bar) bar.setBarState(.toggle),
         .toggle_bar_position   => if (comptime build.has_bar) bar.toggleBarSegmentAnchor(),
 
-        // Minimize 
+        // Minimize
         .minimize_window => if (comptime build.has_minimize) minimize.minimizeWindow(),
         .unminimize_lifo => if (comptime build.has_minimize) minimize.unminimize(.lifo),
         .unminimize_fifo => if (comptime build.has_minimize) minimize.unminimize(.fifo),
         .unminimize_all  => if (comptime build.has_minimize) minimize.unminimizeAll(),
 
-        // Workspaces 
-        .switch_workspace       => |ws| switchToWs(ws),
-        .move_to_workspace      => |ws| if (focus.getFocused()) |win| moveWindowToWs(win, ws) catch |e| debug.warnOnErr(e, "move_to_workspace"),
-        .move_window            => |ws| if (focus.getFocused()) |win| wsMoveWindowExclusive(win, ws),
-        .toggle_tag             => |ws| if (focus.getFocused()) |win| wsTagToggle(win, ws, true),
-        .all_workspaces         => wsSwitchToAll(),
-        .move_to_all_workspaces => if (focus.getFocused()) |win| wsMoveWindowToAll(win),
-        .toggle_tag_all         => if (focus.getFocused()) |win| wsTagToggleAll(win),
+        // Workspaces — delegated to executeWorkspaceAction
+        .switch_workspace, .move_to_workspace, .move_window, .toggle_tag,
+        .all_workspaces, .move_to_all_workspaces, .toggle_tag_all,
+            => executeWorkspaceAction(action),
 
-        // Prompt 
+        // Prompt
         .toggle_prompt => prompt.toggle(),
 
         // Window focus cycling (dwm-style Mod+k / Mod+j)
         .focus_next_window => focus.focusNext(),
         .focus_prev_window => focus.focusPrev(),
-        // Window move in cycle (dwm-style Mod+Shift+k / Mod+Shift+j)
-        .move_window_next  => focus.moveWindowNext(),
-        .move_window_prev  => focus.moveWindowPrev(),
+    }
+}
+
+/// Dispatches tiling-related actions, each wrapped in a server grab so the
+/// compositor cannot render a partial retile frame.
+fn executeTilingAction(action: *const types.Action) void {
+    if (comptime !build.has_tiling) return;
+    switch (action.*) {
+        // toggle_floating_window: wrap in a server grab so that the retile,
+        // border sweep, and bar blit all land in one compositor frame.
+        // Previously a naked xcb_flush fired after retileCurrentWorkspace but
+        // before the border sweep, producing a flash where border colors were
+        // wrong for the newly-tiled or newly-floating window.
+        .toggle_floating_window => if (focus.getFocused()) |win|
+            withTilingGrabAndBordersWin(win, tiling.toggleWindowFloat),
+
+        // Layout and master operations: wrap each retile in a server grab so
+        // the compositor cannot render a partial retile frame.  Consistent with
+        // swap_master which already uses this pattern for the same reason.
+        .toggle_layout         => withTilingGrab(tiling.toggleLayout),
+        .toggle_layout_reverse => withTilingGrab(tiling.toggleLayoutReverse),
+        .cycle_layout_variants => withTilingGrab(tiling.stepLayoutVariant),
+        .increase_master       => withTilingGrab(tiling.increaseMasterWidth),
+        .decrease_master       => withTilingGrab(tiling.decreaseMasterWidth),
+        .increase_master_count => withTilingGrab(tiling.increaseMasterCount),
+        .decrease_master_count => withTilingGrab(tiling.decreaseMasterCount),
+
+        .swap_master, .swap_master_focus_swap => executeSwapMaster(action),
+
+        // Window move in cycle (dwm-style Mod+Shift+k / Mod+Shift+j).
+        // Wrapped in a server grab matching swap_master: both swap two windows
+        // and retile all others, so without a grab the compositor can render a
+        // partial retile frame between individual configure_window calls.
+        .move_window_next => withTilingGrabAndBorders(focus.moveWindowNext),
+        .move_window_prev => withTilingGrabAndBorders(focus.moveWindowPrev),
+
+        else => {},
+    }
+}
+
+/// Executes the swap_master / swap_master_focus_swap action inside a server grab.
+fn executeSwapMaster(action: *const types.Action) void {
+    _ = xcb.xcb_grab_server(core.conn);
+    if (action.* == .swap_master) {
+        // Capture the focused window ID *before* the swap so we can
+        // pass it as defer_configure.  After swapWithMaster() the
+        // focused window is the new master (the growing window); by
+        // deferring its configure_window call to last inside every
+        // column/stack, the shrinking window (old master) fills its new
+        // stack slot before the growing window vacates its old one —
+        // eliminating the one-frame wallpaper gap (Fix 3).
+        const new_master = focus.getFocused();
+        tiling.swapWithMaster();
+        tiling.retileCurrentWorkspaceDeferred(new_master);
+    } else {
+        // For follow-focus: capture focused window, reorder, retile
+        // with deferred configure, then transfer focus — all inside
+        // the grab so the focus border change is part of the same flush.
+        const new_master = focus.getFocused();
+        const displaced = tiling.swapWithMasterFollowFocus();
+        tiling.retileCurrentWorkspaceDeferred(new_master);
+        if (displaced) |win| focus.setFocus(win, .tiling_operation);
+    }
+    // Use the async pointer-sync variant: it queues the xcb_query_pointer
+    // cookie without blocking, so no premature XCB buffer flush occurs
+    // inside the grab.  drainPointerSync() in the event loop will
+    // consume the reply and route focus on the next iteration.
+    focus.beginPointerSync();
+    window.updateWorkspaceBorders();
+    window.markBordersFlushed();
+    // redrawInsideGrab now renders to the off-screen pixmap via the bar
+    // thread (no xcb_flush) and queues xcb_copy_area without flushing.
+    // The blit is sent atomically with configure_window + xcb_ungrab_server
+    // by ungrabAndFlush() below — one compositor frame, no wallpaper flash.
+    bar.redrawInsideGrab();
+    utils.ungrabAndFlush(core.conn);
+}
+
+/// Dispatches workspace-related actions.
+fn executeWorkspaceAction(action: *const types.Action) void {
+    switch (action.*) {
+        .switch_workspace       => |ws| switchToWs(ws),
+        .move_to_workspace      => |ws| if (focus.getFocused()) |win|
+            moveWindowToWs(win, ws) catch |e| debug.warnOnErr(e, "move_to_workspace"),
+        .move_window            => |ws| if (focus.getFocused()) |win| wsMoveWindowExclusive(win, ws),
+        .toggle_tag             => |ws| if (focus.getFocused()) |win| wsTagToggle(win, ws, true),
+        .all_workspaces         => wsSwitchToAll(),
+        .move_to_all_workspaces => if (focus.getFocused()) |win| wsMoveWindowToAll(win),
+        .toggle_tag_all         => if (focus.getFocused()) |win| wsTagToggleAll(win),
+        else => {},
     }
 }
 
@@ -355,8 +395,11 @@ fn executeAction(action: *const types.Action) !void {
 /// toggle_floating_window affects whichever window was actually clicked.
 fn executeMouseAction(action: *const types.Action, clicked_win: u32) !void {
     switch (action.*) {
-        .toggle_floating_window => if (comptime build.has_tiling) tiling.toggleWindowFloat(clicked_win),
-        else             => try executeAction(action),
+        // Same grab pattern as the keyboard path in executeAction: retile,
+        // border sweep, and bar blit must be atomic from the compositor's view.
+        .toggle_floating_window => if (comptime build.has_tiling)
+            withTilingGrabAndBordersWin(clicked_win, tiling.toggleWindowFloat),
+        else => try executeAction(action),
     }
 }
 
@@ -401,6 +444,19 @@ fn forkIntermediate(exec_pipe_write: c_int, pid_pipe_write: c_int, cmd_z: [*:0]c
     std.process.exit(0);
 }
 
+/// Creates an O_CLOEXEC pipe pair atomically via pipe2.
+/// pipe2(O_CLOEXEC) sets close-on-exec on both ends in a single syscall,
+/// closing the TOCTOU window that existed between the old pipe() and the
+/// subsequent fcntl(F_SETFD, FD_CLOEXEC) call.
+fn makePipe() ![2]c_int {
+    const flags = std.os.linux.O{ .CLOEXEC = true };
+    var fds: [2]c_int = undefined;
+    return switch (std.posix.errno(std.os.linux.pipe2(&fds, flags))) {
+        .SUCCESS => fds,
+        else     => error.PipeFailed,
+    };
+}
+
 /// Spawns `cmd` as a detached grandchild (double-fork) so the WM never accumulates zombie processes.
 fn executeShellCommand(cmd: []const u8) !void {
     // Snapshot the target workspace before any blocking syscalls.  In a
@@ -414,32 +470,17 @@ fn executeShellCommand(cmd: []const u8) !void {
     const cmd_z = try core.alloc.dupeZ(u8, cmd);
     defer core.alloc.free(cmd_z);
 
-    var exec_fds: [2]c_int = undefined;
-    var pid_fds: [2]c_int = undefined;
-
-    // pipe2(O_CLOEXEC) sets close-on-exec atomically on both ends in a single
-    // syscall, closing the TOCTOU window that existed between the old pipe()
-    // and the subsequent fcntl(F_SETFD, FD_CLOEXEC) call.  Another thread
-    // could have fork()ed between those two calls, inheriting the write end
-    // of the exec pipe in the child before the flag was set.
-    const pipe2_flags = std.os.linux.O{ .CLOEXEC = true };
-    switch (std.posix.errno(std.os.linux.pipe2(&exec_fds, pipe2_flags))) {
-        .SUCCESS => {},
-        else => {
-            debug.err("pipe2() failed (exec_pipe): {s}", .{cmd});
-            return error.PipeFailed;
-        },
-    }
-    switch (std.posix.errno(std.os.linux.pipe2(&pid_fds, pipe2_flags))) {
-        .SUCCESS => {},
-        else => {
-            closePipe(exec_fds);
-            debug.err("pipe2() failed (pid_pipe): {s}", .{cmd});
-            return error.PipeFailed;
-        },
-    }
-    // exec_pipe write end is CLOEXEC via pipe2 — no separate fcntl needed.
+    // exec_pipe write end is CLOEXEC via makePipe — no separate fcntl needed.
     // exec success silently closes it (EOF); exec failure writes a sentinel byte.
+    const exec_fds = makePipe() catch {
+        debug.err("pipe2() failed (exec_pipe): {s}", .{cmd});
+        return error.PipeFailed;
+    };
+    const pid_fds = makePipe() catch {
+        closePipe(exec_fds);
+        debug.err("pipe2() failed (pid_pipe): {s}", .{cmd});
+        return error.PipeFailed;
+    };
 
     const pid = c.fork();
     if (pid < 0) {
@@ -487,14 +528,8 @@ fn executeShellCommand(cmd: []const u8) !void {
 
 // Diagnostics 
 
-/// Logs a full WM state snapshot at info level. Used for diagnostics only.
-fn dumpState() void {
-    debug.info("========== STATE DUMP ==========", .{});
-    debug.info("Focused:        {?x}", .{focus.getFocused()});
-    debug.info("Total windows:  {}",   .{tracking.windowCount()});
-    debug.info("Suppress focus: {s}",  .{@tagName(focus.getSuppressReason())});
-    debug.info("Drag active:    {}",   .{drag.isDragging()});
-
+/// Logs fullscreen state for each workspace, or "none" when compiled out.
+fn dumpFullscreenState() void {
     if (comptime build.has_fullscreen) {
         fullscreen.forEachFullscreen(struct {
             fn cb(ws: u8, info: fullscreen.FullscreenInfo) void {
@@ -505,30 +540,92 @@ fn dumpState() void {
     } else {
         debug.info("Fullscreen: none", .{});
     }
+}
 
-    if (comptime build.has_workspaces) {
-        if (getWsState()) |ws_state| {
-            debug.info("Current workspace: {}", .{ws_state.current + 1});
-            for (ws_state.workspaces, 0..) |_, i| {
-                debug.info("  WS{}: {} windows", .{ i + 1, tracking.countWindowsOnWorkspace(@intCast(i)) });
-            }
+/// Logs current workspace and per-workspace window counts.
+/// No-op when workspaces are compiled out.
+fn dumpWorkspaceState() void {
+    if (comptime !build.has_workspaces) return;
+    if (getWsState()) |ws_state| {
+        debug.info("Current workspace: {}", .{ws_state.current + 1});
+        for (ws_state.workspaces, 0..) |_, i| {
+            debug.info("  WS{}: {} windows", .{ i + 1, tracking.countWindowsOnWorkspace(@intCast(i)) });
         }
     }
+}
 
-    if (comptime build.has_tiling) {
-        if (tiling.getStateOpt()) |t| {
-            debug.info("Tiling enabled: {}",     .{t.is_enabled});
-            debug.info("Tiling layout:  {s}",    .{@tagName(t.layout)});
-            debug.info("Tiled windows:  {}",     .{t.windows.len});
-            debug.info("Master count:   {}",     .{t.master_count});
-            debug.info("Master width:   {d:.2}", .{t.master_width});
-        }
+/// Logs tiling layout, window count, and master geometry.
+/// No-op when tiling is compiled out.
+fn dumpTilingState() void {
+    if (comptime !build.has_tiling) return;
+    if (tiling.getStateOpt()) |t| {
+        debug.info("Tiling enabled: {}",     .{t.is_enabled});
+        debug.info("Tiling layout:  {s}",    .{@tagName(t.layout)});
+        debug.info("Tiled windows:  {}",     .{t.windows.len});
+        debug.info("Master count:   {}",     .{t.master_count});
+        debug.info("Master width:   {d:.2}", .{t.master_width});
     }
+}
 
+/// Logs a full WM state snapshot at info level. Used for diagnostics only.
+fn dumpState() void {
+    debug.info("========== STATE DUMP ==========", .{});
+    debug.info("Focused:        {?x}", .{focus.getFocused()});
+    debug.info("Total windows:  {}",   .{tracking.windowCount()});
+    debug.info("Suppress focus: {s}",  .{@tagName(focus.getSuppressReason())});
+    debug.info("Drag active:    {}",   .{drag.isDragging()});
+    dumpFullscreenState();
+    dumpWorkspaceState();
+    dumpTilingState();
     debug.info("================================", .{});
 }
 
 // Helpers 
+
+/// Searches config mouse bindings for a modifier+button match and executes it.
+/// Returns true and releases the grab if a binding is found, false otherwise.
+fn tryConfigMouseBind(mods: u16, button: u8, win: u32, time: u32) bool {
+    for (core.config.mouse_bindings.items) |*mb| {
+        if (mb.modifiers == mods and mb.button == button) {
+            executeMouseAction(&mb.action, win)
+                catch |err| debug.err("mouse bind error: {}", .{err});
+            releaseGrab(time);
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Runs `op()` inside an xcb server grab, redraws the bar, and flushes atomically.
+/// Use for layout/master operations where no border sweep is needed.
+inline fn withTilingGrab(op: anytype) void {
+    _ = xcb.xcb_grab_server(core.conn);
+    op();
+    bar.redrawInsideGrab();
+    utils.ungrabAndFlush(core.conn);
+}
+
+/// Like withTilingGrab but also sweeps workspace borders after op().
+/// Use for operations that reorder or restack windows (move_window_next/prev).
+inline fn withTilingGrabAndBorders(op: anytype) void {
+    _ = xcb.xcb_grab_server(core.conn);
+    op();
+    window.updateWorkspaceBorders();
+    window.markBordersFlushed();
+    bar.redrawInsideGrab();
+    utils.ungrabAndFlush(core.conn);
+}
+
+/// Like withTilingGrabAndBorders but passes `win` as the sole argument to `op`.
+/// Use for per-window operations such as toggleWindowFloat.
+inline fn withTilingGrabAndBordersWin(win: u32, op: anytype) void {
+    _ = xcb.xcb_grab_server(core.conn);
+    op(win);
+    window.updateWorkspaceBorders();
+    window.markBordersFlushed();
+    bar.redrawInsideGrab();
+    utils.ungrabAndFlush(core.conn);
+}
 
 /// Replays a frozen pointer event without releasing the keyboard grab.
 /// Always pass event.time — never XCB_CURRENT_TIME.

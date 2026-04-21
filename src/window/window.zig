@@ -1,3 +1,4 @@
+
 //! Window lifecycle
 //! Handles window mapping/unmapping/destroy, configure, enter/button events, and per-window property caching.
 
@@ -52,7 +53,9 @@ const scale = if (build.has_scale) @import("scale") else utils.scale_fallback;
 // XSizeHints flags (ICCCM §4.1.2.3)
 const XSizeHintsFlags = struct {
     const p_min_size:   u32 = 0x10;
+    const p_max_size:   u32 = 0x20;
     const p_resize_inc: u32 = 0x40;
+    const p_aspect:     u32 = 0x80;
     const p_base_size:  u32 = 0x100;
 };
 
@@ -160,7 +163,7 @@ pub fn getWindowGeom(win: u32) ?utils.Rect {
     if (build.has_tiling) {
         return tiling.getWindowGeom(win);
     } else {
-        const wd = g_geom_cache.get(win) orelse return null;
+        const wd = g_geom_cache.getPtr(win) orelse return null;
         if (!wd.hasValidRect()) return null;
         return wd.rect;
     }
@@ -951,15 +954,13 @@ pub fn registerSpawn(workspace: u8, pid: u32) void {
     };
 }
 
-/// Drain a pre-fired xcb_query_pointer cookie and record the cursor position
-/// for later spawn-crossing suppression checks.
-fn snapshotSpawnCursor(ptr_cookie: xcb.xcb_query_pointer_cookie_t, suppress_reason: core.FocusSuppressReason) void {
-    if (suppress_reason != .window_spawn) {
-        xcb.xcb_discard_reply(core.conn, ptr_cookie.sequence);
-        return;
-    }
-    const ptr = xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null) orelse return;
-    defer std.c.free(ptr);
+/// Record the cursor position from a pre-drained pointer reply for later
+/// spawn-crossing suppression checks.  The caller owns the reply memory;
+/// this function only reads from it.  Replaces the old cookie-draining
+/// variant to ensure no implicit XCB flush occurs inside a server grab.
+fn snapshotSpawnCursorFromReply(ptr_reply: ?*xcb.xcb_query_pointer_reply_t, suppress_reason: core.FocusSuppressReason) void {
+    if (suppress_reason != .window_spawn) return;
+    const ptr = ptr_reply orelse return;
     spawn_cursor.x = ptr.*.root_x;
     spawn_cursor.y = ptr.*.root_y;
 }
@@ -1013,7 +1014,21 @@ fn firePropertyCookies(win: u32) PropertyCookies {
 /// configuration, map, focus, border sweep, and bar redraw all land in a
 /// single atomic batch.
 fn mapWindowToScreen(win: u32) void {
-    const ptr_cookie = xcb.xcb_query_pointer(core.conn, core.root);
+    // Fire the pointer query and drain the reply *before* grabbing the server.
+    // The old code fired the cookie here but drained the reply inside
+    // snapshotSpawnCursor (which ran inside the grab).  xcb_query_pointer_reply
+    // flushes the XCB output buffer so that the request reaches the server;
+    // doing that inside the grab caused all queued configure_window /
+    // xcb_map_window / set_input_focus requests to be flushed to the compositor
+    // before xcb_ungrab_server — the same class of implicit-flush-inside-grab
+    // bug fixed in the workspace-switch path.  Pre-draining here keeps the
+    // grab atomic.  The pointer position is at most microseconds staler.
+    const suppress_reason = focus.getSuppressReason();
+    const ptr_reply: ?*xcb.xcb_query_pointer_reply_t = blk: {
+        const cookie = xcb.xcb_query_pointer(core.conn, core.root);
+        break :blk xcb.xcb_query_pointer_reply(core.conn, cookie, null);
+    };
+    defer if (ptr_reply) |r| std.c.free(r);
 
     _ = xcb.xcb_grab_server(core.conn);
 
@@ -1032,7 +1047,8 @@ fn mapWindowToScreen(win: u32) void {
     _ = xcb.xcb_map_window(core.conn, win);
 
     focus.setFocus(win, .window_spawn);
-    snapshotSpawnCursor(ptr_cookie, focus.getSuppressReason());
+    // Pass the pre-drained reply; no implicit flush can occur inside the grab.
+    snapshotSpawnCursorFromReply(ptr_reply, suppress_reason);
 
     // Use the post-retile border sweep: tiled-window borders were already
     // updated by configureWithHints during retileCurrentWorkspace above (via
@@ -1090,8 +1106,11 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
 
     moveWindowToWs(win, target_ws) catch |err| {
         debug.logError(err, win);
+        // xcb_discard_reply is a client-side-only operation — it marks the
+        // sequence numbers as discarded in the XCB reply queue but generates
+        // no XCB output.  Any requests already queued before this early return
+        // will be flushed by the event-loop's end-of-batch xcb_flush.
         discardPropertyCookies(cookies);
-        _ = xcb.xcb_flush(core.conn);
         return;
     };
 
@@ -1123,8 +1142,18 @@ fn unmanageWindow(win: u32) void {
     // as the old toplevel's child on the next hover event.
     evictChildCache(win);
 
-    const ptr_cookie: ?xcb.xcb_query_pointer_cookie_t =
-        if (was_focused) xcb.xcb_query_pointer(core.conn, core.root) else null;
+    // Fire the pointer query and drain the reply *before* grabbing the
+    // server.  The old code fired the cookie here but drained the reply
+    // inside focusWindowUnderPointer (via xcb_query_pointer_reply), which
+    // caused an implicit XCB output-buffer flush inside the grab — releasing
+    // all queued configure_window / set_input_focus requests to the
+    // compositor before xcb_ungrab_server.  Pre-draining here keeps the
+    // grab atomic.  The pointer position is at most microseconds staler.
+    const ptr_reply: ?*xcb.xcb_query_pointer_reply_t = if (was_focused) blk: {
+        const cookie = xcb.xcb_query_pointer(core.conn, core.root);
+        break :blk xcb.xcb_query_pointer_reply(core.conn, cookie, null);
+    } else null;
+    defer if (ptr_reply) |r| std.c.free(r);
 
     _ = xcb.xcb_grab_server(core.conn);
 
@@ -1142,7 +1171,8 @@ fn unmanageWindow(win: u32) void {
     if (was_focused) {
         if (tilingActive()) tiling.retileIfDirty();
         focus.clearFocus();
-        focusWindowUnderPointer(ptr_cookie.?);
+        // Pass the pre-drained reply; no implicit flush inside the grab.
+        focusWindowUnderPointer(ptr_reply);
     } else if (!was_fullscreen and tilingActive()) {
         if (window_workspace) |ws|
             if (current_ws == ws) tiling.retileIfDirty()
@@ -1170,19 +1200,30 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t) void {
 }
 
 /// Post-unmanage focus recovery.
-fn focusWindowUnderPointer(ptr_cookie: xcb.xcb_query_pointer_cookie_t) void {
+///
+/// Uses .pointer_sync so the focus transition may raise a floating window
+/// (the stacking order may have changed after the closed window was removed)
+/// and arms the confirm/retry machinery for non-compliant clients.
+/// This mirrors drainPointerSync's deferred-query semantics — both are
+/// resolving a pointer-position query that was fired before the layout changed.
+/// Accepts a pre-drained pointer reply (null if the query failed or window
+/// was not focused).  The caller owns the memory and must free it; this
+/// function only reads.  Accepting the reply instead of the cookie prevents
+/// an implicit XCB output-buffer flush (xcb_query_pointer_reply) from
+/// occurring inside the server grab in unmanageWindow.
+fn focusWindowUnderPointer(ptr_reply: ?*xcb.xcb_query_pointer_reply_t) void {
     const fallback: ?*const fn () void = if (build.has_minimize)
         minimize.focusMasterOrFirst
     else
         null;
-    const reply = xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null) orelse {
+    // reply memory is owned by the caller; no std.c.free here.
+    const reply = ptr_reply orelse {
         focus.focusBestAvailable(.tiling_operation, tracking.isOnCurrentWorkspaceAndVisible, fallback);
         return;
     };
-    defer std.c.free(reply);
     const child = reply.*.child;
     if (tracking.isOnCurrentWorkspaceAndVisible(child)) {
-        focus.setFocus(child, .mouse_enter);
+        focus.setFocus(child, .pointer_sync);
         return;
     }
     focus.focusBestAvailable(.tiling_operation, tracking.isOnCurrentWorkspaceAndVisible, fallback);
@@ -1348,19 +1389,24 @@ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
     return false;
 }
 
+/// Attempt to focus `win` via the hover (EnterNotify) path.
+///
+/// Guards against workspace membership and minimize state before calling
+/// focus.setFocus(.mouse_enter).  The .mouse_enter reason is the direct
+/// EnterNotify path: lightweight, no raise, no confirm.
 inline fn maybeFocusWindow(win: u32) void {
     if (!isOnCurrentWorkspace(win)) {
-        debug.info("[MAYBE_FOCUS] 0x{x} -> not on current workspace", .{win});
+        debug.info("[MAYBE_FOCUS] 0x{x} -> skipped: not on current workspace", .{win});
         return;
     }
     if (build.has_minimize) {
         if (minimize.isMinimized(win)) {
-            debug.info("[MAYBE_FOCUS] 0x{x} -> minimized", .{win});
+            debug.info("[MAYBE_FOCUS] 0x{x} -> skipped: minimized", .{win});
             return;
         }
     }
-    debug.info("[MAYBE_FOCUS] 0x{x} -> calling dwmFocus", .{win});
-    focus.dwmFocus(win);
+    debug.info("[MAYBE_FOCUS] 0x{x} -> setFocus(.mouse_enter)", .{win});
+    focus.setFocus(win, .mouse_enter);
 }
 
 pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t) void {
@@ -1435,42 +1481,56 @@ fn parseSizeHintsIntoCache(
     const field_count = reply.*.value_len;
     const flags       = fields[0];
 
-    if (flags & (XSizeHintsFlags.p_min_size | XSizeHintsFlags.p_base_size | XSizeHintsFlags.p_resize_inc) == 0) return;
+    // PMinSize and PBaseSize (min_width/min_height) are intentionally not
+    // cached: applyHintsToRect skips min-size clamping for tiling because the
+    // layout engine owns all dimensions.  All other ICCCM constraints are
+    // forwarded so windows with max-size, resize-increment, or aspect-ratio
+    // hints behave correctly.
+    const want_max = flags & XSizeHintsFlags.p_max_size   != 0;
+    const want_inc = flags & XSizeHintsFlags.p_resize_inc != 0;
+    const want_asp = flags & XSizeHintsFlags.p_aspect     != 0;
 
-    // Single early-out: all three hint types require at most 18 fields (p_base_size
-    // reads indices 15–16).  WM_NORMAL_HINTS replies almost always supply the full
-    // struct; in the rare short-reply case we accept missing the lower-field hints
-    // rather than paying three separate bounds checks on every MapRequest.
-    // This reduces cyclomatic complexity from 5 to 3.
-    if (field_count < 18) return;
+    if (!want_max and !want_inc and !want_asp) return;
 
-    var min_width:  u16 = 0;
-    var min_height: u16 = 0;
-
-    if (flags & XSizeHintsFlags.p_min_size != 0) {
-        min_width  = clampToU16(fields[5]);
-        min_height = clampToU16(fields[6]);
-    }
-
-    // p_base_size overrides p_min_size when both are set (ICCCM §4.1.2.3).
-    if (flags & XSizeHintsFlags.p_base_size != 0) {
-        min_width  = clampToU16(fields[15]);
-        min_height = clampToU16(fields[16]);
-    }
-
+    var max_width:  u16 = 0;
+    var max_height: u16 = 0;
     var inc_width:  u16 = 0;
     var inc_height: u16 = 0;
-    if (flags & XSizeHintsFlags.p_resize_inc != 0) {
+    var min_aspect: f32 = 0.0;
+    var max_aspect: f32 = 0.0;
+
+    // PMaxSize: fields[7] = max_width, fields[8] = max_height.
+    if (want_max and field_count >= 9) {
+        max_width  = clampToU16(fields[7]);
+        max_height = clampToU16(fields[8]);
+    }
+
+    // PResizeInc: fields[9] = width_inc, fields[10] = height_inc.
+    if (want_inc and field_count >= 11) {
         inc_width  = clampToU16(fields[9]);
         inc_height = clampToU16(fields[10]);
     }
 
+    // PAspect: fields[11..14] = min_aspect.x/y, max_aspect.x/y.
+    // dwm convention: min_aspect = y/x (lower bound on h/w),
+    //                 max_aspect = x/y (upper bound on w/h).
+    if (want_asp and field_count >= 15) {
+        const min_x = fields[11];
+        const min_y = fields[12];
+        const max_x = fields[13];
+        const max_y = fields[14];
+        if (min_x > 0) min_aspect = @as(f32, @floatFromInt(min_y)) / @as(f32, @floatFromInt(min_x));
+        if (max_y > 0) max_aspect = @as(f32, @floatFromInt(max_x)) / @as(f32, @floatFromInt(max_y));
+    }
+
     if (build.has_tiling)
         tiling.cacheSizeHints(win, .{
-            .min_width  = min_width,
-            .min_height = min_height,
+            .max_width  = max_width,
+            .max_height = max_height,
             .inc_width  = inc_width,
             .inc_height = inc_height,
+            .min_aspect = min_aspect,
+            .max_aspect = max_aspect,
         });
 }
 
@@ -1638,3 +1698,6 @@ pub fn reloadBorders() void {
     if (!build.has_workspaces) return;
     for (tracking.allWindows()) |entry| applyBorder(entry.win);
 }
+
+
+
