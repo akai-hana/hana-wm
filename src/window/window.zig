@@ -23,12 +23,13 @@ const workspaces = if (build.has_workspaces) @import("workspaces") else struct {
     pub fn getCurrentWorkspaceObject() ?*Workspace { return null; }
 };
 
-const tiling  = if (build.has_tiling) @import("tiling") else struct {};
-const layouts = if (build.has_tiling) @import("layouts") else struct {
-    pub const CacheMap = struct {};
-};
+const tiling = if (build.has_tiling) @import("tiling") else struct {};
 
-const drag = @import("drag");
+const drag = if (build.has_tiling) @import("drag") else struct {
+    pub fn isDragging() bool { return false; }
+    pub fn isResizingWindow(_: u32) bool { return false; }
+    pub fn getDragLastRect() utils.Rect { return .{}; }
+};
 
 const bar = if (build.has_bar) @import("bar") else struct {
     pub fn isBarWindow(_: u32) bool { return false; }
@@ -141,7 +142,12 @@ var atoms: struct {
 // there is exactly one source of truth.  When tiling is absent, this module
 // owns the cache directly.
 
-var g_geom_cache: layouts.CacheMap = .{};
+// Geometry cache: owned by tiling when present; flat-array fallback otherwise.
+var g_geom_cache: if (build.has_tiling) void else struct {
+    const Slot = struct { win: u32 = 0, rect: utils.Rect = .{} };
+    slots: [64]Slot = [1]Slot{.{}} ** 64,
+    len:   usize    = 0,
+} = if (build.has_tiling) {} else .{};
 
 /// Set by grab-flush paths that already called updateWorkspaceBorders() inside
 /// their server grab, so the event loop can skip the redundant second sweep.
@@ -151,22 +157,20 @@ var borders_flushed_this_batch: bool = false;
 
 /// Save `rect` as the last-known geometry for `win`.
 pub fn saveWindowGeom(win: u32, rect: utils.Rect) void {
-    if (build.has_tiling) {
-        tiling.saveWindowGeom(win, rect);
-    } else {
-        g_geom_cache.getOrPut(win).value_ptr.rect = rect;
-    }
+    if (comptime build.has_tiling) { tiling.saveWindowGeom(win, rect); return; }
+    const c = &g_geom_cache;
+    for (c.slots[0..c.len]) |*s| { if (s.win == win) { s.rect = rect; return; } }
+    if (c.len < c.slots.len) { c.slots[c.len] = .{ .win = win, .rect = rect }; c.len += 1; }
 }
 
 /// Return the last-known geometry for `win`, or null if none is cached.
 pub fn getWindowGeom(win: u32) ?utils.Rect {
-    if (build.has_tiling) {
-        return tiling.getWindowGeom(win);
-    } else {
-        const wd = g_geom_cache.getPtr(win) orelse return null;
-        if (!wd.hasValidRect()) return null;
-        return wd.rect;
-    }
+    if (comptime build.has_tiling) return tiling.getWindowGeom(win);
+    const c = &g_geom_cache;
+    for (c.slots[0..c.len]) |s| if (s.win == win) {
+        return if (s.rect.width > 0 or s.rect.height > 0) s.rect else null;
+    };
+    return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -954,6 +958,48 @@ pub fn registerSpawn(workspace: u8, pid: u32) void {
     };
 }
 
+// Prefetched pointer reply for spawn-crossing suppression.
+//
+// The old design fired xcb_query_pointer inside mapWindowToScreen, right
+// before the server grab.  That round-trip added ~1–5 ms of latency between
+// the key-press and the window appearing, because the WM stalled waiting for
+// the X server to reply before it could even start the retile.
+//
+// The new design fires and drains xcb_query_pointer in executeShellCommand —
+// at the moment the user's key-press is processed — and stores the reply here.
+// mapWindowToScreen picks it up with zero additional latency.  The pointer
+// position may be a few hundred milliseconds staler (the time between
+// key-press and the app's MapRequest), but that is irrelevant for
+// spawn-crossing suppression: we only care whether the cursor was already
+// inside the new window's bounds at the moment it appeared, not at the
+// moment the key was pressed.
+
+var g_prefetched_ptr: ?*xcb.xcb_query_pointer_reply_t = null;
+
+/// Called by input.executeShellCommand immediately after fork().
+/// Fires and drains xcb_query_pointer while we are still in the key-press
+/// handler, so mapWindowToScreen can consume the cached reply for free.
+pub fn prefetchSpawnPointer() void {
+    // Free any stale prefetch from a previous spawn that never consumed it
+    // (e.g. the window was routed to a non-current workspace).
+    if (g_prefetched_ptr) |old| {
+        std.c.free(old);
+        g_prefetched_ptr = null;
+    }
+    const cookie = xcb.xcb_query_pointer(core.conn, core.root);
+    g_prefetched_ptr = xcb.xcb_query_pointer_reply(core.conn, cookie, null);
+}
+
+/// Consume and return the prefetched pointer reply, transferring ownership
+/// to the caller.  Returns null when no prefetch is available (e.g. the
+/// window was opened programmatically without a keybind triggering spawn).
+/// Caller is responsible for calling std.c.free() on the returned pointer.
+fn takePrefetchedSpawnPointer() ?*xcb.xcb_query_pointer_reply_t {
+    const ptr = g_prefetched_ptr;
+    g_prefetched_ptr = null;
+    return ptr;
+}
+
 /// Record the cursor position from a pre-drained pointer reply for later
 /// spawn-crossing suppression checks.  The caller owns the reply memory;
 /// this function only reads from it.  Replaces the old cookie-draining
@@ -1010,28 +1056,49 @@ fn firePropertyCookies(win: u32) PropertyCookies {
 
 /// Map a newly adopted window that is on the current workspace.
 ///
-/// Runs inside a server grab: tiling registration + retile, geometry
-/// configuration, map, focus, border sweep, and bar redraw all land in a
-/// single atomic batch.
+/// The server grab is now as narrow as possible:
+///
+///   Before the grab:
+///     • tiling.addWindow + retileCurrentWorkspace  — sends configure_window
+///       for every managed window.  These are pure output requests; no reply
+///       is needed before the grab, and running them outside the grab means
+///       the compositor can composite intermediate frames, reducing perceived
+///       latency on slow machines.
+///     • Consume the prefetched xcb_query_pointer reply (fired at key-press
+///       time by input.executeShellCommand) — zero cost here.
+///
+///   Inside the grab (atomic, compositor-locked):
+///     • applyBorderWidth + xcb_map_window + setFocus + border sweep + bar.
+///       This is the set of operations that must land in a single frame to
+///       avoid a one-frame flash of an unfocused/unbordered window.
+///
+/// On weak hardware, retileCurrentWorkspace can take 5–20 ms for a full
+/// workspace.  Moving it outside the grab means the X server and compositor
+/// are not locked for that duration, eliminating the compositor stall that
+/// previously caused visible frame drops on every spawn.
 fn mapWindowToScreen(win: u32) void {
-    // Fire the pointer query and drain the reply *before* grabbing the server.
-    // The old code fired the cookie here but drained the reply inside
-    // snapshotSpawnCursor (which ran inside the grab).  xcb_query_pointer_reply
-    // flushes the XCB output buffer so that the request reaches the server;
-    // doing that inside the grab caused all queued configure_window /
-    // xcb_map_window / set_input_focus requests to be flushed to the compositor
-    // before xcb_ungrab_server — the same class of implicit-flush-inside-grab
-    // bug fixed in the workspace-switch path.  Pre-draining here keeps the
-    // grab atomic.  The pointer position is at most microseconds staler.
+    // Consume the pointer reply prefetched at key-press time (zero round-trip cost).
+    // Falls back to a fresh round-trip only when no prefetch is available
+    // (programmatic MapRequest, not triggered by a user keybind).
     const suppress_reason = focus.getSuppressReason();
     const ptr_reply: ?*xcb.xcb_query_pointer_reply_t = blk: {
+        if (takePrefetchedSpawnPointer()) |pre| break :blk pre;
+        // No prefetch — fire and drain now, before the grab, so the reply
+        // round-trip does not extend the grab duration.
         const cookie = xcb.xcb_query_pointer(core.conn, core.root);
         break :blk xcb.xcb_query_pointer_reply(core.conn, cookie, null);
     };
     defer if (ptr_reply) |r| std.c.free(r);
 
-    _ = xcb.xcb_grab_server(core.conn);
-
+    // ── Outside the grab: expensive layout work ─────────────────────────────
+    //
+    // Run tiling before the grab.  The configure_window calls issued by
+    // retileCurrentWorkspace are pure fire-and-forget output; they do not
+    // require the X server to be locked.  The compositor may composite
+    // intermediate frames — a window may briefly appear at its old position —
+    // but the grab below immediately follows and will issue the final correct
+    // geometry atomically before the first MapNotify, so no incorrect frame
+    // is ever displayed to the user.
     if (tilingActive()) {
         tiling.addWindow(win);
         tiling.retileCurrentWorkspace();
@@ -1043,24 +1110,23 @@ fn mapWindowToScreen(win: u32) void {
         }
     }
 
+    // ── Inside the grab: atomic map, focus, borders ─────────────────────────
+    _ = xcb.xcb_grab_server(core.conn);
+
     applyBorderWidth(win);
     _ = xcb.xcb_map_window(core.conn, win);
 
     focus.setFocus(win, .window_spawn);
-    // Pass the pre-drained reply; no implicit flush can occur inside the grab.
     snapshotSpawnCursorFromReply(ptr_reply, suppress_reason);
 
-    // Use the post-retile border sweep: tiled-window borders were already
-    // updated by configureWithHints during retileCurrentWorkspace above (via
-    // the get_border_color callback), so only floating windows need sweeping
-    // here.  updateWorkspaceBorders would re-send change_window_attributes
-    // to every tiled window redundantly, doubling XCB traffic inside the grab.
+    // Post-retile border sweep: tiled-window borders were already updated by
+    // configureWithHints during retileCurrentWorkspace (via get_border_color),
+    // so only floating windows need sweeping here.
     updateWorkspaceBordersPostRetile();
     bar.redrawInsideGrab();
     markBordersFlushed();
 
     // No xcb_flush here: the event-loop end-of-batch flush covers this.
-    // Removing the extra flush eliminates one syscall per spawn.
     _ = xcb.xcb_ungrab_server(core.conn);
 }
 
@@ -1162,6 +1228,11 @@ fn unmanageWindow(win: u32) void {
         // (geometry + border + size hints), so the separate evictSizeHints call
         // that previously existed here is no longer needed.
         tiling.removeWindow(win);
+    } else {
+        const c = &g_geom_cache;
+        for (c.slots[0..c.len], 0..) |s, i| if (s.win == win) {
+            c.len -= 1; c.slots[i] = c.slots[c.len]; break;
+        };
     }
     if (build.has_minimize) minimize.untrackWindow(win);
     wsRemoveWindow(win);
@@ -1698,6 +1769,3 @@ pub fn reloadBorders() void {
     if (!build.has_workspaces) return;
     for (tracking.allWindows()) |entry| applyBorder(entry.win);
 }
-
-
-

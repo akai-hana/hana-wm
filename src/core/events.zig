@@ -106,7 +106,7 @@ fn createPipe() ![2]std.posix.fd_t {
     return fds;
 }
 
-/// Creates the signal self-pipe and installs handlers for SIGHUP/SIGTERM/SIGINT.
+/// Creates the signal self-pipe and installs handlers for SIGHUP/SIGTERM/SIGINT/SIGCHLD.
 pub fn setupSignalPipe() !void {
     signal_pipe = try createPipe();
 
@@ -119,6 +119,10 @@ pub fn setupSignalPipe() !void {
     std.posix.sigaction(std.posix.SIG.HUP,  &sa, null);
     std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
     std.posix.sigaction(std.posix.SIG.INT,  &sa, null);
+    // SIGCHLD: fired when an intermediate child exits after the double-fork spawn.
+    // The handler writes the signal byte to the self-pipe; the event loop calls
+    // input.reapPendingChildren() which runs waitpid(WNOHANG) + drainPendingSpawns().
+    std.posix.sigaction(std.posix.SIG.CHLD, &sa, null);
 }
 
 /// Closes both ends of the signal pipe.
@@ -136,6 +140,9 @@ inline fn dispatchSignal(byte: u8) void {
         sigToU8(std.posix.SIG.HUP)  => utils.reload(),
         sigToU8(std.posix.SIG.TERM),
         sigToU8(std.posix.SIG.INT)  => utils.quit(),
+        // SIGCHLD: an intermediate double-fork child has exited.
+        // Reap it with WNOHANG and drain any newly-ready spawn pipes.
+        sigToU8(std.posix.SIG.CHLD) => input.reapPendingChildren(),
         else => {},
     }
 }
@@ -298,6 +305,12 @@ fn handleXcbEvents() void {
         defer std.c.free(event);
         dispatch(@as(*u8, @ptrCast(event)).*, event);
     }
+
+    // Drain any spawn pipes that became readable during this event batch.
+    // This catches the common case where SIGCHLD and the MapRequest arrive in
+    // the same poll wakeup: exec_pipe EOF will be readable before SIGCHLD fires,
+    // so registerSpawn runs before handleMapRequest needs the spawn queue entry.
+    input.drainPendingSpawns();
 
     if (build.has_tiling) tiling.retileIfDirty();
     focus.drainPendingConfirm();
