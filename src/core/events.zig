@@ -120,8 +120,8 @@ pub fn setupSignalPipe() !void {
     std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
     std.posix.sigaction(std.posix.SIG.INT,  &sa, null);
     // SIGCHLD: fired when an intermediate child exits after the double-fork spawn.
-    // The handler writes the signal byte to the self-pipe; the event loop calls
-    // input.reapPendingChildren() which runs waitpid(WNOHANG) + drainPendingSpawns().
+    // The handler writes the signal byte to the self-pipe; dispatchSignal then
+    // calls reapPendingChildren() (waitpid WNOHANG) and drainPendingSpawns().
     std.posix.sigaction(std.posix.SIG.CHLD, &sa, null);
 }
 
@@ -141,8 +141,12 @@ inline fn dispatchSignal(byte: u8) void {
         sigToU8(std.posix.SIG.TERM),
         sigToU8(std.posix.SIG.INT)  => utils.quit(),
         // SIGCHLD: an intermediate double-fork child has exited.
-        // Reap it with WNOHANG and drain any newly-ready spawn pipes.
-        sigToU8(std.posix.SIG.CHLD) => input.reapPendingChildren(),
+        // Reap it with WNOHANG, then immediately drain the spawn pipes so
+        // registerSpawn fires without waiting for the next XCB event batch.
+        sigToU8(std.posix.SIG.CHLD) => {
+            input.reapPendingChildren();
+            input.drainPendingSpawns();
+        },
         else => {},
     }
 }
@@ -150,11 +154,19 @@ inline fn dispatchSignal(byte: u8) void {
 const SIGNAL_DRAIN_BUF = 16; // drain a burst in one syscall rather than one per byte
 
 /// Drains the non-blocking signal pipe and dispatches each signal.
+///
+/// std.os.linux.read returns usize (the raw syscall result).  On error the
+/// kernel returns a negative value, which wraps to a huge unsigned number.
+/// Passing that usize to std.posix.errno triggers an unsigned comparison
+/// that never sees the value as negative, so errno returns .SUCCESS and the
+/// giant number escapes into @intCast / the slice bounds check — producing
+/// the "index out of bounds" panic.  The fix is to bitcast to isize first
+/// and treat any non-positive result (error or EOF) as a stop condition.
 fn handleSignalPipe(fd: std.posix.fd_t) void {
     var buf: [SIGNAL_DRAIN_BUF]u8 = undefined;
     while (true) {
-        const rc = std.os.linux.read(fd, &buf, buf.len);
-        if (std.posix.errno(rc) != .SUCCESS) break;
+        const rc: isize = @bitCast(std.os.linux.read(fd, &buf, buf.len));
+        if (rc <= 0) break; // 0 = EOF on write-end close, negative = error/EAGAIN
         const n: usize = @intCast(rc);
         for (buf[0..n]) |byte| dispatchSignal(byte);
     }
@@ -229,13 +241,14 @@ fn validateConfig(cfg: *const types.Config) !void {
     }
 }
 
-/// Applies a validated config: resolves keybindings, re-grabs keys,
-/// and notifies all subsystems of the change.
+/// Applies a validated config: resolves keybindings and notifies all
+/// subsystems of the change.  grabKeybindings() is intentionally NOT called
+/// here — it reads core.config.keybindings, so it must run after the
+/// core.config swap in handleConfigReload.  Calling it here would re-grab
+/// the OLD keycodes while g_keybind_map already points to the new ones.
 fn applyConfig(new_config: *types.Config) !void {
     config.resolveKeybindings(new_config.keybindings.items, input.getXkbState(), core.alloc);
     config.finalizeConfig(new_config, core.screen);
-
-    try grabKeybindings();
 
     window.reloadBorders();
     if (build.has_tiling) tiling.reloadConfig();
@@ -262,6 +275,10 @@ fn handleConfigReload() !void {
     var old_config = core.config;
     core.config = new_config;
     old_config.deinit(core.alloc);
+
+    // Re-grab keybindings now that core.config points to the new config so
+    // fillGrabCookies reads the correct (new) keycodes, not the old ones.
+    try grabKeybindings();
 
     // Rebuild after the swap so borrowed key slices point into the new config's memory.
     window.rebuildRulesMap();
