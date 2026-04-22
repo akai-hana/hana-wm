@@ -579,15 +579,17 @@ var g_keybind_map: std.AutoHashMapUnmanaged(u64, *const types.Action) = .empty;
 pub fn resolveKeybindings(keybindings: anytype, xkb_state: *xkbcommon.XkbState, allocator: std.mem.Allocator) void {
     for (keybindings) |*kb| kb.keycode = xkb_state.keysymToKeycode(kb.keysym);
 
-    // Conflict detection (keycode-keyed, unchanged from before).
+    // Conflict detection: use the same (modifiers | keysym) key as the
+    // dispatch map so warnings accurately reflect what lookupKeybinding sees.
+    // Previously this used keycode, which diverged from the dispatch map and
+    // could silently miss real conflicts or fire false positives.
     var seen = std.AutoHashMap(u64, usize).init(allocator);
     defer seen.deinit();
     for (keybindings, 0..) |*kb, i| {
-        const keycode = kb.keycode orelse continue;
-        const key: u64 = (@as(u64, kb.modifiers) << 32) | keycode;
+        const key: u64 = (@as(u64, kb.modifiers) << 32) | kb.keysym;
         if (seen.get(key)) |first| {
-            debug.warn("Keybinding conflict: #{} and #{} share mods=0x{x:0>4} key={} — second wins",
-                .{ first + 1, i + 1, kb.modifiers, keycode });
+            debug.warn("Keybinding conflict: #{} and #{} share mods=0x{x:0>4} keysym=0x{x} — second wins",
+                .{ first + 1, i + 1, kb.modifiers, kb.keysym });
         } else {
             seen.put(key, i) catch |e| debug.warnOnErr(e, "keybind dedup");
         }
