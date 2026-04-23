@@ -1,6 +1,5 @@
-
 //! Clock segment
-//! Displays the current time and manages the update timer.
+//! Displays the current time on the status bar.
 
 const std     = @import("std");
 const core    = @import("core");

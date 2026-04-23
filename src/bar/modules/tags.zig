@@ -1,12 +1,5 @@
-//! Workspace tag indicator segment.
-//!
-//! Owns the workspace segment cache: label pixel-widths and workspace cell width.
-//! Call `invalidate()` whenever the font, config, or DPI changes (i.e. on bar
-//! reload) so the next draw remeasures everything with the fresh DrawContext.
-//!
-//! draw() receives pre-computed workspace state from a BarSnapshot rather
-//! than reading the workspaces singleton directly, avoiding a data race with
-//! the main thread.
+//! Workspace tag indicator segment
+//! Displays the list of workspaces and their activity states on the status bar.
 
 const std     = @import("std");
 const core    = @import("core");

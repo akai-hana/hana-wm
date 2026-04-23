@@ -1,28 +1,5 @@
-//! Carousel title extension.
-//! Extends title by adding a smooth-scroll carousel effect for titles that
-//! don't fully fit the segment.
-//!
-//! Design
-//! 
-//! A wide XCB pixmap is pre-rendered once per title change:
-//!
-//!   [ bg * left_pad | text A | bg * gap | text B ]
-//!    ←── left_pad ──→←text_w→←── gap ──→←text_w→
-//!
-//! where left_pad = text_x − seg_x (the segment's left inset).
-//! cycle_w = text_w + gap.  At scroll offset O the hot-path blit is a
-//! single xcb_copy_area of seg_w pixels from pixmap position O into the
-//! offscreen pixmap, then a blitAndFlush.  Two XCB calls total per tick —
-//! no fill, no clipping arithmetic, no second copy.
-//!
-//! Offset formula: O = (elapsed_ms × speed / 1000) mod cycle_w.
-//! Continuous linear interpolation — no frame-quantisation.  Smooth at
-//! any wakeup rate.
-//!
-//! Invalidation is deliberately unified: any change (window, title, bg,
-//! or geometry) rebuilds the pixmap and resets start_ms to now.  The
-//! previous code's three-way full_stale / bg_changed / geom_changed split
-//! was a source of subtle bugs and is removed.
+//! Carousel title extension
+//! Adds a scrolling effect to window titles that don't fit the title bar segment.
 
 const std = @import("std");
 
@@ -45,15 +22,11 @@ pub const carousel_gap_px: u16 = 60;
 // Public geometry type
 
 /// Segment geometry passed to carousel draw functions.
-///
-///   seg_x  / seg_w  — full segment bounds (clip + fill region).
-///   text_x / avail_w — inset text area used for the overflow check and for
-///                      static / ellipsis fallback drawing.
 pub const SegmentGeometry = struct {
-    seg_x:   u16,
-    seg_w:   u16,
-    text_x:  u16,
-    avail_w: u16,
+    seg_x:   u16, // Full segment bounds
+    seg_w:   u16, // (clip + fill region)
+    text_x:  u16, // inset text area
+    avail_w: u16, // (used for overflow check and static/ellipsis fallback drawing)
 };
 
 // Internal types
@@ -61,11 +34,11 @@ pub const SegmentGeometry = struct {
 /// All state for one live carousel (single-window or segmented).
 const CarouselEntry = struct {
     cp:       drawing.CarouselPixmap,
-    cycle_w:  u16,   // text_w + carousel_gap_px
-    start_ms: i64,   // monotonicMs() at the moment the animation started
-    last_bg:  u32,   // accent colour baked into cp; used by drawCarouselTick
-                     //   to detect a colour change before the next full draw
-    window:   ?u32,  // window the pixmap was built for (null = no window)
+    cycle_w:  u16,  // text_w + carousel_gap_px
+    start_ms: i64,  // monotonicMs() at the moment the animation started
+    last_bg:  u32,  // accent colour baked into cp; used by drawCarouselTick
+                    // to detect a colour change before the next full draw
+    window:   ?u32, // window the pixmap was built for (null = no window)
     geom:     SegmentGeometry,
 };
 

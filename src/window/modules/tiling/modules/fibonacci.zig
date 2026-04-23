@@ -1,10 +1,5 @@
-//! Fibonacci (spiral) tiling layout.
-//!
-//! Windows spiral counter-clockwise through the available area: the first
-//! window takes the left half, the second takes the top half of the remainder,
-//! the third the right half, the fourth the bottom half, and so on. When the
-//! remaining area becomes too small to split further, all overflow windows are
-//! stacked at the same position.
+//! Fibonacci (spiral) tiling layout
+//! Arranges windows in a counter-clockwise spiral, each taking half the remaining screen area.
 
 const constants = @import("constants");
 const utils     = @import("utils");

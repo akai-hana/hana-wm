@@ -1,5 +1,5 @@
 //! Focus management
-//! Routes window focus with reason-aware sets and clears.
+//! Handles setting, clearing, and tracking the currently focused window.
 
 const std   = @import("std");
 const build = @import("build_options");

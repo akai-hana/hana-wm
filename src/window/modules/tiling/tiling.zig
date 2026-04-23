@@ -1,6 +1,5 @@
-
 //! Tiling window manager
-//! Orchestrates layout, window tracking, and geometry/border cache. Delegates pixel arithmetic to the per-layout modules.
+//! Orchestrates window layout, tracking, and border management for all tiled windows.
 
 const std   = @import("std");
 const build = @import("build_options");
@@ -466,6 +465,13 @@ pub fn retileAllWorkspaces() void {
             if (s.retile_lens[ws_bit] < max_workspace_windows) {
                 s.retile_wins[ws_bit * max_workspace_windows + s.retile_lens[ws_bit]] = win;
                 s.retile_lens[ws_bit] += 1;
+            } else {
+                // Overflow: the per-workspace window list is full. This window
+                // will retain stale geometry after the workspace switch — log
+                // a warning so the condition is diagnosable. Every other
+                // overflow path in this subsystem (CacheMap.getOrPut,
+                // hasWindowBufCapacity) logs; this one must too.
+                debug.warn("retileAllWorkspaces: ws {} window list full, dropping 0x{x}", .{ ws_bit, win });
             }
         }
     }
@@ -741,6 +747,56 @@ pub fn swapWithMaster() void {
 pub fn swapWithMasterFollowFocus() ?u32 {
     const s = getState();
     return swapWithMasterCore(s, findFocusMasterPos(s) orelse return null);
+}
+
+/// Like swapWithMaster but returns the post-swap per-workspace window slice
+/// (already residing in s.scratch_wins). Pass it directly to
+/// retileCurrentWorkspaceDeferredPrebuilt to avoid a redundant
+/// collectWorkspaceWindows call on the same hot path.
+///
+/// Returns null when preconditions are not met (nothing focused, fewer than 2
+/// windows, etc.) — the caller should skip retile in that case.
+pub fn swapWithMasterGetWins() ?[]const u32 {
+    const s = getState();
+    const pos = findFocusMasterPos(s) orelse return null;
+    _ = swapWithMasterCore(s, pos);
+    return pos.ws_wins; // already updated in-place by swapWithMasterCore
+}
+
+/// Like swapWithMasterFollowFocus but also returns the post-swap workspace
+/// window slice so the caller can skip the second collectWorkspaceWindows call.
+pub fn swapWithMasterFollowFocusGetWins() ?struct { displaced: ?u32, ws_wins: []const u32 } {
+    const s = getState();
+    const pos = findFocusMasterPos(s) orelse return null;
+    const displaced = swapWithMasterCore(s, pos);
+    return .{ .displaced = displaced, .ws_wins = pos.ws_wins };
+}
+
+/// Retile the current workspace using a pre-built window list, skipping the
+/// collectWorkspaceWindows scan. Intended for use with the slice returned by
+/// swapWithMasterGetWins / swapWithMasterFollowFocusGetWins so that the
+/// swap-master action path performs one collect instead of two.
+pub fn retileCurrentWorkspaceDeferredPrebuilt(ws_wins: []const u32, defer_win: ?u32) void {
+    const s = getState();
+    if (!s.is_enabled) {
+        _ = restoreWorkspaceGeom();
+        return;
+    }
+    const screen = calcScreenArea();
+    const target_ws: u8 = @intCast(tracking.getCurrentWorkspace() orelse return);
+    if (comptime build.has_fullscreen) {
+        if (fullscreen.getForWorkspace(target_ws)) |_| return;
+    }
+    if (ws_wins.len == 0) return;
+    const ctx = makeLayoutCtxDeferred(s, defer_win);
+    const wss = workspaces.getState();
+    invokeLayout(
+        selectLayout(s, wss, target_ws, core.config.tiling.global_layout),
+        &ctx, s, ws_wins, screen,
+    );
+    s.last_retile_area = screen;
+    markWorkspaceGeomValid(s, target_ws);
+    s.is_dirty = false;
 }
 
 // Query functions 
@@ -1183,7 +1239,10 @@ const FocusMasterPos = struct {
     /// master" path needs no third O(N) scan of s.windows.
     ns_global:   usize,
     fp_filtered: usize,
-    ws_wins:     []const u32,
+    /// Mutable slice into s.scratch_wins; swapWithMasterCore keeps it in sync
+    /// with s.windows.buf so callers can pass it directly to
+    /// retileCurrentWorkspaceDeferredPrebuilt and skip a second collect.
+    ws_wins:     []u32,
 };
 
 fn findFocusMasterPos(s: *State) ?FocusMasterPos {
@@ -1253,10 +1312,16 @@ fn swapWithMasterCore(s: *State, pos: FocusMasterPos) ?u32 {
         if (pos.ws_wins.len < 2) return null;
         const next_win = pos.ws_wins[1];
         swapWindowsInList(s, pos.mp_global, pos.ns_global);
+        // Mirror the swap into ws_wins so the slice stays consistent with
+        // s.windows.buf. Callers that pass ws_wins directly to
+        // retileCurrentWorkspaceDeferredPrebuilt see the correct post-swap order.
+        std.mem.swap(u32, &pos.ws_wins[0], &pos.ws_wins[1]);
         return next_win;
     }
     const master_win = pos.ws_wins[0];
     swapWindowsInList(s, pos.fp_global, pos.mp_global);
+    // Mirror into ws_wins: focused window moves to index 0 (master slot).
+    std.mem.swap(u32, &pos.ws_wins[0], &pos.ws_wins[pos.fp_filtered]);
     return master_win;
 }
 

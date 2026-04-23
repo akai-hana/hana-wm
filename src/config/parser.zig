@@ -1,9 +1,5 @@
-//! Minimal TOML-inspired parser for hana WM configuration files.
-//!
-//! The format extends TOML with WM-specific conveniences: bare keys (treated
-//! as `key = true`), percentage literals (e.g. `50%`), unquoted hex colors
-//! (`#ac3232`), comma-as-decimal separator, and duplicate-key merging into
-//! arrays (used to bind multiple actions to one key).
+//! Config file parser
+//! Parses hana's TOML-inspired configuration format into structured values.
 
 const std   = @import("std");
 const debug = @import("debug");

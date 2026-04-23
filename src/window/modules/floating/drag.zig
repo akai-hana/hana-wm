@@ -1,4 +1,5 @@
-//! Window dragging and resizing via pointer button grabs.
+//! Window drag and resize
+//! Handles interactive dragging and resizing of floating windows with the mouse.
 
 const std   = @import("std");
 const build = @import("build_options");

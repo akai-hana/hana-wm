@@ -1,4 +1,5 @@
-//! X event dispatch, signal handling, config reload, and the main event loop.
+//! X event dispatch and main event loop
+//! Handles X events, OS signals, and config reload, driving the WM's main loop.
 
 const std   = @import("std");
 const build = @import("build_options");

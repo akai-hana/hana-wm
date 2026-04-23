@@ -27,10 +27,10 @@ const fullscreen = if (build.has_fullscreen) @import("fullscreen") else struct {
 const minimize   = if (build.has_minimize) @import("minimize") else struct {};
 const workspaces = if (build.has_workspaces) @import("workspaces") else struct {};
 const tiling     = if (build.has_tiling) @import("tiling") else struct {};
-const drag = if (build.has_tiling) @import("drag") else struct {
-    pub fn isDragging() bool { return false; }
-    pub fn stopDrag() void {}
-    pub fn updateDrag(_: i16, _: i16) void {}
+const drag = if (build.has_drag) @import("drag") else struct {
+    pub fn isDragging()                          bool { return false; }
+    pub fn stopDrag()                            void {}
+    pub fn updateDrag(_: i16, _: i16)            void {}
     pub fn startDrag(_: u32, _: u8, _: i16, _: i16) void {}
 };
 
@@ -353,17 +353,30 @@ fn executeSwapMaster(action: *const types.Action) void {
         // column/stack, the shrinking window (old master) fills its new
         // stack slot before the growing window vacates its old one —
         // eliminating the one-frame wallpaper gap (Fix 3).
+        //
+        // Use swapWithMasterGetWins so the window list built during the
+        // swap is passed directly into retile, avoiding a redundant
+        // collectWorkspaceWindows scan on this hot path (Issue 3 fix).
         const new_master = focus.getFocused();
-        tiling.swapWithMaster();
-        tiling.retileCurrentWorkspaceDeferred(new_master);
+        if (tiling.swapWithMasterGetWins()) |ws_wins| {
+            tiling.retileCurrentWorkspaceDeferredPrebuilt(ws_wins, new_master);
+        } else {
+            tiling.retileCurrentWorkspaceDeferred(new_master);
+        }
     } else {
         // For follow-focus: capture focused window, reorder, retile
         // with deferred configure, then transfer focus — all inside
         // the grab so the focus border change is part of the same flush.
+        // swapWithMasterFollowFocusGetWins returns the pre-built window
+        // slice alongside the displaced window, eliminating the second
+        // collectWorkspaceWindows call in retile (Issue 3 fix).
         const new_master = focus.getFocused();
-        const displaced = tiling.swapWithMasterFollowFocus();
-        tiling.retileCurrentWorkspaceDeferred(new_master);
-        if (displaced) |win| focus.setFocus(win, .tiling_operation);
+        if (tiling.swapWithMasterFollowFocusGetWins()) |result| {
+            tiling.retileCurrentWorkspaceDeferredPrebuilt(result.ws_wins, new_master);
+            if (result.displaced) |win| focus.setFocus(win, .tiling_operation);
+        } else {
+            tiling.retileCurrentWorkspaceDeferred(new_master);
+        }
     }
     // Use the async pointer-sync variant: it queues the xcb_query_pointer
     // cookie without blocking, so no premature XCB buffer flush occurs
@@ -570,10 +583,11 @@ fn executeShellCommand(cmd: []const u8) !void {
     _ = c.close(exec_fds[1]);
     _ = c.close(pid_fds[1]);
 
-    // Pre-snapshot the pointer position for spawn-crossing suppression.
-    // Firing and draining the cookie here — during the key-press handler —
-    // is a single fast round-trip.  mapWindowToScreen can then drain the
-    // cached reply with zero additional latency.
+    // Fire xcb_query_pointer now (key-press time) to snapshot the cursor
+    // position for spawn-crossing suppression.  The reply is NOT drained here;
+    // it will be sitting in the XCB socket buffer by the time MapRequest arrives
+    // (app startup takes at least tens of ms), so mapWindowToScreen drains it
+    // for free with no added round-trip latency.
     window.prefetchSpawnPointer();
 
     if (g_pending.len < MAX_PENDING_SPAWNS) {

@@ -1,5 +1,5 @@
-//! vim modal editing engine for the prompt segment.
-//! Implements a vim-style modal editing layer over a single-line text buffer.
+//! Vim modal editing engine for the prompt segment
+//! Implements vim-style modal editing for the bar's inline command prompt.
 
 const std     = @import("std");
 const core    = @import("core");

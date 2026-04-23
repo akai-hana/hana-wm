@@ -1,4 +1,5 @@
-//! Workspace management — creation, window assignment, and workspace switching.
+//! Workspace management
+//! Handles workspace creation, window assignment, and switching between workspaces.
 
 const std   = @import("std");
 const build = @import("build_options");
@@ -422,10 +423,10 @@ pub fn switchToAll() void {
     if (s.all_view_temp_wins.items.len > 0) {
         // Exit all-workspaces view.
         //
-        // Fix #2: consume the pointer reply BEFORE xcb_grab_server so
-        // xcb_query_pointer_reply cannot flush the grab + evict batch out
-        // from under itself.  The position will be microseconds stale at
-        // most — negligible for focus targeting.
+        // Consume the pointer reply before xcb_grab_server so that
+        // xcb_query_pointer_reply does not cause an implicit flush inside the
+        // grab. The position will be at most microseconds stale — negligible
+        // for focus targeting.
         const ptr_cookie = xcb.xcb_query_pointer(core.conn, core.root);
         const ptr_reply  = xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null);
         defer if (ptr_reply) |r| std.c.free(r);
@@ -575,38 +576,35 @@ pub fn isManaged(win: u32) bool {
 //
 // The switch is executed inside a single xcb_grab_server / xcb_ungrab_server
 // pair so the compositor never observes an intermediate frame where old windows
-// are offscreen but new windows are not yet mapped (the "wallpaper flash").
+// are offscreen but new windows are not yet mapped.
 //
-// To keep the grab free of implicit XCB flushes, ALL round-trips that require
-// an xcb_*_reply call are moved to BEFORE xcb_grab_server:
+// All round-trips requiring an xcb_*_reply call are issued before the grab so
+// the grab body is entirely fire-and-forget:
 //
 //   Pre-grab  (no grab held):
 //     1. prefetchAndSaveWindowGeometries — fires + drains xcb_get_geometry
-//        cookies for floating windows leaving the old workspace.  (Fix #1)
+//        cookies for floating windows leaving the old workspace.
 //     2. xcb_query_pointer + xcb_query_pointer_reply — pointer position for
-//        post-switch focus targeting consumed here.  (Fix #2)
+//        post-switch focus targeting.
 //
 //   Inside grab (one atomic batch):
 //     3. hideWorkspaceWindows  — xcb_configure_window only, no replies.
 //     4. restoreWorkspaceWindows — xcb_map_window + xcb_configure_window,
 //        no replies.
 //     5. applyPostSwitchFocus  — receives the pre-drained pointer reply,
-//        so no xcb_query_pointer_reply flush inside the grab.
+//        no xcb_query_pointer_reply flush inside the grab.
 //     6. bar.raiseBar / bar.redrawInsideGrab — fire-and-forget, no replies.
 //     7. ungrabAndFlush — the single intended flush.
 
-/// Fix #1 — Pre-grab geometry prefetch.
+/// Pre-grab geometry prefetch.
 ///
 /// Fires xcb_get_geometry for every floating window that is about to be hidden
 /// (on workspace `ws`, NOT visible on `new_ws`) and drains all replies,
 /// saving the results via window.saveWindowGeom.
 ///
-/// Must be called BEFORE xcb_grab_server.  Moving these round-trips out of
-/// hideWorkspaceWindows eliminates Flush #1 from the analysis: previously
-/// xcb_get_geometry_reply caused an implicit XCB output-buffer drain while
-/// inside the grab, at a moment when old windows were already offscreen but
-/// new-workspace windows were not yet mapped — the compositor could scan out
-/// that intermediate state as the wallpaper-flash frame.
+/// Must be called before xcb_grab_server so that all reply round-trips complete
+/// before the atomic grab body begins — the grab body must be entirely
+/// fire-and-forget to prevent the compositor from observing partial states.
 fn prefetchAndSaveWindowGeometries(ws: *const Workspace, new_ws: u8) void {
     const MAX_FLOAT = 64;
     const GeomEntry = struct { win: u32, cookie: xcb.xcb_get_geometry_cookie_t };
@@ -646,13 +644,13 @@ fn prefetchAndSaveWindowGeometries(ws: *const Workspace, new_ws: u8) void {
 }
 
 // Step 1 (of the workspace-switch pipeline): move old-workspace windows offscreen.
-// Windows ALSO tagged to `new_ws` stay on screen — they're visible on both.
+// Windows also tagged to `new_ws` stay on screen — they're visible on both.
 // Steps 2/3a are performed inside tiling.applyWorkspaceLayout and
 // tiling.restoreWorkspaceGeom, called from restoreWorkspaceWindows below.
 //
-// NOTE: this function contains NO xcb_*_reply calls.  All geometry saving was
-// moved to prefetchAndSaveWindowGeometries (called before the grab) so that
-// this function is entirely fire-and-forget inside the atomic grab window.
+// Contains no xcb_*_reply calls; entirely fire-and-forget inside the grab.
+// All geometry saving is performed in prefetchAndSaveWindowGeometries before
+// the grab begins.
 fn hideWorkspaceWindows(ws: *const Workspace, new_ws: u8) void {
     const bit = tracking.workspaceBit(ws.id);
     for (tracking.allWindows()) |entry| {
@@ -723,11 +721,9 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
 // Skips the mapped-check and stack raise that focus.setFocus would do —
 // all windows are already mapped and workspace_switch never raises.
 //
-// Fix #2: `ptr_reply` is the already-drained xcb_query_pointer reply,
-// consumed BEFORE xcb_grab_server in executeSwitch / switchToAll.
-// Passing the reply directly (instead of the cookie) means this function
-// contains no xcb_*_reply calls and therefore causes no implicit XCB flush
-// inside the server grab.
+// `ptr_reply` is the pre-drained xcb_query_pointer reply, consumed before
+// xcb_grab_server so this function contains no xcb_*_reply calls and causes
+// no implicit XCB flush inside the server grab.
 fn applyPostSwitchFocus(new_ws: u8, new_ws_obj: *Workspace, ptr_reply: ?*xcb.xcb_query_pointer_reply_t) void {
     const focus_target: ?u32 = blk: {
         const ptr = ptr_reply orelse break :blk lastFocusedOrFirst(new_ws_obj);
@@ -739,22 +735,18 @@ fn applyPostSwitchFocus(new_ws: u8, new_ws_obj: *Workspace, ptr_reply: ?*xcb.xcb
 
     // Route through focus.setFocus / focus.clearFocus so that
     // commitFocusTransition runs its full side-effect list:
-    //   • recordInHistory(old)       — MRU history kept correct for recovery
-    //   • tiling.updateWindowFocus   — tiling border state updated
+    //   • recordInHistory(old)        — MRU history updated
+    //   • tiling.updateWindowFocus    — tiling border state updated
     //   • carousel.notifyFocusChanged — carousel UI notified
-    //   • advertiseActiveWindow      — _NET_ACTIVE_WINDOW on root updated
-    //   • grabButtons on old/new     — button grab ownership transferred
-    //   • xcb_set_input_focus        — X server notified
-    //
-    // The previous direct focus.setFocused() call bypassed all of these,
-    // leaving the MRU history stale and focus recovery broken after every
-    // workspace switch.
+    //   • advertiseActiveWindow       — _NET_ACTIVE_WINDOW on root updated
+    //   • grabButtons on old/new      — button grab ownership transferred
+    //   • xcb_set_input_focus         — X server notified
     //
     // .workspace_switch skips the mapped-check round-trip and never raises
-    // the window — both correct for this path since all windows are already
-    // mapped and the stacking order is set by hide/restoreWorkspaceWindows.
-    // bar.scheduleFocusRedraw() sets only a dirty bit here; the caller
-    // calls bar.redrawInsideGrab() for the actual synchronous redraw.
+    // the window — all windows are already mapped and stacking order is
+    // managed by hide/restoreWorkspaceWindows.
+    // bar.scheduleFocusRedraw() sets a dirty bit; the caller invokes
+    // bar.redrawInsideGrab() for the actual synchronous redraw.
     if (focus_target) |new_win| {
         focus.setFocus(new_win, .workspace_switch);
     } else {
@@ -771,28 +763,22 @@ fn executeSwitch(old_ws: u8, new_ws: u8) void {
     focus.cancelPointerSync(); // discard any stale beginPointerSync cookie from before this switch
     s.workspaces[old_ws].last_focused = focus.getFocused();
 
-    // ── Pre-grab round-trips (Fix #1 + Fix #2) ──────────────────────────────
+    // ── Pre-grab round-trips ─────────────────────────────────────────────────
     //
     // Both xcb_get_geometry and xcb_query_pointer require reply round-trips.
     // Consuming their replies inside xcb_grab_server would cause implicit XCB
     // output-buffer flushes at unpredictable points in the hide+show sequence,
-    // allowing the compositor to observe intermediate states (wallpaper flash).
+    // allowing the compositor to observe intermediate states.
     //
-    // We drain both reply sets here, before grabbing, so the grab body is
+    // Both reply sets are drained here, before the grab, so the grab body is
     // entirely fire-and-forget (no xcb_*_reply calls).
 
-    // Fix #1: save floating-window geometries before the grab.
-    // xcb_get_geometry_reply inside the grab was Flush #1 in the analysis —
-    // the primary cause of the wallpaper flash (old windows offscreen, new
-    // windows not yet mapped when the flush fires).
+    // Save floating-window geometries before the grab.
     prefetchAndSaveWindowGeometries(&s.workspaces[old_ws], new_ws);
 
-    // Fix #2: consume the pointer position before the grab.
-    // xcb_query_pointer_reply inside applyPostSwitchFocus was Flush #2 —
-    // it fired after xcb_map_window for the new workspace, so it was
-    // cosmetically harmless, but it still split the atomic batch.
-    // Consuming here (microseconds before the grab) is indistinguishable
-    // for focus targeting.
+    // Consume the pointer position before the grab so applyPostSwitchFocus
+    // receives a pre-drained reply and issues no xcb_*_reply calls inside
+    // the grab.
     const ptr_cookie = xcb.xcb_query_pointer(core.conn, core.root);
     const ptr_reply  = xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null);
     defer if (ptr_reply) |r| std.c.free(r);
@@ -806,20 +792,10 @@ fn executeSwitch(old_ws: u8, new_ws: u8) void {
 
     if (fs_info) |info| {
         // Map and push offscreen every non-fullscreen window on this workspace.
-        //
-        // When a window is spawned onto an inactive workspace that already has
-        // an active fullscreen, executeSwitch takes this branch and skips
-        // restoreWorkspaceWindows — the only place that calls xcb_map_window
-        // on switch-in. The spawned window therefore stays unmapped. On
-        // fullscreen exit, tiling allocates a tile cell for it (it is in
-        // s.windows and on this workspace) but the cell is invisible, leaving
-        // an empty gap until the next workspace round-trip triggers a normal
-        // restoreWorkspaceWindows path.
-        //
-        // Fix: map every non-fullscreen workspace window here, then push it
-        // offscreen so it is hidden behind the fullscreen window. Invalidate
-        // the tiling cache entry for tiled windows so the next retile after
-        // fullscreen exit does not find a stale zero-rect and skip configure.
+        // Ensures all workspace windows are in a mapped-but-hidden state so that
+        // when fullscreen exits, tiling can reconfigure them without finding stale
+        // zero-rect cache entries. Tiled windows have their cache invalidated so
+        // the next retile recomputes their positions correctly.
         const exec_bit = tracking.workspaceBit(new_ws);
         for (tracking.allWindows()) |entry| {
             if (entry.mask & exec_bit == 0) continue;

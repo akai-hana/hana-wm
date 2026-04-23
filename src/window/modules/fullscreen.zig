@@ -1,17 +1,5 @@
-//! Fullscreen management — enter, exit, toggle, and state queries.
-//!
-//! All fullscreen state lives in the module-level g_state singleton.
-//! WM no longer carries a fullscreen field.
-//! Callers use the module-level query functions (isFullscreen,
-//! getForWorkspace, etc.) rather than going through WM.
-//!
-//! The two commit helpers only queue XCB requests; the caller owns
-//! grab/ungrab/flush so paired exit+enter transitions can share one
-//! grab with no intermediate composited frame.
-//!
-//! Internal window iteration is centralised in forEachWindowOnCurrentWorkspace,
-//! which dispatches to the workspace window list (has_workspaces) or the
-//! global tracking iterator, eliminating three separate copies of that branch.
+//! Fullscreen management
+//! Handles entering, exiting, toggling, and querying fullscreen state for windows.
 
 const std   = @import("std");
 const build = @import("build_options");

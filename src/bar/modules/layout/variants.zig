@@ -1,7 +1,5 @@
-//! Layout variants indicator bar segment.
-//!
-//! Displays the 3-character variants indicator for the active tiling layout.
-//! Can be placed independently from the layout icon in the bar layout config.
+//! Layout variants indicator bar segment
+//! Displays the active tiling layout variant as a short indicator string on the bar.
 
 const build = @import("build_options");
 

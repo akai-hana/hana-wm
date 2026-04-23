@@ -161,10 +161,10 @@ Mod+Middle_click = "toggle_floating_window" # Toggle clicked window between tile
 
 # Layouts
 ## Master-stack
-Mod+H      = "decrease_master" 
-Mod+L      = "increase_master" # Increase master area width
-Mod+Shift+L    = "increase_master_count"
-Mod+Shift+H    = "decrease_master_count"
+Mod+H       = "decrease_master"
+Mod+L       = "increase_master" # Increase master area width
+Mod+Shift+L = "increase_master_count"
+Mod+Shift+H = "decrease_master_count"
 
 # Focus cycling (dwm-style)
 ## k = next/right (master → stack → ... → wrap), j = prev/left
@@ -202,7 +202,7 @@ Mod+S       = "flatpak run org.equicord.equibop"
 Mod+Shift+S = "{kill} equibop"
 
 Mod+D       = "ghostty"
-Mod+i = "xeyes"
+Mod+I       = "xeyes"
 Mod+Shift+D = "{kill} ghostty"
 
 Mod+Z       = "cd ~/Games/isaac-repentance+; wine isaac-ng.exe"

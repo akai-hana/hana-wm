@@ -1,5 +1,5 @@
 //! Shared type definitions
-//! Includes XCB handles, geometry, input state, DPI info, and process-wide globals.
+//! Defines the display handles, geometry types, and process-wide state shared across all modules.
 
 const std = @import("std");
 
