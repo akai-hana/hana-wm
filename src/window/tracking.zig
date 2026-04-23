@@ -1,5 +1,5 @@
 //! Core window tracking
-//! Tracks windows' focus eligibility through workspaces.
+//! Maintains the registry of all managed windows and their workspace assignments.
 
 const std   = @import("std");
 const build = @import("build_options");

@@ -41,6 +41,9 @@ const optional_subsystems = [_][]const u8{
             "grid",
             "fibonacci",
 
+    // floating/
+    "drag",
+
     // bar/
     "bar",
         "tags",

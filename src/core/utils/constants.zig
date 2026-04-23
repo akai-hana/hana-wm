@@ -1,5 +1,5 @@
-
-//! Central location for core constants used across multiple files.
+//! Core constants
+//! Defines shared constants used across multiple modules.
 
 const xcb = @cImport(@cInclude("xcb/xcb.h"));
 

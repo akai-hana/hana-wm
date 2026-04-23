@@ -1,4 +1,5 @@
-//! XKB (X Keyboard Extension) bindings and keyboard state management.
+//! XKB bindings and keyboard state
+//! Wraps the XKB library to provide keyboard state tracking and keysym resolution.
 
 const std  = @import("std");
 

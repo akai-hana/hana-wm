@@ -1,5 +1,5 @@
-//! hana core utilities
-//! Includes X11 geometry helpers, atom caching, ICCCM input model caching, and process lifecycle signals.
+//! Core utilities
+//! Provides shared geometry helpers, process lifecycle signals, and X11 property utilities for the WM core.
 
 const std = @import("std");
 

@@ -1,5 +1,5 @@
-//! Prompt bar in-line command runner
-//! Borrows title's segment space to embed into the bar
+//! Inline command prompt for the bar
+//! Embeds an interactive command runner into the bar's title segment.
 
 const std   = @import("std");
 const build = @import("build_options");

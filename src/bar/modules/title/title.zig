@@ -1,19 +1,5 @@
-//! Title segment — shows the focused window title, or a split view for
-//! multiple windows.
-//!
-//! `draw()` and `drawCached()` receive a pre-computed `TitleSnapshot` captured
-//! on the main thread, making it safe to call from the bar rendering thread.
-//!
-//! Threading contract
-//!
-//! All data in `TitleSnapshot` must be captured on the main thread before
-//! being handed to the render thread.  This module makes zero blocking X11
-//! calls on the render thread.  Both `focused_title` and `minimized_title`
-//! are pre-fetched via `fetchWindowTitleInto` by `bar.captureIntoSlot` on
-//! the main thread.
-//!
-//! Carousel logic lives in carousel.zig.
-//! Monitor refresh-rate detection lives in carousel.zig.
+//! Title bar segment
+//! Displays the focused window title on the status bar, with a split view when minimized windows are present.
 
 const std = @import("std");
 

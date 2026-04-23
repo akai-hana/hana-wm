@@ -1,9 +1,5 @@
-//! Debug logging and error helpers.
-//!
-//! All functions are no-ops in non-debug builds (controlled by the
-//! `enable_debug_logging` build option). Because they are `inline`, @src()
-//! inside each function captures the *call site* source location, so the
-//! module tag printed in log output is always the caller's file, not debug.zig.
+//! Debug logging and error helpers
+//! Provides logging utilities that are compiled away entirely in non-debug builds.
 
 const std   = @import("std");
 const build = @import("build_options");

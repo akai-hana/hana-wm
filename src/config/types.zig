@@ -1,12 +1,5 @@
-//! Config type definitions — structs, enums, and unions that model the WM configuration schema.
-//!
-//! This file is the single source of truth for all config-related types.
-//! - parser.zig  handles TOML tokenisation and document building
-//! - config.zig  reads a parsed Document and populates these structs
-//! - fallback.zig provides auto-detection defaults
-//!
-//! Keeping type definitions here avoids pulling parser or xcb into config.zig
-//! while still letting core.zig re-export everything through `pub usingnamespace`.
+//! Config type definitions
+//! Defines all types used to represent the WM configuration schema.
 
 const std = @import("std");
 const parser = @import("parser");
@@ -35,9 +28,9 @@ pub const Action = union(enum) {
     swap_master_focus_swap,
     switch_workspace:  u8,
     move_to_workspace: u8,
-    move_window:       u8, // exclusive move — clears all tags, sets only target
-    toggle_tag:        u8, // pure toggle — flips bit N, never moves
-    sequence:          []Action, // ordered list of actions executed left-to-right; owned slice
+    move_window:       u8,
+    toggle_tag:        u8,
+    sequence:          []Action, // ordered list of actions executed left-to-right (owned slice)
     dump_state,
     minimize_window,
     unminimize_lifo,
@@ -45,13 +38,13 @@ pub const Action = union(enum) {
     unminimize_all,
     cycle_layout_variants,
     toggle_prompt,
-    all_workspaces,          // shows all windows from every workspace at once; toggled on/off
-    move_to_all_workspaces,  // pin focused window to every workspace
-    toggle_tag_all,          // flip between pinned-to-all and current-workspace-only
-    focus_next_window,       // cycle focus forward / right  (dwm-style Mod+k)
-    focus_prev_window,       // cycle focus backward / left  (dwm-style Mod+j)
-    move_window_next,        // move focused window forward  (dwm-style Mod+Shift+k)
-    move_window_prev,        // move focused window backward (dwm-style Mod+Shift+j)
+    all_workspaces,         // shows all windows from every workspace at once; toggled on/off
+    move_to_all_workspaces, // pin focused window to every workspace
+    toggle_tag_all,         // flip between pinned-to-all and current-workspace-only
+    focus_next_window,      // cycle focus forward / right
+    focus_prev_window,      // cycle focus backward / left
+    move_window_next,       // move focused window forward
+    move_window_prev,       // move focused window backward
 
     pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
         switch (self.*) {

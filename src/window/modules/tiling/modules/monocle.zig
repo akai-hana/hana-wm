@@ -1,14 +1,5 @@
-//! Monocle tiling layout.
-//!
-//! All windows are sized to fill the screen; only the topmost window is
-//! visible. Background windows are pushed offscreen rather than left behind
-//! a potentially transparent top window. Geometry is applied lazily — only
-//! the top window is configured on each retile, keeping cost O(1) regardless
-//! of how many windows are stacked.
-//!
-//! Two variants are supported via `State.layout_variants.monocle`:
-//!   - `.gapless` — top window fills the entire screen (minus border).
-//!   - `.gaps`    — a gap inset is applied on all sides.
+//! Monocle tiling layout
+//! Stacks all windows fullscreen, showing only the topmost one, with optional gap insets.
 
 const core      = @import("core");
 const constants = @import("constants");

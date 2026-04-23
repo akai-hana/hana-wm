@@ -1,5 +1,5 @@
-
-//! DPI detection and scaling utilities for consistent bar appearance across display resolutions.
+//! DPI detection and scaling utilities
+//! Detects display DPI and scales bar dimensions for consistent appearance across resolutions.
 
 const std = @import("std");
 

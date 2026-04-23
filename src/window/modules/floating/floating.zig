@@ -1,29 +1,5 @@
-
-//! Floating layout — windows are left at their current positions.
-//!
-//! Switching to this layout lets windows be moved and resized freely without
-//! any tiling engine interference.  The layout engine is still active (windows
-//! remain tracked in tiling.State), so switching back to a tiling layout
-//! retiles all tracked windows immediately.
-//!
-//! Interface
-//!
-//! floating follows the same tileWithOffset interface as every other layout
-//! module.  Windows that have already been positioned (x or y ≠ 0) are left
-//! untouched.  Windows still at the X default origin (0, 0) — i.e. freshly
-//! spawned while floating was active — are centred on the work area.
-//!
-//! Heuristic limitation: a window the user has intentionally dragged to
-//! position (0, 0) is indistinguishable from an unplaced window and will be
-//! re-centred on the next layout pass.  The correct fix is a `manually_placed`
-//! flag in the window cache; until that is added, (0, 0) remains the
-//! "unplaced" sentinel.
-//!
-//! Prev-layout state
-//!
-//! The layout to restore when floating is exited is stored in tiling.State
-//! (State.prev_layout) rather than here, so this module stays free of a
-//! circular dependency with tiling.zig.
+//! Floating windows layout
+//! Manages placement, movement, and resizing of freely positioned floating windows.
 
 const std   = @import("std");
 const build = @import("build_options");
@@ -46,7 +22,7 @@ const bar = if (build.has_bar) @import("bar") else struct {
 // 64 covers the typical maximum window count on a single workspace while
 // keeping the two per-batch stack arrays (needs_query + cookies) well under
 // 1 KB of combined stack space.
-const BATCH = 64;
+const BATCH = 64; //TODO: is there a better solution to handle this problem, other than arbitrarily defining 64? i feel like this just isn't the best solution to the problem.
 
 /// Centre any window that is still at the X default origin (0, 0).
 /// Windows the user has already moved are left untouched.

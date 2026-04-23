@@ -1,14 +1,13 @@
-//! Drawing context for hana's status bar.
-//!
-//! Rectangle fills use XCB core drawing instead of Cairo's XRender, since the
-//! latter always pre-multiplies alpha pixels, making rectangle colours appear
-//! incorrect and too dark. Cairo + Pango handle all text layout and glyph
-//! rendering on top of these XCB-filled rectangles.
+//! Cairo/Pango drawing context
+//! Text measurement and rendering for bar segments.
 
-const std   = @import("std");
-const core  = @import("core");
-const c     = @import("render");
-const debug = @import("debug");
+const std = @import("std");
+
+const core    = @import("core");
+    const xcb = core.xcb;
+const debug   = @import("debug");
+
+const c = @import("render");
 
 // Public types 
 
@@ -17,7 +16,6 @@ pub const VisualInfo = struct {
     visual_id:   u32,
 };
 
-/// Find the first visual at `depth` bits on the root screen.
 /// Falls back to the root visual if no matching depth is found.
 pub fn findVisualByDepth(screen: *core.xcb.xcb_screen_t, depth: u8) VisualInfo {
     var depth_iter = core.xcb.xcb_screen_allowed_depths_iterator(screen);
@@ -31,12 +29,8 @@ pub fn findVisualByDepth(screen: *core.xcb.xcb_screen_t, depth: u8) VisualInfo {
     return .{ .visual_type = null, .visual_id = screen.root_visual };
 }
 
-// Module-level font cache 
-//
-// Shared across all DrawContext instances. The bar creates multiple short-lived
-// offscreen DCs for measurement and one long-lived rendering DC; cache hits
-// across them avoid redundant allocations. Single-threaded WM only — no
-// synchronisation needed.
+// Module-level font cache shared across all DrawContext instances (measurement + render DCs).
+// Single-threaded — no synchronisation needed.
 
 var font_conversion_cache: ?std.StringHashMap([]const u8) = null;
 
@@ -48,15 +42,13 @@ const fallbackFont = "monospace:size=10";
 pub const FontState = struct {
     allocator:         std.mem.Allocator,
     pango_layout:      *c.PangoLayout,
-    current_font_desc: ?*c.PangoFontDescription         = null,
+    current_font_desc: ?*c.PangoFontDescription = null,
     cached_metrics:    ?struct { ascent: i16, descent: i16 } = null,
 
-    /// Frees the current Pango font description, if one has been loaded.
     fn deinit(self: *FontState) void {
         if (self.current_font_desc) |desc| c.pango_font_description_free(desc);
     }
 
-    /// Load a single font by name, replacing any previously loaded description.
     pub fn loadFont(self: *FontState, font_name: []const u8) !void {
         if (self.current_font_desc) |desc| c.pango_font_description_free(desc);
         const pango_name   = try convertFontName(self.allocator, font_name);
@@ -71,12 +63,7 @@ pub const FontState = struct {
         self.cached_metrics = null;
     }
 
-    /// Load one or more fonts as a Pango comma-separated fallback list.
-    ///
-    /// Both `loadFont` and `loadFonts` exist so that DrawContext and
-    /// MeasureContext can share the same uniform call-site interface regardless
-    /// of whether there is one font or many. Callers never need to branch on
-    /// count.
+    /// Unified entry point shared with MeasureContext so callers need no font-count branch.
     pub fn loadFonts(self: *FontState, font_names: []const []const u8) !void {
         if (font_names.len == 0) return self.loadFont(fallbackFont);
         if (font_names.len == 1) return self.loadFont(font_names[0]);
@@ -85,8 +72,7 @@ pub const FontState = struct {
         try self.loadFont(font_list);
     }
 
-    /// Returns (ascent, descent) in pixels for the current font. Cached after the first call;
-    /// invalidated by loadFont. Result is in pixels, converted from Pango units via PANGO_SCALE.
+    /// Returns (ascent, descent) in pixels; cached per font description, invalidated by loadFont.
     pub fn getMetrics(self: *FontState) struct { i16, i16 } {
         if (self.cached_metrics) |m| return .{ m.ascent, m.descent };
         const metrics = c.pango_context_get_metrics(
@@ -102,8 +88,6 @@ pub const FontState = struct {
 
 // DrawContext 
 
-/// Unpack one 8-bit RGB channel from a packed 0xRRGGBB colour and convert
-/// to the [0.0, 1.0] float that Cairo expects.
 inline fn unpackColorChannel(color: u32, shift: u5) f64 {
     return @as(f64, @floatFromInt((color >> shift) & 0xFF)) / 255.0;
 }
@@ -122,7 +106,7 @@ pub const DrawContext = struct {
     ctx:      *c.cairo_t,
     /// GC used by fillRect (xcb_poly_fill_rectangle).
     gc:       u32,
-    /// Separate GC used exclusively for the xcb_copy_area blit in flush().
+    /// Separate GC used exclusively for the xcb_copy_area blit in blit().
     copy_gc:  u32,
 
     is_argb:       bool = false,
@@ -132,18 +116,9 @@ pub const DrawContext = struct {
     last_color:    ?u32 = null,
     /// Cached GC foreground — skips xcb_change_gc when the packed ARGB pixel is unchanged.
     last_gc_color: ?u32 = null,
-    /// Cached Pango layout width (in Pango units) set by drawTextEllipsis.
-    /// Avoids pango_layout_set_width/set_ellipsize calls — which invalidate
-    /// Pango's internal shaping cache — when the same width is reused across
-    /// consecutive ellipsis draws (e.g. a stable window title in a narrow cell).
-    /// Reset to -1 after each ellipsis draw so the cache is invalidated on the
-    /// next frame (the layout is reset to defaults between draws).
+    /// Cached Pango layout width (Pango units). Skips pango_layout_set_width/set_ellipsize —
+    /// which invalidate Pango's shaping cache unconditionally — when width is stable across frames.
     last_ellipsis_width: i32 = -1,
-
-    // NOTE: pango_layout_get_baseline is intentionally NOT cached. The baseline
-    // can vary per text run when font fallback is active (e.g. a CJK glyph
-    // falling back to Noto Sans CJK has a different ascent than FiraCode),
-    // so caching it would produce wrong positions for subsequent draws.
 
     // drawTextSized cache: avoids copying the font description on every
     // indicator-glyph draw when the requested size matches the previous call.
@@ -157,10 +132,7 @@ pub const DrawContext = struct {
     /// Actual pixel depth of the offscreen pixmap — 32 for ARGB, screen root_depth otherwise.
     depth:       u8                           = 24,
 
-    /// Creates a DrawContext backed by an off-screen pixmap.
-    ///
-    /// All drawing targets the pixmap; call flush() to blit it to the window
-    /// atomically via xcb_copy_area, eliminating visible partial-frame compositing.
+    /// All drawing targets the off-screen pixmap; call blit() to copy to the window atomically.
     pub fn initWithVisual(
         allocator:    std.mem.Allocator,
         conn:         *core.xcb.xcb_connection_t,
@@ -241,7 +213,6 @@ pub const DrawContext = struct {
         return dc;
     }
 
-    /// Frees all Cairo/Pango resources and the pixmap, then deallocates the DrawContext itself.
     pub fn deinit(self: *DrawContext) void {
         self.font.deinit();
         if (self.cached_sized_desc) |desc| c.pango_font_description_free(desc);
@@ -255,7 +226,7 @@ pub const DrawContext = struct {
         self.font.allocator.destroy(self);
     }
 
-    /// Loads a single font and clears the sized-font cache. Delegates to FontState.loadFont.
+    /// Also clears the sized-font cache; delegates to FontState.loadFont.
     pub fn loadFont(self: *DrawContext, font_name: []const u8) !void {
         try self.font.loadFont(font_name);
         if (self.cached_sized_desc) |old| c.pango_font_description_free(old);
@@ -263,7 +234,7 @@ pub const DrawContext = struct {
         debug.info("Cairo/Pango font loaded: {s}", .{font_name});
     }
 
-    /// Loads a comma-separated Pango font fallback list. Delegates to FontState.loadFonts.
+    /// Delegates to FontState.loadFonts.
     pub fn loadFonts(self: *DrawContext, font_names: []const []const u8) !void {
         try self.font.loadFonts(font_names);
         if (font_names.len > 1) debug.info("Loaded {} fonts with fallback support", .{font_names.len});
@@ -288,25 +259,18 @@ pub const DrawContext = struct {
         c.pango_layout_set_text(self.font.pango_layout, text.ptr, @intCast(text.len));
     }
 
-    // pango_layout_get_baseline is called unconditionally on every draw: the
-    // baseline changes when font fallback is active (different scripts trigger
-    // different fonts with different ascents), so caching it would silently
-    // misalign text in multi-font configurations.
-    /// Positions the Cairo cursor so that Pango text rendered at (x, y_top) lands on its baseline.
+    // pango_layout_get_baseline is called unconditionally: font fallback can change the
+    // baseline per-run (e.g. a CJK glyph triggering Noto Sans CJK), so caching it
+    // would silently misalign text in multi-font configurations.
     inline fn moveToTextBaseline(self: *DrawContext, x: u16, y: u16) void {
         const baseline = @as(f64, @floatFromInt(c.pango_layout_get_baseline(self.font.pango_layout)))
             / @as(f64, @floatFromInt(c.PANGO_SCALE));
         c.cairo_move_to(self.ctx, @floatFromInt(x), @as(f64, @floatFromInt(y)) - baseline);
     }
 
-    /// Fill a rectangle using XCB core drawing (xcb_poly_fill_rectangle).
-    ///
-    /// XCB writes the raw packed pixel (A, R, G, B) directly into the pixmap —
-    /// the straight-alpha format picom expects. Cairo's XRender backend writes
-    /// premultiplied pixels instead, which is why fills bypass Cairo entirely.
-    /// `last_gc_color` guards xcb_change_gc: skips the roundtrip when the color
-    /// is unchanged, which is the common case when adjacent segments share a
-    /// background.
+    /// Uses XCB rather than Cairo to write straight-alpha pixels (picom expects straight-alpha;
+    /// Cairo's XRender backend writes premultiplied). `last_gc_color` skips xcb_change_gc
+    /// when the color is unchanged, which is the common case for adjacent same-background segments.
     pub fn fillRect(self: *DrawContext, x: u16, y: u16, width: u16, height: u16, color: u32) void {
         const packed_color: u32 = self.setTransparency(color);
         if (self.last_gc_color != packed_color) {
@@ -319,11 +283,7 @@ pub const DrawContext = struct {
         _ = core.xcb.xcb_poly_fill_rectangle(self.conn, self.offscreen_pixmap, self.gc, 1, &rect);
     }
 
-    /// Draw `text` at a temporarily-overridden absolute font size.
-    ///
-    /// The sized font description is cached by pixel size so repeated calls with
-    /// the same size (the common case) pay zero allocation after the first call.
-    /// The cache is invalidated whenever loadFont is called.
+    /// Sized font description cached by pixel size; cache invalidated by loadFont.
     pub fn drawTextSized(self: *DrawContext, x: u16, y_top: u16, text: []const u8, size_px: u16, color: u32) !void {
         const desc = self.font.current_font_desc orelse return error.NoFont;
 
@@ -353,7 +313,6 @@ pub const DrawContext = struct {
         c.pango_cairo_show_layout(self.ctx, self.font.pango_layout);
     }
 
-    /// Draw `text` at the font's natural baseline.
     pub fn drawText(self: *DrawContext, x: u16, y: u16, text: []const u8, color: u32) !void {
         self.setColor(color);
         self.setPangoText(text);
@@ -361,12 +320,7 @@ pub const DrawContext = struct {
         c.pango_cairo_show_layout(self.ctx, self.font.pango_layout);
     }
 
-    /// Draw `text` truncated with an ellipsis if it exceeds `max_width` pixels.
-    ///
-    /// Use this instead of `drawText` whenever the available width is constrained
-    /// (e.g. the title segment) and overflow must be handled gracefully.
-    /// Pango resets to its internal defaults after the call, so subsequent draws
-    /// are unaffected by the width/ellipsize state.
+    /// Resets Pango width/ellipsize to defaults after rendering; subsequent draws unaffected.
     pub fn drawTextEllipsis(
         self:      *DrawContext,
         x:         u16,
@@ -397,7 +351,6 @@ pub const DrawContext = struct {
         self.last_ellipsis_width = -1; // invalidate cache: layout is back to defaults
     }
 
-    /// Measure how many pixels wide `text` would render with the current font.
     pub fn measureTextWidth(self: *DrawContext, text: []const u8) u16 {
         self.setPangoText(text);
         var width: c_int = undefined;
@@ -407,13 +360,8 @@ pub const DrawContext = struct {
 
     pub fn getMetrics(self: *DrawContext) struct { i16, i16 } { return self.font.getMetrics(); }
 
-    /// Blit the off-screen pixmap to the window in a single xcb_copy_area call.
-    /// The compositor only ever sees fully-rendered frames — no partial-draw flicker.
-    ///
-    /// NOTE: This does NOT call xcb_flush.  The caller is responsible for flushing:
-    /// - On X-event-driven paths, the event loop's end-of-batch xcb_flush covers it.
-    /// - On timer-driven paths (clock tick, cursor blink), the caller must flush
-    ///   explicitly — see events.run() ready == 0 branch.
+    /// Does NOT call xcb_flush — the event loop's end-of-batch flush covers event-driven
+    /// paths; timer-driven paths (clock tick, cursor blink) must flush explicitly.
     pub fn blit(self: *DrawContext) void {
         c.cairo_surface_flush(self.surface);
         if (self.copy_gc == 0) return;
@@ -427,23 +375,15 @@ pub const DrawContext = struct {
         );
     }
 
-    /// Flush the Cairo surface to the off-screen pixmap (pure Cairo/SHM op)
-    /// WITHOUT issuing xcb_copy_area or xcb_flush on the shared connection.
-    ///
-    /// Use this inside xcb_grab_server sections so that the bar thread's render
-    /// work does not trigger an early XCB flush that would let the compositor
-    /// sneak in an intermediate frame.  After the grab, call blitQueued() to
-    /// enqueue the xcb_copy_area, then let ungrabAndFlush() drain everything
-    /// atomically with xcb_ungrab_server.
+    /// cairo_surface_flush only — no xcb_copy_area, no xcb_flush.
+    /// Safe inside xcb_grab_server; pair with blitQueued() + ungrabAndFlush().
     pub fn renderOnly(self: *DrawContext) void {
         c.cairo_surface_flush(self.surface);
         // Deliberately no xcb_copy_area and no xcb_flush here.
     }
 
-    /// Queue an xcb_copy_area from the off-screen pixmap to the bar window
-    /// WITHOUT calling xcb_flush.  Safe to call inside xcb_grab_server because
-    /// no flush is issued; the request will be sent together with all other
-    /// queued geometry changes when ungrabAndFlush() calls xcb_flush.
+    /// Enqueues xcb_copy_area without flushing; safe inside xcb_grab_server.
+    /// The request is sent with all queued geometry changes when ungrabAndFlush() fires.
     pub fn blitQueued(self: *DrawContext) void {
         if (self.copy_gc == 0) return;
         _ = core.xcb.xcb_copy_area(
@@ -457,14 +397,8 @@ pub const DrawContext = struct {
         // No xcb_flush — caller owns the flush (ungrabAndFlush).
     }
 
-    /// Blit only the rectangle [x, x+w) from the off-screen pixmap to the window,
-    /// then flush the XCB connection immediately.
-    ///
-    /// Unlike blit(), this DOES call xcb_flush.  Use on timer-driven paths (e.g.
-    /// carousel ticks) where no event-loop batch flush is coming to drain the queue.
-    ///
-    /// Does NOT call cairo_surface_flush — use this when only XCB (not Cairo) has
-    /// written to the pixmap in the current frame, e.g. carousel blits.
+    /// Unlike blit(), calls xcb_flush immediately. Use on timer-driven paths where
+    /// no event-loop flush is coming. Does NOT call cairo_surface_flush.
     pub fn blitAndFlush(self: *DrawContext, x: u16, w: u16) void {
         if (self.copy_gc == 0) return;
         _ = core.xcb.xcb_copy_area(
@@ -485,11 +419,7 @@ pub const DrawContext = struct {
         return @intCast(top_pad + asc);
     }
 
-    /// Fill a background rectangle and draw `text` with padding, returning the next X position.
-    ///
-    /// Sets the Pango text once and reuses the laid-out state for both the width
-    /// measurement and the render, avoiding the double pango_layout_set_text call
-    /// that would occur if measureTextWidth() and drawText() were called separately.
+    /// Sets Pango text once for both measurement and render, avoiding a double pango_layout_set_text.
     pub fn drawSegment(
         self:    *DrawContext,
         x:       u16,
@@ -511,12 +441,8 @@ pub const DrawContext = struct {
     }
 };
 
-// MeasureContext 
-//
-// Lightweight font-measurement context backed by a 1×1 Cairo image surface.
-// Carries no XCB resources and makes no X server round-trips. Exposes the same
-// loadFont / loadFonts / getMetrics interface as DrawContext so callers can be
-// generic over either.
+// MeasureContext: lightweight font measurement backed by a 1×1 Cairo image surface.
+// No XCB resources, no X round-trips. Same loadFont/loadFonts/getMetrics interface as DrawContext.
 
 pub const MeasureContext = struct {
     font:    FontState,
@@ -533,7 +459,6 @@ pub const MeasureContext = struct {
         return .{ .font = .{ .allocator = allocator, .pango_layout = layout }, .surface = surface, .ctx = ctx };
     }
 
-    /// Frees all Cairo/Pango resources owned by this MeasureContext.
     pub fn deinit(self: *MeasureContext) void {
         self.font.deinit();
         c.g_object_unref(self.font.pango_layout);
@@ -546,30 +471,21 @@ pub const MeasureContext = struct {
     pub fn getMetrics(self: *MeasureContext) struct { i16, i16 }                  { return self.font.getMetrics(); }
 };
 
-/// Pre-renders a window title (background + glyphs) into a wide XCB pixmap
-/// exactly once.  Every subsequent carousel tick is a single xcb_copy_area —
-/// one raw pixel blit with zero Pango/Cairo involvement.
+/// Pre-renders a title into a wide XCB pixmap once; every carousel tick is a single
+/// xcb_copy_area with zero Pango/Cairo involvement.
 ///
-/// Wide-pixmap model
-/// ─────────────────
-/// The pixmap stores two full copies of the text, separated by a gap, all on
-/// the correct background colour:
+/// Wide-pixmap layout
+/// ──────────────────
+/// Two full copies of the text are stored at offsets `left_pad` and `left_pad + cycle_w`:
 ///
 ///   [ bg * left_pad | text A | bg * gap | text B ]
 ///    ←── left_pad ──→←text_w→←── gap ──→←text_w→
 ///
-/// where left_pad = text_x − seg_x (the segment's left inset) and
-/// cycle_w = text_w + gap.
+/// At scroll offset O (0 ≤ O < cycle_w), blitFrame copies seg_w pixels from O into
+/// the offscreen pixmap.  The pixmap is wide enough that the copy is always a single
+/// unclipped xcb_copy_area — no fill step, no clipping arithmetic, no second copy.
 ///
-/// At scroll offset O (0 ≤ O < cycle_w), blitFrame copies exactly seg_w
-/// pixels from position O into the offscreen pixmap at the segment's left
-/// edge.  Because the pixmap is wide enough for any O in that range, the
-/// copy is always a single, unclipped xcb_copy_area.  No fill step, no
-/// clipping arithmetic, no second copy.
-///
-/// pixmap_w must satisfy:
-///   pixmap_w ≥ max(left_pad + cycle_w + text_w,   // text B fits
-///                  cycle_w + seg_w)                // blit at max offset fits
+/// Required: pixmap_w ≥ max(left_pad + cycle_w + text_w, cycle_w + seg_w)
 /// Callers (carousel.zig) compute this before calling init().
 pub const CarouselPixmap = struct {
     conn:     *core.xcb.xcb_connection_t,
@@ -579,8 +495,6 @@ pub const CarouselPixmap = struct {
     pixmap_w: u16,
     height:   u16,
 
-    /// Allocate an XCB pixmap of size (pixmap_w × bar_height) and a Cairo
-    /// surface over it.  The pixmap is uninitialised until render() is called.
     pub fn init(dc: *const DrawContext, pixmap_w: u16) !CarouselPixmap {
         const pixmap = core.xcb.xcb_generate_id(dc.conn);
         _ = core.xcb.xcb_create_pixmap(dc.conn, dc.depth, pixmap,
@@ -604,18 +518,13 @@ pub const CarouselPixmap = struct {
                    .surface = surface, .pixmap_w = pixmap_w, .height = dc.height };
     }
 
-    /// Free the GC, Cairo surface, and XCB pixmap.
     pub fn deinit(self: *CarouselPixmap) void {
         _ = core.xcb.xcb_free_gc(self.conn, self.gc);
         c.cairo_surface_destroy(self.surface);
         _ = core.xcb.xcb_free_pixmap(self.conn, self.pixmap);
     }
 
-    /// Fill the pixmap with `bg` then render `text` at two x-positions:
-    ///   copy A at x = left_pad
-    ///   copy B at x = left_pad + cycle_w
-    ///
-    /// Called once when the title changes; blitFrame handles every tick after.
+    /// Called once per title change; subsequent ticks use blitFrame.
     pub fn render(
         self:     *CarouselPixmap,
         dc:       *DrawContext,
@@ -666,11 +575,7 @@ pub const CarouselPixmap = struct {
         c.cairo_surface_flush(self.surface);
     }
 
-    /// Copy pixmap[offset .. offset+seg_w) → dst[dst_x .. dst_x+seg_w).
-    ///
-    /// Single xcb_copy_area — no clipping, no second copy, no fill.
-    /// The wide pixmap layout guarantees the source range is always in bounds
-    /// for any offset in [0, cycle_w).
+    /// Single xcb_copy_area; the wide-pixmap layout guarantees source is always in bounds.
     pub fn blitFrame(
         self:   *const CarouselPixmap,
         dst:    u32,
@@ -697,9 +602,7 @@ fn createPangoLayout(ctx: *c.cairo_t, dpi: f32) !*c.PangoLayout {
     return layout;
 }
 
-/// Search all screens and depth levels to find the xcb_visualtype_t whose
-/// `visual_id` matches the given value. Returns null if not found, in which
-/// case the caller should fall back to `getDefaultVisualType`.
+/// Returns null if not found; caller should fall back to `getDefaultVisualType`.
 fn findVisualType(conn: *core.xcb.xcb_connection_t, visual_id: u32) ?*core.xcb.xcb_visualtype_t {
     const setup = core.xcb.xcb_get_setup(conn);
     var screen_iter = core.xcb.xcb_setup_roots_iterator(setup);
@@ -715,13 +618,8 @@ fn findVisualType(conn: *core.xcb.xcb_connection_t, visual_id: u32) ?*core.xcb.x
     return null;
 }
 
-/// Return the first visual type available on the root screen.
-///
-/// Walks the screen's depth iterator and returns on the very first visual
-/// entry found. This is the safe unconditional fallback used when a specific
-/// visual ID cannot be located.  Panics in all build modes rather than invoking
-/// undefined behaviour if the X server reports zero visuals — a condition that
-/// cannot occur on any real server.
+/// Unconditional fallback when a specific visual ID cannot be located.
+/// Panics if the X server reports zero visuals (cannot occur on a real server).
 fn getDefaultVisualType(screen: *core.xcb.xcb_screen_t) *core.xcb.xcb_visualtype_t {
     var depth_iter = core.xcb.xcb_screen_allowed_depths_iterator(screen);
     while (depth_iter.rem > 0) : (core.xcb.xcb_depth_next(&depth_iter)) {
@@ -731,20 +629,15 @@ fn getDefaultVisualType(screen: *core.xcb.xcb_screen_t) *core.xcb.xcb_visualtype
     @panic("X server reported zero visuals — cannot create a drawing context");
 }
 
-/// Append a single whitespace-separated Pango style token (e.g. "Bold", "Italic", "12")
-/// to the font name being assembled in `result`.
 inline fn appendFontStyleToken(result: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, token: []const u8) !void {
     try result.append(allocator, ' ');
     try result.appendSlice(allocator, token);
 }
 
-/// Convert an Xft-style `"FontName:size=N:weight=bold"` descriptor to the
-/// Pango `"FontName Bold N"` format that pango_font_description_from_string
-/// expects. Returns `xft_name` unchanged when no `:` separator is present.
-/// Results are memoised in `font_conversion_cache` to avoid repeated work.
+/// Converts Xft `"FontName:size=N:weight=bold"` to Pango `"FontName Bold N"` format.
+/// Returns `xft_name` unchanged when no `:` is present. Results cached in `font_conversion_cache`.
 ///
-/// ALLOCATOR CONTRACT: the same `allocator` must be passed on every call and
-/// to `deinitFontCache`.  Mixing allocators produces use-after-free bugs.
+/// ALLOCATOR CONTRACT: the same `allocator` must be passed on every call and to `deinitFontCache`.
 fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const u8 {
     if (font_conversion_cache == null)
         font_conversion_cache = std.StringHashMap([]const u8).init(allocator);
@@ -789,14 +682,7 @@ fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const 
     return converted;
 }
 
-/// Release the font-name conversion cache. Call once at shutdown.
-///
-/// Ownership invariant: every cache entry was inserted by `convertFontName`,
-/// which always heap-allocates both the key (`allocator.dupe(xft_name)`) and
-/// the value (`result.toOwnedSlice()`).  These are always distinct allocations,
-/// so both can be freed unconditionally without a pointer-equality guard.
-/// Callers that pass a no-conversion name (no `:` separator) take an early
-/// return before any cache insertion, so no aliased key/value pairs exist.
+/// Call once at shutdown. Key and value are always distinct heap allocations, so both are freed unconditionally.
 pub fn deinitFontCache(allocator: std.mem.Allocator) void {
     if (font_conversion_cache) |*cache| {
         var iter = cache.iterator();

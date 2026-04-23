@@ -1,6 +1,5 @@
-
 //! Window lifecycle
-//! Handles window mapping/unmapping/destroy, configure, enter/button events, and per-window property caching.
+//! Manages window creation, destruction, configuration, and event handling for all managed windows.
 
 const std   = @import("std");
 const build = @import("build_options");
@@ -25,10 +24,10 @@ const workspaces = if (build.has_workspaces) @import("workspaces") else struct {
 
 const tiling = if (build.has_tiling) @import("tiling") else struct {};
 
-const drag = if (build.has_tiling) @import("drag") else struct {
-    pub fn isDragging() bool { return false; }
-    pub fn isResizingWindow(_: u32) bool { return false; }
-    pub fn getDragLastRect() utils.Rect { return .{}; }
+const drag = if (build.has_drag) @import("drag") else struct {
+    pub fn isDragging()              bool       { return false; }
+    pub fn isResizingWindow(_: u32)  bool       { return false; }
+    pub fn getDragLastRect()         utils.Rect { return .{ .x = 0, .y = 0, .width = 0, .height = 0 }; }
 };
 
 const bar = if (build.has_bar) @import("bar") else struct {
@@ -144,7 +143,7 @@ var atoms: struct {
 
 // Geometry cache: owned by tiling when present; flat-array fallback otherwise.
 var g_geom_cache: if (build.has_tiling) void else struct {
-    const Slot = struct { win: u32 = 0, rect: utils.Rect = .{} };
+    const Slot = struct { win: u32 = 0, rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 } };
     slots: [64]Slot = [1]Slot{.{}} ** 64,
     len:   usize    = 0,
 } = if (build.has_tiling) {} else .{};
@@ -974,30 +973,31 @@ pub fn registerSpawn(workspace: u8, pid: u32) void {
 // inside the new window's bounds at the moment it appeared, not at the
 // moment the key was pressed.
 
-var g_prefetched_ptr: ?*xcb.xcb_query_pointer_reply_t = null;
+var g_prefetched_ptr_cookie: ?xcb.xcb_query_pointer_cookie_t = null;
 
 /// Called by input.executeShellCommand immediately after fork().
-/// Fires and drains xcb_query_pointer while we are still in the key-press
-/// handler, so mapWindowToScreen can consume the cached reply for free.
+/// Fires xcb_query_pointer but does NOT drain the reply.  By the time the
+/// MapRequest arrives (typically hundreds of ms later, during app startup),
+/// the reply is already sitting in the XCB socket buffer, so
+/// takePrefetchedSpawnPointer drains it for free instead of blocking the
+/// key-press handler with a synchronous round-trip.
 pub fn prefetchSpawnPointer() void {
-    // Free any stale prefetch from a previous spawn that never consumed it
+    // Discard any stale prefetch from a previous spawn that never consumed it
     // (e.g. the window was routed to a non-current workspace).
-    if (g_prefetched_ptr) |old| {
-        std.c.free(old);
-        g_prefetched_ptr = null;
+    if (g_prefetched_ptr_cookie) |old| {
+        xcb.xcb_discard_reply(core.conn, old.sequence);
+        g_prefetched_ptr_cookie = null;
     }
-    const cookie = xcb.xcb_query_pointer(core.conn, core.root);
-    g_prefetched_ptr = xcb.xcb_query_pointer_reply(core.conn, cookie, null);
+    g_prefetched_ptr_cookie = xcb.xcb_query_pointer(core.conn, core.root);
 }
 
-/// Consume and return the prefetched pointer reply, transferring ownership
-/// to the caller.  Returns null when no prefetch is available (e.g. the
-/// window was opened programmatically without a keybind triggering spawn).
+/// Consume the prefetched cookie and drain its reply.  Returns null when no
+/// prefetch is available (e.g. the window was opened programmatically).
 /// Caller is responsible for calling std.c.free() on the returned pointer.
 fn takePrefetchedSpawnPointer() ?*xcb.xcb_query_pointer_reply_t {
-    const ptr = g_prefetched_ptr;
-    g_prefetched_ptr = null;
-    return ptr;
+    const cookie = g_prefetched_ptr_cookie orelse return null;
+    g_prefetched_ptr_cookie = null;
+    return xcb.xcb_query_pointer_reply(core.conn, cookie, null);
 }
 
 /// Record the cursor position from a pre-drained pointer reply for later
@@ -1011,13 +1011,17 @@ fn snapshotSpawnCursorFromReply(ptr_reply: ?*xcb.xcb_query_pointer_reply_t, supp
     spawn_cursor.y = ptr.*.root_y;
 }
 
-/// Cookies for all properties fired at the start of a MapRequest.
+/// Cookies for all requests fired at the start of a MapRequest.
 const PropertyCookies = struct {
     protocols:    xcb.xcb_get_property_cookie_t,
     hints:        xcb.xcb_get_property_cookie_t,
     normal_hints: xcb.xcb_get_property_cookie_t,
     wm_class:     xcb.xcb_get_property_cookie_t,
     net_wm_pid:   ?xcb.xcb_get_property_cookie_t,
+    /// Pipelined alongside the property requests so the pointer position is
+    /// fetched in the same round-trip.  Consumed by mapWindowToScreen when no
+    /// keybind-time prefetch is available; discarded otherwise.
+    ptr:          xcb.xcb_query_pointer_cookie_t,
 };
 
 /// Fires all property requests in a single batch before any blocking work.
@@ -1051,6 +1055,11 @@ fn firePropertyCookies(win: u32) PropertyCookies {
                 xcb.XCB_ATOM_CARDINAL, 0, 1,
             );
         },
+        // Pipelined here so the pointer position is included in the same
+        // batch as the property requests.  By the time any reply is drained
+        // (parseSizeHintsIntoCache pays the one round-trip), this reply is
+        // already buffered and mapWindowToScreen can consume it for free.
+        .ptr = xcb.xcb_query_pointer(core.conn, core.root),
     };
 }
 
@@ -1076,17 +1085,25 @@ fn firePropertyCookies(win: u32) PropertyCookies {
 /// workspace.  Moving it outside the grab means the X server and compositor
 /// are not locked for that duration, eliminating the compositor stall that
 /// previously caused visible frame drops on every spawn.
-fn mapWindowToScreen(win: u32) void {
-    // Consume the pointer reply prefetched at key-press time (zero round-trip cost).
-    // Falls back to a fresh round-trip only when no prefetch is available
-    // (programmatic MapRequest, not triggered by a user keybind).
+fn mapWindowToScreen(win: u32, ptr_cookie: xcb.xcb_query_pointer_cookie_t) void {
+    // Drain the pointer position.  Either path is a free buffer read —
+    // no new round-trip is incurred here:
+    //   • keybind spawn:          consume the prefetch cookie fired at key-press
+    //                             time; the reply has been in the XCB buffer since
+    //                             then (during the entire app startup period).
+    //   • programmatic MapRequest: drain the cookie pipelined with the property
+    //                             batch in firePropertyCookies; parseSizeHintsIntoCache
+    //                             already paid the one shared round-trip above.
+    // In both cases the ptr_cookie from the batch is either consumed or discarded
+    // so no sequence number is leaked.
     const suppress_reason = focus.getSuppressReason();
     const ptr_reply: ?*xcb.xcb_query_pointer_reply_t = blk: {
-        if (takePrefetchedSpawnPointer()) |pre| break :blk pre;
-        // No prefetch — fire and drain now, before the grab, so the reply
-        // round-trip does not extend the grab duration.
-        const cookie = xcb.xcb_query_pointer(core.conn, core.root);
-        break :blk xcb.xcb_query_pointer_reply(core.conn, cookie, null);
+        if (takePrefetchedSpawnPointer()) |pre| {
+            // Prefetch consumed — discard the redundant batch cookie.
+            xcb.xcb_discard_reply(core.conn, ptr_cookie.sequence);
+            break :blk pre;
+        }
+        break :blk xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null);
     };
     defer if (ptr_reply) |r| std.c.free(r);
 
@@ -1108,6 +1125,7 @@ fn mapWindowToScreen(win: u32) void {
                 utils.pushWindowOffscreen(core.conn, win);
             }
         }
+        restoreFloatGeom(win);
     }
 
     // ── Inside the grab: atomic map, focus, borders ─────────────────────────
@@ -1147,6 +1165,7 @@ fn discardPropertyCookies(cookies: PropertyCookies) void {
     xcb.xcb_discard_reply(core.conn, cookies.normal_hints.sequence);
     xcb.xcb_discard_reply(core.conn, cookies.wm_class.sequence);
     if (cookies.net_wm_pid) |c| xcb.xcb_discard_reply(core.conn, c.sequence);
+    xcb.xcb_discard_reply(core.conn, cookies.ptr.sequence);
 }
 
 pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
@@ -1184,7 +1203,10 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
 
     populateFocusCacheFromCookies(core.conn, win, cookies.protocols, cookies.hints);
 
-    if (on_current) mapWindowToScreen(win) else registerWindowOffscreen(win);
+    if (on_current) mapWindowToScreen(win, cookies.ptr) else {
+        xcb.xcb_discard_reply(core.conn, cookies.ptr.sequence);
+        registerWindowOffscreen(win);
+    }
 }
 
 // Unmap / destroy

@@ -1,20 +1,16 @@
-//! Master-stack tiling layout.
-//!
-//! Divides the screen into a master pane (left or right) holding the first
-//! `master_count` windows, and a stack pane holding the rest. When the stack
-//! overflows its visible height, windows spill into a column-major overflow
-//! grid rather than being clipped or hidden.
+//! Master-stack tiling layout
+//! Divides the screen into a master pane and a stack pane, with overflow handling for extra windows.
 
-const constants = @import("constants");
 const utils     = @import("utils");
-const layouts   = @import("layouts");
-const tiling    = @import("tiling");
-const State     = tiling.State;
+const constants = @import("constants");
+
+const tiling  = @import("tiling");
+const layouts = @import("layouts");
 
 /// Tile `windows` into the master-stack layout using the given screen area.
 pub fn tileWithOffset(
     ctx:      *const layouts.LayoutCtx,
-    state:    *State,
+    state:    *tiling.State,
     windows:  []const u32,
     screen_w: u16,
     screen_h: u16,

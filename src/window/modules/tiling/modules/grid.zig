@@ -1,10 +1,5 @@
-//! Grid tiling layout.
-//!
-//! Arranges windows in the smallest square grid that fits all windows.
-//! Two variants are supported via `State.layout_variants.grid`:
-//!   - `.rigid`   — all windows share equal cell widths.
-//!   - `.relaxed` — windows on a partial last row divide the full screen width,
-//!                  so the last row doesn't have awkward narrow cells.
+//! Grid tiling layout
+//! Arranges windows in an evenly divided grid, with rigid or relaxed row sizing.
 
 const constants = @import("constants");
 const utils     = @import("utils");
@@ -34,8 +29,10 @@ pub fn tileWithOffset(
 
     // In relaxed mode, windows on a partial last row divide the full screen
     // width among themselves rather than using the narrower grid-column width.
+    // The computation is gated on .relaxed so the division is skipped entirely
+    // on the default .rigid path where partial_cell_w is never used.
     const last_row_count = n % grid.cols;
-    const partial_cell_w: u16 = if (last_row_count != 0) blk: {
+    const partial_cell_w: u16 = if (state.layout_variants.grid == .relaxed and last_row_count != 0) blk: {
         const count: u16 = @intCast(last_row_count);
         break :blk (screen_w -| (count + 1) * m.gap) / count;
     } else cell_w;
@@ -59,9 +56,7 @@ pub fn tileWithOffset(
     }
 }
 
-// ============================================================================
 // Private helpers
-// ============================================================================
 
 /// Returns the window content dimension for a cell of `cell_size`, subtracting
 /// the combined border margin. Falls back to MIN_WINDOW_DIM on underflow.

@@ -1,30 +1,5 @@
-//! Window minimization: hide/restore with LIFO, FIFO, or bulk restore.
-//!
-//! Minimized windows remain in their workspace's window list so the bar
-//! keeps rendering them, but they are moved offscreen and removed from
-//! tiling so remaining windows fill the freed space.
-//!
-//! Three restore operations are provided, all scoped to the current workspace:
-//!   unminimize(.lifo): restore the most recently minimized window (stack pop)
-//!   unminimize(.fifo): restore the least recently minimized window (queue dequeue)
-//!   unminimizeAll:     restore every minimized window on the current workspace
-//!
-//! Ordering is tracked via a monotonic per-entry timestamp — no separate
-//! per-workspace ordered lists are maintained.  Scanning the fixed buffer for
-//! the LIFO/FIFO candidate is O(n), but n is always tiny in practice (typically
-//! < 10 minimized windows), the entire buffer fits in cache, and there is no
-//! hashing cost, no heap pointer chase, and no allocator dependency.
-//!
-//! Fullscreen interaction: minimizing a fullscreen window tears down the
-//! fullscreen state but saves the pre-fullscreen geometry. Restoring such
-//! a window puts it back into fullscreen exactly as it was.
-//!
-//! Thread safety: this module is NOT thread-safe.  All callers are assumed to
-//! run on the single WM event-loop thread.  No internal synchronization is
-//! performed; adding concurrent callers requires external locking.
-//!
-//! NOTE: init() is now infallible (void return).  Callers that previously did
-//! `try minimize.init()` should change the call to `minimize.init()`.
+//! Window minimization
+//! Hides and restores windows with LIFO, FIFO, or bulk restore modes, scoped to the current workspace.
 
 const std   = @import("std");
 const build = @import("build_options");

@@ -1,14 +1,5 @@
-//! Shared layout infrastructure: geometry constraints, window data cache, and
-//! the `configureWithHints` entry point used by every layout module.
-//!
-//! This file is deliberately free of layout-specific knowledge. It defines the
-//! types and helpers that are *passed into* layout modules, keeping each layout
-//! decoupled from both each other and from the tiling state.
-//!
-//! Performance note: WM_NORMAL_HINTS constraints (SizeHints) are embedded
-//! directly inside each CacheMap slot alongside the geometry and border color.
-//! `configureWithHints` performs a single O(1) hash probe per window per retile,
-//! making the full retile pass O(N) in the number of open windows.
+//! Shared tiling layout infrastructure
+//! Provides the geometry constraints and the configuration entry point shared by all layout modules.
 
 const std     = @import("std");
 const core    = @import("core");
@@ -46,31 +37,6 @@ pub const SizeHints = struct {
 };
 
 // Per-window geometry, border-color, and size-hint cache
-//
-// Stores the last-applied geometry, border color, AND WM_NORMAL_HINTS
-// constraints for each window in a single open-addressing hash table.  All
-// three fields share one slot so `configureWithHints` performs ONE O(1) hash
-// probe per window per retile — down from O(N) linear scan, making the full
-// retile pass O(N) total instead of O(N²).
-//
-// `configureWithHints` writes `.rect`; `applyBorderColor` writes `.border`;
-// `CacheMap.cacheHints` writes `.hints` at map time.
-//
-// Hash table design:
-//   • Open addressing with linear probing.  Hash table avoids heap allocation,
-//     keeps no allocator reference, has no deinit, and has no partial-failure
-//     states — all the properties the previous flat array offered.
-//   • Table capacity = 512 (power of two).  Max live entries = 256 (load ≤ 0.5).
-//     At load 0.5 the expected probe chain length is 1.5; worst case is bounded.
-//   • Hash: Knuth's multiplicative constant (2654435761 ≈ 2³² / φ).
-//     XCB allocates window IDs as near-sequential integers; the multiplicative
-//     hash spreads them across all 9 index bits with minimal collision.
-//   • Deletion: backward-shift (no tombstones).  When an entry is removed,
-//     subsequent entries in the same probe run are pulled back one step so that
-//     lookup probes never skip over a gap left by a deletion.  This keeps probe
-//     chains short without any bookkeeping beyond the shift itself.
-//   • EMPTY_WIN = 0 is the empty-slot sentinel.  XCB never allocates ID 0
-//     (it is XCB_NONE), so this is safe for the lifetime of the process.
 
 /// Combined per-window cache entry: last geometry, last border color, and
 /// WM_NORMAL_HINTS size constraints.
@@ -215,10 +181,23 @@ pub const CacheMap = struct {
         self.slots[hole] = .{}; // clear the final hole (original or shifted)
     }
 
-    /// Reset the cache to empty in O(table_size) time.
-    /// Zeroes all slots since EMPTY_WIN = 0 and WindowData default is all-zero.
+    /// Reset the cache to empty in O(count) time.
+    ///
+    /// Iterates only occupied slots rather than zeroing all 512 unconditionally.
+    /// With typical window counts (10–80) this avoids zeroing 6–50× more memory
+    /// than necessary, making this safe to call on a hot path.
+    ///
+    /// Scans the table sequentially, clears each occupied slot, and stops once
+    /// all `count` entries have been visited.
     pub fn clearRetainingCapacity(self: *CacheMap) void {
-        self.slots = std.mem.zeroes([hash_table_cap]Slot);
+        var i: usize = 0;
+        var cleared: usize = 0;
+        while (cleared < self.count) : (i = (i + 1) & hash_table_mask) {
+            if (self.slots[i].win != EMPTY_WIN) {
+                self.slots[i] = .{};
+                cleared += 1;
+            }
+        }
         self.count = 0;
     }
 
@@ -395,13 +374,18 @@ fn applyHintsToRect(rect: utils.Rect, h: SizeHints) utils.Rect {
     // Pass 4: Aspect ratio (ICCCM §4.1.2.3, matching dwm's applysizehints).
     //   min_aspect = min_aspect.y / min_aspect.x — lower bound on h/w
     //   max_aspect = max_aspect.x / max_aspect.y — upper bound on w/h
+    //
+    // Divisions replaced with cross-multiplications to avoid two FP divides on
+    // every retile for windows that declare PAspect hints (terminals, players):
+    //   fw/fh > max_aspect  →  fw > fh * max_aspect
+    //   fh/fw > min_aspect  →  fh > fw * min_aspect
     if (h.min_aspect > 0.0 and h.max_aspect > 0.0) {
         const fw: f32 = @floatFromInt(w);
         const fh: f32 = @floatFromInt(ht);
-        if (h.max_aspect < fw / fh) {
+        if (fw > fh * h.max_aspect) {
             w = @intFromFloat(@round(fh * h.max_aspect));
             if (h.max_width > 0) w = @min(w, h.max_width);
-        } else if (h.min_aspect < fh / fw) {
+        } else if (fh > fw * h.min_aspect) {
             ht = @intFromFloat(@round(fw * h.min_aspect));
             if (h.max_height > 0) ht = @min(ht, h.max_height);
         }

@@ -1,4 +1,5 @@
-//! Fallback configuration -- terminal and font auto-detection.
+//! Fallback configuration
+//! Auto-detects a suitable terminal and font when no user config is provided.
 
 const std   = @import("std");
 const debug = @import("debug");
