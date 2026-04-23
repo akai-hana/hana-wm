@@ -1,11 +1,9 @@
 # single-dir codebase
 dev/codebase/*
 
-# temporary location, but for now let's ignore zig's binary output
-zig-out/
-
 # zig garbage
 .zig-cache/
+zig-out/
 
 # make garbage
 *.orig
