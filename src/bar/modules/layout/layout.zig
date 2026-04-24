@@ -16,6 +16,7 @@ pub fn getIcon(layout: anytype) []const u8 {
         .monocle   => "[M]",
         .grid      => "[+]",
         .fibonacci => "[@]",
+        .leaf      => "[/]",
         .floating  => "><>",
     };
 }

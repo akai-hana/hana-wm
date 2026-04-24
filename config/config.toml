@@ -52,6 +52,8 @@ global_layout = false # Global or per-workspace layouts?
 
 #       Layout          Variation  Workspaces
 layouts = [                                 # (default/alternative) 
+        "scroll",
+        "leaf",
 	"master-stack",                     # "lifo"/"fifo"
 	"monocle",      "gaps",    # "5",   # "gapless"/"gaps"
 	"grid",         "relaxed", # "6,8", # "rigid"/"relaxed"

@@ -50,6 +50,7 @@ const master    = if (build.has_master)    @import("master")    else LayoutStub;
 const monocle   = if (build.has_monocle)   @import("monocle")   else LayoutStub;
 const grid      = if (build.has_grid)      @import("grid")      else LayoutStub;
 const fibonacci = if (build.has_fibonacci) @import("fibonacci") else LayoutStub;
+const leaf       = if (build.has_leaf)       @import("leaf")       else LayoutStub;
 
 // Module constants 
 
@@ -68,6 +69,7 @@ pub const Layout = enum {
     monocle,
     grid,
     fibonacci,
+    leaf,
     /// Windows are left at their current positions; no tiling is applied.
     /// Windows are left at their current positions; never part of the normal layout cycle.
     floating,
@@ -105,7 +107,7 @@ pub const State = struct {
     /// Runtime layout cycle: intersection of config `layouts` and disk-present
     /// layout files. `stepLayout` walks this so layouts omitted from the
     /// config are invisible at runtime even if their .zig file exists on disk.
-    enabled_layouts:       [4]Layout,
+    enabled_layouts:       [5]Layout,
     enabled_layout_count:  u8,
 
     /// Per-workspace geometry validity bitmask (64 bits -> up to 64 workspaces).
@@ -679,6 +681,7 @@ pub inline fn isLayoutAvailable(layout: Layout) bool {
         .monocle   => build.has_monocle,
         .grid      => build.has_grid,
         .fibonacci => build.has_fibonacci,
+        .leaf       => build.has_leaf,
         .floating  => true, // always built-in
     };
 }
@@ -844,26 +847,28 @@ const layout_cycle: []const Layout = blk: {
     if (build.has_monocle)   list = list ++ &[_]Layout{.monocle};
     if (build.has_grid)      list = list ++ &[_]Layout{.grid};
     if (build.has_fibonacci) list = list ++ &[_]Layout{.fibonacci};
+    if (build.has_leaf)       list = list ++ &[_]Layout{.leaf};
     if (list.len == 0) @compileError("No tiling layouts found. Add at least one .zig file to src/tiling/layouts/.");
     break :blk list;
 };
 
-// layoutFromString — plain if-else over 5 fixed strings.
-// StaticStringMap carries comptime build complexity for no runtime gain at n=5.
+// layoutFromString — plain if-else over 6 fixed strings.
+// StaticStringMap carries comptime build complexity for no runtime gain at n=6.
 inline fn layoutFromString(name: []const u8) ?Layout {
     if (std.mem.eql(u8, name, "master-stack") or
         std.mem.eql(u8, name, "master"))    return .master;
     if (std.mem.eql(u8, name, "monocle"))   return .monocle;
     if (std.mem.eql(u8, name, "grid"))      return .grid;
     if (std.mem.eql(u8, name, "fibonacci")) return .fibonacci;
+    if (std.mem.eql(u8, name, "leaf"))       return .leaf;
     return null;
 }
 
 /// Build the runtime-enabled layout list from the config's `layouts` array,
 /// keeping only entries whose .zig file is present on disk. Duplicates are
 /// dropped. Falls back to `layout_cycle` when the config produces an empty list.
-fn parseEnabledLayouts(layouts_cfg: []const []const u8) struct { arr: [4]Layout, len: u8 } {
-    var arr: [4]Layout = undefined;
+fn parseEnabledLayouts(layouts_cfg: []const []const u8) struct { arr: [5]Layout, len: u8 } {
+    var arr: [5]Layout = undefined;
     var len: u8 = 0;
     for (layouts_cfg) |name| {
         if (len >= arr.len) break;
@@ -983,6 +988,7 @@ fn invokeLayout(
         .monocle   => monocle.tileWithOffset(ctx, s, wins, w, h, y),
         .grid      => grid.tileWithOffset(ctx, s, wins, w, h, y),
         .fibonacci => fibonacci.tileWithOffset(ctx, s, wins, w, h, y),
+        .leaf       => leaf.tileWithOffset(ctx, s, wins, w, h, y),
         .floating  => floating.tileWithOffset(ctx, s, wins, w, h, y),
     }
 }
