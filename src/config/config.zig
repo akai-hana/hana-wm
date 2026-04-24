@@ -744,7 +744,7 @@ inline fn parseIndicator(raw: []const u8) [3]u8 {
 }
 
 const KNOWN_LAYOUT_SET = std.StaticStringMap(void).initComptime(.{
-    .{ "master-stack", {} }, .{ "monocle", {} }, .{ "grid", {} }, .{ "fibonacci", {} },
+    .{ "master-stack", {} }, .{ "monocle", {} }, .{ "grid", {} }, .{ "fibonacci", {} }, .{ "leaf", {} },
 });
 
 /// Returns true if `name` (case-insensitive) is a recognised layout name.
