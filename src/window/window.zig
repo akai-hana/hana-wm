@@ -13,8 +13,8 @@ const debug     = @import("debug");
 const tracking = @import("tracking");
 const focus    = @import("focus");
 
-const fullscreen = if (build.has_fullscreen) @import("fullscreen") else struct {};
-const minimize   = if (build.has_minimize)   @import("minimize")   else struct {};
+const fullscreen = if (build.has_fullscreen) @import("fullscreen");
+const minimize   = if (build.has_minimize)   @import("minimize")  ;
 const workspaces = if (build.has_workspaces) @import("workspaces") else struct {
     pub const State     = struct {};
     pub const Workspace = struct {};
@@ -22,7 +22,7 @@ const workspaces = if (build.has_workspaces) @import("workspaces") else struct {
     pub fn getCurrentWorkspaceObject() ?*Workspace { return null; }
 };
 
-const tiling = if (build.has_tiling) @import("tiling") else struct {};
+const tiling = if (build.has_tiling) @import("tiling");
 
 const drag = if (build.has_drag) @import("drag") else struct {
     pub fn isDragging()              bool       { return false; }
@@ -156,7 +156,7 @@ var borders_flushed_this_batch: bool = false;
 
 /// Save `rect` as the last-known geometry for `win`.
 pub fn saveWindowGeom(win: u32, rect: utils.Rect) void {
-    if (comptime build.has_tiling) { tiling.saveWindowGeom(win, rect); return; }
+    if (build.has_tiling) { tiling.saveWindowGeom(win, rect); return; }
     const c = &g_geom_cache;
     for (c.slots[0..c.len]) |*s| { if (s.win == win) { s.rect = rect; return; } }
     if (c.len < c.slots.len) { c.slots[c.len] = .{ .win = win, .rect = rect }; c.len += 1; }
@@ -164,7 +164,7 @@ pub fn saveWindowGeom(win: u32, rect: utils.Rect) void {
 
 /// Return the last-known geometry for `win`, or null if none is cached.
 pub fn getWindowGeom(win: u32) ?utils.Rect {
-    if (comptime build.has_tiling) return tiling.getWindowGeom(win);
+    if (build.has_tiling) return tiling.getWindowGeom(win);
     const c = &g_geom_cache;
     for (c.slots[0..c.len]) |s| if (s.win == win) {
         return if (s.rect.width > 0 or s.rect.height > 0) s.rect else null;
@@ -1309,6 +1309,22 @@ fn focusWindowUnderPointer(ptr_reply: ?*xcb.xcb_query_pointer_reply_t) void {
         minimize.focusMasterOrFirst
     else
         null;
+
+    // Scroll layout: windows can be off-screen, so the pointer is often not
+    // over any managed window.  Bypass pointer-based focus entirely and use
+    // the focus history recorded by tiling.updateWindowFocus instead.
+    // takePrevFocusedForScroll is a no-op (returns null) in all other layouts.
+    if (build.has_tiling) {
+        if (tiling.takePrevFocusedForScroll()) |prev| {
+            if (tracking.isOnCurrentWorkspaceAndVisible(prev)) {
+                focus.setFocus(prev, .tiling_operation);
+                return;
+            }
+            // prev was already closed or on another workspace — fall through
+            // to the normal pointer / best-available path.
+        }
+    }
+
     // reply memory is owned by the caller; no std.c.free here.
     const reply = ptr_reply orelse {
         focus.focusBestAvailable(.tiling_operation, tracking.isOnCurrentWorkspaceAndVisible, fallback);
@@ -1686,7 +1702,7 @@ fn updateWorkspaceBordersImpl(comptime skip_tiled: bool) void {
     for (tracking.allWindows()) |_entry| {
         const win = _entry.win;
         if (_entry.mask & cur_bit == 0) continue;
-        if (comptime build.has_tiling) {
+        if (build.has_tiling) {
             if (skip_tiled and core.config.tiling.enabled) {
                 // Post-retile: tiled windows already updated by configureWithHints.
                 if (tiling.isWindowTiled(win)) continue;
@@ -1694,7 +1710,7 @@ fn updateWorkspaceBordersImpl(comptime skip_tiled: bool) void {
         }
         const color = borderColor(win);
         // Dedup via the tiling CacheMap: skip the XCB call when color is unchanged.
-        if (comptime build.has_tiling) {
+        if (build.has_tiling) {
             if (tiling.sendBorderColorIfChanged(win, color)) continue;
         }
         _ = xcb.xcb_change_window_attributes(core.conn, win,

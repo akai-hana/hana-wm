@@ -352,6 +352,10 @@ const ACTION_MAP = std.StaticStringMap(types.Action).initComptime(.{
     .{ "focus_prev",             .focus_prev_window      },
     .{ "move_window_next",       .move_window_next       },
     .{ "move_window_prev",       .move_window_prev       },
+    .{ "scroll_view_left",       .scroll_view_left       },
+    .{ "scroll_view_right",      .scroll_view_right      },
+    .{ "scroll_left",            .scroll_view_left       },  // short alias
+    .{ "scroll_right",           .scroll_view_right      },  // short alias
 });
 
 const GlobEntry = struct {
@@ -744,7 +748,7 @@ inline fn parseIndicator(raw: []const u8) [3]u8 {
 }
 
 const KNOWN_LAYOUT_SET = std.StaticStringMap(void).initComptime(.{
-    .{ "master-stack", {} }, .{ "monocle", {} }, .{ "grid", {} }, .{ "fibonacci", {} }, .{ "leaf", {} },
+    .{ "master-stack", {} }, .{ "monocle", {} }, .{ "grid", {} }, .{ "fibonacci", {} }, .{ "leaf", {} }, .{ "scroll", {} },
 });
 
 /// Returns true if `name` (case-insensitive) is a recognised layout name.

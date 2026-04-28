@@ -214,7 +214,7 @@ pub fn fetchWindowTitleInto(
     ) catch {};
 }
 
-// Private — empty workspace fast path
+// Empty workspace fast path
 
 /// If `count` is zero: tears down the carousel, fills the segment background,
 /// and returns the segment's end x so the caller can return immediately.
@@ -228,7 +228,7 @@ inline fn emptyWorkspace(ctx: TitleRenderContext, count: usize) ?u16 {
     return ctx.start_x + ctx.width;
 }
 
-// Private — single-window rendering
+// Single-window rendering
 
 /// Shared rendering logic for both `draw()` and `drawCached()`.
 ///
@@ -312,7 +312,7 @@ fn drawSingleWindow(
     );
 }
 
-// Private — split-view segmented titles
+// Split-view segmented titles
 
 /// Renders one title segment per window in a horizontal split-view layout.
 /// Windows are sorted spatially so each segment position is stable across focus changes.
@@ -513,8 +513,6 @@ fn drawSegmentedTitles(
         }
     }
 }
-
-// Private helpers — window sorting
 
 /// Sort order for the split-view segment layout:
 ///

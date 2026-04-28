@@ -16,10 +16,10 @@ const window   = @import("window");
 const tracking = @import("tracking");
 const focus    = @import("focus");
 
-const fullscreen = if (build.has_fullscreen) @import("fullscreen") else struct {};
-const minimize   = if (build.has_minimize) @import("minimize") else struct {};
+const fullscreen = if (build.has_fullscreen) @import("fullscreen");
+const minimize   = if (build.has_minimize) @import("minimize");
 
-const tiling       = if (build.has_tiling) @import("tiling") else struct {};
+const tiling       = if (build.has_tiling) @import("tiling");
 const TilingLayout = if (build.has_tiling) tiling.Layout else u0; // u0 sentinel when tiling is absent: zero-size, never stored
 
 const bar = if (build.has_bar) @import("bar") else struct {
@@ -33,7 +33,7 @@ const bar = if (build.has_bar) @import("bar") else struct {
 /// Shim so call-sites don't need to repeat the has_minimize comptime guard.
 /// Returns false when minimize is absent — windows are never considered minimized.
 inline fn isMinimized(win: u32) bool {
-    return if (comptime build.has_minimize) minimize.isMinimized(win) else false;
+    return if (build.has_minimize) minimize.isMinimized(win) else false;
 }
 
 pub const Workspace = struct {
@@ -229,14 +229,14 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
     setWindowMask(s, win, new_mask);
 
     if (isMinimized(win)) {
-        if (comptime build.has_minimize) minimize.moveToWorkspace(win, target_ws);
+        if (build.has_minimize) minimize.moveToWorkspace(win, target_ws);
     }
 
     // If this window is fullscreen on the current workspace, clean up the
     // fullscreen side-effects on the source workspace (bar, floating windows,
     // border) and transfer the record to target_ws so the window is still
     // fullscreen when you switch there.
-    if (comptime build.has_fullscreen) fs_blk: {
+    if (build.has_fullscreen) fs_blk: {
         const src_ws = fullscreen.workspaceFor(win) orelse break :fs_blk;
         if (src_ws != s.current) break :fs_blk;
         fullscreen.cleanupFullscreenForMove(win, src_ws);
@@ -297,7 +297,7 @@ pub fn moveWindowExclusive(win: u32, target_ws: u8) void {
     // done: restore the bar, bring back offscreen floating windows, and
     // restore the window's border. Without this the bar stays hidden on the
     // source workspace and floating peers remain invisible there indefinitely.
-    if (comptime build.has_fullscreen) fs_blk: {
+    if (build.has_fullscreen) fs_blk: {
         const src_ws = fullscreen.workspaceFor(win) orelse break :fs_blk;
         if (src_ws != target_ws) fullscreen.cleanupFullscreenForMove(win, src_ws);
         fullscreen.moveRecord(src_ws, target_ws);
@@ -334,7 +334,7 @@ pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
         if (target_ws == current) {
             // Window is leaving the current workspace; if it was fullscreen here
             // transfer the record to whichever workspace it still belongs to.
-            if (comptime build.has_fullscreen) {
+            if (build.has_fullscreen) {
                 if (fullscreen.workspaceFor(win)) |src_ws| {
                     if (src_ws == current) {
                         // Land on the lowest-set-bit workspace still in the new mask.
@@ -757,7 +757,7 @@ fn applyPostSwitchFocus(new_ws: u8, new_ws_obj: *Workspace, ptr_reply: ?*xcb.xcb
 fn executeSwitch(old_ws: u8, new_ws: u8) void {
     const s          = getState() orelse return;
     const new_ws_obj = &s.workspaces[new_ws];
-    const fs_info    = if (comptime build.has_fullscreen) fullscreen.getForWorkspace(new_ws) else null;
+    const fs_info    = if (build.has_fullscreen) fullscreen.getForWorkspace(new_ws) else null;
 
     focus.setSuppressReason(.none);
     focus.cancelPointerSync(); // discard any stale beginPointerSync cookie from before this switch
@@ -803,7 +803,7 @@ fn executeSwitch(old_ws: u8, new_ws: u8) void {
             if (win == info.window) continue;
             _ = xcb.xcb_map_window(core.conn, win);
             utils.pushWindowOffscreen(core.conn, win);
-            if (comptime build.has_tiling) {
+            if (build.has_tiling) {
                 if (tiling.isWindowActiveTiled(win)) tiling.invalidateGeomCache(win);
             }
         }

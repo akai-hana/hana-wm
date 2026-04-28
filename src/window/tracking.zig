@@ -4,7 +4,7 @@
 const std   = @import("std");
 const build = @import("build_options");
 
-const minimize = if (build.has_minimize) @import("minimize") else struct {};
+const minimize = if (build.has_minimize) @import("minimize");
 
 
 // Fixed-size ordered window list.
@@ -300,7 +300,7 @@ pub inline fn isOnCurrentWorkspace(win: u32) bool {
 /// Declared as a plain fn (not inline) so it can be passed as a *const fn(u32)bool.
 pub fn isOnCurrentWorkspaceAndVisible(win: u32) bool {
     if (!isOnCurrentWorkspace(win)) return false;
-    return if (comptime build.has_minimize) !minimize.isMinimized(win) else true;
+    return if (build.has_minimize) !minimize.isMinimized(win) else true;
 }
 
 /// Returns the first non-minimized window in `windows`, or null if all are minimized.
@@ -314,7 +314,7 @@ pub fn isOnCurrentWorkspaceAndVisible(win: u32) bool {
 /// Declared as a plain fn so minimize.zig can store it as a function pointer.
 pub fn firstNonMinimized(windows: []const u32) ?u32 {
     for (windows) |win| {
-        const is_min = if (comptime build.has_minimize) minimize.isMinimized(win) else false;
+        const is_min = if (build.has_minimize) minimize.isMinimized(win) else false;
         if (!is_min) return win;
     }
     return null;

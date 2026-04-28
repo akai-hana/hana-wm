@@ -37,6 +37,8 @@ pub fn tileWithOffset(
         break :blk (screen_w -| (count + 1) * m.gap) / count;
     } else cell_w;
 
+    var defer_slot = layouts.DeferredConfigure.init(ctx);
+
     for (windows, 0..) |win, idx| {
         const col: u16 = @intCast(idx % grid.cols);
         const row: u16 = @intCast(idx / grid.cols);
@@ -47,16 +49,17 @@ pub fn tileWithOffset(
             .relaxed => if (is_partial_row) partial_cell_w else cell_w,
         };
 
-        layouts.configureWithHints(ctx, win, utils.Rect{
+        const rect = utils.Rect{
             .x      = @intCast(m.gap +| col *| (effective_cell_w + m.gap)),
             .y      = @intCast(y_offset +| m.gap +| row *| (cell_h + m.gap)),
             .width  = cellToWindowSize(effective_cell_w, bm),
             .height = win_h,
-        });
+        };
+        if (!defer_slot.capture(ctx, win, rect))
+            layouts.configureWithHints(ctx, win, rect);
     }
+    defer_slot.flush(ctx);
 }
-
-// Private helpers
 
 /// Returns the window content dimension for a cell of `cell_size`, subtracting
 /// the combined border margin. Falls back to MIN_WINDOW_DIM on underflow.

@@ -46,10 +46,6 @@ pub fn tileWithOffset(
     tileStack(ctx, windows[master_n..], stack_x, y_offset, screen_w -| master_w, screen_h, m);
 }
 
-// ============================================================================
-// Private helpers
-// ============================================================================
-
 /// Tile a vertical column of `windows` at a fixed x position with a fixed
 /// content width. Used for both the master pane and the simple stack path.
 ///

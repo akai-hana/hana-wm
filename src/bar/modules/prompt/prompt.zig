@@ -11,55 +11,8 @@ const bar   = @import("bar");
 const types = @import("types");
 
 const drawing = @import("drawing");
-const title   = if (build.has_title) @import("title") else struct {};
-const vim = if (build.has_vim) @import("vim") else struct {
-    pub const default_max_input: usize = 512;
-    pub const default_undo_max:  usize = 32;
-    pub const XK_Tab: xcb.xcb_keysym_t = 0xff09;
-
-    pub const Action = enum { none, deactivate, spawn, spawn_keep };
-
-    pub const Mode = enum(u2) {
-        insert  = 0,
-        normal  = 1,
-        visual  = 2,
-        replace = 3,
-        pub fn label(self: Mode) []const u8 {
-            return switch (self) {
-                .insert  => "[INSERT]",
-                .normal  => "[NORMAL]",
-                .visual  => "[VISUAL]",
-                .replace => "[REPLACE]",
-            };
-        }
-    };
-
-    pub const VimState = struct {
-        allocator: std.mem.Allocator = undefined,
-        max_input: usize             = 0,
-        buf:       []u8              = &.{},
-        len:       usize             = 0,
-        cursor:    usize             = 0,
-        mode:      Mode              = .insert,
-
-        pub fn init(a: std.mem.Allocator, max_input: usize, _: usize) !VimState {
-            return .{ .allocator = a, .max_input = max_input,
-                      .buf = try a.alloc(u8, max_input) };
-        }
-        pub fn deinit(vs: *VimState) void { vs.allocator.free(vs.buf); vs.* = .{}; }
-        pub fn reset(vs: *VimState) void { vs.len = 0; vs.cursor = 0; vs.mode = .insert; }
-    };
-
-    pub fn colonInput(_: *const VimState) ?[]const u8 { return null; }
-    pub fn visualRange(vs: *const VimState) [2]usize {
-        return .{ vs.cursor, @min(vs.cursor + 1, vs.len) };
-    }
-    pub fn onDeactivate (_: *VimState) void {}
-    pub fn handleCtrl   (_: *VimState, _: xcb.xcb_keysym_t) Action { return .none; }
-    pub fn handleNormal (_: *VimState, _: xcb.xcb_keysym_t) Action { return .none; }
-    pub fn handleVisual (_: *VimState, _: xcb.xcb_keysym_t) Action { return .none; }
-    pub fn handleReplace(_: *VimState, _: xcb.xcb_keysym_t) Action { return .none; }
-};
+const title   = if (build.has_title) @import("title");
+const vim = @import("vim.zig");
 
 const debug = @import("debug");
 
@@ -160,7 +113,7 @@ pub fn isActive() bool { return g.is_active; }
 /// to poll() so the event loop wakes up exactly when a redraw is needed.
 pub fn blinkPollTimeoutMs() i32 {
     if (!g.is_active) return -1;
-    if (g.vim_state.mode == .insert or vim.colonInput(&g.vim_state) != null)
+    if (g.vim_state.mode == .insert or (build.has_vim and vim.colonInput(&g.vim_state) != null))
         return cursor_blink_ms;
     return -1;
 }
@@ -324,7 +277,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
 
     // Ctrl-modified keys
     if (ctrl_held) {
-        const action   = vim.handleCtrl(&g.vim_state, sym);
+        const action   = if (build.has_vim) vim.handleCtrl(&g.vim_state, sym) else .none;
         const prev_len = g.vim_state.len;
         handleAction(action);
         if (g.vim_state.len != prev_len)
@@ -339,7 +292,8 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
             @min(g.ghost_len, g.vim_state.max_input - 1 - g.vim_state.len)
         else 0;
         if (n_ghost > 0) {
-            insertBasic(&g.vim_state, g.ghost_buf[0..n_ghost]);
+            if (build.has_vim) vim.insertSlice(&g.vim_state, g.ghost_buf[0..n_ghost])
+            else               insertBasic    (&g.vim_state, g.ghost_buf[0..n_ghost]);
             g.ghost_len = 0;
         }
         g.is_blink_visible = true;
@@ -350,9 +304,9 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     const action = switch (g.vim_state.mode) {
         .insert  => if (build.has_vim) vim.handleInsert(&g.vim_state, sym)
                     else               handleInsertBasic(&g.vim_state, sym),
-        .normal  => vim.handleNormal(&g.vim_state, sym),
-        .visual  => vim.handleVisual(&g.vim_state, sym),
-        .replace => vim.handleReplace(&g.vim_state, sym),
+        .normal  => if (build.has_vim) vim.handleNormal (&g.vim_state, sym) else .none,
+        .visual  => if (build.has_vim) vim.handleVisual (&g.vim_state, sym) else .none,
+        .replace => if (build.has_vim) vim.handleReplace(&g.vim_state, sym) else .none,
     };
     const prev_len = g.vim_state.len;
     handleAction(action);
@@ -480,7 +434,7 @@ fn activate() void {
 /// Ungrabs the keyboard and marks the prompt inactive.
 fn deactivate() void {
     g.is_active = false;
-    vim.onDeactivate(&g.vim_state);
+    if (build.has_vim) vim.onDeactivate(&g.vim_state);
     _ = xcb.xcb_ungrab_keyboard(core.conn, xcb.XCB_CURRENT_TIME);
     _ = xcb.xcb_flush(core.conn);
     g.redraw_pending = true;
@@ -1004,7 +958,7 @@ fn drawActive(
     const pill_h_pad: u16 = 6;
     const white: u32 = 0xFFFFFFFF;
 
-    const mode_label = g.vim_state.mode.label();
+    const mode_label = if (build.has_vim) g.vim_state.mode.label() else "";
     const mode_idx: usize = @intFromEnum(g.vim_state.mode);
 
     const mode_w: u16 = g.cached_mode_w[mode_idx] orelse blk: {
@@ -1027,7 +981,8 @@ fn drawActive(
             // Filled pill background.
             dc.fillRect(pill_x, cursor_v_pad, pill_w, height -| cursor_v_pad * 2, accent);
 
-            if (vim.colonInput(&g.vim_state)) |ct| {
+            const colon_cmd = if (build.has_vim) vim.colonInput(&g.vim_state) else null;
+            if (colon_cmd) |ct| {
                 // Ex-command input: ":typed_chars" + blinking insert-style caret.
                 var ppx: i32 = @as(i32, pill_x) + @as(i32, pill_h_pad);
                 const colon_w: i32 = @intCast(dc.measureTextWidth(":"));
@@ -1121,10 +1076,11 @@ fn drawActive(
     // Mode-specific text rendering.
     // When colon-command mode is active the cursor lives in the pill widget,
     // not here — so we skip all cursor drawing in the main text area.
-    const colon_active = vim.colonInput(&g.vim_state) != null;
+    const colon_active = build.has_vim and vim.colonInput(&g.vim_state) != null;
 
     if (g.vim_state.mode == .visual) {
-        const sel      = vim.visualRange(&g.vim_state);
+        const sel      = if (build.has_vim) vim.visualRange(&g.vim_state)
+                         else [2]usize{ g.vim_state.cursor, @min(g.vim_state.cursor + 1, g.vim_state.len) };
         const sel_lo   = sel[0];
         const sel_hi   = sel[1];
 

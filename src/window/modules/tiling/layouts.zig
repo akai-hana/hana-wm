@@ -14,11 +14,6 @@ const debug = @import("debug");
 // Populated from WM_NORMAL_HINTS during handleMapRequest; evicted on unmanage.
 // `configureWithHints` clamps every rect to stored minimums so terminals always
 // receive a geometry they can render.
-//
-// Implemented as a flat array with a linear scan. Realistic window counts
-// (10–80) make a HashMap's O(1) lookup theoretical rather than measurable:
-// a linear scan over a handful of cache lines is faster in practice and
-// carries zero allocation overhead, no deinit, and no partial-failure states.
 
 /// ICCCM WM_NORMAL_HINTS geometry constraints for a single window.
 pub const SizeHints = struct {
@@ -54,8 +49,13 @@ pub const WindowData = struct {
 
     /// Returns false when the rect is zeroed, indicating the entry is stale or
     /// has not yet been populated by a retile pass.
+    ///
+    /// Both dimensions must be non-zero: a rect with width=0 but height=200 is
+    /// still degenerate and must not be treated as a valid on-screen position.
+    /// Using OR here would let monocle skip the offscreen-push for such a window,
+    /// allowing it to bleed through a transparent top window.
     pub fn hasValidRect(self: WindowData) bool {
-        return self.rect.width != 0 or self.rect.height != 0;
+        return self.rect.width != 0 and self.rect.height != 0;
     }
 };
 
@@ -66,25 +66,13 @@ const hash_table_mask: usize = hash_table_cap - 1;
 const hash_shift:      u5    = 23;  // 32 - log2(512)
 const EMPTY_WIN:       u32   = 0;   // XCB_NONE; never a real window ID
 
-/// Overflow sentinel used by `CacheMap.getOrPut` when the hard cap is exceeded.
-///
-/// Returning a pointer to this throwaway slot lets every call-site proceed
-/// without a null-check while guaranteeing no live cache entry is corrupted.
-/// The affected window simply misses the dedup check and receives a redundant
-/// configure_window on the next retile — an unconditionally correct outcome.
-///
-/// SINGLE-THREADED ASSUMPTION: two concurrent overflows would alias to the same
-/// pointer.  The WM is single-threaded for all geometry operations.
-/// If that invariant ever changes, this sentinel must become per-call or the
-/// overflow path must return an error.
-var overflow_sentinel: WindowData = .{};
+
 
 /// Open-addressing hash table mapping window IDs to their last geometry,
 /// border color, and WM_NORMAL_HINTS constraints — all three in one slot.
 ///
-/// Public API is identical to the previous flat-array CacheMap; callers need
-/// no changes.  The struct is zero-initializable: `CacheMap{}` or `.{}` in
-/// tiling.State produces an empty table because EMPTY_WIN = 0.
+/// Zero-initializable: `CacheMap{}` or `.{}` produces an empty table because
+/// EMPTY_WIN = 0.
 pub const CacheMap = struct {
     const Slot = struct {
         win:  u32        = EMPTY_WIN,
@@ -98,6 +86,19 @@ pub const CacheMap = struct {
 
     slots: [hash_table_cap]Slot = std.mem.zeroes([hash_table_cap]Slot),
     count: usize = 0,
+
+    /// Per-instance overflow sentinel for `getOrPut`.
+    ///
+    /// Keeping the sentinel on the CacheMap instance (rather than as a module-
+    /// level global) eliminates the aliasing hazard: if two different call sites
+    /// both overflow the same cache in the same synchronous call chain, they no
+    /// longer receive a pointer to the same storage.  Each overflow writes and
+    /// returns a pointer to *this instance's* sentinel, which is stable for the
+    /// duration of a single `getOrPut` call (the WM is single-threaded; the
+    /// call is not re-entrant).  The affected window misses the dedup check and
+    /// receives a redundant configure_window on the next retile — correct.
+
+    overflow_sentinel: WindowData = .{},
 
     /// Knuth's multiplicative hash for 32-bit keys, producing a 9-bit index
     /// (log2(512) = 9) into the hash table.  Distributes XCB's near-sequential
@@ -120,8 +121,8 @@ pub const CacheMap = struct {
             if (slot.win == EMPTY_WIN) {
                 if (self.count >= cache_capacity) {
                     debug.err("CacheMap: capacity exceeded, dropping cache for 0x{x}", .{win});
-                    overflow_sentinel = .{};
-                    return .{ .found_existing = false, .value_ptr = &overflow_sentinel };
+                    self.overflow_sentinel = .{};
+                    return .{ .found_existing = false, .value_ptr = &self.overflow_sentinel };
                 }
                 slot.* = .{ .win = win, .data = .{} };
                 self.count += 1;
@@ -181,14 +182,9 @@ pub const CacheMap = struct {
         self.slots[hole] = .{}; // clear the final hole (original or shifted)
     }
 
-    /// Reset the cache to empty in O(count) time.
-    ///
-    /// Iterates only occupied slots rather than zeroing all 512 unconditionally.
-    /// With typical window counts (10–80) this avoids zeroing 6–50× more memory
-    /// than necessary, making this safe to call on a hot path.
-    ///
-    /// Scans the table sequentially, clears each occupied slot, and stops once
-    /// all `count` entries have been visited.
+    /// Reset the cache to empty in O(count) time, visiting only occupied slots.
+    /// Safe to call on a hot path: with typical window counts (10–80) this
+    /// avoids zeroing 6–50× more memory than necessary.
     pub fn clearRetainingCapacity(self: *CacheMap) void {
         var i: usize = 0;
         var cleared: usize = 0;
@@ -213,6 +209,115 @@ pub const CacheMap = struct {
 };
 
 // Layout context and the configureWithHints entry point
+
+/// Axis-aligned screen region used by layout modules to partition space without
+/// duplicating gap/border arithmetic at every call site.
+///
+/// All coordinates use the same i32/u16 conventions as `utils.Rect`: `x` and
+/// `y` are signed (windows can be positioned off-screen), `width` and `height`
+/// are unsigned (a region with zero area is degenerate and should not be split).
+///
+/// Layout modules should:
+///   1. Call `Region.fromScreen` once to get the outer region.
+///   2. Call `inset` to strip the outer gap margin.
+///   3. Call `splitH` / `splitV` / `halve` to partition, passing the gap so
+///      seam spacing is consistent and DRY.
+///   4. At each leaf, call `toRect` and hand it to `configureWithHints`.
+///
+/// The `halve` functions distribute the remainder pixel to the *second* half
+/// so that the first half is always ≤ the second — consistent with the
+/// existing master-stack convention.
+pub const Region = struct {
+    x: i32,
+    y: i32,
+    w: u16,
+    h: u16,
+
+    /// Build the initial region from screen dimensions and a y-offset (bar height).
+    pub inline fn fromScreen(screen_w: u16, screen_h: u16, y_offset: u16) Region {
+        return .{ .x = 0, .y = @intCast(y_offset), .w = screen_w, .h = screen_h };
+    }
+
+    /// Strip `margin` pixels from all four sides.  Saturating: a margin larger
+    /// than the region produces a zero-size region rather than wrapping.
+    pub inline fn inset(r: Region, margin: u16) Region {
+        const m2 = margin *| 2;
+        return .{
+            .x = r.x + @as(i32, @intCast(margin)),
+            .y = r.y + @as(i32, @intCast(margin)),
+            .w = r.w -| m2,
+            .h = r.h -| m2,
+        };
+    }
+
+    /// Split `r` horizontally into `n` equal rows separated by `gap` pixels.
+    /// Returns a stack-allocated array of `n` regions; caller supplies the
+    /// buffer.  `buf.len` must be >= `n`.
+    pub fn splitH(r: Region, n: u16, gap: u16, buf: []Region) void {
+        std.debug.assert(buf.len >= n);
+        if (n == 0) return;
+        const total_gap = gap *| (n -| 1);
+        const avail: u16 = r.h -| total_gap;
+        var y: i32 = r.y;
+        for (0..n) |i| {
+            const idx: u16 = @intCast(i);
+            // Distribute remainder pixel to the last slice.
+            const row_h: u16 = ((idx + 1) * avail / n) -| (idx * avail / n);
+            buf[i] = .{ .x = r.x, .y = y, .w = r.w, .h = row_h };
+            y += @intCast(row_h + gap);
+        }
+    }
+
+    /// Split `r` vertically into `n` equal columns separated by `gap` pixels.
+    pub fn splitV(r: Region, n: u16, gap: u16, buf: []Region) void {
+        std.debug.assert(buf.len >= n);
+        if (n == 0) return;
+        const total_gap = gap *| (n -| 1);
+        const avail: u16 = r.w -| total_gap;
+        var x: i32 = r.x;
+        for (0..n) |i| {
+            const idx: u16 = @intCast(i);
+            const col_w: u16 = ((idx + 1) * avail / n) -| (idx * avail / n);
+            buf[i] = .{ .x = x, .y = r.y, .w = col_w, .h = r.h };
+            x += @intCast(col_w + gap);
+        }
+    }
+
+    /// Split `r` into left and right halves with `gap` between them.
+    /// The remainder pixel (odd width) goes to the right half.
+    pub inline fn halveH(r: Region, gap: u16) struct { left: Region, right: Region } {
+        const left_w: u16  = if (r.w > gap) (r.w - gap) / 2 else 0;
+        const right_w: u16 = r.w -| left_w -| gap;
+        return .{
+            .left  = .{ .x = r.x,                                         .y = r.y, .w = left_w,  .h = r.h },
+            .right = .{ .x = r.x + @as(i32, @intCast(left_w +| gap)),    .y = r.y, .w = right_w, .h = r.h },
+        };
+    }
+
+    /// Split `r` into top and bottom halves with `gap` between them.
+    /// The remainder pixel (odd height) goes to the bottom half.
+    pub inline fn halveV(r: Region, gap: u16) struct { top: Region, bottom: Region } {
+        const top_h: u16    = if (r.h > gap) (r.h - gap) / 2 else 0;
+        const bottom_h: u16 = r.h -| top_h -| gap;
+        return .{
+            .top    = .{ .x = r.x, .y = r.y,                                       .w = r.w, .h = top_h    },
+            .bottom = .{ .x = r.x, .y = r.y + @as(i32, @intCast(top_h +| gap)),   .w = r.w, .h = bottom_h },
+        };
+    }
+
+    /// Convert to a `utils.Rect` for use with `configureWithHints`, subtracting
+    /// border*2 from both dimensions.  Falls back to `constants.MIN_WINDOW_DIM`
+    /// on underflow so the X server never receives a zero-size window.
+    pub inline fn toRect(r: Region, border: u16) utils.Rect {
+        const b2 = border *| 2;
+        return .{
+            .x      = r.x,
+            .y      = r.y,
+            .width  = if (r.w > b2) r.w - b2 else @import("constants").MIN_WINDOW_DIM,
+            .height = if (r.h > b2) r.h - b2 else @import("constants").MIN_WINDOW_DIM,
+        };
+    }
+};
 
 /// Context passed into every layout module's `tileWithOffset` call.
 ///
@@ -243,6 +348,12 @@ pub const LayoutCtx = struct {
     /// into the geometry configure_window call, reducing 3 requests/window to 2.
     /// Set only during reloadConfig retile; null for all normal retile passes.
     border_width: ?u16 = null,
+    /// The currently focused window, supplied by tiling.zig via focus.getFocused().
+    /// Used by monocle to raise the correct window rather than the arbitrary list
+    /// tail.  Null when the layout context is constructed outside the normal
+    /// retile path (e.g. restoreWorkspaceGeom) — monocle falls back to the list
+    /// tail in that case, preserving the previous behaviour.
+    focused_win: ?u32 = null,
 };
 
 /// Returns true when both rects have identical coordinates and dimensions.
@@ -260,7 +371,7 @@ pub inline fn rectsEqual(a: utils.Rect, b: utils.Rect) bool {
 /// the geometry configure_window call, reducing 3 XCB requests per window to 2.
 /// This is only set during reloadConfig; it is null for all normal retile passes.
 fn configureWithHintsImpl(comptime raise: bool, ctx: *const LayoutCtx, win: u32, rect: utils.Rect) void {
-    // Single scan: gop.value_ptr.hints holds any cached WM_NORMAL_HINTS
+    // Single probe: gop.value_ptr.hints holds any cached WM_NORMAL_HINTS
     // constraints alongside the geometry and border dedup data.
     const gop = ctx.cache.getOrPut(win);
     const effective = applyHintsToRect(rect, gop.value_ptr.hints);
@@ -271,6 +382,18 @@ fn configureWithHintsImpl(comptime raise: bool, ctx: *const LayoutCtx, win: u32,
         if (comptime raise) {
             _ = xcb.xcb_configure_window(ctx.conn, win,
                 xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+        }
+        // Apply border color even when geometry is degenerate.  Without this,
+        // a window whose hints shrink its dimensions to zero gets stuck with a
+        // stale border color permanently: every retile takes this early exit
+        // before reaching the border block below, so the color is never updated.
+        if (ctx.get_border_color) |getBorderColor| {
+            const color = getBorderColor(win);
+            if (!gop.found_existing or gop.value_ptr.border != color) {
+                gop.value_ptr.border = color;
+                _ = xcb.xcb_change_window_attributes(ctx.conn, win,
+                    xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
+            }
         }
         return;
     }
@@ -322,14 +445,8 @@ fn configureWithHintsImpl(comptime raise: bool, ctx: *const LayoutCtx, win: u32,
 }
 
 /// Apply geometry to `win`, clamped to its WM_NORMAL_HINTS constraints.
-///
-/// Performs a SINGLE hash probe per window per retile (getOrPut supplies
-/// geometry, border dedup data, and SizeHints in one lookup).
-///
-/// Skips the XCB round-trip when the computed rect matches the cached value.
-/// When `ctx.get_border_color` is set, border color is also updated in the same
-/// probe at zero additional search cost.  When `ctx.border_width` is set,
-/// BORDER_WIDTH is merged into the geometry request (reloadConfig path only).
+/// Skips the XCB round-trip when the rect is unchanged; updates border color
+/// in the same probe when `ctx.get_border_color` is set.
 pub fn configureWithHints(ctx: *const LayoutCtx, win: u32, rect: utils.Rect) void {
     configureWithHintsImpl(false, ctx, win, rect);
 }
@@ -342,7 +459,50 @@ pub fn configureWithHintsAndRaise(ctx: *const LayoutCtx, win: u32, rect: utils.R
     configureWithHintsImpl(true, ctx, win, rect);
 }
 
-// Private helpers
+/// Per-layout helper that implements the `defer_configure` contract for any
+/// layout module without changing that layout's geometry arithmetic.
+///
+/// Usage pattern (inside a layout's main window loop):
+///
+///     var defer_slot = DeferredConfigure.init(ctx);
+///     for (windows) |win| {
+///         if (defer_slot.capture(win, computed_rect)) continue;
+///         configureWithHints(ctx, win, computed_rect);
+///     }
+///     defer_slot.flush(ctx);
+///
+/// The deferred window's rect is stored on the stack.  If no window in the
+/// loop matches `ctx.defer_configure`, `capture` is always false and `flush`
+/// is a no-op, so layouts that never call swap_master pay zero cost.
+pub const DeferredConfigure = struct {
+    pending_win:  u32        = 0,
+    pending_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+
+    /// Initialise from ctx.  If defer_configure is null, the slot is inert.
+    pub inline fn init(_: *const LayoutCtx) DeferredConfigure { return .{}; }
+
+    /// If `win` is the deferred window, store `rect` and return true (skip the
+    /// normal configureWithHints call).  Otherwise return false.
+    pub inline fn capture(self: *DeferredConfigure, ctx: *const LayoutCtx, win: u32, rect: utils.Rect) bool {
+        if (ctx.defer_configure) |dw| {
+            if (dw == win) {
+                self.pending_win  = win;
+                self.pending_rect = rect;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Emit the deferred configure call (if any).  Must be called once after
+    /// the main window loop has configured all other windows.
+    pub inline fn flush(self: *const DeferredConfigure, ctx: *const LayoutCtx) void {
+        if (self.pending_win != 0)
+            configureWithHints(ctx, self.pending_win, self.pending_rect);
+    }
+};
+
+
 
 /// Apply ICCCM §4.1.2.3 hint passes to a raw rect.
 ///

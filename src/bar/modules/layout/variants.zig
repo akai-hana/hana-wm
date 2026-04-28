@@ -7,7 +7,7 @@ const core  = @import("core");
 const types = @import("types");
 
 const drawing = @import("drawing");
-const tiling  = if (build.has_tiling) @import("tiling") else struct {};
+const tiling  = if (build.has_tiling) @import("tiling");
 
 /// Draws the layout variants icon on the bar.
 pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
@@ -37,8 +37,6 @@ pub fn getIndicator(s: anytype) []const u8 {
             .relaxed => "[~]",
             .rigid   => "[#]",
         },
-
-        .leaf => "[L]",
 
         else => ""
     };

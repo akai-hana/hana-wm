@@ -12,8 +12,8 @@ const utils     = @import("utils");
 const window = @import("window");
 const focus  = @import("focus");
 
-const tiling     = if (build.has_tiling) @import("tiling") else struct {};
-const fullscreen = if (build.has_fullscreen) @import("fullscreen") else struct {};
+const tiling     = if (build.has_tiling) @import("tiling");
+const fullscreen = if (build.has_fullscreen) @import("fullscreen");
 
 
 const bar = if (build.has_bar) @import("bar") else struct {
@@ -155,7 +155,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     if (bar.isBarWindow(win)) return;
     // Fullscreen windows must not be drag-resized: they occupy the entire
     // screen and resizing them would corrupt their fullscreen geometry record.
-    if (comptime build.has_fullscreen) {
+    if (build.has_fullscreen) {
         if (fullscreen.isFullscreen(win)) return;
     }
     // Geometry source priority: prefer the tiling-cached geometry over a live
@@ -164,7 +164,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     // round-trip.  The live fallback covers purely floating windows that were
     // never tracked by the tiling engine.
     const geom = blk: {
-        if (comptime build.has_tiling) {
+        if (build.has_tiling) {
             if (tiling.getWindowGeom(win)) |g| break :blk g;
         }
         break :blk window.getGeometry(core.conn, win) orelse return;
@@ -204,7 +204,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
             .start_win_width  = geom.width,
             .start_win_height = geom.height,
         },
-        .pending_float = if (comptime build.has_tiling)
+        .pending_float = if (build.has_tiling)
             tiling.isWindowTiled(win) and !tiling.isFloatingLayout()
         else
             false,
@@ -232,7 +232,7 @@ pub fn updateDrag(x: i16, y: i16) void {
         // visual nicety, not a correctness requirement; the retile proceeds
         // regardless.
         _ = xcb.xcb_grab_server(core.conn);
-        if (comptime build.has_tiling) {
+        if (build.has_tiling) {
             tiling.removeWindow(drag.window);
             tiling.retileCurrentWorkspace();
         }

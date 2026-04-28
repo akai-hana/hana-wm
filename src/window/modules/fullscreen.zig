@@ -15,10 +15,10 @@ const window   = @import("window");
 const tracking = @import("tracking");
 const focus    = @import("focus");
 
-const minimize   = if (build.has_minimize) @import("minimize") else struct {};
-const workspaces = if (build.has_workspaces) @import("workspaces") else struct {};
+const minimize   = if (build.has_minimize) @import("minimize");
+const workspaces = if (build.has_workspaces) @import("workspaces");
 
-const tiling = if (build.has_tiling) @import("tiling") else struct {};
+const tiling = if (build.has_tiling) @import("tiling");
 
 const bar = if (build.has_bar) @import("bar") else struct {
     pub fn setBarState(_: anytype) void {}
@@ -161,7 +161,7 @@ pub fn forEachFullscreen(cb: anytype) void {
 // that formerly lived inside saveFloatingWindowGeoms, restoreFloatingWindows,
 // and enterFullscreenCommit.
 fn forEachWindowOnCurrentWorkspace(skip: u32, ctx: anytype) void {
-    if (comptime build.has_workspaces) {
+    if (build.has_workspaces) {
         const cur = tracking.getCurrentWorkspace() orelse return;
         const bit = tracking.workspaceBit(cur);
         for (tracking.allWindows()) |entry| {
@@ -192,7 +192,7 @@ fn forEachWindowOnCurrentWorkspace(skip: u32, ctx: anytype) void {
 /// (x/y below OFFSCREEN_THRESHOLD_MIN), or the window reports a zero-size
 /// geometry (mapped but not yet sized).
 fn fetchWindowGeom(win: u32) core.WindowGeometry {
-    if (comptime build.has_tiling) {
+    if (build.has_tiling) {
         if (tiling.getWindowGeom(win)) |rect| {
             const bw: u16 = if (tiling.getStateOpt()) |ts| ts.border_width else 0;
             return .{
@@ -262,7 +262,7 @@ fn saveFloatingWindowGeoms(skip_win: u32) void {
 
         fn call(self: @This(), w: u32) void {
             if (minimize.isMinimized(w)) return;
-            if (comptime build.has_tiling) if (tiling.isWindowTiled(w)) return;
+            if (build.has_tiling) if (tiling.isWindowTiled(w)) return;
             if (self.n.* >= MAX_FLOAT_SAVES) {
                 self.truncated.* = true;
                 return;
@@ -324,7 +324,7 @@ fn restoreFloatingWindows(skip_win: u32) void {
 
         fn call(self: @This(), w: u32) void {
             if (minimize.isMinimized(w)) return;
-            if (comptime build.has_tiling) if (tiling.isWindowTiled(w)) return;
+            if (build.has_tiling) if (tiling.isWindowTiled(w)) return;
             const rect: ?utils.Rect = getSavedFloatGeom(w) orelse window.getWindowGeom(w);
             if (rect) |r| {
                 utils.configureWindow(core.conn, w, r);
@@ -373,7 +373,7 @@ fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
     const PushCtx = struct {
         fn call(_: @This(), w: u32) void {
             utils.pushWindowOffscreen(core.conn, w);
-            if (comptime build.has_tiling) {
+            if (build.has_tiling) {
                 // Only invalidate tiled windows — floating windows' cache entries
                 // hold the geometry we need to restore on exit.
                 if (tiling.isWindowTiled(w)) tiling.invalidateGeomCache(w);
@@ -403,7 +403,7 @@ fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
     // Evict the fullscreen window itself; its cache still holds the pre-fullscreen
     // tiled rect. On exit retile would compute the same rect, get a hit, and skip
     // configure_window, leaving the window stuck at fullscreen dimensions.
-    if (comptime build.has_tiling) tiling.invalidateGeomCache(win);
+    if (build.has_tiling) tiling.invalidateGeomCache(win);
 
     bar.setBarState(.hide_fullscreen);
 
@@ -422,7 +422,7 @@ fn exitFullscreenCommit(win: u32, ws: u8) void {
 
     bar.setBarState(.show_fullscreen);
 
-    const win_is_tiled = if (comptime build.has_tiling) tiling.isWindowTiled(win) else false;
+    const win_is_tiled = if (build.has_tiling) tiling.isWindowTiled(win) else false;
     // Tiled windows: geometry is managed by the tiling engine; applyBorder below
     // restores the border width and colour in one pass.
     // Floating windows: restore position + size + border_width atomically via

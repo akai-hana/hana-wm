@@ -609,7 +609,7 @@ inline fn advertiseActiveWindow(win: u32) void {
 inline fn shouldRaise(reason: Reason, win: u32) bool {
     return switch (reason) {
         .mouse_click, .user_command, .pointer_sync =>
-            if (comptime build.has_tiling) !tiling.isWindowActiveTiled(win) else true,
+            if (build.has_tiling) !tiling.isWindowActiveTiled(win) else true,
         .mouse_enter, .tiling_operation, .window_spawn, .workspace_switch => false,
     };
 }
@@ -687,7 +687,7 @@ var cycle_buf: [64]u32 = undefined;
 fn collectVisibleWindows() usize {
     var len: usize = 0;
 
-    if (comptime build.has_tiling) {
+    if (build.has_tiling) {
         if (tiling.getStateOpt()) |t| {
             if (t.is_enabled) {
                 for (t.windows.items()) |w| {
@@ -740,7 +740,7 @@ pub fn focusPrev() void { focusCycle(false); }
 /// Swaps it with the neighbour in the given direction.
 /// Only has an effect when tiling is active and at least two windows are visible.
 fn moveWindowCycle(comptime forward: bool) void {
-    if (comptime !build.has_tiling) return;
+    if (!build.has_tiling) return;
     const len = collectVisibleWindows();
     if (len < 2) return;
     const wins = cycle_buf[0..len];
