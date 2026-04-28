@@ -52,7 +52,7 @@ if [ -d "$FILES_DIR/files" ]; then
   for item in "$FILES_DIR/files/"* "$FILES_DIR/files/".*; do
     [ -e "$item" ] || continue
     case "$(basename "$item")" in
-      .|..) continue ;;
+      .|..) continue;;
     esac
     mv "$item" "$FILES_DIR/"
   done
@@ -73,7 +73,7 @@ maybe_drop_text() {
     *.txt|*.md)
       rm -f "$1"
       return 0
-      ;;
+     ;;
   esac
   return 1
 }
@@ -82,7 +82,7 @@ maybe_drop_text() {
 for f in "$FILES_DIR"/* "$FILES_DIR"/.*; do
   [ -e "$f" ] || continue
   case "$(basename "$f")" in
-    .|..) continue ;;
+    .|..) continue;;
   esac
   [ -f "$f" ] || continue
 

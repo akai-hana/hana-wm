@@ -1,73 +1,39 @@
 ### akai_hana's personal hana WM config.toml :-) ###
 
-### NOTES:
-#
-# - All parameters and values are cApS-iNsEnSiTiVe. 
-# - Strings can be set with single or double quotes (''/"").
-# - Decimal values can use a dot (N.NN) or comma (N,NN).
-# - Any percentage value can be decimal (N.NN%/%N.NN).
-#
-# + Parameters can be set to a numerical value N (px) or N%/%N (ratio)
-#   - 'N' represents an exact amount of pixels occupied on the screen.
-#   + 'N%' represents either a ratio or the scaling of a default value.
-#      - For example, `gap_width = 5%` will make the gaps of windows
-#        take up 5% of the total display's viewable area.
-#      - As for default value scaling, 'indicator_size = 125%' will make
-#         the workspace indicators be +25% of their default 100% (5 px).
-#
-# + Keys in a keybind can be expanded by using `{}` in the key combination
-#   in order to set an array of keybinds, effectively assigning a single
-#   action to multiple key combinations in the same line.
-#   - `Mod+{Q,W,E,R} = "workspace"` sets workspace switching to 4 binds,
-#     Mod+Q through R.
-#   - `Mod+{1-9} = "workspace"` sets workspace switching to 9 binds, keys
-#     Mod+1 through 9.
-#   - Both can be combined at will: `Mod+{1-4,Q,W,E,R} = "workspace"`.
-#
-# + `{}` in place of the action instead of the keybind serves as an alias
-#   ```toml
-#   Mod+L = "larry"
-#   kill = "pkill -9"
-#   Mod+Shift+L = "{kill} larry"
-#   ```
-#   
-# + A single keybind can invoke multiple actions at once.
-#   - `Mod+A = "foo"; Mod+A = "bar"` aren't conflicting;
-#     both `foo` and `bar` will be executed upon pressing Mod+A.
-#   - More conveniently, arrays of actions can be set onto a bind:
-#     `Mod+A = ["foo", "bar"]`
-
 # TOML config files to load.
-# - Sub-directories are ignored, so themes must be listed explicitly.
-# - Multiple files can be included and will all be unified on runtime.
+# - Files placed on main directory are automatically loaded.
+# - Files placed on sub-directories are ignored, so they must be added manually.
+# - Multiple files loaded together will be unified on runtime.
 include = ["themes/akai.toml"]
 
 [tiling]
 enabled = true
-global_layout = false # Global or per-workspace layouts?
+global_layout = false # Make layouts either per-workspace or global.
+                      #TODO: rename to per-workspace_layouts
 
 # Enabled layouts
 # - Layouts not defined on the array will not be available in runtime.
 # - Not defining the array at all enables all layouts in `src/tiling/layouts/.`
 
-#       Layout          Variation  Workspaces
+#       Layout          Variation  Workspaces Variants
 layouts = [                                 # (default/alternative) 
-        "scroll",
-        "leaf",
 	"master-stack",                     # "lifo"/"fifo"
 	"monocle",      "gaps",    # "5",   # "gapless"/"gaps"
 	"grid",         "relaxed", # "6,8", # "rigid"/"relaxed"
-	# "fibonacci",                      # no variants
+	"fibonacci",                        # no variants
+        "scroll",
+        # "leaf",
 ]
 
 [tiling.layouts.master-stack]
-count = 1      # Number of windows in master area (master stack size)
-side  = "left" # "left"/"right" / 'L'/'R'
-width = 50%    # [5%-95%] / (0-N] px
-
-# "lifo" = Last (window remains) In (master area), First (window gets) Out (of master, and onto the stack).
-# "fifo" = First (window goes) In (master area), First (window goes) Out (of master, and onto the stack).
-variants = "lifo" # "lifo"/"fifo"
+# Number of windows in master area
+count = 1 # [1..]
+                  #TODO: rename to master_size
+side  = "left"    # "left"/"right" / 'L'/'R'; main side
+                  #TODO: rename to master_side
+width = 50%       # [5%-95%] / (0-N] px
+                  #TODO: rename to master_width
+variants = "lifo" # "lifo"/"fifo"; New window spawns on master (lifo) / stack (fifo)
 
 # Override the 3-character indicator shown in the bar for this layout.
 # Defaults to the variants name ("LIF" or "FIF") when not set.
@@ -160,6 +126,8 @@ Mod+Tab          = "swap_master"            # Swap focused window with the previ
 Mod+Shift+Tab    = "swap_master_focus_swap" # Swap focused window with the previously focused window
 Mod+grave        = "toggle_prompt"
 Mod+Middle_click = "toggle_floating_window" # Toggle clicked window between tiled and floating
+Mod+scroll_up    = "scroll_view_right"
+Mod+scroll_down  = "scroll_view_left"
 
 # Layouts
 ## Master-stack
@@ -168,7 +136,7 @@ Mod+L       = "increase_master" # Increase master area width
 Mod+Shift+L = "increase_master_count"
 Mod+Shift+H = "decrease_master_count"
 
-# Focus cycling (dwm-style)
+# Focus cycling
 ## k = next/right (master → stack → ... → wrap), j = prev/left
 Mod+k = "focus_next_window"
 Mod+j = "focus_prev_window"
@@ -188,7 +156,7 @@ Mod+5 = "all_workspaces"
 Mod+Shift+{1-4,Q,W,E,R} = "move_to_workspace"
 Mod+Alt+{1-4,Q,W,E,R}   = "toggle_tag" #TODO: rename to toggle_to_workspace
 
-Mod+Shift+5 " move_to_all_workspaces"
+Mod+Shift+5 = "move_to_all_workspaces"
 
 # Bar
 Mod+B       = "toggle_bar_visibility"  # shown/hidden

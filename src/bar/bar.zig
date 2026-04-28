@@ -287,13 +287,13 @@ const State = struct {
                 .allocator = allocator,
             },
             .layout_cache = .{
-                .clock_width = if (comptime build.has_clock)
+                .clock_width = if (build.has_clock)
                     dc.measureTextWidth(clock.CLOCK_MEASURE_STRING) + 2 * config.scaledSegmentPadding(height)
                 else
                     0,
             },
             .has_clock_segment = blk: {
-                if (comptime !build.has_clock) break :blk false;
+                if (!build.has_clock) break :blk false;
                 for (config.layout.items) |lay|
                     for (lay.segments.items) |seg|
                         if (seg == .clock) break :blk true;
@@ -301,7 +301,7 @@ const State = struct {
             },
         };
         try s.title_cache.title.ensureTotalCapacity(allocator, 256);
-        if (comptime build.has_tags) tags.invalidate();
+        if (build.has_tags) tags.invalidate();
         return s;
     }
 
@@ -321,7 +321,7 @@ const State = struct {
     fn measureSegmentWidth(self: *State, snap: *const BarSnapshot, segment: types.BarSegment) u16 {
         return switch (segment) {
             .workspaces => blk: {
-                if (comptime !build.has_tags) break :blk fallbackWorkspacesWidth;
+                if (!build.has_tags) break :blk fallbackWorkspacesWidth;
                 break :blk if (snap.workspace_count > 0)
                     @intCast(snap.workspace_count * tags.getCachedWorkspaceWidth())
                 else
@@ -337,12 +337,12 @@ const State = struct {
         if (segment == .workspaces) self.layout_cache.workspace_x = x;
         const r = &self.render;
         return switch (segment) {
-            .workspaces => if (comptime build.has_tags) try tags.draw(
+            .workspaces => if (build.has_tags) try tags.draw(
                 r.dc, r.config, r.height, x,
                 snap.current_workspace, snap.workspace_has_windows.items, snap.is_all_view_active)
             else x,
-            .layout   => if (comptime build.has_layout)   try layout.draw(r.dc, r.config, r.height, x)   else x,
-            .variants => if (comptime build.has_variants)  try variants.draw(r.dc, r.config, r.height, x) else x,
+            .layout   => if (build.has_layout)   try layout.draw(r.dc, r.config, r.height, x)   else x,
+            .variants => if (build.has_variants)  try variants.draw(r.dc, r.config, r.height, x) else x,
             .title    => blk: {
                 const wins = snap.current_workspace_windows.items;
                 const minimized_title: []const u8 =
@@ -360,7 +360,7 @@ const State = struct {
                     &self.title_cache.title, &self.title_cache.title_window,
                     snap.is_title_invalidated, r.allocator);
             },
-            .clock    => if (comptime build.has_clock) try clock.draw(r.dc, r.config, r.height, x) else x,
+            .clock    => if (build.has_clock) try clock.draw(r.dc, r.config, r.height, x) else x,
         };
     }
 
@@ -487,7 +487,7 @@ const State = struct {
     }
 
     fn drawClockOnly(self: *State) void {
-        if (comptime !build.has_clock) return;
+        if (!build.has_clock) return;
         const clock_x = self.layout_cache.clock_x orelse return;
         _ = clock.draw(self.render.dc, self.render.config, self.render.height, clock_x) catch |e|
             debug.warnOnErr(e, "drawClockOnly");
@@ -495,7 +495,7 @@ const State = struct {
     }
 
     fn drawTitleOnly(self: *State, new_focused: ?u32) void {
-        if (comptime !build.has_title) return;
+        if (!build.has_title) return;
         if (prompt.isActive()) return;
         if (!self.title_cache.is_layout_valid or self.title_cache.title_width == 0) return;
         self.title_cache.focused_window = new_focused;
@@ -696,10 +696,10 @@ fn hasMinimizedSetChanged(
 fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot, forced: bool) !void {
     const allocator = s.render.allocator;
     snap.minimized_windows.clearRetainingCapacity();
-    if (comptime build.has_minimize)
+    if (build.has_minimize)
         try minimize.collectMinimizedIntoSet(&snap.minimized_windows, allocator);
 
-    if (comptime build.has_workspaces) {
+    if (build.has_workspaces) {
         const ws_state = workspaces.getState() orelse return;
         snap.workspace_count      = @intCast(ws_state.workspaces.len);
         snap.current_workspace    = ws_state.current;
@@ -729,7 +729,7 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot,
     s.title_cache.is_invalidated = false;
 
     snap.focused_title.clearRetainingCapacity();
-    if (comptime build.has_title) if (snap.focused_window) |fw| {
+    if (build.has_title) if (snap.focused_window) |fw| {
         if (snap.focused_window != prev.focused_window or snap.is_title_invalidated) {
             title.fetchWindowTitleInto(core.conn, fw, &snap.focused_title, allocator) catch {};
         } else {
@@ -747,7 +747,7 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot,
         var title_tmp: std.ArrayListUnmanaged(u8) = .empty;
         defer title_tmp.deinit(allocator);
         for (snap.current_workspace_windows.items) |win| {
-            if (comptime build.has_title) {
+            if (build.has_title) {
                 if (snap.focused_window == win) {
                     snap.window_title_data.appendSlice(allocator, snap.focused_title.items) catch {};
                 } else {
@@ -947,7 +947,7 @@ fn resolvePercentageFontSize(bar_height: u16) ?u16 {
 
 fn calcBarHeight() !u16 {
     if (core.config.bar.height) |h| {
-        const height = if (comptime build.has_scale) scale.scaleBarHeight(h, core.screen.height_in_pixels) else blk: {
+        const height = if (build.has_scale) scale.scaleBarHeight(h, core.screen.height_in_pixels) else blk: {
             const screen_h: f32 = @floatFromInt(core.screen.height_in_pixels);
             const px: f32 = if (h.is_percentage) screen_h * (h.value / 100.0) else h.value;
             break :blk @max(20, @as(u16, @intFromFloat(@round(px))));
@@ -979,7 +979,7 @@ pub fn init() !void {
     initAtoms();
     // Detect refresh rate before the bar thread spawns so carousel.wakeIntervalNs()
     // returns the real rate from the first tick.
-    if (comptime build.has_scale) scale.ensureRefreshRateDetected(core.conn);
+    if (build.has_scale) scale.ensureRefreshRateDetected(core.conn);
     const height = try calcBarHeight();
     const y_pos  = calcBarYPos(height);
     const setup  = createBarWindow(height, y_pos);
@@ -1072,12 +1072,12 @@ pub fn toggleBarSegmentAnchor() void {
         ungrabAndFlush();
         return;
     };
-    const no_fullscreen = if (comptime build.has_fullscreen)
+    const no_fullscreen = if (build.has_fullscreen)
         fullscreen.getForWorkspace(current_ws) == null
     else
         true;
     if (no_fullscreen)
-        if (comptime build.has_tiling) tiling.retileCurrentWorkspace();
+        if (build.has_tiling) tiling.retileCurrentWorkspace();
     window.updateWorkspaceBorders();
     window.markBordersFlushed();
     ungrabAndFlush();
@@ -1178,10 +1178,10 @@ pub fn setBarState(action: BarAction) void {
         } else {
             _ = xcb.xcb_unmap_window(core.conn, s.win.win_id);
         }
-        if (comptime build.has_tiling) tiling.retileCurrentWorkspace();
+        if (build.has_tiling) tiling.retileCurrentWorkspace();
     }
     debug.info("Bar {s} ({s})", .{ if (show) "shown" else "hidden", @tagName(action) });
-    if (comptime build.has_clock) clock.updateTimerState();
+    if (build.has_clock) clock.updateTimerState();
 }
 
 pub fn updateIfDirty() !void {
@@ -1204,8 +1204,8 @@ pub fn checkClockUpdate() bool {
     return true;
 }
 
-pub fn pollTimeoutMs() i32     { return if (comptime build.has_clock) clock.pollTimeoutMs() else -1; }
-pub fn updateTimerState() void { if (comptime build.has_clock) clock.updateTimerState(); }
+pub fn pollTimeoutMs() i32     { return if (build.has_clock) clock.pollTimeoutMs() else -1; }
+pub fn updateTimerState() void { if (build.has_clock) clock.updateTimerState(); }
 
 pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {
     if (gBar.state) |s| if (event.window == s.win.win_id and event.count == 0) {
@@ -1228,8 +1228,8 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     const s = gBar.state orelse return;
     if (event.event != s.win.win_id) return;
-    if (comptime !build.has_workspaces) return;
-    if (comptime !build.has_tags) return;
+    if (!build.has_workspaces) return;
+    if (!build.has_tags) return;
     const ws_state = workspaces.getState() orelse return;
     const ws_w     = tags.getCachedWorkspaceWidth();
     if (ws_w == 0) return;
@@ -1240,27 +1240,25 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     s.markDirty();
 }
 
-// Private helpers
-
 inline fn switchToWorkspace(ws_arg: u8) void {
-    if (comptime build.has_workspaces) workspaces.switchTo(ws_arg);
+    if (build.has_workspaces) workspaces.switchTo(ws_arg);
 }
 
-inline fn isTilingActive() bool {
-    if (comptime !build.has_tiling) return false;
+fn isTilingActive() bool {
+    if (!build.has_tiling) return false;
     return core.config.tiling.enabled and
         if (tiling.getStateOpt()) |t| t.is_enabled else false;
 }
 
 /// Must be called without holding the X server grab.
 fn retileAllWorkspaces() void {
-    if (comptime !build.has_tiling) return;
-    if (comptime !build.has_workspaces) { tiling.retileCurrentWorkspace(); return; }
+    if (!build.has_tiling) return;
+    if (!build.has_workspaces) { tiling.retileCurrentWorkspace(); return; }
     const ws_state = workspaces.getState() orelse return;
     if (!isTilingActive()) { tiling.retileCurrentWorkspace(); return; }
     for (ws_state.workspaces, 0..) |_, idx| {
         if (!tracking.hasWindowsOnWorkspace(@intCast(idx))) continue;
-        if (comptime build.has_fullscreen) {
+        if (build.has_fullscreen) {
             if (fullscreen.getForWorkspace(@intCast(idx)) != null) continue;
         }
         if (@as(u8, @intCast(idx)) != ws_state.current) {

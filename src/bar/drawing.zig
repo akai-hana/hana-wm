@@ -594,8 +594,6 @@ pub const CarouselPixmap = struct {
     }
 };
 
-// Private helpers 
-
 fn createPangoLayout(ctx: *c.cairo_t, dpi: f32) !*c.PangoLayout {
     const layout = c.pango_cairo_create_layout(ctx) orelse return error.PangoLayoutCreateFailed;
     c.pango_cairo_context_set_resolution(c.pango_layout_get_context(layout), @floatCast(dpi));

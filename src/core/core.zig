@@ -1,18 +1,15 @@
-//! Shared type definitions
-//! Defines the display handles, geometry types, and process-wide state shared across all modules.
+//! Central hub for process-wide XCB state and shared types.
+//! All `undefined` globals must be initialised in main before any other module runs.
 
 const std = @import("std");
 
 const constants = @import("constants");
+const types     = @import("types");
 
-// Importing xcb centrally and re-exporting it avoids repeated @cImport translation
-// on every compilation unit that needs XCB types.
+// Centralised to avoid repeated @cImport translation across compilation units.
 pub const xcb = @cImport(@cInclude("xcb/xcb.h"));
 
-
 // X11 keysym constants
-//
-// Centralised here so key-handling modules reference a single definition and cannot drift.
 // Values match <X11/keysymdef.h> (stable since X11R1).
 pub const XK_BackSpace : xcb.xcb_keysym_t = 0xff08;
 pub const XK_Tab       : xcb.xcb_keysym_t = 0xff09;
@@ -20,14 +17,14 @@ pub const XK_Return    : xcb.xcb_keysym_t = 0xff0d;
 pub const XK_Escape    : xcb.xcb_keysym_t = 0xff1b;
 pub const XK_Delete    : xcb.xcb_keysym_t = 0xffff;
 pub const XK_Left      : xcb.xcb_keysym_t = 0xff51;
+pub const XK_Up        : xcb.xcb_keysym_t = 0xff52;
 pub const XK_Right     : xcb.xcb_keysym_t = 0xff53;
+pub const XK_Down      : xcb.xcb_keysym_t = 0xff54;
 pub const XK_Home      : xcb.xcb_keysym_t = 0xff50;
 pub const XK_End       : xcb.xcb_keysym_t = 0xff57;
 
-/// Type alias for XCB window identifiers.
+/// Equivalent to xcb.xcb_window_t (uint32_t); named for readability.
 pub const WindowId = u32;
-
-// Core geometric type
 
 /// Geometry snapshot used by both fullscreen and minimize.
 pub const WindowGeometry = struct {
@@ -46,22 +43,27 @@ pub const FocusSuppressReason = enum {
 };
 
 /// DPI and scale factor detected at startup.
-/// Defined here so all modules can reference the type via core without
-/// importing scale. scale.zig re-exports this and populates it via detect().
+/// Defined here so modules can reference the type without importing scale
 pub const DpiInfo = struct {
     dpi:          f32,
     scale_factor: f32,
 
-    /// Constructs a DpiInfo from a raw DPI value, computing scale_factor relative to BASELINE_DPI.
+    /// Computes scale_factor relative to BASELINE_DPI.
     pub fn fromDpi(dpi: f32) DpiInfo {
-        return .{ .dpi = dpi, .scale_factor = dpi / @import("constants").BASELINE_DPI };
+        return .{ .dpi = dpi, .scale_factor = dpi / constants.BASELINE_DPI };
     }
 };
 
-// Process-wide singletons, initialised in main before any other module runs.
-pub var conn:     *xcb.xcb_connection_t   = undefined;
-pub var screen:   *xcb.xcb_screen_t       = undefined;
-pub var root:     WindowId                = undefined;
-pub var alloc:    std.mem.Allocator       = undefined;
-pub var config:   @import("types").Config = undefined;
-pub var dpi_info: DpiInfo                 = .{ .dpi = 96.0, .scale_factor = 1.0 };
+// Process-wide singletons. `undefined` fields must be set by main() before use;
+// behaviour is only safety-checked in Debug/ReleaseSafe builds.
+pub var conn:     *xcb.xcb_connection_t = undefined;
+pub var screen:   *xcb.xcb_screen_t    = undefined;
+pub var root:     WindowId             = undefined;
+pub var alloc:    std.mem.Allocator    = undefined;
+pub var config:   types.Config         = undefined;
+pub var dpi_info: DpiInfo              = .{ .dpi = 96.0, .scale_factor = 1.0 };
+
+/// Returns true if the XCB connection is open and error-free.
+pub fn isConnValid() bool {
+    return xcb.xcb_connection_has_error(conn) == 0;
+}

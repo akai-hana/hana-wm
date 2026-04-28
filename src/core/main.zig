@@ -11,8 +11,8 @@ const events    = @import("events");
 const config    = @import("config");
 const constants = @import("constants");
 
-const scale = if (build.has_scale) @import("scale") else struct {};
-const debug = if (build.has_debug) @import("debug") else struct {};
+const scale = if (build.has_scale) @import("scale");
+const debug = if (build.has_debug) @import("debug");
 
 const input = @import("input");
 
@@ -36,7 +36,7 @@ pub fn main() !void {
     core.screen = x.screen;
     core.root   = x.root;
     core.alloc  = std.heap.c_allocator;
-    if (comptime build.has_scale) core.dpi_info = scale.detectDpi(x.conn, x.screen);
+    if (build.has_scale) core.dpi_info = scale.detectDpi(x.conn, x.screen);
 
     input.setup(x.conn, x.screen, x.root);
     try input.initXkb(x.conn);
@@ -47,7 +47,7 @@ pub fn main() !void {
     // Defers are LIFO: deinitKeybindMap runs before core.config.deinit, so the map
     // is cleared (backing array freed) while its action pointers are still valid.
     defer config.deinitKeybindMap(core.alloc);
-    if (comptime build.has_scale)
+    if (build.has_scale)
         core.config.bar.scaled_font_size = scale.scaleFontSize(core.config.bar.font_size, x.screen);
 
     // Defers run in LIFO order

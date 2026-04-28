@@ -45,6 +45,8 @@ pub const Action = union(enum) {
     focus_prev_window,      // cycle focus backward / left
     move_window_next,       // move focused window forward
     move_window_prev,       // move focused window backward
+    scroll_view_left,       // shift scroll-layout viewport left by one slot
+    scroll_view_right,      // shift scroll-layout viewport right by one slot
 
     pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
         switch (self.*) {

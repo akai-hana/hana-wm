@@ -24,7 +24,25 @@ pub fn tileWithOffset(
     const inset: u16 = if (state.layout_variants.monocle == .gaps) m.gap else 0;
     const total_margin = m.border * 2 + inset * 2;
 
-    const top_win  = windows[windows.len - 1];
+    // Raise the focused window.  ctx.focused_win is set by makeLayoutCtx via
+    // focus.getFocused() and is always a window present in the current workspace
+    // window list when valid.  If it is null (e.g. during restoreWorkspaceGeom,
+    // which constructs a bare LayoutCtx without focus information) or names a
+    // window not in this workspace's list, fall back to the list tail so that
+    // monocle still shows *something* rather than raising nothing.
+    //
+    // The old behaviour of unconditionally using windows[len-1] was wrong:
+    // closing the visible window in monocle could surface an arbitrary background
+    // window instead of the one the user previously interacted with.
+    const top_win: u32 = blk: {
+        if (ctx.focused_win) |f| {
+            for (windows) |w| {
+                if (w == f) break :blk f;
+            }
+        }
+        break :blk windows[windows.len - 1];
+    };
+
     const top_rect = utils.Rect{
         .x      = @intCast(inset),
         .y      = @intCast(y_offset +| inset),
@@ -34,19 +52,25 @@ pub fn tileWithOffset(
 
     layouts.configureWithHintsAndRaise(ctx, top_win, top_rect);
 
-    pushBackgroundWindowsOffscreen(ctx, windows[0 .. windows.len - 1]);
+    pushBackgroundWindowsOffscreen(ctx, windows, top_win);
 }
 
-// ============================================================================
-// Private helpers
-// ============================================================================
-
-/// Push non-top windows off the visible screen area so they never show through
-/// a transparent top window. Skips windows already known to be offscreen to
-/// avoid redundant round-trips; invalidates their cache rect so
+/// Push all windows except `top_win` off the visible screen area so they never
+/// show through a transparent top window.  Skips windows already known to be
+/// offscreen to avoid redundant round-trips; invalidates their cache rect so
 /// `restoreWorkspaceGeom` does not replay a stale on-screen position.
-fn pushBackgroundWindowsOffscreen(ctx: *const layouts.LayoutCtx, background: []const u32) void {
-    for (background) |win| {
+///
+/// Accepts the full `windows` slice and skips `top_win` by ID rather than
+/// requiring the caller to pre-slice — this avoids the previous assumption that
+/// top_win is always the last element, which was no longer true once focus-
+/// tracking was introduced.
+fn pushBackgroundWindowsOffscreen(
+    ctx:     *const layouts.LayoutCtx,
+    windows: []const u32,
+    top_win: u32,
+) void {
+    for (windows) |win| {
+        if (win == top_win) continue;
         if (ctx.cache.getPtr(win)) |wd| {
             if (!wd.hasValidRect()) continue; // already offscreen — skip round-trip
             wd.rect = tiling.zero_rect;       // invalidate before sending

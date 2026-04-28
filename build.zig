@@ -163,7 +163,7 @@ fn buildFallbackTomlModule(
         \\pub const content: []const u8 = @embedFile("fallback.toml");
     else
         \\pub const content: []const u8 = "";
-    ;
+   ;
 
     return b.createModule(.{
         .root_source_file = write.add("fallback_toml.zig", stub_source),
