@@ -71,8 +71,13 @@ pub fn tileWithOffset(
         for (batch, 0..) |win, i| {
             const already_placed = blk: {
                 const wd = ctx.cache.getPtr(win) orelse break :blk false;
-                if (!wd.hasValidRect()) break :blk false;
-                break :blk wd.rect.x != 0 or wd.rect.y != 0;
+                // A valid cached rect is proof of intentional placement — the
+                // cache is only written by configureWithHints, stopDrag, and
+                // saveWindowGeom, all of which reflect deliberate WM or user
+                // action.  We no longer exclude (0, 0): a window the user
+                // dragged to the top-left corner has a valid rect there and
+                // must not be re-centred.
+                break :blk wd.hasValidRect();
             };
             // Guard: nothing more to do for windows that are already placed.
             // needs_query[i] stays false (pre-initialised above).

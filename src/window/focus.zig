@@ -114,6 +114,9 @@ pub fn deinit() void {
         xcb.xcb_discard_reply(core.conn, ck.sequence);
     if (state.pointer_cookie) |ck|
         xcb.xcb_discard_reply(core.conn, ck.sequence);
+    // Reset all fields so that any accessor called between deinit() and the
+    // next init() observes a clean zero-value state rather than stale data.
+    state = .{};
 }
 
 // Public accessors
@@ -396,7 +399,7 @@ pub fn setFocus(win: u32, reason: Reason) void {
     commitFocusTransition(old, win, .{
         .set_input_focus    = input_model != .globally_active,
         .raise              = shouldRaise(reason, win),
-        .send_wm_take_focus = input_model != .no_input,
+        .send_wm_take_focus = true, // no_input already returned early above
         .arm_confirm        = reason == .pointer_sync,
         .schedule_bar       = true,
         .new_suppress       = suppressionFor(reason, state.suppress_reason),
@@ -618,6 +621,10 @@ inline fn suppressionFor(reason: Reason, current: core.FocusSuppressReason) core
     return switch (reason) {
         .mouse_click, .user_command => .none,
         .window_spawn               => .window_spawn,
+        // Workspace switch always clears suppression: crossing events generated
+        // by windows mapping/unmapping during the switch must not be masked on
+        // the new workspace.  Documented in Reason.workspace_switch.
+        .workspace_switch           => .none,
         else                        => current,
     };
 }
@@ -723,10 +730,15 @@ fn focusCycle(comptime forward: bool) void {
     const len = collectVisibleWindows();
     if (len == 0) return;
     const wins = cycle_buf[0..len];
+    // When the focused window is not found in the visible list (e.g. it is
+    // minimised or on another workspace) we pick a sentinel index that wraps
+    // the very next step back to wins[0] (forward) or wins[len-1] (backward),
+    // so the user always lands on the first visible window rather than skipping
+    // wins[0] with the default-to-0 + (+1 % len) combination.
     const idx = if (state.focused_window) |w|
-        std.mem.indexOfScalar(u32, wins, w) orelse 0
+        std.mem.indexOfScalar(u32, wins, w) orelse (if (comptime forward) len - 1 else 0)
     else
-        0;
+        if (comptime forward) len - 1 else 0;
     const next_idx = if (forward) (idx + 1) % len else (idx + len - 1) % len;
     setFocus(wins[next_idx], .user_command);
 }

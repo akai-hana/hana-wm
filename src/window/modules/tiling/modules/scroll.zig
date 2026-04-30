@@ -3,19 +3,12 @@
 //! with a scrollable viewport. New windows snap the viewport right so they appear immediately;
 //! manual scrolling and window closes are handled by clamping on every retile.
 
-const std = @import("std");
-
-const core      = @import("core");
+const std       = @import("std");
 const utils     = @import("utils");
 const constants = @import("constants");
 
 const tiling  = @import("tiling");
 const layouts = @import("layouts");
-
-// i16 bounds for utils.Rect.x; positions outside this range are parked at
-// OFFSCREEN_X_POSITION rather than sent as an overflowing cast to the X server.
-const I16_MAX: i32 = std.math.maxInt(i16);
-const I16_MIN: i32 = std.math.minInt(i16);
 
 pub fn tileWithOffset(
     ctx:      *const layouts.LayoutCtx,
@@ -59,7 +52,7 @@ pub fn tileWithOffset(
     const gap_half: i32 = @intCast(m.gap / 2);
     const border2:  i32 = 2 * @as(i32, @intCast(m.border));
 
-    var defer_slot = layouts.DeferredConfigure.init(ctx);
+    var defer_slot = layouts.DeferredConfigure.init();
 
     for (windows, 0..) |win, i| {
         const col: i32 = @intCast(i);
@@ -79,23 +72,18 @@ pub fn tileWithOffset(
 
         const right: i32 = x + avail + border2;
 
-        // Completely off-screen: park the window.
+        // Completely off-screen: park the window at OFFSCREEN_X_POSITION so
+        // the cache stays consistent.  Clamp x into i16 range first; values
+        // outside that range cannot be sent as a valid configure_window X
+        // coordinate and would overflow the u32 cast the X server expects.
         if (x >= sw_i32 or right <= 0) {
-            if (x < I16_MIN or x > I16_MAX) {
-                _ = core.xcb.xcb_configure_window(
-                    ctx.conn, win,
-                    core.xcb.XCB_CONFIG_WINDOW_X,
-                    &[_]u32{@bitCast(constants.OFFSCREEN_X_POSITION)},
-                );
-                ctx.cache.getOrPut(win).value_ptr.rect = tiling.zero_rect;
-            } else {
-                const rect = utils.Rect{
-                    .x = @intCast(x), .y = @intCast(win_y),
-                    .width = content_w, .height = content_h,
-                };
-                if (!defer_slot.capture(ctx, win, rect))
-                    layouts.configureWithHints(ctx, win, rect);
-            }
+            const parked_x: i32 = constants.OFFSCREEN_X_POSITION;
+            const rect = utils.Rect{
+                .x = @intCast(parked_x), .y = @intCast(win_y),
+                .width = content_w, .height = content_h,
+            };
+            if (!defer_slot.capture(ctx, win, rect))
+                layouts.configureWithHints(ctx, win, rect);
             continue;
         }
 

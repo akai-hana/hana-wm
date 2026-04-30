@@ -156,17 +156,21 @@ pub fn init() !void {
         var ws_layout   = default_layout;
         var ws_variant: ?types.LayoutVariantOverride = null;
         if (build.has_tiling) {
-            if (override_lookup[id]) |o| {
-                if (o.layout_idx < cfg_tiling.layouts.items.len)
-                    ws_layout = layoutFromName(cfg_tiling.layouts.items[o.layout_idx]);
-                ws_variant = o.variant;
+            if (id < MAX_WS) {
+                if (override_lookup[id]) |o| {
+                    if (o.layout_idx < cfg_tiling.layouts.items.len)
+                        ws_layout = layoutFromName(cfg_tiling.layouts.items[o.layout_idx]);
+                    ws_variant = o.variant;
+                }
             }
         }
 
         ws.* = Workspace.init(id, name, ws_layout);
         ws.variants = ws_variant;
         if (build.has_tiling) {
-            if (master_count_lookup[id]) |mc| ws.master_count = mc;
+            if (id < MAX_WS) {
+                if (master_count_lookup[id]) |mc| ws.master_count = mc;
+            }
         }
     }
 
@@ -186,7 +190,7 @@ pub fn deinit() void {
         s.allocator.free(s.workspaces);
     }
     g_state = null;
-    tracking.setWorkspaceCount(1);
+    tracking.setWorkspaceCount(0);
     tracking.setCurrentWorkspace(0);
 }
 
@@ -221,8 +225,9 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
     const target_bit = tracking.workspaceBit(target_ws);
     if (mask == target_bit) return;
 
-    var new_mask = (mask & ~tracking.workspaceBit(s.current)) | target_bit;
-    if (new_mask == 0) new_mask = target_bit; // safety: never leave mask empty
+    const new_mask = (mask & ~tracking.workspaceBit(s.current)) | target_bit;
+    // Note: new_mask is always non-zero here — target_bit (= 1 << target_ws) is
+    // always set, so the OR guarantees at least one bit is present.
 
     // Route through setWindowMask so every workspace's window list stays in sync,
     // including any extra workspaces the window was tagged to beyond the current one.
@@ -243,8 +248,10 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
         fullscreen.moveRecord(src_ws, target_ws);
     }
 
-    evictWindow(win);
-    if (focus.getFocused() == win) focus.clearFocus();
+    if (target_ws != s.current) {
+        evictWindow(win);
+        if (focus.getFocused() == win) focus.clearFocus();
+    }
     if (build.has_tiling and core.config.tiling.enabled) tiling.markDirty();
     bar.scheduleRedraw();
     // No xcb_flush: the window has never been mapped so evictWindow's offscreen
@@ -299,7 +306,7 @@ pub fn moveWindowExclusive(win: u32, target_ws: u8) void {
     // source workspace and floating peers remain invisible there indefinitely.
     if (build.has_fullscreen) fs_blk: {
         const src_ws = fullscreen.workspaceFor(win) orelse break :fs_blk;
-        if (src_ws != target_ws) fullscreen.cleanupFullscreenForMove(win, src_ws);
+        if (src_ws == s.current) fullscreen.cleanupFullscreenForMove(win, src_ws);
         fullscreen.moveRecord(src_ws, target_ws);
     }
 
@@ -337,8 +344,14 @@ pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
             if (build.has_fullscreen) {
                 if (fullscreen.workspaceFor(win)) |src_ws| {
                     if (src_ws == current) {
-                        // Land on the lowest-set-bit workspace still in the new mask.
+                        // Mirror moveWindowTo / moveWindowExclusive: run the same
+                        // cleanup that exitFullscreenCommit would have performed on
+                        // the source workspace — restores the bar, brings floating
+                        // peers back onscreen, and restores the window's border
+                        // width — then transfer the record so the window remains
+                        // fullscreen on whichever workspace it lands on.
                         const dst: u8 = @intCast(@ctz(new_mask));
+                        fullscreen.cleanupFullscreenForMove(win, src_ws);
                         fullscreen.moveRecord(src_ws, dst);
                     }
                 }
@@ -501,8 +514,17 @@ pub fn moveWindowToAll(win: u32) void {
     pinToAllWorkspacesToggle(s, win);
 }
 
-/// `toggle_tag_all` action — Mod+Alt+5.  Identical semantics to moveWindowToAll.
-pub fn tagToggleAll(win: u32) void { moveWindowToAll(win); }
+/// `toggle_tag_all` action — Mod+Alt+5.
+/// Intentional alias for moveWindowToAll: both actions share identical
+/// semantics (toggle between pinned-to-all-workspaces and current-workspace-only)
+/// and are bound to different key chords as user-facing convenience names.
+/// Both delegate to pinToAllWorkspacesToggle so any future behavioural
+/// divergence only requires updating one of the two call-sites.
+pub fn tagToggleAll(win: u32) void {
+    const s = getState() orelse return;
+    if (isMinimized(win)) return;
+    pinToAllWorkspacesToggle(s, win);
+}
 
 /// Returns the workspace bitmask for `win`, or null if unmanaged.
 /// Delegates to tracking which owns the map.
@@ -606,6 +628,11 @@ pub fn isManaged(win: u32) bool {
 /// before the atomic grab body begins — the grab body must be entirely
 /// fire-and-forget to prevent the compositor from observing partial states.
 fn prefetchAndSaveWindowGeometries(ws: *const Workspace, new_ws: u8) void {
+    // TODO: replace the fixed-size stack buffer with a heap-allocated slice
+    // (e.g. std.ArrayListUnmanaged) so that workspaces with more than MAX_FLOAT
+    // floating windows do not silently lose geometry on switch.  The warning
+    // below fires only once per call, so subsequent switches with excess windows
+    // also degrade without any further diagnostic.
     const MAX_FLOAT = 64;
     const GeomEntry = struct { win: u32, cookie: xcb.xcb_get_geometry_cookie_t };
     var pending:   [MAX_FLOAT]GeomEntry = undefined;

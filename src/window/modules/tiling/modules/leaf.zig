@@ -22,7 +22,7 @@ pub fn tileWithOffset(
 
     const m = state.margins();
 
-    var defer_slot = layouts.DeferredConfigure.init(ctx);
+    var defer_slot = layouts.DeferredConfigure.init();
 
     // Strip the outer gap; each recursive split inserts one gap at its seam,
     // so adjacent windows are always separated by exactly one gap_width.
