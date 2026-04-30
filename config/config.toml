@@ -175,8 +175,11 @@ Mod+D       = "ghostty"
 Mod+I       = "xeyes"
 Mod+Shift+D = "{kill} ghostty"
 
-Mod+Z       = "cd ~/Games/isaac-repentance+; wine isaac-ng.exe"
-Mod+Shift+Z = "pkill isaac-ng"
+Mod+Z       = "cd ~/Games/noita; wine noita.exe"
+Mod+Shift+Z = "pkill noita"
+
+# Mod+Z       = "cd ~/Games/isaac-repentance+; wine isaac-ng.exe"
+# Mod+Shift+Z = "pkill isaac-ng"
 
 Mod+X       = "~/Games/t-client/DDNet"
 Mod+Shift+X = "{kill} DDNet"

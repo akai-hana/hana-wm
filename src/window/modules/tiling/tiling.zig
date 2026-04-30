@@ -377,6 +377,10 @@ pub fn removeWindow(window_id: u32) void {
     // AND the embedded WM_NORMAL_HINTS in one operation.  No-op when the window
     // was never cached (e.g. floating windows that opened while tiling was disabled).
     _ = s.cache.remove(window_id);
+    // If this window was stored as the previous focused window for scroll focus
+    // restoration, clear it now — returning a destroyed window ID to the caller
+    // of takePrevFocusedForScroll would generate an XCB BadWindow error.
+    if (s.scroll.prev_focused == window_id) s.scroll.prev_focused = null;
 }
 
 /// Toggle a window between tiled and floating.
@@ -968,7 +972,9 @@ inline fn layoutFromString(name: []const u8) ?Layout {
 
 /// Build the runtime-enabled layout list from the config's `layouts` array,
 /// keeping only entries whose .zig file is present on disk. Duplicates are
-/// dropped. Falls back to `layout_cycle` when the config produces an empty list.
+/// dropped. When the config produces an empty list (all names unknown or all
+/// layouts disabled at build time), seeds from layout_cycle so the returned
+/// list is always non-empty — stepLayout depends on this guarantee.
 fn parseEnabledLayouts(layouts_cfg: []const []const u8) struct { arr: [6]Layout, len: u8 } {
     var arr: [6]Layout = undefined;
     var len: u8 = 0;
@@ -988,12 +994,10 @@ fn parseEnabledLayouts(layouts_cfg: []const []const u8) struct { arr: [6]Layout,
 }
 
 /// Walk the runtime-enabled layout list to find `current`, then step forward or
-/// backward. Falls back to `layout_cycle` if state has no enabled layouts.
+/// backward. enabled_layouts is always non-empty — parseEnabledLayouts seeds it
+/// from layout_cycle when the config produces no valid entries.
 inline fn stepLayout(s: *const State, current: Layout, comptime forward: bool) Layout {
-    const cycle: []const Layout = if (s.enabled_layout_count > 0)
-        s.enabled_layouts[0..s.enabled_layout_count]
-    else
-        layout_cycle;
+    const cycle: []const Layout = s.enabled_layouts[0..s.enabled_layout_count];
     for (cycle, 0..) |l, i| {
         if (l != current) continue;
         return cycle[if (forward) (i + 1) % cycle.len else (cycle.len + i - 1) % cycle.len];
@@ -1076,7 +1080,7 @@ fn invokeLayout(
 ) void {
     const w = screen.width;
     const h = screen.height;
-    const y: u16 = @intCast(screen.y);
+    const y: u16 = if (screen.y > 0) @intCast(screen.y) else 0;
     switch (layout) {
         .master    => master.tileWithOffset(ctx, s, wins, w, h, y),
         .monocle   => monocle.tileWithOffset(ctx, s, wins, w, h, y),
@@ -1240,7 +1244,10 @@ fn collectWorkspaceWindows(s: *State, buf: []u32, for_ws: ?u8) usize {
     // retile must observe the same sequence or swaps have no visual effect.
     var n: usize = 0;
     for (s.windows.items()) |win| {
-        if (n >= buf.len) break;
+        if (n >= buf.len) {
+            debug.warn("collectWorkspaceWindows: workspace has >{} windows; excess dropped", .{buf.len});
+            break;
+        }
         const is_on_target = if (for_ws) |idx|
             tracking.isWindowOnWorkspace(win, idx)
         else

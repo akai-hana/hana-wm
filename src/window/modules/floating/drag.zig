@@ -341,11 +341,32 @@ pub fn updateDrag(x: i16, y: i16) void {
             const new_w = new_right  - new_left;
             const new_h = new_bottom - new_top;
 
+            // Clamp dimensions first, then re-pin the position so the anchor
+            // edge stays fixed even when the minimum size is hit.
+            //
+            // Without this correction the anchor drifts: .x is set to new_left
+            // (the cursor-tracked edge) while .width is inflated by the clamp,
+            // so the far edge overshoots anchor_x.  Example: dragging the left
+            // edge rightward past (anchor_x - MIN_WINDOW_DIM) would push the
+            // right edge beyond anchor_x instead of holding it steady.
+            //
+            // The rule is straightforward:
+            //   • moving edge is on the LEFT  (moving_x < anchor_x)
+            //     → anchor is the RIGHT edge; x = anchor_x - clamped_w
+            //   • moving edge is on the RIGHT (moving_x >= anchor_x)
+            //     → anchor is the LEFT  edge; x = new_left (unchanged)
+            // Identical logic applies vertically.
+            const clamped_w: i32 = std.math.clamp(new_w, constants.MIN_WINDOW_DIM, std.math.maxInt(u16));
+            const clamped_h: i32 = std.math.clamp(new_h, constants.MIN_WINDOW_DIM, std.math.maxInt(u16));
+
+            const pinned_x: i32 = if (moving_x < anchor_x) anchor_x - clamped_w else new_left;
+            const pinned_y: i32 = if (moving_y < anchor_y) anchor_y - clamped_h else new_top;
+
             break :blk utils.Rect{
-                .x      = @intCast(new_left),
-                .y      = @intCast(new_top),
-                .width  = @intCast(std.math.clamp(new_w, constants.MIN_WINDOW_DIM, std.math.maxInt(u16))),
-                .height = @intCast(std.math.clamp(new_h, constants.MIN_WINDOW_DIM, std.math.maxInt(u16))),
+                .x      = @intCast(pinned_x),
+                .y      = @intCast(pinned_y),
+                .width  = @intCast(clamped_w),
+                .height = @intCast(clamped_h),
             };
         },
     };

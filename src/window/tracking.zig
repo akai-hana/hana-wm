@@ -90,27 +90,45 @@ pub const Tracking = struct {
 
     /// Replace the current window order with `new_order`.
     ///
-    /// Asserts (in debug/releaseSafe builds) that `new_order` contains exactly
-    /// the same set of windows as the current list — no additions, no removals,
-    /// no duplicates.
+    /// Validates that `new_order` contains exactly the same set of windows as
+    /// the current list — no additions, no removals, no duplicates.  In all
+    /// build modes an error is logged and the function returns early on bad
+    /// input (no corruption).  In debug/releaseSafe builds the assert also
+    /// fires to surface programmer errors loudly.
     ///
-    /// Validation is O(n²) in debug/releaseSafe builds: each entry in new_order
-    /// requires an O(n) linear scan (indexOfScalar) to locate its slot in
-    /// self.buf, and the resulting slot index is marked in a stack-allocated
-    /// bitset to detect duplicates.  For capacity = 64 this is at most 4,096
-    /// operations — acceptable for debug-only code.  The bitset operations
-    /// themselves are O(1) per entry; the dominant cost is the linear scan.
+    /// Validation is O(n²): each entry requires an O(n) linear scan to locate
+    /// its slot, and the result is marked in a stack-allocated bitset to detect
+    /// duplicates.  For capacity = 64 this is at most 4,096 operations.
     pub fn reorder(self: *Tracking, new_order: []const u32) void {
-        std.debug.assert(new_order.len == self.len);
+        if (new_order.len != self.len) {
+            std.log.err(
+                "tracking: reorder length mismatch: got {d}, expected {d}",
+                .{ new_order.len, self.len },
+            );
+            std.debug.assert(new_order.len == self.len);
+            return;
+        }
 
         var seen = std.StaticBitSet(capacity).initEmpty();
         for (new_order) |w| {
             const slot = std.mem.indexOfScalar(u32, self.buf[0..self.len], w);
-            // Every entry in new_order must exist in the current list.
-            std.debug.assert(slot != null);
+            if (slot == null) {
+                std.log.err(
+                    "tracking: reorder: window 0x{x} not in current list",
+                    .{w},
+                );
+                std.debug.assert(slot != null);
+                return;
+            }
             const idx = slot.?;
-            // No duplicates in new_order.
-            std.debug.assert(!seen.isSet(idx));
+            if (seen.isSet(idx)) {
+                std.log.err(
+                    "tracking: reorder: duplicate window 0x{x} in new_order",
+                    .{w},
+                );
+                std.debug.assert(!seen.isSet(idx));
+                return;
+            }
             seen.set(idx);
         }
         @memcpy(self.buf[0..self.len], new_order);
@@ -154,7 +172,11 @@ pub fn deinit() void {
 }
 
 /// Called by workspaces.init — tells tracking how many workspaces exist.
-pub fn setWorkspaceCount(count: usize) void { g_workspace_count = count; }
+/// count must not exceed 64; the workspace bitmask (u64) cannot represent more.
+pub fn setWorkspaceCount(count: usize) void {
+    std.debug.assert(count <= 64);
+    g_workspace_count = count;
+}
 
 /// Called by workspaces.switchTo so getCurrentWorkspace() stays correct
 /// even when code queries tracking directly.
@@ -164,6 +186,7 @@ pub fn setWorkspaceCount(count: usize) void { g_workspace_count = count; }
 /// count) would cause isOnCurrentWorkspace to return false for all windows,
 /// making every window appear off-workspace and silently breaking focus.
 pub fn setCurrentWorkspace(ws: u8) void {
+    std.debug.assert(ws < 64);
     std.debug.assert(ws < g_workspace_count);
     g_current = ws;
 }
@@ -175,6 +198,7 @@ pub fn setCurrentWorkspace(ws: u8) void {
 /// handles the full registration path (screen effects etc.) when present.
 pub fn registerWindow(win: u32, ws: u8) !void {
     if (!g_initialized) return;
+    std.debug.assert(ws < 64);
     for (g_windows.items) |e| { if (e.win == win) return; }
     try g_windows.append(g_alloc, .{ .win = win, .mask = @as(u64, 1) << @intCast(ws) });
 }
@@ -184,6 +208,7 @@ pub fn registerWindow(win: u32, ws: u8) !void {
 /// When workspaces.zig is present it calls this after cleaning up workspace
 /// last_focused; when absent, window.zig calls this directly.
 pub fn removeWindow(win: u32) void {
+    if (!g_initialized) return;
     for (g_windows.items, 0..) |e, i| {
         if (e.win == win) { _ = g_windows.swapRemove(i); return; }
     }
@@ -198,6 +223,7 @@ pub fn removeWindow(win: u32) void {
 /// race between removeWindow and a delayed mask update), not a programmer
 /// invariant that can be checked at compile time.
 pub fn setWindowMask(win: u32, mask: u64) void {
+    if (!g_initialized) return;
     std.debug.assert(mask != 0);
     for (g_windows.items) |*e| {
         if (e.win == win) { e.mask = mask; return; }
@@ -251,8 +277,9 @@ pub fn countWindowsOnWorkspace(ws_idx: u8) usize {
 // Workspace bitmask helpers
 
 /// Returns a u64 bitmask with only the bit for `ws_idx` set.
-/// `ws_idx` may be any integer type; the cast is checked in debug builds.
+/// `ws_idx` may be any integer type; must be in [0, 63].
 pub inline fn workspaceBit(ws_idx: anytype) u64 {
+    std.debug.assert(ws_idx < 64);
     return @as(u64, 1) << @intCast(ws_idx);
 }
 
@@ -265,10 +292,13 @@ pub inline fn allWorkspacesMask(count: usize) u64 {
 
 // Comptime workspace label table
 
-/// Comptime-generated number strings "1".."20" for workspace display labels.
+/// Comptime-generated number strings "1".."64" for workspace display labels.
+/// Sized to match the bitmask capacity so any valid workspace index can be
+/// looked up without risk of out-of-bounds access.
 /// Never heap-allocated; slices remain valid for the lifetime of the program.
-pub const WORKSPACE_LABELS: [20][]const u8 = blk: {
-    var labels: [20][]const u8 = undefined;
+pub const WORKSPACE_LABELS: [64][]const u8 = blk: {
+    @setEvalBranchQuota(10_000);
+    var labels: [64][]const u8 = undefined;
     for (&labels, 1..) |*label, i| label.* = std.fmt.comptimePrint("{d}", .{i});
     break :blk labels;
 };

@@ -20,7 +20,7 @@ pub fn tileWithOffset(
     if (n == 0) return;
 
     const m    = state.margins();
-    const grid = calcGridShape(n);
+    const grid = calcGridShape(n, screen_w, screen_h);
     const bm   = 2 *| m.border;
 
     const cell_w = (screen_w -| (grid.cols + 1) *| m.gap) / grid.cols;
@@ -37,7 +37,7 @@ pub fn tileWithOffset(
         break :blk (screen_w -| (count + 1) * m.gap) / count;
     } else cell_w;
 
-    var defer_slot = layouts.DeferredConfigure.init(ctx);
+    var defer_slot = layouts.DeferredConfigure.init();
 
     for (windows, 0..) |win, idx| {
         const col: u16 = @intCast(idx % grid.cols);
@@ -67,15 +67,19 @@ inline fn cellToWindowSize(cell_size: u16, border_margin: u16) u16 {
     return if (cell_size > border_margin) cell_size - border_margin else constants.MIN_WINDOW_DIM;
 }
 
-/// Returns the column and row count for the smallest square grid that holds `n`
-/// windows. Special-cases `n == 3` to produce a single row of three rather than
-/// a 2×2 grid with a dead cell.
+/// Returns column and row count for a grid that holds `n` windows, weighted
+/// by the screen aspect ratio so landscape monitors get more columns than rows.
 ///
-/// Uses integer ceiling-sqrt to avoid the float pipeline entirely; terminates
-/// in at most 12 iterations for any realistic window count.
-inline fn calcGridShape(n: usize) struct { cols: u16, rows: u16 } {
-    if (n == 3) return .{ .cols = 3, .rows = 1 };
-    var cols: u16 = 1;
-    while (@as(usize, cols) * cols < n) cols += 1;
-    return .{ .cols = cols, .rows = @intCast((n + cols - 1) / cols) };
+/// Algorithm: cols ≈ sqrt(n × aspect), rounded to the nearest integer.  A
+/// tightening pass then reduces cols until doing so would increase the row
+/// count (i.e. every column is necessary).  This eliminates most dead cells
+/// without requiring special-case logic for individual counts.
+inline fn calcGridShape(n: usize, screen_w: u16, screen_h: u16) struct { cols: u16, rows: u16 } {
+    const aspect: f32 = @as(f32, @floatFromInt(screen_w)) / @as(f32, @floatFromInt(screen_h));
+    const cols_f = @sqrt(@as(f32, @floatFromInt(n)) * aspect);
+    var cols: u16 = @max(1, @as(u16, @intFromFloat(@round(cols_f))));
+    const rows: u16 = @intCast((n + cols - 1) / cols);
+    // Tighten: drop a column if the row count is unchanged (dead cell removal).
+    while (cols > 1 and (cols - 1) * rows >= n) cols -= 1;
+    return .{ .cols = cols, .rows = rows };
 }

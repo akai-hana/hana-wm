@@ -177,7 +177,10 @@ pub fn getWindowGeom(win: u32) ?utils.Rect {
 // ---------------------------------------------------------------------------
 
 /// Screen-space position of a window's top-left corner.
-pub const Pos = struct { x: u32, y: u32 };
+/// X11 coordinates are signed (windows may be partially off-screen or on a
+/// monitor to the left/above the primary), so both fields use i16 to match
+/// the XCB wire type for X/Y configure values.
+pub const Pos = struct { x: i16, y: i16 };
 
 /// Returns the default floating window position
 /// (one quarter of the screen in from the top-left).
@@ -201,7 +204,7 @@ pub fn restoreFloatGeom(win: u32) void {
         const pos = floatDefaultPos();
         _ = xcb.xcb_configure_window(core.conn, win,
             xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
-            &[_]u32{ pos.x, pos.y });
+            &[_]u32{ @bitCast(@as(i32, pos.x)), @bitCast(@as(i32, pos.y)) });
     }
 }
 
@@ -340,6 +343,19 @@ inline fn resolveFocusAtoms() ?struct { take_focus: u32, wm_delete: u32 } {
     return .{ .take_focus = take_focus, .wm_delete = wm_delete };
 }
 
+/// Shared WM_HINTS input-field parser used by both the cookie path and the
+/// live-query path.  Accepts the already-decoded property data slice so the
+/// two callers can each handle their own reply lifetime.
+///
+/// Returns true when the input flag is unset, the field is absent, or the
+/// field is explicitly set to True — matching ICCCM §4.1.2.4 defaults.
+inline fn parseWMHintsInputFromData(hints: [*]const u32, value_len: u32) bool {
+    const input_flag_set  = (hints[WM_HINTS_FLAGS_FIELD] & WM_HINTS_INPUT_FLAG) != 0;
+    const has_input_field = value_len > @as(u32, WM_HINTS_INPUT_FIELD);
+    if (!input_flag_set or !has_input_field) return true;
+    return hints[WM_HINTS_INPUT_FIELD] != 0;
+}
+
 /// Extracts the WM_HINTS input field from a pre-fired cookie reply.
 /// Returns true when absent (assume True per ICCCM) or explicitly True.
 fn extractWMHintsInput(
@@ -350,10 +366,7 @@ fn extractWMHintsInput(
     defer std.c.free(r);
     if (r.*.format != 32 or r.*.value_len < 1) return true;
     const hints: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(r)));
-    const input_flag_set  = (hints[WM_HINTS_FLAGS_FIELD] & WM_HINTS_INPUT_FLAG) != 0;
-    const has_input_field = r.*.value_len > WM_HINTS_INPUT_FIELD;
-    if (!input_flag_set or !has_input_field) return true;
-    return hints[WM_HINTS_INPUT_FIELD] != 0;
+    return parseWMHintsInputFromData(hints, r.*.value_len);
 }
 
 /// Recomputes and caches the focus properties after a WM_PROTOCOLS or WM_HINTS
@@ -600,10 +613,7 @@ fn queryWMHintsAcceptsInput(conn: *xcb.xcb_connection_t, win: u32) bool {
     if (reply.*.format != 32 or reply.*.value_len < 1) return true;
 
     const hints: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
-    const input_flag_set  = (hints[WM_HINTS_FLAGS_FIELD] & WM_HINTS_INPUT_FLAG) != 0;
-    const has_input_field = reply.*.value_len > WM_HINTS_INPUT_FIELD;
-    if (!input_flag_set or !has_input_field) return true;
-    return hints[WM_HINTS_INPUT_FIELD] != 0;
+    return parseWMHintsInputFromData(hints, reply.*.value_len);
 }
 
 // ---------------------------------------------------------------------------
@@ -785,9 +795,13 @@ pub fn deinit() void {
         g_rules_map.deinit(a);
         g_rules_map = .{};
     }
+    // InputModel cache must be torn down before focus and tracking, mirroring
+    // the init order where initInputModelCache() follows focus.init().
+    // focus.deinit() and tracking.deinit() may sweep managed windows and
+    // must not encounter a partially-valid cache.
+    deinitInputModelCache();
     focus.deinit();
     tracking.deinit();
-    deinitInputModelCache();
 }
 
 /// Returns true when tiling is both compiled in and enabled at runtime.
@@ -1004,9 +1018,19 @@ fn takePrefetchedSpawnPointer() ?*xcb.xcb_query_pointer_reply_t {
 /// spawn-crossing suppression checks.  The caller owns the reply memory;
 /// this function only reads from it.  Replaces the old cookie-draining
 /// variant to ensure no implicit XCB flush occurs inside a server grab.
+///
+/// When `ptr_reply` is null (pointer query failed), the suppression flag is
+/// cleared rather than leaving `spawn_cursor` at its previous value, which
+/// could be {0,0} on startup and cause false suppression for windows at the
+/// screen origin.
 fn snapshotSpawnCursorFromReply(ptr_reply: ?*xcb.xcb_query_pointer_reply_t, suppress_reason: core.FocusSuppressReason) void {
     if (suppress_reason != .window_spawn) return;
-    const ptr = ptr_reply orelse return;
+    const ptr = ptr_reply orelse {
+        // Cannot snapshot a valid cursor position — disable suppression so
+        // the stale spawn_cursor value does not block legitimate focus events.
+        focus.setSuppressReason(.none);
+        return;
+    };
     spawn_cursor.x = ptr.*.root_x;
     spawn_cursor.y = ptr.*.root_y;
 }
@@ -1330,7 +1354,13 @@ fn focusWindowUnderPointer(ptr_reply: ?*xcb.xcb_query_pointer_reply_t) void {
         focus.focusBestAvailable(.tiling_operation, tracking.isOnCurrentWorkspaceAndVisible, fallback);
         return;
     };
-    const child = reply.*.child;
+    // xcb_query_pointer's `child` is the immediate child of root under the
+    // pointer.  For Electron/Qt apps this may be a non-managed sub-window XID,
+    // not the managed toplevel.  Resolve via findManagedWindow (which checks the
+    // child-window cache first) so focus recovery works correctly when the
+    // pointer rests over a toolkit child window after a window is closed.
+    const raw_child = reply.*.child;
+    const child = findManagedWindow(core.conn, raw_child, tracking.isManaged);
     if (tracking.isOnCurrentWorkspaceAndVisible(child)) {
         focus.setFocus(child, .pointer_sync);
         return;
@@ -1493,9 +1523,12 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
 
 inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
     if (focus.getSuppressReason() != .window_spawn) return false;
-    if (root_x == spawn_cursor.x and root_y == spawn_cursor.y) return true;
+    // Consume the suppression flag unconditionally: it is a one-shot guard that
+    // only applies to the first crossing event after a spawn.  Previously the
+    // flag was only cleared when the cursor had moved, which could suppress all
+    // future hover-focus events if the cursor stayed at the exact spawn pixel.
     focus.setSuppressReason(.none);
-    return false;
+    return root_x == spawn_cursor.x and root_y == spawn_cursor.y;
 }
 
 /// Attempt to focus `win` via the hover (EnterNotify) path.
@@ -1568,7 +1601,11 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t) void {
 pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void {
     if (!isValidManagedWindow(event.window)) return;
     if (event.atom != atoms.wm_protocols and event.atom != xcb.XCB_ATOM_WM_HINTS) return;
-    focus.invalidateInputModelCache(event.window);
+    // Re-query and store the updated focus properties in the window-level cache
+    // (CacheSlot array).  Calling focus.invalidateInputModelCache only cleared
+    // focus.zig's side, leaving the CacheSlot stale until the window was
+    // destroyed — so future getCachedProps hits would return the old model.
+    recacheInputModel(core.conn, event.window);
 }
 
 // Size-hint parsing

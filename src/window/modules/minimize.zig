@@ -115,55 +115,40 @@ pub fn focusMasterOrFirst() void {
     focus.clearFocus();
 }
 
-/// Undo a partially-completed minimizeWindow call on buffer-full failure.
-/// `tiling_index` is the slot captured before tiling.removeWindow so the
-/// window is re-inserted at its original position rather than appended.
-fn rollbackMinimize(win: u32, tiling_index: ?usize, fs_ws: ?u8, saved_fs: ?core.WindowGeometry) void {
-    if (core.config.tiling.enabled) {
-        if (tiling_index) |ti|
-            tiling.addWindowAtFilteredIndex(win, ti)
-        else
-            tiling.addWindow(win);
-        tiling.retileCurrentWorkspace();
-    }
-    if (build.has_fullscreen) {
-        if (saved_fs) |geom| {
-            // saved_fs and fs_ws are always set together in minimizeWindow.
-            std.debug.assert(fs_ws != null);
-            fullscreen.setForWorkspace(fs_ws.?, .{ .window = win, .saved_geometry = geom });
-        }
-    }
-}
-
 pub fn minimizeWindow() void {
     const win    = focus.getFocused()             orelse return;
     const ws_idx = tracking.getCurrentWorkspace() orelse return;
 
     if (isMinimized(win)) return;
 
-    // Tear down fullscreen state if needed, saving geometry for later restore.
-    var saved_fs: ?core.WindowGeometry = null;
-    var fs_ws_idx: ?u8 = null;
-    if (build.has_fullscreen) fs_blk: {
-        const fs_ws = fullscreen.workspaceFor(win) orelse break :fs_blk;
-        saved_fs  = fullscreen.getForWorkspace(fs_ws).?.saved_geometry;
-        fs_ws_idx = fs_ws;
-        fullscreen.removeForWorkspace(fs_ws);
-    }
-    const tiling_index = tiling.getWindowFilteredIndex(win);
-
-    if (core.config.tiling.enabled) tiling.removeWindow(win);
+    // ── Guard: fail fast before touching any other module's state ────────────
+    //
+    // Both checks are cheap (a comparison against a module-local integer) and
+    // have no side effects. Placing them here eliminates the need for a
+    // rollback path — no other module's state has been mutated if we return.
 
     if (g_len >= MAX_MINIMIZED) {
-        debug.err("minimize: buffer full ({d} entries), cannot minimize 0x{x} -- rolling back",
+        debug.err("minimize: buffer full ({d} entries), cannot minimize 0x{x}",
             .{ MAX_MINIMIZED, win });
-        rollbackMinimize(win, tiling_index, fs_ws_idx, saved_fs);
         return;
     }
 
     // u64 overflow is unreachable in any real session (~1.8e19 operations),
     // but assert so a future regression is loud rather than a silent ordering bug.
     std.debug.assert(g_next_timestamp != std.math.maxInt(u64));
+
+    // ── Side effects begin here — buffer slot is guaranteed ──────────────────
+
+    // Tear down fullscreen state if needed, saving geometry for later restore.
+    var saved_fs: ?core.WindowGeometry = null;
+    if (build.has_fullscreen) fs_blk: {
+        const fs_ws = fullscreen.workspaceFor(win) orelse break :fs_blk;
+        saved_fs = fullscreen.getForWorkspace(fs_ws).?.saved_geometry;
+        fullscreen.removeForWorkspace(fs_ws);
+    }
+    const tiling_index = tiling.getWindowFilteredIndex(win);
+
+    if (core.config.tiling.enabled) tiling.removeWindow(win);
 
     const ts = g_next_timestamp;
     g_buf[g_len] = .{ .win = win, .entry = .{

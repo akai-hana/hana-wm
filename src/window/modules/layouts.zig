@@ -7,6 +7,7 @@ const core    = @import("core");
 const utils   = @import("utils");
 
 const debug = @import("debug");
+const constants = @import("constants");
 
 
 // WM_NORMAL_HINTS size constraint cache
@@ -204,7 +205,13 @@ pub const CacheMap = struct {
     /// separate `evictSizeHints` call is required.
     pub fn cacheHints(self: *CacheMap, win: u32, hints: SizeHints) void {
         if (isEmptySizeHints(hints)) return;
-        self.getOrPut(win).value_ptr.hints = hints;
+        const gop = self.getOrPut(win);
+        // Do not write to the overflow_sentinel: unlike geometry dedup (where a
+        // missed write only causes a redundant configure_window), losing hints
+        // permanently breaks window sizing — every subsequent retile would apply
+        // zero/unconstrained hints instead of the client's declared constraints.
+        if (!gop.found_existing and self.count > cache_capacity) return;
+        gop.value_ptr.hints = hints;
     }
 };
 
@@ -235,7 +242,7 @@ pub const Region = struct {
 
     /// Build the initial region from screen dimensions and a y-offset (bar height).
     pub inline fn fromScreen(screen_w: u16, screen_h: u16, y_offset: u16) Region {
-        return .{ .x = 0, .y = @intCast(y_offset), .w = screen_w, .h = screen_h };
+        return .{ .x = 0, .y = @intCast(y_offset), .w = screen_w, .h = screen_h -| y_offset };
     }
 
     /// Strip `margin` pixels from all four sides.  Saturating: a margin larger
@@ -313,8 +320,8 @@ pub const Region = struct {
         return .{
             .x      = r.x,
             .y      = r.y,
-            .width  = if (r.w > b2) r.w - b2 else @import("constants").MIN_WINDOW_DIM,
-            .height = if (r.h > b2) r.h - b2 else @import("constants").MIN_WINDOW_DIM,
+            .width  = if (r.w > b2) r.w - b2 else constants.MIN_WINDOW_DIM,
+            .height = if (r.h > b2) r.h - b2 else constants.MIN_WINDOW_DIM,
         };
     }
 };
@@ -376,7 +383,7 @@ fn configureWithHintsImpl(comptime raise: bool, ctx: *const LayoutCtx, win: u32,
     const gop = ctx.cache.getOrPut(win);
     const effective = applyHintsToRect(rect, gop.value_ptr.hints);
 
-    if (!effective.isValid()) {
+    if (effective.width == 0 or effective.height == 0) {
         debug.err("Invalid rect for window 0x{x}: {}x{} at {},{}",
             .{ win, effective.width, effective.height, effective.x, effective.y });
         if (comptime raise) {
@@ -464,7 +471,7 @@ pub fn configureWithHintsAndRaise(ctx: *const LayoutCtx, win: u32, rect: utils.R
 ///
 /// Usage pattern (inside a layout's main window loop):
 ///
-///     var defer_slot = DeferredConfigure.init(ctx);
+///     var defer_slot = DeferredConfigure.init();
 ///     for (windows) |win| {
 ///         if (defer_slot.capture(win, computed_rect)) continue;
 ///         configureWithHints(ctx, win, computed_rect);
@@ -478,8 +485,8 @@ pub const DeferredConfigure = struct {
     pending_win:  u32        = 0,
     pending_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
 
-    /// Initialise from ctx.  If defer_configure is null, the slot is inert.
-    pub inline fn init(_: *const LayoutCtx) DeferredConfigure { return .{}; }
+    /// Initialise an inert slot.
+    pub inline fn init() DeferredConfigure { return .{}; }
 
     /// If `win` is the deferred window, store `rect` and return true (skip the
     /// normal configureWithHints call).  Otherwise return false.
@@ -518,6 +525,7 @@ pub const DeferredConfigure = struct {
 /// snap to whole character cells; the base is 0 rather than min_width since
 /// we are no longer enforcing the declared minimum.
 fn applyHintsToRect(rect: utils.Rect, h: SizeHints) utils.Rect {
+    if (isEmptySizeHints(h)) return rect; // fast path for unconstrained windows
     var w:  u16 = rect.width;
     var ht: u16 = rect.height;
 

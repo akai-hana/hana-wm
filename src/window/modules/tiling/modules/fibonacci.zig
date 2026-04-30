@@ -39,10 +39,12 @@ pub fn tileWithOffset(
     var h: u16 = screen_h -| m.gap *| 2;
     var dir: SpiralDirection = .right;
 
-    var defer_slot = layouts.DeferredConfigure.init(ctx);
+    var defer_slot = layouts.DeferredConfigure.init();
 
     for (windows, 0..) |win, i| {
-        // Remaining area too small to split: stack all overflow windows here.
+        // Remaining area too small to split: raise the focused window (or the
+        // first overflow window as fallback) and push the rest offscreen so the
+        // user at least sees one window rather than a stack of identical rects.
         if (w < m.gap * 2 + border2 or h < m.gap * 2 + border2) {
             const overflow_rect = utils.Rect{
                 .x      = @intCast(x),
@@ -50,9 +52,22 @@ pub fn tileWithOffset(
                 .width  = if (w > border2) w - border2 else constants.MIN_WINDOW_DIM,
                 .height = if (h > border2) h - border2 else constants.MIN_WINDOW_DIM,
             };
+            // Find the focused window among the overflow set; fall back to the
+            // first window if no focused window is present here.
+            var raise_win: u32 = windows[i];
+            if (ctx.focused_win) |f| {
+                for (windows[i..]) |ow| {
+                    if (ow == f) { raise_win = f; break; }
+                }
+            }
+            layouts.configureWithHintsAndRaise(ctx, raise_win, overflow_rect);
             for (windows[i..]) |overflow_win| {
-                if (!defer_slot.capture(ctx, overflow_win, overflow_rect))
-                    layouts.configureWithHints(ctx, overflow_win, overflow_rect);
+                if (overflow_win == raise_win) continue;
+                if (ctx.cache.getPtr(overflow_win)) |wd| {
+                    if (!wd.hasValidRect()) continue;
+                    wd.rect = tiling.zero_rect;
+                }
+                utils.pushWindowOffscreen(ctx.conn, overflow_win);
             }
             defer_slot.flush(ctx);
             return;
