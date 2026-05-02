@@ -29,6 +29,6 @@ pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, star
         return dc.drawSegment(start_x, height, "><>", config.scaledSegmentPadding(height), config.bg, config.fg);
 
     const t_state = tiling.getStateOpt() orelse return start_x;
-    const icon    = getIcon(t_state.layout);
+    const icon    = getIcon(t_state.config.layout);
     return dc.drawSegment(start_x, height, icon, config.scaledSegmentPadding(height), config.bg, config.fg);
 }

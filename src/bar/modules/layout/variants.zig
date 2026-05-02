@@ -22,18 +22,18 @@ pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, star
 /// Uses anytype so this function is only instantiated when tiling is present,
 /// keeping the no-tiling build from trying to resolve tiling.State.
 pub fn getIndicator(s: anytype) []const u8 {
-    return switch (s.layout) {
-        .master => switch (s.layout_variants.master) {
+    return switch (s.config.layout) {
+        .master => switch (s.config.layout_variants.master) {
             .lifo => "[N]",
             .fifo => "=N=",
         },
 
-        .monocle => switch (s.layout_variants.monocle) {
+        .monocle => switch (s.config.layout_variants.monocle) {
             .gaps    => ">-<",
             .gapless => "<->",
         },
 
-        .grid => switch (s.layout_variants.grid) {
+        .grid => switch (s.config.layout_variants.grid) {
             .relaxed => "[~]",
             .rigid   => "[#]",
         },

@@ -160,6 +160,7 @@ pub fn saveWindowGeom(win: u32, rect: utils.Rect) void {
     const c = &g_geom_cache;
     for (c.slots[0..c.len]) |*s| { if (s.win == win) { s.rect = rect; return; } }
     if (c.len < c.slots.len) { c.slots[c.len] = .{ .win = win, .rect = rect }; c.len += 1; }
+    else debug.warn("saveWindowGeom: cache full; geometry for 0x{x} not saved (restore will use float default)", .{win});
 }
 
 /// Return the last-known geometry for `win`, or null if none is cached.
@@ -170,6 +171,23 @@ pub fn getWindowGeom(win: u32) ?utils.Rect {
         return if (s.rect.width > 0 or s.rect.height > 0) s.rect else null;
     };
     return null;
+}
+
+/// Remove the saved geometry for `win`, if any.
+/// When tiling is present, tiling.removeWindow() already handles geometry
+/// eviction as part of its combined cache teardown; this function is a no-op
+/// in that configuration.  The non-tiling path mirrors the swap-remove idiom
+/// used by evictChildCache and uncacheWindowFocusProps for consistency.
+fn removeWindowGeom(win: u32) void {
+    if (build.has_tiling) return;
+    const c = &g_geom_cache;
+    for (c.slots[0..c.len], 0..) |s, i| {
+        if (s.win == win) {
+            c.len -= 1;
+            c.slots[i] = c.slots[c.len];
+            return;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -186,8 +204,8 @@ pub const Pos = struct { x: i16, y: i16 };
 /// (one quarter of the screen in from the top-left).
 pub inline fn floatDefaultPos() Pos {
     return .{
-        .x = @intCast(core.screen.width_in_pixels  / 4),
-        .y = @intCast(core.screen.height_in_pixels / 4),
+        .x = @intCast(@min(core.screen.width_in_pixels  / 4, std.math.maxInt(i16))),
+        .y = @intCast(@min(core.screen.height_in_pixels / 4, std.math.maxInt(i16))),
     };
 }
 
@@ -751,8 +769,9 @@ fn buildRulesMap() void {
     const alloc = g_alloc orelse return;
     g_rules_map.clearRetainingCapacity();
     for (core.config.workspaces.rules.items) |rule| {
-        // putNoClobber: first occurrence wins; ignore OOM (map stays usable,
-        // the affected rule falls back to the O(n) scan path via null return).
+        // putNoClobber: first occurrence wins.  On OOM the entry is silently
+        // dropped — there is no linear-scan fallback.  The affected rule will
+        // not fire; the window is routed to the current workspace instead.
         g_rules_map.putNoClobber(alloc, rule.class_name, rule.workspace) catch {};
     }
 }
@@ -784,7 +803,11 @@ pub fn init(alloc: std.mem.Allocator) !void {
 }
 
 pub fn deinit() void {
-    // Teardown in reverse-init order.
+    // Teardown order: optional subsystems in approximate reverse-init order,
+    // then InputModelCache (which must precede focus and tracking — see the
+    // init order comment above initInputModelCache), then focus, then tracking.
+    // This is NOT strict reverse-init order; the InputModelCache dependency
+    // intentionally breaks strict symmetry.
     if (build.has_tiling)     tiling.deinit();
     if (build.has_fullscreen) fullscreen.deinit();
     if (build.has_workspaces) workspaces.deinit();
@@ -802,6 +825,9 @@ pub fn deinit() void {
     deinitInputModelCache();
     focus.deinit();
     tracking.deinit();
+    // Null the allocator last so no function called above can accidentally
+    // pass the guard in registerSpawn/buildRulesMap on a re-entry after deinit.
+    g_alloc = null;
 }
 
 /// Returns true when tiling is both compiled in and enabled at runtime.
@@ -845,18 +871,29 @@ fn findWorkspaceRuleByClass(cookie: xcb.xcb_get_property_cookie_t) ?u8 {
     if (reply.*.format != 8 or reply.*.value_len == 0) return null;
 
     const raw: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
-    const data = std.mem.trimEnd(u8, raw[0..reply.*.value_len], "\x00");
+    const data = raw[0..reply.*.value_len];
 
+    // WM_CLASS is two consecutive null-terminated strings: "instance\0class\0".
+    // Do NOT trim trailing nulls from the whole buffer before splitting: doing
+    // so turns "instance\0\0" (empty class) into "instance", which has no null
+    // separator and causes an early return null — silently skipping the instance
+    // lookup.  Instead, find the separator first, then trim each component.
     const sep = std.mem.indexOfScalar(u8, data, 0) orelse return null;
-    const class_start = sep + 1;
-    if (class_start >= data.len) return null;
-
     const instance = data[0..sep];
-    const class    = data[class_start..];
 
-    // O(1) hash lookups — class component first, then instance.
-    if (g_rules_map.get(class))    |ws| return ws;
-    if (g_rules_map.get(instance)) |ws| return ws;
+    const class_start = sep + 1;
+    // Extract the class component, stripping any trailing null padding.
+    const class_raw = if (class_start < data.len) data[class_start..] else "";
+    const class_end = std.mem.indexOfScalar(u8, class_raw, 0) orelse class_raw.len;
+    const class = class_raw[0..class_end];
+
+    // O(1) hash lookups — class first (when non-empty), then instance.
+    if (class.len > 0) {
+        if (g_rules_map.get(class))    |ws| return ws;
+    }
+    if (instance.len > 0) {
+        if (g_rules_map.get(instance)) |ws| return ws;
+    }
     return null;
 }
 
@@ -893,23 +930,25 @@ fn findSpawnQueueWorkspace(
 
     const entries = g_spawn_queue.items;
 
-    // Single pass: exact PID match takes priority; daemon-mode index is
-    // recorded as a fallback candidate without a second scan.
-    var daemon_idx: ?usize = null;
+    // Single pass: exact PID match only.
+    //
+    // Daemon-mode entries (pid == 0) and windows without _NET_WM_PID
+    // (win_pid == 0) are intentionally NOT matched here.  Treating
+    // "win_pid == 0" as a daemon-mode signal conflates two distinct cases:
+    //
+    //   • A terminal registered with pid=0 (knows it will fork a grandchild).
+    //   • Any regular application that simply does not set _NET_WM_PID.
+    //
+    // The false-match risk is real: if a daemon-mode entry sits in the queue
+    // and an unrelated app without _NET_WM_PID maps, it would silently consume
+    // the daemon entry and route to the wrong workspace.  Both cases are
+    // handled correctly by the single-entry oldest-entry fallback below.
     for (entries, 0..) |e, i| {
         if (win_pid != 0 and e.pid == win_pid) {
             const ws = entries[i].workspace;
             _ = g_spawn_queue.swapRemove(i); // order has no semantic meaning
             return ws;
         }
-        if (daemon_idx == null and e.pid == 0 and win_pid == 0) daemon_idx = i;
-    }
-
-    if (daemon_idx) |i| {
-        std.log.debug("spawn: daemon-mode PID match at entry={d}, ws={d}", .{ i, g_spawn_queue.items[i].workspace });
-        const ws = g_spawn_queue.items[i].workspace;
-        _ = g_spawn_queue.swapRemove(i); // order has no semantic meaning
-        return ws;
     }
 
     // Oldest-entry fallback — only safe when there is exactly one pending entry.
@@ -1275,10 +1314,7 @@ fn unmanageWindow(win: u32) void {
         // that previously existed here is no longer needed.
         tiling.removeWindow(win);
     } else {
-        const c = &g_geom_cache;
-        for (c.slots[0..c.len], 0..) |s, i| if (s.win == win) {
-            c.len -= 1; c.slots[i] = c.slots[c.len]; break;
-        };
+        removeWindowGeom(win);
     }
     if (build.has_minimize) minimize.untrackWindow(win);
     wsRemoveWindow(win);
@@ -1360,10 +1396,15 @@ fn focusWindowUnderPointer(ptr_reply: ?*xcb.xcb_query_pointer_reply_t) void {
     // child-window cache first) so focus recovery works correctly when the
     // pointer rests over a toolkit child window after a window is closed.
     const raw_child = reply.*.child;
-    const child = findManagedWindow(core.conn, raw_child, tracking.isManaged);
-    if (tracking.isOnCurrentWorkspaceAndVisible(child)) {
-        focus.setFocus(child, .pointer_sync);
-        return;
+    // child == 0 means the pointer is over no window at all.  Skip the tree
+    // walk: xcb_query_tree on XID 0 is undefined by the X protocol and wastes
+    // a round-trip.  Fall through to focusBestAvailable instead.
+    if (raw_child != 0) {
+        const child = findManagedWindow(core.conn, raw_child, tracking.isManaged);
+        if (tracking.isOnCurrentWorkspaceAndVisible(child)) {
+            focus.setFocus(child, .pointer_sync);
+            return;
+        }
     }
     focus.focusBestAvailable(.tiling_operation, tracking.isOnCurrentWorkspaceAndVisible, fallback);
 }
@@ -1425,7 +1466,7 @@ fn sendSyntheticConfigureNotify(win: u32) void {
     // Path 1: tiling cache — zero round-trips.
     if (build.has_tiling) {
         if (tiling.getWindowGeom(win)) |rect| {
-            const border: u16 = if (tiling.getStateOpt()) |s| s.border_width else 0;
+            const border: u16 = if (tiling.getStateOpt()) |s| s.config.border_width else 0;
             sendConfigureNotify(win, .{
                 .x = rect.x, .y = rect.y, .width = rect.width, .height = rect.height,
                 .border_width = border,
@@ -1493,7 +1534,7 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
                 .y            = last.y,
                 .width        = last.width,
                 .height       = last.height,
-                .border_width = 0,
+                .border_width = getBorderWidth(),
             });
         } else {
             // No motion event has arrived yet in this drag — fall back to a
@@ -1600,6 +1641,20 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t) void {
 
 pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void {
     if (!isValidManagedWindow(event.window)) return;
+
+    // WM_NORMAL_HINTS: refresh the size-hint cache so max-size, resize-
+    // increment, and aspect-ratio constraints remain accurate for apps that
+    // update these hints dynamically after map time (e.g. terminal emulators
+    // adjusting their resize-increment grid when the font changes).
+    if (event.atom == xcb.XCB_ATOM_WM_NORMAL_HINTS) {
+        const cookie = xcb.xcb_get_property(
+            core.conn, 0, event.window,
+            xcb.XCB_ATOM_WM_NORMAL_HINTS, xcb.XCB_ATOM_ANY, 0, 18,
+        );
+        parseSizeHintsIntoCache(event.window, cookie);
+        return;
+    }
+
     if (event.atom != atoms.wm_protocols and event.atom != xcb.XCB_ATOM_WM_HINTS) return;
     // Re-query and store the updated focus properties in the window-level cache
     // (CacheSlot array).  Calling focus.invalidateInputModelCache only cleared
@@ -1685,7 +1740,7 @@ fn parseSizeHintsIntoCache(
 /// Returns the DPI-scaled border width.
 pub inline fn getBorderWidth() u16 {
     if (build.has_tiling) {
-        if (tiling.getStateOpt()) |s| return s.border_width;
+        if (tiling.getStateOpt()) |s| return s.config.border_width;
     }
     return scale.scaleBorderWidth(
         core.config.tiling.border_width,
@@ -1833,7 +1888,11 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
         if (should_enter and !is_fs) {
             fullscreen.enterFullscreen(win, null);
         } else if (!should_enter and is_fs) {
-            fullscreen.toggle();
+            // Use the window-specific exit path, not toggle(), which acts on
+            // whatever the fullscreen module considers "current" rather than
+            // on `win`.  This matters on multi-workspace setups where more
+            // than one workspace can hold a fullscreen window.
+            fullscreen.exitFullscreen(win);
         }
     }
 }
