@@ -156,8 +156,11 @@ pub const ScrollState = struct {
     prev_focused: ?u32  = null,
 };
 
-pub const State = struct {
-    is_enabled:       bool,
+/// Layout configuration: all user-adjustable parameters that control which
+/// layout is active and how it sizes windows.  Functions that only need to
+/// read or modify layout behaviour should accept *LayoutConfig (or
+/// *const LayoutConfig) rather than *State to make their dependencies explicit.
+pub const LayoutConfig = struct {
     layout:           Layout,
     /// The layout active before floating mode was entered.
     /// Used by retileForRestore and addWindow when the current layout is .floating.
@@ -170,18 +173,22 @@ pub const State = struct {
     border_width:     u16,
     border_focused:   u32,
     border_unfocused: u32,
-    windows:          tracking.Tracking,
-    is_dirty:         bool,
 
     /// Runtime layout cycle: intersection of config `layouts` and disk-present
     /// layout files. `stepLayout` walks this so layouts omitted from the
     /// config are invisible at runtime even if their .zig file exists on disk.
-    enabled_layouts:       [6]Layout,
-    enabled_layout_count:  u8,
+    enabled_layouts:      [6]Layout,
+    enabled_layout_count: u8,
+};
 
-    /// Scroll-layout runtime state, grouped so its lifetime and ownership are
-    /// explicit.  Dormant (but preserved) when layout != .scroll.
-    scroll: ScrollState,
+/// Geometry cache: workspace validity tracking, the per-window rect/border/hints
+/// hash table, and the scratch buffer reused across retile calls.  Functions
+/// that only touch cached geometry should accept *GeomCache rather than *State.
+pub const GeomCache = struct {
+    /// Per-window cache storing last geometry AND last border color in a single
+    /// open-addressing hash table. Populated by configureWithHints (rect) and
+    /// applyBorderColor (border). O(1) lookup per window per retile.
+    cache: layouts.CacheMap,
 
     /// Per-workspace geometry validity bitmask (64 bits -> up to 64 workspaces).
     ///
@@ -197,20 +204,34 @@ pub const State = struct {
     /// bar height or position change).
     last_retile_area: utils.Rect,
 
-    /// Per-window cache storing last geometry AND last border color in a single
-    /// open-addressing hash table. Populated by configureWithHints (rect) and
-    /// applyBorderColor (border). O(1) lookup per window per retile.
-    cache: layouts.CacheMap,
-
-    // Scratch buffer — fixed-size array embedded in State (BSS, zero allocation).
+    // Scratch buffer — fixed-size array embedded in GeomCache (BSS, zero allocation).
     //
     // Reused across retile calls to avoid per-call stack pressure.
     //   scratch_wins — [max_workspace_windows]u32   single-workspace window list;
     //                  also used by retileAllWorkspaces for per-workspace collection.
     scratch_wins: [max_workspace_windows]u32,
+};
+
+pub const State = struct {
+    is_enabled: bool,
+    is_dirty:   bool,
+
+    /// All layout configuration: which layout is active, sizing parameters, etc.
+    config: LayoutConfig,
+
+    /// Window tracking list.
+    windows: tracking.Tracking,
+
+    /// Geometry cache: per-window rect/border cache, workspace validity bits,
+    /// and the scratch window buffer.
+    geom: GeomCache,
+
+    /// Scroll-layout runtime state, grouped so its lifetime and ownership are
+    /// explicit.  Dormant (but preserved) when layout != .scroll.
+    scroll: ScrollState,
 
     pub inline fn margins(self: *const State) utils.Margins {
-        return .{ .gap = self.gap_width, .border = self.border_width };
+        return .{ .gap = self.config.gap_width, .border = self.config.border_width };
     }
 
     /// Returns the border color for `win`: 0 for fullscreen windows, focused or
@@ -219,7 +240,7 @@ pub const State = struct {
         if (build.has_fullscreen) {
             if (fullscreen.isFullscreen(win)) return 0;
         }
-        return if (focus.getFocused() == win) self.border_focused else self.border_unfocused;
+        return if (focus.getFocused() == win) self.config.border_focused else self.config.border_unfocused;
     }
 };
 
@@ -272,7 +293,7 @@ pub fn reloadConfig() void {
     if (build.has_workspaces) {
         if (workspaces.getState()) |ws_state| {
             for (ws_state.workspaces) |*ws| {
-                ws.layout       = ns.layout;
+                ws.layout       = ns.config.layout;
                 ws.master_width = null;
                 ws.master_count = null;
             }
@@ -301,9 +322,9 @@ pub fn reloadConfig() void {
                 if (tracking.isWindowOnWorkspace(win, @intCast(cws))) continue;
             }
             _ = xcb.xcb_configure_window(core.conn, win,
-                xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{ns.border_width});
+                xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{ns.config.border_width});
         }
-        retileCurrentWorkspaceReload(ns.border_width);
+        retileCurrentWorkspaceReload(ns.config.border_width);
         bar.redrawInsideGrab();
         utils.ungrabAndFlush(core.conn);
     }
@@ -316,7 +337,7 @@ pub fn reloadConfig() void {
 /// The hints live inside the same flat-array entry as the window's geometry and
 /// border color, so no separate table scan is needed inside configureWithHints.
 pub fn cacheSizeHints(win: u32, hints: layouts.SizeHints) void {
-    getState().cache.cacheHints(win, hints);
+    getState().geom.cache.cacheHints(win, hints);
 }
 
 // Window management
@@ -330,14 +351,14 @@ pub fn addWindow(window_id: u32) void {
     // so they enter the tiling pool when floating is later exited.
     // Use prev_layout to resolve FIFO/LIFO when the current layout is .floating,
     // so new windows land in the correct slot once floating is exited.
-    const effective_layout = if (s.layout == .floating) s.prev_layout else s.layout;
-    if (effective_layout == .master and s.layout_variants.master == .fifo)
+    const effective_layout = if (s.config.layout == .floating) s.config.prev_layout else s.config.layout;
+    if (effective_layout == .master and s.config.layout_variants.master == .fifo)
         s.windows.addFront(window_id)
     else
         s.windows.add(window_id);
 
     s.is_dirty = true;
-    s.workspace_geom_valid_bits = 0;
+    s.geom.workspace_geom_valid_bits = 0;
 
     // Skip X protocol operations while the tiling engine is disabled. Border
     // width and color will be applied on the first retile after floating exits.
@@ -363,7 +384,7 @@ pub fn addWindow(window_id: u32) void {
 
     // Pre-populate the cache so the immediately-following retile does not
     // re-send the border pixel. getOrPut is infallible on the flat-array cache.
-    const gop = s.cache.getOrPut(window_id);
+    const gop = s.geom.cache.getOrPut(window_id);
     gop.value_ptr.border = border_color;
 }
 
@@ -371,12 +392,12 @@ pub fn removeWindow(window_id: u32) void {
     const s = getState();
     if (s.windows.remove(window_id)) {
         s.is_dirty = true;
-        s.workspace_geom_valid_bits = 0;
+        s.geom.workspace_geom_valid_bits = 0;
     }
     // Always evict the cache entry — this removes geometry, border dedup data,
     // AND the embedded WM_NORMAL_HINTS in one operation.  No-op when the window
     // was never cached (e.g. floating windows that opened while tiling was disabled).
-    _ = s.cache.remove(window_id);
+    _ = s.geom.cache.remove(window_id);
     // If this window was stored as the previous focused window for scroll focus
     // restoration, clear it now — returning a destroyed window ID to the caller
     // of takePrevFocusedForScroll would generate an XCB BadWindow error.
@@ -444,7 +465,7 @@ pub fn saveWindowGeom(window_id: u32, rect: utils.Rect) void {
 /// or the entry has been invalidated (zeroed rect).
 pub fn getWindowGeom(window_id: u32) ?utils.Rect {
     const s = getStateOpt() orelse return null;
-    const wd = s.cache.getPtr(window_id) orelse return null;
+    const wd = s.geom.cache.getPtr(window_id) orelse return null;
     if (!wd.hasValidRect()) return null;
     return wd.rect;
 }
@@ -455,14 +476,14 @@ pub fn getWindowGeom(window_id: u32) ?utils.Rect {
 /// stale cache hit and skip configure_window. The border entry is preserved.
 pub fn invalidateGeomCache(window_id: u32) void {
     const s = getState();
-    if (s.cache.getPtr(window_id)) |wd| wd.rect = zero_rect;
+    if (s.geom.cache.getPtr(window_id)) |wd| wd.rect = zero_rect;
 }
 
 /// Clear the workspace-valid bit for `ws_idx` so the next restoreWorkspaceGeom
 /// for that workspace triggers a full retile.
 pub inline fn invalidateWsGeomBit(ws_idx: u8) void {
     const s = getState();
-    if (ws_idx < max_workspaces) s.workspace_geom_valid_bits &= ~tracking.workspaceBit(ws_idx);
+    if (ws_idx < max_workspaces) s.geom.workspace_geom_valid_bits &= ~tracking.workspaceBit(ws_idx);
 }
 
 pub inline fn markDirty() void {
@@ -532,22 +553,22 @@ pub fn retileAllWorkspaces() void {
             if (fullscreen.getForWorkspace(ws_idx)) |_| continue;
         }
 
-        const n = collectWorkspaceWindows(s, &s.scratch_wins, ws_idx);
+        const n = collectWorkspaceWindows(s, &s.geom.scratch_wins, ws_idx);
         if (n == 0) continue;
-        const ws_windows = s.scratch_wins[0..n];
+        const ws_windows = s.geom.scratch_wins[0..n];
 
-        const saved_width = s.master_width;
-        const saved_count = s.master_count;
-        s.master_width = resolveMasterWidth(s, ws_state_opt, ws_idx);
-        s.master_count = resolveMasterCount(s, ws_state_opt, ws_idx);
-        defer s.master_width = saved_width;
-        defer s.master_count = saved_count;
+        const saved_width = s.config.master_width;
+        const saved_count = s.config.master_count;
+        s.config.master_width = resolveMasterWidth(s, ws_state_opt, ws_idx);
+        s.config.master_count = resolveMasterCount(s, ws_state_opt, ws_idx);
+        defer s.config.master_width = saved_width;
+        defer s.config.master_count = saved_count;
 
         invokeLayout(selectLayout(s, ws_state_opt, ws_idx, core.config.tiling.global_layout), &ctx, s, ws_windows, screen);
         markWorkspaceGeomValid(s, ws_idx);
     }
 
-    s.last_retile_area = screen;
+    s.geom.last_retile_area = screen;
 }
 
 /// Retile a specific inactive workspace so its cache is correct before the
@@ -574,10 +595,10 @@ pub fn retileInactiveWorkspace(ws_idx: u8) void {
 /// use `getWindowGeom` instead of falling back to the default float position.
 pub fn retileForRestore() void {
     const s = getState();
-    const saved = s.layout;
-    s.layout = s.prev_layout;
+    const saved = s.config.layout;
+    s.config.layout = s.config.prev_layout;
     retileImpl(calcScreenArea(), .{});
-    s.layout = saved;
+    s.config.layout = saved;
     s.is_dirty = false;
 }
 
@@ -598,23 +619,23 @@ fn retileCurrentWorkspaceReload(border_width: u16) void {
 pub fn restoreWorkspaceGeom() bool {
     const s = getStateOpt() orelse return false;
 
-    const ws_count   = collectWorkspaceWindows(s, &s.scratch_wins, null);
-    const ws_windows = s.scratch_wins[0..ws_count];
+    const ws_count   = collectWorkspaceWindows(s, &s.geom.scratch_wins, null);
+    const ws_windows = s.geom.scratch_wins[0..ws_count];
     if (ws_windows.len == 0) return true;
 
     const current_ws = tracking.getCurrentWorkspace() orelse return false;
     if (current_ws >= max_workspaces) return false;
-    if (s.workspace_geom_valid_bits & tracking.workspaceBit(current_ws) == 0) return false;
+    if (s.geom.workspace_geom_valid_bits & tracking.workspaceBit(current_ws) == 0) return false;
 
     const current_screen = calcScreenArea();
-    if (!layouts.rectsEqual(current_screen, s.last_retile_area)) return false;
+    if (!layouts.rectsEqual(current_screen, s.geom.last_retile_area)) return false;
 
     // Pass 1 — validate all cache entries before emitting any XCB calls.
     // getPtr returns a stable pointer (CacheMap never reallocates) so we can
     // collect pointers here and dereference them safely in pass 2.
     var wd_ptrs: [max_workspace_windows]*layouts.WindowData = undefined;
     for (ws_windows, 0..) |win, i| {
-        const wd = s.cache.getPtr(win) orelse return false;
+        const wd = s.geom.cache.getPtr(win) orelse return false;
         if (!wd.hasValidRect()) return false;
         wd_ptrs[i] = wd;
     }
@@ -643,26 +664,26 @@ pub fn toggleLayoutReverse() void { applyLayoutStep(false); }
 /// Cycle through the per-layout variants for the currently active layout.
 pub fn stepLayoutVariant() void {
     const s = getState();
-    switch (s.layout) {
+    switch (s.config.layout) {
         .master  => {
-            cycleEnum(&s.layout_variants.master);
-            debug.info("Master variant: {s}", .{@tagName(s.layout_variants.master)});
+            cycleEnum(&s.config.layout_variants.master);
+            debug.info("Master variant: {s}", .{@tagName(s.config.layout_variants.master)});
         },
         .monocle => {
-            cycleEnum(&s.layout_variants.monocle);
-            debug.info("Monocle variant: {s}", .{@tagName(s.layout_variants.monocle)});
+            cycleEnum(&s.config.layout_variants.monocle);
+            debug.info("Monocle variant: {s}", .{@tagName(s.config.layout_variants.monocle)});
         },
         .grid    => {
-            cycleEnum(&s.layout_variants.grid);
-            debug.info("Grid variant: {s}", .{@tagName(s.layout_variants.grid)});
+            cycleEnum(&s.config.layout_variants.grid);
+            debug.info("Grid variant: {s}", .{@tagName(s.config.layout_variants.grid)});
         },
         else     => {
-            debug.info("{s} has no variants", .{@tagName(s.layout)});
+            debug.info("{s} has no variants", .{@tagName(s.config.layout)});
             return;
         },
     }
     // Variants are always global — all inactive workspace caches are now stale.
-    s.workspace_geom_valid_bits = 0;
+    s.geom.workspace_geom_valid_bits = 0;
     retileCurrentWorkspace();
 }
 
@@ -670,23 +691,23 @@ pub fn stepLayoutVariant() void {
 pub fn applyWorkspaceLayout(ws: *const WsWorkspace) void {
     const s = getState();
     const needs_retile =
-        s.layout != ws.layout
+        s.config.layout != ws.layout
         or ws.variants != null
-        or (ws.master_width != null and ws.master_width.? != s.master_width)
-        or (ws.master_count != null and ws.master_count.? != s.master_count);
-    s.layout = ws.layout;
-    if (ws.master_width) |mw| s.master_width = mw;
-    s.master_count = ws.master_count orelse core.config.tiling.master_count;
+        or (ws.master_width != null and ws.master_width.? != s.config.master_width)
+        or (ws.master_count != null and ws.master_count.? != s.config.master_count);
+    s.config.layout = ws.layout;
+    if (ws.master_width) |mw| s.config.master_width = mw;
+    s.config.master_count = ws.master_count orelse core.config.tiling.master_count;
     if (ws.variants) |v| {
         switch (v) {
-            .master  => |mv| s.layout_variants.master  = mv,
-            .monocle => |mv| s.layout_variants.monocle = mv,
-            .grid    => |gv| s.layout_variants.grid    = gv,
+            .master  => |mv| s.config.layout_variants.master  = mv,
+            .monocle => |mv| s.config.layout_variants.monocle = mv,
+            .grid    => |gv| s.config.layout_variants.grid    = gv,
         }
     }
     if (needs_retile) {
         s.is_dirty = true;
-        s.workspace_geom_valid_bits = 0;
+        s.geom.workspace_geom_valid_bits = 0;
     }
 }
 
@@ -708,19 +729,19 @@ pub inline fn isLayoutAvailable(layout: Layout) bool {
 
 pub fn adjustMasterCount(delta: i8) void {
     const s = getState();
-    const new: i16 = @as(i16, s.master_count) + delta;
+    const new: i16 = @as(i16, s.config.master_count) + delta;
     if (new < 1) return;
     const clamped: u8 = @intCast(@min(new, max_master_count));
-    if (clamped == s.master_count) return;
-    s.master_count = clamped;
+    if (clamped == s.config.master_count) return;
+    s.config.master_count = clamped;
     if (!core.config.tiling.global_layout) {
         if (build.has_workspaces) {
-            if (workspaces.getCurrentWorkspaceObject()) |ws| ws.master_count = s.master_count;
+            if (workspaces.getCurrentWorkspaceObject()) |ws| ws.master_count = s.config.master_count;
         }
     }
     // In global mode master_count applies to every workspace, so all inactive
     // workspace caches are now stale.
-    if (core.config.tiling.global_layout) s.workspace_geom_valid_bits = 0;
+    if (core.config.tiling.global_layout) s.geom.workspace_geom_valid_bits = 0;
     retileCurrentWorkspace();
 }
 
@@ -729,18 +750,18 @@ pub inline fn decreaseMasterCount() void { adjustMasterCount(-1); }
 
 pub fn adjustMasterWidth(delta: f32) void {
     const s = getState();
-    s.master_width = @max(constants.MIN_MASTER_WIDTH,
-        @min(max_master_width_ratio, s.master_width + delta));
+    s.config.master_width = @max(constants.MIN_MASTER_WIDTH,
+        @min(max_master_width_ratio, s.config.master_width + delta));
     if (!core.config.tiling.global_layout) {
         if (build.has_workspaces) {
-            if (workspaces.getCurrentWorkspaceObject()) |ws| ws.master_width = s.master_width;
+            if (workspaces.getCurrentWorkspaceObject()) |ws| ws.master_width = s.config.master_width;
         }
     }
     // Invalidate inactive workspace caches so their next switch-in forces a
     // full retile with the new width, rather than replaying stale positions.
     // is_dirty is NOT set here: retileCurrentWorkspace() immediately below
     // sets is_dirty = false unconditionally, making the write a no-op.
-    s.workspace_geom_valid_bits = 0;
+    s.geom.workspace_geom_valid_bits = 0;
     retileCurrentWorkspace();
 }
 
@@ -753,7 +774,7 @@ pub inline fn decreaseMasterWidth() void { adjustMasterWidth(-0.025); }
 /// tileWithOffset clamps the result to [0, max_off] on the next retile.
 pub fn stepScrollView(delta: i32) void {
     const s = getState();
-    if (s.layout != .scroll) return;
+    if (s.config.layout != .scroll) return;
     const slot_w: i32 = @intCast(core.screen.width_in_pixels / 2);
     s.scroll.offset += delta * slot_w;
     retileCurrentWorkspace();
@@ -776,8 +797,8 @@ pub inline fn scrollViewRight() void { stepScrollView( 1); }
 ///   • edge < scroll           →  window is to the left   →  place on left half:
 ///     new_scroll = fi*slot_w            (successor  fills right half)
 fn snapScrollOffsetToWindow(s: *State, win: u32) bool {
-    const ws_count = collectWorkspaceWindows(s, &s.scratch_wins, null);
-    const ws_wins  = s.scratch_wins[0..ws_count];
+    const ws_count = collectWorkspaceWindows(s, &s.geom.scratch_wins, null);
+    const ws_wins  = s.geom.scratch_wins[0..ws_count];
     const fi = std.mem.indexOfScalar(u32, ws_wins, win) orelse return false;
 
     const fi_i32:  i32 = @intCast(fi);
@@ -814,7 +835,7 @@ fn snapScrollOffsetToWindow(s: *State, win: u32) bool {
 ///   • the focused window is already fully visible in the current viewport
 pub fn snapScrollToFocused() void {
     const s = getState();
-    if (s.layout != .scroll) return;
+    if (s.config.layout != .scroll) return;
     const win = focus.getFocused() orelse return;
     if (snapScrollOffsetToWindow(s, win)) retileCurrentWorkspace();
 }
@@ -886,7 +907,7 @@ pub inline fn isWindowTiled(window_id: u32) bool {
 /// Returns true when the floating layout is currently active.
 pub inline fn isFloatingLayout() bool {
     const s = getStateOpt() orelse return false;
-    return s.layout == .floating;
+    return s.config.layout == .floating;
 }
 
 /// Returns true only when tiling is *actively running* (runtime toggle on) AND
@@ -932,7 +953,7 @@ pub fn updateWindowFocus(old_focused: ?u32, new_focused: ?u32) void {
 pub fn takePrevFocusedForScroll() ?u32 {
     if (comptime !build.has_scroll) return null;
     const s = getState();
-    if (s.layout != .scroll) return null;
+    if (s.config.layout != .scroll) return null;
     const prev = s.scroll.prev_focused orelse return null;
     s.scroll.prev_focused = null;
     return prev;
@@ -997,7 +1018,7 @@ fn parseEnabledLayouts(layouts_cfg: []const []const u8) struct { arr: [6]Layout,
 /// backward. enabled_layouts is always non-empty — parseEnabledLayouts seeds it
 /// from layout_cycle when the config produces no valid entries.
 inline fn stepLayout(s: *const State, current: Layout, comptime forward: bool) Layout {
-    const cycle: []const Layout = s.enabled_layouts[0..s.enabled_layout_count];
+    const cycle: []const Layout = s.config.enabled_layouts[0..s.config.enabled_layout_count];
     for (cycle, 0..) |l, i| {
         if (l != current) continue;
         return cycle[if (forward) (i + 1) % cycle.len else (cycle.len + i - 1) % cycle.len];
@@ -1021,34 +1042,38 @@ fn initState() State {
     const el            = parseEnabledLayouts(core.config.tiling.layouts.items);
 
     return .{
-        .is_enabled       = core.config.tiling.enabled,
-        .layout           = blk: {
-            const requested = std.meta.stringToEnum(Layout, core.config.tiling.layout)
-                orelse layout_cycle[0];
-            break :blk if (isLayoutAvailable(requested)) requested else layout_cycle[0];
+        .is_enabled = core.config.tiling.enabled,
+        .is_dirty   = false,
+        .config = .{
+            .layout      = blk: {
+                const requested = std.meta.stringToEnum(Layout, core.config.tiling.layout)
+                    orelse layout_cycle[0];
+                break :blk if (isLayoutAvailable(requested)) requested else layout_cycle[0];
+            },
+            .prev_layout          = layout_cycle[0],
+            .enabled_layouts      = el.arr,
+            .enabled_layout_count = el.len,
+            .layout_variants = .{
+                .master  = core.config.tiling.master_variant,
+                .monocle = core.config.tiling.monocle_variant,
+                .grid    = core.config.tiling.grid_variant,
+            },
+            .master_side      = core.config.tiling.master_side,
+            .master_width     = calcMasterWidth(),
+            .master_count     = core.config.tiling.master_count,
+            .gap_width        = scale.scaleBorderWidth(core.config.tiling.gap_width, screen_height),
+            .border_width     = scale.scaleBorderWidth(core.config.tiling.border_width, screen_height),
+            .border_focused   = core.config.tiling.border_focused,
+            .border_unfocused = core.config.tiling.border_unfocused,
         },
-        .prev_layout           = layout_cycle[0],
-        .enabled_layouts       = el.arr,
-        .enabled_layout_count  = el.len,
-        .layout_variants = .{
-            .master  = core.config.tiling.master_variant,
-            .monocle = core.config.tiling.monocle_variant,
-            .grid    = core.config.tiling.grid_variant,
+        .windows = .{},
+        .geom = .{
+            .cache                     = .{},
+            .workspace_geom_valid_bits = 0,
+            .last_retile_area          = zero_rect,
+            .scratch_wins              = undefined,
         },
-        .master_side      = core.config.tiling.master_side,
-        .master_width     = calcMasterWidth(),
-        .master_count     = core.config.tiling.master_count,
-        .gap_width        = scale.scaleBorderWidth(core.config.tiling.gap_width, screen_height),
-        .border_width     = scale.scaleBorderWidth(core.config.tiling.border_width, screen_height),
-        .border_focused   = core.config.tiling.border_focused,
-        .border_unfocused = core.config.tiling.border_unfocused,
-        .windows          = .{},
-        .is_dirty         = false,
-        .workspace_geom_valid_bits = 0,
-        .last_retile_area = zero_rect,
-        .scroll           = .{},
-        .cache            = .{},
-        .scratch_wins     = undefined,
+        .scroll = .{},
     };
 }
 
@@ -1065,7 +1090,7 @@ fn getBorderColorForWindow(win: u32) u32 {
 inline fn makeLayoutCtx(s: *State) layouts.LayoutCtx {
     return .{
         .conn             = core.conn,
-        .cache            = &s.cache,
+        .cache            = &s.geom.cache,
         .get_border_color = getBorderColorForWindow,
         .focused_win      = focus.getFocused(),
     };
@@ -1105,33 +1130,33 @@ inline fn calcScreenArea() utils.Rect {
 }
 
 fn selectLayout(s: *State, ws_state: ?*WsState, ws_idx: u8, is_global: bool) Layout {
-    if (!build.has_workspaces) return s.layout;
-    if (is_global) return s.layout;
-    const wss = ws_state orelse return s.layout;
-    return if (ws_idx < wss.workspaces.len) wss.workspaces[ws_idx].layout else s.layout;
+    if (!build.has_workspaces) return s.config.layout;
+    if (is_global) return s.config.layout;
+    const wss = ws_state orelse return s.config.layout;
+    return if (ws_idx < wss.workspaces.len) wss.workspaces[ws_idx].layout else s.config.layout;
 }
 
 /// Returns the master width for `ws_idx` in per-workspace mode.
 /// Falls back to the current global value for workspaces that have not yet
 /// had their width adjusted (master_width == null).
 inline fn resolveMasterWidth(s: *const State, ws_state: ?*WsState, ws_idx: u8) f32 {
-    if (!build.has_workspaces) return s.master_width;
-    if (core.config.tiling.global_layout) return s.master_width;
-    const wss = ws_state orelse return s.master_width;
-    if (ws_idx >= wss.workspaces.len) return s.master_width;
+    if (!build.has_workspaces) return s.config.master_width;
+    if (core.config.tiling.global_layout) return s.config.master_width;
+    const wss = ws_state orelse return s.config.master_width;
+    if (ws_idx >= wss.workspaces.len) return s.config.master_width;
     if (wss.workspaces[ws_idx].master_width) |mw| return mw;
-    return s.master_width;
+    return s.config.master_width;
 }
 
 /// Returns the master count for `ws_idx` in per-workspace mode.
 /// Falls back to the current global value for workspaces that have no override.
 inline fn resolveMasterCount(s: *const State, ws_state: ?*WsState, ws_idx: u8) u8 {
-    if (!build.has_workspaces) return s.master_count;
-    if (core.config.tiling.global_layout) return s.master_count;
-    const wss = ws_state orelse return s.master_count;
-    if (ws_idx >= wss.workspaces.len) return s.master_count;
+    if (!build.has_workspaces) return s.config.master_count;
+    if (core.config.tiling.global_layout) return s.config.master_count;
+    const wss = ws_state orelse return s.config.master_count;
+    if (ws_idx >= wss.workspaces.len) return s.config.master_count;
     if (wss.workspaces[ws_idx].master_count) |mc| return mc;
-    return s.master_count;
+    return s.config.master_count;
 }
 
 // Core retile
@@ -1167,8 +1192,8 @@ fn retileImpl(screen: utils.Rect, opts: RetileOpts) void {
     }
 
     const ws_windows: []const u32 = if (opts.pre_built) |pb| pb else blk: {
-        const n = collectWorkspaceWindows(s, &s.scratch_wins, opts.for_ws);
-        break :blk s.scratch_wins[0..n];
+        const n = collectWorkspaceWindows(s, &s.geom.scratch_wins, opts.for_ws);
+        break :blk s.geom.scratch_wins[0..n];
     };
     if (ws_windows.len == 0) return;
 
@@ -1178,21 +1203,21 @@ fn retileImpl(screen: utils.Rect, opts: RetileOpts) void {
 
     const wss = workspaces.getState();
 
-    const saved_width = s.master_width;
-    const saved_count = s.master_count;
+    const saved_width = s.config.master_width;
+    const saved_count = s.config.master_count;
     if (opts.for_ws != null) {
-        s.master_width = resolveMasterWidth(s, wss, target_ws);
-        s.master_count = resolveMasterCount(s, wss, target_ws);
+        s.config.master_width = resolveMasterWidth(s, wss, target_ws);
+        s.config.master_count = resolveMasterCount(s, wss, target_ws);
     }
-    defer s.master_width = saved_width;
-    defer s.master_count = saved_count;
+    defer s.config.master_width = saved_width;
+    defer s.config.master_count = saved_count;
 
     invokeLayout(
         selectLayout(s, wss, target_ws, core.config.tiling.global_layout),
         &ctx, s, ws_windows, screen,
     );
 
-    s.last_retile_area = screen;
+    s.geom.last_retile_area = screen;
     markWorkspaceGeomValid(s, target_ws);
 }
 
@@ -1200,7 +1225,7 @@ fn retileImpl(screen: utils.Rect, opts: RetileOpts) void {
 
 /// Change the border pixel for `win` only when `color` differs from the cached value.
 fn applyBorderColor(s: *State, conn: *xcb.xcb_connection_t, win: u32, color: u32) void {
-    const gop = s.cache.getOrPut(win);
+    const gop = s.geom.cache.getOrPut(win);
     if (gop.found_existing and gop.value_ptr.border == color) return;
     gop.value_ptr.border = color;
     _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
@@ -1225,7 +1250,7 @@ inline fn updateBorders(s: *State, ws_windows: []const u32) void {
 /// during idle scroll, typing, or cursor movement inside a window.
 pub fn sendBorderColorIfChanged(win: u32, color: u32) bool {
     const s = getStateOpt() orelse return false;
-    const wd = s.cache.getPtr(win) orelse return false;
+    const wd = s.geom.cache.getPtr(win) orelse return false;
     if (wd.border == color) return true; // cached, color unchanged — skip XCB
     wd.border = color;
     _ = xcb.xcb_change_window_attributes(core.conn, win,
@@ -1258,7 +1283,7 @@ fn collectWorkspaceWindows(s: *State, buf: []u32, for_ws: ?u8) usize {
 }
 
 inline fn hasWindowBufCapacity(s: *const State, n: usize, comptime caller: []const u8) bool {
-    if (n <= s.scratch_wins.len) return true;
+    if (n <= s.geom.scratch_wins.len) return true;
     debug.warn(caller ++ ": too many windows ({})", .{n});
     return false;
 }
@@ -1273,12 +1298,12 @@ fn moveWindowToIndex(s: *State, from_idx: usize, to_idx: usize) void {
     var j: usize = 0;
     for (current, 0..) |w, i| {
         if (i == from_idx) continue;
-        if (j == to_idx) { s.scratch_wins[j] = win; j += 1; }
-        s.scratch_wins[j] = w;
+        if (j == to_idx) { s.geom.scratch_wins[j] = win; j += 1; }
+        s.geom.scratch_wins[j] = w;
         j += 1;
     }
-    if (to_idx >= j) { s.scratch_wins[j] = win; j += 1; }
-    s.windows.reorder(s.scratch_wins[0..j]);
+    if (to_idx >= j) { s.geom.scratch_wins[j] = win; j += 1; }
+    s.windows.reorder(s.geom.scratch_wins[0..j]);
 }
 
 /// Reposition `win` within the global window list so that it lands at
@@ -1372,8 +1397,8 @@ fn findFocusMasterPos(s: *State) ?FocusMasterPos {
     // Build the per-workspace filtered list exactly as retile does, so that
     // ws_wins[0] is the true layout master regardless of s.windows.buf
     // insertion order across workspaces.
-    const ws_count = collectWorkspaceWindows(s, &s.scratch_wins, null);
-    const ws_wins  = s.scratch_wins[0..ws_count];
+    const ws_count = collectWorkspaceWindows(s, &s.geom.scratch_wins, null);
+    const ws_wins  = s.geom.scratch_wins[0..ws_count];
 
     // Need at least two windows on this workspace for a meaningful swap.
     if (ws_wins.len < 2) return null;
@@ -1428,30 +1453,30 @@ fn swapWithMasterCore(s: *State, pos: FocusMasterPos) ?u32 {
 }
 
 fn updateCacheRect(s: *State, win: u32, rect: utils.Rect) void {
-    s.cache.getOrPut(win).value_ptr.rect = rect;
+    s.geom.cache.getOrPut(win).value_ptr.rect = rect;
 }
 
 /// Set the geometry-valid bit for `ws_idx`, indicating the cache is correct for that workspace.
 inline fn markWorkspaceGeomValid(s: *State, ws_idx: anytype) void {
-    if (ws_idx < max_workspaces) s.workspace_geom_valid_bits |= tracking.workspaceBit(ws_idx);
+    if (ws_idx < max_workspaces) s.geom.workspace_geom_valid_bits |= tracking.workspaceBit(ws_idx);
 }
 
 /// Step the layout forward or backward and apply it.
 inline fn applyLayoutStep(comptime forward: bool) void {
     const s = getState();
-    if (s.layout == .floating) return;
-    applyLayout(s, stepLayout(s, s.layout, forward));
+    if (s.config.layout == .floating) return;
+    applyLayout(s, stepLayout(s, s.config.layout, forward));
 }
 
 fn applyLayout(s: *State, layout: Layout) void {
-    s.layout = layout;
+    s.config.layout = layout;
     if (!core.config.tiling.global_layout) {
         if (build.has_workspaces) {
             if (workspaces.getCurrentWorkspaceObject()) |ws| ws.layout = layout;
         }
     }
     // In global mode all workspaces share the same layout; inactive caches are stale.
-    if (core.config.tiling.global_layout) s.workspace_geom_valid_bits = 0;
+    if (core.config.tiling.global_layout) s.geom.workspace_geom_valid_bits = 0;
     retileCurrentWorkspace();
     bar.scheduleFullRedraw();
     debug.info("Layout: {s}", .{@tagName(layout)});

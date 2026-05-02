@@ -1,0 +1,91 @@
+List of issues:
+Lines 65–69 — timedWait overflow and wrong clock:
+zigconst new_nsec = @as(u64, @intCast(ts.nsec)) + timeout_ns;
+If timeout_ns is near u64.max, this overflows (panics in debug, wraps in release, producing a wildly wrong deadline). Use saturating arithmetic or validate the input.
+More critically, CLOCK_REALTIME is used for the absolute deadline. If the system clock is adjusted (NTP step, manual change) while the bar thread is sleeping, the wait returns instantly or stalls far longer than intended. CLOCK_MONOTONIC is the correct choice for timeouts; it requires setting pthread_condattr_setclock on the condition attribute, or switching to std.Thread.Condition (which does support timedWait in current Zig).
+Line 84 vs 82–83 — Inconsistent types for related constants:
+zigconst minBarHeight:     u32 = 20;
+const maxBarHeight:     u32 = 200;
+const defaultBarHeight: u16 = 24;  // ← different type
+defaultBarHeight is used as a fallback return value in calcBarHeight() !u16, so u16 is technically correct, but the inconsistency with its siblings is unnecessary and confusing.
+Line 225 — ArrayList declared but used as ArrayListUnmanaged:
+zigtitle: std.ArrayList(u8) = std.ArrayList(u8).empty,
+Every call site treats this field as ArrayListUnmanaged: deinit(allocator) at line 240 and ensureTotalCapacity(allocator, 256) at line 303. std.ArrayList.deinit takes no allocator; std.ArrayList.ensureTotalCapacity takes no allocator either. This is an API mismatch — it should be std.ArrayListUnmanaged(u8) to match every other field in TitleCache and match the call sites exactly.
+Lines 354 / 474 — Magic number 100 instead of titleMinWidth:
+zigprompt.draw(..., width orelse 100, ...);
+titleMinWidth = 100 already exists for this exact purpose. Using the constant would make the relationship explicit.
+Lines 599 — Inconsistent wrapping arithmetic:
+zignext.* = if (now >= next.*) now + interval else next.* +% interval;
+The now + interval branch uses regular addition (panic on overflow in debug), while the else branch uses wrapping +%. If now is near u64.max, the first branch panics. Both should be +% or both should be regular (with the caller guaranteeing interval won't overflow).
+Lines 919–922 — Strut arrays are swapped:
+This is the most serious line-level bug. _NET_WM_STRUT_PARTIAL layout:
+
+index 2 = top strut
+index 3 = bottom strut
+
+zigconst strut: [12]u32 = if (core.config.bar.bar_position == .top)
+    .{ 0, 0, 0, height, 0, ... }  // sets index 3 (bottom!) = height
+else
+    .{ 0, 0, height, 0, 0, ... }; // sets index 2 (top!) = height
+The top and bottom cases are inverted. A top-position bar tells the compositor its strut is at the bottom, and vice versa. This means window tilers and maximise operations will reserve space on the wrong side of the screen — windows will be placed behind the bar rather than beside it.
+
+Function-Level Issues
+drawRightSegments — Non-drawing segments consume phantom width:
+The right-to-left loop pre-subtracts each segment's measured width before calling draw. When a segment draws nothing (drew == false), only the gap spacing is reclaimed via right_x += scaled_spacing, but right_x -= seg_w from the pre-subtraction is never restored. The next segment is therefore placed seg_w pixels too far left, leaving a dead zone in the layout. This only manifests at runtime when a segment conditionally draws nothing (e.g., a layout/variants segment with no active state), but it would produce a visible misalignment.
+syncTitleCache — window_title_data and window_title_ends can go out of sync:
+zigself.title_cache.window_title_data.clearRetainingCapacity();
+self.title_cache.window_title_data.appendSlice(...) catch {};   // ← silently fails
+self.title_cache.window_title_ends.clearRetainingCapacity();
+self.title_cache.window_title_ends.appendSlice(...) catch {};   // ← silently fails
+Both clears happen unconditionally. If appendSlice for window_title_data succeeds but window_title_ends fails (or vice versa), the two buffers will be desynced. windowTitle(idx) will then return garbage slices or out-of-bounds slices. The two operations should be treated atomically — either both succeed and are committed, or neither is applied (using the new_wins-style pre-allocation pattern used just above in the same function).
+runBarThread — Unconditional break swallows spurious wakeups:
+zigwhile (!gBar.channel.work.hasPending()) {
+    if (carousel.isCarouselActive()) {
+        ...
+        gBar.channel.work_ready.timedWait(...) catch {};
+        break; // ← exits loop regardless of why timedWait returned
+    }
+    ...
+}
+After a spurious wakeup, work.hasPending() may still be false and now_ns may still be < next_carousel_ns, yet the thread exits the sleep loop and dispatches an .idle work item, which calls drawTitleOnly and advances the carousel timer prematurely. The break should only fire on error.Timeout; a spurious wakeup should restart the loop.
+captureStateIntoSlot — Main thread fetches all window titles unconditionally:
+The title pre-fetch loop (lines 746–761) runs on every snapshot capture, issuing X11 xcb_get_property round-trips for every window in the current workspace. This happens even when only the clock ticks and is_title_dirty is false. The fetch should be conditioned on is_title_dirty or forced for efficiency, particularly on workspaces with many windows.
+drawTitleOnly — minimized_title is hardcoded to "":
+Line 544 always passes an empty string for minimized_title. This means the fast-path title draw (triggered on focus change) never shows a minimized window's title, potentially causing a single-frame flash until the next full snapReady draw fills it in correctly.
+
+Architectural Issues
+pending_force_full_redraw lives in BarChannel but is not mutex-protected:
+BarChannel visually implies all fields are guarded by BarChannel.mutex. But pending_force_full_redraw is read and written exclusively on the main thread, outside the mutex (e.g., in scheduleFullRedraw, handleExpose, prepareSnapshot). This is safe today but is a trap for future contributors who may assume mutex-guardedness and either skip locking (introducing a race) or add redundant locking. The field belongs on State or Bar, not BarChannel.
+TitleCache mixes managed and unmanaged lists:
+All fields of TitleCache use ArrayListUnmanaged except title: std.ArrayList(u8). Every downstream call site uses the unmanaged API pattern (deinit(allocator), ensureTotalCapacity(allocator, n)). The declaration on line 225 is simply wrong (or a leftover from a refactor), and causes an API mismatch as described above.
+switchToWorkspace accepts u8 but is called with usize:
+ziginline fn switchToWorkspace(ws_arg: u8) void { ... }
+...
+const clicked_ws: usize = @intCast(...);
+switchToWorkspace(clicked_ws);  // usize → u8: requires explicit cast
+Zig does not implicitly narrow integer types, so this is either a compile error or requires a silent @intCast that truncates on workspaces ≥ 256. The parameter should be usize or at minimum there should be an explicit @intCast at the call site with a bounds check.
+retileAllWorkspaces temporarily mutates visible state to trick callers:
+zigconst saved = s.is_visible;
+if (is_fullscreen) s.is_visible = s.is_globally_visible;
+retileAllWorkspaces();
+if (is_fullscreen) s.is_visible = saved;
+This is a side-effect-hiding pattern: retileAllWorkspaces (and tilers underneath) implicitly read isVisible(), so is_visible is temporarily set to a fictitious value. Any future path inside retileAllWorkspaces that stores or propagates is_visible will observe and persist the fake value. Passing visibility as an explicit parameter to retileAllWorkspaces would be safer and more honest.
+Snapshot slot data can be stale on reload:
+After applyReload, joinBarThread resets gBar.channel.work but not the slot contents. The new bar thread inherits BarSnapshot data from the old run. On the first draw, is_full_redraw = true (forced by submitDrawBlockingFull) ensures a full clear, so this is safe today. But it is an implicit invariant that must be maintained — a future path that adds snapshot fields without full-redraw on reload would silently use stale data from a previous session.
+
+Proposed solutions:
+Lines 65-69 — timedWait overflow and wrong clock: Use CLOCK_MONOTONIC + saturating arithmetic
+Line 84 vs 82-83 — defaultBarHeight type: Change u16 to u32
+Line 225 — ArrayList should be ArrayListUnmanaged: Change to std.ArrayListUnmanaged(u8)
+Lines 354/474 — Magic number 100 instead of titleMinWidth: Replace 100 with titleMinWidth
+Line 599 — Inconsistent wrapping arithmetic: Both branches should use +%
+Lines 919-922 — Strut arrays are swapped: Fix the top/bottom strut indices
+drawRightSegments — Non-drawing segments consume phantom width: Fix the dead zone issue
+syncTitleCache — window_title_data and window_title_ends can go out of sync: Atomize the two operations
+runBarThread — Unconditional break swallows spurious wakeups: Only break on error.Timeout
+captureStateIntoSlot — Main thread fetches all window titles unconditionally: Condition on is_title_dirty
+drawTitleOnly — minimized_title is hardcoded to "": Fix to actually look up minimized title
+pending_force_full_redraw lives in BarChannel but not mutex-protected: Move to State or Bar
+TitleCache mixes managed and unmanaged lists: Already described in #3
+switchToWorkspace accepts u8 but is called with usize: Fix parameter type
+retileAllWorkspaces temporarily mutates visible state: Pass visibility explicitly

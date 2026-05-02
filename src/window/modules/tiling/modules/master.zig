@@ -20,27 +20,25 @@ pub fn tileWithOffset(
     if (n == 0) return;
 
     const m         = state.margins();
-    const master_n: u16 = @intCast(@min(state.master_count, n));
+    const master_n: u16 = @intCast(@min(state.config.master_count, n));
     const stack_n:  u16 = @intCast(n - master_n);
 
     // When no stack exists the master pane takes the full width.
     const master_w: u16 = if (stack_n > 0)
-        @intFromFloat(@round(@as(f32, @floatFromInt(screen_w)) * state.master_width))
+        @intFromFloat(@round(@as(f32, @floatFromInt(screen_w)) * state.config.master_width))
     else
         screen_w;
 
-    const is_master_on_right = state.master_side == .right;
+    const is_master_on_right = state.config.master_side == .right;
     const master_x: u16      = if (is_master_on_right) screen_w -| master_w else 0;
 
-    // When the master pane is on the right the seam is on its left side, so the
-    // half-gap goes left and the full gap goes right (screen edge).  On the left
-    // side it is the opposite.  When no stack exists the master pane takes the
-    // full width, so both margins are the full gap.
-    const master_left_margin:  u16 = if (stack_n > 0 and is_master_on_right) m.gap / 2 else m.gap;
-    const master_right_margin: u16 = if (stack_n > 0 and is_master_on_right) m.gap      else if (stack_n > 0) m.gap / 2 else m.gap;
-    const master_inner_w = calcInnerWidth(master_w, master_left_margin, master_right_margin + 2 * m.border);
+    // Inner width accounts for the gap between master and stack panes.
+    const master_inner_w = if (stack_n > 0)
+        calcInnerWidth(master_w, m.gap, m.gap / 2 + 2 * m.border)
+    else
+        calcInnerWidth(master_w, m.gap, m.gap + 2 * m.border);
 
-    tileColumn(ctx, windows[0..master_n], master_x +| master_left_margin, y_offset, screen_h, master_inner_w, m);
+    tileColumn(ctx, windows[0..master_n], master_x +| m.gap, y_offset, screen_h, master_inner_w, m);
 
     if (stack_n == 0) return;
 

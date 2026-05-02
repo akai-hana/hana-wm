@@ -116,7 +116,7 @@ pub fn init() !void {
     const count = core.config.workspaces.count;
     const wss   = try core.alloc.alloc(Workspace, count);
 
-    const default_layout: TilingLayout = if (build.has_tiling) tiling.getState().layout else 0;
+    const default_layout: TilingLayout = if (build.has_tiling) tiling.getState().config.layout else 0;
     const cfg_tiling = &core.config.tiling;
 
     // Build a flat lookup table so each workspace's override is O(1) to find,

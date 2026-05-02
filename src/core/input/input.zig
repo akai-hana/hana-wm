@@ -757,10 +757,10 @@ fn dumpTilingState() void {
     if (!build.has_tiling) return;
     if (tiling.getStateOpt()) |t| {
         debug.info("Tiling enabled: {}",     .{t.is_enabled});
-        debug.info("Tiling layout:  {s}",    .{@tagName(t.layout)});
+        debug.info("Tiling layout:  {s}",    .{@tagName(t.config.layout)});
         debug.info("Tiled windows:  {}",     .{t.windows.len});
-        debug.info("Master count:   {}",     .{t.master_count});
-        debug.info("Master width:   {d:.2}", .{t.master_width});
+        debug.info("Master count:   {}",     .{t.config.master_count});
+        debug.info("Master width:   {d:.2}", .{t.config.master_width});
     }
 }
 

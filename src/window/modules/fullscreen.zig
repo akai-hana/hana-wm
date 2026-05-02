@@ -26,9 +26,8 @@ const bar = if (build.has_bar) @import("bar") else struct {
     pub fn setBarState(_: anytype) void {}
 };
 
-// Shim: returns false when minimize is compiled out, matching the pattern in
-// workspaces.zig. Prevents a compile error on minimize.isMinimized when
-// build.has_minimize is false (the bare import resolves to void in that case).
+// Shim: returns false when minimize is compiled out (bare import resolves to void).
+// Prevents a compile error on minimize.isMinimized when build.has_minimize is false.
 inline fn isMinimized(win: u32) bool {
     return if (build.has_minimize) minimize.isMinimized(win) else false;
 }
@@ -43,22 +42,8 @@ pub const FullscreenInfo = struct {
 
 // Module state
 //
-// g_slots is a fixed array indexed directly by workspace index (u8).
-// Workspace count is always a small number (default 9, max 255), so
-// this is a dense array with zero heap involvement:
-//   - getForWorkspace    — O(1) direct index
-//   - setForWorkspace    — O(1) direct write, single array, no sync needed
-//   - removeForWorkspace — O(1) direct write
-//   - isFullscreen       — O(n) scan over at most 256 slots; faster in
-//                          practice than a hashmap because n is tiny,
-//                          there is no hashing cost, and the entire array
-//                          fits in a single cache line
-//   - workspaceFor       — O(n) scan, same reasoning
-//   - clear              — single @splat(null) assignment
-//
-// g_float_saves replaces the former g_saved_float_geoms hashmap for the
-// same reasons: the window count on a workspace is bounded and small,
-// so a parallel fixed array with a length counter is simpler and cheaper.
+// g_slots: fixed array keyed by workspace index (u8); O(1) operations, no heap.
+// g_float_saves: fixed array replacing the former hashmap; length-bounded reads.
 
 const MAX_WORKSPACES:  usize = 256; // u8 key space — array is ~4 KB, trivial
 const MAX_FLOAT_SAVES: usize = 64;  // matches the former MAX constant in saveFloatingWindowGeoms
@@ -66,12 +51,10 @@ const MAX_FLOAT_SAVES: usize = 64;  // matches the former MAX constant in saveFl
 var g_slots: [MAX_WORKSPACES]?FullscreenInfo = @splat(null);
 
 const FloatSave = struct { win: u32, rect: utils.Rect };
-/// Floating window positions saved just before a fullscreen enter. Populated
-/// by saveFloatingWindowGeoms, consumed and cleared by restoreFloatingWindows.
-/// Zero-initialised at program start; note that resetState() only resets
-/// g_float_saves_len and does not re-zero the backing array, so stale data
-/// may exist in g_float_saves[0..old_len] after a reset.  All reads must be
-/// bounded by g_float_saves_len to avoid accessing that stale data.
+/// Floating window positions saved before a fullscreen enter.
+/// Populated by saveFloatingWindowGeoms, consumed by restoreFloatingWindows.
+/// resetState() only resets g_float_saves_len, not the array; all reads must
+/// be bounded by g_float_saves_len to avoid stale data.
 var g_float_saves:     [MAX_FLOAT_SAVES]FloatSave = std.mem.zeroes([MAX_FLOAT_SAVES]FloatSave);
 var g_float_saves_len: usize = 0;
 
@@ -133,15 +116,11 @@ pub fn removeForWorkspace(ws: u8) void {
     g_slots[ws] = null;
 }
 
-/// Atomically transfer the fullscreen record from `src_ws` to `dst_ws`.
-/// Callers are responsible for any visual cleanup (bar, floating windows,
-/// border restoration) before calling this.
-/// Asserts that a record exists at `src_ws`; call `getForWorkspace` to verify
-/// first if that is not guaranteed by the call-site invariants.
-/// Asserts that `dst_ws` is empty: if a FullscreenInfo already occupies that
-/// slot it would be silently discarded, leaking associated state.  The caller
-/// must ensure `dst_ws` has no active fullscreen record before calling
-/// (e.g. by calling `removeForWorkspace(dst_ws)` after any required cleanup).
+/// Transfer the fullscreen record from `src_ws` to `dst_ws`.
+/// Callers must handle visual cleanup (bar, floating windows, borders) first.
+/// Asserts `src_ws` has a record and `dst_ws` is empty — a non-null `dst_ws`
+/// slot would be silently discarded. Call `removeForWorkspace(dst_ws)` first
+/// if needed.
 pub fn moveRecord(src_ws: u8, dst_ws: u8) void {
     std.debug.assert(g_slots[dst_ws] == null); // dst_ws must be empty; see doc comment
     const info = g_slots[src_ws].?;
@@ -164,19 +143,9 @@ pub fn forEachFullscreen(cb: anytype) void {
         if (slot) |info| cb(@intCast(i), info);
 }
 
-// Internal iteration helper
-//
-// Calls `ctx.call(window_id)` for every window on the current workspace
-// except `skip`, dispatching to the workspace window list when workspaces
-// are compiled in and falling back to the global tracking iterator otherwise.
-// `ctx` is anytype so each call site is monomorphised over its specific
-// context struct; the resulting code is equivalent to a hand-written branch
-// at each site with zero overhead.
-//
-// This helper is the single place that knows about the has_workspaces
-// dispatch, replacing three separate copies of the same branching pattern
-// that formerly lived inside saveFloatingWindowGeoms, restoreFloatingWindows,
-// and enterFullscreenCommit.
+// Calls `ctx.call(window_id)` for every window on the current workspace except
+// `skip`. Uses the workspace window list when has_workspaces is set, otherwise
+// falls back to the global iterator. `ctx` is anytype — zero overhead at call sites.
 fn forEachWindowOnCurrentWorkspace(skip: u32, ctx: anytype) void {
     if (build.has_workspaces) {
         const cur = tracking.getCurrentWorkspace() orelse return;
@@ -196,22 +165,16 @@ fn forEachWindowOnCurrentWorkspace(skip: u32, ctx: anytype) void {
 
 // Geometry helpers
 
-/// Retrieve the pre-fullscreen geometry for `win` before entering fullscreen.
+/// Retrieve the pre-fullscreen geometry for `win`.
 ///
-/// Fast path — tiled windows: `configureWithHints` stores the most recent tiled
-/// rect in the geometry cache after every retile.  Reading from the cache
-/// avoids a blocking xcb_get_geometry round-trip.
-///
-/// Slow path — floating or newly-spawned windows: these are not in the tiling
-/// cache (they were never passed through `configureWithHints`), so a blocking
-/// xcb_get_geometry round-trip is unavoidable.  Falls back to a centred
-/// quarter-screen default if the reply fails, the window is offscreen
-/// (x/y below OFFSCREEN_SENTINEL_MIN), or the window reports a zero-size
-/// geometry (mapped but not yet sized).
+/// Fast path (tiled): reads from the geometry cache, no round-trip needed.
+/// Slow path (floating/new): issues a blocking xcb_get_geometry round-trip.
+/// Falls back to a centred quarter-screen default if the reply fails, the
+/// window is offscreen, or reports zero dimensions.
 fn fetchWindowGeom(win: u32) core.WindowGeometry {
     if (build.has_tiling) {
         if (tiling.getWindowGeom(win)) |rect| {
-            const bw: u16 = if (tiling.getStateOpt()) |ts| ts.border_width else 0;
+            const bw: u16 = if (tiling.getStateOpt()) |ts| ts.config.border_width else 0;
             return .{
                 .x            = rect.x,
                 .y            = rect.y,
@@ -254,10 +217,8 @@ fn fetchWindowGeom(win: u32) core.WindowGeometry {
 
 // Floating geometry save/restore
 //
-// Window positions are saved to g_float_saves before a fullscreen enter
-// so they survive the offscreen-push and can be exactly restored on exit.
-// Cookies are fired in a batch before the server grab; replies are consumed
-// immediately after so the round-trips overlap with in-memory setup.
+// Positions saved to g_float_saves before fullscreen enter so they survive
+// the offscreen-push. Cookies batched before the server grab for overlap.
 
 /// Save the current on-screen position of every non-minimized, non-tiled
 /// window on the current workspace (except `skip_win`) into g_float_saves.
@@ -342,12 +303,9 @@ fn restoreFloatingWindows(skip_win: u32) void {
         fn call(self: @This(), w: u32) void {
             if (isMinimized(w)) return;
             if (build.has_tiling) if (tiling.isWindowTiled(w)) return;
-            // Do NOT fall back to window.getWindowGeom here: restoreFloatingWindows
-            // is called inside xcb_grab_server, and a synchronous xcb_get_geometry
-            // round-trip would block indefinitely waiting for a reply that can never
-            // be delivered while this client holds the grab (classic XCB grab
-            // deadlock).  Windows absent from g_float_saves fall back to the
-            // pre-computed default position instead.
+            // Do NOT call window.getWindowGeom here: we are inside xcb_grab_server
+            // and a synchronous xcb_get_geometry round-trip would deadlock.
+            // Windows absent from g_float_saves fall back to the default position.
             if (getSavedFloatGeom(w)) |r| {
                 utils.configureWindow(core.conn, w, r);
             } else {
@@ -363,14 +321,9 @@ fn restoreFloatingWindows(skip_win: u32) void {
     g_float_saves_len = 0;
 }
 
-/// Advertise or clear the EWMH _NET_WM_STATE_FULLSCREEN property on `win`.
-///
-/// Guards on both atoms being valid so a partial atom-intern failure cannot
-/// corrupt the property (matches the enter-path guard that was already
-/// dual-checking both atoms; exit paths now do the same).
-///
-/// `is_fullscreen = true`  → sets count=1, data=&g_net_wm_state_fullscreen
-/// `is_fullscreen = false` → sets count=0, data=null  (clears the property)
+/// Set or clear the EWMH _NET_WM_STATE_FULLSCREEN property on `win`.
+/// Guards on both atoms being valid before touching the property.
+/// `is_fullscreen = true` → sets the atom; false → clears it (count=0).
 fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
     if (g_net_wm_state == xcb.XCB_ATOM_NONE or
         g_net_wm_state_fullscreen == xcb.XCB_ATOM_NONE) return;
@@ -404,14 +357,10 @@ fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
     };
     forEachWindowOnCurrentWorkspace(win, PushCtx{});
 
-    // Configure the fullscreen window and raise it BEFORE calling setBarState.
-    // setBarState(.hide_fullscreen) triggers tiling.retileCurrentWorkspace() when
-    // tiling is active. If setBarState ran first, the retile would pull the other
-    // windows back to their tiled on-screen positions, undoing the offscreen push
-    // above. By configuring and raising the fullscreen window first, the retile
-    // that fires inside setBarState sees a fully-committed fullscreen state and
-    // skips (or correctly handles) the fullscreen window, leaving everything else
-    // offscreen where we placed it.
+    // Configure and raise the fullscreen window BEFORE calling setBarState.
+    // setBarState(.hide_fullscreen) triggers retileCurrentWorkspace(); if it ran
+    // first, the retile would undo the offscreen push above. Configuring first
+    // ensures the retile sees committed fullscreen state and leaves others offscreen.
     window.configureWindowGeom(core.conn, win, .{
         .x            = 0,
         .y            = 0,
@@ -445,10 +394,8 @@ fn exitFullscreenCommit(win: u32, ws: u8) void {
     bar.setBarState(.show_fullscreen);
 
     const win_is_tiled = if (build.has_tiling) tiling.isWindowTiled(win) else false;
-    // Tiled windows: geometry is managed by the tiling engine; applyBorder below
-    // restores the border width and colour in one pass.
-    // Floating windows: restore position + size + border_width atomically via
-    // configureWindowGeom to avoid a visible intermediate frame.
+    // Tiled: geometry managed by tiling engine; applyBorder restores border.
+    // Floating: configureWindowGeom restores position + size + border atomically.
     if (!win_is_tiled) window.configureWindowGeom(core.conn, win, saved);
 
     window.applyBorder(win);
@@ -459,37 +406,17 @@ fn exitFullscreenCommit(win: u32, ws: u8) void {
 
 // Public actions
 
-/// Cleans up fullscreen side-effects when a fullscreen window is being moved
-/// to a different workspace.  Specifically, this handles what exitFullscreenCommit
-/// would have done on the source workspace — without restoring the window's
-/// geometry, since the caller is responsible for repositioning it on the target.
-///
-/// Concretely:
-///   - Shows the bar again on the source workspace.
-///   - Restores any floating windows that were pushed offscreen during enter.
-///   - Restores the window's border width (zeroed on enter) and re-applies the
-///     border colour via window.applyBorder.
-///   - Clears the EWMH _NET_WM_STATE_FULLSCREEN property on the window.
-///
-/// The fullscreen record for `src_ws` must still be present when this is called.
-/// The caller is responsible for removing/transferring the record afterward.
+/// Clean up fullscreen side-effects when moving a fullscreen window to another
+/// workspace: shows the bar, restores offscreen floats, reapplies border, and
+/// clears the EWMH property. Does not restore geometry (caller handles that).
+/// `src_ws` must still hold a fullscreen record; caller removes it afterward.
 pub fn cleanupFullscreenForMove(win: u32, src_ws: u8) void {
     const fs_info = getForWorkspace(src_ws) orelse return;
     if (fs_info.window != win) return;
 
-    // Restore the bar on the source workspace.
     bar.setBarState(.show_fullscreen);
-
-    // Bring back floating windows that were pushed offscreen during enter.
-    // restoreFloatingWindows also clears g_float_saves_len.
     restoreFloatingWindows(win);
-
-    // Restore border width (zeroed on enter) and colour. applyBorder handles
-    // both in one pass via applyBorderWidth + xcb_change_window_attributes.
     window.applyBorder(win);
-
-    // Clear the EWMH fullscreen property so external tools (compositors, etc.)
-    // see the window is no longer fullscreen.
     setEwmhFullscreenState(win, false);
 }
 
@@ -506,13 +433,19 @@ pub fn enterFullscreen(win: u32, saved_geom: ?core.WindowGeometry) void {
     utils.ungrabAndFlush(core.conn);
 }
 
-// toggle() design note:
-//
-// All round-trip work (saveFloatingWindowGeoms, fetchWindowGeom) is hoisted
-// before xcb_grab_server because replies cannot be delivered while the same
-// client holds the server grab — xcb_get_geometry_reply would block indefinitely.
-// All three branches own the grab uniformly via enterFullscreenCommit /
-// exitFullscreenCommit rather than delegating to enterFullscreen().
+/// Exit fullscreen for `win`. No-op if not currently fullscreen. Targets `win`
+/// explicitly (unlike toggle()) for event-driven call sites. No pre-grab needed.
+pub fn exitFullscreen(win: u32) void {
+    const ws = workspaceFor(win) orelse return;
+    _ = xcb.xcb_grab_server(core.conn);
+    exitFullscreenCommit(win, ws);
+    restoreFloatingWindows(win);
+    utils.ungrabAndFlush(core.conn);
+}
+
+// Round-trips are hoisted before xcb_grab_server (replies can't be delivered
+// while a grab is held). The switch branch holds a single grab across both
+// exitFullscreenCommit and enterFullscreenCommit to avoid an intermediate frame.
 pub fn toggle() void {
     const win        = focus.getFocused() orelse return;
     const current_ws = tracking.getCurrentWorkspace() orelse return;
@@ -520,38 +453,22 @@ pub fn toggle() void {
     if (getForWorkspace(current_ws)) |fs_info| {
         if (fs_info.window == win) {
             // Toggle off: exit fullscreen for the focused window.
-            _ = xcb.xcb_grab_server(core.conn);
-            exitFullscreenCommit(win, current_ws);
-            restoreFloatingWindows(win);
-            utils.ungrabAndFlush(core.conn);
+            exitFullscreen(win);
         } else {
-            // Switch: a different window is currently fullscreen.
-            // Hoist the round-trip (fetchWindowGeom issues a synchronous
-            // xcb_get_geometry) before acquiring the grab so its reply can be
-            // delivered by the server.
-            //
-            // Do NOT call saveFloatingWindowGeoms here: all background windows
-            // are already offscreen (pushed there by the original
-            // enterFullscreenCommit), so every geometry reply would fail the
-            // OFFSCREEN_SENTINEL_MIN guard and saveFloatingWindowGeoms would
-            // reset g_float_saves_len to 0, destroying the valid positions that
-            // were captured before the initial enter.  The existing g_float_saves
-            // entries already hold the correct pre-fullscreen positions and will
-            // be consumed by restoreFloatingWindows below.
+            // Switch: fetch geometry before the grab (replies can't be delivered inside one).
+            // Skip saveFloatingWindowGeoms — windows are already offscreen so replies would
+            // fail the sentinel guard and zero out g_float_saves. Existing entries are still
+            // valid and will be consumed by restoreFloatingWindows below.
             const new_geom = fetchWindowGeom(win);
             _ = xcb.xcb_grab_server(core.conn);
             exitFullscreenCommit(fs_info.window, current_ws);
-            // Restore background windows to their positions before pushing
-            // them offscreen again for the new fullscreen window.  Without
-            // this step they remain invisible after the transition.
+            // Restore background windows before pushing them offscreen again.
             restoreFloatingWindows(win);
             enterFullscreenCommit(win, current_ws, new_geom);
             utils.ungrabAndFlush(core.conn);
         }
     } else {
-        // Nothing fullscreen on this workspace — enter fullscreen.
-        // Round-trip work is hoisted before the grab, consistent with the
-        // switch branch above.
+        // Nothing fullscreen on this workspace — hoist round-trips before the grab.
         const geom = fetchWindowGeom(win);
         saveFloatingWindowGeoms(win);
         _ = xcb.xcb_grab_server(core.conn);

@@ -21,7 +21,7 @@ pub fn tileWithOffset(
     if (windows.len == 0) return;
 
     const m      = state.margins();
-    const inset: u16 = if (state.layout_variants.monocle == .gaps) m.gap else 0;
+    const inset: u16 = if (state.config.layout_variants.monocle == .gaps) m.gap else 0;
     const total_margin = m.border * 2 + inset * 2;
 
     // Raise the focused window.  ctx.focused_win is set by makeLayoutCtx via
