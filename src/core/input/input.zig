@@ -352,7 +352,7 @@ fn executeSwapMaster(action: *const types.Action) void {
     // Async pointer-sync: queues the cookie without blocking so no premature
     // flush occurs inside the grab. drainPointerSync() consumes it next loop.
     focus.beginPointerSync();
-    window.updateWorkspaceBorders(.full);
+    window.updateFloatingWindowBorders();
     window.markBordersFlushed();
     // redrawInsideGrab renders to the off-screen pixmap and queues xcb_copy_area
     // without flushing; ungrabAndFlush sends everything atomically.
@@ -677,7 +677,7 @@ inline fn withTilingGrab(op: anytype) void {
 inline fn withTilingGrabAndBorders(op: anytype) void {
     _ = xcb.xcb_grab_server(core.conn);
     op();
-    window.updateWorkspaceBorders(.full);
+    window.updateFloatingWindowBorders();
     window.markBordersFlushed();
     bar.redrawInsideGrab();
     utils.ungrabAndFlush(core.conn);
@@ -688,7 +688,7 @@ inline fn withTilingGrabAndBorders(op: anytype) void {
 inline fn withTilingGrabAndBordersWin(win: u32, op: anytype) void {
     _ = xcb.xcb_grab_server(core.conn);
     op(win);
-    window.updateWorkspaceBorders(.full);
+    window.updateFloatingWindowBorders();
     window.markBordersFlushed();
     bar.redrawInsideGrab();
     utils.ungrabAndFlush(core.conn);

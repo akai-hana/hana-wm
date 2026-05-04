@@ -1107,7 +1107,7 @@ pub fn toggleBarSegmentAnchor() void {
     _ = xcb.xcb_configure_window(core.conn, s.win.win_id, xcb.XCB_CONFIG_WINDOW_Y,
         &[_]u32{@as(u32, @bitCast(@as(i32, new_y)))});
     const current_ws = tracking.getCurrentWorkspace() orelse {
-        window.updateWorkspaceBorders(.full);
+        window.updateWorkspaceBorders();
         window.markBordersFlushed();
         ungrabAndFlush();
         return;
@@ -1118,7 +1118,7 @@ pub fn toggleBarSegmentAnchor() void {
         true;
     if (no_fullscreen)
         if (build.has_tiling) tiling.retileCurrentWorkspace();
-    window.updateWorkspaceBorders(.full);
+    window.updateFloatingWindowBorders();
     window.markBordersFlushed();
     ungrabAndFlush();
     debug.info("Bar position toggled to: {s}", .{@tagName(core.config.bar.bar_position)});
@@ -1205,7 +1205,7 @@ pub fn setBarState(action: BarAction) void {
         else      _ = xcb.xcb_unmap_window(core.conn, s.win.win_id);
         const effective_visible = if (is_fullscreen) s.is_globally_visible else s.is_visible;
         retileAllWorkspaces(effective_visible);
-        window.updateWorkspaceBorders(.full);
+        window.updateFloatingWindowBorders();
         window.markBordersFlushed();
         ungrabAndFlush();
     } else {
