@@ -16,13 +16,13 @@ pub const XK = enum(u32) {
     Tab       = 0xff09,
     Return    = 0xff0d,
     Escape    = 0xff1b,
-    Delete    = 0xffff,
+    Home      = 0xff50,
     Left      = 0xff51,
     Up        = 0xff52,
     Right     = 0xff53,
     Down      = 0xff54,
-    Home      = 0xff50,
     End       = 0xff57,
+    Delete    = 0xffff,
 };
 
 /// Equivalent to xcb.xcb_window_t (uint32_t); named for readability.
@@ -30,20 +30,23 @@ pub const WindowId = u32;
 
 /// Geometry snapshot used by both fullscreen and minimize.
 pub const WindowGeometry = struct {
-    x:            i16,
-    y:            i16,
-    width:        u16,
-    height:       u16,
+    // Coordinates
+    x: i16,
+    y: i16,
+    // Dimensions
+    width: u16,
+    height: u16,
+    // Others
     border_width: u16,
 };
 
 /// Focus suppression reason for context-aware behavior.
 pub const FocusSuppressReason = enum {
-    /// Normal operation: focus follows mouse.
+    /// No suppression (default)
     none,
-    /// Just spawned a window — suppress cursor focus steal.
+    /// Window just spawned
     window_spawn,
-    /// Tiling in progress — suppress cursor focus steal.
+    /// Tiling in progress
     tiling_operation,
 };
 

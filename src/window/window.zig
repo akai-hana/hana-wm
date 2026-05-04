@@ -148,7 +148,7 @@ var g_geom_cache: if (build.has_tiling) void else struct {
     len:   usize    = 0,
 } = if (build.has_tiling) {} else .{};
 
-/// Set by grab-flush paths that already called updateWorkspaceBorders(.float_only) inside
+/// Set by grab-flush paths that already called updateFloatingWindowBorders() inside
 /// their server grab, so the event loop can skip the redundant second sweep.
 /// Reset unconditionally by updateWorkspaceBordersIfNeeded() at the end of each
 /// event batch.
@@ -1180,7 +1180,7 @@ fn mapWindowToScreen(win: u32, ptr_cookie: xcb.xcb_query_pointer_cookie_t) void 
     // Post-retile border sweep: tiled-window borders were already updated by
     // configureWithHints during retileCurrentWorkspace (via get_border_color),
     // so only floating windows need sweeping here.
-    updateWorkspaceBorders(.float_only);
+    updateFloatingWindowBorders();
     bar.redrawInsideGrab();
     markBordersFlushed();
 
@@ -1311,9 +1311,9 @@ fn unmanageWindow(win: u32) void {
 
     // Post-retile border sweep: tiled-window borders are already current after
     // retileIfDirty (handled by configureWithHints), so only float windows need
-    // a sweep here.  The full updateWorkspaceBorders(.full) would re-send
+    // a sweep here.  updateWorkspaceBorders() would re-send
     // change_window_attributes to every tiled window redundantly.
-    updateWorkspaceBorders(.float_only);
+    updateFloatingWindowBorders();
     bar.redrawInsideGrab();
     markBordersFlushed();
 
@@ -1749,34 +1749,16 @@ pub fn applyBorder(win: u32) void {
         xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
 }
 
-/// Selects which windows are swept when refreshing workspace border colors.
-pub const BorderSweep = enum {
-    /// Visit all windows on the current workspace.  Tiled windows are
-    /// deduped via the tiling CacheMap so the common steady-state
-    /// (focused window unchanged) generates zero XCB traffic.
-    full,
-    /// Skip tiled windows — used after a retile because `configureWithHints`
-    /// already updated their border color via the `get_border_color` callback.
-    /// Only floating windows need sweeping.  Falls back to `full` behaviour
-    /// when tiling is absent or disabled.
-    float_only,
-};
-
-/// Refresh border colors for windows on the current workspace.
-/// Pass `.full` for the end-of-batch sweep; `.float_only` after a retile.
-pub fn updateWorkspaceBorders(comptime mode: BorderSweep) void {
+/// Refresh border colors for all windows on the current workspace.
+/// Tiled windows are deduped via the tiling CacheMap, so the common
+/// steady-state (focused window unchanged) generates zero XCB traffic.
+pub fn updateWorkspaceBorders() void {
     if (!build.has_workspaces) return;
     const cur = tracking.getCurrentWorkspace() orelse return;
     const cur_bit = tracking.workspaceBit(cur);
     for (tracking.allWindows()) |_entry| {
         const win = _entry.win;
         if (_entry.mask & cur_bit == 0) continue;
-        if (build.has_tiling) {
-            if (mode == .float_only and core.config.tiling.enabled) {
-                // Post-retile: tiled windows already updated by configureWithHints.
-                if (tiling.isWindowTiled(win)) continue;
-            }
-        }
         const color = borderColor(win);
         // Dedup via the tiling CacheMap: skip the XCB call when color is unchanged.
         if (build.has_tiling) {
@@ -1787,13 +1769,33 @@ pub fn updateWorkspaceBorders(comptime mode: BorderSweep) void {
     }
 }
 
+/// Refresh border colors for only the floating windows on the current workspace.
+/// Called after a retile: `configureWithHints` already updated tiled-window
+/// borders via the `get_border_color` callback, so re-sending them here would
+/// be redundant.  When tiling is absent or disabled, falls back to a full sweep
+/// because there are no tiled windows to skip.
+pub fn updateFloatingWindowBorders() void {
+    if (!build.has_workspaces) return;
+    const cur = tracking.getCurrentWorkspace() orelse return;
+    const cur_bit = tracking.workspaceBit(cur);
+    for (tracking.allWindows()) |_entry| {
+        const win = _entry.win;
+        if (_entry.mask & cur_bit == 0) continue;
+        if (build.has_tiling and core.config.tiling.enabled) {
+            if (tiling.isWindowTiled(win)) continue;
+        }
+        _ = xcb.xcb_change_window_attributes(core.conn, win,
+            xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
+    }
+}
+
 /// Mark that the current event batch already swept all workspace border colors
 /// inside a server grab, so the event loop does not need to do it again.
 pub fn markBordersFlushed() void { borders_flushed_this_batch = true; }
 
 /// Event-loop entry point for the per-batch border sweep.
-/// Calls updateWorkspaceBorders(.full) only when no grab-flush path already
-/// did so, then unconditionally resets the flag for the next batch.
+/// Calls updateWorkspaceBorders() only when no grab-flush path already did so,
+/// then unconditionally resets the flag for the next batch.
 ///
 /// CALLING CONTRACT: This function must be called exactly once per event batch,
 /// at the end of the batch.  Calling it multiple times in a single batch will
@@ -1802,7 +1804,7 @@ pub fn markBordersFlushed() void { borders_flushed_this_batch = true; }
 /// Any upstream refactor that introduces a second call site in the same batch
 /// must account for this behavior.
 pub fn updateWorkspaceBordersIfNeeded() void {
-    if (!borders_flushed_this_batch) updateWorkspaceBorders(.full);
+    if (!borders_flushed_this_batch) updateWorkspaceBorders();
     borders_flushed_this_batch = false;
 }
 
