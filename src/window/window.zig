@@ -113,7 +113,7 @@ var spawn_cursor: struct { x: i16 = 0, y: i16 = 0 } = .{};
 // hash lookup instead of an O(R) linear scan on every MapRequest.
 //
 // Keys borrow slices from the config's allocations and are valid until the
-// next rebuild (triggered by a config reload via `rebuildRulesMap`).
+// next rebuild (triggered by a config reload via `buildRulesMap`).
 // Because rebuilding always happens *after* the new config is committed to
 // core.config, the borrowed slices are always live.
 
@@ -148,7 +148,7 @@ var g_geom_cache: if (build.has_tiling) void else struct {
     len:   usize    = 0,
 } = if (build.has_tiling) {} else .{};
 
-/// Set by grab-flush paths that already called updateWorkspaceBorders() inside
+/// Set by grab-flush paths that already called updateWorkspaceBorders(.float_only) inside
 /// their server grab, so the event loop can skip the redundant second sweep.
 /// Reset unconditionally by updateWorkspaceBordersIfNeeded() at the end of each
 /// event batch.
@@ -332,24 +332,19 @@ pub fn populateFocusCacheFromCookies(
     };
 
     // Scan WM_PROTOCOLS once for both atoms (no second round-trip).
-    var take_focus = false;
-    var wm_delete  = false;
-
-    protocols: {
-        const r = xcb.xcb_get_property_reply(conn, protocols_cookie, null) orelse break :protocols;
+    const protocols_result = protocols: {
+        const r = xcb.xcb_get_property_reply(conn, protocols_cookie, null) orelse break :protocols WMProtocolsProps{};
         defer std.c.free(r);
-        if (r.*.format != 32 or r.*.value_len == 0) break :protocols;
+        if (r.*.format != 32 or r.*.value_len == 0) break :protocols WMProtocolsProps{};
         const raw: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(r)));
-        const result = scanProtocolAtoms(raw[0..@intCast(r.*.value_len)], focus_atoms.take_focus, focus_atoms.wm_delete);
-        take_focus = result.take_focus;
-        wm_delete  = result.wm_delete;
-    }
+        break :protocols scanProtocolAtoms(raw[0..@intCast(r.*.value_len)], focus_atoms.take_focus, focus_atoms.wm_delete);
+    };
 
     const accepts_input = extractWMHintsInput(conn, hints_cookie);
 
     putCachedProps(win, .{
-        .model     = inputModelFrom(take_focus, accepts_input),
-        .wm_delete = wm_delete,
+        .model     = inputModelFrom(protocols_result.take_focus, accepts_input),
+        .wm_delete = protocols_result.wm_delete,
     });
 }
 
@@ -385,12 +380,6 @@ fn extractWMHintsInput(
     if (r.*.format != 32 or r.*.value_len < 1) return true;
     const hints: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(r)));
     return parseWMHintsInputFromData(hints, r.*.value_len);
-}
-
-/// Recomputes and caches the focus properties after a WM_PROTOCOLS or WM_HINTS
-/// PropertyNotify. Two round-trips; called only on rare property change events.
-pub fn recacheInputModel(conn: *xcb.xcb_connection_t, win: u32) void {
-    _ = queryAndCacheProps(conn, win);
 }
 
 /// Removes `win` from the focus property cache — called on window destruction
@@ -765,7 +754,7 @@ fn populateAtomCache() void {
 /// Keys are borrowed slices pointing into the config's allocations and remain
 /// valid until the next rebuild.  If a class name appears in multiple rules,
 /// the first rule wins (consistent with the old linear scan).
-fn buildRulesMap() void {
+pub fn buildRulesMap() void {
     const alloc = g_alloc orelse return;
     g_rules_map.clearRetainingCapacity();
     for (core.config.workspaces.rules.items) |rule| {
@@ -775,11 +764,6 @@ fn buildRulesMap() void {
         g_rules_map.putNoClobber(alloc, rule.class_name, rule.workspace) catch {};
     }
 }
-
-/// Rebuild the workspace-rule map after a config reload.
-/// Must be called AFTER core.config has been swapped to the new config so
-/// the borrowed key slices point into the new config's allocations.
-pub fn rebuildRulesMap() void { buildRulesMap(); }
 
 pub fn init(alloc: std.mem.Allocator) !void {
     g_alloc = alloc;
@@ -838,15 +822,16 @@ inline fn tilingActive() bool {
 
 // Window predicates
 
+inline fn isBasicInvalid(win: u32) bool {
+    return win == 0 or win == core.root or bar.isBarWindow(win);
+}
+
 pub inline fn isValidManagedWindow(win: u32) bool {
-    return win != 0 and
-           win != core.root and
-           !bar.isBarWindow(win) and
-           tracking.isManaged(win);
+    return !isBasicInvalid(win) and tracking.isManaged(win);
 }
 
 pub inline fn isOnCurrentWorkspace(win: u32) bool {
-    if (win == 0 or win == core.root or bar.isBarWindow(win)) return false;
+    if (isBasicInvalid(win)) return false;
     return tracking.isOnCurrentWorkspace(win);
 }
 
@@ -899,15 +884,6 @@ fn findWorkspaceRuleByClass(cookie: xcb.xcb_get_property_cookie_t) ?u8 {
 
 // Workspace assignment
 
-/// Phase 1 of workspace resolution: checks WM_CLASS against config rules.
-fn findClassRuleWorkspace(cookie: xcb.xcb_get_property_cookie_t) ?u8 {
-    if (core.config.workspaces.rules.items.len == 0 or atoms.wm_class == 0) {
-        xcb.xcb_discard_reply(core.conn, cookie.sequence);
-        return null;
-    }
-    return findWorkspaceRuleByClass(cookie);
-}
-
 /// Phase 2 of workspace resolution: matches the window against the spawn queue.
 /// Tries exact PID match first; tracks the earliest daemon-mode (pid==0) entry
 /// as a candidate; falls back to the oldest pending entry.
@@ -945,9 +921,8 @@ fn findSpawnQueueWorkspace(
     // handled correctly by the single-entry oldest-entry fallback below.
     for (entries, 0..) |e, i| {
         if (win_pid != 0 and e.pid == win_pid) {
-            const ws = entries[i].workspace;
             _ = g_spawn_queue.swapRemove(i); // order has no semantic meaning
-            return ws;
+            return e.workspace;
         }
     }
 
@@ -985,11 +960,13 @@ fn resolveTargetWorkspace(
     c_wm_class:    xcb.xcb_get_property_cookie_t,
     c_net_wm_pid:  ?xcb.xcb_get_property_cookie_t,
 ) u8 {
-    if (findClassRuleWorkspace(c_wm_class)) |target| {
-        if (c_net_wm_pid) |pid_cookie|
-            xcb.xcb_discard_reply(core.conn, pid_cookie.sequence);
-        return clampToValidWorkspace(target, current_ws);
-    }
+    if (core.config.workspaces.rules.items.len > 0 and atoms.wm_class != 0) {
+        if (findWorkspaceRuleByClass(c_wm_class)) |target| {
+            if (c_net_wm_pid) |pid_cookie|
+                xcb.xcb_discard_reply(core.conn, pid_cookie.sequence);
+            return clampToValidWorkspace(target, current_ws);
+        }
+    } else xcb.xcb_discard_reply(core.conn, c_wm_class.sequence);
 
     if (findSpawnQueueWorkspace(c_net_wm_pid)) |spawn_ws|
         return clampToValidWorkspace(spawn_ws, current_ws);
@@ -1203,7 +1180,7 @@ fn mapWindowToScreen(win: u32, ptr_cookie: xcb.xcb_query_pointer_cookie_t) void 
     // Post-retile border sweep: tiled-window borders were already updated by
     // configureWithHints during retileCurrentWorkspace (via get_border_color),
     // so only floating windows need sweeping here.
-    updateWorkspaceBordersPostRetile();
+    updateWorkspaceBorders(.float_only);
     bar.redrawInsideGrab();
     markBordersFlushed();
 
@@ -1334,9 +1311,9 @@ fn unmanageWindow(win: u32) void {
 
     // Post-retile border sweep: tiled-window borders are already current after
     // retileIfDirty (handled by configureWithHints), so only float windows need
-    // a sweep here.  The full updateWorkspaceBorders would re-send
+    // a sweep here.  The full updateWorkspaceBorders(.full) would re-send
     // change_window_attributes to every tiled window redundantly.
-    updateWorkspaceBordersPostRetile();
+    updateWorkspaceBorders(.float_only);
     bar.redrawInsideGrab();
     markBordersFlushed();
 
@@ -1660,7 +1637,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
     // (CacheSlot array).  Calling focus.invalidateInputModelCache only cleared
     // focus.zig's side, leaving the CacheSlot stale until the window was
     // destroyed — so future getCachedProps hits would return the old model.
-    recacheInputModel(core.conn, event.window);
+    _ = queryAndCacheProps(core.conn, event.window);
 }
 
 // Size-hint parsing
@@ -1772,22 +1749,22 @@ pub fn applyBorder(win: u32) void {
         xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
 }
 
-/// Refresh border colors for every window on the current workspace.
-/// Shared implementation for workspace border sweeps.
-///
-/// When `skip_tiled` is true (post-retile path): tiled windows are skipped
-/// because `configureWithHints` already updated their border color via the
-/// `get_border_color` callback during the retile pass.  Only floating windows
-/// need sweeping here.
-///
-/// When `skip_tiled` is false (end-of-batch path): all windows are visited.
-/// Tiled windows are still deduped via the tiling CacheMap and only receive an
-/// XCB call when the color has changed since the last send, so the common
-/// steady-state (focused window unchanged) generates zero XCB traffic.
-///
-/// When tiling is absent or disabled there are no tiled windows to skip, so
-/// both paths fall through to the full unconditional sweep.
-fn updateWorkspaceBordersImpl(comptime skip_tiled: bool) void {
+/// Selects which windows are swept when refreshing workspace border colors.
+pub const BorderSweep = enum {
+    /// Visit all windows on the current workspace.  Tiled windows are
+    /// deduped via the tiling CacheMap so the common steady-state
+    /// (focused window unchanged) generates zero XCB traffic.
+    full,
+    /// Skip tiled windows — used after a retile because `configureWithHints`
+    /// already updated their border color via the `get_border_color` callback.
+    /// Only floating windows need sweeping.  Falls back to `full` behaviour
+    /// when tiling is absent or disabled.
+    float_only,
+};
+
+/// Refresh border colors for windows on the current workspace.
+/// Pass `.full` for the end-of-batch sweep; `.float_only` after a retile.
+pub fn updateWorkspaceBorders(comptime mode: BorderSweep) void {
     if (!build.has_workspaces) return;
     const cur = tracking.getCurrentWorkspace() orelse return;
     const cur_bit = tracking.workspaceBit(cur);
@@ -1795,7 +1772,7 @@ fn updateWorkspaceBordersImpl(comptime skip_tiled: bool) void {
         const win = _entry.win;
         if (_entry.mask & cur_bit == 0) continue;
         if (build.has_tiling) {
-            if (skip_tiled and core.config.tiling.enabled) {
+            if (mode == .float_only and core.config.tiling.enabled) {
                 // Post-retile: tiled windows already updated by configureWithHints.
                 if (tiling.isWindowTiled(win)) continue;
             }
@@ -1810,44 +1787,13 @@ fn updateWorkspaceBordersImpl(comptime skip_tiled: bool) void {
     }
 }
 
-/// Refresh border colors for every window on the current workspace.
-/// Used by `updateWorkspaceBordersIfNeeded` (event-loop end-of-batch sweep)
-/// and by `reloadBorders` (config reload, needs all windows).
-///
-/// Tiled windows are deduped via the tiling geometry cache, skipping
-/// `xcb_change_window_attributes` entirely when the color has not changed
-/// since the last send.  This eliminates one XCB request per tiled window per
-/// event batch in the common steady-state (focused window unchanged): idle
-/// typing, scrolling, or cursor movement inside a window no longer generates
-/// any border protocol traffic.
-///
-/// Floating windows with no tiling cache entry are sent unconditionally (they
-/// are typically few in number and do not benefit from tiling-cache dedup).
-pub fn updateWorkspaceBorders() void {
-    updateWorkspaceBordersImpl(false);
-}
-
-/// Refresh border colors for only the FLOATING (non-tiled) windows on the
-/// current workspace.  Called inside grab-flush paths that just ran a full
-/// retile: `configureWithHints` already updated all tiled-window borders via
-/// the `get_border_color` callback during the retile, so re-sending them here
-/// would be a no-op that costs one `xcb_change_window_attributes` per tiled
-/// window per spawn/close inside the server grab.
-///
-/// Floating windows are not touched by the retile pass and must be swept here.
-/// When tiling is absent or disabled, this falls back to the full sweep because
-/// there are no tiled windows to skip.
-fn updateWorkspaceBordersPostRetile() void {
-    updateWorkspaceBordersImpl(true);
-}
-
 /// Mark that the current event batch already swept all workspace border colors
 /// inside a server grab, so the event loop does not need to do it again.
 pub fn markBordersFlushed() void { borders_flushed_this_batch = true; }
 
 /// Event-loop entry point for the per-batch border sweep.
-/// Calls updateWorkspaceBorders() only when no grab-flush path already did so,
-/// then unconditionally resets the flag for the next batch.
+/// Calls updateWorkspaceBorders(.full) only when no grab-flush path already
+/// did so, then unconditionally resets the flag for the next batch.
 ///
 /// CALLING CONTRACT: This function must be called exactly once per event batch,
 /// at the end of the batch.  Calling it multiple times in a single batch will
@@ -1856,7 +1802,7 @@ pub fn markBordersFlushed() void { borders_flushed_this_batch = true; }
 /// Any upstream refactor that introduces a second call site in the same batch
 /// must account for this behavior.
 pub fn updateWorkspaceBordersIfNeeded() void {
-    if (!borders_flushed_this_batch) updateWorkspaceBorders();
+    if (!borders_flushed_this_batch) updateWorkspaceBorders(.full);
     borders_flushed_this_batch = false;
 }
 

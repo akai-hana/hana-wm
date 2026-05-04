@@ -68,16 +68,14 @@ pub const Margins = struct {
 /// Moves and resizes `win` without touching border_width.
 /// Use `window.configureWindowGeom` when border_width must change atomically.
 pub inline fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect) void {
+    const coord = struct {
+        inline fn u(v: i16) u32 { return @bitCast(@as(i32, v)); }
+    }.u;
     _ = xcb.xcb_configure_window(
         conn, win,
         xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
             xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT,
-        &[_]u32{
-            @bitCast(@as(i32, rect.x)),
-            @bitCast(@as(i32, rect.y)),
-            rect.width,
-            rect.height,
-        },
+        &[_]u32{ coord(rect.x), coord(rect.y), rect.width, rect.height },
     );
 }
 
@@ -156,10 +154,11 @@ pub const scale_fallback = struct {
         return if (value.is_percentage) value.value / 100.0 else -value.value;
     }
     pub fn scaleBorderWidth(value: anytype, reference_dimension: u16) u16 {
-        if (value.is_percentage) {
-            const dim_f: f32 = @floatFromInt(reference_dimension);
-            return @intFromFloat(@max(0.0, @round((value.value / 100.0) * 0.5 * dim_f)));
-        } else return @intFromFloat(@max(0.0, @round(value.value)));
+        const v: f32 = if (value.is_percentage)
+            (value.value / 100.0) * 0.5 * @as(f32, @floatFromInt(reference_dimension))
+        else
+            value.value;
+        return @intFromFloat(@max(0.0, @round(v)));
     }
 };
 
@@ -215,10 +214,11 @@ pub fn fetchPropertyToBuffer(
         null,
     ) orelse return null;
     defer std.c.free(reply);
-    if (reply.*.format != 8 or reply.*.value_len == 0) return null;
+    const r = reply.*;
+    if (r.format != 8 or r.value_len == 0) return null;
 
     buffer.clearRetainingCapacity();
     const value_ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
-    try buffer.appendSlice(allocator, value_ptr[0..@intCast(reply.*.value_len)]);
+    try buffer.appendSlice(allocator, value_ptr[0..@intCast(r.value_len)]);
     return buffer.items;
 }

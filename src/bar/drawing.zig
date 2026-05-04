@@ -9,7 +9,7 @@ const debug   = @import("debug");
 
 const c = @import("render");
 
-// Public types 
+// Public types
 
 pub const VisualInfo = struct {
     visual_type: ?*core.xcb.xcb_visualtype_t,
@@ -18,13 +18,12 @@ pub const VisualInfo = struct {
 
 /// Falls back to the root visual if no matching depth is found.
 pub fn findVisualByDepth(screen: *core.xcb.xcb_screen_t, depth: u8) VisualInfo {
-    var depth_iter = core.xcb.xcb_screen_allowed_depths_iterator(screen);
-    while (depth_iter.rem > 0) : (core.xcb.xcb_depth_next(&depth_iter)) {
-        if (depth_iter.data.*.depth != depth) continue;
-        const visual_iter = core.xcb.xcb_depth_visuals_iterator(depth_iter.data);
-        if (visual_iter.rem == 0) continue;
-        const vt = visual_iter.data;
-        return .{ .visual_type = vt, .visual_id = vt.*.visual_id };
+    var di = core.xcb.xcb_screen_allowed_depths_iterator(screen);
+    while (di.rem > 0) : (core.xcb.xcb_depth_next(&di)) {
+        if (di.data.*.depth != depth) continue;
+        const vi = core.xcb.xcb_depth_visuals_iterator(di.data);
+        if (vi.rem == 0) continue;
+        return .{ .visual_type = vi.data, .visual_id = vi.data.*.visual_id };
     }
     return .{ .visual_type = null, .visual_id = screen.root_visual };
 }
@@ -37,7 +36,7 @@ var font_conversion_cache: ?std.StringHashMap([]const u8) = null;
 /// Pango font string used when no fonts are configured or a named font fails to load.
 const fallbackFont = "monospace:size=10";
 
-// FontState 
+// FontState
 
 pub const FontState = struct {
     allocator:         std.mem.Allocator,
@@ -51,8 +50,7 @@ pub const FontState = struct {
 
     pub fn loadFont(self: *FontState, font_name: []const u8) !void {
         if (self.current_font_desc) |desc| c.pango_font_description_free(desc);
-        const pango_name   = try convertFontName(self.allocator, font_name);
-        const pango_name_z = try self.allocator.dupeZ(u8, pango_name);
+        const pango_name_z = try self.allocator.dupeZ(u8, try convertFontName(self.allocator, font_name));
         defer self.allocator.free(pango_name_z);
         self.current_font_desc = c.pango_font_description_from_string(pango_name_z.ptr);
         if (self.current_font_desc == null) {
@@ -66,7 +64,6 @@ pub const FontState = struct {
     /// Unified entry point shared with MeasureContext so callers need no font-count branch.
     pub fn loadFonts(self: *FontState, font_names: []const []const u8) !void {
         if (font_names.len == 0) return self.loadFont(fallbackFont);
-        if (font_names.len == 1) return self.loadFont(font_names[0]);
         const font_list = try std.mem.join(self.allocator, ",", font_names);
         defer self.allocator.free(font_list);
         try self.loadFont(font_list);
@@ -86,10 +83,15 @@ pub const FontState = struct {
     }
 };
 
-// DrawContext 
+// DrawContext
 
 inline fn unpackColorChannel(color: u32, shift: u5) f64 {
     return @as(f64, @floatFromInt((color >> shift) & 0xFF)) / 255.0;
+}
+
+/// Converts Pango units (1/1024 px) to floating-point pixels.
+inline fn pangoToF64(pango_units: c_int) f64 {
+    return @as(f64, @floatFromInt(pango_units)) / @as(f64, @floatFromInt(c.PANGO_SCALE));
 }
 
 pub const DrawContext = struct {
@@ -132,6 +134,14 @@ pub const DrawContext = struct {
     /// Actual pixel depth of the offscreen pixmap — 32 for ARGB, screen root_depth otherwise.
     depth:       u8                           = 24,
 
+    /// Checks an XCB void-cookie; frees the error and returns GCCreationFailed on failure.
+    inline fn checkXcbCookie(conn: *core.xcb.xcb_connection_t, cookie: core.xcb.xcb_void_cookie_t) !void {
+        if (core.xcb.xcb_request_check(conn, cookie)) |err| {
+            std.c.free(err);
+            return error.GCCreationFailed;
+        }
+    }
+
     /// All drawing targets the off-screen pixmap; call blit() to copy to the window atomically.
     pub fn initWithVisual(
         allocator:    std.mem.Allocator,
@@ -150,10 +160,7 @@ pub const DrawContext = struct {
         const setup  = core.xcb.xcb_get_setup(conn);
         const screen = core.xcb.xcb_setup_roots_iterator(setup).data;
 
-        const visual_type = if (visual_id) |vid|
-            findVisualType(conn, vid) orelse getDefaultVisualType(screen)
-        else
-            getDefaultVisualType(screen);
+        const visual_type = resolveVisualType(conn, screen, visual_id);
 
         const depth: u8 = if (is_argb) 32 else core.xcb.XCB_COPY_FROM_PARENT;
 
@@ -201,14 +208,8 @@ pub const DrawContext = struct {
         dc.copy_gc = core.xcb.xcb_generate_id(conn);
         const gc_cookie      = core.xcb.xcb_create_gc_checked(conn, dc.gc,      pixmap, 0, null);
         const copy_gc_cookie = core.xcb.xcb_create_gc_checked(conn, dc.copy_gc, window, 0, null);
-        if (core.xcb.xcb_request_check(conn, gc_cookie)) |err| {
-            std.c.free(err);
-            return error.GCCreationFailed;
-        }
-        if (core.xcb.xcb_request_check(conn, copy_gc_cookie)) |err| {
-            std.c.free(err);
-            return error.GCCreationFailed;
-        }
+        try checkXcbCookie(conn, gc_cookie);
+        try checkXcbCookie(conn, copy_gc_cookie);
 
         return dc;
     }
@@ -263,8 +264,7 @@ pub const DrawContext = struct {
     // baseline per-run (e.g. a CJK glyph triggering Noto Sans CJK), so caching it
     // would silently misalign text in multi-font configurations.
     inline fn moveToTextBaseline(self: *DrawContext, x: u16, y: u16) void {
-        const baseline = @as(f64, @floatFromInt(c.pango_layout_get_baseline(self.font.pango_layout)))
-            / @as(f64, @floatFromInt(c.PANGO_SCALE));
+        const baseline = pangoToF64(c.pango_layout_get_baseline(self.font.pango_layout));
         c.cairo_move_to(self.ctx, @floatFromInt(x), @as(f64, @floatFromInt(y)) - baseline);
     }
 
@@ -304,12 +304,10 @@ pub const DrawContext = struct {
 
         var ink_rect: c.PangoRectangle = undefined;
         c.pango_layout_get_extents(self.font.pango_layout, &ink_rect, null);
-        const ink_top_px: f64 = @as(f64, @floatFromInt(ink_rect.y)) /
-                                 @as(f64, @floatFromInt(c.PANGO_SCALE));
 
         self.setColor(color);
         c.cairo_move_to(self.ctx, @floatFromInt(x),
-            @as(f64, @floatFromInt(y_top)) - ink_top_px);
+            @as(f64, @floatFromInt(y_top)) - pangoToF64(ink_rect.y));
         c.pango_cairo_show_layout(self.ctx, self.font.pango_layout);
     }
 
@@ -360,57 +358,29 @@ pub const DrawContext = struct {
 
     pub fn getMetrics(self: *DrawContext) struct { i16, i16 } { return self.font.getMetrics(); }
 
-    /// Does NOT call xcb_flush — the event loop's end-of-batch flush covers event-driven
-    /// paths; timer-driven paths (clock tick, cursor blink) must flush explicitly.
-    pub fn blit(self: *DrawContext) void {
-        c.cairo_surface_flush(self.surface);
-        if (self.copy_gc == 0) return;
-        _ = core.xcb.xcb_copy_area(
-            self.conn,
-            self.offscreen_pixmap,
-            self.window,
-            self.copy_gc,
-            0, 0, 0, 0,
-            self.width, self.height,
-        );
+    inline fn xcbCopyArea(self: *DrawContext, src_x: u16, dst_x: u16, w: u16) void {
+        _ = core.xcb.xcb_copy_area(self.conn, self.offscreen_pixmap, self.window, self.copy_gc,
+            @intCast(src_x), 0, @intCast(dst_x), 0, w, self.height);
     }
 
     /// cairo_surface_flush only — no xcb_copy_area, no xcb_flush.
     /// Safe inside xcb_grab_server; pair with blitQueued() + ungrabAndFlush().
-    pub fn renderOnly(self: *DrawContext) void {
-        c.cairo_surface_flush(self.surface);
-        // Deliberately no xcb_copy_area and no xcb_flush here.
-    }
+    pub fn renderOnly(self: *DrawContext) void { c.cairo_surface_flush(self.surface); }
 
     /// Enqueues xcb_copy_area without flushing; safe inside xcb_grab_server.
     /// The request is sent with all queued geometry changes when ungrabAndFlush() fires.
     pub fn blitQueued(self: *DrawContext) void {
-        if (self.copy_gc == 0) return;
-        _ = core.xcb.xcb_copy_area(
-            self.conn,
-            self.offscreen_pixmap,
-            self.window,
-            self.copy_gc,
-            0, 0, 0, 0,
-            self.width, self.height,
-        );
-        // No xcb_flush — caller owns the flush (ungrabAndFlush).
+        if (self.copy_gc != 0) self.xcbCopyArea(0, 0, self.width);
     }
+
+    /// Does NOT call xcb_flush — the event loop's end-of-batch flush covers event-driven
+    /// paths; timer-driven paths (clock tick, cursor blink) must flush explicitly.
+    pub fn blit(self: *DrawContext) void { self.renderOnly(); self.blitQueued(); }
 
     /// Unlike blit(), calls xcb_flush immediately. Use on timer-driven paths where
     /// no event-loop flush is coming. Does NOT call cairo_surface_flush.
     pub fn blitAndFlush(self: *DrawContext, x: u16, w: u16) void {
-        if (self.copy_gc == 0) return;
-        _ = core.xcb.xcb_copy_area(
-            self.conn,
-            self.offscreen_pixmap,
-            self.window,
-            self.copy_gc,
-            @intCast(x), 0,
-            @intCast(x), 0,
-            w, self.height,
-        );
-        _ = core.xcb.xcb_flush(self.conn);
+        if (self.copy_gc != 0) { self.xcbCopyArea(x, x, w); _ = core.xcb.xcb_flush(self.conn); }
     }
 
     pub fn baselineY(self: *DrawContext, bar_height: u16) u16 {
@@ -560,9 +530,7 @@ pub const CarouselPixmap = struct {
             unpackColorChannel(fg, 0),
             1.0);
 
-        const bl = @as(f64, @floatFromInt(c.pango_layout_get_baseline(layout)))
-                 / @as(f64, @floatFromInt(c.PANGO_SCALE));
-        const text_y = @as(f64, @floatFromInt(baseline)) - bl;
+        const text_y = @as(f64, @floatFromInt(baseline)) - pangoToF64(c.pango_layout_get_baseline(layout));
 
         // Copy A
         c.cairo_move_to(ctx, @as(f64, @floatFromInt(left_pad)), text_y);
@@ -600,29 +568,29 @@ fn createPangoLayout(ctx: *c.cairo_t, dpi: f32) !*c.PangoLayout {
     return layout;
 }
 
-/// Returns null if not found; caller should fall back to `getDefaultVisualType`.
-fn findVisualType(conn: *core.xcb.xcb_connection_t, visual_id: u32) ?*core.xcb.xcb_visualtype_t {
-    const setup = core.xcb.xcb_get_setup(conn);
-    var screen_iter = core.xcb.xcb_setup_roots_iterator(setup);
-    while (screen_iter.rem > 0) : (core.xcb.xcb_screen_next(&screen_iter)) {
-        var depth_iter = core.xcb.xcb_screen_allowed_depths_iterator(screen_iter.data);
-        while (depth_iter.rem > 0) : (core.xcb.xcb_depth_next(&depth_iter)) {
-            var visual_iter = core.xcb.xcb_depth_visuals_iterator(depth_iter.data);
-            while (visual_iter.rem > 0) : (core.xcb.xcb_visualtype_next(&visual_iter)) {
-                if (visual_iter.data.*.visual_id == visual_id) return visual_iter.data;
+/// Returns the visual matching `visual_id` across all screens, or falls back to
+/// the first visual on `screen`. Panics if the X server has no visuals at all.
+fn resolveVisualType(
+    conn:      *core.xcb.xcb_connection_t,
+    screen:    *core.xcb.xcb_screen_t,
+    visual_id: ?u32,
+) *core.xcb.xcb_visualtype_t {
+    if (visual_id) |vid| {
+        var si = core.xcb.xcb_setup_roots_iterator(core.xcb.xcb_get_setup(conn));
+        while (si.rem > 0) : (core.xcb.xcb_screen_next(&si)) {
+            var di = core.xcb.xcb_screen_allowed_depths_iterator(si.data);
+            while (di.rem > 0) : (core.xcb.xcb_depth_next(&di)) {
+                var vi = core.xcb.xcb_depth_visuals_iterator(di.data);
+                while (vi.rem > 0) : (core.xcb.xcb_visualtype_next(&vi))
+                    if (vi.data.*.visual_id == vid) return vi.data;
             }
         }
     }
-    return null;
-}
-
-/// Unconditional fallback when a specific visual ID cannot be located.
-/// Panics if the X server reports zero visuals (cannot occur on a real server).
-fn getDefaultVisualType(screen: *core.xcb.xcb_screen_t) *core.xcb.xcb_visualtype_t {
-    var depth_iter = core.xcb.xcb_screen_allowed_depths_iterator(screen);
-    while (depth_iter.rem > 0) : (core.xcb.xcb_depth_next(&depth_iter)) {
-        const visual_iter = core.xcb.xcb_depth_visuals_iterator(depth_iter.data);
-        if (visual_iter.rem > 0) return visual_iter.data;
+    // Fall back to the first available visual on screen; panic if there are none.
+    var di = core.xcb.xcb_screen_allowed_depths_iterator(screen);
+    while (di.rem > 0) : (core.xcb.xcb_depth_next(&di)) {
+        const vi = core.xcb.xcb_depth_visuals_iterator(di.data);
+        if (vi.rem > 0) return vi.data;
     }
     @panic("X server reported zero visuals — cannot create a drawing context");
 }

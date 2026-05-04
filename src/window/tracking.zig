@@ -19,7 +19,7 @@ pub const Tracking = struct {
     /// silently dropped from tiling and workspace membership with an error log.
     ///
     /// If 64 is regularly too small for your workflow, increase this value and
-    /// rebuild.  The struct is stack-allocated, so the cost is 4 × capacity bytes
+    /// rebuild.  The struct is stack-allocated, so the cost is 4 x capacity bytes
     /// per Workspace instance — 256 bytes at capacity = 64, 512 bytes at 128.
     const capacity = 64;
 
@@ -111,22 +111,20 @@ pub const Tracking = struct {
 
         var seen = std.StaticBitSet(capacity).initEmpty();
         for (new_order) |w| {
-            const slot = std.mem.indexOfScalar(u32, self.buf[0..self.len], w);
-            if (slot == null) {
+            const idx = std.mem.indexOfScalar(u32, self.buf[0..self.len], w) orelse {
                 std.log.err(
                     "tracking: reorder: window 0x{x} not in current list",
                     .{w},
                 );
-                std.debug.assert(slot != null);
+                std.debug.assert(false);
                 return;
-            }
-            const idx = slot.?;
+            };
             if (seen.isSet(idx)) {
                 std.log.err(
                     "tracking: reorder: duplicate window 0x{x} in new_order",
                     .{w},
                 );
-                std.debug.assert(!seen.isSet(idx));
+                std.debug.assert(false);
                 return;
             }
             seen.set(idx);
@@ -199,8 +197,8 @@ pub fn setCurrentWorkspace(ws: u8) void {
 pub fn registerWindow(win: u32, ws: u8) !void {
     if (!g_initialized) return;
     std.debug.assert(ws < 64);
-    for (g_windows.items) |e| { if (e.win == win) return; }
-    try g_windows.append(g_alloc, .{ .win = win, .mask = @as(u64, 1) << @intCast(ws) });
+    if (isManaged(win)) return;
+    try g_windows.append(g_alloc, .{ .win = win, .mask = workspaceBit(ws) });
 }
 
 /// Remove `win` from the tracking list.
@@ -319,7 +317,7 @@ pub inline fn getWorkspaceForWindow(win: u32) ?u8 {
 
 pub inline fn isWindowOnWorkspace(win: u32, ws_idx: u8) bool {
     const mask = getWindowWorkspaceMask(win) orelse return false;
-    return (mask >> @intCast(ws_idx)) & 1 != 0;
+    return mask & workspaceBit(ws_idx) != 0;
 }
 
 pub inline fn isOnCurrentWorkspace(win: u32) bool {
@@ -343,9 +341,9 @@ pub fn isOnCurrentWorkspaceAndVisible(win: u32) bool {
 ///
 /// Declared as a plain fn so minimize.zig can store it as a function pointer.
 pub fn firstNonMinimized(windows: []const u32) ?u32 {
+    if (comptime !build.has_minimize) return if (windows.len > 0) windows[0] else null;
     for (windows) |win| {
-        const is_min = if (build.has_minimize) minimize.isMinimized(win) else false;
-        if (!is_min) return win;
+        if (!minimize.isMinimized(win)) return win;
     }
     return null;
 }

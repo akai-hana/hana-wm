@@ -99,7 +99,7 @@ fn calcDpiFromGeometry(screen: *xcb.xcb_screen_t) f32 {
 /// within SNAP_THRESHOLD of it to avoid rendering at odd intermediate DPIs.
 fn snapToCommonDpi(dpi: f32) f32 {
     var closest = COMMON_DPI_TABLE[0];
-    for (COMMON_DPI_TABLE[1..]) |entry| {
+    for (COMMON_DPI_TABLE) |entry| {
         if (@abs(dpi - entry) < @abs(dpi - closest)) closest = entry;
     }
     if (@abs(dpi - closest) / closest < SNAP_THRESHOLD) {
@@ -125,28 +125,27 @@ fn calcScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
 /// Priority: Xft.dpi from X resources -> geometry calculation -> resolution-based scaling.
 pub fn detectDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) DpiInfo {
     if (dpi_cache) |cached| return cached;
-    const result = detectDpiUncached(conn, screen);
-    dpi_cache = result;
-    return result;
-}
 
-/// Performs the actual DPI detection without consulting or updating the cache.
-fn detectDpiUncached(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) DpiInfo {
     if (readXftDpi(conn, screen)) |xft_dpi| {
         debug.info("Using DPI from X resources (Xft.dpi): {d:.1}", .{xft_dpi});
-        return DpiInfo.fromDpi(snapToCommonDpi(xft_dpi));
+        dpi_cache = .{ .dpi = snapToCommonDpi(xft_dpi) };
+        return dpi_cache.?;
     }
 
-    var geometry_dpi = calcDpiFromGeometry(screen);
-    if (geometry_dpi < 50.0 or geometry_dpi > 300.0) {
-        debug.warn("Calculated DPI {d:.1} seems unreasonable, using resolution-based scaling", .{geometry_dpi});
-        geometry_dpi = BASELINE_DPI * calcScaleFromResolution(screen);
-        debug.info("Using resolution-based DPI: {d:.1}", .{geometry_dpi});
-    } else {
-        debug.info("Using geometry-calculated DPI: {d:.1}", .{geometry_dpi});
-    }
+    const geometry_dpi = blk: {
+        const raw = calcDpiFromGeometry(screen);
+        if (raw < 50.0 or raw > 300.0) {
+            debug.warn("Calculated DPI {d:.1} seems unreasonable, using resolution-based scaling", .{raw});
+            const scaled = BASELINE_DPI * calcScaleFromResolution(screen);
+            debug.info("Using resolution-based DPI: {d:.1}", .{scaled});
+            break :blk scaled;
+        }
+        debug.info("Using geometry-calculated DPI: {d:.1}", .{raw});
+        break :blk raw;
+    };
 
-    return DpiInfo.fromDpi(snapToCommonDpi(geometry_dpi));
+    dpi_cache = .{ .dpi = snapToCommonDpi(geometry_dpi) };
+    return dpi_cache.?;
 }
 
 /// Scales an integer value by `scale_factor`, rounding to the nearest integer.
@@ -168,11 +167,9 @@ pub fn scaleToInt(comptime T: type, base_value: f32, scale_factor: f32) T {
 /// excluded — applying it would double-scale on HiDPI displays.
 /// Absolute pixel values are screen-independent and used as-is.
 pub fn scaleBorderWidth(value: parser.ScalableValue, reference_dimension: u16) u16 {
-    if (value.is_percentage) {
-        const dim_f: f32 = @floatFromInt(reference_dimension);
-        return @intFromFloat(@max(0.0, @round((value.value / 100.0) * 0.5 * dim_f)));
-    }
-    return @intFromFloat(@max(0.0, @round(value.value)));
+    const dim_f: f32 = @floatFromInt(reference_dimension);
+    const raw = if (value.is_percentage) (value.value / 100.0) * 0.5 * dim_f else value.value;
+    return @intFromFloat(@max(0.0, @round(raw)));
 }
 
 /// Returns the master width as a fraction (0.0–1.0) for percentage values,
@@ -186,11 +183,9 @@ pub fn scaleMasterWidth(value: parser.ScalableValue) f32 {
 /// Percentage values are relative to FONT_BASELINE_HEIGHT (1080px) rather than the
 /// screen baseline, so font sizes degrade more gracefully on smaller screens.
 pub fn scaleFontSize(value: parser.ScalableValue, screen: *xcb.xcb_screen_t) u16 {
-    if (value.is_percentage) {
-        const screen_height: f32 = @floatFromInt(screen.height_in_pixels);
-        return @intFromFloat(@max(1.0, @round(value.value * (screen_height / FONT_BASELINE_HEIGHT))));
-    }
-    return @intFromFloat(@max(1.0, @round(value.value)));
+    const screen_height: f32 = @floatFromInt(screen.height_in_pixels);
+    const raw = if (value.is_percentage) value.value * (screen_height / FONT_BASELINE_HEIGHT) else value.value;
+    return @intFromFloat(@max(1.0, @round(raw)));
 }
 
 /// Converts a scalable bar height value to pixels, clamped to BAR_MIN_HEIGHT_PX.
@@ -208,24 +203,19 @@ pub fn scaleBarHeight(value: parser.ScalableValue, screen_height: u16) u16 {
 /// Fallback refresh rate used when RandR is unavailable or returns an invalid value.
 pub const default_hz: f64 = 60.0;
 
-const HzCache = struct {
-    hz:       f64  = default_hz,
-    is_ready: bool = false,
-};
-var hz_cache: HzCache = .{};
+var hz_cache: ?f64 = null;
 
 /// Detect and cache the monitor refresh rate.
 /// Subsequent calls are a single branch and a return — zero X11 I/O.
 pub fn ensureRefreshRateDetected(conn: *xcb.xcb_connection_t) void {
-    if (hz_cache.is_ready) return;
-    hz_cache.is_ready = true;
-    hz_cache.hz       = detectRefreshRate(conn);
+    if (hz_cache != null) return;
+    hz_cache = detectRefreshRate(conn);
 }
 
 /// Returns the detected monitor refresh rate in Hz.
 /// Returns `default_hz` (60.0) when called before `ensureRefreshRateDetected`.
 pub fn getDetectedRateHz() f64 {
-    return if (hz_cache.is_ready) hz_cache.hz else default_hz;
+    return hz_cache orelse default_hz;
 }
 
 /// Returns the root window ID of the first screen, or 0 if no screens are available.
@@ -279,11 +269,12 @@ fn detectRefreshRateViaCrtc(conn: *xcb.xcb_connection_t, root: u32) ?f64 {
             if (m.id != mode_id) continue;
             const htotal: u64 = m.htotal;
             const vtotal: u64 = m.vtotal;
-            if (htotal == 0 or vtotal == 0) break;
-            const hz: f64 = @as(f64, @floatFromInt(m.dot_clock)) /
-                @as(f64, @floatFromInt(htotal * vtotal));
-            if (hz > best_hz) best_hz = hz;
-            break;
+            if (htotal != 0 and vtotal != 0) {
+                const hz: f64 = @as(f64, @floatFromInt(m.dot_clock)) /
+                    @as(f64, @floatFromInt(htotal * vtotal));
+                if (hz > best_hz) best_hz = hz;
+            }
+            break; // found the mode entry regardless; stop searching
         }
     }
     return if (best_hz > 0.0) best_hz else null;

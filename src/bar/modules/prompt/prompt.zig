@@ -287,7 +287,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     }
 
     // Tab: accept ghost completion
-    if (sym == vim.XK_Tab and g.vim_state.mode == .insert) {
+    if (sym == @intFromEnum(vim.XK.Tab) and g.vim_state.mode == .insert) {
         const n_ghost: usize = if (g.ghost_len > 0 and g.vim_state.cursor == g.vim_state.len)
             @min(g.ghost_len, g.vim_state.max_input - 1 - g.vim_state.len)
         else 0;
