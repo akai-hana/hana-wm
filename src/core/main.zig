@@ -50,17 +50,15 @@ pub fn main() !void {
     if (build.has_scale)
         core.config.bar.scaled_font_size = scale.scaleFontSize(core.config.bar.font_size, x.screen);
 
-    // Defers run in LIFO order
-
-    try initGlobalState(x.conn);
+    try utils.initAtomCache(x.conn);
     //TODO: make sure this doesn't need a defer
 
     try events.setupSignalPipe();
     defer events.deinitSignalPipe();
 
-    try events.grabKeybindings();
-    try initModules();
-    defer deinitModules();
+    events.grabKeybindings();
+    try window.init(core.alloc);
+    defer window.deinit();
 
     initBar();
     defer bar.deinit();
@@ -88,7 +86,7 @@ fn connectToX() !X {
     // Pass null for both display and screen number: XCB reads $DISPLAY and
     // selects screen 0. The screen number parameter is a legacy X11 concept —
     // modern multi-monitor setups use a single unified screen via Xrandr/Xinerama.
-    const conn = xcb.xcb_connect(null, null).?;
+    const conn = xcb.xcb_connect(null, null) orelse unreachable;
 
     if (xcb.xcb_connection_has_error(conn) != 0) {
         debug.err("X11 connection failed", .{});
@@ -113,10 +111,6 @@ fn connectToX() !X {
     return .{ .conn = conn, .screen = screen, .root = screen.*.root };
 }
 
-const BAR_NOT_FOUND_MSG =
-    "Bar not found; either purposefully removed by user, " ++
-    "or bar.zig was renamed/moved from its default path (src/bar/bar.zig).";
-
 /// Initializes the bar, logging the outcome if it is disabled or not found.
 ///
 /// if/else used instead of switch because bar.init's error set is inferred/anyerror,
@@ -131,19 +125,4 @@ fn initBar() void {
             debug.err("Bar init failed: {}", .{err});
         }
     };
-}
-
-/// Initializes all WM modules that require explicit lifecycle management.
-fn initModules() !void {
-    try window.init(core.alloc);
-}
-
-/// Tears down all WM modules in reverse init order.
-fn deinitModules() void {
-    window.deinit();
-}
-
-/// Initializes global WM state: X atom cache.
-fn initGlobalState(conn: *xcb.xcb_connection_t) !void {
-    try utils.initAtomCache(conn);
 }

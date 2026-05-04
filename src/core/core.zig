@@ -9,19 +9,21 @@ const types     = @import("types");
 // Centralised to avoid repeated @cImport translation across compilation units.
 pub const xcb = @cImport(@cInclude("xcb/xcb.h"));
 
-// X11 keysym constants
-// Values match <X11/keysymdef.h> (stable since X11R1).
-pub const XK_BackSpace : xcb.xcb_keysym_t = 0xff08;
-pub const XK_Tab       : xcb.xcb_keysym_t = 0xff09;
-pub const XK_Return    : xcb.xcb_keysym_t = 0xff0d;
-pub const XK_Escape    : xcb.xcb_keysym_t = 0xff1b;
-pub const XK_Delete    : xcb.xcb_keysym_t = 0xffff;
-pub const XK_Left      : xcb.xcb_keysym_t = 0xff51;
-pub const XK_Up        : xcb.xcb_keysym_t = 0xff52;
-pub const XK_Right     : xcb.xcb_keysym_t = 0xff53;
-pub const XK_Down      : xcb.xcb_keysym_t = 0xff54;
-pub const XK_Home      : xcb.xcb_keysym_t = 0xff50;
-pub const XK_End       : xcb.xcb_keysym_t = 0xff57;
+/// X11 keysym constants. Values match <X11/keysymdef.h> (stable since X11R1).
+/// Cast to xcb_keysym_t with `@intFromEnum`.
+pub const XK = enum(u32) {
+    BackSpace = 0xff08,
+    Tab       = 0xff09,
+    Return    = 0xff0d,
+    Escape    = 0xff1b,
+    Delete    = 0xffff,
+    Left      = 0xff51,
+    Up        = 0xff52,
+    Right     = 0xff53,
+    Down      = 0xff54,
+    Home      = 0xff50,
+    End       = 0xff57,
+};
 
 /// Equivalent to xcb.xcb_window_t (uint32_t); named for readability.
 pub const WindowId = u32;
@@ -37,20 +39,22 @@ pub const WindowGeometry = struct {
 
 /// Focus suppression reason for context-aware behavior.
 pub const FocusSuppressReason = enum {
-    none,             // normal operation: focus follows mouse
-    window_spawn,     // just spawned a window: don't let cursor steal focus
-    tiling_operation, // currently tiling: don't let cursor steal focus
+    /// Normal operation: focus follows mouse.
+    none,
+    /// Just spawned a window — suppress cursor focus steal.
+    window_spawn,
+    /// Tiling in progress — suppress cursor focus steal.
+    tiling_operation,
 };
 
 /// DPI and scale factor detected at startup.
 /// Defined here so modules can reference the type without importing scale
 pub const DpiInfo = struct {
-    dpi:          f32,
-    scale_factor: f32,
+    dpi: f32,
 
-    /// Computes scale_factor relative to BASELINE_DPI.
-    pub fn fromDpi(dpi: f32) DpiInfo {
-        return .{ .dpi = dpi, .scale_factor = dpi / constants.BASELINE_DPI };
+    /// Computes scale factor relative to BASELINE_DPI on demand.
+    pub fn scaleFactor(self: DpiInfo) f32 {
+        return self.dpi / constants.BASELINE_DPI;
     }
 };
 
@@ -61,7 +65,7 @@ pub var screen:   *xcb.xcb_screen_t    = undefined;
 pub var root:     WindowId             = undefined;
 pub var alloc:    std.mem.Allocator    = undefined;
 pub var config:   types.Config         = undefined;
-pub var dpi_info: DpiInfo              = .{ .dpi = 96.0, .scale_factor = 1.0 };
+pub var dpi_info: DpiInfo              = .{ .dpi = 96.0 };
 
 /// Returns true if the XCB connection is open and error-free.
 pub fn isConnValid() bool {

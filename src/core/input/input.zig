@@ -25,12 +25,25 @@ const focus    = @import("focus");
 
 const fullscreen = if (build.has_fullscreen) @import("fullscreen");
 const minimize   = if (build.has_minimize) @import("minimize");
-const workspaces = if (build.has_workspaces) @import("workspaces");
 const tiling     = if (build.has_tiling) @import("tiling");
+
+// Stub struct keeps executeWorkspaceAction guard-free; the comptime if-else
+// means stub methods are never analyzed when has_workspaces = true, matching
+// the same pattern used by `drag`, `bar`, and `prompt` below.
+const workspaces = if (build.has_workspaces) @import("workspaces") else struct {
+    pub fn switchTo(_: u8) void {}
+    pub fn moveWindowTo(_: u32, _: u8) !void {}
+    pub fn moveWindowExclusive(_: u32, _: u8) void {}
+    pub fn tagToggle(_: u32, _: u8, _: bool) void {}
+    pub fn switchToAll() void {}
+    pub fn moveWindowToAll(_: u32) void {}
+    pub fn tagToggleAll(_: u32) void {}
+};
+
 const drag = if (build.has_drag) @import("drag") else struct {
-    pub fn isDragging()                          bool { return false; }
-    pub fn stopDrag()                            void {}
-    pub fn updateDrag(_: i16, _: i16)            void {}
+    pub fn isDragging()                              bool { return false; }
+    pub fn stopDrag()                                void {}
+    pub fn updateDrag(_: i16, _: i16)               void {}
     pub fn startDrag(_: u32, _: u8, _: i16, _: i16) void {}
 };
 
@@ -49,34 +62,7 @@ const prompt = if (build.has_bar and build.has_prompt) @import("prompt") else st
     pub fn toggle() void {}
 };
 
-/// Returns the workspaces.State pointer, or null when workspaces are compiled out.
-fn getWsState() ?*workspaces.State {
-    return if (build.has_workspaces) workspaces.getState() else null;
-}
-inline fn switchToWs(ws: u8) void {
-    if (build.has_workspaces) workspaces.switchTo(ws);
-}
-inline fn moveWindowToWs(win: u32, ws: u8) !void {
-    if (build.has_workspaces) try workspaces.moveWindowTo(win, ws);
-}
-inline fn wsMoveWindowExclusive(win: u32, ws: u8) void {
-    if (build.has_workspaces) workspaces.moveWindowExclusive(win, ws);
-}
-inline fn wsTagToggle(win: u32, ws: u8, p: bool) void {
-    if (build.has_workspaces) workspaces.tagToggle(win, ws, p);
-}
-inline fn wsSwitchToAll() void {
-    if (build.has_workspaces) workspaces.switchToAll();
-}
-inline fn wsMoveWindowToAll(win: u32) void {
-    if (build.has_workspaces) workspaces.moveWindowToAll(win);
-}
-inline fn wsTagToggleAll(win: u32) void {
-    if (build.has_workspaces) workspaces.tagToggleAll(win);
-}
-
-
-// Constants 
+// Constants
 
 const mouse_button_left:        u8 = 1;
 const mouse_button_middle:      u8 = 2;
@@ -89,7 +75,7 @@ const mouse_buttons = [_]u8{
     mouse_button_scroll_up, mouse_button_scroll_down,
 };
 
-// XKB state 
+// XKB state
 
 var xkb_state: ?xkbcommon.XkbState = null;
 
@@ -99,20 +85,19 @@ pub fn initXkb(conn: *xcb.xcb_connection_t) !void {
     xkb_state = try xkbcommon.XkbState.init(conn);
 }
 
-/// Tears down XKB state.
-/// Must be called after all other deinit steps.
+/// Tears down XKB state. Must be called after all other deinit steps.
 pub fn deinitXkb() void {
     if (xkb_state) |*s| s.deinit();
     xkb_state = null;
 }
 
-/// Returns a pointer to the module-owned XkbState, 
+/// Returns a pointer to the module-owned XkbState,
 /// used by events.zig during config reloads.
 pub fn getXkbState() *xkbcommon.XkbState {
     return &xkb_state.?;
 }
 
-// Grab setup 
+// Grab setup
 
 /// Grabs mouse buttons on the root window and applies the user's cursor theme.
 pub fn setup(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t, root: u32) void {
@@ -122,7 +107,6 @@ pub fn setup(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t, root: u32) 
 
 /// Grabs Super+Button{1,2,3} on the root window for all LOCK_MODIFIERS
 /// combinations (NumLock, CapsLock, ScrollLock, and their combinations).
-/// Button1 = move, Button3 = resize, Button2 = config-driven mouse binds.
 pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
     for (mouse_buttons) |button| {
         for (constants.LOCK_MODIFIERS) |lock| {
@@ -139,21 +123,19 @@ pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
     _ = xcb.xcb_flush(conn);
 }
 
-// Event handlers 
+// Event handlers
 
 pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     focus.setLastEventTime(event.time);
 
-    const mods = utils.normalizeModifiers(event.state);
+    const mods   = utils.normalizeModifiers(event.state);
     const keysym = xkb_state.?.keycodeToKeysym(event.detail);
 
-    // O(1) keybinding dispatch via the persistent (modifiers << 32 | keysym) map
-    // built by config.resolveKeybindings.  Replaces the previous O(n) linear
-    // scan, eliminating up to 50 comparisons per key press.
+    // O(1) dispatch via the persistent (modifiers << 32 | keysym) map built
+    // by config.resolveKeybindings — replaces the former O(n) linear scan.
     const matched: ?*const types.Action = config.lookupKeybinding(mods, keysym);
 
-    // The prompt owns all key input while active; routing (including the
-    // close_window dismiss shortcut) is handled entirely inside it.
+    // The prompt owns all key input while active; routing is handled inside it.
     if (prompt.handlePromptKeypress(event, matched)) return;
 
     debug.info("[KEY] keycode={} state=0x{x} mods=0x{x} keysym=0x{x}",
@@ -167,11 +149,10 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     }
 }
 
-/// Dispatches a priority order button-press event.
+/// Dispatches a priority-ordered button-press event.
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     focus.setLastEventTime(event.time);
 
-    // Ignore clicks on root / unknown windows
     const clicked_window = if (event.child != 0) event.child else event.event;
     const managed_window = window.findManagedWindow(core.conn, clicked_window, tracking.isManaged);
 
@@ -182,38 +163,29 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
 
     const super_held = (event.state & constants.MOD_SUPER) != 0;
 
-    // Scroll-wheel binds (buttons 4/5) are viewport actions — they don't
-    // target a specific window, so we check them before the managed-window
-    // guard that would otherwise discard events fired over the desktop/bar.
+    // Scroll-wheel binds (buttons 4/5) are viewport actions — check before the
+    // managed-window guard that would otherwise discard desktop/bar events.
     if (super_held and (event.detail == mouse_button_scroll_up or event.detail == mouse_button_scroll_down)) {
-        const mods = utils.normalizeModifiers(event.state);
-        _ = tryConfigMouseBind(mods, event.detail, 0, event.time);
+        _ = tryConfigMouseBind(utils.normalizeModifiers(event.state), event.detail, 0, event.time);
         return;
     }
 
-    // Config-driven mouse binds (Super + Key)
     if (super_held) {
-        const mods = utils.normalizeModifiers(event.state);
-        if (tryConfigMouseBind(mods, event.detail, managed_window, event.time)) return;
+        if (tryConfigMouseBind(utils.normalizeModifiers(event.state), event.detail, managed_window, event.time)) return;
     }
 
-    // Super + Left/Right: Move or Resize
     if (super_held and (event.detail == mouse_button_left or event.detail == mouse_button_right)) {
         drag.startDrag(managed_window, event.detail, event.root_x, event.root_y);
-        releaseGrab(event.time); // Explicitly release and exit
+        releaseGrab(event.time);
         return;
     }
 
-    // Fallback: Any other click focuses and raises the window.
+    // Fallback: any other click focuses and raises the window.
     //
     // The raise must be issued unconditionally here, before setFocus, because
     // setFocus short-circuits when managed_window is already focused_window
-    // (the common case after hover-focus) and never reaches the raise inside
-    // commitFocusTransition.  Without this explicit raise, a window that holds
-    // focus but has been visually covered — by a newly-spawned window, a
-    // floating peer, or any stacking change that bypasses the focus path —
-    // stays buried despite the click.  The double-raise when setFocus also
-    // raises is a no-op from the server's perspective.
+    // and never reaches the raise inside commitFocusTransition. Without this,
+    // a covered window that holds focus stays buried despite the click.
     _ = xcb.xcb_configure_window(core.conn, managed_window,
         xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     focus.setFocus(managed_window, .mouse_click);
@@ -235,16 +207,14 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
         return;
     }
 
-    // Real pointer movement clears any active focus suppression.
     if (focus.getSuppressReason() != .none) focus.setSuppressReason(.none);
 
     // POINTER_MOTION_HINT delivers one event per gesture; re-arm by sending a
-    // QueryPointer. We fire and discard the reply — the server re-arms on
-    // receipt of the request, not the reply, so there's no need to block.
+    // QueryPointer. Fire-and-discard — the server re-arms on receipt, not reply.
     xcb.xcb_discard_reply(core.conn, xcb.xcb_query_pointer(core.conn, core.root).sequence);
 }
 
-// Window operations 
+// Window operations
 
 /// Closes a window gracefully via WM_DELETE_WINDOW (ICCCM §4.1.2.7), falling
 /// back to xcb_destroy_window for clients that don't advertise the protocol.
@@ -254,27 +224,26 @@ fn closeWindow(win: u32) void {
         return;
     }
 
-    const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch return;
-    const delete_atom = utils.getAtomCached("WM_DELETE_WINDOW") catch return;
+    const protocols_atom = utils.getAtomCached("WM_PROTOCOLS")   catch return;
+    const delete_atom    = utils.getAtomCached("WM_DELETE_WINDOW") catch return;
 
     // Zero-initialise: XCB transmits raw bytes, so uninitialised padding
     // would be undefined behaviour on the wire.
     var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
-    event.response_type = xcb.XCB_CLIENT_MESSAGE;
-    event.format = 32;
-    event.window = win;
-    event.type = protocols_atom;
+    event.response_type  = xcb.XCB_CLIENT_MESSAGE;
+    event.format         = 32;
+    event.window         = win;
+    event.type           = protocols_atom;
     event.data.data32[0] = delete_atom;
     event.data.data32[1] = focus.getLastEventTime(); // ICCCM §4.1.7
 
     _ = xcb.xcb_send_event(core.conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
 }
 
-// Action dispatch 
+// Action dispatch
 
-/// Top-level action dispatcher.  Routes each action tag to the appropriate
-/// domain helper.  Only the two error-producing cases (exec and sequence) are
-/// handled here directly; all others delegate to void sub-dispatchers.
+/// Top-level action dispatcher. Routes each action tag to the appropriate
+/// domain helper. Error-producing cases (exec, sequence) are handled directly.
 fn executeAction(action: *const types.Action) !void {
     switch (action.*) {
         // Core
@@ -315,10 +284,8 @@ fn executeAction(action: *const types.Action) !void {
         .toggle_prompt => prompt.toggle(),
 
         // Window focus cycling (dwm-style Mod+k / Mod+j).
-        // After cycling, snap the scroll-layout viewport to the newly focused
-        // window when it is off-screen, so a window reached via keyboard is
-        // always brought into view.  The server grab prevents the compositor
-        // from rendering a partial retile frame when the snap triggers a retile.
+        // Snaps the scroll-layout viewport to the newly focused window when
+        // it is off-screen. The server grab prevents a partial retile frame.
         .focus_next_window => {
             focus.focusNext();
             if (build.has_tiling) withTilingGrab(tiling.snapScrollToFocused);
@@ -335,17 +302,9 @@ fn executeAction(action: *const types.Action) !void {
 fn executeTilingAction(action: *const types.Action) void {
     if (!build.has_tiling) return;
     switch (action.*) {
-        // toggle_floating_window: wrap in a server grab so that the retile,
-        // border sweep, and bar blit all land in one compositor frame.
-        // Previously a naked xcb_flush fired after retileCurrentWorkspace but
-        // before the border sweep, producing a flash where border colors were
-        // wrong for the newly-tiled or newly-floating window.
         .toggle_floating_window => if (focus.getFocused()) |win|
             withTilingGrabAndBordersWin(win, tiling.toggleWindowFloat),
 
-        // Layout and master operations: wrap each retile in a server grab so
-        // the compositor cannot render a partial retile frame.  Consistent with
-        // swap_master which already uses this pattern for the same reason.
         .toggle_layout         => withTilingGrab(tiling.toggleLayout),
         .toggle_layout_reverse => withTilingGrab(tiling.toggleLayoutReverse),
         .cycle_layout_variants => withTilingGrab(tiling.stepLayoutVariant),
@@ -356,10 +315,6 @@ fn executeTilingAction(action: *const types.Action) void {
 
         .swap_master, .swap_master_focus_swap => executeSwapMaster(action),
 
-        // Window move in cycle (dwm-style Mod+Shift+k / Mod+Shift+j).
-        // Wrapped in a server grab matching swap_master: both swap two windows
-        // and retile all others, so without a grab the compositor can render a
-        // partial retile frame between individual configure_window calls.
         .move_window_next => withTilingGrabAndBorders(focus.moveWindowNext),
         .move_window_prev => withTilingGrabAndBorders(focus.moveWindowPrev),
 
@@ -374,17 +329,9 @@ fn executeTilingAction(action: *const types.Action) void {
 fn executeSwapMaster(action: *const types.Action) void {
     _ = xcb.xcb_grab_server(core.conn);
     if (action.* == .swap_master) {
-        // Capture the focused window ID *before* the swap so we can
-        // pass it as defer_configure.  After swapWithMaster() the
-        // focused window is the new master (the growing window); by
-        // deferring its configure_window call to last inside every
-        // column/stack, the shrinking window (old master) fills its new
-        // stack slot before the growing window vacates its old one —
-        // eliminating the one-frame wallpaper gap (Fix 3).
-        //
-        // Use swapWithMasterGetWins so the window list built during the
-        // swap is passed directly into retile, avoiding a redundant
-        // collectWorkspaceWindows scan on this hot path (Issue 3 fix).
+        // Capture the focused window ID before the swap so we can pass it as
+        // defer_configure — the shrinking window fills its new slot before the
+        // growing window vacates its old one, eliminating a one-frame gap.
         const new_master = focus.getFocused();
         if (tiling.swapWithMasterGetWins()) |ws_wins| {
             tiling.retileCurrentWorkspaceDeferredPrebuilt(ws_wins, new_master);
@@ -392,12 +339,8 @@ fn executeSwapMaster(action: *const types.Action) void {
             tiling.retileCurrentWorkspaceDeferred(new_master);
         }
     } else {
-        // For follow-focus: capture focused window, reorder, retile
-        // with deferred configure, then transfer focus — all inside
-        // the grab so the focus border change is part of the same flush.
-        // swapWithMasterFollowFocusGetWins returns the pre-built window
-        // slice alongside the displaced window, eliminating the second
-        // collectWorkspaceWindows call in retile (Issue 3 fix).
+        // follow-focus: capture, reorder, retile deferred, transfer focus —
+        // all inside the grab so the border change is part of the same flush.
         const new_master = focus.getFocused();
         if (tiling.swapWithMasterFollowFocusGetWins()) |result| {
             tiling.retileCurrentWorkspaceDeferredPrebuilt(result.ws_wins, new_master);
@@ -406,43 +349,37 @@ fn executeSwapMaster(action: *const types.Action) void {
             tiling.retileCurrentWorkspaceDeferred(new_master);
         }
     }
-    // Use the async pointer-sync variant: it queues the xcb_query_pointer
-    // cookie without blocking, so no premature XCB buffer flush occurs
-    // inside the grab.  drainPointerSync() in the event loop will
-    // consume the reply and route focus on the next iteration.
+    // Async pointer-sync: queues the cookie without blocking so no premature
+    // flush occurs inside the grab. drainPointerSync() consumes it next loop.
     focus.beginPointerSync();
-    window.updateWorkspaceBorders();
+    window.updateWorkspaceBorders(.full);
     window.markBordersFlushed();
-    // redrawInsideGrab now renders to the off-screen pixmap via the bar
-    // thread (no xcb_flush) and queues xcb_copy_area without flushing.
-    // The blit is sent atomically with configure_window + xcb_ungrab_server
-    // by ungrabAndFlush() below — one compositor frame, no wallpaper flash.
+    // redrawInsideGrab renders to the off-screen pixmap and queues xcb_copy_area
+    // without flushing; ungrabAndFlush sends everything atomically.
     bar.redrawInsideGrab();
     utils.ungrabAndFlush(core.conn);
 }
 
-/// Dispatches workspace-related actions.
+/// Dispatches workspace-related actions. The workspaces stub struct ensures
+/// calls here are always valid regardless of build.has_workspaces.
 fn executeWorkspaceAction(action: *const types.Action) void {
     switch (action.*) {
-        .switch_workspace       => |ws| switchToWs(ws),
+        .switch_workspace       => |ws| workspaces.switchTo(ws),
         .move_to_workspace      => |ws| if (focus.getFocused()) |win|
-            moveWindowToWs(win, ws) catch |e| debug.warnOnErr(e, "move_to_workspace"),
-        .move_window            => |ws| if (focus.getFocused()) |win| wsMoveWindowExclusive(win, ws),
-        .toggle_tag             => |ws| if (focus.getFocused()) |win| wsTagToggle(win, ws, true),
-        .all_workspaces         => wsSwitchToAll(),
-        .move_to_all_workspaces => if (focus.getFocused()) |win| wsMoveWindowToAll(win),
-        .toggle_tag_all         => if (focus.getFocused()) |win| wsTagToggleAll(win),
+            workspaces.moveWindowTo(win, ws) catch |e| debug.warnOnErr(e, "move_to_workspace"),
+        .move_window            => |ws| if (focus.getFocused()) |win| workspaces.moveWindowExclusive(win, ws),
+        .toggle_tag             => |ws| if (focus.getFocused()) |win| workspaces.tagToggle(win, ws, true),
+        .all_workspaces         => workspaces.switchToAll(),
+        .move_to_all_workspaces => if (focus.getFocused()) |win| workspaces.moveWindowToAll(win),
+        .toggle_tag_all         => if (focus.getFocused()) |win| workspaces.tagToggleAll(win),
         else => {},
     }
 }
 
 /// Like executeAction but acts on the clicked window rather than the
-/// keyboard-focused one. Used by the mouse bind dispatcher so that e.g.
-/// toggle_floating_window affects whichever window was actually clicked.
+/// keyboard-focused one, so e.g. toggle_floating_window affects what was clicked.
 fn executeMouseAction(action: *const types.Action, clicked_win: u32) !void {
     switch (action.*) {
-        // Same grab pattern as the keyboard path in executeAction: retile,
-        // border sweep, and bar blit must be atomic from the compositor's view.
         .toggle_floating_window => if (build.has_tiling)
             withTilingGrabAndBordersWin(clicked_win, tiling.toggleWindowFloat),
         else => try executeAction(action),
@@ -455,21 +392,14 @@ fn executeMouseAction(action: *const types.Action, clicked_win: u32) !void {
 // init and the WM never accumulates zombie processes.
 //
 // Two pipes co-ordinate the three processes:
-//   exec_pipe  – write end is FD_CLOEXEC; exec success closes it silently
-//                (EOF), exec failure writes a sentinel byte.
-//   pid_pipe   – intermediate child writes the grandchild PID before exiting,
-//                so the WM can register the spawn without racing.
+//   exec_pipe — write end is O_CLOEXEC; exec success closes it (EOF),
+//               exec failure writes a sentinel byte.
+//   pid_pipe  — intermediate child writes the grandchild PID before exiting.
 //
-// Previously the WM blocked on waitpid()+read() in the main event loop,
-// stalling input and X-event processing for the duration of two fork() calls
-// (typically 2–30 ms on weak hardware where page-table copying is slow).
-//
-// Now executeShellCommand returns immediately after fork().  The pending entry
-// is stored in g_pending and resolved asynchronously:
-//   • drainPendingSpawns()  – called every event batch; does O_NONBLOCK reads
-//   • reapPendingChildren() – called on SIGCHLD; targeted waitpid(WNOHANG)
-//
-// All pipe FDs are created O_CLOEXEC|O_NONBLOCK so reads never stall the loop.
+// executeShellCommand returns immediately after fork(). The pending entry is
+// stored in g_pending and resolved asynchronously:
+//   drainPendingSpawns()  — called every event batch; does O_NONBLOCK reads.
+//   reapPendingChildren() — called on SIGCHLD; targeted waitpid(WNOHANG).
 
 /// Grandchild: detaches from the session and execs the command.
 /// Writes a sentinel byte to exec_pipe_write on execvp failure.
@@ -490,7 +420,7 @@ fn forkIntermediate(exec_pipe_write: c_int, pid_pipe_write: c_int, cmd_z: [*:0]c
         std.process.exit(1);
     }
     if (grandchild_pid == 0) {
-        _ = c.close(pid_pipe_write); // don't leak into the spawned process
+        _ = c.close(pid_pipe_write);
         execAsGrandchild(exec_pipe_write, cmd_z);
     }
 
@@ -502,12 +432,6 @@ fn forkIntermediate(exec_pipe_write: c_int, pid_pipe_write: c_int, cmd_z: [*:0]c
 }
 
 /// Creates an O_CLOEXEC|O_NONBLOCK pipe pair atomically via pipe2.
-///
-/// O_NONBLOCK on the read ends prevents the WM's event loop from stalling
-/// when drainPendingSpawns() polls pipes whose data is not yet ready.
-/// O_NONBLOCK on the write ends is harmless: the payloads are ≤4 bytes,
-/// well within the PIPE_BUF atomic-write guarantee, so partial writes cannot
-/// occur regardless of the non-blocking flag.
 fn makePipe() ![2]c_int {
     const flags = std.os.linux.O{ .CLOEXEC = true, .NONBLOCK = true };
     var fds: [2]c_int = undefined;
@@ -519,27 +443,18 @@ fn makePipe() ![2]c_int {
 
 // Pending spawn table
 //
-// executeShellCommand stores one entry per fork() and returns immediately.
-// drainPendingSpawns() is called from the event loop and from the SIGCHLD
-// handler to process entries non-blockingly.
-//
-// Capacity: 16 is more than enough.  Firing 16 exec keybindings in the
-// ~100 ms window before /bin/sh finishes exec-ing would require inhuman speed.
+// Capacity: 16 is sufficient — firing 16 exec keybindings in the ~100 ms
+// window before /bin/sh finishes exec-ing would require inhuman speed.
 
 const MAX_PENDING_SPAWNS: usize = 16;
 
 /// Lifecycle state for a single double-fork spawn.
 const PendingSpawn = struct {
-    /// PID of the intermediate (first) child.  Used for targeted waitpid.
-    pid:        c_int,
-    /// Read end of pid_pipe (O_NONBLOCK).  -1 after closed.
-    pid_fd:     c_int,
-    /// Read end of exec_pipe (O_NONBLOCK).  -1 after closed.
-    exec_fd:    c_int,
-    /// Grandchild PID read from pid_pipe.  -1 until known.
-    grandchild: c_int,
-    /// Target workspace for window.registerSpawn.
-    spawn_ws:   ?u8,
+    pid:        c_int,  // PID of intermediate child; used for targeted waitpid.
+    pid_fd:     c_int,  // Read end of pid_pipe (O_NONBLOCK). -1 after closed.
+    exec_fd:    c_int,  // Read end of exec_pipe (O_NONBLOCK). -1 after closed.
+    grandchild: c_int,  // Grandchild PID read from pid_pipe. -1 until known.
+    spawn_ws:   ?u8,    // Target workspace for window.registerSpawn.
 };
 
 fn BoundedArray(comptime T: type, comptime cap: usize) type {
@@ -551,38 +466,32 @@ fn BoundedArray(comptime T: type, comptime cap: usize) type {
             self.len += 1;
         }
         pub fn slice(self: *@This()) []T { return self.buffer[0..self.len]; }
-        pub fn swapRemove(self: *@This(), i: usize) T {
-            const val = self.buffer[i];
+        pub fn swapRemove(self: *@This(), i: usize) void {
             self.len -= 1;
             if (i != self.len) self.buffer[i] = self.buffer[self.len];
-            return val;
         }
     };
 }
 
 var g_pending: BoundedArray(PendingSpawn, MAX_PENDING_SPAWNS) = .{};
 
-/// Spawns `cmd` as a detached grandchild (double-fork).
-/// Returns immediately — lifecycle is tracked in g_pending and resolved
-/// by drainPendingSpawns() / reapPendingChildren() without blocking the loop.
+/// Swap-removes the entry at `i`; caller must `continue` the drain loop after.
+inline fn removePending(i: usize) void { g_pending.swapRemove(i); }
+
+/// Spawns `cmd` as a detached grandchild (double-fork). Returns immediately —
+/// lifecycle is tracked in g_pending and resolved by drainPendingSpawns() /
+/// reapPendingChildren() without blocking the event loop.
 fn executeShellCommand(cmd: []const u8) !void {
-    // Snapshot the workspace now.  The event loop is single-threaded so
-    // g_current cannot change while we run, but capturing it here is correct
-    // for sequence actions of the form [exec, switch_workspace] where a later
-    // action in the same sequence mutates g_current before registerSpawn fires.
+    // Snapshot the workspace now; correct for sequence actions of the form
+    // [exec, switch_workspace] where a later action mutates g_current.
     const spawn_ws = tracking.getCurrentWorkspace();
 
     const cmd_z = try core.alloc.dupeZ(u8, cmd);
     defer core.alloc.free(cmd_z);
 
-    if (g_pending.len >= MAX_PENDING_SPAWNS) {
-        // Extremely rare: 16 concurrent unresolved spawns.  Fall back to a
-        // fire-and-forget spawn with no workspace routing rather than dropping
-        // the user's command.
+    if (g_pending.len >= MAX_PENDING_SPAWNS)
         debug.warn("spawn: pending table full, spawning '{s}' without workspace routing", .{cmd});
-    }
 
-    // Both pipes are O_CLOEXEC|O_NONBLOCK (see makePipe).
     const exec_fds = makePipe() catch {
         debug.err("pipe2() failed (exec_pipe): {s}", .{cmd});
         return error.PipeFailed;
@@ -611,11 +520,8 @@ fn executeShellCommand(cmd: []const u8) !void {
     _ = c.close(exec_fds[1]);
     _ = c.close(pid_fds[1]);
 
-    // Fire xcb_query_pointer now (key-press time) to snapshot the cursor
-    // position for spawn-crossing suppression.  The reply is NOT drained here;
-    // it will be sitting in the XCB socket buffer by the time MapRequest arrives
-    // (app startup takes at least tens of ms), so mapWindowToScreen drains it
-    // for free with no added round-trip latency.
+    // Fire xcb_query_pointer now to snapshot cursor position for
+    // spawn-crossing suppression. Reply is drained lazily by mapWindowToScreen.
     window.prefetchSpawnPointer();
 
     if (g_pending.len < MAX_PENDING_SPAWNS) {
@@ -627,32 +533,22 @@ fn executeShellCommand(cmd: []const u8) !void {
             .spawn_ws   = spawn_ws,
         });
     } else {
-        // Table full: close the read ends we won't track; intermediate child
-        // will be reaped by the SIGCHLD handler's waitpid loop.
+        // Table full: close the read ends we won't track.
         _ = c.close(pid_fds[0]);
         _ = c.close(exec_fds[0]);
     }
 }
 
-/// Drain pending spawn entries non-blockingly.
-///
-/// Called every event batch and on SIGCHLD.  For each entry:
-///   1. If pid_fd is still open, attempt a non-blocking read to obtain the
-///      grandchild PID written by the intermediate child.
-///   2. If exec_fd is still open, attempt a non-blocking read:
-///        EOF (n == 0)    → exec succeeded; call registerSpawn; remove entry.
-///        sentinel byte   → exec failed;    skip registration; remove entry.
-///        EAGAIN          → grandchild has not exec'd yet; retry next call.
-///
-/// The intermediate child is reaped via reapPendingChildren() (SIGCHLD path),
-/// keeping this function free of any blocking syscall.
+/// Drains pending spawn entries non-blockingly.
+/// Called every event batch and on SIGCHLD. For each entry:
+///   1. pid_fd: non-blocking read for the grandchild PID from the intermediate child.
+///   2. exec_fd: non-blocking read — EOF = exec succeeded, sentinel byte = failed,
+///      EAGAIN = not yet exec'd, other = hard error treated as failure.
 pub fn drainPendingSpawns() void {
     var i: usize = 0;
     while (i < g_pending.len) {
         const entry = &g_pending.slice()[i];
 
-        // Step 1: read grandchild PID from pid_pipe (written before the
-        // intermediate child exits, so it becomes available shortly after fork).
         if (entry.pid_fd >= 0) {
             var gcp: c_int = -1;
             const nr = c.read(entry.pid_fd, &gcp, @sizeOf(c_int));
@@ -660,45 +556,37 @@ pub fn drainPendingSpawns() void {
                 entry.grandchild = gcp;
                 _ = c.close(entry.pid_fd);
                 entry.pid_fd = -1;
-            } else if (nr < 0 and
-                std.posix.errno(nr) == .AGAIN)
-            {
-                // Not ready yet — pid_pipe stays open; retry on next call.
+            } else if (nr < 0 and std.posix.errno(nr) == .AGAIN) {
+                // Not ready yet — retry on next call.
             } else {
-                // EOF without data or hard error: intermediate fork failed.
-                _ = c.close(entry.pid_fd);
+                _ = c.close(entry.pid_fd); // EOF without data or hard error.
                 entry.pid_fd = -1;
             }
         }
 
-        // Step 2: read exec result from exec_pipe.
-        // The write end is CLOEXEC in the grandchild: exec success closes it
-        // (EOF); exec failure writes a sentinel byte then exits.
         if (entry.exec_fd >= 0) {
             var sentinel: u8 = 0;
             const ne = c.read(entry.exec_fd, &sentinel, 1);
             if (ne == 0) {
-                // EOF: exec succeeded.
+                // EOF: exec succeeded — register the spawn.
                 if (entry.spawn_ws) |ws| {
                     const pid_u32: u32 = if (entry.grandchild > 0) @intCast(entry.grandchild) else 0;
                     window.registerSpawn(ws, pid_u32);
                 }
                 _ = c.close(entry.exec_fd);
-                _ = g_pending.swapRemove(i);
-                continue; // slot i now holds the swapped-in tail entry
-            } else if (ne == 1) {
-                // Sentinel byte: exec failed — skip registerSpawn.
-                _ = c.close(entry.exec_fd);
-                _ = g_pending.swapRemove(i);
+                removePending(i);
                 continue;
-            } else if (ne < 0 and
-                std.posix.errno(ne) == .AGAIN)
-            {
-                // Grandchild has not exec'd yet — retry next call.
+            } else if (ne == 1) {
+                // Sentinel: exec failed — skip registerSpawn.
+                _ = c.close(entry.exec_fd);
+                removePending(i);
+                continue;
+            } else if (ne < 0 and std.posix.errno(ne) == .AGAIN) {
+                // Not exec'd yet — retry next call.
             } else {
                 // Hard read error — treat as exec failure.
                 _ = c.close(entry.exec_fd);
-                _ = g_pending.swapRemove(i);
+                removePending(i);
                 continue;
             }
         }
@@ -707,26 +595,26 @@ pub fn drainPendingSpawns() void {
     }
 }
 
-/// Reap zombie intermediate children without blocking.
-/// Called from the SIGCHLD signal handler (via the signal self-pipe).
-/// Uses targeted waitpid so we only reap the PIDs we forked, leaving any
-/// other children (e.g., popen) to their own reaping paths.
+/// Reaps zombie intermediate children without blocking.
+/// Called from the SIGCHLD handler (via the signal self-pipe).
 pub fn reapPendingChildren() void {
     for (g_pending.slice()) |*entry| {
-        if (entry.pid > 0) {
-            if (c.waitpid(entry.pid, null, c.WNOHANG) > 0) {
-                entry.pid = -1; // reaped; pipe draining continues independently
-            }
-        }
+        if (entry.pid > 0 and c.waitpid(entry.pid, null, c.WNOHANG) > 0)
+            entry.pid = -1;
     }
-    // Drain any pipe data that just became available due to the child exiting.
     drainPendingSpawns();
 }
 
-// Diagnostics 
+// Diagnostics
 
-/// Logs fullscreen state for each workspace, or "none" when compiled out.
-fn dumpFullscreenState() void {
+/// Logs a full WM state snapshot at info level. Used for diagnostics only.
+fn dumpState() void {
+    debug.info("========== STATE DUMP ==========", .{});
+    debug.info("Focused:        {?x}", .{focus.getFocused()});
+    debug.info("Total windows:  {}",   .{tracking.windowCount()});
+    debug.info("Suppress focus: {s}",  .{@tagName(focus.getSuppressReason())});
+    debug.info("Drag active:    {}",   .{drag.isDragging()});
+
     if (build.has_fullscreen) {
         fullscreen.forEachFullscreen(struct {
             fn cb(ws: u8, info: fullscreen.FullscreenInfo) void {
@@ -737,47 +625,29 @@ fn dumpFullscreenState() void {
     } else {
         debug.info("Fullscreen: none", .{});
     }
-}
 
-/// Logs current workspace and per-workspace window counts.
-/// No-op when workspaces are compiled out.
-fn dumpWorkspaceState() void {
-    if (!build.has_workspaces) return;
-    if (getWsState()) |ws_state| {
-        debug.info("Current workspace: {}", .{ws_state.current + 1});
-        for (ws_state.workspaces, 0..) |_, i| {
-            debug.info("  WS{}: {} windows", .{ i + 1, tracking.countWindowsOnWorkspace(@intCast(i)) });
+    if (build.has_workspaces) {
+        if (workspaces.getState()) |ws_state| {
+            debug.info("Current workspace: {}", .{ws_state.current + 1});
+            for (ws_state.workspaces, 0..) |_, i|
+                debug.info("  WS{}: {} windows", .{ i + 1, tracking.countWindowsOnWorkspace(@intCast(i)) });
         }
     }
-}
 
-/// Logs tiling layout, window count, and master geometry.
-/// No-op when tiling is compiled out.
-fn dumpTilingState() void {
-    if (!build.has_tiling) return;
-    if (tiling.getStateOpt()) |t| {
-        debug.info("Tiling enabled: {}",     .{t.is_enabled});
-        debug.info("Tiling layout:  {s}",    .{@tagName(t.config.layout)});
-        debug.info("Tiled windows:  {}",     .{t.windows.len});
-        debug.info("Master count:   {}",     .{t.config.master_count});
-        debug.info("Master width:   {d:.2}", .{t.config.master_width});
+    if (build.has_tiling) {
+        if (tiling.getStateOpt()) |t| {
+            debug.info("Tiling enabled: {}",     .{t.is_enabled});
+            debug.info("Tiling layout:  {s}",    .{@tagName(t.config.layout)});
+            debug.info("Tiled windows:  {}",     .{t.windows.len});
+            debug.info("Master count:   {}",     .{t.config.master_count});
+            debug.info("Master width:   {d:.2}", .{t.config.master_width});
+        }
     }
-}
 
-/// Logs a full WM state snapshot at info level. Used for diagnostics only.
-fn dumpState() void {
-    debug.info("========== STATE DUMP ==========", .{});
-    debug.info("Focused:        {?x}", .{focus.getFocused()});
-    debug.info("Total windows:  {}",   .{tracking.windowCount()});
-    debug.info("Suppress focus: {s}",  .{@tagName(focus.getSuppressReason())});
-    debug.info("Drag active:    {}",   .{drag.isDragging()});
-    dumpFullscreenState();
-    dumpWorkspaceState();
-    dumpTilingState();
     debug.info("================================", .{});
 }
 
-// Helpers 
+// Helpers
 
 /// Searches config mouse bindings for a modifier+button match and executes it.
 /// Returns true and releases the grab if a binding is found, false otherwise.
@@ -807,7 +677,7 @@ inline fn withTilingGrab(op: anytype) void {
 inline fn withTilingGrabAndBorders(op: anytype) void {
     _ = xcb.xcb_grab_server(core.conn);
     op();
-    window.updateWorkspaceBorders();
+    window.updateWorkspaceBorders(.full);
     window.markBordersFlushed();
     bar.redrawInsideGrab();
     utils.ungrabAndFlush(core.conn);
@@ -818,7 +688,7 @@ inline fn withTilingGrabAndBorders(op: anytype) void {
 inline fn withTilingGrabAndBordersWin(win: u32, op: anytype) void {
     _ = xcb.xcb_grab_server(core.conn);
     op(win);
-    window.updateWorkspaceBorders();
+    window.updateWorkspaceBorders(.full);
     window.markBordersFlushed();
     bar.redrawInsideGrab();
     utils.ungrabAndFlush(core.conn);
@@ -844,7 +714,7 @@ inline fn closePipe(p: [2]c_int) void {
     _ = c.close(p[1]);
 }
 
-// XcbCursor 
+// XcbCursor
 //
 // Declared manually rather than via cImport because xcb_cursor_load_cursor is
 // a static inline function that cImport cannot bind.
@@ -878,8 +748,8 @@ const XcbCursor = struct {
             std.c.free(err);
         }
 
-        // The server reference-counts cursors, so freeing our handle here is
-        // safe — it stays alive as long as the root window holds a reference.
+        // The server reference-counts cursors; freeing our handle is safe —
+        // it stays alive as long as the root window holds a reference.
         _ = xcb.xcb_free_cursor(conn, cursor);
     }
 };

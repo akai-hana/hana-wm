@@ -33,7 +33,6 @@ const drawing  = @import("drawing");
 const prompt   = @import("prompt");
 const carousel = @import("carousel");
 
-
 const clock    = @import("clock");
 const layout   = @import("layout");
 const title    = @import("title");
@@ -109,7 +108,7 @@ const fallbackWorkspacesWidth: u16 = 270;
 const layoutWidth:      u16 = 60;
 const titleMinWidth:    u16 = 100;
 
-// Core data structures 
+// Core data structures
 
 /// Point-in-time bar state captured by the main thread and consumed by the bar thread.
 const BarSnapshot = struct {
@@ -144,9 +143,8 @@ const BarSnapshot = struct {
     /// Returns empty slice when `idx` is out of range.
     pub fn windowTitle(snap: *const BarSnapshot, idx: usize) []const u8 {
         if (idx >= snap.window_title_ends.items.len) return "";
-        const end: usize   = snap.window_title_ends.items[idx];
         const start: usize = if (idx == 0) 0 else snap.window_title_ends.items[idx - 1];
-        return snap.window_title_data.items[start..end];
+        return snap.window_title_data.items[start..snap.window_title_ends.items[idx]];
     }
 };
 
@@ -208,7 +206,7 @@ const Bar = struct {
 
 var gBar: Bar = .{};
 
-// Sub-state types 
+// Sub-state types
 
 /// X11 connection and window handle; stable for the bar's lifetime.
 const WindowCtx = struct {
@@ -269,7 +267,7 @@ const TitleCache = struct {
     }
 };
 
-// State 
+// State
 
 const State = struct {
     win:               WindowCtx,
@@ -344,13 +342,10 @@ const State = struct {
 
     fn measureSegmentWidth(self: *State, snap: *const BarSnapshot, segment: types.BarSegment) u16 {
         return switch (segment) {
-            .workspaces => blk: {
-                if (!build.has_tags) break :blk fallbackWorkspacesWidth;
-                break :blk if (snap.workspace_count > 0)
-                    @intCast(snap.workspace_count * tags.getCachedWorkspaceWidth())
-                else
-                    fallbackWorkspacesWidth;
-            },
+            .workspaces => if (build.has_tags and snap.workspace_count > 0)
+                @intCast(snap.workspace_count * tags.getCachedWorkspaceWidth())
+            else
+                fallbackWorkspacesWidth,
             .layout, .variants => layoutWidth,
             .title             => titleMinWidth,
             .clock             => self.layout_cache.clock_width,
@@ -428,20 +423,11 @@ const State = struct {
         }
     }
 
-    fn drawAll(self: *State, snap: *const BarSnapshot) !void {
+    /// When `flush` is true, blits the off-screen pixmap to the window (event-loop path).
+    /// When false, only flushes Cairo to the pixmap — safe inside xcb_grab_server.
+    fn drawAll(self: *State, snap: *const BarSnapshot, flush: bool) !void {
         try self.drawAllInner(snap);
-        self.render.dc.blit();
-        if (self.title_cache_pending_x) |x|
-            self.syncTitleCache(snap, x, self.title_cache_pending_w);
-        self.title_cache_pending_x = null;
-    }
-
-    /// No dc.blit() — safe to call from inside xcb_grab_server via submitRenderBlocking.
-    fn drawAllNoFlush(self: *State, snap: *const BarSnapshot) !void {
-        try self.drawAllInner(snap);
-        // Cairo surface is flushed to the off-screen pixmap here (pure Cairo op,
-        // no XCB traffic on the shared connection).
-        self.render.dc.renderOnly();
+        if (flush) self.render.dc.blit() else self.render.dc.renderOnly();
         if (self.title_cache_pending_x) |x|
             self.syncTitleCache(snap, x, self.title_cache_pending_w);
         self.title_cache_pending_x = null;
@@ -570,17 +556,11 @@ const State = struct {
                 .focused_title     = self.title_cache.title.items,
                 .minimized_title   = blk: {
                     const wins = self.title_cache.workspace_windows.items;
-                    if (wins.len > 0 and self.title_cache.minimized_windows.contains(wins[0])) {
-                        // Build a temporary BarSnapshot-like helper to reuse windowTitle logic.
-                        const ends  = self.title_cache.window_title_ends.items;
-                        const data  = self.title_cache.window_title_data.items;
-                        if (ends.len > 0) {
-                            const end:   usize = ends[0];
-                            const start: usize = 0;
-                            break :blk data[start..end];
-                        }
-                    }
-                    break :blk "";
+                    const ends = self.title_cache.window_title_ends.items;
+                    break :blk if (wins.len > 0 and ends.len > 0 and
+                                   self.title_cache.minimized_windows.contains(wins[0]))
+                        self.title_cache.window_title_data.items[0..ends[0]]
+                    else "";
                 },
                 .current_ws_wins   = self.title_cache.workspace_windows.items,
                 .minimized_set     = &self.title_cache.minimized_windows,
@@ -597,15 +577,18 @@ const State = struct {
     /// Replacements are built before the swap so a failed allocation leaves the cache
     /// showing stale data rather than going silently empty.
     fn syncTitleCache(self: *State, snap: *const BarSnapshot, x: u16, w: u16) void {
+        const alloc = self.render.allocator;
+
         var new_wins: std.ArrayListUnmanaged(u32) = .empty;
-        if (new_wins.appendSlice(self.render.allocator, snap.current_workspace_windows.items)) {
-            self.title_cache.workspace_windows.deinit(self.render.allocator);
+        if (new_wins.appendSlice(alloc, snap.current_workspace_windows.items)) {
+            self.title_cache.workspace_windows.deinit(alloc);
             self.title_cache.workspace_windows = new_wins;
         } else |_| {
-            new_wins.deinit(self.render.allocator);
+            new_wins.deinit(alloc);
         }
-        if (snap.minimized_windows.clone(self.render.allocator)) |new_set| {
-            self.title_cache.minimized_windows.deinit(self.render.allocator);
+
+        if (snap.minimized_windows.clone(alloc)) |new_set| {
+            self.title_cache.minimized_windows.deinit(alloc);
             self.title_cache.minimized_windows = new_set;
         } else |_| {
             // minimized_windows left stale rather than cleared.
@@ -614,24 +597,22 @@ const State = struct {
         // Keep cached titles in sync for the drawTitleOnly fast path.
         // Both buffers must be updated atomically: pre-allocate into temporaries,
         // then swap so a failed append leaves the cache stale rather than desynced.
-        var new_title_data: std.ArrayListUnmanaged(u8)  = .empty;
-        var new_title_ends: std.ArrayListUnmanaged(u32) = .empty;
-        const synced = blk: {
-            new_title_data.appendSlice(
-                self.render.allocator, snap.window_title_data.items) catch break :blk false;
-            new_title_ends.appendSlice(
-                self.render.allocator, snap.window_title_ends.items) catch break :blk false;
-            break :blk true;
-        };
-        if (synced) {
-            self.title_cache.window_title_data.deinit(self.render.allocator);
-            self.title_cache.window_title_ends.deinit(self.render.allocator);
-            self.title_cache.window_title_data = new_title_data;
-            self.title_cache.window_title_ends = new_title_ends;
-        } else {
-            new_title_data.deinit(self.render.allocator);
-            new_title_ends.deinit(self.render.allocator);
-            // Both caches left stale but still consistent with each other.
+        sync_titles: {
+            var new_data: std.ArrayListUnmanaged(u8)  = .empty;
+            var new_ends: std.ArrayListUnmanaged(u32) = .empty;
+            new_data.appendSlice(alloc, snap.window_title_data.items) catch {
+                new_data.deinit(alloc);
+                break :sync_titles; // both caches left stale but still consistent
+            };
+            new_ends.appendSlice(alloc, snap.window_title_ends.items) catch {
+                new_data.deinit(alloc);
+                new_ends.deinit(alloc);
+                break :sync_titles;
+            };
+            self.title_cache.window_title_data.deinit(alloc);
+            self.title_cache.window_title_ends.deinit(alloc);
+            self.title_cache.window_title_data = new_data;
+            self.title_cache.window_title_ends = new_ends;
         }
 
         self.title_cache.focused_window  = snap.focused_window;
@@ -641,7 +622,7 @@ const State = struct {
     }
 };
 
-// Bar thread 
+// Bar thread
 
 fn runBarThread(s: *State) void {
     var next_carousel_ns: u64 = 0;
@@ -683,20 +664,11 @@ fn runBarThread(s: *State) void {
         gBar.channel.mutex.unlock();
 
         switch (work.kind) {
-            .snapReady => {
-                // Full draw covers the clock too — ignore work.has_clock_tick.
-                s.drawAll(&gBar.channel.slots[read_idx]) catch |e|
-                    debug.warnOnErr(e, "bar thread drawAll");
-                gBar.channel.mutex.lock();
-                gBar.channel.draw_generation +%= 1;
-                gBar.channel.draw_done.broadcast();
-                gBar.channel.mutex.unlock();
-            },
-            .renderOnly => {
-                // No xcb_copy_area, no xcb_flush — caller queues the blit via
-                // dc.blitQueued() so it is sent atomically with ungrabAndFlush().
-                s.drawAllNoFlush(&gBar.channel.slots[read_idx]) catch |e|
-                    debug.warnOnErr(e, "bar thread drawAllNoFlush");
+            // snapReady flushes (blit + xcb_flush); renderOnly renders to the pixmap only
+            // so the caller can blit atomically with ungrabAndFlush().
+            .snapReady, .renderOnly => {
+                s.drawAll(&gBar.channel.slots[read_idx], work.kind == .snapReady)
+                    catch |e| debug.warnOnErr(e, "bar thread draw");
                 gBar.channel.mutex.lock();
                 gBar.channel.draw_generation +%= 1;
                 gBar.channel.draw_done.broadcast();
@@ -736,7 +708,7 @@ fn joinBarThread() void {
     gBar.channel.work = .{};  // reset for potential re-use after reload
 }
 
-// Snapshot capture 
+// Snapshot capture
 
 /// Returns true when the two minimised sets differ in membership (not just count).
 fn hasMinimizedSetChanged(
@@ -845,67 +817,64 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot,
         hasMinimizedSetChanged(&snap.minimized_windows, &prev.minimized_windows);
 }
 
-// Draw submission 
+// Draw submission
 
 fn submitDrawBlockingFull() void {
     gBar.pending_force_full_redraw = true;
-    submitDrawBlocking();
+    submitBlockingWork(.snapReady);
 }
 
 inline fn ungrabAndFlush() void { utils.ungrabAndFlush(core.conn); }
 
-// Returns the write_index that was captured (and already flipped into the slot)
-// on success, or null if the bar is not visible or capture failed.
-fn prepareSnapshot() ?u1 {
-    const s = gBar.state orelse return null;
-    if (!s.is_visible) return null;
+/// Flips the write index, sets work kind, and signals the bar thread.
+/// Must be called with gBar.channel.mutex held.
+inline fn postWork(kind: BarWork.Kind) void {
+    gBar.channel.write_index ^= 1;
+    gBar.channel.work.kind    = kind;
+    gBar.channel.work_ready.signal();
+}
+
+/// Shared blocking submit: captures a snapshot, signals the bar thread with `kind`,
+/// and waits for the draw generation to advance before returning.
+fn submitBlockingWork(kind: BarWork.Kind) void {
+    if (!prepareSnapshot()) return;
+    gBar.channel.mutex.lock();
+    defer gBar.channel.mutex.unlock();
+    const gen = gBar.channel.draw_generation;
+    postWork(kind);
+    while (gBar.channel.draw_generation == gen)
+        gBar.channel.draw_done.wait(&gBar.channel.mutex);
+}
+
+/// Blocks until draw completes. Use only inside or immediately before xcb_ungrab_server.
+pub fn submitDrawBlocking() void { submitBlockingWork(.snapReady); }
+
+/// Like submitDrawBlocking but renders only — no xcb_copy_area, no xcb_flush.
+/// Use INSIDE xcb_grab_server; pair with dc.blitQueued() + ungrabAndFlush().
+fn submitRenderBlocking() void { submitBlockingWork(.renderOnly); }
+
+/// Returns true on success, false if the bar is not visible or capture failed.
+fn prepareSnapshot() bool {
+    const s = gBar.state orelse return false;
+    if (!s.is_visible) return false;
     const idx = gBar.channel.write_index;
     const forced = gBar.pending_force_full_redraw;
     gBar.pending_force_full_redraw = false;
     captureStateIntoSlot(s, &gBar.channel.slots[idx], &gBar.channel.slots[1 - idx], forced) catch |e| {
         debug.warnOnErr(e, "bar captureStateIntoSlot");
-        return null;
+        return false;
     };
-    return idx;
+    return true;
 }
 
 pub fn submitDraw() void {
-    if (prepareSnapshot() == null) return;
+    if (!prepareSnapshot()) return;
     gBar.channel.mutex.lock();
     defer gBar.channel.mutex.unlock();
-    gBar.channel.write_index  ^= 1;
-    gBar.channel.work.kind     = .snapReady;
-    gBar.channel.work_ready.signal();
+    postWork(.snapReady);
 }
 
-/// Blocks until draw completes. Use only inside or immediately before xcb_ungrab_server.
-pub fn submitDrawBlocking() void {
-    if (prepareSnapshot() == null) return;
-    gBar.channel.mutex.lock();
-    defer gBar.channel.mutex.unlock();
-    gBar.channel.write_index ^= 1;
-    gBar.channel.work.kind    = .snapReady;
-    const gen_before = gBar.channel.draw_generation;
-    gBar.channel.work_ready.signal();
-    while (gBar.channel.draw_generation == gen_before)
-        gBar.channel.draw_done.wait(&gBar.channel.mutex);
-}
-
-/// Like submitDrawBlocking but renders only — no xcb_copy_area, no xcb_flush.
-/// Use INSIDE xcb_grab_server; pair with dc.blitQueued() + ungrabAndFlush().
-fn submitRenderBlocking() void {
-    if (prepareSnapshot() == null) return;
-    gBar.channel.mutex.lock();
-    defer gBar.channel.mutex.unlock();
-    gBar.channel.write_index ^= 1;
-    gBar.channel.work.kind    = .renderOnly;
-    const gen_before = gBar.channel.draw_generation;
-    gBar.channel.work_ready.signal();
-    while (gBar.channel.draw_generation == gen_before)
-        gBar.channel.draw_done.wait(&gBar.channel.mutex);
-}
-
-// Window and atom setup 
+// Window and atom setup
 
 fn initAtoms() void {
     const entries = .{
@@ -960,19 +929,16 @@ fn createBarWindow(height: u16, y_pos: i16) BarWindowSetup {
 }
 
 fn loadBarFonts(dc: anytype) !void {
-    const cfg         = core.config.bar;
-    const alloc       = core.alloc;
-    const scaled_size = cfg.scaled_font_size;
-    const fonts       = cfg.fonts.items;
+    const fonts = core.config.bar.fonts.items;
     if (fonts.len == 0) return;
-    const sized = try alloc.alloc([]const u8, fonts.len);
+    const sized = try core.alloc.alloc([]const u8, fonts.len);
     defer {
-        for (sized, fonts) |s, orig| if (s.ptr != orig.ptr) alloc.free(s);
-        alloc.free(sized);
+        for (sized, fonts) |s, orig| if (s.ptr != orig.ptr) core.alloc.free(s);
+        core.alloc.free(sized);
     }
     for (fonts, sized) |f, *out| {
-        out.* = if (scaled_size > 0)
-            try std.fmt.allocPrint(alloc, "{s}:size={}", .{ f, scaled_size })
+        out.* = if (core.config.bar.scaled_font_size > 0)
+            try std.fmt.allocPrint(core.alloc, "{s}:size={}", .{ f, core.config.bar.scaled_font_size })
         else
             f;
     }
@@ -1043,7 +1009,7 @@ fn createDrawContext(setup: BarWindowSetup, height: u16) !*drawing.DrawContext {
     return dc;
 }
 
-// Lifecycle 
+// Lifecycle
 
 pub fn init() !void {
     std.debug.assert(core.config.bar.enabled);
@@ -1125,7 +1091,7 @@ fn applyReload(old: *State, setup: BarWindowSetup, height: u16) !void {
     old.deinit();
 }
 
-// Public event handlers & queries 
+// Public event handlers & queries
 
 pub fn toggleBarSegmentAnchor() void {
     const s = gBar.state orelse return;
@@ -1141,7 +1107,7 @@ pub fn toggleBarSegmentAnchor() void {
     _ = xcb.xcb_configure_window(core.conn, s.win.win_id, xcb.XCB_CONFIG_WINDOW_Y,
         &[_]u32{@as(u32, @bitCast(@as(i32, new_y)))});
     const current_ws = tracking.getCurrentWorkspace() orelse {
-        window.updateWorkspaceBorders();
+        window.updateWorkspaceBorders(.full);
         window.markBordersFlushed();
         ungrabAndFlush();
         return;
@@ -1152,7 +1118,7 @@ pub fn toggleBarSegmentAnchor() void {
         true;
     if (no_fullscreen)
         if (build.has_tiling) tiling.retileCurrentWorkspace();
-    window.updateWorkspaceBorders();
+    window.updateWorkspaceBorders(.full);
     window.markBordersFlushed();
     ungrabAndFlush();
     debug.info("Bar position toggled to: {s}", .{@tagName(core.config.bar.bar_position)});
@@ -1239,7 +1205,7 @@ pub fn setBarState(action: BarAction) void {
         else      _ = xcb.xcb_unmap_window(core.conn, s.win.win_id);
         const effective_visible = if (is_fullscreen) s.is_globally_visible else s.is_visible;
         retileAllWorkspaces(effective_visible);
-        window.updateWorkspaceBorders();
+        window.updateWorkspaceBorders(.full);
         window.markBordersFlushed();
         ungrabAndFlush();
     } else {
@@ -1329,26 +1295,20 @@ fn retileAllWorkspaces(effective_visible: bool) void {
     if (!build.has_tiling) return;
     // Temporarily expose the effective visibility so tiling code that reads
     // isVisible() sees the intended value rather than the transitional state.
-    const s = gBar.state;
-    const saved = if (s) |st| st.is_visible else false;
-    if (s) |st| st.is_visible = effective_visible;
-    retileAllWorkspacesInner();
-    if (s) |st| st.is_visible = saved;
-}
-
-fn retileAllWorkspacesInner() void {
+    if (gBar.state) |st| {
+        const saved = st.is_visible;
+        st.is_visible = effective_visible;
+        defer st.is_visible = saved;
+    }
     if (!build.has_workspaces) { tiling.retileCurrentWorkspace(); return; }
     const ws_state = workspaces.getState() orelse return;
     if (!isTilingActive()) { tiling.retileCurrentWorkspace(); return; }
     for (ws_state.workspaces, 0..) |_, idx| {
         if (!tracking.hasWindowsOnWorkspace(@intCast(idx))) continue;
-        if (build.has_fullscreen) {
-            if (fullscreen.getForWorkspace(@intCast(idx)) != null) continue;
-        }
-        if (@as(u8, @intCast(idx)) != ws_state.current) {
-            tiling.retileInactiveWorkspace(@intCast(idx));
-            continue;
-        }
-        tiling.retileCurrentWorkspace();
+        if (build.has_fullscreen and fullscreen.getForWorkspace(@intCast(idx)) != null) continue;
+        if (@as(u8, @intCast(idx)) != ws_state.current)
+            tiling.retileInactiveWorkspace(@intCast(idx))
+        else
+            tiling.retileCurrentWorkspace();
     }
 }

@@ -6,16 +6,17 @@ const core    = @import("core");
     const xcb = core.xcb;
 
 // Re-exported keysyms (convenience for callers)
+pub const XK = core.XK;
 
-pub const XK_BackSpace = core.XK_BackSpace;
-pub const XK_Tab       = core.XK_Tab;
-pub const XK_Return    = core.XK_Return;
-pub const XK_Escape    = core.XK_Escape;
-pub const XK_Delete    = core.XK_Delete;
-pub const XK_Left      = core.XK_Left;
-pub const XK_Right     = core.XK_Right;
-pub const XK_Home      = core.XK_Home;
-pub const XK_End       = core.XK_End;
+// Private integer aliases so switch arms can match against raw xcb_keysym_t values.
+const XK_BackSpace = @intFromEnum(XK.BackSpace);
+const XK_Return    = @intFromEnum(XK.Return);
+const XK_Escape    = @intFromEnum(XK.Escape);
+const XK_Delete    = @intFromEnum(XK.Delete);
+const XK_Left      = @intFromEnum(XK.Left);
+const XK_Right     = @intFromEnum(XK.Right);
+const XK_Home      = @intFromEnum(XK.Home);
+const XK_End       = @intFromEnum(XK.End);
 
 // Public constants
 

@@ -82,10 +82,7 @@ pub fn dispatch(event_type: u8, event: *anyopaque) void {
 
 /// Converts any signal value — enum or integer — to its raw u8 number.
 inline fn sigToU8(sig: anytype) u8 {
-    return switch (@typeInfo(@TypeOf(sig))) {
-        .@"enum" => @intCast(@intFromEnum(sig)),
-        else     => @intCast(sig),
-    };
+    return @intCast(if (@typeInfo(@TypeOf(sig)) == .@"enum") @intFromEnum(sig) else sig);
 }
 
 /// Async-signal-safe handler: writes the signal number as a byte to the pipe.
@@ -220,7 +217,7 @@ fn checkGrabCookies(cookies: []const CookieEntry) usize {
 
 /// Ungrabs all keys, then re-grabs every configured keybinding across all lock modifier combinations.
 /// Fires all grab cookies before reading any reply to reduce round-trips.
-pub fn grabKeybindings() !void {
+pub fn grabKeybindings() void {
     _ = xcb.xcb_ungrab_key(core.conn, xcb.XCB_GRAB_ANY, core.root, xcb.XCB_MOD_MASK_ANY);
 
     var cookies: [MAX_KEYBIND_COOKIES]CookieEntry = undefined;
@@ -233,14 +230,6 @@ pub fn grabKeybindings() !void {
 }
 
 // Config reload
-
-/// Validates config constraints that cannot be checked at parse time.
-fn validateConfig(cfg: *const types.Config) !void {
-    if (cfg.tiling.master_count == 0) {
-        debug.err("Invalid config: master_count must be > 0, keeping old", .{});
-        return error.InvalidConfig;
-    }
-}
 
 /// Applies a validated config: resolves keybindings and notifies all
 /// subsystems of the change.  grabKeybindings() is intentionally NOT called
@@ -270,7 +259,10 @@ fn handleConfigReload() !void {
     };
     errdefer new_config.deinit(core.alloc);
 
-    try validateConfig(&new_config);
+    if (new_config.tiling.master_count == 0) {
+        debug.err("Invalid config: master_count must be > 0, keeping old", .{});
+        return error.InvalidConfig;
+    }
     try applyConfig(&new_config);
 
     var old_config = core.config;
@@ -279,10 +271,10 @@ fn handleConfigReload() !void {
 
     // Re-grab keybindings now that core.config points to the new config so
     // fillGrabCookies reads the correct (new) keycodes, not the old ones.
-    try grabKeybindings();
+    grabKeybindings();
 
     // Rebuild after the swap so borrowed key slices point into the new config's memory.
-    window.rebuildRulesMap();
+    window.buildRulesMap();
 
     debug.info("Reload complete", .{});
 }
@@ -303,16 +295,11 @@ fn combinedTimeoutMs(blink_ms: i32) i32 {
 /// Ticks the clock and cursor blink on poll timeout, then flushes to the compositor.
 fn handleTimerEvents(cursor_is_blinking: bool) void {
     if (build.has_bar) {
-        var drew = false;
-
-        if (bar.checkClockUpdate()) drew = true;
-
+        const drew = bar.checkClockUpdate() or cursor_is_blinking;
         if (cursor_is_blinking) {
             prompt.blinkTick();
             bar.submitDraw();
-            drew = true;
         }
-
         if (drew) _ = xcb.xcb_flush(core.conn);
     }
 }
