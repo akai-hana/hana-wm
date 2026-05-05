@@ -175,7 +175,8 @@ Mod+D       = "ghostty"
 Mod+I       = "xeyes"
 Mod+Shift+D = "{kill} ghostty"
 
-Mod+Z       = "cd ~/Games/noita; wine noita.exe"
+# Noita
+Mod+Z       = "flatpak run com.valvesoftware.Steam steam://rungameid/881100"
 Mod+Shift+Z = "pkill noita"
 
 # Mod+Z       = "cd ~/Games/isaac-repentance+; wine isaac-ng.exe"
@@ -184,7 +185,8 @@ Mod+Shift+Z = "pkill noita"
 Mod+X       = "~/Games/t-client/DDNet"
 Mod+Shift+X = "{kill} DDNet"
 
-Mod+c       = "flatpak run com.valvesoftware.Steam"
+# ULTRAKILL
+Mod+C       = "flatpak run com.valvesoftware.Steam steam://rungameid/1229490"
 Mod+Shift+C = "{kill} steam"
 
 Mod+V       = "flatpak run com.github.th_ch.youtube_music"
