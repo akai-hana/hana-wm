@@ -33,13 +33,15 @@ pub const SegmentGeometry = struct {
 
 /// All state for one live carousel (single-window or segmented).
 const CarouselEntry = struct {
-    cp:       drawing.CarouselPixmap,
-    cycle_w:  u16,  // text_w + carousel_gap_px
-    start_ms: i64,  // monotonicMs() at the moment the animation started
-    last_bg:  u32,  // accent colour baked into cp; used by drawCarouselTick
-                    // to detect a colour change before the next full draw
-    window:   ?u32, // window the pixmap was built for (null = no window)
-    geom:     SegmentGeometry,
+    cp:           drawing.CarouselPixmap,
+    cycle_w:      u16,  // text_w + carousel_gap_px
+    pixel_offset: u16,  // current integer blit offset (advances each tick)
+    frac_acc:     f64,  // sub-pixel carry between ticks (Bresenham remainder)
+    last_ns:      u64,  // monotonicNs() of the most-recent blit
+    last_bg:      u32,  // accent colour baked into cp; used by drawCarouselTick
+                        // to detect a colour change before the next full draw
+    window:       ?u32, // window the pixmap was built for (null = no window)
+    geom:         SegmentGeometry,
 };
 
 /// Runtime-configurable scroll parameters.
@@ -178,11 +180,12 @@ pub fn drawCarouselTick(
     seg_x: u16,
     seg_w: u16,
 ) bool {
-    const e = render.single orelse return false;
+    if (render.single == null) return false;
+    const e = &render.single.?;
     if (seg_x != e.geom.seg_x or seg_w != e.geom.seg_w or bg != e.last_bg)
         return false;
 
-    const off = carouselOffset(e.start_ms, e.cycle_w, utils.monotonicMs());
+    const off = advanceCarouselOffset(e, utils.monotonicNs());
     e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, seg_x, off, seg_w);
     dc.blitAndFlush(seg_x, seg_w);
     return true;
@@ -195,13 +198,14 @@ pub fn drawCarouselTick(
 /// Returns false when no segmented carousel is live or the accent colour changed
 /// (indicating a minimize/unminimize that requires a full rebuild).
 pub fn drawSegCarouselTickAuto(dc: *drawing.DrawContext, accent: u32) bool {
-    const e = render.seg orelse return false;
+    if (render.seg == null) return false;
+    const e = &render.seg.?;
     if (accent != e.last_bg) return false;
     // If a focus change is pending, bail out so the caller falls through to
     // drawCached → drawSegmentedTitles, which redraws ALL segments with the
     // correct accent colours (old focused → unfocused, new focused → focused).
     if (focus_signal.is_invalidated.load(.acquire)) return false;
-    const off = carouselOffset(e.start_ms, e.cycle_w, utils.monotonicMs());
+    const off = advanceCarouselOffset(e, utils.monotonicNs());
     e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, e.geom.seg_x, off, e.geom.seg_w);
     dc.blitAndFlush(e.geom.seg_x, e.geom.seg_w);
     return true;
@@ -216,7 +220,7 @@ pub fn drawSegCarouselTickAuto(dc: *drawing.DrawContext, accent: u32) bool {
 ///   pixmap and blit one frame.
 /// • If text overflows and carousel is disabled: draw with ellipsis.
 ///
-/// Pixmap rebuild triggers (unified — any change resets start_ms to now):
+/// Pixmap rebuild triggers (unified — any change resets the accumulator to zero):
 ///   • No pixmap live
 ///   • Window ID changed
 ///   • Title text changed (title_invalidated)
@@ -273,17 +277,19 @@ pub fn drawScrollingTitle(
         try cp.render(dc, text, bg, fg, y, left_pad, cycle_w);
 
         render.single = .{
-            .cp       = cp,
-            .cycle_w  = cycle_w,
-            .start_ms = utils.monotonicMs(),
-            .last_bg  = bg,
-            .window   = window,
-            .geom     = geom,
+            .cp           = cp,
+            .cycle_w      = cycle_w,
+            .pixel_offset = 0,
+            .frac_acc     = 0.0,
+            .last_ns      = utils.monotonicNs(),
+            .last_bg      = bg,
+            .window       = window,
+            .geom         = geom,
         };
     }
 
-    const e   = render.single.?;
-    const off = carouselOffset(e.start_ms, e.cycle_w, utils.monotonicMs());
+    const e   = &render.single.?;
+    const off = advanceCarouselOffset(e, utils.monotonicNs());
     e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, geom.seg_x, off, geom.seg_w);
 }
 
@@ -346,38 +352,53 @@ pub fn drawSegmentedCarousel(
         try cp.render(dc, text, accent, text_fg, baseline_y, left_pad, cycle_w);
 
         render.seg = .{
-            .cp       = cp,
-            .cycle_w  = cycle_w,
-            .start_ms = utils.monotonicMs(),
-            .last_bg  = accent,
-            .window   = window,
-            .geom     = geom,
+            .cp           = cp,
+            .cycle_w      = cycle_w,
+            .pixel_offset = 0,
+            .frac_acc     = 0.0,
+            .last_ns      = utils.monotonicNs(),
+            .last_bg      = accent,
+            .window       = window,
+            .geom         = geom,
         };
         // Publish the window atomically so notifyFocusChanged on the main
         // thread can check it without touching render.seg.
         focus_signal.seg_window.store(window, .release);
     }
 
-    const e   = render.seg.?;
-    const off = carouselOffset(e.start_ms, e.cycle_w, utils.monotonicMs());
+    const e   = &render.seg.?;
+    const off = advanceCarouselOffset(e, utils.monotonicNs());
     e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, geom.seg_x, off, geom.seg_w);
     return true;
 }
 
 // Private — scroll math
 
-/// Smooth continuous scroll offset.
+/// Bresenham-style sub-pixel accumulator.
 ///
-///   offset = (elapsed_ms × speed / 1000.0) mod cycle_w
+/// Advances `e.pixel_offset` by the correct integer number of pixels for the
+/// elapsed time since the last blit, carrying the fractional remainder in
+/// `e.frac_acc` so it is applied on the next tick.
 ///
-/// Linear interpolation with no frame quantisation — the position advances
-/// proportionally to elapsed wall-clock time regardless of the bar thread's
-/// wakeup cadence.  The previous frame-quantised formula stepped at display
-/// Hz (e.g. every 16.67 ms at 60 Hz) while the bar woke at 165 Hz (6 ms),
-/// producing a step-function: frozen for ~10 ms then a 2 px snap.
-fn carouselOffset(start_ms: i64, cycle_w: u16, now_ms: i64) u16 {
-    std.debug.assert(cycle_w > 0);
-    const elapsed = @as(f64, @floatFromInt(@max(0, now_ms - start_ms)));
-    const raw_px  = elapsed * scroll_config.speed / 1000.0;
-    return @intFromFloat(@mod(raw_px, @as(f64, @floatFromInt(cycle_w))));
+/// This distributes 0 px and 1 px advances evenly across frames (Bresenham
+/// pattern) rather than clustering all the fractional debt into occasional
+/// larger jumps.  At 125 px/s on a 165 Hz display the raw advance is
+/// ≈0.758 px/frame; the old floor() approach produced a freeze every ~4–5
+/// frames followed by a 1 px snap.  The accumulator ensures every frame moves
+/// either 0 or 1 px in an optimally spaced sequence with no clustering.
+///
+/// Caller must hold a mutable pointer to the entry (`*CarouselEntry`).
+fn advanceCarouselOffset(e: *CarouselEntry, now_ns: u64) u16 {
+    std.debug.assert(e.cycle_w > 0);
+    const delta_ns = @as(f64, @floatFromInt(now_ns -| e.last_ns));
+    // Accumulate exact sub-pixel advance for this tick plus any carry.
+    const delta_px  = delta_ns * scroll_config.speed / 1_000_000_000.0 + e.frac_acc;
+    const int_px    = @floor(delta_px);
+    e.frac_acc      = delta_px - int_px;          // carry remainder to next tick
+    e.last_ns       = now_ns;
+    e.pixel_offset  = @intCast(
+        (@as(u32, e.pixel_offset) + @as(u32, @intFromFloat(int_px)))
+        % @as(u32, e.cycle_w)
+    );
+    return e.pixel_offset;
 }
