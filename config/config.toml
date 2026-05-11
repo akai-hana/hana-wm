@@ -229,7 +229,7 @@ Mod+Shift+Escape = "emergency_recover" #TODO: remove. this is hacky and assumes 
 # Launchers
 4 = ["OpenTabletDriver.UX"]
 # Games
-5 = ["steam", "noita", "wine", "proton", "noita", "osu!", "DDNet", "isaac-ng.exe"]
+5 = ["steam", "steam.exe", "wine", "proton", "noita", "noita.exe", "osu!", "DDNet", "isaac-ng.exe"]
 # Editors
 6 = ["emacs"]
 # Media
