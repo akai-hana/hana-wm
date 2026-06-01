@@ -60,7 +60,17 @@ pub fn main() !void {
     try window.init(core.alloc);
     defer window.deinit();
 
-    initBar();
+    // bar.init's error set is inferred (anyerror), so BarDisabled/BarNotFound
+    // can't be switch arms — if/else is the only option here.
+    bar.init() catch |err| {
+        if (err == error.BarDisabled) {
+            debug.info("Bar disabled on user config: {}", .{err});
+        } else if (err == error.BarNotFound) {
+            debug.info("Bar not found (src/bar/bar.zig): {}", .{err});
+        } else {
+            debug.err("Bar init failed: {}", .{err});
+        }
+    };
     defer bar.deinit();
 
     bar.updateTimerState();
@@ -109,20 +119,4 @@ fn connectToX() !X {
     }
 
     return .{ .conn = conn, .screen = screen, .root = screen.*.root };
-}
-
-/// Initializes the bar, logging the outcome if it is disabled or not found.
-///
-/// if/else used instead of switch because bar.init's error set is inferred/anyerror,
-/// so BarDisabled and BarNotFound are not statically declared members and can't be switch arms.
-fn initBar() void {
-    bar.init() catch |err| {
-        if (err == error.BarDisabled) {
-            debug.info("Bar disabled on user config: {}", .{err});
-        } else if (err == error.BarNotFound) {
-            debug.info("Bar not found (src/bar/bar.zig): {}", .{err});
-        } else {
-            debug.err("Bar init failed: {}", .{err});
-        }
-    };
 }

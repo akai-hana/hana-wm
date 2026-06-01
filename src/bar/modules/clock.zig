@@ -1,5 +1,18 @@
 //! Clock segment
 //! Displays the current time on the status bar.
+//!
+//! The clock tick is driven by a dedicated thread that sleeps to the next
+//! whole-second REALTIME boundary, fires a tick, then sleeps exactly one
+//! second per subsequent tick.  This is independent of the main event loop,
+//! so the displayed time never skips a second when the WM is busy.
+//!
+//! Thread lifecycle
+//! ----------------
+//!   startThread()  — call from bar.init() after the bar render thread starts.
+//!   stopThread()   — call before bar thread teardown (deinit and reload).
+//!
+//! The sleep uses a pthread condition variable so stopThread() returns
+//! promptly (typically < 1 ms) rather than waiting up to one full second.
 
 const std     = @import("std");
 const core    = @import("core");
@@ -12,38 +25,116 @@ const c = @cImport(@cInclude("time.h"));
 
 pub const CLOCK_MEASURE_STRING: []const u8 = "0000-00-00 00:00:00";
 
-var timer_enabled:       bool    = false;
-var last_formatted_time: [20]u8  = undefined;
-var last_formatted_sec:  i64     = -1;
+var last_formatted_time: [20]u8 = undefined;
+var last_formatted_sec:  i64    = -1;
 
-/// Returns true when the bar is visible and has a clock segment configured.
-fn shouldClockRun() bool {
-    return bar.isVisible() and bar.hasClockSegment();
+// ---------------------------------------------------------------------------
+// Thread state
+// ---------------------------------------------------------------------------
+
+// clock_mutex / clock_cond protect clock_quit and provide the interruptible
+// sleep primitive.  Zero-initialised (.{}) is PTHREAD_MUTEX/COND_INITIALIZER
+// on Linux; no explicit init call is required.  The default cond clock is
+// CLOCK_REALTIME, which is exactly what we want for second-aligned deadlines.
+var clock_mutex:  std.c.pthread_mutex_t = .{};
+var clock_cond:   std.c.pthread_cond_t  = .{};
+var clock_quit:   bool                  = false;
+var clock_thread: ?std.Thread           = null;
+
+// ---------------------------------------------------------------------------
+// Public lifecycle API
+// ---------------------------------------------------------------------------
+
+/// Spawns the dedicated clock thread.
+/// Safe to call after a preceding stopThread().
+pub fn startThread() void {
+    clock_quit  = false;
+    clock_thread = std.Thread.spawn(.{}, runClockThread, .{}) catch |e| {
+        debug.err("Clock thread spawn failed: {s}", .{@errorName(e)});
+        return;
+    };
+    debug.info("Clock thread started", .{});
 }
 
-/// Enables or disables the clock timer based on whether the clock segment is active.
-/// Called whenever bar visibility or segment configuration changes.
-pub fn updateTimerState() void {
-    const enable = shouldClockRun();
-    if (enable != timer_enabled) {
-        timer_enabled = enable;
-        debug.info("Clock timer {s}", .{if (enable) "enabled" else "disabled"});
+/// Signals the clock thread to exit and blocks until it has joined.
+/// Typically returns in < 1 ms regardless of where the thread is in its
+/// sleep cycle.
+pub fn stopThread() void {
+    _ = std.c.pthread_mutex_lock(&clock_mutex);
+    clock_quit = true;
+    _ = std.c.pthread_cond_signal(&clock_cond);
+    _ = std.c.pthread_mutex_unlock(&clock_mutex);
+    if (clock_thread) |t| { t.join(); clock_thread = null; }
+    debug.info("Clock thread stopped", .{});
+}
+
+// ---------------------------------------------------------------------------
+// Compatibility stubs (call sites in main.zig, events.zig, setBarState)
+// ---------------------------------------------------------------------------
+
+/// No-op: the thread runs continuously while the bar is alive; it does not
+/// need to be toggled when bar visibility changes because checkClockUpdate()
+/// performs the is_visible check before signalling the render thread.
+pub fn updateTimerState() void {}
+
+/// No-op: the clock thread drives ticks directly and no longer participates
+/// in the main event loop's poll() timeout calculation.
+pub fn pollTimeoutMs() i32 { return -1; }
+
+// ---------------------------------------------------------------------------
+// Thread body
+// ---------------------------------------------------------------------------
+
+/// Sleeps up to `ns` nanoseconds, waking early if clock_quit is set.
+/// Must NOT be called with clock_mutex held.
+fn sleepInterruptible(ns: u64) void {
+    // Compute an absolute REALTIME deadline for pthread_cond_timedwait.
+    var deadline: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.REALTIME, &deadline);
+    const new_nsec = @as(u64, @intCast(deadline.nsec)) + ns;
+    deadline.sec  += @intCast(new_nsec / std.time.ns_per_s);
+    deadline.nsec  = @intCast(new_nsec % std.time.ns_per_s);
+
+    _ = std.c.pthread_mutex_lock(&clock_mutex);
+    while (!clock_quit) {
+        const rc = std.c.pthread_cond_timedwait(&clock_cond, &clock_mutex, @ptrCast(&deadline));
+        if (rc == std.posix.E.TIMEDOUT) break;
+        // Spurious wakeup or signal: recheck clock_quit from the top of the loop.
+    }
+    _ = std.c.pthread_mutex_unlock(&clock_mutex);
+}
+
+fn runClockThread() void {
+    // ── Align first tick to the next whole-second REALTIME boundary ────────
+    // This ensures the displayed time is never stale by up to a full second
+    // immediately after the bar starts.
+    {
+        var now_ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.REALTIME, &now_ts);
+        // ns_per_s - now_ts.nsec is always in (0, 1_000_000_000].
+        const ns_to_boundary: u64 = @intCast(std.time.ns_per_s - now_ts.nsec);
+        sleepInterruptible(ns_to_boundary);
+    }
+
+    while (true) {
+        // Check quit before firing so we never send a spurious tick after
+        // stopThread() has been called (e.g. during bar deinit or reload).
+        _ = std.c.pthread_mutex_lock(&clock_mutex);
+        const quit = clock_quit;
+        _ = std.c.pthread_mutex_unlock(&clock_mutex);
+        if (quit) return;
+
+        // checkClockUpdate() guards against invisible / unconfigured bars
+        // internally, so no extra check is needed here.
+        _ = bar.checkClockUpdate();
+
+        sleepInterruptible(std.time.ns_per_s);
     }
 }
 
-/// Returns the number of milliseconds until the next whole-second boundary,
-/// or -1 if the clock is disabled (telling poll to block indefinitely).
-pub fn pollTimeoutMs() i32 {
-    if (!timer_enabled) return -1;
-    var now_ts: std.os.linux.timespec = undefined;
-    switch (std.posix.errno(std.os.linux.clock_gettime(.REALTIME, &now_ts))) {
-        .SUCCESS => {},
-        else     => return 1000,
-    }
-    const ns_remaining: u64 = @intCast(std.time.ns_per_s - now_ts.nsec);
-    // Round up to the nearest millisecond so we never fire slightly early.
-    return @intCast((ns_remaining + 999_999) / 1_000_000);
-}
+// ---------------------------------------------------------------------------
+// Drawing (unchanged)
+// ---------------------------------------------------------------------------
 
 /// Draws the current time string on the bar. Returns the x position after the segment.
 pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
