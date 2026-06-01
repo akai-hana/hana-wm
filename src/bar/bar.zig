@@ -504,7 +504,11 @@ const State = struct {
         const clock_x = self.layout_cache.clock_x orelse return;
         _ = clock.draw(self.render.dc, self.render.config, self.render.height, clock_x) catch |e|
             debug.warnOnErr(e, "drawClockOnly");
-        self.render.dc.blit();
+        // renderOnly() flushes Cairo to the off-screen pixmap; blitAndFlush()
+        // copies only the clock region to the window and calls xcb_flush.
+        // This replaces the old blit() + main-thread xcb_flush pattern.
+        self.render.dc.renderOnly();
+        self.render.dc.blitAndFlush(clock_x, self.layout_cache.clock_width);
     }
 
     fn drawTitleOnly(self: *State, new_focused: ?u32) void {
@@ -1033,6 +1037,7 @@ pub fn init() !void {
     gBar.state = try State.init(core.alloc, core.conn, setup.win_id, setup.colormap,
         core.screen.width_in_pixels, height, dc, core.config.bar);
     spawnBarThread(gBar.state.?);
+    if (build.has_clock) clock.startThread();
     submitDrawBlocking();
     _ = xcb.xcb_map_window(core.conn, setup.win_id);
     _ = xcb.xcb_flush(core.conn);
@@ -1041,6 +1046,7 @@ pub fn init() !void {
 
 pub fn deinit() void {
     prompt.deinit();
+    if (build.has_clock) clock.stopThread();
     joinBarThread();
     if (gBar.state) |s| {
         carousel.deinitCarousel();
@@ -1079,10 +1085,12 @@ fn applyReload(old: *State, setup: BarWindowSetup, height: u16) !void {
         core.screen.width_in_pixels, height, new_dc, core.config.bar);
     new_state.is_visible          = old.is_visible;
     new_state.is_globally_visible = old.is_globally_visible;
+    if (build.has_clock) clock.stopThread();
     joinBarThread();
     gBar.channel.work_ready.initMonotonic();
     gBar.state = new_state;
     spawnBarThread(new_state);
+    if (build.has_clock) clock.startThread();
     submitDrawBlockingFull();
     if (new_state.is_visible) _ = xcb.xcb_map_window(core.conn, setup.win_id);
     _ = xcb.xcb_destroy_window(core.conn, old.win.win_id);

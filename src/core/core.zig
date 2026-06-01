@@ -30,13 +30,10 @@ pub const WindowId = u32;
 
 /// Geometry snapshot used by both fullscreen and minimize.
 pub const WindowGeometry = struct {
-    // Coordinates
-    x: i16,
-    y: i16,
-    // Dimensions
-    width: u16,
-    height: u16,
-    // Others
+    x:            i16,
+    y:            i16,
+    width:        u16,
+    height:       u16,
     border_width: u16,
 };
 
