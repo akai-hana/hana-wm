@@ -166,7 +166,7 @@ Mod+Shift+B = "toggle_bar_position"    # top/bottom
 
 ## Misc
 Mod+A       = "MOZ_USE_XINPUT2=1 firefox"
-Mod+Shift+A = "{kill} firefox"
+Mod+Shift+A = "~/.local/bin/firefox-sync.sh xpmraevm.default-default; {kill} firefox"
 
 Mod+S       = "flatpak run org.equicord.equibop"
 Mod+Shift+S = "{kill} equibop"
@@ -175,22 +175,25 @@ Mod+D       = "ghostty"
 Mod+I       = "xeyes"
 Mod+Shift+D = "{kill} ghostty"
 
-# Noita
-Mod+Z       = "flatpak run com.valvesoftware.Steam steam://rungameid/881100"
-Mod+Shift+Z = "pkill noita"
+#Mod+Z       = "flatpak run com.valvesoftware.Steam steam://rungameid/881100" # Noita
+#Mod+Shift+Z = "pkill noita"
+
+# Minecraft Beta
+Mod+Z = "distrobox enter aur -- prismlauncher --launch BTA_MANAGED_INSTANCE"
+Mod+Shift+Z = "distrobox enter aur -- ~/Games/factorio-vanilla"
 
 # Mod+Z       = "cd ~/Games/isaac-repentance+; wine isaac-ng.exe"
 # Mod+Shift+Z = "pkill isaac-ng"
 
 Mod+X       = "~/Games/t-client/DDNet"
-Mod+Shift+X = "{kill} DDNet"
+Mod+Shift+X = "~/Games/etterna/Etterna"
 
 # ULTRAKILL
 Mod+C       = "flatpak run com.valvesoftware.Steam steam://rungameid/1229490"
 Mod+Shift+C = "{kill} steam"
 
 Mod+V       = "flatpak run com.github.th_ch.youtube_music"
-Mod+Shift+V = "{kill} youtube-music"
+Mod+Shift+V = "distrobox enter aur -- stremio-enhanced"
 
 Mod+Y       = "thunar"
 Mod+Shift+Y = "{kill} thunar"
@@ -229,7 +232,7 @@ Mod+Shift+Escape = "emergency_recover" #TODO: remove. this is hacky and assumes 
 # Launchers
 4 = ["OpenTabletDriver.UX"]
 # Games
-5 = ["steam", "steam.exe", "wine", "proton", "noita", "noita.exe", "osu!", "DDNet", "isaac-ng.exe"]
+5 = ["steam", "steam.exe", "wine", "proton", "noita", "noita.exe", "osu!", "DDNet", "isaac-ng.exe", "java", "Minecraft"]
 # Editors
 6 = ["emacs"]
 # Media
