@@ -559,7 +559,12 @@ fn applyHintsToRect(rect: utils.Rect, h: SizeHints) utils.Rect {
         }
     }
 
-    return .{ .x = rect.x, .y = rect.y, .width = w, .height = ht };
+    // Centre the (possibly reduced) window inside the slot that the layout
+    // allocated.  All hint passes above only shrink dimensions, so both deltas
+    // are always non-negative and no clamping guard is required.
+    const dx: i16 = @intCast((rect.width  - w)  / 2);
+    const dy: i16 = @intCast((rect.height - ht) / 2);
+    return .{ .x = rect.x + dx, .y = rect.y + dy, .width = w, .height = ht };
 }
 
 /// Snap `dim` to the nearest multiple of `inc` above `base`.
