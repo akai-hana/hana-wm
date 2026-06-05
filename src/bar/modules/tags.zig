@@ -1,9 +1,9 @@
 //! Workspace tag indicator segment
 //! Displays the list of workspaces and their activity states on the status bar.
 
-const std     = @import("std");
-const core    = @import("core");
-const types   = @import("types");
+const std = @import("std");
+const core = @import("core");
+const types = @import("types");
 const drawing = @import("drawing");
 const tracking = @import("tracking");
 
@@ -12,32 +12,36 @@ const tracking = @import("tracking");
 // dc.measureTextWidth(label) on a cache miss.
 // Raise this cap if workspace count ever exceeds 20.
 var label_widths: [20]u16 = [_]u16{0} ** 20;
-var ws_width:          u16     = 0;
-var cache_valid:       bool    = false;
+var ws_width: u16 = 0;
+var cache_valid: bool = false;
 /// Cached horizontal offset of the indicator glyph within a workspace cell.
 /// Added to the cell's start_x at draw time. Constant for all cells.
-var cached_ind_x_off:  u16     = 0;
+var cached_ind_x_off: u16 = 0;
 /// Cached vertical top position of the indicator glyph. Constant for all cells.
-var cached_ind_y:      u16     = 0;
+var cached_ind_y: u16 = 0;
 
 /// Returns the display label for workspace `i`, falling back through icons, labels, and "?".
 inline fn getLabel(i: usize, config: types.BarConfig) []const u8 {
     if (i < config.workspace_icons.items.len) return config.workspace_icons.items[i];
-    if (i < tracking.WORKSPACE_LABELS.len)    return tracking.WORKSPACE_LABELS[i];
+    if (i < tracking.WORKSPACE_LABELS.len) return tracking.WORKSPACE_LABELS[i];
     return "?";
 }
 
 /// Invalidates the segment cache; next draw() call will remeasure labels and cell widths.
-pub fn invalidate() void { cache_valid = false; }
+pub fn invalidate() void {
+    cache_valid = false;
+}
 
 /// Returns the last-computed workspace cell width in pixels (0 until first draw).
-pub fn getCachedWorkspaceWidth() u16 { return ws_width; }
+pub fn getCachedWorkspaceWidth() u16 {
+    return ws_width;
+}
 
 /// Rebuilds the label-width and geometry cache if stale. No-op if cache_valid is true.
 fn ensureCache(dc: *drawing.DrawContext, config: types.BarConfig, height: u16) void {
     if (cache_valid) return;
     for (&label_widths, 0..) |*w, i| w.* = dc.measureTextWidth(getLabel(i, config));
-    ws_width    = config.scaledWorkspaceWidth(height);
+    ws_width = config.scaledWorkspaceWidth(height);
     cache_valid = true;
 
     // Precompute the indicator glyph position within a cell. All geometry
@@ -45,35 +49,34 @@ fn ensureCache(dc: *drawing.DrawContext, config: types.BarConfig, height: u16) v
     // constant between reloads, so the result is valid for the entire session
     // until the next invalidate() + ensureCache() cycle.
     const ind_size = config.scaledIndicatorSize(height);
-    const pos = indicatorPos(0, ws_width, height, ind_size, ind_size,
-        config.indicator_location, config.indicator_padding);
+    const pos = indicatorPos(0, ws_width, height, ind_size, ind_size, config.indicator_location, config.indicator_padding);
     // pos.x is computed with cell_x = 0, so it is already the intra-cell offset.
     cached_ind_x_off = pos.x;
-    cached_ind_y     = pos.y;
+    cached_ind_y = pos.y;
 }
 
 /// Computes the top-left pixel position of an indicator item within a workspace cell.
 fn indicatorPos(
-    cell_x:     u16,
-    cell_w:     u16,
+    cell_x: u16,
+    cell_w: u16,
     bar_height: u16,
-    item_w:     u16,
-    item_h:     u16,
-    location:   types.IndicatorLocation,
-    padding:    f32,
+    item_w: u16,
+    item_h: u16,
+    location: types.IndicatorLocation,
+    padding: f32,
 ) struct { x: u16, y: u16 } {
     const cw: f32 = @floatFromInt(cell_w);
     const bh: f32 = @floatFromInt(bar_height);
 
     const Corner = struct { x: f32, y: f32 };
     const corner: Corner = switch (location) {
-        .left       => .{ .x = 0.0, .y = 0.5 },
-        .right      => .{ .x = 1.0, .y = 0.5 },
-        .up         => .{ .x = 0.5, .y = 0.0 },
-        .down       => .{ .x = 0.5, .y = 1.0 },
-        .up_left    => .{ .x = 0.0, .y = 0.0 },
-        .up_right   => .{ .x = 1.0, .y = 0.0 },
-        .down_left  => .{ .x = 0.0, .y = 1.0 },
+        .left => .{ .x = 0.0, .y = 0.5 },
+        .right => .{ .x = 1.0, .y = 0.5 },
+        .up => .{ .x = 0.5, .y = 0.0 },
+        .down => .{ .x = 0.5, .y = 1.0 },
+        .up_left => .{ .x = 0.0, .y = 0.0 },
+        .up_right => .{ .x = 1.0, .y = 0.0 },
+        .down_left => .{ .x = 0.0, .y = 1.0 },
         .down_right => .{ .x = 1.0, .y = 1.0 },
     };
 
@@ -93,13 +96,13 @@ fn indicatorPos(
 /// `ws_has_windows` — one bool per workspace; true when that workspace has
 ///                    at least one window (used to draw the indicator glyph).
 pub fn draw(
-    dc:             *drawing.DrawContext,
-    config:         types.BarConfig,
-    height:         u16,
-    start_x:        u16,
-    ws_current:     u8,
+    dc: *drawing.DrawContext,
+    config: types.BarConfig,
+    height: u16,
+    start_x: u16,
+    ws_current: u8,
     ws_has_windows: []const bool,
-    ws_all_active:  bool,
+    ws_all_active: bool,
 ) !u16 {
     if (ws_has_windows.len == 0) return start_x;
     ensureCache(dc, config, height);
@@ -114,14 +117,14 @@ pub fn draw(
         defer x += ws_width;
 
         const is_current = ws_all_active or (i == ws_current);
-        const bg         = if (is_current) config.selected_bg else config.bg;
-        const fg         = if (is_current) config.selected_fg else config.fg;
+        const bg = if (is_current) config.selected_bg else config.bg;
+        const fg = if (is_current) config.selected_fg else config.fg;
 
         dc.fillRect(x, 0, ws_width, height, bg);
 
-        const label   = getLabel(i, config);
+        const label = getLabel(i, config);
         const label_w = if (i < label_widths.len) label_widths[i] else dc.measureTextWidth(label);
-        const text_x  = x + (ws_width - label_w) / 2;
+        const text_x = x + (ws_width - label_w) / 2;
         try dc.drawText(text_x, baseline_y, label, fg);
 
         // No windows on this workspace — nothing more to draw for this cell.

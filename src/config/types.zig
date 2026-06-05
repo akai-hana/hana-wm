@@ -26,11 +26,11 @@ pub const Action = union(enum) {
     toggle_fullscreen,
     swap_master,
     swap_master_focus_swap,
-    switch_workspace:  u8,
+    switch_workspace: u8,
     move_to_workspace: u8,
-    move_window:       u8,
-    toggle_tag:        u8,
-    sequence:          []Action, // ordered list of actions executed left-to-right (owned slice)
+    move_window: u8,
+    toggle_tag: u8,
+    sequence: []Action, // ordered list of actions executed left-to-right (owned slice)
     dump_state,
     minimize_window,
     unminimize_lifo,
@@ -38,19 +38,19 @@ pub const Action = union(enum) {
     unminimize_all,
     cycle_layout_variants,
     toggle_prompt,
-    all_workspaces,         // shows all windows from every workspace at once; toggled on/off
+    all_workspaces, // shows all windows from every workspace at once; toggled on/off
     move_to_all_workspaces, // pin focused window to every workspace
-    toggle_tag_all,         // flip between pinned-to-all and current-workspace-only
-    focus_next_window,      // cycle focus forward / right
-    focus_prev_window,      // cycle focus backward / left
-    move_window_next,       // move focused window forward
-    move_window_prev,       // move focused window backward
-    scroll_view_left,       // shift scroll-layout viewport left by one slot
-    scroll_view_right,      // shift scroll-layout viewport right by one slot
+    toggle_tag_all, // flip between pinned-to-all and current-workspace-only
+    focus_next_window, // cycle focus forward / right
+    focus_prev_window, // cycle focus backward / left
+    move_window_next, // move focused window forward
+    move_window_prev, // move focused window backward
+    scroll_view_left, // shift scroll-layout viewport left by one slot
+    scroll_view_right, // shift scroll-layout viewport right by one slot
 
     pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
         switch (self.*) {
-            .exec     => |cmd|  allocator.free(cmd),
+            .exec => |cmd| allocator.free(cmd),
             .sequence => |acts| {
                 for (acts) |*a| a.deinit(allocator);
                 allocator.free(acts);
@@ -62,16 +62,16 @@ pub const Action = union(enum) {
 
 pub const Keybind = struct {
     modifiers: u16, // u16 per XCB spec; xcb_grab_key rejects wider types
-    keysym:    u32, // xcb_keysym_t is u32 by X11 protocol spec; never narrowed
-    keycode:   ?u8 = null,
-    action:    Action,
+    keysym: u32, // xcb_keysym_t is u32 by X11 protocol spec; never narrowed
+    keycode: ?u8 = null,
+    action: Action,
 };
 
 /// A binding triggered by a mouse button press with modifier keys held.
 pub const MouseBind = struct {
     modifiers: u16,
-    button:    u8,
-    action:    Action,
+    button: u8,
+    action: Action,
 };
 
 // Tiling layout types
@@ -93,9 +93,9 @@ pub const MasterSide = enum {
     // Both orderings of diagonal names and both separators are pre-listed in string_map;
     // fromString is the canonical parse entry point.
     const string_map = std.StaticStringMap(MasterSide).initComptime(.{
-        .{ "l",     .left  },
-        .{ "left",  .left  },
-        .{ "r",     .right },
+        .{ "l", .left },
+        .{ "left", .left },
+        .{ "r", .right },
         .{ "right", .right },
     });
 
@@ -117,61 +117,61 @@ pub const MasterVariant = enum {
 
 pub const MonocleVariant = enum {
     gapless, // true fullscreen; ignore gap settings (default)
-    gaps,    // honor gap settings like every other layout
+    gaps, // honor gap settings like every other layout
 };
 
 pub const GridVariant = enum {
-    rigid,   // strict grid: leave empty cells in incomplete last row (default)
+    rigid, // strict grid: leave empty cells in incomplete last row (default)
     relaxed, // last window in incomplete row expands to fill the row
 };
 
 /// Tagged union pairing a variant value with its owning layout type.
 pub const LayoutVariantOverride = union(enum) {
-    master:  MasterVariant,
+    master: MasterVariant,
     monocle: MonocleVariant,
-    grid:    GridVariant,
+    grid: GridVariant,
 };
 
 /// Per-workspace startup layout assignment, overriding the global default.
 /// variant is null -> use the per-layout section default.
 pub const WorkspaceLayoutOverride = struct {
-    workspace_idx: u8,                   // 0-indexed workspace number
-    layout_idx:    u8,                   // index into TilingConfig.layouts
-    variant:     ?LayoutVariantOverride, // null = use per-layout section default
+    workspace_idx: u8, // 0-indexed workspace number
+    layout_idx: u8, // index into TilingConfig.layouts
+    variant: ?LayoutVariantOverride, // null = use per-layout section default
 };
 
 /// Per-workspace master count override, parsed from [tiling.layouts.master-stack.counts].
 pub const WorkspaceMasterCountOverride = struct {
     workspace_idx: u8, // 0-indexed workspace number
-    count:         u8,
+    count: u8,
 };
 
 pub const TilingConfig = struct {
-    enabled:      bool           = true,
-    layout:       []const u8     = "master_left",
-    layouts:      std.ArrayList([]const u8) = .empty, // Available layouts in cycle order
-    master_side:  MasterSide     = .left,
+    enabled: bool = true,
+    layout: []const u8 = "master_left",
+    layouts: std.ArrayList([]const u8) = .empty, // Available layouts in cycle order
+    master_side: MasterSide = .left,
     master_width: parser.ScalableValue = parser.ScalableValue.percentage(50.0),
-    master_count: u8             = 1,
-    gap_width:    parser.ScalableValue = parser.ScalableValue.absolute(10.0),
+    master_count: u8 = 1,
+    gap_width: parser.ScalableValue = parser.ScalableValue.absolute(10.0),
     border_width: parser.ScalableValue = parser.ScalableValue.absolute(2.0),
-    border_focused:   Color = 0x5294E2,
+    border_focused: Color = 0x5294E2,
     border_unfocused: Color = 0x383C4A,
 
     // Per-layout variant preferences
     //
     // Stored as parsed enums (not raw strings) to avoid
     // dangling slices after the config document is freed.
-    master_variant:  MasterVariant  = .lifo,
+    master_variant: MasterVariant = .lifo,
     monocle_variant: MonocleVariant = .gapless,
-    grid_variant:    GridVariant    = .rigid,
+    grid_variant: GridVariant = .rigid,
 
     // Per-layout 3-character indicator overrides (null = derive from active variant).
     // Stored as fixed-size arrays: no allocation, no dangling pointers.
     // Set via `indicator = "XYZ"` (3 chars) in the corresponding [tiling.layouts.*] section.
-    master_indicator:    ?[3]u8 = null,
-    monocle_indicator:   ?[3]u8 = null,
-    grid_indicator:      ?[3]u8 = null,
+    master_indicator: ?[3]u8 = null,
+    monocle_indicator: ?[3]u8 = null,
+    grid_indicator: ?[3]u8 = null,
 
     /// Per-workspace layout assignments parsed from the layouts array.
     workspace_layout_overrides: std.ArrayList(WorkspaceLayoutOverride) = .empty,
@@ -207,22 +207,22 @@ pub const IndicatorLocation = enum {
     // Accepts hyphens or underscores and both orderings of diagonal names (e.g. "left-up" == "up-left").
     // StaticStringMap.initComptime is a compile-time perfect hash — O(1), no runtime cost.
     const string_map = std.StaticStringMap(IndicatorLocation).initComptime(.{
-        .{ "up",         .up         },
-        .{ "down",       .down       },
-        .{ "left",       .left       },
-        .{ "right",      .right      },
-        .{ "up-left",    .up_left    },
-        .{ "up_left",    .up_left    },
-        .{ "left-up",    .up_left    },
-        .{ "left_up",    .up_left    },
-        .{ "up-right",   .up_right   },
-        .{ "up_right",   .up_right   },
-        .{ "right-up",   .up_right   },
-        .{ "right_up",   .up_right   },
-        .{ "down-left",  .down_left  },
-        .{ "down_left",  .down_left  },
-        .{ "left-down",  .down_left  },
-        .{ "left_down",  .down_left  },
+        .{ "up", .up },
+        .{ "down", .down },
+        .{ "left", .left },
+        .{ "right", .right },
+        .{ "up-left", .up_left },
+        .{ "up_left", .up_left },
+        .{ "left-up", .up_left },
+        .{ "left_up", .up_left },
+        .{ "up-right", .up_right },
+        .{ "up_right", .up_right },
+        .{ "right-up", .up_right },
+        .{ "right_up", .up_right },
+        .{ "down-left", .down_left },
+        .{ "down_left", .down_left },
+        .{ "left-down", .down_left },
+        .{ "left_down", .down_left },
         .{ "down-right", .down_right },
         .{ "down_right", .down_right },
         .{ "right-down", .down_right },
@@ -272,51 +272,51 @@ pub const BarConfig = struct {
     bar_position: BarScreenPosition = .top,
     // Configured bar height: absolute pixel value or percentage of screen height.
     // null = auto-calculate from font metrics alone.
-    height:            ?parser.ScalableValue  = null,
-    font:              []const u8             = "monospace:size=10",
-    fonts:             std.ArrayList([]const u8)  = .empty,
-    font_size:         parser.ScalableValue   = parser.ScalableValue.percentage(10.0),
+    height: ?parser.ScalableValue = null,
+    font: []const u8 = "monospace:size=10",
+    fonts: std.ArrayList([]const u8) = .empty,
+    font_size: parser.ScalableValue = parser.ScalableValue.percentage(10.0),
     // Resolved pixel value cached after DPI scaling; derived from font_size at startup.
     // Mixed into BarConfig for convenience; keep in mind it is runtime state, not a raw
     // config value — separate it if BarConfig is ever serialised or structurally diffed.
-    scaled_font_size:  u16                    = 10, // Can exceed 255 on high DPI - u16 is correct
-    spacing:           parser.ScalableValue   = parser.ScalableValue.absolute(12.0),
+    scaled_font_size: u16 = 10, // Can exceed 255 on high DPI - u16 is correct
+    spacing: parser.ScalableValue = parser.ScalableValue.absolute(12.0),
 
     // Bar color scheme; all values are 0xRRGGBB (see Color type alias).
-    bg:          Color = 0x222222,
-    fg:          Color = 0xBBBBBB,
+    bg: Color = 0x222222,
+    fg: Color = 0xBBBBBB,
     selected_bg: Color = 0x005577,
     selected_fg: Color = 0xEEEEEE,
     occupied_fg: Color = 0xEEEEEE,
-    urgent_bg:   Color = 0xFF0000,
-    urgent_fg:   Color = 0xFFFFFF,
+    urgent_bg: Color = 0xFF0000,
+    urgent_fg: Color = 0xFFFFFF,
 
-    accent_color:           Color = 0x61AFEF,
-    workspaces_accent:      Color = 0x61AFEF,
-    title_accent_color:     Color = 0x61AFEF,
+    accent_color: Color = 0x61AFEF,
+    workspaces_accent: Color = 0x61AFEF,
+    title_accent_color: Color = 0x61AFEF,
     title_unfocused_accent: Color = 0x222222,
     title_minimized_accent: Color = 0x61AFEF,
-    clock_accent:           Color = 0x61AFEF,
+    clock_accent: Color = 0x61AFEF,
 
-    workspace_icons:     std.ArrayList([]const u8) = .empty,
-    indicator_size:      parser.ScalableValue = parser.ScalableValue.percentage(30.0),
+    workspace_icons: std.ArrayList([]const u8) = .empty,
+    indicator_size: parser.ScalableValue = parser.ScalableValue.percentage(30.0),
     workspace_tag_width: parser.ScalableValue = parser.ScalableValue.percentage(100.0),
 
-    indicator_location:  IndicatorLocation = .up_left,
-    indicator_padding:   f32               = 0.1,
-    indicator_focused:   []const u8        = "■",
-    indicator_unfocused: []const u8        = "□",
-    indicator_color:     ?Color             = null,
+    indicator_location: IndicatorLocation = .up_left,
+    indicator_padding: f32 = 0.1,
+    indicator_focused: []const u8 = "■",
+    indicator_unfocused: []const u8 = "□",
+    indicator_color: ?Color = null,
 
     clock_format: []const u8 = "%Y-%m-%d %H:%M:%S",
 
     // drun segment colors and prompt; all nullable, falling back to bar-wide defaults.
-    drun_bg:           ?Color     = null,    // Background; falls back to bg
-    drun_fg:           ?Color     = null,    // Typed text color; falls back to fg
-    drun_prompt_color: ?Color     = null,    // Prompt text color; falls back to accent_color
-    drun_prompt:       []const u8 = "run: ", // Prefix rendered left of the text input cursor
+    drun_bg: ?Color = null, // Background; falls back to bg
+    drun_fg: ?Color = null, // Typed text color; falls back to fg
+    drun_prompt_color: ?Color = null, // Prompt text color; falls back to accent_color
+    drun_prompt: []const u8 = "run: ", // Prefix rendered left of the text input cursor
 
-    layout: std.ArrayList(BarLayout)           = .empty,
+    layout: std.ArrayList(BarLayout) = .empty,
 
     scale_factor: f32 = 1.0,
     transparency: f32 = 1.0,
@@ -385,7 +385,7 @@ pub const BarConfig = struct {
 
 pub const Rule = struct {
     class_name: []const u8,
-    workspace:  u8,
+    workspace: u8,
 };
 
 pub const WorkspaceConfig = struct {
@@ -401,11 +401,11 @@ pub const WorkspaceConfig = struct {
 // Top-level config
 
 pub const Config = struct {
-    keybindings:    std.ArrayList(Keybind)   = .empty,
+    keybindings: std.ArrayList(Keybind) = .empty,
     mouse_bindings: std.ArrayList(MouseBind) = .empty,
-    tiling:      TilingConfig    = .{},
-    workspaces:  WorkspaceConfig = .{},
-    bar:         BarConfig       = .{},
+    tiling: TilingConfig = .{},
+    workspaces: WorkspaceConfig = .{},
+    bar: BarConfig = .{},
 
     /// How close (in px or %) a window edge must be to a monitor/bar boundary
     /// before it snaps. Set to 0 to disable. Percentage is relative to screen width.
@@ -420,11 +420,11 @@ pub const Config = struct {
     // NOTE: `tiling.layout` is intentionally absent here — it always points into
     // `tiling.layouts.items[0]`, which is freed by `TilingConfig.deinit`.  A
     // separate sentinel would create a redundant allocation and a double-free risk.
-    allocated_font:                ?[]const u8 = null,
-    allocated_clock_format:        ?[]const u8 = null,
-    allocated_indicator_focused:   ?[]const u8 = null,
+    allocated_font: ?[]const u8 = null,
+    allocated_clock_format: ?[]const u8 = null,
+    allocated_indicator_focused: ?[]const u8 = null,
     allocated_indicator_unfocused: ?[]const u8 = null,
-    allocated_drun_prompt:         ?[]const u8 = null,
+    allocated_drun_prompt: ?[]const u8 = null,
 
     pub fn deinit(self: *Config, a: std.mem.Allocator) void {
         for (self.keybindings.items) |*kb| kb.action.deinit(a);
@@ -439,9 +439,16 @@ pub const Config = struct {
         self.tiling.deinit(a);
 
         inline for (.{
-            "allocated_font", "allocated_clock_format",
+            "allocated_font",              "allocated_clock_format",
             "allocated_indicator_focused", "allocated_indicator_unfocused",
             "allocated_drun_prompt",
-        }) |field| if (@field(self, field)) |s| a.free(s);
+        }) |field| {
+            // Catch field renames or deletions at compile time: if this string no
+            // longer names a real Config field, the build fails with a clear error
+            // rather than silently skipping the free.
+            comptime if (!@hasField(Config, field))
+                @compileError("Config.deinit: '" ++ field ++ "' is not a field of Config; update the list");
+            if (@field(self, field)) |s| a.free(s);
+        }
     }
 };

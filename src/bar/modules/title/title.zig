@@ -3,19 +3,20 @@
 
 const std = @import("std");
 
-const core    = @import("core");
-    const xcb = core.xcb;
-const utils   = @import("utils");
-const scale   = @import("scale");
+const core = @import("core");
+const xcb = core.xcb;
+const utils = @import("utils");
+const scale = @import("scale");
 
 const types = @import("types");
 
-const drawing  = @import("drawing");
+const drawing = @import("drawing");
 const carousel = @import("carousel");
-const tiling   = if (@import("build_options").has_tiling) @import("tiling") else struct {
-    pub fn getWindowGeom(_: u32) ?@import("utils").Rect { return null; }
+const tiling = if (@import("build_options").has_tiling) @import("tiling") else struct {
+    pub fn getWindowGeom(_: u32) ?@import("utils").Rect {
+        return null;
+    }
 };
-
 
 // Module constants
 
@@ -34,8 +35,8 @@ const max_visible_windows: usize = 128;
 
 const Atoms = struct {
     /// null until successfully resolved, to avoid XCB_ATOM_NONE's sentinel (0).
-    net_wm_name:    ?u32 = null,
-    utf8_string:    ?u32 = null,
+    net_wm_name: ?u32 = null,
+    utf8_string: ?u32 = null,
     is_initialized: bool = false,
 
     /// Resolves and caches the X11 atoms needed for title fetching.
@@ -43,8 +44,8 @@ const Atoms = struct {
     fn ensureResolved(self: *Atoms) void {
         if (self.is_initialized) return;
         self.is_initialized = true;
-        self.net_wm_name    = utils.getAtomCached("_NET_WM_NAME") catch null;
-        self.utf8_string    = utils.getAtomCached("UTF8_STRING")  catch null;
+        self.net_wm_name = utils.getAtomCached("_NET_WM_NAME") catch null;
+        self.utf8_string = utils.getAtomCached("UTF8_STRING") catch null;
     }
 
     /// Returns the UTF-8 atom when available, falling back to XCB_ATOM_STRING.
@@ -58,10 +59,10 @@ var atoms: Atoms = .{};
 // Internal types
 
 const WindowInfo = struct {
-    window:    u32,
-    x:         i16,
-    y:         i16,
-    title:     []const u8,
+    window: u32,
+    x: i16,
+    y: i16,
+    title: []const u8,
     minimized: bool,
 };
 
@@ -70,12 +71,12 @@ const WindowInfo = struct {
 /// Stable per-call rendering context: geometry, draw state, and connection.
 /// Constructed once per bar frame and shared between `draw()` and `drawCached()`.
 pub const TitleRenderContext = struct {
-    dc:      *drawing.DrawContext,
-    config:  types.BarConfig,
-    height:  u16,
+    dc: *drawing.DrawContext,
+    config: types.BarConfig,
+    height: u16,
     start_x: u16,
-    width:   u16,
-    conn:    *xcb.xcb_connection_t,
+    width: u16,
+    conn: *xcb.xcb_connection_t,
 };
 
 /// Per-frame volatile snapshot captured on the main thread.
@@ -87,25 +88,25 @@ pub const TitleRenderContext = struct {
 /// an empty slice when that case cannot occur (e.g. the `drawCached` fast path,
 /// which has no cached minimized title).
 pub const TitleSnapshot = struct {
-    focused_window:  ?u32,
-    focused_title:   []const u8,
+    focused_window: ?u32,
+    focused_title: []const u8,
     minimized_title: []const u8,
     current_ws_wins: []const u32,
-    minimized_set:   *const std.AutoHashMapUnmanaged(u32, void),
+    minimized_set: *const std.AutoHashMapUnmanaged(u32, void),
 
     /// Pre-fetched window titles captured on the main thread (Issue #2).
     /// Flat byte buffer; `window_title_ends[i]` is the exclusive end offset of
     /// the i-th title inside `window_title_data`.  Empty slices signal that no
     /// pre-fetched data is available (e.g. the drawCached fast path before the
     /// title cache has been populated with multi-window data).
-    window_title_data: []const u8  = &.{},
+    window_title_data: []const u8 = &.{},
     window_title_ends: []const u32 = &.{},
 
     /// Returns the pre-fetched title for `current_ws_wins[idx]`, or an empty
     /// slice when pre-fetched data is unavailable or `idx` is out of range.
     pub fn windowTitle(self: *const TitleSnapshot, idx: usize) []const u8 {
         if (idx >= self.window_title_ends.len) return &.{};
-        const end:   usize = self.window_title_ends[idx];
+        const end: usize = self.window_title_ends[idx];
         const start: usize = if (idx == 0) 0 else self.window_title_ends[idx - 1];
         if (start > self.window_title_data.len or end > self.window_title_data.len) return &.{};
         return self.window_title_data[start..end];
@@ -121,7 +122,7 @@ pub const TitleSnapshot = struct {
 /// `cached_title_window` — window ID the buffer was fetched for; used to
 ///                          detect when `focused_title` belongs to a new window.
 pub const TitleCache = struct {
-    cached_title:        *std.ArrayListUnmanaged(u8),
+    cached_title: *std.ArrayListUnmanaged(u8),
     cached_title_window: *?u32,
 };
 
@@ -135,10 +136,10 @@ pub const TitleCache = struct {
 /// `title_invalidated` must be true whenever the focused window's title
 /// property changed since the last draw.
 pub fn draw(
-    ctx:               TitleRenderContext,
-    snapshot:          TitleSnapshot,
-    cache:             TitleCache,
-    allocator:         std.mem.Allocator,
+    ctx: TitleRenderContext,
+    snapshot: TitleSnapshot,
+    cache: TitleCache,
+    allocator: std.mem.Allocator,
     title_invalidated: bool,
 ) !u16 {
     scale.ensureRefreshRateDetected(ctx.conn);
@@ -166,8 +167,8 @@ pub fn draw(
 ///   - passes `minimized_title = ""` in the snapshot (the minimized title is not
 ///     cached by the bar slot; the full `draw()` path handles it).
 pub fn drawCached(
-    ctx:       TitleRenderContext,
-    snapshot:  TitleSnapshot,
+    ctx: TitleRenderContext,
+    snapshot: TitleSnapshot,
     allocator: std.mem.Allocator,
 ) !u16 {
     scale.ensureRefreshRateDetected(ctx.conn);
@@ -196,9 +197,9 @@ pub fn drawCached(
 /// that minimized window — storing the results in `TitleSnapshot.focused_title`
 /// and `TitleSnapshot.minimized_title` respectively.
 pub fn fetchWindowTitleInto(
-    conn:      *xcb.xcb_connection_t,
-    win:       u32,
-    buf:       *std.ArrayListUnmanaged(u8),
+    conn: *xcb.xcb_connection_t,
+    win: u32,
+    buf: *std.ArrayListUnmanaged(u8),
     allocator: std.mem.Allocator,
 ) !void {
     atoms.ensureResolved();
@@ -210,7 +211,12 @@ pub fn fetchWindowTitleInto(
         }
     }
     _ = utils.fetchPropertyToBuffer(
-        conn, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, buf, allocator,
+        conn,
+        win,
+        xcb.XCB_ATOM_WM_NAME,
+        xcb.XCB_ATOM_STRING,
+        buf,
+        allocator,
     ) catch {};
 }
 
@@ -236,10 +242,10 @@ inline fn emptyWorkspace(ctx: TitleRenderContext, count: usize) ?u16 {
 /// `cache` is null on the `drawCached()` path (read-only; no cache update).
 /// `title_invalidated` is always false on the `drawCached()` path.
 fn drawSingleWindow(
-    ctx:               TitleRenderContext,
-    snapshot:          TitleSnapshot,
-    cache:             ?TitleCache,
-    allocator:         std.mem.Allocator,
+    ctx: TitleRenderContext,
+    snapshot: TitleSnapshot,
+    cache: ?TitleCache,
+    allocator: std.mem.Allocator,
     title_invalidated: bool,
 ) !void {
     // Free the segmented carousel: the single and segmented paths are
@@ -253,11 +259,11 @@ fn drawSingleWindow(
     // Mirrors the deinitSingleCarousel() call in drawSegmentedTitles.
     carousel.deinitSegmentedCarousel();
 
-    const single_win   = snapshot.current_ws_wins[0];
+    const single_win = snapshot.current_ws_wins[0];
     const is_minimized = snapshot.minimized_set.contains(single_win);
     // `has_focus` is true when any window on this workspace is focused,
     // meaning the segment gets the accent colour rather than plain bg.
-    const has_focus    = snapshot.focused_window != null;
+    const has_focus = snapshot.focused_window != null;
 
     const accent = if (is_minimized)
         ctx.config.title_minimized_accent
@@ -268,15 +274,15 @@ fn drawSingleWindow(
     ctx.dc.fillRect(ctx.start_x, 0, ctx.width, ctx.height, accent);
 
     const scaled_padding = ctx.config.scaledSegmentPadding(ctx.height);
-    const baseline_y     = ctx.dc.baselineY(ctx.height);
-    const text_x         = ctx.start_x + scaled_padding + title_lead_px;
+    const baseline_y = ctx.dc.baselineY(ctx.height);
+    const text_x = ctx.start_x + scaled_padding + title_lead_px;
     // Saturating arithmetic guards against extreme padding values before the
     // saturating subtraction, preventing a u16 wrap in the intermediate result.
-    const avail_w        = ctx.width -| scaled_padding *| 2 -| title_lead_px;
-    const geom           = carousel.SegmentGeometry{
-        .seg_x   = ctx.start_x,
-        .seg_w   = ctx.width,
-        .text_x  = text_x,
+    const avail_w = ctx.width -| scaled_padding *| 2 -| title_lead_px;
+    const geom = carousel.SegmentGeometry{
+        .seg_x = ctx.start_x,
+        .seg_w = ctx.width,
+        .text_x = text_x,
         .avail_w = avail_w,
     };
 
@@ -285,9 +291,14 @@ fn drawSingleWindow(
         // I/O here, upholding the render-thread threading contract.
         if (snapshot.minimized_title.len > 0)
             try carousel.drawScrollingTitle(
-                ctx.dc, baseline_y, geom,
-                snapshot.minimized_title, accent, ctx.config.fg,
-                single_win, false,
+                ctx.dc,
+                baseline_y,
+                geom,
+                snapshot.minimized_title,
+                accent,
+                ctx.config.fg,
+                single_win,
+                false,
             );
         return;
     }
@@ -306,9 +317,14 @@ fn drawSingleWindow(
 
     const fg = if (has_focus) ctx.config.selected_fg else ctx.config.fg;
     try carousel.drawScrollingTitle(
-        ctx.dc, baseline_y, geom,
-        snapshot.focused_title, accent, fg,
-        snapshot.focused_window, title_invalidated,
+        ctx.dc,
+        baseline_y,
+        geom,
+        snapshot.focused_title,
+        accent,
+        fg,
+        snapshot.focused_window,
+        title_invalidated,
     );
 }
 
@@ -317,9 +333,9 @@ fn drawSingleWindow(
 /// Renders one title segment per window in a horizontal split-view layout.
 /// Windows are sorted spatially so each segment position is stable across focus changes.
 fn drawSegmentedTitles(
-    ctx:               TitleRenderContext,
-    snapshot:          TitleSnapshot,
-    allocator:         std.mem.Allocator,
+    ctx: TitleRenderContext,
+    snapshot: TitleSnapshot,
+    allocator: std.mem.Allocator,
     title_invalidated: bool,
 ) !void {
     const windows = snapshot.current_ws_wins;
@@ -352,10 +368,10 @@ fn drawSegmentedTitles(
     // XCB cookie arrays — only populated for windows whose titles are not
     // available from the pre-fetched snapshot data.
     var net_wm_cookies: [max_visible_windows]xcb.xcb_get_property_cookie_t = undefined;
-    var geom_cookies:   [max_visible_windows]xcb.xcb_get_geometry_cookie_t = undefined;
-    var needs_xcb_title:    [max_visible_windows]bool = @splat(false);
+    var geom_cookies: [max_visible_windows]xcb.xcb_get_geometry_cookie_t = undefined;
+    var needs_xcb_title: [max_visible_windows]bool = @splat(false);
     var needs_xcb_geometry: [max_visible_windows]bool = @splat(false);
-    var is_minimized:       [max_visible_windows]bool = @splat(false);
+    var is_minimized: [max_visible_windows]bool = @splat(false);
 
     // Phase 1 — fire only the cookies we actually need.
     // Tiled windows: geometry comes from the tiling CacheMap (zero round-trips).
@@ -372,16 +388,16 @@ fn drawSegmentedTitles(
         if (!is_minimized[i]) {
             // Tiling cache hit: geometry is already known, no round-trip needed.
             if (tiling.getWindowGeom(win) == null) {
-                geom_cookies[i]       = xcb.xcb_get_geometry(ctx.conn, win);
+                geom_cookies[i] = xcb.xcb_get_geometry(ctx.conn, win);
                 needs_xcb_geometry[i] = true;
             }
         }
     }
 
     // Phase 2 — collect _NET_WM_NAME replies; queue WM_NAME fallbacks.
-    var titles:          [max_visible_windows]?[]const u8                   = @splat(null);
-    var fallback_cookies:[max_visible_windows]xcb.xcb_get_property_cookie_t = undefined;
-    var needs_fallback:  [max_visible_windows]bool                          = @splat(false);
+    var titles: [max_visible_windows]?[]const u8 = @splat(null);
+    var fallback_cookies: [max_visible_windows]xcb.xcb_get_property_cookie_t = undefined;
+    var needs_fallback: [max_visible_windows]bool = @splat(false);
 
     if (!has_prefetched_titles) {
         for (windows[0..win_count], 0..) |win, i| {
@@ -396,8 +412,7 @@ fn drawSegmentedTitles(
                         break :got;
                     }
                 }
-                fallback_cookies[i] = xcb.xcb_get_property(
-                    ctx.conn, 0, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, 0, 8192);
+                fallback_cookies[i] = xcb.xcb_get_property(ctx.conn, 0, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, 0, 8192);
                 needs_fallback[i] = true;
             }
         }
@@ -419,7 +434,7 @@ fn drawSegmentedTitles(
     // Build WindowInfo list.
     // Geometry: tiling cache → xcb_get_geometry reply → offscreen sentinel.
     var window_info_buf: [max_visible_windows]WindowInfo = undefined;
-    var info_count:      usize                           = 0;
+    var info_count: usize = 0;
 
     for (windows[0..win_count], 0..) |win, i| {
         const geom: utils.Rect = if (is_minimized[i])
@@ -430,9 +445,9 @@ fn drawSegmentedTitles(
             const r = xcb.xcb_get_geometry_reply(ctx.conn, geom_cookies[i], null) orelse continue;
             defer std.c.free(r);
             break :blk utils.Rect{
-                .x      = @intCast(r.*.x),
-                .y      = @intCast(r.*.y),
-                .width  = r.*.width,
+                .x = @intCast(r.*.x),
+                .y = @intCast(r.*.y),
+                .width = r.*.width,
                 .height = r.*.height,
             };
         } else .{ .x = std.math.maxInt(i16), .y = std.math.maxInt(i16), .width = 0, .height = 0 };
@@ -443,10 +458,10 @@ fn drawSegmentedTitles(
             titles[i] orelse "";
 
         window_info_buf[info_count] = .{
-            .window    = win,
-            .x         = geom.x,
-            .y         = geom.y,
-            .title     = title_str,
+            .window = win,
+            .x = geom.x,
+            .y = geom.y,
+            .title = title_str,
             .minimized = is_minimized[i],
         };
         info_count += 1;
@@ -460,36 +475,34 @@ fn drawSegmentedTitles(
     // focus changes, which would be visually jarring.
     std.mem.sort(WindowInfo, window_infos, {}, compareWindows);
 
-    const window_count:    u32 = @intCast(window_infos.len);
-    const scaled_padding       = ctx.config.scaledSegmentPadding(ctx.height);
-    const baseline_y           = ctx.dc.baselineY(ctx.height);
+    const window_count: u32 = @intCast(window_infos.len);
+    const scaled_padding = ctx.config.scaledSegmentPadding(ctx.height);
+    const baseline_y = ctx.dc.baselineY(ctx.height);
 
     for (window_infos, 0..) |info, i| {
         // Pixel-perfect tiling: segment i spans [i*W/n, (i+1)*W/n).
-        const x0: u16 = @intCast(@divFloor(@as(u32, @intCast(i))     * ctx.width, window_count));
+        const x0: u16 = @intCast(@divFloor(@as(u32, @intCast(i)) * ctx.width, window_count));
         const x1: u16 = @intCast(@divFloor(@as(u32, @intCast(i + 1)) * ctx.width, window_count));
-        const segment_x:     u16 = ctx.start_x + x0;
+        const segment_x: u16 = ctx.start_x + x0;
         const segment_width: u16 = x1 - x0;
         if (segment_width == 0) continue;
 
         const is_focused_win = snapshot.focused_window == info.window;
 
-        const accent = if (is_focused_win)  ctx.config.title_accent_color
-            else if (info.minimized)         ctx.config.title_minimized_accent
-            else                             ctx.config.title_unfocused_accent;
+        const accent = if (is_focused_win) ctx.config.title_accent_color else if (info.minimized) ctx.config.title_minimized_accent else ctx.config.title_unfocused_accent;
 
         ctx.dc.fillRect(segment_x, 0, segment_width, ctx.height, accent);
 
         if (info.title.len == 0 or segment_width <= scaled_padding *| 2) continue;
 
-        const text_x  = segment_x + scaled_padding + title_lead_px;
+        const text_x = segment_x + scaled_padding + title_lead_px;
         const avail_w = segment_width -| scaled_padding *| 2 -| title_lead_px;
         const text_fg = if (is_focused_win) ctx.config.selected_fg else ctx.config.fg;
-        const text_w  = ctx.dc.measureTextWidth(info.title);
-        const geom    = carousel.SegmentGeometry{
-            .seg_x   = segment_x,
-            .seg_w   = segment_width,
-            .text_x  = text_x,
+        const text_w = ctx.dc.measureTextWidth(info.title);
+        const geom = carousel.SegmentGeometry{
+            .seg_x = segment_x,
+            .seg_w = segment_width,
+            .text_x = text_x,
             .avail_w = avail_w,
         };
 
@@ -497,8 +510,15 @@ fn drawSegmentedTitles(
             // Focused + carousel enabled: pass full segment bounds so
             // the scroll covers the entire segment width.
             const scrolled = try carousel.drawSegmentedCarousel(
-                ctx.dc, baseline_y, geom, text_w,
-                info.title, accent, text_fg, info.window, title_invalidated,
+                ctx.dc,
+                baseline_y,
+                geom,
+                text_w,
+                info.title,
+                accent,
+                text_fg,
+                info.window,
+                title_invalidated,
             );
             if (!scrolled) {
                 // Text fits — draw it inset with normal padding.

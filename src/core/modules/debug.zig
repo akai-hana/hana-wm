@@ -1,9 +1,8 @@
 //! Debug logging and error helpers
 //! Provides logging utilities that are compiled away entirely in non-debug builds.
 
-const std   = @import("std");
+const std = @import("std");
 const build = @import("build_options");
-
 
 /// Strips the directory and ".zig" extension from a source file path, returning a short module tag.
 fn moduleFromSrc(src: std.builtin.SourceLocation) []const u8 {
@@ -27,17 +26,29 @@ fn emitLog(src: std.builtin.SourceLocation, comptime kind: LogKind, comptime fmt
     if (!debugEnabled()) return;
     const module = moduleFromSrc(src);
     switch (kind) {
-        .err       => std.log.err  ("[{s}] " ++ fmt, .{module} ++ args),
-        .warn      => std.log.warn ("[{s}] " ++ fmt, .{module} ++ args),
+        .err => std.log.err("[{s}] " ++ fmt, .{module} ++ args),
+        .warn => std.log.warn("[{s}] " ++ fmt, .{module} ++ args),
+        // Use std.log.info so that all log levels go through the same handler
+        // (respecting any custom log handler the embedder installs and compile-time
+        // log-level filtering).  Previously this branch used std.debug.print with
+        // hardcoded ANSI escape codes, which bypassed log routing entirely.
+        .info => std.log.info("[{s}] " ++ fmt, .{module} ++ args),
         .debug_log => std.log.debug("[{s}] " ++ fmt, .{module} ++ args),
-        .info      => std.debug.print("\x1b[32m[{s}]\x1b[0m " ++ fmt ++ "\n", .{module} ++ args),
     }
 }
 
-pub inline fn err  (comptime fmt: []const u8, args: anytype) void { emitLog(@src(), .err,       fmt, args); }
-pub inline fn warn (comptime fmt: []const u8, args: anytype) void { emitLog(@src(), .warn,      fmt, args); }
-pub inline fn info (comptime fmt: []const u8, args: anytype) void { emitLog(@src(), .info,      fmt, args); }
-pub inline fn debug(comptime fmt: []const u8, args: anytype) void { emitLog(@src(), .debug_log, fmt, args); }
+pub inline fn err(comptime fmt: []const u8, args: anytype) void {
+    emitLog(@src(), .err, fmt, args);
+}
+pub inline fn warn(comptime fmt: []const u8, args: anytype) void {
+    emitLog(@src(), .warn, fmt, args);
+}
+pub inline fn info(comptime fmt: []const u8, args: anytype) void {
+    emitLog(@src(), .info, fmt, args);
+}
+pub inline fn debug(comptime fmt: []const u8, args: anytype) void {
+    emitLog(@src(), .debug_log, fmt, args);
+}
 
 /// Panics with a module-tagged message when `condition` is false, in debug builds only.
 pub inline fn assert(condition: bool, comptime message: []const u8) void {

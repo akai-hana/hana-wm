@@ -1,33 +1,33 @@
 //! X event dispatch and main event loop
 //! Handles X events, OS signals, and config reload, driving the WM's main loop.
 
-const std   = @import("std");
+const std = @import("std");
 const build = @import("build_options");
 
-const core      = @import("core");
-    const xcb   = core.xcb;
-const utils     = @import("utils");
+const core = @import("core");
+const xcb = core.xcb;
+const utils = @import("utils");
 const constants = @import("constants");
-const types     = @import("types");
+const types = @import("types");
 
-const debug  = @import("debug");
+const debug = @import("debug");
 const config = @import("config");
-const input  = @import("input");
+const input = @import("input");
 const window = @import("window");
-const focus  = @import("focus");
+const focus = @import("focus");
 
 const tiling = if (build.has_tiling) @import("tiling");
-const bar    = if (build.has_bar) @import("bar");
+const bar = if (build.has_bar) @import("bar");
 const prompt = if (build.has_prompt and build.has_bar) @import("prompt");
 
 // Indices into the poll fd array.
-const FD_XCB    = 0;
+const FD_XCB = 0;
 const FD_SIGNAL = 1;
 
 // Aliases to canonical definitions in constants.zig.
 const EVENT_DISPATCH_TABLE = constants.Limits.EVENT_DISPATCH_TABLE;
-const MAX_KEYBIND_COOKIES  = constants.Limits.MAX_KEYBIND_COOKIES;
-const LOCK_MODIFIERS       = constants.LOCK_MODIFIERS;
+const MAX_KEYBIND_COOKIES = constants.Limits.MAX_KEYBIND_COOKIES;
+const LOCK_MODIFIERS = constants.LOCK_MODIFIERS;
 
 // Self-pipe for portable signal delivery.
 // Signal handlers write to [1]; the event loop polls [0].
@@ -55,17 +55,17 @@ const dispatch_table = blk: {
     table[xcb.XCB_ENTER_NOTIFY] = asHandler(window.handleEnterNotify);
     table[xcb.XCB_LEAVE_NOTIFY] = asHandler(window.handleLeaveNotify);
 
-    table[xcb.XCB_MAP_REQUEST]       = asHandler(window.handleMapRequest);
+    table[xcb.XCB_MAP_REQUEST] = asHandler(window.handleMapRequest);
     table[xcb.XCB_CONFIGURE_REQUEST] = asHandler(window.handleConfigureRequest);
-    table[xcb.XCB_UNMAP_NOTIFY]      = asHandler(window.handleUnmapNotify);
-    table[xcb.XCB_DESTROY_NOTIFY]    = asHandler(window.handleDestroyNotify);
-    table[xcb.XCB_CLIENT_MESSAGE]    = asHandler(window.handleClientMessage);
+    table[xcb.XCB_UNMAP_NOTIFY] = asHandler(window.handleUnmapNotify);
+    table[xcb.XCB_DESTROY_NOTIFY] = asHandler(window.handleDestroyNotify);
+    table[xcb.XCB_CLIENT_MESSAGE] = asHandler(window.handleClientMessage);
 
-    table[xcb.XCB_KEY_PRESS]       = asHandler(input.handleKeyPress);
-    table[xcb.XCB_BUTTON_PRESS]    = asHandler(input.handleButtonPress);
-    table[xcb.XCB_BUTTON_RELEASE]  = asHandler(input.handleButtonRelease);
-    table[xcb.XCB_MOTION_NOTIFY]   = asHandler(input.handleMotionNotify);
-    table[xcb.XCB_FOCUS_IN]        = asHandler(focus.handleFocusIn);
+    table[xcb.XCB_KEY_PRESS] = asHandler(input.handleKeyPress);
+    table[xcb.XCB_BUTTON_PRESS] = asHandler(input.handleButtonPress);
+    table[xcb.XCB_BUTTON_RELEASE] = asHandler(input.handleButtonRelease);
+    table[xcb.XCB_MOTION_NOTIFY] = asHandler(input.handleMotionNotify);
+    table[xcb.XCB_FOCUS_IN] = asHandler(focus.handleFocusIn);
     table[xcb.XCB_PROPERTY_NOTIFY] = asHandler(handlePropertyNotify);
 
     if (build.has_bar) table[xcb.XCB_EXPOSE] = asHandler(bar.handleExpose);
@@ -97,9 +97,9 @@ fn createPipe() ![2]std.posix.fd_t {
     const flags = std.os.linux.O{ .CLOEXEC = true, .NONBLOCK = true };
     switch (std.posix.errno(std.os.linux.pipe2(&fds, flags))) {
         .SUCCESS => {},
-        .MFILE   => return error.ProcessFdQuotaExceeded,
-        .NFILE   => return error.SystemFdQuotaExceeded,
-        else     => |err| return std.posix.unexpectedErrno(err),
+        .MFILE => return error.ProcessFdQuotaExceeded,
+        .NFILE => return error.SystemFdQuotaExceeded,
+        else => |err| return std.posix.unexpectedErrno(err),
     }
     return fds;
 }
@@ -110,13 +110,13 @@ pub fn setupSignalPipe() !void {
 
     const sa: std.posix.Sigaction = .{
         .handler = .{ .handler = signalHandler },
-        .mask    = std.posix.sigemptyset(),
-        .flags   = std.posix.SA.RESTART,
+        .mask = std.posix.sigemptyset(),
+        .flags = std.posix.SA.RESTART,
     };
 
-    std.posix.sigaction(std.posix.SIG.HUP,  &sa, null);
+    std.posix.sigaction(std.posix.SIG.HUP, &sa, null);
     std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
-    std.posix.sigaction(std.posix.SIG.INT,  &sa, null);
+    std.posix.sigaction(std.posix.SIG.INT, &sa, null);
     // SIGCHLD: fired when an intermediate child exits after the double-fork spawn.
     // The handler writes the signal byte to the self-pipe; dispatchSignal then
     // calls reapPendingChildren() (waitpid WNOHANG) and drainPendingSpawns().
@@ -135,9 +135,8 @@ pub fn deinitSignalPipe() void {
 /// Dispatches a single signal byte to the appropriate handler.
 inline fn dispatchSignal(byte: u8) void {
     switch (byte) {
-        sigToU8(std.posix.SIG.HUP)  => utils.reload(),
-        sigToU8(std.posix.SIG.TERM),
-        sigToU8(std.posix.SIG.INT)  => utils.quit(),
+        sigToU8(std.posix.SIG.HUP) => utils.reload(),
+        sigToU8(std.posix.SIG.TERM), sigToU8(std.posix.SIG.INT) => utils.quit(),
         // SIGCHLD: an intermediate double-fork child has exited.
         // Reap it with WNOHANG, then immediately drain the spawn pipes so
         // registerSpawn fires without waiting for the next XCB event batch.
@@ -191,8 +190,13 @@ fn fillGrabCookies(cookies: []CookieEntry) usize {
         for (LOCK_MODIFIERS) |lock| {
             cookies[n] = .{
                 .cookie = xcb.xcb_grab_key_checked(
-                    core.conn, 0, core.root, @intCast(kb.modifiers | lock), keycode,
-                    xcb.XCB_GRAB_MODE_ASYNC, xcb.XCB_GRAB_MODE_ASYNC,
+                    core.conn,
+                    0,
+                    core.root,
+                    @intCast(kb.modifiers | lock),
+                    keycode,
+                    xcb.XCB_GRAB_MODE_ASYNC,
+                    xcb.XCB_GRAB_MODE_ASYNC,
                 ),
                 .keycode = keycode,
             };
@@ -253,6 +257,17 @@ fn applyConfig(new_config: *types.Config) !void {
 fn validateConfig(cfg: *const types.Config) !void {
     if (cfg.tiling.master_count == 0) {
         debug.err("Invalid config: master_count must be > 0, keeping old", .{});
+        return error.InvalidConfig;
+    }
+    // master_width is stored as a ScalableValue; normalise to [0,1] for the check.
+    const mw = cfg.tiling.master_width;
+    const mw_ratio: f32 = if (mw.is_percentage) mw.value / 100.0 else mw.value;
+    if (mw_ratio < constants.MIN_MASTER_WIDTH or mw_ratio > 1.0) {
+        debug.err("Invalid config: master_width ratio {d:.3} out of [{d:.2}, 1.0], keeping old", .{ mw_ratio, constants.MIN_MASTER_WIDTH });
+        return error.InvalidConfig;
+    }
+    if (cfg.workspaces.count < 1) {
+        debug.err("Invalid config: workspace count must be >= 1, keeping old", .{});
         return error.InvalidConfig;
     }
 }
@@ -332,11 +347,11 @@ fn handleXcbEvents() void {
 }
 
 pub fn run() !void {
-    const x_fd: std.posix.fd_t      = xcb.xcb_get_file_descriptor(core.conn);
+    const x_fd: std.posix.fd_t = xcb.xcb_get_file_descriptor(core.conn);
     const signal_fd: std.posix.fd_t = signal_pipe[0];
 
     var fds = [_]std.posix.pollfd{
-        .{ .fd = x_fd,      .events = std.posix.POLL.IN, .revents = 0 },
+        .{ .fd = x_fd, .events = std.posix.POLL.IN, .revents = 0 },
         .{ .fd = signal_fd, .events = std.posix.POLL.IN, .revents = 0 },
     };
 
@@ -346,8 +361,8 @@ pub fn run() !void {
         const poll_rc = std.os.linux.poll(&fds, fds.len, combinedTimeoutMs(blink_ms));
         const ready: usize = switch (std.posix.errno(poll_rc)) {
             .SUCCESS => @intCast(poll_rc),
-            .INTR    => continue,
-            else     => |err| {
+            .INTR => continue,
+            else => |err| {
                 debug.err("poll error: {s}", .{@errorName(std.posix.unexpectedErrno(err))});
                 break;
             },

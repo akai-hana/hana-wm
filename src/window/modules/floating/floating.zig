@@ -1,17 +1,21 @@
 //! Floating windows layout
 //! Manages placement, movement, and resizing of freely positioned floating windows.
 
-const std   = @import("std");
+const std = @import("std");
 const build = @import("build_options");
 
-const core    = @import("core");
-    const xcb = core.xcb;
+const core = @import("core");
+const xcb = core.xcb;
 
 const layouts = @import("layouts");
 
 const bar = if (build.has_bar) @import("bar") else struct {
-    pub fn isVisible() bool { return false; }
-    pub fn getBarHeight() u16 { return 0; }
+    pub fn isVisible() bool {
+        return false;
+    }
+    pub fn getBarHeight() u16 {
+        return 0;
+    }
 };
 
 // Geometry requests are batched so that all cookies are issued before any
@@ -22,7 +26,10 @@ const bar = if (build.has_bar) @import("bar") else struct {
 // 64 covers the typical maximum window count on a single workspace while
 // keeping the two per-batch stack arrays (needs_query + cookies) well under
 // 1 KB of combined stack space.
-const BATCH = 64; //TODO: is there a better solution to handle this problem, other than arbitrarily defining 64? i feel like this just isn't the best solution to the problem.
+// TODO: Replace the hardcoded BATCH limit with a dynamic approach.
+// 64 covers typical workspace sizes, but an ArrayListUnmanaged would
+// handle arbitrarily large window counts without silent truncation.
+const BATCH = 64;
 
 /// Centre any window that is still at the X default origin (0, 0).
 /// Windows the user has already moved are left untouched.
@@ -43,21 +50,23 @@ pub fn tileWithOffset(
     ctx: *const layouts.LayoutCtx,
     _: anytype,
     windows: []const u32,
-    _: u16, _: u16, _: u16,
+    _: u16,
+    _: u16,
+    _: u16,
 ) void {
     const sw: i32 = core.screen.width_in_pixels;
     const sh: i32 = core.screen.height_in_pixels;
 
     // Work-area geometry: exclude the bar so that centred windows land in
     // the visible portion of the screen rather than behind the bar.
-    const bh: i32       = if (bar.isVisible()) bar.getBarHeight() else 0;
+    const bh: i32 = if (bar.isVisible()) bar.getBarHeight() else 0;
     const bar_at_bottom = core.config.bar.bar_position == .bottom;
     const work_top: i32 = if (bar_at_bottom) 0 else bh;
-    const work_h: i32   = sh - bh;
+    const work_h: i32 = sh - bh;
 
     var base: usize = 0;
     while (base < windows.len) {
-        const end   = @min(base + BATCH, windows.len);
+        const end = @min(base + BATCH, windows.len);
         const batch = windows[base..end];
 
         // Phase 0 — cache check.
@@ -88,7 +97,10 @@ pub fn tileWithOffset(
             any_needs = true;
         }
 
-        if (!any_needs) { base = end; continue; }
+        if (!any_needs) {
+            base = end;
+            continue;
+        }
 
         // Phase 1 — issue geometry requests only for uncached / origin windows.
         var cookies: [BATCH]xcb.xcb_get_geometry_cookie_t = undefined;
@@ -102,7 +114,9 @@ pub fn tileWithOffset(
         for (batch, 0..) |win, i| {
             if (!needs_query[i]) continue;
             const reply = xcb.xcb_get_geometry_reply(
-                core.conn, cookies[i], null,
+                core.conn,
+                cookies[i],
+                null,
             ) orelse continue;
             defer std.c.free(reply);
 
@@ -119,16 +133,16 @@ pub fn tileWithOffset(
 
             // Centre within the work area.  @max(0, …) clamps windows larger
             // than the work area to the near edge instead of going negative.
-            const cx: i32 = @max(0, @divTrunc(sw     - w, 2));
+            const cx: i32 = @max(0, @divTrunc(sw - w, 2));
             const cy: i32 = work_top + @max(0, @divTrunc(work_h - h, 2));
 
             // Use configureWithHints so the centred position is stored in the cache.
             // This ensures restoreWorkspaceGeom can replay it on workspace
             // switch without issuing a fresh get_geometry round-trip.
             layouts.configureWithHints(ctx, win, .{
-                .x      = @intCast(cx),
-                .y      = @intCast(cy),
-                .width  = @intCast(w),
+                .x = @intCast(cx),
+                .y = @intCast(cy),
+                .width = @intCast(w),
                 .height = @intCast(h),
             });
         }

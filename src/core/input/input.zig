@@ -1,7 +1,7 @@
 //! User input handling
 //! Handles keyboard, mouse buttons, pointer motion, and drag operations.
 
-const std   = @import("std");
+const std = @import("std");
 const build = @import("build_options");
 
 // libc bindings for fork/exec/wait — no Zig stdlib wrappers exist for these low-level syscalls.
@@ -10,22 +10,22 @@ const c = @cImport({
     @cInclude("sys/wait.h");
 });
 
-const core      = @import("core");
-    const xcb   = core.xcb;
-const types     = @import("types");
-const utils     = @import("utils");
+const core = @import("core");
+const xcb = core.xcb;
+const types = @import("types");
+const utils = @import("utils");
 const constants = @import("constants");
 
-const debug  = @import("debug");
+const debug = @import("debug");
 const config = @import("config");
 
-const window   = @import("window");
+const window = @import("window");
 const tracking = @import("tracking");
-const focus    = @import("focus");
+const focus = @import("focus");
 
 const fullscreen = if (build.has_fullscreen) @import("fullscreen");
-const minimize   = if (build.has_minimize) @import("minimize");
-const tiling     = if (build.has_tiling) @import("tiling");
+const minimize = if (build.has_minimize) @import("minimize");
+const tiling = if (build.has_tiling) @import("tiling");
 
 // Stub struct keeps executeWorkspaceAction guard-free; the comptime if-else
 // means stub methods are never analyzed when has_workspaces = true, matching
@@ -41,9 +41,11 @@ const workspaces = if (build.has_workspaces) @import("workspaces") else struct {
 };
 
 const drag = if (build.has_drag) @import("drag") else struct {
-    pub fn isDragging()                              bool { return false; }
-    pub fn stopDrag()                                void {}
-    pub fn updateDrag(_: i16, _: i16)               void {}
+    pub fn isDragging() bool {
+        return false;
+    }
+    pub fn stopDrag() void {}
+    pub fn updateDrag(_: i16, _: i16) void {}
     pub fn startDrag(_: u32, _: u8, _: i16, _: i16) void {}
 };
 
@@ -58,20 +60,22 @@ const bar = if (build.has_bar) @import("bar") else struct {
 };
 
 const prompt = if (build.has_bar and build.has_prompt) @import("prompt") else struct {
-    pub fn handlePromptKeypress(_: anytype, _: anytype) bool { return false; }
+    pub fn handlePromptKeypress(_: anytype, _: anytype) bool {
+        return false;
+    }
     pub fn toggle() void {}
 };
 
 // Constants
 
-const mouse_button_left:        u8 = 1;
-const mouse_button_middle:      u8 = 2;
-const mouse_button_right:       u8 = 3;
-const mouse_button_scroll_up:   u8 = 4;
+const mouse_button_left: u8 = 1;
+const mouse_button_middle: u8 = 2;
+const mouse_button_right: u8 = 3;
+const mouse_button_scroll_up: u8 = 4;
 const mouse_button_scroll_down: u8 = 5;
 
 const mouse_buttons = [_]u8{
-    mouse_button_left, mouse_button_middle, mouse_button_right,
+    mouse_button_left,      mouse_button_middle,      mouse_button_right,
     mouse_button_scroll_up, mouse_button_scroll_down,
 };
 
@@ -111,12 +115,18 @@ pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
     for (mouse_buttons) |button| {
         for (constants.LOCK_MODIFIERS) |lock| {
             _ = xcb.xcb_grab_button(
-                conn, 0, root,
+                conn,
+                0,
+                root,
                 xcb.XCB_EVENT_MASK_BUTTON_PRESS |
                     xcb.XCB_EVENT_MASK_BUTTON_RELEASE |
                     xcb.XCB_EVENT_MASK_POINTER_MOTION,
-                xcb.XCB_GRAB_MODE_ASYNC, xcb.XCB_GRAB_MODE_ASYNC,
-                root, xcb.XCB_NONE, button, @intCast(constants.MOD_SUPER | lock),
+                xcb.XCB_GRAB_MODE_ASYNC,
+                xcb.XCB_GRAB_MODE_ASYNC,
+                root,
+                xcb.XCB_NONE,
+                button,
+                @intCast(constants.MOD_SUPER | lock),
             );
         }
     }
@@ -128,7 +138,7 @@ pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
 pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     focus.setLastEventTime(event.time);
 
-    const mods   = utils.normalizeModifiers(event.state);
+    const mods = utils.normalizeModifiers(event.state);
     const keysym = xkb_state.?.keycodeToKeysym(event.detail);
 
     // O(1) dispatch via the persistent (modifiers << 32 | keysym) map built
@@ -138,8 +148,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     // The prompt owns all key input while active; routing is handled inside it.
     if (prompt.handlePromptKeypress(event, matched)) return;
 
-    debug.info("[KEY] keycode={} state=0x{x} mods=0x{x} keysym=0x{x}",
-        .{ event.detail, event.state, mods, keysym });
+    debug.info("[KEY] keycode={} state=0x{x} mods=0x{x} keysym=0x{x}", .{ event.detail, event.state, mods, keysym });
 
     if (matched) |action| {
         debug.info("[KEY] action={s}", .{@tagName(action.*)});
@@ -186,8 +195,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     // setFocus short-circuits when managed_window is already focused_window
     // and never reaches the raise inside commitFocusTransition. Without this,
     // a covered window that holds focus stays buried despite the click.
-    _ = xcb.xcb_configure_window(core.conn, managed_window,
-        xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+    _ = xcb.xcb_configure_window(core.conn, managed_window, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     focus.setFocus(managed_window, .mouse_click);
     releaseGrab(event.time);
 }
@@ -224,16 +232,16 @@ fn closeWindow(win: u32) void {
         return;
     }
 
-    const protocols_atom = utils.getAtomCached("WM_PROTOCOLS")   catch return;
-    const delete_atom    = utils.getAtomCached("WM_DELETE_WINDOW") catch return;
+    const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch return;
+    const delete_atom = utils.getAtomCached("WM_DELETE_WINDOW") catch return;
 
     // Zero-initialise: XCB transmits raw bytes, so uninitialised padding
     // would be undefined behaviour on the wire.
     var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
-    event.response_type  = xcb.XCB_CLIENT_MESSAGE;
-    event.format         = 32;
-    event.window         = win;
-    event.type           = protocols_atom;
+    event.response_type = xcb.XCB_CLIENT_MESSAGE;
+    event.format = 32;
+    event.window = win;
+    event.type = protocols_atom;
     event.data.data32[0] = delete_atom;
     event.data.data32[1] = focus.getLastEventTime(); // ICCCM §4.1.7
 
@@ -247,38 +255,51 @@ fn closeWindow(win: u32) void {
 fn executeAction(action: *const types.Action) !void {
     switch (action.*) {
         // Core
-        .close_window  => if (focus.getFocused()) |win| closeWindow(win),
+        .close_window => if (focus.getFocused()) |win| closeWindow(win),
         .reload_config => utils.reload(),
-        .dump_state    => dumpState(),
-        .exec          => |cmd| try executeShellCommand(cmd),
-        .sequence      => |acts| for (acts) |*a| try executeAction(a),
+        .dump_state => dumpState(),
+        .exec => |cmd| try executeShellCommand(cmd),
+        .sequence => |acts| for (acts) |*a| try executeAction(a),
 
         // Fullscreen
         .toggle_fullscreen => if (build.has_fullscreen) fullscreen.toggle(),
 
         // Tiling — delegated to executeTilingAction
         .toggle_floating_window,
-        .toggle_layout, .toggle_layout_reverse, .cycle_layout_variants,
-        .increase_master, .decrease_master, .increase_master_count, .decrease_master_count,
-        .swap_master, .swap_master_focus_swap,
-        .move_window_next, .move_window_prev,
-        .scroll_view_left, .scroll_view_right,
-            => executeTilingAction(action),
+        .toggle_layout,
+        .toggle_layout_reverse,
+        .cycle_layout_variants,
+        .increase_master,
+        .decrease_master,
+        .increase_master_count,
+        .decrease_master_count,
+        .swap_master,
+        .swap_master_focus_swap,
+        .move_window_next,
+        .move_window_prev,
+        .scroll_view_left,
+        .scroll_view_right,
+        => executeTilingAction(action),
 
         // Bar
         .toggle_bar_visibility => if (build.has_bar) bar.setBarState(.toggle),
-        .toggle_bar_position   => if (build.has_bar) bar.toggleBarSegmentAnchor(),
+        .toggle_bar_position => if (build.has_bar) bar.toggleBarSegmentAnchor(),
 
         // Minimize
         .minimize_window => if (build.has_minimize) minimize.minimizeWindow(),
         .unminimize_lifo => if (build.has_minimize) minimize.unminimize(.lifo),
         .unminimize_fifo => if (build.has_minimize) minimize.unminimize(.fifo),
-        .unminimize_all  => if (build.has_minimize) minimize.unminimizeAll(),
+        .unminimize_all => if (build.has_minimize) minimize.unminimizeAll(),
 
         // Workspaces — delegated to executeWorkspaceAction
-        .switch_workspace, .move_to_workspace, .move_window, .toggle_tag,
-        .all_workspaces, .move_to_all_workspaces, .toggle_tag_all,
-            => executeWorkspaceAction(action),
+        .switch_workspace,
+        .move_to_workspace,
+        .move_window,
+        .toggle_tag,
+        .all_workspaces,
+        .move_to_all_workspaces,
+        .toggle_tag_all,
+        => executeWorkspaceAction(action),
 
         // Prompt
         .toggle_prompt => prompt.toggle(),
@@ -305,11 +326,11 @@ fn executeTilingAction(action: *const types.Action) void {
         .toggle_floating_window => if (focus.getFocused()) |win|
             withTilingGrabAndBordersWin(win, tiling.toggleWindowFloat),
 
-        .toggle_layout         => withTilingGrab(tiling.toggleLayout),
+        .toggle_layout => withTilingGrab(tiling.toggleLayout),
         .toggle_layout_reverse => withTilingGrab(tiling.toggleLayoutReverse),
         .cycle_layout_variants => withTilingGrab(tiling.stepLayoutVariant),
-        .increase_master       => withTilingGrab(tiling.increaseMasterWidth),
-        .decrease_master       => withTilingGrab(tiling.decreaseMasterWidth),
+        .increase_master => withTilingGrab(tiling.increaseMasterWidth),
+        .decrease_master => withTilingGrab(tiling.decreaseMasterWidth),
         .increase_master_count => withTilingGrab(tiling.increaseMasterCount),
         .decrease_master_count => withTilingGrab(tiling.decreaseMasterCount),
 
@@ -318,7 +339,7 @@ fn executeTilingAction(action: *const types.Action) void {
         .move_window_next => withTilingGrabAndBorders(focus.moveWindowNext),
         .move_window_prev => withTilingGrabAndBorders(focus.moveWindowPrev),
 
-        .scroll_view_left  => withTilingGrab(tiling.scrollViewLeft),
+        .scroll_view_left => withTilingGrab(tiling.scrollViewLeft),
         .scroll_view_right => withTilingGrab(tiling.scrollViewRight),
 
         else => {},
@@ -364,14 +385,14 @@ fn executeSwapMaster(action: *const types.Action) void {
 /// calls here are always valid regardless of build.has_workspaces.
 fn executeWorkspaceAction(action: *const types.Action) void {
     switch (action.*) {
-        .switch_workspace       => |ws| workspaces.switchTo(ws),
-        .move_to_workspace      => |ws| if (focus.getFocused()) |win|
+        .switch_workspace => |ws| workspaces.switchTo(ws),
+        .move_to_workspace => |ws| if (focus.getFocused()) |win|
             workspaces.moveWindowTo(win, ws) catch |e| debug.warnOnErr(e, "move_to_workspace"),
-        .move_window            => |ws| if (focus.getFocused()) |win| workspaces.moveWindowExclusive(win, ws),
-        .toggle_tag             => |ws| if (focus.getFocused()) |win| workspaces.tagToggle(win, ws, true),
-        .all_workspaces         => workspaces.switchToAll(),
+        .move_window => |ws| if (focus.getFocused()) |win| workspaces.moveWindowExclusive(win, ws),
+        .toggle_tag => |ws| if (focus.getFocused()) |win| workspaces.tagToggle(win, ws, true),
+        .all_workspaces => workspaces.switchToAll(),
         .move_to_all_workspaces => if (focus.getFocused()) |win| workspaces.moveWindowToAll(win),
-        .toggle_tag_all         => if (focus.getFocused()) |win| workspaces.tagToggleAll(win),
+        .toggle_tag_all => if (focus.getFocused()) |win| workspaces.tagToggleAll(win),
         else => {},
     }
 }
@@ -437,7 +458,7 @@ fn makePipe() ![2]c_int {
     var fds: [2]c_int = undefined;
     return switch (std.posix.errno(std.os.linux.pipe2(&fds, flags))) {
         .SUCCESS => fds,
-        else     => error.PipeFailed,
+        else => error.PipeFailed,
     };
 }
 
@@ -450,11 +471,11 @@ const MAX_PENDING_SPAWNS: usize = 16;
 
 /// Lifecycle state for a single double-fork spawn.
 const PendingSpawn = struct {
-    pid:        c_int,  // PID of intermediate child; used for targeted waitpid.
-    pid_fd:     c_int,  // Read end of pid_pipe (O_NONBLOCK). -1 after closed.
-    exec_fd:    c_int,  // Read end of exec_pipe (O_NONBLOCK). -1 after closed.
-    grandchild: c_int,  // Grandchild PID read from pid_pipe. -1 until known.
-    spawn_ws:   ?u8,    // Target workspace for window.registerSpawn.
+    pid: c_int, // PID of intermediate child; used for targeted waitpid.
+    pid_fd: c_int, // Read end of pid_pipe (O_NONBLOCK). -1 after closed.
+    exec_fd: c_int, // Read end of exec_pipe (O_NONBLOCK). -1 after closed.
+    grandchild: c_int, // Grandchild PID read from pid_pipe. -1 until known.
+    spawn_ws: ?u8, // Target workspace for window.registerSpawn.
 };
 
 fn BoundedArray(comptime T: type, comptime cap: usize) type {
@@ -465,7 +486,9 @@ fn BoundedArray(comptime T: type, comptime cap: usize) type {
             self.buffer[self.len] = item;
             self.len += 1;
         }
-        pub fn slice(self: *@This()) []T { return self.buffer[0..self.len]; }
+        pub fn slice(self: *@This()) []T {
+            return self.buffer[0..self.len];
+        }
         pub fn swapRemove(self: *@This(), i: usize) void {
             self.len -= 1;
             if (i != self.len) self.buffer[i] = self.buffer[self.len];
@@ -476,7 +499,9 @@ fn BoundedArray(comptime T: type, comptime cap: usize) type {
 var g_pending: BoundedArray(PendingSpawn, MAX_PENDING_SPAWNS) = .{};
 
 /// Swap-removes the entry at `i`; caller must `continue` the drain loop after.
-inline fn removePending(i: usize) void { g_pending.swapRemove(i); }
+inline fn removePending(i: usize) void {
+    g_pending.swapRemove(i);
+}
 
 /// Spawns `cmd` as a detached grandchild (double-fork). Returns immediately —
 /// lifecycle is tracked in g_pending and resolved by drainPendingSpawns() /
@@ -526,11 +551,11 @@ fn executeShellCommand(cmd: []const u8) !void {
 
     if (g_pending.len < MAX_PENDING_SPAWNS) {
         g_pending.appendAssumeCapacity(.{
-            .pid        = pid,
-            .pid_fd     = pid_fds[0],
-            .exec_fd    = exec_fds[0],
+            .pid = pid,
+            .pid_fd = pid_fds[0],
+            .exec_fd = exec_fds[0],
             .grandchild = -1,
-            .spawn_ws   = spawn_ws,
+            .spawn_ws = spawn_ws,
         });
     } else {
         // Table full: close the read ends we won't track.
@@ -611,9 +636,9 @@ pub fn reapPendingChildren() void {
 fn dumpState() void {
     debug.info("========== STATE DUMP ==========", .{});
     debug.info("Focused:        {?x}", .{focus.getFocused()});
-    debug.info("Total windows:  {}",   .{tracking.windowCount()});
-    debug.info("Suppress focus: {s}",  .{@tagName(focus.getSuppressReason())});
-    debug.info("Drag active:    {}",   .{drag.isDragging()});
+    debug.info("Total windows:  {}", .{tracking.windowCount()});
+    debug.info("Suppress focus: {s}", .{@tagName(focus.getSuppressReason())});
+    debug.info("Drag active:    {}", .{drag.isDragging()});
 
     if (build.has_fullscreen) {
         fullscreen.forEachFullscreen(struct {
@@ -636,10 +661,10 @@ fn dumpState() void {
 
     if (build.has_tiling) {
         if (tiling.getStateOpt()) |t| {
-            debug.info("Tiling enabled: {}",     .{t.is_enabled});
-            debug.info("Tiling layout:  {s}",    .{@tagName(t.config.layout)});
-            debug.info("Tiled windows:  {}",     .{t.windows.len});
-            debug.info("Master count:   {}",     .{t.config.master_count});
+            debug.info("Tiling enabled: {}", .{t.is_enabled});
+            debug.info("Tiling layout:  {s}", .{@tagName(t.config.layout)});
+            debug.info("Tiled windows:  {}", .{t.windows.len});
+            debug.info("Master count:   {}", .{t.config.master_count});
             debug.info("Master width:   {d:.2}", .{t.config.master_width});
         }
     }
@@ -654,8 +679,7 @@ fn dumpState() void {
 fn tryConfigMouseBind(mods: u16, button: u8, win: u32, time: u32) bool {
     for (core.config.mouse_bindings.items) |*mb| {
         if (mb.modifiers == mods and mb.button == button) {
-            executeMouseAction(&mb.action, win)
-                catch |err| debug.err("mouse bind error: {}", .{err});
+            executeMouseAction(&mb.action, win) catch |err| debug.err("mouse bind error: {}", .{err});
             releaseGrab(time);
             return true;
         }
@@ -741,7 +765,10 @@ const XcbCursor = struct {
         if (cursor == xcb.XCB_NONE) return;
 
         const cookie = xcb.xcb_change_window_attributes_checked(
-            conn, screen.*.root, xcb.XCB_CW_CURSOR, &[_]u32{cursor},
+            conn,
+            screen.*.root,
+            xcb.XCB_CW_CURSOR,
+            &[_]u32{cursor},
         );
         if (xcb.xcb_request_check(conn, cookie)) |err| {
             debug.err("Failed to set root cursor: {*}", .{err});

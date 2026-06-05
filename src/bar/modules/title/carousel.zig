@@ -3,11 +3,11 @@
 
 const std = @import("std");
 
-const core    = @import("core");
-    const xcb = core.xcb;
-const utils   = @import("utils");
+const core = @import("core");
+const xcb = core.xcb;
+const utils = @import("utils");
 
-const scale   = @import("scale");
+const scale = @import("scale");
 const drawing = @import("drawing");
 
 // Public constants
@@ -23,9 +23,9 @@ pub const carousel_gap_px: u16 = 60;
 
 /// Segment geometry passed to carousel draw functions.
 pub const SegmentGeometry = struct {
-    seg_x:   u16, // Full segment bounds
-    seg_w:   u16, // (clip + fill region)
-    text_x:  u16, // inset text area
+    seg_x: u16, // Full segment bounds
+    seg_w: u16, // (clip + fill region)
+    text_x: u16, // inset text area
     avail_w: u16, // (used for overflow check and static/ellipsis fallback drawing)
 };
 
@@ -33,20 +33,20 @@ pub const SegmentGeometry = struct {
 
 /// All state for one live carousel (single-window or segmented).
 const CarouselEntry = struct {
-    cp:           drawing.CarouselPixmap,
-    cycle_w:      u16,  // text_w + carousel_gap_px
-    pixel_offset: u16,  // current integer blit offset (advances each tick)
-    frac_acc:     f64,  // sub-pixel carry between ticks (Bresenham remainder)
-    last_ns:      u64,  // monotonicNs() of the most-recent blit
-    last_bg:      u32,  // accent colour baked into cp; used by drawCarouselTick
-                        // to detect a colour change before the next full draw
-    window:       ?u32, // window the pixmap was built for (null = no window)
-    geom:         SegmentGeometry,
+    cp: drawing.CarouselPixmap,
+    cycle_w: u16, // text_w + carousel_gap_px
+    pixel_offset: u16, // current integer blit offset (advances each tick)
+    frac_acc: f64, // sub-pixel carry between ticks (Bresenham remainder)
+    last_ns: u64, // monotonicNs() of the most-recent blit
+    last_bg: u32, // accent colour baked into cp; used by drawCarouselTick
+    // to detect a colour change before the next full draw
+    window: ?u32, // window the pixmap was built for (null = no window)
+    geom: SegmentGeometry,
 };
 
 /// Runtime-configurable scroll parameters.
 const ScrollConfig = struct {
-    speed:         f64 = default_scroll_speed,
+    speed: f64 = default_scroll_speed,
     /// When > 0, overrides the monitor's detected refresh rate for the wake
     /// interval. Set via `carousel_refresh_rate` in the config file.
     rate_override: f64 = 0.0,
@@ -56,8 +56,8 @@ const ScrollConfig = struct {
 /// `is_enabled` is also written by the main thread (setCarouselEnabled) and
 /// is therefore an atomic; all other fields are render-thread-only.
 const RenderState = struct {
-    single:     ?CarouselEntry                    = null,
-    seg:        ?CarouselEntry                    = null,
+    single: ?CarouselEntry = null,
+    seg: ?CarouselEntry = null,
     is_enabled: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
 };
 
@@ -69,12 +69,12 @@ const RenderState = struct {
 /// render.seg so the main thread never has to read the non-atomic render.seg.
 const FocusSignal = struct {
     is_invalidated: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    seg_window:     std.atomic.Value(u32)  = std.atomic.Value(u32).init(0),
+    seg_window: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 };
 
 var scroll_config: ScrollConfig = .{};
-var render:        RenderState  = .{};
-var focus_signal:  FocusSignal  = .{};
+var render: RenderState = .{};
+var focus_signal: FocusSignal = .{};
 
 // Public API — feature toggles and scroll config
 
@@ -86,7 +86,9 @@ pub fn setCarouselEnabled(enabled: bool) void {
 }
 
 /// Returns true when the carousel feature is currently enabled.
-pub fn isCarouselEnabled() bool { return render.is_enabled.load(.acquire); }
+pub fn isCarouselEnabled() bool {
+    return render.is_enabled.load(.acquire);
+}
 
 /// Set the scroll speed in pixels per second.
 /// Values ≤ 0 are clamped to default_scroll_speed.
@@ -140,12 +142,18 @@ pub fn deinitCarousel() void {
 
 /// Free the single-window carousel pixmap.  Render thread only.
 pub fn deinitSingleCarousel() void {
-    if (render.single) |*e| { e.cp.deinit(); render.single = null; }
+    if (render.single) |*e| {
+        e.cp.deinit();
+        render.single = null;
+    }
 }
 
 /// Free the segmented carousel pixmap.  Render thread only.
 pub fn deinitSegmentedCarousel() void {
-    if (render.seg) |*e| { e.cp.deinit(); render.seg = null; }
+    if (render.seg) |*e| {
+        e.cp.deinit();
+        render.seg = null;
+    }
     focus_signal.seg_window.store(0, .release);
 }
 
@@ -175,8 +183,8 @@ pub fn notifyFocusChanged(new_window: ?u32) void {
 /// Hot path: one xcb_copy_area (wide pixmap → offscreen) + blitAndFlush.
 /// No fill, no Cairo, no Pango.
 pub fn drawCarouselTick(
-    dc:    *drawing.DrawContext,
-    bg:    u32,
+    dc: *drawing.DrawContext,
+    bg: u32,
     seg_x: u16,
     seg_w: u16,
 ) bool {
@@ -228,13 +236,13 @@ pub fn drawSegCarouselTickAuto(dc: *drawing.DrawContext, accent: u32) bool {
 ///   • Text width changed (cycle_w mismatch)
 ///   • Segment geometry changed (position or size)
 pub fn drawScrollingTitle(
-    dc:                *drawing.DrawContext,
-    y:                 u16,
-    geom:              SegmentGeometry,
-    text:              []const u8,
-    bg:                u32,
-    fg:                u32,
-    window:            ?u32,
+    dc: *drawing.DrawContext,
+    y: u16,
+    geom: SegmentGeometry,
+    text: []const u8,
+    bg: u32,
+    fg: u32,
+    window: ?u32,
     title_invalidated: bool,
 ) !void {
     const text_w = dc.measureTextWidth(text);
@@ -253,23 +261,18 @@ pub fn drawScrollingTitle(
 
     const cycle_w: u16 = text_w + carousel_gap_px;
 
-    const stale = render.single == null
-        or render.single.?.window  != window
-        or render.single.?.last_bg != bg
-        or title_invalidated
-        or render.single.?.cycle_w         != cycle_w
-        or render.single.?.geom.seg_x      != geom.seg_x
-        or render.single.?.geom.seg_w      != geom.seg_w
-        or render.single.?.geom.avail_w    != geom.avail_w;
+    const stale = render.single == null or render.single.?.window != window or render.single.?.last_bg != bg or title_invalidated or render.single.?.cycle_w != cycle_w or render.single.?.geom.seg_x != geom.seg_x or render.single.?.geom.seg_w != geom.seg_w or render.single.?.geom.avail_w != geom.avail_w;
 
     if (stale) {
         deinitSingleCarousel();
 
         const left_pad: u16 = if (geom.text_x > geom.seg_x)
-            geom.text_x - geom.seg_x else 0;
+            geom.text_x - geom.seg_x
+        else
+            0;
         const pixmap_w: u16 = @max(
-            left_pad + cycle_w + text_w,   // room for text copy B
-            cycle_w  + geom.seg_w,          // room for blit at max offset
+            left_pad + cycle_w + text_w, // room for text copy B
+            cycle_w + geom.seg_w, // room for blit at max offset
         );
 
         var cp = try drawing.CarouselPixmap.init(dc, pixmap_w);
@@ -277,18 +280,18 @@ pub fn drawScrollingTitle(
         try cp.render(dc, text, bg, fg, y, left_pad, cycle_w);
 
         render.single = .{
-            .cp           = cp,
-            .cycle_w      = cycle_w,
+            .cp = cp,
+            .cycle_w = cycle_w,
             .pixel_offset = 0,
-            .frac_acc     = 0.0,
-            .last_ns      = utils.monotonicNs(),
-            .last_bg      = bg,
-            .window       = window,
-            .geom         = geom,
+            .frac_acc = 0.0,
+            .last_ns = utils.monotonicNs(),
+            .last_bg = bg,
+            .window = window,
+            .geom = geom,
         };
     }
 
-    const e   = &render.single.?;
+    const e = &render.single.?;
     const off = advanceCarouselOffset(e, utils.monotonicNs());
     e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, geom.seg_x, off, geom.seg_w);
 }
@@ -303,14 +306,14 @@ pub fn drawScrollingTitle(
 /// Rebuild triggers: same unified logic as drawScrollingTitle, plus
 /// externally_invalidated from focus_signal (set by notifyFocusChanged).
 pub fn drawSegmentedCarousel(
-    dc:                *drawing.DrawContext,
-    baseline_y:        u16,
-    geom:              SegmentGeometry,
-    text_w:            u16,
-    text:              []const u8,
-    accent:            u32,
-    text_fg:           u32,
-    window:            u32,
+    dc: *drawing.DrawContext,
+    baseline_y: u16,
+    geom: SegmentGeometry,
+    text_w: u16,
+    text: []const u8,
+    accent: u32,
+    text_fg: u32,
+    window: u32,
     title_invalidated: bool,
 ) !bool {
     if (text_w <= geom.avail_w) {
@@ -327,24 +330,18 @@ pub fn drawSegmentedCarousel(
 
     const cycle_w: u16 = text_w + carousel_gap_px;
 
-    const stale = externally_invalidated
-        or render.seg == null
-        or render.seg.?.window            != window
-        or render.seg.?.last_bg           != accent
-        or title_invalidated
-        or render.seg.?.cycle_w           != cycle_w
-        or render.seg.?.geom.seg_x        != geom.seg_x
-        or render.seg.?.geom.seg_w        != geom.seg_w
-        or render.seg.?.geom.avail_w      != geom.avail_w;
+    const stale = externally_invalidated or render.seg == null or render.seg.?.window != window or render.seg.?.last_bg != accent or title_invalidated or render.seg.?.cycle_w != cycle_w or render.seg.?.geom.seg_x != geom.seg_x or render.seg.?.geom.seg_w != geom.seg_w or render.seg.?.geom.avail_w != geom.avail_w;
 
     if (stale) {
         deinitSegmentedCarousel();
 
         const left_pad: u16 = if (geom.text_x > geom.seg_x)
-            geom.text_x - geom.seg_x else 0;
+            geom.text_x - geom.seg_x
+        else
+            0;
         const pixmap_w: u16 = @max(
             left_pad + cycle_w + text_w,
-            cycle_w  + geom.seg_w,
+            cycle_w + geom.seg_w,
         );
 
         var cp = try drawing.CarouselPixmap.init(dc, pixmap_w);
@@ -352,21 +349,21 @@ pub fn drawSegmentedCarousel(
         try cp.render(dc, text, accent, text_fg, baseline_y, left_pad, cycle_w);
 
         render.seg = .{
-            .cp           = cp,
-            .cycle_w      = cycle_w,
+            .cp = cp,
+            .cycle_w = cycle_w,
             .pixel_offset = 0,
-            .frac_acc     = 0.0,
-            .last_ns      = utils.monotonicNs(),
-            .last_bg      = accent,
-            .window       = window,
-            .geom         = geom,
+            .frac_acc = 0.0,
+            .last_ns = utils.monotonicNs(),
+            .last_bg = accent,
+            .window = window,
+            .geom = geom,
         };
         // Publish the window atomically so notifyFocusChanged on the main
         // thread can check it without touching render.seg.
         focus_signal.seg_window.store(window, .release);
     }
 
-    const e   = &render.seg.?;
+    const e = &render.seg.?;
     const off = advanceCarouselOffset(e, utils.monotonicNs());
     e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, geom.seg_x, off, geom.seg_w);
     return true;
@@ -392,13 +389,10 @@ fn advanceCarouselOffset(e: *CarouselEntry, now_ns: u64) u16 {
     std.debug.assert(e.cycle_w > 0);
     const delta_ns = @as(f64, @floatFromInt(now_ns -| e.last_ns));
     // Accumulate exact sub-pixel advance for this tick plus any carry.
-    const delta_px  = delta_ns * scroll_config.speed / 1_000_000_000.0 + e.frac_acc;
-    const int_px    = @floor(delta_px);
-    e.frac_acc      = delta_px - int_px;          // carry remainder to next tick
-    e.last_ns       = now_ns;
-    e.pixel_offset  = @intCast(
-        (@as(u32, e.pixel_offset) + @as(u32, @intFromFloat(int_px)))
-        % @as(u32, e.cycle_w)
-    );
+    const delta_px = delta_ns * scroll_config.speed / 1_000_000_000.0 + e.frac_acc;
+    const int_px = @floor(delta_px);
+    e.frac_acc = delta_px - int_px; // carry remainder to next tick
+    e.last_ns = now_ns;
+    e.pixel_offset = @intCast((@as(u32, e.pixel_offset) + @as(u32, @intFromFloat(int_px))) % @as(u32, e.cycle_w));
     return e.pixel_offset;
 }

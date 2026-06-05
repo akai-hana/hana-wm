@@ -2,17 +2,17 @@
 //! Arranges windows in a counter-clockwise spiral, each taking half the remaining screen area.
 
 const constants = @import("constants");
-const utils     = @import("utils");
-const layouts   = @import("layouts");
-const tiling    = @import("tiling");
-const State     = tiling.State;
+const utils = @import("utils");
+const layouts = @import("layouts");
+const tiling = @import("tiling");
+const State = tiling.State;
 
 /// Counter-clockwise spiral direction for the next window split.
 const SpiralDirection = enum(u2) {
     right, // Split vertically:   window on left,   remainder on right.
-    down,  // Split horizontally: window on top,    remainder below.
-    left,  // Split vertically:   window on right,  remainder on left.
-    up,    // Split horizontally: window on bottom, remainder above.
+    down, // Split horizontally: window on top,    remainder below.
+    left, // Split vertically:   window on right,  remainder on left.
+    up, // Split horizontally: window on bottom, remainder above.
 
     inline fn next(self: SpiralDirection) SpiralDirection {
         return @enumFromInt(@intFromEnum(self) +% 1); // 2-bit wrapping; 4 variants
@@ -21,16 +21,16 @@ const SpiralDirection = enum(u2) {
 
 /// Tile `windows` into a Fibonacci spiral using the given screen area.
 pub fn tileWithOffset(
-    ctx:      *const layouts.LayoutCtx,
-    state:    *State,
-    windows:  []const u32,
+    ctx: *const layouts.LayoutCtx,
+    state: *State,
+    windows: []const u32,
     screen_w: u16,
     screen_h: u16,
     y_offset: u16,
 ) void {
     if (windows.len == 0) return;
 
-    const m       = state.margins();
+    const m = state.margins();
     const border2 = 2 *| m.border;
 
     var x: i32 = @intCast(m.gap);
@@ -47,9 +47,9 @@ pub fn tileWithOffset(
         // user at least sees one window rather than a stack of identical rects.
         if (w < m.gap * 2 + border2 or h < m.gap * 2 + border2) {
             const overflow_rect = utils.Rect{
-                .x      = @intCast(x),
-                .y      = @intCast(y),
-                .width  = if (w > border2) w - border2 else constants.MIN_WINDOW_DIM,
+                .x = @intCast(x),
+                .y = @intCast(y),
+                .width = if (w > border2) w - border2 else constants.MIN_WINDOW_DIM,
                 .height = if (h > border2) h - border2 else constants.MIN_WINDOW_DIM,
             };
             // Find the focused window among the overflow set; fall back to the
@@ -57,7 +57,10 @@ pub fn tileWithOffset(
             var raise_win: u32 = windows[i];
             if (ctx.focused_win) |f| {
                 for (windows[i..]) |ow| {
-                    if (ow == f) { raise_win = f; break; }
+                    if (ow == f) {
+                        raise_win = f;
+                        break;
+                    }
                 }
             }
             layouts.configureWithHintsAndRaise(ctx, raise_win, overflow_rect);
@@ -76,9 +79,9 @@ pub fn tileWithOffset(
         // Last window takes the entire remaining area.
         if (i == windows.len - 1) {
             const rect = utils.Rect{
-                .x      = @intCast(x),
-                .y      = @intCast(y),
-                .width  = w -| border2,
+                .x = @intCast(x),
+                .y = @intCast(y),
+                .width = w -| border2,
                 .height = h -| border2,
             };
             if (!defer_slot.capture(ctx, win, rect))
@@ -97,41 +100,49 @@ pub fn tileWithOffset(
 /// If `win` is the deferred window, stores its rect in `defer_slot` rather
 /// than calling configureWithHints — the caller flushes it after the loop.
 inline fn splitAndAdvance(
-    ctx:        *const layouts.LayoutCtx,
-    win:        u32,
-    dir:        SpiralDirection,
+    ctx: *const layouts.LayoutCtx,
+    win: u32,
+    dir: SpiralDirection,
     defer_slot: *layouts.DeferredConfigure,
-    border2:    u16,
-    gap:        u16,
-    x: *i32, y: *i32, w: *u16, h: *u16,
+    border2: u16,
+    gap: u16,
+    x: *i32,
+    y: *i32,
+    w: *u16,
+    h: *u16,
 ) void {
     switch (dir) {
         .right => {
             const win_w = (w.* -| gap) / 2;
             const rect = utils.Rect{
-                .x = @intCast(x.*), .y = @intCast(y.*),
-                .width = win_w -| border2, .height = h.* -| border2,
+                .x = @intCast(x.*),
+                .y = @intCast(y.*),
+                .width = win_w -| border2,
+                .height = h.* -| border2,
             };
             if (!defer_slot.capture(ctx, win, rect)) layouts.configureWithHints(ctx, win, rect);
             x.* += @as(i32, @intCast(win_w + gap));
-            w.*  = w.* -| (win_w + gap);
+            w.* = w.* -| (win_w + gap);
         },
         .down => {
             const win_h = (h.* -| gap) / 2;
             const rect = utils.Rect{
-                .x = @intCast(x.*), .y = @intCast(y.*),
-                .width = w.* -| border2, .height = win_h -| border2,
+                .x = @intCast(x.*),
+                .y = @intCast(y.*),
+                .width = w.* -| border2,
+                .height = win_h -| border2,
             };
             if (!defer_slot.capture(ctx, win, rect)) layouts.configureWithHints(ctx, win, rect);
             y.* += @as(i32, @intCast(win_h + gap));
-            h.*  = h.* -| (win_h + gap);
+            h.* = h.* -| (win_h + gap);
         },
         .left => {
             const win_w = (w.* -| gap) / 2;
             const rect = utils.Rect{
                 .x = @intCast(x.* + @as(i32, @intCast(w.* - win_w))),
                 .y = @intCast(y.*),
-                .width = win_w -| border2, .height = h.* -| border2,
+                .width = win_w -| border2,
+                .height = h.* -| border2,
             };
             if (!defer_slot.capture(ctx, win, rect)) layouts.configureWithHints(ctx, win, rect);
             w.* = w.* -| (win_w + gap);
@@ -141,7 +152,8 @@ inline fn splitAndAdvance(
             const rect = utils.Rect{
                 .x = @intCast(x.*),
                 .y = @intCast(y.* + @as(i32, @intCast(h.* - win_h))),
-                .width = w.* -| border2, .height = win_h -| border2,
+                .width = w.* -| border2,
+                .height = win_h -| border2,
             };
             if (!defer_slot.capture(ctx, win, rect)) layouts.configureWithHints(ctx, win, rect);
             h.* = h.* -| (win_h + gap);

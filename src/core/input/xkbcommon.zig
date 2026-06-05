@@ -1,7 +1,7 @@
 //! XKB bindings and keyboard state
 //! Wraps the XKB library to provide keyboard state tracking and keysym resolution.
 
-const std  = @import("std");
+const std = @import("std");
 
 const constants = @import("constants");
 
@@ -11,29 +11,29 @@ pub const xkb = @cImport({
 });
 
 // Re-exports for callers that don't want to reach through `xkb.*`.
-pub const XKB_KEYSYM_CASE_INSENSITIVE            = xkb.XKB_KEYSYM_CASE_INSENSITIVE;
-pub const XKB_KEY_NoSymbol: u32                  = xkb.XKB_KEY_NoSymbol;
-pub const xkb_context                            = xkb.struct_xkb_context;
-pub const xkb_keymap                             = xkb.struct_xkb_keymap;
-pub const xkb_state                              = xkb.struct_xkb_state;
-pub const xkb_keysym_from_name                   = xkb.xkb_keysym_from_name;
-pub const xkb_context_new                        = xkb.xkb_context_new;
-pub const xkb_context_unref                      = xkb.xkb_context_unref;
-pub const xkb_x11_setup_xkb_extension            = xkb.xkb_x11_setup_xkb_extension;
-pub const xkb_x11_get_core_keyboard_device_id    = xkb.xkb_x11_get_core_keyboard_device_id;
-pub const xkb_x11_keymap_new_from_device         = xkb.xkb_x11_keymap_new_from_device;
-pub const xkb_state_new                          = xkb.xkb_state_new;
-pub const xkb_state_unref                        = xkb.xkb_state_unref;
-pub const xkb_keymap_unref                       = xkb.xkb_keymap_unref;
-pub const xkb_state_key_get_one_sym              = xkb.xkb_state_key_get_one_sym;
+pub const XKB_KEYSYM_CASE_INSENSITIVE = xkb.XKB_KEYSYM_CASE_INSENSITIVE;
+pub const XKB_KEY_NoSymbol: u32 = xkb.XKB_KEY_NoSymbol;
+pub const xkb_context = xkb.struct_xkb_context;
+pub const xkb_keymap = xkb.struct_xkb_keymap;
+pub const xkb_state = xkb.struct_xkb_state;
+pub const xkb_keysym_from_name = xkb.xkb_keysym_from_name;
+pub const xkb_context_new = xkb.xkb_context_new;
+pub const xkb_context_unref = xkb.xkb_context_unref;
+pub const xkb_x11_setup_xkb_extension = xkb.xkb_x11_setup_xkb_extension;
+pub const xkb_x11_get_core_keyboard_device_id = xkb.xkb_x11_get_core_keyboard_device_id;
+pub const xkb_x11_keymap_new_from_device = xkb.xkb_x11_keymap_new_from_device;
+pub const xkb_state_new = xkb.xkb_state_new;
+pub const xkb_state_unref = xkb.xkb_state_unref;
+pub const xkb_keymap_unref = xkb.xkb_keymap_unref;
+pub const xkb_state_key_get_one_sym = xkb.xkb_state_key_get_one_sym;
 
 const MAX_ATTEMPTS: u8 = 3;
 
 pub const XkbState = struct {
-    context:           *xkb_context,
-    keymap:            *xkb_keymap,
-    state:             *xkb_state,
-    device_id:         i32,
+    context: *xkb_context,
+    keymap: *xkb_keymap,
+    state: *xkb_state,
+    device_id: i32,
     /// Flat keycode->keysym table for the standard X11 range (indices 0..255).
     /// Populated at init time; entries outside 8..255 hold XKB_KEY_NoSymbol.
     /// No allocator needed — 256 × 4 bytes = 1 KiB, lives inside XkbState.
@@ -64,10 +64,10 @@ pub const XkbState = struct {
         }
 
         return XkbState{
-            .context           = ctx,
-            .keymap            = km,
-            .state             = st,
-            .device_id         = device_id,
+            .context = ctx,
+            .keymap = km,
+            .state = st,
+            .device_id = device_id,
             .keysym_by_keycode = table,
         };
     }
@@ -118,7 +118,10 @@ fn retrySetup(xcb_conn: *anyopaque) !void {
             xkb.XKB_X11_MIN_MAJOR_XKB_VERSION,
             xkb.XKB_X11_MIN_MINOR_XKB_VERSION,
             xkb.XKB_X11_SETUP_XKB_EXTENSION_NO_FLAGS,
-            null, null, null, null,
+            null,
+            null,
+            null,
+            null,
         );
         if (ok != 0) return;
         retryDelay(@intCast(i));
@@ -126,7 +129,17 @@ fn retrySetup(xcb_conn: *anyopaque) !void {
     return error.XkbSetupFailed;
 }
 
-/// Returns true if `km` has at least 40 reachable keysyms in the 8..128 range.
+/// Minimum number of reachable keysyms in the X11 keycode range 8..128 that
+/// hana considers a "fully populated" keymap.
+///
+/// A healthy keymap typically has ≥ 100 reachable keysyms in this range.  40 is
+/// chosen deliberately low so that minimal or embedded keymaps (e.g. on
+/// headless build machines) are still accepted, while an empty keymap returned
+/// by a failed or still-initialising XKB extension (common during early startup)
+/// is rejected and retried.
+const MIN_KEYMAP_SYMBOLS: u32 = 40;
+
+/// Returns true if `km` has at least MIN_KEYMAP_SYMBOLS reachable keysyms in the 8..128 range.
 /// Guards against accepting a partially-initialised keymap on early startup.
 fn keymapHasEnoughSymbols(km: *xkb_keymap) bool {
     const test_state = xkb.xkb_state_new(km) orelse return false;
@@ -136,7 +149,7 @@ fn keymapHasEnoughSymbols(km: *xkb_keymap) bool {
         if (xkb.xkb_state_key_get_one_sym(test_state, @intCast(kc)) != xkb.XKB_KEY_NoSymbol)
             valid_keys += 1;
     }
-    return valid_keys >= 40;
+    return valid_keys >= MIN_KEYMAP_SYMBOLS;
 }
 
 /// Retries keymap creation up to MAX_ATTEMPTS times, accepting only a
@@ -144,7 +157,10 @@ fn keymapHasEnoughSymbols(km: *xkb_keymap) bool {
 fn retryKeymap(ctx: *xkb_context, xcb_conn: *anyopaque, device_id: i32) !*xkb_keymap {
     for (0..MAX_ATTEMPTS) |i| {
         const km = xkb.xkb_x11_keymap_new_from_device(
-            ctx, @ptrCast(xcb_conn), device_id, xkb.XKB_KEYMAP_COMPILE_NO_FLAGS,
+            ctx,
+            @ptrCast(xcb_conn),
+            device_id,
+            xkb.XKB_KEYMAP_COMPILE_NO_FLAGS,
         ) orelse {
             retryDelay(@intCast(i));
             continue;

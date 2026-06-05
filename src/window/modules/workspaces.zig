@@ -1,25 +1,25 @@
 //! Workspace management
 //! Handles workspace creation, window assignment, and switching between workspaces.
 
-const std   = @import("std");
+const std = @import("std");
 const build = @import("build_options");
 
-const core      = @import("core");
-    const xcb   = core.xcb;
-const utils     = @import("utils");
-const types     = @import("types");
+const core = @import("core");
+const xcb = core.xcb;
+const utils = @import("utils");
+const types = @import("types");
 const constants = @import("constants");
 
 const debug = @import("debug");
 
-const window   = @import("window");
+const window = @import("window");
 const tracking = @import("tracking");
-const focus    = @import("focus");
+const focus = @import("focus");
 
 const fullscreen = if (build.has_fullscreen) @import("fullscreen");
-const minimize   = if (build.has_minimize) @import("minimize");
+const minimize = if (build.has_minimize) @import("minimize");
 
-const tiling       = if (build.has_tiling) @import("tiling");
+const tiling = if (build.has_tiling) @import("tiling");
 const TilingLayout = if (build.has_tiling) tiling.Layout else u0; // u0 sentinel when tiling is absent: zero-size, never stored
 
 const bar = if (build.has_bar) @import("bar") else struct {
@@ -29,7 +29,6 @@ const bar = if (build.has_bar) @import("bar") else struct {
     pub fn setBarState(_: anytype) void {}
 };
 
-
 /// Shim so call-sites don't need to repeat the has_minimize comptime guard.
 /// Returns false when minimize is absent — windows are never considered minimized.
 inline fn isMinimized(win: u32) bool {
@@ -37,8 +36,8 @@ inline fn isMinimized(win: u32) bool {
 }
 
 pub const Workspace = struct {
-    id:      u8,
-    name:    []const u8,
+    id: u8,
+    name: []const u8,
     // The tiling layout active on this workspace.
     // Initialized from config; updated when the user switches layouts
     // in per-workspace mode.
@@ -72,8 +71,8 @@ pub const Workspace = struct {
 
 pub const State = struct {
     workspaces: []Workspace,
-    current:    u8,
-    allocator:  std.mem.Allocator,
+    current: u8,
+    allocator: std.mem.Allocator,
     /// Windows temporarily patched into the current workspace by switchToAll().
     /// Non-empty iff all-workspaces view is active.
     /// Cleared (and their bitmasks restored) on the next switchToAll() or switchTo().
@@ -82,7 +81,9 @@ pub const State = struct {
 
 var g_state: ?State = null;
 
-pub inline fn getState() ?*State { return if (g_state) |*s| s else null; }
+pub inline fn getState() ?*State {
+    return if (g_state) |*s| s else null;
+}
 
 /// Yields the index of each set bit in `mask`, lowest first.
 const SetBitIterator = struct {
@@ -94,7 +95,9 @@ const SetBitIterator = struct {
         return idx;
     }
 };
-inline fn setBits(mask: u64) SetBitIterator { return .{ .bits = mask }; }
+inline fn setBits(mask: u64) SetBitIterator {
+    return .{ .bits = mask };
+}
 
 /// Push `win` offscreen and evict its geometry cache entry.
 /// Used when a window leaves the current workspace.
@@ -106,15 +109,14 @@ inline fn evictWindow(win: u32) void {
 /// Resolves a layout name (e.g. "master-stack", "monocle") to tiling.Layout.
 fn layoutFromName(name: []const u8) TilingLayout {
     if (!build.has_tiling) return 0;
-    return if (std.mem.eql(u8, name, "master-stack")) .master
-        else std.meta.stringToEnum(tiling.Layout, name) orelse tiling.defaultLayout();
+    return if (std.mem.eql(u8, name, "master-stack")) .master else std.meta.stringToEnum(tiling.Layout, name) orelse tiling.defaultLayout();
 }
 
 /// Initializes global workspace state.  Returns error.OutOfMemory if the
 /// workspace slice cannot be allocated; callers should treat this as fatal.
 pub fn init() !void {
     const count = core.config.workspaces.count;
-    const wss   = try core.alloc.alloc(Workspace, count);
+    const wss = try core.alloc.alloc(Workspace, count);
 
     const default_layout: TilingLayout = if (build.has_tiling) tiling.getState().config.layout else 0;
     const cfg_tiling = &core.config.tiling;
@@ -125,7 +127,7 @@ pub fn init() !void {
     const MAX_WS = 64;
     const OverrideLookup = struct {
         layout_idx: usize,
-        variant:    ?types.LayoutVariantOverride,
+        variant: ?types.LayoutVariantOverride,
     };
     var override_lookup: [MAX_WS]?OverrideLookup = .{null} ** MAX_WS;
     if (build.has_tiling) {
@@ -133,7 +135,7 @@ pub fn init() !void {
             if (o.workspace_idx < MAX_WS)
                 override_lookup[o.workspace_idx] = .{
                     .layout_idx = o.layout_idx,
-                    .variant    = o.variant,
+                    .variant = o.variant,
                 };
         }
     }
@@ -153,7 +155,7 @@ pub fn init() !void {
 
         // Apply any workspace-specific layout + variants override from the
         // layouts array (e.g. `"monocle", "gapless", "4,8"` in config.toml).
-        var ws_layout   = default_layout;
+        var ws_layout = default_layout;
         var ws_variant: ?types.LayoutVariantOverride = null;
         if (build.has_tiling) {
             if (id < MAX_WS) {
@@ -179,8 +181,8 @@ pub fn init() !void {
 
     g_state = .{
         .workspaces = wss,
-        .current    = 0,
-        .allocator  = core.alloc,
+        .current = 0,
+        .allocator = core.alloc,
     };
 }
 
@@ -441,7 +443,7 @@ pub fn switchToAll() void {
         // grab. The position will be at most microseconds stale — negligible
         // for focus targeting.
         const ptr_cookie = xcb.xcb_query_pointer(core.conn, core.root);
-        const ptr_reply  = xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null);
+        const ptr_reply = xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null);
         defer if (ptr_reply) |r| std.c.free(r);
 
         _ = xcb.xcb_grab_server(core.conn);
@@ -460,7 +462,7 @@ pub fn switchToAll() void {
         for (tracking.allWindows()) |entry| {
             if (tracking.isWindowOnWorkspace(entry.win, s.current)) continue;
             if (isMinimized(entry.win)) continue;
-            const win  = entry.win;
+            const win = entry.win;
             const mask = entry.mask;
             setWindowMask(s, win, mask | tracking.workspaceBit(s.current));
             s.all_view_temp_wins.append(s.allocator, win) catch {
@@ -635,9 +637,9 @@ fn prefetchAndSaveWindowGeometries(ws: *const Workspace, new_ws: u8) void {
     // also degrade without any further diagnostic.
     const MAX_FLOAT = 64;
     const GeomEntry = struct { win: u32, cookie: xcb.xcb_get_geometry_cookie_t };
-    var pending:   [MAX_FLOAT]GeomEntry = undefined;
-    var pending_n: usize                = 0;
-    var cap_warned                      = false;
+    var pending: [MAX_FLOAT]GeomEntry = undefined;
+    var pending_n: usize = 0;
+    var cap_warned = false;
 
     const bit = tracking.workspaceBit(ws.id);
     for (tracking.allWindows()) |entry| {
@@ -663,8 +665,10 @@ fn prefetchAndSaveWindowGeometries(ws: *const Workspace, new_ws: u8) void {
         if (xcb.xcb_get_geometry_reply(core.conn, e.cookie, null)) |geom| {
             defer std.c.free(geom);
             window.saveWindowGeom(e.win, .{
-                .x = geom.*.x, .y = geom.*.y,
-                .width = geom.*.width, .height = geom.*.height,
+                .x = geom.*.x,
+                .y = geom.*.y,
+                .width = geom.*.width,
+                .height = geom.*.height,
             });
         }
     }
@@ -757,7 +761,9 @@ fn applyPostSwitchFocus(new_ws: u8, new_ws_obj: *Workspace, ptr_reply: ?*xcb.xcb
         const child = ptr.*.child;
         break :blk if (child != 0 and child != core.root and
             tracking.isWindowOnWorkspace(child, new_ws) and !isMinimized(child))
-            child else lastFocusedOrFirst(new_ws_obj);
+            child
+        else
+            lastFocusedOrFirst(new_ws_obj);
     };
 
     // Route through focus.setFocus / focus.clearFocus so that
@@ -782,9 +788,9 @@ fn applyPostSwitchFocus(new_ws: u8, new_ws_obj: *Workspace, ptr_reply: ?*xcb.xcb
 }
 
 fn executeSwitch(old_ws: u8, new_ws: u8) void {
-    const s          = getState() orelse return;
+    const s = getState() orelse return;
     const new_ws_obj = &s.workspaces[new_ws];
-    const fs_info    = if (build.has_fullscreen) fullscreen.getForWorkspace(new_ws) else null;
+    const fs_info = if (build.has_fullscreen) fullscreen.getForWorkspace(new_ws) else null;
 
     focus.setSuppressReason(.none);
     focus.cancelPointerSync(); // discard any stale beginPointerSync cookie from before this switch
@@ -807,7 +813,7 @@ fn executeSwitch(old_ws: u8, new_ws: u8) void {
     // receives a pre-drained reply and issues no xcb_*_reply calls inside
     // the grab.
     const ptr_cookie = xcb.xcb_query_pointer(core.conn, core.root);
-    const ptr_reply  = xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null);
+    const ptr_reply = xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null);
     defer if (ptr_reply) |r| std.c.free(r);
 
     // ── Atomic grab window ───────────────────────────────────────────────────
@@ -834,16 +840,10 @@ fn executeSwitch(old_ws: u8, new_ws: u8) void {
                 if (tiling.isWindowActiveTiled(win)) tiling.invalidateGeomCache(win);
             }
         }
-        _ = xcb.xcb_configure_window(core.conn, info.window,
-            xcb.XCB_CONFIG_WINDOW_X     | xcb.XCB_CONFIG_WINDOW_Y     |
+        _ = xcb.xcb_configure_window(core.conn, info.window, xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
             xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
-            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
-            &[_]u32{ 0, 0,
-                @intCast(core.screen.width_in_pixels),
-                @intCast(core.screen.height_in_pixels),
-                0 });
-        _ = xcb.xcb_configure_window(core.conn, info.window,
-            xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{ 0, 0, @intCast(core.screen.width_in_pixels), @intCast(core.screen.height_in_pixels), 0 });
+        _ = xcb.xcb_configure_window(core.conn, info.window, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     } else {
         restoreWorkspaceWindows(new_ws_obj, old_ws);
     }

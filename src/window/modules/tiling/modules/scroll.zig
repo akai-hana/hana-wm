@@ -3,17 +3,17 @@
 //! with a scrollable viewport. New windows snap the viewport right so they appear immediately;
 //! manual scrolling and window closes are handled by clamping on every retile.
 
-const std       = @import("std");
-const utils     = @import("utils");
+const std = @import("std");
+const utils = @import("utils");
 const constants = @import("constants");
 
-const tiling  = @import("tiling");
+const tiling = @import("tiling");
 const layouts = @import("layouts");
 
 pub fn tileWithOffset(
-    ctx:      *const layouts.LayoutCtx,
-    state:    *tiling.State,
-    windows:  []const u32,
+    ctx: *const layouts.LayoutCtx,
+    state: *tiling.State,
+    windows: []const u32,
     screen_w: u16,
     screen_h: u16,
     y_offset: u16,
@@ -26,7 +26,7 @@ pub fn tileWithOffset(
     // Every slot is exactly half the screen width.
     const slot_w: i32 = @intCast(screen_w / 2);
 
-    const n_i32: i32  = @intCast(n);
+    const n_i32: i32 = @intCast(n);
     const sw_i32: i32 = @intCast(screen_w);
 
     // Max scroll: reached when the last window's right edge is flush with the screen.
@@ -44,13 +44,13 @@ pub fn tileWithOffset(
     const scroll: i32 = state.scroll.offset;
 
     const content_h: u16 = calcContentH(screen_h, m);
-    const win_y: i32     = @as(i32, @intCast(y_offset)) + @as(i32, @intCast(m.gap));
+    const win_y: i32 = @as(i32, @intCast(y_offset)) + @as(i32, @intCast(m.gap));
 
     // Full gap at screen edges; half-gap at interior slot boundaries so that
     // adjacent windows together share exactly one full gap.
-    const gap_i32:  i32 = @intCast(m.gap);
+    const gap_i32: i32 = @intCast(m.gap);
     const gap_half: i32 = @intCast(m.gap / 2);
-    const border2:  i32 = 2 * @as(i32, @intCast(m.border));
+    const border2: i32 = 2 * @as(i32, @intCast(m.border));
 
     var defer_slot = layouts.DeferredConfigure.init();
 
@@ -60,11 +60,11 @@ pub fn tileWithOffset(
         const slot_left: i32 = col * slot_w - scroll;
 
         // <= / >= rather than < / > to handle off-by-one from integer-division of odd screen widths.
-        const left_inset:  i32 = if (slot_left <= 0)               gap_i32 else gap_half;
+        const left_inset: i32 = if (slot_left <= 0) gap_i32 else gap_half;
         const right_inset: i32 = if (slot_left + slot_w >= sw_i32) gap_i32 else gap_half;
 
-        const x: i32         = slot_left + left_inset;
-        const avail: i32     = slot_w - left_inset - right_inset - border2;
+        const x: i32 = slot_left + left_inset;
+        const avail: i32 = slot_w - left_inset - right_inset - border2;
         const content_w: u16 = if (avail > constants.MIN_WINDOW_DIM)
             @intCast(avail)
         else
@@ -79,8 +79,10 @@ pub fn tileWithOffset(
         if (x >= sw_i32 or right <= 0) {
             const parked_x: i32 = constants.OFFSCREEN_X_POSITION;
             const rect = utils.Rect{
-                .x = @intCast(parked_x), .y = @intCast(win_y),
-                .width = content_w, .height = content_h,
+                .x = @intCast(parked_x),
+                .y = @intCast(win_y),
+                .width = content_w,
+                .height = content_h,
             };
             if (!defer_slot.capture(ctx, win, rect))
                 layouts.configureWithHints(ctx, win, rect);
@@ -88,8 +90,10 @@ pub fn tileWithOffset(
         }
 
         const rect = utils.Rect{
-            .x = @intCast(x), .y = @intCast(win_y),
-            .width = content_w, .height = content_h,
+            .x = @intCast(x),
+            .y = @intCast(win_y),
+            .width = content_w,
+            .height = content_h,
         };
         if (!defer_slot.capture(ctx, win, rect))
             layouts.configureWithHints(ctx, win, rect);

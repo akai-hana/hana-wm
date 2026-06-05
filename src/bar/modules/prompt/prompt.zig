@@ -1,17 +1,17 @@
 //! Inline command prompt for the bar
 //! Embeds an interactive command runner into the bar's title segment.
 
-const std   = @import("std");
+const std = @import("std");
 const build = @import("build_options");
 
-const core    = @import("core");
-    const xcb = core.xcb;
+const core = @import("core");
+const xcb = core.xcb;
 
-const bar   = @import("bar");
+const bar = @import("bar");
 const types = @import("types");
 
 const drawing = @import("drawing");
-const title   = if (build.has_title) @import("title");
+const title = if (build.has_title) @import("title");
 const vim = @import("vim.zig");
 
 const debug = @import("debug");
@@ -59,22 +59,22 @@ const max_history_line: usize = vim.default_max_input;
 
 /// All mutable state owned by this module.
 const PromptState = struct {
-    is_active: bool         = false,
+    is_active: bool = false,
     vim_state: vim.VimState = .{},
 
     allocator: std.mem.Allocator = undefined,
 
-    key_syms:        ?*xcb_key_symbols_t = null,
-    cached_prompt_w: ?u16                = null,
+    key_syms: ?*xcb_key_symbols_t = null,
+    cached_prompt_w: ?u16 = null,
     /// Cached pixel width of each mode label, indexed by `vim.Mode` integer value.
-    cached_mode_w:   [4]?u16             = .{ null, null, null, null },
+    cached_mode_w: [4]?u16 = .{ null, null, null, null },
 
     // PATH completion
-    comp_names: []u8  = &.{},
+    comp_names: []u8 = &.{},
     comp_count: usize = 0,
 
     /// Ghost text: the completion suffix shown dimmed after the cursor.
-    ghost_buf: []u8  = &.{},
+    ghost_buf: []u8 = &.{},
     ghost_len: usize = 0,
     /// True when the current buffer contains at least one space.  Maintained
     /// incrementally so `updateGhost` can skip a full buffer scan on every call.
@@ -85,11 +85,11 @@ const PromptState = struct {
     /// Caret geometry cached after the first insert-mode draw.  Font metrics
     /// and bar height are constant between reloads, so these never need clearing.
     cached_caret_top: ?u16 = null,
-    cached_caret_h:   ?u16 = null,
+    cached_caret_h: ?u16 = null,
 
     // Command history (newest at index 0)
-    hist_entries: []u8  = &.{},
-    hist_count:   usize = 0,
+    hist_entries: []u8 = &.{},
+    hist_count: usize = 0,
     is_hist_loaded: bool = false,
 
     /// Set by key handlers, `activate`, and `deactivate` to notify the bar
@@ -103,14 +103,16 @@ var g: PromptState = .{};
 // Public API
 
 /// Returns true when the prompt is currently active and accepting key input.
-pub fn isActive() bool { return g.is_active; }
-
-/// Returns true when the prompt is active in insert mode, signalling that
-/// the bar should schedule a periodic redraw for the cursor blink animation.
+pub fn isActive() bool {
+    return g.is_active;
+}
 
 /// Returns the milliseconds until the next blink toggle, or -1 if the cursor
 /// blink animation is not running.  Pass this (combined with the clock timeout)
 /// to poll() so the event loop wakes up exactly when a redraw is needed.
+/// Only returns a non-negative value when the prompt is active in insert mode
+/// or colon-command mode, signalling that the bar should schedule a periodic
+/// redraw for the cursor blink animation.
 pub fn blinkPollTimeoutMs() i32 {
     if (!g.is_active) return -1;
     if (g.vim_state.mode == .insert or (build.has_vim and vim.colonInput(&g.vim_state) != null))
@@ -136,12 +138,12 @@ pub fn consumeRedrawRequest() bool {
 /// No-op if already initialised (idempotent).
 pub fn init(allocator: std.mem.Allocator, conn: *xcb.xcb_connection_t) !void {
     if (g.vim_state.buf.len != 0) return; // already initialised
-    g.allocator   = allocator;
-    g.vim_state   = try vim.VimState.init(allocator, vim.default_max_input, vim.default_undo_max);
-    g.comp_names  = try allocator.alloc(u8, (max_completion_len + 1) * max_completions);
-    g.ghost_buf   = try allocator.alloc(u8, max_completion_len);
-    g.hist_entries= try allocator.alloc(u8, (max_history_line + 1) * max_history);
-    g.key_syms    = xcb_key_symbols_alloc(conn);
+    g.allocator = allocator;
+    g.vim_state = try vim.VimState.init(allocator, vim.default_max_input, vim.default_undo_max);
+    g.comp_names = try allocator.alloc(u8, (max_completion_len + 1) * max_completions);
+    g.ghost_buf = try allocator.alloc(u8, max_completion_len);
+    g.hist_entries = try allocator.alloc(u8, (max_history_line + 1) * max_history);
+    g.key_syms = xcb_key_symbols_alloc(conn);
     if (g.key_syms == null)
         debug.warn("prompt: xcb_key_symbols_alloc failed — key input will not work", .{});
 }
@@ -153,9 +155,9 @@ pub fn deinit() void {
         g.key_syms = null;
     }
     if (g.vim_state.buf.len != 0) g.vim_state.deinit();
-    if (g.hist_entries.len  != 0) g.allocator.free(g.hist_entries);
-    if (g.ghost_buf.len     != 0) g.allocator.free(g.ghost_buf);
-    if (g.comp_names.len    != 0) g.allocator.free(g.comp_names);
+    if (g.hist_entries.len != 0) g.allocator.free(g.hist_entries);
+    if (g.ghost_buf.len != 0) g.allocator.free(g.ghost_buf);
+    if (g.comp_names.len != 0) g.allocator.free(g.comp_names);
     g = .{};
 }
 
@@ -171,7 +173,7 @@ pub fn toggle() void {
 ///   • cursor over nothing    → swallow the event silently, do nothing
 fn closeWindowOrPromptUnderCursor() bool {
     const ptr_cookie = xcb.xcb_query_pointer(core.conn, core.root);
-    const ptr_reply  = xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null);
+    const ptr_reply = xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null);
     defer if (ptr_reply) |r| std.c.free(r);
 
     const child: u32 = if (ptr_reply) |r| r.*.child else 0;
@@ -203,7 +205,7 @@ fn closeWindowOrPromptUnderCursor() bool {
 /// `bound_action` is whatever the keybind map resolved for this key; pass
 /// `state.map.get(key)` directly — null is fine when there is no binding.
 pub fn handlePromptKeypress(
-    event:        *const xcb.xcb_key_press_event_t,
+    event: *const xcb.xcb_key_press_event_t,
     bound_action: ?*const types.Action,
 ) bool {
     if (!g.is_active) return false;
@@ -255,10 +257,10 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
 
     const syms = g.key_syms orelse return false;
 
-    const shift_held = event.state & xcb.XCB_MOD_MASK_SHIFT   != 0;
-    const ctrl_held  = event.state & xcb.XCB_MOD_MASK_CONTROL != 0;
+    const shift_held = event.state & xcb.XCB_MOD_MASK_SHIFT != 0;
+    const ctrl_held = event.state & xcb.XCB_MOD_MASK_CONTROL != 0;
     const col: c_int = if (shift_held) 1 else 0;
-    const sym        = xcb_key_symbols_get_keysym(syms, event.detail, col);
+    const sym = xcb_key_symbols_get_keysym(syms, event.detail, col);
 
     // Drop bare modifier key events (Shift, Ctrl, Alt, Super, Meta, Hyper …).
     //
@@ -277,7 +279,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
 
     // Ctrl-modified keys
     if (ctrl_held) {
-        const action   = if (build.has_vim) vim.handleCtrl(&g.vim_state, sym) else .none;
+        const action = if (build.has_vim) vim.handleCtrl(&g.vim_state, sym) else .none;
         const prev_len = g.vim_state.len;
         handleAction(action);
         if (g.vim_state.len != prev_len)
@@ -290,22 +292,21 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     if (sym == @intFromEnum(vim.XK.Tab) and g.vim_state.mode == .insert) {
         const n_ghost: usize = if (g.ghost_len > 0 and g.vim_state.cursor == g.vim_state.len)
             @min(g.ghost_len, g.vim_state.max_input - 1 - g.vim_state.len)
-        else 0;
+        else
+            0;
         if (n_ghost > 0) {
-            if (build.has_vim) vim.insertSlice(&g.vim_state, g.ghost_buf[0..n_ghost])
-            else               insertBasic    (&g.vim_state, g.ghost_buf[0..n_ghost]);
+            if (build.has_vim) vim.insertSlice(&g.vim_state, g.ghost_buf[0..n_ghost]) else insertBasic(&g.vim_state, g.ghost_buf[0..n_ghost]);
             g.ghost_len = 0;
         }
         g.is_blink_visible = true;
-        g.redraw_pending   = true;
+        g.redraw_pending = true;
         return true;
     }
 
     const action = switch (g.vim_state.mode) {
-        .insert  => if (build.has_vim) vim.handleInsert(&g.vim_state, sym)
-                    else               handleInsertBasic(&g.vim_state, sym),
-        .normal  => if (build.has_vim) vim.handleNormal (&g.vim_state, sym) else .none,
-        .visual  => if (build.has_vim) vim.handleVisual (&g.vim_state, sym) else .none,
+        .insert => if (build.has_vim) vim.handleInsert(&g.vim_state, sym) else handleInsertBasic(&g.vim_state, sym),
+        .normal => if (build.has_vim) vim.handleNormal(&g.vim_state, sym) else .none,
+        .visual => if (build.has_vim) vim.handleVisual(&g.vim_state, sym) else .none,
         .replace => if (build.has_vim) vim.handleReplace(&g.vim_state, sym) else .none,
     };
     const prev_len = g.vim_state.len;
@@ -314,49 +315,49 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
         g.has_space = std.mem.indexOfScalar(u8, g.vim_state.buf[0..g.vim_state.len], ' ') != null;
     updateGhost();
     g.is_blink_visible = true;
-    g.redraw_pending   = true;
+    g.redraw_pending = true;
     return true;
 }
 
 pub fn draw(
-    dc:                  *drawing.DrawContext,
-    config:              types.BarConfig,
-    height:              u16,
-    start_x:             u16,
-    width:               u16,
-    conn:                *xcb.xcb_connection_t,
-    focused_window:      ?u32,
-    focused_title:       []const u8,
-    minimized_title:     []const u8,
-    current_ws_wins:     []const u32,
-    minimized_set:       *const std.AutoHashMapUnmanaged(u32, void),
-    window_title_data:   []const u8,
-    window_title_ends:   []const u32,
-    cached_title:        *std.ArrayList(u8),
+    dc: *drawing.DrawContext,
+    config: types.BarConfig,
+    height: u16,
+    start_x: u16,
+    width: u16,
+    conn: *xcb.xcb_connection_t,
+    focused_window: ?u32,
+    focused_title: []const u8,
+    minimized_title: []const u8,
+    current_ws_wins: []const u32,
+    minimized_set: *const std.AutoHashMapUnmanaged(u32, void),
+    window_title_data: []const u8,
+    window_title_ends: []const u32,
+    cached_title: *std.ArrayList(u8),
     cached_title_window: *?u32,
-    title_invalidated:   bool,
-    allocator:           std.mem.Allocator,
+    title_invalidated: bool,
+    allocator: std.mem.Allocator,
 ) !u16 {
     if (!g.is_active) return title.draw(
         .{
-            .dc      = dc,
-            .config  = config,
-            .height  = height,
+            .dc = dc,
+            .config = config,
+            .height = height,
             .start_x = start_x,
-            .width   = width,
-            .conn    = conn,
+            .width = width,
+            .conn = conn,
         },
         .{
-            .focused_window    = focused_window,
-            .focused_title     = focused_title,
-            .minimized_title   = minimized_title,
-            .current_ws_wins   = current_ws_wins,
-            .minimized_set     = minimized_set,
+            .focused_window = focused_window,
+            .focused_title = focused_title,
+            .minimized_title = minimized_title,
+            .current_ws_wins = current_ws_wins,
+            .minimized_set = minimized_set,
             .window_title_data = window_title_data,
             .window_title_ends = window_title_ends,
         },
         .{
-            .cached_title        = cached_title,
+            .cached_title = cached_title,
             .cached_title_window = cached_title_window,
         },
         allocator,
@@ -371,9 +372,9 @@ pub fn draw(
 /// resets and keeps open on spawn_keep, deactivates on deactivate, no-ops on none.
 fn handleAction(action: vim.Action) void {
     switch (action) {
-        .none       => {},
+        .none => {},
         .deactivate => deactivate(),
-        .spawn      => {
+        .spawn => {
             const cmd = g.vim_state.buf[0..g.vim_state.len];
             if (cmd.len > 0) spawnCommand(cmd);
             deactivate();
@@ -396,21 +397,23 @@ fn handleAction(action: vim.Action) void {
 
 /// Reset all `VimState` editing fields to their defaults without touching the
 /// heap-allocated buffers (buf, yank_buf, undo/redo stacks, etc.).
-
-
 /// Grabs the keyboard, resets editing state, and marks the prompt active.
 fn activate() void {
     g.vim_state.reset(); // reset editing state, preserve heap allocations
     g.ghost_len = 0;
     g.has_space = false;
     // Load completions and history on first activation.
-    if (g.comp_count == 0)   loadCompletions();
-    if (!g.is_hist_loaded)   loadHistory();
+    if (g.comp_count == 0) loadCompletions();
+    if (!g.is_hist_loaded) loadHistory();
     g.is_blink_visible = true;
 
     const cookie = xcb.xcb_grab_keyboard(
-        core.conn, 0, core.root, xcb.XCB_CURRENT_TIME,
-        xcb.XCB_GRAB_MODE_ASYNC, xcb.XCB_GRAB_MODE_ASYNC,
+        core.conn,
+        0,
+        core.root,
+        xcb.XCB_CURRENT_TIME,
+        xcb.XCB_GRAB_MODE_ASYNC,
+        xcb.XCB_GRAB_MODE_ASYNC,
     );
     const grab_reply = xcb.xcb_grab_keyboard_reply(core.conn, cookie, null);
     if (grab_reply == null) {
@@ -422,7 +425,7 @@ fn activate() void {
         debug.warn("prompt: keyboard grab failed (status {}) — aborting activation", .{grab_reply.*.status});
         return;
     }
-    g.is_active      = true;
+    g.is_active = true;
     g.redraw_pending = true;
     // No xcb_flush: xcb_grab_keyboard_reply already drained the XCB output
     // buffer to deliver the preceding grab request.  The two assignments above
@@ -487,16 +490,13 @@ fn loadCompletions() void {
     }.lt);
 }
 
-/// Binary search for the first `comp_names` entry >= prefix.
-/// Used as the starting point for prefix scanning in `updateGhost`,
-/// and as the basis for `compExistsExact`.
 /// Binary searches the sorted completion table for the first entry ≥ `prefix`.
 /// Returns the insertion index (0..comp_count) — use with compExistsExact for lookup.
 fn compLowerBound(prefix: []const u8) usize {
     var lo: usize = 0;
     var hi: usize = g.comp_count;
     while (lo < hi) {
-        const mid  = lo + (hi - lo) / 2;
+        const mid = lo + (hi - lo) / 2;
         const slot = mid * (max_completion_len + 1);
         const entry = std.mem.sliceTo(g.comp_names[slot .. slot + max_completion_len + 1], 0);
         if (std.mem.order(u8, entry, prefix) == .lt) lo = mid + 1 else hi = mid;
@@ -520,9 +520,9 @@ fn compExistsExact(name: []const u8) bool {
 fn updateGhost() void {
     g.ghost_len = 0;
 
-    if (g.vim_state.mode != .insert)                          return;
+    if (g.vim_state.mode != .insert) return;
     if (g.vim_state.len == 0 or g.vim_state.cursor != g.vim_state.len) return;
-    if (g.has_space)                                          return;
+    if (g.has_space) return;
 
     const prefix = g.vim_state.buf[0..g.vim_state.len];
 
@@ -536,9 +536,9 @@ fn updateGhost() void {
         const cmd_end = std.mem.indexOfScalar(u8, entry, ' ') orelse entry.len;
         const cmd_tok = entry[0..cmd_end];
 
-        if (cmd_tok.len <= prefix.len)               continue;
+        if (cmd_tok.len <= prefix.len) continue;
         if (!std.mem.startsWith(u8, cmd_tok, prefix)) continue;
-        if (!compExistsExact(cmd_tok))                continue;
+        if (!compExistsExact(cmd_tok)) continue;
 
         const suffix = cmd_tok[prefix.len..];
         const n = @min(suffix.len, max_completion_len);
@@ -555,7 +555,7 @@ fn updateGhost() void {
         const slot = i * (max_completion_len + 1);
         const name = std.mem.sliceTo(g.comp_names[slot .. slot + max_completion_len + 1], 0);
         if (!std.mem.startsWith(u8, name, prefix)) return; // past all prefix matches
-        if (name.len <= prefix.len) continue;              // exact match, not a completion
+        if (name.len <= prefix.len) continue; // exact match, not a completion
         const suffix = name[prefix.len..];
         const n = @min(suffix.len, max_completion_len);
         @memcpy(g.ghost_buf[0..n], suffix[0..n]);
@@ -576,9 +576,8 @@ fn histPrepend(cmd: []const u8) void {
     var i: usize = keep;
     while (i > 0) : (i -= 1) {
         const src = (i - 1) * (max_history_line + 1);
-        const dst =  i      * (max_history_line + 1);
-        @memcpy(g.hist_entries[dst .. dst + max_history_line + 1],
-                g.hist_entries[src .. src + max_history_line + 1]);
+        const dst = i * (max_history_line + 1);
+        @memcpy(g.hist_entries[dst .. dst + max_history_line + 1], g.hist_entries[src .. src + max_history_line + 1]);
     }
     @memcpy(g.hist_entries[0..cmd.len], cmd);
     g.hist_entries[cmd.len] = 0;
@@ -590,10 +589,10 @@ fn histAppendToFile(cmd: []const u8) void {
     if (cmd.len == 0) return;
     const home = std.mem.span(c.getenv("HOME") orelse return);
 
-    var dir_buf:  [512:0]u8 = undefined;
+    var dir_buf: [512:0]u8 = undefined;
     var file_buf: [512:0]u8 = undefined;
 
-    _ = std.fmt.bufPrintZ(&dir_buf,  "{s}/.local/share/drun",        .{home}) catch return;
+    _ = std.fmt.bufPrintZ(&dir_buf, "{s}/.local/share/drun", .{home}) catch return;
     _ = std.fmt.bufPrintZ(&file_buf, "{s}/.local/share/drun/history", .{home}) catch return;
 
     _ = c.mkdir(&dir_buf, 0o700);
@@ -622,7 +621,7 @@ fn histParseLine(line: []const u8, out: []u8) usize {
         cmd = cmd["- cmd: ".len..];
     } else if (cmd.len > 2 and cmd[0] == ':' and cmd[1] == ' ') {
         if (std.mem.indexOfScalar(u8, cmd, ';')) |semi| {
-            cmd = cmd[semi + 1..];
+            cmd = cmd[semi + 1 ..];
         }
     } else if (cmd[0] == '#') {
         return 0;
@@ -652,9 +651,9 @@ fn histLoadFile(fp: *c.FILE) void {
     const max_lines_cap = max_history * 2;
     const lines_raw = c.malloc(@sizeOf(usize) * max_lines_cap * 2) orelse return;
     defer c.free(lines_raw);
-    const lines_buf   = @as([*]usize, @ptrCast(@alignCast(lines_raw)));
+    const lines_buf = @as([*]usize, @ptrCast(@alignCast(lines_raw)));
     const line_starts = lines_buf[0..max_lines_cap];
-    const line_ends   = lines_buf[max_lines_cap .. max_lines_cap * 2];
+    const line_ends = lines_buf[max_lines_cap .. max_lines_cap * 2];
 
     var n_lines: usize = 0;
     var pos: usize = 0;
@@ -664,7 +663,7 @@ fn histLoadFile(fp: *c.FILE) void {
         const line_end = pos;
         if (pos < text.len) pos += 1;
         line_starts[n_lines] = line_start;
-        line_ends[n_lines]   = line_end;
+        line_ends[n_lines] = line_end;
         n_lines += 1;
     }
 
@@ -676,7 +675,7 @@ fn histLoadFile(fp: *c.FILE) void {
     var seen = std.AutoHashMapUnmanaged(u64, void){};
     defer seen.deinit(g.allocator);
     for (0..g.hist_count) |di| {
-        const dslot    = di * (max_history_line + 1);
+        const dslot = di * (max_history_line + 1);
         const existing = std.mem.sliceTo(g.hist_entries[dslot .. dslot + max_history_line + 1], 0);
         seen.put(g.allocator, std.hash.Wyhash.hash(0, existing), {}) catch {};
     }
@@ -707,25 +706,25 @@ fn loadHistory() void {
     // Local helper: format a path and open it for reading.
     const tryOpen = struct {
         fn tryOpenFormatted(buf: []u8, comptime fmt: []const u8, args: anytype) ?*c.FILE {
-            const s = std.fmt.bufPrint(buf[0..buf.len-1], fmt, args) catch return null;
+            const s = std.fmt.bufPrint(buf[0 .. buf.len - 1], fmt, args) catch return null;
             buf[s.len] = 0;
             return c.fopen(@ptrCast(buf.ptr), "r");
         }
     }.tryOpenFormatted;
 
-    if (tryOpen(&path_buf, "{s}/.local/share/drun/history",          .{home})) |fp| {
+    if (tryOpen(&path_buf, "{s}/.local/share/drun/history", .{home})) |fp| {
         defer _ = c.fclose(fp);
         histLoadFile(fp);
     }
-    if (tryOpen(&path_buf, "{s}/.bash_history",                       .{home})) |fp| {
+    if (tryOpen(&path_buf, "{s}/.bash_history", .{home})) |fp| {
         defer _ = c.fclose(fp);
         histLoadFile(fp);
     }
-    if (tryOpen(&path_buf, "{s}/.zsh_history",                        .{home})) |fp| {
+    if (tryOpen(&path_buf, "{s}/.zsh_history", .{home})) |fp| {
         defer _ = c.fclose(fp);
         histLoadFile(fp);
     }
-    if (tryOpen(&path_buf, "{s}/.local/share/fish/fish_history",      .{home})) |fp| {
+    if (tryOpen(&path_buf, "{s}/.local/share/fish/fish_history", .{home})) |fp| {
         defer _ = c.fclose(fp);
         histLoadFile(fp);
     }
@@ -761,16 +760,25 @@ fn spawnCommand(cmd: []const u8) void {
 
 // Private — basic insert-mode editing (used when build.has_vim = false)
 
+// Integer aliases matching vim.zig's private constants so switch arms compile
+// against the same keysym values without repeating raw hex literals.
+const XK_Escape = @intFromEnum(vim.XK.Escape);
+const XK_Return = @intFromEnum(vim.XK.Return);
+const XK_BackSpace = @intFromEnum(vim.XK.BackSpace);
+const XK_Delete = @intFromEnum(vim.XK.Delete);
+const XK_Left = @intFromEnum(vim.XK.Left);
+const XK_Right = @intFromEnum(vim.XK.Right);
+const XK_Home = @intFromEnum(vim.XK.Home);
+const XK_End = @intFromEnum(vim.XK.End);
+
 /// Insert `slice` at the cursor position, advancing cursor by the bytes written.
 fn insertBasic(vs: *vim.VimState, slice: []const u8) void {
     const n = @min(slice.len, vs.max_input - 1 - vs.len);
     if (n == 0) return;
     if (vs.cursor < vs.len)
-        std.mem.copyBackwards(u8,
-            vs.buf[vs.cursor + n .. vs.len + n],
-            vs.buf[vs.cursor     .. vs.len]);
+        std.mem.copyBackwards(u8, vs.buf[vs.cursor + n .. vs.len + n], vs.buf[vs.cursor..vs.len]);
     @memcpy(vs.buf[vs.cursor .. vs.cursor + n], slice[0..n]);
-    vs.len    += n;
+    vs.len += n;
     vs.cursor += n;
 }
 
@@ -779,27 +787,36 @@ fn insertBasic(vs: *vim.VimState, slice: []const u8) void {
 /// Return (spawn), and Escape (deactivate).
 fn handleInsertBasic(vs: *vim.VimState, sym: xcb.xcb_keysym_t) vim.Action {
     switch (sym) {
-        0xff1b => return .deactivate,               // Escape
-        0xff0d => return .spawn,                    // Return
-        0xff08 => { if (vs.cursor > 0) {            // BackSpace
-            std.mem.copyForwards(u8,
-                vs.buf[vs.cursor - 1 .. vs.len - 1],
-                vs.buf[vs.cursor     .. vs.len]);
-            vs.len    -= 1;
-            vs.cursor -= 1;
-        }},
-        0xffff => { if (vs.cursor < vs.len) {       // Delete
-            std.mem.copyForwards(u8,
-                vs.buf[vs.cursor     .. vs.len - 1],
-                vs.buf[vs.cursor + 1 .. vs.len]);
-            vs.len -= 1;
-        }},
-        0xff51 => { if (vs.cursor > 0)       vs.cursor -= 1; }, // Left
-        0xff53 => { if (vs.cursor < vs.len)  vs.cursor += 1; }, // Right
-        0xff50 => { vs.cursor = 0; },               // Home
-        0xff57 => { vs.cursor = vs.len; },           // End
-        else   => { if (sym >= 0x20 and sym <= 0x7e)
-            insertBasic(vs, &[1]u8{@truncate(sym)});
+        XK_Escape => return .deactivate,
+        XK_Return => return .spawn,
+        XK_BackSpace => {
+            if (vs.cursor > 0) {
+                std.mem.copyForwards(u8, vs.buf[vs.cursor - 1 .. vs.len - 1], vs.buf[vs.cursor..vs.len]);
+                vs.len -= 1;
+                vs.cursor -= 1;
+            }
+        },
+        XK_Delete => {
+            if (vs.cursor < vs.len) {
+                std.mem.copyForwards(u8, vs.buf[vs.cursor .. vs.len - 1], vs.buf[vs.cursor + 1 .. vs.len]);
+                vs.len -= 1;
+            }
+        },
+        XK_Left => {
+            if (vs.cursor > 0) vs.cursor -= 1;
+        },
+        XK_Right => {
+            if (vs.cursor < vs.len) vs.cursor += 1;
+        },
+        XK_Home => {
+            vs.cursor = 0;
+        },
+        XK_End => {
+            vs.cursor = vs.len;
+        },
+        else => {
+            if (sym >= 0x20 and sym <= 0x7e)
+                insertBasic(vs, &[1]u8{@truncate(sym)});
         },
     }
     return .none;
@@ -847,13 +864,13 @@ fn textPrefixFit(dc: *drawing.DrawContext, text: []const u8, max_px: u16) []cons
 /// This is the correct behaviour for pre-cursor text in a scrolling field:
 /// the cursor must appear immediately after the last visible character with no "…".
 inline fn drawSpan(
-    dc:           *drawing.DrawContext,
-    px:           *i32,
-    text_left_x:  u16,
+    dc: *drawing.DrawContext,
+    px: *i32,
+    text_left_x: u16,
     scroll_end_x: u16,
-    baseline:     u16,
-    text:         []const u8,
-    color:        u32,
+    baseline: u16,
+    text: []const u8,
+    color: u32,
 ) !void {
     const w = dc.measureTextWidth(text);
     defer px.* += @intCast(w);
@@ -871,7 +888,7 @@ inline fn drawSpan(
     else
         0;
 
-    const draw_x: u16  = @intCast(@max(px.*, tl));
+    const draw_x: u16 = @intCast(@max(px.*, tl));
     const available: u16 = @intCast(se - @as(i32, draw_x));
 
     // Clip the visible suffix to the available width on the right.
@@ -884,16 +901,16 @@ inline fn drawSpan(
 /// Shared by the insert, normal, and visual branches of `drawActive` for
 /// post-cursor text.
 inline fn drawPostSpan(
-    dc:           *drawing.DrawContext,
-    px:           i32,
-    text_left_x:  u16,
+    dc: *drawing.DrawContext,
+    px: i32,
+    text_left_x: u16,
     scroll_end_x: u16,
-    baseline:     u16,
-    text:         []const u8,
-    color:        u32,
+    baseline: u16,
+    text: []const u8,
+    color: u32,
 ) !void {
     if (text.len == 0 or px >= @as(i32, scroll_end_x)) return;
-    const draw_x: u16    = @intCast(@max(px, @as(i32, text_left_x)));
+    const draw_x: u16 = @intCast(@max(px, @as(i32, text_left_x)));
     const remaining: u16 = scroll_end_x -| draw_x;
     if (remaining > 0)
         try dc.drawTextEllipsis(draw_x, baseline, text, remaining, color);
@@ -902,15 +919,15 @@ inline fn drawPostSpan(
 /// Compute the clamped `draw_x` and `vis_w` for a block cursor or selection
 /// highlight.  Returns null when the block is entirely off-screen.
 inline fn cursorBlockGeom(
-    px:           i32,
-    block_w:      u16,
-    text_left_x:  u16,
+    px: i32,
+    block_w: u16,
+    text_left_x: u16,
     scroll_end_x: u16,
 ) ?struct { draw_x: u16, vis_w: u16 } {
     if (px + @as(i32, block_w) <= @as(i32, text_left_x) or px >= @as(i32, scroll_end_x))
         return null;
     const draw_x: u16 = @intCast(@max(px, @as(i32, text_left_x)));
-    const vis_w: u16  = @intCast(@min(@as(i32, block_w), @as(i32, scroll_end_x) - px));
+    const vis_w: u16 = @intCast(@min(@as(i32, block_w), @as(i32, scroll_end_x) - px));
     if (vis_w == 0) return null;
     return .{ .draw_x = draw_x, .vis_w = vis_w };
 }
@@ -926,24 +943,24 @@ inline fn cursorBlockGeom(
 /// The mode label is pinned to the right edge (does not scroll).
 /// The scrollable region keeps the cursor in view.
 fn drawActive(
-    dc:      *drawing.DrawContext,
-    config:  types.BarConfig,
-    height:  u16,
+    dc: *drawing.DrawContext,
+    config: types.BarConfig,
+    height: u16,
     start_x: u16,
-    width:   u16,
+    width: u16,
 ) !u16 {
-    const end_x  = start_x + width;
-    const pad    = config.scaledSegmentPadding(height);
+    const end_x = start_x + width;
+    const pad = config.scaledSegmentPadding(height);
     const accent = config.drunPromptColor();
-    const bg     = config.drunBg();
-    const fg     = config.drunFg();
+    const bg = config.drunBg();
+    const fg = config.drunFg();
     const prompt = config.drun_prompt;
 
     dc.fillRect(start_x, 0, width, height, bg);
 
-    const baseline    = dc.baselineY(height);
+    const baseline = dc.baselineY(height);
     const text_left_x = start_x + pad;
-    const text_end_x  = end_x   -| pad;
+    const text_end_x = end_x -| pad;
     if (text_left_x >= text_end_x) return end_x;
 
     // Mode widget — pinned to the right edge; does not scroll.
@@ -998,10 +1015,10 @@ fn drawActive(
                     const asc, const desc = dc.getMetrics();
                     const font_h: u16 = @intCast(@max(0, @as(i32, asc) + @as(i32, desc)));
                     g.cached_caret_top = (height -| font_h) / 2;
-                    g.cached_caret_h   = @min(font_h, height);
+                    g.cached_caret_h = @min(font_h, height);
                 }
                 const caret_top = g.cached_caret_top.?;
-                const caret_h   = g.cached_caret_h.?;
+                const caret_h = g.cached_caret_h.?;
                 const pill_inner_end: i32 = @as(i32, pill_x) + @as(i32, pill_w) - @as(i32, pill_h_pad);
                 if (g.is_blink_visible and ppx < pill_inner_end) {
                     dc.fillRect(@intCast(ppx), caret_top, cursor_width, caret_h, white);
@@ -1031,15 +1048,16 @@ fn drawActive(
     // caret_w used for layout is `cursor_width`.
     // In all other modes a full-character block model is used.
     const pre_cur_text = g.vim_state.buf[0..g.vim_state.cursor];
-    const pre_w_cur    = dc.measureTextWidth(pre_cur_text);
+    const pre_w_cur = dc.measureTextWidth(pre_cur_text);
 
     const caret_w: u16 = if (g.vim_state.mode == .insert)
         cursor_width
     else
         @max(
             dc.measureTextWidth(if (g.vim_state.cursor < g.vim_state.len)
-                g.vim_state.buf[g.vim_state.cursor..g.vim_state.cursor + 1]
-            else " "),
+                g.vim_state.buf[g.vim_state.cursor .. g.vim_state.cursor + 1]
+            else
+                " "),
             min_cursor_px,
         );
 
@@ -1048,7 +1066,8 @@ fn drawActive(
     else
         (if (g.vim_state.cursor < g.vim_state.len)
             g.vim_state.buf[g.vim_state.cursor + 1 .. g.vim_state.len]
-        else "");
+        else
+            "");
 
     var scroll_x: u16 = 0;
     const cursor_right = prompt_w + pre_w_cur + caret_w;
@@ -1079,15 +1098,14 @@ fn drawActive(
     const colon_active = build.has_vim and vim.colonInput(&g.vim_state) != null;
 
     if (g.vim_state.mode == .visual) {
-        const sel      = if (build.has_vim) vim.visualRange(&g.vim_state)
-                         else [2]usize{ g.vim_state.cursor, @min(g.vim_state.cursor + 1, g.vim_state.len) };
-        const sel_lo   = sel[0];
-        const sel_hi   = sel[1];
+        const sel = if (build.has_vim) vim.visualRange(&g.vim_state) else [2]usize{ g.vim_state.cursor, @min(g.vim_state.cursor + 1, g.vim_state.len) };
+        const sel_lo = sel[0];
+        const sel_hi = sel[1];
 
-        const pre_sel  = g.vim_state.buf[0..sel_lo];
+        const pre_sel = g.vim_state.buf[0..sel_lo];
         const sel_text = g.vim_state.buf[sel_lo..sel_hi];
         const post_sel = g.vim_state.buf[sel_hi..g.vim_state.len];
-        const sel_w    = @max(dc.measureTextWidth(sel_text), min_cursor_px);
+        const sel_w = @max(dc.measureTextWidth(sel_text), min_cursor_px);
 
         if (pre_sel.len > 0)
             try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, pre_sel, fg);
@@ -1100,7 +1118,6 @@ fn drawActive(
         px += @intCast(sel_w);
 
         try drawPostSpan(dc, px, text_left_x, ellipsis_end_x, baseline, post_sel, fg);
-
     } else if (g.vim_state.mode == .insert) {
         // Blinking thin caret; text NOT consumed by cursor position.
         if (pre_cur_text.len > 0)
@@ -1112,10 +1129,10 @@ fn drawActive(
             const asc, const desc = dc.getMetrics();
             const font_h: u16 = @intCast(@max(0, @as(i32, asc) + @as(i32, desc)));
             g.cached_caret_top = (height -| font_h) / 2;
-            g.cached_caret_h   = @min(font_h, height);
+            g.cached_caret_h = @min(font_h, height);
         }
         const caret_top = g.cached_caret_top.?;
-        const caret_h   = g.cached_caret_h.?;
+        const caret_h = g.cached_caret_h.?;
 
         if (g.is_blink_visible and !colon_active and px >= @as(i32, text_left_x) and px < @as(i32, scroll_end_x)) {
             dc.fillRect(@intCast(px), caret_top, cursor_width, caret_h, accent);
@@ -1124,21 +1141,21 @@ fn drawActive(
         // Ghost text (only when cursor is at end).
         if (g.ghost_len > 0 and g.vim_state.cursor == g.vim_state.len and px < @as(i32, scroll_end_x)) {
             const ghost = g.ghost_buf[0..g.ghost_len];
-            const draw_x: u16  = @intCast(@max(px, @as(i32, text_left_x)));
+            const draw_x: u16 = @intCast(@max(px, @as(i32, text_left_x)));
             const remaining: u16 = scroll_end_x -| draw_x;
             if (remaining > 0)
                 try dc.drawTextEllipsis(draw_x, baseline, ghost, remaining, accent);
         }
 
         try drawPostSpan(dc, px, text_left_x, ellipsis_end_x, baseline, post_text, fg);
-
     } else {
         // NORMAL / REPLACE: full-character block cursor.
         const pre_text = g.vim_state.buf[0..g.vim_state.cursor];
         const cur_text = if (g.vim_state.cursor < g.vim_state.len)
             g.vim_state.buf[g.vim_state.cursor .. g.vim_state.cursor + 1]
-        else " ";
-        const cur_w    = @max(dc.measureTextWidth(cur_text), min_cursor_px);
+        else
+            " ";
+        const cur_w = @max(dc.measureTextWidth(cur_text), min_cursor_px);
 
         if (pre_text.len > 0)
             try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, pre_text, fg);
