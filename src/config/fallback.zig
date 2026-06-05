@@ -1,15 +1,14 @@
 //! Fallback configuration
 //! Auto-detects a suitable terminal and font when no user config is provided.
 
-const std   = @import("std");
+const std = @import("std");
 const debug = @import("debug");
 
 // Checked in preference order.
 const TERMINALS = [_][]const u8{
-    "ghostty", "alacritty", "kitty", "wezterm", "foot",
-    "st", "urxvt", "rxvt", "xterm",
-    "konsole", "gnome-terminal", "xfce4-terminal",
-    "mate-terminal", "lxterminal", "terminator",
+    "ghostty",        "alacritty",      "kitty",         "wezterm",    "foot",
+    "st",             "urxvt",          "rxvt",          "xterm",      "konsole",
+    "gnome-terminal", "xfce4-terminal", "mate-terminal", "lxterminal", "terminator",
 };
 
 // Checked in preference order. "monospace" is always the final fallback.

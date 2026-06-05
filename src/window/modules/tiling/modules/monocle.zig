@@ -1,26 +1,26 @@
 //! Monocle tiling layout
 //! Stacks all windows fullscreen, showing only the topmost one, with optional gap insets.
 
-const core      = @import("core");
+const core = @import("core");
 const constants = @import("constants");
-const utils     = @import("utils");
-const layouts   = @import("layouts");
-const tiling    = @import("tiling");
-const State     = tiling.State;
-const xcb       = core.xcb;
+const utils = @import("utils");
+const layouts = @import("layouts");
+const tiling = @import("tiling");
+const State = tiling.State;
+const xcb = core.xcb;
 
 /// Tile `windows` into monocle mode using the given screen area.
 pub fn tileWithOffset(
-    ctx:      *const layouts.LayoutCtx,
-    state:    *State,
-    windows:  []const u32,
+    ctx: *const layouts.LayoutCtx,
+    state: *State,
+    windows: []const u32,
     screen_w: u16,
     screen_h: u16,
     y_offset: u16,
 ) void {
     if (windows.len == 0) return;
 
-    const m      = state.margins();
+    const m = state.margins();
     const inset: u16 = if (state.config.layout_variants.monocle == .gaps) m.gap else 0;
     const total_margin = m.border * 2 + inset * 2;
 
@@ -44,9 +44,9 @@ pub fn tileWithOffset(
     };
 
     const top_rect = utils.Rect{
-        .x      = @intCast(inset),
-        .y      = @intCast(y_offset +| inset),
-        .width  = if (screen_w > total_margin) screen_w - total_margin else constants.MIN_WINDOW_DIM,
+        .x = @intCast(inset),
+        .y = @intCast(y_offset +| inset),
+        .width = if (screen_w > total_margin) screen_w - total_margin else constants.MIN_WINDOW_DIM,
         .height = if (screen_h > total_margin) screen_h - total_margin else constants.MIN_WINDOW_DIM,
     };
 
@@ -65,7 +65,7 @@ pub fn tileWithOffset(
 /// top_win is always the last element, which was no longer true once focus-
 /// tracking was introduced.
 fn pushBackgroundWindowsOffscreen(
-    ctx:     *const layouts.LayoutCtx,
+    ctx: *const layouts.LayoutCtx,
     windows: []const u32,
     top_win: u32,
 ) void {
@@ -73,7 +73,7 @@ fn pushBackgroundWindowsOffscreen(
         if (win == top_win) continue;
         if (ctx.cache.getPtr(win)) |wd| {
             if (!wd.hasValidRect()) continue; // already offscreen — skip round-trip
-            wd.rect = tiling.zero_rect;       // invalidate before sending
+            wd.rect = tiling.zero_rect; // invalidate before sending
         }
         utils.pushWindowOffscreen(ctx.conn, win);
     }

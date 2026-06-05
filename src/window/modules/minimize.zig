@@ -1,24 +1,26 @@
 //! Window minimization
 //! Hides and restores windows with LIFO, FIFO, or bulk restore modes, scoped to the current workspace.
 
-const std   = @import("std");
+const std = @import("std");
 const build = @import("build_options");
 
-const core      = @import("core");
-    const xcb   = core.xcb;
-const utils     = @import("utils");
+const core = @import("core");
+const xcb = core.xcb;
+const utils = @import("utils");
 const constants = @import("constants");
 
 const debug = @import("debug");
 
-const window   = @import("window");
+const window = @import("window");
 const tracking = @import("tracking");
-const focus    = @import("focus");
+const focus = @import("focus");
 
-const fullscreen  = if (build.has_fullscreen) @import("fullscreen");
-const workspaces  = if (build.has_workspaces) @import("workspaces") else struct {
+const fullscreen = if (build.has_fullscreen) @import("fullscreen");
+const workspaces = if (build.has_workspaces) @import("workspaces") else struct {
     pub const Workspace = struct {};
-    pub fn getCurrentWorkspaceObject() ?*Workspace { return null; }
+    pub fn getCurrentWorkspaceObject() ?*Workspace {
+        return null;
+    }
 };
 const WsWorkspace = workspaces.Workspace;
 
@@ -27,7 +29,9 @@ const tiling = if (build.has_tiling) @import("tiling") else struct {
     pub fn addWindowAtFilteredIndex(_: u32, _: usize) void {}
     pub fn removeWindow(_: u32) void {}
     pub fn retileCurrentWorkspace() void {}
-    pub fn getWindowFilteredIndex(_: u32) ?usize { return null; }
+    pub fn getWindowFilteredIndex(_: u32) ?usize {
+        return null;
+    }
 };
 
 const bar = if (build.has_bar) @import("bar") else struct {
@@ -38,16 +42,16 @@ const bar = if (build.has_bar) @import("bar") else struct {
 
 /// Per-window minimize record.
 const MinimizedEntry = struct {
-    saved_fs:      ?core.WindowGeometry, // non-null iff the window was fullscreen when minimized
-    workspace_idx: u8,                   // single workspace only; multi-workspace tagging is handled upstream
-    timestamp:     u64,                  // monotonic counter; higher = more recently minimized (drives LIFO/FIFO)
-                                         //TODO: is a monotonic counter really the best way to drive lifo/fifo?
-    tiling_index:  ?usize,               // workspace-filtered slot at minimize time to reinsert at original position
+    saved_fs: ?core.WindowGeometry, // non-null iff the window was fullscreen when minimized
+    workspace_idx: u8, // single workspace only; multi-workspace tagging is handled upstream
+    timestamp: u64, // monotonic counter; higher = more recently minimized (drives LIFO/FIFO)
+    //TODO: is a monotonic counter really the best way to drive lifo/fifo?
+    tiling_index: ?usize, // workspace-filtered slot at minimize time to reinsert at original position
 };
 
 /// One slot in the fixed minimize buffer.
 const MinimizedRecord = struct {
-    win:   u32,
+    win: u32,
     entry: MinimizedEntry,
 };
 
@@ -59,19 +63,21 @@ else
     32;
 
 // Zero-initialised so slots beyond g_len never contain garbage.
-var g_buf:            [MAX_MINIMIZED]MinimizedRecord = std.mem.zeroes([MAX_MINIMIZED]MinimizedRecord);
-var g_len:            usize = 0;
+var g_buf: [MAX_MINIMIZED]MinimizedRecord = std.mem.zeroes([MAX_MINIMIZED]MinimizedRecord);
+var g_len: usize = 0;
 var g_next_timestamp: u64 = 0;
 
 // Lifecycle
 
 pub fn init() void {
-    g_len            = 0;
+    g_len = 0;
     g_next_timestamp = 0;
 }
 
 /// No heap resources are owned, so deinit is just a state reset.
-pub fn deinit() void { init(); }
+pub fn deinit() void {
+    init();
+}
 
 /// Returns the index into g_buf[0..g_len] for the given window, or null.
 fn findInBuf(win: u32) ?usize {
@@ -86,7 +92,7 @@ fn findInBuf(win: u32) ?usize {
 /// Returns true if the window was found and removed.
 fn removeFromBuf(win: u32) bool {
     if (findInBuf(win)) |i| {
-        g_len   -= 1;
+        g_len -= 1;
         g_buf[i] = g_buf[g_len];
         return true;
     }
@@ -102,8 +108,14 @@ pub fn isMinimized(win: u32) bool {
 /// insertion order, not MRU). Last-resort fallback called by minimizeWindow
 /// (via focus.focusBestAvailable) and directly from window.zig.
 pub fn focusMasterOrFirst() void {
-    if (!build.has_workspaces) { focus.clearFocus(); return; }
-    const cur = tracking.getCurrentWorkspace() orelse { focus.clearFocus(); return; };
+    if (!build.has_workspaces) {
+        focus.clearFocus();
+        return;
+    }
+    const cur = tracking.getCurrentWorkspace() orelse {
+        focus.clearFocus();
+        return;
+    };
     const bit = tracking.workspaceBit(cur);
     for (tracking.allWindows()) |entry| {
         if (entry.mask & bit == 0) continue;
@@ -116,7 +128,7 @@ pub fn focusMasterOrFirst() void {
 }
 
 pub fn minimizeWindow() void {
-    const win    = focus.getFocused()             orelse return;
+    const win = focus.getFocused() orelse return;
     const ws_idx = tracking.getCurrentWorkspace() orelse return;
 
     if (isMinimized(win)) return;
@@ -128,8 +140,7 @@ pub fn minimizeWindow() void {
     // rollback path — no other module's state has been mutated if we return.
 
     if (g_len >= MAX_MINIMIZED) {
-        debug.err("minimize: buffer full ({d} entries), cannot minimize 0x{x}",
-            .{ MAX_MINIMIZED, win });
+        debug.err("minimize: buffer full ({d} entries), cannot minimize 0x{x}", .{ MAX_MINIMIZED, win });
         return;
     }
 
@@ -152,12 +163,12 @@ pub fn minimizeWindow() void {
 
     const ts = g_next_timestamp;
     g_buf[g_len] = .{ .win = win, .entry = .{
-        .saved_fs      = saved_fs,
+        .saved_fs = saved_fs,
         .workspace_idx = ws_idx,
-        .timestamp     = ts,
-        .tiling_index  = tiling_index,
-    }};
-    g_len           += 1;
+        .timestamp = ts,
+        .tiling_index = tiling_index,
+    } };
+    g_len += 1;
     g_next_timestamp = ts + 1;
 
     _ = xcb.xcb_grab_server(core.conn);
@@ -165,7 +176,9 @@ pub fn minimizeWindow() void {
 
     // Prefer MRU history; fall back to workspace insertion order.
     focus.focusBestAvailable(.tiling_operation, struct {
-        fn visible(w: u32) bool { return !isMinimized(w); }
+        fn visible(w: u32) bool {
+            return !isMinimized(w);
+        }
     }.visible, focusMasterOrFirst);
 
     if (saved_fs != null) {
@@ -226,17 +239,20 @@ pub fn unminimize(order: RestoreOrder) void {
         const ts = rec.entry.timestamp;
         const better = best_idx == null or
             (if (want_max) ts > best_ts else ts < best_ts);
-        if (better) { best_idx = i; best_ts = ts; }
+        if (better) {
+            best_idx = i;
+            best_ts = ts;
+        }
     }
 
     const idx = best_idx orelse return;
 
     // Capture fields before the swap-remove invalidates the slot.
-    const win          = g_buf[idx].win;
-    const saved_fs     = g_buf[idx].entry.saved_fs;
+    const win = g_buf[idx].win;
+    const saved_fs = g_buf[idx].entry.saved_fs;
     const tiling_index = g_buf[idx].entry.tiling_index;
-    g_len      -= 1;
-    g_buf[idx]  = g_buf[g_len];
+    g_len -= 1;
+    g_buf[idx] = g_buf[g_len];
 
     restoreWindowImpl(win, saved_fs, tiling_index);
 }
@@ -274,18 +290,18 @@ pub fn unminimizeAll() void {
     var plain_end: usize = 0;
     while (plain_end < count and snapshot[plain_end].entry.saved_fs == null) plain_end += 1;
     const plain_wins = snapshot[0..plain_end];
-    const fs_wins    = snapshot[plain_end..count];
+    const fs_wins = snapshot[plain_end..count];
 
     if (plain_wins.len > 0) {
         // Focus the most recently minimized window (highest timestamp), matching
         // repeated LIFO unminimize semantics. Captured now because plain_wins is
         // re-sorted below for tiling insertion order.
         var focus_target = plain_wins[0].win;
-        var focus_ts     = plain_wins[0].entry.timestamp;
+        var focus_ts = plain_wins[0].entry.timestamp;
         for (plain_wins[1..]) |rec| {
             if (rec.entry.timestamp > focus_ts) {
                 focus_target = rec.win;
-                focus_ts     = rec.entry.timestamp;
+                focus_ts = rec.entry.timestamp;
             }
         }
 
@@ -330,7 +346,7 @@ pub fn unminimizeAll() void {
 /// Fills `set` with every currently minimized window ID, replacing any prior contents.
 /// Called by bar.zig to build the per-frame BarSnapshot.minimized_set.
 pub fn collectMinimizedIntoSet(
-    set:       *std.AutoHashMapUnmanaged(u32, void),
+    set: *std.AutoHashMapUnmanaged(u32, void),
     allocator: std.mem.Allocator,
 ) !void {
     set.clearRetainingCapacity();

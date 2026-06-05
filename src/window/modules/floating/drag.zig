@@ -1,25 +1,30 @@
 //! Window drag and resize
 //! Handles interactive dragging and resizing of floating windows with the mouse.
 
-const std   = @import("std");
+const std = @import("std");
 const build = @import("build_options");
 
-const core      = @import("core");
-    const xcb   = core.xcb;
+const core = @import("core");
+const xcb = core.xcb;
 const constants = @import("constants");
-const utils     = @import("utils");
+const utils = @import("utils");
 
 const window = @import("window");
-const focus  = @import("focus");
+const focus = @import("focus");
 
-const tiling     = if (build.has_tiling) @import("tiling");
+const tiling = if (build.has_tiling) @import("tiling");
 const fullscreen = if (build.has_fullscreen) @import("fullscreen");
 
-
 const bar = if (build.has_bar) @import("bar") else struct {
-    pub fn isVisible() bool { return false; }
-    pub fn getBarHeight() u16 { return 0; }
-    pub fn isBarWindow(_: u32) bool { return false; }
+    pub fn isVisible() bool {
+        return false;
+    }
+    pub fn getBarHeight() u16 {
+        return 0;
+    }
+    pub fn isBarWindow(_: u32) bool {
+        return false;
+    }
 };
 
 // Drag state types
@@ -43,29 +48,29 @@ pub const DragMode = enum { move, resize };
 pub const ResizeCorner = enum { top_left, top_right, bottom_left, bottom_right };
 
 pub const DragState = struct {
-    active:           bool          = false,
-    window:           core.WindowId = 0,
-    mode:             DragMode      = .move,
-    resize_corner:    ResizeCorner  = .bottom_right,
-    start_x:          i16           = 0,
-    start_y:          i16           = 0,
-    start_win_x:      i16           = 0,
-    start_win_y:      i16           = 0,
-    start_win_width:  u16           = 0,
-    start_win_height: u16           = 0,
+    active: bool = false,
+    window: core.WindowId = 0,
+    mode: DragMode = .move,
+    resize_corner: ResizeCorner = .bottom_right,
+    start_x: i16 = 0,
+    start_y: i16 = 0,
+    start_win_x: i16 = 0,
+    start_win_y: i16 = 0,
+    start_win_width: u16 = 0,
+    start_win_height: u16 = 0,
     /// Last geometry applied by updateDrag; saved to the geometry cache by
     /// stopDrag so workspace-switch float-restore finds the post-drag position.
     /// Zero (default) means no motion event arrived during this drag.
-    last_rect:        utils.Rect    = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    last_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
 };
 
-// Named work-area type 
+// Named work-area type
 // A named struct makes the return type of workArea() referenceable in
 // variable declarations and future doc-comments, unlike an anonymous return
 // struct whose type cannot be spelled anywhere else in the code.
 const WorkArea = struct { left: i32, right: i32, top: i32, bottom: i32 };
 
-// Snap helpers 
+// Snap helpers
 
 /// Resolve snap_distance from config into pixels.
 /// Percentage values are relative to screen width (the primary drag axis).
@@ -91,18 +96,18 @@ fn snapDistance() i32 {
 /// 2 * border_width from that edge (total footprint = pos + dim + 2*bw).
 /// Near edges need no correction because the outer border is already at pos.
 fn workArea() WorkArea {
-    const sw: i32  = core.screen.width_in_pixels;
-    const sh: i32  = core.screen.height_in_pixels;
-    const bh: i32  = if (bar.isVisible()) bar.getBarHeight() else 0;
+    const sw: i32 = core.screen.width_in_pixels;
+    const sh: i32 = core.screen.height_in_pixels;
+    const bh: i32 = if (bar.isVisible()) bar.getBarHeight() else 0;
     const bw2: i32 = @as(i32, window.getBorderWidth()) * 2;
     // bar_at_bottom only has observable effect when bh > 0 (bar is visible).
     // When bh == 0 both branches of the ternaries below produce identical
     // results, so evaluating it unconditionally is harmless.
     const bar_at_bottom = core.config.bar.bar_position == .bottom;
     return .{
-        .left   = 0,
-        .right  = sw - bw2,
-        .top    = if (bar_at_bottom) 0 else bh,
+        .left = 0,
+        .right = sw - bw2,
+        .top = if (bar_at_bottom) 0 else bh,
         .bottom = (if (bar_at_bottom) sh - bh else sh) - bw2,
     };
 }
@@ -137,16 +142,16 @@ inline fn snapEdge(edge: i32, boundary: i32, snap: i32) i32 {
 
 // snapNearEdge and snapFarEdge are identical in implementation; use snapEdge directly.
 
-// Module state 
+// Module state
 
 const State = struct {
-    drag:          DragState = .{},
-    pending_float: bool      = false,
+    drag: DragState = .{},
+    pending_float: bool = false,
 };
 
 var g_state: State = .{};
 
-// Public API 
+// Public API
 
 /// Begins a move (button 1) or resize (button 3) drag on `win` at pointer position (x, y).
 /// No-op when a drag is already active, or for bar/fullscreen windows.
@@ -175,7 +180,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     // that map cleanly onto the four corners.
     const resize_corner: ResizeCorner = corner: {
         if (button == 1) break :corner .bottom_right; // move — corner unused
-        const cx: i32 = @as(i32, geom.x) + @divTrunc(@as(i32, geom.width),  2);
+        const cx: i32 = @as(i32, geom.x) + @divTrunc(@as(i32, geom.width), 2);
         const cy: i32 = @as(i32, geom.y) + @divTrunc(@as(i32, geom.height), 2);
         const cursor_x: i32 = x;
         const cursor_y: i32 = y;
@@ -193,15 +198,15 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     // with a screen edge (see updateDrag's was_pending_float guard).
     g_state = .{
         .drag = .{
-            .active           = true,
-            .window           = win,
-            .mode             = if (button == 1) .move else .resize,
-            .resize_corner    = resize_corner,
-            .start_x          = x,
-            .start_y          = y,
-            .start_win_x      = geom.x,
-            .start_win_y      = geom.y,
-            .start_win_width  = geom.width,
+            .active = true,
+            .window = win,
+            .mode = if (button == 1) .move else .resize,
+            .resize_corner = resize_corner,
+            .start_x = x,
+            .start_y = y,
+            .start_win_x = geom.x,
+            .start_win_y = geom.y,
+            .start_win_width = geom.width,
             .start_win_height = geom.height,
         },
         .pending_float = if (build.has_tiling)
@@ -213,8 +218,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     // Raise the window to the top of the stack.  The cookie is intentionally
     // discarded — XCB errors surface only via xcb_request_check, which we do
     // not call here; a stack-raise failure is non-fatal.
-    _ = xcb.xcb_configure_window(core.conn, win,
-        xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+    _ = xcb.xcb_configure_window(core.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     _ = xcb.xcb_flush(core.conn);
 }
 
@@ -256,17 +260,17 @@ pub fn updateDrag(x: i16, y: i16) void {
             // the tiled position may coincide with a screen edge, which would
             // make the window appear frozen on the first drag movement.
             if (was_pending_float) break :blk utils.Rect{
-                .x      = @intCast(raw_x),
-                .y      = @intCast(raw_y),
-                .width  = drag.start_win_width,
+                .x = @intCast(raw_x),
+                .y = @intCast(raw_y),
+                .width = drag.start_win_width,
                 .height = drag.start_win_height,
             };
             const win_w: i32 = drag.start_win_width;
             const win_h: i32 = drag.start_win_height;
             break :blk utils.Rect{
-                .x      = @intCast(snapAxis(raw_x, win_w, wa.left, wa.right,  snap)),
-                .y      = @intCast(snapAxis(raw_y, win_h, wa.top,  wa.bottom, snap)),
-                .width  = drag.start_win_width,
+                .x = @intCast(snapAxis(raw_x, win_w, wa.left, wa.right, snap)),
+                .y = @intCast(snapAxis(raw_y, win_h, wa.top, wa.bottom, snap)),
+                .width = drag.start_win_width,
                 .height = drag.start_win_height,
             };
         },
@@ -305,21 +309,21 @@ pub fn updateDrag(x: i16, y: i16) void {
             // Anchor: the edge that stays fixed (opposite side from the
             // initially-dragged corner).
             const anchor_x: i32 = switch (drag.resize_corner) {
-                .top_left,    .bottom_left  => start_x + start_w, // anchor = right edge
-                .top_right,   .bottom_right => start_x,            // anchor = left  edge
+                .top_left, .bottom_left => start_x + start_w, // anchor = right edge
+                .top_right, .bottom_right => start_x, // anchor = left  edge
             };
             const anchor_y: i32 = switch (drag.resize_corner) {
-                .top_left,    .top_right    => start_y + start_h, // anchor = bottom edge
-                .bottom_left, .bottom_right => start_y,            // anchor = top   edge
+                .top_left, .top_right => start_y + start_h, // anchor = bottom edge
+                .bottom_left, .bottom_right => start_y, // anchor = top   edge
             };
 
             // Moving corner: initial position of the edge under the cursor.
             const moving_x0: i32 = switch (drag.resize_corner) {
-                .top_left,    .bottom_left  => start_x,            // moving = left  edge
-                .top_right,   .bottom_right => start_x + start_w, // moving = right edge
+                .top_left, .bottom_left => start_x, // moving = left  edge
+                .top_right, .bottom_right => start_x + start_w, // moving = right edge
             };
             const moving_y0: i32 = switch (drag.resize_corner) {
-                .top_left,    .top_right    => start_y,            // moving = top    edge
+                .top_left, .top_right => start_y, // moving = top    edge
                 .bottom_left, .bottom_right => start_y + start_h, // moving = bottom edge
             };
 
@@ -328,17 +332,17 @@ pub fn updateDrag(x: i16, y: i16) void {
             const raw_moving_x: i32 = moving_x0 + @as(i32, dx);
             const raw_moving_y: i32 = moving_y0 + @as(i32, dy);
 
-            const moving_x: i32 = snapEdge(snapEdge(raw_moving_x, wa.left, snap), wa.right,  snap);
-            const moving_y: i32 = snapEdge(snapEdge(raw_moving_y, wa.top,  snap), wa.bottom, snap);
+            const moving_x: i32 = snapEdge(snapEdge(raw_moving_x, wa.left, snap), wa.right, snap);
+            const moving_y: i32 = snapEdge(snapEdge(raw_moving_y, wa.top, snap), wa.bottom, snap);
 
             // The four edges are simply the min/max of anchor and moving on
             // each axis.  Crossing the anchor wraps the resize direction.
-            const new_left:   i32 = @min(anchor_x, moving_x);
-            const new_right:  i32 = @max(anchor_x, moving_x);
-            const new_top:    i32 = @min(anchor_y, moving_y);
+            const new_left: i32 = @min(anchor_x, moving_x);
+            const new_right: i32 = @max(anchor_x, moving_x);
+            const new_top: i32 = @min(anchor_y, moving_y);
             const new_bottom: i32 = @max(anchor_y, moving_y);
 
-            const new_w = new_right  - new_left;
+            const new_w = new_right - new_left;
             const new_h = new_bottom - new_top;
 
             // Clamp dimensions first, then re-pin the position so the anchor
@@ -363,9 +367,9 @@ pub fn updateDrag(x: i16, y: i16) void {
             const pinned_y: i32 = if (moving_y < anchor_y) anchor_y - clamped_h else new_top;
 
             break :blk utils.Rect{
-                .x      = @intCast(pinned_x),
-                .y      = @intCast(pinned_y),
-                .width  = @intCast(clamped_w),
+                .x = @intCast(pinned_x),
+                .y = @intCast(pinned_y),
+                .width = @intCast(clamped_w),
                 .height = @intCast(clamped_h),
             };
         },
@@ -390,7 +394,9 @@ pub fn stopDrag() void {
     g_state = .{};
 }
 
-pub inline fn isDragging() bool { return g_state.drag.active; }
+pub inline fn isDragging() bool {
+    return g_state.drag.active;
+}
 
 /// Returns true when a resize drag is active on the given window.
 /// Use this in handleConfigureRequest to deny min-size requests from the
@@ -403,4 +409,6 @@ pub inline fn isResizingWindow(win: u32) bool {
 /// Returns the rect last applied during the active drag.
 /// Only meaningful when isDragging() is true and at least one motion event
 /// has arrived (last_rect.width != 0).
-pub inline fn getDragLastRect() utils.Rect { return g_state.drag.last_rect; }
+pub inline fn getDragLastRect() utils.Rect {
+    return g_state.drag.last_rect;
+}

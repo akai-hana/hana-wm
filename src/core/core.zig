@@ -4,7 +4,7 @@
 const std = @import("std");
 
 const constants = @import("constants");
-const types     = @import("types");
+const types = @import("types");
 
 // Centralised to avoid repeated @cImport translation across compilation units.
 pub const xcb = @cImport(@cInclude("xcb/xcb.h"));
@@ -13,16 +13,16 @@ pub const xcb = @cImport(@cInclude("xcb/xcb.h"));
 /// Cast to xcb_keysym_t with `@intFromEnum`.
 pub const XK = enum(u32) {
     BackSpace = 0xff08,
-    Tab       = 0xff09,
-    Return    = 0xff0d,
-    Escape    = 0xff1b,
-    Home      = 0xff50,
-    Left      = 0xff51,
-    Up        = 0xff52,
-    Right     = 0xff53,
-    Down      = 0xff54,
-    End       = 0xff57,
-    Delete    = 0xffff,
+    Tab = 0xff09,
+    Return = 0xff0d,
+    Escape = 0xff1b,
+    Home = 0xff50,
+    Left = 0xff51,
+    Up = 0xff52,
+    Right = 0xff53,
+    Down = 0xff54,
+    End = 0xff57,
+    Delete = 0xffff,
 };
 
 /// Equivalent to xcb.xcb_window_t (uint32_t); named for readability.
@@ -30,10 +30,10 @@ pub const WindowId = u32;
 
 /// Geometry snapshot used by both fullscreen and minimize.
 pub const WindowGeometry = struct {
-    x:            i16,
-    y:            i16,
-    width:        u16,
-    height:       u16,
+    x: i16,
+    y: i16,
+    width: u16,
+    height: u16,
     border_width: u16,
 };
 
@@ -58,14 +58,24 @@ pub const DpiInfo = struct {
     }
 };
 
-// Process-wide singletons. `undefined` fields must be set by main() before use;
-// behaviour is only safety-checked in Debug/ReleaseSafe builds.
-pub var conn:     *xcb.xcb_connection_t = undefined;
-pub var screen:   *xcb.xcb_screen_t    = undefined;
-pub var root:     WindowId             = undefined;
-pub var alloc:    std.mem.Allocator    = undefined;
-pub var config:   types.Config         = undefined;
-pub var dpi_info: DpiInfo              = .{ .dpi = 96.0 };
+// Process-wide singletons.
+//
+// INVARIANT: every field below is `undefined` until main() initialises it.
+// In Debug/ReleaseSafe builds an out-of-order access panics; in ReleaseFast
+// the compiler may assume these are fully initialised and silently mis-compile
+// any access that races with startup (e.g. a module-level `comptime` block or
+// a test that imports `core` without calling main first).
+//
+// To eliminate this class of bug entirely, consider migrating to the
+// `?State` pattern used in `tiling.zig`, where each field is a nullable
+// pointer initialised to null and unwrapped with `.?` at every use site —
+// producing a safe panic in all build modes on premature access.
+pub var conn: *xcb.xcb_connection_t = undefined;
+pub var screen: *xcb.xcb_screen_t = undefined;
+pub var root: WindowId = undefined;
+pub var alloc: std.mem.Allocator = undefined;
+pub var config: types.Config = undefined;
+pub var dpi_info: DpiInfo = .{ .dpi = 96.0 };
 
 /// Returns true if the XCB connection is open and error-free.
 pub fn isConnValid() bool {

@@ -2,16 +2,16 @@
 //! Arranges windows in an evenly divided grid, with rigid or relaxed row sizing.
 
 const constants = @import("constants");
-const utils     = @import("utils");
-const layouts   = @import("layouts");
-const tiling    = @import("tiling");
-const State     = tiling.State;
+const utils = @import("utils");
+const layouts = @import("layouts");
+const tiling = @import("tiling");
+const State = tiling.State;
 
 /// Tile `windows` into a grid using the given screen area.
 pub fn tileWithOffset(
-    ctx:      *const layouts.LayoutCtx,
-    state:    *State,
-    windows:  []const u32,
+    ctx: *const layouts.LayoutCtx,
+    state: *State,
+    windows: []const u32,
     screen_w: u16,
     screen_h: u16,
     y_offset: u16,
@@ -19,13 +19,13 @@ pub fn tileWithOffset(
     const n = windows.len;
     if (n == 0) return;
 
-    const m    = state.margins();
+    const m = state.margins();
     const grid = calcGridShape(n);
-    const bm   = 2 *| m.border;
+    const bm = 2 *| m.border;
 
     const cell_w = (screen_w -| (grid.cols + 1) *| m.gap) / grid.cols;
     const cell_h = (screen_h -| (grid.rows + 1) *| m.gap) / grid.rows;
-    const win_h  = cellToWindowSize(cell_h, bm);
+    const win_h = cellToWindowSize(cell_h, bm);
 
     // In relaxed mode, windows on a partial last row divide the full screen
     // width among themselves rather than using the narrower grid-column width.
@@ -45,14 +45,14 @@ pub fn tileWithOffset(
 
         const is_partial_row = last_row_count != 0 and row == grid.rows - 1;
         const effective_cell_w: u16 = switch (state.config.layout_variants.grid) {
-            .rigid   => cell_w,
+            .rigid => cell_w,
             .relaxed => if (is_partial_row) partial_cell_w else cell_w,
         };
 
         const rect = utils.Rect{
-            .x      = @intCast(m.gap +| col *| (effective_cell_w + m.gap)),
-            .y      = @intCast(y_offset +| m.gap +| row *| (cell_h + m.gap)),
-            .width  = cellToWindowSize(effective_cell_w, bm),
+            .x = @intCast(m.gap +| col *| (effective_cell_w + m.gap)),
+            .y = @intCast(y_offset +| m.gap +| row *| (cell_h + m.gap)),
+            .width = cellToWindowSize(effective_cell_w, bm),
             .height = win_h,
         };
         if (!defer_slot.capture(ctx, win, rect))

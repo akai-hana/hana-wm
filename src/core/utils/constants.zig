@@ -5,12 +5,12 @@ const xcb = @cImport(@cInclude("xcb/xcb.h"));
 
 // Modifier masks
 // Must be u16 as per XCB API
-pub const MOD_SHIFT:    u16 = xcb.XCB_MOD_MASK_SHIFT;
+pub const MOD_SHIFT: u16 = xcb.XCB_MOD_MASK_SHIFT;
 pub const MOD_CAPSLOCK: u16 = xcb.XCB_MOD_MASK_LOCK;
-pub const MOD_CONTROL:  u16 = xcb.XCB_MOD_MASK_CONTROL;
-pub const MOD_ALT:      u16 = xcb.XCB_MOD_MASK_1;
-pub const MOD_NUMLOCK:  u16 = xcb.XCB_MOD_MASK_2;
-pub const MOD_SUPER:    u16 = xcb.XCB_MOD_MASK_4;
+pub const MOD_CONTROL: u16 = xcb.XCB_MOD_MASK_CONTROL;
+pub const MOD_ALT: u16 = xcb.XCB_MOD_MASK_1;
+pub const MOD_NUMLOCK: u16 = xcb.XCB_MOD_MASK_2;
+pub const MOD_SUPER: u16 = xcb.XCB_MOD_MASK_4;
 
 // Mask applied before comparing a received modifier state against a keybinding.
 // Excludes CapsLock and NumLock so bindings fire regardless of lock-key state;
@@ -18,7 +18,7 @@ pub const MOD_SUPER:    u16 = xcb.XCB_MOD_MASK_4;
 pub const MOD_MASK_BINDING: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER;
 
 // Window constraints
-pub const MIN_WINDOW_DIM:   u16 = 50;
+pub const MIN_WINDOW_DIM: u16 = 50;
 pub const MIN_MASTER_WIDTH: f32 = 0.05;
 
 // XKB retry parameters
@@ -67,14 +67,14 @@ pub const EventMasks = struct {
     // server coalesces motion events and we re-arm with xcb_query_pointer,
     // matching the drag/suppression logic in input.zig.
     pub const ROOT_WINDOW = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
-                            xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
-                            xcb.XCB_EVENT_MASK_KEY_PRESS |
-                            xcb.XCB_EVENT_MASK_BUTTON_PRESS |
-                            xcb.XCB_EVENT_MASK_POINTER_MOTION_HINT | // DWM: PointerMotionMask
-                            xcb.XCB_EVENT_MASK_ENTER_WINDOW |
-                            xcb.XCB_EVENT_MASK_LEAVE_WINDOW |
-                            xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY | // DWM: StructureNotifyMask
-                            xcb.XCB_EVENT_MASK_PROPERTY_CHANGE;
+        xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
+        xcb.XCB_EVENT_MASK_KEY_PRESS |
+        xcb.XCB_EVENT_MASK_BUTTON_PRESS |
+        xcb.XCB_EVENT_MASK_POINTER_MOTION_HINT | // DWM: PointerMotionMask
+        xcb.XCB_EVENT_MASK_ENTER_WINDOW |
+        xcb.XCB_EVENT_MASK_LEAVE_WINDOW |
+        xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY | // DWM: StructureNotifyMask
+        xcb.XCB_EVENT_MASK_PROPERTY_CHANGE;
 
     // DWM verbatim (manage() in dwm.c):
     //   XSelectInput(dpy, w, EnterWindowMask|FocusChangeMask|PropertyChangeMask
@@ -87,10 +87,10 @@ pub const EventMasks = struct {
     // grabs set in grabbuttons(c, 1).  Adding BUTTON_PRESS here would mean the
     // WM receives button events through *both* the grab mechanism and the event
     // mask, creating duplicates and interfering with SYNC-mode grab sequencing.
-    pub const MANAGED_WINDOW = xcb.XCB_EVENT_MASK_ENTER_WINDOW |       // DWM: EnterWindowMask
-                               xcb.XCB_EVENT_MASK_FOCUS_CHANGE |        // DWM: FocusChangeMask
-                               xcb.XCB_EVENT_MASK_PROPERTY_CHANGE |     // DWM: PropertyChangeMask
-                               xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY;     // DWM: StructureNotifyMask
+    pub const MANAGED_WINDOW = xcb.XCB_EVENT_MASK_ENTER_WINDOW | // DWM: EnterWindowMask
+        xcb.XCB_EVENT_MASK_FOCUS_CHANGE | // DWM: FocusChangeMask
+        xcb.XCB_EVENT_MASK_PROPERTY_CHANGE | // DWM: PropertyChangeMask
+        xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY; // DWM: StructureNotifyMask
 };
 
 /// Lock key combinations grabbed alongside every keybinding so binds work

@@ -1,37 +1,49 @@
 //! Window lifecycle
 //! Manages window creation, destruction, configuration, and event handling for all managed windows.
 
-const std   = @import("std");
+const std = @import("std");
 const build = @import("build_options");
 
-const core      = @import("core");
-const xcb       = core.xcb;
-const utils     = @import("utils");
+const core = @import("core");
+const xcb = core.xcb;
+const utils = @import("utils");
 const constants = @import("constants");
-const debug     = @import("debug");
+const debug = @import("debug");
 
 const tracking = @import("tracking");
-const focus    = @import("focus");
+const focus = @import("focus");
 
 const fullscreen = if (build.has_fullscreen) @import("fullscreen");
-const minimize   = if (build.has_minimize)   @import("minimize")  ;
+const minimize = if (build.has_minimize) @import("minimize");
 const workspaces = if (build.has_workspaces) @import("workspaces") else struct {
-    pub const State     = struct {};
+    pub const State = struct {};
     pub const Workspace = struct {};
-    pub fn getState() ?*State { return null; }
-    pub fn getCurrentWorkspaceObject() ?*Workspace { return null; }
+    pub fn getState() ?*State {
+        return null;
+    }
+    pub fn getCurrentWorkspaceObject() ?*Workspace {
+        return null;
+    }
 };
 
 const tiling = if (build.has_tiling) @import("tiling");
 
 const drag = if (build.has_drag) @import("drag") else struct {
-    pub fn isDragging()              bool       { return false; }
-    pub fn isResizingWindow(_: u32)  bool       { return false; }
-    pub fn getDragLastRect()         utils.Rect { return .{ .x = 0, .y = 0, .width = 0, .height = 0 }; }
+    pub fn isDragging() bool {
+        return false;
+    }
+    pub fn isResizingWindow(_: u32) bool {
+        return false;
+    }
+    pub fn getDragLastRect() utils.Rect {
+        return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+    }
 };
 
 const bar = if (build.has_bar) @import("bar") else struct {
-    pub fn isBarWindow(_: u32) bool { return false; }
+    pub fn isBarWindow(_: u32) bool {
+        return false;
+    }
     pub fn redrawInsideGrab() void {}
     pub fn scheduleRedraw() void {}
     pub fn setBarState(_: anytype) void {}
@@ -39,43 +51,38 @@ const bar = if (build.has_bar) @import("bar") else struct {
 
 const WsWorkspace = workspaces.Workspace;
 inline fn moveWindowToWs(win: u32, ws: u8) !void {
-    if (build.has_workspaces) try workspaces.moveWindowTo(win, ws)
-    else try tracking.registerWindow(win, 0);
+    if (build.has_workspaces) try workspaces.moveWindowTo(win, ws) else try tracking.registerWindow(win, 0);
 }
 inline fn wsRemoveWindow(win: u32) void {
-    if (build.has_workspaces) workspaces.removeWindow(win)
-    else tracking.removeWindow(win);
+    if (build.has_workspaces) workspaces.removeWindow(win) else tracking.removeWindow(win);
 }
 
 const scale = if (build.has_scale) @import("scale") else utils.scale_fallback;
 
-
 // XSizeHints flags (ICCCM §4.1.2.3)
 const XSizeHintsFlags = struct {
-    const p_min_size:   u32 = 0x10;
-    const p_max_size:   u32 = 0x20;
+    const p_min_size: u32 = 0x10;
+    const p_max_size: u32 = 0x20;
     const p_resize_inc: u32 = 0x40;
-    const p_aspect:     u32 = 0x80;
-    const p_base_size:  u32 = 0x100;
+    const p_aspect: u32 = 0x80;
+    const p_base_size: u32 = 0x100;
 };
 
 // WM_HINTS constants (ICCCM §4.1.2.4)
-const WM_HINTS_INPUT_FLAG:  u32   = 1 << 0;
+const WM_HINTS_INPUT_FLAG: u32 = 1 << 0;
 const WM_HINTS_FLAGS_FIELD: usize = 0;
 const WM_HINTS_INPUT_FIELD: usize = 1;
-const WM_HINTS_LONG_LENGTH: u32   = 9; // flags + 8 fields
+const WM_HINTS_LONG_LENGTH: u32 = 9; // flags + 8 fields
 
 const MAX_PROPERTY_LENGTH = constants.PROPERTY_MAX_LENGTH;
-const PROPERTY_NO_DELETE  = constants.PROPERTY_NO_DELETE;
+const PROPERTY_NO_DELETE = constants.PROPERTY_NO_DELETE;
 
 /// Minimum window dimension; windows thinner or shorter than this are considered invalid.
 const MIN_WINDOW_DIM = constants.MIN_WINDOW_DIM;
 /// Maximum depth when walking the X11 window tree in findManagedWindow.
 const MAX_WINDOW_TREE_DEPTH = constants.MAX_WINDOW_TREE_DEPTH;
 
-// ---------------------------------------------------------------------------
 // Spawn queue
-// ---------------------------------------------------------------------------
 //
 // Tracks pending (workspace, pid) assignments for newly-mapped windows.
 // Lives here (window.zig) because it is exclusively accessed by this module.
@@ -127,10 +134,10 @@ var g_rules_map: std.StringHashMapUnmanaged(u8) = .{};
 // which existing null-reply guards handle correctly.
 
 var atoms: struct {
-    wm_protocols:            u32 = 0,
-    wm_class:                u32 = 0,
-    net_wm_pid:              u32 = 0,
-    net_wm_state:            u32 = 0,
+    wm_protocols: u32 = 0,
+    wm_class: u32 = 0,
+    net_wm_pid: u32 = 0,
+    net_wm_state: u32 = 0,
     net_wm_state_fullscreen: u32 = 0,
 } = .{};
 
@@ -145,7 +152,7 @@ var atoms: struct {
 var g_geom_cache: if (build.has_tiling) void else struct {
     const Slot = struct { win: u32 = 0, rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 } };
     slots: [64]Slot = [1]Slot{.{}} ** 64,
-    len:   usize    = 0,
+    len: usize = 0,
 } = if (build.has_tiling) {} else .{};
 
 /// Set by grab-flush paths that already called updateFloatingWindowBorders() inside
@@ -156,11 +163,21 @@ var borders_flushed_this_batch: bool = false;
 
 /// Save `rect` as the last-known geometry for `win`.
 pub fn saveWindowGeom(win: u32, rect: utils.Rect) void {
-    if (build.has_tiling) { tiling.saveWindowGeom(win, rect); return; }
+    if (build.has_tiling) {
+        tiling.saveWindowGeom(win, rect);
+        return;
+    }
     const c = &g_geom_cache;
-    for (c.slots[0..c.len]) |*s| { if (s.win == win) { s.rect = rect; return; } }
-    if (c.len < c.slots.len) { c.slots[c.len] = .{ .win = win, .rect = rect }; c.len += 1; }
-    else debug.warn("saveWindowGeom: cache full; geometry for 0x{x} not saved (restore will use float default)", .{win});
+    for (c.slots[0..c.len]) |*s| {
+        if (s.win == win) {
+            s.rect = rect;
+            return;
+        }
+    }
+    if (c.len < c.slots.len) {
+        c.slots[c.len] = .{ .win = win, .rect = rect };
+        c.len += 1;
+    } else debug.warn("saveWindowGeom: cache full; geometry for 0x{x} not saved (restore will use float default)", .{win});
 }
 
 /// Return the last-known geometry for `win`, or null if none is cached.
@@ -190,9 +207,7 @@ fn removeWindowGeom(win: u32) void {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Geometry helpers
-// ---------------------------------------------------------------------------
 
 /// Screen-space position of a window's top-left corner.
 /// X11 coordinates are signed (windows may be partially off-screen or on a
@@ -204,7 +219,7 @@ pub const Pos = struct { x: i16, y: i16 };
 /// (one quarter of the screen in from the top-left).
 pub inline fn floatDefaultPos() Pos {
     return .{
-        .x = @intCast(@min(core.screen.width_in_pixels  / 4, std.math.maxInt(i16))),
+        .x = @intCast(@min(core.screen.width_in_pixels / 4, std.math.maxInt(i16))),
         .y = @intCast(@min(core.screen.height_in_pixels / 4, std.math.maxInt(i16))),
     };
 }
@@ -220,9 +235,7 @@ pub fn restoreFloatGeom(win: u32) void {
         utils.configureWindow(core.conn, win, rect);
     } else {
         const pos = floatDefaultPos();
-        _ = xcb.xcb_configure_window(core.conn, win,
-            xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y,
-            &[_]u32{ @bitCast(@as(i32, pos.x)), @bitCast(@as(i32, pos.y)) });
+        _ = xcb.xcb_configure_window(core.conn, win, xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{ @bitCast(@as(i32, pos.x)), @bitCast(@as(i32, pos.y)) });
     }
 }
 
@@ -230,10 +243,11 @@ pub fn restoreFloatGeom(win: u32) void {
 /// preventing a one-frame flash on fullscreen enter/exit or workspace switch.
 pub inline fn configureWindowGeom(conn: *xcb.xcb_connection_t, win: u32, geom: core.WindowGeometry) void {
     _ = xcb.xcb_configure_window(
-        conn, win,
-        xcb.XCB_CONFIG_WINDOW_X     | xcb.XCB_CONFIG_WINDOW_Y     |
-        xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
-        xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
+        conn,
+        win,
+        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
+            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
+            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
         &[_]u32{
             @bitCast(@as(i32, geom.x)),
             @bitCast(@as(i32, geom.y)),
@@ -252,7 +266,6 @@ pub fn getGeometry(conn: *xcb.xcb_connection_t, win: u32) ?utils.Rect {
     return utils.Rect.fromXcb(reply);
 }
 
-// ---------------------------------------------------------------------------
 // ICCCM focus property cache
 //
 // Keyed by window ID; populated at map time via `populateFocusCacheFromCookies`.
@@ -263,21 +276,20 @@ pub fn getGeometry(conn: *xcb.xcb_connection_t, win: u32) ?utils.Rect {
 // `InputModel` (focus routing) and `wm_delete` (close protocol) are both derived from
 // WM_PROTOCOLS, so they are populated together in a single scan.
 // See the flat-array implementation below for rationale over AutoHashMap.
-// ---------------------------------------------------------------------------
 
 /// The four ICCCM focus delivery modes (§4.1.7), determined by the combination of
 /// WM_HINTS.input and WM_TAKE_FOCUS presence in WM_PROTOCOLS.
 pub const InputModel = enum {
-    no_input,        // input=False, no WM_TAKE_FOCUS: window doesn't want focus
-    passive,         // input=True,  no WM_TAKE_FOCUS: set focus via `XSetInputFocus`
-    locally_active,  // input=True,  WM_TAKE_FOCUS:    set focus + send protocol
+    no_input, // input=False, no WM_TAKE_FOCUS: window doesn't want focus
+    passive, // input=True,  no WM_TAKE_FOCUS: set focus via `XSetInputFocus`
+    locally_active, // input=True,  WM_TAKE_FOCUS:    set focus + send protocol
     globally_active, // input=False, WM_TAKE_FOCUS:    only send protocol
 };
 
 /// Per-window focus properties derived from WM_PROTOCOLS and WM_HINTS,
 /// stored together since both are populated in a single WM_PROTOCOLS scan.
 const CachedProps = struct {
-    model:     InputModel,
+    model: InputModel,
     wm_delete: bool,
 };
 
@@ -293,24 +305,24 @@ const CachedProps = struct {
 const MAX_WINDOW_CACHE: usize = 512;
 
 const CacheSlot = struct {
-    id:    u32,
+    id: u32,
     props: CachedProps,
 };
 
 var cache_slots: [MAX_WINDOW_CACHE]CacheSlot = undefined;
-var cache_len:   usize = 0;
-var cache_ready: bool  = false;
+var cache_len: usize = 0;
+var cache_ready: bool = false;
 
 /// Initializes the per-window focus property cache.
 /// No allocator required — the backing store is a module-level static array.
 pub fn initInputModelCache() void {
-    cache_len   = 0;
+    cache_len = 0;
     cache_ready = true;
 }
 
 /// Cleans up the per-window focus property cache.
 pub fn deinitInputModelCache() void {
-    cache_len   = 0;
+    cache_len = 0;
     cache_ready = false;
 }
 
@@ -319,9 +331,9 @@ pub fn deinitInputModelCache() void {
 /// processes property requests in parallel with the map.
 pub fn populateFocusCacheFromCookies(
     conn: *xcb.xcb_connection_t,
-    win:  u32,
+    win: u32,
     protocols_cookie: xcb.xcb_get_property_cookie_t,
-    hints_cookie:     xcb.xcb_get_property_cookie_t,
+    hints_cookie: xcb.xcb_get_property_cookie_t,
 ) void {
     // Resolve both atoms upfront so a failure on either can discard both cookies
     // together along a single cleanup path.
@@ -343,7 +355,7 @@ pub fn populateFocusCacheFromCookies(
     const accepts_input = extractWMHintsInput(conn, hints_cookie);
 
     putCachedProps(win, .{
-        .model     = inputModelFrom(protocols_result.take_focus, accepts_input),
+        .model = inputModelFrom(protocols_result.take_focus, accepts_input),
         .wm_delete = protocols_result.wm_delete,
     });
 }
@@ -351,8 +363,8 @@ pub fn populateFocusCacheFromCookies(
 /// Resolves WM_TAKE_FOCUS and WM_DELETE_WINDOW atoms from cache.
 /// Returns null if either atom is not cached (should not happen after initAtomCache).
 inline fn resolveFocusAtoms() ?struct { take_focus: u32, wm_delete: u32 } {
-    const take_focus = utils.getAtomCached("WM_TAKE_FOCUS")    catch return null;
-    const wm_delete  = utils.getAtomCached("WM_DELETE_WINDOW") catch return null;
+    const take_focus = utils.getAtomCached("WM_TAKE_FOCUS") catch return null;
+    const wm_delete = utils.getAtomCached("WM_DELETE_WINDOW") catch return null;
     return .{ .take_focus = take_focus, .wm_delete = wm_delete };
 }
 
@@ -363,7 +375,7 @@ inline fn resolveFocusAtoms() ?struct { take_focus: u32, wm_delete: u32 } {
 /// Returns true when the input flag is unset, the field is absent, or the
 /// field is explicitly set to True — matching ICCCM §4.1.2.4 defaults.
 inline fn parseWMHintsInputFromData(hints: [*]const u32, value_len: u32) bool {
-    const input_flag_set  = (hints[WM_HINTS_FLAGS_FIELD] & WM_HINTS_INPUT_FLAG) != 0;
+    const input_flag_set = (hints[WM_HINTS_FLAGS_FIELD] & WM_HINTS_INPUT_FLAG) != 0;
     const has_input_field = value_len > @as(u32, WM_HINTS_INPUT_FIELD);
     if (!input_flag_set or !has_input_field) return true;
     return hints[WM_HINTS_INPUT_FIELD] != 0;
@@ -411,7 +423,10 @@ inline fn getCachedProps(win: u32) ?CachedProps {
 fn putCachedProps(win: u32, props: CachedProps) void {
     if (!cache_ready) return;
     for (cache_slots[0..cache_len]) |*slot| {
-        if (slot.id == win) { slot.props = props; return; }
+        if (slot.id == win) {
+            slot.props = props;
+            return;
+        }
     }
     if (cache_len < MAX_WINDOW_CACHE) {
         cache_slots[cache_len] = .{ .id = win, .props = props };
@@ -426,7 +441,7 @@ fn putCachedProps(win: u32, props: CachedProps) void {
 fn queryAndCacheProps(conn: *xcb.xcb_connection_t, win: u32) CachedProps {
     const protocols_props = queryWMProtocolsProps(conn, win);
     const props = CachedProps{
-        .model     = inputModelFrom(protocols_props.take_focus, queryWMHintsAcceptsInput(conn, win)),
+        .model = inputModelFrom(protocols_props.take_focus, queryWMHintsAcceptsInput(conn, win)),
         .wm_delete = protocols_props.wm_delete,
     };
     putCachedProps(win, props);
@@ -454,11 +469,10 @@ pub fn supportsWMDeleteCached(conn: *xcb.xcb_connection_t, win: u32) bool {
 /// after startup but handled gracefully).
 pub fn fireTakeFocusCookie(
     conn: *xcb.xcb_connection_t,
-    win:  u32,
+    win: u32,
 ) ?xcb.xcb_get_property_cookie_t {
     const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch return null;
-    return xcb.xcb_get_property(conn, 0, win, protocols_atom,
-        xcb.XCB_ATOM_ATOM, 0, MAX_PROPERTY_LENGTH);
+    return xcb.xcb_get_property(conn, 0, win, protocols_atom, xcb.XCB_ATOM_ATOM, 0, MAX_PROPERTY_LENGTH);
 }
 
 /// Shared implementation: scans `proto_list` for `take_focus_atom` and, when
@@ -466,22 +480,22 @@ pub fn fireTakeFocusCookie(
 /// Called by both `sendWMTakeFocusWithCookie` (pre-fired cookie path) and
 /// `sendWMTakeFocus` (live round-trip path) to keep the send logic in one place.
 fn dispatchTakeFocusMessage(
-    conn:             *xcb.xcb_connection_t,
-    win:              u32,
-    time:             u32,
-    protocols_atom:   u32,
-    take_focus_atom:  u32,
-    proto_list:       []const u32,
+    conn: *xcb.xcb_connection_t,
+    win: u32,
+    time: u32,
+    protocols_atom: u32,
+    take_focus_atom: u32,
+    proto_list: []const u32,
 ) void {
     for (proto_list) |atom| {
         if (atom == take_focus_atom) break;
     } else return; // window does not advertise WM_TAKE_FOCUS
 
     var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
-    event.response_type  = xcb.XCB_CLIENT_MESSAGE;
-    event.window         = win;
-    event.type           = protocols_atom;
-    event.format         = 32;
+    event.response_type = xcb.XCB_CLIENT_MESSAGE;
+    event.window = win;
+    event.type = protocols_atom;
+    event.format = 32;
     event.data.data32[0] = take_focus_atom;
     event.data.data32[1] = time;
 
@@ -493,12 +507,12 @@ fn dispatchTakeFocusMessage(
 /// request since before commitFocusTransition ran its bookkeeping, so by the time
 /// this function is called the reply is typically already in the XCB receive buffer.
 pub fn sendWMTakeFocusWithCookie(
-    conn:   *xcb.xcb_connection_t,
-    win:    u32,
-    time:   u32,
+    conn: *xcb.xcb_connection_t,
+    win: u32,
+    time: u32,
     cookie: xcb.xcb_get_property_cookie_t,
 ) void {
-    const protocols_atom  = utils.getAtomCached("WM_PROTOCOLS")  catch {
+    const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch {
         xcb.xcb_discard_reply(conn, cookie.sequence);
         return;
     };
@@ -550,11 +564,12 @@ pub fn sendWMTakeFocusWithCookie(
 ///   to pipeline this round-trip.  This fallback is retained for callers that
 ///   do not pre-fire the cookie (syncPointerFocusBlocking, drainPendingConfirm).
 pub fn sendWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32, time: u32) void {
-    const protocols_atom  = utils.getAtomCached("WM_PROTOCOLS")  catch return;
+    const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch return;
     const take_focus_atom = utils.getAtomCached("WM_TAKE_FOCUS") catch return;
 
     // Live WM_PROTOCOLS scan — same logic as DWM's sendevent.
-    const proto_reply = xcb.xcb_get_property_reply(conn,
+    const proto_reply = xcb.xcb_get_property_reply(
+        conn,
         xcb.xcb_get_property(conn, 0, win, protocols_atom, xcb.XCB_ATOM_ATOM, 0, MAX_PROPERTY_LENGTH),
         null,
     ) orelse return;
@@ -587,7 +602,7 @@ inline fn scanProtocolAtoms(protocol_atoms: []const u32, take_focus_atom: u32, w
     var props: WMProtocolsProps = .{};
     for (protocol_atoms) |atom| {
         if (atom == take_focus_atom) props.take_focus = true;
-        if (atom == wm_delete_atom)  props.wm_delete  = true;
+        if (atom == wm_delete_atom) props.wm_delete = true;
         if (props.take_focus and props.wm_delete) break;
     }
     return props;
@@ -595,12 +610,14 @@ inline fn scanProtocolAtoms(protocol_atoms: []const u32, take_focus_atom: u32, w
 
 /// Scans WM_PROTOCOLS once and returns all flags the WM cares about.
 fn queryWMProtocolsProps(conn: *xcb.xcb_connection_t, win: u32) WMProtocolsProps {
-    const protocols_atom  = utils.getAtomCached("WM_PROTOCOLS")    catch return .{};
-    const take_focus_atom = utils.getAtomCached("WM_TAKE_FOCUS")   catch return .{};
-    const wm_delete_atom  = utils.getAtomCached("WM_DELETE_WINDOW") catch return .{};
+    const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch return .{};
+    const take_focus_atom = utils.getAtomCached("WM_TAKE_FOCUS") catch return .{};
+    const wm_delete_atom = utils.getAtomCached("WM_DELETE_WINDOW") catch return .{};
 
-    const reply = xcb.xcb_get_property_reply(conn,
-        xcb.xcb_get_property(conn, PROPERTY_NO_DELETE, win, protocols_atom, xcb.XCB_ATOM_ATOM, 0, MAX_PROPERTY_LENGTH), null,
+    const reply = xcb.xcb_get_property_reply(
+        conn,
+        xcb.xcb_get_property(conn, PROPERTY_NO_DELETE, win, protocols_atom, xcb.XCB_ATOM_ATOM, 0, MAX_PROPERTY_LENGTH),
+        null,
     ) orelse return .{};
     defer std.c.free(reply);
     if (reply.*.format != 32 or reply.*.value_len == 0) return .{};
@@ -611,7 +628,8 @@ fn queryWMProtocolsProps(conn: *xcb.xcb_connection_t, win: u32) WMProtocolsProps
 
 /// Queries the WM_HINTS input field. Returns true when absent (assume True) or explicitly True.
 fn queryWMHintsAcceptsInput(conn: *xcb.xcb_connection_t, win: u32) bool {
-    const reply = xcb.xcb_get_property_reply(conn,
+    const reply = xcb.xcb_get_property_reply(
+        conn,
         xcb.xcb_get_property(conn, PROPERTY_NO_DELETE, win, xcb.XCB_ATOM_WM_HINTS, xcb.XCB_ATOM_WM_HINTS, 0, WM_HINTS_LONG_LENGTH),
         null,
     ) orelse return true;
@@ -623,15 +641,13 @@ fn queryWMHintsAcceptsInput(conn: *xcb.xcb_connection_t, win: u32) bool {
     return parseWMHintsInputFromData(hints, reply.*.value_len);
 }
 
-// ---------------------------------------------------------------------------
 // WM_CLASS
-// ---------------------------------------------------------------------------
 
 /// The two components of the X11 WM_CLASS property (ICCCM §4.1.2.5).
 /// Both slices are heap-allocated and must be freed via deinit.
 pub const WMClass = struct {
     instance: []const u8,
-    class:    []const u8,
+    class: []const u8,
 
     pub fn deinit(self: WMClass, allocator: std.mem.Allocator) void {
         allocator.free(self.instance);
@@ -639,9 +655,7 @@ pub const WMClass = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Child window resolution
-// ---------------------------------------------------------------------------
 //
 // Electron, Qt, GTK, and similar toolkits create one or more child windows
 // beneath their managed toplevel for rendering.  When a ButtonPress or
@@ -675,7 +689,10 @@ var child_cache_len: usize = 0;
 fn cacheChildWindow(child: u32, managed: u32) void {
     if (child == managed) return; // direct hit — not a child, nothing to cache
     for (child_cache[0..child_cache_len]) |*e| {
-        if (e.child == child) { e.managed = managed; return; } // update in place
+        if (e.child == child) {
+            e.managed = managed;
+            return;
+        } // update in place
     }
     if (child_cache_len < CHILD_CACHE_CAP) {
         child_cache[child_cache_len] = .{ .child = child, .managed = managed };
@@ -726,7 +743,9 @@ pub fn findManagedWindow(conn: *xcb.xcb_connection_t, win: u32, is_managed: *con
     var current = win;
     for (0..MAX_WINDOW_TREE_DEPTH) |_| {
         const tree_reply = xcb.xcb_query_tree_reply(
-            conn, xcb.xcb_query_tree(conn, current), null,
+            conn,
+            xcb.xcb_query_tree(conn, current),
+            null,
         ) orelse return win;
         defer std.c.free(tree_reply);
 
@@ -742,11 +761,11 @@ pub fn findManagedWindow(conn: *xcb.xcb_connection_t, win: u32, is_managed: *con
 
 fn populateAtomCache() void {
     inline for (.{
-        .{ .field = "wm_protocols",            .atom = "WM_PROTOCOLS"              },
-        .{ .field = "wm_class",                .atom = "WM_CLASS"                  },
-        .{ .field = "net_wm_pid",              .atom = "_NET_WM_PID"               },
-        .{ .field = "net_wm_state",            .atom = "_NET_WM_STATE"             },
-        .{ .field = "net_wm_state_fullscreen", .atom = "_NET_WM_STATE_FULLSCREEN"  },
+        .{ .field = "wm_protocols", .atom = "WM_PROTOCOLS" },
+        .{ .field = "wm_class", .atom = "WM_CLASS" },
+        .{ .field = "net_wm_pid", .atom = "_NET_WM_PID" },
+        .{ .field = "net_wm_state", .atom = "_NET_WM_STATE" },
+        .{ .field = "net_wm_state_fullscreen", .atom = "_NET_WM_STATE_FULLSCREEN" },
     }) |e| @field(atoms, e.field) = utils.getAtomCached(e.atom) catch 0;
 }
 
@@ -770,10 +789,10 @@ pub fn init(alloc: std.mem.Allocator) !void {
     tracking.init(alloc);
     focus.init();
     // tiling must precede workspaces: workspaces.init() calls tiling.getState().
-    if (build.has_tiling)      tiling.init();
-    if (build.has_fullscreen)  fullscreen.init();
+    if (build.has_tiling) tiling.init();
+    if (build.has_fullscreen) fullscreen.init();
     if (build.has_workspaces) try workspaces.init();
-    if (build.has_minimize)    minimize.init();
+    if (build.has_minimize) minimize.init();
     if (build.has_minimize or build.has_workspaces) {
         // Pre-allocate spawn queue capacity for the common case (a handful of
         // concurrent spawns).  Failure is non-fatal; the list grows on demand.
@@ -792,10 +811,10 @@ pub fn deinit() void {
     // init order comment above initInputModelCache), then focus, then tracking.
     // This is NOT strict reverse-init order; the InputModelCache dependency
     // intentionally breaks strict symmetry.
-    if (build.has_tiling)     tiling.deinit();
+    if (build.has_tiling) tiling.deinit();
     if (build.has_fullscreen) fullscreen.deinit();
     if (build.has_workspaces) workspaces.deinit();
-    if (build.has_minimize)   minimize.deinit();
+    if (build.has_minimize) minimize.deinit();
     if (g_alloc) |a| {
         g_spawn_queue.deinit(a);
         g_spawn_queue = .empty;
@@ -874,7 +893,7 @@ fn findWorkspaceRuleByClass(cookie: xcb.xcb_get_property_cookie_t) ?u8 {
 
     // O(1) hash lookups — class first (when non-empty), then instance.
     if (class.len > 0) {
-        if (g_rules_map.get(class))    |ws| return ws;
+        if (g_rules_map.get(class)) |ws| return ws;
     }
     if (instance.len > 0) {
         if (g_rules_map.get(instance)) |ws| return ws;
@@ -897,8 +916,7 @@ fn findSpawnQueueWorkspace(
     const pid_cookie = c_net_wm_pid orelse return null;
 
     const win_pid: u32 = pid: {
-        const pid_reply = xcb.xcb_get_property_reply(core.conn, pid_cookie, null)
-            orelse break :pid 0;
+        const pid_reply = xcb.xcb_get_property_reply(core.conn, pid_cookie, null) orelse break :pid 0;
         defer std.c.free(pid_reply);
         if (pid_reply.*.format != 32 or pid_reply.*.value_len < 1) break :pid 0;
         break :pid @as([*]const u32, @ptrCast(@alignCast(xcb.xcb_get_property_value(pid_reply))))[0];
@@ -956,9 +974,9 @@ fn findSpawnQueueWorkspace(
 
 /// Resolves the target workspace for a newly mapped window.
 fn resolveTargetWorkspace(
-    current_ws:    u8,
-    c_wm_class:    xcb.xcb_get_property_cookie_t,
-    c_net_wm_pid:  ?xcb.xcb_get_property_cookie_t,
+    current_ws: u8,
+    c_wm_class: xcb.xcb_get_property_cookie_t,
+    c_net_wm_pid: ?xcb.xcb_get_property_cookie_t,
 ) u8 {
     if (core.config.workspaces.rules.items.len > 0 and atoms.wm_class != 0) {
         if (findWorkspaceRuleByClass(c_wm_class)) |target| {
@@ -1053,46 +1071,68 @@ fn snapshotSpawnCursorFromReply(ptr_reply: ?*xcb.xcb_query_pointer_reply_t, supp
 
 /// Cookies for all requests fired at the start of a MapRequest.
 const PropertyCookies = struct {
-    protocols:    xcb.xcb_get_property_cookie_t,
-    hints:        xcb.xcb_get_property_cookie_t,
+    protocols: xcb.xcb_get_property_cookie_t,
+    hints: xcb.xcb_get_property_cookie_t,
     normal_hints: xcb.xcb_get_property_cookie_t,
-    wm_class:     xcb.xcb_get_property_cookie_t,
-    net_wm_pid:   ?xcb.xcb_get_property_cookie_t,
+    wm_class: xcb.xcb_get_property_cookie_t,
+    net_wm_pid: ?xcb.xcb_get_property_cookie_t,
     /// Pipelined alongside the property requests so the pointer position is
     /// fetched in the same round-trip.  Consumed by mapWindowToScreen when no
     /// keybind-time prefetch is available; discarded otherwise.
-    ptr:          xcb.xcb_query_pointer_cookie_t,
+    ptr: xcb.xcb_query_pointer_cookie_t,
 };
 
 /// Fires all property requests in a single batch before any blocking work.
 fn firePropertyCookies(win: u32) PropertyCookies {
     return .{
         .protocols = xcb.xcb_get_property(
-            core.conn, 0, win,
+            core.conn,
+            0,
+            win,
             atoms.wm_protocols,
-            xcb.XCB_ATOM_ATOM, 0, 256,
+            xcb.XCB_ATOM_ATOM,
+            0,
+            256,
         ),
         .hints = xcb.xcb_get_property(
-            core.conn, 0, win,
-            xcb.XCB_ATOM_WM_HINTS, xcb.XCB_ATOM_WM_HINTS, 0, 9,
+            core.conn,
+            0,
+            win,
+            xcb.XCB_ATOM_WM_HINTS,
+            xcb.XCB_ATOM_WM_HINTS,
+            0,
+            9,
         ),
         .normal_hints = xcb.xcb_get_property(
-            core.conn, 0, win,
-            xcb.XCB_ATOM_WM_NORMAL_HINTS, xcb.XCB_ATOM_ANY, 0, 18,
+            core.conn,
+            0,
+            win,
+            xcb.XCB_ATOM_WM_NORMAL_HINTS,
+            xcb.XCB_ATOM_ANY,
+            0,
+            18,
         ),
         .wm_class = xcb.xcb_get_property(
-            core.conn, 0, win,
+            core.conn,
+            0,
+            win,
             atoms.wm_class,
-            xcb.XCB_ATOM_STRING, 0, 256,
+            xcb.XCB_ATOM_STRING,
+            0,
+            256,
         ),
         // Only fired when the spawn queue is non-empty so the type system
         // enforces this cookie is never accessed on an idle queue.
         .net_wm_pid = blk: {
             if (g_spawn_queue.items.len == 0) break :blk null;
             break :blk xcb.xcb_get_property(
-                core.conn, 0, win,
+                core.conn,
+                0,
+                win,
                 atoms.net_wm_pid,
-                xcb.XCB_ATOM_CARDINAL, 0, 1,
+                xcb.XCB_ATOM_CARDINAL,
+                0,
+                1,
             );
         },
         // Pipelined here so the pointer position is included in the same
@@ -1222,10 +1262,13 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const current_ws: u8 = tracking.getCurrentWorkspace() orelse 0;
 
     _ = xcb.xcb_change_window_attributes(
-        core.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{constants.EventMasks.MANAGED_WINDOW},
+        core.conn,
+        win,
+        xcb.XCB_CW_EVENT_MASK,
+        &[_]u32{constants.EventMasks.MANAGED_WINDOW},
     );
 
-    const cookies   = firePropertyCookies(win);
+    const cookies = firePropertyCookies(win);
     const target_ws = resolveTargetWorkspace(current_ws, cookies.wm_class, cookies.net_wm_pid);
     const on_current = target_ws == current_ws;
 
@@ -1261,7 +1304,7 @@ fn unmanageWindow(win: u32) void {
     const was_focused = (focus.getFocused() == win);
 
     const window_workspace = tracking.getWorkspaceForWindow(win);
-    const current_ws       = tracking.getCurrentWorkspace();
+    const current_ws = tracking.getCurrentWorkspace();
 
     uncacheWindowFocusProps(win);
 
@@ -1305,8 +1348,7 @@ fn unmanageWindow(win: u32) void {
         focusWindowUnderPointer(ptr_reply);
     } else if (!was_fullscreen and tilingActive()) {
         if (window_workspace) |ws|
-            if (current_ws == ws) tiling.retileIfDirty()
-            else tiling.retileInactiveWorkspace(ws);
+            if (current_ws == ws) tiling.retileIfDirty() else tiling.retileInactiveWorkspace(ws);
     }
 
     // Post-retile border sweep: tiled-window borders are already current after
@@ -1394,28 +1436,28 @@ const GEOMETRY_MASK: u16 =
     xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH;
 
 const WindowGeometry = struct {
-    x:            i16,
-    y:            i16,
-    width:        u16,
-    height:       u16,
+    x: i16,
+    y: i16,
+    width: u16,
+    height: u16,
     border_width: u16,
 };
 
 fn sendConfigureNotify(win: u32, geom: WindowGeometry) void {
     const ev = xcb.xcb_configure_notify_event_t{
-        .response_type     = xcb.XCB_CONFIGURE_NOTIFY,
-        .pad0              = 0,
-        .sequence          = 0,
-        .event             = win,
-        .window            = win,
-        .above_sibling     = xcb.XCB_NONE,
-        .x                 = geom.x,
-        .y                 = geom.y,
-        .width             = geom.width,
-        .height            = geom.height,
-        .border_width      = geom.border_width,
+        .response_type = xcb.XCB_CONFIGURE_NOTIFY,
+        .pad0 = 0,
+        .sequence = 0,
+        .event = win,
+        .window = win,
+        .above_sibling = xcb.XCB_NONE,
+        .x = geom.x,
+        .y = geom.y,
+        .width = geom.width,
+        .height = geom.height,
+        .border_width = geom.border_width,
         .override_redirect = 0,
-        .pad1              = 0,
+        .pad1 = 0,
     };
     _ = xcb.xcb_send_event(core.conn, 0, win, xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY, @ptrCast(&ev));
 }
@@ -1445,7 +1487,10 @@ fn sendSyntheticConfigureNotify(win: u32) void {
         if (tiling.getWindowGeom(win)) |rect| {
             const border: u16 = if (tiling.getStateOpt()) |s| s.config.border_width else 0;
             sendConfigureNotify(win, .{
-                .x = rect.x, .y = rect.y, .width = rect.width, .height = rect.height,
+                .x = rect.x,
+                .y = rect.y,
+                .width = rect.width,
+                .height = rect.height,
                 .border_width = border,
             });
             return;
@@ -1458,10 +1503,10 @@ fn sendSyntheticConfigureNotify(win: u32) void {
     if (build.has_fullscreen) {
         if (fullscreen.isFullscreen(win)) {
             sendConfigureNotify(win, .{
-                .x            = 0,
-                .y            = 0,
-                .width        = @intCast(core.screen.width_in_pixels),
-                .height       = @intCast(core.screen.height_in_pixels),
+                .x = 0,
+                .y = 0,
+                .width = @intCast(core.screen.width_in_pixels),
+                .height = @intCast(core.screen.height_in_pixels),
                 .border_width = 0,
             });
             return;
@@ -1471,11 +1516,16 @@ fn sendSyntheticConfigureNotify(win: u32) void {
     // Path 3: true cache miss — floating window, no retile yet. One blocking
     // round-trip.  Rare in practice; not a hot path.
     const reply = xcb.xcb_get_geometry_reply(
-        core.conn, xcb.xcb_get_geometry(core.conn, win), null,
+        core.conn,
+        xcb.xcb_get_geometry(core.conn, win),
+        null,
     ) orelse return;
     defer std.c.free(reply);
     sendConfigureNotify(win, .{
-        .x = reply.*.x, .y = reply.*.y, .width = reply.*.width, .height = reply.*.height,
+        .x = reply.*.x,
+        .y = reply.*.y,
+        .width = reply.*.width,
+        .height = reply.*.height,
         .border_width = reply.*.border_width,
     });
 }
@@ -1507,10 +1557,10 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
         const last = drag.getDragLastRect();
         if (last.width != 0) {
             sendConfigureNotify(win, .{
-                .x            = last.x,
-                .y            = last.y,
-                .width        = last.width,
-                .height       = last.height,
+                .x = last.x,
+                .y = last.y,
+                .width = last.width,
+                .height = last.height,
                 .border_width = getBorderWidth(),
             });
         } else {
@@ -1523,16 +1573,19 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
 
     const GeomField = struct { bit: u16, value: u32 };
     const geom_fields = [_]GeomField{
-        .{ .bit = xcb.XCB_CONFIG_WINDOW_X,            .value = @bitCast(@as(i32, event.x)) },
-        .{ .bit = xcb.XCB_CONFIG_WINDOW_Y,            .value = @bitCast(@as(i32, event.y)) },
-        .{ .bit = xcb.XCB_CONFIG_WINDOW_WIDTH,        .value = event.width                 },
-        .{ .bit = xcb.XCB_CONFIG_WINDOW_HEIGHT,       .value = event.height                },
-        .{ .bit = xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, .value = event.border_width          },
+        .{ .bit = xcb.XCB_CONFIG_WINDOW_X, .value = @bitCast(@as(i32, event.x)) },
+        .{ .bit = xcb.XCB_CONFIG_WINDOW_Y, .value = @bitCast(@as(i32, event.y)) },
+        .{ .bit = xcb.XCB_CONFIG_WINDOW_WIDTH, .value = event.width },
+        .{ .bit = xcb.XCB_CONFIG_WINDOW_HEIGHT, .value = event.height },
+        .{ .bit = xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, .value = event.border_width },
     };
     var values: [5]u32 = undefined;
     var n: usize = 0;
     for (geom_fields) |f| {
-        if (mask & f.bit != 0) { values[n] = f.value; n += 1; }
+        if (mask & f.bit != 0) {
+            values[n] = f.value;
+            n += 1;
+        }
     }
     _ = xcb.xcb_configure_window(core.conn, win, mask, &values);
 }
@@ -1625,8 +1678,13 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
     // adjusting their resize-increment grid when the font changes).
     if (event.atom == xcb.XCB_ATOM_WM_NORMAL_HINTS) {
         const cookie = xcb.xcb_get_property(
-            core.conn, 0, event.window,
-            xcb.XCB_ATOM_WM_NORMAL_HINTS, xcb.XCB_ATOM_ANY, 0, 18,
+            core.conn,
+            0,
+            event.window,
+            xcb.XCB_ATOM_WM_NORMAL_HINTS,
+            xcb.XCB_ATOM_ANY,
+            0,
+            18,
         );
         parseSizeHintsIntoCache(event.window, cookie);
         return;
@@ -1648,7 +1706,7 @@ inline fn clampToU16(v: u32) u16 {
 }
 
 fn parseSizeHintsIntoCache(
-    win:    u32,
+    win: u32,
     cookie: xcb.xcb_get_property_cookie_t,
 ) void {
     const reply = xcb.xcb_get_property_reply(core.conn, cookie, null) orelse return;
@@ -1657,35 +1715,35 @@ fn parseSizeHintsIntoCache(
 
     const fields: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
     const field_count = reply.*.value_len;
-    const flags       = fields[0];
+    const flags = fields[0];
 
     // PMinSize and PBaseSize (min_width/min_height) are intentionally not
     // cached: applyHintsToRect skips min-size clamping for tiling because the
     // layout engine owns all dimensions.  All other ICCCM constraints are
     // forwarded so windows with max-size, resize-increment, or aspect-ratio
     // hints behave correctly.
-    const want_max = flags & XSizeHintsFlags.p_max_size   != 0;
+    const want_max = flags & XSizeHintsFlags.p_max_size != 0;
     const want_inc = flags & XSizeHintsFlags.p_resize_inc != 0;
-    const want_asp = flags & XSizeHintsFlags.p_aspect     != 0;
+    const want_asp = flags & XSizeHintsFlags.p_aspect != 0;
 
     if (!want_max and !want_inc and !want_asp) return;
 
-    var max_width:  u16 = 0;
+    var max_width: u16 = 0;
     var max_height: u16 = 0;
-    var inc_width:  u16 = 0;
+    var inc_width: u16 = 0;
     var inc_height: u16 = 0;
     var min_aspect: f32 = 0.0;
     var max_aspect: f32 = 0.0;
 
     // PMaxSize: fields[7] = max_width, fields[8] = max_height.
     if (want_max and field_count >= 9) {
-        max_width  = clampToU16(fields[7]);
+        max_width = clampToU16(fields[7]);
         max_height = clampToU16(fields[8]);
     }
 
     // PResizeInc: fields[9] = width_inc, fields[10] = height_inc.
     if (want_inc and field_count >= 11) {
-        inc_width  = clampToU16(fields[9]);
+        inc_width = clampToU16(fields[9]);
         inc_height = clampToU16(fields[10]);
     }
 
@@ -1703,9 +1761,9 @@ fn parseSizeHintsIntoCache(
 
     if (build.has_tiling)
         tiling.cacheSizeHints(win, .{
-            .max_width  = max_width,
+            .max_width = max_width,
             .max_height = max_height,
-            .inc_width  = inc_width,
+            .inc_width = inc_width,
             .inc_height = inc_height,
             .min_aspect = min_aspect,
             .max_aspect = max_aspect,
@@ -1738,15 +1796,13 @@ inline fn borderColor(win: u32) u32 {
 pub fn applyBorderWidth(win: u32) void {
     const width = getBorderWidth();
     if (width > 0)
-        _ = xcb.xcb_configure_window(core.conn, win,
-            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{width});
+        _ = xcb.xcb_configure_window(core.conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{width});
 }
 
 /// Apply border width and color to `win`.
 pub fn applyBorder(win: u32) void {
     applyBorderWidth(win);
-    _ = xcb.xcb_change_window_attributes(core.conn, win,
-        xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
+    _ = xcb.xcb_change_window_attributes(core.conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
 }
 
 /// Refresh border colors for all windows on the current workspace.
@@ -1764,8 +1820,7 @@ pub fn updateWorkspaceBorders() void {
         if (build.has_tiling) {
             if (tiling.sendBorderColorIfChanged(win, color)) continue;
         }
-        _ = xcb.xcb_change_window_attributes(core.conn, win,
-            xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
+        _ = xcb.xcb_change_window_attributes(core.conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
     }
 }
 
@@ -1784,14 +1839,15 @@ pub fn updateFloatingWindowBorders() void {
         if (build.has_tiling and core.config.tiling.enabled) {
             if (tiling.isWindowTiled(win)) continue;
         }
-        _ = xcb.xcb_change_window_attributes(core.conn, win,
-            xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
+        _ = xcb.xcb_change_window_attributes(core.conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
     }
 }
 
 /// Mark that the current event batch already swept all workspace border colors
 /// inside a server grab, so the event loop does not need to do it again.
-pub fn markBordersFlushed() void { borders_flushed_this_batch = true; }
+pub fn markBordersFlushed() void {
+    borders_flushed_this_batch = true;
+}
 
 /// Event-loop entry point for the per-batch border sweep.
 /// Calls updateWorkspaceBorders() only when no grab-flush path already did so,
@@ -1817,8 +1873,8 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
 
     const fs_atom = atoms.net_wm_state_fullscreen;
     if (fs_atom == 0) return;
-    const prop1   = event.data.data32[1];
-    const prop2   = event.data.data32[2];
+    const prop1 = event.data.data32[1];
+    const prop2 = event.data.data32[2];
     if (prop1 != fs_atom and prop2 != fs_atom) return;
 
     const win = event.window;
@@ -1826,10 +1882,10 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
 
     if (build.has_fullscreen) {
         const action = event.data.data32[0];
-        const is_fs  = fullscreen.isFullscreen(win);
+        const is_fs = fullscreen.isFullscreen(win);
         const should_enter = switch (action) {
-            1 => true,   // _NET_WM_STATE_ADD
-            0 => false,  // _NET_WM_STATE_REMOVE
+            1 => true, // _NET_WM_STATE_ADD
+            0 => false, // _NET_WM_STATE_REMOVE
             2 => !is_fs, // _NET_WM_STATE_TOGGLE
             else => return,
         };

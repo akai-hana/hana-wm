@@ -1,14 +1,13 @@
 //! Shared tiling layout infrastructure
 //! Provides the geometry constraints and the configuration entry point shared by all layout modules.
 
-const std     = @import("std");
-const core    = @import("core");
-    const xcb = core.xcb;
-const utils   = @import("utils");
+const std = @import("std");
+const core = @import("core");
+const xcb = core.xcb;
+const utils = @import("utils");
 
 const debug = @import("debug");
 const constants = @import("constants");
-
 
 // WM_NORMAL_HINTS size constraint cache
 //
@@ -20,11 +19,11 @@ const constants = @import("constants");
 pub const SizeHints = struct {
     /// PMaxSize: upper bounds on window dimensions.
     /// 0 means unconstrained (no max declared by the client).
-    max_width:  u16 = 0,
+    max_width: u16 = 0,
     max_height: u16 = 0,
     /// PResizeInc: dimensions must satisfy w = base_width + N * inc_width.
     /// 0 means unconstrained (no increment declared by the client).
-    inc_width:  u16 = 0,
+    inc_width: u16 = 0,
     inc_height: u16 = 0,
     /// PAspect: aspect ratio bounds (dwm convention).
     /// 0.0 means unconstrained (no aspect hint declared by the client).
@@ -40,13 +39,13 @@ pub const WindowData = struct {
     /// A zeroed rect is the sentinel for "stale / not yet computed".
     /// The layout engine never produces a 0×0 rect, so the sentinel is
     /// unambiguous. Prefer `hasValidRect()` over open-coding the checks.
-    rect:   utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
     border: u32 = 0,
     /// WM_NORMAL_HINTS constraints populated at map time via `CacheMap.cacheHints`.
     /// All-zero (the default) means unconstrained — `applyHintsToRect` is a
     /// no-op when every field is zero, so windows without declared hints are
     /// handled correctly with zero branches on the hot retile path.
-    hints:  SizeHints = .{},
+    hints: SizeHints = .{},
 
     /// Returns false when the rect is zeroed, indicating the entry is stale or
     /// has not yet been populated by a retile pass.
@@ -61,13 +60,11 @@ pub const WindowData = struct {
 };
 
 // Hash table parameters
-const cache_capacity:  usize = 256; // max live entries; overflow_sentinel fires above this
-const hash_table_cap:  usize = 512; // power-of-two slot count; load factor ≤ 0.5
+const cache_capacity: usize = 256; // max live entries; overflow_sentinel fires above this
+const hash_table_cap: usize = 512; // power-of-two slot count; load factor ≤ 0.5
 const hash_table_mask: usize = hash_table_cap - 1;
-const hash_shift:      u5    = 23;  // 32 - log2(512)
-const EMPTY_WIN:       u32   = 0;   // XCB_NONE; never a real window ID
-
-
+const hash_shift: u5 = 23; // 32 - log2(512)
+const EMPTY_WIN: u32 = 0; // XCB_NONE; never a real window ID
 
 /// Open-addressing hash table mapping window IDs to their last geometry,
 /// border color, and WM_NORMAL_HINTS constraints — all three in one slot.
@@ -76,7 +73,7 @@ const EMPTY_WIN:       u32   = 0;   // XCB_NONE; never a real window ID
 /// EMPTY_WIN = 0.
 pub const CacheMap = struct {
     const Slot = struct {
-        win:  u32        = EMPTY_WIN,
+        win: u32 = EMPTY_WIN,
         data: WindowData = .{},
     };
 
@@ -98,7 +95,6 @@ pub const CacheMap = struct {
     /// duration of a single `getOrPut` call (the WM is single-threaded; the
     /// call is not re-entrant).  The affected window misses the dedup check and
     /// receives a redundant configure_window on the next retile — correct.
-
     overflow_sentinel: WindowData = .{},
 
     /// Knuth's multiplicative hash for 32-bit keys, producing a 9-bit index
@@ -137,7 +133,7 @@ pub const CacheMap = struct {
         var idx = hashSlot(win);
         while (true) : (idx = (idx + 1) & hash_table_mask) {
             const slot = &self.slots[idx];
-            if (slot.win == win)       return &slot.data;
+            if (slot.win == win) return &slot.data;
             if (slot.win == EMPTY_WIN) return null;
         }
     }
@@ -161,7 +157,7 @@ pub const CacheMap = struct {
         var hole: usize = hashSlot(win);
         while (true) : (hole = (hole + 1) & hash_table_mask) {
             if (self.slots[hole].win == EMPTY_WIN) return; // not present
-            if (self.slots[hole].win == win)       break;
+            if (self.slots[hole].win == win) break;
         }
         self.count -= 1;
 
@@ -293,22 +289,22 @@ pub const Region = struct {
     /// Split `r` into left and right halves with `gap` between them.
     /// The remainder pixel (odd width) goes to the right half.
     pub inline fn halveH(r: Region, gap: u16) struct { left: Region, right: Region } {
-        const left_w: u16  = if (r.w > gap) (r.w - gap) / 2 else 0;
+        const left_w: u16 = if (r.w > gap) (r.w - gap) / 2 else 0;
         const right_w: u16 = r.w -| left_w -| gap;
         return .{
-            .left  = .{ .x = r.x,                                         .y = r.y, .w = left_w,  .h = r.h },
-            .right = .{ .x = r.x + @as(i32, @intCast(left_w +| gap)),    .y = r.y, .w = right_w, .h = r.h },
+            .left = .{ .x = r.x, .y = r.y, .w = left_w, .h = r.h },
+            .right = .{ .x = r.x + @as(i32, @intCast(left_w +| gap)), .y = r.y, .w = right_w, .h = r.h },
         };
     }
 
     /// Split `r` into top and bottom halves with `gap` between them.
     /// The remainder pixel (odd height) goes to the bottom half.
     pub inline fn halveV(r: Region, gap: u16) struct { top: Region, bottom: Region } {
-        const top_h: u16    = if (r.h > gap) (r.h - gap) / 2 else 0;
+        const top_h: u16 = if (r.h > gap) (r.h - gap) / 2 else 0;
         const bottom_h: u16 = r.h -| top_h -| gap;
         return .{
-            .top    = .{ .x = r.x, .y = r.y,                                       .w = r.w, .h = top_h    },
-            .bottom = .{ .x = r.x, .y = r.y + @as(i32, @intCast(top_h +| gap)),   .w = r.w, .h = bottom_h },
+            .top = .{ .x = r.x, .y = r.y, .w = r.w, .h = top_h },
+            .bottom = .{ .x = r.x, .y = r.y + @as(i32, @intCast(top_h +| gap)), .w = r.w, .h = bottom_h },
         };
     }
 
@@ -318,9 +314,9 @@ pub const Region = struct {
     pub inline fn toRect(r: Region, border: u16) utils.Rect {
         const b2 = border *| 2;
         return .{
-            .x      = r.x,
-            .y      = r.y,
-            .width  = if (r.w > b2) r.w - b2 else constants.MIN_WINDOW_DIM,
+            .x = r.x,
+            .y = r.y,
+            .width = if (r.w > b2) r.w - b2 else constants.MIN_WINDOW_DIM,
             .height = if (r.h > b2) r.h - b2 else constants.MIN_WINDOW_DIM,
         };
     }
@@ -384,11 +380,9 @@ fn configureWithHintsImpl(comptime raise: bool, ctx: *const LayoutCtx, win: u32,
     const effective = applyHintsToRect(rect, gop.value_ptr.hints);
 
     if (effective.width == 0 or effective.height == 0) {
-        debug.err("Invalid rect for window 0x{x}: {}x{} at {},{}",
-            .{ win, effective.width, effective.height, effective.x, effective.y });
+        debug.err("Invalid rect for window 0x{x}: {}x{} at {},{}", .{ win, effective.width, effective.height, effective.x, effective.y });
         if (comptime raise) {
-            _ = xcb.xcb_configure_window(ctx.conn, win,
-                xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+            _ = xcb.xcb_configure_window(ctx.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
         }
         // Apply border color even when geometry is degenerate.  Without this,
         // a window whose hints shrink its dimensions to zero gets stuck with a
@@ -398,8 +392,7 @@ fn configureWithHintsImpl(comptime raise: bool, ctx: *const LayoutCtx, win: u32,
             const color = getBorderColor(win);
             if (!gop.found_existing or gop.value_ptr.border != color) {
                 gop.value_ptr.border = color;
-                _ = xcb.xcb_change_window_attributes(ctx.conn, win,
-                    xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
+                _ = xcb.xcb_change_window_attributes(ctx.conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
             }
         }
         return;
@@ -409,46 +402,40 @@ fn configureWithHintsImpl(comptime raise: bool, ctx: *const LayoutCtx, win: u32,
     if (is_rect_changed) {
         gop.value_ptr.rect = effective;
         if (comptime raise) {
-            _ = xcb.xcb_configure_window(ctx.conn, win,
-                xcb.XCB_CONFIG_WINDOW_X     | xcb.XCB_CONFIG_WINDOW_Y     |
+            _ = xcb.xcb_configure_window(ctx.conn, win, xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
                 xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
-                xcb.XCB_CONFIG_WINDOW_STACK_MODE,
-                &[_]u32{
-                    @bitCast(@as(i32, effective.x)),
-                    @bitCast(@as(i32, effective.y)),
-                    effective.width,
-                    effective.height,
-                    xcb.XCB_STACK_MODE_ABOVE,
-                });
+                xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{
+                @bitCast(@as(i32, effective.x)),
+                @bitCast(@as(i32, effective.y)),
+                effective.width,
+                effective.height,
+                xcb.XCB_STACK_MODE_ABOVE,
+            });
         } else if (ctx.border_width) |bw| {
             // Merge BORDER_WIDTH into the geometry request — saves one XCB round-trip
             // per window during reloadConfig (the only caller that sets border_width).
-            _ = xcb.xcb_configure_window(ctx.conn, win,
-                xcb.XCB_CONFIG_WINDOW_X     | xcb.XCB_CONFIG_WINDOW_Y     |
+            _ = xcb.xcb_configure_window(ctx.conn, win, xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
                 xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
-                xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
-                &[_]u32{
-                    @bitCast(@as(i32, effective.x)),
-                    @bitCast(@as(i32, effective.y)),
-                    effective.width,
-                    effective.height,
-                    bw,
-                });
+                xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{
+                @bitCast(@as(i32, effective.x)),
+                @bitCast(@as(i32, effective.y)),
+                effective.width,
+                effective.height,
+                bw,
+            });
         } else {
             utils.configureWindow(ctx.conn, win, effective);
         }
     } else if (comptime raise) {
         // Geometry unchanged (cache hit) — only raise; no intermediate state possible.
-        _ = xcb.xcb_configure_window(ctx.conn, win,
-            xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+        _ = xcb.xcb_configure_window(ctx.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     }
 
     const getBorderColor = ctx.get_border_color orelse return;
     const color = getBorderColor(win);
     if (gop.found_existing and gop.value_ptr.border == color) return;
     gop.value_ptr.border = color;
-    _ = xcb.xcb_change_window_attributes(ctx.conn, win,
-        xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
+    _ = xcb.xcb_change_window_attributes(ctx.conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
 }
 
 /// Apply geometry to `win`, clamped to its WM_NORMAL_HINTS constraints.
@@ -482,18 +469,20 @@ pub fn configureWithHintsAndRaise(ctx: *const LayoutCtx, win: u32, rect: utils.R
 /// loop matches `ctx.defer_configure`, `capture` is always false and `flush`
 /// is a no-op, so layouts that never call swap_master pay zero cost.
 pub const DeferredConfigure = struct {
-    pending_win:  u32        = 0,
+    pending_win: u32 = 0,
     pending_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
 
     /// Initialise an inert slot.
-    pub inline fn init() DeferredConfigure { return .{}; }
+    pub inline fn init() DeferredConfigure {
+        return .{};
+    }
 
     /// If `win` is the deferred window, store `rect` and return true (skip the
     /// normal configureWithHints call).  Otherwise return false.
     pub inline fn capture(self: *DeferredConfigure, ctx: *const LayoutCtx, win: u32, rect: utils.Rect) bool {
         if (ctx.defer_configure) |dw| {
             if (dw == win) {
-                self.pending_win  = win;
+                self.pending_win = win;
                 self.pending_rect = rect;
                 return true;
             }
@@ -508,8 +497,6 @@ pub const DeferredConfigure = struct {
             configureWithHints(ctx, self.pending_win, self.pending_rect);
     }
 };
-
-
 
 /// Apply ICCCM §4.1.2.3 hint passes to a raw rect.
 ///
@@ -526,17 +513,17 @@ pub const DeferredConfigure = struct {
 /// we are no longer enforcing the declared minimum.
 fn applyHintsToRect(rect: utils.Rect, h: SizeHints) utils.Rect {
     if (isEmptySizeHints(h)) return rect; // fast path for unconstrained windows
-    var w:  u16 = rect.width;
+    var w: u16 = rect.width;
     var ht: u16 = rect.height;
 
     // Pass 2: Snap to resize increments (base = 0; min-size not enforced).
     //   effective = floor(dim / inc) * inc
-    w  = snapDimToIncrement(w,  0, h.inc_width);
+    w = snapDimToIncrement(w, 0, h.inc_width);
     ht = snapDimToIncrement(ht, 0, h.inc_height);
 
     // Pass 3: Clamp to declared maximum (after increment snap so we never
     //   exceed the max even after rounding up to the next increment).
-    if (h.max_width  > 0) w  = @min(w,  h.max_width);
+    if (h.max_width > 0) w = @min(w, h.max_width);
     if (h.max_height > 0) ht = @min(ht, h.max_height);
 
     // Pass 4: Aspect ratio (ICCCM §4.1.2.3, matching dwm's applysizehints).
@@ -562,7 +549,7 @@ fn applyHintsToRect(rect: utils.Rect, h: SizeHints) utils.Rect {
     // Centre the (possibly reduced) window inside the slot that the layout
     // allocated.  All hint passes above only shrink dimensions, so both deltas
     // are always non-negative and no clamping guard is required.
-    const dx: i16 = @intCast((rect.width  - w)  / 2);
+    const dx: i16 = @intCast((rect.width - w) / 2);
     const dy: i16 = @intCast((rect.height - ht) / 2);
     return .{ .x = rect.x + dx, .y = rect.y + dy, .width = w, .height = ht };
 }
@@ -578,6 +565,6 @@ inline fn snapDimToIncrement(dim: u16, base: u16, inc: u16) u16 {
 /// Returns true when all hint fields are zero, indicating the client published no constraints.
 inline fn isEmptySizeHints(h: SizeHints) bool {
     return h.max_width == 0 and h.max_height == 0 and
-           h.inc_width == 0 and h.inc_height == 0 and
-           h.min_aspect == 0.0 and h.max_aspect == 0.0;
+        h.inc_width == 0 and h.inc_height == 0 and
+        h.min_aspect == 0.0 and h.max_aspect == 0.0;
 }

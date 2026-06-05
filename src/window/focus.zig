@@ -1,29 +1,32 @@
 //! Focus management
 //! Handles setting, clearing, and tracking the currently focused window.
 
-const std   = @import("std");
+const std = @import("std");
 const build = @import("build_options");
 
-const core    = @import("core");
-    const xcb = core.xcb;
-const utils   = @import("utils");
+const core = @import("core");
+const xcb = core.xcb;
+const utils = @import("utils");
 
-const window   = @import("window");
+const window = @import("window");
 const tracking = @import("tracking");
-const tiling   = if (build.has_tiling) @import("tiling") else struct {
-    pub fn getStateOpt() ?*anyopaque { return null; }
+const tiling = if (build.has_tiling) @import("tiling") else struct {
+    pub fn getStateOpt() ?*anyopaque {
+        return null;
+    }
 };
 
 const bar = if (build.has_bar) @import("bar") else struct {
     pub fn scheduleFocusRedraw(_: anytype) void {}
-    pub fn isBarWindow(_: u32) bool { return false; }
+    pub fn isBarWindow(_: u32) bool {
+        return false;
+    }
     pub fn redrawInsideGrab() void {}
 };
 
 const carousel = if (build.has_bar and build.has_carousel) @import("carousel") else struct {
     pub fn notifyFocusChanged(_: anytype) void {}
 };
-
 
 // Module state
 //
@@ -38,8 +41,8 @@ const carousel = if (build.has_bar and build.has_carousel) @import("carousel") e
 // not for multi-context support.
 
 const State = struct {
-    focused_window:    ?u32                                = null,
-    suppress_reason:   core.FocusSuppressReason            = .none,
+    focused_window: ?u32 = null,
+    suppress_reason: core.FocusSuppressReason = .none,
 
     // Maintained for callers outside this module that need the most recent X
     // event timestamp (e.g. to forward it to subsystems that require it for
@@ -47,10 +50,10 @@ const State = struct {
     // xcb_set_input_focus and WM_TAKE_FOCUS; see "Timestamp handling" below.
     // This field is retained rather than removed so external consumers are not
     // broken; it must NOT be used inside this module — use 0 (CurrentTime).
-    last_event_time:   u32                                 = 0,
+    last_event_time: u32 = 0,
 
     // EWMH atom for _NET_ACTIVE_WINDOW — interned once in init().
-    net_active_window: xcb.xcb_atom_t                     = xcb.XCB_ATOM_NONE,
+    net_active_window: xcb.xcb_atom_t = xcb.XCB_ATOM_NONE,
 
     // Deferred async state
     //
@@ -78,10 +81,10 @@ const State = struct {
     //   already sitting in the XCB receive buffer, turning a synchronous
     //   round-trip into a near-zero-cost buffer drain.
     //   null when not in use (most call paths do not pre-fire).
-    confirm_cookie:        ?xcb.xcb_get_input_focus_cookie_t  = null,
-    confirm_win:           ?u32                               = null,
-    pointer_cookie:        ?xcb.xcb_query_pointer_cookie_t    = null,
-    pre_protocols_cookie:  ?xcb.xcb_get_property_cookie_t     = null,
+    confirm_cookie: ?xcb.xcb_get_input_focus_cookie_t = null,
+    confirm_win: ?u32 = null,
+    pointer_cookie: ?xcb.xcb_query_pointer_cookie_t = null,
+    pre_protocols_cookie: ?xcb.xcb_get_property_cookie_t = null,
 };
 
 var state: State = .{};
@@ -124,8 +127,12 @@ pub fn deinit() void {
 
 // Public accessors
 
-pub inline fn getFocused()        ?u32                       { return state.focused_window;  }
-pub inline fn getSuppressReason() core.FocusSuppressReason   { return state.suppress_reason; }
+pub inline fn getFocused() ?u32 {
+    return state.focused_window;
+}
+pub inline fn getSuppressReason() core.FocusSuppressReason {
+    return state.suppress_reason;
+}
 
 /// Returns true when the current suppress reason indicates that an incoming
 /// EnterNotify event should be silently ignored by the window layer.
@@ -142,14 +149,18 @@ pub inline fn getSuppressReason() core.FocusSuppressReason   { return state.supp
 pub inline fn shouldSuppressEnterNotify() bool {
     return state.suppress_reason == .tiling_operation;
 }
-pub inline fn getLastEventTime() u32 { return state.last_event_time; }
+pub inline fn getLastEventTime() u32 {
+    return state.last_event_time;
+}
 
 /// Update the X11 event timestamp.  Called by the EnterNotify and
 /// LeaveNotify handlers before they call into focus logic.
 ///
 /// See "Timestamp handling" below for why focus.zig itself always uses
 /// CurrentTime (0) rather than forwarding this value.
-pub inline fn setLastEventTime(t: u32) void { state.last_event_time = t; }
+pub inline fn setLastEventTime(t: u32) void {
+    state.last_event_time = t;
+}
 
 // Timestamp handling
 //
@@ -186,7 +197,9 @@ pub inline fn setLastEventTime(t: u32) void { state.last_event_time = t; }
 /// Use this for cases where suppression must be cleared or set independently
 /// of any focus change — e.g. MotionNotify clearing suppression when real
 /// pointer movement is detected.
-pub inline fn setSuppressReason(r: core.FocusSuppressReason) void { state.suppress_reason = r; }
+pub inline fn setSuppressReason(r: core.FocusSuppressReason) void {
+    state.suppress_reason = r;
+}
 
 // Button grab management
 //
@@ -202,9 +215,16 @@ fn grabButtons(win: u32, focused: bool) void {
     _ = xcb.xcb_ungrab_button(core.conn, xcb.XCB_BUTTON_INDEX_ANY, win, xcb.XCB_MOD_MASK_ANY);
     if (focused) return;
     _ = xcb.xcb_grab_button(
-        core.conn, 0, win, xcb.XCB_EVENT_MASK_BUTTON_PRESS,
-        xcb.XCB_GRAB_MODE_SYNC, xcb.XCB_GRAB_MODE_SYNC,
-        xcb.XCB_NONE, xcb.XCB_NONE, xcb.XCB_BUTTON_INDEX_ANY, xcb.XCB_MOD_MASK_ANY,
+        core.conn,
+        0,
+        win,
+        xcb.XCB_EVENT_MASK_BUTTON_PRESS,
+        xcb.XCB_GRAB_MODE_SYNC,
+        xcb.XCB_GRAB_MODE_SYNC,
+        xcb.XCB_NONE,
+        xcb.XCB_NONE,
+        xcb.XCB_BUTTON_INDEX_ANY,
+        xcb.XCB_MOD_MASK_ANY,
     );
 }
 
@@ -212,7 +232,9 @@ fn grabButtons(win: u32, focused: bool) void {
 /// non-current workspace (and thus never focused via the normal transition
 /// path).  The window will have its grabs updated to `focused = true` the
 /// first time it receives focus via commitFocusTransition.
-pub fn initWindowGrabs(win: u32) void { grabButtons(win, false); }
+pub fn initWindowGrabs(win: u32) void {
+    grabButtons(win, false);
+}
 
 // Focus logic
 
@@ -255,12 +277,12 @@ const CommitFlags = struct {
     /// False for no_input and globally_active windows: no_input never receives
     /// focus protocol; globally_active manages its own focus and must not be
     /// sent xcb_set_input_focus per ICCCM §4.1.7.
-    set_input_focus:    bool,
+    set_input_focus: bool,
 
     /// Raise the window to the top of the stack.
     /// True for click/command (user-driven), and for globally_active hover
     /// (raising is the only focus signal these windows receive).
-    raise:              bool,
+    raise: bool,
 
     /// Send a WM_TAKE_FOCUS ClientMessage after xcb_set_input_focus.
     /// Required for locally_active and globally_active input models.
@@ -269,12 +291,12 @@ const CommitFlags = struct {
     /// Arm the async focus-confirm cookie for a deferred raise-and-retry.
     /// Used by pointer_sync for passive and locally_active windows that may
     /// silently drop xcb_set_input_focus when not already topmost.
-    arm_confirm:        bool,
+    arm_confirm: bool,
 
     /// Call bar.scheduleFocusRedraw after the transition.
     /// False only when running inside a server grab; the caller is then
     /// responsible for calling bar.redrawInsideGrab() instead.
-    schedule_bar:       bool,
+    schedule_bar: bool,
 
     /// New value for suppress_reason after the transition.
     /// `setFocus` derives this from reason + current state via suppressionFor();
@@ -296,7 +318,7 @@ const CommitFlags = struct {
 ///   • `win` != focused_window (no-op transitions are filtered upstream).
 ///   • Any stale confirm cookie has been cancelled or consumed by the caller.
 fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
-    state.focused_window  = win;
+    state.focused_window = win;
     state.suppress_reason = flags.new_suppress;
 
     grabButtons(win, true);
@@ -308,12 +330,10 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
         // event timestamp risks rejection if it predates the server's last
         // focus-change time, and also risks Electron/Qt apps forwarding a stale
         // timestamp back to XSetInputFocus on their internal widget.
-        _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
-            win, 0); // CurrentTime
+        _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, 0); // CurrentTime
 
     if (flags.raise)
-        _ = xcb.xcb_configure_window(core.conn, win,
-            xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+        _ = xcb.xcb_configure_window(core.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 
     if (flags.send_wm_take_focus) {
         // If setFocus pre-fired the WM_PROTOCOLS cookie before entering this
@@ -337,7 +357,7 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
 
     if (flags.arm_confirm) {
         state.confirm_cookie = xcb.xcb_get_input_focus(core.conn);
-        state.confirm_win    = win;
+        state.confirm_win = win;
     }
 
     if (build.has_tiling) tiling.updateWindowFocus(old, win);
@@ -359,7 +379,9 @@ inline fn isInvalidFocusTarget(win: u32) bool {
 /// the window is still alive at call time.
 inline fn isWindowMapped(conn: *xcb.xcb_connection_t, win: u32) bool {
     const reply = xcb.xcb_get_window_attributes_reply(
-        conn, xcb.xcb_get_window_attributes(conn, win), null,
+        conn,
+        xcb.xcb_get_window_attributes(conn, win),
+        null,
     ) orelse return false;
     defer std.c.free(reply);
     return reply.*.map_state == xcb.XCB_MAP_STATE_VIEWABLE;
@@ -400,12 +422,12 @@ pub fn setFocus(win: u32, reason: Reason) void {
 
     const old = state.focused_window;
     commitFocusTransition(old, win, .{
-        .set_input_focus    = input_model != .globally_active,
-        .raise              = shouldRaise(reason, win),
+        .set_input_focus = input_model != .globally_active,
+        .raise = shouldRaise(reason, win),
         .send_wm_take_focus = true, // no_input already returned early above
-        .arm_confirm        = reason == .pointer_sync,
-        .schedule_bar       = true,
-        .new_suppress       = suppressionFor(reason, state.suppress_reason),
+        .arm_confirm = reason == .pointer_sync,
+        .schedule_bar = true,
+        .new_suppress = suppressionFor(reason, state.suppress_reason),
     });
 }
 
@@ -428,7 +450,7 @@ pub fn setFocus(win: u32, reason: Reason) void {
 /// Safe to call when no confirm is pending (returns immediately).
 pub fn drainPendingConfirm() void {
     const cookie = state.confirm_cookie orelse return;
-    const win    = state.confirm_win.?;  // invariant: always set/cleared together with confirm_cookie
+    const win = state.confirm_win.?; // invariant: always set/cleared together with confirm_cookie
     clearConfirmState();
 
     // Reply must be consumed before any return to drain the XCB queue.
@@ -453,8 +475,7 @@ pub fn drainPendingConfirm() void {
     // rather than silently degrading into an unresponsive window.
     std.log.debug("focus: confirm retry for 0x{x}: focus={} (expected > 1), retrying once", .{ win, c.*.focus });
 
-    _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
-        win, 0); // CurrentTime
+    _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, 0); // CurrentTime
     window.sendWMTakeFocus(core.conn, win, 0); // CurrentTime
 }
 
@@ -462,7 +483,7 @@ pub fn drainPendingConfirm() void {
 /// Invariant: these two fields are always set/cleared as a unit.
 inline fn clearConfirmState() void {
     state.confirm_cookie = null;
-    state.confirm_win    = null;
+    state.confirm_win = null;
 }
 
 /// Discard a pending confirm reply without acting on it.
@@ -507,8 +528,7 @@ fn sendFocusProtocol(win: u32) void {
     const model = window.getInputModelCached(core.conn, win);
     if (model == .no_input) return;
     if (model != .globally_active) {
-        _ = xcb.xcb_set_input_focus(core.conn,
-            xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, 0); // CurrentTime
+        _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, 0); // CurrentTime
     }
     // Always advertise the active window, regardless of input model.
     // Without this, a globally_active window that has stolen focus would leave
@@ -525,7 +545,7 @@ fn sendFocusProtocol(win: u32) void {
 /// NotifyInferior) was incorrect: it allowed Electron's internal focus steals
 /// to slip through unchallenged.
 pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
-    if (state.confirm_win)    |exp| if (event.event == exp)  cancelPendingConfirm();
+    if (state.confirm_win) |exp| if (event.event == exp) cancelPendingConfirm();
     const is_offscreen_steal = !isInvalidFocusTarget(event.event) and
         !tracking.isOnCurrentWorkspace(event.event);
     if (state.focused_window) |sel| {
@@ -546,13 +566,11 @@ pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
             // (which never replies), exhausting its retry budget.  Then
             // sendFocusProtocol(sel) reclaims focus with no active opponent.
             if (is_offscreen_steal)
-                _ = xcb.xcb_set_input_focus(core.conn,
-                    xcb.XCB_INPUT_FOCUS_POINTER_ROOT, core.root, 0); // CurrentTime
+                _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, core.root, 0); // CurrentTime
             sendFocusProtocol(sel);
         }
     } else if (is_offscreen_steal) {
-        _ = xcb.xcb_set_input_focus(core.conn,
-            xcb.XCB_INPUT_FOCUS_POINTER_ROOT, core.root, 0); // CurrentTime
+        _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, core.root, 0); // CurrentTime
         advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
     }
 }
@@ -571,12 +589,15 @@ pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
 ///   • Pass window.isValidManagedWindow for cleanup contexts where any managed
 ///     window is acceptable regardless of workspace membership.
 pub fn focusBestAvailable(
-    reason:  Reason,
+    reason: Reason,
     visible: *const fn (u32) bool,
     on_miss: ?*const fn () void,
 ) void {
     for (tracking.allWindows()) |entry| {
-        if (visible(entry.win)) { setFocus(entry.win, reason); return; }
+        if (visible(entry.win)) {
+            setFocus(entry.win, reason);
+            return;
+        }
     }
     if (on_miss) |f| f() else clearFocus();
 }
@@ -587,10 +608,9 @@ pub fn clearFocus() void {
         if (build.has_tiling) tiling.updateWindowFocus(old_win, null);
     }
     cancelPendingConfirm();
-    state.focused_window  = null;
+    state.focused_window = null;
     state.suppress_reason = .none;
-    _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT,
-        core.root, 0); // CurrentTime
+    _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, core.root, 0); // CurrentTime
     carousel.notifyFocusChanged(null);
     bar.scheduleFocusRedraw(null);
     advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
@@ -598,8 +618,7 @@ pub fn clearFocus() void {
 
 inline fn advertiseActiveWindow(win: u32) void {
     if (state.net_active_window == xcb.XCB_ATOM_NONE) return;
-    _ = xcb.xcb_change_property(core.conn, xcb.XCB_PROP_MODE_REPLACE,
-        core.root, state.net_active_window, xcb.XCB_ATOM_WINDOW, 32, 1, &win);
+    _ = xcb.xcb_change_property(core.conn, xcb.XCB_PROP_MODE_REPLACE, core.root, state.net_active_window, xcb.XCB_ATOM_WINDOW, 32, 1, &win);
 }
 
 /// True when `reason` should raise `win` to the top of the stacking order.
@@ -614,8 +633,7 @@ inline fn advertiseActiveWindow(win: u32) void {
 /// FocusOut/FocusIn pairs that confuse Electron's internal focus state machine.
 inline fn shouldRaise(reason: Reason, win: u32) bool {
     return switch (reason) {
-        .mouse_click, .user_command, .pointer_sync =>
-            if (build.has_tiling) !tiling.isWindowActiveTiled(win) else true,
+        .mouse_click, .user_command, .pointer_sync => if (build.has_tiling) !tiling.isWindowActiveTiled(win) else true,
         .mouse_enter, .tiling_operation, .window_spawn, .workspace_switch => false,
     };
 }
@@ -626,8 +644,8 @@ inline fn suppressionFor(reason: Reason, current: core.FocusSuppressReason) core
         // windows mapping/unmapping during the switch must not be masked on
         // the new workspace.  Documented in Reason.workspace_switch.
         .mouse_click, .user_command, .workspace_switch => .none,
-        .window_spawn                                  => .window_spawn,
-        else                                           => current,
+        .window_spawn => .window_spawn,
+        else => current,
     };
 }
 
@@ -737,9 +755,13 @@ fn focusCycle(comptime forward: bool) void {
 }
 
 /// Cycle focus to the next visible window (Mod+k — moves right/forward).
-pub fn focusNext() void { focusCycle(true);  }
+pub fn focusNext() void {
+    focusCycle(true);
+}
 /// Cycle focus to the previous visible window (Mod+j — moves left/backward).
-pub fn focusPrev() void { focusCycle(false); }
+pub fn focusPrev() void {
+    focusCycle(false);
+}
 
 /// Shared implementation for moving the focused window through the cycle.
 /// Swaps it with the neighbour in the given direction.
@@ -756,6 +778,10 @@ fn moveWindowCycle(comptime forward: bool) void {
 }
 
 /// Move the focused window one step forward in the cycle (Mod+Shift+k).
-pub fn moveWindowNext() void { moveWindowCycle(true);  }
+pub fn moveWindowNext() void {
+    moveWindowCycle(true);
+}
 /// Move the focused window one step backward in the cycle (Mod+Shift+j).
-pub fn moveWindowPrev() void { moveWindowCycle(false); }
+pub fn moveWindowPrev() void {
+    moveWindowCycle(false);
+}

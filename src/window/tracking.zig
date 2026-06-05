@@ -1,11 +1,10 @@
 //! Core window tracking
 //! Maintains the registry of all managed windows and their workspace assignments.
 
-const std   = @import("std");
+const std = @import("std");
 const build = @import("build_options");
 
 const minimize = if (build.has_minimize) @import("minimize");
-
 
 // Fixed-size ordered window list.
 // Used by Workspace in workspaces.zig; kept here so it can be imported from
@@ -141,19 +140,19 @@ pub const Tracking = struct {
 // Global tracking state
 
 pub const Entry = struct {
-    win:  u32,
+    win: u32,
     mask: u64,
 };
 
-var g_windows:         std.ArrayListUnmanaged(Entry) = .empty;
-var g_alloc:           std.mem.Allocator             = undefined;
-var g_initialized:     bool                          = false;
-var g_current:         u8                            = 0;
-var g_workspace_count: usize                         = 1;
+var g_windows: std.ArrayListUnmanaged(Entry) = .empty;
+var g_alloc: std.mem.Allocator = undefined;
+var g_initialized: bool = false;
+var g_current: u8 = 0;
+var g_workspace_count: usize = 1;
 
 /// Initialises the global window-tracking list. Must be called once at startup before any windows are managed.
 pub fn init(allocator: std.mem.Allocator) void {
-    g_alloc       = allocator;
+    g_alloc = allocator;
     g_initialized = true;
     g_windows.ensureTotalCapacity(allocator, 32) catch |err| {
         std.log.warn("tracking: initial pre-allocation failed ({s}); list will grow on demand", .{@errorName(err)});
@@ -163,9 +162,9 @@ pub fn init(allocator: std.mem.Allocator) void {
 /// Frees the global window-tracking list and resets all state.
 pub fn deinit() void {
     if (g_initialized) g_windows.deinit(g_alloc);
-    g_windows         = .empty;
-    g_initialized     = false;
-    g_current         = 0;
+    g_windows = .empty;
+    g_initialized = false;
+    g_current = 0;
     g_workspace_count = 1;
 }
 
@@ -208,7 +207,10 @@ pub fn registerWindow(win: u32, ws: u8) !void {
 pub fn removeWindow(win: u32) void {
     if (!g_initialized) return;
     for (g_windows.items, 0..) |e, i| {
-        if (e.win == win) { _ = g_windows.swapRemove(i); return; }
+        if (e.win == win) {
+            _ = g_windows.swapRemove(i);
+            return;
+        }
     }
 }
 
@@ -224,7 +226,10 @@ pub fn setWindowMask(win: u32, mask: u64) void {
     if (!g_initialized) return;
     std.debug.assert(mask != 0);
     for (g_windows.items) |*e| {
-        if (e.win == win) { e.mask = mask; return; }
+        if (e.win == win) {
+            e.mask = mask;
+            return;
+        }
     }
     std.log.err(
         "tracking: setWindowMask called on unregistered window 0x{x}",
@@ -236,7 +241,9 @@ pub fn setWindowMask(win: u32, mask: u64) void {
 
 /// Returns the workspace bitmask for `win`, or null if not tracked.
 pub inline fn getWindowWorkspaceMask(win: u32) ?u64 {
-    for (g_windows.items) |e| { if (e.win == win) return e.mask; }
+    for (g_windows.items) |e| {
+        if (e.win == win) return e.mask;
+    }
     return null;
 }
 
@@ -244,23 +251,31 @@ pub fn isManaged(win: u32) bool {
     return getWindowWorkspaceMask(win) != null;
 }
 
-pub inline fn windowCount() usize { return g_windows.items.len; }
+pub inline fn windowCount() usize {
+    return g_windows.items.len;
+}
 
 pub inline fn getCurrentWorkspace() ?u8 {
     return if (g_initialized) g_current else null;
 }
 
-pub inline fn getWorkspaceCount() usize { return g_workspace_count; }
+pub inline fn getWorkspaceCount() usize {
+    return g_workspace_count;
+}
 
 /// Returns a read-only slice of all tracked (win, mask) pairs.
 /// Callers filter by mask bit as needed; do not retain the slice across
 /// any call that may add or remove windows.
-pub fn allWindows() []const Entry { return g_windows.items; }
+pub fn allWindows() []const Entry {
+    return g_windows.items;
+}
 
 /// True when at least one window has ws_idx set in its mask.
 pub fn hasWindowsOnWorkspace(ws_idx: u8) bool {
     const bit = workspaceBit(ws_idx);
-    for (g_windows.items) |e| { if (e.mask & bit != 0) return true; }
+    for (g_windows.items) |e| {
+        if (e.mask & bit != 0) return true;
+    }
     return false;
 }
 
@@ -268,7 +283,9 @@ pub fn hasWindowsOnWorkspace(ws_idx: u8) bool {
 pub fn countWindowsOnWorkspace(ws_idx: u8) usize {
     const bit = workspaceBit(ws_idx);
     var n: usize = 0;
-    for (g_windows.items) |e| { if (e.mask & bit != 0) n += 1; }
+    for (g_windows.items) |e| {
+        if (e.mask & bit != 0) n += 1;
+    }
     return n;
 }
 

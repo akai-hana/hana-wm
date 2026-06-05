@@ -1,17 +1,17 @@
 //! Master-stack tiling layout
 //! Divides the screen into a master pane and a stack pane, with overflow handling for extra windows.
 
-const utils     = @import("utils");
+const utils = @import("utils");
 const constants = @import("constants");
 
-const tiling  = @import("tiling");
+const tiling = @import("tiling");
 const layouts = @import("layouts");
 
 /// Tile `windows` into the master-stack layout using the given screen area.
 pub fn tileWithOffset(
-    ctx:      *const layouts.LayoutCtx,
-    state:    *tiling.State,
-    windows:  []const u32,
+    ctx: *const layouts.LayoutCtx,
+    state: *tiling.State,
+    windows: []const u32,
     screen_w: u16,
     screen_h: u16,
     y_offset: u16,
@@ -19,9 +19,9 @@ pub fn tileWithOffset(
     const n = windows.len;
     if (n == 0) return;
 
-    const m         = state.margins();
+    const m = state.margins();
     const master_n: u16 = @intCast(@min(state.config.master_count, n));
-    const stack_n:  u16 = @intCast(n - master_n);
+    const stack_n: u16 = @intCast(n - master_n);
 
     // When no stack exists the master pane takes the full width.
     const master_w: u16 = if (stack_n > 0)
@@ -30,7 +30,7 @@ pub fn tileWithOffset(
         screen_w;
 
     const is_master_on_right = state.config.master_side == .right;
-    const master_x: u16      = if (is_master_on_right) screen_w -| master_w else 0;
+    const master_x: u16 = if (is_master_on_right) screen_w -| master_w else 0;
 
     // Inner width accounts for the gap between master and stack panes.
     const master_inner_w = if (stack_n > 0)
@@ -55,56 +55,50 @@ pub fn tileWithOffset(
 /// the stack) fills its slot before the growing window (new master) vacates its
 /// old slot, preventing a one-frame wallpaper gap.
 fn tileColumn(
-    ctx:      *const layouts.LayoutCtx,
-    windows:  []const u32,
-    x:        u16,
+    ctx: *const layouts.LayoutCtx,
+    windows: []const u32,
+    x: u16,
     y_offset: u16,
-    h:        u16,
-    inner_w:  u16,
-    m:        utils.Margins,
+    h: u16,
+    inner_w: u16,
+    m: utils.Margins,
 ) void {
     const count: u16 = @intCast(windows.len);
     const avail = calcAvailableHeight(h, count, m);
-    var deferred_win:  ?u32        = null;
-    var deferred_rect: utils.Rect  = undefined;
+    var deferred = layouts.DeferredConfigure.init();
     for (windows, 0..) |win, i| {
         const row: u16 = @intCast(i);
         const rect = utils.Rect{
-            .x      = @intCast(x),
-            .y      = @intCast(windowY(row, count, avail, y_offset, m)),
-            .width  = inner_w,
+            .x = @intCast(x),
+            .y = @intCast(windowY(row, count, avail, y_offset, m)),
+            .width = inner_w,
             .height = windowHeight(row, count, avail),
         };
-        if (ctx.defer_configure == win) {
-            deferred_win  = win;
-            deferred_rect = rect;
-        } else {
+        if (!deferred.capture(ctx, win, rect))
             layouts.configureWithHints(ctx, win, rect);
-        }
     }
-    if (deferred_win) |w| layouts.configureWithHints(ctx, w, deferred_rect);
+    deferred.flush(ctx);
 }
 
 /// Tile the stack pane, spilling into a column-major overflow grid when the
 /// number of stack windows exceeds what fits in a single column.
 fn tileStack(
-    ctx:      *const layouts.LayoutCtx,
-    windows:  []const u32,
-    x:        u16,
+    ctx: *const layouts.LayoutCtx,
+    windows: []const u32,
+    x: u16,
     y_offset: u16,
-    w:        u16,
-    h:        u16,
-    m:        utils.Margins,
+    w: u16,
+    h: u16,
+    m: utils.Margins,
 ) void {
     const stack_n: u16 = @intCast(windows.len);
 
     const space_per_window: u32 = constants.MIN_WINDOW_DIM + 2 * @as(u32, m.border) + @as(u32, m.gap);
-    const available: u32        = @as(u32, h) -| @as(u32, m.gap);
-    const max_fit: u16          = @intCast(@max(1, available / space_per_window));
+    const available: u32 = @as(u32, h) -| @as(u32, m.gap);
+    const max_fit: u16 = @intCast(@max(1, available / space_per_window));
 
     if (stack_n <= max_fit) {
-        tileColumn(ctx, windows, x +| m.gap / 2, y_offset, h,
-            calcInnerWidth(w, m.gap / 2, m.gap + 2 * m.border), m);
+        tileColumn(ctx, windows, x +| m.gap / 2, y_offset, h, calcInnerWidth(w, m.gap / 2, m.gap + 2 * m.border), m);
         return;
     }
     tileStackExtra(ctx, windows, x, y_offset, w, h, max_fit, m);
@@ -114,20 +108,19 @@ fn tileStack(
 /// r+2*max_fit, … Each row's column count is ceil((stack_n - r) / max_fit).
 /// Respects ctx.defer_configure: the named window is emitted last.
 fn tileStackExtra(
-    ctx:      *const layouts.LayoutCtx,
-    windows:  []const u32,
-    x:        u16,
+    ctx: *const layouts.LayoutCtx,
+    windows: []const u32,
+    x: u16,
     y_offset: u16,
-    w:        u16,
-    h:        u16,
-    max_fit:  u16,
-    m:        utils.Margins,
+    w: u16,
+    h: u16,
+    max_fit: u16,
+    m: utils.Margins,
 ) void {
     const stack_n: u16 = @intCast(windows.len);
-    const row_avail    = calcAvailableHeight(h, max_fit, m);
+    const row_avail = calcAvailableHeight(h, max_fit, m);
 
-    var deferred_win:  ?u32       = null;
-    var deferred_rect: utils.Rect = undefined;
+    var deferred = layouts.DeferredConfigure.init();
 
     var row: u16 = 0;
     while (row < max_fit) : (row += 1) {
@@ -135,7 +128,7 @@ fn tileStackExtra(
 
         const gaps_in_row = m.gap / 2 +| m.gap *| cols_in_row;
         const row_total_w = if (w > gaps_in_row) w - gaps_in_row else cols_in_row * constants.MIN_WINDOW_DIM;
-        const col_w       = row_total_w / cols_in_row;
+        const col_w = row_total_w / cols_in_row;
         const col_inner_w = calcInnerWidth(col_w, 0, 2 * m.border);
 
         const y_pos = windowY(row, max_fit, row_avail, y_offset, m);
@@ -145,20 +138,16 @@ fn tileStackExtra(
         while (win_idx < stack_n) : (win_idx += max_fit) {
             const col: u16 = (win_idx - row) / max_fit;
             const rect = utils.Rect{
-                .x      = @intCast(x +| m.gap / 2 +| col *| (col_w +| m.gap)),
-                .y      = @intCast(y_pos),
-                .width  = col_inner_w,
+                .x = @intCast(x +| m.gap / 2 +| col *| (col_w +| m.gap)),
+                .y = @intCast(y_pos),
+                .width = col_inner_w,
                 .height = row_h,
             };
-            if (ctx.defer_configure == windows[win_idx]) {
-                deferred_win  = windows[win_idx];
-                deferred_rect = rect;
-            } else {
+            if (!deferred.capture(ctx, windows[win_idx], rect))
                 layouts.configureWithHints(ctx, windows[win_idx], rect);
-            }
         }
     }
-    if (deferred_win) |win| layouts.configureWithHints(ctx, win, deferred_rect);
+    deferred.flush(ctx);
 }
 
 /// Total pixel height available for window content after gaps and borders.

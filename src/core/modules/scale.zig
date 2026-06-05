@@ -3,18 +3,18 @@
 
 const std = @import("std");
 
-const core      = @import("core");
-    const xcb   = core.xcb;
+const core = @import("core");
+const xcb = core.xcb;
 const constants = @import("constants");
-const debug     = @import("debug");
+const debug = @import("debug");
 
 const parser = @import("parser");
 
 // Baseline screen used to define "1× scale". All percentage-based values
 // are computed relative to this reference display.
-const BASELINE_WIDTH:  f32 = 2560.0;
+const BASELINE_WIDTH: f32 = 2560.0;
 const BASELINE_HEIGHT: f32 = 1600.0;
-const BASELINE_DPI          = constants.BASELINE_DPI;
+const BASELINE_DPI = constants.BASELINE_DPI;
 
 // Font size percentages are relative to 1080 p height, not the baseline display,
 // so font sizing degrades more gracefully on smaller screens.
@@ -45,11 +45,10 @@ pub const DpiInfo = core.DpiInfo;
 /// Returns null when the property is absent, empty, or does not contain an Xft.dpi entry.
 fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
     const atom_cookie = xcb.xcb_intern_atom(conn, 0, "RESOURCE_MANAGER".len, "RESOURCE_MANAGER");
-    const atom_reply  = xcb.xcb_intern_atom_reply(conn, atom_cookie, null) orelse return null;
+    const atom_reply = xcb.xcb_intern_atom_reply(conn, atom_cookie, null) orelse return null;
     defer std.c.free(atom_reply);
 
-    const prop_cookie = xcb.xcb_get_property(conn, 0, screen.*.root, atom_reply.*.atom,
-        xcb.XCB_ATOM_STRING, 0, RESOURCE_MANAGER_MAX_LEN);
+    const prop_cookie = xcb.xcb_get_property(conn, 0, screen.*.root, atom_reply.*.atom, xcb.XCB_ATOM_STRING, 0, RESOURCE_MANAGER_MAX_LEN);
     const prop_reply = xcb.xcb_get_property_reply(conn, prop_cookie, null) orelse return null;
     defer std.c.free(prop_reply);
 
@@ -58,7 +57,7 @@ fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
     const value_len = xcb.xcb_get_property_value_length(prop_reply);
     if (value_len == 0) return null;
 
-    const value_ptr    = xcb.xcb_get_property_value(prop_reply);
+    const value_ptr = xcb.xcb_get_property_value(prop_reply);
     const resource_str = @as([*]const u8, @ptrCast(value_ptr))[0..@intCast(value_len)];
 
     // Format: "Xft.dpi:\t96" or "Xft.dpi: 96".
@@ -70,7 +69,7 @@ fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (std.mem.startsWith(u8, trimmed, prefix)) {
             const rest = std.mem.trim(u8, trimmed[prefix.len..], " \t");
-            const dpi  = std.fmt.parseFloat(f32, rest) catch continue;
+            const dpi = std.fmt.parseFloat(f32, rest) catch continue;
             return dpi;
         }
     }
@@ -80,16 +79,16 @@ fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
 /// Computes DPI from the screen's physical dimensions reported by X.
 /// Returns BASELINE_DPI if the screen reports 0mm dimensions (e.g. virtual displays).
 fn calcDpiFromGeometry(screen: *xcb.xcb_screen_t) f32 {
-    const width_px:  f32 = @floatFromInt(screen.width_in_pixels);
+    const width_px: f32 = @floatFromInt(screen.width_in_pixels);
     const height_px: f32 = @floatFromInt(screen.height_in_pixels);
-    const width_mm:  f32 = @floatFromInt(screen.width_in_millimeters);
+    const width_mm: f32 = @floatFromInt(screen.width_in_millimeters);
     const height_mm: f32 = @floatFromInt(screen.height_in_millimeters);
     if (width_mm == 0 or height_mm == 0) {
         debug.warn("Display reports 0mm dimensions, using baseline DPI", .{});
         return BASELINE_DPI;
     }
-    const dpi_x   = (width_px  / width_mm)  * 25.4;
-    const dpi_y   = (height_px / height_mm) * 25.4;
+    const dpi_x = (width_px / width_mm) * 25.4;
+    const dpi_y = (height_px / height_mm) * 25.4;
     const avg_dpi = (dpi_x + dpi_y) / 2.0;
     debug.info("Calculated DPI: X={d:.1}, Y={d:.1}, Average={d:.1}", .{ dpi_x, dpi_y, avg_dpi });
     return avg_dpi;
@@ -112,12 +111,11 @@ fn snapToCommonDpi(dpi: f32) f32 {
 /// Computes a scale factor from the screen's pixel diagonal relative to the baseline display.
 /// Used as a fallback when geometry-based DPI is out of a plausible range.
 fn calcScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
-    const width_px:  f32 = @floatFromInt(screen.width_in_pixels);
+    const width_px: f32 = @floatFromInt(screen.width_in_pixels);
     const height_px: f32 = @floatFromInt(screen.height_in_pixels);
-    const diagonal         = @sqrt(width_px * width_px + height_px * height_px);
+    const diagonal = @sqrt(width_px * width_px + height_px * height_px);
     const resolution_scale = diagonal / BASELINE_DIAGONAL;
-    debug.info("Resolution scaling: {d:.0}x{d:.0} -> {d:.2}x baseline ({d:.0}x{d:.0})",
-        .{ width_px, height_px, resolution_scale, BASELINE_WIDTH, BASELINE_HEIGHT });
+    debug.info("Resolution scaling: {d:.0}x{d:.0} -> {d:.2}x baseline ({d:.0}x{d:.0})", .{ width_px, height_px, resolution_scale, BASELINE_WIDTH, BASELINE_HEIGHT });
     return resolution_scale;
 }
 
@@ -221,7 +219,7 @@ pub fn getDetectedRateHz() f64 {
 /// Returns the root window ID of the first screen, or 0 if no screens are available.
 fn xcbRootWindow(conn: *xcb.xcb_connection_t) u32 {
     const setup = xcb.xcb_get_setup(conn);
-    const it    = xcb.xcb_setup_roots_iterator(setup);
+    const it = xcb.xcb_setup_roots_iterator(setup);
     return if (it.rem > 0) it.data.*.root else 0;
 }
 
@@ -251,7 +249,7 @@ fn detectRefreshRateViaCrtc(conn: *xcb.xcb_connection_t, root: u32) ?f64 {
     const crtcs = crtc_it_ptr.?[0..@intCast(crtc_it_len)];
 
     const max_crtcs: usize = 16;
-    const n_crtcs          = @min(crtcs.len, max_crtcs);
+    const n_crtcs = @min(crtcs.len, max_crtcs);
     var crtc_cookies: [max_crtcs]xcb.xcb_randr_get_crtc_info_cookie_t = undefined;
     for (crtcs[0..n_crtcs], crtc_cookies[0..n_crtcs]) |crtc, *cookie| {
         cookie.* = xcb.xcb_randr_get_crtc_info(conn, crtc, rr.*.config_timestamp);
@@ -289,7 +287,7 @@ fn detectRefreshRate(conn: *xcb.xcb_connection_t) f64 {
     if (root == 0) return default_hz;
 
     const cookie = xcb.xcb_randr_get_screen_info(conn, root);
-    const reply  = xcb.xcb_randr_get_screen_info_reply(conn, cookie, null) orelse
+    const reply = xcb.xcb_randr_get_screen_info_reply(conn, cookie, null) orelse
         return default_hz;
     defer std.c.free(reply);
 

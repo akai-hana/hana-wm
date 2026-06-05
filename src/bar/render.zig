@@ -1,47 +1,59 @@
 //! Text rendering library bindings
 //! Cairo/Pango/GLib C bindings for bar rendering.
+//!
+//! These bindings are declared manually as `pub extern fn` rather than via
+//! `@cImport` because the Cairo/Pango/GLib headers are not guaranteed to be
+//! present in all build environments.  All signatures were verified against:
+//!   cairo  1.18.x  (libcairo2-dev)
+//!   pango  1.52.x  (libpango1.0-dev)
+//!   glib   2.80.x  (libglib2.0-dev)
+//!
+//! When updating any signature, cross-check it against the installed headers
+//! and bump the version note above.  A wrong return type (e.g. `?*T` vs `*T`)
+//! is a silent miscompilation in ReleaseFast.  If headers are available in the
+//! build environment, prefer replacing this file with `@cImport`/`@cInclude`.
 
-const core    = @import("core");
-    const xcb = core.xcb;
+const core = @import("core");
+const xcb = core.xcb;
 
 const xcb_connection_t = xcb.xcb_connection_t;
-const xcb_pixmap_t     = xcb.xcb_pixmap_t;
+const xcb_pixmap_t = xcb.xcb_pixmap_t;
 const xcb_visualtype_t = xcb.xcb_visualtype_t;
 
-// Cairo 
+// Cairo
 
 pub const cairo_surface_t = opaque {};
-pub const cairo_t         = opaque {};
+pub const cairo_t = opaque {};
 
 /// Numeric values match the C ABI; do not change them.
 pub const cairo_format_t = enum(c_int) {
-    ARGB32    = 0,
-    RGB24     = 1,
-    A8        = 2,
-    A1        = 3,
+    ARGB32 = 0,
+    RGB24 = 1,
+    A8 = 2,
+    A1 = 3,
     RGB16_565 = 4,
-    RGB30     = 5,
+    RGB30 = 5,
 };
 
 /// Trimmed to the two operators used (CLEAR, OVER); full C enum has 29. Numeric values unchanged.
 pub const cairo_operator_t = enum(c_int) {
     CLEAR = 0,
-    OVER  = 2,
+    OVER = 2,
 };
 
 /// Pixmap must outlive the surface; destroy the surface before freeing the pixmap.
 pub extern fn cairo_xcb_surface_create(
     connection: *xcb_connection_t,
-    pixmap:     xcb_pixmap_t,
-    visual:     *xcb_visualtype_t,
-    width:      c_int,
-    height:     c_int,
+    pixmap: xcb_pixmap_t,
+    visual: *xcb_visualtype_t,
+    width: c_int,
+    height: c_int,
 ) ?*cairo_surface_t;
 
 /// In-memory surface with no X connection. Used for font measurement.
 pub extern fn cairo_image_surface_create(
     format: cairo_format_t,
-    width:  c_int,
+    width: c_int,
     height: c_int,
 ) ?*cairo_surface_t;
 
@@ -62,27 +74,27 @@ pub extern fn cairo_restore(cr: *cairo_t) void;
 pub extern fn cairo_rectangle(cr: *cairo_t, x: f64, y: f64, width: f64, height: f64) void;
 pub extern fn cairo_clip(cr: *cairo_t) void;
 
-// Pango 
+// Pango
 
-pub const PangoLayout          = opaque {};
-pub const PangoContext         = opaque {};
+pub const PangoLayout = opaque {};
+pub const PangoContext = opaque {};
 pub const PangoFontDescription = opaque {};
-pub const PangoFontMetrics     = opaque {};
+pub const PangoFontMetrics = opaque {};
 
 /// Divide Pango units by PANGO_SCALE to get pixels.
 pub const PANGO_SCALE: c_int = 1024;
 
 pub const PangoEllipsizeMode = enum(c_int) {
-    NONE   = 0,
-    START  = 1,
+    NONE = 0,
+    START = 1,
     MIDDLE = 2,
-    END    = 3,
+    END = 3,
 };
 
 pub const PangoRectangle = extern struct {
-    x:      c_int,
-    y:      c_int,
-    width:  c_int,
+    x: c_int,
+    y: c_int,
+    width: c_int,
     height: c_int,
 };
 
@@ -110,15 +122,15 @@ pub extern fn pango_font_description_set_absolute_size(desc: *PangoFontDescripti
 
 /// Returns Pango units. Pass null for either rect if not needed.
 pub extern fn pango_layout_get_extents(
-    layout:       *PangoLayout,
-    ink_rect:     ?*PangoRectangle,
+    layout: *PangoLayout,
+    ink_rect: ?*PangoRectangle,
     logical_rect: ?*PangoRectangle,
 ) void;
 
 /// Pass null for `language` to use the default language.
 pub extern fn pango_context_get_metrics(
-    context:  *PangoContext,
-    desc:     ?*PangoFontDescription,
+    context: *PangoContext,
+    desc: ?*PangoFontDescription,
     language: ?*anyopaque,
 ) *PangoFontMetrics;
 
@@ -126,7 +138,7 @@ pub extern fn pango_font_metrics_get_ascent(metrics: *PangoFontMetrics) c_int;
 pub extern fn pango_font_metrics_get_descent(metrics: *PangoFontMetrics) c_int;
 pub extern fn pango_font_metrics_unref(metrics: *PangoFontMetrics) void;
 
-// GLib / GObject 
+// GLib / GObject
 
 /// Releases PangoLayout and other GObject-based types.
 pub extern fn g_object_unref(object: *anyopaque) void;
