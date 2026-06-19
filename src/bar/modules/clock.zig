@@ -27,7 +27,7 @@ const c = @cImport(@cInclude("time.h"));
 /// Chosen to be wider than the default "%Y-%m-%d %H:%M:%S" format (19 chars)
 /// so that typical user extensions (e.g., adding a day-of-week prefix) still
 /// fit without the segment changing width mid-session.
-pub const CLOCK_MEASURE_STRING: []const u8 = "Www 0000-00-00 00:00:00";
+pub const CLOCK_MEASURE_STRING: []const u8 = "0000-00-00 00:00:00";
 
 /// Internal buffer for the formatted time string.  64 bytes accommodates
 /// common custom strftime formats without heap allocation.

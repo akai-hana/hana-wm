@@ -190,7 +190,7 @@ Mod+Shift+X = "~/Games/etterna/Etterna"
 
 # ULTRAKILL
 Mod+C       = "flatpak run com.valvesoftware.Steam steam://rungameid/1229490"
-Mod+Shift+C = "{kill} steam"
+Mod+Shift+C = "flatpak run com.valvesoftware.Steam"
 
 Mod+V       = "flatpak run com.github.th_ch.youtube_music"
 Mod+Shift+V = "distrobox enter aur -- stremio-enhanced"
@@ -226,16 +226,16 @@ Mod+Shift+Escape = "emergency_recover" #TODO: remove. this is hacky and assumes 
 # Browser
 1 = ["firefox", "Navigator"]
 # Socials
-2 = ["discord", "vesktop", "equibop", "electron"]
+2 = ["discord", "vesktop", "equibop"]
 # Music
 3 = ["com.github.th_ch.youtube_music"]
 # Launchers
 4 = ["OpenTabletDriver.UX"]
 # Games
-5 = ["steam", "steam.exe", "wine", "proton", "noita", "noita.exe", "osu!", "DDNet", "isaac-ng.exe", "java", "Minecraft"]
+5 = ["steam", "steam.exe", "wine", "proton", "noita", "noita.exe", "osu!", "DDNet", "isaac-ng.exe", "java", "Minecraft", "Etterna"]
 # Editors
 6 = ["emacs"]
 # Media
-7 = ["prismlauncher", "freetube", "gimp"]
+7 = ["prismlauncher", "freetube", "gimp", "stremio", "stremio-enhanced", "mpv"]
 # Torrenting
 8 = ["deluge"]
