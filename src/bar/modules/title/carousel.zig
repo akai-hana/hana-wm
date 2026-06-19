@@ -87,7 +87,7 @@ pub fn setCarouselEnabled(enabled: bool) void {
 
 /// Returns true when the carousel feature is currently enabled.
 pub fn isCarouselEnabled() bool {
-    return render.is_enabled.load(.acquire);
+    return render.is_enabled.load(.monotonic);
 }
 
 /// Set the scroll speed in pixels per second.
@@ -228,13 +228,15 @@ pub fn drawSegCarouselTickAuto(dc: *drawing.DrawContext, accent: u32) bool {
 ///   pixmap and blit one frame.
 /// • If text overflows and carousel is disabled: draw with ellipsis.
 ///
-/// Pixmap rebuild triggers (unified — any change resets the accumulator to zero):
+/// Pixmap rebuild triggers (any change resets the accumulator to zero):
 ///   • No pixmap live
 ///   • Window ID changed
 ///   • Title text changed (title_invalidated)
-///   • Accent colour changed
 ///   • Text width changed (cycle_w mismatch)
 ///   • Segment geometry changed (position or size)
+///
+/// Colour-only change (accent update): pixmap is re-rendered in-place without
+/// freeing and reallocating, preserving the scroll position.
 pub fn drawScrollingTitle(
     dc: *drawing.DrawContext,
     y: u16,
@@ -245,7 +247,12 @@ pub fn drawScrollingTitle(
     window: ?u32,
     title_invalidated: bool,
 ) !void {
-    const text_w = dc.measureTextWidth(text);
+    // Recover text_w from the live entry when the title hasn't changed,
+    // avoiding a Pango measurement on the common steady-state path.
+    const text_w: u16 = if (!title_invalidated) blk: {
+        if (render.single) |e| break :blk e.cycle_w - carousel_gap_px;
+        break :blk dc.measureTextWidth(text);
+    } else dc.measureTextWidth(text);
 
     if (text_w <= geom.avail_w) {
         deinitSingleCarousel();
@@ -253,7 +260,7 @@ pub fn drawScrollingTitle(
         return;
     }
 
-    if (!render.is_enabled.load(.acquire)) {
+    if (!render.is_enabled.load(.monotonic)) {
         deinitSingleCarousel();
         try dc.drawTextEllipsis(geom.text_x, y, text, geom.avail_w, fg);
         return;
@@ -261,10 +268,19 @@ pub fn drawScrollingTitle(
 
     const cycle_w: u16 = text_w + carousel_gap_px;
 
-    const stale = render.single == null or render.single.?.window != window or render.single.?.last_bg != bg or title_invalidated or render.single.?.cycle_w != cycle_w or render.single.?.geom.seg_x != geom.seg_x or render.single.?.geom.seg_w != geom.seg_w or render.single.?.geom.avail_w != geom.avail_w;
+    // Determine whether a full pixmap rebuild is needed (geometry/identity
+    // changed) vs. an in-place colour update vs. no action.
+    const geom_stale: bool = blk: {
+        const e = render.single orelse break :blk true;
+        break :blk e.window != window or title_invalidated
+            or e.cycle_w != cycle_w or e.geom.seg_x != geom.seg_x
+            or e.geom.seg_w != geom.seg_w or e.geom.avail_w != geom.avail_w;
+    };
 
-    if (stale) {
-        deinitSingleCarousel();
+    if (geom_stale) {
+        // Full rebuild: free old pixmap (if any) without an intermediate null
+        // assignment, then immediately overwrite the entry.
+        if (render.single) |*old| old.cp.deinit();
 
         const left_pad: u16 = if (geom.text_x > geom.seg_x)
             geom.text_x - geom.seg_x
@@ -279,21 +295,41 @@ pub fn drawScrollingTitle(
         errdefer cp.deinit();
         try cp.render(dc, text, bg, fg, y, left_pad, cycle_w);
 
+        // Capture timestamp once: used as both last_ns and the advance
+        // argument so advanceCarouselOffset sees delta_ns = 0 on the first
+        // frame (guaranteed zero advance, clean start).
+        const now_ns = utils.monotonicNs();
         render.single = .{
             .cp = cp,
             .cycle_w = cycle_w,
             .pixel_offset = 0,
             .frac_acc = 0.0,
-            .last_ns = utils.monotonicNs(),
+            .last_ns = now_ns,
             .last_bg = bg,
             .window = window,
             .geom = geom,
         };
-    }
 
-    const e = &render.single.?;
-    const off = advanceCarouselOffset(e, utils.monotonicNs());
-    e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, geom.seg_x, off, geom.seg_w);
+        const e = &render.single.?;
+        const off = advanceCarouselOffset(e, now_ns);
+        e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, geom.seg_x, off, geom.seg_w);
+    } else {
+        const e = &render.single.?;
+
+        if (e.last_bg != bg) {
+            // Colour-only change: re-render into the existing pixmap without
+            // freeing or reallocating it, preserving the scroll position.
+            const left_pad: u16 = if (geom.text_x > geom.seg_x)
+                geom.text_x - geom.seg_x
+            else
+                0;
+            try e.cp.render(dc, text, bg, fg, y, left_pad, cycle_w);
+            e.last_bg = bg;
+        }
+
+        const off = advanceCarouselOffset(e, utils.monotonicNs());
+        e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, geom.seg_x, off, geom.seg_w);
+    }
 }
 
 // Public API — segmented carousel
@@ -305,6 +341,7 @@ pub fn drawScrollingTitle(
 ///
 /// Rebuild triggers: same unified logic as drawScrollingTitle, plus
 /// externally_invalidated from focus_signal (set by notifyFocusChanged).
+/// Colour-only change: re-rendered in-place, scroll position preserved.
 pub fn drawSegmentedCarousel(
     dc: *drawing.DrawContext,
     baseline_y: u16,
@@ -330,10 +367,20 @@ pub fn drawSegmentedCarousel(
 
     const cycle_w: u16 = text_w + carousel_gap_px;
 
-    const stale = externally_invalidated or render.seg == null or render.seg.?.window != window or render.seg.?.last_bg != accent or title_invalidated or render.seg.?.cycle_w != cycle_w or render.seg.?.geom.seg_x != geom.seg_x or render.seg.?.geom.seg_w != geom.seg_w or render.seg.?.geom.avail_w != geom.avail_w;
+    // Determine whether a full pixmap rebuild is needed (geometry/identity/focus
+    // changed) vs. an in-place colour update vs. no action.
+    const geom_stale: bool = blk: {
+        if (externally_invalidated) break :blk true;
+        const e = render.seg orelse break :blk true;
+        break :blk e.window != window or title_invalidated
+            or e.cycle_w != cycle_w or e.geom.seg_x != geom.seg_x
+            or e.geom.seg_w != geom.seg_w or e.geom.avail_w != geom.avail_w;
+    };
 
-    if (stale) {
-        deinitSegmentedCarousel();
+    if (geom_stale) {
+        // Full rebuild: free old pixmap (if any) without an intermediate null
+        // assignment, then immediately overwrite the entry.
+        if (render.seg) |*old| old.cp.deinit();
 
         const left_pad: u16 = if (geom.text_x > geom.seg_x)
             geom.text_x - geom.seg_x
@@ -348,12 +395,16 @@ pub fn drawSegmentedCarousel(
         errdefer cp.deinit();
         try cp.render(dc, text, accent, text_fg, baseline_y, left_pad, cycle_w);
 
+        // Capture timestamp once: used as both last_ns and the advance
+        // argument so advanceCarouselOffset sees delta_ns = 0 on the first
+        // frame (guaranteed zero advance, clean start).
+        const now_ns = utils.monotonicNs();
         render.seg = .{
             .cp = cp,
             .cycle_w = cycle_w,
             .pixel_offset = 0,
             .frac_acc = 0.0,
-            .last_ns = utils.monotonicNs(),
+            .last_ns = now_ns,
             .last_bg = accent,
             .window = window,
             .geom = geom,
@@ -361,11 +412,28 @@ pub fn drawSegmentedCarousel(
         // Publish the window atomically so notifyFocusChanged on the main
         // thread can check it without touching render.seg.
         focus_signal.seg_window.store(window, .release);
+
+        const e = &render.seg.?;
+        const off = advanceCarouselOffset(e, now_ns);
+        e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, geom.seg_x, off, geom.seg_w);
+    } else {
+        const e = &render.seg.?;
+
+        if (e.last_bg != accent) {
+            // Colour-only change: re-render into the existing pixmap without
+            // freeing or reallocating it, preserving the scroll position.
+            const left_pad: u16 = if (geom.text_x > geom.seg_x)
+                geom.text_x - geom.seg_x
+            else
+                0;
+            try e.cp.render(dc, text, accent, text_fg, baseline_y, left_pad, cycle_w);
+            e.last_bg = accent;
+        }
+
+        const off = advanceCarouselOffset(e, utils.monotonicNs());
+        e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, geom.seg_x, off, geom.seg_w);
     }
 
-    const e = &render.seg.?;
-    const off = advanceCarouselOffset(e, utils.monotonicNs());
-    e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, geom.seg_x, off, geom.seg_w);
     return true;
 }
 
@@ -393,6 +461,6 @@ fn advanceCarouselOffset(e: *CarouselEntry, now_ns: u64) u16 {
     const int_px = @floor(delta_px);
     e.frac_acc = delta_px - int_px; // carry remainder to next tick
     e.last_ns = now_ns;
-    e.pixel_offset = @intCast((@as(u32, e.pixel_offset) + @as(u32, @intFromFloat(int_px))) % @as(u32, e.cycle_w));
+    e.pixel_offset = @truncate((@as(u32, e.pixel_offset) + @as(u32, @intFromFloat(int_px))) % @as(u32, e.cycle_w));
     return e.pixel_offset;
 }
