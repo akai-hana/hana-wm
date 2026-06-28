@@ -12,11 +12,7 @@ const types = @import("types");
 
 const drawing = @import("drawing");
 const carousel = @import("carousel");
-const tiling = if (@import("build_options").has_tiling) @import("tiling") else struct {
-    pub fn getWindowGeom(_: u32) ?@import("utils").Rect {
-        return null;
-    }
-};
+const tiling = @import("tiling");
 
 // Module constants
 
@@ -126,6 +122,44 @@ pub const TitleCache = struct {
     cached_title_window: *?u32,
 };
 
+// Private helpers
+
+/// Extract a UTF-8 string from an XCB get_property reply and dupe it into
+/// `allocator`. Returns null when the reply carries no bytes, avoiding the
+/// identical three-line extract-and-dupe block that was previously written
+/// in both Phase 2 and Phase 3 of drawSegmentedTitles.
+fn extractPropertyString(
+    r: *xcb.xcb_get_property_reply_t,
+    allocator: std.mem.Allocator,
+) !?[]const u8 {
+    const len = xcb.xcb_get_property_value_length(r);
+    if (len == 0) return null;
+    const ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(r));
+    return try allocator.dupe(u8, ptr[0..@intCast(len)]);
+}
+
+/// Shared body for draw() and drawCached(). Accepts a nullable cache so it
+/// can be called from both paths without duplicating the preamble or footer.
+fn drawInner(
+    ctx: TitleRenderContext,
+    snapshot: TitleSnapshot,
+    cache: ?TitleCache,
+    allocator: std.mem.Allocator,
+    title_invalidated: bool,
+) !u16 {
+    scale.ensureRefreshRateDetected(ctx.conn);
+    const window_count = snapshot.current_ws_wins.len;
+    if (emptyWorkspace(ctx, window_count)) |end_x| return end_x;
+
+    if (window_count == 1) {
+        try drawSingleWindow(ctx, snapshot, cache, allocator, title_invalidated);
+    } else {
+        try drawSegmentedTitles(ctx, snapshot, allocator, title_invalidated);
+    }
+
+    return ctx.start_x + ctx.width;
+}
+
 // Public API — draw entry points
 
 /// Draw the title segment.
@@ -142,17 +176,7 @@ pub fn draw(
     allocator: std.mem.Allocator,
     title_invalidated: bool,
 ) !u16 {
-    scale.ensureRefreshRateDetected(ctx.conn);
-    const window_count = snapshot.current_ws_wins.len;
-    if (emptyWorkspace(ctx, window_count)) |end_x| return end_x;
-
-    if (window_count == 1) {
-        try drawSingleWindow(ctx, snapshot, cache, allocator, title_invalidated);
-    } else {
-        try drawSegmentedTitles(ctx, snapshot, allocator, title_invalidated);
-    }
-
-    return ctx.start_x + ctx.width;
+    return drawInner(ctx, snapshot, cache, allocator, title_invalidated);
 }
 
 /// Draw the title segment using already-cached state.
@@ -171,18 +195,7 @@ pub fn drawCached(
     snapshot: TitleSnapshot,
     allocator: std.mem.Allocator,
 ) !u16 {
-    scale.ensureRefreshRateDetected(ctx.conn);
-    const window_count = snapshot.current_ws_wins.len;
-    if (emptyWorkspace(ctx, window_count)) |end_x| return end_x;
-
-    if (window_count == 1) {
-        // null cache — this path never updates the cache.
-        try drawSingleWindow(ctx, snapshot, null, allocator, false);
-    } else {
-        try drawSegmentedTitles(ctx, snapshot, allocator, false);
-    }
-
-    return ctx.start_x + ctx.width;
+    return drawInner(ctx, snapshot, null, allocator, false);
 }
 
 // Public API — title pre-fetch (main thread only)
@@ -405,10 +418,8 @@ fn drawSegmentedTitles(
                 if (net_atom != null) {
                     const r = xcb.xcb_get_property_reply(ctx.conn, net_wm_cookies[i], null) orelse break :got;
                     defer std.c.free(r);
-                    const len = xcb.xcb_get_property_value_length(r);
-                    if (len > 0) {
-                        const ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(r));
-                        titles[i] = try allocator.dupe(u8, ptr[0..@intCast(len)]);
+                    if (try extractPropertyString(r, allocator)) |title| {
+                        titles[i] = title;
                         break :got;
                     }
                 }
@@ -422,11 +433,7 @@ fn drawSegmentedTitles(
             if (!needs_fallback[i]) continue;
             const r = xcb.xcb_get_property_reply(ctx.conn, fallback_cookies[i], null) orelse continue;
             defer std.c.free(r);
-            const len = xcb.xcb_get_property_value_length(r);
-            if (len > 0) {
-                const ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(r));
-                titles[i] = try allocator.dupe(u8, ptr[0..@intCast(len)]);
-            }
+            titles[i] = try extractPropertyString(r, allocator);
         }
     }
     defer for (titles[0..win_count]) |t| if (t) |s| allocator.free(s);

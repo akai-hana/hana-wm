@@ -253,37 +253,40 @@ pub const Region = struct {
         };
     }
 
+    /// Shared partition loop for `splitH` and `splitV`.
+    ///
+    /// When `horiz` is true the region is sliced along the Y axis (rows);
+    /// when false along the X axis (columns).  The comptime parameter means
+    /// the compiler sees two fully specialised copies with no runtime branching.
+    fn splitAxis(comptime horiz: bool, r: Region, n: u16, gap: u16, buf: []Region) void {
+        std.debug.assert(buf.len >= n);
+        if (n == 0) return;
+        const total_gap = gap *| (n -| 1);
+        const avail: u16 = (if (horiz) r.h else r.w) -| total_gap;
+        var pos: i32 = if (horiz) r.y else r.x;
+        for (0..n) |i| {
+            const idx: u16 = @intCast(i);
+            // Distribute remainder pixel by using the cumulative-slice formula:
+            // slice_i = floor((i+1)*avail/n) - floor(i*avail/n)
+            const dim: u16 = ((idx + 1) * avail / n) -| (idx * avail / n);
+            buf[i] = if (horiz)
+                .{ .x = r.x, .y = pos, .w = r.w, .h = dim }
+            else
+                .{ .x = pos, .y = r.y, .w = dim, .h = r.h };
+            pos += @intCast(dim + gap);
+        }
+    }
+
     /// Split `r` horizontally into `n` equal rows separated by `gap` pixels.
     /// Returns a stack-allocated array of `n` regions; caller supplies the
     /// buffer.  `buf.len` must be >= `n`.
     pub fn splitH(r: Region, n: u16, gap: u16, buf: []Region) void {
-        std.debug.assert(buf.len >= n);
-        if (n == 0) return;
-        const total_gap = gap *| (n -| 1);
-        const avail: u16 = r.h -| total_gap;
-        var y: i32 = r.y;
-        for (0..n) |i| {
-            const idx: u16 = @intCast(i);
-            // Distribute remainder pixel to the last slice.
-            const row_h: u16 = ((idx + 1) * avail / n) -| (idx * avail / n);
-            buf[i] = .{ .x = r.x, .y = y, .w = r.w, .h = row_h };
-            y += @intCast(row_h + gap);
-        }
+        splitAxis(true, r, n, gap, buf);
     }
 
     /// Split `r` vertically into `n` equal columns separated by `gap` pixels.
     pub fn splitV(r: Region, n: u16, gap: u16, buf: []Region) void {
-        std.debug.assert(buf.len >= n);
-        if (n == 0) return;
-        const total_gap = gap *| (n -| 1);
-        const avail: u16 = r.w -| total_gap;
-        var x: i32 = r.x;
-        for (0..n) |i| {
-            const idx: u16 = @intCast(i);
-            const col_w: u16 = ((idx + 1) * avail / n) -| (idx * avail / n);
-            buf[i] = .{ .x = x, .y = r.y, .w = col_w, .h = r.h };
-            x += @intCast(col_w + gap);
-        }
+        splitAxis(false, r, n, gap, buf);
     }
 
     /// Split `r` into left and right halves with `gap` between them.
@@ -460,14 +463,17 @@ pub fn configureWithHintsAndRaise(ctx: *const LayoutCtx, win: u32, rect: utils.R
 ///
 ///     var defer_slot = DeferredConfigure.init();
 ///     for (windows) |win| {
-///         if (defer_slot.capture(win, computed_rect)) continue;
-///         configureWithHints(ctx, win, computed_rect);
+///         defer_slot.emit(ctx, win, computed_rect);
 ///     }
 ///     defer_slot.flush(ctx);
 ///
 /// The deferred window's rect is stored on the stack.  If no window in the
 /// loop matches `ctx.defer_configure`, `capture` is always false and `flush`
 /// is a no-op, so layouts that never call swap_master pay zero cost.
+///
+/// Use `emit` for the common case above.  `capture` is exposed separately for
+/// the rare callers that need to branch on whether a window was deferred
+/// (e.g. to skip other per-window work for it) before deciding what to do.
 pub const DeferredConfigure = struct {
     pending_win: u32 = 0,
     pending_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
@@ -488,6 +494,21 @@ pub const DeferredConfigure = struct {
             }
         }
         return false;
+    }
+
+    /// Emit `rect` for `win`: captures it in this slot when `win` is the
+    /// deferred window, otherwise configures it immediately via
+    /// `configureWithHints`.
+    ///
+    /// This is the single shared implementation of the "capture-or-configure"
+    /// pattern every layout module needs around its main window loop — each
+    /// module previously redefined an identical local `emitRect` helper (or
+    /// inlined the same two-line conditional) to get this behaviour. Calling
+    /// `defer_slot.emit(ctx, win, rect)` instead keeps that pattern defined in
+    /// exactly one place.
+    pub inline fn emit(self: *DeferredConfigure, ctx: *const LayoutCtx, win: u32, rect: utils.Rect) void {
+        if (!self.capture(ctx, win, rect))
+            configureWithHints(ctx, win, rect);
     }
 
     /// Emit the deferred configure call (if any).  Must be called once after

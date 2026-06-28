@@ -84,8 +84,7 @@ pub fn tileWithOffset(
                 .width = content_w,
                 .height = content_h,
             };
-            if (!defer_slot.capture(ctx, win, rect))
-                layouts.configureWithHints(ctx, win, rect);
+            defer_slot.emit(ctx, win, rect);
             continue;
         }
 
@@ -95,8 +94,7 @@ pub fn tileWithOffset(
             .width = content_w,
             .height = content_h,
         };
-        if (!defer_slot.capture(ctx, win, rect))
-            layouts.configureWithHints(ctx, win, rect);
+        defer_slot.emit(ctx, win, rect);
     }
     defer_slot.flush(ctx);
 }

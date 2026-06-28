@@ -2,7 +2,6 @@
 //! Handles X events, OS signals, and config reload, driving the WM's main loop.
 
 const std = @import("std");
-const build = @import("build_options");
 
 const core = @import("core");
 const xcb = core.xcb;
@@ -16,9 +15,9 @@ const input = @import("input");
 const window = @import("window");
 const focus = @import("focus");
 
-const tiling = if (build.has_tiling) @import("tiling");
-const bar = if (build.has_bar) @import("bar");
-const prompt = if (build.has_prompt and build.has_bar) @import("prompt");
+const tiling = @import("tiling");
+const bar = @import("bar");
+const prompt = @import("prompt");
 
 // Indices into the poll fd array.
 const FD_XCB = 0;
@@ -44,7 +43,7 @@ inline fn asHandler(comptime f: anytype) EventHandler {
 /// Fans out PropertyNotify to both bar (title) and window (WM_PROTOCOLS cache).
 fn handlePropertyNotify(event: *anyopaque) void {
     const e: *xcb.xcb_property_notify_event_t = @ptrCast(@alignCast(event));
-    if (build.has_bar) bar.handlePropertyNotify(e);
+    bar.handlePropertyNotify(e);
     window.handlePropertyNotify(e);
 }
 
@@ -68,7 +67,7 @@ const dispatch_table = blk: {
     table[xcb.XCB_FOCUS_IN] = asHandler(focus.handleFocusIn);
     table[xcb.XCB_PROPERTY_NOTIFY] = asHandler(handlePropertyNotify);
 
-    if (build.has_bar) table[xcb.XCB_EXPOSE] = asHandler(bar.handleExpose);
+    table[xcb.XCB_EXPOSE] = asHandler(bar.handleExpose);
 
     break :blk table;
 };
@@ -245,11 +244,9 @@ fn applyConfig(new_config: *types.Config) !void {
     config.finalizeConfig(new_config, core.screen);
 
     window.reloadBorders();
-    if (build.has_tiling) tiling.reloadConfig();
-    if (build.has_bar) {
-        bar.updateTimerState();
-        bar.reload();
-    }
+    tiling.reloadConfig();
+    bar.updateTimerState();
+    bar.reload();
 }
 
 /// Validates domain invariants on a freshly loaded config.
@@ -304,8 +301,6 @@ fn handleConfigReload() !void {
 
 /// Returns the shortest timeout across all subsystems, or -1 to block indefinitely.
 fn combinedTimeoutMs(blink_ms: i32) i32 {
-    if (!build.has_bar) return -1;
-
     const clock_ms = bar.pollTimeoutMs();
     if (clock_ms < 0) return blink_ms;
     if (blink_ms < 0) return clock_ms;
@@ -317,7 +312,7 @@ fn combinedTimeoutMs(blink_ms: i32) i32 {
 fn handleTimerEvents(cursor_is_blinking: bool) void {
     // poll() now times out only for cursor blink; the clock thread
     // signals the bar render thread directly via checkClockUpdate().
-    if (build.has_bar and cursor_is_blinking) {
+    if (cursor_is_blinking) {
         prompt.blinkTick();
         bar.submitDraw();
         _ = xcb.xcb_flush(core.conn);
@@ -337,11 +332,11 @@ fn handleXcbEvents() void {
     // so registerSpawn runs before handleMapRequest needs the spawn queue entry.
     input.drainPendingSpawns();
 
-    if (build.has_tiling) tiling.retileIfDirty();
+    tiling.retileIfDirty();
     focus.drainPendingConfirm();
     focus.drainPointerSync();
     window.updateWorkspaceBordersIfNeeded();
-    if (build.has_bar) bar.updateIfDirty() catch |err| debug.err("Failed to update bar: {}", .{err});
+    bar.updateIfDirty() catch |err| debug.err("Failed to update bar: {}", .{err});
 
     _ = xcb.xcb_flush(core.conn);
 }
@@ -356,7 +351,7 @@ pub fn run() !void {
     };
 
     while (utils.running.load(.acquire)) {
-        const blink_ms = if (build.has_prompt) prompt.blinkPollTimeoutMs() else -1;
+        const blink_ms = prompt.blinkPollTimeoutMs();
         const cursor_is_blinking = blink_ms >= 0;
         const poll_rc = std.os.linux.poll(&fds, fds.len, combinedTimeoutMs(blink_ms));
         const ready: usize = switch (std.posix.errno(poll_rc)) {

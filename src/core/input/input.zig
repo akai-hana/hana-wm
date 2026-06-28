@@ -2,7 +2,6 @@
 //! Handles keyboard, mouse buttons, pointer motion, and drag operations.
 
 const std = @import("std");
-const build = @import("build_options");
 
 // libc bindings for fork/exec/wait — no Zig stdlib wrappers exist for these low-level syscalls.
 const c = @cImport({
@@ -23,48 +22,19 @@ const window = @import("window");
 const tracking = @import("tracking");
 const focus = @import("focus");
 
-const fullscreen = if (build.has_fullscreen) @import("fullscreen");
-const minimize = if (build.has_minimize) @import("minimize");
-const tiling = if (build.has_tiling) @import("tiling");
+const fullscreen = @import("fullscreen");
+const minimize = @import("minimize");
+const tiling = @import("tiling");
 
-// Stub struct keeps executeWorkspaceAction guard-free; the comptime if-else
-// means stub methods are never analyzed when has_workspaces = true, matching
-// the same pattern used by `drag`, `bar`, and `prompt` below.
-const workspaces = if (build.has_workspaces) @import("workspaces") else struct {
-    pub fn switchTo(_: u8) void {}
-    pub fn moveWindowTo(_: u32, _: u8) !void {}
-    pub fn moveWindowExclusive(_: u32, _: u8) void {}
-    pub fn tagToggle(_: u32, _: u8, _: bool) void {}
-    pub fn switchToAll() void {}
-    pub fn moveWindowToAll(_: u32) void {}
-    pub fn tagToggleAll(_: u32) void {}
-};
+const workspaces = @import("workspaces");
 
-const drag = if (build.has_drag) @import("drag") else struct {
-    pub fn isDragging() bool {
-        return false;
-    }
-    pub fn stopDrag() void {}
-    pub fn updateDrag(_: i16, _: i16) void {}
-    pub fn startDrag(_: u32, _: u8, _: i16, _: i16) void {}
-};
+const drag = @import("drag");
 
 const xkbcommon = @import("xkbcommon");
 
-const bar = if (build.has_bar) @import("bar") else struct {
-    pub fn scheduleFullRedraw() void {}
-    pub fn scheduleRedraw() void {}
-    pub fn redrawInsideGrab() void {}
-    pub fn setBarState(_: anytype) void {}
-    pub fn toggleBarSegmentAnchor() void {}
-};
+const bar = @import("bar");
 
-const prompt = if (build.has_bar and build.has_prompt) @import("prompt") else struct {
-    pub fn handlePromptKeypress(_: anytype, _: anytype) bool {
-        return false;
-    }
-    pub fn toggle() void {}
-};
+const prompt = @import("prompt");
 
 // Constants
 
@@ -262,7 +232,7 @@ fn executeAction(action: *const types.Action) !void {
         .sequence => |acts| for (acts) |*a| try executeAction(a),
 
         // Fullscreen
-        .toggle_fullscreen => if (build.has_fullscreen) fullscreen.toggle(),
+        .toggle_fullscreen => fullscreen.toggle(),
 
         // Tiling — delegated to executeTilingAction
         .toggle_floating_window,
@@ -282,14 +252,14 @@ fn executeAction(action: *const types.Action) !void {
         => executeTilingAction(action),
 
         // Bar
-        .toggle_bar_visibility => if (build.has_bar) bar.setBarState(.toggle),
-        .toggle_bar_position => if (build.has_bar) bar.toggleBarSegmentAnchor(),
+        .toggle_bar_visibility => bar.setBarState(.toggle),
+        .toggle_bar_position => bar.toggleBarSegmentAnchor(),
 
         // Minimize
-        .minimize_window => if (build.has_minimize) minimize.minimizeWindow(),
-        .unminimize_lifo => if (build.has_minimize) minimize.unminimize(.lifo),
-        .unminimize_fifo => if (build.has_minimize) minimize.unminimize(.fifo),
-        .unminimize_all => if (build.has_minimize) minimize.unminimizeAll(),
+        .minimize_window => minimize.minimizeWindow(),
+        .unminimize_lifo => minimize.unminimize(.lifo),
+        .unminimize_fifo => minimize.unminimize(.fifo),
+        .unminimize_all => minimize.unminimizeAll(),
 
         // Workspaces — delegated to executeWorkspaceAction
         .switch_workspace,
@@ -309,11 +279,11 @@ fn executeAction(action: *const types.Action) !void {
         // it is off-screen. The server grab prevents a partial retile frame.
         .focus_next_window => {
             focus.focusNext();
-            if (build.has_tiling) withTilingGrab(tiling.snapScrollToFocused);
+            withTilingGrab(tiling.snapScrollToFocused);
         },
         .focus_prev_window => {
             focus.focusPrev();
-            if (build.has_tiling) withTilingGrab(tiling.snapScrollToFocused);
+            withTilingGrab(tiling.snapScrollToFocused);
         },
     }
 }
@@ -321,7 +291,6 @@ fn executeAction(action: *const types.Action) !void {
 /// Dispatches tiling-related actions, each wrapped in a server grab so the
 /// compositor cannot render a partial retile frame.
 fn executeTilingAction(action: *const types.Action) void {
-    if (!build.has_tiling) return;
     switch (action.*) {
         .toggle_floating_window => if (focus.getFocused()) |win|
             withTilingGrabAndBordersWin(win, tiling.toggleWindowFloat),
@@ -381,8 +350,9 @@ fn executeSwapMaster(action: *const types.Action) void {
     utils.ungrabAndFlush(core.conn);
 }
 
-/// Dispatches workspace-related actions. The workspaces stub struct ensures
-/// calls here are always valid regardless of build.has_workspaces.
+/// Dispatches workspace-related actions. workspaces.zig self-gates to a
+/// single implicit workspace when core.config.workspaces.enabled is false,
+/// so these calls are always valid regardless of that setting.
 fn executeWorkspaceAction(action: *const types.Action) void {
     switch (action.*) {
         .switch_workspace => |ws| workspaces.switchTo(ws),
@@ -401,8 +371,7 @@ fn executeWorkspaceAction(action: *const types.Action) void {
 /// keyboard-focused one, so e.g. toggle_floating_window affects what was clicked.
 fn executeMouseAction(action: *const types.Action, clicked_win: u32) !void {
     switch (action.*) {
-        .toggle_floating_window => if (build.has_tiling)
-            withTilingGrabAndBordersWin(clicked_win, tiling.toggleWindowFloat),
+        .toggle_floating_window => withTilingGrabAndBordersWin(clicked_win, tiling.toggleWindowFloat),
         else => try executeAction(action),
     }
 }
@@ -453,6 +422,11 @@ fn forkIntermediate(exec_pipe_write: c_int, pid_pipe_write: c_int, cmd_z: [*:0]c
 }
 
 /// Creates an O_CLOEXEC|O_NONBLOCK pipe pair atomically via pipe2.
+///
+/// NOTE: events.zig contains a structurally identical `createPipe()` function
+/// returning [2]std.posix.fd_t.  On Linux, fd_t aliases c_int, so the two are
+/// byte-equivalent.  Both should be consolidated into a single `utils.makePipe()`
+/// returning [2]std.posix.fd_t when utils.zig is next modified.
 fn makePipe() ![2]c_int {
     const flags = std.os.linux.O{ .CLOEXEC = true, .NONBLOCK = true };
     var fds: [2]c_int = undefined;
@@ -640,33 +614,25 @@ fn dumpState() void {
     debug.info("Suppress focus: {s}", .{@tagName(focus.getSuppressReason())});
     debug.info("Drag active:    {}", .{drag.isDragging()});
 
-    if (build.has_fullscreen) {
-        fullscreen.forEachFullscreen(struct {
-            fn cb(ws: u8, info: fullscreen.FullscreenInfo) void {
-                debug.info("Fullscreen on workspace {}: {x}", .{ ws, info.window });
-            }
-        }.cb);
-        if (!fullscreen.hasAnyFullscreen()) debug.info("Fullscreen: none", .{});
-    } else {
-        debug.info("Fullscreen: none", .{});
+    fullscreen.forEachFullscreen(struct {
+        fn cb(ws: u8, info: fullscreen.FullscreenInfo) void {
+            debug.info("Fullscreen on workspace {}: {x}", .{ ws, info.window });
+        }
+    }.cb);
+    if (!fullscreen.hasAnyFullscreen()) debug.info("Fullscreen: none", .{});
+
+    if (workspaces.getState()) |ws_state| {
+        debug.info("Current workspace: {}", .{ws_state.current + 1});
+        for (ws_state.workspaces, 0..) |_, i|
+            debug.info("  WS{}: {} windows", .{ i + 1, tracking.countWindowsOnWorkspace(@intCast(i)) });
     }
 
-    if (build.has_workspaces) {
-        if (workspaces.getState()) |ws_state| {
-            debug.info("Current workspace: {}", .{ws_state.current + 1});
-            for (ws_state.workspaces, 0..) |_, i|
-                debug.info("  WS{}: {} windows", .{ i + 1, tracking.countWindowsOnWorkspace(@intCast(i)) });
-        }
-    }
-
-    if (build.has_tiling) {
-        if (tiling.getStateOpt()) |t| {
-            debug.info("Tiling enabled: {}", .{t.is_enabled});
-            debug.info("Tiling layout:  {s}", .{@tagName(t.config.layout)});
-            debug.info("Tiled windows:  {}", .{t.windows.len});
-            debug.info("Master count:   {}", .{t.config.master_count});
-            debug.info("Master width:   {d:.2}", .{t.config.master_width});
-        }
+    if (tiling.getStateOpt()) |t| {
+        debug.info("Tiling enabled: {}", .{t.is_enabled});
+        debug.info("Tiling layout:  {s}", .{@tagName(t.config.layout)});
+        debug.info("Tiled windows:  {}", .{t.windows.len});
+        debug.info("Master count:   {}", .{t.config.master_count});
+        debug.info("Master width:   {d:.2}", .{t.config.master_width});
     }
 
     debug.info("================================", .{});

@@ -104,20 +104,35 @@ pub const Section = struct {
         return self.pairs.get(key);
     }
 
+    /// Generic typed getter — dispatches to the matching `Value.asXxx()` accessor
+    /// for the requested type.  All five typed getters below are thin wrappers
+    /// around this single function so the dispatch logic lives in one place.
+    pub fn getAs(self: *const Section, comptime T: type, key: []const u8) ?T {
+        const v = self.get(key) orelse return null;
+        return switch (T) {
+            i64          => v.asInt(),
+            bool         => v.asBool(),
+            []const u8   => v.asString(),
+            u32          => v.asColor(),
+            ScalableValue => v.asScalable(),
+            else         => @compileError("Section.getAs: unsupported type " ++ @typeName(T)),
+        };
+    }
+
     pub fn getInt(self: *const Section, key: []const u8) ?i64 {
-        return if (self.get(key)) |v| v.asInt() else null;
+        return self.getAs(i64, key);
     }
     pub fn getBool(self: *const Section, key: []const u8) ?bool {
-        return if (self.get(key)) |v| v.asBool() else null;
+        return self.getAs(bool, key);
     }
     pub fn getString(self: *const Section, key: []const u8) ?[]const u8 {
-        return if (self.get(key)) |v| v.asString() else null;
+        return self.getAs([]const u8, key);
     }
     pub fn getColor(self: *const Section, key: []const u8) ?u32 {
-        return if (self.get(key)) |v| v.asColor() else null;
+        return self.getAs(u32, key);
     }
     pub fn getScalable(self: *const Section, key: []const u8) ?ScalableValue {
-        return if (self.get(key)) |v| v.asScalable() else null;
+        return self.getAs(ScalableValue, key);
     }
 };
 

@@ -15,30 +15,13 @@ const window = @import("window");
 const tracking = @import("tracking");
 const focus = @import("focus");
 
-const fullscreen = if (build.has_fullscreen) @import("fullscreen");
-const workspaces = if (build.has_workspaces) @import("workspaces") else struct {
-    pub const Workspace = struct {};
-    pub fn getCurrentWorkspaceObject() ?*Workspace {
-        return null;
-    }
-};
+const fullscreen = @import("fullscreen");
+const workspaces = @import("workspaces");
 const WsWorkspace = workspaces.Workspace;
 
-const tiling = if (build.has_tiling) @import("tiling") else struct {
-    pub fn addWindow(_: u32) void {}
-    pub fn addWindowAtFilteredIndex(_: u32, _: usize) void {}
-    pub fn removeWindow(_: u32) void {}
-    pub fn retileCurrentWorkspace() void {}
-    pub fn getWindowFilteredIndex(_: u32) ?usize {
-        return null;
-    }
-};
+const tiling = @import("tiling");
 
-const bar = if (build.has_bar) @import("bar") else struct {
-    pub fn setBarState(_: anytype) void {}
-    pub fn redrawInsideGrab() void {}
-    pub fn scheduleRedraw() void {}
-};
+const bar = @import("bar");
 
 /// Per-window minimize record.
 const MinimizedEntry = struct {
@@ -108,7 +91,7 @@ pub fn isMinimized(win: u32) bool {
 /// insertion order, not MRU). Last-resort fallback called by minimizeWindow
 /// (via focus.focusBestAvailable) and directly from window.zig.
 pub fn focusMasterOrFirst() void {
-    if (!build.has_workspaces) {
+    if (!core.config.workspaces.enabled) {
         focus.clearFocus();
         return;
     }
@@ -128,6 +111,7 @@ pub fn focusMasterOrFirst() void {
 }
 
 pub fn minimizeWindow() void {
+    if (!core.config.minimize_enabled) return;
     const win = focus.getFocused() orelse return;
     const ws_idx = tracking.getCurrentWorkspace() orelse return;
 
@@ -152,7 +136,7 @@ pub fn minimizeWindow() void {
 
     // Tear down fullscreen state if needed, saving geometry for later restore.
     var saved_fs: ?core.WindowGeometry = null;
-    if (build.has_fullscreen) fs_blk: {
+    fs_blk: {
         const fs_ws = fullscreen.workspaceFor(win) orelse break :fs_blk;
         saved_fs = fullscreen.getForWorkspace(fs_ws).?.saved_geometry;
         fullscreen.removeForWorkspace(fs_ws);
@@ -199,7 +183,7 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
         // enterFullscreen owns its own server grab, so we must not be inside one.
         // Use scheduleRedraw (next event-loop iteration) rather than redrawInsideGrab.
         focus.setFocus(win, .window_spawn);
-        if (build.has_fullscreen) fullscreen.enterFullscreen(win, geom);
+        fullscreen.enterFullscreen(win, geom);
         bar.scheduleRedraw();
         return;
     }

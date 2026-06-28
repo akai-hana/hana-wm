@@ -2,21 +2,13 @@
 //! Manages placement, movement, and resizing of freely positioned floating windows.
 
 const std = @import("std");
-const build = @import("build_options");
 
 const core = @import("core");
 const xcb = core.xcb;
 
 const layouts = @import("layouts");
 
-const bar = if (build.has_bar) @import("bar") else struct {
-    pub fn isVisible() bool {
-        return false;
-    }
-    pub fn getBarHeight() u16 {
-        return 0;
-    }
-};
+const bar = @import("bar");
 
 // Geometry requests are batched so that all cookies are issued before any
 // reply is awaited. This turns n sequential X round-trips into one flight of

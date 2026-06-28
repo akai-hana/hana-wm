@@ -2,7 +2,6 @@
 //! Embeds an interactive command runner into the bar's title segment.
 
 const std = @import("std");
-const build = @import("build_options");
 
 const core = @import("core");
 const xcb = core.xcb;
@@ -11,7 +10,7 @@ const bar = @import("bar");
 const types = @import("types");
 
 const drawing = @import("drawing");
-const title = if (build.has_title) @import("title");
+const title = @import("title");
 const vim = @import("vim.zig");
 
 const debug = @import("debug");
@@ -115,7 +114,7 @@ pub fn isActive() bool {
 /// redraw for the cursor blink animation.
 pub fn blinkPollTimeoutMs() i32 {
     if (!g.is_active) return -1;
-    if (g.vim_state.mode == .insert or (build.has_vim and vim.colonInput(&g.vim_state) != null))
+    if (g.vim_state.mode == .insert or (core.config.bar.vim_mode and vim.colonInput(&g.vim_state) != null))
         return cursor_blink_ms;
     return -1;
 }
@@ -279,7 +278,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
 
     // Ctrl-modified keys
     if (ctrl_held) {
-        const action = if (build.has_vim) vim.handleCtrl(&g.vim_state, sym) else .none;
+        const action = if (core.config.bar.vim_mode) vim.handleCtrl(&g.vim_state, sym) else .none;
         const prev_len = g.vim_state.len;
         handleAction(action);
         if (g.vim_state.len != prev_len)
@@ -295,7 +294,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
         else
             0;
         if (n_ghost > 0) {
-            if (build.has_vim) vim.insertSlice(&g.vim_state, g.ghost_buf[0..n_ghost]) else insertBasic(&g.vim_state, g.ghost_buf[0..n_ghost]);
+            if (core.config.bar.vim_mode) vim.insertSlice(&g.vim_state, g.ghost_buf[0..n_ghost]) else insertBasic(&g.vim_state, g.ghost_buf[0..n_ghost]);
             g.ghost_len = 0;
         }
         g.is_blink_visible = true;
@@ -304,10 +303,10 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     }
 
     const action = switch (g.vim_state.mode) {
-        .insert => if (build.has_vim) vim.handleInsert(&g.vim_state, sym) else handleInsertBasic(&g.vim_state, sym),
-        .normal => if (build.has_vim) vim.handleNormal(&g.vim_state, sym) else .none,
-        .visual => if (build.has_vim) vim.handleVisual(&g.vim_state, sym) else .none,
-        .replace => if (build.has_vim) vim.handleReplace(&g.vim_state, sym) else .none,
+        .insert => if (core.config.bar.vim_mode) vim.handleInsert(&g.vim_state, sym) else handleInsertBasic(&g.vim_state, sym),
+        .normal => if (core.config.bar.vim_mode) vim.handleNormal(&g.vim_state, sym) else .none,
+        .visual => if (core.config.bar.vim_mode) vim.handleVisual(&g.vim_state, sym) else .none,
+        .replace => if (core.config.bar.vim_mode) vim.handleReplace(&g.vim_state, sym) else .none,
     };
     const prev_len = g.vim_state.len;
     handleAction(action);
@@ -437,7 +436,7 @@ fn activate() void {
 /// Ungrabs the keyboard and marks the prompt inactive.
 fn deactivate() void {
     g.is_active = false;
-    if (build.has_vim) vim.onDeactivate(&g.vim_state);
+    if (core.config.bar.vim_mode) vim.onDeactivate(&g.vim_state);
     _ = xcb.xcb_ungrab_keyboard(core.conn, xcb.XCB_CURRENT_TIME);
     _ = xcb.xcb_flush(core.conn);
     g.redraw_pending = true;
@@ -758,7 +757,7 @@ fn spawnCommand(cmd: []const u8) void {
     }
 }
 
-// Private — basic insert-mode editing (used when build.has_vim = false)
+// Private — basic insert-mode editing (used when core.config.bar.vim_mode = false)
 
 // Integer aliases matching vim.zig's private constants so switch arms compile
 // against the same keysym values without repeating raw hex literals.
@@ -975,7 +974,7 @@ fn drawActive(
     const pill_h_pad: u16 = 6;
     const white: u32 = 0xFFFFFFFF;
 
-    const mode_label = if (build.has_vim) g.vim_state.mode.label() else "";
+    const mode_label = if (core.config.bar.vim_mode) g.vim_state.mode.label() else "";
     const mode_idx: usize = @intFromEnum(g.vim_state.mode);
 
     const mode_w: u16 = g.cached_mode_w[mode_idx] orelse blk: {
@@ -992,13 +991,23 @@ fn drawActive(
     // Clip post-cursor text 2 px before the pill so ink never bleeds into it.
     const ellipsis_end_x: u16 = scroll_end_x -| 2;
 
+    // Caret geometry — cached since font metrics and bar height are constant
+    // between reloads.  Hoisted before the pill and insert-mode branches so the
+    // lazy-init runs at most once regardless of which branch executes first.
+    if (g.cached_caret_top == null) {
+        const asc, const desc = dc.getMetrics();
+        const font_h: u16 = @intCast(@max(0, @as(i32, asc) + @as(i32, desc)));
+        g.cached_caret_top = (height -| font_h) / 2;
+        g.cached_caret_h = @min(font_h, height);
+    }
+
     if (pill_w > 0 and text_end_x >= pill_w) {
         const pill_x: u16 = text_end_x - pill_w;
         if (pill_x >= text_left_x) {
             // Filled pill background.
             dc.fillRect(pill_x, cursor_v_pad, pill_w, height -| cursor_v_pad * 2, accent);
 
-            const colon_cmd = if (build.has_vim) vim.colonInput(&g.vim_state) else null;
+            const colon_cmd = if (core.config.bar.vim_mode) vim.colonInput(&g.vim_state) else null;
             if (colon_cmd) |ct| {
                 // Ex-command input: ":typed_chars" + blinking insert-style caret.
                 var ppx: i32 = @as(i32, pill_x) + @as(i32, pill_h_pad);
@@ -1011,12 +1020,7 @@ fn drawActive(
                 }
                 // Blinking thin caret — same geometry as the insert-mode caret
                 // in the main text area so both look identical.
-                if (g.cached_caret_top == null) {
-                    const asc, const desc = dc.getMetrics();
-                    const font_h: u16 = @intCast(@max(0, @as(i32, asc) + @as(i32, desc)));
-                    g.cached_caret_top = (height -| font_h) / 2;
-                    g.cached_caret_h = @min(font_h, height);
-                }
+                // (Caret geometry was already computed before the pill branch.)
                 const caret_top = g.cached_caret_top.?;
                 const caret_h = g.cached_caret_h.?;
                 const pill_inner_end: i32 = @as(i32, pill_x) + @as(i32, pill_w) - @as(i32, pill_h_pad);
@@ -1095,10 +1099,10 @@ fn drawActive(
     // Mode-specific text rendering.
     // When colon-command mode is active the cursor lives in the pill widget,
     // not here — so we skip all cursor drawing in the main text area.
-    const colon_active = build.has_vim and vim.colonInput(&g.vim_state) != null;
+    const colon_active = core.config.bar.vim_mode and vim.colonInput(&g.vim_state) != null;
 
     if (g.vim_state.mode == .visual) {
-        const sel = if (build.has_vim) vim.visualRange(&g.vim_state) else [2]usize{ g.vim_state.cursor, @min(g.vim_state.cursor + 1, g.vim_state.len) };
+        const sel = if (core.config.bar.vim_mode) vim.visualRange(&g.vim_state) else [2]usize{ g.vim_state.cursor, @min(g.vim_state.cursor + 1, g.vim_state.len) };
         const sel_lo = sel[0];
         const sel_hi = sel[1];
 
@@ -1123,14 +1127,7 @@ fn drawActive(
         if (pre_cur_text.len > 0)
             try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, pre_cur_text, fg);
 
-        // Caret geometry — cached since font metrics and bar height are constant
-        // between reloads.
-        if (g.cached_caret_top == null) {
-            const asc, const desc = dc.getMetrics();
-            const font_h: u16 = @intCast(@max(0, @as(i32, asc) + @as(i32, desc)));
-            g.cached_caret_top = (height -| font_h) / 2;
-            g.cached_caret_h = @min(font_h, height);
-        }
+        // Caret geometry was pre-computed before the mode branches below.
         const caret_top = g.cached_caret_top.?;
         const caret_h = g.cached_caret_h.?;
 
