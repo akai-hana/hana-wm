@@ -74,8 +74,7 @@ fn tileColumn(
             .width = inner_w,
             .height = windowHeight(row, count, avail),
         };
-        if (!deferred.capture(ctx, win, rect))
-            layouts.configureWithHints(ctx, win, rect);
+        deferred.emit(ctx, win, rect);
     }
     deferred.flush(ctx);
 }
@@ -143,8 +142,7 @@ fn tileStackExtra(
                 .width = col_inner_w,
                 .height = row_h,
             };
-            if (!deferred.capture(ctx, windows[win_idx], rect))
-                layouts.configureWithHints(ctx, windows[win_idx], rect);
+            deferred.emit(ctx, windows[win_idx], rect);
         }
     }
     deferred.flush(ctx);

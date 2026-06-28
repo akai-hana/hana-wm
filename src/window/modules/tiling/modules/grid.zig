@@ -55,8 +55,7 @@ pub fn tileWithOffset(
             .width = cellToWindowSize(effective_cell_w, bm),
             .height = win_h,
         };
-        if (!defer_slot.capture(ctx, win, rect))
-            layouts.configureWithHints(ctx, win, rect);
+        defer_slot.emit(ctx, win, rect);
     }
     defer_slot.flush(ctx);
 }

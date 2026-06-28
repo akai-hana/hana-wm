@@ -1,62 +1,28 @@
 //! hana's build configuration
-//! Includes module auto-discovery and sub-system gating.
+//! Includes module auto-discovery: every .zig file under src/ becomes a
+//! named module, available to import from every other module.
 
 const std     = @import("std");
 const builtin = @import("builtin");
 
 // Compile-time version guard
 // Must be top-level so it fires before the compiler analyses any other functions
-comptime {
-    if (builtin.zig_version.pre == null) @compileError(
-        \\!!! Hana requires Zig's master branch. !!!
-        \\
-        \\# If your package manager doesn't ship it, you can try ZVM's easy installer:
-        \\curl https://raw.githubusercontent.com/tristanisham/zvm/master/install.sh | bash
-        \\# And then install Zig's master branch:
-        \\zvm i master
-        \\
-        // ^ Intended to leave a blank gap
-    );
-}
+// comptime {
+//     if (builtin.zig_version.pre == null) @compileError(
+//         \\!!! Hana requires Zig's master branch. !!!
+//         \\
+//         \\# If your package manager doesn't ship it, you can try ZVM's easy installer:
+//         \\curl https://raw.githubusercontent.com/tristanisham/zvm/master/install.sh | bash
+//         \\# And then install Zig's master branch:
+//         \\zvm i master
+//         \\
+//         // ^ Intended to leave a blank gap
+//     );
+// }
 
 // Configuration
 
 const source_root = "src/";
-
-const optional_subsystems = [_][]const u8{
-    // core/
-    "scale",
-    "debug",
-
-    // window/
-    "fullscreen",
-    "minimize",
-    "workspaces",
-
-    // tiling/
-    "tiling",
-        "layouts",
-            "master",
-            "monocle",
-            "grid",
-            "fibonacci",
-            "scroll",
-            "leaf",
-
-    // floating/
-    "drag",
-
-    // bar/
-    "bar",
-        "tags",
-        "layout",
-        "variants",
-        "title",
-            "carousel",
-            "prompt",
-                "vim",
-        "clock",
-};
 
 // Entry point
 
@@ -80,13 +46,6 @@ pub fn build(b: *std.Build) void {
         std.process.exit(1);
     };
 
-    // Emit one `has_<n>` build option per optional subsystem.
-    for (optional_subsystems) |sys| {
-        const is_present = discovery.modules.contains(sys);
-        build_opts.addOption(bool, b.fmt("has_{s}", .{sys}), is_present);
-    }
-    const has_bar = discovery.modules.contains("bar");
-
     // Root module
     const shared_ctx: SharedBuildContext = .{
         .build_opts    = build_opts.createModule(),
@@ -108,7 +67,7 @@ pub fn build(b: *std.Build) void {
 
     // Wire & link
     Module.wireAll(root_mod, &discovery.modules, shared_ctx);
-    SystemLibraries.link(root_mod, has_bar);
+    SystemLibraries.link(root_mod);
 
     // Artifact & steps
     const exe = b.addExecutable(.{ .name = "hana", .root_module = root_mod });
@@ -201,25 +160,18 @@ const Module = struct {
         optimize:     std.builtin.OptimizeMode,
         modules:      std.StringHashMap(*std.Build.Module),
         source_paths: std.StringHashMap([]const u8),
-        /// Built once from `optional_subsystems` for O(1) gating lookups.
-        gated_names:  std.StringHashMap(void),
 
         fn init(
             b:        *std.Build,
             target:   std.Build.ResolvedTarget,
             optimize: std.builtin.OptimizeMode,
         ) !DiscoveryContext {
-            var gated_names = std.StringHashMap(void).init(b.allocator);
-            for (optional_subsystems) |name|
-                try gated_names.put(name, {});
-
             return .{
                 .b            = b,
                 .target       = target,
                 .optimize     = optimize,
                 .modules      = std.StringHashMap(*std.Build.Module).init(b.allocator),
                 .source_paths = std.StringHashMap([]const u8).init(b.allocator),
-                .gated_names  = gated_names,
             };
         }
 
@@ -234,8 +186,8 @@ const Module = struct {
             return ctx;
         }
 
-        /// Recursively walks `dir_path`, registers every `.zig` file as a named module
-        /// (except `main.zig`), and skips gated-out subsystem directories.
+        /// Recursively walks `dir_path` and registers every `.zig` file as a
+        /// named module (except `main.zig`).
         fn discoverAll(ctx: *DiscoveryContext, dir_path: []const u8) !void {
             const b = ctx.b;
             var dir = try b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true });
@@ -246,7 +198,6 @@ const Module = struct {
                 switch (entry.kind) {
                     .directory => {
                         if (isHiddenDirectory(entry.name)) continue;
-                        if (isGatedOut(ctx, dir_path, entry.name)) continue;
 
                         const subdir_path = try std.fs.path.join(b.allocator, &.{ dir_path, entry.name });
                         try ctx.discoverAll(subdir_path);
@@ -287,19 +238,6 @@ const Module = struct {
                 .optimize = ctx.optimize,
             }));
         }
- 
-        /// Checks whether a sub-system is gated out or not.
-        ///
-        /// A subsystem's directory is gated out when it appears in `optional_subsystems`
-        /// and yet its conventional entry point (`<dir>/<n>/<n>.zig`) is absent.
-        /// This lets users opt out of a feature by simply deleting its central/entry file in charge.
-        fn isGatedOut(ctx: *const DiscoveryContext, parent: []const u8, dir_name: []const u8) bool {
-            if (!ctx.gated_names.contains(dir_name)) return false;
-
-            const b          = ctx.b;
-            const entry_path = b.pathJoin(&.{ parent, dir_name, b.fmt("{s}.zig", .{dir_name}) });
-            return !pathExists(b, entry_path);
-        }
     };
 
     /// Wires up all discovered modules together.
@@ -333,11 +271,6 @@ const Module = struct {
         }
     }
 
-    fn pathExists(b: *std.Build, path: []const u8) bool {
-        _ = b.build_root.handle.statFile(b.graph.io, path, .{}) catch return false;
-        return true;
-    }
-
     fn isHiddenDirectory(name: []const u8) bool {
         return std.mem.startsWith(u8, name, ".");
     }
@@ -357,13 +290,10 @@ const Module = struct {
 ///
 /// Helps keep `build()` clean.
 const SystemLibraries = struct {
-    /// Links system libraries depended by hana.
-    ///
-    /// Cairo/Pango/GLib are only linked when at least one bar segment exists,
-    /// in case the user wants to use hana without its bar.
-    fn link(root: *std.Build.Module, has_bar: bool) void {
+    /// Links system libraries depended on by hana.
+    fn link(root: *std.Build.Module) void {
         linkXcb(root);
-        if (has_bar) linkCairoPango(root);
+        linkCairoPango(root);
     }
 
     // Core libraries

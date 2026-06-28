@@ -91,6 +91,19 @@ inline fn unpackColorChannel(color: u32, shift: u5) f64 {
     return @as(f64, @floatFromInt((color >> shift) & 0xFF)) / 255.0;
 }
 
+/// Set the Cairo source color from a packed 0xRRGGBB u32 at full opacity.
+/// Consolidates the three-channel unpack that was previously open-coded in
+/// DrawContext.setColor and CarouselPixmap.render.
+inline fn setCairoColor(ctx: *c.cairo_t, color: u32) void {
+    c.cairo_set_source_rgba(
+        ctx,
+        unpackColorChannel(color, 16),
+        unpackColorChannel(color, 8),
+        unpackColorChannel(color, 0),
+        1.0,
+    );
+}
+
 /// Converts Pango units (1/1024 px) to floating-point pixels.
 inline fn pangoToF64(pango_units: c_int) f64 {
     return @as(f64, @floatFromInt(pango_units)) / @as(f64, @floatFromInt(c.PANGO_SCALE));
@@ -249,7 +262,7 @@ pub const DrawContext = struct {
 
     inline fn setColor(self: *DrawContext, color: u32) void {
         if (self.last_color == color) return;
-        c.cairo_set_source_rgba(self.ctx, unpackColorChannel(color, 16), unpackColorChannel(color, 8), unpackColorChannel(color, 0), 1.0);
+        setCairoColor(self.ctx, color);
         self.last_color = color;
     }
 
@@ -533,13 +546,12 @@ pub const CarouselPixmap = struct {
         const ctx = c.cairo_create(self.surface) orelse return error.CairoFailed;
         defer c.cairo_destroy(ctx);
 
-        const layout = c.pango_cairo_create_layout(ctx) orelse return error.PangoFailed;
+        const layout = try createPangoLayout(ctx, dc.dpi);
         defer c.g_object_unref(layout);
-        c.pango_cairo_context_set_resolution(c.pango_layout_get_context(layout), @floatCast(dc.dpi));
         c.pango_layout_set_font_description(layout, dc.font.current_font_desc);
         c.pango_layout_set_text(layout, text.ptr, @intCast(text.len));
 
-        c.cairo_set_source_rgba(ctx, unpackColorChannel(fg, 16), unpackColorChannel(fg, 8), unpackColorChannel(fg, 0), 1.0);
+        setCairoColor(ctx, fg);
 
         const text_y = @as(f64, @floatFromInt(baseline)) - pangoToF64(c.pango_layout_get_baseline(layout));
 

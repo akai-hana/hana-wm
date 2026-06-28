@@ -47,6 +47,17 @@ var clock_cond: std.c.pthread_cond_t = .{};
 var clock_quit: bool = false;
 var clock_thread: ?std.Thread = null;
 
+// Helpers
+
+/// Returns the current CLOCK_REALTIME timespec.
+/// Analogous to `monotonicTs()` in utils.zig; centralises the two-line
+/// clock_gettime call that previously appeared three times in this file.
+inline fn realtimeTs() std.os.linux.timespec {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.REALTIME, &ts);
+    return ts;
+}
+
 // Public lifecycle API
 
 /// Spawns the dedicated clock thread.
@@ -100,8 +111,7 @@ pub fn pollTimeoutMs() i32 {
 /// Must NOT be called with clock_mutex held.
 fn sleepInterruptible(ns: u64) void {
     // Compute an absolute REALTIME deadline for pthread_cond_timedwait.
-    var deadline: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.REALTIME, &deadline);
+    var deadline: std.os.linux.timespec = realtimeTs();
     const new_nsec = @as(u64, @intCast(deadline.nsec)) + ns;
     deadline.sec += @intCast(new_nsec / std.time.ns_per_s);
     deadline.nsec = @intCast(new_nsec % std.time.ns_per_s);
@@ -120,8 +130,7 @@ fn runClockThread() void {
     // This ensures the displayed time is never stale by up to a full second
     // immediately after the bar starts.
     {
-        var now_ts: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(.REALTIME, &now_ts);
+        const now_ts = realtimeTs();
         // ns_per_s - now_ts.nsec is always in (0, 1_000_000_000].
         const ns_to_boundary: u64 = @intCast(std.time.ns_per_s - now_ts.nsec);
         sleepInterruptible(ns_to_boundary);
@@ -148,8 +157,7 @@ fn runClockThread() void {
 /// Draws the current time string on the bar. Returns the x position after the segment.
 pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
     // Derive seconds from clock_gettime(REALTIME); sub-second precision is not needed for display.
-    var now_ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.REALTIME, &now_ts);
+    const now_ts = realtimeTs();
     const sec: i64 = now_ts.sec;
 
     // Re-use the cached string when the second hasn't changed; format otherwise.

@@ -151,13 +151,9 @@ pub inline fn getAtomCached(comptime name: []const u8) error{AtomCacheNotInitial
 
 // Property helpers
 
-/// Scale helpers used when `build.has_scale` is false (no DPI-aware scaling).
-/// These are the canonical implementations for no-scale builds; scale.zig calls
-/// these same helpers so that the two code paths share one formula.
-///
-/// INVARIANT: a test in scale.zig exercises both code paths on identical inputs
-/// and asserts equal output.  If you change the arithmetic here, update scale.zig
-/// (and vice-versa) and ensure the shared test still passes.
+/// Canonical implementations of the no-DPI-info scaling formulas.
+/// scale.zig delegates scaleBorderWidth/scaleMasterWidth to these directly
+/// (they need no DPI lookup), so there is exactly one formula to maintain.
 pub const scale_fallback = struct {
     pub fn scaleMasterWidth(value: anytype) f32 {
         return if (value.is_percentage) value.value / 100.0 else -value.value;

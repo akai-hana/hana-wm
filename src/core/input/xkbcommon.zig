@@ -109,6 +109,23 @@ inline fn retryDelay(attempt: u8) void {
     _ = std.os.linux.nanosleep(&req, &rem);
 }
 
+// ── Retry helpers ─────────────────────────────────────────────────────────────
+// `retrySetup` and `retryKeymap` share the same structural contract:
+//
+//   for (0..MAX_ATTEMPTS) |i| {
+//       <attempt operation>
+//       if (<success condition>) return <value>;
+//       retryDelay(@intCast(i));
+//   }
+//   return error.<Xxx>Failed;
+//
+// The two functions differ in their operation (xkb_x11_setup_xkb_extension vs
+// xkb_x11_keymap_new_from_device + keymapHasEnoughSymbols) and return types
+// (!void vs !*xkb_keymap), which prevents a single generic loop abstraction
+// without compiler-opaque function pointers.  If a third retry site is added,
+// extract a comptime `retryLoop(comptime Fn: type, ...)` at that point.
+// ──────────────────────────────────────────────────────────────────────────────
+
 /// Calls xkb_x11_setup_xkb_extension, retrying up to MAX_ATTEMPTS times.
 /// The extension may not be ready immediately at WM startup.
 fn retrySetup(xcb_conn: *anyopaque) !void {

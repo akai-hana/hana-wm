@@ -9,6 +9,7 @@ const constants = @import("constants");
 const debug = @import("debug");
 
 const parser = @import("parser");
+const utils = @import("utils");
 
 // Baseline screen used to define "1× scale". All percentage-based values
 // are computed relative to this reference display.
@@ -164,17 +165,21 @@ pub fn scaleToInt(comptime T: type, base_value: f32, scale_factor: f32) T {
 /// Percentage values are screen-relative, so scale_factor is intentionally
 /// excluded — applying it would double-scale on HiDPI displays.
 /// Absolute pixel values are screen-independent and used as-is.
+///
+/// Delegates to `utils.scale_fallback.scaleBorderWidth` — the single source
+/// of truth for this formula, shared with the build-options-free fallback path.
 pub fn scaleBorderWidth(value: parser.ScalableValue, reference_dimension: u16) u16 {
-    const dim_f: f32 = @floatFromInt(reference_dimension);
-    const raw = if (value.is_percentage) (value.value / 100.0) * 0.5 * dim_f else value.value;
-    return @intFromFloat(@max(0.0, @round(raw)));
+    return utils.scale_fallback.scaleBorderWidth(value, reference_dimension);
 }
 
 /// Returns the master width as a fraction (0.0–1.0) for percentage values,
 /// or as a negative float encoding an absolute pixel value otherwise.
 /// Callers should treat negative results as `@abs(result)` pixels.
+///
+/// Delegates to `utils.scale_fallback.scaleMasterWidth` — the single source
+/// of truth for this formula, shared with the build-options-free fallback path.
 pub fn scaleMasterWidth(value: parser.ScalableValue) f32 {
-    return if (value.is_percentage) value.value / 100.0 else -value.value;
+    return utils.scale_fallback.scaleMasterWidth(value);
 }
 
 /// Scales a font size value against the screen height, clamped to a minimum of 1px.

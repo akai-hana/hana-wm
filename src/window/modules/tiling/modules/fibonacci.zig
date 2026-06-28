@@ -84,8 +84,7 @@ pub fn tileWithOffset(
                 .width = w -| border2,
                 .height = h -| border2,
             };
-            if (!defer_slot.capture(ctx, win, rect))
-                layouts.configureWithHints(ctx, win, rect);
+            defer_slot.emit(ctx, win, rect);
             defer_slot.flush(ctx);
             return;
         }
@@ -120,7 +119,7 @@ inline fn splitAndAdvance(
                 .width = win_w -| border2,
                 .height = h.* -| border2,
             };
-            if (!defer_slot.capture(ctx, win, rect)) layouts.configureWithHints(ctx, win, rect);
+            defer_slot.emit(ctx, win, rect);
             x.* += @as(i32, @intCast(win_w + gap));
             w.* = w.* -| (win_w + gap);
         },
@@ -132,7 +131,7 @@ inline fn splitAndAdvance(
                 .width = w.* -| border2,
                 .height = win_h -| border2,
             };
-            if (!defer_slot.capture(ctx, win, rect)) layouts.configureWithHints(ctx, win, rect);
+            defer_slot.emit(ctx, win, rect);
             y.* += @as(i32, @intCast(win_h + gap));
             h.* = h.* -| (win_h + gap);
         },
@@ -144,7 +143,7 @@ inline fn splitAndAdvance(
                 .width = win_w -| border2,
                 .height = h.* -| border2,
             };
-            if (!defer_slot.capture(ctx, win, rect)) layouts.configureWithHints(ctx, win, rect);
+            defer_slot.emit(ctx, win, rect);
             w.* = w.* -| (win_w + gap);
         },
         .up => {
@@ -155,7 +154,7 @@ inline fn splitAndAdvance(
                 .width = w.* -| border2,
                 .height = win_h -| border2,
             };
-            if (!defer_slot.capture(ctx, win, rect)) layouts.configureWithHints(ctx, win, rect);
+            defer_slot.emit(ctx, win, rect);
             h.* = h.* -| (win_h + gap);
         },
     }

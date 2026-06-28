@@ -208,11 +208,12 @@ pub const VimState = struct {
             .undo_max = undo_max,
         };
 
-        vs.buf = try allocator.alloc(u8, max_input);
-        vs.yank_buf = try allocator.alloc(u8, max_input);
-        vs.replace_origin_buf = try allocator.alloc(u8, max_input);
-        vs.insert_rec_buf = try allocator.alloc(u8, max_input);
-        vs.dot_insert_buf = try allocator.alloc(u8, max_input);
+        // Allocate all five same-sized editing buffers in a single loop so that
+        // adding or removing a buffer only requires touching this list and the
+        // matching list in `deinit` — the compiler enforces symmetry at a glance.
+        inline for (.{ "buf", "yank_buf", "replace_origin_buf", "insert_rec_buf", "dot_insert_buf" }) |field| {
+            @field(vs, field) = try allocator.alloc(u8, max_input);
+        }
         vs.undo.entries = try allocator.alloc(UndoEntry, undo_max);
         vs.redo.entries = try allocator.alloc(UndoEntry, undo_max);
 
@@ -259,11 +260,10 @@ pub const VimState = struct {
         for (vs.redo.entries) |*e| vs.allocator.free(e.buf);
         vs.allocator.free(vs.redo.entries);
 
-        vs.allocator.free(vs.dot_insert_buf);
-        vs.allocator.free(vs.insert_rec_buf);
-        vs.allocator.free(vs.replace_origin_buf);
-        vs.allocator.free(vs.yank_buf);
-        vs.allocator.free(vs.buf);
+        // Mirror of the init loop — same field order in reverse; keep in sync.
+        inline for (.{ "dot_insert_buf", "insert_rec_buf", "replace_origin_buf", "yank_buf", "buf" }) |field| {
+            vs.allocator.free(@field(vs, field));
+        }
         vs.* = .{}; // poison all fields
     }
 };
@@ -822,6 +822,21 @@ const MotionKeyResult = union(enum) {
 /// Handles: pending find, pending g, digit accumulation, ;/,, simple motions,
 /// and prefix arming (f/F/t/T/g).
 ///
+/// Captures the current pending operator fields, calls `resetPendingCmd`, and
+/// returns a base `.motion` result initialised from those fields.  Every arm of
+/// `resolveMotionKey` that produces a motion follows exactly this pattern; the
+/// helper ensures the three-field capture and the reset always happen together
+/// and in the correct order.  The caller sets any arm-specific extra fields
+/// (find_kind, find_ch, has_g_prefix, dot_eligible) directly on the returned
+/// literal before returning it.
+inline fn commitMotion(vs: *VimState, mr: MotionResult) MotionKeyResult {
+    const op  = vs.pending.op;
+    const opc = vs.pending.op_count;
+    const mc  = vs.pending.count;
+    resetPendingCmd(vs);
+    return .{ .motion = .{ .mr = mr, .op = op, .op_count = opc, .motion_count = mc } };
+}
+
 /// Returns `.motion` if a motion was resolved (`pending` already reset; caller
 /// applies the result then returns `.none`), `.consumed` if the key was
 /// absorbed without producing a motion (digit or prefix arm; `pending` not
@@ -837,11 +852,10 @@ fn resolveMotionKey(vs: *VimState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
             vs.last_find_kind = kind;
             vs.last_find_ch = ch;
             const mr = motionFind(vs, kind, ch, cnt);
-            const op = vs.pending.op;
-            const opc = vs.pending.op_count;
-            const mc = vs.pending.count;
-            resetPendingCmd(vs);
-            return .{ .motion = .{ .mr = mr, .op = op, .op_count = opc, .motion_count = mc, .find_kind = kind, .find_ch = ch } };
+            var result = commitMotion(vs, mr);
+            result.motion.find_kind = kind;
+            result.motion.find_ch = ch;
+            return result;
         }
         resetPendingCmd(vs);
         return .consumed;
@@ -852,11 +866,9 @@ fn resolveMotionKey(vs: *VimState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
         const cnt = effectiveCount(vs);
         if (resolveGPrefixPos(vs, sym, cnt)) |pos| {
             const mr = MotionResult{ .pos = pos, .inclusive = (sym == 'e' or sym == 'E') };
-            const op = vs.pending.op;
-            const opc = vs.pending.op_count;
-            const mc = vs.pending.count;
-            resetPendingCmd(vs);
-            return .{ .motion = .{ .mr = mr, .op = op, .op_count = opc, .motion_count = mc, .has_g_prefix = true } };
+            var result = commitMotion(vs, mr);
+            result.motion.has_g_prefix = true;
+            return result;
         }
         resetPendingCmd(vs);
         return .consumed;
@@ -878,11 +890,9 @@ fn resolveMotionKey(vs: *VimState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
         if (vs.last_find_kind != 0) {
             const kind = if (sym == ',') reverseFindKind(vs.last_find_kind) else vs.last_find_kind;
             const mr = motionFind(vs, kind, vs.last_find_ch, cnt);
-            const op = vs.pending.op;
-            const opc = vs.pending.op_count;
-            const mc = vs.pending.count;
-            resetPendingCmd(vs);
-            return .{ .motion = .{ .mr = mr, .op = op, .op_count = opc, .motion_count = mc, .dot_eligible = false } };
+            var result = commitMotion(vs, mr);
+            result.motion.dot_eligible = false;
+            return result;
         }
         resetPendingCmd(vs);
         return .consumed;
@@ -890,11 +900,7 @@ fn resolveMotionKey(vs: *VimState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
 
     // Simple motions (h/l/w/b/e/0/^/$/arrows …).
     if (resolveSimpleMotion(vs, sym, cnt)) |mr| {
-        const op = vs.pending.op;
-        const opc = vs.pending.op_count;
-        const mc = vs.pending.count;
-        resetPendingCmd(vs);
-        return .{ .motion = .{ .mr = mr, .op = op, .op_count = opc, .motion_count = mc } };
+        return commitMotion(vs, mr);
     }
 
     // Prefix arming (f/F/t/T/g).

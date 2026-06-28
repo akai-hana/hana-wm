@@ -2,7 +2,6 @@
 //! Entry point to and orchestrator of all hana's subsystems.
 
 const std = @import("std");
-const build = @import("build_options");
 
 const core = @import("core");
 const xcb = core.xcb;
@@ -11,18 +10,14 @@ const events = @import("events");
 const config = @import("config");
 const constants = @import("constants");
 
-const scale = if (build.has_scale) @import("scale");
-const debug = if (build.has_debug) @import("debug");
+const scale = @import("scale");
+const debug = @import("debug");
 
 const input = @import("input");
 
 const window = @import("window");
 
-const bar = if (build.has_bar) @import("bar") else struct {
-    pub fn init() !void {}
-    pub fn deinit() void {}
-    pub fn updateTimerState() void {}
-};
+const bar = @import("bar");
 
 /// hana's startup sequence and event-loop entry point.
 pub fn main() !void {
@@ -35,7 +30,7 @@ pub fn main() !void {
     core.screen = x.screen;
     core.root = x.root;
     core.alloc = std.heap.c_allocator;
-    if (build.has_scale) core.dpi_info = scale.detectDpi(x.conn, x.screen);
+    core.dpi_info = scale.detectDpi(x.conn, x.screen);
 
     input.setup(x.conn, x.screen, x.root);
     try input.initXkb(x.conn);
@@ -46,8 +41,7 @@ pub fn main() !void {
     // Defers are LIFO: deinitKeybindMap runs before core.config.deinit, so the map
     // is cleared (backing array freed) while its action pointers are still valid.
     defer config.deinitKeybindMap(core.alloc);
-    if (build.has_scale)
-        core.config.bar.scaled_font_size = scale.scaleFontSize(core.config.bar.font_size, x.screen);
+    core.config.bar.scaled_font_size = scale.scaleFontSize(core.config.bar.font_size, x.screen);
 
     try utils.initAtomCache(x.conn);
     // No defer needed: atom values are plain integers (xcb_atom_t) with no heap
@@ -62,18 +56,14 @@ pub fn main() !void {
     try window.init(core.alloc);
     defer window.deinit();
 
-    // bar.init's error set is inferred (anyerror), so BarDisabled/BarNotFound
-    // can't be switch arms — if/else is the only option here.
-    bar.init() catch |err| {
-        if (err == error.BarDisabled) {
-            debug.info("Bar disabled on user config: {}", .{err});
-        } else if (err == error.BarNotFound) {
-            debug.info("Bar not found (src/bar/bar.zig): {}", .{err});
-        } else {
+    // bar.init() asserts core.config.bar.enabled; check here so a config with
+    // bar disabled is always safe, regardless of how the binary was built.
+    if (core.config.bar.enabled) {
+        bar.init() catch |err| {
             debug.err("Bar init failed: {}", .{err});
-        }
-    };
-    defer bar.deinit();
+        };
+    }
+    defer if (core.config.bar.enabled) bar.deinit();
 
     bar.updateTimerState();
     _ = xcb.xcb_flush(core.conn);

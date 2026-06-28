@@ -2,7 +2,6 @@
 //! Handles interactive dragging and resizing of floating windows with the mouse.
 
 const std = @import("std");
-const build = @import("build_options");
 
 const core = @import("core");
 const xcb = core.xcb;
@@ -12,20 +11,9 @@ const utils = @import("utils");
 const window = @import("window");
 const focus = @import("focus");
 
-const tiling = if (build.has_tiling) @import("tiling");
-const fullscreen = if (build.has_fullscreen) @import("fullscreen");
-
-const bar = if (build.has_bar) @import("bar") else struct {
-    pub fn isVisible() bool {
-        return false;
-    }
-    pub fn getBarHeight() u16 {
-        return 0;
-    }
-    pub fn isBarWindow(_: u32) bool {
-        return false;
-    }
-};
+const tiling = @import("tiling");
+const fullscreen = @import("fullscreen");
+const bar = @import("bar");
 
 // Drag state types
 
@@ -156,22 +144,19 @@ var g_state: State = .{};
 /// Begins a move (button 1) or resize (button 3) drag on `win` at pointer position (x, y).
 /// No-op when a drag is already active, or for bar/fullscreen windows.
 pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
+    if (!core.config.drag_enabled) return;
     if (g_state.drag.active) return;
     if (bar.isBarWindow(win)) return;
     // Fullscreen windows must not be drag-resized: they occupy the entire
     // screen and resizing them would corrupt their fullscreen geometry record.
-    if (build.has_fullscreen) {
-        if (fullscreen.isFullscreen(win)) return;
-    }
+    if (fullscreen.isFullscreen(win)) return;
     // Geometry source priority: prefer the tiling-cached geometry over a live
     // XCB round-trip.  The tiling engine keeps this up-to-date after every
     // retile, so it reflects the window's current position without a server
     // round-trip.  The live fallback covers purely floating windows that were
     // never tracked by the tiling engine.
     const geom = blk: {
-        if (build.has_tiling) {
-            if (tiling.getWindowGeom(win)) |g| break :blk g;
-        }
+        if (tiling.getWindowGeom(win)) |g| break :blk g;
         break :blk window.getGeometry(core.conn, win) orelse return;
     };
 
@@ -209,10 +194,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
             .start_win_width = geom.width,
             .start_win_height = geom.height,
         },
-        .pending_float = if (build.has_tiling)
-            tiling.isWindowTiled(win) and !tiling.isFloatingLayout()
-        else
-            false,
+        .pending_float = tiling.isWindowTiled(win) and !tiling.isFloatingLayout(),
     };
     focus.setFocus(win, .user_command);
     // Raise the window to the top of the stack.  The cookie is intentionally
@@ -236,10 +218,8 @@ pub fn updateDrag(x: i16, y: i16) void {
         // visual nicety, not a correctness requirement; the retile proceeds
         // regardless.
         _ = xcb.xcb_grab_server(core.conn);
-        if (build.has_tiling) {
-            tiling.removeWindow(drag.window);
-            tiling.retileCurrentWorkspace();
-        }
+        tiling.removeWindow(drag.window);
+        tiling.retileCurrentWorkspace();
         utils.ungrabAndFlush(core.conn);
     }
 
