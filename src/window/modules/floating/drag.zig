@@ -68,10 +68,11 @@ const WorkArea = struct { left: i32, right: i32, top: i32, bottom: i32 };
 /// abs-comparison is never satisfied when snap < 0, so no snap fires.
 /// Zero is the canonical "disabled" sentinel.
 fn snapDistance() i32 {
-    const sv = core.config.snap_distance;
+    const cs = core.getState();
+    const sv = cs.config.snap_distance;
     if (sv.value == 0) return 0;
     if (sv.is_percentage) {
-        const sw: f32 = @floatFromInt(core.screen.width_in_pixels);
+        const sw: f32 = @floatFromInt(cs.screen.width_in_pixels);
         return @intFromFloat(@round(sv.value / 100.0 * sw));
     }
     return @intFromFloat(@round(sv.value));
@@ -84,14 +85,15 @@ fn snapDistance() i32 {
 /// 2 * border_width from that edge (total footprint = pos + dim + 2*bw).
 /// Near edges need no correction because the outer border is already at pos.
 fn workArea() WorkArea {
-    const sw: i32 = core.screen.width_in_pixels;
-    const sh: i32 = core.screen.height_in_pixels;
+    const cs = core.getState();
+    const sw: i32 = cs.screen.width_in_pixels;
+    const sh: i32 = cs.screen.height_in_pixels;
     const bh: i32 = if (bar.isVisible()) bar.getBarHeight() else 0;
     const bw2: i32 = @as(i32, window.getBorderWidth()) * 2;
     // bar_at_bottom only has observable effect when bh > 0 (bar is visible).
     // When bh == 0 both branches of the ternaries below produce identical
     // results, so evaluating it unconditionally is harmless.
-    const bar_at_bottom = core.config.bar.bar_position == .bottom;
+    const bar_at_bottom = cs.config.bar.bar_position == .bottom;
     return .{
         .left = 0,
         .right = sw - bw2,
@@ -144,7 +146,8 @@ var g_state: State = .{};
 /// Begins a move (button 1) or resize (button 3) drag on `win` at pointer position (x, y).
 /// No-op when a drag is already active, or for bar/fullscreen windows.
 pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
-    if (!core.config.drag_enabled) return;
+    const cs = core.getState();
+    if (!cs.config.drag_enabled) return;
     if (g_state.drag.active) return;
     if (bar.isBarWindow(win)) return;
     // Fullscreen windows must not be drag-resized: they occupy the entire
@@ -157,7 +160,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     // never tracked by the tiling engine.
     const geom = blk: {
         if (tiling.getWindowGeom(win)) |g| break :blk g;
-        break :blk window.getGeometry(core.conn, win) orelse return;
+        break :blk window.getGeometry(cs.conn, win) orelse return;
     };
 
     // For resize drags, determine which corner of the window is closest to the
@@ -200,8 +203,8 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     // Raise the window to the top of the stack.  The cookie is intentionally
     // discarded — XCB errors surface only via xcb_request_check, which we do
     // not call here; a stack-raise failure is non-fatal.
-    _ = xcb.xcb_configure_window(core.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
-    _ = xcb.xcb_flush(core.conn);
+    _ = xcb.xcb_configure_window(cs.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+    _ = xcb.xcb_flush(cs.conn);
 }
 
 /// Applies pointer motion to the active drag, updating window position or size.
@@ -217,10 +220,11 @@ pub fn updateDrag(x: i16, y: i16) void {
         // retile sequence.  A failed grab is intentionally ignored — it is a
         // visual nicety, not a correctness requirement; the retile proceeds
         // regardless.
-        _ = xcb.xcb_grab_server(core.conn);
+        const conn = core.getState().conn;
+        _ = xcb.xcb_grab_server(conn);
         tiling.removeWindow(drag.window);
         tiling.retileCurrentWorkspace();
-        utils.ungrabAndFlush(core.conn);
+        utils.ungrabAndFlush(conn);
     }
 
     const dx = x - drag.start_x;
@@ -355,8 +359,9 @@ pub fn updateDrag(x: i16, y: i16) void {
         },
     };
     drag.last_rect = rect;
-    utils.configureWindow(core.conn, drag.window, rect);
-    _ = xcb.xcb_flush(core.conn);
+    const conn = core.getState().conn;
+    utils.configureWindow(conn, drag.window, rect);
+    _ = xcb.xcb_flush(conn);
 }
 
 /// Ends the active drag and resets all drag state.

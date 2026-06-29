@@ -91,7 +91,7 @@ pub fn isMinimized(win: u32) bool {
 /// insertion order, not MRU). Last-resort fallback called by minimizeWindow
 /// (via focus.focusBestAvailable) and directly from window.zig.
 pub fn focusMasterOrFirst() void {
-    if (!core.config.workspaces.enabled) {
+    if (!core.getState().config.workspaces.enabled) {
         focus.clearFocus();
         return;
     }
@@ -111,7 +111,8 @@ pub fn focusMasterOrFirst() void {
 }
 
 pub fn minimizeWindow() void {
-    if (!core.config.minimize_enabled) return;
+    const cs = core.getState();
+    if (!cs.config.minimize_enabled) return;
     const win = focus.getFocused() orelse return;
     const ws_idx = tracking.getCurrentWorkspace() orelse return;
 
@@ -143,7 +144,7 @@ pub fn minimizeWindow() void {
     }
     const tiling_index = tiling.getWindowFilteredIndex(win);
 
-    if (core.config.tiling.enabled) tiling.removeWindow(win);
+    if (cs.config.tiling.enabled) tiling.removeWindow(win);
 
     const ts = g_next_timestamp;
     g_buf[g_len] = .{ .win = win, .entry = .{
@@ -155,8 +156,8 @@ pub fn minimizeWindow() void {
     g_len += 1;
     g_next_timestamp = ts + 1;
 
-    _ = xcb.xcb_grab_server(core.conn);
-    utils.pushWindowOffscreen(core.conn, win);
+    _ = xcb.xcb_grab_server(cs.conn);
+    utils.pushWindowOffscreen(cs.conn, win);
 
     // Prefer MRU history; fall back to workspace insertion order.
     focus.focusBestAvailable(.tiling_operation, struct {
@@ -167,11 +168,11 @@ pub fn minimizeWindow() void {
 
     if (saved_fs != null) {
         bar.setBarState(.show_fullscreen);
-    } else if (core.config.tiling.enabled) {
+    } else if (cs.config.tiling.enabled) {
         tiling.retileCurrentWorkspace();
     }
     bar.redrawInsideGrab();
-    utils.ungrabAndFlush(core.conn);
+    utils.ungrabAndFlush(cs.conn);
 }
 
 /// Restore a window that has already been removed from g_buf.
@@ -188,9 +189,10 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
         return;
     }
 
-    _ = xcb.xcb_grab_server(core.conn);
+    const conn = core.getState().conn;
+    _ = xcb.xcb_grab_server(conn);
 
-    if (core.config.tiling.enabled) {
+    if (core.getState().config.tiling.enabled) {
         // Restore at the original layout slot so a former master returns to master,
         // rather than being appended to the end of the stack.
         if (tiling_index) |ti|
@@ -204,7 +206,7 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
 
     focus.setFocus(win, .window_spawn);
     bar.redrawInsideGrab();
-    utils.ungrabAndFlush(core.conn);
+    utils.ungrabAndFlush(conn);
 }
 
 pub const RestoreOrder = enum { lifo, fifo };
@@ -289,9 +291,10 @@ pub fn unminimizeAll() void {
             }
         }
 
-        _ = xcb.xcb_grab_server(core.conn);
+        const conn = core.getState().conn;
+        _ = xcb.xcb_grab_server(conn);
 
-        if (core.config.tiling.enabled) {
+        if (core.getState().config.tiling.enabled) {
             // Re-sort by tiling_index ascending (nulls last) before inserting.
             // Inserting at index i shifts every slot > i by 1, so lower-index
             // windows must go first to avoid displacing higher-index targets.
@@ -320,7 +323,7 @@ pub fn unminimizeAll() void {
 
         focus.setFocus(focus_target, .window_spawn);
         bar.redrawInsideGrab();
-        utils.ungrabAndFlush(core.conn);
+        utils.ungrabAndFlush(conn);
     }
 
     // Each fullscreen window needs its own grab (enterFullscreen owns it).

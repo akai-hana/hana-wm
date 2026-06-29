@@ -114,7 +114,7 @@ pub fn isActive() bool {
 /// redraw for the cursor blink animation.
 pub fn blinkPollTimeoutMs() i32 {
     if (!g.is_active) return -1;
-    if (g.vim_state.mode == .insert or (core.config.bar.vim_mode and vim.colonInput(&g.vim_state) != null))
+    if (g.vim_state.mode == .insert or (core.getState().config.bar.vim_mode and vim.colonInput(&g.vim_state) != null))
         return cursor_blink_ms;
     return -1;
 }
@@ -171,8 +171,9 @@ pub fn toggle() void {
 ///   • cursor over a program  → let WM close that window (return false)
 ///   • cursor over nothing    → swallow the event silently, do nothing
 fn closeWindowOrPromptUnderCursor() bool {
-    const ptr_cookie = xcb.xcb_query_pointer(core.conn, core.root);
-    const ptr_reply = xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null);
+    const cs = core.getState();
+    const ptr_cookie = xcb.xcb_query_pointer(cs.conn, cs.root);
+    const ptr_reply = xcb.xcb_query_pointer_reply(cs.conn, ptr_cookie, null);
     defer if (ptr_reply) |r| std.c.free(r);
 
     const child: u32 = if (ptr_reply) |r| r.*.child else 0;
@@ -182,7 +183,7 @@ fn closeWindowOrPromptUnderCursor() bool {
         deactivate();
         return true;
     }
-    if (child == 0 or child == core.root) {
+    if (child == 0 or child == cs.root) {
         // Cursor is over the desktop / no window — do nothing, swallow key.
         return true;
     }
@@ -260,6 +261,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     const ctrl_held = event.state & xcb.XCB_MOD_MASK_CONTROL != 0;
     const col: c_int = if (shift_held) 1 else 0;
     const sym = xcb_key_symbols_get_keysym(syms, event.detail, col);
+    const vim_mode = core.getState().config.bar.vim_mode;
 
     // Drop bare modifier key events (Shift, Ctrl, Alt, Super, Meta, Hyper …).
     //
@@ -278,7 +280,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
 
     // Ctrl-modified keys
     if (ctrl_held) {
-        const action = if (core.config.bar.vim_mode) vim.handleCtrl(&g.vim_state, sym) else .none;
+        const action = if (vim_mode) vim.handleCtrl(&g.vim_state, sym) else .none;
         const prev_len = g.vim_state.len;
         handleAction(action);
         if (g.vim_state.len != prev_len)
@@ -294,7 +296,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
         else
             0;
         if (n_ghost > 0) {
-            if (core.config.bar.vim_mode) vim.insertSlice(&g.vim_state, g.ghost_buf[0..n_ghost]) else insertBasic(&g.vim_state, g.ghost_buf[0..n_ghost]);
+            if (vim_mode) vim.insertSlice(&g.vim_state, g.ghost_buf[0..n_ghost]) else insertBasic(&g.vim_state, g.ghost_buf[0..n_ghost]);
             g.ghost_len = 0;
         }
         g.is_blink_visible = true;
@@ -303,10 +305,10 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     }
 
     const action = switch (g.vim_state.mode) {
-        .insert => if (core.config.bar.vim_mode) vim.handleInsert(&g.vim_state, sym) else handleInsertBasic(&g.vim_state, sym),
-        .normal => if (core.config.bar.vim_mode) vim.handleNormal(&g.vim_state, sym) else .none,
-        .visual => if (core.config.bar.vim_mode) vim.handleVisual(&g.vim_state, sym) else .none,
-        .replace => if (core.config.bar.vim_mode) vim.handleReplace(&g.vim_state, sym) else .none,
+        .insert => if (vim_mode) vim.handleInsert(&g.vim_state, sym) else handleInsertBasic(&g.vim_state, sym),
+        .normal => if (vim_mode) vim.handleNormal(&g.vim_state, sym) else .none,
+        .visual => if (vim_mode) vim.handleVisual(&g.vim_state, sym) else .none,
+        .replace => if (vim_mode) vim.handleReplace(&g.vim_state, sym) else .none,
     };
     const prev_len = g.vim_state.len;
     handleAction(action);
@@ -406,15 +408,16 @@ fn activate() void {
     if (!g.is_hist_loaded) loadHistory();
     g.is_blink_visible = true;
 
+    const cs = core.getState();
     const cookie = xcb.xcb_grab_keyboard(
-        core.conn,
+        cs.conn,
         0,
-        core.root,
+        cs.root,
         xcb.XCB_CURRENT_TIME,
         xcb.XCB_GRAB_MODE_ASYNC,
         xcb.XCB_GRAB_MODE_ASYNC,
     );
-    const grab_reply = xcb.xcb_grab_keyboard_reply(core.conn, cookie, null);
+    const grab_reply = xcb.xcb_grab_keyboard_reply(cs.conn, cookie, null);
     if (grab_reply == null) {
         debug.warn("prompt: xcb_grab_keyboard_reply returned null — aborting activation", .{});
         return;
@@ -436,9 +439,10 @@ fn activate() void {
 /// Ungrabs the keyboard and marks the prompt inactive.
 fn deactivate() void {
     g.is_active = false;
-    if (core.config.bar.vim_mode) vim.onDeactivate(&g.vim_state);
-    _ = xcb.xcb_ungrab_keyboard(core.conn, xcb.XCB_CURRENT_TIME);
-    _ = xcb.xcb_flush(core.conn);
+    if (core.getState().config.bar.vim_mode) vim.onDeactivate(&g.vim_state);
+    const conn = core.getState().conn;
+    _ = xcb.xcb_ungrab_keyboard(conn, xcb.XCB_CURRENT_TIME);
+    _ = xcb.xcb_flush(conn);
     g.redraw_pending = true;
 }
 
@@ -757,7 +761,7 @@ fn spawnCommand(cmd: []const u8) void {
     }
 }
 
-// Private — basic insert-mode editing (used when core.config.bar.vim_mode = false)
+// Private — basic insert-mode editing (used when core.getState().config.bar.vim_mode = false)
 
 // Integer aliases matching vim.zig's private constants so switch arms compile
 // against the same keysym values without repeating raw hex literals.
@@ -974,7 +978,7 @@ fn drawActive(
     const pill_h_pad: u16 = 6;
     const white: u32 = 0xFFFFFFFF;
 
-    const mode_label = if (core.config.bar.vim_mode) g.vim_state.mode.label() else "";
+    const mode_label = if (core.getState().config.bar.vim_mode) g.vim_state.mode.label() else "";
     const mode_idx: usize = @intFromEnum(g.vim_state.mode);
 
     const mode_w: u16 = g.cached_mode_w[mode_idx] orelse blk: {
@@ -1007,7 +1011,7 @@ fn drawActive(
             // Filled pill background.
             dc.fillRect(pill_x, cursor_v_pad, pill_w, height -| cursor_v_pad * 2, accent);
 
-            const colon_cmd = if (core.config.bar.vim_mode) vim.colonInput(&g.vim_state) else null;
+            const colon_cmd = if (core.getState().config.bar.vim_mode) vim.colonInput(&g.vim_state) else null;
             if (colon_cmd) |ct| {
                 // Ex-command input: ":typed_chars" + blinking insert-style caret.
                 var ppx: i32 = @as(i32, pill_x) + @as(i32, pill_h_pad);
@@ -1099,10 +1103,11 @@ fn drawActive(
     // Mode-specific text rendering.
     // When colon-command mode is active the cursor lives in the pill widget,
     // not here — so we skip all cursor drawing in the main text area.
-    const colon_active = core.config.bar.vim_mode and vim.colonInput(&g.vim_state) != null;
+    const vim_mode = core.getState().config.bar.vim_mode;
+    const colon_active = vim_mode and vim.colonInput(&g.vim_state) != null;
 
     if (g.vim_state.mode == .visual) {
-        const sel = if (core.config.bar.vim_mode) vim.visualRange(&g.vim_state) else [2]usize{ g.vim_state.cursor, @min(g.vim_state.cursor + 1, g.vim_state.len) };
+        const sel = if (vim_mode) vim.visualRange(&g.vim_state) else [2]usize{ g.vim_state.cursor, @min(g.vim_state.cursor + 1, g.vim_state.len) };
         const sel_lo = sel[0];
         const sel_hi = sel[1];
 

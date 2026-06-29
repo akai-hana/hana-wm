@@ -176,7 +176,8 @@ const CookieEntry = struct { cookie: xcb.xcb_void_cookie_t, keycode: u8 };
 /// Returns the number of entries written.
 fn fillGrabCookies(cookies: []CookieEntry) usize {
     var n: usize = 0;
-    for (core.config.keybindings.items) |kb| {
+    const cs = core.getState();
+    for (cs.config.keybindings.items) |kb| {
         const keycode = kb.keycode orelse continue;
 
         // Check once per keybinding that the full lock-modifier set fits.
@@ -189,9 +190,9 @@ fn fillGrabCookies(cookies: []CookieEntry) usize {
         for (LOCK_MODIFIERS) |lock| {
             cookies[n] = .{
                 .cookie = xcb.xcb_grab_key_checked(
-                    core.conn,
+                    cs.conn,
                     0,
-                    core.root,
+                    cs.root,
                     @intCast(kb.modifiers | lock),
                     keycode,
                     xcb.XCB_GRAB_MODE_ASYNC,
@@ -208,8 +209,9 @@ fn fillGrabCookies(cookies: []CookieEntry) usize {
 /// Checks each cookie for an XCB error. Returns the number of failures.
 fn checkGrabCookies(cookies: []const CookieEntry) usize {
     var failed: usize = 0;
+    const conn = core.getState().conn;
     for (cookies) |entry| {
-        if (xcb.xcb_request_check(core.conn, entry.cookie)) |err| {
+        if (xcb.xcb_request_check(conn, entry.cookie)) |err| {
             std.c.free(err);
             debug.warn("Failed to grab keycode: {}", .{entry.keycode});
             failed += 1;
@@ -221,7 +223,8 @@ fn checkGrabCookies(cookies: []const CookieEntry) usize {
 /// Ungrabs all keys, then re-grabs every configured keybinding across all lock modifier combinations.
 /// Fires all grab cookies before reading any reply to reduce round-trips.
 pub fn grabKeybindings() void {
-    _ = xcb.xcb_ungrab_key(core.conn, xcb.XCB_GRAB_ANY, core.root, xcb.XCB_MOD_MASK_ANY);
+    const cs = core.getState();
+    _ = xcb.xcb_ungrab_key(cs.conn, xcb.XCB_GRAB_ANY, cs.root, xcb.XCB_MOD_MASK_ANY);
 
     var cookies: [MAX_KEYBIND_COOKIES]CookieEntry = undefined;
     const n = fillGrabCookies(&cookies);
@@ -229,19 +232,20 @@ pub fn grabKeybindings() void {
     const failed = checkGrabCookies(cookies[0..n]);
     if (failed > 0) debug.warn("{} keybinding(s) failed to grab", .{failed});
 
-    _ = xcb.xcb_flush(core.conn);
+    _ = xcb.xcb_flush(cs.conn);
 }
 
 // Config reload
 
 /// Applies a validated config: resolves keybindings and notifies all
 /// subsystems of the change.  grabKeybindings() is intentionally NOT called
-/// here — it reads core.config.keybindings, so it must run after the
-/// core.config swap in handleConfigReload.  Calling it here would re-grab
+/// here — it reads core.getState().config.keybindings, so it must run after
+/// the config swap in handleConfigReload.  Calling it here would re-grab
 /// the OLD keycodes while g_keybind_map already points to the new ones.
 fn applyConfig(new_config: *types.Config) !void {
-    config.resolveKeybindings(new_config.keybindings.items, input.getXkbState(), core.alloc);
-    config.finalizeConfig(new_config, core.screen);
+    const cs = core.getState();
+    config.resolveKeybindings(new_config.keybindings.items, input.getXkbState(), cs.alloc);
+    config.finalizeConfig(new_config, cs.screen);
 
     window.reloadBorders();
     tiling.reloadConfig();
@@ -273,21 +277,22 @@ fn validateConfig(cfg: *const types.Config) !void {
 /// On failure, the old config remains active.
 fn handleConfigReload() !void {
     debug.info("Reload requested", .{});
+    const cs = core.getState();
 
-    var new_config = config.loadConfigDefault(core.alloc) catch |err| {
+    var new_config = config.loadConfigDefault(cs.alloc) catch |err| {
         debug.err("Failed to load: {}, keeping old", .{err});
         return err;
     };
-    errdefer new_config.deinit(core.alloc);
+    errdefer new_config.deinit(cs.alloc);
 
     try validateConfig(&new_config);
     try applyConfig(&new_config);
 
-    var old_config = core.config;
-    core.config = new_config;
-    old_config.deinit(core.alloc);
+    var old_config = cs.config;
+    cs.config = new_config;
+    old_config.deinit(cs.alloc);
 
-    // Re-grab keybindings now that core.config points to the new config so
+    // Re-grab keybindings now that cs.config points to the new config so
     // fillGrabCookies reads the correct (new) keycodes, not the old ones.
     grabKeybindings();
 
@@ -315,13 +320,14 @@ fn handleTimerEvents(cursor_is_blinking: bool) void {
     if (cursor_is_blinking) {
         prompt.blinkTick();
         bar.submitDraw();
-        _ = xcb.xcb_flush(core.conn);
+        _ = xcb.xcb_flush(core.getState().conn);
     }
 }
 
 /// Drains all pending XCB events for this batch, then runs post-batch housekeeping.
 fn handleXcbEvents() void {
-    while (xcb.xcb_poll_for_event(core.conn)) |event| {
+    const conn = core.getState().conn;
+    while (xcb.xcb_poll_for_event(conn)) |event| {
         defer std.c.free(event);
         dispatch(@as(*u8, @ptrCast(event)).*, event);
     }
@@ -338,11 +344,11 @@ fn handleXcbEvents() void {
     window.updateWorkspaceBordersIfNeeded();
     bar.updateIfDirty() catch |err| debug.err("Failed to update bar: {}", .{err});
 
-    _ = xcb.xcb_flush(core.conn);
+    _ = xcb.xcb_flush(conn);
 }
 
 pub fn run() !void {
-    const x_fd: std.posix.fd_t = xcb.xcb_get_file_descriptor(core.conn);
+    const x_fd: std.posix.fd_t = xcb.xcb_get_file_descriptor(core.getState().conn);
     const signal_fd: std.posix.fd_t = signal_pipe[0];
 
     var fds = [_]std.posix.pollfd{

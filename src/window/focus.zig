@@ -86,8 +86,9 @@ pub fn init() void {
     // Intern _NET_ACTIVE_WINDOW so setFocus can advertise the focused window
     // on the root.  null reply -> stays XCB_ATOM_NONE; advertiseActiveWindow
     // no-ops.
-    const ck = xcb.xcb_intern_atom(core.conn, 0, "_NET_ACTIVE_WINDOW".len, "_NET_ACTIVE_WINDOW");
-    if (xcb.xcb_intern_atom_reply(core.conn, ck, null)) |r| {
+    const conn = core.getState().conn;
+    const ck = xcb.xcb_intern_atom(conn, 0, "_NET_ACTIVE_WINDOW".len, "_NET_ACTIVE_WINDOW");
+    if (xcb.xcb_intern_atom_reply(conn, ck, null)) |r| {
         state.net_active_window = r.*.atom;
         std.c.free(r);
     }
@@ -96,7 +97,7 @@ pub fn init() void {
 /// Discard an optional XCB cookie without blocking.
 /// All XCB cookie types share a `.sequence` field, so anytype covers all of them.
 inline fn discardOptCookie(opt: anytype) void {
-    if (opt) |ck| xcb.xcb_discard_reply(core.conn, ck.sequence);
+    if (opt) |ck| xcb.xcb_discard_reply(core.getState().conn, ck.sequence);
 }
 
 pub fn deinit() void {
@@ -199,10 +200,11 @@ pub inline fn setSuppressReason(r: core.FocusSuppressReason) void {
 /// Unconditionally release all button grabs on `win`, then — if `focused` is
 /// false — re-grab all buttons so click-to-focus events are delivered to us.
 fn grabButtons(win: u32, focused: bool) void {
-    _ = xcb.xcb_ungrab_button(core.conn, xcb.XCB_BUTTON_INDEX_ANY, win, xcb.XCB_MOD_MASK_ANY);
+    const conn = core.getState().conn;
+    _ = xcb.xcb_ungrab_button(conn, xcb.XCB_BUTTON_INDEX_ANY, win, xcb.XCB_MOD_MASK_ANY);
     if (focused) return;
     _ = xcb.xcb_grab_button(
-        core.conn,
+        conn,
         0,
         win,
         xcb.XCB_EVENT_MASK_BUTTON_PRESS,
@@ -311,16 +313,18 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
     grabButtons(win, true);
     if (old) |o| grabButtons(o, false);
 
+    const conn = core.getState().conn;
+
     if (flags.set_input_focus)
         // Always CurrentTime (0): the X server interprets CurrentTime as "now"
         // and bypasses its timestamp-ordering check entirely.  Passing a real
         // event timestamp risks rejection if it predates the server's last
         // focus-change time, and also risks Electron/Qt apps forwarding a stale
         // timestamp back to XSetInputFocus on their internal widget.
-        _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, 0); // CurrentTime
+        _ = xcb.xcb_set_input_focus(conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, 0); // CurrentTime
 
     if (flags.raise)
-        _ = xcb.xcb_configure_window(core.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+        _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 
     if (flags.send_wm_take_focus) {
         // If setFocus pre-fired the WM_PROTOCOLS cookie before entering this
@@ -331,19 +335,19 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
         // pre-fire (drainPendingConfirm).
         if (state.pre_protocols_cookie) |ck| {
             state.pre_protocols_cookie = null;
-            window.sendWMTakeFocusWithCookie(core.conn, win, 0, ck); // CurrentTime
+            window.sendWMTakeFocusWithCookie(conn, win, 0, ck); // CurrentTime
         } else {
-            window.sendWMTakeFocus(core.conn, win, 0); // CurrentTime
+            window.sendWMTakeFocus(conn, win, 0); // CurrentTime
         }
     } else if (state.pre_protocols_cookie) |ck| {
         // send_wm_take_focus is false (e.g. no_input model) but a cookie was
         // pre-fired — discard it to keep the XCB reply queue drained.
-        xcb.xcb_discard_reply(core.conn, ck.sequence);
+        xcb.xcb_discard_reply(conn, ck.sequence);
         state.pre_protocols_cookie = null;
     }
 
     if (flags.arm_confirm) {
-        state.confirm_cookie = xcb.xcb_get_input_focus(core.conn);
+        state.confirm_cookie = xcb.xcb_get_input_focus(conn);
         state.confirm_win = win;
     }
 
@@ -358,7 +362,7 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
 /// path (setFocus).
 /// NOTE: handleFocusIn intentionally does NOT use this guard.
 inline fn isInvalidFocusTarget(win: u32) bool {
-    return win == 0 or win == core.root or bar.isBarWindow(win);
+    return win == 0 or win == core.getState().root or bar.isBarWindow(win);
 }
 
 /// Returns true if `win` currently has map_state == Viewable.
@@ -378,6 +382,8 @@ pub fn setFocus(win: u32, reason: Reason) void {
     if (isInvalidFocusTarget(win)) return;
     if (state.focused_window == win) return;
 
+    const conn = core.getState().conn;
+
     // Guard against destroy/unmap races on paths where the window's liveness
     // cannot be guaranteed without asking the server.
     //   • mouse_click / user_command: event may have been queued before destroy.
@@ -388,9 +394,9 @@ pub fn setFocus(win: u32, reason: Reason) void {
     // reasons either operate inside a server grab or use windows verified by the
     // tiling/workspace machinery.
     if ((reason == .mouse_click or reason == .user_command or reason == .pointer_sync) and
-        !isWindowMapped(core.conn, win)) return;
+        !isWindowMapped(conn, win)) return;
 
-    const input_model = window.getInputModelCached(core.conn, win);
+    const input_model = window.getInputModelCached(conn, win);
     if (input_model == .no_input) return;
 
     // Pipeline: fire the WM_PROTOCOLS get_property cookie NOW, before
@@ -401,9 +407,9 @@ pub fn setFocus(win: u32, reason: Reason) void {
     // typically already in the XCB receive buffer.
     if (state.pre_protocols_cookie) |stale| {
         // Discard any leftover cookie from a previous interrupted path.
-        xcb.xcb_discard_reply(core.conn, stale.sequence);
+        xcb.xcb_discard_reply(conn, stale.sequence);
     }
-    state.pre_protocols_cookie = window.fireTakeFocusCookie(core.conn, win);
+    state.pre_protocols_cookie = window.fireTakeFocusCookie(conn, win);
 
     cancelPendingConfirm();
 
@@ -440,13 +446,15 @@ pub fn drainPendingConfirm() void {
     const win = state.confirm_win.?; // invariant: always set/cleared together with confirm_cookie
     clearConfirmState();
 
+    const conn = core.getState().conn;
+
     // Reply must be consumed before any return to drain the XCB queue.
-    const focus_reply = xcb.xcb_get_input_focus_reply(core.conn, cookie, null);
+    const focus_reply = xcb.xcb_get_input_focus_reply(conn, cookie, null);
     defer if (focus_reply) |r| std.c.free(r);
 
     if (!window.isValidManagedWindow(win)) return;
 
-    const input_model = window.getInputModelCached(core.conn, win);
+    const input_model = window.getInputModelCached(conn, win);
     if (input_model == .no_input) return;
 
     const c = focus_reply orelse return;
@@ -462,8 +470,8 @@ pub fn drainPendingConfirm() void {
     // rather than silently degrading into an unresponsive window.
     std.log.debug("focus: confirm retry for 0x{x}: focus={} (expected > 1), retrying once", .{ win, c.*.focus });
 
-    _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, 0); // CurrentTime
-    window.sendWMTakeFocus(core.conn, win, 0); // CurrentTime
+    _ = xcb.xcb_set_input_focus(conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, 0); // CurrentTime
+    window.sendWMTakeFocus(conn, win, 0); // CurrentTime
 }
 
 /// Clear the paired confirm cookie and window together.
@@ -483,7 +491,7 @@ inline fn clearConfirmState() void {
 fn cancelPendingConfirm() void {
     const cookie = state.confirm_cookie orelse return;
     clearConfirmState();
-    xcb.xcb_discard_reply(core.conn, cookie.sequence);
+    xcb.xcb_discard_reply(core.getState().conn, cookie.sequence);
 }
 
 /// Invalidate the cached input model for `win`.
@@ -500,7 +508,7 @@ fn cancelPendingConfirm() void {
 /// A stale cache would skip the message, leaving the app's internal widget
 /// inactive.
 pub fn invalidateInputModelCache(win: u32) void {
-    window.recacheInputModel(core.conn, win);
+    window.recacheInputModel(core.getState().conn, win);
 }
 
 /// Re-assert focus on `win` from inside handleFocusIn.
@@ -512,16 +520,17 @@ pub fn invalidateInputModelCache(win: u32) void {
 /// No raise, no confirm/retry machinery — re-assertion happens in response
 /// to a focus steal, so stability (not raise-order) is the priority.
 fn sendFocusProtocol(win: u32) void {
-    const model = window.getInputModelCached(core.conn, win);
+    const conn = core.getState().conn;
+    const model = window.getInputModelCached(conn, win);
     if (model == .no_input) return;
     if (model != .globally_active) {
-        _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, 0); // CurrentTime
+        _ = xcb.xcb_set_input_focus(conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, 0); // CurrentTime
     }
     // Always advertise the active window, regardless of input model.
     // Without this, a globally_active window that has stolen focus would leave
     // _NET_ACTIVE_WINDOW pointing at the thief even after we re-assert `win`.
     advertiseActiveWindow(win);
-    window.sendWMTakeFocus(core.conn, win, 0); // CurrentTime
+    window.sendWMTakeFocus(conn, win, 0); // CurrentTime
 }
 
 /// DWM's focusin — translated exactly. No mode/detail/managed filtering.
@@ -552,12 +561,15 @@ pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
             // Redirecting to root first breaks the cycle: the thief fights root
             // (which never replies), exhausting its retry budget.  Then
             // sendFocusProtocol(sel) reclaims focus with no active opponent.
-            if (is_offscreen_steal)
-                _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, core.root, 0); // CurrentTime
+            if (is_offscreen_steal) {
+                const cs = core.getState();
+                _ = xcb.xcb_set_input_focus(cs.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, cs.root, 0); // CurrentTime
+            }
             sendFocusProtocol(sel);
         }
     } else if (is_offscreen_steal) {
-        _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, core.root, 0); // CurrentTime
+        const cs = core.getState();
+        _ = xcb.xcb_set_input_focus(cs.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, cs.root, 0); // CurrentTime
         advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
     }
 }
@@ -597,7 +609,8 @@ pub fn clearFocus() void {
     cancelPendingConfirm();
     state.focused_window = null;
     state.suppress_reason = .none;
-    _ = xcb.xcb_set_input_focus(core.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, core.root, 0); // CurrentTime
+    const cs = core.getState();
+    _ = xcb.xcb_set_input_focus(cs.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, cs.root, 0); // CurrentTime
     carousel.notifyFocusChanged(null);
     bar.scheduleFocusRedraw(null);
     advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
@@ -605,7 +618,8 @@ pub fn clearFocus() void {
 
 inline fn advertiseActiveWindow(win: u32) void {
     if (state.net_active_window == xcb.XCB_ATOM_NONE) return;
-    _ = xcb.xcb_change_property(core.conn, xcb.XCB_PROP_MODE_REPLACE, core.root, state.net_active_window, xcb.XCB_ATOM_WINDOW, 32, 1, &win);
+    const cs = core.getState();
+    _ = xcb.xcb_change_property(cs.conn, xcb.XCB_PROP_MODE_REPLACE, cs.root, state.net_active_window, xcb.XCB_ATOM_WINDOW, 32, 1, &win);
 }
 
 /// True when `reason` should raise `win` to the top of the stacking order.
@@ -652,7 +666,8 @@ pub fn cancelPointerSync() void {
 pub fn beginPointerSync() void {
     state.suppress_reason = .none;
     discardOptCookie(state.pointer_cookie);
-    state.pointer_cookie = xcb.xcb_query_pointer(core.conn, core.root);
+    const cs = core.getState();
+    state.pointer_cookie = xcb.xcb_query_pointer(cs.conn, cs.root);
 }
 
 /// Drain the deferred pointer-position reply and route focus to whichever
@@ -662,10 +677,11 @@ pub fn beginPointerSync() void {
 pub fn drainPointerSync() void {
     const cookie = state.pointer_cookie orelse return;
     state.pointer_cookie = null;
-    const reply = xcb.xcb_query_pointer_reply(core.conn, cookie, null) orelse return;
+    const cs = core.getState();
+    const reply = xcb.xcb_query_pointer_reply(cs.conn, cookie, null) orelse return;
     defer std.c.free(reply);
     const child = reply.*.child;
-    if (child == 0 or child == core.root or !window.isValidManagedWindow(child)) return;
+    if (child == 0 or child == cs.root or !window.isValidManagedWindow(child)) return;
     // BUG FIX: if the stale pointer reply contains a window from a workspace
     // that is no longer current (e.g., the reply was fired before a workspace
     // switch), silently discard it — do not redirect focus to an offscreen window.
