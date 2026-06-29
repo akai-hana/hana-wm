@@ -87,15 +87,15 @@ var spawn_cursor: struct { x: i16 = 0, y: i16 = 0 } = .{};
 
 // Workspace-rule fast-lookup map
 //
-// Rebuilt from core.config.workspaces.rules at init() and after every config
-// reload.  Maps a WM_CLASS name (class or instance component) to the target
-// workspace index (0-based), so `findWorkspaceRuleByClass` can do an O(1)
-// hash lookup instead of an O(R) linear scan on every MapRequest.
+// Rebuilt from core.getState().config.workspaces.rules at init() and after
+// every config reload.  Maps a WM_CLASS name (class or instance component) to
+// the target workspace index (0-based), so `findWorkspaceRuleByClass` can do
+// an O(1) hash lookup instead of an O(R) linear scan on every MapRequest.
 //
 // Keys borrow slices from the config's allocations and are valid until the
 // next rebuild (triggered by a config reload via `buildRulesMap`).
 // Because rebuilding always happens *after* the new config is committed to
-// core.config, the borrowed slices are always live.
+// core's state, the borrowed slices are always live.
 
 var g_rules_map: std.StringHashMapUnmanaged(u8) = .{};
 
@@ -148,9 +148,10 @@ pub const Pos = struct { x: i16, y: i16 };
 /// Returns the default floating window position
 /// (one quarter of the screen in from the top-left).
 pub inline fn floatDefaultPos() Pos {
+    const screen = core.getState().screen;
     return .{
-        .x = @intCast(@min(core.screen.width_in_pixels / 4, std.math.maxInt(i16))),
-        .y = @intCast(@min(core.screen.height_in_pixels / 4, std.math.maxInt(i16))),
+        .x = @intCast(@min(screen.width_in_pixels / 4, std.math.maxInt(i16))),
+        .y = @intCast(@min(screen.height_in_pixels / 4, std.math.maxInt(i16))),
     };
 }
 
@@ -161,11 +162,12 @@ pub inline fn floatDefaultPos() Pos {
 /// This is the shared implementation of the "restore floating window"
 /// pattern that appears in minimize, workspaces, and fullscreen modules.
 pub fn restoreFloatGeom(win: u32) void {
+    const conn = core.getState().conn;
     if (getWindowGeom(win)) |rect| {
-        utils.configureWindow(core.conn, win, rect);
+        utils.configureWindow(conn, win, rect);
     } else {
         const pos = floatDefaultPos();
-        _ = xcb.xcb_configure_window(core.conn, win, xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{ @bitCast(@as(i32, pos.x)), @bitCast(@as(i32, pos.y)) });
+        _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{ @bitCast(@as(i32, pos.x)), @bitCast(@as(i32, pos.y)) });
     }
 }
 
@@ -701,14 +703,14 @@ fn populateAtomCache() void {
     }) |e| @field(atoms, e.field) = utils.getAtomCached(e.atom) catch 0;
 }
 
-/// (Re)build the workspace-rule fast-lookup map from the current core.config.
+/// (Re)build the workspace-rule fast-lookup map from the current config.
 /// Keys are borrowed slices pointing into the config's allocations and remain
 /// valid until the next rebuild.  If a class name appears in multiple rules,
 /// the first rule wins (consistent with the old linear scan).
 pub fn buildRulesMap() void {
     const alloc = g_alloc orelse return;
     g_rules_map.clearRetainingCapacity();
-    for (core.config.workspaces.rules.items) |rule| {
+    for (core.getState().config.workspaces.rules.items) |rule| {
         // putNoClobber: first occurrence wins.  On OOM the entry is silently
         // dropped — there is no linear-scan fallback.  The affected rule will
         // not fire; the window is routed to the current workspace instead.
@@ -764,13 +766,13 @@ pub fn deinit() void {
 }
 
 inline fn tilingActive() bool {
-    return core.config.tiling.enabled;
+    return core.getState().config.tiling.enabled;
 }
 
 // Window predicates
 
 inline fn isBasicInvalid(win: u32) bool {
-    return win == 0 or win == core.root or bar.isBarWindow(win);
+    return win == 0 or win == core.getState().root or bar.isBarWindow(win);
 }
 
 pub inline fn isValidManagedWindow(win: u32) bool {
@@ -798,7 +800,7 @@ inline fn clampToValidWorkspace(target: u8, fallback: u8) u8 {
 /// instance component.  The map is built at init() and after every config
 /// reload, so no linear scan over the rules list happens at spawn time.
 fn findWorkspaceRuleByClass(cookie: xcb.xcb_get_property_cookie_t) ?u8 {
-    const reply = xcb.xcb_get_property_reply(core.conn, cookie, null) orelse return null;
+    const reply = xcb.xcb_get_property_reply(core.getState().conn, cookie, null) orelse return null;
     defer std.c.free(reply);
     if (reply.*.format != 8 or reply.*.value_len == 0) return null;
 
@@ -844,7 +846,7 @@ fn findSpawnQueueWorkspace(
     const pid_cookie = c_net_wm_pid orelse return null;
 
     const win_pid: u32 = pid: {
-        const pid_reply = xcb.xcb_get_property_reply(core.conn, pid_cookie, null) orelse break :pid 0;
+        const pid_reply = xcb.xcb_get_property_reply(core.getState().conn, pid_cookie, null) orelse break :pid 0;
         defer std.c.free(pid_reply);
         if (pid_reply.*.format != 32 or pid_reply.*.value_len < 1) break :pid 0;
         break :pid @as([*]const u32, @ptrCast(@alignCast(xcb.xcb_get_property_value(pid_reply))))[0];
@@ -906,13 +908,14 @@ fn resolveTargetWorkspace(
     c_wm_class: xcb.xcb_get_property_cookie_t,
     c_net_wm_pid: ?xcb.xcb_get_property_cookie_t,
 ) u8 {
-    if (core.config.workspaces.rules.items.len > 0 and atoms.wm_class != 0) {
+    const cs = core.getState();
+    if (cs.config.workspaces.rules.items.len > 0 and atoms.wm_class != 0) {
         if (findWorkspaceRuleByClass(c_wm_class)) |target| {
             if (c_net_wm_pid) |pid_cookie|
-                xcb.xcb_discard_reply(core.conn, pid_cookie.sequence);
+                xcb.xcb_discard_reply(cs.conn, pid_cookie.sequence);
             return clampToValidWorkspace(target, current_ws);
         }
-    } else xcb.xcb_discard_reply(core.conn, c_wm_class.sequence);
+    } else xcb.xcb_discard_reply(cs.conn, c_wm_class.sequence);
 
     if (findSpawnQueueWorkspace(c_net_wm_pid)) |spawn_ws|
         return clampToValidWorkspace(spawn_ws, current_ws);
@@ -958,13 +961,14 @@ var g_prefetched_ptr_cookie: ?xcb.xcb_query_pointer_cookie_t = null;
 /// takePrefetchedSpawnPointer drains it for free instead of blocking the
 /// key-press handler with a synchronous round-trip.
 pub fn prefetchSpawnPointer() void {
+    const cs = core.getState();
     // Discard any stale prefetch from a previous spawn that never consumed it
     // (e.g. the window was routed to a non-current workspace).
     if (g_prefetched_ptr_cookie) |old| {
-        xcb.xcb_discard_reply(core.conn, old.sequence);
+        xcb.xcb_discard_reply(cs.conn, old.sequence);
         g_prefetched_ptr_cookie = null;
     }
-    g_prefetched_ptr_cookie = xcb.xcb_query_pointer(core.conn, core.root);
+    g_prefetched_ptr_cookie = xcb.xcb_query_pointer(cs.conn, cs.root);
 }
 
 /// Consume the prefetched cookie and drain its reply.  Returns null when no
@@ -973,7 +977,7 @@ pub fn prefetchSpawnPointer() void {
 fn takePrefetchedSpawnPointer() ?*xcb.xcb_query_pointer_reply_t {
     const cookie = g_prefetched_ptr_cookie orelse return null;
     g_prefetched_ptr_cookie = null;
-    return xcb.xcb_query_pointer_reply(core.conn, cookie, null);
+    return xcb.xcb_query_pointer_reply(core.getState().conn, cookie, null);
 }
 
 /// Record the cursor position from a pre-drained pointer reply for later
@@ -1012,9 +1016,10 @@ const PropertyCookies = struct {
 
 /// Fires all property requests in a single batch before any blocking work.
 fn firePropertyCookies(win: u32) PropertyCookies {
+    const cs = core.getState();
     return .{
         .protocols = xcb.xcb_get_property(
-            core.conn,
+            cs.conn,
             0,
             win,
             atoms.wm_protocols,
@@ -1023,7 +1028,7 @@ fn firePropertyCookies(win: u32) PropertyCookies {
             256,
         ),
         .hints = xcb.xcb_get_property(
-            core.conn,
+            cs.conn,
             0,
             win,
             xcb.XCB_ATOM_WM_HINTS,
@@ -1032,7 +1037,7 @@ fn firePropertyCookies(win: u32) PropertyCookies {
             9,
         ),
         .normal_hints = xcb.xcb_get_property(
-            core.conn,
+            cs.conn,
             0,
             win,
             xcb.XCB_ATOM_WM_NORMAL_HINTS,
@@ -1041,7 +1046,7 @@ fn firePropertyCookies(win: u32) PropertyCookies {
             18,
         ),
         .wm_class = xcb.xcb_get_property(
-            core.conn,
+            cs.conn,
             0,
             win,
             atoms.wm_class,
@@ -1054,7 +1059,7 @@ fn firePropertyCookies(win: u32) PropertyCookies {
         .net_wm_pid = blk: {
             if (g_spawn_queue.items.len == 0) break :blk null;
             break :blk xcb.xcb_get_property(
-                core.conn,
+                cs.conn,
                 0,
                 win,
                 atoms.net_wm_pid,
@@ -1067,7 +1072,7 @@ fn firePropertyCookies(win: u32) PropertyCookies {
         // batch as the property requests.  By the time any reply is drained
         // (parseSizeHintsIntoCache pays the one round-trip), this reply is
         // already buffered and mapWindowToScreen can consume it for free.
-        .ptr = xcb.xcb_query_pointer(core.conn, core.root),
+        .ptr = xcb.xcb_query_pointer(cs.conn, cs.root),
     };
 }
 
@@ -1094,6 +1099,7 @@ fn firePropertyCookies(win: u32) PropertyCookies {
 /// are not locked for that duration, eliminating the compositor stall that
 /// previously caused visible frame drops on every spawn.
 fn mapWindowToScreen(win: u32, ptr_cookie: xcb.xcb_query_pointer_cookie_t) void {
+    const conn = core.getState().conn;
     // Drain the pointer position.  Either path is a free buffer read —
     // no new round-trip is incurred here:
     //   • keybind spawn:          consume the prefetch cookie fired at key-press
@@ -1108,10 +1114,10 @@ fn mapWindowToScreen(win: u32, ptr_cookie: xcb.xcb_query_pointer_cookie_t) void 
     const ptr_reply: ?*xcb.xcb_query_pointer_reply_t = blk: {
         if (takePrefetchedSpawnPointer()) |pre| {
             // Prefetch consumed — discard the redundant batch cookie.
-            xcb.xcb_discard_reply(core.conn, ptr_cookie.sequence);
+            xcb.xcb_discard_reply(conn, ptr_cookie.sequence);
             break :blk pre;
         }
-        break :blk xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null);
+        break :blk xcb.xcb_query_pointer_reply(conn, ptr_cookie, null);
     };
     defer if (ptr_reply) |r| std.c.free(r);
 
@@ -1129,16 +1135,16 @@ fn mapWindowToScreen(win: u32, ptr_cookie: xcb.xcb_query_pointer_cookie_t) void 
         tiling.retileCurrentWorkspace();
     } else {
         if (fullscreen.hasAnyFullscreen()) {
-            utils.pushWindowOffscreen(core.conn, win);
+            utils.pushWindowOffscreen(conn, win);
         }
         restoreFloatGeom(win);
     }
 
     // ── Inside the grab: atomic map, focus, borders ─────────────────────────
-    _ = xcb.xcb_grab_server(core.conn);
+    _ = xcb.xcb_grab_server(conn);
 
     applyBorderWidth(win);
-    _ = xcb.xcb_map_window(core.conn, win);
+    _ = xcb.xcb_map_window(conn, win);
 
     focus.setFocus(win, .window_spawn);
     snapshotSpawnCursorFromReply(ptr_reply, suppress_reason);
@@ -1151,7 +1157,7 @@ fn mapWindowToScreen(win: u32, ptr_cookie: xcb.xcb_query_pointer_cookie_t) void 
     markBordersFlushed();
 
     // No xcb_flush here: the event-loop end-of-batch flush covers this.
-    _ = xcb.xcb_ungrab_server(core.conn);
+    _ = xcb.xcb_ungrab_server(conn);
 }
 
 /// Register a newly adopted window that is on a non-current workspace.
@@ -1166,16 +1172,18 @@ fn registerWindowOffscreen(win: u32) void {
 }
 
 fn discardPropertyCookies(cookies: PropertyCookies) void {
-    xcb.xcb_discard_reply(core.conn, cookies.protocols.sequence);
-    xcb.xcb_discard_reply(core.conn, cookies.hints.sequence);
-    xcb.xcb_discard_reply(core.conn, cookies.normal_hints.sequence);
-    xcb.xcb_discard_reply(core.conn, cookies.wm_class.sequence);
-    if (cookies.net_wm_pid) |c| xcb.xcb_discard_reply(core.conn, c.sequence);
-    xcb.xcb_discard_reply(core.conn, cookies.ptr.sequence);
+    const conn = core.getState().conn;
+    xcb.xcb_discard_reply(conn, cookies.protocols.sequence);
+    xcb.xcb_discard_reply(conn, cookies.hints.sequence);
+    xcb.xcb_discard_reply(conn, cookies.normal_hints.sequence);
+    xcb.xcb_discard_reply(conn, cookies.wm_class.sequence);
+    if (cookies.net_wm_pid) |c| xcb.xcb_discard_reply(conn, c.sequence);
+    xcb.xcb_discard_reply(conn, cookies.ptr.sequence);
 }
 
 pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const win = event.window;
+    const conn = core.getState().conn;
 
     // Guard against double-manage: a window can send multiple MapRequest events
     // (e.g. if it unmaps and remaps itself quickly while the WM is still
@@ -1188,7 +1196,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const current_ws: u8 = tracking.getCurrentWorkspace() orelse 0;
 
     _ = xcb.xcb_change_window_attributes(
-        core.conn,
+        conn,
         win,
         xcb.XCB_CW_EVENT_MASK,
         &[_]u32{constants.EventMasks.MANAGED_WINDOW},
@@ -1210,10 +1218,10 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
 
     parseSizeHintsIntoCache(win, cookies.normal_hints);
 
-    populateFocusCacheFromCookies(core.conn, win, cookies.protocols, cookies.hints);
+    populateFocusCacheFromCookies(conn, win, cookies.protocols, cookies.hints);
 
     if (on_current) mapWindowToScreen(win, cookies.ptr) else {
-        xcb.xcb_discard_reply(core.conn, cookies.ptr.sequence);
+        xcb.xcb_discard_reply(conn, cookies.ptr.sequence);
         registerWindowOffscreen(win);
     }
 }
@@ -1221,6 +1229,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
 // Unmap / destroy
 
 fn unmanageWindow(win: u32) void {
+    const cs = core.getState();
     const was_fullscreen = blk: {
         const fs_ws = fullscreen.workspaceFor(win);
         if (fs_ws) |ws| fullscreen.removeForWorkspace(ws);
@@ -1247,12 +1256,12 @@ fn unmanageWindow(win: u32) void {
     // compositor before xcb_ungrab_server.  Pre-draining here keeps the
     // grab atomic.  The pointer position is at most microseconds staler.
     const ptr_reply: ?*xcb.xcb_query_pointer_reply_t = if (was_focused) blk: {
-        const cookie = xcb.xcb_query_pointer(core.conn, core.root);
-        break :blk xcb.xcb_query_pointer_reply(core.conn, cookie, null);
+        const cookie = xcb.xcb_query_pointer(cs.conn, cs.root);
+        break :blk xcb.xcb_query_pointer_reply(cs.conn, cookie, null);
     } else null;
     defer if (ptr_reply) |r| std.c.free(r);
 
-    _ = xcb.xcb_grab_server(core.conn);
+    _ = xcb.xcb_grab_server(cs.conn);
 
     // tiling.removeWindow now unconditionally evicts the combined cache entry
     // (geometry + border + size hints), so the separate evictSizeHints call
@@ -1282,7 +1291,7 @@ fn unmanageWindow(win: u32) void {
     markBordersFlushed();
 
     // No xcb_flush here: the event-loop end-of-batch flush covers this.
-    _ = xcb.xcb_ungrab_server(core.conn);
+    _ = xcb.xcb_ungrab_server(cs.conn);
 }
 
 pub fn handleUnmapNotify(event: *const xcb.xcb_unmap_notify_event_t) void {
@@ -1336,7 +1345,7 @@ fn focusWindowUnderPointer(ptr_reply: ?*xcb.xcb_query_pointer_reply_t) void {
     // walk: xcb_query_tree on XID 0 is undefined by the X protocol and wastes
     // a round-trip.  Fall through to focusBestAvailable instead.
     if (raw_child != 0) {
-        const child = findManagedWindow(core.conn, raw_child, tracking.isManaged);
+        const child = findManagedWindow(core.getState().conn, raw_child, tracking.isManaged);
         if (tracking.isOnCurrentWorkspaceAndVisible(child)) {
             focus.setFocus(child, .pointer_sync);
             return;
@@ -1376,7 +1385,7 @@ fn sendConfigureNotify(win: u32, geom: WindowGeometry) void {
         .override_redirect = 0,
         .pad1 = 0,
     };
-    _ = xcb.xcb_send_event(core.conn, 0, win, xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY, @ptrCast(&ev));
+    _ = xcb.xcb_send_event(core.getState().conn, 0, win, xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY, @ptrCast(&ev));
 }
 
 /// Synthesize and send a ConfigureNotify event with the window's current geometry.
@@ -1417,11 +1426,12 @@ fn sendSyntheticConfigureNotify(win: u32) void {
     // cache entry, so this window will always miss path 1 while fullscreen.
     {
         if (fullscreen.isFullscreen(win)) {
+            const screen = core.getState().screen;
             sendConfigureNotify(win, .{
                 .x = 0,
                 .y = 0,
-                .width = @intCast(core.screen.width_in_pixels),
-                .height = @intCast(core.screen.height_in_pixels),
+                .width = @intCast(screen.width_in_pixels),
+                .height = @intCast(screen.height_in_pixels),
                 .border_width = 0,
             });
             return;
@@ -1430,9 +1440,10 @@ fn sendSyntheticConfigureNotify(win: u32) void {
 
     // Path 3: true cache miss — floating window, no retile yet. One blocking
     // round-trip.  Rare in practice; not a hot path.
+    const conn = core.getState().conn;
     const reply = xcb.xcb_get_geometry_reply(
-        core.conn,
-        xcb.xcb_get_geometry(core.conn, win),
+        conn,
+        xcb.xcb_get_geometry(conn, win),
         null,
     ) orelse return;
     defer std.c.free(reply);
@@ -1502,7 +1513,7 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
             n += 1;
         }
     }
-    _ = xcb.xcb_configure_window(core.conn, win, mask, &values);
+    _ = xcb.xcb_configure_window(core.getState().conn, win, mask, &values);
 }
 
 // Focus / crossing events
@@ -1560,14 +1571,14 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t) void {
         debug.info("[ENTER] -> filtered: focus suppressed for hover", .{});
         return;
     }
-    const managed = findManagedWindow(core.conn, event.event, tracking.isManaged);
+    const managed = findManagedWindow(core.getState().conn, event.event, tracking.isManaged);
     debug.info("[ENTER] -> resolved managed=0x{x}", .{managed});
     maybeFocusWindow(managed);
 }
 
 pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t) void {
     focus.setLastEventTime(event.time);
-    if (event.event != core.root) return;
+    if (event.event != core.getState().root) return;
     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL) return;
     if (drag.isDragging()) return;
     if (suppressSpawnCrossing(event.root_x, event.root_y)) return;
@@ -1586,6 +1597,7 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t) void {
 
 pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void {
     if (!isValidManagedWindow(event.window)) return;
+    const conn = core.getState().conn;
 
     // WM_NORMAL_HINTS: refresh the size-hint cache so max-size, resize-
     // increment, and aspect-ratio constraints remain accurate for apps that
@@ -1593,7 +1605,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
     // adjusting their resize-increment grid when the font changes).
     if (event.atom == xcb.XCB_ATOM_WM_NORMAL_HINTS) {
         const cookie = xcb.xcb_get_property(
-            core.conn,
+            conn,
             0,
             event.window,
             xcb.XCB_ATOM_WM_NORMAL_HINTS,
@@ -1610,7 +1622,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
     // (CacheSlot array).  Calling focus.invalidateInputModelCache only cleared
     // focus.zig's side, leaving the CacheSlot stale until the window was
     // destroyed — so future getCachedProps hits would return the old model.
-    _ = queryAndCacheProps(core.conn, event.window);
+    _ = queryAndCacheProps(conn, event.window);
 }
 
 // Size-hint parsing
@@ -1624,7 +1636,7 @@ fn parseSizeHintsIntoCache(
     win: u32,
     cookie: xcb.xcb_get_property_cookie_t,
 ) void {
-    const reply = xcb.xcb_get_property_reply(core.conn, cookie, null) orelse return;
+    const reply = xcb.xcb_get_property_reply(core.getState().conn, cookie, null) orelse return;
     defer std.c.free(reply);
     if (reply.*.format != 32 or reply.*.value_len < 5) return;
 
@@ -1689,16 +1701,17 @@ fn parseSizeHintsIntoCache(
 /// Returns the DPI-scaled border width.
 pub inline fn getBorderWidth() u16 {
     if (tiling.getStateOpt()) |s| return s.config.border_width;
+    const cs = core.getState();
     return scale.scaleBorderWidth(
-        core.config.tiling.border_width,
-        core.screen.height_in_pixels,
+        cs.config.tiling.border_width,
+        cs.screen.height_in_pixels,
     );
 }
 
 /// Returns the correct border color for `win`.
 inline fn borderColor(win: u32) u32 {
     if (fullscreen.isFullscreen(win)) return 0;
-    const cfg = &core.config.tiling;
+    const cfg = &core.getState().config.tiling;
     return if (focus.getFocused() == win) cfg.border_focused else cfg.border_unfocused;
 }
 
@@ -1706,13 +1719,13 @@ inline fn borderColor(win: u32) u32 {
 pub fn applyBorderWidth(win: u32) void {
     const width = getBorderWidth();
     if (width > 0)
-        _ = xcb.xcb_configure_window(core.conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{width});
+        _ = xcb.xcb_configure_window(core.getState().conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{width});
 }
 
 /// Apply border width and color to `win`.
 pub fn applyBorder(win: u32) void {
     applyBorderWidth(win);
-    _ = xcb.xcb_change_window_attributes(core.conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
+    _ = xcb.xcb_change_window_attributes(core.getState().conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
 }
 
 /// Refresh border colors for all windows on the current workspace.
@@ -1728,17 +1741,18 @@ pub fn applyBorder(win: u32) void {
 fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
     const cur = tracking.getCurrentWorkspace() orelse return;
     const cur_bit = tracking.workspaceBit(cur);
+    const conn = core.getState().conn;
     for (tracking.allWindows()) |_entry| {
         const win = _entry.win;
         if (_entry.mask & cur_bit == 0) continue;
         if (comptime skip_tiled) {
-            if (core.config.tiling.enabled and tiling.isWindowTiled(win)) continue;
-            _ = xcb.xcb_change_window_attributes(core.conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
+            if (core.getState().config.tiling.enabled and tiling.isWindowTiled(win)) continue;
+            _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
         } else {
             const color = borderColor(win);
             // Dedup via the tiling CacheMap: skip the XCB call when color is unchanged.
             if (tiling.sendBorderColorIfChanged(win, color)) continue;
-            _ = xcb.xcb_change_window_attributes(core.conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
+            _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
         }
     }
 }

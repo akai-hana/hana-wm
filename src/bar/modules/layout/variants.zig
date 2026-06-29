@@ -9,7 +9,7 @@ const tiling = @import("tiling");
 
 /// Draws the layout variants icon on the bar.
 pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
-    if (!core.config.tiling.enabled) return start_x;
+    if (!core.getState().config.tiling.enabled) return start_x;
     const t_state = tiling.getStateOpt() orelse return start_x;
     const indicator = getIndicator(t_state);
     if (indicator.len == 0) return start_x;

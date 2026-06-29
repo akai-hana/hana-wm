@@ -132,10 +132,11 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     focus.setLastEventTime(event.time);
 
+    const cs = core.getState();
     const clicked_window = if (event.child != 0) event.child else event.event;
-    const managed_window = window.findManagedWindow(core.conn, clicked_window, tracking.isManaged);
+    const managed_window = window.findManagedWindow(cs.conn, clicked_window, tracking.isManaged);
 
-    if (clicked_window == 0 or clicked_window == core.root or managed_window == 0) {
+    if (clicked_window == 0 or clicked_window == cs.root or managed_window == 0) {
         replayPointer(event.time);
         return;
     }
@@ -165,7 +166,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     // setFocus short-circuits when managed_window is already focused_window
     // and never reaches the raise inside commitFocusTransition. Without this,
     // a covered window that holds focus stays buried despite the click.
-    _ = xcb.xcb_configure_window(core.conn, managed_window, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+    _ = xcb.xcb_configure_window(cs.conn, managed_window, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     focus.setFocus(managed_window, .mouse_click);
     releaseGrab(event.time);
 }
@@ -189,7 +190,8 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
 
     // POINTER_MOTION_HINT delivers one event per gesture; re-arm by sending a
     // QueryPointer. Fire-and-discard — the server re-arms on receipt, not reply.
-    xcb.xcb_discard_reply(core.conn, xcb.xcb_query_pointer(core.conn, core.root).sequence);
+    const cs = core.getState();
+    xcb.xcb_discard_reply(cs.conn, xcb.xcb_query_pointer(cs.conn, cs.root).sequence);
 }
 
 // Window operations
@@ -197,8 +199,9 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
 /// Closes a window gracefully via WM_DELETE_WINDOW (ICCCM §4.1.2.7), falling
 /// back to xcb_destroy_window for clients that don't advertise the protocol.
 fn closeWindow(win: u32) void {
-    if (!window.supportsWMDeleteCached(core.conn, win)) {
-        _ = xcb.xcb_destroy_window(core.conn, win);
+    const conn = core.getState().conn;
+    if (!window.supportsWMDeleteCached(conn, win)) {
+        _ = xcb.xcb_destroy_window(conn, win);
         return;
     }
 
@@ -215,7 +218,7 @@ fn closeWindow(win: u32) void {
     event.data.data32[0] = delete_atom;
     event.data.data32[1] = focus.getLastEventTime(); // ICCCM §4.1.7
 
-    _ = xcb.xcb_send_event(core.conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
+    _ = xcb.xcb_send_event(conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
 }
 
 // Action dispatch
@@ -317,7 +320,8 @@ fn executeTilingAction(action: *const types.Action) void {
 
 /// Executes the swap_master / swap_master_focus_swap action inside a server grab.
 fn executeSwapMaster(action: *const types.Action) void {
-    _ = xcb.xcb_grab_server(core.conn);
+    const conn = core.getState().conn;
+    _ = xcb.xcb_grab_server(conn);
     if (action.* == .swap_master) {
         // Capture the focused window ID before the swap so we can pass it as
         // defer_configure — the shrinking window fills its new slot before the
@@ -347,12 +351,12 @@ fn executeSwapMaster(action: *const types.Action) void {
     // redrawInsideGrab renders to the off-screen pixmap and queues xcb_copy_area
     // without flushing; ungrabAndFlush sends everything atomically.
     bar.redrawInsideGrab();
-    utils.ungrabAndFlush(core.conn);
+    utils.ungrabAndFlush(conn);
 }
 
 /// Dispatches workspace-related actions. workspaces.zig self-gates to a
-/// single implicit workspace when core.config.workspaces.enabled is false,
-/// so these calls are always valid regardless of that setting.
+/// single implicit workspace when core.getState().config.workspaces.enabled
+/// is false, so these calls are always valid regardless of that setting.
 fn executeWorkspaceAction(action: *const types.Action) void {
     switch (action.*) {
         .switch_workspace => |ws| workspaces.switchTo(ws),
@@ -485,8 +489,9 @@ fn executeShellCommand(cmd: []const u8) !void {
     // [exec, switch_workspace] where a later action mutates g_current.
     const spawn_ws = tracking.getCurrentWorkspace();
 
-    const cmd_z = try core.alloc.dupeZ(u8, cmd);
-    defer core.alloc.free(cmd_z);
+    const alloc = core.getState().alloc;
+    const cmd_z = try alloc.dupeZ(u8, cmd);
+    defer alloc.free(cmd_z);
 
     if (g_pending.len >= MAX_PENDING_SPAWNS)
         debug.warn("spawn: pending table full, spawning '{s}' without workspace routing", .{cmd});
@@ -643,7 +648,7 @@ fn dumpState() void {
 /// Searches config mouse bindings for a modifier+button match and executes it.
 /// Returns true and releases the grab if a binding is found, false otherwise.
 fn tryConfigMouseBind(mods: u16, button: u8, win: u32, time: u32) bool {
-    for (core.config.mouse_bindings.items) |*mb| {
+    for (core.getState().config.mouse_bindings.items) |*mb| {
         if (mb.modifiers == mods and mb.button == button) {
             executeMouseAction(&mb.action, win) catch |err| debug.err("mouse bind error: {}", .{err});
             releaseGrab(time);
@@ -656,47 +661,52 @@ fn tryConfigMouseBind(mods: u16, button: u8, win: u32, time: u32) bool {
 /// Runs `op()` inside an xcb server grab, redraws the bar, and flushes atomically.
 /// Use for layout/master operations where no border sweep is needed.
 inline fn withTilingGrab(op: anytype) void {
-    _ = xcb.xcb_grab_server(core.conn);
+    const conn = core.getState().conn;
+    _ = xcb.xcb_grab_server(conn);
     op();
     bar.redrawInsideGrab();
-    utils.ungrabAndFlush(core.conn);
+    utils.ungrabAndFlush(conn);
 }
 
 /// Like withTilingGrab but also sweeps workspace borders after op().
 /// Use for operations that reorder or restack windows (move_window_next/prev).
 inline fn withTilingGrabAndBorders(op: anytype) void {
-    _ = xcb.xcb_grab_server(core.conn);
+    const conn = core.getState().conn;
+    _ = xcb.xcb_grab_server(conn);
     op();
     window.updateFloatingWindowBorders();
     window.markBordersFlushed();
     bar.redrawInsideGrab();
-    utils.ungrabAndFlush(core.conn);
+    utils.ungrabAndFlush(conn);
 }
 
 /// Like withTilingGrabAndBorders but passes `win` as the sole argument to `op`.
 /// Use for per-window operations such as toggleWindowFloat.
 inline fn withTilingGrabAndBordersWin(win: u32, op: anytype) void {
-    _ = xcb.xcb_grab_server(core.conn);
+    const conn = core.getState().conn;
+    _ = xcb.xcb_grab_server(conn);
     op(win);
     window.updateFloatingWindowBorders();
     window.markBordersFlushed();
     bar.redrawInsideGrab();
-    utils.ungrabAndFlush(core.conn);
+    utils.ungrabAndFlush(conn);
 }
 
 /// Replays a frozen pointer event without releasing the keyboard grab.
 /// Always pass event.time — never XCB_CURRENT_TIME.
 inline fn replayPointer(time: u32) void {
-    _ = xcb.xcb_allow_events(core.conn, xcb.XCB_ALLOW_REPLAY_POINTER, time);
-    _ = xcb.xcb_flush(core.conn);
+    const conn = core.getState().conn;
+    _ = xcb.xcb_allow_events(conn, xcb.XCB_ALLOW_REPLAY_POINTER, time);
+    _ = xcb.xcb_flush(conn);
 }
 
 /// Releases both the pointer and keyboard SYNC grabs acquired on Super+click.
 /// Always pass event.time — never XCB_CURRENT_TIME.
 inline fn releaseGrab(time: u32) void {
-    _ = xcb.xcb_allow_events(core.conn, xcb.XCB_ALLOW_REPLAY_POINTER, time);
-    _ = xcb.xcb_allow_events(core.conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, time);
-    _ = xcb.xcb_flush(core.conn);
+    const conn = core.getState().conn;
+    _ = xcb.xcb_allow_events(conn, xcb.XCB_ALLOW_REPLAY_POINTER, time);
+    _ = xcb.xcb_allow_events(conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, time);
+    _ = xcb.xcb_flush(conn);
 }
 
 inline fn closePipe(p: [2]c_int) void {

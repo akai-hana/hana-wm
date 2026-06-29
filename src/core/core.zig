@@ -1,5 +1,6 @@
 //! Central hub for process-wide XCB state and shared types.
-//! All `undefined` globals must be initialised in main before any other module runs.
+//! `core.init()` must be called from main before any other module calls
+//! `core.getState()` — see `State` below for why and how this is enforced.
 
 const std = @import("std");
 
@@ -60,24 +61,59 @@ pub const DpiInfo = struct {
 
 // Process-wide singletons.
 //
-// INVARIANT: every field below is `undefined` until main() initialises it.
-// In Debug/ReleaseSafe builds an out-of-order access panics; in ReleaseFast
-// the compiler may assume these are fully initialised and silently mis-compile
-// any access that races with startup (e.g. a module-level `comptime` block or
-// a test that imports `core` without calling main first).
+// `conn`, `screen`, `root`, `alloc`, and `config` are all written exactly
+// once during main()'s startup sequence (config is later *replaced*
+// wholesale on a config reload — see events.zig — but the act of replacing
+// it is itself just a normal field write, not a teardown).  Before that
+// first write they have no sensible value, so they're bundled into one
+// `?State` rather than left as five separate `undefined` globals: any
+// access before init() is a clear, safe @panic in every build mode, never
+// silent undefined behaviour in ReleaseFast.
 //
-// To eliminate this class of bug entirely, consider migrating to the
-// `?State` pattern used in `tiling.zig`, where each field is a nullable
-// pointer initialised to null and unwrapped with `.?` at every use site —
-// producing a safe panic in all build modes on premature access.
-pub var conn: *xcb.xcb_connection_t = undefined;
-pub var screen: *xcb.xcb_screen_t = undefined;
-pub var root: WindowId = undefined;
-pub var alloc: std.mem.Allocator = undefined;
-pub var config: types.Config = undefined;
+// This mirrors the pattern `tiling.zig` already uses for its own state
+// (see `tiling.getState()` / `tiling.getStateOpt()`); core now follows the
+// same convention instead of being the one place that didn't.
+pub const State = struct {
+    conn: *xcb.xcb_connection_t,
+    screen: *xcb.xcb_screen_t,
+    root: WindowId,
+    alloc: std.mem.Allocator,
+    config: types.Config,
+};
+
+// Null before init(), non-null for the rest of the process lifetime.
+// Using ?State rather than five undefined fields makes pre-init access a
+// safe runtime @panic in all build modes, not UB in ReleaseFast.
+var state: ?State = null;
+
+/// Returns a pointer to the live core state.
+/// Panics in all build modes when called before init() — never silent UB.
+pub inline fn getState() *State {
+    if (state) |*s| return s;
+    @panic("core: getState() called before init()");
+}
+
+/// Safe pre-init query for code that may run before main() finishes startup
+/// (e.g. a test that imports `core` without driving the normal boot path).
+pub inline fn getStateOpt() ?*State {
+    return if (state) |*s| s else null;
+}
+
+/// Establishes the process-wide core state. Must be called exactly once,
+/// after the X connection is open and the initial config has been loaded,
+/// and before any other module calls `getState()`.
+pub fn init(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t, root: WindowId, alloc: std.mem.Allocator, config: types.Config) void {
+    state = .{ .conn = conn, .screen = screen, .root = root, .alloc = alloc, .config = config };
+}
+
+// `dpi_info` deliberately stays outside `State`: unlike the fields above it
+// already carries a safe, sensible default (96.0 DPI, i.e. "assume no
+// scaling") instead of `undefined`, so it never had the uninitialised-access
+// hazard `State` exists to fix. It's set once during scale detection at
+// startup and never reassigned afterward.
 pub var dpi_info: DpiInfo = .{ .dpi = 96.0 };
 
 /// Returns true if the XCB connection is open and error-free.
 pub fn isConnValid() bool {
-    return xcb.xcb_connection_has_error(conn) == 0;
+    return xcb.xcb_connection_has_error(getState().conn) == 0;
 }

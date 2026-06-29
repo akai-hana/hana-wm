@@ -96,7 +96,7 @@ inline fn setBits(mask: u64) SetBitIterator {
 /// Push `win` offscreen and evict its geometry cache entry.
 /// Used when a window leaves the current workspace.
 inline fn evictWindow(win: u32) void {
-    utils.pushWindowOffscreen(core.conn, win);
+    utils.pushWindowOffscreen(core.getState().conn, win);
     tiling.invalidateGeomCache(win);
 }
 
@@ -113,11 +113,12 @@ pub fn init() !void {
     // no-ops on an out-of-range target (see the `target_ws >= s.workspaces.len`
     // guards below), so this one line reproduces the old "absent" behavior
     // without any further branching elsewhere.
-    const count = if (core.config.workspaces.enabled) core.config.workspaces.count else 1;
-    const wss = try core.alloc.alloc(Workspace, count);
+    const cs = core.getState();
+    const count = if (cs.config.workspaces.enabled) cs.config.workspaces.count else 1;
+    const wss = try cs.alloc.alloc(Workspace, count);
 
     const default_layout: TilingLayout = tiling.getState().config.layout;
-    const cfg_tiling = &core.config.tiling;
+    const cfg_tiling = &cs.config.tiling;
 
     // Build a flat lookup table so each workspace's override is O(1) to find,
     // instead of the original O(overrides) inner-loop scan per workspace.
@@ -172,7 +173,7 @@ pub fn init() !void {
     g_state = .{
         .workspaces = wss,
         .current = 0,
-        .allocator = core.alloc,
+        .allocator = cs.alloc,
     };
 }
 
@@ -246,7 +247,7 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
         evictWindow(win);
         if (focus.getFocused() == win) focus.clearFocus();
     }
-    if (core.config.tiling.enabled) tiling.markDirty();
+    if (core.getState().config.tiling.enabled) tiling.markDirty();
     bar.scheduleRedraw();
     // No xcb_flush: the window has never been mapped so evictWindow's offscreen
     // configure_window has no visible effect.  tiling.markDirty() defers the
@@ -274,15 +275,16 @@ fn setWindowMask(s: *State, win: u32, new_mask: u64) void {
 /// Always pair with an xcb_grab_server call before this and do any fire-and-forget
 /// window operations (map, evict) between the grab and this call.
 inline fn retileRedrawAndFlush() void {
-    if (core.config.tiling.enabled) tiling.retileCurrentWorkspace();
+    const cs = core.getState();
+    if (cs.config.tiling.enabled) tiling.retileCurrentWorkspace();
     bar.redrawInsideGrab();
-    utils.ungrabAndFlush(core.conn);
+    utils.ungrabAndFlush(cs.conn);
 }
 
 /// Grab the server, retile, redraw the bar, and flush atomically.
 /// Use when no per-window operation is needed before the retile.
 inline fn retileAndScheduleFlush() void {
-    _ = xcb.xcb_grab_server(core.conn);
+    _ = xcb.xcb_grab_server(core.getState().conn);
     retileRedrawAndFlush();
 }
 
@@ -358,7 +360,7 @@ pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
             // Grab the server so the evict (offscreen move) and retile land in
             // the same atomic batch — the compositor never sees a frame where
             // the window has vanished but the remaining windows haven't reflowed.
-            _ = xcb.xcb_grab_server(core.conn);
+            _ = xcb.xcb_grab_server(core.getState().conn);
             evictWindow(win);
             retileRedrawAndFlush();
         } else {
@@ -376,8 +378,9 @@ pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
             // Grab the server so the map and retile land in the same atomic
             // batch — the compositor never sees a frame where the window is
             // mapped but not yet positioned by the tiling engine.
-            _ = xcb.xcb_grab_server(core.conn);
-            _ = xcb.xcb_map_window(core.conn, win);
+            const conn = core.getState().conn;
+            _ = xcb.xcb_grab_server(conn);
+            _ = xcb.xcb_map_window(conn, win);
             retileRedrawAndFlush();
         } else {
             tiling.invalidateWsGeomBit(target_ws);
@@ -435,22 +438,24 @@ pub fn switchToAll() void {
         // xcb_query_pointer_reply does not cause an implicit flush inside the
         // grab. The position will be at most microseconds stale — negligible
         // for focus targeting.
-        const ptr_cookie = xcb.xcb_query_pointer(core.conn, core.root);
-        const ptr_reply = xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null);
+        const cs = core.getState();
+        const ptr_cookie = xcb.xcb_query_pointer(cs.conn, cs.root);
+        const ptr_reply = xcb.xcb_query_pointer_reply(cs.conn, ptr_cookie, null);
         defer if (ptr_reply) |r| std.c.free(r);
 
-        _ = xcb.xcb_grab_server(core.conn);
+        _ = xcb.xcb_grab_server(cs.conn);
 
         exitAllWorkspacesView(s);
 
-        if (core.config.tiling.enabled) tiling.retileCurrentWorkspace();
+        if (cs.config.tiling.enabled) tiling.retileCurrentWorkspace();
         applyPostSwitchFocus(s.current, &s.workspaces[s.current], ptr_reply);
         bar.raiseBar();
         bar.redrawInsideGrab();
-        utils.ungrabAndFlush(core.conn);
+        utils.ungrabAndFlush(cs.conn);
     } else {
         // Enter all-workspaces view
-        _ = xcb.xcb_grab_server(core.conn);
+        const cs = core.getState();
+        _ = xcb.xcb_grab_server(cs.conn);
 
         for (tracking.allWindows()) |entry| {
             if (tracking.isWindowOnWorkspace(entry.win, s.current)) continue;
@@ -466,18 +471,18 @@ pub fn switchToAll() void {
 
         // All foreign windows are now genuinely on the current workspace.
         // Retile handles mapping + positioning for tiled windows in one pass.
-        if (core.config.tiling.enabled) {
+        if (cs.config.tiling.enabled) {
             tiling.retileCurrentWorkspace();
         } else {
             // Floating layout: map and restore geometry manually.
             for (s.all_view_temp_wins.items) |win| {
-                _ = xcb.xcb_map_window(core.conn, win);
+                _ = xcb.xcb_map_window(cs.conn, win);
                 window.restoreFloatGeom(win);
             }
         }
 
         bar.scheduleRedraw();
-        utils.ungrabAndFlush(core.conn);
+        utils.ungrabAndFlush(cs.conn);
     }
 }
 
@@ -493,7 +498,7 @@ fn pinToAllWorkspacesToggle(s: *State, win: u32) void {
     } else {
         // Pin to every workspace.
         setWindowMask(s, win, all_mask);
-        _ = xcb.xcb_map_window(core.conn, win);
+        _ = xcb.xcb_map_window(core.getState().conn, win);
     }
 
     retileAndScheduleFlush();
@@ -634,6 +639,7 @@ fn prefetchAndSaveWindowGeometries(ws: *const Workspace, new_ws: u8) void {
     var pending_n: usize = 0;
     var cap_warned = false;
 
+    const conn = core.getState().conn;
     const bit = tracking.workspaceBit(ws.id);
     for (tracking.allWindows()) |entry| {
         const win = entry.win;
@@ -641,7 +647,7 @@ fn prefetchAndSaveWindowGeometries(ws: *const Workspace, new_ws: u8) void {
         if (tracking.isWindowOnWorkspace(win, new_ws)) continue; // stays visible
         if (!tiling.isWindowActiveTiled(win) and !isMinimized(win)) {
             if (pending_n < MAX_FLOAT) {
-                pending[pending_n] = .{ .win = win, .cookie = xcb.xcb_get_geometry(core.conn, win) };
+                pending[pending_n] = .{ .win = win, .cookie = xcb.xcb_get_geometry(conn, win) };
                 pending_n += 1;
             } else if (!cap_warned) {
                 debug.warn("prefetchAndSaveWindowGeometries: geometry-save cap ({d}) reached; " ++
@@ -655,7 +661,7 @@ fn prefetchAndSaveWindowGeometries(ws: *const Workspace, new_ws: u8) void {
     // whatever else the CPU is doing (focus state, tiling bookkeeping) so
     // the round-trips overlap well with pre-grab housekeeping.
     for (pending[0..pending_n]) |e| {
-        if (xcb.xcb_get_geometry_reply(core.conn, e.cookie, null)) |geom| {
+        if (xcb.xcb_get_geometry_reply(conn, e.cookie, null)) |geom| {
             defer std.c.free(geom);
             window.saveWindowGeom(e.win, .{
                 .x = geom.*.x,
@@ -676,13 +682,14 @@ fn prefetchAndSaveWindowGeometries(ws: *const Workspace, new_ws: u8) void {
 // All geometry saving is performed in prefetchAndSaveWindowGeometries before
 // the grab begins.
 fn hideWorkspaceWindows(ws: *const Workspace, new_ws: u8) void {
+    const conn = core.getState().conn;
     const bit = tracking.workspaceBit(ws.id);
     for (tracking.allWindows()) |entry| {
         const win = entry.win;
         if (entry.mask & bit == 0) continue;
         if (tracking.isWindowOnWorkspace(win, new_ws)) continue; // stays visible
 
-        utils.pushWindowOffscreen(core.conn, win);
+        utils.pushWindowOffscreen(conn, win);
         if (tiling.isWindowActiveTiled(win)) tiling.invalidateGeomCache(win);
     }
 }
@@ -692,7 +699,7 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
     const tiling_active = tiling.getState().is_enabled;
 
     if (tiling_active) {
-        if (!core.config.tiling.global_layout) tiling.applyWorkspaceLayout(ws);
+        if (!core.getState().config.tiling.global_layout) tiling.applyWorkspaceLayout(ws);
 
         // Unified invalidation loop: on success, only shared windows (also on old_ws)
         // need invalidation; on failure, all tiled windows are invalidated for a full retile.
@@ -721,10 +728,11 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
 
     // Map every window; restore floating geometry for those not already on screen.
     const bit_map = tracking.workspaceBit(ws.id);
+    const conn = core.getState().conn;
     for (tracking.allWindows()) |entry| {
         const win = entry.win;
         if (entry.mask & bit_map == 0) continue;
-        _ = xcb.xcb_map_window(core.conn, win);
+        _ = xcb.xcb_map_window(conn, win);
         if (!tiling.isWindowActiveTiled(win) and !isMinimized(win) and
             !tracking.isWindowOnWorkspace(win, old_ws))
         {
@@ -744,7 +752,7 @@ fn applyPostSwitchFocus(new_ws: u8, new_ws_obj: *Workspace, ptr_reply: ?*xcb.xcb
     const focus_target: ?u32 = blk: {
         const ptr = ptr_reply orelse break :blk lastFocusedOrFirst(new_ws_obj);
         const child = ptr.*.child;
-        break :blk if (child != 0 and child != core.root and
+        break :blk if (child != 0 and child != core.getState().root and
             tracking.isWindowOnWorkspace(child, new_ws) and !isMinimized(child))
             child
         else
@@ -797,12 +805,13 @@ fn executeSwitch(old_ws: u8, new_ws: u8) void {
     // Consume the pointer position before the grab so applyPostSwitchFocus
     // receives a pre-drained reply and issues no xcb_*_reply calls inside
     // the grab.
-    const ptr_cookie = xcb.xcb_query_pointer(core.conn, core.root);
-    const ptr_reply = xcb.xcb_query_pointer_reply(core.conn, ptr_cookie, null);
+    const cs = core.getState();
+    const ptr_cookie = xcb.xcb_query_pointer(cs.conn, cs.root);
+    const ptr_reply = xcb.xcb_query_pointer_reply(cs.conn, ptr_cookie, null);
     defer if (ptr_reply) |r| std.c.free(r);
 
     // ── Atomic grab window ───────────────────────────────────────────────────
-    _ = xcb.xcb_grab_server(core.conn);
+    _ = xcb.xcb_grab_server(cs.conn);
 
     hideWorkspaceWindows(&s.workspaces[old_ws], new_ws);
 
@@ -819,14 +828,14 @@ fn executeSwitch(old_ws: u8, new_ws: u8) void {
             if (entry.mask & exec_bit == 0) continue;
             const win = entry.win;
             if (win == info.window) continue;
-            _ = xcb.xcb_map_window(core.conn, win);
-            utils.pushWindowOffscreen(core.conn, win);
+            _ = xcb.xcb_map_window(cs.conn, win);
+            utils.pushWindowOffscreen(cs.conn, win);
             if (tiling.isWindowActiveTiled(win)) tiling.invalidateGeomCache(win);
         }
-        _ = xcb.xcb_configure_window(core.conn, info.window, xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
+        _ = xcb.xcb_configure_window(cs.conn, info.window, xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
             xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
-            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{ 0, 0, @intCast(core.screen.width_in_pixels), @intCast(core.screen.height_in_pixels), 0 });
-        _ = xcb.xcb_configure_window(core.conn, info.window, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{ 0, 0, @intCast(cs.screen.width_in_pixels), @intCast(cs.screen.height_in_pixels), 0 });
+        _ = xcb.xcb_configure_window(cs.conn, info.window, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     } else {
         restoreWorkspaceWindows(new_ws_obj, old_ws);
     }
@@ -835,5 +844,5 @@ fn executeSwitch(old_ws: u8, new_ws: u8) void {
 
     bar.raiseBar();
     bar.redrawInsideGrab();
-    utils.ungrabAndFlush(core.conn);
+    utils.ungrabAndFlush(cs.conn);
 }

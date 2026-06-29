@@ -290,7 +290,8 @@ pub fn reloadConfig() void {
         // configure_window when their workspace is next activated, so they
         // MUST get an explicit BORDER_WIDTH send here — otherwise the new
         // border width is never applied to them.
-        _ = xcb.xcb_grab_server(core.conn);
+        const conn = core.getState().conn;
+        _ = xcb.xcb_grab_server(conn);
         const current_ws = tracking.getCurrentWorkspace();
         for (ns.windows.items()) |win| {
             // Skip current-workspace windows: retileCurrentWorkspaceReload
@@ -298,11 +299,11 @@ pub fn reloadConfig() void {
             if (current_ws) |cws| {
                 if (tracking.isWindowOnWorkspace(win, @intCast(cws))) continue;
             }
-            _ = xcb.xcb_configure_window(core.conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{ns.config.border_width});
+            _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{ns.config.border_width});
         }
         retileCurrentWorkspaceReload(ns.config.border_width);
         bar.redrawInsideGrab();
-        utils.ungrabAndFlush(core.conn);
+        utils.ungrabAndFlush(conn);
     }
 }
 
@@ -341,7 +342,7 @@ pub fn addWindow(window_id: u32) void {
     if (!s.is_enabled) return;
 
     const border_color = s.borderColor(window_id);
-    _ = xcb.xcb_change_window_attributes(core.conn, window_id, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{border_color});
+    _ = xcb.xcb_change_window_attributes(core.getState().conn, window_id, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{border_color});
 
     // NOTE: BORDER_WIDTH is intentionally NOT sent here.
     //
@@ -520,7 +521,7 @@ pub fn retileAllWorkspaces() void {
     const screen = calcScreenArea();
     const ws_count = tracking.getWorkspaceCount();
     const current_ws = tracking.getCurrentWorkspace() orelse return;
-    const ws_state_opt = if (!core.config.tiling.global_layout) workspaces.getState() else null;
+    const ws_state_opt = if (!core.getState().config.tiling.global_layout) workspaces.getState() else null;
     var ctx = makeLayoutCtx(s);
     const effective_ws = @min(ws_count, max_workspaces);
 
@@ -540,7 +541,7 @@ pub fn retileAllWorkspaces() void {
         defer s.config.master_width = saved_width;
         defer s.config.master_count = saved_count;
 
-        invokeLayout(selectLayout(s, ws_state_opt, ws_idx, core.config.tiling.global_layout), &ctx, s, ws_windows, screen);
+        invokeLayout(selectLayout(s, ws_state_opt, ws_idx, core.getState().config.tiling.global_layout), &ctx, s, ws_windows, screen);
         markWorkspaceGeomValid(s, ws_idx);
     }
 
@@ -552,7 +553,7 @@ pub fn retileAllWorkspaces() void {
 pub fn retileInactiveWorkspace(ws_idx: u8) void {
     const s = getState();
     if (!s.is_enabled) return;
-    if (!core.config.workspaces.enabled) return;
+    if (!core.getState().config.workspaces.enabled) return;
 
     const ws_state = workspaces.getState() orelse return;
     if (ws_idx == ws_state.current) {
@@ -563,8 +564,9 @@ pub fn retileInactiveWorkspace(ws_idx: u8) void {
     retileImpl(calcScreenArea(), .{ .for_ws = ws_idx });
 
     const bit = tracking.workspaceBit(ws_idx);
+    const conn = core.getState().conn;
     for (tracking.allWindows()) |entry| {
-        if (entry.mask & bit != 0) utils.pushWindowOffscreen(core.conn, entry.win);
+        if (entry.mask & bit != 0) utils.pushWindowOffscreen(conn, entry.win);
     }
 }
 
@@ -621,12 +623,13 @@ pub fn restoreWorkspaceGeom() bool {
 
     // Pass 2 — configure + border in one loop (replaces the previous separate
     // configureWindow pass and updateBorders pass).
+    const conn = core.getState().conn;
     for (ws_windows, wd_ptrs[0..ws_windows.len]) |win, wd| {
-        utils.configureWindow(core.conn, win, wd.rect);
+        utils.configureWindow(conn, win, wd.rect);
         const color = s.borderColor(win);
         if (wd.border != color) {
             wd.border = color;
-            _ = xcb.xcb_change_window_attributes(core.conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
+            _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
         }
     }
     return true;
@@ -676,7 +679,7 @@ pub fn applyWorkspaceLayout(ws: *const WsWorkspace) void {
         s.config.layout != ws.layout or ws.variants != null or (ws.master_width != null and ws.master_width.? != s.config.master_width) or (ws.master_count != null and ws.master_count.? != s.config.master_count);
     s.config.layout = ws.layout;
     if (ws.master_width) |mw| s.config.master_width = mw;
-    s.config.master_count = ws.master_count orelse core.config.tiling.master_count;
+    s.config.master_count = ws.master_count orelse core.getState().config.tiling.master_count;
     if (ws.variants) |v| {
         switch (v) {
             .master => |mv| s.config.layout_variants.master = mv,
@@ -712,12 +715,13 @@ pub fn adjustMasterCount(delta: i8) void {
     const clamped: u8 = @intCast(@min(new, max_master_count));
     if (clamped == s.config.master_count) return;
     s.config.master_count = clamped;
-    if (!core.config.tiling.global_layout) {
+    const global_layout = core.getState().config.tiling.global_layout;
+    if (!global_layout) {
         if (workspaces.getCurrentWorkspaceObject()) |ws| ws.master_count = s.config.master_count;
     }
     // In global mode master_count applies to every workspace, so all inactive
     // workspace caches are now stale.
-    if (core.config.tiling.global_layout) s.geom.workspace_geom_valid_bits = 0;
+    if (global_layout) s.geom.workspace_geom_valid_bits = 0;
     retileCurrentWorkspace();
 }
 
@@ -731,7 +735,7 @@ pub inline fn decreaseMasterCount() void {
 pub fn adjustMasterWidth(delta: f32) void {
     const s = getState();
     s.config.master_width = @max(constants.MIN_MASTER_WIDTH, @min(max_master_width_ratio, s.config.master_width + delta));
-    if (!core.config.tiling.global_layout) {
+    if (!core.getState().config.tiling.global_layout) {
         if (workspaces.getCurrentWorkspaceObject()) |ws| ws.master_width = s.config.master_width;
     }
     // Invalidate inactive workspace caches so their next switch-in forces a
@@ -756,7 +760,7 @@ pub inline fn decreaseMasterWidth() void {
 pub fn stepScrollView(delta: i32) void {
     const s = getState();
     if (s.config.layout != .scroll) return;
-    const slot_w: i32 = @intCast(core.screen.width_in_pixels / 2);
+    const slot_w: i32 = @intCast(core.getState().screen.width_in_pixels / 2);
     s.scroll.offset += delta * slot_w;
     retileCurrentWorkspace();
 }
@@ -787,9 +791,10 @@ fn snapScrollOffsetToWindow(s: *State, win: u32) bool {
     const fi = std.mem.indexOfScalar(u32, ws_wins, win) orelse return false;
 
     const fi_i32: i32 = @intCast(fi);
-    const slot_w: i32 = @intCast(core.screen.width_in_pixels / 2);
+    const screen_w = core.getState().screen.width_in_pixels;
+    const slot_w: i32 = @intCast(screen_w / 2);
     const n_i32: i32 = @intCast(ws_wins.len);
-    const sw_i32: i32 = @intCast(core.screen.width_in_pixels);
+    const sw_i32: i32 = @intCast(screen_w);
     const max_off: i32 = @max(0, n_i32 * slot_w - sw_i32);
 
     const win_left: i32 = fi_i32 * slot_w;
@@ -923,7 +928,7 @@ pub fn updateWindowFocus(old_focused: ?u32, new_focused: ?u32) void {
     for ([2]?u32{ old_focused, new_focused }) |opt| {
         const win = opt orelse continue;
         if (!s.windows.contains(win)) continue;
-        applyBorderColor(s, core.conn, win, s.borderColor(win));
+        applyBorderColor(s, core.getState().conn, win, s.borderColor(win));
     }
 }
 
@@ -1004,41 +1009,43 @@ inline fn stepLayout(s: *const State, current: Layout, comptime forward: bool) L
 /// Compute the initial master pane width ratio from config, converting negative
 /// pixel values to screen-relative fractions.
 fn calcMasterWidth() f32 {
-    const raw = scale.scaleMasterWidth(core.config.tiling.master_width);
+    const cs = core.getState();
+    const raw = scale.scaleMasterWidth(cs.config.tiling.master_width);
     if (raw < 0) {
-        const ratio = -raw / @as(f32, @floatFromInt(core.screen.width_in_pixels));
+        const ratio = -raw / @as(f32, @floatFromInt(cs.screen.width_in_pixels));
         return @min(max_master_width_ratio, @max(constants.MIN_MASTER_WIDTH, ratio));
     }
     return raw;
 }
 
 fn initState() State {
-    const screen_height = core.screen.height_in_pixels;
-    const el = parseEnabledLayouts(core.config.tiling.layouts.items);
+    const cs = core.getState();
+    const screen_height = cs.screen.height_in_pixels;
+    const el = parseEnabledLayouts(cs.config.tiling.layouts.items);
 
     return .{
-        .is_enabled = core.config.tiling.enabled,
+        .is_enabled = cs.config.tiling.enabled,
         .is_dirty = false,
         .config = .{
             .layout = blk: {
-                const requested = std.meta.stringToEnum(Layout, core.config.tiling.layout) orelse layout_cycle[0];
+                const requested = std.meta.stringToEnum(Layout, cs.config.tiling.layout) orelse layout_cycle[0];
                 break :blk if (isLayoutAvailable(requested)) requested else layout_cycle[0];
             },
             .prev_layout = layout_cycle[0],
             .enabled_layouts = el.arr,
             .enabled_layout_count = el.len,
             .layout_variants = .{
-                .master = core.config.tiling.master_variant,
-                .monocle = core.config.tiling.monocle_variant,
-                .grid = core.config.tiling.grid_variant,
+                .master = cs.config.tiling.master_variant,
+                .monocle = cs.config.tiling.monocle_variant,
+                .grid = cs.config.tiling.grid_variant,
             },
-            .master_side = core.config.tiling.master_side,
+            .master_side = cs.config.tiling.master_side,
             .master_width = calcMasterWidth(),
-            .master_count = core.config.tiling.master_count,
-            .gap_width = scale.scaleBorderWidth(core.config.tiling.gap_width, screen_height),
-            .border_width = scale.scaleBorderWidth(core.config.tiling.border_width, screen_height),
-            .border_focused = core.config.tiling.border_focused,
-            .border_unfocused = core.config.tiling.border_unfocused,
+            .master_count = cs.config.tiling.master_count,
+            .gap_width = scale.scaleBorderWidth(cs.config.tiling.gap_width, screen_height),
+            .border_width = scale.scaleBorderWidth(cs.config.tiling.border_width, screen_height),
+            .border_focused = cs.config.tiling.border_focused,
+            .border_unfocused = cs.config.tiling.border_unfocused,
         },
         .windows = .{},
         .geom = .{
@@ -1063,7 +1070,7 @@ fn getBorderColorForWindow(win: u32) u32 {
 /// after this call returns, keeping the construction site minimal.
 inline fn makeLayoutCtx(s: *State) layouts.LayoutCtx {
     return .{
-        .conn = core.conn,
+        .conn = core.getState().conn,
         .cache = &s.geom.cache,
         .get_border_color = getBorderColorForWindow,
         .focused_win = focus.getFocused(),
@@ -1094,12 +1101,13 @@ fn invokeLayout(
 /// Screen area available for tiling, with bar height subtracted from the appropriate edge.
 inline fn calcScreenArea() utils.Rect {
     const bar_height: u16 = if (bar.isVisible()) bar.getBarHeight() else 0;
-    const is_bar_at_bottom = core.config.bar.bar_position == .bottom;
+    const cs = core.getState();
+    const is_bar_at_bottom = cs.config.bar.bar_position == .bottom;
     return .{
         .x = 0,
         .y = if (is_bar_at_bottom) 0 else @intCast(bar_height),
-        .width = core.screen.width_in_pixels,
-        .height = core.screen.height_in_pixels -| bar_height,
+        .width = cs.screen.width_in_pixels,
+        .height = cs.screen.height_in_pixels -| bar_height,
     };
 }
 
@@ -1125,7 +1133,7 @@ inline fn resolveWorkspaceValue(
     ws_idx: u8,
 ) T {
     const global: T = @field(s.config, field);
-    if (core.config.tiling.global_layout) return global;
+    if (core.getState().config.tiling.global_layout) return global;
     const wss = ws_state orelse return global;
     if (ws_idx >= wss.workspaces.len) return global;
     if (@field(wss.workspaces[ws_idx], field)) |v| return v;
@@ -1194,7 +1202,7 @@ fn retileImpl(screen: utils.Rect, opts: RetileOpts) void {
     defer s.config.master_count = saved_count;
 
     invokeLayout(
-        selectLayout(s, wss, target_ws, core.config.tiling.global_layout),
+        selectLayout(s, wss, target_ws, core.getState().config.tiling.global_layout),
         &ctx,
         s,
         ws_windows,
@@ -1217,7 +1225,7 @@ fn applyBorderColor(s: *State, conn: *xcb.xcb_connection_t, win: u32, color: u32
 
 /// Refresh border colors for all `ws_windows`, deduped via the cache.
 inline fn updateBorders(s: *State, ws_windows: []const u32) void {
-    for (ws_windows) |win| applyBorderColor(s, core.conn, win, s.borderColor(win));
+    for (ws_windows) |win| applyBorderColor(s, core.getState().conn, win, s.borderColor(win));
 }
 
 /// Public dedup helper for window.zig's border-sweep functions.
@@ -1237,7 +1245,7 @@ pub fn sendBorderColorIfChanged(win: u32, color: u32) bool {
     const wd = s.geom.cache.getPtr(win) orelse return false;
     if (wd.border == color) return true; // cached, color unchanged — skip XCB
     wd.border = color;
-    _ = xcb.xcb_change_window_attributes(core.conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
+    _ = xcb.xcb_change_window_attributes(core.getState().conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
     return true;
 }
 
@@ -1462,11 +1470,12 @@ inline fn applyLayoutStep(comptime forward: bool) void {
 
 fn applyLayout(s: *State, layout: Layout) void {
     s.config.layout = layout;
-    if (!core.config.tiling.global_layout) {
+    const global_layout = core.getState().config.tiling.global_layout;
+    if (!global_layout) {
         if (workspaces.getCurrentWorkspaceObject()) |ws| ws.layout = layout;
     }
     // In global mode all workspaces share the same layout; inactive caches are stale.
-    if (core.config.tiling.global_layout) s.geom.workspace_geom_valid_bits = 0;
+    if (global_layout) s.geom.workspace_geom_valid_bits = 0;
     retileCurrentWorkspace();
     bar.scheduleFullRedraw();
     debug.info("Layout: {s}", .{@tagName(layout)});

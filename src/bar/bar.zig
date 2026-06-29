@@ -769,7 +769,7 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot,
     snap.focused_title.clearRetainingCapacity();
     if (snap.focused_window) |fw| {
         if (snap.focused_window != prev.focused_window or snap.is_title_invalidated) {
-            title.fetchWindowTitleInto(core.conn, fw, &snap.focused_title, allocator) catch {};
+            title.fetchWindowTitleInto(core.getState().conn, fw, &snap.focused_title, allocator) catch {};
         } else {
             snap.focused_title.appendSlice(allocator, prev.focused_title.items) catch {};
         }
@@ -794,7 +794,7 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot,
                 snap.window_titles.data.appendSlice(allocator, snap.focused_title.items) catch {};
             } else {
                 title_tmp.clearRetainingCapacity();
-                title.fetchWindowTitleInto(core.conn, win, &title_tmp, allocator) catch {};
+                title.fetchWindowTitleInto(core.getState().conn, win, &title_tmp, allocator) catch {};
                 snap.window_titles.data.appendSlice(allocator, title_tmp.items) catch {};
             }
             const end: u32 = @intCast(snap.window_titles.data.items.len);
@@ -837,7 +837,7 @@ fn submitFullRedrawWithCarouselReset(s: *State) void {
 }
 
 inline fn ungrabAndFlush() void {
-    utils.ungrabAndFlush(core.conn);
+    utils.ungrabAndFlush(core.getState().conn);
 }
 
 /// Flips the write index, sets work kind, and signals the bar thread.
@@ -912,8 +912,9 @@ fn initAtoms() void {
 }
 
 fn calcBarYPos(height: u16) i16 {
-    return if (core.config.bar.bar_position == .bottom)
-        @intCast(@as(i32, core.screen.height_in_pixels) - height)
+    const cs = core.getState();
+    return if (cs.config.bar.bar_position == .bottom)
+        @intCast(@as(i32, cs.screen.height_in_pixels) - height)
     else
         0;
 }
@@ -921,39 +922,41 @@ fn calcBarYPos(height: u16) i16 {
 const BarWindowSetup = struct { win_id: u32, visual_id: u32, has_argb: bool, colormap: u32 };
 
 fn createBarWindow(height: u16, y_pos: i16) BarWindowSetup {
-    const want_transparency = core.config.bar.getAlpha16() < 0xFFFF;
+    const cs = core.getState();
+    const want_transparency = cs.config.bar.getAlpha16() < 0xFFFF;
     const visual_info = if (want_transparency)
-        drawing.findVisualByDepth(core.screen, 32)
+        drawing.findVisualByDepth(cs.screen, 32)
     else
-        drawing.VisualInfo{ .visual_type = null, .visual_id = core.screen.root_visual };
+        drawing.VisualInfo{ .visual_type = null, .visual_id = cs.screen.root_visual };
     const depth: u8 = if (want_transparency) 32 else xcb.XCB_COPY_FROM_PARENT;
     const visual_id = visual_info.visual_id;
     const colormap: u32 = if (want_transparency) blk: {
-        const cmap = xcb.xcb_generate_id(core.conn);
-        _ = xcb.xcb_create_colormap(core.conn, xcb.XCB_COLORMAP_ALLOC_NONE, cmap, core.screen.root, visual_id);
+        const cmap = xcb.xcb_generate_id(cs.conn);
+        _ = xcb.xcb_create_colormap(cs.conn, xcb.XCB_COLORMAP_ALLOC_NONE, cmap, cs.screen.root, visual_id);
         break :blk cmap;
     } else 0;
-    const win_id = xcb.xcb_generate_id(core.conn);
+    const win_id = xcb.xcb_generate_id(cs.conn);
     const value_mask = xcb.XCB_CW_BACK_PIXEL | xcb.XCB_CW_BORDER_PIXEL |
         xcb.XCB_CW_OVERRIDE_REDIRECT | xcb.XCB_CW_EVENT_MASK |
         if (want_transparency) xcb.XCB_CW_COLORMAP else 0;
     const base_events = xcb.XCB_EVENT_MASK_EXPOSURE | xcb.XCB_EVENT_MASK_BUTTON_PRESS;
     const value_list = [5]u32{ 0, 0, 1, base_events, colormap };
-    _ = xcb.xcb_create_window(core.conn, depth, win_id, core.screen.root, 0, y_pos, core.screen.width_in_pixels, height, 0, xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, visual_id, @intCast(value_mask), &value_list);
+    _ = xcb.xcb_create_window(cs.conn, depth, win_id, cs.screen.root, 0, y_pos, cs.screen.width_in_pixels, height, 0, xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, visual_id, @intCast(value_mask), &value_list);
     return .{ .win_id = win_id, .visual_id = visual_id, .has_argb = want_transparency, .colormap = colormap };
 }
 
 fn loadBarFonts(dc: anytype) !void {
-    const fonts = core.config.bar.fonts.items;
+    const cs = core.getState();
+    const fonts = cs.config.bar.fonts.items;
     if (fonts.len == 0) return;
-    const sized = try core.alloc.alloc([]const u8, fonts.len);
+    const sized = try cs.alloc.alloc([]const u8, fonts.len);
     defer {
-        for (sized, fonts) |s, orig| if (s.ptr != orig.ptr) core.alloc.free(s);
-        core.alloc.free(sized);
+        for (sized, fonts) |s, orig| if (s.ptr != orig.ptr) cs.alloc.free(s);
+        cs.alloc.free(sized);
     }
     for (fonts, sized) |f, *out| {
-        out.* = if (core.config.bar.scaled_font_size > 0)
-            try std.fmt.allocPrint(core.alloc, "{s}:size={}", .{ f, core.config.bar.scaled_font_size })
+        out.* = if (cs.config.bar.scaled_font_size > 0)
+            try std.fmt.allocPrint(cs.alloc, "{s}:size={}", .{ f, cs.config.bar.scaled_font_size })
         else
             f;
     }
@@ -966,19 +969,20 @@ fn setAtomProperty(conn: *xcb.xcb_connection_t, win_id: u32, prop: u32, atom_typ
 }
 
 fn setWindowProperties(win_id: u32, height: u16) void {
+    const cs = core.getState();
     // _NET_WM_STRUT_PARTIAL layout: index 2 = top strut, index 3 = bottom strut.
-    const strut: [12]u32 = if (core.config.bar.bar_position == .top)
-        .{ 0, 0, height, 0, 0, 0, 0, 0, 0, core.screen.width_in_pixels, 0, 0 }
+    const strut: [12]u32 = if (cs.config.bar.bar_position == .top)
+        .{ 0, 0, height, 0, 0, 0, 0, 0, 0, cs.screen.width_in_pixels, 0, 0 }
     else
-        .{ 0, 0, 0, height, 0, 0, 0, 0, 0, 0, 0, core.screen.width_in_pixels };
-    if (gBar.atoms.strut_partial != 0) setAtomProperty(core.conn, win_id, gBar.atoms.strut_partial, xcb.XCB_ATOM_CARDINAL, &strut);
-    if (gBar.atoms.window_type != 0) setAtomProperty(core.conn, win_id, gBar.atoms.window_type, xcb.XCB_ATOM_ATOM, &[_]u32{gBar.atoms.window_type_dock});
-    if (gBar.atoms.wm_state != 0) setAtomProperty(core.conn, win_id, gBar.atoms.wm_state, xcb.XCB_ATOM_ATOM, &[_]u32{ gBar.atoms.state_above, gBar.atoms.state_sticky });
-    if (gBar.atoms.allowed_actions != 0) setAtomProperty(core.conn, win_id, gBar.atoms.allowed_actions, xcb.XCB_ATOM_ATOM, &[_]u32{ gBar.atoms.action_close, gBar.atoms.action_above, gBar.atoms.action_stick });
+        .{ 0, 0, 0, height, 0, 0, 0, 0, 0, 0, 0, cs.screen.width_in_pixels };
+    if (gBar.atoms.strut_partial != 0) setAtomProperty(cs.conn, win_id, gBar.atoms.strut_partial, xcb.XCB_ATOM_CARDINAL, &strut);
+    if (gBar.atoms.window_type != 0) setAtomProperty(cs.conn, win_id, gBar.atoms.window_type, xcb.XCB_ATOM_ATOM, &[_]u32{gBar.atoms.window_type_dock});
+    if (gBar.atoms.wm_state != 0) setAtomProperty(cs.conn, win_id, gBar.atoms.wm_state, xcb.XCB_ATOM_ATOM, &[_]u32{ gBar.atoms.state_above, gBar.atoms.state_sticky });
+    if (gBar.atoms.allowed_actions != 0) setAtomProperty(cs.conn, win_id, gBar.atoms.allowed_actions, xcb.XCB_ATOM_ATOM, &[_]u32{ gBar.atoms.action_close, gBar.atoms.action_above, gBar.atoms.action_stick });
 }
 
 fn measureFontMetrics() ?struct { asc: i32, desc: i32 } {
-    var mc = drawing.MeasureContext.init(core.alloc, core.dpi_info.dpi) catch return null;
+    var mc = drawing.MeasureContext.init(core.getState().alloc, core.dpi_info.dpi) catch return null;
     defer mc.deinit();
     loadBarFonts(&mc) catch return null;
     const asc, const desc = mc.getMetrics();
@@ -987,21 +991,23 @@ fn measureFontMetrics() ?struct { asc: i32, desc: i32 } {
 
 fn resolvePercentageFontSize(bar_height: u16) ?u16 {
     const trialPt: u16 = 100;
-    const saved_size = core.config.bar.scaled_font_size;
-    core.config.bar.scaled_font_size = trialPt;
-    defer core.config.bar.scaled_font_size = saved_size;
+    const cs = core.getState();
+    const saved_size = cs.config.bar.scaled_font_size;
+    cs.config.bar.scaled_font_size = trialPt;
+    defer cs.config.bar.scaled_font_size = saved_size;
     const m = measureFontMetrics() orelse return null;
     const px_per_pt: f32 = @as(f32, @floatFromInt(@max(1, m.asc + m.desc))) / @as(f32, @floatFromInt(trialPt));
     const max_size_pt = @as(f32, @floatFromInt(bar_height)) / px_per_pt;
-    return @max(1, @as(u16, @intFromFloat(@round(max_size_pt * (core.config.bar.font_size.value / 100.0)))));
+    return @max(1, @as(u16, @intFromFloat(@round(max_size_pt * (cs.config.bar.font_size.value / 100.0)))));
 }
 
 fn calcBarHeight() !u16 {
-    if (core.config.bar.height) |h| {
-        const height = scale.scaleBarHeight(h, core.screen.height_in_pixels);
-        if (core.config.bar.font_size.is_percentage) {
+    const cs = core.getState();
+    if (cs.config.bar.height) |h| {
+        const height = scale.scaleBarHeight(h, cs.screen.height_in_pixels);
+        if (cs.config.bar.font_size.is_percentage) {
             if (resolvePercentageFontSize(height)) |sz|
-                core.config.bar.scaled_font_size = sz;
+                cs.config.bar.scaled_font_size = sz;
         }
         return height;
     }
@@ -1010,16 +1016,17 @@ fn calcBarHeight() !u16 {
 }
 
 fn createDrawContext(setup: BarWindowSetup, height: u16) !*drawing.DrawContext {
+    const cs = core.getState();
     const dc = try drawing.DrawContext.initWithVisual(
-        core.alloc,
-        core.conn,
+        cs.alloc,
+        cs.conn,
         setup.win_id,
-        core.screen.width_in_pixels,
+        cs.screen.width_in_pixels,
         height,
         setup.visual_id,
         core.dpi_info.dpi,
         setup.has_argb,
-        core.config.bar.transparency,
+        cs.config.bar.transparency,
     );
     errdefer dc.deinit();
     try loadBarFonts(dc);
@@ -1029,31 +1036,32 @@ fn createDrawContext(setup: BarWindowSetup, height: u16) !*drawing.DrawContext {
 // Lifecycle
 
 pub fn init() !void {
-    std.debug.assert(core.config.bar.enabled);
+    const cs = core.getState();
+    std.debug.assert(cs.config.bar.enabled);
     // work_ready uses timedWait with a CLOCK_MONOTONIC deadline.
     gBar.channel.work_ready.initMonotonic();
     initAtoms();
     // Detect refresh rate before the bar thread spawns so carousel.wakeIntervalNs()
     // returns the real rate from the first tick.
-    scale.ensureRefreshRateDetected(core.conn);
+    scale.ensureRefreshRateDetected(cs.conn);
     const height = try calcBarHeight();
     const y_pos = calcBarYPos(height);
     const setup = createBarWindow(height, y_pos);
     errdefer {
-        _ = xcb.xcb_destroy_window(core.conn, setup.win_id);
-        if (setup.colormap != 0) _ = xcb.xcb_free_colormap(core.conn, setup.colormap);
+        _ = xcb.xcb_destroy_window(cs.conn, setup.win_id);
+        if (setup.colormap != 0) _ = xcb.xcb_free_colormap(cs.conn, setup.colormap);
     }
     setWindowProperties(setup.win_id, height);
     const dc = try createDrawContext(setup, height);
     errdefer dc.deinit();
     debug.info("Bar transparency: {s}", .{if (setup.has_argb) "enabled (ARGB)" else "disabled (opaque)"});
-    gBar.state = try State.init(core.alloc, core.conn, setup.win_id, setup.colormap, core.screen.width_in_pixels, height, dc, core.config.bar);
+    gBar.state = try State.init(cs.alloc, cs.conn, setup.win_id, setup.colormap, cs.screen.width_in_pixels, height, dc, cs.config.bar);
     spawnBarThread(gBar.state.?);
     clock.startThread();
     submitDrawBlocking();
-    _ = xcb.xcb_map_window(core.conn, setup.win_id);
-    _ = xcb.xcb_flush(core.conn);
-    try prompt.init(core.alloc, core.conn);
+    _ = xcb.xcb_map_window(cs.conn, setup.win_id);
+    _ = xcb.xcb_flush(cs.conn);
+    try prompt.init(cs.alloc, cs.conn);
 }
 
 pub fn deinit() void {
@@ -1073,12 +1081,12 @@ pub fn deinit() void {
 
 pub fn reload() void {
     const old = gBar.state orelse {
-        if (core.config.bar.enabled) {
+        if (core.getState().config.bar.enabled) {
             init() catch |err| debug.err("Bar init failed: {}", .{err});
         }
         return;
     };
-    if (!core.config.bar.enabled) {
+    if (!core.getState().config.bar.enabled) {
         deinit();
         return;
     }
@@ -1086,8 +1094,9 @@ pub fn reload() void {
     const y_pos = calcBarYPos(height);
     const setup = createBarWindow(height, y_pos);
     applyReload(old, setup, height) catch |err| {
-        _ = xcb.xcb_destroy_window(core.conn, setup.win_id);
-        if (setup.colormap != 0) _ = xcb.xcb_free_colormap(core.conn, setup.colormap);
+        const conn = core.getState().conn;
+        _ = xcb.xcb_destroy_window(conn, setup.win_id);
+        if (setup.colormap != 0) _ = xcb.xcb_free_colormap(conn, setup.colormap);
         debug.err("Bar reload failed ({s}), keeping old bar", .{@errorName(err)});
     };
 }
@@ -1096,7 +1105,8 @@ fn applyReload(old: *State, setup: BarWindowSetup, height: u16) !void {
     setWindowProperties(setup.win_id, height);
     const new_dc = try createDrawContext(setup, height);
     errdefer new_dc.deinit();
-    const new_state = try State.init(core.alloc, core.conn, setup.win_id, setup.colormap, core.screen.width_in_pixels, height, new_dc, core.config.bar);
+    const cs = core.getState();
+    const new_state = try State.init(cs.alloc, cs.conn, setup.win_id, setup.colormap, cs.screen.width_in_pixels, height, new_dc, cs.config.bar);
     new_state.is_visible = old.is_visible;
     new_state.is_globally_visible = old.is_globally_visible;
     clock.stopThread();
@@ -1106,8 +1116,8 @@ fn applyReload(old: *State, setup: BarWindowSetup, height: u16) !void {
     spawnBarThread(new_state);
     clock.startThread();
     submitDrawBlockingFull();
-    if (new_state.is_visible) _ = xcb.xcb_map_window(core.conn, setup.win_id);
-    _ = xcb.xcb_destroy_window(core.conn, old.win.win_id);
+    if (new_state.is_visible) _ = xcb.xcb_map_window(cs.conn, setup.win_id);
+    _ = xcb.xcb_destroy_window(cs.conn, old.win.win_id);
     ungrabAndFlush();
     old.render.dc.deinit();
     old.deinit();
@@ -1117,7 +1127,8 @@ fn applyReload(old: *State, setup: BarWindowSetup, height: u16) !void {
 
 pub fn toggleBarSegmentAnchor() void {
     const s = gBar.state orelse return;
-    core.config.bar.bar_position = switch (core.config.bar.bar_position) {
+    const cs = core.getState();
+    cs.config.bar.bar_position = switch (cs.config.bar.bar_position) {
         .top => .bottom,
         .bottom => .top,
     };
@@ -1125,8 +1136,8 @@ pub fn toggleBarSegmentAnchor() void {
     setWindowProperties(s.win.win_id, s.render.height);
     gBar.pending_force_full_redraw = true;
     s.invalidateLayoutCache();
-    _ = xcb.xcb_grab_server(core.conn);
-    _ = xcb.xcb_configure_window(core.conn, s.win.win_id, xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{@as(u32, @bitCast(@as(i32, new_y)))});
+    _ = xcb.xcb_grab_server(cs.conn);
+    _ = xcb.xcb_configure_window(cs.conn, s.win.win_id, xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{@as(u32, @bitCast(@as(i32, new_y)))});
     const current_ws = tracking.getCurrentWorkspace() orelse {
         window.updateWorkspaceBorders();
         window.markBordersFlushed();
@@ -1139,7 +1150,7 @@ pub fn toggleBarSegmentAnchor() void {
     window.updateFloatingWindowBorders();
     window.markBordersFlushed();
     ungrabAndFlush();
-    debug.info("Bar position toggled to: {s}", .{@tagName(core.config.bar.bar_position)});
+    debug.info("Bar position toggled to: {s}", .{@tagName(cs.config.bar.bar_position)});
 }
 
 /// Lightweight focus-only redraw; skipped when a full redraw is already pending.
@@ -1238,7 +1249,7 @@ pub fn prerenderForShow() void {
 pub fn commitShowInsideGrab() void {
     const s = gBar.state orelse return;
     s.render.dc.blitQueued();
-    _ = xcb.xcb_map_window(core.conn, s.win.win_id);
+    _ = xcb.xcb_map_window(core.getState().conn, s.win.win_id);
     s.is_dirty = false;
     debug.info("Bar shown (show_fullscreen)", .{});
     clock.updateTimerState();
@@ -1260,8 +1271,9 @@ pub fn setBarState(action: BarAction) void {
     s.is_visible = show;
     if (action == .toggle) {
         if (show) submitFullRedrawWithCarouselReset(s);
-        _ = xcb.xcb_grab_server(core.conn);
-        if (show) _ = xcb.xcb_map_window(core.conn, s.win.win_id) else _ = xcb.xcb_unmap_window(core.conn, s.win.win_id);
+        const conn = core.getState().conn;
+        _ = xcb.xcb_grab_server(conn);
+        if (show) _ = xcb.xcb_map_window(conn, s.win.win_id) else _ = xcb.xcb_unmap_window(conn, s.win.win_id);
         const effective_visible = if (is_fullscreen) s.is_globally_visible else s.is_visible;
         retileAllWorkspaces(effective_visible);
         window.updateFloatingWindowBorders();
@@ -1270,9 +1282,9 @@ pub fn setBarState(action: BarAction) void {
     } else {
         if (show) {
             submitFullRedrawWithCarouselReset(s);
-            _ = xcb.xcb_map_window(core.conn, s.win.win_id);
+            _ = xcb.xcb_map_window(core.getState().conn, s.win.win_id);
         } else {
-            _ = xcb.xcb_unmap_window(core.conn, s.win.win_id);
+            _ = xcb.xcb_unmap_window(core.getState().conn, s.win.win_id);
         }
         tiling.retileCurrentWorkspace();
     }
@@ -1331,7 +1343,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     const s = gBar.state orelse return;
     if (event.event != s.win.win_id) return;
-    if (!core.config.workspaces.enabled) return;
+    if (!core.getState().config.workspaces.enabled) return;
     const ws_state = workspaces.getState() orelse return;
     const ws_w = tags.getCachedWorkspaceWidth();
     if (ws_w == 0) return;
@@ -1347,7 +1359,7 @@ inline fn switchToWorkspace(ws_arg: usize) void {
 }
 
 fn isTilingActive() bool {
-    return core.config.tiling.enabled and
+    return core.getState().config.tiling.enabled and
         if (tiling.getStateOpt()) |t| t.is_enabled else false;
 }
 
@@ -1362,7 +1374,7 @@ fn retileAllWorkspaces(effective_visible: bool) void {
         st.is_visible = effective_visible;
         defer st.is_visible = saved;
     }
-    if (!core.config.workspaces.enabled) {
+    if (!core.getState().config.workspaces.enabled) {
         tiling.retileCurrentWorkspace();
         return;
     }
