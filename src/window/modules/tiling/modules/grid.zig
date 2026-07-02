@@ -37,7 +37,9 @@ pub fn tileWithOffset(
         break :blk (screen_w -| (count + 1) * m.gap) / count;
     } else cell_w;
 
-    var defer_slot = layouts.DeferredConfigure.init();
+    // If swap_master deferred a window (see LayoutCtx.defer_win), capture its
+    // rect here and send it once, after every other window has been configured.
+    var deferred_rect: ?utils.Rect = null;
 
     for (windows, 0..) |win, idx| {
         const col: u16 = @intCast(idx % grid.cols);
@@ -55,9 +57,13 @@ pub fn tileWithOffset(
             .width = cellToWindowSize(effective_cell_w, bm),
             .height = win_h,
         };
-        defer_slot.emit(ctx, win, rect);
+        if (ctx.defer_win == win) {
+            deferred_rect = rect;
+        } else {
+            layouts.configureWithHints(ctx, win, rect);
+        }
     }
-    defer_slot.flush(ctx);
+    if (deferred_rect) |rect| layouts.configureWithHints(ctx, ctx.defer_win.?, rect);
 }
 
 /// Returns the window content dimension for a cell of `cell_size`, subtracting

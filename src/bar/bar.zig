@@ -112,24 +112,39 @@ const TITLE_MIN_WIDTH: u16 = 100;
 
 // Core data structures
 
-/// Paired (data, ends) buffers that together store a list of window title strings.
+/// List of per-window title strings, each individually heap-allocated.
 ///
-/// `data` is a flat byte array of all titles concatenated.
-/// `ends[i]` is the exclusive byte-end of title i within `data`.
-/// The two are always operated on together; this struct eliminates the repeated
-/// dual-field clear/append/deinit pairs in captureStateIntoSlot and deinit methods.
-const WindowTitleBuffer = struct {
-    data: std.ArrayListUnmanaged(u8) = .empty,
-    ends: std.ArrayListUnmanaged(u32) = .empty,
+/// The main thread fills this directly (one dupe per window, in workspace
+/// order); the render thread reads `list.items[idx]` with no offset
+/// arithmetic. Replaces the previous flat-buffer-plus-offset-array
+/// representation, which forced every reader to reconstruct a slice from a
+/// byte range instead of indexing directly.
+const WindowTitles = struct {
+    list: std.ArrayListUnmanaged([]const u8) = .empty,
 
-    pub fn clearRetaining(self: *WindowTitleBuffer) void {
-        self.data.clearRetainingCapacity();
-        self.ends.clearRetainingCapacity();
+    /// Frees every owned title string and empties the list.
+    pub fn clear(self: *WindowTitles, allocator: std.mem.Allocator) void {
+        for (self.list.items) |t| allocator.free(t);
+        self.list.clearRetainingCapacity();
     }
 
-    pub fn deinit(self: *WindowTitleBuffer, allocator: std.mem.Allocator) void {
-        self.data.deinit(allocator);
-        self.ends.deinit(allocator);
+    /// Appends an owned dupe of `title_str`.
+    pub fn append(self: *WindowTitles, allocator: std.mem.Allocator, title_str: []const u8) !void {
+        const owned = try allocator.dupe(u8, title_str);
+        errdefer allocator.free(owned);
+        try self.list.append(allocator, owned);
+    }
+
+    /// Clears the list, then refills it with dupes of `titles`.
+    /// Partial failures leave the list shorter than `titles` rather than erroring out.
+    pub fn replaceWith(self: *WindowTitles, allocator: std.mem.Allocator, titles: []const []const u8) void {
+        self.clear(allocator);
+        for (titles) |t| self.append(allocator, t) catch break;
+    }
+
+    pub fn deinit(self: *WindowTitles, allocator: std.mem.Allocator) void {
+        self.clear(allocator);
+        self.list.deinit(allocator);
     }
 };
 
@@ -148,10 +163,10 @@ const BarSnapshot = struct {
     is_workspace_dirty: bool = true, // workspace state changed
     is_title_dirty: bool = true, // title / focus / minimised state changed
 
-    /// Flat buffer of concatenated window titles; pre-fetched on the main thread so
-    /// the render thread never makes X11 calls for the segmented-title path.
-    /// `window_title_ends[i]` is the exclusive byte offset of the i-th title; use `windowTitle(i)`.
-    window_titles: WindowTitleBuffer = .{},
+    /// Pre-fetched window titles, indexed parallel to `current_workspace_windows`;
+    /// pre-fetched on the main thread so the render thread never makes X11
+    /// calls for the segmented-title path.
+    window_titles: WindowTitles = .{},
 
     fn deinit(snap: *BarSnapshot, allocator: std.mem.Allocator) void {
         snap.focused_title.deinit(allocator);
@@ -159,13 +174,6 @@ const BarSnapshot = struct {
         snap.minimized_windows.deinit(allocator);
         snap.workspace_has_windows.deinit(allocator);
         snap.window_titles.deinit(allocator);
-    }
-
-    /// Returns empty slice when `idx` is out of range.
-    pub fn windowTitle(snap: *const BarSnapshot, idx: usize) []const u8 {
-        if (idx >= snap.window_titles.ends.items.len) return "";
-        const start: usize = if (idx == 0) 0 else snap.window_titles.ends.items[idx - 1];
-        return snap.window_titles.data.items[start..snap.window_titles.ends.items[idx]];
     }
 };
 
@@ -271,7 +279,7 @@ const TitleCache = struct {
     minimized_windows: std.AutoHashMapUnmanaged(u32, void) = .{},
     /// Mirrors BarSnapshot.window_titles; populated by syncTitleCache so
     /// drawTitleOnly can pass cached titles without re-fetching from the X server.
-    window_titles: WindowTitleBuffer = .{},
+    window_titles: WindowTitles = .{},
     title_x: u16 = 0,
     title_width: u16 = 0,
     is_layout_valid: bool = false,
@@ -378,11 +386,11 @@ const State = struct {
             .title => blk: {
                 const wins = snap.current_workspace_windows.items;
                 const minimized_title: []const u8 =
-                    if (wins.len > 0 and snap.minimized_windows.contains(wins[0]))
-                        snap.windowTitle(0)
+                    if (wins.len > 0 and snap.minimized_windows.contains(wins[0]) and snap.window_titles.list.items.len > 0)
+                        snap.window_titles.list.items[0]
                     else
                         "";
-                break :blk try prompt.draw(r.dc, r.config, r.height, x, width orelse TITLE_MIN_WIDTH, self.win.conn, snap.focused_window, snap.focused_title.items, minimized_title, snap.current_workspace_windows.items, &snap.minimized_windows, snap.window_titles.data.items, snap.window_titles.ends.items, &self.title_cache.title, &self.title_cache.title_window, snap.is_title_invalidated, r.allocator);
+                break :blk try prompt.draw(r.dc, r.config, r.height, x, width orelse TITLE_MIN_WIDTH, self.win.conn, snap.focused_window, snap.focused_title.items, minimized_title, snap.current_workspace_windows.items, &snap.minimized_windows, snap.window_titles.list.items, &self.title_cache.title, &self.title_cache.title_window, snap.is_title_invalidated, r.allocator);
             },
             .clock => try clock.draw(r.dc, r.config, r.height, x),
         };
@@ -566,10 +574,10 @@ const State = struct {
                 .focused_title = self.title_cache.title.items,
                 .minimized_title = blk: {
                     const wins = self.title_cache.workspace_windows.items;
-                    const ends = self.title_cache.window_titles.ends.items;
-                    break :blk if (wins.len > 0 and ends.len > 0 and
+                    const cached_titles = self.title_cache.window_titles.list.items;
+                    break :blk if (wins.len > 0 and cached_titles.len > 0 and
                         self.title_cache.minimized_windows.contains(wins[0]))
-                        self.title_cache.window_titles.data.items[0..ends[0]]
+                        cached_titles[0]
                     else
                         "";
                 },
@@ -577,8 +585,7 @@ const State = struct {
                 .minimized_set = &self.title_cache.minimized_windows,
                 // Supply cached pre-fetched titles so drawSegmentedTitles skips
                 // xcb_get_property calls on this fast-path redraw too.
-                .window_title_data = self.title_cache.window_titles.data.items,
-                .window_title_ends = self.title_cache.window_titles.ends.items,
+                .titles = self.title_cache.window_titles.list.items,
             },
             self.render.allocator,
         ) catch |e| {
@@ -609,21 +616,9 @@ const State = struct {
         }
 
         // Keep cached titles in sync for the drawTitleOnly fast path.
-        // Both buffers are updated atomically via a WindowTitleBuffer temporary;
-        // a failed append leaves the cache stale rather than desynced.
-        sync_titles: {
-            var new_buf: WindowTitleBuffer = .{};
-            new_buf.data.appendSlice(alloc, snap.window_titles.data.items) catch {
-                new_buf.deinit(alloc);
-                break :sync_titles; // both lists left stale but still consistent
-            };
-            new_buf.ends.appendSlice(alloc, snap.window_titles.ends.items) catch {
-                new_buf.deinit(alloc);
-                break :sync_titles;
-            };
-            self.title_cache.window_titles.deinit(alloc);
-            self.title_cache.window_titles = new_buf;
-        }
+        // replaceWith frees the old owned strings before duping the new ones,
+        // so a failed dupe simply truncates the cache rather than desyncing it.
+        self.title_cache.window_titles.replaceWith(alloc, snap.window_titles.list.items);
 
         self.title_cache.focused_window = snap.focused_window;
         self.title_cache.title_x = x;
@@ -777,34 +772,27 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot,
 
     // Pre-fetch titles on the main thread so the render thread never issues X11 calls.
     // Only run when title state has changed; on clock-only wakeups this is a no-op.
-    // IMPORTANT: fetchWindowTitleInto replaces its buffer, so each non-focused window
-    // must be fetched into a temporary buffer and appended — not fetched directly into
-    // window_title_data, which would overwrite all previously stored titles.
     const title_changed =
         snap.focused_window != prev.focused_window or
         snap.is_title_invalidated or
         !std.mem.eql(u32, snap.current_workspace_windows.items, prev.current_workspace_windows.items) or
         hasMinimizedSetChanged(&snap.minimized_windows, &prev.minimized_windows);
     if (title_changed) {
-        snap.window_titles.clearRetaining();
+        snap.window_titles.clear(allocator);
         var title_tmp: std.ArrayListUnmanaged(u8) = .empty;
         defer title_tmp.deinit(allocator);
         for (snap.current_workspace_windows.items) |win| {
             if (snap.focused_window == win) {
-                snap.window_titles.data.appendSlice(allocator, snap.focused_title.items) catch {};
+                snap.window_titles.append(allocator, snap.focused_title.items) catch {};
             } else {
                 title_tmp.clearRetainingCapacity();
                 title.fetchWindowTitleInto(core.getState().conn, win, &title_tmp, allocator) catch {};
-                snap.window_titles.data.appendSlice(allocator, title_tmp.items) catch {};
+                snap.window_titles.append(allocator, title_tmp.items) catch {};
             }
-            const end: u32 = @intCast(snap.window_titles.data.items.len);
-            snap.window_titles.ends.append(allocator, end) catch {};
         }
     } else {
         // Carry forward the previous slot's title data unchanged.
-        snap.window_titles.clearRetaining();
-        snap.window_titles.data.appendSlice(allocator, prev.window_titles.data.items) catch {};
-        snap.window_titles.ends.appendSlice(allocator, prev.window_titles.ends.items) catch {};
+        snap.window_titles.replaceWith(allocator, prev.window_titles.list.items);
     }
 
     snap.is_full_redraw = forced or (snap.workspace_count != prev.workspace_count);

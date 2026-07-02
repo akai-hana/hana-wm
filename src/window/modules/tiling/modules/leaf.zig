@@ -22,7 +22,10 @@ pub fn tileWithOffset(
 
     const m = state.margins();
 
-    var defer_slot = layouts.DeferredConfigure.init();
+    // If swap_master deferred a window (see LayoutCtx.defer_win), its
+    // configure_window call is captured here and sent once, after every
+    // other window in the workspace, instead of inline during the recursion.
+    var deferred_rect: ?utils.Rect = null;
 
     // Strip the outer gap; each recursive split inserts one gap at its seam,
     // so adjacent windows are always separated by exactly one gap_width.
@@ -34,10 +37,10 @@ pub fn tileWithOffset(
         @as(i32, @intCast(y_offset +| m.gap)),
         screen_w -| m.gap *| 2,
         screen_h -| m.gap *| 2,
-        &defer_slot,
+        &deferred_rect,
     );
 
-    defer_slot.flush(ctx);
+    if (deferred_rect) |rect| layouts.configureWithHints(ctx, ctx.defer_win.?, rect);
 }
 
 /// Splits `dim` into two halves separated by `gap`.
@@ -61,7 +64,7 @@ fn tileRegion(
     y: i32,
     w: u16,
     h: u16,
-    defer_slot: *layouts.DeferredConfigure,
+    deferred_rect: *?utils.Rect,
 ) void {
     const n = windows.len;
     if (n == 0) return;
@@ -76,7 +79,11 @@ fn tileRegion(
             .width = if (w > b2) w - b2 else constants.MIN_WINDOW_DIM,
             .height = if (h > b2) h - b2 else constants.MIN_WINDOW_DIM,
         };
-        defer_slot.emit(ctx, windows[0], rect);
+        if (ctx.defer_win == windows[0]) {
+            deferred_rect.* = rect;
+        } else {
+            layouts.configureWithHints(ctx, windows[0], rect);
+        }
         return;
     }
 
@@ -88,13 +95,13 @@ fn tileRegion(
         // Vertical split (wide/square region)
         const split = halveWithMin(w, gap);
         const right_x: i32 = x + @as(i32, @intCast(split.first +| gap));
-        tileRegion(ctx, windows[0..n_left], m, x, y, split.first, h, defer_slot);
-        tileRegion(ctx, windows[n_left..], m, right_x, y, split.second, h, defer_slot);
+        tileRegion(ctx, windows[0..n_left], m, x, y, split.first, h, deferred_rect);
+        tileRegion(ctx, windows[n_left..], m, right_x, y, split.second, h, deferred_rect);
     } else {
         // Horizontal split (tall region)
         const split = halveWithMin(h, gap);
         const bottom_y: i32 = y + @as(i32, @intCast(split.first +| gap));
-        tileRegion(ctx, windows[0..n_left], m, x, y, w, split.first, defer_slot);
-        tileRegion(ctx, windows[n_left..], m, x, bottom_y, w, split.second, defer_slot);
+        tileRegion(ctx, windows[0..n_left], m, x, y, w, split.first, deferred_rect);
+        tileRegion(ctx, windows[n_left..], m, x, bottom_y, w, split.second, deferred_rect);
     }
 }

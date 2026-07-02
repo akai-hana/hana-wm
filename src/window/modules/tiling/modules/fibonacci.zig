@@ -39,7 +39,9 @@ pub fn tileWithOffset(
     var h: u16 = screen_h -| m.gap *| 2;
     var dir: SpiralDirection = .right;
 
-    var defer_slot = layouts.DeferredConfigure.init();
+    // If swap_master deferred a window (see LayoutCtx.defer_win), its rect is
+    // captured here by emitOrDefer and sent once, after every other window.
+    var deferred_rect: ?utils.Rect = null;
 
     for (windows, 0..) |win, i| {
         // Remaining area too small to split: raise the focused window (or the
@@ -72,7 +74,7 @@ pub fn tileWithOffset(
                 }
                 utils.pushWindowOffscreen(ctx.conn, overflow_win);
             }
-            defer_slot.flush(ctx);
+            if (deferred_rect) |rect| layouts.configureWithHints(ctx, ctx.defer_win.?, rect);
             return;
         }
 
@@ -84,31 +86,40 @@ pub fn tileWithOffset(
                 .width = w -| border2,
                 .height = h -| border2,
             };
-            defer_slot.emit(ctx, win, rect);
-            defer_slot.flush(ctx);
+            emitOrDefer(ctx, win, rect, &deferred_rect);
+            if (deferred_rect) |dr| layouts.configureWithHints(ctx, ctx.defer_win.?, dr);
             return;
         }
 
-        splitAndAdvance(ctx, win, dir, &defer_slot, border2, m.gap, &x, &y, &w, &h);
+        splitAndAdvance(ctx, win, dir, border2, m.gap, &x, &y, &w, &h, &deferred_rect);
         dir = dir.next();
     }
-    defer_slot.flush(ctx);
+    if (deferred_rect) |rect| layouts.configureWithHints(ctx, ctx.defer_win.?, rect);
+}
+
+/// Sends `rect` for `win` immediately, unless `win` is the window named by
+/// `ctx.defer_win`, in which case the rect is stashed in `deferred_rect` for
+/// the caller to send once, after every other window in this retile.
+inline fn emitOrDefer(ctx: *const layouts.LayoutCtx, win: u32, rect: utils.Rect, deferred_rect: *?utils.Rect) void {
+    if (ctx.defer_win == win) {
+        deferred_rect.* = rect;
+    } else {
+        layouts.configureWithHints(ctx, win, rect);
+    }
 }
 
 /// Place `win` in its split half and advance the remaining area cursor.
-/// If `win` is the deferred window, stores its rect in `defer_slot` rather
-/// than calling configureWithHints — the caller flushes it after the loop.
 inline fn splitAndAdvance(
     ctx: *const layouts.LayoutCtx,
     win: u32,
     dir: SpiralDirection,
-    defer_slot: *layouts.DeferredConfigure,
     border2: u16,
     gap: u16,
     x: *i32,
     y: *i32,
     w: *u16,
     h: *u16,
+    deferred_rect: *?utils.Rect,
 ) void {
     switch (dir) {
         .right => {
@@ -119,7 +130,7 @@ inline fn splitAndAdvance(
                 .width = win_w -| border2,
                 .height = h.* -| border2,
             };
-            defer_slot.emit(ctx, win, rect);
+            emitOrDefer(ctx, win, rect, deferred_rect);
             x.* += @as(i32, @intCast(win_w + gap));
             w.* = w.* -| (win_w + gap);
         },
@@ -131,7 +142,7 @@ inline fn splitAndAdvance(
                 .width = w.* -| border2,
                 .height = win_h -| border2,
             };
-            defer_slot.emit(ctx, win, rect);
+            emitOrDefer(ctx, win, rect, deferred_rect);
             y.* += @as(i32, @intCast(win_h + gap));
             h.* = h.* -| (win_h + gap);
         },
@@ -143,7 +154,7 @@ inline fn splitAndAdvance(
                 .width = win_w -| border2,
                 .height = h.* -| border2,
             };
-            defer_slot.emit(ctx, win, rect);
+            emitOrDefer(ctx, win, rect, deferred_rect);
             w.* = w.* -| (win_w + gap);
         },
         .up => {
@@ -154,7 +165,7 @@ inline fn splitAndAdvance(
                 .width = w.* -| border2,
                 .height = win_h -| border2,
             };
-            defer_slot.emit(ctx, win, rect);
+            emitOrDefer(ctx, win, rect, deferred_rect);
             h.* = h.* -| (win_h + gap);
         },
     }

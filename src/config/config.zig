@@ -287,8 +287,7 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !types.Config {
         defer allocator.free(detected_font);
         const font_size_val: u16 = @intFromFloat(cfg.bar.font_size.value);
         const font_with_size = try std.fmt.allocPrint(allocator, "{s}:size={}", .{ detected_font, font_size_val });
-        if (cfg.allocated_font) |old| allocator.free(old);
-        cfg.allocated_font = font_with_size;
+        allocator.free(cfg.bar.font);
         cfg.bar.font = font_with_size;
     }
 
@@ -1005,11 +1004,13 @@ fn parseTransparency(value: parser.Value) f32 {
 }
 
 fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *types.Config) !void {
-    // Dupes `val` into `slot` and points `view` at the result.
+    // Dupes `val` into `view`. Always allocates — even for the default
+    // literal — so callers never need to track whether a given BarConfig
+    // string field points at a literal or a heap copy; Config.deinit can
+    // free it unconditionally.
     const set = struct {
-        fn assignStr(a: std.mem.Allocator, slot: *?[]const u8, view: *[]const u8, val: []const u8) !void {
-            slot.* = try a.dupe(u8, val);
-            view.* = slot.*.?;
+        fn assignStr(a: std.mem.Allocator, view: *[]const u8, val: []const u8) !void {
+            view.* = try a.dupe(u8, val);
         }
     };
     const section = doc.getSection("bar") orelse return;
@@ -1018,7 +1019,7 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *typ
     if (section.getString("position")) |pos_str|
         cfg.bar.bar_position = std.meta.stringToEnum(types.BarScreenPosition, pos_str) orelse .top;
     cfg.bar.height = section.getScalable("height"); // null = auto from font metrics
-    try set.assignStr(allocator, &cfg.allocated_font, &cfg.bar.font, getInRange([]const u8, section, "font", "monospace:size=10", null, null));
+    try set.assignStr(allocator, &cfg.bar.font, getInRange([]const u8, section, "font", "monospace:size=10", null, null));
     if (section.get("fonts")) |v| if (v.asArray()) |arr| {
         for (cfg.bar.fonts.items) |font| allocator.free(font);
         cfg.bar.fonts.clearRetainingCapacity();
@@ -1030,8 +1031,8 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *typ
     cfg.bar.spacing = section.getScalable("segment_spacing") orelse parser.ScalableValue.absolute(12.0);
     inline for (BAR_COLOR_FIELDS) |field|
         @field(cfg.bar, field.name) = getColor(section, field.name, field.default);
-    try set.assignStr(allocator, &cfg.allocated_clock_format, &cfg.bar.clock_format, getInRange([]const u8, section, "clock_format", "%Y-%m-%d %H:%M:%S", null, null));
-    try set.assignStr(allocator, &cfg.allocated_drun_prompt, &cfg.bar.drun_prompt, getInRange([]const u8, section, "drun_prompt", "run: ", null, null));
+    try set.assignStr(allocator, &cfg.bar.clock_format, getInRange([]const u8, section, "clock_format", "%Y-%m-%d %H:%M:%S", null, null));
+    try set.assignStr(allocator, &cfg.bar.drun_prompt, getInRange([]const u8, section, "drun_prompt", "run: ", null, null));
     cfg.bar.indicator_size = section.getScalable("indicator_size") orelse parser.ScalableValue.percentage(20.0);
     cfg.bar.workspace_tag_width = section.getScalable("workspace_tag_width") orelse parser.ScalableValue.percentage(100.0);
     if (section.getString("indicator_location")) |loc_str| {
@@ -1051,14 +1052,11 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *typ
         cfg.bar.indicator_padding = std.math.clamp(f, 0.0, 1.0);
     }
     // indicator_focused/unfocused: if only one is set, the other mirrors it.
+    // Always duped (even the literal defaults) so deinit can free unconditionally.
     const raw_focused = section.getString("indicator_focused");
     const raw_unfocused = section.getString("indicator_unfocused");
-    if (raw_focused orelse raw_unfocused) |_| {
-        cfg.allocated_indicator_focused = try allocator.dupe(u8, raw_focused orelse raw_unfocused.?);
-        cfg.allocated_indicator_unfocused = try allocator.dupe(u8, raw_unfocused orelse raw_focused.?);
-        cfg.bar.indicator_focused = cfg.allocated_indicator_focused.?;
-        cfg.bar.indicator_unfocused = cfg.allocated_indicator_unfocused.?;
-    }
+    try set.assignStr(allocator, &cfg.bar.indicator_focused, raw_focused orelse raw_unfocused orelse cfg.bar.indicator_focused);
+    try set.assignStr(allocator, &cfg.bar.indicator_unfocused, raw_unfocused orelse raw_focused orelse cfg.bar.indicator_unfocused);
 
     if (section.get("indicator_color")) |_| // null = inherit workspace fg
         cfg.bar.indicator_color = getColor(section, "indicator_color", cfg.bar.fg);
