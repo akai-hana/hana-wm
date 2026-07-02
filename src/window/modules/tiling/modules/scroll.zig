@@ -52,7 +52,9 @@ pub fn tileWithOffset(
     const gap_half: i32 = @intCast(m.gap / 2);
     const border2: i32 = 2 * @as(i32, @intCast(m.border));
 
-    var defer_slot = layouts.DeferredConfigure.init();
+    // If swap_master deferred a window (see LayoutCtx.defer_win), capture its
+    // rect here and send it once, after every other window has been configured.
+    var deferred_rect: ?utils.Rect = null;
 
     for (windows, 0..) |win, i| {
         const col: i32 = @intCast(i);
@@ -84,7 +86,11 @@ pub fn tileWithOffset(
                 .width = content_w,
                 .height = content_h,
             };
-            defer_slot.emit(ctx, win, rect);
+            if (ctx.defer_win == win) {
+                deferred_rect = rect;
+            } else {
+                layouts.configureWithHints(ctx, win, rect);
+            }
             continue;
         }
 
@@ -94,9 +100,13 @@ pub fn tileWithOffset(
             .width = content_w,
             .height = content_h,
         };
-        defer_slot.emit(ctx, win, rect);
+        if (ctx.defer_win == win) {
+            deferred_rect = rect;
+        } else {
+            layouts.configureWithHints(ctx, win, rect);
+        }
     }
-    defer_slot.flush(ctx);
+    if (deferred_rect) |rect| layouts.configureWithHints(ctx, ctx.defer_win.?, rect);
 }
 
 /// Height of each window: full screen height minus top + bottom gap and borders.

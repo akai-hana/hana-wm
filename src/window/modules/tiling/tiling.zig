@@ -248,15 +248,15 @@ pub fn init() void {
 }
 
 pub fn deinit() void {
-    // State holds only fixed arrays and value types; nothing to free.
+    if (state) |*s| s.geom.cache.deinit();
     state = null;
 }
 
 pub fn reloadConfig() void {
     const s = getState();
     const saved_windows = s.windows;
+    s.geom.cache.deinit();
 
-    // initState is infallible: scratch buffers are fixed arrays in BSS.
     // Config changes invalidate every cached rect and border color, so we
     // want the fresh empty cache initState produces. The only field that
     // must survive the rebuild is the live window list.
@@ -282,26 +282,17 @@ pub fn reloadConfig() void {
         // frame where some windows have the new border width but the layout has
         // not yet been recalculated.
         //
-        // Current-workspace windows: BORDER_WIDTH is merged into the geometry
-        // configure_window call inside retileCurrentWorkspaceReload, saving one
-        // XCB round-trip per window vs. the old separate-loop approach.
-        //
-        // Inactive-workspace windows: they only receive a geometry
-        // configure_window when their workspace is next activated, so they
-        // MUST get an explicit BORDER_WIDTH send here — otherwise the new
-        // border width is never applied to them.
+        // BORDER_WIDTH is sent explicitly to every tiled window here, then the
+        // normal retile path recalculates geometry separately. This trades one
+        // extra XCB request per window (vs. the previous merge into the
+        // geometry configure_window call) for a retile path that no longer
+        // needs to know about border width at all.
         const conn = core.getState().conn;
         _ = xcb.xcb_grab_server(conn);
-        const current_ws = tracking.getCurrentWorkspace();
         for (ns.windows.items()) |win| {
-            // Skip current-workspace windows: retileCurrentWorkspaceReload
-            // merges BORDER_WIDTH into their geometry request below.
-            if (current_ws) |cws| {
-                if (tracking.isWindowOnWorkspace(win, @intCast(cws))) continue;
-            }
             _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{ns.config.border_width});
         }
-        retileCurrentWorkspaceReload(ns.config.border_width);
+        retileCurrentWorkspace();
         bar.redrawInsideGrab();
         utils.ungrabAndFlush(conn);
     }
@@ -314,7 +305,7 @@ pub fn reloadConfig() void {
 /// The hints live inside the same flat-array entry as the window's geometry and
 /// border color, so no separate table scan is needed inside configureWithHints.
 pub fn cacheSizeHints(win: u32, hints: layouts.SizeHints) void {
-    getState().geom.cache.cacheHints(win, hints);
+    layouts.cacheHints(&getState().geom.cache, win, hints);
 }
 
 // Window management
@@ -359,8 +350,9 @@ pub fn addWindow(window_id: u32) void {
     // spawn path, costing one extra XCB round-trip per window open.
 
     // Pre-populate the cache so the immediately-following retile does not
-    // re-send the border pixel. getOrPut is infallible on the flat-array cache.
-    const gop = s.geom.cache.getOrPut(window_id);
+    // re-send the border pixel.
+    const gop = s.geom.cache.getOrPut(window_id) catch return;
+    if (!gop.found_existing) gop.value_ptr.* = .{};
     gop.value_ptr.border = border_color;
 }
 
@@ -542,6 +534,7 @@ pub fn retileAllWorkspaces() void {
         defer s.config.master_count = saved_count;
 
         invokeLayout(selectLayout(s, ws_state_opt, ws_idx, core.getState().config.tiling.global_layout), &ctx, s, ws_windows, screen);
+        updateBorders(s, ws_windows);
         markWorkspaceGeomValid(s, ws_idx);
     }
 
@@ -583,16 +576,6 @@ pub fn retileForRestore() void {
     s.is_dirty = false;
 }
 
-/// Retile the current workspace, merging `border_width` into each geometry
-/// configure_window call. Used exclusively by reloadConfig so that BORDER_WIDTH
-/// and X|Y|W|H are sent as a single request per window inside the server grab.
-fn retileCurrentWorkspaceReload(border_width: u16) void {
-    const s = getState();
-    if (!s.is_enabled) return;
-    retileImpl(calcScreenArea(), .{ .border_width = border_width });
-    s.is_dirty = false;
-}
-
 /// Restore windows on the current workspace to their cached tiled positions,
 /// bypassing the layout algorithm. Returns true if the cache is valid and
 /// positions have been replayed. Returns false if the cache is stale; the caller
@@ -612,8 +595,9 @@ pub fn restoreWorkspaceGeom() bool {
     if (!layouts.rectsEqual(current_screen, s.geom.last_retile_area)) return false;
 
     // Pass 1 — validate all cache entries before emitting any XCB calls.
-    // getPtr returns a stable pointer (CacheMap never reallocates) so we can
-    // collect pointers here and dereference them safely in pass 2.
+    // getPtr pointers stay valid through pass 2 because no insertion happens
+    // into the cache between collecting them here and dereferencing them below
+    // (AutoHashMap pointers are only invalidated by insertion/rehash).
     var wd_ptrs: [max_workspace_windows]*layouts.WindowData = undefined;
     for (ws_windows, 0..) |win, i| {
         const wd = s.geom.cache.getPtr(win) orelse return false;
@@ -1049,7 +1033,7 @@ fn initState() State {
         },
         .windows = .{},
         .geom = .{
-            .cache = .{},
+            .cache = layouts.CacheMap.init(cs.alloc),
             .workspace_geom_valid_bits = 0,
             .last_retile_area = zero_rect,
             .scratch_wins = undefined,
@@ -1060,19 +1044,12 @@ fn initState() State {
 
 // Layout dispatch helpers
 
-/// Stable function-pointer target for `LayoutCtx.get_border_color`.
-fn getBorderColorForWindow(win: u32) u32 {
-    return getState().borderColor(win);
-}
-
-/// Build a LayoutCtx for a normal retile.  defer_configure and border_width
-/// are left at their defaults (null); retileImpl sets them from RetileOpts
-/// after this call returns, keeping the construction site minimal.
+/// Build a LayoutCtx for a normal retile. defer_win is left at its default
+/// (null); retileImpl sets it from RetileOpts after this call returns.
 inline fn makeLayoutCtx(s: *State) layouts.LayoutCtx {
     return .{
         .conn = core.getState().conn,
         .cache = &s.geom.cache,
-        .get_border_color = getBorderColorForWindow,
         .focused_win = focus.getFocused(),
     };
 }
@@ -1155,17 +1132,15 @@ inline fn resolveMasterCount(s: *const State, ws_state: ?*WsState, ws_idx: u8) u
 /// Options for the single core retile implementation.  All public retile
 /// entry points are thin wrappers that fill in this struct and call retileImpl,
 /// eliminating the near-duplicate logic that previously lived across four
-/// private functions (retile, retileDeferred, retileCurrentWorkspaceReload,
+/// private functions (retile, retileDeferred, retileForWorkspace,
 /// retileCurrentWorkspaceDeferredPrebuilt).
 const RetileOpts = struct {
     /// Target workspace.  Null = current workspace.
     for_ws: ?u8 = null,
-    /// When non-null, this window's configure_window call is emitted last
-    /// within every column/stack group it belongs to.
+    /// When non-null, threaded into LayoutCtx.defer_win so the named window's
+    /// configure_window call lands last within whatever column/stack group it
+    /// belongs to. Used by swap_master to eliminate the one-frame wallpaper gap.
     defer_win: ?u32 = null,
-    /// When non-null, XCB_CONFIG_WINDOW_BORDER_WIDTH is merged into the
-    /// per-window geometry request.  Set only during reloadConfig.
-    border_width: ?u16 = null,
     /// When non-null, skip collectWorkspaceWindows and use this list directly.
     /// The caller guarantees the slice contents match the current workspace.
     pre_built: ?[]const u32 = null,
@@ -1187,8 +1162,7 @@ fn retileImpl(screen: utils.Rect, opts: RetileOpts) void {
     if (ws_windows.len == 0) return;
 
     var ctx = makeLayoutCtx(s);
-    ctx.defer_configure = opts.defer_win;
-    ctx.border_width = opts.border_width;
+    ctx.defer_win = opts.defer_win;
 
     const wss = workspaces.getState();
 
@@ -1209,6 +1183,8 @@ fn retileImpl(screen: utils.Rect, opts: RetileOpts) void {
         screen,
     );
 
+    updateBorders(s, ws_windows);
+
     s.geom.last_retile_area = screen;
     markWorkspaceGeomValid(s, target_ws);
 }
@@ -1217,7 +1193,8 @@ fn retileImpl(screen: utils.Rect, opts: RetileOpts) void {
 
 /// Change the border pixel for `win` only when `color` differs from the cached value.
 fn applyBorderColor(s: *State, conn: *xcb.xcb_connection_t, win: u32, color: u32) void {
-    const gop = s.geom.cache.getOrPut(win);
+    const gop = s.geom.cache.getOrPut(win) catch return;
+    if (!gop.found_existing) gop.value_ptr.* = .{};
     if (gop.found_existing and gop.value_ptr.border == color) return;
     gop.value_ptr.border = color;
     _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
@@ -1453,7 +1430,9 @@ fn swapWithMasterCore(s: *State, pos: FocusMasterPos) ?u32 {
 }
 
 fn updateCacheRect(s: *State, win: u32, rect: utils.Rect) void {
-    s.geom.cache.getOrPut(win).value_ptr.rect = rect;
+    const gop = s.geom.cache.getOrPut(win) catch return;
+    if (!gop.found_existing) gop.value_ptr.* = .{};
+    gop.value_ptr.rect = rect;
 }
 
 /// Set the geometry-valid bit for `ws_idx`, indicating the cache is correct for that workspace.

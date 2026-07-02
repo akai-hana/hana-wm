@@ -48,6 +48,12 @@ const FloatSave = struct { win: u32, rect: utils.Rect };
 var g_float_saves: [MAX_FLOAT_SAVES]FloatSave = std.mem.zeroes([MAX_FLOAT_SAVES]FloatSave);
 var g_float_saves_len: usize = 0;
 
+/// Window that has been configured for fullscreen but has not yet sent a
+/// ConfigureNotify confirming its new dimensions.  Zero when no window is
+/// pending.  Set in enterFullscreenCommit; cleared in
+/// notifyConfigureIfPending and resetState.
+var g_pending_bar_hide_win: u32 = 0;
+
 // EWMH atoms for _NET_WM_STATE_FULLSCREEN — interned once in init().
 var g_net_wm_state: xcb.xcb_atom_t = xcb.XCB_ATOM_NONE;
 var g_net_wm_state_fullscreen: xcb.xcb_atom_t = xcb.XCB_ATOM_NONE;
@@ -56,6 +62,7 @@ var g_net_wm_state_fullscreen: xcb.xcb_atom_t = xcb.XCB_ATOM_NONE;
 fn resetState() void {
     g_slots = @splat(null);
     g_float_saves_len = 0;
+    g_pending_bar_hide_win = 0;
 }
 
 /// Consume an intern-atom cookie and return the resulting atom,
@@ -362,10 +369,11 @@ fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
     };
     forEachWindowOnCurrentWorkspace(win, PushCtx{});
 
-    // Configure and raise the fullscreen window BEFORE calling setBarState.
-    // setBarState(.hide_fullscreen) triggers retileCurrentWorkspace(); if it ran
-    // first, the retile would undo the offscreen push above. Configuring first
-    // ensures the retile sees committed fullscreen state and leaves others offscreen.
+    // Configure and raise the fullscreen window BEFORE hiding the bar.
+    // Deferring the bar hide until ConfigureNotify ensures heavy clients
+    // (e.g. Discord, Electron apps) don't expose the raw background during
+    // their repaint delay.  The bar hide is triggered in notifyConfigureIfPending
+    // once the window confirms its new geometry.
     const cs = core.getState();
     window.configureWindowGeom(cs.conn, win, .{
         .x = 0,
@@ -381,7 +389,10 @@ fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
     // configure_window, leaving the window stuck at fullscreen dimensions.
     tiling.invalidateGeomCache(win);
 
-    bar.setBarState(.hide_fullscreen);
+    // Defer hiding the bar until the window confirms its new geometry via
+    // ConfigureNotify, so heavy clients (e.g. Discord) don't expose the
+    // raw background during their repaint delay.
+    g_pending_bar_hide_win = win;
 
     // Advertise fullscreen state via EWMH so external tools (e.g. compositor
     // scripts) can detect it with xprop / xev.
@@ -391,6 +402,10 @@ fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
 fn exitFullscreenCommit(win: u32, ws: u8) void {
     const fs_info = getForWorkspace(ws) orelse return;
     if (fs_info.window != win) return;
+
+    // Cancel any in-flight deferred bar hide for this window — the fullscreen
+    // transition is being reversed before the ConfigureNotify arrived.
+    g_pending_bar_hide_win = 0;
 
     const saved = fs_info.saved_geometry;
 
@@ -498,4 +513,20 @@ pub fn toggle() void {
         enterFullscreenCommit(win, current_ws, geom);
         utils.ungrabAndFlush(conn);
     }
+}
+
+/// Called from the ConfigureNotify handler in events.zig.
+/// Hides the bar if `win` is the window we were waiting for and its reported
+/// dimensions now match the screen.  Safe to call for every ConfigureNotify —
+/// it is a no-op when no fullscreen transition is pending or the dimensions
+/// do not yet match.
+pub fn notifyConfigureIfPending(win: u32, width: u16, height: u16) void {
+    if (g_pending_bar_hide_win == 0 or g_pending_bar_hide_win != win) return;
+
+    const cs = core.getState();
+    if (width != @as(u16, @intCast(cs.screen.width_in_pixels)) or
+        height != @as(u16, @intCast(cs.screen.height_in_pixels))) return;
+
+    g_pending_bar_hide_win = 0;
+    bar.setBarState(.hide_fullscreen);
 }

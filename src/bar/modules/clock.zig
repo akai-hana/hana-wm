@@ -107,18 +107,35 @@ pub fn pollTimeoutMs() i32 {
 
 // Thread body
 
-/// Sleeps up to `ns` nanoseconds, waking early if clock_quit is set.
-/// Must NOT be called with clock_mutex held.
-fn sleepInterruptible(ns: u64) void {
-    // Compute an absolute REALTIME deadline for pthread_cond_timedwait.
-    var deadline: std.os.linux.timespec = realtimeTs();
-    const new_nsec = @as(u64, @intCast(deadline.nsec)) + ns;
-    deadline.sec += @intCast(new_nsec / std.time.ns_per_s);
-    deadline.nsec = @intCast(new_nsec % std.time.ns_per_s);
+/// Adds `ns` nanoseconds to `ts`, normalising the nanosecond field.
+inline fn addNs(ts: std.os.linux.timespec, ns: u64) std.os.linux.timespec {
+    var out = ts;
+    const new_nsec = @as(u64, @intCast(out.nsec)) + ns;
+    out.sec += @intCast(new_nsec / std.time.ns_per_s);
+    out.nsec = @intCast(new_nsec % std.time.ns_per_s);
+    return out;
+}
 
+/// Sleeps until the absolute REALTIME `deadline`, waking early if clock_quit
+/// is set. Must NOT be called with clock_mutex held.
+///
+/// Unlike sleeping for a relative duration computed from "now", this takes
+/// the deadline as-is, so callers can advance a fixed schedule (deadline +=
+/// 1s each tick) instead of re-deriving the next deadline from the thread's
+/// actual wake time. That fixed-schedule approach is what keeps ticks phase
+/// -locked to true wall-clock second boundaries: re-deriving from "now" on
+/// every iteration lets per-wake scheduling latency accumulate, so the
+/// thread's notion of "the boundary" drifts later relative to real time the
+/// longer the bar runs. That drift is what produced the occasional visible
+/// blip: an action-triggered redraw (which always reads the real clock at
+/// the instant of the redraw) could show the new second slightly before the
+/// drifted clock thread's own tick "expected" to, making the time appear to
+/// jump forward and then immediately settle.
+fn sleepUntilInterruptible(deadline: std.os.linux.timespec) void {
+    var ts = deadline;
     _ = std.c.pthread_mutex_lock(&clock_mutex);
     while (!clock_quit) {
-        const rc = std.c.pthread_cond_timedwait(&clock_cond, &clock_mutex, @ptrCast(&deadline));
+        const rc = std.c.pthread_cond_timedwait(&clock_cond, &clock_mutex, @ptrCast(&ts));
         if (rc == std.posix.E.TIMEDOUT) break;
         // Spurious wakeup or signal: recheck clock_quit from the top of the loop.
     }
@@ -128,12 +145,14 @@ fn sleepInterruptible(ns: u64) void {
 fn runClockThread() void {
     // ── Align first tick to the next whole-second REALTIME boundary ────────
     // This ensures the displayed time is never stale by up to a full second
-    // immediately after the bar starts.
+    // immediately after the bar starts. `deadline` becomes the anchor for
+    // every subsequent tick.
+    var deadline: std.os.linux.timespec = realtimeTs();
     {
-        const now_ts = realtimeTs();
-        // ns_per_s - now_ts.nsec is always in (0, 1_000_000_000].
-        const ns_to_boundary: u64 = @intCast(std.time.ns_per_s - now_ts.nsec);
-        sleepInterruptible(ns_to_boundary);
+        // ns_per_s - deadline.nsec is always in (0, 1_000_000_000].
+        const ns_to_boundary: u64 = @intCast(std.time.ns_per_s - deadline.nsec);
+        deadline = addNs(deadline, ns_to_boundary);
+        sleepUntilInterruptible(deadline);
     }
 
     while (true) {
@@ -148,7 +167,23 @@ fn runClockThread() void {
         // internally, so no extra check is needed here.
         _ = bar.checkClockUpdate();
 
-        sleepInterruptible(std.time.ns_per_s);
+        // Advance the fixed schedule by exactly one second rather than
+        // computing "now + 1s" — this is what keeps ticks locked to true
+        // second boundaries instead of drifting later over time.
+        deadline = addNs(deadline, std.time.ns_per_s);
+
+        // Recover if we've fallen behind real time (e.g. system suspend,
+        // a long scheduler stall, or the clock being stepped): re-anchor to
+        // the next boundary instead of firing a burst of catch-up ticks.
+        const now_ts = realtimeTs();
+        if (deadline.sec < now_ts.sec or
+            (deadline.sec == now_ts.sec and deadline.nsec < now_ts.nsec))
+        {
+            const ns_to_boundary: u64 = @intCast(std.time.ns_per_s - now_ts.nsec);
+            deadline = addNs(now_ts, ns_to_boundary);
+        }
+
+        sleepUntilInterruptible(deadline);
     }
 }
 

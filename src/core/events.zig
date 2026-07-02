@@ -18,6 +18,7 @@ const focus = @import("focus");
 const tiling = @import("tiling");
 const bar = @import("bar");
 const prompt = @import("prompt");
+const fullscreen = @import("fullscreen");
 
 // Indices into the poll fd array.
 const FD_XCB = 0;
@@ -47,6 +48,12 @@ fn handlePropertyNotify(event: *anyopaque) void {
     window.handlePropertyNotify(e);
 }
 
+/// Routes ConfigureNotify to the fullscreen deferred-bar-hide logic.
+fn handleConfigureNotify(event: *anyopaque) void {
+    const e: *xcb.xcb_configure_notify_event_t = @ptrCast(@alignCast(event));
+    fullscreen.notifyConfigureIfPending(e.window, e.width, e.height);
+}
+
 /// O(1) dispatch via a comptime-built table indexed by XCB event type (low 7 bits).
 const dispatch_table = blk: {
     var table = [_]?EventHandler{null} ** EVENT_DISPATCH_TABLE;
@@ -68,6 +75,8 @@ const dispatch_table = blk: {
     table[xcb.XCB_PROPERTY_NOTIFY] = asHandler(handlePropertyNotify);
 
     table[xcb.XCB_EXPOSE] = asHandler(bar.handleExpose);
+
+    table[xcb.XCB_CONFIGURE_NOTIFY] = asHandler(handleConfigureNotify);
 
     break :blk table;
 };

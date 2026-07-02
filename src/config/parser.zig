@@ -187,57 +187,59 @@ fn deepCopyValue(allocator: std.mem.Allocator, val: Value) std.mem.Allocator.Err
     };
 }
 
-/// Appends `incoming` into `dst_arr`, flattening it if it is itself an array.
-/// Takes ownership of `incoming` in all cases.
-fn appendFlatOrSingle(allocator: std.mem.Allocator, dst_arr: *std.ArrayList(Value), incoming: Value) !void {
-    if (incoming == .array) {
-        for (incoming.array.items) |item|
-            try dst_arr.append(allocator, try deepCopyValue(allocator, item));
-        var inc = incoming;
-        inc.deinit(allocator);
-    } else {
-        try dst_arr.append(allocator, incoming);
-    }
-}
-
-/// Accumulate `incoming` into the existing value at `old_val`.
+/// Accumulate `incoming` into the existing single-file value at `old_val`.
 ///
-/// If `old_val` is already an array the new value is appended (or flattened)
-/// into it.  Otherwise both the existing scalar and `incoming` are wrapped in
-/// a fresh 2-element array.
-///
-/// `flatten`: when true, an array-valued `incoming` is exploded into individual
-/// elements rather than nested.  Set true for the merge path, false for the
-/// single-file parse path.
+/// Used while parsing one file: a duplicate key wraps the existing scalar and
+/// `incoming` into a fresh 2-element array (or appends to an existing array).
+/// An array-valued `incoming` is nested as a single element, not flattened —
+/// matching the existing single-file parse behavior.
 ///
 /// Takes ownership of `incoming`; `old_val` is updated in place.
-fn accumulateIntoExisting(
-    allocator: std.mem.Allocator,
-    old_val: *Value,
-    incoming: Value,
-    flatten: bool,
-) !void {
+fn accumulateScalar(allocator: std.mem.Allocator, old_val: *Value, incoming: Value) !void {
     if (old_val.* == .array) {
-        if (flatten) {
-            try appendFlatOrSingle(allocator, &old_val.array, incoming);
-        } else {
-            try old_val.array.append(allocator, incoming);
-        }
-    } else {
-        // First duplicate: wrap the existing scalar and the incoming value in
-        // a 2-element array.  initCapacity(2) guarantees both appends cannot fail.
-        var arr = try std.ArrayList(Value).initCapacity(allocator, 2);
+        try old_val.array.append(allocator, incoming);
+        return;
+    }
+    // First duplicate: wrap the existing scalar and the incoming value in
+    // a 2-element array. initCapacity(2) guarantees both appends cannot fail.
+    var arr = try std.ArrayList(Value).initCapacity(allocator, 2);
+    errdefer {
+        for (arr.items) |*item| item.deinit(allocator);
+        arr.deinit(allocator);
+    }
+    arr.appendAssumeCapacity(old_val.*);
+    arr.appendAssumeCapacity(incoming);
+    old_val.* = .{ .array = arr };
+}
+
+/// Merge `incoming` into the existing value at `old_val` when combining two
+/// config files.
+///
+/// Used by the multi-file merge path: a duplicate key accumulates into an
+/// array like `accumulateScalar`, but an array-valued `incoming` is exploded
+/// into individual elements rather than nested — so two files each declaring
+/// the same array key produce one flat array, not an array-of-arrays.
+///
+/// Takes ownership of `incoming`; `old_val` is updated in place.
+fn mergeIntoArray(allocator: std.mem.Allocator, old_val: *Value, incoming: Value) !void {
+    if (old_val.* != .array) {
+        // First duplicate: wrap the existing scalar in a fresh array before
+        // flattening `incoming` into it below.
+        var arr = try std.ArrayList(Value).initCapacity(allocator, 1);
         errdefer {
             for (arr.items) |*item| item.deinit(allocator);
             arr.deinit(allocator);
         }
         arr.appendAssumeCapacity(old_val.*);
-        if (flatten) {
-            try appendFlatOrSingle(allocator, &arr, incoming);
-        } else {
-            arr.appendAssumeCapacity(incoming);
-        }
         old_val.* = .{ .array = arr };
+    }
+    if (incoming == .array) {
+        for (incoming.array.items) |item|
+            try old_val.array.append(allocator, try deepCopyValue(allocator, item));
+        var inc = incoming;
+        inc.deinit(allocator);
+    } else {
+        try old_val.array.append(allocator, incoming);
     }
 }
 
@@ -261,7 +263,7 @@ fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Se
                 var v = incoming;
                 v.deinit(allocator);
             }
-            try accumulateIntoExisting(allocator, old_val, incoming, true);
+            try mergeIntoArray(allocator, old_val, incoming);
         } else {
             const key_copy = try allocator.dupe(u8, src_key);
             errdefer allocator.free(key_copy);
@@ -634,7 +636,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
                 //
                 // parseKeybindings already handles array values as sequences,
                 // so no further changes are needed there.
-                try accumulateIntoExisting(allocator, old, kv[1], false);
+                try accumulateScalar(allocator, old, kv[1]);
                 allocator.free(kv[0]);
             } else {
                 try current_section.pairs.put(kv[0], kv[1]);

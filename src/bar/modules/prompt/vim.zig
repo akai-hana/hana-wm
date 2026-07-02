@@ -119,33 +119,33 @@ pub const RingStack = struct {
 
 // Internal types
 
+/// What the engine is waiting for between keystrokes.
+/// Exactly one state is active at a time; the union makes that exclusivity structural.
+/// Adding a new pending state requires one new tag here — not a new boolean,
+/// a new `if` block, and a new bail-out condition in `resolveMotionKey`.
+const Awaiting = union(enum) {
+    none,
+    find_char: u8, // the f/F/t/T kind byte
+    g_prefix,
+    text_obj: u8, // the 'i'/'a' prefix byte
+    replace_char,
+    mark_set,
+    mark_jump,
+    colon_cmd,
+};
+
 /// Accumulated state for the in-progress normal-mode command.
 /// Reset atomically between commands via `resetPendingCmd`.
 const PendingCmd = struct {
-    count: u32 = 0, // Digit accumulator
-    op: u8 = 0, // Pending operator ('d'/'c'/'y')
+    count: u32 = 0,    // Digit accumulator
+    op: u8 = 0,        // Pending operator ('d'/'c'/'y')
     op_count: u32 = 0, // Count when operator was armed
-    find_kind: u8 = 0, // Pending f/F/t/T target (0 = none)
 
-    /// True after 'r' is pressed; the next printable char replaces `count` chars.
-    is_awaiting_replace_char: bool = false,
+    /// What the engine is waiting for from the next keystroke.
+    awaiting: Awaiting = .none,
 
-    /// True after 'g' is pressed; the next key completes a g-prefix motion.
-    is_g_prefix_active: bool = false,
-
-    /// The 'i' or 'a' pressed before a text-object delimiter (0 = none).
-    text_obj_prefix: u8 = 0,
-
-    /// True after 'm' is pressed; the next letter names the mark to set.
-    is_awaiting_mark_set: bool = false,
-
-    /// True after `'` is pressed; the next letter names the mark to jump to.
-    is_awaiting_mark_jump: bool = false,
-
-    /// True after ':' is pressed; subsequent keys build the ex command.
-    /// Recognised commands: w (spawn_keep), q (deactivate), wq (spawn), x (spawn).
-    is_colon_cmd: bool = false,
-
+    // colon_buf/colon_len are only meaningful in the .colon_cmd state;
+    // kept flat here to avoid nesting.
     colon_buf: [4]u8 = .{ 0, 0, 0, 0 },
     colon_len: u8 = 0,
 };
@@ -307,7 +307,7 @@ pub fn visualRange(vs: *VimState) [2]usize {
 /// The returned slice aliases internal `PendingCmd` storage and is valid only
 /// until the next call that mutates `VimState`.
 pub fn colonInput(vs: *const VimState) ?[]const u8 {
-    if (!vs.pending.is_colon_cmd) return null;
+    if (vs.pending.awaiting != .colon_cmd) return null;
     return vs.pending.colon_buf[0..vs.pending.colon_len];
 }
 
@@ -395,7 +395,7 @@ pub fn handleInsert(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
 /// Handles a key press in normal mode. Returns the Action the caller should take.
 pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     // Pending r{c}: replace `count` chars with a single character.
-    if (vs.pending.is_awaiting_replace_char) {
+    if (vs.pending.awaiting == .replace_char) {
         if (sym >= 0x20 and sym <= 0x7e and vs.cursor < vs.len) {
             const ch: u8 = @truncate(sym);
             const cnt: u32 = effectiveCount(vs);
@@ -414,7 +414,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     //                         :wq -> spawn      (execute, close)
     //                         :x  -> spawn      (execute, close)
     // Escape cancels; any unrecognised command is silently discarded.
-    if (vs.pending.is_colon_cmd) {
+    if (vs.pending.awaiting == .colon_cmd) {
         switch (sym) {
             XK_Escape => {
                 resetPendingCmd(vs);
@@ -455,42 +455,40 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
 
     // ':' with no pending operator arms colon command mode.
     if (sym == ':' and vs.pending.op == 0) {
-        vs.pending.is_colon_cmd = true;
+        vs.pending.awaiting = .colon_cmd;
         vs.pending.colon_len = 0;
         return .none;
     }
 
-    if (resolveMotionKey(vs, sym)) |mkr| {
-        switch (mkr) {
-            .consumed => return .none,
-            .motion => |m| {
-                if (m.op == 0) {
-                    setCursor(vs, m.mr);
-                    return .none;
-                }
-                if (m.dot_eligible) vs.dot = .{ .op_motion = .{
-                    .op = m.op,
-                    .op_count = m.op_count,
-                    .motion_count = m.motion_count,
-                    .motion_sym = if (m.find_kind != 0) 0 else @truncate(sym),
-                    .find_kind = m.find_kind,
-                    .find_ch = m.find_ch,
-                    .has_g_prefix = m.has_g_prefix,
-                } };
-                applyOperator(vs, m.op, m.mr);
+    if (resolveMotionKey(vs, sym)) |res| {
+        if (res.mr) |mr| {
+            if (res.op == 0) {
+                setCursor(vs, mr);
                 return .none;
-            },
+            }
+            if (res.dot_eligible) vs.dot = .{ .op_motion = .{
+                .op = res.op,
+                .op_count = res.op_count,
+                .motion_count = res.motion_count,
+                .motion_sym = if (res.find_kind != 0) 0 else @truncate(sym),
+                .find_kind = res.find_kind,
+                .find_ch = res.find_ch,
+                .has_g_prefix = res.has_g_prefix,
+            } };
+            applyOperator(vs, res.op, mr);
         }
+        return .none;
     }
 
     // Normal-mode-specific pending states (only reachable when resolveMotionKey
     // bailed out because one of these flags was set).
-    if (vs.pending.text_obj_prefix != 0) {
+    if (vs.pending.awaiting == .text_obj) {
+        const prefix = vs.pending.awaiting.text_obj;
         if (sym >= 0x20 and sym <= 0x7e) {
             const ch: u8 = @truncate(sym);
-            if (resolveTextObject(vs, vs.pending.text_obj_prefix, ch)) |mr| {
+            if (resolveTextObject(vs, prefix, ch)) |mr| {
                 vs.dot = buildOpMotionRecord(vs, 0);
-                vs.dot.op_motion.tobj_kind = vs.pending.text_obj_prefix;
+                vs.dot.op_motion.tobj_kind = prefix;
                 vs.dot.op_motion.tobj_delim = ch;
                 applyOperator(vs, vs.pending.op, mr);
             }
@@ -498,13 +496,13 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         resetPendingCmd(vs);
         return .none;
     }
-    if (vs.pending.is_awaiting_mark_set) {
+    if (vs.pending.awaiting == .mark_set) {
         if (sym >= 'a' and sym <= 'z')
             vs.marks[@as(usize, @intCast(sym - 'a'))] = vs.cursor;
         resetPendingCmd(vs);
         return .none;
     }
-    if (vs.pending.is_awaiting_mark_jump) {
+    if (vs.pending.awaiting == .mark_jump) {
         if (sym >= 'a' and sym <= 'z') {
             if (vs.marks[@as(usize, @intCast(sym - 'a'))]) |pos| {
                 const mr = MotionResult{ .pos = pos };
@@ -536,21 +534,21 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
 
     // i/a after an operator arms the text-object resolver.
     if ((sym == 'i' or sym == 'a') and vs.pending.op != 0) {
-        vs.pending.text_obj_prefix = @truncate(sym);
+        vs.pending.awaiting = .{ .text_obj = @truncate(sym) };
         return .none;
     }
 
     // r/m/' prefix arming (single-char targets; not consumed by resolveMotionKey).
     if (sym == 'r' and vs.pending.op == 0) {
-        vs.pending.is_awaiting_replace_char = true;
+        vs.pending.awaiting = .replace_char;
         return .none;
     }
     if (sym == 'm' and vs.pending.op == 0) {
-        vs.pending.is_awaiting_mark_set = true;
+        vs.pending.awaiting = .mark_set;
         return .none;
     }
     if (sym == 0x27) {
-        vs.pending.is_awaiting_mark_jump = true;
+        vs.pending.awaiting = .mark_jump;
         return .none;
     } // '
 
@@ -653,14 +651,9 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
 /// Handles a key press in visual mode. Returns the Action the caller should take.
 pub fn handleVisual(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     // Shared: pending find/g, digits, ;/,, simple motions, prefix arming.
-    if (resolveMotionKey(vs, sym)) |mkr| {
-        switch (mkr) {
-            .consumed => return .none,
-            .motion => |m| {
-                setCursor(vs, m.mr);
-                return .none;
-            },
-        }
+    if (resolveMotionKey(vs, sym)) |res| {
+        if (res.mr) |mr| setCursor(vs, mr);
+        return .none;
     }
 
     switch (sym) {
@@ -777,11 +770,11 @@ fn tryAccumulateDigit(vs: *VimState, sym: xcb.xcb_keysym_t) bool {
 /// Arms f/F/t/T or the g prefix; returns true if `sym` was consumed.
 fn tryArmFindPrefix(vs: *VimState, sym: xcb.xcb_keysym_t) bool {
     if (sym == 'g') {
-        vs.pending.is_g_prefix_active = true;
+        vs.pending.awaiting = .g_prefix;
         return true;
     }
     if (sym == 'f' or sym == 'F' or sym == 't' or sym == 'T') {
-        vs.pending.find_kind = @truncate(sym);
+        vs.pending.awaiting = .{ .find_char = @truncate(sym) };
         return true;
     }
     return false;
@@ -799,23 +792,23 @@ fn resolveGPrefixPos(vs: *VimState, sym: xcb.xcb_keysym_t, cnt: u32) ?usize {
     };
 }
 
-/// Result returned by `resolveMotionKey`.
-const MotionKeyResult = union(enum) {
-    /// Digit accumulated or prefix flag set; `pending` not reset; caller returns `.none`.
-    consumed: void,
-    /// A motion was produced; `pending` has already been reset.
-    /// The captured op fields enable dot-record construction without reading `pending`.
-    /// `dot_eligible` is false for `;`/`,` repeats, which do not update the dot record.
-    motion: struct {
-        mr: MotionResult,
-        op: u8 = 0,
-        op_count: u32 = 0,
-        motion_count: u32 = 0,
-        find_kind: u8 = 0,
-        find_ch: u8 = 0,
-        has_g_prefix: bool = false,
-        dot_eligible: bool = true,
-    },
+/// Result returned by `resolveMotionKey` when the key was handled in some way.
+/// `mr == null` means the key was consumed (digit accumulated, prefix armed,
+/// or `;`/`,` with no prior find) but produced no motion — the caller just
+/// returns `.none`. `mr != null` carries the resolved motion plus the
+/// operator/dot-record fields captured from `pending` before it was reset.
+/// `dot_eligible` is false for `;`/`,` repeats, which do not update the dot record.
+/// A bare `null` from `resolveMotionKey` itself (no `.?`) means the key was
+/// not recognised at all and the caller should keep handling it.
+const MotionKeyResult = struct {
+    mr: ?MotionResult = null,
+    op: u8 = 0,
+    op_count: u32 = 0,
+    motion_count: u32 = 0,
+    find_kind: u8 = 0,
+    find_ch: u8 = 0,
+    has_g_prefix: bool = false,
+    dot_eligible: bool = true,
 };
 
 /// Shared motion-key resolution for normal and visual mode.
@@ -834,54 +827,55 @@ inline fn commitMotion(vs: *VimState, mr: MotionResult) MotionKeyResult {
     const opc = vs.pending.op_count;
     const mc  = vs.pending.count;
     resetPendingCmd(vs);
-    return .{ .motion = .{ .mr = mr, .op = op, .op_count = opc, .motion_count = mc } };
+    return .{ .mr = mr, .op = op, .op_count = opc, .motion_count = mc };
 }
 
-/// Returns `.motion` if a motion was resolved (`pending` already reset; caller
-/// applies the result then returns `.none`), `.consumed` if the key was
-/// absorbed without producing a motion (digit or prefix arm; `pending` not
-/// reset), or null if the key was not handled (normal-mode-specific pending
-/// state active, or unrecognised).
+/// Returns a result with `mr` set if a motion was resolved (`pending` already
+/// reset; caller applies the motion then returns `.none`), a result with
+/// `mr == null` if the key was absorbed without producing a motion (digit or
+/// prefix arm; `pending` not reset), or plain `null` if the key was not
+/// handled at all (normal-mode-specific pending state active, or unrecognised).
 fn resolveMotionKey(vs: *VimState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
     // Pending find char.
-    if (vs.pending.find_kind != 0) {
+    if (vs.pending.awaiting == .find_char) {
         if (sym >= 0x20 and sym <= 0x7e) {
             const ch: u8 = @truncate(sym);
             const cnt = effectiveCount(vs);
-            const kind = vs.pending.find_kind;
+            const kind = vs.pending.awaiting.find_char;
             vs.last_find_kind = kind;
             vs.last_find_ch = ch;
             const mr = motionFind(vs, kind, ch, cnt);
             var result = commitMotion(vs, mr);
-            result.motion.find_kind = kind;
-            result.motion.find_ch = ch;
+            result.find_kind = kind;
+            result.find_ch = ch;
             return result;
         }
         resetPendingCmd(vs);
-        return .consumed;
+        return .{};
     }
 
     // Pending g-prefix.
-    if (vs.pending.is_g_prefix_active) {
+    if (vs.pending.awaiting == .g_prefix) {
         const cnt = effectiveCount(vs);
         if (resolveGPrefixPos(vs, sym, cnt)) |pos| {
             const mr = MotionResult{ .pos = pos, .inclusive = (sym == 'e' or sym == 'E') };
             var result = commitMotion(vs, mr);
-            result.motion.has_g_prefix = true;
+            result.has_g_prefix = true;
             return result;
         }
         resetPendingCmd(vs);
-        return .consumed;
+        return .{};
     }
 
     // Bail out so handleNormal can service its own pending states (text-object,
     // mark set/jump) before we consume digits or simple motions.
-    if (vs.pending.text_obj_prefix != 0 or
-        vs.pending.is_awaiting_mark_set or
-        vs.pending.is_awaiting_mark_jump) return null;
+    switch (vs.pending.awaiting) {
+        .text_obj, .mark_set, .mark_jump => return null,
+        else => {},
+    }
 
     // Digit accumulation.
-    if (tryAccumulateDigit(vs, sym)) return .consumed;
+    if (tryAccumulateDigit(vs, sym)) return .{};
 
     const cnt = effectiveCount(vs);
 
@@ -891,11 +885,11 @@ fn resolveMotionKey(vs: *VimState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
             const kind = if (sym == ',') reverseFindKind(vs.last_find_kind) else vs.last_find_kind;
             const mr = motionFind(vs, kind, vs.last_find_ch, cnt);
             var result = commitMotion(vs, mr);
-            result.motion.dot_eligible = false;
+            result.dot_eligible = false;
             return result;
         }
         resetPendingCmd(vs);
-        return .consumed;
+        return .{};
     }
 
     // Simple motions (h/l/w/b/e/0/^/$/arrows …).
@@ -904,7 +898,7 @@ fn resolveMotionKey(vs: *VimState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
     }
 
     // Prefix arming (f/F/t/T/g).
-    if (tryArmFindPrefix(vs, sym)) return .consumed;
+    if (tryArmFindPrefix(vs, sym)) return .{};
 
     return null;
 }

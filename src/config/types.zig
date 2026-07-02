@@ -438,21 +438,6 @@ pub const Config = struct {
     /// before it snaps. Set to 0 to disable. Percentage is relative to screen width.
     snap_distance: parser.ScalableValue = parser.ScalableValue.absolute(8.0),
 
-    // Ownership sentinels for string fields that have static defaults.
-    //
-    // Some fields (e.g. bar.font, bar.clock_format) point to string literals by default
-    // and to heap-allocated slices when the user overrides them in the config file.
-    // These nullable fields track which case applies so deinit knows what to free.
-    //
-    // NOTE: `tiling.layout` is intentionally absent here — it always points into
-    // `tiling.layouts.items[0]`, which is freed by `TilingConfig.deinit`.  A
-    // separate sentinel would create a redundant allocation and a double-free risk.
-    allocated_font: ?[]const u8 = null,
-    allocated_clock_format: ?[]const u8 = null,
-    allocated_indicator_focused: ?[]const u8 = null,
-    allocated_indicator_unfocused: ?[]const u8 = null,
-    allocated_drun_prompt: ?[]const u8 = null,
-
     pub fn deinit(self: *Config, a: std.mem.Allocator) void {
         for (self.keybindings.items) |*kb| kb.action.deinit(a);
         self.keybindings.deinit(a);
@@ -465,17 +450,14 @@ pub const Config = struct {
         self.bar.deinit(a);
         self.tiling.deinit(a);
 
-        inline for (.{
-            "allocated_font",              "allocated_clock_format",
-            "allocated_indicator_focused", "allocated_indicator_unfocused",
-            "allocated_drun_prompt",
-        }) |field| {
-            // Catch field renames or deletions at compile time: if this string no
-            // longer names a real Config field, the build fails with a clear error
-            // rather than silently skipping the free.
-            comptime if (!@hasField(Config, field))
-                @compileError("Config.deinit: '" ++ field ++ "' is not a field of Config; update the list");
-            if (@field(self, field)) |s| a.free(s);
-        }
+        // These string fields are always heap-allocated at parse time (see
+        // parseBar in config.zig), so they can be freed unconditionally —
+        // no ownership sentinel needed to distinguish literal defaults from
+        // heap copies.
+        a.free(self.bar.font);
+        a.free(self.bar.clock_format);
+        a.free(self.bar.drun_prompt);
+        a.free(self.bar.indicator_focused);
+        a.free(self.bar.indicator_unfocused);
     }
 };

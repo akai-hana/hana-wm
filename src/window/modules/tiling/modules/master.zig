@@ -49,11 +49,9 @@ pub fn tileWithOffset(
 /// Tile a vertical column of `windows` at a fixed x position with a fixed
 /// content width. Used for both the master pane and the simple stack path.
 ///
-/// When ctx.defer_configure is non-null and names a window in this column,
-/// that window's configure_window call is emitted after all other windows in
-/// the column.  This guarantees the shrinking window (old master moving into
-/// the stack) fills its slot before the growing window (new master) vacates its
-/// old slot, preventing a one-frame wallpaper gap.
+/// When `ctx.defer_win` names a window in this column, that window's
+/// configure_window call is sent after every other window in the column —
+/// see LayoutCtx.defer_win for why (swap_master's one-frame-gap fix).
 fn tileColumn(
     ctx: *const layouts.LayoutCtx,
     windows: []const u32,
@@ -65,7 +63,7 @@ fn tileColumn(
 ) void {
     const count: u16 = @intCast(windows.len);
     const avail = calcAvailableHeight(h, count, m);
-    var deferred = layouts.DeferredConfigure.init();
+    var deferred_rect: ?utils.Rect = null;
     for (windows, 0..) |win, i| {
         const row: u16 = @intCast(i);
         const rect = utils.Rect{
@@ -74,9 +72,13 @@ fn tileColumn(
             .width = inner_w,
             .height = windowHeight(row, count, avail),
         };
-        deferred.emit(ctx, win, rect);
+        if (ctx.defer_win == win) {
+            deferred_rect = rect;
+        } else {
+            layouts.configureWithHints(ctx, win, rect);
+        }
     }
-    deferred.flush(ctx);
+    if (deferred_rect) |rect| layouts.configureWithHints(ctx, ctx.defer_win.?, rect);
 }
 
 /// Tile the stack pane, spilling into a column-major overflow grid when the
@@ -105,7 +107,7 @@ fn tileStack(
 
 /// Column-major overflow grid: row `r` holds windows at indices r, r+max_fit,
 /// r+2*max_fit, … Each row's column count is ceil((stack_n - r) / max_fit).
-/// Respects ctx.defer_configure: the named window is emitted last.
+/// Respects ctx.defer_win: the named window is sent last (see LayoutCtx.defer_win).
 fn tileStackExtra(
     ctx: *const layouts.LayoutCtx,
     windows: []const u32,
@@ -119,7 +121,7 @@ fn tileStackExtra(
     const stack_n: u16 = @intCast(windows.len);
     const row_avail = calcAvailableHeight(h, max_fit, m);
 
-    var deferred = layouts.DeferredConfigure.init();
+    var deferred_rect: ?utils.Rect = null;
 
     var row: u16 = 0;
     while (row < max_fit) : (row += 1) {
@@ -142,10 +144,14 @@ fn tileStackExtra(
                 .width = col_inner_w,
                 .height = row_h,
             };
-            deferred.emit(ctx, windows[win_idx], rect);
+            if (ctx.defer_win == windows[win_idx]) {
+                deferred_rect = rect;
+            } else {
+                layouts.configureWithHints(ctx, windows[win_idx], rect);
+            }
         }
     }
-    deferred.flush(ctx);
+    if (deferred_rect) |rect| layouts.configureWithHints(ctx, ctx.defer_win.?, rect);
 }
 
 /// Total pixel height available for window content after gaps and borders.

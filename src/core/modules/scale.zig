@@ -11,21 +11,11 @@ const debug = @import("debug");
 const parser = @import("parser");
 const utils = @import("utils");
 
-// Baseline screen used to define "1× scale". All percentage-based values
-// are computed relative to this reference display.
-const BASELINE_WIDTH: f32 = 2560.0;
-const BASELINE_HEIGHT: f32 = 1600.0;
 const BASELINE_DPI = constants.BASELINE_DPI;
 
-// Font size percentages are relative to 1080 p height, not the baseline display,
-// so font sizing degrades more gracefully on smaller screens.
+// Font size percentages are relative to 1080 p height, not the screen's own
+// resolution, so font sizing degrades more gracefully on smaller screens.
 const FONT_BASELINE_HEIGHT: f32 = 1080.0;
-
-const BASELINE_DIAGONAL: f32 = @sqrt(BASELINE_WIDTH * BASELINE_WIDTH + BASELINE_HEIGHT * BASELINE_HEIGHT);
-
-/// Snap to a common DPI value if within 5% of it, to avoid rendering at odd
-/// intermediate DPIs caused by imprecise monitor EDID data.
-const SNAP_THRESHOLD: f32 = 0.05;
 
 /// Minimum bar height in pixels. Exposed so callers can validate config values
 /// before passing them to scaleBarHeight.
@@ -36,8 +26,6 @@ const RESOURCE_MANAGER_MAX_LEN: u32 = 4096;
 
 // Not thread-safe; assumes detectDpi() is only called from the main thread.
 var dpi_cache: ?DpiInfo = null;
-
-const COMMON_DPI_TABLE = [_]f32{ 96.0, 120.0, 144.0, 192.0 };
 
 /// Re-exported from core so callers that only import scale still get the type.
 pub const DpiInfo = core.DpiInfo;
@@ -95,55 +83,27 @@ fn calcDpiFromGeometry(screen: *xcb.xcb_screen_t) f32 {
     return avg_dpi;
 }
 
-/// Returns the entry in COMMON_DPI_TABLE nearest to `dpi`, snapping only when
-/// within SNAP_THRESHOLD of it to avoid rendering at odd intermediate DPIs.
-fn snapToCommonDpi(dpi: f32) f32 {
-    var closest = COMMON_DPI_TABLE[0];
-    for (COMMON_DPI_TABLE) |entry| {
-        if (@abs(dpi - entry) < @abs(dpi - closest)) closest = entry;
-    }
-    if (@abs(dpi - closest) / closest < SNAP_THRESHOLD) {
-        debug.info("Snapped DPI {d:.1} to common value {d:.1}", .{ dpi, closest });
-        return closest;
-    }
-    return dpi;
-}
-
-/// Computes a scale factor from the screen's pixel diagonal relative to the baseline display.
-/// Used as a fallback when geometry-based DPI is out of a plausible range.
-fn calcScaleFromResolution(screen: *xcb.xcb_screen_t) f32 {
-    const width_px: f32 = @floatFromInt(screen.width_in_pixels);
-    const height_px: f32 = @floatFromInt(screen.height_in_pixels);
-    const diagonal = @sqrt(width_px * width_px + height_px * height_px);
-    const resolution_scale = diagonal / BASELINE_DIAGONAL;
-    debug.info("Resolution scaling: {d:.0}x{d:.0} -> {d:.2}x baseline ({d:.0}x{d:.0})", .{ width_px, height_px, resolution_scale, BASELINE_WIDTH, BASELINE_HEIGHT });
-    return resolution_scale;
-}
-
 /// Detect DPI, returning a cached result until the DPI cache is invalidated.
-/// Priority: Xft.dpi from X resources -> geometry calculation -> resolution-based scaling.
+/// Priority: Xft.dpi from X resources -> geometry calculation -> BASELINE_DPI (96).
 pub fn detectDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) DpiInfo {
     if (dpi_cache) |cached| return cached;
 
     if (readXftDpi(conn, screen)) |xft_dpi| {
         debug.info("Using DPI from X resources (Xft.dpi): {d:.1}", .{xft_dpi});
-        dpi_cache = .{ .dpi = snapToCommonDpi(xft_dpi) };
+        dpi_cache = .{ .dpi = xft_dpi };
         return dpi_cache.?;
     }
 
-    const geometry_dpi = blk: {
-        const raw = calcDpiFromGeometry(screen);
-        if (raw < 50.0 or raw > 300.0) {
-            debug.warn("Calculated DPI {d:.1} seems unreasonable, using resolution-based scaling", .{raw});
-            const scaled = BASELINE_DPI * calcScaleFromResolution(screen);
-            debug.info("Using resolution-based DPI: {d:.1}", .{scaled});
-            break :blk scaled;
-        }
-        debug.info("Using geometry-calculated DPI: {d:.1}", .{raw});
-        break :blk raw;
+    const geometry_dpi = calcDpiFromGeometry(screen);
+    const dpi = if (geometry_dpi < 50.0 or geometry_dpi > 300.0) blk: {
+        debug.warn("Calculated DPI {d:.1} seems unreasonable, using baseline DPI", .{geometry_dpi});
+        break :blk BASELINE_DPI;
+    } else blk: {
+        debug.info("Using geometry-calculated DPI: {d:.1}", .{geometry_dpi});
+        break :blk geometry_dpi;
     };
 
-    dpi_cache = .{ .dpi = snapToCommonDpi(geometry_dpi) };
+    dpi_cache = .{ .dpi = dpi };
     return dpi_cache.?;
 }
 
