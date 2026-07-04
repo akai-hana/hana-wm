@@ -251,6 +251,25 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator) !types.Config {
     return try loadFallbackConfig(allocator);
 }
 
+/// Validates domain invariants on a freshly loaded config.
+pub fn validate(cfg: *const types.Config) !void {
+    if (cfg.tiling.master_count == 0) {
+        debug.err("Invalid config: master_count must be > 0, keeping old", .{});
+        return error.InvalidConfig;
+    }
+    // master_width is stored as a ScalableValue; normalise to [0,1] for the check.
+    const mw = cfg.tiling.master_width;
+    const mw_ratio: f32 = if (mw.is_percentage) mw.value / 100.0 else mw.value;
+    if (mw_ratio < constants.MIN_MASTER_WIDTH or mw_ratio > 1.0) {
+        debug.err("Invalid config: master_width ratio {d:.3} out of [{d:.2}, 1.0], keeping old", .{ mw_ratio, constants.MIN_MASTER_WIDTH });
+        return error.InvalidConfig;
+    }
+    if (cfg.workspaces.count < 1) {
+        debug.err("Invalid config: workspace count must be >= 1, keeping old", .{});
+        return error.InvalidConfig;
+    }
+}
+
 /// Reads, parses, and returns the config at `path` (single-file entry point).
 pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !types.Config {
     const raw = readFileAlloc(allocator, path) catch |err| return err;

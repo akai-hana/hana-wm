@@ -17,37 +17,29 @@ inline fn debugEnabled() bool {
     return build.enable_debug_logging;
 }
 
-/// Log output target — controls which std.log level (or print) to use.
-const LogKind = enum { err, warn, info, debug_log };
-
-/// Shared log emitter. `src` must come from @src() in the caller's inline
-/// wrapper so it reflects the actual call site, not this function's location.
-fn emitLog(src: std.builtin.SourceLocation, comptime kind: LogKind, comptime fmt: []const u8, args: anytype) void {
-    if (!debugEnabled()) return;
-    const module = moduleFromSrc(src);
-    switch (kind) {
-        .err => std.log.err("[{s}] " ++ fmt, .{module} ++ args),
-        .warn => std.log.warn("[{s}] " ++ fmt, .{module} ++ args),
-        // Use std.log.info so that all log levels go through the same handler
-        // (respecting any custom log handler the embedder installs and compile-time
-        // log-level filtering).  Previously this branch used std.debug.print with
-        // hardcoded ANSI escape codes, which bypassed log routing entirely.
-        .info => std.log.info("[{s}] " ++ fmt, .{module} ++ args),
-        .debug_log => std.log.debug("[{s}] " ++ fmt, .{module} ++ args),
-    }
-}
-
 pub inline fn err(comptime fmt: []const u8, args: anytype) void {
-    emitLog(@src(), .err, fmt, args);
+    if (!debugEnabled()) return;
+    const module = moduleFromSrc(@src());
+    std.log.err("[{s}] " ++ fmt, .{module} ++ args);
 }
 pub inline fn warn(comptime fmt: []const u8, args: anytype) void {
-    emitLog(@src(), .warn, fmt, args);
+    if (!debugEnabled()) return;
+    const module = moduleFromSrc(@src());
+    std.log.warn("[{s}] " ++ fmt, .{module} ++ args);
 }
+// Use std.log.info so that all log levels go through the same handler
+// (respecting any custom log handler the embedder installs and compile-time
+// log-level filtering). Previously this used std.debug.print with hardcoded
+// ANSI escape codes, which bypassed log routing entirely.
 pub inline fn info(comptime fmt: []const u8, args: anytype) void {
-    emitLog(@src(), .info, fmt, args);
+    if (!debugEnabled()) return;
+    const module = moduleFromSrc(@src());
+    std.log.info("[{s}] " ++ fmt, .{module} ++ args);
 }
 pub inline fn debug(comptime fmt: []const u8, args: anytype) void {
-    emitLog(@src(), .debug_log, fmt, args);
+    if (!debugEnabled()) return;
+    const module = moduleFromSrc(@src());
+    std.log.debug("[{s}] " ++ fmt, .{module} ++ args);
 }
 
 /// Panics with a module-tagged message when `condition` is false, in debug builds only.

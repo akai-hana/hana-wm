@@ -46,14 +46,6 @@ const Mutex = struct {
     }
 };
 
-// pthread_condattr_t and related functions are not exposed by std.c in this
-// Zig version, so we declare them directly against libc.
-const pthread_condattr_t = opaque {};
-extern "c" fn pthread_condattr_init(attr: *pthread_condattr_t) c_int;
-extern "c" fn pthread_condattr_setclock(attr: *pthread_condattr_t, clock_id: c_int) c_int;
-extern "c" fn pthread_condattr_destroy(attr: *pthread_condattr_t) c_int;
-extern "c" fn pthread_cond_init(cond: *std.c.pthread_cond_t, attr: *const pthread_condattr_t) c_int;
-
 /// Condition variable backed by pthread_cond_t; `.{}` is safe (= PTHREAD_COND_INITIALIZER).
 /// Call `initMonotonic()` on any instance that will use `timedWait`.
 const Condition = struct {
@@ -63,12 +55,7 @@ const Condition = struct {
     /// Must be called once before any `timedWait` call; safe to call on a freshly
     /// zero-initialised instance.
     pub fn initMonotonic(c: *Condition) void {
-        var attr_buf: [64]u8 align(8) = @splat(0);
-        const attr: *pthread_condattr_t = @ptrCast(&attr_buf);
-        _ = pthread_condattr_init(attr);
-        _ = pthread_condattr_setclock(attr, @intFromEnum(std.os.linux.CLOCK.MONOTONIC));
-        _ = pthread_cond_init(&c.inner, attr);
-        _ = pthread_condattr_destroy(attr);
+        utils.initMonotonicCondvar(&c.inner);
     }
 
     pub fn wait(c: *Condition, m: *Mutex) void {

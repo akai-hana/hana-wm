@@ -27,8 +27,6 @@ const bar = @import("bar");
 const MinimizedEntry = struct {
     saved_fs: ?core.WindowGeometry, // non-null iff the window was fullscreen when minimized
     workspace_idx: u8, // single workspace only; multi-workspace tagging is handled upstream
-    timestamp: u64, // monotonic counter; higher = more recently minimized (drives LIFO/FIFO)
-    //TODO: is a monotonic counter really the best way to drive lifo/fifo?
     tiling_index: ?usize, // workspace-filtered slot at minimize time to reinsert at original position
 };
 
@@ -46,15 +44,17 @@ else
     32;
 
 // Zero-initialised so slots beyond g_len never contain garbage.
+// Entries are always appended at g_len, and removeFromBuf preserves the
+// relative order of the remaining entries, so buffer position IS insertion
+// order: g_buf[0] is the oldest minimized window still tracked, g_buf[g_len-1]
+// is the most recent. LIFO/FIFO restore order reads directly off this.
 var g_buf: [MAX_MINIMIZED]MinimizedRecord = std.mem.zeroes([MAX_MINIMIZED]MinimizedRecord);
 var g_len: usize = 0;
-var g_next_timestamp: u64 = 0;
 
 // Lifecycle
 
 pub fn init() void {
     g_len = 0;
-    g_next_timestamp = 0;
 }
 
 /// No heap resources are owned, so deinit is just a state reset.
@@ -70,13 +70,14 @@ fn findInBuf(win: u32) ?usize {
     return null;
 }
 
-/// O(1) removal via swap-with-last. Buffer order has no semantic meaning —
-/// LIFO/FIFO ordering is encoded in each entry's timestamp, not its position.
+/// Removal that shifts trailing entries down, preserving relative order.
+/// Buffer position encodes insertion order (see g_buf's doc comment above),
+/// so unlike a swap-with-last removal this must not disturb it.
 /// Returns true if the window was found and removed.
 fn removeFromBuf(win: u32) bool {
     if (findInBuf(win)) |i| {
         g_len -= 1;
-        g_buf[i] = g_buf[g_len];
+        std.mem.copyForwards(MinimizedRecord, g_buf[i..g_len], g_buf[i + 1 .. g_len + 1]);
         return true;
     }
     return false;
@@ -129,10 +130,6 @@ pub fn minimizeWindow() void {
         return;
     }
 
-    // u64 overflow is unreachable in any real session (~1.8e19 operations),
-    // but assert so a future regression is loud rather than a silent ordering bug.
-    std.debug.assert(g_next_timestamp != std.math.maxInt(u64));
-
     // ── Side effects begin here — buffer slot is guaranteed ──────────────────
 
     // Tear down fullscreen state if needed, saving geometry for later restore.
@@ -146,15 +143,12 @@ pub fn minimizeWindow() void {
 
     if (cs.config.tiling.enabled) tiling.removeWindow(win);
 
-    const ts = g_next_timestamp;
     g_buf[g_len] = .{ .win = win, .entry = .{
         .saved_fs = saved_fs,
         .workspace_idx = ws_idx,
-        .timestamp = ts,
         .tiling_index = tiling_index,
     } };
     g_len += 1;
-    g_next_timestamp = ts + 1;
 
     _ = xcb.xcb_grab_server(cs.conn);
     utils.pushWindowOffscreen(cs.conn, win);
@@ -214,31 +208,37 @@ pub const RestoreOrder = enum { lifo, fifo };
 pub fn unminimize(order: RestoreOrder) void {
     const ws_idx = tracking.getCurrentWorkspace() orelse return;
 
-    const want_max = (order == .lifo);
+    // Buffer position is insertion order: LIFO wants the last matching entry,
+    // FIFO wants the first.
     var best_idx: ?usize = null;
-    // Sentinels: LIFO scans for the highest timestamp (any real ts beats 0);
-    // FIFO scans for the lowest (any real ts beats maxInt).
-    var best_ts: u64 = if (want_max) 0 else std.math.maxInt(u64);
-
-    for (g_buf[0..g_len], 0..) |rec, i| {
-        if (rec.entry.workspace_idx != ws_idx) continue;
-        const ts = rec.entry.timestamp;
-        const better = best_idx == null or
-            (if (want_max) ts > best_ts else ts < best_ts);
-        if (better) {
-            best_idx = i;
-            best_ts = ts;
-        }
+    switch (order) {
+        .lifo => {
+            var i = g_len;
+            while (i > 0) {
+                i -= 1;
+                if (g_buf[i].entry.workspace_idx == ws_idx) {
+                    best_idx = i;
+                    break;
+                }
+            }
+        },
+        .fifo => {
+            for (g_buf[0..g_len], 0..) |rec, i| {
+                if (rec.entry.workspace_idx == ws_idx) {
+                    best_idx = i;
+                    break;
+                }
+            }
+        },
     }
 
     const idx = best_idx orelse return;
 
-    // Capture fields before the swap-remove invalidates the slot.
+    // Capture fields before removal invalidates the slot.
     const win = g_buf[idx].win;
     const saved_fs = g_buf[idx].entry.saved_fs;
     const tiling_index = g_buf[idx].entry.tiling_index;
-    g_len -= 1;
-    g_buf[idx] = g_buf[g_len];
+    _ = removeFromBuf(win);
 
     restoreWindowImpl(win, saved_fs, tiling_index);
 }
@@ -246,7 +246,9 @@ pub fn unminimize(order: RestoreOrder) void {
 pub fn unminimizeAll() void {
     const ws_idx = tracking.getCurrentWorkspace() orelse return;
 
-    // Snapshot this workspace's records before mutating the buffer.
+    // Snapshot this workspace's records before mutating the buffer. Buffer
+    // order is insertion order (FIFO), and this single forward pass over
+    // g_buf preserves that order in the snapshot.
     comptime std.debug.assert(MAX_MINIMIZED <= 256); // ensure snapshot fits on the stack
     var snapshot: [MAX_MINIMIZED]MinimizedRecord = undefined;
     var count: usize = 0;
@@ -258,38 +260,35 @@ pub fn unminimizeAll() void {
     }
     if (count == 0) return;
 
-    // Remove all collected windows up-front. removeFromBuf uses swap-with-last;
-    // working from a separate snapshot makes the reordering safe.
+    // Remove all collected windows up-front; the snapshot is now the sole
+    // record of what needs restoring.
     for (snapshot[0..count]) |rec| _ = removeFromBuf(rec.win);
 
-    // Primary sort: plain windows before fullscreen (each fullscreen restore needs
-    // its own grab and must run after the batch). Secondary: ascending timestamp (FIFO).
-    std.sort.pdq(MinimizedRecord, snapshot[0..count], {}, struct {
-        fn lt(_: void, a: MinimizedRecord, b: MinimizedRecord) bool {
-            const a_fs = a.entry.saved_fs != null;
-            const b_fs = b.entry.saved_fs != null;
-            if (a_fs != b_fs) return !a_fs; // plain before fullscreen
-            return a.entry.timestamp < b.entry.timestamp;
+    // Partition into plain vs. fullscreen (each fullscreen restore needs its
+    // own grab and must run after the batch), preserving the FIFO order
+    // within each group — a single forward pass keeps that stable.
+    var plain_buf: [MAX_MINIMIZED]MinimizedRecord = undefined;
+    var fs_buf: [MAX_MINIMIZED]MinimizedRecord = undefined;
+    var plain_count: usize = 0;
+    var fs_count: usize = 0;
+    for (snapshot[0..count]) |rec| {
+        if (rec.entry.saved_fs == null) {
+            plain_buf[plain_count] = rec;
+            plain_count += 1;
+        } else {
+            fs_buf[fs_count] = rec;
+            fs_count += 1;
         }
-    }.lt);
-
-    var plain_end: usize = 0;
-    while (plain_end < count and snapshot[plain_end].entry.saved_fs == null) plain_end += 1;
-    const plain_wins = snapshot[0..plain_end];
-    const fs_wins = snapshot[plain_end..count];
+    }
+    const plain_wins = plain_buf[0..plain_count];
+    const fs_wins = fs_buf[0..fs_count];
 
     if (plain_wins.len > 0) {
-        // Focus the most recently minimized window (highest timestamp), matching
-        // repeated LIFO unminimize semantics. Captured now because plain_wins is
-        // re-sorted below for tiling insertion order.
-        var focus_target = plain_wins[0].win;
-        var focus_ts = plain_wins[0].entry.timestamp;
-        for (plain_wins[1..]) |rec| {
-            if (rec.entry.timestamp > focus_ts) {
-                focus_target = rec.win;
-                focus_ts = rec.entry.timestamp;
-            }
-        }
+        // Focus the most recently minimized window, matching repeated LIFO
+        // unminimize semantics. plain_wins is still in FIFO order here, so
+        // that's simply the last entry — captured before the tiling-index
+        // sort below reorders the array.
+        const focus_target = plain_wins[plain_wins.len - 1].win;
 
         const conn = core.getState().conn;
         _ = xcb.xcb_grab_server(conn);
