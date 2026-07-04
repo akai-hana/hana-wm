@@ -202,6 +202,49 @@ pub inline fn ungrabAndFlush(conn: *xcb.xcb_connection_t) void {
     _ = xcb.xcb_flush(conn);
 }
 
+/// Creates a pipe with O_NONBLOCK | O_CLOEXEC on both ends via pipe2(2).
+///
+/// Shared by input.zig (double-fork spawn plumbing) and events.zig (signal
+/// self-pipe) — both previously defined byte-equivalent copies of this.
+pub fn makePipe() ![2]std.posix.fd_t {
+    var fds: [2]std.posix.fd_t = undefined;
+    const flags = std.os.linux.O{ .CLOEXEC = true, .NONBLOCK = true };
+    switch (std.posix.errno(std.os.linux.pipe2(&fds, flags))) {
+        .SUCCESS => {},
+        .MFILE => return error.ProcessFdQuotaExceeded,
+        .NFILE => return error.SystemFdQuotaExceeded,
+        else => |err| return std.posix.unexpectedErrno(err),
+    }
+    return fds;
+}
+
+// pthread_condattr_t and related functions are not exposed by std.c in this
+// Zig version, so we declare them directly against libc. Used only by
+// initMonotonicCondvar below.
+const pthread_condattr_t = opaque {};
+extern "c" fn pthread_condattr_init(attr: *pthread_condattr_t) c_int;
+extern "c" fn pthread_condattr_setclock(attr: *pthread_condattr_t, clock_id: c_int) c_int;
+extern "c" fn pthread_condattr_destroy(attr: *pthread_condattr_t) c_int;
+extern "c" fn pthread_cond_init(cond: *std.c.pthread_cond_t, attr: *const pthread_condattr_t) c_int;
+
+/// Re-initialises `cond` to use CLOCK_MONOTONIC as its clock, so that a
+/// subsequent `pthread_cond_timedwait` on it can use a monotonic deadline
+/// (immune to wall-clock adjustments). Must be called once before any
+/// timed wait; safe to call on a freshly zero-initialised pthread_cond_t.
+///
+/// This exists as a standalone helper because std.c does not expose
+/// pthread_condattr_t on this Zig version, so setting up a non-default
+/// clock requires eight lines of raw C interop: a stack-allocated opaque
+/// attr buffer, init/setclock/destroy calls, and the cond_init call itself.
+pub fn initMonotonicCondvar(cond: *std.c.pthread_cond_t) void {
+    var attr_buf: [64]u8 align(8) = @splat(0);
+    const attr: *pthread_condattr_t = @ptrCast(&attr_buf);
+    _ = pthread_condattr_init(attr);
+    _ = pthread_condattr_setclock(attr, @intFromEnum(std.os.linux.CLOCK.MONOTONIC));
+    _ = pthread_cond_init(cond, attr);
+    _ = pthread_condattr_destroy(attr);
+}
+
 /// Fetches an 8-bit X11 window property into a caller-supplied reuse buffer.
 /// Returns a slice into `buffer.items` on success, or null if the property is absent, empty, or not 8-bit encoded.
 /// The buffer is cleared before each use, so the caller can allocate it once and pass it across repeated calls.

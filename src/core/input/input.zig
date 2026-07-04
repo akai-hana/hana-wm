@@ -296,7 +296,12 @@ fn executeAction(action: *const types.Action) !void {
 fn executeTilingAction(action: *const types.Action) void {
     switch (action.*) {
         .toggle_floating_window => if (focus.getFocused()) |win|
-            withTilingGrabAndBordersWin(win, tiling.toggleWindowFloat),
+            withTilingGrab(struct {
+                win: u32,
+                fn call(self: @This()) void {
+                    tiling.toggleWindowFloat(self.win);
+                }
+            }{ .win = win }),
 
         .toggle_layout => withTilingGrab(tiling.toggleLayout),
         .toggle_layout_reverse => withTilingGrab(tiling.toggleLayoutReverse),
@@ -308,8 +313,8 @@ fn executeTilingAction(action: *const types.Action) void {
 
         .swap_master, .swap_master_focus_swap => executeSwapMaster(action),
 
-        .move_window_next => withTilingGrabAndBorders(focus.moveWindowNext),
-        .move_window_prev => withTilingGrabAndBorders(focus.moveWindowPrev),
+        .move_window_next => withTilingGrab(focus.moveWindowNext),
+        .move_window_prev => withTilingGrab(focus.moveWindowPrev),
 
         .scroll_view_left => withTilingGrab(tiling.scrollViewLeft),
         .scroll_view_right => withTilingGrab(tiling.scrollViewRight),
@@ -375,7 +380,12 @@ fn executeWorkspaceAction(action: *const types.Action) void {
 /// keyboard-focused one, so e.g. toggle_floating_window affects what was clicked.
 fn executeMouseAction(action: *const types.Action, clicked_win: u32) !void {
     switch (action.*) {
-        .toggle_floating_window => withTilingGrabAndBordersWin(clicked_win, tiling.toggleWindowFloat),
+        .toggle_floating_window => withTilingGrab(struct {
+            win: u32,
+            fn call(self: @This()) void {
+                tiling.toggleWindowFloat(self.win);
+            }
+        }{ .win = clicked_win }),
         else => try executeAction(action),
     }
 }
@@ -425,21 +435,6 @@ fn forkIntermediate(exec_pipe_write: c_int, pid_pipe_write: c_int, cmd_z: [*:0]c
     std.process.exit(0);
 }
 
-/// Creates an O_CLOEXEC|O_NONBLOCK pipe pair atomically via pipe2.
-///
-/// NOTE: events.zig contains a structurally identical `createPipe()` function
-/// returning [2]std.posix.fd_t.  On Linux, fd_t aliases c_int, so the two are
-/// byte-equivalent.  Both should be consolidated into a single `utils.makePipe()`
-/// returning [2]std.posix.fd_t when utils.zig is next modified.
-fn makePipe() ![2]c_int {
-    const flags = std.os.linux.O{ .CLOEXEC = true, .NONBLOCK = true };
-    var fds: [2]c_int = undefined;
-    return switch (std.posix.errno(std.os.linux.pipe2(&fds, flags))) {
-        .SUCCESS => fds,
-        else => error.PipeFailed,
-    };
-}
-
 // Pending spawn table
 //
 // Capacity: 16 is sufficient — firing 16 exec keybindings in the ~100 ms
@@ -456,6 +451,10 @@ const PendingSpawn = struct {
     spawn_ws: ?u8, // Target workspace for window.registerSpawn.
 };
 
+// std.BoundedArray was removed from the standard library (gone as of the
+// Zig 0.16 toolchain this project targets), so a minimal local stand-in is
+// unavoidable here rather than optional. Kept deliberately small: no
+// AutoHashMap-esque hidden allocations, just a fixed buffer and length.
 fn BoundedArray(comptime T: type, comptime cap: usize) type {
     return struct {
         buffer: [cap]T = undefined,
@@ -467,10 +466,6 @@ fn BoundedArray(comptime T: type, comptime cap: usize) type {
         pub fn slice(self: *@This()) []T {
             return self.buffer[0..self.len];
         }
-        pub fn swapRemove(self: *@This(), i: usize) void {
-            self.len -= 1;
-            if (i != self.len) self.buffer[i] = self.buffer[self.len];
-        }
     };
 }
 
@@ -478,7 +473,8 @@ var g_pending: BoundedArray(PendingSpawn, MAX_PENDING_SPAWNS) = .{};
 
 /// Swap-removes the entry at `i`; caller must `continue` the drain loop after.
 inline fn removePending(i: usize) void {
-    g_pending.swapRemove(i);
+    g_pending.len -= 1;
+    if (i != g_pending.len) g_pending.buffer[i] = g_pending.buffer[g_pending.len];
 }
 
 /// Spawns `cmd` as a detached grandchild (double-fork). Returns immediately —
@@ -496,11 +492,11 @@ fn executeShellCommand(cmd: []const u8) !void {
     if (g_pending.len >= MAX_PENDING_SPAWNS)
         debug.warn("spawn: pending table full, spawning '{s}' without workspace routing", .{cmd});
 
-    const exec_fds = makePipe() catch {
+    const exec_fds = utils.makePipe() catch {
         debug.err("pipe2() failed (exec_pipe): {s}", .{cmd});
         return error.PipeFailed;
     };
-    const pid_fds = makePipe() catch {
+    const pid_fds = utils.makePipe() catch {
         closePipe(exec_fds);
         debug.err("pipe2() failed (pid_pipe): {s}", .{cmd});
         return error.PipeFailed;
@@ -658,34 +654,22 @@ fn tryConfigMouseBind(mods: u16, button: u8, win: u32, time: u32) bool {
     return false;
 }
 
-/// Runs `op()` inside an xcb server grab, redraws the bar, and flushes atomically.
-/// Use for layout/master operations where no border sweep is needed.
+/// Runs `op` inside an xcb server grab, sweeps workspace borders, redraws
+/// the bar, and flushes atomically. Used for every tiling/layout/master
+/// operation; the border sweep is cheap enough to run unconditionally rather
+/// than have callers opt in.
+///
+/// `op` is normally a plain `fn () void`. A per-window operation (like
+/// toggle_floating_window below) instead passes a small value-capturing
+/// struct with a `call(self) void` method — Zig has no runtime closures, so
+/// this is how `win` rides along without a dedicated wrapper function.
 inline fn withTilingGrab(op: anytype) void {
     const conn = core.getState().conn;
     _ = xcb.xcb_grab_server(conn);
-    op();
-    bar.redrawInsideGrab();
-    utils.ungrabAndFlush(conn);
-}
-
-/// Like withTilingGrab but also sweeps workspace borders after op().
-/// Use for operations that reorder or restack windows (move_window_next/prev).
-inline fn withTilingGrabAndBorders(op: anytype) void {
-    const conn = core.getState().conn;
-    _ = xcb.xcb_grab_server(conn);
-    op();
-    window.updateFloatingWindowBorders();
-    window.markBordersFlushed();
-    bar.redrawInsideGrab();
-    utils.ungrabAndFlush(conn);
-}
-
-/// Like withTilingGrabAndBorders but passes `win` as the sole argument to `op`.
-/// Use for per-window operations such as toggleWindowFloat.
-inline fn withTilingGrabAndBordersWin(win: u32, op: anytype) void {
-    const conn = core.getState().conn;
-    _ = xcb.xcb_grab_server(conn);
-    op(win);
+    switch (@typeInfo(@TypeOf(op))) {
+        .@"fn" => op(),
+        else => op.call(),
+    }
     window.updateFloatingWindowBorders();
     window.markBordersFlushed();
     bar.redrawInsideGrab();

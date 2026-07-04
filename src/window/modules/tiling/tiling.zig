@@ -1324,6 +1324,11 @@ fn moveWindowToFilteredSlot(s: *State, win: u32, target: usize) void {
 fn swapWindowsInList(s: *State, idx_a: usize, idx_b: usize) void {
     if (idx_a == idx_b) return;
     std.mem.swap(u32, &s.windows.buf[idx_a], &s.windows.buf[idx_b]);
+    // The bar's title dirty-check compares window IDs in tracking-table
+    // order, which a same-workspace swap doesn't change — only on-screen
+    // position changes. Force a full redraw so the title segment picks up
+    // the new geometry even though focus and the window-ID set are unchanged.
+    bar.scheduleFullRedraw();
 }
 
 /// Swap two tiled windows by their IDs.  Used by focus.zig to implement

@@ -16,7 +16,7 @@ const focus = @import("focus");
 
 const minimize = @import("minimize");
 // Note: workspaces dispatch is handled through tracking.workspaceBit /
-// tracking.allWindows inside forEachWindowOnCurrentWorkspace; a top-level
+// tracking.allWindows inside windowsOnCurrentWorkspace; a top-level
 // workspaces import is not needed here.
 
 const tiling = @import("tiling");
@@ -54,6 +54,12 @@ var g_float_saves_len: usize = 0;
 /// notifyConfigureIfPending and resetState.
 var g_pending_bar_hide_win: u32 = 0;
 
+/// Window that has exited fullscreen and been retiled but has not yet sent a
+/// ConfigureNotify confirming its new (non-fullscreen) dimensions.  Zero when
+/// no window is pending.  Set in exitFullscreen after retile; cleared in
+/// notifyConfigureIfPending, resetState, and onWindowGone.
+var g_pending_bar_show_win: u32 = 0;
+
 // EWMH atoms for _NET_WM_STATE_FULLSCREEN — interned once in init().
 var g_net_wm_state: xcb.xcb_atom_t = xcb.XCB_ATOM_NONE;
 var g_net_wm_state_fullscreen: xcb.xcb_atom_t = xcb.XCB_ATOM_NONE;
@@ -63,6 +69,7 @@ fn resetState() void {
     g_slots = @splat(null);
     g_float_saves_len = 0;
     g_pending_bar_hide_win = 0;
+    g_pending_bar_show_win = 0;
 }
 
 /// Consume an intern-atom cookie and return the resulting atom,
@@ -153,24 +160,35 @@ pub fn forEachFullscreen(cb: anytype) void {
         if (slot) |info| cb(@intCast(i), info);
 }
 
-// Calls `ctx.call(window_id)` for every window on the current workspace except
-// `skip`. Uses the workspace window list when workspaces are enabled, otherwise
-// falls back to the global iterator. `ctx` is anytype — zero overhead at call sites.
-fn forEachWindowOnCurrentWorkspace(skip: u32, ctx: anytype) void {
-    if (core.getState().config.workspaces.enabled) {
-        const cur = tracking.getCurrentWorkspace() orelse return;
-        const bit = tracking.workspaceBit(cur);
-        for (tracking.allWindows()) |entry| {
-            if (entry.mask & bit == 0) continue;
-            if (entry.win == skip) continue;
-            ctx.call(entry.win);
+/// Iterates windows on the current workspace, skipping `skip`. Uses the
+/// workspace window list when workspaces are enabled, otherwise falls back
+/// to the global window list.
+const WorkspaceWindowIter = struct {
+    entries: []const tracking.Entry,
+    idx: usize = 0,
+    skip: u32,
+    filtered: bool,
+    bit: u64 = 0,
+
+    fn next(self: *@This()) ?u32 {
+        while (self.idx < self.entries.len) {
+            const entry = self.entries[self.idx];
+            self.idx += 1;
+            if (self.filtered and entry.mask & self.bit == 0) continue;
+            if (entry.win == self.skip) continue;
+            return entry.win;
         }
-    } else {
-        for (tracking.allWindows()) |entry| {
-            if (entry.win == skip) continue;
-            ctx.call(entry.win);
-        }
+        return null;
     }
+};
+
+fn windowsOnCurrentWorkspace(skip: u32) WorkspaceWindowIter {
+    if (core.getState().config.workspaces.enabled) {
+        const cur = tracking.getCurrentWorkspace() orelse
+            return .{ .entries = &.{}, .skip = skip, .filtered = true };
+        return .{ .entries = tracking.allWindows(), .skip = skip, .filtered = true, .bit = tracking.workspaceBit(cur) };
+    }
+    return .{ .entries = tracking.allWindows(), .skip = skip, .filtered = false };
 }
 
 // Geometry helpers
@@ -242,33 +260,19 @@ fn saveFloatingWindowGeoms(skip_win: u32) void {
     var n: usize = 0;
     var truncated: bool = false;
 
-    // Uses forEachWindowOnCurrentWorkspace for workspace dispatch.
     // Overflow past MAX_FLOAT_SAVES is logged rather than silently dropped.
-    const CollectCtx = struct {
-        n: *usize,
-        truncated: *bool,
-        wins: *[MAX_FLOAT_SAVES]u32,
-        cookies: *[MAX_FLOAT_SAVES]xcb.xcb_get_geometry_cookie_t,
-
-        fn call(self: @This(), w: u32) void {
-            if (minimize.isMinimized(w)) return;
-            if (tiling.isWindowTiled(w)) return;
-            if (self.n.* >= MAX_FLOAT_SAVES) {
-                self.truncated.* = true;
-                return;
-            }
-            self.wins[self.n.*] = w;
-            self.cookies[self.n.*] = xcb.xcb_get_geometry(core.getState().conn, w);
-            self.n.* += 1;
+    var it = windowsOnCurrentWorkspace(skip_win);
+    while (it.next()) |w| {
+        if (minimize.isMinimized(w)) continue;
+        if (tiling.isWindowTiled(w)) continue;
+        if (n >= MAX_FLOAT_SAVES) {
+            truncated = true;
+            continue;
         }
-    };
-
-    forEachWindowOnCurrentWorkspace(skip_win, CollectCtx{
-        .n = &n,
-        .truncated = &truncated,
-        .wins = &wins,
-        .cookies = &cookies,
-    });
+        wins[n] = w;
+        cookies[n] = xcb.xcb_get_geometry(core.getState().conn, w);
+        n += 1;
+    }
 
     if (truncated) debug.warn(
         "saveFloatingWindowGeoms: more than {d} floating windows on workspace; " ++
@@ -305,26 +309,22 @@ fn getSavedFloatGeom(win: u32) ?utils.Rect {
 fn restoreFloatingWindows(skip_win: u32) void {
     const pos = window.floatDefaultPos();
 
-    // Workspace dispatch is handled by forEachWindowOnCurrentWorkspace.
-    const RestoreCtx = struct {
-        pos_x: u32,
-        pos_y: u32,
+    const pos_x: u32 = @intCast(pos.x);
+    const pos_y: u32 = @intCast(pos.y);
 
-        fn call(self: @This(), w: u32) void {
-            if (minimize.isMinimized(w)) return;
-            if (tiling.isWindowTiled(w)) return;
-            // Do NOT call window.getWindowGeom here: we are inside xcb_grab_server
-            // and a synchronous xcb_get_geometry round-trip would deadlock.
-            // Windows absent from g_float_saves fall back to the default position.
-            if (getSavedFloatGeom(w)) |r| {
-                utils.configureWindow(core.getState().conn, w, r);
-            } else {
-                _ = xcb.xcb_configure_window(core.getState().conn, w, xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{ self.pos_x, self.pos_y });
-            }
+    var it = windowsOnCurrentWorkspace(skip_win);
+    while (it.next()) |w| {
+        if (minimize.isMinimized(w)) continue;
+        if (tiling.isWindowTiled(w)) continue;
+        // Do NOT call window.getWindowGeom here: we are inside xcb_grab_server
+        // and a synchronous xcb_get_geometry round-trip would deadlock.
+        // Windows absent from g_float_saves fall back to the default position.
+        if (getSavedFloatGeom(w)) |r| {
+            utils.configureWindow(core.getState().conn, w, r);
+        } else {
+            _ = xcb.xcb_configure_window(core.getState().conn, w, xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{ pos_x, pos_y });
         }
-    };
-
-    forEachWindowOnCurrentWorkspace(skip_win, RestoreCtx{ .pos_x = @intCast(pos.x), .pos_y = @intCast(pos.y) });
+    }
 
     g_float_saves_len = 0;
 }
@@ -356,18 +356,14 @@ fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
         .saved_geometry = geom,
     });
 
-    // Push every other window offscreen; workspace dispatch is through the shared helper.
-    const PushCtx = struct {
-        fn call(_: @This(), w: u32) void {
-            utils.pushWindowOffscreen(core.getState().conn, w);
-            {
-                // Only invalidate tiled windows — floating windows' cache entries
-                // hold the geometry we need to restore on exit.
-                if (tiling.isWindowTiled(w)) tiling.invalidateGeomCache(w);
-            }
-        }
-    };
-    forEachWindowOnCurrentWorkspace(win, PushCtx{});
+    // Push every other window offscreen; workspace dispatch is through the shared iterator.
+    var it = windowsOnCurrentWorkspace(win);
+    while (it.next()) |w| {
+        utils.pushWindowOffscreen(core.getState().conn, w);
+        // Only invalidate tiled windows — floating windows' cache entries
+        // hold the geometry we need to restore on exit.
+        if (tiling.isWindowTiled(w)) tiling.invalidateGeomCache(w);
+    }
 
     // Configure and raise the fullscreen window BEFORE hiding the bar.
     // Deferring the bar hide until ConfigureNotify ensures heavy clients
@@ -388,6 +384,10 @@ fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
     // tiled rect. On exit retile would compute the same rect, get a hit, and skip
     // configure_window, leaving the window stuck at fullscreen dimensions.
     tiling.invalidateGeomCache(win);
+
+    // Cancel any pending deferred bar-show from a previous exit: entering
+    // fullscreen again means the bar should stay hidden.
+    g_pending_bar_show_win = 0;
 
     // Defer hiding the bar until the window confirms its new geometry via
     // ConfigureNotify, so heavy clients (e.g. Discord) don't expose the
@@ -439,6 +439,8 @@ pub fn cleanupFullscreenForMove(win: u32, src_ws: u8) void {
     const fs_info = getForWorkspace(src_ws) orelse return;
     if (fs_info.window != win) return;
 
+    // Cancel deferred bar-show if one was in flight for this window.
+    g_pending_bar_show_win = 0;
     bar.setBarState(.show_fullscreen);
     restoreFloatingWindows(win);
     window.applyBorder(win);
@@ -464,18 +466,23 @@ pub fn enterFullscreen(win: u32, saved_geom: ?core.WindowGeometry) void {
 /// explicitly (unlike toggle()) for event-driven call sites.
 pub fn exitFullscreen(win: u32) void {
     const ws = workspaceFor(win) orelse return;
-    // Hoist bar pre-render before the grab: captureStateIntoSlot may issue X
-    // round-trips for title fetches, which trigger an implicit XCB flush.  If
-    // xcb_grab_server were already queued at flush time, the compositor would be
-    // frozen for the full Cairo render — causing the visible lag on fullscreen exit
-    // that the toggle path avoids by drawing before grabbing.
-    bar.prerenderForShow();
+    // Do NOT prerender+commitShowInsideGrab here.  The fullscreen window was
+    // raised (XCB_STACK_MODE_ABOVE) on enter; if we map the bar before the
+    // window has repainted at its new tiled size, the still-raised window
+    // occludes the bar until repaint completes — exactly the same class of
+    // race as the enter-fullscreen bar-hide delay, just in reverse.
+    //
+    // Instead we defer the bar show until the window confirms its new
+    // (non-fullscreen) dimensions via ConfigureNotify, identically to how
+    // the bar hide is deferred on enter.
     const conn = core.getState().conn;
     _ = xcb.xcb_grab_server(conn);
     exitFullscreenCommit(win, ws);
     restoreFloatingWindows(win);
-    bar.commitShowInsideGrab();
     tiling.retileCurrentWorkspace();
+    // Record the pending show AFTER retile so the window ID is set before
+    // the grab is released and ConfigureNotify can arrive.
+    g_pending_bar_show_win = win;
     utils.ungrabAndFlush(conn);
 }
 
@@ -516,17 +523,48 @@ pub fn toggle() void {
 }
 
 /// Called from the ConfigureNotify handler in events.zig.
-/// Hides the bar if `win` is the window we were waiting for and its reported
-/// dimensions now match the screen.  Safe to call for every ConfigureNotify —
-/// it is a no-op when no fullscreen transition is pending or the dimensions
-/// do not yet match.
+/// Drives both deferred bar transitions:
+///   • hide: fired when the window confirms fullscreen dimensions (enter path)
+///   • show: fired when the window confirms non-fullscreen dimensions (exit path)
+/// Safe to call for every ConfigureNotify — no-ops when no transition is pending
+/// or the dimensions do not match the expected state.
 pub fn notifyConfigureIfPending(win: u32, width: u16, height: u16) void {
-    if (g_pending_bar_hide_win == 0 or g_pending_bar_hide_win != win) return;
-
     const cs = core.getState();
-    if (width != @as(u16, @intCast(cs.screen.width_in_pixels)) or
-        height != @as(u16, @intCast(cs.screen.height_in_pixels))) return;
+    const screen_w = @as(u16, @intCast(cs.screen.width_in_pixels));
+    const screen_h = @as(u16, @intCast(cs.screen.height_in_pixels));
 
-    g_pending_bar_hide_win = 0;
-    bar.setBarState(.hide_fullscreen);
+    // Deferred bar hide (enter-fullscreen path): window must report exactly
+    // screen dimensions before we hide the bar.
+    if (g_pending_bar_hide_win != 0 and g_pending_bar_hide_win == win) {
+        if (width == screen_w and height == screen_h) {
+            g_pending_bar_hide_win = 0;
+            bar.setBarState(.hide_fullscreen);
+        }
+        return;
+    }
+
+    // Deferred bar show (exit-fullscreen path): window must report dimensions
+    // that are no longer fullscreen before we show the bar.  This fires as
+    // soon as the retile configure_window is acknowledged — before the
+    // window has repainted — so the bar appears exactly when the window
+    // starts rendering at its new tiled size.
+    if (g_pending_bar_show_win != 0 and g_pending_bar_show_win == win) {
+        if (width != screen_w or height != screen_h) {
+            g_pending_bar_show_win = 0;
+            bar.setBarState(.show_fullscreen);
+        }
+    }
+}
+
+/// Called when a window is destroyed.  Clears any pending deferred bar
+/// operation for that window so the bar does not stay permanently hidden.
+/// The hide case (enter-fullscreen) is already cleaned up by exitFullscreenCommit
+/// (called from the destroy handler via exitFullscreen); this function exists
+/// solely for the show case (exit-fullscreen), where the window may be
+/// destroyed after exitFullscreen returns but before ConfigureNotify arrives.
+pub fn onWindowGone(win: u32) void {
+    if (g_pending_bar_show_win == win) {
+        g_pending_bar_show_win = 0;
+        bar.setBarState(.show_fullscreen);
+    }
 }
