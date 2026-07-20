@@ -283,10 +283,9 @@ pub fn reloadConfig() void {
         // not yet been recalculated.
         //
         // BORDER_WIDTH is sent explicitly to every tiled window here, then the
-        // normal retile path recalculates geometry separately. This trades one
-        // extra XCB request per window (vs. the previous merge into the
-        // geometry configure_window call) for a retile path that no longer
-        // needs to know about border width at all.
+        // normal retile path recalculates geometry separately. This costs one
+        // extra XCB request per window, in exchange for keeping the retile
+        // path free of any border-width bookkeeping.
         const conn = core.getState().conn;
         _ = xcb.xcb_grab_server(conn);
         for (ns.windows.items()) |win| {
@@ -494,18 +493,16 @@ pub fn retileIfDirty() void {
 /// Retile all workspaces in one pass, updating the cache for each.
 /// Skips the current workspace (handled separately) and any fullscreen workspace.
 ///
-/// Previously this function built a flattened 2-D window-list array
-/// (retile_wins[max_workspaces * max_workspace_windows]) in a first pass using
-/// bitmask iteration, then processed each workspace in a second pass.  That
-/// required 32 KB of BSS scratch space and was sensitive to the interaction
-/// between the two passes.
-///
-/// Now: a single loop collects each workspace's windows into scratch_wins (128 B
-/// of already-available BSS) immediately before invoking the layout.  The
-/// tradeoff — O(workspaces × all_windows) instead of O(all_windows) — is
-/// acceptable because both counts are bounded small (≤64 workspaces, ≤128
-/// windows per workspace) and this path only runs on workspace switch, not on
-/// every keypress.
+/// A single loop collects each workspace's windows into scratch_wins (128 B
+/// of already-available BSS) immediately before invoking the layout, rather
+/// than building a flattened 2-D window-list array
+/// (retile_wins[max_workspaces * max_workspace_windows]) up front via bitmask
+/// iteration, which would require 32 KB of BSS scratch space and add
+/// sensitivity to the interaction between the two passes.  The tradeoff —
+/// O(workspaces × all_windows) instead of O(all_windows) — is acceptable
+/// because both counts are bounded small (≤64 workspaces, ≤128 windows per
+/// workspace) and this path only runs on workspace switch, not on every
+/// keypress.
 pub fn retileAllWorkspaces() void {
     const s = getState();
     if (!s.is_enabled) return;
@@ -681,10 +678,9 @@ pub inline fn defaultLayout() Layout {
     return layout_cycle[0];
 }
 
-/// All layouts are always compiled in now (the old per-layout has_X build
-/// flags were a binary-size opt-out, not a runtime feature toggle), so this
-/// is always true. Kept as a named predicate since callers read more clearly
-/// with it than with a bare `true`.
+/// All layouts are always compiled in, so this is always true. Kept as a
+/// named predicate since callers read more clearly with it than with a bare
+/// `true`.
 pub inline fn isLayoutAvailable(layout: Layout) bool {
     _ = layout;
     return true;
@@ -1131,8 +1127,8 @@ inline fn resolveMasterCount(s: *const State, ws_state: ?*WsState, ws_idx: u8) u
 
 /// Options for the single core retile implementation.  All public retile
 /// entry points are thin wrappers that fill in this struct and call retileImpl,
-/// eliminating the near-duplicate logic that previously lived across four
-/// private functions (retile, retileDeferred, retileForWorkspace,
+/// avoiding near-duplicate logic that would otherwise be spread across four
+/// separate private functions (retile, retileDeferred, retileForWorkspace,
 /// retileCurrentWorkspaceDeferredPrebuilt).
 const RetileOpts = struct {
     /// Target workspace.  Null = current workspace.

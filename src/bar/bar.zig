@@ -33,57 +33,6 @@ const title = @import("title");
 const variants = @import("variants");
 const tags = @import("tags");
 
-// Low-level threading primitives
-
-/// Blocking mutex backed by pthread_mutex_t; `.{}` is safe (= PTHREAD_MUTEX_INITIALIZER).
-const Mutex = struct {
-    inner: std.c.pthread_mutex_t = .{},
-    pub fn lock(m: *Mutex) void {
-        _ = std.c.pthread_mutex_lock(&m.inner);
-    }
-    pub fn unlock(m: *Mutex) void {
-        _ = std.c.pthread_mutex_unlock(&m.inner);
-    }
-};
-
-/// Condition variable backed by pthread_cond_t; `.{}` is safe (= PTHREAD_COND_INITIALIZER).
-/// Call `initMonotonic()` on any instance that will use `timedWait`.
-const Condition = struct {
-    inner: std.c.pthread_cond_t = .{},
-
-    /// Re-initialises the condition variable to use CLOCK_MONOTONIC as its clock.
-    /// Must be called once before any `timedWait` call; safe to call on a freshly
-    /// zero-initialised instance.
-    pub fn initMonotonic(c: *Condition) void {
-        utils.initMonotonicCondvar(&c.inner);
-    }
-
-    pub fn wait(c: *Condition, m: *Mutex) void {
-        _ = std.c.pthread_cond_wait(&c.inner, &m.inner);
-    }
-
-    /// Waits up to `timeout_ns` nanoseconds; returns error.Timeout on expiry.
-    /// Uses a CLOCK_MONOTONIC absolute deadline — requires that `initMonotonic()`
-    /// was called on this instance at startup.
-    pub fn timedWait(c: *Condition, m: *Mutex, timeout_ns: u64) error{Timeout}!void {
-        var ts: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
-        // Saturating add prevents overflow when timeout_ns is near u64 max.
-        const new_nsec = @as(u64, @intCast(ts.nsec)) +| timeout_ns;
-        ts.sec += @intCast(new_nsec / std.time.ns_per_s);
-        ts.nsec = @intCast(new_nsec % std.time.ns_per_s);
-        const rc = std.c.pthread_cond_timedwait(&c.inner, &m.inner, @ptrCast(&ts));
-        if (rc == std.posix.E.TIMEDOUT) return error.Timeout;
-    }
-
-    pub fn signal(c: *Condition) void {
-        _ = std.c.pthread_cond_signal(&c.inner);
-    }
-    pub fn broadcast(c: *Condition) void {
-        _ = std.c.pthread_cond_broadcast(&c.inner);
-    }
-};
-
 // Public API types
 
 pub const BarAction = enum { toggle, hide_fullscreen, show_fullscreen };
@@ -101,11 +50,10 @@ const TITLE_MIN_WIDTH: u16 = 100;
 
 /// List of per-window title strings, each individually heap-allocated.
 ///
-/// The main thread fills this directly (one dupe per window, in workspace
-/// order); the render thread reads `list.items[idx]` with no offset
-/// arithmetic. Replaces the previous flat-buffer-plus-offset-array
-/// representation, which forced every reader to reconstruct a slice from a
-/// byte range instead of indexing directly.
+/// Filled once per redraw (one dupe per window, in workspace order) and read
+/// back by index with no offset arithmetic. Replaces an earlier flat-buffer-
+/// plus-offset-array representation that forced every reader to reconstruct
+/// a slice from a byte range instead of indexing directly.
 const WindowTitles = struct {
     list: std.ArrayListUnmanaged([]const u8) = .empty,
 
@@ -135,7 +83,9 @@ const WindowTitles = struct {
     }
 };
 
-/// Point-in-time bar state captured by the main thread and consumed by the bar thread.
+/// Point-in-time bar state, captured fresh before each draw and diffed
+/// against the previous frame's snapshot (see captureStateIntoSlot) to
+/// decide which segments actually need repainting.
 const BarSnapshot = struct {
     focused_window: ?u32 = null,
     focused_title: std.ArrayListUnmanaged(u8) = .empty,
@@ -151,8 +101,8 @@ const BarSnapshot = struct {
     is_title_dirty: bool = true, // title / focus / minimised state changed
 
     /// Pre-fetched window titles, indexed parallel to `current_workspace_windows`;
-    /// pre-fetched on the main thread so the render thread never makes X11
-    /// calls for the segmented-title path.
+    /// fetched once per snapshot so the segmented-title draw path never issues
+    /// its own xcb_get_property calls.
     window_titles: WindowTitles = .{},
 
     fn deinit(snap: *BarSnapshot, allocator: std.mem.Allocator) void {
@@ -164,36 +114,14 @@ const BarSnapshot = struct {
     }
 };
 
-/// Explicit work-item model for the bar render thread.
-///
-/// All fields are read/written under BarChannel.mutex. `kind` encodes the
-/// primary action (mutually exclusive states); `has_clock_tick` is additive
-/// and may accompany any non-snap primary action.
-const BarWork = struct {
-    kind: Kind = .idle,
-    focused_window: ?u32 = null, // valid only when kind == .focusOnly
-    has_clock_tick: bool = false, // additive clock tick; ignored when kind == .snapReady
-
-    const Kind = enum { idle, snapReady, renderOnly, focusOnly, quit };
-
-    fn hasPending(w: BarWork) bool {
-        return w.kind != .idle or w.has_clock_tick;
-    }
-};
-
-/// Double-buffered lock channel between main thread (producer) and bar thread (consumer).
-///
-/// Main writes into slots[write_index] then flips write_index under mutex;
-/// the bar thread reads from slots[1 - write_index].
-const BarChannel = struct {
-    mutex: Mutex = .{},
-    work_ready: Condition = .{},
-    draw_done: Condition = .{},
-    slots: [2]BarSnapshot = .{ .{}, .{} },
-    write_index: u1 = 0,
-    work: BarWork = .{},
-    draw_generation: u64 = 0,
-};
+/// Serializes access to the shared Cairo/XCB DrawContext. All bar drawing is
+/// now called directly (no cross-thread work queue), except for two small
+/// dedicated timers that still run on their own threads: clock.zig (ticks once
+/// per wall-clock second) and carousel.zig (ticks once per display refresh
+/// while a title is actively scrolling). This mutex is what keeps those two
+/// threads from ever painting into the DrawContext at the same instant as the
+/// main WM thread.
+var draw_mutex: utils.Mutex = .{};
 
 /// All atoms needed to declare the bar window as a dock to the compositor.
 const BarAtoms = struct {
@@ -211,8 +139,6 @@ const BarAtoms = struct {
 
 /// Owns all live bar state.
 const Bar = struct {
-    channel: BarChannel = .{},
-    thread: ?std.Thread = null,
     state: ?*State = null,
     atoms: BarAtoms = .{},
     /// Forces a full bar redraw on the next submitDraw (expose, reload, position toggle, show).
@@ -295,6 +221,11 @@ const State = struct {
     /// to call syncTitleCache after the flush decision.
     title_cache_pending_x: ?u16 = null,
     title_cache_pending_w: u16 = 0,
+    /// Ping-ponged snapshot pair used to diff this frame's state against the
+    /// last one (see captureStateIntoSlot). snap_idx names the "current" slot;
+    /// `1 - snap_idx` is "previous". Flipped after every draw.
+    snapshots: [2]BarSnapshot = .{ .{}, .{} },
+    snap_idx: u1 = 0,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -339,6 +270,7 @@ const State = struct {
     fn deinit(self: *State) void {
         self.win.deinit();
         self.title_cache.deinit(self.render.allocator);
+        for (&self.snapshots) |*snap| snap.deinit(self.render.allocator);
         self.render.allocator.destroy(self);
     }
 
@@ -511,7 +443,8 @@ const State = struct {
             debug.warnOnErr(e, "drawClockOnly");
         // renderOnly() flushes Cairo to the off-screen pixmap; blitAndFlush()
         // copies only the clock region to the window and calls xcb_flush.
-        // This replaces the old blit() + main-thread xcb_flush pattern.
+        // Splitting the flush this way avoids a full-window blit plus a
+        // separate main-thread xcb_flush call.
         self.render.dc.renderOnly();
         self.render.dc.blitAndFlush(clock_x, self.layout_cache.clock_width);
     }
@@ -614,98 +547,6 @@ const State = struct {
     }
 };
 
-// Bar thread
-
-fn runBarThread(s: *State) void {
-    var next_carousel_ns: u64 = 0;
-
-    // Re-reads wakeIntervalNs() each advance so a config reload takes effect immediately.
-    const advanceCarouselTimer = struct {
-        inline fn f(next: *u64) void {
-            const interval = carousel.wakeIntervalNs();
-            const now = utils.monotonicNs();
-            next.* = if (now >= next.*) now +% interval else next.* +% interval;
-        }
-    }.f;
-
-    while (true) {
-        gBar.channel.mutex.lock();
-
-        // Sleep until there is something to do or the carousel timer fires.
-        while (!gBar.channel.work.hasPending()) {
-            if (carousel.isCarouselActive()) {
-                const now_ns = utils.monotonicNs();
-                if (now_ns >= next_carousel_ns) break;
-                const remaining = next_carousel_ns - now_ns;
-                gBar.channel.work_ready.timedWait(&gBar.channel.mutex, remaining) catch |e| {
-                    if (e == error.Timeout) break; // timer fired — dispatch carousel tick
-                    // Spurious wakeup: recheck conditions from the top of the loop.
-                };
-                continue;
-            }
-            next_carousel_ns = 0;
-            gBar.channel.work_ready.wait(&gBar.channel.mutex);
-        }
-
-        if (gBar.channel.work.kind == .quit) {
-            gBar.channel.mutex.unlock();
-            return;
-        }
-
-        // Snapshot the pending work and clear it atomically under the mutex.
-        const work = gBar.channel.work;
-        const read_idx: u1 = 1 - gBar.channel.write_index;
-        gBar.channel.work = .{};
-        gBar.channel.mutex.unlock();
-
-        switch (work.kind) {
-            // snapReady flushes (blit + xcb_flush); renderOnly renders to the pixmap only
-            // so the caller can blit atomically with ungrabAndFlush().
-            .snapReady, .renderOnly => {
-                s.drawAll(&gBar.channel.slots[read_idx], work.kind == .snapReady) catch |e| debug.warnOnErr(e, "bar thread draw");
-                gBar.channel.mutex.lock();
-                gBar.channel.draw_generation +%= 1;
-                gBar.channel.draw_done.broadcast();
-                gBar.channel.mutex.unlock();
-            },
-            .focusOnly => {
-                s.drawTitleOnly(work.focused_window);
-                if (carousel.isCarouselActive()) advanceCarouselTimer(&next_carousel_ns);
-                if (work.has_clock_tick) s.drawClockOnly();
-            },
-            .idle => {
-                // Carousel tick or clock-only wakeup with no focus change.
-                if (carousel.isCarouselActive()) {
-                    s.drawTitleOnly(s.title_cache.focused_window);
-                    advanceCarouselTimer(&next_carousel_ns);
-                }
-                if (work.has_clock_tick) s.drawClockOnly();
-            },
-            .quit => unreachable,
-        }
-    }
-}
-
-inline fn spawnBarThread(s: *State) void {
-    gBar.thread = std.Thread.spawn(.{}, runBarThread, .{s}) catch |e| {
-        debug.warnOnErr(e, "Failed to start bar render thread");
-        return;
-    };
-}
-
-/// Signals the bar thread to quit and waits for it to exit.
-fn joinBarThread() void {
-    gBar.channel.mutex.lock();
-    gBar.channel.work = .{ .kind = .quit };
-    gBar.channel.work_ready.signal();
-    gBar.channel.mutex.unlock();
-    if (gBar.thread) |t| {
-        t.join();
-        gBar.thread = null;
-    }
-    gBar.channel.work = .{}; // reset for potential re-use after reload
-}
-
 // Snapshot capture
 
 /// Returns true when the two minimised sets differ in membership (not just count).
@@ -757,8 +598,10 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot,
         }
     }
 
-    // Pre-fetch titles on the main thread so the render thread never issues X11 calls.
-    // Only run when title state has changed; on clock-only wakeups this is a no-op.
+    // Pre-fetch titles so the segmented-title draw path never issues its own
+    // X11 calls. Only run when title state has changed. (Clock and carousel
+    // ticks call drawClockOnly/drawTitleOnly directly and never reach this
+    // function at all, so there's no separate "no-op" case to handle here.)
     const title_changed =
         snap.focused_window != prev.focused_window or
         snap.is_title_invalidated or
@@ -798,14 +641,43 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot,
 
 // Draw submission
 
-fn submitDrawBlockingFull() void {
-    gBar.pending_force_full_redraw = true;
-    submitBlockingWork(.snapReady);
+/// Returns true on success, false if the bar is not visible or capture failed.
+/// Captures into whichever snapshot slot is currently "current" (s.snap_idx),
+/// diffing against the other slot ("previous").
+fn prepareSnapshot(s: *State) bool {
+    if (!s.is_visible) return false;
+    const idx = s.snap_idx;
+    const forced = gBar.pending_force_full_redraw;
+    gBar.pending_force_full_redraw = false;
+    captureStateIntoSlot(s, &s.snapshots[idx], &s.snapshots[1 - idx], forced) catch |e| {
+        debug.warnOnErr(e, "bar captureStateIntoSlot");
+        return false;
+    };
+    return true;
 }
 
-/// Invalidates the title carousel cache and triggers a full blocking redraw.
-/// Replaces the three repeated (is_invalidated = true; submitDrawBlockingFull())
-/// pairs in setBarState and applyReload with a single named call site.
+/// Captures a fresh snapshot and draws synchronously, holding draw_mutex for
+/// the duration so the clock/carousel threads never paint at the same instant.
+/// `flush` selects whether the result is blitted to the window immediately
+/// (the normal event-loop path) or only rendered to the off-screen pixmap
+/// (the xcb_grab_server-safe path — see redrawInsideGrab).
+fn performDraw(flush: bool) void {
+    const s = gBar.state orelse return;
+    if (!prepareSnapshot(s)) return;
+    draw_mutex.lock();
+    defer draw_mutex.unlock();
+    s.drawAll(&s.snapshots[s.snap_idx], flush) catch |e| debug.warnOnErr(e, "bar draw");
+    s.snap_idx ^= 1;
+}
+
+fn submitDrawBlockingFull() void {
+    gBar.pending_force_full_redraw = true;
+    performDraw(true);
+}
+
+/// Invalidates the title carousel cache and triggers a full redraw.
+/// Shared by setBarState and applyReload, which would otherwise each repeat
+/// an (is_invalidated = true; submitDrawBlockingFull()) pair inline.
 fn submitFullRedrawWithCarouselReset(s: *State) void {
     s.title_cache.is_invalidated = true;
     submitDrawBlockingFull();
@@ -815,56 +687,20 @@ inline fn ungrabAndFlush() void {
     utils.ungrabAndFlush(core.getState().conn);
 }
 
-/// Flips the write index, sets work kind, and signals the bar thread.
-/// Must be called with gBar.channel.mutex held.
-inline fn postWork(kind: BarWork.Kind) void {
-    gBar.channel.write_index ^= 1;
-    gBar.channel.work.kind = kind;
-    gBar.channel.work_ready.signal();
-}
-
-/// Shared blocking submit: captures a snapshot, signals the bar thread with `kind`,
-/// and waits for the draw generation to advance before returning.
-fn submitBlockingWork(kind: BarWork.Kind) void {
-    if (!prepareSnapshot()) return;
-    gBar.channel.mutex.lock();
-    defer gBar.channel.mutex.unlock();
-    const gen = gBar.channel.draw_generation;
-    postWork(kind);
-    while (gBar.channel.draw_generation == gen)
-        gBar.channel.draw_done.wait(&gBar.channel.mutex);
-}
-
-/// Blocks until draw completes. Use only inside or immediately before xcb_ungrab_server.
+/// Draws and blits to the window. Drawing always happens inline on the
+/// calling thread, so this is identical to submitDraw.
 pub fn submitDrawBlocking() void {
-    submitBlockingWork(.snapReady);
+    performDraw(true);
 }
 
-/// Like submitDrawBlocking but renders only — no xcb_copy_area, no xcb_flush.
+/// Renders only — no xcb_copy_area, no xcb_flush.
 /// Use INSIDE xcb_grab_server; pair with dc.blitQueued() + ungrabAndFlush().
 fn submitRenderBlocking() void {
-    submitBlockingWork(.renderOnly);
-}
-
-/// Returns true on success, false if the bar is not visible or capture failed.
-fn prepareSnapshot() bool {
-    const s = gBar.state orelse return false;
-    if (!s.is_visible) return false;
-    const idx = gBar.channel.write_index;
-    const forced = gBar.pending_force_full_redraw;
-    gBar.pending_force_full_redraw = false;
-    captureStateIntoSlot(s, &gBar.channel.slots[idx], &gBar.channel.slots[1 - idx], forced) catch |e| {
-        debug.warnOnErr(e, "bar captureStateIntoSlot");
-        return false;
-    };
-    return true;
+    performDraw(false);
 }
 
 pub fn submitDraw() void {
-    if (!prepareSnapshot()) return;
-    gBar.channel.mutex.lock();
-    defer gBar.channel.mutex.unlock();
-    postWork(.snapReady);
+    performDraw(true);
 }
 
 // Window and atom setup
@@ -1013,11 +849,9 @@ fn createDrawContext(setup: BarWindowSetup, height: u16) !*drawing.DrawContext {
 pub fn init() !void {
     const cs = core.getState();
     std.debug.assert(cs.config.bar.enabled);
-    // work_ready uses timedWait with a CLOCK_MONOTONIC deadline.
-    gBar.channel.work_ready.initMonotonic();
     initAtoms();
-    // Detect refresh rate before the bar thread spawns so carousel.wakeIntervalNs()
-    // returns the real rate from the first tick.
+    // Detect refresh rate before the carousel thread spawns so
+    // carousel.wakeIntervalNs() returns the real rate from the first tick.
     scale.ensureRefreshRateDetected(cs.conn);
     const height = try calcBarHeight();
     const y_pos = calcBarYPos(height);
@@ -1031,7 +865,7 @@ pub fn init() !void {
     errdefer dc.deinit();
     debug.info("Bar transparency: {s}", .{if (setup.has_argb) "enabled (ARGB)" else "disabled (opaque)"});
     gBar.state = try State.init(cs.alloc, cs.conn, setup.win_id, setup.colormap, cs.screen.width_in_pixels, height, dc, cs.config.bar);
-    spawnBarThread(gBar.state.?);
+    carousel.startThread();
     clock.startThread();
     submitDrawBlocking();
     _ = xcb.xcb_map_window(cs.conn, setup.win_id);
@@ -1042,10 +876,9 @@ pub fn init() !void {
 pub fn deinit() void {
     prompt.deinit();
     clock.stopThread();
-    joinBarThread();
+    carousel.stopThread();
     if (gBar.state) |s| {
         carousel.deinitCarousel();
-        for (&gBar.channel.slots) |*slot| slot.deinit(s.render.allocator);
         _ = xcb.xcb_destroy_window(s.win.conn, s.win.win_id);
         s.render.dc.deinit();
         drawing.deinitFontCache(s.render.allocator);
@@ -1085,10 +918,9 @@ fn applyReload(old: *State, setup: BarWindowSetup, height: u16) !void {
     new_state.is_visible = old.is_visible;
     new_state.is_globally_visible = old.is_globally_visible;
     clock.stopThread();
-    joinBarThread();
-    gBar.channel.work_ready.initMonotonic();
+    carousel.stopThread();
     gBar.state = new_state;
-    spawnBarThread(new_state);
+    carousel.startThread();
     clock.startThread();
     submitDrawBlockingFull();
     if (new_state.is_visible) _ = xcb.xcb_map_window(cs.conn, setup.win_id);
@@ -1132,16 +964,12 @@ pub fn toggleBarSegmentAnchor() void {
 pub fn scheduleFocusRedraw(new_win: ?u32) void {
     const s = gBar.state orelse return;
     if (!s.is_visible or s.is_dirty) return;
-    gBar.channel.mutex.lock();
-    // Only post a focus update when no higher-priority work is already queued.
-    if (gBar.channel.work.kind == .idle) {
-        gBar.channel.work = .{ .kind = .focusOnly, .focused_window = new_win };
-        gBar.channel.work_ready.signal();
-    }
-    gBar.channel.mutex.unlock();
-    // markDirty ensures a snapReady draw follows, which fetches the new window's title
+    draw_mutex.lock();
+    s.drawTitleOnly(new_win);
+    draw_mutex.unlock();
+    // markDirty ensures a full redraw follows, which fetches the new window's title
     // and rebuilds the carousel correctly. Without it, a cross-window focus change with
-    // no other dirty state would rely solely on the stale-title focusOnly path —
+    // no other dirty state would rely solely on the stale-title drawTitleOnly path —
     // the combination that triggers the double-start flicker drawTitleOnly guards against.
     s.markDirty();
 }
@@ -1227,7 +1055,6 @@ pub fn commitShowInsideGrab() void {
     _ = xcb.xcb_map_window(core.getState().conn, s.win.win_id);
     s.is_dirty = false;
     debug.info("Bar shown (show_fullscreen)", .{});
-    clock.updateTimerState();
 }
 
 pub fn raiseBar() void {
@@ -1264,7 +1091,6 @@ pub fn setBarState(action: BarAction) void {
         tiling.retileCurrentWorkspace();
     }
     debug.info("Bar {s} ({s})", .{ if (show) "shown" else "hidden", @tagName(action) });
-    clock.updateTimerState();
 }
 
 pub fn updateIfDirty() !void {
@@ -1280,21 +1106,28 @@ pub fn updateIfDirty() !void {
     }
 }
 
+/// Called from the dedicated clock thread (clock.zig) once per real-time
+/// second boundary. Draws just the clock segment; draw_mutex keeps this safe
+/// against a same-instant redraw from the main WM thread or the carousel thread.
 pub fn checkClockUpdate() bool {
     const s = gBar.state orelse return false;
     if (!s.is_visible) return false;
-    gBar.channel.mutex.lock();
-    gBar.channel.work.has_clock_tick = true;
-    gBar.channel.work_ready.signal();
-    gBar.channel.mutex.unlock();
+    draw_mutex.lock();
+    s.drawClockOnly();
+    draw_mutex.unlock();
     return true;
 }
 
-pub fn pollTimeoutMs() i32 {
-    return clock.pollTimeoutMs();
-}
-pub fn updateTimerState() void {
-    clock.updateTimerState();
+/// Called from the dedicated carousel thread (carousel.zig) roughly once per
+/// display refresh while a title is actively scrolling. Advances and redraws
+/// just the title segment; draw_mutex keeps this safe against a same-instant
+/// redraw from the main WM thread or the clock thread.
+pub fn tickCarousel() void {
+    const s = gBar.state orelse return;
+    if (!s.is_visible) return;
+    draw_mutex.lock();
+    s.drawTitleOnly(s.title_cache.focused_window);
+    draw_mutex.unlock();
 }
 
 pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {

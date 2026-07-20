@@ -180,6 +180,14 @@ pub inline fn setLastEventTime(t: u32) void {
 // maintained for external consumers (e.g. subsystems that forward timestamps
 // to input-method frameworks) rather than for use inside this module.
 
+/// Sets X input focus to `win`, always with CurrentTime (0) rather than a
+/// real event timestamp — see "Timestamp handling" above for why a real
+/// timestamp risks the request being silently ignored, or an Electron/Qt app
+/// forwarding a stale timestamp back to its own internal XSetInputFocus call.
+inline fn focusNow(conn: *xcb.xcb_connection_t, win: u32) void {
+    _ = xcb.xcb_set_input_focus(conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, 0); // CurrentTime
+}
+
 /// Direct write to suppress_reason.
 ///
 /// Use this for cases where suppression must be cleared or set independently
@@ -315,13 +323,7 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
 
     const conn = core.getState().conn;
 
-    if (flags.set_input_focus)
-        // Always CurrentTime (0): the X server interprets CurrentTime as "now"
-        // and bypasses its timestamp-ordering check entirely.  Passing a real
-        // event timestamp risks rejection if it predates the server's last
-        // focus-change time, and also risks Electron/Qt apps forwarding a stale
-        // timestamp back to XSetInputFocus on their internal widget.
-        _ = xcb.xcb_set_input_focus(conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, 0); // CurrentTime
+    if (flags.set_input_focus) focusNow(conn, win);
 
     if (flags.raise)
         _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
@@ -396,7 +398,14 @@ pub fn setFocus(win: u32, reason: Reason) void {
     if ((reason == .mouse_click or reason == .user_command or reason == .pointer_sync) and
         !isWindowMapped(conn, win)) return;
 
-    const input_model = window.getInputModelCached(conn, win);
+    // getInputModel's WM_TAKE_FOCUS half is checked live against the X server
+    // on every call (see its doc comment in window.zig) rather than trusting
+    // a cache, matching dwm's sendevent(). This is a second, independent
+    // WM_PROTOCOLS round trip from the pipelined one fired just below for the
+    // actual send — deliberately not merged into one to avoid entangling
+    // this classification step with that pipelining. Neither is perceptible
+    // on a human-triggered, infrequent path like a focus change.
+    const input_model = window.getInputModel(conn, win);
     if (input_model == .no_input) return;
 
     // Pipeline: fire the WM_PROTOCOLS get_property cookie NOW, before
@@ -454,7 +463,9 @@ pub fn drainPendingConfirm() void {
 
     if (!window.isValidManagedWindow(win)) return;
 
-    const input_model = window.getInputModelCached(conn, win);
+    // Live take_focus check, same as setFocus above — see getInputModel's
+    // doc comment in window.zig.
+    const input_model = window.getInputModel(conn, win);
     if (input_model == .no_input) return;
 
     const c = focus_reply orelse return;
@@ -470,7 +481,7 @@ pub fn drainPendingConfirm() void {
     // rather than silently degrading into an unresponsive window.
     std.log.debug("focus: confirm retry for 0x{x}: focus={} (expected > 1), retrying once", .{ win, c.*.focus });
 
-    _ = xcb.xcb_set_input_focus(conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, 0); // CurrentTime
+    focusNow(conn, win);
     window.sendWMTakeFocus(conn, win, 0); // CurrentTime
 }
 
@@ -494,21 +505,26 @@ fn cancelPendingConfirm() void {
     xcb.xcb_discard_reply(core.getState().conn, cookie.sequence);
 }
 
-/// Invalidate the cached input model for `win`.
+/// Refresh the cached focus/close properties for `win`.
 ///
 /// MUST be called from the PropertyNotify handler whenever `XA_WM_HINTS` OR
 /// `WM_PROTOCOLS` changes for a managed window.
 ///
 /// Rationale for WM_HINTS: Electron and Java/Qt apps routinely update WM_HINTS
-/// after their window is mapped.  A stale cache that missed an input=False→True
-/// update would return early at `if (input_model == .no_input)` on every hover,
-/// silently discarding all focus for that window.
+/// after their window is mapped.  A stale `accepts_input` bit that missed an
+/// input=False→True update would return early at
+/// `if (input_model == .no_input)` on every hover, silently discarding all
+/// focus for that window. This is the one half of the old InputModel cache
+/// that is still cached — see the section comment above CachedProps in
+/// window.zig for why the WM_TAKE_FOCUS half no longer needs this at all.
 ///
-/// Rationale for WM_PROTOCOLS: apps can register WM_TAKE_FOCUS after mapping.
-/// A stale cache would skip the message, leaving the app's internal widget
-/// inactive.
+/// Rationale for WM_PROTOCOLS: WM_DELETE_WINDOW support (`wm_delete`) is
+/// still cached and derived from the same property, for the close-window
+/// path (window.supportsWMDeleteCached). WM_TAKE_FOCUS support itself is
+/// exempt — getInputModel() checks it live on every call, so there is
+/// nothing left to go stale on that front.
 pub fn invalidateInputModelCache(win: u32) void {
-    window.recacheInputModel(core.getState().conn, win);
+    _ = window.queryAndCacheProps(core.getState().conn, win);
 }
 
 /// Re-assert focus on `win` from inside handleFocusIn.
@@ -521,10 +537,16 @@ pub fn invalidateInputModelCache(win: u32) void {
 /// to a focus steal, so stability (not raise-order) is the priority.
 fn sendFocusProtocol(win: u32) void {
     const conn = core.getState().conn;
-    const model = window.getInputModelCached(conn, win);
+    // getInputModel's take_focus half is live (see its doc comment in
+    // window.zig); sendWMTakeFocus below independently re-checks the same
+    // property live too. Two round trips instead of one, on a path that
+    // fires on focus steals rather than every event — acceptable per the
+    // same reasoning as setFocus above, not worth entangling the two checks
+    // to save one round trip.
+    const model = window.getInputModel(conn, win);
     if (model == .no_input) return;
     if (model != .globally_active) {
-        _ = xcb.xcb_set_input_focus(conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, 0); // CurrentTime
+        focusNow(conn, win);
     }
     // Always advertise the active window, regardless of input model.
     // Without this, a globally_active window that has stolen focus would leave
@@ -563,13 +585,13 @@ pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
             // sendFocusProtocol(sel) reclaims focus with no active opponent.
             if (is_offscreen_steal) {
                 const cs = core.getState();
-                _ = xcb.xcb_set_input_focus(cs.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, cs.root, 0); // CurrentTime
+                focusNow(cs.conn, cs.root);
             }
             sendFocusProtocol(sel);
         }
     } else if (is_offscreen_steal) {
         const cs = core.getState();
-        _ = xcb.xcb_set_input_focus(cs.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, cs.root, 0); // CurrentTime
+        focusNow(cs.conn, cs.root);
         advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
     }
 }
@@ -610,7 +632,7 @@ pub fn clearFocus() void {
     state.focused_window = null;
     state.suppress_reason = .none;
     const cs = core.getState();
-    _ = xcb.xcb_set_input_focus(cs.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, cs.root, 0); // CurrentTime
+    focusNow(cs.conn, cs.root);
     carousel.notifyFocusChanged(null);
     bar.scheduleFocusRedraw(null);
     advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
@@ -682,9 +704,10 @@ pub fn drainPointerSync() void {
     defer std.c.free(reply);
     const child = reply.*.child;
     if (child == 0 or child == cs.root or !window.isValidManagedWindow(child)) return;
-    // BUG FIX: if the stale pointer reply contains a window from a workspace
-    // that is no longer current (e.g., the reply was fired before a workspace
-    // switch), silently discard it — do not redirect focus to an offscreen window.
+    // A stale pointer reply may reference a window from a workspace that is
+    // no longer current (e.g., if the reply arrives after a workspace
+    // switch); silently discard it in that case — do not redirect focus to
+    // an offscreen window.
     if (!tracking.isOnCurrentWorkspace(child)) return;
     setFocus(child, .pointer_sync);
 }

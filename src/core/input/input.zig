@@ -395,43 +395,66 @@ fn executeMouseAction(action: *const types.Action, clicked_win: u32) !void {
 // Commands are launched via a double-fork so the grandchild is re-parented to
 // init and the WM never accumulates zombie processes.
 //
-// Two pipes co-ordinate the three processes:
-//   exec_pipe — write end is O_CLOEXEC; exec success closes it (EOF),
-//               exec failure writes a sentinel byte.
-//   pid_pipe  — intermediate child writes the grandchild PID before exiting.
+// A single pipe co-ordinates the three processes. Its write end is
+// O_CLOEXEC (see utils.makePipe), so a successful execvp() in the grandchild
+// closes its inherited copy automatically — nothing needs to be sent for the
+// success case. Two tagged messages can be written onto the read end:
+//   TAG_PID    — {TAG_PID, grandchild pid} written by the intermediate child
+//                in one atomic write(), always, right before it exits.
+//   TAG_FAILED — one byte written by the grandchild itself, only if execvp()
+//                fails.
+// Because these come from two independently-scheduled processes, they can
+// arrive in either order — see finishSpawn() for how that's resolved. EOF
+// always marks the end of the conversation, whatever was or wasn't sent.
 //
 // executeShellCommand returns immediately after fork(). The pending entry is
 // stored in g_pending and resolved asynchronously:
 //   drainPendingSpawns()  — called every event batch; does O_NONBLOCK reads.
 //   reapPendingChildren() — called on SIGCHLD; targeted waitpid(WNOHANG).
 
+/// Tags for the two possible messages written onto the spawn pipe. Sent as
+/// a leading byte so the reader can tell them apart no matter which order
+/// they arrive in (see finishSpawn()).
+const TAG_PID: u8 = 0;
+const TAG_FAILED: u8 = 1;
+
+/// Byte length of a TAG_PID message: the tag plus a raw c_int.
+const PID_MSG_LEN: usize = 1 + @sizeOf(c_int);
+
 /// Grandchild: detaches from the session and execs the command.
-/// Writes a sentinel byte to exec_pipe_write on execvp failure.
-fn execAsGrandchild(exec_pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
+/// On execvp failure, writes a TAG_FAILED byte to pipe_write before exiting.
+/// On success this function never returns far enough to write anything —
+/// pipe_write's O_CLOEXEC copy closes itself as part of the exec.
+fn execAsGrandchild(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
     _ = c.setsid();
     _ = c.execvp("/bin/sh", @ptrCast(&[_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z, null }));
-    const sentinel: u8 = 1;
-    _ = c.write(exec_pipe_write, &sentinel, 1);
+    const msg = [1]u8{TAG_FAILED};
+    _ = c.write(pipe_write, &msg, msg.len);
     std.process.exit(1);
 }
 
-/// Intermediate child: forks the grandchild, forwards its PID over pid_pipe,
-/// then exits so the grandchild is re-parented to init.
-fn forkIntermediate(exec_pipe_write: c_int, pid_pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
+/// Intermediate child: forks the grandchild, forwards its PID over the
+/// spawn pipe tagged as TAG_PID, then exits so the grandchild is
+/// re-parented to init.
+fn forkIntermediate(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
     const grandchild_pid = c.fork();
     if (grandchild_pid < 0) {
         debug.err("Second fork failed", .{});
         std.process.exit(1);
     }
     if (grandchild_pid == 0) {
-        _ = c.close(pid_pipe_write);
-        execAsGrandchild(exec_pipe_write, cmd_z);
+        // Grandchild: keep pipe_write open rather than closing it up front.
+        // Its copy is O_CLOEXEC, so a successful execvp() closes it for us;
+        // execAsGrandchild only writes to it explicitly if exec fails.
+        execAsGrandchild(pipe_write, cmd_z);
     }
 
     const gp: c_int = grandchild_pid;
-    _ = c.write(pid_pipe_write, &gp, @sizeOf(c_int));
-    _ = c.close(pid_pipe_write);
-    _ = c.close(exec_pipe_write);
+    var msg: [PID_MSG_LEN]u8 = undefined;
+    msg[0] = TAG_PID;
+    @memcpy(msg[1..], std.mem.asBytes(&gp));
+    _ = c.write(pipe_write, &msg, msg.len);
+    _ = c.close(pipe_write);
     std.process.exit(0);
 }
 
@@ -442,39 +465,29 @@ fn forkIntermediate(exec_pipe_write: c_int, pid_pipe_write: c_int, cmd_z: [*:0]c
 
 const MAX_PENDING_SPAWNS: usize = 16;
 
+/// Largest possible spawn-pipe conversation: a TAG_PID message plus an
+/// optional trailing (or leading) TAG_FAILED byte.
+const SPAWN_MSG_MAX: usize = PID_MSG_LEN + 1;
+
 /// Lifecycle state for a single double-fork spawn.
 const PendingSpawn = struct {
     pid: c_int, // PID of intermediate child; used for targeted waitpid.
-    pid_fd: c_int, // Read end of pid_pipe (O_NONBLOCK). -1 after closed.
-    exec_fd: c_int, // Read end of exec_pipe (O_NONBLOCK). -1 after closed.
-    grandchild: c_int, // Grandchild PID read from pid_pipe. -1 until known.
+    spawn_fd: c_int, // Read end of the spawn pipe (O_NONBLOCK). -1 once done.
+    buf: [SPAWN_MSG_MAX]u8 = undefined, // Accumulates bytes until the conversation ends.
+    len: usize = 0, // Valid bytes accumulated in buf so far.
     spawn_ws: ?u8, // Target workspace for window.registerSpawn.
 };
 
-// std.BoundedArray was removed from the standard library (gone as of the
-// Zig 0.16 toolchain this project targets), so a minimal local stand-in is
-// unavoidable here rather than optional. Kept deliberately small: no
-// AutoHashMap-esque hidden allocations, just a fixed buffer and length.
-fn BoundedArray(comptime T: type, comptime cap: usize) type {
-    return struct {
-        buffer: [cap]T = undefined,
-        len: usize = 0,
-        pub fn appendAssumeCapacity(self: *@This(), item: T) void {
-            self.buffer[self.len] = item;
-            self.len += 1;
-        }
-        pub fn slice(self: *@This()) []T {
-            return self.buffer[0..self.len];
-        }
-    };
-}
-
-var g_pending: BoundedArray(PendingSpawn, MAX_PENDING_SPAWNS) = .{};
+// std.BoundedArray is not available in the standard library (removed as of
+// the Zig 0.16 toolchain this project targets); utils.BoundedList is the
+// shared fixed-buffer-plus-length stand-in used everywhere this shape is
+// needed.
+var g_pending: utils.BoundedList(PendingSpawn, MAX_PENDING_SPAWNS) = .{};
 
 /// Swap-removes the entry at `i`; caller must `continue` the drain loop after.
+/// Order doesn't matter here — pending spawns aren't replayed in sequence.
 inline fn removePending(i: usize) void {
-    g_pending.len -= 1;
-    if (i != g_pending.len) g_pending.buffer[i] = g_pending.buffer[g_pending.len];
+    g_pending.swapRemove(i);
 }
 
 /// Spawns `cmd` as a detached grandchild (double-fork). Returns immediately —
@@ -492,106 +505,128 @@ fn executeShellCommand(cmd: []const u8) !void {
     if (g_pending.len >= MAX_PENDING_SPAWNS)
         debug.warn("spawn: pending table full, spawning '{s}' without workspace routing", .{cmd});
 
-    const exec_fds = utils.makePipe() catch {
-        debug.err("pipe2() failed (exec_pipe): {s}", .{cmd});
-        return error.PipeFailed;
-    };
-    const pid_fds = utils.makePipe() catch {
-        closePipe(exec_fds);
-        debug.err("pipe2() failed (pid_pipe): {s}", .{cmd});
+    const pipe_fds = utils.makePipe() catch {
+        debug.err("pipe2() failed (spawn pipe): {s}", .{cmd});
         return error.PipeFailed;
     };
 
     const pid = c.fork();
     if (pid < 0) {
-        closePipe(exec_fds);
-        closePipe(pid_fds);
+        closePipe(pipe_fds);
         debug.err("First fork failed: {s}", .{cmd});
         return error.ForkFailed;
     }
 
     if (pid == 0) {
-        _ = c.close(exec_fds[0]);
-        _ = c.close(pid_fds[0]);
-        forkIntermediate(exec_fds[1], pid_fds[1], cmd_z.ptr);
+        _ = c.close(pipe_fds[0]);
+        forkIntermediate(pipe_fds[1], cmd_z.ptr);
     }
 
-    // Parent: close write ends so our read ends eventually see EOF.
-    _ = c.close(exec_fds[1]);
-    _ = c.close(pid_fds[1]);
+    // Parent: close the write end so our read end eventually sees EOF.
+    _ = c.close(pipe_fds[1]);
 
-    // Fire xcb_query_pointer now to snapshot cursor position for
-    // spawn-crossing suppression. Reply is drained lazily by mapWindowToScreen.
-    window.prefetchSpawnPointer();
+    // Cursor position for spawn-crossing suppression is queried synchronously
+    // by window.mapWindowToScreen when the MapRequest actually arrives, rather
+    // than prefetched here at key-press time: MapRequest is a one-time event
+    // per window, so that round-trip isn't worth pipelining ahead of time.
 
-    if (g_pending.len < MAX_PENDING_SPAWNS) {
-        g_pending.appendAssumeCapacity(.{
-            .pid = pid,
-            .pid_fd = pid_fds[0],
-            .exec_fd = exec_fds[0],
-            .grandchild = -1,
-            .spawn_ws = spawn_ws,
-        });
-    } else {
-        // Table full: close the read ends we won't track.
-        _ = c.close(pid_fds[0]);
-        _ = c.close(exec_fds[0]);
+    const queued = g_pending.append(.{
+        .pid = pid,
+        .spawn_fd = pipe_fds[0],
+        .spawn_ws = spawn_ws,
+    });
+    if (!queued) {
+        // Table full: close the read end we won't track.
+        _ = c.close(pipe_fds[0]);
     }
 }
 
 /// Drains pending spawn entries non-blockingly.
-/// Called every event batch and on SIGCHLD. For each entry:
-///   1. pid_fd: non-blocking read for the grandchild PID from the intermediate child.
-///   2. exec_fd: non-blocking read — EOF = exec succeeded, sentinel byte = failed,
-///      EAGAIN = not yet exec'd, other = hard error treated as failure.
+/// Called every event batch and on SIGCHLD. Each entry's spawn pipe carries
+/// up to two independently-written messages (see the block comment above),
+/// so bytes are just accumulated into entry.buf until EOF — or until the
+/// buffer is full, which already means both possible messages have arrived
+/// and there's no need to wait for EOF too. finishSpawn() then classifies
+/// whatever ended up in the buffer.
 pub fn drainPendingSpawns() void {
     var i: usize = 0;
     while (i < g_pending.len) {
         const entry = &g_pending.slice()[i];
 
-        if (entry.pid_fd >= 0) {
-            var gcp: c_int = -1;
-            const nr = c.read(entry.pid_fd, &gcp, @sizeOf(c_int));
-            if (nr == @sizeOf(c_int)) {
-                entry.grandchild = gcp;
-                _ = c.close(entry.pid_fd);
-                entry.pid_fd = -1;
-            } else if (nr < 0 and std.posix.errno(nr) == .AGAIN) {
-                // Not ready yet — retry on next call.
-            } else {
-                _ = c.close(entry.pid_fd); // EOF without data or hard error.
-                entry.pid_fd = -1;
-            }
-        }
-
-        if (entry.exec_fd >= 0) {
-            var sentinel: u8 = 0;
-            const ne = c.read(entry.exec_fd, &sentinel, 1);
-            if (ne == 0) {
-                // EOF: exec succeeded — register the spawn.
-                if (entry.spawn_ws) |ws| {
-                    const pid_u32: u32 = if (entry.grandchild > 0) @intCast(entry.grandchild) else 0;
-                    window.registerSpawn(ws, pid_u32);
+        if (entry.spawn_fd >= 0) {
+            const n = c.read(entry.spawn_fd, &entry.buf[entry.len], entry.buf.len - entry.len);
+            if (n > 0) {
+                entry.len += @intCast(n);
+                if (entry.len == entry.buf.len) {
+                    // Buffer full: both possible messages have necessarily
+                    // arrived already — no need to wait for EOF too.
+                    _ = c.close(entry.spawn_fd);
+                    entry.spawn_fd = -1;
                 }
-                _ = c.close(entry.exec_fd);
-                removePending(i);
-                continue;
-            } else if (ne == 1) {
-                // Sentinel: exec failed — skip registerSpawn.
-                _ = c.close(entry.exec_fd);
-                removePending(i);
-                continue;
-            } else if (ne < 0 and std.posix.errno(ne) == .AGAIN) {
-                // Not exec'd yet — retry next call.
+            } else if (n < 0 and std.posix.errno(n) == .AGAIN) {
+                // Not ready yet — retry on the next call.
             } else {
-                // Hard read error — treat as exec failure.
-                _ = c.close(entry.exec_fd);
-                removePending(i);
-                continue;
+                // EOF (n == 0) or a hard read error: conversation is over.
+                _ = c.close(entry.spawn_fd);
+                entry.spawn_fd = -1;
             }
         }
 
-        i += 1;
+        if (entry.spawn_fd >= 0) {
+            i += 1;
+            continue;
+        }
+
+        finishSpawn(entry);
+        removePending(i);
+    }
+}
+
+/// Classifies a fully-drained spawn-pipe conversation and, on success,
+/// registers the spawn for workspace routing.
+///
+/// The intermediate child always sends a PID_MSG_LEN-byte TAG_PID message
+/// (tag + c_int, one atomic write()); the grandchild sends a single
+/// TAG_FAILED byte only if execvp() fails (also atomic). These come from two
+/// independently-scheduled processes, so they can arrive in either order —
+/// but neither write can be torn or interleaved with the other, since both
+/// are far under PIPE_BUF. That means finding a TAG_FAILED byte anywhere in
+/// the buffer is a reliable failure signal regardless of which message
+/// landed first, and an empty buffer (immediate EOF) means the second
+/// fork() itself never completed.
+fn finishSpawn(entry: *PendingSpawn) void {
+    const data = entry.buf[0..entry.len];
+
+    var grandchild: c_int = -1;
+    var failed = data.len == 0;
+
+    var idx: usize = 0;
+    while (idx < data.len) {
+        switch (data[idx]) {
+            TAG_PID => {
+                if (idx + PID_MSG_LEN > data.len) {
+                    failed = true;
+                    break;
+                }
+                grandchild = std.mem.bytesToValue(c_int, data[idx + 1 ..][0..@sizeOf(c_int)]);
+                idx += PID_MSG_LEN;
+            },
+            TAG_FAILED => {
+                failed = true;
+                idx += 1;
+            },
+            else => {
+                failed = true;
+                break;
+            },
+        }
+    }
+
+    if (!failed) {
+        if (entry.spawn_ws) |ws| {
+            const pid_u32: u32 = if (grandchild > 0) @intCast(grandchild) else 0;
+            window.registerSpawn(ws, pid_u32);
+        }
     }
 }
 

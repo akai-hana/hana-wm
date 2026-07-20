@@ -272,7 +272,8 @@ pub fn updateDrag(x: i16, y: i16) void {
             // and moving on each axis, so:
             //
             //   • While the cursor is on the same side as the original corner
-            //     the behaviour is identical to the old per-corner code.
+            //     the drag behaves the same as simple corner-anchored
+            //     resizing.
             //
             //   • When the cursor crosses the anchor horizontally the
             //     left/right roles swap automatically — the window begins

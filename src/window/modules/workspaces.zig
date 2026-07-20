@@ -108,11 +108,11 @@ fn layoutFromName(name: []const u8) TilingLayout {
 /// Initializes global workspace state.  Returns error.OutOfMemory if the
 /// workspace slice cannot be allocated; callers should treat this as fatal.
 pub fn init() !void {
-    // Runtime equivalent of the old has_workspaces build flag: collapse to a
-    // single implicit workspace. Every switch/tag/move action already
-    // no-ops on an out-of-range target (see the `target_ws >= s.workspaces.len`
-    // guards below), so this one line reproduces the old "absent" behavior
-    // without any further branching elsewhere.
+    // When workspaces are disabled, collapse to a single implicit workspace.
+    // Every switch/tag/move action already no-ops on an out-of-range target
+    // (see the `target_ws >= s.workspaces.len` guards below), so this one
+    // line reproduces the "disabled" behavior without any further branching
+    // elsewhere.
     const cs = core.getState();
     const count = if (cs.config.workspaces.enabled) cs.config.workspaces.count else 1;
     const wss = try cs.alloc.alloc(Workspace, count);
@@ -604,8 +604,10 @@ pub fn isManaged(win: u32) bool {
 // the grab body is entirely fire-and-forget:
 //
 //   Pre-grab  (no grab held):
-//     1. prefetchAndSaveWindowGeometries — fires + drains xcb_get_geometry
-//        cookies for floating windows leaving the old workspace.
+//     1. prefetchAndSaveWindowGeometries — trusts the existing tiling geometry
+//        cache for floating windows leaving the old workspace, only falling
+//        back to a live xcb_get_geometry round-trip for the rare window with
+//        no cache entry yet.
 //     2. xcb_query_pointer + xcb_query_pointer_reply — pointer position for
 //        post-switch focus targeting.
 //
@@ -618,58 +620,47 @@ pub fn isManaged(win: u32) bool {
 //     6. bar.raiseBar / bar.redrawInsideGrab — fire-and-forget, no replies.
 //     7. ungrabAndFlush — the single intended flush.
 
-/// Pre-grab geometry prefetch.
+/// Pre-grab geometry save.
 ///
-/// Fires xcb_get_geometry for every floating window that is about to be hidden
-/// (on workspace `ws`, NOT visible on `new_ws`) and drains all replies,
-/// saving the results via window.saveWindowGeom.
+/// Floating windows are placed via floating.tileWithOffset and moved via
+/// drag.zig, both of which already write the resulting rect into the shared
+/// tiling geometry cache (window.saveWindowGeom / tiling.getWindowGeom) as
+/// they happen. That cache is therefore already trustworthy for the common
+/// case, the same way fullscreen.zig's fetchWindowGeom trusts it as a fast
+/// path — so there is nothing left to save for a window that already has a
+/// valid cached rect.
 ///
-/// Must be called before xcb_grab_server so that all reply round-trips complete
-/// before the atomic grab body begins — the grab body must be entirely
-/// fire-and-forget to prevent the compositor from observing partial states.
+/// This only issues a live xcb_get_geometry round-trip for the rare window
+/// that reaches a workspace switch with no cache entry yet (e.g. one that
+/// hasn't been through float placement), saving the result via
+/// window.saveWindowGeom so it survives being pushed offscreen.
+///
+/// Must be called before xcb_grab_server: any round-trip taken on the
+/// cache-miss path must complete before the atomic grab body begins — the
+/// grab body must be entirely fire-and-forget to prevent the compositor from
+/// observing partial states.
 fn prefetchAndSaveWindowGeometries(ws: *const Workspace, new_ws: u8) void {
-    // TODO: replace the fixed-size stack buffer with a heap-allocated slice
-    // (e.g. std.ArrayListUnmanaged) so that workspaces with more than MAX_FLOAT
-    // floating windows do not silently lose geometry on switch.  The warning
-    // below fires only once per call, so subsequent switches with excess windows
-    // also degrade without any further diagnostic.
-    const MAX_FLOAT = 64;
-    const GeomEntry = struct { win: u32, cookie: xcb.xcb_get_geometry_cookie_t };
-    var pending: [MAX_FLOAT]GeomEntry = undefined;
-    var pending_n: usize = 0;
-    var cap_warned = false;
-
     const conn = core.getState().conn;
     const bit = tracking.workspaceBit(ws.id);
     for (tracking.allWindows()) |entry| {
         const win = entry.win;
         if (entry.mask & bit == 0) continue;
         if (tracking.isWindowOnWorkspace(win, new_ws)) continue; // stays visible
-        if (!tiling.isWindowActiveTiled(win) and !isMinimized(win)) {
-            if (pending_n < MAX_FLOAT) {
-                pending[pending_n] = .{ .win = win, .cookie = xcb.xcb_get_geometry(conn, win) };
-                pending_n += 1;
-            } else if (!cap_warned) {
-                debug.warn("prefetchAndSaveWindowGeometries: geometry-save cap ({d}) reached; " ++
-                    "additional floating windows will not have geometry saved", .{MAX_FLOAT});
-                cap_warned = true;
-            }
-        }
-    }
+        if (tiling.isWindowActiveTiled(win) or isMinimized(win)) continue;
 
-    // Drain all replies.  The X server processes these in parallel with
-    // whatever else the CPU is doing (focus state, tiling bookkeeping) so
-    // the round-trips overlap well with pre-grab housekeeping.
-    for (pending[0..pending_n]) |e| {
-        if (xcb.xcb_get_geometry_reply(conn, e.cookie, null)) |geom| {
-            defer std.c.free(geom);
-            window.saveWindowGeom(e.win, .{
-                .x = geom.*.x,
-                .y = geom.*.y,
-                .width = geom.*.width,
-                .height = geom.*.height,
-            });
-        }
+        // Cache-first: a valid rect here already reflects the window's
+        // real on-screen position, so there's nothing to do.
+        if (tiling.getWindowGeom(win) != null) continue;
+
+        // Cache miss: fall back to a single live round-trip.
+        const reply = xcb.xcb_get_geometry_reply(conn, xcb.xcb_get_geometry(conn, win), null) orelse continue;
+        defer std.c.free(reply);
+        window.saveWindowGeom(win, .{
+            .x = reply.*.x,
+            .y = reply.*.y,
+            .width = reply.*.width,
+            .height = reply.*.height,
+        });
     }
 }
 

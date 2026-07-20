@@ -76,14 +76,10 @@ fn tileRegion(
         const rect = utils.Rect{
             .x = @intCast(x),
             .y = @intCast(y),
-            .width = if (w > b2) w - b2 else constants.MIN_WINDOW_DIM,
-            .height = if (h > b2) h - b2 else constants.MIN_WINDOW_DIM,
+            .width = layouts.shrinkClamped(w, b2),
+            .height = layouts.shrinkClamped(h, b2),
         };
-        if (ctx.defer_win == windows[0]) {
-            deferred_rect.* = rect;
-        } else {
-            layouts.configureWithHints(ctx, windows[0], rect);
-        }
+        layouts.emitOrDefer(ctx, windows[0], rect, deferred_rect);
         return;
     }
 

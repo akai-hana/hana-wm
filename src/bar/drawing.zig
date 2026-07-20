@@ -92,8 +92,8 @@ inline fn unpackColorChannel(color: u32, shift: u5) f64 {
 }
 
 /// Set the Cairo source color from a packed 0xRRGGBB u32 at full opacity.
-/// Consolidates the three-channel unpack that was previously open-coded in
-/// DrawContext.setColor and CarouselPixmap.render.
+/// Consolidates the three-channel unpack shared by DrawContext.setColor and
+/// CarouselPixmap.render.
 inline fn setCairoColor(ctx: *c.cairo_t, color: u32) void {
     c.cairo_set_source_rgba(
         ctx,
