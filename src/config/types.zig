@@ -282,9 +282,9 @@ fn freeStringList(list: *std.ArrayList([]const u8), allocator: std.mem.Allocator
 pub const BarConfig = struct {
     enabled: bool = true,
 
-    /// Runtime equivalent of the old `has_vim` build flag. true = full vim
-    /// modal editing in the prompt; false = basic single-line editing
-    /// (arrows, Home/End, Backspace/Delete) via the existing fallback path.
+    /// true = full vim modal editing in the prompt; false = basic
+    /// single-line editing (arrows, Home/End, Backspace/Delete) via the
+    /// existing fallback path.
     vim_mode: bool = true,
 
     bar_position: BarScreenPosition = .top,
@@ -405,7 +405,6 @@ pub const Rule = struct {
 };
 
 pub const WorkspaceConfig = struct {
-    /// Runtime equivalent of the old `has_workspaces` build flag.
     /// When false, every window lives on a single implicit workspace and
     /// all workspace-switching keybindings/actions are no-ops.
     enabled: bool = true,
@@ -427,8 +426,7 @@ pub const Config = struct {
     workspaces: WorkspaceConfig = .{},
     bar: BarConfig = .{},
 
-    /// Runtime equivalents of the old has_fullscreen / has_minimize / has_drag
-    /// build flags. Each subsystem is still fully compiled in; these just gate
+    /// Each subsystem is always fully compiled in; these flags just gate
     /// whether its behavior (and keybindings/actions that drive it) is active.
     fullscreen_enabled: bool = true,
     minimize_enabled: bool = true,

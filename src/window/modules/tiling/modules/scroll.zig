@@ -43,7 +43,7 @@ pub fn tileWithOffset(
     state.scroll.offset = std.math.clamp(state.scroll.offset, 0, max_off);
     const scroll: i32 = state.scroll.offset;
 
-    const content_h: u16 = calcContentH(screen_h, m);
+    const content_h: u16 = layouts.shrinkClamped(screen_h, m.gap *| 2 +| m.border *| 2);
     const win_y: i32 = @as(i32, @intCast(y_offset)) + @as(i32, @intCast(m.gap));
 
     // Full gap at screen edges; half-gap at interior slot boundaries so that
@@ -86,11 +86,7 @@ pub fn tileWithOffset(
                 .width = content_w,
                 .height = content_h,
             };
-            if (ctx.defer_win == win) {
-                deferred_rect = rect;
-            } else {
-                layouts.configureWithHints(ctx, win, rect);
-            }
+            layouts.emitOrDefer(ctx, win, rect, &deferred_rect);
             continue;
         }
 
@@ -100,17 +96,7 @@ pub fn tileWithOffset(
             .width = content_w,
             .height = content_h,
         };
-        if (ctx.defer_win == win) {
-            deferred_rect = rect;
-        } else {
-            layouts.configureWithHints(ctx, win, rect);
-        }
+        layouts.emitOrDefer(ctx, win, rect, &deferred_rect);
     }
     if (deferred_rect) |rect| layouts.configureWithHints(ctx, ctx.defer_win.?, rect);
-}
-
-/// Height of each window: full screen height minus top + bottom gap and borders.
-inline fn calcContentH(screen_h: u16, m: utils.Margins) u16 {
-    const overhead = m.gap *| 2 +| m.border *| 2;
-    return if (screen_h > overhead) screen_h - overhead else constants.MIN_WINDOW_DIM;
 }

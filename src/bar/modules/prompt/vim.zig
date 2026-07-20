@@ -225,7 +225,6 @@ pub const VimState = struct {
 
     /// Reset all editing state for a new editing session, preserving heap
     /// allocations (buf, yank_buf, undo/redo entries, etc.).
-    /// Equivalent to the old `resetVimEditing` in prompt.zig.
     pub fn reset(vs: *VimState) void {
         const allocator = vs.allocator;
         const max_input = vs.max_input;

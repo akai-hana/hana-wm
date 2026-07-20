@@ -73,7 +73,6 @@ pub fn main() !void {
     }
     defer if (core.getState().config.bar.enabled) bar.deinit();
 
-    bar.updateTimerState();
     _ = xcb.xcb_flush(x.conn);
     debug.info("hana booted up successfully!", .{});
 

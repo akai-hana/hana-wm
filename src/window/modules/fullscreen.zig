@@ -74,7 +74,7 @@ fn resetState() void {
 
 /// Consume an intern-atom cookie and return the resulting atom,
 /// or XCB_ATOM_NONE if the reply is null. Centralises the consume-assign-free
-/// pattern that was previously repeated for each atom in init().
+/// pattern shared by every atom lookup in init().
 fn internAtom(cookie: xcb.xcb_intern_atom_cookie_t) xcb.xcb_atom_t {
     const r = xcb.xcb_intern_atom_reply(core.getState().conn, cookie, null) orelse
         return xcb.XCB_ATOM_NONE;

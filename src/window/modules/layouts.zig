@@ -200,10 +200,11 @@ pub const Region = struct {
 /// do not depend on module-level globals, making their dependencies explicit
 /// and their behaviour independently verifiable.
 ///
-/// Border-color updates are no longer threaded through this struct: colors
-/// are refreshed in a dedicated pass after the layout runs (see `tiling.zig`'s
-/// `updateBorders`). `border_width` is gone too — reloadConfig now sends it
-/// as an explicit, separate XCB request rather than smuggling it through here.
+/// Border-color updates are not threaded through this struct: colors are
+/// refreshed in a dedicated pass after the layout runs (see `tiling.zig`'s
+/// `updateBorders`). `border_width` isn't carried here either — reloadConfig
+/// sends it as an explicit, separate XCB request rather than smuggling it
+/// through here.
 pub const LayoutCtx = struct {
     conn: *xcb.xcb_connection_t,
     /// Pointer into tiling.State.cache. Always non-null during a retile pass.
@@ -231,11 +232,44 @@ pub inline fn rectsEqual(a: utils.Rect, b: utils.Rect) bool {
     return a.x == b.x and a.y == b.y and a.width == b.width and a.height == b.height;
 }
 
+/// Sends `rect` for `win` immediately via `configureWithHints`, unless `win`
+/// is the window named by `ctx.defer_win` — in which case the rect is
+/// stashed into `deferred_rect` for the caller to send once, after every
+/// other window in this retile pass (see `LayoutCtx.defer_win` for why this
+/// exists: it eliminates swap_master's one-frame wallpaper gap).
+///
+/// Shared by every tiling layout that honours `defer_win`, instead of each
+/// layout carrying its own copy — fibonacci, master, grid, leaf, and scroll
+/// would otherwise each need a local or inline re-derivation of the same
+/// check.
+pub inline fn emitOrDefer(ctx: *const LayoutCtx, win: u32, rect: utils.Rect, deferred_rect: *?utils.Rect) void {
+    if (ctx.defer_win == win) {
+        deferred_rect.* = rect;
+    } else {
+        configureWithHints(ctx, win, rect);
+    }
+}
+
+/// Shrinks `dim` by `margin` (gap and/or border allowance), floored to
+/// `constants.MIN_WINDOW_DIM` so a layout never hands a client a zero or
+/// negative size when margins exceed the available space.
+///
+/// Shared by every tiling layout that turns a slot dimension into window
+/// content size, instead of each layout defining its own copy of the
+/// identical `if (dim > margin) dim - margin else MIN_WINDOW_DIM` check under
+/// a different name — as master's `calcInnerWidth`, grid's
+/// `cellToWindowSize`, scroll's `calcContentH`, or an inline re-derivation in
+/// leaf, monocle, and fibonacci's overflow path.
+pub inline fn shrinkClamped(dim: u16, margin: u16) u16 {
+    return if (dim > margin) dim - margin else constants.MIN_WINDOW_DIM;
+}
+
 /// Shared implementation for configureWithHints and configureWithHintsAndRaise.
 ///
 /// `raise` is a comptime bool — the compiler eliminates the dead branch, so
-/// codegen is identical to the previous two-function approach with zero runtime
-/// cost. The two public entry points are thin wrappers that instantiate this.
+/// codegen has zero runtime cost despite the two public entry points sharing
+/// one implementation. Those entry points are thin wrappers that instantiate
+/// this.
 fn configureWithHintsImpl(comptime raise: bool, ctx: *const LayoutCtx, win: u32, rect: utils.Rect) void {
     // Single probe: gop.value_ptr.hints holds any cached WM_NORMAL_HINTS
     // constraints alongside the geometry and border dedup data.
@@ -277,9 +311,9 @@ fn configureWithHintsImpl(comptime raise: bool, ctx: *const LayoutCtx, win: u32,
 }
 
 /// Apply geometry to `win`, clamped to its WM_NORMAL_HINTS constraints.
-/// Skips the XCB round-trip when the rect is unchanged. Border color is no
-/// longer updated here — call `tiling.zig`'s border-refresh pass after the
-/// layout has run.
+/// Skips the XCB round-trip when the rect is unchanged. Border color is
+/// refreshed in a separate pass — call `tiling.zig`'s border-refresh pass
+/// after the layout has run.
 pub fn configureWithHints(ctx: *const LayoutCtx, win: u32, rect: utils.Rect) void {
     configureWithHintsImpl(false, ctx, win, rect);
 }
@@ -303,8 +337,8 @@ pub fn configureWithHintsAndRaise(ctx: *const LayoutCtx, win: u32, rect: utils.R
 /// dragged to), so this makes tiling consistent with floating behaviour.
 ///
 /// Pass 2 (resize-increment snap) is retained so terminal emulators still
-/// snap to whole character cells; the base is 0 rather than min_width since
-/// we are no longer enforcing the declared minimum.
+/// snap to whole character cells; the base is 0 rather than min_width,
+/// matching pass 1's decision not to enforce the declared minimum.
 fn applyHintsToRect(rect: utils.Rect, h: SizeHints) utils.Rect {
     if (isEmptySizeHints(h)) return rect; // fast path for unconstrained windows
     var w: u16 = rect.width;

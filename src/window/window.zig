@@ -61,10 +61,11 @@ const MAX_WINDOW_TREE_DEPTH = constants.MAX_WINDOW_TREE_DEPTH;
 // Lives here (window.zig) because it is exclusively accessed by this module.
 //
 // Implemented as a module-level std.ArrayListUnmanaged so there is one logical
-// allocation rather than two (the old design heap-allocated a SpawnQueue node
-// that itself heap-allocated its backing slice, plus stored a redundant alloc
-// field).  The allocator is stored once at module level (g_alloc) and used for
-// both the spawn queue and any other window-module lifetime allocations.
+// allocation rather than two: a heap-allocated node with its own
+// heap-allocated backing slice, plus a redundant alloc field, would cost an
+// extra allocation for no benefit.  The allocator is stored once at module
+// level (g_alloc) and used for both the spawn queue and any other
+// window-module lifetime allocations.
 //
 // The list is capped at SPAWN_QUEUE_CAP entries.  Exceeding the cap logs an
 // error and drops the entry; it never terminates the process.
@@ -202,11 +203,22 @@ pub fn getGeometry(conn: *xcb.xcb_connection_t, win: u32) ?utils.Rect {
 //
 // Keyed by window ID; populated at map time via `populateFocusCacheFromCookies`.
 // Invalidated on WM_PROTOCOLS/WM_HINTS `PropertyNotify` and on window destruction.
-// Keeps the `setFocus` hot path and close-window path free of blocking X11 round-trips
-// for all windows that were seen at map time.
 //
-// `InputModel` (focus routing) and `wm_delete` (close protocol) are both derived from
-// WM_PROTOCOLS, so they are populated together in a single scan.
+// Only half of the ICCCM focus-delivery split lives in this cache:
+//   accepts_input — from WM_HINTS.input. Cached, mirroring dwm's `c->neverfocus`.
+//   wm_delete     — WM_DELETE_WINDOW support from WM_PROTOCOLS. Also cached,
+//                   for the close-window path, and populated in the same scan
+//                   as accepts_input's WM_PROTOCOLS-derived sibling below.
+//
+// WM_TAKE_FOCUS support (the other half of InputModel) is deliberately NOT
+// cached here — see getInputModel() below for why. This is what let a real
+// bug happen once: PropertyNotify-driven invalidation of the old cached
+// model could be missed if WM_PROTOCOLS was set before the WM's event mask
+// was in place, leaving a stale `passive` verdict for a window that actually
+// supported WM_TAKE_FOCUS, for the life of the window. Not caching that half
+// at all makes that failure mode structurally impossible rather than
+// something that has to be remembered to invalidate correctly.
+//
 // See the flat-array implementation below for rationale over AutoHashMap.
 
 /// The four ICCCM focus delivery modes (§4.1.7), determined by the combination of
@@ -218,10 +230,14 @@ pub const InputModel = enum {
     globally_active, // input=False, WM_TAKE_FOCUS:    only send protocol
 };
 
-/// Per-window focus properties derived from WM_PROTOCOLS and WM_HINTS,
-/// stored together since both are populated in a single WM_PROTOCOLS scan.
+/// Per-window properties cached from WM_HINTS and WM_PROTOCOLS.
+///
+/// `accepts_input` (WM_HINTS.input) and `wm_delete` (WM_DELETE_WINDOW support)
+/// are cached because both are cheap to keep in sync via PropertyNotify and
+/// rarely change post-map. WM_TAKE_FOCUS support is intentionally excluded —
+/// see the section comment above and getInputModel() below.
 const CachedProps = struct {
-    model: InputModel,
+    accepts_input: bool,
     wm_delete: bool,
 };
 
@@ -241,26 +257,35 @@ const CacheSlot = struct {
     props: CachedProps,
 };
 
-var cache_slots: [MAX_WINDOW_CACHE]CacheSlot = undefined;
-var cache_len: usize = 0;
+var cache_slots: utils.BoundedList(CacheSlot, MAX_WINDOW_CACHE) = .{};
 var cache_ready: bool = false;
+
+fn matchCacheSlotId(win: u32, slot: CacheSlot) bool {
+    return slot.id == win;
+}
 
 /// Initializes the per-window focus property cache.
 /// No allocator required — the backing store is a module-level static array.
 pub fn initInputModelCache() void {
-    cache_len = 0;
+    cache_slots.clear();
     cache_ready = true;
 }
 
 /// Cleans up the per-window focus property cache.
 pub fn deinitInputModelCache() void {
-    cache_len = 0;
+    cache_slots.clear();
     cache_ready = false;
 }
 
-/// Consumes pre-fired WM_PROTOCOLS and WM_HINTS cookies and stores the result.
-/// The caller fires the cookies immediately after xcb_map_window so the server
-/// processes property requests in parallel with the map.
+/// Consumes WM_PROTOCOLS and WM_HINTS cookies and stores the result.
+/// Called from handleMapRequest, which fires both cookies synchronously
+/// (one right before this call) since MapRequest is a one-time event per
+/// window, not a hot path worth pipelining.
+///
+/// The WM_PROTOCOLS reply is still scanned for WM_TAKE_FOCUS here (via
+/// `focus_atoms.take_focus`, folded into the same single-pass scan as
+/// WM_DELETE_WINDOW) but that half of the result is discarded rather than
+/// cached — see getInputModel() for why.
 pub fn populateFocusCacheFromCookies(
     conn: *xcb.xcb_connection_t,
     win: u32,
@@ -275,7 +300,8 @@ pub fn populateFocusCacheFromCookies(
         return;
     };
 
-    // Scan WM_PROTOCOLS once for both atoms (no second round-trip).
+    // Scan WM_PROTOCOLS once for both atoms (no second round-trip); only
+    // .wm_delete gets cached below.
     const protocols_result = protocols: {
         const r = xcb.xcb_get_property_reply(conn, protocols_cookie, null) orelse break :protocols WMProtocolsProps{};
         defer std.c.free(r);
@@ -284,10 +310,8 @@ pub fn populateFocusCacheFromCookies(
         break :protocols scanProtocolAtoms(raw[0..@intCast(r.*.value_len)], focus_atoms.take_focus, focus_atoms.wm_delete);
     };
 
-    const accepts_input = extractWMHintsInput(conn, hints_cookie);
-
     putCachedProps(win, .{
-        .model = inputModelFrom(protocols_result.take_focus, accepts_input),
+        .accepts_input = extractWMHintsInput(conn, hints_cookie),
         .wm_delete = protocols_result.wm_delete,
     });
 }
@@ -331,22 +355,14 @@ fn extractWMHintsInput(
 /// Swap-remove keeps the live region dense so subsequent scans stay short.
 pub inline fn uncacheWindowFocusProps(win: u32) void {
     if (!cache_ready) return;
-    for (cache_slots[0..cache_len], 0..) |slot, i| {
-        if (slot.id == win) {
-            cache_len -= 1;
-            cache_slots[i] = cache_slots[cache_len];
-            return;
-        }
-    }
+    if (cache_slots.indexOf(win, matchCacheSlotId)) |i| cache_slots.swapRemove(i);
 }
 
 /// Returns the cached focus properties for `win`, or null on a cache miss.
 inline fn getCachedProps(win: u32) ?CachedProps {
     if (!cache_ready) return null;
-    for (cache_slots[0..cache_len]) |slot| {
-        if (slot.id == win) return slot.props;
-    }
-    return null;
+    const i = cache_slots.indexOf(win, matchCacheSlotId) orelse return null;
+    return cache_slots.items[i].props;
 }
 
 /// Inserts or updates the cache entry for `win`.
@@ -354,37 +370,58 @@ inline fn getCachedProps(win: u32) ?CachedProps {
 /// Silently drops the entry when the cache is full — the live-query fallback is always correct.
 fn putCachedProps(win: u32, props: CachedProps) void {
     if (!cache_ready) return;
-    for (cache_slots[0..cache_len]) |*slot| {
-        if (slot.id == win) {
-            slot.props = props;
-            return;
-        }
+    if (cache_slots.indexOf(win, matchCacheSlotId)) |i| {
+        cache_slots.items[i].props = props;
+        return;
     }
-    if (cache_len < MAX_WINDOW_CACHE) {
-        cache_slots[cache_len] = .{ .id = win, .props = props };
-        cache_len += 1;
-    } else {
+    if (!cache_slots.append(.{ .id = win, .props = props })) {
         debug.warn("Focus cache full, falling back to live queries", .{});
     }
 }
 
-/// Runs both WM_PROTOCOLS and WM_HINTS queries, stores the result, and returns it.
+/// Runs both WM_PROTOCOLS and WM_HINTS queries, stores the result (accepts_input
+/// + wm_delete only — see CachedProps), and returns it.
 /// Used by cache-miss paths so the populate logic lives in exactly one place.
-fn queryAndCacheProps(conn: *xcb.xcb_connection_t, win: u32) CachedProps {
-    const protocols_props = queryWMProtocolsProps(conn, win);
+/// Cache misses are expected to be extremely rare (every window is populated
+/// at map time), so the fact that this issues its own WM_PROTOCOLS round trip
+/// even though getInputModel() below will immediately issue another one for
+/// the live take_focus check is not worth optimizing away.
+pub fn queryAndCacheProps(conn: *xcb.xcb_connection_t, win: u32) CachedProps {
     const props = CachedProps{
-        .model = inputModelFrom(protocols_props.take_focus, queryWMHintsAcceptsInput(conn, win)),
-        .wm_delete = protocols_props.wm_delete,
+        .accepts_input = queryWMHintsAcceptsInput(conn, win),
+        .wm_delete = queryWMProtocolsProps(conn, win).wm_delete,
     };
     putCachedProps(win, props);
     return props;
 }
 
-/// Returns the cached InputModel, falling back to a live query on miss.
-/// On the hover-focus hot path this should always be a cache hit.
-pub fn getInputModelCached(conn: *xcb.xcb_connection_t, win: u32) InputModel {
-    if (getCachedProps(win)) |props| return props.model;
-    return queryAndCacheProps(conn, win).model;
+/// Resolves the ICCCM §4.1.7 focus-delivery model for `win`, composing two
+/// independent checks rather than trusting one fully-cached enum — matching
+/// dwm's split exactly:
+///
+///   • accepts_input (WM_HINTS.input) — read from the cache above, falling
+///     back to a live query only on a miss. Mirrors dwm's cached
+///     `c->neverfocus`.
+///   • supports_take_focus (WM_TAKE_FOCUS in WM_PROTOCOLS) — always queried
+///     live against the X server, on every call, no caching at all. Mirrors
+///     dwm's sendevent(), which re-runs XGetWMProtocols fresh every time
+///     rather than trusting a stored flag.
+///
+/// Focus changes are human-triggered and infrequent, so the extra round trip
+/// for the live half is not perceptible — and it removes a real bug class:
+/// a cached WM_TAKE_FOCUS bit can only go stale if every property-change path
+/// remembers to invalidate it, which this codebase already got wrong once
+/// (see the section comment above CachedProps). A value that is never cached
+/// cannot go stale.
+pub fn getInputModel(conn: *xcb.xcb_connection_t, win: u32) InputModel {
+    const accepts_input = if (getCachedProps(win)) |props|
+        props.accepts_input
+    else
+        queryAndCacheProps(conn, win).accepts_input;
+
+    const supports_take_focus = queryWMProtocolsProps(conn, win).take_focus;
+
+    return inputModelFrom(supports_take_focus, accepts_input);
 }
 
 /// Returns true if `win` declared WM_DELETE_WINDOW support at map time.
@@ -616,33 +653,30 @@ const CHILD_CACHE_CAP: usize = 64;
 
 const ChildEntry = struct { child: u32, managed: u32 };
 
-var child_cache: [CHILD_CACHE_CAP]ChildEntry = undefined;
-var child_cache_len: usize = 0;
+var child_cache: utils.BoundedList(ChildEntry, CHILD_CACHE_CAP) = .{};
+
+fn matchChildEntry(child: u32, e: ChildEntry) bool {
+    return e.child == child;
+}
 
 /// Record that `child` resolves to `managed` so future tree walks are skipped.
 fn cacheChildWindow(child: u32, managed: u32) void {
     if (child == managed) return; // direct hit — not a child, nothing to cache
-    for (child_cache[0..child_cache_len]) |*e| {
-        if (e.child == child) {
-            e.managed = managed;
-            return;
-        } // update in place
+    if (child_cache.indexOf(child, matchChildEntry)) |i| {
+        child_cache.items[i].managed = managed; // update in place
+        return;
     }
-    if (child_cache_len < CHILD_CACHE_CAP) {
-        child_cache[child_cache_len] = .{ .child = child, .managed = managed };
-        child_cache_len += 1;
-    }
-    // At cap: silently drop — the tree walk fallback is always correct.
+    // At cap, append silently drops — the tree walk fallback is always correct.
+    _ = child_cache.append(.{ .child = child, .managed = managed });
 }
 
 /// Remove all entries whose managed toplevel is `managed_win`.
 /// Called from unmanageWindow so stale child entries don't linger.
 pub fn evictChildCache(managed_win: u32) void {
     var i: usize = 0;
-    while (i < child_cache_len) {
-        if (child_cache[i].managed == managed_win) {
-            child_cache_len -= 1;
-            child_cache[i] = child_cache[child_cache_len];
+    while (i < child_cache.len) {
+        if (child_cache.items[i].managed == managed_win) {
+            child_cache.swapRemove(i);
         } else {
             i += 1;
         }
@@ -654,21 +688,20 @@ pub fn evictChildCache(managed_win: u32) void {
 /// rendering, so button events may arrive on a child rather than the managed parent.
 ///
 /// Fast path: checks the child-window cache first. On a hit, returns the cached
-/// managed ancestor with zero XCB calls — eliminating the 2–3 blocking
-/// xcb_query_tree round-trips that previously fired on every hover over an
-/// Electron/Qt child window.
+/// managed ancestor with zero XCB calls, avoiding the 2–3 blocking
+/// xcb_query_tree round-trips that a full tree walk on every hover over an
+/// Electron/Qt child window would otherwise cost.
 pub fn findManagedWindow(conn: *xcb.xcb_connection_t, win: u32, is_managed: *const fn (u32) bool) u32 {
     // Fast path: direct managed window (most common case — no child involved).
     if (is_managed(win)) return win;
 
     // Fast path: child-window cache hit (common for Electron/Qt after first hover).
-    for (child_cache[0..child_cache_len]) |e| {
-        if (e.child == win) {
-            // Validate: if the cached managed window was since unmanaged (race),
-            // is_managed will return false and we fall through to the tree walk.
-            if (is_managed(e.managed)) return e.managed;
-            break; // stale entry — fall through to tree walk
-        }
+    if (child_cache.indexOf(win, matchChildEntry)) |i| {
+        // Validate: if the cached managed window was since unmanaged (race),
+        // is_managed will return false and we fall through to the tree walk.
+        const managed = child_cache.items[i].managed;
+        if (is_managed(managed)) return managed;
+        // stale entry — fall through to tree walk
     }
 
     // Slow path: walk the X11 window tree. Each iteration is one blocking
@@ -706,7 +739,8 @@ fn populateAtomCache() void {
 /// (Re)build the workspace-rule fast-lookup map from the current config.
 /// Keys are borrowed slices pointing into the config's allocations and remain
 /// valid until the next rebuild.  If a class name appears in multiple rules,
-/// the first rule wins (consistent with the old linear scan).
+/// the first rule wins, matching the semantics of a plain linear scan through
+/// the rule list.
 pub fn buildRulesMap() void {
     const alloc = g_alloc orelse return;
     g_rules_map.clearRetainingCapacity();
@@ -836,17 +870,16 @@ fn findWorkspaceRuleByClass(cookie: xcb.xcb_get_property_cookie_t) ?u8 {
 /// Phase 2 of workspace resolution: matches the window against the spawn queue.
 /// Tries exact PID match first; tracks the earliest daemon-mode (pid==0) entry
 /// as a candidate; falls back to the oldest pending entry.
-/// Returns null when the spawn queue was empty (c_net_wm_pid == null).
+/// The caller only fires `c_net_wm_pid` (and calls this function at all) when
+/// the spawn queue is non-empty, so no empty-queue case is handled here.
 ///
 /// Logs a debug message on both fallback branches so heuristic routing is
 /// visible in debug sessions.
 fn findSpawnQueueWorkspace(
-    c_net_wm_pid: ?xcb.xcb_get_property_cookie_t,
+    c_net_wm_pid: xcb.xcb_get_property_cookie_t,
 ) ?u8 {
-    const pid_cookie = c_net_wm_pid orelse return null;
-
     const win_pid: u32 = pid: {
-        const pid_reply = xcb.xcb_get_property_reply(core.getState().conn, pid_cookie, null) orelse break :pid 0;
+        const pid_reply = xcb.xcb_get_property_reply(core.getState().conn, c_net_wm_pid, null) orelse break :pid 0;
         defer std.c.free(pid_reply);
         if (pid_reply.*.format != 32 or pid_reply.*.value_len < 1) break :pid 0;
         break :pid @as([*]const u32, @ptrCast(@alignCast(xcb.xcb_get_property_value(pid_reply))))[0];
@@ -903,22 +936,29 @@ fn findSpawnQueueWorkspace(
 }
 
 /// Resolves the target workspace for a newly mapped window.
-fn resolveTargetWorkspace(
-    current_ws: u8,
-    c_wm_class: xcb.xcb_get_property_cookie_t,
-    c_net_wm_pid: ?xcb.xcb_get_property_cookie_t,
-) u8 {
+///
+/// MapRequest fires once per window creation, not on every event-loop tick,
+/// so each property below is queried synchronously — fire the request, then
+/// immediately drain the reply — rather than batched into a single pipelined
+/// round-trip. Firing WM_CLASS and _NET_WM_PID only when they're actually
+/// needed (a rule set exists; the spawn queue is non-empty) also means there
+/// is nothing to discard on the paths that don't need them. Pipelining is
+/// reserved for genuinely hot paths, like dragging and retiling, where the
+/// round-trip savings are actually perceptible.
+fn resolveTargetWorkspace(win: u32, current_ws: u8) u8 {
     const cs = core.getState();
-    if (cs.config.workspaces.rules.items.len > 0 and atoms.wm_class != 0) {
-        if (findWorkspaceRuleByClass(c_wm_class)) |target| {
-            if (c_net_wm_pid) |pid_cookie|
-                xcb.xcb_discard_reply(cs.conn, pid_cookie.sequence);
-            return clampToValidWorkspace(target, current_ws);
-        }
-    } else xcb.xcb_discard_reply(cs.conn, c_wm_class.sequence);
 
-    if (findSpawnQueueWorkspace(c_net_wm_pid)) |spawn_ws|
-        return clampToValidWorkspace(spawn_ws, current_ws);
+    if (cs.config.workspaces.rules.items.len > 0 and atoms.wm_class != 0) {
+        const c_wm_class = xcb.xcb_get_property(cs.conn, 0, win, atoms.wm_class, xcb.XCB_ATOM_STRING, 0, 256);
+        if (findWorkspaceRuleByClass(c_wm_class)) |target|
+            return clampToValidWorkspace(target, current_ws);
+    }
+
+    if (g_spawn_queue.items.len > 0) {
+        const c_net_wm_pid = xcb.xcb_get_property(cs.conn, 0, win, atoms.net_wm_pid, xcb.XCB_ATOM_CARDINAL, 0, 1);
+        if (findSpawnQueueWorkspace(c_net_wm_pid)) |spawn_ws|
+            return clampToValidWorkspace(spawn_ws, current_ws);
+    }
 
     return current_ws;
 }
@@ -936,54 +976,24 @@ pub fn registerSpawn(workspace: u8, pid: u32) void {
     };
 }
 
-// Prefetched pointer reply for spawn-crossing suppression.
+// Pointer snapshot for spawn-crossing suppression.
 //
-// The old design fired xcb_query_pointer inside mapWindowToScreen, right
-// before the server grab.  That round-trip added ~1–5 ms of latency between
-// the key-press and the window appearing, because the WM stalled waiting for
-// the X server to reply before it could even start the retile.
-//
-// The new design fires and drains xcb_query_pointer in executeShellCommand —
-// at the moment the user's key-press is processed — and stores the reply here.
-// mapWindowToScreen picks it up with zero additional latency.  The pointer
-// position may be a few hundred milliseconds staler (the time between
-// key-press and the app's MapRequest), but that is irrelevant for
-// spawn-crossing suppression: we only care whether the cursor was already
-// inside the new window's bounds at the moment it appeared, not at the
-// moment the key was pressed.
+// A previous design prefetched xcb_query_pointer at key-press time (in
+// input.executeShellCommand, immediately after fork()) and stashed the
+// cookie in a module-level variable so mapWindowToScreen could drain it
+// "for free" once the MapRequest arrived — shaving the ~1–5 ms round-trip
+// off the critical path. MapRequest fires once per window creation, not on
+// every event-loop tick, so that round-trip is not perceptible, and the
+// prefetch machinery (a stashed cookie, stale-prefetch discarding, a
+// cross-module call from input.zig) cost more in complexity than it saved
+// in latency. mapWindowToScreen now just fires and drains xcb_query_pointer
+// synchronously, right where the position is needed. Prefetching /
+// caching is reserved for genuinely hot paths — dragging and retiling —
+// where the round-trip savings actually matter.
 
-var g_prefetched_ptr_cookie: ?xcb.xcb_query_pointer_cookie_t = null;
-
-/// Called by input.executeShellCommand immediately after fork().
-/// Fires xcb_query_pointer but does NOT drain the reply.  By the time the
-/// MapRequest arrives (typically hundreds of ms later, during app startup),
-/// the reply is already sitting in the XCB socket buffer, so
-/// takePrefetchedSpawnPointer drains it for free instead of blocking the
-/// key-press handler with a synchronous round-trip.
-pub fn prefetchSpawnPointer() void {
-    const cs = core.getState();
-    // Discard any stale prefetch from a previous spawn that never consumed it
-    // (e.g. the window was routed to a non-current workspace).
-    if (g_prefetched_ptr_cookie) |old| {
-        xcb.xcb_discard_reply(cs.conn, old.sequence);
-        g_prefetched_ptr_cookie = null;
-    }
-    g_prefetched_ptr_cookie = xcb.xcb_query_pointer(cs.conn, cs.root);
-}
-
-/// Consume the prefetched cookie and drain its reply.  Returns null when no
-/// prefetch is available (e.g. the window was opened programmatically).
-/// Caller is responsible for calling std.c.free() on the returned pointer.
-fn takePrefetchedSpawnPointer() ?*xcb.xcb_query_pointer_reply_t {
-    const cookie = g_prefetched_ptr_cookie orelse return null;
-    g_prefetched_ptr_cookie = null;
-    return xcb.xcb_query_pointer_reply(core.getState().conn, cookie, null);
-}
-
-/// Record the cursor position from a pre-drained pointer reply for later
+/// Record the cursor position from a drained pointer reply for later
 /// spawn-crossing suppression checks.  The caller owns the reply memory;
-/// this function only reads from it.  Replaces the old cookie-draining
-/// variant to ensure no implicit XCB flush occurs inside a server grab.
+/// this function only reads from it.
 ///
 /// When `ptr_reply` is null (pointer query failed), the suppression flag is
 /// cleared rather than leaving `spawn_cursor` at its previous value, which
@@ -1001,84 +1011,9 @@ fn snapshotSpawnCursorFromReply(ptr_reply: ?*xcb.xcb_query_pointer_reply_t, supp
     spawn_cursor.y = ptr.*.root_y;
 }
 
-/// Cookies for all requests fired at the start of a MapRequest.
-const PropertyCookies = struct {
-    protocols: xcb.xcb_get_property_cookie_t,
-    hints: xcb.xcb_get_property_cookie_t,
-    normal_hints: xcb.xcb_get_property_cookie_t,
-    wm_class: xcb.xcb_get_property_cookie_t,
-    net_wm_pid: ?xcb.xcb_get_property_cookie_t,
-    /// Pipelined alongside the property requests so the pointer position is
-    /// fetched in the same round-trip.  Consumed by mapWindowToScreen when no
-    /// keybind-time prefetch is available; discarded otherwise.
-    ptr: xcb.xcb_query_pointer_cookie_t,
-};
-
-/// Fires all property requests in a single batch before any blocking work.
-fn firePropertyCookies(win: u32) PropertyCookies {
-    const cs = core.getState();
-    return .{
-        .protocols = xcb.xcb_get_property(
-            cs.conn,
-            0,
-            win,
-            atoms.wm_protocols,
-            xcb.XCB_ATOM_ATOM,
-            0,
-            256,
-        ),
-        .hints = xcb.xcb_get_property(
-            cs.conn,
-            0,
-            win,
-            xcb.XCB_ATOM_WM_HINTS,
-            xcb.XCB_ATOM_WM_HINTS,
-            0,
-            9,
-        ),
-        .normal_hints = xcb.xcb_get_property(
-            cs.conn,
-            0,
-            win,
-            xcb.XCB_ATOM_WM_NORMAL_HINTS,
-            xcb.XCB_ATOM_ANY,
-            0,
-            18,
-        ),
-        .wm_class = xcb.xcb_get_property(
-            cs.conn,
-            0,
-            win,
-            atoms.wm_class,
-            xcb.XCB_ATOM_STRING,
-            0,
-            256,
-        ),
-        // Only fired when the spawn queue is non-empty so the type system
-        // enforces this cookie is never accessed on an idle queue.
-        .net_wm_pid = blk: {
-            if (g_spawn_queue.items.len == 0) break :blk null;
-            break :blk xcb.xcb_get_property(
-                cs.conn,
-                0,
-                win,
-                atoms.net_wm_pid,
-                xcb.XCB_ATOM_CARDINAL,
-                0,
-                1,
-            );
-        },
-        // Pipelined here so the pointer position is included in the same
-        // batch as the property requests.  By the time any reply is drained
-        // (parseSizeHintsIntoCache pays the one round-trip), this reply is
-        // already buffered and mapWindowToScreen can consume it for free.
-        .ptr = xcb.xcb_query_pointer(cs.conn, cs.root),
-    };
-}
-
 /// Map a newly adopted window that is on the current workspace.
 ///
-/// The server grab is now as narrow as possible:
+/// The server grab is as narrow as possible:
 ///
 ///   Before the grab:
 ///     • tiling.addWindow + retileCurrentWorkspace  — sends configure_window
@@ -1086,8 +1021,10 @@ fn firePropertyCookies(win: u32) PropertyCookies {
 ///       is needed before the grab, and running them outside the grab means
 ///       the compositor can composite intermediate frames, reducing perceived
 ///       latency on slow machines.
-///     • Consume the prefetched xcb_query_pointer reply (fired at key-press
-///       time by input.executeShellCommand) — zero cost here.
+///     • xcb_query_pointer, fired and drained synchronously right here — see
+///       the comment above snapshotSpawnCursorFromReply for why this doesn't
+///       need prefetching: MapRequest is a one-time event per window, so the
+///       round-trip isn't perceptible.
 ///
 ///   Inside the grab (atomic, compositor-locked):
 ///     • applyBorderWidth + xcb_map_window + setFocus + border sweep + bar.
@@ -1096,29 +1033,14 @@ fn firePropertyCookies(win: u32) PropertyCookies {
 ///
 /// On weak hardware, retileCurrentWorkspace can take 5–20 ms for a full
 /// workspace.  Moving it outside the grab means the X server and compositor
-/// are not locked for that duration, eliminating the compositor stall that
-/// previously caused visible frame drops on every spawn.
-fn mapWindowToScreen(win: u32, ptr_cookie: xcb.xcb_query_pointer_cookie_t) void {
-    const conn = core.getState().conn;
-    // Drain the pointer position.  Either path is a free buffer read —
-    // no new round-trip is incurred here:
-    //   • keybind spawn:          consume the prefetch cookie fired at key-press
-    //                             time; the reply has been in the XCB buffer since
-    //                             then (during the entire app startup period).
-    //   • programmatic MapRequest: drain the cookie pipelined with the property
-    //                             batch in firePropertyCookies; parseSizeHintsIntoCache
-    //                             already paid the one shared round-trip above.
-    // In both cases the ptr_cookie from the batch is either consumed or discarded
-    // so no sequence number is leaked.
+/// are not locked for that duration, avoiding the compositor stall that
+/// would otherwise cause visible frame drops on every spawn.
+fn mapWindowToScreen(win: u32) void {
+    const cs = core.getState();
+    const conn = cs.conn;
+
     const suppress_reason = focus.getSuppressReason();
-    const ptr_reply: ?*xcb.xcb_query_pointer_reply_t = blk: {
-        if (takePrefetchedSpawnPointer()) |pre| {
-            // Prefetch consumed — discard the redundant batch cookie.
-            xcb.xcb_discard_reply(conn, ptr_cookie.sequence);
-            break :blk pre;
-        }
-        break :blk xcb.xcb_query_pointer_reply(conn, ptr_cookie, null);
-    };
+    const ptr_reply = xcb.xcb_query_pointer_reply(conn, xcb.xcb_query_pointer(conn, cs.root), null);
     defer if (ptr_reply) |r| std.c.free(r);
 
     // ── Outside the grab: expensive layout work ─────────────────────────────
@@ -1171,24 +1093,23 @@ fn registerWindowOffscreen(win: u32) void {
     bar.scheduleRedraw();
 }
 
-fn discardPropertyCookies(cookies: PropertyCookies) void {
-    const conn = core.getState().conn;
-    xcb.xcb_discard_reply(conn, cookies.protocols.sequence);
-    xcb.xcb_discard_reply(conn, cookies.hints.sequence);
-    xcb.xcb_discard_reply(conn, cookies.normal_hints.sequence);
-    xcb.xcb_discard_reply(conn, cookies.wm_class.sequence);
-    if (cookies.net_wm_pid) |c| xcb.xcb_discard_reply(conn, c.sequence);
-    xcb.xcb_discard_reply(conn, cookies.ptr.sequence);
-}
-
+/// Handles a MapRequest by querying the properties it needs one at a time —
+/// fire the request, then immediately drain the reply — rather than batching
+/// every cookie up front the way a hot path (dragging, retiling) would.
+/// MapRequest happens once per window creation, so paying a handful of
+/// separate round-trips instead of one pipelined round-trip is not a
+/// perceptible cost, and querying properties only when they're actually
+/// needed (e.g. WM_NORMAL_HINTS and WM_PROTOCOLS/WM_HINTS only once the
+/// window is confirmed to belong on some workspace) means there's nothing
+/// left over to discard on the early-return error path below.
 pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const win = event.window;
     const conn = core.getState().conn;
 
     // Guard against double-manage: a window can send multiple MapRequest events
     // (e.g. if it unmaps and remaps itself quickly while the WM is still
-    // processing the first).  Without this guard, tiling.addWindow and
-    // firePropertyCookies could fire twice for the same window.
+    // processing the first).  Without this guard, tiling.addWindow and the
+    // property queries below could fire twice for the same window.
     if (tracking.isManaged(win)) return;
 
     // getCurrentWorkspace() returns ?u8; the value is already bounded to [0,255]
@@ -1202,28 +1123,48 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
         &[_]u32{constants.EventMasks.MANAGED_WINDOW},
     );
 
-    const cookies = firePropertyCookies(win);
-    const target_ws = resolveTargetWorkspace(current_ws, cookies.wm_class, cookies.net_wm_pid);
+    const target_ws = resolveTargetWorkspace(win, current_ws);
     const on_current = target_ws == current_ws;
 
     moveWindowToWs(win, target_ws) catch |err| {
         debug.logError(err, win);
-        // xcb_discard_reply is a client-side-only operation — it marks the
-        // sequence numbers as discarded in the XCB reply queue but generates
-        // no XCB output.  Any requests already queued before this early return
-        // will be flushed by the event-loop's end-of-batch xcb_flush.
-        discardPropertyCookies(cookies);
+        // Nothing has been fired yet beyond what resolveTargetWorkspace already
+        // drained, so there is no cookie left to discard here.
         return;
     };
 
-    parseSizeHintsIntoCache(win, cookies.normal_hints);
+    const normal_hints_cookie = xcb.xcb_get_property(
+        conn,
+        0,
+        win,
+        xcb.XCB_ATOM_WM_NORMAL_HINTS,
+        xcb.XCB_ATOM_ANY,
+        0,
+        18,
+    );
+    parseSizeHintsIntoCache(win, normal_hints_cookie);
 
-    populateFocusCacheFromCookies(conn, win, cookies.protocols, cookies.hints);
+    const protocols_cookie = xcb.xcb_get_property(
+        conn,
+        0,
+        win,
+        atoms.wm_protocols,
+        xcb.XCB_ATOM_ATOM,
+        0,
+        256,
+    );
+    const hints_cookie = xcb.xcb_get_property(
+        conn,
+        0,
+        win,
+        xcb.XCB_ATOM_WM_HINTS,
+        xcb.XCB_ATOM_WM_HINTS,
+        0,
+        9,
+    );
+    populateFocusCacheFromCookies(conn, win, protocols_cookie, hints_cookie);
 
-    if (on_current) mapWindowToScreen(win, cookies.ptr) else {
-        xcb.xcb_discard_reply(conn, cookies.ptr.sequence);
-        registerWindowOffscreen(win);
-    }
+    if (on_current) mapWindowToScreen(win) else registerWindowOffscreen(win);
 }
 
 // Unmap / destroy
@@ -1249,12 +1190,12 @@ fn unmanageWindow(win: u32) void {
     evictChildCache(win);
 
     // Fire the pointer query and drain the reply *before* grabbing the
-    // server.  The old code fired the cookie here but drained the reply
-    // inside focusWindowUnderPointer (via xcb_query_pointer_reply), which
-    // caused an implicit XCB output-buffer flush inside the grab — releasing
-    // all queued configure_window / set_input_focus requests to the
-    // compositor before xcb_ungrab_server.  Pre-draining here keeps the
-    // grab atomic.  The pointer position is at most microseconds staler.
+    // server.  Draining the reply inside the grab (e.g. from within
+    // focusWindowUnderPointer via xcb_query_pointer_reply) would trigger an
+    // implicit XCB output-buffer flush inside the grab — releasing all
+    // queued configure_window / set_input_focus requests to the compositor
+    // before xcb_ungrab_server.  Pre-draining here keeps the grab atomic.
+    // The pointer position is at most microseconds staler.
     const ptr_reply: ?*xcb.xcb_query_pointer_reply_t = if (was_focused) blk: {
         const cookie = xcb.xcb_query_pointer(cs.conn, cs.root);
         break :blk xcb.xcb_query_pointer_reply(cs.conn, cookie, null);
@@ -1263,9 +1204,9 @@ fn unmanageWindow(win: u32) void {
 
     _ = xcb.xcb_grab_server(cs.conn);
 
-    // tiling.removeWindow now unconditionally evicts the combined cache entry
-    // (geometry + border + size hints), so the separate evictSizeHints call
-    // that previously existed here is no longer needed.
+    // tiling.removeWindow unconditionally evicts the combined cache entry
+    // (geometry + border + size hints), so no separate evictSizeHints call
+    // is needed here.
     tiling.removeWindow(win);
     minimize.untrackWindow(win);
     wsRemoveWindow(win);
@@ -1400,9 +1341,10 @@ fn sendConfigureNotify(win: u32, geom: WindowGeometry) void {
 ///      (x=0, y=0, width=screen_width, height=screen_height, border_width=0).
 ///      The tiling cache for a fullscreen window is intentionally invalidated on
 ///      enter (so retile skips it), so path 1 misses and we arrive here.
-///      Previously this fell through to the blocking xcb_get_geometry path,
-///      costing one server round-trip per ConfigureRequest — a problem for
-///      video players and screensavers that poll their size continuously.
+///      Handling it directly here avoids falling through to the blocking
+///      xcb_get_geometry path, which would cost one server round-trip per
+///      ConfigureRequest — a problem for video players and screensavers that
+///      poll their size continuously.
 ///
 ///   3. True cache miss — one blocking xcb_get_geometry round-trip.  This should
 ///      only occur for floating windows that have never been retiled and are not
@@ -1521,9 +1463,9 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
 inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
     if (focus.getSuppressReason() != .window_spawn) return false;
     // Consume the suppression flag unconditionally: it is a one-shot guard that
-    // only applies to the first crossing event after a spawn.  Previously the
-    // flag was only cleared when the cursor had moved, which could suppress all
-    // future hover-focus events if the cursor stayed at the exact spawn pixel.
+    // only applies to the first crossing event after a spawn.  Clearing it
+    // only when the cursor had moved would instead suppress all future
+    // hover-focus events if the cursor stayed at the exact spawn pixel.
     focus.setSuppressReason(.none);
     return root_x == spawn_cursor.x and root_y == spawn_cursor.y;
 }
@@ -1619,9 +1561,10 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
 
     if (event.atom != atoms.wm_protocols and event.atom != xcb.XCB_ATOM_WM_HINTS) return;
     // Re-query and store the updated focus properties in the window-level cache
-    // (CacheSlot array).  Calling focus.invalidateInputModelCache only cleared
-    // focus.zig's side, leaving the CacheSlot stale until the window was
-    // destroyed — so future getCachedProps hits would return the old model.
+    // (CacheSlot array).  focus.invalidateInputModelCache only clears
+    // focus.zig's side; without this call the CacheSlot would stay stale
+    // until the window is destroyed, and future getCachedProps hits would
+    // return an outdated model.
     _ = queryAndCacheProps(conn, event.window);
 }
 

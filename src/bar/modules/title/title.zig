@@ -70,8 +70,9 @@ const WindowInfo = struct {
 /// Constructed once per bar frame and shared between `draw()` and
 /// `drawCached()`. `cached_title` / `cached_title_window` are left at their
 /// null default on the `drawCached()` path, which never updates the cache —
-/// only `draw()` passes them, merging what used to be a separate `TitleCache`
-/// struct that every caller had to construct and pass alongside this one.
+/// only `draw()` passes them. Folding the cache fields directly into this
+/// struct avoids a separate `TitleCache` struct that every caller would
+/// otherwise have to construct and pass alongside this one.
 pub const TitleRenderContext = struct {
     dc: *drawing.DrawContext,
     config: types.BarConfig,
@@ -89,10 +90,11 @@ pub const TitleRenderContext = struct {
     cached_title_window: ?*?u32 = null,
 };
 
-/// Per-frame volatile snapshot captured on the main thread.
+/// Per-frame volatile snapshot captured before drawing.
 ///
-/// `focused_title` and `minimized_title` must be pre-fetched on the main
-/// thread via `fetchWindowTitleInto` before the render thread runs `draw()`.
+/// `focused_title` and `minimized_title` must be pre-fetched via
+/// `fetchWindowTitleInto` before `draw()` runs, so `draw()` itself never
+/// issues its own X11 property fetches.
 ///
 /// `minimized_title` is only used in the single-window-minimized case.  Pass
 /// an empty slice when that case cannot occur (e.g. the `drawCached` fast path,
@@ -115,9 +117,9 @@ pub const TitleSnapshot = struct {
 // Private helpers
 
 /// Extract a UTF-8 string from an XCB get_property reply and dupe it into
-/// `allocator`. Returns null when the reply carries no bytes, avoiding the
-/// identical three-line extract-and-dupe block that was previously written
-/// in both Phase 2 and Phase 3 of drawSegmentedTitles.
+/// `allocator`. Returns null when the reply carries no bytes. Shared by
+/// Phase 2 and Phase 3 of drawSegmentedTitles instead of duplicating an
+/// identical three-line extract-and-dupe block in each.
 fn extractPropertyString(
     r: *xcb.xcb_get_property_reply_t,
     allocator: std.mem.Allocator,
@@ -170,7 +172,9 @@ pub fn draw(
 
 /// Draw the title segment using already-cached state.
 ///
-/// Called from the bar thread's fast-path redraw (focus-only or carousel tick).
+/// Called from a fast-path redraw (focus-only or carousel tick) — either the
+/// main thread (scheduleFocusRedraw) or the dedicated carousel thread
+/// (carousel's per-refresh tick), serialized by bar.zig's draw_mutex.
 /// Unlike `draw()`, this function:
 ///   - uses `snapshot.focused_title` as a read-only slice; the caller is
 ///     responsible for passing the bar slot's cached buffer contents here.
@@ -193,7 +197,7 @@ pub fn drawCached(
 /// Fetch the title of `win` into `buf`, reusing its existing capacity.
 ///
 /// Must be called on the MAIN THREAD.  Used for both focused and minimized
-/// windows so the bar render thread never makes blocking X11 round-trips.
+/// windows so drawing never has to make blocking X11 round-trips itself.
 ///
 /// `bar.captureIntoSlot` should call this once for the focused window and,
 /// when the workspace has exactly one window and it is minimized, once for
@@ -253,7 +257,7 @@ fn drawSingleWindow(
     // Free the segmented carousel: the single and segmented paths are
     // mutually exclusive.  Leaving render.seg alive after a workspace switch
     // from a multi-window workspace keeps carousel.isCarouselActive() true,
-    // which drives the bar thread to call drawCached on every carousel tick.
+    // which keeps the carousel thread calling drawCached on every tick.
     // drawCached passes minimized_title = "" (it has no cache for it), so
     // drawSingleWindow would fill the accent background but draw no text —
     // erasing the correctly rendered minimized title after the first full draw
@@ -290,7 +294,7 @@ fn drawSingleWindow(
 
     if (is_minimized) {
         // Pre-fetched on the main thread via fetchWindowTitleInto — zero X11
-        // I/O here, upholding the render-thread threading contract.
+        // I/O here, keeping this call free of blocking round-trips.
         if (snapshot.minimized_title.len > 0)
             try carousel.drawScrollingTitle(
                 ctx.dc,
@@ -360,8 +364,8 @@ fn drawSegmentedTitles(
 
     // Determine whether pre-fetched title data is available.
     // When titles is populated with the correct count of entries, all N title
-    // round-trips are skipped on the render thread (they were already fetched
-    // on the main thread in captureStateIntoSlot).
+    // round-trips are skipped here (they were already fetched in
+    // captureStateIntoSlot).
     const has_prefetched_titles = snapshot.titles.len >= win_count;
 
     atoms.ensureResolved();

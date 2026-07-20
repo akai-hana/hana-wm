@@ -1,7 +1,6 @@
 //! Grid tiling layout
 //! Arranges windows in an evenly divided grid, with rigid or relaxed row sizing.
 
-const constants = @import("constants");
 const utils = @import("utils");
 const layouts = @import("layouts");
 const tiling = @import("tiling");
@@ -25,7 +24,7 @@ pub fn tileWithOffset(
 
     const cell_w = (screen_w -| (grid.cols + 1) *| m.gap) / grid.cols;
     const cell_h = (screen_h -| (grid.rows + 1) *| m.gap) / grid.rows;
-    const win_h = cellToWindowSize(cell_h, bm);
+    const win_h = layouts.shrinkClamped(cell_h, bm);
 
     // In relaxed mode, windows on a partial last row divide the full screen
     // width among themselves rather than using the narrower grid-column width.
@@ -54,22 +53,12 @@ pub fn tileWithOffset(
         const rect = utils.Rect{
             .x = @intCast(m.gap +| col *| (effective_cell_w + m.gap)),
             .y = @intCast(y_offset +| m.gap +| row *| (cell_h + m.gap)),
-            .width = cellToWindowSize(effective_cell_w, bm),
+            .width = layouts.shrinkClamped(effective_cell_w, bm),
             .height = win_h,
         };
-        if (ctx.defer_win == win) {
-            deferred_rect = rect;
-        } else {
-            layouts.configureWithHints(ctx, win, rect);
-        }
+        layouts.emitOrDefer(ctx, win, rect, &deferred_rect);
     }
     if (deferred_rect) |rect| layouts.configureWithHints(ctx, ctx.defer_win.?, rect);
-}
-
-/// Returns the window content dimension for a cell of `cell_size`, subtracting
-/// the combined border margin. Falls back to MIN_WINDOW_DIM on underflow.
-inline fn cellToWindowSize(cell_size: u16, border_margin: u16) u16 {
-    return if (cell_size > border_margin) cell_size - border_margin else constants.MIN_WINDOW_DIM;
 }
 
 /// Returns the column and row count for the smallest square grid that holds `n`

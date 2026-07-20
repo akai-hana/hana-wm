@@ -657,7 +657,7 @@ pub fn resolveKeybindings(keybindings: anytype, xkb_state: *xkbcommon.XkbState, 
 
     // Conflict detection: use the same (modifiers | keysym) key as the
     // dispatch map so warnings accurately reflect what lookupKeybinding sees.
-    // Previously this used keycode, which diverged from the dispatch map and
+    // Using keycode here instead would diverge from the dispatch map and
     // could silently miss real conflicts or fire false positives.
     var seen = std.AutoHashMap(u64, usize).init(allocator);
     defer seen.deinit();
@@ -713,9 +713,8 @@ fn parseWorkspaces(doc: *const parser.Document, cfg: *types.Config) void {
 }
 
 /// Parses the [fullscreen] and [minimize] sections, each currently exposing
-/// only an `enabled` toggle. These replace the old has_fullscreen /
-/// has_minimize build flags — the subsystems are always compiled in now;
-/// this is just whether their behavior and keybindings are active.
+/// only an `enabled` toggle. Each of these subsystems is always compiled in;
+/// this toggle only controls whether its behavior and keybindings are active.
 fn parseFullscreen(doc: *const parser.Document, cfg: *types.Config) void {
     const section = doc.getSection("fullscreen") orelse return;
     cfg.fullscreen_enabled = getInRange(bool, section, "enabled", true, null, null);

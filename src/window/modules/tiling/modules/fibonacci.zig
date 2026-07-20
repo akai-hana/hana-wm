@@ -1,7 +1,6 @@
 //! Fibonacci (spiral) tiling layout
 //! Arranges windows in a counter-clockwise spiral, each taking half the remaining screen area.
 
-const constants = @import("constants");
 const utils = @import("utils");
 const layouts = @import("layouts");
 const tiling = @import("tiling");
@@ -51,8 +50,8 @@ pub fn tileWithOffset(
             const overflow_rect = utils.Rect{
                 .x = @intCast(x),
                 .y = @intCast(y),
-                .width = if (w > border2) w - border2 else constants.MIN_WINDOW_DIM,
-                .height = if (h > border2) h - border2 else constants.MIN_WINDOW_DIM,
+                .width = layouts.shrinkClamped(w, border2),
+                .height = layouts.shrinkClamped(h, border2),
             };
             // Find the focused window among the overflow set; fall back to the
             // first window if no focused window is present here.
@@ -86,7 +85,7 @@ pub fn tileWithOffset(
                 .width = w -| border2,
                 .height = h -| border2,
             };
-            emitOrDefer(ctx, win, rect, &deferred_rect);
+            layouts.emitOrDefer(ctx, win, rect, &deferred_rect);
             if (deferred_rect) |dr| layouts.configureWithHints(ctx, ctx.defer_win.?, dr);
             return;
         }
@@ -95,17 +94,6 @@ pub fn tileWithOffset(
         dir = dir.next();
     }
     if (deferred_rect) |rect| layouts.configureWithHints(ctx, ctx.defer_win.?, rect);
-}
-
-/// Sends `rect` for `win` immediately, unless `win` is the window named by
-/// `ctx.defer_win`, in which case the rect is stashed in `deferred_rect` for
-/// the caller to send once, after every other window in this retile.
-inline fn emitOrDefer(ctx: *const layouts.LayoutCtx, win: u32, rect: utils.Rect, deferred_rect: *?utils.Rect) void {
-    if (ctx.defer_win == win) {
-        deferred_rect.* = rect;
-    } else {
-        layouts.configureWithHints(ctx, win, rect);
-    }
 }
 
 /// Place `win` in its split half and advance the remaining area cursor.
@@ -130,7 +118,7 @@ inline fn splitAndAdvance(
                 .width = win_w -| border2,
                 .height = h.* -| border2,
             };
-            emitOrDefer(ctx, win, rect, deferred_rect);
+            layouts.emitOrDefer(ctx, win, rect, deferred_rect);
             x.* += @as(i32, @intCast(win_w + gap));
             w.* = w.* -| (win_w + gap);
         },
@@ -142,7 +130,7 @@ inline fn splitAndAdvance(
                 .width = w.* -| border2,
                 .height = win_h -| border2,
             };
-            emitOrDefer(ctx, win, rect, deferred_rect);
+            layouts.emitOrDefer(ctx, win, rect, deferred_rect);
             y.* += @as(i32, @intCast(win_h + gap));
             h.* = h.* -| (win_h + gap);
         },
@@ -154,7 +142,7 @@ inline fn splitAndAdvance(
                 .width = win_w -| border2,
                 .height = h.* -| border2,
             };
-            emitOrDefer(ctx, win, rect, deferred_rect);
+            layouts.emitOrDefer(ctx, win, rect, deferred_rect);
             w.* = w.* -| (win_w + gap);
         },
         .up => {
@@ -165,7 +153,7 @@ inline fn splitAndAdvance(
                 .width = w.* -| border2,
                 .height = win_h -| border2,
             };
-            emitOrDefer(ctx, win, rect, deferred_rect);
+            layouts.emitOrDefer(ctx, win, rect, deferred_rect);
             h.* = h.* -| (win_h + gap);
         },
     }

@@ -205,7 +205,7 @@ pub inline fn ungrabAndFlush(conn: *xcb.xcb_connection_t) void {
 /// Creates a pipe with O_NONBLOCK | O_CLOEXEC on both ends via pipe2(2).
 ///
 /// Shared by input.zig (double-fork spawn plumbing) and events.zig (signal
-/// self-pipe) — both previously defined byte-equivalent copies of this.
+/// self-pipe), avoiding byte-equivalent copies of this in each.
 pub fn makePipe() ![2]std.posix.fd_t {
     var fds: [2]std.posix.fd_t = undefined;
     const flags = std.os.linux.O{ .CLOEXEC = true, .NONBLOCK = true };
@@ -218,31 +218,149 @@ pub fn makePipe() ![2]std.posix.fd_t {
     return fds;
 }
 
-// pthread_condattr_t and related functions are not exposed by std.c in this
-// Zig version, so we declare them directly against libc. Used only by
-// initMonotonicCondvar below.
-const pthread_condattr_t = opaque {};
-extern "c" fn pthread_condattr_init(attr: *pthread_condattr_t) c_int;
-extern "c" fn pthread_condattr_setclock(attr: *pthread_condattr_t, clock_id: c_int) c_int;
-extern "c" fn pthread_condattr_destroy(attr: *pthread_condattr_t) c_int;
-extern "c" fn pthread_cond_init(cond: *std.c.pthread_cond_t, attr: *const pthread_condattr_t) c_int;
-
-/// Re-initialises `cond` to use CLOCK_MONOTONIC as its clock, so that a
-/// subsequent `pthread_cond_timedwait` on it can use a monotonic deadline
-/// (immune to wall-clock adjustments). Must be called once before any
-/// timed wait; safe to call on a freshly zero-initialised pthread_cond_t.
+/// Blocking mutex backed by pthread_mutex_t; `.{}` is safe (= PTHREAD_MUTEX_INITIALIZER).
 ///
-/// This exists as a standalone helper because std.c does not expose
-/// pthread_condattr_t on this Zig version, so setting up a non-default
-/// clock requires eight lines of raw C interop: a stack-allocated opaque
-/// attr buffer, init/setclock/destroy calls, and the cond_init call itself.
-pub fn initMonotonicCondvar(cond: *std.c.pthread_cond_t) void {
-    var attr_buf: [64]u8 align(8) = @splat(0);
-    const attr: *pthread_condattr_t = @ptrCast(&attr_buf);
-    _ = pthread_condattr_init(attr);
-    _ = pthread_condattr_setclock(attr, @intFromEnum(std.os.linux.CLOCK.MONOTONIC));
-    _ = pthread_cond_init(cond, attr);
-    _ = pthread_condattr_destroy(attr);
+/// Zig 0.16 removed std.Thread.Mutex/Condition (replaced by std.Io.Mutex,
+/// which requires threading an std.Io handle through every lock/unlock call
+/// site — too invasive for the small, self-contained locking bar.zig and
+/// carousel.zig need). This is a minimal handle-free substitute, shared
+/// between both instead of each defining its own copy.
+pub const Mutex = struct {
+    inner: std.c.pthread_mutex_t = .{},
+    pub fn lock(m: *Mutex) void {
+        _ = std.c.pthread_mutex_lock(&m.inner);
+    }
+    pub fn unlock(m: *Mutex) void {
+        _ = std.c.pthread_mutex_unlock(&m.inner);
+    }
+};
+
+/// Condition variable backed by pthread_cond_t; `.{}` is safe (= PTHREAD_COND_INITIALIZER).
+/// Call `initMonotonic()` on any instance that will use `timedWait`.
+pub const Condition = struct {
+    inner: std.c.pthread_cond_t = .{},
+
+    // pthread_condattr_t and related functions are not exposed by std.c on
+    // this Zig version, so they're declared directly against libc here.
+    const pthread_condattr_t = opaque {};
+    extern "c" fn pthread_condattr_init(attr: *pthread_condattr_t) c_int;
+    extern "c" fn pthread_condattr_setclock(attr: *pthread_condattr_t, clock_id: c_int) c_int;
+    extern "c" fn pthread_condattr_destroy(attr: *pthread_condattr_t) c_int;
+    extern "c" fn pthread_cond_init(cond: *std.c.pthread_cond_t, attr: *const pthread_condattr_t) c_int;
+
+    /// Re-initialises this condition variable to use CLOCK_MONOTONIC as its
+    /// clock, so that a subsequent `timedWait` can use a monotonic deadline
+    /// (immune to wall-clock adjustments). Must be called once before any
+    /// `timedWait` call; safe to call on a freshly zero-initialised instance,
+    /// and safe to call again later (e.g. on every config reload) as long as
+    /// no thread is currently blocked in `wait`/`timedWait` on it.
+    pub fn initMonotonic(c: *Condition) void {
+        var attr_buf: [64]u8 align(8) = @splat(0);
+        const attr: *pthread_condattr_t = @ptrCast(&attr_buf);
+        _ = pthread_condattr_init(attr);
+        _ = pthread_condattr_setclock(attr, @intFromEnum(std.os.linux.CLOCK.MONOTONIC));
+        _ = pthread_cond_init(&c.inner, attr);
+        _ = pthread_condattr_destroy(attr);
+    }
+
+    pub fn wait(c: *Condition, m: *Mutex) void {
+        _ = std.c.pthread_cond_wait(&c.inner, &m.inner);
+    }
+
+    /// Waits up to `timeout_ns` nanoseconds; returns error.Timeout on expiry.
+    /// Uses a CLOCK_MONOTONIC absolute deadline — requires that `initMonotonic()`
+    /// was called on this instance at startup.
+    pub fn timedWait(c: *Condition, m: *Mutex, timeout_ns: u64) error{Timeout}!void {
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+        // Saturating add prevents overflow when timeout_ns is near u64 max.
+        const new_nsec = @as(u64, @intCast(ts.nsec)) +| timeout_ns;
+        ts.sec += @intCast(new_nsec / std.time.ns_per_s);
+        ts.nsec = @intCast(new_nsec % std.time.ns_per_s);
+        const rc = std.c.pthread_cond_timedwait(&c.inner, &m.inner, @ptrCast(&ts));
+        if (rc == std.posix.E.TIMEDOUT) return error.Timeout;
+    }
+
+    pub fn signal(c: *Condition) void {
+        _ = std.c.pthread_cond_signal(&c.inner);
+    }
+    pub fn broadcast(c: *Condition) void {
+        _ = std.c.pthread_cond_broadcast(&c.inner);
+    }
+};
+
+// Bounded collections
+//
+// Four call sites across the codebase (window.zig's focus-property cache and
+// child-window cache, minimize.zig's minimized-window record, input.zig's
+// pending-spawn table) each independently hand-rolled the same shape: a
+// fixed-capacity array plus a length, with linear-scan find, append, and
+// remove-and-compact. BoundedList consolidates that into one generic type so
+// a future fix to e.g. swap-remove semantics only needs to happen once.
+
+/// Generic fixed-capacity, allocation-free collection backed by a plain
+/// array. At the small counts these call sites deal with (tens to low
+/// hundreds of entries), a linear scan beats a hash table: cache-local,
+/// branch-predictor-friendly, and with no allocator or OOM error surface.
+pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
+    return struct {
+        items: [capacity]T = undefined,
+        len: usize = 0,
+
+        const Self = @This();
+
+        /// Mutable view over the live portion of the backing array.
+        pub fn slice(self: *Self) []T {
+            return self.items[0..self.len];
+        }
+
+        /// Read-only view over the live portion of the backing array.
+        pub fn constSlice(self: *const Self) []const T {
+            return self.items[0..self.len];
+        }
+
+        /// Returns the index of the first item for which `match(context, item)`
+        /// is true, or null if none matches. `context` is typically the search
+        /// key (e.g. a window ID) and `match` a plain (non-closure) function —
+        /// the same context+comptime-predicate shape `std.sort.pdq` uses.
+        pub fn indexOf(self: *const Self, context: anytype, comptime match: fn (@TypeOf(context), T) bool) ?usize {
+            for (self.items[0..self.len], 0..) |item, i| {
+                if (match(context, item)) return i;
+            }
+            return null;
+        }
+
+        /// Appends `item` if there's room. Returns false and leaves the
+        /// collection untouched if full — callers decide whether a full
+        /// collection is worth a warning or a silent fallback.
+        pub fn append(self: *Self, item: T) bool {
+            if (self.len >= capacity) return false;
+            self.items[self.len] = item;
+            self.len += 1;
+            return true;
+        }
+
+        /// O(1) removal that does *not* preserve the relative order of the
+        /// remaining elements — the slot at `i` is filled with the current
+        /// last element. Use when ordering carries no meaning (caches, sets).
+        pub fn swapRemove(self: *Self, i: usize) void {
+            self.len -= 1;
+            self.items[i] = self.items[self.len];
+        }
+
+        /// O(n) removal that preserves the relative order of the remaining
+        /// elements. Use when insertion order is meaningful, e.g. LIFO/FIFO
+        /// replay.
+        pub fn orderedRemove(self: *Self, i: usize) void {
+            self.len -= 1;
+            std.mem.copyForwards(T, self.items[i..self.len], self.items[i + 1 .. self.len + 1]);
+        }
+
+        /// Resets to empty without touching capacity or contents of unused slots.
+        pub fn clear(self: *Self) void {
+            self.len = 0;
+        }
+    };
 }
 
 /// Fetches an 8-bit X11 window property into a caller-supplied reuse buffer.

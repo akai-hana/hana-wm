@@ -8,8 +8,8 @@
 //!
 //! Thread lifecycle
 //! ----------------
-//!   startThread()  — call from bar.init() after the bar render thread starts.
-//!   stopThread()   — call before bar thread teardown (deinit and reload).
+//!   startThread()  — call from bar.init() after the bar window exists.
+//!   stopThread()   — call before bar teardown (deinit and reload).
 //!
 //! The sleep uses a pthread condition variable so stopThread() returns
 //! promptly (typically < 1 ms) rather than waiting up to one full second.
@@ -51,7 +51,7 @@ var clock_thread: ?std.Thread = null;
 
 /// Returns the current CLOCK_REALTIME timespec.
 /// Analogous to `monotonicTs()` in utils.zig; centralises the two-line
-/// clock_gettime call that previously appeared three times in this file.
+/// clock_gettime call shared by every caller in this file.
 inline fn realtimeTs() std.os.linux.timespec {
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(.REALTIME, &ts);
@@ -90,19 +90,6 @@ pub fn stopThread() void {
         clock_thread = null;
     }
     debug.info("Clock thread stopped", .{});
-}
-
-// Compatibility stubs (call sites in main.zig, events.zig, setBarState)
-
-/// No-op: the thread runs continuously while the bar is alive; it does not
-/// need to be toggled when bar visibility changes because checkClockUpdate()
-/// performs the is_visible check before signalling the render thread.
-pub fn updateTimerState() void {}
-
-/// No-op: the clock thread drives ticks directly and no longer participates
-/// in the main event loop's poll() timeout calculation.
-pub fn pollTimeoutMs() i32 {
-    return -1;
 }
 
 // Thread body
@@ -210,7 +197,9 @@ pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, star
 /// Formats `sec` (seconds since the Unix epoch) into `buf` using `fmt` as a
 /// strftime(3) format string.  Uses localtime_r for the local timezone, falling
 /// back to gmtime_r when timezone data is unavailable.  Both are POSIX-guaranteed
-/// reentrant, making this safe to call from the bar render thread.
+/// reentrant, making this safe to call from any thread — draw() runs both on
+/// the main WM thread (full redraws) and on the dedicated clock thread
+/// (checkClockUpdate's per-second tick).
 ///
 /// Returns a slice into `buf` containing the formatted string (without the
 /// trailing NUL that strftime writes).  Returns an error when `fmt` is too long

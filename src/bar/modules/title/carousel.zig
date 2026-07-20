@@ -9,6 +9,8 @@ const utils = @import("utils");
 
 const scale = @import("scale");
 const drawing = @import("drawing");
+const bar = @import("bar");
+const debug = @import("debug");
 
 // Public constants
 
@@ -52,21 +54,26 @@ const ScrollConfig = struct {
     rate_override: f64 = 0.0,
 };
 
-/// All state exclusively owned by the render thread.
-/// `is_enabled` is also written by the main thread (setCarouselEnabled) and
-/// is therefore an atomic; all other fields are render-thread-only.
+/// All state exclusively owned by whichever thread currently holds bar.zig's
+/// draw_mutex (the main WM thread or the dedicated carousel thread — never
+/// both at once). `is_enabled` is also written by the main thread outside
+/// that lock (setCarouselEnabled) and is therefore an atomic; all other
+/// fields require draw_mutex.
 const RenderState = struct {
     single: ?CarouselEntry = null,
     seg: ?CarouselEntry = null,
     is_enabled: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
 };
 
-/// Cross-thread signal: main thread sets is_invalidated when focus changes;
-/// render thread consumes it on the next seg-carousel blit.
+/// Cross-thread signal: the focus system sets is_invalidated (from the main
+/// thread, outside draw_mutex) when focus changes; whichever thread is
+/// currently drawing (main or carousel, under draw_mutex) consumes it on the
+/// next seg-carousel blit.
 ///
-/// `seg_window` is the window the render thread last built the seg carousel
-/// for (0 = none).  The render thread writes it atomically after updating
-/// render.seg so the main thread never has to read the non-atomic render.seg.
+/// `seg_window` is the window the seg carousel was last built for (0 = none).
+/// The drawing thread writes it atomically after updating render.seg so the
+/// main thread's notifyFocusChanged can check it without touching the
+/// non-atomic render.seg.
 const FocusSignal = struct {
     is_invalidated: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     seg_window: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
@@ -102,14 +109,14 @@ pub fn setRefreshRateOverride(hz: f64) void {
     scroll_config.rate_override = if (hz > 0.0) hz else 0.0;
 }
 
-/// Returns the bar thread's carousel wake interval in nanoseconds.
+/// Returns the carousel thread's wake interval in nanoseconds.
 ///
 /// Priority:
 ///   1. User-configured `carousel_refresh_rate` (rate_override > 0).
 ///   2. Monitor refresh rate detected via RandR at startup.
 ///   3. 60 Hz fallback when detection has not yet run.
 ///
-/// Called once per bar-thread sleep cycle; the division is cheap relative
+/// Called once per carousel-thread sleep cycle; the division is cheap relative
 /// to the timedWait syscall that follows.
 pub fn wakeIntervalNs() u64 {
     const hz: f64 = if (scroll_config.rate_override > 0.0)
@@ -127,20 +134,25 @@ pub fn isCarouselActive() bool {
 }
 
 /// Returns the window ID the segmented carousel was built for, or null.
-/// Render thread only — reading render.seg here is safe.
+/// Caller must hold bar.zig's draw_mutex — reading render.seg here is only
+/// safe while no other thread can be drawing concurrently.
 pub fn getSegmentedCarouselWindow() ?u32 {
     return if (render.seg) |e| e.window else null;
 }
 
 /// Free all carousel pixmaps and reset cross-thread signals.
-/// Call on bar deinit or config reload.  Render thread only.
+/// Call on bar deinit or config reload, after the carousel thread has
+/// already been stopped (carousel.stopThread()) so nothing else can be
+/// touching render.single/render.seg concurrently.
 pub fn deinitCarousel() void {
     deinitSingleCarousel();
     deinitSegmentedCarousel();
     focus_signal.is_invalidated.store(false, .monotonic);
 }
 
-/// Free the single-window carousel pixmap.  Render thread only.
+/// Free the single-window carousel pixmap.
+/// Caller must either hold draw_mutex or call after the carousel thread has
+/// stopped (see deinitCarousel).
 pub fn deinitSingleCarousel() void {
     if (render.single) |*e| {
         e.cp.deinit();
@@ -148,7 +160,9 @@ pub fn deinitSingleCarousel() void {
     }
 }
 
-/// Free the segmented carousel pixmap.  Render thread only.
+/// Free the segmented carousel pixmap.
+/// Caller must either hold draw_mutex or call after the carousel thread has
+/// stopped (see deinitCarousel).
 pub fn deinitSegmentedCarousel() void {
     if (render.seg) |*e| {
         e.cp.deinit();
@@ -161,13 +175,82 @@ pub fn deinitSegmentedCarousel() void {
 
 /// Called by the focus system when the focused window changes.
 /// MUST be called from the main thread only.
-/// Sets focus_signal.is_invalidated so the render thread rebuilds the
-/// seg-carousel on the next blit.
+/// Sets focus_signal.is_invalidated so whichever thread draws next rebuilds
+/// the seg-carousel on its next blit.
 pub fn notifyFocusChanged(new_window: ?u32) void {
     const tracked = focus_signal.seg_window.load(.acquire);
     const changed = if (new_window) |nw| nw != tracked else tracked != 0;
     if (!changed) return;
     focus_signal.is_invalidated.store(true, .release);
+}
+
+// Thread lifecycle
+//
+// The carousel needs to redraw on its own cadence (roughly once per display
+// refresh) whenever a title is actively scrolling, independent of both the
+// once-a-second clock tick and whatever the main WM event loop happens to be
+// doing. This mirrors clock.zig's dedicated-thread pattern: a small thread
+// that sleeps, wakes, ticks if there's anything to tick, and sleeps again.
+//
+// Unlike the clock thread, there is no wall-clock deadline to stay aligned
+// to, so the loop simply re-sleeps for wakeIntervalNs() every iteration
+// (re-read live each time, so a config-driven refresh-rate change or
+// carousel_refresh_rate override takes effect on the very next wake) rather
+// than tracking a fixed schedule.
+//
+//   startThread() — call from bar.init() after the bar window exists.
+//   stopThread()  — call before bar teardown (deinit and reload).
+
+var carousel_mutex: utils.Mutex = .{};
+var carousel_cond: utils.Condition = .{};
+var carousel_quit: bool = false;
+var carousel_thread: ?std.Thread = null;
+
+/// Spawns the dedicated carousel-tick thread. Safe to call after stopThread().
+pub fn startThread() void {
+    // timedWait uses a CLOCK_MONOTONIC deadline; safe to re-init on every
+    // call (init/reload) since the thread is never running while this fires.
+    carousel_cond.initMonotonic();
+    carousel_mutex.lock();
+    carousel_quit = false;
+    carousel_mutex.unlock();
+    carousel_thread = std.Thread.spawn(.{}, runCarouselThread, .{}) catch |e| {
+        debug.err("Carousel thread spawn failed: {s}", .{@errorName(e)});
+        return;
+    };
+}
+
+/// Signals the carousel thread to exit and blocks until it has joined.
+/// Returns within one wake interval (typically well under 16ms) rather than
+/// waiting for a full sleep cycle, since stopThread signals the condition
+/// the thread is sleeping on.
+pub fn stopThread() void {
+    carousel_mutex.lock();
+    carousel_quit = true;
+    carousel_cond.signal();
+    carousel_mutex.unlock();
+    if (carousel_thread) |t| {
+        t.join();
+        carousel_thread = null;
+    }
+}
+
+fn runCarouselThread() void {
+    while (true) {
+        carousel_mutex.lock();
+        const quit = carousel_quit;
+        carousel_mutex.unlock();
+        if (quit) return;
+
+        if (isCarouselActive()) bar.tickCarousel();
+
+        carousel_mutex.lock();
+        defer carousel_mutex.unlock();
+        if (carousel_quit) return;
+        carousel_cond.timedWait(&carousel_mutex, wakeIntervalNs()) catch {};
+        // Timeout is the expected outcome every iteration; a signal (from
+        // stopThread) is handled by the quit re-check at the top of the loop.
+    }
 }
 
 // Public API — hot-path carousel tick
@@ -426,9 +509,10 @@ fn buildCarouselEntry(
 /// This distributes 0 px and 1 px advances evenly across frames (Bresenham
 /// pattern) rather than clustering all the fractional debt into occasional
 /// larger jumps.  At 125 px/s on a 165 Hz display the raw advance is
-/// ≈0.758 px/frame; the old floor() approach produced a freeze every ~4–5
-/// frames followed by a 1 px snap.  The accumulator ensures every frame moves
-/// either 0 or 1 px in an optimally spaced sequence with no clustering.
+/// ≈0.758 px/frame; simply flooring that value each frame would instead
+/// produce a freeze every ~4–5 frames followed by a 1 px snap.  The
+/// accumulator ensures every frame moves either 0 or 1 px in an optimally
+/// spaced sequence with no clustering.
 ///
 /// Caller must hold a mutable pointer to the entry (`*CarouselEntry`).
 fn advanceCarouselOffset(e: *CarouselEntry, now_ns: u64) u16 {

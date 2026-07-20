@@ -43,18 +43,18 @@ const MAX_MINIMIZED: usize = if (@hasDecl(build, "max_minimized_windows"))
 else
     32;
 
-// Zero-initialised so slots beyond g_len never contain garbage.
-// Entries are always appended at g_len, and removeFromBuf preserves the
+// Entries are always appended at the end, and removeFromBuf preserves the
 // relative order of the remaining entries, so buffer position IS insertion
-// order: g_buf[0] is the oldest minimized window still tracked, g_buf[g_len-1]
-// is the most recent. LIFO/FIFO restore order reads directly off this.
-var g_buf: [MAX_MINIMIZED]MinimizedRecord = std.mem.zeroes([MAX_MINIMIZED]MinimizedRecord);
-var g_len: usize = 0;
+// order: g_minimized.items[0] is the oldest minimized window still tracked,
+// g_minimized.items[g_minimized.len-1] is the most recent. LIFO/FIFO restore
+// order reads directly off this — which is why removal here must use
+// BoundedList.orderedRemove rather than swapRemove.
+var g_minimized: utils.BoundedList(MinimizedRecord, MAX_MINIMIZED) = .{};
 
 // Lifecycle
 
 pub fn init() void {
-    g_len = 0;
+    g_minimized.clear();
 }
 
 /// No heap resources are owned, so deinit is just a state reset.
@@ -62,22 +62,21 @@ pub fn deinit() void {
     init();
 }
 
-/// Returns the index into g_buf[0..g_len] for the given window, or null.
-fn findInBuf(win: u32) ?usize {
-    for (g_buf[0..g_len], 0..) |rec, i| {
-        if (rec.win == win) return i;
-    }
-    return null;
+fn matchMinimizedWin(win: u32, rec: MinimizedRecord) bool {
+    return rec.win == win;
 }
 
-/// Removal that shifts trailing entries down, preserving relative order.
-/// Buffer position encodes insertion order (see g_buf's doc comment above),
-/// so unlike a swap-with-last removal this must not disturb it.
-/// Returns true if the window was found and removed.
+/// Returns the index into g_minimized for the given window, or null.
+fn findInBuf(win: u32) ?usize {
+    return g_minimized.indexOf(win, matchMinimizedWin);
+}
+
+/// Removal that preserves the relative order of the remaining entries (see
+/// g_minimized's doc comment above). Returns true if the window was found
+/// and removed.
 fn removeFromBuf(win: u32) bool {
     if (findInBuf(win)) |i| {
-        g_len -= 1;
-        std.mem.copyForwards(MinimizedRecord, g_buf[i..g_len], g_buf[i + 1 .. g_len + 1]);
+        g_minimized.orderedRemove(i);
         return true;
     }
     return false;
@@ -125,7 +124,7 @@ pub fn minimizeWindow() void {
     // have no side effects. Placing them here eliminates the need for a
     // rollback path — no other module's state has been mutated if we return.
 
-    if (g_len >= MAX_MINIMIZED) {
+    if (g_minimized.len >= MAX_MINIMIZED) {
         debug.err("minimize: buffer full ({d} entries), cannot minimize 0x{x}", .{ MAX_MINIMIZED, win });
         return;
     }
@@ -143,12 +142,12 @@ pub fn minimizeWindow() void {
 
     if (cs.config.tiling.enabled) tiling.removeWindow(win);
 
-    g_buf[g_len] = .{ .win = win, .entry = .{
+    // Capacity was already checked above, so this always succeeds.
+    _ = g_minimized.append(.{ .win = win, .entry = .{
         .saved_fs = saved_fs,
         .workspace_idx = ws_idx,
         .tiling_index = tiling_index,
-    } };
-    g_len += 1;
+    } });
 
     _ = xcb.xcb_grab_server(cs.conn);
     utils.pushWindowOffscreen(cs.conn, win);
@@ -169,7 +168,7 @@ pub fn minimizeWindow() void {
     utils.ungrabAndFlush(cs.conn);
 }
 
-/// Restore a window that has already been removed from g_buf.
+/// Restore a window that has already been removed from g_minimized.
 /// Precondition: caller must remove the record before calling — asserted below.
 fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?usize) void {
     std.debug.assert(!isMinimized(win));
@@ -213,17 +212,17 @@ pub fn unminimize(order: RestoreOrder) void {
     var best_idx: ?usize = null;
     switch (order) {
         .lifo => {
-            var i = g_len;
+            var i = g_minimized.len;
             while (i > 0) {
                 i -= 1;
-                if (g_buf[i].entry.workspace_idx == ws_idx) {
+                if (g_minimized.items[i].entry.workspace_idx == ws_idx) {
                     best_idx = i;
                     break;
                 }
             }
         },
         .fifo => {
-            for (g_buf[0..g_len], 0..) |rec, i| {
+            for (g_minimized.constSlice(), 0..) |rec, i| {
                 if (rec.entry.workspace_idx == ws_idx) {
                     best_idx = i;
                     break;
@@ -235,9 +234,9 @@ pub fn unminimize(order: RestoreOrder) void {
     const idx = best_idx orelse return;
 
     // Capture fields before removal invalidates the slot.
-    const win = g_buf[idx].win;
-    const saved_fs = g_buf[idx].entry.saved_fs;
-    const tiling_index = g_buf[idx].entry.tiling_index;
+    const win = g_minimized.items[idx].win;
+    const saved_fs = g_minimized.items[idx].entry.saved_fs;
+    const tiling_index = g_minimized.items[idx].entry.tiling_index;
     _ = removeFromBuf(win);
 
     restoreWindowImpl(win, saved_fs, tiling_index);
@@ -248,12 +247,12 @@ pub fn unminimizeAll() void {
 
     // Snapshot this workspace's records before mutating the buffer. Buffer
     // order is insertion order (FIFO), and this single forward pass over
-    // g_buf preserves that order in the snapshot.
+    // g_minimized preserves that order in the snapshot.
     comptime std.debug.assert(MAX_MINIMIZED <= 256); // ensure snapshot fits on the stack
     var snapshot: [MAX_MINIMIZED]MinimizedRecord = undefined;
     var count: usize = 0;
 
-    for (g_buf[0..g_len]) |rec| {
+    for (g_minimized.constSlice()) |rec| {
         if (rec.entry.workspace_idx != ws_idx) continue;
         snapshot[count] = rec;
         count += 1;
@@ -336,8 +335,8 @@ pub fn collectMinimizedIntoSet(
     allocator: std.mem.Allocator,
 ) !void {
     set.clearRetainingCapacity();
-    try set.ensureTotalCapacity(allocator, @intCast(g_len));
-    for (g_buf[0..g_len]) |rec|
+    try set.ensureTotalCapacity(allocator, @intCast(g_minimized.len));
+    for (g_minimized.constSlice()) |rec|
         set.putAssumeCapacity(rec.win, {});
 }
 
@@ -349,6 +348,6 @@ pub fn untrackWindow(win: u32) void {
 /// Called by workspaces.zig when a minimized window is moved to another workspace.
 pub fn moveToWorkspace(win: u32, new_ws: u8) void {
     if (findInBuf(win)) |i| {
-        g_buf[i].entry.workspace_idx = new_ws;
+        g_minimized.items[i].entry.workspace_idx = new_ws;
     }
 }

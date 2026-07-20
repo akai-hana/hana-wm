@@ -29,8 +29,8 @@ pub inline fn warn(comptime fmt: []const u8, args: anytype) void {
 }
 // Use std.log.info so that all log levels go through the same handler
 // (respecting any custom log handler the embedder installs and compile-time
-// log-level filtering). Previously this used std.debug.print with hardcoded
-// ANSI escape codes, which bypassed log routing entirely.
+// log-level filtering), rather than std.debug.print with hardcoded ANSI
+// escape codes, which would bypass log routing entirely.
 pub inline fn info(comptime fmt: []const u8, args: anytype) void {
     if (!debugEnabled()) return;
     const module = moduleFromSrc(@src());

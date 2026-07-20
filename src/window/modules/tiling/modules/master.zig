@@ -34,9 +34,9 @@ pub fn tileWithOffset(
 
     // Inner width accounts for the gap between master and stack panes.
     const master_inner_w = if (stack_n > 0)
-        calcInnerWidth(master_w, m.gap, m.gap / 2 + 2 * m.border)
+        layouts.shrinkClamped(master_w, m.gap + (m.gap / 2 + 2 * m.border))
     else
-        calcInnerWidth(master_w, m.gap, m.gap + 2 * m.border);
+        layouts.shrinkClamped(master_w, m.gap + (m.gap + 2 * m.border));
 
     tileColumn(ctx, windows[0..master_n], master_x +| m.gap, y_offset, screen_h, master_inner_w, m);
 
@@ -72,11 +72,7 @@ fn tileColumn(
             .width = inner_w,
             .height = windowHeight(row, count, avail),
         };
-        if (ctx.defer_win == win) {
-            deferred_rect = rect;
-        } else {
-            layouts.configureWithHints(ctx, win, rect);
-        }
+        layouts.emitOrDefer(ctx, win, rect, &deferred_rect);
     }
     if (deferred_rect) |rect| layouts.configureWithHints(ctx, ctx.defer_win.?, rect);
 }
@@ -99,7 +95,7 @@ fn tileStack(
     const max_fit: u16 = @intCast(@max(1, available / space_per_window));
 
     if (stack_n <= max_fit) {
-        tileColumn(ctx, windows, x +| m.gap / 2, y_offset, h, calcInnerWidth(w, m.gap / 2, m.gap + 2 * m.border), m);
+        tileColumn(ctx, windows, x +| m.gap / 2, y_offset, h, layouts.shrinkClamped(w, m.gap / 2 + (m.gap + 2 * m.border)), m);
         return;
     }
     tileStackExtra(ctx, windows, x, y_offset, w, h, max_fit, m);
@@ -130,7 +126,7 @@ fn tileStackExtra(
         const gaps_in_row = m.gap / 2 +| m.gap *| cols_in_row;
         const row_total_w = if (w > gaps_in_row) w - gaps_in_row else cols_in_row * constants.MIN_WINDOW_DIM;
         const col_w = row_total_w / cols_in_row;
-        const col_inner_w = calcInnerWidth(col_w, 0, 2 * m.border);
+        const col_inner_w = layouts.shrinkClamped(col_w, 2 * m.border);
 
         const y_pos = windowY(row, max_fit, row_avail, y_offset, m);
         const row_h = windowHeight(row, max_fit, row_avail);
@@ -144,11 +140,7 @@ fn tileStackExtra(
                 .width = col_inner_w,
                 .height = row_h,
             };
-            if (ctx.defer_win == windows[win_idx]) {
-                deferred_rect = rect;
-            } else {
-                layouts.configureWithHints(ctx, windows[win_idx], rect);
-            }
+            layouts.emitOrDefer(ctx, windows[win_idx], rect, &deferred_rect);
         }
     }
     if (deferred_rect) |rect| layouts.configureWithHints(ctx, ctx.defer_win.?, rect);
@@ -172,12 +164,4 @@ inline fn windowHeight(i: u16, count: u16, available: u16) u16 {
 /// preceding windows' heights (which may vary by 1 px) are accounted for.
 inline fn windowY(i: u16, count: u16, available: u16, y_offset: u16, m: utils.Margins) u16 {
     return y_offset +| m.gap +| (i * available / count) +| i *| (m.gap +| 2 *| m.border);
-}
-
-/// Width available for window content after subtracting left and right margins.
-inline fn calcInnerWidth(full_w: u16, left_margin: u16, right_margin: u16) u16 {
-    return if (full_w > left_margin + right_margin)
-        full_w - left_margin - right_margin
-    else
-        constants.MIN_WINDOW_DIM;
 }
