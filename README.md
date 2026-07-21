@@ -3,9 +3,7 @@
 # hana【花】
 ###### A comfy X11 Window Manager written in Zig.
 
-![](https://raw.githubusercontent.com/akai-hana/assets/main/flower-banner.png)
-
-<sub>*TODO: replace this with a tiling demonstration gif*</sub>
+![](https://raw.githubusercontent.com/hana-wm/hana/dev/dev/demonstration.gif)
 
 </div>
 
@@ -121,12 +119,12 @@ zig build
 apt install libgtk-3-dev xorg-dev libxcb-cursor-dev libxcb-keysyms1-dev libxkbcommon-x11-dev
 ```
 
-`#`
+*more distros later :)*
 
 ---
 
 <div align="center">
 
-made with <3 by akai_hana
+</> with <3 by akai_hana
 
 </div>
