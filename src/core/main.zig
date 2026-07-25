@@ -57,6 +57,11 @@ pub fn main() !void {
     // persists until the server itself exits; xcb_disconnect (deferred above)
     // tears down the connection and the server frees all server-side resources.
 
+    // Publish EWMH conformance (_NET_SUPPORTED, _NET_SUPPORTING_WM_CHECK) before
+    // any client can map a window, so every client sees a fully EWMH-aware WM
+    // from its very first property query. Depends only on the atom cache above.
+    utils.advertiseEwmhSupport(x.conn, x.screen, x.root);
+
     try events.setupSignalPipe();
     defer events.deinitSignalPipe();
 
