@@ -101,6 +101,9 @@ const AtomCache = struct {
     _NET_WM_NAME: u32,
     UTF8_STRING: u32,
     WM_CLASS: u32,
+    // Root window EWMH-conformance atoms — see advertiseEwmhSupport() below.
+    _NET_SUPPORTED: u32,
+    _NET_SUPPORTING_WM_CHECK: u32,
     // Bar window property atoms
     // Batched here so setWindowProperties pays zero X round-trips rather than 10 serial ones.
     _NET_WM_STRUT_PARTIAL: u32,
@@ -147,6 +150,95 @@ pub inline fn getAtomCached(comptime name: []const u8) error{AtomCacheNotInitial
     comptime if (!@hasField(AtomCache, name)) @compileError("atom not in cache: " ++ name);
     const cache = atom_cache orelse return error.AtomCacheNotInitialized;
     return @field(cache, name);
+}
+
+// EWMH root window advertisement
+
+/// EWMH atoms hana declares support for via `_NET_SUPPORTED`. Every entry
+/// here must correspond to a protocol hana genuinely honours — clients use
+/// this list to decide what they can rely on.
+///
+/// This is the fix for GLFW's "Iconification of full screen windows requires
+/// a WM that supports EWMH full screen" error (seen in Minecraft and other
+/// LWJGL/GLFW games): GLFW only uses `_NET_WM_STATE_FULLSCREEN` for full
+/// screen windows if that atom is listed here. Without it, GLFW falls back
+/// to a raw override-redirect window, which bypasses the WM entirely — and
+/// override-redirect windows can't be iconified through the WM, so the very
+/// next XIconifyWindow() call (minimize, alt-tab-triggered auto-iconify,
+/// etc.) throws that error instead of doing anything.
+const supported_atoms = [_][]const u8{
+    "_NET_SUPPORTED",
+    "_NET_SUPPORTING_WM_CHECK",
+    "_NET_WM_NAME",
+    "_NET_WM_STATE",
+    "_NET_WM_STATE_FULLSCREEN",
+    "_NET_WM_STATE_ABOVE",
+    "_NET_WM_STATE_STICKY",
+    "_NET_WM_ALLOWED_ACTIONS",
+    "_NET_WM_ACTION_CLOSE",
+    "_NET_WM_ACTION_ABOVE",
+    "_NET_WM_ACTION_STICK",
+    "_NET_WM_PID",
+    "_NET_WM_WINDOW_TYPE",
+    "_NET_WM_WINDOW_TYPE_DOCK",
+    "_NET_WM_STRUT_PARTIAL",
+};
+
+/// Publishes hana's EWMH conformance on the root window.
+///
+/// Per the EWMH spec, a conformant WM creates a small identity ("check")
+/// window, tags it — and the root — with `_NET_SUPPORTING_WM_CHECK` pointing
+/// at it, gives it a `_NET_WM_NAME`, and lists every hint it honours in
+/// `_NET_SUPPORTED` on the root. Clients (GLFW, Qt, Chromium, ...) probe
+/// this once at startup to decide whether the WM understands EWMH at all;
+/// without it they assume a bare ICCCM-only WM and take much more
+/// conservative — and in GLFW's case, broken — code paths. See
+/// `supported_atoms` above for the concrete bug this fixes.
+///
+/// Must run once at startup, after initAtomCache() (it depends on the atoms
+/// above already being interned) and before any client can map a window.
+pub fn advertiseEwmhSupport(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t, root: u32) void {
+    const supporting_wm_check = getAtomCached("_NET_SUPPORTING_WM_CHECK") catch return;
+    const net_wm_name = getAtomCached("_NET_WM_NAME") catch return;
+    const utf8_string = getAtomCached("UTF8_STRING") catch return;
+    const net_supported = getAtomCached("_NET_SUPPORTED") catch return;
+
+    // A small, invisible identity window. Override-redirect so hana's own
+    // SubstructureRedirect handling never tries to manage it as a client.
+    const check_win = xcb.xcb_generate_id(conn);
+    const depth: u8 = xcb.XCB_COPY_FROM_PARENT;
+    const value_mask = xcb.XCB_CW_OVERRIDE_REDIRECT;
+    const value_list = [_]u32{1};
+    _ = xcb.xcb_create_window(
+        conn,
+        depth,
+        check_win,
+        root,
+        -1,
+        -1,
+        1,
+        1,
+        0,
+        xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT,
+        screen.root_visual,
+        @intCast(value_mask),
+        &value_list,
+    );
+
+    // Identity dance required by the spec: the check window points at
+    // itself, and the root points at the check window. Clients compare the
+    // two `_NET_SUPPORTING_WM_CHECK` values to tell a live WM from a stale
+    // property a crashed WM left behind.
+    _ = xcb.xcb_change_property(conn, xcb.XCB_PROP_MODE_REPLACE, check_win, supporting_wm_check, xcb.XCB_ATOM_WINDOW, 32, 1, &check_win);
+    _ = xcb.xcb_change_property(conn, xcb.XCB_PROP_MODE_REPLACE, root, supporting_wm_check, xcb.XCB_ATOM_WINDOW, 32, 1, &check_win);
+
+    const wm_name = "hana";
+    _ = xcb.xcb_change_property(conn, xcb.XCB_PROP_MODE_REPLACE, check_win, net_wm_name, utf8_string, 8, @intCast(wm_name.len), wm_name.ptr);
+
+    var supported: [supported_atoms.len]xcb.xcb_atom_t = undefined;
+    inline for (supported_atoms, 0..) |name, i|
+        supported[i] = getAtomCached(name) catch xcb.XCB_ATOM_NONE;
+    _ = xcb.xcb_change_property(conn, xcb.XCB_PROP_MODE_REPLACE, root, net_supported, xcb.XCB_ATOM_ATOM, 32, @intCast(supported.len), &supported);
 }
 
 // Property helpers
