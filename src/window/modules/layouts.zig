@@ -82,117 +82,20 @@ pub fn cacheHints(cache: *CacheMap, win: u32, hints: SizeHints) void {
 
 // Layout context and the configureWithHints entry point
 
-/// Axis-aligned screen region used by layout modules to partition space without
-/// duplicating gap/border arithmetic at every call site.
-///
-/// All coordinates use the same i32/u16 conventions as `utils.Rect`: `x` and
-/// `y` are signed (windows can be positioned off-screen), `width` and `height`
-/// are unsigned (a region with zero area is degenerate and should not be split).
-///
-/// Layout modules should:
-///   1. Call `Region.fromScreen` once to get the outer region.
-///   2. Call `inset` to strip the outer gap margin.
-///   3. Call `splitH` / `splitV` / `halve` to partition, passing the gap so
-///      seam spacing is consistent and DRY.
-///   4. At each leaf, call `toRect` and hand it to `configureWithHints`.
-///
-/// The `halve` functions distribute the remainder pixel to the *second* half
-/// so that the first half is always ≤ the second — consistent with the
-/// existing master-stack convention.
-pub const Region = struct {
-    x: i32,
-    y: i32,
-    w: u16,
-    h: u16,
-
-    /// Build the initial region from screen dimensions and a y-offset (bar height).
-    pub inline fn fromScreen(screen_w: u16, screen_h: u16, y_offset: u16) Region {
-        return .{ .x = 0, .y = @intCast(y_offset), .w = screen_w, .h = screen_h -| y_offset };
-    }
-
-    /// Strip `margin` pixels from all four sides.  Saturating: a margin larger
-    /// than the region produces a zero-size region rather than wrapping.
-    pub inline fn inset(r: Region, margin: u16) Region {
-        const m2 = margin *| 2;
-        return .{
-            .x = r.x + @as(i32, @intCast(margin)),
-            .y = r.y + @as(i32, @intCast(margin)),
-            .w = r.w -| m2,
-            .h = r.h -| m2,
-        };
-    }
-
-    /// Shared partition loop for `splitH` and `splitV`.
-    ///
-    /// When `horiz` is true the region is sliced along the Y axis (rows);
-    /// when false along the X axis (columns).  The comptime parameter means
-    /// the compiler sees two fully specialised copies with no runtime branching.
-    fn splitAxis(comptime horiz: bool, r: Region, n: u16, gap: u16, buf: []Region) void {
-        std.debug.assert(buf.len >= n);
-        if (n == 0) return;
-        const total_gap = gap *| (n -| 1);
-        const avail: u16 = (if (horiz) r.h else r.w) -| total_gap;
-        var pos: i32 = if (horiz) r.y else r.x;
-        for (0..n) |i| {
-            const idx: u16 = @intCast(i);
-            // Distribute remainder pixel by using the cumulative-slice formula:
-            // slice_i = floor((i+1)*avail/n) - floor(i*avail/n)
-            const dim: u16 = ((idx + 1) * avail / n) -| (idx * avail / n);
-            buf[i] = if (horiz)
-                .{ .x = r.x, .y = pos, .w = r.w, .h = dim }
-            else
-                .{ .x = pos, .y = r.y, .w = dim, .h = r.h };
-            pos += @intCast(dim + gap);
-        }
-    }
-
-    /// Split `r` horizontally into `n` equal rows separated by `gap` pixels.
-    /// Returns a stack-allocated array of `n` regions; caller supplies the
-    /// buffer.  `buf.len` must be >= `n`.
-    pub fn splitH(r: Region, n: u16, gap: u16, buf: []Region) void {
-        splitAxis(true, r, n, gap, buf);
-    }
-
-    /// Split `r` vertically into `n` equal columns separated by `gap` pixels.
-    pub fn splitV(r: Region, n: u16, gap: u16, buf: []Region) void {
-        splitAxis(false, r, n, gap, buf);
-    }
-
-    /// Split `r` into left and right halves with `gap` between them.
-    /// The remainder pixel (odd width) goes to the right half.
-    pub inline fn halveH(r: Region, gap: u16) struct { left: Region, right: Region } {
-        const left_w: u16 = if (r.w > gap) (r.w - gap) / 2 else 0;
-        const right_w: u16 = r.w -| left_w -| gap;
-        return .{
-            .left = .{ .x = r.x, .y = r.y, .w = left_w, .h = r.h },
-            .right = .{ .x = r.x + @as(i32, @intCast(left_w +| gap)), .y = r.y, .w = right_w, .h = r.h },
-        };
-    }
-
-    /// Split `r` into top and bottom halves with `gap` between them.
-    /// The remainder pixel (odd height) goes to the bottom half.
-    pub inline fn halveV(r: Region, gap: u16) struct { top: Region, bottom: Region } {
-        const top_h: u16 = if (r.h > gap) (r.h - gap) / 2 else 0;
-        const bottom_h: u16 = r.h -| top_h -| gap;
-        return .{
-            .top = .{ .x = r.x, .y = r.y, .w = r.w, .h = top_h },
-            .bottom = .{ .x = r.x, .y = r.y + @as(i32, @intCast(top_h +| gap)), .w = r.w, .h = bottom_h },
-        };
-    }
-
-    /// Convert to a `utils.Rect` for use with `configureWithHints`, subtracting
-    /// border*2 from both dimensions.  Falls back to `constants.MIN_WINDOW_DIM`
-    /// on underflow so the X server never receives a zero-size window.
-    pub inline fn toRect(r: Region, border: u16) utils.Rect {
-        const b2 = border *| 2;
-        return .{
-            .x = r.x,
-            .y = r.y,
-            .width = if (r.w > b2) r.w - b2 else constants.MIN_WINDOW_DIM,
-            .height = if (r.h > b2) r.h - b2 else constants.MIN_WINDOW_DIM,
-        };
-    }
-};
+/// The pattern layout modules actually follow today (each under
+/// `src/window/modules/tiling/modules/`):
+///   - `shrinkClamped` (below) converts a slot's raw dimension into the
+///     window size actually sent to the X server, applying the gap/border
+///     margin and clamping to `constants.MIN_WINDOW_DIM` on underflow.
+///   - `emitOrDefer` (below) implements the `defer_win` protocol: every
+///     window's rect is routed through it so the master/stack-swap window's
+///     final placement can be deferred to the end of the retile pass.
+///   - The actual row/column/spiral split arithmetic (how a screen area is
+///     divided into per-window slots) is hand-rolled per layout, since each
+///     layout's partitioning shape differs enough (grid cells, BSP splits,
+///     Fibonacci spirals, master/stack columns) that a shared splitting
+///     abstraction was tried and abandoned; there is no shared `Region`-style
+///     helper for it.
 
 /// Context passed into every layout module's `tileWithOffset` call.
 ///
@@ -220,11 +123,19 @@ pub const LayoutCtx = struct {
     /// until every other window — in particular the one taking its place —
     /// has already been moved. Set by swap_master via tiling.zig's
     /// retileCurrentWorkspaceDeferred(Prebuilt) to eliminate a one-frame
-    /// wallpaper gap. Layout modules check this directly with a plain `if`
-    /// at their configure call site instead of going through a shared
-    /// capture/emit/flush abstraction — there is exactly one window to defer,
-    /// so the inline check is simpler than the type it replaces.
+    /// wallpaper gap. Layout modules never check this directly — they call
+    /// `emitOrDefer` for every window and leave capture and flush entirely to
+    /// `emitOrDefer` and `invokeLayout` respectively (see `emitOrDefer`'s doc
+    /// comment for the contract).
     defer_win: ?u32 = null,
+    /// Scratch slot for the rect `emitOrDefer` stashes when a window matches
+    /// `defer_win`. Points at a slot owned by the caller (tiling.zig's
+    /// `invokeLayout` caller), not at LayoutCtx itself — `LayoutCtx` is
+    /// passed as `*const` throughout, so mutation happens through this
+    /// pointer rather than through the struct's own fields. `invokeLayout`
+    /// flushes it once, after the layout function returns; layout modules
+    /// never read or flush it themselves.
+    deferred: *?utils.Rect,
 };
 
 /// Returns true when both rects have identical coordinates and dimensions.
@@ -234,17 +145,20 @@ pub inline fn rectsEqual(a: utils.Rect, b: utils.Rect) bool {
 
 /// Sends `rect` for `win` immediately via `configureWithHints`, unless `win`
 /// is the window named by `ctx.defer_win` — in which case the rect is
-/// stashed into `deferred_rect` for the caller to send once, after every
+/// stashed into `ctx.deferred` for `invokeLayout` to send once, after every
 /// other window in this retile pass (see `LayoutCtx.defer_win` for why this
 /// exists: it eliminates swap_master's one-frame wallpaper gap).
 ///
 /// Shared by every tiling layout that honours `defer_win`, instead of each
 /// layout carrying its own copy — fibonacci, master, grid, leaf, and scroll
 /// would otherwise each need a local or inline re-derivation of the same
-/// check.
-pub inline fn emitOrDefer(ctx: *const LayoutCtx, win: u32, rect: utils.Rect, deferred_rect: *?utils.Rect) void {
+/// check. Layout modules call this for every window and never touch
+/// `ctx.defer_win` or `ctx.deferred` directly: capturing the deferred rect is
+/// `emitOrDefer`'s job, flushing it is `invokeLayout`'s, and no third party
+/// needs to be involved.
+pub inline fn emitOrDefer(ctx: *const LayoutCtx, win: u32, rect: utils.Rect) void {
     if (ctx.defer_win == win) {
-        deferred_rect.* = rect;
+        ctx.deferred.* = rect;
     } else {
         configureWithHints(ctx, win, rect);
     }

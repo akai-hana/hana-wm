@@ -100,11 +100,6 @@ inline fn evictWindow(win: u32) void {
     tiling.invalidateGeomCache(win);
 }
 
-/// Resolves a layout name (e.g. "master-stack", "monocle") to tiling.Layout.
-fn layoutFromName(name: []const u8) TilingLayout {
-    return if (std.mem.eql(u8, name, "master-stack")) .master else std.meta.stringToEnum(tiling.Layout, name) orelse tiling.defaultLayout();
-}
-
 /// Initializes global workspace state.  Returns error.OutOfMemory if the
 /// workspace slice cannot be allocated; callers should treat this as fatal.
 pub fn init() !void {
@@ -155,7 +150,7 @@ pub fn init() !void {
         if (id < MAX_WS) {
             if (override_lookup[id]) |o| {
                 if (o.layout_idx < cfg_tiling.layouts.items.len)
-                    ws_layout = layoutFromName(cfg_tiling.layouts.items[o.layout_idx]);
+                    ws_layout = tiling.layoutFromString(cfg_tiling.layouts.items[o.layout_idx]) orelse tiling.defaultLayout();
                 ws_variant = o.variant;
             }
         }

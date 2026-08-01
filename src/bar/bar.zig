@@ -6,7 +6,6 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
-const constants = @import("constants");
 const scale = @import("scale");
 const debug = @import("debug");
 
@@ -105,12 +104,21 @@ const BarSnapshot = struct {
     /// its own xcb_get_property calls.
     window_titles: WindowTitles = .{},
 
+    /// Pre-fetched window geometry, indexed parallel to `current_workspace_windows`
+    /// (same indexing as `window_titles`). Fetched once per snapshot, on the main
+    /// thread, so the segmented-title draw path — including drawTitleOnly's
+    /// carousel-thread fast path via drawCached — never issues its own
+    /// xcb_get_geometry round-trip for a window the tiling cache doesn't cover
+    /// (e.g. a floating window).
+    window_geoms: std.ArrayListUnmanaged(utils.Rect) = .empty,
+
     fn deinit(snap: *BarSnapshot, allocator: std.mem.Allocator) void {
         snap.focused_title.deinit(allocator);
         snap.current_workspace_windows.deinit(allocator);
         snap.minimized_windows.deinit(allocator);
         snap.workspace_has_windows.deinit(allocator);
         snap.window_titles.deinit(allocator);
+        snap.window_geoms.deinit(allocator);
     }
 };
 
@@ -156,11 +164,8 @@ const WindowCtx = struct {
     win_id: u32,
     colormap: u32,
     net_wm_name_atom: xcb.xcb_atom_t,
-    last_monitored_window: ?u32 = null,
 
     fn deinit(self: *WindowCtx) void {
-        if (self.last_monitored_window) |win|
-            _ = xcb.xcb_change_window_attributes(self.conn, win, xcb.XCB_CW_EVENT_MASK, &[_]u32{constants.EventMasks.MANAGED_WINDOW});
         if (self.colormap != 0) _ = xcb.xcb_free_colormap(self.conn, self.colormap);
     }
 };
@@ -193,6 +198,10 @@ const TitleCache = struct {
     /// Mirrors BarSnapshot.window_titles; populated by syncTitleCache so
     /// drawTitleOnly can pass cached titles without re-fetching from the X server.
     window_titles: WindowTitles = .{},
+    /// Mirrors BarSnapshot.window_geoms; populated by syncTitleCache so
+    /// drawTitleOnly can pass cached geometry without an xcb_get_geometry
+    /// round-trip from the carousel thread.
+    window_geoms: std.ArrayListUnmanaged(utils.Rect) = .empty,
     title_x: u16 = 0,
     title_width: u16 = 0,
     is_layout_valid: bool = false,
@@ -203,6 +212,7 @@ const TitleCache = struct {
         self.workspace_windows.deinit(allocator);
         self.minimized_windows.deinit(allocator);
         self.window_titles.deinit(allocator);
+        self.window_geoms.deinit(allocator);
     }
 };
 
@@ -309,9 +319,22 @@ const State = struct {
                         snap.window_titles.list.items[0]
                     else
                         "";
-                break :blk try prompt.draw(r.dc, r.config, r.height, x, width orelse TITLE_MIN_WIDTH, self.win.conn, snap.focused_window, snap.focused_title.items, minimized_title, snap.current_workspace_windows.items, &snap.minimized_windows, snap.window_titles.list.items, &self.title_cache.title, &self.title_cache.title_window, snap.is_title_invalidated, r.allocator);
+                break :blk try prompt.draw(r.dc, r.config, r.height, x, width orelse TITLE_MIN_WIDTH, self.win.conn, snap.focused_window, snap.focused_title.items, minimized_title, snap.current_workspace_windows.items, &snap.minimized_windows, snap.window_titles.list.items, snap.window_geoms.items, &self.title_cache.title, &self.title_cache.title_window, snap.is_title_invalidated, r.allocator);
             },
             .clock => try clock.draw(r.dc, r.config, r.height, x),
+        };
+    }
+
+    /// Draws `segment`, catching and logging any error instead of propagating it.
+    /// On failure, returns `x` unchanged — the same signal drawSegment's callers
+    /// already use for "this segment drew nothing" — so a single broken segment
+    /// (bad config value, transient allocation failure, ...) can neither corrupt
+    /// the layout of the segments around it nor abort the rest of the frame,
+    /// leaving the off-screen pixmap partially drawn and never blitted.
+    fn drawSegmentSafe(self: *State, snap: *const BarSnapshot, segment: types.BarSegment, x: u16, width: ?u16) u16 {
+        return self.drawSegment(snap, segment, x, width) catch |e| {
+            debug.warnOnErr(e, "bar drawSegment");
+            return x;
         };
     }
 
@@ -340,7 +363,7 @@ const State = struct {
             right_x -= seg_w;
             if (pending_gap) right_x -= scaled_spacing;
             if (segments[i] == .clock) self.layout_cache.clock_x = right_x;
-            const drew_to = try self.drawSegment(snap, segments[i], right_x, null);
+            const drew_to = self.drawSegmentSafe(snap, segments[i], right_x, null);
             const drew = drew_to != right_x;
 
             if (drew and pending_gap) {
@@ -402,7 +425,7 @@ const State = struct {
                         continue;
                     }
                     const x_before = x;
-                    x = try self.drawSegment(snap, seg, x, null);
+                    x = self.drawSegmentSafe(snap, seg, x, null);
                     if (x != x_before) {
                         self.render.dc.fillRect(x, 0, scaled_spacing, self.render.height, self.render.config.bg);
                         x += scaled_spacing;
@@ -422,7 +445,7 @@ const State = struct {
                             continue;
                         }
                         const x_before = x;
-                        x = try self.drawSegment(snap, seg, x, w);
+                        x = self.drawSegmentSafe(snap, seg, x, w);
                         if (seg != .title and x != x_before) {
                             self.render.dc.fillRect(x, 0, scaled_spacing, self.render.height, self.render.config.bg);
                             x += scaled_spacing;
@@ -506,6 +529,11 @@ const State = struct {
                 // Supply cached pre-fetched titles so drawSegmentedTitles skips
                 // xcb_get_property calls on this fast-path redraw too.
                 .titles = self.title_cache.window_titles.list.items,
+                // Supply cached pre-fetched geometry so drawSegmentedTitles skips
+                // xcb_get_geometry calls on this fast-path redraw as well — this
+                // path runs on the dedicated carousel thread, where a blocking
+                // X11 round-trip would stall the scroll animation.
+                .geoms = self.title_cache.window_geoms.items,
             },
             self.render.allocator,
         ) catch |e| {
@@ -540,6 +568,18 @@ const State = struct {
         // so a failed dupe simply truncates the cache rather than desyncing it.
         self.title_cache.window_titles.replaceWith(alloc, snap.window_titles.list.items);
 
+        // Keep cached geometry in sync for the drawTitleOnly fast path. Rect is
+        // POD (no owned allocations per element), so — like workspace_windows
+        // above — build the replacement before swapping it in: a failed
+        // allocation leaves the existing cache untouched rather than emptied.
+        var new_geoms: std.ArrayListUnmanaged(utils.Rect) = .empty;
+        if (new_geoms.appendSlice(alloc, snap.window_geoms.items)) {
+            self.title_cache.window_geoms.deinit(alloc);
+            self.title_cache.window_geoms = new_geoms;
+        } else |_| {
+            new_geoms.deinit(alloc);
+        }
+
         self.title_cache.focused_window = snap.focused_window;
         self.title_cache.title_x = x;
         self.title_cache.title_width = w;
@@ -562,7 +602,11 @@ fn hasMinimizedSetChanged(
 
 /// Captures current WM state into `snap`, diffing against `prev` to set dirty flags.
 /// `forced` (caller must read and clear `pending_force_full_redraw`) overrides all dirty checks.
-fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot, forced: bool) !void {
+/// `prev` is mutable (not const) because the "nothing changed" branches below relay
+/// ownership of `window_titles`/`window_geoms` back and forth between the two ping-pong
+/// snapshot slots via std.mem.swap instead of duping them every frame — see the comment
+/// at the swap sites for why this is safe.
+fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *BarSnapshot, forced: bool) !void {
     const allocator = s.render.allocator;
     snap.minimized_windows.clearRetainingCapacity();
     try minimize.collectMinimizedIntoSet(&snap.minimized_windows, allocator);
@@ -609,6 +653,7 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot,
         hasMinimizedSetChanged(&snap.minimized_windows, &prev.minimized_windows);
     if (title_changed) {
         snap.window_titles.clear(allocator);
+        snap.window_geoms.clearRetainingCapacity();
         var title_tmp: std.ArrayListUnmanaged(u8) = .empty;
         defer title_tmp.deinit(allocator);
         for (snap.current_workspace_windows.items) |win| {
@@ -619,10 +664,30 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *const BarSnapshot,
                 title.fetchWindowTitleInto(core.getState().conn, win, &title_tmp, allocator) catch {};
                 snap.window_titles.append(allocator, title_tmp.items) catch {};
             }
+            // Skip the round-trip for minimized windows the same way
+            // drawSegmentedTitles' sentinel does — they're never actually
+            // positioned on screen.
+            const geom: utils.Rect = if (snap.minimized_windows.contains(win))
+                .{ .x = std.math.maxInt(i16), .y = std.math.maxInt(i16), .width = 0, .height = 0 }
+            else
+                title.fetchWindowGeom(core.getState().conn, win);
+            snap.window_geoms.append(allocator, geom) catch {};
         }
     } else {
-        // Carry forward the previous slot's title data unchanged.
-        snap.window_titles.replaceWith(allocator, prev.window_titles.list.items);
+        // Nothing about titles/membership/minimized-state changed since the
+        // previous frame: rather than freeing every owned string in `snap`
+        // and re-duping every owned string from `prev` — an O(window count)
+        // alloc+free pass on every redraw where the titles themselves didn't
+        // actually change (e.g. a plain workspace-indicator repaint) — swap
+        // list ownership between the two snapshot slots instead.
+        //
+        // `prev` is not read again after this point in the current frame, and
+        // on the *next* frame the roles of the two slots flip (today's `snap`
+        // becomes tomorrow's `prev`), so ownership simply relays back and
+        // forth between the two slots forever with zero allocation traffic,
+        // until a frame where title_changed is true refreshes it for real.
+        std.mem.swap(WindowTitles, &snap.window_titles, &prev.window_titles);
+        std.mem.swap(std.ArrayListUnmanaged(utils.Rect), &snap.window_geoms, &prev.window_geoms);
     }
 
     snap.is_full_redraw = forced or (snap.workspace_count != prev.workspace_count);
@@ -1177,11 +1242,17 @@ fn isTilingActive() bool {
 fn retileAllWorkspaces(effective_visible: bool) void {
     // Temporarily expose the effective visibility so tiling code that reads
     // isVisible() sees the intended value rather than the transitional state.
-    if (gBar.state) |st| {
-        const saved = st.is_visible;
-        st.is_visible = effective_visible;
-        defer st.is_visible = saved;
-    }
+    //
+    // NOTE: the save/restore is scoped to the whole function, not to this
+    // `if` block — a `defer` written inside `if (gBar.state) |st| { ... }`
+    // would fire as soon as that block ends (i.e. immediately, before any
+    // retiling below runs), which would silently defeat this override.
+    const st_opt = gBar.state;
+    const saved_visible = if (st_opt) |st| st.is_visible else false;
+    if (st_opt) |st| st.is_visible = effective_visible;
+    defer if (st_opt) |st| {
+        st.is_visible = saved_visible;
+    };
     if (!core.getState().config.workspaces.enabled) {
         tiling.retileCurrentWorkspace();
         return;

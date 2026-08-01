@@ -38,6 +38,8 @@ const MinimizedRecord = struct {
 
 // Configurable via build_options.max_minimized_windows; 32 is the default.
 // Exceeding this silently fails (with a logged error) — see minimizeWindow.
+// Related to, but intentionally distinct from, constants.Limits.MAX_TILED_WINDOWS
+// — this bounds concurrently-minimized windows, not the tiled-window pool.
 const MAX_MINIMIZED: usize = if (@hasDecl(build, "max_minimized_windows"))
     build.max_minimized_windows
 else

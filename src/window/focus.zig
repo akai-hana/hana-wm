@@ -6,6 +6,7 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
+const constants = @import("constants");
 
 const window = @import("window");
 const tracking = @import("tracking");
@@ -716,9 +717,10 @@ pub fn drainPointerSync() void {
 //
 // Scratch buffer for collectVisibleWindows.  Module-level so it is not
 // stack-allocated on every key press.  Safe in a single-threaded WM.
-// Sized to match tracking.Tracking.capacity (64 windows per workspace).
+// Sized to match tracking.Tracking.capacity (constants.Limits.MAX_TILED_WINDOWS,
+// tiled windows across the whole window manager, not per workspace).
 
-var cycle_buf: [64]u32 = undefined;
+var cycle_buf: [constants.Limits.MAX_TILED_WINDOWS]u32 = undefined;
 
 /// Append `w` to cycle_buf if there is room and it is on the current workspace
 /// and visible (not minimised).  Shared by both paths in collectVisibleWindows.

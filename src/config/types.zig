@@ -125,6 +125,57 @@ pub const GridVariant = enum {
     relaxed, // last window in incomplete row expands to fill the row
 };
 
+/// The tiling layout algorithm.
+///
+/// Defined here and not in tiling.zig — same reason as MasterVariant above —
+/// so that config.zig and workspaces.zig can resolve layout names to this
+/// type without creating a circular import (tiling.zig already depends on
+/// this module; the reverse would cycle). tiling.zig re-exports this as
+/// `tiling.Layout` so every existing call site keeps working unchanged.
+pub const Layout = enum {
+    master,
+    monocle,
+    grid,
+    fibonacci,
+    leaf,
+    scroll,
+    /// Windows are left at their current positions. Never part of the layout
+    /// cycle, and deliberately excluded from LAYOUT_TABLE below — it isn't
+    /// reachable by name from config (not in the `layouts` array, not part
+    /// of the toggle-layout cycle); it's only ever produced as a default.
+    floating,
+};
+
+/// One entry per cyclable layout — every `Layout` tag except `.floating`.
+///
+/// Single source of truth for every place in the codebase that previously
+/// hand-rolled its own copy of this name<->tag mapping: tiling.zig's
+/// `layout_cycle` and `layoutFromString`, workspaces.zig's `layoutFromName`
+/// (now deleted — it calls tiling.layoutFromString directly), and config.zig's
+/// `isKnownLayout`/`canonicalLayout`. Table order is also cycle order for
+/// toggleLayout/toggleLayoutReverse.
+pub const LayoutInfo = struct {
+    tag: Layout,
+    /// Canonical name — what gets stored in cfg.tiling.layouts and shown in
+    /// the bar's layout indicator.
+    name: []const u8,
+    /// Alternate spellings accepted when parsing config, folded to `name`
+    /// before storage/comparison. "master_stack" alongside "master" exists
+    /// because config.zig's old canonicalLayout accepted the underscore form
+    /// too (tiling.zig's old layoutFromString did not) — preserved here so
+    /// no previously-accepted config value stops parsing.
+    aliases: []const []const u8 = &.{},
+};
+
+pub const LAYOUT_TABLE = [_]LayoutInfo{
+    .{ .tag = .master, .name = "master-stack", .aliases = &.{ "master", "master_stack" } },
+    .{ .tag = .monocle, .name = "monocle" },
+    .{ .tag = .grid, .name = "grid" },
+    .{ .tag = .fibonacci, .name = "fibonacci" },
+    .{ .tag = .leaf, .name = "leaf" },
+    .{ .tag = .scroll, .name = "scroll" },
+};
+
 /// Tagged union pairing a variant value with its owning layout type.
 pub const LayoutVariantOverride = union(enum) {
     master: MasterVariant,

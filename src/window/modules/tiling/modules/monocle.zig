@@ -33,6 +33,19 @@ pub fn tileWithOffset(
     // Falling back to windows[len-1] unconditionally would be wrong: closing
     // the visible window in monocle could then surface an arbitrary background
     // window instead of the one the user last interacted with.
+    //
+    // NOTE ON WHO CALLS THIS: picking the right top_win only matters if this
+    // function actually runs on every focus change. A plain focus.setFocus()
+    // does NOT retile by itself — it only raises the newly focused window in
+    // stacking order, which is a no-op here, since monocle hides background
+    // windows by moving them off-screen (pushBackgroundWindowsOffscreen
+    // below), not by lowering them in the stack. Something must call
+    // retileCurrentWorkspace() (or otherwise invoke tileWithOffset) after
+    // every focus change for the visible window to actually swap.
+    // tiling.zig's snapScrollToFocused() is the hook that does this for the
+    // Mod+j/k focus-cycle keybindings; it must special-case .monocle (in
+    // addition to .scroll) or focus-cycling through this layout silently
+    // stops swapping the visible window again.
     const top_win: u32 = blk: {
         if (ctx.focused_win) |f| {
             for (windows) |w| {

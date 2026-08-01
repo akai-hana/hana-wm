@@ -3,6 +3,7 @@
 
 const std = @import("std");
 
+const constants = @import("constants");
 const minimize = @import("minimize");
 
 // Fixed-size ordered window list.
@@ -10,22 +11,26 @@ const minimize = @import("minimize");
 // the always-present tracking module rather than the optional workspaces module.
 
 pub const Tracking = struct {
-    /// Maximum windows tracked per workspace.
+    /// Maximum windows tracked across the whole window manager (all
+    /// workspaces combined) — this is `tiling.State.windows`, a single
+    /// global instance, not one per workspace.
     ///
     /// This is a hard compile-time cap, not a tuneable.  Power users with many
     /// terminal instances or IDE popups can hit it; windows beyond the cap are
     /// silently dropped from tiling and workspace membership with an error log.
     ///
-    /// If 64 is regularly too small for your workflow, increase this value and
-    /// rebuild.  The struct is stack-allocated, so the cost is 4 x capacity bytes
-    /// per Workspace instance — 256 bytes at capacity = 64, 512 bytes at 128.
-    const capacity = 64;
+    /// If this is regularly too small for your workflow, raise
+    /// constants.Limits.MAX_TILED_WINDOWS and rebuild.  The struct is
+    /// stack-allocated, so the cost is 4 bytes per capacity slot per
+    /// Workspace instance.
+    const capacity = constants.Limits.MAX_TILED_WINDOWS;
 
     buf: [capacity]u32 = undefined,
 
     /// Number of live entries in buf[0..len].  Never exceeds `capacity`.
-    /// The type u8 is wider than strictly necessary for a maximum of 64;
-    /// the invariant is enforced by prepareAdd rather than the type alone.
+    /// Kept as u8 (max 255) since capacity is 200; the invariant is enforced
+    /// by prepareAdd rather than the type alone. If capacity is ever raised
+    /// above 255, this must be widened too (e.g. to u16).
     len: u8 = 0,
 
     /// Returns true if `win` is present in the list.
@@ -96,7 +101,7 @@ pub const Tracking = struct {
     ///
     /// Validation is O(n²): each entry requires an O(n) linear scan to locate
     /// its slot, and the result is marked in a stack-allocated bitset to detect
-    /// duplicates.  For capacity = 64 this is at most 4,096 operations.
+    /// duplicates.  For capacity = 200 this is at most 40,000 operations.
     pub fn reorder(self: *Tracking, new_order: []const u32) void {
         if (new_order.len != self.len) {
             std.log.err(
@@ -144,6 +149,14 @@ pub const Entry = struct {
 };
 
 var g_windows: std.ArrayListUnmanaged(Entry) = .empty;
+/// win -> index into g_windows.items. Accelerates the single-ID lookup
+/// functions below (getWindowWorkspaceMask, isManaged, setWindowMask,
+/// removeWindow) to O(1) average instead of an O(n) linear scan. Unlike the
+/// bounded, small per-workspace tiling list (tracking.Tracking), g_windows
+/// is genuinely unbounded — it holds every managed window, tiled and
+/// floating alike — so its scan cost grows with real usage. Mirrors the
+/// AutoHashMap-by-window-ID pattern already used by layouts.CacheMap.
+var g_index: std.AutoHashMapUnmanaged(u32, usize) = .empty;
 var g_alloc: std.mem.Allocator = undefined;
 var g_initialized: bool = false;
 var g_current: u8 = 0;
@@ -156,12 +169,19 @@ pub fn init(allocator: std.mem.Allocator) void {
     g_windows.ensureTotalCapacity(allocator, 32) catch |err| {
         std.log.warn("tracking: initial pre-allocation failed ({s}); list will grow on demand", .{@errorName(err)});
     };
+    g_index.ensureTotalCapacity(allocator, 32) catch |err| {
+        std.log.warn("tracking: initial index pre-allocation failed ({s}); map will grow on demand", .{@errorName(err)});
+    };
 }
 
 /// Frees the global window-tracking list and resets all state.
 pub fn deinit() void {
-    if (g_initialized) g_windows.deinit(g_alloc);
+    if (g_initialized) {
+        g_windows.deinit(g_alloc);
+        g_index.deinit(g_alloc);
+    }
     g_windows = .empty;
+    g_index = .empty;
     g_initialized = false;
     g_current = 0;
     g_workspace_count = 1;
@@ -196,20 +216,42 @@ pub fn registerWindow(win: u32, ws: u8) !void {
     if (!g_initialized) return;
     std.debug.assert(ws < 64);
     if (isManaged(win)) return;
+    const idx = g_windows.items.len;
     try g_windows.append(g_alloc, .{ .win = win, .mask = workspaceBit(ws) });
+    g_index.put(g_alloc, win, idx) catch |err| {
+        // Roll back the just-appended entry so g_windows and g_index stay in
+        // sync — otherwise the window would be present in g_windows but
+        // invisible to isManaged/getWindowWorkspaceMask, which only consult
+        // g_index.
+        _ = g_windows.pop();
+        return err;
+    };
 }
 
 /// Remove `win` from the tracking list.
-/// Swap-remove: O(1) after the linear find; order doesn't matter for WM ops.
-/// When workspaces.zig is present it calls this after cleaning up workspace
-/// last_focused; when absent, window.zig calls this directly.
+/// Swap-remove: O(1) after an O(1) index lookup via g_index; order doesn't
+/// matter for WM ops. When workspaces.zig is present it calls this after
+/// cleaning up workspace last_focused; when absent, window.zig calls this
+/// directly.
 pub fn removeWindow(win: u32) void {
     if (!g_initialized) return;
-    for (g_windows.items, 0..) |e, i| {
-        if (e.win == win) {
-            _ = g_windows.swapRemove(i);
-            return;
-        }
+    const i = g_index.get(win) orelse return;
+    _ = g_windows.swapRemove(i);
+    _ = g_index.remove(win);
+    // swapRemove(i) moves the previously-last entry into slot i (unless i
+    // itself was the last slot) — repoint that window's index if so.
+    if (i < g_windows.items.len) {
+        const moved_win = g_windows.items[i].win;
+        g_index.put(g_alloc, moved_win, i) catch {
+            // The map just shrank by one entry (g_index.remove above), so
+            // this put cannot need new bucket capacity and should not
+            // actually fail in practice; handled defensively regardless.
+            std.log.err(
+                "tracking: failed to reindex window 0x{x} after swap-remove; " ++
+                    "it may be unreachable by ID lookup until removed and re-registered",
+                .{moved_win},
+            );
+        };
     }
 }
 
@@ -224,26 +266,22 @@ pub fn removeWindow(win: u32) void {
 pub fn setWindowMask(win: u32, mask: u64) void {
     if (!g_initialized) return;
     std.debug.assert(mask != 0);
-    for (g_windows.items) |*e| {
-        if (e.win == win) {
-            e.mask = mask;
-            return;
-        }
-    }
-    std.log.err(
-        "tracking: setWindowMask called on unregistered window 0x{x}",
-        .{win},
-    );
+    const idx = g_index.get(win) orelse {
+        std.log.err(
+            "tracking: setWindowMask called on unregistered window 0x{x}",
+            .{win},
+        );
+        return;
+    };
+    g_windows.items[idx].mask = mask;
 }
 
 // Query predicates
 
 /// Returns the workspace bitmask for `win`, or null if not tracked.
 pub inline fn getWindowWorkspaceMask(win: u32) ?u64 {
-    for (g_windows.items) |e| {
-        if (e.win == win) return e.mask;
-    }
-    return null;
+    const idx = g_index.get(win) orelse return null;
+    return g_windows.items[idx].mask;
 }
 
 pub fn isManaged(win: u32) bool {
