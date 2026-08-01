@@ -838,15 +838,18 @@ inline fn parseIndicator(raw: []const u8) [3]u8 {
     return ind;
 }
 
-const KNOWN_LAYOUT_SET = std.StaticStringMap(void).initComptime(.{
-    .{ "master-stack", {} }, .{ "monocle", {} }, .{ "grid", {} }, .{ "fibonacci", {} }, .{ "leaf", {} }, .{ "scroll", {} },
-});
-
 /// Returns true if `name` (case-insensitive) is a recognised layout name.
+/// Linear scan over types.LAYOUT_TABLE — StaticStringMap would carry comptime
+/// build complexity for no runtime gain at n=6 (tiling.zig's layoutFromString
+/// documents the same reasoning for its own, larger name<->tag table).
 inline fn isKnownLayout(name: []const u8) bool {
     var buf: [32]u8 = undefined;
     if (name.len > buf.len) return false;
-    return KNOWN_LAYOUT_SET.has(std.ascii.lowerString(&buf, name));
+    const lower = std.ascii.lowerString(&buf, name);
+    for (types.LAYOUT_TABLE) |entry| {
+        if (std.mem.eql(u8, lower, entry.name)) return true;
+    }
+    return false;
 }
 
 /// Returns true if `s` looks like a workspace-number list: only digits, commas, spaces,
@@ -864,12 +867,20 @@ inline fn isWorkspaceList(s: []const u8) bool {
     return has_digit;
 }
 
-/// Canonicalises a layout name to the plain lowercase form used in the layouts list.
-/// "master_stack" and "master" both become "master-stack".
+/// Canonicalises a layout name to the plain lowercase form used in the layouts
+/// list. Resolves via types.LAYOUT_TABLE's aliases (e.g. "master_stack" and
+/// "master" both become "master-stack") instead of a hardcoded local check,
+/// so this can never drift from what layoutFromString/isKnownLayout accept.
+/// Names with no match are returned lowercased, unchanged — isKnownLayout
+/// rejects those at the call site.
 inline fn canonicalLayout(name: []const u8, buf: []u8) []const u8 {
     const lower = std.ascii.lowerString(buf[0..name.len], name);
-    if (std.mem.eql(u8, lower, "master_stack") or std.mem.eql(u8, lower, "master"))
-        return "master-stack";
+    for (types.LAYOUT_TABLE) |entry| {
+        if (std.mem.eql(u8, lower, entry.name)) return entry.name;
+        for (entry.aliases) |alias| {
+            if (std.mem.eql(u8, lower, alias)) return entry.name;
+        }
+    }
     return lower;
 }
 

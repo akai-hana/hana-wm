@@ -110,4 +110,10 @@ pub const Limits = struct {
     /// (max distinct keybindings × 4 LOCK_MODIFIERS combinations).
     /// Raise if you ever exceed 128 keybindings.
     pub const MAX_KEYBIND_COOKIES = 512;
+
+    /// Maximum tiled windows across the whole WM (all workspaces combined),
+    /// not per workspace — see tracking.Tracking, which this backs.
+    /// tracking.Tracking.len is a u8 (max 255), so this must stay <= 255
+    /// unless that field is widened too.
+    pub const MAX_TILED_WINDOWS = 200;
 };

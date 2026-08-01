@@ -112,6 +112,16 @@ pub const TitleSnapshot = struct {
     /// drawCached fast path before the title cache has been populated with
     /// multi-window data).
     titles: []const []const u8 = &.{},
+
+    /// Pre-fetched window geometry captured on the main thread (see
+    /// `fetchWindowGeom`), indexed parallel to `current_ws_wins` the same way
+    /// `titles` is. Used by drawSegmentedTitles as a non-blocking fallback for
+    /// windows the tiling cache doesn't cover (e.g. floating windows), so that
+    /// path — including the drawCached fast path, which can run on the
+    /// carousel thread — never issues its own xcb_get_geometry round-trip.
+    /// An empty slice signals no pre-fetched data is available, in which case
+    /// drawSegmentedTitles falls back to fetching live.
+    geoms: []const utils.Rect = &.{},
 };
 
 // Private helpers
@@ -225,6 +235,30 @@ pub fn fetchWindowTitleInto(
         buf,
         allocator,
     ) catch {};
+}
+
+/// Fetch the geometry of `win`, preferring the tiling cache (zero round-trips)
+/// and falling back to a blocking xcb_get_geometry round-trip on a cache miss.
+/// Returns an offscreen sentinel rect if the reply can't be read.
+///
+/// Must be called on the MAIN THREAD — same contract as `fetchWindowTitleInto`.
+/// `bar.captureStateIntoSlot` calls this once per non-minimized workspace
+/// window so `drawSegmentedTitles` — including the `drawCached` fast path,
+/// which can run on the carousel thread — never has to issue its own
+/// xcb_get_geometry round-trip for a window the tiling cache doesn't cover
+/// (e.g. a floating window).
+pub fn fetchWindowGeom(conn: *xcb.xcb_connection_t, win: u32) utils.Rect {
+    if (tiling.getWindowGeom(win)) |cached| return cached;
+    const cookie = xcb.xcb_get_geometry(conn, win);
+    const r = xcb.xcb_get_geometry_reply(conn, cookie, null) orelse
+        return .{ .x = std.math.maxInt(i16), .y = std.math.maxInt(i16), .width = 0, .height = 0 };
+    defer std.c.free(r);
+    return .{
+        .x = @intCast(r.*.x),
+        .y = @intCast(r.*.y),
+        .width = r.*.width,
+        .height = r.*.height,
+    };
 }
 
 // Empty workspace fast path
@@ -362,112 +396,24 @@ fn drawSegmentedTitles(
             carousel.deinitSegmentedCarousel();
     }
 
-    // Determine whether pre-fetched title data is available.
-    // When titles is populated with the correct count of entries, all N title
-    // round-trips are skipped here (they were already fetched in
-    // captureStateIntoSlot).
-    const has_prefetched_titles = snapshot.titles.len >= win_count;
-
-    atoms.ensureResolved();
-    const net_atom = atoms.net_wm_name;
-    const utf_type = atoms.utf8AtomType();
-
-    // XCB cookie arrays — only populated for windows whose titles are not
-    // available from the pre-fetched snapshot data.
-    var net_wm_cookies: [max_visible_windows]xcb.xcb_get_property_cookie_t = undefined;
-    var geom_cookies: [max_visible_windows]xcb.xcb_get_geometry_cookie_t = undefined;
-    var needs_xcb_title: [max_visible_windows]bool = @splat(false);
-    var needs_xcb_geometry: [max_visible_windows]bool = @splat(false);
-    var is_minimized: [max_visible_windows]bool = @splat(false);
-
-    // Phase 1 — fire only the cookies we actually need.
-    // Tiled windows: geometry comes from the tiling CacheMap (zero round-trips).
-    // Pre-fetched titles: skip xcb_get_property entirely.
-    for (windows[0..win_count], 0..) |win, i| {
-        is_minimized[i] = snapshot.minimized_set.contains(win);
-
-        if (!has_prefetched_titles) {
-            if (net_atom) |na|
-                net_wm_cookies[i] = xcb.xcb_get_property(ctx.conn, 0, win, na, utf_type, 0, 8192);
-            needs_xcb_title[i] = true;
-        }
-
-        if (!is_minimized[i]) {
-            // Tiling cache hit: geometry is already known, no round-trip needed.
-            if (tiling.getWindowGeom(win) == null) {
-                geom_cookies[i] = xcb.xcb_get_geometry(ctx.conn, win);
-                needs_xcb_geometry[i] = true;
-            }
-        }
-    }
-
-    // Phase 2 — collect _NET_WM_NAME replies; queue WM_NAME fallbacks.
-    var titles: [max_visible_windows]?[]const u8 = @splat(null);
-    var fallback_cookies: [max_visible_windows]xcb.xcb_get_property_cookie_t = undefined;
-    var needs_fallback: [max_visible_windows]bool = @splat(false);
-
-    if (!has_prefetched_titles) {
-        for (windows[0..win_count], 0..) |win, i| {
-            got: {
-                if (net_atom != null) {
-                    const r = xcb.xcb_get_property_reply(ctx.conn, net_wm_cookies[i], null) orelse break :got;
-                    defer std.c.free(r);
-                    if (try extractPropertyString(r, allocator)) |title| {
-                        titles[i] = title;
-                        break :got;
-                    }
-                }
-                fallback_cookies[i] = xcb.xcb_get_property(ctx.conn, 0, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, 0, 8192);
-                needs_fallback[i] = true;
-            }
-        }
-
-        // Phase 3 — collect WM_NAME fallback replies.
-        for (0..win_count) |i| {
-            if (!needs_fallback[i]) continue;
-            const r = xcb.xcb_get_property_reply(ctx.conn, fallback_cookies[i], null) orelse continue;
-            defer std.c.free(r);
-            titles[i] = try extractPropertyString(r, allocator);
-        }
-    }
-    defer for (titles[0..win_count]) |t| if (t) |s| allocator.free(s);
-
-    // Build WindowInfo list.
-    // Geometry: tiling cache → xcb_get_geometry reply → offscreen sentinel.
+    // `window_info_buf` and `owned_titles` must outlive gatherWindowInfos —
+    // a WindowInfo's `.title` may point into `owned_titles`' memory — so they
+    // live here rather than inside that function. Everything else
+    // gatherWindowInfos needs (XCB cookie arrays, per-window bool flags —
+    // several KB combined) is scoped entirely to its own stack frame and is
+    // reclaimed as soon as it returns, before any of the drawing below runs.
     var window_info_buf: [max_visible_windows]WindowInfo = undefined;
-    var info_count: usize = 0;
+    var owned_titles: [max_visible_windows]?[]const u8 = @splat(null);
+    defer for (owned_titles[0..win_count]) |t| if (t) |s| allocator.free(s);
 
-    for (windows[0..win_count], 0..) |win, i| {
-        const geom: utils.Rect = if (is_minimized[i])
-            .{ .x = std.math.maxInt(i16), .y = std.math.maxInt(i16), .width = 0, .height = 0 }
-        else if (tiling.getWindowGeom(win)) |cached|
-            cached
-        else if (needs_xcb_geometry[i]) blk: {
-            const r = xcb.xcb_get_geometry_reply(ctx.conn, geom_cookies[i], null) orelse continue;
-            defer std.c.free(r);
-            break :blk utils.Rect{
-                .x = @intCast(r.*.x),
-                .y = @intCast(r.*.y),
-                .width = r.*.width,
-                .height = r.*.height,
-            };
-        } else .{ .x = std.math.maxInt(i16), .y = std.math.maxInt(i16), .width = 0, .height = 0 };
-
-        const title_str: []const u8 = if (has_prefetched_titles)
-            snapshot.titles[i]
-        else
-            titles[i] orelse "";
-
-        window_info_buf[info_count] = .{
-            .window = win,
-            .x = geom.x,
-            .y = geom.y,
-            .title = title_str,
-            .minimized = is_minimized[i],
-        };
-        info_count += 1;
-    }
-
+    const info_count = try gatherWindowInfos(
+        ctx,
+        snapshot,
+        allocator,
+        windows[0..win_count],
+        &window_info_buf,
+        &owned_titles,
+    );
     if (info_count == 0) return;
 
     const window_infos = window_info_buf[0..info_count];
@@ -533,6 +479,148 @@ fn drawSegmentedTitles(
                 try ctx.dc.drawTextEllipsis(text_x, baseline_y, info.title, avail_w, text_fg);
         }
     }
+}
+
+/// Phase 1-3 of drawSegmentedTitles: resolves each window in `windows` to a
+/// WindowInfo (position, title text, minimized state), writing up to
+/// `windows.len` entries into `out_infos` and returning the count actually
+/// written (a window is skipped rather than padded with a sentinel if its
+/// live xcb_get_geometry reply fails — see the `orelse continue` below — so
+/// this can be less than `windows.len`).
+///
+/// Title strings fetched live from X are duped into `out_owned_titles[i]`
+/// (parallel to `windows`, pre-sized/zeroed by the caller) because
+/// `out_infos[*].title` may point into that memory; the caller owns
+/// `out_owned_titles` and is responsible for freeing its entries once done
+/// reading `out_infos`.
+///
+/// Kept separate from drawSegmentedTitles so its scratch arrays — XCB cookie
+/// buffers and per-window bool flags, several KB combined — are off the
+/// stack again as soon as this function returns, rather than coexisting with
+/// drawSegmentedTitles' own locals for the whole call, including its drawing
+/// loop.
+fn gatherWindowInfos(
+    ctx: TitleRenderContext,
+    snapshot: TitleSnapshot,
+    allocator: std.mem.Allocator,
+    windows: []const u32,
+    out_infos: *[max_visible_windows]WindowInfo,
+    out_owned_titles: *[max_visible_windows]?[]const u8,
+) !usize {
+    const win_count = windows.len;
+
+    // Determine whether pre-fetched title/geometry data is available.
+    // When titles is populated with the correct count of entries, all N title
+    // round-trips are skipped here (they were already fetched in
+    // captureStateIntoSlot); same for geoms and xcb_get_geometry round-trips.
+    const has_prefetched_titles = snapshot.titles.len >= win_count;
+    const has_prefetched_geoms = snapshot.geoms.len >= win_count;
+
+    atoms.ensureResolved();
+    const net_atom = atoms.net_wm_name;
+    const utf_type = atoms.utf8AtomType();
+
+    // XCB cookie arrays — only populated for windows whose titles are not
+    // available from the pre-fetched snapshot data.
+    var net_wm_cookies: [max_visible_windows]xcb.xcb_get_property_cookie_t = undefined;
+    var geom_cookies: [max_visible_windows]xcb.xcb_get_geometry_cookie_t = undefined;
+    var needs_xcb_title: [max_visible_windows]bool = @splat(false);
+    var needs_xcb_geometry: [max_visible_windows]bool = @splat(false);
+    var is_minimized: [max_visible_windows]bool = @splat(false);
+
+    // Phase 1 — fire only the cookies we actually need.
+    // Tiled windows: geometry comes from the tiling CacheMap (zero round-trips).
+    // Pre-fetched titles: skip xcb_get_property entirely.
+    for (windows, 0..) |win, i| {
+        is_minimized[i] = snapshot.minimized_set.contains(win);
+
+        if (!has_prefetched_titles) {
+            if (net_atom) |na|
+                net_wm_cookies[i] = xcb.xcb_get_property(ctx.conn, 0, win, na, utf_type, 0, 8192);
+            needs_xcb_title[i] = true;
+        }
+
+        if (!is_minimized[i]) {
+            // Tiling cache hit: geometry is already known, no round-trip needed.
+            // Otherwise, prefer the pre-fetched snapshot data (captured on the
+            // main thread ahead of time) over a live round-trip — this is what
+            // keeps this path (including the carousel-thread drawCached call)
+            // free of blocking X11 I/O for floating/untracked windows.
+            if (tiling.getWindowGeom(win) == null and !has_prefetched_geoms) {
+                geom_cookies[i] = xcb.xcb_get_geometry(ctx.conn, win);
+                needs_xcb_geometry[i] = true;
+            }
+        }
+    }
+
+    // Phase 2 — collect _NET_WM_NAME replies; queue WM_NAME fallbacks.
+    var fallback_cookies: [max_visible_windows]xcb.xcb_get_property_cookie_t = undefined;
+    var needs_fallback: [max_visible_windows]bool = @splat(false);
+
+    if (!has_prefetched_titles) {
+        for (windows, 0..) |win, i| {
+            got: {
+                if (net_atom != null) {
+                    const r = xcb.xcb_get_property_reply(ctx.conn, net_wm_cookies[i], null) orelse break :got;
+                    defer std.c.free(r);
+                    if (try extractPropertyString(r, allocator)) |title| {
+                        out_owned_titles[i] = title;
+                        break :got;
+                    }
+                }
+                fallback_cookies[i] = xcb.xcb_get_property(ctx.conn, 0, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, 0, 8192);
+                needs_fallback[i] = true;
+            }
+        }
+
+        // Phase 3 — collect WM_NAME fallback replies.
+        for (0..win_count) |i| {
+            if (!needs_fallback[i]) continue;
+            const r = xcb.xcb_get_property_reply(ctx.conn, fallback_cookies[i], null) orelse continue;
+            defer std.c.free(r);
+            out_owned_titles[i] = try extractPropertyString(r, allocator);
+        }
+    }
+
+    // Build WindowInfo list.
+    // Geometry: tiling cache → xcb_get_geometry reply → pre-fetched snapshot data → offscreen sentinel.
+    var info_count: usize = 0;
+
+    for (windows, 0..) |win, i| {
+        const geom: utils.Rect = if (is_minimized[i])
+            .{ .x = std.math.maxInt(i16), .y = std.math.maxInt(i16), .width = 0, .height = 0 }
+        else if (tiling.getWindowGeom(win)) |cached|
+            cached
+        else if (needs_xcb_geometry[i]) blk: {
+            const r = xcb.xcb_get_geometry_reply(ctx.conn, geom_cookies[i], null) orelse continue;
+            defer std.c.free(r);
+            break :blk utils.Rect{
+                .x = @intCast(r.*.x),
+                .y = @intCast(r.*.y),
+                .width = r.*.width,
+                .height = r.*.height,
+            };
+        } else if (has_prefetched_geoms)
+            snapshot.geoms[i]
+        else
+            .{ .x = std.math.maxInt(i16), .y = std.math.maxInt(i16), .width = 0, .height = 0 };
+
+        const title_str: []const u8 = if (has_prefetched_titles)
+            snapshot.titles[i]
+        else
+            out_owned_titles[i] orelse "";
+
+        out_infos[info_count] = .{
+            .window = win,
+            .x = geom.x,
+            .y = geom.y,
+            .title = title_str,
+            .minimized = is_minimized[i],
+        };
+        info_count += 1;
+    }
+
+    return info_count;
 }
 
 /// Sort order for the split-view segment layout:

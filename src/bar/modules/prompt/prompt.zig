@@ -8,6 +8,7 @@ const xcb = core.xcb;
 
 const bar = @import("bar");
 const types = @import("types");
+const utils = @import("utils");
 
 const drawing = @import("drawing");
 const title = @import("title");
@@ -333,7 +334,8 @@ pub fn draw(
     current_ws_wins: []const u32,
     minimized_set: *const std.AutoHashMapUnmanaged(u32, void),
     titles: []const []const u8,
-    cached_title: *std.ArrayList(u8),
+    geoms: []const utils.Rect,
+    cached_title: *std.ArrayListUnmanaged(u8),
     cached_title_window: *?u32,
     title_invalidated: bool,
     allocator: std.mem.Allocator,
@@ -356,6 +358,7 @@ pub fn draw(
             .current_ws_wins = current_ws_wins,
             .minimized_set = minimized_set,
             .titles = titles,
+            .geoms = geoms,
         },
         allocator,
         title_invalidated,
@@ -452,6 +455,7 @@ fn loadCompletions() void {
     const path_env = std.mem.span(path_env_ptr);
 
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var full_path_buf: [std.fs.max_path_bytes]u8 = undefined;
 
     var dir_it = std.mem.splitScalar(u8, path_env, ':');
     outer: while (dir_it.next()) |dir_path| {
@@ -470,6 +474,18 @@ fn loadCompletions() void {
 
             const dt = entry.*.d_type;
             if (dt != 0 and dt != c.DT_REG and dt != c.DT_LNK) continue;
+
+            // DT_REG/DT_LNK (or DT_UNKNOWN, dt == 0, on filesystems that don't
+            // report a type) only rules out "obviously not a plain file" — it
+            // says nothing about the executable bit. Without this check, a
+            // stray non-executable file sitting in a $PATH directory would be
+            // offered as a runnable completion.
+            if (dir_path.len + 1 + name.len + 1 > full_path_buf.len) continue;
+            @memcpy(full_path_buf[0..dir_path.len], dir_path);
+            full_path_buf[dir_path.len] = '/';
+            @memcpy(full_path_buf[dir_path.len + 1 ..][0..name.len], name);
+            full_path_buf[dir_path.len + 1 + name.len] = 0;
+            if (c.access(&full_path_buf, c.X_OK) != 0) continue;
 
             const slot = g.comp_count * (max_completion_len + 1);
             @memcpy(g.comp_names[slot .. slot + name.len], name);

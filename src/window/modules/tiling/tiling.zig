@@ -51,6 +51,15 @@ comptime {
         u16, // y_offset
     };
     const layout_modules = [_]LayoutModule{ master, monocle, grid, fibonacci, leaf, scroll };
+    // Every cyclable layout in types.LAYOUT_TABLE must have a dispatchable
+    // module here (and vice versa) — `.floating` is the one deliberate
+    // exception on both sides: it has no entry in LAYOUT_TABLE (see that
+    // type's doc comment) and no module in this list (invokeLayout dispatches
+    // it directly to the floating.zig import instead).
+    if (layout_modules.len != types.LAYOUT_TABLE.len) {
+        @compileError("layout_modules and types.LAYOUT_TABLE have drifted apart — " ++
+            "add/remove entries in both so every cyclable layout has exactly one dispatch module");
+    }
     for (layout_modules) |Mod| {
         if (!@hasDecl(Mod, "tileWithOffset")) {
             @compileError(@typeName(Mod) ++ " must export `tileWithOffset`");
@@ -79,8 +88,16 @@ comptime {
 
 const max_master_width_ratio: f32 = 0.95; // prevents master from consuming the full screen
 const max_master_count: u8 = 10;
-const max_workspace_windows: usize = 128; // per-retile window list capacity
+// Per-retile window list capacity. A single workspace can never hold more
+// tiled windows than the global pool (tracking.Tracking, s.windows below)
+// allows, so this must stay >= constants.Limits.MAX_TILED_WINDOWS — enforced
+// by the comptime assertion below.
+const max_workspace_windows: usize = constants.Limits.MAX_TILED_WINDOWS;
 const max_workspaces: usize = 64; // matches u64 workspace_geom_valid_bits
+
+comptime {
+    std.debug.assert(max_workspace_windows >= constants.Limits.MAX_TILED_WINDOWS);
+}
 
 // Public types
 
@@ -88,16 +105,10 @@ const max_workspaces: usize = 64; // matches u64 workspace_geom_valid_bits
 /// Exported so layout modules (monocle) can write it directly.
 pub const zero_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
 
-pub const Layout = enum {
-    master,
-    monocle,
-    grid,
-    fibonacci,
-    leaf,
-    scroll,
-    /// Windows are left at their current positions. Never part of the layout cycle.
-    floating,
-};
+/// Defined in types.zig (see its doc comment for why) so config.zig and
+/// workspaces.zig can resolve layout names without a circular import;
+/// re-exported here so every existing `tiling.Layout` call site is unaffected.
+pub const Layout = types.Layout;
 
 // Variant enums are defined in core.zig to allow config.zig to parse them
 // without a circular import. Re-exported here for convenience.
@@ -156,7 +167,7 @@ pub const LayoutConfig = struct {
     /// Runtime layout cycle: intersection of config `layouts` and disk-present
     /// layout files. `stepLayout` walks this so layouts omitted from the
     /// config are invisible at runtime even if their .zig file exists on disk.
-    enabled_layouts: [6]Layout,
+    enabled_layouts: [types.LAYOUT_TABLE.len]Layout,
     enabled_layout_count: u8,
 };
 
@@ -511,7 +522,11 @@ pub fn retileAllWorkspaces() void {
     const ws_count = tracking.getWorkspaceCount();
     const current_ws = tracking.getCurrentWorkspace() orelse return;
     const ws_state_opt = if (!core.getState().config.tiling.global_layout) workspaces.getState() else null;
-    var ctx = makeLayoutCtx(s);
+    // defer_win is never set on this path (retileAllWorkspaces never defers
+    // a swap_master flush), so this slot is always flushed as a no-op — but
+    // invokeLayout still needs a valid pointer to write through.
+    var deferred: ?utils.Rect = null;
+    var ctx = makeLayoutCtx(s, &deferred);
     const effective_ws = @min(ws_count, max_workspaces);
 
     var ws_idx: u8 = 0;
@@ -794,20 +809,33 @@ fn snapScrollOffsetToWindow(s: *State, win: u32) bool {
     return true;
 }
 
-/// Scroll layout only: snaps the viewport to the currently focused window when
-/// it is off-screen, then retiles. Called after keyboard focus-cycle actions
-/// (focus_next_window / focus_prev_window) so a window that was moved into
-/// focus via Mod+j/k is immediately brought into view.
+/// Brings the newly focused window into view after keyboard focus-cycle
+/// actions (focus_next_window / focus_prev_window), for layouts where a
+/// plain focus change doesn't already make the right window visible:
+///
+///   • .scroll: snaps the viewport to the focused window when it's off-screen,
+///     then retiles.
+///   • .monocle: always retiles. Monocle hides every window but the focused
+///     one by moving it off-screen (see monocle.zig's
+///     pushBackgroundWindowsOffscreen), not by lowering it in the stacking
+///     order, so the plain raise that setFocus() already performs is a
+///     no-op — only a retile repositions the newly focused window back on
+///     screen and pushes the previously focused one off.
 ///
 /// No-op when:
-///   • the active layout is not .scroll
-///   • no window is focused
-///   • the focused window is already fully visible in the current viewport
+///   • the active layout is neither .scroll nor .monocle
+///   • (.scroll only) no window is focused, or it's already fully visible
+///     in the current viewport
 pub fn snapScrollToFocused() void {
     const s = getState();
-    if (s.config.layout != .scroll) return;
-    const win = focus.getFocused() orelse return;
-    if (snapScrollOffsetToWindow(s, win)) retileCurrentWorkspace();
+    switch (s.config.layout) {
+        .monocle => retileCurrentWorkspace(),
+        .scroll => {
+            const win = focus.getFocused() orelse return;
+            if (snapScrollOffsetToWindow(s, win)) retileCurrentWorkspace();
+        },
+        else => {},
+    }
 }
 
 // Window swap operations
@@ -936,18 +964,26 @@ pub fn takePrevFocusedForScroll() ?u32 {
 
 // All six layouts are always compiled in now. toggleLayout/toggleLayoutReverse
 // walk this fixed list when cycling.
-const layout_cycle: []const Layout = &.{ .master, .monocle, .grid, .fibonacci, .leaf, .scroll };
+const layout_cycle_array: [types.LAYOUT_TABLE.len]Layout = blk: {
+    var arr: [types.LAYOUT_TABLE.len]Layout = undefined;
+    for (types.LAYOUT_TABLE, 0..) |entry, i| arr[i] = entry.tag;
+    break :blk arr;
+};
+const layout_cycle: []const Layout = &layout_cycle_array;
 
-// layoutFromString — plain if-else over 6 fixed strings.
-// StaticStringMap carries comptime build complexity for no runtime gain at n=6.
-inline fn layoutFromString(name: []const u8) ?Layout {
-    if (std.mem.eql(u8, name, "master-stack") or
-        std.mem.eql(u8, name, "master")) return .master;
-    if (std.mem.eql(u8, name, "monocle")) return .monocle;
-    if (std.mem.eql(u8, name, "grid")) return .grid;
-    if (std.mem.eql(u8, name, "fibonacci")) return .fibonacci;
-    if (std.mem.eql(u8, name, "leaf")) return .leaf;
-    if (std.mem.eql(u8, name, "scroll")) return .scroll;
+/// Resolves a config-file layout name (canonical or alias, e.g. "master-stack",
+/// "master", "monocle") to its `Layout` tag. Driven by types.LAYOUT_TABLE — the
+/// single source of truth also used by config.zig's isKnownLayout/canonicalLayout
+/// and workspaces.zig's layout-name resolution — instead of a hand-rolled copy
+/// of the same name<->tag mapping. Linear scan: StaticStringMap would carry
+/// comptime build complexity for no runtime gain at n=6 (+ a couple aliases).
+pub inline fn layoutFromString(name: []const u8) ?Layout {
+    for (types.LAYOUT_TABLE) |entry| {
+        if (std.mem.eql(u8, name, entry.name)) return entry.tag;
+        for (entry.aliases) |alias| {
+            if (std.mem.eql(u8, name, alias)) return entry.tag;
+        }
+    }
     return null;
 }
 
@@ -956,8 +992,8 @@ inline fn layoutFromString(name: []const u8) ?Layout {
 /// dropped. When the config produces an empty list (all names unknown or all
 /// layouts disabled at build time), seeds from layout_cycle so the returned
 /// list is always non-empty — stepLayout depends on this guarantee.
-fn parseEnabledLayouts(layouts_cfg: []const []const u8) struct { arr: [6]Layout, len: u8 } {
-    var arr: [6]Layout = undefined;
+fn parseEnabledLayouts(layouts_cfg: []const []const u8) struct { arr: [types.LAYOUT_TABLE.len]Layout, len: u8 } {
+    var arr: [types.LAYOUT_TABLE.len]Layout = undefined;
     var len: u8 = 0;
     for (layouts_cfg) |name| {
         if (len >= arr.len) break;
@@ -1042,11 +1078,14 @@ fn initState() State {
 
 /// Build a LayoutCtx for a normal retile. defer_win is left at its default
 /// (null); retileImpl sets it from RetileOpts after this call returns.
-inline fn makeLayoutCtx(s: *State) layouts.LayoutCtx {
+/// `deferred` must point at a scratch slot the caller owns for the lifetime
+/// of the retile pass (see LayoutCtx.deferred) — invokeLayout flushes it.
+inline fn makeLayoutCtx(s: *State, deferred: *?utils.Rect) layouts.LayoutCtx {
     return .{
         .conn = core.getState().conn,
         .cache = &s.geom.cache,
         .focused_win = focus.getFocused(),
+        .deferred = deferred,
     };
 }
 
@@ -1068,6 +1107,16 @@ fn invokeLayout(
         .leaf => leaf.tileWithOffset(ctx, s, wins, w, h, y),
         .scroll => scroll.tileWithOffset(ctx, s, wins, w, h, y),
         .floating => floating.tileWithOffset(ctx, s, wins, w, h, y),
+    }
+    // Centralized flush of the deferred swap_master rect (see LayoutCtx.deferred
+    // and emitOrDefer's doc comment). This is the single place that flushes —
+    // layout modules never do it themselves. Reset to null afterward so a
+    // stale rect can never leak into a future retile pass that reuses this
+    // scratch slot (e.g. retileAllWorkspaces, which reuses one ctx/slot across
+    // every workspace in its loop).
+    if (ctx.deferred.*) |rect| {
+        layouts.configureWithHints(ctx, ctx.defer_win.?, rect);
+        ctx.deferred.* = null;
     }
 }
 
@@ -1157,7 +1206,8 @@ fn retileImpl(screen: utils.Rect, opts: RetileOpts) void {
     };
     if (ws_windows.len == 0) return;
 
-    var ctx = makeLayoutCtx(s);
+    var deferred: ?utils.Rect = null;
+    var ctx = makeLayoutCtx(s, &deferred);
     ctx.defer_win = opts.defer_win;
 
     const wss = workspaces.getState();
@@ -1279,6 +1329,25 @@ fn moveWindowToIndex(s: *State, from_idx: usize, to_idx: usize) void {
     s.windows.reorder(s.geom.scratch_wins[0..j]);
 }
 
+/// Finds the index of each id in `targets` within `items`, in one pass.
+/// `out[i]` is left null if `targets[i]` is not found.
+///
+/// Shared by call sites that previously hand-rolled their own "find several
+/// IDs in one fused scan" loop (swapWindowsById, findFocusMasterPos) — the
+/// same shape BoundedList already consolidated for a different repeated
+/// pattern elsewhere in this codebase. moveWindowToFilteredSlot below does
+/// NOT use this helper: unlike a plain multi-ID search, its second target
+/// (`to_global`) is a *filtered positional* match (the Nth window on the
+/// current workspace), not an ID match, so it keeps its own fused loop.
+fn findIndices(items: []const u32, targets: []const u32, out: []?usize) void {
+    std.debug.assert(out.len >= targets.len);
+    for (items, 0..) |w, i| {
+        for (targets, 0..) |t, ti| {
+            if (out[ti] == null and w == t) out[ti] = i;
+        }
+    }
+}
+
 /// Reposition `win` within the global window list so that it lands at
 /// workspace-filtered index `target` (0 = master slot).
 ///
@@ -1292,7 +1361,9 @@ fn moveWindowToFilteredSlot(s: *State, win: u32, target: usize) void {
 
     // Single fused pass: find from_global (position of `win`) and to_global
     // (target filtered slot, skipping `win` itself) simultaneously with early
-    // exit when both are found — replaces two separate O(N) scans.
+    // exit when both are found — replaces two separate O(N) scans. Not a
+    // findIndices call: to_global is a filtered positional match, not an ID
+    // match, so it needs its own loop body (see findIndices' doc comment).
     var from_global: ?usize = null;
     var to_global: ?usize = null;
     var filtered_count: usize = 0;
@@ -1332,15 +1403,9 @@ fn swapWindowsInList(s: *State, idx_a: usize, idx_b: usize) void {
 pub fn swapWindowsById(win_a: u32, win_b: u32) void {
     const s = getState();
     const all = s.windows.items();
-    // Single fused pass — replaces two separate indexOfScalar O(N) scans.
-    var idx_a: ?usize = null;
-    var idx_b: ?usize = null;
-    for (all, 0..) |w, i| {
-        if (w == win_a) idx_a = i;
-        if (w == win_b) idx_b = i;
-        if (idx_a != null and idx_b != null) break;
-    }
-    swapWindowsInList(s, idx_a orelse return, idx_b orelse return);
+    var out: [2]?usize = .{ null, null };
+    findIndices(all, &.{ win_a, win_b }, &out);
+    swapWindowsInList(s, out[0] orelse return, out[1] orelse return);
     retileCurrentWorkspace();
 }
 
@@ -1390,20 +1455,13 @@ fn findFocusMasterPos(s: *State) ?FocusMasterPos {
     const master_xid = ws_wins[0];
     const next = ws_wins[1]; // always valid: ws_wins.len >= 2 checked above
 
-    var fp_global: ?usize = null;
-    var mp_global: ?usize = null;
-    var ns_global: ?usize = null;
-    for (all, 0..) |w, i| {
-        if (w == focused) fp_global = i;
-        if (w == master_xid) mp_global = i;
-        if (w == next) ns_global = i;
-        if (fp_global != null and mp_global != null and ns_global != null) break;
-    }
+    var out: [3]?usize = .{ null, null, null };
+    findIndices(all, &.{ focused, master_xid, next }, &out);
 
     return .{
-        .fp_global = fp_global orelse return null,
-        .mp_global = mp_global orelse return null,
-        .ns_global = ns_global orelse return null,
+        .fp_global = out[0] orelse return null,
+        .mp_global = out[1] orelse return null,
+        .ns_global = out[2] orelse return null,
         .fp_filtered = fp_filtered,
         .ws_wins = ws_wins,
     };

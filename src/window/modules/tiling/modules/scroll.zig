@@ -52,9 +52,9 @@ pub fn tileWithOffset(
     const gap_half: i32 = @intCast(m.gap / 2);
     const border2: i32 = 2 * @as(i32, @intCast(m.border));
 
-    // If swap_master deferred a window (see LayoutCtx.defer_win), capture its
-    // rect here and send it once, after every other window has been configured.
-    var deferred_rect: ?utils.Rect = null;
+    // Deferred-window handling (see LayoutCtx.defer_win): emitOrDefer stashes
+    // this window's rect if it matches ctx.defer_win; invokeLayout flushes it
+    // once, after this function returns, so it is sent last.
 
     for (windows, 0..) |win, i| {
         const col: i32 = @intCast(i);
@@ -86,7 +86,7 @@ pub fn tileWithOffset(
                 .width = content_w,
                 .height = content_h,
             };
-            layouts.emitOrDefer(ctx, win, rect, &deferred_rect);
+            layouts.emitOrDefer(ctx, win, rect);
             continue;
         }
 
@@ -96,7 +96,6 @@ pub fn tileWithOffset(
             .width = content_w,
             .height = content_h,
         };
-        layouts.emitOrDefer(ctx, win, rect, &deferred_rect);
+        layouts.emitOrDefer(ctx, win, rect);
     }
-    if (deferred_rect) |rect| layouts.configureWithHints(ctx, ctx.defer_win.?, rect);
 }

@@ -63,7 +63,6 @@ fn tileColumn(
 ) void {
     const count: u16 = @intCast(windows.len);
     const avail = calcAvailableHeight(h, count, m);
-    var deferred_rect: ?utils.Rect = null;
     for (windows, 0..) |win, i| {
         const row: u16 = @intCast(i);
         const rect = utils.Rect{
@@ -72,9 +71,8 @@ fn tileColumn(
             .width = inner_w,
             .height = windowHeight(row, count, avail),
         };
-        layouts.emitOrDefer(ctx, win, rect, &deferred_rect);
+        layouts.emitOrDefer(ctx, win, rect);
     }
-    if (deferred_rect) |rect| layouts.configureWithHints(ctx, ctx.defer_win.?, rect);
 }
 
 /// Tile the stack pane, spilling into a column-major overflow grid when the
@@ -117,8 +115,6 @@ fn tileStackExtra(
     const stack_n: u16 = @intCast(windows.len);
     const row_avail = calcAvailableHeight(h, max_fit, m);
 
-    var deferred_rect: ?utils.Rect = null;
-
     var row: u16 = 0;
     while (row < max_fit) : (row += 1) {
         const cols_in_row: u16 = (stack_n - row + max_fit - 1) / max_fit;
@@ -140,10 +136,9 @@ fn tileStackExtra(
                 .width = col_inner_w,
                 .height = row_h,
             };
-            layouts.emitOrDefer(ctx, windows[win_idx], rect, &deferred_rect);
+            layouts.emitOrDefer(ctx, windows[win_idx], rect);
         }
     }
-    if (deferred_rect) |rect| layouts.configureWithHints(ctx, ctx.defer_win.?, rect);
 }
 
 /// Total pixel height available for window content after gaps and borders.

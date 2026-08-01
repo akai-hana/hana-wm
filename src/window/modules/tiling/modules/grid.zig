@@ -36,9 +36,9 @@ pub fn tileWithOffset(
         break :blk (screen_w -| (count + 1) * m.gap) / count;
     } else cell_w;
 
-    // If swap_master deferred a window (see LayoutCtx.defer_win), capture its
-    // rect here and send it once, after every other window has been configured.
-    var deferred_rect: ?utils.Rect = null;
+    // Deferred-window handling (see LayoutCtx.defer_win): emitOrDefer stashes
+    // this window's rect if it matches ctx.defer_win; invokeLayout flushes it
+    // once, after this function returns, so it is sent last.
 
     for (windows, 0..) |win, idx| {
         const col: u16 = @intCast(idx % grid.cols);
@@ -56,9 +56,8 @@ pub fn tileWithOffset(
             .width = layouts.shrinkClamped(effective_cell_w, bm),
             .height = win_h,
         };
-        layouts.emitOrDefer(ctx, win, rect, &deferred_rect);
+        layouts.emitOrDefer(ctx, win, rect);
     }
-    if (deferred_rect) |rect| layouts.configureWithHints(ctx, ctx.defer_win.?, rect);
 }
 
 /// Returns the column and row count for the smallest square grid that holds `n`

@@ -76,6 +76,8 @@ const SpawnEntry = struct {
     pid: u32,
 };
 
+// Related to, but intentionally distinct from, constants.Limits.MAX_TILED_WINDOWS
+// — this bounds pending spawns awaiting their first-map, not the tiled-window pool.
 const SPAWN_QUEUE_CAP: usize = 64;
 
 /// Module allocator, set in init() and used for the spawn queue and any other
