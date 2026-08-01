@@ -10,34 +10,14 @@ const layouts = @import("layouts");
 
 const bar = @import("bar");
 
-// Geometry requests are batched so that all cookies are issued before any
-// reply is awaited. This turns n sequential X round-trips into one flight of
-// n requests followed by n local reads — important on forwarded connections
-// where each round-trip carries non-trivial latency.
-//
-// 64 covers the typical maximum window count on a single workspace while
-// keeping the two per-batch stack arrays (needs_query + cookies) well under
-// 1 KB of combined stack space.
-// TODO: Replace the hardcoded BATCH limit with a dynamic approach.
-// 64 covers typical workspace sizes, but an ArrayListUnmanaged would
-// handle arbitrarily large window counts without silent truncation.
+// Geometry requests are batched so every xcb_get_geometry cookie is issued
+// before any reply is awaited — one round-trip per batch instead of one per
+// window. 64 covers a typical workspace's window count.
 const BATCH = 64;
 
-/// Centre any window that is still at the X default origin (0, 0).
-/// Windows the user has already moved are left untouched.
-///
-/// Centring is relative to the work area (screen minus bar height) so that
-/// freshly spawned windows are not obscured by the bar.
-///
-/// Cache-first optimisation: windows with a valid cached rect at a non-zero
-/// origin are skipped entirely — no geometry round-trip is needed.  This
-/// matters after a retile-to-floating transition where every window was just
-/// positioned by the tiling engine and all their rects are already cached.
-///
-/// For windows that do require centering, configureWithHints is used instead of a
-/// raw xcb_configure_window so the cache is populated with the new position.
-/// This lets restoreWorkspaceGeom replay centred positions on workspace switch
-/// without a fresh geometry round-trip.
+/// Centre any window still at the X default origin (0, 0); windows the user
+/// has already moved are left untouched. Centring uses the work area (screen
+/// minus bar) so new windows aren't obscured by the bar.
 pub fn tileWithOffset(
     ctx: *const layouts.LayoutCtx,
     _: anytype,
@@ -50,8 +30,6 @@ pub fn tileWithOffset(
     const sw: i32 = cs.screen.width_in_pixels;
     const sh: i32 = cs.screen.height_in_pixels;
 
-    // Work-area geometry: exclude the bar so that centred windows land in
-    // the visible portion of the screen rather than behind the bar.
     const bh: i32 = if (bar.isVisible()) bar.getBarHeight() else 0;
     const bar_at_bottom = cs.config.bar.bar_position == .bottom;
     const work_top: i32 = if (bar_at_bottom) 0 else bh;
@@ -62,76 +40,43 @@ pub fn tileWithOffset(
         const end = @min(base + BATCH, windows.len);
         const batch = windows[base..end];
 
-        // Phase 0 — cache check.
-        // A window with a valid cached rect at a non-zero origin has already
-        // been positioned (by the user or by a previous tiling pass).  Skip
-        // the geometry query entirely for those windows.
-        // Default false: a window is assumed to need a query until the cache
-        // check below proves otherwise.
+        // Skip windows already positioned (valid cached rect at a non-zero
+        // origin) — no geometry query needed for those.
         var needs_query = [_]bool{false} ** BATCH;
         var any_needs: bool = false;
         for (batch, 0..) |win, i| {
-            const already_placed = blk: {
-                const wd = ctx.cache.getPtr(win) orelse break :blk false;
-                // A valid cached rect is proof of intentional placement — the
-                // cache is only written by configureWithHints, stopDrag, and
-                // saveWindowGeom, all of which reflect deliberate WM or user
-                // action.  (0, 0) counts as a valid placement too: a window
-                // the user dragged to the top-left corner has a valid rect
-                // there and must not be re-centred.
-                break :blk wd.hasValidRect();
-            };
-            // Guard: nothing more to do for windows that are already placed.
-            // needs_query[i] stays false (pre-initialised above).
+            const already_placed = if (ctx.cache.getPtr(win)) |wd| wd.hasValidRect() else false;
             if (already_placed) continue;
             needs_query[i] = true;
-            // any_needs lets us skip the phase-1/2 loops entirely when every
-            // window in this batch is already cached and placed.
             any_needs = true;
         }
-
         if (!any_needs) {
             base = end;
             continue;
         }
 
-        // Phase 1 — issue geometry requests only for uncached / origin windows.
+        // Issue all geometry requests for this batch, then collect replies —
+        // only the first reply pays for a round-trip.
         var cookies: [BATCH]xcb.xcb_get_geometry_cookie_t = undefined;
         for (batch, 0..) |win, i| {
-            if (needs_query[i])
-                cookies[i] = xcb.xcb_get_geometry(cs.conn, win);
+            if (needs_query[i]) cookies[i] = xcb.xcb_get_geometry(cs.conn, win);
         }
 
-        // Phase 2 — collect replies; the server has been working on all of
-        // them since phase 1, so only the first reply incurs a round-trip.
         for (batch, 0..) |win, i| {
             if (!needs_query[i]) continue;
-            const reply = xcb.xcb_get_geometry_reply(
-                cs.conn,
-                cookies[i],
-                null,
-            ) orelse continue;
+            const reply = xcb.xcb_get_geometry_reply(cs.conn, cookies[i], null) orelse continue;
             defer std.c.free(reply);
 
-            // A window not at (0,0) was placed by the user before this layout
-            // pass (the cache check above missed it because the entry was
-            // absent or zeroed). Leave it untouched.
+            // Not at (0,0): user already placed it before this pass — leave it.
             if (reply.*.x != 0 or reply.*.y != 0) continue;
 
-            // Use w/h throughout to avoid re-reading the reply fields after
-            // the widening conversion.  @intCast back to u16 is safe: XCB
-            // width/height are u16 so w and h are always in [1, 65535].
             const w: i32 = reply.*.width;
             const h: i32 = reply.*.height;
-
-            // Centre within the work area.  @max(0, …) clamps windows larger
-            // than the work area to the near edge instead of going negative.
             const cx: i32 = @max(0, @divTrunc(sw - w, 2));
             const cy: i32 = work_top + @max(0, @divTrunc(work_h - h, 2));
 
-            // Use configureWithHints so the centred position is stored in the cache.
-            // This ensures restoreWorkspaceGeom can replay it on workspace
-            // switch without issuing a fresh get_geometry round-trip.
+            // configureWithHints stores the position in the cache so
+            // restoreWorkspaceGeom can replay it without a fresh query.
             layouts.configureWithHints(ctx, win, .{
                 .x = @intCast(cx),
                 .y = @intCast(cy),

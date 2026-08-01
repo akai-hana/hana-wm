@@ -9,14 +9,10 @@ const utils = @import("utils");
 const events = @import("events");
 const config = @import("config");
 const constants = @import("constants");
-
 const scale = @import("scale");
 const debug = @import("debug");
-
 const input = @import("input");
-
 const window = @import("window");
-
 const bar = @import("bar");
 
 /// hana's startup sequence and event-loop entry point.
@@ -34,32 +30,14 @@ pub fn main() !void {
     var loaded_config = try config.load(alloc, x.screen, input.getXkbState());
     loaded_config.bar.scaled_font_size = scale.scaleFontSize(loaded_config.bar.font_size, x.screen);
 
-    // Everything core.getState() will ever hand out is ready now — conn, screen,
-    // root, alloc, and the fully-resolved config — so this is the one point where
-    // core's process-wide state comes into existence. No other module may call
-    // core.getState() before this line.
-    //
-    // core.init() copies loaded_config by value; from here on the copy living in
-    // core's state is the canonical one (and the one a SIGHUP reload replaces —
-    // see events.handleConfigReload), so the deferred deinit below targets
-    // core.getState().config rather than the now-redundant local. Deinit'ing the
-    // local instead would free memory the copy in core's state still points to.
+    // core.init() copies loaded_config by value and becomes the canonical
+    // owner; must run before any core.getState() call, and its config must
+    // outlive the keybind map (deinit order below is deliberate).
     core.init(x.conn, x.screen, x.root, alloc, loaded_config);
     defer core.getState().config.deinit(alloc);
-    // Defers are LIFO: deinitKeybindMap runs before the config deinit above, so
-    // the map is cleared (backing array freed) while its action pointers are
-    // still valid.
     defer config.deinitKeybindMap(alloc);
 
     try utils.initAtomCache(x.conn);
-    // No defer needed: atom values are plain integers (xcb_atom_t) with no heap
-    // allocation on our side.  The X server's atom table is global per-server and
-    // persists until the server itself exits; xcb_disconnect (deferred above)
-    // tears down the connection and the server frees all server-side resources.
-
-    // Publish EWMH conformance (_NET_SUPPORTED, _NET_SUPPORTING_WM_CHECK) before
-    // any client can map a window, so every client sees a fully EWMH-aware WM
-    // from its very first property query. Depends only on the atom cache above.
     utils.advertiseEwmhSupport(x.conn, x.screen, x.root);
 
     try events.setupSignalPipe();
@@ -69,12 +47,8 @@ pub fn main() !void {
     try window.init(alloc);
     defer window.deinit();
 
-    // bar.init() asserts core.getState().config.bar.enabled; check here so a
-    // config with bar disabled is always safe, regardless of how the binary was built.
     if (core.getState().config.bar.enabled) {
-        bar.init() catch |err| {
-            debug.err("Bar init failed: {}", .{err});
-        };
+        bar.init() catch |err| debug.err("Bar init failed: {}", .{err});
     }
     defer if (core.getState().config.bar.enabled) bar.deinit();
 
@@ -82,7 +56,6 @@ pub fn main() !void {
     debug.info("hana booted up successfully!", .{});
 
     try events.run();
-    // When event loop exits, it must mean hana's shutting down
     debug.info("Shutting down gracefully...", .{});
 }
 
@@ -97,9 +70,6 @@ const X = struct {
 /// Fails if the display is unavailable, the screen cannot be retrieved,
 /// or another WM is already running.
 fn connectToX() !X {
-    // Pass null for both display and screen number: XCB reads $DISPLAY and
-    // selects screen 0. The screen number parameter is a legacy X11 concept —
-    // modern multi-monitor setups use a single unified screen via Xrandr/Xinerama.
     const conn = xcb.xcb_connect(null, null) orelse unreachable;
 
     if (xcb.xcb_connection_has_error(conn) != 0) {
@@ -109,8 +79,8 @@ fn connectToX() !X {
 
     const screen = xcb.xcb_setup_roots_iterator(xcb.xcb_get_setup(conn)).data orelse return error.X11ScreenFailed;
 
-    // Claim SubstructureRedirectMask on the root window to become the WM.
-    // The X server rejects this if another WM already holds it.
+    // Claim SubstructureRedirectMask on the root window to become the WM;
+    // the X server rejects this if another WM already holds it.
     const cookie = xcb.xcb_change_window_attributes_checked(
         conn,
         screen.*.root,

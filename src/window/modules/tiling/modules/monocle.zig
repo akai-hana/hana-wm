@@ -23,29 +23,16 @@ pub fn tileWithOffset(
     const inset: u16 = if (state.config.layout_variants.monocle == .gaps) m.gap else 0;
     const total_margin = m.border * 2 + inset * 2;
 
-    // Raise the focused window.  ctx.focused_win is set by makeLayoutCtx via
-    // focus.getFocused() and is always a window present in the current workspace
-    // window list when valid.  If it is null (e.g. during restoreWorkspaceGeom,
-    // which constructs a bare LayoutCtx without focus information) or names a
-    // window not in this workspace's list, fall back to the list tail so that
-    // monocle still shows *something* rather than raising nothing.
+    // Pick the top (visible) window: prefer the focused window, falling back
+    // to the list tail if focus info is unavailable. On close, this ensures
+    // the last-focused window resurfaces rather than an arbitrary one.
     //
-    // Falling back to windows[len-1] unconditionally would be wrong: closing
-    // the visible window in monocle could then surface an arbitrary background
-    // window instead of the one the user last interacted with.
-    //
-    // NOTE ON WHO CALLS THIS: picking the right top_win only matters if this
-    // function actually runs on every focus change. A plain focus.setFocus()
-    // does NOT retile by itself — it only raises the newly focused window in
-    // stacking order, which is a no-op here, since monocle hides background
-    // windows by moving them off-screen (pushBackgroundWindowsOffscreen
-    // below), not by lowering them in the stack. Something must call
-    // retileCurrentWorkspace() (or otherwise invoke tileWithOffset) after
-    // every focus change for the visible window to actually swap.
-    // tiling.zig's snapScrollToFocused() is the hook that does this for the
-    // Mod+j/k focus-cycle keybindings; it must special-case .monocle (in
-    // addition to .scroll) or focus-cycling through this layout silently
-    // stops swapping the visible window again.
+    // (A focus change alone doesn't retile, since monocle hides windows via
+    // offscreen positioning rather than stack order — snapScrollToFocused()
+    // in tiling.zig retiles on focus-cycle keypresses to compensate. On
+    // spawn, window.zig's mapWindowToScreen passes the new window in as
+    // ctx.focused_win via retileCurrentWorkspaceWithPendingFocus, since
+    // focus.setFocus for it hasn't run yet at retile time.)
     const top_win: u32 = blk: {
         if (ctx.focused_win) |f| {
             for (windows) |w| {
@@ -67,15 +54,10 @@ pub fn tileWithOffset(
     pushBackgroundWindowsOffscreen(ctx, windows, top_win);
 }
 
-/// Push all windows except `top_win` off the visible screen area so they never
-/// show through a transparent top window.  Skips windows already known to be
-/// offscreen to avoid redundant round-trips; invalidates their cache rect so
-/// `restoreWorkspaceGeom` does not replay a stale on-screen position.
-///
-/// Accepts the full `windows` slice and skips `top_win` by ID rather than
-/// requiring the caller to pre-slice — top_win may be anywhere in the slice
-/// once focus-tracking is taken into account, not necessarily the last
-/// element.
+/// Push all windows except `top_win` offscreen so they never show through a
+/// transparent top window. Skips windows already offscreen to avoid redundant
+/// round-trips, and invalidates their cached rect so `restoreWorkspaceGeom`
+/// doesn't replay a stale on-screen position.
 fn pushBackgroundWindowsOffscreen(
     ctx: *const layouts.LayoutCtx,
     windows: []const u32,

@@ -6,11 +6,8 @@ const core = @import("core");
 const types = @import("types");
 const constants = @import("constants");
 const debug = @import("debug");
-
 const xkbcommon = @import("xkbcommon");
-
 const parser = @import("parser");
-
 const carousel = @import("carousel");
 
 const parseColor = parser.parseColor;
@@ -336,8 +333,8 @@ fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *const parser.Document)
     try parseBar(allocator, doc, &cfg);
     try parseRules(allocator, doc, &cfg);
     parseDrag(doc, &cfg);
-    parseFullscreen(doc, &cfg);
-    parseMinimize(doc, &cfg);
+    parseEnabledFlag(doc, "fullscreen", &cfg.fullscreen_enabled);
+    parseEnabledFlag(doc, "minimize", &cfg.minimize_enabled);
     return cfg;
 }
 
@@ -632,33 +629,17 @@ pub inline fn finalizeConfig(cfg: *types.Config, screen: *core.xcb.xcb_screen_t)
     cfg.bar.scaled_font_size = scale_module.scaleFontSize(cfg.bar.font_size, screen);
 }
 
-/// Resolves keysyms to keycodes and warns about duplicate bindings.
-///
-/// LIFETIME CONTRACT: every Action pointer stored in `g_keybind_map` below
-/// borrows from the `keybindings` slice of the *current* `types.Config`.
-/// The required teardown order is therefore:
-///   1. `deinitKeybindMap`  — clears map entries (Action pointers become dangling)
-///   2. `config.deinit`     — frees the Actions the pointers referenced
-///
-/// This ordering is enforced by the LIFO `defer` sequence in `main.zig`:
-///   defer config.deinit(alloc);            // runs second
-///   defer config.deinitKeybindMap(alloc);  // runs first (LIFO)
-///
-/// TODO: migrate to a `KeybindResolver` struct owned by `Config` so that the
-/// compiler enforces the lifetime rather than relying on defer ordering.
-// Persistent O(1) dispatch table: (modifiers << 32 | keysym) → *const Action.
-// Built by resolveKeybindings and retained across the lifetime of each config.
-// Cleared and rebuilt on every config reload before the old config is freed,
-// so pointers remain valid for the lifetime of the current types.Config.
+/// Persistent O(1) dispatch table: (modifiers << 32 | keysym) → *const Action.
+/// Entries borrow from the current types.Config's keybindings slice, so
+/// callers must call deinitKeybindMap() before freeing that Config.
 var g_keybind_map: std.AutoHashMapUnmanaged(u64, *const types.Action) = .empty;
 
+/// Resolves keysyms to keycodes and warns about duplicate bindings.
 pub fn resolveKeybindings(keybindings: anytype, xkb_state: *xkbcommon.XkbState, allocator: std.mem.Allocator) void {
     for (keybindings) |*kb| kb.keycode = xkb_state.keysymToKeycode(kb.keysym);
 
-    // Conflict detection: use the same (modifiers | keysym) key as the
-    // dispatch map so warnings accurately reflect what lookupKeybinding sees.
-    // Using keycode here instead would diverge from the dispatch map and
-    // could silently miss real conflicts or fire false positives.
+    // Same (modifiers | keysym) key as the dispatch map, so warnings match
+    // what lookupKeybinding actually sees.
     var seen = std.AutoHashMap(u64, usize).init(allocator);
     defer seen.deinit();
     for (keybindings, 0..) |*kb, i| {
@@ -712,19 +693,13 @@ fn parseWorkspaces(doc: *const parser.Document, cfg: *types.Config) void {
     cfg.workspaces.count = getInRange(u8, section, "count", 9, 1, null);
 }
 
-/// Parses the [fullscreen] and [minimize] sections, each currently exposing
-/// only an `enabled` toggle. Each of these subsystems is always compiled in;
-/// this toggle only controls whether its behavior and keybindings are active.
-fn parseFullscreen(doc: *const parser.Document, cfg: *types.Config) void {
-    const section = doc.getSection("fullscreen") orelse return;
-    cfg.fullscreen_enabled = getInRange(bool, section, "enabled", true, null, null);
+/// Reads `section_name.enabled` (default true) into `field`. Used for
+/// subsystems that are always compiled in and only toggled on/off, like
+/// [fullscreen] and [minimize].
+fn parseEnabledFlag(doc: *const parser.Document, section_name: []const u8, field: *bool) void {
+    const section = doc.getSection(section_name) orelse return;
+    field.* = getInRange(bool, section, "enabled", true, null, null);
 }
-
-fn parseMinimize(doc: *const parser.Document, cfg: *types.Config) void {
-    const section = doc.getSection("minimize") orelse return;
-    cfg.minimize_enabled = getInRange(bool, section, "enabled", true, null, null);
-}
-
 
 fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *types.Config) !void {
     const section = doc.getSection("tiling") orelse return;
@@ -824,11 +799,9 @@ fn parseTilingVariants(doc: *const parser.Document, cfg: *types.Config) void {
     };
 }
 
-/// Parses a UTF-8 indicator string into a fixed 3-byte array.
-/// Copies the first complete codepoint only (up to 3 bytes); 4-byte codepoints
-/// (e.g. most emoji) do not fit in 3 bytes and are silently replaced by spaces.
-/// Using `std.unicode.utf8ByteSequenceLength` prevents the previous truncation
-/// bug where a 4-byte emoji was sliced at 3 bytes, producing invalid UTF-8.
+/// Parses a UTF-8 indicator string into a fixed 3-byte array, copying the
+/// first complete codepoint only. 4-byte codepoints (most emoji) don't fit
+/// and fall back to spaces rather than producing invalid UTF-8.
 inline fn parseIndicator(raw: []const u8) [3]u8 {
     var ind: [3]u8 = "   ".*;
     if (raw.len == 0) return ind;
@@ -839,9 +812,6 @@ inline fn parseIndicator(raw: []const u8) [3]u8 {
 }
 
 /// Returns true if `name` (case-insensitive) is a recognised layout name.
-/// Linear scan over types.LAYOUT_TABLE — StaticStringMap would carry comptime
-/// build complexity for no runtime gain at n=6 (tiling.zig's layoutFromString
-/// documents the same reasoning for its own, larger name<->tag table).
 inline fn isKnownLayout(name: []const u8) bool {
     var buf: [32]u8 = undefined;
     if (name.len > buf.len) return false;
@@ -867,12 +837,9 @@ inline fn isWorkspaceList(s: []const u8) bool {
     return has_digit;
 }
 
-/// Canonicalises a layout name to the plain lowercase form used in the layouts
-/// list. Resolves via types.LAYOUT_TABLE's aliases (e.g. "master_stack" and
-/// "master" both become "master-stack") instead of a hardcoded local check,
-/// so this can never drift from what layoutFromString/isKnownLayout accept.
-/// Names with no match are returned lowercased, unchanged — isKnownLayout
-/// rejects those at the call site.
+/// Canonicalises a layout name via types.LAYOUT_TABLE's aliases (e.g. "master"
+/// -> "master-stack"). Unmatched names come back lowercased, unchanged;
+/// isKnownLayout rejects those at the call site.
 inline fn canonicalLayout(name: []const u8, buf: []u8) []const u8 {
     const lower = std.ascii.lowerString(buf[0..name.len], name);
     for (types.LAYOUT_TABLE) |entry| {
@@ -1032,23 +999,20 @@ fn parseTransparency(value: parser.Value) f32 {
     return 1.0;
 }
 
+/// Dupes `val` into `*view`. Always allocates, even for default literals, so
+/// Config.deinit can free every BarConfig string field unconditionally.
+fn assignStr(a: std.mem.Allocator, view: *[]const u8, val: []const u8) !void {
+    view.* = try a.dupe(u8, val);
+}
+
 fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *types.Config) !void {
-    // Dupes `val` into `view`. Always allocates — even for the default
-    // literal — so callers never need to track whether a given BarConfig
-    // string field points at a literal or a heap copy; Config.deinit can
-    // free it unconditionally.
-    const set = struct {
-        fn assignStr(a: std.mem.Allocator, view: *[]const u8, val: []const u8) !void {
-            view.* = try a.dupe(u8, val);
-        }
-    };
     const section = doc.getSection("bar") orelse return;
     cfg.bar.enabled = getInRange(bool, section, "enabled", true, null, null);
     cfg.bar.vim_mode = getInRange(bool, section, "vim_mode", true, null, null);
     if (section.getString("position")) |pos_str|
         cfg.bar.bar_position = std.meta.stringToEnum(types.BarScreenPosition, pos_str) orelse .top;
     cfg.bar.height = section.getScalable("height"); // null = auto from font metrics
-    try set.assignStr(allocator, &cfg.bar.font, getInRange([]const u8, section, "font", "monospace:size=10", null, null));
+    try assignStr(allocator, &cfg.bar.font, getInRange([]const u8, section, "font", "monospace:size=10", null, null));
     if (section.get("fonts")) |v| if (v.asArray()) |arr| {
         for (cfg.bar.fonts.items) |font| allocator.free(font);
         cfg.bar.fonts.clearRetainingCapacity();
@@ -1060,8 +1024,8 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *typ
     cfg.bar.spacing = section.getScalable("segment_spacing") orelse parser.ScalableValue.absolute(12.0);
     inline for (BAR_COLOR_FIELDS) |field|
         @field(cfg.bar, field.name) = getColor(section, field.name, field.default);
-    try set.assignStr(allocator, &cfg.bar.clock_format, getInRange([]const u8, section, "clock_format", "%Y-%m-%d %H:%M:%S", null, null));
-    try set.assignStr(allocator, &cfg.bar.drun_prompt, getInRange([]const u8, section, "drun_prompt", "run: ", null, null));
+    try assignStr(allocator, &cfg.bar.clock_format, getInRange([]const u8, section, "clock_format", "%Y-%m-%d %H:%M:%S", null, null));
+    try assignStr(allocator, &cfg.bar.drun_prompt, getInRange([]const u8, section, "drun_prompt", "run: ", null, null));
     cfg.bar.indicator_size = section.getScalable("indicator_size") orelse parser.ScalableValue.percentage(20.0);
     cfg.bar.workspace_tag_width = section.getScalable("workspace_tag_width") orelse parser.ScalableValue.percentage(100.0);
     if (section.getString("indicator_location")) |loc_str| {
@@ -1084,8 +1048,8 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *typ
     // Always duped (even the literal defaults) so deinit can free unconditionally.
     const raw_focused = section.getString("indicator_focused");
     const raw_unfocused = section.getString("indicator_unfocused");
-    try set.assignStr(allocator, &cfg.bar.indicator_focused, raw_focused orelse raw_unfocused orelse cfg.bar.indicator_focused);
-    try set.assignStr(allocator, &cfg.bar.indicator_unfocused, raw_unfocused orelse raw_focused orelse cfg.bar.indicator_unfocused);
+    try assignStr(allocator, &cfg.bar.indicator_focused, raw_focused orelse raw_unfocused orelse cfg.bar.indicator_focused);
+    try assignStr(allocator, &cfg.bar.indicator_unfocused, raw_unfocused orelse raw_focused orelse cfg.bar.indicator_unfocused);
 
     if (section.get("indicator_color")) |_| // null = inherit workspace fg
         cfg.bar.indicator_color = getColor(section, "indicator_color", cfg.bar.fg);

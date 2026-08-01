@@ -7,20 +7,13 @@ const build = @import("build_options");
 const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
-const constants = @import("constants");
-
 const debug = @import("debug");
-
 const window = @import("window");
 const tracking = @import("tracking");
 const focus = @import("focus");
-
 const fullscreen = @import("fullscreen");
 const workspaces = @import("workspaces");
-const WsWorkspace = workspaces.Workspace;
-
 const tiling = @import("tiling");
-
 const bar = @import("bar");
 
 /// Per-window minimize record.

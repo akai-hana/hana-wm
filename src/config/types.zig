@@ -90,8 +90,6 @@ pub const MasterSide = enum {
     left,
     right,
 
-    // Both orderings of diagonal names and both separators are pre-listed in string_map;
-    // fromString is the canonical parse entry point.
     const string_map = std.StaticStringMap(MasterSide).initComptime(.{
         .{ "l", .left },
         .{ "left", .left },
@@ -126,12 +124,8 @@ pub const GridVariant = enum {
 };
 
 /// The tiling layout algorithm.
-///
-/// Defined here and not in tiling.zig — same reason as MasterVariant above —
-/// so that config.zig and workspaces.zig can resolve layout names to this
-/// type without creating a circular import (tiling.zig already depends on
-/// this module; the reverse would cycle). tiling.zig re-exports this as
-/// `tiling.Layout` so every existing call site keeps working unchanged.
+/// Defined here (not tiling.zig) to avoid a circular import; tiling.zig
+/// re-exports this as `tiling.Layout`.
 pub const Layout = enum {
     master,
     monocle,
@@ -139,20 +133,15 @@ pub const Layout = enum {
     fibonacci,
     leaf,
     scroll,
-    /// Windows are left at their current positions. Never part of the layout
-    /// cycle, and deliberately excluded from LAYOUT_TABLE below — it isn't
-    /// reachable by name from config (not in the `layouts` array, not part
-    /// of the toggle-layout cycle); it's only ever produced as a default.
+    /// Windows are left at their current positions. Never cyclable and never
+    /// parseable by name from config — produced only as a default. Deliberately
+    /// excluded from LAYOUT_TABLE below.
     floating,
 };
 
 /// One entry per cyclable layout — every `Layout` tag except `.floating`.
-///
-/// Single source of truth for every place in the codebase that previously
-/// hand-rolled its own copy of this name<->tag mapping: tiling.zig's
-/// `layout_cycle` and `layoutFromString`, workspaces.zig's `layoutFromName`
-/// (now deleted — it calls tiling.layoutFromString directly), and config.zig's
-/// `isKnownLayout`/`canonicalLayout`. Table order is also cycle order for
+/// Single source of truth for the name<->tag mapping used across tiling.zig,
+/// workspaces.zig, and config.zig. Table order is also cycle order for
 /// toggleLayout/toggleLayoutReverse.
 pub const LayoutInfo = struct {
     tag: Layout,
@@ -160,10 +149,7 @@ pub const LayoutInfo = struct {
     /// the bar's layout indicator.
     name: []const u8,
     /// Alternate spellings accepted when parsing config, folded to `name`
-    /// before storage/comparison. "master_stack" alongside "master" exists
-    /// because config.zig's old canonicalLayout accepted the underscore form
-    /// too (tiling.zig's old layoutFromString did not) — preserved here so
-    /// no previously-accepted config value stops parsing.
+    /// before storage/comparison.
     aliases: []const []const u8 = &.{},
 };
 
@@ -345,9 +331,9 @@ pub const BarConfig = struct {
     font: []const u8 = "monospace:size=10",
     fonts: std.ArrayList([]const u8) = .empty,
     font_size: parser.ScalableValue = parser.ScalableValue.percentage(10.0),
-    // Resolved pixel value cached after DPI scaling; derived from font_size at startup.
-    // Mixed into BarConfig for convenience; keep in mind it is runtime state, not a raw
-    // config value — separate it if BarConfig is ever serialised or structurally diffed.
+    // Resolved pixel value cached after DPI scaling, derived from font_size
+    // at startup. This is runtime state, not raw config, mixed into
+    // BarConfig for convenience.
     scaled_font_size: u16 = 10, // Can exceed 255 on high DPI - u16 is correct
     spacing: parser.ScalableValue = parser.ScalableValue.absolute(12.0),
 
@@ -412,12 +398,10 @@ pub const BarConfig = struct {
     /// Absolute path:   margin = (bar_height - font_px * scale_factor) / 2.
     pub inline fn scaledSegmentPadding(self: *const BarConfig, bar_height: u16) u16 {
         const h: f32 = @floatFromInt(bar_height);
-        // Percentage path: margin = (bar_height - font_height) / 2, scaled.
         if (self.font_size.is_percentage) {
             const margin_ratio = (1.0 - self.font_size.value / 100.0) / 2.0;
             return @as(u16, @intFromFloat(@round(@max(0.0, h * margin_ratio * self.scale_factor))));
         }
-        // Absolute path: margin = (bar_height - font_px * scale_factor) / 2.
         const font_px = self.font_size.value * self.scale_factor;
         return @as(u16, @intFromFloat(@round(@max(0.0, (h - font_px) / 2.0))));
     }
@@ -499,10 +483,8 @@ pub const Config = struct {
         self.bar.deinit(a);
         self.tiling.deinit(a);
 
-        // These string fields are always heap-allocated at parse time (see
-        // parseBar in config.zig), so they can be freed unconditionally —
-        // no ownership sentinel needed to distinguish literal defaults from
-        // heap copies.
+        // Always heap-allocated at parse time (see parseBar in config.zig),
+        // so freed unconditionally here.
         a.free(self.bar.font);
         a.free(self.bar.clock_format);
         a.free(self.bar.drun_prompt);

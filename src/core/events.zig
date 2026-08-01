@@ -97,13 +97,14 @@ pub fn dispatch(event_type: u8, event: *anyopaque) void {
 
 // Signal handling
 
-/// Converts a signal enum value to its raw u8 number.
+// anytype: called with both std.os.linux.SIG (signalHandler, the kernel's
+// callback signature) and std.posix.SIG (sigaction setup and dispatchSignal)
+// — two different enum types for the same signal numbers.
 inline fn sigToU8(sig: anytype) u8 {
     return @intCast(@intFromEnum(sig));
 }
 
 /// Async-signal-safe handler: writes the signal number as a byte to the pipe.
-/// sigToU8 accepts the SIG enum used by Zig master's Sigaction signature.
 fn signalHandler(signo: std.os.linux.SIG) callconv(.c) void {
     _ = std.os.linux.write(signal_pipe[1], &[_]u8{sigToU8(signo)}, 1);
 }
@@ -121,10 +122,7 @@ pub fn setupSignalPipe() !void {
     std.posix.sigaction(std.posix.SIG.HUP, &sa, null);
     std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
     std.posix.sigaction(std.posix.SIG.INT, &sa, null);
-    // SIGCHLD: fired when an intermediate child exits after the double-fork spawn.
-    // The handler writes the signal byte to the self-pipe; dispatchSignal then
-    // calls reapPendingChildren() (waitpid WNOHANG) and drainPendingSpawns().
-    std.posix.sigaction(std.posix.SIG.CHLD, &sa, null);
+    std.posix.sigaction(std.posix.SIG.CHLD, &sa, null); // reaped in dispatchSignal, below
 }
 
 /// Closes both ends of the signal pipe.
@@ -243,10 +241,8 @@ pub fn grabKeybindings() void {
 // Config reload
 
 /// Applies a validated config: resolves keybindings and notifies all
-/// subsystems of the change.  grabKeybindings() is intentionally NOT called
-/// here — it reads core.getState().config.keybindings, so it must run after
-/// the config swap in handleConfigReload.  Calling it here would re-grab
-/// the OLD keycodes while g_keybind_map already points to the new ones.
+/// subsystems of the change. grabKeybindings() is deliberately not called
+/// here — see the comment in handleConfigReload for why.
 fn applyConfig(new_config: *types.Config) !void {
     const cs = core.getState();
     config.resolveKeybindings(new_config.keybindings.items, input.getXkbState(), cs.alloc);
@@ -276,8 +272,9 @@ fn handleConfigReload() !void {
     cs.config = new_config;
     old_config.deinit(cs.alloc);
 
-    // Re-grab keybindings now that cs.config points to the new config so
-    // fillGrabCookies reads the correct (new) keycodes, not the old ones.
+    // grabKeybindings() must run after this swap, not inside applyConfig:
+    // fillGrabCookies() reads core.getState().config.keybindings, so calling
+    // it before the swap would re-grab the OLD keycodes.
     grabKeybindings();
 
     // Rebuild after the swap so borrowed key slices point into the new config's memory.

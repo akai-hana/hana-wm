@@ -6,9 +6,21 @@ const debug = @import("debug");
 
 // Checked in preference order.
 const TERMINALS = [_][]const u8{
-    "ghostty",        "alacritty",      "kitty",         "wezterm",    "foot",
-    "st",             "urxvt",          "rxvt",          "xterm",      "konsole",
-    "gnome-terminal", "xfce4-terminal", "mate-terminal", "lxterminal", "terminator",
+    "ghostty",
+    "alacritty",
+    "kitty",
+    "wezterm",
+    "foot",
+    "st",
+    "urxvt",
+    "rxvt",
+    "xterm",
+    "konsole",
+    "gnome-terminal",
+    "xfce4-terminal",
+    "mate-terminal",
+    "lxterminal",
+    "terminator",
 };
 
 // Checked in preference order. "monospace" is always the final fallback.

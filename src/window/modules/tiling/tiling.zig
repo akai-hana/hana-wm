@@ -33,57 +33,6 @@ const fibonacci = @import("fibonacci");
 const leaf = @import("leaf");
 const scroll = @import("scroll");
 
-// Comptime verification that every layout module (or its LayoutStub fallback)
-// exports a `tileWithOffset` function with the exact signature the dispatcher
-// `invokeLayout` requires.  This fires a compile error — not a runtime panic —
-// the moment a new layout module is added or an existing one's signature drifts,
-// before any tests are run.  Without this check, a duck-typed mismatch only
-// surfaces if the mismatched layout is selected at runtime in a test run that
-// actually exercises it.
-comptime {
-    const LayoutModule = type;
-    const expected_params = .{
-        *const layouts.LayoutCtx, // ctx
-        *State, // state
-        []const u32, // windows
-        u16, // screen_w
-        u16, // screen_h
-        u16, // y_offset
-    };
-    const layout_modules = [_]LayoutModule{ master, monocle, grid, fibonacci, leaf, scroll };
-    // Every cyclable layout in types.LAYOUT_TABLE must have a dispatchable
-    // module here (and vice versa) — `.floating` is the one deliberate
-    // exception on both sides: it has no entry in LAYOUT_TABLE (see that
-    // type's doc comment) and no module in this list (invokeLayout dispatches
-    // it directly to the floating.zig import instead).
-    if (layout_modules.len != types.LAYOUT_TABLE.len) {
-        @compileError("layout_modules and types.LAYOUT_TABLE have drifted apart — " ++
-            "add/remove entries in both so every cyclable layout has exactly one dispatch module");
-    }
-    for (layout_modules) |Mod| {
-        if (!@hasDecl(Mod, "tileWithOffset")) {
-            @compileError(@typeName(Mod) ++ " must export `tileWithOffset`");
-        }
-        const fn_info = @typeInfo(@TypeOf(Mod.tileWithOffset));
-        if (fn_info != .@"fn") {
-            @compileError(@typeName(Mod) ++ ".tileWithOffset must be a function");
-        }
-        const params = fn_info.@"fn".params;
-        if (params.len != expected_params.len) {
-            @compileError(@typeName(Mod) ++ ".tileWithOffset has wrong parameter count");
-        }
-        // Parameter type checks — each must match the expected type exactly.
-        for (expected_params, 0..) |ExpT, i| {
-            if (params[i].type) |ActT| {
-                if (ActT != ExpT) {
-                    @compileError(@typeName(Mod) ++ ".tileWithOffset parameter " ++
-                        std.fmt.comptimePrint("{d}", .{i}) ++ " type mismatch");
-                }
-            }
-        }
-    }
-}
-
 // Module constants
 
 const max_master_width_ratio: f32 = 0.95; // prevents master from consuming the full screen
@@ -122,16 +71,9 @@ pub const LayoutVariants = struct {
     grid: GridVariant = .rigid,
 };
 
-/// All scroll-layout-specific runtime state, grouped to make it clear
-/// which fields are only meaningful while `layout == .scroll`.  When a
-/// different layout is active these fields are dormant but retain their
-/// last values so that switching back to scroll restores the viewport
-/// position the user left it at.
-///
-/// Kept on State rather than being heap-allocated so that the WM never
-/// touches an allocator during normal operation.  The size cost is
-/// negligible (16 bytes) and the separation makes future removal of the
-/// scroll layout a one-field delete instead of a multi-site grep.
+/// Scroll-layout runtime state. Only meaningful while `layout == .scroll`;
+/// otherwise dormant but preserved, so switching back to scroll restores the
+/// viewport position the user left it at.
 pub const ScrollState = struct {
     /// Horizontal pixel offset of the scroll viewport.
     /// Clamped by scroll.tileWithOffset on every retile.
@@ -194,11 +136,13 @@ pub const GeomCache = struct {
     /// bar height or position change).
     last_retile_area: utils.Rect,
 
-    // Scratch buffer — fixed-size array embedded in GeomCache (BSS, zero allocation).
-    //
-    // Reused across retile calls to avoid per-call stack pressure.
-    //   scratch_wins — [max_workspace_windows]u32   single-workspace window list;
-    //                  also used by retileAllWorkspaces for per-workspace collection.
+    /// Single-workspace window list, reused across retile calls (BSS, zero
+    /// allocation) instead of collecting into a fresh per-call buffer.
+    /// retileAllWorkspaces reuses this same buffer once per workspace in its
+    /// loop rather than a flattened `[workspaces][windows]` array — window
+    /// and workspace counts are both small and bounded, so the O(workspaces
+    /// × windows) it costs is negligible, and it avoids the ~32 KB a
+    /// flattened buffer would need.
     scratch_wins: [max_workspace_windows]u32,
 };
 
@@ -403,8 +347,8 @@ pub fn toggleWindowFloat(window_id: u32) void {
     retileCurrentWorkspace();
     // Grab, border sweep, bar redraw, and flush are the caller's responsibility
     // (input.zig executeAction / executeMouseAction).  Keeping this function
-    // grab-agnostic matches the swapWithMaster / swapWithMasterFollowFocus
-    // convention and lets the caller compose the full atomic batch.
+    // grab-agnostic matches swapWithMaster's convention and lets the caller
+    // compose the full atomic batch.
 }
 
 /// Returns the position of `win` in the current-workspace-filtered window list —
@@ -494,6 +438,26 @@ pub fn retileCurrentWorkspaceDeferred(defer_win: ?u32) void {
     s.is_dirty = false;
 }
 
+/// Like retileCurrentWorkspace, but overrides LayoutCtx.focused_win with
+/// `pending_focus` instead of reading focus.getFocused().
+///
+/// Used by window.zig's spawn path: a newly-mapped window is retiled before
+/// focus.setFocus runs on it (retiling is deliberately kept outside the
+/// atomic map/focus/border grab — see mapWindowToScreen), so
+/// focus.getFocused() would still report the previously-focused window at
+/// retile time. Passing the spawning window here keeps focus-driven layouts
+/// (e.g. monocle raising the focused window) in sync with the window that is
+/// about to actually receive focus, instead of lagging by one retile.
+pub fn retileCurrentWorkspaceWithPendingFocus(pending_focus: u32) void {
+    const s = getState();
+    if (!s.is_enabled) {
+        _ = restoreWorkspaceGeom();
+        return;
+    }
+    retileImpl(calcScreenArea(), .{ .focus_override = pending_focus });
+    s.is_dirty = false;
+}
+
 /// Retile the current workspace only when state has been marked dirty.
 pub fn retileIfDirty() void {
     const s = getState();
@@ -501,19 +465,9 @@ pub fn retileIfDirty() void {
     retileCurrentWorkspace();
 }
 
-/// Retile all workspaces in one pass, updating the cache for each.
-/// Skips the current workspace (handled separately) and any fullscreen workspace.
-///
-/// A single loop collects each workspace's windows into scratch_wins (128 B
-/// of already-available BSS) immediately before invoking the layout, rather
-/// than building a flattened 2-D window-list array
-/// (retile_wins[max_workspaces * max_workspace_windows]) up front via bitmask
-/// iteration, which would require 32 KB of BSS scratch space and add
-/// sensitivity to the interaction between the two passes.  The tradeoff —
-/// O(workspaces × all_windows) instead of O(all_windows) — is acceptable
-/// because both counts are bounded small (≤64 workspaces, ≤128 windows per
-/// workspace) and this path only runs on workspace switch, not on every
-/// keypress.
+/// Retile every workspace except the current one and any fullscreen
+/// workspace, so their geometry caches are correct before the user switches
+/// to them. Runs on workspace switch only, not on every keypress.
 pub fn retileAllWorkspaces() void {
     const s = getState();
     if (!s.is_enabled) return;
@@ -841,61 +795,16 @@ pub fn snapScrollToFocused() void {
 // Window swap operations
 
 /// Swap the focused window into the master slot (index 0 of the current
-/// workspace window list). If it is already the master, promotes the next
-/// workspace window.
+/// workspace window list). If it is already master, promotes the next
+/// window instead. Returns the window that was displaced, so the caller can
+/// re-focus it — or null if there was nothing to swap.
 ///
 /// NOTE: Does NOT call retileCurrentWorkspace(). The caller (action handler)
 /// is responsible for retiling inside the server grab so that the list
 /// reorder and the geometry flush are part of the same atomic batch.
-pub fn swapWithMaster() void {
-    const s = getState();
-    _ = swapWithMasterCore(s, findFocusMasterPos(s) orelse return);
-}
-
-/// Like `swapWithMaster`, but returns the displaced window so the caller can
-/// transfer focus to it after retiling, still inside the server grab.
-///
-/// NOTE: Does NOT call retileCurrentWorkspace(). See swapWithMaster().
-pub fn swapWithMasterFollowFocus() ?u32 {
+pub fn swapWithMaster() ?u32 {
     const s = getState();
     return swapWithMasterCore(s, findFocusMasterPos(s) orelse return null);
-}
-
-/// Like swapWithMaster but returns the post-swap per-workspace window slice
-/// (already residing in s.scratch_wins). Pass it directly to
-/// retileCurrentWorkspaceDeferredPrebuilt to avoid a redundant
-/// collectWorkspaceWindows call on the same hot path.
-///
-/// Returns null when preconditions are not met (nothing focused, fewer than 2
-/// windows, etc.) — the caller should skip retile in that case.
-pub fn swapWithMasterGetWins() ?[]const u32 {
-    const s = getState();
-    const pos = findFocusMasterPos(s) orelse return null;
-    _ = swapWithMasterCore(s, pos);
-    return pos.ws_wins; // already updated in-place by swapWithMasterCore
-}
-
-/// Like swapWithMasterFollowFocus but also returns the post-swap workspace
-/// window slice so the caller can skip the second collectWorkspaceWindows call.
-pub fn swapWithMasterFollowFocusGetWins() ?struct { displaced: ?u32, ws_wins: []const u32 } {
-    const s = getState();
-    const pos = findFocusMasterPos(s) orelse return null;
-    const displaced = swapWithMasterCore(s, pos);
-    return .{ .displaced = displaced, .ws_wins = pos.ws_wins };
-}
-
-/// Retile the current workspace using a pre-built window list, skipping the
-/// collectWorkspaceWindows scan. Intended for use with the slice returned by
-/// swapWithMasterGetWins / swapWithMasterFollowFocusGetWins so that the
-/// swap-master action path performs one collect instead of two.
-pub fn retileCurrentWorkspaceDeferredPrebuilt(ws_wins: []const u32, defer_win: ?u32) void {
-    const s = getState();
-    if (!s.is_enabled) {
-        _ = restoreWorkspaceGeom();
-        return;
-    }
-    retileImpl(calcScreenArea(), .{ .defer_win = defer_win, .pre_built = ws_wins });
-    s.is_dirty = false;
 }
 
 // Query functions
@@ -1139,56 +1048,40 @@ fn selectLayout(s: *State, ws_state: ?*WsState, ws_idx: u8, is_global: bool) Lay
     return if (ws_idx < wss.workspaces.len) wss.workspaces[ws_idx].layout else s.config.layout;
 }
 
-/// Returns the master width for `ws_idx` in per-workspace mode.
-/// Falls back to the current global value for workspaces that have not yet
-/// had their width adjusted (master_width == null).
-/// Generic resolver for per-workspace config overrides.
-///
-/// Reads `s.config.<field>` as the global fallback and
-/// `ws_state.workspaces[ws_idx].<field>` (optional) as the per-workspace override.
-/// Both functions below delegate here to eliminate the duplicated five-arm guard.
-inline fn resolveWorkspaceValue(
-    comptime field: []const u8,
-    comptime T: type,
-    s: *const State,
-    ws_state: ?*WsState,
-    ws_idx: u8,
-) T {
-    const global: T = @field(s.config, field);
-    if (core.getState().config.tiling.global_layout) return global;
-    const wss = ws_state orelse return global;
-    if (ws_idx >= wss.workspaces.len) return global;
-    if (@field(wss.workspaces[ws_idx], field)) |v| return v;
-    return global;
-}
-
+/// Returns the master width for `ws_idx` in per-workspace mode. Falls back to
+/// the current global value for workspaces that have no override yet.
 inline fn resolveMasterWidth(s: *const State, ws_state: ?*WsState, ws_idx: u8) f32 {
-    return resolveWorkspaceValue("master_width", f32, s, ws_state, ws_idx);
+    if (core.getState().config.tiling.global_layout) return s.config.master_width;
+    const wss = ws_state orelse return s.config.master_width;
+    if (ws_idx >= wss.workspaces.len) return s.config.master_width;
+    return wss.workspaces[ws_idx].master_width orelse s.config.master_width;
 }
 
-/// Returns the master count for `ws_idx` in per-workspace mode.
-/// Falls back to the current global value for workspaces that have no override.
+/// Returns the master count for `ws_idx` in per-workspace mode. Falls back to
+/// the current global value for workspaces that have no override yet.
 inline fn resolveMasterCount(s: *const State, ws_state: ?*WsState, ws_idx: u8) u8 {
-    return resolveWorkspaceValue("master_count", u8, s, ws_state, ws_idx);
+    if (core.getState().config.tiling.global_layout) return s.config.master_count;
+    const wss = ws_state orelse return s.config.master_count;
+    if (ws_idx >= wss.workspaces.len) return s.config.master_count;
+    return wss.workspaces[ws_idx].master_count orelse s.config.master_count;
 }
 
 // Core retile
 
-/// Options for the single core retile implementation.  All public retile
-/// entry points are thin wrappers that fill in this struct and call retileImpl,
-/// avoiding near-duplicate logic that would otherwise be spread across four
-/// separate private functions (retile, retileDeferred, retileForWorkspace,
-/// retileCurrentWorkspaceDeferredPrebuilt).
+/// Options for the single core retile implementation. All public retile
+/// entry points are thin wrappers that fill this in and call retileImpl.
 const RetileOpts = struct {
-    /// Target workspace.  Null = current workspace.
+    /// Target workspace. Null = current workspace.
     for_ws: ?u8 = null,
     /// When non-null, threaded into LayoutCtx.defer_win so the named window's
     /// configure_window call lands last within whatever column/stack group it
     /// belongs to. Used by swap_master to eliminate the one-frame wallpaper gap.
     defer_win: ?u32 = null,
-    /// When non-null, skip collectWorkspaceWindows and use this list directly.
-    /// The caller guarantees the slice contents match the current workspace.
-    pre_built: ?[]const u32 = null,
+    /// When non-null, overrides LayoutCtx.focused_win instead of reading
+    /// focus.getFocused(). Used by the spawn path (retileCurrentWorkspaceWithPendingFocus)
+    /// to hand a freshly-mapped window to the layout before focus.setFocus
+    /// has actually run on it.
+    focus_override: ?u32 = null,
 };
 
 /// Single implementation underlying every public retile entry point.
@@ -1200,15 +1093,14 @@ fn retileImpl(screen: utils.Rect, opts: RetileOpts) void {
 
     if (fullscreen.getForWorkspace(target_ws)) |_| return;
 
-    const ws_windows: []const u32 = if (opts.pre_built) |pb| pb else blk: {
-        const n = collectWorkspaceWindows(s, &s.geom.scratch_wins, opts.for_ws);
-        break :blk s.geom.scratch_wins[0..n];
-    };
+    const n = collectWorkspaceWindows(s, &s.geom.scratch_wins, opts.for_ws);
+    const ws_windows = s.geom.scratch_wins[0..n];
     if (ws_windows.len == 0) return;
 
     var deferred: ?utils.Rect = null;
     var ctx = makeLayoutCtx(s, &deferred);
     ctx.defer_win = opts.defer_win;
+    if (opts.focus_override) |f| ctx.focused_win = f;
 
     const wss = workspaces.getState();
 
@@ -1251,18 +1143,12 @@ inline fn updateBorders(s: *State, ws_windows: []const u32) void {
     for (ws_windows) |win| applyBorderColor(s, core.getState().conn, win, s.borderColor(win));
 }
 
-/// Public dedup helper for window.zig's border-sweep functions.
-///
-/// Checks the tiling geometry cache for `win` and sends
-/// `xcb_change_window_attributes BORDER_PIXEL` only when `color` differs from
-/// the stored value.  Returns true when the window was found in the cache
-/// (caller should `continue` and not send again).  Returns false when the
-/// window has no cache entry (pure floating window never retiled), so the
-/// caller falls back to an unconditional send.
-///
-/// This eliminates one `xcb_change_window_attributes` per tiled window per
-/// event batch when the focused window has not changed — the most common case
-/// during idle scroll, typing, or cursor movement inside a window.
+/// Sends the border-pixel change for `win` only if `color` differs from the
+/// cached value. Returns true when `win` had a cache entry (a tiled or
+/// previously-retiled window) — the caller should treat that as "handled".
+/// Returns false when there is no cache entry (a pure floating window that
+/// was never retiled), so the caller should fall back to an unconditional
+/// send. Used by window.zig's border-sweep functions.
 pub fn sendBorderColorIfChanged(win: u32, color: u32) bool {
     const s = getStateOpt() orelse return false;
     const wd = s.geom.cache.getPtr(win) orelse return false;
@@ -1329,41 +1215,19 @@ fn moveWindowToIndex(s: *State, from_idx: usize, to_idx: usize) void {
     s.windows.reorder(s.geom.scratch_wins[0..j]);
 }
 
-/// Finds the index of each id in `targets` within `items`, in one pass.
-/// `out[i]` is left null if `targets[i]` is not found.
-///
-/// Shared by call sites that previously hand-rolled their own "find several
-/// IDs in one fused scan" loop (swapWindowsById, findFocusMasterPos) — the
-/// same shape BoundedList already consolidated for a different repeated
-/// pattern elsewhere in this codebase. moveWindowToFilteredSlot below does
-/// NOT use this helper: unlike a plain multi-ID search, its second target
-/// (`to_global`) is a *filtered positional* match (the Nth window on the
-/// current workspace), not an ID match, so it keeps its own fused loop.
-fn findIndices(items: []const u32, targets: []const u32, out: []?usize) void {
-    std.debug.assert(out.len >= targets.len);
-    for (items, 0..) |w, i| {
-        for (targets, 0..) |t, ti| {
-            if (out[ti] == null and w == t) out[ti] = i;
-        }
-    }
-}
-
 /// Reposition `win` within the global window list so that it lands at
 /// workspace-filtered index `target` (0 = master slot).
 ///
-/// Background — the shift arithmetic:
-///   moveWindowToIndex(from, to) removes the source element first, then
-///   inserts at position `to` in the *shortened* list. When `from` lies
-///   before `to`, removal shifts elements left by one, so the effective
-///   insertion point is `tg - 1`. When `from` lies after `to` no shift occurs.
+/// moveWindowToIndex(from, to) removes the source element first, then
+/// inserts at position `to` in the shortened list. When `from` lies before
+/// `to`, removal shifts elements left by one, so the effective insertion
+/// point is `tg - 1`; when `from` lies after `to`, no shift occurs.
 fn moveWindowToFilteredSlot(s: *State, win: u32, target: usize) void {
     const items = s.windows.items();
 
-    // Single fused pass: find from_global (position of `win`) and to_global
-    // (target filtered slot, skipping `win` itself) simultaneously with early
-    // exit when both are found — replaces two separate O(N) scans. Not a
-    // findIndices call: to_global is a filtered positional match, not an ID
-    // match, so it needs its own loop body (see findIndices' doc comment).
+    // `to_global` is a filtered *positional* match (the Nth window on the
+    // current workspace), not an ID match like `from_global`, so both are
+    // found in one pass here rather than via a plain indexOfScalar.
     var from_global: ?usize = null;
     var to_global: ?usize = null;
     var filtered_count: usize = 0;
@@ -1403,34 +1267,22 @@ fn swapWindowsInList(s: *State, idx_a: usize, idx_b: usize) void {
 pub fn swapWindowsById(win_a: u32, win_b: u32) void {
     const s = getState();
     const all = s.windows.items();
-    var out: [2]?usize = .{ null, null };
-    findIndices(all, &.{ win_a, win_b }, &out);
-    swapWindowsInList(s, out[0] orelse return, out[1] orelse return);
+    const idx_a = std.mem.indexOfScalar(u32, all, win_a) orelse return;
+    const idx_b = std.mem.indexOfScalar(u32, all, win_b) orelse return;
+    swapWindowsInList(s, idx_a, idx_b);
     retileCurrentWorkspace();
 }
 
-/// Locates the focused window and the current workspace's master window in the
-/// ordered window list. Returns null when preconditions are not met (nothing
-/// focused, not tiled, not on current workspace, or fewer than 2 windows).
-/// fp_global   — index of the focused window in s.windows.buf
-/// mp_global   — index of the master window (ws_wins[0]) in s.windows.buf
-/// fp_filtered — index of the focused window in the per-workspace ordered list
-///               (0 means the focused window IS the current master)
-/// ws_wins     — per-workspace filtered window slice, matching the order the
-///               layout module receives; ws_wins[0] is always the layout master.
-///               Points into s.scratch_wins; valid until the next call that
-///               overwrites that buffer.
+/// Locates the focused window and the current workspace's master window in
+/// the ordered window list. Returns null when preconditions are not met
+/// (nothing focused, not tiled, not on current workspace, or fewer than two
+/// windows on the workspace).
 const FocusMasterPos = struct {
-    fp_global: usize,
-    mp_global: usize,
-    /// Global index of ws_wins[1] — the first stack window.
-    /// Pre-computed alongside fp/mp to avoid a third O(N) scan in swapWithMasterCore.
-    ns_global: usize,
-    fp_filtered: usize,
-    /// Mutable slice into s.scratch_wins; swapWithMasterCore keeps it in sync
-    /// with s.windows.buf so callers can pass it directly to
-    /// retileCurrentWorkspaceDeferredPrebuilt and skip a second collect.
-    ws_wins: []u32,
+    fp_global: usize, // index of the focused window in s.windows.buf
+    mp_global: usize, // index of the master window (ws_wins[0]) in s.windows.buf
+    next_global: usize, // index of ws_wins[1], the first stack window
+    fp_filtered: usize, // index of the focused window in ws_wins (0 == focused is master)
+    ws_wins: []const u32, // per-workspace filtered list; ws_wins[0] is the layout master
 };
 
 fn findFocusMasterPos(s: *State) ?FocusMasterPos {
@@ -1442,32 +1294,21 @@ fn findFocusMasterPos(s: *State) ?FocusMasterPos {
     // insertion order across workspaces.
     const ws_count = collectWorkspaceWindows(s, &s.geom.scratch_wins, null);
     const ws_wins = s.geom.scratch_wins[0..ws_count];
+    if (ws_wins.len < 2) return null; // need at least two windows for a meaningful swap
 
-    // Need at least two windows on this workspace for a meaningful swap.
-    if (ws_wins.len < 2) return null;
-
-    // Locate the focused window inside the filtered list.
     const fp_filtered = std.mem.indexOfScalar(u32, ws_wins, focused) orelse return null;
-
-    // Single pass over s.windows.buf to find global indices for focused, master,
-    // and next-stack windows — avoids three separate O(N) scans.
     const all = s.windows.items();
-    const master_xid = ws_wins[0];
-    const next = ws_wins[1]; // always valid: ws_wins.len >= 2 checked above
-
-    var out: [3]?usize = .{ null, null, null };
-    findIndices(all, &.{ focused, master_xid, next }, &out);
 
     return .{
-        .fp_global = out[0] orelse return null,
-        .mp_global = out[1] orelse return null,
-        .ns_global = out[2] orelse return null,
+        .fp_global = std.mem.indexOfScalar(u32, all, focused) orelse return null,
+        .mp_global = std.mem.indexOfScalar(u32, all, ws_wins[0]) orelse return null,
+        .next_global = std.mem.indexOfScalar(u32, all, ws_wins[1]) orelse return null,
         .fp_filtered = fp_filtered,
         .ws_wins = ws_wins,
     };
 }
 
-/// Shared core for both swap-with-master variants.
+/// Shared core for swapWithMaster.
 ///
 /// Uses swapWindowsInList (O(1) std.mem.swap) instead of moveWindowToIndex
 /// (O(n) remove-then-insert) — untouched windows keep their slots, get cache
@@ -1478,13 +1319,11 @@ fn swapWithMasterCore(s: *State, pos: FocusMasterPos) ?u32 {
         // visual result as a rotation for single-master layouts.
         if (pos.ws_wins.len < 2) return null;
         const next_win = pos.ws_wins[1];
-        swapWindowsInList(s, pos.mp_global, pos.ns_global);
-        std.mem.swap(u32, &pos.ws_wins[0], &pos.ws_wins[1]); // keep ws_wins in sync with buf
+        swapWindowsInList(s, pos.mp_global, pos.next_global);
         return next_win;
     }
     const master_win = pos.ws_wins[0];
     swapWindowsInList(s, pos.fp_global, pos.mp_global);
-    std.mem.swap(u32, &pos.ws_wins[0], &pos.ws_wins[pos.fp_filtered]); // keep ws_wins in sync
     return master_win;
 }
 

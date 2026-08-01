@@ -23,41 +23,24 @@ const TilingLayout = tiling.Layout;
 
 const bar = @import("bar");
 
-/// Shim so call-sites read naturally; minimize self-gates (its buffer stays
-/// empty when minimize_enabled is false), so this is just a direct passthrough.
-inline fn isMinimized(win: u32) bool {
-    return minimize.isMinimized(win);
-}
-
 pub const Workspace = struct {
     id: u8,
     name: []const u8,
-    // The tiling layout active on this workspace.
-    // Initialized from config; updated when the user switches layouts
-    // in per-workspace mode.
     layout: TilingLayout,
-    // Optional layout variants override set via the layouts array in config.
-    // Applied on every workspace switch; null means use the global defaults.
+    /// Per-workspace layout-variant override from config; null = global default.
     variants: ?types.LayoutVariantOverride = null,
-    // Per-workspace master width override (master-stack layout).
-    // null = use the global default from tiling state.
-    // Set when the user adjusts master width in per-workspace layout mode;
-    // loaded back into tiling state on every workspace switch-in.
+    /// Per-workspace master-width override (master-stack layout); null = global default.
     master_width: ?f32 = null,
-    // Per-workspace master count override (master-stack layout).
-    // null = use the global default from config / tiling state.
-    // Populated at init from [tiling.layouts.master-stack.counts] and updated
-    // when the user adjusts the count via keybind in per-workspace layout mode.
+    /// Per-workspace master-count override (master-stack layout); null = global default.
     master_count: ?u8 = null,
-    // Last window that held focus on this workspace before the user left it.
-    // Restored on re-entry when the cursor is not hovering over any window.
+    /// Window focused here before the user last left; restored on re-entry
+    /// when the cursor isn't hovering a window.
     last_focused: ?u32 = null,
 
     pub fn init(id: u8, name: []const u8, default_layout: TilingLayout) Workspace {
         return .{ .id = id, .name = name, .layout = default_layout };
     }
 
-    /// Clears last_focused if it pointed to `win`.
     pub fn removeAndClearFocus(self: *Workspace, win: u32) void {
         if (self.last_focused == win) self.last_focused = null;
     }
@@ -67,9 +50,8 @@ pub const State = struct {
     workspaces: []Workspace,
     current: u8,
     allocator: std.mem.Allocator,
-    /// Windows temporarily patched into the current workspace by switchToAll().
-    /// Non-empty iff all-workspaces view is active.
-    /// Cleared (and their bitmasks restored) on the next switchToAll() or switchTo().
+    /// Windows temporarily patched into the current workspace by switchToAll();
+    /// non-empty iff all-workspaces view is active.
     all_view_temp_wins: std.ArrayListUnmanaged(u32) = .empty,
 };
 
@@ -93,21 +75,33 @@ inline fn setBits(mask: u64) SetBitIterator {
     return .{ .bits = mask };
 }
 
-/// Push `win` offscreen and evict its geometry cache entry.
-/// Used when a window leaves the current workspace.
+/// Push `win` offscreen and evict its geometry cache entry, for a window
+/// leaving the current workspace.
 inline fn evictWindow(win: u32) void {
     utils.pushWindowOffscreen(core.getState().conn, win);
     tiling.invalidateGeomCache(win);
 }
 
-/// Initializes global workspace state.  Returns error.OutOfMemory if the
-/// workspace slice cannot be allocated; callers should treat this as fatal.
+/// Moves win's fullscreen record so it stays fullscreen after a tag/move.
+/// No-op if win isn't fullscreen anywhere. Cleans up the source workspace's
+/// live UI (bar, border) only when leaving `current` — other workspaces have
+/// no live fullscreen chrome to clean up. `force`: follow `new_home` even
+/// when fullscreen on some other, non-current workspace — used when `win` is
+/// being detached from every workspace except `new_home`.
+fn transferFullscreenRecord(win: u32, current: u8, new_home: u8, force: bool) void {
+    const src_ws = fullscreen.workspaceFor(win) orelse return;
+    if (src_ws == current) {
+        fullscreen.cleanupFullscreenForMove(win, src_ws);
+        fullscreen.moveRecord(src_ws, new_home);
+    } else if (force) {
+        fullscreen.moveRecord(src_ws, new_home);
+    }
+}
+
+/// Initializes global workspace state. Workspaces-disabled collapses to a
+/// single implicit workspace; every switch/tag/move action already no-ops on
+/// an out-of-range target, so nothing else needs to branch on this.
 pub fn init() !void {
-    // When workspaces are disabled, collapse to a single implicit workspace.
-    // Every switch/tag/move action already no-ops on an out-of-range target
-    // (see the `target_ws >= s.workspaces.len` guards below), so this one
-    // line reproduces the "disabled" behavior without any further branching
-    // elsewhere.
     const cs = core.getState();
     const count = if (cs.config.workspaces.enabled) cs.config.workspaces.count else 1;
     const wss = try cs.alloc.alloc(Workspace, count);
@@ -115,9 +109,8 @@ pub fn init() !void {
     const default_layout: TilingLayout = tiling.getState().config.layout;
     const cfg_tiling = &cs.config.tiling;
 
-    // Build a flat lookup table so each workspace's override is O(1) to find,
-    // instead of the original O(overrides) inner-loop scan per workspace.
-    // The u64 bitmask caps us at 64 workspaces, so a fixed-size array suffices.
+    // Flatten the override lists into O(1)-lookup arrays, capped at 64
+    // workspaces by the u64 tag bitmask used everywhere else.
     const MAX_WS = 64;
     const OverrideLookup = struct {
         layout_idx: usize,
@@ -132,7 +125,6 @@ pub fn init() !void {
             };
     }
 
-    // Per-workspace master count overrides from [tiling.layouts.master-stack.counts].
     var master_count_lookup: [MAX_WS]?u8 = .{null} ** MAX_WS;
     for (cfg_tiling.workspace_master_count_overrides.items) |o| {
         if (o.workspace_idx < MAX_WS)
@@ -143,8 +135,6 @@ pub fn init() !void {
         const id: u8 = @intCast(i);
         const name = if (i < tracking.WORKSPACE_LABELS.len) tracking.WORKSPACE_LABELS[i] else "?";
 
-        // Apply any workspace-specific layout + variants override from the
-        // layouts array (e.g. `"monocle", "gapless", "4,8"` in config.toml).
         var ws_layout = default_layout;
         var ws_variant: ?types.LayoutVariantOverride = null;
         if (id < MAX_WS) {
@@ -178,8 +168,8 @@ pub fn deinit() void {
         s.allocator.free(s.workspaces);
     }
     g_state = null;
-    // Order matters: setCurrentWorkspace asserts ws < g_workspace_count, so it
-    // must run before setWorkspaceCount(0) zeroes that bound out from under it.
+    // setCurrentWorkspace asserts ws < g_workspace_count, so it must run
+    // before setWorkspaceCount(0) zeroes that bound out from under it.
     tracking.setCurrentWorkspace(0);
     tracking.setWorkspaceCount(0);
 }
@@ -207,36 +197,19 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
     }
 
     const mask = tracking.getWindowWorkspaceMask(win) orelse {
-        // Not yet tracked (new window): register in tracking.
-        try tracking.registerWindow(win, target_ws);
+        try tracking.registerWindow(win, target_ws); // new window: register in tracking
         return;
     };
 
     const target_bit = tracking.workspaceBit(target_ws);
     if (mask == target_bit) return;
 
+    // new_mask is always non-zero: target_bit is always set.
     const new_mask = (mask & ~tracking.workspaceBit(s.current)) | target_bit;
-    // Note: new_mask is always non-zero here — target_bit (= 1 << target_ws) is
-    // always set, so the OR guarantees at least one bit is present.
-
-    // Route through setWindowMask so every workspace's window list stays in sync,
-    // including any extra workspaces the window was tagged to beyond the current one.
     setWindowMask(s, win, new_mask);
 
-    if (isMinimized(win)) {
-        minimize.moveToWorkspace(win, target_ws);
-    }
-
-    // If this window is fullscreen on the current workspace, clean up the
-    // fullscreen side-effects on the source workspace (bar, floating windows,
-    // border) and transfer the record to target_ws so the window is still
-    // fullscreen when you switch there.
-    fs_blk: {
-        const src_ws = fullscreen.workspaceFor(win) orelse break :fs_blk;
-        if (src_ws != s.current) break :fs_blk;
-        fullscreen.cleanupFullscreenForMove(win, src_ws);
-        fullscreen.moveRecord(src_ws, target_ws);
-    }
+    if (minimize.isMinimized(win)) minimize.moveToWorkspace(win, target_ws);
+    transferFullscreenRecord(win, s.current, target_ws, false);
 
     if (target_ws != s.current) {
         evictWindow(win);
@@ -244,21 +217,19 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
     }
     if (core.getState().config.tiling.enabled) tiling.markDirty();
     bar.scheduleRedraw();
-    // No xcb_flush: the window has never been mapped so evictWindow's offscreen
-    // configure_window has no visible effect.  tiling.markDirty() defers the
-    // retile; the end-of-batch flush in the event loop delivers everything.
+    // No flush: the window has never been mapped, so evictWindow's offscreen
+    // configure has no visible effect; the event loop flushes at end-of-batch.
 }
 
 // Tag operations
 
 /// Low-level: set a window's workspace bitmask and clear last_focused on
-/// workspaces the window just left. Does NOT handle screen visibility or tiling.
+/// workspaces it just left. Does not touch screen visibility or tiling.
 fn setWindowMask(s: *State, win: u32, new_mask: u64) void {
     std.debug.assert(new_mask != 0);
     const old_mask = tracking.getWindowWorkspaceMask(win) orelse 0;
     tracking.setWindowMask(win, new_mask);
 
-    // Clear last_focused on workspaces the window just left.
     var removed_it = setBits(old_mask & ~new_mask);
     while (removed_it.next()) |idx| {
         if (idx < s.workspaces.len)
@@ -266,9 +237,7 @@ fn setWindowMask(s: *State, win: u32, new_mask: u64) void {
     }
 }
 
-/// Inner body of retile+redraw+flush — runs inside an already-held server grab.
-/// Always pair with an xcb_grab_server call before this and do any fire-and-forget
-/// window operations (map, evict) between the grab and this call.
+/// Retile + redraw + flush, run inside an already-held server grab.
 inline fn retileRedrawAndFlush() void {
     const cs = core.getState();
     if (cs.config.tiling.enabled) tiling.retileCurrentWorkspace();
@@ -276,36 +245,24 @@ inline fn retileRedrawAndFlush() void {
     utils.ungrabAndFlush(cs.conn);
 }
 
-/// Grab the server, retile, redraw the bar, and flush atomically.
-/// Use when no per-window operation is needed before the retile.
+/// Grab, retile, redraw, flush — for callers with no per-window op to
+/// perform before the retile.
 inline fn retileAndScheduleFlush() void {
     _ = xcb.xcb_grab_server(core.getState().conn);
     retileRedrawAndFlush();
 }
 
-/// `move_window` action — Mod+Shift+N. Hard-moves `win` to `target_ws` exclusively,
-/// clearing all other workspace bits. Pair with tagToggle (Mod+Alt+N) to add more.
+/// `move_window` action (Mod+Shift+N): hard-moves `win` to `target_ws`
+/// exclusively, clearing all other workspace bits.
 pub fn moveWindowExclusive(win: u32, target_ws: u8) void {
     const s = getState() orelse return;
     if (target_ws >= s.workspaces.len) return;
-    if (isMinimized(win)) return;
+    if (minimize.isMinimized(win)) return;
 
     const mask = tracking.getWindowWorkspaceMask(win) orelse return;
-    if (mask == tracking.workspaceBit(target_ws)) return; // already exclusively on target — no-op
+    if (mask == tracking.workspaceBit(target_ws)) return; // already exclusive there
 
-    // Transfer fullscreen record to the target workspace so the window
-    // remains fullscreen wherever it lands, not just on the source workspace.
-    // When the window is actually leaving the current workspace (src_ws !=
-    // target_ws), also run the cleanup that exitFullscreenCommit would have
-    // done: restore the bar, bring back offscreen floating windows, and
-    // restore the window's border. Without this the bar stays hidden on the
-    // source workspace and floating peers remain invisible there indefinitely.
-    fs_blk: {
-        const src_ws = fullscreen.workspaceFor(win) orelse break :fs_blk;
-        if (src_ws == s.current) fullscreen.cleanupFullscreenForMove(win, src_ws);
-        fullscreen.moveRecord(src_ws, target_ws);
-    }
-
+    transferFullscreenRecord(win, s.current, target_ws, true);
     setWindowMask(s, win, tracking.workspaceBit(target_ws));
 
     if (target_ws != s.current) {
@@ -316,14 +273,14 @@ pub fn moveWindowExclusive(win: u32, target_ws: u8) void {
     retileAndScheduleFlush();
 }
 
-/// Toggle workspace tag N on `win` (Mod+Alt+N). Flips bit N in the window's mask;
-/// focus is not changed so the user can tag multiple workspaces in one gesture.
-/// When `protect_current` is true, adding a tag keeps the current workspace set too.
-/// The last remaining workspace tag is always protected and cannot be cleared.
+/// Toggle workspace tag N on `win` (Mod+Alt+N). Focus is left unchanged so
+/// the user can tag multiple workspaces in one gesture. `protect_current`
+/// keeps the current workspace tagged too when adding. The last remaining
+/// tag can never be cleared.
 pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
     const s = getState() orelse return;
     if (target_ws >= s.workspaces.len) return;
-    if (isMinimized(win)) return;
+    if (minimize.isMinimized(win)) return;
 
     const current = s.current;
     const mask = tracking.getWindowWorkspaceMask(win) orelse return;
@@ -335,44 +292,24 @@ pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
         const new_mask = mask & ~tbit;
         setWindowMask(s, win, new_mask);
         if (target_ws == current) {
-            // Window is leaving the current workspace; if it was fullscreen here
-            // transfer the record to whichever workspace it still belongs to.
-            {
-                if (fullscreen.workspaceFor(win)) |src_ws| {
-                    if (src_ws == current) {
-                        // Mirror moveWindowTo / moveWindowExclusive: run the same
-                        // cleanup that exitFullscreenCommit would have performed on
-                        // the source workspace — restores the bar, brings floating
-                        // peers back onscreen, and restores the window's border
-                        // width — then transfer the record so the window remains
-                        // fullscreen on whichever workspace it lands on.
-                        const dst: u8 = @intCast(@ctz(new_mask));
-                        fullscreen.cleanupFullscreenForMove(win, src_ws);
-                        fullscreen.moveRecord(src_ws, dst);
-                    }
-                }
-            }
-            // Grab the server so the evict (offscreen move) and retile land in
-            // the same atomic batch — the compositor never sees a frame where
-            // the window has vanished but the remaining windows haven't reflowed.
+            // Leaving the current workspace: if fullscreen here, hand the
+            // record to whichever tagged workspace remains lowest.
+            transferFullscreenRecord(win, current, @intCast(@ctz(new_mask)), false);
+            // Grab so the evict and retile land in one atomic batch — the
+            // compositor never sees the window gone but peers not yet reflowed.
             _ = xcb.xcb_grab_server(core.getState().conn);
             evictWindow(win);
             retileRedrawAndFlush();
         } else {
             tiling.invalidateWsGeomBit(target_ws);
             bar.scheduleRedraw();
-            // No xcb_flush: invalidateWsGeomBit and scheduleRedraw are pure
-            // in-process writes; no XCB requests are pending.  The event-loop's
-            // end-of-batch flush covers any earlier queued requests.
         }
     } else {
-        // Add tag N. In protected mode, always keep the current workspace set too.
+        // Add tag N.
         const new_mask = if (protect_current) mask | tbit | tracking.workspaceBit(current) else mask | tbit;
         setWindowMask(s, win, new_mask);
         if (target_ws == current) {
-            // Grab the server so the map and retile land in the same atomic
-            // batch — the compositor never sees a frame where the window is
-            // mapped but not yet positioned by the tiling engine.
+            // Grab so the map and retile land in one atomic batch.
             const conn = core.getState().conn;
             _ = xcb.xcb_grab_server(conn);
             _ = xcb.xcb_map_window(conn, win);
@@ -380,8 +317,6 @@ pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
         } else {
             tiling.invalidateWsGeomBit(target_ws);
             bar.scheduleRedraw();
-            // No xcb_flush: same reasoning as the remove branch above —
-            // no XCB requests are queued; the end-of-batch flush suffices.
         }
     }
 }
@@ -391,70 +326,57 @@ pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
 pub fn switchTo(ws_id: u8) void {
     const s = getState() orelse return;
     if (ws_id >= s.workspaces.len or ws_id == s.current) return;
-    exitAllWorkspacesView(s); // no-op when list is empty
+    exitAllWorkspacesView(s); // no-op if not in all-view
     const old = s.current;
     s.current = ws_id;
     tracking.setCurrentWorkspace(ws_id);
     executeSwitch(old, ws_id);
 }
 
-/// Strips the current_ws bit from every window in `s.all_view_temp_wins`,
-/// evicts each one, and clears the list.  No-op when the list is empty.
+/// Strips the current-workspace bit from every window in
+/// `s.all_view_temp_wins`, evicts each, and clears the list.
 fn exitAllWorkspacesView(s: *State) void {
     if (s.all_view_temp_wins.items.len == 0) return;
     const current = s.current;
     for (s.all_view_temp_wins.items) |win| {
         const mask = tracking.getWindowWorkspaceMask(win) orelse continue;
         const restored = mask & ~tracking.workspaceBit(current);
-        if (restored == 0) continue; // shouldn't happen, but never leave mask empty
+        if (restored == 0) continue; // never leave a window with an empty mask
         setWindowMask(s, win, restored);
         evictWindow(win);
     }
     s.all_view_temp_wins.clearRetainingCapacity();
 }
 
-/// `all_workspaces` action — Mod+5.
-/// Toggles a view where every window from every workspace is visible at once.
-///
-/// Enter: for each non-minimized window not already on the current workspace,
-///        adds the current-workspace bit to its tracking mask and appends it
-///        to `all_view_temp_wins`.  With all windows genuinely on the current
-///        workspace, `tiling.retileCurrentWorkspace()` tiles them normally.
-///
-/// Exit:  calls `exitAllWorkspacesView` which strips the temporary bit from
-///        each saved window and evicts it, then retiles to restore normal layout.
+/// `all_workspaces` action (Mod+5): toggles a view where every window from
+/// every workspace is visible at once, by temporarily tagging foreign
+/// windows onto the current workspace.
 pub fn switchToAll() void {
     const s = getState() orelse return;
 
     if (s.all_view_temp_wins.items.len > 0) {
-        // Exit all-workspaces view.
-        //
-        // Consume the pointer reply before xcb_grab_server so that
-        // xcb_query_pointer_reply does not cause an implicit flush inside the
-        // grab. The position will be at most microseconds stale — negligible
-        // for focus targeting.
+        // Exit. Pointer position is drained before the grab so
+        // applyPostSwitchFocus makes no xcb_*_reply call inside it.
         const cs = core.getState();
         const ptr_cookie = xcb.xcb_query_pointer(cs.conn, cs.root);
         const ptr_reply = xcb.xcb_query_pointer_reply(cs.conn, ptr_cookie, null);
         defer if (ptr_reply) |r| std.c.free(r);
 
         _ = xcb.xcb_grab_server(cs.conn);
-
         exitAllWorkspacesView(s);
-
         if (cs.config.tiling.enabled) tiling.retileCurrentWorkspace();
         applyPostSwitchFocus(s.current, &s.workspaces[s.current], ptr_reply);
         bar.raiseBar();
         bar.redrawInsideGrab();
         utils.ungrabAndFlush(cs.conn);
     } else {
-        // Enter all-workspaces view
+        // Enter.
         const cs = core.getState();
         _ = xcb.xcb_grab_server(cs.conn);
 
         for (tracking.allWindows()) |entry| {
             if (tracking.isWindowOnWorkspace(entry.win, s.current)) continue;
-            if (isMinimized(entry.win)) continue;
+            if (minimize.isMinimized(entry.win)) continue;
             const win = entry.win;
             const mask = entry.mask;
             setWindowMask(s, win, mask | tracking.workspaceBit(s.current));
@@ -464,12 +386,11 @@ pub fn switchToAll() void {
             };
         }
 
-        // All foreign windows are now genuinely on the current workspace.
-        // Retile handles mapping + positioning for tiled windows in one pass.
+        // Every foreign window is now genuinely on the current workspace;
+        // retile handles mapping + positioning for tiled ones in one pass.
         if (cs.config.tiling.enabled) {
             tiling.retileCurrentWorkspace();
         } else {
-            // Floating layout: map and restore geometry manually.
             for (s.all_view_temp_wins.items) |win| {
                 _ = xcb.xcb_map_window(cs.conn, win);
                 window.restoreFloatGeom(win);
@@ -481,17 +402,15 @@ pub fn switchToAll() void {
     }
 }
 
-/// Common implementation for moveWindowToAll and tagToggleAll:
-/// toggles a window between "pinned to every workspace" and "current workspace only".
+/// Shared body for moveWindowToAll / tagToggleAll: toggles `win` between
+/// pinned-to-every-workspace and current-workspace-only.
 fn pinToAllWorkspacesToggle(s: *State, win: u32) void {
     const all_mask = tracking.allWorkspacesMask(s.workspaces.len);
     const mask = tracking.getWindowWorkspaceMask(win) orelse return;
 
     if (mask == all_mask) {
-        // Pinned everywhere — shrink back to current workspace only.
         setWindowMask(s, win, tracking.workspaceBit(s.current));
     } else {
-        // Pin to every workspace.
         setWindowMask(s, win, all_mask);
         _ = xcb.xcb_map_window(core.getState().conn, win);
     }
@@ -499,56 +418,46 @@ fn pinToAllWorkspacesToggle(s: *State, win: u32) void {
     retileAndScheduleFlush();
 }
 
-/// `move_to_all_workspaces` action — Mod+Shift+5.
-/// Toggles the focused window between pinned-to-all-workspaces and current-workspace-only.
-/// First press: sets all workspace bits — the window appears on every workspace.
-/// Second press: clears back to just the current workspace bit.
+/// `move_to_all_workspaces` action (Mod+Shift+5).
 pub fn moveWindowToAll(win: u32) void {
     const s = getState() orelse return;
-    if (isMinimized(win)) return;
+    if (minimize.isMinimized(win)) return;
     pinToAllWorkspacesToggle(s, win);
 }
 
-/// `toggle_tag_all` action — Mod+Alt+5.
-/// Intentional alias for moveWindowToAll: both actions share identical
-/// semantics (toggle between pinned-to-all-workspaces and current-workspace-only)
-/// and are bound to different key chords as user-facing convenience names.
-/// Both delegate to pinToAllWorkspacesToggle so any future behavioural
-/// divergence only requires updating one of the two call-sites.
+/// `toggle_tag_all` action (Mod+Alt+5). Same semantics as moveWindowToAll —
+/// two key chords for user convenience, sharing one implementation so any
+/// future behavioural change only needs updating in one place.
 pub fn tagToggleAll(win: u32) void {
     const s = getState() orelse return;
-    if (isMinimized(win)) return;
+    if (minimize.isMinimized(win)) return;
     pinToAllWorkspacesToggle(s, win);
 }
 
-/// Returns the workspace bitmask for `win`, or null if unmanaged.
-/// Delegates to tracking which owns the map.
 pub inline fn getWindowWorkspaceMask(win: u32) ?u64 {
     return tracking.getWindowWorkspaceMask(win);
 }
 
-/// True when workspace `ws_idx` is set in `win`'s tag bitmask.
 pub inline fn isWindowOnWorkspace(win: u32, ws_idx: u8) bool {
     return tracking.isWindowOnWorkspace(win, ws_idx);
 }
 
-/// Returns the first non-minimized window in `windows`, or null if all minimized.
 pub inline fn firstNonMinimized(windows: []const u32) ?u32 {
     return tracking.firstNonMinimized(windows);
 }
 
-// Prefer the workspace's remembered focus target; fall back to firstNonMinimized.
-// Clears last_focused when it refers to a minimized window so the stale pointer
-// is not rechecked on every subsequent call.
+/// The workspace's remembered focus target, falling back to the first
+/// non-minimized window. Clears last_focused when it points at a now-
+/// minimized window so the stale pointer isn't rechecked every call.
 inline fn lastFocusedOrFirst(ws: *Workspace) ?u32 {
     if (ws.last_focused) |win| {
-        if (!isMinimized(win)) return win;
-        ws.last_focused = null; // stale — clear so future calls skip it
+        if (!minimize.isMinimized(win)) return win;
+        ws.last_focused = null;
     }
     const bit = tracking.workspaceBit(ws.id);
     for (tracking.allWindows()) |entry| {
         if (entry.mask & bit == 0) continue;
-        if (!isMinimized(entry.win)) return entry.win;
+        if (!minimize.isMinimized(entry.win)) return entry.win;
     }
     return null;
 }
@@ -561,11 +470,8 @@ pub inline fn isOnCurrentWorkspace(win: u32) bool {
     return tracking.isOnCurrentWorkspace(win);
 }
 
-/// Returns true when `win` is on the current workspace and is not minimized.
-///
-/// The combined predicate used by focus.focusBestAvailable for post-unmanage
-/// and post-minimize focus recovery.  Combining the two checks into one
-/// function lets it serve as a typed *const fn(u32) bool without a closure.
+/// True when `win` is on the current workspace and not minimized. Used by
+/// focus.focusBestAvailable as a typed `*const fn(u32) bool` predicate.
 pub fn isOnCurrentWorkspaceAndVisible(win: u32) bool {
     return tracking.isOnCurrentWorkspaceAndVisible(win);
 }
@@ -580,7 +486,7 @@ pub inline fn getWorkspaceCount() usize {
     return s.workspaces.len;
 }
 
-/// Returns the lowest-set-bit workspace index for `win`.
+/// Lowest-set-bit workspace index for `win`.
 pub inline fn getWorkspaceForWindow(win: u32) ?u8 {
     return tracking.getWorkspaceForWindow(win);
 }
@@ -589,51 +495,17 @@ pub fn isManaged(win: u32) bool {
     return tracking.isManaged(win);
 }
 
-// ── Workspace-switch pipeline ────────────────────────────────────────────────
-//
-// The switch is executed inside a single xcb_grab_server / xcb_ungrab_server
-// pair so the compositor never observes an intermediate frame where old windows
-// are offscreen but new windows are not yet mapped.
-//
-// All round-trips requiring an xcb_*_reply call are issued before the grab so
-// the grab body is entirely fire-and-forget:
-//
-//   Pre-grab  (no grab held):
-//     1. prefetchAndSaveWindowGeometries — trusts the existing tiling geometry
-//        cache for floating windows leaving the old workspace, only falling
-//        back to a live xcb_get_geometry round-trip for the rare window with
-//        no cache entry yet.
-//     2. xcb_query_pointer + xcb_query_pointer_reply — pointer position for
-//        post-switch focus targeting.
-//
-//   Inside grab (one atomic batch):
-//     3. hideWorkspaceWindows  — xcb_configure_window only, no replies.
-//     4. restoreWorkspaceWindows — xcb_map_window + xcb_configure_window,
-//        no replies.
-//     5. applyPostSwitchFocus  — receives the pre-drained pointer reply,
-//        no xcb_query_pointer_reply flush inside the grab.
-//     6. bar.raiseBar / bar.redrawInsideGrab — fire-and-forget, no replies.
-//     7. ungrabAndFlush — the single intended flush.
+// ── Workspace switch pipeline ────────────────────────────────────────────
+// Runs inside one xcb_grab_server/ungrab pair so the compositor never sees
+// old windows offscreen with new windows not yet mapped. Every xcb_*_reply
+// call (geometry prefetch, pointer query) happens before the grab, so the
+// grab body below is pure fire-and-forget: hide → restore → focus → flush.
 
-/// Pre-grab geometry save.
-///
-/// Floating windows are placed via floating.tileWithOffset and moved via
-/// drag.zig, both of which already write the resulting rect into the shared
-/// tiling geometry cache (window.saveWindowGeom / tiling.getWindowGeom) as
-/// they happen. That cache is therefore already trustworthy for the common
-/// case, the same way fullscreen.zig's fetchWindowGeom trusts it as a fast
-/// path — so there is nothing left to save for a window that already has a
-/// valid cached rect.
-///
-/// This only issues a live xcb_get_geometry round-trip for the rare window
-/// that reaches a workspace switch with no cache entry yet (e.g. one that
-/// hasn't been through float placement), saving the result via
-/// window.saveWindowGeom so it survives being pushed offscreen.
-///
-/// Must be called before xcb_grab_server: any round-trip taken on the
-/// cache-miss path must complete before the atomic grab body begins — the
-/// grab body must be entirely fire-and-forget to prevent the compositor from
-/// observing partial states.
+/// Pre-grab: save geometry for floating windows leaving the old workspace.
+/// Floating placement and drag already keep the geometry cache current, so
+/// this only issues a live xcb_get_geometry for the rare window that reaches
+/// a switch with no cache entry yet. Must run before the grab — any
+/// round-trip here has to complete before the atomic hide/restore begins.
 fn prefetchAndSaveWindowGeometries(ws: *const Workspace, new_ws: u8) void {
     const conn = core.getState().conn;
     const bit = tracking.workspaceBit(ws.id);
@@ -641,13 +513,9 @@ fn prefetchAndSaveWindowGeometries(ws: *const Workspace, new_ws: u8) void {
         const win = entry.win;
         if (entry.mask & bit == 0) continue;
         if (tracking.isWindowOnWorkspace(win, new_ws)) continue; // stays visible
-        if (tiling.isWindowActiveTiled(win) or isMinimized(win)) continue;
+        if (tiling.isWindowActiveTiled(win) or minimize.isMinimized(win)) continue;
+        if (tiling.getWindowGeom(win) != null) continue; // cache already correct
 
-        // Cache-first: a valid rect here already reflects the window's
-        // real on-screen position, so there's nothing to do.
-        if (tiling.getWindowGeom(win) != null) continue;
-
-        // Cache miss: fall back to a single live round-trip.
         const reply = xcb.xcb_get_geometry_reply(conn, xcb.xcb_get_geometry(conn, win), null) orelse continue;
         defer std.c.free(reply);
         window.saveWindowGeom(win, .{
@@ -659,36 +527,30 @@ fn prefetchAndSaveWindowGeometries(ws: *const Workspace, new_ws: u8) void {
     }
 }
 
-// Step 1 (of the workspace-switch pipeline): move old-workspace windows offscreen.
-// Windows also tagged to `new_ws` stay on screen — they're visible on both.
-// Steps 2/3a are performed inside tiling.applyWorkspaceLayout and
-// tiling.restoreWorkspaceGeom, called from restoreWorkspaceWindows below.
-//
-// Contains no xcb_*_reply calls; entirely fire-and-forget inside the grab.
-// All geometry saving is performed in prefetchAndSaveWindowGeometries before
-// the grab begins.
+/// Grab step 1: move old-workspace windows offscreen. Windows also tagged to
+/// `new_ws` stay put — they're visible on both.
 fn hideWorkspaceWindows(ws: *const Workspace, new_ws: u8) void {
     const conn = core.getState().conn;
     const bit = tracking.workspaceBit(ws.id);
     for (tracking.allWindows()) |entry| {
         const win = entry.win;
         if (entry.mask & bit == 0) continue;
-        if (tracking.isWindowOnWorkspace(win, new_ws)) continue; // stays visible
+        if (tracking.isWindowOnWorkspace(win, new_ws)) continue;
 
         utils.pushWindowOffscreen(conn, win);
         if (tiling.isWindowActiveTiled(win)) tiling.invalidateGeomCache(win);
     }
 }
 
-// Step 3b: restore geometry for the new workspace.
+/// Grab step 2: restore geometry and map every window on the new workspace.
 fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
     const tiling_active = tiling.getState().is_enabled;
 
     if (tiling_active) {
         if (!core.getState().config.tiling.global_layout) tiling.applyWorkspaceLayout(ws);
 
-        // Unified invalidation loop: on success, only shared windows (also on old_ws)
-        // need invalidation; on failure, all tiled windows are invalidated for a full retile.
+        // On success only windows shared with old_ws need invalidation; on
+        // failure invalidate everything tiled for a full retile.
         const restore_ok = tiling.restoreWorkspaceGeom();
         const bit = tracking.workspaceBit(ws.id);
         for (tracking.allWindows()) |entry| {
@@ -700,26 +562,21 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
         }
         if (!restore_ok) tiling.retileCurrentWorkspace();
     } else if (tiling.isFloatingLayout()) {
-        // Floating layout: the tiling engine is disabled for window management
-        // but windows on inactive workspaces may have had their geometry cache
-        // zeroed the last time they were left while tiling was still active.
-        // Attempt a fast cache restore first; if that fails, run a silent retile
-        // that bypasses the !s.enabled guard to recompute the correct tiled
-        // positions without changing the active layout or moving any windows
-        // permanently.
-        if (!tiling.restoreWorkspaceGeom()) {
-            tiling.retileForRestore();
-        }
+        // Tiling is off, but a window's cache may have been zeroed the last
+        // time it was left while tiling was still active. Try a fast cache
+        // restore first; fall back to a silent retile (bypassing the
+        // !enabled guard) to recompute positions without changing the
+        // active layout or moving anything permanently.
+        if (!tiling.restoreWorkspaceGeom()) tiling.retileForRestore();
     }
 
-    // Map every window; restore floating geometry for those not already on screen.
     const bit_map = tracking.workspaceBit(ws.id);
     const conn = core.getState().conn;
     for (tracking.allWindows()) |entry| {
         const win = entry.win;
         if (entry.mask & bit_map == 0) continue;
         _ = xcb.xcb_map_window(conn, win);
-        if (!tiling.isWindowActiveTiled(win) and !isMinimized(win) and
+        if (!tiling.isWindowActiveTiled(win) and !minimize.isMinimized(win) and
             !tracking.isWindowOnWorkspace(win, old_ws))
         {
             window.restoreFloatGeom(win);
@@ -727,38 +584,24 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
     }
 }
 
-// Step 4: resolve the post-switch focus target and apply it.
-// Skips the mapped-check and stack raise that focus.setFocus would do —
-// all windows are already mapped and workspace_switch never raises.
-//
-// `ptr_reply` is the pre-drained xcb_query_pointer reply, consumed before
-// xcb_grab_server so this function contains no xcb_*_reply calls and causes
-// no implicit XCB flush inside the server grab.
+/// Grab step 3: resolve and apply post-switch focus. Skips the mapped-check
+/// and raise that focus.setFocus would normally do — every window here is
+/// already mapped and a workspace switch never raises. `ptr_reply` is the
+/// pre-drained pointer-query reply, so this makes no xcb_*_reply call.
 fn applyPostSwitchFocus(new_ws: u8, new_ws_obj: *Workspace, ptr_reply: ?*xcb.xcb_query_pointer_reply_t) void {
     const focus_target: ?u32 = blk: {
         const ptr = ptr_reply orelse break :blk lastFocusedOrFirst(new_ws_obj);
         const child = ptr.*.child;
         break :blk if (child != 0 and child != core.getState().root and
-            tracking.isWindowOnWorkspace(child, new_ws) and !isMinimized(child))
+            tracking.isWindowOnWorkspace(child, new_ws) and !minimize.isMinimized(child))
             child
         else
             lastFocusedOrFirst(new_ws_obj);
     };
 
-    // Route through focus.setFocus / focus.clearFocus so that
-    // commitFocusTransition runs its full side-effect list:
-    //   • recordInHistory(old)        — MRU history updated
-    //   • tiling.updateWindowFocus    — tiling border state updated
-    //   • carousel.notifyFocusChanged — carousel UI notified
-    //   • advertiseActiveWindow       — _NET_ACTIVE_WINDOW on root updated
-    //   • grabButtons on old/new      — button grab ownership transferred
-    //   • xcb_set_input_focus         — X server notified
-    //
-    // .workspace_switch skips the mapped-check round-trip and never raises
-    // the window — all windows are already mapped and stacking order is
-    // managed by hide/restoreWorkspaceWindows.
-    // bar.scheduleFocusRedraw() sets a dirty bit; the caller invokes
-    // bar.redrawInsideGrab() for the actual synchronous redraw.
+    // Route through focus.setFocus/clearFocus so commitFocusTransition runs
+    // its full side-effect list (MRU history, tiling border state, carousel
+    // notification, _NET_ACTIVE_WINDOW, button-grab transfer, input focus).
     if (focus_target) |new_win| {
         focus.setFocus(new_win, .workspace_switch);
     } else {
@@ -772,31 +615,19 @@ fn executeSwitch(old_ws: u8, new_ws: u8) void {
     const fs_info = fullscreen.getForWorkspace(new_ws);
 
     focus.setSuppressReason(.none);
-    focus.cancelPointerSync(); // discard any stale beginPointerSync cookie from before this switch
+    focus.cancelPointerSync(); // discard any stale beginPointerSync cookie
     s.workspaces[old_ws].last_focused = focus.getFocused();
 
-    // ── Pre-grab round-trips ─────────────────────────────────────────────────
-    //
-    // Both xcb_get_geometry and xcb_query_pointer require reply round-trips.
-    // Consuming their replies inside xcb_grab_server would cause implicit XCB
-    // output-buffer flushes at unpredictable points in the hide+show sequence,
-    // allowing the compositor to observe intermediate states.
-    //
-    // Both reply sets are drained here, before the grab, so the grab body is
-    // entirely fire-and-forget (no xcb_*_reply calls).
-
-    // Save floating-window geometries before the grab.
+    // Pre-grab: drain every xcb_*_reply call so the grab body is
+    // fire-and-forget (no implicit flush points for the compositor to catch
+    // a partial hide/restore).
     prefetchAndSaveWindowGeometries(&s.workspaces[old_ws], new_ws);
 
-    // Consume the pointer position before the grab so applyPostSwitchFocus
-    // receives a pre-drained reply and issues no xcb_*_reply calls inside
-    // the grab.
     const cs = core.getState();
     const ptr_cookie = xcb.xcb_query_pointer(cs.conn, cs.root);
     const ptr_reply = xcb.xcb_query_pointer_reply(cs.conn, ptr_cookie, null);
     defer if (ptr_reply) |r| std.c.free(r);
 
-    // ── Atomic grab window ───────────────────────────────────────────────────
     _ = xcb.xcb_grab_server(cs.conn);
 
     hideWorkspaceWindows(&s.workspaces[old_ws], new_ws);
@@ -804,11 +635,9 @@ fn executeSwitch(old_ws: u8, new_ws: u8) void {
     if (fs_info != null) bar.setBarState(.hide_fullscreen) else bar.setBarState(.show_fullscreen);
 
     if (fs_info) |info| {
-        // Map and push offscreen every non-fullscreen window on this workspace.
-        // Ensures all workspace windows are in a mapped-but-hidden state so that
-        // when fullscreen exits, tiling can reconfigure them without finding stale
-        // zero-rect cache entries. Tiled windows have their cache invalidated so
-        // the next retile recomputes their positions correctly.
+        // Map and push offscreen every non-fullscreen window on this
+        // workspace, so exiting fullscreen later never finds a stale
+        // zero-rect cache entry. Tiled windows are invalidated for the next retile.
         const exec_bit = tracking.workspaceBit(new_ws);
         for (tracking.allWindows()) |entry| {
             if (entry.mask & exec_bit == 0) continue;

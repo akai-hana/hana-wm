@@ -95,13 +95,13 @@ pub fn detectDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) DpiInfo
     }
 
     const geometry_dpi = calcDpiFromGeometry(screen);
-    const dpi = if (geometry_dpi < 50.0 or geometry_dpi > 300.0) blk: {
+    var dpi = geometry_dpi;
+    if (geometry_dpi < 50.0 or geometry_dpi > 300.0) {
         debug.warn("Calculated DPI {d:.1} seems unreasonable, using baseline DPI", .{geometry_dpi});
-        break :blk BASELINE_DPI;
-    } else blk: {
+        dpi = BASELINE_DPI;
+    } else {
         debug.info("Using geometry-calculated DPI: {d:.1}", .{geometry_dpi});
-        break :blk geometry_dpi;
-    };
+    }
 
     dpi_cache = .{ .dpi = dpi };
     return dpi_cache.?;
@@ -121,23 +121,18 @@ pub fn scaleToInt(comptime T: type, base_value: f32, scale_factor: f32) T {
     return @intFromFloat(@round(base_value * scale_factor));
 }
 
-/// Scale a border or gap value.
-/// Percentage values are screen-relative, so scale_factor is intentionally
-/// excluded — applying it would double-scale on HiDPI displays.
-/// Absolute pixel values are screen-independent and used as-is.
-///
-/// Delegates to `utils.scale_fallback.scaleBorderWidth` — the single source
-/// of truth for this formula, shared with the build-options-free fallback path.
+/// Scale a border or gap value. Percentages are screen-relative and applied
+/// as-is (no scale_factor, or HiDPI displays would get double-scaled);
+/// absolute pixel values pass through unchanged.
+/// See utils.scale_fallback.scaleBorderWidth, the shared source of truth.
 pub fn scaleBorderWidth(value: parser.ScalableValue, reference_dimension: u16) u16 {
     return utils.scale_fallback.scaleBorderWidth(value, reference_dimension);
 }
 
 /// Returns the master width as a fraction (0.0–1.0) for percentage values,
-/// or as a negative float encoding an absolute pixel value otherwise.
-/// Callers should treat negative results as `@abs(result)` pixels.
-///
-/// Delegates to `utils.scale_fallback.scaleMasterWidth` — the single source
-/// of truth for this formula, shared with the build-options-free fallback path.
+/// or as a negative float encoding an absolute pixel value otherwise
+/// (callers should treat negative results as `@abs(result)` pixels).
+/// See utils.scale_fallback.scaleMasterWidth, the shared source of truth.
 pub fn scaleMasterWidth(value: parser.ScalableValue) f32 {
     return utils.scale_fallback.scaleMasterWidth(value);
 }

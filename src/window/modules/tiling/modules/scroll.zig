@@ -52,10 +52,7 @@ pub fn tileWithOffset(
     const gap_half: i32 = @intCast(m.gap / 2);
     const border2: i32 = 2 * @as(i32, @intCast(m.border));
 
-    // Deferred-window handling (see LayoutCtx.defer_win): emitOrDefer stashes
-    // this window's rect if it matches ctx.defer_win; invokeLayout flushes it
-    // once, after this function returns, so it is sent last.
-
+    // emitOrDefer honors ctx.defer_win — see LayoutCtx.defer_win.
     for (windows, 0..) |win, i| {
         const col: i32 = @intCast(i);
 

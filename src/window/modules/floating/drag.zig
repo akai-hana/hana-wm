@@ -15,24 +15,13 @@ const tiling = @import("tiling");
 const fullscreen = @import("fullscreen");
 const bar = @import("bar");
 
-// Drag state types
+// Drag state
 
 pub const DragMode = enum { move, resize };
 
-/// Which corner of the window is being dragged during a resize.
-///
-/// Determined at drag-start by comparing the cursor position to the window
-/// centre.  The chosen corner is the one closest to the cursor:
-///
-///   top_left     | top_right
-///   -------------|------------
-///   bottom_left  | bottom_right
-///
-/// During updateDrag the opposite (anchor) corner is held fixed.  The window
-/// always spans from min→max of anchor and current cursor, so when the cursor
-/// crosses the anchor horizontally or vertically the resize wraps: the window
-/// begins growing toward the opposite side instead of collapsing.  The
-/// effective dragged corner therefore mirrors itself across the midpoint.
+/// Corner closest to the cursor at drag-start; the opposite corner is the
+/// anchor that stays fixed during the resize. Crossing the anchor on an axis
+/// wraps the resize to grow the opposite way instead of collapsing.
 pub const ResizeCorner = enum { top_left, top_right, bottom_left, bottom_right };
 
 pub const DragState = struct {
@@ -46,27 +35,17 @@ pub const DragState = struct {
     start_win_y: i16 = 0,
     start_win_width: u16 = 0,
     start_win_height: u16 = 0,
-    /// Last geometry applied by updateDrag; saved to the geometry cache by
-    /// stopDrag so workspace-switch float-restore finds the post-drag position.
-    /// Zero (default) means no motion event arrived during this drag.
+    /// Geometry from the last updateDrag call. Zero means no motion event
+    /// arrived; saved to the geometry cache by stopDrag on exit.
     last_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
 };
 
-// Named work-area type
-// A named struct makes the return type of workArea() referenceable in
-// variable declarations and future doc-comments, unlike an anonymous return
-// struct whose type cannot be spelled anywhere else in the code.
 const WorkArea = struct { left: i32, right: i32, top: i32, bottom: i32 };
 
-// Snap helpers
+// Snapping
 
-/// Resolve snap_distance from config into pixels.
-/// Percentage values are relative to screen width (the primary drag axis).
-/// Returns 0 when snapping is disabled.
-///
-/// Note: a misconfigured negative value degrades safely — snapAxis's
-/// abs-comparison is never satisfied when snap < 0, so no snap fires.
-/// Zero is the canonical "disabled" sentinel.
+/// snap_distance from config, resolved to pixels (0 = disabled).
+/// Percentages are relative to screen width.
 fn snapDistance() i32 {
     const cs = core.getState();
     const sv = cs.config.snap_distance;
@@ -78,21 +57,15 @@ fn snapDistance() i32 {
     return @intFromFloat(@round(sv.value));
 }
 
-/// Compute the work area edges accounting for bar height/position.
-///
-/// Border correction: X positions the window's content area, not its outer
-/// border. To align the outer border flush with a far boundary, we subtract
-/// 2 * border_width from that edge (total footprint = pos + dim + 2*bw).
-/// Near edges need no correction because the outer border is already at pos.
+/// Work-area edges, accounting for the bar and border width. X positions a
+/// window's content area, so far edges are pulled in by 2*border_width to
+/// keep the outer border flush with the screen edge.
 fn workArea() WorkArea {
     const cs = core.getState();
     const sw: i32 = cs.screen.width_in_pixels;
     const sh: i32 = cs.screen.height_in_pixels;
     const bh: i32 = if (bar.isVisible()) bar.getBarHeight() else 0;
     const bw2: i32 = @as(i32, window.getBorderWidth()) * 2;
-    // bar_at_bottom only has observable effect when bh > 0 (bar is visible).
-    // When bh == 0 both branches of the ternaries below produce identical
-    // results, so evaluating it unconditionally is harmless.
     const bar_at_bottom = cs.config.bar.bar_position == .bottom;
     return .{
         .left = 0,
@@ -102,35 +75,18 @@ fn workArea() WorkArea {
     };
 }
 
-/// Snap a window origin on one axis toward the near or far work-area boundary.
-///
-/// Snapping engages when a window edge comes within `snap` pixels of a
-/// boundary.  It disengages as soon as the raw position would push the edge
-/// past the boundary — the user is intentionally crossing it.
-///
-/// Precondition: all inputs are within normal window-coordinate range
-/// (i.e. well within ±32 767).  The subtractions `pos - near` and
-/// `(pos + dim) - far` are not overflow-guarded; wrapping cannot occur
-/// for any real screen geometry.
-///
-/// `pos`  — raw window origin on this axis
-/// `dim`  — window size on this axis (width or height), excluding borders
-/// `near` — work-area near boundary (left or top)
-/// `far`  — work-area far boundary (right or bottom)
+/// Snap a window origin toward `near` or `far` when within `snap` pixels.
 inline fn snapAxis(pos: i32, dim: i32, near: i32, far: i32, snap: i32) i32 {
     if (@abs(pos - near) < snap) return near;
     if (@abs((pos + dim) - far) < snap) return far - dim;
     return pos;
 }
 
-/// Snap a single edge position toward `boundary` if within `snap` pixels of it.
-/// Used for both near (left/top) and far (right/bottom) edges during resize.
+/// Snap a single edge toward `boundary` when within `snap` pixels of it.
 inline fn snapEdge(edge: i32, boundary: i32, snap: i32) i32 {
     if (snap > 0 and @abs(edge - boundary) < snap) return boundary;
     return edge;
 }
-
-// snapNearEdge and snapFarEdge are identical in implementation; use snapEdge directly.
 
 // Module state
 
@@ -143,29 +99,23 @@ var g_state: State = .{};
 
 // Public API
 
-/// Begins a move (button 1) or resize (button 3) drag on `win` at pointer position (x, y).
-/// No-op when a drag is already active, or for bar/fullscreen windows.
+/// Begins a move (button 1) or resize (button 3) drag on `win` at (x, y).
+/// No-op if a drag is already active, or for bar/fullscreen windows.
 pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     const cs = core.getState();
     if (!cs.config.drag_enabled) return;
     if (g_state.drag.active) return;
     if (bar.isBarWindow(win)) return;
-    // Fullscreen windows must not be drag-resized: they occupy the entire
-    // screen and resizing them would corrupt their fullscreen geometry record.
-    if (fullscreen.isFullscreen(win)) return;
-    // Geometry source priority: prefer the tiling-cached geometry over a live
-    // XCB round-trip.  The tiling engine keeps this up-to-date after every
-    // retile, so it reflects the window's current position without a server
-    // round-trip.  The live fallback covers purely floating windows that were
-    // never tracked by the tiling engine.
+    if (fullscreen.isFullscreen(win)) return; // fullscreen geometry must not be touched
+
+    // Prefer the tiling cache (always current) over a live XCB round-trip;
+    // fall back to a live query for floating windows the tiler never tracked.
     const geom = blk: {
         if (tiling.getWindowGeom(win)) |g| break :blk g;
         break :blk window.getGeometry(cs.conn, win) orelse return;
     };
 
-    // For resize drags, determine which corner of the window is closest to the
-    // cursor.  Comparing the cursor to the window centre gives four quadrants
-    // that map cleanly onto the four corners.
+    // Resize: pick the corner nearest the cursor by comparing to window centre.
     const resize_corner: ResizeCorner = corner: {
         if (button == 1) break :corner .bottom_right; // move — corner unused
         const cx: i32 = @as(i32, geom.x) + @divTrunc(@as(i32, geom.width), 2);
@@ -178,12 +128,6 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
         break :corner .bottom_right;
     };
 
-    // pending_float is set for any drag (move *or* resize) on a tiled window
-    // in a non-floating layout.  On the first motion event it triggers tiling
-    // detach and a full retile of the workspace.
-    // For .move specifically, the first event after detach also skips snap to
-    // prevent the window appearing frozen when its tiled position coincides
-    // with a screen edge (see updateDrag's was_pending_float guard).
     g_state = .{
         .drag = .{
             .active = true,
@@ -197,18 +141,17 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
             .start_win_width = geom.width,
             .start_win_height = geom.height,
         },
+        // A tiled window in a non-floating layout detaches on first motion
+        // (see updateDrag); move also skips snap on that first event so the
+        // window doesn't appear frozen at a tiled edge.
         .pending_float = tiling.isWindowTiled(win) and !tiling.isFloatingLayout(),
     };
     focus.setFocus(win, .user_command);
-    // Raise the window to the top of the stack.  The cookie is intentionally
-    // discarded — XCB errors surface only via xcb_request_check, which we do
-    // not call here; a stack-raise failure is non-fatal.
     _ = xcb.xcb_configure_window(cs.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     _ = xcb.xcb_flush(cs.conn);
 }
 
-/// Applies pointer motion to the active drag, updating window position or size.
-/// No-op when no drag is active.
+/// Applies pointer motion to the active drag. No-op if no drag is active.
 pub fn updateDrag(x: i16, y: i16) void {
     if (!g_state.drag.active) return;
     const drag = &g_state.drag;
@@ -216,10 +159,8 @@ pub fn updateDrag(x: i16, y: i16) void {
     const was_pending_float = g_state.pending_float;
     if (g_state.pending_float) {
         g_state.pending_float = false;
-        // Grab the server to suppress intermediate renders during the detach +
-        // retile sequence.  A failed grab is intentionally ignored — it is a
-        // visual nicety, not a correctness requirement; the retile proceeds
-        // regardless.
+        // Grab to suppress intermediate renders during detach + retile; a
+        // failed grab just costs a visual nicety, not correctness.
         const conn = core.getState().conn;
         _ = xcb.xcb_grab_server(conn);
         tiling.removeWindow(drag.window);
@@ -230,9 +171,6 @@ pub fn updateDrag(x: i16, y: i16) void {
     const dx = x - drag.start_x;
     const dy = y - drag.start_y;
 
-    // Compute snap threshold and work area once, shared by both switch arms.
-    // workArea() is only evaluated when snapping is active; when snap == 0
-    // the zero-value sentinel is never read (all snap logic short-circuits).
     const snap = snapDistance();
     const wa: WorkArea = if (snap > 0) workArea() else .{ .left = 0, .right = 0, .top = 0, .bottom = 0 };
 
@@ -240,9 +178,6 @@ pub fn updateDrag(x: i16, y: i16) void {
         .move => blk: {
             const raw_x: i32 = @as(i32, drag.start_win_x) + @as(i32, dx);
             const raw_y: i32 = @as(i32, drag.start_win_y) + @as(i32, dy);
-            // Skip snap on the first motion after a tiled-to-float transition:
-            // the tiled position may coincide with a screen edge, which would
-            // make the window appear frozen on the first drag movement.
             if (was_pending_float) break :blk utils.Rect{
                 .x = @intCast(raw_x),
                 .y = @intCast(raw_y),
@@ -259,95 +194,46 @@ pub fn updateDrag(x: i16, y: i16) void {
             };
         },
         .resize => blk: {
-            // was_pending_float triggered the tiling detach above.  No
-            // snap-skip is needed here: the "frozen at edge" problem only
-            // arises during move (window origin snaps to a tiled edge);
-            // resize starts from the current size and is unaffected.
-            //
-            // Anchor-based resizing with automatic corner wrapping.
-            //
-            // The anchor is the corner diagonally opposite the one being
-            // dragged; it stays fixed throughout the drag.  The moving corner
-            // follows the cursor.  The window always spans min→max of anchor
-            // and moving on each axis, so:
-            //
-            //   • While the cursor is on the same side as the original corner
-            //     the drag behaves the same as simple corner-anchored
-            //     resizing.
-            //
-            //   • When the cursor crosses the anchor horizontally the
-            //     left/right roles swap automatically — the window begins
-            //     growing toward the opposite horizontal side.
-            //
-            //   • The same applies vertically, and both axes are independent,
-            //     so all four quadrant transitions are handled.
-            //
-            // Snapping is applied to the moving edge toward whichever
-            // work-area boundary (near or far) it is closest to.  The anchor
-            // edge is fixed and never snapped.
-
+            // Anchor = corner opposite the one grabbed; stays fixed. Moving
+            // corner follows the cursor. The rect is always min/max(anchor,
+            // moving) per axis, so crossing the anchor flips growth direction
+            // automatically — no separate "wrap" case needed.
             const start_x: i32 = drag.start_win_x;
             const start_y: i32 = drag.start_win_y;
             const start_w: i32 = drag.start_win_width;
             const start_h: i32 = drag.start_win_height;
 
-            // Anchor: the edge that stays fixed (opposite side from the
-            // initially-dragged corner).
             const anchor_x: i32 = switch (drag.resize_corner) {
-                .top_left, .bottom_left => start_x + start_w, // anchor = right edge
-                .top_right, .bottom_right => start_x, // anchor = left  edge
+                .top_left, .bottom_left => start_x + start_w,
+                .top_right, .bottom_right => start_x,
             };
             const anchor_y: i32 = switch (drag.resize_corner) {
-                .top_left, .top_right => start_y + start_h, // anchor = bottom edge
-                .bottom_left, .bottom_right => start_y, // anchor = top   edge
+                .top_left, .top_right => start_y + start_h,
+                .bottom_left, .bottom_right => start_y,
             };
-
-            // Moving corner: initial position of the edge under the cursor.
             const moving_x0: i32 = switch (drag.resize_corner) {
-                .top_left, .bottom_left => start_x, // moving = left  edge
-                .top_right, .bottom_right => start_x + start_w, // moving = right edge
+                .top_left, .bottom_left => start_x,
+                .top_right, .bottom_right => start_x + start_w,
             };
             const moving_y0: i32 = switch (drag.resize_corner) {
-                .top_left, .top_right => start_y, // moving = top    edge
-                .bottom_left, .bottom_right => start_y + start_h, // moving = bottom edge
+                .top_left, .top_right => start_y,
+                .bottom_left, .bottom_right => start_y + start_h,
             };
 
-            // Apply cursor delta then snap toward whichever work-area
-            // boundary the moving edge is closest to.
             const raw_moving_x: i32 = moving_x0 + @as(i32, dx);
             const raw_moving_y: i32 = moving_y0 + @as(i32, dy);
-
             const moving_x: i32 = snapEdge(snapEdge(raw_moving_x, wa.left, snap), wa.right, snap);
             const moving_y: i32 = snapEdge(snapEdge(raw_moving_y, wa.top, snap), wa.bottom, snap);
 
-            // The four edges are simply the min/max of anchor and moving on
-            // each axis.  Crossing the anchor wraps the resize direction.
             const new_left: i32 = @min(anchor_x, moving_x);
             const new_right: i32 = @max(anchor_x, moving_x);
             const new_top: i32 = @min(anchor_y, moving_y);
             const new_bottom: i32 = @max(anchor_y, moving_y);
 
-            const new_w = new_right - new_left;
-            const new_h = new_bottom - new_top;
-
-            // Clamp dimensions first, then re-pin the position so the anchor
-            // edge stays fixed even when the minimum size is hit.
-            //
-            // Without this correction the anchor drifts: .x is set to new_left
-            // (the cursor-tracked edge) while .width is inflated by the clamp,
-            // so the far edge overshoots anchor_x.  Example: dragging the left
-            // edge rightward past (anchor_x - MIN_WINDOW_DIM) would push the
-            // right edge beyond anchor_x instead of holding it steady.
-            //
-            // The rule is straightforward:
-            //   • moving edge is on the LEFT  (moving_x < anchor_x)
-            //     → anchor is the RIGHT edge; x = anchor_x - clamped_w
-            //   • moving edge is on the RIGHT (moving_x >= anchor_x)
-            //     → anchor is the LEFT  edge; x = new_left (unchanged)
-            // Identical logic applies vertically.
-            const clamped_w: i32 = std.math.clamp(new_w, constants.MIN_WINDOW_DIM, std.math.maxInt(u16));
-            const clamped_h: i32 = std.math.clamp(new_h, constants.MIN_WINDOW_DIM, std.math.maxInt(u16));
-
+            // Clamp size first, then re-pin position off the anchor so the
+            // anchor edge never drifts when the minimum size is hit.
+            const clamped_w: i32 = std.math.clamp(new_right - new_left, constants.MIN_WINDOW_DIM, std.math.maxInt(u16));
+            const clamped_h: i32 = std.math.clamp(new_bottom - new_top, constants.MIN_WINDOW_DIM, std.math.maxInt(u16));
             const pinned_x: i32 = if (moving_x < anchor_x) anchor_x - clamped_w else new_left;
             const pinned_y: i32 = if (moving_y < anchor_y) anchor_y - clamped_h else new_top;
 
@@ -365,18 +251,13 @@ pub fn updateDrag(x: i16, y: i16) void {
     _ = xcb.xcb_flush(conn);
 }
 
-/// Ends the active drag and resets all drag state.
+/// Ends the active drag, saving the final geometry so workspace-switch
+/// float-restore finds the drag-moved position.
 pub fn stopDrag() void {
-    // Save the final geometry so workspace-switch float-restore finds the
-    // drag-moved position rather than the pre-drag tiling or default position.
-    // last_rect is zero when no motion event arrived during this drag (a bare
-    // click-and-release), in which case the cached geometry is already correct.
     const drag = &g_state.drag;
     if (drag.active and drag.last_rect.width != 0) {
         window.saveWindowGeom(drag.window, drag.last_rect);
     }
-    // No flush needed: the last updateDrag call already flushed all pending
-    // geometry changes before this function is reached.
     g_state = .{};
 }
 
@@ -384,17 +265,14 @@ pub inline fn isDragging() bool {
     return g_state.drag.active;
 }
 
-/// Returns true when a resize drag is active on the given window.
-/// Use this in handleConfigureRequest to deny min-size requests from the
-/// window being resized, preventing flicker between the client minimum and
-/// the WM-enforced size.
+/// True when a resize drag is active on `win` — used to deny min-size
+/// configure requests from the window being resized, preventing flicker.
 pub inline fn isResizingWindow(win: u32) bool {
     return g_state.drag.active and g_state.drag.mode == .resize and g_state.drag.window == win;
 }
 
-/// Returns the rect last applied during the active drag.
-/// Only meaningful when isDragging() is true and at least one motion event
-/// has arrived (last_rect.width != 0).
+/// Rect last applied during the active drag. Only meaningful while
+/// isDragging() and after at least one motion event.
 pub inline fn getDragLastRect() utils.Rect {
     return g_state.drag.last_rect;
 }

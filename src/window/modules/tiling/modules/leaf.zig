@@ -24,10 +24,7 @@ pub fn tileWithOffset(
 
     // Strip the outer gap; each recursive split inserts one gap at its seam,
     // so adjacent windows are always separated by exactly one gap_width.
-    // If swap_master deferred a window (see LayoutCtx.defer_win), emitOrDefer
-    // (called from the leaf case of tileRegion below) stashes its rect into
-    // ctx.deferred; invokeLayout flushes it once, after this whole call tree
-    // returns, instead of inline during the recursion.
+    // tileRegion's emitOrDefer honors ctx.defer_win — see LayoutCtx.defer_win.
     tileRegion(
         ctx,
         windows,

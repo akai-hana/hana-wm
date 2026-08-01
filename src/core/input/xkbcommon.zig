@@ -109,22 +109,9 @@ inline fn retryDelay(attempt: u8) void {
     _ = std.os.linux.nanosleep(&req, &rem);
 }
 
-// ── Retry helpers ─────────────────────────────────────────────────────────────
-// `retrySetup` and `retryKeymap` share the same structural contract:
-//
-//   for (0..MAX_ATTEMPTS) |i| {
-//       <attempt operation>
-//       if (<success condition>) return <value>;
-//       retryDelay(@intCast(i));
-//   }
-//   return error.<Xxx>Failed;
-//
-// The two functions differ in their operation (xkb_x11_setup_xkb_extension vs
-// xkb_x11_keymap_new_from_device + keymapHasEnoughSymbols) and return types
-// (!void vs !*xkb_keymap), which prevents a single generic loop abstraction
-// without compiler-opaque function pointers.  If a third retry site is added,
-// extract a comptime `retryLoop(comptime Fn: type, ...)` at that point.
-// ──────────────────────────────────────────────────────────────────────────────
+// retrySetup and retryKeymap share the same retry-loop shape but differ in
+// operation and return type (!void vs !*xkb_keymap), so they're left as two
+// small functions rather than one generic loop.
 
 /// Calls xkb_x11_setup_xkb_extension, retrying up to MAX_ATTEMPTS times.
 /// The extension may not be ready immediately at WM startup.
@@ -146,14 +133,10 @@ fn retrySetup(xcb_conn: *anyopaque) !void {
     return error.XkbSetupFailed;
 }
 
-/// Minimum number of reachable keysyms in the X11 keycode range 8..128 that
-/// hana considers a "fully populated" keymap.
-///
-/// A healthy keymap typically has ≥ 100 reachable keysyms in this range.  40 is
-/// chosen deliberately low so that minimal or embedded keymaps (e.g. on
-/// headless build machines) are still accepted, while an empty keymap returned
-/// by a failed or still-initialising XKB extension (common during early startup)
-/// is rejected and retried.
+/// Minimum reachable keysyms in keycode range 8..128 for a keymap to count
+/// as fully populated. A healthy keymap has 100+; 40 stays low enough to
+/// accept minimal/embedded keymaps while still rejecting the empty keymap
+/// a not-yet-ready XKB extension returns during early startup.
 const MIN_KEYMAP_SYMBOLS: u32 = 40;
 
 /// Returns true if `km` has at least MIN_KEYMAP_SYMBOLS reachable keysyms in the 8..128 range.

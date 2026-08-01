@@ -104,35 +104,30 @@ pub const Tracking = struct {
     /// duplicates.  For capacity = 200 this is at most 40,000 operations.
     pub fn reorder(self: *Tracking, new_order: []const u32) void {
         if (new_order.len != self.len) {
-            std.log.err(
-                "tracking: reorder length mismatch: got {d}, expected {d}",
-                .{ new_order.len, self.len },
-            );
-            std.debug.assert(new_order.len == self.len);
+            reorderFail("length mismatch: got {d}, expected {d}", .{ new_order.len, self.len });
             return;
         }
 
         var seen = std.StaticBitSet(capacity).initEmpty();
         for (new_order) |w| {
             const idx = std.mem.indexOfScalar(u32, self.buf[0..self.len], w) orelse {
-                std.log.err(
-                    "tracking: reorder: window 0x{x} not in current list",
-                    .{w},
-                );
-                std.debug.assert(false);
+                reorderFail("window 0x{x} not in current list", .{w});
                 return;
             };
             if (seen.isSet(idx)) {
-                std.log.err(
-                    "tracking: reorder: duplicate window 0x{x} in new_order",
-                    .{w},
-                );
-                std.debug.assert(false);
+                reorderFail("duplicate window 0x{x} in new_order", .{w});
                 return;
             }
             seen.set(idx);
         }
         @memcpy(self.buf[0..self.len], new_order);
+    }
+
+    /// Logs a reorder validation failure and asserts in debug/releaseSafe
+    /// builds; the caller returns early regardless of build mode.
+    fn reorderFail(comptime fmt: []const u8, args: anytype) void {
+        std.log.err("tracking: reorder: " ++ fmt, args);
+        std.debug.assert(false);
     }
 
     /// Returns a slice of the live entries in insertion order.
