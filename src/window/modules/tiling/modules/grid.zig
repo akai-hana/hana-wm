@@ -36,10 +36,7 @@ pub fn tileWithOffset(
         break :blk (screen_w -| (count + 1) * m.gap) / count;
     } else cell_w;
 
-    // Deferred-window handling (see LayoutCtx.defer_win): emitOrDefer stashes
-    // this window's rect if it matches ctx.defer_win; invokeLayout flushes it
-    // once, after this function returns, so it is sent last.
-
+    // emitOrDefer honors ctx.defer_win — see LayoutCtx.defer_win.
     for (windows, 0..) |win, idx| {
         const col: u16 = @intCast(idx % grid.cols);
         const row: u16 = @intCast(idx / grid.cols);

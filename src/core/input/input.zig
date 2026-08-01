@@ -14,26 +14,18 @@ const xcb = core.xcb;
 const types = @import("types");
 const utils = @import("utils");
 const constants = @import("constants");
-
 const debug = @import("debug");
 const config = @import("config");
-
 const window = @import("window");
 const tracking = @import("tracking");
 const focus = @import("focus");
-
 const fullscreen = @import("fullscreen");
 const minimize = @import("minimize");
 const tiling = @import("tiling");
-
 const workspaces = @import("workspaces");
-
 const drag = @import("drag");
-
 const xkbcommon = @import("xkbcommon");
-
 const bar = @import("bar");
-
 const prompt = @import("prompt");
 
 // Constants
@@ -111,8 +103,8 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     const mods = utils.normalizeModifiers(event.state);
     const keysym = xkb_state.?.keycodeToKeysym(event.detail);
 
-    // O(1) dispatch via the persistent (modifiers << 32 | keysym) map built
-    // by config.resolveKeybindings — replaces the former O(n) linear scan.
+    // O(1) dispatch via the (modifiers << 32 | keysym) map built by
+    // config.resolveKeybindings.
     const matched: ?*const types.Action = config.lookupKeybinding(mods, keysym);
 
     // The prompt owns all key input while active; routing is handled inside it.
@@ -160,12 +152,10 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
         return;
     }
 
-    // Fallback: any other click focuses and raises the window.
-    //
-    // The raise must be issued unconditionally here, before setFocus, because
-    // setFocus short-circuits when managed_window is already focused_window
-    // and never reaches the raise inside commitFocusTransition. Without this,
-    // a covered window that holds focus stays buried despite the click.
+    // Fallback: any other click focuses and raises the window. Raise must
+    // happen before setFocus — setFocus short-circuits when managed_window
+    // is already focused and skips the raise, leaving a covered focused
+    // window buried despite the click.
     _ = xcb.xcb_configure_window(cs.conn, managed_window, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     focus.setFocus(managed_window, .mouse_click);
     releaseGrab(event.time);
@@ -188,7 +178,7 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
 
     if (focus.getSuppressReason() != .none) focus.setSuppressReason(.none);
 
-    // POINTER_MOTION_HINT delivers one event per gesture; re-arm by sending a
+    // POINTER_MOTION_HINT delivers one event per gesture; re-arm with a
     // QueryPointer. Fire-and-discard — the server re-arms on receipt, not reply.
     const cs = core.getState();
     xcb.xcb_discard_reply(cs.conn, xcb.xcb_query_pointer(cs.conn, cs.root).sequence);
@@ -332,21 +322,15 @@ fn executeSwapMaster(action: *const types.Action) void {
         // defer_configure — the shrinking window fills its new slot before the
         // growing window vacates its old one, eliminating a one-frame gap.
         const new_master = focus.getFocused();
-        if (tiling.swapWithMasterGetWins()) |ws_wins| {
-            tiling.retileCurrentWorkspaceDeferredPrebuilt(ws_wins, new_master);
-        } else {
-            tiling.retileCurrentWorkspaceDeferred(new_master);
-        }
+        _ = tiling.swapWithMaster();
+        tiling.retileCurrentWorkspaceDeferred(new_master);
     } else {
         // follow-focus: capture, reorder, retile deferred, transfer focus —
         // all inside the grab so the border change is part of the same flush.
         const new_master = focus.getFocused();
-        if (tiling.swapWithMasterFollowFocusGetWins()) |result| {
-            tiling.retileCurrentWorkspaceDeferredPrebuilt(result.ws_wins, new_master);
-            if (result.displaced) |win| focus.setFocus(win, .tiling_operation);
-        } else {
-            tiling.retileCurrentWorkspaceDeferred(new_master);
-        }
+        const displaced = tiling.swapWithMaster();
+        tiling.retileCurrentWorkspaceDeferred(new_master);
+        if (displaced) |win| focus.setFocus(win, .tiling_operation);
     }
     // Async pointer-sync: queues the cookie without blocking so no premature
     // flush occurs inside the grab. drainPointerSync() consumes it next loop.
@@ -392,25 +376,18 @@ fn executeMouseAction(action: *const types.Action, clicked_win: u32) !void {
 
 // Shell execution
 //
-// Commands are launched via a double-fork so the grandchild is re-parented to
-// init and the WM never accumulates zombie processes.
+// Commands run via a double-fork so the grandchild re-parents to init and
+// the WM never accumulates zombies. A single O_CLOEXEC pipe (see
+// utils.makePipe) carries the outcome: a successful execvp() closes its
+// copy automatically, so nothing is sent on success. Otherwise the
+// intermediate child always writes TAG_PID (its child's pid) right before
+// exiting, and the grandchild writes TAG_FAILED only if execvp() fails —
+// two independently-scheduled writers, so the two messages can arrive in
+// either order (finishSpawn() handles both). EOF ends the conversation.
 //
-// A single pipe co-ordinates the three processes. Its write end is
-// O_CLOEXEC (see utils.makePipe), so a successful execvp() in the grandchild
-// closes its inherited copy automatically — nothing needs to be sent for the
-// success case. Two tagged messages can be written onto the read end:
-//   TAG_PID    — {TAG_PID, grandchild pid} written by the intermediate child
-//                in one atomic write(), always, right before it exits.
-//   TAG_FAILED — one byte written by the grandchild itself, only if execvp()
-//                fails.
-// Because these come from two independently-scheduled processes, they can
-// arrive in either order — see finishSpawn() for how that's resolved. EOF
-// always marks the end of the conversation, whatever was or wasn't sent.
-//
-// executeShellCommand returns immediately after fork(). The pending entry is
-// stored in g_pending and resolved asynchronously:
-//   drainPendingSpawns()  — called every event batch; does O_NONBLOCK reads.
-//   reapPendingChildren() — called on SIGCHLD; targeted waitpid(WNOHANG).
+// executeShellCommand returns right after fork(). The pending entry then
+// lives in g_pending until drainPendingSpawns() (polled every event batch)
+// or reapPendingChildren() (SIGCHLD) resolves it.
 
 /// Tags for the two possible messages written onto the spawn pipe. Sent as
 /// a leading byte so the reader can tell them apart no matter which order
@@ -541,13 +518,10 @@ fn executeShellCommand(cmd: []const u8) !void {
     }
 }
 
-/// Drains pending spawn entries non-blockingly.
-/// Called every event batch and on SIGCHLD. Each entry's spawn pipe carries
-/// up to two independently-written messages (see the block comment above),
-/// so bytes are just accumulated into entry.buf until EOF — or until the
-/// buffer is full, which already means both possible messages have arrived
-/// and there's no need to wait for EOF too. finishSpawn() then classifies
-/// whatever ended up in the buffer.
+/// Drains pending spawn entries non-blockingly (every event batch and on
+/// SIGCHLD). Bytes accumulate into entry.buf until EOF or until the buffer
+/// is full — a full buffer already holds both possible messages, so there's
+/// no need to wait for EOF too. finishSpawn() classifies the result.
 pub fn drainPendingSpawns() void {
     var i: usize = 0;
     while (i < g_pending.len) {
@@ -585,15 +559,11 @@ pub fn drainPendingSpawns() void {
 /// Classifies a fully-drained spawn-pipe conversation and, on success,
 /// registers the spawn for workspace routing.
 ///
-/// The intermediate child always sends a PID_MSG_LEN-byte TAG_PID message
-/// (tag + c_int, one atomic write()); the grandchild sends a single
-/// TAG_FAILED byte only if execvp() fails (also atomic). These come from two
-/// independently-scheduled processes, so they can arrive in either order —
-/// but neither write can be torn or interleaved with the other, since both
-/// are far under PIPE_BUF. That means finding a TAG_FAILED byte anywhere in
-/// the buffer is a reliable failure signal regardless of which message
-/// landed first, and an empty buffer (immediate EOF) means the second
-/// fork() itself never completed.
+/// Both writes (TAG_PID's PID_MSG_LEN bytes, TAG_FAILED's single byte) are
+/// well under PIPE_BUF, so neither is ever torn or interleaved — a
+/// TAG_FAILED byte anywhere in the buffer is a reliable failure signal
+/// regardless of arrival order, and an empty buffer means the second
+/// fork() never completed.
 fn finishSpawn(entry: *PendingSpawn) void {
     const data = entry.buf[0..entry.len];
 
@@ -689,15 +659,12 @@ fn tryConfigMouseBind(mods: u16, button: u8, win: u32, time: u32) bool {
     return false;
 }
 
-/// Runs `op` inside an xcb server grab, sweeps workspace borders, redraws
-/// the bar, and flushes atomically. Used for every tiling/layout/master
-/// operation; the border sweep is cheap enough to run unconditionally rather
-/// than have callers opt in.
+/// Runs `op` inside an xcb server grab, then sweeps borders, redraws the
+/// bar, and flushes atomically. Used for every tiling/layout/master op.
 ///
-/// `op` is normally a plain `fn () void`. A per-window operation (like
-/// toggle_floating_window below) instead passes a small value-capturing
-/// struct with a `call(self) void` method — Zig has no runtime closures, so
-/// this is how `win` rides along without a dedicated wrapper function.
+/// `op` is a plain `fn () void`, or — since Zig has no closures — a small
+/// value-capturing struct with a `call(self) void` method when a window ID
+/// needs to ride along (see toggle_floating_window below).
 inline fn withTilingGrab(op: anytype) void {
     const conn = core.getState().conn;
     _ = xcb.xcb_grab_server(conn);

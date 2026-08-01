@@ -204,17 +204,15 @@ fn windowsOnCurrentWorkspace(skip: u32) WorkspaceWindowIter {
 /// Falls back to a centred quarter-screen default if the reply fails, the
 /// window is offscreen, or reports zero dimensions.
 fn fetchWindowGeom(win: u32) core.WindowGeometry {
-    {
-        if (tiling.getWindowGeom(win)) |rect| {
-            const bw: u16 = if (tiling.getStateOpt()) |ts| ts.config.border_width else 0;
-            return .{
-                .x = rect.x,
-                .y = rect.y,
-                .width = rect.width,
-                .height = rect.height,
-                .border_width = bw,
-            };
-        }
+    if (tiling.getWindowGeom(win)) |rect| {
+        const bw: u16 = if (tiling.getStateOpt()) |ts| ts.config.border_width else 0;
+        return .{
+            .x = rect.x,
+            .y = rect.y,
+            .width = rect.width,
+            .height = rect.height,
+            .border_width = bw,
+        };
     }
 
     // Screen dimensions are u16; dividing by a power of two is unambiguous on unsigned values.
@@ -393,9 +391,7 @@ fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
     // fullscreen again means the bar should stay hidden.
     g_pending_bar_show_win = 0;
 
-    // Defer hiding the bar until the window confirms its new geometry via
-    // ConfigureNotify, so heavy clients (e.g. Discord) don't expose the
-    // raw background during their repaint delay.
+    // Arm the deferred bar-hide (see comment above configureWindowGeom).
     g_pending_bar_hide_win = win;
 
     // Advertise fullscreen state via EWMH so external tools (e.g. compositor

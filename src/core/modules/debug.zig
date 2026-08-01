@@ -17,29 +17,28 @@ inline fn debugEnabled() bool {
     return build.enable_debug_logging;
 }
 
+// Routed through std.log (rather than std.debug.print with hardcoded ANSI
+// codes) so custom log handlers and compile-time log-level filtering still
+// apply.
+inline fn log(comptime log_fn: anytype, comptime fmt: []const u8, module: []const u8, args: anytype) void {
+    log_fn("[{s}] " ++ fmt, .{module} ++ args);
+}
+
 pub inline fn err(comptime fmt: []const u8, args: anytype) void {
     if (!debugEnabled()) return;
-    const module = moduleFromSrc(@src());
-    std.log.err("[{s}] " ++ fmt, .{module} ++ args);
+    log(std.log.err, fmt, moduleFromSrc(@src()), args);
 }
 pub inline fn warn(comptime fmt: []const u8, args: anytype) void {
     if (!debugEnabled()) return;
-    const module = moduleFromSrc(@src());
-    std.log.warn("[{s}] " ++ fmt, .{module} ++ args);
+    log(std.log.warn, fmt, moduleFromSrc(@src()), args);
 }
-// Use std.log.info so that all log levels go through the same handler
-// (respecting any custom log handler the embedder installs and compile-time
-// log-level filtering), rather than std.debug.print with hardcoded ANSI
-// escape codes, which would bypass log routing entirely.
 pub inline fn info(comptime fmt: []const u8, args: anytype) void {
     if (!debugEnabled()) return;
-    const module = moduleFromSrc(@src());
-    std.log.info("[{s}] " ++ fmt, .{module} ++ args);
+    log(std.log.info, fmt, moduleFromSrc(@src()), args);
 }
 pub inline fn debug(comptime fmt: []const u8, args: anytype) void {
     if (!debugEnabled()) return;
-    const module = moduleFromSrc(@src());
-    std.log.debug("[{s}] " ++ fmt, .{module} ++ args);
+    log(std.log.debug, fmt, moduleFromSrc(@src()), args);
 }
 
 /// Panics with a module-tagged message when `condition` is false, in debug builds only.

@@ -391,166 +391,127 @@ pub fn handleInsert(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
-/// Handles a key press in normal mode. Returns the Action the caller should take.
-pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
-    // Pending r{c}: replace `count` chars with a single character.
-    if (vs.pending.awaiting == .replace_char) {
-        if (sym >= 0x20 and sym <= 0x7e and vs.cursor < vs.len) {
-            const ch: u8 = @truncate(sym);
-            const cnt: u32 = effectiveCount(vs);
-            vs.dot = .{ .direct = .{ .sym = 'r', .count = cnt, .replace_char = ch } };
-            undoPush(vs);
-            var i: usize = 0;
-            while (i < cnt and vs.cursor + i < vs.len) : (i += 1) vs.buf[vs.cursor + i] = ch;
-            vs.cursor = @min(vs.cursor + cnt - 1, vs.len -| 1);
-        }
-        resetPendingCmd(vs);
-        return .none;
+/// Handles a pending `r{c}` command: replace `count` chars under the cursor
+/// with a single character. Call only when vs.pending.awaiting == .replace_char.
+fn handleReplaceCharPending(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
+    if (sym >= 0x20 and sym <= 0x7e and vs.cursor < vs.len) {
+        const ch: u8 = @truncate(sym);
+        const cnt: u32 = effectiveCount(vs);
+        vs.dot = .{ .direct = .{ .sym = 'r', .count = cnt, .replace_char = ch } };
+        undoPush(vs);
+        var i: usize = 0;
+        while (i < cnt and vs.cursor + i < vs.len) : (i += 1) vs.buf[vs.cursor + i] = ch;
+        vs.cursor = @min(vs.cursor + cnt - 1, vs.len -| 1);
     }
+    resetPendingCmd(vs);
+    return .none;
+}
 
-    // Colon ex-command mode: :w  -> spawn_keep (execute, keep open)
-    //                         :q  -> deactivate (cancel)
-    //                         :wq -> spawn      (execute, close)
-    //                         :x  -> spawn      (execute, close)
-    // Escape cancels; any unrecognised command is silently discarded.
-    if (vs.pending.awaiting == .colon_cmd) {
-        switch (sym) {
-            XK_Escape => {
-                resetPendingCmd(vs);
-                return .none;
-            },
-            XK_BackSpace => {
-                if (vs.pending.colon_len > 0) {
-                    vs.pending.colon_len -= 1;
-                } else {
-                    resetPendingCmd(vs); // nothing typed -> cancel back to normal
-                }
-                return .none;
-            },
-            XK_Return => {
-                // Copy command bytes locally before resetPendingCmd zeroes colon_buf.
-                var cmd_buf: [4]u8 = vs.pending.colon_buf;
-                const cmd_len: u8 = vs.pending.colon_len;
-                const cmd = cmd_buf[0..cmd_len];
-                resetPendingCmd(vs);
-
-                if (std.mem.eql(u8, cmd, "q")) return .deactivate;
-                if (std.mem.eql(u8, cmd, "w")) return .spawn_keep;
-                if (std.mem.eql(u8, cmd, "wq")) return .spawn;
-                if (std.mem.eql(u8, cmd, "x")) return .spawn;
-
-                return .none;
-            },
-            else => {
-                // 0x20..0x7e is the printable ASCII range (space through tilde).
-                if (sym >= 0x20 and sym <= 0x7e and vs.pending.colon_len < vs.pending.colon_buf.len) {
-                    vs.pending.colon_buf[vs.pending.colon_len] = @truncate(sym);
-                    vs.pending.colon_len += 1;
-                }
-                return .none;
-            },
-        }
-    }
-
-    // ':' with no pending operator arms colon command mode.
-    if (sym == ':' and vs.pending.op == 0) {
-        vs.pending.awaiting = .colon_cmd;
-        vs.pending.colon_len = 0;
-        return .none;
-    }
-
-    if (resolveMotionKey(vs, sym)) |res| {
-        if (res.mr) |mr| {
-            if (res.op == 0) {
-                setCursor(vs, mr);
-                return .none;
-            }
-            if (res.dot_eligible) vs.dot = .{ .op_motion = .{
-                .op = res.op,
-                .op_count = res.op_count,
-                .motion_count = res.motion_count,
-                .motion_sym = if (res.find_kind != 0) 0 else @truncate(sym),
-                .find_kind = res.find_kind,
-                .find_ch = res.find_ch,
-                .has_g_prefix = res.has_g_prefix,
-            } };
-            applyOperator(vs, res.op, mr);
-        }
-        return .none;
-    }
-
-    // Normal-mode-specific pending states (only reachable when resolveMotionKey
-    // bailed out because one of these flags was set).
-    if (vs.pending.awaiting == .text_obj) {
-        const prefix = vs.pending.awaiting.text_obj;
-        if (sym >= 0x20 and sym <= 0x7e) {
-            const ch: u8 = @truncate(sym);
-            if (resolveTextObject(vs, prefix, ch)) |mr| {
-                vs.dot = buildOpMotionRecord(vs, 0);
-                vs.dot.op_motion.tobj_kind = prefix;
-                vs.dot.op_motion.tobj_delim = ch;
-                applyOperator(vs, vs.pending.op, mr);
-            }
-        }
-        resetPendingCmd(vs);
-        return .none;
-    }
-    if (vs.pending.awaiting == .mark_set) {
-        if (sym >= 'a' and sym <= 'z')
-            vs.marks[@as(usize, @intCast(sym - 'a'))] = vs.cursor;
-        resetPendingCmd(vs);
-        return .none;
-    }
-    if (vs.pending.awaiting == .mark_jump) {
-        if (sym >= 'a' and sym <= 'z') {
-            if (vs.marks[@as(usize, @intCast(sym - 'a'))]) |pos| {
-                const mr = MotionResult{ .pos = pos };
-                if (vs.pending.op != 0) applyOperator(vs, vs.pending.op, mr) else setCursor(vs, mr);
-            }
-        }
-        resetPendingCmd(vs);
-        return .none;
-    }
-
-    const cnt = effectiveCount(vs);
-
-    // Operator arming (d/c/y) and doubled-operator line commands (dd/cc/yy).
-    if (sym == 'd' or sym == 'c' or sym == 'y') {
-        const op: u8 = @truncate(sym);
-        if (vs.pending.op == 0) {
-            vs.pending.op = op;
-            vs.pending.op_count = vs.pending.count;
-            vs.pending.count = 0;
+/// Handles input while collecting an ex-command after ':'.
+///   :w  -> spawn_keep (execute, keep prompt open)   :q  -> deactivate (cancel)
+///   :wq -> spawn      (execute, close)              :x  -> spawn      (execute, close)
+/// Escape cancels; any unrecognised command is silently discarded.
+/// Call only when vs.pending.awaiting == .colon_cmd.
+fn handleColonCmdPending(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
+    switch (sym) {
+        XK_Escape => {
+            resetPendingCmd(vs);
             return .none;
+        },
+        XK_BackSpace => {
+            if (vs.pending.colon_len > 0) {
+                vs.pending.colon_len -= 1;
+            } else {
+                resetPendingCmd(vs); // nothing typed -> cancel back to normal
+            }
+            return .none;
+        },
+        XK_Return => {
+            // Copy command bytes locally before resetPendingCmd zeroes colon_buf.
+            var cmd_buf: [4]u8 = vs.pending.colon_buf;
+            const cmd_len: u8 = vs.pending.colon_len;
+            const cmd = cmd_buf[0..cmd_len];
+            resetPendingCmd(vs);
+
+            if (std.mem.eql(u8, cmd, "q")) return .deactivate;
+            if (std.mem.eql(u8, cmd, "w")) return .spawn_keep;
+            if (std.mem.eql(u8, cmd, "wq")) return .spawn;
+            if (std.mem.eql(u8, cmd, "x")) return .spawn;
+
+            return .none;
+        },
+        else => {
+            // 0x20..0x7e is the printable ASCII range (space through tilde).
+            if (sym >= 0x20 and sym <= 0x7e and vs.pending.colon_len < vs.pending.colon_buf.len) {
+                vs.pending.colon_buf[vs.pending.colon_len] = @truncate(sym);
+                vs.pending.colon_len += 1;
+            }
+            return .none;
+        },
+    }
+}
+
+/// Resolves a text-object target (e.g. the `w` in `diw`) and applies the
+/// pending operator to it. Call only when vs.pending.awaiting == .text_obj.
+fn handleTextObjPending(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
+    const prefix = vs.pending.awaiting.text_obj;
+    if (sym >= 0x20 and sym <= 0x7e) {
+        const ch: u8 = @truncate(sym);
+        if (resolveTextObject(vs, prefix, ch)) |mr| {
+            vs.dot = buildOpMotionRecord(vs, 0);
+            vs.dot.op_motion.tobj_kind = prefix;
+            vs.dot.op_motion.tobj_delim = ch;
+            applyOperator(vs, vs.pending.op, mr);
         }
-        if (vs.pending.op == op) {
-            vs.dot = .{ .op_line = .{ .op = op, .op_count = vs.pending.op_count, .motion_count = vs.pending.count } };
-            applyOperator(vs, op, .{ .pos = vs.len, .range_start_override = 0 });
+    }
+    resetPendingCmd(vs);
+    return .none;
+}
+
+/// Records the cursor position under mark `sym` (a-z only).
+/// Call only when vs.pending.awaiting == .mark_set.
+fn handleMarkSetPending(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
+    if (sym >= 'a' and sym <= 'z')
+        vs.marks[@as(usize, @intCast(sym - 'a'))] = vs.cursor;
+    resetPendingCmd(vs);
+    return .none;
+}
+
+/// Jumps to (or applies the pending operator up to) mark `sym`.
+/// Call only when vs.pending.awaiting == .mark_jump.
+fn handleMarkJumpPending(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
+    if (sym >= 'a' and sym <= 'z') {
+        if (vs.marks[@as(usize, @intCast(sym - 'a'))]) |pos| {
+            const mr = MotionResult{ .pos = pos };
+            if (vs.pending.op != 0) applyOperator(vs, vs.pending.op, mr) else setCursor(vs, mr);
         }
-        resetPendingCmd(vs);
-        return .none;
     }
+    resetPendingCmd(vs);
+    return .none;
+}
 
-    // i/a after an operator arms the text-object resolver.
-    if ((sym == 'i' or sym == 'a') and vs.pending.op != 0) {
-        vs.pending.awaiting = .{ .text_obj = @truncate(sym) };
+/// Arms an operator (d/c/y) on the first press, or — on a doubled press
+/// (dd/cc/yy) — applies it to the whole line. Call only when sym is 'd', 'c', or 'y'.
+fn handleOperatorArm(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
+    const op: u8 = @truncate(sym);
+    if (vs.pending.op == 0) {
+        vs.pending.op = op;
+        vs.pending.op_count = vs.pending.count;
+        vs.pending.count = 0;
         return .none;
     }
+    if (vs.pending.op == op) {
+        vs.dot = .{ .op_line = .{ .op = op, .op_count = vs.pending.op_count, .motion_count = vs.pending.count } };
+        applyOperator(vs, op, .{ .pos = vs.len, .range_start_override = 0 });
+    }
+    resetPendingCmd(vs);
+    return .none;
+}
 
-    // r/m/' prefix arming (single-char targets; not consumed by resolveMotionKey).
-    if (sym == 'r' and vs.pending.op == 0) {
-        vs.pending.awaiting = .replace_char;
-        return .none;
-    }
-    if (sym == 'm' and vs.pending.op == 0) {
-        vs.pending.awaiting = .mark_set;
-        return .none;
-    }
-    if (sym == 0x27) {
-        vs.pending.awaiting = .mark_jump;
-        return .none;
-    } // '
-
+/// Dispatches a bare (unprefixed) normal-mode command key — the fallback once
+/// none of the pending/prefix/motion handlers above have claimed `sym`.
+/// Always leaves pending state reset before returning.
+fn execNormalKey(vs: *VimState, sym: xcb.xcb_keysym_t, cnt: u32) Action {
     switch (sym) {
         XK_Escape => {
             const act: Action = if (vs.pending.op == 0 and vs.pending.count == 0) .deactivate else .none;
@@ -645,6 +606,76 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
 
     resetPendingCmd(vs);
     return .none;
+}
+
+/// Handles a key press in normal mode. Returns the Action the caller should take.
+///
+/// Reads top-to-bottom as the precedence order of normal mode: a pending
+/// single-char target (r{c}, :cmd, text-object, mark) claims the very next
+/// key outright; otherwise a motion is tried; otherwise a prefix key (d/c/y,
+/// i/a after an operator, r/m/') arms pending state for the *next* key;
+/// otherwise the key is a bare command handled by execNormalKey.
+pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
+    if (vs.pending.awaiting == .replace_char) return handleReplaceCharPending(vs, sym);
+    if (vs.pending.awaiting == .colon_cmd) return handleColonCmdPending(vs, sym);
+
+    // ':' with no pending operator arms colon command mode.
+    if (sym == ':' and vs.pending.op == 0) {
+        vs.pending.awaiting = .colon_cmd;
+        vs.pending.colon_len = 0;
+        return .none;
+    }
+
+    if (resolveMotionKey(vs, sym)) |res| {
+        if (res.mr) |mr| {
+            if (res.op == 0) {
+                setCursor(vs, mr);
+                return .none;
+            }
+            if (res.dot_eligible) vs.dot = .{ .op_motion = .{
+                .op = res.op,
+                .op_count = res.op_count,
+                .motion_count = res.motion_count,
+                .motion_sym = if (res.find_kind != 0) 0 else @truncate(sym),
+                .find_kind = res.find_kind,
+                .find_ch = res.find_ch,
+                .has_g_prefix = res.has_g_prefix,
+            } };
+            applyOperator(vs, res.op, mr);
+        }
+        return .none;
+    }
+
+    // Normal-mode-specific pending states (only reachable when resolveMotionKey
+    // bailed out because one of these flags was set).
+    if (vs.pending.awaiting == .text_obj) return handleTextObjPending(vs, sym);
+    if (vs.pending.awaiting == .mark_set) return handleMarkSetPending(vs, sym);
+    if (vs.pending.awaiting == .mark_jump) return handleMarkJumpPending(vs, sym);
+
+    // Operator arming (d/c/y) and doubled-operator line commands (dd/cc/yy).
+    if (sym == 'd' or sym == 'c' or sym == 'y') return handleOperatorArm(vs, sym);
+
+    // i/a after an operator arms the text-object resolver.
+    if ((sym == 'i' or sym == 'a') and vs.pending.op != 0) {
+        vs.pending.awaiting = .{ .text_obj = @truncate(sym) };
+        return .none;
+    }
+
+    // r/m/' prefix arming (single-char targets; not consumed by resolveMotionKey).
+    if (sym == 'r' and vs.pending.op == 0) {
+        vs.pending.awaiting = .replace_char;
+        return .none;
+    }
+    if (sym == 'm' and vs.pending.op == 0) {
+        vs.pending.awaiting = .mark_set;
+        return .none;
+    }
+    if (sym == 0x27) {
+        vs.pending.awaiting = .mark_jump;
+        return .none;
+    } // '
+
+    return execNormalKey(vs, sym, effectiveCount(vs));
 }
 
 /// Handles a key press in visual mode. Returns the Action the caller should take.

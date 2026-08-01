@@ -282,10 +282,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     // Ctrl-modified keys
     if (ctrl_held) {
         const action = if (vim_mode) vim.handleCtrl(&g.vim_state, sym) else .none;
-        const prev_len = g.vim_state.len;
-        handleAction(action);
-        if (g.vim_state.len != prev_len)
-            g.has_space = std.mem.indexOfScalar(u8, g.vim_state.buf[0..g.vim_state.len], ' ') != null;
+        applyAction(action);
         g.redraw_pending = true;
         return true;
     }
@@ -311,10 +308,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
         .visual => if (vim_mode) vim.handleVisual(&g.vim_state, sym) else .none,
         .replace => if (vim_mode) vim.handleReplace(&g.vim_state, sym) else .none,
     };
-    const prev_len = g.vim_state.len;
-    handleAction(action);
-    if (g.vim_state.len != prev_len)
-        g.has_space = std.mem.indexOfScalar(u8, g.vim_state.buf[0..g.vim_state.len], ' ') != null;
+    applyAction(action);
     updateGhost();
     g.is_blink_visible = true;
     g.redraw_pending = true;
@@ -367,6 +361,16 @@ pub fn draw(
 }
 
 // Private — action handling
+
+/// Runs `action` through handleAction, then resyncs g.has_space if the buffer
+/// length changed. Shared by the Ctrl-key and normal-key paths in
+/// handleKeyPress, which otherwise duplicated this exact sequence.
+fn applyAction(action: vim.Action) void {
+    const prev_len = g.vim_state.len;
+    handleAction(action);
+    if (g.vim_state.len != prev_len)
+        g.has_space = std.mem.indexOfScalar(u8, g.vim_state.buf[0..g.vim_state.len], ' ') != null;
+}
 
 /// Dispatches a vim.Action returned by a mode handler: executes/closes on spawn,
 /// resets and keeps open on spawn_keep, deactivates on deactivate, no-ops on none.
@@ -529,6 +533,14 @@ fn compExistsExact(name: []const u8) bool {
     return std.mem.eql(u8, entry, name);
 }
 
+/// Clamps `suffix` into g.ghost_buf/g.ghost_len. Shared by both updateGhost
+/// branches, which only differ in how they find the match.
+inline fn setGhost(suffix: []const u8) void {
+    const n = @min(suffix.len, max_completion_len);
+    @memcpy(g.ghost_buf[0..n], suffix[0..n]);
+    g.ghost_len = n;
+}
+
 /// Recompute the ghost-text suggestion based on the current buffer.
 /// Priority: history (newest first) -> any executable match.
 /// Only operates in INSERT mode with cursor at end and no spaces typed.
@@ -555,11 +567,7 @@ fn updateGhost() void {
         if (!std.mem.startsWith(u8, cmd_tok, prefix)) continue;
         if (!compExistsExact(cmd_tok)) continue;
 
-        const suffix = cmd_tok[prefix.len..];
-        const n = @min(suffix.len, max_completion_len);
-        @memcpy(g.ghost_buf[0..n], suffix[0..n]);
-        g.ghost_len = n;
-        return;
+        return setGhost(cmd_tok[prefix.len..]);
     }
 
     // 2. Fallback: shortest executable that starts with prefix.
@@ -571,11 +579,7 @@ fn updateGhost() void {
         const name = std.mem.sliceTo(g.comp_names[slot .. slot + max_completion_len + 1], 0);
         if (!std.mem.startsWith(u8, name, prefix)) return; // past all prefix matches
         if (name.len <= prefix.len) continue; // exact match, not a completion
-        const suffix = name[prefix.len..];
-        const n = @min(suffix.len, max_completion_len);
-        @memcpy(g.ghost_buf[0..n], suffix[0..n]);
-        g.ghost_len = n;
-        return;
+        return setGhost(name[prefix.len..]);
     }
 }
 

@@ -5,15 +5,11 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const utils = @import("utils");
 const constants = @import("constants");
-
 const window = @import("window");
 const tracking = @import("tracking");
 const tiling = @import("tiling");
-
 const bar = @import("bar");
-
 const carousel = @import("carousel");
 
 // Module state
@@ -538,12 +534,10 @@ pub fn invalidateInputModelCache(win: u32) void {
 /// to a focus steal, so stability (not raise-order) is the priority.
 fn sendFocusProtocol(win: u32) void {
     const conn = core.getState().conn;
-    // getInputModel's take_focus half is live (see its doc comment in
-    // window.zig); sendWMTakeFocus below independently re-checks the same
-    // property live too. Two round trips instead of one, on a path that
-    // fires on focus steals rather than every event — acceptable per the
-    // same reasoning as setFocus above, not worth entangling the two checks
-    // to save one round trip.
+    // take_focus is checked live twice here (getInputModel, then again inside
+    // sendWMTakeFocus) — same "not worth entangling to save one round trip"
+    // reasoning as setFocus above, just unpipelined since this path fires on
+    // focus steals, not on every event.
     const model = window.getInputModel(conn, win);
     if (model == .no_input) return;
     if (model != .globally_active) {

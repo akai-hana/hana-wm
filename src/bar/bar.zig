@@ -319,7 +319,25 @@ const State = struct {
                         snap.window_titles.list.items[0]
                     else
                         "";
-                break :blk try prompt.draw(r.dc, r.config, r.height, x, width orelse TITLE_MIN_WIDTH, self.win.conn, snap.focused_window, snap.focused_title.items, minimized_title, snap.current_workspace_windows.items, &snap.minimized_windows, snap.window_titles.list.items, snap.window_geoms.items, &self.title_cache.title, &self.title_cache.title_window, snap.is_title_invalidated, r.allocator);
+                break :blk try prompt.draw(
+                    r.dc,
+                    r.config,
+                    r.height,
+                    x,
+                    width orelse TITLE_MIN_WIDTH,
+                    self.win.conn,
+                    snap.focused_window,
+                    snap.focused_title.items,
+                    minimized_title,
+                    snap.current_workspace_windows.items,
+                    &snap.minimized_windows,
+                    snap.window_titles.list.items,
+                    snap.window_geoms.items,
+                    &self.title_cache.title,
+                    &self.title_cache.title_window,
+                    snap.is_title_invalidated,
+                    r.allocator,
+                );
             },
             .clock => try clock.draw(r.dc, r.config, r.height, x),
         };

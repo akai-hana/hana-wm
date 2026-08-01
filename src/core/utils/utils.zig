@@ -15,8 +15,9 @@ const property_no_delete = constants.PROPERTY_NO_DELETE;
 
 // Process lifecycle signals
 //
-// Module-level atomics rather than WM struct fields, because they are process control state, not window-manager state.
-// Signal handlers and keybind actions write here; the main event loop reads here.
+// Module-level atomics, not WM struct fields — this is process control
+// state, not window-manager state. Signal handlers and keybind actions
+// write here; the main event loop reads here.
 
 /// Set to false by SIGTERM/SIGINT to break the main event loop.
 pub var running = std.atomic.Value(bool).init(true);
@@ -92,8 +93,9 @@ pub inline fn normalizeModifiers(state: u16) u16 {
 
 // Atom cache
 //
-// Field names match X11 atom strings exactly so getAtomCached can resolve them with a single @field call:
-// No switch, no redundant enum, no second place to add entries when a new atom is needed.
+// Field names match X11 atom strings exactly, so getAtomCached resolves
+// them with a single @field call — no switch, no enum, no second place to
+// add entries when a new atom is needed.
 const AtomCache = struct {
     WM_PROTOCOLS: u32,
     WM_DELETE_WINDOW: u32,
@@ -104,8 +106,8 @@ const AtomCache = struct {
     // Root window EWMH-conformance atoms — see advertiseEwmhSupport() below.
     _NET_SUPPORTED: u32,
     _NET_SUPPORTING_WM_CHECK: u32,
-    // Bar window property atoms
-    // Batched here so setWindowProperties pays zero X round-trips rather than 10 serial ones.
+    // Bar window property atoms, batched here so setWindowProperties pays
+    // zero X round-trips instead of 10 serial ones.
     _NET_WM_STRUT_PARTIAL: u32,
     _NET_WM_WINDOW_TYPE: u32,
     _NET_WM_WINDOW_TYPE_DOCK: u32,
@@ -122,9 +124,9 @@ const AtomCache = struct {
 
 var atom_cache: ?AtomCache = null;
 
-/// Interns all atoms in a single round-trip batch.
-/// Atom names are derived from `AtomCache` field names at comptime, so adding a field is the only change required:
-/// No parallel array to maintain, and no index-order mismatch risk.
+/// Interns all atoms in a single round-trip batch. Atom names come from
+/// `AtomCache`'s field names at comptime, so adding a field is the only
+/// change required — no parallel array, no index-order mismatch risk.
 pub fn initAtomCache(conn: *xcb.xcb_connection_t) !void {
     const fields = std.meta.fields(AtomCache);
     var cookies: [fields.len]xcb.xcb_intern_atom_cookie_t = undefined;
@@ -158,14 +160,13 @@ pub inline fn getAtomCached(comptime name: []const u8) error{AtomCacheNotInitial
 /// here must correspond to a protocol hana genuinely honours — clients use
 /// this list to decide what they can rely on.
 ///
-/// This is the fix for GLFW's "Iconification of full screen windows requires
-/// a WM that supports EWMH full screen" error (seen in Minecraft and other
-/// LWJGL/GLFW games): GLFW only uses `_NET_WM_STATE_FULLSCREEN` for full
-/// screen windows if that atom is listed here. Without it, GLFW falls back
-/// to a raw override-redirect window, which bypasses the WM entirely — and
-/// override-redirect windows can't be iconified through the WM, so the very
-/// next XIconifyWindow() call (minimize, alt-tab-triggered auto-iconify,
-/// etc.) throws that error instead of doing anything.
+/// Notably fixes GLFW's "Iconification of full screen windows requires a WM
+/// that supports EWMH full screen" error (seen in Minecraft and other
+/// LWJGL/GLFW games): GLFW only fullscreens via `_NET_WM_STATE_FULLSCREEN`
+/// if that atom is listed here. Without it, GLFW falls back to a raw
+/// override-redirect window, which bypasses the WM — and override-redirect
+/// windows can't be iconified through the WM, so the next XIconifyWindow()
+/// call throws that error instead of doing anything.
 const supported_atoms = [_][]const u8{
     "_NET_SUPPORTED",
     "_NET_SUPPORTING_WM_CHECK",
@@ -187,16 +188,15 @@ const supported_atoms = [_][]const u8{
 /// Publishes hana's EWMH conformance on the root window.
 ///
 /// Per the EWMH spec, a conformant WM creates a small identity ("check")
-/// window, tags it — and the root — with `_NET_SUPPORTING_WM_CHECK` pointing
-/// at it, gives it a `_NET_WM_NAME`, and lists every hint it honours in
+/// window, tags it and the root with `_NET_SUPPORTING_WM_CHECK` pointing at
+/// it, gives it a `_NET_WM_NAME`, and lists every hint it honours in
 /// `_NET_SUPPORTED` on the root. Clients (GLFW, Qt, Chromium, ...) probe
-/// this once at startup to decide whether the WM understands EWMH at all;
-/// without it they assume a bare ICCCM-only WM and take much more
-/// conservative — and in GLFW's case, broken — code paths. See
-/// `supported_atoms` above for the concrete bug this fixes.
+/// this once at startup; without it they assume a bare ICCCM-only WM and
+/// take more conservative — in GLFW's case, broken — code paths (see
+/// `supported_atoms` above).
 ///
-/// Must run once at startup, after initAtomCache() (it depends on the atoms
-/// above already being interned) and before any client can map a window.
+/// Must run once at startup, after initAtomCache() and before any client
+/// can map a window.
 pub fn advertiseEwmhSupport(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t, root: u32) void {
     const supporting_wm_check = getAtomCached("_NET_SUPPORTING_WM_CHECK") catch return;
     const net_wm_name = getAtomCached("_NET_WM_NAME") catch return;
@@ -383,12 +383,10 @@ pub const Condition = struct {
 
 // Bounded collections
 //
-// Four call sites across the codebase (window.zig's focus-property cache and
-// child-window cache, minimize.zig's minimized-window record, input.zig's
-// pending-spawn table) each independently hand-rolled the same shape: a
-// fixed-capacity array plus a length, with linear-scan find, append, and
-// remove-and-compact. BoundedList consolidates that into one generic type so
-// a future fix to e.g. swap-remove semantics only needs to happen once.
+// Consolidates a shape that four call sites (window.zig's caches,
+// minimize.zig's minimized-window record, input.zig's pending-spawn table)
+// each hand-rolled independently: a fixed-capacity array plus a length,
+// with linear-scan find, append, and remove-and-compact.
 
 /// Generic fixed-capacity, allocation-free collection backed by a plain
 /// array. At the small counts these call sites deal with (tens to low
@@ -456,8 +454,9 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
 }
 
 /// Fetches an 8-bit X11 window property into a caller-supplied reuse buffer.
-/// Returns a slice into `buffer.items` on success, or null if the property is absent, empty, or not 8-bit encoded.
-/// The buffer is cleared before each use, so the caller can allocate it once and pass it across repeated calls.
+/// Returns a slice into `buffer.items`, or null if the property is absent,
+/// empty, or not 8-bit encoded. The buffer is cleared before each use, so
+/// the caller can allocate it once and pass it across repeated calls.
 pub fn fetchPropertyToBuffer(
     conn: *xcb.xcb_connection_t,
     window: u32,

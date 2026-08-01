@@ -38,11 +38,7 @@ pub fn tileWithOffset(
     var h: u16 = screen_h -| m.gap *| 2;
     var dir: SpiralDirection = .right;
 
-    // Deferred-window handling (see LayoutCtx.defer_win): emitOrDefer, called
-    // from splitAndAdvance below, stashes a window's rect into ctx.deferred
-    // if it matches ctx.defer_win; invokeLayout flushes it once, after this
-    // whole function returns — no per-return-path flush needed here.
-
+    // splitAndAdvance's emitOrDefer honors ctx.defer_win — see LayoutCtx.defer_win.
     for (windows, 0..) |win, i| {
         // Remaining area too small to split: raise the focused window (or the
         // first overflow window as fallback) and push the rest offscreen so the
