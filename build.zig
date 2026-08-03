@@ -1,69 +1,69 @@
 //! hana's build configuration
 //! Includes module auto-discovery: every .zig file under src/ becomes a
 //! named module, available to import from every other module.
+//!
+//! This script relies on newer, still-evolving parts of the standard
+//! library (e.g. the Io-based filesystem calls below), so it requires a
+//! recent Zig build. Rather than a comptime version guard here, declare the
+//! minimum supported compiler via build.zig.zon's `minimum_zig_version`
+//! field -- that's the version-manager-aware place for it today (read by
+//! zvm, mise, vscode-zig, etc.).
 
-const std     = @import("std");
-const builtin = @import("builtin");
-
-// Compile-time version guard
-// Must be top-level so it fires before the compiler analyses any other functions
-// comptime {
-//     if (builtin.zig_version.pre == null) @compileError(
-//         \\!!! Hana requires Zig's master branch. !!!
-//         \\
-//         \\# If your package manager doesn't ship it, you can try ZVM's easy installer:
-//         \\curl https://raw.githubusercontent.com/tristanisham/zvm/master/install.sh | bash
-//         \\# And then install Zig's master branch:
-//         \\zvm i master
-//         \\
-//         // ^ Intended to leave a blank gap
-//     );
-// }
+const std = @import("std");
 
 // Configuration
+//
+// Every path (and path-adjacent limit) this build script depends on,
+// gathered in one place so they're easy to audit together instead of being
+// scattered as inline literals.
 
 const source_root = "src/";
+const entry_point_path = source_root ++ "core/main.zig";
+const fallback_toml_path = "config/fallback.toml";
+const max_fallback_toml_bytes = 1024 * 1024; // Memory limit just in case.
 
 // Entry point
 
-pub fn build(b: *std.Build) void {
-    const target   = b.standardTargetOptions(.{});
+pub fn build(b: *std.Build) !void {
+    const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast });
 
+    if (target.result.os.tag != .linux) {
+        std.debug.print(
+            "Fatal: hana only supports Linux (it links against xcb, xkbcommon-x11, and pango/cairo).\n",
+            .{},
+        );
+        return error.UnsupportedTarget;
+    }
+
     // Fallback config
-    const fallback_toml     = readFallbackToml(b);
+    const fallback_toml = readFallbackToml(b);
     // Attempt to embed `config/fallback.toml` at build time
     const fallback_toml_mod = buildFallbackTomlModule(b, fallback_toml, target, optimize);
 
     // Build options
     const build_opts = b.addOptions();
     build_opts.addOption(bool, "enable_debug_logging", optimize == .Debug);
-    build_opts.addOption(bool, "has_fallback_toml",    fallback_toml != null);
+    build_opts.addOption(bool, "has_fallback_toml", fallback_toml != null);
 
     // Module discovery
-    var discovery = Module.DiscoveryContext.run(b, target, optimize, source_root) catch |err| {
-        std.debug.print("Fatal: module discovery failed: {}\n", .{err});
-        std.process.exit(1);
-    };
+    var discovery = try Module.DiscoveryContext.run(b, target, optimize, source_root, entry_point_path);
 
     // Root module
     const shared_ctx: SharedBuildContext = .{
-        .build_opts    = build_opts.createModule(),
+        .build_opts = build_opts.createModule(),
         .fallback_toml = fallback_toml_mod,
-        .optimize      = optimize,
+        .optimize = optimize,
     };
 
     const root_mod = b.createModule(.{
-        .root_source_file = b.path(source_root ++ "core/main.zig"),
+        .root_source_file = b.path(entry_point_path),
 
-        .target    = target,
-        .optimize  = optimize,
+        .target = target,
+        .optimize = optimize,
         .link_libc = true,
     });
     stripIfRelease(root_mod, optimize);
-
-    root_mod.addImport("build_options", shared_ctx.build_opts);
-    root_mod.addImport("fallback_toml", shared_ctx.fallback_toml);
 
     // Wire & link
     Module.wireAll(root_mod, &discovery.modules, shared_ctx);
@@ -76,42 +76,58 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
-    b.step("run",   "Run hana").dependOn(&run_cmd.step);
+    b.step("run", "Run hana").dependOn(&run_cmd.step);
     b.step("check", "Type-check without installing").dependOn(&exe.step);
 }
 
 // Shared context
 
-/// Shared artefacts injected into every discovered module.
+/// Names already claimed by `injectShared`. A discovered module sharing one
+/// of these names would collide with the import `injectShared` adds to
+/// every module, so `Module.registerModule` rejects them at registration
+/// time with a clear error instead of failing deep inside `addImport`.
+const reserved_module_names = [_][]const u8{ "build_options", "fallback_toml" };
+
+/// Shared artefacts injected into every module -- root and discovered alike.
 const SharedBuildContext = struct {
-    build_opts:    *std.Build.Module,
+    build_opts: *std.Build.Module,
     fallback_toml: *std.Build.Module,
-    optimize:      std.builtin.OptimizeMode,
+    optimize: std.builtin.OptimizeMode,
 };
 
 // Helpers
 
-/// Reads `config/fallback.toml` from the build root.
+/// Reads the fallback TOML config (`fallback_toml_path`) from the build root.
 ///
-/// Uses a build-lifetime arena so no explicit free is needed.
+/// Uses a build-lifetime arena so no explicit free is needed. A missing file
+/// is expected -- the fallback config is optional -- and treated as "no
+/// fallback". Any other error (permissions, I/O, etc.) is surfaced as a
+/// warning instead of being silently swallowed, so a real problem doesn't
+/// quietly degrade the build.
 fn readFallbackToml(b: *std.Build) ?[]const u8 {
     return b.build_root.handle.readFileAlloc(
         b.graph.io,
-        "config/fallback.toml",
+        fallback_toml_path,
         b.allocator,
-        .limited(1024 * 1024), // Memory limit just in case
-    ) catch null;
+        .limited(max_fallback_toml_bytes),
+    ) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => {
+            std.debug.print("Warning: couldn't read {s}: {}\n", .{ fallback_toml_path, err });
+            return null;
+        },
+    };
 }
 
 /// Generates a synthetic Zig module exposing fallback TOML data.
-/// 
-/// Exposes a `content` slice containing either the provided TOML or an empty string. 
-/// Generating this at build-time allows consumers to safely import the content 
+///
+/// Exposes a `content` slice containing either the provided TOML or an empty string.
+/// Generating this at build-time allows consumers to safely import the content
 /// unconditionally, avoiding messy `@embedFile` checks in the source code.
 fn buildFallbackTomlModule(
-    b:        *std.Build,
-    content:  ?[]const u8,
-    target:   std.Build.ResolvedTarget,
+    b: *std.Build,
+    content: ?[]const u8,
+    target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) *std.Build.Module {
     const write = b.addWriteFiles();
@@ -122,16 +138,14 @@ fn buildFallbackTomlModule(
         \\pub const content: []const u8 = @embedFile("fallback.toml");
     else
         \\pub const content: []const u8 = "";
-   ;
+    ;
 
     return b.createModule(.{
         .root_source_file = write.add("fallback_toml.zig", stub_source),
-        .target   = target,
+        .target = target,
         .optimize = optimize,
     });
 }
-
-// Helpers
 
 /// Enables symbol stripping for release builds to reduce binary size.
 ///
@@ -143,51 +157,66 @@ fn stripIfRelease(mod: *std.Build.Module, optimize: std.builtin.OptimizeMode) vo
     }
 }
 
+/// Injects the artefacts every module needs, regardless of where it lives in
+/// the tree: build options and the fallback-config stub. Shared by the root
+/// module and every discovered module so there's exactly one place that
+/// knows what "every module gets this" means.
+fn injectShared(mod: *std.Build.Module, ctx: SharedBuildContext) void {
+    mod.addImport("build_options", ctx.build_opts);
+    mod.addImport("fallback_toml", ctx.fallback_toml);
+}
+
 // Module namespace discovery & wiring
 
 /// Namespace that owns all logic related to module discovery and wiring.
 ///
 /// Grouped here so the entry point (`build`) stays at a high level of abstraction.
 const Module = struct {
-
     /// Mutable state threaded through the entire discovery pass.
     ///
     /// Grouping it here means discoverAll and registerModule take only the arguments
     /// that actually vary per call, and future additions touch zero function signatures.
     const DiscoveryContext = struct {
-        b:            *std.Build,
-        target:       std.Build.ResolvedTarget,
-        optimize:     std.builtin.OptimizeMode,
-        modules:      std.StringHashMap(*std.Build.Module),
+        b: *std.Build,
+        target: std.Build.ResolvedTarget,
+        optimize: std.builtin.OptimizeMode,
+        entry_point_path: []const u8,
+        // Neither map below is explicitly torn down: both they and their
+        // duped keys live in b.allocator, which is an arena scoped to the
+        // whole build, so their lifetime already matches the process's.
+        modules: std.StringHashMap(*std.Build.Module),
         source_paths: std.StringHashMap([]const u8),
 
         fn init(
-            b:        *std.Build,
-            target:   std.Build.ResolvedTarget,
+            b: *std.Build,
+            target: std.Build.ResolvedTarget,
             optimize: std.builtin.OptimizeMode,
-        ) !DiscoveryContext {
+            entry_point: []const u8,
+        ) DiscoveryContext {
             return .{
-                .b            = b,
-                .target       = target,
-                .optimize     = optimize,
-                .modules      = std.StringHashMap(*std.Build.Module).init(b.allocator),
+                .b = b,
+                .target = target,
+                .optimize = optimize,
+                .entry_point_path = entry_point,
+                .modules = std.StringHashMap(*std.Build.Module).init(b.allocator),
                 .source_paths = std.StringHashMap([]const u8).init(b.allocator),
             };
         }
 
         fn run(
-            b:        *std.Build,
-            target:   std.Build.ResolvedTarget,
+            b: *std.Build,
+            target: std.Build.ResolvedTarget,
             optimize: std.builtin.OptimizeMode,
             dir_path: []const u8,
+            entry_point: []const u8,
         ) !DiscoveryContext {
-            var ctx = try init(b, target, optimize);
+            var ctx = init(b, target, optimize, entry_point);
             try ctx.discoverAll(dir_path);
             return ctx;
         }
 
         /// Recursively walks `dir_path` and registers every `.zig` file as a
-        /// named module (except `main.zig`).
+        /// named module, except the entry point itself (`ctx.entry_point_path`).
         fn discoverAll(ctx: *DiscoveryContext, dir_path: []const u8) !void {
             const b = ctx.b;
             var dir = try b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true });
@@ -205,8 +234,11 @@ const Module = struct {
 
                     .file => {
                         if (!isZigSource(entry.name)) continue;
-                        if (isEntryPoint(entry.name))  continue;
-                        try ctx.registerModule(dir_path, entry.name);
+
+                        const rel_path = try std.fs.path.join(b.allocator, &.{ dir_path, entry.name });
+                        if (isEntryPointPath(rel_path, ctx.entry_point_path)) continue;
+
+                        try ctx.registerModule(rel_path);
                     },
 
                     else => {},
@@ -216,11 +248,22 @@ const Module = struct {
 
         /// Registers a new module.
         ///
-        /// Handles collisions if found.
-        fn registerModule(ctx: *DiscoveryContext, dir_path: []const u8, filename: []const u8) !void {
-            const b        = ctx.b;
-            const stem     = std.fs.path.stem(filename);
-            const rel_path = try std.fs.path.join(b.allocator, &.{ dir_path, filename });
+        /// Rejects reserved names (see `reserved_module_names`) and handles
+        /// collisions between discovered modules if found.
+        fn registerModule(ctx: *DiscoveryContext, rel_path: []const u8) !void {
+            const b = ctx.b;
+            const stem = std.fs.path.stem(std.fs.path.basename(rel_path));
+
+            for (reserved_module_names) |reserved| {
+                if (std.mem.eql(u8, stem, reserved)) {
+                    std.debug.print(
+                        "Error: module name '{s}' ({s}) is reserved -- it collides with the " ++
+                            "import every module gets automatically. Rename the file.\n",
+                        .{ stem, rel_path },
+                    );
+                    return error.ReservedModuleName;
+                }
+            }
 
             if (ctx.source_paths.get(stem)) |existing_path| {
                 std.debug.print(
@@ -234,7 +277,7 @@ const Module = struct {
             try ctx.source_paths.put(owned_stem, rel_path);
             try ctx.modules.put(owned_stem, b.createModule(.{
                 .root_source_file = b.path(rel_path),
-                .target   = ctx.target,
+                .target = ctx.target,
                 .optimize = ctx.optimize,
             }));
         }
@@ -242,22 +285,32 @@ const Module = struct {
 
     /// Wires up all discovered modules together.
     ///
-    /// Injects discovered modules into `root`, then cross-wires all modules with each other.
-    /// Because unused imports are elided by the compiler, this blanket approach keeps the
-    /// build script simple without affecting compile time or binary size.
+    /// Injects shared imports into `root` itself, then into every discovered
+    /// module, before cross-wiring all discovered modules with each other and
+    /// exposing them to `root`. This gives every module access to every other
+    /// module by name; because unused imports are elided by the compiler,
+    /// this blanket approach keeps the build script simple without affecting
+    /// compile time or binary size. Note that it also means there is
+    /// currently no encapsulation boundary between modules -- worth
+    /// revisiting with an opt-out mechanism if that coupling becomes a
+    /// problem as the module tree grows. It also means every module's cached
+    /// compilation is invalidated by a change to *any* module, not just the
+    /// ones it actually uses -- a cost worth keeping in mind alongside compile
+    /// time and binary size as the module count grows.
     fn wireAll(
         root: *std.Build.Module,
-        all:  *std.StringHashMap(*std.Build.Module),
-        ctx:  SharedBuildContext,
+        all: *std.StringHashMap(*std.Build.Module),
+        ctx: SharedBuildContext,
     ) void {
+        injectShared(root, ctx);
+
         var outer = all.iterator();
         while (outer.next()) |entry| {
-            const mod  = entry.value_ptr.*;
+            const mod = entry.value_ptr.*;
             const name = entry.key_ptr.*;
 
             stripIfRelease(mod, ctx.optimize);
-            mod.addImport("build_options", ctx.build_opts);
-            mod.addImport("fallback_toml", ctx.fallback_toml);
+            injectShared(mod, ctx);
 
             // Cross-wire modules
             // Gives current module access to every other module.
@@ -279,8 +332,25 @@ const Module = struct {
         return std.mem.endsWith(u8, filename, ".zig");
     }
 
-    fn isEntryPoint(filename: []const u8) bool {
-        return std.mem.eql(u8, filename, "main.zig");
+    /// Compares a discovered path against the entry-point path component-wise
+    /// rather than byte-wise.
+    ///
+    /// `rel_path` is produced by `std.fs.path.join`, which joins using the
+    /// host's native separator; `entry_point_path` is a POSIX-style literal
+    /// defined above. On POSIX hosts the two happen to use the same
+    /// separator already, but comparing components keeps this correct on
+    /// any host regardless.
+    fn isEntryPointPath(rel_path: []const u8, entry_point: []const u8) bool {
+        var mine = std.mem.tokenizeAny(u8, rel_path, "/\\");
+        var theirs = std.mem.tokenizeAny(u8, entry_point, "/\\");
+
+        while (true) {
+            const a = mine.next();
+            const b = theirs.next();
+            if (a == null and b == null) return true;
+            if (a == null or b == null) return false;
+            if (!std.mem.eql(u8, a.?, b.?)) return false;
+        }
     }
 };
 
@@ -298,9 +368,9 @@ const SystemLibraries = struct {
 
     // Core libraries
     fn linkXcb(root: *std.Build.Module) void {
-        root.linkSystemLibrary("xcb-keysyms",   .{});
+        root.linkSystemLibrary("xcb-keysyms", .{});
         root.linkSystemLibrary("xkbcommon-x11", .{});
-        root.linkSystemLibrary("xcb-cursor",    .{}); // Makes hana's root window respect custom cursor settings.
+        root.linkSystemLibrary("xcb-cursor", .{}); // Makes hana's root window respect custom cursor settings.
     }
 
     // Bar libraries

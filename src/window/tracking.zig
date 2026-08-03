@@ -25,12 +25,18 @@ pub const Tracking = struct {
     /// Workspace instance.
     const capacity = constants.Limits.MAX_TILED_WINDOWS;
 
+    // `len` below is a u8, which only stays a valid counter for `capacity`
+    // up to 255. Enforced at compile time rather than left as a comment, so
+    // raising MAX_TILED_WINDOWS past 255 fails the build instead of
+    // silently overflowing `len` at runtime. If this ever fires, widen
+    // `len` (e.g. to u16) alongside raising the cap.
+    comptime {
+        std.debug.assert(capacity <= std.math.maxInt(u8));
+    }
+
     buf: [capacity]u32 = undefined,
 
     /// Number of live entries in buf[0..len].  Never exceeds `capacity`.
-    /// Kept as u8 (max 255) since capacity is 200; the invariant is enforced
-    /// by prepareAdd rather than the type alone. If capacity is ever raised
-    /// above 255, this must be widened too (e.g. to u16).
     len: u8 = 0,
 
     /// Returns true if `win` is present in the list.
@@ -197,7 +203,9 @@ pub fn setWorkspaceCount(count: usize) void {
 /// count) would cause isOnCurrentWorkspace to return false for all windows,
 /// making every window appear off-workspace and silently breaking focus.
 pub fn setCurrentWorkspace(ws: u8) void {
-    std.debug.assert(ws < 64);
+    // ws < g_workspace_count alone is sufficient: setWorkspaceCount already
+    // asserts g_workspace_count <= 64, so ws < 64 is implied and would be
+    // redundant to check separately.
     std.debug.assert(ws < g_workspace_count);
     g_current = ws;
 }
@@ -209,7 +217,9 @@ pub fn setCurrentWorkspace(ws: u8) void {
 /// handles the full registration path (screen effects etc.) when present.
 pub fn registerWindow(win: u32, ws: u8) !void {
     if (!g_initialized) return;
-    std.debug.assert(ws < 64);
+    // Same validation strength as setCurrentWorkspace: ws < g_workspace_count
+    // implies ws < 64, so there's no separate looser check here either.
+    std.debug.assert(ws < g_workspace_count);
     if (isManaged(win)) return;
     const idx = g_windows.items.len;
     try g_windows.append(g_alloc, .{ .win = win, .mask = workspaceBit(ws) });
@@ -302,29 +312,23 @@ pub fn allWindows() []const Entry {
     return g_windows.items;
 }
 
-/// Shared iteration core for workspace-window counting.
-/// When `stop_at_first` is true, returns 1 as soon as any match is found (early-exit).
-/// When false, counts all matches.
-fn iterWindowsOnWorkspace(ws_idx: u8, comptime stop_at_first: bool) usize {
-    const bit = workspaceBit(ws_idx);
-    var n: usize = 0;
-    for (g_windows.items) |e| {
-        if (e.mask & bit != 0) {
-            n += 1;
-            if (comptime stop_at_first) return n;
-        }
-    }
-    return n;
-}
-
 /// True when at least one window has ws_idx set in its mask.
 pub fn hasWindowsOnWorkspace(ws_idx: u8) bool {
-    return iterWindowsOnWorkspace(ws_idx, true) > 0;
+    const bit = workspaceBit(ws_idx);
+    for (g_windows.items) |e| {
+        if (e.mask & bit != 0) return true;
+    }
+    return false;
 }
 
 /// Count of windows that have ws_idx set in their mask.
 pub fn countWindowsOnWorkspace(ws_idx: u8) usize {
-    return iterWindowsOnWorkspace(ws_idx, false);
+    const bit = workspaceBit(ws_idx);
+    var n: usize = 0;
+    for (g_windows.items) |e| {
+        if (e.mask & bit != 0) n += 1;
+    }
+    return n;
 }
 
 // Workspace bitmask helpers

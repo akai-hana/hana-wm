@@ -124,6 +124,66 @@ pub const TitleSnapshot = struct {
     geoms: []const utils.Rect = &.{},
 };
 
+// Title width cache
+
+/// Bounded cache of measured title text widths, indexed by window ID.
+///
+/// `drawSegmentedTitles` previously called `dc.measureTextWidth` for every
+/// visible segment on every call — including calls that originate from the
+/// `drawCached()` fast path, which can run once per carousel tick (up to the
+/// display refresh rate). Most of those segments are not the actively
+/// scrolling one and their title text does not change between ticks, so
+/// re-measuring them every time was wasted Pango/cairo work.
+///
+/// This mirrors the text_w recovery `carousel.drawScrollingTitle` already
+/// does for the single-window case, generalised to the N-window split view.
+/// A cache hit requires both the window ID and the title slice's identity
+/// (pointer + length) to match what was last measured; any difference falls
+/// back to a fresh measurement, so a stale entry can only ever cost an extra
+/// measurement, never return a wrong width.
+const TitleWidthCache = struct {
+    const Entry = struct {
+        window: u32,
+        title_ptr: [*]const u8,
+        title_len: usize,
+        width: u16,
+    };
+
+    /// Direct storage, not a hash map: bounded by `max_visible_windows` and
+    /// lives for the process lifetime, so there is no per-frame allocation
+    /// or initialization cost. Lookup is a linear scan, which is fine at the
+    /// realistic window counts this bar renders (a handful of segments);
+    /// even in the 128-window worst case, a scan of plain integer
+    /// comparisons is far cheaper than the Pango call it replaces.
+    entries: [max_visible_windows]?Entry = @splat(null),
+
+    fn widthFor(self: *TitleWidthCache, dc: *drawing.DrawContext, window: u32, title: []const u8) u16 {
+        var free_slot: ?usize = null;
+        for (&self.entries, 0..) |*slot, i| {
+            if (slot.*) |e| {
+                if (e.window == window) {
+                    if (e.title_ptr == title.ptr and e.title_len == title.len) return e.width;
+                    const w = dc.measureTextWidth(title);
+                    slot.* = .{ .window = window, .title_ptr = title.ptr, .title_len = title.len, .width = w };
+                    return w;
+                }
+            } else if (free_slot == null) {
+                free_slot = i;
+            }
+        }
+        // No existing entry for this window: measure and store in a free
+        // slot, or evict slot 0 if the cache is completely full (only
+        // possible when `max_visible_windows` windows are simultaneously
+        // visible — the cache degrades to more frequent misses there, but
+        // stays correct).
+        const w = dc.measureTextWidth(title);
+        self.entries[free_slot orelse 0] = .{ .window = window, .title_ptr = title.ptr, .title_len = title.len, .width = w };
+        return w;
+    }
+};
+
+var title_width_cache: TitleWidthCache = .{};
+
 // Private helpers
 
 /// Extract a UTF-8 string from an XCB get_property reply and dupe it into
@@ -403,7 +463,12 @@ fn drawSegmentedTitles(
     // several KB combined) is scoped entirely to its own stack frame and is
     // reclaimed as soon as it returns, before any of the drawing below runs.
     var window_info_buf: [max_visible_windows]WindowInfo = undefined;
-    var owned_titles: [max_visible_windows]?[]const u8 = @splat(null);
+    // Only the first `win_count` slots are read (see the defer below and
+    // gatherWindowInfos), so only those need initializing — previously this
+    // zero-filled all `max_visible_windows` slots on every call regardless
+    // of how many windows were actually visible.
+    var owned_titles: [max_visible_windows]?[]const u8 = undefined;
+    for (owned_titles[0..win_count]) |*t| t.* = null;
     defer for (owned_titles[0..win_count]) |t| if (t) |s| allocator.free(s);
 
     const info_count = try gatherWindowInfos(
@@ -445,7 +510,7 @@ fn drawSegmentedTitles(
         const text_x = segment_x + scaled_padding + title_lead_px;
         const avail_w = segment_width -| scaled_padding *| 2 -| title_lead_px;
         const text_fg = if (is_focused_win) ctx.config.selected_fg else ctx.config.fg;
-        const text_w = ctx.dc.measureTextWidth(info.title);
+        const text_w = title_width_cache.widthFor(ctx.dc, info.window, info.title);
         const geom = carousel.SegmentGeometry{
             .seg_x = segment_x,
             .seg_w = segment_width,
@@ -522,11 +587,22 @@ fn gatherWindowInfos(
 
     // XCB cookie arrays — only populated for windows whose titles are not
     // available from the pre-fetched snapshot data.
+    //
+    // These are left `undefined` rather than zero-filled: every slot actually
+    // read below (indices `0..win_count`) is unconditionally written first by
+    // the loops that follow, so the remaining `max_visible_windows - win_count`
+    // slots never need initializing. Previously these were `@splat`-filled
+    // across all 128 slots on every call regardless of how many windows were
+    // actually visible.
     var net_wm_cookies: [max_visible_windows]xcb.xcb_get_property_cookie_t = undefined;
     var geom_cookies: [max_visible_windows]xcb.xcb_get_geometry_cookie_t = undefined;
-    var needs_xcb_title: [max_visible_windows]bool = @splat(false);
-    var needs_xcb_geometry: [max_visible_windows]bool = @splat(false);
-    var is_minimized: [max_visible_windows]bool = @splat(false);
+    var needs_xcb_geometry: [max_visible_windows]bool = undefined;
+    var is_minimized: [max_visible_windows]bool = undefined;
+    // Tiling-cache lookup result per window, resolved once here in Phase 1
+    // and reused by the "Build WindowInfo list" loop below instead of that
+    // loop calling tiling.getWindowGeom(win) a second time for the same
+    // window.
+    var tiling_geom: [max_visible_windows]?utils.Rect = undefined;
 
     // Phase 1 — fire only the cookies we actually need.
     // Tiled windows: geometry comes from the tiling CacheMap (zero round-trips).
@@ -537,16 +613,18 @@ fn gatherWindowInfos(
         if (!has_prefetched_titles) {
             if (net_atom) |na|
                 net_wm_cookies[i] = xcb.xcb_get_property(ctx.conn, 0, win, na, utf_type, 0, 8192);
-            needs_xcb_title[i] = true;
         }
 
+        needs_xcb_geometry[i] = false;
+        tiling_geom[i] = null;
         if (!is_minimized[i]) {
             // Tiling cache hit: geometry is already known, no round-trip needed.
             // Otherwise, prefer the pre-fetched snapshot data (captured on the
             // main thread ahead of time) over a live round-trip — this is what
             // keeps this path (including the carousel-thread drawCached call)
             // free of blocking X11 I/O for floating/untracked windows.
-            if (tiling.getWindowGeom(win) == null and !has_prefetched_geoms) {
+            tiling_geom[i] = tiling.getWindowGeom(win);
+            if (tiling_geom[i] == null and !has_prefetched_geoms) {
                 geom_cookies[i] = xcb.xcb_get_geometry(ctx.conn, win);
                 needs_xcb_geometry[i] = true;
             }
@@ -555,10 +633,11 @@ fn gatherWindowInfos(
 
     // Phase 2 — collect _NET_WM_NAME replies; queue WM_NAME fallbacks.
     var fallback_cookies: [max_visible_windows]xcb.xcb_get_property_cookie_t = undefined;
-    var needs_fallback: [max_visible_windows]bool = @splat(false);
+    var needs_fallback: [max_visible_windows]bool = undefined;
 
     if (!has_prefetched_titles) {
         for (windows, 0..) |win, i| {
+            needs_fallback[i] = false;
             got: {
                 if (net_atom != null) {
                     const r = xcb.xcb_get_property_reply(ctx.conn, net_wm_cookies[i], null) orelse break :got;
@@ -589,7 +668,7 @@ fn gatherWindowInfos(
     for (windows, 0..) |win, i| {
         const geom: utils.Rect = if (is_minimized[i])
             .{ .x = std.math.maxInt(i16), .y = std.math.maxInt(i16), .width = 0, .height = 0 }
-        else if (tiling.getWindowGeom(win)) |cached|
+        else if (tiling_geom[i]) |cached|
             cached
         else if (needs_xcb_geometry[i]) blk: {
             const r = xcb.xcb_get_geometry_reply(ctx.conn, geom_cookies[i], null) orelse continue;

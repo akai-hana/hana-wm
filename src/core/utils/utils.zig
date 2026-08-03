@@ -383,15 +383,14 @@ pub const Condition = struct {
 
 // Bounded collections
 //
-// Consolidates a shape that four call sites (window.zig's caches,
-// minimize.zig's minimized-window record, input.zig's pending-spawn table)
-// each hand-rolled independently: a fixed-capacity array plus a length,
-// with linear-scan find, append, and remove-and-compact.
+// Shared shape used by window.zig's caches, minimize.zig's minimized-window
+// record, and input.zig's pending-spawn table: a fixed-capacity array plus
+// a length, with linear-scan find, append, and remove-and-compact.
 
 /// Generic fixed-capacity, allocation-free collection backed by a plain
-/// array. At the small counts these call sites deal with (tens to low
-/// hundreds of entries), a linear scan beats a hash table: cache-local,
-/// branch-predictor-friendly, and with no allocator or OOM error surface.
+/// array. Linear scan is the right tool at the counts these call sites deal
+/// with (tens to low hundreds of entries): cache-local, branch-predictor-
+/// friendly, no allocator, no OOM error surface.
 pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
     return struct {
         items: [capacity]T = undefined,

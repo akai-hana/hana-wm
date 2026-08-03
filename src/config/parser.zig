@@ -110,12 +110,12 @@ pub const Section = struct {
     pub fn getAs(self: *const Section, comptime T: type, key: []const u8) ?T {
         const v = self.get(key) orelse return null;
         return switch (T) {
-            i64          => v.asInt(),
-            bool         => v.asBool(),
-            []const u8   => v.asString(),
-            u32          => v.asColor(),
+            i64 => v.asInt(),
+            bool => v.asBool(),
+            []const u8 => v.asString(),
+            u32 => v.asColor(),
             ScalableValue => v.asScalable(),
-            else         => @compileError("Section.getAs: unsupported type " ++ @typeName(T)),
+            else => @compileError("Section.getAs: unsupported type " ++ @typeName(T)),
         };
     }
 

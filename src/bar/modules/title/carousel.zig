@@ -357,9 +357,7 @@ pub fn drawScrollingTitle(
     // changed) vs. an in-place colour update vs. no action.
     const geom_stale: bool = blk: {
         const e = render.single orelse break :blk true;
-        break :blk e.window != window or title_invalidated
-            or e.cycle_w != cycle_w or e.geom.seg_x != geom.seg_x
-            or e.geom.seg_w != geom.seg_w or e.geom.avail_w != geom.avail_w;
+        break :blk e.window != window or title_invalidated or e.cycle_w != cycle_w or e.geom.seg_x != geom.seg_x or e.geom.seg_w != geom.seg_w or e.geom.avail_w != geom.avail_w;
     };
 
     if (geom_stale) {
@@ -426,9 +424,7 @@ pub fn drawSegmentedCarousel(
     const geom_stale: bool = blk: {
         if (externally_invalidated) break :blk true;
         const e = render.seg orelse break :blk true;
-        break :blk e.window != window or title_invalidated
-            or e.cycle_w != cycle_w or e.geom.seg_x != geom.seg_x
-            or e.geom.seg_w != geom.seg_w or e.geom.avail_w != geom.avail_w;
+        break :blk e.window != window or title_invalidated or e.cycle_w != cycle_w or e.geom.seg_x != geom.seg_x or e.geom.seg_w != geom.seg_w or e.geom.avail_w != geom.avail_w;
     };
 
     if (geom_stale) {
@@ -523,6 +519,17 @@ fn advanceCarouselOffset(e: *CarouselEntry, now_ns: u64) u16 {
     const int_px = @floor(delta_px);
     e.frac_acc = delta_px - int_px; // carry remainder to next tick
     e.last_ns = now_ns;
-    e.pixel_offset = @truncate((@as(u32, e.pixel_offset) + @as(u32, @intFromFloat(int_px))) % @as(u32, e.cycle_w));
+
+    // Reduce modulo cycle_w in floating point *before* casting to an
+    // integer. Under normal ticking int_px is 0 or 1 and this is a no-op,
+    // but after a long stall (the carousel thread being descheduled, or the
+    // machine suspending) delta_ns — and therefore int_px — can be far
+    // larger than fits in a u32. Casting that directly via @intFromFloat
+    // below would overflow (a trap in safety-checked builds, UB otherwise).
+    // Only the wrapped remainder ever affects pixel_offset, so reducing
+    // first is exactly equivalent for the result while staying in range.
+    const cycle_w_f: f64 = @floatFromInt(e.cycle_w);
+    const wrapped_advance: u32 = @intFromFloat(@mod(int_px, cycle_w_f));
+    e.pixel_offset = @truncate((@as(u32, e.pixel_offset) + wrapped_advance) % @as(u32, e.cycle_w));
     return e.pixel_offset;
 }

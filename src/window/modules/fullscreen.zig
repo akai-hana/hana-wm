@@ -33,13 +33,12 @@ pub const FullscreenInfo = struct {
 // Module state
 //
 // g_slots: fixed array keyed by workspace index (u8); O(1) operations, no heap.
-// g_float_saves: fixed array replacing the former hashmap; length-bounded reads.
+// g_float_saves: fixed array with length-bounded reads.
 
 const MAX_WORKSPACES: usize = 256; // u8 key space — array is ~4 KB, trivial
-// Matches the former MAX constant in saveFloatingWindowGeoms. Related to,
-// but intentionally distinct from, constants.Limits.MAX_TILED_WINDOWS — this
-// bounds floating windows saved across a single fullscreen transition, not
-// the tiled-window pool.
+// Related to, but intentionally distinct from, constants.Limits.MAX_TILED_WINDOWS
+// — this bounds floating windows saved across a single fullscreen transition,
+// not the tiled-window pool.
 const MAX_FLOAT_SAVES: usize = 64;
 
 var g_slots: [MAX_WORKSPACES]?FullscreenInfo = @splat(null);

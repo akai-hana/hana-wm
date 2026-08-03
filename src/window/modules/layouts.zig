@@ -41,12 +41,22 @@ pub const WindowData = struct {
 /// release with `.deinit()`.
 pub const CacheMap = std.AutoHashMap(u32, WindowData);
 
+/// Get or create `win`'s cache entry, defaulting a freshly-created entry to
+/// `.{}`. Centralizes the get-or-put-with-default pattern shared by every
+/// cache writer that doesn't need to distinguish "existing" from "new"
+/// (callers that DO need that distinction, e.g. to skip a redundant XCB
+/// call, still use `cache.getOrPut` directly).
+pub fn getOrPutDefault(cache: *CacheMap, win: u32) !*WindowData {
+    const gop = try cache.getOrPut(win);
+    if (!gop.found_existing) gop.value_ptr.* = .{};
+    return gop.value_ptr;
+}
+
 /// Store `hints` for `win`. No-op if every field is zero (nothing declared).
 pub fn cacheHints(cache: *CacheMap, win: u32, hints: SizeHints) void {
     if (isEmptySizeHints(hints)) return;
-    const gop = cache.getOrPut(win) catch return; // OOM: leave hints uncached
-    if (!gop.found_existing) gop.value_ptr.* = .{};
-    gop.value_ptr.hints = hints;
+    const wd = getOrPutDefault(cache, win) catch return; // OOM: leave hints uncached
+    wd.hints = hints;
 }
 
 /// Context passed to every layout module's `tileWithOffset`. Carries the XCB
@@ -74,8 +84,7 @@ pub inline fn rectsEqual(a: utils.Rect, b: utils.Rect) bool {
 
 /// Send `rect` for `win` now via configureWithHints, unless `win` is
 /// `ctx.defer_win` — then stash it in `ctx.deferred` for `invokeLayout` to
-/// send last. Every defer_win-aware layout calls this instead of duplicating
-/// the check.
+/// send last. Called by every defer_win-aware layout.
 pub inline fn emitOrDefer(ctx: *const LayoutCtx, win: u32, rect: utils.Rect) void {
     if (ctx.defer_win == win) {
         ctx.deferred.* = rect;
