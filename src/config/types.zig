@@ -217,7 +217,8 @@ pub const TilingConfig = struct {
     /// Only applied when global_layout = false.
     workspace_master_count_overrides: std.ArrayList(WorkspaceMasterCountOverride) = .empty,
 
-    /// When true, layout changes apply globally across all workspaces (legacy behavior).
+    /// When true, layout changes apply globally across all workspaces instead
+    /// of per workspace.
     global_layout: bool = false,
 
     pub fn deinit(self: *TilingConfig, allocator: std.mem.Allocator) void {

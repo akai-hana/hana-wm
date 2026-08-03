@@ -155,12 +155,11 @@ const SIGNAL_DRAIN_BUF = 16; // drain a burst in one syscall rather than one per
 /// Drains the non-blocking signal pipe and dispatches each signal.
 ///
 /// std.os.linux.read returns usize (the raw syscall result).  On error the
-/// kernel returns a negative value, which wraps to a huge unsigned number.
-/// Passing that usize to std.posix.errno triggers an unsigned comparison
-/// that never sees the value as negative, so errno returns .SUCCESS and the
-/// giant number escapes into @intCast / the slice bounds check — producing
-/// the "index out of bounds" panic.  The fix is to bitcast to isize first
-/// and treat any non-positive result (error or EOF) as a stop condition.
+/// kernel returns a negative value, which wraps to a huge unsigned number;
+/// an unsigned comparison against that value never reads as negative, so it
+/// would escape unchecked into @intCast and the slice bounds check.  Bitcast
+/// to isize first and treat any non-positive result (error or EOF) as a stop
+/// condition.
 fn handleSignalPipe(fd: std.posix.fd_t) void {
     var buf: [SIGNAL_DRAIN_BUF]u8 = undefined;
     while (true) {

@@ -511,15 +511,15 @@ fn cancelPendingConfirm() void {
 /// after their window is mapped.  A stale `accepts_input` bit that missed an
 /// input=False→True update would return early at
 /// `if (input_model == .no_input)` on every hover, silently discarding all
-/// focus for that window. This is the one half of the old InputModel cache
-/// that is still cached — see the section comment above CachedProps in
-/// window.zig for why the WM_TAKE_FOCUS half no longer needs this at all.
+/// focus for that window. `accepts_input` is the only input-model bit that is
+/// cached — see the section comment above CachedProps in window.zig for why
+/// WM_TAKE_FOCUS support is checked live instead.
 ///
 /// Rationale for WM_PROTOCOLS: WM_DELETE_WINDOW support (`wm_delete`) is
-/// still cached and derived from the same property, for the close-window
-/// path (window.supportsWMDeleteCached). WM_TAKE_FOCUS support itself is
-/// exempt — getInputModel() checks it live on every call, so there is
-/// nothing left to go stale on that front.
+/// cached and derived from the same property, for the close-window path
+/// (window.supportsWMDeleteCached). WM_TAKE_FOCUS support itself is exempt —
+/// getInputModel() checks it live on every call, so there is nothing to go
+/// stale on that front.
 pub fn invalidateInputModelCache(win: u32) void {
     _ = window.queryAndCacheProps(core.getState().conn, win);
 }

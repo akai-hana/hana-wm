@@ -137,8 +137,8 @@ const Awaiting = union(enum) {
 /// Accumulated state for the in-progress normal-mode command.
 /// Reset atomically between commands via `resetPendingCmd`.
 const PendingCmd = struct {
-    count: u32 = 0,    // Digit accumulator
-    op: u8 = 0,        // Pending operator ('d'/'c'/'y')
+    count: u32 = 0, // Digit accumulator
+    op: u8 = 0, // Pending operator ('d'/'c'/'y')
     op_count: u32 = 0, // Count when operator was armed
 
     /// What the engine is waiting for from the next keystroke.
@@ -632,15 +632,7 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
                 setCursor(vs, mr);
                 return .none;
             }
-            if (res.dot_eligible) vs.dot = .{ .op_motion = .{
-                .op = res.op,
-                .op_count = res.op_count,
-                .motion_count = res.motion_count,
-                .motion_sym = if (res.find_kind != 0) 0 else @truncate(sym),
-                .find_kind = res.find_kind,
-                .find_ch = res.find_ch,
-                .has_g_prefix = res.has_g_prefix,
-            } };
+            if (res.dot_eligible) vs.dot = res.dot;
             applyOperator(vs, res.op, mr);
         }
         return .none;
@@ -825,19 +817,15 @@ fn resolveGPrefixPos(vs: *VimState, sym: xcb.xcb_keysym_t, cnt: u32) ?usize {
 /// Result returned by `resolveMotionKey` when the key was handled in some way.
 /// `mr == null` means the key was consumed (digit accumulated, prefix armed,
 /// or `;`/`,` with no prior find) but produced no motion — the caller just
-/// returns `.none`. `mr != null` carries the resolved motion plus the
-/// operator/dot-record fields captured from `pending` before it was reset.
+/// returns `.none`. `mr != null` carries the resolved motion plus `dot`, an
+/// already-assembled `op_motion` record the caller can store verbatim.
 /// `dot_eligible` is false for `;`/`,` repeats, which do not update the dot record.
 /// A bare `null` from `resolveMotionKey` itself (no `.?`) means the key was
 /// not recognised at all and the caller should keep handling it.
 const MotionKeyResult = struct {
     mr: ?MotionResult = null,
     op: u8 = 0,
-    op_count: u32 = 0,
-    motion_count: u32 = 0,
-    find_kind: u8 = 0,
-    find_ch: u8 = 0,
-    has_g_prefix: bool = false,
+    dot: DotRecord = .none,
     dot_eligible: bool = true,
 };
 
@@ -846,18 +834,22 @@ const MotionKeyResult = struct {
 /// and prefix arming (f/F/t/T/g).
 ///
 /// Captures the current pending operator fields, calls `resetPendingCmd`, and
-/// returns a base `.motion` result initialised from those fields.  Every arm of
-/// `resolveMotionKey` that produces a motion follows exactly this pattern; the
-/// helper ensures the three-field capture and the reset always happen together
-/// and in the correct order.  The caller sets any arm-specific extra fields
-/// (find_kind, find_ch, has_g_prefix, dot_eligible) directly on the returned
-/// literal before returning it.
-inline fn commitMotion(vs: *VimState, mr: MotionResult) MotionKeyResult {
-    const op  = vs.pending.op;
+/// assembles the base `op_motion` dot record from those fields plus
+/// `motion_sym` (pass 0 when the caller will fill in `find_kind`/`find_ch`
+/// instead). Every arm of `resolveMotionKey` that produces a motion follows
+/// exactly this pattern; the helper ensures the capture, reset, and dot-record
+/// assembly always happen together. Callers only need to set the one or two
+/// fields that differ (e.g. `result.dot.op_motion.has_g_prefix`) before returning.
+inline fn commitMotion(vs: *VimState, mr: MotionResult, motion_sym: xcb.xcb_keysym_t) MotionKeyResult {
+    const op = vs.pending.op;
     const opc = vs.pending.op_count;
-    const mc  = vs.pending.count;
+    const mc = vs.pending.count;
     resetPendingCmd(vs);
-    return .{ .mr = mr, .op = op, .op_count = opc, .motion_count = mc };
+    return .{
+        .mr = mr,
+        .op = op,
+        .dot = .{ .op_motion = .{ .op = op, .op_count = opc, .motion_count = mc, .motion_sym = @truncate(motion_sym) } },
+    };
 }
 
 /// Returns a result with `mr` set if a motion was resolved (`pending` already
@@ -875,9 +867,9 @@ fn resolveMotionKey(vs: *VimState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
             vs.last_find_kind = kind;
             vs.last_find_ch = ch;
             const mr = motionFind(vs, kind, ch, cnt);
-            var result = commitMotion(vs, mr);
-            result.find_kind = kind;
-            result.find_ch = ch;
+            var result = commitMotion(vs, mr, 0);
+            result.dot.op_motion.find_kind = kind;
+            result.dot.op_motion.find_ch = ch;
             return result;
         }
         resetPendingCmd(vs);
@@ -889,8 +881,8 @@ fn resolveMotionKey(vs: *VimState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
         const cnt = effectiveCount(vs);
         if (resolveGPrefixPos(vs, sym, cnt)) |pos| {
             const mr = MotionResult{ .pos = pos, .inclusive = (sym == 'e' or sym == 'E') };
-            var result = commitMotion(vs, mr);
-            result.has_g_prefix = true;
+            var result = commitMotion(vs, mr, sym);
+            result.dot.op_motion.has_g_prefix = true;
             return result;
         }
         resetPendingCmd(vs);
@@ -914,7 +906,7 @@ fn resolveMotionKey(vs: *VimState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
         if (vs.last_find_kind != 0) {
             const kind = if (sym == ',') reverseFindKind(vs.last_find_kind) else vs.last_find_kind;
             const mr = motionFind(vs, kind, vs.last_find_ch, cnt);
-            var result = commitMotion(vs, mr);
+            var result = commitMotion(vs, mr, 0);
             result.dot_eligible = false;
             return result;
         }
@@ -924,7 +916,7 @@ fn resolveMotionKey(vs: *VimState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
 
     // Simple motions (h/l/w/b/e/0/^/$/arrows …).
     if (resolveSimpleMotion(vs, sym, cnt)) |mr| {
-        return commitMotion(vs, mr);
+        return commitMotion(vs, mr, sym);
     }
 
     // Prefix arming (f/F/t/T/g).
@@ -1041,26 +1033,20 @@ fn ctrlAdjustNumber(vs: *VimState, delta: i64) void {
     var new_str_buf: [32]u8 = undefined;
     const new_str = std.fmt.bufPrint(&new_str_buf, "{}", .{new_val}) catch return;
 
+    const old_len = num_end - num_start;
+    if (new_str.len > old_len and vs.len - old_len + new_str.len >= vs.max_input) return;
+
     undoPush(vs);
 
-    const old_len = num_end - num_start;
-    const new_len = new_str.len;
-
-    if (new_len > old_len) {
-        const expand = new_len - old_len;
-        if (vs.len + expand >= vs.max_input) return;
-        std.mem.copyBackwards(u8, vs.buf[num_end + expand .. vs.len + expand], vs.buf[num_end..vs.len]);
-        vs.len += expand;
-    } else if (new_len < old_len) {
-        const shrink = old_len - new_len;
-        std.mem.copyForwards(u8, vs.buf[num_start + new_len .. vs.len - shrink], vs.buf[num_end..vs.len]);
-        vs.len -= shrink;
-    }
-
-    @memcpy(vs.buf[num_start .. num_start + new_len], new_str);
-    // num_start >= 0 and new_len >= 1 (any integer formats as at least "0"),
-    // so num_start + new_len - 1 is always a valid non-negative index.
-    vs.cursor = num_start + new_len - 1;
+    // Replace the old digits by deleting the range and inserting the new text
+    // at the same position — reuses the same buffer-shifting code every other
+    // edit goes through instead of hand-rolling a resize here.
+    deleteRange(vs, num_start, num_end);
+    vs.cursor = num_start;
+    insertSlice(vs, new_str);
+    // new_str.len >= 1 (any integer formats as at least "0"), so landing on
+    // the last inserted digit is always a valid non-negative offset.
+    vs.cursor -= 1;
 }
 
 /// Apply an operator to the range described by `mr`.

@@ -294,7 +294,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
         else
             0;
         if (n_ghost > 0) {
-            if (vim_mode) vim.insertSlice(&g.vim_state, g.ghost_buf[0..n_ghost]) else insertBasic(&g.vim_state, g.ghost_buf[0..n_ghost]);
+            vim.insertSlice(&g.vim_state, g.ghost_buf[0..n_ghost]);
             g.ghost_len = 0;
         }
         g.is_blink_visible = true;
@@ -790,17 +790,6 @@ const XK_Right = @intFromEnum(vim.XK.Right);
 const XK_Home = @intFromEnum(vim.XK.Home);
 const XK_End = @intFromEnum(vim.XK.End);
 
-/// Insert `slice` at the cursor position, advancing cursor by the bytes written.
-fn insertBasic(vs: *vim.VimState, slice: []const u8) void {
-    const n = @min(slice.len, vs.max_input - 1 - vs.len);
-    if (n == 0) return;
-    if (vs.cursor < vs.len)
-        std.mem.copyBackwards(u8, vs.buf[vs.cursor + n .. vs.len + n], vs.buf[vs.cursor..vs.len]);
-    @memcpy(vs.buf[vs.cursor .. vs.cursor + n], slice[0..n]);
-    vs.len += n;
-    vs.cursor += n;
-}
-
 /// Minimal insert-mode handler used when vim.zig is absent.
 /// Handles printable ASCII, cursor keys, Backspace, Delete,
 /// Return (spawn), and Escape (deactivate).
@@ -835,7 +824,7 @@ fn handleInsertBasic(vs: *vim.VimState, sym: xcb.xcb_keysym_t) vim.Action {
         },
         else => {
             if (sym >= 0x20 and sym <= 0x7e)
-                insertBasic(vs, &[1]u8{@truncate(sym)});
+                vim.insertSlice(vs, &[1]u8{@truncate(sym)});
         },
     }
     return .none;
@@ -949,6 +938,48 @@ inline fn cursorBlockGeom(
     const vis_w: u16 = @intCast(@min(@as(i32, block_w), @as(i32, scroll_end_x) - px));
     if (vis_w == 0) return null;
     return .{ .draw_x = draw_x, .vis_w = vis_w };
+}
+
+/// Draw a filled block cursor over `buf[lo..hi]` and advance `px.*` past it.
+///
+/// Shared by visual-mode selection highlighting and the normal/replace-mode
+/// character cursor — both are "highlight a byte range with an accent block
+/// and inverse-coloured text", differing only in how wide the range is (a
+/// multi-byte selection vs. always one character) and whether colon-command
+/// mode wants the fill suppressed (`text_only`, normal/replace-only: while
+/// typing a `:` command the cursor lives in the pill widget, so the character
+/// underneath is shown as plain text instead of being boxed).
+/// When `lo == hi` (cursor sits past the end of the line) an empty
+/// space-sized block is drawn instead, matching the end-of-line caret.
+inline fn drawBlockCursor(
+    dc: *drawing.DrawContext,
+    px: *i32,
+    text_left_x: u16,
+    scroll_end_x: u16,
+    baseline: u16,
+    height: u16,
+    accent: u32,
+    bg: u32,
+    fg: u32,
+    buf: []const u8,
+    lo: usize,
+    hi: usize,
+    text_only: bool,
+) !void {
+    const block_text = if (hi > lo) buf[lo..hi] else " ";
+    const block_w = @max(dc.measureTextWidth(block_text), min_cursor_px);
+
+    if (text_only) {
+        if (hi > lo) {
+            if (cursorBlockGeom(px.*, block_w, text_left_x, scroll_end_x)) |block|
+                try dc.drawText(block.draw_x, baseline, block_text, fg);
+        }
+    } else if (cursorBlockGeom(px.*, block_w, text_left_x, scroll_end_x)) |block| {
+        dc.fillRect(block.draw_x, cursor_v_pad, block.vis_w, height -| cursor_v_pad * 2, accent);
+        if (hi > lo)
+            try dc.drawText(block.draw_x, baseline, block_text, bg);
+    }
+    px.* += @intCast(block_w);
 }
 
 // Private — active-mode rendering
@@ -1124,23 +1155,14 @@ fn drawActive(
 
     if (g.vim_state.mode == .visual) {
         const sel = if (vim_mode) vim.visualRange(&g.vim_state) else [2]usize{ g.vim_state.cursor, @min(g.vim_state.cursor + 1, g.vim_state.len) };
-        const sel_lo = sel[0];
-        const sel_hi = sel[1];
 
-        const pre_sel = g.vim_state.buf[0..sel_lo];
-        const sel_text = g.vim_state.buf[sel_lo..sel_hi];
-        const post_sel = g.vim_state.buf[sel_hi..g.vim_state.len];
-        const sel_w = @max(dc.measureTextWidth(sel_text), min_cursor_px);
+        const pre_sel = g.vim_state.buf[0..sel[0]];
+        const post_sel = g.vim_state.buf[sel[1]..g.vim_state.len];
 
         if (pre_sel.len > 0)
             try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, pre_sel, fg);
 
-        if (cursorBlockGeom(px, sel_w, text_left_x, scroll_end_x)) |block| {
-            dc.fillRect(block.draw_x, cursor_v_pad, block.vis_w, height -| cursor_v_pad * 2, accent);
-            if (sel_text.len > 0)
-                try dc.drawText(block.draw_x, baseline, sel_text, bg);
-        }
-        px += @intCast(sel_w);
+        try drawBlockCursor(dc, &px, text_left_x, scroll_end_x, baseline, height, accent, bg, fg, g.vim_state.buf, sel[0], sel[1], false);
 
         try drawPostSpan(dc, px, text_left_x, ellipsis_end_x, baseline, post_sel, fg);
     } else if (g.vim_state.mode == .insert) {
@@ -1169,30 +1191,14 @@ fn drawActive(
     } else {
         // NORMAL / REPLACE: full-character block cursor.
         const pre_text = g.vim_state.buf[0..g.vim_state.cursor];
-        const cur_text = if (g.vim_state.cursor < g.vim_state.len)
-            g.vim_state.buf[g.vim_state.cursor .. g.vim_state.cursor + 1]
-        else
-            " ";
-        const cur_w = @max(dc.measureTextWidth(cur_text), min_cursor_px);
+        const cur_hi = @min(g.vim_state.cursor + 1, g.vim_state.len);
 
         if (pre_text.len > 0)
             try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, pre_text, fg);
 
-        if (colon_active) {
-            // No cursor box — draw the character under the cursor as plain text
-            // so it isn't swallowed when the cursor moves to the pill widget.
-            if (g.vim_state.cursor < g.vim_state.len) {
-                if (cursorBlockGeom(px, cur_w, text_left_x, scroll_end_x)) |block|
-                    try dc.drawText(block.draw_x, baseline, cur_text, fg);
-            }
-        } else {
-            if (cursorBlockGeom(px, cur_w, text_left_x, scroll_end_x)) |block| {
-                dc.fillRect(block.draw_x, cursor_v_pad, block.vis_w, height -| cursor_v_pad * 2, accent);
-                if (g.vim_state.cursor < g.vim_state.len)
-                    try dc.drawText(block.draw_x, baseline, cur_text, bg);
-            }
-        }
-        px += @intCast(cur_w);
+        // In colon-command mode the cursor lives in the pill widget, so the
+        // character underneath is shown as plain text instead of being boxed.
+        try drawBlockCursor(dc, &px, text_left_x, scroll_end_x, baseline, height, accent, bg, fg, g.vim_state.buf, g.vim_state.cursor, cur_hi, colon_active);
 
         try drawPostSpan(dc, px, text_left_x, ellipsis_end_x, baseline, post_text, fg);
     }

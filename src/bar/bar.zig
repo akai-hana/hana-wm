@@ -50,9 +50,7 @@ const TITLE_MIN_WIDTH: u16 = 100;
 /// List of per-window title strings, each individually heap-allocated.
 ///
 /// Filled once per redraw (one dupe per window, in workspace order) and read
-/// back by index with no offset arithmetic. Replaces an earlier flat-buffer-
-/// plus-offset-array representation that forced every reader to reconstruct
-/// a slice from a byte range instead of indexing directly.
+/// back by index with no offset arithmetic.
 const WindowTitles = struct {
     list: std.ArrayListUnmanaged([]const u8) = .empty,
 
@@ -122,13 +120,12 @@ const BarSnapshot = struct {
     }
 };
 
-/// Serializes access to the shared Cairo/XCB DrawContext. All bar drawing is
-/// now called directly (no cross-thread work queue), except for two small
-/// dedicated timers that still run on their own threads: clock.zig (ticks once
-/// per wall-clock second) and carousel.zig (ticks once per display refresh
-/// while a title is actively scrolling). This mutex is what keeps those two
-/// threads from ever painting into the DrawContext at the same instant as the
-/// main WM thread.
+/// Serializes access to the shared Cairo/XCB DrawContext. Bar drawing runs on
+/// the main WM thread, except for two small dedicated timers that run on
+/// their own threads: clock.zig (ticks once per wall-clock second) and
+/// carousel.zig (ticks once per display refresh while a title is actively
+/// scrolling). This mutex is what keeps those two threads from ever painting
+/// into the DrawContext at the same instant as the main WM thread.
 var draw_mutex: utils.Mutex = .{};
 
 /// All atoms needed to declare the bar window as a dock to the compositor.
@@ -479,7 +476,7 @@ const State = struct {
     }
 
     fn drawClockOnly(self: *State) void {
-                const clock_x = self.layout_cache.clock_x orelse return;
+        const clock_x = self.layout_cache.clock_x orelse return;
         _ = clock.draw(self.render.dc, self.render.config, self.render.height, clock_x) catch |e|
             debug.warnOnErr(e, "drawClockOnly");
         // renderOnly() flushes Cairo to the off-screen pixmap; blitAndFlush()
@@ -491,7 +488,7 @@ const State = struct {
     }
 
     fn drawTitleOnly(self: *State, new_focused: ?u32) void {
-                if (prompt.isActive()) return;
+        if (prompt.isActive()) return;
         if (!self.title_cache.is_layout_valid or self.title_cache.title_width == 0) return;
         self.title_cache.focused_window = new_focused;
 
@@ -1276,7 +1273,10 @@ fn retileAllWorkspaces(effective_visible: bool) void {
         return;
     }
     const ws_state = workspaces.getState() orelse return;
-    if (!isTilingActive()) { tiling.retileCurrentWorkspace(); return; }
+    if (!isTilingActive()) {
+        tiling.retileCurrentWorkspace();
+        return;
+    }
     for (ws_state.workspaces, 0..) |_, idx| {
         if (!tracking.hasWindowsOnWorkspace(@intCast(idx))) continue;
         if (fullscreen.getForWorkspace(@intCast(idx)) != null) continue;
