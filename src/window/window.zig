@@ -1118,10 +1118,17 @@ fn unmanageWindow(win: u32) void {
     if (was_fullscreen) bar.setBarState(.show_fullscreen);
 
     if (was_focused) {
-        if (tilingActive()) tiling.retileIfDirty();
+        // Resolve the real post-close focus BEFORE retiling: tiling.removeWindow
+        // above already dropped `win` from the workspace list, but
+        // focus.getFocused() still returns it until clearFocus/setFocus runs.
+        // A retile in between would read that stale, no-longer-present ID —
+        // focus-driven layouts (monocle) fall back to an arbitrary window in
+        // that case — and nothing retiles again once focus actually lands on
+        // the right window below.
         focus.clearFocus();
         // Pass the pre-drained reply; no implicit flush inside the grab.
         focusWindowUnderPointer(ptr_reply);
+        if (tilingActive()) tiling.retileIfDirty();
     } else if (!was_fullscreen and tilingActive()) {
         if (window_workspace) |ws|
             if (current_ws == ws) tiling.retileIfDirty() else tiling.retileInactiveWorkspace(ws);

@@ -187,12 +187,18 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
             tiling.addWindowAtFilteredIndex(win, ti)
         else
             tiling.addWindow(win);
+        // Focus must move to the restored window BEFORE the retile: layouts
+        // that pick their visible window from focus.getFocused() at retile
+        // time (e.g. monocle) would otherwise retile against the still-
+        // focused old window, then have no follow-up retile once focus
+        // actually lands on `win`.
+        focus.setFocus(win, .window_spawn);
         tiling.retileCurrentWorkspace();
     } else {
         window.restoreFloatGeom(win);
+        focus.setFocus(win, .window_spawn);
     }
 
-    focus.setFocus(win, .window_spawn);
     bar.redrawInsideGrab();
     utils.ungrabAndFlush(conn);
 }
@@ -309,12 +315,15 @@ pub fn unminimizeAll() void {
                 else
                     tiling.addWindow(rec.win);
             }
+            // Focus must move to focus_target BEFORE the retile — see the
+            // matching comment in restoreWindowImpl.
+            focus.setFocus(focus_target, .window_spawn);
             tiling.retileCurrentWorkspace();
         } else {
             for (plain_wins) |rec| window.restoreFloatGeom(rec.win);
+            focus.setFocus(focus_target, .window_spawn);
         }
 
-        focus.setFocus(focus_target, .window_spawn);
         bar.redrawInsideGrab();
         utils.ungrabAndFlush(conn);
     }

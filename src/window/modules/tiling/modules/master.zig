@@ -49,6 +49,15 @@ pub fn tileWithOffset(
 /// Tile a vertical column of `windows` at a fixed x position with a fixed
 /// content width. Used for both the master pane and the simple stack path.
 ///
+/// Windows normally split the column's height evenly, EXCEPT any window
+/// whose cached WM_NORMAL_HINTS max_height caps it below its fair share —
+/// that window is pinned to its declared max instead, and the pixels it
+/// doesn't use are folded back into the split for the rest of the column
+/// (see distributeHeights). This is what keeps a short fixed-height window
+/// (e.g. a picture-in-picture pane or a dialog with PMaxSize set) from
+/// leaving a dead gap in its slot: its column neighbours grow to absorb
+/// the space it gives up, so the column always fills `h` exactly.
+///
 /// When `ctx.defer_win` names a window in this column, that window's
 /// configure_window call is sent after every other window in the column —
 /// see LayoutCtx.defer_win for why (swap_master's one-frame-gap fix).
@@ -63,16 +72,89 @@ fn tileColumn(
 ) void {
     const count: u16 = @intCast(windows.len);
     const avail = calcAvailableHeight(h, count, m);
+
+    var heights_buf: [constants.Limits.MAX_TILED_WINDOWS]u16 = undefined;
+    const heights = heights_buf[0..windows.len];
+    distributeHeights(ctx, windows, avail, heights);
+
+    // distributeHeights only folds a capped window's unused pixels into
+    // *other* windows in this column. If every window ends up capped
+    // (e.g. a lone fixed-height window on the workspace, or a master/stack
+    // pane that holds just one window), there's nothing left to absorb the
+    // slack, so sum(heights) < avail. Center the resulting stack in the
+    // column instead of leaving all that space stranded at the bottom.
+    var used: u32 = 0;
+    for (heights) |win_h| used += win_h;
+    const dead_space: u32 = @as(u32, avail) -| used;
+    const pad_top: u16 = @intCast(dead_space / 2);
+
+    var y: u16 = y_offset +| m.gap +| pad_top;
     for (windows, 0..) |win, i| {
-        const row: u16 = @intCast(i);
         const rect = utils.Rect{
             .x = @intCast(x),
-            .y = @intCast(windowY(row, count, avail, y_offset, m)),
+            .y = @intCast(y),
             .width = inner_w,
-            .height = windowHeight(row, count, avail),
+            .height = heights[i],
         };
         layouts.emitOrDefer(ctx, win, rect);
+        y = y +| heights[i] +| m.gap +| 2 *| m.border;
     }
+}
+
+/// Split `avail` content-height pixels across `windows`, writing one height
+/// per window into `out` (same order/length as `windows`).
+///
+/// A window whose cached max_height hint sits at or below its *current*
+/// fair share is "capped": it's pinned to that max_height and removed from
+/// the pool, and the pixels it left unclaimed flow back into what's left
+/// for everyone else. Because pinning one window raises the fair share for
+/// the rest, that can newly cap a window that wasn't capped a moment ago —
+/// so this repeats pass by pass until nothing new gets pinned (standard
+/// water-filling; bounded by `windows.len` passes, since each pass that
+/// changes anything pins at least one window). Whatever is still uncapped
+/// at the end — which is every window, in the common case with no size
+/// hints — is split evenly using the same cumulative-division scheme
+/// windowHeight/windowY use elsewhere, so no two adaptive siblings differ
+/// by more than 1px.
+fn distributeHeights(ctx: *const layouts.LayoutCtx, windows: []const u32, avail: u16, out: []u16) void {
+    var capped_buf: [constants.Limits.MAX_TILED_WINDOWS]bool = undefined;
+    const capped = capped_buf[0..windows.len];
+    @memset(capped, false);
+
+    var remaining_avail = avail;
+    var remaining_count: u16 = @intCast(windows.len);
+
+    var pinned_any = true;
+    while (pinned_any and remaining_count > 0) {
+        pinned_any = false;
+        const fair_share = remaining_avail / remaining_count;
+        for (windows, 0..) |win, i| {
+            if (capped[i]) continue;
+            const max_h = windowMaxHeight(ctx, win);
+            if (max_h > 0 and max_h <= fair_share) {
+                out[i] = @max(constants.MIN_WINDOW_DIM, max_h);
+                capped[i] = true;
+                remaining_avail = remaining_avail -| out[i];
+                remaining_count -= 1;
+                pinned_any = true;
+            }
+        }
+    }
+
+    var seen: u16 = 0;
+    for (windows, 0..) |_, i| {
+        if (capped[i]) continue;
+        out[i] = windowHeight(seen, remaining_count, remaining_avail);
+        seen += 1;
+    }
+}
+
+/// Cached WM_NORMAL_HINTS max_height for `win`, or 0 if it declared none.
+/// 0 doubles as "unconstrained" (see layouts.SizeHints), so callers never
+/// need to special-case a missing cache entry vs. a window with no hint.
+inline fn windowMaxHeight(ctx: *const layouts.LayoutCtx, win: u32) u16 {
+    const wd = ctx.cache.get(win) orelse return 0;
+    return wd.hints.max_height;
 }
 
 /// Tile the stack pane, spilling into a column-major overflow grid when the
@@ -102,6 +184,13 @@ fn tileStack(
 /// Column-major overflow grid: row `r` holds windows at indices r, r+max_fit,
 /// r+2*max_fit, … Each row's column count is ceil((stack_n - r) / max_fit).
 /// Respects ctx.defer_win: the named window is sent last (see LayoutCtx.defer_win).
+///
+/// NOTE: overflow rows do NOT get the max_height redistribution tileColumn
+/// gets above — every window in a row shares that row's height, so a single
+/// capped window here would cap its whole row rather than just itself.
+/// Handling that well needs a row-aware version of distributeHeights; out of
+/// scope for now since overflow only kicks in once a stack has more windows
+/// than fit one-per-slot.
 fn tileStackExtra(
     ctx: *const layouts.LayoutCtx,
     windows: []const u32,

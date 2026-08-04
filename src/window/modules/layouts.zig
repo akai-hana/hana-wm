@@ -151,9 +151,11 @@ pub fn configureWithHintsAndRaise(ctx: *const LayoutCtx, win: u32, rect: utils.R
 }
 
 /// Apply ICCCM §4.1.2.3 hints to a raw rect: resize-increment snap, max-size
-/// clamp, then aspect-ratio clamp. Declared minimums are intentionally NOT
-/// enforced — tiling owns window size, and honouring a client minimum would
-/// pin the rect there and block mod_h/mod_l resizing.
+/// clamp, then aspect-ratio clamp (itself followed by a re-snap to the
+/// increment grid, since a client can legally declare both hints at once).
+/// Declared minimums are intentionally NOT enforced — tiling owns window
+/// size, and honouring a client minimum would pin the rect there and block
+/// mod_h/mod_l resizing.
 fn applyHintsToRect(rect: utils.Rect, h: SizeHints) utils.Rect {
     if (isEmptySizeHints(h)) return rect;
     var w: u16 = rect.width;
@@ -167,14 +169,23 @@ fn applyHintsToRect(rect: utils.Rect, h: SizeHints) utils.Rect {
 
     // min_aspect = h/w lower bound, max_aspect = w/h upper bound (dwm
     // convention). Cross-multiplied to avoid FP division on every retile.
+    //
+    // The aspect clamp recomputes w (or ht) from scratch, which can land
+    // off the increment grid snapDimToIncrement just placed it on — e.g. a
+    // terminal with both PResizeInc and PAspect set. Re-snapping afterward
+    // (base=0, so this only ever floors, never grows past max_width/height)
+    // keeps both hints satisfied simultaneously; only the rarer of the two
+    // constraints (aspect ratio, snapped down to the nearest cell) yields.
     if (h.min_aspect > 0.0 and h.max_aspect > 0.0) {
         const fw: f32 = @floatFromInt(w);
         const fh: f32 = @floatFromInt(ht);
         if (fw > fh * h.max_aspect) {
             w = @intFromFloat(@round(fh * h.max_aspect));
+            w = snapDimToIncrement(w, 0, h.inc_width);
             if (h.max_width > 0) w = @min(w, h.max_width);
         } else if (fh > fw * h.min_aspect) {
             ht = @intFromFloat(@round(fw * h.min_aspect));
+            ht = snapDimToIncrement(ht, 0, h.inc_height);
             if (h.max_height > 0) ht = @min(ht, h.max_height);
         }
     }

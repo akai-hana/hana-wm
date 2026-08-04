@@ -1137,37 +1137,25 @@ fn collectWorkspaceWindows(s: *State, buf: []u32, for_ws: ?u8) usize {
     return n;
 }
 
-/// Bounds-checks `n` against the scratch window buffer before a caller
-/// writes into it, warning (instead of overflowing) if a workspace somehow
-/// exceeds tracked capacity.
-inline fn hasWindowBufCapacity(s: *const State, n: usize, comptime caller: []const u8) bool {
-    if (n <= s.geom.scratch_wins.len) return true;
-    debug.warn(caller ++ ": too many windows ({})", .{n});
-    return false;
-}
-
-/// Move the element at `from_idx` to `to_idx` in `s.windows`, shifting intervening elements.
+/// Move the element at `from_idx` to `to_idx` in `s.windows`, shifting
+/// intervening elements — equivalent to removing at `from_idx` and
+/// re-inserting at `to_idx` (see moveWindowToFilteredSlot's contract below).
+///
+/// Implemented as an in-place rotation of the sub-range spanning both
+/// indices: rotating [from, to] left by one slides the removed slot's
+/// neighbours down and drops `from`'s element in at the far end, and the
+/// mirror image (rotate right by one) does the same for `from > to`. This
+/// touches only the |to_idx - from_idx| elements between the two positions
+/// — no scratch buffer, no full-list rebuild, no capacity check needed
+/// since both indices are already valid positions in `s.windows`.
 fn moveWindowToIndex(s: *State, from_idx: usize, to_idx: usize) void {
     if (from_idx == to_idx) return;
-    const current = s.windows.items();
-    if (!hasWindowBufCapacity(s, current.len, "moveWindowToIndex")) return;
-
-    const win = current[from_idx];
-    var j: usize = 0;
-    for (current, 0..) |w, i| {
-        if (i == from_idx) continue;
-        if (j == to_idx) {
-            s.geom.scratch_wins[j] = win;
-            j += 1;
-        }
-        s.geom.scratch_wins[j] = w;
-        j += 1;
+    if (from_idx < to_idx) {
+        std.mem.rotate(u32, s.windows.buf[from_idx .. to_idx + 1], 1);
+    } else {
+        const slice = s.windows.buf[to_idx .. from_idx + 1];
+        std.mem.rotate(u32, slice, slice.len - 1);
     }
-    if (to_idx >= j) {
-        s.geom.scratch_wins[j] = win;
-        j += 1;
-    }
-    s.windows.reorder(s.geom.scratch_wins[0..j]);
 }
 
 /// Reposition `win` within the global window list so that it lands at

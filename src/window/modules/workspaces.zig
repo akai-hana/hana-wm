@@ -364,8 +364,15 @@ pub fn switchToAll() void {
 
         _ = xcb.xcb_grab_server(cs.conn);
         exitAllWorkspacesView(s);
+        // Resolve and apply focus BEFORE retiling: exitAllWorkspacesView may
+        // have just evicted the still-focused window from this workspace's
+        // list, and focus-driven layouts (monocle) pick their visible window
+        // from focus.getFocused() at retile time — retiling first would use
+        // the stale, now-evicted window with no follow-up retile once focus
+        // actually moves. All windows here are already mapped, so it's safe
+        // to apply focus ahead of the retile.
+        applyPostSwitchFocus(resolvePostSwitchFocus(&s.workspaces[s.current], ptr_reply));
         if (cs.config.tiling.enabled) tiling.retileCurrentWorkspace();
-        applyPostSwitchFocus(s.current, &s.workspaces[s.current], ptr_reply);
         bar.raiseBar();
         bar.redrawInsideGrab();
         utils.ungrabAndFlush(cs.conn);
@@ -543,7 +550,13 @@ fn hideWorkspaceWindows(ws: *const Workspace, new_ws: u8) void {
 }
 
 /// Grab step 2: restore geometry and map every window on the new workspace.
-fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
+/// `pending_focus` is the not-yet-applied post-switch focus target (see
+/// resolvePostSwitchFocus); on a cache miss this is passed through to the
+/// retile so focus-driven layouts (monocle) show the right window on the
+/// first frame, instead of reading focus.getFocused() — which at this point
+/// still reports the old workspace's focused window, since the real
+/// focus.setFocus() call happens only after every window here is mapped.
+fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8, pending_focus: ?u32) void {
     const tiling_active = tiling.getState().is_enabled;
 
     if (tiling_active) {
@@ -560,7 +573,12 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
             if (restore_ok and !tracking.isWindowOnWorkspace(win, old_ws)) continue;
             tiling.invalidateGeomCache(win);
         }
-        if (!restore_ok) tiling.retileCurrentWorkspace();
+        if (!restore_ok) {
+            if (pending_focus) |pf|
+                tiling.retileCurrentWorkspaceWithPendingFocus(pf)
+            else
+                tiling.retileCurrentWorkspace();
+        }
     } else if (tiling.isFloatingLayout()) {
         // Tiling is off, but a window's cache may have been zeroed the last
         // time it was left while tiling was still active. Try a fast cache
@@ -584,24 +602,29 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8) void {
     }
 }
 
-/// Grab step 3: resolve and apply post-switch focus. Skips the mapped-check
-/// and raise that focus.setFocus would normally do — every window here is
-/// already mapped and a workspace switch never raises. `ptr_reply` is the
-/// pre-drained pointer-query reply, so this makes no xcb_*_reply call.
-fn applyPostSwitchFocus(new_ws: u8, new_ws_obj: *Workspace, ptr_reply: ?*xcb.xcb_query_pointer_reply_t) void {
-    const focus_target: ?u32 = blk: {
-        const ptr = ptr_reply orelse break :blk lastFocusedOrFirst(new_ws_obj);
-        const child = ptr.*.child;
-        break :blk if (child != 0 and child != core.getState().root and
-            tracking.isWindowOnWorkspace(child, new_ws) and !minimize.isMinimized(child))
-            child
-        else
-            lastFocusedOrFirst(new_ws_obj);
-    };
+/// Grab step 3a: resolve (but do not apply) the post-switch focus target.
+/// Pure — no side effects — so callers can resolve it early and pass it
+/// through to a retile as a pending-focus override before actually applying
+/// it. `ptr_reply` is the pre-drained pointer-query reply, so this makes no
+/// xcb_*_reply call.
+fn resolvePostSwitchFocus(new_ws_obj: *Workspace, ptr_reply: ?*xcb.xcb_query_pointer_reply_t) ?u32 {
+    const ptr = ptr_reply orelse return lastFocusedOrFirst(new_ws_obj);
+    const child = ptr.*.child;
+    return if (child != 0 and child != core.getState().root and
+        tracking.isWindowOnWorkspace(child, new_ws_obj.id) and !minimize.isMinimized(child))
+        child
+    else
+        lastFocusedOrFirst(new_ws_obj);
+}
 
-    // Route through focus.setFocus/clearFocus so commitFocusTransition runs
-    // its full side-effect list (MRU history, tiling border state, carousel
-    // notification, _NET_ACTIVE_WINDOW, button-grab transfer, input focus).
+/// Grab step 3b: apply an already-resolved post-switch focus target. Skips
+/// the mapped-check and raise that focus.setFocus would normally do — every
+/// window here is already mapped and a workspace switch never raises.
+///
+/// Route through focus.setFocus/clearFocus so commitFocusTransition runs
+/// its full side-effect list (MRU history, tiling border state, carousel
+/// notification, _NET_ACTIVE_WINDOW, button-grab transfer, input focus).
+fn applyPostSwitchFocus(focus_target: ?u32) void {
     if (focus_target) |new_win| {
         focus.setFocus(new_win, .workspace_switch);
     } else {
@@ -651,11 +674,18 @@ fn executeSwitch(old_ws: u8, new_ws: u8) void {
             xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
             xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{ 0, 0, @intCast(cs.screen.width_in_pixels), @intCast(cs.screen.height_in_pixels), 0 });
         _ = xcb.xcb_configure_window(cs.conn, info.window, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+        applyPostSwitchFocus(resolvePostSwitchFocus(new_ws_obj, ptr_reply));
     } else {
-        restoreWorkspaceWindows(new_ws_obj, old_ws);
+        // Resolve before restoring: on a geometry-cache miss,
+        // restoreWorkspaceWindows falls back to a full retile, and
+        // focus-driven layouts (monocle) need to know the intended focus
+        // target at that point rather than reading the stale pre-switch
+        // focus. The actual focus.setFocus() call still happens below,
+        // after every window is mapped.
+        const focus_target = resolvePostSwitchFocus(new_ws_obj, ptr_reply);
+        restoreWorkspaceWindows(new_ws_obj, old_ws, focus_target);
+        applyPostSwitchFocus(focus_target);
     }
-
-    applyPostSwitchFocus(new_ws, new_ws_obj, ptr_reply);
 
     bar.raiseBar();
     bar.redrawInsideGrab();

@@ -30,14 +30,30 @@ pub const State = struct {
     prev_focused: ?u32 = null,
 };
 
+/// Pixel width of one scroll slot: always exactly half the screen width.
+/// The single source of truth for this formula — step, snapOffsetToWindow,
+/// and tileWithOffset all derive their geometry from it, so a future change
+/// to the slot-width convention only has to happen here.
+inline fn slotWidth(screen_w: u16) i32 {
+    return @intCast(screen_w / 2);
+}
+
+/// Maximum scroll offset: reached when the last of `n` windows' right edge
+/// is flush with the screen's right edge. Zero (nothing to scroll) when the
+/// strip is no wider than the screen.
+inline fn maxOffset(n: usize, screen_w: u16) i32 {
+    const n_i32: i32 = @intCast(n);
+    const sw_i32: i32 = @intCast(screen_w);
+    return @max(0, n_i32 * slotWidth(screen_w) - sw_i32);
+}
+
 /// Shift the scroll viewport by one slot. `delta` is +1 (right/forward) or
 /// -1 (left/backward). No-op (returns false) when the current layout is not
 /// .scroll; the caller should skip retiling in that case. tileWithOffset
 /// clamps the result to [0, max_off] on the next retile.
 pub fn step(s: *tiling.State, delta: i32) bool {
     if (s.config.layout != .scroll) return false;
-    const slot_w: i32 = @intCast(core.getState().screen.width_in_pixels / 2);
-    s.scroll.offset += delta * slot_w;
+    s.scroll.offset += delta * slotWidth(core.getState().screen.width_in_pixels);
     return true;
 }
 
@@ -60,10 +76,8 @@ pub fn snapOffsetToWindow(s: *tiling.State, ws_wins: []const u32, win: u32) bool
 
     const fi_i32: i32 = @intCast(fi);
     const screen_w = core.getState().screen.width_in_pixels;
-    const slot_w: i32 = @intCast(screen_w / 2);
-    const n_i32: i32 = @intCast(ws_wins.len);
-    const sw_i32: i32 = @intCast(screen_w);
-    const max_off: i32 = @max(0, n_i32 * slot_w - sw_i32);
+    const slot_w = slotWidth(screen_w);
+    const max_off = maxOffset(ws_wins.len, screen_w);
 
     const win_left: i32 = fi_i32 * slot_w;
     const scroll_off = s.scroll.offset;
@@ -112,13 +126,12 @@ pub fn tileWithOffset(
     const m = state.margins();
 
     // Every slot is exactly half the screen width.
-    const slot_w: i32 = @intCast(screen_w / 2);
+    const slot_w: i32 = slotWidth(screen_w);
 
-    const n_i32: i32 = @intCast(n);
     const sw_i32: i32 = @intCast(screen_w);
 
     // Max scroll: reached when the last window's right edge is flush with the screen.
-    const max_off: i32 = @max(0, n_i32 * slot_w - sw_i32);
+    const max_off: i32 = maxOffset(n, screen_w);
 
     // New window: snap viewport right so it is immediately visible.
     // Killed window: the clamp below is sufficient.

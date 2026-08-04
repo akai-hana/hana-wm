@@ -43,6 +43,21 @@ pub fn tileWithOffset(
         // Remaining area too small to split: raise the focused window (or the
         // first overflow window as fallback) and push the rest offscreen so the
         // user at least sees one window rather than a stack of identical rects.
+        //
+        // Note: the raise/offscreen calls below go straight to XCB instead of
+        // through emitOrDefer, so if ctx.defer_win falls inside windows[i..]
+        // it's configured now rather than deferred to the end of the retile.
+        // In practice this never matters: defer_win is only ever set by
+        // swap_master (see executeSwapMaster in input.zig), which always
+        // passes the *new* master — and swapWindowsInList places the new
+        // master at the old master's global index, so defer_win is always
+        // windows[0] here. windows[0] is handled by the loop's very first
+        // iteration (i=0) via the normal splitAndAdvance/emitOrDefer path,
+        // long before any i>0 overflow branch is reached. The only way
+        // defer_win could land in windows[i..] is i==0 itself — the screen
+        // too small to fit even one window with margins — and that's a
+        // total-fallback state where the one-frame-gap concern is moot:
+        // nothing else got tiled this pass, so there's no handoff to protect.
         if (w < m.gap * 2 + border2 or h < m.gap * 2 + border2) {
             const overflow_rect = utils.Rect{
                 .x = @intCast(x),
