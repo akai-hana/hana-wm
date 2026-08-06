@@ -33,6 +33,9 @@ pub const Workspace = struct {
     master_width: ?f32 = null,
     /// Per-workspace master-count override (master-stack layout); null = global default.
     master_count: ?u8 = null,
+    /// Per-workspace stack top/bottom balance override (master-stack layout,
+    /// mod+n/mod+o); null = even split (0).
+    stack_balance: ?f32 = null,
     /// Window focused here before the user last left; restored on re-entry
     /// when the cursor isn't hovering a window.
     last_focused: ?u32 = null,

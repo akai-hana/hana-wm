@@ -376,6 +376,10 @@ const ACTION_MAP = std.StaticStringMap(types.Action).initComptime(.{
     .{ "decrease_master", .decrease_master },
     .{ "increase_master_count", .increase_master_count },
     .{ "decrease_master_count", .decrease_master_count },
+    .{ "grow_stack_top", .grow_stack_top },
+    .{ "stack_top", .grow_stack_top }, // short alias
+    .{ "grow_stack_bottom", .grow_stack_bottom },
+    .{ "stack_bottom", .grow_stack_bottom }, // short alias
     .{ "toggle_floating_window", .toggle_floating_window },
     .{ "toggle_fullscreen", .toggle_fullscreen },
     .{ "fullscreen", .toggle_fullscreen },

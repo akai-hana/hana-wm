@@ -48,8 +48,7 @@ pub const XkbState = struct {
 
         try retrySetup(xcb_conn);
 
-        const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
-        if (device_id == -1) return error.XkbNoKeyboard;
+        const device_id = try retryDeviceId(xcb_conn);
 
         const km = try retryKeymap(ctx, xcb_conn, device_id);
         errdefer xkb.xkb_keymap_unref(km);
@@ -101,17 +100,27 @@ const XKB_RETRY_DELAY_MS = constants.XKB_RETRY_DELAY_MS;
 
 /// Sleeps between retry attempts; skips the sleep on the final attempt.
 /// Uses nanosleep directly — std.time.sleep is absent in this Zig build.
+///
+/// Resumes on EINTR (this WM installs a SIGCHLD handler, which can interrupt
+/// the sleep) so a signal arriving mid-retry doesn't shorten the delay.
 inline fn retryDelay(attempt: u8) void {
     if (attempt >= MAX_ATTEMPTS - 1) return;
     const ns = XKB_RETRY_DELAY_MS * std.time.ns_per_ms;
     var req = std.os.linux.timespec{ .sec = @intCast(ns / std.time.ns_per_s), .nsec = @intCast(ns % std.time.ns_per_s) };
     var rem = std.os.linux.timespec{ .sec = 0, .nsec = 0 };
-    _ = std.os.linux.nanosleep(&req, &rem);
+    while (true) {
+        const rc = std.os.linux.nanosleep(&req, &rem);
+        if (std.posix.errno(rc) != .INTR) break;
+        // Interrupted by a signal (this WM installs a SIGCHLD handler) —
+        // resume sleeping for the remaining time rather than returning
+        // early with a shortened delay.
+        req = rem;
+    }
 }
 
-// retrySetup and retryKeymap share the same retry-loop shape but differ in
-// operation and return type (!void vs !*xkb_keymap), so they're left as two
-// small functions rather than one generic loop.
+// retrySetup, retryDeviceId, and retryKeymap share the same retry-loop shape
+// but differ in operation and return type (!void vs !i32 vs !*xkb_keymap),
+// so they're left as small functions rather than one generic loop.
 
 /// Calls xkb_x11_setup_xkb_extension, retrying up to MAX_ATTEMPTS times.
 /// The extension may not be ready immediately at WM startup.
@@ -131,6 +140,19 @@ fn retrySetup(xcb_conn: *anyopaque) !void {
         retryDelay(@intCast(i));
     }
     return error.XkbSetupFailed;
+}
+
+/// Calls xkb_x11_get_core_keyboard_device_id, retrying up to MAX_ATTEMPTS
+/// times. Like the XKB extension itself, the core keyboard device may not
+/// be enumerable yet in the same early-startup window retrySetup guards
+/// against.
+fn retryDeviceId(xcb_conn: *anyopaque) !i32 {
+    for (0..MAX_ATTEMPTS) |i| {
+        const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
+        if (device_id != -1) return device_id;
+        retryDelay(@intCast(i));
+    }
+    return error.XkbNoKeyboard;
 }
 
 /// Minimum reachable keysyms in keycode range 8..128 for a keymap to count

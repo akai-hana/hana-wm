@@ -135,6 +135,8 @@ Mod+H       = "decrease_master"
 Mod+L       = "increase_master" # Increase master area width
 Mod+Shift+L = "increase_master_count"
 Mod+Shift+H = "decrease_master_count"
+Mod+N       = "grow_stack_top"    # Grow topmost slave, shrink the rest evenly
+Mod+O       = "grow_stack_bottom" # Grow bottommost slave, shrink the rest evenly
 
 # Focus cycling
 ## k = next/right (master → stack → ... → wrap), j = prev/left
