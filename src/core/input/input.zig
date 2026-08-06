@@ -703,6 +703,12 @@ fn tryConfigMouseBind(mods: u16, button: u8, win: u32, time: u32) bool {
 inline fn withTilingGrab(op: anytype) void {
     const conn = core.getState().conn;
     _ = xcb.xcb_grab_server(conn);
+    // Suppress EnterNotify events generated as a side effect of windows
+    // moving/resizing under a stationary cursor during this reflow — X11
+    // fires real crossing events for that, not just for cursor motion, and
+    // without this they get processed as genuine hover and steal focus to
+    // whatever window transiently ends up under the pointer mid-shuffle.
+    focus.setSuppressReason(.tiling_operation);
     switch (@typeInfo(@TypeOf(op))) {
         .@"fn" => op(),
         else => op.call(),
@@ -710,6 +716,11 @@ inline fn withTilingGrab(op: anytype) void {
     window.updateFloatingWindowBorders();
     window.markBordersFlushed();
     bar.redrawInsideGrab();
+    // Once the layout has settled, resolve focus against where the pointer
+    // actually rests — mirrors executeSwapMaster's use of the same call.
+    // Clears the suppression above and queues an authoritative query that
+    // drainPointerSync() consumes on the next event-loop iteration.
+    focus.beginPointerSync();
     utils.ungrabAndFlush(conn);
 }
 

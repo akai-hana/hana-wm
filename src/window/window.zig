@@ -936,7 +936,6 @@ fn mapWindowToScreen(win: u32) void {
     const cs = core.getState();
     const conn = cs.conn;
 
-    const suppress_reason = focus.getSuppressReason();
     const ptr_reply = xcb.xcb_query_pointer_reply(conn, xcb.xcb_query_pointer(conn, cs.root), null);
     defer if (ptr_reply) |r| std.c.free(r);
 
@@ -976,7 +975,12 @@ fn mapWindowToScreen(win: u32) void {
     _ = xcb.xcb_map_window(conn, win);
 
     focus.setFocus(win, .window_spawn);
-    snapshotSpawnCursorFromReply(ptr_reply, suppress_reason);
+    // Re-check the suppress reason *after* setFocus, not before: setFocus is
+    // what actually arms `.window_spawn` (via suppressionFor). Reading it
+    // beforehand — when it's almost always `.none` — meant this snapshot
+    // was skipped on virtually every spawn, leaving state.spawn_cursor
+    // stale and spawn-crossing suppression unable to match.
+    snapshotSpawnCursorFromReply(ptr_reply, focus.getSuppressReason());
 
     // Post-retile border sweep: tiled-window borders were already updated by
     // configureWithHints during retileCurrentWorkspace (via get_border_color),
