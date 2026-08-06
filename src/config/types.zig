@@ -22,6 +22,8 @@ pub const Action = union(enum) {
     decrease_master,
     increase_master_count,
     decrease_master_count,
+    grow_stack_top, // grow the topmost stack slave's share of the column, shrinking the rest evenly (mod+n)
+    grow_stack_bottom, // grow the bottommost stack slave's share of the column, shrinking the rest evenly (mod+o)
     toggle_floating_window,
     toggle_fullscreen,
     swap_master,

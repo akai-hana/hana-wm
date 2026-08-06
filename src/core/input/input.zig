@@ -59,6 +59,9 @@ pub fn deinitXkb() void {
 
 /// Returns a pointer to the module-owned XkbState,
 /// used by events.zig during config reloads.
+///
+/// The returned pointer is invalidated by deinitXkb/initXkb (e.g. during a
+/// config reload) — callers must not cache it across those calls.
 pub fn getXkbState() *xkbcommon.XkbState {
     return &xkb_state.?;
 }
@@ -71,8 +74,9 @@ pub fn setup(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t, root: u32) 
     XcbCursor.setupRoot(conn, screen);
 }
 
-/// Grabs Super+Button{1,2,3} on the root window for all LOCK_MODIFIERS
-/// combinations (NumLock, CapsLock, ScrollLock, and their combinations).
+/// Grabs Super+Button{1,2,3,4,5} (including the scroll buttons) on the root
+/// window for all LOCK_MODIFIERS combinations (NumLock, CapsLock,
+/// ScrollLock, and their combinations).
 pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
     for (mouse_buttons) |button| {
         for (constants.LOCK_MODIFIERS) |lock| {
@@ -83,8 +87,8 @@ pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
                 xcb.XCB_EVENT_MASK_BUTTON_PRESS |
                     xcb.XCB_EVENT_MASK_BUTTON_RELEASE |
                     xcb.XCB_EVENT_MASK_POINTER_MOTION,
-                xcb.XCB_GRAB_MODE_ASYNC,
-                xcb.XCB_GRAB_MODE_ASYNC,
+                xcb.XCB_GRAB_MODE_SYNC,
+                xcb.XCB_GRAB_MODE_SYNC,
                 root,
                 xcb.XCB_NONE,
                 button,
@@ -100,8 +104,13 @@ pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
 pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     focus.setLastEventTime(event.time);
 
+    const state = xkb_state orelse {
+        debug.warn("[KEY] keypress before XKB init; ignoring", .{});
+        return;
+    };
+
     const mods = utils.normalizeModifiers(event.state);
-    const keysym = xkb_state.?.keycodeToKeysym(event.detail);
+    const keysym = state.keycodeToKeysym(event.detail);
 
     // O(1) dispatch via the (modifiers << 32 | keysym) map built by
     // config.resolveKeybindings.
@@ -134,16 +143,19 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     }
 
     const super_held = (event.state & constants.MOD_SUPER) != 0;
+    const mods = utils.normalizeModifiers(event.state);
 
     // Scroll-wheel binds (buttons 4/5) are viewport actions — check before the
     // managed-window guard that would otherwise discard desktop/bar events.
     if (super_held and (event.detail == mouse_button_scroll_up or event.detail == mouse_button_scroll_down)) {
-        _ = tryConfigMouseBind(utils.normalizeModifiers(event.state), event.detail, 0, event.time);
+        if (!tryConfigMouseBind(mods, event.detail, 0, event.time)) {
+            replayPointer(event.time);
+        }
         return;
     }
 
     if (super_held) {
-        if (tryConfigMouseBind(utils.normalizeModifiers(event.state), event.detail, managed_window, event.time)) return;
+        if (tryConfigMouseBind(mods, event.detail, managed_window, event.time)) return;
     }
 
     if (super_held and (event.detail == mouse_button_left or event.detail == mouse_button_right)) {
@@ -195,8 +207,14 @@ fn closeWindow(win: u32) void {
         return;
     }
 
-    const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch return;
-    const delete_atom = utils.getAtomCached("WM_DELETE_WINDOW") catch return;
+    const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch {
+        _ = xcb.xcb_destroy_window(conn, win);
+        return;
+    };
+    const delete_atom = utils.getAtomCached("WM_DELETE_WINDOW") catch {
+        _ = xcb.xcb_destroy_window(conn, win);
+        return;
+    };
 
     // Zero-initialise: XCB transmits raw bytes, so uninitialised padding
     // would be undefined behaviour on the wire.
@@ -236,6 +254,8 @@ fn executeAction(action: *const types.Action) !void {
         .decrease_master,
         .increase_master_count,
         .decrease_master_count,
+        .grow_stack_top,
+        .grow_stack_bottom,
         .swap_master,
         .swap_master_focus_swap,
         .move_window_next,
@@ -300,6 +320,8 @@ fn executeTilingAction(action: *const types.Action) void {
         .decrease_master => withTilingGrab(tiling.decreaseMasterWidth),
         .increase_master_count => withTilingGrab(tiling.increaseMasterCount),
         .decrease_master_count => withTilingGrab(tiling.decreaseMasterCount),
+        .grow_stack_top => withTilingGrab(tiling.growTopSlave),
+        .grow_stack_bottom => withTilingGrab(tiling.growBottomSlave),
 
         .swap_master, .swap_master_focus_swap => executeSwapMaster(action),
 
@@ -521,6 +543,12 @@ fn executeShellCommand(cmd: []const u8) !void {
     if (!queued) {
         // Table full: close the read end we won't track.
         _ = c.close(pipe_fds[0]);
+        // `pid` (the intermediate child) isn't in g_pending, so
+        // reapPendingChildren's waitpid loop will never wait on it. It
+        // exits almost instantly (one more fork() + a 5-byte write +
+        // exit()), so a synchronous reap here is cheap and bounded, and
+        // avoids leaving a permanent zombie behind.
+        _ = c.waitpid(pid, null, 0);
     }
 }
 
@@ -645,6 +673,7 @@ fn dumpState() void {
         debug.info("Tiled windows:  {}", .{t.windows.len});
         debug.info("Master count:   {}", .{t.config.master_count});
         debug.info("Master width:   {d:.2}", .{t.config.master_width});
+        debug.info("Stack balance:  {d:.2} (+ = top slave grown, - = bottom slave grown)", .{t.config.stack_balance});
     }
 
     debug.info("================================", .{});
@@ -739,7 +768,7 @@ const XcbCursor = struct {
             &[_]u32{cursor},
         );
         if (xcb.xcb_request_check(conn, cookie)) |err| {
-            debug.err("Failed to set root cursor: {*}", .{err});
+            debug.err("Failed to set root cursor: error_code={}", .{err.*.error_code});
             std.c.free(err);
         }
 

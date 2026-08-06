@@ -32,6 +32,7 @@ const WM_HINTS_INPUT_FLAG: u32 = 1 << 0;
 const WM_HINTS_FLAGS_FIELD: usize = 0;
 const WM_HINTS_INPUT_FIELD: usize = 1;
 const WM_HINTS_LONG_LENGTH: u32 = 9; // flags + 8 fields
+const WM_NORMAL_HINTS_LONG_LENGTH: u32 = 18; // flags + 17 fields (up to base_size/win_gravity)
 
 const MAX_PROPERTY_LENGTH = constants.PROPERTY_MAX_LENGTH;
 const PROPERTY_NO_DELETE = constants.PROPERTY_NO_DELETE;
@@ -1044,7 +1045,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
         xcb.XCB_ATOM_WM_NORMAL_HINTS,
         xcb.XCB_ATOM_ANY,
         0,
-        18,
+        WM_NORMAL_HINTS_LONG_LENGTH,
     );
     parseSizeHintsIntoCache(win, normal_hints_cookie);
 
@@ -1460,7 +1461,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
             xcb.XCB_ATOM_WM_NORMAL_HINTS,
             xcb.XCB_ATOM_ANY,
             0,
-            18,
+            WM_NORMAL_HINTS_LONG_LENGTH,
         );
         parseSizeHintsIntoCache(event.window, cookie);
         return;
@@ -1592,9 +1593,9 @@ fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
     const cur = tracking.getCurrentWorkspace() orelse return;
     const cur_bit = tracking.workspaceBit(cur);
     const conn = core.getState().conn;
-    for (tracking.allWindows()) |_entry| {
-        const win = _entry.win;
-        if (_entry.mask & cur_bit == 0) continue;
+    for (tracking.allWindows()) |entry| {
+        const win = entry.win;
+        if (entry.mask & cur_bit == 0) continue;
         if (comptime skip_tiled) {
             if (core.getState().config.tiling.enabled and tiling.isWindowTiled(win)) continue;
             _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
