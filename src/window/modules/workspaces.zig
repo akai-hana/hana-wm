@@ -101,24 +101,54 @@ fn transferFullscreenRecord(win: u32, current: u8, new_home: u8, force: bool) vo
     }
 }
 
-/// Initializes global workspace state. Workspaces-disabled collapses to a
-/// single implicit workspace; every switch/tag/move action already no-ops on
-/// an out-of-range target, so nothing else needs to branch on this.
-pub fn init() !void {
-    const cs = core.getState();
-    const count = if (cs.config.workspaces.enabled) cs.config.workspaces.count else 1;
-    const wss = try cs.alloc.alloc(Workspace, count);
+/// Resolved layout + variant override for a single workspace, keyed by
+/// workspace index in the flat lookup table built by applyWorkspaceOverrides.
+const OverrideLookup = struct {
+    layout_idx: usize,
+    variant: ?types.LayoutVariantOverride,
+};
 
-    const default_layout: TilingLayout = tiling.getState().config.layout;
-    const cfg_tiling = &cs.config.tiling;
+/// Applies per-workspace layout and master-count overrides from `cfg_tiling`
+/// to every workspace in `wss`, falling back to `default_layout` for any
+/// workspace without its own override.
+///
+/// Shared by workspaces.init() (first launch) and tiling.reloadConfig()
+/// (config reload / SIGHUP) so config-declared overrides are re-applied
+/// identically in both cases — previously, reload discarded every
+/// per-workspace override back to the global default because the
+/// lookup-table-building logic lived only inline in init() (see item 5 in
+/// the config-subsystem review).
+///
+/// Builds a flat lookup table so applying overrides to N workspaces is O(N)
+/// instead of O(N × overrides); the table is sized to constants.MAX_WORKSPACES,
+/// which is also the hard ceiling enforced elsewhere (tiling.zig's u64
+/// workspace_geom_valid_bits bitmask). config.zig already warns at parse time
+/// about overrides targeting a workspace index at or beyond that ceiling (see
+/// item 4), so silently ignoring them here is not a second, separate failure
+/// mode — just the mechanical consequence of the table not having a slot for
+/// them.
+///
+/// `master_width` and `stack_balance` are always reset to their global
+/// defaults (null) here: neither has a config-file representation (unlike
+/// layout/variant/master_count, which come from the layouts array /
+/// master-stack.counts) — they're purely runtime state set via the
+/// increase_master/decrease_master and mod+n/mod+o (growTopSlave/
+/// growBottomSlave) actions respectively — so there is nothing for this
+/// function to restore either *to*, and both genuinely should reset on
+/// reload, same as before this field existed.
+///
+/// `last_focused` (which workspace-switch focus restoration reads) is
+/// deliberately NOT touched by this function: it's pure interactive runtime
+/// state with no config-file concept behind it at all, so a reload
+/// shouldn't disturb it any more than it should disturb which window
+/// currently has focus (item 5, step 3).
+pub fn applyWorkspaceOverrides(
+    wss: []Workspace,
+    cfg_tiling: *const types.TilingConfig,
+    default_layout: TilingLayout,
+) void {
+    const MAX_WS = constants.MAX_WORKSPACES;
 
-    // Flatten the override lists into O(1)-lookup arrays, capped at 64
-    // workspaces by the u64 tag bitmask used everywhere else.
-    const MAX_WS = 64;
-    const OverrideLookup = struct {
-        layout_idx: usize,
-        variant: ?types.LayoutVariantOverride,
-    };
     var override_lookup: [MAX_WS]?OverrideLookup = .{null} ** MAX_WS;
     for (cfg_tiling.workspace_layout_overrides.items) |o| {
         if (o.workspace_idx < MAX_WS)
@@ -128,15 +158,15 @@ pub fn init() !void {
             };
     }
 
+    // Per-workspace master count overrides from [tiling.layouts.master-stack.counts].
     var master_count_lookup: [MAX_WS]?u8 = .{null} ** MAX_WS;
     for (cfg_tiling.workspace_master_count_overrides.items) |o| {
         if (o.workspace_idx < MAX_WS)
             master_count_lookup[o.workspace_idx] = o.count;
     }
 
-    for (wss, 0..) |*ws, i| {
-        const id: u8 = @intCast(i);
-        const name = if (i < tracking.WORKSPACE_LABELS.len) tracking.WORKSPACE_LABELS[i] else "?";
+    for (wss) |*ws| {
+        const id = ws.id;
 
         var ws_layout = default_layout;
         var ws_variant: ?types.LayoutVariantOverride = null;
@@ -148,12 +178,31 @@ pub fn init() !void {
             }
         }
 
-        ws.* = Workspace.init(id, name, ws_layout);
+        ws.layout = ws_layout;
         ws.variants = ws_variant;
-        if (id < MAX_WS) {
-            if (master_count_lookup[id]) |mc| ws.master_count = mc;
-        }
+        ws.master_width = null;
+        ws.stack_balance = null;
+        ws.master_count = if (id < MAX_WS) master_count_lookup[id] else null;
     }
+}
+
+/// Initializes global workspace state. Workspaces-disabled collapses to a
+/// single implicit workspace; every switch/tag/move action already no-ops on
+/// an out-of-range target, so nothing else needs to branch on this.
+pub fn init() !void {
+    const cs = core.getState();
+    const count = if (cs.config.workspaces.enabled) cs.config.workspaces.count else 1;
+    const wss = try cs.alloc.alloc(Workspace, count);
+
+    const default_layout: TilingLayout = tiling.getState().config.layout;
+    const cfg_tiling = &cs.config.tiling;
+
+    for (wss, 0..) |*ws, i| {
+        const id: u8 = @intCast(i);
+        const name = if (i < tracking.WORKSPACE_LABELS.len) tracking.WORKSPACE_LABELS[i] else "?";
+        ws.* = Workspace.init(id, name, default_layout);
+    }
+    applyWorkspaceOverrides(wss, cfg_tiling, default_layout);
 
     tracking.setWorkspaceCount(count);
     tracking.setCurrentWorkspace(0);

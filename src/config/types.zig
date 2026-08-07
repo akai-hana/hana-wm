@@ -3,6 +3,8 @@
 
 const std = @import("std");
 const parser = @import("parser");
+const xkbcommon = @import("xkbcommon");
+const debug = @import("debug");
 
 /// X11 color value packed as 0x00RRGGBB into 32 bits.
 /// The high byte is unused; values match what XCB expects for pixel/color fields.
@@ -76,16 +78,139 @@ pub const MouseBind = struct {
     action: Action,
 };
 
+/// Owns the persistent (modifiers, keysym) -> Action dispatch map resolved
+/// from a Config's keybindings, along with the keycode-resolution step that
+/// feeds it.
+///
+/// This used to be a bare module-level global in config.zig
+/// (`g_keybind_map`), with a documented but hand-enforced contract: the map
+/// had to be cleared (via `deinitKeybindMap`) before the Config whose
+/// keybindings it pointed into was freed, using a specific `defer` ordering
+/// in main.zig that nothing but a code comment protected. Embedding the
+/// resolver as a field of Config instead ties its lifetime structurally to
+/// the Config it was built from — Config.deinit tears the resolver down
+/// internally, before freeing the Actions its map entries point into — so
+/// there is no longer a two-`defer` dance for a future edit to accidentally
+/// reorder (see item 10 in the config-subsystem review).
+pub const KeybindResolver = struct {
+    map: std.AutoHashMapUnmanaged(u64, *const Action) = .empty,
+
+    inline fn dispatchKey(modifiers: u16, keysym: u32) u64 {
+        return (@as(u64, modifiers) << 32) | keysym;
+    }
+
+    /// Resolves each keybinding's keysym to a keycode via `xkb_state`, then
+    /// rebuilds the dispatch map (see rebuildDispatchMap). Call once at
+    /// startup (config.load) and again on every config reload
+    /// (events.applyConfig).
+    pub fn build(self: *KeybindResolver, keybindings: []Keybind, xkb_state: *xkbcommon.XkbState, allocator: std.mem.Allocator) void {
+        for (keybindings) |*kb| kb.keycode = xkb_state.keysymToKeycode(kb.keysym);
+        self.rebuildDispatchMap(keybindings, allocator);
+    }
+
+    /// Warns about conflicting bindings (same effective mods+keysym — the
+    /// same key the dispatch map itself is keyed on, so warnings accurately
+    /// reflect what `lookup` sees) and rebuilds the persistent dispatch map.
+    /// Safe to call repeatedly; clears and rebuilds from scratch every time,
+    /// so bindings from a previous build never leak into the next one.
+    ///
+    /// Split out from `build` so the map-rebuild behavior can be exercised
+    /// without a live XkbState/X connection (see the reload-safety test
+    /// below), since keycode resolution is the only part that needs one.
+    pub fn rebuildDispatchMap(self: *KeybindResolver, keybindings: []Keybind, allocator: std.mem.Allocator) void {
+        var seen = std.AutoHashMap(u64, usize).init(allocator);
+        defer seen.deinit();
+        for (keybindings, 0..) |*kb, i| {
+            const key = dispatchKey(kb.modifiers, kb.keysym);
+            if (seen.get(key)) |first| {
+                debug.warn("Keybinding conflict: #{} and #{} share mods=0x{x:0>4} keysym=0x{x} — second wins", .{ first + 1, i + 1, kb.modifiers, kb.keysym });
+            } else {
+                seen.put(key, i) catch |e| debug.warnOnErr(e, "keybind dedup");
+            }
+        }
+
+        self.map.clearRetainingCapacity();
+        for (keybindings) |*kb| {
+            const key = dispatchKey(kb.modifiers, kb.keysym);
+            self.map.put(allocator, key, &kb.action) catch |e| debug.warnOnErr(e, "keybind map build");
+        }
+    }
+
+    /// O(1) keybinding lookup for use on the hot key-press path.
+    /// Returns a pointer into the current config's keybindings slice, or null.
+    pub inline fn lookup(self: *const KeybindResolver, mods: u16, keysym: u32) ?*const Action {
+        return self.map.get(dispatchKey(mods, keysym));
+    }
+
+    /// Releases the dispatch map. Called from Config.deinit, before the
+    /// keybindings whose Actions this map's entries point into are freed.
+    pub fn deinit(self: *KeybindResolver, allocator: std.mem.Allocator) void {
+        self.map.deinit(allocator);
+        self.map = .empty;
+    }
+};
+
 // Tiling layout types
+
+/// Result of lowerStringCI: the lowercased string is embedded *by value*
+/// (copied into `buf`, not borrowed from the caller's stack frame), so it's
+/// safe to return this from a function and keep using it afterward.
+pub fn LowerResult(comptime max_len: usize) type {
+    return union(enum) {
+        ok: struct {
+            buf: [max_len]u8,
+            len: usize,
+
+            pub fn slice(self: *const @This()) []const u8 {
+                return self.buf[0..self.len];
+            }
+        },
+        too_long,
+    };
+}
+
+/// Lowercases `str` into a fixed `max_len`-byte buffer if it fits, or
+/// reports `.too_long`.
+///
+/// Centralizes the "pick a stack buffer size, bounds-check the input, then
+/// lowercase into it" pattern that used to be duplicated — each with its own
+/// separately-chosen buffer size (32, 32, 32, 32, and 16 bytes) — across
+/// fromStringCI, canonicalLayout, isKnownLayout, parseLayoutVariant, and
+/// mouseButtonFromName. Callers that log a warning on failure can now switch
+/// on `.too_long` to give a more specific message than the generic "value
+/// not recognized" that both an overlong value and a genuine typo used to
+/// produce identically, since both previously just looked like "not found in
+/// map" to the caller (item 11 in the config-subsystem review).
+///
+/// This is complementary to (not a replacement for) LAYOUT_TABLE below:
+/// LAYOUT_TABLE is the single source of truth for name<->tag<->alias
+/// mappings; lowerStringCI is the shared case-folding/bounds-safety
+/// mechanism config.zig's layout-name helpers use to probe it and the other
+/// string_map-backed enums in this file.
+///
+/// keyNameToKeysym's 64-byte buffer is intentionally NOT routed through
+/// this: it copies `name` verbatim (case folding is delegated to
+/// libxkbcommon's XKB_KEYSYM_CASE_INSENSITIVE flag) purely to null-terminate
+/// it for the C API, which is a different operation than the case-insensitive
+/// map lookups this helper serves. It already surfaces a distinct
+/// error.KeyNameTooLong vs error.UnknownKeyName to its caller, so it doesn't
+/// have the "identical generic warning" problem this item is about.
+pub fn lowerStringCI(comptime max_len: usize, str: []const u8) LowerResult(max_len) {
+    if (str.len > max_len) return .too_long;
+    var result: LowerResult(max_len) = .{ .ok = .{ .buf = undefined, .len = str.len } };
+    _ = std.ascii.lowerString(result.ok.buf[0..str.len], str);
+    return result;
+}
 
 /// Case-insensitive enum lookup shared by enums that expose a `string_map` decl.
 /// Lowercases `str` into a 32-byte stack buffer and probes the map.
 /// Returns null when `str` exceeds the buffer or the key is not found.
 fn fromStringCI(comptime T: type, str: []const u8) ?T {
     const map = T.string_map;
-    var buf: [32]u8 = undefined;
-    if (str.len > buf.len) return null;
-    return map.get(std.ascii.lowerString(buf[0..str.len], str));
+    return switch (lowerStringCI(32, str)) {
+        .too_long => null,
+        .ok => |r| map.get(r.slice()),
+    };
 }
 
 pub const MasterSide = enum {
@@ -464,6 +589,12 @@ pub const Config = struct {
     workspaces: WorkspaceConfig = .{},
     bar: BarConfig = .{},
 
+    /// Persistent (modifiers, keysym) -> Action dispatch map, built from
+    /// `keybindings` by config.load() (startup) and events.applyConfig()
+    /// (reload). See KeybindResolver's doc comment for why this lives here
+    /// rather than as a module-level global.
+    keybind_resolver: KeybindResolver = .{},
+
     /// Each subsystem is always fully compiled in; these flags just gate
     /// whether its behavior (and keybindings/actions that drive it) is active.
     fullscreen_enabled: bool = true,
@@ -475,6 +606,14 @@ pub const Config = struct {
     snap_distance: parser.ScalableValue = parser.ScalableValue.absolute(8.0),
 
     pub fn deinit(self: *Config, a: std.mem.Allocator) void {
+        // Must run before `self.keybindings.deinit(a)` below: keybind_resolver's
+        // map holds `*const Action` pointers borrowed from self.keybindings'
+        // elements, so the map has to be torn down (or at least never touched
+        // again) before those Actions are freed. Living inside one function
+        // makes this ordering structural rather than a convention two separate
+        // `defer` statements in main.zig had to get right (see item 10).
+        self.keybind_resolver.deinit(a);
+
         for (self.keybindings.items) |*kb| kb.action.deinit(a);
         self.keybindings.deinit(a);
 

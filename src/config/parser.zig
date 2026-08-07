@@ -57,6 +57,13 @@ pub const Value = union(enum) {
             else => null,
         };
     }
+    /// Both whole-number and decimal absolute values arrive here as `.scalable`
+    /// (parseValue converts any bare numeric literal containing a `.` into a
+    /// `.scalable` too, not just `%`-suffixed ones — see the decimal-literal
+    /// branch there). `.integer` is retained purely for callers that need a
+    /// true integer (workspace counts, master counts, etc.); it is widened
+    /// losslessly here for the convenience of callers that only care about
+    /// the scalable form.
     pub inline fn asScalable(self: Value) ?ScalableValue {
         return switch (self) {
             .scalable => |s| s,
@@ -190,26 +197,39 @@ fn deepCopyValue(allocator: std.mem.Allocator, val: Value) std.mem.Allocator.Err
 /// Accumulate `incoming` into the existing single-file value at `old_val`.
 ///
 /// Used while parsing one file: a duplicate key wraps the existing scalar and
-/// `incoming` into a fresh 2-element array (or appends to an existing array).
-/// An array-valued `incoming` is nested as a single element, not flattened —
-/// matching the existing single-file parse behavior.
+/// `incoming` into a fresh array (or appends to an existing array). An
+/// array-valued `incoming` is flattened into the existing array rather than
+/// nested as a single element, so the same logical situation — a key
+/// declared twice — produces the same flat-array shape whether the
+/// duplication happened within one file or was split across two included
+/// files (see `mergeIntoArray`, which this now matches).
 ///
 /// Takes ownership of `incoming`; `old_val` is updated in place.
 fn accumulateScalar(allocator: std.mem.Allocator, old_val: *Value, incoming: Value) !void {
-    if (old_val.* == .array) {
+    if (old_val.* != .array) {
+        // First duplicate: wrap the existing scalar in a fresh array before
+        // flattening `incoming` into it below.
+        var arr = try std.ArrayList(Value).initCapacity(allocator, 1);
+        errdefer {
+            for (arr.items) |*item| item.deinit(allocator);
+            arr.deinit(allocator);
+        }
+        arr.appendAssumeCapacity(old_val.*);
+        old_val.* = .{ .array = arr };
+    }
+    if (incoming == .array) {
+        // `incoming` is uniquely owned here (freshly parsed within this same
+        // file, not shared with any other Document), so its elements can be
+        // moved directly into old_val.array without an extra deep-copy pass —
+        // unlike mergeIntoArray, which must copy because its `incoming` was
+        // already a copy taken from a distinct source document.
+        var inc = incoming;
+        for (inc.array.items) |item|
+            try old_val.array.append(allocator, item);
+        inc.array.deinit(allocator); // items already moved; only free the backing array
+    } else {
         try old_val.array.append(allocator, incoming);
-        return;
     }
-    // First duplicate: wrap the existing scalar and the incoming value in
-    // a 2-element array. initCapacity(2) guarantees both appends cannot fail.
-    var arr = try std.ArrayList(Value).initCapacity(allocator, 2);
-    errdefer {
-        for (arr.items) |*item| item.deinit(allocator);
-        arr.deinit(allocator);
-    }
-    arr.appendAssumeCapacity(old_val.*);
-    arr.appendAssumeCapacity(incoming);
-    old_val.* = .{ .array = arr };
 }
 
 /// Merge `incoming` into the existing value at `old_val` when combining two
@@ -338,6 +358,14 @@ const Parser = struct {
     content: []const u8,
     pos: usize,
     line: usize,
+    /// Current nested-array depth; incremented on entry to parseArray and
+    /// checked against MAX_ARRAY_DEPTH to guard against a pathologically
+    /// deeply nested literal (`[[[[[...]]]]]`) exhausting the stack. Config
+    /// files are locally authored and trusted, not adversarial input, so this
+    /// is a defensive backstop rather than a response to an observed problem —
+    /// consistent with the existing MAX_FILE_BYTES / fc-list-output caps
+    /// elsewhere in the config subsystem.
+    array_depth: usize = 0,
 
     fn init(allocator: std.mem.Allocator, content: []const u8) Parser {
         return .{ .allocator = allocator, .content = content, .pos = 0, .line = 1 };
@@ -467,7 +495,17 @@ const Parser = struct {
         return try result.toOwnedSlice(self.allocator);
     }
 
+    /// Maximum nested-array depth accepted by parseArray (see array_depth doc comment).
+    const MAX_ARRAY_DEPTH = 16;
+
     fn parseArray(self: *Parser) ParseError!std.ArrayList(Value) {
+        self.array_depth += 1;
+        defer self.array_depth -= 1;
+        if (self.array_depth > MAX_ARRAY_DEPTH) {
+            debug.warn("Array nesting too deep (> {}) at line {}, treating as invalid", .{ MAX_ARRAY_DEPTH, self.line });
+            return ParseError.InvalidValue;
+        }
+
         _ = self.consume();
         var array = try std.ArrayList(Value).initCapacity(self.allocator, 8);
         errdefer {
@@ -492,6 +530,29 @@ const Parser = struct {
     const BOOLEAN_KEYWORDS = std.StaticStringMap(bool).initComptime(.{
         .{ "true", true }, .{ "false", false },
     });
+
+    /// Returns true when `raw` is an optionally-signed bare decimal literal:
+    /// digits, exactly one '.', and at least one digit overall (e.g. "2.5",
+    /// "-0.3", "0.15"). Whole numbers (no '.') and malformed tokens (multiple
+    /// dots, stray letters) return false and fall through to the existing
+    /// color/integer/string handling in `parseValue`.
+    fn looksLikeDecimal(raw: []const u8) bool {
+        var start: usize = 0;
+        if (raw.len > 0 and raw[0] == '-') start = 1;
+        if (start >= raw.len) return false;
+        var dot_count: usize = 0;
+        var digit_count: usize = 0;
+        for (raw[start..]) |c| {
+            if (c == '.') {
+                dot_count += 1;
+            } else if (std.ascii.isDigit(c)) {
+                digit_count += 1;
+            } else {
+                return false;
+            }
+        }
+        return dot_count == 1 and digit_count > 0;
+    }
 
     fn parseValue(self: *Parser) ParseError!Value {
         self.skipWhitespace();
@@ -518,12 +579,28 @@ const Parser = struct {
             return .{ .scalable = ScalableValue.percentage(f) };
         }
 
-        // Hex digits overlap with base-10, so check for a color-like token before
-        // trying integer parsing; otherwise "ac3232" would fail integer parsing
-        // rather than being recognised as a color.
+        // Bare decimal literal (no '%' suffix): e.g. `border_width = 2.5` or
+        // `indicator_padding = 0.15`. Parsed as an absolute ScalableValue so
+        // ScalableValue-typed config fields no longer silently keep their
+        // struct default just because the value lacked a '%' suffix — see
+        // `looksLikeDecimal` below. Whole numbers (no '.') are intentionally
+        // left to the integer branch further down so asInt()/asBool()
+        // consumers are unaffected.
+        if (looksLikeDecimal(raw)) {
+            if (std.fmt.parseFloat(f32, raw)) |f| return .{ .scalable = ScalableValue.absolute(f) } else |_| {}
+        }
+
+        // Bare color literals require an explicit '#' or '0x' prefix. Sniffing
+        // for hex-only letters (the old heuristic) meant any short, all-lowercase
+        // identifier composed entirely of a-f characters — e.g. "dead", "cafe",
+        // "face" — would parse as `.color` instead of `.string`, silently
+        // breaking any asString()/ACTION_MAP.get() lookup downstream the moment
+        // such a word appeared as a layout/variant/segment/action name. Bare hex
+        // digits with no prefix (e.g. "ac3232") now simply fall through to the
+        // integer-parse attempt below and then to `.string`, the same fallback
+        // path already used for every other unrecognized bare token.
         const looks_like_color = raw[0] == '#' or
-            (raw.len > 2 and raw[0] == '0' and (raw[1] == 'x' or raw[1] == 'X')) or
-            std.mem.indexOfAny(u8, raw, "abcdefABCDEF") != null;
+            (raw.len > 2 and raw[0] == '0' and (raw[1] == 'x' or raw[1] == 'X'));
 
         if (looks_like_color) {
             if (parseColor(raw)) |color| return .{ .color = color } else |_| {
