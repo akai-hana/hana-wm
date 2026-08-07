@@ -27,15 +27,18 @@ pub fn main() !void {
     try input.initXkb(x.conn);
     defer input.deinitXkb();
 
-    var loaded_config = try config.load(alloc, x.screen, input.getXkbState());
-    loaded_config.bar.scaled_font_size = scale.scaleFontSize(loaded_config.bar.font_size, x.screen);
+    const loaded_config = try config.load(alloc, x.screen, input.getXkbState());
 
     // core.init() copies loaded_config by value and becomes the canonical
-    // owner; must run before any core.getState() call, and its config must
-    // outlive the keybind map (deinit order below is deliberate).
+    // owner; must run before any core.getState() call.
     core.init(x.conn, x.screen, x.root, alloc, loaded_config);
+    // config.load() already built loaded_config's keybind_resolver, and
+    // Config.deinit tears it down internally (before freeing the keybindings
+    // whose Actions it points into) — see KeybindResolver in types.zig. That
+    // used to be two separate `defer`s here, relying on their LIFO relative
+    // order to get the teardown sequence right; now it's just this one
+    // (item 10 in the config-subsystem review).
     defer core.getState().config.deinit(alloc);
-    defer config.deinitKeybindMap(alloc);
 
     try utils.initAtomCache(x.conn);
     utils.advertiseEwmhSupport(x.conn, x.screen, x.root);

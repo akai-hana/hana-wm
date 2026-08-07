@@ -244,7 +244,7 @@ pub fn grabKeybindings() void {
 /// here — see the comment in handleConfigReload for why.
 fn applyConfig(new_config: *types.Config) !void {
     const cs = core.getState();
-    config.resolveKeybindings(new_config.keybindings.items, input.getXkbState(), cs.alloc);
+    new_config.keybind_resolver.build(new_config.keybindings.items, input.getXkbState(), cs.alloc);
     config.finalizeConfig(new_config, cs.screen);
 
     window.reloadBorders();

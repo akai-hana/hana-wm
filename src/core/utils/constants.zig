@@ -42,6 +42,20 @@ pub const OFFSCREEN_SENTINEL_MIN: i32 = -1000;
 /// Maximum depth when walking the X11 window tree in findManagedWindow.
 pub const MAX_WINDOW_TREE_DEPTH: usize = 10;
 
+/// Hard ceiling on the number of workspaces the WM can meaningfully support.
+///
+/// This is not an arbitrary round number: tiling.zig's geometry-validity cache
+/// packs one bit per workspace into a u64 (`workspace_geom_valid_bits`), and
+/// workspaces.zig's per-workspace layout/master-count override lookup tables
+/// are fixed-size arrays sized to match. Raising this would require widening
+/// that bitmask (and the arrays) first — it is not just a config-side number.
+///
+/// config.zig checks parsed workspace numbers against this at parse time so a
+/// config declaring more workspaces (or overrides targeting workspace indices)
+/// than the WM can apply produces a visible warning immediately, rather than
+/// silently doing nothing once workspaces.init() builds its lookup tables.
+pub const MAX_WORKSPACES: usize = 64;
+
 // XCB property helpers
 /// Maximum number of 32-bit words to request when fetching an XCB window property.
 /// 256 words = 1 KiB, sufficient for all fixed-size properties the WM reads.

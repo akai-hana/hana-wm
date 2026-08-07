@@ -323,6 +323,13 @@ pub fn insertSlice(vs: *VimState, slice: []const u8) void {
     vs.cursor += n;
 }
 
+/// True for space (0x20) through tilde (0x7e) — the printable ASCII range
+/// accepted as literal input in insert/replace mode and as single-char
+/// targets (find-char, text-object delimiter, colon command, etc.).
+inline fn isPrintableAscii(sym: xcb.xcb_keysym_t) bool {
+    return sym >= 0x20 and sym <= 0x7e;
+}
+
 // Public mode handlers
 
 /// Handle a Ctrl-modified key.  Call this before dispatching to mode handlers.
@@ -377,7 +384,7 @@ pub fn handleInsert(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         XK_End => vs.cursor = vs.len,
 
         else => {
-            if (sym >= 0x20 and sym <= 0x7e) {
+            if (isPrintableAscii(sym)) {
                 const ch: u8 = @truncate(sym);
                 insertSlice(vs, &[1]u8{ch});
                 // Record for dot repeat.
@@ -391,17 +398,24 @@ pub fn handleInsert(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
+/// Overwrite up to `cnt` characters starting at the cursor with `ch`, then
+/// land the cursor on the last character replaced. Shared by the `r{c}`
+/// command and its `.` replay.
+fn applyReplaceChar(vs: *VimState, ch: u8, cnt: u32) void {
+    var i: usize = 0;
+    while (i < cnt and vs.cursor + i < vs.len) : (i += 1) vs.buf[vs.cursor + i] = ch;
+    vs.cursor = @min(vs.cursor + cnt - 1, vs.len -| 1);
+}
+
 /// Handles a pending `r{c}` command: replace `count` chars under the cursor
 /// with a single character. Call only when vs.pending.awaiting == .replace_char.
 fn handleReplaceCharPending(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
-    if (sym >= 0x20 and sym <= 0x7e and vs.cursor < vs.len) {
+    if (isPrintableAscii(sym) and vs.cursor < vs.len) {
         const ch: u8 = @truncate(sym);
         const cnt: u32 = effectiveCount(vs);
         vs.dot = .{ .direct = .{ .sym = 'r', .count = cnt, .replace_char = ch } };
         undoPush(vs);
-        var i: usize = 0;
-        while (i < cnt and vs.cursor + i < vs.len) : (i += 1) vs.buf[vs.cursor + i] = ch;
-        vs.cursor = @min(vs.cursor + cnt - 1, vs.len -| 1);
+        applyReplaceChar(vs, ch, cnt);
     }
     resetPendingCmd(vs);
     return .none;
@@ -427,22 +441,22 @@ fn handleColonCmdPending(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
             return .none;
         },
         XK_Return => {
-            // Copy command bytes locally before resetPendingCmd zeroes colon_buf.
-            var cmd_buf: [4]u8 = vs.pending.colon_buf;
-            const cmd_len: u8 = vs.pending.colon_len;
-            const cmd = cmd_buf[0..cmd_len];
+            // Read the command from pending storage before resetPendingCmd
+            // zeroes it; resolve the action first, reset, then return it.
+            const cmd = vs.pending.colon_buf[0..vs.pending.colon_len];
+            const act: Action = if (std.mem.eql(u8, cmd, "q"))
+                .deactivate
+            else if (std.mem.eql(u8, cmd, "w"))
+                .spawn_keep
+            else if (std.mem.eql(u8, cmd, "wq") or std.mem.eql(u8, cmd, "x"))
+                .spawn
+            else
+                .none;
             resetPendingCmd(vs);
-
-            if (std.mem.eql(u8, cmd, "q")) return .deactivate;
-            if (std.mem.eql(u8, cmd, "w")) return .spawn_keep;
-            if (std.mem.eql(u8, cmd, "wq")) return .spawn;
-            if (std.mem.eql(u8, cmd, "x")) return .spawn;
-
-            return .none;
+            return act;
         },
         else => {
-            // 0x20..0x7e is the printable ASCII range (space through tilde).
-            if (sym >= 0x20 and sym <= 0x7e and vs.pending.colon_len < vs.pending.colon_buf.len) {
+            if (isPrintableAscii(sym) and vs.pending.colon_len < vs.pending.colon_buf.len) {
                 vs.pending.colon_buf[vs.pending.colon_len] = @truncate(sym);
                 vs.pending.colon_len += 1;
             }
@@ -455,7 +469,7 @@ fn handleColonCmdPending(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
 /// pending operator to it. Call only when vs.pending.awaiting == .text_obj.
 fn handleTextObjPending(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     const prefix = vs.pending.awaiting.text_obj;
-    if (sym >= 0x20 and sym <= 0x7e) {
+    if (isPrintableAscii(sym)) {
         const ch: u8 = @truncate(sym);
         if (resolveTextObject(vs, prefix, ch)) |mr| {
             vs.dot = buildOpMotionRecord(vs, 0);
@@ -525,13 +539,13 @@ fn execNormalKey(vs: *VimState, sym: xcb.xcb_keysym_t, cnt: u32) Action {
         },
 
         'x', 'X', 'D', 'C', 's' => {
-            vs.dot = .{ .direct = .{ .sym = @truncate(sym), .count = cnt } };
+            vs.dot = .{ .direct = .{ .sym = sym, .count = cnt } };
             _ = execDirectSym(vs, @truncate(sym), cnt);
         },
 
         'p', 'P' => {
             if (vs.yank_len > 0) {
-                vs.dot = .{ .direct = .{ .sym = @truncate(sym), .count = cnt } };
+                vs.dot = .{ .direct = .{ .sym = sym, .count = cnt } };
                 undoPush(vs);
                 var i: u32 = 0;
                 while (i < cnt) : (i += 1) {
@@ -662,10 +676,10 @@ pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         vs.pending.awaiting = .mark_set;
         return .none;
     }
-    if (sym == 0x27) {
+    if (sym == '\'') {
         vs.pending.awaiting = .mark_jump;
         return .none;
-    } // '
+    }
 
     return execNormalKey(vs, sym, effectiveCount(vs));
 }
@@ -689,9 +703,7 @@ pub fn handleVisual(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         'd', 'x', 'c' => {
             const sel = visualRange(vs);
             vs.dot = .{ .op_line = .{ .op = if (sym == 'c') @as(u8, 'c') else @as(u8, 'd') } };
-            undoPush(vs);
-            yankRange(vs, sel[0], sel[1]);
-            deleteRange(vs, sel[0], sel[1]);
+            deleteAndYank(vs, sel[0], sel[1]);
             exitVisual(vs);
             if (sym == 'c') enterInsert(vs, false);
         },
@@ -707,10 +719,7 @@ pub fn handleVisual(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
             const sel = visualRange(vs);
             undoPush(vs);
             var i = sel[0];
-            while (i < sel[1]) : (i += 1) {
-                const ch = vs.buf[i];
-                vs.buf[i] = if (std.ascii.isLower(ch)) std.ascii.toUpper(ch) else if (std.ascii.isUpper(ch)) std.ascii.toLower(ch) else ch;
-            }
+            while (i < sel[1]) : (i += 1) vs.buf[i] = toggleCaseChar(vs.buf[i]);
             vs.cursor = sel[0];
             exitVisual(vs);
         },
@@ -744,7 +753,7 @@ pub fn handleReplace(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         },
 
         else => blk: {
-            if (sym < 0x20 or sym > 0x7e) break :blk;
+            if (!isPrintableAscii(sym)) break :blk;
             const ch: u8 = @truncate(sym);
             if (vs.cursor < vs.len) {
                 vs.buf[vs.cursor] = ch;
@@ -764,7 +773,7 @@ pub fn handleReplace(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
 /// Clamp cursor to the last valid position for normal mode.
 /// In normal mode the cursor must sit on a character, not past the end.
 inline fn clampCursorForNormal(vs: *VimState) void {
-    if (vs.len > 0 and vs.cursor == vs.len) vs.cursor = vs.len - 1;
+    if (vs.cursor >= vs.len) vs.cursor = vs.len -| 1;
 }
 
 inline fn exitVisual(vs: *VimState) void {
@@ -848,7 +857,7 @@ inline fn commitMotion(vs: *VimState, mr: MotionResult, motion_sym: xcb.xcb_keys
     return .{
         .mr = mr,
         .op = op,
-        .dot = .{ .op_motion = .{ .op = op, .op_count = opc, .motion_count = mc, .motion_sym = @truncate(motion_sym) } },
+        .dot = .{ .op_motion = .{ .op = op, .op_count = opc, .motion_count = mc, .motion_sym = motion_sym } },
     };
 }
 
@@ -860,7 +869,7 @@ inline fn commitMotion(vs: *VimState, mr: MotionResult, motion_sym: xcb.xcb_keys
 fn resolveMotionKey(vs: *VimState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
     // Pending find char.
     if (vs.pending.awaiting == .find_char) {
-        if (sym >= 0x20 and sym <= 0x7e) {
+        if (isPrintableAscii(sym)) {
             const ch: u8 = @truncate(sym);
             const cnt = effectiveCount(vs);
             const kind = vs.pending.awaiting.find_char;
@@ -946,8 +955,7 @@ fn resolveSimpleMotion(vs: *VimState, sym: xcb.xcb_keysym_t, cnt: u32) ?MotionRe
 
 /// Move cursor (normal mode: clamp to last valid position).
 fn setCursor(vs: *VimState, mr: MotionResult) void {
-    const max_pos: usize = if (vs.len > 0) vs.len - 1 else 0;
-    vs.cursor = @min(mr.pos, max_pos);
+    vs.cursor = @min(mr.pos, vs.len -| 1);
 }
 
 fn deleteBefore(vs: *VimState) void {
@@ -979,6 +987,14 @@ fn yankRange(vs: *VimState, from: usize, to: usize) void {
     vs.yank_len = n;
 }
 
+/// Push an undo snapshot, yank `[from, to)`, then delete it. Shared by every
+/// edit that removes a range of text (operators, visual delete, Ctrl-U).
+fn deleteAndYank(vs: *VimState, from: usize, to: usize) void {
+    undoPush(vs);
+    yankRange(vs, from, to);
+    deleteRange(vs, from, to);
+}
+
 fn pasteAfter(vs: *VimState) void {
     if (vs.yank_len == 0) return;
     if (vs.cursor < vs.len) vs.cursor += 1;
@@ -990,11 +1006,16 @@ fn pasteBefore(vs: *VimState) void {
     insertSlice(vs, vs.yank_buf[0..vs.yank_len]);
 }
 
+/// Flip the case of a single letter; non-letters pass through unchanged.
+inline fn toggleCaseChar(ch: u8) u8 {
+    if (std.ascii.isLower(ch)) return std.ascii.toUpper(ch);
+    if (std.ascii.isUpper(ch)) return std.ascii.toLower(ch);
+    return ch;
+}
+
 fn toggleCaseOnce(vs: *VimState) void {
     if (vs.cursor >= vs.len) return;
-    const ch = vs.buf[vs.cursor];
-    vs.buf[vs.cursor] =
-        if (std.ascii.isLower(ch)) std.ascii.toUpper(ch) else if (std.ascii.isUpper(ch)) std.ascii.toLower(ch) else ch;
+    vs.buf[vs.cursor] = toggleCaseChar(vs.buf[vs.cursor]);
     if (vs.cursor + 1 < vs.len) vs.cursor += 1;
 }
 
@@ -1006,9 +1027,7 @@ fn ctrlW(vs: *VimState) void {
 
 fn ctrlU(vs: *VimState) void {
     if (vs.cursor == 0) return;
-    undoPush(vs);
-    yankRange(vs, 0, vs.cursor);
-    deleteRange(vs, 0, vs.cursor);
+    deleteAndYank(vs, 0, vs.cursor);
 }
 
 /// Ctrl+A / Ctrl+X: find the nearest number at/after cursor and increment by `delta`.
@@ -1071,9 +1090,7 @@ fn applyOperator(vs: *VimState, op: u8, mr: MotionResult) void {
 
     switch (op) {
         'd', 'c' => {
-            undoPush(vs);
-            yankRange(vs, from, to);
-            deleteRange(vs, from, to);
+            deleteAndYank(vs, from, to);
             if (op == 'c') enterInsert(vs, false);
         },
         'y' => {
@@ -1165,12 +1182,7 @@ fn replayDot(vs: *VimState) void {
                     vs.cursor = 0;
                     insertSlice(vs, vs.dot_insert_buf[0..vs.dot_insert_len]);
                 },
-                'r' => {
-                    var i: usize = 0;
-                    while (i < cnt and vs.cursor + i < vs.len) : (i += 1)
-                        vs.buf[vs.cursor + i] = d.replace_char;
-                    vs.cursor = @min(vs.cursor + cnt - 1, vs.len -| 1);
-                },
+                'r' => applyReplaceChar(vs, d.replace_char, cnt),
                 else => {},
             }
         },
@@ -1227,7 +1239,7 @@ inline fn buildOpMotionRecord(vs: *VimState, sym: xcb.xcb_keysym_t) DotRecord {
         .op = vs.pending.op,
         .op_count = vs.pending.op_count,
         .motion_count = vs.pending.count,
-        .motion_sym = @truncate(sym),
+        .motion_sym = sym,
     } };
 }
 

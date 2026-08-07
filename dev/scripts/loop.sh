@@ -1,6 +1,6 @@
 #!/bin/bash
 
-max=200
+max=300
 while true; do
     yes y | git-rewrite-commits --provider ollama --model hf.co/noctrex/Qwopus3.5-9B-Coder-MTP \
         --template "feat\(scope\): message" \

@@ -116,14 +116,17 @@ fn isCommandAvailable(command: []const u8) bool {
     return false;
 }
 
-// std.Io.Dir.openFileAbsolute takes []const u8 directly — no null terminator needed.
-// std.options.debug_io is appropriate: this is a blocking existence check that
-// runs at startup before any event loop or Io context is available.
+// std.posix.access(..., X_OK) checks both existence and that the file is
+// executable by the current user in one syscall — this is intentionally not
+// std.Io.Dir.openFileAbsolute (which only checks that the path can be
+// opened for reading). A regular, non-executable file happening to share a
+// terminal's name (e.g. a stray "kitty" left in /usr/local/bin by some
+// unrelated package) would otherwise be reported as "available" here and
+// only fail later, with an unhelpful EACCES, when hana actually tries to
+// spawn it as the detected terminal (item 13 in the config-subsystem review).
 inline fn checkPath(buf: []u8, dir: []const u8, command: []const u8) bool {
-    const full_path = std.fmt.bufPrint(buf, "{s}/{s}", .{ dir, command }) catch return false;
-    const io = std.Options.debug_io;
-    const file = std.Io.Dir.openFileAbsolute(io, full_path, .{}) catch return false;
-    file.close(io);
+    const full_path = std.fmt.bufPrintZ(buf, "{s}/{s}", .{ dir, command }) catch return false;
+    std.posix.access(full_path, std.posix.X_OK) catch return false;
     return true;
 }
 

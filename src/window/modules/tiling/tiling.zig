@@ -42,7 +42,9 @@ const max_master_count: u8 = 10;
 // allows, so this must stay >= constants.Limits.MAX_TILED_WINDOWS — enforced
 // by the comptime assertion below.
 const max_workspace_windows: usize = constants.Limits.MAX_TILED_WINDOWS;
-const max_workspaces: usize = 64; // matches u64 workspace_geom_valid_bits
+// Single-sourced in constants.zig: also matches workspaces.zig's fixed-size
+// override lookup tables and the u64 workspace_geom_valid_bits bitmask below.
+const max_workspaces: usize = constants.MAX_WORKSPACES;
 
 comptime {
     std.debug.assert(max_workspace_windows >= constants.Limits.MAX_TILED_WINDOWS);
@@ -217,16 +219,24 @@ pub fn reloadConfig() void {
 
     const ns = getState();
 
-    // Reset all workspace layouts and master widths to the new config defaults.
-    // Per-workspace adjustments made at runtime are intentionally discarded so
-    // the reloaded config values take effect immediately.
+    // Re-apply per-workspace layout/variant/master-count overrides from the
+    // *new* config, falling back to the new global default layout for any
+    // workspace without its own override. Runtime-only state with no
+    // config-file representation — master_width (increase_master/
+    // decrease_master) and stack_balance (mod+n/mod+o grow-slave actions) —
+    // is reset to null by applyWorkspaceOverrides itself, since a reload has
+    // no config-declared value to restore either to.
+    //
+    // Previously this only reset every workspace to the single global
+    // default and never re-read workspace_layout_overrides /
+    // workspace_master_count_overrides at all, so editing a per-workspace
+    // override and reloading silently reverted it to the global default
+    // instead of applying the edit — see item 5 in the config-subsystem
+    // review. applyWorkspaceOverrides is the same function workspaces.init()
+    // uses at startup, so first-launch and reload now apply overrides
+    // identically.
     if (workspaces.getState()) |ws_state| {
-        for (ws_state.workspaces) |*ws| {
-            ws.layout = ns.config.layout;
-            ws.master_width = null;
-            ws.master_count = null;
-            ws.stack_balance = null;
-        }
+        workspaces.applyWorkspaceOverrides(ws_state.workspaces, &core.getState().config.tiling, ns.config.layout);
     }
 
     if (ns.is_enabled) {
