@@ -90,7 +90,7 @@ const dispatch_table = blk: {
     break :blk table;
 };
 
-pub fn dispatch(event_type: u8, event: *anyopaque) void {
+fn dispatch(event_type: u8, event: *anyopaque) void {
     const idx = event_type & 0x7F; // strip XCB synthetic-event bit
     if (dispatch_table[idx]) |handler| handler(event);
 }

@@ -77,9 +77,9 @@ pub const LayoutCtx = struct {
     /// `defer_win`; flushed once by `invokeLayout` after the layout returns.
     deferred: *?utils.Rect,
     /// True when this retile targets a workspace other than the one
-    /// currently on screen (see tiling.retileInactiveWorkspace /
-    /// retileAllWorkspaces). There is no "visible" window to promote on a
-    /// workspace nobody is looking at, so any layout that raises a window
+    /// currently on screen (see tiling.retileInactiveWorkspace).
+    /// There is no "visible" window to promote on a workspace nobody is
+    /// looking at, so any layout that raises a window
     /// (e.g. monocle) must skip the raise while this is set — raising here
     /// would leave that window first in the *global* stacking order, ahead
     /// of the bar and every window on the workspace actually being viewed.

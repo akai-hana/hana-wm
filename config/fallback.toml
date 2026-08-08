@@ -7,7 +7,7 @@ layout      = "master"
 master_side = "left"
 
 master_count     = 1
-master_width     = 55
+master_width     = "55%"
 gaps             = 12
 border_width     = 4
 border_focused   = "#005577"
@@ -63,24 +63,17 @@ Mod+Shift+B = "toggle_bar_position"
 Mod+Shift+T = "reload"
 
 [bar]
-show = true
 position = "bottom"
-font = "auto"
 font_size = 12
-padding = 8
 spacing = 6
 
 bg          = "#222222"
 fg          = "#bbbbbb"
 selected_bg = "#005577"
 selected_fg = "#eeeeee"
-occupied_fg = "#eeeeee"
-urgent_bg   = "#ff0000"
-urgent_fg   = "#ffffff"
 
 accent_color   = "#005577"
 indicator_size = 4
-title_accent   = true
 
 icons = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
 

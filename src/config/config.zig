@@ -29,6 +29,19 @@ fn getInRange(
         []const u8 => section.getString(key) orelse return default,
         u8, u16, u32, usize => blk: {
             const i = section.getInt(key) orelse return default;
+            // A negative int would trap on the @intCast below; warn-and-default
+            // it here so the out-of-range contract holds for negatives too.
+            if (i < 0) {
+                debug.warn("Value for '{s}' ({d}) below minimum (0), using default", .{ key, i });
+                return default;
+            }
+            // Guard the type's own range before the cast: an int larger than T
+            // can hold would trap on @intCast even when no explicit max is set.
+            // (For u64/usize the comparison is comptime-folded away.)
+            if (std.math.maxInt(T) < std.math.maxInt(i64) and i > std.math.maxInt(T)) {
+                debug.warn("Value for '{s}' ({d}) above maximum ({d}), using default", .{ key, i, std.math.maxInt(T) });
+                return default;
+            }
             break :blk @as(T, @intCast(i));
         },
         else => @compileError("Unsupported type"),
@@ -358,22 +371,13 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !types.Config {
     const fallback_toml = try fallback.getFallbackToml();
     var doc = try parser.parse(allocator, fallback_toml);
     defer doc.deinit();
-    var cfg = try buildConfigFromDoc(allocator, &doc);
+    const cfg = try buildConfigFromDoc(allocator, &doc);
     const terminal = fallback.detectTerminal();
     for (cfg.keybindings.items) |*kb| {
         if (kb.action == .exec and std.mem.eql(u8, kb.action.exec, "auto_terminal")) {
             allocator.free(kb.action.exec);
             kb.action.exec = try allocator.dupe(u8, terminal);
         }
-    }
-
-    if (std.mem.eql(u8, cfg.bar.font, "auto")) {
-        const detected_font = try fallback.detectFont(allocator);
-        defer allocator.free(detected_font);
-        const font_size_val: u16 = @intFromFloat(cfg.bar.font_size.value);
-        const font_with_size = try std.fmt.allocPrint(allocator, "{s}:size={}", .{ detected_font, font_size_val });
-        allocator.free(cfg.bar.font);
-        cfg.bar.font = font_with_size;
     }
 
     debug.info("Loaded fallback configuration with auto-detection", .{});
@@ -385,6 +389,18 @@ fn getDefaultConfig(allocator: std.mem.Allocator) types.Config {
     const default_layout = allocator.dupe(u8, "master_left") catch "master_left";
     cfg.tiling.layouts.append(allocator, default_layout) catch |e| debug.warnOnErr(e, "default layout append");
     cfg.tiling.layout = if (cfg.tiling.layouts.items.len > 0) cfg.tiling.layouts.items[0] else default_layout;
+    // The four BarConfig string fields that parseBar rewrites are duped here
+    // too, so Config.deinit can free every one of them unconditionally even
+    // when the config has no [bar] section (parseBar then returns early and
+    // never overwrites them). assignStr's ownership transfer makes the dupe
+    // leak-free when a key IS present.
+    const defaults = [_]struct { view: *[]const u8, literal: []const u8 }{
+        .{ .view = &cfg.bar.clock_format, .literal = "%Y-%m-%d %H:%M:%S" },
+        .{ .view = &cfg.bar.drun_prompt, .literal = "run: " },
+        .{ .view = &cfg.bar.indicator_focused, .literal = "■" },
+        .{ .view = &cfg.bar.indicator_unfocused, .literal = "□" },
+    };
+    for (defaults) |d| d.view.* = allocator.dupe(u8, d.literal) catch d.literal;
     for (0..9) |i| {
         const icon = std.fmt.allocPrint(allocator, "{}", .{i + 1}) catch continue;
         cfg.bar.workspace_icons.append(allocator, icon) catch |e| debug.warnOnErr(e, "workspace icon append");
@@ -860,31 +876,14 @@ inline fn tryParseVariant(
     };
 }
 
-inline fn tryParseIndicator(section: *const parser.Section, field: *?[3]u8) void {
-    if (section.getString("indicator")) |raw| field.* = parseIndicator(raw);
-}
-
 fn parseTilingVariants(doc: *const parser.Document, cfg: *types.Config) void {
     inline for (.{
-        .{ "tiling.layouts.master-stack", types.MasterVariant, "master-stack", "master_variant", "master_indicator" },
-        .{ "tiling.layouts.monocle", types.MonocleVariant, "monocle", "monocle_variant", "monocle_indicator" },
-        .{ "tiling.layouts.grid", types.GridVariant, "grid", "grid_variant", "grid_indicator" },
+        .{ "tiling.layouts.master-stack", types.MasterVariant, "master-stack", "master_variant" },
+        .{ "tiling.layouts.monocle", types.MonocleVariant, "monocle", "monocle_variant" },
+        .{ "tiling.layouts.grid", types.GridVariant, "grid", "grid_variant" },
     }) |e| if (doc.getSection(e[0])) |ms| {
         tryParseVariant(e[1], ms, e[2], &@field(cfg.tiling, e[3]));
-        tryParseIndicator(ms, &@field(cfg.tiling, e[4]));
     };
-}
-
-/// Parses a UTF-8 indicator string into a fixed 3-byte array, copying the
-/// first complete codepoint only. 4-byte codepoints (most emoji) don't fit
-/// and fall back to spaces rather than producing invalid UTF-8.
-inline fn parseIndicator(raw: []const u8) [3]u8 {
-    var ind: [3]u8 = "   ".*;
-    if (raw.len == 0) return ind;
-    const cp_len: usize = std.unicode.utf8ByteSequenceLength(raw[0]) catch 1;
-    const n = @min(cp_len, 3);
-    if (n <= raw.len) @memcpy(ind[0..n], raw[0..n]);
-    return ind;
 }
 
 /// Returns true if `name` (case-insensitive) is a recognised layout name in
@@ -1064,7 +1063,7 @@ fn parseLayoutsArray(
 // exactly the "leave it alone" semantics wanted, with types.zig remaining
 // the single place each of these defaults is written.
 const BAR_COLOR_FIELDS = [_][]const u8{
-    "bg", "fg", "selected_bg", "selected_fg", "occupied_fg", "urgent_bg", "urgent_fg", "accent_color",
+    "bg", "fg", "selected_bg", "selected_fg", "accent_color",
 };
 
 /// Parses bar transparency from integers (0–100), decimals (0.0–1.0),
@@ -1103,9 +1102,13 @@ fn parseTransparency(value: parser.Value) f32 {
     return 1.0;
 }
 
-/// Dupes `val` into `*view`. Always allocates, even for default literals, so
-/// Config.deinit can free every BarConfig string field unconditionally.
+/// Dupes `val` into `*view`, freeing the previous value first.
+///
+/// `*view` must already hold a heap allocation (getDefaultConfig dupes the
+/// defaults), so this transfers ownership and Config.deinit can free every
+/// BarConfig string field unconditionally.
 fn assignStr(a: std.mem.Allocator, view: *[]const u8, val: []const u8) !void {
+    a.free(view.*);
     view.* = try a.dupe(u8, val);
 }
 
@@ -1133,7 +1136,6 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *typ
         }
         break :height_blk h;
     };
-    try assignStrKey(allocator, section, "font", &cfg.bar.font);
     if (section.get("fonts")) |v| if (v.asArray()) |arr| {
         for (cfg.bar.fonts.items) |font| allocator.free(font);
         cfg.bar.fonts.clearRetainingCapacity();
@@ -1161,10 +1163,12 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *typ
     }
 
     if (section.get("indicator_padding")) |val| {
-        const f: f32 = if (val.asScalable()) |sv|
-            if (sv.is_percentage) sv.value / 100.0 else sv.value
-        else if (val.asInt()) |i|
+        // Integer values are a percentage (0–100), matching transparency;
+        // fractional/decimal values are a 0.0–1.0 ratio directly.
+        const f: f32 = if (val.asInt()) |i|
             @as(f32, @floatFromInt(i)) / 100.0
+        else if (val.asScalable()) |sv|
+            if (sv.is_percentage) sv.value / 100.0 else sv.value
         else
             0.1;
         cfg.bar.indicator_padding = std.math.clamp(f, 0.0, 1.0);
@@ -1185,11 +1189,9 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *typ
     // Segment accent colors from [bar.colors], falling back to accent_color / bg.
     const colors = doc.getSection("bar.colors");
     const ACCENT_FIELDS = [_]struct { field: []const u8, key: []const u8, fallback: []const u8 }{
-        .{ .field = "workspaces_accent", .key = "workspaces", .fallback = "accent_color" },
         .{ .field = "title_accent_color", .key = "title", .fallback = "accent_color" },
         .{ .field = "title_unfocused_accent", .key = "title_unfocused", .fallback = "bg" },
         .{ .field = "title_minimized_accent", .key = "title_minimized", .fallback = "accent_color" },
-        .{ .field = "clock_accent", .key = "clock", .fallback = "accent_color" },
     };
     inline for (ACCENT_FIELDS) |f|
         @field(cfg.bar, f.field) = if (colors) |c|
@@ -1296,9 +1298,17 @@ fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *t
 /// `class_name` to that workspace. Shared by the class-keyed direction of
 /// [workspace.rules] and by [rules], which is always class-keyed.
 fn tryAddClassRule(allocator: std.mem.Allocator, cfg: *types.Config, class_name: []const u8, value: parser.Value) !void {
-    const ws_num = value.asInt() orelse return;
-    if (!validateWorkspace(@intCast(ws_num), cfg.workspaces.count, class_name)) return;
-    try addRule(allocator, cfg, class_name, @intCast(ws_num));
+    const ws_num = value.asInt() orelse {
+        debug.warn("Rule for '{s}' has non-integer value, skipping", .{class_name});
+        return;
+    };
+    if (ws_num < 1) {
+        debug.warn("Rule workspace {d} for '{s}' below minimum 1, skipping", .{ ws_num, class_name });
+        return;
+    }
+    const ws: usize = @intCast(ws_num);
+    if (!validateWorkspace(ws, cfg.workspaces.count, class_name)) return;
+    try addRule(allocator, cfg, class_name, ws);
 }
 
 /// Handle the [workspace.rules] section where the key may be a class name

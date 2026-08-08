@@ -41,6 +41,16 @@ const mouse_buttons = [_]u8{
     mouse_button_scroll_up, mouse_button_scroll_down,
 };
 
+// Operation run inside a tiling grab so toggle_floating_window works from
+// both the keybinding path (withTilingGrabKeepFocus) and the click path
+// (withTilingGrab) without duplicating the struct.
+const ToggleFloatOp = struct {
+    win: u32,
+    fn call(self: @This()) void {
+        tiling.toggleWindowFloat(self.win);
+    }
+};
+
 // XKB state
 
 var xkb_state: ?xkbcommon.XkbState = null;
@@ -77,7 +87,7 @@ pub fn setup(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t, root: u32) 
 /// Grabs Super+Button{1,2,3,4,5} (including the scroll buttons) on the root
 /// window for all LOCK_MODIFIERS combinations (NumLock, CapsLock,
 /// ScrollLock, and their combinations).
-pub fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
+fn setupGrabs(conn: *xcb.xcb_connection_t, root: u32) void {
     for (mouse_buttons) |button| {
         for (constants.LOCK_MODIFIERS) |lock| {
             _ = xcb.xcb_grab_button(
@@ -290,7 +300,6 @@ fn executeAction(action: *const types.Action) !void {
         // Workspaces — delegated to executeWorkspaceAction
         .switch_workspace,
         .move_to_workspace,
-        .move_window,
         .toggle_tag,
         .all_workspaces,
         .move_to_all_workspaces,
@@ -319,12 +328,7 @@ fn executeAction(action: *const types.Action) !void {
 fn executeTilingAction(action: *const types.Action) void {
     switch (action.*) {
         .toggle_floating_window => if (focus.getFocused()) |win|
-            withTilingGrabKeepFocus(struct {
-                win: u32,
-                fn call(self: @This()) void {
-                    tiling.toggleWindowFloat(self.win);
-                }
-            }{ .win = win }),
+            withTilingGrabKeepFocus(ToggleFloatOp{ .win = win }),
 
         .toggle_layout => withTilingGrab(tiling.toggleLayout),
         .toggle_layout_reverse => withTilingGrab(tiling.toggleLayoutReverse),
@@ -392,7 +396,6 @@ fn executeWorkspaceAction(action: *const types.Action) void {
         .switch_workspace => |ws| workspaces.switchTo(ws),
         .move_to_workspace => |ws| if (focus.getFocused()) |win|
             workspaces.moveWindowTo(win, ws) catch |e| debug.warnOnErr(e, "move_to_workspace"),
-        .move_window => |ws| if (focus.getFocused()) |win| workspaces.moveWindowExclusive(win, ws),
         .toggle_tag => |ws| if (focus.getFocused()) |win| workspaces.tagToggle(win, ws, true),
         .all_workspaces => workspaces.switchToAll(),
         .move_to_all_workspaces => if (focus.getFocused()) |win| workspaces.moveWindowToAll(win),
@@ -405,12 +408,7 @@ fn executeWorkspaceAction(action: *const types.Action) void {
 /// keyboard-focused one, so e.g. toggle_floating_window affects what was clicked.
 fn executeMouseAction(action: *const types.Action, clicked_win: u32) !void {
     switch (action.*) {
-        .toggle_floating_window => withTilingGrab(struct {
-            win: u32,
-            fn call(self: @This()) void {
-                tiling.toggleWindowFloat(self.win);
-            }
-        }{ .win = clicked_win }),
+        .toggle_floating_window => withTilingGrab(ToggleFloatOp{ .win = clicked_win }),
         else => try executeAction(action),
     }
 }

@@ -23,25 +23,6 @@ const TERMINALS = [_][]const u8{
     "terminator",
 };
 
-// Checked in preference order. "monospace" is always the final fallback.
-const FONTS = [_][]const u8{
-    "FiraCode Nerd Font",
-    "FiraCode",
-    "JetBrains Mono Nerd Font",
-    "JetBrains Mono",
-    "Terminus",
-    "monospace",
-};
-
-// Direct libc bindings — avoids depending on the nightly std.process.Child API,
-// which requires an Io handle incompatible with synchronous config loading.
-// link_libc = true in build.zig makes these resolve at link time.
-const FILE = opaque {};
-extern fn popen(command: [*:0]const u8, mode: [*:0]const u8) ?*FILE;
-extern fn pclose(stream: *FILE) c_int;
-extern fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *FILE) usize;
-extern fn feof(stream: *FILE) c_int;
-
 /// Returns the first available terminal from TERMINALS, or "xterm".
 /// Pure PATH scan — does not allocate; returns a static string slice.
 pub fn detectTerminal() []const u8 {
@@ -53,45 +34,6 @@ pub fn detectTerminal() []const u8 {
     }
     debug.warn("No preferred terminal found, using 'xterm'", .{});
     return "xterm";
-}
-
-/// Runs fc-list and returns the first FONTS entry present on the system.
-/// Falls back to "monospace" when fc-list is unavailable or produces no match.
-pub fn detectFont(allocator: std.mem.Allocator) ![]const u8 {
-    const pipe = popen("fc-list --format=%{family}\\n", "r") orelse {
-        debug.warn("fc-list unavailable, using 'monospace'", .{});
-        return "monospace";
-    };
-    defer _ = pclose(pipe);
-
-    var output: std.ArrayListUnmanaged(u8) = .empty;
-    defer output.deinit(allocator);
-
-    var buf: [4096]u8 = undefined;
-    while (feof(pipe) == 0) {
-        const n = fread(&buf, 1, buf.len, pipe);
-        if (n == 0) break;
-        try output.appendSlice(allocator, buf[0..n]);
-        if (output.items.len > 256 * 1024) break; // guard against pathological fc-list output
-    }
-
-    // fc-list may emit comma-separated aliases per line, e.g. "FiraCode,FiraCode Nerd Font".
-    // Iterate FONTS first so preference order is respected regardless of fc-list output order.
-    for (FONTS) |font| {
-        var lines = std.mem.splitScalar(u8, output.items, '\n');
-        while (lines.next()) |line| {
-            var families = std.mem.splitScalar(u8, line, ',');
-            while (families.next()) |family| {
-                if (std.mem.eql(u8, std.mem.trim(u8, family, " \t\r"), font)) {
-                    debug.info("Detected font: {s}", .{font});
-                    return font;
-                }
-            }
-        }
-    }
-
-    debug.warn("No preferred font found via fc-list, using 'monospace'", .{});
-    return "monospace";
 }
 
 /// Checks whether command exists in a common bin directory or $PATH.
@@ -123,7 +65,7 @@ fn isCommandAvailable(command: []const u8) bool {
 // terminal's name (e.g. a stray "kitty" left in /usr/local/bin by some
 // unrelated package) would otherwise be reported as "available" here and
 // only fail later, with an unhelpful EACCES, when hana actually tries to
-// spawn it as the detected terminal (item 13 in the config-subsystem review).
+// spawn it as the detected terminal.
 inline fn checkPath(buf: []u8, dir: []const u8, command: []const u8) bool {
     const full_path = std.fmt.bufPrintZ(buf, "{s}/{s}", .{ dir, command }) catch return false;
     std.posix.access(full_path, std.posix.X_OK) catch return false;

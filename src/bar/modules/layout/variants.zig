@@ -17,7 +17,7 @@ pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, star
 }
 
 /// Accessor for the icon of each layout's variants.
-pub fn getIndicator(s: *const tiling.State) []const u8 {
+fn getIndicator(s: *const tiling.State) []const u8 {
     return switch (s.config.layout) {
         .master => switch (s.config.layout_variants.master) {
             .lifo => "[N]",

@@ -76,9 +76,6 @@ fg = "#ebd9bc"
 ## Workspace tag indicators
 selected_bg = "#ac3232"
 selected_fg = "#eeeeee"
-occupied_fg = "#eeeeee"
-urgent_bg   = "#FF0000"
-urgent_fg   = "#FFFFFF"
 
 # Accent colors for bar segments
 # Default accent for all segments
@@ -86,11 +83,9 @@ accent_color = "#ac3232"
 
 # Per-segment accent colors (overrides default accent_color)
 [bar.colors]
-workspaces      = "#b9c0a8"  # Custom accent for workspace indicators
 title           = "#ac3232"  # Custom accent for title segment
 title_unfocused = "#52263e"
 title_minimized = "#007373"
-clock           = "#ac3232"  # Custom accent for clock segment
 
 # drun command runner colors (all optional — omit to use bar-wide defaults)
  # drun_bg           = "#0d0d14"  # background (default: bar bg)

@@ -160,7 +160,7 @@ pub inline fn setLastEventTime(t: u32) void {
 //
 // CRITICAL: setLastEventTime MUST be called with enter_event.time BEFORE
 // calling setFocus(.mouse_enter).  If it is only called for button and key
-// events, g_last_event_time will be from the last click/keystroke, not the
+// events, state.last_event_time will be from the last click/keystroke, not the
 // current hover event.
 //
 // Why this matters:
@@ -366,9 +366,7 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
 /// Returns true when `win` must never receive focus from any focus-granting
 /// path (setFocus).
 /// NOTE: handleFocusIn intentionally does NOT use this guard.
-inline fn isInvalidFocusTarget(win: u32) bool {
-    return win == 0 or win == core.getState().root or bar.isBarWindow(win);
-}
+const isInvalidFocusTarget = window.isInvalidWindow;
 
 /// Returns true if `win` currently has map_state == Viewable.
 /// Used to guard against destroy/unmap races on paths that cannot guarantee
@@ -476,7 +474,7 @@ pub fn drainPendingConfirm() void {
     // internal child widget, so xcb_get_input_focus returns the child XID —
     // not the managed toplevel.  Only retry when focus is completely absent
     // (None or PointerRoot, i.e. <= 1).
-    if (c.*.focus == win or c.*.focus > 1) return;
+    if (c.*.focus > 1) return;
 
     // Log the retry so failed confirmations are visible in debug sessions
     // rather than silently degrading into an unresponsive window.

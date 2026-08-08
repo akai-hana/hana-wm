@@ -2,9 +2,6 @@
 //! Adds a scrolling effect to window titles that don't fit the title bar segment.
 
 const std = @import("std");
-
-const core = @import("core");
-const xcb = core.xcb;
 const utils = @import("utils");
 
 const scale = @import("scale");
@@ -31,6 +28,11 @@ pub const SegmentGeometry = struct {
     avail_w: u16, // (used for overflow check and static/ellipsis fallback drawing)
 };
 
+/// Horizontal inset between the text area and the segment bounds.
+inline fn leftPadOf(geom: SegmentGeometry) u16 {
+    return if (geom.text_x > geom.seg_x) geom.text_x - geom.seg_x else 0;
+}
+
 // Internal types
 
 /// All state for one live carousel (single-window or segmented).
@@ -40,11 +42,20 @@ const CarouselEntry = struct {
     pixel_offset: u16, // current integer blit offset (advances each tick)
     frac_acc: f64, // sub-pixel carry between ticks (Bresenham remainder)
     last_ns: u64, // monotonicNs() of the most-recent blit
-    last_bg: u32, // accent colour baked into cp; used by drawCarouselTick
+    last_bg: u32, // accent colour baked into cp; detects colour-only changes on later draws
     // to detect a colour change before the next full draw
     window: ?u32, // window the pixmap was built for (null = no window)
     geom: SegmentGeometry,
 };
+
+/// True when `e` must be rebuilt from scratch: the window it was built for,
+/// the title, the cycle width, or the segment geometry changed.
+/// Colour-only changes (e.last_bg) are deliberately excluded — those reuse
+/// the existing pixmap in place.
+inline fn entryStale(e: *const CarouselEntry, window: ?u32, title_invalidated: bool, cycle_w: u16, geom: SegmentGeometry) bool {
+    return e.window != window or title_invalidated or e.cycle_w != cycle_w or
+        e.geom.seg_x != geom.seg_x or e.geom.seg_w != geom.seg_w or e.geom.avail_w != geom.avail_w;
+}
 
 /// Runtime-configurable scroll parameters.
 const ScrollConfig = struct {
@@ -357,7 +368,7 @@ pub fn drawScrollingTitle(
     // changed) vs. an in-place colour update vs. no action.
     const geom_stale: bool = blk: {
         const e = render.single orelse break :blk true;
-        break :blk e.window != window or title_invalidated or e.cycle_w != cycle_w or e.geom.seg_x != geom.seg_x or e.geom.seg_w != geom.seg_w or e.geom.avail_w != geom.avail_w;
+        break :blk entryStale(&e, window, title_invalidated, cycle_w, geom);
     };
 
     if (geom_stale) {
@@ -374,8 +385,7 @@ pub fn drawScrollingTitle(
         if (e.last_bg != bg) {
             // Colour-only change: re-render into the existing pixmap without
             // freeing or reallocating it, preserving the scroll position.
-            const left_pad: u16 = if (geom.text_x > geom.seg_x) geom.text_x - geom.seg_x else 0;
-            try e.cp.render(dc, text, bg, fg, y, left_pad, cycle_w);
+            try e.cp.render(dc, text, bg, fg, y, leftPadOf(geom), cycle_w);
             e.last_bg = bg;
         }
 
@@ -424,7 +434,7 @@ pub fn drawSegmentedCarousel(
     const geom_stale: bool = blk: {
         if (externally_invalidated) break :blk true;
         const e = render.seg orelse break :blk true;
-        break :blk e.window != window or title_invalidated or e.cycle_w != cycle_w or e.geom.seg_x != geom.seg_x or e.geom.seg_w != geom.seg_w or e.geom.avail_w != geom.avail_w;
+        break :blk entryStale(&e, window, title_invalidated, cycle_w, geom);
     };
 
     if (geom_stale) {
@@ -444,8 +454,7 @@ pub fn drawSegmentedCarousel(
         if (e.last_bg != accent) {
             // Colour-only change: re-render into the existing pixmap without
             // freeing or reallocating it, preserving the scroll position.
-            const left_pad: u16 = if (geom.text_x > geom.seg_x) geom.text_x - geom.seg_x else 0;
-            try e.cp.render(dc, text, accent, text_fg, baseline_y, left_pad, cycle_w);
+            try e.cp.render(dc, text, accent, text_fg, baseline_y, leftPadOf(geom), cycle_w);
             e.last_bg = accent;
         }
 
@@ -473,7 +482,7 @@ fn buildCarouselEntry(
     cycle_w: u16,
     window: ?u32,
 ) !CarouselEntry {
-    const left_pad: u16 = if (geom.text_x > geom.seg_x) geom.text_x - geom.seg_x else 0;
+    const left_pad = leftPadOf(geom);
     const pixmap_w: u16 = @max(
         left_pad + cycle_w + text_w, // room for text copy B
         cycle_w + geom.seg_w, // room for blit at max offset

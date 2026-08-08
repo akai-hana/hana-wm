@@ -12,7 +12,6 @@ const window = @import("window");
 const tracking = @import("tracking");
 const focus = @import("focus");
 const fullscreen = @import("fullscreen");
-const workspaces = @import("workspaces");
 const tiling = @import("tiling");
 const bar = @import("bar");
 

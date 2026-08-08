@@ -35,7 +35,7 @@ pub const FullscreenInfo = struct {
 // g_slots: fixed array keyed by workspace index (u8); O(1) operations, no heap.
 // g_float_saves: fixed array with length-bounded reads.
 
-const MAX_WORKSPACES: usize = 256; // u8 key space — array is ~4 KB, trivial
+const MAX_WORKSPACES: usize = constants.MAX_WORKSPACES; // single-sourced; keys g_slots
 // Related to, but intentionally distinct from, constants.Limits.MAX_TILED_WINDOWS
 // — this bounds floating windows saved across a single fullscreen transition,
 // not the tiled-window pool.
@@ -128,7 +128,7 @@ pub fn workspaceFor(win: u32) ?u8 {
     return null;
 }
 
-pub fn setForWorkspace(ws: u8, info: FullscreenInfo) void {
+fn setForWorkspace(ws: u8, info: FullscreenInfo) void {
     g_slots[ws] = info;
 }
 
@@ -410,12 +410,11 @@ fn exitFullscreenCommit(win: u32, ws: u8) void {
 
     removeForWorkspace(ws);
 
-    // Bar visibility is managed by the caller via the two-phase API:
-    //   bar.prerenderForShow()      — before xcb_grab_server (X round-trips safe here)
-    //   bar.commitShowInsideGrab()  — inside the grab (blit + map, no round-trips)
-    // Keeping the draw outside the grab prevents captureStateIntoSlot's implicit
-    // XCB flush from delivering xcb_grab_server early and stalling the compositor
-    // for the duration of the Cairo render.
+    // Bar visibility is managed by the caller via bar.setBarState(.show_fullscreen)
+    // (see fullscreen.zig entry/exit call sites). Keeping the draw outside the
+    // grab prevents captureStateIntoSlot's implicit XCB flush from delivering
+    // xcb_grab_server early and stalling the compositor for the duration of the
+    // Cairo render.
 
     const win_is_tiled = tiling.isWindowTiled(win);
     // Tiled: geometry managed by tiling engine; applyBorder restores border.
@@ -465,11 +464,10 @@ pub fn enterFullscreen(win: u32, saved_geom: ?core.WindowGeometry) void {
 /// explicitly (unlike toggle()) for event-driven call sites.
 pub fn exitFullscreen(win: u32) void {
     const ws = workspaceFor(win) orelse return;
-    // Do NOT prerender+commitShowInsideGrab here.  The fullscreen window was
-    // raised (XCB_STACK_MODE_ABOVE) on enter; if we map the bar before the
-    // window has repainted at its new tiled size, the still-raised window
-    // occludes the bar until repaint completes — exactly the same class of
-    // race as the enter-fullscreen bar-hide delay, just in reverse.
+    // The fullscreen window was raised (XCB_STACK_MODE_ABOVE) on enter; if we
+    // map the bar before the window has repainted at its new tiled size, the
+    // still-raised window occludes the bar until repaint completes — exactly the
+    // same class of race as the enter-fullscreen bar-hide delay, just in reverse.
     //
     // Instead we defer the bar show until the window confirms its new
     // (non-fullscreen) dimensions via ConfigureNotify, identically to how

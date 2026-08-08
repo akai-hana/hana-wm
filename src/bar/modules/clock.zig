@@ -15,7 +15,7 @@
 //! promptly (typically < 1 ms) rather than waiting up to one full second.
 
 const std = @import("std");
-const core = @import("core");
+const utils = @import("utils");
 const types = @import("types");
 const drawing = @import("drawing");
 const bar = @import("bar");
@@ -49,13 +49,9 @@ var clock_thread: ?std.Thread = null;
 
 // Helpers
 
-/// Returns the current CLOCK_REALTIME timespec.
-/// Analogous to `monotonicTs()` in utils.zig; centralises the two-line
-/// clock_gettime call shared by every caller in this file.
+/// Returns the current CLOCK_REALTIME timespec, for second-aligned deadlines.
 inline fn realtimeTs() std.os.linux.timespec {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.REALTIME, &ts);
-    return ts;
+    return utils.clockTs(.REALTIME);
 }
 
 // Public lifecycle API
@@ -174,7 +170,7 @@ fn runClockThread() void {
     }
 }
 
-// Drawing (unchanged)
+// Drawing
 
 /// Draws the current time string on the bar. Returns the x position after the segment.
 pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {

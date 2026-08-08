@@ -216,28 +216,17 @@ pub fn handlePromptKeypress(
     // window-manager operations without cancelling the prompt.
     // The close_window action is still routed through here so it can dismiss
     // the prompt — but only when the cursor is over the bar itself.
-    if (event.state & xcb.XCB_MOD_MASK_4 != 0) {
-        if (bound_action) |action| {
-            if (action.* == .close_window) {
-                return closeWindowOrPromptUnderCursor();
-            }
+    if (bound_action) |action| {
+        if (action.* == .close_window) return closeWindowOrPromptUnderCursor();
+        if (event.state & xcb.XCB_MOD_MASK_4 != 0)
             return false; // let WM dispatch execute the bind; prompt stays open
-        }
     }
-
-    if (bound_action) |action| if (action.* == .close_window) {
-        return closeWindowOrPromptUnderCursor();
-    };
     return handleKeyPress(event);
 }
 
 /// Low-level key-press handler.  Called by `handlePromptKeypress` after all
 /// prompt-level routing decisions have been made.
-///
-/// Exposed as `pub` so the bar's legacy key dispatch path can call it
-/// directly when it has already confirmed the prompt is active.  Prefer
-/// `handlePromptKeypress` for new call sites.
-pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
+fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     if (!g.is_active) return false;
 
     // Only process XCB_KEY_PRESS events.  xcb_key_press_event_t and
@@ -283,6 +272,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     if (ctrl_held) {
         const action = if (vim_mode) vim.handleCtrl(&g.vim_state, sym) else .none;
         applyAction(action);
+        updateGhost(); // handleCtrl may have deleted text (Ctrl-W / Ctrl-U)
         g.redraw_pending = true;
         return true;
     }
@@ -585,8 +575,8 @@ fn updateGhost() void {
 
 // Private — history
 
-/// Prepend `cmd` to the in-memory history ring (newest at index 0).
-/// Shifts all history entries right by one slot and inserts `cmd` at index 0 (newest first).
+/// Prepend `cmd` to the in-memory history ring (newest at index 0), shifting
+/// entries right by one slot.
 /// Silently no-ops when cmd is empty or exceeds max_history_line.
 fn histPrepend(cmd: []const u8) void {
     if (cmd.len == 0 or cmd.len > max_history_line) return;
@@ -779,53 +769,25 @@ fn spawnCommand(cmd: []const u8) void {
 
 // Private — basic insert-mode editing (used when core.getState().config.bar.vim_mode = false)
 
-// Integer aliases matching vim.zig's private constants so switch arms compile
-// against the same keysym values without repeating raw hex literals.
-const XK_Escape = @intFromEnum(vim.XK.Escape);
-const XK_Return = @intFromEnum(vim.XK.Return);
-const XK_BackSpace = @intFromEnum(vim.XK.BackSpace);
-const XK_Delete = @intFromEnum(vim.XK.Delete);
-const XK_Left = @intFromEnum(vim.XK.Left);
-const XK_Right = @intFromEnum(vim.XK.Right);
-const XK_Home = @intFromEnum(vim.XK.Home);
-const XK_End = @intFromEnum(vim.XK.End);
-
-/// Minimal insert-mode handler used when vim.zig is absent.
+/// Minimal insert handler used when vim mode is disabled.
 /// Handles printable ASCII, cursor keys, Backspace, Delete,
 /// Return (spawn), and Escape (deactivate).
 fn handleInsertBasic(vs: *vim.VimState, sym: xcb.xcb_keysym_t) vim.Action {
     switch (sym) {
-        XK_Escape => return .deactivate,
-        XK_Return => return .spawn,
-        XK_BackSpace => {
-            if (vs.cursor > 0) {
-                std.mem.copyForwards(u8, vs.buf[vs.cursor - 1 .. vs.len - 1], vs.buf[vs.cursor..vs.len]);
-                vs.len -= 1;
-                vs.cursor -= 1;
-            }
+        vim.XK_Escape => return .deactivate,
+        vim.XK_Return => return .spawn,
+        vim.XK_BackSpace => vim.deleteBefore(vs),
+        vim.XK_Delete => vim.deleteAfter(vs),
+        vim.XK_Left => if (vs.cursor > 0) {
+            vs.cursor -= 1;
         },
-        XK_Delete => {
-            if (vs.cursor < vs.len) {
-                std.mem.copyForwards(u8, vs.buf[vs.cursor .. vs.len - 1], vs.buf[vs.cursor + 1 .. vs.len]);
-                vs.len -= 1;
-            }
+        vim.XK_Right => if (vs.cursor < vs.len) {
+            vs.cursor += 1;
         },
-        XK_Left => {
-            if (vs.cursor > 0) vs.cursor -= 1;
-        },
-        XK_Right => {
-            if (vs.cursor < vs.len) vs.cursor += 1;
-        },
-        XK_Home => {
-            vs.cursor = 0;
-        },
-        XK_End => {
-            vs.cursor = vs.len;
-        },
-        else => {
-            if (sym >= 0x20 and sym <= 0x7e)
-                vim.insertSlice(vs, &[1]u8{@truncate(sym)});
-        },
+        vim.XK_Home => vs.cursor = 0,
+        vim.XK_End => vs.cursor = vs.len,
+        else => if (vim.isPrintableAscii(sym))
+            vim.insertSlice(vs, &[1]u8{@truncate(sym)}),
     }
     return .none;
 }
@@ -834,7 +796,6 @@ fn handleInsertBasic(vs: *vim.VimState, sym: xcb.xcb_keysym_t) vim.Action {
 
 /// Binary search: first byte offset where `measureTextWidth(text[0..offset])
 /// >= target_px`.  Returns `text.len` if the whole string is narrower.
-/// Binary-searches `text` for the byte offset whose rendered width first reaches `target_px`.
 /// Used to map a pixel scroll offset back to a character boundary.
 fn textOffsetAtPx(dc: *drawing.DrawContext, text: []const u8, target_px: u16) usize {
     var lo: usize = 0;
@@ -1036,9 +997,18 @@ fn drawActive(
 
     // Total pill width = inner text width + left pad + right pad.
     const pill_w: u16 = mode_w + pill_h_pad * 2;
+    // The pill only exists when there is a mode label (vim mode enabled);
+    // basic mode gets the full width for the scrollable text region.
+    const show_pill = mode_w > 0;
+    const pill_fits = text_end_x >= pill_w;
 
     // Reserve the pill width on the right; the scrollable region ends here.
-    const scroll_end_x: u16 = if (text_end_x >= pill_w) text_end_x - pill_w else text_left_x;
+    const scroll_end_x: u16 = if (show_pill and pill_fits)
+        text_end_x - pill_w
+    else if (show_pill)
+        text_left_x
+    else
+        text_end_x;
     // Clip post-cursor text 2 px before the pill so ink never bleeds into it.
     const ellipsis_end_x: u16 = scroll_end_x -| 2;
 
@@ -1052,7 +1022,7 @@ fn drawActive(
         g.cached_caret_h = @min(font_h, height);
     }
 
-    if (pill_w > 0 and text_end_x >= pill_w) {
+    if (show_pill and pill_fits) {
         const pill_x: u16 = text_end_x - pill_w;
         if (pill_x >= text_left_x) {
             // Filled pill background.
@@ -1154,7 +1124,7 @@ fn drawActive(
     const colon_active = vim_mode and vim.colonInput(&g.vim_state) != null;
 
     if (g.vim_state.mode == .visual) {
-        const sel = if (vim_mode) vim.visualRange(&g.vim_state) else [2]usize{ g.vim_state.cursor, @min(g.vim_state.cursor + 1, g.vim_state.len) };
+        const sel = vim.visualRange(&g.vim_state);
 
         const pre_sel = g.vim_state.buf[0..sel[0]];
         const post_sel = g.vim_state.buf[sel[1]..g.vim_state.len];
@@ -1174,18 +1144,13 @@ fn drawActive(
         const caret_top = g.cached_caret_top.?;
         const caret_h = g.cached_caret_h.?;
 
-        if (g.is_blink_visible and !colon_active and px >= @as(i32, text_left_x) and px < @as(i32, scroll_end_x)) {
+        if (g.is_blink_visible and px >= @as(i32, text_left_x) and px < @as(i32, scroll_end_x)) {
             dc.fillRect(@intCast(px), caret_top, cursor_width, caret_h, accent);
         }
 
         // Ghost text (only when cursor is at end).
-        if (g.ghost_len > 0 and g.vim_state.cursor == g.vim_state.len and px < @as(i32, scroll_end_x)) {
-            const ghost = g.ghost_buf[0..g.ghost_len];
-            const draw_x: u16 = @intCast(@max(px, @as(i32, text_left_x)));
-            const remaining: u16 = scroll_end_x -| draw_x;
-            if (remaining > 0)
-                try dc.drawTextEllipsis(draw_x, baseline, ghost, remaining, accent);
-        }
+        if (g.ghost_len > 0 and g.vim_state.cursor == g.vim_state.len)
+            try drawPostSpan(dc, px, text_left_x, scroll_end_x, baseline, g.ghost_buf[0..g.ghost_len], accent);
 
         try drawPostSpan(dc, px, text_left_x, ellipsis_end_x, baseline, post_text, fg);
     } else {

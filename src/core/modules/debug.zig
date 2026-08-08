@@ -36,24 +36,6 @@ pub inline fn info(comptime fmt: []const u8, args: anytype) void {
     if (!debugEnabled()) return;
     log(std.log.info, fmt, moduleFromSrc(@src()), args);
 }
-pub inline fn debug(comptime fmt: []const u8, args: anytype) void {
-    if (!debugEnabled()) return;
-    log(std.log.debug, fmt, moduleFromSrc(@src()), args);
-}
-
-/// Panics with a module-tagged message when `condition` is false, in debug builds only.
-pub inline fn assert(condition: bool, comptime message: []const u8) void {
-    if (!debugEnabled() or condition) return;
-    const module = moduleFromSrc(@src());
-    std.debug.panic("[{s}] Assertion failed: {s}", .{ module, message });
-}
-
-/// Emits a debug-level line showing `label = value` with the caller's module tag.
-pub inline fn print(comptime label: []const u8, value: anytype) void {
-    if (!debugEnabled()) return;
-    const module = moduleFromSrc(@src());
-    std.log.debug("[{s}] {s} = {any}", .{ module, label, value });
-}
 
 /// Log a structured error with an optional window ID for context.
 /// Use this as the canonical pattern for operation failures:

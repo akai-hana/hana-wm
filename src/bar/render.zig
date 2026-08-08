@@ -28,17 +28,10 @@ pub const cairo_t = opaque {};
 /// Numeric values match the C ABI; do not change them.
 pub const cairo_format_t = enum(c_int) {
     ARGB32 = 0,
-    RGB24 = 1,
     A8 = 2,
     A1 = 3,
     RGB16_565 = 4,
     RGB30 = 5,
-};
-
-/// Trimmed to the two operators used (CLEAR, OVER); full C enum has 29. Numeric values unchanged.
-pub const cairo_operator_t = enum(c_int) {
-    CLEAR = 0,
-    OVER = 2,
 };
 
 /// Pixmap must outlive the surface; destroy the surface before freeing the pixmap.
@@ -65,14 +58,6 @@ pub extern fn cairo_destroy(cr: *cairo_t) void;
 
 pub extern fn cairo_set_source_rgba(cr: *cairo_t, red: f64, green: f64, blue: f64, alpha: f64) void;
 pub extern fn cairo_move_to(cr: *cairo_t, x: f64, y: f64) void;
-pub extern fn cairo_set_operator(cr: *cairo_t, op: cairo_operator_t) void;
-pub extern fn cairo_paint(cr: *cairo_t) void;
-
-/// Used to isolate clip regions; cairo_restore removes the active clip.
-pub extern fn cairo_save(cr: *cairo_t) void;
-pub extern fn cairo_restore(cr: *cairo_t) void;
-pub extern fn cairo_rectangle(cr: *cairo_t, x: f64, y: f64, width: f64, height: f64) void;
-pub extern fn cairo_clip(cr: *cairo_t) void;
 
 // Pango
 
@@ -115,9 +100,6 @@ pub extern fn pango_layout_get_baseline(layout: *PangoLayout) c_int;
 pub extern fn pango_font_description_from_string(str: [*:0]const u8) ?*PangoFontDescription;
 pub extern fn pango_font_description_copy(desc: *PangoFontDescription) ?*PangoFontDescription;
 pub extern fn pango_font_description_free(desc: *PangoFontDescription) void;
-pub extern fn pango_font_description_get_size(desc: *PangoFontDescription) c_int;
-pub extern fn pango_font_description_get_size_is_absolute(desc: *PangoFontDescription) c_int;
-pub extern fn pango_font_description_set_size(desc: *PangoFontDescription, size: c_int) void;
 pub extern fn pango_font_description_set_absolute_size(desc: *PangoFontDescription, size: f64) void;
 
 /// Returns Pango units. Pass null for either rect if not needed.

@@ -50,10 +50,11 @@ pub fn main() !void {
     try window.init(alloc);
     defer window.deinit();
 
-    if (core.getState().config.bar.enabled) {
+    const bar_enabled = core.getState().config.bar.enabled;
+    if (bar_enabled) {
         bar.init() catch |err| debug.err("Bar init failed: {}", .{err});
     }
-    defer if (core.getState().config.bar.enabled) bar.deinit();
+    defer if (bar_enabled) bar.deinit();
 
     _ = xcb.xcb_flush(x.conn);
     debug.info("hana booted up successfully!", .{});

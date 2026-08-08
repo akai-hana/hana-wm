@@ -32,7 +32,6 @@ pub const Action = union(enum) {
     swap_master_focus_swap,
     switch_workspace: u8,
     move_to_workspace: u8,
-    move_window: u8,
     toggle_tag: u8,
     sequence: []Action, // ordered list of actions executed left-to-right (owned slice)
     dump_state,
@@ -91,7 +90,7 @@ pub const MouseBind = struct {
 /// the Config it was built from — Config.deinit tears the resolver down
 /// internally, before freeing the Actions its map entries point into — so
 /// there is no longer a two-`defer` dance for a future edit to accidentally
-/// reorder (see item 10 in the config-subsystem review).
+/// reorder.
 pub const KeybindResolver = struct {
     map: std.AutoHashMapUnmanaged(u64, *const Action) = .empty,
 
@@ -115,8 +114,8 @@ pub const KeybindResolver = struct {
     /// so bindings from a previous build never leak into the next one.
     ///
     /// Split out from `build` so the map-rebuild behavior can be exercised
-    /// without a live XkbState/X connection (see the reload-safety test
-    /// below), since keycode resolution is the only part that needs one.
+    /// without a live XkbState/X connection, since keycode resolution is the
+    /// only part that needs one.
     pub fn rebuildDispatchMap(self: *KeybindResolver, keybindings: []Keybind, allocator: std.mem.Allocator) void {
         var seen = std.AutoHashMap(u64, usize).init(allocator);
         defer seen.deinit();
@@ -180,7 +179,7 @@ pub fn LowerResult(comptime max_len: usize) type {
 /// on `.too_long` to give a more specific message than the generic "value
 /// not recognized" that both an overlong value and a genuine typo used to
 /// produce identically, since both previously just looked like "not found in
-/// map" to the caller (item 11 in the config-subsystem review).
+/// map" to the caller.
 ///
 /// This is complementary to (not a replacement for) LAYOUT_TABLE below:
 /// LAYOUT_TABLE is the single source of truth for name<->tag<->alias
@@ -330,13 +329,6 @@ pub const TilingConfig = struct {
     monocle_variant: MonocleVariant = .gapless,
     grid_variant: GridVariant = .rigid,
 
-    // Per-layout 3-character indicator overrides (null = derive from active variant).
-    // Stored as fixed-size arrays: no allocation, no dangling pointers.
-    // Set via `indicator = "XYZ"` (3 chars) in the corresponding [tiling.layouts.*] section.
-    master_indicator: ?[3]u8 = null,
-    monocle_indicator: ?[3]u8 = null,
-    grid_indicator: ?[3]u8 = null,
-
     /// Per-workspace layout assignments parsed from the layouts array.
     workspace_layout_overrides: std.ArrayList(WorkspaceLayoutOverride) = .empty,
 
@@ -456,7 +448,6 @@ pub const BarConfig = struct {
     // Configured bar height: absolute pixel value or percentage of screen height.
     // null = auto-calculate from font metrics alone.
     height: ?parser.ScalableValue = null,
-    font: []const u8 = "monospace:size=10",
     fonts: std.ArrayList([]const u8) = .empty,
     font_size: parser.ScalableValue = parser.ScalableValue.percentage(10.0),
     // Resolved pixel value cached after DPI scaling, derived from font_size
@@ -470,16 +461,11 @@ pub const BarConfig = struct {
     fg: Color = 0xBBBBBB,
     selected_bg: Color = 0x005577,
     selected_fg: Color = 0xEEEEEE,
-    occupied_fg: Color = 0xEEEEEE,
-    urgent_bg: Color = 0xFF0000,
-    urgent_fg: Color = 0xFFFFFF,
 
     accent_color: Color = DEFAULT_ACCENT,
-    workspaces_accent: Color = DEFAULT_ACCENT,
     title_accent_color: Color = DEFAULT_ACCENT,
     title_unfocused_accent: Color = 0x222222,
     title_minimized_accent: Color = DEFAULT_ACCENT,
-    clock_accent: Color = DEFAULT_ACCENT,
 
     workspace_icons: std.ArrayList([]const u8) = .empty,
     indicator_size: parser.ScalableValue = parser.ScalableValue.percentage(30.0),
@@ -501,7 +487,6 @@ pub const BarConfig = struct {
 
     layout: std.ArrayList(BarLayout) = .empty,
 
-    scale_factor: f32 = 1.0,
     transparency: f32 = 1.0,
 
     pub fn deinit(self: *BarConfig, allocator: std.mem.Allocator) void {
@@ -523,35 +508,34 @@ pub const BarConfig = struct {
 
     /// Derives horizontal segment padding from font_size.
     /// Percentage path: margin = (bar_height - font_height) / 2, scaled.
-    /// Absolute path:   margin = (bar_height - font_px * scale_factor) / 2.
+    /// Absolute path:   margin = (bar_height - font_px) / 2.
     pub inline fn scaledSegmentPadding(self: *const BarConfig, bar_height: u16) u16 {
         const h: f32 = @floatFromInt(bar_height);
         if (self.font_size.is_percentage) {
             const margin_ratio = (1.0 - self.font_size.value / 100.0) / 2.0;
-            return @as(u16, @intFromFloat(@round(@max(0.0, h * margin_ratio * self.scale_factor))));
+            return @as(u16, @intFromFloat(@round(@max(0.0, h * margin_ratio))));
         }
-        const font_px = self.font_size.value * self.scale_factor;
+        const font_px = self.font_size.value;
         return @as(u16, @intFromFloat(@round(@max(0.0, (h - font_px) / 2.0))));
     }
 
-    /// Scales a ScalableValue to pixels. `factor` multiplies the percentage path;
-    /// `scale` is applied on both paths (pass 1.0 to skip).
-    inline fn scaleValue(sv: parser.ScalableValue, bar_height: u16, factor: f32, scale: f32) f32 {
+    /// Scales a ScalableValue to pixels. `factor` multiplies the percentage path.
+    inline fn scaleValue(sv: parser.ScalableValue, bar_height: u16, factor: f32) f32 {
         const h: f32 = @floatFromInt(bar_height);
-        return if (sv.is_percentage) h * factor * (sv.value / 100.0) * scale else sv.value * scale;
+        return if (sv.is_percentage) h * factor * (sv.value / 100.0) else sv.value;
     }
 
     inline fn scaleToU16(val: f32) u16 {
         return @as(u16, @intFromFloat(@round(@max(0.0, val))));
     }
     pub inline fn scaledSpacing(self: *const BarConfig, bar_height: u16) u16 {
-        return scaleToU16(scaleValue(self.spacing, bar_height, 5.0, self.scale_factor));
+        return scaleToU16(scaleValue(self.spacing, bar_height, 5.0));
     }
     pub inline fn scaledIndicatorSize(self: *const BarConfig, bar_height: u16) u16 {
-        return @max(1, scaleToU16(scaleValue(self.indicator_size, bar_height, 1.0, self.scale_factor)));
+        return @max(1, scaleToU16(scaleValue(self.indicator_size, bar_height, 1.0)));
     }
     pub inline fn scaledWorkspaceWidth(self: *const BarConfig, bar_height: u16) u16 {
-        return @max(1, scaleToU16(scaleValue(self.workspace_tag_width, bar_height, 1.0, self.scale_factor)));
+        return @max(1, scaleToU16(scaleValue(self.workspace_tag_width, bar_height, 1.0)));
     }
 
     /// Returns the bar's alpha in 16-bit format (0x0000–0xFFFF).
@@ -625,9 +609,9 @@ pub const Config = struct {
         self.bar.deinit(a);
         self.tiling.deinit(a);
 
-        // Always heap-allocated at parse time (see parseBar in config.zig),
-        // so freed unconditionally here.
-        a.free(self.bar.font);
+        // Always heap-allocated: getDefaultConfig dupes the string literals
+        // and parseBar (via assignStr) transfers ownership on every write, so
+        // freed unconditionally here (see assignStr in config.zig).
         a.free(self.bar.clock_format);
         a.free(self.bar.drun_prompt);
         a.free(self.bar.indicator_focused);

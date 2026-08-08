@@ -12,7 +12,6 @@ const c = @import("render");
 // Public types
 
 pub const VisualInfo = struct {
-    visual_type: ?*core.xcb.xcb_visualtype_t,
     visual_id: u32,
 };
 
@@ -23,9 +22,9 @@ pub fn findVisualByDepth(screen: *core.xcb.xcb_screen_t, depth: u8) VisualInfo {
         if (di.data.*.depth != depth) continue;
         const vi = core.xcb.xcb_depth_visuals_iterator(di.data);
         if (vi.rem == 0) continue;
-        return .{ .visual_type = vi.data, .visual_id = vi.data.*.visual_id };
+        return .{ .visual_id = vi.data.*.visual_id };
     }
-    return .{ .visual_type = null, .visual_id = screen.root_visual };
+    return .{ .visual_id = screen.root_visual };
 }
 
 // Module-level font cache shared across all DrawContext instances (measurement + render DCs).
@@ -55,7 +54,7 @@ pub const FontState = struct {
         self.current_font_desc = c.pango_font_description_from_string(pango_name_z.ptr);
         if (self.current_font_desc == null) {
             debug.warn("Failed to load font '{s}', using default", .{font_name});
-            self.current_font_desc = c.pango_font_description_from_string("monospace 10");
+            self.current_font_desc = c.pango_font_description_from_string(fallbackFont);
         }
         c.pango_layout_set_font_description(self.pango_layout, self.current_font_desc);
         self.cached_metrics = null;
@@ -108,6 +107,19 @@ inline fn pangoToF64(pango_units: c_int) f64 {
     return @as(f64, @floatFromInt(pango_units)) / @as(f64, @floatFromInt(c.PANGO_SCALE));
 }
 
+/// Converts a pixel size to Pango units (1/1024 px).
+inline fn pxToPango(px: u16) f64 {
+    return @as(f64, @floatFromInt(px)) * @as(f64, @floatFromInt(c.PANGO_SCALE));
+}
+
+/// Checks an XCB void-cookie; frees the error and returns GCCreationFailed on failure.
+inline fn checkXcbCookie(conn: *core.xcb.xcb_connection_t, cookie: core.xcb.xcb_void_cookie_t) !void {
+    if (core.xcb.xcb_request_check(conn, cookie)) |err| {
+        std.c.free(err);
+        return error.GCCreationFailed;
+    }
+}
+
 pub const DrawContext = struct {
     font: FontState,
     conn: *core.xcb.xcb_connection_t,
@@ -132,9 +144,6 @@ pub const DrawContext = struct {
     last_color: ?u32 = null,
     /// Cached GC foreground — skips xcb_change_gc when the packed ARGB pixel is unchanged.
     last_gc_color: ?u32 = null,
-    /// Cached Pango layout width (Pango units). Skips pango_layout_set_width/set_ellipsize —
-    /// which invalidate Pango's shaping cache unconditionally — when width is stable across frames.
-    last_ellipsis_width: i32 = -1,
 
     // drawTextSized cache: avoids copying the font description on every
     // indicator-glyph draw when the requested size matches the previous call.
@@ -147,14 +156,6 @@ pub const DrawContext = struct {
     dpi: f32 = 96.0,
     /// Actual pixel depth of the offscreen pixmap — 32 for ARGB, screen root_depth otherwise.
     depth: u8 = 24,
-
-    /// Checks an XCB void-cookie; frees the error and returns GCCreationFailed on failure.
-    inline fn checkXcbCookie(conn: *core.xcb.xcb_connection_t, cookie: core.xcb.xcb_void_cookie_t) !void {
-        if (core.xcb.xcb_request_check(conn, cookie)) |err| {
-            std.c.free(err);
-            return error.GCCreationFailed;
-        }
-    }
 
     /// All drawing targets the off-screen pixmap; call blit() to copy to the window atomically.
     pub fn initWithVisual(
@@ -245,14 +246,6 @@ pub const DrawContext = struct {
         self.font.allocator.destroy(self);
     }
 
-    /// Also clears the sized-font cache; delegates to FontState.loadFont.
-    pub fn loadFont(self: *DrawContext, font_name: []const u8) !void {
-        try self.font.loadFont(font_name);
-        if (self.cached_sized_desc) |old| c.pango_font_description_free(old);
-        self.cached_sized_desc = null;
-        debug.info("Cairo/Pango font loaded: {s}", .{font_name});
-    }
-
     /// Delegates to FontState.loadFonts.
     pub fn loadFonts(self: *DrawContext, font_names: []const []const u8) !void {
         try self.font.loadFonts(font_names);
@@ -300,14 +293,16 @@ pub const DrawContext = struct {
         _ = core.xcb.xcb_poly_fill_rectangle(self.conn, self.offscreen_pixmap, self.gc, 1, &rect);
     }
 
-    /// Sized font description cached by pixel size; cache invalidated by loadFont.
+    /// Cached sized font description; rebuilt whenever `size_px` changes.
+    /// Derived from font.current_font_desc, so it is stale after a font reload —
+    /// DrawContexts are created fresh per reload, which keeps it consistent today.
     pub fn drawTextSized(self: *DrawContext, x: u16, y_top: u16, text: []const u8, size_px: u16, color: u32) !void {
         const desc = self.font.current_font_desc orelse return error.NoFont;
 
         if (self.cached_sized_desc == null or self.cached_sized_px != size_px) {
             if (self.cached_sized_desc) |old| c.pango_font_description_free(old);
             const temp = c.pango_font_description_copy(desc) orelse return error.PangoDescCopyFailed;
-            c.pango_font_description_set_absolute_size(temp, @as(f64, @floatFromInt(size_px)) * @as(f64, @floatFromInt(c.PANGO_SCALE)));
+            c.pango_font_description_set_absolute_size(temp, pxToPango(size_px));
             self.cached_sized_desc = temp;
             self.cached_sized_px = size_px;
         }
@@ -344,16 +339,8 @@ pub const DrawContext = struct {
     ) !void {
         self.setPangoText(text);
 
-        // Only call pango_layout_set_width / set_ellipsize when the width has
-        // changed since the last draw.  Both calls invalidate Pango's internal
-        // shaping cache unconditionally — even when the value is unchanged — so
-        // skipping them when max_width is stable across frames avoids reshaping.
-        const pango_width: i32 = @as(i32, max_width) * c.PANGO_SCALE;
-        if (pango_width != self.last_ellipsis_width) {
-            c.pango_layout_set_width(self.font.pango_layout, pango_width);
-            c.pango_layout_set_ellipsize(self.font.pango_layout, c.PangoEllipsizeMode.END);
-            self.last_ellipsis_width = pango_width;
-        }
+        c.pango_layout_set_width(self.font.pango_layout, @as(i32, max_width) * c.PANGO_SCALE);
+        c.pango_layout_set_ellipsize(self.font.pango_layout, c.PangoEllipsizeMode.END);
 
         self.setColor(color);
         self.moveToTextBaseline(x, y);
@@ -361,7 +348,6 @@ pub const DrawContext = struct {
 
         c.pango_layout_set_width(self.font.pango_layout, -1);
         c.pango_layout_set_ellipsize(self.font.pango_layout, c.PangoEllipsizeMode.NONE);
-        self.last_ellipsis_width = -1; // invalidate cache: layout is back to defaults
     }
 
     pub fn measureTextWidth(self: *DrawContext, text: []const u8) u16 {
@@ -459,9 +445,6 @@ pub const MeasureContext = struct {
         c.cairo_surface_destroy(self.surface);
     }
 
-    pub fn loadFont(self: *MeasureContext, font_name: []const u8) !void {
-        return self.font.loadFont(font_name);
-    }
     pub fn loadFonts(self: *MeasureContext, font_names: []const []const u8) !void {
         return self.font.loadFonts(font_names);
     }
@@ -501,10 +484,7 @@ pub const CarouselPixmap = struct {
 
         const gc = core.xcb.xcb_generate_id(dc.conn);
         const cookie = core.xcb.xcb_create_gc_checked(dc.conn, gc, pixmap, 0, null);
-        if (core.xcb.xcb_request_check(dc.conn, cookie)) |err| {
-            std.c.free(err);
-            return error.GCCreationFailed;
-        }
+        try checkXcbCookie(dc.conn, cookie);
         errdefer _ = core.xcb.xcb_free_gc(dc.conn, gc);
 
         const vt = dc.visual_type orelse return error.NoVisualType;
