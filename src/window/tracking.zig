@@ -97,45 +97,6 @@ pub const Tracking = struct {
         return true;
     }
 
-    /// Replace the current window order with `new_order`.
-    ///
-    /// Validates that `new_order` contains exactly the same set of windows as
-    /// the current list — no additions, no removals, no duplicates.  In all
-    /// build modes an error is logged and the function returns early on bad
-    /// input (no corruption).  In debug/releaseSafe builds the assert also
-    /// fires to surface programmer errors loudly.
-    ///
-    /// Validation is O(n²): each entry requires an O(n) linear scan to locate
-    /// its slot, and the result is marked in a stack-allocated bitset to detect
-    /// duplicates.  For capacity = 200 this is at most 40,000 operations.
-    pub fn reorder(self: *Tracking, new_order: []const u32) void {
-        if (new_order.len != self.len) {
-            reorderFail("length mismatch: got {d}, expected {d}", .{ new_order.len, self.len });
-            return;
-        }
-
-        var seen = std.StaticBitSet(capacity).initEmpty();
-        for (new_order) |w| {
-            const idx = std.mem.indexOfScalar(u32, self.buf[0..self.len], w) orelse {
-                reorderFail("window 0x{x} not in current list", .{w});
-                return;
-            };
-            if (seen.isSet(idx)) {
-                reorderFail("duplicate window 0x{x} in new_order", .{w});
-                return;
-            }
-            seen.set(idx);
-        }
-        @memcpy(self.buf[0..self.len], new_order);
-    }
-
-    /// Logs a reorder validation failure and asserts in debug/releaseSafe
-    /// builds; the caller returns early regardless of build mode.
-    fn reorderFail(comptime fmt: []const u8, args: anytype) void {
-        std.log.err("tracking: reorder: " ++ fmt, args);
-        std.debug.assert(false);
-    }
-
     /// Returns a slice of the live entries in insertion order.
     pub fn items(self: *const Tracking) []const u32 {
         return self.buf[0..self.len];
@@ -388,17 +349,4 @@ pub inline fn isOnCurrentWorkspace(win: u32) bool {
 pub fn isOnCurrentWorkspaceAndVisible(win: u32) bool {
     if (!isOnCurrentWorkspace(win)) return false;
     return !minimize.isMinimized(win);
-}
-
-/// Returns the first non-minimized window in `windows`, or null if all are minimized.
-///
-/// This function lives in tracking.zig rather than minimize.zig for layering
-/// reasons: minimize.zig already imports tracking.zig, so the reverse import
-/// would be circular if this lived there instead. Declared as a plain fn so
-/// minimize.zig can store it as a function pointer.
-pub fn firstNonMinimized(windows: []const u32) ?u32 {
-    for (windows) |win| {
-        if (!minimize.isMinimized(win)) return win;
-    }
-    return null;
 }

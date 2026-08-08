@@ -482,6 +482,9 @@ pub fn retileAllWorkspaces() void {
     // invokeLayout still needs a valid pointer to write through.
     var deferred: ?utils.Rect = null;
     var ctx = makeLayoutCtx(s, &deferred);
+    // Every workspace reached in the loop below is, by construction, not
+    // `current_ws` (skipped just above) — see LayoutCtx.is_background.
+    ctx.is_background = true;
     const effective_ws = @min(ws_count, max_workspaces);
 
     var ws_idx: u8 = 0;
@@ -519,10 +522,17 @@ pub fn retileInactiveWorkspace(ws_idx: u8) void {
 
     retileImpl(calcScreenArea(), .{ .for_ws = ws_idx });
 
+    // Defense in depth: monocle (and fibonacci's overflow fallback) now skip
+    // raising during a background retile (see LayoutCtx.is_background), but
+    // nothing here relies on that being the *only* way a window could have
+    // ended up first in stacking order — pushWindowOffscreenAndLower also
+    // explicitly sends XCB_STACK_MODE_BELOW alongside the offscreen X, so a
+    // hidden window can never surface above the bar or the visible
+    // workspace regardless of what raised it.
     const bit = tracking.workspaceBit(ws_idx);
     const conn = core.getState().conn;
     for (tracking.allWindows()) |entry| {
-        if (entry.mask & bit != 0) utils.pushWindowOffscreen(conn, entry.win);
+        if (entry.mask & bit != 0) utils.pushWindowOffscreenAndLower(conn, entry.win);
     }
 }
 
@@ -1109,8 +1119,9 @@ const RetileOpts = struct {
 fn retileImpl(screen: utils.Rect, opts: RetileOpts) void {
     const s = getState();
 
+    const current_ws_opt = tracking.getCurrentWorkspace();
     const target_ws: u8 = opts.for_ws orelse
-        @intCast(tracking.getCurrentWorkspace() orelse return);
+        @intCast(current_ws_opt orelse return);
 
     if (fullscreen.getForWorkspace(target_ws)) |_| return;
 
@@ -1122,6 +1133,10 @@ fn retileImpl(screen: utils.Rect, opts: RetileOpts) void {
     var ctx = makeLayoutCtx(s, &deferred);
     ctx.defer_win = opts.defer_win;
     if (opts.focus_override) |f| ctx.focused_win = f;
+    // Background whenever the target isn't the workspace actually on screen
+    // (retileInactiveWorkspace is the only caller that ever sets for_ws to
+    // something other than the current workspace) — see LayoutCtx.is_background.
+    ctx.is_background = current_ws_opt == null or target_ws != current_ws_opt.?;
 
     const wss = workspaces.getState();
 

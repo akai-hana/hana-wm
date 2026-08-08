@@ -501,10 +501,6 @@ pub inline fn isWindowOnWorkspace(win: u32, ws_idx: u8) bool {
     return tracking.isWindowOnWorkspace(win, ws_idx);
 }
 
-pub inline fn firstNonMinimized(windows: []const u32) ?u32 {
-    return tracking.firstNonMinimized(windows);
-}
-
 /// The workspace's remembered focus target, falling back to the first
 /// non-minimized window. Clears last_focused when it points at a now-
 /// minimized window so the stale pointer isn't rechecked every call.

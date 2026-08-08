@@ -124,11 +124,6 @@ pub fn saveWindowGeom(win: u32, rect: utils.Rect) void {
     tiling.saveWindowGeom(win, rect);
 }
 
-/// Return the last-known geometry for `win`, or null if none is cached.
-pub fn getWindowGeom(win: u32) ?utils.Rect {
-    return tiling.getWindowGeom(win);
-}
-
 // Geometry helpers
 
 /// Screen-space position of a window's top-left corner.
@@ -155,7 +150,7 @@ pub inline fn floatDefaultPos() Pos {
 /// pattern that appears in minimize, workspaces, and fullscreen modules.
 pub fn restoreFloatGeom(win: u32) void {
     const conn = core.getState().conn;
-    if (getWindowGeom(win)) |rect| {
+    if (tiling.getWindowGeom(win)) |rect| {
         utils.configureWindow(conn, win, rect);
     } else {
         const pos = floatDefaultPos();
@@ -440,6 +435,20 @@ fn dispatchTakeFocusMessage(
     _ = xcb.xcb_send_event(conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
 }
 
+/// Shared WM_TAKE_FOCUS dispatch from an already-drained WM_PROTOCOLS reply.
+/// Guarded by the caller owning `reply`'s memory (freed after this returns).
+inline fn dispatchTakeFocusFromReply(
+    conn: *xcb.xcb_connection_t,
+    win: u32,
+    time: u32,
+    protocols_atom: u32,
+    take_focus_atom: u32,
+    reply: *xcb.xcb_get_property_reply_t,
+) void {
+    if (reply.*.format != 32 or reply.*.value_len == 0) return;
+    dispatchTakeFocusMessage(conn, win, time, protocols_atom, take_focus_atom, protoListFromReply(reply));
+}
+
 /// Like sendWMTakeFocus but drains an already-fired WM_PROTOCOLS cookie instead
 /// of issuing a new round-trip.  The X server has been processing the property
 /// request since before commitFocusTransition ran its bookkeeping, so by the time
@@ -461,8 +470,7 @@ pub fn sendWMTakeFocusWithCookie(
 
     const proto_reply = xcb.xcb_get_property_reply(conn, cookie, null) orelse return;
     defer std.c.free(proto_reply);
-    if (proto_reply.*.format != 32 or proto_reply.*.value_len == 0) return;
-    dispatchTakeFocusMessage(conn, win, time, protocols_atom, take_focus_atom, protoListFromReply(proto_reply));
+    dispatchTakeFocusFromReply(conn, win, time, protocols_atom, take_focus_atom, proto_reply);
 }
 
 /// Sends a WM_TAKE_FOCUS client message (ICCCM §4.1.7) iff `win` advertises
@@ -484,8 +492,7 @@ pub fn sendWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32, time: u32) void {
         null,
     ) orelse return;
     defer std.c.free(proto_reply);
-    if (proto_reply.*.format != 32 or proto_reply.*.value_len == 0) return;
-    dispatchTakeFocusMessage(conn, win, time, protocols_atom, take_focus_atom, protoListFromReply(proto_reply));
+    dispatchTakeFocusFromReply(conn, win, time, protocols_atom, take_focus_atom, proto_reply);
 }
 
 // Private ICCCM helpers
@@ -1183,29 +1190,20 @@ fn focusWindowUnderPointer(ptr_reply: ?*xcb.xcb_query_pointer_reply_t) void {
             focus.setFocus(prev, .tiling_operation);
             return;
         }
-        // prev was already closed or on another workspace — fall through
-        // to the normal pointer / best-available path.
     }
 
     // reply memory is owned by the caller; no std.c.free here.
-    const reply = ptr_reply orelse {
-        focus.focusBestAvailable(.tiling_operation, tracking.isOnCurrentWorkspaceAndVisible, fallback);
-        return;
-    };
-    // xcb_query_pointer's `child` is the immediate child of root under the
-    // pointer.  For Electron/Qt apps this may be a non-managed sub-window XID,
-    // not the managed toplevel.  Resolve via findManagedWindow (which checks the
-    // child-window cache first) so focus recovery works correctly when the
-    // pointer rests over a toolkit child window after a window is closed.
-    const raw_child = reply.*.child;
-    // child == 0 means the pointer is over no window at all.  Skip the tree
-    // walk: xcb_query_tree on XID 0 is undefined by the X protocol and wastes
-    // a round-trip.  Fall through to focusBestAvailable instead.
-    if (raw_child != 0) {
-        const child = findManagedWindow(core.getState().conn, raw_child, tracking.isManaged);
-        if (tracking.isOnCurrentWorkspaceAndVisible(child)) {
-            focus.setFocus(child, .pointer_sync);
-            return;
+    // xcb_query_pointer's `child` may be a non-managed toolkit sub-window XID,
+    // not the managed toplevel — resolve it via findManagedWindow (which checks
+    // the child-window cache first).  child == 0 means the pointer is over no
+    // window at all; skip the tree walk on XID 0 and fall through instead.
+    if (ptr_reply) |reply| {
+        if (reply.*.child != 0) {
+            const child = findManagedWindow(core.getState().conn, reply.*.child, tracking.isManaged);
+            if (tracking.isOnCurrentWorkspaceAndVisible(child)) {
+                focus.setFocus(child, .pointer_sync);
+                return;
+            }
         }
     }
     focus.focusBestAvailable(.tiling_operation, tracking.isOnCurrentWorkspaceAndVisible, fallback);
@@ -1218,15 +1216,7 @@ const GEOMETRY_MASK: u16 =
     xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
     xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH;
 
-const WindowGeometry = struct {
-    x: i16,
-    y: i16,
-    width: u16,
-    height: u16,
-    border_width: u16,
-};
-
-fn sendConfigureNotify(win: u32, geom: WindowGeometry) void {
+fn sendConfigureNotify(win: u32, geom: core.WindowGeometry) void {
     const ev = xcb.xcb_configure_notify_event_t{
         .response_type = xcb.XCB_CONFIGURE_NOTIFY,
         .pad0 = 0,
@@ -1473,8 +1463,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
 
     if (event.atom != state.atoms.wm_protocols and event.atom != xcb.XCB_ATOM_WM_HINTS) return;
     // Re-query and store the updated focus properties in the window-level cache
-    // (CacheSlot array).  focus.invalidateInputModelCache only clears
-    // focus.zig's side; without this call the CacheSlot would stay stale
+    // (CacheSlot array).  Without this call the CacheSlot would stay stale
     // until the window is destroyed, and future getCachedProps hits would
     // return an outdated model.
     _ = queryAndCacheProps(conn, event.window);

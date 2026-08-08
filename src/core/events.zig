@@ -313,6 +313,11 @@ fn handleXcbEvents() void {
     tiling.retileIfDirty();
     focus.drainPendingConfirm();
     focus.drainPointerSync();
+    // Must run after the event-draining loop above: any EnterNotify a tiling
+    // reflow generated has to have already been dispatched (and filtered,
+    // since suppression is still active) before this lifts suppression.
+    // See beginTilingOpSettle's doc comment in focus.zig.
+    focus.drainTilingOpSettle();
     window.updateWorkspaceBordersIfNeeded();
     bar.updateIfDirty() catch |err| debug.err("Failed to update bar: {}", .{err});
 
