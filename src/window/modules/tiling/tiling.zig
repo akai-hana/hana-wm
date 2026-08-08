@@ -61,11 +61,11 @@ pub const zero_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
 /// re-exported here so every existing `tiling.Layout` call site is unaffected.
 pub const Layout = types.Layout;
 
-// Variant enums are defined in core.zig to allow config.zig to parse them
-// without a circular import. Re-exported here for convenience.
-pub const MasterVariant = types.MasterVariant;
-pub const MonocleVariant = types.MonocleVariant;
-pub const GridVariant = types.GridVariant;
+// Variant enums are defined in types.zig to allow config.zig to parse them
+// without a circular import. Short private aliases for the struct fields below.
+const MasterVariant = types.MasterVariant;
+const MonocleVariant = types.MonocleVariant;
+const GridVariant = types.GridVariant;
 
 pub const LayoutVariants = struct {
     master: MasterVariant = .lifo,
@@ -74,8 +74,8 @@ pub const LayoutVariants = struct {
 };
 
 /// Scroll-layout runtime state, defined in scroll.zig alongside the scroll
-/// layout's other logic, re-exported here as `tiling.ScrollState`.
-pub const ScrollState = scroll.State;
+/// layout's other logic.
+const ScrollState = scroll.State;
 
 /// Layout configuration: all user-adjustable parameters that control which
 /// layout is active and how it sizes windows.  Functions that only need to
@@ -136,7 +136,7 @@ pub const GeomCache = struct {
 
     /// Single-workspace window list, reused across retile calls (BSS, zero
     /// allocation) instead of collecting into a fresh per-call buffer.
-    /// retileAllWorkspaces reuses this same buffer once per workspace in its
+    /// Background retiles reuse this same buffer once per workspace in their
     /// loop rather than a flattened `[workspaces][windows]` array — window
     /// and workspace counts are both small and bounded, so the O(workspaces
     /// × windows) it costs is negligible, and it avoids the ~32 KB a
@@ -466,49 +466,9 @@ pub fn retileIfDirty() void {
     retileCurrentWorkspace();
 }
 
-/// Retile every workspace except the current one and any fullscreen
-/// workspace, so their geometry caches are correct before the user switches
-/// to them. Runs on workspace switch only, not on every keypress.
-pub fn retileAllWorkspaces() void {
-    const s = getState();
-    if (!s.is_enabled) return;
-
-    const screen = calcScreenArea();
-    const ws_count = tracking.getWorkspaceCount();
-    const current_ws = tracking.getCurrentWorkspace() orelse return;
-    const ws_state_opt = if (!core.getState().config.tiling.global_layout) workspaces.getState() else null;
-    // defer_win is never set on this path (retileAllWorkspaces never defers
-    // a swap_master flush), so this slot is always flushed as a no-op — but
-    // invokeLayout still needs a valid pointer to write through.
-    var deferred: ?utils.Rect = null;
-    var ctx = makeLayoutCtx(s, &deferred);
-    // Every workspace reached in the loop below is, by construction, not
-    // `current_ws` (skipped just above) — see LayoutCtx.is_background.
-    ctx.is_background = true;
-    const effective_ws = @min(ws_count, max_workspaces);
-
-    var ws_idx: u8 = 0;
-    while (ws_idx < effective_ws) : (ws_idx += 1) {
-        if (ws_idx == current_ws) continue;
-        if (fullscreen.getForWorkspace(ws_idx)) |_| continue;
-
-        const n = collectWorkspaceWindows(s, &s.geom.scratch_wins, ws_idx);
-        if (n == 0) continue;
-        const ws_windows = s.geom.scratch_wins[0..n];
-
-        const mc = overrideMasterConfig(s, resolveMasterWidth(s, ws_state_opt, ws_idx), resolveMasterCount(s, ws_state_opt, ws_idx));
-        defer mc.deinit();
-
-        invokeLayout(selectLayout(s, ws_state_opt, ws_idx, core.getState().config.tiling.global_layout), &ctx, s, ws_windows, screen);
-        updateBorders(s, ws_windows);
-        markWorkspaceGeomValid(s, ws_idx);
-    }
-
-    s.geom.last_retile_area = screen;
-}
-
-/// Retile a specific inactive workspace so its cache is correct before the
-/// user switches to it. MUST be called inside a server grab.
+/// Retile `ws_idx`, which is guaranteed not to be the current workspace.
+/// Used to keep an inactive workspace's geometry cache correct so it is ready
+/// before the user switches to it (see bar.retileAllWorkspaces).
 pub fn retileInactiveWorkspace(ws_idx: u8) void {
     const s = getState();
     if (!s.is_enabled) return;
@@ -747,7 +707,6 @@ pub fn growBottomSlave() void {
     s.geom.workspace_geom_valid_bits = 0;
     retileCurrentWorkspace();
 }
-
 
 /// Shift the scroll-layout viewport left or right by one slot.
 /// `delta` is +1 (right/forward) or -1 (left/backward).
@@ -1018,8 +977,7 @@ fn invokeLayout(
     // and emitOrDefer's doc comment). This is the single place that flushes —
     // layout modules never do it themselves. Reset to null afterward so a
     // stale rect can never leak into a future retile pass that reuses this
-    // scratch slot (e.g. retileAllWorkspaces, which reuses one ctx/slot across
-    // every workspace in its loop).
+    // scratch slot.
     if (ctx.deferred.*) |rect| {
         layouts.configureWithHints(ctx, ctx.defer_win.?, rect);
         ctx.deferred.* = null;

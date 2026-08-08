@@ -1,12 +1,10 @@
 //! Monocle tiling layout
 //! Stacks all windows fullscreen, showing only the topmost one, with optional gap insets.
 
-const core = @import("core");
 const utils = @import("utils");
 const layouts = @import("layouts");
 const tiling = @import("tiling");
 const State = tiling.State;
-const xcb = core.xcb;
 
 /// Tile `windows` into monocle mode using the given screen area.
 pub fn tileWithOffset(

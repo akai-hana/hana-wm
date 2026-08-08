@@ -25,7 +25,6 @@ const bar = @import("bar");
 
 pub const Workspace = struct {
     id: u8,
-    name: []const u8,
     layout: TilingLayout,
     /// Per-workspace layout-variant override from config; null = global default.
     variants: ?types.LayoutVariantOverride = null,
@@ -40,8 +39,8 @@ pub const Workspace = struct {
     /// when the cursor isn't hovering a window.
     last_focused: ?u32 = null,
 
-    pub fn init(id: u8, name: []const u8, default_layout: TilingLayout) Workspace {
-        return .{ .id = id, .name = name, .layout = default_layout };
+    pub fn init(id: u8, default_layout: TilingLayout) Workspace {
+        return .{ .id = id, .layout = default_layout };
     }
 
     pub fn removeAndClearFocus(self: *Workspace, win: u32) void {
@@ -199,8 +198,7 @@ pub fn init() !void {
 
     for (wss, 0..) |*ws, i| {
         const id: u8 = @intCast(i);
-        const name = if (i < tracking.WORKSPACE_LABELS.len) tracking.WORKSPACE_LABELS[i] else "?";
-        ws.* = Workspace.init(id, name, default_layout);
+        ws.* = Workspace.init(id, default_layout);
     }
     applyWorkspaceOverrides(wss, cfg_tiling, default_layout);
 
@@ -302,27 +300,6 @@ inline fn retileRedrawAndFlush() void {
 inline fn retileAndScheduleFlush() void {
     _ = xcb.xcb_grab_server(core.getState().conn);
     retileRedrawAndFlush();
-}
-
-/// `move_window` action (Mod+Shift+N): hard-moves `win` to `target_ws`
-/// exclusively, clearing all other workspace bits.
-pub fn moveWindowExclusive(win: u32, target_ws: u8) void {
-    const s = getState() orelse return;
-    if (target_ws >= s.workspaces.len) return;
-    if (minimize.isMinimized(win)) return;
-
-    const mask = tracking.getWindowWorkspaceMask(win) orelse return;
-    if (mask == tracking.workspaceBit(target_ws)) return; // already exclusive there
-
-    transferFullscreenRecord(win, s.current, target_ws, true);
-    setWindowMask(s, win, tracking.workspaceBit(target_ws));
-
-    if (target_ws != s.current) {
-        evictWindow(win);
-        if (focus.getFocused() == win) focus.clearFocus();
-    }
-
-    retileAndScheduleFlush();
 }
 
 /// Toggle workspace tag N on `win` (Mod+Alt+N). Focus is left unchanged so
@@ -493,14 +470,6 @@ pub fn tagToggleAll(win: u32) void {
     pinToAllWorkspacesToggle(s, win);
 }
 
-pub inline fn getWindowWorkspaceMask(win: u32) ?u64 {
-    return tracking.getWindowWorkspaceMask(win);
-}
-
-pub inline fn isWindowOnWorkspace(win: u32, ws_idx: u8) bool {
-    return tracking.isWindowOnWorkspace(win, ws_idx);
-}
-
 /// The workspace's remembered focus target, falling back to the first
 /// non-minimized window. Clears last_focused when it points at a now-
 /// minimized window so the stale pointer isn't rechecked every call.
@@ -517,37 +486,9 @@ inline fn lastFocusedOrFirst(ws: *Workspace) ?u32 {
     return null;
 }
 
-pub inline fn getCurrentWorkspace() ?u8 {
-    return tracking.getCurrentWorkspace();
-}
-
-pub inline fn isOnCurrentWorkspace(win: u32) bool {
-    return tracking.isOnCurrentWorkspace(win);
-}
-
-/// True when `win` is on the current workspace and not minimized. Used by
-/// focus.focusBestAvailable as a typed `*const fn(u32) bool` predicate.
-pub fn isOnCurrentWorkspaceAndVisible(win: u32) bool {
-    return tracking.isOnCurrentWorkspaceAndVisible(win);
-}
-
 pub inline fn getCurrentWorkspaceObject() ?*Workspace {
     const s = getState() orelse return null;
     return &s.workspaces[s.current];
-}
-
-pub inline fn getWorkspaceCount() usize {
-    const s = getState() orelse return 0;
-    return s.workspaces.len;
-}
-
-/// Lowest-set-bit workspace index for `win`.
-pub inline fn getWorkspaceForWindow(win: u32) ?u8 {
-    return tracking.getWorkspaceForWindow(win);
-}
-
-pub fn isManaged(win: u32) bool {
-    return tracking.isManaged(win);
 }
 
 // ── Workspace switch pipeline ────────────────────────────────────────────

@@ -4,7 +4,6 @@
 
 const std = @import("std");
 
-const constants = @import("constants");
 const types = @import("types");
 
 // Centralized here to avoid repeated @cImport translation across compilation units.
@@ -18,9 +17,7 @@ pub const XK = enum(u32) {
     Escape = 0xff1b,
     Home = 0xff50,
     Left = 0xff51,
-    Up = 0xff52,
     Right = 0xff53,
-    Down = 0xff54,
     End = 0xff57,
     Delete = 0xffff,
 };
@@ -47,10 +44,6 @@ pub const FocusSuppressReason = enum {
 /// DPI and scale factor detected at startup.
 pub const DpiInfo = struct {
     dpi: f32,
-
-    pub fn scaleFactor(self: DpiInfo) f32 {
-        return self.dpi / constants.BASELINE_DPI;
-    }
 };
 
 // conn, screen, root, alloc, and config are written once during startup
@@ -74,12 +67,6 @@ pub inline fn getState() *State {
     @panic("core: getState() called before init()");
 }
 
-/// Safe pre-init query, for code that may run before main() finishes startup
-/// (e.g. a test that imports core without driving the normal boot path).
-pub inline fn getStateOpt() ?*State {
-    return if (state) |*s| s else null;
-}
-
 /// Establishes the process-wide core state. Must be called exactly once,
 /// after the X connection is open and config is loaded, before any
 /// other module calls getState().
@@ -91,8 +78,3 @@ pub fn init(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t, root: Window
 /// (96.0 DPI, no scaling), and is set once during scale detection, never
 /// reassigned afterward.
 pub var dpi_info: DpiInfo = .{ .dpi = 96.0 };
-
-/// True if the XCB connection is open and error-free.
-pub fn isConnValid() bool {
-    return xcb.xcb_connection_has_error(getState().conn) == 0;
-}

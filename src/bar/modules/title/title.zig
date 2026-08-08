@@ -269,7 +269,7 @@ pub fn drawCached(
 /// Must be called on the MAIN THREAD.  Used for both focused and minimized
 /// windows so drawing never has to make blocking X11 round-trips itself.
 ///
-/// `bar.captureIntoSlot` should call this once for the focused window and,
+/// `bar.captureStateIntoSlot` should call this once for the focused window and,
 /// when the workspace has exactly one window and it is minimized, once for
 /// that minimized window — storing the results in `TitleSnapshot.focused_title`
 /// and `TitleSnapshot.minimized_title` respectively.

@@ -1,17 +1,13 @@
 //! Workspace tag indicator segment
 //! Displays the list of workspaces and their activity states on the status bar.
 
-const std = @import("std");
-const core = @import("core");
 const types = @import("types");
 const drawing = @import("drawing");
 const tracking = @import("tracking");
 
-// Both arrays are capped at 20 entries, matching tracking.WORKSPACE_LABELS.
-// Workspaces beyond index 20 still render correctly: draw() falls back to
-// dc.measureTextWidth(label) on a cache miss.
-// Raise this cap if workspace count ever exceeds 20.
-var label_widths: [20]u16 = [_]u16{0} ** 20;
+// Sized to WORKSPACE_LABELS, the largest label source; every workspace index is
+// bounded by tracking.getWorkspaceCount() (≤ MAX_WORKSPACES), so no fallback path.
+var label_widths: [tracking.WORKSPACE_LABELS.len]u16 = [_]u16{0} ** tracking.WORKSPACE_LABELS.len;
 var ws_width: u16 = 0;
 var cache_valid: bool = false;
 /// Cached horizontal offset of the indicator glyph within a workspace cell.
@@ -113,9 +109,6 @@ pub fn draw(
     const baseline_y = dc.baselineY(height);
 
     for (ws_has_windows, 0..) |has_windows, i| {
-        // Advance the cursor unconditionally, even when we skip indicator drawing below.
-        defer x += ws_width;
-
         const is_current = ws_all_active or (i == ws_current);
         const bg = if (is_current) config.selected_bg else config.bg;
         const fg = if (is_current) config.selected_fg else config.fg;
@@ -123,17 +116,18 @@ pub fn draw(
         dc.fillRect(x, 0, ws_width, height, bg);
 
         const label = getLabel(i, config);
-        const label_w = if (i < label_widths.len) label_widths[i] else dc.measureTextWidth(label);
+        const label_w = label_widths[i];
         const text_x = x + (ws_width - label_w) / 2;
         try dc.drawText(text_x, baseline_y, label, fg);
 
-        // No windows on this workspace — nothing more to draw for this cell.
-        if (!has_windows) continue;
+        if (has_windows) {
+            const glyph = if (is_current) config.indicator_focused else config.indicator_unfocused;
+            const color = config.indicator_color orelse fg;
+            // Use the pre-cached intra-cell offset; avoids per-workspace float arithmetic.
+            try dc.drawTextSized(x + cached_ind_x_off, cached_ind_y, glyph, ind_size, color);
+        }
 
-        const glyph = if (is_current) config.indicator_focused else config.indicator_unfocused;
-        const color = config.indicator_color orelse fg;
-        // Use the pre-cached intra-cell offset; avoids per-workspace float arithmetic.
-        try dc.drawTextSized(x + cached_ind_x_off, cached_ind_y, glyph, ind_size, color);
+        x += ws_width;
     }
     return x;
 }

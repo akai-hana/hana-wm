@@ -20,11 +20,9 @@ const scale = @import("scale");
 
 // XSizeHints flags (ICCCM §4.1.2.3)
 const XSizeHintsFlags = struct {
-    const p_min_size: u32 = 0x10;
     const p_max_size: u32 = 0x20;
     const p_resize_inc: u32 = 0x40;
     const p_aspect: u32 = 0x80;
-    const p_base_size: u32 = 0x100;
 };
 
 // WM_HINTS constants (ICCCM §4.1.2.4)
@@ -130,7 +128,7 @@ pub fn saveWindowGeom(win: u32, rect: utils.Rect) void {
 /// X11 coordinates are signed (windows may be partially off-screen or on a
 /// monitor to the left/above the primary), so both fields use i16 to match
 /// the XCB wire type for X/Y configure values.
-pub const Pos = struct { x: i16, y: i16 };
+const Pos = struct { x: i16, y: i16 };
 
 /// Returns the default floating window position
 /// (one quarter of the screen in from the top-left).
@@ -153,8 +151,7 @@ pub fn restoreFloatGeom(win: u32) void {
     if (tiling.getWindowGeom(win)) |rect| {
         utils.configureWindow(conn, win, rect);
     } else {
-        const pos = floatDefaultPos();
-        _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{ @bitCast(@as(i32, pos.x)), @bitCast(@as(i32, pos.y)) });
+        moveFloatToDefaultPos(win);
     }
 }
 
@@ -175,6 +172,13 @@ pub inline fn configureWindowGeom(conn: *xcb.xcb_connection_t, win: u32, geom: c
             geom.border_width,
         },
     );
+}
+
+/// Moves `win` to the default floating position (used when no saved geometry exists).
+pub fn moveFloatToDefaultPos(win: u32) void {
+    const conn = core.getState().conn;
+    const pos = floatDefaultPos();
+    _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{ @bitCast(@as(i32, pos.x)), @bitCast(@as(i32, pos.y)) });
 }
 
 /// Queries the current geometry of `win`.
@@ -200,7 +204,7 @@ pub fn getGeometry(conn: *xcb.xcb_connection_t, win: u32) ?utils.Rect {
 
 /// The four ICCCM focus delivery modes (§4.1.7), determined by the combination of
 /// WM_HINTS.input and WM_TAKE_FOCUS presence in WM_PROTOCOLS.
-pub const InputModel = enum {
+const InputModel = enum {
     no_input, // input=False, no WM_TAKE_FOCUS: window doesn't want focus
     passive, // input=True,  no WM_TAKE_FOCUS: set focus via `XSetInputFocus`
     locally_active, // input=True,  WM_TAKE_FOCUS:    set focus + send protocol
@@ -481,7 +485,7 @@ pub fn sendWMTakeFocusWithCookie(
 ///
 /// Hot paths (setFocus) use fireTakeFocusCookie / sendWMTakeFocusWithCookie to
 /// pipeline the round trip; this is the fallback for callers that don't
-/// pre-fire the cookie (syncPointerFocusBlocking, drainPendingConfirm).
+/// pre-fire the cookie (drainPendingConfirm).
 pub fn sendWMTakeFocus(conn: *xcb.xcb_connection_t, win: u32, time: u32) void {
     const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch return;
     const take_focus_atom = utils.getAtomCached("WM_TAKE_FOCUS") catch return;
@@ -542,17 +546,15 @@ fn queryWMProtocolsProps(conn: *xcb.xcb_connection_t, win: u32) WMProtocolsProps
 
 /// Queries the WM_HINTS input field. Returns true when absent (assume True) or explicitly True.
 fn queryWMHintsAcceptsInput(conn: *xcb.xcb_connection_t, win: u32) bool {
-    const reply = xcb.xcb_get_property_reply(
+    return extractWMHintsInput(conn, xcb.xcb_get_property(
         conn,
-        xcb.xcb_get_property(conn, PROPERTY_NO_DELETE, win, xcb.XCB_ATOM_WM_HINTS, xcb.XCB_ATOM_WM_HINTS, 0, WM_HINTS_LONG_LENGTH),
-        null,
-    ) orelse return true;
-    defer std.c.free(reply);
-
-    if (reply.*.format != 32 or reply.*.value_len < 1) return true;
-
-    const hints: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
-    return parseWMHintsInputFromData(hints, reply.*.value_len);
+        PROPERTY_NO_DELETE,
+        win,
+        xcb.XCB_ATOM_WM_HINTS,
+        xcb.XCB_ATOM_WM_HINTS,
+        0,
+        WM_HINTS_LONG_LENGTH,
+    ));
 }
 
 // Child window resolution
@@ -731,16 +733,17 @@ inline fn tilingActive() bool {
 
 // Window predicates
 
-inline fn isBasicInvalid(win: u32) bool {
+/// True for the null window, the root, or the bar — never valid focus/manage targets.
+pub inline fn isInvalidWindow(win: u32) bool {
     return win == 0 or win == core.getState().root or bar.isBarWindow(win);
 }
 
 pub inline fn isValidManagedWindow(win: u32) bool {
-    return !isBasicInvalid(win) and tracking.isManaged(win);
+    return !isInvalidWindow(win) and tracking.isManaged(win);
 }
 
-pub inline fn isOnCurrentWorkspace(win: u32) bool {
-    if (isBasicInvalid(win)) return false;
+inline fn isOnCurrentWorkspace(win: u32) bool {
+    if (isInvalidWindow(win)) return false;
     return tracking.isOnCurrentWorkspace(win);
 }
 
@@ -828,7 +831,7 @@ fn findSpawnQueueWorkspace(
     // handled correctly by the single-entry oldest-entry fallback below.
     for (entries, 0..) |e, i| {
         if (win_pid != 0 and e.pid == win_pid) {
-            _ = state.spawn_queue.swapRemove(i); // order has no semantic meaning
+            _ = state.spawn_queue.swapRemove(i);
             return e.workspace;
         }
     }
@@ -1589,15 +1592,14 @@ fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
     for (tracking.allWindows()) |entry| {
         const win = entry.win;
         if (entry.mask & cur_bit == 0) continue;
+        const color = borderColor(win);
         if (comptime skip_tiled) {
-            if (core.getState().config.tiling.enabled and tiling.isWindowTiled(win)) continue;
-            _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
+            if (tilingActive() and tiling.isWindowTiled(win)) continue;
         } else {
-            const color = borderColor(win);
             // Dedup via the tiling CacheMap: skip the XCB call when color is unchanged.
             if (tiling.sendBorderColorIfChanged(win, color)) continue;
-            _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
         }
+        _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
     }
 }
 

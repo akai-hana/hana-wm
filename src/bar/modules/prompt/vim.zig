@@ -9,22 +9,22 @@ const xcb = core.xcb;
 pub const XK = core.XK;
 
 // Private integer aliases so switch arms can match against raw xcb_keysym_t values.
-const XK_BackSpace = @intFromEnum(XK.BackSpace);
-const XK_Return = @intFromEnum(XK.Return);
-const XK_Escape = @intFromEnum(XK.Escape);
-const XK_Delete = @intFromEnum(XK.Delete);
-const XK_Left = @intFromEnum(XK.Left);
-const XK_Right = @intFromEnum(XK.Right);
-const XK_Home = @intFromEnum(XK.Home);
-const XK_End = @intFromEnum(XK.End);
+// `pub` so prompt.zig's basic insert handler can match on the same values.
+pub const XK_BackSpace = @intFromEnum(XK.BackSpace);
+pub const XK_Return = @intFromEnum(XK.Return);
+pub const XK_Escape = @intFromEnum(XK.Escape);
+pub const XK_Delete = @intFromEnum(XK.Delete);
+pub const XK_Left = @intFromEnum(XK.Left);
+pub const XK_Right = @intFromEnum(XK.Right);
+pub const XK_Home = @intFromEnum(XK.Home);
+pub const XK_End = @intFromEnum(XK.End);
 
 // Public constants
 
 pub const default_max_input: usize = 512;
 pub const default_undo_max: usize = 32;
 /// Number of named marks supported (a–z).
-pub const mark_count: usize = 26;
-
+const mark_count: usize = 26;
 // Public enums and types
 
 pub const Action = enum { none, deactivate, spawn, spawn_keep };
@@ -48,14 +48,14 @@ pub const Mode = enum(u2) {
 };
 
 /// What the last committed change was — used by `.` to replay it.
-pub const DotKind = enum { none, direct, op_motion, op_line, insert_session };
+const DotKind = enum { none, direct, op_motion, op_line, insert_session };
 
 /// Record of the last atomic change for `.` repeat.
 ///
 /// `dot_insert_buf` / `dot_insert_len` live directly on `VimState` (see
 /// below) so that the allocation is not lost when `vs.dot` is overwritten
 /// with a union literal.
-pub const DotRecord = union(DotKind) {
+const DotRecord = union(DotKind) {
     none: void,
 
     direct: struct {
@@ -80,8 +80,6 @@ pub const DotRecord = union(DotKind) {
 
     op_line: struct {
         op: u8 = 0,
-        op_count: u32 = 1,
-        motion_count: u32 = 1,
     },
 
     insert_session: void,
@@ -326,7 +324,7 @@ pub fn insertSlice(vs: *VimState, slice: []const u8) void {
 /// True for space (0x20) through tilde (0x7e) — the printable ASCII range
 /// accepted as literal input in insert/replace mode and as single-char
 /// targets (find-char, text-object delimiter, colon command, etc.).
-inline fn isPrintableAscii(sym: xcb.xcb_keysym_t) bool {
+pub inline fn isPrintableAscii(sym: xcb.xcb_keysym_t) bool {
     return sym >= 0x20 and sym <= 0x7e;
 }
 
@@ -515,7 +513,7 @@ fn handleOperatorArm(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
         return .none;
     }
     if (vs.pending.op == op) {
-        vs.dot = .{ .op_line = .{ .op = op, .op_count = vs.pending.op_count, .motion_count = vs.pending.count } };
+        vs.dot = .{ .op_line = .{ .op = op } };
         applyOperator(vs, op, .{ .pos = vs.len, .range_start_override = 0 });
     }
     resetPendingCmd(vs);
@@ -958,13 +956,14 @@ fn setCursor(vs: *VimState, mr: MotionResult) void {
     vs.cursor = @min(mr.pos, vs.len -| 1);
 }
 
-fn deleteBefore(vs: *VimState) void {
+/// Low-level deletion ops; `pub` so prompt.zig's basic insert handler reuses them.
+pub fn deleteBefore(vs: *VimState) void {
     if (vs.cursor == 0) return;
     vs.cursor -= 1;
     deleteAfter(vs);
 }
 
-fn deleteAfter(vs: *VimState) void {
+pub fn deleteAfter(vs: *VimState) void {
     if (vs.cursor >= vs.len) return;
     std.mem.copyForwards(u8, vs.buf[vs.cursor .. vs.len - 1], vs.buf[vs.cursor + 1 .. vs.len]);
     vs.len -= 1;

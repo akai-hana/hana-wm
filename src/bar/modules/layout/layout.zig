@@ -7,7 +7,7 @@ const drawing = @import("drawing");
 const tiling = @import("tiling");
 
 /// Returns the icon string for the given layout.
-pub fn getIcon(layout: tiling.Layout) []const u8 {
+fn getIcon(layout: tiling.Layout) []const u8 {
     return switch (layout) {
         .master => "[]=",
         .monocle => "[M]",
@@ -23,7 +23,7 @@ pub fn getIcon(layout: tiling.Layout) []const u8 {
 pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
     // Without tiling all windows are floating by definition.
     if (!core.getState().config.tiling.enabled)
-        return dc.drawSegment(start_x, height, "><>", config.scaledSegmentPadding(height), config.bg, config.fg);
+        return dc.drawSegment(start_x, height, getIcon(.floating), config.scaledSegmentPadding(height), config.bg, config.fg);
 
     const t_state = tiling.getStateOpt() orelse return start_x;
     const icon = getIcon(t_state.config.layout);
