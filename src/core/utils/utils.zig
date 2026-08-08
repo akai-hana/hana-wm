@@ -287,6 +287,26 @@ pub inline fn pushWindowOffscreen(conn: *xcb.xcb_connection_t, win: u32) void {
     _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
 }
 
+/// Like `pushWindowOffscreen`, but also drops `win` to the bottom of the
+/// global stacking order in the same request. Nothing in this codebase ever
+/// lowers a window otherwise (only XCB_STACK_MODE_ABOVE is used, by raises),
+/// so a window that got raised once — e.g. by a layout that isn't supposed
+/// to raise during a background retile — would otherwise stay first in
+/// stacking order forever, regardless of how far offscreen its X coordinate
+/// is parked. Use this instead of `pushWindowOffscreen` for any window whose
+/// hidden state must be defended even if something upstream raised it.
+pub inline fn pushWindowOffscreenAndLower(conn: *xcb.xcb_connection_t, win: u32) void {
+    _ = xcb.xcb_configure_window(
+        conn,
+        win,
+        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_STACK_MODE,
+        &[_]u32{
+            @bitCast(@as(i32, constants.OFFSCREEN_X_POSITION)),
+            xcb.XCB_STACK_MODE_BELOW,
+        },
+    );
+}
+
 /// Ungrabs the X server and flushes pending requests.
 /// Always called as a pair; defined here so every module can share one copy.
 pub inline fn ungrabAndFlush(conn: *xcb.xcb_connection_t) void {

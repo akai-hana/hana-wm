@@ -30,9 +30,16 @@ pub const XKB_RETRY_DELAY_MS: u64 = 20;
 // Offscreen positioning
 // Windows on inactive workspaces are parked at OFFSCREEN_X_POSITION so they
 // are hidden without being unmapped (unmapping causes some apps to pause).
-// -4000 clears the widest common display in use today (4K = 3840 px wide) with
-// a small margin; increase if ultra-wide support beyond 4000 px is ever needed.
-pub const OFFSCREEN_X_POSITION: i32 = -4000;
+//
+// X11's ConfigureWindow request encodes x/y as INT16 on the wire (this is
+// also why utils.Rect.x/y are i16), so -32768 is the hard floor for how far
+// off the left edge a window can ever be parked. The previous value, -4000,
+// only cleared a single 3840px-wide (4K) display with a small margin — on a
+// multi-monitor layout with a display to the left of the primary, an
+// ultrawide, or a 5K/6K panel, -4000 can land back inside real screen real
+// estate instead of off it. -30000 clears any realistic combined desktop
+// while leaving headroom below the INT16 floor.
+pub const OFFSCREEN_X_POSITION: i32 = -30000;
 
 /// Lower bound for detecting whether a window is parked offscreen.
 /// A fixed upper bound is intentionally absent: multi-monitor desktops can
@@ -80,10 +87,28 @@ pub const EventMasks = struct {
     // POINTER_MOTION_HINT is used instead of plain POINTER_MOTION so the X
     // server coalesces motion events and we re-arm with xcb_query_pointer,
     // matching the drag/suppression logic in input.zig.
+    //
+    // BUTTON_RELEASE is ALSO kept (not in DWM's root mask either) for a
+    // related reason: DWM's movemouse()/resizemouse() run their own blocking
+    // XGrabPointer + XMaskEvent loop for the whole drag and read
+    // ButtonRelease directly off that grab, so root never needs to select it.
+    // This WM tracks drags asynchronously instead: input.startDrag() arms
+    // drag.zig's state and returns immediately, and the Super+Button grab
+    // from input.setupGrabs stays engaged (AsyncPointer, not ReplayPointer)
+    // for the rest of the gesture, so MotionNotify/ButtonRelease keep
+    // arriving to us — see keepDragGrab in input.zig for why ReplayPointer
+    // is NOT used there. This bit is what lets that ButtonRelease reach
+    // window.handleEnterNotify's `if (drag.isDragging()) return;` guard is
+    // gated on: without it, a release that isn't caught by the grab (e.g. one
+    // delivered by AllowEvents after the drag) has nothing to fall back to,
+    // drag.active gets stuck true forever, and every hover-focus EnterNotify
+    // — for every window, on every workspace — is silently dropped until the
+    // WM is restarted and resets drag.zig's module state.
     pub const ROOT_WINDOW = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
         xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
         xcb.XCB_EVENT_MASK_KEY_PRESS |
         xcb.XCB_EVENT_MASK_BUTTON_PRESS |
+        xcb.XCB_EVENT_MASK_BUTTON_RELEASE |
         xcb.XCB_EVENT_MASK_POINTER_MOTION_HINT | // DWM: PointerMotionMask
         xcb.XCB_EVENT_MASK_ENTER_WINDOW |
         xcb.XCB_EVENT_MASK_LEAVE_WINDOW |

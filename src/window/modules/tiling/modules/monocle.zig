@@ -49,7 +49,16 @@ pub fn tileWithOffset(
         .height = layouts.shrinkClamped(screen_h, total_margin),
     };
 
-    layouts.configureWithHintsAndRaise(ctx, top_win, top_rect);
+    // Only raise on-screen: a background retile (see LayoutCtx.is_background)
+    // is purely a geometry-cache warm-up for a workspace nobody is viewing,
+    // and raising `top_win` here would make it first in the *global*
+    // stacking order — above the bar and every window on the workspace
+    // actually being looked at — with nothing to ever lower it again.
+    if (ctx.is_background) {
+        layouts.configureWithHints(ctx, top_win, top_rect);
+    } else {
+        layouts.configureWithHintsAndRaise(ctx, top_win, top_rect);
+    }
 
     pushBackgroundWindowsOffscreen(ctx, windows, top_win);
 }

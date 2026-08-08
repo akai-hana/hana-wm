@@ -3,7 +3,7 @@
 
 const std = @import("std");
 
-// libc bindings for fork/exec/wait — no Zig stdlib wrappers exist for these low-level syscalls.
+// libc bindings for fork/exec/wait (no Zig stdlib wrappers exist for these low-level syscalls)
 const c = @cImport({
     @cInclude("unistd.h");
     @cInclude("sys/wait.h");
@@ -160,7 +160,17 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
 
     if (super_held and (event.detail == mouse_button_left or event.detail == mouse_button_right)) {
         drag.startDrag(managed_window, event.detail, event.root_x, event.root_y);
-        releaseGrab(event.time);
+        // Do NOT releaseGrab (ReplayPointer) here. Replaying hands the rest
+        // of the gesture to normal event delivery, which almost always means
+        // the app itself — real toolkits select ButtonReleaseMask on their
+        // own windows, and the pointer sits over that (moving) window for
+        // the whole drag. That swallows our ButtonRelease before it ever
+        // reaches root, so drag.stopDrag() never runs and drag.active is
+        // stuck true until the WM is restarted (see keepDragGrab below).
+        // AsyncPointer instead keeps the Super+Button grab from setupGrabs
+        // engaged, so MotionNotify/ButtonRelease keep arriving to us — the
+        // grab ends automatically once the button is physically released.
+        keepDragGrab(event.time);
         return;
     }
 
@@ -183,17 +193,20 @@ pub fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t) void {
 pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
     focus.setLastEventTime(event.time);
 
+    // POINTER_MOTION_HINT delivers one event per gesture; re-arm with a
+    // QueryPointer. Fire-and-discard — the server re-arms on receipt, not
+    // reply. This must happen on EVERY path through this handler, including
+    // while dragging — skipping it here would starve the drag of any motion
+    // event after the first, since the hint is not re-armed by anything else.
+    const cs = core.getState();
+    xcb.xcb_discard_reply(cs.conn, xcb.xcb_query_pointer(cs.conn, cs.root).sequence);
+
     if (drag.isDragging()) {
         drag.updateDrag(event.root_x, event.root_y);
         return;
     }
 
     if (focus.getSuppressReason() != .none) focus.setSuppressReason(.none);
-
-    // POINTER_MOTION_HINT delivers one event per gesture; re-arm with a
-    // QueryPointer. Fire-and-discard — the server re-arms on receipt, not reply.
-    const cs = core.getState();
-    xcb.xcb_discard_reply(cs.conn, xcb.xcb_query_pointer(cs.conn, cs.root).sequence);
 }
 
 // Window operations
@@ -306,7 +319,7 @@ fn executeAction(action: *const types.Action) !void {
 fn executeTilingAction(action: *const types.Action) void {
     switch (action.*) {
         .toggle_floating_window => if (focus.getFocused()) |win|
-            withTilingGrab(struct {
+            withTilingGrabKeepFocus(struct {
                 win: u32,
                 fn call(self: @This()) void {
                     tiling.toggleWindowFloat(self.win);
@@ -701,6 +714,33 @@ fn tryConfigMouseBind(mods: u16, button: u8, win: u32, time: u32) bool {
 /// value-capturing struct with a `call(self) void` method when a window ID
 /// needs to ride along (see toggle_floating_window below).
 inline fn withTilingGrab(op: anytype) void {
+    withTilingGrabImpl(op, true);
+}
+
+/// Like `withTilingGrab`, but does not re-sync focus to whatever window is
+/// currently under the pointer afterward.
+///
+/// Used for actions that already have an explicit, keyboard-chosen target
+/// window (e.g. toggle_floating_window's keybind path). The pointer-sync
+/// step exists so mouse-driven reflows (layout changes, master swaps) hand
+/// focus to whichever window physically ends up under a stationary cursor.
+/// But when the action was itself keyboard-triggered against a specific
+/// window, that same step can silently move keyboard focus onto a
+/// completely different, unrelated window the cursor merely happens to be
+/// resting over (e.g. a floating window stacked on top of the one just
+/// acted on) — so a second, un-intended keypress (autorepeat, a fast
+/// double-tap, etc.) then lands on that other window instead of the one
+/// the user was just interacting with.
+///
+/// This guarantee depends on suppression staying active until any crossing
+/// events the reflow itself generates have actually been delivered and
+/// filtered — see beginTilingOpSettle's doc comment in focus.zig for why
+/// that can't just be done synchronously here.
+inline fn withTilingGrabKeepFocus(op: anytype) void {
+    withTilingGrabImpl(op, false);
+}
+
+inline fn withTilingGrabImpl(op: anytype, sync_pointer: bool) void {
     const conn = core.getState().conn;
     _ = xcb.xcb_grab_server(conn);
     // Suppress EnterNotify events generated as a side effect of windows
@@ -716,11 +756,28 @@ inline fn withTilingGrab(op: anytype) void {
     window.updateFloatingWindowBorders();
     window.markBordersFlushed();
     bar.redrawInsideGrab();
-    // Once the layout has settled, resolve focus against where the pointer
-    // actually rests — mirrors executeSwapMaster's use of the same call.
-    // Clears the suppression above and queues an authoritative query that
-    // drainPointerSync() consumes on the next event-loop iteration.
-    focus.beginPointerSync();
+    if (sync_pointer) {
+        // Once the layout has settled, resolve focus against where the pointer
+        // actually rests — mirrors executeSwapMaster's use of the same call.
+        // Clears the suppression above and queues an authoritative query that
+        // drainPointerSync() consumes on the next event-loop iteration.
+        focus.beginPointerSync();
+    } else {
+        // No pointer resync — but suppression still needs clearing eventually,
+        // or hover-focus stays masked until some other action happens to call
+        // beginPointerSync. It must NOT be cleared synchronously here, though:
+        // the configure_window calls queued above by `op()` are not sent to
+        // the X server until ungrabAndFlush below, so clearing suppression
+        // now would turn EnterNotify filtering back off before the server has
+        // even processed the reflow that suppression exists to mask — letting
+        // a real crossing event (e.g. a neighbour window's edge sliding under
+        // a stationary cursor) slip through unfiltered and silently steal
+        // focus. beginTilingOpSettle defers the clear to the next
+        // event-dispatch iteration, after any such event is guaranteed to
+        // have already been dispatched and filtered. See its doc comment in
+        // focus.zig for the full ordering argument.
+        focus.beginTilingOpSettle();
+    }
     utils.ungrabAndFlush(conn);
 }
 
@@ -733,10 +790,31 @@ inline fn replayPointer(time: u32) void {
 }
 
 /// Releases both the pointer and keyboard SYNC grabs acquired on Super+click.
-/// Always pass event.time — never XCB_CURRENT_TIME.
+/// Replays the pointer, so the triggering click is handed to normal event
+/// delivery (i.e. to the app underneath). Only safe for click paths that
+/// don't need to keep tracking pointer events afterward — NOT for drag
+/// start; use keepDragGrab for that. Always pass event.time — never
+/// XCB_CURRENT_TIME.
 inline fn releaseGrab(time: u32) void {
     const conn = core.getState().conn;
     _ = xcb.xcb_allow_events(conn, xcb.XCB_ALLOW_REPLAY_POINTER, time);
+    _ = xcb.xcb_allow_events(conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, time);
+    _ = xcb.xcb_flush(conn);
+}
+
+/// Un-freezes the pointer for a drag gesture while keeping the Super+Button
+/// grab from setupGrabs (root, SYNC, event_mask BUTTON_PRESS|BUTTON_RELEASE|
+/// POINTER_MOTION) engaged — AsyncPointer resumes delivery without replaying
+/// or ending the grab, unlike releaseGrab's ReplayPointer. That guarantees
+/// the drag's MotionNotify/ButtonRelease keep arriving to us (dispatched to
+/// input.handleMotionNotify/handleButtonRelease) instead of going straight
+/// to whichever client window the cursor ends up over. The grab ends on its
+/// own once the button is physically released, so no matching "reacquire"
+/// call is needed. The keyboard grab is released immediately since dragging
+/// doesn't need it held. Always pass event.time — never XCB_CURRENT_TIME.
+inline fn keepDragGrab(time: u32) void {
+    const conn = core.getState().conn;
+    _ = xcb.xcb_allow_events(conn, xcb.XCB_ALLOW_ASYNC_POINTER, time);
     _ = xcb.xcb_allow_events(conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, time);
     _ = xcb.xcb_flush(conn);
 }

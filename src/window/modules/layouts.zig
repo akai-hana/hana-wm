@@ -76,6 +76,14 @@ pub const LayoutCtx = struct {
     /// Scratch slot `emitOrDefer` writes into when a window matches
     /// `defer_win`; flushed once by `invokeLayout` after the layout returns.
     deferred: *?utils.Rect,
+    /// True when this retile targets a workspace other than the one
+    /// currently on screen (see tiling.retileInactiveWorkspace /
+    /// retileAllWorkspaces). There is no "visible" window to promote on a
+    /// workspace nobody is looking at, so any layout that raises a window
+    /// (e.g. monocle) must skip the raise while this is set — raising here
+    /// would leave that window first in the *global* stacking order, ahead
+    /// of the bar and every window on the workspace actually being viewed.
+    is_background: bool = false,
 };
 
 pub inline fn rectsEqual(a: utils.Rect, b: utils.Rect) bool {
