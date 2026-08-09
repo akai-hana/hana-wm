@@ -30,12 +30,13 @@ pub fn tileWithOffset(
     if (windows.len == 0) return;
 
     const m = state.margins();
-    const border2 = 2 *| m.border;
+    const border2 = utils.doubledBorder(m);
 
-    var x: i32 = @intCast(m.gap);
-    var y: i32 = @intCast(y_offset +| m.gap);
-    var w: u16 = screen_w -| m.gap *| 2;
-    var h: u16 = screen_h -| m.gap *| 2;
+    const outer = layouts.outerArea(screen_w, screen_h, y_offset, m.gap);
+    var x: i32 = outer.x;
+    var y: i32 = outer.y;
+    var w: u16 = outer.w;
+    var h: u16 = outer.h;
     var dir: SpiralDirection = .right;
 
     // splitAndAdvance's emitOrDefer honors ctx.defer_win — see LayoutCtx.defer_win.

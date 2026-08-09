@@ -19,7 +19,7 @@ pub fn tileWithOffset(
 
     const m = state.margins();
     const inset: u16 = if (state.config.layout_variants.monocle == .gaps) m.gap else 0;
-    const total_margin = m.border * 2 + inset * 2;
+    const total_margin = utils.doubledBorder(m) + inset * 2;
 
     // Pick the top (visible) window: prefer the focused window, falling back
     // to the list tail if focus info is unavailable. On close, this ensures

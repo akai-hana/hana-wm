@@ -69,9 +69,9 @@ pub fn tileWithOffset(
 
     // Inner width accounts for the gap between master and stack panes.
     const master_inner_w = if (stack_n > 0)
-        layouts.shrinkClamped(master_w, m.gap + (m.gap / 2 + 2 * m.border))
+        layouts.shrinkClamped(master_w, m.gap + (m.gap / 2 + utils.doubledBorder(m)))
     else
-        layouts.shrinkClamped(master_w, m.gap + (m.gap + 2 * m.border));
+        layouts.shrinkClamped(master_w, m.gap + (m.gap + utils.doubledBorder(m)));
 
     // The master column never uses the stack boost — it isn't a "slave"
     // column, so mod+n/mod+o have no effect on it.
@@ -374,12 +374,14 @@ inline fn calcAvailableHeight(total_h: u16, count: u16, m: utils.Margins) u16 {
 /// Height of window `i` out of `count`, distributing `available` pixels via
 /// cumulative integer division. No two siblings differ by more than 1 px.
 inline fn windowHeight(i: u16, count: u16, available: u16) u16 {
-    const h = ((i + 1) * available / count) -| (i * available / count);
-    return @max(constants.MIN_WINDOW_DIM, h);
+    const hi: u32 = (@as(u32, i) + 1) * @as(u32, available) / @as(u32, count);
+    const lo: u32 = @as(u32, i) * @as(u32, available) / @as(u32, count);
+    return @max(constants.MIN_WINDOW_DIM, @as(u16, @intCast(hi - lo)));
 }
 
 /// Y position of window `i`, derived from the same cumulative formula so that
 /// preceding windows' heights (which may vary by 1 px) are accounted for.
 inline fn windowY(i: u16, count: u16, available: u16, y_offset: u16, m: utils.Margins) u16 {
-    return y_offset +| m.gap +| (i * available / count) +| i *| (m.gap +| 2 *| m.border);
+    const cum: u32 = @as(u32, i) * @as(u32, available) / @as(u32, count);
+    return y_offset +| m.gap +| @as(u16, @intCast(cum)) +| i *| (m.gap +| 2 *| m.border);
 }

@@ -145,43 +145,42 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
 
     const cs = core.getState();
     const clicked_window = if (event.child != 0) event.child else event.event;
-    const managed_window = window.findManagedWindow(cs.conn, clicked_window, tracking.isManaged);
+    const super_held = (event.state & constants.MOD_SUPER) != 0;
+    const mods = utils.normalizeModifiers(event.state);
 
+    // Scroll-wheel binds (buttons 4/5) are viewport actions that don't target
+    // a specific window, so they're checked before the managed-window guard
+    // that would otherwise discard events fired over the desktop/bar.
+    if (super_held and (event.detail == mouse_button_scroll_up or event.detail == mouse_button_scroll_down)) {
+        if (!tryConfigMouseBind(mods, event.detail, 0, event.time))
+            replayPointer(event.time);
+        return;
+    }
+
+    const managed_window = window.findManagedWindow(cs.conn, clicked_window, tracking.isManaged);
     if (clicked_window == 0 or clicked_window == cs.root or managed_window == 0) {
         replayPointer(event.time);
         return;
     }
 
-    const super_held = (event.state & constants.MOD_SUPER) != 0;
-    const mods = utils.normalizeModifiers(event.state);
-
-    // Scroll-wheel binds (buttons 4/5) are viewport actions — check before the
-    // managed-window guard that would otherwise discard desktop/bar events.
-    if (super_held and (event.detail == mouse_button_scroll_up or event.detail == mouse_button_scroll_down)) {
-        if (!tryConfigMouseBind(mods, event.detail, 0, event.time)) {
-            replayPointer(event.time);
-        }
-        return;
-    }
-
     if (super_held) {
         if (tryConfigMouseBind(mods, event.detail, managed_window, event.time)) return;
-    }
 
-    if (super_held and (event.detail == mouse_button_left or event.detail == mouse_button_right)) {
-        drag.startDrag(managed_window, event.detail, event.root_x, event.root_y);
-        // Do NOT releaseGrab (ReplayPointer) here. Replaying hands the rest
-        // of the gesture to normal event delivery, which almost always means
-        // the app itself — real toolkits select ButtonReleaseMask on their
-        // own windows, and the pointer sits over that (moving) window for
-        // the whole drag. That swallows our ButtonRelease before it ever
-        // reaches root, so drag.stopDrag() never runs and drag.active is
-        // stuck true until the WM is restarted (see keepDragGrab below).
-        // AsyncPointer instead keeps the Super+Button grab from setupGrabs
-        // engaged, so MotionNotify/ButtonRelease keep arriving to us — the
-        // grab ends automatically once the button is physically released.
-        keepDragGrab(event.time);
-        return;
+        if (event.detail == mouse_button_left or event.detail == mouse_button_right) {
+            drag.startDrag(managed_window, event.detail, event.root_x, event.root_y);
+            // Do NOT releaseGrab (ReplayPointer) here. Replaying hands the rest
+            // of the gesture to normal event delivery, which almost always means
+            // the app itself — real toolkits select ButtonReleaseMask on their
+            // own windows, and the pointer sits over that (moving) window for
+            // the whole drag. That swallows our ButtonRelease before it ever
+            // reaches root, so drag.stopDrag() never runs and drag.active is
+            // stuck true until the WM is restarted (see keepDragGrab below).
+            // AsyncPointer instead keeps the Super+Button grab from setupGrabs
+            // engaged, so MotionNotify/ButtonRelease keep arriving to us — the
+            // grab ends automatically once the button is physically released.
+            keepDragGrab(event.time);
+            return;
+        }
     }
 
     // Fallback: any other click focuses and raises the window. Raise must
@@ -356,27 +355,24 @@ fn executeTilingAction(action: *const types.Action) void {
 fn executeSwapMaster(action: *const types.Action) void {
     const conn = core.getState().conn;
     _ = xcb.xcb_grab_server(conn);
-    if (action.* == .swap_master) {
-        // Capture the focused window ID before the swap so we can pass it as
-        // defer_configure — the shrinking window fills its new slot before the
-        // growing window vacates its old one, eliminating a one-frame gap.
-        const new_master = focus.getFocused();
-        _ = tiling.swapWithMaster();
-        tiling.retileCurrentWorkspaceDeferred(new_master);
-    } else {
-        // follow-focus: capture, reorder, transfer focus, retile deferred —
-        // all inside the grab so the border change is part of the same flush.
-        //
-        // Focus MUST be transferred before the retile: layouts that derive
-        // their visible/raised window from focus.getFocused() at retile time
-        // (e.g. monocle — see monocle.zig's tileWithOffset) would otherwise
-        // retile against the stale, about-to-be-displaced window, then have
-        // no follow-up retile to correct course once focus actually moves.
-        const new_master = focus.getFocused();
-        const displaced = tiling.swapWithMaster();
+
+    // Capture the focused window ID before the swap so we can pass it as
+    // defer_configure — the shrinking window fills its new slot before the
+    // growing window vacates its old one, eliminating a one-frame gap.
+    const new_master = focus.getFocused();
+    const displaced = tiling.swapWithMaster();
+
+    // follow-focus only: transfer focus before the retile. Focus MUST move
+    // first — layouts that derive their visible/raised window from
+    // focus.getFocused() at retile time (e.g. monocle — see monocle.zig's
+    // tileWithOffset) would otherwise retile against the stale,
+    // about-to-be-displaced window, then have no follow-up retile to correct
+    // course once focus actually moves.
+    if (action.* == .swap_master_focus_swap)
         if (displaced) |win| focus.setFocus(win, .tiling_operation);
-        tiling.retileCurrentWorkspaceDeferred(new_master);
-    }
+
+    tiling.retileCurrentWorkspaceDeferred(new_master);
+
     // Async pointer-sync: queues the cookie without blocking so no premature
     // flush occurs inside the grab. drainPointerSync() consumes it next loop.
     focus.beginPointerSync();

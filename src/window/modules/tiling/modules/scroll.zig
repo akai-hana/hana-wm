@@ -151,7 +151,7 @@ pub fn tileWithOffset(
     // adjacent windows together share exactly one full gap.
     const gap_i32: i32 = @intCast(m.gap);
     const gap_half: i32 = @intCast(m.gap / 2);
-    const border2: i32 = 2 * @as(i32, @intCast(m.border));
+    const border2: i32 = @as(i32, utils.doubledBorder(m));
 
     // emitOrDefer honors ctx.defer_win — see LayoutCtx.defer_win.
     for (windows, 0..) |win, i| {

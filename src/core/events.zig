@@ -97,16 +97,10 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
 
 // Signal handling
 
-// anytype: called with both std.os.linux.SIG (signalHandler, the kernel's
-// callback signature) and std.posix.SIG (sigaction setup and dispatchSignal)
-// — two different enum types for the same signal numbers.
-inline fn sigToU8(sig: anytype) u8 {
-    return @intCast(@intFromEnum(sig));
-}
-
 /// Async-signal-safe handler: writes the signal number as a byte to the pipe.
-fn signalHandler(signo: std.os.linux.SIG) callconv(.c) void {
-    _ = std.os.linux.write(signal_pipe[1], &[_]u8{sigToU8(signo)}, 1);
+fn signalHandler(signo: std.posix.SIG) callconv(.c) void {
+    const byte: u8 = @intCast(@intFromEnum(signo));
+    _ = std.os.linux.write(signal_pipe[1], &[_]u8{byte}, 1);
 }
 
 /// Creates the signal self-pipe and installs handlers for SIGHUP/SIGTERM/SIGINT/SIGCHLD.
@@ -119,10 +113,9 @@ pub fn setupSignalPipe() !void {
         .flags = std.posix.SA.RESTART,
     };
 
-    std.posix.sigaction(std.posix.SIG.HUP, &sa, null);
-    std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
-    std.posix.sigaction(std.posix.SIG.INT, &sa, null);
-    std.posix.sigaction(std.posix.SIG.CHLD, &sa, null); // reaped in dispatchSignal, below
+    // SIGCHLD is reaped in dispatchSignal; the rest control the event loop.
+    inline for (.{ std.posix.SIG.HUP, std.posix.SIG.TERM, std.posix.SIG.INT, std.posix.SIG.CHLD }) |sig|
+        std.posix.sigaction(sig, &sa, null);
 }
 
 /// Closes both ends of the signal pipe.
@@ -136,13 +129,13 @@ pub fn deinitSignalPipe() void {
 
 /// Dispatches a single signal byte to the appropriate handler.
 inline fn dispatchSignal(byte: u8) void {
-    switch (byte) {
-        sigToU8(std.posix.SIG.HUP) => utils.reload(),
-        sigToU8(std.posix.SIG.TERM), sigToU8(std.posix.SIG.INT) => utils.quit(),
+    switch (@as(std.posix.SIG, @enumFromInt(byte))) {
+        .HUP => utils.reload(),
+        .TERM, .INT => utils.quit(),
         // SIGCHLD: an intermediate double-fork child has exited.
         // Reap it with WNOHANG, then immediately drain the spawn pipes so
         // registerSpawn fires without waiting for the next XCB event batch.
-        sigToU8(std.posix.SIG.CHLD) => {
+        .CHLD => {
             input.reapPendingChildren();
             input.drainPendingSpawns();
         },

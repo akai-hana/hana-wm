@@ -165,8 +165,8 @@ pub inline fn configureWindowGeom(conn: *xcb.xcb_connection_t, win: u32, geom: c
             xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
             xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
         &[_]u32{
-            @bitCast(@as(i32, geom.x)),
-            @bitCast(@as(i32, geom.y)),
+            utils.toXcbCoord(geom.x),
+            utils.toXcbCoord(geom.y),
             geom.width,
             geom.height,
             geom.border_width,
@@ -178,7 +178,7 @@ pub inline fn configureWindowGeom(conn: *xcb.xcb_connection_t, win: u32, geom: c
 pub fn moveFloatToDefaultPos(win: u32) void {
     const conn = core.getState().conn;
     const pos = floatDefaultPos();
-    _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{ @bitCast(@as(i32, pos.x)), @bitCast(@as(i32, pos.y)) });
+    _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{ utils.toXcbCoord(pos.x), utils.toXcbCoord(pos.y) });
 }
 
 /// Queries the current geometry of `win`.
@@ -1348,8 +1348,8 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
 
     const GeomField = struct { bit: u16, value: u32 };
     const geom_fields = [_]GeomField{
-        .{ .bit = xcb.XCB_CONFIG_WINDOW_X, .value = @bitCast(@as(i32, event.x)) },
-        .{ .bit = xcb.XCB_CONFIG_WINDOW_Y, .value = @bitCast(@as(i32, event.y)) },
+        .{ .bit = xcb.XCB_CONFIG_WINDOW_X, .value = utils.toXcbCoord(event.x) },
+        .{ .bit = xcb.XCB_CONFIG_WINDOW_Y, .value = utils.toXcbCoord(event.y) },
         .{ .bit = xcb.XCB_CONFIG_WINDOW_WIDTH, .value = event.width },
         .{ .bit = xcb.XCB_CONFIG_WINDOW_HEIGHT, .value = event.height },
         .{ .bit = xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, .value = event.border_width },

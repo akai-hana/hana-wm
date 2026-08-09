@@ -32,12 +32,9 @@ pub fn main() !void {
     // core.init() copies loaded_config by value and becomes the canonical
     // owner; must run before any core.getState() call.
     core.init(x.conn, x.screen, x.root, alloc, loaded_config);
-    // config.load() already built loaded_config's keybind_resolver, and
-    // Config.deinit tears it down internally (before freeing the keybindings
-    // whose Actions it points into) — see KeybindResolver in types.zig. That
-    // used to be two separate `defer`s here, relying on their LIFO relative
-    // order to get the teardown sequence right; now it's just this one
-    // (item 10 in the config-subsystem review).
+    // Config.deinit tears the keybind_resolver down internally, before
+    // freeing the keybindings whose Actions it points into — so a single
+    // defer on the config suffices (see KeybindResolver in types.zig).
     defer core.getState().config.deinit(alloc);
 
     try utils.initAtomCache(x.conn);

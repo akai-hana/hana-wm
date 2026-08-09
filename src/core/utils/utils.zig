@@ -61,20 +61,26 @@ pub const Margins = struct {
     border: u16,
 };
 
+/// Twice the border width (left+right / top+bottom inset).
+pub inline fn doubledBorder(m: Margins) u16 {
+    return 2 *| m.border;
+}
+
+/// Reinterprets a signed X11 coordinate (i16 on the wire) as the u32 value
+/// XCB's configure_window value array expects.
+pub inline fn toXcbCoord(v: i16) u32 {
+    return @bitCast(@as(i32, v));
+}
+
 /// Moves and resizes `win` without touching border_width.
 /// Use `window.configureWindowGeom` when border_width must change atomically.
 pub inline fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect) void {
-    const coord = struct {
-        inline fn u(v: i16) u32 {
-            return @bitCast(@as(i32, v));
-        }
-    }.u;
     _ = xcb.xcb_configure_window(
         conn,
         win,
         xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
             xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT,
-        &[_]u32{ coord(rect.x), coord(rect.y), rect.width, rect.height },
+        &[_]u32{ toXcbCoord(rect.x), toXcbCoord(rect.y), rect.width, rect.height },
     );
 }
 
@@ -236,10 +242,20 @@ pub fn advertiseEwmhSupport(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen
 
 // Property helpers
 
-/// Canonical implementations of the no-DPI-info scaling formulas.
-/// scale.zig delegates scaleBorderWidth/scaleMasterWidth to these directly
-/// (they need no DPI lookup), so there is exactly one formula to maintain.
-pub const scale_fallback = struct {
+/// Canonical scaling formulas — pure functions of a ScalableValue, no DPI
+/// lookup. scale.zig and config.zig both call into these, so there is exactly
+/// one formula to maintain.
+pub const scaling = struct {
+    /// Resolves a ScalableValue to a ratio: `v%` becomes v/100, an absolute
+    /// value stays as-is.
+    pub inline fn asRatio(value: anytype) f32 {
+        return if (value.is_percentage) value.value / 100.0 else value.value;
+    }
+    /// Resolves a ScalableValue against a reference dimension: `v%` becomes
+    /// reference * v/100, an absolute value stays as-is (reference unused).
+    pub inline fn scaleToPixels(value: anytype, reference: f32) f32 {
+        return if (value.is_percentage) reference * (value.value / 100.0) else value.value;
+    }
     pub fn scaleMasterWidth(value: anytype) f32 {
         return if (value.is_percentage) value.value / 100.0 else -value.value;
     }
@@ -254,7 +270,7 @@ pub const scale_fallback = struct {
 
 /// Returns the raw timespec for the given clock id (REALTIME/MONOTONIC).
 /// Uses the VDSO-accelerated clock_gettime on supported kernels.
-pub inline fn clockTs(clock_id: std.os.linux.clockid_t) std.os.linux.timespec {
+inline fn clockTs(clock_id: std.os.linux.clockid_t) std.os.linux.timespec {
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(clock_id, &ts);
     return ts;
@@ -360,10 +376,6 @@ pub const Condition = struct {
         _ = pthread_condattr_setclock(attr, @intFromEnum(std.os.linux.CLOCK.MONOTONIC));
         _ = pthread_cond_init(&c.inner, attr);
         _ = pthread_condattr_destroy(attr);
-    }
-
-    pub fn wait(c: *Condition, m: *Mutex) void {
-        _ = std.c.pthread_cond_wait(&c.inner, &m.inner);
     }
 
     /// Waits up to `timeout_ns` nanoseconds; returns error.Timeout on expiry.

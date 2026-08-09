@@ -24,12 +24,6 @@ pub const BAR_MIN_HEIGHT_PX: u16 = 20;
 /// Maximum long-words to request for the RESOURCE_MANAGER property (16 KB).
 const RESOURCE_MANAGER_MAX_LEN: u32 = 4096;
 
-// Not thread-safe; assumes detectDpi() is only called from the main thread.
-var dpi_cache: ?DpiInfo = null;
-
-/// Re-exported from core so callers that only import scale still get the type.
-const DpiInfo = core.DpiInfo;
-
 /// Reads the Xft.dpi value from the X RESOURCE_MANAGER property, if present.
 /// Returns null when the property is absent, empty, or does not contain an Xft.dpi entry.
 fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
@@ -83,46 +77,39 @@ fn calcDpiFromGeometry(screen: *xcb.xcb_screen_t) f32 {
     return avg_dpi;
 }
 
-/// Detect DPI, returning a cached result until the DPI cache is invalidated.
-/// Priority: Xft.dpi from X resources -> geometry calculation -> BASELINE_DPI (96).
-pub fn detectDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) DpiInfo {
-    if (dpi_cache) |cached| return cached;
-
+/// Detect DPI: Xft.dpi from X resources -> geometry calculation -> BASELINE_DPI (96).
+/// Called once at startup; core.dpi_info holds the result for the process lifetime.
+pub fn detectDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) f32 {
     if (readXftDpi(conn, screen)) |xft_dpi| {
         debug.info("Using DPI from X resources (Xft.dpi): {d:.1}", .{xft_dpi});
-        const info: DpiInfo = .{ .dpi = xft_dpi };
-        dpi_cache = info;
-        return info;
+        return xft_dpi;
     }
 
     const geometry_dpi = calcDpiFromGeometry(screen);
-    const dpi = if (geometry_dpi < 50.0 or geometry_dpi > 300.0) blk: {
-        debug.warn("Calculated DPI {d:.1} seems unreasonable, using baseline DPI", .{geometry_dpi});
-        break :blk BASELINE_DPI;
-    } else blk: {
+    const reasonable = geometry_dpi >= 50.0 and geometry_dpi <= 300.0;
+    if (reasonable) {
         debug.info("Using geometry-calculated DPI: {d:.1}", .{geometry_dpi});
-        break :blk geometry_dpi;
-    };
+    } else {
+        debug.warn("Calculated DPI {d:.1} seems unreasonable, using baseline DPI", .{geometry_dpi});
+    }
 
-    const info: DpiInfo = .{ .dpi = dpi };
-    dpi_cache = info;
-    return info;
+    return if (reasonable) geometry_dpi else BASELINE_DPI;
 }
 
 /// Scale a border or gap value. Percentages are screen-relative and applied
 /// as-is (no global scale, or HiDPI displays would get double-scaled);
 /// absolute pixel values pass through unchanged.
-/// See utils.scale_fallback.scaleBorderWidth, the shared source of truth.
+/// See utils.scaling.scaleBorderWidth, the shared source of truth.
 pub fn scaleBorderWidth(value: parser.ScalableValue, reference_dimension: u16) u16 {
-    return utils.scale_fallback.scaleBorderWidth(value, reference_dimension);
+    return utils.scaling.scaleBorderWidth(value, reference_dimension);
 }
 
 /// Returns the master width as a fraction (0.0–1.0) for percentage values,
 /// or as a negative float encoding an absolute pixel value otherwise
 /// (callers should treat negative results as `@abs(result)` pixels).
-/// See utils.scale_fallback.scaleMasterWidth, the shared source of truth.
+/// See utils.scaling.scaleMasterWidth, the shared source of truth.
 pub fn scaleMasterWidth(value: parser.ScalableValue) f32 {
-    return utils.scale_fallback.scaleMasterWidth(value);
+    return utils.scaling.scaleMasterWidth(value);
 }
 
 /// Scales a font size value against the screen height, clamped to a minimum of 1px.
@@ -137,10 +124,7 @@ pub fn scaleFontSize(value: parser.ScalableValue, screen: *xcb.xcb_screen_t) u16
 /// Converts a scalable bar height value to pixels, clamped to BAR_MIN_HEIGHT_PX.
 pub fn scaleBarHeight(value: parser.ScalableValue, screen_height: u16) u16 {
     const screen_height_f: f32 = @floatFromInt(screen_height);
-    const scaled_px: f32 = if (value.is_percentage)
-        screen_height_f * (value.value / 100.0)
-    else
-        value.value;
+    const scaled_px: f32 = utils.scaling.scaleToPixels(value, screen_height_f);
     return @max(BAR_MIN_HEIGHT_PX, @as(u16, @intFromFloat(@round(scaled_px))));
 }
 

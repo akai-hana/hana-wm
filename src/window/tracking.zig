@@ -7,8 +7,9 @@ const constants = @import("constants");
 const minimize = @import("minimize");
 
 // Fixed-size ordered window list.
-// Used by Workspace in workspaces.zig; kept here so it can be imported from
-// the always-present tracking module rather than the optional workspaces module.
+// Embedded once as tiling.State.windows (a single global instance, not one
+// per workspace); kept here so tiling.zig can import it from the always-present
+// tracking module.
 
 pub const Tracking = struct {
     /// Maximum windows tracked across the whole window manager (all
@@ -21,8 +22,8 @@ pub const Tracking = struct {
     ///
     /// If this is regularly too small for your workflow, raise
     /// constants.Limits.MAX_TILED_WINDOWS and rebuild.  The struct is
-    /// stack-allocated, so the cost is 4 bytes per capacity slot per
-    /// Workspace instance.
+    /// stack-allocated, so the cost is 4 bytes per capacity slot — 800 B at
+    /// MAX_TILED_WINDOWS.
     const capacity = constants.Limits.MAX_TILED_WINDOWS;
 
     // `len` below is a u8, which only stays a valid counter for `capacity`

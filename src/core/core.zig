@@ -41,11 +41,6 @@ pub const FocusSuppressReason = enum {
     tiling_operation,
 };
 
-/// DPI and scale factor detected at startup.
-pub const DpiInfo = struct {
-    dpi: f32,
-};
-
 // conn, screen, root, alloc, and config are written once during startup
 // (config is later replaced wholesale on reload — see events.zig). Bundled
 // into one optional State, rather than five `undefined` globals, so any
@@ -77,4 +72,4 @@ pub fn init(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t, root: Window
 /// Stays outside State: unlike State's fields it has a safe default
 /// (96.0 DPI, no scaling), and is set once during scale detection, never
 /// reassigned afterward.
-pub var dpi_info: DpiInfo = .{ .dpi = 96.0 };
+pub var dpi_info: f32 = 96.0;
