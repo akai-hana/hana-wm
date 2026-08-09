@@ -107,6 +107,17 @@ pub inline fn shrinkClamped(dim: u16, margin: u16) u16 {
     return if (dim > margin) dim - margin else constants.MIN_WINDOW_DIM;
 }
 
+/// Work-area rect: the whole screen inset by the outer gap. x/y are i32
+/// (some tiling layouts thread i32 coords through their recursion), w/h u16.
+pub inline fn outerArea(screen_w: u16, screen_h: u16, y_offset: u16, gap: u16) struct { x: i32, y: i32, w: u16, h: u16 } {
+    return .{
+        .x = @intCast(gap),
+        .y = @intCast(y_offset +| gap),
+        .w = screen_w -| gap *| 2,
+        .h = screen_h -| gap *| 2,
+    };
+}
+
 /// Shared body for configureWithHints/configureWithHintsAndRaise. `raise` is
 /// comptime so the compiler drops the dead branch.
 fn configureWithHintsImpl(comptime raise: bool, ctx: *const LayoutCtx, win: u32, rect: utils.Rect) void {
@@ -132,8 +143,8 @@ fn configureWithHintsImpl(comptime raise: bool, ctx: *const LayoutCtx, win: u32,
             _ = xcb.xcb_configure_window(ctx.conn, win, xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
                 xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
                 xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{
-                @bitCast(@as(i32, effective.x)),
-                @bitCast(@as(i32, effective.y)),
+                utils.toXcbCoord(effective.x),
+                utils.toXcbCoord(effective.y),
                 effective.width,
                 effective.height,
                 xcb.XCB_STACK_MODE_ABOVE,

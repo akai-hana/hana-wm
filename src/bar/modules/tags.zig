@@ -45,15 +45,14 @@ fn ensureCache(dc: *drawing.DrawContext, config: types.BarConfig, height: u16) v
     // constant between reloads, so the result is valid for the entire session
     // until the next invalidate() + ensureCache() cycle.
     const ind_size = config.scaledIndicatorSize(height);
-    const pos = indicatorPos(0, ws_width, height, ind_size, ind_size, config.indicator_location, config.indicator_padding);
-    // pos.x is computed with cell_x = 0, so it is already the intra-cell offset.
+    const pos = indicatorPos(ws_width, height, ind_size, ind_size, config.indicator_location, config.indicator_padding);
+    // pos.x is already the intra-cell offset (computed without a cell_x base).
     cached_ind_x_off = pos.x;
     cached_ind_y = pos.y;
 }
 
 /// Computes the top-left pixel position of an indicator item within a workspace cell.
 fn indicatorPos(
-    cell_x: u16,
     cell_w: u16,
     bar_height: u16,
     item_w: u16,
@@ -83,7 +82,7 @@ fn indicatorPos(
     const ih: f32 = @floatFromInt(item_h);
     const ix: u16 = @intCast(@max(0, @as(i32, @intFromFloat(@round(ax * cw - iw / 2.0)))));
     const iy: u16 = @intCast(@max(0, @as(i32, @intFromFloat(@round(ay * bh - ih / 2.0)))));
-    return .{ .x = cell_x + ix, .y = iy };
+    return .{ .x = ix, .y = iy };
 }
 
 /// Draw workspace tags.

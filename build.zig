@@ -65,9 +65,22 @@ pub fn build(b: *std.Build) !void {
     });
     stripIfRelease(root_mod, optimize);
 
+    // Some hosts (e.g. musl-based distros) report an empty default system
+    // include/library search path, so headers and libraries under /usr aren't
+    // found. Point at them explicitly; the extra paths are harmless elsewhere.
+    root_mod.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+    root_mod.addIncludePath(.{ .cwd_relative = "/usr/include" });
+
     // Wire & link
     Module.wireAll(root_mod, &discovery.modules, shared_ctx);
     SystemLibraries.link(root_mod);
+    // Discovered modules don't inherit root_mod's include/library paths, so
+    // give each one the same system paths for its @cImport / link work.
+    var mod_it = discovery.modules.valueIterator();
+    while (mod_it.next()) |mod| {
+        mod.*.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+        mod.*.addIncludePath(.{ .cwd_relative = "/usr/include" });
+    }
 
     // Artifact & steps
     const exe = b.addExecutable(.{ .name = "hana", .root_module = root_mod });

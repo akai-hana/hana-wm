@@ -27,6 +27,10 @@ const title_lead_px: u16 = 4;
 /// 128 covers any practical workspace size while keeping stack usage bounded.
 const max_visible_windows: usize = 128;
 
+/// Off-screen sentinel geometry for minimized or otherwise unresolvable
+/// windows: position sorting places it last, and drawing is skipped.
+pub const offscreen_rect: utils.Rect = .{ .x = std.math.maxInt(i16), .y = std.math.maxInt(i16), .width = 0, .height = 0 };
+
 // Atom cache
 
 const Atoms = struct {
@@ -310,8 +314,7 @@ pub fn fetchWindowTitleInto(
 pub fn fetchWindowGeom(conn: *xcb.xcb_connection_t, win: u32) utils.Rect {
     if (tiling.getWindowGeom(win)) |cached| return cached;
     const cookie = xcb.xcb_get_geometry(conn, win);
-    const r = xcb.xcb_get_geometry_reply(conn, cookie, null) orelse
-        return .{ .x = std.math.maxInt(i16), .y = std.math.maxInt(i16), .width = 0, .height = 0 };
+    const r = xcb.xcb_get_geometry_reply(conn, cookie, null) orelse return offscreen_rect;
     defer std.c.free(r);
     return .{
         .x = @intCast(r.*.x),
@@ -518,10 +521,12 @@ fn drawSegmentedTitles(
             .avail_w = avail_w,
         };
 
+        var scrolled = false;
         if (is_focused_win and carousel.isCarouselEnabled()) {
             // Focused + carousel enabled: pass full segment bounds so
-            // the scroll covers the entire segment width.
-            const scrolled = try carousel.drawSegmentedCarousel(
+            // the scroll covers the entire segment width. Returns false
+            // exactly when the text fits.
+            scrolled = try carousel.drawSegmentedCarousel(
                 ctx.dc,
                 baseline_y,
                 geom,
@@ -532,12 +537,9 @@ fn drawSegmentedTitles(
                 info.window,
                 title_invalidated,
             );
-            if (!scrolled) {
-                // Text fits — draw it inset with normal padding.
-                try ctx.dc.drawText(text_x, baseline_y, info.title, text_fg);
-            }
-        } else {
-            // Non-focused or carousel disabled: ellipsis on overflow.
+        }
+        if (!scrolled) {
+            // Text fits (or carousel disabled / not focused): ellipsis on overflow.
             if (text_w <= avail_w)
                 try ctx.dc.drawText(text_x, baseline_y, info.title, text_fg)
             else
@@ -667,7 +669,7 @@ fn gatherWindowInfos(
 
     for (windows, 0..) |win, i| {
         const geom: utils.Rect = if (is_minimized[i])
-            .{ .x = std.math.maxInt(i16), .y = std.math.maxInt(i16), .width = 0, .height = 0 }
+            offscreen_rect
         else if (tiling_geom[i]) |cached|
             cached
         else if (needs_xcb_geometry[i]) blk: {
@@ -682,7 +684,7 @@ fn gatherWindowInfos(
         } else if (has_prefetched_geoms)
             snapshot.geoms[i]
         else
-            .{ .x = std.math.maxInt(i16), .y = std.math.maxInt(i16), .width = 0, .height = 0 };
+            offscreen_rect;
 
         const title_str: []const u8 = if (has_prefetched_titles)
             snapshot.titles[i]

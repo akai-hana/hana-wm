@@ -300,32 +300,33 @@ const State = struct {
             .workspaces => try tags.draw(r.dc, r.config, r.height, x, snap.current_workspace, snap.workspace_has_windows.items, snap.is_all_view_active),
             .layout => try layout.draw(r.dc, r.config, r.height, x),
             .variants => try variants.draw(r.dc, r.config, r.height, x),
-            .title => blk: {
-                const minimized_title = minimizedTitleFor(
-                    snap.current_workspace_windows.items,
-                    &snap.minimized_windows,
-                    snap.window_titles.list.items,
-                );
-                break :blk try prompt.draw(
-                    r.dc,
-                    r.config,
-                    r.height,
-                    x,
-                    width orelse TITLE_MIN_WIDTH,
-                    self.win.conn,
-                    snap.focused_window,
-                    snap.focused_title.items,
-                    minimized_title,
-                    snap.current_workspace_windows.items,
-                    &snap.minimized_windows,
-                    snap.window_titles.list.items,
-                    snap.window_geoms.items,
-                    &self.title_cache.title,
-                    &self.title_cache.title_window,
-                    snap.is_title_invalidated,
-                    r.allocator,
-                );
-            },
+            .title => prompt.draw(
+                .{
+                    .dc = r.dc,
+                    .config = r.config,
+                    .height = r.height,
+                    .start_x = x,
+                    .width = width orelse TITLE_MIN_WIDTH,
+                    .conn = self.win.conn,
+                    .cached_title = &self.title_cache.title,
+                    .cached_title_window = &self.title_cache.title_window,
+                },
+                .{
+                    .focused_window = snap.focused_window,
+                    .focused_title = snap.focused_title.items,
+                    .minimized_title = minimizedTitleFor(
+                        snap.current_workspace_windows.items,
+                        &snap.minimized_windows,
+                        snap.window_titles.list.items,
+                    ),
+                    .current_ws_wins = snap.current_workspace_windows.items,
+                    .minimized_set = &snap.minimized_windows,
+                    .titles = snap.window_titles.list.items,
+                    .geoms = snap.window_geoms.items,
+                },
+                r.allocator,
+                snap.is_title_invalidated,
+            ),
             .clock => try clock.draw(r.dc, r.config, r.height, x),
         };
     }
@@ -341,6 +342,32 @@ const State = struct {
             debug.warnOnErr(e, "bar drawSegment");
             return x;
         };
+    }
+
+    /// Draws one segment of a left-to-right row, painting the inter-segment gap
+    /// and advancing `x`. `w` is the reserved width (used when the segment is
+    /// skipped, and as the title width); `omit_gap_after_title` suppresses the
+    /// gap after a title segment so the next segment sits flush against it (the
+    /// center layout). Returns the new `x`.
+    fn drawRowSegment(
+        self: *State,
+        snap: *const BarSnapshot,
+        seg: types.BarSegment,
+        x: u16,
+        w: u16,
+        omit_gap_after_title: bool,
+        scaled_spacing: u16,
+    ) u16 {
+        const omit_gap = omit_gap_after_title and seg == .title;
+        if (shouldSkipSegment(snap, seg)) return x + w + @as(u16, @intFromBool(!omit_gap)) * scaled_spacing;
+
+        const x_before = x;
+        const drawn_x = self.drawSegmentSafe(snap, seg, x, w);
+        if (!omit_gap and drawn_x != x_before) {
+            self.render.dc.fillRect(drawn_x, 0, scaled_spacing, self.render.height, self.render.config.bg);
+            return drawn_x + scaled_spacing;
+        }
+        return drawn_x;
     }
 
     /// Returns true when `seg` should be skipped because its data has not changed
@@ -420,21 +447,12 @@ const State = struct {
         for (self.render.config.layout.items) |lay| {
             switch (lay.position) {
                 .left => for (lay.segments.items) |seg| {
-                    const seg_w = self.measureSegmentWidth(snap, seg);
+                    const w = self.measureSegmentWidth(snap, seg);
                     if (seg == .title) {
                         title_seg_x = x;
-                        title_seg_w = seg_w;
+                        title_seg_w = w;
                     }
-                    if (shouldSkipSegment(snap, seg)) {
-                        x += seg_w + scaled_spacing;
-                        continue;
-                    }
-                    const x_before = x;
-                    x = self.drawSegmentSafe(snap, seg, x, null);
-                    if (x != x_before) {
-                        self.render.dc.fillRect(x, 0, scaled_spacing, self.render.height, self.render.config.bg);
-                        x += scaled_spacing;
-                    }
+                    x = self.drawRowSegment(snap, seg, x, w, false, scaled_spacing);
                 },
                 .center => {
                     const remaining = @max(TITLE_MIN_WIDTH, self.render.width -| x -| right_total -| scaled_spacing);
@@ -444,17 +462,7 @@ const State = struct {
                             title_seg_x = x;
                             title_seg_w = w;
                         }
-                        if (shouldSkipSegment(snap, seg)) {
-                            x += w;
-                            if (seg != .title) x += scaled_spacing;
-                            continue;
-                        }
-                        const x_before = x;
-                        x = self.drawSegmentSafe(snap, seg, x, w);
-                        if (seg != .title and x != x_before) {
-                            self.render.dc.fillRect(x, 0, scaled_spacing, self.render.height, self.render.config.bg);
-                            x += scaled_spacing;
-                        }
+                        x = self.drawRowSegment(snap, seg, x, w, true, scaled_spacing);
                     }
                 },
                 .right => try self.drawRightSegments(snap, lay.segments.items),
@@ -675,7 +683,7 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *BarSnapshot, force
             // drawSegmentedTitles' sentinel does — they're never actually
             // positioned on screen.
             const geom: utils.Rect = if (snap.minimized_windows.contains(win))
-                .{ .x = std.math.maxInt(i16), .y = std.math.maxInt(i16), .width = 0, .height = 0 }
+                title.offscreen_rect
             else
                 title.fetchWindowGeom(core.getState().conn, win);
             snap.window_geoms.append(allocator, geom) catch {};
@@ -800,6 +808,27 @@ fn calcBarYPos(height: u16) i16 {
 
 const BarWindowSetup = struct { win_id: u32, visual_id: u32, has_argb: bool, colormap: u32 };
 
+/// Everything a fully-initialised bar owns; returned by createBar.
+const BarSetup = struct {
+    setup: BarWindowSetup,
+    dc: *drawing.DrawContext,
+    state: *State,
+};
+
+/// Creates the bar window, off-screen draw context, and live State.
+/// On any failure, everything already created is freed before returning.
+fn createBar(height: u16, y_pos: i16) !BarSetup {
+    const cs = core.getState();
+    const setup = createBarWindow(height, y_pos);
+    errdefer destroyBarWindow(cs.conn, setup.win_id, setup.colormap);
+    setWindowProperties(setup.win_id, height);
+    const dc = try createDrawContext(setup, height);
+    errdefer dc.deinit();
+    debug.info("Bar transparency: {s}", .{if (setup.has_argb) "enabled (ARGB)" else "disabled (opaque)"});
+    const state = try State.init(cs.alloc, cs.conn, setup.win_id, setup.colormap, cs.screen.width_in_pixels, height, dc, cs.config.bar);
+    return .{ .setup = setup, .dc = dc, .state = state };
+}
+
 fn createBarWindow(height: u16, y_pos: i16) BarWindowSetup {
     const cs = core.getState();
     const want_transparency = cs.config.bar.getAlpha16() < 0xFFFF;
@@ -872,7 +901,7 @@ fn destroyBarWindow(conn: *xcb.xcb_connection_t, win_id: u32, colormap: u32) voi
 }
 
 fn measureFontMetrics() ?struct { asc: i32, desc: i32 } {
-    var mc = drawing.MeasureContext.init(core.getState().alloc, core.dpi_info.dpi) catch return null;
+    var mc = drawing.MeasureContext.init(core.getState().alloc, core.dpi_info) catch return null;
     defer mc.deinit();
     loadBarFonts(&mc) catch return null;
     const asc, const desc = mc.getMetrics();
@@ -914,7 +943,7 @@ fn createDrawContext(setup: BarWindowSetup, height: u16) !*drawing.DrawContext {
         cs.screen.width_in_pixels,
         height,
         setup.visual_id,
-        core.dpi_info.dpi,
+        core.dpi_info,
         setup.has_argb,
         cs.config.bar.transparency,
     );
@@ -925,6 +954,16 @@ fn createDrawContext(setup: BarWindowSetup, height: u16) !*drawing.DrawContext {
 
 // Lifecycle
 
+fn startBarThreads() void {
+    carousel.startThread();
+    clock.startThread();
+}
+
+fn stopBarThreads() void {
+    clock.stopThread();
+    carousel.stopThread();
+}
+
 pub fn init() !void {
     const cs = core.getState();
     std.debug.assert(cs.config.bar.enabled);
@@ -933,26 +972,18 @@ pub fn init() !void {
     // carousel.wakeIntervalNs() returns the real rate from the first tick.
     scale.ensureRefreshRateDetected(cs.conn);
     const height = try calcBarHeight();
-    const y_pos = calcBarYPos(height);
-    const setup = createBarWindow(height, y_pos);
-    errdefer destroyBarWindow(cs.conn, setup.win_id, setup.colormap);
-    setWindowProperties(setup.win_id, height);
-    const dc = try createDrawContext(setup, height);
-    errdefer dc.deinit();
-    debug.info("Bar transparency: {s}", .{if (setup.has_argb) "enabled (ARGB)" else "disabled (opaque)"});
-    gBar.state = try State.init(cs.alloc, cs.conn, setup.win_id, setup.colormap, cs.screen.width_in_pixels, height, dc, cs.config.bar);
-    carousel.startThread();
-    clock.startThread();
+    const bar = try createBar(height, calcBarYPos(height));
+    gBar.state = bar.state;
+    startBarThreads();
     submitDraw();
-    _ = xcb.xcb_map_window(cs.conn, setup.win_id);
+    _ = xcb.xcb_map_window(cs.conn, bar.setup.win_id);
     _ = xcb.xcb_flush(cs.conn);
     try prompt.init(cs.alloc, cs.conn);
 }
 
 pub fn deinit() void {
     prompt.deinit();
-    clock.stopThread();
-    carousel.stopThread();
+    stopBarThreads();
     if (gBar.state) |s| {
         carousel.deinitCarousel();
         _ = xcb.xcb_destroy_window(s.win.conn, s.win.win_id);
@@ -975,29 +1006,22 @@ pub fn reload() void {
         return;
     }
     const height = calcBarHeight() catch DEFAULT_BAR_HEIGHT;
-    const y_pos = calcBarYPos(height);
-    const setup = createBarWindow(height, y_pos);
-    applyReload(old, setup, height) catch |err| {
-        destroyBarWindow(core.getState().conn, setup.win_id, setup.colormap);
+    applyReload(old, height) catch |err| {
         debug.err("Bar reload failed ({s}), keeping old bar", .{@errorName(err)});
     };
 }
 
-fn applyReload(old: *State, setup: BarWindowSetup, height: u16) !void {
-    setWindowProperties(setup.win_id, height);
-    const new_dc = try createDrawContext(setup, height);
-    errdefer new_dc.deinit();
+fn applyReload(old: *State, height: u16) !void {
     const cs = core.getState();
-    const new_state = try State.init(cs.alloc, cs.conn, setup.win_id, setup.colormap, cs.screen.width_in_pixels, height, new_dc, cs.config.bar);
+    const new_bar = try createBar(height, calcBarYPos(height));
+    const new_state = new_bar.state;
     new_state.is_visible = old.is_visible;
     new_state.is_globally_visible = old.is_globally_visible;
-    clock.stopThread();
-    carousel.stopThread();
+    stopBarThreads();
     gBar.state = new_state;
-    carousel.startThread();
-    clock.startThread();
+    startBarThreads();
     submitDrawBlockingFull();
-    if (new_state.is_visible) _ = xcb.xcb_map_window(cs.conn, setup.win_id);
+    if (new_state.is_visible) _ = xcb.xcb_map_window(cs.conn, new_bar.setup.win_id);
     _ = xcb.xcb_destroy_window(cs.conn, old.win.win_id);
     ungrabAndFlush();
     old.render.dc.deinit();
@@ -1018,7 +1042,7 @@ pub fn toggleBarSegmentAnchor() void {
     gBar.pending_force_full_redraw = true;
     s.invalidateLayoutCache();
     _ = xcb.xcb_grab_server(cs.conn);
-    _ = xcb.xcb_configure_window(cs.conn, s.win.win_id, xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{@as(u32, @bitCast(@as(i32, new_y)))});
+    _ = xcb.xcb_configure_window(cs.conn, s.win.win_id, xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{utils.toXcbCoord(new_y)});
     const current_ws = tracking.getCurrentWorkspace() orelse {
         window.updateWorkspaceBorders();
         window.markBordersFlushed();
@@ -1107,23 +1131,19 @@ pub fn setBarState(action: BarAction) void {
     const show = !is_fullscreen and s.is_globally_visible and action != .hide_fullscreen;
     if (s.is_visible == show and action != .toggle) return;
     s.is_visible = show;
-    if (action == .toggle) {
-        if (show) submitFullRedrawWithCarouselReset(s);
-        const conn = core.getState().conn;
-        _ = xcb.xcb_grab_server(conn);
-        if (show) _ = xcb.xcb_map_window(conn, s.win.win_id) else _ = xcb.xcb_unmap_window(conn, s.win.win_id);
+    if (show) submitFullRedrawWithCarouselReset(s);
+
+    const conn = core.getState().conn;
+    const grabbed = action == .toggle;
+    if (grabbed) _ = xcb.xcb_grab_server(conn);
+    if (show) _ = xcb.xcb_map_window(conn, s.win.win_id) else _ = xcb.xcb_unmap_window(conn, s.win.win_id);
+    if (grabbed) {
         const effective_visible = if (is_fullscreen) s.is_globally_visible else s.is_visible;
         retileAllWorkspaces(effective_visible);
         window.updateFloatingWindowBorders();
         window.markBordersFlushed();
         ungrabAndFlush();
     } else {
-        if (show) {
-            submitFullRedrawWithCarouselReset(s);
-            _ = xcb.xcb_map_window(core.getState().conn, s.win.win_id);
-        } else {
-            _ = xcb.xcb_unmap_window(core.getState().conn, s.win.win_id);
-        }
         tiling.retileCurrentWorkspace();
     }
     debug.info("Bar {s} ({s})", .{ if (show) "shown" else "hidden", @tagName(action) });
@@ -1145,13 +1165,12 @@ pub fn updateIfDirty() !void {
 /// Called from the dedicated clock thread (clock.zig) once per real-time
 /// second boundary. Draws just the clock segment; draw_mutex keeps this safe
 /// against a same-instant redraw from the main WM thread or the carousel thread.
-pub fn checkClockUpdate() bool {
-    const s = gBar.state orelse return false;
-    if (!s.is_visible) return false;
+pub fn checkClockUpdate() void {
+    const s = gBar.state orelse return;
+    if (!s.is_visible) return;
     draw_mutex.lock();
     s.drawClockOnly();
     draw_mutex.unlock();
-    return true;
 }
 
 /// Called from the dedicated carousel thread (carousel.zig) roughly once per

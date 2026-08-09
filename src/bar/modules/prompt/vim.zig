@@ -367,29 +367,46 @@ pub fn handleInsert(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
             vs.mode = .normal;
             resetPendingCmd(vs);
         },
+        else => return insertKey(vs, sym),
+    }
+    return .none;
+}
 
+/// Minimal insert handler used when vim mode is disabled (vim_mode = false).
+/// Handles printable ASCII, cursor keys, Backspace, Delete, Return (spawn),
+/// and Escape (deactivate).
+pub fn handleInsertBasic(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
+    switch (sym) {
+        XK_Escape => return .deactivate,
+        else => return insertKey(vs, sym),
+    }
+}
+
+/// Shared insert-mode key dispatch: Return (spawn), Backspace/Delete, cursor
+/// keys, Home/End, and printable ASCII (with dot-record capture). Escape is
+/// handled by the callers above, which differ only in what it means.
+fn insertKey(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
+    switch (sym) {
         XK_Return => return .spawn,
 
         XK_BackSpace => deleteBefore(vs),
         XK_Delete => deleteAfter(vs),
-        XK_Left => {
-            if (vs.cursor > 0) vs.cursor -= 1;
+        XK_Left => if (vs.cursor > 0) {
+            vs.cursor -= 1;
         },
-        XK_Right => {
-            if (vs.cursor < vs.len) vs.cursor += 1;
+        XK_Right => if (vs.cursor < vs.len) {
+            vs.cursor += 1;
         },
         XK_Home => vs.cursor = 0,
         XK_End => vs.cursor = vs.len,
 
-        else => {
-            if (isPrintableAscii(sym)) {
-                const ch: u8 = @truncate(sym);
-                insertSlice(vs, &[1]u8{ch});
-                // Record for dot repeat.
-                if (vs.is_recording_insert and vs.insert_rec_len < vs.max_input - 1) {
-                    vs.insert_rec_buf[vs.insert_rec_len] = ch;
-                    vs.insert_rec_len += 1;
-                }
+        else => if (isPrintableAscii(sym)) {
+            const ch: u8 = @truncate(sym);
+            insertSlice(vs, &[1]u8{ch});
+            // Record for dot repeat.
+            if (vs.is_recording_insert and vs.insert_rec_len < vs.max_input - 1) {
+                vs.insert_rec_buf[vs.insert_rec_len] = ch;
+                vs.insert_rec_len += 1;
             }
         },
     }
@@ -1193,13 +1210,15 @@ fn replayDot(vs: *VimState) void {
                     motionFind(vs, om.find_kind, om.find_ch, cnt)
                 else if (om.tobj_kind != 0)
                     resolveTextObject(vs, om.tobj_kind, om.tobj_delim)
-                else if (om.has_g_prefix) blk: {
-                    break :blk switch (om.motion_sym) {
-                        'e' => MotionResult{ .pos = motionWordEndBackward(vs, false, cnt), .inclusive = true },
-                        'E' => MotionResult{ .pos = motionWordEndBackward(vs, true, cnt), .inclusive = true },
-                        else => null,
-                    };
-                } else resolveSimpleMotion(vs, om.motion_sym, cnt);
+                else if (om.has_g_prefix)
+                    if (resolveGPrefixPos(vs, om.motion_sym, cnt)) |pos|
+                        MotionResult{ .pos = pos, .inclusive = (om.motion_sym == 'e' or om.motion_sym == 'E') }
+                    else
+                        null
+                else if (om.motion_sym == '%')
+                    MotionResult{ .pos = motionMatchBracket(vs), .inclusive = true }
+                else
+                    resolveSimpleMotion(vs, om.motion_sym, cnt);
             if (mr_opt) |mr| {
                 applyOperator(vs, om.op, mr);
                 if (om.op == 'c') insertSlice(vs, vs.dot_insert_buf[0..vs.dot_insert_len]);

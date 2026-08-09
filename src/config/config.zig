@@ -9,13 +9,10 @@ const debug = @import("debug");
 const xkbcommon = @import("xkbcommon");
 const parser = @import("parser");
 const carousel = @import("carousel");
+const utils = @import("utils");
 
-const parseColor = parser.parseColor;
-
-/// Returns `default` when the key is absent, the wrong type, or out of range.
-/// Out-of-range values log a warning and return the default (not clamped).
-/// The name `getInRange` is intentional: callers can see at a glance that
-/// min/max bounds are enforced, not just a plain key lookup.
+/// Returns `default` when the key is absent, the wrong type, or out of range
+/// (values are warn-and-revert, not clamped).
 fn getInRange(
     comptime T: type,
     section: *const parser.Section,
@@ -61,7 +58,7 @@ fn getInRange(
 inline fn getColor(section: *const parser.Section, key: []const u8, default: u32) u32 {
     const value = section.get(key) orelse return default;
     if (value.asColor()) |c| return c;
-    if (value.asString()) |s| return parseColor(s) catch {
+    if (value.asString()) |s| return parser.parseColor(s) catch {
         debug.warn("Invalid color for {s}: '{s}'", .{ key, s });
         return default;
     };
@@ -69,15 +66,10 @@ inline fn getColor(section: *const parser.Section, key: []const u8, default: u32
     return default;
 }
 
-/// Like getInRange, but for ScalableValue fields.
-///
-/// Percentage and absolute ScalableValues have different natural upper
-/// bounds (a percentage sensibly stays near 0..200; an absolute pixel value
-/// has no meaningful ceiling), so this only enforces a lower bound on the raw
-/// `.value` — every field routed through this today just needs to reject a
-/// negative pixel/percentage value from being handed to rendering/layout code
-/// (e.g. `gap_width = -50`). Returns `default` (unclamped) and logs a warning
-/// when out of range, matching getInRange's behavior for integers.
+/// Like getInRange, but for ScalableValue fields. Only enforces a lower bound
+/// on the raw `.value` (percentages and absolute pixels share no meaningful
+/// ceiling) — enough to reject a negative like `gap_width = -50`. Returns
+/// `default` unclamped, with a warning, matching getInRange.
 fn getScalableInRange(
     section: *const parser.Section,
     key: []const u8,
@@ -92,35 +84,20 @@ fn getScalableInRange(
     return value;
 }
 
-inline fn validateWorkspace(ws_num: usize, max: usize, context: []const u8) bool {
-    if (ws_num < 1 or ws_num > max) {
-        debug.warn("Rule workspace {} for '{s}' exceeds count {}, skipping", .{ ws_num, context, max });
-        return false;
-    }
-    return true;
-}
-
-/// Validates a 1-based workspace number parsed from a per-workspace override
-/// (the `layouts` array's workspace-list syntax, or
-/// `[tiling.layouts.master-stack.counts]`) against both the syntactic 1..255
-/// range and constants.MAX_WORKSPACES — the hard ceiling enforced by
-/// workspaces.zig's fixed-size override lookup tables and tiling.zig's u64
-/// workspace_geom_valid_bits bitmask.
-///
-/// Checking the MAX_WORKSPACES bound here, at parse time, means an override
-/// that can never take effect is reported immediately via a warning, instead
-/// of being accepted silently here only to be silently dropped later when
-/// workspaces.init() builds its lookup tables.
-inline fn checkWorkspaceOverrideBound(ws_1based: usize, context: []const u8) bool {
+/// Validates a 1-based workspace number, warn-and-skip (returns false) when it
+/// is outside the syntactic 1..255 range or exceeds `max` — the configured
+/// workspace count for window rules, or constants.MAX_WORKSPACES (the hard
+/// ceiling behind workspaces.zig's fixed-size override lookup tables) for
+/// per-workspace overrides. Checking that ceiling at parse time reports an
+/// override that can never take effect immediately, instead of silently
+/// dropping it later when workspaces.init() builds its tables.
+inline fn checkWorkspaceBound(ws_1based: usize, context: []const u8, max: usize) bool {
     if (ws_1based < 1 or ws_1based > 255) {
         debug.warn("{s}: workspace {} out of range, skipping", .{ context, ws_1based });
         return false;
     }
-    if (ws_1based - 1 >= constants.MAX_WORKSPACES) {
-        debug.warn(
-            "{s}: workspace {} exceeds the {}-workspace limit (MAX_WORKSPACES); override would never apply, skipping",
-            .{ context, ws_1based, constants.MAX_WORKSPACES },
-        );
+    if (ws_1based > max) {
+        debug.warn("{s}: workspace {} exceeds the {}-workspace limit, skipping", .{ context, ws_1based, max });
         return false;
     }
     return true;
@@ -152,12 +129,9 @@ const MAX_FILE_BYTES = 1024 * 1024;
 /// Reads the file at `path` into a freshly allocated slice owned by the caller.
 /// Returns `error.FileTooLarge` when the file exceeds `MAX_FILE_BYTES`.
 ///
-/// This always allocates the full MAX_FILE_BYTES + 1 ceiling up front, then
-/// reallocs down to the actual size — more allocation than a small config
-/// file strictly needs, but config loading only happens at startup and on
-/// explicit reload, so it's not worth the extra `stat()`-then-allocate
-/// complexity (and the accompanying TOCTOU re-check against a file that could
-/// grow between stat() and read()) for a cost this low-frequency.
+/// Allocates the full MAX_FILE_BYTES + 1 ceiling up front, then reallocs down
+/// — config loading is startup/reload-only, so it's not worth a stat-then-
+/// allocate dance (and its TOCTOU re-check) for a cost this low-frequency.
 fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const io = std.Options.debug_io;
     const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| {
@@ -175,18 +149,32 @@ fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return allocator.realloc(buf, n) catch buf[0..n];
 }
 
+/// Reads and parses the .toml at `path`, returning null for an empty file.
+/// Read/parse errors propagate to the caller, who decides how to handle them.
+fn parseTomlFile(allocator: std.mem.Allocator, path: []const u8) !?parser.Document {
+    const raw = try readFileAlloc(allocator, path);
+    defer allocator.free(raw);
+    if (raw.len == 0) return null;
+    return try parser.parse(allocator, raw);
+}
+
+/// warn-and-skip wrapper around parseTomlFile — the "never crash on bad
+/// config" path shared by the directory loader and `include` resolution.
+fn tryParseTomlFile(allocator: std.mem.Allocator, path: []const u8) ?parser.Document {
+    const doc = parseTomlFile(allocator, path) catch |err| {
+        debug.warn("Skipping '{s}': {}", .{ path, err });
+        return null;
+    };
+    if (doc == null) debug.info("Skipping empty file: {s}", .{path});
+    return doc;
+}
+
 /// Merges files listed in `include = [...]` from `src_doc` into `dst`; `dir_path` is the base for relative paths.
 ///
-/// Includes are resolved one level deep only: an included file's own
-/// `include = [...]` directive is not processed. This is intentional, not an
-/// oversight — it keeps the include graph trivially easy to reason about
-/// (no possibility of an include cycle, so no cycle-detection machinery is
-/// needed) at the cost of not supporting chained includes. If recursive
-/// includes are ever wanted, this function will need to call itself on each
-/// `inc_doc` after parsing it, threading through a visited-canonical-path set
-/// to detect cycles and a max-depth backstop — warn-and-skip on either,
-/// consistent with the rest of this subsystem's "never crash on bad config"
-/// philosophy.
+/// Includes are resolved one level deep only — an included file's own
+/// `include` directive is intentionally not processed. This keeps the include
+/// graph cycle-free by construction (no cycle-detection machinery needed) at
+/// the cost of no chained includes.
 fn processIncludes(allocator: std.mem.Allocator, dst: *parser.Document, src_doc: *const parser.Document, dir_path: []const u8) !void {
     const inc_val = src_doc.get("include") orelse return;
     const includes = inc_val.asArray() orelse return;
@@ -198,19 +186,7 @@ fn processIncludes(allocator: std.mem.Allocator, dst: *parser.Document, src_doc:
         }
         const abs = try std.fs.path.join(allocator, &.{ dir_path, rel });
         defer allocator.free(abs);
-        const raw = readFileAlloc(allocator, abs) catch |err| {
-            debug.warn("include '{s}': could not read: {}", .{ abs, err });
-            continue;
-        };
-        defer allocator.free(raw);
-        if (raw.len == 0) {
-            debug.info("include '{s}': empty, skipping", .{abs});
-            continue;
-        }
-        var inc_doc = parser.parse(allocator, raw) catch |err| {
-            debug.warn("include '{s}': parse error: {}", .{ abs, err });
-            continue;
-        };
+        var inc_doc = tryParseTomlFile(allocator, abs) orelse continue;
         defer inc_doc.deinit();
         // Note: inc_doc's own `include` array (if any) is intentionally NOT
         // processed here — see the doc comment above.
@@ -261,19 +237,7 @@ pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !ty
     for (names.items) |name| {
         const path = try std.fs.path.join(allocator, &.{ dir_path, name });
         defer allocator.free(path);
-        const raw = readFileAlloc(allocator, path) catch |err| {
-            debug.warn("Skipping '{s}': {}", .{ path, err });
-            continue;
-        };
-        defer allocator.free(raw);
-        if (raw.len == 0) {
-            debug.info("Skipping empty file: {s}", .{path});
-            continue;
-        }
-        var doc = parser.parse(allocator, raw) catch |err| {
-            debug.warn("Parse error in '{s}': {}", .{ path, err });
-            continue;
-        };
+        var doc = tryParseTomlFile(allocator, path) orelse continue;
         defer doc.deinit();
         try parser.mergeDocumentsInto(allocator, &merged, &doc);
         debug.info("Merged: {s}", .{path});
@@ -338,7 +302,7 @@ pub fn validate(cfg: *const types.Config) !void {
     }
     // master_width is stored as a ScalableValue; normalise to [0,1] for the check.
     const mw = cfg.tiling.master_width;
-    const mw_ratio: f32 = if (mw.is_percentage) mw.value / 100.0 else mw.value;
+    const mw_ratio: f32 = utils.scaling.asRatio(mw);
     if (mw_ratio < constants.MIN_MASTER_WIDTH or mw_ratio > 1.0) {
         debug.err("Invalid config: master_width ratio {d:.3} out of [{d:.2}, 1.0], keeping old", .{ mw_ratio, constants.MIN_MASTER_WIDTH });
         return error.InvalidConfig;
@@ -351,14 +315,10 @@ pub fn validate(cfg: *const types.Config) !void {
 
 /// Reads, parses, and returns the config at `path` (single-file entry point).
 pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !types.Config {
-    const raw = readFileAlloc(allocator, path) catch |err| return err;
-    defer allocator.free(raw);
-    if (raw.len == 0) {
+    var doc = try parseTomlFile(allocator, path) orelse {
         debug.info("Empty config file: {s}, using fallback", .{path});
         return try loadFallbackConfig(allocator);
-    }
-
-    var doc = try parser.parse(allocator, raw);
+    };
     defer doc.deinit();
     try processIncludes(allocator, &doc, &doc, std.fs.path.dirname(path) orelse ".");
     const cfg = try buildConfigFromDoc(allocator, &doc);
@@ -389,11 +349,9 @@ fn getDefaultConfig(allocator: std.mem.Allocator) types.Config {
     const default_layout = allocator.dupe(u8, "master_left") catch "master_left";
     cfg.tiling.layouts.append(allocator, default_layout) catch |e| debug.warnOnErr(e, "default layout append");
     cfg.tiling.layout = if (cfg.tiling.layouts.items.len > 0) cfg.tiling.layouts.items[0] else default_layout;
-    // The four BarConfig string fields that parseBar rewrites are duped here
-    // too, so Config.deinit can free every one of them unconditionally even
-    // when the config has no [bar] section (parseBar then returns early and
-    // never overwrites them). assignStr's ownership transfer makes the dupe
-    // leak-free when a key IS present.
+    // Dupe the four BarConfig string fields parseBar may rewrite, so
+    // Config.deinit can free each unconditionally (assignStr's ownership
+    // transfer keeps the rewrite path leak-free).
     const defaults = [_]struct { view: *[]const u8, literal: []const u8 }{
         .{ .view = &cfg.bar.clock_format, .literal = "%Y-%m-%d %H:%M:%S" },
         .{ .view = &cfg.bar.drun_prompt, .literal = "run: " },
@@ -748,10 +706,8 @@ pub fn load(allocator: std.mem.Allocator, screen: *core.xcb.xcb_screen_t, xkb_st
 fn parseDrag(doc: *const parser.Document, cfg: *types.Config) void {
     const section = doc.getSection("drag") orelse return;
     cfg.drag_enabled = getInRange(bool, section, "enabled", cfg.drag_enabled, null, null);
-    // `cfg` is already initialised from types.Config{} (via getDefaultConfig)
-    // before this runs, so reading the current value as the default is
-    // equivalent to — but doesn't duplicate — the struct default in
-    // types.zig. getScalableInRange additionally rejects a negative
+    // Reading the current value as the default avoids duplicating the struct
+    // default from types.zig; getScalableInRange also rejects a negative
     // snap_distance.
     cfg.snap_distance = getScalableInRange(section, "snap_distance", cfg.snap_distance, 0.0);
 }
@@ -767,42 +723,29 @@ fn parseWorkspaces(doc: *const parser.Document, cfg: *types.Config) void {
 /// [fullscreen] and [minimize].
 fn parseEnabledFlag(doc: *const parser.Document, section_name: []const u8, field: *bool) void {
     const section = doc.getSection(section_name) orelse return;
-    // `field.*` is already initialised from types.Config{} at this point, so
-    // reading it back as the default (rather than restating the struct's
-    // `true` literal here too) means this single generic helper can't drift
-    // out of sync with whatever default each caller's field actually has in
-    // types.zig.
+    // Read the already-initialised value back as the default so this helper
+    // can't drift out of sync with the field's default in types.zig.
     field.* = getInRange(bool, section, "enabled", field.*, null, null);
 }
 
 fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *types.Config) !void {
     const section = doc.getSection("tiling") orelse return;
     cfg.tiling.enabled = getInRange(bool, section, "enabled", cfg.tiling.enabled, null, null);
-    if (section.get("layouts")) |layouts_value| {
-        if (layouts_value.asArray()) |arr| {
-            for (cfg.tiling.layouts.items) |layout| allocator.free(layout);
-            cfg.tiling.layouts.clearRetainingCapacity();
-            cfg.tiling.workspace_layout_overrides.clearRetainingCapacity();
-            try parseLayoutsArray(allocator, arr, cfg);
-            if (cfg.tiling.layouts.items.len > 0) cfg.tiling.layout = cfg.tiling.layouts.items[0];
-        }
+    if (section.getArray("layouts")) |arr| {
+        for (cfg.tiling.layouts.items) |layout| allocator.free(layout);
+        cfg.tiling.layouts.clearRetainingCapacity();
+        cfg.tiling.workspace_layout_overrides.clearRetainingCapacity();
+        try parseLayoutsArray(allocator, arr, cfg);
+        if (cfg.tiling.layouts.items.len > 0) cfg.tiling.layout = cfg.tiling.layouts.items[0];
     } else {
-        // Single-layout path.  Clear the default set by getDefaultConfig so
-        // layouts contains exactly one entry and there is no stale "master_left"
-        // accumulating alongside the user's choice.
-        // `cfg.tiling.layout` points into layouts[0]; TilingConfig.deinit frees
-        // it — no separate `allocated_layout` sentinel is needed.
+        // Single-layout path: clear the getDefaultConfig default so layouts
+        // holds exactly the user's one choice. `cfg.tiling.layout` points into
+        // layouts[0]; TilingConfig.deinit frees it.
         //
-        // NOTE on the "layout" default below: unlike the other fields in this
-        // function, we deliberately do NOT pass `cfg.tiling.layout` as the
-        // getInRange default here. cfg.tiling.layout currently aliases
-        // cfg.tiling.layouts.items[0] — the exact memory freed on the next
-        // line — so reading it after the free (which happens when the
-        // "layout" key is absent and getInRange falls back to its default)
-        // would be a use-after-free. (types.TilingConfig{}).layout yields the
-        // identical value (the comptime string literal "master_left") without
-        // aliasing anything that gets freed, so it still single-sources the
-        // default while sidestepping that hazard.
+        // The "layout" default is (types.TilingConfig{}).layout, NOT
+        // cfg.tiling.layout — the latter aliases layouts.items[0], which is
+        // freed on the next line, so using it as the fallback would read
+        // freed memory when the key is absent.
         for (cfg.tiling.layouts.items) |l| allocator.free(l);
         cfg.tiling.layouts.clearRetainingCapacity();
         const layout_str = getInRange([]const u8, section, "layout", (types.TilingConfig{}).layout, null, null);
@@ -812,11 +755,9 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
 
     const aesthetic_src = doc.getSection("tiling.aesthetics") orelse section;
 
-    // gap_width/border_width: ScalableValue fields, so a bare negative value
-    // (`gap_width = -50`) is rejected via getScalableInRange rather than being
-    // silently accepted and handed to layout code as a negative pixel value.
-    // The "current value" passed as default is safe to read here — unlike
-    // the "layout" string above, nothing frees it first.
+    // ScalableValue fields: getScalableInRange rejects a bare negative like
+    // `gap_width = -50`. Safe to read the current value as default here —
+    // unlike the "layout" string above, nothing frees it first.
     cfg.tiling.gap_width = getScalableInRange(aesthetic_src, "gap_width", cfg.tiling.gap_width, 0.0);
     cfg.tiling.border_width = getScalableInRange(aesthetic_src, "border_width", cfg.tiling.border_width, 0.0);
     cfg.tiling.border_focused = getColor(aesthetic_src, "border_focused", cfg.tiling.border_focused);
@@ -825,9 +766,8 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *
     const dedicated = master_src != section; // true when [tiling.layouts.master-stack] exists
     cfg.tiling.master_count = getInRange(u8, master_src, if (dedicated) "count" else "master_count", cfg.tiling.master_count, 1, null);
     if (master_src.getString(if (dedicated) "side" else "master_side")) |s| cfg.tiling.master_side = types.MasterSide.fromString(s) orelse .left;
-    // master_width already has its own dedicated ratio check in validate(),
-    // so it only needs the "leave alone when absent" treatment here, not
-    // getScalableInRange.
+    // master_width has its own ratio check in validate(); only leave-alone-
+    // when-absent is needed here, not getScalableInRange.
     if (master_src.getScalable(if (dedicated) "width" else "master_width")) |v| cfg.tiling.master_width = v;
     parseTilingVariants(doc, cfg);
     cfg.tiling.global_layout = getInRange(bool, section, "global_layout", cfg.tiling.global_layout, null, null);
@@ -846,7 +786,7 @@ fn parseMasterStackCounts(allocator: std.mem.Allocator, doc: *const parser.Docum
             debug.warn("master-stack.counts: invalid workspace key '{s}', skipping", .{entry.key_ptr.*});
             continue;
         };
-        if (!checkWorkspaceOverrideBound(ws_1based, "master-stack.counts")) continue;
+        if (!checkWorkspaceBound(ws_1based, "master-stack.counts", constants.MAX_WORKSPACES)) continue;
         const count_val = entry.value_ptr.*.asInt() orelse {
             debug.warn("master-stack.counts: non-integer count for workspace {}, skipping", .{ws_1based});
             continue;
@@ -1045,7 +985,7 @@ fn parseLayoutsArray(
                     debug.warn("layouts array: invalid workspace number '{s}' for layout '{s}', skipping", .{ trimmed, canonical });
                     continue;
                 };
-                if (!checkWorkspaceOverrideBound(ws_1based, "layouts array")) continue;
+                if (!checkWorkspaceBound(ws_1based, "layouts array", constants.MAX_WORKSPACES)) continue;
                 const ws_idx: u8 = @intCast(ws_1based - 1);
                 try cfg.tiling.workspace_layout_overrides.append(allocator, .{
                     .workspace_idx = ws_idx,
@@ -1057,11 +997,9 @@ fn parseLayoutsArray(
     }
 }
 
-// Field names only — no duplicated default literal. getColor's `default`
-// parameter is only consulted when the key is absent, so passing the
-// already-initialised `cfg.bar` field's current value (see parseBar) is
-// exactly the "leave it alone" semantics wanted, with types.zig remaining
-// the single place each of these defaults is written.
+// Field names only — no duplicated default literal; getColor's default is
+// the already-initialised cfg.bar value (leave-alone semantics), so types.zig
+// stays the single place each default is written.
 const BAR_COLOR_FIELDS = [_][]const u8{
     "bg", "fg", "selected_bg", "selected_fg", "accent_color",
 };
@@ -1090,7 +1028,7 @@ fn parseTransparency(value: parser.Value) f32 {
         return 1.0;
     }
     if (value.asScalable()) |s| {
-        const f = if (s.is_percentage) s.value / 100.0 else s.value;
+        const f = utils.scaling.asRatio(s);
         if (f < 0.0 or f > 1.0) {
             debug.warn("Invalid transparency value {d} (must be 0.0–1.0 or 0–100%), using default", .{f});
             return 1.0;
@@ -1136,23 +1074,22 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *typ
         }
         break :height_blk h;
     };
-    if (section.get("fonts")) |v| if (v.asArray()) |arr| {
+    if (section.getArray("fonts")) |arr| {
         for (cfg.bar.fonts.items) |font| allocator.free(font);
         cfg.bar.fonts.clearRetainingCapacity();
         for (arr) |item| if (item.asString()) |name|
             try cfg.bar.fonts.append(allocator, try allocator.dupe(u8, name));
         debug.info("Loaded {} fonts for bar", .{cfg.bar.fonts.items.len});
-    };
+    }
     cfg.bar.font_size = getScalableInRange(section, "font_size", cfg.bar.font_size, 0.0);
     cfg.bar.spacing = getScalableInRange(section, "segment_spacing", cfg.bar.spacing, 0.0);
     inline for (BAR_COLOR_FIELDS) |field_name|
         @field(cfg.bar, field_name) = getColor(section, field_name, @field(cfg.bar, field_name));
     try assignStrKey(allocator, section, "clock_format", &cfg.bar.clock_format);
     try assignStrKey(allocator, section, "drun_prompt", &cfg.bar.drun_prompt);
-    // indicator_size: reads the already-initialised current value (from
-    // getDefaultConfig) rather than restating the struct default as a
-    // literal here, so the two can't drift apart. Also folds in the same
-    // negative-value rejection as the other ScalableValue fields.
+    // Reads the already-initialised value as default so the struct default in
+    // types.zig can't drift; also rejects negative values like the other
+    // ScalableValue fields.
     cfg.bar.indicator_size = getScalableInRange(section, "indicator_size", cfg.bar.indicator_size, 0.0);
     cfg.bar.workspace_tag_width = getScalableInRange(section, "workspace_tag_width", cfg.bar.workspace_tag_width, 0.0);
     if (section.getString("indicator_location")) |loc_str| {
@@ -1168,7 +1105,7 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *typ
         const f: f32 = if (val.asInt()) |i|
             @as(f32, @floatFromInt(i)) / 100.0
         else if (val.asScalable()) |sv|
-            if (sv.is_percentage) sv.value / 100.0 else sv.value
+            utils.scaling.asRatio(sv)
         else
             0.1;
         cfg.bar.indicator_padding = std.math.clamp(f, 0.0, 1.0);
@@ -1218,19 +1155,17 @@ fn parseBar(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *typ
 fn parseWorkspaceIcons(allocator: std.mem.Allocator, section: *const parser.Section, cfg: *types.Config) !void {
     for (cfg.bar.workspace_icons.items) |icon| allocator.free(icon);
     cfg.bar.workspace_icons.clearRetainingCapacity();
-    if (section.get("icons")) |value| {
-        if (value.asArray()) |arr| {
-            for (arr) |item| {
-                if (item.asString()) |s| {
-                    try cfg.bar.workspace_icons.append(allocator, try allocator.dupe(u8, s));
-                } else if (item.asInt()) |n| {
-                    try cfg.bar.workspace_icons.append(allocator, try std.fmt.allocPrint(allocator, "{}", .{n}));
-                }
+    if (section.getArray("icons")) |arr| {
+        for (arr) |item| {
+            if (item.asString()) |s| {
+                try cfg.bar.workspace_icons.append(allocator, try allocator.dupe(u8, s));
+            } else if (item.asInt()) |n| {
+                try cfg.bar.workspace_icons.append(allocator, try std.fmt.allocPrint(allocator, "{}", .{n}));
             }
-        } else if (value.asString()) |str| {
-            for (str) |ch|
-                try cfg.bar.workspace_icons.append(allocator, try std.fmt.allocPrint(allocator, "{c}", .{ch}));
         }
+    } else if (section.getString("icons")) |str| {
+        for (str) |ch|
+            try cfg.bar.workspace_icons.append(allocator, try std.fmt.allocPrint(allocator, "{c}", .{ch}));
     }
 
     while (cfg.bar.workspace_icons.items.len < cfg.workspaces.count) {
@@ -1249,7 +1184,7 @@ fn parseBarLayout(allocator: std.mem.Allocator, doc: *const parser.Document, cfg
     for (positions) |p| {
         const layout_section = doc.getSection(p.name) orelse continue;
         var bar_layout = types.BarLayout{ .position = p.pos, .segments = .empty };
-        if (layout_section.get("segments")) |sv| if (sv.asArray()) |seg_arr|
+        if (layout_section.getArray("segments")) |seg_arr|
             for (seg_arr) |item| if (item.asString()) |s|
                 if (std.meta.stringToEnum(types.BarSegment, s)) |segment|
                     try bar_layout.segments.append(allocator, segment)
@@ -1287,7 +1222,7 @@ fn parseRules(allocator: std.mem.Allocator, doc: *const parser.Document, cfg: *t
         else
             continue;
         const ws_num = std.fmt.parseInt(usize, ws_str, 10) catch continue;
-        if (!validateWorkspace(ws_num, cfg.workspaces.count, name)) continue;
+        if (!checkWorkspaceBound(ws_num, name, cfg.workspaces.count)) continue;
         var iter = entry.value_ptr.pairs.iterator();
         while (iter.next()) |class_entry|
             try addRule(allocator, cfg, class_entry.key_ptr.*, ws_num);
@@ -1307,7 +1242,7 @@ fn tryAddClassRule(allocator: std.mem.Allocator, cfg: *types.Config, class_name:
         return;
     }
     const ws: usize = @intCast(ws_num);
-    if (!validateWorkspace(ws, cfg.workspaces.count, class_name)) return;
+    if (!checkWorkspaceBound(ws, class_name, cfg.workspaces.count)) return;
     try addRule(allocator, cfg, class_name, ws);
 }
 
@@ -1324,7 +1259,7 @@ fn parseWorkspaceRuleSection(
             try tryAddClassRule(allocator, cfg, entry.key_ptr.*, entry.value_ptr.*);
             continue;
         };
-        if (!validateWorkspace(ws_num, cfg.workspaces.count, entry.key_ptr.*)) continue;
+        if (!checkWorkspaceBound(ws_num, entry.key_ptr.*, cfg.workspaces.count)) continue;
         if (entry.value_ptr.*.asArray()) |arr| {
             for (arr) |item| {
                 if (item.asString()) |class_name| try addRule(allocator, cfg, class_name, ws_num);

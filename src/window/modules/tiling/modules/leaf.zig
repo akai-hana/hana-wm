@@ -25,15 +25,8 @@ pub fn tileWithOffset(
     // Strip the outer gap; each recursive split inserts one gap at its seam,
     // so adjacent windows are always separated by exactly one gap_width.
     // tileRegion's emitOrDefer honors ctx.defer_win — see LayoutCtx.defer_win.
-    tileRegion(
-        ctx,
-        windows,
-        m,
-        @as(i32, @intCast(m.gap)),
-        @as(i32, @intCast(y_offset +| m.gap)),
-        screen_w -| m.gap *| 2,
-        screen_h -| m.gap *| 2,
-    );
+    const area = layouts.outerArea(screen_w, screen_h, y_offset, m.gap);
+    tileRegion(ctx, windows, m, area.x, area.y, area.w, area.h);
 }
 
 /// Splits `dim` into two halves separated by `gap`.
@@ -61,7 +54,7 @@ fn tileRegion(
     const n = windows.len;
     if (n == 0) return;
 
-    const b2: u16 = 2 *| m.border;
+    const b2: u16 = utils.doubledBorder(m);
 
     // Leaf: place the single window in this region.
     if (n == 1) {

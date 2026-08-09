@@ -20,7 +20,7 @@ pub fn tileWithOffset(
 
     const m = state.margins();
     const grid = calcGridShape(n);
-    const bm = 2 *| m.border;
+    const bm = utils.doubledBorder(m);
 
     const cell_w = (screen_w -| (grid.cols + 1) *| m.gap) / grid.cols;
     const cell_h = (screen_h -| (grid.rows + 1) *| m.gap) / grid.rows;

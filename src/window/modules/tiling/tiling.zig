@@ -139,7 +139,7 @@ pub const GeomCache = struct {
     /// Background retiles reuse this same buffer once per workspace in their
     /// loop rather than a flattened `[workspaces][windows]` array — window
     /// and workspace counts are both small and bounded, so the O(workspaces
-    /// × windows) it costs is negligible, and it avoids the ~32 KB a
+    /// × windows) it costs is negligible, and it avoids the ~50 KB a
     /// flattened buffer would need.
     scratch_wins: [max_workspace_windows]u32,
 };

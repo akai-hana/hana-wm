@@ -6,10 +6,10 @@ const xcb = @cImport(@cInclude("xcb/xcb.h"));
 // Modifier masks
 // Must be u16 as per XCB API
 pub const MOD_SHIFT: u16 = xcb.XCB_MOD_MASK_SHIFT;
-pub const MOD_CAPSLOCK: u16 = xcb.XCB_MOD_MASK_LOCK;
+const MOD_CAPSLOCK: u16 = xcb.XCB_MOD_MASK_LOCK;
 pub const MOD_CONTROL: u16 = xcb.XCB_MOD_MASK_CONTROL;
 pub const MOD_ALT: u16 = xcb.XCB_MOD_MASK_1;
-pub const MOD_NUMLOCK: u16 = xcb.XCB_MOD_MASK_2;
+const MOD_NUMLOCK: u16 = xcb.XCB_MOD_MASK_2;
 pub const MOD_SUPER: u16 = xcb.XCB_MOD_MASK_4;
 
 // Mask applied before comparing a received modifier state against a keybinding.
@@ -97,13 +97,14 @@ pub const EventMasks = struct {
     // from input.setupGrabs stays engaged (AsyncPointer, not ReplayPointer)
     // for the rest of the gesture, so MotionNotify/ButtonRelease keep
     // arriving to us — see keepDragGrab in input.zig for why ReplayPointer
-    // is NOT used there. This bit is what lets that ButtonRelease reach
-    // window.handleEnterNotify's `if (drag.isDragging()) return;` guard is
-    // gated on: without it, a release that isn't caught by the grab (e.g. one
-    // delivered by AllowEvents after the drag) has nothing to fall back to,
-    // drag.active gets stuck true forever, and every hover-focus EnterNotify
-    // — for every window, on every workspace — is silently dropped until the
-    // WM is restarted and resets drag.zig's module state.
+    // is NOT used there. This bit is what lets that ButtonRelease (delivered
+    // to root, the grab window) reach input.handleButtonRelease, whose
+    // `if (drag.isDragging()) drag.stopDrag();` clears drag.active: without
+    // it the release would be dropped, drag.active would stay stuck true
+    // forever, and every hover-focus EnterNotify — for every window, on
+    // every workspace — would be silently dropped by handleEnterNotify's
+    // `if (drag.isDragging()) return;` guard until the WM restarts and
+    // resets drag.zig's module state.
     pub const ROOT_WINDOW = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
         xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
         xcb.XCB_EVENT_MASK_KEY_PRESS |

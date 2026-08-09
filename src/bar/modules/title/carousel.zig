@@ -344,9 +344,7 @@ pub fn drawScrollingTitle(
     // Recover text_w from the live entry when the title hasn't changed,
     // avoiding a Pango measurement on the common steady-state path.
     const text_w: u16 = if (!title_invalidated) blk: {
-        if (render.single) |e| {
-            if (e.window == window) break :blk e.cycle_w - carousel_gap_px;
-        }
+        if (render.single) |e| if (e.window == window) break :blk e.cycle_w - carousel_gap_px;
         break :blk dc.measureTextWidth(text);
     } else dc.measureTextWidth(text);
 
@@ -362,36 +360,7 @@ pub fn drawScrollingTitle(
         return;
     }
 
-    const cycle_w: u16 = text_w + carousel_gap_px;
-
-    // Determine whether a full pixmap rebuild is needed (geometry/identity
-    // changed) vs. an in-place colour update vs. no action.
-    const geom_stale: bool = blk: {
-        const e = render.single orelse break :blk true;
-        break :blk entryStale(&e, window, title_invalidated, cycle_w, geom);
-    };
-
-    if (geom_stale) {
-        // Full rebuild: free old pixmap (if any) then delegate to buildCarouselEntry.
-        if (render.single) |*old| old.cp.deinit();
-        const entry = try buildCarouselEntry(dc, text, text_w, bg, fg, y, geom, cycle_w, window);
-        render.single = entry;
-        const e = &render.single.?;
-        const off = advanceCarouselOffset(e, e.last_ns);
-        e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, geom.seg_x, off, geom.seg_w);
-    } else {
-        const e = &render.single.?;
-
-        if (e.last_bg != bg) {
-            // Colour-only change: re-render into the existing pixmap without
-            // freeing or reallocating it, preserving the scroll position.
-            try e.cp.render(dc, text, bg, fg, y, leftPadOf(geom), cycle_w);
-            e.last_bg = bg;
-        }
-
-        const off = advanceCarouselOffset(e, utils.monotonicNs());
-        e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, geom.seg_x, off, geom.seg_w);
-    }
+    _ = try commitCarouselFrame(&render.single, dc, text, text_w, bg, fg, y, geom, window, title_invalidated, false);
 }
 
 // Public API — segmented carousel
@@ -425,44 +394,63 @@ pub fn drawSegmentedCarousel(
     }
 
     // Consume the focus-change signal atomically.
-    const externally_invalidated = focus_signal.is_invalidated.swap(false, .acq_rel);
+    const force_rebuild = focus_signal.is_invalidated.swap(false, .acq_rel);
 
+    const rebuilt = try commitCarouselFrame(&render.seg, dc, text, text_w, accent, text_fg, baseline_y, geom, window, title_invalidated, force_rebuild);
+    // Publish the window atomically after a rebuild so notifyFocusChanged on the
+    // main thread can check it without touching render.seg.
+    if (rebuilt) focus_signal.seg_window.store(window, .release);
+    return true;
+}
+
+// Private — shared rebuild/recolour/blit step
+
+/// Rebuilds `slot`'s pixmap from scratch when it is stale (window, title,
+/// cycle width, or segment geometry changed — or `force_rebuild` is set), or
+/// re-renders the existing pixmap in place on a colour-only change, then
+/// advances the scroll offset and blits one frame.
+/// Returns true when the pixmap was rebuilt from scratch.
+fn commitCarouselFrame(
+    slot: *?CarouselEntry,
+    dc: *drawing.DrawContext,
+    text: []const u8,
+    text_w: u16,
+    bg: u32,
+    fg: u32,
+    baseline_y: u16,
+    geom: SegmentGeometry,
+    window: ?u32,
+    title_invalidated: bool,
+    force_rebuild: bool,
+) !bool {
     const cycle_w: u16 = text_w + carousel_gap_px;
 
-    // Determine whether a full pixmap rebuild is needed (geometry/identity/focus
-    // changed) vs. an in-place colour update vs. no action.
-    const geom_stale: bool = blk: {
-        if (externally_invalidated) break :blk true;
-        const e = render.seg orelse break :blk true;
-        break :blk entryStale(&e, window, title_invalidated, cycle_w, geom);
-    };
+    // Determine whether a full pixmap rebuild is needed (geometry/identity/
+    // focus changed) vs. an in-place colour update vs. no action.
+    const geom_stale = force_rebuild or if (slot.*) |*e| entryStale(e, window, title_invalidated, cycle_w, geom) else true;
 
     if (geom_stale) {
         // Full rebuild: free old pixmap (if any) then delegate to buildCarouselEntry.
-        if (render.seg) |*old| old.cp.deinit();
-        const entry = try buildCarouselEntry(dc, text, text_w, accent, text_fg, baseline_y, geom, cycle_w, window);
-        render.seg = entry;
-        // Publish the window atomically so notifyFocusChanged on the main
-        // thread can check it without touching render.seg.
-        focus_signal.seg_window.store(window, .release);
-        const e = &render.seg.?;
+        if (slot.*) |*old| old.cp.deinit();
+        slot.* = try buildCarouselEntry(dc, text, text_w, bg, fg, baseline_y, geom, cycle_w, window);
+        const e = &slot.*.?;
         const off = advanceCarouselOffset(e, e.last_ns);
         e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, geom.seg_x, off, geom.seg_w);
-    } else {
-        const e = &render.seg.?;
-
-        if (e.last_bg != accent) {
-            // Colour-only change: re-render into the existing pixmap without
-            // freeing or reallocating it, preserving the scroll position.
-            try e.cp.render(dc, text, accent, text_fg, baseline_y, leftPadOf(geom), cycle_w);
-            e.last_bg = accent;
-        }
-
-        const off = advanceCarouselOffset(e, utils.monotonicNs());
-        e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, geom.seg_x, off, geom.seg_w);
+        return true;
     }
 
-    return true;
+    const e = &slot.*.?;
+
+    if (e.last_bg != bg) {
+        // Colour-only change: re-render into the existing pixmap without
+        // freeing or reallocating it, preserving the scroll position.
+        try e.cp.render(dc, text, bg, fg, baseline_y, leftPadOf(geom), cycle_w);
+        e.last_bg = bg;
+    }
+
+    const off = advanceCarouselOffset(e, utils.monotonicNs());
+    e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, geom.seg_x, off, geom.seg_w);
+    return false;
 }
 
 // Private — carousel entry construction

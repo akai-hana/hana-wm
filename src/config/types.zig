@@ -78,19 +78,12 @@ pub const MouseBind = struct {
 };
 
 /// Owns the persistent (modifiers, keysym) -> Action dispatch map resolved
-/// from a Config's keybindings, along with the keycode-resolution step that
-/// feeds it.
+/// from a Config's keybindings, plus the keycode-resolution step that feeds
+/// it.
 ///
-/// This used to be a bare module-level global in config.zig
-/// (`g_keybind_map`), with a documented but hand-enforced contract: the map
-/// had to be cleared (via `deinitKeybindMap`) before the Config whose
-/// keybindings it pointed into was freed, using a specific `defer` ordering
-/// in main.zig that nothing but a code comment protected. Embedding the
-/// resolver as a field of Config instead ties its lifetime structurally to
-/// the Config it was built from — Config.deinit tears the resolver down
-/// internally, before freeing the Actions its map entries point into — so
-/// there is no longer a two-`defer` dance for a future edit to accidentally
-/// reorder.
+/// Embedded in Config (rather than a module-level global) so its lifetime is
+/// tied structurally to the Config whose keybindings its entries point into:
+/// Config.deinit tears the resolver down before freeing those Actions.
 pub const KeybindResolver = struct {
     map: std.AutoHashMapUnmanaged(u64, *const Action) = .empty,
 
@@ -107,15 +100,10 @@ pub const KeybindResolver = struct {
         self.rebuildDispatchMap(keybindings, allocator);
     }
 
-    /// Warns about conflicting bindings (same effective mods+keysym — the
-    /// same key the dispatch map itself is keyed on, so warnings accurately
-    /// reflect what `lookup` sees) and rebuilds the persistent dispatch map.
-    /// Safe to call repeatedly; clears and rebuilds from scratch every time,
-    /// so bindings from a previous build never leak into the next one.
-    ///
-    /// Split out from `build` so the map-rebuild behavior can be exercised
-    /// without a live XkbState/X connection, since keycode resolution is the
-    /// only part that needs one.
+    /// Warns about conflicting bindings (same effective mods+keysym the map
+    /// is keyed on) and rebuilds the dispatch map from scratch. Split out
+    /// from `build` so it can be exercised without a live XkbState/X
+    /// connection.
     pub fn rebuildDispatchMap(self: *KeybindResolver, keybindings: []Keybind, allocator: std.mem.Allocator) void {
         var seen = std.AutoHashMap(u64, usize).init(allocator);
         defer seen.deinit();
@@ -168,32 +156,15 @@ pub fn LowerResult(comptime max_len: usize) type {
     };
 }
 
-/// Lowercases `str` into a fixed `max_len`-byte buffer if it fits, or
-/// reports `.too_long`.
+/// Lowercases `str` into a fixed `max_len`-byte stack buffer if it fits, or
+/// reports `.too_long` — distinguishable from a plain "not found", so callers
+/// can warn specifically about overlong values.
 ///
-/// Centralizes the "pick a stack buffer size, bounds-check the input, then
-/// lowercase into it" pattern that used to be duplicated — each with its own
-/// separately-chosen buffer size (32, 32, 32, 32, and 16 bytes) — across
-/// fromStringCI, canonicalLayout, isKnownLayout, parseLayoutVariant, and
-/// mouseButtonFromName. Callers that log a warning on failure can now switch
-/// on `.too_long` to give a more specific message than the generic "value
-/// not recognized" that both an overlong value and a genuine typo used to
-/// produce identically, since both previously just looked like "not found in
-/// map" to the caller.
-///
-/// This is complementary to (not a replacement for) LAYOUT_TABLE below:
-/// LAYOUT_TABLE is the single source of truth for name<->tag<->alias
-/// mappings; lowerStringCI is the shared case-folding/bounds-safety
-/// mechanism config.zig's layout-name helpers use to probe it and the other
-/// string_map-backed enums in this file.
-///
-/// keyNameToKeysym's 64-byte buffer is intentionally NOT routed through
-/// this: it copies `name` verbatim (case folding is delegated to
-/// libxkbcommon's XKB_KEYSYM_CASE_INSENSITIVE flag) purely to null-terminate
-/// it for the C API, which is a different operation than the case-insensitive
-/// map lookups this helper serves. It already surfaces a distinct
-/// error.KeyNameTooLong vs error.UnknownKeyName to its caller, so it doesn't
-/// have the "identical generic warning" problem this item is about.
+/// Shared case-folding/bounds-safety helper for the layout-name and
+/// string_map-backed lookups in config.zig and this file; complementary to
+/// LAYOUT_TABLE (the name<->tag<->alias mapping), not a replacement for it.
+/// keyNameToKeysym intentionally bypasses this: it needs a verbatim
+/// NUL-terminated copy for the C API, not a case-folded lookup.
 pub fn lowerStringCI(comptime max_len: usize, str: []const u8) LowerResult(max_len) {
     if (str.len > max_len) return .too_long;
     var result: LowerResult(max_len) = .{ .ok = .{ .buf = undefined, .len = str.len } };
@@ -590,12 +561,9 @@ pub const Config = struct {
     snap_distance: parser.ScalableValue = parser.ScalableValue.absolute(8.0),
 
     pub fn deinit(self: *Config, a: std.mem.Allocator) void {
-        // Must run before `self.keybindings.deinit(a)` below: keybind_resolver's
-        // map holds `*const Action` pointers borrowed from self.keybindings'
-        // elements, so the map has to be torn down (or at least never touched
-        // again) before those Actions are freed. Living inside one function
-        // makes this ordering structural rather than a convention two separate
-        // `defer` statements in main.zig had to get right (see item 10).
+        // Must precede `self.keybindings.deinit(a)`: the map holds `*const
+        // Action` pointers borrowed from self.keybindings' elements, so it
+        // must be torn down before those Actions are freed.
         self.keybind_resolver.deinit(a);
 
         for (self.keybindings.items) |*kb| kb.action.deinit(a);
