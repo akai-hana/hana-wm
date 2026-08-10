@@ -1,6 +1,11 @@
-//! Binary Space Partitioning tiling layout
-//! Recursively partitions the screen using a balanced binary tree.
-//TODO: improve these comments
+//! Binary Space Partitioning tiling layout.
+//!
+//! Recursively splits the window list and the screen region in lockstep: each
+//! internal node bisects the region along its longer axis (a tie prefers a
+//! vertical split) and hands the two halves to the two halves of the window
+//! list, so `n` windows end up as ~log2(n) balanced leaves. One gap is inserted
+//! at every seam; the outer gap is stripped up front and borders are subtracted
+//! only at the leaves.
 
 const constants = @import("constants");
 const utils = @import("utils");
@@ -18,8 +23,6 @@ pub fn tileWithOffset(
     screen_h: u16,
     y_offset: u16,
 ) void {
-    if (windows.len == 0) return;
-
     const m = state.margins();
 
     // Strip the outer gap; each recursive split inserts one gap at its seam,

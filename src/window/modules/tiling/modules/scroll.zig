@@ -120,8 +120,8 @@ pub fn tileWithOffset(
     screen_h: u16,
     y_offset: u16,
 ) void {
+    // Windows list is guaranteed non-empty by invokeLayout (see tiling.zig).
     const n = windows.len;
-    if (n == 0) return;
 
     const m = state.margins();
 
@@ -173,23 +173,11 @@ pub fn tileWithOffset(
         const right: i32 = x + avail + border2;
 
         // Completely off-screen: park the window at OFFSCREEN_X_POSITION so
-        // the cache stays consistent.  Clamp x into i16 range first; values
-        // outside that range cannot be sent as a valid configure_window X
-        // coordinate and would overflow the u32 cast the X server expects.
-        if (x >= sw_i32 or right <= 0) {
-            const parked_x: i32 = constants.OFFSCREEN_X_POSITION;
-            const rect = utils.Rect{
-                .x = @intCast(parked_x),
-                .y = @intCast(win_y),
-                .width = content_w,
-                .height = content_h,
-            };
-            layouts.emitOrDefer(ctx, win, rect);
-            continue;
-        }
-
+        // the cache stays consistent. The computed x is never used when parked
+        // — it can exceed the i16 range a configure_window X coordinate allows.
+        const effective_x: i32 = if (x >= sw_i32 or right <= 0) constants.OFFSCREEN_X_POSITION else x;
         const rect = utils.Rect{
-            .x = @intCast(x),
+            .x = @intCast(effective_x),
             .y = @intCast(win_y),
             .width = content_w,
             .height = content_h,

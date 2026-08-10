@@ -1,6 +1,8 @@
 //! Monocle tiling layout
 //! Stacks all windows fullscreen, showing only the topmost one, with optional gap insets.
 
+const std = @import("std");
+
 const utils = @import("utils");
 const layouts = @import("layouts");
 const tiling = @import("tiling");
@@ -15,8 +17,6 @@ pub fn tileWithOffset(
     screen_h: u16,
     y_offset: u16,
 ) void {
-    if (windows.len == 0) return;
-
     const m = state.margins();
     const inset: u16 = if (state.config.layout_variants.monocle == .gaps) m.gap else 0;
     const total_margin = utils.doubledBorder(m) + inset * 2;
@@ -32,11 +32,7 @@ pub fn tileWithOffset(
     // ctx.focused_win via retileCurrentWorkspaceWithPendingFocus, since
     // focus.setFocus for it hasn't run yet at retile time.)
     const top_win: u32 = blk: {
-        if (ctx.focused_win) |f| {
-            for (windows) |w| {
-                if (w == f) break :blk f;
-            }
-        }
+        if (ctx.focused_win) |f| if (std.mem.indexOfScalar(u32, windows, f) != null) break :blk f;
         break :blk windows[windows.len - 1];
     };
 
@@ -52,19 +48,13 @@ pub fn tileWithOffset(
     // and raising `top_win` here would make it first in the *global*
     // stacking order — above the bar and every window on the workspace
     // actually being looked at — with nothing to ever lower it again.
-    if (ctx.is_background) {
-        layouts.configureWithHints(ctx, top_win, top_rect);
-    } else {
-        layouts.configureWithHintsAndRaise(ctx, top_win, top_rect);
-    }
+    layouts.configureWithHintsAndRaiseIfVisible(ctx, top_win, top_rect);
 
     pushBackgroundWindowsOffscreen(ctx, windows, top_win);
 }
 
 /// Push all windows except `top_win` offscreen so they never show through a
-/// transparent top window. Skips windows already offscreen to avoid redundant
-/// round-trips, and invalidates their cached rect so `restoreWorkspaceGeom`
-/// doesn't replay a stale on-screen position.
+/// transparent top window.
 fn pushBackgroundWindowsOffscreen(
     ctx: *const layouts.LayoutCtx,
     windows: []const u32,
@@ -72,10 +62,6 @@ fn pushBackgroundWindowsOffscreen(
 ) void {
     for (windows) |win| {
         if (win == top_win) continue;
-        if (ctx.cache.getPtr(win)) |wd| {
-            if (!wd.hasValidRect()) continue; // already offscreen — skip round-trip
-            wd.rect = tiling.zero_rect; // invalidate before sending
-        }
-        utils.pushWindowOffscreen(ctx.conn, win);
+        layouts.pushWindowOffscreenAndInvalidate(ctx, win);
     }
 }

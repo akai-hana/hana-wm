@@ -6,6 +6,7 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const constants = @import("constants");
+const utils = @import("utils");
 const window = @import("window");
 const tracking = @import("tracking");
 const tiling = @import("tiling");
@@ -36,7 +37,9 @@ const State = struct {
     // broken; it must NOT be used inside this module — use 0 (CurrentTime).
     last_event_time: u32 = 0,
 
-    // EWMH atom for _NET_ACTIVE_WINDOW — interned once in init().
+    // EWMH atom for _NET_ACTIVE_WINDOW — resolved from the shared atom cache
+    // (utils.initAtomCache) in init(). Zero (XCB_ATOM_NONE) when the cache was
+    // unavailable; advertiseActiveWindow no-ops then.
     net_active_window: xcb.xcb_atom_t = xcb.XCB_ATOM_NONE,
 
     // Deferred async state
@@ -88,15 +91,9 @@ pub fn init() void {
     // (test harness, session restart) starts from a clean slate.
     state = .{};
 
-    // Intern _NET_ACTIVE_WINDOW so setFocus can advertise the focused window
-    // on the root.  null reply -> stays XCB_ATOM_NONE; advertiseActiveWindow
-    // no-ops.
-    const conn = core.getState().conn;
-    const ck = xcb.xcb_intern_atom(conn, 0, "_NET_ACTIVE_WINDOW".len, "_NET_ACTIVE_WINDOW");
-    if (xcb.xcb_intern_atom_reply(conn, ck, null)) |r| {
-        state.net_active_window = r.*.atom;
-        std.c.free(r);
-    }
+    // Resolve _NET_ACTIVE_WINDOW from the shared atom cache so setFocus can
+    // advertise the focused window on the root. Zero -> advertiseActiveWindow no-ops.
+    state.net_active_window = utils.getAtomCached("_NET_ACTIVE_WINDOW") catch 0;
 }
 
 /// Discard an optional XCB cookie without blocking.
@@ -331,8 +328,7 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
 
     if (flags.set_input_focus) focusNow(conn, win);
 
-    if (flags.raise)
-        _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+    if (flags.raise) utils.raiseWindow(conn, win);
 
     // Consume the pre-fired WM_PROTOCOLS cookie (set by setFocus) either by
     // draining it through sendWMTakeFocusWithCookie — the server has been

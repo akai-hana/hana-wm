@@ -133,17 +133,16 @@ Mod+scroll_down  = "scroll_view_left"
 ## Master-stack
 Mod+H       = "decrease_master"
 Mod+L       = "increase_master" # Increase master area width
-Mod+Shift+L = "increase_master_count"
 Mod+Shift+H = "decrease_master_count"
+Mod+Shift+L = "increase_master_count"
 Mod+N       = "grow_stack_top"    # Grow topmost slave, shrink the rest evenly
 Mod+O       = "grow_stack_bottom" # Grow bottommost slave, shrink the rest evenly
 
 # Focus cycling
-## k = next/right (master → stack → ... → wrap), j = prev/left
-Mod+k = "focus_next_window"
 Mod+j = "focus_prev_window"
-Mod+Shift+k = "move_window_next"
+Mod+k = "focus_next_window"
 Mod+Shift+j = "move_window_prev"
+Mod+Shift+k = "move_window_next"
 
 # Workspaces
 ## Switch to workspace N

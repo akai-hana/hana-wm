@@ -15,8 +15,8 @@ pub fn tileWithOffset(
     screen_h: u16,
     y_offset: u16,
 ) void {
+    // Windows list is guaranteed non-empty by invokeLayout (see tiling.zig).
     const n = windows.len;
-    if (n == 0) return;
 
     const m = state.margins();
     const grid = calcGridShape(n);
@@ -29,7 +29,8 @@ pub fn tileWithOffset(
     // In relaxed mode, windows on a partial last row divide the full screen
     // width among themselves rather than using the narrower grid-column width.
     // The computation is gated on .relaxed so the division is skipped entirely
-    // on the default .rigid path where partial_cell_w is never used.
+    // on the default .rigid path; on .rigid partial_cell_w is just cell_w, so
+    // the is_partial_row pick below reduces to cell_w either way.
     const last_row_count = n % grid.cols;
     const partial_cell_w: u16 = if (state.config.layout_variants.grid == .relaxed and last_row_count != 0) blk: {
         const count: u16 = @intCast(last_row_count);
@@ -42,10 +43,7 @@ pub fn tileWithOffset(
         const row: u16 = @intCast(idx / grid.cols);
 
         const is_partial_row = last_row_count != 0 and row == grid.rows - 1;
-        const effective_cell_w: u16 = switch (state.config.layout_variants.grid) {
-            .rigid => cell_w,
-            .relaxed => if (is_partial_row) partial_cell_w else cell_w,
-        };
+        const effective_cell_w: u16 = if (is_partial_row) partial_cell_w else cell_w;
 
         const rect = utils.Rect{
             .x = @intCast(m.gap +| col *| (effective_cell_w + m.gap)),

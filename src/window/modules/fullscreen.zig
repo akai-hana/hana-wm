@@ -63,9 +63,11 @@ var g_pending_bar_hide_win: u32 = 0;
 /// notifyConfigureIfPending, resetState, and onWindowGone.
 var g_pending_bar_show_win: u32 = 0;
 
-// EWMH atoms for _NET_WM_STATE_FULLSCREEN — interned once in init().
-var g_net_wm_state: xcb.xcb_atom_t = xcb.XCB_ATOM_NONE;
-var g_net_wm_state_fullscreen: xcb.xcb_atom_t = xcb.XCB_ATOM_NONE;
+// EWMH atoms for _NET_WM_STATE_FULLSCREEN, resolved from the shared atom
+// cache (utils.initAtomCache) in init(). Zero (XCB_ATOM_NONE) when the cache
+// was unavailable — setEwmhFullscreenState's guard already skips the write then.
+var g_net_wm_state: xcb.xcb_atom_t = 0;
+var g_net_wm_state_fullscreen: xcb.xcb_atom_t = 0;
 
 /// Shared reset sequence used by both init() and deinit() to keep them in sync.
 fn resetState() void {
@@ -73,16 +75,8 @@ fn resetState() void {
     g_float_saves_len = 0;
     g_pending_bar_hide_win = 0;
     g_pending_bar_show_win = 0;
-}
-
-/// Consume an intern-atom cookie and return the resulting atom,
-/// or XCB_ATOM_NONE if the reply is null. Centralises the consume-assign-free
-/// pattern shared by every atom lookup in init().
-fn internAtom(cookie: xcb.xcb_intern_atom_cookie_t) xcb.xcb_atom_t {
-    const r = xcb.xcb_intern_atom_reply(core.getState().conn, cookie, null) orelse
-        return xcb.XCB_ATOM_NONE;
-    defer std.c.free(r);
-    return r.*.atom;
+    g_net_wm_state = 0;
+    g_net_wm_state_fullscreen = 0;
 }
 
 /// Returns true when the reply geometry indicates the window is parked
@@ -96,13 +90,10 @@ inline fn isOffscreenReply(r: *const xcb.xcb_get_geometry_reply_t) bool {
 pub fn init() void {
     resetState();
 
-    // Intern EWMH atoms needed for _NET_WM_STATE_FULLSCREEN.
-    // Batch both requests before consuming either reply so the round-trips overlap.
-    const conn = core.getState().conn;
-    const ck_state = xcb.xcb_intern_atom(conn, 0, "_NET_WM_STATE".len, "_NET_WM_STATE");
-    const ck_fs = xcb.xcb_intern_atom(conn, 0, "_NET_WM_STATE_FULLSCREEN".len, "_NET_WM_STATE_FULLSCREEN");
-    g_net_wm_state = internAtom(ck_state);
-    g_net_wm_state_fullscreen = internAtom(ck_fs);
+    // Re-resolve the EWMH fullscreen atoms from the shared atom cache rather
+    // than interning them again here.
+    g_net_wm_state = utils.getAtomCached("_NET_WM_STATE") catch 0;
+    g_net_wm_state_fullscreen = utils.getAtomCached("_NET_WM_STATE_FULLSCREEN") catch 0;
 }
 
 pub fn deinit() void {
@@ -305,14 +296,9 @@ fn getSavedFloatGeom(win: u32) ?utils.Rect {
 
 /// Restore every non-minimized, non-tiled window on the current workspace
 /// (except `skip_win`) to its saved position.
-/// Priority: g_float_saves -> tiling geometry cache -> floatDefaultPos fallback.
+/// Priority: g_float_saves -> tiling geometry cache -> moveFloatToDefaultPos.
 /// Clears g_float_saves when done.
 fn restoreFloatingWindows(skip_win: u32) void {
-    const pos = window.floatDefaultPos();
-
-    const pos_x: u32 = @intCast(pos.x);
-    const pos_y: u32 = @intCast(pos.y);
-
     var it = windowsOnCurrentWorkspace(skip_win);
     while (it.next()) |w| {
         if (minimize.isMinimized(w)) continue;
@@ -323,7 +309,7 @@ fn restoreFloatingWindows(skip_win: u32) void {
         if (getSavedFloatGeom(w)) |r| {
             utils.configureWindow(core.getState().conn, w, r);
         } else {
-            _ = xcb.xcb_configure_window(core.getState().conn, w, xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{ pos_x, pos_y });
+            window.moveFloatToDefaultPos(w);
         }
     }
 
@@ -351,6 +337,21 @@ fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
 
 // Commit helpers (XCB-only; caller owns grab/ungrab/flush)
 
+/// Configure `win` at fullscreen geometry (screen-sized, borderless) and raise
+/// it. Shared by enterFullscreenCommit and the workspace-switch path in
+/// workspaces.zig, which must apply identical geometry to the fullscreen window.
+pub fn applyFullscreenGeometry(win: u32) void {
+    const cs = core.getState();
+    window.configureWindowGeom(cs.conn, win, .{
+        .x = 0,
+        .y = 0,
+        .width = @intCast(cs.screen.width_in_pixels),
+        .height = @intCast(cs.screen.height_in_pixels),
+        .border_width = 0,
+    });
+    utils.raiseWindow(cs.conn, win);
+}
+
 fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
     setForWorkspace(ws, .{
         .window = win,
@@ -371,15 +372,7 @@ fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
     // (e.g. Discord, Electron apps) don't expose the raw background during
     // their repaint delay.  The bar hide is triggered in notifyConfigureIfPending
     // once the window confirms its new geometry.
-    const cs = core.getState();
-    window.configureWindowGeom(cs.conn, win, .{
-        .x = 0,
-        .y = 0,
-        .width = @intCast(cs.screen.width_in_pixels),
-        .height = @intCast(cs.screen.height_in_pixels),
-        .border_width = 0,
-    });
-    _ = xcb.xcb_configure_window(cs.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+    applyFullscreenGeometry(win);
 
     // Evict the fullscreen window itself; its cache still holds the pre-fullscreen
     // tiled rect. On exit retile would compute the same rect, get a hit, and skip
@@ -509,13 +502,8 @@ pub fn toggle() void {
             utils.ungrabAndFlush(conn);
         }
     } else {
-        // Nothing fullscreen on this workspace — hoist round-trips before the grab.
-        const geom = fetchWindowGeom(win);
-        saveFloatingWindowGeoms(win);
-        const conn = core.getState().conn;
-        _ = xcb.xcb_grab_server(conn);
-        enterFullscreenCommit(win, current_ws, geom);
-        utils.ungrabAndFlush(conn);
+        // Nothing fullscreen on this workspace.
+        enterFullscreen(win, null);
     }
 }
 

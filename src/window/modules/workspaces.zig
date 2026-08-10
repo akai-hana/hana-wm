@@ -329,9 +329,6 @@ pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
             _ = xcb.xcb_grab_server(core.getState().conn);
             evictWindow(win);
             retileRedrawAndFlush();
-        } else {
-            tiling.invalidateWsGeomBit(target_ws);
-            bar.scheduleRedraw();
         }
     } else {
         // Add tag N.
@@ -343,10 +340,12 @@ pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
             _ = xcb.xcb_grab_server(conn);
             _ = xcb.xcb_map_window(conn, win);
             retileRedrawAndFlush();
-        } else {
-            tiling.invalidateWsGeomBit(target_ws);
-            bar.scheduleRedraw();
         }
+    }
+    if (target_ws != current) {
+        // Off-workspace change: just mark that workspace's geometry stale.
+        tiling.invalidateWsGeomBit(target_ws);
+        bar.scheduleRedraw();
     }
 }
 
@@ -659,10 +658,7 @@ fn executeSwitch(old_ws: u8, new_ws: u8) void {
             utils.pushWindowOffscreen(cs.conn, win);
             if (tiling.isWindowActiveTiled(win)) tiling.invalidateGeomCache(win);
         }
-        _ = xcb.xcb_configure_window(cs.conn, info.window, xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
-            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
-            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{ 0, 0, @intCast(cs.screen.width_in_pixels), @intCast(cs.screen.height_in_pixels), 0 });
-        _ = xcb.xcb_configure_window(cs.conn, info.window, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+        fullscreen.applyFullscreenGeometry(info.window);
         applyPostSwitchFocus(resolvePostSwitchFocus(new_ws_obj, ptr_reply));
     } else {
         // Resolve before restoring: on a geometry-cache miss,

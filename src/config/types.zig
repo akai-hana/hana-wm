@@ -230,9 +230,12 @@ pub const Layout = enum {
     fibonacci,
     leaf,
     scroll,
-    /// Windows are left at their current positions. Never cyclable and never
-    /// parseable by name from config — produced only as a default. Deliberately
-    /// excluded from LAYOUT_TABLE below.
+    /// Windows are left at their current positions. Reachable from config via
+    /// `tiling.layout = "floating"` — the scalar layout key resolves through
+    /// stringToEnum (see tiling.initState), not LAYOUT_TABLE — but never
+    /// cyclable: excluded from LAYOUT_TABLE below, so toggleLayout can't select
+    /// it, and stepping the cycle while it's active jumps to the first enabled
+    /// layout.
     floating,
 };
 

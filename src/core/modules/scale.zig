@@ -27,11 +27,11 @@ const RESOURCE_MANAGER_MAX_LEN: u32 = 4096;
 /// Reads the Xft.dpi value from the X RESOURCE_MANAGER property, if present.
 /// Returns null when the property is absent, empty, or does not contain an Xft.dpi entry.
 fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
-    const atom_cookie = xcb.xcb_intern_atom(conn, 0, "RESOURCE_MANAGER".len, "RESOURCE_MANAGER");
-    const atom_reply = xcb.xcb_intern_atom_reply(conn, atom_cookie, null) orelse return null;
-    defer std.c.free(atom_reply);
+    // Resolve the atom from the shared cache; a property request with atom 0
+    // just comes back empty, so a cache miss reads as "no Xft.dpi".
+    const atom = utils.getAtomCached("RESOURCE_MANAGER") catch 0;
 
-    const prop_cookie = xcb.xcb_get_property(conn, 0, screen.*.root, atom_reply.*.atom, xcb.XCB_ATOM_STRING, 0, RESOURCE_MANAGER_MAX_LEN);
+    const prop_cookie = xcb.xcb_get_property(conn, 0, screen.*.root, atom, xcb.XCB_ATOM_STRING, 0, RESOURCE_MANAGER_MAX_LEN);
     const prop_reply = xcb.xcb_get_property_reply(conn, prop_cookie, null) orelse return null;
     defer std.c.free(prop_reply);
 
