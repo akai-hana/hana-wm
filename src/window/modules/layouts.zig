@@ -24,11 +24,14 @@ pub const SizeHints = struct {
     max_aspect: f32 = 0.0,
 };
 
+/// Sentinel zero rect used to mark a cache entry as stale.
+pub const zero_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+
 /// Per-window cache entry: last geometry, last border color, size hints.
 pub const WindowData = struct {
     /// Zeroed rect = stale / not yet computed. The layout engine never
     /// produces a real 0×0 rect, so this sentinel is unambiguous.
-    rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    rect: utils.Rect = zero_rect,
     border: u32 = 0,
     hints: SizeHints = .{},
 
@@ -86,6 +89,18 @@ pub const LayoutCtx = struct {
     is_background: bool = false,
 };
 
+/// Push `win` offscreen for layouts that hide it (monocle's background
+/// windows, fibonacci's overflow fallback). Invalidates the cached rect first
+/// so `restoreWorkspaceGeom` never replays a stale on-screen position, and
+/// skips the XCB round-trip when the entry is already invalid.
+pub inline fn pushWindowOffscreenAndInvalidate(ctx: *const LayoutCtx, win: u32) void {
+    if (ctx.cache.getPtr(win)) |wd| {
+        if (!wd.hasValidRect()) return;
+        wd.rect = zero_rect;
+    }
+    utils.pushWindowOffscreen(ctx.conn, win);
+}
+
 pub inline fn rectsEqual(a: utils.Rect, b: utils.Rect) bool {
     return a.x == b.x and a.y == b.y and a.width == b.width and a.height == b.height;
 }
@@ -130,9 +145,7 @@ fn configureWithHintsImpl(comptime raise: bool, ctx: *const LayoutCtx, win: u32,
 
     if (effective.width == 0 or effective.height == 0) {
         debug.err("Invalid rect for window 0x{x}: {}x{} at {},{}", .{ win, effective.width, effective.height, effective.x, effective.y });
-        if (comptime raise) {
-            _ = xcb.xcb_configure_window(ctx.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
-        }
+        if (comptime raise) utils.raiseWindow(ctx.conn, win);
         return;
     }
 
@@ -153,7 +166,7 @@ fn configureWithHintsImpl(comptime raise: bool, ctx: *const LayoutCtx, win: u32,
             utils.configureWindow(ctx.conn, win, effective);
         }
     } else if (comptime raise) {
-        _ = xcb.xcb_configure_window(ctx.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+        utils.raiseWindow(ctx.conn, win);
     }
 }
 
@@ -167,6 +180,20 @@ pub fn configureWithHints(ctx: *const LayoutCtx, win: u32, rect: utils.Rect) voi
 /// same request when geometry changes.
 pub fn configureWithHintsAndRaise(ctx: *const LayoutCtx, win: u32, rect: utils.Rect) void {
     configureWithHintsImpl(true, ctx, win, rect);
+}
+
+/// Configure `win` with hints, raising it only when this is not a background
+/// retile (LayoutCtx.is_background). There is no viewer on a workspace nobody
+/// is looking at, and raising would leave the window first in the *global*
+/// stacking order — above the bar and every window on the workspace actually
+/// being viewed — with nothing to ever lower it again. Shared by the layouts
+/// that promote a focused/top window (monocle, fibonacci's overflow fallback).
+pub inline fn configureWithHintsAndRaiseIfVisible(ctx: *const LayoutCtx, win: u32, rect: utils.Rect) void {
+    if (ctx.is_background) {
+        configureWithHints(ctx, win, rect);
+    } else {
+        configureWithHintsAndRaise(ctx, win, rect);
+    }
 }
 
 /// Apply ICCCM §4.1.2.3 hints to a raw rect: resize-increment snap, max-size

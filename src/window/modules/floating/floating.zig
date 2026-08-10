@@ -40,49 +40,41 @@ pub fn tileWithOffset(
         const end = @min(base + BATCH, windows.len);
         const batch = windows[base..end];
 
-        // Skip windows already positioned (valid cached rect at a non-zero
-        // origin) — no geometry query needed for those.
+        // Issue geometry requests for every window not already placed;
+        // replies are collected below — only the first reply pays for a round-trip.
+        var cookies: [BATCH]xcb.xcb_get_geometry_cookie_t = undefined;
         var needs_query = [_]bool{false} ** BATCH;
         var any_needs: bool = false;
         for (batch, 0..) |win, i| {
             const already_placed = if (ctx.cache.getPtr(win)) |wd| wd.hasValidRect() else false;
             if (already_placed) continue;
+            cookies[i] = xcb.xcb_get_geometry(cs.conn, win);
             needs_query[i] = true;
             any_needs = true;
         }
-        if (!any_needs) {
-            base = end;
-            continue;
-        }
+        if (any_needs) {
+            for (batch, 0..) |win, i| {
+                if (!needs_query[i]) continue;
+                const reply = xcb.xcb_get_geometry_reply(cs.conn, cookies[i], null) orelse continue;
+                defer std.c.free(reply);
 
-        // Issue all geometry requests for this batch, then collect replies —
-        // only the first reply pays for a round-trip.
-        var cookies: [BATCH]xcb.xcb_get_geometry_cookie_t = undefined;
-        for (batch, 0..) |win, i| {
-            if (needs_query[i]) cookies[i] = xcb.xcb_get_geometry(cs.conn, win);
-        }
+                // Not at (0,0): user already placed it before this pass — leave it.
+                if (reply.*.x != 0 or reply.*.y != 0) continue;
 
-        for (batch, 0..) |win, i| {
-            if (!needs_query[i]) continue;
-            const reply = xcb.xcb_get_geometry_reply(cs.conn, cookies[i], null) orelse continue;
-            defer std.c.free(reply);
+                const w: i32 = reply.*.width;
+                const h: i32 = reply.*.height;
+                const cx: i32 = @max(0, @divTrunc(sw - w, 2));
+                const cy: i32 = work_top + @max(0, @divTrunc(work_h - h, 2));
 
-            // Not at (0,0): user already placed it before this pass — leave it.
-            if (reply.*.x != 0 or reply.*.y != 0) continue;
-
-            const w: i32 = reply.*.width;
-            const h: i32 = reply.*.height;
-            const cx: i32 = @max(0, @divTrunc(sw - w, 2));
-            const cy: i32 = work_top + @max(0, @divTrunc(work_h - h, 2));
-
-            // configureWithHints stores the position in the cache so
-            // restoreWorkspaceGeom can replay it without a fresh query.
-            layouts.configureWithHints(ctx, win, .{
-                .x = @intCast(cx),
-                .y = @intCast(cy),
-                .width = @intCast(w),
-                .height = @intCast(h),
-            });
+                // configureWithHints stores the position in the cache so
+                // restoreWorkspaceGeom can replay it without a fresh query.
+                layouts.configureWithHints(ctx, win, .{
+                    .x = @intCast(cx),
+                    .y = @intCast(cy),
+                    .width = @intCast(w),
+                    .height = @intCast(h),
+                });
+            }
         }
 
         base = end;

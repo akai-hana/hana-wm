@@ -175,6 +175,7 @@ pub inline fn configureWindowGeom(conn: *xcb.xcb_connection_t, win: u32, geom: c
 }
 
 /// Moves `win` to the default floating position (used when no saved geometry exists).
+/// Shared by restoreFloatGeom and fullscreen.restoreFloatingWindows.
 pub fn moveFloatToDefaultPos(win: u32) void {
     const conn = core.getState().conn;
     const pos = floatDefaultPos();
@@ -237,17 +238,13 @@ fn matchCacheSlotId(win: u32, slot: CacheSlot) bool {
     return slot.id == win;
 }
 
-/// Initializes the per-window focus property cache.
-/// No allocator required — the backing store is a module-level static array.
-pub fn initInputModelCache() void {
+/// Enables (ready=true) or disables (ready=false) the per-window focus
+/// property cache, clearing any entries. Shared by init and deinit so the
+/// two paths cannot drift apart. No allocator required — the backing store
+/// is a module-level static array.
+fn setInputModelCacheReady(ready: bool) void {
     state.cache_slots.clear();
-    state.cache_ready = true;
-}
-
-/// Cleans up the per-window focus property cache.
-pub fn deinitInputModelCache() void {
-    state.cache_slots.clear();
-    state.cache_ready = false;
+    state.cache_ready = ready;
 }
 
 /// Consumes WM_PROTOCOLS and WM_HINTS cookies and stores the result.
@@ -259,7 +256,7 @@ pub fn deinitInputModelCache() void {
 /// `focus_atoms.take_focus`, folded into the same single-pass scan as
 /// WM_DELETE_WINDOW) but that half of the result is discarded rather than
 /// cached — see getInputModel() for why.
-pub fn populateFocusCacheFromCookies(
+fn populateFocusCacheFromCookies(
     conn: *xcb.xcb_connection_t,
     win: u32,
     protocols_cookie: xcb.xcb_get_property_cookie_t,
@@ -326,7 +323,7 @@ fn extractWMHintsInput(
 /// Removes `win` from the focus property cache — called on window destruction
 /// to prevent stale entries from accumulating over the session.
 /// Swap-remove keeps the live region dense so subsequent scans stay short.
-pub inline fn uncacheWindowFocusProps(win: u32) void {
+fn uncacheWindowFocusProps(win: u32) void {
     if (!state.cache_ready) return;
     if (state.cache_slots.indexOf(win, matchCacheSlotId)) |i| state.cache_slots.swapRemove(i);
 }
@@ -359,7 +356,7 @@ fn putCachedProps(win: u32, props: CachedProps) void {
 /// at map time), so the fact that this issues its own WM_PROTOCOLS round trip
 /// even though getInputModel() below will immediately issue another one for
 /// the live take_focus check is not worth optimizing away.
-pub fn queryAndCacheProps(conn: *xcb.xcb_connection_t, win: u32) CachedProps {
+fn queryAndCacheProps(conn: *xcb.xcb_connection_t, win: u32) CachedProps {
     const props = CachedProps{
         .accepts_input = queryWMHintsAcceptsInput(conn, win),
         .wm_delete = queryWMProtocolsProps(conn, win).wm_delete,
@@ -592,7 +589,7 @@ fn cacheChildWindow(child: u32, managed: u32) void {
 
 /// Remove all entries whose managed toplevel is `managed_win`.
 /// Called from unmanageWindow so stale child entries don't linger.
-pub fn evictChildCache(managed_win: u32) void {
+fn evictChildCache(managed_win: u32) void {
     var i: usize = 0;
     while (i < state.child_cache.len) {
         if (state.child_cache.items[i].managed == managed_win) {
@@ -691,16 +688,16 @@ pub fn init(alloc: std.mem.Allocator) !void {
         std.log.warn("window: spawn queue pre-allocation failed ({s}); will grow on demand", .{@errorName(err)});
     };
     populateAtomCache();
-    initInputModelCache();
+    setInputModelCacheReady(true);
     buildRulesMap();
 }
 
 pub fn deinit() void {
     // Teardown order: optional subsystems in approximate reverse-init order,
     // then InputModelCache (which must precede focus and tracking — see the
-    // init order comment above initInputModelCache), then focus, then tracking.
-    // This is NOT strict reverse-init order; the InputModelCache dependency
-    // intentionally breaks strict symmetry.
+    // init-order note in the InputModelCache section above), then focus, then
+    // tracking. This is NOT strict reverse-init order; the InputModelCache
+    // dependency intentionally breaks strict symmetry.
     tiling.deinit();
     fullscreen.deinit();
     workspaces.deinit();
@@ -713,10 +710,10 @@ pub fn deinit() void {
         state.rules_map.deinit(a);
     }
     // InputModel cache must be torn down before focus and tracking, mirroring
-    // the init order where initInputModelCache() follows focus.init().
+    // the init order where setInputModelCacheReady(true) follows focus.init().
     // focus.deinit() and tracking.deinit() may sweep managed windows and
     // must not encounter a partially-valid cache.
-    deinitInputModelCache();
+    setInputModelCacheReady(false);
     focus.deinit();
     tracking.deinit();
     // Reset every remaining field (spawn_cursor, atoms, child_cache,
@@ -1563,7 +1560,7 @@ inline fn borderColor(win: u32) u32 {
 }
 
 /// Apply border width only to `win`.
-pub fn applyBorderWidth(win: u32) void {
+fn applyBorderWidth(win: u32) void {
     const width = getBorderWidth();
     if (width > 0)
         _ = xcb.xcb_configure_window(core.getState().conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{width});

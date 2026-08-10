@@ -1,6 +1,7 @@
 //! Fibonacci (spiral) tiling layout
 //! Arranges windows in a counter-clockwise spiral, each taking half the remaining screen area.
 
+const std = @import("std");
 const utils = @import("utils");
 const layouts = @import("layouts");
 const tiling = @import("tiling");
@@ -27,8 +28,6 @@ pub fn tileWithOffset(
     screen_h: u16,
     y_offset: u16,
 ) void {
-    if (windows.len == 0) return;
-
     const m = state.margins();
     const border2 = utils.doubledBorder(m);
 
@@ -44,21 +43,6 @@ pub fn tileWithOffset(
         // Remaining area too small to split: raise the focused window (or the
         // first overflow window as fallback) and push the rest offscreen so the
         // user at least sees one window rather than a stack of identical rects.
-        //
-        // Note: the raise/offscreen calls below go straight to XCB instead of
-        // through emitOrDefer, so if ctx.defer_win falls inside windows[i..]
-        // it's configured now rather than deferred to the end of the retile.
-        // In practice this never matters: defer_win is only ever set by
-        // swap_master (see executeSwapMaster in input.zig), which always
-        // passes the *new* master — and swapWindowsInList places the new
-        // master at the old master's global index, so defer_win is always
-        // windows[0] here. windows[0] is handled by the loop's very first
-        // iteration (i=0) via the normal splitAndAdvance/emitOrDefer path,
-        // long before any i>0 overflow branch is reached. The only way
-        // defer_win could land in windows[i..] is i==0 itself — the screen
-        // too small to fit even one window with margins — and that's a
-        // total-fallback state where the one-frame-gap concern is moot:
-        // nothing else got tiled this pass, so there's no handoff to protect.
         if (w < m.gap * 2 + border2 or h < m.gap * 2 + border2) {
             const overflow_rect = utils.Rect{
                 .x = @intCast(x),
@@ -68,31 +52,18 @@ pub fn tileWithOffset(
             };
             // Find the focused window among the overflow set; fall back to the
             // first window if no focused window is present here.
-            var raise_win: u32 = windows[i];
-            if (ctx.focused_win) |f| {
-                for (windows[i..]) |ow| {
-                    if (ow == f) {
-                        raise_win = f;
-                        break;
-                    }
-                }
-            }
+            const raise_win: u32 = if (ctx.focused_win) |f|
+                if (std.mem.indexOfScalar(u32, windows[i..], f) != null) f else windows[i]
+            else
+                windows[i];
             // Same reasoning as monocle: never raise for a background retile
             // (see LayoutCtx.is_background) — there's no on-screen viewer to
             // show `raise_win` to, and raising it would leave it first in the
             // global stacking order with nothing to ever lower it again.
-            if (ctx.is_background) {
-                layouts.configureWithHints(ctx, raise_win, overflow_rect);
-            } else {
-                layouts.configureWithHintsAndRaise(ctx, raise_win, overflow_rect);
-            }
+            layouts.configureWithHintsAndRaiseIfVisible(ctx, raise_win, overflow_rect);
             for (windows[i..]) |overflow_win| {
                 if (overflow_win == raise_win) continue;
-                if (ctx.cache.getPtr(overflow_win)) |wd| {
-                    if (!wd.hasValidRect()) continue;
-                    wd.rect = tiling.zero_rect;
-                }
-                utils.pushWindowOffscreen(ctx.conn, overflow_win);
+                layouts.pushWindowOffscreenAndInvalidate(ctx, overflow_win);
             }
             return;
         }

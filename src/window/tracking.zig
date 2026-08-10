@@ -59,7 +59,7 @@ pub const Tracking = struct {
         if (self.contains(win)) return false;
         if (self.len >= capacity) {
             std.log.err(
-                "tracking: workspace capacity ({d}) reached; window 0x{x} will not be tracked",
+                "tracking: window list capacity ({d}) reached; window 0x{x} will not be tracked",
                 .{ capacity, win },
             );
             return false;

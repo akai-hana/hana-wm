@@ -84,6 +84,11 @@ pub inline fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect)
     );
 }
 
+/// Raises `win` to the top of the stacking order.
+pub inline fn raiseWindow(conn: *xcb.xcb_connection_t, win: u32) void {
+    _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+}
+
 /// Strips lock-key and pointer-button bits from a raw event modifier state,
 /// leaving only the modifier bits the WM uses for keybinding matching.
 pub inline fn normalizeModifiers(state: u16) u16 {
@@ -119,6 +124,10 @@ const AtomCache = struct {
     _NET_WM_ACTION_ABOVE: u32,
     _NET_WM_ACTION_STICK: u32,
     _NET_WM_PID: u32,
+    // Root-window focus advertisement — read by focus.zig's setFocus path.
+    _NET_ACTIVE_WINDOW: u32,
+    // Legacy X resource-database atom — read by scale.zig for Xft.dpi.
+    RESOURCE_MANAGER: u32,
 };
 
 var atom_cache: ?AtomCache = null;

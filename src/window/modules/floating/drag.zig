@@ -120,11 +120,9 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
         if (button == 1) break :corner .bottom_right; // move — corner unused
         const cx: i32 = @as(i32, geom.x) + @divTrunc(@as(i32, geom.width), 2);
         const cy: i32 = @as(i32, geom.y) + @divTrunc(@as(i32, geom.height), 2);
-        const cursor_x: i32 = x;
-        const cursor_y: i32 = y;
-        if (cursor_x < cx and cursor_y < cy) break :corner .top_left;
-        if (cursor_x >= cx and cursor_y < cy) break :corner .top_right;
-        if (cursor_x < cx and cursor_y >= cy) break :corner .bottom_left;
+        if (x < cx and y < cy) break :corner .top_left;
+        if (x >= cx and y < cy) break :corner .top_right;
+        if (x < cx and y >= cy) break :corner .bottom_left;
         break :corner .bottom_right;
     };
 
@@ -147,7 +145,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
         .pending_float = tiling.isWindowTiled(win) and !tiling.isFloatingLayout(),
     };
     focus.setFocus(win, .user_command);
-    _ = xcb.xcb_configure_window(cs.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+    utils.raiseWindow(cs.conn, win);
     _ = xcb.xcb_flush(cs.conn);
 }
 

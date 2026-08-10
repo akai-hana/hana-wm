@@ -81,6 +81,11 @@ pub fn isMinimized(win: u32) bool {
     return findInBuf(win) != null;
 }
 
+/// Plain fn (not inline) so it can be passed as a *const fn(u32)bool predicate.
+fn notMinimized(win: u32) bool {
+    return !isMinimized(win);
+}
+
 /// Focus the first non-minimized window on the current workspace (workspace
 /// insertion order, not MRU). Last-resort fallback called by minimizeWindow
 /// (via focus.focusBestAvailable) and directly from window.zig.
@@ -89,19 +94,7 @@ pub fn focusMasterOrFirst() void {
         focus.clearFocus();
         return;
     }
-    const cur = tracking.getCurrentWorkspace() orelse {
-        focus.clearFocus();
-        return;
-    };
-    const bit = tracking.workspaceBit(cur);
-    for (tracking.allWindows()) |entry| {
-        if (entry.mask & bit == 0) continue;
-        if (!isMinimized(entry.win)) {
-            focus.setFocus(entry.win, .tiling_operation);
-            return;
-        }
-    }
-    focus.clearFocus();
+    focus.focusBestAvailable(.tiling_operation, tracking.isOnCurrentWorkspaceAndVisible, focus.clearFocus);
 }
 
 pub fn minimizeWindow() void {
@@ -112,11 +105,7 @@ pub fn minimizeWindow() void {
 
     if (isMinimized(win)) return;
 
-    // ── Guard: fail fast before touching any other module's state ────────────
-    //
-    // Both checks are cheap (a comparison against a module-local integer) and
-    // have no side effects. Placing them here eliminates the need for a
-    // rollback path — no other module's state has been mutated if we return.
+    // Guard: check capacity before mutating any state so there is no rollback path.
 
     if (g_minimized.len >= MAX_MINIMIZED) {
         debug.err("minimize: buffer full ({d} entries), cannot minimize 0x{x}", .{ MAX_MINIMIZED, win });
@@ -147,11 +136,7 @@ pub fn minimizeWindow() void {
     utils.pushWindowOffscreen(cs.conn, win);
 
     // Prefer MRU history; fall back to workspace insertion order.
-    focus.focusBestAvailable(.tiling_operation, struct {
-        fn visible(w: u32) bool {
-            return !isMinimized(w);
-        }
-    }.visible, focusMasterOrFirst);
+    focus.focusBestAvailable(.tiling_operation, notMinimized, focusMasterOrFirst);
 
     if (saved_fs != null) {
         bar.setBarState(.show_fullscreen);

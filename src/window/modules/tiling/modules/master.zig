@@ -51,8 +51,8 @@ pub fn tileWithOffset(
     screen_h: u16,
     y_offset: u16,
 ) void {
+    // Windows list is guaranteed non-empty by invokeLayout (see tiling.zig).
     const n = windows.len;
-    if (n == 0) return;
 
     const m = state.margins();
     const master_n: u16 = @intCast(@min(state.config.master_count, n));
@@ -67,11 +67,12 @@ pub fn tileWithOffset(
     const is_master_on_right = state.config.master_side == .right;
     const master_x: u16 = if (is_master_on_right) screen_w -| master_w else 0;
 
-    // Inner width accounts for the gap between master and stack panes.
-    const master_inner_w = if (stack_n > 0)
-        layouts.shrinkClamped(master_w, m.gap + (m.gap / 2 + utils.doubledBorder(m)))
-    else
-        layouts.shrinkClamped(master_w, m.gap + (m.gap + utils.doubledBorder(m)));
+    // The master column is inset by a full gap on its screen edge plus a
+    // half-gap toward the stack (the stack's own half-gap completes the shared
+    // gap); with no stack both screen edges carry a full gap. Borders are then
+    // subtracted from the content width.
+    const edge_inset: u16 = if (stack_n > 0) m.gap + m.gap / 2 else m.gap * 2;
+    const master_inner_w = layouts.shrinkClamped(master_w, edge_inset + utils.doubledBorder(m));
 
     // The master column never uses the stack boost — it isn't a "slave"
     // column, so mod+n/mod+o have no effect on it.
@@ -90,19 +91,19 @@ pub fn tileWithOffset(
 /// whose cached WM_NORMAL_HINTS max_height caps it below its fair share —
 /// that window is pinned to its declared max instead, and the pixels it
 /// doesn't use are folded back into the split for the rest of the column
-/// (see distributeHeights). This is what keeps a short fixed-height window
-/// (e.g. a picture-in-picture pane or a dialog with PMaxSize set) from
-/// leaving a dead gap in its slot: its column neighbours grow to absorb
-/// the space it gives up, so the column always fills `h` exactly.
+/// (see distributeStackHeightsWeighted). This is what keeps a short
+/// fixed-height window (e.g. a picture-in-picture pane or a dialog with
+/// PMaxSize set) from leaving a dead gap in its slot: its column neighbours
+/// grow to absorb the space it gives up, so the column always fills `h`
+/// exactly.
 ///
 /// When `ctx.defer_win` names a window in this column, that window's
 /// configure_window call is sent after every other window in the column —
 /// see LayoutCtx.defer_win for why (swap_master's one-frame-gap fix).
 ///
 /// `boost` is always `.{}` (zero) for the master column — only the stack's
-/// simple-column path ever passes a non-zero value (mod+n/mod+o). When zero,
-/// this takes the exact same code path it always has (distributeHeights);
-/// a non-zero boost switches to distributeStackHeightsWeighted instead, so
+/// simple-column path ever passes a non-zero value (mod+n/mod+o). A zero
+/// boost reduces distributeStackHeightsWeighted to a plain even split, so
 /// nobody who never touches mod+n/mod+o sees any change in behaviour.
 fn tileColumn(
     ctx: *const layouts.LayoutCtx,
@@ -119,18 +120,14 @@ fn tileColumn(
 
     var heights_buf: [constants.Limits.MAX_TILED_WINDOWS]u16 = undefined;
     const heights = heights_buf[0..windows.len];
-    if (boost.isZero()) {
-        distributeHeights(ctx, windows, avail, heights);
-    } else {
-        distributeStackHeightsWeighted(ctx, windows, avail, boost, heights);
-    }
+    distributeStackHeightsWeighted(ctx, windows, avail, boost, heights);
 
-    // distributeHeights only folds a capped window's unused pixels into
-    // *other* windows in this column. If every window ends up capped
-    // (e.g. a lone fixed-height window on the workspace, or a master/stack
-    // pane that holds just one window), there's nothing left to absorb the
-    // slack, so sum(heights) < avail. Center the resulting stack in the
-    // column instead of leaving all that space stranded at the bottom.
+    // distributeStackHeightsWeighted only folds a capped window's unused
+    // pixels into *other* windows in this column. If every window ends up
+    // capped (e.g. a lone fixed-height window on the workspace, or a
+    // master/stack pane that holds just one window), there's nothing left to
+    // absorb the slack, so sum(heights) < avail. Center the resulting stack
+    // in the column instead of leaving all that space stranded at the bottom.
     var used: u32 = 0;
     for (heights) |win_h| used += win_h;
     const dead_space: u32 = @as(u32, avail) -| used;
@@ -159,57 +156,18 @@ fn tileColumn(
 /// the rest, that can newly cap a window that wasn't capped a moment ago —
 /// so this repeats pass by pass until nothing new gets pinned (standard
 /// water-filling; bounded by `windows.len` passes, since each pass that
-/// changes anything pins at least one window). Whatever is still uncapped
-/// at the end — which is every window, in the common case with no size
-/// hints — is split evenly using the same cumulative-division scheme
-/// windowHeight/windowY use elsewhere, so no two adaptive siblings differ
-/// by more than 1px.
-fn distributeHeights(ctx: *const layouts.LayoutCtx, windows: []const u32, avail: u16, out: []u16) void {
-    var capped_buf: [constants.Limits.MAX_TILED_WINDOWS]bool = undefined;
-    const capped = capped_buf[0..windows.len];
-    @memset(capped, false);
-
-    var remaining_avail = avail;
-    var remaining_count: u16 = @intCast(windows.len);
-
-    var pinned_any = true;
-    while (pinned_any and remaining_count > 0) {
-        pinned_any = false;
-        const fair_share = remaining_avail / remaining_count;
-        for (windows, 0..) |win, i| {
-            if (capped[i]) continue;
-            const max_h = windowMaxHeight(ctx, win);
-            if (max_h > 0 and max_h <= fair_share) {
-                out[i] = @max(constants.MIN_WINDOW_DIM, max_h);
-                capped[i] = true;
-                remaining_avail = remaining_avail -| out[i];
-                remaining_count -= 1;
-                pinned_any = true;
-            }
-        }
-    }
-
-    var seen: u16 = 0;
-    for (windows, 0..) |_, i| {
-        if (capped[i]) continue;
-        out[i] = windowHeight(seen, remaining_count, remaining_avail);
-        seen += 1;
-    }
-}
-
-/// Weighted counterpart of distributeHeights, used only when the stack has
-/// an active top and/or bottom boost (LayoutConfig.stack_balance, derived via
-/// StackBoost.fromBalance — see that struct's doc comment for the weight
-/// scheme). Structurally identical to distributeHeights — same iterative
-/// max_height water-filling — except the fair share used for both the
-/// capping check and the final split comes from `windowWeight` instead of a
-/// flat 1/n. Keep the two functions in sync if the capping algorithm above
-/// ever changes.
+/// changes anything pins at least one window).
 ///
-/// The final split uses rounding (rather than distributeHeights' truncating
-/// integer division) so fractional weights land on the right pixel; a
-/// telescoping cumulative sum (`cum`/`prev_px` below) guarantees the
-/// individually-rounded heights still add up to exactly `remaining_avail`.
+/// The fair share each window is measured against (both for the capping
+/// check and the final split) is weighted by `boost` — StackBoost.fromBalance
+/// on LayoutConfig.stack_balance. A zero boost gives every slot weight 1.0 —
+/// the common case (master column, untouched stack) — and then the final
+/// split takes the same integer cumulative-division path windowHeight/windowY
+/// use elsewhere, so pixel output is bit-identical to the historical even
+/// split. A non-zero boost (mod+n/mod+o) switches the final split to a
+/// telescoping rounded cumulative sum (`cum`/`prev_px` below) so fractional
+/// weights land on the right pixel; it's also why the fair-share estimate
+/// above floats.
 fn distributeStackHeightsWeighted(ctx: *const layouts.LayoutCtx, windows: []const u32, avail: u16, boost: StackBoost, out: []u16) void {
     const n: u16 = @intCast(windows.len);
 
@@ -241,6 +199,16 @@ fn distributeStackHeightsWeighted(ctx: *const layouts.LayoutCtx, windows: []cons
                 pinned_any = true;
             }
         }
+    }
+
+    if (boost.isZero()) {
+        var seen: u16 = 0;
+        for (windows, 0..) |_, i| {
+            if (capped[i]) continue;
+            out[i] = windowHeight(seen, remaining_count, remaining_avail);
+            seen += 1;
+        }
+        return;
     }
 
     var cum: f32 = 0;
