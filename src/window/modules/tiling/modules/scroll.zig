@@ -144,7 +144,7 @@ pub fn tileWithOffset(
     state.scroll.offset = std.math.clamp(state.scroll.offset, 0, max_off);
     const scroll: i32 = state.scroll.offset;
 
-    const content_h: u16 = layouts.shrinkClamped(screen_h, m.gap *| 2 +| m.border *| 2);
+    const content_h: u16 = layouts.shrinkClamped(screen_h, m.gap *| 2 +| m.border *| 2, state.config.min_window_dim);
     const win_y: i32 = @as(i32, @intCast(y_offset)) + @as(i32, @intCast(m.gap));
 
     // Full gap at screen edges; half-gap at interior slot boundaries so that
@@ -165,10 +165,10 @@ pub fn tileWithOffset(
 
         const x: i32 = slot_left + left_inset;
         const avail: i32 = slot_w - left_inset - right_inset - border2;
-        const content_w: u16 = if (avail > constants.MIN_WINDOW_DIM)
+        const content_w: u16 = if (avail > state.config.min_window_dim)
             @intCast(avail)
         else
-            constants.MIN_WINDOW_DIM;
+            state.config.min_window_dim;
 
         const right: i32 = x + avail + border2;
 

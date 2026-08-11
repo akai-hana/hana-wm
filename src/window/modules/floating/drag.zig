@@ -5,7 +5,6 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const constants = @import("constants");
 const utils = @import("utils");
 
 const window = @import("window");
@@ -160,7 +159,7 @@ pub fn updateDrag(x: i16, y: i16) void {
         // Grab to suppress intermediate renders during detach + retile; a
         // failed grab just costs a visual nicety, not correctness.
         const conn = core.getState().conn;
-        _ = xcb.xcb_grab_server(conn);
+        utils.grabServer(conn);
         tiling.removeWindow(drag.window);
         tiling.retileCurrentWorkspace();
         utils.ungrabAndFlush(conn);
@@ -230,8 +229,9 @@ pub fn updateDrag(x: i16, y: i16) void {
 
             // Clamp size first, then re-pin position off the anchor so the
             // anchor edge never drifts when the minimum size is hit.
-            const clamped_w: i32 = std.math.clamp(new_right - new_left, constants.MIN_WINDOW_DIM, std.math.maxInt(u16));
-            const clamped_h: i32 = std.math.clamp(new_bottom - new_top, constants.MIN_WINDOW_DIM, std.math.maxInt(u16));
+            const min_dim: i32 = core.getState().config.tiling.min_window_dim;
+            const clamped_w: i32 = std.math.clamp(new_right - new_left, min_dim, std.math.maxInt(u16));
+            const clamped_h: i32 = std.math.clamp(new_bottom - new_top, min_dim, std.math.maxInt(u16));
             const pinned_x: i32 = if (moving_x < anchor_x) anchor_x - clamped_w else new_left;
             const pinned_y: i32 = if (moving_y < anchor_y) anchor_y - clamped_h else new_top;
 
@@ -257,6 +257,15 @@ pub fn stopDrag() void {
         window.saveWindowGeom(drag.window, drag.last_rect);
     }
     g_state = .{};
+}
+
+/// Clears the active drag if it targets `win`, without saving geometry.
+/// Used when the dragged window is destroyed mid-drag: without this, a lost
+/// ButtonRelease would leave the drag stuck active until the WM restarts,
+/// dropping pointer-motion focus. The window is gone, so there's no geometry
+/// to persist.
+pub fn cancelDragForWindow(win: u32) void {
+    if (g_state.drag.active and g_state.drag.window == win) g_state = .{};
 }
 
 pub inline fn isDragging() bool {

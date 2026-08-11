@@ -248,7 +248,7 @@ pub const Reason = enum {
     mouse_enter,
 
     /// Deferred pointer-position query resolved after a tiling retile or
-    /// window-close (drainPointerSync / focusWindowUnderPointer).
+    /// window-close (drainPointerSync / resolveDestroyFocusTarget).
     /// Heavier path: may raise a floating window, arms confirm/retry.
     pointer_sync,
 
@@ -367,7 +367,9 @@ const isInvalidFocusTarget = window.isInvalidWindow;
 /// Returns true if `win` currently has map_state == Viewable.
 /// Used to guard against destroy/unmap races on paths that cannot guarantee
 /// the window is still alive at call time.
-inline fn isWindowMapped(conn: *xcb.xcb_connection_t, win: u32) bool {
+/// pub: the unmanageWindow destroy path re-runs this check pre-grab to keep
+/// the grab body free of blocking reply waits.
+pub fn isWindowMapped(conn: *xcb.xcb_connection_t, win: u32) bool {
     const reply = xcb.xcb_get_window_attributes_reply(
         conn,
         xcb.xcb_get_window_attributes(conn, win),
@@ -404,6 +406,30 @@ pub fn setFocus(win: u32, reason: Reason) void {
     // on a human-triggered, infrequent path like a focus change.
     const input_model = window.getInputModel(conn, win);
     if (input_model == .no_input) return;
+
+    setFocusWithModel(win, reason, input_model);
+}
+
+/// Focus `win` using a caller-resolved input model, skipping the two blocking
+/// round trips setFocus normally performs (the isWindowMapped liveness guard
+/// and getInputModel's WM_PROTOCOLS query).
+///
+/// Intended for server-grab-held callers: they resolve the window and its
+/// input model BEFORE xcb_grab_server so the grab body stays fire-and-forget.
+/// A blocking reply wait inside the grab would implicitly flush the queued
+/// configure_window / set_input_focus batch to the compositor mid-grab,
+/// breaking the atomicity the grab exists to provide — the same hazard the
+/// pre-drained pointer query in unmanageWindow guards against.
+///
+/// The caller must already have validated the window's liveness when `reason`
+/// is .mouse_click, .user_command, or .pointer_sync — setFocus's isWindowMapped
+/// guard is deliberately NOT repeated here.
+pub fn setFocusWithModel(win: u32, reason: Reason, input_model: window.InputModel) void {
+    if (isInvalidFocusTarget(win)) return;
+    if (state.focused_window == win) return;
+    if (input_model == .no_input) return;
+
+    const conn = core.getState().conn;
 
     // Pipeline: fire the WM_PROTOCOLS get_property cookie NOW, before
     // cancelPendingConfirm and commitFocusTransition do their bookkeeping.
@@ -564,31 +590,26 @@ pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
     }
 }
 
-/// Focus any visible window satisfying `visible`, walking the tracking list.
-/// Falls back to `on_miss()` if provided, or clearFocus() if null, when no
-/// candidate is found.
+/// Returns the first window satisfying `visible`, walking the tracking list.
+/// Pure — no side effects — so grab-held callers can resolve the target and
+/// pre-query its input model before xcb_grab_server, keeping the grab body
+/// fire-and-forget (see setFocusWithModel).
 ///
-/// This is the Zig equivalent of dwm's focus(NULL) idiom — callers that need
-/// to focus "whatever is best after X happened" (window close, workspace switch,
-/// unmanage, etc.) use this instead of rolling their own scan + setFocus sequence.
+/// This is the resolver behind the dwm focus(NULL) idiom — callers that need
+/// to focus "whatever is best after X happened" (window close, workspace
+/// switch, unmanage, etc.) use this instead of rolling their own scan +
+/// setFocus sequence.
 ///
 /// The `visible` predicate decouples workspace visibility from focus mechanics:
 ///   • Pass tracking.isOnCurrentWorkspaceAndVisible for normal post-action
 ///     re-focus (on current workspace and not minimized).
 ///   • Pass window.isValidManagedWindow for cleanup contexts where any managed
 ///     window is acceptable regardless of workspace membership.
-pub fn focusBestAvailable(
-    reason: Reason,
-    visible: *const fn (u32) bool,
-    on_miss: ?*const fn () void,
-) void {
+pub fn findBestAvailable(visible: *const fn (u32) bool) ?u32 {
     for (tracking.allWindows()) |entry| {
-        if (visible(entry.win)) {
-            setFocus(entry.win, reason);
-            return;
-        }
+        if (visible(entry.win)) return entry.win;
     }
-    if (on_miss) |f| f() else clearFocus();
+    return null;
 }
 
 pub fn clearFocus() void {

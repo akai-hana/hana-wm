@@ -6,6 +6,7 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const constants = @import("constants");
+const debug = @import("debug");
 
 const max_property_length = constants.PROPERTY_MAX_LENGTH;
 /// Passed as the `delete` argument to xcb_get_property; 0 means do not consume the property.
@@ -24,14 +25,33 @@ pub var running = std.atomic.Value(bool).init(true);
 /// Consumed by `consumeReload` in the main event loop.
 var should_reload = std.atomic.Value(bool).init(false);
 
+/// Write end of the signal self-pipe (owned by events.zig), registered via
+/// `setSignalWriteFd`. The `reload_config` keybinding has no signal byte, so
+/// `reload()` writes a SIGHUP wake byte here to poke the event loop out of
+/// poll immediately instead of waiting for an unrelated signal.
+var signal_write_fd: std.posix.fd_t = -1;
+
+/// Registers the write end of the signal self-pipe so `reload()` can wake the
+/// event loop. Pass -1 to unregister (teardown).
+pub fn setSignalWriteFd(fd: std.posix.fd_t) void {
+    signal_write_fd = fd;
+}
+
 /// Signals the main event loop to exit cleanly.
 pub inline fn quit() void {
     running.store(false, .release);
 }
 
 /// Signals the main event loop to reload the user config.
+///
+/// Safe from any thread: the wake byte is a plain write, not a signal. If the
+/// pipe is full (or not yet registered) the write is dropped — the event loop
+/// also polls the flag itself every iteration, so a lost byte only delays the
+/// reload by one poll timeout at worst.
 pub inline fn reload() void {
     should_reload.store(true, .release);
+    if (signal_write_fd >= 0)
+        _ = std.os.linux.write(signal_write_fd, &[_]u8{@intFromEnum(std.posix.SIG.HUP)}, 1);
 }
 
 /// Atomically consumes the reload flag.
@@ -273,7 +293,8 @@ pub const scaling = struct {
             (value.value / 100.0) * 0.5 * @as(f32, @floatFromInt(reference_dimension))
         else
             value.value;
-        return @intFromFloat(@max(0.0, @round(v)));
+        const clamped = std.math.clamp(@round(v), 0.0, @as(f32, std.math.maxInt(u16)));
+        return @intFromFloat(clamped);
     }
 };
 
@@ -319,10 +340,41 @@ pub inline fn pushWindowOffscreenAndLower(conn: *xcb.xcb_connection_t, win: u32)
     );
 }
 
+// X server grab state
+//
+// The grab body runs on the main WM thread, but the shared xcb output buffer
+// is flushed by ANY thread (the dedicated carousel/bar thread calls xcb_flush
+// up to ~refresh-rate times per second). A carousel flush while the main
+// thread holds xcb_grab_server would release the queued grab-batch requests to
+// the server before xcb_ungrab_server, letting the compositor present an
+// intermediate frame — exactly what the grab is meant to prevent.
+//
+// grab_active lets the bar thread detect that window and skip its flush.
+
+/// True while the main WM thread holds the X server grab.
+pub var grab_active = std.atomic.Value(bool).init(false);
+
+/// Returns true while the main WM thread holds the X server grab.
+pub inline fn isGrabActive() bool {
+    return grab_active.load(.monotonic);
+}
+
+/// Takes the X server grab. Always pair with ungrabServer()/ungrabAndFlush().
+pub inline fn grabServer(conn: *xcb.xcb_connection_t) void {
+    grab_active.store(true, .release);
+    _ = xcb.xcb_grab_server(conn);
+}
+
+/// Releases the X server grab without flushing pending requests.
+pub inline fn ungrabServer(conn: *xcb.xcb_connection_t) void {
+    _ = xcb.xcb_ungrab_server(conn);
+    grab_active.store(false, .release);
+}
+
 /// Ungrabs the X server and flushes pending requests.
 /// Always called as a pair; defined here so every module can share one copy.
 pub inline fn ungrabAndFlush(conn: *xcb.xcb_connection_t) void {
-    _ = xcb.xcb_ungrab_server(conn);
+    ungrabServer(conn);
     _ = xcb.xcb_flush(conn);
 }
 
@@ -349,6 +401,7 @@ pub fn makePipe() ![2]std.posix.fd_t {
 /// site — too invasive for the small, self-contained locking bar.zig and
 /// carousel.zig need). This is a minimal handle-free substitute, shared
 /// between both instead of each defining its own copy.
+
 pub const Mutex = struct {
     inner: std.c.pthread_mutex_t = .{},
     pub fn lock(m: *Mutex) void {
@@ -364,13 +417,12 @@ pub const Mutex = struct {
 pub const Condition = struct {
     inner: std.c.pthread_cond_t = .{},
 
-    // pthread_condattr_t and related functions are not exposed by std.c on
-    // this Zig version, so they're declared directly against libc here.
-    const pthread_condattr_t = opaque {};
-    extern "c" fn pthread_condattr_init(attr: *pthread_condattr_t) c_int;
-    extern "c" fn pthread_condattr_setclock(attr: *pthread_condattr_t, clock_id: c_int) c_int;
-    extern "c" fn pthread_condattr_destroy(attr: *pthread_condattr_t) c_int;
-    extern "c" fn pthread_cond_init(cond: *std.c.pthread_cond_t, attr: *const pthread_condattr_t) c_int;
+    // pthread_condattr_t is not exposed by std.c on this Zig version, so it's
+    // pulled in from the system header directly. Using the real type (rather
+    // than a hand-sized opaque buffer) keeps the stack allocation exactly as
+    // large as libc's definition — no silent corruption if a libc ever
+    // grows the type.
+    const pthread = @cImport(@cInclude("pthread.h"));
 
     /// Re-initialises this condition variable to use CLOCK_MONOTONIC as its
     /// clock, so that a subsequent `timedWait` can use a monotonic deadline
@@ -378,13 +430,12 @@ pub const Condition = struct {
     /// `timedWait` call; safe to call on a freshly zero-initialised instance,
     /// and safe to call again later (e.g. on every config reload) as long as
     /// no thread is currently blocked in `wait`/`timedWait` on it.
-    pub fn initMonotonic(c: *Condition) void {
-        var attr_buf: [64]u8 align(8) = @splat(0);
-        const attr: *pthread_condattr_t = @ptrCast(&attr_buf);
-        _ = pthread_condattr_init(attr);
-        _ = pthread_condattr_setclock(attr, @intFromEnum(std.os.linux.CLOCK.MONOTONIC));
-        _ = pthread_cond_init(&c.inner, attr);
-        _ = pthread_condattr_destroy(attr);
+    pub fn initMonotonic(cv: *Condition) void {
+        var attr: pthread.pthread_condattr_t = undefined;
+        if (pthread.pthread_condattr_init(&attr) != 0) return;
+        defer _ = pthread.pthread_condattr_destroy(&attr);
+        _ = pthread.pthread_condattr_setclock(&attr, @intFromEnum(std.os.linux.CLOCK.MONOTONIC));
+        _ = pthread.pthread_cond_init(@ptrCast(&cv.inner), &attr);
     }
 
     /// Waits up to `timeout_ns` nanoseconds; returns error.Timeout on expiry.
@@ -479,8 +530,9 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
 
 /// Fetches an 8-bit X11 window property into a caller-supplied reuse buffer.
 /// Returns a slice into `buffer.items`, or null if the property is absent,
-/// empty, or not 8-bit encoded. The buffer is cleared before each use, so
-/// the caller can allocate it once and pass it across repeated calls.
+/// empty, or not 8-bit encoded, or the reply's type doesn't match the
+/// requested `atom_type`. The buffer is cleared before each use, so the
+/// caller can allocate it once and pass it across repeated calls.
 pub fn fetchPropertyToBuffer(
     conn: *xcb.xcb_connection_t,
     window: u32,
@@ -496,7 +548,9 @@ pub fn fetchPropertyToBuffer(
     ) orelse return null;
     defer std.c.free(reply);
     const r = reply.*;
-    if (r.format != 8 or r.value_len == 0) return null;
+    if (r.format != 8 or r.value_len == 0 or r.type != atom_type) return null;
+    if (r.value_len == max_property_length)
+        debug.warn("Property atom {x} on window {x} exceeds the {}-byte fetch cap; value truncated", .{ atom, window, max_property_length });
 
     buffer.clearRetainingCapacity();
     const value_ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));

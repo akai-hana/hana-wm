@@ -7,7 +7,6 @@ const xcb = core.xcb;
 const utils = @import("utils");
 
 const debug = @import("debug");
-const constants = @import("constants");
 
 // WM_NORMAL_HINTS size-constraint cache, populated at map time and evicted
 // on unmanage. configureWithHints clamps every rect to these so clients
@@ -116,10 +115,10 @@ pub inline fn emitOrDefer(ctx: *const LayoutCtx, win: u32, rect: utils.Rect) voi
     }
 }
 
-/// Shrinks `dim` by `margin` (gap/border), floored to MIN_WINDOW_DIM so a
-/// layout never hands a client a zero or negative size.
-pub inline fn shrinkClamped(dim: u16, margin: u16) u16 {
-    return if (dim > margin) dim - margin else constants.MIN_WINDOW_DIM;
+/// Shrinks `dim` by `margin` (gap/border), floored to `min_dim` so a layout
+/// never hands a client a zero or negative size.
+pub inline fn shrinkClamped(dim: u16, margin: u16, min_dim: u16) u16 {
+    return if (dim > margin) dim - margin else min_dim;
 }
 
 /// Work-area rect: the whole screen inset by the outer gap. x/y are i32

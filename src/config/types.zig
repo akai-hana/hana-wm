@@ -5,6 +5,7 @@ const std = @import("std");
 const parser = @import("parser");
 const xkbcommon = @import("xkbcommon");
 const debug = @import("debug");
+const constants = @import("constants");
 
 /// X11 color value packed as 0x00RRGGBB into 32 bits.
 /// The high byte is unused; values match what XCB expects for pixel/color fields.
@@ -96,7 +97,14 @@ pub const KeybindResolver = struct {
     /// startup (config.load) and again on every config reload
     /// (events.applyConfig).
     pub fn build(self: *KeybindResolver, keybindings: []Keybind, xkb_state: *xkbcommon.XkbState, allocator: std.mem.Allocator) void {
-        for (keybindings) |*kb| kb.keycode = xkb_state.keysymToKeycode(kb.keysym);
+        for (keybindings) |*kb| {
+            kb.keycode = xkb_state.keysymToKeycode(kb.keysym);
+            if (kb.keycode == null) {
+                var name_buf: [64]u8 = undefined;
+                const name = xkbcommon.keysymGetName(kb.keysym, &name_buf);
+                debug.warn("Keybinding mods=0x{x:0>4} keysym={s} (0x{x}) resolves to no base keycode and will NOT be grabbed — shifted symbols such as \"@\" must be bound via their unshifted key name (e.g. \"2\")", .{ kb.modifiers, name, kb.keysym });
+            }
+        }
         self.rebuildDispatchMap(keybindings, allocator);
     }
 
@@ -294,6 +302,9 @@ pub const TilingConfig = struct {
     border_width: parser.ScalableValue = parser.ScalableValue.absolute(2.0),
     border_focused: Color = 0x5294E2,
     border_unfocused: Color = 0x383C4A,
+    /// Smallest on-screen width/height a tiled window (and floating drag
+    /// resize) is allowed to reach, in pixels.
+    min_window_dim: u16 = constants.MIN_WINDOW_DIM,
 
     // Per-layout variant preferences
     //
@@ -410,6 +421,14 @@ fn freeStringList(list: *std.ArrayList([]const u8), allocator: std.mem.Allocator
     list.deinit(allocator);
 }
 
+/// Sentinels for the Config-owned string fields whose defaults are string
+/// literals. `getDefaultConfig` replaces each with a heap copy on success;
+/// `Config.deinit` compares pointers against these sentinels so a
+/// partially-built Config (the OOM/parse-error `errdefer` path, where some
+/// dupes never ran) frees only what is genuinely heap-owned — never a
+/// string literal.
+const OWNED_STR_SENTINEL: []const u8 = "";
+
 pub const BarConfig = struct {
     enabled: bool = true,
 
@@ -447,21 +466,33 @@ pub const BarConfig = struct {
 
     indicator_location: IndicatorLocation = .up_left,
     indicator_padding: f32 = 0.1,
-    indicator_focused: []const u8 = "■",
-    indicator_unfocused: []const u8 = "□",
+    indicator_focused: []const u8 = OWNED_STR_SENTINEL,
+    indicator_unfocused: []const u8 = OWNED_STR_SENTINEL,
     indicator_color: ?Color = null,
 
-    clock_format: []const u8 = "%Y-%m-%d %H:%M:%S",
+    clock_format: []const u8 = OWNED_STR_SENTINEL,
 
     // drun segment colors and prompt; all nullable, falling back to bar-wide defaults.
     drun_bg: ?Color = null, // Background; falls back to bg
     drun_fg: ?Color = null, // Typed text color; falls back to fg
     drun_prompt_color: ?Color = null, // Prompt text color; falls back to accent_color
-    drun_prompt: []const u8 = "run: ", // Prefix rendered left of the text input cursor
+    drun_prompt: []const u8 = OWNED_STR_SENTINEL, // Prefix rendered left of the text input cursor
 
     layout: std.ArrayList(BarLayout) = .empty,
 
     transparency: f32 = 1.0,
+
+    /// Carousel scroll settings, staged here so they are applied to the
+    /// carousel's live globals only after a config has been fully validated
+    /// and swapped in (config.applyCarouselSettings). Writing them straight to
+    /// the globals at parse time (the old behaviour) leaked them into effect
+    /// even when validate() later rejected the config and the old config was
+    /// kept.
+    carousel_enabled: bool = true,
+    /// Scroll speed in px/s (config `scroll_speed`, min 1).
+    scroll_speed: u16 = 125,
+    /// Refresh-rate override in Hz (config `carousel_refresh_rate`); 0 = auto.
+    carousel_refresh_rate: u16 = 0,
 
     pub fn deinit(self: *BarConfig, allocator: std.mem.Allocator) void {
         freeStringList(&self.workspace_icons, allocator);
@@ -487,10 +518,10 @@ pub const BarConfig = struct {
         const h: f32 = @floatFromInt(bar_height);
         if (self.font_size.is_percentage) {
             const margin_ratio = (1.0 - self.font_size.value / 100.0) / 2.0;
-            return @as(u16, @intFromFloat(@round(@max(0.0, h * margin_ratio))));
+            return scaleToU16(h * margin_ratio);
         }
         const font_px = self.font_size.value;
-        return @as(u16, @intFromFloat(@round(@max(0.0, (h - font_px) / 2.0))));
+        return scaleToU16((h - font_px) / 2.0);
     }
 
     /// Scales a ScalableValue to pixels. `factor` multiplies the percentage path.
@@ -500,7 +531,8 @@ pub const BarConfig = struct {
     }
 
     inline fn scaleToU16(val: f32) u16 {
-        return @as(u16, @intFromFloat(@round(@max(0.0, val))));
+        const clamped = std.math.clamp(val, 0.0, @as(f32, std.math.maxInt(u16)));
+        return @as(u16, @intFromFloat(@round(clamped)));
     }
     pub inline fn scaledSpacing(self: *const BarConfig, bar_height: u16) u16 {
         return scaleToU16(scaleValue(self.spacing, bar_height, 5.0));
@@ -580,12 +612,14 @@ pub const Config = struct {
         self.bar.deinit(a);
         self.tiling.deinit(a);
 
-        // Always heap-allocated: getDefaultConfig dupes the string literals
-        // and parseBar (via assignStr) transfers ownership on every write, so
-        // freed unconditionally here (see assignStr in config.zig).
-        a.free(self.bar.clock_format);
-        a.free(self.bar.drun_prompt);
-        a.free(self.bar.indicator_focused);
-        a.free(self.bar.indicator_unfocused);
+        // Heap-allocated whenever set: getDefaultConfig dupes the string
+        // literals and parseBar (via assignStr) transfers ownership on every
+        // write. Config.deinit frees each that no longer points at the
+        // sentinel, so the errdefer path on a partially-built Config never
+        // frees a string literal (see getDefaultConfig in config.zig).
+        if (self.bar.clock_format.ptr != OWNED_STR_SENTINEL.ptr) a.free(self.bar.clock_format);
+        if (self.bar.drun_prompt.ptr != OWNED_STR_SENTINEL.ptr) a.free(self.bar.drun_prompt);
+        if (self.bar.indicator_focused.ptr != OWNED_STR_SENTINEL.ptr) a.free(self.bar.indicator_focused);
+        if (self.bar.indicator_unfocused.ptr != OWNED_STR_SENTINEL.ptr) a.free(self.bar.indicator_unfocused);
     }
 };

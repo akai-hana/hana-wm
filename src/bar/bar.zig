@@ -121,12 +121,16 @@ const BarSnapshot = struct {
 };
 
 /// Serializes access to the shared Cairo/XCB DrawContext. Bar drawing runs on
-/// the main WM thread, except for two small dedicated timers that run on
-/// their own threads: clock.zig (ticks once per wall-clock second) and
-/// carousel.zig (ticks once per display refresh while a title is actively
-/// scrolling). This mutex is what keeps those two threads from ever painting
-/// into the DrawContext at the same instant as the main WM thread.
-var draw_mutex: utils.Mutex = .{};
+/// the main WM thread, except for one small dedicated timer that runs on its
+/// own thread: carousel.zig (ticks once per display refresh while a title is
+/// actively scrolling) — and even that thread only ever performs the Pango-free
+/// carousel-pixmap blit, never a full Pango layout. The clock thread no longer
+/// touches the DrawContext at all: it formats the time string and flags the
+/// main thread to redraw. This mutex keeps the carousel thread from painting
+/// into the DrawContext at the same instant as the main WM thread, and Pango/
+/// fontconfig work is confined to the main thread so no bar thread can block
+/// the shutdown path inside a fontconfig lookup.
+pub var draw_mutex: utils.Mutex = .{};
 
 /// All atoms needed to declare the bar window as a dock to the compositor.
 const BarAtoms = struct {
@@ -491,24 +495,7 @@ const State = struct {
         self.title_cache.focused_window = new_focused;
 
         // Fast path: try to blit just the live carousel pixmap without a full Pango layout pass.
-        if (carousel.isCarouselActive()) {
-            const win_count = self.title_cache.workspace_windows.items.len;
-            if (win_count > 1) {
-                // Segmented mode: blit the focused segment directly from render.seg.
-                // drawSegCarouselTickAuto reads seg_x/seg_w from the stored entry, so no
-                // separate coordinate cache is needed here.
-                if (carousel.drawSegCarouselTickAuto(self.render.dc, self.render.config.title_accent_color)) return;
-            } else {
-                // Single-window mode: pass accent so the tick detects a bg change
-                // (minimize/unminimize) and returns false to force a full rebuild.
-                const accent: u32 = if (win_count == 1 and
-                    self.title_cache.minimized_windows.contains(self.title_cache.workspace_windows.items[0]))
-                    self.render.config.title_minimized_accent
-                else
-                    self.render.config.title_accent_color;
-                if (carousel.drawCarouselTick(self.render.dc, accent, self.title_cache.title_x, self.title_cache.title_width)) return;
-            }
-        }
+        if (self.drawTitleBlitOnly()) return;
 
         // title_cache.title holds text for title_cache.title_window (the last full draw).
         // If new_focused differs, that text is stale — drawing it would build the carousel
@@ -550,6 +537,31 @@ const State = struct {
             return;
         };
         self.render.dc.blit();
+    }
+
+    /// Pango-free title fast path shared by the main-thread drawTitleOnly and
+    /// the dedicated carousel thread. Blits the live carousel pixmap when
+    /// possible and returns true. Returns false (drawing nothing) when a
+    /// rebuild/colour/focus change is pending — those are handled by the main
+    /// thread's full-redraw machinery, never by falling through to a Pango
+    /// layout from the carousel thread.
+    fn drawTitleBlitOnly(self: *State) bool {
+        if (!carousel.isCarouselActive()) return false;
+        const win_count = self.title_cache.workspace_windows.items.len;
+        if (win_count > 1) {
+            // Segmented mode: blit the focused segment directly from render.seg.
+            // drawSegCarouselTickAuto reads seg_x/seg_w from the stored entry, so no
+            // separate coordinate cache is needed here.
+            return carousel.drawSegCarouselTickAuto(self.render.dc, self.render.config.title_accent_color);
+        }
+        // Single-window mode: pass accent so the tick detects a bg change
+        // (minimize/unminimize) and returns false to force a full rebuild.
+        const accent: u32 = if (win_count == 1 and
+            self.title_cache.minimized_windows.contains(self.title_cache.workspace_windows.items[0]))
+            self.render.config.title_minimized_accent
+        else
+            self.render.config.title_accent_color;
+        return carousel.drawCarouselTick(self.render.dc, accent, self.title_cache.title_x, self.title_cache.title_width);
     }
 
     /// Replacements are built before the swap so a failed allocation leaves the cache
@@ -955,12 +967,14 @@ fn createDrawContext(setup: BarWindowSetup, height: u16) !*drawing.DrawContext {
 // Lifecycle
 
 fn startBarThreads() void {
+    const cs = core.getState();
     carousel.startThread();
-    clock.startThread();
+    clock.startThread(cs.alloc, cs.config.bar.clock_format);
 }
 
 fn stopBarThreads() void {
-    clock.stopThread();
+    const cs = core.getState();
+    clock.stopThread(cs.alloc);
     carousel.stopThread();
 }
 
@@ -1013,7 +1027,16 @@ pub fn reload() void {
 
 fn applyReload(old: *State, height: u16) !void {
     const cs = core.getState();
-    const new_bar = try createBar(height, calcBarYPos(height));
+    const new_bar = createBar(height, calcBarYPos(height)) catch |err| {
+        // The caller (handleConfigReload) has already swapped cs.config to the
+        // new config and frees the OLD config when this returns. The old bar
+        // survives this failed reload, but its render.config is a shallow copy
+        // of the old config's BarConfig (borrowed string/list slices) — so
+        // re-point it at the live new config now, before old_config.deinit()
+        // runs, or the next bar draw reads freed memory.
+        old.render.config = cs.config.bar;
+        return err;
+    };
     const new_state = new_bar.state;
     new_state.is_visible = old.is_visible;
     new_state.is_globally_visible = old.is_globally_visible;
@@ -1041,7 +1064,7 @@ pub fn toggleBarSegmentAnchor() void {
     setWindowProperties(s.win.win_id, s.render.height);
     gBar.pending_force_full_redraw = true;
     s.invalidateLayoutCache();
-    _ = xcb.xcb_grab_server(cs.conn);
+    utils.grabServer(cs.conn);
     _ = xcb.xcb_configure_window(cs.conn, s.win.win_id, xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{utils.toXcbCoord(new_y)});
     const current_ws = tracking.getCurrentWorkspace() orelse {
         window.updateWorkspaceBorders();
@@ -1135,7 +1158,7 @@ pub fn setBarState(action: BarAction) void {
 
     const conn = core.getState().conn;
     const grabbed = action == .toggle;
-    if (grabbed) _ = xcb.xcb_grab_server(conn);
+    if (grabbed) utils.grabServer(conn);
     if (show) _ = xcb.xcb_map_window(conn, s.win.win_id) else _ = xcb.xcb_unmap_window(conn, s.win.win_id);
     if (grabbed) {
         const effective_visible = if (is_fullscreen) s.is_globally_visible else s.is_visible;
@@ -1162,27 +1185,46 @@ pub fn updateIfDirty() !void {
     }
 }
 
-/// Called from the dedicated clock thread (clock.zig) once per real-time
-/// second boundary. Draws just the clock segment; draw_mutex keeps this safe
-/// against a same-instant redraw from the main WM thread or the carousel thread.
-pub fn checkClockUpdate() void {
-    const s = gBar.state orelse return;
-    if (!s.is_visible) return;
+/// Drains the clock thread's redraw request on the main WM thread. Draws just
+/// the clock segment — Pango runs here, never on the clock thread. Returns
+/// true when a redraw was actually performed. Cheap to call on every event
+/// batch: it no-ops unless the clock thread published a new second.
+pub fn updateClock() bool {
+    const s = gBar.state orelse return false;
+    if (!s.is_visible) return false;
+    if (!clock.consumeClockDirty()) return false;
     draw_mutex.lock();
+    defer draw_mutex.unlock();
     s.drawClockOnly();
-    draw_mutex.unlock();
+    return true;
 }
 
 /// Called from the dedicated carousel thread (carousel.zig) roughly once per
-/// display refresh while a title is actively scrolling. Advances and redraws
-/// just the title segment; draw_mutex keeps this safe against a same-instant
-/// redraw from the main WM thread or the clock thread.
+/// display refresh while a title is actively scrolling. Blits the live
+/// carousel pixmap if possible; draw_mutex keeps this safe against a
+/// same-instant redraw from the main WM thread.
+///
+/// Never runs Pango: when the fast-path blit reports a pending rebuild/colour/
+/// focus change, this draws nothing and lets the main thread's redraw
+/// machinery (focus change, minimize/unminimize, bar resize) repaint the
+/// title. Pango and fontconfig therefore never run off the main thread, which
+/// removes the SIGTERM deadlock class where a bar thread held draw_mutex while
+/// blocked inside a fontconfig lookup.
 pub fn tickCarousel() void {
     const s = gBar.state orelse return;
     if (!s.is_visible) return;
+    if (prompt.isActive()) return;
+    if (!s.title_cache.is_layout_valid or s.title_cache.title_width == 0) return;
+    // Skip the tick while the main WM thread holds the X server grab. This
+    // thread's blit flushes the shared output buffer, which would release the
+    // grab-batch requests mid-grab and split what must be one atomic frame —
+    // and grabbing draw_mutex here could stall the main thread's
+    // scheduleFocusRedraw inside its own grab. The grab window is
+    // microseconds; skipping a scroll tick is imperceptible.
+    if (utils.isGrabActive()) return;
     draw_mutex.lock();
-    s.drawTitleOnly(s.title_cache.focused_window);
-    draw_mutex.unlock();
+    defer draw_mutex.unlock();
+    _ = s.drawTitleBlitOnly();
 }
 
 pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {

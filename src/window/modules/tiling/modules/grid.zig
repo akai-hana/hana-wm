@@ -24,7 +24,7 @@ pub fn tileWithOffset(
 
     const cell_w = (screen_w -| (grid.cols + 1) *| m.gap) / grid.cols;
     const cell_h = (screen_h -| (grid.rows + 1) *| m.gap) / grid.rows;
-    const win_h = layouts.shrinkClamped(cell_h, bm);
+    const win_h = layouts.shrinkClamped(cell_h, bm, state.config.min_window_dim);
 
     // In relaxed mode, windows on a partial last row divide the full screen
     // width among themselves rather than using the narrower grid-column width.
@@ -48,7 +48,7 @@ pub fn tileWithOffset(
         const rect = utils.Rect{
             .x = @intCast(m.gap +| col *| (effective_cell_w + m.gap)),
             .y = @intCast(y_offset +| m.gap +| row *| (cell_h + m.gap)),
-            .width = layouts.shrinkClamped(effective_cell_w, bm),
+            .width = layouts.shrinkClamped(effective_cell_w, bm, state.config.min_window_dim),
             .height = win_h,
         };
         layouts.emitOrDefer(ctx, win, rect);

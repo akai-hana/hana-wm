@@ -205,7 +205,9 @@ pub fn getGeometry(conn: *xcb.xcb_connection_t, win: u32) ?utils.Rect {
 
 /// The four ICCCM focus delivery modes (§4.1.7), determined by the combination of
 /// WM_HINTS.input and WM_TAKE_FOCUS presence in WM_PROTOCOLS.
-const InputModel = enum {
+/// pub: focus.setFocusWithModel takes a pre-resolved model so grab-held
+/// callers can hoist the live WM_PROTOCOLS query before the server grab.
+pub const InputModel = enum {
     no_input, // input=False, no WM_TAKE_FOCUS: window doesn't want focus
     passive, // input=True,  no WM_TAKE_FOCUS: set focus via `XSetInputFocus`
     locally_active, // input=True,  WM_TAKE_FOCUS:    set focus + send protocol
@@ -976,12 +978,19 @@ fn mapWindowToScreen(win: u32) void {
     }
 
     // ── Inside the grab: atomic map, focus, borders ─────────────────────────
-    _ = xcb.xcb_grab_server(conn);
+    //
+    // Resolve the input model BEFORE the grab: getInputModel's blocking
+    // WM_PROTOCOLS reply wait would implicitly flush the queued retile
+    // configure_window batch to the compositor mid-grab (same hazard the
+    // pre-drained pointer query above avoids). setFocusWithModel re-applies
+    // setFocus's own short-circuits (already-focused / no_input).
+    const spawn_input_model = getInputModel(conn, win);
+    utils.grabServer(conn);
 
     applyBorderWidth(win);
     _ = xcb.xcb_map_window(conn, win);
 
-    focus.setFocus(win, .window_spawn);
+    focus.setFocusWithModel(win, .window_spawn, spawn_input_model);
     // Re-check the suppress reason *after* setFocus, not before: setFocus is
     // what actually arms `.window_spawn` (via suppressionFor). Reading it
     // beforehand — when it's almost always `.none` — meant this snapshot
@@ -997,7 +1006,7 @@ fn mapWindowToScreen(win: u32) void {
     markBordersFlushed();
 
     // No xcb_flush here: the event-loop end-of-batch flush covers this.
-    _ = xcb.xcb_ungrab_server(conn);
+    utils.ungrabServer(conn);
 }
 
 /// Register a newly adopted window that is on a non-current workspace.
@@ -1105,9 +1114,20 @@ fn unmanageWindow(win: u32) void {
     // as the old toplevel's child on the next hover event.
     evictChildCache(win);
 
+    // ── Local bookkeeping, before the grab ─────────────────────────────────
+    // tiling.removeWindow unconditionally evicts the combined cache entry
+    // (geometry + border + size hints), so no separate evictSizeHints call
+    // is needed here. All three removes are pure local bookkeeping (no X
+    // requests), so they run pre-grab — this lets the post-close focus target
+    // be resolved against win-free tracking state below, with its input model
+    // queried BEFORE the grab.
+    tiling.removeWindow(win);
+    minimize.untrackWindow(win);
+    workspaces.removeWindow(win);
+
     // Fire the pointer query and drain the reply *before* grabbing the
     // server.  Draining the reply inside the grab (e.g. from within
-    // focusWindowUnderPointer via xcb_query_pointer_reply) would trigger an
+    // resolveDestroyFocusTarget via xcb_query_pointer_reply) would trigger an
     // implicit XCB output-buffer flush inside the grab — releasing all
     // queued configure_window / set_input_focus requests to the compositor
     // before xcb_ungrab_server.  Pre-draining here keeps the grab atomic.
@@ -1118,14 +1138,19 @@ fn unmanageWindow(win: u32) void {
     } else null;
     defer if (ptr_reply) |r| std.c.free(r);
 
-    _ = xcb.xcb_grab_server(cs.conn);
+    // Resolve the post-close focus target and its input model BEFORE the
+    // grab, so the grab body performs no blocking reply waits. A live
+    // getInputModel query inside the grab would implicitly flush the queued
+    // retile configure_window batch to the compositor mid-grab — the same
+    // atomicity hazard the pre-drained pointer query above avoids. setFocus's
+    // own .pointer_sync liveness guard is replicated here, pre-grab.
+    const destroy_target = if (was_focused) resolveDestroyFocusTarget(ptr_reply) else null;
+    const destroy_model: ?InputModel = if (destroy_target) |t| blk: {
+        if (t.reason == .pointer_sync and !focus.isWindowMapped(cs.conn, t.win)) break :blk null;
+        break :blk getInputModel(cs.conn, t.win);
+    } else null;
 
-    // tiling.removeWindow unconditionally evicts the combined cache entry
-    // (geometry + border + size hints), so no separate evictSizeHints call
-    // is needed here.
-    tiling.removeWindow(win);
-    minimize.untrackWindow(win);
-    workspaces.removeWindow(win);
+    utils.grabServer(cs.conn);
 
     if (was_fullscreen) bar.setBarState(.show_fullscreen);
 
@@ -1138,8 +1163,10 @@ fn unmanageWindow(win: u32) void {
         // that case — and nothing retiles again once focus actually lands on
         // the right window below.
         focus.clearFocus();
-        // Pass the pre-drained reply; no implicit flush inside the grab.
-        focusWindowUnderPointer(ptr_reply);
+        // destroy_model is null only when the liveness guard failed above; in
+        // that case skip focus, matching setFocus's early return.
+        if (destroy_target) |t|
+            if (destroy_model) |model| focus.setFocusWithModel(t.win, t.reason, model);
         if (tilingActive()) tiling.retileIfDirty();
     } else if (!was_fullscreen and tilingActive()) {
         if (window_workspace) |ws|
@@ -1155,7 +1182,7 @@ fn unmanageWindow(win: u32) void {
     markBordersFlushed();
 
     // No xcb_flush here: the event-loop end-of-batch flush covers this.
-    _ = xcb.xcb_ungrab_server(cs.conn);
+    utils.ungrabServer(cs.conn);
 }
 
 pub fn handleUnmapNotify(event: *const xcb.xcb_unmap_notify_event_t) void {
@@ -1163,32 +1190,38 @@ pub fn handleUnmapNotify(event: *const xcb.xcb_unmap_notify_event_t) void {
 }
 
 pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t) void {
+    drag.cancelDragForWindow(event.window);
     if (isValidManagedWindow(event.window)) unmanageWindow(event.window);
 }
 
-/// Post-unmanage focus recovery.
+/// Post-unmanage focus target resolution — PURE, no side effects.
 ///
-/// Uses .pointer_sync so the focus transition may raise a floating window
-/// (the stacking order may have changed after the closed window was removed)
-/// and arms the confirm/retry machinery for non-compliant clients.
-/// This mirrors drainPointerSync's deferred-query semantics — both are
-/// resolving a pointer-position query that was fired before the layout changed.
+/// Resolves where focus should land after `win` (the just-removed focused
+/// window) closed: the scroll-layout MRU prev, else the window under the
+/// pointer, else the first visible window on the current workspace. Returns
+/// null when nothing should receive focus (unmanageWindow falls back to
+/// clearFocus).
+///
+/// The caller applies the result via focus.setFocusWithModel with a
+/// pre-resolved input model, so the model's blocking WM_PROTOCOLS reply wait
+/// happens BEFORE the server grab rather than inside it.
+///
+/// `.pointer_sync` (the pointer-child case) may raise a floating window (the
+/// stacking order may have changed after the closed window was removed) and
+/// arms the confirm/retry machinery for non-compliant clients.
 /// Accepts a pre-drained pointer reply (null if the query failed or window
 /// was not focused).  The caller owns the memory and must free it; this
 /// function only reads.  Accepting the reply instead of the cookie prevents
 /// an implicit XCB output-buffer flush (xcb_query_pointer_reply) from
 /// occurring inside the server grab in unmanageWindow.
-fn focusWindowUnderPointer(ptr_reply: ?*xcb.xcb_query_pointer_reply_t) void {
-    const fallback: ?*const fn () void = minimize.focusMasterOrFirst;
-
+fn resolveDestroyFocusTarget(ptr_reply: ?*xcb.xcb_query_pointer_reply_t) ?DestroyFocusTarget {
     // Scroll layout: windows can be off-screen, so the pointer is often not
     // over any managed window.  Bypass pointer-based focus entirely and use
     // the focus history recorded by tiling.updateWindowFocus instead.
     // takePrevFocusedForScroll is a no-op (returns null) in all other layouts.
     if (tiling.takePrevFocusedForScroll()) |prev| {
         if (tracking.isOnCurrentWorkspaceAndVisible(prev)) {
-            focus.setFocus(prev, .tiling_operation);
-            return;
+            return .{ .win = prev, .reason = .tiling_operation };
         }
     }
 
@@ -1201,13 +1234,20 @@ fn focusWindowUnderPointer(ptr_reply: ?*xcb.xcb_query_pointer_reply_t) void {
         if (reply.*.child != 0) {
             const child = findManagedWindow(core.getState().conn, reply.*.child, tracking.isManaged);
             if (tracking.isOnCurrentWorkspaceAndVisible(child)) {
-                focus.setFocus(child, .pointer_sync);
-                return;
+                return .{ .win = child, .reason = .pointer_sync };
             }
         }
     }
-    focus.focusBestAvailable(.tiling_operation, tracking.isOnCurrentWorkspaceAndVisible, fallback);
+    if (focus.findBestAvailable(tracking.isOnCurrentWorkspaceAndVisible)) |win| {
+        return .{ .win = win, .reason = .tiling_operation };
+    }
+    return null;
 }
+
+const DestroyFocusTarget = struct {
+    win: u32,
+    reason: focus.Reason,
+};
 
 // Configure request
 

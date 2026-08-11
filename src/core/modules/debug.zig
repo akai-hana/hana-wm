@@ -1,5 +1,12 @@
 //! Debug logging and error helpers
-//! Provides logging utilities that are compiled away entirely in non-debug builds.
+//!
+//! `info` is compiled away in non-debug builds (verbose runtime tracing).
+//! `warn`/`err`/`logError`/`warnOnErr` always emit regardless of build mode:
+//! they carry user-facing diagnostics — config validation feedback ("value out
+//! of range, using default"), load failures, non-fatal runtime errors — that
+//! must reach the user in release builds too, where they are otherwise the
+//! only explanation for behaviour the user didn't ask for. A silent
+//! ReleaseFast fallback to config defaults with no message would be a bug.
 
 const std = @import("std");
 const build = @import("build_options");
@@ -13,7 +20,7 @@ fn moduleFromSrc(src: std.builtin.SourceLocation) []const u8 {
         basename;
 }
 
-inline fn debugEnabled() bool {
+inline fn infoEnabled() bool {
     return build.enable_debug_logging;
 }
 
@@ -25,15 +32,13 @@ inline fn log(comptime log_fn: anytype, comptime fmt: []const u8, module: []cons
 }
 
 pub inline fn err(comptime fmt: []const u8, args: anytype) void {
-    if (!debugEnabled()) return;
     log(std.log.err, fmt, moduleFromSrc(@src()), args);
 }
 pub inline fn warn(comptime fmt: []const u8, args: anytype) void {
-    if (!debugEnabled()) return;
     log(std.log.warn, fmt, moduleFromSrc(@src()), args);
 }
 pub inline fn info(comptime fmt: []const u8, args: anytype) void {
-    if (!debugEnabled()) return;
+    if (!infoEnabled()) return;
     log(std.log.info, fmt, moduleFromSrc(@src()), args);
 }
 
@@ -43,7 +48,6 @@ pub inline fn info(comptime fmt: []const u8, args: anytype) void {
 ///   s.windows.add(win) catch |e| { debug.logError(e, win); return; };
 ///   StateManager.init(...) catch |e| { debug.logError(e, null); return; };
 pub inline fn logError(e: anyerror, window: ?u32) void {
-    if (!debugEnabled()) return;
     if (window) |win| {
         std.log.err("[error] Failed: {} (window: 0x{x})", .{ e, win });
     } else {
@@ -59,6 +63,5 @@ pub inline fn logError(e: anyerror, window: ?u32) void {
 /// Truly inconsequential capacity hints (ensureTotalCapacity etc.) may keep
 /// bare `catch {}` — they produce no actionable diagnostic information.
 pub inline fn warnOnErr(e: anyerror, comptime context: []const u8) void {
-    if (!debugEnabled()) return;
     std.log.warn("[warn] Best-effort op failed (" ++ context ++ "): {}", .{e});
 }

@@ -7,6 +7,7 @@ const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
 const scale = @import("scale");
+const debug = @import("debug");
 
 const types = @import("types");
 
@@ -333,7 +334,9 @@ inline fn emptyWorkspace(ctx: TitleRenderContext, count: usize) ?u16 {
     if (count != 0) return null;
     // No windows on this workspace — tear down any live carousel immediately
     // so it does not keep scrolling invisibly in the background.
-    carousel.deinitCarousel();
+    // Runs under draw_mutex (drawAll), so use the non-locking teardown;
+    // deinitCarousel() would recursively re-lock draw_mutex (not recursive).
+    carousel.deinitCarouselLocked();
     ctx.dc.fillRect(ctx.start_x, 0, ctx.width, ctx.height, ctx.config.bg);
     return ctx.start_x + ctx.width;
 }
@@ -445,6 +448,8 @@ fn drawSegmentedTitles(
     const windows = snapshot.current_ws_wins;
     if (windows.len == 0) return;
 
+    if (windows.len > max_visible_windows)
+        debug.warn("Workspace has {} windows; only the first {} are rendered in split-view", .{ windows.len, max_visible_windows });
     const win_count = @min(windows.len, max_visible_windows);
 
     // Free the single-window carousel: the single and segmented paths are

@@ -4,6 +4,7 @@
 const std = @import("std");
 
 const constants = @import("constants");
+const debug = @import("debug");
 
 pub const xkb = @cImport({
     @cInclude("xkbcommon/xkbcommon.h");
@@ -45,18 +46,11 @@ pub const XkbState = struct {
 
         const st = xkb.xkb_state_new(km) orelse return error.XkbStateFailed;
 
-        // Keycodes below 8 are reserved by X11 and produce no real keysym;
-        // fill with NoSymbol so the array is always fully initialised.
-        var table: [256]u32 = [_]u32{xkb.XKB_KEY_NoSymbol} ** 256;
-        for (8..256) |kc| {
-            table[kc] = xkb.xkb_state_key_get_one_sym(st, @intCast(kc));
-        }
-
         return XkbState{
             .context = ctx,
             .keymap = km,
             .state = st,
-            .keysym_by_keycode = table,
+            .keysym_by_keycode = buildKeysymTable(km),
         };
     }
 
@@ -67,9 +61,39 @@ pub const XkbState = struct {
         xkb.xkb_context_unref(self.context);
     }
 
+    /// Rebuilds the keymap, state, and keysym table after a server-side
+    /// mapping change (setxkbmap/xmodmap → XCB_MAPPING_NOTIFY).
+    ///
+    /// Keybinding dispatch resolves keysyms from `keysym_by_keycode`, so the
+    /// live table must track the new mapping or every binding silently stops
+    /// matching. On failure the previous mapping is kept and the next mapping
+    /// notify retries.
+    pub fn rebuild(self: *XkbState, xcb_conn: *anyopaque) void {
+        const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
+        if (device_id == -1) return;
+        const km = retryKeymap(self.context, xcb_conn, device_id) catch {
+            debug.warn("XKB: keymap rebuild failed after mapping change; keeping old mapping", .{});
+            return;
+        };
+        const st = xkb.xkb_state_new(km) orelse {
+            xkb.xkb_keymap_unref(km);
+            debug.warn("XKB: state rebuild failed after mapping change; keeping old mapping", .{});
+            return;
+        };
+
+        // Build the table before freeing anything; failure above already
+        // returned, so the swap below cannot fail.
+        const new_table = buildKeysymTable(km);
+        xkb.xkb_state_unref(self.state);
+        xkb.xkb_keymap_unref(self.keymap);
+        self.state = st;
+        self.keymap = km;
+        self.keysym_by_keycode = new_table;
+    }
+
     /// Convert an X11 keycode to a keysym for keybinding dispatch.
-    /// Uses the lock-modifier-free table built at init so results are
-    /// unaffected by NumLock / CapsLock state.
+    /// Uses the level-0 (lock-free) table so results are unaffected by
+    /// NumLock / CapsLock / ScrollLock state.
     pub inline fn keycodeToKeysym(self: *const XkbState, keycode: u8) u32 {
         return self.keysym_by_keycode[keycode];
     }
@@ -77,6 +101,11 @@ pub const XkbState = struct {
     /// Reverse-look up a keysym to its keycode (used during config parsing).
     /// Scans the flat table (248 entries, all in L1 cache). Called only at
     /// config-parse time, never on the hot key-press path.
+    ///
+    /// The table holds each key's base (level-0) symbol, so a keysym that
+    /// only exists behind a Shift — e.g. `@` on a US layout — resolves to
+    /// null. Callers should warn when this happens: the binding cannot be
+    /// grabbed.
     pub inline fn keysymToKeycode(self: *const XkbState, keysym: u32) ?u8 {
         for (8..256) |kc| {
             if (self.keysym_by_keycode[kc] == keysym) return @intCast(kc);
@@ -84,6 +113,37 @@ pub const XkbState = struct {
         return null;
     }
 };
+
+/// Base (level-0) symbol for `kc`, independent of any modifier/lock state.
+/// Uses the keymap's level-0 entry directly rather than the live xkb_state,
+/// whose `get_one_sym` resolves keys under the current lock state (a
+/// CapsLock held at startup would otherwise pin the table to shifted
+/// symbols and break every lowercase binding).
+inline fn baseSymbol(km: *xkb_keymap, kc: u8) u32 {
+    var syms: [*c]const u32 = null;
+    const n = xkb.xkb_keymap_key_get_syms_by_level(km, @intCast(kc), 0, 0, &syms);
+    if (n > 0 and syms != null) return syms[0];
+    return xkb.XKB_KEY_NoSymbol;
+}
+
+/// Builds the flat keycode→keysym table from level-0 symbols.
+/// Keycodes below 8 are reserved by X11 and produce no real keysym.
+fn buildKeysymTable(km: *xkb_keymap) [256]u32 {
+    var table: [256]u32 = [_]u32{xkb.XKB_KEY_NoSymbol} ** 256;
+    for (8..256) |kc| {
+        table[kc] = baseSymbol(km, @intCast(kc));
+    }
+    return table;
+}
+
+/// Renders a keysym to its XKB name (e.g. XKB_KEY_at -> "at") into `buf`,
+/// returning a slice of `buf` holding the name. Used for diagnostic messages.
+pub fn keysymGetName(keysym: u32, buf: []u8) []const u8 {
+    if (buf.len == 0) return "";
+    const n = xkb.xkb_keysym_get_name(keysym, @ptrCast(buf.ptr), buf.len);
+    const len: usize = if (n < 0) 0 else @min(@as(usize, @intCast(n)), buf.len);
+    return buf[0..len];
+}
 
 const XKB_RETRY_DELAY_MS = constants.XKB_RETRY_DELAY_MS;
 

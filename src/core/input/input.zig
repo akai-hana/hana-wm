@@ -76,6 +76,15 @@ pub fn getXkbState() *xkbcommon.XkbState {
     return &xkb_state.?;
 }
 
+/// Rebuilds the keymap/keysym table after the server changes the keyboard
+/// mapping (setxkbmap/xmodmap). Keybinding resolution is keysym-indexed, so
+/// rebuilding the flat keycode→keysym table keeps existing bindings working
+/// under the new layout.
+pub fn handleMappingNotify() void {
+    const cs = core.getState();
+    if (xkb_state) |*s| s.rebuild(cs.conn);
+}
+
 // Grab setup
 
 /// Grabs mouse buttons on the root window and applies the user's cursor theme.
@@ -354,7 +363,6 @@ fn executeTilingAction(action: *const types.Action) void {
 /// Executes the swap_master / swap_master_focus_swap action inside a server grab.
 fn executeSwapMaster(action: *const types.Action) void {
     const conn = core.getState().conn;
-    _ = xcb.xcb_grab_server(conn);
 
     // Capture the focused window ID before the swap so we can pass it as
     // defer_configure — the shrinking window fills its new slot before the
@@ -362,14 +370,24 @@ fn executeSwapMaster(action: *const types.Action) void {
     const new_master = focus.getFocused();
     const displaced = tiling.swapWithMaster();
 
+    // Resolve the displaced window's input model BEFORE the grab: the
+    // WM_PROTOCOLS reply wait would implicitly flush the swap's configure_window
+    // batch to the compositor mid-grab (see focus.setFocusWithModel).
+    const displaced_model: ?window.InputModel = if (action.* == .swap_master_focus_swap)
+        if (displaced) |win| window.getInputModel(conn, win) else null
+    else
+        null;
+
+    utils.grabServer(conn);
+
     // follow-focus only: transfer focus before the retile. Focus MUST move
     // first — layouts that derive their visible/raised window from
     // focus.getFocused() at retile time (e.g. monocle — see monocle.zig's
     // tileWithOffset) would otherwise retile against the stale,
     // about-to-be-displaced window, then have no follow-up retile to correct
     // course once focus actually moves.
-    if (action.* == .swap_master_focus_swap)
-        if (displaced) |win| focus.setFocus(win, .tiling_operation);
+    if (displaced) |win|
+        if (displaced_model) |model| focus.setFocusWithModel(win, .tiling_operation, model);
 
     tiling.retileCurrentWorkspaceDeferred(new_master);
 
@@ -643,12 +661,13 @@ fn finishSpawn(entry: *PendingSpawn) void {
 
 /// Reaps zombie intermediate children without blocking.
 /// Called from the SIGCHLD handler (via the signal self-pipe).
+/// The spawn-pipe drain is the caller's job (events.zig drains it right
+/// after this) — draining here too would run it twice per SIGCHLD.
 pub fn reapPendingChildren() void {
     for (g_pending.slice()) |*entry| {
         if (entry.pid > 0 and c.waitpid(entry.pid, null, c.WNOHANG) > 0)
             entry.pid = -1;
     }
-    drainPendingSpawns();
 }
 
 // Diagnostics
@@ -736,7 +755,7 @@ inline fn withTilingGrabKeepFocus(op: anytype) void {
 
 inline fn withTilingGrabImpl(op: anytype, sync_pointer: bool) void {
     const conn = core.getState().conn;
-    _ = xcb.xcb_grab_server(conn);
+    utils.grabServer(conn);
     // Suppress EnterNotify events generated as a side effect of windows
     // moving/resizing under a stationary cursor during this reflow — X11
     // fires real crossing events for that, not just for cursor motion, and

@@ -7,7 +7,6 @@ const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
 const constants = @import("constants");
-const types = @import("types");
 
 const debug = @import("debug");
 const config = @import("config");
@@ -18,11 +17,16 @@ const focus = @import("focus");
 const tiling = @import("tiling");
 const bar = @import("bar");
 const prompt = @import("prompt");
+const clock = @import("clock");
 const fullscreen = @import("fullscreen");
 
 // Indices into the poll fd array.
 const FD_XCB = 0;
 const FD_SIGNAL = 1;
+
+/// Maximum events dispatched per XCB batch before returning to poll, so the
+/// signal pipe and timer paths get fair scheduling against a chatty client.
+const MAX_EVENTS_PER_BATCH: usize = 128;
 
 // Aliases to canonical definitions in constants.zig.
 const EVENT_DISPATCH_TABLE = constants.Limits.EVENT_DISPATCH_TABLE;
@@ -77,6 +81,7 @@ const dispatch_table = blk: {
     table[xcb.XCB_CLIENT_MESSAGE] = asHandler(window.handleClientMessage);
 
     table[xcb.XCB_KEY_PRESS] = asHandler(input.handleKeyPress);
+    table[xcb.XCB_MAPPING_NOTIFY] = asHandler(input.handleMappingNotify);
     table[xcb.XCB_BUTTON_PRESS] = asHandler(input.handleButtonPress);
     table[xcb.XCB_BUTTON_RELEASE] = asHandler(input.handleButtonRelease);
     table[xcb.XCB_MOTION_NOTIFY] = asHandler(input.handleMotionNotify);
@@ -91,7 +96,23 @@ const dispatch_table = blk: {
 };
 
 fn dispatch(event_type: u8, event: *anyopaque) void {
+    // Type 0 is an X error pseudo-event produced for a failed *unchecked*
+    // request. Nothing else in this codebase subscribes to type-0, so without
+    // this branch such errors would be silently dropped — making real-world
+    // X11 failures (bad grabs, stale window ids, wrong atoms) undiagnosable.
+    if (event_type == 0) {
+        const e: *xcb.xcb_generic_error_t = @ptrCast(@alignCast(event));
+        debug.warn("Unchecked XCB request failed: code={} major={} minor={} resource={x}", .{
+            e.error_code, e.major_code, e.minor_code, e.resource_id,
+        });
+        return;
+    }
     const idx = event_type & 0x7F; // strip XCB synthetic-event bit
+    // Guard the fixed-size table: extension events live above XCB_GE_GENERIC
+    // and would index out of bounds. hana only selects core events today, but
+    // the moment anyone subscribes to an extension this would become a
+    // memory-safety bug — cheap insurance.
+    if (idx >= dispatch_table.len) return;
     if (dispatch_table[idx]) |handler| handler(event);
 }
 
@@ -106,6 +127,7 @@ fn signalHandler(signo: std.posix.SIG) callconv(.c) void {
 /// Creates the signal self-pipe and installs handlers for SIGHUP/SIGTERM/SIGINT/SIGCHLD.
 pub fn setupSignalPipe() !void {
     signal_pipe = try utils.makePipe();
+    utils.setSignalWriteFd(signal_pipe[1]);
 
     const sa: std.posix.Sigaction = .{
         .handler = .{ .handler = signalHandler },
@@ -120,6 +142,7 @@ pub fn setupSignalPipe() !void {
 
 /// Closes both ends of the signal pipe.
 pub fn deinitSignalPipe() void {
+    utils.setSignalWriteFd(-1);
     for (&signal_pipe) |*fd| {
         if (fd.* == -1) continue;
         _ = std.os.linux.close(fd.*);
@@ -232,21 +255,31 @@ pub fn grabKeybindings() void {
 
 // Config reload
 
-/// Applies a validated config: resolves keybindings and notifies all
-/// subsystems of the change. grabKeybindings() is deliberately not called
-/// here — see the comment in handleConfigReload for why.
-fn applyConfig(new_config: *types.Config) !void {
-    const cs = core.getState();
-    new_config.keybind_resolver.build(new_config.keybindings.items, input.getXkbState(), cs.alloc);
-    config.finalizeConfig(new_config, cs.screen);
-
-    window.reloadBorders();
-    tiling.reloadConfig();
-    bar.reload();
-}
-
 /// Loads and validates a new config, then applies it atomically.
 /// On failure, the old config remains active.
+///
+/// Ordering matters for every step:
+///   1. Keybind resolution and DPI scaling operate directly on `new_config`
+///      and must run before the swap.
+///   2. The swap (old -> new) happens BEFORE the subsystem reloads below, so
+///      window.reloadBorders()/tiling.reloadConfig()/bar.reload() — which all
+///      read core.getState().config — rebuild from the NEW config, not the
+///      stale one. (The old ordering silently kept bar/tiling/border settings
+///      from the previous config, then old_config.deinit() freed the bar
+///      string slices the new bar had shallow-copied: a use-after-free on the
+///      next bar draw.)
+///   3. grabKeybindings() must run after the swap: fillGrabCookies() reads
+///      core.getState().config.keybindings, so grabbing before the swap would
+///      re-grab the OLD keycodes.
+///   4. `committed` flips the errdefer: before the swap a failure must free the
+///      unused new_config; after the swap new_config is the live config, so a
+///      failure must instead keep it and free the displaced old_config.
+///      (Today every post-swap call returns void, so this is latent-but-safe —
+///      bar.reload() swallows its own errors and keeps the old bar, which
+///      applyReload re-points at the new config before that.)
+///   5. config.applyCarouselSettings() runs only after the swap so a rejected
+///      reload never leaks carousel settings into effect (they are staged on
+///      the config struct at parse time, not written to globals).
 fn handleConfigReload() !void {
     debug.info("Reload requested", .{});
     const cs = core.getState();
@@ -255,43 +288,68 @@ fn handleConfigReload() !void {
         debug.err("Failed to load: {}, keeping old", .{err});
         return err;
     };
-    errdefer new_config.deinit(cs.alloc);
+    var old_config = cs.config;
+    var committed = false;
+    errdefer {
+        if (committed) {
+            old_config.deinit(cs.alloc);
+        } else {
+            new_config.deinit(cs.alloc);
+        }
+    }
 
     try config.validate(&new_config);
-    try applyConfig(&new_config);
+    new_config.keybind_resolver.build(new_config.keybindings.items, input.getXkbState(), cs.alloc);
+    config.finalizeConfig(&new_config, cs.screen);
 
-    var old_config = cs.config;
     cs.config = new_config;
+    committed = true;
+
+    window.reloadBorders();
+    tiling.reloadConfig();
+    bar.reload();
+
     old_config.deinit(cs.alloc);
 
-    // grabKeybindings() must run after this swap, not inside applyConfig:
-    // fillGrabCookies() reads core.getState().config.keybindings, so calling
-    // it before the swap would re-grab the OLD keycodes.
     grabKeybindings();
 
     // Rebuild after the swap so borrowed key slices point into the new config's memory.
     window.buildRulesMap();
+
+    config.applyCarouselSettings(&new_config);
 
     debug.info("Reload complete", .{});
 }
 
 // Event loop
 
-/// Ticks the clock and cursor blink on poll timeout, then flushes to the compositor.
+/// Ticks the cursor blink and drains the clock thread's redraw request on
+/// poll timeout, then flushes to the compositor.
 fn handleTimerEvents(cursor_is_blinking: bool) void {
-    // poll() now times out only for cursor blink; the clock and carousel
-    // threads draw directly via bar.checkClockUpdate()/bar.tickCarousel().
+    // poll() times out for cursor blink and/or the clock's next whole-second
+    // boundary. The clock thread formats the time string and sets a dirty
+    // flag; bar.updateClock() (below) runs the Pango layout for the clock
+    // segment here on the main thread.
     if (cursor_is_blinking) {
         prompt.blinkTick();
         bar.submitDraw();
         _ = xcb.xcb_flush(core.getState().conn);
     }
+    _ = bar.updateClock();
 }
 
-/// Drains all pending XCB events for this batch, then runs post-batch housekeeping.
+/// Drains pending XCB events for this batch, then runs post-batch housekeeping.
 fn handleXcbEvents() void {
     const conn = core.getState().conn;
-    while (xcb.xcb_poll_for_event(conn)) |event| {
+
+    // Cap the number of events dispatched per batch so a chatty client
+    // flooding PropertyNotify/ConfigureNotify can't starve the signal pipe and
+    // timer paths (clock, cursor blink) indefinitely. Unread events stay in the
+    // socket buffer and the fd stays readable, so they're handled on the next
+    // poll round.
+    var handled: usize = 0;
+    while (handled < MAX_EVENTS_PER_BATCH) : (handled += 1) {
+        const event = xcb.xcb_poll_for_event(conn) orelse break;
         defer std.c.free(event);
         dispatch(@as(*u8, @ptrCast(event)).*, event);
     }
@@ -313,6 +371,10 @@ fn handleXcbEvents() void {
     focus.drainTilingOpSettle();
     window.updateWorkspaceBordersIfNeeded();
     bar.updateIfDirty() catch |err| debug.err("Failed to update bar: {}", .{err});
+    // Drain the clock thread's redraw request here too, not only on poll
+    // timeout: a busy main loop that never lets the timeout expire (constant
+    // XCB traffic) would otherwise starve the clock repaint.
+    _ = bar.updateClock();
 
     _ = xcb.xcb_flush(conn);
 }
@@ -327,9 +389,16 @@ pub fn run() !void {
     };
 
     while (utils.running.load(.acquire)) {
+        // Wake for the earlier of the cursor-blink deadline and the clock's
+        // next whole-second tick (plus grace). The clock deadline keeps the
+        // loop ticking even when nothing else is happening, and also provides
+        // the short-retry behaviour inside clock.nextTickWaitMs when the clock
+        // thread is late publishing a second.
         const blink_ms = prompt.blinkPollTimeoutMs();
         const cursor_is_blinking = blink_ms >= 0;
-        const poll_rc = std.os.linux.poll(&fds, fds.len, blink_ms);
+        const clock_ms: i32 = @intCast(clock.nextTickWaitMs());
+        const poll_ms: i32 = if (blink_ms < 0) clock_ms else @min(blink_ms, clock_ms);
+        const poll_rc = std.os.linux.poll(&fds, fds.len, poll_ms);
         const ready: usize = switch (std.posix.errno(poll_rc)) {
             .SUCCESS => @intCast(poll_rc),
             .INTR => continue,
@@ -351,10 +420,14 @@ pub fn run() !void {
 
         if ((fds[FD_XCB].revents & std.posix.POLL.IN) != 0) handleXcbEvents();
 
-        if ((fds[FD_SIGNAL].revents & std.posix.POLL.IN) != 0) {
+        if ((fds[FD_SIGNAL].revents & std.posix.POLL.IN) != 0)
             handleSignalPipe(signal_fd);
-            if (utils.consumeReload())
-                handleConfigReload() catch |err| debug.err("Reload failed: {}", .{err});
-        }
+
+        // The reload flag is also set directly by the reload_config keybinding
+        // (which writes a wake byte to the pipe, but the byte can be dropped if
+        // the pipe is full). Consume it every iteration so that path can never
+        // be lost — a flag-only request is picked up on the next poll timeout.
+        if (utils.consumeReload())
+            handleConfigReload() catch |err| debug.err("Reload failed: {}", .{err});
     }
 }

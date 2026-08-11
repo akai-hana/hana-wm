@@ -1,7 +1,7 @@
 //! Core constants
 //! Defines shared constants used across multiple modules.
 
-const xcb = @cImport(@cInclude("xcb/xcb.h"));
+const xcb = @import("x11").xcb;
 
 // Modifier masks
 // Must be u16 as per XCB API
@@ -10,6 +10,7 @@ const MOD_CAPSLOCK: u16 = xcb.XCB_MOD_MASK_LOCK;
 pub const MOD_CONTROL: u16 = xcb.XCB_MOD_MASK_CONTROL;
 pub const MOD_ALT: u16 = xcb.XCB_MOD_MASK_1;
 const MOD_NUMLOCK: u16 = xcb.XCB_MOD_MASK_2;
+const MOD_SCROLLLOCK: u16 = xcb.XCB_MOD_MASK_3;
 pub const MOD_SUPER: u16 = xcb.XCB_MOD_MASK_4;
 
 // Mask applied before comparing a received modifier state against a keybinding.
@@ -20,6 +21,11 @@ pub const MOD_MASK_BINDING: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER;
 // Window constraints
 pub const MIN_WINDOW_DIM: u16 = 50;
 pub const MIN_MASTER_WIDTH: f32 = 0.05;
+/// Master pane width is capped at 95% so the stack column always keeps some
+/// screen. Single-sourced: config validation, the runtime pixel->ratio
+/// conversion, and the increase_master_width action all clamp to this same
+/// bound (tiling.zig's local `max_master_width_ratio` used to duplicate it).
+pub const MAX_MASTER_WIDTH: f32 = 0.95;
 
 // XKB retry parameters
 // 20 ms is short enough to be imperceptible to the user yet long enough to avoid
@@ -134,12 +140,17 @@ pub const EventMasks = struct {
 };
 
 /// Lock key combinations grabbed alongside every keybinding so binds work
-/// regardless of NumLock / CapsLock state.
+/// regardless of NumLock / CapsLock / ScrollLock state. All 2^3 subsets of
+/// the three lock modifiers.
 pub const LOCK_MODIFIERS = [_]u16{
     0,
     MOD_CAPSLOCK,
     MOD_NUMLOCK,
+    MOD_SCROLLLOCK,
     MOD_CAPSLOCK | MOD_NUMLOCK,
+    MOD_CAPSLOCK | MOD_SCROLLLOCK,
+    MOD_NUMLOCK | MOD_SCROLLLOCK,
+    MOD_CAPSLOCK | MOD_NUMLOCK | MOD_SCROLLLOCK,
 };
 
 pub const Limits = struct {
@@ -147,9 +158,9 @@ pub const Limits = struct {
     pub const EVENT_DISPATCH_TABLE = 36;
 
     /// Upper bound for the XCB cookie scratch buffer in grabKeybindings
-    /// (max distinct keybindings × 4 LOCK_MODIFIERS combinations).
+    /// (max distinct keybindings × LOCK_MODIFIERS.len combinations).
     /// Raise if you ever exceed 128 keybindings.
-    pub const MAX_KEYBIND_COOKIES = 512;
+    pub const MAX_KEYBIND_COOKIES = 1024;
 
     /// Maximum tiled windows across the whole WM (all workspaces combined),
     /// not per workspace — see tracking.Tracking, which this backs.

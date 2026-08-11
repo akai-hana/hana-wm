@@ -39,8 +39,8 @@ pub fn tileWithOffset(
     const top_rect = utils.Rect{
         .x = @intCast(inset),
         .y = @intCast(y_offset +| inset),
-        .width = layouts.shrinkClamped(screen_w, total_margin),
-        .height = layouts.shrinkClamped(screen_h, total_margin),
+        .width = layouts.shrinkClamped(screen_w, total_margin, state.config.min_window_dim),
+        .height = layouts.shrinkClamped(screen_h, total_margin, state.config.min_window_dim),
     };
 
     // Only raise on-screen: a background retile (see LayoutCtx.is_background)

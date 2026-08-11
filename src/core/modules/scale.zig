@@ -21,6 +21,13 @@ const FONT_BASELINE_HEIGHT: f32 = 1080.0;
 /// before passing them to scaleBarHeight.
 pub const BAR_MIN_HEIGHT_PX: u16 = 20;
 
+/// Reasonable-DPI band applied to both the geometry-derived and Xft.dpi paths.
+/// Values outside this range (or non-finite) are rejected as misconfiguration
+/// rather than being fed straight into Pango, where 0/negative/NaN DPI would
+/// produce divide-by-zero or garbage font metrics.
+const MIN_REASONABLE_DPI: f32 = 50.0;
+const MAX_REASONABLE_DPI: f32 = 300.0;
+
 /// Maximum long-words to request for the RESOURCE_MANAGER property (16 KB).
 const RESOURCE_MANAGER_MAX_LEN: u32 = 4096;
 
@@ -81,19 +88,28 @@ fn calcDpiFromGeometry(screen: *xcb.xcb_screen_t) f32 {
 /// Called once at startup; core.dpi_info holds the result for the process lifetime.
 pub fn detectDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) f32 {
     if (readXftDpi(conn, screen)) |xft_dpi| {
-        debug.info("Using DPI from X resources (Xft.dpi): {d:.1}", .{xft_dpi});
-        return xft_dpi;
+        // Same reasonableness band as the geometry path: a broken Xft.dpi value
+        // (0, negative, NaN, inf, absurd) flows straight into Pango's resolution
+        // and would crash or corrupt bar rendering. Reject it and fall through.
+        if (isReasonableDpi(xft_dpi)) {
+            debug.info("Using DPI from X resources (Xft.dpi): {d:.1}", .{xft_dpi});
+            return xft_dpi;
+        }
+        debug.warn("Ignoring unreasonable Xft.dpi value {d:.1}", .{xft_dpi});
     }
 
     const geometry_dpi = calcDpiFromGeometry(screen);
-    const reasonable = geometry_dpi >= 50.0 and geometry_dpi <= 300.0;
-    if (reasonable) {
+    if (isReasonableDpi(geometry_dpi)) {
         debug.info("Using geometry-calculated DPI: {d:.1}", .{geometry_dpi});
     } else {
         debug.warn("Calculated DPI {d:.1} seems unreasonable, using baseline DPI", .{geometry_dpi});
     }
 
-    return if (reasonable) geometry_dpi else BASELINE_DPI;
+    return if (isReasonableDpi(geometry_dpi)) geometry_dpi else BASELINE_DPI;
+}
+
+fn isReasonableDpi(dpi: f32) bool {
+    return std.math.isFinite(dpi) and dpi >= MIN_REASONABLE_DPI and dpi <= MAX_REASONABLE_DPI;
 }
 
 /// Scale a border or gap value. Percentages are screen-relative and applied
@@ -118,116 +134,40 @@ pub fn scaleMasterWidth(value: parser.ScalableValue) f32 {
 pub fn scaleFontSize(value: parser.ScalableValue, screen: *xcb.xcb_screen_t) u16 {
     const screen_height: f32 = @floatFromInt(screen.height_in_pixels);
     const raw = if (value.is_percentage) value.value * (screen_height / FONT_BASELINE_HEIGHT) else value.value;
-    return @intFromFloat(@max(1.0, @round(raw)));
+    const clamped = std.math.clamp(@round(raw), 1.0, @as(f32, std.math.maxInt(u16)));
+    return @intFromFloat(clamped);
 }
 
 /// Converts a scalable bar height value to pixels, clamped to BAR_MIN_HEIGHT_PX.
 pub fn scaleBarHeight(value: parser.ScalableValue, screen_height: u16) u16 {
     const screen_height_f: f32 = @floatFromInt(screen_height);
     const scaled_px: f32 = utils.scaling.scaleToPixels(value, screen_height_f);
-    return @max(BAR_MIN_HEIGHT_PX, @as(u16, @intFromFloat(@round(scaled_px))));
+    const clamped = std.math.clamp(@round(scaled_px), 0.0, @as(f32, std.math.maxInt(u16)));
+    return @max(BAR_MIN_HEIGHT_PX, @as(u16, @intFromFloat(clamped)));
 }
 
 // Refresh-rate detection
+//
+// hana deliberately does not link xcb-randr, so monitor refresh-rate
+// auto-detection is unavailable: `getDetectedRateHz` always returns the
+// fallback below. (An earlier implementation queried RandR behind
+// `@hasDecl` guards that were never satisfied — the header was never
+// imported nor the library linked, so it silently always returned 60 Hz.
+// Rather than keep ~100 lines of guaranteed-dead code, the API remains as a
+// stable seam for a future implementation that adds the real dependency.)
+//
+// The two functions are intentionally side-effect-free so callers (title.zig,
+// carousel.zig, bar.zig — the last from a worker thread) need no locking.
 
 /// Fallback refresh rate used when RandR is unavailable or returns an invalid value.
 const default_hz: f64 = 60.0;
 
-var hz_cache: ?f64 = null;
-
-/// Detect and cache the monitor refresh rate.
-/// Subsequent calls are a single branch and a return — zero X11 I/O.
+/// Kept for API stability; a no-op without RandR support.
 pub fn ensureRefreshRateDetected(conn: *xcb.xcb_connection_t) void {
-    if (hz_cache != null) return;
-    hz_cache = detectRefreshRate(conn);
+    _ = conn;
 }
 
-/// Returns the detected monitor refresh rate in Hz.
-/// Returns `default_hz` (60.0) when called before `ensureRefreshRateDetected`.
+/// Returns the fallback refresh rate in Hz.
 pub fn getDetectedRateHz() f64 {
-    return hz_cache orelse default_hz;
-}
-
-/// Returns the root window ID of the first screen, or 0 if no screens are available.
-fn xcbRootWindow(conn: *xcb.xcb_connection_t) u32 {
-    const setup = xcb.xcb_get_setup(conn);
-    const it = xcb.xcb_setup_roots_iterator(setup);
-    return if (it.rem > 0) it.data.*.root else 0;
-}
-
-/// Read the refresh rate of all active CRTCs and return the highest value.
-///
-/// All `xcb_randr_get_crtc_info` cookies are fired before any reply is read,
-/// reducing round-trips from O(crtcs) to O(1).
-///
-/// Returning the maximum rate rather than the first ensures correct behaviour
-/// on multi-monitor setups where each display has a different refresh rate.
-///
-/// Returns null on any failure.
-fn detectRefreshRateViaCrtc(conn: *xcb.xcb_connection_t, root: u32) ?f64 {
-    const rc = xcb.xcb_randr_get_screen_resources_current(conn, root);
-    const rr = xcb.xcb_randr_get_screen_resources_current_reply(conn, rc, null) orelse
-        return null;
-    defer std.c.free(rr);
-
-    const mode_it_len = xcb.xcb_randr_get_screen_resources_current_modes_length(rr);
-    const mode_it_ptr = xcb.xcb_randr_get_screen_resources_current_modes(rr);
-    if (mode_it_len <= 0 or mode_it_ptr == null) return null;
-    const modes = mode_it_ptr.?[0..@intCast(mode_it_len)];
-
-    const crtc_it_len = xcb.xcb_randr_get_screen_resources_current_crtcs_length(rr);
-    const crtc_it_ptr = xcb.xcb_randr_get_screen_resources_current_crtcs(rr);
-    if (crtc_it_len <= 0 or crtc_it_ptr == null) return null;
-    const crtcs = crtc_it_ptr.?[0..@intCast(crtc_it_len)];
-
-    const max_crtcs: usize = 16;
-    const n_crtcs = @min(crtcs.len, max_crtcs);
-    var crtc_cookies: [max_crtcs]xcb.xcb_randr_get_crtc_info_cookie_t = undefined;
-    for (crtcs[0..n_crtcs], crtc_cookies[0..n_crtcs]) |crtc, *cookie| {
-        cookie.* = xcb.xcb_randr_get_crtc_info(conn, crtc, rr.*.config_timestamp);
-    }
-
-    var best_hz: f64 = 0.0;
-    for (0..n_crtcs) |i| {
-        const cr = xcb.xcb_randr_get_crtc_info_reply(conn, crtc_cookies[i], null) orelse continue;
-        defer std.c.free(cr);
-
-        const mode_id = cr.*.mode;
-        if (mode_id == 0) continue;
-
-        for (modes) |m| {
-            if (m.id != mode_id) continue;
-            const htotal: u64 = m.htotal;
-            const vtotal: u64 = m.vtotal;
-            if (htotal != 0 and vtotal != 0) {
-                const hz: f64 = @as(f64, @floatFromInt(m.dot_clock)) /
-                    @as(f64, @floatFromInt(htotal * vtotal));
-                if (hz > best_hz) best_hz = hz;
-            }
-            break; // found the mode entry regardless; stop searching
-        }
-    }
-    return if (best_hz > 0.0) best_hz else null;
-}
-
-/// Attempt to read the current refresh rate via `xcb_randr_get_screen_info`.
-/// Falls back to CRTC mode data when rate == 0, then to `default_hz`.
-fn detectRefreshRate(conn: *xcb.xcb_connection_t) f64 {
-    if (!@hasDecl(xcb, "xcb_randr_get_screen_info")) return default_hz;
-
-    const root = xcbRootWindow(conn);
-    if (root == 0) return default_hz;
-
-    const cookie = xcb.xcb_randr_get_screen_info(conn, root);
-    const reply = xcb.xcb_randr_get_screen_info_reply(conn, cookie, null) orelse
-        return default_hz;
-    defer std.c.free(reply);
-
-    const rate = reply.*.rate;
-    if (rate > 0) return @floatFromInt(rate);
-
-    if (@hasDecl(xcb, "xcb_randr_get_screen_resources_current"))
-        if (detectRefreshRateViaCrtc(conn, root)) |hz| return hz;
-
     return default_hz;
 }
