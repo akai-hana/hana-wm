@@ -47,8 +47,8 @@ pub fn tileWithOffset(
             const overflow_rect = utils.Rect{
                 .x = @intCast(x),
                 .y = @intCast(y),
-                .width = layouts.shrinkClamped(w, border2),
-                .height = layouts.shrinkClamped(h, border2),
+                .width = layouts.shrinkClamped(w, border2, state.config.min_window_dim),
+                .height = layouts.shrinkClamped(h, border2, state.config.min_window_dim),
             };
             // Find the focused window among the overflow set; fall back to the
             // first window if no focused window is present here.

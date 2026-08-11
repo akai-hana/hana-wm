@@ -21,6 +21,12 @@ pub fn main() !void {
     defer xcb.xcb_disconnect(x.conn);
 
     const alloc = std.heap.c_allocator;
+
+    // Intern the atom cache before any module reads atoms: scale.detectDpi()
+    // resolves RESOURCE_MANAGER through the cache, so it must be populated
+    // first or Xft.dpi would never be read.
+    try utils.initAtomCache(x.conn);
+
     core.dpi_info = scale.detectDpi(x.conn, x.screen);
 
     input.setup(x.conn, x.screen, x.root);
@@ -37,7 +43,6 @@ pub fn main() !void {
     // defer on the config suffices (see KeybindResolver in types.zig).
     defer core.getState().config.deinit(alloc);
 
-    try utils.initAtomCache(x.conn);
     utils.advertiseEwmhSupport(x.conn, x.screen, x.root);
 
     try events.setupSignalPipe();
@@ -71,7 +76,7 @@ const X = struct {
 /// Fails if the display is unavailable, the screen cannot be retrieved,
 /// or another WM is already running.
 fn connectToX() !X {
-    const conn = xcb.xcb_connect(null, null) orelse unreachable;
+    const conn = xcb.xcb_connect(null, null) orelse return error.X11ConnectFailed;
 
     if (xcb.xcb_connection_has_error(conn) != 0) {
         debug.err("X11 connection failed", .{});

@@ -35,7 +35,7 @@ const scroll = @import("scroll");
 
 // Module constants
 
-const max_master_width_ratio: f32 = 0.95; // prevents master from consuming the full screen
+const max_master_width_ratio: f32 = constants.MAX_MASTER_WIDTH; // prevents master from consuming the full screen
 const max_master_count: u8 = 10;
 // Per-retile window list capacity. A single workspace can never hold more
 // tiled windows than the global pool (tracking.Tracking, s.windows below)
@@ -90,6 +90,8 @@ pub const LayoutConfig = struct {
     border_width: u16,
     border_focused: u32,
     border_unfocused: u32,
+    /// Smallest on-screen width/height a tiled window is allowed to reach.
+    min_window_dim: u16,
 
     /// Runtime layout cycle: intersection of config `layouts` and disk-present
     /// layout files. `stepLayout` walks this so layouts omitted from the
@@ -224,7 +226,7 @@ pub fn reloadConfig() void {
         // extra XCB request per window, in exchange for keeping the retile
         // path free of any border-width bookkeeping.
         const conn = core.getState().conn;
-        _ = xcb.xcb_grab_server(conn);
+        utils.grabServer(conn);
         for (ns.windows.items()) |win| {
             _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{ns.config.border_width});
         }
@@ -870,7 +872,10 @@ fn calcMasterWidth() f32 {
         const ratio = -raw / @as(f32, @floatFromInt(cs.screen.width_in_pixels));
         return @min(max_master_width_ratio, @max(constants.MIN_MASTER_WIDTH, ratio));
     }
-    return raw;
+    // Percentage path gets the same [MIN, MAX] clamp as the pixel path — a
+    // value at or beyond the cap (e.g. `master_width = 100%`) must still
+    // leave the stack column its minimum share of the screen.
+    return @min(max_master_width_ratio, @max(constants.MIN_MASTER_WIDTH, raw));
 }
 
 fn initState() State {
@@ -901,6 +906,7 @@ fn initState() State {
             .border_width = scale.scaleBorderWidth(cs.config.tiling.border_width, screen_height),
             .border_focused = cs.config.tiling.border_focused,
             .border_unfocused = cs.config.tiling.border_unfocused,
+            .min_window_dim = cs.config.tiling.min_window_dim,
         },
         .windows = .{},
         .geom = .{

@@ -87,17 +87,24 @@ inline fn evictWindow(win: u32) void {
 /// Moves win's fullscreen record so it stays fullscreen after a tag/move.
 /// No-op if win isn't fullscreen anywhere. Cleans up the source workspace's
 /// live UI (bar, border) only when leaving `current` — other workspaces have
-/// no live fullscreen chrome to clean up. `force`: follow `new_home` even
-/// when fullscreen on some other, non-current workspace — used when `win` is
-/// being detached from every workspace except `new_home`.
-fn transferFullscreenRecord(win: u32, current: u8, new_home: u8, force: bool) void {
+/// no live fullscreen chrome to clean up.
+///
+/// Must be called BEFORE the workspace mask is changed (i.e. before
+/// setWindowMask): setWindowMask prunes fullscreen records on workspaces the
+/// window is no longer tagged on, so a record relocated here first survives
+/// the prune because `new_home` is still tagged. If `new_home` already holds a
+/// record for another window, win's record is dropped rather than clobbering
+/// it — a window leaving the visible workspace does not displace a resident
+/// workspace's fullscreen window.
+fn transferFullscreenRecord(win: u32, current: u8, new_home: u8) void {
     const src_ws = fullscreen.workspaceFor(win) orelse return;
-    if (src_ws == current) {
-        fullscreen.cleanupFullscreenForMove(win, src_ws);
-        fullscreen.moveRecord(src_ws, new_home);
-    } else if (force) {
-        fullscreen.moveRecord(src_ws, new_home);
+    if (src_ws != current) return;
+    fullscreen.cleanupFullscreenForMove(win, src_ws);
+    if (fullscreen.getForWorkspace(new_home) != null) {
+        fullscreen.removeForWorkspace(src_ws);
+        return;
     }
+    fullscreen.moveRecord(src_ws, new_home);
 }
 
 /// Resolved layout + variant override for a single workspace, keyed by
@@ -256,10 +263,13 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
 
     // new_mask is always non-zero: target_bit is always set.
     const new_mask = (mask & ~tracking.workspaceBit(s.current)) | target_bit;
+    // Relocate the fullscreen record BEFORE the mask change: setWindowMask's
+    // pruneForWorkspaceMask would otherwise drop it (win is no longer tagged
+    // on its old workspace), instead of carrying it to the new home.
+    transferFullscreenRecord(win, s.current, target_ws);
     setWindowMask(s, win, new_mask);
 
     if (minimize.isMinimized(win)) minimize.moveToWorkspace(win, target_ws);
-    transferFullscreenRecord(win, s.current, target_ws, false);
 
     if (target_ws != s.current) {
         evictWindow(win);
@@ -275,10 +285,13 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
 
 /// Low-level: set a window's workspace bitmask and clear last_focused on
 /// workspaces it just left. Does not touch screen visibility or tiling.
+/// Any fullscreen record for `win` on a workspace it no longer occupies is
+/// pruned here, so a stale record can never survive a mask change.
 fn setWindowMask(s: *State, win: u32, new_mask: u64) void {
     std.debug.assert(new_mask != 0);
     const old_mask = tracking.getWindowWorkspaceMask(win) orelse 0;
     tracking.setWindowMask(win, new_mask);
+    fullscreen.pruneForWorkspaceMask(win, new_mask);
 
     var removed_it = setBits(old_mask & ~new_mask);
     while (removed_it.next()) |idx| {
@@ -298,7 +311,7 @@ inline fn retileRedrawAndFlush() void {
 /// Grab, retile, redraw, flush — for callers with no per-window op to
 /// perform before the retile.
 inline fn retileAndScheduleFlush() void {
-    _ = xcb.xcb_grab_server(core.getState().conn);
+    utils.grabServer(core.getState().conn);
     retileRedrawAndFlush();
 }
 
@@ -319,14 +332,18 @@ pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
         // Remove tag N.
         if (@popCount(mask) <= 1) return; // last workspace — protect
         const new_mask = mask & ~tbit;
+        if (target_ws == current) {
+            // Leaving the current workspace: hand the fullscreen record to
+            // whichever tagged workspace remains lowest. This must run before
+            // setWindowMask, whose pruneForWorkspaceMask would drop the record
+            // because win is no longer tagged on the old current workspace.
+            transferFullscreenRecord(win, current, @intCast(@ctz(new_mask)));
+        }
         setWindowMask(s, win, new_mask);
         if (target_ws == current) {
-            // Leaving the current workspace: if fullscreen here, hand the
-            // record to whichever tagged workspace remains lowest.
-            transferFullscreenRecord(win, current, @intCast(@ctz(new_mask)), false);
             // Grab so the evict and retile land in one atomic batch — the
             // compositor never sees the window gone but peers not yet reflowed.
-            _ = xcb.xcb_grab_server(core.getState().conn);
+            utils.grabServer(core.getState().conn);
             evictWindow(win);
             retileRedrawAndFlush();
         }
@@ -337,7 +354,7 @@ pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
         if (target_ws == current) {
             // Grab so the map and retile land in one atomic batch.
             const conn = core.getState().conn;
-            _ = xcb.xcb_grab_server(conn);
+            utils.grabServer(conn);
             _ = xcb.xcb_map_window(conn, win);
             retileRedrawAndFlush();
         }
@@ -390,7 +407,12 @@ pub fn switchToAll() void {
         const ptr_reply = xcb.xcb_query_pointer_reply(cs.conn, ptr_cookie, null);
         defer if (ptr_reply) |r| std.c.free(r);
 
-        _ = xcb.xcb_grab_server(cs.conn);
+        // Pre-resolve the focus target + input model before the grab so the
+        // grab body performs no blocking reply waits (see executeSwitch).
+        const focus_target = resolvePostSwitchFocus(&s.workspaces[s.current], ptr_reply);
+        const focus_model = if (focus_target) |w| window.getInputModel(cs.conn, w) else null;
+
+        utils.grabServer(cs.conn);
         exitAllWorkspacesView(s);
         // Resolve and apply focus BEFORE retiling: exitAllWorkspacesView may
         // have just evicted the still-focused window from this workspace's
@@ -399,7 +421,7 @@ pub fn switchToAll() void {
         // the stale, now-evicted window with no follow-up retile once focus
         // actually moves. All windows here are already mapped, so it's safe
         // to apply focus ahead of the retile.
-        applyPostSwitchFocus(resolvePostSwitchFocus(&s.workspaces[s.current], ptr_reply));
+        applyPostSwitchFocus(focus_target, focus_model);
         if (cs.config.tiling.enabled) tiling.retileCurrentWorkspace();
         bar.raiseBar();
         bar.redrawInsideGrab();
@@ -407,7 +429,7 @@ pub fn switchToAll() void {
     } else {
         // Enter.
         const cs = core.getState();
-        _ = xcb.xcb_grab_server(cs.conn);
+        utils.grabServer(cs.conn);
 
         for (tracking.allWindows()) |entry| {
             if (tracking.isWindowOnWorkspace(entry.win, s.current)) continue;
@@ -609,12 +631,14 @@ fn resolvePostSwitchFocus(new_ws_obj: *Workspace, ptr_reply: ?*xcb.xcb_query_poi
 /// the mapped-check and raise that focus.setFocus would normally do — every
 /// window here is already mapped and a workspace switch never raises.
 ///
-/// Route through focus.setFocus/clearFocus so commitFocusTransition runs
-/// its full side-effect list (MRU history, tiling border state, carousel
+/// Route through focus.setFocusWithModel/clearFocus so commitFocusTransition
+/// runs its full side-effect list (MRU history, tiling border state, carousel
 /// notification, _NET_ACTIVE_WINDOW, button-grab transfer, input focus).
-fn applyPostSwitchFocus(focus_target: ?u32) void {
+/// `focus_model` is the input model resolved BEFORE the grab (null only when
+/// focus_target is null) so the grab body performs no blocking reply waits.
+fn applyPostSwitchFocus(focus_target: ?u32, focus_model: ?window.InputModel) void {
     if (focus_target) |new_win| {
-        focus.setFocus(new_win, .workspace_switch);
+        if (focus_model) |model| focus.setFocusWithModel(new_win, .workspace_switch, model);
     } else {
         focus.clearFocus();
     }
@@ -639,7 +663,16 @@ fn executeSwitch(old_ws: u8, new_ws: u8) void {
     const ptr_reply = xcb.xcb_query_pointer_reply(cs.conn, ptr_cookie, null);
     defer if (ptr_reply) |r| std.c.free(r);
 
-    _ = xcb.xcb_grab_server(cs.conn);
+    // Resolve the post-switch focus target and its input model BEFORE the
+    // grab: getInputModel's blocking WM_PROTOCOLS reply wait inside the grab
+    // would implicitly flush the queued hide/restore configure_window batch
+    // to the compositor mid-grab (same hazard as the pre-drained pointer
+    // query above — see focus.setFocusWithModel). The target resolution
+    // itself is pure (resolvePostSwitchFocus makes no xcb_*_reply call).
+    const focus_target = resolvePostSwitchFocus(new_ws_obj, ptr_reply);
+    const focus_model = if (focus_target) |w| window.getInputModel(cs.conn, w) else null;
+
+    utils.grabServer(cs.conn);
 
     hideWorkspaceWindows(&s.workspaces[old_ws], new_ws);
 
@@ -659,7 +692,7 @@ fn executeSwitch(old_ws: u8, new_ws: u8) void {
             if (tiling.isWindowActiveTiled(win)) tiling.invalidateGeomCache(win);
         }
         fullscreen.applyFullscreenGeometry(info.window);
-        applyPostSwitchFocus(resolvePostSwitchFocus(new_ws_obj, ptr_reply));
+        applyPostSwitchFocus(focus_target, focus_model);
     } else {
         // Resolve before restoring: on a geometry-cache miss,
         // restoreWorkspaceWindows falls back to a full retile, and
@@ -667,9 +700,8 @@ fn executeSwitch(old_ws: u8, new_ws: u8) void {
         // target at that point rather than reading the stale pre-switch
         // focus. The actual focus.setFocus() call still happens below,
         // after every window is mapped.
-        const focus_target = resolvePostSwitchFocus(new_ws_obj, ptr_reply);
         restoreWorkspaceWindows(new_ws_obj, old_ws, focus_target);
-        applyPostSwitchFocus(focus_target);
+        applyPostSwitchFocus(focus_target, focus_model);
     }
 
     bar.raiseBar();

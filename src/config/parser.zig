@@ -26,28 +26,42 @@ pub const Value = union(enum) {
     color: u32,
     scalable: ScalableValue,
 
-    pub inline fn asInt(self: Value) ?i64 {
+    /// Duplicate keys are stored as a flat array (see `accumulate`), so every
+    /// `.array`-handling case below implements the "later declaration wins"
+    /// half of the config merge contract: the value from the latest file (or
+    /// latest line within a file) is the LAST element, and array consumers see
+    /// the full accumulation via asArray. Without this, a repeated scalar key
+    /// would silently fall back to its struct default.
+    /// Not `inline`: these recurse once when a value is an accumulated
+    /// duplicate array (see the `.array` cases), and inline recursion is
+    /// rejected by the compiler. They are only exercised during config
+    /// interpretation (startup/reload), not on any hot path.
+    pub fn asInt(self: Value) ?i64 {
         return switch (self) {
             .integer => |i| i,
+            .array => |arr| if (arr.items.len > 0) arr.items[arr.items.len - 1].asInt() else null,
             else => null,
         };
     }
-    pub inline fn asBool(self: Value) ?bool {
+    pub fn asBool(self: Value) ?bool {
         return switch (self) {
             .boolean => |b| b,
             .integer => |i| i != 0,
+            .array => |arr| if (arr.items.len > 0) arr.items[arr.items.len - 1].asBool() else null,
             else => null,
         };
     }
-    pub inline fn asString(self: Value) ?[]const u8 {
+    pub fn asString(self: Value) ?[]const u8 {
         return switch (self) {
             .string => |s| s,
+            .array => |arr| if (arr.items.len > 0) arr.items[arr.items.len - 1].asString() else null,
             else => null,
         };
     }
-    pub inline fn asColor(self: Value) ?u32 {
+    pub fn asColor(self: Value) ?u32 {
         return switch (self) {
             .color => |c| c,
+            .array => |arr| if (arr.items.len > 0) arr.items[arr.items.len - 1].asColor() else null,
             else => null,
         };
     }
@@ -64,10 +78,11 @@ pub const Value = union(enum) {
     /// true integer (workspace counts, master counts, etc.); it is widened
     /// losslessly here for the convenience of callers that only care about
     /// the scalable form.
-    pub inline fn asScalable(self: Value) ?ScalableValue {
+    pub fn asScalable(self: Value) ?ScalableValue {
         return switch (self) {
             .scalable => |s| s,
             .integer => |i| ScalableValue.absolute(@floatFromInt(i)),
+            .array => |arr| if (arr.items.len > 0) arr.items[arr.items.len - 1].asScalable() else null,
             else => null,
         };
     }
@@ -86,25 +101,74 @@ pub const Value = union(enum) {
 
 pub const Section = struct {
     pairs: std.StringHashMap(Value),
+    /// Keys examined via get()/getAs()/markConsumed() during config
+    /// interpretation. Populated (best-effort — alloc failures are swallowed)
+    /// so config.zig can warn about keys no parse function recognises.
+    consumed: std.StringHashMap(void),
+    /// Document-order key list (insertion order), mirroring the first-time
+    /// keys land in `pairs`. `pairs` is a hashmap, so iterating it directly
+    /// yields nondeterministic order across runs (per-process random seed) —
+    /// `[binds]`, `[workspace.rules]` etc. use `orderedIterator` instead so
+    /// duplicate-effective bindings resolve deterministically (first in the
+    /// file wins, like a sequential parser). Strings are the same allocations
+    /// `pairs` owns; this list holds the pointers and is never copied.
+    keys_in_order: std.ArrayListUnmanaged([]const u8) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Section {
         var map = std.StringHashMap(Value).init(allocator);
         map.ensureTotalCapacity(16) catch {};
-        return .{ .pairs = map };
+        var consumed = std.StringHashMap(void).init(allocator);
+        consumed.ensureTotalCapacity(16) catch {};
+        return .{ .pairs = map, .consumed = consumed };
     }
 
     pub fn deinit(self: *Section, allocator: std.mem.Allocator) void {
+        self.keys_in_order.deinit(allocator);
         cleanPairs(allocator, &self.pairs);
+        self.consumed.deinit();
     }
 
-    pub fn get(self: *const Section, key: []const u8) ?Value {
+    /// Records `key` as the newest document-order key. Best-effort: an OOM
+    /// here just loses deterministic ordering for this section, never data.
+    fn recordKey(self: *Section, allocator: std.mem.Allocator, key: []const u8) void {
+        self.keys_in_order.append(allocator, key) catch {};
+    }
+
+    /// Iterates pairs in document (insertion) order — deterministic, unlike
+    /// `pairs.iterator()`. Values are the live (possibly accumulated) values.
+    pub fn orderedIterator(self: *const Section) OrderedIterator {
+        return .{ .section = self, .idx = 0 };
+    }
+
+    /// Records `key` as recognised so it won't be reported by warnUnconsumed.
+    /// Needed for keys read via direct `pairs` iteration (e.g. `[binds]`,
+    /// `[workspace.rules]`, `[tiling.layouts.master-stack.counts]`) rather
+    /// than the typed getters.
+    pub fn markConsumed(self: *Section, key: []const u8) void {
+        self.consumed.put(key, {}) catch {};
+    }
+
+    /// Warns about every key in the section that was never examined via
+    /// get()/getAs()/markConsumed() — typically a typo in the key name, since
+    /// the parser otherwise accepts it silently.
+    pub fn warnUnconsumed(self: *const Section, section_name: []const u8) void {
+        var iter = self.pairs.iterator();
+        while (iter.next()) |entry| {
+            if (!self.consumed.contains(entry.key_ptr.*)) {
+                debug.warn("Unrecognized key '{s}' in section [{s}] — ignoring", .{ entry.key_ptr.*, section_name });
+            }
+        }
+    }
+
+    pub fn get(self: *Section, key: []const u8) ?Value {
+        self.markConsumed(key);
         return self.pairs.get(key);
     }
 
     /// Generic typed getter — dispatches to the matching `Value.asXxx()` accessor
     /// for the requested type.  All five typed getters below are thin wrappers
     /// around this single function so the dispatch logic lives in one place.
-    pub fn getAs(self: *const Section, comptime T: type, key: []const u8) ?T {
+    pub fn getAs(self: *Section, comptime T: type, key: []const u8) ?T {
         const v = self.get(key) orelse return null;
         return switch (T) {
             i64 => v.asInt(),
@@ -116,20 +180,34 @@ pub const Section = struct {
         };
     }
 
-    pub fn getInt(self: *const Section, key: []const u8) ?i64 {
+    pub fn getInt(self: *Section, key: []const u8) ?i64 {
         return self.getAs(i64, key);
     }
-    pub fn getBool(self: *const Section, key: []const u8) ?bool {
+    pub fn getBool(self: *Section, key: []const u8) ?bool {
         return self.getAs(bool, key);
     }
-    pub fn getString(self: *const Section, key: []const u8) ?[]const u8 {
+    pub fn getString(self: *Section, key: []const u8) ?[]const u8 {
         return self.getAs([]const u8, key);
     }
-    pub fn getArray(self: *const Section, key: []const u8) ?[]const Value {
+    pub fn getArray(self: *Section, key: []const u8) ?[]const Value {
         return self.getAs([]const Value, key);
     }
-    pub fn getScalable(self: *const Section, key: []const u8) ?ScalableValue {
+    pub fn getScalable(self: *Section, key: []const u8) ?ScalableValue {
         return self.getAs(ScalableValue, key);
+    }
+};
+
+/// Iterates a section's pairs in document (insertion) order. Values are
+/// looked up live from `pairs` so accumulated duplicates are seen in full.
+pub const OrderedIterator = struct {
+    section: *const Section,
+    idx: usize,
+
+    pub fn next(self: *OrderedIterator) ?struct { key: []const u8, value: Value } {
+        if (self.idx >= self.section.keys_in_order.items.len) return null;
+        const key = self.section.keys_in_order.items[self.idx];
+        self.idx += 1;
+        return .{ .key = key, .value = self.section.pairs.get(key).? };
     }
 };
 
@@ -145,21 +223,21 @@ pub const Document = struct {
     }
 
     pub fn deinit(self: *Document) void {
-        cleanPairs(self.allocator, &self.root.pairs);
+        self.root.deinit(self.allocator);
 
         var section_iter = self.sections.iterator();
         while (section_iter.next()) |section_entry| {
             self.allocator.free(section_entry.key_ptr.*);
-            cleanPairs(self.allocator, &section_entry.value_ptr.pairs);
+            section_entry.value_ptr.deinit(self.allocator);
         }
         self.sections.deinit();
     }
 
-    pub fn getSection(self: *const Document, name: []const u8) ?*const Section {
+    pub fn getSection(self: *Document, name: []const u8) ?*Section {
         return self.sections.getPtr(name);
     }
 
-    pub fn get(self: *const Document, key: []const u8) ?Value {
+    pub fn get(self: *Document, key: []const u8) ?Value {
         return self.root.get(key);
     }
 };
@@ -204,6 +282,13 @@ fn ensureArray(allocator: std.mem.Allocator, old_val: *Value) !void {
 /// array and flatten an array-valued `incoming` into one flat array, so the
 /// same logical situation — a key declared twice — produces the same shape
 /// whether it happened within one file or was split across two included files.
+///
+/// Storage is array-shaped for every repeated key, but the two read paths
+/// resolve it differently (the "later files win on scalar conflicts; arrays
+/// accumulate" contract): the typed scalar getters (asInt/asBool/asString/
+/// asColor/asScalable) resolve to the LAST element, while asArray returns the
+/// full flat array — so keybinds, `include`, `layouts`, `fonts`, `icons`, and
+/// `segments` still chain across declarations.
 ///
 /// With `move` set, `incoming` is uniquely owned (freshly parsed within a
 /// single file) and its array elements are transferred into `old_val.array` by
@@ -258,6 +343,8 @@ fn mergeIntoArray(allocator: std.mem.Allocator, old_val: *Value, incoming: Value
 /// Duplicate keys are accumulated into arrays, exactly like the parser does for
 /// duplicate keys within a single file — so a keybind defined in two different
 /// config files will have both actions executed, not one overwriting the other.
+/// Scalar reads resolve to the last declaration (the later file wins); only
+/// array-shaped reads see the full accumulation.
 /// `src` is not modified; all new data is freshly allocated.
 fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Section) !void {
     var iter = src.pairs.iterator();
@@ -279,6 +366,7 @@ fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Se
             const key_copy = try allocator.dupe(u8, src_key);
             errdefer allocator.free(key_copy);
             try dst.pairs.put(key_copy, try deepCopyValue(allocator, src_val));
+            dst.recordKey(allocator, key_copy);
         }
     }
 }
@@ -286,7 +374,9 @@ fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Se
 /// Merges `src` into `dst`. Duplicate keys are accumulated into arrays rather
 /// than overwritten, so the result is equivalent to having written all the
 /// key-value pairs in a single file — consistent with how the parser itself
-/// handles duplicate keys within one file.
+/// handles duplicate keys within one file. Scalar reads then resolve to the
+/// last element of the accumulation (later files win), while array reads see
+/// every declaration.
 pub fn mergeDocumentsInto(allocator: std.mem.Allocator, dst: *Document, src: *const Document) !void {
     // Merge root-level keys.
     try mergeSectionsInto(allocator, &dst.root, &src.root);
@@ -357,6 +447,11 @@ const Parser = struct {
     /// consistent with the existing MAX_FILE_BYTES / fc-list-output caps
     /// elsewhere in the config subsystem.
     array_depth: usize = 0,
+    /// Set while parsing array elements so parseBareValues parses only a
+    /// single bare token per call — the `,`/`]` separators belong to
+    /// parseArray, and without this an element list like `[a, b]` would be
+    /// gathered greedily into one nested array.
+    in_array: bool = false,
 
     fn init(allocator: std.mem.Allocator, content: []const u8) Parser {
         return .{ .allocator = allocator, .content = content, .pos = 0, .line = 1 };
@@ -437,6 +532,22 @@ const Parser = struct {
         const quote = self.consume().?;
         const start = self.pos;
 
+        // Single-quoted strings are literal: backslashes are kept verbatim and
+        // no escape sequences are recognised, matching TOML's literal strings.
+        // A path like 'C:\temp' would otherwise be rejected for its invalid
+        // '\t' escape.
+        if (quote == '\'') {
+            var end_pos = start;
+            while (end_pos < self.content.len and self.content[end_pos] != quote) {
+                if (self.content[end_pos] == '\n') return ParseError.InvalidValue;
+                end_pos += 1;
+            }
+            if (end_pos >= self.content.len) return ParseError.InvalidValue;
+            const result = try self.allocator.dupe(u8, self.content[start..end_pos]);
+            self.pos = end_pos + 1;
+            return result;
+        }
+
         // Scan ahead to determine whether escape processing is needed.
         var has_escapes = false;
         var end_pos = start;
@@ -502,6 +613,9 @@ const Parser = struct {
             return ParseError.InvalidValue;
         }
 
+        self.in_array = true;
+        defer self.in_array = false;
+
         _ = self.consume();
         var array = try std.ArrayList(Value).initCapacity(self.allocator, 8);
         errdefer {
@@ -550,28 +664,37 @@ const Parser = struct {
         return dot_count == 1 and digit_count > 0;
     }
 
-    fn parseValue(self: *Parser) ParseError!Value {
-        self.skipWhitespace();
-        const c = self.peek() orelse return ParseError.InvalidValue;
-
-        if (c == '[') return .{ .array = try self.parseArray() };
-        if (c == '"' or c == '\'') return .{ .string = try self.parseString() };
-
+    /// Scans a single bare (unquoted) token. Stops at whitespace, newline,
+    /// ',', ';', ']', and any '#' that is not the first character (a comment
+    /// start). A leading '#' is allowed so unquoted `#RRGGBB` colors parse as
+    /// colors rather than being mistaken for a comment.
+    fn parseBareToken(self: *Parser) ?[]const u8 {
         const start = self.pos;
-        while (self.pos < self.content.len and
-            self.content[self.pos] != '\n' and
-            self.content[self.pos] != '#')
-        {
-            self.pos += 1;
+        while (self.pos < self.content.len) {
+            const ch = self.content[self.pos];
+            switch (ch) {
+                ' ', '\t', '\r', '\n', ',', ';', ']' => break,
+                '#' => {
+                    if (self.pos == start) {
+                        self.pos += 1;
+                    } else break;
+                },
+                else => self.pos += 1,
+            }
         }
+        const token = self.content[start..self.pos];
+        return if (token.len > 0) token else null;
+    }
 
-        const raw = std.mem.trim(u8, self.content[start..self.pos], " \t\r");
-        if (raw.len == 0) return ParseError.InvalidValue;
-
+    /// Interprets a single bare token as a Value. Every scalar form a bare
+    /// token can take is handled here — boolean, percentage, decimal, color,
+    /// integer — with the unrecognised-token string fallback last.
+    fn parseBareTokenValue(self: *Parser, raw: []const u8) ParseError!Value {
         if (BOOLEAN_KEYWORDS.get(raw)) |b| return .{ .boolean = b };
 
         if (raw.len > 1 and raw[raw.len - 1] == '%') {
             const f = std.fmt.parseFloat(f32, raw[0 .. raw.len - 1]) catch return ParseError.InvalidValue;
+            if (!std.math.isFinite(f)) return ParseError.InvalidValue;
             return .{ .scalable = ScalableValue.percentage(f) };
         }
 
@@ -583,7 +706,9 @@ const Parser = struct {
         // left to the integer branch further down so asInt()/asBool()
         // consumers are unaffected.
         if (looksLikeDecimal(raw)) {
-            if (std.fmt.parseFloat(f32, raw)) |f| return .{ .scalable = ScalableValue.absolute(f) } else |_| {}
+            if (std.fmt.parseFloat(f32, raw)) |f| {
+                if (std.math.isFinite(f)) return .{ .scalable = ScalableValue.absolute(f) };
+            } else |_| {}
         }
 
         // Bare color literals require an explicit '#' or '0x' prefix. Sniffing
@@ -595,10 +720,14 @@ const Parser = struct {
         // digits with no prefix (e.g. "ac3232") now simply fall through to the
         // integer-parse attempt below and then to `.string`, the same fallback
         // path already used for every other unrecognized bare token.
-        const looks_like_color = raw[0] == '#' or
-            (raw.len > 2 and raw[0] == '0' and (raw[1] == 'x' or raw[1] == 'X'));
+        if (raw[0] == '#') {
+            // A leading '#' marks the token as a color, not a comment. If it
+            // does not form a valid color the line is invalid — the same
+            // outcome as a bare '#' after '=' always produced before.
+            if (parseColor(raw)) |color| return .{ .color = color } else |_| return ParseError.InvalidValue;
+        }
 
-        if (looks_like_color) {
+        if (raw.len > 2 and raw[0] == '0' and (raw[1] == 'x' or raw[1] == 'X')) {
             if (parseColor(raw)) |color| return .{ .color = color } else |_| {}
         }
 
@@ -609,6 +738,62 @@ const Parser = struct {
             // layout or action names that appear without quotes.
             return .{ .string = try self.allocator.dupe(u8, raw) };
         }
+    }
+
+    /// Parses a bare (unquoted) value: one or more bare tokens on a single
+    /// line. A single token is returned as a scalar (or string). Two or more
+    /// tokens separated by whitespace and/or commas form an array:
+    ///
+    ///     segments = workspaces layout clock   → ["workspaces","layout","clock"]
+    ///     icons = #ac3232, #52263e             → [0xac3232, 0x52263e]
+    ///
+    /// While inside a `[...]` literal only one token is consumed — the commas
+    /// and bracket belong to parseArray. Semicolons are likewise left to the
+    /// pair parser (`key = value; key = value`), so they never terminate a
+    /// bare token here.
+    fn parseBareValues(self: *Parser) ParseError!Value {
+        var items: std.ArrayList(Value) = .empty;
+        errdefer {
+            for (items.items) |*v| v.deinit(self.allocator);
+            items.deinit(self.allocator);
+        }
+
+        while (true) {
+            self.skipWhitespace();
+            const nxt = self.peek() orelse break;
+            if (nxt == '\n' or nxt == ';') break;
+            // A '#' following a token is a comment; a leading '#' (no token
+            // collected yet) starts a color literal instead.
+            if (nxt == '#' and items.items.len > 0) break;
+            const token = self.parseBareToken() orelse break;
+            try items.append(self.allocator, try self.parseBareTokenValue(token));
+            if (self.in_array) break;
+            self.skipWhitespace();
+            if (self.peek() == ',') _ = self.consume();
+        }
+
+        if (items.items.len == 0) return ParseError.InvalidValue;
+        if (items.items.len == 1) {
+            const single = items.items[0];
+            // Keep ownership of the single element but release the ArrayList's
+            // backing buffer — zeroing `len` alone would leak that allocation
+            // once the local goes out of scope (every scalar value parsed
+            // leaked a small buffer before this).
+            items.items.len = 0;
+            items.deinit(self.allocator);
+            return single;
+        }
+        return .{ .array = items };
+    }
+
+    fn parseValue(self: *Parser) ParseError!Value {
+        self.skipWhitespace();
+        const c = self.peek() orelse return ParseError.InvalidValue;
+
+        if (c == '[') return .{ .array = try self.parseArray() };
+        if (c == '"' or c == '\'') return .{ .string = try self.parseString() };
+
+        return self.parseBareValues();
     }
 
     /// Advances past a trailing newline or comment character at line end.
@@ -662,15 +847,18 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
             };
             errdefer allocator.free(section_name);
 
-            if (doc.sections.contains(section_name)) {
+            if (doc.sections.getPtr(section_name)) |existing| {
+                // Duplicate section header: keep filling the existing section
+                // rather than discarding the block. Duplicate keys accumulate
+                // into arrays exactly as if the two blocks had been written as
+                // one section — consistent with the parser's handling of
+                // duplicate keys and the cross-file merge path.
                 allocator.free(section_name);
-                debug.warn("Duplicate section at line {}", .{p.line});
-                p.skipToNewline();
-                continue;
+                current_section = existing;
+            } else {
+                try doc.sections.put(section_name, Section.init(allocator));
+                current_section = doc.sections.getPtr(section_name).?;
             }
-
-            try doc.sections.put(section_name, Section.init(allocator));
-            current_section = doc.sections.getPtr(section_name).?;
 
             p.skipWhitespace();
             if (p.peek() == '\n') _ = p.consume();
@@ -698,11 +886,15 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
                 //   Mod+Shift+1 = "toggle_tag_1"
                 //
                 // parseKeybindings already handles array values as sequences,
-                // so no further changes are needed there.
+                // so no further changes are needed there. Scalar-typed reads
+                // of a repeated key resolve to the last declaration instead
+                // (see the Value getters), so e.g. a duplicated `master_width`
+                // is later-wins rather than silently defaulting.
                 try accumulateScalar(allocator, old, kv[1]);
                 allocator.free(kv[0]);
             } else {
                 try current_section.pairs.put(kv[0], kv[1]);
+                current_section.recordKey(allocator, kv[0]);
             }
 
             p.skipWhitespace();

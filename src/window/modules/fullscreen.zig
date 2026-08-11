@@ -127,14 +127,63 @@ pub fn removeForWorkspace(ws: u8) void {
     g_slots[ws] = null;
 }
 
+/// Drops the record at `ws`, clearing the window's EWMH fullscreen property so
+/// external tools stop seeing it as fullscreen. No-op when the slot is empty.
+fn dropRecord(ws: u8) void {
+    if (g_slots[ws]) |info| {
+        setEwmhFullscreenState(info.window, false);
+        g_slots[ws] = null;
+    }
+}
+
+/// Drops any fullscreen record of `win` on a workspace other than `keep_ws`.
+/// A window entering fullscreen again on another workspace would otherwise end
+/// up with two records, and workspaceFor() — which scans lowest-first — would
+/// resolve exit/toggle to the stale (wrong) slot.
+fn dropOtherRecordsFor(win: u32, keep_ws: u8) void {
+    const count = tracking.getWorkspaceCount();
+    for (g_slots[0..count], 0..) |*slot, i| {
+        if (i == keep_ws) continue;
+        if (slot.*) |info| {
+            if (info.window == win) {
+                setEwmhFullscreenState(win, false);
+                slot.* = null;
+            }
+        }
+    }
+}
+
+/// After a window's workspace-mask change, drop any fullscreen record of `win`
+/// on a workspace it is no longer tagged on. A stale record (window no longer
+/// resident there) would otherwise resurrect bogus fullscreen chrome — hidden
+/// bar, offscreen peers, fullscreen-sized configure — the next time that
+/// workspace is shown (see executeSwitch in workspaces.zig).
+/// Call from every setWindowMask site, after the mask is updated.
+pub fn pruneForWorkspaceMask(win: u32, new_mask: u64) void {
+    const count = tracking.getWorkspaceCount();
+    for (g_slots[0..count], 0..) |*slot, i| {
+        if (slot.*) |info| {
+            if (info.window == win and (new_mask & tracking.workspaceBit(@as(u8, @intCast(i)))) == 0)
+                dropRecord(@as(u8, @intCast(i)));
+        }
+    }
+}
+
 /// Transfer the fullscreen record from `src_ws` to `dst_ws`.
 /// Callers must handle visual cleanup (bar, floating windows, borders) first.
-/// Asserts `src_ws` has a record and `dst_ws` is empty — a non-null `dst_ws`
-/// slot would be silently discarded. Call `removeForWorkspace(dst_ws)` first
-/// if needed.
+/// If `dst_ws` already holds a record, the moved record is dropped instead of
+/// clobbering the occupant's: never destroy one fullscreen window's state to
+/// make room for another (that would leave the occupant visually fullscreen
+/// but untracked and unstoppable). Defense in depth — transferFullscreenRecord
+/// in workspaces.zig checks the destination before calling.
 pub fn moveRecord(src_ws: u8, dst_ws: u8) void {
-    std.debug.assert(g_slots[dst_ws] == null); // dst_ws must be empty; see doc comment
     const info = g_slots[src_ws].?;
+    if (g_slots[dst_ws] != null) {
+        debug.warn("moveRecord: workspace {} already has a fullscreen record; dropping the moved one", .{dst_ws});
+        setEwmhFullscreenState(info.window, false);
+        g_slots[src_ws] = null;
+        return;
+    }
     g_slots[src_ws] = null;
     g_slots[dst_ws] = info;
 }
@@ -353,6 +402,12 @@ pub fn applyFullscreenGeometry(win: u32) void {
 }
 
 fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
+    // A window can only be fullscreen on one workspace at a time. If it was
+    // previously fullscreen elsewhere (enter fullscreen, switch workspaces,
+    // enter fullscreen again), the stale duplicate record would make
+    // workspaceFor() — which scans lowest-first — resolve exit/toggle to the
+    // wrong slot.
+    dropOtherRecordsFor(win, ws);
     setForWorkspace(ws, .{
         .window = win,
         .saved_geometry = geom,
@@ -448,7 +503,7 @@ pub fn enterFullscreen(win: u32, saved_geom: ?core.WindowGeometry) void {
     const geom = saved_geom orelse fetchWindowGeom(win);
     saveFloatingWindowGeoms(win);
     const conn = core.getState().conn;
-    _ = xcb.xcb_grab_server(conn);
+    utils.grabServer(conn);
     enterFullscreenCommit(win, ws, geom);
     utils.ungrabAndFlush(conn);
 }
@@ -466,7 +521,7 @@ pub fn exitFullscreen(win: u32) void {
     // (non-fullscreen) dimensions via ConfigureNotify, identically to how
     // the bar hide is deferred on enter.
     const conn = core.getState().conn;
-    _ = xcb.xcb_grab_server(conn);
+    utils.grabServer(conn);
     exitFullscreenCommit(win, ws);
     restoreFloatingWindows(win);
     tiling.retileCurrentWorkspace();
@@ -494,7 +549,7 @@ pub fn toggle() void {
             // valid and will be consumed by restoreFloatingWindows below.
             const new_geom = fetchWindowGeom(win);
             const conn = core.getState().conn;
-            _ = xcb.xcb_grab_server(conn);
+            utils.grabServer(conn);
             exitFullscreenCommit(fs_info.window, current_ws);
             // Restore background windows before pushing them offscreen again.
             restoreFloatingWindows(win);

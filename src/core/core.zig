@@ -7,7 +7,7 @@ const std = @import("std");
 const types = @import("types");
 
 // Centralized here to avoid repeated @cImport translation across compilation units.
-pub const xcb = @cImport(@cInclude("xcb/xcb.h"));
+pub const xcb = @import("x11").xcb;
 
 /// X11 keysym constants, matching <X11/keysymdef.h>. Cast to xcb_keysym_t with @intFromEnum.
 pub const XK = enum(u32) {

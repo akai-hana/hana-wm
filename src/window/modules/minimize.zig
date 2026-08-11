@@ -86,17 +86,6 @@ fn notMinimized(win: u32) bool {
     return !isMinimized(win);
 }
 
-/// Focus the first non-minimized window on the current workspace (workspace
-/// insertion order, not MRU). Last-resort fallback called by minimizeWindow
-/// (via focus.focusBestAvailable) and directly from window.zig.
-pub fn focusMasterOrFirst() void {
-    if (!core.getState().config.workspaces.enabled) {
-        focus.clearFocus();
-        return;
-    }
-    focus.focusBestAvailable(.tiling_operation, tracking.isOnCurrentWorkspaceAndVisible, focus.clearFocus);
-}
-
 pub fn minimizeWindow() void {
     const cs = core.getState();
     if (!cs.config.minimize_enabled) return;
@@ -132,11 +121,27 @@ pub fn minimizeWindow() void {
         .tiling_index = tiling_index,
     } });
 
-    _ = xcb.xcb_grab_server(cs.conn);
+    // Resolve the fallback focus target and its input model BEFORE the grab:
+    // focusBestAvailable would otherwise run setFocus's blocking WM_PROTOCOLS
+    // reply wait inside it (see focus.setFocusWithModel).
+    const restore_target = focus.findBestAvailable(notMinimized);
+    const restore_model = if (restore_target) |t| window.getInputModel(cs.conn, t) else null;
+
+    utils.grabServer(cs.conn);
     utils.pushWindowOffscreen(cs.conn, win);
 
-    // Prefer MRU history; fall back to workspace insertion order.
-    focus.focusBestAvailable(.tiling_operation, notMinimized, focusMasterOrFirst);
+    // Mirrors focusBestAvailable(.tiling_operation, notMinimized,
+    // focusMasterOrFirst). When restore_target is null (every window is
+    // minimized), focusMasterOrFirst can only resolve to clearFocus — its
+    // inner scan over visible windows is necessarily empty, since any visible
+    // window would not be minimized and so would have satisfied notMinimized —
+    // so that fallback is inlined as clearFocus here to keep the grab body
+    // free of reply waits.
+    if (restore_target) |t| {
+        if (restore_model) |m| focus.setFocusWithModel(t, .tiling_operation, m);
+    } else {
+        focus.clearFocus();
+    }
 
     if (saved_fs != null) {
         bar.setBarState(.show_fullscreen);
@@ -162,7 +167,12 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
     }
 
     const conn = core.getState().conn;
-    _ = xcb.xcb_grab_server(conn);
+    // Resolve the input model BEFORE the grab: setFocus's blocking WM_PROTOCOLS
+    // reply wait inside the grab would implicitly flush the queued retile
+    // configure_window batch to the compositor mid-grab (see
+    // focus.setFocusWithModel).
+    const focus_model = window.getInputModel(conn, win);
+    utils.grabServer(conn);
 
     if (core.getState().config.tiling.enabled) {
         // Restore at the original layout slot so a former master returns to master,
@@ -176,11 +186,11 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
         // time (e.g. monocle) would otherwise retile against the still-
         // focused old window, then have no follow-up retile once focus
         // actually lands on `win`.
-        focus.setFocus(win, .window_spawn);
+        focus.setFocusWithModel(win, .window_spawn, focus_model);
         tiling.retileCurrentWorkspace();
     } else {
         window.restoreFloatGeom(win);
-        focus.setFocus(win, .window_spawn);
+        focus.setFocusWithModel(win, .window_spawn, focus_model);
     }
 
     bar.redrawInsideGrab();
@@ -275,7 +285,9 @@ pub fn unminimizeAll() void {
         const focus_target = plain_wins[plain_wins.len - 1].win;
 
         const conn = core.getState().conn;
-        _ = xcb.xcb_grab_server(conn);
+        // Resolve the input model BEFORE the grab — see restoreWindowImpl.
+        const focus_model = window.getInputModel(conn, focus_target);
+        utils.grabServer(conn);
 
         if (core.getState().config.tiling.enabled) {
             // Re-sort by tiling_index ascending (nulls last) before inserting.
@@ -301,11 +313,11 @@ pub fn unminimizeAll() void {
             }
             // Focus must move to focus_target BEFORE the retile — see the
             // matching comment in restoreWindowImpl.
-            focus.setFocus(focus_target, .window_spawn);
+            focus.setFocusWithModel(focus_target, .window_spawn, focus_model);
             tiling.retileCurrentWorkspace();
         } else {
             for (plain_wins) |rec| window.restoreFloatGeom(rec.win);
-            focus.setFocus(focus_target, .window_spawn);
+            focus.setFocusWithModel(focus_target, .window_spawn, focus_model);
         }
 
         bar.redrawInsideGrab();

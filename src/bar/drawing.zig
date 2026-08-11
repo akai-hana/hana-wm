@@ -175,7 +175,7 @@ pub const DrawContext = struct {
         const setup = core.xcb.xcb_get_setup(conn);
         const screen = core.xcb.xcb_setup_roots_iterator(setup).data;
 
-        const visual_type = resolveVisualType(conn, screen, visual_id);
+        const visual_type = try resolveVisualType(conn, screen, visual_id);
 
         const depth: u8 = if (is_argb) 32 else core.xcb.XCB_COPY_FROM_PARENT;
 
@@ -576,12 +576,12 @@ fn createPangoLayout(ctx: *c.cairo_t, dpi: f32) !*c.PangoLayout {
 }
 
 /// Returns the visual matching `visual_id` across all screens, or falls back to
-/// the first visual on `screen`. Panics if the X server has no visuals at all.
+/// the first visual on `screen`. Errors if the X server has no visuals at all.
 fn resolveVisualType(
     conn: *core.xcb.xcb_connection_t,
     screen: *core.xcb.xcb_screen_t,
     visual_id: ?u32,
-) *core.xcb.xcb_visualtype_t {
+) !*core.xcb.xcb_visualtype_t {
     if (visual_id) |vid| {
         var si = core.xcb.xcb_setup_roots_iterator(core.xcb.xcb_get_setup(conn));
         while (si.rem > 0) : (core.xcb.xcb_screen_next(&si)) {
@@ -593,13 +593,13 @@ fn resolveVisualType(
             }
         }
     }
-    // Fall back to the first available visual on screen; panic if there are none.
+    // Fall back to the first available visual on screen; error if there are none.
     var di = core.xcb.xcb_screen_allowed_depths_iterator(screen);
     while (di.rem > 0) : (core.xcb.xcb_depth_next(&di)) {
         const vi = core.xcb.xcb_depth_visuals_iterator(di.data);
         if (vi.rem > 0) return vi.data;
     }
-    @panic("X server reported zero visuals — cannot create a drawing context");
+    return error.NoVisuals;
 }
 
 inline fn appendFontStyleToken(result: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, token: []const u8) !void {

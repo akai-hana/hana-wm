@@ -46,7 +46,9 @@ indicator_location = "up-left"
 # Workspace width as percentage of base (100% = 40px, 150% = 60px, or set exact pixels)
 workspace_tag_width = 100%  # Default base width
 
-# Bar transparency (0 = fully transparent, 1 = fully opaque)
+# Bar transparency. Bare integers are percentages: 0% = fully transparent,
+# 100% / 1.0 = fully opaque, 50% / 0.5 = half. (A bare `1` means 1% opacity,
+# not 1.0 — write `1.0` or `100%` for fully opaque.)
 # With picom's gaussian blur, the bar will show blurred content behind it
 transparency = 0% # [0.0 - 1.0] / [0% - 100%]
 

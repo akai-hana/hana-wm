@@ -7,9 +7,10 @@ layout      = "master"
 master_side = "left"
 
 master_count     = 1
-master_width     = "55%"
+master_width     = 55%
 gaps             = 12
 border_width     = 4
+min_window_dim   = 50
 border_focused   = "#005577"
 border_unfocused = "#444444"
 
@@ -27,7 +28,7 @@ Mod+F       = "toggle_fullscreen"
 # Tiling layout controls
 Mod+Space       = "toggle_layout"
 Mod+Shift+Space = "toggle_layout_reverse"
-Mod+N           = "toggle_tiling"
+Mod+N           = "toggle_layout"
 Mod+H           = "decrease_master"
 Mod+L           = "increase_master"
 Mod+Comma       = "increase_master_count"

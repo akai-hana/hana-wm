@@ -53,6 +53,7 @@ pub fn tileWithOffset(
 ) void {
     // Windows list is guaranteed non-empty by invokeLayout (see tiling.zig).
     const n = windows.len;
+    const min_dim = state.config.min_window_dim;
 
     const m = state.margins();
     const master_n: u16 = @intCast(@min(state.config.master_count, n));
@@ -72,16 +73,16 @@ pub fn tileWithOffset(
     // gap); with no stack both screen edges carry a full gap. Borders are then
     // subtracted from the content width.
     const edge_inset: u16 = if (stack_n > 0) m.gap + m.gap / 2 else m.gap * 2;
-    const master_inner_w = layouts.shrinkClamped(master_w, edge_inset + utils.doubledBorder(m));
+    const master_inner_w = layouts.shrinkClamped(master_w, edge_inset + utils.doubledBorder(m), min_dim);
 
     // The master column never uses the stack boost — it isn't a "slave"
     // column, so mod+n/mod+o have no effect on it.
-    tileColumn(ctx, windows[0..master_n], master_x +| m.gap, y_offset, screen_h, master_inner_w, m, .{});
+    tileColumn(ctx, windows[0..master_n], master_x +| m.gap, y_offset, screen_h, master_inner_w, m, .{}, min_dim);
 
     if (stack_n == 0) return;
 
     const stack_x: u16 = if (is_master_on_right) 0 else master_w;
-    tileStack(ctx, windows[master_n..], stack_x, y_offset, screen_w -| master_w, screen_h, m, StackBoost.fromBalance(state.config.stack_balance));
+    tileStack(ctx, windows[master_n..], stack_x, y_offset, screen_w -| master_w, screen_h, m, StackBoost.fromBalance(state.config.stack_balance), min_dim);
 }
 
 /// Tile a vertical column of `windows` at a fixed x position with a fixed
@@ -114,13 +115,14 @@ fn tileColumn(
     inner_w: u16,
     m: utils.Margins,
     boost: StackBoost,
+    min_dim: u16,
 ) void {
     const count: u16 = @intCast(windows.len);
-    const avail = calcAvailableHeight(h, count, m);
+    const avail = calcAvailableHeight(h, count, m, min_dim);
 
     var heights_buf: [constants.Limits.MAX_TILED_WINDOWS]u16 = undefined;
     const heights = heights_buf[0..windows.len];
-    distributeStackHeightsWeighted(ctx, windows, avail, boost, heights);
+    distributeStackHeightsWeighted(ctx, windows, avail, boost, min_dim, heights);
 
     // distributeStackHeightsWeighted only folds a capped window's unused
     // pixels into *other* windows in this column. If every window ends up
@@ -168,7 +170,7 @@ fn tileColumn(
 /// telescoping rounded cumulative sum (`cum`/`prev_px` below) so fractional
 /// weights land on the right pixel; it's also why the fair-share estimate
 /// above floats.
-fn distributeStackHeightsWeighted(ctx: *const layouts.LayoutCtx, windows: []const u32, avail: u16, boost: StackBoost, out: []u16) void {
+fn distributeStackHeightsWeighted(ctx: *const layouts.LayoutCtx, windows: []const u32, avail: u16, boost: StackBoost, min_dim: u16, out: []u16) void {
     const n: u16 = @intCast(windows.len);
 
     var capped_buf: [constants.Limits.MAX_TILED_WINDOWS]bool = undefined;
@@ -191,7 +193,7 @@ fn distributeStackHeightsWeighted(ctx: *const layouts.LayoutCtx, windows: []cons
                 0;
             const max_h = windowMaxHeight(ctx, win);
             if (max_h > 0 and max_h <= fair_share) {
-                out[i] = @max(constants.MIN_WINDOW_DIM, max_h);
+                out[i] = @max(min_dim, max_h);
                 capped[i] = true;
                 remaining_avail = remaining_avail -| out[i];
                 remaining_weight -= w_i;
@@ -205,7 +207,7 @@ fn distributeStackHeightsWeighted(ctx: *const layouts.LayoutCtx, windows: []cons
         var seen: u16 = 0;
         for (windows, 0..) |_, i| {
             if (capped[i]) continue;
-            out[i] = windowHeight(seen, remaining_count, remaining_avail);
+            out[i] = windowHeight(seen, remaining_count, remaining_avail, min_dim);
             seen += 1;
         }
         return;
@@ -221,7 +223,7 @@ fn distributeStackHeightsWeighted(ctx: *const layouts.LayoutCtx, windows: []cons
         else
             0;
         const h: u16 = @intFromFloat(@max(@as(f32, 0), px - prev_px));
-        out[i] = @max(constants.MIN_WINDOW_DIM, h);
+        out[i] = @max(min_dim, h);
         prev_px = px;
     }
 }
@@ -264,18 +266,19 @@ fn tileStack(
     h: u16,
     m: utils.Margins,
     boost: StackBoost,
+    min_dim: u16,
 ) void {
     const stack_n: u16 = @intCast(windows.len);
 
-    const space_per_window: u32 = constants.MIN_WINDOW_DIM + 2 * @as(u32, m.border) + @as(u32, m.gap);
+    const space_per_window: u32 = min_dim + 2 * @as(u32, m.border) + @as(u32, m.gap);
     const available: u32 = @as(u32, h) -| @as(u32, m.gap);
     const max_fit: u16 = @intCast(@max(1, available / space_per_window));
 
     if (stack_n <= max_fit) {
-        tileColumn(ctx, windows, x +| m.gap / 2, y_offset, h, layouts.shrinkClamped(w, m.gap / 2 + (m.gap + 2 * m.border)), m, boost);
+        tileColumn(ctx, windows, x +| m.gap / 2, y_offset, h, layouts.shrinkClamped(w, m.gap / 2 + (m.gap + 2 * m.border), min_dim), m, boost, min_dim);
         return;
     }
-    tileStackExtra(ctx, windows, x, y_offset, w, h, max_fit, m);
+    tileStackExtra(ctx, windows, x, y_offset, w, h, max_fit, m, min_dim);
 }
 
 /// Column-major overflow grid: row `r` holds windows at indices r, r+max_fit,
@@ -302,21 +305,22 @@ fn tileStackExtra(
     h: u16,
     max_fit: u16,
     m: utils.Margins,
+    min_dim: u16,
 ) void {
     const stack_n: u16 = @intCast(windows.len);
-    const row_avail = calcAvailableHeight(h, max_fit, m);
+    const row_avail = calcAvailableHeight(h, max_fit, m, min_dim);
 
     var row: u16 = 0;
     while (row < max_fit) : (row += 1) {
         const cols_in_row: u16 = (stack_n - row + max_fit - 1) / max_fit;
 
         const gaps_in_row = m.gap / 2 +| m.gap *| cols_in_row;
-        const row_total_w = if (w > gaps_in_row) w - gaps_in_row else cols_in_row * constants.MIN_WINDOW_DIM;
+        const row_total_w = if (w > gaps_in_row) w - gaps_in_row else cols_in_row * min_dim;
         const col_w = row_total_w / cols_in_row;
-        const col_inner_w = layouts.shrinkClamped(col_w, 2 * m.border);
+        const col_inner_w = layouts.shrinkClamped(col_w, 2 * m.border, min_dim);
 
         const y_pos = windowY(row, max_fit, row_avail, y_offset, m);
-        const row_h = windowHeight(row, max_fit, row_avail);
+        const row_h = windowHeight(row, max_fit, row_avail, min_dim);
 
         var win_idx: u16 = row;
         while (win_idx < stack_n) : (win_idx += max_fit) {
@@ -333,18 +337,18 @@ fn tileStackExtra(
 }
 
 /// Total pixel height available for window content after gaps and borders.
-/// Falls back to count * MIN_WINDOW_DIM when margins exceed total_h.
-inline fn calcAvailableHeight(total_h: u16, count: u16, m: utils.Margins) u16 {
+/// Falls back to count * min_dim when margins exceed total_h.
+inline fn calcAvailableHeight(total_h: u16, count: u16, m: utils.Margins, min_dim: u16) u16 {
     const overhead = m.gap *| (count + 1) +| m.border *| 2 *| count;
-    return if (total_h > overhead) total_h - overhead else count * constants.MIN_WINDOW_DIM;
+    return if (total_h > overhead) total_h - overhead else count * min_dim;
 }
 
 /// Height of window `i` out of `count`, distributing `available` pixels via
 /// cumulative integer division. No two siblings differ by more than 1 px.
-inline fn windowHeight(i: u16, count: u16, available: u16) u16 {
+inline fn windowHeight(i: u16, count: u16, available: u16, min_dim: u16) u16 {
     const hi: u32 = (@as(u32, i) + 1) * @as(u32, available) / @as(u32, count);
     const lo: u32 = @as(u32, i) * @as(u32, available) / @as(u32, count);
-    return @max(constants.MIN_WINDOW_DIM, @as(u16, @intCast(hi - lo)));
+    return @max(min_dim, @as(u16, @intCast(hi - lo)));
 }
 
 /// Y position of window `i`, derived from the same cumulative formula so that

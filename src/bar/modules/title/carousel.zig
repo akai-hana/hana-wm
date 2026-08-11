@@ -58,11 +58,14 @@ inline fn entryStale(e: *const CarouselEntry, window: ?u32, title_invalidated: b
 }
 
 /// Runtime-configurable scroll parameters.
+/// Read by the carousel thread (wakeIntervalNs, advanceCarouselOffset) and
+/// written by the main thread during config parse/reload, so both fields are
+/// atomics rather than plain f64.
 const ScrollConfig = struct {
-    speed: f64 = default_scroll_speed,
+    speed: std.atomic.Value(f64) = std.atomic.Value(f64).init(default_scroll_speed),
     /// When > 0, overrides the monitor's detected refresh rate for the wake
     /// interval. Set via `carousel_refresh_rate` in the config file.
-    rate_override: f64 = 0.0,
+    rate_override: std.atomic.Value(f64) = std.atomic.Value(f64).init(0.0),
 };
 
 /// All state exclusively owned by whichever thread currently holds bar.zig's
@@ -111,13 +114,13 @@ pub fn isCarouselEnabled() bool {
 /// Set the scroll speed in pixels per second.
 /// Values ≤ 0 are clamped to default_scroll_speed.
 pub fn setScrollSpeed(px_per_s: f64) void {
-    scroll_config.speed = if (px_per_s > 0.0) px_per_s else default_scroll_speed;
+    scroll_config.speed.store(if (px_per_s > 0.0) px_per_s else default_scroll_speed, .monotonic);
 }
 
 /// Override the refresh rate used for the wake interval.
 /// Pass 0 (the default) to use the monitor's auto-detected rate.
 pub fn setRefreshRateOverride(hz: f64) void {
-    scroll_config.rate_override = if (hz > 0.0) hz else 0.0;
+    scroll_config.rate_override.store(if (hz > 0.0) hz else 0.0, .monotonic);
 }
 
 /// Returns the carousel thread's wake interval in nanoseconds.
@@ -130,10 +133,8 @@ pub fn setRefreshRateOverride(hz: f64) void {
 /// Called once per carousel-thread sleep cycle; the division is cheap relative
 /// to the timedWait syscall that follows.
 pub fn wakeIntervalNs() u64 {
-    const hz: f64 = if (scroll_config.rate_override > 0.0)
-        scroll_config.rate_override
-    else
-        scale.getDetectedRateHz();
+    const rate_override = scroll_config.rate_override.load(.monotonic);
+    const hz: f64 = if (rate_override > 0.0) rate_override else scale.getDetectedRateHz();
     return @intFromFloat(1_000_000_000.0 / hz);
 }
 
@@ -152,10 +153,22 @@ pub fn getSegmentedCarouselWindow() ?u32 {
 }
 
 /// Free all carousel pixmaps and reset cross-thread signals.
-/// Call on bar deinit or config reload, after the carousel thread has
-/// already been stopped (carousel.stopThread()) so nothing else can be
-/// touching render.single/render.seg concurrently.
+/// Call on bar deinit or config reload. Safe both when the carousel thread is
+/// still running and after it has been stopped: it acquires bar.zig's
+/// draw_mutex (which the carousel thread holds while drawing) so it cannot
+/// race a concurrent blit of render.single/render.seg.
+/// Caller must NOT already hold draw_mutex (it is not recursive); use
+/// deinitCarouselLocked() from within a draw that holds draw_mutex.
 pub fn deinitCarousel() void {
+    bar.draw_mutex.lock();
+    defer bar.draw_mutex.unlock();
+    deinitCarouselLocked();
+}
+
+/// Same teardown as deinitCarousel() for callers that already hold bar.zig's
+/// draw_mutex (title rendering paths run under it via performDraw/redraws).
+/// Must not be called without holding draw_mutex.
+pub fn deinitCarouselLocked() void {
     deinitSingleCarousel();
     deinitSegmentedCarousel();
     focus_signal.is_invalidated.store(false, .monotonic);
@@ -289,7 +302,11 @@ pub fn drawCarouselTick(
 
     const off = advanceCarouselOffset(e, utils.monotonicNs());
     e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, seg_x, off, seg_w);
-    dc.blitAndFlush(seg_x, seg_w);
+    // Skip the flush while the main thread holds the X server grab: xcb_flush
+    // here would release the grab-batch requests mid-grab, splitting what must
+    // be one atomic compositor frame. The enqueued copy_area instead rides
+    // along with the main thread's closing ungrabAndFlush.
+    if (!utils.isGrabActive()) dc.blitAndFlush(seg_x, seg_w);
     return true;
 }
 
@@ -309,7 +326,9 @@ pub fn drawSegCarouselTickAuto(dc: *drawing.DrawContext, accent: u32) bool {
     if (focus_signal.is_invalidated.load(.acquire)) return false;
     const off = advanceCarouselOffset(e, utils.monotonicNs());
     e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, e.geom.seg_x, off, e.geom.seg_w);
-    dc.blitAndFlush(e.geom.seg_x, e.geom.seg_w);
+    // See drawCarouselTick: skip the flush inside an X server grab so the
+    // shared output buffer is not released mid-grab.
+    if (!utils.isGrabActive()) dc.blitAndFlush(e.geom.seg_x, e.geom.seg_w);
     return true;
 }
 
@@ -512,7 +531,7 @@ fn advanceCarouselOffset(e: *CarouselEntry, now_ns: u64) u16 {
     std.debug.assert(e.cycle_w > 0);
     const delta_ns = @as(f64, @floatFromInt(now_ns -| e.last_ns));
     // Accumulate exact sub-pixel advance for this tick plus any carry.
-    const delta_px = delta_ns * scroll_config.speed / 1_000_000_000.0 + e.frac_acc;
+    const delta_px = delta_ns * scroll_config.speed.load(.monotonic) / 1_000_000_000.0 + e.frac_acc;
     const int_px = @floor(delta_px);
     e.frac_acc = delta_px - int_px; // carry remainder to next tick
     e.last_ns = now_ns;
