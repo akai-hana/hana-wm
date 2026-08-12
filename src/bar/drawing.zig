@@ -458,7 +458,8 @@ pub const MeasureContext = struct {
 ///
 /// Wide-pixmap layout
 /// ──────────────────
-/// Two full copies of the text are stored at offsets `left_pad` and `left_pad + cycle_w`:
+/// Text A is rendered at offset `left_pad`; text B — the seamless loop's second
+/// copy — at `left_pad + cycle_w`:
 ///
 ///   [ bg * left_pad | text A | bg * gap | text B ]
 ///    ←── left_pad ──→←text_w→←── gap ──→←text_w→
@@ -467,8 +468,12 @@ pub const MeasureContext = struct {
 /// the offscreen pixmap.  The pixmap is wide enough that the copy is always a single
 /// unclipped xcb_copy_area — no fill step, no clipping arithmetic, no second copy.
 ///
-/// Required: pixmap_w ≥ max(left_pad + cycle_w + text_w, cycle_w + seg_w)
-/// Callers (carousel.zig) compute this before calling init().
+/// Required: pixmap_w ≥ cycle_w + seg_w.  The blit window is always
+/// [O, O + seg_w) ⊂ [0, cycle_w + seg_w), so source pixels past that are never
+/// read.  When the title is wider than the segment, text B simply clips at the
+/// pixmap edge: the window can only ever see the first seg_w − left_pad pixels
+/// of it, which always land inside the pixmap.  Callers (carousel.zig) compute
+/// the width before calling init().
 pub const CarouselPixmap = struct {
     conn: *core.xcb.xcb_connection_t,
     pixmap: u32,

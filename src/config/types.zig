@@ -293,7 +293,7 @@ pub const WorkspaceMasterCountOverride = struct {
 
 pub const TilingConfig = struct {
     enabled: bool = true,
-    layout: []const u8 = "master_left",
+    layout: []const u8 = "master-stack",
     layouts: std.ArrayList([]const u8) = .empty, // Available layouts in cycle order
     master_side: MasterSide = .left,
     master_width: parser.ScalableValue = parser.ScalableValue.percentage(50.0),

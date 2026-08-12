@@ -322,11 +322,11 @@ fn executeAction(action: *const types.Action) !void {
         // it is off-screen. The server grab prevents a partial retile frame.
         .focus_next_window => {
             focus.focusNext();
-            withTilingGrab(tiling.snapScrollToFocused);
+            withTilingGrabKeepFocus(tiling.snapScrollToFocused);
         },
         .focus_prev_window => {
             focus.focusPrev();
-            withTilingGrab(tiling.snapScrollToFocused);
+            withTilingGrabKeepFocus(tiling.snapScrollToFocused);
         },
     }
 }

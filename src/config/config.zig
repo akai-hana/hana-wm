@@ -348,7 +348,11 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !types.Config {
     const fallback_toml = fallback.getFallbackToml() orelse return error.FallbackMissing;
     var doc = try parser.parse(allocator, fallback_toml);
     defer doc.deinit();
-    const cfg = try buildConfigFromDoc(allocator, &doc);
+    var cfg = try buildConfigFromDoc(allocator, &doc);
+    // If the terminal detection/dupe below errors, free the built config
+    // rather than leaking it (the `try` above means buildConfigFromDoc's own
+    // errdefer already handled its internal failures).
+    errdefer cfg.deinit(allocator);
     const terminal = fallback.detectTerminal();
     for (cfg.keybindings.items) |*kb| {
         if (kb.action == .exec and std.mem.eql(u8, kb.action.exec, "auto_terminal")) {
@@ -369,7 +373,11 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !types.Config {
 fn getDefaultConfig(allocator: std.mem.Allocator) !types.Config {
     var cfg: types.Config = .{};
     errdefer cfg.deinit(allocator);
-    const default_layout = try allocator.dupe(u8, "master_left");
+    // Canonical LAYOUT_TABLE name (types.LAYOUT_TABLE's .master entry), so the
+    // default is resolvable by layoutFromString in workspaces.zig and falls
+    // through to .master in tiling.zig's stringToEnum check — the historical
+    // "master_left" matched neither and only worked via `orelse` fallbacks.
+    const default_layout = try allocator.dupe(u8, "master-stack");
     try cfg.tiling.layouts.append(allocator, default_layout);
     cfg.tiling.layout = cfg.tiling.layouts.items[0];
     // Dupe the four BarConfig string fields parseBar may rewrite, so
