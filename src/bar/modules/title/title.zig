@@ -9,6 +9,9 @@ const utils = @import("utils");
 const scale = @import("scale");
 const debug = @import("debug");
 
+const constants = @import("constants");
+const bench = @import("bench");
+
 const types = @import("types");
 
 const drawing = @import("drawing");
@@ -27,6 +30,13 @@ const title_lead_px: u16 = 4;
 /// Windows beyond this index are silently omitted from the bar.
 /// 128 covers any practical workspace size while keeping stack usage bounded.
 const max_visible_windows: usize = 128;
+
+/// Maximum windows addressed by the batch pre-fetch scratch arrays at once.
+/// `bar.captureStateIntoSlot` hands over the full workspace window list,
+/// which is bounded by `constants.Limits.MAX_TILED_WINDOWS` (larger than
+/// `max_visible_windows` — the bar may draw only the first 128, but the
+/// snapshot still carries a title/geometry entry per window).
+const max_batch_windows: usize = constants.Limits.MAX_TILED_WINDOWS;
 
 /// Off-screen sentinel geometry for minimized or otherwise unresolvable
 /// windows: position sorting places it last, and drawing is skipped.
@@ -314,15 +324,167 @@ pub fn fetchWindowTitleInto(
 /// (e.g. a floating window).
 pub fn fetchWindowGeom(conn: *xcb.xcb_connection_t, win: u32) utils.Rect {
     if (tiling.getWindowGeom(win)) |cached| return cached;
-    const cookie = xcb.xcb_get_geometry(conn, win);
+    return collectGeometryReply(conn, xcb.xcb_get_geometry(conn, win));
+}
+
+/// Collect the reply for a fired `xcb_get_geometry` request without a blocking
+/// wait when the reply is already buffered (see `bench.pollReply`). In a
+/// non-bench build this reduces to a single blocking reply call.
+fn collectGeometryReply(conn: *xcb.xcb_connection_t, cookie: xcb.xcb_get_geometry_cookie_t) utils.Rect {
+    if (bench.pollReply(conn, cookie.sequence)) |rep| {
+        const r: *xcb.xcb_get_geometry_reply_t = @ptrCast(@alignCast(rep));
+        defer std.c.free(r);
+        return geometryFromReply(r);
+    }
     const r = xcb.xcb_get_geometry_reply(conn, cookie, null) orelse return offscreen_rect;
     defer std.c.free(r);
+    return geometryFromReply(r);
+}
+
+fn geometryFromReply(r: *xcb.xcb_get_geometry_reply_t) utils.Rect {
     return .{
         .x = @intCast(r.*.x),
         .y = @intCast(r.*.y),
         .width = r.*.width,
         .height = r.*.height,
     };
+}
+
+/// Batch pre-fetch of title and geometry for every window in `wins`, writing
+/// one entry per window into `out_titles` / `out_geoms` in parallel order.
+/// Replaces the sequential `fetchWindowTitleInto` + `fetchWindowGeom` loop in
+/// `bar.captureStateIntoSlot`.
+///
+/// Uses the same Phase 1-3 cookie-batching pattern as `gatherWindowInfos`: all
+/// X11 requests are fired before any reply is collected, so N windows cost
+/// ~2 round-trips (plus one per window whose `_NET_WM_NAME` is absent/empty
+/// and needs a `WM_NAME` fallback) instead of up to 2N blocking waits on the
+/// main thread.
+///
+/// `focused_idx` is the index of the focused window in `wins`; its title is
+/// already available to the caller as `focused_title` and is duped into
+/// `out_titles` with no X11 traffic. Geometry prefers the tiling cache (zero
+/// round-trips); minimized windows get the `offscreen_rect` sentinel without
+/// a round-trip; only cache-missing, non-minimized windows get a
+/// get_geometry round-trip, also batched.
+///
+/// Each successful title dupe is owned by `out_titles`; on partial OOM a
+/// prefix is present and the caller frees via the normal
+/// `std.ArrayListUnmanaged([]const u8)` / WindowTitles ownership rules.
+pub fn batchFetchWindowInfosInto(
+    conn: *xcb.xcb_connection_t,
+    wins: []const u32,
+    focused_idx: ?usize,
+    focused_title: []const u8,
+    minimized: *const std.AutoHashMapUnmanaged(u32, void),
+    out_titles: *std.ArrayListUnmanaged([]const u8),
+    out_geoms: *std.ArrayListUnmanaged(utils.Rect),
+    allocator: std.mem.Allocator,
+) void {
+    const win_count = wins.len;
+    std.debug.assert(win_count <= max_batch_windows);
+
+    atoms.ensureResolved();
+    const net_atom = atoms.net_wm_name;
+    const utf_type = atoms.utf8AtomType();
+
+    var net_wm_cookies: [max_batch_windows]xcb.xcb_get_property_cookie_t = undefined;
+    var fallback_cookies: [max_batch_windows]xcb.xcb_get_property_cookie_t = undefined;
+    var needs_fallback: [max_batch_windows]bool = undefined;
+    var owned_titles: [max_batch_windows]?[]const u8 = undefined;
+    var geom_cookies: [max_batch_windows]xcb.xcb_get_geometry_cookie_t = undefined;
+    var needs_xcb_geometry: [max_batch_windows]bool = undefined;
+    var tiling_geoms: [max_batch_windows]?utils.Rect = undefined;
+
+    // Phase 1 — fire every request up front: _NET_WM_NAME for windows whose
+    // title isn't already known, get_geometry for windows the tiling cache
+    // doesn't cover. Minimized windows are skipped for both — they are never
+    // positioned on screen.
+    for (wins, 0..) |win, i| {
+        const is_focused = focused_idx == i;
+        if (net_atom != null and !is_focused)
+            net_wm_cookies[i] = xcb.xcb_get_property(conn, 0, win, net_atom.?, utf_type, 0, 8192);
+
+        needs_xcb_geometry[i] = false;
+        tiling_geoms[i] = null;
+        if (!minimized.contains(win)) {
+            tiling_geoms[i] = tiling.getWindowGeom(win);
+            if (tiling_geoms[i] == null) {
+                geom_cookies[i] = xcb.xcb_get_geometry(conn, win);
+                needs_xcb_geometry[i] = true;
+            }
+        }
+    }
+
+    // Phase 2 — collect _NET_WM_NAME replies; queue WM_NAME fallbacks.
+    for (wins, 0..) |win, i| {
+        owned_titles[i] = null;
+        needs_fallback[i] = false;
+        if (focused_idx == i) continue;
+        got: {
+            if (net_atom != null) {
+                owned_titles[i] = collectPropertyReply(conn, net_wm_cookies[i], allocator);
+                if (owned_titles[i] != null) break :got;
+            }
+            fallback_cookies[i] = xcb.xcb_get_property(conn, 0, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, 0, 8192);
+            needs_fallback[i] = true;
+        }
+    }
+
+    // Phase 3 — collect WM_NAME fallback replies.
+    for (wins, 0..) |_, i| {
+        if (focused_idx == i or !needs_fallback[i]) continue;
+        owned_titles[i] = collectPropertyReply(conn, fallback_cookies[i], allocator);
+    }
+
+    // Build parallel output lists, collecting geometry as we go.
+    for (wins, 0..) |win, i| {
+        if (focused_idx == i) {
+            // Duped like every other title: the snapshot frees every entry in
+            // `out_titles`, so a slice aliasing `focused_title` here would be
+            // freed as an interior pointer into that buffer.
+            const owned = allocator.dupe(u8, focused_title) catch null;
+            if (owned) |t|
+                out_titles.append(allocator, t) catch allocator.free(t)
+            else
+                out_titles.append(allocator, "") catch {};
+        } else if (owned_titles[i]) |t| {
+            out_titles.append(allocator, t) catch {
+                allocator.free(t);
+            };
+        } else {
+            out_titles.append(allocator, "") catch {};
+        }
+
+        const geom: utils.Rect = if (minimized.contains(win))
+            offscreen_rect
+        else if (tiling_geoms[i]) |cached|
+            cached
+        else if (needs_xcb_geometry[i])
+            collectGeometryReply(conn, geom_cookies[i])
+        else
+            offscreen_rect;
+        out_geoms.append(allocator, geom) catch {};
+    }
+}
+
+/// Collect the reply for a fired `xcb_get_property` request without a blocking
+/// wait when the reply is already buffered (see `bench.pollReply`); the reply's
+/// string value is duped into `allocator`. In a non-bench build this reduces to
+/// a single blocking reply call.
+fn collectPropertyReply(
+    conn: *xcb.xcb_connection_t,
+    cookie: xcb.xcb_get_property_cookie_t,
+    allocator: std.mem.Allocator,
+) ?[]const u8 {
+    if (bench.pollReply(conn, cookie.sequence)) |rep| {
+        const r: *xcb.xcb_get_property_reply_t = @ptrCast(@alignCast(rep));
+        defer std.c.free(r);
+        return extractPropertyString(r, allocator) catch null;
+    }
+    const r = xcb.xcb_get_property_reply(conn, cookie, null) orelse return null;
+    defer std.c.free(r);
+    return extractPropertyString(r, allocator) catch null;
 }
 
 // Empty workspace fast path

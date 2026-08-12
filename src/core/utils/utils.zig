@@ -7,6 +7,7 @@ const core = @import("core");
 const xcb = core.xcb;
 const constants = @import("constants");
 const debug = @import("debug");
+const bench = @import("bench");
 
 const max_property_length = constants.PROPERTY_MAX_LENGTH;
 /// Passed as the `delete` argument to xcb_get_property; 0 means do not consume the property.
@@ -541,10 +542,9 @@ pub fn fetchPropertyToBuffer(
     buffer: *std.ArrayListUnmanaged(u8),
     allocator: std.mem.Allocator,
 ) !?[]const u8 {
-    const reply = xcb.xcb_get_property_reply(
+    const reply = pollPropertyReply(
         conn,
         xcb.xcb_get_property(conn, property_no_delete, window, atom, atom_type, 0, max_property_length),
-        null,
     ) orelse return null;
     defer std.c.free(reply);
     const r = reply.*;
@@ -556,4 +556,16 @@ pub fn fetchPropertyToBuffer(
     const value_ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
     try buffer.appendSlice(allocator, value_ptr[0..@intCast(r.value_len)]);
     return buffer.items;
+}
+
+/// Collect the reply for a fired `xcb_get_property` request without a blocking
+/// wait when the reply is already buffered (see `bench.pollReply`). In a
+/// non-bench build this reduces to a single blocking reply call.
+fn pollPropertyReply(
+    conn: *xcb.xcb_connection_t,
+    cookie: xcb.xcb_get_property_cookie_t,
+) ?*xcb.xcb_get_property_reply_t {
+    if (bench.pollReply(conn, cookie.sequence)) |rep|
+        return @ptrCast(@alignCast(rep));
+    return xcb.xcb_get_property_reply(conn, cookie, null);
 }
