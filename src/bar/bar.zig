@@ -8,6 +8,7 @@ const xcb = core.xcb;
 const utils = @import("utils");
 const scale = @import("scale");
 const debug = @import("debug");
+const bench = @import("bench");
 
 const types = @import("types");
 
@@ -110,6 +111,13 @@ const BarSnapshot = struct {
     /// (e.g. a floating window).
     window_geoms: std.ArrayListUnmanaged(utils.Rect) = .empty,
 
+    /// True when `window_titles`/`window_geoms` were freshly re-fetched this
+    /// frame (the title pre-fetch re-ran) rather than relayed unchanged from
+    /// the previous snapshot slot. syncTitleCache uses this to skip re-duping
+    /// the cache's title strings on frames where the content provably did not
+    /// change — see the ownership-relay comment in captureStateIntoSlot.
+    title_list_refreshed: bool = false,
+
     fn deinit(snap: *BarSnapshot, allocator: std.mem.Allocator) void {
         snap.focused_title.deinit(allocator);
         snap.current_workspace_windows.deinit(allocator);
@@ -153,6 +161,16 @@ const Bar = struct {
     /// Forces a full bar redraw on the next submitDraw (expose, reload, position toggle, show).
     /// Read and written exclusively on the main thread — does not require mutex protection.
     pending_force_full_redraw: bool = false,
+    /// Forces the next capture to re-fetch the title segment's per-window data
+    /// (titles + geometry) even though focus / window-set / minimized state
+    /// haven't changed — without a full bar clear (see scheduleTitleRedraw).
+    /// Read and written exclusively on the main thread.
+    pending_force_title_redraw: bool = false,
+    /// True when presentForPrompt() had to map an otherwise-hidden bar (e.g.
+    /// hidden by a fullscreen window, or by the user toggling it off) purely
+    /// so the inline prompt would be visible. dismissAfterPrompt() checks this
+    /// to know whether hiding the bar again is part of "returning to normal".
+    prompt_forced_visible: bool = false,
 };
 
 var gBar: Bar = .{};
@@ -569,27 +587,36 @@ const State = struct {
     fn syncTitleCache(self: *State, snap: *const BarSnapshot, x: u16, w: u16) void {
         const alloc = self.render.allocator;
 
-        swapAlloc(u32, &self.title_cache.workspace_windows, alloc, snap.current_workspace_windows.items);
+        // Only re-sync the per-window data when the capture actually re-fetched
+        // it (snap.title_list_refreshed). On unchanged frames the snapshot
+        // relays the same lists between its ping-pong slots, so the cache
+        // already holds identical content — re-duping every title string here
+        // was an O(window count) alloc+free pass on every full redraw for data
+        // that didn't change.
+        if (snap.title_list_refreshed) {
+            swapAlloc(u32, &self.title_cache.workspace_windows, alloc, snap.current_workspace_windows.items);
 
-        if (snap.minimized_windows.clone(alloc)) |new_set| {
-            self.title_cache.minimized_windows.deinit(alloc);
-            self.title_cache.minimized_windows = new_set;
-        } else |_| {
-            // minimized_windows left stale rather than cleared.
+            if (snap.minimized_windows.clone(alloc)) |new_set| {
+                self.title_cache.minimized_windows.deinit(alloc);
+                self.title_cache.minimized_windows = new_set;
+            } else |_| {
+                // minimized_windows left stale rather than cleared.
+            }
+
+            // Keep cached titles in sync for the drawTitleOnly fast path.
+            // replaceWith frees the old owned strings before duping the new ones,
+            // so a failed dupe simply truncates the cache rather than desyncing it.
+            self.title_cache.window_titles.replaceWith(alloc, snap.window_titles.list.items);
+
+            // Keep cached geometry in sync for the drawTitleOnly fast path. Rect is
+            // POD (no owned allocations per element), so — like workspace_windows
+            // above — build the replacement before swapping it in: a failed
+            // allocation leaves the existing cache untouched rather than emptied.
+            swapAlloc(utils.Rect, &self.title_cache.window_geoms, alloc, snap.window_geoms.items);
+
+            self.title_cache.focused_window = snap.focused_window;
         }
 
-        // Keep cached titles in sync for the drawTitleOnly fast path.
-        // replaceWith frees the old owned strings before duping the new ones,
-        // so a failed dupe simply truncates the cache rather than desyncing it.
-        self.title_cache.window_titles.replaceWith(alloc, snap.window_titles.list.items);
-
-        // Keep cached geometry in sync for the drawTitleOnly fast path. Rect is
-        // POD (no owned allocations per element), so — like workspace_windows
-        // above — build the replacement before swapping it in: a failed
-        // allocation leaves the existing cache untouched rather than emptied.
-        swapAlloc(utils.Rect, &self.title_cache.window_geoms, alloc, snap.window_geoms.items);
-
-        self.title_cache.focused_window = snap.focused_window;
         self.title_cache.title_x = x;
         self.title_cache.title_width = w;
         self.title_cache.is_layout_valid = true;
@@ -635,6 +662,13 @@ fn hasMinimizedSetChanged(
 /// at the swap sites for why this is safe.
 fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *BarSnapshot, forced: bool) !void {
     const allocator = s.render.allocator;
+    bench.beginTitleCapture();
+    const capture_start_ns: u64 = if (bench.enabled) utils.monotonicNs() else 0;
+    // Consume the title-only redraw request. Unlike `forced` (which clears the
+    // whole bar), it only forces the title pre-fetch to re-run so the
+    // segmented title view picks up new per-window geometry after a swap.
+    const forced_title_redraw = gBar.pending_force_title_redraw;
+    gBar.pending_force_title_redraw = false;
     snap.minimized_windows.clearRetainingCapacity();
     try minimize.collectMinimizedIntoSet(&snap.minimized_windows, allocator);
 
@@ -674,32 +708,35 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *BarSnapshot, force
     // ticks call drawClockOnly/drawTitleOnly directly and never reach this
     // function at all, so there's no separate "no-op" case to handle here.)
     const title_changed =
+        forced_title_redraw or
         snap.focused_window != prev.focused_window or
         snap.is_title_invalidated or
         !std.mem.eql(u32, snap.current_workspace_windows.items, prev.current_workspace_windows.items) or
         hasMinimizedSetChanged(&snap.minimized_windows, &prev.minimized_windows);
     if (title_changed) {
+        const focused_idx: ?usize = if (snap.focused_window) |fw|
+            std.mem.indexOfScalar(u32, snap.current_workspace_windows.items, fw)
+        else
+            null;
+
+        // Batch pre-fetch replaces the sequential per-window round-trips:
+        // one dupe per title, ~2 round-trips total, zero blocking waits on
+        // the draw path itself (see title.batchFetchWindowInfosInto).
         snap.window_titles.clear(allocator);
         snap.window_geoms.clearRetainingCapacity();
-        var title_tmp: std.ArrayListUnmanaged(u8) = .empty;
-        defer title_tmp.deinit(allocator);
-        for (snap.current_workspace_windows.items) |win| {
-            if (snap.focused_window == win) {
-                snap.window_titles.append(allocator, snap.focused_title.items) catch {};
-            } else {
-                title_tmp.clearRetainingCapacity();
-                title.fetchWindowTitleInto(core.getState().conn, win, &title_tmp, allocator) catch {};
-                snap.window_titles.append(allocator, title_tmp.items) catch {};
-            }
-            // Skip the round-trip for minimized windows the same way
-            // drawSegmentedTitles' sentinel does — they're never actually
-            // positioned on screen.
-            const geom: utils.Rect = if (snap.minimized_windows.contains(win))
-                title.offscreen_rect
-            else
-                title.fetchWindowGeom(core.getState().conn, win);
-            snap.window_geoms.append(allocator, geom) catch {};
-        }
+        var titles: std.ArrayListUnmanaged([]const u8) = .empty;
+        title.batchFetchWindowInfosInto(
+            core.getState().conn,
+            snap.current_workspace_windows.items,
+            focused_idx,
+            snap.focused_title.items,
+            &snap.minimized_windows,
+            &titles,
+            &snap.window_geoms,
+            allocator,
+        );
+        // Steal the batch-owned title list; snapshot deinit frees its strings.
+        snap.window_titles.list = titles;
     } else {
         // Nothing about titles/membership/minimized-state changed since the
         // previous frame: rather than freeing every owned string in `snap`
@@ -717,18 +754,25 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *BarSnapshot, force
         std.mem.swap(std.ArrayListUnmanaged(utils.Rect), &snap.window_geoms, &prev.window_geoms);
     }
 
+    snap.title_list_refreshed = title_changed;
     snap.is_full_redraw = forced or (snap.workspace_count != prev.workspace_count);
     snap.is_workspace_dirty = snap.is_full_redraw or
         snap.current_workspace != prev.current_workspace or
         snap.is_all_view_active != prev.is_all_view_active or
         !std.mem.eql(bool, snap.workspace_has_windows.items, prev.workspace_has_windows.items);
     snap.is_title_dirty =
+        forced_title_redraw or
         prompt.isActive() or
         snap.focused_window != prev.focused_window or
         snap.is_title_invalidated or
         !std.mem.eql(u8, snap.focused_title.items, prev.focused_title.items) or
         !std.mem.eql(u32, snap.current_workspace_windows.items, prev.current_workspace_windows.items) or
         hasMinimizedSetChanged(&snap.minimized_windows, &prev.minimized_windows);
+
+    if (bench.enabled) bench.reportTitleCapture(
+        utils.monotonicNs() -| capture_start_ns,
+        snap.current_workspace_windows.items.len,
+    );
 }
 
 // Draw submission
@@ -1118,6 +1162,21 @@ pub fn scheduleFullRedraw() void {
     };
 }
 
+/// Schedules a redraw that re-captures the title segment's per-window data
+/// (re-running the batched pre-fetch) without clearing the whole bar.
+///
+/// Use when on-screen window positions change but focus and the window-ID set
+/// don't (e.g. a master swap): the segmented title view sorts windows by
+/// position, so its segment order is stale even though every other segment is
+/// clean. Cheaper than scheduleFullRedraw — no background clear, and the
+/// workspace/layout/clock segments skip their repaint via shouldSkipSegment.
+pub fn scheduleTitleRedraw() void {
+    if (gBar.state) |s| if (s.is_visible) {
+        gBar.pending_force_title_redraw = true;
+        s.markDirty();
+    };
+}
+
 pub fn isVisible() bool {
     return if (gBar.state) |s| s.is_visible else false;
 }
@@ -1143,6 +1202,61 @@ pub fn redrawInsideGrab() void {
 pub fn raiseBar() void {
     if (gBar.state) |s|
         _ = xcb.xcb_configure_window(s.win.conn, s.win.win_id, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+}
+
+/// Forces the bar to the absolute top of the stacking order and guarantees it
+/// is mapped, overriding whatever would normally keep it hidden or covered —
+/// a fullscreen window on the current workspace, the user having toggled the
+/// bar off, or some other window simply having been raised above it. Used by
+/// the inline prompt (prompt.zig) so it is always visible and reachable while
+/// active, regardless of what else is on screen.
+///
+/// This never touches window geometry or retiles anything: the bar is
+/// overlaid on top of whatever is already there (fullscreen content included)
+/// exactly as-is, the same way a dock/OSD overlays a fullscreen video. Pair
+/// with `dismissAfterPrompt` when the prompt exits so the bar returns to
+/// whatever state it was actually in beforehand.
+pub fn presentForPrompt() void {
+    const s = gBar.state orelse return;
+    if (!s.is_visible) {
+        // The bar is hidden — draw fresh content into it before mapping
+        // (same ordering setBarState's show path uses) so the compositor
+        // never shows a blank or stale bar for a frame.
+        gBar.prompt_forced_visible = true;
+        s.is_visible = true;
+        submitFullRedrawWithCarouselReset(s);
+        _ = xcb.xcb_map_window(s.win.conn, s.win.win_id);
+    }
+    raiseBar();
+    _ = xcb.xcb_flush(s.win.conn);
+}
+
+/// Undoes `presentForPrompt` once the prompt exits (entered or cancelled).
+///
+/// If the bar had to be shown solely to make the prompt visible, hides it
+/// again — but only if it *should still* be hidden right now. The prompt can
+/// stay open across other state changes (e.g. the fullscreen window that
+/// justified the override closes on its own), so this recomputes the bar's
+/// natural visibility at exit time rather than trusting a decision made back
+/// when the prompt activated; setBarState changes elsewhere in the meantime
+/// have no reason to know about (or clear) the forced-visible override.
+///
+/// If the bar was already visible beforehand, this leaves it as-is: its
+/// forced top-of-stack position needs no explicit undo, since focusing or
+/// raising any other window (see focus.zig) already places that window above
+/// the bar again the moment the user interacts with it — the bar was never
+/// pinned above anything beyond this one moment.
+pub fn dismissAfterPrompt() void {
+    const s = gBar.state orelse return;
+    if (!gBar.prompt_forced_visible) return;
+    gBar.prompt_forced_visible = false;
+    const current_ws = tracking.getCurrentWorkspace() orelse 0;
+    const is_fullscreen = fullscreen.getForWorkspace(current_ws) != null;
+    const should_show = !is_fullscreen and s.is_globally_visible;
+    if (should_show) return; // conditions changed while the prompt was open — stay visible
+    s.is_visible = false;
+    _ = xcb.xcb_unmap_window(s.win.conn, s.win.win_id);
+    _ = xcb.xcb_flush(s.win.conn);
 }
 
 pub fn setBarState(action: BarAction) void {

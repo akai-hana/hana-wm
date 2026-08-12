@@ -12,7 +12,7 @@ const debug = @import("debug");
 // Public constants
 
 /// Default scroll speed in pixels per second.
-pub const default_scroll_speed: f64 = 125.0;
+pub const default_scroll_speed: u8 = 250;
 
 /// Pixel gap between the end of text copy A and the start of copy B in the
 /// pre-rendered pixmap.
@@ -134,8 +134,10 @@ pub fn setRefreshRateOverride(hz: f64) void {
 ///
 /// Priority:
 ///   1. User-configured `carousel_refresh_rate` (rate_override > 0).
-///   2. Monitor refresh rate detected via RandR at startup.
-///   3. 60 Hz fallback when detection has not yet run.
+///   2. Monitor refresh rate detected via RandR — queried at startup and
+///      re-detected live whenever the monitor re-configures (mode switch,
+///      hotplug), so a rate change takes effect on the very next wake.
+///   3. 60 Hz fallback when detection is unavailable or has not yet run.
 ///
 /// Called once per carousel-thread sleep cycle; the division is cheap relative
 /// to the timedWait syscall that follows.

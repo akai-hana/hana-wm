@@ -406,9 +406,15 @@ fn activate() void {
     g.is_active = true;
     g.layout_dirty = true;
     g.redraw_pending = true;
+    // Force the bar to the absolute top of the screen for the duration of the
+    // prompt — above a fullscreen window, above anything else that happens to
+    // be raised over it — so the prompt is always visible and reachable.
+    // Reversed in deactivate() via bar.dismissAfterPrompt().
+    bar.presentForPrompt();
     // No xcb_flush: xcb_grab_keyboard_reply already drained the XCB output
-    // buffer to deliver the preceding grab request.  The two assignments above
-    // are pure struct-field writes; no XCB requests are pending here.
+    // buffer to deliver the preceding grab request, and presentForPrompt()
+    // flushes its own requests. The two assignments above are pure
+    // struct-field writes; no XCB requests are pending here otherwise.
     // Contrast with deactivate(), where the flush is correct because
     // xcb_ungrab_keyboard sends a new request that must arrive promptly.
 }
@@ -421,6 +427,10 @@ fn deactivate() void {
     _ = xcb.xcb_ungrab_keyboard(conn, xcb.XCB_CURRENT_TIME);
     _ = xcb.xcb_flush(conn);
     g.redraw_pending = true;
+    // Return the bar to whatever state it was actually in before the prompt
+    // forced it to the top (e.g. re-hide it if a fullscreen window is still
+    // active) — see the comment on presentForPrompt() in activate().
+    bar.dismissAfterPrompt();
 }
 
 // Private — PATH completion

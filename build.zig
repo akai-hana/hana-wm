@@ -45,6 +45,11 @@ pub fn build(b: *std.Build) !void {
     const build_opts = b.addOptions();
     build_opts.addOption(bool, "enable_debug_logging", optimize == .Debug);
     build_opts.addOption(bool, "has_fallback_toml", fallback_toml != null);
+    build_opts.addOption(
+        bool,
+        "bench",
+        b.option(bool, "bench", "Enable opt-in performance probe counters (default: off)") orelse false,
+    );
 
     // Module discovery
     var discovery = try Module.DiscoveryContext.run(b, target, optimize, source_root, entry_point_path);
@@ -384,6 +389,7 @@ const SystemLibraries = struct {
         root.linkSystemLibrary("xcb-keysyms", .{});
         root.linkSystemLibrary("xkbcommon-x11", .{});
         root.linkSystemLibrary("xcb-cursor", .{}); // Makes hana's root window respect custom cursor settings.
+        root.linkSystemLibrary("xcb-randr", .{}); // Monitor refresh-rate detection for the carousel.
     }
 
     // Bar libraries

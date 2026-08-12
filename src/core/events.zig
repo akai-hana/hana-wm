@@ -19,6 +19,7 @@ const bar = @import("bar");
 const prompt = @import("prompt");
 const clock = @import("clock");
 const fullscreen = @import("fullscreen");
+const scale = @import("scale");
 
 // Indices into the poll fd array.
 const FD_XCB = 0;
@@ -108,6 +109,18 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
         return;
     }
     const idx = event_type & 0x7F; // strip XCB synthetic-event bit
+
+    // RandR extension events (extension base and base+1): screen, CRTC, and
+    // output change notifications. The carousel's refresh-rate cadence must
+    // track monitor re-configuration (xrandr mode switch, hotplug), so any of
+    // them triggers a re-detection. Extension events sit above the fixed
+    // dispatch table and would otherwise be dropped by the bounds guard below.
+    const randr_first = scale.randrFirstEvent();
+    if (randr_first != 0 and idx >= randr_first and idx <= randr_first + 1) {
+        scale.handleRandrNotifyEvent(core.getState().conn);
+        return;
+    }
+
     // Guard the fixed-size table: extension events live above XCB_GE_GENERIC
     // and would index out of bounds. hana only selects core events today, but
     // the moment anyone subscribes to an extension this would become a

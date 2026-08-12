@@ -1208,9 +1208,11 @@ fn swapWindowsInList(s: *State, idx_a: usize, idx_b: usize) void {
     std.mem.swap(u32, &s.windows.buf[idx_a], &s.windows.buf[idx_b]);
     // The bar's title dirty-check compares window IDs in tracking-table
     // order, which a same-workspace swap doesn't change — only on-screen
-    // position changes. Force a full redraw so the title segment picks up
-    // the new geometry even though focus and the window-ID set are unchanged.
-    bar.scheduleFullRedraw();
+    // position changes. Trigger a title-only redraw so the segmented title
+    // view picks up the new geometry (via the re-run pre-fetch) without
+    // clearing the whole bar: focus and the window-ID set are unchanged, so
+    // the workspace/layout/clock segments don't need repainting.
+    bar.scheduleTitleRedraw();
 }
 
 /// Locates the focused window and the current workspace's master window in
