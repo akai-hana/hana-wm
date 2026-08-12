@@ -176,7 +176,7 @@ Mod+D       = "ghostty"
 Mod+I       = "xeyes"
 Mod+Shift+D = "{kill} ghostty"
 
-#Mod+Z       = "flatpak run com.valvesoftware.Steam steam://rungameid/881100" # Noita
+#Mod+Z       = "steam steam://rungameid/881100" # Noita
 #Mod+Shift+Z = "pkill noita"
 
 # Minecraft
@@ -190,8 +190,8 @@ Mod+X       = "~/Games/t-client/DDNet"
 Mod+Shift+X = "~/Games/etterna/Etterna"
 
 # ULTRAKILL
-Mod+C       = "flatpak run com.valvesoftware.Steam steam://rungameid/1229490"
-Mod+Shift+C = "flatpak run com.valvesoftware.Steam"
+Mod+C       = "steam steam://rungameid/1229490"
+Mod+Shift+C = "steam"
 
 Mod+V       = "nixGL pear-desktop"
 Mod+Shift+V = "distrobox enter aur -- stremio-enhanced"

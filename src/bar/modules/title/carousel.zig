@@ -42,16 +42,18 @@ const CarouselEntry = struct {
     pixel_offset: u16, // current integer blit offset (advances each tick)
     frac_acc: f64, // sub-pixel carry between ticks (Bresenham remainder)
     last_ns: u64, // monotonicNs() of the most-recent blit
-    last_bg: u32, // accent colour baked into cp; detects colour-only changes on later draws
-    // to detect a colour change before the next full draw
+    last_bg: u32, // accent colour baked into cp
+    last_fg: u32, // text colour baked into cp
+    // last_bg/last_fg detect colour-only changes on later draws so the pixmap
+    // is re-rendered in place (scroll position preserved) instead of rebuilt.
     window: ?u32, // window the pixmap was built for (null = no window)
     geom: SegmentGeometry,
 };
 
 /// True when `e` must be rebuilt from scratch: the window it was built for,
 /// the title, the cycle width, or the segment geometry changed.
-/// Colour-only changes (e.last_bg) are deliberately excluded — those reuse
-/// the existing pixmap in place.
+/// Colour-only changes (e.last_bg/e.last_fg) are deliberately excluded — those
+/// reuse the existing pixmap in place.
 inline fn entryStale(e: *const CarouselEntry, window: ?u32, title_invalidated: bool, cycle_w: u16, geom: SegmentGeometry) bool {
     return e.window != window or title_invalidated or e.cycle_w != cycle_w or
         e.geom.seg_x != geom.seg_x or e.geom.seg_w != geom.seg_w or e.geom.avail_w != geom.avail_w;
@@ -77,6 +79,11 @@ const RenderState = struct {
     single: ?CarouselEntry = null,
     seg: ?CarouselEntry = null,
     is_enabled: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
+    /// Atomic mirror of `single != null or seg != null`, maintained under
+    /// draw_mutex. Lets the carousel thread's wake-loop check activity (and
+    /// pick its sleep interval) without racing the main thread's deinit of the
+    /// non-atomic `single`/`seg` fields.
+    active: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 };
 
 /// Cross-thread signal: the focus system sets is_invalidated (from the main
@@ -141,8 +148,11 @@ pub fn wakeIntervalNs() u64 {
 // Public API — lifecycle
 
 /// True when either carousel pixmap is live.
+/// Backed by the `active` atomic mirror so the carousel thread can read it
+/// without draw_mutex — reading render.single/render.seg themselves from a
+/// second thread would race the main thread's deinit under the lock.
 pub fn isCarouselActive() bool {
-    return render.single != null or render.seg != null;
+    return render.active.load(.monotonic);
 }
 
 /// Returns the window ID the segmented carousel was built for, or null.
@@ -181,6 +191,7 @@ pub fn deinitSingleCarousel() void {
     if (render.single) |*e| {
         e.cp.deinit();
         render.single = null;
+        if (render.seg == null) render.active.store(false, .monotonic);
     }
 }
 
@@ -191,6 +202,7 @@ pub fn deinitSegmentedCarousel() void {
     if (render.seg) |*e| {
         e.cp.deinit();
         render.seg = null;
+        if (render.single == null) render.active.store(false, .monotonic);
     }
     focus_signal.seg_window.store(0, .release);
 }
@@ -229,6 +241,12 @@ var carousel_mutex: utils.Mutex = .{};
 var carousel_cond: utils.Condition = .{};
 var carousel_quit: bool = false;
 var carousel_thread: ?std.Thread = null;
+
+/// Sleep duration while no carousel is live. With no title scrolling, a
+/// once-per-refresh wakeup is pure overhead; commitCarouselFrame signals the
+/// condition variable when a carousel becomes active, so the thread still
+/// starts scrolling within one refresh of activation despite the long sleep.
+const idle_interval_ns: u64 = 250 * std.time.ns_per_ms;
 
 /// Spawns the dedicated carousel-tick thread. Safe to call after stopThread().
 pub fn startThread() void {
@@ -271,9 +289,16 @@ fn runCarouselThread() void {
         carousel_mutex.lock();
         defer carousel_mutex.unlock();
         if (carousel_quit) return;
-        carousel_cond.timedWait(&carousel_mutex, wakeIntervalNs()) catch {};
+        // Sleep one refresh interval while a title is scrolling, or a long idle
+        // interval when nothing is active (most of the bar's lifetime). The
+        // activity check runs under carousel_mutex — the same mutex
+        // commitCarouselFrame holds while signalling on activation — so the
+        // activation signal can never be lost between this check and the wait.
+        const interval = if (isCarouselActive()) wakeIntervalNs() else idle_interval_ns;
+        carousel_cond.timedWait(&carousel_mutex, interval) catch {};
         // Timeout is the expected outcome every iteration; a signal (from
-        // stopThread) is handled by the quit re-check at the top of the loop.
+        // stopThread or commitCarouselFrame) is handled by the re-checks at the
+        // top of the loop.
     }
 }
 
@@ -300,7 +325,15 @@ pub fn drawCarouselTick(
     if (seg_x != e.geom.seg_x or seg_w != e.geom.seg_w or bg != e.last_bg)
         return false;
 
+    // Skip the blit when the offset didn't advance (sub-pixel carry frames):
+    // the source content is identical, so the last frame is already correct.
+    // This avoids ~25% of the copy+flush work at typical speeds on high-refresh
+    // displays and lets the compositor skip a no-op present. The accumulator
+    // still carries the fractional remainder, so motion resumes exactly where
+    // it left off.
+    const prev_off = e.pixel_offset;
     const off = advanceCarouselOffset(e, utils.monotonicNs());
+    if (off == prev_off) return true;
     e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, seg_x, off, seg_w);
     // Skip the flush while the main thread holds the X server grab: xcb_flush
     // here would release the grab-batch requests mid-grab, splitting what must
@@ -324,7 +357,10 @@ pub fn drawSegCarouselTickAuto(dc: *drawing.DrawContext, accent: u32) bool {
     // drawCached → drawSegmentedTitles, which redraws ALL segments with the
     // correct accent colours (old focused → unfocused, new focused → focused).
     if (focus_signal.is_invalidated.load(.acquire)) return false;
+    const prev_off = e.pixel_offset;
     const off = advanceCarouselOffset(e, utils.monotonicNs());
+    // See drawCarouselTick: identical-offset frames need no blit or flush.
+    if (off == prev_off) return true;
     e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, e.geom.seg_x, off, e.geom.seg_w);
     // See drawCarouselTick: skip the flush inside an X server grab so the
     // shared output buffer is not released mid-grab.
@@ -424,6 +460,23 @@ pub fn drawSegmentedCarousel(
 
 // Private — shared rebuild/recolour/blit step
 
+/// Publish a freshly-built carousel entry: set the atomic `active` mirror and
+/// wake the carousel thread so the scroll starts on the next refresh instead of
+/// at the end of the idle interval. Must be called after storing a new entry
+/// while holding draw_mutex. Safe before startThread() — with the thread not
+/// running the mutex is never touched.
+inline fn publishActive() void {
+    render.active.store(true, .release);
+    if (carousel_thread != null) {
+        // Held only around the signal, matching the thread's activity check
+        // under carousel_mutex so the wakeup cannot be lost (see
+        // runCarouselThread).
+        carousel_mutex.lock();
+        carousel_cond.signal();
+        carousel_mutex.unlock();
+    }
+}
+
 /// Rebuilds `slot`'s pixmap from scratch when it is stale (window, title,
 /// cycle width, or segment geometry changed — or `force_rebuild` is set), or
 /// re-renders the existing pixmap in place on a colour-only change, then
@@ -449,9 +502,13 @@ fn commitCarouselFrame(
     const geom_stale = force_rebuild or if (slot.*) |*e| entryStale(e, window, title_invalidated, cycle_w, geom) else true;
 
     if (geom_stale) {
-        // Full rebuild: free old pixmap (if any) then delegate to buildCarouselEntry.
+        // Full rebuild: build the new pixmap before freeing the old one so a
+        // failed build keeps the previous pixmap live (the scroll continues on
+        // the old frame) instead of dropping to a blank segment.
+        const new_entry = try buildCarouselEntry(dc, text, bg, fg, baseline_y, geom, cycle_w, window);
         if (slot.*) |*old| old.cp.deinit();
-        slot.* = try buildCarouselEntry(dc, text, text_w, bg, fg, baseline_y, geom, cycle_w, window);
+        slot.* = new_entry;
+        publishActive();
         const e = &slot.*.?;
         const off = advanceCarouselOffset(e, e.last_ns);
         e.cp.blitFrame(dc.offscreen_pixmap, dc.gc, geom.seg_x, off, geom.seg_w);
@@ -460,11 +517,12 @@ fn commitCarouselFrame(
 
     const e = &slot.*.?;
 
-    if (e.last_bg != bg) {
+    if (e.last_bg != bg or e.last_fg != fg) {
         // Colour-only change: re-render into the existing pixmap without
         // freeing or reallocating it, preserving the scroll position.
         try e.cp.render(dc, text, bg, fg, baseline_y, leftPadOf(geom), cycle_w);
         e.last_bg = bg;
+        e.last_fg = fg;
     }
 
     const off = advanceCarouselOffset(e, utils.monotonicNs());
@@ -475,13 +533,12 @@ fn commitCarouselFrame(
 // Private — carousel entry construction
 
 /// Build a fresh CarouselPixmap and CarouselEntry from scratch.
-/// Computes left_pad and pixmap_w from `geom` and `text_w`, initialises the
-/// sub-pixel accumulator to zero, and captures the current monotonic timestamp.
+/// Computes left_pad and the blit-minimum pixmap width from `geom`, initialises
+/// the sub-pixel accumulator to zero, and captures the current monotonic timestamp.
 /// Returns a fully-populated entry ready to be stored in render.single or render.seg.
 fn buildCarouselEntry(
     dc: *drawing.DrawContext,
     text: []const u8,
-    text_w: u16,
     bg: u32,
     fg: u32,
     baseline_y: u16,
@@ -490,10 +547,14 @@ fn buildCarouselEntry(
     window: ?u32,
 ) !CarouselEntry {
     const left_pad = leftPadOf(geom);
-    const pixmap_w: u16 = @max(
-        left_pad + cycle_w + text_w, // room for text copy B
-        cycle_w + geom.seg_w, // room for blit at max offset
-    );
+    // The blit window is always [O, O + seg_w) with O in [0, cycle_w), so source
+    // pixels past cycle_w + seg_w are never read. Copy B clips at the pixmap
+    // edge when the title is wider than the segment: the window can only ever
+    // see the first seg_w - left_pad pixels of it, which always land inside the
+    // pixmap. A full second copy (left_pad + cycle_w + text_w) holds text that
+    // nothing ever reads — for very long titles that's roughly double the
+    // server-side pixmap memory for zero gain.
+    const pixmap_w: u16 = cycle_w + geom.seg_w;
     var cp = try drawing.CarouselPixmap.init(dc, pixmap_w);
     errdefer cp.deinit();
     try cp.render(dc, text, bg, fg, baseline_y, left_pad, cycle_w);
@@ -505,6 +566,7 @@ fn buildCarouselEntry(
         .frac_acc = 0.0,
         .last_ns = now_ns,
         .last_bg = bg,
+        .last_fg = fg,
         .window = window,
         .geom = geom,
     };

@@ -95,6 +95,21 @@ const PromptState = struct {
     /// that the prompt area needs to be redrawn.  Consumed (read + cleared)
     /// by `consumeRedrawRequest` to avoid a circular import between prompt ↔ bar.
     redraw_pending: bool = false,
+
+    // Layout cache: pixel width of the text before the caret, the block-caret
+    // width, and the scroll offset that keeps the caret visible.  Recomputed in
+    // `drawActive` only when `layout_dirty` is set (any keypress, activate,
+    // spawn_keep, or a bar-height change).  The caret-blink animation redraws an
+    // identical frame every cursor_blink_ms, so blink ticks reuse these cached
+    // values instead of re-running ~20 Pango shape passes per tick.  Font
+    // metrics, mode/prompt widths, and the scroll region are constant between
+    // keypresses, so the cache only needs invalidating when the buffer, cursor,
+    // mode, or bar height changes.
+    cached_pre_w: u16 = 0,
+    cached_caret_w: u16 = 0,
+    cached_scroll_x: u16 = 0,
+    cached_height: u16 = 0,
+    layout_dirty: bool = true,
 };
 
 var g: PromptState = .{};
@@ -272,6 +287,7 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
         const action = if (vim_mode) vim.handleCtrl(&g.vim_state, sym) else .none;
         applyAction(action);
         updateGhost(); // handleCtrl may have deleted text (Ctrl-W / Ctrl-U)
+        g.layout_dirty = true;
         g.redraw_pending = true;
         return true;
     }
@@ -287,6 +303,7 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
             g.ghost_len = 0;
         }
         g.is_blink_visible = true;
+        g.layout_dirty = true;
         g.redraw_pending = true;
         return true;
     }
@@ -300,6 +317,7 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     applyAction(action);
     updateGhost();
     g.is_blink_visible = true;
+    g.layout_dirty = true;
     g.redraw_pending = true;
     return true;
 }
@@ -347,6 +365,7 @@ fn handleAction(action: vim.Action) void {
             g.vim_state.reset();
             g.ghost_len = 0;
             g.has_space = false;
+            g.layout_dirty = true;
         },
     }
 }
@@ -385,6 +404,7 @@ fn activate() void {
         return;
     }
     g.is_active = true;
+    g.layout_dirty = true;
     g.redraw_pending = true;
     // No xcb_flush: xcb_grab_keyboard_reply already drained the XCB output
     // buffer to deliver the preceding grab request.  The two assignments above
@@ -775,6 +795,9 @@ fn textPrefixFit(dc: *drawing.DrawContext, text: []const u8, max_px: u16) []cons
 ///
 /// This is the correct behaviour for pre-cursor text in a scrolling field:
 /// the cursor must appear immediately after the last visible character with no "…".
+/// `text_w` is the caller's already-measured pixel width of `text` (null to
+/// measure here).  Callers usually measure the same slice for scroll layout,
+/// so passing it in avoids a second Pango shape pass.
 inline fn drawSpan(
     dc: *drawing.DrawContext,
     px: *i32,
@@ -782,9 +805,10 @@ inline fn drawSpan(
     scroll_end_x: u16,
     baseline: u16,
     text: []const u8,
+    text_w: ?u16,
     color: u32,
 ) !void {
-    const w = dc.measureTextWidth(text);
+    const w = text_w orelse dc.measureTextWidth(text);
     defer px.* += @intCast(w);
     if (w == 0) return;
 
@@ -803,8 +827,13 @@ inline fn drawSpan(
     const draw_x: u16 = @intCast(@max(px.*, tl));
     const available: u16 = @intCast(se - @as(i32, draw_x));
 
-    // Clip the visible suffix to the available width on the right.
-    const visible = textPrefixFit(dc, text[start..], available);
+    // Clip the visible suffix to the available width on the right.  When no
+    // left clip occurred, `w` is already the full width, so reuse it instead
+    // of letting textPrefixFit re-measure the same slice on its fast path.
+    const visible = if (start == 0)
+        (if (w <= available) text else textPrefixFit(dc, text, available))
+    else
+        textPrefixFit(dc, text[start..], available);
     if (visible.len > 0)
         try dc.drawText(draw_x, baseline, visible, color);
 }
@@ -868,10 +897,11 @@ inline fn drawBlockCursor(
     buf: []const u8,
     lo: usize,
     hi: usize,
+    text_w: ?u16,
     text_only: bool,
 ) !void {
     const block_text = if (hi > lo) buf[lo..hi] else " ";
-    const block_w = @max(dc.measureTextWidth(block_text), min_cursor_px);
+    const block_w = @max(text_w orelse dc.measureTextWidth(block_text), min_cursor_px);
 
     if (text_only) {
         if (hi > lo) {
@@ -1017,18 +1047,51 @@ fn drawActive(
     // caret_w used for layout is `cursor_width`.
     // In all other modes a full-character block model is used.
     const pre_cur_text = g.vim_state.buf[0..g.vim_state.cursor];
-    const pre_w_cur = dc.measureTextWidth(pre_cur_text);
 
-    const caret_w: u16 = if (g.vim_state.mode == .insert)
-        cursor_width
-    else
-        @max(
-            dc.measureTextWidth(if (g.vim_state.cursor < g.vim_state.len)
-                g.vim_state.buf[g.vim_state.cursor .. g.vim_state.cursor + 1]
-            else
-                " "),
-            min_cursor_px,
-        );
+    // Geometry is recomputed only when `layout_dirty`: the caret-blink
+    // animation redraws an identical frame every cursor_blink_ms, so blink
+    // ticks reuse the cached widths and scroll offset instead of re-running
+    // ~20 Pango shape passes per tick.  Font metrics, mode/prompt widths, and
+    // the scroll region are constant between keypresses, so the cache only
+    // needs invalidating when the buffer, cursor, mode, or bar height changes.
+    if (g.layout_dirty or height != g.cached_height) {
+        g.cached_pre_w = dc.measureTextWidth(pre_cur_text);
+        g.cached_caret_w = if (g.vim_state.mode == .insert)
+            cursor_width
+        else
+            @max(
+                dc.measureTextWidth(if (g.vim_state.cursor < g.vim_state.len)
+                    g.vim_state.buf[g.vim_state.cursor .. g.vim_state.cursor + 1]
+                else
+                    " "),
+                min_cursor_px,
+            );
+
+        var scroll_x: u16 = 0;
+        const cursor_right = prompt_w + g.cached_pre_w + g.cached_caret_w;
+        if (cursor_right > max_scroll_px) {
+            const min_scroll: u16 = cursor_right -| max_scroll_px;
+            // Snap scroll_x to the nearest character boundary at or past min_scroll.
+            // Without snapping, `drawSpan` draws text[start..] at text_left_x even
+            // though character `start` begins some pixels past text_left_x in virtual
+            // space.  That shift creates a gap between the rendered text and the caret
+            // that looks like a phantom extra character to the right of the cursor.
+            if (min_scroll <= prompt_w) {
+                const idx = textOffsetAtPx(dc, prompt, min_scroll);
+                scroll_x = dc.measureTextWidth(prompt[0..idx]);
+            } else {
+                const min_in_pre: u16 = min_scroll - prompt_w;
+                const idx = textOffsetAtPx(dc, pre_cur_text, min_in_pre);
+                scroll_x = prompt_w + dc.measureTextWidth(pre_cur_text[0..idx]);
+            }
+        }
+        g.cached_scroll_x = scroll_x;
+        g.cached_height = height;
+        g.layout_dirty = false;
+    }
+    const pre_w_cur = g.cached_pre_w;
+    const caret_w = g.cached_caret_w;
+    const scroll_x = g.cached_scroll_x;
 
     const post_text: []const u8 = if (g.vim_state.mode == .insert)
         g.vim_state.buf[g.vim_state.cursor..g.vim_state.len]
@@ -1038,28 +1101,9 @@ fn drawActive(
         else
             "");
 
-    var scroll_x: u16 = 0;
-    const cursor_right = prompt_w + pre_w_cur + caret_w;
-    if (cursor_right > max_scroll_px) {
-        const min_scroll: u16 = cursor_right -| max_scroll_px;
-        // Snap scroll_x to the nearest character boundary at or past min_scroll.
-        // Without snapping, `drawSpan` draws text[start..] at text_left_x even
-        // though character `start` begins some pixels past text_left_x in virtual
-        // space.  That shift creates a gap between the rendered text and the caret
-        // that looks like a phantom extra character to the right of the cursor.
-        if (min_scroll <= prompt_w) {
-            const idx = textOffsetAtPx(dc, prompt, min_scroll);
-            scroll_x = dc.measureTextWidth(prompt[0..idx]);
-        } else {
-            const min_in_pre: u16 = min_scroll - prompt_w;
-            const idx = textOffsetAtPx(dc, pre_cur_text, min_in_pre);
-            scroll_x = prompt_w + dc.measureTextWidth(pre_cur_text[0..idx]);
-        }
-    }
-
     // Draw prompt
     var px: i32 = @as(i32, text_left_x) - @as(i32, scroll_x);
-    try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, prompt, accent);
+    try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, prompt, prompt_w, accent);
 
     // Mode-specific text rendering.
     // When colon-command mode is active the cursor lives in the pill widget,
@@ -1073,15 +1117,15 @@ fn drawActive(
         const post_sel = g.vim_state.buf[sel[1]..g.vim_state.len];
 
         if (pre_sel.len > 0)
-            try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, pre_sel, fg);
+            try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, pre_sel, null, fg);
 
-        try drawBlockCursor(dc, &px, text_left_x, scroll_end_x, baseline, height, accent, bg, fg, g.vim_state.buf, sel[0], sel[1], false);
+        try drawBlockCursor(dc, &px, text_left_x, scroll_end_x, baseline, height, accent, bg, fg, g.vim_state.buf, sel[0], sel[1], null, false);
 
         try drawPostSpan(dc, px, text_left_x, ellipsis_end_x, baseline, post_sel, fg);
     } else if (g.vim_state.mode == .insert) {
         // Blinking thin caret; text NOT consumed by cursor position.
         if (pre_cur_text.len > 0)
-            try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, pre_cur_text, fg);
+            try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, pre_cur_text, pre_w_cur, fg);
 
         // Caret geometry was pre-computed before the mode branches below.
         const caret_top = g.cached_caret_top.?;
@@ -1102,11 +1146,11 @@ fn drawActive(
         const cur_hi = @min(g.vim_state.cursor + 1, g.vim_state.len);
 
         if (pre_text.len > 0)
-            try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, pre_text, fg);
+            try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, pre_text, pre_w_cur, fg);
 
         // In colon-command mode the cursor lives in the pill widget, so the
         // character underneath is shown as plain text instead of being boxed.
-        try drawBlockCursor(dc, &px, text_left_x, scroll_end_x, baseline, height, accent, bg, fg, g.vim_state.buf, g.vim_state.cursor, cur_hi, colon_active);
+        try drawBlockCursor(dc, &px, text_left_x, scroll_end_x, baseline, height, accent, bg, fg, g.vim_state.buf, g.vim_state.cursor, cur_hi, caret_w, colon_active);
 
         try drawPostSpan(dc, px, text_left_x, ellipsis_end_x, baseline, post_text, fg);
     }
