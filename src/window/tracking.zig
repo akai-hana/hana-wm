@@ -12,25 +12,17 @@ const minimize = @import("minimize");
 // tracking module.
 
 pub const Tracking = struct {
-    /// Maximum windows tracked across the whole window manager (all
-    /// workspaces combined) — this is `tiling.State.windows`, a single
-    /// global instance, not one per workspace.
-    ///
-    /// This is a hard compile-time cap, not a tuneable.  Power users with many
-    /// terminal instances or IDE popups can hit it; windows beyond the cap are
-    /// silently dropped from tiling and workspace membership with an error log.
-    ///
-    /// If this is regularly too small for your workflow, raise
-    /// constants.Limits.MAX_TILED_WINDOWS and rebuild.  The struct is
-    /// stack-allocated, so the cost is 4 bytes per capacity slot — 800 B at
-    /// MAX_TILED_WINDOWS.
+    /// Hard compile-time cap on windows tracked across the whole WM (all
+    /// workspaces combined) — `tiling.State.windows`, a single global
+    /// instance, not one per workspace. Not a tuneable: windows beyond the cap
+    /// are silently dropped from tiling and workspace membership (error log).
+    /// Raise constants.Limits.MAX_TILED_WINDOWS and rebuild if too small; the
+    /// struct is stack-allocated, 4 bytes per slot.
     const capacity = constants.Limits.MAX_TILED_WINDOWS;
 
-    // `len` below is a u8, which only stays a valid counter for `capacity`
-    // up to 255. Enforced at compile time rather than left as a comment, so
-    // raising MAX_TILED_WINDOWS past 255 fails the build instead of
-    // silently overflowing `len` at runtime. If this ever fires, widen
-    // `len` (e.g. to u16) alongside raising the cap.
+    // `len` is a u8, so capacity may not exceed 255. Enforced at compile time
+    // so raising MAX_TILED_WINDOWS past 255 fails the build instead of
+    // overflowing `len` at runtime; widen `len` alongside the cap.
     comptime {
         std.debug.assert(capacity <= std.math.maxInt(u8));
     }
@@ -45,16 +37,12 @@ pub const Tracking = struct {
         return std.mem.indexOfScalar(u32, self.buf[0..self.len], win) != null;
     }
 
-    /// Returns true if `win` may be safely appended or prepended.
+    /// Returns true if `win` may be safely appended or prepended. Logs an
+    /// error and returns false when the list is at capacity; the window is
+    /// NOT tracked (invisible to tiling, membership queries, focus history).
     ///
-    /// When the list is already at capacity, logs an error and returns false.
-    /// The window is NOT tracked — it becomes invisible to tiling, workspace
-    /// membership queries, and focus history with no further diagnostic output.
-    ///
-    /// NOTE: reaching capacity is a runtime condition that can happen in
-    /// production (many terminal windows, browser instances, etc.).  It is
-    /// handled with a log message and graceful degradation rather than an
-    /// assertion, so ReleaseFast builds remain safe.
+    /// NOTE: capacity is reachable in production (many terminals, browsers);
+    /// handled by log + graceful degradation so ReleaseFast stays safe.
     fn prepareAdd(self: *Tracking, win: u32) bool {
         if (self.contains(win)) return false;
         if (self.len >= capacity) {
@@ -112,13 +100,12 @@ pub const Entry = struct {
 };
 
 var g_windows: std.ArrayListUnmanaged(Entry) = .empty;
-/// win -> index into g_windows.items. Accelerates the single-ID lookup
-/// functions below (getWindowWorkspaceMask, isManaged, setWindowMask,
-/// removeWindow) to O(1) average instead of an O(n) linear scan. Unlike the
-/// bounded, small per-workspace tiling list (tracking.Tracking), g_windows
-/// is genuinely unbounded — it holds every managed window, tiled and
-/// floating alike — so its scan cost grows with real usage. Mirrors the
-/// AutoHashMap-by-window-ID pattern already used by layouts.CacheMap.
+/// win -> index into g_windows.items, giving the ID-lookup functions below
+/// (getWindowWorkspaceMask, isManaged, setWindowMask, removeWindow) O(1)
+/// average instead of an O(n) scan. Unlike the bounded per-workspace tiling
+/// list (Tracking above), g_windows is genuinely unbounded — it holds every
+/// managed window, tiled and floating — so its scan cost grows with real
+/// usage. Same window-ID index pattern as layouts.CacheMap.
 var g_index: std.AutoHashMapUnmanaged(u32, usize) = .empty;
 var g_alloc: std.mem.Allocator = undefined;
 var g_initialized: bool = false;
@@ -157,17 +144,13 @@ pub fn setWorkspaceCount(count: usize) void {
     g_workspace_count = count;
 }
 
-/// Called by workspaces.switchTo so getCurrentWorkspace() stays correct
-/// even when code queries tracking directly.
-///
-/// Asserts that `ws` is within the valid range [0, g_workspace_count).
-/// An out-of-range value (e.g. from a config reload that reduces the workspace
-/// count) would cause isOnCurrentWorkspace to return false for all windows,
-/// making every window appear off-workspace and silently breaking focus.
+/// Called by workspaces.switchTo so getCurrentWorkspace() stays correct even
+/// when code queries tracking directly. Asserts `ws` is in [0, g_workspace_count):
+/// an out-of-range value (e.g. a config reload reducing the workspace count)
+/// would make every window appear off-workspace and silently break focus.
 pub fn setCurrentWorkspace(ws: u8) void {
-    // ws < g_workspace_count alone is sufficient: setWorkspaceCount already
-    // asserts g_workspace_count <= 64, so ws < 64 is implied and would be
-    // redundant to check separately.
+    // ws < g_workspace_count is sufficient: setWorkspaceCount already asserts
+    // g_workspace_count <= 64, so ws < 64 is implied.
     std.debug.assert(ws < g_workspace_count);
     g_current = ws;
 }
@@ -195,24 +178,22 @@ pub fn registerWindow(win: u32, ws: u8) !void {
     };
 }
 
-/// Remove `win` from the tracking list.
-/// Swap-remove: O(1) after an O(1) index lookup via g_index; order doesn't
-/// matter for WM ops. When workspaces.zig is present it calls this after
-/// cleaning up workspace last_focused; when absent, window.zig calls this
-/// directly.
+/// Remove `win` from the tracking list. Swap-remove: O(1) after an O(1)
+/// g_index lookup; order doesn't matter for WM ops. When workspaces.zig is
+/// present it calls this after cleaning up workspace last_focused; when
+/// absent, window.zig calls this directly.
 pub fn removeWindow(win: u32) void {
     if (!g_initialized) return;
     const i = g_index.get(win) orelse return;
     _ = g_windows.swapRemove(i);
     _ = g_index.remove(win);
-    // swapRemove(i) moves the previously-last entry into slot i (unless i
-    // itself was the last slot) — repoint that window's index if so.
+    // swapRemove moved the previously-last entry into slot i (unless i was
+    // last) — repoint that window's index if so.
     if (i < g_windows.items.len) {
         const moved_win = g_windows.items[i].win;
         g_index.put(g_alloc, moved_win, i) catch {
-            // The map just shrank by one entry (g_index.remove above), so
-            // this put cannot need new bucket capacity and should not
-            // actually fail in practice; handled defensively regardless.
+            // The map just shrank by one (g_index.remove above), so this put
+            // should not need new bucket capacity; handled defensively anyway.
             std.log.err(
                 "tracking: failed to reindex window 0x{x} after swap-remove; " ++
                     "it may be unreachable by ID lookup until removed and re-registered",
@@ -222,14 +203,10 @@ pub fn removeWindow(win: u32) void {
     }
 }
 
-/// Update the workspace bitmask for `win`.
-///
-/// Called by workspaces.zig for tag and move operations.
-///
-/// Logs an error and returns (rather than asserting) if `win` is not in the list,
-/// because this is a runtime condition that can occur in production (e.g. a
-/// race between removeWindow and a delayed mask update), not a programmer
-/// invariant that can be checked at compile time.
+/// Update the workspace bitmask for `win` (tag and move operations).
+/// Logs an error and returns (rather than asserting) when `win` is untracked:
+/// a runtime condition in production (e.g. a removeWindow/mask-update race),
+/// not a compile-time-checkable invariant.
 pub fn setWindowMask(win: u32, mask: u64) void {
     if (!g_initialized) return;
     std.debug.assert(mask != 0);
@@ -311,10 +288,8 @@ pub inline fn allWorkspacesMask(count: usize) u64 {
 
 // Comptime workspace label table
 
-/// Comptime-generated number strings "1".."64" for workspace display labels.
-/// Sized to match the bitmask capacity so any valid workspace index can be
-/// looked up without risk of out-of-bounds access.
-/// Never heap-allocated; slices remain valid for the lifetime of the program.
+/// Comptime number strings "1".."64" for workspace display labels. Sized to
+/// the bitmask capacity so any valid index is in-bounds; never heap-allocated.
 pub const WORKSPACE_LABELS: [64][]const u8 = blk: {
     @setEvalBranchQuota(10_000);
     var labels: [64][]const u8 = undefined;
@@ -322,15 +297,11 @@ pub const WORKSPACE_LABELS: [64][]const u8 = blk: {
     break :blk labels;
 };
 
-/// Returns the lowest-indexed workspace this window belongs to, or null if
-/// the window is not tracked.
-///
-/// For windows on exactly one workspace (the common case) this is the
-/// definitive workspace index.  For tag-based multi-workspace windows the
-/// bitmask may have several bits set; this function returns the lowest set bit,
-/// which is not necessarily the *current* workspace.  Callers that need
-/// "is this window on the current workspace?" should use
-/// isOnCurrentWorkspace(win) instead.
+/// Lowest-indexed workspace this window belongs to, or null if untracked.
+/// Definitive for single-workspace windows (the common case); for tag-based
+/// multi-workspace windows the mask may have several bits set and this returns
+/// the lowest, which need not be the *current* workspace — use
+/// isOnCurrentWorkspace(win) for that.
 pub inline fn getWorkspaceForWindow(win: u32) ?u8 {
     const mask = getWindowWorkspaceMask(win) orelse return null;
     return @intCast(@ctz(mask));

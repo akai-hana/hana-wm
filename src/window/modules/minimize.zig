@@ -28,21 +28,19 @@ const MinimizedRecord = struct {
     entry: MinimizedEntry,
 };
 
-// Configurable via build_options.max_minimized_windows; 32 is the default.
-// Exceeding this silently fails (with a logged error) — see minimizeWindow.
-// Related to, but intentionally distinct from, constants.Limits.MAX_TILED_WINDOWS
-// — this bounds concurrently-minimized windows, not the tiled-window pool.
+// Configurable via build_options.max_minimized_windows (default 32).
+// Exceeding it silently fails with a logged error — see minimizeWindow.
+// Intentionally distinct from constants.Limits.MAX_TILED_WINDOWS: this bounds
+// concurrently-minimized windows, not the tiled-window pool.
 const MAX_MINIMIZED: usize = if (@hasDecl(build, "max_minimized_windows"))
     build.max_minimized_windows
 else
     32;
 
-// Entries are always appended at the end, and removeFromBuf preserves the
-// relative order of the remaining entries, so buffer position IS insertion
-// order: g_minimized.items[0] is the oldest minimized window still tracked,
-// g_minimized.items[g_minimized.len-1] is the most recent. LIFO/FIFO restore
-// order reads directly off this — which is why removal here must use
-// BoundedList.orderedRemove rather than swapRemove.
+// Entries are always appended at the end and removeFromBuf preserves relative
+// order, so buffer position IS insertion order: items[0] is the oldest
+// minimized window, items[len-1] the most recent. LIFO/FIFO restore read
+// directly off this — which is why removal uses orderedRemove, not swapRemove.
 var g_minimized: utils.BoundedList(MinimizedRecord, MAX_MINIMIZED) = .{};
 
 // Lifecycle
@@ -131,12 +129,10 @@ pub fn minimizeWindow() void {
     utils.pushWindowOffscreen(cs.conn, win);
 
     // Mirrors focusBestAvailable(.tiling_operation, notMinimized,
-    // focusMasterOrFirst). When restore_target is null (every window is
-    // minimized), focusMasterOrFirst can only resolve to clearFocus — its
-    // inner scan over visible windows is necessarily empty, since any visible
-    // window would not be minimized and so would have satisfied notMinimized —
-    // so that fallback is inlined as clearFocus here to keep the grab body
-    // free of reply waits.
+    // focusMasterOrFirst). When restore_target is null every window is
+    // minimized, so focusMasterOrFirst can only resolve to clearFocus — any
+    // visible window would have satisfied notMinimized — so that fallback is
+    // inlined as clearFocus here to keep the grab body free of reply waits.
     if (restore_target) |t| {
         if (restore_model) |m| focus.setFocusWithModel(t, .tiling_operation, m);
     } else {
@@ -175,17 +171,16 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
     utils.grabServer(conn);
 
     if (core.getState().config.tiling.enabled) {
-        // Restore at the original layout slot so a former master returns to master,
-        // rather than being appended to the end of the stack.
+        // Restore at the original layout slot so a former master returns to
+        // master rather than being appended to the stack end.
         if (tiling_index) |ti|
             tiling.addWindowAtFilteredIndex(win, ti)
         else
             tiling.addWindow(win);
-        // Focus must move to the restored window BEFORE the retile: layouts
-        // that pick their visible window from focus.getFocused() at retile
-        // time (e.g. monocle) would otherwise retile against the still-
-        // focused old window, then have no follow-up retile once focus
-        // actually lands on `win`.
+        // Move focus BEFORE the retile: layouts that pick their visible window
+        // from focus.getFocused() at retile time (monocle) would otherwise
+        // retile against the still-focused old window with no follow-up retile
+        // once focus lands on `win`.
         focus.setFocusWithModel(win, .window_spawn, focus_model);
         tiling.retileCurrentWorkspace();
     } else {
@@ -278,10 +273,9 @@ pub fn unminimizeAll() void {
     const fs_wins = fs_buf[0..fs_count];
 
     if (plain_wins.len > 0) {
-        // Focus the most recently minimized window, matching repeated LIFO
-        // unminimize semantics. plain_wins is still in FIFO order here, so
-        // that's simply the last entry — captured before the tiling-index
-        // sort below reorders the array.
+        // Focus the most recently minimized window (LIFO semantics):
+        // plain_wins is still in FIFO order here, so that's the last entry —
+        // captured before the tiling-index sort below reorders the array.
         const focus_target = plain_wins[plain_wins.len - 1].win;
 
         const conn = core.getState().conn;

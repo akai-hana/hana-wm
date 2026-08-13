@@ -28,9 +28,15 @@ var should_reload = std.atomic.Value(bool).init(false);
 
 /// Write end of the signal self-pipe (owned by events.zig), registered via
 /// `setSignalWriteFd`. The `reload_config` keybinding has no signal byte, so
-/// `reload()` writes a SIGHUP wake byte here to poke the event loop out of
-/// poll immediately instead of waiting for an unrelated signal.
+/// `reload()` writes a wake byte here to poke the event loop out of poll
+/// immediately instead of waiting for an unrelated signal.
 var signal_write_fd: std.posix.fd_t = -1;
+
+/// Byte `reload()` writes to the signal pipe to wake the event loop. Must not
+/// be a real signal number: `handleSignalPipe` dispatches every byte it reads,
+/// and re-dispatching the wake byte as SIGHUP would make the drain loop call
+/// `reload()` again — writing another wake byte and spinning forever.
+pub const WAKE_BYTE: u8 = 0xff;
 
 /// Registers the write end of the signal self-pipe so `reload()` can wake the
 /// event loop. Pass -1 to unregister (teardown).
@@ -52,7 +58,7 @@ pub inline fn quit() void {
 pub inline fn reload() void {
     should_reload.store(true, .release);
     if (signal_write_fd >= 0)
-        _ = std.os.linux.write(signal_write_fd, &[_]u8{@intFromEnum(std.posix.SIG.HUP)}, 1);
+        _ = std.os.linux.write(signal_write_fd, &[_]u8{WAKE_BYTE}, 1);
 }
 
 /// Atomically consumes the reload flag.
@@ -185,17 +191,16 @@ pub inline fn getAtomCached(comptime name: []const u8) error{AtomCacheNotInitial
 
 // EWMH root window advertisement
 
-/// EWMH atoms hana declares support for via `_NET_SUPPORTED`. Every entry
-/// here must correspond to a protocol hana genuinely honours — clients use
-/// this list to decide what they can rely on.
+/// EWMH atoms hana declares via `_NET_SUPPORTED`. Every entry must correspond
+/// to a protocol hana genuinely honours — clients use this list to decide what
+/// they can rely on.
 ///
 /// Notably fixes GLFW's "Iconification of full screen windows requires a WM
-/// that supports EWMH full screen" error (seen in Minecraft and other
-/// LWJGL/GLFW games): GLFW only fullscreens via `_NET_WM_STATE_FULLSCREEN`
-/// if that atom is listed here. Without it, GLFW falls back to a raw
-/// override-redirect window, which bypasses the WM — and override-redirect
-/// windows can't be iconified through the WM, so the next XIconifyWindow()
-/// call throws that error instead of doing anything.
+/// that supports EWMH full screen" error (Minecraft and other LWJGL games):
+/// GLFW only fullscreens via `_NET_WM_STATE_FULLSCREEN` if that atom is
+/// listed here; otherwise it falls back to a raw override-redirect window that
+/// bypasses the WM and can't be iconified through it, so the next
+/// XIconifyWindow() throws that error.
 const supported_atoms = [_][]const u8{
     "_NET_SUPPORTED",
     "_NET_SUPPORTING_WM_CHECK",
@@ -214,18 +219,16 @@ const supported_atoms = [_][]const u8{
     "_NET_WM_STRUT_PARTIAL",
 };
 
-/// Publishes hana's EWMH conformance on the root window.
+/// Publishes hana's EWMH conformance on the root window: per the spec a
+/// conformant WM creates a small identity ("check") window, tags it and the
+/// root with `_NET_SUPPORTING_WM_CHECK`, gives it a `_NET_WM_NAME`, and lists
+/// every honour-able hint in `_NET_SUPPORTED`. Clients (GLFW, Qt, Chromium, …)
+/// probe this once at startup; without it they assume a bare ICCCM-only WM and
+/// take more conservative — in GLFW's case broken — code paths (see
+/// `supported_atoms`).
 ///
-/// Per the EWMH spec, a conformant WM creates a small identity ("check")
-/// window, tags it and the root with `_NET_SUPPORTING_WM_CHECK` pointing at
-/// it, gives it a `_NET_WM_NAME`, and lists every hint it honours in
-/// `_NET_SUPPORTED` on the root. Clients (GLFW, Qt, Chromium, ...) probe
-/// this once at startup; without it they assume a bare ICCCM-only WM and
-/// take more conservative — in GLFW's case, broken — code paths (see
-/// `supported_atoms` above).
-///
-/// Must run once at startup, after initAtomCache() and before any client
-/// can map a window.
+/// Must run once at startup, after initAtomCache() and before any client can
+/// map a window.
 pub fn advertiseEwmhSupport(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t, root: u32) void {
     const supporting_wm_check = getAtomCached("_NET_SUPPORTING_WM_CHECK") catch return;
     const net_wm_name = getAtomCached("_NET_WM_NAME") catch return;

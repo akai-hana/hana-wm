@@ -26,11 +26,9 @@ pub fn tileWithOffset(
     const cell_h = (screen_h -| (grid.rows + 1) *| m.gap) / grid.rows;
     const win_h = layouts.shrinkClamped(cell_h, bm, state.config.min_window_dim);
 
-    // In relaxed mode, windows on a partial last row divide the full screen
-    // width among themselves rather than using the narrower grid-column width.
-    // The computation is gated on .relaxed so the division is skipped entirely
-    // on the default .rigid path; on .rigid partial_cell_w is just cell_w, so
-    // the is_partial_row pick below reduces to cell_w either way.
+    // In relaxed mode, a partial last row's windows share the full screen
+    // width rather than the narrower grid-column width. Gated on .relaxed so
+    // the division is skipped entirely on the default .rigid path.
     const last_row_count = n % grid.cols;
     const partial_cell_w: u16 = if (state.config.layout_variants.grid == .relaxed and last_row_count != 0) blk: {
         const count: u16 = @intCast(last_row_count);
@@ -55,12 +53,9 @@ pub fn tileWithOffset(
     }
 }
 
-/// Returns the column and row count for the smallest square grid that holds `n`
-/// windows. Special-cases `n == 3` to produce a single row of three rather than
-/// a 2×2 grid with a dead cell.
-///
-/// Uses integer ceiling-sqrt to avoid the float pipeline entirely; terminates
-/// in at most 12 iterations for any realistic window count.
+/// Returns the column/row counts of the smallest square grid holding `n`
+/// windows. Special-cases `n == 3` (one row of three, not a 2×2 with a dead
+/// cell). Uses integer ceiling-sqrt to avoid floats; at most 12 iterations.
 inline fn calcGridShape(n: usize) struct { cols: u16, rows: u16 } {
     if (n == 3) return .{ .cols = 3, .rows = 1 };
     var cols: u16 = 1;

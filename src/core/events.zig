@@ -110,11 +110,11 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
     }
     const idx = event_type & 0x7F; // strip XCB synthetic-event bit
 
-    // RandR extension events (extension base and base+1): screen, CRTC, and
-    // output change notifications. The carousel's refresh-rate cadence must
-    // track monitor re-configuration (xrandr mode switch, hotplug), so any of
-    // them triggers a re-detection. Extension events sit above the fixed
-    // dispatch table and would otherwise be dropped by the bounds guard below.
+    // RandR extension events (base and base+1): screen/CRTC/output change
+    // notifications. The carousel's refresh-rate cadence must track monitor
+    // re-configuration, so any of them triggers re-detection. Extension events
+    // sit above the fixed dispatch table and would otherwise be dropped by the
+    // bounds guard below.
     const randr_first = scale.randrFirstEvent();
     if (randr_first != 0 and idx >= randr_first and idx <= randr_first + 1) {
         scale.handleRandrNotifyEvent(core.getState().conn);
@@ -183,19 +183,23 @@ const SIGNAL_DRAIN_BUF = 16; // drain a burst in one syscall rather than one per
 
 /// Drains the non-blocking signal pipe and dispatches each signal.
 ///
-/// std.os.linux.read returns usize (the raw syscall result).  On error the
-/// kernel returns a negative value, which wraps to a huge unsigned number;
-/// an unsigned comparison against that value never reads as negative, so it
-/// would escape unchecked into @intCast and the slice bounds check.  Bitcast
-/// to isize first and treat any non-positive result (error or EOF) as a stop
-/// condition.
+/// std.os.linux.read returns usize (the raw syscall result); on error the
+/// kernel returns a negative value that wraps to a huge unsigned number, so an
+/// unsigned comparison would never read as negative and could escape unchecked
+/// into @intCast. Bitcast to isize and treat any non-positive result (error or
+/// EOF) as a stop condition.
 fn handleSignalPipe(fd: std.posix.fd_t) void {
     var buf: [SIGNAL_DRAIN_BUF]u8 = undefined;
     while (true) {
         const rc: isize = @bitCast(std.os.linux.read(fd, &buf, buf.len));
         if (rc <= 0) break; // 0 = EOF on write-end close, negative = error/EAGAIN
         const n: usize = @intCast(rc);
-        for (buf[0..n]) |byte| dispatchSignal(byte);
+        for (buf[0..n]) |byte| {
+            // Wake byte written by utils.reload(): poke the event loop out of
+            // poll, but don't re-dispatch it (see utils.WAKE_BYTE).
+            if (byte == utils.WAKE_BYTE) continue;
+            dispatchSignal(byte);
+        }
     }
 }
 
@@ -268,31 +272,24 @@ pub fn grabKeybindings() void {
 
 // Config reload
 
-/// Loads and validates a new config, then applies it atomically.
-/// On failure, the old config remains active.
+/// Loads and validates a new config, then applies it atomically. On failure
+/// the old config remains active.
 ///
 /// Ordering matters for every step:
-///   1. Keybind resolution and DPI scaling operate directly on `new_config`
-///      and must run before the swap.
-///   2. The swap (old -> new) happens BEFORE the subsystem reloads below, so
-///      window.reloadBorders()/tiling.reloadConfig()/bar.reload() — which all
-///      read core.getState().config — rebuild from the NEW config, not the
-///      stale one. (The old ordering silently kept bar/tiling/border settings
-///      from the previous config, then old_config.deinit() freed the bar
-///      string slices the new bar had shallow-copied: a use-after-free on the
-///      next bar draw.)
-///   3. grabKeybindings() must run after the swap: fillGrabCookies() reads
-///      core.getState().config.keybindings, so grabbing before the swap would
-///      re-grab the OLD keycodes.
-///   4. `committed` flips the errdefer: before the swap a failure must free the
-///      unused new_config; after the swap new_config is the live config, so a
-///      failure must instead keep it and free the displaced old_config.
-///      (Today every post-swap call returns void, so this is latent-but-safe —
-///      bar.reload() swallows its own errors and keeps the old bar, which
-///      applyReload re-points at the new config before that.)
-///   5. config.applyCarouselSettings() runs only after the swap so a rejected
-///      reload never leaks carousel settings into effect (they are staged on
-///      the config struct at parse time, not written to globals).
+///   1. Keybind resolution and DPI scaling operate on `new_config` and must
+///      run before the swap.
+///   2. The swap happens BEFORE the subsystem reloads (reloadBorders /
+///      reloadConfig / bar.reload) so they rebuild from the NEW config, not
+///      the stale one. (The old ordering kept stale bar/tiling/border settings
+///      and then old_config.deinit() freed the string slices the new bar had
+///      shallow-copied — a use-after-free on the next bar draw.)
+///   3. grabKeybindings() runs after the swap because fillGrabCookies() reads
+///      the live config — grabbing first would re-grab the OLD keycodes.
+///   4. `committed` flips the errdefer: pre-swap failure frees new_config;
+///      post-swap failure keeps it and frees the displaced old_config. (Every
+///      post-swap call is void today, so this is latent-but-safe.)
+///   5. applyCarouselSettings() runs after the swap so a rejected reload never
+///      leaks staged carousel settings into effect.
 fn handleConfigReload() !void {
     debug.info("Reload requested", .{});
     const cs = core.getState();

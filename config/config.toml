@@ -186,12 +186,12 @@ Mod+Shift+Z = "distrobox enter aur -- ~/Games/factorio-vanilla"
 # Mod+Z       = "cd ~/Games/isaac-repentance+; wine isaac-ng.exe"
 # Mod+Shift+Z = "pkill isaac-ng"
 
-Mod+X       = "~/Games/t-client/DDNet"
-Mod+Shift+X = "~/Games/etterna/Etterna"
+Mod+X       = "nixVulkanIntel TaterClient-DDNet"
+Mod+Shift+X = "nixVulkanIntel etterna"
 
 # ULTRAKILL
-Mod+C       = "steam steam://rungameid/1229490"
-Mod+Shift+C = "steam"
+Mod+C       = "nixGL nixVulkanIntel steam steam://rungameid/1229490"
+Mod+Shift+C = "nixGL nixVulkanIntel steam"
 
 Mod+V       = "nixGL pear-desktop"
 Mod+Shift+V = "distrobox enter aur -- stremio-enhanced"

@@ -48,26 +48,18 @@ const SpawnEntry = struct {
     pid: u32,
 };
 
-// Related to, but intentionally distinct from, constants.Limits.MAX_TILED_WINDOWS
-// — this bounds pending spawns awaiting their first-map, not the tiled-window pool.
+// Bounds pending spawns awaiting their first map, not the tiled-window pool.
 const SPAWN_QUEUE_CAP: usize = 64;
 
 // Module state
 //
-// All mutable window-module state is grouped into a single State struct,
-// mirroring the pattern focus.zig uses (see the comment above its own State
-// struct for the full rationale): init() and deinit() can each reset
-// everything in one assignment, there is one obvious encapsulation boundary,
-// and a deinit()+init() cycle can no longer leave an individual field
-// (e.g. a stale cursor position or a batch flag) un-reset by accident.
-//
-// There is still exactly one window-module context per process (the single
-// module-level `state` variable below) — this is for reset discipline, not
-// multi-context support.
+// All mutable window-module state is grouped into a single State struct
+// (mirroring the pattern focus.zig uses) so init()/deinit() each reset
+// everything in one assignment, and a deinit()+init() cycle can't leave a
+// stale field behind. Still exactly one context per process — this is for
+// reset discipline, not multi-context support.
 const State = struct {
-    /// Module allocator, set in init() and used for the spawn queue and any
-    /// other window-module lifetime allocations.  Null before the first
-    /// init() call.
+    /// Module allocator, set in init(). Null before the first init() call.
     alloc: ?std.mem.Allocator = null,
 
     spawn_queue: std.ArrayListUnmanaged(SpawnEntry) = .empty,
@@ -75,18 +67,13 @@ const State = struct {
     spawn_cursor: struct { x: i16 = 0, y: i16 = 0 } = .{},
 
     // Workspace-rule fast-lookup map: WM_CLASS name -> target workspace,
-    // rebuilt by buildRulesMap() from config.workspaces.rules at init and on
-    // every config reload. O(1) lookup instead of a linear scan per
-    // MapRequest.
-    //
-    // Keys borrow slices from the config, so they stay valid until the next
-    // reload rebuilds the map — reloads always commit the new config first.
+    // rebuilt from config.workspaces.rules at init and on every reload.
+    // Keys borrow slices from the config, valid until the next rebuild.
     rules_map: std.StringHashMapUnmanaged(u8) = .{},
 
     // Atoms used on every MapRequest, resolved once into plain u32 fields
-    // instead of hash-probed per event. An atom that fails to intern stays
-    // 0; a property request with atom 0 just comes back empty, which the
-    // reply guards below already handle.
+    // instead of hash-probed per event. An atom that fails to intern stays 0;
+    // a property request with atom 0 just comes back empty.
     atoms: struct {
         wm_protocols: u32 = 0,
         wm_class: u32 = 0,
@@ -95,18 +82,16 @@ const State = struct {
         net_wm_state_fullscreen: u32 = 0,
     } = .{},
 
-    // ICCCM focus-property cache (see the section comment further below for
-    // what accepts_input/wm_delete mean and why WM_TAKE_FOCUS isn't cached).
+    // ICCCM focus-property cache (see the section comment below).
     cache_slots: utils.BoundedList(CacheSlot, MAX_WINDOW_CACHE) = .{},
     cache_ready: bool = false,
 
-    // child XID -> managed toplevel XID, for previously resolved Electron/Qt
-    // child windows (see the "Child window resolution" section below).
+    // Child XID -> managed toplevel XID (see "Child window resolution").
     child_cache: utils.BoundedList(ChildEntry, CHILD_CACHE_CAP) = .{},
 
-    /// True when a grab-flush path already called updateFloatingWindowBorders()
-    /// inside its own server grab this batch, so the event loop can skip the
-    /// redundant second sweep. Reset unconditionally at the end of each batch.
+    /// True when a grab-flush path already swept floating borders this batch,
+    /// so the event loop can skip the redundant second sweep. Reset at the
+    /// end of each batch.
     borders_flushed_this_batch: bool = false,
 };
 
@@ -199,9 +184,9 @@ pub fn getGeometry(conn: *xcb.xcb_connection_t, win: u32) ?utils.Rect {
 //   wm_delete     — WM_DELETE_WINDOW support, for the close-window path.
 //
 // WM_TAKE_FOCUS is deliberately NOT cached (see getInputModel below): caching
-// it would risk missing the invalidating PropertyNotify if WM_PROTOCOLS was
-// set before our event mask was in place, wedging a window at a stale
-// `passive` verdict for life. A value that's never cached can't go stale.
+// it could miss the invalidating PropertyNotify if WM_PROTOCOLS was set before
+// our event mask was in place, wedging a window at a stale verdict for life. A
+// value that's never cached can't go stale.
 
 /// The four ICCCM focus delivery modes (§4.1.7), determined by the combination of
 /// WM_HINTS.input and WM_TAKE_FOCUS presence in WM_PROTOCOLS.
@@ -216,19 +201,17 @@ pub const InputModel = enum {
 
 /// Per-window properties cached from WM_HINTS and WM_PROTOCOLS.
 ///
-/// `accepts_input` (WM_HINTS.input) and `wm_delete` (WM_DELETE_WINDOW support)
-/// are cached because both are cheap to keep in sync via PropertyNotify and
-/// rarely change post-map. WM_TAKE_FOCUS support is intentionally excluded —
-/// see the section comment above and getInputModel() below.
+/// `accepts_input` and `wm_delete` are cached because both are cheap to keep
+/// in sync via PropertyNotify and rarely change post-map. WM_TAKE_FOCUS is
+/// intentionally excluded — see the section comment above and getInputModel().
 const CachedProps = struct {
     accepts_input: bool,
     wm_delete: bool,
 };
 
-// At realistic window counts (≤100 typical, ≤300 extreme) a linear scan
-// over u32 IDs in a flat array is cache-local and allocation-free. Windows
-// beyond MAX_WINDOW_CACHE still work — they just fall through to the live
-// X11 query path.
+// At realistic window counts (≤100 typical, ≤300 extreme) a linear scan over
+// u32 IDs in a flat array is cache-local and allocation-free. Windows beyond
+// MAX_WINDOW_CACHE still work — they just fall through to the live X11 path.
 const MAX_WINDOW_CACHE: usize = 512;
 
 const CacheSlot = struct {
@@ -249,23 +232,20 @@ fn setInputModelCacheReady(ready: bool) void {
     state.cache_ready = ready;
 }
 
-/// Consumes WM_PROTOCOLS and WM_HINTS cookies and stores the result.
-/// Called from handleMapRequest, which fires both cookies synchronously
-/// (one right before this call) since MapRequest is a one-time event per
-/// window, not a hot path worth pipelining.
+/// Consumes WM_PROTOCOLS and WM_HINTS cookies and stores the result. Called
+/// from handleMapRequest, which fires both cookies synchronously — MapRequest
+/// is a one-time event per window, not a hot path worth pipelining.
 ///
-/// The WM_PROTOCOLS reply is still scanned for WM_TAKE_FOCUS here (via
-/// `focus_atoms.take_focus`, folded into the same single-pass scan as
-/// WM_DELETE_WINDOW) but that half of the result is discarded rather than
-/// cached — see getInputModel() for why.
+/// The WM_PROTOCOLS reply is still scanned for WM_TAKE_FOCUS here but that
+/// half is discarded rather than cached — see getInputModel() for why.
 fn populateFocusCacheFromCookies(
     conn: *xcb.xcb_connection_t,
     win: u32,
     protocols_cookie: xcb.xcb_get_property_cookie_t,
     hints_cookie: xcb.xcb_get_property_cookie_t,
 ) void {
-    // Resolve both atoms upfront so a failure on either can discard both cookies
-    // together along a single cleanup path.
+    // Resolve both atoms upfront so a failure on either can discard both
+    // cookies together along a single cleanup path.
     const focus_atoms = resolveFocusAtoms() orelse {
         xcb.xcb_discard_reply(conn, protocols_cookie.sequence);
         xcb.xcb_discard_reply(conn, hints_cookie.sequence);
@@ -352,12 +332,10 @@ fn putCachedProps(win: u32, props: CachedProps) void {
 }
 
 /// Runs both WM_PROTOCOLS and WM_HINTS queries, stores the result (accepts_input
-/// + wm_delete only — see CachedProps), and returns it.
-/// Used by cache-miss paths so the populate logic lives in exactly one place.
-/// Cache misses are expected to be extremely rare (every window is populated
-/// at map time), so the fact that this issues its own WM_PROTOCOLS round trip
-/// even though getInputModel() below will immediately issue another one for
-/// the live take_focus check is not worth optimizing away.
+/// + wm_delete only — see CachedProps), and returns it. Used by cache-miss
+/// paths so the populate logic lives in exactly one place. Cache misses are
+/// expected to be extremely rare (every window is populated at map time), so
+/// the extra WM_PROTOCOLS round trip here is not worth optimizing away.
 fn queryAndCacheProps(conn: *xcb.xcb_connection_t, win: u32) CachedProps {
     const props = CachedProps{
         .accepts_input = queryWMHintsAcceptsInput(conn, win),
@@ -369,9 +347,9 @@ fn queryAndCacheProps(conn: *xcb.xcb_connection_t, win: u32) CachedProps {
 
 /// Resolves the ICCCM §4.1.7 focus-delivery model for `win`: accepts_input
 /// comes from the cache above (live query on a miss); supports_take_focus is
-/// always queried live, on every call — see the "ICCCM focus property cache"
-/// note for why. Focus changes are human-triggered and infrequent, so the
-/// extra round trip is not perceptible.
+/// always queried live — see the "ICCCM focus property cache" note for why.
+/// Focus changes are human-triggered and infrequent, so the extra round trip
+/// is not perceptible.
 pub fn getInputModel(conn: *xcb.xcb_connection_t, win: u32) InputModel {
     const accepts_input = if (getCachedProps(win)) |props|
         props.accepts_input
@@ -391,10 +369,9 @@ pub fn supportsWMDeleteCached(conn: *xcb.xcb_connection_t, win: u32) bool {
 }
 
 /// Fires the WM_PROTOCOLS get_property request for `win` and returns the cookie
-/// immediately, without blocking.  Used by focus.zig to overlap the round-trip
+/// immediately, without blocking. Used by focus.zig to overlap the round-trip
 /// latency of the WM_TAKE_FOCUS check with local focus-transition bookkeeping.
-/// Returns null when the WM_PROTOCOLS atom is not yet interned (should not happen
-/// after startup but handled gracefully).
+/// Returns null when the WM_PROTOCOLS atom is not yet interned.
 pub fn fireTakeFocusCookie(
     conn: *xcb.xcb_connection_t,
     win: u32,
@@ -453,9 +430,9 @@ inline fn dispatchTakeFocusFromReply(
 }
 
 /// Like sendWMTakeFocus but drains an already-fired WM_PROTOCOLS cookie instead
-/// of issuing a new round-trip.  The X server has been processing the property
-/// request since before commitFocusTransition ran its bookkeeping, so by the time
-/// this function is called the reply is typically already in the XCB receive buffer.
+/// of issuing a new round-trip. The X server has been processing the property
+/// request since before commitFocusTransition ran its bookkeeping, so by the
+/// time this is called the reply is typically already in the XCB receive buffer.
 pub fn sendWMTakeFocusWithCookie(
     conn: *xcb.xcb_connection_t,
     win: u32,
@@ -478,9 +455,9 @@ pub fn sendWMTakeFocusWithCookie(
 
 /// Sends a WM_TAKE_FOCUS client message (ICCCM §4.1.7) iff `win` advertises
 /// WM_TAKE_FOCUS in WM_PROTOCOLS. Checked live on every call, matching dwm's
-/// sendevent() — see the "ICCCM focus property cache" note above for why this
-/// one flag is never cached (Electron/GTK apps can set WM_PROTOCOLS before we
-/// subscribe to PropertyNotify, permanently staling a cached value).
+/// sendevent() — this one flag is never cached (see the "ICCCM focus property
+/// cache" note: Electron/GTK apps can set WM_PROTOCOLS before we subscribe to
+/// PropertyNotify, permanently staling a cached value).
 ///
 /// Hot paths (setFocus) use fireTakeFocusCookie / sendWMTakeFocusWithCookie to
 /// pipeline the round trip; this is the fallback for callers that don't
@@ -560,15 +537,11 @@ fn queryWMHintsAcceptsInput(conn: *xcb.xcb_connection_t, win: u32) bool {
 //
 // Electron/Qt/GTK toolkits render into child windows beneath their managed
 // toplevel, so ButtonPress/EnterNotify often land on a child, not the window
-// we manage. findManagedWindow walks the X11 tree upward (xcb_query_tree) to
-// find the managed ancestor — each step is a blocking round-trip, so without
-// caching, every hover over a nested Electron window pays 2-3 round-trips.
-//
-// state.child_cache maps child XID -> managed toplevel XID for previously resolved
-// children, so repeat hovers cost zero XCB calls. Entries are evicted when
-// their toplevel is unmanaged (evictChildCache, called from unmanageWindow).
-// A fixed flat array is enough: Electron nests at most 3-5 children per app,
-// so even five open Electron windows fit in ~25 entries.
+// we manage. findManagedWindow walks the X11 tree upward (each step a blocking
+// round-trip) to find the managed ancestor; state.child_cache maps child XID
+// -> managed toplevel XID so repeat hovers cost zero XCB calls. Entries are
+// evicted when their toplevel is unmanaged (evictChildCache). A fixed flat
+// array is enough: Electron nests at most 3-5 children per app.
 
 const CHILD_CACHE_CAP: usize = 64;
 
@@ -602,30 +575,22 @@ fn evictChildCache(managed_win: u32) void {
     }
 }
 
-/// Walks up the X11 window tree from `win` to find the top-level window the WM
-/// manages. Electron apps and other toolkits often use child windows for
-/// rendering, so button events may arrive on a child rather than the managed parent.
+/// Walks up the X11 window tree from `win` to find the managed toplevel.
 ///
-/// Fast path: checks the child-window cache first. On a hit, returns the cached
-/// managed ancestor with zero XCB calls, avoiding the 2–3 blocking
-/// xcb_query_tree round-trips that a full tree walk on every hover over an
-/// Electron/Qt child window would otherwise cost.
+/// Fast paths: direct managed window (most common), then the child-window
+/// cache (common for Electron/Qt after the first hover — zero XCB calls).
+/// Slow path: one blocking xcb_query_tree round-trip per level (2-3 for
+/// Electron), only on the first hover over a new child window.
 pub fn findManagedWindow(conn: *xcb.xcb_connection_t, win: u32, is_managed: *const fn (u32) bool) u32 {
-    // Fast path: direct managed window (most common case — no child involved).
     if (is_managed(win)) return win;
 
-    // Fast path: child-window cache hit (common for Electron/Qt after first hover).
+    // Cache hit; validate the cached toplevel is still managed (it may have
+    // been unmanaged since the entry was written), else fall through.
     if (state.child_cache.indexOf(win, matchChildEntry)) |i| {
-        // Validate: if the cached managed window was since unmanaged (race),
-        // is_managed will return false and we fall through to the tree walk.
         const managed = state.child_cache.items[i].managed;
         if (is_managed(managed)) return managed;
-        // stale entry — fall through to tree walk
     }
 
-    // Slow path: walk the X11 window tree. Each iteration is one blocking
-    // round-trip. Electron typically nests 2–3 levels, so this runs 2–3 times
-    // on the first hover over a new Electron window, then never again.
     var current = win;
     for (0..MAX_WINDOW_TREE_DEPTH) |_| {
         const tree_reply = xcb.xcb_query_tree_reply(
@@ -656,17 +621,15 @@ fn populateAtomCache() void {
 }
 
 /// (Re)build the workspace-rule fast-lookup map from the current config.
-/// Keys are borrowed slices pointing into the config's allocations and remain
-/// valid until the next rebuild.  If a class name appears in multiple rules,
-/// the first rule wins, matching the semantics of a plain linear scan through
-/// the rule list.
+/// Keys are borrowed slices into the config's allocations, valid until the
+/// next rebuild. If a class name appears in multiple rules, the first rule
+/// wins — matching a plain linear scan through the rule list.
 pub fn buildRulesMap() void {
     const alloc = state.alloc orelse return;
     state.rules_map.clearRetainingCapacity();
     for (core.getState().config.workspaces.rules.items) |rule| {
-        // putNoClobber: first occurrence wins.  On OOM the entry is silently
-        // dropped — there is no linear-scan fallback.  The affected rule will
-        // not fire; the window is routed to the current workspace instead.
+        // putNoClobber: first occurrence wins. On OOM the entry is silently
+        // dropped — the window is routed to the current workspace instead.
         state.rules_map.putNoClobber(alloc, rule.class_name, rule.workspace) catch {};
     }
 }
@@ -685,7 +648,7 @@ pub fn init(alloc: std.mem.Allocator) !void {
     try workspaces.init();
     minimize.init();
     // Pre-allocate spawn queue capacity for the common case (a handful of
-    // concurrent spawns).  Failure is non-fatal; the list grows on demand.
+    // concurrent spawns). Failure is non-fatal; the list grows on demand.
     state.spawn_queue.ensureTotalCapacity(alloc, 16) catch |err| {
         std.log.warn("window: spawn queue pre-allocation failed ({s}); will grow on demand", .{@errorName(err)});
     };
@@ -757,10 +720,10 @@ inline fn clampToValidWorkspace(target: u8, fallback: u8) u8 {
 }
 
 /// Resolves a pre-fired WM_CLASS property cookie against workspace rules.
-/// Parses the WM_CLASS reply inline (no allocation) then does two O(1) hash
-/// lookups in state.rules_map — one for the class component and one for the
-/// instance component.  The map is built at init() and after every config
-/// reload, so no linear scan over the rules list happens at spawn time.
+/// Parses the WM_CLASS reply inline (no allocation), then does two O(1) hash
+/// lookups in state.rules_map (class, then instance). The map is built at
+/// init() and after every config reload, so no linear rule scan runs at
+/// spawn time.
 fn findWorkspaceRuleByClass(cookie: xcb.xcb_get_property_cookie_t) ?u8 {
     const reply = xcb.xcb_get_property_reply(core.getState().conn, cookie, null) orelse return null;
     defer std.c.free(reply);
@@ -770,15 +733,13 @@ fn findWorkspaceRuleByClass(cookie: xcb.xcb_get_property_cookie_t) ?u8 {
     const data = raw[0..reply.*.value_len];
 
     // WM_CLASS is two consecutive null-terminated strings: "instance\0class\0".
-    // Do NOT trim trailing nulls from the whole buffer before splitting: doing
-    // so turns "instance\0\0" (empty class) into "instance", which has no null
-    // separator and causes an early return null — silently skipping the instance
-    // lookup.  Instead, find the separator first, then trim each component.
+    // Trim trailing nulls per component, not on the whole buffer: trimming the
+    // whole buffer first turns "instance\0\0" (empty class) into "instance"
+    // with no separator, silently skipping the instance lookup.
     const sep = std.mem.indexOfScalar(u8, data, 0) orelse return null;
     const instance = data[0..sep];
 
     const class_start = sep + 1;
-    // Extract the class component, stripping any trailing null padding.
     const class_raw = if (class_start < data.len) data[class_start..] else "";
     const class_end = std.mem.indexOfScalar(u8, class_raw, 0) orelse class_raw.len;
     const class = class_raw[0..class_end];
@@ -796,13 +757,9 @@ fn findWorkspaceRuleByClass(cookie: xcb.xcb_get_property_cookie_t) ?u8 {
 // Workspace assignment
 
 /// Phase 2 of workspace resolution: matches the window against the spawn queue.
-/// Tries exact PID match first; tracks the earliest daemon-mode (pid==0) entry
-/// as a candidate; falls back to the oldest pending entry.
-/// The caller only fires `c_net_wm_pid` (and calls this function at all) when
-/// the spawn queue is non-empty, so no empty-queue case is handled here.
-///
-/// Logs a debug message on both fallback branches so heuristic routing is
-/// visible in debug sessions.
+/// Tries an exact PID match first, then falls back to the sole-pending-entry
+/// heuristic. The caller only fires `c_net_wm_pid` when the queue is non-empty,
+/// so no empty-queue case is handled here.
 fn findSpawnQueueWorkspace(
     c_net_wm_pid: xcb.xcb_get_property_cookie_t,
 ) ?u8 {
@@ -815,19 +772,11 @@ fn findSpawnQueueWorkspace(
 
     const entries = state.spawn_queue.items;
 
-    // Single pass: exact PID match only.
-    //
-    // Daemon-mode entries (pid == 0) and windows without _NET_WM_PID
-    // (win_pid == 0) are intentionally NOT matched here.  Treating
-    // "win_pid == 0" as a daemon-mode signal conflates two distinct cases:
-    //
-    //   • A terminal registered with pid=0 (knows it will fork a grandchild).
-    //   • Any regular application that simply does not set _NET_WM_PID.
-    //
-    // The false-match risk is real: if a daemon-mode entry sits in the queue
-    // and an unrelated app without _NET_WM_PID maps, it would silently consume
-    // the daemon entry and route to the wrong workspace.  Both cases are
-    // handled correctly by the single-entry oldest-entry fallback below.
+    // Exact PID match only. Daemon-mode entries (pid == 0) are intentionally
+    // NOT matched against windows without _NET_WM_PID (win_pid == 0): that
+    // would conflate "terminal that will fork a grandchild" with "app that
+    // simply doesn't set _NET_WM_PID", letting an unrelated app silently
+    // consume the daemon entry and route to the wrong workspace.
     for (entries, 0..) |e, i| {
         if (win_pid != 0 and e.pid == win_pid) {
             _ = state.spawn_queue.swapRemove(i);
@@ -835,18 +784,11 @@ fn findSpawnQueueWorkspace(
         }
     }
 
-    // Oldest-entry fallback — only safe when there is exactly one pending entry.
-    // Common case: the app was launched via `sh -c "cmd"` and the window reports
-    // a PID that is a grandchild of the tracked sh process (sh exec-optimised into
-    // cmd, or cmd forked a subprocess for its UI).  With a single entry there is
-    // no ambiguity: it must belong to this window.
-    //
-    // With multiple entries we cannot know which entry belongs to this window.
-    // Consuming items[0] would mis-route the window to whatever workspace the
-    // *oldest* pending spawn was registered on — which may be a completely
-    // different workspace than where the user currently is (the classic symptom:
-    // "window spawns on the workspace I was previously on").  Return null so
-    // handleMapRequest falls back to current_ws instead.
+    // Sole-entry fallback: with exactly one pending entry there's no ambiguity
+    // (the app was launched via `sh -c "cmd"` and reports a grandchild PID).
+    // With multiple entries we can't know which one this window belongs to —
+    // consuming items[0] would mis-route it to the oldest pending spawn's
+    // workspace, so return null and let handleMapRequest fall back to current_ws.
     if (state.spawn_queue.items.len != 1) {
         std.log.debug(
             "spawn: no exact PID match for pid={d}, {d} entries pending — ambiguous, routing to current workspace",
@@ -865,9 +807,8 @@ fn findSpawnQueueWorkspace(
 
 /// Resolves the target workspace for a newly mapped window. Queries are
 /// fire-then-drain, not pipelined (see handleMapRequest below for why), and
-/// WM_CLASS / _NET_WM_PID are only fired when actually needed (a rule set
-/// exists; the spawn queue is non-empty) — so there's nothing to discard on
-/// paths that skip them.
+/// WM_CLASS / _NET_WM_PID are only fired when actually needed — so there's
+/// nothing to discard on paths that skip them.
 fn resolveTargetWorkspace(win: u32, current_ws: u8) u8 {
     const cs = core.getState();
 
@@ -904,21 +845,20 @@ pub fn registerSpawn(workspace: u8, pid: u32) void {
 // mapWindowToScreen fires+drains xcb_query_pointer synchronously (MapRequest
 // is once-per-window, so the round trip isn't perceptible). Don't reach for
 // prefetch/caching here — that's for genuinely hot paths like dragging and
-// retiling, where the savings actually matter.
+// retiling.
 
 /// Record the cursor position from a drained pointer reply for later
 /// spawn-crossing suppression checks.  The caller owns the reply memory;
 /// this function only reads from it.
 ///
-/// When `ptr_reply` is null (pointer query failed), the suppression flag is
-/// cleared rather than leaving `state.spawn_cursor` at its previous value, which
-/// could be {0,0} on startup and cause false suppression for windows at the
-/// screen origin.
+/// When `ptr_reply` is null, the suppression flag is cleared rather than
+/// leaving `state.spawn_cursor` at its previous value (which could be {0,0}
+/// on startup and cause false suppression for windows at the screen origin).
 fn snapshotSpawnCursorFromReply(ptr_reply: ?*xcb.xcb_query_pointer_reply_t, suppress_reason: core.FocusSuppressReason) void {
     if (suppress_reason != .window_spawn) return;
     const ptr = ptr_reply orelse {
-        // Cannot snapshot a valid cursor position — disable suppression so
-        // the stale state.spawn_cursor value does not block legitimate focus events.
+        // No valid cursor position — disable suppression so the stale
+        // state.spawn_cursor cannot block legitimate focus events.
         focus.setSuppressReason(.none);
         return;
     };
@@ -932,10 +872,9 @@ fn snapshotSpawnCursorFromReply(ptr_reply: ?*xcb.xcb_query_pointer_reply_t, supp
 ///
 ///   Before the grab — no reply needed, so the compositor keeps compositing:
 ///     • tiling.addWindow + retileCurrentWorkspace: configure_window for every
-///       managed window. Can take 5–20 ms on weak hardware; running it outside
+///       managed window. Can take 5-20 ms on weak hardware; running it outside
 ///       the grab avoids a compositor stall on every spawn.
-///     • xcb_query_pointer, fired and drained synchronously (see the pointer
-///       snapshot comment above for why this isn't prefetched).
+///     • xcb_query_pointer, fired and drained synchronously.
 ///
 ///   Inside the grab (atomic, compositor-locked):
 ///     • applyBorderWidth + xcb_map_window + setFocus + border sweep + bar —
@@ -950,27 +889,23 @@ fn mapWindowToScreen(win: u32) void {
 
     // ── Outside the grab: expensive layout work ─────────────────────────────
     //
-    // Run tiling before the grab.  The configure_window calls issued by
-    // retileCurrentWorkspace are pure fire-and-forget output; they do not
-    // require the X server to be locked.  The compositor may composite
-    // intermediate frames — a window may briefly appear at its old position —
-    // but the grab below immediately follows and will issue the final correct
-    // geometry atomically before the first MapNotify, so no incorrect frame
-    // is ever displayed to the user.
+    // The configure_window calls from retile are pure fire-and-forget output;
+    // the compositor may composite an intermediate frame (a window briefly at
+    // its old position), but the grab below immediately issues the final
+    // geometry atomically before the first MapNotify, so no incorrect frame is
+    // ever displayed.
     //
-    // focus.setFocus(win, ...) below hasn't run yet at this point, so
-    // focus.getFocused() would still report the previously-focused window.
-    // Pass `win` explicitly as the pending focus target so focus-driven
-    // layouts (e.g. monocle) treat the new window as focused immediately,
-    // instead of lagging by one retile.
+    // focus.setFocus(win, ...) hasn't run yet, so focus.getFocused() still
+    // reports the previously-focused window. Pass `win` as the pending focus
+    // target so focus-driven layouts (e.g. monocle) treat the new window as
+    // focused immediately instead of lagging by one retile.
     if (tilingActive()) {
         tiling.addWindow(win);
         tiling.retileCurrentWorkspaceWithPendingFocus(win);
     } else {
         if (fullscreen.hasAnyFullscreen()) {
             // Leave it offscreen — restoreFloatGeom would immediately move it
-            // back to a visible position (its cached geometry, or the default
-            // floating position when uncached), undoing the push above.
+            // back to a visible position, undoing the push above.
             utils.pushWindowOffscreen(conn, win);
         } else {
             restoreFloatGeom(win);
@@ -980,10 +915,9 @@ fn mapWindowToScreen(win: u32) void {
     // ── Inside the grab: atomic map, focus, borders ─────────────────────────
     //
     // Resolve the input model BEFORE the grab: getInputModel's blocking
-    // WM_PROTOCOLS reply wait would implicitly flush the queued retile
-    // configure_window batch to the compositor mid-grab (same hazard the
-    // pre-drained pointer query above avoids). setFocusWithModel re-applies
-    // setFocus's own short-circuits (already-focused / no_input).
+    // WM_PROTOCOLS reply wait would implicitly flush the queued retile batch
+    // to the compositor mid-grab (same hazard the pre-drained pointer query
+    // avoids). setFocusWithModel re-applies setFocus's own short-circuits.
     const spawn_input_model = getInputModel(conn, win);
     utils.grabServer(conn);
 
@@ -991,16 +925,13 @@ fn mapWindowToScreen(win: u32) void {
     _ = xcb.xcb_map_window(conn, win);
 
     focus.setFocusWithModel(win, .window_spawn, spawn_input_model);
-    // Re-check the suppress reason *after* setFocus, not before: setFocus is
-    // what actually arms `.window_spawn` (via suppressionFor). Reading it
-    // beforehand — when it's almost always `.none` — meant this snapshot
-    // was skipped on virtually every spawn, leaving state.spawn_cursor
-    // stale and spawn-crossing suppression unable to match.
+    // Re-check the suppress reason *after* setFocus: setFocus is what arms
+    // .window_spawn (via suppressionFor), so reading it before — when it's
+    // almost always .none — would skip this snapshot on virtually every spawn.
     snapshotSpawnCursorFromReply(ptr_reply, focus.getSuppressReason());
 
-    // Post-retile border sweep: tiled-window borders were already updated by
-    // configureWithHints during retileCurrentWorkspace (via get_border_color),
-    // so only floating windows need sweeping here.
+    // Tiled-window borders were already updated by configureWithHints during
+    // the retile, so only floating windows need sweeping here.
     updateFloatingWindowBorders();
     bar.redrawInsideGrab();
     markBordersFlushed();
@@ -1031,10 +962,9 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const win = event.window;
     const conn = core.getState().conn;
 
-    // Guard against double-manage: a window can send multiple MapRequest events
-    // (e.g. if it unmaps and remaps itself quickly while the WM is still
-    // processing the first).  Without this guard, tiling.addWindow and the
-    // property queries below could fire twice for the same window.
+    // Double-manage guard: a window can send multiple MapRequest events (e.g.
+    // an unmap+remap race while the first is still processing); without it,
+    // tiling.addWindow and the property queries below would fire twice.
     if (tracking.isManaged(win)) return;
 
     // getCurrentWorkspace() returns ?u8; the value is already bounded to [0,255]
@@ -1109,41 +1039,35 @@ fn unmanageWindow(win: u32) void {
 
     uncacheWindowFocusProps(win);
 
-    // Evict any child-window cache entries pointing at this managed toplevel.
-    // Without this, a new window reusing the same XID could be mis-identified
-    // as the old toplevel's child on the next hover event.
+    // Evict child-cache entries pointing at this toplevel, so a new window
+    // reusing the same XID can't be mis-identified as its child on the next
+    // hover.
     evictChildCache(win);
 
     // ── Local bookkeeping, before the grab ─────────────────────────────────
     // tiling.removeWindow unconditionally evicts the combined cache entry
-    // (geometry + border + size hints), so no separate evictSizeHints call
-    // is needed here. All three removes are pure local bookkeeping (no X
-    // requests), so they run pre-grab — this lets the post-close focus target
-    // be resolved against win-free tracking state below, with its input model
-    // queried BEFORE the grab.
+    // (geometry + border + size hints). All three removes are pure local
+    // bookkeeping (no X requests), so they run pre-grab — letting the
+    // post-close focus target be resolved against win-free tracking state,
+    // with its input model queried BEFORE the grab.
     tiling.removeWindow(win);
     minimize.untrackWindow(win);
     workspaces.removeWindow(win);
 
-    // Fire the pointer query and drain the reply *before* grabbing the
-    // server.  Draining the reply inside the grab (e.g. from within
-    // resolveDestroyFocusTarget via xcb_query_pointer_reply) would trigger an
-    // implicit XCB output-buffer flush inside the grab — releasing all
-    // queued configure_window / set_input_focus requests to the compositor
-    // before xcb_ungrab_server.  Pre-draining here keeps the grab atomic.
-    // The pointer position is at most microseconds staler.
+    // Fire the pointer query and drain the reply before grabbing. Draining
+    // inside the grab would implicitly flush queued configure/set_input_focus
+    // requests to the compositor before xcb_ungrab_server, breaking the
+    // grab's atomicity. The pointer position is at most microseconds staler.
     const ptr_reply: ?*xcb.xcb_query_pointer_reply_t = if (was_focused) blk: {
         const cookie = xcb.xcb_query_pointer(cs.conn, cs.root);
         break :blk xcb.xcb_query_pointer_reply(cs.conn, cookie, null);
     } else null;
     defer if (ptr_reply) |r| std.c.free(r);
 
-    // Resolve the post-close focus target and its input model BEFORE the
-    // grab, so the grab body performs no blocking reply waits. A live
-    // getInputModel query inside the grab would implicitly flush the queued
-    // retile configure_window batch to the compositor mid-grab — the same
-    // atomicity hazard the pre-drained pointer query above avoids. setFocus's
-    // own .pointer_sync liveness guard is replicated here, pre-grab.
+    // Resolve the post-close focus target and its input model BEFORE the grab
+    // so the grab body performs no blocking reply waits (same atomicity
+    // hazard as above). setFocus's .pointer_sync liveness guard is replicated
+    // here, pre-grab.
     const destroy_target = if (was_focused) resolveDestroyFocusTarget(ptr_reply) else null;
     const destroy_model: ?InputModel = if (destroy_target) |t| blk: {
         if (t.reason == .pointer_sync and !focus.isWindowMapped(cs.conn, t.win)) break :blk null;
@@ -1156,12 +1080,10 @@ fn unmanageWindow(win: u32) void {
 
     if (was_focused) {
         // Resolve the real post-close focus BEFORE retiling: tiling.removeWindow
-        // above already dropped `win` from the workspace list, but
-        // focus.getFocused() still returns it until clearFocus/setFocus runs.
-        // A retile in between would read that stale, no-longer-present ID —
-        // focus-driven layouts (monocle) fall back to an arbitrary window in
-        // that case — and nothing retiles again once focus actually lands on
-        // the right window below.
+        // already dropped `win` from the workspace list, but focus.getFocused()
+        // still returns it until clearFocus/setFocus runs. A retile in between
+        // would read that stale ID — focus-driven layouts (monocle) fall back
+        // to an arbitrary window — and nothing retiles again once focus lands.
         focus.clearFocus();
         // destroy_model is null only when the liveness guard failed above; in
         // that case skip focus, matching setFocus's early return.
@@ -1173,10 +1095,8 @@ fn unmanageWindow(win: u32) void {
             if (current_ws == ws) tiling.retileIfDirty() else tiling.retileInactiveWorkspace(ws);
     }
 
-    // Post-retile border sweep: tiled-window borders are already current after
-    // retileIfDirty (handled by configureWithHints), so only float windows need
-    // a sweep here.  updateWorkspaceBorders() would re-send
-    // change_window_attributes to every tiled window redundantly.
+    // Tiled-window borders are already current after retileIfDirty (handled by
+    // configureWithHints), so only float windows need a sweep here.
     updateFloatingWindowBorders();
     bar.redrawInsideGrab();
     markBordersFlushed();
@@ -1196,28 +1116,24 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t) void {
 
 /// Post-unmanage focus target resolution — PURE, no side effects.
 ///
-/// Resolves where focus should land after `win` (the just-removed focused
-/// window) closed: the scroll-layout MRU prev, else the window under the
-/// pointer, else the first visible window on the current workspace. Returns
-/// null when nothing should receive focus (unmanageWindow falls back to
-/// clearFocus).
+/// Resolves where focus should land after the focused window closes: the
+/// scroll-layout MRU prev, else the window under the pointer, else the first
+/// visible window on the current workspace. Returns null when nothing should
+/// receive focus (unmanageWindow falls back to clearFocus).
 ///
 /// The caller applies the result via focus.setFocusWithModel with a
 /// pre-resolved input model, so the model's blocking WM_PROTOCOLS reply wait
 /// happens BEFORE the server grab rather than inside it.
 ///
-/// `.pointer_sync` (the pointer-child case) may raise a floating window (the
-/// stacking order may have changed after the closed window was removed) and
-/// arms the confirm/retry machinery for non-compliant clients.
-/// Accepts a pre-drained pointer reply (null if the query failed or window
-/// was not focused).  The caller owns the memory and must free it; this
-/// function only reads.  Accepting the reply instead of the cookie prevents
-/// an implicit XCB output-buffer flush (xcb_query_pointer_reply) from
-/// occurring inside the server grab in unmanageWindow.
+/// `.pointer_sync` (the pointer-child case) may raise a floating window and
+/// arms the confirm/retry machinery for non-compliant clients. Accepts a
+/// pre-drained pointer reply (null if the query failed or window was not
+/// focused); the caller owns its memory — accepting the reply instead of the
+/// cookie prevents an implicit XCB output-buffer flush inside the grab.
 fn resolveDestroyFocusTarget(ptr_reply: ?*xcb.xcb_query_pointer_reply_t) ?DestroyFocusTarget {
     // Scroll layout: windows can be off-screen, so the pointer is often not
-    // over any managed window.  Bypass pointer-based focus entirely and use
-    // the focus history recorded by tiling.updateWindowFocus instead.
+    // over any managed window. Bypass pointer-based focus entirely and use the
+    // focus history recorded by tiling.updateWindowFocus.
     // takePrevFocusedForScroll is a no-op (returns null) in all other layouts.
     if (tiling.takePrevFocusedForScroll()) |prev| {
         if (tracking.isOnCurrentWorkspaceAndVisible(prev)) {
@@ -1225,11 +1141,9 @@ fn resolveDestroyFocusTarget(ptr_reply: ?*xcb.xcb_query_pointer_reply_t) ?Destro
         }
     }
 
-    // reply memory is owned by the caller; no std.c.free here.
-    // xcb_query_pointer's `child` may be a non-managed toolkit sub-window XID,
-    // not the managed toplevel — resolve it via findManagedWindow (which checks
-    // the child-window cache first).  child == 0 means the pointer is over no
-    // window at all; skip the tree walk on XID 0 and fall through instead.
+    // xcb_query_pointer's `child` may be a non-managed toolkit sub-window, not
+    // the managed toplevel — resolve it via findManagedWindow. child == 0
+    // means the pointer is over no window; skip the tree walk and fall through.
     if (ptr_reply) |reply| {
         if (reply.*.child != 0) {
             const child = findManagedWindow(core.getState().conn, reply.*.child, tracking.isManaged);
@@ -1275,28 +1189,18 @@ fn sendConfigureNotify(win: u32, geom: core.WindowGeometry) void {
     _ = xcb.xcb_send_event(core.getState().conn, 0, win, xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY, @ptrCast(&ev));
 }
 
-/// Synthesize and send a ConfigureNotify event with the window's current geometry.
+/// Synthesize a ConfigureNotify with the window's current geometry, cheapest
+/// source first:
 ///
-/// Three paths, in order of cost:
-///
-///   1. Tiling cache hit — zero round-trips.  The geometry for tiled windows is
-///      always up-to-date in the tiling CacheMap after a retile pass.
-///
-///   2. Fullscreen fast path — zero round-trips.  Fullscreen geometry is fully
-///      determined by the screen dimensions written in enterFullscreen:
-///      (x=0, y=0, width=screen_width, height=screen_height, border_width=0).
-///      The tiling cache for a fullscreen window is intentionally invalidated on
-///      enter (so retile skips it), so path 1 misses and we arrive here.
-///      Handling it directly here avoids falling through to the blocking
-///      xcb_get_geometry path, which would cost one server round-trip per
-///      ConfigureRequest — a problem for video players and screensavers that
-///      poll their size continuously.
-///
-///   3. True cache miss — one blocking xcb_get_geometry round-trip.  This should
-///      only occur for floating windows that have never been retiled and are not
-///      fullscreen.  It is a genuine fallback, not a hot path.
+///   1. Tiling cache — zero round-trips (always current after a retile).
+///   2. Fullscreen — geometry is fixed at (0, 0, screen_w, screen_h, bw=0);
+///      enterFullscreen writes exactly this and invalidates the tiling cache
+///      entry so the window misses path 1 while fullscreen. Handling it here
+///      avoids a blocking xcb_get_geometry per ConfigureRequest, which matters
+///      for video players that poll their size continuously.
+///   3. True cache miss — one blocking xcb_get_geometry. Floating windows
+///      never retiled; a fallback, not a hot path.
 fn sendSyntheticConfigureNotify(win: u32) void {
-    // Path 1: tiling cache — zero round-trips.
     if (tiling.getWindowGeom(win)) |rect| {
         const border: u16 = if (tiling.getStateOpt()) |s| s.config.border_width else 0;
         sendConfigureNotify(win, .{
@@ -1309,9 +1213,6 @@ fn sendSyntheticConfigureNotify(win: u32) void {
         return;
     }
 
-    // Path 2: fullscreen — geometry is always (0, 0, screen_w, screen_h, bw=0).
-    // enterFullscreen writes exactly these values and invalidates the tiling
-    // cache entry, so this window will always miss path 1 while fullscreen.
     if (fullscreen.isFullscreen(win)) {
         const screen = core.getState().screen;
         sendConfigureNotify(win, .{
@@ -1324,8 +1225,6 @@ fn sendSyntheticConfigureNotify(win: u32) void {
         return;
     }
 
-    // Path 3: true cache miss — floating window, no retile yet. One blocking
-    // round-trip.  Rare in practice; not a hot path.
     const conn = core.getState().conn;
     const reply = xcb.xcb_get_geometry_reply(
         conn,
@@ -1346,9 +1245,8 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
     const win = event.window;
 
     // Fast exit: no geometry fields requested — nothing for the WM to act on.
-    // Checked before the tiling/fullscreen predicates to avoid two hash probes
-    // on stacking-order-only requests (e.g. from compositors or override-redirect
-    // games) that carry no geometry mask bits.
+    // Checked before the tiling/fullscreen predicates to skip two hash probes
+    // on stacking-order-only requests (compositors, override-redirect games).
     const mask = event.value_mask & GEOMETRY_MASK;
     if (mask == 0) return;
 
@@ -1359,12 +1257,12 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
         return;
     }
 
-    // Deny min-size ConfigureRequests from the window being drag-resized.
-    // When the WM sizes a floating window below its WM_NORMAL_HINTS minimum,
-    // the client fires a ConfigureRequest back with its minimum dimensions.
-    // Honouring that request races with the next MotionNotify and causes
-    // visible flicker.  Instead, echo the geometry the WM already applied so
-    // the client settles without fighting the drag.
+    // Deny min-size ConfigureRequests from the window being drag-resized. When
+    // the WM sizes a floating window below its WM_NORMAL_HINTS minimum, the
+    // client fires a ConfigureRequest back with its minimum dimensions;
+    // honouring it races the next MotionNotify and causes visible flicker.
+    // Echo the geometry the WM already applied so the client settles without
+    // fighting the drag.
     if (drag.isResizingWindow(win)) {
         const last = drag.getDragLastRect();
         if (last.width != 0) {
@@ -1376,8 +1274,8 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
                 .border_width = getBorderWidth(),
             });
         } else {
-            // No motion event has arrived yet in this drag — fall back to a
-            // get_geometry round-trip so we echo an accurate current size.
+            // No motion event yet in this drag — get_geometry round-trip so we
+            // echo an accurate current size.
             sendSyntheticConfigureNotify(win);
         }
         return;
@@ -1468,11 +1366,10 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t) void {
     if (suppressSpawnCrossing(event.root_x, event.root_y)) return;
     // When child is zero the pointer left to an area not covered by any window.
     if (event.child == 0) return;
-    // Guard against unmanaged subwindows (e.g. embedded GTK widgets): LeaveNotify
-    // on root with a non-zero child does not guarantee the child is a managed
-    // toplevel.  Checking isManaged here avoids a spurious workspace-mask lookup
-    // in maybeFocusWindow for every non-toplevel the pointer traverses, and is
-    // consistent with how handleEnterNotify routes through findManagedWindow.
+    // Guard against unmanaged subwindows (e.g. embedded GTK widgets): a root
+    // LeaveNotify with non-zero child doesn't guarantee a managed toplevel.
+    // This avoids a spurious workspace lookup for every non-toplevel the
+    // pointer traverses, consistent with handleEnterNotify's findManagedWindow.
     if (!tracking.isManaged(event.child)) return;
     maybeFocusWindow(event.child);
 }
@@ -1484,9 +1381,9 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
     const conn = core.getState().conn;
 
     // WM_NORMAL_HINTS: refresh the size-hint cache so max-size, resize-
-    // increment, and aspect-ratio constraints remain accurate for apps that
-    // update these hints dynamically after map time (e.g. terminal emulators
-    // adjusting their resize-increment grid when the font changes).
+    // increment, and aspect-ratio constraints stay accurate for apps that
+    // update hints after map time (e.g. terminal emulators adjusting their
+    // increment grid when the font changes).
     if (event.atom == xcb.XCB_ATOM_WM_NORMAL_HINTS) {
         const cookie = xcb.xcb_get_property(
             conn,
@@ -1502,10 +1399,8 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
     }
 
     if (event.atom != state.atoms.wm_protocols and event.atom != xcb.XCB_ATOM_WM_HINTS) return;
-    // Re-query and store the updated focus properties in the window-level cache
-    // (CacheSlot array).  Without this call the CacheSlot would stay stale
-    // until the window is destroyed, and future getCachedProps hits would
-    // return an outdated model.
+    // Re-query and cache the updated focus properties, else the CacheSlot
+    // stays stale until the window is destroyed.
     _ = queryAndCacheProps(conn, event.window);
 }
 
@@ -1612,16 +1507,14 @@ pub fn applyBorder(win: u32) void {
     _ = xcb.xcb_change_window_attributes(core.getState().conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{borderColor(win)});
 }
 
-/// Refresh border colors for all windows on the current workspace.
-/// Tiled windows are deduped via the tiling CacheMap, so the common
-/// steady-state (focused window unchanged) generates zero XCB traffic.
-/// Shared iteration loop for workspace border sweeps.
+/// Refresh border colors for all windows on the current workspace. Shared
+/// iteration loop for workspace border sweeps:
 ///
-/// When `skip_tiled` is true (updateFloatingWindowBorders): skips tiled windows
-/// because configureWithHints has already updated their borders via get_border_color.
-///
-/// When `skip_tiled` is false (updateWorkspaceBorders): applies tiling-aware
-/// deduplication via sendBorderColorIfChanged to avoid redundant XCB requests.
+/// - `skip_tiled` true (updateFloatingWindowBorders): skip tiled windows —
+///   configureWithHints already updated their borders via get_border_color.
+/// - `skip_tiled` false (updateWorkspaceBorders): dedup via the tiling
+///   CacheMap (sendBorderColorIfChanged), so the steady-state focused-window
+///   sweep generates zero XCB traffic.
 fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
     const cur = tracking.getCurrentWorkspace() orelse return;
     const cur_bit = tracking.workspaceBit(cur);
@@ -1633,7 +1526,7 @@ fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
         if (comptime skip_tiled) {
             if (tilingActive() and tiling.isWindowTiled(win)) continue;
         } else {
-            // Dedup via the tiling CacheMap: skip the XCB call when color is unchanged.
+            // Dedup via the tiling CacheMap: skip the XCB call when unchanged.
             if (tiling.sendBorderColorIfChanged(win, color)) continue;
         }
         _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{color});
@@ -1659,16 +1552,13 @@ pub fn markBordersFlushed() void {
     state.borders_flushed_this_batch = true;
 }
 
-/// Event-loop entry point for the per-batch border sweep.
-/// Calls updateWorkspaceBorders() only when no grab-flush path already did so,
-/// then unconditionally resets the flag for the next batch.
+/// Event-loop entry point for the per-batch border sweep. Sweeps only when no
+/// grab-flush path (markBordersFlushed) already did so, then resets the flag
+/// for the next batch.
 ///
-/// CALLING CONTRACT: This function must be called exactly once per event batch,
-/// at the end of the batch.  Calling it multiple times in a single batch will
-/// cause redundant border sweeps: the flag is reset unconditionally after the
-/// first call, so a second call will see the flag as false and sweep again.
-/// Any upstream refactor that introduces a second call site in the same batch
-/// must account for this behavior.
+/// CALLING CONTRACT: must be called exactly once per event batch, at its end.
+/// Multiple calls per batch cause redundant sweeps — the flag resets
+/// unconditionally, so a second call sees it false and sweeps again.
 pub fn updateWorkspaceBordersIfNeeded() void {
     if (!state.borders_flushed_this_batch) updateWorkspaceBorders();
     state.borders_flushed_this_batch = false;
@@ -1701,10 +1591,9 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     if (should_enter and !is_fs) {
         fullscreen.enterFullscreen(win, null);
     } else if (!should_enter and is_fs) {
-        // Use the window-specific exit path, not toggle(), which acts on
-        // whatever the fullscreen module considers "current" rather than
-        // on `win`.  This matters on multi-workspace setups where more
-        // than one workspace can hold a fullscreen window.
+        // Use the per-window exit path, not toggle() (which acts on whatever
+        // the fullscreen module deems "current") — multiple workspaces can
+        // each hold a fullscreen window.
         fullscreen.exitFullscreen(win);
     }
 }

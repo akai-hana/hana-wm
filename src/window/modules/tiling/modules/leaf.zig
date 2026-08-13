@@ -1,11 +1,10 @@
 //! Binary Space Partitioning tiling layout.
 //!
-//! Recursively splits the window list and the screen region in lockstep: each
-//! internal node bisects the region along its longer axis (a tie prefers a
-//! vertical split) and hands the two halves to the two halves of the window
-//! list, so `n` windows end up as ~log2(n) balanced leaves. One gap is inserted
-//! at every seam; the outer gap is stripped up front and borders are subtracted
-//! only at the leaves.
+//! Recursively splits the window list and screen region in lockstep: each
+//! internal node bisects along its longer axis (ties split vertically) and
+//! hands the halves to the halves of the window list, yielding ~log2(n)
+//! balanced leaves. One gap per seam; the outer gap is stripped up front,
+//! borders subtracted only at leaves.
 
 const utils = @import("utils");
 const layouts = @import("layouts");
@@ -25,17 +24,15 @@ pub fn tileWithOffset(
     const m = state.margins();
     const min_dim = state.config.min_window_dim;
 
-    // Strip the outer gap; each recursive split inserts one gap at its seam,
-    // so adjacent windows are always separated by exactly one gap_width.
-    // tileRegion's emitOrDefer honors ctx.defer_win — see LayoutCtx.defer_win.
+    // Strip the outer gap; each recursive split inserts one gap at its seam
+    // (adjacent windows stay one gap_width apart). emitOrDefer honors ctx.defer_win.
     const area = layouts.outerArea(screen_w, screen_h, y_offset, m.gap);
     tileRegion(ctx, windows, m, min_dim, area.x, area.y, area.w, area.h);
 }
 
-/// Splits `dim` into two halves separated by `gap`.
-/// Each half is clamped to `min_dim` when `dim` is too small
-/// to produce a valid split, so recursive calls never produce zero-size regions.
-/// The invariant `first + gap + second ≈ dim` holds for all normal inputs.
+/// Splits `dim` into two halves separated by `gap`, clamping each half to
+/// `min_dim` when `dim` is too small — recursive calls never produce zero-size
+/// regions, and `first + gap + second ≈ dim` for normal inputs.
 inline fn halveWithMin(dim: u16, gap: u16, min_dim: u16) struct { first: u16, second: u16 } {
     const first: u16 = if (dim > gap) (dim - gap) / 2 else min_dim;
     const second: u16 = if (dim > first +| gap) dim - first - gap else min_dim;

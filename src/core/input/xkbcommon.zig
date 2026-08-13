@@ -61,13 +61,12 @@ pub const XkbState = struct {
         xkb.xkb_context_unref(self.context);
     }
 
-    /// Rebuilds the keymap, state, and keysym table after a server-side
-    /// mapping change (setxkbmap/xmodmap → XCB_MAPPING_NOTIFY).
-    ///
-    /// Keybinding dispatch resolves keysyms from `keysym_by_keycode`, so the
-    /// live table must track the new mapping or every binding silently stops
-    /// matching. On failure the previous mapping is kept and the next mapping
-    /// notify retries.
+/// Rebuilds the keymap, state, and keysym table after a server-side mapping
+/// change (setxkbmap/xmodmap → XCB_MAPPING_NOTIFY).
+///
+/// Dispatch resolves keysyms from `keysym_by_keycode`, so the table must
+/// track the new mapping or bindings silently stop matching. On failure the
+/// previous mapping is kept and the next mapping notify retries.
     pub fn rebuild(self: *XkbState, xcb_conn: *anyopaque) void {
         const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
         if (device_id == -1) return;
@@ -98,14 +97,13 @@ pub const XkbState = struct {
         return self.keysym_by_keycode[keycode];
     }
 
-    /// Reverse-look up a keysym to its keycode (used during config parsing).
-    /// Scans the flat table (248 entries, all in L1 cache). Called only at
-    /// config-parse time, never on the hot key-press path.
-    ///
-    /// The table holds each key's base (level-0) symbol, so a keysym that
-    /// only exists behind a Shift — e.g. `@` on a US layout — resolves to
-    /// null. Callers should warn when this happens: the binding cannot be
-    /// grabbed.
+/// Reverse-look up a keysym to its keycode (used during config parsing).
+/// Scans the flat table (248 entries, all in L1 cache); config-parse time
+/// only, never the hot path.
+///
+/// The table holds each key's level-0 symbol, so a Shift-only keysym — e.g.
+/// `@` on a US layout — resolves to null; callers should warn, since the
+/// binding cannot be grabbed.
     pub inline fn keysymToKeycode(self: *const XkbState, keysym: u32) ?u8 {
         for (8..256) |kc| {
             if (self.keysym_by_keycode[kc] == keysym) return @intCast(kc);
@@ -114,11 +112,10 @@ pub const XkbState = struct {
     }
 };
 
-/// Base (level-0) symbol for `kc`, independent of any modifier/lock state.
-/// Uses the keymap's level-0 entry directly rather than the live xkb_state,
-/// whose `get_one_sym` resolves keys under the current lock state (a
-/// CapsLock held at startup would otherwise pin the table to shifted
-/// symbols and break every lowercase binding).
+/// Base (level-0) symbol for `kc`, independent of lock state — reads the
+/// keymap's level-0 entry directly rather than the live xkb_state, whose
+/// `get_one_sym` resolves under current locks (a CapsLock held at startup
+/// would pin the table to shifted symbols and break lowercase bindings).
 inline fn baseSymbol(km: *xkb_keymap, kc: u8) u32 {
     var syms: [*c]const u32 = null;
     const n = xkb.xkb_keymap_key_get_syms_by_level(km, @intCast(kc), 0, 0, &syms);
@@ -147,11 +144,10 @@ pub fn keysymGetName(keysym: u32, buf: []u8) []const u8 {
 
 const XKB_RETRY_DELAY_MS = constants.XKB_RETRY_DELAY_MS;
 
-/// Sleeps between retry attempts; skips the sleep on the final attempt.
-/// Uses nanosleep directly — std.time.sleep is absent in this Zig build.
-///
-/// Resumes on EINTR (this WM installs a SIGCHLD handler, which can interrupt
-/// the sleep) so a signal arriving mid-retry doesn't shorten the delay.
+/// Sleeps between retry attempts (skipped on the final one). Uses nanosleep
+/// directly — std.time.sleep is absent in this Zig build. Resumes on EINTR
+/// (the WM's SIGCHLD handler can interrupt the sleep) so a signal doesn't
+/// shorten the delay.
 inline fn retryDelay(attempt: u8) void {
     if (attempt >= MAX_ATTEMPTS - 1) return;
     const ns = XKB_RETRY_DELAY_MS * std.time.ns_per_ms;
@@ -160,16 +156,13 @@ inline fn retryDelay(attempt: u8) void {
     while (true) {
         const rc = std.os.linux.nanosleep(&req, &rem);
         if (std.posix.errno(rc) != .INTR) break;
-        // Interrupted by a signal (this WM installs a SIGCHLD handler) —
-        // resume sleeping for the remaining time rather than returning
-        // early with a shortened delay.
+        // Signal interrupted the sleep — resume for the remaining time.
         req = rem;
     }
 }
 
-// retrySetup, retryDeviceId, and retryKeymap share the same retry-loop shape
-// but differ in operation and return type (!void vs !i32 vs !*xkb_keymap),
-// so they're left as small functions rather than one generic loop.
+// retrySetup, retryDeviceId, and retryKeymap share a retry-loop shape but
+// differ in return type (!void vs !i32 vs !*xkb_keymap), so they're separate.
 
 /// Calls xkb_x11_setup_xkb_extension, retrying up to MAX_ATTEMPTS times.
 /// The extension may not be ready immediately at WM startup.
@@ -192,9 +185,8 @@ fn retrySetup(xcb_conn: *anyopaque) !void {
 }
 
 /// Calls xkb_x11_get_core_keyboard_device_id, retrying up to MAX_ATTEMPTS
-/// times. Like the XKB extension itself, the core keyboard device may not
-/// be enumerable yet in the same early-startup window retrySetup guards
-/// against.
+/// times — the core keyboard device may not be enumerable yet in the same
+/// early-startup window retrySetup guards against.
 fn retryDeviceId(xcb_conn: *anyopaque) !i32 {
     for (0..MAX_ATTEMPTS) |i| {
         const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
@@ -204,10 +196,9 @@ fn retryDeviceId(xcb_conn: *anyopaque) !i32 {
     return error.XkbNoKeyboard;
 }
 
-/// Minimum reachable keysyms in keycode range 8..128 for a keymap to count
-/// as fully populated. A healthy keymap has 100+; 40 stays low enough to
-/// accept minimal/embedded keymaps while still rejecting the empty keymap
-/// a not-yet-ready XKB extension returns during early startup.
+/// Minimum reachable keysyms in 8..128 for a keymap to count as populated.
+/// A healthy keymap has 100+; 40 accepts minimal/embedded keymaps while
+/// still rejecting the empty keymap a not-yet-ready XKB returns at startup.
 const MIN_KEYMAP_SYMBOLS: u32 = 40;
 
 /// Returns true if `km` has at least MIN_KEYMAP_SYMBOLS reachable keysyms in the 8..128 range.

@@ -10,9 +10,8 @@ const layouts = @import("layouts");
 
 const bar = @import("bar");
 
-// Geometry requests are batched so every xcb_get_geometry cookie is issued
-// before any reply is awaited — one round-trip per batch instead of one per
-// window. 64 covers a typical workspace's window count.
+// Geometry cookies are all issued before any reply is awaited — one round-trip
+// per batch instead of one per window. 64 covers a typical workspace.
 const BATCH = 64;
 
 /// Centre any window still at the X default origin (0, 0); windows the user

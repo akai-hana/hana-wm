@@ -58,27 +58,22 @@ fn isCommandAvailable(command: []const u8) bool {
     return false;
 }
 
-// std.posix.access was removed in this Zig version; faccessat is called
-// directly as a raw syscall, matching the codebase's other std.os.linux
-// usage. It checks both existence and that the file is executable by the
-// current user in one syscall — intentionally not std.Io.Dir.openFileAbsolute
-// (which only checks that the path can be opened for reading). A regular,
-// non-executable file happening to share a terminal's name (e.g. a stray
-// "kitty" left in /usr/local/bin by some unrelated package) would otherwise be
-// reported as "available" here and only fail later, with an unhelpful EACCES,
-// when hana actually tries to spawn it as the detected terminal.
+// std.posix.access was removed in this Zig version, so faccessat is called
+// directly as a raw syscall, matching the codebase's other std.os.linux usage.
+// It checks both existence and executability in one syscall — intentionally
+// not std.Io.Dir.openFileAbsolute (which only checks readability), so a
+// stray non-executable file named like a terminal isn't reported "available"
+// and only later fails with an unhelpful EACCES at spawn time.
 inline fn checkPath(buf: []u8, dir: []const u8, command: []const u8) bool {
     const full_path = std.fmt.bufPrintZ(buf, "{s}/{s}", .{ dir, command }) catch return false;
     const rc: isize = @bitCast(std.os.linux.faccessat(std.os.linux.AT.FDCWD, full_path, std.posix.X_OK, 0));
     return rc == 0;
 }
 
-/// Returns the fallback TOML configuration embedded in the binary, or null
-/// when config/fallback.toml was absent at build time.
-///
-/// The `fallback_toml` module is injected into every module by build.zig (see
-/// injectShared) and always exists; it exposes an empty `content` slice when
-/// no fallback file was embedded, which is the only "missing" signal.
+/// Returns the fallback TOML embedded in the binary, or null when
+/// config/fallback.toml was absent at build time. The `fallback_toml` module
+/// (injected by build.zig's injectShared) always exists; an empty `content`
+/// slice is the only "missing" signal.
 pub inline fn getFallbackToml() ?[]const u8 {
     const content = @import("fallback_toml").content;
     return if (content.len == 0) null else content;
