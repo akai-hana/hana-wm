@@ -515,6 +515,19 @@ pub fn toggle() void {
     const win = focus.getFocused() orelse return;
     const current_ws = tracking.getCurrentWorkspace() orelse return;
 
+    // Defense-in-depth: focus.getFocused() is supposed to always be either
+    // null or a window on the current workspace, but toggle()/enterFullscreen
+    // used to trust that blindly, and exactly one path (minimize's restore
+    // fallback) was once able to violate it — fullscreening a window that
+    // wasn't even on the workspace being viewed, then leaving it stuck on top
+    // after exit. Re-check the invariant here so a future regression of that
+    // class fails loudly (a no-op + a log line) instead of silently
+    // corrupting the visible workspace again.
+    if (!tracking.isOnCurrentWorkspace(win)) {
+        debug.warn("fullscreen.toggle: focused window 0x{x} is not on the current workspace ({d}); ignoring", .{ win, current_ws });
+        return;
+    }
+
     if (getForWorkspace(current_ws)) |fs_info| {
         if (fs_info.window == win) {
             // Toggle off: exit fullscreen for the focused window.

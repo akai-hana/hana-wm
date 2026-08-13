@@ -1,4 +1,3 @@
-
 //! Workspace management
 //! Handles workspace creation, window assignment, and switching between workspaces.
 
@@ -334,10 +333,43 @@ pub fn tagToggle(win: u32, target_ws: u8, protect_current: bool) void {
         }
         setWindowMask(s, win, new_mask);
         if (target_ws == current) {
+            // Unlike the *add* branch (where the window stays visible, so
+            // focus correctly stays put — see the doc comment above), `win`
+            // is actually leaving the screen here. Leaving focus.getFocused()
+            // pointing at it would violate the same "focus is always on the
+            // current workspace" invariant minimize's restore fallback used
+            // to violate — matches the pattern moveWindowTo already uses for
+            // its structurally identical case.
+            //
+            // Resolve the refocus target and its input model BEFORE the grab
+            // below (same reasoning as minimize.zig/restoreWindowImpl):
+            // setFocus's blocking WM_PROTOCOLS reply wait must not happen
+            // inside the grab, or it would implicitly flush the queued
+            // evict/retile batch to the compositor mid-grab, breaking the
+            // grab's atomicity. setWindowMask has already run above, so
+            // `win` no longer satisfies isOnCurrentWorkspace and can't be
+            // picked as its own replacement.
+            const was_focused = focus.getFocused() == win;
+            const refocus_target = if (was_focused)
+                focus.findBestAvailable(tracking.isOnCurrentWorkspaceAndVisible)
+            else
+                null;
+            const refocus_model = if (refocus_target) |t|
+                window.getInputModel(core.getState().conn, t)
+            else
+                null;
+
             // Grab so the evict and retile land in one atomic batch — the
             // compositor never sees the window gone but peers not yet reflowed.
             utils.grabServer(core.getState().conn);
             evictWindow(win);
+            if (was_focused) {
+                if (refocus_target) |t| {
+                    if (refocus_model) |m| focus.setFocusWithModel(t, .tiling_operation, m);
+                } else {
+                    focus.clearFocus();
+                }
+            }
             retileRedrawAndFlush();
         }
     } else {

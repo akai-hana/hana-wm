@@ -53,7 +53,7 @@ workspace_tag_width = 100%  # Default base width
 transparency = 0% # [0.0 - 1.0] / [0% - 100%]
 
 # drun command runner prompt string (default: "run: ")
-drun_prompt = "❯ "
+drun_prompt = "$ "
 
 #  Carousel (scrolling title) 
 # carousel_enabled: set to false to disable scrolling entirely and use a

@@ -777,6 +777,18 @@ pub fn updateWindowFocus(old_focused: ?u32, new_focused: ?u32) void {
         s.scroll.prev_focused = old_focused;
     }
 
+    // Record the departing window in its own workspace's focus-MRU (see
+    // tracking.pushFocusMru's doc comment) — unlike prev_focused above, this
+    // runs unconditionally whenever there IS a departing window, including
+    // when focus is being cleared outright (e.g. every window minimized),
+    // since that's still meaningful history once something becomes visible
+    // there again.
+    if (old_focused) |old| {
+        if (tracking.getWorkspaceForWindow(old)) |ws_idx| {
+            tracking.pushFocusMru(ws_idx, old);
+        }
+    }
+
     for ([2]?u32{ old_focused, new_focused }) |opt| {
         const win = opt orelse continue;
         if (!s.windows.contains(win)) continue;
