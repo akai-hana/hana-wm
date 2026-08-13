@@ -8,9 +8,8 @@ const utils = @import("utils");
 
 const debug = @import("debug");
 
-// WM_NORMAL_HINTS size-constraint cache, populated at map time and evicted
-// on unmanage. configureWithHints clamps every rect to these so clients
-// always receive a geometry they can render.
+// WM_NORMAL_HINTS size-constraint cache, populated at map time, evicted on
+// unmanage. configureWithHints clamps every rect to these.
 
 /// ICCCM WM_NORMAL_HINTS geometry constraints for one window. Zero fields
 /// mean "unconstrained" (client declared no hint).
@@ -43,11 +42,9 @@ pub const WindowData = struct {
 /// release with `.deinit()`.
 pub const CacheMap = std.AutoHashMap(u32, WindowData);
 
-/// Get or create `win`'s cache entry, defaulting a freshly-created entry to
-/// `.{}`. Centralizes the get-or-put-with-default pattern shared by every
-/// cache writer that doesn't need to distinguish "existing" from "new"
-/// (callers that DO need that distinction, e.g. to skip a redundant XCB
-/// call, still use `cache.getOrPut` directly).
+/// Get or create `win`'s cache entry, defaulting a new entry to `.{}`.
+/// Centralizes the get-or-put-with-default pattern for writers that don't
+/// distinguish "existing" from "new" (those that do use `getOrPut` directly).
 pub fn getOrPutDefault(cache: *CacheMap, win: u32) !*WindowData {
     const gop = try cache.getOrPut(win);
     if (!gop.found_existing) gop.value_ptr.* = .{};
@@ -78,20 +75,17 @@ pub const LayoutCtx = struct {
     /// Scratch slot `emitOrDefer` writes into when a window matches
     /// `defer_win`; flushed once by `invokeLayout` after the layout returns.
     deferred: *?utils.Rect,
-    /// True when this retile targets a workspace other than the one
-    /// currently on screen (see tiling.retileInactiveWorkspace).
-    /// There is no "visible" window to promote on a workspace nobody is
-    /// looking at, so any layout that raises a window
-    /// (e.g. monocle) must skip the raise while this is set — raising here
-    /// would leave that window first in the *global* stacking order, ahead
-    /// of the bar and every window on the workspace actually being viewed.
+    /// True when this retile targets an off-screen workspace (see
+    /// tiling.retileInactiveWorkspace). Layouts that raise a window (e.g.
+    /// monocle) must skip the raise here, or the window lands first in the
+    /// global stacking order, above the bar and the visible workspace.
     is_background: bool = false,
 };
 
 /// Push `win` offscreen for layouts that hide it (monocle's background
-/// windows, fibonacci's overflow fallback). Invalidates the cached rect first
-/// so `restoreWorkspaceGeom` never replays a stale on-screen position, and
-/// skips the XCB round-trip when the entry is already invalid.
+/// windows, fibonacci's overflow fallback). Invalidates the cached rect so
+/// restoreWorkspaceGeom never replays a stale position; skips the round-trip
+/// when the entry is already invalid.
 pub inline fn pushWindowOffscreenAndInvalidate(ctx: *const LayoutCtx, win: u32) void {
     if (ctx.cache.getPtr(win)) |wd| {
         if (!wd.hasValidRect()) return;
@@ -182,11 +176,9 @@ pub fn configureWithHintsAndRaise(ctx: *const LayoutCtx, win: u32, rect: utils.R
 }
 
 /// Configure `win` with hints, raising it only when this is not a background
-/// retile (LayoutCtx.is_background). There is no viewer on a workspace nobody
-/// is looking at, and raising would leave the window first in the *global*
-/// stacking order — above the bar and every window on the workspace actually
-/// being viewed — with nothing to ever lower it again. Shared by the layouts
-/// that promote a focused/top window (monocle, fibonacci's overflow fallback).
+/// retile — there's no viewer off-screen, and raising would leave the window
+/// first in the *global* stacking order with nothing to ever lower it again.
+/// Shared by the layouts that promote a top window (monocle, fibonacci).
 pub inline fn configureWithHintsAndRaiseIfVisible(ctx: *const LayoutCtx, win: u32, rect: utils.Rect) void {
     if (ctx.is_background) {
         configureWithHints(ctx, win, rect);
@@ -195,12 +187,10 @@ pub inline fn configureWithHintsAndRaiseIfVisible(ctx: *const LayoutCtx, win: u3
     }
 }
 
-/// Apply ICCCM §4.1.2.3 hints to a raw rect: resize-increment snap, max-size
-/// clamp, then aspect-ratio clamp (itself followed by a re-snap to the
-/// increment grid, since a client can legally declare both hints at once).
-/// Declared minimums are intentionally NOT enforced — tiling owns window
-/// size, and honouring a client minimum would pin the rect there and block
-/// mod_h/mod_l resizing.
+/// Apply ICCCM §4.1.2.3 hints to a raw rect: increment snap, max-size clamp,
+/// then aspect clamp (with a re-snap, since a client may declare both).
+/// Declared minimums are intentionally NOT enforced — tiling owns window size,
+/// and honouring them would pin the rect and block mod_h/mod_l resizing.
 fn applyHintsToRect(rect: utils.Rect, h: SizeHints) utils.Rect {
     if (isEmptySizeHints(h)) return rect;
     var w: u16 = rect.width;
@@ -215,12 +205,10 @@ fn applyHintsToRect(rect: utils.Rect, h: SizeHints) utils.Rect {
     // min_aspect = h/w lower bound, max_aspect = w/h upper bound (dwm
     // convention). Cross-multiplied to avoid FP division on every retile.
     //
-    // The aspect clamp recomputes w (or ht) from scratch, which can land
-    // off the increment grid snapDimToIncrement just placed it on — e.g. a
-    // terminal with both PResizeInc and PAspect set. Re-snapping afterward
-    // (base=0, so this only ever floors, never grows past max_width/height)
-    // keeps both hints satisfied simultaneously; only the rarer of the two
-    // constraints (aspect ratio, snapped down to the nearest cell) yields.
+    // The aspect clamp recomputes the dimension from scratch, which can land
+    // off the increment grid (e.g. a terminal with both PResizeInc and PAspect
+    // set); re-snapping afterward floors to the grid and never grows past
+    // max_width/height, keeping both hints satisfied simultaneously.
     if (h.min_aspect > 0.0 and h.max_aspect > 0.0) {
         const fw: f32 = @floatFromInt(w);
         const fh: f32 = @floatFromInt(ht);

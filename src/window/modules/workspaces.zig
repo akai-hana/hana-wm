@@ -1,3 +1,4 @@
+
 //! Workspace management
 //! Handles workspace creation, window assignment, and switching between workspaces.
 
@@ -86,16 +87,14 @@ inline fn evictWindow(win: u32) void {
 
 /// Moves win's fullscreen record so it stays fullscreen after a tag/move.
 /// No-op if win isn't fullscreen anywhere. Cleans up the source workspace's
-/// live UI (bar, border) only when leaving `current` — other workspaces have
-/// no live fullscreen chrome to clean up.
+/// live UI (bar, border) only when leaving `current`.
 ///
-/// Must be called BEFORE the workspace mask is changed (i.e. before
-/// setWindowMask): setWindowMask prunes fullscreen records on workspaces the
-/// window is no longer tagged on, so a record relocated here first survives
-/// the prune because `new_home` is still tagged. If `new_home` already holds a
-/// record for another window, win's record is dropped rather than clobbering
-/// it — a window leaving the visible workspace does not displace a resident
-/// workspace's fullscreen window.
+/// Must run BEFORE setWindowMask: that call prunes fullscreen records on
+/// workspaces the window is no longer tagged on, so a record relocated here
+/// first survives because `new_home` is still tagged. If `new_home` already
+/// holds a record for another window, win's record is dropped rather than
+/// clobbering it — a window leaving the visible workspace does not displace a
+/// resident workspace's fullscreen window.
 fn transferFullscreenRecord(win: u32, current: u8, new_home: u8) void {
     const src_ws = fullscreen.workspaceFor(win) orelse return;
     if (src_ws != current) return;
@@ -120,34 +119,25 @@ const OverrideLookup = struct {
 ///
 /// Shared by workspaces.init() (first launch) and tiling.reloadConfig()
 /// (config reload / SIGHUP) so config-declared overrides are re-applied
-/// identically in both cases — previously, reload discarded every
-/// per-workspace override back to the global default because the
-/// lookup-table-building logic lived only inline in init() (see item 5 in
-/// the config-subsystem review).
+/// identically in both cases — previously reload discarded every override
+/// back to the global default because the logic lived inline in init() only.
 ///
-/// Builds a flat lookup table so applying overrides to N workspaces is O(N)
-/// instead of O(N × overrides); the table is sized to constants.MAX_WORKSPACES,
-/// which is also the hard ceiling enforced elsewhere (tiling.zig's u64
-/// workspace_geom_valid_bits bitmask). config.zig already warns at parse time
-/// about overrides targeting a workspace index at or beyond that ceiling (see
-/// item 4), so silently ignoring them here is not a second, separate failure
-/// mode — just the mechanical consequence of the table not having a slot for
-/// them.
+/// Builds a flat lookup table so applying to N workspaces is O(N) rather than
+/// O(N × overrides); sized to constants.MAX_WORKSPACES, the hard ceiling also
+/// enforced by tiling.zig's u64 workspace_geom_valid_bits. config.zig already
+/// warns at parse time about overrides past that ceiling, so silently ignoring
+/// them here is just the mechanical consequence of the table having no slot.
 ///
-/// `master_width` and `stack_balance` are always reset to their global
-/// defaults (null) here: neither has a config-file representation (unlike
-/// layout/variant/master_count, which come from the layouts array /
-/// master-stack.counts) — they're purely runtime state set via the
-/// increase_master/decrease_master and mod+n/mod+o (growTopSlave/
-/// growBottomSlave) actions respectively — so there is nothing for this
-/// function to restore either *to*, and both genuinely should reset on
-/// reload, same as before this field existed.
+/// `master_width` and `stack_balance` always reset to their global defaults
+/// (null): neither has a config-file representation (unlike layout/variant/
+/// master_count) — they're pure runtime state from the increase_master/
+/// decrease_master and growTopSlave/growBottomSlave actions, and genuinely
+/// should reset on reload.
 ///
-/// `last_focused` (which workspace-switch focus restoration reads) is
-/// deliberately NOT touched by this function: it's pure interactive runtime
-/// state with no config-file concept behind it at all, so a reload
-/// shouldn't disturb it any more than it should disturb which window
-/// currently has focus (item 5, step 3).
+/// `last_focused` (workspace-switch focus restoration) is deliberately
+/// untouched: pure interactive runtime state with no config-file concept
+/// behind it, so a reload shouldn't disturb it any more than it should
+/// disturb the currently-focused window.
 pub fn applyWorkspaceOverrides(
     wss: []Workspace,
     cfg_tiling: *const types.TilingConfig,
@@ -273,7 +263,10 @@ pub fn moveWindowTo(win: u32, target_ws: u8) !void {
 
     if (target_ws != s.current) {
         evictWindow(win);
-        if (focus.getFocused() == win) focus.clearFocus();
+        if (focus.getFocused() == win) {
+            focus.clearFocus();
+            focus.focusBestAvailable();
+        }
     }
     if (core.getState().config.tiling.enabled) tiling.markDirty();
     bar.scheduleRedraw();
@@ -414,13 +407,12 @@ pub fn switchToAll() void {
 
         utils.grabServer(cs.conn);
         exitAllWorkspacesView(s);
-        // Resolve and apply focus BEFORE retiling: exitAllWorkspacesView may
-        // have just evicted the still-focused window from this workspace's
-        // list, and focus-driven layouts (monocle) pick their visible window
-        // from focus.getFocused() at retile time — retiling first would use
-        // the stale, now-evicted window with no follow-up retile once focus
-        // actually moves. All windows here are already mapped, so it's safe
-        // to apply focus ahead of the retile.
+        // Apply focus BEFORE retiling: exitAllWorkspacesView may have just
+        // evicted the still-focused window from this workspace's list, and
+        // focus-driven layouts (monocle) read focus.getFocused() at retile
+        // time — retiling first would use the stale, now-evicted window with
+        // no follow-up retile once focus moves. All windows are already
+        // mapped, so applying focus early is safe.
         applyPostSwitchFocus(focus_target, focus_model);
         if (cs.config.tiling.enabled) tiling.retileCurrentWorkspace();
         bar.raiseBar();
@@ -560,12 +552,10 @@ fn hideWorkspaceWindows(ws: *const Workspace, new_ws: u8) void {
 }
 
 /// Grab step 2: restore geometry and map every window on the new workspace.
-/// `pending_focus` is the not-yet-applied post-switch focus target (see
-/// resolvePostSwitchFocus); on a cache miss this is passed through to the
-/// retile so focus-driven layouts (monocle) show the right window on the
-/// first frame, instead of reading focus.getFocused() — which at this point
-/// still reports the old workspace's focused window, since the real
-/// focus.setFocus() call happens only after every window here is mapped.
+/// `pending_focus` is the not-yet-applied post-switch target; on a cache miss
+/// it's passed to the retile so focus-driven layouts (monocle) show the right
+/// window on the first frame instead of reading focus.getFocused() — still
+/// the old workspace's window until the real setFocus() below.
 fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8, pending_focus: ?u32) void {
     const tiling_active = tiling.getState().is_enabled;
 
@@ -592,9 +582,8 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: u8, pending_focus: ?u32
     } else if (tiling.isFloatingLayout()) {
         // Tiling is off, but a window's cache may have been zeroed the last
         // time it was left while tiling was still active. Try a fast cache
-        // restore first; fall back to a silent retile (bypassing the
-        // !enabled guard) to recompute positions without changing the
-        // active layout or moving anything permanently.
+        // restore; fall back to a silent retile that recomputes positions
+        // without changing the active layout.
         if (!tiling.restoreWorkspaceGeom()) tiling.retileForRestore();
     }
 
@@ -696,10 +685,9 @@ fn executeSwitch(old_ws: u8, new_ws: u8) void {
     } else {
         // Resolve before restoring: on a geometry-cache miss,
         // restoreWorkspaceWindows falls back to a full retile, and
-        // focus-driven layouts (monocle) need to know the intended focus
-        // target at that point rather than reading the stale pre-switch
-        // focus. The actual focus.setFocus() call still happens below,
-        // after every window is mapped.
+        // focus-driven layouts (monocle) need the intended focus target then
+        // rather than the stale pre-switch focus. The actual setFocus() still
+        // happens below, after every window is mapped.
         restoreWorkspaceWindows(new_ws_obj, old_ws, focus_target);
         applyPostSwitchFocus(focus_target, focus_model);
     }

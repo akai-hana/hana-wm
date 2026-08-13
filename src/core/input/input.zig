@@ -41,9 +41,8 @@ const mouse_buttons = [_]u8{
     mouse_button_scroll_up, mouse_button_scroll_down,
 };
 
-// Operation run inside a tiling grab so toggle_floating_window works from
-// both the keybinding path (withTilingGrabKeepFocus) and the click path
-// (withTilingGrab) without duplicating the struct.
+// Shared struct so toggle_floating_window works via both the keybinding path
+// (withTilingGrabKeepFocus) and the click path (withTilingGrab).
 const ToggleFloatOp = struct {
     win: u32,
     fn call(self: @This()) void {
@@ -177,25 +176,20 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
 
         if (event.detail == mouse_button_left or event.detail == mouse_button_right) {
             drag.startDrag(managed_window, event.detail, event.root_x, event.root_y);
-            // Do NOT releaseGrab (ReplayPointer) here. Replaying hands the rest
-            // of the gesture to normal event delivery, which almost always means
-            // the app itself — real toolkits select ButtonReleaseMask on their
-            // own windows, and the pointer sits over that (moving) window for
-            // the whole drag. That swallows our ButtonRelease before it ever
-            // reaches root, so drag.stopDrag() never runs and drag.active is
-            // stuck true until the WM is restarted (see keepDragGrab below).
-            // AsyncPointer instead keeps the Super+Button grab from setupGrabs
-            // engaged, so MotionNotify/ButtonRelease keep arriving to us — the
-            // grab ends automatically once the button is physically released.
+            // Do NOT releaseGrab (ReplayPointer) here — replaying hands the
+            // rest of the gesture to the app, which swallows our ButtonRelease
+            // before it reaches root, leaving drag.active stuck until the WM
+            // restarts. AsyncPointer instead keeps the setupGrabs grab engaged,
+            // so motion/release events keep arriving to us until the button is
+            // physically released (see keepDragGrab below).
             keepDragGrab(event.time);
             return;
         }
     }
 
-    // Fallback: any other click focuses and raises the window. Raise must
-    // happen before setFocus — setFocus short-circuits when managed_window
-    // is already focused and skips the raise, leaving a covered focused
-    // window buried despite the click.
+    // Fallback: any other click focuses and raises. Raise must precede
+    // setFocus — it short-circuits when managed_window is already focused,
+    // which would leave a covered focused window buried despite the click.
     _ = xcb.xcb_configure_window(cs.conn, managed_window, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
     focus.setFocus(managed_window, .mouse_click);
     releaseGrab(event.time);
@@ -212,10 +206,8 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
     focus.setLastEventTime(event.time);
 
     // POINTER_MOTION_HINT delivers one event per gesture; re-arm with a
-    // QueryPointer. Fire-and-discard — the server re-arms on receipt, not
-    // reply. This must happen on EVERY path through this handler, including
-    // while dragging — skipping it here would starve the drag of any motion
-    // event after the first, since the hint is not re-armed by anything else.
+    // fire-and-discard QueryPointer. Must run on EVERY path here, including
+    // while dragging, or the drag is starved of motion events after the first.
     const cs = core.getState();
     xcb.xcb_discard_reply(cs.conn, xcb.xcb_query_pointer(cs.conn, cs.root).sequence);
 
@@ -380,12 +372,9 @@ fn executeSwapMaster(action: *const types.Action) void {
 
     utils.grabServer(conn);
 
-    // follow-focus only: transfer focus before the retile. Focus MUST move
-    // first — layouts that derive their visible/raised window from
-    // focus.getFocused() at retile time (e.g. monocle — see monocle.zig's
-    // tileWithOffset) would otherwise retile against the stale,
-    // about-to-be-displaced window, then have no follow-up retile to correct
-    // course once focus actually moves.
+    // Follow-focus only: focus MUST move before the retile, or layouts that
+    // derive their raised window from focus.getFocused() at retile time
+    // (e.g. monocle) retile against the stale window with no follow-up fix.
     if (displaced) |win|
         if (displaced_model) |model| focus.setFocusWithModel(win, .tiling_operation, model);
 
@@ -430,17 +419,14 @@ fn executeMouseAction(action: *const types.Action, clicked_win: u32) !void {
 // Shell execution
 //
 // Commands run via a double-fork so the grandchild re-parents to init and
-// the WM never accumulates zombies. A single O_CLOEXEC pipe (see
-// utils.makePipe) carries the outcome: a successful execvp() closes its
-// copy automatically, so nothing is sent on success. Otherwise the
-// intermediate child always writes TAG_PID (its child's pid) right before
-// exiting, and the grandchild writes TAG_FAILED only if execvp() fails —
-// two independently-scheduled writers, so the two messages can arrive in
-// either order (finishSpawn() handles both). EOF ends the conversation.
-//
-// executeShellCommand returns right after fork(). The pending entry then
-// lives in g_pending until drainPendingSpawns() (polled every event batch)
-// or reapPendingChildren() (SIGCHLD) resolves it.
+// the WM never accumulates zombies. A single O_CLOEXEC pipe (utils.makePipe)
+// carries the outcome: success closes the pipe copy automatically (nothing is
+// sent); otherwise the intermediate child writes TAG_PID and the grandchild
+// writes TAG_FAILED only if execvp() fails — two independently-scheduled
+// writers, so the messages can arrive in either order (finishSpawn() handles
+// both). EOF ends the conversation. executeShellCommand returns right after
+// fork(); g_pending entries are resolved by drainPendingSpawns() (every event
+// batch) or reapPendingChildren() (SIGCHLD).
 
 /// Tags for the two possible messages written onto the spawn pipe. Sent as
 /// a leading byte so the reader can tell them apart no matter which order
@@ -490,8 +476,8 @@ fn forkIntermediate(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
 
 // Pending spawn table
 //
-// Capacity: 16 is sufficient — firing 16 exec keybindings in the ~100 ms
-// window before /bin/sh finishes exec-ing would require inhuman speed.
+// Capacity: 16 suffices — 16 execs within the ~100 ms before /bin/sh execs
+// would require inhuman speed.
 
 const MAX_PENDING_SPAWNS: usize = 16;
 
@@ -508,10 +494,9 @@ const PendingSpawn = struct {
     spawn_ws: ?u8, // Target workspace for window.registerSpawn.
 };
 
-// std.BoundedArray is not available in the standard library (removed as of
-// the Zig 0.16 toolchain this project targets); utils.BoundedList is the
-// shared fixed-buffer-plus-length stand-in used everywhere this shape is
-// needed.
+// std.BoundedArray was removed in the Zig 0.16 toolchain; utils.BoundedList
+// is the shared fixed-buffer-plus-length stand-in used everywhere this shape
+// is needed.
 var g_pending: utils.BoundedList(PendingSpawn, MAX_PENDING_SPAWNS) = .{};
 
 /// Swap-removes the entry at `i`; caller must `continue` the drain loop after.
@@ -556,9 +541,8 @@ fn executeShellCommand(cmd: []const u8) !void {
     _ = c.close(pipe_fds[1]);
 
     // Cursor position for spawn-crossing suppression is queried synchronously
-    // by window.mapWindowToScreen when the MapRequest actually arrives, rather
-    // than prefetched here at key-press time: MapRequest is a one-time event
-    // per window, so that round-trip isn't worth pipelining ahead of time.
+    // in mapWindowToScreen when the MapRequest arrives — MapRequest is
+    // one-time per window, so the round-trip isn't worth pipelining here.
 
     const queued = g_pending.append(.{
         .pid = pid,
@@ -566,21 +550,17 @@ fn executeShellCommand(cmd: []const u8) !void {
         .spawn_ws = spawn_ws,
     });
     if (!queued) {
-        // Table full: close the read end we won't track.
+        // Table full: close the read end we won't track; reap `pid`
+        // synchronously — it exits almost instantly, and reapPendingChildren
+        // can't wait on it since it's not in g_pending (no permanent zombie).
         _ = c.close(pipe_fds[0]);
-        // `pid` (the intermediate child) isn't in g_pending, so
-        // reapPendingChildren's waitpid loop will never wait on it. It
-        // exits almost instantly (one more fork() + a 5-byte write +
-        // exit()), so a synchronous reap here is cheap and bounded, and
-        // avoids leaving a permanent zombie behind.
         _ = c.waitpid(pid, null, 0);
     }
 }
 
 /// Drains pending spawn entries non-blockingly (every event batch and on
-/// SIGCHLD). Bytes accumulate into entry.buf until EOF or until the buffer
-/// is full — a full buffer already holds both possible messages, so there's
-/// no need to wait for EOF too. finishSpawn() classifies the result.
+/// SIGCHLD), until EOF or a full buffer — a full buffer already holds both
+/// possible messages, so EOF needn't be awaited. finishSpawn() classifies.
 pub fn drainPendingSpawns() void {
     var i: usize = 0;
     while (i < g_pending.len) {
@@ -618,11 +598,10 @@ pub fn drainPendingSpawns() void {
 /// Classifies a fully-drained spawn-pipe conversation and, on success,
 /// registers the spawn for workspace routing.
 ///
-/// Both writes (TAG_PID's PID_MSG_LEN bytes, TAG_FAILED's single byte) are
-/// well under PIPE_BUF, so neither is ever torn or interleaved — a
-/// TAG_FAILED byte anywhere in the buffer is a reliable failure signal
-/// regardless of arrival order, and an empty buffer means the second
-/// fork() never completed.
+/// Both writes are well under PIPE_BUF, so neither is ever torn or
+/// interleaved — a TAG_FAILED byte anywhere in the buffer is a reliable
+/// failure signal in any arrival order; an empty buffer means the second
+/// fork() never ran.
 fn finishSpawn(entry: *PendingSpawn) void {
     const data = entry.buf[0..entry.len];
 
@@ -659,10 +638,9 @@ fn finishSpawn(entry: *PendingSpawn) void {
     }
 }
 
-/// Reaps zombie intermediate children without blocking.
-/// Called from the SIGCHLD handler (via the signal self-pipe).
-/// The spawn-pipe drain is the caller's job (events.zig drains it right
-/// after this) — draining here too would run it twice per SIGCHLD.
+/// Reaps zombie intermediate children without blocking. Called from the
+/// SIGCHLD handler; the spawn-pipe drain stays in events.zig so it doesn't
+/// run twice per SIGCHLD.
 pub fn reapPendingChildren() void {
     for (g_pending.slice()) |*entry| {
         if (entry.pid > 0 and c.waitpid(entry.pid, null, c.WNOHANG) > 0)
@@ -721,34 +699,23 @@ fn tryConfigMouseBind(mods: u16, button: u8, win: u32, time: u32) bool {
 }
 
 /// Runs `op` inside an xcb server grab, then sweeps borders, redraws the
-/// bar, and flushes atomically. Used for every tiling/layout/master op.
-///
-/// `op` is a plain `fn () void`, or — since Zig has no closures — a small
-/// value-capturing struct with a `call(self) void` method when a window ID
-/// needs to ride along (see toggle_floating_window below).
+/// bar, and flushes atomically. `op` is a plain `fn () void`, or — since Zig
+/// has no closures — a value-capturing struct with a `call(self) void` method
+/// when a window ID must ride along (see toggle_floating_window below).
 inline fn withTilingGrab(op: anytype) void {
     withTilingGrabImpl(op, true);
 }
 
-/// Like `withTilingGrab`, but does not re-sync focus to whatever window is
-/// currently under the pointer afterward.
+/// Like `withTilingGrab`, but skips the pointer-focus resync. Used for
+/// actions with an explicit keyboard-chosen target: the resync exists for
+/// mouse-driven reflows, but on a keyboard-triggered action it can silently
+/// move focus onto an unrelated window the cursor happens to rest over
+/// (e.g. a floating window stacked above the one acted on), so a following
+/// keypress lands there instead.
 ///
-/// Used for actions that already have an explicit, keyboard-chosen target
-/// window (e.g. toggle_floating_window's keybind path). The pointer-sync
-/// step exists so mouse-driven reflows (layout changes, master swaps) hand
-/// focus to whichever window physically ends up under a stationary cursor.
-/// But when the action was itself keyboard-triggered against a specific
-/// window, that same step can silently move keyboard focus onto a
-/// completely different, unrelated window the cursor merely happens to be
-/// resting over (e.g. a floating window stacked on top of the one just
-/// acted on) — so a second, un-intended keypress (autorepeat, a fast
-/// double-tap, etc.) then lands on that other window instead of the one
-/// the user was just interacting with.
-///
-/// This guarantee depends on suppression staying active until any crossing
-/// events the reflow itself generates have actually been delivered and
-/// filtered — see beginTilingOpSettle's doc comment in focus.zig for why
-/// that can't just be done synchronously here.
+/// Suppression must stay active until crossing events from the reflow have
+/// been delivered and filtered — see beginTilingOpSettle in focus.zig for
+/// why that can't be synchronous here.
 inline fn withTilingGrabKeepFocus(op: anytype) void {
     withTilingGrabImpl(op, false);
 }
@@ -756,11 +723,9 @@ inline fn withTilingGrabKeepFocus(op: anytype) void {
 inline fn withTilingGrabImpl(op: anytype, sync_pointer: bool) void {
     const conn = core.getState().conn;
     utils.grabServer(conn);
-    // Suppress EnterNotify events generated as a side effect of windows
-    // moving/resizing under a stationary cursor during this reflow — X11
-    // fires real crossing events for that, not just for cursor motion, and
-    // without this they get processed as genuine hover and steal focus to
-    // whatever window transiently ends up under the pointer mid-shuffle.
+    // X11 fires real crossing events when windows move under a stationary
+    // cursor; without suppression they read as hover and steal focus to
+    // whichever window transiently ends up under the pointer mid-shuffle.
     focus.setSuppressReason(.tiling_operation);
     switch (@typeInfo(@TypeOf(op))) {
         .@"fn" => op(),
@@ -770,25 +735,17 @@ inline fn withTilingGrabImpl(op: anytype, sync_pointer: bool) void {
     window.markBordersFlushed();
     bar.redrawInsideGrab();
     if (sync_pointer) {
-        // Once the layout has settled, resolve focus against where the pointer
-        // actually rests — mirrors executeSwapMaster's use of the same call.
-        // Clears the suppression above and queues an authoritative query that
-        // drainPointerSync() consumes on the next event-loop iteration.
+        // Once the layout has settled, resolve focus against the pointer's
+        // resting spot: clears suppression and queues a query that
+        // drainPointerSync() consumes next loop (mirrors executeSwapMaster).
         focus.beginPointerSync();
     } else {
-        // No pointer resync — but suppression still needs clearing eventually,
-        // or hover-focus stays masked until some other action happens to call
-        // beginPointerSync. It must NOT be cleared synchronously here, though:
-        // the configure_window calls queued above by `op()` are not sent to
-        // the X server until ungrabAndFlush below, so clearing suppression
-        // now would turn EnterNotify filtering back off before the server has
-        // even processed the reflow that suppression exists to mask — letting
-        // a real crossing event (e.g. a neighbour window's edge sliding under
-        // a stationary cursor) slip through unfiltered and silently steal
-        // focus. beginTilingOpSettle defers the clear to the next
-        // event-dispatch iteration, after any such event is guaranteed to
-        // have already been dispatched and filtered. See its doc comment in
-        // focus.zig for the full ordering argument.
+        // Suppression still needs clearing, but not synchronously: `op()`'s
+        // configure_window calls aren't sent until ungrabAndFlush, so clearing
+        // now would disable the filtering before the server processes the
+        // reflow it masks. beginTilingOpSettle defers the clear to the next
+        // event-dispatch iteration, after crossing events are guaranteed
+        // filtered (see its doc in focus.zig).
         focus.beginTilingOpSettle();
     }
     utils.ungrabAndFlush(conn);
@@ -802,12 +759,10 @@ inline fn replayPointer(time: u32) void {
     _ = xcb.xcb_flush(conn);
 }
 
-/// Releases both the pointer and keyboard SYNC grabs acquired on Super+click.
-/// Replays the pointer, so the triggering click is handed to normal event
-/// delivery (i.e. to the app underneath). Only safe for click paths that
-/// don't need to keep tracking pointer events afterward — NOT for drag
-/// start; use keepDragGrab for that. Always pass event.time — never
-/// XCB_CURRENT_TIME.
+/// Releases both SYNC grabs acquired on Super+click, replaying the pointer so
+/// the click reaches the app underneath. Only safe for click paths that don't
+/// need to keep tracking the pointer afterward — NOT for drag start; use
+/// keepDragGrab. Always pass event.time — never XCB_CURRENT_TIME.
 inline fn releaseGrab(time: u32) void {
     const conn = core.getState().conn;
     _ = xcb.xcb_allow_events(conn, xcb.XCB_ALLOW_REPLAY_POINTER, time);
@@ -815,16 +770,12 @@ inline fn releaseGrab(time: u32) void {
     _ = xcb.xcb_flush(conn);
 }
 
-/// Un-freezes the pointer for a drag gesture while keeping the Super+Button
-/// grab from setupGrabs (root, SYNC, event_mask BUTTON_PRESS|BUTTON_RELEASE|
-/// POINTER_MOTION) engaged — AsyncPointer resumes delivery without replaying
-/// or ending the grab, unlike releaseGrab's ReplayPointer. That guarantees
-/// the drag's MotionNotify/ButtonRelease keep arriving to us (dispatched to
-/// input.handleMotionNotify/handleButtonRelease) instead of going straight
-/// to whichever client window the cursor ends up over. The grab ends on its
-/// own once the button is physically released, so no matching "reacquire"
-/// call is needed. The keyboard grab is released immediately since dragging
-/// doesn't need it held. Always pass event.time — never XCB_CURRENT_TIME.
+/// Un-freezes the pointer for a drag while keeping the setupGrabs Super+Button
+/// grab engaged — AsyncPointer resumes delivery without replaying or ending
+/// the grab, so MotionNotify/ButtonRelease keep arriving to us instead of
+/// going straight to the client under the cursor. The grab ends on its own
+/// once the button is released; the keyboard grab is dropped immediately.
+/// Always pass event.time — never XCB_CURRENT_TIME.
 inline fn keepDragGrab(time: u32) void {
     const conn = core.getState().conn;
     _ = xcb.xcb_allow_events(conn, xcb.XCB_ALLOW_ASYNC_POINTER, time);
@@ -839,8 +790,8 @@ inline fn closePipe(p: [2]c_int) void {
 
 // XcbCursor
 //
-// Declared manually rather than via cImport because xcb_cursor_load_cursor is
-// a static inline function that cImport cannot bind.
+// Declared manually because xcb_cursor_load_cursor is a static inline
+// function cImport cannot bind.
 
 const XcbCursor = struct {
     const Context = opaque {};

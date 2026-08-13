@@ -11,12 +11,14 @@
 //!                                    window exists. Dupes `format` for the
 //!                                    thread's own use.
 //!   stopThread(allocator)           — call before bar teardown (deinit and
-//!                                     reload). Can block up to ~1s: the
-//!                                     thread only checks for quit between
-//!                                     sleeps, and it's mid-sleep most of the
-//!                                     time. The next startThread() re-aligns
-//!                                     from scratch, so a reload never leaves
-//!                                     the tick phase-drifted.
+//!                                     reload). Returns almost immediately:
+//!                                     it signals the condition variable the
+//!                                     thread is sleeping on, so the thread
+//!                                     wakes and exits instead of letting the
+//!                                     current sleep run out. The next
+//!                                     startThread() re-aligns from scratch,
+//!                                     so a reload never leaves the tick
+//!                                     phase-drifted.
 //!
 //! Cross-thread wakeup
 //! -------------------
@@ -77,7 +79,9 @@ var last_formatted_sec: i64 = -1;
 /// (consumed) by the main thread when it redraws the clock segment.
 var clock_dirty: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
-var clock_quit: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+var clock_mutex: utils.Mutex = .{};
+var clock_cond: utils.Condition = .{};
+var clock_quit: bool = false;
 var clock_thread: ?std.Thread = null;
 
 /// Format string duped from the config at startThread(); owned by this module
@@ -91,7 +95,12 @@ pub fn startThread(allocator: std.mem.Allocator, format: []const u8) void {
         return;
     };
     clock_format_owned = owned;
-    clock_quit.store(false, .seq_cst);
+    // timedWait uses a CLOCK_MONOTONIC deadline; safe to re-init on every
+    // call (init/reload) since the thread is never running while this fires.
+    clock_cond.initMonotonic();
+    clock_mutex.lock();
+    clock_quit = false;
+    clock_mutex.unlock();
     clock_thread = std.Thread.spawn(.{}, runClockThread, .{}) catch |e| {
         allocator.free(owned);
         clock_format_owned = "";
@@ -102,7 +111,10 @@ pub fn startThread(allocator: std.mem.Allocator, format: []const u8) void {
 }
 
 pub fn stopThread(allocator: std.mem.Allocator) void {
-    clock_quit.store(true, .seq_cst);
+    clock_mutex.lock();
+    clock_quit = true;
+    clock_cond.signal();
+    clock_mutex.unlock();
     if (clock_thread) |t| {
         t.join();
         clock_thread = null;
@@ -118,25 +130,60 @@ fn runClockThread() void {
     // One-time alignment: sleep just long enough to land on the next whole
     // second, so the periodic loop below starts in phase with the real
     // clock instead of ticking at whatever offset the thread happened to
-    // spawn at.
-    {
-        var ts: Timespec = undefined;
-        _ = c.clock_gettime(c.CLOCK_REALTIME, @ptrCast(&ts));
-        var req: Timespec = .{ .tv_sec = 0, .tv_nsec = ns_per_s - ts.tv_nsec };
-        _ = c.nanosleep(@ptrCast(&req), null);
-    }
+    // spawn at. Uses the interruptible timedWait so stopThread() returns
+    // immediately even if it fires during alignment.
+    if (!sleepUntilNextSecond()) return;
 
     // Plain periodic loop from here on. No re-anchoring: a fixed 1s sleep
     // per iteration can accumulate a little scheduling drift over a very
     // long uptime, but a reload (which re-runs the alignment above) resets
     // it, so it never compounds indefinitely.
-    while (!clock_quit.load(.seq_cst)) {
-        var req: Timespec = .{ .tv_sec = 1, .tv_nsec = 0 };
-        _ = c.nanosleep(@ptrCast(&req), null);
+    while (true) {
+        clock_mutex.lock();
+        if (clock_quit) {
+            clock_mutex.unlock();
+            return;
+        }
+        clock_cond.timedWait(&clock_mutex, ns_per_s) catch {};
+        const quit = clock_quit;
+        clock_mutex.unlock();
+        if (quit) return;
         // Pango-free: format the time string into the shared cache and flag
         // the main thread to redraw the segment. No DrawContext access here.
         publishCurrentTime();
     }
+}
+
+/// Sleeps until the next whole-second boundary, returning false when quit
+/// was requested mid-sleep. A spurious early wakeup (or a quit signal that
+/// somehow raced past the check above) recomputes the remaining time and
+/// keeps sleeping, so the periodic loop always starts in phase with the
+/// wall clock rather than offset by however long the interruption was.
+fn sleepUntilNextSecond() bool {
+    var ts: Timespec = undefined;
+    _ = c.clock_gettime(c.CLOCK_REALTIME, @ptrCast(&ts));
+    var remaining: i64 = ns_per_s - ts.tv_nsec;
+    while (remaining > 0) {
+        clock_mutex.lock();
+        if (clock_quit) {
+            clock_mutex.unlock();
+            return false;
+        }
+        // error.Timeout means the full `remaining` elapsed: we've reached
+        // the boundary. A normal return is a signal (quit) or spurious wake.
+        const timed_out = if (clock_cond.timedWait(&clock_mutex, @intCast(remaining))) |_|
+            false
+        else |err|
+            err == error.Timeout;
+        const quit = clock_quit;
+        clock_mutex.unlock();
+        if (quit) return false;
+        if (timed_out) return true;
+        _ = c.clock_gettime(c.CLOCK_REALTIME, @ptrCast(&ts));
+        remaining = ns_per_s - ts.tv_nsec;
+        if (remaining < 0) remaining = 0;
+    }
+    return true;
 }
 
 /// Formats the current wall-clock time into the shared cache (no Pango, no

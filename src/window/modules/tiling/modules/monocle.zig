@@ -21,16 +21,11 @@ pub fn tileWithOffset(
     const inset: u16 = if (state.config.layout_variants.monocle == .gaps) m.gap else 0;
     const total_margin = utils.doubledBorder(m) + inset * 2;
 
-    // Pick the top (visible) window: prefer the focused window, falling back
-    // to the list tail if focus info is unavailable. On close, this ensures
-    // the last-focused window resurfaces rather than an arbitrary one.
-    //
-    // (A focus change alone doesn't retile, since monocle hides windows via
-    // offscreen positioning rather than stack order — snapScrollToFocused()
-    // in tiling.zig retiles on focus-cycle keypresses to compensate. On
-    // spawn, window.zig's mapWindowToScreen passes the new window in as
-    // ctx.focused_win via retileCurrentWorkspaceWithPendingFocus, since
-    // focus.setFocus for it hasn't run yet at retile time.)
+    // Pick the top (visible) window: prefer the focused window, else the list
+    // tail, so the last-focused window resurfaces on close. A focus change
+    // alone doesn't retile (monocle hides via offscreen positioning, not stack
+    // order) — snapScrollToFocused retiles on focus cycling, and on spawn
+    // mapWindowToScreen passes the new window as ctx.focused_win.
     const top_win: u32 = blk: {
         if (ctx.focused_win) |f| if (std.mem.indexOfScalar(u32, windows, f) != null) break :blk f;
         break :blk windows[windows.len - 1];
@@ -43,11 +38,9 @@ pub fn tileWithOffset(
         .height = layouts.shrinkClamped(screen_h, total_margin, state.config.min_window_dim),
     };
 
-    // Only raise on-screen: a background retile (see LayoutCtx.is_background)
-    // is purely a geometry-cache warm-up for a workspace nobody is viewing,
-    // and raising `top_win` here would make it first in the *global*
-    // stacking order — above the bar and every window on the workspace
-    // actually being looked at — with nothing to ever lower it again.
+    // Only raise on-screen: a background retile (LayoutCtx.is_background) is a
+    // cache warm-up for an unviewed workspace, and raising would leave `top_win`
+    // first in the global stacking order with nothing to ever lower it again.
     layouts.configureWithHintsAndRaiseIfVisible(ctx, top_win, top_rect);
 
     pushBackgroundWindowsOffscreen(ctx, windows, top_win);

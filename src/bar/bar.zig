@@ -48,36 +48,59 @@ const TITLE_MIN_WIDTH: u16 = 100;
 
 // Core data structures
 
-/// List of per-window title strings, each individually heap-allocated.
+/// List of per-window title strings backed by a per-slot arena.
 ///
-/// Filled once per redraw (one dupe per window, in workspace order) and read
-/// back by index with no offset arithmetic.
+/// Every string in `list` is a slice into `arena`'s memory, so clearing or
+/// dropping a list is one arena reset instead of one allocator.free per
+/// window, and duping a batch of titles bumps a pointer into already-owned
+/// arena pages instead of hitting the system allocator once per window.
+/// `list`'s own buffer stays on the caller's allocator (separate from the
+/// arena so `clear` can reset the arena without invalidating the retained
+/// buffer).
 const WindowTitles = struct {
+    arena: std.heap.ArenaAllocator = undefined,
     list: std.ArrayListUnmanaged([]const u8) = .empty,
 
-    /// Frees every owned title string and empties the list.
-    pub fn clear(self: *WindowTitles, allocator: std.mem.Allocator) void {
-        for (self.list.items) |t| allocator.free(t);
+    fn init(backing: std.mem.Allocator) WindowTitles {
+        return .{ .arena = std.heap.ArenaAllocator.init(backing) };
+    }
+
+    /// Allocator for title-string storage; bump-allocated and reclaimed by
+    /// the next `clear`/`deinit`.
+    pub fn allocator(self: *WindowTitles) std.mem.Allocator {
+        return self.arena.allocator();
+    }
+
+    /// Empties the list and reclaims all title-string memory (capacity is
+    /// retained for reuse by the next capture).
+    pub fn clear(self: *WindowTitles) void {
+        _ = self.arena.reset(.retain_capacity);
         self.list.clearRetainingCapacity();
     }
 
-    /// Appends an owned dupe of `title_str`.
-    pub fn append(self: *WindowTitles, allocator: std.mem.Allocator, title_str: []const u8) !void {
-        const owned = try allocator.dupe(u8, title_str);
-        errdefer allocator.free(owned);
-        try self.list.append(allocator, owned);
+    /// Appends an owned dupe of `title_str`, allocated from the arena.
+    pub fn append(self: *WindowTitles, list_allocator: std.mem.Allocator, title_str: []const u8) !void {
+        const owned = try self.arena.allocator().dupe(u8, title_str);
+        try self.list.append(list_allocator, owned);
+    }
+
+    /// Appends a slice the caller already owns — a dupe that lives in this
+    /// list's arena (see `allocator`). Used by the batch pre-fetch to move a
+    /// freshly-fetched title into the list without copying it twice.
+    pub fn appendOwned(self: *WindowTitles, list_allocator: std.mem.Allocator, title_str: []const u8) !void {
+        try self.list.append(list_allocator, title_str);
     }
 
     /// Clears the list, then refills it with dupes of `titles`.
     /// Partial failures leave the list shorter than `titles` rather than erroring out.
-    pub fn replaceWith(self: *WindowTitles, allocator: std.mem.Allocator, titles: []const []const u8) void {
-        self.clear(allocator);
-        for (titles) |t| self.append(allocator, t) catch break;
+    pub fn replaceWith(self: *WindowTitles, list_allocator: std.mem.Allocator, titles: []const []const u8) void {
+        self.clear();
+        for (titles) |t| self.append(list_allocator, t) catch break;
     }
 
-    pub fn deinit(self: *WindowTitles, allocator: std.mem.Allocator) void {
-        self.clear(allocator);
-        self.list.deinit(allocator);
+    pub fn deinit(self: *WindowTitles, list_allocator: std.mem.Allocator) void {
+        self.list.deinit(list_allocator);
+        self.arena.deinit();
     }
 };
 
@@ -283,6 +306,8 @@ const State = struct {
                 .clock_width = dc.measureTextWidth(clock.CLOCK_MEASURE_STRING) + 2 * config.scaledSegmentPadding(height),
             },
         };
+        for (&s.snapshots) |*snap| snap.window_titles = WindowTitles.init(allocator);
+        s.title_cache.window_titles = WindowTitles.init(allocator);
         try s.title_cache.title.ensureTotalCapacity(allocator, 256);
         tags.invalidate();
         return s;
@@ -722,21 +747,19 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *BarSnapshot, force
         // Batch pre-fetch replaces the sequential per-window round-trips:
         // one dupe per title, ~2 round-trips total, zero blocking waits on
         // the draw path itself (see title.batchFetchWindowInfosInto).
-        snap.window_titles.clear(allocator);
+        snap.window_titles.clear();
         snap.window_geoms.clearRetainingCapacity();
-        var titles: std.ArrayListUnmanaged([]const u8) = .empty;
         title.batchFetchWindowInfosInto(
             core.getState().conn,
             snap.current_workspace_windows.items,
             focused_idx,
             snap.focused_title.items,
             &snap.minimized_windows,
-            &titles,
+            &snap.window_titles.list,
             &snap.window_geoms,
+            snap.window_titles.allocator(),
             allocator,
         );
-        // Steal the batch-owned title list; snapshot deinit frees its strings.
-        snap.window_titles.list = titles;
     } else {
         // Nothing about titles/membership/minimized-state changed since the
         // previous frame: rather than freeing every owned string in `snap`

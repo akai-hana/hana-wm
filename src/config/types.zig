@@ -79,12 +79,10 @@ pub const MouseBind = struct {
 };
 
 /// Owns the persistent (modifiers, keysym) -> Action dispatch map resolved
-/// from a Config's keybindings, plus the keycode-resolution step that feeds
-/// it.
-///
-/// Embedded in Config (rather than a module-level global) so its lifetime is
-/// tied structurally to the Config whose keybindings its entries point into:
-/// Config.deinit tears the resolver down before freeing those Actions.
+/// from a Config's keybindings, plus the keycode-resolution step that feeds it.
+/// Embedded in Config (not a module-level global) so its lifetime is tied to
+/// the Config whose keybindings its entries point into: Config.deinit tears
+/// the resolver down before freeing those Actions.
 pub const KeybindResolver = struct {
     map: std.AutoHashMapUnmanaged(u64, *const Action) = .empty,
 
@@ -165,14 +163,11 @@ pub fn LowerResult(comptime max_len: usize) type {
 }
 
 /// Lowercases `str` into a fixed `max_len`-byte stack buffer if it fits, or
-/// reports `.too_long` — distinguishable from a plain "not found", so callers
-/// can warn specifically about overlong values.
-///
-/// Shared case-folding/bounds-safety helper for the layout-name and
-/// string_map-backed lookups in config.zig and this file; complementary to
-/// LAYOUT_TABLE (the name<->tag<->alias mapping), not a replacement for it.
-/// keyNameToKeysym intentionally bypasses this: it needs a verbatim
-/// NUL-terminated copy for the C API, not a case-folded lookup.
+/// reports `.too_long` — distinguishable from "not found", so callers can warn
+/// specifically about overlong values. Shared helper for the layout-name and
+/// string_map lookups in config.zig and this file; complementary to
+/// LAYOUT_TABLE. keyNameToKeysym bypasses it: the C API needs a verbatim
+/// NUL-terminated copy, not a case-folded lookup.
 pub fn lowerStringCI(comptime max_len: usize, str: []const u8) LowerResult(max_len) {
     if (str.len > max_len) return .too_long;
     var result: LowerResult(max_len) = .{ .ok = .{ .buf = undefined, .len = str.len } };
@@ -238,12 +233,11 @@ pub const Layout = enum {
     fibonacci,
     leaf,
     scroll,
-    /// Windows are left at their current positions. Reachable from config via
-    /// `tiling.layout = "floating"` — the scalar layout key resolves through
-    /// stringToEnum (see tiling.initState), not LAYOUT_TABLE — but never
-    /// cyclable: excluded from LAYOUT_TABLE below, so toggleLayout can't select
-    /// it, and stepping the cycle while it's active jumps to the first enabled
-    /// layout.
+    /// Windows are left at their current positions. Reachable from config
+    /// (`tiling.layout = "floating"` — the scalar key resolves via
+    /// stringToEnum, not LAYOUT_TABLE) but never cyclable: excluded from
+    /// LAYOUT_TABLE below, so toggleLayout can't select it and stepping the
+    /// cycle jumps to the first enabled layout.
     floating,
 };
 
@@ -306,10 +300,8 @@ pub const TilingConfig = struct {
     /// resize) is allowed to reach, in pixels.
     min_window_dim: u16 = constants.MIN_WINDOW_DIM,
 
-    // Per-layout variant preferences
-    //
-    // Stored as parsed enums (not raw strings) to avoid
-    // dangling slices after the config document is freed.
+    // Per-layout variant preferences, stored as parsed enums (not raw
+    // strings) to avoid dangling slices after the config document is freed.
     master_variant: MasterVariant = .lifo,
     monocle_variant: MonocleVariant = .gapless,
     grid_variant: GridVariant = .rigid,
@@ -421,12 +413,11 @@ fn freeStringList(list: *std.ArrayList([]const u8), allocator: std.mem.Allocator
     list.deinit(allocator);
 }
 
-/// Sentinels for the Config-owned string fields whose defaults are string
-/// literals. `getDefaultConfig` replaces each with a heap copy on success;
-/// `Config.deinit` compares pointers against these sentinels so a
-/// partially-built Config (the OOM/parse-error `errdefer` path, where some
-/// dupes never ran) frees only what is genuinely heap-owned — never a
-/// string literal.
+/// Sentinel for the Config-owned string fields whose defaults are string
+/// literals. getDefaultConfig replaces each with a heap copy on success;
+/// Config.deinit compares pointers against this so a partially-built Config
+/// (the errdefer path, where some dupes never ran) frees only what is
+/// genuinely heap-owned — never a string literal.
 const OWNED_STR_SENTINEL: []const u8 = "";
 
 pub const BarConfig = struct {
@@ -482,12 +473,10 @@ pub const BarConfig = struct {
 
     transparency: f32 = 1.0,
 
-    /// Carousel scroll settings, staged here so they are applied to the
-    /// carousel's live globals only after a config has been fully validated
-    /// and swapped in (config.applyCarouselSettings). Writing them straight to
-    /// the globals at parse time (the old behaviour) leaked them into effect
-    /// even when validate() later rejected the config and the old config was
-    /// kept.
+    /// Carousel scroll settings, staged here so they reach the carousel's
+    /// live globals only after a config has been validated and swapped in
+    /// (config.applyCarouselSettings) — writing them at parse time (the old
+    /// behaviour) leaked them into effect for a rejected config.
     carousel_enabled: bool = true,
     /// Scroll speed in px/s (config `scroll_speed`, min 1).
     scroll_speed: u16 = 125,
@@ -612,11 +601,10 @@ pub const Config = struct {
         self.bar.deinit(a);
         self.tiling.deinit(a);
 
-        // Heap-allocated whenever set: getDefaultConfig dupes the string
-        // literals and parseBar (via assignStr) transfers ownership on every
-        // write. Config.deinit frees each that no longer points at the
-        // sentinel, so the errdefer path on a partially-built Config never
-        // frees a string literal (see getDefaultConfig in config.zig).
+        // Heap-allocated whenever set: getDefaultConfig dupes the literals
+        // and parseBar (via assignStr) transfers ownership on every write.
+        // Frees each that no longer points at the sentinel, so the errdefer
+        // path on a partially-built Config never frees a string literal.
         if (self.bar.clock_format.ptr != OWNED_STR_SENTINEL.ptr) a.free(self.bar.clock_format);
         if (self.bar.drun_prompt.ptr != OWNED_STR_SENTINEL.ptr) a.free(self.bar.drun_prompt);
         if (self.bar.indicator_focused.ptr != OWNED_STR_SENTINEL.ptr) a.free(self.bar.indicator_focused);

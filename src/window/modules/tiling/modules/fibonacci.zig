@@ -56,10 +56,9 @@ pub fn tileWithOffset(
                 if (std.mem.indexOfScalar(u32, windows[i..], f) != null) f else windows[i]
             else
                 windows[i];
-            // Same reasoning as monocle: never raise for a background retile
-            // (see LayoutCtx.is_background) — there's no on-screen viewer to
-            // show `raise_win` to, and raising it would leave it first in the
-            // global stacking order with nothing to ever lower it again.
+            // Same reasoning as monocle: never raise on a background retile
+            // (LayoutCtx.is_background) — there's no viewer to show it to, and
+            // raising would leave it first in the global stacking order.
             layouts.configureWithHintsAndRaiseIfVisible(ctx, raise_win, overflow_rect);
             for (windows[i..]) |overflow_win| {
                 if (overflow_win == raise_win) continue;

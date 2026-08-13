@@ -368,9 +368,10 @@ fn geometryFromReply(r: *xcb.xcb_get_geometry_reply_t) utils.Rect {
 /// a round-trip; only cache-missing, non-minimized windows get a
 /// get_geometry round-trip, also batched.
 ///
-/// Each successful title dupe is owned by `out_titles`; on partial OOM a
-/// prefix is present and the caller frees via the normal
-/// `std.ArrayListUnmanaged([]const u8)` / WindowTitles ownership rules.
+/// Each successful title dupe is owned by `out_titles` and is allocated from
+/// `title_allocator` (the caller's per-batch arena — see
+/// `bar.WindowTitles.allocator`); the caller frees them in bulk via
+/// `WindowTitles.clear`/`deinit`.
 pub fn batchFetchWindowInfosInto(
     conn: *xcb.xcb_connection_t,
     wins: []const u32,
@@ -379,6 +380,7 @@ pub fn batchFetchWindowInfosInto(
     minimized: *const std.AutoHashMapUnmanaged(u32, void),
     out_titles: *std.ArrayListUnmanaged([]const u8),
     out_geoms: *std.ArrayListUnmanaged(utils.Rect),
+    title_allocator: std.mem.Allocator,
     allocator: std.mem.Allocator,
 ) void {
     const win_count = wins.len;
@@ -423,7 +425,7 @@ pub fn batchFetchWindowInfosInto(
         if (focused_idx == i) continue;
         got: {
             if (net_atom != null) {
-                owned_titles[i] = collectPropertyReply(conn, net_wm_cookies[i], allocator);
+                owned_titles[i] = collectPropertyReply(conn, net_wm_cookies[i], title_allocator);
                 if (owned_titles[i] != null) break :got;
             }
             fallback_cookies[i] = xcb.xcb_get_property(conn, 0, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, 0, 8192);
@@ -434,26 +436,24 @@ pub fn batchFetchWindowInfosInto(
     // Phase 3 — collect WM_NAME fallback replies.
     for (wins, 0..) |_, i| {
         if (focused_idx == i or !needs_fallback[i]) continue;
-        owned_titles[i] = collectPropertyReply(conn, fallback_cookies[i], allocator);
+        owned_titles[i] = collectPropertyReply(conn, fallback_cookies[i], title_allocator);
     }
 
     // Build parallel output lists, collecting geometry as we go.
     for (wins, 0..) |win, i| {
         if (focused_idx == i) {
-            // Duped like every other title: the snapshot frees every entry in
-            // `out_titles`, so a slice aliasing `focused_title` here would be
-            // freed as an interior pointer into that buffer.
-            const owned = allocator.dupe(u8, focused_title) catch null;
+            // Duped like every other title: `focused_title` lives in the
+            // snapshot's separate focused_title buffer, which is freed
+            // independently of window_titles. An entry aliasing it would
+            // dangle once that buffer is deinit'd while the list continues
+            // relaying between snapshot slots.
+            const owned = title_allocator.dupe(u8, focused_title) catch null;
             if (owned) |t|
-                out_titles.append(allocator, t) catch allocator.free(t)
+                out_titles.append(allocator, t) catch {}
             else
                 out_titles.append(allocator, "") catch {};
         } else if (owned_titles[i]) |t| {
-            out_titles.append(allocator, t) catch {
-                allocator.free(t);
-            };
-        } else {
-            out_titles.append(allocator, "") catch {};
+            out_titles.append(allocator, t) catch {};
         }
 
         const geom: utils.Rect = if (minimized.contains(win))

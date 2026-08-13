@@ -205,26 +205,23 @@ pub fn reloadConfig() void {
 
     const ns = getState();
 
-    // Re-apply per-workspace layout/variant/master-count overrides from the
-    // *new* config, falling back to the new global default layout for any
-    // workspace without its own override. Runtime-only state with no
-    // config-file representation — master_width (increase_master/
-    // decrease_master) and stack_balance (mod+n/mod+o grow-slave actions) —
-    // is reset to null by applyWorkspaceOverrides itself, since a reload has
-    // no config-declared value to restore either to.
+    // Re-apply per-workspace overrides from the *new* config, falling back to
+    // its global default layout. Runtime-only state with no config-file
+    // representation — master_width (increase_master/decrease_master) and
+    // stack_balance (mod+n/mod+o grow-slave) — is reset to null by
+    // applyWorkspaceOverrides itself, since a reload has no declared value
+    // to restore either to.
     if (workspaces.getState()) |ws_state| {
         workspaces.applyWorkspaceOverrides(ws_state.workspaces, &core.getState().config.tiling, ns.config.layout);
     }
 
     if (ns.is_enabled) {
-        // Wrap everything in a single server grab so picom never composites a
-        // frame where some windows have the new border width but the layout has
-        // not yet been recalculated.
-        //
-        // BORDER_WIDTH is sent explicitly to every tiled window here, then the
-        // normal retile path recalculates geometry separately. This costs one
-        // extra XCB request per window, in exchange for keeping the retile
-        // path free of any border-width bookkeeping.
+        // Single server grab so picom never composites a frame where some
+        // windows have the new border width but the layout hasn't been
+        // recalculated. BORDER_WIDTH is sent explicitly to every tiled window
+        // here, then the retile recalculates geometry separately: one extra
+        // XCB request per window in exchange for keeping the retile path free
+        // of border-width bookkeeping.
         const conn = core.getState().conn;
         utils.grabServer(conn);
         for (ns.windows.items()) |win| {
@@ -252,15 +249,13 @@ pub fn addWindow(window_id: u32) void {
     std.debug.assert(window_id != 0);
     const s = getState();
 
-    // Always add to the tracking list, even when tiling is disabled
-    // (is_enabled == false) or the floating layout is active. Windows opened
-    // in those modes must be tracked so they enter the tiling pool as soon as
-    // a tiled layout is active again.
+    // Always add to the tracking list, even when tiling is disabled or the
+    // floating layout is active: windows opened in those modes must be tracked
+    // so they enter the tiling pool the moment a tiled layout becomes active.
     // FIFO/LIFO insertion order is resolved from the master layout's variant
-    // when the current layout is .floating: floating has no window order of
+    // when the current layout is .floating — floating has no window order of
     // its own, and master (the cycle's first layout) is where cycling away
-    // from floating lands — so new windows arrive in the slot they'd have
-    // under master.
+    // from floating lands.
     const fifo_insert = s.config.layout_variants.master == .fifo and
         (s.config.layout == .floating or s.config.layout == .master);
     if (fifo_insert)
@@ -283,7 +278,7 @@ pub fn addWindow(window_id: u32) void {
     // addWindow is immediately followed by the code that owns the BORDER_WIDTH
     // send (mapWindowToScreen → applyBorderWidth, registerWindowOffscreen →
     // applyBorder, toggleWindowFloat / unminimize → already set at initial
-    // map). The X server retains BORDER_WIDTH between configure calls, so
+    // map). The server retains BORDER_WIDTH between configure calls, so
     // sending it here would duplicate that request in the common spawn path.
 
     // Pre-populate the cache so the immediately-following retile does not
@@ -328,9 +323,9 @@ pub fn toggleWindowFloat(window_id: u32) void {
     }
     retileCurrentWorkspace();
     // Grab, border sweep, bar redraw, and flush are the caller's responsibility
-    // (input.zig executeAction / executeMouseAction).  Keeping this function
-    // grab-agnostic matches swapWithMaster's convention and lets the caller
-    // compose the full atomic batch.
+    // (input.zig executeAction / executeMouseAction). Staying grab-agnostic
+    // matches swapWithMaster's convention and lets the caller compose the full
+    // atomic batch.
 }
 
 /// Returns the position of `win` in the current-workspace-filtered window list —
@@ -425,12 +420,11 @@ pub fn retileCurrentWorkspaceDeferred(defer_win: ?u32) void {
 /// `pending_focus` instead of reading focus.getFocused().
 ///
 /// Used by window.zig's spawn path: a newly-mapped window is retiled before
-/// focus.setFocus runs on it (retiling is deliberately kept outside the
-/// atomic map/focus/border grab — see mapWindowToScreen), so
-/// focus.getFocused() would still report the previously-focused window at
-/// retile time. Passing the spawning window here keeps focus-driven layouts
-/// (e.g. monocle raising the focused window) in sync with the window that is
-/// about to actually receive focus, instead of lagging by one retile.
+/// focus.setFocus runs on it (retiling is deliberately outside the atomic
+/// map/focus/border grab — see mapWindowToScreen), so getFocused() still
+/// reports the previous window at retile time. Passing the spawn here keeps
+/// focus-driven layouts (monocle raising the focused window) in sync with the
+/// window about to receive focus, instead of lagging by one retile.
 pub fn retileCurrentWorkspaceWithPendingFocus(pending_focus: u32) void {
     retileCurrentWorkspaceWithOpts(.{ .focus_override = pending_focus });
 }
@@ -460,11 +454,9 @@ pub fn retileInactiveWorkspace(ws_idx: u8) void {
 
     // Defense in depth: monocle (and fibonacci's overflow fallback) now skip
     // raising during a background retile (see LayoutCtx.is_background), but
-    // nothing here relies on that being the *only* way a window could have
-    // ended up first in stacking order — pushWindowOffscreenAndLower also
-    // explicitly sends XCB_STACK_MODE_BELOW alongside the offscreen X, so a
-    // hidden window can never surface above the bar or the visible
-    // workspace regardless of what raised it.
+    // nothing relies on that being the *only* guard — pushWindowOffscreenAndLower
+    // also sends XCB_STACK_MODE_BELOW alongside the offscreen X, so a hidden
+    // window can never surface above the bar or the visible workspace.
     const bit = tracking.workspaceBit(ws_idx);
     const conn = core.getState().conn;
     for (tracking.allWindows()) |entry| {
@@ -474,9 +466,9 @@ pub fn retileInactiveWorkspace(ws_idx: u8) void {
 
 /// Compute tiled geometry bypassing the `!is_enabled` guard, then restore
 /// `s.layout`. Used by the workspace switcher when tiling is disabled (the
-/// .floating layout may also be active) and the geometry cache is stale —
-/// pre-populates the cache so float-restore can use `getWindowGeom` instead
-/// of falling back to the default float position.
+/// .floating layout may be active) and the geometry cache is stale — warms
+/// the cache so float-restore can use `getWindowGeom` instead of falling back
+/// to the default float position.
 pub fn retileForRestore() void {
     const s = getState();
     const saved = s.config.layout;
@@ -507,9 +499,9 @@ pub fn restoreWorkspaceGeom() bool {
     if (!layouts.rectsEqual(current_screen, s.geom.last_retile_area)) return false;
 
     // Pass 1 — validate all cache entries before emitting any XCB calls.
-    // getPtr pointers stay valid through pass 2 because no insertion happens
-    // into the cache between collecting them here and dereferencing them below
-    // (AutoHashMap pointers are only invalidated by insertion/rehash).
+    // getPtr pointers stay valid through pass 2: nothing inserts into the cache
+    // between collecting them and dereferencing below (AutoHashMap pointers
+    // are only invalidated by insertion/rehash).
     var wd_ptrs: [max_workspace_windows]*layouts.WindowData = undefined;
     for (ws_windows, 0..) |win, i| {
         const wd = s.geom.cache.getPtr(win) orelse return false;
@@ -634,9 +626,9 @@ pub fn adjustMasterWidth(delta: f32) void {
     s.config.master_width = std.math.clamp(s.config.master_width + delta, constants.MIN_MASTER_WIDTH, max_master_width_ratio);
     persistToCurrentWorkspace("master_width", s.config.master_width);
     // Invalidate inactive workspace caches so their next switch-in forces a
-    // full retile with the new width, rather than replaying stale positions.
-    // is_dirty is NOT set here: retileCurrentWorkspace() immediately below
-    // sets is_dirty = false unconditionally, making the write a no-op.
+    // full retile with the new width instead of replaying stale positions.
+    // is_dirty is NOT set here: the retile immediately below clears it
+    // unconditionally, making the write a no-op.
     s.geom.workspace_geom_valid_bits = 0;
     retileCurrentWorkspace();
 }
@@ -696,22 +688,19 @@ pub inline fn scrollViewRight() void {
 }
 
 /// Brings the newly focused window into view after keyboard focus-cycle
-/// actions (focus_next_window / focus_prev_window), for layouts where a
-/// plain focus change doesn't already make the right window visible:
+/// actions, for layouts where a plain focus change doesn't already show the
+/// right window:
 ///
-///   • .scroll: snaps the viewport to the focused window when it's off-screen,
-///     then retiles.
-///   • .monocle: always retiles. Monocle hides every window but the focused
-///     one by moving it off-screen (see monocle.zig's
-///     pushBackgroundWindowsOffscreen), not by lowering it in the stacking
-///     order, so the plain raise that setFocus() already performs is a
-///     no-op — only a retile repositions the newly focused window back on
-///     screen and pushes the previously focused one off.
+///   • .scroll: snaps the viewport to the focused window when off-screen, then
+///     retiles.
+///   • .monocle: always retiles. Monocle hides every window but the focused one
+///     off-screen (monocle.pushBackgroundWindowsOffscreen), not by lowering in
+///     the stacking order, so the plain raise that setFocus() performs is a
+///     no-op — only a retile brings the newly focused window back and pushes
+///     the previous one off.
 ///
-/// No-op when:
-///   • the active layout is neither .scroll nor .monocle
-///   • (.scroll only) no window is focused, or it's already fully visible
-///     in the current viewport
+/// No-op when the active layout is neither .scroll nor .monocle, or (.scroll
+/// only) nothing is focused or it's already fully visible.
 pub fn snapScrollToFocused() void {
     const s = getState();
     switch (s.config.layout) {
@@ -763,12 +752,12 @@ pub inline fn isFloatingLayout() bool {
     return s.config.layout == .floating;
 }
 
-/// Returns true only when the tiler is enabled AND `window_id` is managed by
-/// the tiler. `is_enabled` mirrors config.tiling.enabled (applied at
-/// init/reload — there is no runtime toggle), so when tiling is disabled this
-/// returns false and applications are free to position themselves. Use this in
-/// handleConfigureRequest so tiled windows' configure requests are denied (the
-/// WM owns their geometry) while untiled ones pass through.
+/// True only when the tiler is enabled AND `window_id` is managed by it.
+/// `is_enabled` mirrors config.tiling.enabled (set at init/reload — no runtime
+/// toggle), so when tiling is disabled this returns false and applications may
+/// position themselves. Use in handleConfigureRequest so tiled windows'
+/// configure requests are denied (the WM owns their geometry) while untiled
+/// ones pass through.
 pub inline fn isWindowActiveTiled(window_id: u32) bool {
     const s = getStateOpt() orelse return false;
     return s.is_enabled and s.windows.contains(window_id);
@@ -1146,16 +1135,14 @@ fn collectWorkspaceWindows(s: *State, for_ws: ?u8) []const u32 {
 }
 
 /// Move the element at `from_idx` to `to_idx` in `s.windows`, shifting
-/// intervening elements — equivalent to removing at `from_idx` and
-/// re-inserting at `to_idx` (see moveWindowToFilteredSlot's contract below).
+/// intervening elements — equivalent to remove + re-insert (see
+/// moveWindowToFilteredSlot's contract).
 ///
 /// Implemented as an in-place rotation of the sub-range spanning both
-/// indices: rotating [from, to] left by one slides the removed slot's
-/// neighbours down and drops `from`'s element in at the far end, and the
-/// mirror image (rotate right by one) does the same for `from > to`. This
-/// touches only the |to_idx - from_idx| elements between the two positions
-/// — no scratch buffer, no full-list rebuild, no capacity check needed
-/// since both indices are already valid positions in `s.windows`.
+/// indices: rotate [from, to] left by one for `from < to`, right by one
+/// otherwise. Touches only the elements between the two positions — no
+/// scratch buffer, no full-list rebuild, no capacity check (both indices are
+/// already valid).
 fn moveWindowToIndex(s: *State, from_idx: usize, to_idx: usize) void {
     if (from_idx == to_idx) return;
     if (from_idx < to_idx) {
@@ -1166,19 +1153,19 @@ fn moveWindowToIndex(s: *State, from_idx: usize, to_idx: usize) void {
     }
 }
 
-/// Reposition `win` within the global window list so that it lands at
+/// Reposition `win` within the global window list so it lands at
 /// workspace-filtered index `target` (0 = master slot).
 ///
-/// moveWindowToIndex(from, to) removes the source element first, then
-/// inserts at position `to` in the shortened list. When `from` lies before
-/// `to`, removal shifts elements left by one, so the effective insertion
-/// point is `tg - 1`; when `from` lies after `to`, no shift occurs.
+/// moveWindowToIndex(from, to) removes the source element first, then inserts
+/// at `to` in the shortened list. When `from` lies before `to`, removal shifts
+/// elements left by one, so the effective insertion point is `tg - 1`; when
+/// `from` lies after `to`, no shift occurs.
 fn moveWindowToFilteredSlot(s: *State, win: u32, target: usize) void {
     const items = s.windows.items();
 
     // `to_global` is a filtered *positional* match (the Nth window on the
     // current workspace), not an ID match like `from_global`, so both are
-    // found in one pass here rather than via a plain indexOfScalar.
+    // found in one pass rather than via plain indexOfScalar.
     var from_global: ?usize = null;
     var to_global: ?usize = null;
     var filtered_count: usize = 0;
@@ -1252,8 +1239,8 @@ fn findFocusMasterPos(s: *State) ?FocusMasterPos {
 /// Shared core for swapWithMaster.
 ///
 /// Uses swapWindowsInList (O(1) std.mem.swap) instead of moveWindowToIndex
-/// (O(n) remove-then-insert) — untouched windows keep their slots, get cache
-/// hits, and receive no configure_window call, preventing intermediate frames.
+/// (O(n) remove-then-insert): untouched windows keep their slots, get cache
+/// hits, and receive no configure_window call — preventing intermediate frames.
 fn swapWithMasterCore(s: *State, pos: FocusMasterPos) ?u32 {
     if (pos.fp_filtered == 0) {
         // Focused is already master — promote ws_wins[1]; a swap gives the same

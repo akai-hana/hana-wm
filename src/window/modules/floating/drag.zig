@@ -23,6 +23,8 @@ pub const DragMode = enum { move, resize };
 /// wraps the resize to grow the opposite way instead of collapsing.
 pub const ResizeCorner = enum { top_left, top_right, bottom_left, bottom_right };
 
+const WorkArea = struct { left: i32, right: i32, top: i32, bottom: i32 };
+
 pub const DragState = struct {
     active: bool = false,
     window: core.WindowId = 0,
@@ -37,9 +39,12 @@ pub const DragState = struct {
     /// Geometry from the last updateDrag call. Zero means no motion event
     /// arrived; saved to the geometry cache by stopDrag on exit.
     last_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    /// Resolved once at drag start: snap distance in pixels (0 = disabled) and
+    /// the work-area edges used for snapping. Both are constant for the whole
+    /// drag, so re-resolving them on every motion event would be wasted work.
+    snap_px: i32 = 0,
+    work_area: WorkArea = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
 };
-
-const WorkArea = struct { left: i32, right: i32, top: i32, bottom: i32 };
 
 // Snapping
 
@@ -125,6 +130,9 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
         break :corner .bottom_right;
     };
 
+    // Snap distance and work area are resolved here so updateDrag's per-event
+    // path only does arithmetic. They are constant for the duration of a drag.
+    const snap_px = snapDistance();
     g_state = .{
         .drag = .{
             .active = true,
@@ -137,6 +145,8 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
             .start_win_y = geom.y,
             .start_win_width = geom.width,
             .start_win_height = geom.height,
+            .snap_px = snap_px,
+            .work_area = if (snap_px > 0) workArea() else .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
         },
         // A tiled window in a non-floating layout detaches on first motion
         // (see updateDrag); move also skips snap on that first event so the
@@ -168,8 +178,8 @@ pub fn updateDrag(x: i16, y: i16) void {
     const dx = x - drag.start_x;
     const dy = y - drag.start_y;
 
-    const snap = snapDistance();
-    const wa: WorkArea = if (snap > 0) workArea() else .{ .left = 0, .right = 0, .top = 0, .bottom = 0 };
+    const snap = drag.snap_px;
+    const wa = drag.work_area;
 
     const rect = switch (drag.mode) {
         .move => blk: {
@@ -191,10 +201,9 @@ pub fn updateDrag(x: i16, y: i16) void {
             };
         },
         .resize => blk: {
-            // Anchor = corner opposite the one grabbed; stays fixed. Moving
-            // corner follows the cursor. The rect is always min/max(anchor,
-            // moving) per axis, so crossing the anchor flips growth direction
-            // automatically — no separate "wrap" case needed.
+            // Anchor = corner opposite the grabbed one, fixed; the moving
+            // corner follows the cursor. min/max(anchor, moving) per axis
+            // makes crossing the anchor flip growth automatically.
             const start_x: i32 = drag.start_win_x;
             const start_y: i32 = drag.start_win_y;
             const start_w: i32 = drag.start_win_width;
@@ -259,11 +268,10 @@ pub fn stopDrag() void {
     g_state = .{};
 }
 
-/// Clears the active drag if it targets `win`, without saving geometry.
-/// Used when the dragged window is destroyed mid-drag: without this, a lost
-/// ButtonRelease would leave the drag stuck active until the WM restarts,
-/// dropping pointer-motion focus. The window is gone, so there's no geometry
-/// to persist.
+/// Clears the active drag if it targets `win`, without saving geometry. Used
+/// when the dragged window is destroyed mid-drag — a lost ButtonRelease would
+/// otherwise leave the drag stuck until the WM restarts, and there's no
+/// geometry to persist for a dead window.
 pub fn cancelDragForWindow(win: u32) void {
     if (g_state.drag.active and g_state.drag.window == win) g_state = .{};
 }

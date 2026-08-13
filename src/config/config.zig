@@ -84,13 +84,11 @@ fn getScalableInRange(
     return value;
 }
 
-/// Validates a 1-based workspace number, warn-and-skip (returns false) when it
-/// is outside the syntactic 1..255 range or exceeds `max` — the configured
-/// workspace count for window rules, or constants.MAX_WORKSPACES (the hard
-/// ceiling behind workspaces.zig's fixed-size override lookup tables) for
-/// per-workspace overrides. Checking that ceiling at parse time reports an
-/// override that can never take effect immediately, instead of silently
-/// dropping it later when workspaces.init() builds its tables.
+/// Validates a 1-based workspace number, warn-and-skip (false) when outside
+/// the syntactic 1..255 range or exceeding `max` — the configured workspace
+/// count, or constants.MAX_WORKSPACES (the hard ceiling behind workspaces.zig's
+/// fixed-size lookup tables) — flagging an impossible override at parse time
+/// instead of dropping it later when workspaces.init() builds its tables.
 inline fn checkWorkspaceBound(ws_1based: usize, context: []const u8, max: usize) bool {
     if (ws_1based < 1 or ws_1based > 255) {
         debug.warn("{s}: workspace {} out of range, skipping", .{ context, ws_1based });
@@ -126,12 +124,11 @@ fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *types.Config) !void 
 /// Maximum bytes accepted from a single .toml file (1 MiB).
 const MAX_FILE_BYTES = 1024 * 1024;
 
-/// Reads the file at `path` into a freshly allocated slice owned by the caller.
-/// Returns `error.FileTooLarge` when the file exceeds `MAX_FILE_BYTES`.
-///
-/// Allocates the full MAX_FILE_BYTES + 1 ceiling up front, then reallocs down
-/// — config loading is startup/reload-only, so it's not worth a stat-then-
-/// allocate dance (and its TOCTOU re-check) for a cost this low-frequency.
+/// Reads the file at `path` into a freshly allocated slice owned by the caller;
+/// `error.FileTooLarge` when it exceeds `MAX_FILE_BYTES`. Allocates the full
+/// MAX_FILE_BYTES + 1 ceiling up front, then reallocs down — config loading is
+/// startup/reload-only, so a stat-then-allocate dance (and its TOCTOU re-check)
+/// isn't worth it for this low-frequency cost.
 fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const io = std.Options.debug_io;
     const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| {
@@ -170,11 +167,10 @@ fn tryParseTomlFile(allocator: std.mem.Allocator, path: []const u8) ?parser.Docu
 }
 
 /// Merges files listed in `include = [...]` from `src_doc` into `dst`; `dir_path` is the base for relative paths.
-///
 /// Includes are resolved one level deep only — an included file's own
-/// `include` directive is intentionally not processed. This keeps the include
-/// graph cycle-free by construction (no cycle-detection machinery needed) at
-/// the cost of no chained includes.
+/// `include` is intentionally skipped, keeping the graph cycle-free by
+/// construction (no cycle-detection machinery needed) at the cost of no
+/// chained includes.
 fn processIncludes(allocator: std.mem.Allocator, dst: *parser.Document, src_doc: *parser.Document, dir_path: []const u8) !void {
     // The `include` key is copied into `dst` by mergeDocumentsInto, so mark it
     // consumed there as well — otherwise warnUnconsumed would flag it as a typo.
@@ -306,13 +302,10 @@ pub fn validate(cfg: *const types.Config) !void {
     }
     // master_width is stored as a ScalableValue. Percentages are validated as
     // a [MIN_MASTER_WIDTH, MAX_MASTER_WIDTH] ratio (the runtime never lets the
-    // master consume the full screen — the same cap the increase_master_width
-    // action and the pixel->ratio conversion clamp to). Absolute pixel values
-    // are checked as pixels (>= 0 only): converting them to a ratio needs the
-    // screen width, which isn't available here, and the runtime clamps the
-    // resulting fraction into range itself — so rejecting them outright (the
-    // old behaviour, which compared raw pixels against the ratio bounds) would
-    // wrongly refuse a perfectly valid `master_width = 600`.
+    // master consume the full screen). Pixels are checked as pixels (>= 0 only):
+    // the screen width needed to convert them to a ratio isn't available here,
+    // and the runtime clamps the fraction itself — so the old pixel-vs-ratio
+    // comparison would wrongly refuse a valid `master_width = 600`.
     const mw = cfg.tiling.master_width;
     if (mw.is_percentage) {
         const mw_ratio: f32 = utils.scaling.asRatio(mw);
@@ -366,17 +359,15 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !types.Config {
 }
 
 /// Builds the built-in default Config: heap-dup'd strings so deinit can free
-/// every owned field unconditionally, plus one entry in `layouts` so the
-/// layout cycle always has something to rotate. Fallible: an OOM propagates
-/// and the partially-built Config is torn down by the errdefer, never left
-/// holding string literals that a later deinit would free.
+/// every owned field unconditionally, plus one `layouts` entry so the layout
+/// cycle always has something to rotate. OOM propagates; the errdefer tears
+/// down the partial Config, never leaving string literals for deinit to free.
 fn getDefaultConfig(allocator: std.mem.Allocator) !types.Config {
     var cfg: types.Config = .{};
     errdefer cfg.deinit(allocator);
-    // Canonical LAYOUT_TABLE name (types.LAYOUT_TABLE's .master entry), so the
-    // default is resolvable by layoutFromString in workspaces.zig and falls
-    // through to .master in tiling.zig's stringToEnum check — the historical
-    // "master_left" matched neither and only worked via `orelse` fallbacks.
+    // Canonical LAYOUT_TABLE name (the .master entry), so the default resolves
+    // via layoutFromString in workspaces.zig and stringToEnum in tiling.zig —
+    // the old "master_left" matched neither and worked only via `orelse`.
     const default_layout = try allocator.dupe(u8, "master-stack");
     try cfg.tiling.layouts.append(allocator, default_layout);
     cfg.tiling.layout = cfg.tiling.layouts.items[0];
@@ -689,9 +680,8 @@ fn parseBindString(str: []const u8) !BindResult {
     var parts = std.mem.splitScalar(u8, str, '+');
     while (parts.next()) |part| {
         const trimmed = std.mem.trim(u8, part, " \t");
-        // Normalise to lowercase so modifier names are case-insensitive, via
-        // the same bounded helper mouseButtonFromName uses below — an
-        // overlong token (longer than any modifier name we recognise) comes
+        // Normalise to lowercase (modifiers are case-insensitive) via the same
+        // bounded helper mouseButtonFromName uses — an overlong token comes
         // back as `.too_long` instead of overflowing a fixed buffer.
         const mod: ?u16 = switch (types.lowerStringCI(16, trimmed)) {
             .too_long => null,
@@ -761,10 +751,9 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !types.Action {
     if (tryParseWorkspace(cmd, "workspace_")) |ws| return .{ .switch_workspace = ws };
     if (tryParseWorkspace(cmd, "move_to_workspace_")) |ws| return .{ .move_to_workspace = ws };
     if (tryParseWorkspace(cmd, "toggle_tag_")) |ws| return .{ .toggle_tag = ws };
-    // The fallback is exec so any shell command can be bound as an action —
-    // but a bare word that resembles a built-in action name is almost always
-    // a typo, and silently running it as an exec command (which then fails or
-    // does nothing) hides the mistake. Warn in that case.
+    // The fallback is exec so any shell command can be bound — but a bare word
+    // resembling a built-in action is almost always a typo, and running it as
+    // an exec (which fails or does nothing) hides the mistake, so warn.
     if (looksLikeActionWord(cmd))
         debug.warn("Unrecognized action '{s}': running it as an exec command — check the spelling (action names are matched exactly)", .{cmd});
     return .{ .exec = try allocator.dupe(u8, cmd) };
@@ -778,13 +767,10 @@ pub inline fn finalizeConfig(cfg: *types.Config, screen: *core.xcb.xcb_screen_t)
 
 /// O(1) keybinding lookup for use on the hot key-press path.
 /// Returns a pointer into the current config's keybindings slice, or null.
-///
-/// This delegates to the current config's embedded `keybind_resolver`
-/// (core.getState().config.keybind_resolver — see KeybindResolver in
-/// types.zig) rather than reading a bare module-level global. Kept as a free
-/// function — rather than requiring every call site to spell out
-/// `core.getState().config.keybind_resolver.lookup(...)` — because it's
-/// called from the hot key-press path in src/core/input/input.zig.
+/// Delegates to the current config's embedded `keybind_resolver`
+/// (core.getState().config.keybind_resolver — see KeybindResolver in types.zig)
+/// rather than a bare module-level global; kept a free function so the hot
+/// key-press path in src/core/input/input.zig needn't spell out the lookup.
 pub inline fn lookupKeybinding(mods: u16, keysym: u32) ?*const types.Action {
     return core.getState().config.keybind_resolver.lookup(mods, keysym);
 }
@@ -801,10 +787,9 @@ pub fn load(allocator: std.mem.Allocator, screen: *core.xcb.xcb_screen_t, xkb_st
 }
 
 /// Pushes the config's staged carousel settings onto the carousel's live
-/// globals. Called only from load() — i.e. at startup and, via
-/// handleConfigReload, AFTER the fully-validated config has been swapped in —
-/// so carousel settings can never leak into effect from a config that failed
-/// validation and was discarded.
+/// globals. Called only from load() — at startup and, via handleConfigReload,
+/// after the validated config has been swapped in — so settings from a
+/// rejected config can never leak into effect.
 pub fn applyCarouselSettings(cfg: *const types.Config) void {
     carousel.setCarouselEnabled(cfg.bar.carousel_enabled);
     carousel.setScrollSpeed(@as(f64, @floatFromInt(cfg.bar.scroll_speed)));
@@ -823,10 +808,9 @@ fn parseDrag(doc: *parser.Document, cfg: *types.Config) void {
 fn parseWorkspaces(doc: *parser.Document, cfg: *types.Config) void {
     const section = doc.getSection("bar.modules.workspaces") orelse doc.getSection("workspaces") orelse return;
     cfg.workspaces.enabled = getInRange(bool, section, "enabled", cfg.workspaces.enabled, null, null);
-    // Cap at MAX_WORKSPACES: tracking's u64 workspace bitmask and the
-    // fixed-size override/fullscreen lookup tables can't represent more, and
-    // tracking.setWorkspaceCount asserts the same ceiling — so a larger count
-    // would trip that assert in Debug and index out of bounds in release.
+    // Cap at MAX_WORKSPACES: the u64 workspace bitmask and fixed-size
+    // override/fullscreen tables can't represent more, and setWorkspaceCount
+    // asserts the same ceiling — a larger count would assert/index OOB.
     cfg.workspaces.count = getInRange(u8, section, "count", cfg.workspaces.count, 1, @intCast(constants.MAX_WORKSPACES));
 }
 
@@ -851,13 +835,10 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.
         if (cfg.tiling.layouts.items.len > 0) cfg.tiling.layout = cfg.tiling.layouts.items[0];
     } else {
         // Single-layout path: clear the getDefaultConfig default so layouts
-        // holds exactly the user's one choice. `cfg.tiling.layout` points into
-        // layouts[0]; TilingConfig.deinit frees it.
-        //
-        // The "layout" default is (types.TilingConfig{}).layout, NOT
-        // cfg.tiling.layout — the latter aliases layouts.items[0], which is
-        // freed on the next line, so using it as the fallback would read
-        // freed memory when the key is absent.
+        // holds exactly the user's one choice. The "layout" default is
+        // (types.TilingConfig{}).layout, NOT cfg.tiling.layout — the latter
+        // aliases layouts.items[0], which is freed on the next line, so using
+        // it as the fallback would read freed memory when the key is absent.
         for (cfg.tiling.layouts.items) |l| allocator.free(l);
         cfg.tiling.layouts.clearRetainingCapacity();
         const layout_str = getInRange([]const u8, section, "layout", (types.TilingConfig{}).layout, null, null);
@@ -974,11 +955,10 @@ inline fn isWorkspaceList(s: []const u8) bool {
 /// -> "master-stack"). Unmatched names come back lowercased, unchanged;
 /// isKnownLayout rejects those at the call site.
 inline fn canonicalLayout(name: []const u8, buf: *[32]u8) []const u8 {
-    // An overlong name (see lowerStringCI) is returned unchanged: the caller
-    // immediately passes the result through isKnownLayout, which also uses
-    // lowerStringCI and so also reports `.too_long` (as `false`) for it,
-    // correctly routing an oversized name into the "unknown layout name"
-    // warning path instead of crashing or silently truncating.
+    // An overlong name is returned unchanged: isKnownLayout (the immediate
+    // caller-side check) also uses lowerStringCI and reports `.too_long` as
+    // false, routing the name into the "unknown layout" warning instead of
+    // crashing or truncating.
     switch (types.lowerStringCI(32, name)) {
         .too_long => return name,
         .ok => |r| {
@@ -998,16 +978,12 @@ inline fn canonicalLayout(name: []const u8, buf: *[32]u8) []const u8 {
 /// Parses a variants string for the given layout name into a LayoutVariantOverride.
 /// Returns null and emits a warning when the string is not valid for that layout.
 fn parseLayoutVariant(layout_name: []const u8, variants_str: []const u8) ?types.LayoutVariantOverride {
-    // Named local (rather than capturing inside a switch/if expression) so
-    // `lowered.ok.buf` unambiguously lives for the rest of this function —
-    // lower_layout borrows from it below and is used well past the point a
-    // switch-arm-scoped capture would be.
+    // A named local (not a switch-arm capture) so `lowered.ok.buf` outlives
+    // the expression — lower_layout borrows from it later in this function.
     const lowered = types.lowerStringCI(32, layout_name);
     if (lowered == .too_long) {
-        // Distinguished from "not a known variant-typed layout" (below) so a
-        // config with a genuinely too-long layout name gets a message that
-        // points at the actual problem, instead of looking identical to a
-        // plain typo.
+        // Distinguished from "unknown layout" below so a genuinely overlong
+        // name gets a message pointing at the real problem, not a plain typo.
         debug.warn("layouts array: layout name '{s}' too long to match against a variant type, ignoring variants '{s}'", .{ layout_name, variants_str });
         return null;
     }
@@ -1054,10 +1030,9 @@ fn parseLayoutsArray(
             }
             continue;
         }
-        // Deduplicate: skip if this exact canonical name is already in the list.
-        // Prevents pointless cycle entries when the user lists the same layout
-        // twice, while still allowing distinct variant entries for the same layout
-        // through separate [tiling.layouts.*] sections.
+        // Skip if this canonical name is already listed — pointless cycle
+        // entries when the user repeats a layout, while separate
+        // [tiling.layouts.*] sections still allow distinct variant entries.
         var already_present = false;
         for (cfg.tiling.layouts.items) |existing| {
             if (std.mem.eql(u8, existing, canonical)) {
@@ -1118,30 +1093,22 @@ const BAR_COLOR_FIELDS = [_][]const u8{
     "bg", "fg", "selected_bg", "selected_fg", "accent_color",
 };
 
-/// Parses bar transparency from integers (0–100), decimals (0.0–1.0),
-/// or percentages (`50%`). Returns a [0.0, 1.0] opacity value, working
-/// purely off asInt()/asScalable() since the parser already recognises
-/// bare decimal literals as well as percentages.
+/// Parses bar transparency from integers (0–100), decimals (0.0–1.0), or
+/// percentages (`50%`) into a [0.0, 1.0] opacity value, purely off
+/// asInt()/asScalable() since the parser already recognises bare decimals.
 ///
-/// Bare integers are ALWAYS percentages (0–100), so `transparency = 50`
-/// is 50% opacity — identical in meaning to `50%`. The one colliding case
-/// is a bare `1`: `= 1` means 1% opacity while `= 1.0`/`= 100%` mean fully
-/// opaque. The ambiguity is resolved as 1% (consistent with the other
-/// integer-percent fields such as indicator_padding) and an explicit
-/// warning is emitted so a user who meant "fully opaque" notices.
-///
-/// A *quoted* transparency value (e.g. `transparency = "0.5"`) is not
-/// specially unwrapped; it falls to the default with an explicit warning.
+/// Bare integers are always percentages, so `transparency = 50` means 50%.
+/// The one collision is `= 1`: 1% opacity (consistent with other
+/// integer-percent fields), with a warning — a user meaning fully opaque
+/// writes `1.0` or `100%`. A *quoted* value falls to the default, warned.
 fn parseTransparency(value: parser.Value) f32 {
     if (value.asInt()) |i| {
         if (i == 0) return 0.0;
         if (i >= 2 and i <= 100) return @as(f32, @floatFromInt(i)) / 100.0;
         if (i == 1) {
-            // `transparency = 1` is ambiguous: it could mean 1% opacity (like
-            // every other bare integer, a percentage of 100) or the
-            // floating-point 1.0 (fully opaque).  Per the "bare integers are
-            // percentages" rule it resolves to 1% opacity, but we warn so a
-            // user who meant fully opaque can write `1.0` or `100%` instead.
+            // `= 1` is ambiguous (1% opacity or 1.0 fully opaque); per the
+            // "bare integers are percentages" rule it resolves to 1%, but we
+            // warn so a user who meant fully opaque writes `1.0` or `100%`.
             debug.warn("Transparency value 1 is ambiguous (1% opacity or 1.0 fully opaque?); " ++
                 "treating as 1% opacity. Use '1.0' or '100%' for fully opaque.", .{});
             return 0.01;
@@ -1163,15 +1130,12 @@ fn parseTransparency(value: parser.Value) f32 {
     return 1.0;
 }
 
-/// Dupes `val` into `*view`, freeing the previous value first.
-///
-/// `*view` must already hold a heap allocation (getDefaultConfig dupes the
-/// defaults), so this transfers ownership and Config.deinit can free every
-/// BarConfig string field unconditionally.
-///
-/// The duplicate is taken BEFORE the old allocation is freed: in the
-/// "key absent" fallback path (assignStrKey) `val` IS the current `view.*`,
-/// so freeing first would read freed memory.
+/// Dupes `val` into `*view`, freeing the previous value first. `*view` must
+/// already hold a heap allocation (getDefaultConfig dupes the defaults), so
+/// ownership transfers and Config.deinit can free every BarConfig string
+/// unconditionally. The dupe happens BEFORE the free: in the key-absent
+/// fallback (assignStrKey) `val` IS `view.*`, so freeing first would use
+/// freed memory.
 fn assignStr(a: std.mem.Allocator, view: *[]const u8, val: []const u8) !void {
     const copy = try a.dupe(u8, val);
     a.free(view.*);
@@ -1190,10 +1154,9 @@ fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Con
     cfg.bar.vim_mode = getInRange(bool, section, "vim_mode", cfg.bar.vim_mode, null, null);
     if (section.getString("position")) |pos_str|
         cfg.bar.bar_position = std.meta.stringToEnum(types.BarScreenPosition, pos_str) orelse .top;
-    // height: null = auto-calculate from font metrics alone (see the BarConfig
-    // field doc comment). A negative explicit height makes no sense either, so
-    // it is rejected (with a warning) back to that same auto behavior rather
-    // than being passed through to rendering code.
+    // height: null = auto-calculate from font metrics alone. A negative
+    // explicit height is likewise rejected (with a warning) back to auto
+    // rather than passed through to rendering code.
     cfg.bar.height = height_blk: {
         const h = section.getScalable("height") orelse break :height_blk null;
         if (h.value < 0.0) {
@@ -1229,9 +1192,8 @@ fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Con
 
     if (section.get("indicator_padding")) |val| {
         // Bare integers are always a percentage (0–100), matching transparency;
-        // fractional/decimal values are a 0.0–1.0 ratio directly. `= 1` resolves
-        // to 1% padding (a bare integer, per the rule) with an explicit warning
-        // because `= 1.0` would mean 100% — same collision as transparency.
+        // decimals are a 0.0–1.0 ratio directly. `= 1` resolves to 1% padding
+        // (bare-integer rule) with a warning — `= 1.0` would mean 100%.
         const f: f32 = if (val.asInt()) |i| blk: {
             if (i == 1)
                 debug.warn("indicator_padding value 1 is ambiguous (1% or 1.0 ratio?); " ++
@@ -1279,11 +1241,10 @@ fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Con
                 @field(cfg.bar, f.key) = getColor(c, f.key, @field(cfg.bar, f.fallback));
         }
     }
-    // Carousel: enabled flag, scroll_speed (px/s, min 1), carousel_refresh_rate
-    // (Hz, 0 = auto-detect via RandR). These are staged on the config struct;
-    // applyCarouselSettings() pushes them onto the carousel's live globals only
-    // after a fully-validated config is swapped in (see load()), so a rejected
-    // reload cannot leak them into effect.
+    // Carousel: enabled flag, scroll_speed (px/s, min 1), refresh rate
+    // (Hz, 0 = auto-detect via RandR). Staged on the config struct and pushed
+    // to the live globals only after a validated config is swapped in (see
+    // load()), so a rejected reload can't leak them into effect.
     cfg.bar.carousel_enabled = getInRange(bool, section, "carousel_enabled", true, null, null);
     cfg.bar.scroll_speed = getInRange(u16, section, "scroll_speed", 125, 1, null);
     cfg.bar.carousel_refresh_rate = getInRange(u16, section, "carousel_refresh_rate", 0, null, null);
