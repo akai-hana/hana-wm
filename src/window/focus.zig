@@ -1,4 +1,3 @@
-
 //! Focus management
 //! Handles setting, clearing, and tracking the currently focused window.
 
@@ -337,6 +336,21 @@ pub fn setFocusWithModel(win: u32, reason: Reason, input_model: window.InputMode
     if (isInvalidFocusTarget(win)) return;
     if (state.focused_window == win) return;
     if (input_model == .no_input) return;
+
+    // Debug-mode invariant: focus.getFocused() must always be either null or
+    // a window on the current workspace — every downstream consumer
+    // (fullscreen.toggle in particular) trusts this without re-checking.
+    // .workspace_switch legitimately targets the workspace being switched TO
+    // (that's the whole point), and .window_spawn legitimately targets a
+    // window being registered off the current workspace in some paths,
+    // so both are exempt; every other reason is a programmatically-chosen
+    // "refocus after X happened" target and must already be workspace-scoped
+    // by its caller (see findBestAvailable's doc comment). Asserting here
+    // catches a violation at the call site that introduces it, rather than
+    // three code reviews later when it surfaces as a visual bug in an
+    // unrelated module.
+    std.debug.assert(reason == .workspace_switch or reason == .window_spawn or
+        tracking.isOnCurrentWorkspace(win));
 
     const conn = core.getState().conn;
 

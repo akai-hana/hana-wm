@@ -10,8 +10,7 @@ zig-out/
 *.rej
 
 # vim garbage
-*.swp
-*.swo
+*.sw*
 
 # other garbage
 *.xml

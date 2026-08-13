@@ -4,6 +4,7 @@
 const std = @import("std");
 
 const constants = @import("constants");
+const utils = @import("utils");
 const minimize = @import("minimize");
 
 // Fixed-size ordered window list.
@@ -99,6 +100,80 @@ pub const Entry = struct {
     mask: u64,
 };
 
+// Per-workspace focus history (MRU)
+//
+// Records, per workspace, the order in which windows lost focus on that
+// workspace — so a caller resolving "what should regain focus now" (minimize
+// fallback, in particular) can answer "whichever window was *actually*
+// focused right before this one", not merely "the first candidate a
+// registration-order scan happens to turn up". Scoped per-workspace (rather
+// than one global stack) so the answer is never a window living on a
+// workspace the user isn't even looking at.
+//
+// Pushed from tiling.updateWindowFocus on every focus transition (it already
+// runs unconditionally from focus.commitFocusTransition); popped by
+// minimize.zig when resolving its post-minimize restore target. Scoping each
+// push by the departing window's OWN workspace membership (getWorkspaceForWindow),
+// rather than by "current workspace" at push time, keeps this correct even
+// across a workspace switch — by the time the switch's own focus transition
+// runs, the current-workspace pointer has already moved to the destination,
+// so keying off "current" here would misfile the departing window under the
+// wrong workspace.
+const FOCUS_MRU_CAP: usize = 12; // 8-16 entries is plenty for real usage; bounded like g_minimized.
+var g_focus_mru: [constants.MAX_WORKSPACES]utils.BoundedList(u32, FOCUS_MRU_CAP) = @splat(.{});
+
+fn matchMruWin(win: u32, item: u32) bool {
+    return item == win;
+}
+
+/// Record `win` as the most-recently-defocused window on workspace `ws_idx`.
+/// Moves `win` to the top if it was already present, so a window that gets
+/// focused/defocused repeatedly doesn't accumulate duplicate, increasingly
+/// stale entries. Evicts the oldest entry to make room when full: staying
+/// bounded matters more here than remembering arbitrarily far back.
+pub fn pushFocusMru(ws_idx: u8, win: u32) void {
+    if (ws_idx >= constants.MAX_WORKSPACES) return;
+    const list = &g_focus_mru[ws_idx];
+    if (list.indexOf(win, matchMruWin)) |i| list.orderedRemove(i);
+    if (!list.append(win)) {
+        list.orderedRemove(0);
+        _ = list.append(win);
+    }
+}
+
+/// Pop the most recently defocused window on workspace `ws_idx` that
+/// satisfies `visible`. Entries popped along the way that do NOT satisfy
+/// `visible` are discarded rather than left in place — they're stale
+/// (minimized, destroyed, or moved off this workspace) and, having already
+/// failed the check once, would only fail it again later. Returns null once
+/// the stack is exhausted with nothing eligible.
+pub fn popFocusMru(ws_idx: u8, visible: *const fn (u32) bool) ?u32 {
+    if (ws_idx >= constants.MAX_WORKSPACES) return null;
+    const list = &g_focus_mru[ws_idx];
+    while (list.len > 0) {
+        const i = list.len - 1;
+        const win = list.items[i];
+        list.orderedRemove(i);
+        if (visible(win)) return win;
+    }
+    return null;
+}
+
+/// Purge `win` from every workspace's focus history. Called on final
+/// untracking (removeWindow) so a destroyed window's ID can never surface
+/// from a stale entry — X11 recycles window IDs, and an unpurged entry could
+/// otherwise be mistaken for a live, unrelated window that later reuses the
+/// same ID.
+fn removeFromFocusMruAll(win: u32) void {
+    for (&g_focus_mru) |*list| {
+        if (list.indexOf(win, matchMruWin)) |i| list.orderedRemove(i);
+    }
+}
+
+fn clearFocusMru() void {
+    for (&g_focus_mru) |*list| list.clear();
+}
+
 var g_windows: std.ArrayListUnmanaged(Entry) = .empty;
 /// win -> index into g_windows.items, giving the ID-lookup functions below
 /// (getWindowWorkspaceMask, isManaged, setWindowMask, removeWindow) O(1)
@@ -122,6 +197,7 @@ pub fn init(allocator: std.mem.Allocator) void {
     g_index.ensureTotalCapacity(allocator, 32) catch |err| {
         std.log.warn("tracking: initial index pre-allocation failed ({s}); map will grow on demand", .{@errorName(err)});
     };
+    clearFocusMru();
 }
 
 /// Frees the global window-tracking list and resets all state.
@@ -135,6 +211,7 @@ pub fn deinit() void {
     g_initialized = false;
     g_current = 0;
     g_workspace_count = 1;
+    clearFocusMru();
 }
 
 /// Called by workspaces.init — tells tracking how many workspaces exist.
@@ -185,6 +262,7 @@ pub fn registerWindow(win: u32, ws: u8) !void {
 pub fn removeWindow(win: u32) void {
     if (!g_initialized) return;
     const i = g_index.get(win) orelse return;
+    removeFromFocusMruAll(win);
     _ = g_windows.swapRemove(i);
     _ = g_index.remove(win);
     // swapRemove moved the previously-last entry into slot i (unless i was

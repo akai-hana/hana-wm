@@ -79,11 +79,6 @@ pub fn isMinimized(win: u32) bool {
     return findInBuf(win) != null;
 }
 
-/// Plain fn (not inline) so it can be passed as a *const fn(u32)bool predicate.
-fn notMinimized(win: u32) bool {
-    return !isMinimized(win);
-}
-
 pub fn minimizeWindow() void {
     const cs = core.getState();
     if (!cs.config.minimize_enabled) return;
@@ -122,17 +117,29 @@ pub fn minimizeWindow() void {
     // Resolve the fallback focus target and its input model BEFORE the grab:
     // focusBestAvailable would otherwise run setFocus's blocking WM_PROTOCOLS
     // reply wait inside it (see focus.setFocusWithModel).
-    const restore_target = focus.findBestAvailable(notMinimized);
+    //
+    // Two-tier resolution, both scoped to the current workspace so this can
+    // never hand focus to a window living on a workspace the user isn't even
+    // looking at:
+    //  1. The most recently focused-then-defocused window on this workspace,
+    //     per tracking's per-workspace focus MRU — this is "whichever window
+    //     you were looking at before the one you just minimized", not merely
+    //     *a* visible window.
+    //  2. Fallback when the MRU has nothing eligible (e.g. right after a
+    //     workspace switch, before any focus transition has been recorded
+    //     for it yet): the first visible window on this workspace in
+    //     tracking order.
+    const restore_target = tracking.popFocusMru(ws_idx, tracking.isOnCurrentWorkspaceAndVisible) orelse
+        focus.findBestAvailable(tracking.isOnCurrentWorkspaceAndVisible);
     const restore_model = if (restore_target) |t| window.getInputModel(cs.conn, t) else null;
 
     utils.grabServer(cs.conn);
     utils.pushWindowOffscreen(cs.conn, win);
 
-    // Mirrors focusBestAvailable(.tiling_operation, notMinimized,
-    // focusMasterOrFirst). When restore_target is null every window is
-    // minimized, so focusMasterOrFirst can only resolve to clearFocus — any
-    // visible window would have satisfied notMinimized — so that fallback is
-    // inlined as clearFocus here to keep the grab body free of reply waits.
+    // When restore_target is null, nothing eligible remains on this
+    // workspace (every window here is minimized), so the only correct
+    // outcome is clearing focus — inlined here rather than going through
+    // focus.focusBestAvailable() to keep the grab body free of reply waits.
     if (restore_target) |t| {
         if (restore_model) |m| focus.setFocusWithModel(t, .tiling_operation, m);
     } else {
