@@ -53,16 +53,15 @@ pub fn step(s: *tiling.State, delta: i32) bool {
     return true;
 }
 
-/// If `win` is not fully in the viewport, snaps the offset so `win` occupies
-/// the nearer of the two half-screen slots (the smaller offset change), so the
-/// next retile shows it. `ws_wins` is the same filtered list tileWithOffset
-/// receives. Returns true when the offset changed (caller should retile).
+/// If `win` is not fully in the viewport, snaps the offset so it occupies the
+/// nearer of the two half-screen slots (smaller offset change), and the next
+/// retile shows it. `ws_wins` is the same filtered list tileWithOffset gets.
+/// Returns true when the offset changed (caller should retile).
 ///
 /// Window at index `fi` has its strip edge at `fi * slot_w`; it's fully
-/// visible when that edge is in [scroll, scroll + slot_w]. Otherwise it's
-/// placed on the right half (new_scroll = fi*slot_w - slot_w, predecessor
-/// fills the left) or the left half (new_scroll = fi*slot_w, successor fills
-/// the right).
+/// visible when that edge is in [scroll, scroll + slot_w], else it's placed
+/// on the right half (new_scroll = fi*slot_w - slot_w) or the left half
+/// (new_scroll = fi*slot_w).
 pub fn snapOffsetToWindow(s: *tiling.State, ws_wins: []const u32, win: u32) bool {
     const fi = std.mem.indexOfScalar(u32, ws_wins, win) orelse return false;
 

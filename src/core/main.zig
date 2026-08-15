@@ -76,7 +76,7 @@ const X = struct {
 /// Fails if the display is unavailable, the screen cannot be retrieved,
 /// or another WM is already running.
 fn connectToX() !X {
-    const conn = xcb.xcb_connect(null, null) orelse return error.X11ConnectFailed;
+    const conn = xcb.xcb_connect(null, null) orelse return error.X11ConnectionFailed;
 
     if (xcb.xcb_connection_has_error(conn) != 0) {
         debug.err("X11 connection failed", .{});

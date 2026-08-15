@@ -187,6 +187,23 @@ pub inline fn configureWithHintsAndRaiseIfVisible(ctx: *const LayoutCtx, win: u3
     }
 }
 
+/// Prefer `ctx.focused_win` when it appears in `windows`, else `fallback`.
+pub fn focusedElse(ctx: *const LayoutCtx, windows: []const u32, fallback: u32) u32 {
+    if (ctx.focused_win) |f| if (std.mem.indexOfScalar(u32, windows, f) != null) return f;
+    return fallback;
+}
+
+/// Raise/configure `top` on-screen and push every other window in `windows`
+/// offscreen. Only raises on-screen (respects LayoutCtx.is_background via
+/// configureWithHintsAndRaiseIfVisible).
+pub fn showOneHideRest(ctx: *const LayoutCtx, windows: []const u32, top: u32, top_rect: utils.Rect) void {
+    configureWithHintsAndRaiseIfVisible(ctx, top, top_rect);
+    for (windows) |win| {
+        if (win == top) continue;
+        pushWindowOffscreenAndInvalidate(ctx, win);
+    }
+}
+
 /// Apply ICCCM §4.1.2.3 hints to a raw rect: increment snap, max-size clamp,
 /// then aspect clamp (with a re-snap, since a client may declare both).
 /// Declared minimums are intentionally NOT enforced — tiling owns window size,
@@ -203,12 +220,11 @@ fn applyHintsToRect(rect: utils.Rect, h: SizeHints) utils.Rect {
     if (h.max_height > 0) ht = @min(ht, h.max_height);
 
     // min_aspect = h/w lower bound, max_aspect = w/h upper bound (dwm
-    // convention). Cross-multiplied to avoid FP division on every retile.
+    // convention); cross-multiplied to avoid FP division per retile.
     //
-    // The aspect clamp recomputes the dimension from scratch, which can land
-    // off the increment grid (e.g. a terminal with both PResizeInc and PAspect
-    // set); re-snapping afterward floors to the grid and never grows past
-    // max_width/height, keeping both hints satisfied simultaneously.
+    // The aspect clamp recomputes from scratch and can land off the increment
+    // grid (e.g. PResizeInc + PAspect on a terminal); re-snapping afterward
+    // floors to the grid without exceeding max_width/height.
     if (h.min_aspect > 0.0 and h.max_aspect > 0.0) {
         const fw: f32 = @floatFromInt(w);
         const fh: f32 = @floatFromInt(ht);

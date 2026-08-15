@@ -59,11 +59,9 @@ fn isCommandAvailable(command: []const u8) bool {
 }
 
 // std.posix.access was removed in this Zig version, so faccessat is called
-// directly as a raw syscall, matching the codebase's other std.os.linux usage.
-// It checks both existence and executability in one syscall — intentionally
-// not std.Io.Dir.openFileAbsolute (which only checks readability), so a
-// stray non-executable file named like a terminal isn't reported "available"
-// and only later fails with an unhelpful EACCES at spawn time.
+// as a raw syscall. It checks existence and executability in one syscall —
+// openFileAbsolute checks readability only, so a non-executable file named
+// like a terminal isn't reported "available" and fails later with EACCES.
 inline fn checkPath(buf: []u8, dir: []const u8, command: []const u8) bool {
     const full_path = std.fmt.bufPrintZ(buf, "{s}/{s}", .{ dir, command }) catch return false;
     const rc: isize = @bitCast(std.os.linux.faccessat(std.os.linux.AT.FDCWD, full_path, std.posix.X_OK, 0));

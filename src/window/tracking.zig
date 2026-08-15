@@ -102,23 +102,20 @@ pub const Entry = struct {
 
 // Per-workspace focus history (MRU)
 //
-// Records, per workspace, the order in which windows lost focus on that
-// workspace — so a caller resolving "what should regain focus now" (minimize
-// fallback, in particular) can answer "whichever window was *actually*
-// focused right before this one", not merely "the first candidate a
-// registration-order scan happens to turn up". Scoped per-workspace (rather
-// than one global stack) so the answer is never a window living on a
-// workspace the user isn't even looking at.
+// Records, per workspace, the order windows lost focus on it — so a caller
+// resolving "what should regain focus now" (minimize fallback, in particular)
+// answers "whichever window was actually focused right before this one", not
+// "the first candidate a registration-order scan turns up". Scoped
+// per-workspace (rather than one global stack) so the answer is never a window
+// on a workspace the user isn't looking at.
 //
 // Pushed from tiling.updateWindowFocus on every focus transition (it already
-// runs unconditionally from focus.commitFocusTransition); popped by
-// minimize.zig when resolving its post-minimize restore target. Scoping each
-// push by the departing window's OWN workspace membership (getWorkspaceForWindow),
-// rather than by "current workspace" at push time, keeps this correct even
-// across a workspace switch — by the time the switch's own focus transition
-// runs, the current-workspace pointer has already moved to the destination,
-// so keying off "current" here would misfile the departing window under the
-// wrong workspace.
+// runs unconditionally from focus.commitFocusTransition); popped by minimize.zig
+// when resolving its post-minimize restore target. Pushes are keyed by the
+// departing window's OWN workspace (getWorkspaceForWindow), not the "current"
+// workspace: across a workspace switch the current pointer has already moved to
+// the destination by the time the switch's focus transition runs, so keying off
+// "current" would misfile the departing window.
 const FOCUS_MRU_CAP: usize = 12; // 8-16 entries is plenty for real usage; bounded like g_minimized.
 var g_focus_mru: [constants.MAX_WORKSPACES]utils.BoundedList(u32, FOCUS_MRU_CAP) = @splat(.{});
 

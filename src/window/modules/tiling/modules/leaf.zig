@@ -1,10 +1,9 @@
 //! Binary Space Partitioning tiling layout.
 //!
 //! Recursively splits the window list and screen region in lockstep: each
-//! internal node bisects along its longer axis (ties split vertically) and
-//! hands the halves to the halves of the window list, yielding ~log2(n)
-//! balanced leaves. One gap per seam; the outer gap is stripped up front,
-//! borders subtracted only at leaves.
+//! internal node bisects its longer axis (ties vertical) and hands the halves
+//! to the halves of the window list, yielding ~log2(n) balanced leaves. One
+//! gap per seam; the outer gap is stripped up front, borders only at leaves.
 
 const utils = @import("utils");
 const layouts = @import("layouts");

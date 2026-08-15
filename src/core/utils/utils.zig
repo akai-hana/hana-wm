@@ -297,7 +297,11 @@ pub const scaling = struct {
             (value.value / 100.0) * 0.5 * @as(f32, @floatFromInt(reference_dimension))
         else
             value.value;
-        const clamped = std.math.clamp(@round(v), 0.0, @as(f32, std.math.maxInt(u16)));
+        return roundToU16(v, 0.0);
+    }
+    /// Rounds `v` to the nearest integer and clamps it into [min, maxInt(u16)].
+    pub inline fn roundToU16(v: f32, min: f32) u16 {
+        const clamped = std.math.clamp(@round(v), min, @as(f32, std.math.maxInt(u16)));
         return @intFromFloat(clamped);
     }
 };
@@ -313,6 +317,12 @@ inline fn clockTs(clock_id: std.os.linux.clockid_t) std.os.linux.timespec {
 /// Returns the current monotonic clock time in nanoseconds.
 pub fn monotonicNs() u64 {
     const ts = clockTs(.MONOTONIC);
+    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+}
+
+/// Returns the current realtime clock time in nanoseconds since the Unix epoch.
+pub fn realtimeNs() u64 {
+    const ts = clockTs(.REALTIME);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 
@@ -458,6 +468,35 @@ pub const Condition = struct {
 
     pub fn signal(c: *Condition) void {
         _ = std.c.pthread_cond_signal(&c.inner);
+    }
+};
+
+/// Owns the mutex/condvar/quit-flag/thread quartet used by the bar's
+/// background threads (clock, carousel). `start` spawns `f` with `self` as
+/// its only argument; `stop` signals and joins.
+pub const CondThread = struct {
+    mutex: Mutex = .{},
+    cond: Condition = .{},
+    quit: bool = false,
+    thread: ?std.Thread = null,
+
+    pub fn start(self: *CondThread, comptime f: anytype, args: anytype) !void {
+        self.cond.initMonotonic();
+        self.mutex.lock();
+        self.quit = false;
+        self.mutex.unlock();
+        self.thread = try std.Thread.spawn(.{}, f, args);
+    }
+
+    pub fn stop(self: *CondThread) void {
+        self.mutex.lock();
+        self.quit = true;
+        self.cond.signal();
+        self.mutex.unlock();
+        if (self.thread) |t| {
+            t.join();
+            self.thread = null;
+        }
     }
 };
 

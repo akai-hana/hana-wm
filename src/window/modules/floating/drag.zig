@@ -54,11 +54,8 @@ fn snapDistance() i32 {
     const cs = core.getState();
     const sv = cs.config.snap_distance;
     if (sv.value == 0) return 0;
-    if (sv.is_percentage) {
-        const sw: f32 = @floatFromInt(cs.screen.width_in_pixels);
-        return @intFromFloat(@round(sv.value / 100.0 * sw));
-    }
-    return @intFromFloat(@round(sv.value));
+    const sw: f32 = @floatFromInt(cs.screen.width_in_pixels);
+    return @intFromFloat(@round(utils.scaling.scaleToPixels(sv, sw)));
 }
 
 /// Work-area edges, accounting for the bar and border width. X positions a

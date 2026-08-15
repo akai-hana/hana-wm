@@ -156,6 +156,16 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     const super_held = (event.state & constants.MOD_SUPER) != 0;
     const mods = utils.normalizeModifiers(event.state);
 
+    // The bar selects BUTTON_PRESS directly (not via the Super+Button grab),
+    // so a plain click arrives ungrabbed; route it to the bar and skip the
+    // managed-window/replay-pointer machinery built for the synchronous grab
+    // a client-window click goes through. Super-held clicks fall through to
+    // the normal mouse-binding/drag path.
+    if (!super_held and bar.isBarWindow(clicked_window)) {
+        bar.handleButtonPress(event);
+        return;
+    }
+
     // Scroll-wheel binds (buttons 4/5) are viewport actions that don't target
     // a specific window, so they're checked before the managed-window guard
     // that would otherwise discard events fired over the desktop/bar.
@@ -176,12 +186,10 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
 
         if (event.detail == mouse_button_left or event.detail == mouse_button_right) {
             drag.startDrag(managed_window, event.detail, event.root_x, event.root_y);
-            // Do NOT releaseGrab (ReplayPointer) here — replaying hands the
-            // rest of the gesture to the app, which swallows our ButtonRelease
-            // before it reaches root, leaving drag.active stuck until the WM
-            // restarts. AsyncPointer instead keeps the setupGrabs grab engaged,
-            // so motion/release events keep arriving to us until the button is
-            // physically released (see keepDragGrab below).
+            // Don't ReplayPointer here — replaying hands the rest of the
+            // gesture to the app, which swallows our ButtonRelease before it
+            // reaches root, leaving drag.active stuck. keepDragGrab instead
+            // uses AsyncPointer so motion/release keep arriving until release.
             keepDragGrab(event.time);
             return;
         }
@@ -418,15 +426,13 @@ fn executeMouseAction(action: *const types.Action, clicked_win: u32) !void {
 
 // Shell execution
 //
-// Commands run via a double-fork so the grandchild re-parents to init and
-// the WM never accumulates zombies. A single O_CLOEXEC pipe (utils.makePipe)
-// carries the outcome: success closes the pipe copy automatically (nothing is
-// sent); otherwise the intermediate child writes TAG_PID and the grandchild
-// writes TAG_FAILED only if execvp() fails — two independently-scheduled
-// writers, so the messages can arrive in either order (finishSpawn() handles
-// both). EOF ends the conversation. executeShellCommand returns right after
-// fork(); g_pending entries are resolved by drainPendingSpawns() (every event
-// batch) or reapPendingChildren() (SIGCHLD).
+// Double-fork so the grandchild re-parents to init and the WM never
+// accumulates zombies. A single O_CLOEXEC pipe carries the outcome: success
+// closes its copy automatically; otherwise the intermediate child writes
+// TAG_PID and the grandchild writes TAG_FAILED only if execvp() fails — two
+// independently-scheduled writers, so messages can arrive in either order
+// (finishSpawn() handles both). EOF ends the conversation; entries resolve via
+// drainPendingSpawns() (every event batch) or reapPendingChildren() (SIGCHLD).
 
 /// Tags for the two possible messages written onto the spawn pipe. Sent as
 /// a leading byte so the reader can tell them apart no matter which order
@@ -476,8 +482,7 @@ fn forkIntermediate(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
 
 // Pending spawn table
 //
-// Capacity: 16 suffices — 16 execs within the ~100 ms before /bin/sh execs
-// would require inhuman speed.
+// 16 execs within the ~100 ms before /bin/sh execs would be inhuman speed.
 
 const MAX_PENDING_SPAWNS: usize = 16;
 
@@ -551,8 +556,7 @@ fn executeShellCommand(cmd: []const u8) !void {
     });
     if (!queued) {
         // Table full: close the read end we won't track; reap `pid`
-        // synchronously — it exits almost instantly, and reapPendingChildren
-        // can't wait on it since it's not in g_pending (no permanent zombie).
+        // synchronously — it exits almost instantly and isn't tracked (no zombie).
         _ = c.close(pipe_fds[0]);
         _ = c.waitpid(pid, null, 0);
     }
@@ -598,10 +602,9 @@ pub fn drainPendingSpawns() void {
 /// Classifies a fully-drained spawn-pipe conversation and, on success,
 /// registers the spawn for workspace routing.
 ///
-/// Both writes are well under PIPE_BUF, so neither is ever torn or
-/// interleaved — a TAG_FAILED byte anywhere in the buffer is a reliable
-/// failure signal in any arrival order; an empty buffer means the second
-/// fork() never ran.
+/// Both writes are under PIPE_BUF, so neither is torn or interleaved: a
+/// TAG_FAILED byte anywhere is a reliable failure signal in any arrival
+/// order; an empty buffer means the second fork() never ran.
 fn finishSpawn(entry: *PendingSpawn) void {
     const data = entry.buf[0..entry.len];
 
@@ -706,16 +709,12 @@ inline fn withTilingGrab(op: anytype) void {
     withTilingGrabImpl(op, true);
 }
 
-/// Like `withTilingGrab`, but skips the pointer-focus resync. Used for
-/// actions with an explicit keyboard-chosen target: the resync exists for
-/// mouse-driven reflows, but on a keyboard-triggered action it can silently
-/// move focus onto an unrelated window the cursor happens to rest over
-/// (e.g. a floating window stacked above the one acted on), so a following
-/// keypress lands there instead.
+/// Like `withTilingGrab`, but skips the pointer-focus resync: on a
+/// keyboard-triggered action it could silently move focus onto an unrelated
+/// window under the cursor (e.g. a floating window stacked above the target).
 ///
-/// Suppression must stay active until crossing events from the reflow have
-/// been delivered and filtered — see beginTilingOpSettle in focus.zig for
-/// why that can't be synchronous here.
+/// Suppression stays active until reflow crossing events are filtered — see
+/// beginTilingOpSettle in focus.zig for why that can't be synchronous.
 inline fn withTilingGrabKeepFocus(op: anytype) void {
     withTilingGrabImpl(op, false);
 }
@@ -742,10 +741,8 @@ inline fn withTilingGrabImpl(op: anytype, sync_pointer: bool) void {
     } else {
         // Suppression still needs clearing, but not synchronously: `op()`'s
         // configure_window calls aren't sent until ungrabAndFlush, so clearing
-        // now would disable the filtering before the server processes the
-        // reflow it masks. beginTilingOpSettle defers the clear to the next
-        // event-dispatch iteration, after crossing events are guaranteed
-        // filtered (see its doc in focus.zig).
+        // now would disable the filtering too early. beginTilingOpSettle
+        // defers it until after reflow crossing events are filtered.
         focus.beginTilingOpSettle();
     }
     utils.ungrabAndFlush(conn);
@@ -770,12 +767,10 @@ inline fn releaseGrab(time: u32) void {
     _ = xcb.xcb_flush(conn);
 }
 
-/// Un-freezes the pointer for a drag while keeping the setupGrabs Super+Button
-/// grab engaged — AsyncPointer resumes delivery without replaying or ending
-/// the grab, so MotionNotify/ButtonRelease keep arriving to us instead of
-/// going straight to the client under the cursor. The grab ends on its own
-/// once the button is released; the keyboard grab is dropped immediately.
-/// Always pass event.time — never XCB_CURRENT_TIME.
+/// Un-freezes the pointer for a drag while keeping the Super+Button grab
+/// engaged: AsyncPointer resumes delivery without replaying or ending the
+/// grab, so MotionNotify/ButtonRelease keep reaching us. The grab ends on
+/// release; the keyboard grab drops immediately. Always pass event.time.
 inline fn keepDragGrab(time: u32) void {
     const conn = core.getState().conn;
     _ = xcb.xcb_allow_events(conn, xcb.XCB_ALLOW_ASYNC_POINTER, time);
@@ -788,10 +783,8 @@ inline fn closePipe(p: [2]c_int) void {
     _ = c.close(p[1]);
 }
 
-// XcbCursor
-//
-// Declared manually because xcb_cursor_load_cursor is a static inline
-// function cImport cannot bind.
+// XcbCursor — declared manually because xcb_cursor_load_cursor is a static
+// inline function cImport cannot bind.
 
 const XcbCursor = struct {
     const Context = opaque {};

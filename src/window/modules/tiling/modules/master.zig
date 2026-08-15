@@ -8,17 +8,14 @@ const tiling = @import("tiling");
 const layouts = @import("layouts");
 
 /// The two adjustable stack-column weights derived from LayoutConfig's
-/// signed `stack_balance` scalar (see that field's doc in tiling.zig for why
-/// it's a single signed value). Bundled so tileColumn/tileStack thread one
-/// extra parameter through.
+/// signed `stack_balance` scalar (see its doc in tiling.zig). Bundled so
+/// tileColumn/tileStack thread one extra parameter through.
 ///
-/// tileStack's column path splits height proportionally to weight; every slot
-/// starts at 1.0 (the historical even split), and `top`/`bottom` add to the
-/// first/last slot's weight. Because the shrink just falls out of others'
-/// weight becoming a smaller fraction of a larger total, this generalizes to
-/// any slave count: with 2 slaves it's grow-A/shrink-B 1:1; with 3+, boosting
-/// one slot shrinks the rest evenly (all stay weight 1.0 relative to each
-/// other). See distributeStackHeightsWeighted for the math.
+/// Every slot starts at 1.0 (the historical even split); `top`/`bottom` add
+/// to the first/last slot's weight. Because shrink falls out of weights
+/// becoming smaller fractions of a larger total, this generalizes to any
+/// slave count: with 2 slaves it's grow-A/shrink-B 1:1; with 3+, boosting
+/// one slot shrinks the rest evenly. See distributeStackHeightsWeighted.
 pub const StackBoost = struct {
     top: f32 = 0,
     bottom: f32 = 0,
@@ -80,16 +77,14 @@ pub fn tileWithOffset(
 /// Tile a vertical column of `windows` at a fixed x with a fixed content
 /// width. Used for both the master pane and the simple stack path.
 ///
-/// Windows normally split the column's height evenly, EXCEPT a window whose
-/// cached max_height caps it below its fair share — it's pinned to that max
-/// and the unused pixels fold back into the rest of the split (see
-/// distributeStackHeightsWeighted), so a short fixed-height window (e.g. a
-/// PiP pane or PMaxSize dialog) never leaves a dead gap: neighbours absorb
-/// the space and the column always fills `h` exactly.
+/// Windows split the column's height evenly, EXCEPT a window whose cached
+/// max_height caps it below its fair share — it's pinned to that max and its
+/// pixels fold back into the split (see distributeStackHeightsWeighted), so a
+/// short fixed-height window (PiP pane, PMaxSize dialog) never leaves a dead
+/// gap and the column always fills `h`.
 ///
-/// A window named by `ctx.defer_win` is configured last (swap_master's
-/// one-frame-gap fix). `boost` is zero for the master column; only the stack
-/// path passes non-zero values, and zero reduces the split to plain even.
+/// `ctx.defer_win` is configured last (swap_master's one-frame-gap fix).
+/// `boost` is zero for the master column, which reduces the split to plain even.
 fn tileColumn(
     ctx: *const layouts.LayoutCtx,
     windows: []const u32,
@@ -108,10 +103,8 @@ fn tileColumn(
     const heights = heights_buf[0..windows.len];
     distributeStackHeightsWeighted(ctx, windows, avail, boost, min_dim, heights);
 
-    // Capped windows' unused pixels fold into *other* windows in this column.
-    // If every window is capped (a lone fixed-height window, or a pane with
-    // one window), sum(heights) < avail — centre the stack in the column
-    // instead of stranding the slack at the bottom.
+    // If every window is capped, sum(heights) < avail — centre the stack in
+    // the column instead of stranding the slack at the bottom.
     var used: u32 = 0;
     for (heights) |win_h| used += win_h;
     const dead_space: u32 = @as(u32, avail) -| used;
@@ -133,20 +126,17 @@ fn tileColumn(
 /// Split `avail` content-height pixels across `windows`, writing one height
 /// per window into `out` (same order/length as `windows`).
 ///
-/// A window whose cached max_height sits at or below its current fair share is
+/// A window whose cached max_height sits at or below its fair share is
 /// "capped": pinned to that max_height, removed from the pool, and its pixels
-/// flow back to everyone else. Pinning raises the remaining fair shares, which
-/// can cap a previously-uncapped window — so this repeats until nothing new
-/// gets pinned (water-filling; bounded by `windows.len` passes since each pass
-/// pins at least one window).
+/// flow back to everyone else. Pinning raises remaining fair shares, which can
+/// cap a previously-uncapped window — so this repeats until nothing new gets
+/// pinned (water-filling; bounded by `windows.len` passes).
 ///
-/// Fair shares (for both the cap check and the final split) are weighted by
-/// `boost`. Zero boost — the common master/untouched-stack case — gives every
-/// slot weight 1.0 and takes the same cumulative-division path as
-/// windowHeight/windowY, so pixel output stays bit-identical to the historical
-/// even split. Non-zero boost (mod+n/mod+o) uses the telescoping rounded
-/// cumulative sum (`cum`/`prev_px`) so fractional weights land on the right
-/// pixel; it's also why the fair-share estimate floats.
+/// Fair shares are weighted by `boost`. Zero boost — the common case — gives
+/// every slot weight 1.0 and takes the same cumulative-division path as
+/// windowHeight/windowY, so output stays bit-identical to the historical even
+/// split. Non-zero boost uses the telescoping rounded cumulative sum
+/// (`cum`/`prev_px`) so fractional weights land on the right pixel.
 fn distributeStackHeightsWeighted(ctx: *const layouts.LayoutCtx, windows: []const u32, avail: u16, boost: StackBoost, min_dim: u16, out: []u16) void {
     const n: u16 = @intCast(windows.len);
 
@@ -231,8 +221,7 @@ inline fn windowMaxHeight(ctx: *const layouts.LayoutCtx, win: u32) u16 {
 /// Tile the stack pane, spilling into a column-major overflow grid when the
 /// stack exceeds what fits in a single column.
 ///
-/// `boost` (mod+n/mod+o) only affects the simple single-column path — see
-/// tileStackExtra for why the overflow grid doesn't get it.
+/// `boost` only affects the single-column path — see tileStackExtra for why.
 fn tileStack(
     ctx: *const layouts.LayoutCtx,
     windows: []const u32,
@@ -261,13 +250,10 @@ fn tileStack(
 /// r+2*max_fit, … Each row's column count is ceil((stack_n - r) / max_fit).
 /// Respects ctx.defer_win.
 ///
-/// NOTE: overflow rows do NOT get the max_height redistribution tileColumn
-/// gets — every window in a row shares that row's height, so one capped
-/// window would cap its whole row. A row-aware distribution is out of scope;
-/// overflow only triggers once a stack outgrows one-per-slot.
-///
-/// NOTE: the stack boost is likewise not applied here — "topmost"/"bottommost"
-/// stop being well-defined once the stack wraps into multiple columns.
+/// NOTE: overflow rows get neither tileColumn's max_height redistribution (a
+/// row's windows share one height, so one capped window would cap the whole
+/// row) nor the stack boost ("topmost"/"bottommost" lose meaning once the
+/// stack wraps into multiple columns).
 fn tileStackExtra(
     ctx: *const layouts.LayoutCtx,
     windows: []const u32,
