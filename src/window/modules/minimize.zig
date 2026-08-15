@@ -161,6 +161,18 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
     std.debug.assert(!isMinimized(win));
 
     if (saved_fs) |geom| {
+        // Fullscreen does not remove a window from the tiling pool (see
+        // fullscreen.zig's enterFullscreenCommit) — it just stops the layout
+        // from repositioning it. So if `win` was tiled when minimizeWindow()
+        // tore down its fullscreen state, tiling_index is non-null and it
+        // must be reinserted at its original slot now, BEFORE re-entering
+        // fullscreen. Without this, isWindowTiled(win) stays false forever:
+        // when this window later exits fullscreen, exitFullscreenCommit sees
+        // an untiled window, so it configures it to the saved geometry
+        // directly and never hands it back to the tiling engine — it keeps
+        // its dimensions but is permanently stuck outside the tiled layout.
+        if (tiling_index) |ti| tiling.addWindowAtFilteredIndex(win, ti);
+
         // enterFullscreen owns its own server grab, so we must not be inside one.
         // Use scheduleRedraw (next event-loop iteration) rather than redrawInsideGrab.
         focus.setFocus(win, .window_spawn);
@@ -232,6 +244,22 @@ pub fn unminimize(order: RestoreOrder) void {
 
     // Capture fields before removal invalidates the slot.
     const win = g_minimized.items[idx].win;
+    const saved_fs = g_minimized.items[idx].entry.saved_fs;
+    const tiling_index = g_minimized.items[idx].entry.tiling_index;
+    _ = removeFromBuf(win);
+
+    restoreWindowImpl(win, saved_fs, tiling_index);
+}
+
+/// Restores a specific minimized window, regardless of where it falls in the
+/// LIFO/FIFO order `unminimize` uses. Used by the title bar segment's click
+/// handling: clicking a minimized window's segment should bring back that
+/// particular window, not "whichever `unminimize` would have picked".
+/// No-op if `win` is not currently minimized.
+pub fn unminimizeSpecific(win: u32) void {
+    const idx = findInBuf(win) orelse return;
+
+    // Capture fields before removal invalidates the slot (mirrors unminimize()).
     const saved_fs = g_minimized.items[idx].entry.saved_fs;
     const tiling_index = g_minimized.items[idx].entry.tiling_index;
     _ = removeFromBuf(win);

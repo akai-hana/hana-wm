@@ -1,33 +1,23 @@
 //! Clock segment
 //! Displays the current time on the status bar. A background thread aligns
-//! itself to the next whole-second boundary, then wakes once a second to
-//! format the time string and flag the main WM thread to redraw the segment.
-//! Pango/layout work always runs on the main thread (bar.updateClock →
-//! drawClockOnly); the clock thread never touches the DrawContext.
+//! to the next whole-second boundary, wakes once a second to format the time
+//! string, and flags the main WM thread to redraw the segment. Pango/layout
+//! work always runs on the main thread (bar.updateClock → drawClockOnly); the
+//! clock thread never touches the DrawContext.
 //!
 //! Thread lifecycle
 //! ----------------
-//!   startThread(allocator, format) — call from bar.init() after the bar
-//!                                    window exists. Dupes `format` for the
-//!                                    thread's own use.
-//!   stopThread(allocator)           — call before bar teardown (deinit and
-//!                                     reload). Returns almost immediately:
-//!                                     it signals the condition variable the
-//!                                     thread is sleeping on, so the thread
-//!                                     wakes and exits instead of letting the
-//!                                     current sleep run out. The next
-//!                                     startThread() re-aligns from scratch,
-//!                                     so a reload never leaves the tick
-//!                                     phase-drifted.
+//! startThread(allocator, format) — call from bar.init() after the bar window
+//! exists; dupes `format`. stopThread(allocator) — call before teardown;
+//! signals the condition variable the thread sleeps on so it exits at once.
+//! The next startThread() re-aligns from scratch, so reloads never phase-drift.
 //!
 //! Cross-thread wakeup
 //! -------------------
-//! The main event loop polls with a deadline of clock.nextTickWaitMs() (the
-//! ms until the next whole-second boundary, plus a grace period) so it wakes
-//! shortly after each tick, then drains the clock_dirty flag via
-//! bar.updateClock(). It also drains the flag after every XCB event batch, so
-//! a busy main loop that never lets a poll timeout expire still repaints the
-//! clock in time.
+//! The main loop polls with deadline clock.nextTickWaitMs() (ms to the next
+//! boundary plus a grace period) so it wakes shortly after each tick and
+//! drains clock_dirty via bar.updateClock(); it also drains after every XCB
+//! event batch so a busy loop still repaints the clock in time.
 
 const std = @import("std");
 const types = @import("types");
@@ -37,13 +27,11 @@ const debug = @import("debug");
 
 const c = @cImport(@cInclude("time.h"));
 
-/// Mirrors the ABI of C's `struct timespec` (two word-sized fields on
-/// every LP64 target this bar runs on). We can't use `c.timespec`
-/// directly: recent glibc headers define it with endian-conditional
-/// anonymous bitfield padding that zig's C translator can't represent,
-/// so `c.timespec` comes through as an opaque type with no known size.
-/// This struct has the same layout, so a pointer to it is safe to hand
-/// across the C boundary via `@ptrCast`.
+/// Mirrors the ABI of C's `struct timespec` (two word-sized fields on LP64).
+/// We can't use `c.timespec` directly: recent glibc headers define it with
+/// endian-conditional anonymous bitfield padding that Zig's C translator
+/// can't represent, so it comes through as an opaque type. This struct has
+/// the same layout, so a pointer is safe across the C boundary via `@ptrCast`.
 const Timespec = extern struct {
     tv_sec: i64,
     tv_nsec: i64,
@@ -128,16 +116,14 @@ pub fn stopThread(allocator: std.mem.Allocator) void {
 
 fn runClockThread() void {
     // One-time alignment: sleep just long enough to land on the next whole
-    // second, so the periodic loop below starts in phase with the real
-    // clock instead of ticking at whatever offset the thread happened to
-    // spawn at. Uses the interruptible timedWait so stopThread() returns
-    // immediately even if it fires during alignment.
+    // second so the periodic loop starts in phase with the wall clock.
+    // Uses the interruptible timedWait so stopThread() returns immediately
+    // even if it fires during alignment.
     if (!sleepUntilNextSecond()) return;
 
-    // Plain periodic loop from here on. No re-anchoring: a fixed 1s sleep
-    // per iteration can accumulate a little scheduling drift over a very
-    // long uptime, but a reload (which re-runs the alignment above) resets
-    // it, so it never compounds indefinitely.
+    // Plain periodic loop from here on. No re-anchoring: a fixed 1s sleep can
+    // accumulate slight scheduling drift over long uptime, but a reload (which
+    // re-runs the alignment above) resets it, so it never compounds.
     while (true) {
         clock_mutex.lock();
         if (clock_quit) {
@@ -154,11 +140,10 @@ fn runClockThread() void {
     }
 }
 
-/// Sleeps until the next whole-second boundary, returning false when quit
-/// was requested mid-sleep. A spurious early wakeup (or a quit signal that
-/// somehow raced past the check above) recomputes the remaining time and
-/// keeps sleeping, so the periodic loop always starts in phase with the
-/// wall clock rather than offset by however long the interruption was.
+/// Sleeps until the next whole-second boundary, returning false if quit was
+/// requested mid-sleep. A spurious early wakeup or racing quit signal just
+/// recomputes the remaining time and keeps sleeping, so the periodic loop
+/// always starts in phase with the wall clock.
 fn sleepUntilNextSecond() bool {
     var ts: Timespec = undefined;
     _ = c.clock_gettime(c.CLOCK_REALTIME, @ptrCast(&ts));
@@ -208,11 +193,10 @@ pub fn consumeClockDirty() bool {
 }
 
 /// ms until the next whole-second boundary (CLOCK_REALTIME) plus a grace
-/// period, so a poll() with this deadline wakes shortly after the clock
-/// thread's tick. If we're already inside the grace window and the dirty flag
-/// is still clear (the thread was descheduled past the boundary), returns a
-/// short retry instead so the main loop keeps waking until the thread
-/// publishes.
+/// period, so a poll() with this deadline wakes shortly after the tick. If
+/// already inside the grace window with the dirty flag still clear (thread
+/// descheduled past the boundary), returns a short retry instead so the main
+/// loop keeps waking until the thread publishes.
 pub fn nextTickWaitMs() i64 {
     const now_ms = realtimeMs();
     const m = @mod(now_ms, 1000);
@@ -226,29 +210,26 @@ pub fn nextTickWaitMs() i64 {
 /// Draws the current time string on the bar. Returns the x position after the segment.
 pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
     // Snapshot the cached time string into a local buffer under the cache
-    // lock, then render it after releasing the lock: the clock thread may be
-    // formatting the next second concurrently, and dc.drawSegment must never
-    // read a torn mid-format string.
+    // lock, then render after releasing it — the clock thread may be formatting
+    // the next second concurrently, so drawSegment must not read a torn string.
     var buf: [64]u8 = undefined;
-    var time_str: []const u8 = "";
+    var len: usize = 0;
     const sec = currentEpochSeconds();
     cache_mutex.lock();
     defer cache_mutex.unlock();
     if (sec == last_formatted_sec) {
-        const n = last_formatted_len;
-        @memcpy(buf[0..n], last_formatted_time[0..n]);
-        time_str = buf[0..n];
+        len = last_formatted_len;
+        @memcpy(buf[0..len], last_formatted_time[0..len]);
     } else {
         // Fallback format path (e.g. before the clock thread's first tick):
         // same guarded cache, so a concurrent publishCurrentTime can't race.
         const str = try formatTime(&last_formatted_time, sec, config.clock_format);
         last_formatted_len = str.len;
         last_formatted_sec = sec;
-        const n = str.len;
-        @memcpy(buf[0..n], str);
-        time_str = buf[0..n];
+        @memcpy(buf[0..str.len], str);
+        len = str.len;
     }
-    return dc.drawSegment(start_x, height, time_str, config.scaledSegmentPadding(height), config.bg, config.fg);
+    return dc.drawSegment(start_x, height, buf[0..len], config.scaledSegmentPadding(height), config.bg, config.fg);
 }
 
 fn currentEpochSeconds() i64 {

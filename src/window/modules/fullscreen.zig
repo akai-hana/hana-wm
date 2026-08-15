@@ -32,8 +32,8 @@ pub const FullscreenInfo = struct {
 
 // Module state
 //
-// g_slots: fixed array keyed by workspace index (u8); O(1) operations, no heap.
-// g_float_saves: fixed array with length-bounded reads.
+// g_slots: fixed array keyed by workspace index (u8); g_float_saves: fixed
+// array with length-bounded reads. Fixed arrays keep ops O(1), no heap.
 
 const MAX_WORKSPACES: usize = constants.MAX_WORKSPACES; // single-sourced; keys g_slots
 // Intentionally distinct from constants.Limits.MAX_TILED_WINDOWS — bounds
@@ -149,11 +149,9 @@ fn dropOtherRecordsFor(win: u32, keep_ws: u8) void {
     }
 }
 
-/// After a window's workspace-mask change, drop any fullscreen record on a
-/// workspace it's no longer tagged on — a stale record would resurrect bogus
-/// fullscreen chrome (hidden bar, offscreen peers) when that workspace is next
-/// shown (see executeSwitch in workspaces.zig). Call from every setWindowMask
-/// site after the mask is updated.
+/// After a workspace-mask change, drop any fullscreen record on a workspace
+/// the window is no longer tagged on — a stale record would resurrect bogus
+/// fullscreen chrome when shown next. Call from every setWindowMask site.
 pub fn pruneForWorkspaceMask(win: u32, new_mask: u64) void {
     const count = tracking.getWorkspaceCount();
     for (g_slots[0..count], 0..) |*slot, i| {
@@ -278,9 +276,8 @@ fn fetchWindowGeom(win: u32) core.WindowGeometry {
 
 // Floating geometry save/restore
 //
-// Positions saved before fullscreen enter so they survive the offscreen-push;
-// cookies batched so replies don't block inside the grab.
-
+// Positions saved before enter so they survive the offscreen-push; cookies
+// batched so replies don't block inside the grab.
 /// Save the on-screen position of every non-minimized, non-tiled window on
 /// the current workspace (except `skip_win`) into g_float_saves. Must run
 /// BEFORE xcb_grab_server so the round-trips don't block inside a grab.
@@ -492,11 +489,10 @@ pub fn enterFullscreen(win: u32, saved_geom: ?core.WindowGeometry) void {
 /// explicitly (unlike toggle()) for event-driven call sites.
 pub fn exitFullscreen(win: u32) void {
     const ws = workspaceFor(win) orelse return;
-    // The window was raised on enter; mapping the bar before it repaints at
+    // The window was raised on enter; showing the bar before it repaints at
     // its new tiled size would let it occlude the bar — the mirror image of
-    // the enter-path bar-hide race. So the bar show is deferred until the
-    // window confirms its non-fullscreen dimensions via ConfigureNotify, like
-    // the hide is on enter.
+    // the enter-path bar-hide race — so the show is deferred until the window
+    // confirms its non-fullscreen dimensions via ConfigureNotify.
     const conn = core.getState().conn;
     utils.grabServer(conn);
     exitFullscreenCommit(win, ws);
@@ -515,14 +511,12 @@ pub fn toggle() void {
     const win = focus.getFocused() orelse return;
     const current_ws = tracking.getCurrentWorkspace() orelse return;
 
-    // Defense-in-depth: focus.getFocused() is supposed to always be either
-    // null or a window on the current workspace, but toggle()/enterFullscreen
-    // used to trust that blindly, and exactly one path (minimize's restore
-    // fallback) was once able to violate it — fullscreening a window that
-    // wasn't even on the workspace being viewed, then leaving it stuck on top
-    // after exit. Re-check the invariant here so a future regression of that
-    // class fails loudly (a no-op + a log line) instead of silently
-    // corrupting the visible workspace again.
+    // Defense-in-depth: focus.getFocused() is supposed to be null or a window
+    // on the current workspace, but toggle()/enterFullscreen used to trust
+    // that blindly, and one path (minimize's restore fallback) once violated
+    // it — fullscreening a window off the viewed workspace and leaving it
+    // stuck on top. Re-check here so a future regression fails loudly (a no-op
+    // + log line) instead of silently corrupting the workspace.
     if (!tracking.isOnCurrentWorkspace(win)) {
         debug.warn("fullscreen.toggle: focused window 0x{x} is not on the current workspace ({d}); ignoring", .{ win, current_ws });
         return;
@@ -570,11 +564,10 @@ pub fn notifyConfigureIfPending(win: u32, width: u16, height: u16) void {
         return;
     }
 
-    // Deferred bar show (exit-fullscreen path): window must report dimensions
-    // that are no longer fullscreen before we show the bar.  This fires as
-    // soon as the retile configure_window is acknowledged — before the
-    // window has repainted — so the bar appears exactly when the window
-    // starts rendering at its new tiled size.
+    // Deferred bar show (exit path): window must report non-fullscreen
+    // dimensions first. Fires as soon as the retile configure_window is
+    // acknowledged — before the window has repainted — so the bar appears
+    // exactly when the window starts rendering at its new tiled size.
     if (g_pending_bar_show_win != 0 and g_pending_bar_show_win == win) {
         if (width != screen_w or height != screen_h) {
             g_pending_bar_show_win = 0;

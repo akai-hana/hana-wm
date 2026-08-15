@@ -427,21 +427,22 @@ pub const DrawContext = struct {
 pub const MeasureContext = struct {
     font: FontState,
     surface: *c.cairo_surface_t,
-    ctx: *c.cairo_t,
 
     pub fn init(allocator: std.mem.Allocator, dpi: f32) !MeasureContext {
         const surface = c.cairo_image_surface_create(.ARGB32, 1, 1) orelse return error.CairoSurfaceCreateFailed;
         errdefer c.cairo_surface_destroy(surface);
+        // The cairo context exists only to obtain the Pango layout — the
+        // layout keeps its own PangoContext/font map — so it is created and
+        // destroyed here rather than stored.
         const ctx = c.cairo_create(surface) orelse return error.CairoCreateFailed;
-        errdefer c.cairo_destroy(ctx);
+        defer c.cairo_destroy(ctx);
         const layout = try createPangoLayout(ctx, dpi);
-        return .{ .font = .{ .allocator = allocator, .pango_layout = layout }, .surface = surface, .ctx = ctx };
+        return .{ .font = .{ .allocator = allocator, .pango_layout = layout }, .surface = surface };
     }
 
     pub fn deinit(self: *MeasureContext) void {
         self.font.deinit();
         c.g_object_unref(self.font.pango_layout);
-        c.cairo_destroy(self.ctx);
         c.cairo_surface_destroy(self.surface);
     }
 
@@ -453,27 +454,23 @@ pub const MeasureContext = struct {
     }
 };
 
-/// Pre-renders a title into a wide XCB pixmap once; every carousel tick is a single
-/// xcb_copy_area with zero Pango/Cairo involvement.
+/// Pre-renders a title into a wide XCB pixmap once; every carousel tick is a
+/// single xcb_copy_area with zero Pango/Cairo involvement.
 ///
-/// Wide-pixmap layout
-/// ──────────────────
 /// Text A is rendered at offset `left_pad`; text B — the seamless loop's second
 /// copy — at `left_pad + cycle_w`:
 ///
 ///   [ bg * left_pad | text A | bg * gap | text B ]
 ///    ←── left_pad ──→←text_w→←── gap ──→←text_w→
 ///
-/// At scroll offset O (0 ≤ O < cycle_w), blitFrame copies seg_w pixels from O into
-/// the offscreen pixmap.  The pixmap is wide enough that the copy is always a single
-/// unclipped xcb_copy_area — no fill step, no clipping arithmetic, no second copy.
+/// At scroll offset O (0 ≤ O < cycle_w), blitFrame copies seg_w pixels from O;
+/// the pixmap is wide enough that the copy is always a single unclipped
+/// xcb_copy_area.
 ///
-/// Required: pixmap_w ≥ cycle_w + seg_w.  The blit window is always
-/// [O, O + seg_w) ⊂ [0, cycle_w + seg_w), so source pixels past that are never
-/// read.  When the title is wider than the segment, text B simply clips at the
-/// pixmap edge: the window can only ever see the first seg_w − left_pad pixels
-/// of it, which always land inside the pixmap.  Callers (carousel.zig) compute
-/// the width before calling init().
+/// Required: pixmap_w ≥ cycle_w + seg_w, so [O, O + seg_w) never reads past the
+/// pixmap. If the title is wider than the segment, text B clips at the pixmap
+/// edge (the window only ever sees the first seg_w − left_pad pixels, always in
+/// bounds). Callers (carousel.zig) compute the width before calling init().
 pub const CarouselPixmap = struct {
     conn: *core.xcb.xcb_connection_t,
     pixmap: u32,
@@ -580,6 +577,21 @@ fn createPangoLayout(ctx: *c.cairo_t, dpi: f32) !*c.PangoLayout {
     return layout;
 }
 
+/// Searches every screen's allowed depths for `visual_id`, returning the first
+/// matching visual.
+fn findVisualById(conn: *core.xcb.xcb_connection_t, visual_id: u32) ?*core.xcb.xcb_visualtype_t {
+    var si = core.xcb.xcb_setup_roots_iterator(core.xcb.xcb_get_setup(conn));
+    while (si.rem > 0) : (core.xcb.xcb_screen_next(&si)) {
+        var di = core.xcb.xcb_screen_allowed_depths_iterator(si.data);
+        while (di.rem > 0) : (core.xcb.xcb_depth_next(&di)) {
+            var vi = core.xcb.xcb_depth_visuals_iterator(di.data);
+            while (vi.rem > 0) : (core.xcb.xcb_visualtype_next(&vi))
+                if (vi.data.*.visual_id == visual_id) return vi.data;
+        }
+    }
+    return null;
+}
+
 /// Returns the visual matching `visual_id` across all screens, or falls back to
 /// the first visual on `screen`. Errors if the X server has no visuals at all.
 fn resolveVisualType(
@@ -588,15 +600,7 @@ fn resolveVisualType(
     visual_id: ?u32,
 ) !*core.xcb.xcb_visualtype_t {
     if (visual_id) |vid| {
-        var si = core.xcb.xcb_setup_roots_iterator(core.xcb.xcb_get_setup(conn));
-        while (si.rem > 0) : (core.xcb.xcb_screen_next(&si)) {
-            var di = core.xcb.xcb_screen_allowed_depths_iterator(si.data);
-            while (di.rem > 0) : (core.xcb.xcb_depth_next(&di)) {
-                var vi = core.xcb.xcb_depth_visuals_iterator(di.data);
-                while (vi.rem > 0) : (core.xcb.xcb_visualtype_next(&vi))
-                    if (vi.data.*.visual_id == vid) return vi.data;
-            }
-        }
+        if (findVisualById(conn, vid)) |vt| return vt;
     }
     // Fall back to the first available visual on screen; error if there are none.
     var di = core.xcb.xcb_screen_allowed_depths_iterator(screen);
@@ -610,6 +614,13 @@ fn resolveVisualType(
 inline fn appendFontStyleToken(result: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, token: []const u8) !void {
     try result.append(allocator, ' ');
     try result.appendSlice(allocator, token);
+}
+
+/// Returns the value of a trailing `key=value` field inside an Xft font token,
+/// or null when the token doesn't start with `key`.
+inline fn styleField(part: []const u8, comptime key: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, part, key)) return null;
+    return part[key.len..];
 }
 
 /// Converts Xft `"FontName:size=N:weight=bold"` to Pango `"FontName Bold N"` format.
@@ -634,7 +645,10 @@ fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const 
     var slant: ?[]const u8 = null;
 
     while (parts.next()) |part| {
-        if (std.mem.startsWith(u8, part, "size=")) size = part[5..] else if (std.mem.startsWith(u8, part, "pixelsize=")) size = part[10..] else if (std.mem.startsWith(u8, part, "weight=")) weight = part[7..] else if (std.mem.startsWith(u8, part, "slant=")) slant = part[6..];
+        if (styleField(part, "size=")) |v| size = v
+        else if (styleField(part, "pixelsize=")) |v| size = v
+        else if (styleField(part, "weight=")) |v| weight = v
+        else if (styleField(part, "slant=")) |v| slant = v;
     }
 
     if (slant) |s| if (std.mem.eql(u8, s, "italic") or std.mem.eql(u8, s, "oblique"))

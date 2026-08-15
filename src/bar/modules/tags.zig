@@ -40,10 +40,9 @@ fn ensureCache(dc: *drawing.DrawContext, config: types.BarConfig, height: u16) v
     ws_width = config.scaledWorkspaceWidth(height);
     cache_valid = true;
 
-    // Precompute the indicator glyph position within a cell. All geometry
-    // inputs (cell width, bar height, indicator size, location, padding) are
-    // constant between reloads, so the result is valid for the entire session
-    // until the next invalidate() + ensureCache() cycle.
+    // Precompute the indicator glyph position within a cell: all geometry
+    // inputs are constant between reloads, so the result holds until the next
+    // invalidate() + ensureCache() cycle.
     const ind_size = config.scaledIndicatorSize(height);
     const pos = indicatorPos(ws_width, height, ind_size, ind_size, config.indicator_location, config.indicator_padding);
     // pos.x is already the intra-cell offset (computed without a cell_x base).
@@ -87,9 +86,9 @@ fn indicatorPos(
 
 /// Draw workspace tags.
 ///
-/// `ws_current`     — index of the currently active workspace.
-/// `ws_has_windows` — one bool per workspace; true when that workspace has
-///                    at least one window (used to draw the indicator glyph).
+/// `ws_current` — index of the currently active workspace. `ws_has_windows` —
+/// one bool per workspace; true when it has at least one window (drives the
+/// indicator glyph).
 pub fn draw(
     dc: *drawing.DrawContext,
     config: types.BarConfig,

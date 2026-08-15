@@ -5,6 +5,7 @@
 const std = @import("std");
 
 const types = @import("types");
+const constants = @import("constants");
 
 // Centralized here to avoid repeated @cImport translation across compilation units.
 pub const xcb = @import("x11").xcb;
@@ -72,4 +73,4 @@ pub fn init(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t, root: Window
 /// Stays outside State: unlike State's fields it has a safe default
 /// (96.0 DPI, no scaling), and is set once during scale detection, never
 /// reassigned afterward.
-pub var dpi_info: f32 = 96.0;
+pub var dpi_info: f32 = constants.BASELINE_DPI;

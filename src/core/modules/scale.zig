@@ -99,13 +99,12 @@ pub fn detectDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) f32 {
     }
 
     const geometry_dpi = calcDpiFromGeometry(screen);
-    if (isReasonableDpi(geometry_dpi)) {
-        debug.info("Using geometry-calculated DPI: {d:.1}", .{geometry_dpi});
-    } else {
+    if (!isReasonableDpi(geometry_dpi)) {
         debug.warn("Calculated DPI {d:.1} seems unreasonable, using baseline DPI", .{geometry_dpi});
+        return BASELINE_DPI;
     }
-
-    return if (isReasonableDpi(geometry_dpi)) geometry_dpi else BASELINE_DPI;
+    debug.info("Using geometry-calculated DPI: {d:.1}", .{geometry_dpi});
+    return geometry_dpi;
 }
 
 fn isReasonableDpi(dpi: f32) bool {
@@ -134,16 +133,14 @@ pub fn scaleMasterWidth(value: parser.ScalableValue) f32 {
 pub fn scaleFontSize(value: parser.ScalableValue, screen: *xcb.xcb_screen_t) u16 {
     const screen_height: f32 = @floatFromInt(screen.height_in_pixels);
     const raw = if (value.is_percentage) value.value * (screen_height / FONT_BASELINE_HEIGHT) else value.value;
-    const clamped = std.math.clamp(@round(raw), 1.0, @as(f32, std.math.maxInt(u16)));
-    return @intFromFloat(clamped);
+    return utils.scaling.roundToU16(raw, 1.0);
 }
 
 /// Converts a scalable bar height value to pixels, clamped to BAR_MIN_HEIGHT_PX.
 pub fn scaleBarHeight(value: parser.ScalableValue, screen_height: u16) u16 {
     const screen_height_f: f32 = @floatFromInt(screen_height);
     const scaled_px: f32 = utils.scaling.scaleToPixels(value, screen_height_f);
-    const clamped = std.math.clamp(@round(scaled_px), 0.0, @as(f32, std.math.maxInt(u16)));
-    return @max(BAR_MIN_HEIGHT_PX, @as(u16, @intFromFloat(clamped)));
+    return @max(BAR_MIN_HEIGHT_PX, utils.scaling.roundToU16(scaled_px, 0.0));
 }
 
 // Refresh-rate detection
@@ -290,9 +287,7 @@ fn refreshRateFromOutputs(
 
     const outputs = xcb.xcb_randr_get_screen_resources_current_outputs(res);
     const output_count: usize = @intCast(xcb.xcb_randr_get_screen_resources_current_outputs_length(res));
-    var i: usize = 0;
-    while (i < output_count) : (i += 1) {
-        const output = outputs[i];
+    for (outputs[0..output_count]) |output| {
         if (output == primary) continue;
         if (refreshRateFromOutput(conn, output, res)) |rate| return rate;
     }
@@ -322,9 +317,7 @@ fn refreshRateFromOutput(
     // from the pixel clock: rate = dot_clock / (htotal * vtotal).
     const modes = xcb.xcb_randr_get_screen_resources_current_modes(res);
     const mode_count: usize = @intCast(xcb.xcb_randr_get_screen_resources_current_modes_length(res));
-    var i: usize = 0;
-    while (i < mode_count) : (i += 1) {
-        const mode = modes[i];
+    for (modes[0..mode_count]) |mode| {
         if (mode.id != mode_id) continue;
         if (mode.htotal == 0 or mode.vtotal == 0) return null;
         return @as(f64, @floatFromInt(mode.dot_clock)) /

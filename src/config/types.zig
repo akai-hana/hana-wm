@@ -78,11 +78,10 @@ pub const MouseBind = struct {
     action: Action,
 };
 
-/// Owns the persistent (modifiers, keysym) -> Action dispatch map resolved
-/// from a Config's keybindings, plus the keycode-resolution step that feeds it.
-/// Embedded in Config (not a module-level global) so its lifetime is tied to
-/// the Config whose keybindings its entries point into: Config.deinit tears
-/// the resolver down before freeing those Actions.
+/// Owns the (modifiers, keysym) -> Action dispatch map resolved from a
+/// Config's keybindings, plus the keycode-resolution step that feeds it.
+/// Embedded in Config (not a global) so its lifetime tracks that Config —
+/// deinit tears it down before freeing the Actions its entries point into.
 pub const KeybindResolver = struct {
     map: std.AutoHashMapUnmanaged(u64, *const Action) = .empty,
 
@@ -162,12 +161,10 @@ pub fn LowerResult(comptime max_len: usize) type {
     };
 }
 
-/// Lowercases `str` into a fixed `max_len`-byte stack buffer if it fits, or
-/// reports `.too_long` — distinguishable from "not found", so callers can warn
-/// specifically about overlong values. Shared helper for the layout-name and
-/// string_map lookups in config.zig and this file; complementary to
-/// LAYOUT_TABLE. keyNameToKeysym bypasses it: the C API needs a verbatim
-/// NUL-terminated copy, not a case-folded lookup.
+/// Lowercases `str` into a `max_len`-byte stack buffer if it fits, or reports
+/// `.too_long` (distinct from "not found", so callers can warn on overlong
+/// values). Shared by the layout-name and string_map lookups; keyNameToKeysym
+/// bypasses it — the C API needs a verbatim NUL-terminated copy.
 pub fn lowerStringCI(comptime max_len: usize, str: []const u8) LowerResult(max_len) {
     if (str.len > max_len) return .too_long;
     var result: LowerResult(max_len) = .{ .ok = .{ .buf = undefined, .len = str.len } };
@@ -233,11 +230,10 @@ pub const Layout = enum {
     fibonacci,
     leaf,
     scroll,
-    /// Windows are left at their current positions. Reachable from config
-    /// (`tiling.layout = "floating"` — the scalar key resolves via
-    /// stringToEnum, not LAYOUT_TABLE) but never cyclable: excluded from
-    /// LAYOUT_TABLE below, so toggleLayout can't select it and stepping the
-    /// cycle jumps to the first enabled layout.
+    /// Windows keep their current positions. Configurable via
+    /// `tiling.layout = "floating"` (resolved via stringToEnum, not
+    /// LAYOUT_TABLE) but never cyclable: excluded from LAYOUT_TABLE, so
+    /// toggleLayout can't select it and the cycle skips it.
     floating,
 };
 
@@ -413,11 +409,10 @@ fn freeStringList(list: *std.ArrayList([]const u8), allocator: std.mem.Allocator
     list.deinit(allocator);
 }
 
-/// Sentinel for the Config-owned string fields whose defaults are string
-/// literals. getDefaultConfig replaces each with a heap copy on success;
-/// Config.deinit compares pointers against this so a partially-built Config
-/// (the errdefer path, where some dupes never ran) frees only what is
-/// genuinely heap-owned — never a string literal.
+/// Sentinel for Config-owned string fields whose defaults are string
+/// literals. getDefaultConfig replaces each with a heap copy; Config.deinit
+/// compares pointers against this so a partially-built Config (errdefer path)
+/// frees only what is genuinely heap-owned — never a string literal.
 const OWNED_STR_SENTINEL: []const u8 = "";
 
 pub const BarConfig = struct {
@@ -601,10 +596,9 @@ pub const Config = struct {
         self.bar.deinit(a);
         self.tiling.deinit(a);
 
-        // Heap-allocated whenever set: getDefaultConfig dupes the literals
-        // and parseBar (via assignStr) transfers ownership on every write.
-        // Frees each that no longer points at the sentinel, so the errdefer
-        // path on a partially-built Config never frees a string literal.
+        // Heap-allocated whenever set (getDefaultConfig dupes, parseBar's
+        // assignStr transfers ownership on write); free any that no longer
+        // point at the sentinel, so the errdefer path never frees a literal.
         if (self.bar.clock_format.ptr != OWNED_STR_SENTINEL.ptr) a.free(self.bar.clock_format);
         if (self.bar.drun_prompt.ptr != OWNED_STR_SENTINEL.ptr) a.free(self.bar.drun_prompt);
         if (self.bar.indicator_focused.ptr != OWNED_STR_SENTINEL.ptr) a.free(self.bar.indicator_focused);

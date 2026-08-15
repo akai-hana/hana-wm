@@ -44,26 +44,19 @@ pub fn tileWithOffset(
         // first overflow window as fallback) and push the rest offscreen so the
         // user at least sees one window rather than a stack of identical rects.
         if (w < m.gap * 2 + border2 or h < m.gap * 2 + border2) {
-            const overflow_rect = utils.Rect{
+            const top_rect = utils.Rect{
                 .x = @intCast(x),
                 .y = @intCast(y),
                 .width = layouts.shrinkClamped(w, border2, state.config.min_window_dim),
                 .height = layouts.shrinkClamped(h, border2, state.config.min_window_dim),
             };
             // Find the focused window among the overflow set; fall back to the
-            // first window if no focused window is present here.
-            const raise_win: u32 = if (ctx.focused_win) |f|
-                if (std.mem.indexOfScalar(u32, windows[i..], f) != null) f else windows[i]
-            else
-                windows[i];
-            // Same reasoning as monocle: never raise on a background retile
+            // first window if no focused window is present here. Same reasoning
+            // as monocle: showOneHideRest never raises on a background retile
             // (LayoutCtx.is_background) — there's no viewer to show it to, and
             // raising would leave it first in the global stacking order.
-            layouts.configureWithHintsAndRaiseIfVisible(ctx, raise_win, overflow_rect);
-            for (windows[i..]) |overflow_win| {
-                if (overflow_win == raise_win) continue;
-                layouts.pushWindowOffscreenAndInvalidate(ctx, overflow_win);
-            }
+            const top = layouts.focusedElse(ctx, windows[i..], windows[i]);
+            layouts.showOneHideRest(ctx, windows[i..], top, top_rect);
             return;
         }
 
@@ -96,52 +89,26 @@ inline fn splitAndAdvance(
     w: *u16,
     h: *u16,
 ) void {
-    switch (dir) {
-        .right => {
-            const win_w = (w.* -| gap) / 2;
-            const rect = utils.Rect{
-                .x = @intCast(x.*),
-                .y = @intCast(y.*),
-                .width = win_w -| border2,
-                .height = h.* -| border2,
-            };
-            layouts.emitOrDefer(ctx, win, rect);
-            x.* += @as(i32, @intCast(win_w + gap));
-            w.* = w.* -| (win_w + gap);
-        },
-        .down => {
-            const win_h = (h.* -| gap) / 2;
-            const rect = utils.Rect{
-                .x = @intCast(x.*),
-                .y = @intCast(y.*),
-                .width = w.* -| border2,
-                .height = win_h -| border2,
-            };
-            layouts.emitOrDefer(ctx, win, rect);
-            y.* += @as(i32, @intCast(win_h + gap));
-            h.* = h.* -| (win_h + gap);
-        },
-        .left => {
-            const win_w = (w.* -| gap) / 2;
-            const rect = utils.Rect{
-                .x = @intCast(x.* + @as(i32, @intCast(w.* - win_w))),
-                .y = @intCast(y.*),
-                .width = win_w -| border2,
-                .height = h.* -| border2,
-            };
-            layouts.emitOrDefer(ctx, win, rect);
-            w.* = w.* -| (win_w + gap);
-        },
-        .up => {
-            const win_h = (h.* -| gap) / 2;
-            const rect = utils.Rect{
-                .x = @intCast(x.*),
-                .y = @intCast(y.* + @as(i32, @intCast(h.* - win_h))),
-                .width = w.* -| border2,
-                .height = win_h -| border2,
-            };
-            layouts.emitOrDefer(ctx, win, rect);
-            h.* = h.* -| (win_h + gap);
-        },
+    const split_x = dir == .right or dir == .left;
+    const dim: u16 = if (split_x) w.* else h.*;
+    const win_dim = (dim -| gap) / 2;
+    const off: u16 = if (dir == .right or dir == .down) 0 else dim - win_dim;
+    const off_x: i32 = if (split_x) @intCast(off) else 0;
+    const off_y: i32 = if (split_x) 0 else @intCast(off);
+    const advance: i32 = if (dir == .right or dir == .down) @intCast(win_dim + gap) else 0;
+
+    const rect = utils.Rect{
+        .x = @intCast(x.* + off_x),
+        .y = @intCast(y.* + off_y),
+        .width = (if (split_x) win_dim else w.*) -| border2,
+        .height = (if (split_x) h.* else win_dim) -| border2,
+    };
+    layouts.emitOrDefer(ctx, win, rect);
+    x.* += advance;
+    y.* += advance;
+    if (split_x) {
+        w.* = w.* -| (win_dim + gap);
+    } else {
+        h.* = h.* -| (win_dim + gap);
     }
 }

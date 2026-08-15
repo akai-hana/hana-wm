@@ -9,6 +9,6 @@
 
 pub const xcb = @cImport({
     @cInclude("xcb/xcb.h");
-    @cInclude("xcb/xcbext.h"); // xcb_poll_for_reply — bench probe (src/bench.zig)
+    @cInclude("xcb/xcbext.h"); // xcb_poll_for_reply — bench probe (src/test/bench.zig)
     @cInclude("xcb/randr.h"); // Refresh-rate detection for the carousel (scale.zig).
 });

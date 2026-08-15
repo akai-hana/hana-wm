@@ -62,11 +62,9 @@ pub const XkbState = struct {
     }
 
 /// Rebuilds the keymap, state, and keysym table after a server-side mapping
-/// change (setxkbmap/xmodmap → XCB_MAPPING_NOTIFY).
-///
-/// Dispatch resolves keysyms from `keysym_by_keycode`, so the table must
-/// track the new mapping or bindings silently stop matching. On failure the
-/// previous mapping is kept and the next mapping notify retries.
+/// change (setxkbmap/xmodmap → XCB_MAPPING_NOTIFY). Dispatch resolves keysyms
+/// from the table, so it must track the new mapping or bindings silently stop
+/// matching; on failure the old mapping is kept.
     pub fn rebuild(self: *XkbState, xcb_conn: *anyopaque) void {
         const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
         if (device_id == -1) return;
@@ -97,13 +95,12 @@ pub const XkbState = struct {
         return self.keysym_by_keycode[keycode];
     }
 
-/// Reverse-look up a keysym to its keycode (used during config parsing).
-/// Scans the flat table (248 entries, all in L1 cache); config-parse time
-/// only, never the hot path.
+/// Reverse-look up a keysym to its keycode (config parsing only). Scans the
+/// flat table (248 entries, all in L1 cache).
 ///
-/// The table holds each key's level-0 symbol, so a Shift-only keysym — e.g.
-/// `@` on a US layout — resolves to null; callers should warn, since the
-/// binding cannot be grabbed.
+/// The table holds level-0 symbols, so a Shift-only keysym — e.g. `@` on a
+/// US layout — resolves to null; callers should warn, since such a binding
+/// cannot be grabbed.
     pub inline fn keysymToKeycode(self: *const XkbState, keysym: u32) ?u8 {
         for (8..256) |kc| {
             if (self.keysym_by_keycode[kc] == keysym) return @intCast(kc);

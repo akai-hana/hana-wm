@@ -58,8 +58,8 @@ pub inline fn pollReply(conn: *xcb.xcb_connection_t, sequence: u32) ?*anyopaque 
     if (comptime !enabled) return null;
     var reply: ?*anyopaque = null;
     var err: ?*xcb.xcb_generic_error_t = null;
-    const res = xcb.xcb_poll_for_reply(conn, sequence, &reply, &err);
-    if (res == 1 and reply != null) return reply;
+    _ = xcb.xcb_poll_for_reply(conn, sequence, &reply, &err);
+    if (reply) |r| return r;
     _ = title_round_trips.fetchAdd(1, .monotonic);
     return null;
 }

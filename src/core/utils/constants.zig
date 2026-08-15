@@ -28,23 +28,20 @@ pub const MIN_MASTER_WIDTH: f32 = 0.05;
 pub const MAX_MASTER_WIDTH: f32 = 0.95;
 
 // XKB retry parameters
-// 20 ms is short enough to be imperceptible to the user yet long enough to avoid
-// busy-spinning while the XKB extension finishes initialising (~1 polling cycle
-// at 50 Hz).
+// Short enough to be imperceptible, long enough to avoid busy-spinning while
+// XKB initialises (~1 polling cycle at 50 Hz).
 pub const XKB_RETRY_DELAY_MS: u64 = 20;
 
 // Offscreen positioning
-// Windows on inactive workspaces are parked at OFFSCREEN_X_POSITION so they
-// are hidden without being unmapped (unmapping causes some apps to pause).
+// Windows on inactive workspaces are parked here so they are hidden without
+// being unmapped (unmapping causes some apps to pause).
 //
-// X11's ConfigureWindow request encodes x/y as INT16 on the wire (this is
-// also why utils.Rect.x/y are i16), so -32768 is the hard floor for how far
-// off the left edge a window can ever be parked. The previous value, -4000,
-// only cleared a single 3840px-wide (4K) display with a small margin — on a
-// multi-monitor layout with a display to the left of the primary, an
-// ultrawide, or a 5K/6K panel, -4000 can land back inside real screen real
-// estate instead of off it. -30000 clears any realistic combined desktop
-// while leaving headroom below the INT16 floor.
+// X11's ConfigureWindow encodes x/y as INT16 on the wire (hence utils.Rect.x/y
+// being i16), so -32768 is the hard floor. The old -4000 only cleared a single
+// 3840px-wide display: on multi-monitor layouts with a display left of primary,
+// ultrawides, or 5K/6K panels, -4000 can land back inside real screen estate.
+// -30000 clears any realistic combined desktop while leaving headroom below
+// the INT16 floor.
 pub const OFFSCREEN_X_POSITION: i32 = -30000;
 
 /// Lower bound for detecting whether a window is parked offscreen.
@@ -57,16 +54,14 @@ pub const MAX_WINDOW_TREE_DEPTH: usize = 10;
 
 /// Hard ceiling on the number of workspaces the WM can meaningfully support.
 ///
-/// This is not an arbitrary round number: tiling.zig's geometry-validity cache
-/// packs one bit per workspace into a u64 (`workspace_geom_valid_bits`), and
-/// workspaces.zig's per-workspace layout/master-count override lookup tables
-/// are fixed-size arrays sized to match. Raising this would require widening
-/// that bitmask (and the arrays) first — it is not just a config-side number.
-///
-/// config.zig checks parsed workspace numbers against this at parse time so a
-/// config declaring more workspaces (or overrides targeting workspace indices)
-/// than the WM can apply produces a visible warning immediately, rather than
-/// silently doing nothing once workspaces.init() builds its lookup tables.
+/// Not an arbitrary round number: tiling.zig's geometry-validity cache packs
+/// one bit per workspace into a u64 (`workspace_geom_valid_bits`), and
+/// workspaces.zig's per-workspace layout/master-count override tables are
+/// fixed-size arrays sized to match. Raising this requires widening those
+/// first — it is not just a config-side number. config.zig validates parsed
+/// workspace numbers against it at parse time so oversized configs warn
+/// immediately instead of silently no-oping once workspaces.init() builds its
+/// lookup tables.
 pub const MAX_WORKSPACES: usize = 64;
 
 // XCB property helpers
@@ -82,35 +77,21 @@ pub const BASELINE_DPI: f32 = 96.0;
 
 // Event masks
 pub const EventMasks = struct {
-    // DWM verbatim (setup() in dwm.c):
-    //   wa.event_mask = SubstructureRedirectMask|SubstructureNotifyMask
-    //       |ButtonPressMask|PointerMotionMask|EnterWindowMask
-    //       |LeaveWindowMask|StructureNotifyMask|PropertyChangeMask;
-    //   XChangeWindowAttributes(dpy, root, CWEventMask|CWCursor, &wa);
-    //   XSelectInput(dpy, root, wa.event_mask);
-    // KEY_PRESS is kept (not in DWM's root mask) because our keybinding grabs
-    // land on root via xcb_grab_key and the events are dispatched here.
-    // POINTER_MOTION_HINT is used instead of plain POINTER_MOTION so the X
-    // server coalesces motion events and we re-arm with xcb_query_pointer,
-    // matching the drag/suppression logic in input.zig.
+    // DWM verbatim (setup() in dwm.c): SubstructureRedirect|Notify, ButtonPress,
+    // PointerMotion, Enter/LeaveWindow, StructureNotify, PropertyChange.
     //
-    // BUTTON_RELEASE is ALSO kept (not in DWM's root mask either) for a
-    // related reason: DWM's movemouse()/resizemouse() run their own blocking
-    // XGrabPointer + XMaskEvent loop for the whole drag and read
-    // ButtonRelease directly off that grab, so root never needs to select it.
-    // This WM tracks drags asynchronously instead: input.startDrag() arms
-    // drag.zig's state and returns immediately, and the Super+Button grab
-    // from input.setupGrabs stays engaged (AsyncPointer, not ReplayPointer)
-    // for the rest of the gesture, so MotionNotify/ButtonRelease keep
-    // arriving to us — see keepDragGrab in input.zig for why ReplayPointer
-    // is NOT used there. This bit is what lets that ButtonRelease (delivered
-    // to root, the grab window) reach input.handleButtonRelease, whose
-    // `if (drag.isDragging()) drag.stopDrag();` clears drag.active: without
-    // it the release would be dropped, drag.active would stay stuck true
-    // forever, and every hover-focus EnterNotify — for every window, on
-    // every workspace — would be silently dropped by handleEnterNotify's
-    // `if (drag.isDragging()) return;` guard until the WM restarts and
-    // resets drag.zig's module state.
+    // Three deliberate deviations, all because this WM differs from DWM:
+    //  - KEY_PRESS: our keybinding grabs land on root via xcb_grab_key.
+    //  - POINTER_MOTION_HINT instead of POINTER_MOTION: the server coalesces
+    //    motion and we re-arm with xcb_query_pointer (see drag/suppression in
+    //    input.zig).
+    //  - BUTTON_RELEASE: DWM's drags run their own blocking XGrabPointer +
+    //    XMaskEvent loop, so root never needs it. Ours are async — the
+    //    Super+Button grab from input.setupGrabs stays engaged for the whole
+    //    gesture (AsyncPointer; see keepDragGrab in input.zig), so this bit is
+    //    what lets the release reach input.handleButtonRelease and clear
+    //    drag.active. Without it, drag.active sticks true and handleEnterNotify
+    //    drops every hover-focus EnterNotify until the WM restarts.
     pub const ROOT_WINDOW = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
         xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
         xcb.XCB_EVENT_MASK_KEY_PRESS |
@@ -122,17 +103,14 @@ pub const EventMasks = struct {
         xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY | // DWM: StructureNotifyMask
         xcb.XCB_EVENT_MASK_PROPERTY_CHANGE;
 
-    // DWM verbatim (manage() in dwm.c):
-    //   XSelectInput(dpy, w, EnterWindowMask|FocusChangeMask|PropertyChangeMask
-    //                        |StructureNotifyMask);
-    //   grabbuttons(c, 0);
+    // DWM verbatim (manage() in dwm.c): EnterWindow|FocusChange|PropertyChange|
+    // StructureNotify via XSelectInput; buttons via XGrabButton (grabbuttons).
     //
-    // DWM does NOT subscribe managed windows to ButtonPressMask via XSelectInput.
-    // Button events on unfocused windows arrive via XGrabButton (grabbuttons),
-    // and button events on the focused window arrive via the focused-specific
-    // grabs set in grabbuttons(c, 1).  Adding BUTTON_PRESS here would mean the
-    // WM receives button events through *both* the grab mechanism and the event
-    // mask, creating duplicates and interfering with SYNC-mode grab sequencing.
+    // Deliberately NO BUTTON_PRESS: DWM does not subscribe managed windows to
+    // it either — unfocused-window buttons arrive via grabbuttons' grabs and
+    // focused-window buttons via the focus-specific grabs. Adding it here would
+    // deliver button events through both mechanisms, duplicating events and
+    // interfering with SYNC-mode grab sequencing.
     pub const MANAGED_WINDOW = xcb.XCB_EVENT_MASK_ENTER_WINDOW | // DWM: EnterWindowMask
         xcb.XCB_EVENT_MASK_FOCUS_CHANGE | // DWM: FocusChangeMask
         xcb.XCB_EVENT_MASK_PROPERTY_CHANGE | // DWM: PropertyChangeMask
