@@ -53,6 +53,8 @@ const max_completion_len: usize = 64;
 const max_history: usize = 512;
 /// Maximum byte length of a single history entry.
 const max_history_line: usize = vim.default_max_input;
+/// Number of editing modes (derived from vim.Mode at comptime).
+const num_modes = @typeInfo(vim.Mode).@"enum".fields.len;
 
 // Module state
 
@@ -66,7 +68,7 @@ const PromptState = struct {
     key_syms: ?*xcb_key_symbols_t = null,
     cached_prompt_w: ?u16 = null,
     /// Cached pixel width of each mode label, indexed by `vim.Mode` integer value.
-    cached_mode_w: [4]?u16 = .{ null, null, null, null },
+    cached_mode_w: [num_modes]?u16 = .{null} ** num_modes,
 
     // PATH completion
     comp_names: []u8 = &.{},
@@ -110,6 +112,19 @@ const PromptState = struct {
 
 var g: PromptState = .{};
 
+// Module helpers
+
+fn vimModeEnabled() bool {
+    return core.getState().config.bar.vim_mode;
+}
+
+fn copyToZ(dest: []u8, src: []const u8) ?[*:0]u8 {
+    if (src.len >= dest.len) return null;
+    @memcpy(dest[0..src.len], src);
+    dest[src.len] = 0;
+    return @ptrCast(dest.ptr);
+}
+
 // Public API
 
 /// Returns true when the prompt is currently active and accepting key input.
@@ -123,7 +138,7 @@ pub fn isActive() bool {
 /// colon-command mode.
 pub fn blinkPollTimeoutMs() i32 {
     if (!g.is_active) return -1;
-    if (g.vim_state.mode == .insert or (core.getState().config.bar.vim_mode and vim.colonInput(&g.vim_state) != null))
+    if (g.vim_state.mode == .insert or (vimModeEnabled() and vim.colonInput(&g.vim_state) != null))
         return cursor_blink_ms;
     return -1;
 }
@@ -228,8 +243,6 @@ pub fn handlePromptKeypress(
 /// Low-level key-press handler.  Called by `handlePromptKeypress` after all
 /// prompt-level routing decisions have been made.
 fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
-    if (!g.is_active) return false;
-
     // Only process XCB_KEY_PRESS events — press and release events share the
     // same struct layout, so the loop sometimes casts a release and dispatches
     // it here. Without this guard the Escape release is a trap: handleInsert
@@ -247,7 +260,7 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     const ctrl_held = event.state & xcb.XCB_MOD_MASK_CONTROL != 0;
     const col: c_int = if (shift_held) 1 else 0;
     const sym = xcb_key_symbols_get_keysym(syms, event.detail, col);
-    const vim_mode = core.getState().config.bar.vim_mode;
+    const vim_mode = vimModeEnabled();
 
     // Drop bare modifier key events (Shift, Ctrl, Alt, Super, Meta, Hyper …).
     //
@@ -272,11 +285,13 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
         return acceptGhost();
     }
 
-    const action = switch (g.vim_state.mode) {
-        .insert => if (vim_mode) vim.handleInsert(&g.vim_state, sym) else vim.handleInsertBasic(&g.vim_state, sym),
-        .normal => if (vim_mode) vim.handleNormal(&g.vim_state, sym) else .none,
-        .visual => if (vim_mode) vim.handleVisual(&g.vim_state, sym) else .none,
-        .replace => if (vim_mode) vim.handleReplace(&g.vim_state, sym) else .none,
+    const action = if (!vim_mode and g.vim_state.mode == .insert)
+        vim.handleInsertBasic(&g.vim_state, sym)
+    else switch (g.vim_state.mode) {
+        .insert => vim.handleInsert(&g.vim_state, sym),
+        .normal => vim.handleNormal(&g.vim_state, sym),
+        .visual => vim.handleVisual(&g.vim_state, sym),
+        .replace => vim.handleReplace(&g.vim_state, sym),
     };
     return finishKeyPress(action, true);
 }
@@ -409,7 +424,7 @@ fn activate() void {
 /// Ungrabs the keyboard and marks the prompt inactive.
 fn deactivate() void {
     g.is_active = false;
-    if (core.getState().config.bar.vim_mode) vim.onDeactivate(&g.vim_state);
+    if (vimModeEnabled()) vim.onDeactivate(&g.vim_state);
     const conn = core.getState().conn;
     _ = xcb.xcb_ungrab_keyboard(conn, xcb.XCB_CURRENT_TIME);
     _ = xcb.xcb_flush(conn);
@@ -434,7 +449,7 @@ fn loadCompletions() void {
     var dir_it = std.mem.splitScalar(u8, path_env, ':');
     outer: while (dir_it.next()) |dir_path| {
         if (dir_path.len == 0) continue;
-        _ = std.fmt.bufPrintZ(&dir_buf, "{s}", .{dir_path}) catch continue;
+        _ = copyToZ(&dir_buf, dir_path) orelse continue;
 
         const dirp = c.opendir(&dir_buf) orelse continue;
         defer _ = c.closedir(dirp);
@@ -588,15 +603,15 @@ fn histAppendToFile(cmd: []const u8) void {
     if (cmd.len == 0) return;
     const home = std.mem.span(c.getenv("HOME") orelse return);
 
-    var dir_buf: [512:0]u8 = undefined;
-    var file_buf: [512:0]u8 = undefined;
+    var path_buf: [512:0]u8 = undefined;
+    const file_path = std.fmt.bufPrintZ(&path_buf, "{s}/.local/share/drun/history", .{home}) catch return;
 
-    _ = std.fmt.bufPrintZ(&dir_buf, "{s}/.local/share/drun", .{home}) catch return;
-    _ = std.fmt.bufPrintZ(&file_buf, "{s}/.local/share/drun/history", .{home}) catch return;
+    const last_sep = std.mem.lastIndexOfScalar(u8, file_path, '/') orelse return;
+    path_buf[last_sep] = 0;
+    _ = c.mkdir(@ptrCast(&path_buf), 0o700);
+    path_buf[last_sep] = '/';
 
-    _ = c.mkdir(&dir_buf, 0o700);
-
-    const fd = c.open(&file_buf, c.O_WRONLY | c.O_CREAT | c.O_APPEND, @as(c_int, 0o600));
+    const fd = c.open(@ptrCast(&path_buf), c.O_WRONLY | c.O_CREAT | c.O_APPEND, @as(c_int, 0o600));
     if (fd < 0) return;
     defer _ = c.close(fd);
     _ = c.write(fd, cmd.ptr, cmd.len);
@@ -703,31 +718,23 @@ fn loadHistory() void {
     var path_buf: [512]u8 = undefined;
     const home = std.mem.span(c.getenv("HOME") orelse return);
 
-    // Local helper: format a path and open it for reading.
-    const tryOpen = struct {
-        fn tryOpenFormatted(buf: []u8, comptime fmt: []const u8, args: anytype) ?*c.FILE {
-            const s = std.fmt.bufPrint(buf[0 .. buf.len - 1], fmt, args) catch return null;
-            buf[s.len] = 0;
-            return c.fopen(@ptrCast(buf.ptr), "r");
+    const history_fmts = [_][]const u8{
+        "{s}/.local/share/drun/history",
+        "{s}/.bash_history",
+        "{s}/.zsh_history",
+        "{s}/.local/share/fish/fish_history",
+    };
+    inline for (history_fmts) |fmt| {
+        if (tryOpenHistoryFile(&path_buf, fmt, .{home})) |fp| {
+            defer _ = c.fclose(fp);
+            histLoadFile(fp);
         }
-    }.tryOpenFormatted;
+    }
+}
 
-    if (tryOpen(&path_buf, "{s}/.local/share/drun/history", .{home})) |fp| {
-        defer _ = c.fclose(fp);
-        histLoadFile(fp);
-    }
-    if (tryOpen(&path_buf, "{s}/.bash_history", .{home})) |fp| {
-        defer _ = c.fclose(fp);
-        histLoadFile(fp);
-    }
-    if (tryOpen(&path_buf, "{s}/.zsh_history", .{home})) |fp| {
-        defer _ = c.fclose(fp);
-        histLoadFile(fp);
-    }
-    if (tryOpen(&path_buf, "{s}/.local/share/fish/fish_history", .{home})) |fp| {
-        defer _ = c.fclose(fp);
-        histLoadFile(fp);
-    }
+fn tryOpenHistoryFile(buf: []u8, comptime fmt: []const u8, args: anytype) ?*c.FILE {
+    _ = std.fmt.bufPrintZ(buf, fmt, args) catch return null;
+    return c.fopen(@ptrCast(buf.ptr), "r");
 }
 
 // Private — command spawning
@@ -872,6 +879,20 @@ inline fn cursorBlockGeom(
     return .{ .draw_x = draw_x, .vis_w = vis_w };
 }
 
+const CursorStyle = struct {
+    text_left_x: u16,
+    scroll_end_x: u16,
+    baseline: u16,
+    height: u16,
+    accent: u32,
+    bg: u32,
+    fg: u32,
+};
+
+fn makeCursorStyle(text_left_x: u16, scroll_end_x: u16, baseline: u16, height: u16, accent: u32, bg: u32, fg: u32) CursorStyle {
+    return .{ .text_left_x = text_left_x, .scroll_end_x = scroll_end_x, .baseline = baseline, .height = height, .accent = accent, .bg = bg, .fg = fg };
+}
+
 /// Draw a filled block cursor over `buf[lo..hi]` and advance `px.*` past it.
 ///
 /// Shared by visual selection highlighting and the normal/replace character
@@ -882,13 +903,7 @@ inline fn cursorBlockGeom(
 inline fn drawBlockCursor(
     dc: *drawing.DrawContext,
     px: *i32,
-    text_left_x: u16,
-    scroll_end_x: u16,
-    baseline: u16,
-    height: u16,
-    accent: u32,
-    bg: u32,
-    fg: u32,
+    style: CursorStyle,
     buf: []const u8,
     lo: usize,
     hi: usize,
@@ -898,15 +913,11 @@ inline fn drawBlockCursor(
     const block_text = if (hi > lo) buf[lo..hi] else " ";
     const block_w = @max(text_w orelse dc.measureTextWidth(block_text), min_cursor_px);
 
-    if (text_only) {
-        if (hi > lo) {
-            if (cursorBlockGeom(px.*, block_w, text_left_x, scroll_end_x)) |block|
-                try dc.drawText(block.draw_x, baseline, block_text, fg);
-        }
-    } else if (cursorBlockGeom(px.*, block_w, text_left_x, scroll_end_x)) |block| {
-        dc.fillRect(block.draw_x, cursor_v_pad, block.vis_w, height -| cursor_v_pad * 2, accent);
+    if (cursorBlockGeom(px.*, block_w, style.text_left_x, style.scroll_end_x)) |block| {
+        if (!text_only)
+            dc.fillRect(block.draw_x, cursor_v_pad, block.vis_w, style.height -| cursor_v_pad * 2, style.accent);
         if (hi > lo)
-            try dc.drawText(block.draw_x, baseline, block_text, bg);
+            try dc.drawText(block.draw_x, style.baseline, block_text, if (text_only) style.fg else style.bg);
     }
     px.* += @intCast(block_w);
 }
@@ -919,7 +930,7 @@ inline fn drawBlockCursor(
 /// branch executes first.
 fn ensureCaretGeom(dc: *drawing.DrawContext, height: u16) void {
     if (g.cached_caret_top == null) {
-        const asc, const desc = dc.getMetrics();
+        const asc, const desc = dc.font.getMetrics();
         const font_h: u16 = @intCast(@max(0, @as(i32, asc) + @as(i32, desc)));
         g.cached_caret_top = (height -| font_h) / 2;
         g.cached_caret_h = @min(font_h, height);
@@ -985,6 +996,31 @@ fn refreshLayoutCache(
     g.layout_dirty = false;
 }
 
+fn drawColonPillContent(
+    dc: *drawing.DrawContext,
+    pill_x: u16,
+    pill_w: u16,
+    pill_h_pad: u16,
+    baseline: u16,
+    ct: []const u8,
+    white: u32,
+) !void {
+    var ppx: i32 = @as(i32, pill_x) + @as(i32, pill_h_pad);
+    const colon_w: i32 = @intCast(dc.measureTextWidth(":"));
+    try dc.drawText(@intCast(ppx), baseline, ":", white);
+    ppx += colon_w;
+    if (ct.len > 0) {
+        try dc.drawText(@intCast(ppx), baseline, ct, white);
+        ppx += @intCast(dc.measureTextWidth(ct));
+    }
+    const caret_top = g.cached_caret_top.?;
+    const caret_h = g.cached_caret_h.?;
+    const pill_inner_end: i32 = @as(i32, pill_x) + @as(i32, pill_w) - @as(i32, pill_h_pad);
+    if (g.is_blink_visible and ppx < pill_inner_end) {
+        dc.fillRect(@intCast(ppx), caret_top, cursor_width, caret_h, white);
+    }
+}
+
 /// Right-pinned mode widget: a filled pill (accent bg, white text) with
 /// `pill_h_pad` on both sides so the text never touches the pill edge and
 /// there's a gap to the scrollable region. In colon-command mode the label is
@@ -1003,7 +1039,7 @@ fn drawPill(
     const pill_h_pad: u16 = 6;
     const white: u32 = 0xFFFFFFFF;
 
-    const vim_mode = core.getState().config.bar.vim_mode;
+    const vim_mode = vimModeEnabled();
     const mode_label = if (vim_mode) g.vim_state.mode.label() else "";
     const mode_idx: usize = @intFromEnum(g.vim_state.mode);
     const mode_w: u16 = g.cached_mode_w[mode_idx] orelse blk: {
@@ -1033,23 +1069,7 @@ fn drawPill(
         dc.fillRect(pill_x, cursor_v_pad, pill_w, height -| cursor_v_pad * 2, accent);
 
         if (vim.colonInput(&g.vim_state)) |ct| {
-            // Ex-command input: ":typed_chars" + blinking insert-style caret.
-            var ppx: i32 = @as(i32, pill_x) + @as(i32, pill_h_pad);
-            const colon_w: i32 = @intCast(dc.measureTextWidth(":"));
-            try dc.drawText(@intCast(ppx), baseline, ":", white);
-            ppx += colon_w;
-            if (ct.len > 0) {
-                try dc.drawText(@intCast(ppx), baseline, ct, white);
-                ppx += @intCast(dc.measureTextWidth(ct));
-            }
-            // Blinking thin caret — same geometry as the insert-mode caret
-            // in the main text area so both look identical.
-            const caret_top = g.cached_caret_top.?;
-            const caret_h = g.cached_caret_h.?;
-            const pill_inner_end: i32 = @as(i32, pill_x) + @as(i32, pill_w) - @as(i32, pill_h_pad);
-            if (g.is_blink_visible and ppx < pill_inner_end) {
-                dc.fillRect(@intCast(ppx), caret_top, cursor_width, caret_h, white);
-            }
+            try drawColonPillContent(dc, pill_x, pill_w, pill_h_pad, baseline, ct, white);
         } else {
             // Normal mode label centred (left-padded) inside the pill.
             try dc.drawText(pill_x + pill_h_pad, baseline, mode_label, white);
@@ -1080,7 +1100,7 @@ fn drawVisualMode(
     if (pre_sel.len > 0)
         try drawSpan(dc, px, text_left_x, scroll_end_x, baseline, pre_sel, null, fg);
 
-    try drawBlockCursor(dc, px, text_left_x, scroll_end_x, baseline, height, accent, bg, fg, g.vim_state.buf, sel[0], sel[1], null, false);
+    try drawBlockCursor(dc, px, makeCursorStyle(text_left_x, scroll_end_x, baseline, height, accent, bg, fg), g.vim_state.buf, sel[0], sel[1], null, false);
 
     try drawPostSpan(dc, px.*, text_left_x, ellipsis_end_x, baseline, post_sel, fg);
 }
@@ -1137,7 +1157,7 @@ fn drawNormalMode(
     if (pre_text.len > 0)
         try drawSpan(dc, px, text_left_x, scroll_end_x, baseline, pre_text, g.cached_pre_w, fg);
 
-    try drawBlockCursor(dc, px, text_left_x, scroll_end_x, baseline, height, accent, bg, fg, g.vim_state.buf, g.vim_state.cursor, cur_hi, g.cached_caret_w, colon_active);
+    try drawBlockCursor(dc, px, makeCursorStyle(text_left_x, scroll_end_x, baseline, height, accent, bg, fg), g.vim_state.buf, g.vim_state.cursor, cur_hi, g.cached_caret_w, colon_active);
 
     const post_text: []const u8 = if (g.vim_state.cursor < g.vim_state.len)
         g.vim_state.buf[g.vim_state.cursor + 1 .. g.vim_state.len]
@@ -1163,8 +1183,8 @@ fn drawActive(
     const accent = config.drunPromptColor();
     const bg = config.drunBg();
     const fg = config.drunFg();
-    const prompt = config.drun_prompt;
-    const vim_mode = core.getState().config.bar.vim_mode;
+    const prompt = config.drun_prompt orelse types.DEFAULT_DRUN_PROMPT;
+    const vim_mode = vimModeEnabled();
 
     dc.fillRect(start_x, 0, width, height, bg);
 

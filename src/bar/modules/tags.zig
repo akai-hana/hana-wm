@@ -119,7 +119,7 @@ pub fn draw(
         try dc.drawText(text_x, baseline_y, label, fg);
 
         if (has_windows) {
-            const glyph = if (is_current) config.indicator_focused else config.indicator_unfocused;
+            const glyph = if (is_current) (config.indicator_focused orelse types.DEFAULT_INDICATOR_FOCUSED) else (config.indicator_unfocused orelse types.DEFAULT_INDICATOR_UNFOCUSED);
             const color = config.indicator_color orelse fg;
             // Use the pre-cached intra-cell offset; avoids per-workspace float arithmetic.
             try dc.drawTextSized(x + cached_ind_x_off, cached_ind_y, glyph, ind_size, color);

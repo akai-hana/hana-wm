@@ -3,6 +3,7 @@
 
 const std = @import("std");
 
+const core = @import("core");
 const constants = @import("constants");
 const utils = @import("utils");
 const minimize = @import("minimize");
@@ -119,10 +120,6 @@ pub const Entry = struct {
 const FOCUS_MRU_CAP: usize = 12; // 8-16 entries is plenty for real usage; bounded like g_minimized.
 var g_focus_mru: [constants.MAX_WORKSPACES]utils.BoundedList(u32, FOCUS_MRU_CAP) = @splat(.{});
 
-fn matchMruWin(win: u32, item: u32) bool {
-    return item == win;
-}
-
 /// Record `win` as the most-recently-defocused window on workspace `ws_idx`.
 /// Moves `win` to the top if it was already present, so a window that gets
 /// focused/defocused repeatedly doesn't accumulate duplicate, increasingly
@@ -131,7 +128,7 @@ fn matchMruWin(win: u32, item: u32) bool {
 pub fn pushFocusMru(ws_idx: u8, win: u32) void {
     if (ws_idx >= constants.MAX_WORKSPACES) return;
     const list = &g_focus_mru[ws_idx];
-    if (list.indexOf(win, matchMruWin)) |i| list.orderedRemove(i);
+    if (list.indexOfScalar(win)) |i| list.orderedRemove(i);
     if (!list.append(win)) {
         list.orderedRemove(0);
         _ = list.append(win);
@@ -163,7 +160,7 @@ pub fn popFocusMru(ws_idx: u8, visible: *const fn (u32) bool) ?u32 {
 /// same ID.
 fn removeFromFocusMruAll(win: u32) void {
     for (&g_focus_mru) |*list| {
-        if (list.indexOf(win, matchMruWin)) |i| list.orderedRemove(i);
+        if (list.indexOfScalar(win)) |i| list.orderedRemove(i);
     }
 }
 
@@ -326,13 +323,95 @@ pub fn allWindows() []const Entry {
     return g_windows.items;
 }
 
-/// True when at least one window has ws_idx set in its mask.
-pub fn hasWindowsOnWorkspace(ws_idx: u8) bool {
-    const bit = workspaceBit(ws_idx);
-    for (g_windows.items) |e| {
-        if (e.mask & bit != 0) return true;
+/// Iterates tracked entries, yielding only those whose workspace mask contains
+/// `bit`, and optionally skipping a single window id (`skip` = 0 = none).
+/// When the caller wants no mask filter it passes an all-ones `bit`.
+pub const WorkspaceIter = struct {
+    entries: []const Entry,
+    idx: usize = 0,
+    bit: u64,
+    skip: u32,
+
+    pub fn next(self: *WorkspaceIter) ?Entry {
+        while (self.idx < self.entries.len) {
+            const e = self.entries[self.idx];
+            self.idx += 1;
+            if (e.mask & self.bit == 0) continue;
+            if (e.win == self.skip) continue;
+            return e;
+        }
+        return null;
     }
-    return false;
+};
+
+/// Iterate entries on workspace `bit` (via `WorkspaceIter`), skipping `skip`.
+pub fn onWorkspace(bit: u64, skip: u32) WorkspaceIter {
+    return .{ .entries = allWindows(), .bit = bit, .skip = skip };
+}
+
+/// Bitmask selecting "windows on the current workspace" for iteration
+/// helpers: the current workspace's bit when workspaces are enabled, or
+/// all-ones (no filter) when they're disabled. Null when workspaces are
+/// enabled but no current workspace is set yet (not initialized) — callers
+/// treat that as "nothing to iterate".
+fn currentWorkspaceIterBit() ?u64 {
+    if (core.getState().config.workspaces.enabled) {
+        const cur = getCurrentWorkspace() orelse return null;
+        return workspaceBit(cur);
+    }
+    return ~@as(u64, 0);
+}
+
+/// Iterate windows on the current workspace, skipping `skip`. Uses the
+/// shared `WorkspaceIter` with a workspace-mask filter when workspaces
+/// are enabled, otherwise the global window list (all-ones bit = no filter).
+pub fn windowsOnCurrentWorkspace(skip: u32) WorkspaceIter {
+    const bit = currentWorkspaceIterBit() orelse
+        return .{ .entries = &.{}, .skip = skip, .bit = ~@as(u64, 0) };
+    return onWorkspace(bit, skip);
+}
+
+/// Shared geometry prefetch + save: iterates windows matching `ws_bit`
+/// (use `~@as(u64, 0)` for all windows), applies `predicate`, skips
+/// windows that are on `skip_ws` (use 255 to skip none), skips
+/// windows with a cache hit, issues a live `xcb_get_geometry`, and saves
+/// the result. Skips replies that report the window parked at the
+/// off-screen sentinel — that position isn't a real, restorable geometry.
+/// Must run BEFORE `xcb_grab_server` (a round-trip can't happen inside a
+/// grab). `skip_win` is excluded from iteration (0 = none).
+pub fn prefetchAndSaveGeometry(
+    ws_bit: u64,
+    predicate: *const fn (u32) bool,
+    skip_win: u32,
+    skip_ws: u8,
+) void {
+    const tiling = @import("tiling");
+    const window = @import("window");
+    const conn = core.getState().conn;
+    var it = onWorkspace(ws_bit, skip_win);
+    while (it.next()) |entry| {
+        const win = entry.win;
+        if (skip_ws < 64 and isWindowOnWorkspace(win, skip_ws)) continue;
+        if (!predicate(win)) continue;
+        if (tiling.getWindowGeom(win) != null) continue;
+        const reply = core.xcb.xcb_get_geometry_reply(conn, core.xcb.xcb_get_geometry(conn, win), null) orelse continue;
+        defer std.c.free(reply);
+        if (utils.isOffscreenGeomReply(reply)) continue;
+        window.saveWindowGeom(win, utils.Rect.fromXcb(reply));
+    }
+}
+
+/// Like `prefetchAndSaveGeometry`, but scoped to "the current workspace"
+/// using the same enabled/disabled semantics as `windowsOnCurrentWorkspace`
+/// (falls back to every window when workspaces are disabled). No-op when no
+/// current workspace is set yet. Shared by callers that only ever care about
+/// the visible workspace, so they don't need to pass a `skip_ws`.
+pub fn prefetchAndSaveGeometryOnCurrentWorkspace(
+    predicate: *const fn (u32) bool,
+    skip_win: u32,
+) void {
+    const bit = currentWorkspaceIterBit() orelse return;
+    prefetchAndSaveGeometry(bit, predicate, skip_win, 255);
 }
 
 /// Count of windows that have ws_idx set in their mask.

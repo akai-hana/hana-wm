@@ -57,8 +57,7 @@ pub inline fn reportTitleCapture(ns: u64, windows: usize) void {
 pub inline fn pollReply(conn: *xcb.xcb_connection_t, sequence: u32) ?*anyopaque {
     if (comptime !enabled) return null;
     var reply: ?*anyopaque = null;
-    var err: ?*xcb.xcb_generic_error_t = null;
-    _ = xcb.xcb_poll_for_reply(conn, sequence, &reply, &err);
+    _ = xcb.xcb_poll_for_reply(conn, sequence, &reply, null);
     if (reply) |r| return r;
     _ = title_round_trips.fetchAdd(1, .monotonic);
     return null;

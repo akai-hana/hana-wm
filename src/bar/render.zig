@@ -24,10 +24,6 @@ pub const cairo_t = opaque {};
 /// Numeric values match the C ABI; do not change them.
 pub const cairo_format_t = enum(c_int) {
     ARGB32 = 0,
-    A8 = 2,
-    A1 = 3,
-    RGB16_565 = 4,
-    RGB30 = 5,
 };
 
 /// Pixmap must outlive the surface; destroy the surface before freeing the pixmap.
@@ -67,8 +63,6 @@ pub const PANGO_SCALE: c_int = 1024;
 
 pub const PangoEllipsizeMode = enum(c_int) {
     NONE = 0,
-    START = 1,
-    MIDDLE = 2,
     END = 3,
 };
 

@@ -19,7 +19,8 @@ const bar = @import("bar");
 const prompt = @import("prompt");
 const clock = @import("clock");
 const fullscreen = @import("fullscreen");
-const scale = @import("scale");
+const refresh_rate = @import("refresh_rate");
+const signals = @import("signals");
 
 // Indices into the poll fd array.
 const FD_XCB = 0;
@@ -28,10 +29,6 @@ const FD_SIGNAL = 1;
 /// Maximum events dispatched per XCB batch before returning to poll, so the
 /// signal pipe and timer paths get fair scheduling against a chatty client.
 const MAX_EVENTS_PER_BATCH: usize = 128;
-
-// Self-pipe for portable signal delivery.
-// Signal handlers write to [1]; the event loop polls [0].
-var signal_pipe: [2]std.posix.fd_t = .{ -1, -1 };
 
 // Dispatch table
 
@@ -79,6 +76,14 @@ fn handleDestroyNotify(event: *anyopaque) void {
     window.handleDestroyNotify(e);
 }
 
+/// Adapts input.handleMappingNotify to the EventHandler shape. The keymap
+/// rebuild it triggers doesn't consult any MappingNotify fields, so the
+/// event pointer is discarded.
+fn handleMappingNotify(event: *anyopaque) void {
+    _ = event;
+    input.handleMappingNotify();
+}
+
 /// O(1) dispatch via a comptime-built table indexed by XCB event type (low 7 bits).
 const dispatch_table = blk: {
     var table = [_]?EventHandler{null} ** constants.Limits.EVENT_DISPATCH_TABLE;
@@ -93,7 +98,7 @@ const dispatch_table = blk: {
     table[xcb.XCB_CLIENT_MESSAGE] = asHandler(window.handleClientMessage);
 
     table[xcb.XCB_KEY_PRESS] = asHandler(input.handleKeyPress);
-    table[xcb.XCB_MAPPING_NOTIFY] = asHandler(input.handleMappingNotify);
+    table[xcb.XCB_MAPPING_NOTIFY] = asHandler(handleMappingNotify);
     table[xcb.XCB_BUTTON_PRESS] = asHandler(input.handleButtonPress);
     table[xcb.XCB_BUTTON_RELEASE] = asHandler(input.handleButtonRelease);
     table[xcb.XCB_MOTION_NOTIFY] = asHandler(input.handleMotionNotify);
@@ -126,9 +131,9 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
     // re-configuration, so any of them triggers re-detection. Extension events
     // sit above the fixed dispatch table and would otherwise be dropped by the
     // bounds guard below.
-    const randr_first = scale.randrFirstEvent();
+    const randr_first = refresh_rate.randrFirstEvent();
     if (randr_first != 0 and idx >= randr_first and idx <= randr_first + 1) {
-        scale.handleRandrNotifyEvent(core.getState().conn);
+        refresh_rate.handleRandrNotifyEvent(core.getState().conn);
         return;
     }
 
@@ -138,78 +143,6 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
     // memory-safety bug — cheap insurance.
     if (idx >= dispatch_table.len) return;
     if (dispatch_table[idx]) |handler| handler(event);
-}
-
-// Signal handling
-
-/// Async-signal-safe handler: writes the signal number as a byte to the pipe.
-fn signalHandler(signo: std.posix.SIG) callconv(.c) void {
-    const byte: u8 = @intCast(@intFromEnum(signo));
-    _ = std.os.linux.write(signal_pipe[1], &[_]u8{byte}, 1);
-}
-
-/// Creates the signal self-pipe and installs handlers for SIGHUP/SIGTERM/SIGINT/SIGCHLD.
-pub fn setupSignalPipe() !void {
-    signal_pipe = try utils.makePipe();
-    utils.setSignalWriteFd(signal_pipe[1]);
-
-    const sa: std.posix.Sigaction = .{
-        .handler = .{ .handler = signalHandler },
-        .mask = std.posix.sigemptyset(),
-        .flags = std.posix.SA.RESTART,
-    };
-
-    // SIGCHLD is reaped in dispatchSignal; the rest control the event loop.
-    inline for (.{ std.posix.SIG.HUP, std.posix.SIG.TERM, std.posix.SIG.INT, std.posix.SIG.CHLD }) |sig|
-        std.posix.sigaction(sig, &sa, null);
-}
-
-/// Closes both ends of the signal pipe.
-pub fn deinitSignalPipe() void {
-    utils.setSignalWriteFd(-1);
-    for (&signal_pipe) |*fd| {
-        if (fd.* == -1) continue;
-        _ = std.os.linux.close(fd.*);
-        fd.* = -1;
-    }
-}
-
-/// Dispatches a single signal byte to the appropriate handler.
-inline fn dispatchSignal(byte: u8) void {
-    switch (@as(std.posix.SIG, @enumFromInt(byte))) {
-        .HUP => utils.reload(),
-        .TERM, .INT => utils.quit(),
-        // SIGCHLD: an intermediate double-fork child has exited.
-        // Reap it with WNOHANG, then immediately drain the spawn pipes so
-        // registerSpawn fires without waiting for the next XCB event batch.
-        .CHLD => {
-            input.reapPendingChildren();
-            input.drainPendingSpawns();
-        },
-        else => {},
-    }
-}
-
-const SIGNAL_DRAIN_BUF = 16; // drain a burst in one syscall rather than one per byte
-
-/// Drains the non-blocking signal pipe and dispatches each signal.
-///
-/// std.os.linux.read returns usize; a kernel error wraps a negative value into
-/// a huge unsigned number an unsigned comparison would never catch. Bitcast to
-/// isize and stop on any non-positive result (error, EOF, or empty).
-fn handleSignalPipe(fd: std.posix.fd_t) void {
-    var buf: [SIGNAL_DRAIN_BUF]u8 = undefined;
-    while (true) {
-        const rc: isize = @bitCast(std.os.linux.read(fd, &buf, buf.len));
-        if (rc <= 0) break; // 0 = EOF on write-end close, negative = error/EAGAIN
-        const n: usize = @intCast(rc);
-        for (buf[0..n]) |byte| {
-            // Wake byte written by utils.reload(): poke the event loop out of
-            // poll, but don't re-dispatch it (see utils.WAKE_BYTE).
-            if (byte == utils.WAKE_BYTE) continue;
-            dispatchSignal(byte);
-        }
-    }
 }
 
 // Keybindings
@@ -340,21 +273,6 @@ fn handleConfigReload() !void {
 
 // Event loop
 
-/// Ticks the cursor blink and drains the clock thread's redraw request on
-/// poll timeout, then flushes to the compositor.
-fn handleTimerEvents(cursor_is_blinking: bool) void {
-    // poll() times out for cursor blink and/or the clock's next whole-second
-    // boundary. The clock thread formats the time string and sets a dirty
-    // flag; bar.updateClock() (below) runs the Pango layout for the clock
-    // segment here on the main thread.
-    if (cursor_is_blinking) {
-        prompt.blinkTick();
-        bar.submitDraw();
-        _ = xcb.xcb_flush(core.getState().conn);
-    }
-    _ = bar.updateClock();
-}
-
 /// Drains pending XCB events for this batch, then runs post-batch housekeeping.
 fn handleXcbEvents() void {
     const conn = core.getState().conn;
@@ -387,17 +305,13 @@ fn handleXcbEvents() void {
     focus.drainTilingOpSettle();
     window.updateWorkspaceBordersIfNeeded();
     bar.updateIfDirty() catch |err| debug.err("Failed to update bar: {}", .{err});
-    // Drain the clock thread's redraw request here too, not only on poll
-    // timeout: a busy main loop that never lets the timeout expire (constant
-    // XCB traffic) would otherwise starve the clock repaint.
-    _ = bar.updateClock();
 
     _ = xcb.xcb_flush(conn);
 }
 
 pub fn run() !void {
     const x_fd: std.posix.fd_t = xcb.xcb_get_file_descriptor(core.getState().conn);
-    const signal_fd: std.posix.fd_t = signal_pipe[0];
+    const signal_fd: std.posix.fd_t = signals.readFd();
 
     var fds = [_]std.posix.pollfd{
         .{ .fd = x_fd, .events = std.posix.POLL.IN, .revents = 0 },
@@ -425,25 +339,28 @@ pub fn run() !void {
         };
 
         if (ready == 0) {
-            handleTimerEvents(cursor_is_blinking);
-            continue;
-        }
-
-        if ((fds[FD_XCB].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
+            if (cursor_is_blinking) {
+                prompt.blinkTick();
+                bar.submitDraw();
+                _ = xcb.xcb_flush(core.getState().conn);
+            }
+        } else if ((fds[FD_XCB].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
             debug.err("X11 connection error, shutting down", .{});
             break;
+        } else {
+            if ((fds[FD_XCB].revents & std.posix.POLL.IN) != 0) handleXcbEvents();
+
+            if ((fds[FD_SIGNAL].revents & std.posix.POLL.IN) != 0)
+                signals.drainAndDispatch(signal_fd);
+
+            // The reload flag is also set directly by the reload_config keybinding
+            // (which writes a wake byte to the pipe, but the byte can be dropped if
+            // the pipe is full). Consume it every iteration so that path can never
+            // be lost — a flag-only request is picked up on the next poll timeout.
+            if (utils.consumeReload())
+                handleConfigReload() catch |err| debug.err("Reload failed: {}", .{err});
         }
 
-        if ((fds[FD_XCB].revents & std.posix.POLL.IN) != 0) handleXcbEvents();
-
-        if ((fds[FD_SIGNAL].revents & std.posix.POLL.IN) != 0)
-            handleSignalPipe(signal_fd);
-
-        // The reload flag is also set directly by the reload_config keybinding
-        // (which writes a wake byte to the pipe, but the byte can be dropped if
-        // the pipe is full). Consume it every iteration so that path can never
-        // be lost — a flag-only request is picked up on the next poll timeout.
-        if (utils.consumeReload())
-            handleConfigReload() catch |err| debug.err("Reload failed: {}", .{err});
+        _ = bar.updateClock();
     }
 }

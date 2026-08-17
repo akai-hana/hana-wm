@@ -49,9 +49,9 @@ pub inline fn info(comptime fmt: []const u8, args: anytype) void {
 ///   StateManager.init(...) catch |e| { debug.logError(e, null); return; };
 pub inline fn logError(e: anyerror, window: ?u32) void {
     if (window) |win| {
-        std.log.err("[error] Failed: {} (window: 0x{x})", .{ e, win });
+        log(std.log.err, "Failed: {} (window: 0x{x})", moduleFromSrc(@src()), .{ e, win });
     } else {
-        std.log.err("[error] Failed: {}", .{e});
+        log(std.log.err, "Failed: {}", moduleFromSrc(@src()), .{e});
     }
 }
 
@@ -63,5 +63,5 @@ pub inline fn logError(e: anyerror, window: ?u32) void {
 /// Truly inconsequential capacity hints (ensureTotalCapacity etc.) may keep
 /// bare `catch {}` — they produce no actionable diagnostic information.
 pub inline fn warnOnErr(e: anyerror, comptime context: []const u8) void {
-    std.log.warn("[warn] Best-effort op failed (" ++ context ++ "): {}", .{e});
+    log(std.log.warn, "Best-effort op failed (" ++ context ++ "): {}", moduleFromSrc(@src()), .{e});
 }
