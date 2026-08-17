@@ -4,27 +4,20 @@
 const std = @import("std");
 
 const core = @import("core");
-const xcb = core.xcb;
 const debug = @import("debug");
 
 const c = @import("render");
 
-// Public types
-
-pub const VisualInfo = struct {
-    visual_id: u32,
-};
-
 /// Falls back to the root visual if no matching depth is found.
-pub fn findVisualByDepth(screen: *core.xcb.xcb_screen_t, depth: u8) VisualInfo {
+pub fn findVisualByDepth(screen: *core.xcb.xcb_screen_t, depth: u8) u32 {
     var di = core.xcb.xcb_screen_allowed_depths_iterator(screen);
     while (di.rem > 0) : (core.xcb.xcb_depth_next(&di)) {
         if (di.data.*.depth != depth) continue;
         const vi = core.xcb.xcb_depth_visuals_iterator(di.data);
         if (vi.rem == 0) continue;
-        return .{ .visual_id = vi.data.*.visual_id };
+        return vi.data.*.visual_id;
     }
-    return .{ .visual_id = screen.root_visual };
+    return screen.root_visual;
 }
 
 // Module-level font cache shared across all DrawContext instances (measurement + render DCs).
@@ -86,30 +79,23 @@ pub const FontState = struct {
 
 // DrawContext
 
-inline fn unpackColorChannel(color: u32, shift: u5) f64 {
-    return @as(f64, @floatFromInt((color >> shift) & 0xFF)) / 255.0;
-}
-
 /// Set the Cairo source color from a packed 0xRRGGBB u32 at full opacity.
 /// Shared by DrawContext.setColor and CarouselPixmap.render.
 inline fn setCairoColor(ctx: *c.cairo_t, color: u32) void {
-    c.cairo_set_source_rgba(
-        ctx,
-        unpackColorChannel(color, 16),
-        unpackColorChannel(color, 8),
-        unpackColorChannel(color, 0),
-        1.0,
-    );
+    const r = @as(f64, @floatFromInt((color >> 16) & 0xFF)) / 255.0;
+    const g = @as(f64, @floatFromInt((color >> 8) & 0xFF)) / 255.0;
+    const b = @as(f64, @floatFromInt(color & 0xFF)) / 255.0;
+    c.cairo_set_source_rgba(ctx, r, g, b, 1.0);
 }
 
 /// Converts Pango units (1/1024 px) to floating-point pixels.
 inline fn pangoToF64(pango_units: c_int) f64 {
-    return @as(f64, @floatFromInt(pango_units)) / @as(f64, @floatFromInt(c.PANGO_SCALE));
+    return @as(f64, @floatFromInt(pango_units)) / c.PANGO_SCALE;
 }
 
 /// Converts a pixel size to Pango units (1/1024 px).
 inline fn pxToPango(px: u16) f64 {
-    return @as(f64, @floatFromInt(px)) * @as(f64, @floatFromInt(c.PANGO_SCALE));
+    return @as(f64, @floatFromInt(px)) * c.PANGO_SCALE;
 }
 
 /// Checks an XCB void-cookie; frees the error and returns GCCreationFailed on failure.
@@ -118,6 +104,29 @@ inline fn checkXcbCookie(conn: *core.xcb.xcb_connection_t, cookie: core.xcb.xcb_
         std.c.free(err);
         return error.GCCreationFailed;
     }
+}
+
+/// Creates an XCB pixmap and returns its id.
+inline fn createXcbPixmap(conn: *core.xcb.xcb_connection_t, depth: u8, drawable: u32, w: u16, h: u16) u32 {
+    const pixmap = core.xcb.xcb_generate_id(conn);
+    _ = core.xcb.xcb_create_pixmap(conn, depth, pixmap, drawable, w, h);
+    return pixmap;
+}
+
+/// Creates a graphics context with checked creation, returning its id.
+inline fn createCheckedGC(conn: *core.xcb.xcb_connection_t, drawable: u32) !u32 {
+    const gc = core.xcb.xcb_generate_id(conn);
+    const cookie = core.xcb.xcb_create_gc_checked(conn, gc, drawable, 0, null);
+    try checkXcbCookie(conn, cookie);
+    return gc;
+}
+
+/// Positions `layout` at `x` on `baseline` (accounting for the layout's own
+/// baseline — font fallback can shift it per-run) and renders it. Shared by the
+/// DrawContext text paths and CarouselPixmap's two copy positions.
+inline fn showAtBaseline(ctx: *c.cairo_t, layout: *c.PangoLayout, x: u16, baseline: u16) void {
+    c.cairo_move_to(ctx, @as(f64, @floatFromInt(x)), @as(f64, @floatFromInt(baseline)) - pangoToF64(c.pango_layout_get_baseline(layout)));
+    c.pango_cairo_show_layout(ctx, layout);
 }
 
 pub const DrawContext = struct {
@@ -147,8 +156,8 @@ pub const DrawContext = struct {
 
     // drawTextSized cache: avoids copying the font description on every
     // indicator-glyph draw when the requested size matches the previous call.
-    cached_sized_desc: ?*c.PangoFontDescription = null,
-    cached_sized_px: u16 = 0,
+    sized_font_desc: ?*c.PangoFontDescription = null,
+    sized_font_px: u16 = 0,
 
     /// Stored for CarouselPixmap — needed to create a Cairo surface with the same visual.
     visual_type: ?*core.xcb.xcb_visualtype_t = null,
@@ -179,8 +188,8 @@ pub const DrawContext = struct {
 
         const depth: u8 = if (is_argb) 32 else core.xcb.XCB_COPY_FROM_PARENT;
 
-        const pixmap = core.xcb.xcb_generate_id(conn);
-        _ = core.xcb.xcb_create_pixmap(conn, depth, pixmap, window, width, height);
+        const pixmap = createXcbPixmap(conn, depth, window, width, height);
+        errdefer _ = core.xcb.xcb_free_pixmap(conn, pixmap);
 
         const surface = c.cairo_xcb_surface_create(
             conn,
@@ -188,10 +197,7 @@ pub const DrawContext = struct {
             visual_type,
             @intCast(width),
             @intCast(height),
-        ) orelse {
-            _ = core.xcb.xcb_free_pixmap(conn, pixmap);
-            return error.CairoSurfaceCreateFailed;
-        };
+        ) orelse return error.CairoSurfaceCreateFailed;
         errdefer c.cairo_surface_destroy(surface);
 
         const ctx = c.cairo_create(surface) orelse return error.CairoCreateFailed;
@@ -223,19 +229,15 @@ pub const DrawContext = struct {
 
         // Fire both GC-create requests before blocking on either reply so both
         // land in the same TCP segment.
-        dc.gc = core.xcb.xcb_generate_id(conn);
-        dc.copy_gc = core.xcb.xcb_generate_id(conn);
-        const gc_cookie = core.xcb.xcb_create_gc_checked(conn, dc.gc, pixmap, 0, null);
-        const copy_gc_cookie = core.xcb.xcb_create_gc_checked(conn, dc.copy_gc, window, 0, null);
-        try checkXcbCookie(conn, gc_cookie);
-        try checkXcbCookie(conn, copy_gc_cookie);
+        dc.gc = try createCheckedGC(conn, pixmap);
+        dc.copy_gc = try createCheckedGC(conn, window);
 
         return dc;
     }
 
     pub fn deinit(self: *DrawContext) void {
         self.font.deinit();
-        if (self.cached_sized_desc) |desc| c.pango_font_description_free(desc);
+        if (self.sized_font_desc) |desc| c.pango_font_description_free(desc);
         if (self.gc != 0) _ = core.xcb.xcb_free_gc(self.conn, self.gc);
         if (self.copy_gc != 0) _ = core.xcb.xcb_free_gc(self.conn, self.copy_gc);
         c.g_object_unref(self.font.pango_layout);
@@ -246,19 +248,13 @@ pub const DrawContext = struct {
         self.font.allocator.destroy(self);
     }
 
-    /// Delegates to FontState.loadFonts.
-    pub fn loadFonts(self: *DrawContext, font_names: []const []const u8) !void {
-        try self.font.loadFonts(font_names);
-        if (font_names.len > 1) debug.info("Loaded {} fonts with fallback support", .{font_names.len});
-    }
-
     inline fn setColor(self: *DrawContext, color: u32) void {
         if (self.last_color == color) return;
         setCairoColor(self.ctx, color);
         self.last_color = color;
     }
 
-    pub inline fn setTransparency(self: *DrawContext, color: u32) u32 {
+    pub inline fn withAlpha(self: *DrawContext, color: u32) u32 {
         if (!self.is_argb) return color;
         return (@as(u32, self.alpha_u8) << 24) | (color & 0x00FFFFFF);
     }
@@ -267,19 +263,11 @@ pub const DrawContext = struct {
         c.pango_layout_set_text(self.font.pango_layout, text.ptr, @intCast(text.len));
     }
 
-    // pango_layout_get_baseline is called unconditionally: font fallback can change the
-    // baseline per-run (e.g. a CJK glyph triggering Noto Sans CJK), so caching it
-    // would silently misalign text in multi-font configurations.
-    inline fn moveToTextBaseline(self: *DrawContext, x: u16, y: u16) void {
-        const baseline = pangoToF64(c.pango_layout_get_baseline(self.font.pango_layout));
-        c.cairo_move_to(self.ctx, @floatFromInt(x), @as(f64, @floatFromInt(y)) - baseline);
-    }
-
     /// Uses XCB rather than Cairo to write straight-alpha pixels (picom expects straight-alpha;
     /// Cairo's XRender backend writes premultiplied). `last_gc_color` skips xcb_change_gc
     /// when the color is unchanged, which is the common case for adjacent same-background segments.
     pub fn fillRect(self: *DrawContext, x: u16, y: u16, width: u16, height: u16, color: u32) void {
-        const packed_color: u32 = self.setTransparency(color);
+        const packed_color: u32 = self.withAlpha(color);
         if (self.last_gc_color != packed_color) {
             _ = core.xcb.xcb_change_gc(self.conn, self.gc, core.xcb.XCB_GC_FOREGROUND, &[_]u32{packed_color});
             self.last_gc_color = packed_color;
@@ -299,14 +287,14 @@ pub const DrawContext = struct {
     pub fn drawTextSized(self: *DrawContext, x: u16, y_top: u16, text: []const u8, size_px: u16, color: u32) !void {
         const desc = self.font.current_font_desc orelse return error.NoFont;
 
-        if (self.cached_sized_desc == null or self.cached_sized_px != size_px) {
-            if (self.cached_sized_desc) |old| c.pango_font_description_free(old);
+        if (self.sized_font_desc == null or self.sized_font_px != size_px) {
+            if (self.sized_font_desc) |old| c.pango_font_description_free(old);
             const temp = c.pango_font_description_copy(desc) orelse return error.PangoDescCopyFailed;
             c.pango_font_description_set_absolute_size(temp, pxToPango(size_px));
-            self.cached_sized_desc = temp;
-            self.cached_sized_px = size_px;
+            self.sized_font_desc = temp;
+            self.sized_font_px = size_px;
         }
-        const sized = self.cached_sized_desc.?;
+        const sized = self.sized_font_desc.?;
 
         c.pango_layout_set_font_description(self.font.pango_layout, sized);
         defer c.pango_layout_set_font_description(self.font.pango_layout, desc);
@@ -324,8 +312,7 @@ pub const DrawContext = struct {
     pub fn drawText(self: *DrawContext, x: u16, y: u16, text: []const u8, color: u32) !void {
         self.setColor(color);
         self.setPangoText(text);
-        self.moveToTextBaseline(x, y);
-        c.pango_cairo_show_layout(self.ctx, self.font.pango_layout);
+        showAtBaseline(self.ctx, self.font.pango_layout, x, y);
     }
 
     /// Resets Pango width/ellipsize to defaults after rendering; subsequent draws unaffected.
@@ -341,13 +328,13 @@ pub const DrawContext = struct {
 
         c.pango_layout_set_width(self.font.pango_layout, @as(i32, max_width) * c.PANGO_SCALE);
         c.pango_layout_set_ellipsize(self.font.pango_layout, c.PangoEllipsizeMode.END);
+        defer {
+            c.pango_layout_set_width(self.font.pango_layout, -1);
+            c.pango_layout_set_ellipsize(self.font.pango_layout, c.PangoEllipsizeMode.NONE);
+        }
 
         self.setColor(color);
-        self.moveToTextBaseline(x, y);
-        c.pango_cairo_show_layout(self.ctx, self.font.pango_layout);
-
-        c.pango_layout_set_width(self.font.pango_layout, -1);
-        c.pango_layout_set_ellipsize(self.font.pango_layout, c.PangoEllipsizeMode.NONE);
+        showAtBaseline(self.ctx, self.font.pango_layout, x, y);
     }
 
     pub fn measureTextWidth(self: *DrawContext, text: []const u8) u16 {
@@ -355,10 +342,6 @@ pub const DrawContext = struct {
         var width: c_int = undefined;
         c.pango_layout_get_pixel_size(self.font.pango_layout, &width, null);
         return @intCast(width);
-    }
-
-    pub fn getMetrics(self: *DrawContext) struct { i16, i16 } {
-        return self.font.getMetrics();
     }
 
     inline fn xcbCopyArea(self: *DrawContext, src_x: u16, dst_x: u16, w: u16) void {
@@ -394,7 +377,7 @@ pub const DrawContext = struct {
     }
 
     pub fn baselineY(self: *DrawContext, bar_height: u16) u16 {
-        const asc, const desc = self.getMetrics();
+        const asc, const desc = self.font.getMetrics();
         const top_pad: i32 = @max(0, @divTrunc(@as(i32, bar_height) - (asc + desc), 2));
         return @intCast(top_pad + asc);
     }
@@ -409,14 +392,10 @@ pub const DrawContext = struct {
         bg: u32,
         fg: u32,
     ) !u16 {
-        self.setPangoText(text);
-        var tw: c_int = undefined;
-        c.pango_layout_get_pixel_size(self.font.pango_layout, &tw, null);
-        const width: u16 = @as(u16, @intCast(tw)) + padding * 2;
+        const width: u16 = self.measureTextWidth(text) + padding * 2;
         self.fillRect(x, 0, width, height, bg);
         self.setColor(fg);
-        self.moveToTextBaseline(x + padding, self.baselineY(height));
-        c.pango_cairo_show_layout(self.ctx, self.font.pango_layout);
+        showAtBaseline(self.ctx, self.font.pango_layout, x + padding, self.baselineY(height));
         return x + width;
     }
 };
@@ -444,13 +423,6 @@ pub const MeasureContext = struct {
         self.font.deinit();
         c.g_object_unref(self.font.pango_layout);
         c.cairo_surface_destroy(self.surface);
-    }
-
-    pub fn loadFonts(self: *MeasureContext, font_names: []const []const u8) !void {
-        return self.font.loadFonts(font_names);
-    }
-    pub fn getMetrics(self: *MeasureContext) struct { i16, i16 } {
-        return self.font.getMetrics();
     }
 };
 
@@ -480,13 +452,10 @@ pub const CarouselPixmap = struct {
     height: u16,
 
     pub fn init(dc: *const DrawContext, pixmap_w: u16) !CarouselPixmap {
-        const pixmap = core.xcb.xcb_generate_id(dc.conn);
-        _ = core.xcb.xcb_create_pixmap(dc.conn, dc.depth, pixmap, dc.offscreen_pixmap, pixmap_w, dc.height);
+        const pixmap = createXcbPixmap(dc.conn, dc.depth, dc.offscreen_pixmap, pixmap_w, dc.height);
         errdefer _ = core.xcb.xcb_free_pixmap(dc.conn, pixmap);
 
-        const gc = core.xcb.xcb_generate_id(dc.conn);
-        const cookie = core.xcb.xcb_create_gc_checked(dc.conn, gc, pixmap, 0, null);
-        try checkXcbCookie(dc.conn, cookie);
+        const gc = try createCheckedGC(dc.conn, pixmap);
         errdefer _ = core.xcb.xcb_free_gc(dc.conn, gc);
 
         const vt = dc.visual_type orelse return error.NoVisualType;
@@ -519,7 +488,7 @@ pub const CarouselPixmap = struct {
         cycle_w: u16,
     ) !void {
         // Fill the entire pixmap with the background colour (XCB, straight-alpha).
-        const packed_bg = dc.setTransparency(bg);
+        const packed_bg = dc.withAlpha(bg);
         _ = core.xcb.xcb_change_gc(self.conn, self.gc, core.xcb.XCB_GC_FOREGROUND, &[_]u32{packed_bg});
         _ = core.xcb.xcb_poly_fill_rectangle(self.conn, self.pixmap, self.gc, 1, &core.xcb.xcb_rectangle_t{ .x = 0, .y = 0, .width = self.pixmap_w, .height = self.height });
 
@@ -534,15 +503,10 @@ pub const CarouselPixmap = struct {
 
         setCairoColor(ctx, fg);
 
-        const text_y = @as(f64, @floatFromInt(baseline)) - pangoToF64(c.pango_layout_get_baseline(layout));
-
-        // Copy A
-        c.cairo_move_to(ctx, @as(f64, @floatFromInt(left_pad)), text_y);
-        c.pango_cairo_show_layout(ctx, layout);
-
-        // Copy B — one cycle_w to the right; same layout, different position.
-        c.cairo_move_to(ctx, @as(f64, @floatFromInt(left_pad + cycle_w)), text_y);
-        c.pango_cairo_show_layout(ctx, layout);
+        // Copy A at left_pad, copy B one cycle_w to the right; same layout,
+        // two positions. showAtBaseline recomputes the layout baseline per call
+        // (font fallback can shift it per-run), matching the DrawContext paths.
+        for ([_]u16{ left_pad, left_pad + cycle_w }) |x| showAtBaseline(ctx, layout, x, baseline);
 
         c.cairo_surface_flush(self.surface);
     }
@@ -611,11 +575,6 @@ fn resolveVisualType(
     return error.NoVisuals;
 }
 
-inline fn appendFontStyleToken(result: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, token: []const u8) !void {
-    try result.append(allocator, ' ');
-    try result.appendSlice(allocator, token);
-}
-
 /// Returns the value of a trailing `key=value` field inside an Xft font token,
 /// or null when the token doesn't start with `key`.
 inline fn styleField(part: []const u8, comptime key: []const u8) ?[]const u8 {
@@ -651,16 +610,24 @@ fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const 
         else if (styleField(part, "slant=")) |v| slant = v;
     }
 
-    if (slant) |s| if (std.mem.eql(u8, s, "italic") or std.mem.eql(u8, s, "oblique"))
-        try appendFontStyleToken(&result, allocator, "Italic");
+    if (slant) |s| if (std.mem.eql(u8, s, "italic") or std.mem.eql(u8, s, "oblique")) {
+        try result.append(allocator, ' ');
+        try result.appendSlice(allocator, "Italic");
+    };
 
     if (weight) |w| {
         const token: ?[]const u8 =
             if (std.mem.eql(u8, w, "bold")) "Bold" else if (std.mem.eql(u8, w, "light")) "Light" else null;
-        if (token) |t| try appendFontStyleToken(&result, allocator, t);
+        if (token) |t| {
+            try result.append(allocator, ' ');
+            try result.appendSlice(allocator, t);
+        }
     }
 
-    if (size) |s| try appendFontStyleToken(&result, allocator, s);
+    if (size) |s| {
+        try result.append(allocator, ' ');
+        try result.appendSlice(allocator, s);
+    }
 
     const converted = try result.toOwnedSlice(allocator);
     const owned_key = try allocator.dupe(u8, xft_name);

@@ -6,7 +6,7 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
-const scale = @import("scale");
+const refresh_rate = @import("refresh_rate");
 const debug = @import("debug");
 
 const constants = @import("constants");
@@ -202,6 +202,31 @@ fn extractPropertyString(
     return try allocator.dupe(u8, ptr[0..@intCast(len)]);
 }
 
+const SortedWindowInfos = struct {
+    infos: []WindowInfo,
+    owned_titles: *[max_visible_windows]?[]const u8,
+};
+
+fn gatherAndSortWindowInfos(
+    ctx: TitleRenderContext,
+    snapshot: TitleSnapshot,
+    allocator: std.mem.Allocator,
+    windows: []const u32,
+    win_count: usize,
+) !?SortedWindowInfos {
+    var window_info_buf: [max_visible_windows]WindowInfo = undefined;
+    var owned_titles: [max_visible_windows]?[]const u8 = undefined;
+    @memset(owned_titles[0..win_count], null);
+    const info_count = try gatherWindowInfos(ctx, snapshot, allocator, windows[0..win_count], &window_info_buf, &owned_titles);
+    if (info_count == 0) {
+        for (owned_titles[0..win_count]) |t| if (t) |s| allocator.free(s);
+        return null;
+    }
+    const window_infos = window_info_buf[0..info_count];
+    std.mem.sort(WindowInfo, window_infos, {}, compareWindows);
+    return .{ .infos = window_infos, .owned_titles = &owned_titles };
+}
+
 /// Shared body for draw() and drawCached(). `ctx.cached_title` is non-null
 /// only on the draw() path, so this works unmodified for both callers.
 fn drawInner(
@@ -210,7 +235,8 @@ fn drawInner(
     allocator: std.mem.Allocator,
     title_invalidated: bool,
 ) !u16 {
-    scale.ensureRefreshRateDetected(ctx.conn);
+    refresh_rate.ensureRefreshRateDetected(ctx.conn);
+    std.debug.assert((ctx.cached_title != null) == (ctx.cached_title_window != null));
     const window_count = snapshot.current_ws_wins.len;
     if (emptyWorkspace(ctx, window_count)) |end_x| return end_x;
 
@@ -301,20 +327,10 @@ pub fn hitTest(
     if (ctx.width == 0) return null;
     const win_count = @min(windows.len, max_visible_windows);
 
-    // Same outlive requirement as drawSegmentedTitles: a WindowInfo's
-    // `.title` may point into `owned_titles`' memory.
-    var window_info_buf: [max_visible_windows]WindowInfo = undefined;
-    var owned_titles: [max_visible_windows]?[]const u8 = undefined;
-    @memset(owned_titles[0..win_count], null);
-    defer for (owned_titles[0..win_count]) |t| if (t) |s| allocator.free(s);
+    const sorted = (try gatherAndSortWindowInfos(ctx, snapshot, allocator, windows, win_count)) orelse return null;
+    defer for (sorted.owned_titles[0..win_count]) |t| if (t) |s| allocator.free(s);
 
-    const info_count = try gatherWindowInfos(ctx, snapshot, allocator, windows[0..win_count], &window_info_buf, &owned_titles);
-    if (info_count == 0) return null;
-
-    // Same sort as drawSegmentedTitles, so segment index i corresponds to the
-    // same on-screen position: [i*W/n, (i+1)*W/n).
-    const window_infos = window_info_buf[0..info_count];
-    std.mem.sort(WindowInfo, window_infos, {}, compareWindows);
+    const window_infos = sorted.infos;
 
     const n: u32 = @intCast(window_infos.len);
     // Inverse of the pixel-perfect tiling formula drawSegmentedTitles uses
@@ -471,11 +487,9 @@ const WindowDataBatch = struct {
             owned_titles[i] = null;
             self.needs_fallback[i] = false;
             if (focused_idx == i) continue;
-            got: {
-                if (self.net_atom != null) {
-                    owned_titles[i] = collectPropertyReply(self.conn, self.net_wm_cookies[i], self.allocator);
-                    if (owned_titles[i] != null) break :got;
-                }
+            if (self.net_atom != null)
+                owned_titles[i] = collectPropertyReply(self.conn, self.net_wm_cookies[i], self.allocator);
+            if (owned_titles[i] == null) {
                 self.fallback_cookies[i] = xcb.xcb_get_property(self.conn, 0, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, 0, 8192);
                 self.needs_fallback[i] = true;
             }
@@ -607,13 +621,13 @@ fn drawSingleWindow(
 
     const single_win = snapshot.current_ws_wins[0];
     const is_minimized = snapshot.minimized_set.contains(single_win);
-    // `has_focus` is true when any window on this workspace is focused,
+    // `workspace_has_focus` is true when any window on this workspace is focused,
     // meaning the segment gets the accent colour rather than plain bg.
-    const has_focus = snapshot.focused_window != null;
+    const workspace_has_focus = snapshot.focused_window != null;
 
     const accent = if (is_minimized)
         ctx.config.title_minimized_accent
-    else if (has_focus)
+    else if (workspace_has_focus)
         ctx.config.title_accent_color
     else
         ctx.config.bg;
@@ -652,7 +666,7 @@ fn drawSingleWindow(
         }
     }
 
-    const fg = if (has_focus) ctx.config.selected_fg else ctx.config.fg;
+    const fg = if (workspace_has_focus) ctx.config.selected_fg else ctx.config.fg;
     try carousel.drawScrollingTitle(
         ctx.dc,
         baseline_y,
@@ -735,8 +749,6 @@ fn drawSegmentedTitles(
     title_invalidated: bool,
 ) !void {
     const windows = snapshot.current_ws_wins;
-    if (windows.len == 0) return;
-
     if (windows.len > max_visible_windows)
         debug.warn("Workspace has {} windows; only the first {} are rendered in split-view", .{ windows.len, max_visible_windows });
     const win_count = @min(windows.len, max_visible_windows);
@@ -757,29 +769,10 @@ fn drawSegmentedTitles(
     // WindowInfo's `.title` may point into `owned_titles'` memory — so they
     // live here, while gatherWindowInfos' own scratch (XCB cookies, bool
     // flags, several KB) is reclaimed when it returns.
-    var window_info_buf: [max_visible_windows]WindowInfo = undefined;
-    // Only the first `win_count` slots are read, so only those are
-    // initialized — previously this zero-filled all `max_visible_windows`
-    // slots every call regardless of how many windows were visible.
-    var owned_titles: [max_visible_windows]?[]const u8 = undefined;
-    @memset(owned_titles[0..win_count], null);
-    defer for (owned_titles[0..win_count]) |t| if (t) |s| allocator.free(s);
+    const sorted = (try gatherAndSortWindowInfos(ctx, snapshot, allocator, windows, win_count)) orelse return;
+    defer for (sorted.owned_titles[0..win_count]) |t| if (t) |s| allocator.free(s);
 
-    const info_count = try gatherWindowInfos(
-        ctx,
-        snapshot,
-        allocator,
-        windows[0..win_count],
-        &window_info_buf,
-        &owned_titles,
-    );
-    if (info_count == 0) return;
-
-    const window_infos = window_info_buf[0..info_count];
-    // void context: sort order is purely spatial + window ID, never dependent
-    // on focus (see `compareWindows`).  This prevents segment reordering on
-    // focus changes, which would be visually jarring.
-    std.mem.sort(WindowInfo, window_infos, {}, compareWindows);
+    const window_infos = sorted.infos;
 
     const window_count: u32 = @intCast(window_infos.len);
     const baseline_y = ctx.dc.baselineY(ctx.height);

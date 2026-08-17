@@ -26,16 +26,16 @@ pub var running = std.atomic.Value(bool).init(true);
 /// Consumed by `consumeReload` in the main event loop.
 var should_reload = std.atomic.Value(bool).init(false);
 
-/// Write end of the signal self-pipe (owned by events.zig), registered via
+/// Write end of the signal self-pipe (owned by signals.zig), registered via
 /// `setSignalWriteFd`. The `reload_config` keybinding has no signal byte, so
 /// `reload()` writes a wake byte here to poke the event loop out of poll
 /// immediately instead of waiting for an unrelated signal.
 var signal_write_fd: std.posix.fd_t = -1;
 
 /// Byte `reload()` writes to the signal pipe to wake the event loop. Must not
-/// be a real signal number: `handleSignalPipe` dispatches every byte it reads,
-/// and re-dispatching the wake byte as SIGHUP would make the drain loop call
-/// `reload()` again — writing another wake byte and spinning forever.
+/// be a real signal number: `signals.drainAndDispatch` dispatches every byte
+/// it reads, and re-dispatching the wake byte as SIGHUP would make the drain
+/// loop call `reload()` again — writing another wake byte and spinning forever.
 pub const WAKE_BYTE: u8 = 0xff;
 
 /// Registers the write end of the signal self-pipe so `reload()` can wake the
@@ -80,7 +80,19 @@ pub const Rect = struct {
     pub inline fn fromXcb(geom: *const xcb.xcb_get_geometry_reply_t) Rect {
         return .{ .x = geom.x, .y = geom.y, .width = geom.width, .height = geom.height };
     }
+
+    pub inline fn eql(self: Rect, other: Rect) bool {
+        return self.x == other.x and self.y == other.y and self.width == other.width and self.height == other.height;
+    }
 };
+
+/// True when a get_geometry reply reports the window parked at (or past) the
+/// off-screen sentinel position written by `pushWindowOffscreen`. Shared by
+/// every call site that live-fetches geometry and must not cache that
+/// parking spot as if it were the window's real, restorable position.
+pub inline fn isOffscreenGeomReply(r: *const xcb.xcb_get_geometry_reply_t) bool {
+    return r.x < constants.OFFSCREEN_SENTINEL_MIN or r.y < constants.OFFSCREEN_SENTINEL_MIN;
+}
 
 /// Gap and border widths applied around a tiled window.
 pub const Margins = struct {
@@ -187,6 +199,13 @@ pub inline fn getAtomCached(comptime name: []const u8) error{AtomCacheNotInitial
     comptime if (!@hasField(AtomCache, name)) @compileError("atom not in cache: " ++ name);
     const cache = atom_cache orelse return error.AtomCacheNotInitialized;
     return @field(cache, name);
+}
+
+/// Like getAtomCached but returns 0 (the X11 "no atom" sentinel) instead of
+/// erroring when the cache isn't ready. Callers guard `if (atom != 0)` before
+/// issuing an X request.
+pub inline fn getAtomOrZero(comptime name: []const u8) u32 {
+    return getAtomCached(name) catch 0;
 }
 
 // EWMH root window advertisement
@@ -314,33 +333,30 @@ inline fn clockTs(clock_id: std.os.linux.clockid_t) std.os.linux.timespec {
     return ts;
 }
 
-/// Returns the current monotonic clock time in nanoseconds.
-pub fn monotonicNs() u64 {
-    const ts = clockTs(.MONOTONIC);
+/// Returns the current clock time in nanoseconds for the given clock id.
+pub fn clockNs(clock_id: std.os.linux.clockid_t) u64 {
+    const ts = clockTs(clock_id);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 
+/// Returns the current monotonic clock time in nanoseconds.
+pub inline fn monotonicNs() u64 {
+    return clockNs(.MONOTONIC);
+}
+
 /// Returns the current realtime clock time in nanoseconds since the Unix epoch.
-pub fn realtimeNs() u64 {
-    const ts = clockTs(.REALTIME);
-    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+pub inline fn realtimeNs() u64 {
+    return clockNs(.REALTIME);
 }
 
 // XCB grab helpers
 
-/// Moves `win` to the offscreen holding area (outside visible display bounds).
-/// Uses only XCB_CONFIG_WINDOW_X.
 pub inline fn pushWindowOffscreen(conn: *xcb.xcb_connection_t, win: u32) void {
     _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
 }
 
 /// Like `pushWindowOffscreen`, but also drops `win` to the bottom of the
-/// global stacking order in the same request. Nothing in this codebase ever
-/// lowers a window otherwise (only XCB_STACK_MODE_ABOVE is used, by raises),
-/// so a window that got raised once — e.g. by a layout that isn't supposed
-/// to raise during a background retile — would otherwise stay first in
-/// stacking order forever, regardless of how far offscreen its X coordinate
-/// is parked. Use this instead of `pushWindowOffscreen` for any window whose
+/// global stacking order in the same request. Use this for any window whose
 /// hidden state must be defended even if something upstream raised it.
 pub inline fn pushWindowOffscreenAndLower(conn: *xcb.xcb_connection_t, win: u32) void {
     _ = xcb.xcb_configure_window(
@@ -392,9 +408,15 @@ pub inline fn ungrabAndFlush(conn: *xcb.xcb_connection_t) void {
     _ = xcb.xcb_flush(conn);
 }
 
+/// Set a window's border pixel color with a single change-window-attributes
+/// request.
+pub inline fn setBorderPixel(conn: *xcb.xcb_connection_t, win: u32, pixel: u32) void {
+    _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{pixel});
+}
+
 /// Creates a pipe with O_NONBLOCK | O_CLOEXEC on both ends via pipe2(2).
 ///
-/// Shared by input.zig (double-fork spawn plumbing) and events.zig (signal
+/// Shared by input.zig (double-fork spawn plumbing) and signals.zig (signal
 /// self-pipe), avoiding byte-equivalent copies of this in each.
 pub fn makePipe() ![2]std.posix.fd_t {
     var fds: [2]std.posix.fd_t = undefined;
@@ -456,12 +478,11 @@ pub const Condition = struct {
     /// Uses a CLOCK_MONOTONIC absolute deadline — requires that `initMonotonic()`
     /// was called on this instance at startup.
     pub fn timedWait(c: *Condition, m: *Mutex, timeout_ns: u64) error{Timeout}!void {
-        var ts: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
-        // Saturating add prevents overflow when timeout_ns is near u64 max.
-        const new_nsec = @as(u64, @intCast(ts.nsec)) +| timeout_ns;
-        ts.sec += @intCast(new_nsec / std.time.ns_per_s);
-        ts.nsec = @intCast(new_nsec % std.time.ns_per_s);
+        const deadline_ns = monotonicNs() +| timeout_ns;
+        var ts: std.os.linux.timespec = .{
+            .sec = @intCast(deadline_ns / std.time.ns_per_s),
+            .nsec = @intCast(deadline_ns % std.time.ns_per_s),
+        };
         const rc = std.c.pthread_cond_timedwait(&c.inner, &m.inner, @ptrCast(&ts));
         if (rc == std.posix.E.TIMEDOUT) return error.Timeout;
     }
@@ -482,9 +503,7 @@ pub const CondThread = struct {
 
     pub fn start(self: *CondThread, comptime f: anytype, args: anytype) !void {
         self.cond.initMonotonic();
-        self.mutex.lock();
         self.quit = false;
-        self.mutex.unlock();
         self.thread = try std.Thread.spawn(.{}, f, args);
     }
 
@@ -536,6 +555,22 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
                 if (match(context, item)) return i;
             }
             return null;
+        }
+
+        /// Returns the index of the first item whose `.id` field equals `id`,
+        /// or null. For element types keyed by a single `id` field.
+        pub fn indexOfById(self: *const Self, id: u32) ?usize {
+            return self.indexOf(id, struct {
+                fn match(i: u32, item: T) bool { return item.id == i; }
+            }.match);
+        }
+
+        /// Returns the index of the first item equal to `scalar`, or null.
+        /// For scalar element types (e.g. u32 window-ID lists).
+        pub fn indexOfScalar(self: *const Self, scalar: T) ?usize {
+            return self.indexOf(scalar, struct {
+                fn match(s: T, item: T) bool { return item == s; }
+            }.match);
         }
 
         /// Appends `item` if there's room. Returns false and leaves the

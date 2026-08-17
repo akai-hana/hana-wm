@@ -7,6 +7,7 @@ const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
 const events = @import("events");
+const signals = @import("signals");
 const config = @import("config");
 const constants = @import("constants");
 const scale = @import("scale");
@@ -45,8 +46,8 @@ pub fn main() !void {
 
     utils.advertiseEwmhSupport(x.conn, x.screen, x.root);
 
-    try events.setupSignalPipe();
-    defer events.deinitSignalPipe();
+    try signals.setup();
+    defer signals.deinit();
 
     events.grabKeybindings();
     try window.init(alloc);

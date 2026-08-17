@@ -4,7 +4,7 @@
 const std = @import("std");
 const utils = @import("utils");
 
-const scale = @import("scale");
+const refresh_rate = @import("refresh_rate");
 const drawing = @import("drawing");
 const bar = @import("bar");
 const debug = @import("debug");
@@ -137,7 +137,7 @@ pub fn setRefreshRateOverride(hz: f64) void {
 /// timedWait that follows.
 pub fn wakeIntervalNs() u64 {
     const rate_override = scroll_config.rate_override.load(.monotonic);
-    const hz: f64 = if (rate_override > 0.0) rate_override else scale.getDetectedRateHz();
+    const hz: f64 = if (rate_override > 0.0) rate_override else refresh_rate.getDetectedRateHz();
     return @intFromFloat(1_000_000_000.0 / hz);
 }
 
@@ -177,26 +177,29 @@ pub fn deinitCarouselLocked() void {
     focus_signal.is_invalidated.store(false, .monotonic);
 }
 
+/// Free a single carousel slot: deinit its pixmap, null the slot, and clear
+/// the `active` mirror when nothing remains live. Caller must hold draw_mutex
+/// (or the carousel thread must already be stopped).
+fn deinitSlot(slot: *?CarouselEntry) void {
+    if (slot.*) |*e| {
+        e.cp.deinit();
+        slot.* = null;
+        if (render.single == null and render.seg == null) render.active.store(false, .monotonic);
+    }
+}
+
 /// Free the single-window carousel pixmap.
 /// Caller must either hold draw_mutex or call after the carousel thread has
 /// stopped (see deinitCarousel).
 pub fn deinitSingleCarousel() void {
-    if (render.single) |*e| {
-        e.cp.deinit();
-        render.single = null;
-        if (render.seg == null) render.active.store(false, .monotonic);
-    }
+    deinitSlot(&render.single);
 }
 
 /// Free the segmented carousel pixmap.
 /// Caller must either hold draw_mutex or call after the carousel thread has
 /// stopped (see deinitCarousel).
 pub fn deinitSegmentedCarousel() void {
-    if (render.seg) |*e| {
-        e.cp.deinit();
-        render.seg = null;
-        if (render.single == null) render.active.store(false, .monotonic);
-    }
+    deinitSlot(&render.seg);
     focus_signal.seg_window.store(0, .release);
 }
 
@@ -226,10 +229,7 @@ pub fn notifyFocusChanged(new_window: ?u32) void {
 //   startThread() — call from bar.init() after the bar window exists.
 //   stopThread()  — call before bar teardown (deinit and reload).
 
-var carousel_mutex: utils.Mutex = .{};
-var carousel_cond: utils.Condition = .{};
-var carousel_quit: bool = false;
-var carousel_thread: ?std.Thread = null;
+var carousel_thread: utils.CondThread = .{};
 
 /// Sleep duration while no carousel is live. With no title scrolling, a
 /// once-per-refresh wakeup is pure overhead; commitCarouselFrame signals the
@@ -239,13 +239,7 @@ const idle_interval_ns: u64 = 250 * std.time.ns_per_ms;
 
 /// Spawns the dedicated carousel-tick thread. Safe to call after stopThread().
 pub fn startThread() void {
-    // timedWait uses a CLOCK_MONOTONIC deadline; safe to re-init on every
-    // call (init/reload) since the thread is never running while this fires.
-    carousel_cond.initMonotonic();
-    carousel_mutex.lock();
-    carousel_quit = false;
-    carousel_mutex.unlock();
-    carousel_thread = std.Thread.spawn(.{}, runCarouselThread, .{}) catch |e| {
+    carousel_thread.start(runCarouselThread, .{&carousel_thread}) catch |e| {
         debug.err("Carousel thread spawn failed: {s}", .{@errorName(e)});
         return;
     };
@@ -256,34 +250,27 @@ pub fn startThread() void {
 /// waiting for a full sleep cycle, since stopThread signals the condition
 /// the thread is sleeping on.
 pub fn stopThread() void {
-    carousel_mutex.lock();
-    carousel_quit = true;
-    carousel_cond.signal();
-    carousel_mutex.unlock();
-    if (carousel_thread) |t| {
-        t.join();
-        carousel_thread = null;
-    }
+    carousel_thread.stop();
 }
 
-fn runCarouselThread() void {
+fn runCarouselThread(t: *utils.CondThread) void {
     while (true) {
-        carousel_mutex.lock();
-        const quit = carousel_quit;
-        carousel_mutex.unlock();
+        t.mutex.lock();
+        const quit = t.quit;
+        t.mutex.unlock();
         if (quit) return;
 
         if (isCarouselActive()) bar.tickCarousel();
 
-        carousel_mutex.lock();
-        defer carousel_mutex.unlock();
-        if (carousel_quit) return;
+        t.mutex.lock();
+        defer t.mutex.unlock();
+        if (t.quit) return;
         // Sleep one refresh interval while scrolling, or a long idle interval
-        // when nothing is active. The check runs under carousel_mutex — the
-        // same mutex commitCarouselFrame signals under — so the activation
-        // signal can't be lost between check and wait.
+        // when nothing is active. The check runs under t.mutex — the same
+        // mutex commitCarouselFrame signals under — so the activation signal
+        // can't be lost between check and wait.
         const interval = if (isCarouselActive()) wakeIntervalNs() else idle_interval_ns;
-        carousel_cond.timedWait(&carousel_mutex, interval) catch {};
+        t.cond.timedWait(&t.mutex, interval) catch {};
         // Timeout is the expected outcome every iteration; a signal (from
         // stopThread or commitCarouselFrame) is handled by the re-checks at the
         // top of the loop.
@@ -291,6 +278,20 @@ fn runCarouselThread() void {
 }
 
 // Public API — hot-path carousel tick
+
+/// Advance the scroll offset by the elapsed time since the last blit and copy
+/// the new frame to the bar's offscreen pixmap. Returns false when the offset
+/// didn't advance (a sub-pixel carry frame): the source content is identical,
+/// so the last frame is already correct and the copy+flush can be skipped.
+/// The accumulator still carries the remainder, so motion resumes where it
+/// left off.
+inline fn advanceAndBlit(e: *CarouselEntry, dc: *drawing.DrawContext) bool {
+    const prev_off = e.pixel_offset;
+    const off = advanceCarouselOffset(e, utils.monotonicNs());
+    if (off == prev_off) return false;
+    blitOneFrame(e, dc, e.geom);
+    return true;
+}
 
 /// Fast per-tick single-window carousel blit.
 ///
@@ -311,14 +312,7 @@ pub fn drawCarouselTick(
     if (seg_x != e.geom.seg_x or seg_w != e.geom.seg_w or bg != e.last_bg)
         return false;
 
-    // Skip the blit when the offset didn't advance (sub-pixel carry frames):
-    // source content is identical, so the last frame is already correct. This
-    // avoids ~25% of the copy+flush work at typical speeds. The accumulator
-    // still carries the remainder, so motion resumes where it left off.
-    const prev_off = e.pixel_offset;
-    const off = advanceCarouselOffset(e, utils.monotonicNs());
-    if (off == prev_off) return true;
-    blitOneFrame(e, dc, e.geom);
+    _ = advanceAndBlit(e, dc);
     return true;
 }
 
@@ -334,15 +328,20 @@ pub fn drawSegCarouselTickAuto(dc: *drawing.DrawContext, accent: u32) bool {
     // drawCached → drawSegmentedTitles, which redraws ALL segments with the
     // correct accent colours (old focused → unfocused, new focused → focused).
     if (focus_signal.is_invalidated.load(.acquire)) return false;
-    const prev_off = e.pixel_offset;
-    const off = advanceCarouselOffset(e, utils.monotonicNs());
-    // See drawCarouselTick: identical-offset frames need no blit or flush.
-    if (off == prev_off) return true;
-    blitOneFrame(e, dc, e.geom);
+    _ = advanceAndBlit(e, dc);
     return true;
 }
 
 // Public API — single-window title rendering
+
+/// Recover text_w from the live carousel entry when the title hasn't changed,
+/// avoiding a Pango measurement on the common steady-state path.
+fn recoverTextWidth(dc: *drawing.DrawContext, text: []const u8, window: ?u32, title_invalidated: bool) u16 {
+    if (!title_invalidated) {
+        if (render.single) |e| if (e.window == window) return e.cycle_w - carousel_gap_px;
+    }
+    return dc.measureTextWidth(text);
+}
 
 /// Render `text` into the segment described by `geom`.
 ///
@@ -364,12 +363,7 @@ pub fn drawScrollingTitle(
     window: ?u32,
     title_invalidated: bool,
 ) !void {
-    // Recover text_w from the live entry when the title hasn't changed,
-    // avoiding a Pango measurement on the common steady-state path.
-    const text_w: u16 = if (!title_invalidated) blk: {
-        if (render.single) |e| if (e.window == window) break :blk e.cycle_w - carousel_gap_px;
-        break :blk dc.measureTextWidth(text);
-    } else dc.measureTextWidth(text);
+    const text_w: u16 = recoverTextWidth(dc, text, window, title_invalidated);
 
     if (text_w <= geom.avail_w) {
         deinitSingleCarousel();
@@ -464,13 +458,13 @@ fn blitOneFrame(e: *CarouselEntry, dc: *drawing.DrawContext, geom: SegmentGeomet
 /// the idle interval. Call while holding draw_mutex; safe before startThread().
 inline fn publishActive() void {
     render.active.store(true, .release);
-    if (carousel_thread != null) {
+    if (carousel_thread.thread != null) {
         // Held only around the signal, matching the thread's activity check
         // under carousel_mutex so the wakeup cannot be lost (see
         // runCarouselThread).
-        carousel_mutex.lock();
-        carousel_cond.signal();
-        carousel_mutex.unlock();
+        carousel_thread.mutex.lock();
+        carousel_thread.cond.signal();
+        carousel_thread.mutex.unlock();
     }
 }
 
@@ -512,7 +506,6 @@ fn commitCarouselFrame(
         slot.* = new_entry;
         publishActive();
         const e = &slot.*.?;
-        _ = advanceCarouselOffset(e, e.last_ns);
         blitOneFrame(e, dc, frame.geom);
         return true;
     }

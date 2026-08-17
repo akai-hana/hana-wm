@@ -110,20 +110,15 @@ pub const KeybindResolver = struct {
     /// from `build` so it can be exercised without a live XkbState/X
     /// connection.
     pub fn rebuildDispatchMap(self: *KeybindResolver, keybindings: []Keybind, allocator: std.mem.Allocator) void {
-        var seen = std.AutoHashMap(u64, usize).init(allocator);
-        defer seen.deinit();
+        self.map.clearRetainingCapacity();
         for (keybindings, 0..) |*kb, i| {
             const key = dispatchKey(kb.modifiers, kb.keysym);
-            if (seen.get(key)) |first| {
-                debug.warn("Keybinding conflict: #{} and #{} share mods=0x{x:0>4} keysym=0x{x} — second wins", .{ first + 1, i + 1, kb.modifiers, kb.keysym });
-            } else {
-                seen.put(key, i) catch |e| debug.warnOnErr(e, "keybind dedup");
+            if (self.map.get(key)) |_| {
+                const first_idx = for (keybindings[0..i], 0..) |other, j| {
+                    if (dispatchKey(other.modifiers, other.keysym) == key) break j;
+                } else unreachable;
+                debug.warn("Keybinding conflict: #{} and #{} share mods=0x{x:0>4} keysym=0x{x} — second wins", .{ first_idx + 1, i + 1, kb.modifiers, kb.keysym });
             }
-        }
-
-        self.map.clearRetainingCapacity();
-        for (keybindings) |*kb| {
-            const key = dispatchKey(kb.modifiers, kb.keysym);
             self.map.put(allocator, key, &kb.action) catch |e| debug.warnOnErr(e, "keybind map build");
         }
     }
@@ -267,6 +262,15 @@ pub const LayoutVariantOverride = union(enum) {
     grid: GridVariant,
 };
 
+/// Single source of truth mapping a variant-owning layout's config name to
+/// its variant enum type, the `LayoutVariantOverride` tag, and the field on
+/// `TilingConfig` that stores the parsed value.
+pub const VARIANT_LAYOUTS = [_]struct { name: []const u8, variant: type, tag: []const u8, field: []const u8 }{
+    .{ .name = "master-stack", .variant = MasterVariant, .tag = "master", .field = "master_variant" },
+    .{ .name = "monocle", .variant = MonocleVariant, .tag = "monocle", .field = "monocle_variant" },
+    .{ .name = "grid", .variant = GridVariant, .tag = "grid", .field = "grid_variant" },
+};
+
 /// Per-workspace startup layout assignment, overriding the global default.
 /// variant is null -> use the per-layout section default.
 pub const WorkspaceLayoutOverride = struct {
@@ -401,19 +405,20 @@ pub const BarLayout = struct {
     }
 };
 
-/// Free every owned string in `list`, then deinit the list itself.
-/// Extracted to avoid repeating the same two-step pattern for every
-/// `ArrayList([]const u8)` field in `BarConfig.deinit`.
-fn freeStringList(list: *std.ArrayList([]const u8), allocator: std.mem.Allocator) void {
-    for (list.items) |s| allocator.free(s);
-    list.deinit(allocator);
-}
+/// Type-level defaults for optional string fields in BarConfig.
+/// When a field is `null`, the corresponding default is used at read time.
+pub const DEFAULT_CLOCK_FORMAT: []const u8 = "%Y-%m-%d %H:%M:%S";
+pub const DEFAULT_DRUN_PROMPT: []const u8 = "run: ";
+pub const DEFAULT_INDICATOR_FOCUSED: []const u8 = "■";
+pub const DEFAULT_INDICATOR_UNFOCUSED: []const u8 = "□";
 
-/// Sentinel for Config-owned string fields whose defaults are string
-/// literals. getDefaultConfig replaces each with a heap copy; Config.deinit
-/// compares pointers against this so a partially-built Config (errdefer path)
-/// frees only what is genuinely heap-owned — never a string literal.
-const OWNED_STR_SENTINEL: []const u8 = "";
+/// Frees every owned string in `list`, then either deinits or clears the
+/// list depending on `retain_capacity`. Shared by `BarConfig.deinit`
+/// (full teardown) and config reload (reuse backing storage).
+pub inline fn freeStrings(list: *std.ArrayList([]const u8), allocator: std.mem.Allocator, retain_capacity: bool) void {
+    for (list.items) |s| allocator.free(s);
+    if (retain_capacity) list.clearRetainingCapacity() else list.deinit(allocator);
+}
 
 pub const BarConfig = struct {
     enabled: bool = true,
@@ -452,17 +457,17 @@ pub const BarConfig = struct {
 
     indicator_location: IndicatorLocation = .up_left,
     indicator_padding: f32 = 0.1,
-    indicator_focused: []const u8 = OWNED_STR_SENTINEL,
-    indicator_unfocused: []const u8 = OWNED_STR_SENTINEL,
+    indicator_focused: ?[]const u8 = null,
+    indicator_unfocused: ?[]const u8 = null,
     indicator_color: ?Color = null,
 
-    clock_format: []const u8 = OWNED_STR_SENTINEL,
+    clock_format: ?[]const u8 = null,
 
     // drun segment colors and prompt; all nullable, falling back to bar-wide defaults.
     drun_bg: ?Color = null, // Background; falls back to bg
     drun_fg: ?Color = null, // Typed text color; falls back to fg
     drun_prompt_color: ?Color = null, // Prompt text color; falls back to accent_color
-    drun_prompt: []const u8 = OWNED_STR_SENTINEL, // Prefix rendered left of the text input cursor
+    drun_prompt: ?[]const u8 = null, // Prefix rendered left of the text input cursor
 
     layout: std.ArrayList(BarLayout) = .empty,
 
@@ -479,10 +484,14 @@ pub const BarConfig = struct {
     carousel_refresh_rate: u16 = 0,
 
     pub fn deinit(self: *BarConfig, allocator: std.mem.Allocator) void {
-        freeStringList(&self.workspace_icons, allocator);
-        freeStringList(&self.fonts, allocator);
+        freeStrings(&self.workspace_icons, allocator, false);
+        freeStrings(&self.fonts, allocator, false);
         for (self.layout.items) |*item| item.deinit(allocator);
         self.layout.deinit(allocator);
+        if (self.clock_format) |s| allocator.free(s);
+        if (self.drun_prompt) |s| allocator.free(s);
+        if (self.indicator_focused) |s| allocator.free(s);
+        if (self.indicator_unfocused) |s| allocator.free(s);
     }
 
     pub inline fn drunBg(self: *const BarConfig) Color {
@@ -595,13 +604,5 @@ pub const Config = struct {
 
         self.bar.deinit(a);
         self.tiling.deinit(a);
-
-        // Heap-allocated whenever set (getDefaultConfig dupes, parseBar's
-        // assignStr transfers ownership on write); free any that no longer
-        // point at the sentinel, so the errdefer path never frees a literal.
-        if (self.bar.clock_format.ptr != OWNED_STR_SENTINEL.ptr) a.free(self.bar.clock_format);
-        if (self.bar.drun_prompt.ptr != OWNED_STR_SENTINEL.ptr) a.free(self.bar.drun_prompt);
-        if (self.bar.indicator_focused.ptr != OWNED_STR_SENTINEL.ptr) a.free(self.bar.indicator_focused);
-        if (self.bar.indicator_unfocused.ptr != OWNED_STR_SENTINEL.ptr) a.free(self.bar.indicator_unfocused);
     }
 };

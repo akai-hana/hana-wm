@@ -460,25 +460,31 @@ fn sendFocusProtocol(win: u32) void {
 /// never rejects it. Filtering mode/detail was incorrect: it allowed Electron's
 /// internal focus steals to slip through unchallenged.
 pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
-    if (state.confirm_win) |exp| if (event.event == exp) cancelPendingConfirm();
+    if (state.confirm_win) |exp| {
+        if (event.event == exp) cancelPendingConfirm();
+    }
     const cs = core.getState();
     const is_offscreen_steal = !isInvalidFocusTarget(event.event) and
         !tracking.isOnCurrentWorkspace(event.event);
-    if (state.focused_window) |sel| {
-        if (event.event != sel) {
-            // An off-workspace window (Wine, Electron, a game) that re-focuses
-            // itself on every FocusOut would otherwise create a three-way
-            // fight that never converges. Redirecting to root first breaks the
-            // cycle: the thief fights root (which never replies), exhausting
-            // its retry budget, then sendFocusProtocol(sel) reclaims focus
-            // with no active opponent.
-            if (is_offscreen_steal) focusNow(cs.conn, cs.root);
-            sendFocusProtocol(sel);
+
+    const sel = state.focused_window orelse {
+        if (is_offscreen_steal) {
+            focusNow(cs.conn, cs.root);
+            advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
         }
-    } else if (is_offscreen_steal) {
-        focusNow(cs.conn, cs.root);
-        advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
-    }
+        return;
+    };
+
+    if (event.event == sel) return;
+
+    // An off-workspace window (Wine, Electron, a game) that re-focuses
+    // itself on every FocusOut would otherwise create a three-way
+    // fight that never converges. Redirecting to root first breaks the
+    // cycle: the thief fights root (which never replies), exhausting
+    // its retry budget, then sendFocusProtocol(sel) reclaims focus
+    // with no active opponent.
+    if (is_offscreen_steal) focusNow(cs.conn, cs.root);
+    sendFocusProtocol(sel);
 }
 
 /// Returns the first window satisfying `visible`, walking the tracking list.
@@ -519,6 +525,42 @@ pub fn clearFocus() void {
     bar.scheduleFocusRedraw(null);
     advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
 }
+
+/// Focus `target` with `model` when both are present, else clear focus when
+/// `target` is null. `target` non-null with a null `model` is a no-op (the
+/// caller decided not to focus, mirroring the inline `if (model) |m|` pattern
+/// it replaces).
+pub fn focusOrClear(target: ?u32, model: ?window.InputModel, reason: Reason) void {
+    if (target) |t| {
+        if (model) |m| setFocusWithModel(t, reason, m);
+        return;
+    }
+    clearFocus();
+}
+
+
+
+/// Pre-grab focus resolution: bundles a window target with its input
+/// model, resolved before `xcb_grab_server` so the grab body stays
+/// fire-and-forget. Use with `focusOrClear` to apply in one call.
+pub const FocusContext = struct {
+    target: ?u32,
+    model: ?window.InputModel,
+
+    /// Resolve the input model for `target`. Pass the target from any
+    /// resolution strategy (MRU, pointer, findBestAvailable, etc.).
+    pub fn resolve(target: ?u32) FocusContext {
+        return .{
+            .target = target,
+            .model = if (target) |t| window.getInputModel(core.getState().conn, t) else null,
+        };
+    }
+
+    /// Apply this focus context: focus the target (with its model) or clear.
+    pub fn apply(self: FocusContext, reason: Reason) void {
+        focusOrClear(self.target, self.model, reason);
+    }
+};
 
 inline fn advertiseActiveWindow(win: u32) void {
     if (state.net_active_window == xcb.XCB_ATOM_NONE) return;

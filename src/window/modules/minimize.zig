@@ -5,7 +5,6 @@ const std = @import("std");
 const build = @import("build_options");
 
 const core = @import("core");
-const xcb = core.xcb;
 const utils = @import("utils");
 const debug = @import("debug");
 const window = @import("window");
@@ -24,7 +23,7 @@ const MinimizedEntry = struct {
 
 /// One slot in the fixed minimize buffer.
 const MinimizedRecord = struct {
-    win: u32,
+    id: u32,
     entry: MinimizedEntry,
 };
 
@@ -54,13 +53,9 @@ pub fn deinit() void {
     init();
 }
 
-fn matchMinimizedWin(win: u32, rec: MinimizedRecord) bool {
-    return rec.win == win;
-}
-
 /// Returns the index into g_minimized for the given window, or null.
 fn findInBuf(win: u32) ?usize {
-    return g_minimized.indexOf(win, matchMinimizedWin);
+    return g_minimized.indexOfById(win);
 }
 
 /// Removal that preserves the relative order of the remaining entries (see
@@ -108,7 +103,7 @@ pub fn minimizeWindow() void {
     if (cs.config.tiling.enabled) tiling.removeWindow(win);
 
     // Capacity was already checked above, so this always succeeds.
-    _ = g_minimized.append(.{ .win = win, .entry = .{
+    _ = g_minimized.append(.{ .id = win, .entry = .{
         .saved_fs = saved_fs,
         .workspace_idx = ws_idx,
         .tiling_index = tiling_index,
@@ -131,7 +126,7 @@ pub fn minimizeWindow() void {
     //     tracking order.
     const restore_target = tracking.popFocusMru(ws_idx, tracking.isOnCurrentWorkspaceAndVisible) orelse
         focus.findBestAvailable(tracking.isOnCurrentWorkspaceAndVisible);
-    const restore_model = if (restore_target) |t| window.getInputModel(cs.conn, t) else null;
+    const restore_ctx = focus.FocusContext.resolve(restore_target);
 
     utils.grabServer(cs.conn);
     utils.pushWindowOffscreen(cs.conn, win);
@@ -140,19 +135,14 @@ pub fn minimizeWindow() void {
     // workspace (every window here is minimized), so the only correct
     // outcome is clearing focus — inlined here rather than going through
     // focus.focusBestAvailable() to keep the grab body free of reply waits.
-    if (restore_target) |t| {
-        if (restore_model) |m| focus.setFocusWithModel(t, .tiling_operation, m);
-    } else {
-        focus.clearFocus();
-    }
+    restore_ctx.apply(.tiling_operation);
 
     if (saved_fs != null) {
         bar.setBarState(.show_fullscreen);
     } else if (cs.config.tiling.enabled) {
         tiling.retileCurrentWorkspace();
     }
-    bar.redrawInsideGrab();
-    utils.ungrabAndFlush(cs.conn);
+    bar.commitInsideGrab();
 }
 
 /// Restore a window that has already been removed from g_minimized.
@@ -186,7 +176,7 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
     // reply wait inside the grab would implicitly flush the queued retile
     // configure_window batch to the compositor mid-grab (see
     // focus.setFocusWithModel).
-    const focus_model = window.getInputModel(conn, win);
+    const focus_ctx = focus.FocusContext.resolve(win);
     utils.grabServer(conn);
 
     if (core.getState().config.tiling.enabled) {
@@ -200,55 +190,44 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
         // from focus.getFocused() at retile time (monocle) would otherwise
         // retile against the still-focused old window with no follow-up retile
         // once focus lands on `win`.
-        focus.setFocusWithModel(win, .window_spawn, focus_model);
+        focus.setFocusWithModel(win, .window_spawn, focus_ctx.model.?);
         tiling.retileCurrentWorkspace();
     } else {
         window.restoreFloatGeom(win);
-        focus.setFocusWithModel(win, .window_spawn, focus_model);
+        focus.setFocusWithModel(win, .window_spawn, focus_ctx.model.?);
     }
 
-    bar.redrawInsideGrab();
-    utils.ungrabAndFlush(conn);
+    bar.commitInsideGrab();
 }
 
 pub const RestoreOrder = enum { lifo, fifo };
 
+/// Remove the minimized record at `idx` and restore the window.
+/// Precondition: `idx` is a valid index into g_minimized.
+fn unminimizeAtIndex(idx: usize) void {
+    const rec = g_minimized.items[idx];
+    const win = rec.id;
+    const saved_fs = rec.entry.saved_fs;
+    const tiling_index = rec.entry.tiling_index;
+    _ = removeFromBuf(win);
+    restoreWindowImpl(win, saved_fs, tiling_index);
+}
+
 pub fn unminimize(order: RestoreOrder) void {
     const ws_idx = tracking.getCurrentWorkspace() orelse return;
 
-    // Buffer position is insertion order: LIFO wants the last matching entry,
-    // FIFO wants the first.
+    // Buffer position is insertion order. One forward scan serves both modes:
+    // FIFO breaks on the first matching entry, LIFO keeps scanning so the last
+    // (most recent) matching entry wins.
     var best_idx: ?usize = null;
-    switch (order) {
-        .lifo => {
-            var i = g_minimized.len;
-            while (i > 0) {
-                i -= 1;
-                if (g_minimized.items[i].entry.workspace_idx == ws_idx) {
-                    best_idx = i;
-                    break;
-                }
-            }
-        },
-        .fifo => {
-            for (g_minimized.constSlice(), 0..) |rec, i| {
-                if (rec.entry.workspace_idx == ws_idx) {
-                    best_idx = i;
-                    break;
-                }
-            }
-        },
+    for (g_minimized.constSlice(), 0..) |rec, i| {
+        if (rec.entry.workspace_idx != ws_idx) continue;
+        best_idx = i;
+        if (order == .fifo) break;
     }
 
     const idx = best_idx orelse return;
-
-    // Capture fields before removal invalidates the slot.
-    const win = g_minimized.items[idx].win;
-    const saved_fs = g_minimized.items[idx].entry.saved_fs;
-    const tiling_index = g_minimized.items[idx].entry.tiling_index;
-    _ = removeFromBuf(win);
-
-    restoreWindowImpl(win, saved_fs, tiling_index);
+    unminimizeAtIndex(idx);
 }
 
 /// Restores a specific minimized window, regardless of where it falls in the
@@ -258,13 +237,68 @@ pub fn unminimize(order: RestoreOrder) void {
 /// No-op if `win` is not currently minimized.
 pub fn unminimizeSpecific(win: u32) void {
     const idx = findInBuf(win) orelse return;
+    unminimizeAtIndex(idx);
+}
 
-    // Capture fields before removal invalidates the slot (mirrors unminimize()).
-    const saved_fs = g_minimized.items[idx].entry.saved_fs;
-    const tiling_index = g_minimized.items[idx].entry.tiling_index;
-    _ = removeFromBuf(win);
+const Partitioned = struct {
+    plain: [MAX_MINIMIZED]MinimizedRecord = undefined,
+    fs: [MAX_MINIMIZED]MinimizedRecord = undefined,
+    plain_len: usize = 0,
+    fs_len: usize = 0,
 
-    restoreWindowImpl(win, saved_fs, tiling_index);
+    fn plainSlice(self: *Partitioned) []MinimizedRecord {
+        return self.plain[0..self.plain_len];
+    }
+
+    fn fsSlice(self: *const Partitioned) []const MinimizedRecord {
+        return self.fs[0..self.fs_len];
+    }
+};
+
+fn partitionByFullscreen(snapshot: []const MinimizedRecord) Partitioned {
+    var result: Partitioned = .{};
+    for (snapshot) |rec| {
+        if (rec.entry.saved_fs == null) {
+            result.plain[result.plain_len] = rec;
+            result.plain_len += 1;
+        } else {
+            result.fs[result.fs_len] = rec;
+            result.fs_len += 1;
+        }
+    }
+    return result;
+}
+
+/// Restore a batch of plain (non-fullscreen) minimized windows back into the
+/// tiling layout, sorted by original tiling index so lower-index slots are
+/// inserted first. Caller must already hold the server grab and have resolved
+/// the focus input model.
+fn restorePlainWindowsTiling(plain_wins: []MinimizedRecord, focus_target: u32, focus_model: window.InputModel) void {
+    // Re-sort by tiling_index ascending (nulls last) before inserting.
+    // Inserting at index i shifts every slot > i by 1, so lower-index
+    // windows must go first to avoid displacing higher-index targets.
+    //
+    // Example ([X, A, B, Z], A at ti=1, B at ti=2, minimized to [X, Z]):
+    //   insert A@1 → [X, A, Z]
+    //   insert B@2 → [X, A, B, Z]  ← correct
+    //   (reversed order would mis-place A at index 2)
+    std.sort.pdq(MinimizedRecord, plain_wins, {}, struct {
+        fn lt(_: void, a: MinimizedRecord, b: MinimizedRecord) bool {
+            if (a.entry.tiling_index == null) return false; // nulls last
+            if (b.entry.tiling_index == null) return true;
+            return a.entry.tiling_index.? < b.entry.tiling_index.?;
+        }
+    }.lt);
+    for (plain_wins) |rec| {
+        if (rec.entry.tiling_index) |ti|
+            tiling.addWindowAtFilteredIndex(rec.id, ti)
+        else
+            tiling.addWindow(rec.id);
+    }
+    // Focus must move to focus_target BEFORE the retile — see the
+    // matching comment in restoreWindowImpl.
+    focus.setFocusWithModel(focus_target, .window_spawn, focus_model);
+    tiling.retileCurrentWorkspace();
 }
 
 pub fn unminimizeAll() void {
@@ -286,75 +320,35 @@ pub fn unminimizeAll() void {
 
     // Remove all collected windows up-front; the snapshot is now the sole
     // record of what needs restoring.
-    for (snapshot[0..count]) |rec| _ = removeFromBuf(rec.win);
+    for (snapshot[0..count]) |rec| _ = removeFromBuf(rec.id);
 
-    // Partition into plain vs. fullscreen (each fullscreen restore needs its
-    // own grab and must run after the batch), preserving the FIFO order
-    // within each group — a single forward pass keeps that stable.
-    var plain_buf: [MAX_MINIMIZED]MinimizedRecord = undefined;
-    var fs_buf: [MAX_MINIMIZED]MinimizedRecord = undefined;
-    var plain_count: usize = 0;
-    var fs_count: usize = 0;
-    for (snapshot[0..count]) |rec| {
-        if (rec.entry.saved_fs == null) {
-            plain_buf[plain_count] = rec;
-            plain_count += 1;
-        } else {
-            fs_buf[fs_count] = rec;
-            fs_count += 1;
-        }
-    }
-    const plain_wins = plain_buf[0..plain_count];
-    const fs_wins = fs_buf[0..fs_count];
+    var partitioned = partitionByFullscreen(snapshot[0..count]);
+    const plain_wins = partitioned.plainSlice();
+    const fs_wins = partitioned.fsSlice();
 
     if (plain_wins.len > 0) {
         // Focus the most recently minimized window (LIFO semantics):
         // plain_wins is still in FIFO order here, so that's the last entry —
         // captured before the tiling-index sort below reorders the array.
-        const focus_target = plain_wins[plain_wins.len - 1].win;
+        const focus_target = plain_wins[plain_wins.len - 1].id;
 
         const conn = core.getState().conn;
         // Resolve the input model BEFORE the grab — see restoreWindowImpl.
-        const focus_model = window.getInputModel(conn, focus_target);
+        const focus_ctx = focus.FocusContext.resolve(focus_target);
         utils.grabServer(conn);
 
         if (core.getState().config.tiling.enabled) {
-            // Re-sort by tiling_index ascending (nulls last) before inserting.
-            // Inserting at index i shifts every slot > i by 1, so lower-index
-            // windows must go first to avoid displacing higher-index targets.
-            //
-            // Example ([X, A, B, Z], A at ti=1, B at ti=2, minimized to [X, Z]):
-            //   insert A@1 → [X, A, Z]
-            //   insert B@2 → [X, A, B, Z]  ← correct
-            //   (reversed order would mis-place A at index 2)
-            std.sort.pdq(MinimizedRecord, plain_wins, {}, struct {
-                fn lt(_: void, a: MinimizedRecord, b: MinimizedRecord) bool {
-                    if (a.entry.tiling_index == null) return false; // nulls last
-                    if (b.entry.tiling_index == null) return true;
-                    return a.entry.tiling_index.? < b.entry.tiling_index.?;
-                }
-            }.lt);
-            for (plain_wins) |rec| {
-                if (rec.entry.tiling_index) |ti|
-                    tiling.addWindowAtFilteredIndex(rec.win, ti)
-                else
-                    tiling.addWindow(rec.win);
-            }
-            // Focus must move to focus_target BEFORE the retile — see the
-            // matching comment in restoreWindowImpl.
-            focus.setFocusWithModel(focus_target, .window_spawn, focus_model);
-            tiling.retileCurrentWorkspace();
+            restorePlainWindowsTiling(plain_wins, focus_target, focus_ctx.model.?);
         } else {
-            for (plain_wins) |rec| window.restoreFloatGeom(rec.win);
-            focus.setFocusWithModel(focus_target, .window_spawn, focus_model);
+            for (plain_wins) |rec| window.restoreFloatGeom(rec.id);
+            focus.setFocusWithModel(focus_target, .window_spawn, focus_ctx.model.?);
         }
 
-        bar.redrawInsideGrab();
-        utils.ungrabAndFlush(conn);
+        bar.commitInsideGrab();
     }
 
     // Each fullscreen window needs its own grab (enterFullscreen owns it).
-    for (fs_wins) |rec| restoreWindowImpl(rec.win, rec.entry.saved_fs, rec.entry.tiling_index);
+    for (fs_wins) |rec| restoreWindowImpl(rec.id, rec.entry.saved_fs, rec.entry.tiling_index);
 }
 
 /// Fills `set` with every currently minimized window ID, replacing any prior contents.
@@ -366,7 +360,7 @@ pub fn collectMinimizedIntoSet(
     set.clearRetainingCapacity();
     try set.ensureTotalCapacity(allocator, @intCast(g_minimized.len));
     for (g_minimized.constSlice()) |rec|
-        set.putAssumeCapacity(rec.win, {});
+        set.putAssumeCapacity(rec.id, {});
 }
 
 /// Called by window.zig on unmap/destroy to keep state coherent.

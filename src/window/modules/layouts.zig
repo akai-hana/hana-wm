@@ -94,10 +94,6 @@ pub inline fn pushWindowOffscreenAndInvalidate(ctx: *const LayoutCtx, win: u32) 
     utils.pushWindowOffscreen(ctx.conn, win);
 }
 
-pub inline fn rectsEqual(a: utils.Rect, b: utils.Rect) bool {
-    return a.x == b.x and a.y == b.y and a.width == b.width and a.height == b.height;
-}
-
 /// Send `rect` for `win` now via configureWithHints, unless `win` is
 /// `ctx.defer_win` — then stash it in `ctx.deferred` for `invokeLayout` to
 /// send last. Called by every defer_win-aware layout.
@@ -142,7 +138,7 @@ fn configureWithHintsImpl(comptime raise: bool, ctx: *const LayoutCtx, win: u32,
         return;
     }
 
-    const is_rect_changed = !gop.found_existing or !rectsEqual(gop.value_ptr.rect, effective);
+    const is_rect_changed = !gop.found_existing or !gop.value_ptr.rect.eql(effective);
     if (is_rect_changed) {
         gop.value_ptr.rect = effective;
         if (comptime raise) {

@@ -64,15 +64,27 @@ fn snapDistance() i32 {
 fn workArea() WorkArea {
     const cs = core.getState();
     const sw: i32 = cs.screen.width_in_pixels;
-    const sh: i32 = cs.screen.height_in_pixels;
-    const bh: i32 = if (bar.isVisible()) bar.getBarHeight() else 0;
     const bw2: i32 = @as(i32, window.getBorderWidth()) * 2;
-    const bar_at_bottom = cs.config.bar.bar_position == .bottom;
+    const work = bar.workAreaRect();
     return .{
         .left = 0,
         .right = sw - bw2,
-        .top = if (bar_at_bottom) 0 else bh,
-        .bottom = (if (bar_at_bottom) sh - bh else sh) - bw2,
+        .top = work.y,
+        .bottom = work.y + @as(i32, work.height) - bw2,
+    };
+}
+
+/// Which sides of the window the grabbed corner anchors to (left/top = the
+/// corner is a left or top edge). Collapses the four per-axis corner switches
+/// in updateDrag into two booleans.
+const CornerAxes = struct { left: bool, top: bool };
+
+inline fn cornerAxes(corner: ResizeCorner) CornerAxes {
+    return switch (corner) {
+        .top_left => .{ .left = true, .top = true },
+        .top_right => .{ .left = false, .top = true },
+        .bottom_left => .{ .left = true, .top = false },
+        .bottom_right => .{ .left = false, .top = false },
     };
 }
 
@@ -100,6 +112,15 @@ var g_state: State = .{};
 
 // Public API
 
+fn nearestCorner(x: i16, y: i16, geom: utils.Rect) ResizeCorner {
+    const cx: i32 = @as(i32, geom.x) + @divTrunc(@as(i32, geom.width), 2);
+    const cy: i32 = @as(i32, geom.y) + @divTrunc(@as(i32, geom.height), 2);
+    if (x < cx and y < cy) return .top_left;
+    if (x >= cx and y < cy) return .top_right;
+    if (x < cx and y >= cy) return .bottom_left;
+    return .bottom_right;
+}
+
 /// Begins a move (button 1) or resize (button 3) drag on `win` at (x, y).
 /// No-op if a drag is already active, or for bar/fullscreen windows.
 pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
@@ -116,16 +137,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
         break :blk window.getGeometry(cs.conn, win) orelse return;
     };
 
-    // Resize: pick the corner nearest the cursor by comparing to window centre.
-    const resize_corner: ResizeCorner = corner: {
-        if (button == 1) break :corner .bottom_right; // move — corner unused
-        const cx: i32 = @as(i32, geom.x) + @divTrunc(@as(i32, geom.width), 2);
-        const cy: i32 = @as(i32, geom.y) + @divTrunc(@as(i32, geom.height), 2);
-        if (x < cx and y < cy) break :corner .top_left;
-        if (x >= cx and y < cy) break :corner .top_right;
-        if (x < cx and y >= cy) break :corner .bottom_left;
-        break :corner .bottom_right;
-    };
+    const resize_corner: ResizeCorner = if (button == 1) .bottom_right else nearestCorner(x, y, geom);
 
     // Snap distance and work area are resolved here so updateDrag's per-event
     // path only does arithmetic. They are constant for the duration of a drag.
@@ -155,6 +167,62 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     _ = xcb.xcb_flush(cs.conn);
 }
 
+fn computeMoveRect(drag: DragState, dx: i16, dy: i16, wa: WorkArea, was_pending_float: bool) utils.Rect {
+    const snap = drag.snap_px;
+    const raw_x: i32 = @as(i32, drag.start_win_x) + @as(i32, dx);
+    const raw_y: i32 = @as(i32, drag.start_win_y) + @as(i32, dy);
+    const win_w: i32 = drag.start_win_width;
+    const win_h: i32 = drag.start_win_height;
+    return .{
+        .x = @intCast(if (was_pending_float) raw_x else snapAxis(raw_x, win_w, wa.left, wa.right, snap)),
+        .y = @intCast(if (was_pending_float) raw_y else snapAxis(raw_y, win_h, wa.top, wa.bottom, snap)),
+        .width = drag.start_win_width,
+        .height = drag.start_win_height,
+    };
+}
+
+fn computeResizeRect(drag: DragState, dx: i16, dy: i16, wa: WorkArea) utils.Rect {
+    const snap = drag.snap_px;
+    // Anchor = corner opposite the grabbed one, fixed; the moving
+    // corner follows the cursor. min/max(anchor, moving) per axis
+    // makes crossing the anchor flip growth automatically.
+    const axes = cornerAxes(drag.resize_corner);
+    const start_x: i32 = drag.start_win_x;
+    const start_y: i32 = drag.start_win_y;
+    const start_w: i32 = drag.start_win_width;
+    const start_h: i32 = drag.start_win_height;
+
+    const anchor_x: i32 = start_x + @as(i32, if (axes.left) start_w else 0);
+    const anchor_y: i32 = start_y + @as(i32, if (axes.top) start_h else 0);
+    const moving_x0: i32 = start_x + @as(i32, if (axes.left) 0 else start_w);
+    const moving_y0: i32 = start_y + @as(i32, if (axes.top) 0 else start_h);
+
+    const raw_moving_x: i32 = moving_x0 + @as(i32, dx);
+    const raw_moving_y: i32 = moving_y0 + @as(i32, dy);
+    const moving_x: i32 = snapEdge(snapEdge(raw_moving_x, wa.left, snap), wa.right, snap);
+    const moving_y: i32 = snapEdge(snapEdge(raw_moving_y, wa.top, snap), wa.bottom, snap);
+
+    const new_left: i32 = @min(anchor_x, moving_x);
+    const new_right: i32 = @max(anchor_x, moving_x);
+    const new_top: i32 = @min(anchor_y, moving_y);
+    const new_bottom: i32 = @max(anchor_y, moving_y);
+
+    // Clamp size first, then re-pin position off the anchor so the
+    // anchor edge never drifts when the minimum size is hit.
+    const min_dim: i32 = core.getState().config.tiling.min_window_dim;
+    const clamped_w: i32 = std.math.clamp(new_right - new_left, min_dim, std.math.maxInt(u16));
+    const clamped_h: i32 = std.math.clamp(new_bottom - new_top, min_dim, std.math.maxInt(u16));
+    const pinned_x: i32 = if (moving_x < anchor_x) anchor_x - clamped_w else new_left;
+    const pinned_y: i32 = if (moving_y < anchor_y) anchor_y - clamped_h else new_top;
+
+    return .{
+        .x = @intCast(pinned_x),
+        .y = @intCast(pinned_y),
+        .width = @intCast(clamped_w),
+        .height = @intCast(clamped_h),
+    };
+}
+
 /// Applies pointer motion to the active drag. No-op if no drag is active.
 pub fn updateDrag(x: i16, y: i16) void {
     if (!g_state.drag.active) return;
@@ -163,8 +231,6 @@ pub fn updateDrag(x: i16, y: i16) void {
     const was_pending_float = g_state.pending_float;
     if (g_state.pending_float) {
         g_state.pending_float = false;
-        // Grab to suppress intermediate renders during detach + retile; a
-        // failed grab just costs a visual nicety, not correctness.
         const conn = core.getState().conn;
         utils.grabServer(conn);
         tiling.removeWindow(drag.window);
@@ -174,80 +240,11 @@ pub fn updateDrag(x: i16, y: i16) void {
 
     const dx = x - drag.start_x;
     const dy = y - drag.start_y;
-
-    const snap = drag.snap_px;
     const wa = drag.work_area;
 
     const rect = switch (drag.mode) {
-        .move => blk: {
-            const raw_x: i32 = @as(i32, drag.start_win_x) + @as(i32, dx);
-            const raw_y: i32 = @as(i32, drag.start_win_y) + @as(i32, dy);
-            if (was_pending_float) break :blk utils.Rect{
-                .x = @intCast(raw_x),
-                .y = @intCast(raw_y),
-                .width = drag.start_win_width,
-                .height = drag.start_win_height,
-            };
-            const win_w: i32 = drag.start_win_width;
-            const win_h: i32 = drag.start_win_height;
-            break :blk utils.Rect{
-                .x = @intCast(snapAxis(raw_x, win_w, wa.left, wa.right, snap)),
-                .y = @intCast(snapAxis(raw_y, win_h, wa.top, wa.bottom, snap)),
-                .width = drag.start_win_width,
-                .height = drag.start_win_height,
-            };
-        },
-        .resize => blk: {
-            // Anchor = corner opposite the grabbed one, fixed; the moving
-            // corner follows the cursor. min/max(anchor, moving) per axis
-            // makes crossing the anchor flip growth automatically.
-            const start_x: i32 = drag.start_win_x;
-            const start_y: i32 = drag.start_win_y;
-            const start_w: i32 = drag.start_win_width;
-            const start_h: i32 = drag.start_win_height;
-
-            const anchor_x: i32 = switch (drag.resize_corner) {
-                .top_left, .bottom_left => start_x + start_w,
-                .top_right, .bottom_right => start_x,
-            };
-            const anchor_y: i32 = switch (drag.resize_corner) {
-                .top_left, .top_right => start_y + start_h,
-                .bottom_left, .bottom_right => start_y,
-            };
-            const moving_x0: i32 = switch (drag.resize_corner) {
-                .top_left, .bottom_left => start_x,
-                .top_right, .bottom_right => start_x + start_w,
-            };
-            const moving_y0: i32 = switch (drag.resize_corner) {
-                .top_left, .top_right => start_y,
-                .bottom_left, .bottom_right => start_y + start_h,
-            };
-
-            const raw_moving_x: i32 = moving_x0 + @as(i32, dx);
-            const raw_moving_y: i32 = moving_y0 + @as(i32, dy);
-            const moving_x: i32 = snapEdge(snapEdge(raw_moving_x, wa.left, snap), wa.right, snap);
-            const moving_y: i32 = snapEdge(snapEdge(raw_moving_y, wa.top, snap), wa.bottom, snap);
-
-            const new_left: i32 = @min(anchor_x, moving_x);
-            const new_right: i32 = @max(anchor_x, moving_x);
-            const new_top: i32 = @min(anchor_y, moving_y);
-            const new_bottom: i32 = @max(anchor_y, moving_y);
-
-            // Clamp size first, then re-pin position off the anchor so the
-            // anchor edge never drifts when the minimum size is hit.
-            const min_dim: i32 = core.getState().config.tiling.min_window_dim;
-            const clamped_w: i32 = std.math.clamp(new_right - new_left, min_dim, std.math.maxInt(u16));
-            const clamped_h: i32 = std.math.clamp(new_bottom - new_top, min_dim, std.math.maxInt(u16));
-            const pinned_x: i32 = if (moving_x < anchor_x) anchor_x - clamped_w else new_left;
-            const pinned_y: i32 = if (moving_y < anchor_y) anchor_y - clamped_h else new_top;
-
-            break :blk utils.Rect{
-                .x = @intCast(pinned_x),
-                .y = @intCast(pinned_y),
-                .width = @intCast(clamped_w),
-                .height = @intCast(clamped_h),
-            };
-        },
+        .move => computeMoveRect(drag.*, dx, dy, wa, was_pending_float),
+        .resize => computeResizeRect(drag.*, dx, dy, wa),
     };
     drag.last_rect = rect;
     const conn = core.getState().conn;

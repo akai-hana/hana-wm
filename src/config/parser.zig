@@ -46,7 +46,6 @@ pub const Value = union(enum) {
     pub fn asBool(self: Value) ?bool {
         return switch (self.lastScalar() orelse return null) {
             .boolean => |b| b,
-            .integer => |i| i != 0,
             else => null,
         };
     }
@@ -114,7 +113,13 @@ pub const Section = struct {
 
     pub fn deinit(self: *Section, allocator: std.mem.Allocator) void {
         self.keys_in_order.deinit(allocator);
-        cleanPairs(allocator, &self.pairs);
+        var iter = self.pairs.iterator();
+        while (iter.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            var val = entry.value_ptr.*;
+            val.deinit(allocator);
+        }
+        self.pairs.deinit();
         self.consumed.deinit();
     }
 
@@ -265,55 +270,32 @@ fn ensureArray(allocator: std.mem.Allocator, old_val: *Value) !void {
     old_val.* = .{ .array = arr };
 }
 
-/// Accumulates `incoming` into `old_val`, shared by the single-file
-/// duplicate-key path (`accumulateScalar`) and the multi-file merge path
-/// (`mergeIntoArray`): a repeated scalar becomes a flat array and an
-/// array-valued `incoming` is flattened into it, so a key declared twice has
-/// the same shape in one file as across two. Scalar getters resolve to the
-/// LAST element (later files win); asArray sees the full accumulation so
-/// keybinds, `include`, `layouts`, etc. chain. With `move`, `incoming` is
-/// uniquely owned and elements transfer by ownership; otherwise they're
-/// deep-copied so the borrowed `incoming` stays owned.
-fn accumulate(comptime move: bool, allocator: std.mem.Allocator, old_val: *Value, incoming: Value) !void {
+/// Accumulates `incoming` into `old_val`. When `do_copy` is true elements are
+/// deep-copied (for cross-document merging); when false they transfer by
+/// ownership (for within-file duplicate keys). An array-valued `incoming` is
+/// flattened. Scalar getters resolve to the LAST element (later files win);
+/// asArray sees the full accumulation so keybinds, `include`, `layouts`, etc.
+/// chain.
+fn accumulate(allocator: std.mem.Allocator, old_val: *Value, incoming: Value, comptime do_copy: bool) !void {
     try ensureArray(allocator, old_val);
     if (incoming == .array) {
         var inc = incoming;
         const start = old_val.array.items.len;
         for (inc.array.items) |item| {
-            const elt = if (comptime move) item else try deepCopyValue(allocator, item);
-            old_val.array.append(allocator, elt) catch |err| {
-                if (comptime move) {
-                    // Un-append the moved elements so the caller's errdefer
-                    // (deiniting `incoming`) frees each exactly once — without
-                    // this they'd be freed here AND again by `old_val`'s deinit.
-                    old_val.array.shrinkRetainingCapacity(start);
-                }
+            const v = if (do_copy) try deepCopyValue(allocator, item) else item;
+            old_val.array.append(allocator, v) catch |err| {
+                old_val.array.shrinkRetainingCapacity(start);
                 return err;
             };
         }
-        if (comptime move) {
-            inc.array.deinit(allocator); // items transferred by ownership; free only the backing array
-        } else {
-            // Items were deep-copied into `old_val`; free the source copies
-            // and their backing array so nothing from `incoming` leaks.
+        if (do_copy) {
             for (inc.array.items) |*item| item.deinit(allocator);
-            inc.array.deinit(allocator);
         }
+        inc.array.deinit(allocator);
     } else {
-        try old_val.array.append(allocator, incoming);
+        const v = if (do_copy) try deepCopyValue(allocator, incoming) else incoming;
+        try old_val.array.append(allocator, v);
     }
-}
-
-/// Single-file duplicate-key accumulation: `incoming` is freshly parsed and
-/// uniquely owned, so elements are moved rather than copied.
-fn accumulateScalar(allocator: std.mem.Allocator, old_val: *Value, incoming: Value) !void {
-    return accumulate(true, allocator, old_val, incoming);
-}
-
-/// Multi-file merge accumulation: `incoming` is a copy taken from a distinct
-/// source document, so elements are deep-copied before being stored.
-fn mergeIntoArray(allocator: std.mem.Allocator, old_val: *Value, incoming: Value) !void {
-    return accumulate(false, allocator, old_val, incoming);
 }
 
 /// Merges `src`'s pairs into `dst`; duplicate keys accumulate into arrays,
@@ -321,10 +303,10 @@ fn mergeIntoArray(allocator: std.mem.Allocator, old_val: *Value, incoming: Value
 /// Scalar reads resolve to the last declaration (later file wins); array
 /// reads see the full accumulation; `src` is unmodified.
 fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Section) !void {
-    var iter = src.pairs.iterator();
+    var iter = src.orderedIterator();
     while (iter.next()) |entry| {
-        const src_key = entry.key_ptr.*;
-        const src_val = entry.value_ptr.*;
+        const src_key = entry.key;
+        const src_val = entry.value;
         if (dst.pairs.getPtr(src_key)) |old_val| {
             // Duplicate key: accumulate into an array, flattening an
             // array-valued `incoming` so two files declaring an array produce
@@ -334,7 +316,7 @@ fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Se
                 var v = incoming;
                 v.deinit(allocator);
             }
-            try mergeIntoArray(allocator, old_val, incoming);
+            try accumulate(allocator, old_val, incoming, true);
         } else {
             const key_copy = try allocator.dupe(u8, src_key);
             errdefer allocator.free(key_copy);
@@ -392,17 +374,6 @@ pub fn parseColor(value: []const u8) !u32 {
     const color = std.fmt.parseInt(u32, hex_part, 16) catch return error.InvalidColor;
     if (color > 0xFFFFFF) return error.InvalidColor;
     return color;
-}
-
-/// Frees all key strings and recursively deinits all values in `pairs`, then deinits the map.
-fn cleanPairs(alloc: std.mem.Allocator, pairs: *std.StringHashMap(Value)) void {
-    var iter = pairs.iterator();
-    while (iter.next()) |entry| {
-        alloc.free(entry.key_ptr.*);
-        var val = entry.value_ptr.*;
-        val.deinit(alloc);
-    }
-    pairs.deinit();
 }
 
 const Parser = struct {
@@ -498,40 +469,15 @@ const Parser = struct {
 
     fn parseString(self: *Parser) ParseError![]const u8 {
         const quote = self.consume().?;
-        const start = self.pos;
-
-        // Single-quoted strings are literal (matching TOML): backslashes kept
-        // verbatim, no escapes — 'C:\temp' would otherwise be rejected for
-        // its invalid '\t'. Double-quoted strings scan only for the escape
-        // terminator here; actual escape processing happens below.
-        var has_escapes = false;
-        var end_pos = start;
-        while (end_pos < self.content.len) {
-            const c = self.content[end_pos];
-            if (c == quote) break;
-            if (c == '\\' and quote == '"') { has_escapes = true; break; }
-            if (c == '\n') return ParseError.InvalidValue;
-            end_pos += 1;
-        }
-        if (!has_escapes) {
-            if (end_pos >= self.content.len) return ParseError.InvalidValue;
-            const result = try self.allocator.dupe(u8, self.content[start..end_pos]);
-            self.pos = end_pos + 1;
-            return result;
-        }
-
-        var result = try std.ArrayList(u8).initCapacity(self.allocator, end_pos - start);
+        var result = std.ArrayList(u8).initCapacity(self.allocator, 64) catch return ParseError.OutOfMemory;
         errdefer result.deinit(self.allocator);
-
-        var closed = false;
         while (self.peek()) |c| {
             if (c == quote) {
-                closed = true;
-                break;
+                _ = self.consume();
+                return try result.toOwnedSlice(self.allocator);
             }
             if (c == '\n') return ParseError.InvalidValue;
-
-            if (c == '\\') {
+            if (c == '\\' and quote == '"') {
                 _ = self.consume();
                 const next = self.consume() orelse return ParseError.InvalidValue;
                 try result.append(self.allocator, switch (next) {
@@ -547,10 +493,7 @@ const Parser = struct {
                 _ = self.consume();
             }
         }
-
-        if (!closed) return ParseError.InvalidValue;
-        _ = self.consume();
-        return try result.toOwnedSlice(self.allocator);
+        return ParseError.InvalidValue;
     }
 
     /// Maximum nested-array depth accepted by parseArray (see array_depth doc comment).
@@ -653,9 +596,8 @@ const Parser = struct {
         // default for lacking a '%'. Whole numbers stay integers so
         // asInt()/asBool() consumers are unaffected.
         if (looksLikeDecimal(raw)) {
-            if (std.fmt.parseFloat(f32, raw)) |f| {
-                if (std.math.isFinite(f)) return .{ .scalable = ScalableValue.absolute(f) };
-            } else |_| {}
+            const f = std.fmt.parseFloat(f32, raw) catch unreachable;
+            if (std.math.isFinite(f)) return .{ .scalable = ScalableValue.absolute(f) };
         }
 
         // Bare colors require an explicit '#' or '0x' prefix: the old
@@ -667,7 +609,7 @@ const Parser = struct {
         // always produced before. An invalid `0x...` instead falls through
         // to the string fallback below.
         if (raw[0] == '#' or (raw.len > 2 and raw[0] == '0' and (raw[1] == 'x' or raw[1] == 'X'))) {
-            if (parseColor(raw)) |color| return .{ .color = color };
+            if (parseColor(raw)) |color| return .{ .color = color } else |_| {}
             if (raw[0] == '#') return ParseError.InvalidValue;
         }
 
@@ -706,11 +648,7 @@ const Parser = struct {
 
         if (items.items.len == 0) return ParseError.InvalidValue;
         if (items.items.len == 1) {
-            const single = items.items[0];
-            // Keep ownership of the single element but release the ArrayList's
-            // backing buffer — zeroing `len` alone would leak that allocation
-            // when the local goes out of scope.
-            items.items.len = 0;
+            const single = items.swapRemove(0);
             items.deinit(self.allocator);
             return single;
         }
@@ -729,8 +667,11 @@ const Parser = struct {
 
     /// Advances past a trailing newline or comment character at line end.
     fn skipLineEnd(self: *Parser, c: ?u8) void {
-        if (c == '\n') _ = self.consume();
-        if (c == '#') self.skipToNewline();
+        switch (c orelse return) {
+            '\n' => _ = self.consume(),
+            '#' => self.skipToNewline(),
+            else => {},
+        }
     }
 
     /// Parses one `key = value` pair, or a bare `key` (treated as `key = true`).
@@ -742,10 +683,57 @@ const Parser = struct {
 
         if (self.peek() == '=') {
             _ = self.consume();
-            const value = self.parseValue() catch |err| return err;
+            const value = try self.parseValue();
             return .{ key, value };
         }
         return .{ key, Value{ .boolean = true } };
+    }
+
+    /// Parses `key = value` pairs (and bare `key` flags) until a blank line,
+    /// comment, `;` terminator, or end of content. Duplicate keys accumulate
+    /// into arrays so a repeated keybind or include runs all declarations.
+    fn parsePairs(self: *Parser, section: *Section) ParseError!void {
+        while (true) {
+            var kv = self.parseKeyValuePair() catch |err| {
+                debug.warn("Invalid key-value at line {}: {}", .{ self.line, err });
+                self.skipToNewline();
+                break;
+            };
+
+            errdefer {
+                self.allocator.free(kv[0]);
+                kv[1].deinit(self.allocator);
+            }
+
+            if (section.pairs.getPtr(kv[0])) |old| {
+                // Duplicate key: accumulate both values into an array rather
+                // than overwriting, so a keybind can bind multiple actions:
+                //
+                //   Mod+Shift+1 = "move_to_workspace_1"
+                //   Mod+Shift+1 = "toggle_tag_1"
+                //
+                // parseKeybindings treats array values as sequences; scalar
+                // reads of a repeated key resolve to the last declaration.
+                try accumulate(self.allocator, old, kv[1], false);
+                self.allocator.free(kv[0]);
+            } else {
+                try section.pairs.put(kv[0], kv[1]);
+                section.recordKey(self.allocator, kv[0]);
+            }
+
+            self.skipWhitespace();
+            const next = self.peek();
+            if (next == ';') _ = self.consume();
+            self.skipWhitespace();
+            const trail = self.peek();
+            if (trail == '\n' or trail == '#' or trail == null) {
+                self.skipLineEnd(trail);
+                break;
+            }
+            debug.warn("Unexpected character at line {}", .{self.line});
+            self.skipToNewline();
+            break;
+        }
     }
 };
 
@@ -761,12 +749,8 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
         p.skipWhitespace();
         const c = p.peek() orelse break;
 
-        if (c == '\n') {
-            _ = p.consume();
-            continue;
-        }
-        if (c == '#') {
-            p.skipToNewline();
+        if (c == '\n' or c == '#') {
+            p.skipLineEnd(c);
             continue;
         }
 
@@ -789,62 +773,10 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
                 current_section = doc.sections.getPtr(section_name).?;
             }
 
-            p.skipWhitespace();
-            if (p.peek() == '\n') _ = p.consume();
             continue;
         }
 
-        while (true) {
-            var kv = p.parseKeyValuePair() catch |err| {
-                debug.warn("Invalid key-value at line {}: {}", .{ p.line, err });
-                p.skipToNewline();
-                break;
-            };
-
-            errdefer {
-                allocator.free(kv[0]);
-                kv[1].deinit(allocator);
-            }
-
-            if (current_section.pairs.getPtr(kv[0])) |old| {
-                // Duplicate key: accumulate both values into an array rather
-                // than overwriting, so a keybind can bind multiple actions:
-                //
-                //   Mod+Shift+1 = "move_to_workspace_1"
-                //   Mod+Shift+1 = "toggle_tag_1"
-                //
-                // parseKeybindings treats array values as sequences; scalar
-                // reads of a repeated key resolve to the last declaration.
-                try accumulateScalar(allocator, old, kv[1]);
-                allocator.free(kv[0]);
-            } else {
-                try current_section.pairs.put(kv[0], kv[1]);
-                current_section.recordKey(allocator, kv[0]);
-            }
-
-            p.skipWhitespace();
-            const next = p.peek();
-
-            if (next == ';') {
-                _ = p.consume();
-                p.skipWhitespace();
-                const after = p.peek();
-                if (after == '\n' or after == '#' or after == null) {
-                    p.skipLineEnd(after);
-                    break;
-                }
-                continue;
-            }
-
-            if (next == '\n' or next == '#' or next == null) {
-                p.skipLineEnd(next);
-                break;
-            }
-
-            debug.warn("Unexpected character at line {}", .{p.line});
-            p.skipToNewline();
-            break;
-        }
+        try p.parsePairs(current_section);
     }
 
     return doc;

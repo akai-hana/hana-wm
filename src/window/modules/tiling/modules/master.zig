@@ -123,25 +123,28 @@ fn tileColumn(
     }
 }
 
-/// Split `avail` content-height pixels across `windows`, writing one height
-/// per window into `out` (same order/length as `windows`).
-///
-/// A window whose cached max_height sits at or below its fair share is
-/// "capped": pinned to that max_height, removed from the pool, and its pixels
-/// flow back to everyone else. Pinning raises remaining fair shares, which can
-/// cap a previously-uncapped window — so this repeats until nothing new gets
-/// pinned (water-filling; bounded by `windows.len` passes).
-///
-/// Fair shares are weighted by `boost`. Zero boost — the common case — gives
-/// every slot weight 1.0 and takes the same cumulative-division path as
-/// windowHeight/windowY, so output stays bit-identical to the historical even
-/// split. Non-zero boost uses the telescoping rounded cumulative sum
-/// (`cum`/`prev_px`) so fractional weights land on the right pixel.
-fn distributeStackHeightsWeighted(ctx: *const layouts.LayoutCtx, windows: []const u32, avail: u16, boost: StackBoost, min_dim: u16, out: []u16) void {
-    const n: u16 = @intCast(windows.len);
+/// Result of the water-filling pass: which windows are capped (pinned to their
+/// max_height) and the leftover budget after removing their pixels.
+const CapResult = struct {
+    capped: []bool,
+    remaining_avail: u16,
+    remaining_weight: f32,
+    remaining_count: u16,
+};
 
-    var capped_buf: [constants.Limits.MAX_TILED_WINDOWS]bool = undefined;
-    const capped = capped_buf[0..windows.len];
+/// Water-filling pass: repeatedly pins windows whose max_height sits at or
+/// below their current fair share, redistributing their pixels to the rest.
+/// Stops when no new window gets pinned (bounded by `windows.len` passes).
+fn findCappedWindows(
+    ctx: *const layouts.LayoutCtx,
+    windows: []const u32,
+    avail: u16,
+    boost: StackBoost,
+    min_dim: u16,
+    out: []u16,
+    capped: []bool,
+) CapResult {
+    const n: u16 = @intCast(windows.len);
     @memset(capped, false);
 
     var remaining_avail = avail;
@@ -170,16 +173,26 @@ fn distributeStackHeightsWeighted(ctx: *const layouts.LayoutCtx, windows: []cons
         }
     }
 
-    if (boost.isZero()) {
-        var seen: u16 = 0;
-        for (windows, 0..) |_, i| {
-            if (capped[i]) continue;
-            out[i] = windowHeight(seen, remaining_count, remaining_avail, min_dim);
-            seen += 1;
-        }
-        return;
-    }
+    return .{
+        .capped = capped,
+        .remaining_avail = remaining_avail,
+        .remaining_weight = remaining_weight,
+        .remaining_count = remaining_count,
+    };
+}
 
+/// Assigns heights to uncapped windows using plain even division (zero boost).
+fn distributeEven(windows: []const u32, capped: []bool, remaining_count: u16, remaining_avail: u16, min_dim: u16, out: []u16) void {
+    var seen: u16 = 0;
+    for (windows, 0..) |_, i| {
+        if (capped[i]) continue;
+        out[i] = windowHeight(seen, remaining_count, remaining_avail, min_dim);
+        seen += 1;
+    }
+}
+
+/// Assigns heights to uncapped windows using weighted cumulative division.
+fn distributeWeighted(windows: []const u32, n: u16, boost: StackBoost, capped: []bool, remaining_weight: f32, remaining_avail: u16, min_dim: u16, out: []u16) void {
     var cum: f32 = 0;
     var prev_px: f32 = 0;
     for (windows, 0..) |_, i| {
@@ -192,6 +205,35 @@ fn distributeStackHeightsWeighted(ctx: *const layouts.LayoutCtx, windows: []cons
         const h: u16 = @intFromFloat(@max(@as(f32, 0), px - prev_px));
         out[i] = @max(min_dim, h);
         prev_px = px;
+    }
+}
+
+/// Split `avail` content-height pixels across `windows`, writing one height
+/// per window into `out` (same order/length as `windows`).
+///
+/// A window whose cached max_height sits at or below its fair share is
+/// "capped": pinned to that max_height, removed from the pool, and its pixels
+/// flow back to everyone else. Pinning raises remaining fair shares, which can
+/// cap a previously-uncapped window — so this repeats until nothing new gets
+/// pinned (water-filling; bounded by `windows.len` passes).
+///
+/// Fair shares are weighted by `boost`. Zero boost — the common case — gives
+/// every slot weight 1.0 and takes the same cumulative-division path as
+/// windowHeight/windowY, so output stays bit-identical to the historical even
+/// split. Non-zero boost uses the telescoping rounded cumulative sum
+/// (`cum`/`prev_px`) so fractional weights land on the right pixel.
+fn distributeStackHeightsWeighted(ctx: *const layouts.LayoutCtx, windows: []const u32, avail: u16, boost: StackBoost, min_dim: u16, out: []u16) void {
+    const n: u16 = @intCast(windows.len);
+
+    var capped_buf: [constants.Limits.MAX_TILED_WINDOWS]bool = undefined;
+    const capped = capped_buf[0..windows.len];
+
+    const cap = findCappedWindows(ctx, windows, avail, boost, min_dim, out, capped);
+
+    if (boost.isZero()) {
+        distributeEven(windows, cap.capped, cap.remaining_count, cap.remaining_avail, min_dim, out);
+    } else {
+        distributeWeighted(windows, n, boost, cap.capped, cap.remaining_weight, cap.remaining_avail, min_dim, out);
     }
 }
 
@@ -240,7 +282,8 @@ fn tileStack(
     const max_fit: u16 = @intCast(@max(1, available / space_per_window));
 
     if (stack_n <= max_fit) {
-        tileColumn(ctx, windows, x +| m.gap / 2, y_offset, h, layouts.shrinkClamped(w, m.gap / 2 + (m.gap + 2 * m.border), min_dim), m, boost, min_dim);
+        const stack_inner_w = layouts.shrinkClamped(w, m.gap / 2 + (m.gap + 2 * m.border), min_dim);
+        tileColumn(ctx, windows, x +| m.gap / 2, y_offset, h, stack_inner_w, m, boost, min_dim);
         return;
     }
     tileStackExtra(ctx, windows, x, y_offset, w, h, max_fit, m, min_dim);

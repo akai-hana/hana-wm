@@ -4,7 +4,6 @@
 //! manual scrolling and window closes are handled by clamping on every retile.
 
 const std = @import("std");
-const core = @import("core");
 const utils = @import("utils");
 const constants = @import("constants");
 
@@ -47,9 +46,9 @@ inline fn maxOffset(n: usize, screen_w: u16) i32 {
 /// Shift the scroll viewport by one slot; `delta` is +1 (right) or -1 (left).
 /// No-op (false) when the layout isn't .scroll — the caller should skip
 /// retiling then. tileWithOffset clamps to [0, max_off] next retile.
-pub fn step(s: *tiling.State, delta: i32) bool {
+pub fn step(s: *tiling.State, delta: i32, screen_w: u16) bool {
     if (s.config.layout != .scroll) return false;
-    s.scroll.offset += delta * slotWidth(core.getState().screen.width_in_pixels);
+    s.scroll.offset += delta * slotWidth(screen_w);
     return true;
 }
 
@@ -62,11 +61,10 @@ pub fn step(s: *tiling.State, delta: i32) bool {
 /// visible when that edge is in [scroll, scroll + slot_w], else it's placed
 /// on the right half (new_scroll = fi*slot_w - slot_w) or the left half
 /// (new_scroll = fi*slot_w).
-pub fn snapOffsetToWindow(s: *tiling.State, ws_wins: []const u32, win: u32) bool {
+pub fn snapOffsetToWindow(s: *tiling.State, ws_wins: []const u32, win: u32, screen_w: u16) bool {
     const fi = std.mem.indexOfScalar(u32, ws_wins, win) orelse return false;
 
     const fi_i32: i32 = @intCast(fi);
-    const screen_w = core.getState().screen.width_in_pixels;
     const slot_w = slotWidth(screen_w);
     const max_off = maxOffset(ws_wins.len, screen_w);
 
