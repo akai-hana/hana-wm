@@ -1223,8 +1223,8 @@ inline fn cycleEnum(v: anytype, comptime forward: bool) void {
     v.* = @enumFromInt(if (forward) (cur + 1) % len else (cur + len - 1) % len);
 }
 
-// Focused accessors for hooks.zig — expose live tiling state fields directly
-// instead of returning a pointer to a never-synced static copy.
+// Focused accessors for hooks.zig
+// Expose live tiling state fields directly instead of returning a pointer to a never-synced static copy.
 
 pub inline fn isEnabled() bool {
     const s = getStateOpt() orelse return false;
