@@ -10,9 +10,11 @@ const utils = @import("utils");
 const window = @import("window");
 const focus = @import("focus");
 
-const tiling = @import("tiling");
+const build_options = @import("build_options");
+const hooks = @import("hooks");
+const bar = if (build_options.has_bar) @import("bar") else null;
+const tiling = if (build_options.has_tiling) @import("tiling") else null;
 const fullscreen = @import("fullscreen");
-const bar = @import("bar");
 
 // Drag state
 
@@ -65,7 +67,7 @@ fn workArea() WorkArea {
     const cs = core.getState();
     const sw: i32 = cs.screen.width_in_pixels;
     const bw2: i32 = @as(i32, window.getBorderWidth()) * 2;
-    const work = bar.workAreaRect();
+    const work = if (build_options.has_bar) bar.workAreaRect() else .{ .x = 0, .y = 0, .width = core.screen.width, .height = core.screen.height };
     return .{
         .left = 0,
         .right = sw - bw2,
@@ -127,13 +129,13 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     const cs = core.getState();
     if (!cs.config.drag_enabled) return;
     if (g_state.drag.active) return;
-    if (bar.isBarWindow(win)) return;
+    if ((if (build_options.has_bar) bar.isBarWindow(win) else false)) return;
     if (fullscreen.isFullscreen(win)) return; // fullscreen geometry must not be touched
 
     // Prefer the tiling cache (always current) over a live XCB round-trip;
     // fall back to a live query for floating windows the tiler never tracked.
     const geom = blk: {
-        if (tiling.getWindowGeom(win)) |g| break :blk g;
+        if (if (build_options.has_tiling) tiling.getWindowGeom(win) else null) |g| break :blk g;
         break :blk window.getGeometry(cs.conn, win) orelse return;
     };
 
@@ -160,7 +162,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
         // A tiled window in a non-floating layout detaches on first motion
         // (see updateDrag); move also skips snap on that first event so the
         // window doesn't appear frozen at a tiled edge.
-        .pending_float = tiling.isWindowTiled(win) and !tiling.isFloatingLayout(),
+        .pending_float = (if (build_options.has_tiling) tiling.isWindowTiled(win) else false) and !(if (build_options.has_tiling) tiling.isFloatingLayout() else false),
     };
     focus.setFocus(win, .user_command);
     utils.raiseWindow(cs.conn, win);
@@ -233,8 +235,8 @@ pub fn updateDrag(x: i16, y: i16) void {
         g_state.pending_float = false;
         const conn = core.getState().conn;
         utils.grabServer(conn);
-        tiling.removeWindow(drag.window);
-        tiling.retileCurrentWorkspace();
+        if (build_options.has_tiling) tiling.removeWindow(drag.window);
+        if (build_options.has_tiling) tiling.retileCurrentWorkspace();
         utils.ungrabAndFlush(conn);
     }
 
@@ -263,25 +265,27 @@ pub fn stopDrag() void {
 }
 
 /// Clears the active drag if it targets `win`, without saving geometry. Used
-/// when the dragged window is destroyed mid-drag — a lost ButtonRelease would
+/// when the dragged window is destroyed mid-drag; a lost ButtonRelease would
 /// otherwise leave the drag stuck until the WM restarts, and there's no
 /// geometry to persist for a dead window.
 pub fn cancelDragForWindow(win: u32) void {
     if (g_state.drag.active and g_state.drag.window == win) g_state = .{};
 }
 
-pub inline fn isDragging() bool {
+pub fn isDragging() bool {
     return g_state.drag.active;
 }
 
-/// True when a resize drag is active on `win` — used to deny min-size
+/// True when a resize drag is active on `win`; used to deny min-size
 /// configure requests from the window being resized, preventing flicker.
-pub inline fn isResizingWindow(win: u32) bool {
+pub fn isResizingWindow(win: u32) bool {
     return g_state.drag.active and g_state.drag.mode == .resize and g_state.drag.window == win;
 }
 
 /// Rect last applied during the active drag. Only meaningful while
 /// isDragging() and after at least one motion event.
-pub inline fn getDragLastRect() utils.Rect {
+pub fn getDragLastRect() utils.Rect {
     return g_state.drag.last_rect;
 }
+
+pub const plugin = hooks.Plugin{};

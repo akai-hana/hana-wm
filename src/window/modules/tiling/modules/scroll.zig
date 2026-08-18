@@ -22,13 +22,13 @@ pub const State = struct {
     /// Used to detect new windows and snap the viewport to them.
     prev_n: usize = 0,
     /// The window focused just before the current one (updated on each real
-    /// A→B transition), so closing the focused window restores focus to the
+    /// A->B transition), so closing the focused window restores focus to the
     /// previous one rather than falling back to list order.
     prev_focused: ?u32 = null,
 };
 
 /// Pixel width of one scroll slot: exactly half the screen width. Single
-/// source of truth — step, snapOffsetToWindow, and tileWithOffset all derive
+/// source of truth; step, snapOffsetToWindow, and tileWithOffset all derive
 /// their geometry from it.
 inline fn slotWidth(screen_w: u16) i32 {
     return @intCast(screen_w / 2);
@@ -44,7 +44,7 @@ inline fn maxOffset(n: usize, screen_w: u16) i32 {
 }
 
 /// Shift the scroll viewport by one slot; `delta` is +1 (right) or -1 (left).
-/// No-op (false) when the layout isn't .scroll — the caller should skip
+/// No-op (false) when the layout isn't .scroll; the caller should skip
 /// retiling then. tileWithOffset clamps to [0, max_off] next retile.
 pub fn step(s: *tiling.State, delta: i32, screen_w: u16) bool {
     if (s.config.layout != .scroll) return false;
@@ -71,7 +71,7 @@ pub fn snapOffsetToWindow(s: *tiling.State, ws_wins: []const u32, win: u32, scre
     const win_left: i32 = fi_i32 * slot_w;
     const scroll_off = s.scroll.offset;
 
-    // Already fully visible — left edge is inside [scroll_off, scroll_off + slot_w].
+    // Already fully visible, left edge is inside [scroll_off, scroll_off + slot_w].
     if (win_left >= scroll_off and win_left <= scroll_off + slot_w) return false;
 
     const new_scroll: i32 = if (win_left > scroll_off + slot_w)
@@ -137,7 +137,7 @@ pub fn tileWithOffset(
     const gap_half: i32 = @intCast(m.gap / 2);
     const border2: i32 = @as(i32, utils.doubledBorder(m));
 
-    // emitOrDefer honors ctx.defer_win — see LayoutCtx.defer_win.
+    // emitOrDefer honors ctx.defer_win, see LayoutCtx.defer_win.
     for (windows, 0..) |win, i| {
         const col: i32 = @intCast(i);
 
@@ -157,7 +157,7 @@ pub fn tileWithOffset(
         const right: i32 = x + avail + border2;
 
         // Completely off-screen: park at OFFSCREEN_X_POSITION to keep the
-        // cache consistent — the computed x can exceed i16 range.
+        // cache consistent, the computed x can exceed i16 range.
         const effective_x: i32 = if (x >= sw_i32 or right <= 0) constants.OFFSCREEN_X_POSITION else x;
         const rect = utils.Rect{
             .x = @intCast(effective_x),

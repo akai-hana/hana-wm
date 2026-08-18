@@ -5,6 +5,8 @@ const std = @import("std");
 
 const core = @import("core");
 const constants = @import("constants");
+const build_options = @import("build_options");
+const tiling = if (build_options.has_tiling) @import("tiling") else null;
 const utils = @import("utils");
 const minimize = @import("minimize");
 
@@ -15,7 +17,7 @@ const minimize = @import("minimize");
 
 pub const Tracking = struct {
     /// Hard compile-time cap on windows tracked across the whole WM (all
-    /// workspaces combined) — `tiling.State.windows`, a single global
+    /// workspaces combined), `tiling.State.windows`, a single global
     /// instance, not one per workspace. Not a tuneable: windows beyond the cap
     /// are silently dropped from tiling and workspace membership (error log).
     /// Raise constants.Limits.MAX_TILED_WINDOWS and rebuild if too small; the
@@ -76,7 +78,7 @@ pub const Tracking = struct {
 
     /// Remove `win`, preserving the relative order of all other entries.
     ///
-    /// Use this variant when window order is semantically meaningful — e.g.
+    /// Use this variant when window order is semantically meaningful, e.g.
     /// tiling layouts that derive master/slave assignment from positional index.
     /// O(n) due to the left-shift of the tail.
     ///
@@ -103,7 +105,7 @@ pub const Entry = struct {
 
 // Per-workspace focus history (MRU)
 //
-// Records, per workspace, the order windows lost focus on it — so a caller
+// Records, per workspace, the order windows lost focus on it, so a caller
 // resolving "what should regain focus now" (minimize fallback, in particular)
 // answers "whichever window was actually focused right before this one", not
 // "the first candidate a registration-order scan turns up". Scoped
@@ -137,7 +139,7 @@ pub fn pushFocusMru(ws_idx: u8, win: u32) void {
 
 /// Pop the most recently defocused window on workspace `ws_idx` that
 /// satisfies `visible`. Entries popped along the way that do NOT satisfy
-/// `visible` are discarded rather than left in place — they're stale
+/// `visible` are discarded rather than left in place, they're stale
 /// (minimized, destroyed, or moved off this workspace) and, having already
 /// failed the check once, would only fail it again later. Returns null once
 /// the stack is exhausted with nothing eligible.
@@ -155,7 +157,7 @@ pub fn popFocusMru(ws_idx: u8, visible: *const fn (u32) bool) ?u32 {
 
 /// Purge `win` from every workspace's focus history. Called on final
 /// untracking (removeWindow) so a destroyed window's ID can never surface
-/// from a stale entry — X11 recycles window IDs, and an unpurged entry could
+/// from a stale entry, X11 recycles window IDs, and an unpurged entry could
 /// otherwise be mistaken for a live, unrelated window that later reuses the
 /// same ID.
 fn removeFromFocusMruAll(win: u32) void {
@@ -172,8 +174,8 @@ var g_windows: std.ArrayListUnmanaged(Entry) = .empty;
 /// win -> index into g_windows.items, giving the ID-lookup functions below
 /// (getWindowWorkspaceMask, isManaged, setWindowMask, removeWindow) O(1)
 /// average instead of an O(n) scan. Unlike the bounded per-workspace tiling
-/// list (Tracking above), g_windows is genuinely unbounded — it holds every
-/// managed window, tiled and floating — so its scan cost grows with real
+/// list (Tracking above), g_windows is genuinely unbounded, it holds every
+/// managed window, tiled and floating, so its scan cost grows with real
 /// usage. Same window-ID index pattern as layouts.CacheMap.
 var g_index: std.AutoHashMapUnmanaged(u32, usize) = .empty;
 var g_alloc: std.mem.Allocator = undefined;
@@ -208,7 +210,7 @@ pub fn deinit() void {
     clearFocusMru();
 }
 
-/// Called by workspaces.init — tells tracking how many workspaces exist.
+/// Called by workspaces.init: tells tracking how many workspaces exist.
 /// count must not exceed 64; the workspace bitmask (u64) cannot represent more.
 pub fn setWorkspaceCount(count: usize) void {
     std.debug.assert(count <= 64);
@@ -241,7 +243,7 @@ pub fn registerWindow(win: u32, ws: u8) !void {
     try g_windows.append(g_alloc, .{ .win = win, .mask = workspaceBit(ws) });
     g_index.put(g_alloc, win, idx) catch |err| {
         // Roll back the just-appended entry so g_windows and g_index stay in
-        // sync — otherwise the window would be present in g_windows but
+        // sync, otherwise the window would be present in g_windows but
         // invisible to isManaged/getWindowWorkspaceMask, which only consult
         // g_index.
         _ = g_windows.pop();
@@ -260,7 +262,7 @@ pub fn removeWindow(win: u32) void {
     _ = g_windows.swapRemove(i);
     _ = g_index.remove(win);
     // swapRemove moved the previously-last entry into slot i (unless i was
-    // last) — repoint that window's index if so.
+    // last), repoint that window's index if so.
     if (i < g_windows.items.len) {
         const moved_win = g_windows.items[i].win;
         g_index.put(g_alloc, moved_win, i) catch {
@@ -352,7 +354,7 @@ pub fn onWorkspace(bit: u64, skip: u32) WorkspaceIter {
 /// Bitmask selecting "windows on the current workspace" for iteration
 /// helpers: the current workspace's bit when workspaces are enabled, or
 /// all-ones (no filter) when they're disabled. Null when workspaces are
-/// enabled but no current workspace is set yet (not initialized) — callers
+/// enabled but no current workspace is set yet (not initialized), callers
 /// treat that as "nothing to iterate".
 fn currentWorkspaceIterBit() ?u64 {
     if (core.getState().config.workspaces.enabled) {
@@ -376,7 +378,7 @@ pub fn windowsOnCurrentWorkspace(skip: u32) WorkspaceIter {
 /// windows that are on `skip_ws` (use 255 to skip none), skips
 /// windows with a cache hit, issues a live `xcb_get_geometry`, and saves
 /// the result. Skips replies that report the window parked at the
-/// off-screen sentinel — that position isn't a real, restorable geometry.
+/// off-screen sentinel, that position isn't a real, restorable geometry.
 /// Must run BEFORE `xcb_grab_server` (a round-trip can't happen inside a
 /// grab). `skip_win` is excluded from iteration (0 = none).
 pub fn prefetchAndSaveGeometry(
@@ -385,7 +387,6 @@ pub fn prefetchAndSaveGeometry(
     skip_win: u32,
     skip_ws: u8,
 ) void {
-    const tiling = @import("tiling");
     const window = @import("window");
     const conn = core.getState().conn;
     var it = onWorkspace(ws_bit, skip_win);
@@ -393,7 +394,7 @@ pub fn prefetchAndSaveGeometry(
         const win = entry.win;
         if (skip_ws < 64 and isWindowOnWorkspace(win, skip_ws)) continue;
         if (!predicate(win)) continue;
-        if (tiling.getWindowGeom(win) != null) continue;
+        if ((if (build_options.has_tiling) tiling.getWindowGeom(win) else null) != null) continue;
         const reply = core.xcb.xcb_get_geometry_reply(conn, core.xcb.xcb_get_geometry(conn, win), null) orelse continue;
         defer std.c.free(reply);
         if (utils.isOffscreenGeomReply(reply)) continue;
@@ -434,7 +435,7 @@ pub inline fn workspaceBit(ws_idx: anytype) u64 {
 }
 
 /// Returns a bitmask with bits set for every workspace in [0, count).
-/// Returns all-ones for count ≥ 64 (saturating at the u64 width).
+/// Returns all-ones for count >= 64 (saturating at the u64 width).
 pub inline fn allWorkspacesMask(count: usize) u64 {
     if (count >= 64) return ~@as(u64, 0);
     return (@as(u64, 1) << @intCast(count)) - 1;
@@ -454,7 +455,7 @@ pub const WORKSPACE_LABELS: [64][]const u8 = blk: {
 /// Lowest-indexed workspace this window belongs to, or null if untracked.
 /// Definitive for single-workspace windows (the common case); for tag-based
 /// multi-workspace windows the mask may have several bits set and this returns
-/// the lowest, which need not be the *current* workspace — use
+/// the lowest, which need not be the *current* workspace, use
 /// isOnCurrentWorkspace(win) for that.
 pub inline fn getWorkspaceForWindow(win: u32) ?u8 {
     const mask = getWindowWorkspaceMask(win) orelse return null;

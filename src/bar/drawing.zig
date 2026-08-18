@@ -21,7 +21,7 @@ pub fn findVisualByDepth(screen: *core.xcb.xcb_screen_t, depth: u8) u32 {
 }
 
 // Module-level font cache shared across all DrawContext instances (measurement + render DCs).
-// Single-threaded — no synchronisation needed.
+// Single-threaded; no synchronisation needed.
 
 var font_conversion_cache: ?std.StringHashMap([]const u8) = null;
 
@@ -122,7 +122,7 @@ inline fn createCheckedGC(conn: *core.xcb.xcb_connection_t, drawable: u32) !u32 
 }
 
 /// Positions `layout` at `x` on `baseline` (accounting for the layout's own
-/// baseline — font fallback can shift it per-run) and renders it. Shared by the
+/// baseline, font fallback can shift it per-run) and renders it. Shared by the
 /// DrawContext text paths and CarouselPixmap's two copy positions.
 inline fn showAtBaseline(ctx: *c.cairo_t, layout: *c.PangoLayout, x: u16, baseline: u16) void {
     c.cairo_move_to(ctx, @as(f64, @floatFromInt(x)), @as(f64, @floatFromInt(baseline)) - pangoToF64(c.pango_layout_get_baseline(layout)));
@@ -132,9 +132,9 @@ inline fn showAtBaseline(ctx: *c.cairo_t, layout: *c.PangoLayout, x: u16, baseli
 pub const DrawContext = struct {
     font: FontState,
     conn: *core.xcb.xcb_connection_t,
-    /// The real X window — only used as the copy destination in flush().
+    /// The real X window, only used as the copy destination in flush().
     window: u32,
-    /// Off-screen pixmap — all drawing targets this.
+    /// Off-screen pixmap; all drawing targets this.
     offscreen_pixmap: u32,
     width: u16,
     height: u16,
@@ -151,7 +151,7 @@ pub const DrawContext = struct {
     /// Computed once at init so fillRect pays zero floating-point cost per call.
     alpha_u8: u8 = 0xFF,
     last_color: ?u32 = null,
-    /// Cached GC foreground — skips xcb_change_gc when the packed ARGB pixel is unchanged.
+    /// Cached GC foreground: skips xcb_change_gc when the packed ARGB pixel is unchanged.
     last_gc_color: ?u32 = null,
 
     // drawTextSized cache: avoids copying the font description on every
@@ -159,11 +159,11 @@ pub const DrawContext = struct {
     sized_font_desc: ?*c.PangoFontDescription = null,
     sized_font_px: u16 = 0,
 
-    /// Stored for CarouselPixmap — needed to create a Cairo surface with the same visual.
+    /// Stored for CarouselPixmap, needed to create a Cairo surface with the same visual.
     visual_type: ?*core.xcb.xcb_visualtype_t = null,
     /// DPI used when rendering into a CarouselPixmap (must match bar's Pango layout).
     dpi: f32 = 96.0,
-    /// Actual pixel depth of the offscreen pixmap — 32 for ARGB, screen root_depth otherwise.
+    /// Actual pixel depth of the offscreen pixmap: 32 for ARGB, screen root_depth otherwise.
     depth: u8 = 24,
 
     /// All drawing targets the off-screen pixmap; call blit() to copy to the window atomically.
@@ -242,7 +242,7 @@ pub const DrawContext = struct {
         if (self.copy_gc != 0) _ = core.xcb.xcb_free_gc(self.conn, self.copy_gc);
         c.g_object_unref(self.font.pango_layout);
         c.cairo_destroy(self.ctx);
-        // Destroy surface before pixmap — Cairo holds a reference to the pixmap.
+        // Destroy surface before pixmap: Cairo holds a reference to the pixmap.
         c.cairo_surface_destroy(self.surface);
         if (self.offscreen_pixmap != 0) _ = core.xcb.xcb_free_pixmap(self.conn, self.offscreen_pixmap);
         self.font.allocator.destroy(self);
@@ -282,7 +282,7 @@ pub const DrawContext = struct {
     }
 
     /// Cached sized font description; rebuilt whenever `size_px` changes.
-    /// Derived from font.current_font_desc, so it is stale after a font reload —
+    /// Derived from font.current_font_desc, so it is stale after a font reload;
     /// DrawContexts are created fresh per reload, which keeps it consistent today.
     pub fn drawTextSized(self: *DrawContext, x: u16, y_top: u16, text: []const u8, size_px: u16, color: u32) !void {
         const desc = self.font.current_font_desc orelse return error.NoFont;
@@ -348,7 +348,7 @@ pub const DrawContext = struct {
         _ = core.xcb.xcb_copy_area(self.conn, self.offscreen_pixmap, self.window, self.copy_gc, @intCast(src_x), 0, @intCast(dst_x), 0, w, self.height);
     }
 
-    /// cairo_surface_flush only — no xcb_copy_area, no xcb_flush.
+    /// cairo_surface_flush only, no xcb_copy_area, no xcb_flush.
     /// Safe inside xcb_grab_server; pair with blitQueued() + ungrabAndFlush().
     pub fn renderOnly(self: *DrawContext) void {
         c.cairo_surface_flush(self.surface);
@@ -360,7 +360,7 @@ pub const DrawContext = struct {
         if (self.copy_gc != 0) self.xcbCopyArea(0, 0, self.width);
     }
 
-    /// Does NOT call xcb_flush — the event loop's end-of-batch flush covers event-driven
+    /// Does NOT call xcb_flush: the event loop's end-of-batch flush covers event-driven
     /// paths; timer-driven paths (clock tick, cursor blink) must flush explicitly.
     pub fn blit(self: *DrawContext) void {
         self.renderOnly();
@@ -400,7 +400,7 @@ pub const DrawContext = struct {
     }
 };
 
-// MeasureContext: lightweight font measurement backed by a 1×1 Cairo image surface.
+// MeasureContext: lightweight font measurement backed by a 1x1 Cairo image surface.
 // No XCB resources, no X round-trips. Same loadFont/loadFonts/getMetrics interface as DrawContext.
 
 pub const MeasureContext = struct {
@@ -410,8 +410,8 @@ pub const MeasureContext = struct {
     pub fn init(allocator: std.mem.Allocator, dpi: f32) !MeasureContext {
         const surface = c.cairo_image_surface_create(.ARGB32, 1, 1) orelse return error.CairoSurfaceCreateFailed;
         errdefer c.cairo_surface_destroy(surface);
-        // The cairo context exists only to obtain the Pango layout — the
-        // layout keeps its own PangoContext/font map — so it is created and
+        // The cairo context exists only to obtain the Pango layout, the
+        // layout keeps its own PangoContext/font map; so it is created and
         // destroyed here rather than stored.
         const ctx = c.cairo_create(surface) orelse return error.CairoCreateFailed;
         defer c.cairo_destroy(ctx);
@@ -429,17 +429,17 @@ pub const MeasureContext = struct {
 /// Pre-renders a title into a wide XCB pixmap once; every carousel tick is a
 /// single xcb_copy_area with zero Pango/Cairo involvement.
 ///
-/// Text A is rendered at offset `left_pad`; text B — the seamless loop's second
-/// copy — at `left_pad + cycle_w`:
+/// Text A is rendered at offset `left_pad`; text B, the seamless loop's second
+/// copy, at `left_pad + cycle_w`:
 ///
 ///   [ bg * left_pad | text A | bg * gap | text B ]
-///    ←── left_pad ──→←text_w→←── gap ──→←text_w→
+///    <-- left_pad --><-text_w-><-- gap --><-text_w->
 ///
-/// At scroll offset O (0 ≤ O < cycle_w), blitFrame copies seg_w pixels from O;
+/// At scroll offset O (0 <= O < cycle_w), blitFrame copies seg_w pixels from O;
 /// the pixmap is wide enough that the copy is always a single unclipped
 /// xcb_copy_area.
 ///
-/// Required: pixmap_w ≥ cycle_w + seg_w, so [O, O + seg_w) never reads past the
+/// Required: pixmap_w >= cycle_w + seg_w, so [O, O + seg_w) never reads past the
 /// pixmap. If the title is wider than the segment, text B clips at the pixmap
 /// edge (the window only ever sees the first seg_w − left_pad pixels, always in
 /// bounds). Callers (carousel.zig) compute the width before calling init().

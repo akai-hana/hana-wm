@@ -6,7 +6,7 @@ const drawing = @import("drawing");
 const tracking = @import("tracking");
 
 // Sized to WORKSPACE_LABELS, the largest label source; every workspace index is
-// bounded by tracking.getWorkspaceCount() (≤ MAX_WORKSPACES), so no fallback path.
+// bounded by tracking.getWorkspaceCount() (<= MAX_WORKSPACES), so no fallback path.
 var label_widths: [tracking.WORKSPACE_LABELS.len]u16 = [_]u16{0} ** tracking.WORKSPACE_LABELS.len;
 var ws_width: u16 = 0;
 var cache_valid: bool = false;
@@ -86,7 +86,7 @@ fn indicatorPos(
 
 /// Draw workspace tags.
 ///
-/// `ws_current` — index of the currently active workspace. `ws_has_windows` —
+/// `ws_current`: index of the currently active workspace. `ws_has_windows`:
 /// one bool per workspace; true when it has at least one window (drives the
 /// indicator glyph).
 pub fn draw(
@@ -103,7 +103,7 @@ pub fn draw(
     const ind_size = config.scaledIndicatorSize(height);
     var x = start_x;
 
-    // baselineY returns the same value for every cell — hoist it once outside the loop.
+    // baselineY returns the same value for every cell, hoist it once outside the loop.
     const baseline_y = dc.baselineY(height);
 
     for (ws_has_windows, 0..) |has_windows, i| {

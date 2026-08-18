@@ -15,7 +15,7 @@ const property_no_delete = constants.PROPERTY_NO_DELETE;
 
 // Process lifecycle signals
 //
-// Module-level atomics, not WM struct fields — this is process control
+// Module-level atomics, not WM struct fields; this is process control
 // state, not window-manager state. Signal handlers and keybind actions
 // write here; the main event loop reads here.
 
@@ -35,7 +35,7 @@ var signal_write_fd: std.posix.fd_t = -1;
 /// Byte `reload()` writes to the signal pipe to wake the event loop. Must not
 /// be a real signal number: `signals.drainAndDispatch` dispatches every byte
 /// it reads, and re-dispatching the wake byte as SIGHUP would make the drain
-/// loop call `reload()` again — writing another wake byte and spinning forever.
+/// loop call `reload()` again; writing another wake byte and spinning forever.
 pub const WAKE_BYTE: u8 = 0xff;
 
 /// Registers the write end of the signal self-pipe so `reload()` can wake the
@@ -52,7 +52,7 @@ pub inline fn quit() void {
 /// Signals the main event loop to reload the user config.
 ///
 /// Safe from any thread: the wake byte is a plain write, not a signal. If the
-/// pipe is full (or not yet registered) the write is dropped — the event loop
+/// pipe is full (or not yet registered) the write is dropped; the event loop
 /// also polls the flag itself every iteration, so a lost byte only delays the
 /// reload by one poll timeout at worst.
 pub inline fn reload() void {
@@ -137,7 +137,7 @@ pub inline fn normalizeModifiers(state: u16) u16 {
 // Atom cache
 //
 // Field names match X11 atom strings exactly, so getAtomCached resolves
-// them with a single @field call — no switch, no enum, no second place to
+// them with a single @field call: no switch, no enum, no second place to
 // add entries when a new atom is needed.
 const AtomCache = struct {
     WM_PROTOCOLS: u32,
@@ -146,7 +146,7 @@ const AtomCache = struct {
     _NET_WM_NAME: u32,
     UTF8_STRING: u32,
     WM_CLASS: u32,
-    // Root window EWMH-conformance atoms — see advertiseEwmhSupport() below.
+    // Root window EWMH-conformance atoms, see advertiseEwmhSupport() below.
     _NET_SUPPORTED: u32,
     _NET_SUPPORTING_WM_CHECK: u32,
     // Bar window property atoms, batched here so setWindowProperties pays
@@ -163,9 +163,9 @@ const AtomCache = struct {
     _NET_WM_ACTION_ABOVE: u32,
     _NET_WM_ACTION_STICK: u32,
     _NET_WM_PID: u32,
-    // Root-window focus advertisement — read by focus.zig's setFocus path.
+    // Root-window focus advertisement: read by focus.zig's setFocus path.
     _NET_ACTIVE_WINDOW: u32,
-    // Legacy X resource-database atom — read by scale.zig for Xft.dpi.
+    // Legacy X resource-database atom: read by scale.zig for Xft.dpi.
     RESOURCE_MANAGER: u32,
 };
 
@@ -173,7 +173,7 @@ var atom_cache: ?AtomCache = null;
 
 /// Interns all atoms in a single round-trip batch. Atom names come from
 /// `AtomCache`'s field names at comptime, so adding a field is the only
-/// change required — no parallel array, no index-order mismatch risk.
+    /// change required, no parallel array, no index-order mismatch risk.
 pub fn initAtomCache(conn: *xcb.xcb_connection_t) !void {
     const fields = std.meta.fields(AtomCache);
     var cookies: [fields.len]xcb.xcb_intern_atom_cookie_t = undefined;
@@ -211,7 +211,7 @@ pub inline fn getAtomOrZero(comptime name: []const u8) u32 {
 // EWMH root window advertisement
 
 /// EWMH atoms hana declares via `_NET_SUPPORTED`. Every entry must correspond
-/// to a protocol hana genuinely honours — clients use this list to decide what
+/// to a protocol hana genuinely honours; clients use this list to decide what
 /// they can rely on.
 ///
 /// Notably fixes GLFW's "Iconification of full screen windows requires a WM
@@ -241,9 +241,9 @@ const supported_atoms = [_][]const u8{
 /// Publishes hana's EWMH conformance on the root window: per the spec a
 /// conformant WM creates a small identity ("check") window, tags it and the
 /// root with `_NET_SUPPORTING_WM_CHECK`, gives it a `_NET_WM_NAME`, and lists
-/// every honour-able hint in `_NET_SUPPORTED`. Clients (GLFW, Qt, Chromium, …)
+/// every honour-able hint in `_NET_SUPPORTED`. Clients (GLFW, Qt, Chromium, ...)
 /// probe this once at startup; without it they assume a bare ICCCM-only WM and
-/// take more conservative — in GLFW's case broken — code paths (see
+/// take more conservative, in GLFW's case broken, code paths (see
 /// `supported_atoms`).
 ///
 /// Must run once at startup, after initAtomCache() and before any client can
@@ -294,7 +294,7 @@ pub fn advertiseEwmhSupport(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen
 
 // Property helpers
 
-/// Canonical scaling formulas — pure functions of a ScalableValue, no DPI
+/// Canonical scaling formulas: pure functions of a ScalableValue, no DPI
 /// lookup. scale.zig and config.zig both call into these, so there is exactly
 /// one formula to maintain.
 pub const scaling = struct {
@@ -377,7 +377,7 @@ pub inline fn pushWindowOffscreenAndLower(conn: *xcb.xcb_connection_t, win: u32)
 // up to ~refresh-rate times per second). A carousel flush while the main
 // thread holds xcb_grab_server would release the queued grab-batch requests to
 // the server before xcb_ungrab_server, letting the compositor present an
-// intermediate frame — exactly what the grab is meant to prevent.
+// intermediate frame; exactly what the grab is meant to prevent.
 //
 // grab_active lets the bar thread detect that window and skip its flush.
 
@@ -434,7 +434,7 @@ pub fn makePipe() ![2]std.posix.fd_t {
 ///
 /// Zig 0.16 removed std.Thread.Mutex/Condition (replaced by std.Io.Mutex,
 /// which requires threading an std.Io handle through every lock/unlock call
-/// site — too invasive for the small, self-contained locking bar.zig and
+/// site, too invasive for the small, self-contained locking bar.zig and
 /// carousel.zig need). This is a minimal handle-free substitute, shared
 /// between both instead of each defining its own copy.
 
@@ -456,7 +456,7 @@ pub const Condition = struct {
     // pthread_condattr_t is not exposed by std.c on this Zig version, so it's
     // pulled in from the system header directly. Using the real type (rather
     // than a hand-sized opaque buffer) keeps the stack allocation exactly as
-    // large as libc's definition — no silent corruption if a libc ever
+    // large as libc's definition, no silent corruption if a libc ever
     // grows the type.
     const pthread = @cImport(@cInclude("pthread.h"));
 
@@ -475,7 +475,7 @@ pub const Condition = struct {
     }
 
     /// Waits up to `timeout_ns` nanoseconds; returns error.Timeout on expiry.
-    /// Uses a CLOCK_MONOTONIC absolute deadline — requires that `initMonotonic()`
+    /// Uses a CLOCK_MONOTONIC absolute deadline; requires that `initMonotonic()`
     /// was called on this instance at startup.
     pub fn timedWait(c: *Condition, m: *Mutex, timeout_ns: u64) error{Timeout}!void {
         const deadline_ns = monotonicNs() +| timeout_ns;
@@ -548,7 +548,7 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
 
         /// Returns the index of the first item for which `match(context, item)`
         /// is true, or null if none matches. `context` is typically the search
-        /// key (e.g. a window ID) and `match` a plain (non-closure) function —
+        /// key (e.g. a window ID) and `match` a plain (non-closure) function,
         /// the same context+comptime-predicate shape `std.sort.pdq` uses.
         pub fn indexOf(self: *const Self, context: anytype, comptime match: fn (@TypeOf(context), T) bool) ?usize {
             for (self.items[0..self.len], 0..) |item, i| {
@@ -574,7 +574,7 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         }
 
         /// Appends `item` if there's room. Returns false and leaves the
-        /// collection untouched if full — callers decide whether a full
+        /// collection untouched if full; callers decide whether a full
         /// collection is worth a warning or a silent fallback.
         pub fn append(self: *Self, item: T) bool {
             if (self.len >= capacity) return false;
@@ -584,7 +584,7 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         }
 
         /// O(1) removal that does *not* preserve the relative order of the
-        /// remaining elements — the slot at `i` is filled with the current
+        /// remaining elements: the slot at `i` is filled with the current
         /// last element. Use when ordering carries no meaning (caches, sets).
         pub fn swapRemove(self: *Self, i: usize) void {
             self.len -= 1;

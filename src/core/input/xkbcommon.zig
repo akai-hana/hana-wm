@@ -27,7 +27,7 @@ pub const XkbState = struct {
     state: *xkb_state,
     /// Flat keycode->keysym table for the standard X11 range (indices 0..255).
     /// Populated at init time; entries outside 8..255 hold XKB_KEY_NoSymbol.
-    /// No allocator needed — 256 × 4 bytes = 1 KiB, lives inside XkbState.
+    /// No allocator needed; 256 x 4 bytes = 1 KiB, lives inside XkbState.
     keysym_by_keycode: [256]u32,
 
     /// Initialises an XKB context, keymap, and state from the live X connection.
@@ -62,7 +62,7 @@ pub const XkbState = struct {
     }
 
 /// Rebuilds the keymap, state, and keysym table after a server-side mapping
-/// change (setxkbmap/xmodmap → XCB_MAPPING_NOTIFY). Dispatch resolves keysyms
+/// change (setxkbmap/xmodmap -> XCB_MAPPING_NOTIFY). Dispatch resolves keysyms
 /// from the table, so it must track the new mapping or bindings silently stop
 /// matching; on failure the old mapping is kept.
     pub fn rebuild(self: *XkbState, xcb_conn: *anyopaque) void {
@@ -98,8 +98,8 @@ pub const XkbState = struct {
 /// Reverse-look up a keysym to its keycode (config parsing only). Scans the
 /// flat table (248 entries, all in L1 cache).
 ///
-/// The table holds level-0 symbols, so a Shift-only keysym — e.g. `@` on a
-/// US layout — resolves to null; callers should warn, since such a binding
+/// The table holds level-0 symbols, so a Shift-only keysym, e.g. `@` on a
+/// US layout, resolves to null; callers should warn, since such a binding
 /// cannot be grabbed.
     pub inline fn keysymToKeycode(self: *const XkbState, keysym: u32) ?u8 {
         for (8..256) |kc| {
@@ -109,7 +109,7 @@ pub const XkbState = struct {
     }
 };
 
-/// Base (level-0) symbol for `kc`, independent of lock state — reads the
+/// Base (level-0) symbol for `kc`, independent of lock state; reads the
 /// keymap's level-0 entry directly rather than the live xkb_state, whose
 /// `get_one_sym` resolves under current locks (a CapsLock held at startup
 /// would pin the table to shifted symbols and break lowercase bindings).
@@ -120,7 +120,7 @@ inline fn baseSymbol(km: *xkb_keymap, kc: u8) u32 {
     return xkb.XKB_KEY_NoSymbol;
 }
 
-/// Builds the flat keycode→keysym table from level-0 symbols.
+/// Builds the flat keycode->keysym table from level-0 symbols.
 /// Keycodes below 8 are reserved by X11 and produce no real keysym.
 fn buildKeysymTable(km: *xkb_keymap) [256]u32 {
     var table: [256]u32 = [_]u32{xkb.XKB_KEY_NoSymbol} ** 256;
@@ -142,7 +142,7 @@ pub fn keysymGetName(keysym: u32, buf: []u8) []const u8 {
 const XKB_RETRY_DELAY_MS = constants.XKB_RETRY_DELAY_MS;
 
 /// Sleeps between retry attempts (skipped on the final one). Uses nanosleep
-/// directly — std.time.sleep is absent in this Zig build. Resumes on EINTR
+/// directly; std.time.sleep is absent in this Zig build. Resumes on EINTR
 /// (the WM's SIGCHLD handler can interrupt the sleep) so a signal doesn't
 /// shorten the delay.
 inline fn retryDelay(attempt: u8) void {
@@ -153,7 +153,7 @@ inline fn retryDelay(attempt: u8) void {
     while (true) {
         const rc = std.os.linux.nanosleep(&req, &rem);
         if (std.posix.errno(rc) != .INTR) break;
-        // Signal interrupted the sleep — resume for the remaining time.
+        // Signal interrupted the sleep; resume for the remaining time.
         req = rem;
     }
 }
@@ -192,7 +192,7 @@ fn retrySetup(xcb_conn: *anyopaque) !void {
 }
 
 /// Calls xkb_x11_get_core_keyboard_device_id, retrying up to MAX_ATTEMPTS
-/// times — the core keyboard device may not be enumerable yet in the same
+/// times; the core keyboard device may not be enumerable yet in the same
 /// early-startup window retrySetup guards against.
 fn retryDeviceId(xcb_conn: *anyopaque) !i32 {
     inline for (0..MAX_ATTEMPTS) |i| {

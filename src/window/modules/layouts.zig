@@ -28,7 +28,7 @@ pub const zero_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
 /// Per-window cache entry: last geometry, last border color, size hints.
 pub const WindowData = struct {
     /// Zeroed rect = stale / not yet computed. The layout engine never
-    /// produces a real 0×0 rect, so this sentinel is unambiguous.
+    /// produces a real 0x0 rect, so this sentinel is unambiguous.
     rect: utils.Rect = zero_rect,
     border: u32 = 0,
     hints: SizeHints = .{},
@@ -38,7 +38,7 @@ pub const WindowData = struct {
     }
 };
 
-/// Window ID → geometry/border/hints cache. Init with `.init(allocator)`,
+/// Window ID -> geometry/border/hints cache. Init with `.init(allocator)`,
 /// release with `.deinit()`.
 pub const CacheMap = std.AutoHashMap(u32, WindowData);
 
@@ -70,7 +70,7 @@ pub const LayoutCtx = struct {
     /// If set, this window's configure must be the last one sent this retile
     /// (set by swap_master, to avoid a one-frame gap where its old slot is
     /// empty before the window taking it has moved in). Layout modules never
-    /// check this directly — call `emitOrDefer` for every window instead.
+    /// check this directly; call `emitOrDefer` for every window instead.
     defer_win: ?u32 = null,
     /// Scratch slot `emitOrDefer` writes into when a window matches
     /// `defer_win`; flushed once by `invokeLayout` after the layout returns.
@@ -95,7 +95,7 @@ pub inline fn pushWindowOffscreenAndInvalidate(ctx: *const LayoutCtx, win: u32) 
 }
 
 /// Send `rect` for `win` now via configureWithHints, unless `win` is
-/// `ctx.defer_win` — then stash it in `ctx.deferred` for `invokeLayout` to
+/// `ctx.defer_win`; then stash it in `ctx.deferred` for `invokeLayout` to
 /// send last. Called by every defer_win-aware layout.
 pub inline fn emitOrDefer(ctx: *const LayoutCtx, win: u32, rect: utils.Rect) void {
     if (ctx.defer_win == win) {
@@ -172,7 +172,7 @@ pub fn configureWithHintsAndRaise(ctx: *const LayoutCtx, win: u32, rect: utils.R
 }
 
 /// Configure `win` with hints, raising it only when this is not a background
-/// retile — there's no viewer off-screen, and raising would leave the window
+/// retile; there's no viewer off-screen, and raising would leave the window
 /// first in the *global* stacking order with nothing to ever lower it again.
 /// Shared by the layouts that promote a top window (monocle, fibonacci).
 pub inline fn configureWithHintsAndRaiseIfVisible(ctx: *const LayoutCtx, win: u32, rect: utils.Rect) void {
@@ -202,7 +202,7 @@ pub fn showOneHideRest(ctx: *const LayoutCtx, windows: []const u32, top: u32, to
 
 /// Apply ICCCM §4.1.2.3 hints to a raw rect: increment snap, max-size clamp,
 /// then aspect clamp (with a re-snap, since a client may declare both).
-/// Declared minimums are intentionally NOT enforced — tiling owns window size,
+/// Declared minimums are intentionally NOT enforced; tiling owns window size,
 /// and honouring them would pin the rect and block mod_h/mod_l resizing.
 fn applyHintsToRect(rect: utils.Rect, h: SizeHints) utils.Rect {
     if (isEmptySizeHints(h)) return rect;

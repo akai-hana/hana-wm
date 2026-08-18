@@ -21,7 +21,7 @@ const XK_End = @intFromEnum(XK.End);
 
 pub const default_max_input: usize = 512;
 pub const default_undo_max: usize = 32;
-/// Number of named marks supported (a–z).
+/// Number of named marks supported (a-z).
 const mark_count: usize = 26;
 // Public enums and types
 
@@ -41,7 +41,7 @@ pub const Mode = enum(u2) {
     }
 };
 
-/// What the last committed change was — used by `.` to replay it.
+/// What the last committed change was; used by `.` to replay it.
 const DotKind = enum { none, direct, op_motion, op_line, insert_session };
 
 /// Record of the last atomic change for `.` repeat.
@@ -207,7 +207,7 @@ pub const VimState = struct {
 
         // Allocate all five same-sized editing buffers in a single loop so that
         // adding or removing a buffer only requires touching this list and the
-        // matching list in `deinit` — the compiler enforces symmetry at a glance.
+        // matching list in `deinit`: the compiler enforces symmetry at a glance.
         inline for (buf_fields) |field| {
             @field(vs, field) = try allocator.alloc(u8, max_input);
         }
@@ -253,7 +253,7 @@ pub const VimState = struct {
         for (vs.redo.entries) |*e| vs.allocator.free(e.buf);
         vs.allocator.free(vs.redo.entries);
 
-        // Mirror of the init loop — same field order; keep in sync.
+        // Mirror of the init loop, same field order; keep in sync.
         inline for (buf_fields) |field| {
             vs.allocator.free(@field(vs, field));
         }
@@ -324,7 +324,7 @@ pub fn insertSlice(vs: *VimState, slice: []const u8) void {
     vs.cursor += n;
 }
 
-/// True for space (0x20) through tilde (0x7e) — the printable ASCII range
+/// True for space (0x20) through tilde (0x7e): the printable ASCII range
 /// accepted as literal input in insert/replace mode and as single-char
 /// targets (find-char, text-object delimiter, colon command, etc.).
 pub inline fn isPrintableAscii(sym: xcb.xcb_keysym_t) bool {
@@ -440,8 +440,8 @@ fn handleReplaceCharPending(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return pendingDone(vs);
 }
 
-/// Handles input while collecting an ex-command after ':' — :w → spawn_keep,
-/// :q → deactivate, :wq/:x → spawn; Escape cancels, unknown commands are
+/// Handles input while collecting an ex-command after ':' -- :w -> spawn_keep,
+/// :q -> deactivate, :wq/:x -> spawn; Escape cancels, unknown commands are
 /// silently discarded. Call only when vs.pending.awaiting == .colon_cmd.
 fn handleColonCmdPending(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     switch (sym) {
@@ -518,8 +518,8 @@ fn handleMarkJumpPending(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return pendingDone(vs);
 }
 
-/// Arms an operator (d/c/y) on the first press, or — on a doubled press
-/// (dd/cc/yy) — applies it to the whole line. Call only when sym is 'd', 'c', or 'y'.
+/// Arms an operator (d/c/y) on the first press, or; on a doubled press
+/// (dd/cc/yy): applies it to the whole line. Call only when sym is 'd', 'c', or 'y'.
 fn handleOperatorArm(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     const op: u8 = @truncate(sym);
     if (vs.pending.op == 0) {
@@ -536,7 +536,7 @@ fn handleOperatorArm(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
-/// Dispatches a bare (unprefixed) normal-mode command key — the fallback once
+/// Dispatches a bare (unprefixed) normal-mode command key: the fallback once
 /// none of the pending/prefix/motion handlers above have claimed `sym`.
 /// Always leaves pending state reset before returning.
 fn execNormalKey(vs: *VimState, sym: xcb.xcb_keysym_t, cnt: u32) Action {
@@ -789,8 +789,8 @@ inline fn exitVisual(vs: *VimState) void {
 }
 
 /// Digit accumulation helper: returns true and updates `pending.count` if
-/// `sym` is a digit (1–9 always; 0 only when count is already non-zero).
-/// Counts are clamped at 1_000_000 — the vim convention — so an accidental
+/// `sym` is a digit (1-9 always; 0 only when count is already non-zero).
+/// Counts are clamped at 1_000_000, the vim convention: so an accidental
 /// run of digits never wraps silently to a small, unexpected repeat count.
 fn tryAccumulateDigit(vs: *VimState, sym: xcb.xcb_keysym_t) bool {
     if (sym >= '1' and sym <= '9') {
@@ -832,7 +832,7 @@ fn resolveGPrefixPos(vs: *VimState, sym: xcb.xcb_keysym_t, cnt: u32) ?usize {
 
 /// Result returned by `resolveMotionKey` when the key was handled in some way.
 /// `mr == null`: key consumed (digit, prefix arm, `;`/`,` with no find) but no
-/// motion — caller returns `.none`. `mr != null`: resolved motion plus an
+/// motion: caller returns `.none`. `mr != null`: resolved motion plus an
 /// already-assembled `op_motion` `dot` record (store verbatim). `dot_eligible`
 /// is false for `;`/`,` repeats. Bare `null` = key not recognised at all.
 const MotionKeyResult = struct {
@@ -876,7 +876,7 @@ fn resolveMotionKey(vs: *VimState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
 
     const cnt = effectiveCount(vs);
 
-    // ;/, — repeat last find.  Does not update the dot record.
+    // ;/, : repeat last find.  Does not update the dot record.
     if (sym == ';' or sym == ',') {
         if (vs.last_find_kind != 0) {
             const kind = if (sym == ',') reverseFindKind(vs.last_find_kind) else vs.last_find_kind;
@@ -889,7 +889,7 @@ fn resolveMotionKey(vs: *VimState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
         return .{};
     }
 
-    // Simple motions (h/l/w/b/e/0/^/$/arrows …).
+    // Simple motions (h/l/w/b/e/0/^/$/arrows ...).
     if (resolveSimpleMotion(vs, sym, cnt)) |mr| {
         return commitMotion(vs, mr, sym);
     }
@@ -950,7 +950,7 @@ fn resolveSimpleMotion(vs: *VimState, sym: xcb.xcb_keysym_t, cnt: u32) ?MotionRe
     };
 }
 
-// Private — text operations
+// Private: text operations
 
 /// Move cursor (normal mode: clamp to last valid position).
 fn setCursor(vs: *VimState, mr: MotionResult) void {
@@ -1064,7 +1064,7 @@ fn ctrlAdjustNumber(vs: *VimState, delta: i64) void {
     undoPush(vs);
 
     // Replace the old digits by deleting the range and inserting the new text
-    // at the same position — reuses the same buffer-shifting code every other
+    // at the same position, reuses the same buffer-shifting code every other
     // edit goes through instead of hand-rolling a resize here.
     deleteRange(vs, num_start, num_end);
     vs.cursor = num_start;
@@ -1113,7 +1113,7 @@ fn execDirectSym(vs: *VimState, sym: u8, cnt: u32) u8 {
     return op;
 }
 
-// Private — undo / redo ring stacks
+// Private: undo / redo ring stacks
 
 /// Push the current editor state onto `ring`.  When the ring is full, the
 /// oldest slot is overwritten rather than silently dropping the save.
@@ -1150,7 +1150,7 @@ fn undoPush(vs: *VimState) void {
     vs.redo = .{ .entries = vs.redo.entries };
 }
 
-// Private — dot repeat
+// Private: dot repeat
 
 /// After replaying a change operator, re-insert the replacement text captured
 /// when the original command was executed. `op` is the operator char ('c', or
@@ -1222,14 +1222,14 @@ fn resolveDotMotion(vs: *VimState, om: DotOpMotion, cnt: u32) ?MotionResult {
     return resolveSimpleMotion(vs, om.motion_sym, cnt);
 }
 
-// Private — count helpers and dot record building
+// Private: count helpers and dot record building
 
 /// Treat a count of 0 as 1 (vim convention: no count = repeat once).
 inline fn resolveCount(n: u32) u32 {
     return if (n == 0) 1 else n;
 }
 
-/// Compute the combined effective count: `op_count × motion_count` (both
+/// Compute the combined effective count: `op_count x motion_count` (both
 /// defaulting to 1 when zero).
 fn effectiveCount(vs: *VimState) u32 {
     return resolveCount(vs.pending.count) * resolveCount(vs.pending.op_count);
@@ -1247,7 +1247,7 @@ inline fn buildOpMotionRecord(vs: *VimState, sym: xcb.xcb_keysym_t) DotRecord {
     } };
 }
 
-// Private — word and find motions
+// Private: word and find motions
 
 inline fn isWordChar(ch: u8) bool {
     return std.ascii.isAlphanumeric(ch) or ch == '_';
@@ -1343,7 +1343,7 @@ fn motionFind(vs: *VimState, kind: u8, ch: u8, cnt: u32) MotionResult {
     return .{ .pos = p, .inclusive = (kind == 'f' or kind == 'F') };
 }
 
-/// f↔F and t↔T differ only in bit 5 (0x20 = lowercase flag).
+/// f<->F and t<->T differ only in bit 5 (0x20 = lowercase flag).
 fn reverseFindKind(kind: u8) u8 {
     return switch (kind) {
         'f', 'F', 't', 'T' => kind ^ 0x20,
@@ -1351,7 +1351,7 @@ fn reverseFindKind(kind: u8) u8 {
     };
 }
 
-// Private — bracket matching and text objects
+// Private: bracket matching and text objects
 
 fn scanBracket(comptime forward: bool, buf: []const u8, start: usize, open: u8, close: u8) ?usize {
     const inc_ch = if (forward) open else close;

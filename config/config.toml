@@ -44,7 +44,7 @@ variants = "lifo" # "lifo"/"fifo"; New window spawns on master (lifo) / stack (f
 [tiling.layouts.monocle]
 # Behavioral variants for monocle:
 #   "gaps"    = honour window gap settings like every other layout
-#   "gapless" = true fullscreen — ignore gap settings (default)
+#   "gapless" = true fullscreen, ignore gap settings (default)
 variants = "gaps"
 
 # Override the 3-character indicator shown in the bar for this layout.

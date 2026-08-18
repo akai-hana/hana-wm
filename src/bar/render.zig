@@ -6,7 +6,7 @@
 //! Signatures were verified against: cairo 1.18.x, pango 1.52.x, glib 2.80.x.
 //!
 //! When updating a signature, cross-check it against the installed headers and
-//! bump the version note — a wrong return type (e.g. `?*T` vs `*T`) is a silent
+//! bump the version note; a wrong return type (e.g. `?*T` vs `*T`) is a silent
 //! miscompilation in ReleaseFast. Prefer `@cImport`/`@cInclude` if headers exist.
 
 const core = @import("core");

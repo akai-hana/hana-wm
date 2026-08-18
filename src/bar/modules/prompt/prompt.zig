@@ -11,7 +11,7 @@ const types = @import("types");
 
 const drawing = @import("drawing");
 const title = @import("title");
-const vim = @import("vim.zig");
+const vim = @import("vim");
 
 const debug = @import("debug");
 
@@ -95,13 +95,13 @@ const PromptState = struct {
 
     /// Set by key handlers, `activate`, and `deactivate` to notify the bar
     /// that the prompt area needs to be redrawn.  Consumed (read + cleared)
-    /// by `consumeRedrawRequest` to avoid a circular import between prompt ↔ bar.
+    /// by `consumeRedrawRequest` to avoid a circular import between prompt <-> bar.
     redraw_pending: bool = false,
 
     // Layout cache: pixel width of the pre-caret text, the block-caret width,
     // and the scroll offset keeping the caret visible. Recomputed in
     // `drawActive` only when `layout_dirty` is set (keypress, activate,
-    // spawn_keep, or bar-height change) — the caret-blink redraws an identical
+    // spawn_keep, or bar-height change): the caret-blink redraws an identical
     // frame each blink, so ticks reuse these instead of ~20 Pango shape passes.
     cached_pre_w: u16 = 0,
     cached_caret_w: u16 = 0,
@@ -168,7 +168,7 @@ pub fn init(allocator: std.mem.Allocator, conn: *xcb.xcb_connection_t) !void {
     g.hist_entries = try allocator.alloc(u8, (max_history_line + 1) * max_history);
     g.key_syms = xcb_key_symbols_alloc(conn);
     if (g.key_syms == null)
-        debug.warn("prompt: xcb_key_symbols_alloc failed — key input will not work", .{});
+        debug.warn("prompt: xcb_key_symbols_alloc failed: key input will not work", .{});
 }
 
 /// Frees all prompt resources and resets state to zero. Safe to call multiple times.
@@ -190,8 +190,8 @@ pub fn toggle() void {
 }
 
 /// Query the X pointer and decide what close_window should do while the prompt
-/// is active: cursor over the bar → kill the prompt; over a program → let the
-/// WM close it (false); over nothing → swallow the key silently.
+/// is active: cursor over the bar -> kill the prompt; over a program -> let the
+/// WM close it (false); over nothing -> swallow the key silently.
 fn closeWindowOrPromptUnderCursor() bool {
     const cs = core.getState();
     const ptr_cookie = xcb.xcb_query_pointer(cs.conn, cs.root);
@@ -201,15 +201,15 @@ fn closeWindowOrPromptUnderCursor() bool {
     const child: u32 = if (ptr_reply) |r| r.*.child else 0;
 
     if (bar.isBarWindow(child)) {
-        // Cursor is on the bar — kill the prompt.
+        // Cursor is on the bar: kill the prompt.
         deactivate();
         return true;
     }
     if (child == 0 or child == cs.root) {
-        // Cursor is over the desktop / no window — do nothing, swallow key.
+        // Cursor is over the desktop / no window: do nothing, swallow key.
         return true;
     }
-    // Cursor is over a real program window — let the WM close it.
+    // Cursor is over a real program window: let the WM close it.
     return false;
 }
 
@@ -217,11 +217,11 @@ fn closeWindowOrPromptUnderCursor() bool {
 ///
 /// Keeps all prompt-specific routing out of `input.zig`: returns false
 /// immediately when inactive (normal keybind dispatch), routes `close_window`
-/// by cursor position (bar → kill prompt, window → WM close, desktop →
+/// by cursor position (bar -> kill prompt, window -> WM close, desktop ->
 /// swallow), and otherwise delegates to `handleKeyPress`.
 ///
 /// `bound_action` is whatever the keybind map resolved for this key; pass
-/// `state.map.get(key)` directly — null is fine when there's no binding.
+/// `state.map.get(key)` directly; null is fine when there's no binding.
 pub fn handlePromptKeypress(
     event: *const xcb.xcb_key_press_event_t,
     bound_action: ?*const types.Action,
@@ -230,7 +230,7 @@ pub fn handlePromptKeypress(
 
     // When the mod key (Super) is held and a WM action is bound to this key,
     // let the normal dispatcher run so WM operations don't cancel the prompt;
-    // close_window is still routed here to dismiss the prompt — but only when
+    // close_window is still routed here to dismiss the prompt, but only when
     // the cursor is over the bar itself.
     if (bound_action) |action| {
         if (action.* == .close_window) return closeWindowOrPromptUnderCursor();
@@ -243,11 +243,11 @@ pub fn handlePromptKeypress(
 /// Low-level key-press handler.  Called by `handlePromptKeypress` after all
 /// prompt-level routing decisions have been made.
 fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
-    // Only process XCB_KEY_PRESS events — press and release events share the
+    // Only process XCB_KEY_PRESS events: press and release events share the
     // same struct layout, so the loop sometimes casts a release and dispatches
     // it here. Without this guard the Escape release is a trap: handleInsert
     // switches to .normal on press, then handleNormal sees XK_Escape with a
-    // clean pending and deactivates — and the prompt is gone before the next
+    // clean pending and deactivates; and the prompt is gone before the next
     // editing key arrives.
     //
     // Returning true (not false) keeps the release from falling through to WM
@@ -262,14 +262,14 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     const sym = xcb_key_symbols_get_keysym(syms, event.detail, col);
     const vim_mode = vimModeEnabled();
 
-    // Drop bare modifier key events (Shift, Ctrl, Alt, Super, Meta, Hyper …).
+    // Drop bare modifier key events (Shift, Ctrl, Alt, Super, Meta, Hyper ...).
     //
     // XCB delivers a key event for every key including modifiers, so Shift
     // before '$'/'^' fires XK_Shift_L/R first. Reaching handleNormal, that
-    // falls through to resetPendingCmd(), clearing any pending operator/count —
+    // falls through to resetPendingCmd(), clearing any pending operator/count:
     // why d$, d^, c$, y^, visual 3W, etc. silently become bare cursor moves.
     //
-    // Modifier keysyms occupy 0xFFE1–0xFFEE, a band with no valid editing key.
+    // Modifier keysyms occupy 0xFFE1-0xFFEE, a band with no valid editing key.
     if (sym >= 0xFFE0 and sym <= 0xFFEF) return true;
 
     // Ctrl-modified keys
@@ -332,7 +332,7 @@ pub fn draw(
     return drawActive(ctx.dc, ctx.config, ctx.height, ctx.start_x, ctx.width);
 }
 
-// Private — action handling
+// Private: action handling
 
 /// Runs `action` through handleAction, then resyncs g.has_space if the buffer
 /// length changed. Shared by the Ctrl-key and normal-key paths in
@@ -354,7 +354,7 @@ fn handleAction(action: vim.Action) void {
             runPromptCommand();
             deactivate();
         },
-        // :w — execute the command but keep the prompt open for the next one.
+        // :w: execute the command but keep the prompt open for the next one.
         // Clears the buffer and resets to INSERT like activate(), minus the
         // keyboard-grab overhead (the grab is already held).
         .spawn_keep => {
@@ -378,7 +378,7 @@ fn resetPromptEditing() void {
     g.layout_dirty = true;
 }
 
-// Private — activate / deactivate
+// Private: activate / deactivate
 
 /// Reset all `VimState` editing fields to their defaults without touching the
 /// heap-allocated buffers (buf, yank_buf, undo/redo stacks, etc.).
@@ -401,12 +401,12 @@ fn activate() void {
     );
     const grab_reply = xcb.xcb_grab_keyboard_reply(cs.conn, cookie, null);
     if (grab_reply == null) {
-        debug.warn("prompt: xcb_grab_keyboard_reply returned null — aborting activation", .{});
+        debug.warn("prompt: xcb_grab_keyboard_reply returned null: aborting activation", .{});
         return;
     }
     defer std.c.free(grab_reply);
     if (grab_reply.*.status != xcb.XCB_GRAB_STATUS_SUCCESS) {
-        debug.warn("prompt: keyboard grab failed (status {}) — aborting activation", .{grab_reply.*.status});
+        debug.warn("prompt: keyboard grab failed (status {}): aborting activation", .{grab_reply.*.status});
         return;
     }
     g.is_active = true;
@@ -416,7 +416,7 @@ fn activate() void {
     // always visible/reachable; reversed in deactivate() via dismissAfterPrompt().
     bar.presentForPrompt();
     // No xcb_flush: xcb_grab_keyboard_reply already drained the output buffer
-    // and presentForPrompt() flushes its own requests — nothing is pending
+    // and presentForPrompt() flushes its own requests; nothing is pending
     // here. Contrast with deactivate(), where xcb_ungrab_keyboard must arrive
     // promptly.
 }
@@ -431,11 +431,11 @@ fn deactivate() void {
     g.redraw_pending = true;
     // Return the bar to whatever state it was actually in before the prompt
     // forced it to the top (e.g. re-hide it if a fullscreen window is still
-    // active) — see the comment on presentForPrompt() in activate().
+    // active): see the comment on presentForPrompt() in activate().
     bar.dismissAfterPrompt();
 }
 
-// Private — PATH completion
+// Private: PATH completion
 
 /// Scan every directory in $PATH and collect executable names into the static
 /// completion table.  Called once on first activation.
@@ -457,7 +457,7 @@ fn loadCompletions() void {
         while (c.readdir(dirp)) |entry| {
             const name = std.mem.span(@as([*:0]const u8, @ptrCast(&entry.*.d_name)));
             // d_type 0 (DT_UNKNOWN on filesystems with no type) counts as a
-            // candidate — it rules out only "obviously not a plain file"; the
+            // candidate: it rules out only "obviously not a plain file"; the
             // X_OK probe inside isRunnableFile is the real test.
             const dt = entry.*.d_type;
             if (dt != 0 and dt != c.DT_REG and dt != c.DT_LNK) continue;
@@ -498,8 +498,8 @@ fn offerCompletion(name: []const u8) bool {
     return g.comp_count >= max_completions;
 }
 
-/// Binary searches the sorted completion table for the first entry ≥ `prefix`.
-/// Returns the insertion index (0..comp_count) — use with compExistsExact for lookup.
+/// Binary searches the sorted completion table for the first entry >= `prefix`.
+/// Returns the insertion index (0..comp_count); use with compExistsExact for lookup.
 fn compLowerBound(prefix: []const u8) usize {
     var lo: usize = 0;
     var hi: usize = g.comp_count;
@@ -578,7 +578,7 @@ fn updateGhost() void {
     }
 }
 
-// Private — history
+// Private: history
 
 /// Prepend `cmd` to the in-memory history ring (newest at index 0), shifting
 /// entries right by one slot.
@@ -619,7 +619,7 @@ fn histAppendToFile(cmd: []const u8) void {
 }
 
 /// Parse one line from a shell history file into `out`, returning its length
-/// (0 to skip). Understands fish `"- cmd: …"`, zsh `": <ts>:<elapsed>;…"` or
+/// (0 to skip). Understands fish `"- cmd: ..."`, zsh `": <ts>:<elapsed>;..."` or
 /// bare lines, and bash/drun bare lines (`#` timestamp markers skipped).
 fn histParseLine(line: []const u8, out: []u8) usize {
     if (line.len == 0) return 0;
@@ -737,7 +737,7 @@ fn tryOpenHistoryFile(buf: []u8, comptime fmt: []const u8, args: anytype) ?*c.FI
     return c.fopen(@ptrCast(buf.ptr), "r");
 }
 
-// Private — command spawning
+// Private: command spawning
 
 fn spawnCommand(cmd: []const u8) void {
     histPrepend(cmd);
@@ -765,7 +765,7 @@ fn spawnCommand(cmd: []const u8) void {
     }
 }
 
-// Private — rendering helpers
+// Private: rendering helpers
 
 /// Binary search: first byte offset where `measureTextWidth(text[0..offset])
 /// >= target_px`.  Returns `text.len` if the whole string is narrower.
@@ -780,7 +780,7 @@ fn textOffsetAtPx(dc: *drawing.DrawContext, text: []const u8, target_px: u16) us
     return lo;
 }
 
-/// Return the longest prefix of `text` whose pixel width is ≤ `max_px`.
+/// Return the longest prefix of `text` whose pixel width is <= `max_px`.
 /// Fast path: returns the full slice when the text already fits.
 fn textPrefixFit(dc: *drawing.DrawContext, text: []const u8, max_px: u16) []const u8 {
     if (dc.measureTextWidth(text) <= max_px) return text;
@@ -796,11 +796,11 @@ fn textPrefixFit(dc: *drawing.DrawContext, text: []const u8, max_px: u16) []cons
 /// Draw `text` with hard pixel clipping to `[text_left_x, scroll_end_x)`.
 ///
 /// `px` is the virtual pen position (scroll-space, may be negative), always
-/// advanced by the full text width whether or not anything is drawn — callers
+/// advanced by the full text width whether or not anything is drawn; callers
 /// rely on this to keep the pen consistent.
 ///
 /// Both edges clip without ellipsis: characters whose right edges fall before
-/// `text_left_x` are skipped; characters past `scroll_end_x` are dropped —
+/// `text_left_x` are skipped; characters past `scroll_end_x` are dropped:
 /// correct for pre-cursor text, where the caret must sit right after the last
 /// visible character. `text_w` is the caller's already-measured width (null to
 /// measure here), avoiding a second Pango pass.
@@ -821,7 +821,7 @@ inline fn drawSpan(
     const tl: i32 = text_left_x;
     const se: i32 = scroll_end_x;
 
-    // Fully off-screen to the left or right — nothing to draw.
+    // Fully off-screen to the left or right: nothing to draw.
     if (px.* + @as(i32, w) <= tl or px.* >= se) return;
 
     // Skip the prefix that lies off-screen to the left.
@@ -896,7 +896,7 @@ fn makeCursorStyle(text_left_x: u16, scroll_end_x: u16, baseline: u16, height: u
 /// Draw a filled block cursor over `buf[lo..hi]` and advance `px.*` past it.
 ///
 /// Shared by visual selection highlighting and the normal/replace character
-/// cursor — "highlight a byte range with an accent block and inverse text",
+/// cursor: "highlight a byte range with an accent block and inverse text",
 /// differing only in range width and whether `text_only` suppresses the fill
 /// (colon-command mode: the caret lives in the pill, so the character shows as
 /// plain text). `lo == hi` draws an empty space-sized block (end-of-line).
@@ -922,7 +922,7 @@ inline fn drawBlockCursor(
     px.* += @intCast(block_w);
 }
 
-// Private — active-mode rendering
+// Private: active-mode rendering
 
 /// Lazily cache the caret geometry: font metrics and bar height are constant
 /// between reloads, so this runs at most once. Hoisted before the pill and
@@ -947,7 +947,7 @@ fn promptWidth(dc: *drawing.DrawContext, prompt: []const u8) u16 {
     };
 }
 
-/// Recompute the cached caret widths and scroll offset — but only when
+/// Recompute the cached caret widths and scroll offset, but only when
 /// `layout_dirty` or a bar-height change demands it. The caret-blink redraws
 /// an identical frame every blink, so blink ticks reuse these instead of ~20
 /// Pango shape passes per tick; the cache needs invalidating only when
@@ -980,7 +980,7 @@ fn refreshLayoutCache(
         const min_scroll: u16 = cursor_right -| max_scroll_px;
         // Snap scroll_x to the nearest character boundary at/past min_scroll:
         // without it, drawSpan renders text[start..] at text_left_x while the
-        // character begins past it in virtual space — a phantom gap next to the
+        // character begins past it in virtual space: a phantom gap next to the
         // caret.
         if (min_scroll <= prompt_w) {
             const idx = textOffsetAtPx(dc, prompt, min_scroll);
@@ -1027,7 +1027,7 @@ fn drawColonPillContent(
 /// replaced by ":typed_chars" plus a blinking block cursor.
 ///
 /// Returns the scrollable region's right edge (the pill's left edge), or null
-/// when no room remains for text — callers return immediately.
+/// when no room remains for text; callers return immediately.
 fn drawPill(
     dc: *drawing.DrawContext,
     height: u16,
@@ -1195,7 +1195,7 @@ fn drawActive(
 
     ensureCaretGeom(dc, height);
 
-    // Mode widget — pinned right; does not scroll. Its left edge bounds the
+    // Mode widget, pinned right; does not scroll. Its left edge bounds the
     // scrollable text region.
     const scroll_end_x = drawPill(dc, height, baseline, text_left_x, text_end_x, accent) orelse return end_x;
     // Clip post-cursor text 2 px before the pill so ink never bleeds into it.
@@ -1204,7 +1204,7 @@ fn drawActive(
     const max_scroll_px: u16 = scroll_end_x - text_left_x;
     const prompt_w = promptWidth(dc, prompt);
 
-    // In INSERT mode the caret doesn't consume its character — post_text
+    // In INSERT mode the caret doesn't consume its character; post_text
     // starts at cursor and caret_w is `cursor_width`; all other modes use a
     // full-character block.
     const pre_cur_text = g.vim_state.buf[0..g.vim_state.cursor];

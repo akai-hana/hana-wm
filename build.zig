@@ -51,8 +51,54 @@ pub fn build(b: *std.Build) !void {
         b.option(bool, "bench", "Enable opt-in performance probe counters (default: off)") orelse false,
     );
 
+    // Optional module detection
+    const has_bar = blk: {
+        var dir = b.build_root.handle.openDir(b.graph.io, source_root ++ "bar", .{}) catch break :blk false;
+        dir.close(b.graph.io);
+        break :blk true;
+    };
+    const has_tiling = blk: {
+        var dir = b.build_root.handle.openDir(b.graph.io, source_root ++ "window/modules/tiling", .{}) catch break :blk false;
+        dir.close(b.graph.io);
+        break :blk true;
+    };
+    const has_floating = blk: {
+        var dir = b.build_root.handle.openDir(b.graph.io, source_root ++ "window/modules/floating", .{}) catch break :blk false;
+        dir.close(b.graph.io);
+        break :blk true;
+    };
+    const has_drag_file = blk: {
+        var f = b.build_root.handle.openFile(b.graph.io, source_root ++ "window/modules/floating/drag.zig", .{}) catch break :blk false;
+        f.close(b.graph.io);
+        break :blk true;
+    };
+    const has_vim = blk: {
+        var f = b.build_root.handle.openFile(b.graph.io, source_root ++ "bar/modules/prompt/vim.zig", .{}) catch break :blk false;
+        f.close(b.graph.io);
+        break :blk true;
+    };
+
+    build_opts.addOption(bool, "has_bar", has_bar);
+    build_opts.addOption(bool, "has_tiling", has_tiling);
+    build_opts.addOption(bool, "has_floating", has_floating);
+    build_opts.addOption(bool, "has_drag", has_drag_file);
+    build_opts.addOption(bool, "has_vim", has_vim);
+
     // Module discovery
     var discovery = try Module.DiscoveryContext.run(b, target, optimize, source_root, entry_point_path);
+
+    // Register null vim fallback when vim.zig is absent but bar is present.
+    // When bar itself is removed, prompt is also gone so no vim stub is needed.
+    if (has_bar and !has_vim) {
+        const null_vim_path = source_root ++ "bar/modules/prompt/null_vim.zig";
+        const owned_name = try b.allocator.dupe(u8, "vim");
+        try discovery.source_paths.put(owned_name, null_vim_path);
+        try discovery.modules.put(owned_name, b.createModule(.{
+            .root_source_file = b.path(null_vim_path),
+            .target = target,
+            .optimize = optimize,
+        }));
+    }
 
     // Root module
     const shared_ctx: SharedBuildContext = .{
