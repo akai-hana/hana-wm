@@ -63,12 +63,7 @@ pub fn build(b: *std.Build) !void {
         break :blk true;
     };
     const has_floating = blk: {
-        var dir = b.build_root.handle.openDir(b.graph.io, source_root ++ "window/modules/floating", .{}) catch break :blk false;
-        dir.close(b.graph.io);
-        break :blk true;
-    };
-    const has_drag_file = blk: {
-        var f = b.build_root.handle.openFile(b.graph.io, source_root ++ "window/modules/floating/drag.zig", .{}) catch break :blk false;
+        var f = b.build_root.handle.openFile(b.graph.io, source_root ++ "window/modules/floating.zig", .{}) catch break :blk false;
         f.close(b.graph.io);
         break :blk true;
     };
@@ -81,7 +76,6 @@ pub fn build(b: *std.Build) !void {
     build_opts.addOption(bool, "has_bar", has_bar);
     build_opts.addOption(bool, "has_tiling", has_tiling);
     build_opts.addOption(bool, "has_floating", has_floating);
-    build_opts.addOption(bool, "has_drag", has_drag_file);
     build_opts.addOption(bool, "has_vim", has_vim);
 
     // Module discovery

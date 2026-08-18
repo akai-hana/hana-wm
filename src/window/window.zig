@@ -16,7 +16,7 @@ const workspaces = @import("workspaces");
 const build_options = @import("build_options");
 const bar = if (build_options.has_bar) @import("bar") else null;
 const tiling = if (build_options.has_tiling) @import("tiling") else null;
-const drag = if (build_options.has_drag) @import("drag") else null;
+const floating = if (build_options.has_floating) @import("floating") else null;
 
 // XSizeHints flags (ICCCM §4.1.2.3)
 const P_MAX_SIZE: u32 = 0x20;
@@ -1093,7 +1093,7 @@ pub fn handleUnmapNotify(event: *const xcb.xcb_unmap_notify_event_t) void {
 }
 
 pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t) void {
-    if (build_options.has_drag) drag.cancelDragForWindow(event.window);
+    if (build_options.has_floating) floating.cancelDragForWindow(event.window);
     if (isValidManagedWindow(event.window)) unmanageWindow(event.window);
 }
 
@@ -1248,8 +1248,8 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
     // honouring it races the next MotionNotify and causes visible flicker.
     // Echo the geometry the WM already applied so the client settles without
     // fighting the drag.
-    if ((if (build_options.has_drag) drag.isResizingWindow(win) else false)) {
-        const last = if (build_options.has_drag) drag.getDragLastRect() else utils.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 };
+    if ((if (build_options.has_floating) floating.isResizingWindow(win) else false)) {
+        const last = if (build_options.has_floating) floating.getDragLastRect() else utils.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 };
         if (last.width != 0) {
             sendConfigureNotify(win, geomFromRect(last, getBorderWidth()));
         } else {
@@ -1306,7 +1306,7 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t) void {
     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL or
         event.detail == xcb.XCB_NOTIFY_DETAIL_INFERIOR)
         return;
-    if ((if (build_options.has_drag) drag.isDragging() else false)) return;
+    if ((if (build_options.has_floating) floating.isDragging() else false)) return;
     if (suppressSpawnCrossing(event.root_x, event.root_y)) return;
     if (focus.shouldSuppressEnterNotify()) return;
     maybeFocusWindow(findManagedWindow(core.getState().conn, event.event, tracking.isManaged));
@@ -1322,7 +1322,7 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t) void {
     focus.setLastEventTime(event.time);
     if (event.event != core.getState().root) return;
     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL) return;
-    if ((if (build_options.has_drag) drag.isDragging() else false)) return;
+    if ((if (build_options.has_floating) floating.isDragging() else false)) return;
     if (suppressSpawnCrossing(event.root_x, event.root_y)) return;
     // When child is zero the pointer left to an area not covered by any window.
     if (event.child == 0) return;

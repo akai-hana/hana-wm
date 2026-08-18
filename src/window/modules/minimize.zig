@@ -180,18 +180,22 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
     utils.grabServer(conn);
 
     if (core.getState().config.tiling.enabled) {
-        // Restore at the original layout slot so a former master returns to
-        // master rather than being appended to the stack end.
-        if (tiling_index) |ti|
-            if (build.has_tiling) tiling.addWindowAtFilteredIndex(win, ti)
-        else
-            if (build.has_tiling) tiling.addWindow(win);
-        // Move focus BEFORE the retile: layouts that pick their visible window
-        // from focus.getFocused() at retile time (monocle) would otherwise
-        // retile against the still-focused old window with no follow-up retile
-        // once focus lands on `win`.
-        focus.setFocusWithModel(win, .window_spawn, focus_ctx.model.?);
-        if (build.has_tiling) tiling.retileCurrentWorkspace();
+        if (tiling_index) |ti| {
+            // Restore at the original layout slot so a former master returns to
+            // master rather than being appended to the stack end.
+            if (build.has_tiling) tiling.addWindowAtFilteredIndex(win, ti);
+            // Move focus BEFORE the retile: layouts that pick their visible window
+            // from focus.getFocused() at retile time (monocle) would otherwise
+            // retile against the still-focused old window with no follow-up retile
+            // once focus lands on `win`.
+            focus.setFocusWithModel(win, .window_spawn, focus_ctx.model.?);
+            if (build.has_tiling) tiling.retileCurrentWorkspace();
+        } else {
+            // Window was floating when minimized (not in the tiling pool);
+            // restore its floating geometry instead of adding it to tiling.
+            window.restoreFloatGeom(win);
+            focus.setFocusWithModel(win, .window_spawn, focus_ctx.model.?);
+        }
     } else {
         window.restoreFloatGeom(win);
         focus.setFocusWithModel(win, .window_spawn, focus_ctx.model.?);
@@ -293,7 +297,7 @@ fn restorePlainWindowsTiling(plain_wins: []MinimizedRecord, focus_target: u32, f
         if (rec.entry.tiling_index) |ti|
             if (build.has_tiling) tiling.addWindowAtFilteredIndex(rec.id, ti)
         else
-            if (build.has_tiling) tiling.addWindow(rec.id);
+            window.restoreFloatGeom(rec.id);
     }
     // Focus must move to focus_target BEFORE the retile; see the
     // matching comment in restoreWindowImpl.
