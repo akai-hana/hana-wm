@@ -1237,14 +1237,16 @@ pub fn toggleBarSegmentAnchor() void {
 
 /// Lightweight focus-only redraw; skipped when a full redraw is already pending.
 pub fn scheduleFocusRedraw(new_win: ?u32) void {
+    _ = new_win;
     const s = gBar.state orelse return;
     if (!s.is_visible or s.is_dirty) return;
-    draw_mutex.lock();
-    s.drawTitleOnly(new_win);
-    draw_mutex.unlock();
-    // markDirty ensures a full redraw follows, fetching the new window's title and
-    // rebuilding the carousel; without it a cross-window focus change would rely on
-    // the stale-title path: the double-start flicker drawTitleOnly guards against.
+    // markDirty ensures a full redraw follows at end-of-batch via
+    // updateIfDirty, which re-captures window state and renders the
+    // entire bar. The previous drawTitleOnly + blit path performed
+    // Pango rendering and xcb_copy_area inside server grabs; during
+    // rapid window opening each grab would redraw the bar from scratch,
+    // producing O(N²) property queries and Pango renders. Skipping the
+    // early draw lets the post-batch hook do one full redraw instead.
     s.markDirty();
 }
 

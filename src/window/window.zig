@@ -160,11 +160,15 @@ pub fn geomFromRect(rect: utils.Rect, border: u16) core.WindowGeometry {
 }
 
 /// Flush border geometry for every floating window while the server grab is
-/// held, redraw the bar's grab overlays, then clear the pending-flush flag so
-/// the next loop tick doesn't re-sweep. Callers must be inside a grab.
+/// held, then clear the pending-flush flag so the next loop tick doesn't
+/// re-sweep. The bar is NOT redrawn here: redrawInsideGrab performed a full
+/// bar render (captureStateIntoSlot + batchFetchWindowInfosInto + Pango draw)
+/// for every window that mapped, causing O(N²) property queries and Pango
+/// renders inside server grabs during rapid window opening. The bar's
+/// post_batch hook (updateIfDirty) handles the redraw after the entire event
+/// batch is processed. Callers must be inside a grab.
 pub fn flushGrabBorders() void {
     updateFloatingWindowBorders();
-    if (build_options.has_bar) bar.redrawInsideGrab();
     markBordersFlushed();
 }
 
