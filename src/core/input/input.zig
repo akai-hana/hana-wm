@@ -26,7 +26,7 @@ const xkbcommon = @import("xkbcommon");
 const build_options = @import("build_options");
 const bar = if (build_options.has_bar) @import("bar") else null;
 const tiling = if (build_options.has_tiling) @import("tiling") else null;
-const drag = if (build_options.has_drag) @import("drag") else null;
+const floating = if (build_options.has_floating) @import("floating") else null;
 
 // Constants
 
@@ -196,7 +196,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     if (tryConfigMouseBind(mods, event.detail, managed_window, event.time)) return;
 
     if (event.detail == mouse_button_left or event.detail == mouse_button_right) {
-        if (build_options.has_drag) drag.startDrag(managed_window, event.detail, event.root_x, event.root_y);
+        if (build_options.has_floating) floating.startDrag(managed_window, event.detail, event.root_x, event.root_y);
         keepDragGrab(event.time);
         return;
     }
@@ -205,7 +205,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
 /// Stops any active drag and updates the last event timestamp.
 pub fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t) void {
     focus.setLastEventTime(event.time);
-    if ((if (build_options.has_drag) drag.isDragging() else false)) if (build_options.has_drag) drag.stopDrag();
+    if ((if (build_options.has_floating) floating.isDragging() else false)) if (build_options.has_floating) floating.stopDrag();
 }
 
 /// Forwards motion to the drag engine, clears focus suppression, and re-arms POINTER_MOTION_HINT.
@@ -218,8 +218,8 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
     const cs = core.getState();
     xcb.xcb_discard_reply(cs.conn, xcb.xcb_query_pointer(cs.conn, cs.root).sequence);
 
-    if ((if (build_options.has_drag) drag.isDragging() else false)) {
-        if (build_options.has_drag) drag.updateDrag(event.root_x, event.root_y);
+    if ((if (build_options.has_floating) floating.isDragging() else false)) {
+        if (build_options.has_floating) floating.updateDrag(event.root_x, event.root_y);
         return;
     }
 
@@ -655,7 +655,7 @@ fn dumpState() void {
     debug.info("Focused:        {?x}", .{focus.getFocused()});
     debug.info("Total windows:  {}", .{tracking.windowCount()});
     debug.info("Suppress focus: {s}", .{@tagName(focus.getSuppressReason())});
-    debug.info("Drag active:    {}", .{(if (build_options.has_drag) drag.isDragging() else false)});
+    debug.info("Drag active:    {}", .{(if (build_options.has_floating) floating.isDragging() else false)});
 
     fullscreen.forEachFullscreen(struct {
         fn cb(ws: u8, info: fullscreen.FullscreenInfo) void {

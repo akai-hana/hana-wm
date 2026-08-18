@@ -34,7 +34,7 @@ const tags = @import("tags");
 
 const build_options = @import("build_options");
 const tiling = if (build_options.has_tiling) @import("tiling") else null;
-const drag = if (build_options.has_drag) @import("drag") else null;
+const floating = if (build_options.has_floating) @import("floating") else null;
 
 pub const plugin = hooks.Plugin{
     .init = init,
@@ -1461,7 +1461,7 @@ pub fn tickCarousel() void {
 pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {
     if (gBar.state) |s| if (event.window == s.win.win_id and event.count == 0) {
         gBar.pending_force_full_redraw = true;
-        const dragging = if (build_options.has_drag) drag.isDragging() else false;
+        const dragging = if (build_options.has_floating) floating.isDragging() else false;
         if (dragging) s.is_dirty = true else submitDraw();
     };
 }

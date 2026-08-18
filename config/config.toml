@@ -187,7 +187,7 @@ Mod+Shift+Z = "distrobox enter aur -- ~/Games/factorio-vanilla"
 # Mod+Shift+Z = "pkill isaac-ng"
 
 Mod+X       = "nixVulkanIntel TaterClient-DDNet"
-Mod+Shift+X = "nixVulkanIntel etterna"
+Mod+Shift+X = "nixGL nixVulkanIntel etterna"
 
 # ULTRAKILL
 Mod+C       = "nixGL nixVulkanIntel steam steam://rungameid/1229490"

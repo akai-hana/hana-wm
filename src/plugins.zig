@@ -22,10 +22,6 @@ pub const list: [MAX_PLUGINS]hooks.Plugin = blk: {
         result[n] = @import("tiling").plugin;
         n += 1;
     }
-    if (build_options.has_drag) {
-        result[n] = @import("drag").plugin;
-        n += 1;
-    }
     if (build_options.has_floating) {
         result[n] = @import("floating").plugin;
         n += 1;
@@ -39,7 +35,6 @@ pub const count: usize = count: {
     var n: usize = 0;
     if (build_options.has_bar) n += 1;
     if (build_options.has_tiling) n += 1;
-    if (build_options.has_drag) n += 1;
     if (build_options.has_floating) n += 1;
     break :count n;
 };
