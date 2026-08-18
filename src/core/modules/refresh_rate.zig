@@ -48,7 +48,7 @@ var last_redetect_ns: u64 = 0;
 
 /// Perform one-time refresh-rate detection and subscribe to RandR notify
 /// events so later monitor re-configurations re-detect. Idempotent; safe to
-/// call from the main thread on every draw — the actual setup runs once and
+/// call from the main thread on every draw; the actual setup runs once and
 /// subsequent calls return immediately.
 pub fn ensureRefreshRateDetected(conn: *xcb.xcb_connection_t) void {
     if (detection_initialized) return;
@@ -71,7 +71,7 @@ pub fn getDetectedRateHz() f64 {
 }
 
 /// Called by the event loop on any RandR extension event (screen change, CRTC
-/// change, output change — the only masks this module subscribes to).
+/// change, output change, the only masks this module subscribes to).
 /// Re-detects the active refresh rate so the carousel cadence tracks monitor
 /// re-configuration. Main thread only.
 pub fn handleRandrNotifyEvent(conn: *xcb.xcb_connection_t) void {

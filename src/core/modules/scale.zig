@@ -51,7 +51,7 @@ fn readXftDpi(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t) ?f32 {
     const resource_str = @as([*]const u8, @ptrCast(value_ptr))[0..@intCast(value_len)];
 
     // Format: "Xft.dpi:\t96" or "Xft.dpi: 96".
-    // Slice off the prefix and trim whitespace — avoids the split-on-delimiter
+    // Slice off the prefix and trim whitespace, avoiding the split-on-delimiter
     // trap where ":\t" would yield an empty token before the value.
     const prefix = "Xft.dpi:";
     var lines = std.mem.splitScalar(u8, resource_str, '\n');

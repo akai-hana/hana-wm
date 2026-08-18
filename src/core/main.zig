@@ -14,7 +14,8 @@ const scale = @import("scale");
 const debug = @import("debug");
 const input = @import("input");
 const window = @import("window");
-const bar = @import("bar");
+const plugins = @import("plugins");
+const build_options = @import("build_options");
 
 /// hana's startup sequence and event-loop entry point.
 pub fn main() !void {
@@ -40,7 +41,7 @@ pub fn main() !void {
     // owner; must run before any core.getState() call.
     core.init(x.conn, x.screen, x.root, alloc, loaded_config);
     // Config.deinit tears the keybind_resolver down internally, before
-    // freeing the keybindings whose Actions it points into — so a single
+    // freeing the keybindings whose Actions it points into; so a single
     // defer on the config suffices (see KeybindResolver in types.zig).
     defer core.getState().config.deinit(alloc);
 
@@ -53,11 +54,9 @@ pub fn main() !void {
     try window.init(alloc);
     defer window.deinit();
 
-    const bar_enabled = core.getState().config.bar.enabled;
-    if (bar_enabled) {
-        bar.init() catch |err| debug.err("Bar init failed: {}", .{err});
-    }
-    defer if (bar_enabled) bar.deinit();
+    // Initialize plugins (bar, tiling, drag, floating)
+    plugins.initAll();
+    defer plugins.deinitAll();
 
     _ = xcb.xcb_flush(x.conn);
     debug.info("hana booted up successfully!", .{});

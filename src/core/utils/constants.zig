@@ -58,7 +58,7 @@ pub const MAX_WINDOW_TREE_DEPTH: usize = 10;
 /// one bit per workspace into a u64 (`workspace_geom_valid_bits`), and
 /// workspaces.zig's per-workspace layout/master-count override tables are
 /// fixed-size arrays sized to match. Raising this requires widening those
-/// first — it is not just a config-side number. config.zig validates parsed
+/// first; it is not just a config-side number. config.zig validates parsed
 /// workspace numbers against it at parse time so oversized configs warn
 /// immediately instead of silently no-oping once workspaces.init() builds its
 /// lookup tables.
@@ -72,7 +72,7 @@ pub const PROPERTY_MAX_LENGTH: u32 = 256;
 pub const PROPERTY_NO_DELETE: u8 = 0;
 
 // DPI / scaling
-/// Standard DPI for a 1× display. All scale factors are computed relative to this value.
+/// Standard DPI for a 1x display. All scale factors are computed relative to this value.
 pub const BASELINE_DPI: f32 = 96.0;
 
 // Event masks
@@ -86,7 +86,7 @@ pub const EventMasks = struct {
     //    motion and we re-arm with xcb_query_pointer (see drag/suppression in
     //    input.zig).
     //  - BUTTON_RELEASE: DWM's drags run their own blocking XGrabPointer +
-    //    XMaskEvent loop, so root never needs it. Ours are async — the
+    //    XMaskEvent loop, so root never needs it. Ours are async; the
     //    Super+Button grab from input.setupGrabs stays engaged for the whole
     //    gesture (AsyncPointer; see keepDragGrab in input.zig), so this bit is
     //    what lets the release reach input.handleButtonRelease and clear
@@ -107,7 +107,7 @@ pub const EventMasks = struct {
     // StructureNotify via XSelectInput; buttons via XGrabButton (grabbuttons).
     //
     // Deliberately NO BUTTON_PRESS: DWM does not subscribe managed windows to
-    // it either — unfocused-window buttons arrive via grabbuttons' grabs and
+    // it either; unfocused-window buttons arrive via grabbuttons' grabs and
     // focused-window buttons via the focus-specific grabs. Adding it here would
     // deliver button events through both mechanisms, duplicating events and
     // interfering with SYNC-mode grab sequencing.
@@ -132,16 +132,16 @@ pub const LOCK_MODIFIERS = [_]u16{
 };
 
 pub const Limits = struct {
-    /// Dispatch table size — covers all X11 event types up to XCB_FOCUS_OUT=10.
+    /// Dispatch table size, covers all X11 event types up to XCB_FOCUS_OUT=10.
     pub const EVENT_DISPATCH_TABLE = 36;
 
     /// Upper bound for the XCB cookie scratch buffer in grabKeybindings
-    /// (max distinct keybindings × LOCK_MODIFIERS.len combinations).
+    /// (max distinct keybindings x LOCK_MODIFIERS.len combinations).
     /// Raise if you ever exceed 128 keybindings.
     pub const MAX_KEYBIND_COOKIES = 1024;
 
     /// Maximum tiled windows across the whole WM (all workspaces combined),
-    /// not per workspace — see tracking.Tracking, which this backs.
+    /// not per workspace; see tracking.Tracking, which this backs.
     /// tracking.Tracking.len is a u8 (max 255), so this must stay <= 255
     /// unless that field is widened too.
     pub const MAX_TILED_WINDOWS = 200;

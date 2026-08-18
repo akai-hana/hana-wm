@@ -5,6 +5,7 @@
 const std = @import("std");
 
 const types = @import("types");
+const utils = @import("utils");
 const constants = @import("constants");
 
 // Centralized here to avoid repeated @cImport translation across compilation units.
@@ -43,7 +44,7 @@ pub const FocusSuppressReason = enum {
 };
 
 // conn, screen, root, alloc, and config are written once during startup
-// (config is later replaced wholesale on reload — see events.zig). Bundled
+// (config is later replaced wholesale on reload; see events.zig). Bundled
 // into one optional State, rather than five `undefined` globals, so any
 // access before init() panics cleanly instead of reading undefined memory.
 // Mirrors the pattern tiling.zig uses for its own state.
@@ -74,3 +75,14 @@ pub fn init(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t, root: Window
 /// (96.0 DPI, no scaling), and is set once during scale detection, never
 /// reassigned afterward.
 pub var dpi_info: f32 = constants.BASELINE_DPI;
+
+/// Full-screen rect when no bar is present. Used as fallback by tiling,
+/// floating, and drag when the bar module is absent.
+pub fn fullScreenRect() utils.Rect {
+    return .{
+        .x = 0,
+        .y = 0,
+        .width = @intCast(getState().screen.width_in_pixels),
+        .height = @intCast(getState().screen.height_in_pixels),
+    };
+}

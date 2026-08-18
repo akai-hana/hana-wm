@@ -14,13 +14,12 @@ const input = @import("input");
 const window = @import("window");
 const focus = @import("focus");
 
-const tiling = @import("tiling");
-const bar = @import("bar");
-const prompt = @import("prompt");
+const plugins = @import("plugins");
 const clock = @import("clock");
 const fullscreen = @import("fullscreen");
 const refresh_rate = @import("refresh_rate");
 const signals = @import("signals");
+const build_options = @import("build_options");
 
 // Indices into the poll fd array.
 const FD_XCB = 0;
@@ -54,10 +53,20 @@ inline fn eventCast(comptime T: type, event: *anyopaque) T {
     return @ptrCast(@alignCast(event));
 }
 
-/// Fans out PropertyNotify to both bar (title) and window (WM_PROTOCOLS cache).
+/// Fans out expose events to all plugins that handle them.
+fn dispatchExpose(event: *anyopaque) void {
+    const e = eventCast(*xcb.xcb_expose_event_t, event);
+    inline for (plugins.list[0..plugins.count]) |p| {
+        if (p.on_expose) |f| f(e);
+    }
+}
+
+/// Fans out PropertyNotify to plugins and window.
 fn handlePropertyNotify(event: *anyopaque) void {
     const e = eventCast(*xcb.xcb_property_notify_event_t, event);
-    bar.handlePropertyNotify(e);
+    inline for (plugins.list[0..plugins.count]) |p| {
+        if (p.on_property_notify) |f| f(e);
+    }
     window.handlePropertyNotify(e);
 }
 
@@ -105,7 +114,7 @@ const dispatch_table = blk: {
     table[xcb.XCB_FOCUS_IN] = asHandler(focus.handleFocusIn);
     table[xcb.XCB_PROPERTY_NOTIFY] = asHandler(handlePropertyNotify);
 
-    table[xcb.XCB_EXPOSE] = asHandler(bar.handleExpose);
+    table[xcb.XCB_EXPOSE] = asHandler(dispatchExpose);
 
     table[xcb.XCB_CONFIGURE_NOTIFY] = asHandler(handleConfigureNotify);
 
@@ -115,7 +124,7 @@ const dispatch_table = blk: {
 fn dispatch(event_type: u8, event: *anyopaque) void {
     // Type 0 is an X error pseudo-event produced for a failed *unchecked*
     // request. Nothing else in this codebase subscribes to type-0, so without
-    // this branch such errors would be silently dropped — making real-world
+    // this branch such errors would be silently dropped, making real-world
     // X11 failures (bad grabs, stale window ids, wrong atoms) undiagnosable.
     if (event_type == 0) {
         const e = eventCast(*xcb.xcb_generic_error_t, event);
@@ -140,7 +149,7 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
     // Guard the fixed-size table: extension events live above XCB_GE_GENERIC
     // and would index out of bounds. hana only selects core events today, but
     // the moment anyone subscribes to an extension this would become a
-    // memory-safety bug — cheap insurance.
+    // memory-safety bug; cheap insurance.
     if (idx >= dispatch_table.len) return;
     if (dispatch_table[idx]) |handler| handler(event);
 }
@@ -149,7 +158,7 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
 
 const CookieEntry = struct { cookie: xcb.xcb_void_cookie_t, keycode: u8 };
 
-/// Fills `cookies` with one grab request per (keybinding × lock modifier) pair.
+/// Fills `cookies` with one grab request per (keybinding x lock modifier) pair.
 /// Returns the number of entries written.
 fn fillGrabCookies(cookies: []CookieEntry) usize {
     var n: usize = 0;
@@ -222,7 +231,7 @@ pub fn grabKeybindings() void {
 ///   2. The swap precedes the subsystem reloads (reloadBorders / reloadConfig /
 ///      bar.reload) so they rebuild from the NEW config. (The old ordering kept
 ///      stale settings, then old_config.deinit() freed string slices the new bar
-///      had shallow-copied — a use-after-free on the next draw.)
+///      had shallow-copied; a use-after-free on the next draw.)
 ///   3. grabKeybindings() runs post-swap because fillGrabCookies() reads the
 ///      live config.
 ///   4. `committed` flips the errdefer: pre-swap failure frees new_config;
@@ -256,8 +265,7 @@ fn handleConfigReload() !void {
     committed = true;
 
     window.reloadBorders();
-    tiling.reloadConfig();
-    bar.reload();
+    plugins.fanOut("reload", .{});
 
     old_config.deinit(cs.alloc);
 
@@ -295,7 +303,10 @@ fn handleXcbEvents() void {
     // spawn queue entry.
     input.drainPendingSpawns();
 
-    tiling.retileIfDirty();
+    // Post-batch housekeeping: fan out to all plugins
+    inline for (plugins.list[0..plugins.count]) |p| {
+        if (p.post_batch) |f| f() catch |err| debug.err("Plugin post_batch failed: {}", .{err});
+    }
     focus.drainPendingConfirm();
     focus.drainPointerSync();
     // Must run after the event-draining loop above: any EnterNotify a tiling
@@ -304,7 +315,6 @@ fn handleXcbEvents() void {
     // See beginTilingOpSettle's doc comment in focus.zig.
     focus.drainTilingOpSettle();
     window.updateWorkspaceBordersIfNeeded();
-    bar.updateIfDirty() catch |err| debug.err("Failed to update bar: {}", .{err});
 
     _ = xcb.xcb_flush(conn);
 }
@@ -319,16 +329,21 @@ pub fn run() !void {
     };
 
     while (utils.running.load(.acquire)) {
-        // Wake for the earlier of the cursor-blink deadline and the clock's
-        // next whole-second tick (plus grace). The clock deadline keeps the
-        // loop ticking even when nothing else is happening, and also provides
-        // the short-retry behaviour inside clock.nextTickWaitMs when the clock
-        // thread is late publishing a second.
-        const blink_ms = prompt.blinkPollTimeoutMs();
-        const cursor_is_blinking = blink_ms >= 0;
-        const clock_ms: i32 = @intCast(clock.nextTickWaitMs());
-        const poll_ms: i32 = if (blink_ms < 0) clock_ms else @min(blink_ms, clock_ms);
-        const poll_rc = std.os.linux.poll(&fds, fds.len, poll_ms);
+        // Compute poll timeout from plugins that have a poll_timeout_ms hook
+        var poll_timeout_ms: i32 = @intCast(clock.nextTickWaitMs());
+        var cursor_is_blinking = false;
+        inline for (plugins.list[0..plugins.count]) |p| {
+            if (p.poll_timeout_ms) |f| {
+                const ms = f();
+                if (ms >= 0) {
+                    cursor_is_blinking = true;
+                    poll_timeout_ms = if (poll_timeout_ms < 0) ms else @min(poll_timeout_ms, ms);
+                }
+            }
+        }
+        if (poll_timeout_ms < 0) poll_timeout_ms = @intCast(clock.nextTickWaitMs());
+
+        const poll_rc = std.os.linux.poll(&fds, fds.len, poll_timeout_ms);
         const ready: usize = switch (std.posix.errno(poll_rc)) {
             .SUCCESS => @intCast(poll_rc),
             .INTR => continue,
@@ -340,8 +355,9 @@ pub fn run() !void {
 
         if (ready == 0) {
             if (cursor_is_blinking) {
-                prompt.blinkTick();
-                bar.submitDraw();
+                inline for (plugins.list[0..plugins.count]) |p| {
+                    if (p.on_poll_wakeup) |f| f();
+                }
                 _ = xcb.xcb_flush(core.getState().conn);
             }
         } else if ((fds[FD_XCB].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
@@ -356,11 +372,14 @@ pub fn run() !void {
             // The reload flag is also set directly by the reload_config keybinding
             // (which writes a wake byte to the pipe, but the byte can be dropped if
             // the pipe is full). Consume it every iteration so that path can never
-            // be lost — a flag-only request is picked up on the next poll timeout.
+            // be lost; a flag-only request is picked up on the next poll timeout.
             if (utils.consumeReload())
                 handleConfigReload() catch |err| debug.err("Reload failed: {}", .{err});
         }
 
-        _ = bar.updateClock();
+        // End-of-iteration fan-out
+        inline for (plugins.list[0..plugins.count]) |p| {
+            if (p.iteration_end) |f| _ = f();
+        }
     }
 }

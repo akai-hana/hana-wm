@@ -11,7 +11,7 @@
 //! buffer (via `xcb_poll_for_reply`) and therefore forces a blocking wait on
 //! the socket. Replies that were drained in an earlier read of the same batch
 //! are free. When the probe is disabled, `pollReply` always reports a miss and
-//! every call site falls through to its normal blocking reply — identical to
+//! every call site falls through to its normal blocking reply, identical to
 //! the non-bench build.
 
 const std = @import("std");
@@ -43,7 +43,7 @@ pub inline fn reportTitleCapture(ns: u64, windows: usize) void {
 /// Probe for whether the reply to request `sequence` is already available in
 /// xcb's read buffer.
 ///
-/// When it is, returns the reply pointer (consumed here — the caller must NOT
+/// When it is, returns the reply pointer (consumed here, the caller must NOT
 /// call the blocking `xcb_*_reply` function for this cookie again) and counts
 /// no round-trip. The returned pointer is heap-allocated by xcb and must be
 /// freed with `std.c.free`, exactly like a reply from the blocking path.
@@ -51,7 +51,7 @@ pub inline fn reportTitleCapture(ns: u64, windows: usize) void {
 /// When it is not (or the probe is disabled), returns null after counting one
 /// round-trip; the caller should proceed with its normal blocking reply call,
 /// which performs the actual wait. `null` is also returned when the request
-/// has already completed with an error rather than a reply — the subsequent
+/// has already completed with an error rather than a reply, the subsequent
 /// blocking call then resolves quickly to the same failure the non-bench
 /// build would have seen, so behavior is unchanged.
 pub inline fn pollReply(conn: *xcb.xcb_connection_t, sequence: u32) ?*anyopaque {

@@ -80,7 +80,7 @@ pub const MouseBind = struct {
 
 /// Owns the (modifiers, keysym) -> Action dispatch map resolved from a
 /// Config's keybindings, plus the keycode-resolution step that feeds it.
-/// Embedded in Config (not a global) so its lifetime tracks that Config —
+/// Embedded in Config (not a global) so its lifetime tracks that Config;
 /// deinit tears it down before freeing the Actions its entries point into.
 pub const KeybindResolver = struct {
     map: std.AutoHashMapUnmanaged(u64, *const Action) = .empty,
@@ -99,7 +99,7 @@ pub const KeybindResolver = struct {
             if (kb.keycode == null) {
                 var name_buf: [64]u8 = undefined;
                 const name = xkbcommon.keysymGetName(kb.keysym, &name_buf);
-                debug.warn("Keybinding mods=0x{x:0>4} keysym={s} (0x{x}) resolves to no base keycode and will NOT be grabbed — shifted symbols such as \"@\" must be bound via their unshifted key name (e.g. \"2\")", .{ kb.modifiers, name, kb.keysym });
+                debug.warn("Keybinding mods=0x{x:0>4} keysym={s} (0x{x}) resolves to no base keycode and will NOT be grabbed, shifted symbols such as \"@\" must be bound via their unshifted key name (e.g. \"2\")", .{ kb.modifiers, name, kb.keysym });
             }
         }
         self.rebuildDispatchMap(keybindings, allocator);
@@ -117,7 +117,7 @@ pub const KeybindResolver = struct {
                 const first_idx = for (keybindings[0..i], 0..) |other, j| {
                     if (dispatchKey(other.modifiers, other.keysym) == key) break j;
                 } else unreachable;
-                debug.warn("Keybinding conflict: #{} and #{} share mods=0x{x:0>4} keysym=0x{x} — second wins", .{ first_idx + 1, i + 1, kb.modifiers, kb.keysym });
+                debug.warn("Keybinding conflict: #{} and #{} share mods=0x{x:0>4} keysym=0x{x}, second wins", .{ first_idx + 1, i + 1, kb.modifiers, kb.keysym });
             }
             self.map.put(allocator, key, &kb.action) catch |e| debug.warnOnErr(e, "keybind map build");
         }
@@ -159,7 +159,7 @@ pub fn LowerResult(comptime max_len: usize) type {
 /// Lowercases `str` into a `max_len`-byte stack buffer if it fits, or reports
 /// `.too_long` (distinct from "not found", so callers can warn on overlong
 /// values). Shared by the layout-name and string_map lookups; keyNameToKeysym
-/// bypasses it — the C API needs a verbatim NUL-terminated copy.
+/// bypasses it: the C API needs a verbatim NUL-terminated copy.
 pub fn lowerStringCI(comptime max_len: usize, str: []const u8) LowerResult(max_len) {
     if (str.len > max_len) return .too_long;
     var result: LowerResult(max_len) = .{ .ok = .{ .buf = undefined, .len = str.len } };
@@ -215,6 +215,13 @@ pub const GridVariant = enum {
     relaxed, // last window in incomplete row expands to fill the row
 };
 
+/// Combined layout variant state, matching the per-layout defaults.
+pub const LayoutVariants = struct {
+    master: MasterVariant = .lifo,
+    monocle: MonocleVariant = .gapless,
+    grid: GridVariant = .rigid,
+};
+
 /// The tiling layout algorithm.
 /// Defined here (not tiling.zig) to avoid a circular import; tiling.zig
 /// re-exports this as `tiling.Layout`.
@@ -232,13 +239,13 @@ pub const Layout = enum {
     floating,
 };
 
-/// One entry per cyclable layout — every `Layout` tag except `.floating`.
+/// One entry per cyclable layout: every `Layout` tag except `.floating`.
 /// Single source of truth for the name<->tag mapping used across tiling.zig,
 /// workspaces.zig, and config.zig. Table order is also cycle order for
 /// toggleLayout/toggleLayoutReverse.
 pub const LayoutInfo = struct {
     tag: Layout,
-    /// Canonical name — what gets stored in cfg.tiling.layouts and shown in
+    /// Canonical name: what gets stored in cfg.tiling.layouts and shown in
     /// the bar's layout indicator.
     name: []const u8,
     /// Alternate spellings accepted when parsing config, folded to `name`
@@ -344,7 +351,7 @@ pub const IndicatorLocation = enum {
     down_right,
 
     // Accepts hyphens or underscores and both orderings of diagonal names (e.g. "left-up" == "up-left").
-    // StaticStringMap.initComptime is a compile-time perfect hash — O(1), no runtime cost.
+    // StaticStringMap.initComptime is a compile-time perfect hash, O(1), no runtime cost.
     const string_map = std.StaticStringMap(IndicatorLocation).initComptime(.{
         .{ "up", .up },
         .{ "down", .down },
@@ -475,7 +482,7 @@ pub const BarConfig = struct {
 
     /// Carousel scroll settings, staged here so they reach the carousel's
     /// live globals only after a config has been validated and swapped in
-    /// (config.applyCarouselSettings) — writing them at parse time (the old
+    /// (config.applyCarouselSettings), writing them at parse time (the old
     /// behaviour) leaked them into effect for a rejected config.
     carousel_enabled: bool = true,
     /// Scroll speed in px/s (config `scroll_speed`, min 1).
@@ -537,7 +544,7 @@ pub const BarConfig = struct {
         return @max(1, scaleToU16(scaleValue(self.workspace_tag_width, bar_height, 1.0)));
     }
 
-    /// Returns the bar's alpha in 16-bit format (0x0000–0xFFFF).
+    /// Returns the bar's alpha in 16-bit format (0x0000-0xFFFF).
     pub inline fn getAlpha16(self: *const BarConfig) u16 {
         return @intFromFloat(@round(std.math.clamp(self.transparency, 0.0, 1.0) * 0xFFFF));
     }

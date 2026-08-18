@@ -2,8 +2,8 @@
 //!
 //! `info` is compiled away in non-debug builds (verbose runtime tracing).
 //! `warn`/`err`/`logError`/`warnOnErr` always emit regardless of build mode:
-//! they carry user-facing diagnostics — config validation feedback ("value out
-//! of range, using default"), load failures, non-fatal runtime errors — that
+//! they carry user-facing diagnostics, config validation feedback ("value out
+//! of range, using default"), load failures, non-fatal runtime errors, that
 //! must reach the user in release builds too, where they are otherwise the
 //! only explanation for behaviour the user didn't ask for. A silent
 //! ReleaseFast fallback to config defaults with no message would be a bug.
@@ -61,7 +61,7 @@ pub inline fn logError(e: anyerror, window: ?u32) void {
 ///   self.geometry_cache.put(win, rect) catch |e| debug.warnOnErr(e, "geometry cache");
 ///
 /// Truly inconsequential capacity hints (ensureTotalCapacity etc.) may keep
-/// bare `catch {}` — they produce no actionable diagnostic information.
+/// bare `catch {}`; they produce no actionable diagnostic information.
 pub inline fn warnOnErr(e: anyerror, comptime context: []const u8) void {
     log(std.log.warn, "Best-effort op failed (" ++ context ++ "): {}", moduleFromSrc(@src()), .{e});
 }

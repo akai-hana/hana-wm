@@ -1,4 +1,4 @@
-### akai — hana WM default theme ###
+### akai: hana WM default theme ###
 
 # - HEX color code values can be set to either of the following formats:
 #   "#RRGGBB" / RRGGBB / 0xRRGGBB
@@ -48,7 +48,7 @@ workspace_tag_width = 100%  # Default base width
 
 # Bar transparency. Bare integers are percentages: 0% = fully transparent,
 # 100% / 1.0 = fully opaque, 50% / 0.5 = half. (A bare `1` means 1% opacity,
-# not 1.0 — write `1.0` or `100%` for fully opaque.)
+# not 1.0; write `1.0` or `100%` for fully opaque.)
 # With picom's gaussian blur, the bar will show blurred content behind it
 transparency = 0% # [0.0 - 1.0] / [0% - 100%]
 
@@ -89,7 +89,7 @@ title           = "#ac3232"  # Custom accent for title segment
 title_unfocused = "#52263e"
 title_minimized = "#007373"
 
-# drun command runner colors (all optional — omit to use bar-wide defaults)
+# drun command runner colors (all optional; omit to use bar-wide defaults)
  # drun_bg           = "#0d0d14"  # background (default: bar bg)
  # drun_fg           = "#ebd9bc"  # typed text  (default: bar fg)
  # drun_prompt_color = "#ac3232"  # prompt text + cursor (default: title accent)

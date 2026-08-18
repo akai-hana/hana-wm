@@ -30,8 +30,8 @@ pub fn tileWithOffset(
 }
 
 /// Splits `dim` into two halves separated by `gap`, clamping each half to
-/// `min_dim` when `dim` is too small — recursive calls never produce zero-size
-/// regions, and `first + gap + second ≈ dim` for normal inputs.
+/// `min_dim` when `dim` is too small; recursive calls never produce zero-size
+/// regions, and `first + gap + second ~= dim` for normal inputs.
 inline fn halveWithMin(dim: u16, gap: u16, min_dim: u16) struct { first: u16, second: u16 } {
     const first: u16 = if (dim > gap) (dim - gap) / 2 else min_dim;
     const second: u16 = if (dim > first +| gap) dim - first - gap else min_dim;

@@ -24,7 +24,7 @@ const TERMINALS = [_][]const u8{
 };
 
 /// Returns the first available terminal from TERMINALS, or "xterm".
-/// Pure PATH scan — does not allocate; returns a static string slice.
+/// Pure PATH scan; does not allocate; returns a static string slice.
 pub fn detectTerminal() []const u8 {
     for (TERMINALS) |cmd| {
         if (isCommandAvailable(cmd)) {
@@ -59,7 +59,7 @@ fn isCommandAvailable(command: []const u8) bool {
 }
 
 // std.posix.access was removed in this Zig version, so faccessat is called
-// as a raw syscall. It checks existence and executability in one syscall —
+// as a raw syscall. It checks existence and executability in one syscall;
 // openFileAbsolute checks readability only, so a non-executable file named
 // like a terminal isn't reported "available" and fails later with EACCES.
 inline fn checkPath(buf: []u8, dir: []const u8, command: []const u8) bool {

@@ -2,13 +2,13 @@
 //! Displays the current time on the status bar. A background thread aligns
 //! to the next whole-second boundary, wakes once a second to format the time
 //! string, and flags the main WM thread to redraw the segment. Pango/layout
-//! work always runs on the main thread (bar.updateClock → drawClockOnly); the
+//! work always runs on the main thread (bar.updateClock -> drawClockOnly); the
 //! clock thread never touches the DrawContext.
 //!
 //! Thread lifecycle
 //! ----------------
-//! startThread(allocator, format) — call from bar.init() after the bar window
-//! exists; dupes `format`. stopThread(allocator) — call before teardown;
+//! startThread(allocator, format); call from bar.init() after the bar window
+//! exists; dupes `format`. stopThread(allocator); call before teardown;
 //! signals the condition variable the thread sleeps on so it exits at once.
 //! The next startThread() re-aligns from scratch, so reloads never phase-drift.
 //!

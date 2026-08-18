@@ -27,7 +27,7 @@ pub const Value = union(enum) {
     scalable: ScalableValue,
 
     /// Duplicate keys accumulate into a flat array (see `accumulate`), so
-    /// scalar reads implement "later declaration wins" — the latest value is
+    /// scalar reads implement "later declaration wins"; the latest value is
     /// the LAST element, array consumers see the full accumulation. Not
     /// `inline`: recursion into an accumulated duplicate array is rejected.
     /// Routes every scalar accessor through one shared last-element descent.
@@ -94,7 +94,7 @@ pub const Value = union(enum) {
 pub const Section = struct {
     pairs: std.StringHashMap(Value),
     /// Keys examined via get()/getAs()/markConsumed() during config
-    /// interpretation. Populated (best-effort — alloc failures are swallowed)
+    /// interpretation. Populated (best-effort, alloc failures are swallowed)
     /// so config.zig can warn about keys no parse function recognises.
     consumed: std.StringHashMap(void),
     /// Document-order key list (insertion order); `pairs` is a hashmap, so
@@ -129,7 +129,7 @@ pub const Section = struct {
         self.keys_in_order.append(allocator, key) catch {};
     }
 
-    /// Iterates pairs in document (insertion) order — deterministic, unlike
+    /// Iterates pairs in document (insertion) order; deterministic, unlike
     /// `pairs.iterator()`. Values are the live (possibly accumulated) values.
     pub fn orderedIterator(self: *const Section) OrderedIterator {
         return .{ .section = self, .idx = 0 };
@@ -144,13 +144,13 @@ pub const Section = struct {
     }
 
     /// Warns about every key in the section that was never examined via
-    /// get()/getAs()/markConsumed() — typically a typo in the key name, since
+    /// get()/getAs()/markConsumed(); typically a typo in the key name, since
     /// the parser otherwise accepts it silently.
     pub fn warnUnconsumed(self: *const Section, section_name: []const u8) void {
         var iter = self.pairs.iterator();
         while (iter.next()) |entry| {
             if (!self.consumed.contains(entry.key_ptr.*)) {
-                debug.warn("Unrecognized key '{s}' in section [{s}] — ignoring", .{ entry.key_ptr.*, section_name });
+                debug.warn("Unrecognized key '{s}' in section [{s}]; ignoring", .{ entry.key_ptr.*, section_name });
             }
         }
     }
@@ -160,7 +160,7 @@ pub const Section = struct {
         return self.pairs.get(key);
     }
 
-    /// Generic typed getter — dispatches to the matching `Value.asXxx()` accessor
+    /// Generic typed getter: dispatches to the matching `Value.asXxx()` accessor
     /// for the requested type.  All five typed getters below are thin wrappers
     /// around this single function so the dispatch logic lives in one place.
     pub fn getAs(self: *Section, comptime T: type, key: []const u8) ?T {
@@ -299,7 +299,7 @@ fn accumulate(allocator: std.mem.Allocator, old_val: *Value, incoming: Value, co
 }
 
 /// Merges `src`'s pairs into `dst`; duplicate keys accumulate into arrays,
-/// exactly as within one file — a keybind in two files runs both actions.
+/// exactly as within one file: a keybind in two files runs both actions.
 /// Scalar reads resolve to the last declaration (later file wins); array
 /// reads see the full accumulation; `src` is unmodified.
 fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Section) !void {
@@ -339,10 +339,10 @@ pub fn mergeDocumentsInto(allocator: std.mem.Allocator, dst: *Document, src: *co
     while (iter.next()) |entry| {
         const name = entry.key_ptr.*;
         if (dst.sections.getPtr(name)) |dst_sec| {
-            // Section already exists — merge pairs.
+            // Section already exists: merge pairs.
             try mergeSectionsInto(allocator, dst_sec, entry.value_ptr);
         } else {
-            // New section — deep-copy it wholesale.
+            // New section: deep-copy it wholesale.
             var new_sec = Section.init(allocator);
             errdefer new_sec.deinit(allocator);
             try mergeSectionsInto(allocator, &new_sec, entry.value_ptr);
@@ -387,7 +387,7 @@ const Parser = struct {
     /// backstop, not a response to observed input.
     array_depth: usize = 0,
     /// Set while parsing array elements so parseBareValues parses only a
-    /// single bare token per call — the `,`/`]` separators belong to
+    /// single bare token per call, the `,`/`]` separators belong to
     /// parseArray, and without this an element list like `[a, b]` would be
     /// gathered greedily into one nested array.
     in_array: bool = false,
@@ -580,8 +580,8 @@ const Parser = struct {
     }
 
     /// Interprets a single bare token as a Value. Every scalar form a bare
-    /// token can take is handled here — boolean, percentage, decimal, color,
-    /// integer — with the unrecognised-token string fallback last.
+    /// token can take is handled here: boolean, percentage, decimal, color,
+    /// integer, with the unrecognised-token string fallback last.
     fn parseBareTokenValue(self: *Parser, raw: []const u8) ParseError!Value {
         if (BOOLEAN_KEYWORDS.get(raw)) |b| return .{ .boolean = b };
 
@@ -605,7 +605,7 @@ const Parser = struct {
         // `.color` instead of `.string`, breaking asString()/ACTION_MAP
         // lookups for layout/variant/segment names. A leading '#' marks the
         // token as a color, not a comment; if it does not form a valid color
-        // the line is invalid — the same outcome as a bare '#' after '='
+        // the line is invalid: the same outcome as a bare '#' after '='
         // always produced before. An invalid `0x...` instead falls through
         // to the string fallback below.
         if (raw[0] == '#' or (raw.len > 2 and raw[0] == '0' and (raw[1] == 'x' or raw[1] == 'X'))) {
@@ -622,8 +622,8 @@ const Parser = struct {
 
     /// Parses a bare (unquoted) value: one token is a scalar; two or more
     /// (whitespace/commas) form an array, e.g. `segments = workspaces layout
-    /// clock` → ["workspaces","layout","clock"] or `icons = #ac3232, #52263e`
-    /// → [0xac3232, 0x52263e]. Inside `[...]` one token is consumed (commas
+    /// clock` -> ["workspaces","layout","clock"] or `icons = #ac3232, #52263e`
+    /// -> [0xac3232, 0x52263e]. Inside `[...]` one token is consumed (commas
     /// belong to parseArray); semicolons are likewise left to the pair parser.
     fn parseBareValues(self: *Parser) ParseError!Value {
         var items: std.ArrayList(Value) = .empty;
@@ -764,7 +764,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
 
             if (doc.sections.getPtr(section_name)) |existing| {
                 // Duplicate section header: keep filling the existing section
-                // — duplicate keys accumulate as if the blocks were one
+                // : duplicate keys accumulate as if the blocks were one
                 // section, consistent with the cross-file merge path.
                 allocator.free(section_name);
                 current_section = existing;

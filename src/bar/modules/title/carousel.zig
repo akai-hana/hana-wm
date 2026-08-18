@@ -52,7 +52,7 @@ const CarouselEntry = struct {
 
 /// True when `e` must be rebuilt from scratch: the window it was built for,
 /// the title, the cycle width, or the segment geometry changed.
-/// Colour-only changes (e.last_bg/e.last_fg) are deliberately excluded — those
+/// Colour-only changes (e.last_bg/e.last_fg) are deliberately excluded, those
 /// reuse the existing pixmap in place.
 inline fn entryStale(e: *const CarouselEntry, window: ?u32, title_invalidated: bool, cycle_w: u16, geom: SegmentGeometry) bool {
     return e.window != window or title_invalidated or e.cycle_w != cycle_w or
@@ -71,7 +71,7 @@ const ScrollConfig = struct {
 };
 
 /// All state owned by whichever thread holds bar.zig's draw_mutex (the main
-/// WM thread or the carousel thread — never both). `is_enabled` is also
+/// WM thread or the carousel thread, never both). `is_enabled` is also
 /// written outside that lock (setCarouselEnabled) and is therefore an atomic;
 /// all other fields require draw_mutex.
 const RenderState = struct {
@@ -101,7 +101,7 @@ var scroll_config: ScrollConfig = .{};
 var render: RenderState = .{};
 var focus_signal: FocusSignal = .{};
 
-// Public API — feature toggles and scroll config
+// Public API: feature toggles and scroll config
 
 /// Enable or disable the carousel globally.
 /// Disabling immediately frees all carousel pixmaps.
@@ -116,7 +116,7 @@ pub fn isCarouselEnabled() bool {
 }
 
 /// Set the scroll speed in pixels per second.
-/// Values ≤ 0 are clamped to default_scroll_speed.
+/// Values <= 0 are clamped to default_scroll_speed.
 pub fn setScrollSpeed(px_per_s: f64) void {
     scroll_config.speed.store(if (px_per_s > 0.0) px_per_s else default_scroll_speed, .monotonic);
 }
@@ -141,18 +141,18 @@ pub fn wakeIntervalNs() u64 {
     return @intFromFloat(1_000_000_000.0 / hz);
 }
 
-// Public API — lifecycle
+// Public API: lifecycle
 
 /// True when either carousel pixmap is live.
 /// Backed by the `active` atomic mirror so the carousel thread can read it
-/// without draw_mutex — reading render.single/render.seg themselves from a
+/// without draw_mutex, reading render.single/render.seg themselves from a
 /// second thread would race the main thread's deinit under the lock.
 pub fn isCarouselActive() bool {
     return render.active.load(.monotonic);
 }
 
 /// Returns the window ID the segmented carousel was built for, or null.
-/// Caller must hold bar.zig's draw_mutex — reading render.seg here is only
+/// Caller must hold bar.zig's draw_mutex, reading render.seg here is only
 /// safe while no other thread can be drawing concurrently.
 pub fn getSegmentedCarouselWindow() ?u32 {
     return if (render.seg) |e| e.window else null;
@@ -161,7 +161,7 @@ pub fn getSegmentedCarouselWindow() ?u32 {
 /// Free all carousel pixmaps and reset cross-thread signals; call on bar
 /// deinit or reload. Safe before or after the carousel thread stops: it takes
 /// bar.zig's draw_mutex so it can't race a concurrent blit. Caller must NOT
-/// already hold draw_mutex (not recursive) — use deinitCarouselLocked() there.
+/// already hold draw_mutex (not recursive), use deinitCarouselLocked() there.
 pub fn deinitCarousel() void {
     bar.draw_mutex.lock();
     defer bar.draw_mutex.unlock();
@@ -203,7 +203,7 @@ pub fn deinitSegmentedCarousel() void {
     focus_signal.seg_window.store(0, .release);
 }
 
-// Public API — focus notification (main thread only)
+// Public API: focus notification (main thread only)
 
 /// Called by the focus system when the focused window changes.
 /// MUST be called from the main thread only.
@@ -220,14 +220,14 @@ pub fn notifyFocusChanged(new_window: ?u32) void {
 //
 // The carousel redraws on its own cadence (roughly per display refresh) while
 // a title scrolls, independent of the once-a-second clock tick and the main
-// event loop — mirroring clock.zig's dedicated-thread pattern.
+// event loop, mirroring clock.zig's dedicated-thread pattern.
 //
 // Unlike the clock thread there's no wall-clock deadline, so the loop just
 // re-sleeps for wakeIntervalNs() each iteration, re-read live so a
 // refresh-rate config change takes effect on the very next wake.
 //
-//   startThread() — call from bar.init() after the bar window exists.
-//   stopThread()  — call before bar teardown (deinit and reload).
+//   startThread(): call from bar.init() after the bar window exists.
+//   stopThread():  call before bar teardown (deinit and reload).
 
 var carousel_thread: utils.CondThread = .{};
 
@@ -266,8 +266,8 @@ fn runCarouselThread(t: *utils.CondThread) void {
         defer t.mutex.unlock();
         if (t.quit) return;
         // Sleep one refresh interval while scrolling, or a long idle interval
-        // when nothing is active. The check runs under t.mutex — the same
-        // mutex commitCarouselFrame signals under — so the activation signal
+        // when nothing is active. The check runs under t.mutex, the same
+        // mutex commitCarouselFrame signals under, so the activation signal
         // can't be lost between check and wait.
         const interval = if (isCarouselActive()) wakeIntervalNs() else idle_interval_ns;
         t.cond.timedWait(&t.mutex, interval) catch {};
@@ -277,7 +277,7 @@ fn runCarouselThread(t: *utils.CondThread) void {
     }
 }
 
-// Public API — hot-path carousel tick
+// Public API: hot-path carousel tick
 
 /// Advance the scroll offset by the elapsed time since the last blit and copy
 /// the new frame to the bar's offscreen pixmap. Returns false when the offset
@@ -296,10 +296,10 @@ inline fn advanceAndBlit(e: *CarouselEntry, dc: *drawing.DrawContext) bool {
 /// Fast per-tick single-window carousel blit.
 ///
 /// Returns false when no single carousel is live, the segment position/size
-/// changed (bar resize), or the accent colour changed (minimize/unminimize —
+/// changed (bar resize), or the accent colour changed (minimize/unminimize,
 /// caller triggers a full draw that rebuilds with the new bg baked in).
 ///
-/// Hot path: one xcb_copy_area (wide pixmap → offscreen) + blitAndFlush.
+/// Hot path: one xcb_copy_area (wide pixmap -> offscreen) + blitAndFlush.
 /// No fill, no Cairo, no Pango.
 pub fn drawCarouselTick(
     dc: *drawing.DrawContext,
@@ -325,14 +325,14 @@ pub fn drawSegCarouselTickAuto(dc: *drawing.DrawContext, accent: u32) bool {
     const e = &render.seg.?;
     if (accent != e.last_bg) return false;
     // If a focus change is pending, bail out so the caller falls through to
-    // drawCached → drawSegmentedTitles, which redraws ALL segments with the
-    // correct accent colours (old focused → unfocused, new focused → focused).
+    // drawCached -> drawSegmentedTitles, which redraws ALL segments with the
+    // correct accent colours (old focused -> unfocused, new focused -> focused).
     if (focus_signal.is_invalidated.load(.acquire)) return false;
     _ = advanceAndBlit(e, dc);
     return true;
 }
 
-// Public API — single-window title rendering
+// Public API: single-window title rendering
 
 /// Recover text_w from the live carousel entry when the title hasn't changed,
 /// avoiding a Pango measurement on the common steady-state path.
@@ -390,7 +390,7 @@ pub fn drawScrollingTitle(
     });
 }
 
-// Public API — segmented carousel
+// Public API: segmented carousel
 
 /// Render the focused window's title for a split-view segment.
 ///
@@ -412,7 +412,7 @@ pub fn drawSegmentedCarousel(
     title_invalidated: bool,
 ) !bool {
     if (text_w <= geom.avail_w) {
-        // Text fits — free any live seg-carousel so the tick fast-path can't
+        // Text fits, free any live seg-carousel so the tick fast-path can't
         // blit stale scrolling content over the static text the caller draws.
         deinitSegmentedCarousel();
         return false;
@@ -438,7 +438,7 @@ pub fn drawSegmentedCarousel(
     return true;
 }
 
-// Private — shared rebuild/recolour/blit step
+// Private: shared rebuild/recolour/blit step
 
 /// Copy the entry's current frame into the bar's offscreen pixmap and flush
 /// it to screen.
@@ -525,7 +525,7 @@ fn commitCarouselFrame(
     return false;
 }
 
-// Private — carousel entry construction
+// Private: carousel entry construction
 
 /// Build a fresh CarouselPixmap and CarouselEntry from scratch.
 /// Computes left_pad and the blit-minimum pixmap width from `geom`, initialises
@@ -545,7 +545,7 @@ fn buildCarouselEntry(
     // The blit window is always [O, O + seg_w) with O in [0, cycle_w), so
     // pixels past cycle_w + seg_w are never read; copy B clips at the pixmap
     // edge when the title is wider than the segment, always in bounds. A full
-    // second copy would hold unread text — roughly double pixmap memory.
+    // second copy would hold unread text, roughly double pixmap memory.
     const pixmap_w: u16 = cycle_w + geom.seg_w;
     var cp = try drawing.CarouselPixmap.init(dc, pixmap_w);
     errdefer cp.deinit();
@@ -564,7 +564,7 @@ fn buildCarouselEntry(
     };
 }
 
-// Private — scroll math
+// Private: scroll math
 
 /// Bresenham-style sub-pixel accumulator.
 ///
@@ -574,8 +574,8 @@ fn buildCarouselEntry(
 ///
 /// This distributes 0 px and 1 px advances evenly across frames rather than
 /// clustering the fractional debt into occasional jumps: at 125 px/s on
-/// 165 Hz the raw advance is ≈0.758 px/frame, and flooring each frame would
-/// freeze every ~4–5 frames then snap 1 px.
+/// 165 Hz the raw advance is ~=0.758 px/frame, and flooring each frame would
+/// freeze every ~4-5 frames then snap 1 px.
 ///
 /// Caller must hold a mutable pointer to the entry.
 fn advanceCarouselOffset(e: *CarouselEntry, now_ns: u64) u16 {

@@ -40,7 +40,7 @@ pub fn tileWithOffset(
     };
     var dir: SpiralDirection = .right;
 
-    // splitAndAdvance's emitOrDefer honors ctx.defer_win — see LayoutCtx.defer_win.
+    // splitAndAdvance's emitOrDefer honors ctx.defer_win, see LayoutCtx.defer_win.
     for (windows, 0..) |win, i| {
         // Remaining area too small to split: raise the focused window (or the
         // first overflow window as fallback) and push the rest offscreen so the
@@ -55,7 +55,7 @@ pub fn tileWithOffset(
             // Find the focused window among the overflow set; fall back to the
             // first window if no focused window is present here. Same reasoning
             // as monocle: showOneHideRest never raises on a background retile
-            // (LayoutCtx.is_background) — there's no viewer to show it to, and
+            // (LayoutCtx.is_background); there's no viewer to show it to, and
             // raising would leave it first in the global stacking order.
             const top = layouts.focusedElse(ctx, windows[i..], windows[i]);
             layouts.showOneHideRest(ctx, windows[i..], top, top_rect);

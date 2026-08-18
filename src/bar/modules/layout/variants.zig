@@ -5,31 +5,33 @@ const core = @import("core");
 const types = @import("types");
 
 const drawing = @import("drawing");
-const tiling = @import("tiling");
+const build_options = @import("build_options");
+const tiling = if (build_options.has_tiling) @import("tiling") else null;
 
 /// Draws the layout variants icon on the bar.
 pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
     if (!core.getState().config.tiling.enabled) return start_x;
-    const t_state = tiling.getStateOpt() orelse return start_x;
-    const indicator = getIndicator(t_state);
+    const layout_val = if (build_options.has_tiling) tiling.getCurrentLayout() else .master;
+    const variants = if (build_options.has_tiling) tiling.getLayoutVariants() else types.LayoutVariants{};
+    const indicator = getIndicator(layout_val, &variants);
     if (indicator.len == 0) return start_x;
     return dc.drawSegment(start_x, height, indicator, config.scaledSegmentPadding(height), config.bg, config.fg);
 }
 
 /// Accessor for the icon of each layout's variants.
-fn getIndicator(s: *const tiling.State) []const u8 {
-    return switch (s.config.layout) {
-        .master => switch (s.config.layout_variants.master) {
+fn getIndicator(layout: types.Layout, v: *const types.LayoutVariants) []const u8 {
+    return switch (layout) {
+        .master => switch (v.master) {
             .lifo => "[N]",
             .fifo => "=N=",
         },
 
-        .monocle => switch (s.config.layout_variants.monocle) {
+        .monocle => switch (v.monocle) {
             .gaps => ">-<",
             .gapless => "<->",
         },
 
-        .grid => switch (s.config.layout_variants.grid) {
+        .grid => switch (v.grid) {
             .relaxed => "[~]",
             .rigid => "[#]",
         },

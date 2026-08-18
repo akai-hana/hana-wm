@@ -35,7 +35,7 @@ pub fn tileWithOffset(
         break :blk (screen_w -| (count + 1) * m.gap) / count;
     } else cell_w;
 
-    // emitOrDefer honors ctx.defer_win — see LayoutCtx.defer_win.
+    // emitOrDefer honors ctx.defer_win, see LayoutCtx.defer_win.
     for (windows, 0..) |win, idx| {
         const col: u16 = @intCast(idx % grid.cols);
         const row: u16 = @intCast(idx / grid.cols);
@@ -54,7 +54,7 @@ pub fn tileWithOffset(
 }
 
 /// Returns the column/row counts of the smallest square grid holding `n`
-/// windows. Special-cases `n == 3` (one row of three, not a 2×2 with a dead
+/// windows. Special-cases `n == 3` (one row of three, not a 2x2 with a dead
 /// cell). Uses integer ceiling-sqrt to avoid floats; at most 12 iterations.
 inline fn calcGridShape(n: usize) struct { cols: u16, rows: u16 } {
     if (n == 3) return .{ .cols = 3, .rows = 1 };
