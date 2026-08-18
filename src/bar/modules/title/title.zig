@@ -205,27 +205,35 @@ fn extractPropertyString(
 
 const SortedWindowInfos = struct {
     infos: []WindowInfo,
-    owned_titles: *[max_visible_windows]?[]const u8,
 };
 
+/// `out_window_info_buf`/`out_owned_titles` are caller-owned storage, not
+/// locals of this function: a `WindowInfo.title` in the returned slice may
+/// point into `out_owned_titles`' memory, and that memory must still be
+/// valid for as long as the caller keeps reading `infos` afterwards. If
+/// these buffers were declared here instead, they (and everything pointing
+/// into them) would dangle the instant this function returns -- freed stack
+/// space the caller's *next* calls (e.g. Pango/cairo text measurement and
+/// drawing) would promptly overwrite. Requiring the caller to pass them in
+/// keeps them alive in the caller's own frame for as long as it needs them.
 fn gatherAndSortWindowInfos(
     ctx: TitleRenderContext,
     snapshot: TitleSnapshot,
     allocator: std.mem.Allocator,
     windows: []const u32,
     win_count: usize,
+    out_window_info_buf: *[max_visible_windows]WindowInfo,
+    out_owned_titles: *[max_visible_windows]?[]const u8,
 ) !?SortedWindowInfos {
-    var window_info_buf: [max_visible_windows]WindowInfo = undefined;
-    var owned_titles: [max_visible_windows]?[]const u8 = undefined;
-    @memset(owned_titles[0..win_count], null);
-    const info_count = try gatherWindowInfos(ctx, snapshot, allocator, windows[0..win_count], &window_info_buf, &owned_titles);
+    @memset(out_owned_titles[0..win_count], null);
+    const info_count = try gatherWindowInfos(ctx, snapshot, allocator, windows[0..win_count], out_window_info_buf, out_owned_titles);
     if (info_count == 0) {
-        for (owned_titles[0..win_count]) |t| if (t) |s| allocator.free(s);
+        for (out_owned_titles[0..win_count]) |t| if (t) |s| allocator.free(s);
         return null;
     }
-    const window_infos = window_info_buf[0..info_count];
+    const window_infos = out_window_info_buf[0..info_count];
     std.mem.sort(WindowInfo, window_infos, {}, compareWindows);
-    return .{ .infos = window_infos, .owned_titles = &owned_titles };
+    return .{ .infos = window_infos };
 }
 
 /// Shared body for draw() and drawCached(). `ctx.cached_title` is non-null
@@ -328,8 +336,13 @@ pub fn hitTest(
     if (ctx.width == 0) return null;
     const win_count = @min(windows.len, max_visible_windows);
 
-    const sorted = (try gatherAndSortWindowInfos(ctx, snapshot, allocator, windows, win_count)) orelse return null;
-    defer for (sorted.owned_titles[0..win_count]) |t| if (t) |s| allocator.free(s);
+    // Declared here (not inside gatherAndSortWindowInfos) so they stay alive
+    // in this frame for the entire time `window_infos` is read below -- see
+    // the comment on gatherAndSortWindowInfos.
+    var window_info_buf: [max_visible_windows]WindowInfo = undefined;
+    var owned_titles: [max_visible_windows]?[]const u8 = undefined;
+    const sorted = (try gatherAndSortWindowInfos(ctx, snapshot, allocator, windows, win_count, &window_info_buf, &owned_titles)) orelse return null;
+    defer for (owned_titles[0..win_count]) |t| if (t) |s| allocator.free(s);
 
     const window_infos = sorted.infos;
 
@@ -766,12 +779,20 @@ fn drawSegmentedTitles(
             carousel.deinitSegmentedCarousel();
     }
 
-    // `window_info_buf`/`owned_titles` must outlive gatherWindowInfos, a
-    // WindowInfo's `.title` may point into `owned_titles'` memory, so they
-    // live here, while gatherWindowInfos' own scratch (XCB cookies, bool
-    // flags, several KB) is reclaimed when it returns.
-    const sorted = (try gatherAndSortWindowInfos(ctx, snapshot, allocator, windows, win_count)) orelse return;
-    defer for (sorted.owned_titles[0..win_count]) |t| if (t) |s| allocator.free(s);
+    // `window_info_buf`/`owned_titles` must outlive the loop below -- a
+    // WindowInfo's `.title` may point into `owned_titles`' memory, and the
+    // loop's Pango/cairo calls (widthFor, drawSegmentTitle) have plenty of
+    // stack depth of their own. So they're declared here, in the same frame
+    // as the loop that reads them, rather than inside
+    // gatherAndSortWindowInfos: that function's own scratch (XCB cookies,
+    // bool flags, several KB) is reclaimed when it returns, but these two
+    // buffers must not be -- passing them in as out-params keeps them alive
+    // in *this* frame instead of a callee frame that's already gone by the
+    // time the loop runs.
+    var window_info_buf: [max_visible_windows]WindowInfo = undefined;
+    var owned_titles: [max_visible_windows]?[]const u8 = undefined;
+    const sorted = (try gatherAndSortWindowInfos(ctx, snapshot, allocator, windows, win_count, &window_info_buf, &owned_titles)) orelse return;
+    defer for (owned_titles[0..win_count]) |t| if (t) |s| allocator.free(s);
 
     const window_infos = sorted.infos;
 
