@@ -99,14 +99,12 @@ fn tileColumn(
     const count: u16 = @intCast(windows.len);
     const avail = calcAvailableHeight(h, count, m, min_dim);
 
-    var heights_buf: [constants.Limits.MAX_TILED_WINDOWS]u16 = undefined;
+    var heights_buf: [constants.Limits.max_tiled_windows]u16 = undefined;
     const heights = heights_buf[0..windows.len];
-    distributeStackHeightsWeighted(ctx, windows, avail, boost, min_dim, heights);
+    const used = distributeStackHeightsWeighted(ctx, windows, avail, boost, min_dim, heights);
 
     // If every window is capped, sum(heights) < avail; centre the stack in
     // the column instead of stranding the slack at the bottom.
-    var used: u32 = 0;
-    for (heights) |win_h| used += win_h;
     const dead_space: u32 = @as(u32, avail) -| used;
     const pad_top: u16 = @intCast(dead_space / 2);
 
@@ -126,7 +124,8 @@ fn tileColumn(
 /// Result of the water-filling pass: which windows are capped (pinned to their
 /// max_height) and the leftover budget after removing their pixels.
 const CapResult = struct {
-    capped: []bool,
+    capped: []u8,
+    capped_len: usize,
     remaining_avail: u16,
     remaining_weight: f32,
     remaining_count: u16,
@@ -142,21 +141,24 @@ fn findCappedWindows(
     boost: StackBoost,
     min_dim: u16,
     out: []u16,
-    capped: []bool,
+    capped: []u8,
 ) CapResult {
     const n: u16 = @intCast(windows.len);
-    @memset(capped, false);
+    @memset(capped, 0);
 
     var remaining_avail = avail;
     var remaining_weight: f32 = totalWeight(n, boost);
     var remaining_count: u16 = n;
+    const zero_boost = boost.isZero();
 
     var pinned_any = true;
     while (pinned_any and remaining_count > 0) {
         pinned_any = false;
         for (windows, 0..) |win, i| {
-            if (capped[i]) continue;
-            const w_i = windowWeight(@intCast(i), n, boost);
+            if (bitIsSet(capped, i)) continue;
+            // When boost is zero every weight is identically 1.0; skip the
+            // function call and its two branches to keep the hot path tight.
+            const w_i: f32 = if (zero_boost) 1.0 else windowWeight(@intCast(i), n, boost);
             const fair_share: u16 = if (remaining_weight > 0)
                 @intFromFloat(@as(f32, @floatFromInt(remaining_avail)) * w_i / remaining_weight)
             else
@@ -164,7 +166,7 @@ fn findCappedWindows(
             const max_h = windowMaxHeight(ctx, win);
             if (max_h > 0 and max_h <= fair_share) {
                 out[i] = @max(min_dim, max_h);
-                capped[i] = true;
+                bitSet(capped, i);
                 remaining_avail = remaining_avail -| out[i];
                 remaining_weight -= w_i;
                 remaining_count -= 1;
@@ -175,6 +177,7 @@ fn findCappedWindows(
 
     return .{
         .capped = capped,
+        .capped_len = windows.len,
         .remaining_avail = remaining_avail,
         .remaining_weight = remaining_weight,
         .remaining_count = remaining_count,
@@ -182,21 +185,21 @@ fn findCappedWindows(
 }
 
 /// Assigns heights to uncapped windows using plain even division (zero boost).
-fn distributeEven(windows: []const u32, capped: []bool, remaining_count: u16, remaining_avail: u16, min_dim: u16, out: []u16) void {
+fn distributeEven(windows: []const u32, capped: []u8, remaining_count: u16, remaining_avail: u16, min_dim: u16, out: []u16) void {
     var seen: u16 = 0;
     for (windows, 0..) |_, i| {
-        if (capped[i]) continue;
+        if (bitIsSet(capped, i)) continue;
         out[i] = windowHeight(seen, remaining_count, remaining_avail, min_dim);
         seen += 1;
     }
 }
 
 /// Assigns heights to uncapped windows using weighted cumulative division.
-fn distributeWeighted(windows: []const u32, n: u16, boost: StackBoost, capped: []bool, remaining_weight: f32, remaining_avail: u16, min_dim: u16, out: []u16) void {
+fn distributeWeighted(windows: []const u32, n: u16, boost: StackBoost, capped: []u8, remaining_weight: f32, remaining_avail: u16, min_dim: u16, out: []u16) void {
     var cum: f32 = 0;
     var prev_px: f32 = 0;
     for (windows, 0..) |_, i| {
-        if (capped[i]) continue;
+        if (bitIsSet(capped, i)) continue;
         cum += windowWeight(@intCast(i), n, boost);
         const px: f32 = if (remaining_weight > 0)
             @round(@as(f32, @floatFromInt(remaining_avail)) * cum / remaining_weight)
@@ -206,6 +209,14 @@ fn distributeWeighted(windows: []const u32, n: u16, boost: StackBoost, capped: [
         out[i] = @max(min_dim, h);
         prev_px = px;
     }
+}
+
+inline fn bitIsSet(bits: []u8, i: usize) bool {
+    return bits[i / 8] & (@as(u8, 1) << @intCast(i % 8)) != 0;
+}
+
+inline fn bitSet(bits: []u8, i: usize) void {
+    bits[i / 8] |= @as(u8, 1) << @intCast(i % 8);
 }
 
 /// Split `avail` content-height pixels across `windows`, writing one height
@@ -222,19 +233,24 @@ fn distributeWeighted(windows: []const u32, n: u16, boost: StackBoost, capped: [
 /// windowHeight/windowY, so output stays bit-identical to the historical even
 /// split. Non-zero boost uses the telescoping rounded cumulative sum
 /// (`cum`/`prev_px`) so fractional weights land on the right pixel.
-fn distributeStackHeightsWeighted(ctx: *const layouts.LayoutCtx, windows: []const u32, avail: u16, boost: StackBoost, min_dim: u16, out: []u16) void {
+fn distributeStackHeightsWeighted(ctx: *const layouts.LayoutCtx, windows: []const u32, avail: u16, boost: StackBoost, min_dim: u16, out: []u16) u32 {
     const n: u16 = @intCast(windows.len);
 
-    var capped_buf: [constants.Limits.MAX_TILED_WINDOWS]bool = undefined;
-    const capped = capped_buf[0..windows.len];
+    var capped_buf: [constants.Limits.max_tiled_windows / 8]u8 = undefined;
+    const capped = capped_buf[0 .. (windows.len + 7) / 8];
 
     const cap = findCappedWindows(ctx, windows, avail, boost, min_dim, out, capped);
 
     if (boost.isZero()) {
-        distributeEven(windows, cap.capped, cap.remaining_count, cap.remaining_avail, min_dim, out);
+        distributeEven(windows, cap.capped[0..cap.capped_len], cap.remaining_count, cap.remaining_avail, min_dim, out);
     } else {
-        distributeWeighted(windows, n, boost, cap.capped, cap.remaining_weight, cap.remaining_avail, min_dim, out);
+        distributeWeighted(windows, n, boost, cap.capped[0..cap.capped_len], cap.remaining_weight, cap.remaining_avail, min_dim, out);
     }
+
+    // Return the total so the caller avoids a redundant summation pass.
+    var total: u32 = 0;
+    for (out) |h| total += h;
+    return total;
 }
 
 /// Sum of every stack slot's weight (see windowWeight) before any capping.

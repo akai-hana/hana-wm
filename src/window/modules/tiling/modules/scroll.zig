@@ -1,7 +1,5 @@
-//! Scrolling tiling layout
-//! Arranges windows in a horizontal strip of equal-width slots (each half the screen width)
-//! with a scrollable viewport. New windows snap the viewport right so they appear immediately;
-//! manual scrolling and window closes are handled by clamping on every retile.
+//! Scroll tiling layout.
+//! Half-screen slots in a scrollable horizontal strip with viewport management.
 
 const std = @import("std");
 const utils = @import("utils");
@@ -12,8 +10,7 @@ const layouts = @import("layouts");
 
 /// Scroll-layout runtime state. Meaningful only while `layout == .scroll`,
 /// but preserved while dormant so switching back restores the viewport
-/// position. Lives here so all scroll state sits in one module; re-exported
-/// as `tiling.ScrollState`.
+/// position. Re-exported as `tiling.ScrollState`.
 pub const State = struct {
     /// Horizontal pixel offset of the scroll viewport.
     /// Clamped by scroll.tileWithOffset on every retile.
@@ -37,10 +34,10 @@ inline fn slotWidth(screen_w: u16) i32 {
 /// Maximum scroll offset: reached when the last of `n` windows' right edge
 /// is flush with the screen's right edge. Zero (nothing to scroll) when the
 /// strip is no wider than the screen.
-inline fn maxOffset(n: usize, screen_w: u16) i32 {
+inline fn maxOffset(n: usize, slot_w: i32, screen_w: u16) i32 {
     const n_i32: i32 = @intCast(n);
     const sw_i32: i32 = @intCast(screen_w);
-    return @max(0, n_i32 * slotWidth(screen_w) - sw_i32);
+    return @max(0, n_i32 * slot_w - sw_i32);
 }
 
 /// Shift the scroll viewport by one slot; `delta` is +1 (right) or -1 (left).
@@ -66,12 +63,12 @@ pub fn snapOffsetToWindow(s: *tiling.State, ws_wins: []const u32, win: u32, scre
 
     const fi_i32: i32 = @intCast(fi);
     const slot_w = slotWidth(screen_w);
-    const max_off = maxOffset(ws_wins.len, screen_w);
+    const max_off = maxOffset(ws_wins.len, slot_w, screen_w);
 
     const win_left: i32 = fi_i32 * slot_w;
     const scroll_off = s.scroll.offset;
 
-    // Already fully visible, left edge is inside [scroll_off, scroll_off + slot_w].
+    // Left edge is already inside [scroll_off, scroll_off + slot_w].
     if (win_left >= scroll_off and win_left <= scroll_off + slot_w) return false;
 
     const new_scroll: i32 = if (win_left > scroll_off + slot_w)
@@ -104,27 +101,24 @@ pub fn tileWithOffset(
     screen_h: u16,
     y_offset: u16,
 ) void {
-    // Windows list is guaranteed non-empty by invokeLayout (see tiling.zig).
+    // Guaranteed non-empty by invokeLayout; see tiling.zig.
     const n = windows.len;
 
     const m = state.margins();
 
-    // Every slot is exactly half the screen width.
     const slot_w: i32 = slotWidth(screen_w);
 
     const sw_i32: i32 = @intCast(screen_w);
 
-    // Max scroll: reached when the last window's right edge is flush with the screen.
-    const max_off: i32 = maxOffset(n, screen_w);
+    const max_off: i32 = maxOffset(n, slot_w, screen_w);
 
-    // New window: snap viewport right so it is immediately visible.
-    // Killed window: the clamp below is sufficient.
+    // Snap viewport right for new windows so they are immediately visible;
+    // killed windows are handled by the clamp below.
     if (n > state.scroll.prev_n) {
         state.scroll.offset = max_off;
     }
     state.scroll.prev_n = n;
 
-    // Clamp keeps the offset in [0, max_off] after manual scrolling or kills.
     state.scroll.offset = std.math.clamp(state.scroll.offset, 0, max_off);
     const scroll: i32 = state.scroll.offset;
 
@@ -137,13 +131,13 @@ pub fn tileWithOffset(
     const gap_half: i32 = @intCast(m.gap / 2);
     const border2: i32 = @as(i32, utils.doubledBorder(m));
 
-    // emitOrDefer honors ctx.defer_win, see LayoutCtx.defer_win.
+    // emitOrDefer honors ctx.defer_win; see LayoutCtx.defer_win.
     for (windows, 0..) |win, i| {
         const col: i32 = @intCast(i);
 
         const slot_left: i32 = col * slot_w - scroll;
 
-        // <= / >= rather than < / > to handle off-by-one from integer-division of odd screen widths.
+        // <= / >= rather than < / > to handle off-by-one from integer division of odd screen widths.
         const left_inset: i32 = if (slot_left <= 0) gap_i32 else gap_half;
         const right_inset: i32 = if (slot_left + slot_w >= sw_i32) gap_i32 else gap_half;
 
@@ -156,9 +150,9 @@ pub fn tileWithOffset(
 
         const right: i32 = x + avail + border2;
 
-        // Completely off-screen: park at OFFSCREEN_X_POSITION to keep the
-        // cache consistent, the computed x can exceed i16 range.
-        const effective_x: i32 = if (x >= sw_i32 or right <= 0) constants.OFFSCREEN_X_POSITION else x;
+        // Park off-screen windows at a sentinel position to keep the cache
+        // consistent; the computed x can exceed i16 range.
+        const effective_x: i32 = if (x >= sw_i32 or right <= 0) constants.offscreen_x_position else x;
         const rect = utils.Rect{
             .x = @intCast(effective_x),
             .y = @intCast(win_y),

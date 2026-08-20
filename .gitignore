@@ -14,3 +14,6 @@ zig-out/
 
 # other garbage
 *.xml
+
+# other garbage directories
+.*

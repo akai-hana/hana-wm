@@ -5,32 +5,32 @@ const xcb = @import("x11").xcb;
 
 // Modifier masks
 // Must be u16 as per XCB API
-pub const MOD_SHIFT: u16 = xcb.XCB_MOD_MASK_SHIFT;
-const MOD_CAPSLOCK: u16 = xcb.XCB_MOD_MASK_LOCK;
-pub const MOD_CONTROL: u16 = xcb.XCB_MOD_MASK_CONTROL;
-pub const MOD_ALT: u16 = xcb.XCB_MOD_MASK_1;
-const MOD_NUMLOCK: u16 = xcb.XCB_MOD_MASK_2;
-const MOD_SCROLLLOCK: u16 = xcb.XCB_MOD_MASK_3;
-pub const MOD_SUPER: u16 = xcb.XCB_MOD_MASK_4;
+pub const mod_shift: u16 = xcb.XCB_MOD_MASK_SHIFT;
+const mod_capslock: u16 = xcb.XCB_MOD_MASK_LOCK;
+pub const mod_control: u16 = xcb.XCB_MOD_MASK_CONTROL;
+pub const mod_alt: u16 = xcb.XCB_MOD_MASK_1;
+const mod_numlock: u16 = xcb.XCB_MOD_MASK_2;
+const mod_scrolllock: u16 = xcb.XCB_MOD_MASK_3;
+pub const mod_super: u16 = xcb.XCB_MOD_MASK_4;
 
 // Mask applied before comparing a received modifier state against a keybinding.
 // Excludes CapsLock and NumLock so bindings fire regardless of lock-key state;
-// those are handled separately via LOCK_MODIFIERS grabs.
-pub const MOD_MASK_BINDING: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER;
+// those are handled separately via lock_modifiers grabs.
+pub const mod_mask_binding: u16 = mod_shift | mod_control | mod_alt | mod_super;
 
 // Window constraints
-pub const MIN_WINDOW_DIM: u16 = 50;
-pub const MIN_MASTER_WIDTH: f32 = 0.05;
+pub const min_window_dim: u16 = 50;
+pub const min_master_width: f32 = 0.05;
 /// Master pane width is capped at 95% so the stack column always keeps some
 /// screen. Single-sourced: config validation, the runtime pixel->ratio
 /// conversion, and the increase_master_width action all clamp to this same
 /// bound (tiling.zig's local `max_master_width_ratio` used to duplicate it).
-pub const MAX_MASTER_WIDTH: f32 = 0.95;
+pub const max_master_width: f32 = 0.95;
 
 // XKB retry parameters
 // Short enough to be imperceptible, long enough to avoid busy-spinning while
 // XKB initialises (~1 polling cycle at 50 Hz).
-pub const XKB_RETRY_DELAY_MS: u64 = 20;
+pub const xkb_retry_delay_ms: u64 = 20;
 
 // Offscreen positioning
 // Windows on inactive workspaces are parked here so they are hidden without
@@ -42,15 +42,15 @@ pub const XKB_RETRY_DELAY_MS: u64 = 20;
 // ultrawides, or 5K/6K panels, -4000 can land back inside real screen estate.
 // -30000 clears any realistic combined desktop while leaving headroom below
 // the INT16 floor.
-pub const OFFSCREEN_X_POSITION: i32 = -30000;
+pub const offscreen_x_position: i32 = -30000;
 
 /// Lower bound for detecting whether a window is parked offscreen.
 /// A fixed upper bound is intentionally absent: multi-monitor desktops can
 /// exceed 10 000 px, so only the sentinel minimum is safe to check against.
-pub const OFFSCREEN_SENTINEL_MIN: i32 = -1000;
+pub const offscreen_sentinel_min: i32 = -1000;
 
 /// Maximum depth when walking the X11 window tree in findManagedWindow.
-pub const MAX_WINDOW_TREE_DEPTH: usize = 10;
+pub const max_window_tree_depth: usize = 10;
 
 /// Hard ceiling on the number of workspaces the WM can meaningfully support.
 ///
@@ -62,18 +62,22 @@ pub const MAX_WINDOW_TREE_DEPTH: usize = 10;
 /// workspace numbers against it at parse time so oversized configs warn
 /// immediately instead of silently no-oping once workspaces.init() builds its
 /// lookup tables.
-pub const MAX_WORKSPACES: usize = 64;
+pub const max_workspaces: usize = 64;
 
 // XCB property helpers
 /// Maximum number of 32-bit words to request when fetching an XCB window property.
 /// 256 words = 1 KiB, sufficient for all fixed-size properties the WM reads.
-pub const PROPERTY_MAX_LENGTH: u32 = 256;
+pub const property_max_length: u32 = 256;
 /// Value for the `delete` argument to xcb_get_property that leaves the property intact.
-pub const PROPERTY_NO_DELETE: u8 = 0;
+pub const property_no_delete: u8 = 0;
+
+// Mouse button codes (X11 button numbering)
+pub const mouse_button_left: u8 = 1;
+pub const mouse_button_right: u8 = 3;
 
 // DPI / scaling
 /// Standard DPI for a 1x display. All scale factors are computed relative to this value.
-pub const BASELINE_DPI: f32 = 96.0;
+pub const baseline_dpi: f32 = 96.0;
 
 // Event masks
 pub const EventMasks = struct {
@@ -92,7 +96,7 @@ pub const EventMasks = struct {
     //    what lets the release reach input.handleButtonRelease and clear
     //    drag.active. Without it, drag.active sticks true and handleEnterNotify
     //    drops every hover-focus EnterNotify until the WM restarts.
-    pub const ROOT_WINDOW = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
+    pub const root_window = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
         xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
         xcb.XCB_EVENT_MASK_KEY_PRESS |
         xcb.XCB_EVENT_MASK_BUTTON_PRESS |
@@ -111,7 +115,7 @@ pub const EventMasks = struct {
     // focused-window buttons via the focus-specific grabs. Adding it here would
     // deliver button events through both mechanisms, duplicating events and
     // interfering with SYNC-mode grab sequencing.
-    pub const MANAGED_WINDOW = xcb.XCB_EVENT_MASK_ENTER_WINDOW | // DWM: EnterWindowMask
+    pub const managed_window = xcb.XCB_EVENT_MASK_ENTER_WINDOW | // DWM: EnterWindowMask
         xcb.XCB_EVENT_MASK_FOCUS_CHANGE | // DWM: FocusChangeMask
         xcb.XCB_EVENT_MASK_PROPERTY_CHANGE | // DWM: PropertyChangeMask
         xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY; // DWM: StructureNotifyMask
@@ -120,29 +124,29 @@ pub const EventMasks = struct {
 /// Lock key combinations grabbed alongside every keybinding so binds work
 /// regardless of NumLock / CapsLock / ScrollLock state. All 2^3 subsets of
 /// the three lock modifiers.
-pub const LOCK_MODIFIERS = [_]u16{
+pub const lock_modifiers = [_]u16{
     0,
-    MOD_CAPSLOCK,
-    MOD_NUMLOCK,
-    MOD_SCROLLLOCK,
-    MOD_CAPSLOCK | MOD_NUMLOCK,
-    MOD_CAPSLOCK | MOD_SCROLLLOCK,
-    MOD_NUMLOCK | MOD_SCROLLLOCK,
-    MOD_CAPSLOCK | MOD_NUMLOCK | MOD_SCROLLLOCK,
+    mod_capslock,
+    mod_numlock,
+    mod_scrolllock,
+    mod_capslock | mod_numlock,
+    mod_capslock | mod_scrolllock,
+    mod_numlock | mod_scrolllock,
+    mod_capslock | mod_numlock | mod_scrolllock,
 };
 
 pub const Limits = struct {
     /// Dispatch table size, covers all X11 event types up to XCB_FOCUS_OUT=10.
-    pub const EVENT_DISPATCH_TABLE = 36;
+    pub const event_dispatch_table = 36;
 
     /// Upper bound for the XCB cookie scratch buffer in grabKeybindings
-    /// (max distinct keybindings x LOCK_MODIFIERS.len combinations).
+    /// (max distinct keybindings x lock_modifiers.len combinations).
     /// Raise if you ever exceed 128 keybindings.
-    pub const MAX_KEYBIND_COOKIES = 1024;
+    pub const max_keybind_cookies = 1024;
 
     /// Maximum tiled windows across the whole WM (all workspaces combined),
     /// not per workspace; see tracking.Tracking, which this backs.
     /// tracking.Tracking.len is a u8 (max 255), so this must stay <= 255
     /// unless that field is widened too.
-    pub const MAX_TILED_WINDOWS = 200;
+    pub const max_tiled_windows = 200;
 };

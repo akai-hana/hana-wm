@@ -52,26 +52,10 @@ pub fn build(b: *std.Build) !void {
     );
 
     // Optional module detection
-    const has_bar = blk: {
-        var dir = b.build_root.handle.openDir(b.graph.io, source_root ++ "bar", .{}) catch break :blk false;
-        dir.close(b.graph.io);
-        break :blk true;
-    };
-    const has_tiling = blk: {
-        var dir = b.build_root.handle.openDir(b.graph.io, source_root ++ "window/modules/tiling", .{}) catch break :blk false;
-        dir.close(b.graph.io);
-        break :blk true;
-    };
-    const has_floating = blk: {
-        var f = b.build_root.handle.openFile(b.graph.io, source_root ++ "window/modules/floating.zig", .{}) catch break :blk false;
-        f.close(b.graph.io);
-        break :blk true;
-    };
-    const has_vim = blk: {
-        var f = b.build_root.handle.openFile(b.graph.io, source_root ++ "bar/modules/prompt/vim.zig", .{}) catch break :blk false;
-        f.close(b.graph.io);
-        break :blk true;
-    };
+    const has_bar = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar");
+    const has_tiling = pathExists(b.build_root.handle, b.graph.io, source_root ++ "window/modules/tiling");
+    const has_floating = pathExists(b.build_root.handle, b.graph.io, source_root ++ "window/modules/floating.zig");
+    const has_vim = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/modules/prompt/vim.zig");
 
     build_opts.addOption(bool, "has_bar", has_bar);
     build_opts.addOption(bool, "has_tiling", has_tiling);
@@ -224,6 +208,20 @@ fn injectShared(mod: *std.Build.Module, ctx: SharedBuildContext) void {
     mod.addImport("fallback_toml", ctx.fallback_toml);
 }
 
+fn pathExists(root: std.Io.Dir, io: anytype, rel_path: []const u8) bool {
+    // Check files first — the common case in a source tree — to avoid the
+    // extra syscall from trying as a directory when it's actually a file.
+    if (root.openFile(io, rel_path, .{})) |*f| {
+        f.close(io);
+        return true;
+    } else |_| {}
+    if (root.openDir(io, rel_path, .{})) |*dir| {
+        dir.close(io);
+        return true;
+    } else |_| {}
+    return false;
+}
+
 // Module namespace discovery & wiring
 
 /// Namespace that owns all logic related to module discovery and wiring.
@@ -280,23 +278,24 @@ const Module = struct {
             var dir = try b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true });
             defer dir.close(b.graph.io);
 
+            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
             var iter = dir.iterate();
             while (try iter.next(b.graph.io)) |entry| {
                 switch (entry.kind) {
                     .directory => {
                         if (isHiddenDirectory(entry.name)) continue;
 
-                        const subdir_path = try std.fs.path.join(b.allocator, &.{ dir_path, entry.name });
-                        try ctx.discoverAll(subdir_path);
+                        const subdir_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name });
+                        try ctx.discoverAll(b.allocator.dupe(u8, subdir_path) catch unreachable);
                     },
 
                     .file => {
                         if (!isZigSource(entry.name)) continue;
 
-                        const rel_path = try std.fs.path.join(b.allocator, &.{ dir_path, entry.name });
+                        const rel_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name });
                         if (isEntryPointPath(rel_path, ctx.entry_point_path)) continue;
 
-                        try ctx.registerModule(rel_path);
+                        try ctx.registerModule(b.allocator.dupe(u8, rel_path) catch unreachable);
                     },
 
                     else => {},
@@ -370,11 +369,12 @@ const Module = struct {
             stripIfRelease(mod, ctx.optimize);
             injectShared(mod, ctx);
 
-            // Cross-wire modules
-            // Gives current module access to every other module.
+            // Cross-wire modules — O(n²) in module count, but n is small and
+            // comptime-eligible. Skip wiring if the import already exists to
+            // avoid redundant table updates.
             var inner = all.iterator();
             while (inner.next()) |dep| {
-                if (!std.mem.eql(u8, dep.key_ptr.*, name))
+                if (!std.mem.eql(u8, dep.key_ptr.*, name) and !mod.import_table.contains(dep.key_ptr.*))
                     mod.addImport(dep.key_ptr.*, dep.value_ptr.*);
             }
 
@@ -399,16 +399,7 @@ const Module = struct {
     /// separator already, but comparing components keeps this correct on
     /// any host regardless.
     fn isEntryPointPath(rel_path: []const u8, entry_point: []const u8) bool {
-        var mine = std.mem.tokenizeAny(u8, rel_path, "/\\");
-        var theirs = std.mem.tokenizeAny(u8, entry_point, "/\\");
-
-        while (true) {
-            const a = mine.next();
-            const b = theirs.next();
-            if (a == null and b == null) return true;
-            if (a == null or b == null) return false;
-            if (!std.mem.eql(u8, a.?, b.?)) return false;
-        }
+        return std.mem.eql(u8, rel_path, entry_point);
     }
 };
 

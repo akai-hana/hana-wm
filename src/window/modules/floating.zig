@@ -1,5 +1,5 @@
-//! Floating window management
-//! Introduces floating layout and manages placement, dragging, and per-corner resizing of floating windows.
+//! Floating window subsystem.
+//! Manages placement, dragging, and per-corner resizing of floating windows.
 
 const std = @import("std");
 
@@ -19,9 +19,7 @@ const fullscreen = @import("fullscreen");
 
 // Geometry cookies are all issued before any reply is awaited; one round-trip
 // per batch instead of one per window. 64 covers a typical workspace.
-const BATCH = 64;
-
-// Layout
+const batch = 64;
 
 /// Centre any window still at the X default origin (0, 0); windows the user
 /// has already moved are left untouched. Centring uses the work area (screen
@@ -35,22 +33,27 @@ pub fn tileWithOffset(
     _: u16,
 ) void {
     const cs = core.getState();
-    const work = if (build_options.has_bar) bar.workAreaRect() else .{ .x = 0, .y = 0, .width = core.getState().screen.width_in_pixels, .height = core.getState().screen.height_in_pixels };
+    const work = if (build_options.has_bar) bar.workAreaRect() else .{
+        .x = 0,
+        .y = 0,
+        .width = cs.screen.width_in_pixels,
+        .height = cs.screen.height_in_pixels,
+    };
     const sw: i32 = work.width;
     const work_top: i32 = work.y;
     const work_h: i32 = work.height;
 
     var base: usize = 0;
     while (base < windows.len) {
-        const end = @min(base + BATCH, windows.len);
-        const batch = windows[base..end];
+        const end = @min(base + batch, windows.len);
+        const slice = windows[base..end];
 
         // Issue geometry requests for every window not already placed;
         // replies are collected below; only the first reply pays for a round-trip.
-        var cookies: [BATCH]xcb.xcb_get_geometry_cookie_t = undefined;
-        var pending: [BATCH]usize = undefined;
+        var cookies: [batch]xcb.xcb_get_geometry_cookie_t = undefined;
+        var pending: [batch]usize = undefined;
         var pending_len: usize = 0;
-        for (batch, 0..) |win, i| {
+        for (slice, 0..) |win, i| {
             const already_placed = if (ctx.cache.getPtr(win)) |wd| wd.hasValidRect() else false;
             if (already_placed) continue;
             cookies[i] = xcb.xcb_get_geometry(cs.conn, win);
@@ -59,7 +62,7 @@ pub fn tileWithOffset(
         }
         if (pending_len > 0) {
             for (pending[0..pending_len]) |i| {
-                const win = batch[i];
+                const win = slice[i];
                 const reply = xcb.xcb_get_geometry_reply(cs.conn, cookies[i], null) orelse continue;
                 defer std.c.free(reply);
 
@@ -85,8 +88,6 @@ pub fn tileWithOffset(
         base = end;
     }
 }
-
-// Drag and resize
 
 pub const DragMode = enum { move, resize };
 
@@ -118,7 +119,7 @@ pub const DragState = struct {
     work_area: WorkArea = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
 };
 
-/// snap_distance from config, resolved to pixels (0 = disabled).
+/// Snap distance from config, resolved to pixels (0 = disabled).
 /// Percentages are relative to screen width.
 fn snapDistance() i32 {
     const cs = core.getState();
@@ -158,20 +159,16 @@ inline fn cornerAxes(corner: ResizeCorner) CornerAxes {
     };
 }
 
-/// Snap a window origin toward `near` or `far` when within `snap` pixels.
 inline fn snapAxis(pos: i32, dim: i32, near: i32, far: i32, snap: i32) i32 {
     if (@abs(pos - near) < snap) return near;
     if (@abs((pos + dim) - far) < snap) return far - dim;
     return pos;
 }
 
-/// Snap a single edge toward `boundary` when within `snap` pixels of it.
 inline fn snapEdge(edge: i32, boundary: i32, snap: i32) i32 {
     if (snap > 0 and @abs(edge - boundary) < snap) return boundary;
     return edge;
 }
-
-// Module state
 
 const State = struct {
     drag: DragState = .{},
@@ -195,7 +192,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     const cs = core.getState();
     if (!cs.config.drag_enabled) return;
     if (g_state.drag.active) return;
-    if ((if (build_options.has_bar) bar.isBarWindow(win) else false)) return;
+    if (build_options.has_bar and bar.isBarWindow(win)) return;
     if (fullscreen.isFullscreen(win)) return; // fullscreen geometry must not be touched
 
     // Prefer the tiling cache (always current) over a live XCB round-trip;
@@ -228,7 +225,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
         // A tiled window in a non-floating layout detaches on first motion
         // (see updateDrag); move also skips snap on that first event so the
         // window doesn't appear frozen at a tiled edge.
-        .pending_float = (if (build_options.has_tiling) tiling.isWindowTiled(win) else false) and !(if (build_options.has_tiling) tiling.isFloatingLayout() else false),
+        .pending_float = (build_options.has_tiling and tiling.isWindowTiled(win)) and !(build_options.has_tiling and tiling.isFloatingLayout()),
     };
     focus.setFocus(win, .user_command);
     utils.raiseWindow(cs.conn, win);
@@ -294,12 +291,12 @@ fn computeResizeRect(drag: DragState, dx: i16, dy: i16, wa: WorkArea) utils.Rect
 /// Applies pointer motion to the active drag. No-op if no drag is active.
 pub fn updateDrag(x: i16, y: i16) void {
     if (!g_state.drag.active) return;
+    const conn = core.getState().conn;
     const drag = &g_state.drag;
 
     const was_pending_float = g_state.pending_float;
     if (g_state.pending_float) {
         g_state.pending_float = false;
-        const conn = core.getState().conn;
         utils.grabServer(conn);
         if (build_options.has_tiling) tiling.removeWindow(drag.window);
         if (build_options.has_tiling) tiling.retileCurrentWorkspace();
@@ -315,7 +312,6 @@ pub fn updateDrag(x: i16, y: i16) void {
         .resize => computeResizeRect(drag.*, dx, dy, wa),
     };
     drag.last_rect = rect;
-    const conn = core.getState().conn;
     utils.configureWindow(conn, drag.window, rect);
     _ = xcb.xcb_flush(conn);
 }

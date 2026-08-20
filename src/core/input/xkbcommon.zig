@@ -12,14 +12,14 @@ pub const xkb = @cImport({
 });
 
 // Re-exports for callers that don't want to reach through `xkb.*`.
-pub const XKB_KEYSYM_CASE_INSENSITIVE = xkb.XKB_KEYSYM_CASE_INSENSITIVE;
+pub const xkb_keysym_case_insensitive = xkb.XKB_KEYSYM_CASE_INSENSITIVE;
 pub const XKB_KEY_NoSymbol: u32 = xkb.XKB_KEY_NoSymbol;
 pub const xkb_keysym_from_name = xkb.xkb_keysym_from_name;
 const xkb_context = xkb.struct_xkb_context;
 const xkb_keymap = xkb.struct_xkb_keymap;
 const xkb_state = xkb.struct_xkb_state;
 
-const MAX_ATTEMPTS: u8 = 3;
+const max_attempts: u8 = 3;
 
 pub const XkbState = struct {
     context: *xkb_context,
@@ -31,7 +31,7 @@ pub const XkbState = struct {
     keysym_by_keycode: [256]u32,
 
     /// Initialises an XKB context, keymap, and state from the live X connection.
-    /// Retries up to MAX_ATTEMPTS times to handle early-startup races.
+    /// Retries up to max_attempts times to handle early-startup races.
     pub fn init(xcb_conn: *anyopaque) !XkbState {
         const ctx = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS) orelse
             return error.XkbContextFailed;
@@ -61,10 +61,10 @@ pub const XkbState = struct {
         xkb.xkb_context_unref(self.context);
     }
 
-/// Rebuilds the keymap, state, and keysym table after a server-side mapping
-/// change (setxkbmap/xmodmap -> XCB_MAPPING_NOTIFY). Dispatch resolves keysyms
-/// from the table, so it must track the new mapping or bindings silently stop
-/// matching; on failure the old mapping is kept.
+    /// Rebuilds the keymap, state, and keysym table after a server-side mapping
+    /// change (setxkbmap/xmodmap -> XCB_MAPPING_NOTIFY). Dispatch resolves keysyms
+    /// from the table, so it must track the new mapping or bindings silently stop
+    /// matching; on failure the old mapping is kept.
     pub fn rebuild(self: *XkbState, xcb_conn: *anyopaque) void {
         const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
         if (device_id == -1) return;
@@ -78,8 +78,6 @@ pub const XkbState = struct {
             return;
         };
 
-        // Build the table before freeing anything; failure above already
-        // returned, so the swap below cannot fail.
         const new_table = buildKeysymTable(km);
         xkb.xkb_state_unref(self.state);
         xkb.xkb_keymap_unref(self.keymap);
@@ -88,19 +86,18 @@ pub const XkbState = struct {
         self.keysym_by_keycode = new_table;
     }
 
-    /// Convert an X11 keycode to a keysym for keybinding dispatch.
-    /// Uses the level-0 (lock-free) table so results are unaffected by
-    /// NumLock / CapsLock / ScrollLock state.
+    /// Returns the level-0 keysym for `keycode`, unaffected by lock modifiers
+    /// (NumLock, CapsLock, ScrollLock). The flat table is indexed by raw keycode.
     pub inline fn keycodeToKeysym(self: *const XkbState, keycode: u8) u32 {
         return self.keysym_by_keycode[keycode];
     }
 
-/// Reverse-look up a keysym to its keycode (config parsing only). Scans the
-/// flat table (248 entries, all in L1 cache).
-///
-/// The table holds level-0 symbols, so a Shift-only keysym, e.g. `@` on a
-/// US layout, resolves to null; callers should warn, since such a binding
-/// cannot be grabbed.
+    /// Reverse-look up a keysym to its keycode (config parsing only). Scans the
+    /// flat table (248 entries, all in L1 cache).
+    ///
+    /// The table holds level-0 symbols, so a Shift-only keysym, e.g. `@` on a
+    /// US layout, resolves to null; callers should warn, since such a binding
+    /// cannot be grabbed.
     pub inline fn keysymToKeycode(self: *const XkbState, keysym: u32) ?u8 {
         for (8..256) |kc| {
             if (self.keysym_by_keycode[kc] == keysym) return @intCast(kc);
@@ -139,42 +136,41 @@ pub fn keysymGetName(keysym: u32, buf: []u8) []const u8 {
     return buf[0..len];
 }
 
-const XKB_RETRY_DELAY_MS = constants.XKB_RETRY_DELAY_MS;
+const xkb_retry_delay_ms = constants.xkb_retry_delay_ms;
 
 /// Sleeps between retry attempts (skipped on the final one). Uses nanosleep
 /// directly; std.time.sleep is absent in this Zig build. Resumes on EINTR
 /// (the WM's SIGCHLD handler can interrupt the sleep) so a signal doesn't
 /// shorten the delay.
 inline fn retryDelay(attempt: u8) void {
-    if (attempt >= MAX_ATTEMPTS - 1) return;
-    const ns = XKB_RETRY_DELAY_MS * std.time.ns_per_ms;
+    if (attempt >= max_attempts - 1) return;
+    const ns = xkb_retry_delay_ms * std.time.ns_per_ms;
     var req = std.os.linux.timespec{ .sec = @intCast(ns / std.time.ns_per_s), .nsec = @intCast(ns % std.time.ns_per_s) };
     var rem = std.os.linux.timespec{ .sec = 0, .nsec = 0 };
     while (true) {
         const rc = std.os.linux.nanosleep(&req, &rem);
         if (std.posix.errno(rc) != .INTR) break;
-        // Signal interrupted the sleep; resume for the remaining time.
         req = rem;
     }
 }
 
-/// Runs `op.call()` up to MAX_ATTEMPTS times, sleeping retryDelay between
+/// Runs `op.call()` up to max_attempts times, sleeping retryDelay between
 /// tries, and returns the first non-null result (null = that attempt failed).
 /// `op` is a value-capturing struct with a `call(self) ?T` method so each
 /// retrying wrapper passes the args its attempt needs without a closure.
 fn retryPoll(comptime T: type, op: anytype) ?T {
-    for (0..MAX_ATTEMPTS) |i| {
+    for (0..max_attempts) |i| {
         if (op.call()) |result| return result;
         retryDelay(@intCast(i));
     }
     return null;
 }
 
-/// Calls xkb_x11_setup_xkb_extension, retrying up to MAX_ATTEMPTS times.
+/// Calls xkb_x11_setup_xkb_extension, retrying up to max_attempts times.
 /// The extension may not be ready immediately at WM startup.
 fn retrySetup(xcb_conn: *anyopaque) !void {
     var ok: c_int = 0;
-    inline for (0..MAX_ATTEMPTS) |i| {
+    inline for (0..max_attempts) |i| {
         ok = xkb.xkb_x11_setup_xkb_extension(
             @ptrCast(xcb_conn),
             xkb.XKB_X11_MIN_MAJOR_XKB_VERSION,
@@ -191,11 +187,11 @@ fn retrySetup(xcb_conn: *anyopaque) !void {
     return error.XkbSetupFailed;
 }
 
-/// Calls xkb_x11_get_core_keyboard_device_id, retrying up to MAX_ATTEMPTS
+/// Calls xkb_x11_get_core_keyboard_device_id, retrying up to max_attempts
 /// times; the core keyboard device may not be enumerable yet in the same
 /// early-startup window retrySetup guards against.
 fn retryDeviceId(xcb_conn: *anyopaque) !i32 {
-    inline for (0..MAX_ATTEMPTS) |i| {
+    inline for (0..max_attempts) |i| {
         const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
         if (device_id != -1) return device_id;
         retryDelay(@intCast(i));
@@ -206,9 +202,9 @@ fn retryDeviceId(xcb_conn: *anyopaque) !i32 {
 /// Minimum reachable keysyms in 8..128 for a keymap to count as populated.
 /// A healthy keymap has 100+; 40 accepts minimal/embedded keymaps while
 /// still rejecting the empty keymap a not-yet-ready XKB returns at startup.
-const MIN_KEYMAP_SYMBOLS: u32 = 40;
+const min_keymap_symbols: u32 = 40;
 
-/// Returns true if `km` has at least MIN_KEYMAP_SYMBOLS reachable keysyms in the 8..128 range.
+/// Returns true if `km` has at least min_keymap_symbols reachable keysyms in the 8..128 range.
 /// Guards against accepting a partially-initialised keymap on early startup.
 fn keymapHasEnoughSymbols(km: *xkb_keymap) bool {
     var valid_keys: u32 = 0;
@@ -216,10 +212,10 @@ fn keymapHasEnoughSymbols(km: *xkb_keymap) bool {
         if (baseSymbol(km, @intCast(kc)) != xkb.XKB_KEY_NoSymbol)
             valid_keys += 1;
     }
-    return valid_keys >= MIN_KEYMAP_SYMBOLS;
+    return valid_keys >= min_keymap_symbols;
 }
 
-/// Retries keymap creation up to MAX_ATTEMPTS times, accepting only a
+/// Retries keymap creation up to max_attempts times, accepting only a
 /// sufficiently populated keymap to guard against early-startup races.
 fn retryKeymap(ctx: *xkb_context, xcb_conn: *anyopaque, device_id: i32) !*xkb_keymap {
     return retryPoll(*xkb_keymap, struct {

@@ -8,7 +8,6 @@ const layouts = @import("layouts");
 const tiling = @import("tiling");
 const State = tiling.State;
 
-/// Tile `windows` into monocle mode using the given screen area.
 pub fn tileWithOffset(
     ctx: *const layouts.LayoutCtx,
     state: *State,

@@ -84,6 +84,8 @@ pub const MouseBind = struct {
 /// deinit tears it down before freeing the Actions its entries point into.
 pub const KeybindResolver = struct {
     map: std.AutoHashMapUnmanaged(u64, *const Action) = .empty,
+    /// Conflict-detection set reused across rebuilds to avoid alloc churn on config reload.
+    seen: std.AutoHashMapUnmanaged(u64, usize) = .empty,
 
     inline fn dispatchKey(modifiers: u16, keysym: u32) u64 {
         return (@as(u64, modifiers) << 32) | keysym;
@@ -111,13 +113,13 @@ pub const KeybindResolver = struct {
     /// connection.
     pub fn rebuildDispatchMap(self: *KeybindResolver, keybindings: []Keybind, allocator: std.mem.Allocator) void {
         self.map.clearRetainingCapacity();
+        self.seen.clearRetainingCapacity();
         for (keybindings, 0..) |*kb, i| {
             const key = dispatchKey(kb.modifiers, kb.keysym);
-            if (self.map.get(key)) |_| {
-                const first_idx = for (keybindings[0..i], 0..) |other, j| {
-                    if (dispatchKey(other.modifiers, other.keysym) == key) break j;
-                } else unreachable;
+            if (self.seen.get(key)) |first_idx| {
                 debug.warn("Keybinding conflict: #{} and #{} share mods=0x{x:0>4} keysym=0x{x}, second wins", .{ first_idx + 1, i + 1, kb.modifiers, kb.keysym });
+            } else {
+                self.seen.put(allocator, key, i) catch {};
             }
             self.map.put(allocator, key, &kb.action) catch |e| debug.warnOnErr(e, "keybind map build");
         }
@@ -134,6 +136,8 @@ pub const KeybindResolver = struct {
     pub fn deinit(self: *KeybindResolver, allocator: std.mem.Allocator) void {
         self.map.deinit(allocator);
         self.map = .empty;
+        self.seen.deinit(allocator);
+        self.seen = .empty;
     }
 };
 
@@ -234,7 +238,7 @@ pub const Layout = enum {
     scroll,
     /// Windows keep their current positions. Configurable via
     /// `tiling.layout = "floating"` (resolved via stringToEnum, not
-    /// LAYOUT_TABLE) but never cyclable: excluded from LAYOUT_TABLE, so
+    /// layout_table) but never cyclable: excluded from layout_table, so
     /// toggleLayout can't select it and the cycle skips it.
     floating,
 };
@@ -253,7 +257,7 @@ pub const LayoutInfo = struct {
     aliases: []const []const u8 = &.{},
 };
 
-pub const LAYOUT_TABLE = [_]LayoutInfo{
+pub const layout_table = [_]LayoutInfo{
     .{ .tag = .master, .name = "master-stack", .aliases = &.{ "master", "master_stack" } },
     .{ .tag = .monocle, .name = "monocle" },
     .{ .tag = .grid, .name = "grid" },
@@ -272,7 +276,7 @@ pub const LayoutVariantOverride = union(enum) {
 /// Single source of truth mapping a variant-owning layout's config name to
 /// its variant enum type, the `LayoutVariantOverride` tag, and the field on
 /// `TilingConfig` that stores the parsed value.
-pub const VARIANT_LAYOUTS = [_]struct { name: []const u8, variant: type, tag: []const u8, field: []const u8 }{
+pub const variant_layouts = [_]struct { name: []const u8, variant: type, tag: []const u8, field: []const u8 }{
     .{ .name = "master-stack", .variant = MasterVariant, .tag = "master", .field = "master_variant" },
     .{ .name = "monocle", .variant = MonocleVariant, .tag = "monocle", .field = "monocle_variant" },
     .{ .name = "grid", .variant = GridVariant, .tag = "grid", .field = "grid_variant" },
@@ -305,7 +309,7 @@ pub const TilingConfig = struct {
     border_unfocused: Color = 0x383C4A,
     /// Smallest on-screen width/height a tiled window (and floating drag
     /// resize) is allowed to reach, in pixels.
-    min_window_dim: u16 = constants.MIN_WINDOW_DIM,
+    min_window_dim: u16 = constants.min_window_dim,
 
     // Per-layout variant preferences, stored as parsed enums (not raw
     // strings) to avoid dangling slices after the config document is freed.
@@ -337,7 +341,7 @@ pub const TilingConfig = struct {
 /// Default accent color used by several BarConfig fields.
 /// Declared once here so every field referencing it has a single source of truth;
 /// changing the theme default is a one-line edit.
-const DEFAULT_ACCENT: Color = 0x61AFEF;
+const default_accent: Color = 0x61AFEF;
 
 /// Where in the workspace cell the activity indicator is drawn.
 pub const IndicatorLocation = enum {
@@ -414,10 +418,10 @@ pub const BarLayout = struct {
 
 /// Type-level defaults for optional string fields in BarConfig.
 /// When a field is `null`, the corresponding default is used at read time.
-pub const DEFAULT_CLOCK_FORMAT: []const u8 = "%Y-%m-%d %H:%M:%S";
-pub const DEFAULT_DRUN_PROMPT: []const u8 = "run: ";
-pub const DEFAULT_INDICATOR_FOCUSED: []const u8 = "■";
-pub const DEFAULT_INDICATOR_UNFOCUSED: []const u8 = "□";
+pub const default_clock_format: []const u8 = "%Y-%m-%d %H:%M:%S";
+pub const default_drun_prompt: []const u8 = "run: ";
+pub const default_indicator_focused: []const u8 = "■";
+pub const default_indicator_unfocused: []const u8 = "□";
 
 /// Frees every owned string in `list`, then either deinits or clears the
 /// list depending on `retain_capacity`. Shared by `BarConfig.deinit`
@@ -453,10 +457,10 @@ pub const BarConfig = struct {
     selected_bg: Color = 0x005577,
     selected_fg: Color = 0xEEEEEE,
 
-    accent_color: Color = DEFAULT_ACCENT,
-    title_accent_color: Color = DEFAULT_ACCENT,
+    accent_color: Color = default_accent,
+    title_accent_color: Color = default_accent,
     title_unfocused_accent: Color = 0x222222,
-    title_minimized_accent: Color = DEFAULT_ACCENT,
+    title_minimized_accent: Color = default_accent,
 
     workspace_icons: std.ArrayList([]const u8) = .empty,
     indicator_size: parser.ScalableValue = parser.ScalableValue.percentage(30.0),

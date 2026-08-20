@@ -1,18 +1,12 @@
-//! Debug logging and error helpers
-//!
-//! `info` is compiled away in non-debug builds (verbose runtime tracing).
-//! `warn`/`err`/`logError`/`warnOnErr` always emit regardless of build mode:
-//! they carry user-facing diagnostics, config validation feedback ("value out
-//! of range, using default"), load failures, non-fatal runtime errors, that
-//! must reach the user in release builds too, where they are otherwise the
-//! only explanation for behaviour the user didn't ask for. A silent
-//! ReleaseFast fallback to config defaults with no message would be a bug.
+//! Debug logging and error helpers.
+//! User-facing diagnostics and verbose tracing, routed through std.log.
 
 const std = @import("std");
 const build = @import("build_options");
 
-/// Strips the directory and ".zig" extension from a source file path, returning a short module tag.
-fn moduleFromSrc(src: std.builtin.SourceLocation) []const u8 {
+// Extracts the bare filename without ".zig" extension so the module tag is
+// short enough for log lines like "[module] message".
+inline fn moduleFromSrc(src: std.builtin.SourceLocation) []const u8 {
     const basename = std.fs.path.basename(src.file);
     return if (std.mem.endsWith(u8, basename, ".zig"))
         basename[0 .. basename.len - 4]

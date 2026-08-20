@@ -1,5 +1,5 @@
-//! hana's main loop
-//! Entry point to and orchestrator of all hana's subsystems.
+//! Main entry point for hana.
+//! Sets up all subsystems and hands off to the event loop.
 
 const std = @import("std");
 
@@ -9,15 +9,14 @@ const utils = @import("utils");
 const events = @import("events");
 const signals = @import("signals");
 const config = @import("config");
+const types = @import("types");
 const constants = @import("constants");
 const scale = @import("scale");
 const debug = @import("debug");
 const input = @import("input");
 const window = @import("window");
 const plugins = @import("plugins");
-const build_options = @import("build_options");
 
-/// hana's startup sequence and event-loop entry point.
 pub fn main() !void {
     const x = try connectToX();
     defer xcb.xcb_disconnect(x.conn);
@@ -29,7 +28,7 @@ pub fn main() !void {
     // first or Xft.dpi would never be read.
     try utils.initAtomCache(x.conn);
 
-    core.dpi_info = scale.detectDpi(x.conn, x.screen);
+    core.dpi_info.store(scale.detectDpi(x.conn, x.screen), .release);
 
     input.setup(x.conn, x.screen, x.root);
     try input.initXkb(x.conn);
@@ -37,13 +36,21 @@ pub fn main() !void {
 
     const loaded_config = try config.load(alloc, x.screen, input.getXkbState());
 
-    // core.init() copies loaded_config by value and becomes the canonical
-    // owner; must run before any core.getState() call.
-    core.init(x.conn, x.screen, x.root, alloc, loaded_config);
+    // Heap-allocate config so core.State holds a pointer; this allows
+    // atomic pointer-swap on reload instead of by-value copy aliasing.
+    const config_ptr = try alloc.create(types.Config);
+    errdefer alloc.destroy(config_ptr);
+    config_ptr.* = loaded_config;
+
+    // core.init() takes ownership of config_ptr; must run before any
+    // core.getState() call.
+    core.init(x.conn, x.screen, x.root, alloc, config_ptr);
+
     // Config.deinit tears the keybind_resolver down internally, before
     // freeing the keybindings whose Actions it points into; so a single
-    // defer on the config suffices (see KeybindResolver in types.zig).
-    defer core.getState().config.deinit(alloc);
+    // defer on the config pointer suffices (see KeybindResolver in types.zig).
+    const initial_config = core.getState().config;
+    defer initial_config.deinit(alloc);
 
     utils.advertiseEwmhSupport(x.conn, x.screen, x.root);
 
@@ -54,7 +61,6 @@ pub fn main() !void {
     try window.init(alloc);
     defer window.deinit();
 
-    // Initialize plugins (bar, tiling, drag, floating)
     plugins.initAll();
     defer plugins.deinitAll();
 
@@ -65,16 +71,12 @@ pub fn main() !void {
     debug.info("Shutting down gracefully...", .{});
 }
 
-/// X server connection context returned by connectToX.
 const X = struct {
-    conn: *xcb.xcb_connection_t,
-    screen: *xcb.xcb_screen_t,
+    conn: core.Connection,
+    screen: core.Screen,
     root: core.WindowId,
 };
 
-/// Opens an X server connection, fetches screen 0, and registers hana as the WM.
-/// Fails if the display is unavailable, the screen cannot be retrieved,
-/// or another WM is already running.
 fn connectToX() !X {
     const conn = xcb.xcb_connect(null, null) orelse return error.X11ConnectionFailed;
 
@@ -91,7 +93,7 @@ fn connectToX() !X {
         conn,
         screen.*.root,
         xcb.XCB_CW_EVENT_MASK,
-        &[_]u32{constants.EventMasks.ROOT_WINDOW},
+        &[_]u32{constants.EventMasks.root_window},
     );
     if (xcb.xcb_request_check(conn, cookie)) |err| {
         debug.err("Another window manager is already running: {*}", .{err});

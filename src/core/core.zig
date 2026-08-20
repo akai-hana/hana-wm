@@ -1,11 +1,9 @@
-//! Central hub for process-wide XCB state and shared types.
-//! core.init() must be called from main before any other module calls
-//! core.getState().
+//! Process-wide XCB state and shared types.
+//! Must call core.init() before any module accesses core.getState().
 
 const std = @import("std");
 
 const types = @import("types");
-const utils = @import("utils");
 const constants = @import("constants");
 
 // Centralized here to avoid repeated @cImport translation across compilation units.
@@ -24,41 +22,58 @@ pub const XK = enum(u32) {
     Delete = 0xffff,
 };
 
+/// Thin wrappers over raw XCB types, decoupling public APIs from the C binding.
+pub const Connection = *xcb.xcb_connection_t;
+pub const Screen = *xcb.xcb_screen_t;
+
 /// Equivalent to xcb_window_t (uint32_t).
 pub const WindowId = u32;
 
-/// Geometry snapshot used by fullscreen and minimize.
-pub const WindowGeometry = struct {
-    x: i16,
-    y: i16,
-    width: u16,
-    height: u16,
-    border_width: u16,
+/// Workspace index wrapper. Prevents confusing workspace indices with
+/// unrelated u8 values (counts, layout indices, etc.) at call sites.
+pub const WorkspaceId = struct {
+    index: u8,
+
+    pub fn fromIndex(i: u8) WorkspaceId {
+        return .{ .index = i };
+    }
+
+    pub fn toIndex(self: WorkspaceId) u8 {
+        return self.index;
+    }
+
+    pub fn eql(self: WorkspaceId, other: WorkspaceId) bool {
+        return self.index == other.index;
+    }
+
+    pub fn order(self: WorkspaceId, other: WorkspaceId) std.math.Order {
+        return std.math.order(u8, self.index, other.index);
+    }
 };
 
-/// Focus suppression reason for context-aware behavior.
+/// Why keyboard focus is temporarily withheld from a window.
 pub const FocusSuppressReason = enum {
     none,
     window_spawn,
     tiling_operation,
 };
 
-// conn, screen, root, alloc, and config are written once during startup
-// (config is later replaced wholesale on reload; see events.zig). Bundled
-// into one optional State, rather than five `undefined` globals, so any
-// access before init() panics cleanly instead of reading undefined memory.
-// Mirrors the pattern tiling.zig uses for its own state.
+// conn, screen, root, and alloc are written once during startup.
+// config is a heap-allocated pointer swapped atomically on reload
+// (see events.zig handleConfigReload). Bundled into one optional State,
+// rather than five `undefined` globals, so any access before init()
+// panics cleanly instead of reading undefined memory.
 pub const State = struct {
-    conn: *xcb.xcb_connection_t,
-    screen: *xcb.xcb_screen_t,
+    conn: Connection,
+    screen: Screen,
     root: WindowId,
     alloc: std.mem.Allocator,
-    config: types.Config,
+    config: *types.Config,
 };
 
 var state: ?State = null;
 
-/// Pointer to the live core state. Panics if called before init().
+/// Panics if called before init().
 pub inline fn getState() *State {
     if (state) |*s| return s;
     @panic("core: getState() called before init()");
@@ -66,23 +81,15 @@ pub inline fn getState() *State {
 
 /// Establishes the process-wide core state. Must be called exactly once,
 /// after the X connection is open and config is loaded, before any
-/// other module calls getState().
-pub fn init(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t, root: WindowId, alloc: std.mem.Allocator, config: types.Config) void {
+/// other module calls getState(). Takes ownership of the config pointer;
+/// the caller must not free it.
+pub fn init(conn: Connection, screen: Screen, root: WindowId, alloc: std.mem.Allocator, config: *types.Config) void {
     state = .{ .conn = conn, .screen = screen, .root = root, .alloc = alloc, .config = config };
 }
 
 /// Stays outside State: unlike State's fields it has a safe default
 /// (96.0 DPI, no scaling), and is set once during scale detection, never
 /// reassigned afterward.
-pub var dpi_info: f32 = constants.BASELINE_DPI;
+pub var dpi_info: std.atomic.Value(f32) = std.atomic.Value(f32).init(constants.baseline_dpi);
 
-/// Full-screen rect when no bar is present. Used as fallback by tiling,
-/// floating, and drag when the bar module is absent.
-pub fn fullScreenRect() utils.Rect {
-    return .{
-        .x = 0,
-        .y = 0,
-        .width = @intCast(getState().screen.width_in_pixels),
-        .height = @intCast(getState().screen.height_in_pixels),
-    };
-}
+

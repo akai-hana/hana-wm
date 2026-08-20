@@ -1,25 +1,17 @@
-//! Comptime-generated plugin list for optional subsystems.
-//!
-//! Conditionally includes each subsystem's plugin based on build_options,
-//! and provides list, count, initAll(), deinitAll(), and fanOut().
+//! Plugin registry.
+//! Comptime-built list of optional subsystem plugins gated by build_options.
 
 const build_options = @import("build_options");
 const hooks = @import("hooks");
 
-/// Maximum number of simultaneous plugins.
-const MAX_PLUGINS = 8;
+const max_plugins = 8;
 
-/// Comptime-built list of registered plugins. Only includes subsystems that exist.
-pub const list: [MAX_PLUGINS]hooks.Plugin = blk: {
-    var result: [MAX_PLUGINS]hooks.Plugin = .{hooks.Plugin{}} ** MAX_PLUGINS;
+pub const list: [max_plugins]hooks.Plugin = blk: {
+    var result: [max_plugins]hooks.Plugin = .{hooks.Plugin{}} ** max_plugins;
     var n: usize = 0;
 
     if (build_options.has_bar) {
         result[n] = @import("bar").plugin;
-        n += 1;
-    }
-    if (build_options.has_tiling) {
-        result[n] = @import("tiling").plugin;
         n += 1;
     }
     if (build_options.has_floating) {
@@ -30,23 +22,22 @@ pub const list: [MAX_PLUGINS]hooks.Plugin = blk: {
     break :blk result;
 };
 
-/// Number of active plugins.
 pub const count: usize = count: {
     var n: usize = 0;
-    if (build_options.has_bar) n += 1;
-    if (build_options.has_tiling) n += 1;
-    if (build_options.has_floating) n += 1;
+    for (list) |p| {
+        if (p.init != null) n += 1;
+    }
     break :count n;
 };
 
-/// Initialize all plugins in order. Called from main.zig.
 pub fn initAll() void {
     inline for (list[0..count]) |p| {
+        // Swallow init errors so one failing plugin does not prevent others
+        // from starting. A failed subsystem will simply be absent at runtime.
         if (p.init) |f| f() catch {};
     }
 }
 
-/// Deinitialize all plugins in reverse order. Called from main.zig.
 pub fn deinitAll() void {
     var i = count;
     while (i > 0) {
@@ -55,9 +46,10 @@ pub fn deinitAll() void {
     }
 }
 
-/// Fan-out: call a Plugin field on all plugins that have it.
-/// Used for events that multiple plugins need to observe.
 pub fn fanOut(comptime field: []const u8, args: anytype) void {
+    // Dispatches to every plugin that exposes the given optional callback.
+    // The inline loop is unrolled at comptime so the branch is resolved per
+    // plugin, not at runtime.
     inline for (list[0..count]) |p| {
         if (@field(p, field)) |f| {
             @call(.auto, f, args);

@@ -1,4 +1,4 @@
-//! Config file parser
+//! Configuration parser.
 //! Parses hana's TOML-inspired configuration format into structured values.
 
 const std = @import("std");
@@ -26,11 +26,12 @@ pub const Value = union(enum) {
     color: u32,
     scalable: ScalableValue,
 
-    /// Duplicate keys accumulate into a flat array (see `accumulate`), so
-    /// scalar reads implement "later declaration wins"; the latest value is
-    /// the LAST element, array consumers see the full accumulation. Not
-    /// `inline`: recursion into an accumulated duplicate array is rejected.
-    /// Routes every scalar accessor through one shared last-element descent.
+    // Duplicate keys accumulate into a flat array (see `accumulate`), so
+    // scalar reads implement "later declaration wins": the latest value is
+    // the LAST element. Array consumers see the full accumulation. Not
+    // `inline` because recursion into an accumulated duplicate array is
+    // rejected. Routes every scalar accessor through one shared
+    // last-element descent.
     fn lastScalar(self: Value) ?Value {
         return switch (self) {
             .array => |arr| if (arr.items.len > 0) arr.items[arr.items.len - 1].lastScalar() else null,
@@ -67,10 +68,10 @@ pub const Value = union(enum) {
             else => null,
         };
     }
-    /// Both whole-number and decimal absolutes arrive here as `.scalable`
-    /// (parseValue converts any bare literal containing a `.` too, not just
-    /// `%`-suffixed ones). `.integer` is retained for callers needing a true
-    /// integer (workspace/master counts) and widened losslessly here.
+    // Both whole-number and decimal absolutes arrive here as `.scalable`
+    // (parseValue converts any bare literal containing a `.` too, not just
+    // `%`-suffixed ones). `.integer` is retained for callers needing a true
+    // integer (workspace/master counts) and widened losslessly here.
     pub fn asScalable(self: Value) ?ScalableValue {
         return switch (self.lastScalar() orelse return null) {
             .scalable => |s| s,
@@ -93,21 +94,21 @@ pub const Value = union(enum) {
 
 pub const Section = struct {
     pairs: std.StringHashMap(Value),
-    /// Keys examined via get()/getAs()/markConsumed() during config
-    /// interpretation. Populated (best-effort, alloc failures are swallowed)
-    /// so config.zig can warn about keys no parse function recognises.
+    // Keys examined via get()/getAs()/markConsumed() during config
+    // interpretation. Populated (best-effort, alloc failures are swallowed)
+    // so config.zig can warn about keys no parse function recognises.
     consumed: std.StringHashMap(void),
-    /// Document-order key list (insertion order); `pairs` is a hashmap, so
-    /// direct iteration is nondeterministic (per-process random seed).
-    /// `orderedIterator` gives deterministic, first-in-file-wins resolution
-    /// for `[binds]`, `[workspace.rules]`, etc. Holds `pairs`' allocations.
+    // Document-order key list (insertion order); `pairs` is a hashmap, so
+    // direct iteration is nondeterministic (per-process random seed).
+    // `orderedIterator` gives deterministic, first-in-file-wins resolution
+    // for `[binds]`, `[workspace.rules]`, etc. Holds `pairs`' allocations.
     keys_in_order: std.ArrayListUnmanaged([]const u8) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Section {
         var map = std.StringHashMap(Value).init(allocator);
-        map.ensureTotalCapacity(16) catch {};
+        map.ensureTotalCapacity(4) catch {};
         var consumed = std.StringHashMap(void).init(allocator);
-        consumed.ensureTotalCapacity(16) catch {};
+        consumed.ensureTotalCapacity(4) catch {};
         return .{ .pairs = map, .consumed = consumed };
     }
 
@@ -123,29 +124,29 @@ pub const Section = struct {
         self.consumed.deinit();
     }
 
-    /// Records `key` as the newest document-order key. Best-effort: an OOM
-    /// here just loses deterministic ordering for this section, never data.
+    // Records `key` as the newest document-order key. Best-effort: an OOM
+    // here just loses deterministic ordering for this section, never data.
     fn recordKey(self: *Section, allocator: std.mem.Allocator, key: []const u8) void {
         self.keys_in_order.append(allocator, key) catch {};
     }
 
-    /// Iterates pairs in document (insertion) order; deterministic, unlike
-    /// `pairs.iterator()`. Values are the live (possibly accumulated) values.
+    // Iterates pairs in document (insertion) order; deterministic, unlike
+    // `pairs.iterator()`. Values are the live (possibly accumulated) values.
     pub fn orderedIterator(self: *const Section) OrderedIterator {
         return .{ .section = self, .idx = 0 };
     }
 
-    /// Records `key` as recognised so it won't be reported by warnUnconsumed.
-    /// Needed for keys read via direct `pairs` iteration (e.g. `[binds]`,
-    /// `[workspace.rules]`, `[tiling.layouts.master-stack.counts]`) rather
-    /// than the typed getters.
+    // Records `key` as recognised so it won't be reported by warnUnconsumed.
+    // Needed for keys read via direct `pairs` iteration (e.g. `[binds]`,
+    // `[workspace.rules]`, `[tiling.layouts.master-stack.counts]`) rather
+    // than the typed getters.
     pub fn markConsumed(self: *Section, key: []const u8) void {
         self.consumed.put(key, {}) catch {};
     }
 
-    /// Warns about every key in the section that was never examined via
-    /// get()/getAs()/markConsumed(); typically a typo in the key name, since
-    /// the parser otherwise accepts it silently.
+    // Warns about every key in the section that was never examined via
+    // get()/getAs()/markConsumed(); typically a typo in the key name, since
+    // the parser otherwise accepts it silently.
     pub fn warnUnconsumed(self: *const Section, section_name: []const u8) void {
         var iter = self.pairs.iterator();
         while (iter.next()) |entry| {
@@ -160,9 +161,9 @@ pub const Section = struct {
         return self.pairs.get(key);
     }
 
-    /// Generic typed getter: dispatches to the matching `Value.asXxx()` accessor
-    /// for the requested type.  All five typed getters below are thin wrappers
-    /// around this single function so the dispatch logic lives in one place.
+    // Generic typed getter: dispatches to the matching `Value.asXxx()` accessor
+    // for the requested type. All five typed getters below are thin wrappers
+    // around this single function so the dispatch logic lives in one place.
     pub fn getAs(self: *Section, comptime T: type, key: []const u8) ?T {
         const v = self.get(key) orelse return null;
         return switch (T) {
@@ -192,8 +193,8 @@ pub const Section = struct {
     }
 };
 
-/// Iterates a section's pairs in document (insertion) order. Values are
-/// looked up live from `pairs` so accumulated duplicates are seen in full.
+// Iterates a section's pairs in document (insertion) order. Values are
+// looked up live from `pairs` so accumulated duplicates are seen in full.
 pub const OrderedIterator = struct {
     section: *const Section,
     idx: usize,
@@ -239,8 +240,8 @@ pub const Document = struct {
 
 // Document merging
 
-/// Deep-copies a Value; string and array contents are newly allocated.
-/// Integer, boolean, color, and scalable values are plain copies.
+// Deep-copies a Value; string and array contents are newly allocated.
+// Integer, boolean, color, and scalable values are plain copies.
 fn deepCopyValue(allocator: std.mem.Allocator, val: Value) std.mem.Allocator.Error!Value {
     return switch (val) {
         .string => |s| .{ .string = try allocator.dupe(u8, s) },
@@ -253,12 +254,12 @@ fn deepCopyValue(allocator: std.mem.Allocator, val: Value) std.mem.Allocator.Err
             for (arr.items) |item| new_arr.appendAssumeCapacity(try deepCopyValue(allocator, item));
             break :blk .{ .array = new_arr };
         },
-        else => val, // integer / boolean / color / scalable are trivially copyable
+        else => val,
     };
 }
 
-/// Wraps `old_val` in a fresh array if it isn't one already, so callers can
-/// append into it. On error, `old_val` is left untouched.
+// Wraps `old_val` in a fresh array if it isn't one already, so callers can
+// append into it. On error, `old_val` is left untouched.
 fn ensureArray(allocator: std.mem.Allocator, old_val: *Value) !void {
     if (old_val.* == .array) return;
     var arr = try std.ArrayList(Value).initCapacity(allocator, 1);
@@ -270,12 +271,12 @@ fn ensureArray(allocator: std.mem.Allocator, old_val: *Value) !void {
     old_val.* = .{ .array = arr };
 }
 
-/// Accumulates `incoming` into `old_val`. When `do_copy` is true elements are
-/// deep-copied (for cross-document merging); when false they transfer by
-/// ownership (for within-file duplicate keys). An array-valued `incoming` is
-/// flattened. Scalar getters resolve to the LAST element (later files win);
-/// asArray sees the full accumulation so keybinds, `include`, `layouts`, etc.
-/// chain.
+// Accumulates `incoming` into `old_val`. When `do_copy` is true elements are
+// deep-copied (for cross-document merging); when false they transfer by
+// ownership (for within-file duplicate keys). An array-valued `incoming` is
+// flattened. Scalar getters resolve to the LAST element (later files win);
+// asArray sees the full accumulation so keybinds, `include`, `layouts`, etc.
+// chain.
 fn accumulate(allocator: std.mem.Allocator, old_val: *Value, incoming: Value, comptime do_copy: bool) !void {
     try ensureArray(allocator, old_val);
     if (incoming == .array) {
@@ -298,10 +299,10 @@ fn accumulate(allocator: std.mem.Allocator, old_val: *Value, incoming: Value, co
     }
 }
 
-/// Merges `src`'s pairs into `dst`; duplicate keys accumulate into arrays,
-/// exactly as within one file: a keybind in two files runs both actions.
-/// Scalar reads resolve to the last declaration (later file wins); array
-/// reads see the full accumulation; `src` is unmodified.
+// Merges `src`'s pairs into `dst`; duplicate keys accumulate into arrays,
+// exactly as within one file: a keybind in two files runs both actions.
+// Scalar reads resolve to the last declaration (later file wins); array
+// reads see the full accumulation; `src` is unmodified.
 fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Section) !void {
     var iter = src.orderedIterator();
     while (iter.next()) |entry| {
@@ -326,23 +327,19 @@ fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Se
     }
 }
 
-/// Merges `src` into `dst`; duplicate keys accumulate into arrays rather than
-/// overwriting, equivalent to writing all pairs in one file. Scalar reads
-/// resolve to the last element (later files win); array reads see every
-/// declaration.
+// Merges `src` into `dst`; duplicate keys accumulate into arrays rather than
+// overwriting, equivalent to writing all pairs in one file. Scalar reads
+// resolve to the last element (later files win); array reads see every
+// declaration.
 pub fn mergeDocumentsInto(allocator: std.mem.Allocator, dst: *Document, src: *const Document) !void {
-    // Merge root-level keys.
     try mergeSectionsInto(allocator, &dst.root, &src.root);
 
-    // Merge named sections.
     var iter = src.sections.iterator();
     while (iter.next()) |entry| {
         const name = entry.key_ptr.*;
         if (dst.sections.getPtr(name)) |dst_sec| {
-            // Section already exists: merge pairs.
             try mergeSectionsInto(allocator, dst_sec, entry.value_ptr);
         } else {
-            // New section: deep-copy it wholesale.
             var new_sec = Section.init(allocator);
             errdefer new_sec.deinit(allocator);
             try mergeSectionsInto(allocator, &new_sec, entry.value_ptr);
@@ -361,12 +358,17 @@ pub const ParseError = error{
     OutOfMemory,
 };
 
-/// Parses an RGB hex color string (`#RRGGBB`, `0xRRGGBB`, or bare `RRGGBB`).
+fn hexPrefixLen(value: []const u8) ?u2 {
+    if (value.len == 0) return null;
+    if (value[0] == '#') return 1;
+    if (value.len > 2 and value[0] == '0' and (value[1] == 'x' or value[1] == 'X')) return 2;
+    return null;
+}
+
 pub fn parseColor(value: []const u8) !u32 {
     if (value.len == 0) return error.InvalidColor;
 
-    const offset: u8 =
-        if (value[0] == '#') 1 else if (value.len > 2 and value[0] == '0' and (value[1] == 'x' or value[1] == 'X')) 2 else 0;
+    const offset: u8 = hexPrefixLen(value) orelse 0;
     const hex_part = value[offset..];
 
     if (hex_part.len == 0) return error.InvalidColor;
@@ -381,15 +383,15 @@ const Parser = struct {
     content: []const u8,
     pos: usize,
     line: usize,
-    /// Current nested-array depth, checked against MAX_ARRAY_DEPTH so a
-    /// pathologically deep literal (`[[[[[...]]]]]`) can't exhaust the stack.
-    /// Config is locally authored and trusted, so this is a defensive
-    /// backstop, not a response to observed input.
+    // Current nested-array depth, checked against max_array_depth so a
+    // pathologically deep literal (`[[[[[...]]]]]`) can't exhaust the stack.
+    // Config is locally authored and trusted, so this is a defensive
+    // backstop, not a response to observed input.
     array_depth: usize = 0,
-    /// Set while parsing array elements so parseBareValues parses only a
-    /// single bare token per call, the `,`/`]` separators belong to
-    /// parseArray, and without this an element list like `[a, b]` would be
-    /// gathered greedily into one nested array.
+    // Set while parsing array elements so parseBareValues parses only a
+    // single bare token per call, the `,`/`]` separators belong to
+    // parseArray, and without this an element list like `[a, b]` would be
+    // gathered greedily into one nested array.
     in_array: bool = false,
 
     fn init(allocator: std.mem.Allocator, content: []const u8) Parser {
@@ -469,7 +471,7 @@ const Parser = struct {
 
     fn parseString(self: *Parser) ParseError![]const u8 {
         const quote = self.consume().?;
-        var result = std.ArrayList(u8).initCapacity(self.allocator, 64) catch return ParseError.OutOfMemory;
+        var result = std.ArrayList(u8).initCapacity(self.allocator, 32) catch return ParseError.OutOfMemory;
         errdefer result.deinit(self.allocator);
         while (self.peek()) |c| {
             if (c == quote) {
@@ -496,14 +498,14 @@ const Parser = struct {
         return ParseError.InvalidValue;
     }
 
-    /// Maximum nested-array depth accepted by parseArray (see array_depth doc comment).
-    const MAX_ARRAY_DEPTH = 16;
+    // Maximum nested-array depth accepted by parseArray (see array_depth doc comment).
+    const max_array_depth = 16;
 
     fn parseArray(self: *Parser) ParseError!std.ArrayList(Value) {
         self.array_depth += 1;
         defer self.array_depth -= 1;
-        if (self.array_depth > MAX_ARRAY_DEPTH) {
-            debug.warn("Array nesting too deep (> {}) at line {}, treating as invalid", .{ MAX_ARRAY_DEPTH, self.line });
+        if (self.array_depth > max_array_depth) {
+            debug.warn("Array nesting too deep (> {}) at line {}, treating as invalid", .{ max_array_depth, self.line });
             return ParseError.InvalidValue;
         }
 
@@ -531,14 +533,14 @@ const Parser = struct {
         return array;
     }
 
-    const BOOLEAN_KEYWORDS = std.StaticStringMap(bool).initComptime(.{
+    const boolean_keywords = std.StaticStringMap(bool).initComptime(.{
         .{ "true", true }, .{ "false", false },
     });
 
-    /// True when `raw` is an optionally-signed bare decimal literal: digits,
-    /// exactly one '.', at least one digit (e.g. "2.5", "-0.3"). Whole numbers
-    /// and malformed tokens return false, falling through to the existing
-    /// color/integer/string handling in `parseValue`.
+    // True when `raw` is an optionally-signed bare decimal literal: digits,
+    // exactly one '.', at least one digit (e.g. "2.5", "-0.3"). Whole numbers
+    // and malformed tokens return false, falling through to the existing
+    // color/integer/string handling in `parseValue`.
     fn looksLikeDecimal(raw: []const u8) bool {
         var start: usize = 0;
         if (raw.len > 0 and raw[0] == '-') start = 1;
@@ -557,10 +559,10 @@ const Parser = struct {
         return dot_count == 1 and digit_count > 0;
     }
 
-    /// Scans a single bare (unquoted) token. Stops at whitespace, newline,
-    /// ',', ';', ']', and any '#' that is not the first character (a comment
-    /// start). A leading '#' is allowed so unquoted `#RRGGBB` colors parse as
-    /// colors rather than being mistaken for a comment.
+    // Scans a single bare (unquoted) token. Stops at whitespace, newline,
+    // ',', ';', ']', and any '#' that is not the first character (a comment
+    // start). A leading '#' is allowed so unquoted `#RRGGBB` colors parse as
+    // colors rather than being mistaken for a comment.
     fn parseBareToken(self: *Parser) ?[]const u8 {
         const start = self.pos;
         while (self.pos < self.content.len) {
@@ -579,11 +581,11 @@ const Parser = struct {
         return if (token.len > 0) token else null;
     }
 
-    /// Interprets a single bare token as a Value. Every scalar form a bare
-    /// token can take is handled here: boolean, percentage, decimal, color,
-    /// integer, with the unrecognised-token string fallback last.
+    // Interprets a single bare token as a Value. Every scalar form a bare
+    // token can take is handled here: boolean, percentage, decimal, color,
+    // integer, with the unrecognised-token string fallback last.
     fn parseBareTokenValue(self: *Parser, raw: []const u8) ParseError!Value {
-        if (BOOLEAN_KEYWORDS.get(raw)) |b| return .{ .boolean = b };
+        if (boolean_keywords.get(raw)) |b| return .{ .boolean = b };
 
         if (raw.len > 1 and raw[raw.len - 1] == '%') {
             const f = std.fmt.parseFloat(f32, raw[0 .. raw.len - 1]) catch return ParseError.InvalidValue;
@@ -602,13 +604,13 @@ const Parser = struct {
 
         // Bare colors require an explicit '#' or '0x' prefix: the old
         // hex-only sniffing parsed all-a-f identifiers ("dead", "cafe") as
-        // `.color` instead of `.string`, breaking asString()/ACTION_MAP
+        // `.color` instead of `.string`, breaking asString()/action_map
         // lookups for layout/variant/segment names. A leading '#' marks the
         // token as a color, not a comment; if it does not form a valid color
         // the line is invalid: the same outcome as a bare '#' after '='
         // always produced before. An invalid `0x...` instead falls through
         // to the string fallback below.
-        if (raw[0] == '#' or (raw.len > 2 and raw[0] == '0' and (raw[1] == 'x' or raw[1] == 'X'))) {
+        if (hexPrefixLen(raw) != null) {
             if (parseColor(raw)) |color| return .{ .color = color } else |_| {}
             if (raw[0] == '#') return ParseError.InvalidValue;
         }
@@ -620,11 +622,11 @@ const Parser = struct {
         }
     }
 
-    /// Parses a bare (unquoted) value: one token is a scalar; two or more
-    /// (whitespace/commas) form an array, e.g. `segments = workspaces layout
-    /// clock` -> ["workspaces","layout","clock"] or `icons = #ac3232, #52263e`
-    /// -> [0xac3232, 0x52263e]. Inside `[...]` one token is consumed (commas
-    /// belong to parseArray); semicolons are likewise left to the pair parser.
+    // Parses a bare (unquoted) value: one token is a scalar; two or more
+    // (whitespace/commas) form an array, e.g. `segments = workspaces layout
+    // clock` -> ["workspaces","layout","clock"] or `icons = #ac3232, #52263e`
+    // -> [0xac3232, 0x52263e]. Inside `[...]` one token is consumed (commas
+    // belong to parseArray); semicolons are likewise left to the pair parser.
     fn parseBareValues(self: *Parser) ParseError!Value {
         var items: std.ArrayList(Value) = .empty;
         errdefer {
@@ -665,7 +667,7 @@ const Parser = struct {
         return self.parseBareValues();
     }
 
-    /// Advances past a trailing newline or comment character at line end.
+    // Advances past a trailing newline or comment character at line end.
     fn skipLineEnd(self: *Parser, c: ?u8) void {
         switch (c orelse return) {
             '\n' => _ = self.consume(),
@@ -674,8 +676,8 @@ const Parser = struct {
         }
     }
 
-    /// Parses one `key = value` pair, or a bare `key` (treated as `key = true`).
-    /// Workspace rule entries like `Navigator` rely on the bare-key shorthand.
+    // Parses one `key = value` pair, or a bare `key` (treated as `key = true`).
+    // Workspace rule entries like `Navigator` rely on the bare-key shorthand.
     fn parseKeyValuePair(self: *Parser) ParseError!struct { []const u8, Value } {
         const key = try self.parseKey();
         errdefer self.allocator.free(key);
@@ -689,9 +691,9 @@ const Parser = struct {
         return .{ key, Value{ .boolean = true } };
     }
 
-    /// Parses `key = value` pairs (and bare `key` flags) until a blank line,
-    /// comment, `;` terminator, or end of content. Duplicate keys accumulate
-    /// into arrays so a repeated keybind or include runs all declarations.
+    // Parses `key = value` pairs (and bare `key` flags) until a blank line,
+    // comment, `;` terminator, or end of content. Duplicate keys accumulate
+    // into arrays so a repeated keybind or include runs all declarations.
     fn parsePairs(self: *Parser, section: *Section) ParseError!void {
         while (true) {
             var kv = self.parseKeyValuePair() catch |err| {
@@ -737,7 +739,6 @@ const Parser = struct {
     }
 };
 
-/// Parses a configuration string into a `Document`.
 pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
     var doc = Document.init(allocator);
     errdefer doc.deinit();
@@ -764,7 +765,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
 
             if (doc.sections.getPtr(section_name)) |existing| {
                 // Duplicate section header: keep filling the existing section
-                // : duplicate keys accumulate as if the blocks were one
+                // so duplicate keys accumulate as if the blocks were one
                 // section, consistent with the cross-file merge path.
                 allocator.free(section_name);
                 current_section = existing;
