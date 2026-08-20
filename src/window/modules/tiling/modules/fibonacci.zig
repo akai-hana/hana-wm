@@ -7,7 +7,7 @@ const layouts = @import("layouts");
 const tiling = @import("tiling");
 const State = tiling.State;
 
-/// Counter-clockwise spiral direction for the next window split.
+// Counter-clockwise spiral direction for the next window split.
 const SpiralDirection = enum(u2) {
     right, // Split vertically:   window on left,   remainder on right.
     down, // Split horizontally: window on top,    remainder below.
@@ -40,12 +40,16 @@ pub fn tileWithOffset(
     };
     var dir: SpiralDirection = .right;
 
+    // Minimum remaining dimension to place a window (gap on each side + border
+    // on each side). Loop-invariant: hoisted to avoid redundant arithmetic.
+    const min_area = m.gap * 2 + border2;
+
     // splitAndAdvance's emitOrDefer honors ctx.defer_win, see LayoutCtx.defer_win.
     for (windows, 0..) |win, i| {
         // Remaining area too small to split: raise the focused window (or the
         // first overflow window as fallback) and push the rest offscreen so the
         // user at least sees one window rather than a stack of identical rects.
-        if (cur.w < m.gap * 2 + border2 or cur.h < m.gap * 2 + border2) {
+        if (cur.w < min_area or cur.h < min_area) {
             const top_rect = utils.Rect{
                 .x = @intCast(cur.x),
                 .y = @intCast(cur.y),
@@ -62,7 +66,6 @@ pub fn tileWithOffset(
             return;
         }
 
-        // Last window takes the entire remaining area.
         if (i == windows.len - 1) {
             const rect = utils.Rect{
                 .x = @intCast(cur.x),
@@ -79,7 +82,7 @@ pub fn tileWithOffset(
     }
 }
 
-/// Mutable cursor tracking the remaining screen area as windows are placed.
+// Mutable cursor tracking the remaining screen area as windows are placed.
 const Cursor = struct {
     x: i32,
     y: i32,
@@ -87,7 +90,6 @@ const Cursor = struct {
     h: u16,
 };
 
-/// Place `win` in its split half and advance the remaining area cursor.
 inline fn splitAndAdvance(
     ctx: *const layouts.LayoutCtx,
     win: u32,

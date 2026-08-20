@@ -1,5 +1,5 @@
-//! Fullscreen management
-//! Handles entering, exiting, toggling, and querying fullscreen state for windows.
+//! Fullscreen state tracker.
+//! Manages fullscreen transitions, geometry preservation, and deferred bar visibility.
 
 const std = @import("std");
 
@@ -15,31 +15,27 @@ const tracking = @import("tracking");
 const focus = @import("focus");
 
 const minimize = @import("minimize");
-// Note: workspaces dispatch is handled through tracking.workspaceBit /
-// tracking.allWindows inside windowsOnCurrentWorkspace; a top-level
+// Workspaces dispatch is handled through tracking.workspaceBit and
+// tracking.allWindows inside windowsOnCurrentWorkspace, so a top-level
 // workspaces import is not needed here.
 
 const build_options = @import("build_options");
 const bar = if (build_options.has_bar) @import("bar") else null;
 const tiling = if (build_options.has_tiling) @import("tiling") else null;
 
-// Fullscreen types
-
 pub const FullscreenInfo = struct {
     window: core.WindowId,
-    saved_geometry: core.WindowGeometry,
+    saved_geometry: utils.Rect,
 };
 
-// Module state
-//
 // g_slots: fixed array keyed by workspace index (u8). O(1) ops, no heap.
 // Floating-window geometry across a fullscreen transition lives in the
 // shared tiling geometry cache (see the "Floating geometry save/restore"
-// section below), not in module state here.
+// block below), not in module state here.
 
-const MAX_WORKSPACES: usize = constants.MAX_WORKSPACES; // single-sourced; keys g_slots
+const max_workspaces: usize = constants.max_workspaces; // Sourced from constants; determines the size of g_slots.
 
-var g_slots: [MAX_WORKSPACES]?FullscreenInfo = @splat(null);
+var g_slots: [max_workspaces]?FullscreenInfo = @splat(null);
 
 /// Window configured fullscreen but awaiting ConfigureNotify confirmation.
 /// Zero when none pending. Set in enterFullscreenCommit; cleared in
@@ -57,7 +53,7 @@ var g_pending_bar_show_win: u32 = 0;
 var g_net_wm_state: xcb.xcb_atom_t = 0;
 var g_net_wm_state_fullscreen: xcb.xcb_atom_t = 0;
 
-/// Shared reset sequence used by both init() and deinit() to keep them in sync.
+// Shared reset sequence used by both init() and deinit() to keep them in sync.
 fn resetState() void {
     g_slots = @splat(null);
     g_pending_bar_hide_win = 0;
@@ -79,56 +75,52 @@ pub fn deinit() void {
     resetState();
 }
 
-// Public state queries
-
 pub fn isFullscreen(win: u32) bool {
     return workspaceFor(win) != null;
 }
 
-pub fn getForWorkspace(ws: u8) ?FullscreenInfo {
-    return g_slots[ws];
+pub fn getForWorkspace(ws: core.WorkspaceId) ?FullscreenInfo {
+    return g_slots[ws.index];
 }
 
 /// Returns the workspace index that `win` is fullscreen on, or null.
 /// Scans up to getWorkspaceCount() slots; O(workspace_count).
-pub fn workspaceFor(win: u32) ?u8 {
+pub fn workspaceFor(win: u32) ?core.WorkspaceId {
     const count = tracking.getWorkspaceCount();
     for (g_slots[0..count], 0..) |slot, i|
-        if (slot) |info| if (info.window == win) return @intCast(i);
+        if (slot) |info| if (info.window == win) return core.WorkspaceId.fromIndex(@intCast(i));
     return null;
 }
 
-fn setForWorkspace(ws: u8, info: FullscreenInfo) void {
-    g_slots[ws] = info;
+fn setForWorkspace(ws: core.WorkspaceId, info: FullscreenInfo) void {
+    g_slots[ws.index] = info;
 }
 
-pub fn removeForWorkspace(ws: u8) void {
-    g_slots[ws] = null;
+pub fn removeForWorkspace(ws: core.WorkspaceId) void {
+    g_slots[ws.index] = null;
 }
 
-/// Drops the record at `ws`, clearing the window's EWMH fullscreen property so
-/// external tools stop seeing it as fullscreen. No-op when the slot is empty.
-fn dropRecord(ws: u8) void {
-    if (g_slots[ws]) |info| {
+// Drops the record at `ws`, clearing the window's EWMH fullscreen property so
+// external tools stop seeing it as fullscreen. No-op when the slot is empty.
+fn dropRecord(ws: core.WorkspaceId) void {
+    if (g_slots[ws.index]) |info| {
         setEwmhFullscreenState(info.window, false);
-        g_slots[ws] = null;
+        g_slots[ws.index] = null;
     }
 }
 
-/// Drops any fullscreen record of `win` on a workspace other than `keep_ws`,
-/// so a window re-entering fullscreen elsewhere doesn't keep two records;
-/// workspaceFor(), which scans lowest-first, would then resolve exit/toggle
-/// to the stale slot.
-fn dropOtherRecordsFor(win: u32, keep_ws: u8) void {
+// Drops any fullscreen record of `win` on a workspace other than `keep_ws`,
+// so a window re-entering fullscreen elsewhere doesn't keep two records;
+// workspaceFor(), which scans lowest-first, would then resolve exit/toggle
+// to the stale slot.
+fn dropOtherRecordsFor(win: u32, keep_ws: core.WorkspaceId) void {
     const count = tracking.getWorkspaceCount();
     for (g_slots[0..count], 0..) |*slot, i| {
-        if (i == keep_ws) continue;
-        if (slot.*) |info| {
-            if (info.window == win) {
-                setEwmhFullscreenState(win, false);
-                slot.* = null;
-            }
-        }
+        if (i == keep_ws.index) continue;
+        const info = slot.* orelse continue;
+        if (info.window != win) continue;
+        setEwmhFullscreenState(win, false);
+        slot.* = null;
     }
 }
 
@@ -138,10 +130,11 @@ fn dropOtherRecordsFor(win: u32, keep_ws: u8) void {
 pub fn pruneForWorkspaceMask(win: u32, new_mask: u64) void {
     const count = tracking.getWorkspaceCount();
     for (g_slots[0..count], 0..) |*slot, i| {
-        if (slot.*) |info| {
-            if (info.window == win and (new_mask & tracking.workspaceBit(@as(u8, @intCast(i)))) == 0)
-                dropRecord(@as(u8, @intCast(i)));
-        }
+        const info = slot.* orelse continue;
+        if (info.window != win) continue;
+        if (new_mask & tracking.workspaceBit(@as(u8, @intCast(i))) != 0) continue;
+        setEwmhFullscreenState(win, false);
+        g_slots[i] = null;
     }
 }
 
@@ -149,16 +142,16 @@ pub fn pruneForWorkspaceMask(win: u32, new_mask: u64) void {
 /// already holds one, the moved record is dropped; never clobber the
 /// occupant's state (it would stay visually fullscreen but untracked).
 /// Callers handle visual cleanup; workspaces.zig checks the destination too.
-pub fn moveRecord(src_ws: u8, dst_ws: u8) void {
-    const info = g_slots[src_ws].?;
-    if (g_slots[dst_ws] != null) {
-        debug.warn("moveRecord: workspace {} already has a fullscreen record; dropping the moved one", .{dst_ws});
+pub fn moveRecord(src_ws: core.WorkspaceId, dst_ws: core.WorkspaceId) void {
+    const info = g_slots[src_ws.index].?;
+    if (g_slots[dst_ws.index] != null) {
+        debug.warn("moveRecord: workspace {} already has a fullscreen record; dropping the moved one", .{dst_ws.index});
         setEwmhFullscreenState(info.window, false);
-        g_slots[src_ws] = null;
+        g_slots[src_ws.index] = null;
         return;
     }
-    g_slots[src_ws] = null;
-    g_slots[dst_ws] = info;
+    g_slots[src_ws.index] = null;
+    g_slots[dst_ws.index] = info;
 }
 
 pub fn hasAnyFullscreen() bool {
@@ -173,24 +166,22 @@ pub fn hasAnyFullscreen() bool {
 pub fn forEachFullscreen(cb: anytype) void {
     const count = tracking.getWorkspaceCount();
     for (g_slots[0..count], 0..) |slot, i|
-        if (slot) |info| cb(@intCast(i), info);
+        if (slot) |info| cb(core.WorkspaceId.fromIndex(@intCast(i)), info);
 }
 
-// Geometry helpers
-
-/// Retrieve the pre-fullscreen geometry for `win`: tiled windows hit the
-/// geometry cache; floating/new windows issue a blocking xcb_get_geometry.
-/// Falls back to a centred quarter-screen default if the reply fails, the
-/// window is offscreen, or reports zero dimensions.
-fn fetchWindowGeom(win: u32) core.WindowGeometry {
+// Retrieve the pre-fullscreen geometry for `win`: tiled windows hit the
+// geometry cache; floating/new windows issue a blocking xcb_get_geometry.
+// Falls back to a centred quarter-screen default if the reply fails, the
+// window is offscreen, or reports zero dimensions.
+fn fetchWindowGeom(win: u32) utils.Rect {
     if (if (build_options.has_tiling) tiling.getWindowGeom(win) else null) |rect| {
         const bw: u16 = if (build_options.has_tiling) tiling.getBorderWidth() else 0;
-        return window.geomFromRect(rect, bw);
+        return .{ .x = rect.x, .y = rect.y, .width = rect.width, .height = rect.height, .border_width = bw };
     }
 
     // Screen dimensions are u16; dividing by a power of two is unambiguous on unsigned values.
     const cs = core.getState();
-    const default: core.WindowGeometry = .{
+    const default: utils.Rect = .{
         .x = @intCast(cs.screen.width_in_pixels / 4),
         .y = @intCast(cs.screen.height_in_pixels / 4),
         .width = cs.screen.width_in_pixels / 2,
@@ -225,30 +216,30 @@ fn fetchWindowGeom(win: u32) core.WindowGeometry {
 // snapshot array needed: as long as a window's cache entry is valid, it's
 // already exactly what we'd have saved ourselves.
 
-/// True when `win` is free-floating, not minimized and not tiled, i.e. its
-/// geometry is owned by the floating cache rather than the tiling engine.
-/// Shared by warmFloatingWindowGeoms and restoreFloatingWindows. Declared as
-/// a plain fn (not inline) so it can be passed as a *const fn(u32)bool
-/// predicate (see tracking.prefetchAndSaveGeometryOnCurrentWorkspace).
+// True when `win` is free-floating, not minimized and not tiled, i.e. its
+// geometry is owned by the floating cache rather than the tiling engine.
+// Shared by warmFloatingWindowGeoms and restoreFloatingWindows. Declared as
+// a plain fn (not inline) so it can be passed as a *const fn(u32)bool
+// predicate (see tracking.prefetchAndSaveGeometryOnCurrentWorkspace).
 fn isFreeFloating(win: u32) bool {
-    return !minimize.isMinimized(win) and !(if (build_options.has_tiling) tiling.isWindowTiled(win) else false);
+    return !minimize.isMinimized(win) and !(build_options.has_tiling and tiling.isWindowTiled(win));
 }
 
-/// Warm the geometry cache for every free-floating window on the current
-/// workspace (except `skip_win`) that has no cache entry yet: a live
-/// round-trip only for the rare window the cache has never seen. Shares its
-/// prefetch/save/offscreen-skip logic with workspaces.zig's pre-switch
-/// geometry warm via tracking.prefetchAndSaveGeometryOnCurrentWorkspace.
-/// Must run BEFORE xcb_grab_server: a round-trip can't happen inside a grab.
+// Warm the geometry cache for every free-floating window on the current
+// workspace (except `skip_win`) that has no cache entry yet: a live
+// round-trip only for the rare window the cache has never seen. Shares its
+// prefetch/save/offscreen-skip logic with workspaces.zig's pre-switch
+// geometry warm via tracking.prefetchAndSaveGeometryOnCurrentWorkspace.
+// Must run BEFORE xcb_grab_server: a round-trip can't happen inside a grab.
 fn warmFloatingWindowGeoms(skip_win: u32) void {
     tracking.prefetchAndSaveGeometryOnCurrentWorkspace(&isFreeFloating, skip_win);
 }
 
-/// Restore every free-floating window on the current workspace (except
-/// `skip_win`) to its cached position, falling back to the float default
-/// position when the cache has no entry (window.restoreFloatGeom).
-/// Safe inside xcb_grab_server: restoreFloatGeom only ever reads the cache,
-/// never issues a live round-trip.
+// Restore every free-floating window on the current workspace (except
+// `skip_win`) to its cached position, falling back to the float default
+// position when the cache has no entry (window.restoreFloatGeom).
+// Safe inside xcb_grab_server: restoreFloatGeom only ever reads the cache,
+// never issues a live round-trip.
 fn restoreFloatingWindows(skip_win: u32) void {
     var it = tracking.windowsOnCurrentWorkspace(skip_win);
     while (it.next()) |entry| {
@@ -258,9 +249,8 @@ fn restoreFloatingWindows(skip_win: u32) void {
     }
 }
 
-/// Set or clear the EWMH _NET_WM_STATE_FULLSCREEN property on `win`.
-/// Guards on both atoms being valid before touching the property.
-/// `is_fullscreen = true` -> sets the atom; false -> clears it (count=0).
+// Set or clear the EWMH _NET_WM_STATE_FULLSCREEN property on `win`.
+// Guards on both atoms being valid before touching the property.
 fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
     if (g_net_wm_state == xcb.XCB_ATOM_NONE or
         g_net_wm_state_fullscreen == xcb.XCB_ATOM_NONE) return;
@@ -304,7 +294,7 @@ pub fn applyFullscreenGeometry(win: u32) void {
     );
 }
 
-fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
+fn enterFullscreenCommit(win: u32, ws: core.WorkspaceId, geom: utils.Rect) void {
     // A window can only be fullscreen on one workspace: drop stale records on
     // others, or workspaceFor()'s lowest-first scan resolves exit/toggle to
     // the wrong slot.
@@ -315,10 +305,11 @@ fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
     });
 
     // Push every other window offscreen; workspace dispatch is through the shared iterator.
+    const conn = core.getState().conn;
     var it = tracking.windowsOnCurrentWorkspace(win);
     while (it.next()) |entry| {
         const w = entry.win;
-        utils.pushWindowOffscreen(core.getState().conn, w);
+        utils.pushWindowOffscreen(conn, w);
         // Only invalidate tiled windows; floating windows' cache entries
         // hold the geometry we need to restore on exit.
         if (build_options.has_tiling and tiling.isWindowTiled(w)) tiling.invalidateGeomCache(w);
@@ -346,7 +337,7 @@ fn enterFullscreenCommit(win: u32, ws: u8, geom: core.WindowGeometry) void {
     setEwmhFullscreenState(win, true);
 }
 
-fn exitFullscreenCommit(win: u32, ws: u8) void {
+fn exitFullscreenCommit(win: u32, ws: core.WorkspaceId) void {
     const fs_info = getForWorkspace(ws) orelse return;
     if (fs_info.window != win) return;
 
@@ -381,12 +372,10 @@ fn exitFullscreenCommit(win: u32, ws: u8) void {
     setEwmhFullscreenState(win, false);
 }
 
-// Public actions
-
 /// Clean up fullscreen side-effects when moving a fullscreen window: show the
 /// bar, restore offscreen floats, reapply border, clear EWMH state. Geometry
 /// restoration is the caller's job; `src_ws` must still hold the record.
-pub fn cleanupFullscreenForMove(win: u32, src_ws: u8) void {
+pub fn cleanupFullscreenForMove(win: u32, src_ws: core.WorkspaceId) void {
     const fs_info = getForWorkspace(src_ws) orelse return;
     if (fs_info.window != win) return;
 
@@ -401,9 +390,9 @@ pub fn cleanupFullscreenForMove(win: u32, src_ws: u8) void {
 /// Enter fullscreen for `win` on the current workspace. Pass pre-computed
 /// geometry in `saved_geom` (e.g. restoring a minimized window); null fetches
 /// it from the tiling cache or a live round-trip.
-pub fn enterFullscreen(win: u32, saved_geom: ?core.WindowGeometry) void {
+pub fn enterFullscreen(win: u32, saved_geom: ?utils.Rect) void {
     if (!core.getState().config.fullscreen_enabled) return;
-    const ws = tracking.getCurrentWorkspace() orelse return;
+    const ws = core.WorkspaceId.fromIndex(tracking.getCurrentWorkspace() orelse return);
     const geom = saved_geom orelse fetchWindowGeom(win);
     warmFloatingWindowGeoms(win);
     const conn = core.getState().conn;
@@ -417,8 +406,8 @@ pub fn enterFullscreen(win: u32, saved_geom: ?core.WindowGeometry) void {
 pub fn exitFullscreen(win: u32) void {
     const ws = workspaceFor(win) orelse return;
     // The window was raised on enter; showing the bar before it repaints at
-// its new tiled size would let it occlude the bar: the mirror image of
-// the enter-path bar-hide race; the show is deferred until the window
+    // its new tiled size would let it occlude the bar: the mirror image of
+    // the enter-path bar-hide race; the show is deferred until the window
     // confirms its non-fullscreen dimensions via ConfigureNotify.
     const conn = core.getState().conn;
     utils.grabServer(conn);
@@ -436,7 +425,7 @@ pub fn exitFullscreen(win: u32) void {
 // intermediate frame.
 pub fn toggle() void {
     const win = focus.getFocused() orelse return;
-    const current_ws = tracking.getCurrentWorkspace() orelse return;
+    const current_ws = core.WorkspaceId.fromIndex(tracking.getCurrentWorkspace() orelse return);
 
     // Defense-in-depth: focus.getFocused() is supposed to be null or a window
     // on the current workspace, but toggle()/enterFullscreen used to trust
@@ -445,13 +434,12 @@ pub fn toggle() void {
     // stuck on top. Re-check here so a future regression fails loudly (a no-op
     // + log line) instead of silently corrupting the workspace.
     if (!tracking.isOnCurrentWorkspace(win)) {
-        debug.warn("fullscreen.toggle: focused window 0x{x} is not on the current workspace ({d}); ignoring", .{ win, current_ws });
+        debug.warn("fullscreen.toggle: focused window 0x{x} is not on the current workspace ({d}); ignoring", .{ win, current_ws.index });
         return;
     }
 
     if (getForWorkspace(current_ws)) |fs_info| {
         if (fs_info.window == win) {
-            // Toggle off: exit fullscreen for the focused window.
             exitFullscreen(win);
         } else {
             // Switch: fetch geometry before the grab. restoreFloatingWindows
@@ -468,7 +456,6 @@ pub fn toggle() void {
             utils.ungrabAndFlush(conn);
         }
     } else {
-        // Nothing fullscreen on this workspace.
         enterFullscreen(win, null);
     }
 }
@@ -493,10 +480,14 @@ pub fn notifyConfigureIfPending(win: u32, width: u16, height: u16) void {
         }
     } else if (g_pending_bar_show_win == win) {
         if (width != screen_w or height != screen_h) {
-            g_pending_bar_show_win = 0;
-            if (build_options.has_bar) bar.setBarState(.show_fullscreen);
+            resolvePendingBarShow();
         }
     }
+}
+
+fn resolvePendingBarShow() void {
+    g_pending_bar_show_win = 0;
+    if (build_options.has_bar) bar.setBarState(.show_fullscreen);
 }
 
 /// Called when a window is destroyed; clears its pending deferred bar op so
@@ -504,8 +495,5 @@ pub fn notifyConfigureIfPending(win: u32, width: u16, height: u16) void {
 /// exitFullscreenCommit; this exists for the show case, where the window can
 /// be destroyed after exitFullscreen returns but before ConfigureNotify.
 pub fn onWindowGone(win: u32) void {
-    if (g_pending_bar_show_win == win) {
-        g_pending_bar_show_win = 0;
-        if (build_options.has_bar) bar.setBarState(.show_fullscreen);
-    }
+    if (g_pending_bar_show_win == win) resolvePendingBarShow();
 }

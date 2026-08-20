@@ -1,4 +1,4 @@
-//! Inline command prompt for the bar
+//! Inline command prompt for the bar.
 //! Embeds an interactive command runner into the bar's title segment.
 
 const std = @import("std");
@@ -25,7 +25,7 @@ const c = @cImport({
     @cInclude("sys/wait.h");
 });
 
-// xcb-keysyms bindings (link with -lxcb-keysyms)
+// XCB keysyms bindings (link with -lxcb-keysyms).
 
 const xcb_key_symbols_t = opaque {};
 
@@ -33,32 +33,22 @@ extern fn xcb_key_symbols_alloc(conn: *xcb.xcb_connection_t) ?*xcb_key_symbols_t
 extern fn xcb_key_symbols_free(syms: *xcb_key_symbols_t) void;
 extern fn xcb_key_symbols_get_keysym(syms: *xcb_key_symbols_t, code: xcb.xcb_keycode_t, col: c_int) xcb.xcb_keysym_t;
 
-// Module constants
-
-/// Minimum pixel width of the block cursor; ensures it is visible even on
-/// the narrowest glyphs (e.g. '.', '!').
+// Minimum pixel width of the block cursor; ensures it is visible even on
+// the narrowest glyphs (e.g. '.', '!').
 const min_cursor_px: u16 = 8;
-/// Width of the blinking caret in insert mode (pixels).
-const cursor_width: u16 = 1;
-/// Cursor blink half-period: cursor is visible for this many ms, then
-/// invisible for the same duration.
+// Cursor blink half-period: cursor is visible for this many ms, then
+// invisible for the same duration.
 const cursor_blink_ms: u64 = 300;
-/// Vertical padding (pixels) above and below the block cursor / selection.
-const cursor_v_pad: u16 = 2;
-/// Maximum number of executable names stored for tab-completion.
-const max_completions: usize = 4096;
-/// Maximum byte length of a single completion entry (executable name).
-const max_completion_len: usize = 64;
-/// Maximum number of history entries kept in memory.
-const max_history: usize = 512;
-/// Maximum byte length of a single history entry.
-const max_history_line: usize = vim.default_max_input;
-/// Number of editing modes (derived from vim.Mode at comptime).
+// Number of editing modes (derived from vim.Mode at comptime).
 const num_modes = @typeInfo(vim.Mode).@"enum".fields.len;
 
-// Module state
+const cursor_width: u16 = 1;
+const cursor_v_pad: u16 = 2;
+const max_completions: usize = 4096;
+const max_completion_len: usize = 64;
+const max_history: usize = 512;
+const max_history_line: usize = vim.default_max_input;
 
-/// All mutable state owned by this module.
 const PromptState = struct {
     is_active: bool = false,
     vim_state: vim.VimState = .{},
@@ -67,39 +57,38 @@ const PromptState = struct {
 
     key_syms: ?*xcb_key_symbols_t = null,
     cached_prompt_w: ?u16 = null,
-    /// Cached pixel width of each mode label, indexed by `vim.Mode` integer value.
+    // Cached pixel width of each mode label, indexed by `vim.Mode` integer value.
     cached_mode_w: [num_modes]?u16 = .{null} ** num_modes,
 
-    // PATH completion
     comp_names: []u8 = &.{},
     comp_count: usize = 0,
 
-    /// Ghost text: the completion suffix shown dimmed after the cursor.
+    // Ghost text: the completion suffix shown dimmed after the cursor.
     ghost_buf: []u8 = &.{},
     ghost_len: usize = 0,
-    /// True when the current buffer contains at least one space.  Maintained
-    /// incrementally so `updateGhost` can skip a full buffer scan on every call.
+    // True when the current buffer contains at least one space.  Maintained
+    // incrementally so `updateGhost` can skip a full buffer scan on every call.
     has_space: bool = false,
 
     is_blink_visible: bool = true,
 
-    /// Caret geometry cached after the first insert-mode draw.  Font metrics
-    /// and bar height are constant between reloads, so these never need clearing.
+    // Caret geometry cached after the first insert-mode draw.  Font metrics
+    // and bar height are constant between reloads, so these never need clearing.
     cached_caret_top: ?u16 = null,
     cached_caret_h: ?u16 = null,
 
-    // Command history (newest at index 0)
     hist_entries: []u8 = &.{},
     hist_count: usize = 0,
+    hist_head: usize = 0,
     is_hist_loaded: bool = false,
 
-    /// Set by key handlers, `activate`, and `deactivate` to notify the bar
-    /// that the prompt area needs to be redrawn.  Consumed (read + cleared)
-    /// by `consumeRedrawRequest` to avoid a circular import between prompt <-> bar.
+    // Set by key handlers, `activate`, and `deactivate` to notify the bar
+    // that the prompt area needs to be redrawn.  Consumed (read + cleared)
+    // by `consumeRedrawRequest` to avoid a circular import between prompt <-> bar.
     redraw_pending: bool = false,
 
     // Layout cache: pixel width of the pre-caret text, the block-caret width,
-    // and the scroll offset keeping the caret visible. Recomputed in
+    // and the scroll offset keeping the caret visible.  Recomputed in
     // `drawActive` only when `layout_dirty` is set (keypress, activate,
     // spawn_keep, or bar-height change): the caret-blink redraws an identical
     // frame each blink, so ticks reuse these instead of ~20 Pango shape passes.
@@ -107,12 +96,12 @@ const PromptState = struct {
     cached_caret_w: u16 = 0,
     cached_scroll_x: u16 = 0,
     cached_height: u16 = 0,
+    cached_pre_cursor: usize = 0,
+    cached_pre_len: usize = 0,
     layout_dirty: bool = true,
 };
 
 var g: PromptState = .{};
-
-// Module helpers
 
 fn vimModeEnabled() bool {
     return core.getState().config.bar.vim_mode;
@@ -125,26 +114,22 @@ fn copyToZ(dest: []u8, src: []const u8) ?[*:0]u8 {
     return @ptrCast(dest.ptr);
 }
 
-// Public API
-
 /// Returns true when the prompt is currently active and accepting key input.
 pub fn isActive() bool {
     return g.is_active;
 }
 
 /// Milliseconds until the next blink toggle, or -1 when the blink animation
-/// isn't running. Pass this (with the clock timeout) to poll() so the loop
-/// wakes exactly when a redraw is needed. Non-negative only in insert or
+/// isn't running.  Pass this (with the clock timeout) to poll() so the loop
+/// wakes exactly when a redraw is needed.  Non-negative only in insert or
 /// colon-command mode.
 pub fn blinkPollTimeoutMs() i32 {
     if (!g.is_active) return -1;
-    if (g.vim_state.mode == .insert or (vimModeEnabled() and vim.colonInput(&g.vim_state) != null))
+    if (g.vim_state.mode == .insert)
         return cursor_blink_ms;
     return -1;
 }
 
-/// Toggle cursor visibility.  Call from the event loop on every poll timeout
-/// where `blinkPollTimeoutMs() >= 0`, then trigger a bar redraw.
 pub fn blinkTick() void {
     g.is_blink_visible = !g.is_blink_visible;
 }
@@ -157,12 +142,12 @@ pub fn consumeRedrawRequest() bool {
     return pending;
 }
 
-/// Initialises all prompt state: vim engine, key-symbol table, completions, and history buffers.
-/// No-op if already initialised (idempotent).
-pub fn init(allocator: std.mem.Allocator, conn: *xcb.xcb_connection_t) !void {
+/// Initialises all prompt state: vim engine, key-symbol table, completions,
+/// and history buffers.  No-op if already initialised (idempotent).
+pub fn init(allocator: std.mem.Allocator, conn: core.Connection) !void {
     if (g.vim_state.buf.len != 0) return; // already initialised
     g.allocator = allocator;
-    g.vim_state = try vim.VimState.init(allocator, vim.default_max_input, vim.default_undo_max);
+    g.vim_state = try vim.VimState.init(allocator, vim.default_max_input);
     g.comp_names = try allocator.alloc(u8, (max_completion_len + 1) * max_completions);
     g.ghost_buf = try allocator.alloc(u8, max_completion_len);
     g.hist_entries = try allocator.alloc(u8, (max_history_line + 1) * max_history);
@@ -171,7 +156,6 @@ pub fn init(allocator: std.mem.Allocator, conn: *xcb.xcb_connection_t) !void {
         debug.warn("prompt: xcb_key_symbols_alloc failed: key input will not work", .{});
 }
 
-/// Frees all prompt resources and resets state to zero. Safe to call multiple times.
 pub fn deinit() void {
     if (g.key_syms) |ks| {
         xcb_key_symbols_free(ks);
@@ -184,7 +168,6 @@ pub fn deinit() void {
     g = .{};
 }
 
-/// Activates the prompt if inactive, or deactivates it if active.
 pub fn toggle() void {
     if (g.is_active) deactivate() else activate();
 }
@@ -201,15 +184,12 @@ fn closeWindowOrPromptUnderCursor() bool {
     const child: u32 = if (ptr_reply) |r| r.*.child else 0;
 
     if (bar.isBarWindow(child)) {
-        // Cursor is on the bar: kill the prompt.
         deactivate();
         return true;
     }
     if (child == 0 or child == cs.root) {
-        // Cursor is over the desktop / no window: do nothing, swallow key.
         return true;
     }
-    // Cursor is over a real program window: let the WM close it.
     return false;
 }
 
@@ -245,8 +225,8 @@ pub fn handlePromptKeypress(
 fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     // Only process XCB_KEY_PRESS events: press and release events share the
     // same struct layout, so the loop sometimes casts a release and dispatches
-    // it here. Without this guard the Escape release is a trap: handleInsert
-    // switches to .normal on press, then handleNormal sees XK_Escape with a
+    // it here.  Without this guard the Escape release is a trap: handleInsert
+    // switches to .normal on press, then handleNormal sees xk_escape with a
     // clean pending and deactivates; and the prompt is gone before the next
     // editing key arrives.
     //
@@ -265,7 +245,7 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     // Drop bare modifier key events (Shift, Ctrl, Alt, Super, Meta, Hyper ...).
     //
     // XCB delivers a key event for every key including modifiers, so Shift
-    // before '$'/'^' fires XK_Shift_L/R first. Reaching handleNormal, that
+    // before '$'/'^' fires XK_Shift_L/R first.  Reaching handleNormal, that
     // falls through to resetPendingCmd(), clearing any pending operator/count:
     // why d$, d^, c$, y^, visual 3W, etc. silently become bare cursor moves.
     //
@@ -276,7 +256,7 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     if (ctrl_held) {
         const action = if (vim_mode) vim.handleCtrl(&g.vim_state, sym) else .none;
         // handleCtrl may have deleted text (Ctrl-W / Ctrl-U), so the ghost is
-        // recomputed in the shared tail. The blink phase is left untouched.
+        // recomputed in the shared tail.  The blink phase is left untouched.
         return finishKeyPress(action, false);
     }
 
@@ -290,15 +270,13 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     else switch (g.vim_state.mode) {
         .insert => vim.handleInsert(&g.vim_state, sym),
         .normal => vim.handleNormal(&g.vim_state, sym),
-        .visual => vim.handleVisual(&g.vim_state, sym),
-        .replace => vim.handleReplace(&g.vim_state, sym),
     };
     return finishKeyPress(action, true);
 }
 
 /// Shared tail for every key that edited the buffer: run the action, recompute
 /// the ghost suggestion (a mode handler may have deleted or inserted text),
-/// and schedule a redraw. Returns true (event consumed).
+/// and schedule a redraw.  Returns true (event consumed).
 fn finishKeyPress(action: vim.Action, refresh_blink: bool) bool {
     applyAction(action);
     updateGhost();
@@ -332,10 +310,8 @@ pub fn draw(
     return drawActive(ctx.dc, ctx.config, ctx.height, ctx.start_x, ctx.width);
 }
 
-// Private: action handling
-
 /// Runs `action` through handleAction, then resyncs g.has_space if the buffer
-/// length changed. Shared by the Ctrl-key and normal-key paths in
+/// length changed.  Shared by the Ctrl-key and normal-key paths in
 /// handleKeyPress, which otherwise duplicated this exact sequence.
 fn applyAction(action: vim.Action) void {
     const prev_len = g.vim_state.len;
@@ -364,13 +340,11 @@ fn handleAction(action: vim.Action) void {
     }
 }
 
-/// Run the command currently in the buffer, if any.
 fn runPromptCommand() void {
     const cmd = g.vim_state.buf[0..g.vim_state.len];
     if (cmd.len > 0) spawnCommand(cmd);
 }
 
-/// Reset editing state and prompt-editing flags, preserving heap allocations.
 fn resetPromptEditing() void {
     g.vim_state.reset();
     g.ghost_len = 0;
@@ -378,11 +352,8 @@ fn resetPromptEditing() void {
     g.layout_dirty = true;
 }
 
-// Private: activate / deactivate
-
-/// Reset all `VimState` editing fields to their defaults without touching the
-/// heap-allocated buffers (buf, yank_buf, undo/redo stacks, etc.).
-/// Grabs the keyboard, resets editing state, and marks the prompt active.
+/// Loads completions and history on first activation, acquires the keyboard
+/// grab, and marks the prompt active.
 fn activate() void {
     resetPromptEditing();
     // Load completions and history on first activation.
@@ -417,11 +388,10 @@ fn activate() void {
     bar.presentForPrompt();
     // No xcb_flush: xcb_grab_keyboard_reply already drained the output buffer
     // and presentForPrompt() flushes its own requests; nothing is pending
-    // here. Contrast with deactivate(), where xcb_ungrab_keyboard must arrive
+    // here.  Contrast with deactivate(), where xcb_ungrab_keyboard must arrive
     // promptly.
 }
 
-/// Ungrabs the keyboard and marks the prompt inactive.
 fn deactivate() void {
     g.is_active = false;
     if (vimModeEnabled()) vim.onDeactivate(&g.vim_state);
@@ -434,8 +404,6 @@ fn deactivate() void {
     // active): see the comment on presentForPrompt() in activate().
     bar.dismissAfterPrompt();
 }
-
-// Private: PATH completion
 
 /// Scan every directory in $PATH and collect executable names into the static
 /// completion table.  Called once on first activation.
@@ -477,7 +445,7 @@ fn loadCompletions() void {
 }
 
 /// True when `name` under `dir_path` is executable, so it can be offered as a
-/// command completion. Filters empty/oversized/dot-prefixed names and probes
+/// command completion.  Filters empty/oversized/dot-prefixed names and probes
 /// the executable bit on the joined path.
 fn isRunnableFile(dir_path: []const u8, name: []const u8) bool {
     if (name.len == 0 or name.len > max_completion_len) return false;
@@ -488,7 +456,7 @@ fn isRunnableFile(dir_path: []const u8, name: []const u8) bool {
     return c.access(&full_path_buf, c.X_OK) == 0;
 }
 
-/// Stores `name` into the next completion slot. Returns true when the table is
+/// Stores `name` into the next completion slot.  Returns true when the table is
 /// full and the $PATH scan should stop.
 fn offerCompletion(name: []const u8) bool {
     const slot = g.comp_count * (max_completion_len + 1);
@@ -518,19 +486,17 @@ fn compExistsExact(name: []const u8) bool {
     return std.mem.eql(u8, compName(idx), name);
 }
 
-/// The `i`th completion name (fixed-stride slot read from the sorted table).
 fn compName(i: usize) []const u8 {
     const slot = i * (max_completion_len + 1);
     return std.mem.sliceTo(g.comp_names[slot .. slot + max_completion_len + 1], 0);
 }
 
-/// The `i`th history entry (newest at index 0).
 fn histEntry(i: usize) []const u8 {
-    const slot = i * (max_history_line + 1);
+    const slot = ((g.hist_head + i) % max_history) * (max_history_line + 1);
     return std.mem.sliceTo(g.hist_entries[slot .. slot + max_history_line + 1], 0);
 }
 
-/// Clamps `suffix` into g.ghost_buf/g.ghost_len. Shared by both updateGhost
+/// Clamps `suffix` into g.ghost_buf/g.ghost_len.  Shared by both updateGhost
 /// branches, which only differ in how they find the match.
 inline fn setGhost(suffix: []const u8) void {
     const n = @min(suffix.len, max_completion_len);
@@ -555,6 +521,7 @@ fn updateGhost() void {
     while (hi < g.hist_count) : (hi += 1) {
         const entry = histEntry(hi);
         if (entry.len == 0) continue;
+        if (entry[0] != prefix[0]) continue;
 
         const cmd_end = std.mem.indexOfScalar(u8, entry, ' ') orelse entry.len;
         const cmd_tok = entry[0..cmd_end];
@@ -578,27 +545,19 @@ fn updateGhost() void {
     }
 }
 
-// Private: history
-
 /// Prepend `cmd` to the in-memory history ring (newest at index 0), shifting
 /// entries right by one slot.
 /// Silently no-ops when cmd is empty or exceeds max_history_line.
 fn histPrepend(cmd: []const u8) void {
     if (cmd.len == 0 or cmd.len > max_history_line) return;
 
-    const keep = @min(g.hist_count, max_history - 1);
-    var i: usize = keep;
-    while (i > 0) : (i -= 1) {
-        const src = (i - 1) * (max_history_line + 1);
-        const dst = i * (max_history_line + 1);
-        @memcpy(g.hist_entries[dst .. dst + max_history_line + 1], g.hist_entries[src .. src + max_history_line + 1]);
-    }
-    @memcpy(g.hist_entries[0..cmd.len], cmd);
-    g.hist_entries[cmd.len] = 0;
+    g.hist_head = if (g.hist_head == 0) max_history - 1 else g.hist_head - 1;
+    const slot = g.hist_head * (max_history_line + 1);
+    @memcpy(g.hist_entries[slot .. slot + cmd.len], cmd);
+    g.hist_entries[slot + cmd.len] = 0;
     if (g.hist_count < max_history) g.hist_count += 1;
 }
 
-/// Append `cmd` to the prompt's own history file (~/.local/share/drun/history).
 fn histAppendToFile(cmd: []const u8) void {
     if (cmd.len == 0) return;
     const home = std.mem.span(c.getenv("HOME") orelse return);
@@ -619,7 +578,7 @@ fn histAppendToFile(cmd: []const u8) void {
 }
 
 /// Parse one line from a shell history file into `out`, returning its length
-/// (0 to skip). Understands fish `"- cmd: ..."`, zsh `": <ts>:<elapsed>;..."` or
+/// (0 to skip).  Understands fish `"- cmd: ..."`, zsh `": <ts>:<elapsed>;..."` or
 /// bare lines, and bash/drun bare lines (`#` timestamp markers skipped).
 fn histParseLine(line: []const u8, out: []u8) usize {
     if (line.len == 0) return 0;
@@ -687,7 +646,7 @@ fn histLoadFile(fp: *c.FILE) void {
     var out_line: [max_history_line]u8 = undefined;
 
     // Build a hash set of already-loaded entries so duplicate detection is O(1)
-    // instead of O(n²).  Pre-populate with any entries that were prepended by
+    // instead of O(n^2).  Pre-populate with any entries that were prepended by
     // earlier histLoadFile calls in the same session.
     var seen = std.AutoHashMapUnmanaged(u64, void){};
     defer seen.deinit(g.allocator);
@@ -737,8 +696,6 @@ fn tryOpenHistoryFile(buf: []u8, comptime fmt: []const u8, args: anytype) ?*c.FI
     return c.fopen(@ptrCast(buf.ptr), "r");
 }
 
-// Private: command spawning
-
 fn spawnCommand(cmd: []const u8) void {
     histPrepend(cmd);
     histAppendToFile(cmd);
@@ -752,6 +709,8 @@ fn spawnCommand(cmd: []const u8) void {
 
     const pid = c.fork();
     if (pid == 0) {
+        // Double-fork detaches the grandchild from this process so the bar
+        // does not wait on it when it exits.
         const pid2 = c.fork();
         if (pid2 == 0) {
             _ = c.setsid();
@@ -764,8 +723,6 @@ fn spawnCommand(cmd: []const u8) void {
         _ = c.waitpid(pid, &status, 0);
     }
 }
-
-// Private: rendering helpers
 
 /// Binary search: first byte offset where `measureTextWidth(text[0..offset])
 /// >= target_px`.  Returns `text.len` if the whole string is narrower.
@@ -784,6 +741,18 @@ fn textOffsetAtPx(dc: *drawing.DrawContext, text: []const u8, target_px: u16) us
 /// Fast path: returns the full slice when the text already fits.
 fn textPrefixFit(dc: *drawing.DrawContext, text: []const u8, max_px: u16) []const u8 {
     if (dc.measureTextWidth(text) <= max_px) return text;
+    return textPrefixFitBinary(dc, text, max_px);
+}
+
+/// Like textPrefixFit but skips the initial full-text measurement when the
+/// caller already measured the width (`known_w`). Avoids one redundant Pango
+/// round-trip on the common overflow path in `drawSpan`.
+inline fn textPrefixFitKnownW(dc: *drawing.DrawContext, text: []const u8, max_px: u16, known_w: u16) []const u8 {
+    if (known_w <= max_px) return text;
+    return textPrefixFitBinary(dc, text, max_px);
+}
+
+fn textPrefixFitBinary(dc: *drawing.DrawContext, text: []const u8, max_px: u16) []const u8 {
     var lo: usize = 0;
     var hi: usize = text.len;
     while (lo < hi) {
@@ -802,7 +771,7 @@ fn textPrefixFit(dc: *drawing.DrawContext, text: []const u8, max_px: u16) []cons
 /// Both edges clip without ellipsis: characters whose right edges fall before
 /// `text_left_x` are skipped; characters past `scroll_end_x` are dropped:
 /// correct for pre-cursor text, where the caret must sit right after the last
-/// visible character. `text_w` is the caller's already-measured width (null to
+/// visible character.  `text_w` is the caller's already-measured width (null to
 /// measure here), avoiding a second Pango pass.
 inline fn drawSpan(
     dc: *drawing.DrawContext,
@@ -834,10 +803,10 @@ inline fn drawSpan(
     const available: u16 = @intCast(se - @as(i32, draw_x));
 
     // Clip the visible suffix to the available width on the right.  When no
-    // left clip occurred, `w` is already the full width, so reuse it instead
-    // of letting textPrefixFit re-measure the same slice on its fast path.
+    // left clip occurred, `w` is already the full width, so pass it to
+    // textPrefixFitKnownW to avoid a redundant full-text Pango measurement.
     const visible = if (start == 0)
-        (if (w <= available) text else textPrefixFit(dc, text, available))
+        (if (w <= available) text else textPrefixFitKnownW(dc, text, available, w))
     else
         textPrefixFit(dc, text[start..], available);
     if (visible.len > 0)
@@ -845,8 +814,6 @@ inline fn drawSpan(
 }
 
 /// Draw `text` from `px` to the right edge, ellipsizing on overflow.
-/// Shared by the insert, normal, and visual branches of `drawActive` for
-/// post-cursor text.
 inline fn drawPostSpan(
     dc: *drawing.DrawContext,
     px: i32,
@@ -889,17 +856,13 @@ const CursorStyle = struct {
     fg: u32,
 };
 
-fn makeCursorStyle(text_left_x: u16, scroll_end_x: u16, baseline: u16, height: u16, accent: u32, bg: u32, fg: u32) CursorStyle {
-    return .{ .text_left_x = text_left_x, .scroll_end_x = scroll_end_x, .baseline = baseline, .height = height, .accent = accent, .bg = bg, .fg = fg };
-}
-
 /// Draw a filled block cursor over `buf[lo..hi]` and advance `px.*` past it.
 ///
 /// Shared by visual selection highlighting and the normal/replace character
 /// cursor: "highlight a byte range with an accent block and inverse text",
 /// differing only in range width and whether `text_only` suppresses the fill
 /// (colon-command mode: the caret lives in the pill, so the character shows as
-/// plain text). `lo == hi` draws an empty space-sized block (end-of-line).
+/// plain text).  `lo == hi` draws an empty space-sized block (end-of-line).
 inline fn drawBlockCursor(
     dc: *drawing.DrawContext,
     px: *i32,
@@ -922,10 +885,8 @@ inline fn drawBlockCursor(
     px.* += @intCast(block_w);
 }
 
-// Private: active-mode rendering
-
 /// Lazily cache the caret geometry: font metrics and bar height are constant
-/// between reloads, so this runs at most once. Hoisted before the pill and
+/// between reloads, so this runs at most once.  Hoisted before the pill and
 /// mode branches so the lazy-init runs exactly once regardless of which
 /// branch executes first.
 fn ensureCaretGeom(dc: *drawing.DrawContext, height: u16) void {
@@ -948,7 +909,7 @@ fn promptWidth(dc: *drawing.DrawContext, prompt: []const u8) u16 {
 }
 
 /// Recompute the cached caret widths and scroll offset, but only when
-/// `layout_dirty` or a bar-height change demands it. The caret-blink redraws
+/// `layout_dirty` or a bar-height change demands it.  The caret-blink redraws
 /// an identical frame every blink, so blink ticks reuse these instead of ~20
 /// Pango shape passes per tick; the cache needs invalidating only when
 /// buffer, cursor, mode, or height changes.
@@ -962,7 +923,14 @@ fn refreshLayoutCache(
 ) void {
     if (!g.layout_dirty and height == g.cached_height) return;
 
-    g.cached_pre_w = dc.measureTextWidth(pre_cur_text);
+    if (g.layout_dirty) {
+        // Full remeasure on dirty flag (keypress changed text/cursor/mode).
+        g.cached_pre_w = dc.measureTextWidth(pre_cur_text);
+        g.cached_pre_cursor = pre_cur_text.len;
+        g.cached_pre_len = pre_cur_text.len;
+    }
+    // When !layout_dirty: only height changed; text and cursor are unchanged,
+    // so cached_pre_w / cached_pre_cursor / cached_pre_len remain valid.
     g.cached_caret_w = if (g.vim_state.mode == .insert)
         cursor_width
     else
@@ -996,34 +964,9 @@ fn refreshLayoutCache(
     g.layout_dirty = false;
 }
 
-fn drawColonPillContent(
-    dc: *drawing.DrawContext,
-    pill_x: u16,
-    pill_w: u16,
-    pill_h_pad: u16,
-    baseline: u16,
-    ct: []const u8,
-    white: u32,
-) !void {
-    var ppx: i32 = @as(i32, pill_x) + @as(i32, pill_h_pad);
-    const colon_w: i32 = @intCast(dc.measureTextWidth(":"));
-    try dc.drawText(@intCast(ppx), baseline, ":", white);
-    ppx += colon_w;
-    if (ct.len > 0) {
-        try dc.drawText(@intCast(ppx), baseline, ct, white);
-        ppx += @intCast(dc.measureTextWidth(ct));
-    }
-    const caret_top = g.cached_caret_top.?;
-    const caret_h = g.cached_caret_h.?;
-    const pill_inner_end: i32 = @as(i32, pill_x) + @as(i32, pill_w) - @as(i32, pill_h_pad);
-    if (g.is_blink_visible and ppx < pill_inner_end) {
-        dc.fillRect(@intCast(ppx), caret_top, cursor_width, caret_h, white);
-    }
-}
-
 /// Right-pinned mode widget: a filled pill (accent bg, white text) with
 /// `pill_h_pad` on both sides so the text never touches the pill edge and
-/// there's a gap to the scrollable region. In colon-command mode the label is
+/// there's a gap to the scrollable region.  In colon-command mode the label is
 /// replaced by ":typed_chars" plus a blinking block cursor.
 ///
 /// Returns the scrollable region's right edge (the pill's left edge), or null
@@ -1065,44 +1008,11 @@ fn drawPill(
 
     if (show_pill and pill_fits) {
         const pill_x: u16 = text_end_x - pill_w;
-        // Filled pill background.
         dc.fillRect(pill_x, cursor_v_pad, pill_w, height -| cursor_v_pad * 2, accent);
-
-        if (vim.colonInput(&g.vim_state)) |ct| {
-            try drawColonPillContent(dc, pill_x, pill_w, pill_h_pad, baseline, ct, white);
-        } else {
-            // Normal mode label centred (left-padded) inside the pill.
-            try dc.drawText(pill_x + pill_h_pad, baseline, mode_label, white);
-        }
+        try dc.drawText(pill_x + pill_h_pad, baseline, mode_label, white);
     }
 
     return scroll_end_x;
-}
-
-/// Visual mode: highlight `buf[sel[0]..sel[1]]` with an accent block and
-/// inverse text; everything before/after is drawn plain.
-fn drawVisualMode(
-    dc: *drawing.DrawContext,
-    height: u16,
-    baseline: u16,
-    text_left_x: u16,
-    scroll_end_x: u16,
-    ellipsis_end_x: u16,
-    px: *i32,
-    accent: u32,
-    bg: u32,
-    fg: u32,
-) !void {
-    const sel = vim.visualRange(&g.vim_state);
-    const pre_sel = g.vim_state.buf[0..sel[0]];
-    const post_sel = g.vim_state.buf[sel[1]..g.vim_state.len];
-
-    if (pre_sel.len > 0)
-        try drawSpan(dc, px, text_left_x, scroll_end_x, baseline, pre_sel, null, fg);
-
-    try drawBlockCursor(dc, px, makeCursorStyle(text_left_x, scroll_end_x, baseline, height, accent, bg, fg), g.vim_state.buf, sel[0], sel[1], null, false);
-
-    try drawPostSpan(dc, px.*, text_left_x, ellipsis_end_x, baseline, post_sel, fg);
 }
 
 /// Insert mode: blinking thin caret; the caret position does not consume its
@@ -1135,9 +1045,7 @@ fn drawInsertMode(
     try drawPostSpan(dc, px.*, text_left_x, ellipsis_end_x, baseline, g.vim_state.buf[g.vim_state.cursor..g.vim_state.len], fg);
 }
 
-/// NORMAL / REPLACE: full-character block cursor. When colon-command mode is
-/// active the cursor lives in the pill widget, so the character underneath is
-/// shown as plain text instead of being boxed.
+/// NORMAL: full-character block cursor.
 fn drawNormalMode(
     dc: *drawing.DrawContext,
     height: u16,
@@ -1149,7 +1057,6 @@ fn drawNormalMode(
     accent: u32,
     bg: u32,
     fg: u32,
-    colon_active: bool,
 ) !void {
     const pre_text = g.vim_state.buf[0..g.vim_state.cursor];
     const cur_hi = @min(g.vim_state.cursor + 1, g.vim_state.len);
@@ -1157,7 +1064,7 @@ fn drawNormalMode(
     if (pre_text.len > 0)
         try drawSpan(dc, px, text_left_x, scroll_end_x, baseline, pre_text, g.cached_pre_w, fg);
 
-    try drawBlockCursor(dc, px, makeCursorStyle(text_left_x, scroll_end_x, baseline, height, accent, bg, fg), g.vim_state.buf, g.vim_state.cursor, cur_hi, g.cached_caret_w, colon_active);
+    try drawBlockCursor(dc, px, .{ .text_left_x = text_left_x, .scroll_end_x = scroll_end_x, .baseline = baseline, .height = height, .accent = accent, .bg = bg, .fg = fg }, g.vim_state.buf, g.vim_state.cursor, cur_hi, g.cached_caret_w, false);
 
     const post_text: []const u8 = if (g.vim_state.cursor < g.vim_state.len)
         g.vim_state.buf[g.vim_state.cursor + 1 .. g.vim_state.len]
@@ -1169,7 +1076,7 @@ fn drawNormalMode(
 /// Render the active input UI.
 ///
 /// Layout: [ pad | scrollable: PROMPT | pre | CURSOR/SELECTION | post |
-/// MODE_LABEL | pad ]. The mode label is pinned right (never scrolls); the
+/// MODE_LABEL | pad ].  The mode label is pinned right (never scrolls); the
 /// scrollable region keeps the cursor in view.
 fn drawActive(
     dc: *drawing.DrawContext,
@@ -1183,8 +1090,7 @@ fn drawActive(
     const accent = config.drunPromptColor();
     const bg = config.drunBg();
     const fg = config.drunFg();
-    const prompt = config.drun_prompt orelse types.DEFAULT_DRUN_PROMPT;
-    const vim_mode = vimModeEnabled();
+    const prompt = config.drun_prompt orelse types.default_drun_prompt;
 
     dc.fillRect(start_x, 0, width, height, bg);
 
@@ -1195,7 +1101,7 @@ fn drawActive(
 
     ensureCaretGeom(dc, height);
 
-    // Mode widget, pinned right; does not scroll. Its left edge bounds the
+    // Mode widget, pinned right; does not scroll.  Its left edge bounds the
     // scrollable text region.
     const scroll_end_x = drawPill(dc, height, baseline, text_left_x, text_end_x, accent) orelse return end_x;
     // Clip post-cursor text 2 px before the pill so ink never bleeds into it.
@@ -1215,13 +1121,10 @@ fn drawActive(
     var px: i32 = @as(i32, text_left_x) - @as(i32, scroll_x);
     try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, prompt, prompt_w, accent);
 
-    // Mode-specific text rendering. When colon-command mode is active the
-    // cursor lives in the pill widget, not here.
-    const colon_active = vim_mode and vim.colonInput(&g.vim_state) != null;
+    // Mode-specific text rendering.
     switch (g.vim_state.mode) {
-        .visual => try drawVisualMode(dc, height, baseline, text_left_x, scroll_end_x, ellipsis_end_x, &px, accent, bg, fg),
         .insert => try drawInsertMode(dc, baseline, text_left_x, scroll_end_x, ellipsis_end_x, &px, accent, fg),
-        else => try drawNormalMode(dc, height, baseline, text_left_x, scroll_end_x, ellipsis_end_x, &px, accent, bg, fg, colon_active),
+        else => try drawNormalMode(dc, height, baseline, text_left_x, scroll_end_x, ellipsis_end_x, &px, accent, bg, fg),
     }
 
     dc.blitAndFlush(start_x, width);

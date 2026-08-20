@@ -1,4 +1,4 @@
-//! X event dispatch and main event loop
+//! X event dispatch and main event loop.
 //! Handles X events, OS signals, and config reload, driving the WM's main loop.
 
 const std = @import("std");
@@ -20,24 +20,22 @@ const fullscreen = @import("fullscreen");
 const refresh_rate = @import("refresh_rate");
 const signals = @import("signals");
 const build_options = @import("build_options");
+const tiling = if (build_options.has_tiling) @import("tiling") else null;
 
-// Indices into the poll fd array.
-const FD_XCB = 0;
-const FD_SIGNAL = 1;
+const fd_xcb = 0;
+const fd_signal = 1;
 
-/// Maximum events dispatched per XCB batch before returning to poll, so the
-/// signal pipe and timer paths get fair scheduling against a chatty client.
-const MAX_EVENTS_PER_BATCH: usize = 128;
-
-// Dispatch table
+// Maximum events dispatched per XCB batch before returning to poll, so the
+// signal pipe and timer paths get fair scheduling against a chatty client.
+const max_events_per_batch: usize = 128;
 
 const EventHandler = *const fn (event: *anyopaque) void;
 
-/// Casts a `fn(*T) void` event handler to the generic `EventHandler` pointer
-/// type via @ptrCast. Safe only because every registered handler takes a
-/// single pointer argument and returns void, matching EventHandler's shape
-/// exactly; the check below enforces that at comptime so a handler with the
-/// wrong signature fails to build instead of miscompiling through the cast.
+// Casts a `fn(*T) void` event handler to the generic `EventHandler` pointer
+// type via @ptrCast. Safe only because every registered handler takes a
+// single pointer argument and returns void, matching EventHandler's shape
+// exactly; the check below enforces that at comptime so a handler with the
+// wrong signature fails to build instead of miscompiling through the cast.
 inline fn asHandler(comptime f: anytype) EventHandler {
     const info = @typeInfo(@TypeOf(f)).@"fn";
     if (info.params.len != 1)
@@ -53,15 +51,13 @@ inline fn eventCast(comptime T: type, event: *anyopaque) T {
     return @ptrCast(@alignCast(event));
 }
 
-/// Fans out expose events to all plugins that handle them.
-fn dispatchExpose(event: *anyopaque) void {
+fn handleExpose(event: *anyopaque) void {
     const e = eventCast(*xcb.xcb_expose_event_t, event);
     inline for (plugins.list[0..plugins.count]) |p| {
         if (p.on_expose) |f| f(e);
     }
 }
 
-/// Fans out PropertyNotify to plugins and window.
 fn handlePropertyNotify(event: *anyopaque) void {
     const e = eventCast(*xcb.xcb_property_notify_event_t, event);
     inline for (plugins.list[0..plugins.count]) |p| {
@@ -70,32 +66,32 @@ fn handlePropertyNotify(event: *anyopaque) void {
     window.handlePropertyNotify(e);
 }
 
-/// Routes ConfigureNotify to the fullscreen deferred-bar-hide/show logic.
+// Routes ConfigureNotify to the fullscreen deferred-bar-hide/show logic.
 fn handleConfigureNotify(event: *anyopaque) void {
     const e = eventCast(*xcb.xcb_configure_notify_event_t, event);
     fullscreen.notifyConfigureIfPending(e.window, e.width, e.height);
 }
 
-/// Notifies fullscreen of the destroyed window before delegating to window.zig.
-/// This clears any pending deferred bar-show for a window that exits fullscreen
-/// and is then destroyed before it can send a ConfigureNotify.
+// Notifies fullscreen of the destroyed window before delegating to window.zig.
+// This clears any pending deferred bar-show for a window that exits fullscreen
+// and is then destroyed before it can send a ConfigureNotify.
 fn handleDestroyNotify(event: *anyopaque) void {
     const e = eventCast(*xcb.xcb_destroy_notify_event_t, event);
     fullscreen.onWindowGone(e.window);
     window.handleDestroyNotify(e);
 }
 
-/// Adapts input.handleMappingNotify to the EventHandler shape. The keymap
-/// rebuild it triggers doesn't consult any MappingNotify fields, so the
-/// event pointer is discarded.
+// Adapts input.handleMappingNotify to the EventHandler shape. The keymap
+// rebuild it triggers doesn't consult any MappingNotify fields, so the
+// event pointer is discarded.
 fn handleMappingNotify(event: *anyopaque) void {
     _ = event;
     input.handleMappingNotify();
 }
 
-/// O(1) dispatch via a comptime-built table indexed by XCB event type (low 7 bits).
+// O(1) dispatch via a comptime-built table indexed by XCB event type (low 7 bits).
 const dispatch_table = blk: {
-    var table = [_]?EventHandler{null} ** constants.Limits.EVENT_DISPATCH_TABLE;
+    var table = [_]?EventHandler{null} ** constants.Limits.event_dispatch_table;
 
     table[xcb.XCB_ENTER_NOTIFY] = asHandler(window.handleEnterNotify);
     table[xcb.XCB_LEAVE_NOTIFY] = asHandler(window.handleLeaveNotify);
@@ -114,7 +110,7 @@ const dispatch_table = blk: {
     table[xcb.XCB_FOCUS_IN] = asHandler(focus.handleFocusIn);
     table[xcb.XCB_PROPERTY_NOTIFY] = asHandler(handlePropertyNotify);
 
-    table[xcb.XCB_EXPOSE] = asHandler(dispatchExpose);
+    table[xcb.XCB_EXPOSE] = asHandler(handleExpose);
 
     table[xcb.XCB_CONFIGURE_NOTIFY] = asHandler(handleConfigureNotify);
 
@@ -154,12 +150,8 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
     if (dispatch_table[idx]) |handler| handler(event);
 }
 
-// Keybindings
-
 const CookieEntry = struct { cookie: xcb.xcb_void_cookie_t, keycode: u8 };
 
-/// Fills `cookies` with one grab request per (keybinding x lock modifier) pair.
-/// Returns the number of entries written.
 fn fillGrabCookies(cookies: []CookieEntry) usize {
     var n: usize = 0;
     const cs = core.getState();
@@ -168,12 +160,12 @@ fn fillGrabCookies(cookies: []CookieEntry) usize {
 
         // Check once per keybinding that the full lock-modifier set fits.
         // Avoids a per-lock branch and prevents partial grabs if the buffer is nearly full.
-        if (n + constants.LOCK_MODIFIERS.len > cookies.len) {
-            debug.warn("Too many keybindings. Increase MAX_KEYBIND_COOKIES (currently {})", .{constants.Limits.MAX_KEYBIND_COOKIES});
+        if (n + constants.lock_modifiers.len > cookies.len) {
+            debug.warn("Too many keybindings. Increase max_keybind_cookies (currently {})", .{constants.Limits.max_keybind_cookies});
             break;
         }
 
-        for (constants.LOCK_MODIFIERS) |lock| {
+        for (constants.lock_modifiers) |lock| {
             cookies[n] = .{
                 .cookie = xcb.xcb_grab_key_checked(
                     cs.conn,
@@ -192,7 +184,6 @@ fn fillGrabCookies(cookies: []CookieEntry) usize {
     return n;
 }
 
-/// Checks each cookie for an XCB error. Returns the number of failures.
 fn checkGrabCookies(cookies: []const CookieEntry) usize {
     var failed: usize = 0;
     const conn = core.getState().conn;
@@ -206,13 +197,14 @@ fn checkGrabCookies(cookies: []const CookieEntry) usize {
     return failed;
 }
 
-/// Ungrabs all keys, then re-grabs every configured keybinding across all lock modifier combinations.
-/// Fires all grab cookies before reading any reply to reduce round-trips.
+/// Ungrabs all keys, then re-grabs every configured keybinding across all
+/// lock modifier combinations. Fires all grab cookies before reading any
+/// reply to reduce round-trips.
 pub fn grabKeybindings() void {
     const cs = core.getState();
     _ = xcb.xcb_ungrab_key(cs.conn, xcb.XCB_GRAB_ANY, cs.root, xcb.XCB_MOD_MASK_ANY);
 
-    var cookies: [constants.Limits.MAX_KEYBIND_COOKIES]CookieEntry = undefined;
+    var cookies: [constants.Limits.max_keybind_cookies]CookieEntry = undefined;
     const n = fillGrabCookies(&cookies);
 
     const failed = checkGrabCookies(cookies[0..n]);
@@ -221,67 +213,59 @@ pub fn grabKeybindings() void {
     _ = xcb.xcb_flush(cs.conn);
 }
 
-// Config reload
-
-/// Loads and validates a new config, then applies it atomically. On failure
-/// the old config remains active.
-///
-/// Ordering is load-bearing:
-///   1. Keybind resolution and DPI scaling run pre-swap on `new_config`.
-///   2. The swap precedes the subsystem reloads (reloadBorders / reloadConfig /
-///      bar.reload) so they rebuild from the NEW config. (The old ordering kept
-///      stale settings, then old_config.deinit() freed string slices the new bar
-///      had shallow-copied; a use-after-free on the next draw.)
-///   3. grabKeybindings() runs post-swap because fillGrabCookies() reads the
-///      live config.
-///   4. `committed` flips the errdefer: pre-swap failure frees new_config;
-///      post-swap failure keeps it and frees the displaced old_config. (Every
-///      post-swap call is void today, so this is latent-but-safe.)
-///   5. applyCarouselSettings() runs post-swap so a rejected reload never leaks
-///      staged carousel settings.
+// Loads and validates a new config, then applies it atomically via pointer
+// swap. On failure the old config remains active.
+//
+// Ordering is load-bearing:
+//   1. Keybind resolution and DPI scaling run pre-swap on the new config.
+//   2. The swap precedes subsystem reloads (reloadBorders / reloadConfig /
+//      bar.reload) so they rebuild from the NEW config. (The old ordering kept
+//      stale settings, then freed string slices the new bar had shallow-copied;
+//      a use-after-free on the next draw.)
+//   3. grabKeybindings() runs post-swap because fillGrabCookies() reads the
+//      live config.
+//   4. errdefer frees the heap-allocated new config if anything fails pre-swap.
+//      Post-swap all calls are infallible, so no errdefer is needed.
 fn handleConfigReload() !void {
     debug.info("Reload requested", .{});
     const cs = core.getState();
 
-    var new_config = config.loadConfigDefault(cs.alloc) catch |err| {
+    const new_config = config.loadConfigDefault(cs.alloc) catch |err| {
         debug.err("Failed to load: {}, keeping old", .{err});
         return err;
     };
-    var old_config = cs.config;
-    var committed = false;
-    errdefer {
-        if (committed) {
-            old_config.deinit(cs.alloc);
-        } else {
-            new_config.deinit(cs.alloc);
-        }
-    }
+    // Heap-allocate so the swap is a pointer exchange, not a by-value copy.
+    // errdefer frees the allocation if anything fails before the swap.
+    const new_ptr = try cs.alloc.create(@TypeOf(new_config));
+    new_ptr.* = new_config;
+    errdefer new_ptr.deinit(cs.alloc);
 
-    try config.validate(&new_config);
-    new_config.keybind_resolver.build(new_config.keybindings.items, input.getXkbState(), cs.alloc);
-    config.finalizeConfig(&new_config, cs.screen);
+    try config.validate(new_ptr);
+    new_ptr.keybind_resolver.build(new_ptr.keybindings.items, input.getXkbState(), cs.alloc);
+    config.finalizeConfig(new_ptr, cs.screen);
 
-    cs.config = new_config;
-    committed = true;
+    // Swap pointers: new config becomes live, old config is isolated.
+    const old_ptr = cs.config;
+    cs.config = new_ptr;
 
     window.reloadBorders();
     plugins.fanOut("reload", .{});
+    if (build_options.has_tiling) tiling.reloadConfig();
 
-    old_config.deinit(cs.alloc);
+    // Free the displaced old config after subsystem reloads have moved on.
+    old_ptr.deinit(cs.alloc);
 
     grabKeybindings();
 
     // Rebuild after the swap so borrowed key slices point into the new config's memory.
     window.buildRulesMap();
 
-    config.applyCarouselSettings(&new_config);
+    config.applyCarouselSettings(new_ptr);
 
     debug.info("Reload complete", .{});
 }
 
-// Event loop
-
-/// Drains pending XCB events for this batch, then runs post-batch housekeeping.
+// Drains pending XCB events for this batch, then runs post-batch housekeeping.
 fn handleXcbEvents() void {
     const conn = core.getState().conn;
 
@@ -290,7 +274,7 @@ fn handleXcbEvents() void {
     // timer paths (clock, cursor blink) indefinitely. Unread events stay in the
     // socket buffer and the fd stays readable, so they're handled on the next
     // poll round.
-    for (0..MAX_EVENTS_PER_BATCH) |_| {
+    for (0..max_events_per_batch) |_| {
         const event = xcb.xcb_poll_for_event(conn) orelse break;
         defer std.c.free(event);
         dispatch(@as(*u8, @ptrCast(event)).*, event);
@@ -303,7 +287,6 @@ fn handleXcbEvents() void {
     // spawn queue entry.
     input.drainPendingSpawns();
 
-    // Post-batch housekeeping: fan out to all plugins
     inline for (plugins.list[0..plugins.count]) |p| {
         if (p.post_batch) |f| f() catch |err| debug.err("Plugin post_batch failed: {}", .{err});
     }
@@ -320,7 +303,8 @@ fn handleXcbEvents() void {
 }
 
 pub fn run() !void {
-    const x_fd: std.posix.fd_t = xcb.xcb_get_file_descriptor(core.getState().conn);
+    const cs = core.getState();
+    const x_fd: std.posix.fd_t = xcb.xcb_get_file_descriptor(cs.conn);
     const signal_fd: std.posix.fd_t = signals.readFd();
 
     var fds = [_]std.posix.pollfd{
@@ -329,7 +313,6 @@ pub fn run() !void {
     };
 
     while (utils.running.load(.acquire)) {
-        // Compute poll timeout from plugins that have a poll_timeout_ms hook
         var poll_timeout_ms: i32 = @intCast(clock.nextTickWaitMs());
         var cursor_is_blinking = false;
         inline for (plugins.list[0..plugins.count]) |p| {
@@ -358,15 +341,15 @@ pub fn run() !void {
                 inline for (plugins.list[0..plugins.count]) |p| {
                     if (p.on_poll_wakeup) |f| f();
                 }
-                _ = xcb.xcb_flush(core.getState().conn);
+                _ = xcb.xcb_flush(cs.conn);
             }
-        } else if ((fds[FD_XCB].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
+        } else if ((fds[fd_xcb].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
             debug.err("X11 connection error, shutting down", .{});
             break;
         } else {
-            if ((fds[FD_XCB].revents & std.posix.POLL.IN) != 0) handleXcbEvents();
+            if ((fds[fd_xcb].revents & std.posix.POLL.IN) != 0) handleXcbEvents();
 
-            if ((fds[FD_SIGNAL].revents & std.posix.POLL.IN) != 0)
+            if ((fds[fd_signal].revents & std.posix.POLL.IN) != 0)
                 signals.drainAndDispatch(signal_fd);
 
             // The reload flag is also set directly by the reload_config keybinding
@@ -377,7 +360,6 @@ pub fn run() !void {
                 handleConfigReload() catch |err| debug.err("Reload failed: {}", .{err});
         }
 
-        // End-of-iteration fan-out
         inline for (plugins.list[0..plugins.count]) |p| {
             if (p.iteration_end) |f| _ = f();
         }

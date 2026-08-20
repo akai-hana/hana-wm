@@ -1,5 +1,5 @@
-//! Layout icon bar segment
-//! Draws the current tiling layout symbol on the status bar.
+//! Layout icon bar segment.
+//! Displays the active tiling layout symbol on the status bar.
 
 const core = @import("core");
 const types = @import("types");
@@ -7,7 +7,6 @@ const drawing = @import("drawing");
 const build_options = @import("build_options");
 const tiling = if (build_options.has_tiling) @import("tiling") else null;
 
-/// Returns the icon string for the given layout.
 fn getIcon(layout: types.Layout) []const u8 {
     return switch (layout) {
         .master => "[]=",
@@ -20,7 +19,7 @@ fn getIcon(layout: types.Layout) []const u8 {
     };
 }
 
-/// Draws the layout icon on the bar. Returns the x position after the drawn segment.
+/// Returns the x coordinate immediately after the drawn segment.
 pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
     // Without tiling all windows are floating by definition.
     if (!core.getState().config.tiling.enabled)

@@ -9,9 +9,9 @@ const constants = @import("constants");
 const debug = @import("debug");
 const bench = @import("bench");
 
-const max_property_length = constants.PROPERTY_MAX_LENGTH;
+const max_property_length = constants.property_max_length;
 /// Passed as the `delete` argument to xcb_get_property; 0 means do not consume the property.
-const property_no_delete = constants.PROPERTY_NO_DELETE;
+const property_no_delete = constants.property_no_delete;
 
 // Process lifecycle signals
 //
@@ -36,7 +36,7 @@ var signal_write_fd: std.posix.fd_t = -1;
 /// be a real signal number: `signals.drainAndDispatch` dispatches every byte
 /// it reads, and re-dispatching the wake byte as SIGHUP would make the drain
 /// loop call `reload()` again; writing another wake byte and spinning forever.
-pub const WAKE_BYTE: u8 = 0xff;
+pub const wake_byte: u8 = 0xff;
 
 /// Registers the write end of the signal self-pipe so `reload()` can wake the
 /// event loop. Pass -1 to unregister (teardown).
@@ -44,7 +44,6 @@ pub fn setSignalWriteFd(fd: std.posix.fd_t) void {
     signal_write_fd = fd;
 }
 
-/// Signals the main event loop to exit cleanly.
 pub inline fn quit() void {
     running.store(false, .release);
 }
@@ -56,9 +55,10 @@ pub inline fn quit() void {
 /// also polls the flag itself every iteration, so a lost byte only delays the
 /// reload by one poll timeout at worst.
 pub inline fn reload() void {
-    should_reload.store(true, .release);
-    if (signal_write_fd >= 0)
-        _ = std.os.linux.write(signal_write_fd, &[_]u8{WAKE_BYTE}, 1);
+    if (!should_reload.swap(true, .acq_rel)) {
+        if (signal_write_fd >= 0)
+            _ = std.os.linux.write(signal_write_fd, &[_]u8{wake_byte}, 1);
+    }
 }
 
 /// Atomically consumes the reload flag.
@@ -75,14 +75,14 @@ pub const Rect = struct {
     y: i16,
     width: u16,
     height: u16,
+    border_width: u16 = 0,
 
-    /// Constructs a Rect from an XCB geometry reply.
     pub inline fn fromXcb(geom: *const xcb.xcb_get_geometry_reply_t) Rect {
-        return .{ .x = geom.x, .y = geom.y, .width = geom.width, .height = geom.height };
+        return .{ .x = geom.x, .y = geom.y, .width = geom.width, .height = geom.height, .border_width = geom.border_width };
     }
 
     pub inline fn eql(self: Rect, other: Rect) bool {
-        return self.x == other.x and self.y == other.y and self.width == other.width and self.height == other.height;
+        return self.x == other.x and self.y == other.y and self.width == other.width and self.height == other.height and self.border_width == other.border_width;
     }
 };
 
@@ -91,7 +91,7 @@ pub const Rect = struct {
 /// every call site that live-fetches geometry and must not cache that
 /// parking spot as if it were the window's real, restorable position.
 pub inline fn isOffscreenGeomReply(r: *const xcb.xcb_get_geometry_reply_t) bool {
-    return r.x < constants.OFFSCREEN_SENTINEL_MIN or r.y < constants.OFFSCREEN_SENTINEL_MIN;
+    return r.x < constants.offscreen_sentinel_min or r.y < constants.offscreen_sentinel_min;
 }
 
 /// Gap and border widths applied around a tiled window.
@@ -113,7 +113,7 @@ pub inline fn toXcbCoord(v: i16) u32 {
 
 /// Moves and resizes `win` without touching border_width.
 /// Use `window.configureWindowGeom` when border_width must change atomically.
-pub inline fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect) void {
+pub inline fn configureWindow(conn: core.Connection, win: u32, rect: Rect) void {
     _ = xcb.xcb_configure_window(
         conn,
         win,
@@ -123,15 +123,14 @@ pub inline fn configureWindow(conn: *xcb.xcb_connection_t, win: u32, rect: Rect)
     );
 }
 
-/// Raises `win` to the top of the stacking order.
-pub inline fn raiseWindow(conn: *xcb.xcb_connection_t, win: u32) void {
+pub inline fn raiseWindow(conn: core.Connection, win: u32) void {
     _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 }
 
 /// Strips lock-key and pointer-button bits from a raw event modifier state,
 /// leaving only the modifier bits the WM uses for keybinding matching.
 pub inline fn normalizeModifiers(state: u16) u16 {
-    return state & constants.MOD_MASK_BINDING;
+    return state & constants.mod_mask_binding;
 }
 
 // Atom cache
@@ -173,8 +172,8 @@ var atom_cache: ?AtomCache = null;
 
 /// Interns all atoms in a single round-trip batch. Atom names come from
 /// `AtomCache`'s field names at comptime, so adding a field is the only
-    /// change required, no parallel array, no index-order mismatch risk.
-pub fn initAtomCache(conn: *xcb.xcb_connection_t) !void {
+/// change required, no parallel array, no index-order mismatch risk.
+pub fn initAtomCache(conn: core.Connection) !void {
     const fields = std.meta.fields(AtomCache);
     var cookies: [fields.len]xcb.xcb_intern_atom_cookie_t = undefined;
 
@@ -248,7 +247,7 @@ const supported_atoms = [_][]const u8{
 ///
 /// Must run once at startup, after initAtomCache() and before any client can
 /// map a window.
-pub fn advertiseEwmhSupport(conn: *xcb.xcb_connection_t, screen: *xcb.xcb_screen_t, root: u32) void {
+pub fn advertiseEwmhSupport(conn: core.Connection, screen: core.Screen, root: u32) void {
     const supporting_wm_check = getAtomCached("_NET_SUPPORTING_WM_CHECK") catch return;
     const net_wm_name = getAtomCached("_NET_WM_NAME") catch return;
     const utf8_string = getAtomCached("UTF8_STRING") catch return;
@@ -308,9 +307,12 @@ pub const scaling = struct {
     pub inline fn scaleToPixels(value: anytype, reference: f32) f32 {
         return if (value.is_percentage) reference * (value.value / 100.0) else value.value;
     }
+    /// Returns v/100 for percentage values; returns `-value` for absolute values.
     pub fn scaleMasterWidth(value: anytype) f32 {
         return if (value.is_percentage) value.value / 100.0 else -value.value;
     }
+    /// Scales a border-width value. Percentage values are multiplied by half the
+    /// reference dimension, matching the two-sided inset a border represents.
     pub fn scaleBorderWidth(value: anytype, reference_dimension: u16) u16 {
         const v: f32 = if (value.is_percentage)
             (value.value / 100.0) * 0.5 * @as(f32, @floatFromInt(reference_dimension))
@@ -325,46 +327,42 @@ pub const scaling = struct {
     }
 };
 
-/// Returns the raw timespec for the given clock id (REALTIME/MONOTONIC).
-/// Uses the VDSO-accelerated clock_gettime on supported kernels.
+// Uses the VDSO-accelerated clock_gettime on supported kernels.
 inline fn clockTs(clock_id: std.os.linux.clockid_t) std.os.linux.timespec {
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(clock_id, &ts);
     return ts;
 }
 
-/// Returns the current clock time in nanoseconds for the given clock id.
 pub fn clockNs(clock_id: std.os.linux.clockid_t) u64 {
     const ts = clockTs(clock_id);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 
-/// Returns the current monotonic clock time in nanoseconds.
 pub inline fn monotonicNs() u64 {
     return clockNs(.MONOTONIC);
 }
 
-/// Returns the current realtime clock time in nanoseconds since the Unix epoch.
 pub inline fn realtimeNs() u64 {
     return clockNs(.REALTIME);
 }
 
 // XCB grab helpers
 
-pub inline fn pushWindowOffscreen(conn: *xcb.xcb_connection_t, win: u32) void {
-    _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, constants.OFFSCREEN_X_POSITION))});
+pub inline fn pushWindowOffscreen(conn: core.Connection, win: u32) void {
+    _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, constants.offscreen_x_position))});
 }
 
 /// Like `pushWindowOffscreen`, but also drops `win` to the bottom of the
 /// global stacking order in the same request. Use this for any window whose
 /// hidden state must be defended even if something upstream raised it.
-pub inline fn pushWindowOffscreenAndLower(conn: *xcb.xcb_connection_t, win: u32) void {
+pub inline fn pushWindowOffscreenAndLower(conn: core.Connection, win: u32) void {
     _ = xcb.xcb_configure_window(
         conn,
         win,
         xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_STACK_MODE,
         &[_]u32{
-            @bitCast(@as(i32, constants.OFFSCREEN_X_POSITION)),
+            @bitCast(@as(i32, constants.offscreen_x_position)),
             xcb.XCB_STACK_MODE_BELOW,
         },
     );
@@ -384,33 +382,29 @@ pub inline fn pushWindowOffscreenAndLower(conn: *xcb.xcb_connection_t, win: u32)
 /// True while the main WM thread holds the X server grab.
 pub var grab_active = std.atomic.Value(bool).init(false);
 
-/// Returns true while the main WM thread holds the X server grab.
 pub inline fn isGrabActive() bool {
     return grab_active.load(.monotonic);
 }
 
-/// Takes the X server grab. Always pair with ungrabServer()/ungrabAndFlush().
-pub inline fn grabServer(conn: *xcb.xcb_connection_t) void {
+/// Always pair with ungrabServer()/ungrabAndFlush().
+pub inline fn grabServer(conn: core.Connection) void {
     grab_active.store(true, .release);
     _ = xcb.xcb_grab_server(conn);
 }
 
 /// Releases the X server grab without flushing pending requests.
-pub inline fn ungrabServer(conn: *xcb.xcb_connection_t) void {
+pub inline fn ungrabServer(conn: core.Connection) void {
     _ = xcb.xcb_ungrab_server(conn);
     grab_active.store(false, .release);
 }
 
-/// Ungrabs the X server and flushes pending requests.
-/// Always called as a pair; defined here so every module can share one copy.
-pub inline fn ungrabAndFlush(conn: *xcb.xcb_connection_t) void {
+/// Defined here so every module can share one copy.
+pub inline fn ungrabAndFlush(conn: core.Connection) void {
     ungrabServer(conn);
     _ = xcb.xcb_flush(conn);
 }
 
-/// Set a window's border pixel color with a single change-window-attributes
-/// request.
-pub inline fn setBorderPixel(conn: *xcb.xcb_connection_t, win: u32, pixel: u32) void {
+pub inline fn setBorderPixel(conn: core.Connection, win: u32, pixel: u32) void {
     _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{pixel});
 }
 
@@ -536,12 +530,10 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
 
         const Self = @This();
 
-        /// Mutable view over the live portion of the backing array.
         pub fn slice(self: *Self) []T {
             return self.items[0..self.len];
         }
 
-        /// Read-only view over the live portion of the backing array.
         pub fn constSlice(self: *const Self) []const T {
             return self.items[0..self.len];
         }
@@ -606,18 +598,16 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
     };
 }
 
-/// Fetches an 8-bit X11 window property into a caller-supplied reuse buffer.
-/// Returns a slice into `buffer.items`, or null if the property is absent,
-/// empty, or not 8-bit encoded, or the reply's type doesn't match the
-/// requested `atom_type`. The buffer is cleared before each use, so the
-/// caller can allocate it once and pass it across repeated calls.
+/// Fetches an 8-bit X11 window property into the caller-supplied `buffer`.
+/// Returns a slice into `buffer`, or null if the property is absent, empty,
+/// not 8-bit encoded, the reply's type doesn't match the requested
+/// `atom_type`, or the value exceeds the buffer length.
 pub fn fetchPropertyToBuffer(
-    conn: *xcb.xcb_connection_t,
+    conn: core.Connection,
     window: u32,
     atom: u32,
     atom_type: u32,
-    buffer: *std.ArrayListUnmanaged(u8),
-    allocator: std.mem.Allocator,
+    buffer: []u8,
 ) !?[]const u8 {
     const reply = pollPropertyReply(
         conn,
@@ -629,17 +619,18 @@ pub fn fetchPropertyToBuffer(
     if (r.value_len == max_property_length)
         debug.warn("Property atom {x} on window {x} exceeds the {}-byte fetch cap; value truncated", .{ atom, window, max_property_length });
 
-    buffer.clearRetainingCapacity();
+    const len: usize = @intCast(r.value_len);
+    if (len > buffer.len) return null;
     const value_ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
-    try buffer.appendSlice(allocator, value_ptr[0..@intCast(r.value_len)]);
-    return buffer.items;
+    @memcpy(buffer[0..len], value_ptr[0..len]);
+    return buffer[0..len];
 }
 
 /// Collect the reply for a fired `xcb_get_property` request without a blocking
 /// wait when the reply is already buffered (see `bench.pollReply`). In a
 /// non-bench build this reduces to a single blocking reply call.
 fn pollPropertyReply(
-    conn: *xcb.xcb_connection_t,
+    conn: core.Connection,
     cookie: xcb.xcb_get_property_cookie_t,
 ) ?*xcb.xcb_get_property_reply_t {
     if (bench.pollReply(conn, cookie.sequence)) |rep|

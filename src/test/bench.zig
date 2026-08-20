@@ -1,18 +1,6 @@
-//! Opt-in performance probe. Compiled out entirely (zero overhead) unless the
-//! build is configured with -Dbench.
-//!
-//! Counts blocking X11 round-trips issued by the bar's title/geometry
-//! pre-fetch paths and times each `bar.captureStateIntoSlot` pass, so
-//! before/after measurements of a change (e.g. cookie batching) can be
-//! compared directly. The counters are only touched on the main thread, but
-//! they are atomic anyway so the probe stays safe regardless of call site.
-//!
-//! A "round-trip" is counted only when a reply is NOT already in xcb's read
-//! buffer (via `xcb_poll_for_reply`) and therefore forces a blocking wait on
-//! the socket. Replies that were drained in an earlier read of the same batch
-//! are free. When the probe is disabled, `pollReply` always reports a miss and
-//! every call site falls through to its normal blocking reply, identical to
-//! the non-bench build.
+//! Bench probe for the bar's X11 title pre-fetch path.
+//! Counts blocking round-trips and wall time so callers can compare
+//! before/after measurements when optimising cookie batching.
 
 const std = @import("std");
 const build = @import("build_options");
@@ -22,16 +10,15 @@ pub const enabled = build.bench;
 
 var title_round_trips: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
 
-/// Zero the round-trip counter. Call at the start of the region to be
-/// measured so the per-capture report that follows is self-contained.
+/// Call before `reportTitleCapture` to reset the round-trip counter so
+/// the subsequent report reflects only the current capture pass.
 pub inline fn beginTitleCapture() void {
     if (comptime !enabled) return;
     _ = title_round_trips.store(0, .monotonic);
 }
 
-/// Print a one-line summary for one title pre-fetch pass: window count,
-/// blocking round-trips issued on the title/geometry paths since
-/// `beginTitleCapture`, and the elapsed wall time.
+/// Output the wall time, window count, and blocking round-trip count
+/// accumulated since the matching `beginTitleCapture` call.
 pub inline fn reportTitleCapture(ns: u64, windows: usize) void {
     if (comptime !enabled) return;
     std.debug.print(
@@ -40,20 +27,23 @@ pub inline fn reportTitleCapture(ns: u64, windows: usize) void {
     );
 }
 
-/// Probe for whether the reply to request `sequence` is already available in
+/// Non-blocking check for whether the reply to `sequence` is already in
 /// xcb's read buffer.
 ///
-/// When it is, returns the reply pointer (consumed here, the caller must NOT
-/// call the blocking `xcb_*_reply` function for this cookie again) and counts
-/// no round-trip. The returned pointer is heap-allocated by xcb and must be
-/// freed with `std.c.free`, exactly like a reply from the blocking path.
+/// Returns the heap-allocated reply pointer and counts zero round-trips
+/// when the reply is available. The caller owns the pointer and must free
+/// it with `std.c.free`. Having consumed the cookie the caller must NOT
+/// call the corresponding blocking `xcb_*_reply` function.
 ///
-/// When it is not (or the probe is disabled), returns null after counting one
-/// round-trip; the caller should proceed with its normal blocking reply call,
-/// which performs the actual wait. `null` is also returned when the request
-/// has already completed with an error rather than a reply, the subsequent
-/// blocking call then resolves quickly to the same failure the non-bench
-/// build would have seen, so behavior is unchanged.
+/// Returns null and counts one round-trip when the reply is not yet
+/// available, signaling the caller to fall through to its normal blocking
+/// reply call. Also returns null when the request completed with an error;
+/// the subsequent blocking call then resolves to the same failure the
+/// non-bench build would have seen, so behavior is unchanged.
+///
+/// When the probe is disabled the function always returns null and counts
+/// one round-trip, making every call site execute its normal blocking
+/// path, identical to a non-bench build.
 pub inline fn pollReply(conn: *xcb.xcb_connection_t, sequence: u32) ?*anyopaque {
     if (comptime !enabled) return null;
     var reply: ?*anyopaque = null;

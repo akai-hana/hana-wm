@@ -14,14 +14,14 @@ const fullscreen = @import("fullscreen");
 const bar = if (build.has_bar) @import("bar") else null;
 const tiling = if (build.has_tiling) @import("tiling") else null;
 
-/// Per-window minimize record.
+// Per-window minimize record.
 const MinimizedEntry = struct {
-    saved_fs: ?core.WindowGeometry, // non-null iff the window was fullscreen when minimized
+    saved_fs: ?utils.Rect, // non-null iff the window was fullscreen when minimized
     workspace_idx: u8, // single workspace only; multi-workspace tagging is handled upstream
     tiling_index: ?usize, // workspace-filtered slot at minimize time to reinsert at original position
 };
 
-/// One slot in the fixed minimize buffer.
+// One slot in the fixed minimize buffer.
 const MinimizedRecord = struct {
     id: u32,
     entry: MinimizedEntry,
@@ -29,9 +29,9 @@ const MinimizedRecord = struct {
 
 // Configurable via build_options.max_minimized_windows (default 32).
 // Exceeding it silently fails with a logged error; see minimizeWindow.
-// Intentionally distinct from constants.Limits.MAX_TILED_WINDOWS: this bounds
+// Intentionally distinct from constants.Limits.max_tiled_windows: this bounds
 // concurrently-minimized windows, not the tiled-window pool.
-const MAX_MINIMIZED: usize = if (@hasDecl(build, "max_minimized_windows"))
+const max_minimized: usize = if (@hasDecl(build, "max_minimized_windows"))
     build.max_minimized_windows
 else
     32;
@@ -40,9 +40,7 @@ else
 // order, so buffer position IS insertion order: items[0] is the oldest
 // minimized window, items[len-1] the most recent. LIFO/FIFO restore read
 // directly off this; which is why removal uses orderedRemove, not swapRemove.
-var g_minimized: utils.BoundedList(MinimizedRecord, MAX_MINIMIZED) = .{};
-
-// Lifecycle
+var g_minimized: utils.BoundedList(MinimizedRecord, max_minimized) = .{};
 
 pub fn init() void {
     g_minimized.clear();
@@ -53,14 +51,13 @@ pub fn deinit() void {
     init();
 }
 
-/// Returns the index into g_minimized for the given window, or null.
 fn findInBuf(win: u32) ?usize {
     return g_minimized.indexOfById(win);
 }
 
-/// Removal that preserves the relative order of the remaining entries (see
-/// g_minimized's doc comment above). Returns true if the window was found
-/// and removed.
+// Removal that preserves the relative order of the remaining entries (see
+// g_minimized's doc comment above). Returns true if the window was found
+// and removed.
 fn removeFromBuf(win: u32) bool {
     if (findInBuf(win)) |i| {
         g_minimized.orderedRemove(i);
@@ -69,7 +66,6 @@ fn removeFromBuf(win: u32) bool {
     return false;
 }
 
-/// Returns true when `win` is currently minimized.
 pub fn isMinimized(win: u32) bool {
     return findInBuf(win) != null;
 }
@@ -84,15 +80,15 @@ pub fn minimizeWindow() void {
 
     // Guard: check capacity before mutating any state so there is no rollback path.
 
-    if (g_minimized.len >= MAX_MINIMIZED) {
-        debug.err("minimize: buffer full ({d} entries), cannot minimize 0x{x}", .{ MAX_MINIMIZED, win });
+    if (g_minimized.len >= max_minimized) {
+        debug.err("minimize: buffer full ({d} entries), cannot minimize 0x{x}", .{ max_minimized, win });
         return;
     }
 
-    // -- Side effects begin here; buffer slot is guaranteed -------------------
+    // Side effects begin here; buffer slot is guaranteed.
 
     // Tear down fullscreen state if needed, saving geometry for later restore.
-    var saved_fs: ?core.WindowGeometry = null;
+    var saved_fs: ?utils.Rect = null;
     fs_blk: {
         const fs_ws = fullscreen.workspaceFor(win) orelse break :fs_blk;
         saved_fs = fullscreen.getForWorkspace(fs_ws).?.saved_geometry;
@@ -124,7 +120,7 @@ pub fn minimizeWindow() void {
     //     workspace switch, before any focus transition has been recorded
     //     for it yet): the first visible window on this workspace in
     //     tracking order.
-    const restore_target = tracking.popFocusMru(ws_idx, tracking.isOnCurrentWorkspaceAndVisible) orelse
+    const restore_target = tracking.popFocusMru(core.WorkspaceId.fromIndex(ws_idx), tracking.isOnCurrentWorkspaceAndVisible) orelse
         focus.findBestAvailable(tracking.isOnCurrentWorkspaceAndVisible);
     const restore_ctx = focus.FocusContext.resolve(restore_target);
 
@@ -145,9 +141,9 @@ pub fn minimizeWindow() void {
     if (build.has_bar) bar.commitInsideGrab();
 }
 
-/// Restore a window that has already been removed from g_minimized.
-/// Precondition: caller must remove the record before calling; asserted below.
-fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?usize) void {
+// Restore a window that has already been removed from g_minimized.
+// Precondition: caller must remove the record before calling; asserted below.
+fn restoreWindowImpl(win: u32, saved_fs: ?utils.Rect, tiling_index: ?usize) void {
     std.debug.assert(!isMinimized(win));
 
     if (saved_fs) |geom| {
@@ -171,7 +167,8 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
         return;
     }
 
-    const conn = core.getState().conn;
+    const cs = core.getState();
+    const conn = cs.conn;
     // Resolve the input model BEFORE the grab: setFocus's blocking WM_PROTOCOLS
     // reply wait inside the grab would implicitly flush the queued retile
     // configure_window batch to the compositor mid-grab (see
@@ -179,7 +176,7 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
     const focus_ctx = focus.FocusContext.resolve(win);
     utils.grabServer(conn);
 
-    if (core.getState().config.tiling.enabled) {
+    if (cs.config.tiling.enabled) {
         if (tiling_index) |ti| {
             // Restore at the original layout slot so a former master returns to
             // master rather than being appended to the stack end.
@@ -201,13 +198,13 @@ fn restoreWindowImpl(win: u32, saved_fs: ?core.WindowGeometry, tiling_index: ?us
         focus.setFocusWithModel(win, .window_spawn, focus_ctx.model.?);
     }
 
-        if (build.has_bar) bar.commitInsideGrab();
+    if (build.has_bar) bar.commitInsideGrab();
 }
 
 pub const RestoreOrder = enum { lifo, fifo };
 
-/// Remove the minimized record at `idx` and restore the window.
-/// Precondition: `idx` is a valid index into g_minimized.
+// Remove the minimized record at `idx` and restore the window.
+// Precondition: `idx` is a valid index into g_minimized.
 fn unminimizeAtIndex(idx: usize) void {
     const rec = g_minimized.items[idx];
     const win = rec.id;
@@ -245,8 +242,8 @@ pub fn unminimizeSpecific(win: u32) void {
 }
 
 const Partitioned = struct {
-    plain: [MAX_MINIMIZED]MinimizedRecord = undefined,
-    fs: [MAX_MINIMIZED]MinimizedRecord = undefined,
+    plain: [max_minimized]MinimizedRecord = undefined,
+    fs: [max_minimized]MinimizedRecord = undefined,
     plain_len: usize = 0,
     fs_len: usize = 0,
 
@@ -273,10 +270,10 @@ fn partitionByFullscreen(snapshot: []const MinimizedRecord) Partitioned {
     return result;
 }
 
-/// Restore a batch of plain (non-fullscreen) minimized windows back into the
-/// tiling layout, sorted by original tiling index so lower-index slots are
-/// inserted first. Caller must already hold the server grab and have resolved
-/// the focus input model.
+// Restore a batch of plain (non-fullscreen) minimized windows back into the
+// tiling layout, sorted by original tiling index so lower-index slots are
+// inserted first. Caller must already hold the server grab and have resolved
+// the focus input model.
 fn restorePlainWindowsTiling(plain_wins: []MinimizedRecord, focus_target: u32, focus_model: window.InputModel) void {
     // Re-sort by tiling_index ascending (nulls last) before inserting.
     // Inserting at index i shifts every slot > i by 1, so lower-index
@@ -311,8 +308,8 @@ pub fn unminimizeAll() void {
     // Snapshot this workspace's records before mutating the buffer. Buffer
     // order is insertion order (FIFO), and this single forward pass over
     // g_minimized preserves that order in the snapshot.
-    comptime std.debug.assert(MAX_MINIMIZED <= 256); // ensure snapshot fits on the stack
-    var snapshot: [MAX_MINIMIZED]MinimizedRecord = undefined;
+    comptime std.debug.assert(max_minimized <= 256); // ensure snapshot fits on the stack
+    var snapshot: [max_minimized]MinimizedRecord = undefined;
     var count: usize = 0;
 
     for (g_minimized.constSlice()) |rec| {
@@ -336,19 +333,20 @@ pub fn unminimizeAll() void {
         // captured before the tiling-index sort below reorders the array.
         const focus_target = plain_wins[plain_wins.len - 1].id;
 
-        const conn = core.getState().conn;
+        const cs = core.getState();
+        const conn = cs.conn;
         // Resolve the input model BEFORE the grab; see restoreWindowImpl.
         const focus_ctx = focus.FocusContext.resolve(focus_target);
         utils.grabServer(conn);
 
-        if (core.getState().config.tiling.enabled) {
+        if (cs.config.tiling.enabled) {
             restorePlainWindowsTiling(plain_wins, focus_target, focus_ctx.model.?);
         } else {
             for (plain_wins) |rec| window.restoreFloatGeom(rec.id);
             focus.setFocusWithModel(focus_target, .window_spawn, focus_ctx.model.?);
         }
 
-    if (build.has_bar) bar.commitInsideGrab();
+        if (build.has_bar) bar.commitInsideGrab();
     }
 
     // Each fullscreen window needs its own grab (enterFullscreen owns it).
@@ -373,8 +371,8 @@ pub fn untrackWindow(win: u32) void {
 }
 
 /// Called by workspaces.zig when a minimized window is moved to another workspace.
-pub fn moveToWorkspace(win: u32, new_ws: u8) void {
+pub fn moveToWorkspace(win: u32, new_ws: core.WorkspaceId) void {
     if (findInBuf(win)) |i| {
-        g_minimized.items[i].entry.workspace_idx = new_ws;
+        g_minimized.items[i].entry.workspace_idx = new_ws.index;
     }
 }

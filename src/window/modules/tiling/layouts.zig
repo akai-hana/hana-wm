@@ -8,9 +8,6 @@ const utils = @import("utils");
 
 const debug = @import("debug");
 
-// WM_NORMAL_HINTS size-constraint cache, populated at map time, evicted on
-// unmanage. configureWithHints clamps every rect to these.
-
 /// ICCCM WM_NORMAL_HINTS geometry constraints for one window. Zero fields
 /// mean "unconstrained" (client declared no hint).
 pub const SizeHints = struct {
@@ -25,7 +22,6 @@ pub const SizeHints = struct {
 /// Sentinel zero rect used to mark a cache entry as stale.
 pub const zero_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
 
-/// Per-window cache entry: last geometry, last border color, size hints.
 pub const WindowData = struct {
     /// Zeroed rect = stale / not yet computed. The layout engine never
     /// produces a real 0x0 rect, so this sentinel is unambiguous.
@@ -38,11 +34,10 @@ pub const WindowData = struct {
     }
 };
 
-/// Window ID -> geometry/border/hints cache. Init with `.init(allocator)`,
-/// release with `.deinit()`.
+// WM_NORMAL_HINTS size-constraint cache, populated at map time, evicted on
+// unmanage. configureWithHints clamps every rect to these.
 pub const CacheMap = std.AutoHashMap(u32, WindowData);
 
-/// Get or create `win`'s cache entry, defaulting a new entry to `.{}`.
 /// Centralizes the get-or-put-with-default pattern for writers that don't
 /// distinguish "existing" from "new" (those that do use `getOrPut` directly).
 pub fn getOrPutDefault(cache: *CacheMap, win: u32) !*WindowData {
@@ -51,17 +46,22 @@ pub fn getOrPutDefault(cache: *CacheMap, win: u32) !*WindowData {
     return gop.value_ptr;
 }
 
-/// Store `hints` for `win`. No-op if every field is zero (nothing declared).
+/// No-op if every field is zero (nothing declared).
 pub fn cacheHints(cache: *CacheMap, win: u32, hints: SizeHints) void {
     if (isEmptySizeHints(hints)) return;
-    const wd = getOrPutDefault(cache, win) catch return; // OOM: leave hints uncached
+    const wd = getOrPutDefault(cache, win) catch return; // OOM: leave hints uncached.
     wd.hints = hints;
 }
+
+/// Canonical signature every layout module's `tileWithOffset` must conform to.
+/// The second parameter is always `*tiling.State`, but we use `*anyopaque`
+/// here so the type alias lives in layouts.zig without a circular import.
+pub const LayoutFn = *const fn (*const LayoutCtx, *anyopaque, []const u32, u16, u16, u16) void;
 
 /// Context passed to every layout module's `tileWithOffset`. Carries the XCB
 /// connection and cache by pointer so layouts have no module-level globals.
 pub const LayoutCtx = struct {
-    conn: *xcb.xcb_connection_t,
+    conn: core.Connection,
     /// Pointer into tiling.State.cache. Always non-null during a retile.
     cache: *CacheMap,
     /// Focused window (from focus.getFocused()), used by monocle to raise
@@ -159,8 +159,8 @@ fn configureWithHintsImpl(comptime raise: bool, ctx: *const LayoutCtx, win: u32,
     }
 }
 
-/// Apply geometry to `win`, clamped to its WM_NORMAL_HINTS. Skips the XCB
-/// call entirely when the rect is unchanged from the cache.
+/// Clamps `rect` to its WM_NORMAL_HINTS and sends it to XCB. Skips the
+/// round-trip entirely when the rect is unchanged from the cache.
 pub fn configureWithHints(ctx: *const LayoutCtx, win: u32, rect: utils.Rect) void {
     configureWithHintsImpl(false, ctx, win, rect);
 }
@@ -241,7 +241,7 @@ fn applyHintsToRect(rect: utils.Rect, h: SizeHints) utils.Rect {
     return .{ .x = rect.x + dx, .y = rect.y + dy, .width = w, .height = ht };
 }
 
-/// Snap `dim` up to the nearest multiple of `inc` above `base`.
+/// Snap `dim` down to the nearest multiple of `inc` above `base`.
 inline fn snapDimToIncrement(dim: u16, base: u16, inc: u16) u16 {
     if (inc == 0 or dim <= base) return dim;
     const excess = dim - base;

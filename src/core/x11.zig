@@ -1,14 +1,10 @@
-//! Single translation of the xcb C headers, shared by every module.
-//!
-//! Centralized here (rather than in core.zig) so modules that must stay free
-//! of a dependency on core, like constants.zig, which is imported by
-//! core's own dependency chain, can still reference the one xcb namespace
-//! instead of producing a second, byte-identical @cImport translation.
-//! core.zig re-exports this as `pub const xcb` for modules that already
-//! import core.
+//! Single xcb C header translation.
+//! Shared by all modules to avoid duplicate @cImport translations, including modules outside core's dependency chain.
 
 pub const xcb = @cImport({
     @cInclude("xcb/xcb.h");
-    @cInclude("xcb/xcbext.h"); // xcb_poll_for_reply, bench probe (src/test/bench.zig)
-    @cInclude("xcb/randr.h"); // Refresh-rate detection for the carousel (scale.zig).
+    // Provides xcb_poll_for_reply, used by the bench probe in src/test/bench.zig.
+    @cInclude("xcb/xcbext.h");
+    // Provides randr refresh-rate detection used by the carousel in scale.zig.
+    @cInclude("xcb/randr.h");
 });

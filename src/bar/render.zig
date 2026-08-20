@@ -1,13 +1,5 @@
-//! Text rendering library bindings
-//! Cairo/Pango/GLib C bindings for bar rendering.
-//!
-//! Declared manually as `pub extern fn` rather than via `@cImport` because the
-//! Cairo/Pango/GLib headers aren't guaranteed present in all build environments.
-//! Signatures were verified against: cairo 1.18.x, pango 1.52.x, glib 2.80.x.
-//!
-//! When updating a signature, cross-check it against the installed headers and
-//! bump the version note; a wrong return type (e.g. `?*T` vs `*T`) is a silent
-//! miscompilation in ReleaseFast. Prefer `@cImport`/`@cInclude` if headers exist.
+//! Cairo, Pango, and GLib C bindings for bar rendering.
+//! Declared as `pub extern fn` because library headers may not be present in all build environments.
 
 const core = @import("core");
 const xcb = core.xcb;
@@ -35,7 +27,7 @@ pub extern fn cairo_xcb_surface_create(
     height: c_int,
 ) ?*cairo_surface_t;
 
-/// In-memory surface with no X connection. Used for font measurement.
+/// Used for font measurement without an X connection.
 pub extern fn cairo_image_surface_create(
     format: cairo_format_t,
     width: c_int,
@@ -58,8 +50,8 @@ pub const PangoContext = opaque {};
 pub const PangoFontDescription = opaque {};
 pub const PangoFontMetrics = opaque {};
 
-/// Divide Pango units by PANGO_SCALE to get pixels.
-pub const PANGO_SCALE: c_int = 1024;
+/// Divide Pango units by pango_scale to get pixels.
+pub const pango_scale: c_int = 1024;
 
 pub const PangoEllipsizeMode = enum(c_int) {
     NONE = 0,
@@ -86,7 +78,7 @@ pub extern fn pango_layout_set_width(layout: *PangoLayout, width: c_int) void;
 pub extern fn pango_layout_set_ellipsize(layout: *PangoLayout, ellipsize: PangoEllipsizeMode) void;
 pub extern fn pango_layout_get_baseline(layout: *PangoLayout) c_int;
 
-/// Parses a Pango font description string (e.g. `"Sans Bold 12"`).
+/// Accepts strings like `"Sans Bold 12"`.
 pub extern fn pango_font_description_from_string(str: [*:0]const u8) ?*PangoFontDescription;
 pub extern fn pango_font_description_copy(desc: *PangoFontDescription) ?*PangoFontDescription;
 pub extern fn pango_font_description_free(desc: *PangoFontDescription) void;
@@ -112,5 +104,5 @@ pub extern fn pango_font_metrics_unref(metrics: *PangoFontMetrics) void;
 
 // GLib / GObject
 
-/// Releases PangoLayout and other GObject-based types.
+/// Decrements the reference count. All GObject-based types in this file must be freed through this function.
 pub extern fn g_object_unref(object: *anyopaque) void;
