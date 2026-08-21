@@ -209,7 +209,8 @@ pub fn deinit() void {
     g_state = null;
     // setCurrentWorkspace asserts ws < g_workspace_count, so it must run
     // before setWorkspaceCount(0) zeroes that bound out from under it.
-    tracking.setCurrentWorkspace(core.WorkspaceId.fromIndex(0));    tracking.setWorkspaceCount(0);
+    tracking.setCurrentWorkspace(core.WorkspaceId.fromIndex(0));
+    tracking.setWorkspaceCount(0);
 }
 
 pub fn removeWindow(win: u32) void {
@@ -252,16 +253,30 @@ pub fn moveWindowTo(win: u32, target_ws: core.WorkspaceId) !void {
     if (minimize.isMinimized(win)) minimize.moveToWorkspace(win, target_ws);
 
     if (target_ws.index != s.current) {
+        // Resolve the refocus target BEFORE the grab (same reasoning as the
+        // tagToggle remove-branch below): FocusContext.resolve waits on a
+        // blocking WM_PROTOCOLS reply, and running that inside the grab would
+        // implicitly flush the queued evict/retile batch to the compositor
+        // mid-operation.
+        const was_focused = focus.getFocused() == win;
+        const refocus_ctx = focus.FocusContext.resolve(
+            if (was_focused) focus.findBestAvailable(tracking.isOnCurrentWorkspaceAndVisible) else null,
+        );
+
+        // Grab so the evict and retile land in one atomic batch, and retile
+        // immediately: peers must reflow now, not whenever some unrelated
+        // action happens to trigger retileIfDirty -- until then the workspace
+        // shows a hole where `win` used to be.
+        utils.grabServer(core.getState().conn);
         evictWindow(win);
-        if (focus.getFocused() == win) {
-            focus.clearFocus();
-            focus.focusBestAvailable();
-        }
+        if (was_focused) refocus_ctx.apply(.tiling_operation);
+        retileRedrawAndFlush();
+    } else {
+        // Pin-to-current / mask narrowing: the visible layout is unchanged,
+        // only future retiles need to know the pool shifted.
+        if (core.getState().config.tiling.enabled) if (build_options.has_tiling) tiling.markDirty();
     }
-    if (core.getState().config.tiling.enabled) if (build_options.has_tiling) tiling.markDirty();
     if (build_options.has_bar) bar.scheduleRedraw();
-    // No flush: the window has never been mapped, so evictWindow's offscreen
-    // configure has no visible effect; the event loop flushes at end-of-batch.
 }
 
 /// Low-level: set a window's workspace bitmask and clear last_focused on
@@ -285,7 +300,7 @@ fn setWindowMask(s: *State, win: u32, new_mask: u64) void {
 inline fn retileRedrawAndFlush() void {
     const cs = core.getState();
     if (cs.config.tiling.enabled) if (build_options.has_tiling) tiling.retileCurrentWorkspace();
-    if (build_options.has_bar) bar.commitInsideGrab();
+    if (build_options.has_bar) bar.commitInsideGrab() else utils.ungrabAndFlush(cs.conn);
 }
 
 /// Remove tag `target_ws` from `win`; the last remaining tag is protected.
@@ -434,28 +449,35 @@ fn exitAllView(s: *State) void {
     focus.focusOrClear(focus_ctx.target, focus_ctx.model, .workspace_switch);
     if (cs.config.tiling.enabled) if (build_options.has_tiling) tiling.retileCurrentWorkspace();
     if (build_options.has_bar) bar.raiseBar();
-    if (build_options.has_bar) bar.commitInsideGrab();
+    if (build_options.has_bar) bar.commitInsideGrab() else utils.ungrabAndFlush(cs.conn);
 }
 
 fn enterAllView(s: *State) void {
     const cs = core.getState();
     utils.grabServer(cs.conn);
 
+    const cur_bit = tracking.workspaceBit(s.current);
     for (tracking.allWindows()) |entry| {
-        if (tracking.isWindowOnWorkspace(entry.win, core.WorkspaceId.fromIndex(s.current))) continue;
+        if (entry.mask & cur_bit != 0) continue;
         if (minimize.isMinimized(entry.win)) continue;
         const win = entry.win;
         const mask = entry.mask;
-        setWindowMask(s, win, mask | tracking.workspaceBit(s.current));
+        setWindowMask(s, win, mask | cur_bit);
         s.all_view_temp_wins.append(s.allocator, win) catch {
             setWindowMask(s, win, mask);
             continue;
         };
     }
 
-    // Every foreign window is now genuinely on the current workspace;
-    // retile handles mapping + positioning for tiled ones in one pass.
+    // Every foreign window is now genuinely on the current workspace. The
+    // retile positions tiled ones in the same pass, but it only ever sends
+    // configure_window -- windows that registered while their home workspace
+    // was hidden were never mapped server-side (registerWindowOffscreen
+    // consumed their MapRequest without mapping), so they must be mapped
+    // explicitly here, mirroring the floating branch. Mapping an
+    // already-mapped window is a harmless server-side no-op.
     if (cs.config.tiling.enabled) {
+        for (s.all_view_temp_wins.items) |win| _ = xcb.xcb_map_window(cs.conn, win);
         if (build_options.has_tiling) tiling.retileCurrentWorkspace();
     } else {
         for (s.all_view_temp_wins.items) |win| {
@@ -475,14 +497,16 @@ fn pinToAllWorkspacesToggle(s: *State, win: u32) void {
     const all_mask = tracking.allWorkspacesMask(s.workspaces.len);
     const mask = tracking.getWindowWorkspaceMask(win) orelse return;
 
+    // Grab covers the mask flip and the map too, so the retile batch lands
+    // atomically with the visibility change instead of the map leaking out
+    // ahead of it.
+    utils.grabServer(cs.conn);
     if (mask == all_mask) {
         setWindowMask(s, win, tracking.workspaceBit(s.current));
     } else {
         setWindowMask(s, win, all_mask);
         _ = xcb.xcb_map_window(cs.conn, win);
     }
-
-    utils.grabServer(cs.conn);
     retileRedrawAndFlush();
 }
 
@@ -575,8 +599,11 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: core.WorkspaceId, pendi
                 if (restore_ok and !tracking.isWindowOnWorkspace(win, old_ws)) continue;
                 tiling.invalidateGeomCache(win);
             }
-            // Map ALL windows, and restore geometry for non-tiled ones.
-            _ = xcb.xcb_map_window(conn, win);
+            // Map windows that left the screen. Windows also tagged on old_ws
+            // never went anywhere (hideWorkspaceWindows skips them), so
+            // map_window on them is pure redundant traffic.
+            if (!tracking.isWindowOnWorkspace(win, old_ws))
+                _ = xcb.xcb_map_window(conn, win);
             if (!minimize.isMinimized(win) and !tracking.isWindowOnWorkspace(win, old_ws) and
                 !(build_options.has_tiling and tiling.isWindowActiveTiled(win)))
             {
@@ -602,7 +629,9 @@ fn restoreWorkspaceWindows(ws: *const Workspace, old_ws: core.WorkspaceId, pendi
         var it = tracking.onWorkspace(bit_map, 0);
         while (it.next()) |entry| {
             const win = entry.win;
-            _ = xcb.xcb_map_window(conn, win);
+            // Same shared-with-old-ws skip as the tiling branch above.
+            if (!tracking.isWindowOnWorkspace(win, old_ws))
+                _ = xcb.xcb_map_window(conn, win);
             if (!minimize.isMinimized(win) and !tracking.isWindowOnWorkspace(win, old_ws))
                 window.restoreFloatGeom(win);
         }
@@ -671,5 +700,5 @@ fn executeSwitch(old_ws: u8, new_ws: core.WorkspaceId) void {
 
     focus.focusOrClear(focus_ctx.target, focus_ctx.model, .workspace_switch);
     if (build_options.has_bar) bar.raiseBar();
-    if (build_options.has_bar) bar.commitInsideGrab();
+    if (build_options.has_bar) bar.commitInsideGrab() else utils.ungrabAndFlush(cs.conn);
 }

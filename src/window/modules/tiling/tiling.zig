@@ -211,6 +211,9 @@ pub fn reloadConfig() void {
         const conn = core.getState().conn;
         utils.grabServer(conn);
         for (ns.windows.items()) |win| {
+            // Record before sending so a later borders.applyWidth dedups
+            // against this exact value instead of re-sending it.
+            _ = cacheBorderWidth(win, ns.config.border_width);
             _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{ns.config.border_width});
         }
         retileCurrentWorkspace();
@@ -249,7 +252,12 @@ pub fn addWindow(window_id: u32) void {
     else
         s.windows.add(window_id);
 
-    markDirtyAndInvalidateGeom(s);
+    // Only the workspaces the window joins gain a member; clear just their
+    // restore bits. By the time addWindow runs, handleMapRequest has already
+    // assigned the mask via workspaces.moveWindowTo/registerWindow.
+    const joined_mask = tracking.getWindowWorkspaceMask(window_id) orelse
+        tracking.workspaceBit(tracking.getCurrentWorkspace() orelse 0);
+    markDirtyAndInvalidateGeom(s, joined_mask);
 
     // Skip X protocol operations while the tiler is disabled (is_enabled ==
     // false). Border width and color will be applied on the first retile after
@@ -267,10 +275,29 @@ pub fn addWindow(window_id: u32) void {
     wd.border = border_color;
 }
 
+/// Record `w` as the BORDER_WIDTH last sent to `win`. Returns true when the
+/// entry already held exactly that value, letting callers skip a redundant
+/// configure_window. Windows without a cache entry always report "changed"
+/// (and gain one) so the first apply after registration is never skipped.
+pub fn cacheBorderWidth(win: u32, w: u16) bool {
+    const s = getStateOpt() orelse return false;
+    const wd = layouts.getOrPutDefault(&s.geom.cache, win) catch return false;
+    if (wd.applied_border_width) |applied| {
+        if (applied == w) return true;
+    }
+    wd.applied_border_width = w;
+    return false;
+}
+
 pub fn removeWindow(window_id: u32) void {
     const s = getState();
     if (s.windows.remove(window_id)) {
-        markDirtyAndInvalidateGeom(s);
+        // Only workspaces the window was tagged on lose a member; their
+        // filtered window subsequences change, so their cached layouts are no
+        // longer replayable. Every other workspace's subsequence is untouched
+        // and keeps its fast restore path.
+        const affected_mask = tracking.getWindowWorkspaceMask(window_id) orelse 0;
+        markDirtyAndInvalidateGeom(s, affected_mask);
     }
     // Always evict the cache entry, this removes geometry, border dedup data,
     // AND the embedded WM_NORMAL_HINTS in one operation.  No-op when the window
@@ -372,13 +399,18 @@ pub fn markDirty() void {
     getState().is_dirty = true;
 }
 
-/// Mark dirty AND invalidate all workspace geometry cache bits. Used by
-/// addWindow / removeWindow / applyWorkspaceLayout where the cached positions
-/// are no longer correct and every workspace must re-tile from scratch on
-/// next switch-in.
-inline fn markDirtyAndInvalidateGeom(s: *State) void {
+/// Mark dirty AND clear the restore-valid bits for `affected_mask`. Used by
+/// addWindow / removeWindow (which pass the joined/left workspace bits) and
+/// applyWorkspaceLayout (the current workspace, whose cached rects were
+/// computed under the now-replaced layout parameters). Workspaces outside
+/// `affected_mask` keep their valid bits: their filtered window subsequences
+/// and stored per-workspace overrides are unchanged, so restoreWorkspaceGeom
+/// can still replay them instead of full-retiling on switch-in. Layout
+/// changes that affect every workspace go through commitConfigChange, which
+/// clears all bits explicitly.
+inline fn markDirtyAndInvalidateGeom(s: *State, affected_mask: u64) void {
     s.is_dirty = true;
-    s.geom.workspace_geom_valid_bits = 0;
+    s.geom.workspace_geom_valid_bits &= ~affected_mask;
 }
 
 // Retile
@@ -557,7 +589,11 @@ pub fn applyWorkspaceLayout(ws: *const WsWorkspace) void {
         }
     }
     if (needs_retile) {
-        markDirtyAndInvalidateGeom(s);
+        // The swapped-in parameters only govern retiles of the workspace
+        // being entered; background workspaces keep their own overrides and
+        // their caches stay replayable.
+        const current_bit = tracking.workspaceBit(tracking.getCurrentWorkspace() orelse 0);
+        markDirtyAndInvalidateGeom(s, current_bit);
     }
 }
 
@@ -975,12 +1011,15 @@ fn retileImpl(screen: utils.Rect, opts: RetileOpts) void {
     if (opts.for_ws != null) {
         const saved_width = s.config.master_width;
         const saved_count = s.config.master_count;
+        const saved_balance = s.config.stack_balance;
         defer {
             s.config.master_width = saved_width;
             s.config.master_count = saved_count;
+            s.config.stack_balance = saved_balance;
         }
         s.config.master_width = resolveWorkspaceOverride(f32, "master_width", s.config.master_width, wss, target_ws);
         s.config.master_count = resolveWorkspaceOverride(u8, "master_count", s.config.master_count, wss, target_ws);
+        s.config.stack_balance = resolveWorkspaceOverride(f32, "stack_balance", s.config.stack_balance, wss, target_ws);
     }
 
     invokeLayout(
@@ -1021,16 +1060,18 @@ inline fn updateBorders(s: *State, ws_windows: []const u32) void {
     }
 }
 
-/// Sends the border-pixel change for `win` only if `color` differs from the
-/// cached value. Returns true when `win` had a cache entry (a tiled or
-/// previously-retiled window), the caller should treat that as "handled".
-/// Returns false when there is no cache entry (a pure floating window that
-/// was never retiled), so the caller should fall back to an unconditional
-/// send. Used by window.zig's border-sweep functions.
+/// Sends the border-pixel change for `win` unless the cache already shows
+/// that exact color as applied, and RECORDS the color either way. The
+/// recording is load-bearing, not just an optimization: values forced
+/// outside this function (fullscreen's pixel 0) must end up in the cache,
+/// or the next real color change dedups against a stale value and is
+/// silently skipped -- the un-fullscreen "lost borders" bug. Returns false
+/// only when tiling state is unavailable (compiled out / not initialized);
+/// callers then fall back to an unconditional send.
 pub fn sendBorderColorIfChanged(win: u32, color: u32) bool {
     const s = getStateOpt() orelse return false;
     const conn = core.getState().conn;
-    return updateBorderColor(s, conn, win, color, false);
+    return updateBorderColor(s, conn, win, color, true);
 }
 
 // Window list helpers
@@ -1246,5 +1287,3 @@ pub fn getTiledWindows() []const u32 {
     const s = getStateOpt() orelse return &.{};
     return s.windows.items();
 }
-
-

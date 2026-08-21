@@ -28,6 +28,12 @@ pub const WindowData = struct {
     rect: utils.Rect = zero_rect,
     border: u32 = 0,
     hints: SizeHints = .{},
+    /// Last BORDER_WIDTH value sent for this window; null until first sent.
+    /// The optional matters: 0 is a legitimate configured width, and treating
+    /// it as "never sent" would re-issue the configure forever, while treating
+    /// "never sent" as 0 could skip the first send and leave a client-created
+    /// non-zero width standing.
+    applied_border_width: ?u16 = null,
 
     pub fn hasValidRect(self: WindowData) bool {
         return self.rect.width != 0 and self.rect.height != 0;

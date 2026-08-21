@@ -8,7 +8,7 @@ master_side = "left"
 
 master_count     = 1
 master_width     = 55%
-gaps             = 12
+gap_width        = 12
 border_width     = 4
 min_window_dim   = 50
 border_focused   = "#005577"

@@ -133,6 +133,9 @@ pub fn restoreFloatGeom(win: u32) void {
 /// Moves, resizes, and sets border_width atomically,
 /// preventing a one-frame flash on fullscreen enter/exit or workspace switch.
 pub fn configureWindowGeom(conn: core.Connection, win: u32, geom: utils.Rect) void {
+    // Raw BORDER_WIDTH send bypassing borders.applyWidth; keep the dedup
+    // cache truthful about what the server now holds.
+    if (build_options.has_tiling) _ = tiling.cacheBorderWidth(win, geom.border_width);
     _ = xcb.xcb_configure_window(
         conn,
         win,
@@ -316,17 +319,29 @@ fn getOrQueryCachedProps(conn: core.Connection, win: u32) CachedProps {
     return props;
 }
 
-/// Resolves the ICCCM §4.1.7 focus-delivery model for `win`: accepts_input
-/// comes from the cache above (live query on a miss); supports_take_focus is
-/// always queried live, see the "ICCCM focus property cache" note for why.
-/// Focus changes are human-triggered and infrequent, so the extra round trip
-/// is not perceptible.
-pub fn getInputModel(conn: core.Connection, win: u32) InputModel {
+/// Resolves the ICCCM §4.1.7 focus-delivery model for `win` together with the
+/// take_focus answer from the SAME live WM_PROTOCOLS reply, so callers can
+/// dispatch WM_TAKE_FOCUS without firing a second protocol query.
+pub const InputModelResolution = struct {
+    model: InputModel,
+    /// True when `win` advertises WM_TAKE_FOCUS, scanned from the same live
+    /// reply that produced `model`.
+    take_focus: bool,
+};
+
+pub fn getInputModelResolved(conn: core.Connection, win: u32) InputModelResolution {
     const accepts_input = getOrQueryCachedProps(conn, win).accepts_input;
 
     const supports_take_focus = queryWMProtocolsProps(conn, win).take_focus;
 
-    return inputModelFrom(supports_take_focus, accepts_input);
+    return .{ .model = inputModelFrom(supports_take_focus, accepts_input), .take_focus = supports_take_focus };
+}
+
+/// Resolves the ICCCM §4.1.7 focus-delivery model for `win`: accepts_input
+/// comes from the cache above (live query on a miss); supports_take_focus is
+/// always queried live, see the "ICCCM focus property cache" note for why.
+pub fn getInputModel(conn: core.Connection, win: u32) InputModel {
+    return getInputModelResolved(conn, win).model;
 }
 
 /// Falls back to a live query only on a genuine cache miss (extremely rare).
@@ -358,6 +373,18 @@ fn dispatchTakeFocusMessage(
         if (atom == take_focus_atom) break;
     } else return; // window does not advertise WM_TAKE_FOCUS
 
+    sendTakeFocusEvent(conn, win, time, protocols_atom, take_focus_atom);
+}
+
+/// Builds and sends the WM_TAKE_FOCUS ClientMessage. No protocol-list scan:
+/// callers either scanned already or hold an authoritative answer.
+fn sendTakeFocusEvent(
+    conn: core.Connection,
+    win: u32,
+    time: u32,
+    protocols_atom: u32,
+    take_focus_atom: u32,
+) void {
     var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
     event.response_type = xcb.XCB_CLIENT_MESSAGE;
     event.window = win;
@@ -367,6 +394,22 @@ fn dispatchTakeFocusMessage(
     event.data.data32[1] = time;
 
     _ = xcb.xcb_send_event(conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
+}
+
+/// Dispatches WM_TAKE_FOCUS from an already-known advertisement bit — the one
+/// returned by `getInputModelResolved` alongside the input model. Skips the
+/// WM_PROTOCOLS round trip entirely; used by focus.setFocus so a keyboard
+/// focus change costs one protocol query instead of two.
+pub fn sendWMTakeFocusKnown(
+    conn: core.Connection,
+    win: u32,
+    time: u32,
+    advertises_take_focus: bool,
+) void {
+    if (!advertises_take_focus) return;
+    const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch return;
+    const take_focus_atom = utils.getAtomCached("WM_TAKE_FOCUS") catch return;
+    sendTakeFocusEvent(conn, win, time, protocols_atom, take_focus_atom);
 }
 
 /// Shared body of sendWMTakeFocus and sendWMTakeFocusWithCookie: resolves the
@@ -758,8 +801,12 @@ fn resolveTargetWorkspace(win: u32, current_ws: core.WorkspaceId) core.Workspace
 
     // Drain replies: WM_CLASS first, then _NET_WM_PID.
     if (c_wm_class) |cookie| {
-        if (findWorkspaceRuleByClass(cookie)) |target|
+        if (findWorkspaceRuleByClass(cookie)) |target| {
+            // The _NET_WM_PID query may already be in flight; discard it so
+            // no unconsumed reply lingers in the XCB queue past this return.
+            if (c_net_wm_pid) |pid| xcb.xcb_discard_reply(cs.conn, pid.sequence);
             return clampToValidWorkspace(target, current_ws);
+        }
     }
 
     if (c_net_wm_pid) |cookie| {
@@ -926,8 +973,18 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
         return;
     };
 
-    refreshSizeHints(win);
-
+    // Pipeline all three property queries before draining any reply: the
+    // server processes them in parallel while the atom lookups below run, so
+    // the first xcb_get_property_reply is usually already buffered.
+    const normal_hints_cookie = xcb.xcb_get_property(
+        conn,
+        property_no_delete,
+        win,
+        xcb.XCB_ATOM_WM_NORMAL_HINTS,
+        xcb.XCB_ATOM_WM_SIZE_HINTS,
+        0,
+        wm_normal_hints_long_length,
+    );
     // WM_PROTOCOLS is interned at startup; the atom-0 fallback keeps the
     // dual-cookie discard in populateFocusCacheFromCookies symmetric if not.
     const protocols_cookie = fireWMProtocolsQuery(conn, win) orelse
@@ -941,6 +998,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
         0,
         wm_hints_long_length,
     );
+    parseSizeHintsIntoCache(win, normal_hints_cookie);
     populateFocusCacheFromCookies(conn, win, protocols_cookie, hints_cookie);
 
     if (on_current) mapWindowToScreen(win) else registerWindowOffscreen(win);
@@ -1209,12 +1267,47 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
 
     var values: [5]u32 = undefined;
     var n: usize = 0;
-    if (mask & xcb.XCB_CONFIG_WINDOW_X != 0) { values[n] = utils.toXcbCoord(event.x); n += 1; }
-    if (mask & xcb.XCB_CONFIG_WINDOW_Y != 0) { values[n] = utils.toXcbCoord(event.y); n += 1; }
-    if (mask & xcb.XCB_CONFIG_WINDOW_WIDTH != 0) { values[n] = event.width; n += 1; }
-    if (mask & xcb.XCB_CONFIG_WINDOW_HEIGHT != 0) { values[n] = event.height; n += 1; }
-    if (mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0) { values[n] = event.border_width; n += 1; }
+    if (mask & xcb.XCB_CONFIG_WINDOW_X != 0) {
+        values[n] = utils.toXcbCoord(event.x);
+        n += 1;
+    }
+    if (mask & xcb.XCB_CONFIG_WINDOW_Y != 0) {
+        values[n] = utils.toXcbCoord(event.y);
+        n += 1;
+    }
+    if (mask & xcb.XCB_CONFIG_WINDOW_WIDTH != 0) {
+        values[n] = event.width;
+        n += 1;
+    }
+    if (mask & xcb.XCB_CONFIG_WINDOW_HEIGHT != 0) {
+        values[n] = event.height;
+        n += 1;
+    }
+    if (mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0) {
+        values[n] = event.border_width;
+        n += 1;
+    }
     _ = xcb.xcb_configure_window(core.getState().conn, win, mask, &values);
+
+    // A client-initiated border-width change bypasses borders.applyWidth;
+    // record it so later dedups compare against what the server now has.
+    if (build_options.has_tiling and mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0)
+        _ = tiling.cacheBorderWidth(win, event.border_width);
+
+    // Record the granted geometry so a later restoreFloatGeom/minimize-restore
+    // replays what the client actually has instead of snapping back to a stale
+    // pre-request rect. Fields the request didn't mention keep their cached
+    // values; with no cache entry there is nothing to merge into (and fetching
+    // it would cost this hot path a round trip), so those keep the old
+    // behavior of leaving the cache untouched.
+    if (if (build_options.has_tiling) tiling.getWindowGeom(win) else null) |base| {
+        saveWindowGeom(win, .{
+            .x = if (mask & xcb.XCB_CONFIG_WINDOW_X != 0) event.x else base.x,
+            .y = if (mask & xcb.XCB_CONFIG_WINDOW_Y != 0) event.y else base.y,
+            .width = if (mask & xcb.XCB_CONFIG_WINDOW_WIDTH != 0) event.width else base.width,
+            .height = if (mask & xcb.XCB_CONFIG_WINDOW_HEIGHT != 0) event.height else base.height,
+        });
+    }
 }
 
 inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
@@ -1273,10 +1366,9 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t) void {
     if (event.child == 0) return;
     // Guard against unmanaged subwindows (e.g. embedded GTK widgets): a root
     // LeaveNotify with non-zero child doesn't guarantee a managed toplevel.
-    // This avoids a spurious workspace lookup for every non-toplevel the
-    // pointer traverses, consistent with handleEnterNotify's findManagedWindow.
-    if (!tracking.isManaged(event.child)) return;
-    maybeFocusWindow(event.child);
+    // Walk up to the managed toplevel, consistent with handleEnterNotify's
+    // findManagedWindow.
+    maybeFocusWindow(findManagedWindow(core.getState().conn, event.child, tracking.isManaged));
 }
 
 pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void {
@@ -1327,8 +1419,10 @@ inline fn extractFieldPair(fields: [*]const u32, field_count: u32, want: bool, c
     return .{ .width = 0, .height = 0 };
 }
 
-/// Called at map time and whenever WM_NORMAL_HINTS changes post-map
-/// (see handlePropertyNotify).
+/// Called whenever WM_NORMAL_HINTS changes post-map (see handlePropertyNotify).
+/// The map-time path no longer goes through here: handleMapRequest fires the
+/// WM_NORMAL_HINTS cookie together with its other property queries and drains
+/// via parseSizeHintsIntoCache, saving one round trip per spawn.
 fn refreshSizeHints(win: u32) void {
     const conn = core.getState().conn;
     const cookie = xcb.xcb_get_property(
@@ -1426,6 +1520,10 @@ fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
         const color = borders.color(win);
         if (comptime skip_tiled) {
             if (tilingActive() and build_options.has_tiling and tiling.isWindowTiled(win)) continue;
+            // Same CacheMap dedup as the tiled sweep: floating windows with a
+            // cache entry skip the XCB call when their color is unchanged;
+            // uncached ones get an entry created and colored in one step.
+            if (build_options.has_tiling and tiling.sendBorderColorIfChanged(win, color)) continue;
         } else {
             // Dedup via the tiling CacheMap: skip the XCB call when unchanged.
             if (build_options.has_tiling and tiling.sendBorderColorIfChanged(win, color)) continue;

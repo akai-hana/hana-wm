@@ -18,7 +18,8 @@ pub const Plugin = struct {
 
     // Event-loop integration.
     post_batch: ?*const fn () anyerror!void = null,
-    // Return true to signal the event loop to stop iterating.
+    // Called at the end of each event-loop iteration; the return value is
+    // currently unused (reserved for future use, e.g. requesting a shutdown).
     iteration_end: ?*const fn () bool = null,
 
     // Poll integration.

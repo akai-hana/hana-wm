@@ -25,6 +25,6 @@ pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, star
     if (!core.getState().config.tiling.enabled)
         return dc.drawSegment(start_x, height, getIcon(.floating), config.scaledSegmentPadding(height), config.bg, config.fg);
 
-    const icon = getIcon(if (build_options.has_tiling) tiling.getCurrentLayout() else .master);
+    const icon = getIcon(if (build_options.has_tiling) tiling.getCurrentLayout() else .floating);
     return dc.drawSegment(start_x, height, icon, config.scaledSegmentPadding(height), config.bg, config.fg);
 }

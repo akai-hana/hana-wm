@@ -248,9 +248,13 @@ fn handleConfigReload() !void {
     const old_ptr = cs.config;
     cs.config = new_ptr;
 
-    window.reloadBorders();
     plugins.fanOut("reload", .{});
     if (build_options.has_tiling) tiling.reloadConfig();
+    // Borders sweep AFTER tiling.reloadConfig: that call rebuilds the layout
+    // cache from scratch, and sweeping first would send every border twice --
+    // once here, once again from the retile against the fresh cache. Sweeping
+    // last lets borders.apply dedup against entries the retile just wrote.
+    window.reloadBorders();
 
     // Free the displaced old config after subsystem reloads have moved on.
     old_ptr.deinit(cs.alloc);
@@ -361,7 +365,7 @@ pub fn run() !void {
         }
 
         inline for (plugins.list[0..plugins.count]) |p| {
-            if (p.iteration_end) |f| _ = f();
+            if (p.iteration_end) |f| _ = f(); // return value reserved, currently unused
         }
     }
 }

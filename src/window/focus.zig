@@ -221,6 +221,12 @@ const CommitFlags = struct {
     /// locally_active and globally_active input models.
     send_wm_take_focus: bool,
 
+    /// Authoritative WM_TAKE_FOCUS advertisement from the caller's own live
+    /// protocol query (setFocus path, one round trip saved). Null keeps the
+    /// pre-fired-cookie pipeline; defaulted unlike its siblings because it
+    /// refines `send_wm_take_focus` rather than gating a side effect.
+    take_focus_known: ?bool = null,
+
     /// Arm the async focus-confirm cookie for a deferred raise-and-retry.
     /// Used by pointer_sync for windows that may silently drop focus.
     arm_confirm: bool,
@@ -265,10 +271,16 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
     const pre_cookie = state.?.pre_protocols_cookie;
     state.?.pre_protocols_cookie = null;
     if (flags.send_wm_take_focus) {
-        if (pre_cookie) |ck|
-            window.sendWMTakeFocusWithCookie(conn, win, 0, ck)
-        else
+        if (flags.take_focus_known) |advertises| {
+            // The advertisement came from the same live reply that resolved
+            // the input model (setFocus path); no protocol round trip is in
+            // flight, so dispatch straight from the known answer.
+            window.sendWMTakeFocusKnown(conn, win, 0, advertises);
+        } else if (pre_cookie) |ck| {
+            window.sendWMTakeFocusWithCookie(conn, win, 0, ck);
+        } else {
             window.sendWMTakeFocus(conn, win, 0);
+        }
     } else if (pre_cookie) |ck| {
         xcb.xcb_discard_reply(conn, ck.sequence);
     }
@@ -287,7 +299,6 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
 
 /// Returns true when `win` must never receive focus from any focus-granting
 /// path (setFocus). NOTE: handleFocusIn intentionally does NOT use this guard.
-
 /// True if `win` currently has map_state == Viewable. Guards destroy/unmap
 /// races on paths that can't guarantee the window is still alive.
 /// Public because the unmanageWindow destroy path re-runs this pre-grab to
@@ -315,14 +326,13 @@ pub fn setFocus(win: u32, reason: Reason) void {
     if ((reason == .mouse_click or reason == .user_command or reason == .pointer_sync) and
         !isWindowMapped(conn, win)) return;
 
-    // getInputModel's WM_TAKE_FOCUS half is always queried live (see its doc
-    // comment in window.zig), deliberately not merged into the pipelined
-    // cookie fired below. Neither round trip is perceptible on this
-    // infrequent, human-triggered path.
-    const input_model = window.getInputModel(conn, win);
-    if (input_model == .no_input) return;
+    // getInputModelResolved answers take_focus from the same live WM_PROTOCOLS
+    // reply that resolves the model, so the dispatch below needs no second
+    // query and no pipelined cookie: one round trip per focus change.
+    const resolved = window.getInputModelResolved(conn, win);
+    if (resolved.model == .no_input) return;
 
-    setFocusWithModel(win, reason, input_model);
+    setFocusResolved(win, reason, resolved.model, resolved.take_focus);
 }
 
 /// Focus `win` using a caller-resolved input model, skipping the two blocking
@@ -337,6 +347,27 @@ pub fn setFocus(win: u32, reason: Reason) void {
 /// liveness for .mouse_click/.user_command/.pointer_sync; setFocus's guard is
 /// deliberately NOT repeated here.
 pub fn setFocusWithModel(win: u32, reason: Reason, input_model: window.InputModel) void {
+    focusWithModelImpl(win, reason, input_model, null);
+}
+
+/// Like setFocusWithModel, but dispatches WM_TAKE_FOCUS from a known
+/// advertisement instead of firing the pipelined protocol cookie. Used by
+/// setFocus, which already holds the answer from its own live query.
+pub fn setFocusResolved(
+    win: u32,
+    reason: Reason,
+    input_model: window.InputModel,
+    take_focus: bool,
+) void {
+    focusWithModelImpl(win, reason, input_model, take_focus);
+}
+
+fn focusWithModelImpl(
+    win: u32,
+    reason: Reason,
+    input_model: window.InputModel,
+    known_take_focus: ?bool,
+) void {
     if (window.isInvalidWindow(win)) return;
     if (state.?.focused_window == win) return;
     if (input_model == .no_input) return;
@@ -354,12 +385,18 @@ pub fn setFocusWithModel(win: u32, reason: Reason, input_model: window.InputMode
 
     const conn = core.getState().conn;
 
-    // Pipeline: fire the WM_PROTOCOLS cookie now, before the bookkeeping
-    // below, so the reply is typically already buffered by the time
-    // commitFocusTransition drains it. Discard any leftover from a previous
-    // interrupted path first.
-    discardOptCookie(state.?.pre_protocols_cookie);
-    state.?.pre_protocols_cookie = window.fireTakeFocusCookie(conn, win);
+    if (known_take_focus != null) {
+        // Answer already in hand; make sure no stale cookie lingers.
+        discardOptCookie(state.?.pre_protocols_cookie);
+        state.?.pre_protocols_cookie = null;
+    } else {
+        // Pipeline: fire the WM_PROTOCOLS cookie now, before the bookkeeping
+        // below, so the reply is typically already buffered by the time
+        // commitFocusTransition drains it. Discard any leftover from a previous
+        // interrupted path first.
+        discardOptCookie(state.?.pre_protocols_cookie);
+        state.?.pre_protocols_cookie = window.fireTakeFocusCookie(conn, win);
+    }
 
     cancelPendingConfirm();
 
@@ -368,6 +405,7 @@ pub fn setFocusWithModel(win: u32, reason: Reason, input_model: window.InputMode
         .set_input_focus = input_model != .globally_active,
         .raise = shouldRaise(reason, win),
         .send_wm_take_focus = true,
+        .take_focus_known = known_take_focus,
         .arm_confirm = reason == .pointer_sync,
         .schedule_bar = true,
         .new_suppress = suppressionFor(reason, state.?.suppress_reason),

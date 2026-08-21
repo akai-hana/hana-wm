@@ -292,6 +292,12 @@ pub fn applyFullscreenGeometry(win: u32) void {
             xcb.XCB_STACK_MODE_ABOVE,
         },
     );
+    // This raw configure bypasses borders.applyWidth, so the layout cache's
+    // applied-border-width bookkeeping must be updated here. Without it the
+    // cache still holds the pre-fullscreen width and exitFullscreenCommit's
+    // applyBorder dedups against that stale value, skipping the restore send
+    // and leaving the window at border width 0 ("lost borders" bug).
+    if (build_options.has_tiling) _ = tiling.cacheBorderWidth(win, 0);
 }
 
 fn enterFullscreenCommit(win: u32, ws: core.WorkspaceId, geom: utils.Rect) void {
