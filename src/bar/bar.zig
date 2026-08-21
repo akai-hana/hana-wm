@@ -664,8 +664,8 @@ fn captureMinimizedSet(snap: *BarSnapshot, allocator: std.mem.Allocator) !void {
 
 /// Capture the workspace-derived state: count, current workspace, all-view
 /// mode, per-workspace occupancy, and the current workspace's window list.
-/// Single-pass: builds workspace_has_windows and collects current-workspace
-/// windows in one iteration over all tracked windows.
+/// OR-accumulates all window masks in a single pass, then derives per-workspace
+/// occupancy from the combined bitmask in O(workspace_count).
 fn captureWorkspaceState(snap: *BarSnapshot, allocator: std.mem.Allocator) !void {
     const ws_state = workspaces.getState() orelse return;
     snap.workspace_count = @intCast(ws_state.workspaces.len);
@@ -678,14 +678,14 @@ fn captureWorkspaceState(snap: *BarSnapshot, allocator: std.mem.Allocator) !void
         tracking.workspaceBit(ws_state.current)
     else
         0;
+    var combined_mask: u64 = 0;
     for (tracking.allWindows()) |entry| {
-        for (ws_state.workspaces, 0..) |_, i| {
-            if (entry.mask & tracking.workspaceBit(@as(u8, @intCast(i))) != 0) {
-                snap.workspace_has_windows.items[i] = true;
-            }
-        }
+        combined_mask |= entry.mask;
         if (cur_bit != 0 and entry.mask & cur_bit != 0)
             try snap.title_data.workspace_windows.append(allocator, entry.win);
+    }
+    for (0..snap.workspace_count) |i| {
+        snap.workspace_has_windows.items[i] = combined_mask & tracking.workspaceBit(@as(u8, @intCast(i))) != 0;
     }
 }
 
@@ -785,7 +785,7 @@ fn captureStateIntoSlot(s: *State, snap: *BarSnapshot, prev: *BarSnapshot, force
 
     if (bench.enabled) bench.reportTitleCapture(
         utils.monotonicNs() -| capture_start_ns,
-        snap.current_workspace_windows.items.len,
+        snap.title_data.workspace_windows.items.len,
     );
 }
 
@@ -1196,6 +1196,45 @@ pub fn isVisible() bool {
     return if (gBar.state) |s| s.is_visible else false;
 }
 
+/// Read-only prediction of whether captureStateIntoSlot would take its
+/// expensive path (fresh focused-title fetch plus the batched per-window
+/// title/geometry prefetch -- both issue blocking X11 property round trips).
+/// Mirrors the `title_data_changed` computation there WITHOUT consuming any
+/// flags or touching X11, so grab-held callers can defer the whole capture
+/// instead of blocking under xcb_grab_server.
+fn snapshotNeedsRefetch(s: *State) bool {
+    if (gBar.pending_force_title_redraw) return true;
+    const prev = &s.snapshots[1 - s.snap_idx];
+    if (focus.getFocused() != prev.title_data.focused_window) return true;
+    if (s.title_cache.is_invalidated) return true;
+
+    // Rebuild the current workspace's window list on the stack (same source
+    // and order as captureWorkspaceState) and compare against last frame's.
+    const cur = tracking.getCurrentWorkspace() orelse return false;
+    const cur_bit = tracking.workspaceBit(cur);
+    var wins: [256]u32 = undefined;
+    var n: usize = 0;
+    for (tracking.allWindows()) |entry| {
+        if (entry.mask & cur_bit == 0) continue;
+        if (n == wins.len) return true; // over-capacity: let the real capture handle it
+        wins[n] = entry.win;
+        n += 1;
+    }
+    if (!std.mem.eql(u32, wins[0..n], prev.title_data.workspace_windows.items)) return true;
+
+    // Minimized-set equality without allocating: membership of every
+    // currently-minimized window plus an equal count covers both directions.
+    var min_count: usize = 0;
+    for (tracking.allWindows()) |entry| {
+        if (!minimize.isMinimized(entry.win)) continue;
+        min_count += 1;
+        if (!prev.title_data.minimized_windows.contains(entry.win)) return true;
+    }
+    if (min_count != prev.title_data.minimized_windows.count()) return true;
+
+    return false;
+}
+
 /// Synchronous bar update safe to call inside xcb_grab_server.
 ///
 /// Phase 1 (inside grab): render to the off-screen pixmap: cairo_surface_flush
@@ -1203,9 +1242,21 @@ pub fn isVisible() bool {
 /// Phase 2: blitQueued() enqueues xcb_copy_area without flushing; the caller's
 /// ungrabAndFlush() sends configure_window + copy_area + ungrab in one flush,
 /// producing exactly one compositor frame.
+///
+/// Frames whose diff says title data changed are DEFERRED instead of rendered:
+/// their recapture runs blocking property round trips under this grab --
+/// every client stalls until the replies arrive, and each reply's implicit
+/// flush tears the caller's queued configure/map batch apart mid-operation,
+/// exactly what the grab exists to prevent (see the O(N²)-in-grab note in
+/// window.zig). Those frames fall back to the coalesced post-batch redraw;
+/// cheap frames (unchanged focus/window set) still render inline as before.
 pub fn redrawInsideGrab() void {
     const s = gBar.state orelse return;
     if (!s.is_visible) return;
+    if (snapshotNeedsRefetch(s)) {
+        s.markDirty();
+        return;
+    }
     // Phase 1: render to pixmap without any XCB flush.
     submitRenderBlocking();
     // Phase 2: queue the blit; will be sent with ungrabAndFlush().
@@ -1474,10 +1525,18 @@ fn withTilingGrabForClick(op: anytype) void {
     utils.ungrabAndFlush(conn);
 }
 
-fn tilingToggleLayout() void { if (build_options.has_tiling) tiling.toggleLayout(); }
-fn tilingToggleLayoutReverse() void { if (build_options.has_tiling) tiling.toggleLayoutReverse(); }
-fn tilingStepLayoutVariant() void { if (build_options.has_tiling) tiling.stepLayoutVariant(); }
-fn tilingStepLayoutVariantReverse() void { if (build_options.has_tiling) tiling.stepLayoutVariantReverse(); }
+fn tilingToggleLayout() void {
+    if (build_options.has_tiling) tiling.toggleLayout();
+}
+fn tilingToggleLayoutReverse() void {
+    if (build_options.has_tiling) tiling.toggleLayoutReverse();
+}
+fn tilingStepLayoutVariant() void {
+    if (build_options.has_tiling) tiling.stepLayoutVariant();
+}
+fn tilingStepLayoutVariantReverse() void {
+    if (build_options.has_tiling) tiling.stepLayoutVariantReverse();
+}
 
 fn isTilingActive() bool {
     return core.getState().config.tiling.enabled and build_options.has_tiling and tiling.isEnabled();

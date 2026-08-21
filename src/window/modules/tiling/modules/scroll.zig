@@ -69,7 +69,7 @@ pub fn snapOffsetToWindow(s: *tiling.State, ws_wins: []const u32, win: u32, scre
     const scroll_off = s.scroll.offset;
 
     // Left edge is already inside [scroll_off, scroll_off + slot_w].
-    if (win_left >= scroll_off and win_left <= scroll_off + slot_w) return false;
+    if (win_left >= scroll_off and win_left < scroll_off + slot_w) return false;
 
     const new_scroll: i32 = if (win_left > scroll_off + slot_w)
         win_left - slot_w

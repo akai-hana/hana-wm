@@ -699,7 +699,7 @@ const Parser = struct {
             var kv = self.parseKeyValuePair() catch |err| {
                 debug.warn("Invalid key-value at line {}: {}", .{ self.line, err });
                 self.skipToNewline();
-                break;
+                continue;
             };
 
             errdefer {
