@@ -100,15 +100,6 @@ pub fn removeForWorkspace(ws: core.WorkspaceId) void {
     g_slots[ws.index] = null;
 }
 
-// Drops the record at `ws`, clearing the window's EWMH fullscreen property so
-// external tools stop seeing it as fullscreen. No-op when the slot is empty.
-fn dropRecord(ws: core.WorkspaceId) void {
-    if (g_slots[ws.index]) |info| {
-        setEwmhFullscreenState(info.window, false);
-        g_slots[ws.index] = null;
-    }
-}
-
 // Drops any fullscreen record of `win` on a workspace other than `keep_ws`,
 // so a window re-entering fullscreen elsewhere doesn't keep two records;
 // workspaceFor(), which scans lowest-first, would then resolve exit/toggle
@@ -174,7 +165,7 @@ pub fn forEachFullscreen(cb: anytype) void {
 // Falls back to a centred quarter-screen default if the reply fails, the
 // window is offscreen, or reports zero dimensions.
 fn fetchWindowGeom(win: u32) utils.Rect {
-    if (if (build_options.has_tiling) tiling.getWindowGeom(win) else null) |rect| {
+    if (@import("wincache").getWindowGeom(win)) |rect| {
         const bw: u16 = if (build_options.has_tiling) tiling.getBorderWidth() else 0;
         return .{ .x = rect.x, .y = rect.y, .width = rect.width, .height = rect.height, .border_width = bw };
     }
@@ -217,12 +208,12 @@ fn fetchWindowGeom(win: u32) utils.Rect {
 // already exactly what we'd have saved ourselves.
 
 // True when `win` is free-floating, not minimized and not tiled, i.e. its
-// geometry is owned by the floating cache rather than the tiling engine.
+// geometry is owned by the floating cache rather than the layout engine.
 // Shared by warmFloatingWindowGeoms and restoreFloatingWindows. Declared as
 // a plain fn (not inline) so it can be passed as a *const fn(u32)bool
 // predicate (see tracking.prefetchAndSaveGeometryOnCurrentWorkspace).
 fn isFreeFloating(win: u32) bool {
-    return !minimize.isMinimized(win) and !(build_options.has_tiling and tiling.isWindowTiled(win));
+    return !minimize.isMinimized(win) and !tracking.isTiledMode(win);
 }
 
 // Warm the geometry cache for every free-floating window on the current
@@ -251,7 +242,9 @@ fn restoreFloatingWindows(skip_win: u32) void {
 
 // Set or clear the EWMH _NET_WM_STATE_FULLSCREEN property on `win`.
 // Guards on both atoms being valid before touching the property.
-fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
+// PIPELINE: pub for actions.fullscreenToggle (train b) — EWMH advertisement
+// stays protocol-side, exactly like the focus layer until train f.
+pub fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
     if (g_net_wm_state == xcb.XCB_ATOM_NONE or
         g_net_wm_state_fullscreen == xcb.XCB_ATOM_NONE) return;
     const count: u32 = if (is_fullscreen) 1 else 0;
@@ -297,7 +290,7 @@ pub fn applyFullscreenGeometry(win: u32) void {
     // cache still holds the pre-fullscreen width and exitFullscreenCommit's
     // applyBorder dedups against that stale value, skipping the restore send
     // and leaving the window at border width 0 ("lost borders" bug).
-    if (build_options.has_tiling) _ = tiling.cacheBorderWidth(win, 0);
+    if (build_options.has_tiling) _ = @import("wincache").cacheBorderWidth(win, 0);
 }
 
 fn enterFullscreenCommit(win: u32, ws: core.WorkspaceId, geom: utils.Rect) void {
@@ -318,7 +311,7 @@ fn enterFullscreenCommit(win: u32, ws: core.WorkspaceId, geom: utils.Rect) void 
         utils.pushWindowOffscreen(conn, w);
         // Only invalidate tiled windows; floating windows' cache entries
         // hold the geometry we need to restore on exit.
-        if (build_options.has_tiling and tiling.isWindowTiled(w)) tiling.invalidateGeomCache(w);
+        if (tracking.isTiledMode(w)) @import("wincache").invalidateGeomCache(w);
     }
 
     // Configure and raise BEFORE hiding the bar: deferring the bar hide until
@@ -329,7 +322,7 @@ fn enterFullscreenCommit(win: u32, ws: core.WorkspaceId, geom: utils.Rect) void 
     // Evict the fullscreen window's own cache entry: on exit retile it would
     // hit the stale pre-fullscreen rect and skip configure_window, leaving the
     // window stuck at fullscreen dimensions.
-    if (build_options.has_tiling) tiling.invalidateGeomCache(win);
+    @import("wincache").invalidateGeomCache(win);
 
     // Cancel any pending deferred bar-show from a previous exit: entering
     // fullscreen again means the bar should stay hidden.
@@ -396,75 +389,9 @@ pub fn cleanupFullscreenForMove(win: u32, src_ws: core.WorkspaceId) void {
 /// Enter fullscreen for `win` on the current workspace. Pass pre-computed
 /// geometry in `saved_geom` (e.g. restoring a minimized window); null fetches
 /// it from the tiling cache or a live round-trip.
-pub fn enterFullscreen(win: u32, saved_geom: ?utils.Rect) void {
-    if (!core.getState().config.fullscreen_enabled) return;
-    const ws = core.WorkspaceId.fromIndex(tracking.getCurrentWorkspace() orelse return);
-    const geom = saved_geom orelse fetchWindowGeom(win);
-    warmFloatingWindowGeoms(win);
-    const conn = core.getState().conn;
-    utils.grabServer(conn);
-    enterFullscreenCommit(win, ws, geom);
-    utils.ungrabAndFlush(conn);
-}
-
-/// Exit fullscreen for `win`. No-op if not currently fullscreen. Targets `win`
-/// explicitly (unlike toggle()) for event-driven call sites.
-pub fn exitFullscreen(win: u32) void {
-    const ws = workspaceFor(win) orelse return;
-    // The window was raised on enter; showing the bar before it repaints at
-    // its new tiled size would let it occlude the bar: the mirror image of
-    // the enter-path bar-hide race; the show is deferred until the window
-    // confirms its non-fullscreen dimensions via ConfigureNotify.
-    const conn = core.getState().conn;
-    utils.grabServer(conn);
-    exitFullscreenCommit(win, ws);
-    restoreFloatingWindows(win);
-    if (build_options.has_tiling) tiling.retileCurrentWorkspace();
-    // Record the pending show AFTER retile so the window ID is set before
-    // the grab is released and ConfigureNotify can arrive.
-    g_pending_bar_show_win = win;
-    utils.ungrabAndFlush(conn);
-}
-
-// Round-trips hoisted before xcb_grab_server (replies can't arrive while a
-// grab is held). The switch holds one grab across both commits; no
-// intermediate frame.
-pub fn toggle() void {
-    const win = focus.getFocused() orelse return;
-    const current_ws = core.WorkspaceId.fromIndex(tracking.getCurrentWorkspace() orelse return);
-
-    // Defense-in-depth: focus.getFocused() is supposed to be null or a window
-    // on the current workspace, but toggle()/enterFullscreen used to trust
-    // that blindly, and one path (minimize's restore fallback) once violated
-    // it: fullscreening a window off the viewed workspace and leaving it
-    // stuck on top. Re-check here so a future regression fails loudly (a no-op
-    // + log line) instead of silently corrupting the workspace.
-    if (!tracking.isOnCurrentWorkspace(win)) {
-        debug.warn("fullscreen.toggle: focused window 0x{x} is not on the current workspace ({d}); ignoring", .{ win, current_ws.index });
-        return;
-    }
-
-    if (getForWorkspace(current_ws)) |fs_info| {
-        if (fs_info.window == win) {
-            exitFullscreen(win);
-        } else {
-            // Switch: fetch geometry before the grab. restoreFloatingWindows
-            // below only reads the geometry cache (never a live round-trip),
-            // so it's safe to call here even though every other window on
-            // this workspace is currently pushed offscreen.
-            const new_geom = fetchWindowGeom(win);
-            const conn = core.getState().conn;
-            utils.grabServer(conn);
-            exitFullscreenCommit(fs_info.window, current_ws);
-            // Restore background windows before pushing them offscreen again.
-            restoreFloatingWindows(win);
-            enterFullscreenCommit(win, current_ws, new_geom);
-            utils.ungrabAndFlush(conn);
-        }
-    } else {
-        enterFullscreen(win, null);
-    }
-}
+// WP6: enterFullscreen/exitFullscreen deleted — actions.fullscreenToggleWindow
+// owns the model path (enterFullscreenCommit/exitFullscreenCommit) and the old
+// wrappers' only remaining caller (minimize's legacy restore) is gone.
 
 /// Called from the ConfigureNotify handler in events.zig. Drives both deferred
 /// bar transitions: hide on confirmed fullscreen dimensions (enter), show on
@@ -494,6 +421,20 @@ pub fn notifyConfigureIfPending(win: u32, width: u16, height: u16) void {
 fn resolvePendingBarShow() void {
     g_pending_bar_show_win = 0;
     if (build_options.has_bar) bar.setBarState(.show_fullscreen);
+}
+
+/// PIPELINE (train b): arm the deferred bar-hide from the new path's
+/// fullscreenToggle. Same contract as enterFullscreenCommit's tail.
+pub fn armPendingBarHide(win: u32) void {
+    g_pending_bar_show_win = 0;
+    g_pending_bar_hide_win = win;
+}
+
+/// PIPELINE (train b): arm the deferred bar-show after an exit reconcile.
+/// Same contract as exitFullscreen's tail (armed AFTER geometry settles).
+pub fn armPendingBarShow(win: u32) void {
+    g_pending_bar_hide_win = 0;
+    g_pending_bar_show_win = win;
 }
 
 /// Called when a window is destroyed; clears its pending deferred bar op so

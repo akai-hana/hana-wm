@@ -454,11 +454,11 @@ const mod_map = std.StaticStringMap(u16).initComptime(.{
 });
 
 const mouse_button_map = std.StaticStringMap(u8).initComptime(.{
-    .{ "button1", 1 },      .{ "left_click", 1 },   .{ "leftclick", 1 },
-    .{ "button2", 2 },      .{ "middle_click", 2 }, .{ "middleclick", 2 },
-    .{ "button3", 3 },      .{ "right_click", 3 },  .{ "rightclick", 3 },
-    .{ "button4", 4 },      .{ "scroll_up", 4 },    .{ "scrollup", 4 },
-    .{ "button5", 5 },      .{ "scroll_down", 5 },  .{ "scrolldown", 5 },
+    .{ "button1", 1 }, .{ "left_click", 1 },   .{ "leftclick", 1 },
+    .{ "button2", 2 }, .{ "middle_click", 2 }, .{ "middleclick", 2 },
+    .{ "button3", 3 }, .{ "right_click", 3 },  .{ "rightclick", 3 },
+    .{ "button4", 4 }, .{ "scroll_up", 4 },    .{ "scrollup", 4 },
+    .{ "button5", 5 }, .{ "scroll_down", 5 },  .{ "scrolldown", 5 },
 });
 
 fn mouseButtonFromName(name: []const u8) ?u8 {
@@ -790,9 +790,9 @@ fn tryParseWorkspace(command: []const u8, prefix: []const u8) ?u8 {
 /// of these and not containing a shell metacharacter is treated as an ordinary
 /// exec command and left alone (e.g. "firefox", "foot", "/usr/bin/emacs").
 const action_verb_prefixes = [_][]const u8{
-    "toggle_", "increase_", "decrease_", "grow_", "stack_", "swap_",
-    "move_", "move_to_", "focus_", "close_", "kill_", "minimize_",
-    "unminimize_", "cycle_", "scroll_", "workspace_", "all_", "dump_",
+    "toggle_",     "increase_", "decrease_", "grow_",      "stack_", "swap_",
+    "move_",       "move_to_",  "focus_",    "close_",     "kill_",  "minimize_",
+    "unminimize_", "cycle_",    "scroll_",   "workspace_", "all_",   "dump_",
 };
 
 /// True when `cmd` is a bare identifier (letters, digits, underscores only,

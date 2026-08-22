@@ -91,5 +91,3 @@ pub fn init(conn: Connection, screen: Screen, root: WindowId, alloc: std.mem.All
 /// (96.0 DPI, no scaling), and is set once during scale detection, never
 /// reassigned afterward.
 pub var dpi_info: std.atomic.Value(f32) = std.atomic.Value(f32).init(constants.baseline_dpi);
-
-

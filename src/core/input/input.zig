@@ -24,6 +24,8 @@ const minimize = @import("minimize");
 const workspaces = @import("workspaces");
 const xkbcommon = @import("xkbcommon");
 const build_options = @import("build_options");
+const pipeline = @import("pipeline");
+const actions = @import("actions");
 const bar = if (build_options.has_bar) @import("bar") else null;
 const tiling = if (build_options.has_tiling) @import("tiling") else null;
 const floating = if (build_options.has_floating) @import("floating") else null;
@@ -35,23 +37,11 @@ const mouse_button_scroll_up: u8 = 4;
 const mouse_button_scroll_down: u8 = 5;
 
 const mouse_buttons = [_]u8{
-    constants.mouse_button_left, mouse_button_middle, constants.mouse_button_right,
+    constants.mouse_button_left, mouse_button_middle,      constants.mouse_button_right,
     mouse_button_scroll_up,      mouse_button_scroll_down,
 };
 
 // Named adapter functions for tiling actions that need argument forwarding.
-fn tilingIncreaseMaster() void { if (build_options.has_tiling) tiling.adjustMasterWidth(0.025); }
-fn tilingDecreaseMaster() void { if (build_options.has_tiling) tiling.adjustMasterWidth(-0.025); }
-fn tilingIncreaseMasterCount() void { if (build_options.has_tiling) tiling.adjustMasterCount(1); }
-fn tilingDecreaseMasterCount() void { if (build_options.has_tiling) tiling.adjustMasterCount(-1); }
-fn tilingGrowStackTop() void { if (build_options.has_tiling) tiling.adjustStackBalance(0.5); }
-fn tilingGrowStackBottom() void { if (build_options.has_tiling) tiling.adjustStackBalance(-0.5); }
-fn tilingScrollLeft() void { if (build_options.has_tiling) tiling.stepScrollView(-1); }
-fn tilingScrollRight() void { if (build_options.has_tiling) tiling.stepScrollView(1); }
-fn tilingSnapScrollToFocused() void { if (build_options.has_tiling) tiling.snapScrollToFocused(); }
-fn tilingToggleLayout() void { if (build_options.has_tiling) tiling.toggleLayout(); }
-fn tilingToggleLayoutReverse() void { if (build_options.has_tiling) tiling.toggleLayoutReverse(); }
-fn tilingStepLayoutVariant() void { if (build_options.has_tiling) tiling.stepLayoutVariant(); }
 
 // XKB state
 
@@ -140,12 +130,15 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     // The prompt owns all key input while active; routing is handled inside it.
     if (build_options.has_bar) if (bar.promptHandleKeypress(event, matched)) return;
 
-    debug.info("[KEY] keycode={} state=0x{x} mods=0x{x} keysym=0x{x}", .{ event.detail, event.state, mods, keysym });
-
     if (matched) |action| {
+        debug.info("[KEY] keycode={} state=0x{x} mods=0x{x} keysym=0x{x}", .{ event.detail, event.state, mods, keysym });
         debug.info("[KEY] action={s}", .{@tagName(action.*)});
         executeAction(action);
+    } else if (mods == 0 and keysym >= 0xffe1 and keysym <= 0xffee) {
+        // Bare modifier press (Shift/Ctrl/Alt/Super/Hyper L/R): can never
+        // match a binding; staying silent keeps logs free of keystroke noise.
     } else {
+        debug.info("[KEY] keycode={} state=0x{x} mods=0x{x} keysym=0x{x}", .{ event.detail, event.state, mods, keysym });
         debug.info("[KEY] no binding", .{});
     }
 }
@@ -261,6 +254,14 @@ fn closeWindow(win: u32) void {
 
 // Action dispatch
 
+/// PIPELINE: per-dispatch action context for the new path (train a+).
+var action_ctx: actions.Ctx = .{};
+var mouse_ctx: actions.Ctx = .{};
+
+inline fn focusedId() ?u32 {
+    return focus.getFocused();
+}
+
 /// Top-level action dispatcher. Routes each action tag to the appropriate
 /// domain helper. Errors are handled internally.
 fn executeAction(action: *const types.Action) void {
@@ -273,7 +274,7 @@ fn executeAction(action: *const types.Action) void {
         .sequence => |acts| for (acts) |*a| executeAction(a),
 
         // Fullscreen
-        .toggle_fullscreen => fullscreen.toggle(),
+        .toggle_fullscreen => actions.fullscreenToggle(&action_ctx), // WP6
 
         // Tiling, delegated to executeTilingAction
         .toggle_floating_window,
@@ -299,10 +300,10 @@ fn executeAction(action: *const types.Action) void {
         .toggle_bar_position => if (build_options.has_bar) bar.toggleBarSegmentAnchor(),
 
         // Minimize
-        .minimize_window => minimize.minimizeWindow(),
-        .unminimize_lifo => minimize.unminimize(.lifo),
-        .unminimize_fifo => minimize.unminimize(.fifo),
-        .unminimize_all => minimize.unminimizeAll(),
+        .minimize_window => actions.minimize(&action_ctx, focusedId()), // WP6
+        .unminimize_lifo => actions.restoreLifo(&action_ctx), // WP6
+        .unminimize_fifo => actions.restoreFifo(&action_ctx), // WP6
+        .unminimize_all => actions.restoreAll(&action_ctx), // WP6
 
         // Workspaces, delegated to executeWorkspaceAction
         .switch_workspace,
@@ -321,11 +322,11 @@ fn executeAction(action: *const types.Action) void {
         // it is off-screen. The server grab prevents a partial retile frame.
         .focus_next_window => {
             focus.focusNext();
-            withTilingGrabKeepFocus(tilingSnapScrollToFocused);
+            actions.snapScrollToFocused(&action_ctx); // PIPELINE: WP6
         },
         .focus_prev_window => {
             focus.focusPrev();
-            withTilingGrabKeepFocus(tilingSnapScrollToFocused);
+            actions.snapScrollToFocused(&action_ctx); // PIPELINE: WP6
         },
     }
 }
@@ -335,62 +336,42 @@ fn executeAction(action: *const types.Action) void {
 fn executeTilingAction(action: *const types.Action) void {
     switch (action.*) {
         .toggle_floating_window => if (focus.getFocused()) |win| {
-            const conn = core.getState().conn;
-            utils.grabServer(conn);
             focus.setSuppressReason(.tiling_operation);
-            if (build_options.has_tiling) tiling.toggleWindowFloat(win);
-            finishTilingOp(conn, false);
+            actions.toggleFloating(&action_ctx, win);
+            focus.beginTilingOpSettle();
         },
-        .toggle_layout => withTilingGrab(tilingToggleLayout),
-        .toggle_layout_reverse => withTilingGrab(tilingToggleLayoutReverse),
-        .cycle_layout_variants => withTilingGrab(tilingStepLayoutVariant),
-        .increase_master => withTilingGrab(tilingIncreaseMaster),
-        .decrease_master => withTilingGrab(tilingDecreaseMaster),
-        .increase_master_count => withTilingGrab(tilingIncreaseMasterCount),
-        .decrease_master_count => withTilingGrab(tilingDecreaseMasterCount),
-        .grow_stack_top => withTilingGrab(tilingGrowStackTop),
-        .grow_stack_bottom => withTilingGrab(tilingGrowStackBottom),
+        .toggle_layout => {
+            focus.setSuppressReason(.tiling_operation);
+            actions.cycleLayoutKind(&action_ctx, 1);
+            focus.beginTilingOpSettle();
+        },
+        .toggle_layout_reverse => {
+            focus.setSuppressReason(.tiling_operation);
+            actions.cycleLayoutKind(&action_ctx, -1);
+            focus.beginTilingOpSettle();
+        },
+        .cycle_layout_variants => {
+            focus.setSuppressReason(.tiling_operation);
+            actions.stepVariant(&action_ctx);
+            focus.beginTilingOpSettle();
+        },
+        .increase_master => actions.adjustMasterWidthAction(&action_ctx, 0.025),
+        .decrease_master => actions.adjustMasterWidthAction(&action_ctx, -0.025),
+        .increase_master_count => actions.adjustMasterCount(&action_ctx, 1),
+        .decrease_master_count => actions.adjustMasterCount(&action_ctx, -1),
+        .grow_stack_top => actions.adjustStackBalance(&action_ctx, 0.5),
+        .grow_stack_bottom => actions.adjustStackBalance(&action_ctx, -0.5),
 
-        .swap_master, .swap_master_focus_swap => executeSwapMaster(action),
+        .swap_master, .swap_master_focus_swap => actions.swapMasterAction(&action_ctx, action.* == .swap_master_focus_swap),
 
-        .move_window_next => withTilingGrab(focus.moveWindowNext),
-        .move_window_prev => withTilingGrab(focus.moveWindowPrev),
+        .move_window_next => actions.moveFocused(&action_ctx, 1),
+        .move_window_prev => actions.moveFocused(&action_ctx, -1),
 
-        .scroll_view_left => withTilingGrab(tilingScrollLeft),
-        .scroll_view_right => withTilingGrab(tilingScrollRight),
+        .scroll_view_left => actions.scrollStep(&action_ctx, -1),
+        .scroll_view_right => actions.scrollStep(&action_ctx, 1),
 
         else => unreachable,
     }
-}
-
-/// Executes the swap_master / swap_master_focus_swap action inside a server grab.
-fn executeSwapMaster(action: *const types.Action) void {
-    const conn = core.getState().conn;
-
-    // Capture the focused window ID before the swap so we can pass it as
-    // defer_configure; the shrinking window fills its new slot before the
-    // growing window vacates its old one, eliminating a one-frame gap.
-    const new_master = focus.getFocused();
-    const displaced = if (build_options.has_tiling) tiling.swapWithMaster() else false;
-
-    // Resolve the displaced window's input model BEFORE the grab: the
-    // WM_PROTOCOLS reply wait would implicitly flush the swap's configure_window
-    // batch to the compositor mid-grab (see focus.setFocusWithModel).
-    const displaced_model: ?window.InputModel = if (action.* == .swap_master_focus_swap)
-        if (displaced) |win| window.getInputModel(conn, win) else null
-    else
-        null;
-
-    utils.grabServer(conn);
-
-    // Follow-focus only: focus MUST move before the retile, or layouts that
-    // derive their raised window from focus.getFocused() at retile time
-    // (e.g. monocle) retile against the stale window with no follow-up fix.
-    if (displaced) |win|
-        if (displaced_model) |model| focus.setFocusWithModel(win, .tiling_operation, model);
-
-    if (build_options.has_tiling) tiling.retileCurrentWorkspaceWithOpts(.{ .defer_win = new_master });
-    finishTilingOp(conn, true);
 }
 
 /// Dispatches workspace-related actions. workspaces.zig self-gates to a
@@ -398,12 +379,11 @@ fn executeSwapMaster(action: *const types.Action) void {
 /// is false, so these calls are always valid regardless of that setting.
 fn executeWorkspaceAction(action: *const types.Action) void {
     switch (action.*) {
-        .switch_workspace => |ws| workspaces.switchTo(core.WorkspaceId.fromIndex(ws)),
-        .move_to_workspace => |ws| if (focus.getFocused()) |win|
-            workspaces.moveWindowTo(win, core.WorkspaceId.fromIndex(ws)) catch |e| debug.warnOnErr(e, "move_to_workspace"),
-        .toggle_tag => |ws| if (focus.getFocused()) |win| workspaces.tagToggle(win, core.WorkspaceId.fromIndex(ws), true),
-        .all_workspaces => workspaces.switchToAll(),
-        .move_to_all_workspaces, .toggle_tag_all => if (focus.getFocused()) |win| workspaces.moveWindowToAll(win),
+        .switch_workspace => |ws| actions.switchTo(&action_ctx, ws), // WP6
+        .move_to_workspace => |ws| if (focusedId()) |wid| actions.moveWindowTo(&action_ctx, wid, ws), // WP6
+        .toggle_tag => |ws| if (focusedId()) |wid| actions.tagToggle(&action_ctx, wid, ws, true), // WP6
+        .all_workspaces => actions.allViewToggle(&action_ctx), // WP6
+        .move_to_all_workspaces, .toggle_tag_all => if (focusedId()) |wid| actions.pinToggle(&action_ctx, wid), // WP6
         else => unreachable,
     }
 }
@@ -412,12 +392,10 @@ fn executeWorkspaceAction(action: *const types.Action) void {
 /// keyboard-focused one, so e.g. toggle_floating_window affects what was clicked.
 fn executeMouseAction(action: *const types.Action, clicked_win: u32) void {
     switch (action.*) {
-        .toggle_floating_window => {
-            const conn = core.getState().conn;
-            utils.grabServer(conn);
+        .toggle_floating_window => { // WP6
             focus.setSuppressReason(.tiling_operation);
-            if (build_options.has_tiling) tiling.toggleWindowFloat(clicked_win);
-            finishTilingOp(conn, true);
+            actions.toggleFloating(&mouse_ctx, clicked_win);
+            focus.beginTilingOpSettle();
         },
         else => executeAction(action),
     }
@@ -681,7 +659,9 @@ fn dumpState() void {
     if (build_options.has_tiling and tiling.isEnabled()) {
         debug.info("Tiling enabled: true", .{});
         debug.info("Tiling layout:  {s}", .{@tagName(tiling.getCurrentLayout())});
-        debug.info("Tiled windows:  {}", .{tiling.getTiledWindows().len});
+        // Count from the model (WP5 truth), not the legacy pool: the pool is
+        // no longer fed on the model spawn path, so its length would read 0.
+        debug.info("Tiled windows:  {}", .{tracking.tiledCountOnCurrent()});
     }
 
     debug.info("================================", .{});
@@ -703,55 +683,6 @@ fn tryConfigMouseBind(mods: u16, button: u8, win: u32, time: u32) bool {
 }
 
 /// Runs `op` inside an xcb server grab, then sweeps borders, redraws the
-/// bar, and flushes atomically.
-inline fn withTilingGrab(op: *const fn () void) void {
-    withTilingGrabImpl(op, true);
-}
-
-/// Like `withTilingGrab`, but skips the pointer-focus resync: on a
-/// keyboard-triggered action it could silently move focus onto an unrelated
-/// window under the cursor (e.g. a floating window stacked above the target).
-///
-/// Suppression stays active until reflow crossing events are filtered; see
-/// beginTilingOpSettle in focus.zig for why that can't be synchronous.
-/// Shared grab-finish tail for tiling operations: refresh floating-window
-/// borders, mark the batch border-swept, render the bar to the off-screen
-/// pixmap, resolve focus per `sync_pointer` (queueing the pointer query or
-/// deferring suppression-clearing via beginTilingOpSettle, since `op()`'s
-/// configure_window calls aren't sent until ungrabAndFlush), then release the
-/// server grab and flush everything atomically.
-inline fn finishTilingOp(conn: core.Connection, sync_pointer: bool) void {
-    window.updateFloatingWindowBorders();
-    window.markBordersFlushed();
-    if (build_options.has_bar) bar.redrawInsideGrab();
-    if (sync_pointer) {
-        // Once the layout has settled, resolve focus against the pointer's
-        // resting spot: clears suppression and queues a query that
-        // drainPointerSync() consumes next loop.
-        focus.beginPointerSync();
-    } else {
-        // Suppression still needs clearing, but not synchronously: clearing
-        // now would disable the filtering too early.
-        focus.beginTilingOpSettle();
-    }
-    utils.ungrabAndFlush(conn);
-}
-
-inline fn withTilingGrabKeepFocus(op: *const fn () void) void {
-    withTilingGrabImpl(op, false);
-}
-
-inline fn withTilingGrabImpl(op: *const fn () void, sync_pointer: bool) void {
-    const conn = core.getState().conn;
-    utils.grabServer(conn);
-    // X11 fires real crossing events when windows move under a stationary
-    // cursor; without suppression they read as hover and steal focus to
-    // whichever window transiently ends up under the pointer mid-shuffle.
-    focus.setSuppressReason(.tiling_operation);
-    op();
-    finishTilingOp(conn, sync_pointer);
-}
-
 /// Replays a frozen pointer event without releasing the keyboard grab.
 /// Always pass event.time, never XCB_CURRENT_TIME.
 inline fn replayPointer(time: u32) void {
@@ -774,13 +705,17 @@ inline fn finishGrab(time: u32, pointer_mode: c_uint) void {
 /// the click reaches the app underneath. Only safe for click paths that don't
 /// need to keep tracking the pointer afterward; NOT for drag start; use
 /// keepDragGrab. Always pass event.time, never XCB_CURRENT_TIME.
-inline fn releaseGrab(time: u32) void { finishGrab(time, xcb.XCB_ALLOW_REPLAY_POINTER); }
+inline fn releaseGrab(time: u32) void {
+    finishGrab(time, xcb.XCB_ALLOW_REPLAY_POINTER);
+}
 
 /// Un-freezes the pointer for a drag while keeping the Super+Button grab
 /// engaged: AsyncPointer resumes delivery without replaying or ending the
 /// grab, so MotionNotify/ButtonRelease keep reaching us. The grab ends on
 /// release; the keyboard grab drops immediately. Always pass event.time.
-inline fn keepDragGrab(time: u32) void { finishGrab(time, xcb.XCB_ALLOW_ASYNC_POINTER); }
+inline fn keepDragGrab(time: u32) void {
+    finishGrab(time, xcb.XCB_ALLOW_ASYNC_POINTER);
+}
 
 // XcbCursor, declared manually because xcb_cursor_load_cursor is a static
 // inline function cImport cannot bind.

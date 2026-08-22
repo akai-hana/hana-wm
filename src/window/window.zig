@@ -16,8 +16,11 @@ const workspaces = @import("workspaces");
 const build_options = @import("build_options");
 const bar = if (build_options.has_bar) @import("bar") else null;
 const tiling = if (build_options.has_tiling) @import("tiling") else null;
+const wincache = @import("wincache");
 const floating = if (build_options.has_floating) @import("floating") else null;
 const borders = @import("borders");
+const pipeline = @import("pipeline");
+const actions = @import("actions");
 
 // XSizeHints flags (ICCCM §4.1.2.3)
 const p_max_size: u32 = 0x20;
@@ -92,13 +95,13 @@ pub inline fn getStateOpt() ?*State {
 }
 
 // Geometry cache: last-known window geometry for workspace-switch and
-// minimize/restore. Owned by tiling.zig, the single source of truth for both
+// minimize/restore. Owned by wincache.zig, the single source of truth for both
 // tiled and floating windows.
 
-/// Save `rect` as the last-known geometry for `win`. Delegates to tiling,
+/// Save `rect` as the last-known geometry for `win`. Delegates to wincache,
 /// which owns the one geometry cache shared by tiled and floating windows alike.
 pub fn saveWindowGeom(win: u32, rect: utils.Rect) void {
-    if (build_options.has_tiling) tiling.saveWindowGeom(win, rect);
+    wincache.saveWindowGeom(win, rect);
 }
 
 /// Screen-space position of a window's top-left corner.
@@ -123,7 +126,7 @@ pub fn floatDefaultPos() Pos {
 /// pattern that appears in minimize, workspaces, and fullscreen modules.
 pub fn restoreFloatGeom(win: u32) void {
     const conn = core.getState().conn;
-    if (if (build_options.has_tiling) tiling.getWindowGeom(win) else null) |rect| {
+    if (wincache.getWindowGeom(win)) |rect| {
         utils.configureWindow(conn, win, rect);
     } else {
         moveFloatToDefaultPos(win);
@@ -135,7 +138,7 @@ pub fn restoreFloatGeom(win: u32) void {
 pub fn configureWindowGeom(conn: core.Connection, win: u32, geom: utils.Rect) void {
     // Raw BORDER_WIDTH send bypassing borders.applyWidth; keep the dedup
     // cache truthful about what the server now holds.
-    if (build_options.has_tiling) _ = tiling.cacheBorderWidth(win, geom.border_width);
+    _ = wincache.cacheBorderWidth(win, geom.border_width);
     _ = xcb.xcb_configure_window(
         conn,
         win,
@@ -626,8 +629,7 @@ pub fn init(alloc: std.mem.Allocator) !void {
     state.?.alloc = alloc;
     tracking.init(alloc);
     focus.init();
-    // tiling must precede workspaces: workspaces.init() calls tiling.getState().
-    if (build_options.has_tiling) tiling.init();
+    wincache.init(alloc);
     fullscreen.init();
     try workspaces.init();
     minimize.init();
@@ -646,7 +648,7 @@ pub fn deinit() void {
     // then InputModelCache torn down before focus and tracking (they may sweep
     // managed windows and must not encounter a partially-valid cache), then
     // the remaining subsystems in reverse-init order.
-    if (build_options.has_tiling) tiling.deinit();
+    wincache.deinit();
     fullscreen.deinit();
     workspaces.deinit();
     minimize.deinit();
@@ -854,88 +856,6 @@ fn snapshotSpawnCursorFromReply(ptr_reply: ?*xcb.xcb_query_pointer_reply_t, supp
     state.?.spawn_cursor.y = ptr.*.root_y;
 }
 
-/// Map a newly adopted window that is on the current workspace.
-///
-/// The server grab is kept as narrow as possible:
-///
-///   Before the grab: no reply needed, so the compositor keeps compositing:
-///   - tiling.addWindow + retileCurrentWorkspace: configure_window for every
-///     managed window. Can take 5-20 ms on weak hardware; running it outside
-///     the grab avoids a compositor stall on every spawn.
-///   - xcb_query_pointer, fired and drained synchronously.
-///
-///   Inside the grab (atomic, compositor-locked):
-///   - applyBorderWidth + xcb_map_window + setFocus + border sweep + bar --
-///     must land in a single frame to avoid a flash of an unfocused or
-///     unbordered window.
-fn mapWindowToScreen(win: u32) void {
-    const cs = core.getState();
-    const conn = cs.conn;
-
-    const ptr_reply = xcb.xcb_query_pointer_reply(conn, xcb.xcb_query_pointer(conn, cs.root), null);
-    defer if (ptr_reply) |r| std.c.free(r);
-
-    // -- Outside the grab: expensive layout work -----------------------------
-    //
-    // The configure_window calls from retile are pure fire-and-forget output;
-    // the compositor may composite an intermediate frame (a window briefly at
-    // its old position), but the grab below immediately issues the final
-    // geometry atomically before the first MapNotify, so no incorrect frame is
-    // ever displayed.
-    //
-    // focus.setFocus(win, ...) hasn't run yet, so focus.getFocused() still
-    // reports the previously-focused window. Pass `win` as the pending focus
-    // target so focus-driven layouts (e.g. monocle) treat the new window as
-    // focused immediately instead of lagging by one retile.
-    if (tilingActive()) {
-        if (build_options.has_tiling) tiling.addWindow(win);
-        if (build_options.has_tiling) tiling.retileCurrentWorkspaceWithOpts(.{ .focus_override = win });
-    } else {
-        if (fullscreen.hasAnyFullscreen()) {
-            // Leave it offscreen, restoreFloatGeom would immediately move it
-            // back to a visible position, undoing the push above.
-            utils.pushWindowOffscreen(conn, win);
-        } else {
-            restoreFloatGeom(win);
-        }
-    }
-
-    // -- Inside the grab: atomic map, focus, borders -------------------------
-    //
-    // Resolve the input model BEFORE the grab: getInputModel's blocking
-    // WM_PROTOCOLS reply wait would implicitly flush the queued retile batch
-    // to the compositor mid-grab (same hazard the pre-drained pointer query
-    // avoids). setFocusWithModel re-applies setFocus's own short-circuits.
-    const spawn_input_model = getInputModel(conn, win);
-    utils.grabServer(conn);
-
-    applyBorderWidth(win);
-    _ = xcb.xcb_map_window(conn, win);
-
-    focus.setFocusWithModel(win, .window_spawn, spawn_input_model);
-    // Re-check the suppress reason *after* setFocus: setFocus is what arms
-    // .window_spawn (via suppressionFor), so reading it before, when it's
-    // almost always .none, would skip this snapshot on virtually every spawn.
-    snapshotSpawnCursorFromReply(ptr_reply, focus.getSuppressReason());
-
-    // Tiled-window borders were already updated by configureWithHints during
-    // the retile, so only floating windows need sweeping here.
-    flushGrabBorders();
-
-    // No xcb_flush here: the event-loop end-of-batch flush covers this.
-    utils.ungrabServer(conn);
-}
-
-fn registerWindowOffscreen(win: u32) void {
-    if (tilingActive()) if (build_options.has_tiling) tiling.addWindow(win);
-
-    applyBorder(win);
-    focus.initWindowGrabs(win);
-
-    // No xcb_flush here: the event-loop end-of-batch flush covers this.
-    if (build_options.has_bar) bar.scheduleRedraw();
-}
-
 /// Handles a MapRequest by querying the properties it needs one at a time:
 /// fire the request, then immediately drain the reply, rather than batching
 /// every cookie up front the way a hot path (dragging, retiling) would.
@@ -949,7 +869,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
 
     // Double-manage guard: a window can send multiple MapRequest events (e.g.
     // an unmap+remap race while the first is still processing); without it,
-    // tiling.addWindow and the property queries below would fire twice.
+    // the model registration and property queries below would fire twice.
     if (tracking.isManaged(win)) return;
 
     // getCurrentWorkspace() returns ?u8; the value is already bounded to [0,255]
@@ -966,16 +886,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const target_ws = resolveTargetWorkspace(win, current_ws);
     const on_current = target_ws.eql(current_ws);
 
-    workspaces.moveWindowTo(win, target_ws) catch |err| {
-        debug.logError(err, win);
-        // Nothing has been fired yet beyond what resolveTargetWorkspace already
-        // drained, so there is no cookie left to discard here.
-        return;
-    };
-
-    // Pipeline all three property queries before draining any reply: the
-    // server processes them in parallel while the atom lookups below run, so
-    // the first xcb_get_property_reply is usually already buffered.
+    // Same pipelined property queries the legacy tail ran.
     const normal_hints_cookie = xcb.xcb_get_property(
         conn,
         property_no_delete,
@@ -985,8 +896,6 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
         0,
         wm_normal_hints_long_length,
     );
-    // WM_PROTOCOLS is interned at startup; the atom-0 fallback keeps the
-    // dual-cookie discard in populateFocusCacheFromCookies symmetric if not.
     const protocols_cookie = fireWMProtocolsQuery(conn, win) orelse
         xcb.xcb_get_property(conn, property_no_delete, win, 0, xcb.XCB_ATOM_ATOM, 0, max_property_length);
     const hints_cookie = xcb.xcb_get_property(
@@ -1000,44 +909,13 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     );
     parseSizeHintsIntoCache(win, normal_hints_cookie);
     populateFocusCacheFromCookies(conn, win, protocols_cookie, hints_cookie);
-
-    if (on_current) mapWindowToScreen(win) else registerWindowOffscreen(win);
-}
-
-const PreGrabState = struct {
-    ptr_reply: ?*xcb.xcb_query_pointer_reply_t,
-    target: ?DestroyFocusTarget,
-    model: ?InputModel,
-};
-
-fn resolvePreGrabState(was_focused: bool, conn: core.Connection) PreGrabState {
-    if (!was_focused) return .{ .ptr_reply = null, .target = null, .model = null };
-
-    const ptr_reply = xcb.xcb_query_pointer_reply(
-        conn,
-        xcb.xcb_query_pointer(conn, core.getState().root),
-        null,
-    );
-
-    const target = resolveDestroyFocusTarget(ptr_reply);
-    const model: ?InputModel = if (target) |t| blk: {
-        if (t.reason == .pointer_sync and !focus.isWindowMapped(conn, t.win)) break :blk null;
-        break :blk getInputModel(conn, t.win);
-    } else null;
-
-    return .{ .ptr_reply = ptr_reply, .target = target, .model = model };
+    var actx: actions.Ctx = .{ .focused_window_id = focus.getFocused() };
+    actions.mapRequest(&actx, win, target_ws.index, on_current);
 }
 
 fn unmanageWindow(win: u32) void {
-    const cs = core.getState();
     const fs_ws = fullscreen.workspaceFor(win);
     if (fs_ws) |ws| fullscreen.removeForWorkspace(ws);
-    const was_fullscreen = fs_ws != null;
-
-    const was_focused = (focus.getFocused() == win);
-
-    const window_workspace = tracking.getWorkspaceForWindow(win);
-    const current_ws = tracking.getCurrentWorkspace();
 
     if (state.?.cache_ready) {
         if (state.?.cache_slots.indexOfById(win)) |i| state.?.cache_slots.swapRemove(i);
@@ -1049,50 +927,20 @@ fn unmanageWindow(win: u32) void {
     evictChildCache(win);
 
     // -- Local bookkeeping, before the grab ---------------------------------
-    // tiling.removeWindow unconditionally evicts the combined cache entry
+    // wincache.removeWindow unconditionally evicts the combined cache entry
     // (geometry + border + size hints). All three removes are pure local
     // bookkeeping (no X requests), so they run pre-grab, letting the
     // post-close focus target be resolved against win-free tracking state,
     // with its input model queried BEFORE the grab.
-    if (build_options.has_tiling) tiling.removeWindow(win);
-    minimize.untrackWindow(win);
+    wincache.removeWindow(win);
     workspaces.removeWindow(win);
 
-    const pre_grab = resolvePreGrabState(was_focused, cs.conn);
-    defer if (pre_grab.ptr_reply) |r| std.c.free(r);
-
-    utils.grabServer(cs.conn);
-
-    if (was_fullscreen) if (build_options.has_bar) bar.setBarState(.show_fullscreen);
-
-    if (was_focused) {
-        // Resolve the real post-close focus BEFORE retiling: tiling.removeWindow
-        // already dropped `win` from the workspace list, but focus.getFocused()
-        // still returns it until clearFocus/setFocus runs. A retile in between
-        // would read that stale ID, focus-driven layouts (monocle) fall back
-        // to an arbitrary window, and nothing retiles again once focus lands.
-        focus.clearFocus();
-        // pre_grab.target is null only when the liveness guard failed above;
-        // in that case skip focus, matching setFocus's early return.
-        if (pre_grab.target) |t| {
-            if (pre_grab.model) |model| {
-                focus.setFocusWithModel(t.win, t.reason, model);
-            }
-        }
-        if (tilingActive()) if (build_options.has_tiling) tiling.retileIfDirty();
-    } else if (!was_fullscreen and tilingActive() and build_options.has_tiling) {
-        if (window_workspace) |ws| if (current_ws == ws)
-            tiling.retileIfDirty()
-        else
-            tiling.retileInactiveWorkspace(core.WorkspaceId.fromIndex(ws));
-    }
-
-    // Tiled-window borders are already current after retileIfDirty (handled by
-    // configureWithHints), so only float windows need a sweep here.
-    flushGrabBorders();
-
-    // No xcb_flush here: the event-loop end-of-batch flush covers this.
-    utils.ungrabServer(cs.conn);
+    // PIPELINE (train d / fix P0-1): drop the MODEL entry, resolve the
+    // post-close focus target (BC06 tiers) and reconcile under one grab.
+    // Idempotent: a window withdrawn via unmap+destroy runs this once per
+    // event; unregister/fallback no-op on the second pass.
+    var actx: actions.Ctx = .{ .focused_window_id = focus.getFocused() };
+    actions.unmanage(&actx, win);
 }
 
 pub fn handleUnmapNotify(event: *const xcb.xcb_unmap_notify_event_t) void {
@@ -1120,39 +968,6 @@ pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t) void {
 /// pre-drained pointer reply (null if the query failed or window was not
 /// focused); the caller owns its memory, accepting the reply instead of the
 /// cookie prevents an implicit XCB output-buffer flush inside the grab.
-fn resolveDestroyFocusTarget(ptr_reply: ?*xcb.xcb_query_pointer_reply_t) ?DestroyFocusTarget {
-    // Scroll layout: windows can be off-screen, so the pointer is often not
-    // over any managed window. Bypass pointer-based focus entirely and use the
-    // focus history recorded by tiling.updateWindowFocus.
-    // takePrevFocusedForScroll is a no-op (returns null) in all other layouts.
-    if ((if (build_options.has_tiling) tiling.takePrevFocusedForScroll() else null)) |prev| {
-        if (tracking.isOnCurrentWorkspaceAndVisible(prev)) {
-            return .{ .win = prev, .reason = .tiling_operation };
-        }
-    }
-
-    // xcb_query_pointer's `child` may be a non-managed toolkit sub-window, not
-    // the managed toplevel: resolve it via findManagedWindow. child == 0
-    // means the pointer is over no window; skip the tree walk and fall through.
-    if (ptr_reply) |reply| {
-        if (reply.*.child != 0) {
-            const child = findManagedWindow(core.getState().conn, reply.*.child, tracking.isManaged);
-            if (tracking.isOnCurrentWorkspaceAndVisible(child)) {
-                return .{ .win = child, .reason = .pointer_sync };
-            }
-        }
-    }
-    if (focus.findBestAvailable(tracking.isOnCurrentWorkspaceAndVisible)) |win| {
-        return .{ .win = win, .reason = .tiling_operation };
-    }
-    return null;
-}
-
-const DestroyFocusTarget = struct {
-    win: u32,
-    reason: focus.Reason,
-};
-
 const geometry_mask: u16 =
     xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
     xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
@@ -1200,7 +1015,7 @@ pub fn geometryFromXcbReply(reply: *xcb.xcb_get_geometry_reply_t) utils.Rect {
 ///
 /// Returns null when even the fallback fails (window gone).
 fn resolveConfigureGeometry(win: u32) ?utils.Rect {
-    if (if (build_options.has_tiling) tiling.getWindowGeom(win) else null) |rect| {
+    if (wincache.getWindowGeom(win)) |rect| {
         const border: u16 = (if (build_options.has_tiling) tiling.getBorderWidth() else 0);
         return .{ .x = rect.x, .y = rect.y, .width = rect.width, .height = rect.height, .border_width = border };
     }
@@ -1240,7 +1055,7 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
     const mask = event.value_mask & geometry_mask;
     if (mask == 0) return;
 
-    const is_tiled = tilingActive() and build_options.has_tiling and tiling.isWindowActiveTiled(win);
+    const is_tiled = tilingActive() and build_options.has_tiling and tracking.isTiledMode(win);
     const is_fullscreen = fullscreen.isFullscreen(win);
     if (is_tiled or is_fullscreen) {
         sendSyntheticConfigureNotify(win);
@@ -1292,7 +1107,7 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
     // A client-initiated border-width change bypasses borders.applyWidth;
     // record it so later dedups compare against what the server now has.
     if (build_options.has_tiling and mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0)
-        _ = tiling.cacheBorderWidth(win, event.border_width);
+        _ = wincache.cacheBorderWidth(win, event.border_width);
 
     // Record the granted geometry so a later restoreFloatGeom/minimize-restore
     // replays what the client actually has instead of snapping back to a stale
@@ -1300,7 +1115,7 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
     // values; with no cache entry there is nothing to merge into (and fetching
     // it would cost this hot path a round trip), so those keep the old
     // behavior of leaving the cache untouched.
-    if (if (build_options.has_tiling) tiling.getWindowGeom(win) else null) |base| {
+    if (wincache.getWindowGeom(win)) |base| {
         saveWindowGeom(win, .{
             .x = if (mask & xcb.XCB_CONFIG_WINDOW_X != 0) event.x else base.x,
             .y = if (mask & xcb.XCB_CONFIG_WINDOW_Y != 0) event.y else base.y,
@@ -1479,7 +1294,7 @@ fn parseSizeHintsIntoCache(
         if (max_y > 0) max_aspect = @as(f32, @floatFromInt(max_x)) / @as(f32, @floatFromInt(max_y));
     }
 
-    if (build_options.has_tiling) tiling.cacheSizeHints(win, .{
+    wincache.cacheSizeHints(win, .{
         .max_width = max_pair.width,
         .max_height = max_pair.height,
         .inc_width = inc_pair.width,
@@ -1519,14 +1334,14 @@ fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
         if (entry.mask & cur_bit == 0) continue;
         const color = borders.color(win);
         if (comptime skip_tiled) {
-            if (tilingActive() and build_options.has_tiling and tiling.isWindowTiled(win)) continue;
+            if (build_options.has_tiling and tilingActive() and tracking.isTiledMode(win)) continue;
             // Same CacheMap dedup as the tiled sweep: floating windows with a
             // cache entry skip the XCB call when their color is unchanged;
             // uncached ones get an entry created and colored in one step.
-            if (build_options.has_tiling and tiling.sendBorderColorIfChanged(win, color)) continue;
+            if (wincache.sendBorderColorIfChanged(win, color)) continue;
         } else {
             // Dedup via the tiling CacheMap: skip the XCB call when unchanged.
-            if (build_options.has_tiling and tiling.sendBorderColorIfChanged(win, color)) continue;
+            if (wincache.sendBorderColorIfChanged(win, color)) continue;
         }
         utils.setBorderPixel(conn, win, color);
     }
@@ -1574,7 +1389,7 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     if (!isValidManagedWindow(win)) return;
 
     const action = event.data.data32[0];
-    const is_fs = fullscreen.isFullscreen(win);
+    const is_fs = actions.isFullscreenMode(win);
     const should_enter = switch (action) {
         1 => true, // _NET_WM_STATE_ADD
         0 => false, // _NET_WM_STATE_REMOVE
@@ -1582,13 +1397,10 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
         else => return,
     };
     if (should_enter == is_fs) return;
-    if (should_enter)
-        fullscreen.enterFullscreen(win, null)
-    else
-        // Use the per-window exit path, not toggle() (which acts on whatever
-        // the fullscreen module deems "current"), multiple workspaces can
-        // each hold a fullscreen window.
-        fullscreen.exitFullscreen(win);
+    // PIPELINE (fix P0-3): model-path transition — the legacy enter/exit
+    // fullscreen machinery bypassed (and fought) the single source of truth.
+    var actx: actions.Ctx = .{ .focused_window_id = focus.getFocused() };
+    actions.fullscreenToggleWindow(&actx, win);
 }
 
 /// Called on config reload.

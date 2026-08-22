@@ -431,7 +431,6 @@ pub fn makePipe() ![2]std.posix.fd_t {
 /// site, too invasive for the small, self-contained locking bar.zig and
 /// carousel.zig need). This is a minimal handle-free substitute, shared
 /// between both instead of each defining its own copy.
-
 pub const Mutex = struct {
     inner: std.c.pthread_mutex_t = .{},
     pub fn lock(m: *Mutex) void {
@@ -553,7 +552,9 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         /// or null. For element types keyed by a single `id` field.
         pub fn indexOfById(self: *const Self, id: u32) ?usize {
             return self.indexOf(id, struct {
-                fn match(i: u32, item: T) bool { return item.id == i; }
+                fn match(i: u32, item: T) bool {
+                    return item.id == i;
+                }
             }.match);
         }
 
@@ -561,7 +562,9 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         /// For scalar element types (e.g. u32 window-ID lists).
         pub fn indexOfScalar(self: *const Self, scalar: T) ?usize {
             return self.indexOf(scalar, struct {
-                fn match(s: T, item: T) bool { return item == s; }
+                fn match(s: T, item: T) bool {
+                    return item == s;
+                }
             }.match);
         }
 
