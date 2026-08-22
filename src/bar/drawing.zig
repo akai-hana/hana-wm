@@ -489,10 +489,7 @@ fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const 
     var slant: ?[]const u8 = null;
 
     while (parts.next()) |part| {
-        if (styleField(part, "size=")) |v| size = v
-        else if (styleField(part, "pixelsize=")) |v| size = v
-        else if (styleField(part, "weight=")) |v| weight = v
-        else if (styleField(part, "slant=")) |v| slant = v;
+        if (styleField(part, "size=")) |v| size = v else if (styleField(part, "pixelsize=")) |v| size = v else if (styleField(part, "weight=")) |v| weight = v else if (styleField(part, "slant=")) |v| slant = v;
     }
 
     if (slant) |s| {
@@ -504,9 +501,7 @@ fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const 
     }
 
     if (weight) |w| {
-        const token = if (std.mem.eql(u8, w, "bold")) "Bold"
-            else if (std.mem.eql(u8, w, "light")) "Light"
-            else "";
+        const token = if (std.mem.eql(u8, w, "bold")) "Bold" else if (std.mem.eql(u8, w, "light")) "Light" else "";
         if (token.len > 0) {
             try result.append(allocator, ' ');
             try result.appendSlice(allocator, token);

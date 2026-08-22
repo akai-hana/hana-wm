@@ -18,6 +18,8 @@ const tracking = @import("tracking");
 const focus = @import("focus");
 const fullscreen = @import("fullscreen");
 const minimize = @import("minimize");
+const pipeline = @import("pipeline"); // PIPELINE: train a
+const actions = @import("actions"); // PIPELINE: train a
 const workspaces = @import("workspaces");
 
 const hooks = @import("hooks");
@@ -670,7 +672,7 @@ fn captureWorkspaceState(snap: *BarSnapshot, allocator: std.mem.Allocator) !void
     const ws_state = workspaces.getState() orelse return;
     snap.workspace_count = @intCast(ws_state.workspaces.len);
     snap.current_workspace = ws_state.current;
-    snap.is_all_view_active = ws_state.all_view_temp_wins.items.len > 0;
+    snap.is_all_view_active = pipeline.model().all_view_active;
     try snap.workspace_has_windows.resize(allocator, snap.workspace_count);
     @memset(snap.workspace_has_windows.items, false);
     snap.title_data.workspace_windows.clearRetainingCapacity();
@@ -1122,8 +1124,9 @@ pub fn toggleBarSegmentAnchor() void {
         return;
     };
     const no_fullscreen = fullscreen.getForWorkspace(core.WorkspaceId.fromIndex(current_ws)) == null;
-    if (build_options.has_tiling and no_fullscreen)
-        tiling.retileCurrentWorkspace();
+    // WP6: the work area changed with the bar's new edge; one model
+    // reconcile re-derives every placement from it (legacy retile deleted).
+    if (no_fullscreen) pipeline.reconcileInGrab();
     window.updateFloatingWindowBorders();
     window.markBordersFlushed();
     ungrabAndFlush();
@@ -1144,6 +1147,9 @@ pub fn scheduleFocusRedraw(_: ?u32) void {
 
 pub fn isBarWindow(win: u32) bool {
     return if (gBar.state) |s| s.win.win_id == win else false;
+}
+pub fn getBarWindow() u32 {
+    return if (gBar.state) |s| s.win.win_id else 0;
 }
 pub fn getBarHeight() u16 {
     return if (gBar.state) |s| s.render.height else 0;
@@ -1340,14 +1346,11 @@ pub fn setBarState(action: Action) void {
     const grabbed = action == .toggle;
     if (grabbed) utils.grabServer(conn);
     if (should_be_visible) _ = xcb.xcb_map_window(conn, s.win.win_id) else _ = xcb.xcb_unmap_window(conn, s.win.win_id);
-    if (grabbed) {
-        const effective_visible = if (bar_forced_hidden_by_fullscreen) s.is_globally_visible else s.is_visible;
-        retileAllWorkspaces(s, effective_visible);
-        window.updateFloatingWindowBorders();
-        window.markBordersFlushed();
+    if (grabbed) { // PIPELINE: WP6 — legacy retileAllWorkspaces deleted
+        pipeline.reconcileInGrab();
         ungrabAndFlush();
     } else {
-        if (build_options.has_tiling) tiling.retileCurrentWorkspace();
+        pipeline.reconcileNow(); // PIPELINE: WP6
     }
     debug.info("Bar {s} ({s})", .{ if (should_be_visible) "shown" else "hidden", @tagName(action) });
 }
@@ -1439,12 +1442,12 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     }
 
     if (s.layout_cache.layout_bounds.contains(x)) {
-        if (left) withTilingGrabForClick(tilingToggleLayout) else withTilingGrabForClick(tilingToggleLayoutReverse);
+        if (left) clickLayoutCycle(1) else clickLayoutCycle(-1);
         return;
     }
 
     if (s.layout_cache.variants_bounds.contains(x)) {
-        if (left) withTilingGrabForClick(tilingStepLayoutVariant) else withTilingGrabForClick(tilingStepLayoutVariantReverse);
+        if (left) clickVariantStep(1) else clickVariantStep(-1);
         return;
     }
 }
@@ -1458,10 +1461,12 @@ fn resolveWorkspaceClick(offset: u16) ?usize {
     return idx;
 }
 
+var action_ctx: actions.Ctx = .{}; // WP6 — shared bar action context
+
 /// `offset` is the click position relative to the workspaces segment's start.
 fn handleWorkspacesClick(offset: u16) void {
     const idx = resolveWorkspaceClick(offset) orelse return;
-    workspaces.switchTo(core.WorkspaceId.fromIndex(@intCast(idx)));
+    actions.switchTo(&action_ctx, @intCast(idx)); // WP6
 }
 
 /// `offset` is the click position relative to the workspaces segment's start.
@@ -1471,7 +1476,7 @@ fn handleWorkspacesClick(offset: u16) void {
 fn handleWorkspacesRightClick(offset: u16) void {
     const idx = resolveWorkspaceClick(offset) orelse return;
     const win = focus.getFocused() orelse return;
-    workspaces.moveWindowTo(win, core.WorkspaceId.fromIndex(@intCast(idx))) catch |e| debug.warnOnErr(e, "bar workspace right-click move");
+    actions.moveWindowTo(&action_ctx, win, @intCast(idx)); // WP6
 }
 
 /// `offset` is the click position relative to the title segment's start.
@@ -1500,72 +1505,30 @@ fn handleTitleClick(s: *State, offset: u16) void {
         return;
     }) orelse return;
 
-    if (minimize.isMinimized(target.window)) {
-        minimize.unminimizeSpecific(target.window);
+    if (minimize.isMinimized(target.window)) { // WP6 — pipeline-only
+        actions.restore(&action_ctx, target.window);
     } else if (focus.getFocused() == target.window) {
-        minimize.minimizeWindow();
+        actions.minimize(&action_ctx, target.window);
     } else {
         focus.setFocus(target.window, .mouse_click);
     }
 }
 
-/// Mirrors input.zig's withTilingGrab (mouse-driven variant, which resyncs
-/// pointer-based focus after the reflow). Reimplemented locally rather than
-/// exposed from input.zig because input.zig already imports this module;
-/// importing back would cycle.
-fn withTilingGrabForClick(op: anytype) void {
-    const conn = core.getState().conn;
-    utils.grabServer(conn);
-    focus.setSuppressReason(.tiling_operation);
-    op();
-    window.updateFloatingWindowBorders();
-    window.markBordersFlushed();
+/// Layout-segment clicks run the same model-path ops as their keybindings.
+/// Pointer focus is already correct here (the user just clicked the bar), so
+/// no grab/pointer-resync dance is needed — reconcile + redraw suffice.
+fn clickLayoutCycle(dir: i32) void {
+    var ctx: actions.Ctx = .{ .focused_window_id = focus.getFocused() };
+    actions.cycleLayoutKind(&ctx, dir);
     redrawInsideGrab();
-    focus.beginPointerSync();
-    utils.ungrabAndFlush(conn);
 }
 
-fn tilingToggleLayout() void {
-    if (build_options.has_tiling) tiling.toggleLayout();
-}
-fn tilingToggleLayoutReverse() void {
-    if (build_options.has_tiling) tiling.toggleLayoutReverse();
-}
-fn tilingStepLayoutVariant() void {
-    if (build_options.has_tiling) tiling.stepLayoutVariant();
-}
-fn tilingStepLayoutVariantReverse() void {
-    if (build_options.has_tiling) tiling.stepLayoutVariantReverse();
+fn clickVariantStep(dir: i32) void {
+    var ctx: actions.Ctx = .{ .focused_window_id = focus.getFocused() };
+    actions.stepVariantDir(&ctx, dir);
+    redrawInsideGrab();
 }
 
 fn isTilingActive() bool {
     return core.getState().config.tiling.enabled and build_options.has_tiling and tiling.isEnabled();
-}
-
-/// Must be called without holding the X server grab.
-/// `effective_visible` is the bar-visibility value that tilers should observe;
-/// it may differ from `s.is_visible` when a fullscreen override is in effect.
-fn retileAllWorkspaces(s: *State, effective_visible: bool) void {
-    // Temporarily expose the effective visibility so tiling code reading
-    // isVisible() sees the intended value, not the transitional state, for the
-    // duration of this function.
-    const saved_visible = s.is_visible;
-    s.is_visible = effective_visible;
-    defer s.is_visible = saved_visible;
-    const multi_ws = core.getState().config.workspaces.enabled and isTilingActive();
-    if (!multi_ws) {
-        if (build_options.has_tiling) tiling.retileCurrentWorkspace();
-        return;
-    }
-    const ws_state = workspaces.getState() orelse return;
-    for (ws_state.workspaces, 0..) |_, idx| {
-        const ws_idx: u8 = @intCast(idx);
-        if (tracking.countWindowsOnWorkspace(core.WorkspaceId.fromIndex(ws_idx)) == 0) continue;
-        if (fullscreen.getForWorkspace(core.WorkspaceId.fromIndex(ws_idx)) != null) continue;
-        if (!build_options.has_tiling) continue;
-        if (ws_idx != ws_state.current)
-            tiling.retileInactiveWorkspace(core.WorkspaceId.fromIndex(ws_idx))
-        else
-            tiling.retileCurrentWorkspace();
-    }
 }

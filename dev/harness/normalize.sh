@@ -1,0 +1,38 @@
+#!/bin/sh
+# Normalize volatile output from harness dumps so runs are comparable.
+#
+#   - Window ids (0x + >=5 hex digits) -> stable tokens (W01, W02, ...) in
+#     first-appearance order. Creation order is deterministic per scenario,
+#     so token assignment is stable across runs.
+#   - PIDs (_NET_WM_PID) -> PID
+#   - Wall-clock times (bar clock segment) -> TIME
+#   - bench wall-time figures -> T us (round-trip/window counts kept)
+#   - ANSI escapes dropped.
+#
+# Usage: normalize.sh <file...>   (rewrites in place)
+# Env:   HW_KEEP_RAW=1 writes <file>.norm instead of in-place.
+
+for f in "$@"; do
+	[ -f "$f" ] || continue
+	perl -e '
+		my %map; my $n = 0;
+		while (<>) {
+			s/\e\[[0-9;]*[A-Za-z]//g;
+			next if /^Fontconfig warning:/;   # intermittent fontconfig init noise
+			s/(_NET_WM_PID\(CARDINAL\) = )\d+/${1}PID/g;
+			s/\b\d{1,2}:\d{2}(?::\d{2})?\b/TIME/g;
+			s/(bench: title capture: .*), \d+ us/$1, T us/g;
+			# Window ids: 0x-prefixed (xwininfo/xprop) and bare >=6-hex-digit
+			# forms (dump_state prints {x}). Must run after the numeric
+			# scrubbing above so counts/timings never tokenize.
+			s{(0x[0-9a-fA-F]{5,}|(?<![0-9A-Fa-f])(?:0[xX])?[0-9A-Fa-f]{6,}(?![0-9A-Fa-f]))}
+			 { exists $map{$1} ? $map{$1} : ($map{$1} = sprintf("W%02d", ++$n)) }ge;
+			print;
+		}
+	' "$f" >"$f.norm"
+	if [ "${HW_KEEP_RAW:-0}" = "1" ]; then
+		mv "$f.norm" "${f%.raw}.norm"
+	else
+		mv "$f.norm" "$f"
+	fi
+done

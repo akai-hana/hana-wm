@@ -290,7 +290,8 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
         state.?.confirm_win = win;
     }
 
-    if (build_options.has_tiling) tiling.updateWindowFocus(old, win);
+    // WP6: legacy pool focus bookkeeping (updateWindowFocus) deleted — the
+    // model owns window state; nothing reads the pool anymore.
     if (build_options.has_bar) bar.carouselNotifyFocusChanged(win);
     if (flags.schedule_bar) if (build_options.has_bar) bar.scheduleFocusRedraw(win);
 
@@ -410,6 +411,24 @@ fn focusWithModelImpl(
         .schedule_bar = true,
         .new_suppress = suppressionFor(reason, state.?.suppress_reason),
     });
+
+    // PIPELINE (fix P1-4): focus transitions change the border color. Legacy
+    // swept borders here; the model path diffs colors in sync — schedule a
+    // coalesced end-of-dispatch reconcile so hover/click refocuses repaint
+    // borders without an action-driven retile.
+    //
+    // Also mirror the transition INTO the model (fix P2-8 companion): every
+    // focus source — hover, click, EWMH — lands here, so m.focused and the
+    // per-workspace MRU stay true single-source-of-truth state. Idempotent
+    // when actions already called setFocus for this transition.
+    {
+        const pipeline = @import("pipeline");
+        if (pipeline.initialized) {
+            const mm = pipeline.model();
+            @import("model").setFocus(mm, win);
+        }
+        pipeline.scheduleReconcile();
+    }
 }
 
 /// Drain the deferred focus-confirm reply, if one is pending. Must be called
@@ -555,7 +574,6 @@ pub fn focusBestAvailable() void {
 pub fn clearFocus() void {
     if (state.?.focused_window) |old_win| {
         grabButtons(old_win, false);
-        if (build_options.has_tiling) tiling.updateWindowFocus(old_win, null);
     }
     cancelPendingConfirm();
     state.?.focused_window = null;
@@ -615,7 +633,9 @@ inline fn advertiseActiveWindow(win: u32) void {
 /// pairs that confuse Electron's internal focus state machine.
 inline fn shouldRaise(reason: Reason, win: u32) bool {
     return switch (reason) {
-        .mouse_click, .user_command, .pointer_sync => !(build_options.has_tiling and tiling.isWindowActiveTiled(win)),
+        // Tiled windows get their stacking from sync's raise-the-winner pass
+        // during the post-transition reconcile; everything else raises here.
+        .mouse_click, .user_command, .pointer_sync => !tracking.isTiledMode(win),
         .mouse_enter, .tiling_operation, .window_spawn, .workspace_switch => false,
     };
 }
@@ -708,8 +728,8 @@ pub fn drainTilingOpSettle() void {
 // Window focus cycling
 //
 // Scratch buffer for collectVisibleWindows, module-level so it isn't
-// stack-allocated on every key press. Sized to tracking.Tracking.capacity
-// (the max tiled windows across the whole WM, not per workspace).
+// stack-allocated on every key press. Sized to the max tiled windows across
+// the whole WM (not per workspace).
 
 var cycle_buf: [constants.Limits.max_tiled_windows]u32 = undefined;
 
@@ -724,21 +744,12 @@ inline fn appendVisible(w: u32, len: *usize) void {
 
 /// Build an ordered list of currently-visible windows for cycling.
 ///
-/// Prefers the tiling module's window list when tiling is active; it matches
-/// on-screen order (master first, then stack); else falls back to the
-/// tracking table in iteration order. Both paths emit only windows that are on
-/// the current workspace and not minimized. Returns the count written into
+/// All visible windows in tracking-table order (WP6: the legacy tiling-pool
+/// branch is gone — the pool list is never fed). Emits only windows that are
+/// on the current workspace and not minimized. Returns the count written into
 /// `cycle_buf`, or 0 if none.
 fn collectVisibleWindows() usize {
     var len: usize = 0;
-
-    if (build_options.has_tiling and tiling.isEnabled()) {
-        for (if (build_options.has_tiling) tiling.getTiledWindows() else &.{}) |w| appendVisible(w, &len);
-        if (len > 0) return len;
-    }
-
-    // Fallback: all visible windows in tracking-table order. No pre-insertion
-    // or dedup needed; focusCycle locates the focused window via indexOfScalar.
     for (tracking.allWindows()) |entry| appendVisible(entry.win, &len);
     return len;
 }
@@ -772,25 +783,4 @@ pub fn focusNext() void {
 /// Cycle focus to the previous visible window (Mod+j, moves left/backward).
 pub fn focusPrev() void {
     focusCycle(false);
-}
-
-/// Shared implementation for moving the focused window through the cycle.
-/// Swaps it with the neighbour in the given direction.
-fn moveWindowCycle(comptime forward: bool) void {
-    const len = collectVisibleWindows();
-    if (len < 2) return;
-    const wins = cycle_buf[0..len];
-    const focused = state.?.focused_window orelse return;
-    const idx = std.mem.indexOfScalar(u32, wins, focused) orelse return;
-    const target = wins[cycleIndex(forward, idx, len)];
-    if (build_options.has_tiling) tiling.swapWindowsById(focused, target);
-}
-
-/// Move the focused window one step forward in the cycle (Mod+Shift+k).
-pub fn moveWindowNext() void {
-    moveWindowCycle(true);
-}
-/// Move the focused window one step backward in the cycle (Mod+Shift+j).
-pub fn moveWindowPrev() void {
-    moveWindowCycle(false);
 }

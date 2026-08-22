@@ -1,0 +1,67 @@
+# Deterministic config for the smoke-test harness.
+# This is the ONLY config hana sees during harness runs:
+# run-scenario.sh points XDG_CONFIG_HOME at a private copy of this tree.
+#
+# Keep it minimal and explicit: every bind a scenario needs lives here with
+# a fixed keysym. No includes, no themes, no clock-dependent settings.
+
+[tiling]
+enabled = true
+border_width = 7
+gap_width = 8
+
+layouts = [
+	"master-stack",
+	"monocle",
+	"grid",
+	"fibonacci",
+]
+
+[tiling.layouts.master-stack]
+count = 1
+side = "left"
+width = 50%
+variants = "lifo"
+
+[bar]
+enabled = true
+position = "bottom"
+
+[workspaces]
+count = 4
+
+[binds]
+Mod = "Super"
+
+# Terminal is never used by scenarios; bound so auto-detection stays silent.
+Mod+Return = "auto_terminal"
+
+# Window management
+Mod+F       = "toggle_fullscreen"
+Mod+Shift+F = "close_window"
+Mod+S       = "toggle_floating_window"
+
+# Minimize family
+Mod+T           = "minimize_window"
+Mod+Shift+T     = "unminimize_lifo"
+Mod+Alt+T       = "unminimize_fifo"
+Mod+Shift+Alt+T = "unminimize_all"
+
+# Workspaces (glob expansion appends the 1-based index automatically)
+Mod+{1-4} = "workspace"
+Mod+Shift+{1-4} = "move_to_workspace"
+Mod+A = "all_workspaces"
+Mod+P = "move_to_all_workspaces"
+
+# Tiling
+Mod+W         = "swap_master"
+Mod+J         = "focus_next_window"
+Mod+K         = "focus_prev_window"
+Mod+Space     = "toggle_layout"
+Mod+E         = "cycle_variants"
+
+# Config reload
+Mod+Shift+Y = "reload"
+
+# State introspection (harness gold: lands in hana.log)
+Mod+Q = "dump_state"

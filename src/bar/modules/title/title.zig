@@ -16,7 +16,7 @@ const types = @import("types");
 
 const drawing = @import("drawing");
 const build_options = @import("build_options");
-const tiling = if (build_options.has_tiling) @import("tiling") else null;
+const wincache = @import("wincache");
 
 const SegmentGeometry = struct {
     seg_x: u16,
@@ -123,7 +123,7 @@ pub const TitleSnapshot = struct {
     titles: []const []const u8 = &.{},
 
     /// Pre-fetched window geometry (see `batchFetchWindowInfosInto`), indexed like
-    /// `titles`. Non-blocking fallback for windows the tiling cache doesn't
+    /// `titles`. Non-blocking fallback for windows the geometry cache doesn't
     /// cover (e.g. floating), so the drawCached fast path never issues an
     /// xcb_get_geometry round-trip. Empty means no pre-fetched data; fall back
     /// to live.
@@ -470,13 +470,13 @@ const WindowDataBatch = struct {
                 }
             }
 
-            // Prefer the tiling cache; only cache-missing, non-minimized
+            // Prefer the geometry cache; only cache-missing, non-minimized
             // windows (that aren't covered by a pre-fetched snapshot) get a
             // batched get_geometry.
             self.needs_xcb_geometry[i] = false;
             self.tiling_geoms[i] = null;
             if (!minimized.contains(win)) {
-                self.tiling_geoms[i] = if (build_options.has_tiling) tiling.getWindowGeom(win) else null;
+                self.tiling_geoms[i] = wincache.getWindowGeom(win);
                 if (self.tiling_geoms[i] == null and !has_prefetched_geoms) {
                     self.geom_cookies[i] = xcb.xcb_get_geometry(self.conn, win);
                     self.needs_xcb_geometry[i] = true;

@@ -1,0 +1,73 @@
+info: [debug] Calculated DPI: X=95.9, Y=95.8, Average=95.9
+info: [debug] Using geometry-calculated DPI: 95.9
+info: [debug] Merged: /home/akai/eudaimonia/hana/dev/harness/out/S16-close-respawn/config-home/hana/config.toml
+info: [debug] Loaded config from dir: /home/akai/eudaimonia/hana/dev/harness/out/S16-close-respawn/config-home/hana (1 file(s))
+Fontconfig warning: using without calling FcInit()
+info: [debug] hana booted up successfully!
+warning: [debug] Unchecked XCB request failed: code=2 major=53 minor=0 resource=0
+warning: [debug] Unchecked XCB request failed: code=4 major=54 minor=0 resource=200004
+info: [debug] [ENTER] win=0x400001 mode=0 detail=0 root_x=640 root_y=400
+info: [debug] [MAYBE_FOCUS] 0x400001 -> setFocus(.mouse_enter)
+info: [debug] [ENTER] win=0x3a0 mode=0 detail=2 root_x=640 root_y=400
+info: [debug] [KEY] keycode=44 state=0x40 mods=0x40 keysym=0x6a
+info: [debug] [KEY] action=focus_next_window
+info: [debug] [KEY] keycode=24 state=0x40 mods=0x40 keysym=0x71
+info: [debug] [KEY] action=dump_state
+info: [debug] ========== STATE DUMP ==========
+info: [debug] Focused:        400001
+info: [debug] Total windows:  2
+info: [debug] Suppress focus: none
+info: [debug] Drag active:    false
+info: [debug] Fullscreen: none
+info: [debug] Current workspace: 1
+info: [debug]   WS1: 2 windows
+info: [debug]   WS2: 0 windows
+info: [debug]   WS3: 0 windows
+info: [debug]   WS4: 0 windows
+info: [debug] Tiling enabled: true
+info: [debug] Tiling layout:  master
+info: [debug] Tiled windows:  2
+info: [debug] ================================
+info: [debug] [KEY] keycode=41 state=0x41 mods=0x41 keysym=0x66
+info: [debug] [KEY] action=close_window
+info: [debug] [ENTER] win=0x600001 mode=0 detail=0 root_x=640 root_y=400
+info: [debug] [MAYBE_FOCUS] 0x600001 -> setFocus(.mouse_enter)
+warning: [debug] Unchecked XCB request failed: code=3 major=29 minor=0 resource=400001
+warning: [debug] Unchecked XCB request failed: code=3 major=28 minor=0 resource=400001
+info: [debug] [ENTER] win=0x3a0 mode=0 detail=2 root_x=640 root_y=400
+info: [debug] [KEY] keycode=24 state=0x40 mods=0x40 keysym=0x71
+info: [debug] [KEY] action=dump_state
+info: [debug] ========== STATE DUMP ==========
+info: [debug] Focused:        400001
+info: [debug] Total windows:  2
+info: [debug] Suppress focus: window_spawn
+info: [debug] Drag active:    false
+info: [debug] Fullscreen: none
+info: [debug] Current workspace: 1
+info: [debug]   WS1: 2 windows
+info: [debug]   WS2: 0 windows
+info: [debug]   WS3: 0 windows
+info: [debug]   WS4: 0 windows
+info: [debug] Tiling enabled: true
+info: [debug] Tiling layout:  master
+info: [debug] Tiled windows:  2
+info: [debug] ================================
+info: [debug] [KEY] keycode=24 state=0x40 mods=0x40 keysym=0x71
+info: [debug] [KEY] action=dump_state
+info: [debug] ========== STATE DUMP ==========
+info: [debug] Focused:        400001
+info: [debug] Total windows:  2
+info: [debug] Suppress focus: window_spawn
+info: [debug] Drag active:    false
+info: [debug] Fullscreen: none
+info: [debug] Current workspace: 1
+info: [debug]   WS1: 2 windows
+info: [debug]   WS2: 0 windows
+info: [debug]   WS3: 0 windows
+info: [debug]   WS4: 0 windows
+info: [debug] Tiling enabled: true
+info: [debug] Tiling layout:  master
+info: [debug] Tiled windows:  2
+info: [debug] ================================
+info: [debug] Shutting down gracefully...
+info: [debug] Clock thread stopped

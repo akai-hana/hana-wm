@@ -15,6 +15,7 @@ const scale = @import("scale");
 const debug = @import("debug");
 const input = @import("input");
 const window = @import("window");
+const pipeline = @import("pipeline");
 const plugins = @import("plugins");
 
 pub fn main() !void {
@@ -60,6 +61,8 @@ pub fn main() !void {
     events.grabKeybindings();
     try window.init(alloc);
     defer window.deinit();
+
+    pipeline.init(alloc); // PIPELINE: dual-path dispatch (E.7); flag OFF ⇒ legacy only
 
     plugins.initAll();
     defer plugins.deinitAll();

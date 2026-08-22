@@ -1,0 +1,38 @@
+# Rule 1 allowlist (REARCHITECTURE_PLAN.md §13): files permitted to send
+# configure/map/change_attributes outside src/sync/. Each entry documents the
+# surviving wire traffic and why it has not (yet) moved behind sync.
+#
+# Bar's OWN window lifecycle: map on show, Y-reposition on height change,
+# raise-above-others, map/unmap in setBarState. Sync only raises bar_win via
+# the force_restack hook; bar self-management stays local to avoid a
+# bar<->sync import cycle.
+src/bar/bar.zig
+src/bar/drawing.zig
+# ConfigureRequest compliance (BC03/BC04/BC05): client-requested geometry is
+# honored for floating windows and BW recorded for tiled — protocol duty that
+# answers the CLIENT, not layout. restoreFloatGeom / moveFloatToDefaultPos /
+# applyBorder ride along.
+src/window/window.zig
+src/window/borders.zig
+# Click-raise of floating windows and focus-flag raises: single restack
+# request tied to the X11 focus protocol (R2 keeps protocol in window.*).
+src/window/focus.zig
+src/window/modules/floating.zig
+# Legacy unminimize paths still reachable from window.zig unmap/destroy
+# repair; superseded by actions.restore but not yet unreachable.
+src/window/modules/minimize.zig
+src/window/modules/fullscreen.zig
+# Config reload BW sweep inside reloadConfig's server grab; deleted when
+# hints cache re-homing removes the legacy reload body.
+src/window/modules/tiling/tiling.zig
+src/window/modules/tiling/layouts.zig
+src/window/modules/workspaces.zig
+# Root-window keygrab installation at startup and click-focus stack-mode:
+# startup is pre-WM-loop; the restack routes through sync force_restack in a
+# later cleanup.
+src/core/main.zig
+src/core/input/input.zig
+# Wire PRIMITIVES: xcb_sink itself dispatches through utils.configureWindow /
+# raiseWindow / setBorderPixel / pushWindowOffscreen*. Primitive home is not
+# a policy violation — grep cannot distinguish definition from rogue send.
+src/core/utils/utils.zig

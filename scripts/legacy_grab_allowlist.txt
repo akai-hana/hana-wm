@@ -1,0 +1,8 @@
+# Rule 2 allowlist (REARCHITECTURE_PLAN.md §13): files permitted to call
+# xcb_grab_server outside src/sync/. Per plan this list starts non-empty and
+# shrinks; each entry documents why the grab primitive lives there.
+#
+# utils.zig hosts the shared grab/ungrabAndFlush PRIMITIVES. sync.zig's
+# reconcileUnderGrab calls these; the primitive home is not itself a policy
+# violation, but grep cannot tell call from definition.
+src/core/utils/utils.zig

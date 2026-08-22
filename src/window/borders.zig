@@ -11,6 +11,7 @@ const focus = @import("focus");
 const fullscreen = @import("fullscreen");
 const build_options = @import("build_options");
 const tiling = if (build_options.has_tiling) @import("tiling") else null;
+const wincache = @import("wincache");
 
 /// Returns the border color for `win`: 0 for fullscreen windows,
 /// focused or unfocused color otherwise.
@@ -37,7 +38,7 @@ pub inline fn width() u16 {
 pub inline fn applyWidth(conn: core.Connection, win: u32) void {
     const w = width();
     if (w == 0) return;
-    if (build_options.has_tiling and tiling.cacheBorderWidth(win, w)) return;
+    if (wincache.cacheBorderWidth(win, w)) return;
     _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{w});
 }
 
@@ -51,7 +52,7 @@ pub inline fn apply(conn: core.Connection, win: u32) void {
     applyWidth(conn, win);
     const c = color(win);
     if (build_options.has_tiling) {
-        if (tiling.sendBorderColorIfChanged(win, c)) return;
+        if (wincache.sendBorderColorIfChanged(win, c)) return;
     }
     utils.setBorderPixel(conn, win, c);
 }
