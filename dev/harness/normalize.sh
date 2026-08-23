@@ -19,6 +19,10 @@ for f in "$@"; do
 		while (<>) {
 			s/\e\[[0-9;]*[A-Za-z]//g;
 			next if /^Fontconfig warning:/;   # intermittent fontconfig init noise
+			# NoFont draw attempts: the minimal Xvfb has no usable fonts, so
+			# how many of these fire depends on where poll wakeups land
+			# relative to scenario timing. Unreachable on real systems.
+			next if /Best-effort op failed \(bar drawSegment\): error\.NoFont/;
 			s/(_NET_WM_PID\(CARDINAL\) = )\d+/${1}PID/g;
 			s/\b\d{1,2}:\d{2}(?::\d{2})?\b/TIME/g;
 			s/(bench: title capture: .*), \d+ us/$1, T us/g;

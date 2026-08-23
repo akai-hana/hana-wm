@@ -42,16 +42,6 @@ pub fn isManaged(win: u32) bool {
     return mm.store.has(win);
 }
 
-/// Defensive registration path: legacy callers (workspaces.moveWindowTo when
-/// present) may still call this. The map path registers via actions.mapRequest,
-/// so this is a no-op for windows the model already knows.
-pub fn registerWindow(win: u32, ws: core.WorkspaceId) !void {
-    const mm = m() orelse return;
-    std.debug.assert(ws.index < state.workspace_count);
-    if (mm.store.has(win)) return;
-    model_mod.register(mm, win, ws.index);
-}
-
 /// Idempotent with actions.unmanage (unregister early-returns when absent).
 pub fn removeWindow(win: u32) void {
     const mm = m() orelse return;
@@ -95,99 +85,15 @@ pub fn allWindows() []const Entry {
 }
 
 // ---------------------------------------------------------------------------
-// Iterators
-// ---------------------------------------------------------------------------
-
-/// Iterates tracked entries, yielding only those whose workspace mask contains
-/// `bit`, and optionally skipping a single window id (`skip` = 0 = none).
-/// When the caller wants no mask filter it passes an all-ones `bit`.
-pub const WorkspaceIter = struct {
-    idx: usize = 0,
-    bit: u64,
-    skip: u32,
-
-    pub fn next(self: *WorkspaceIter) ?Entry {
-        const mm = m() orelse return null;
-        const count = mm.store.count();
-        while (self.idx < count) {
-            const it = mm.store.at(self.idx);
-            self.idx += 1;
-            if (it.val.mask & self.bit == 0 or it.key == self.skip) continue;
-            return .{ .win = it.key, .mask = it.val.mask };
-        }
-        return null;
-    }
-};
-
-pub fn onWorkspace(bit: u64, skip: u32) WorkspaceIter {
-    return .{ .bit = bit, .skip = skip };
-}
-
-/// Bitmask selecting "windows on the current workspace" for iteration
-/// helpers: the current workspace's bit when workspaces are enabled, or
-/// all-ones (no filter) when they're disabled. Null when workspaces are
-/// enabled but no current workspace is set yet (not initialized), callers
-/// treat that as "nothing to iterate".
-fn currentWorkspaceIterBit() ?u64 {
-    if (core.getState().config.workspaces.enabled) {
-        const cur = getCurrentWorkspace() orelse return null;
-        return workspaceBit(cur);
-    }
-    return ~@as(u64, 0);
-}
-
-pub fn windowsOnCurrentWorkspace(skip: u32) WorkspaceIter {
-    const bit = currentWorkspaceIterBit() orelse
-        return .{ .skip = skip, .bit = ~@as(u64, 0) };
-    return onWorkspace(bit, skip);
-}
-
-// ---------------------------------------------------------------------------
 // Per-workspace focus MRU (facade over model.ws[ws].focus_mru)
 //
 // Order convention: index 0 = most recent (matches model.setFocus's
-// front-insert). popFocusMru consumes from the FRONT and discards invisible
-// entries along the way (legacy consume semantics preserved).
+// front-insert). Fallback selection reads the MRU through actions.pickFallback.
 // ---------------------------------------------------------------------------
-
-const focus_mru_cap = model_mod.mru_capacity;
-
-/// Record `win` as the most-recently-defocused window on workspace `ws_idx`.
-pub fn pushFocusMru(ws_idx: core.WorkspaceId, win: u32) void {
-    const mm = m() orelse return;
-    if (ws_idx.index >= constants.max_workspaces) return;
-    const list = &mm.ws[ws_idx.index].focus_mru;
-    if (model_mod.findInOrder(list, win)) |i| _ = list.orderedRemove(i);
-    list.insert(mm.gpa, 0, win) catch return;
-    if (list.items.len > focus_mru_cap) list.shrinkRetainingCapacity(focus_mru_cap);
-}
-
-/// Pop the most recently defocused window on workspace `ws_idx` that
-/// satisfies `visible`. Entries skipped along the way are discarded (stale:
-/// minimized, destroyed, or moved off this workspace). Returns null once the
-/// history is exhausted with nothing eligible.
-pub fn popFocusMru(ws_idx: core.WorkspaceId, visible: *const fn (u32) bool) ?u32 {
-    const mm = m() orelse return null;
-    if (ws_idx.index >= constants.max_workspaces) return null;
-    const list = &mm.ws[ws_idx.index].focus_mru;
-    while (list.items.len > 0) {
-        const win = list.items[0];
-        _ = list.orderedRemove(0);
-        if (visible(win)) return win;
-    }
-    return null;
-}
-
-/// Purge `win` from every workspace's focus history so a destroyed window's
-/// ID can never surface from a stale entry (X11 recycles window IDs).
-fn removeFromFocusMruAll(win: u32) void {
-    const mm = m() orelse return;
-    for (&mm.ws) |*s| model_mod.removeValuePub(s.focus_mru, win);
-}
 
 fn clearFocusMru() void {
     const mm = m() orelse return;
-    for (&mm.ws) |*s| s.focus_mru.clearRetainingCapacity();
+    for (&mm.ws) |*s| s.focus_mru.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -196,7 +102,6 @@ fn clearFocusMru() void {
 
 var state = struct {
     initialized: bool = false,
-    current: u8 = 0,
     workspace_count: usize = 1,
 }{};
 
@@ -221,76 +126,19 @@ pub fn setWorkspaceCount(count: usize) void {
 /// Called by workspaces.switchTo so getCurrentWorkspace() stays correct even
 /// when code queries tracking directly. Also mirrored into the model by
 /// actions.switchTo (dual-write until tracking's storage is fully deleted).
-pub fn setCurrentWorkspace(ws: core.WorkspaceId) void {
-    std.debug.assert(ws.index < state.workspace_count);
-    state.current = ws.index;
-    if (m()) |mm| mm.current = ws.index;
-}
-
 pub inline fn getStateOpt() ?*@TypeOf(state) {
     return if (state.initialized) &state else null;
 }
 
+/// Single source of truth is `model.current` (A4): read-through facade,
+/// null before pipeline.init (callers default to workspace 0).
 pub inline fn getCurrentWorkspace() ?u8 {
-    if (!state.initialized) return null;
-    return state.current;
+    if (pipeline.initialized) return @intCast(pipeline.model().current);
+    return null;
 }
 
 pub inline fn getWorkspaceCount() usize {
     return state.workspace_count;
-}
-
-// ---------------------------------------------------------------------------
-// Geometry prefetch (data source now model-driven)
-// ---------------------------------------------------------------------------
-
-/// Shared geometry prefetch + save: iterates windows matching `ws_bit`,
-/// applies `predicate`, skips windows on `skip_ws` (255 = none), skips cache
-/// hits, issues pipelined `xcb_get_geometry` requests, saves results. Skips
-/// offscreen-parked replies. Must run BEFORE `xcb_grab_server`.
-/// `skip_win` is excluded from iteration (0 = none).
-pub fn prefetchAndSaveGeometry(
-    ws_bit: u64,
-    predicate: *const fn (u32) bool,
-    skip_win: u32,
-    skip_ws: u8,
-) void {
-    const window = @import("window");
-    const conn = core.getState().conn;
-
-    const capacity = constants.Limits.max_tiled_windows;
-    var wins: [capacity]u32 = undefined;
-    var cookies: [capacity]core.xcb.xcb_get_geometry_cookie_t = undefined;
-    var count: usize = 0;
-
-    {
-        var it = onWorkspace(ws_bit, skip_win);
-        while (it.next()) |entry| {
-            const win = entry.win;
-            if (skip_ws < 64 and isWindowOnWorkspace(win, core.WorkspaceId.fromIndex(skip_ws))) continue;
-            if (!predicate(win)) continue;
-            if (wincache.getWindowGeom(win) != null) continue;
-            if (count >= capacity) break;
-            wins[count] = win;
-            cookies[count] = core.xcb.xcb_get_geometry(conn, win);
-            count += 1;
-        }
-    }
-
-    for (0..count) |i| {
-        const reply = core.xcb.xcb_get_geometry_reply(conn, cookies[i], null) orelse continue;
-        defer std.c.free(reply);
-        if (utils.isOffscreenGeomReply(reply)) continue;
-        window.saveWindowGeom(wins[i], utils.Rect.fromXcb(reply));
-    }
-}
-
-pub fn prefetchAndSaveGeometryOnCurrentWorkspace(
-    predicate: *const fn (u32) bool,
-    skip_win: u32,
-) void {
-    const bit = currentWorkspaceIterBit() orelse return;
-    prefetchAndSaveGeometry(bit, predicate, skip_win, 255);
 }
 
 pub fn countWindowsOnWorkspace(ws_idx: core.WorkspaceId) usize {

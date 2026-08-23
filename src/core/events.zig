@@ -14,8 +14,6 @@ const input = @import("input");
 const window = @import("window");
 const focus = @import("focus");
 
-const plugins = @import("plugins");
-const clock = @import("clock");
 const fullscreen = @import("fullscreen");
 const refresh_rate = @import("refresh_rate");
 const signals = @import("signals");
@@ -23,6 +21,7 @@ const pipeline = @import("pipeline");
 const actions = @import("actions");
 const build_options = @import("build_options");
 const tiling = if (build_options.has_tiling) @import("tiling") else null;
+const bar = if (build_options.has_bar) @import("bar") else null;
 
 const fd_xcb = 0;
 const fd_signal = 1;
@@ -55,16 +54,14 @@ inline fn eventCast(comptime T: type, event: *anyopaque) T {
 
 fn handleExpose(event: *anyopaque) void {
     const e = eventCast(*xcb.xcb_expose_event_t, event);
-    inline for (plugins.list[0..plugins.count]) |p| {
-        if (p.on_expose) |f| f(e);
-    }
+    // D8: the plugin registry is gone (two compile-time-known "plugins",
+    // only bar ever hooked anything); direct dispatch behind build flags.
+    if (build_options.has_bar) bar.handleExpose(e);
 }
 
 fn handlePropertyNotify(event: *anyopaque) void {
     const e = eventCast(*xcb.xcb_property_notify_event_t, event);
-    inline for (plugins.list[0..plugins.count]) |p| {
-        if (p.on_property_notify) |f| f(e);
-    }
+    if (build_options.has_bar) bar.handlePropertyNotify(e);
     window.handlePropertyNotify(e);
 }
 
@@ -134,7 +131,7 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
     const idx = event_type & 0x7F; // strip XCB synthetic-event bit
 
     // RandR extension events (base and base+1): screen/CRTC/output change
-    // notifications. The carousel's refresh-rate cadence must track monitor
+    // notifications. Bar render pacing must track monitor
     // re-configuration, so any of them triggers re-detection. Extension events
     // sit above the fixed dispatch table and would otherwise be dropped by the
     // bounds guard below.
@@ -251,7 +248,7 @@ fn handleConfigReload() !void {
     const old_ptr = cs.config;
     cs.config = new_ptr;
 
-    plugins.fanOut("reload", .{});
+    if (build_options.has_bar) bar.reload();
     actions.applyConfigReload(); // WP6: model path re-seeds params + reconciles
     // Borders sweep AFTER applyConfigReload: its reconcile rebuilds geometry,
     // and sweeping first would send every border twice -- once here, once
@@ -267,8 +264,6 @@ fn handleConfigReload() !void {
     // Rebuild after the swap so borrowed key slices point into the new config's memory.
     window.buildRulesMap();
 
-    config.applyCarouselSettings(new_ptr);
-
     debug.info("Reload complete", .{});
 }
 
@@ -278,12 +273,46 @@ fn handleXcbEvents() void {
 
     // Cap the number of events dispatched per batch so a chatty client
     // flooding PropertyNotify/ConfigureNotify can't starve the signal pipe and
-    // timer paths (clock, cursor blink) indefinitely. Unread events stay in the
+    // timer paths (clock, cursor blink). Unread events stay in the
     // socket buffer and the fd stays readable, so they're handled on the next
     // poll round.
-    for (0..max_events_per_batch) |_| {
-        const event = xcb.xcb_poll_for_event(conn) orelse break;
+    //
+    // Motion coalescing: a run of MotionNotify events collapses to its LAST
+    // member before dispatch — drag paths only need the freshest pointer
+    // position, and every extra dispatched motion costs a reconcile. The
+    // first non-motion event is held in `pending` (it counts against the
+    // batch cap via takeEvent) so ordering is preserved.
+    var pending: ?*xcb.xcb_generic_event_t = null;
+    const takeEvent = struct {
+        fn take(buf: *?*xcb.xcb_generic_event_t, c: core.Connection) ?*xcb.xcb_generic_event_t {
+            if (buf.*) |p| {
+                buf.* = null;
+                return p;
+            }
+            return xcb.xcb_poll_for_event(c);
+        }
+    }.take;
+    const isMotion = struct {
+        fn f(e: *xcb.xcb_generic_event_t) bool {
+            return (@as(*u8, @ptrCast(e)).* & 0x7f) == xcb.XCB_MOTION_NOTIFY;
+        }
+    }.f;
+
+    var dispatched: usize = 0;
+    while (dispatched < max_events_per_batch) : (dispatched += 1) {
+        var event = takeEvent(&pending, conn) orelse break;
         defer std.c.free(event);
+        if (isMotion(event)) {
+            while (true) {
+                const next = xcb.xcb_poll_for_event(conn) orelse break;
+                if (!isMotion(next)) {
+                    pending = next; // dispatched on a later iteration
+                    break;
+                }
+                std.c.free(event);
+                event = next; // keep only the newest motion of the run
+            }
+        }
         dispatch(@as(*u8, @ptrCast(event)).*, event);
     }
 
@@ -294,9 +323,7 @@ fn handleXcbEvents() void {
     // spawn queue entry.
     input.drainPendingSpawns();
 
-    inline for (plugins.list[0..plugins.count]) |p| {
-        if (p.post_batch) |f| f() catch |err| debug.err("Plugin post_batch failed: {}", .{err});
-    }
+    if (build_options.has_bar) bar.updateIfDirty() catch |err| debug.err("Bar post-batch update failed: {}", .{err});
     focus.drainPendingConfirm();
     focus.drainPointerSync();
     // Must run after the event-draining loop above: any EnterNotify a tiling
@@ -320,18 +347,19 @@ pub fn run() !void {
     };
 
     while (utils.running.load(.acquire)) {
-        var poll_timeout_ms: i32 = @intCast(clock.nextTickWaitMs());
+        // No built-in deadline: with no timer hooks registered the loop
+        // blocks until an X event or signal arrives. Timer sources (clock
+        // segment, prompt cursor blink) contribute deadlines exclusively
+        // through plugin.poll_timeout_ms.
+        var poll_timeout_ms: i32 = -1;
         var cursor_is_blinking = false;
-        inline for (plugins.list[0..plugins.count]) |p| {
-            if (p.poll_timeout_ms) |f| {
-                const ms = f();
-                if (ms >= 0) {
-                    cursor_is_blinking = true;
-                    poll_timeout_ms = if (poll_timeout_ms < 0) ms else @min(poll_timeout_ms, ms);
-                }
+        if (build_options.has_bar) {
+            const ms = bar.pollTimeoutMs();
+            if (ms >= 0) {
+                cursor_is_blinking = true;
+                poll_timeout_ms = ms;
             }
         }
-        if (poll_timeout_ms < 0) poll_timeout_ms = @intCast(clock.nextTickWaitMs());
 
         const poll_rc = std.os.linux.poll(&fds, fds.len, poll_timeout_ms);
         const ready: usize = switch (std.posix.errno(poll_rc)) {
@@ -345,9 +373,7 @@ pub fn run() !void {
 
         if (ready == 0) {
             if (cursor_is_blinking) {
-                inline for (plugins.list[0..plugins.count]) |p| {
-                    if (p.on_poll_wakeup) |f| f();
-                }
+                if (build_options.has_bar) bar.onPollWakeup();
                 _ = xcb.xcb_flush(cs.conn);
             }
         } else if ((fds[fd_xcb].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
@@ -367,8 +393,6 @@ pub fn run() !void {
                 handleConfigReload() catch |err| debug.err("Reload failed: {}", .{err});
         }
 
-        inline for (plugins.list[0..plugins.count]) |p| {
-            if (p.iteration_end) |f| _ = f(); // return value reserved, currently unused
-        }
+        if (build_options.has_bar) _ = bar.updateClock(); // return value reserved, currently unused
     }
 }

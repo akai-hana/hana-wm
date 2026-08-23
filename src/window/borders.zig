@@ -1,14 +1,13 @@
 //! Shared border management helpers.
 //!
 //! Unifies border color resolution, width calculation, and atomic apply
-//! logic that was previously duplicated across tiling.zig, window.zig,
-//! and fullscreen.zig.
+//! logic that was previously duplicated across tiling.zig and window.zig.
 
 const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
 const focus = @import("focus");
-const fullscreen = @import("fullscreen");
+const actions = @import("actions");
 const build_options = @import("build_options");
 const tiling = if (build_options.has_tiling) @import("tiling") else null;
 const wincache = @import("wincache");
@@ -16,7 +15,9 @@ const wincache = @import("wincache");
 /// Returns the border color for `win`: 0 for fullscreen windows,
 /// focused or unfocused color otherwise.
 pub inline fn color(win: u32) u32 {
-    if (fullscreen.isFullscreen(win)) return 0;
+    // Model truth (P1): fullscreen windows render borderless via the bw=0/
+    // pixel=0 policy in sync; this predicate covers callers outside reconcile.
+    if (actions.isFullscreenMode(win)) return 0;
     const cfg = &core.getState().config.tiling;
     return if (focus.getFocused() == win) cfg.border_focused else cfg.border_unfocused;
 }

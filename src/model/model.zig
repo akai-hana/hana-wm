@@ -95,13 +95,18 @@ pub const Entry = struct {
 };
 
 pub const WsState = struct {
-    tiled_order: std.ArrayListUnmanaged(WindowId) = .empty,
-    focus_mru: std.ArrayListUnmanaged(WindowId) = .empty, // changelog 2026-08-21
+    tiled_order: OrderList = .{},
+    focus_mru: MruList = .{}, // newest first (index 0), bounded at mru_capacity
     params: LayoutParams = .{},
 };
 
 pub const store_capacity = 512;
 pub const mru_capacity = 16;
+/// Bounded per-workspace tiled membership list (I8: defined capacity,
+/// total operations — transitions never allocate, so no OOM rollback paths).
+pub const max_tiled_per_ws = constants.Limits.max_tiled_windows;
+pub const OrderList = utils.BoundedList(WindowId, max_tiled_per_ws);
+pub const MruList = utils.BoundedList(WindowId, mru_capacity);
 pub const StoreT = @import("store").Store(WindowId, Entry, store_capacity);
 
 pub fn lowestBit(m: Mask) WSId {
@@ -109,7 +114,6 @@ pub fn lowestBit(m: Mask) WSId {
 }
 
 pub const Model = struct {
-    gpa: std.mem.Allocator,
     store: StoreT = .{},
     ws: [MAX_WS]WsState = [_]WsState{.{}} ** MAX_WS,
     current: WSId = 0,
@@ -120,17 +124,15 @@ pub const Model = struct {
     next_seq: u32 = 0,
 };
 
-const Order = std.ArrayListUnmanaged(WindowId);
+const Order = OrderList;
 
 pub fn findInOrder(list: *const Order, win: WindowId) ?usize {
-    for (list.items, 0..) |w, i| {
-        if (w == win) return i;
-    }
-    return null;
+    return list.indexOfScalar(win);
 }
 
-fn removeValue(list: *Order, win: WindowId) void {
-    if (findInOrder(list, win)) |i| _ = list.orderedRemove(i);
+fn removeValue(list: anytype, win: WindowId) void {
+    // anytype: shared by OrderList and MruList (different capacities).
+    if (list.indexOfScalar(win)) |i| list.orderedRemove(i);
 }
 
 /// Public remove-by-value for facades (tracking focus-MRU purge paths).
@@ -146,17 +148,6 @@ pub fn findHome(m: *const Model, win: WindowId) ?WSId {
     return null;
 }
 
-fn baseOf(mode: Mode) BaseMode {
-    return switch (mode) {
-        .base => |b| b,
-        .fullscreen => |f| f.base,
-        .minimized => |mm| switch (mm.prev) {
-            .base => |b| b,
-            .fullscreen => |f| f.base,
-        },
-    };
-}
-
 fn countMinimized(m: *const Model) usize {
     var n: usize = 0;
     for (0..m.store.count()) |i| {
@@ -169,26 +160,23 @@ fn removeFromMruAll(m: *Model, win: WindowId) void {
     for (&m.ws) |*s| removeValue(&s.focus_mru, win);
 }
 
-pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) void {
+pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) error{CapacityFull}!void {
     if (m.store.has(win)) return;
     const target: WSId = hint_ws orelse m.current;
-    // INVARIANT(I8): StoreFull ⇒ refuse BEFORE any mutation; roll back on OOM.
+    // INVARIANT(I8): defined-capacity refusal with rollback, BEFORE any
+    // observable state change. No allocation anywhere: the only failure
+    // modes are the store bound and the per-ws tiled-list bound.
     _ = m.store.put(win, .{
         .mask = bit(target),
         .mode = .{ .base = .tiled },
-    }) catch return;
-    m.ws[target].tiled_order.append(m.gpa, win) catch {
+    }) catch return error.CapacityFull;
+    if (!m.ws[target].tiled_order.append(win)) {
         _ = m.store.remove(win);
-        return;
-    };
-    // Master fifo variant (train g): a new window takes the master slot and
-    // the previous master drops to the stack head. Legacy enforced this in
-    // its spawn placement; the model path does it here so every caller gets
-    // it for free.
-    const p = &m.ws[target].params;
-    if (p.kind == .master and p.variant_idx == 1 and m.ws[target].tiled_order.items.len > 1) {
-        reorderTiled(m, win, 0);
+        return error.CapacityFull;
     }
+    // NOTE: master-fifo spawn placement lives in actions.mapRequest — this
+    // primitive is a dumb membership insert so non-spawn callers never get
+    // windows silently reordered.
 }
 
 pub fn unregister(m: *Model, win: WindowId) void {
@@ -233,12 +221,15 @@ pub fn restore(m: *Model, win: WindowId) void {
     if (mm.prev == .base and mm.prev.base == .tiled) {
         const h: WSId = lowestBit(e.mask); // follows tag-moves made while hidden (BC12)
         const list = &m.ws[h].tiled_order;
-        list.append(m.gpa, win) catch return;
+        // I8: refuse-before-mutate — a full home list leaves the window
+        // minimized rather than half-restoring it. Bounded lists make this
+        // the ONLY failure mode; there is no allocation to fail.
+        if (!list.append(win)) return;
         if (mm.slot) |s| {
-            const last = list.items.len - 1;
+            const last = list.len - 1;
             if (s < last) {
-                _ = list.orderedRemove(last);
-                list.insert(m.gpa, s, win) catch {};
+                list.orderedRemove(last);
+                _ = list.insert(s, win); // cannot fail: len < capacity here
             }
         }
     }
@@ -368,8 +359,14 @@ pub fn moveWindowToWs(m: *Model, win: WindowId, ws: WSId) void {
     e.mask = bit(ws);
     if (findHome(m, win)) |h| {
         if (h != ws) {
+            // I8 refuse-before-mutate: a full destination list cancels the
+            // move instead of stranding the window home-less.
+            if (m.ws[ws].tiled_order.len >= max_tiled_per_ws) {
+                e.mask = bit(h);
+                return;
+            }
             removeValue(&m.ws[h].tiled_order, win);
-            m.ws[ws].tiled_order.append(m.gpa, win) catch {};
+            _ = m.ws[ws].tiled_order.append(win);
         }
     }
 }
@@ -418,14 +415,14 @@ pub fn reorderTiled(m: *Model, win: WindowId, idx_in: usize) void {
     const h = findHome(m, win) orelse return;
     const list = &m.ws[h].tiled_order;
     const from = findInOrder(list, win) orelse return;
-    const idx = @min(idx_in, list.items.len - 1);
-    _ = list.orderedRemove(from);
-    list.insert(m.gpa, idx, win) catch {};
+    const idx = @min(idx_in, list.len - 1);
+    list.orderedRemove(from);
+    _ = list.insert(idx, win); // cannot fail: removal freed a slot
 }
 
 pub fn swapMaster(m: *Model) void {
     const list = &m.ws[m.current].tiled_order;
-    if (list.items.len < 2) return;
+    if (list.len < 2) return;
     const tmp = list.items[0];
     list.items[0] = list.items[1];
     list.items[1] = tmp;
@@ -486,6 +483,9 @@ pub fn honorConfigureRequest(m: *Model, win: WindowId, req: ConfigureReq) HonorD
                 if (req.y) |v| r.y = v;
                 if (req.width) |v| r.width = v;
                 if (req.height) |v| r.height = v;
+                // NOTE: a requested border_width is not stored here (the
+                // floating rect has no bw field); the entry point sends and
+                // caches it alongside the geometry it applies.
                 return .geometry_applied;
             },
             .tiled => {
@@ -502,8 +502,15 @@ pub fn honorConfigureRequest(m: *Model, win: WindowId, req: ConfigureReq) HonorD
 pub fn applyConfigReload(m: *Model, tpl: LayoutParams) void {
     for (&m.ws) |*s| {
         const keep_prev = s.params.scroll_prev;
+        // Scroll viewport state is RUNTIME state, not config: preserving it
+        // prevents a spurious snap-right (n > prev_count fires when the
+        // counter resets) on an unrelated reload while scroll is active.
+        const keep_offset = s.params.scroll_offset;
+        const keep_prev_count = s.params.scroll_prev_count;
         s.params = tpl;
         s.params.scroll_prev = keep_prev;
+        s.params.scroll_offset = keep_offset;
+        s.params.scroll_prev_count = keep_prev_count;
     }
 }
 
@@ -512,8 +519,12 @@ pub fn setFocus(m: *Model, win: WindowId) void {
     m.focused = win;
     const list = &m.ws[m.current].focus_mru;
     removeValue(list, win);
-    list.insert(m.gpa, 0, win) catch {};
-    if (list.items.len > mru_capacity) list.shrinkRetainingCapacity(mru_capacity);
+    // Newest-first insert; when at capacity, drop the OLDEST (tail) entry so
+    // the newest mru_capacity wins are retained (legacy shrink semantics).
+    if (!list.insert(0, win)) {
+        list.orderedRemove(list.len - 1);
+        _ = list.insert(0, win);
+    }
     if (m.ws[m.current].params.kind == .scroll) {
         m.ws[m.current].params.scroll_prev = win; // decision C-D2
     }

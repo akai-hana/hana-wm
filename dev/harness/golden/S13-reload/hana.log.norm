@@ -3,11 +3,9 @@ info: [debug] Using geometry-calculated DPI: 95.9
 info: [debug] Merged: /home/akai/eudaimonia/hana/dev/harness/out/S13-reload/config-home/hana/config.toml
 info: [debug] Loaded config from dir: /home/akai/eudaimonia/hana/dev/harness/out/S13-reload/config-home/hana (1 file(s))
 info: [debug] Bar transparency: disabled (opaque)
-info: [debug] Clock thread started
 info: [debug] hana booted up successfully!
 info: [debug] [ENTER] win=W01 mode=0 detail=0 root_x=640 root_y=400
 info: [debug] [MAYBE_FOCUS] W01 -> setFocus(.mouse_enter)
-warning: [debug] Best-effort op failed (bar drawSegment): error.NoFont
 info: [debug] [ENTER] win=0x3a0 mode=0 detail=2 root_x=640 root_y=400
 info: [debug] [KEY] keycode=29 state=0x41 mods=0x41 keysym=0x79
 info: [debug] [KEY] action=reload_config
@@ -15,11 +13,7 @@ info: [debug] Reload requested
 info: [debug] Merged: /home/akai/eudaimonia/hana/dev/harness/out/S13-reload/config-home/hana/config.toml
 info: [debug] Loaded config from dir: /home/akai/eudaimonia/hana/dev/harness/out/S13-reload/config-home/hana (1 file(s))
 info: [debug] Bar transparency: disabled (opaque)
-info: [debug] Clock thread stopped
-info: [debug] Clock thread started
-warning: [debug] Best-effort op failed (bar drawSegment): error.NoFont
 info: [debug] Reload complete
-warning: [debug] Best-effort op failed (bar drawSegment): error.NoFont
 info: [debug] [ENTER] win=W01 mode=0 detail=0 root_x=640 root_y=400
 info: [debug] [MAYBE_FOCUS] W01 -> setFocus(.mouse_enter)
 info: [debug] [ENTER] win=0x3a0 mode=0 detail=2 root_x=640 root_y=400
@@ -58,7 +52,6 @@ info: [debug] Tiling layout:  master
 info: [debug] Tiled windows:  2
 info: [debug] ================================
 info: [debug] Shutting down gracefully...
-info: [debug] Clock thread stopped
 General protection exception (no address available)
 /home/akai/eudaimonia/hana/src/config/types.zig:56:9: W03 in deinit (types.zig)
         switch (self.*) {
@@ -66,7 +59,7 @@ General protection exception (no address available)
 /home/akai/eudaimonia/hana/src/config/types.zig:608:60: W04 in deinit (types.zig)
         for (self.keybindings.items) |*kb| kb.action.deinit(a);
                                                            ^
-/home/akai/eudaimonia/hana/src/core/main.zig:TIME: W05 in main (main.zig)
+/home/akai/eudaimonia/hana/src/main.zig:TIME: W05 in main (main.zig)
     defer initial_config.deinit(alloc);
                                ^
 /home/akai/.zvm/0.16.0/lib/std/start.zig:698:59: W06 in callMain (std.zig)

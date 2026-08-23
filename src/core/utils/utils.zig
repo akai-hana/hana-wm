@@ -1,73 +1,71 @@
-//! Core utilities
-//! Provides shared geometry helpers, process lifecycle signals, and X11 property utilities for the WM core.
+//! Core utilities — FACADE (D6 split).
+//!
+//! The former grab-bag is split into focused siblings; this file keeps only
+//! pure, xcb-free geometry/scaling helpers and re-exports every public decl
+//! so existing `utils.X` call sites are unchanged:
+//!
+//!   bounded.zig   BoundedList                       (xcb-free)
+//!   threading.zig Mutex/Condition/CondThread        (xcb-free)
+//!   proc.zig      lifecycle flags, wake pipe, pipes  (xcb-free)
+//!   time.zig      clock helpers                      (xcb-free)
+//!   x11wire.zig   atoms/EWMH/properties/grab/configure shims (xcb-DEPENDENT)
+//!
+//! Layer note: model/tiling reference only the xcb-free decls here and in
+//! this file's own pure section. x11wire exists so the wire primitives have
+//! one honest home (check-layers' "wire primitives" allowlist entry).
 
 const std = @import("std");
-
-const core = @import("core");
-const xcb = core.xcb;
 const constants = @import("constants");
-const debug = @import("debug");
-const bench = @import("bench");
 
-const max_property_length = constants.property_max_length;
-/// Passed as the `delete` argument to xcb_get_property; 0 means do not consume the property.
-const property_no_delete = constants.property_no_delete;
+const proc = @import("proc.zig");
+const time = @import("time.zig");
+const threading = @import("threading.zig");
+const bounded = @import("bounded.zig");
+const x11wire = @import("x11wire.zig");
 
-// Process lifecycle signals
-//
-// Module-level atomics, not WM struct fields; this is process control
-// state, not window-manager state. Signal handlers and keybind actions
-// write here; the main event loop reads here.
+// --- process lifecycle (re-exports) --------------------------------------
+pub const running = &proc.running;
+pub const wake_byte = proc.wake_byte;
+pub const setSignalWriteFd = proc.setSignalWriteFd;
+pub const quit = proc.quit;
+pub const reload = proc.reload;
+pub const consumeReload = proc.consumeReload;
+pub const makePipe = proc.makePipe;
 
-/// Set to false by SIGTERM/SIGINT to break the main event loop.
-pub var running = std.atomic.Value(bool).init(true);
+// --- time (re-exports) ----------------------------------------------------
+pub const clockNs = time.clockNs;
+pub const monotonicNs = time.monotonicNs;
+pub const realtimeNs = time.realtimeNs;
 
-/// Set to true by SIGHUP or the `reload_config` keybinding.
-/// Consumed by `consumeReload` in the main event loop.
-var should_reload = std.atomic.Value(bool).init(false);
+// --- threading (re-exports) ------------------------------------------------
+pub const Mutex = threading.Mutex;
+pub const Condition = threading.Condition;
+pub const CondThread = threading.CondThread;
 
-/// Write end of the signal self-pipe (owned by signals.zig), registered via
-/// `setSignalWriteFd`. The `reload_config` keybinding has no signal byte, so
-/// `reload()` writes a wake byte here to poke the event loop out of poll
-/// immediately instead of waiting for an unrelated signal.
-var signal_write_fd: std.posix.fd_t = -1;
+// --- bounded collections (re-exports) ---------------------------------------
+pub const BoundedList = bounded.BoundedList;
 
-/// Byte `reload()` writes to the signal pipe to wake the event loop. Must not
-/// be a real signal number: `signals.drainAndDispatch` dispatches every byte
-/// it reads, and re-dispatching the wake byte as SIGHUP would make the drain
-/// loop call `reload()` again; writing another wake byte and spinning forever.
-pub const wake_byte: u8 = 0xff;
+// --- X11 wire primitives (re-exports; xcb-dependent live in x11wire.zig) ---
+pub const initAtomCache = x11wire.initAtomCache;
+pub const getAtomCached = x11wire.getAtomCached;
+pub const getAtomOrZero = x11wire.getAtomOrZero;
+pub const advertiseEwmhSupport = x11wire.advertiseEwmhSupport;
+pub const fetchPropertyToBuffer = x11wire.fetchPropertyToBuffer;
+pub const configureWindow = x11wire.configureWindow;
+pub const raiseWindow = x11wire.raiseWindow;
+pub const pushWindowOffscreen = x11wire.pushWindowOffscreen;
+pub const pushWindowOffscreenAndLower = x11wire.pushWindowOffscreenAndLower;
+pub const setBorderPixel = x11wire.setBorderPixel;
+pub const grab_active = x11wire.grab_active;
+pub const isGrabActive = x11wire.isGrabActive;
+pub const grabServer = x11wire.grabServer;
+pub const ungrabServer = x11wire.ungrabServer;
+pub const ungrabAndFlush = x11wire.ungrabAndFlush;
+pub const rectFromXcb = x11wire.rectFromXcb;
+pub const isOffscreenGeomReply = x11wire.isOffscreenGeomReply;
 
-/// Registers the write end of the signal self-pipe so `reload()` can wake the
-/// event loop. Pass -1 to unregister (teardown).
-pub fn setSignalWriteFd(fd: std.posix.fd_t) void {
-    signal_write_fd = fd;
-}
-
-pub inline fn quit() void {
-    running.store(false, .release);
-}
-
-/// Signals the main event loop to reload the user config.
-///
-/// Safe from any thread: the wake byte is a plain write, not a signal. If the
-/// pipe is full (or not yet registered) the write is dropped; the event loop
-/// also polls the flag itself every iteration, so a lost byte only delays the
-/// reload by one poll timeout at worst.
-pub inline fn reload() void {
-    if (!should_reload.swap(true, .acq_rel)) {
-        if (signal_write_fd >= 0)
-            _ = std.os.linux.write(signal_write_fd, &[_]u8{wake_byte}, 1);
-    }
-}
-
-/// Atomically consumes the reload flag.
-/// Returns true exactly once per request, whichever call path checks first wins.
-pub inline fn consumeReload() bool {
-    return should_reload.swap(false, .acq_rel);
-}
-
-// Geometry operations
+// ---------------------------------------------------------------------------
+// Pure geometry & scaling (xcb-free; safe for model/tiling)
 
 /// Position and dimensions of a managed window, relative to the root window (the total display area).
 pub const Rect = struct {
@@ -77,22 +75,10 @@ pub const Rect = struct {
     height: u16,
     border_width: u16 = 0,
 
-    pub inline fn fromXcb(geom: *const xcb.xcb_get_geometry_reply_t) Rect {
-        return .{ .x = geom.x, .y = geom.y, .width = geom.width, .height = geom.height, .border_width = geom.border_width };
-    }
-
     pub inline fn eql(self: Rect, other: Rect) bool {
         return self.x == other.x and self.y == other.y and self.width == other.width and self.height == other.height and self.border_width == other.border_width;
     }
 };
-
-/// True when a get_geometry reply reports the window parked at (or past) the
-/// off-screen sentinel position written by `pushWindowOffscreen`. Shared by
-/// every call site that live-fetches geometry and must not cache that
-/// parking spot as if it were the window's real, restorable position.
-pub inline fn isOffscreenGeomReply(r: *const xcb.xcb_get_geometry_reply_t) bool {
-    return r.x < constants.offscreen_sentinel_min or r.y < constants.offscreen_sentinel_min;
-}
 
 /// Gap and border widths applied around a tiled window.
 pub const Margins = struct {
@@ -111,191 +97,15 @@ pub inline fn toXcbCoord(v: i16) u32 {
     return @bitCast(@as(i32, v));
 }
 
-/// Moves and resizes `win` without touching border_width.
-/// Use `window.configureWindowGeom` when border_width must change atomically.
-pub inline fn configureWindow(conn: core.Connection, win: u32, rect: Rect) void {
-    _ = xcb.xcb_configure_window(
-        conn,
-        win,
-        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
-            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT,
-        &[_]u32{ toXcbCoord(rect.x), toXcbCoord(rect.y), rect.width, rect.height },
-    );
-}
-
-pub inline fn raiseWindow(conn: core.Connection, win: u32) void {
-    _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
-}
-
 /// Strips lock-key and pointer-button bits from a raw event modifier state,
 /// leaving only the modifier bits the WM uses for keybinding matching.
 pub inline fn normalizeModifiers(state: u16) u16 {
     return state & constants.mod_mask_binding;
 }
 
-// Atom cache
-//
-// Field names match X11 atom strings exactly, so getAtomCached resolves
-// them with a single @field call: no switch, no enum, no second place to
-// add entries when a new atom is needed.
-const AtomCache = struct {
-    WM_PROTOCOLS: u32,
-    WM_DELETE_WINDOW: u32,
-    WM_TAKE_FOCUS: u32,
-    _NET_WM_NAME: u32,
-    UTF8_STRING: u32,
-    WM_CLASS: u32,
-    // Root window EWMH-conformance atoms, see advertiseEwmhSupport() below.
-    _NET_SUPPORTED: u32,
-    _NET_SUPPORTING_WM_CHECK: u32,
-    // Bar window property atoms, batched here so setWindowProperties pays
-    // zero X round-trips instead of 10 serial ones.
-    _NET_WM_STRUT_PARTIAL: u32,
-    _NET_WM_WINDOW_TYPE: u32,
-    _NET_WM_WINDOW_TYPE_DOCK: u32,
-    _NET_WM_STATE: u32,
-    _NET_WM_STATE_FULLSCREEN: u32,
-    _NET_WM_STATE_ABOVE: u32,
-    _NET_WM_STATE_STICKY: u32,
-    _NET_WM_ALLOWED_ACTIONS: u32,
-    _NET_WM_ACTION_CLOSE: u32,
-    _NET_WM_ACTION_ABOVE: u32,
-    _NET_WM_ACTION_STICK: u32,
-    _NET_WM_PID: u32,
-    // Root-window focus advertisement: read by focus.zig's setFocus path.
-    _NET_ACTIVE_WINDOW: u32,
-    // Legacy X resource-database atom: read by scale.zig for Xft.dpi.
-    RESOURCE_MANAGER: u32,
-};
-
-var atom_cache: ?AtomCache = null;
-
-/// Interns all atoms in a single round-trip batch. Atom names come from
-/// `AtomCache`'s field names at comptime, so adding a field is the only
-/// change required, no parallel array, no index-order mismatch risk.
-pub fn initAtomCache(conn: core.Connection) !void {
-    const fields = std.meta.fields(AtomCache);
-    var cookies: [fields.len]xcb.xcb_intern_atom_cookie_t = undefined;
-
-    inline for (fields, 0..) |f, i|
-        cookies[i] = xcb.xcb_intern_atom(conn, 0, @intCast(f.name.len), f.name.ptr);
-
-    var cache: AtomCache = undefined;
-    inline for (fields, 0..) |f, i| {
-        const reply = xcb.xcb_intern_atom_reply(conn, cookies[i], null) orelse {
-            for (i + 1..fields.len) |j| xcb.xcb_discard_reply(conn, cookies[j].sequence);
-            return error.AtomFailed;
-        };
-        defer std.c.free(reply);
-        @field(cache, f.name) = reply.*.atom;
-    }
-    atom_cache = cache;
-}
-
-/// Looks up a cached atom by name.
-/// Unknown names produce a compile error rather than a silent runtime failure.
-pub inline fn getAtomCached(comptime name: []const u8) error{AtomCacheNotInitialized}!u32 {
-    comptime if (!@hasField(AtomCache, name)) @compileError("atom not in cache: " ++ name);
-    const cache = atom_cache orelse return error.AtomCacheNotInitialized;
-    return @field(cache, name);
-}
-
-/// Like getAtomCached but returns 0 (the X11 "no atom" sentinel) instead of
-/// erroring when the cache isn't ready. Callers guard `if (atom != 0)` before
-/// issuing an X request.
-pub inline fn getAtomOrZero(comptime name: []const u8) u32 {
-    return getAtomCached(name) catch 0;
-}
-
-// EWMH root window advertisement
-
-/// EWMH atoms hana declares via `_NET_SUPPORTED`. Every entry must correspond
-/// to a protocol hana genuinely honours; clients use this list to decide what
-/// they can rely on.
-///
-/// Notably fixes GLFW's "Iconification of full screen windows requires a WM
-/// that supports EWMH full screen" error (Minecraft and other LWJGL games):
-/// GLFW only fullscreens via `_NET_WM_STATE_FULLSCREEN` if that atom is
-/// listed here; otherwise it falls back to a raw override-redirect window that
-/// bypasses the WM and can't be iconified through it, so the next
-/// XIconifyWindow() throws that error.
-const supported_atoms = [_][]const u8{
-    "_NET_SUPPORTED",
-    "_NET_SUPPORTING_WM_CHECK",
-    "_NET_WM_NAME",
-    "_NET_WM_STATE",
-    "_NET_WM_STATE_FULLSCREEN",
-    "_NET_WM_STATE_ABOVE",
-    "_NET_WM_STATE_STICKY",
-    "_NET_WM_ALLOWED_ACTIONS",
-    "_NET_WM_ACTION_CLOSE",
-    "_NET_WM_ACTION_ABOVE",
-    "_NET_WM_ACTION_STICK",
-    "_NET_WM_PID",
-    "_NET_WM_WINDOW_TYPE",
-    "_NET_WM_WINDOW_TYPE_DOCK",
-    "_NET_WM_STRUT_PARTIAL",
-};
-
-/// Publishes hana's EWMH conformance on the root window: per the spec a
-/// conformant WM creates a small identity ("check") window, tags it and the
-/// root with `_NET_SUPPORTING_WM_CHECK`, gives it a `_NET_WM_NAME`, and lists
-/// every honour-able hint in `_NET_SUPPORTED`. Clients (GLFW, Qt, Chromium, ...)
-/// probe this once at startup; without it they assume a bare ICCCM-only WM and
-/// take more conservative, in GLFW's case broken, code paths (see
-/// `supported_atoms`).
-///
-/// Must run once at startup, after initAtomCache() and before any client can
-/// map a window.
-pub fn advertiseEwmhSupport(conn: core.Connection, screen: core.Screen, root: u32) void {
-    const supporting_wm_check = getAtomCached("_NET_SUPPORTING_WM_CHECK") catch return;
-    const net_wm_name = getAtomCached("_NET_WM_NAME") catch return;
-    const utf8_string = getAtomCached("UTF8_STRING") catch return;
-    const net_supported = getAtomCached("_NET_SUPPORTED") catch return;
-
-    // A small, invisible identity window. Override-redirect so hana's own
-    // SubstructureRedirect handling never tries to manage it as a client.
-    const check_win = xcb.xcb_generate_id(conn);
-    const depth: u8 = xcb.XCB_COPY_FROM_PARENT;
-    const value_mask = xcb.XCB_CW_OVERRIDE_REDIRECT;
-    const value_list = [_]u32{1};
-    _ = xcb.xcb_create_window(
-        conn,
-        depth,
-        check_win,
-        root,
-        -1,
-        -1,
-        1,
-        1,
-        0,
-        xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT,
-        screen.root_visual,
-        @intCast(value_mask),
-        &value_list,
-    );
-
-    // Identity dance required by the spec: the check window points at
-    // itself, and the root points at the check window. Clients compare the
-    // two `_NET_SUPPORTING_WM_CHECK` values to tell a live WM from a stale
-    // property a crashed WM left behind.
-    _ = xcb.xcb_change_property(conn, xcb.XCB_PROP_MODE_REPLACE, check_win, supporting_wm_check, xcb.XCB_ATOM_WINDOW, 32, 1, &check_win);
-    _ = xcb.xcb_change_property(conn, xcb.XCB_PROP_MODE_REPLACE, root, supporting_wm_check, xcb.XCB_ATOM_WINDOW, 32, 1, &check_win);
-
-    const wm_name = "hana";
-    _ = xcb.xcb_change_property(conn, xcb.XCB_PROP_MODE_REPLACE, check_win, net_wm_name, utf8_string, 8, @intCast(wm_name.len), wm_name.ptr);
-
-    var supported: [supported_atoms.len]xcb.xcb_atom_t = undefined;
-    inline for (supported_atoms, 0..) |name, i|
-        supported[i] = getAtomCached(name) catch xcb.XCB_ATOM_NONE;
-    _ = xcb.xcb_change_property(conn, xcb.XCB_PROP_MODE_REPLACE, root, net_supported, xcb.XCB_ATOM_ATOM, 32, @intCast(supported.len), &supported);
-}
-
-// Property helpers
-
-/// Canonical scaling formulas: pure functions of a ScalableValue, no DPI
-/// lookup. scale.zig and config.zig both call into these, so there is exactly
-/// one formula to maintain.
+// Canonical scaling formulas: pure functions of a ScalableValue, no DPI
+// lookup. scale.zig and config.zig both call into these, so there is exactly
+// one formula to maintain.
 pub const scaling = struct {
     /// Resolves a ScalableValue to a ratio: `v%` becomes v/100, an absolute
     /// value stays as-is.
@@ -307,11 +117,6 @@ pub const scaling = struct {
     pub inline fn scaleToPixels(value: anytype, reference: f32) f32 {
         return if (value.is_percentage) reference * (value.value / 100.0) else value.value;
     }
-    /// Returns v/100 for percentage values; returns `-value` for absolute values.
-    pub fn scaleMasterWidth(value: anytype) f32 {
-        return if (value.is_percentage) value.value / 100.0 else -value.value;
-    }
-    /// Scales a border-width value. Percentage values are multiplied by half the
     /// reference dimension, matching the two-sided inset a border represents.
     pub fn scaleBorderWidth(value: anytype, reference_dimension: u16) u16 {
         const v: f32 = if (value.is_percentage)
@@ -326,317 +131,3 @@ pub const scaling = struct {
         return @intFromFloat(clamped);
     }
 };
-
-// Uses the VDSO-accelerated clock_gettime on supported kernels.
-inline fn clockTs(clock_id: std.os.linux.clockid_t) std.os.linux.timespec {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(clock_id, &ts);
-    return ts;
-}
-
-pub fn clockNs(clock_id: std.os.linux.clockid_t) u64 {
-    const ts = clockTs(clock_id);
-    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
-}
-
-pub inline fn monotonicNs() u64 {
-    return clockNs(.MONOTONIC);
-}
-
-pub inline fn realtimeNs() u64 {
-    return clockNs(.REALTIME);
-}
-
-// XCB grab helpers
-
-pub inline fn pushWindowOffscreen(conn: core.Connection, win: u32) void {
-    _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, constants.offscreen_x_position))});
-}
-
-/// Like `pushWindowOffscreen`, but also drops `win` to the bottom of the
-/// global stacking order in the same request. Use this for any window whose
-/// hidden state must be defended even if something upstream raised it.
-pub inline fn pushWindowOffscreenAndLower(conn: core.Connection, win: u32) void {
-    _ = xcb.xcb_configure_window(
-        conn,
-        win,
-        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_STACK_MODE,
-        &[_]u32{
-            @bitCast(@as(i32, constants.offscreen_x_position)),
-            xcb.XCB_STACK_MODE_BELOW,
-        },
-    );
-}
-
-// X server grab state
-//
-// The grab body runs on the main WM thread, but the shared xcb output buffer
-// is flushed by ANY thread (the dedicated carousel/bar thread calls xcb_flush
-// up to ~refresh-rate times per second). A carousel flush while the main
-// thread holds xcb_grab_server would release the queued grab-batch requests to
-// the server before xcb_ungrab_server, letting the compositor present an
-// intermediate frame; exactly what the grab is meant to prevent.
-//
-// grab_active lets the bar thread detect that window and skip its flush.
-
-/// True while the main WM thread holds the X server grab.
-pub var grab_active = std.atomic.Value(bool).init(false);
-
-pub inline fn isGrabActive() bool {
-    return grab_active.load(.monotonic);
-}
-
-/// Always pair with ungrabServer()/ungrabAndFlush().
-pub inline fn grabServer(conn: core.Connection) void {
-    grab_active.store(true, .release);
-    _ = xcb.xcb_grab_server(conn);
-}
-
-/// Releases the X server grab without flushing pending requests.
-pub inline fn ungrabServer(conn: core.Connection) void {
-    _ = xcb.xcb_ungrab_server(conn);
-    grab_active.store(false, .release);
-}
-
-/// Defined here so every module can share one copy.
-pub inline fn ungrabAndFlush(conn: core.Connection) void {
-    ungrabServer(conn);
-    _ = xcb.xcb_flush(conn);
-}
-
-pub inline fn setBorderPixel(conn: core.Connection, win: u32, pixel: u32) void {
-    _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{pixel});
-}
-
-/// Creates a pipe with O_NONBLOCK | O_CLOEXEC on both ends via pipe2(2).
-///
-/// Shared by input.zig (double-fork spawn plumbing) and signals.zig (signal
-/// self-pipe), avoiding byte-equivalent copies of this in each.
-pub fn makePipe() ![2]std.posix.fd_t {
-    var fds: [2]std.posix.fd_t = undefined;
-    const flags = std.os.linux.O{ .CLOEXEC = true, .NONBLOCK = true };
-    switch (std.posix.errno(std.os.linux.pipe2(&fds, flags))) {
-        .SUCCESS => {},
-        .MFILE => return error.ProcessFdQuotaExceeded,
-        .NFILE => return error.SystemFdQuotaExceeded,
-        else => |err| return std.posix.unexpectedErrno(err),
-    }
-    return fds;
-}
-
-/// Blocking mutex backed by pthread_mutex_t; `.{}` is safe (= PTHREAD_MUTEX_INITIALIZER).
-///
-/// Zig 0.16 removed std.Thread.Mutex/Condition (replaced by std.Io.Mutex,
-/// which requires threading an std.Io handle through every lock/unlock call
-/// site, too invasive for the small, self-contained locking bar.zig and
-/// carousel.zig need). This is a minimal handle-free substitute, shared
-/// between both instead of each defining its own copy.
-pub const Mutex = struct {
-    inner: std.c.pthread_mutex_t = .{},
-    pub fn lock(m: *Mutex) void {
-        _ = std.c.pthread_mutex_lock(&m.inner);
-    }
-    pub fn unlock(m: *Mutex) void {
-        _ = std.c.pthread_mutex_unlock(&m.inner);
-    }
-};
-
-/// Condition variable backed by pthread_cond_t; `.{}` is safe (= PTHREAD_COND_INITIALIZER).
-/// Call `initMonotonic()` on any instance that will use `timedWait`.
-pub const Condition = struct {
-    inner: std.c.pthread_cond_t = .{},
-
-    // pthread_condattr_t is not exposed by std.c on this Zig version, so it's
-    // pulled in from the system header directly. Using the real type (rather
-    // than a hand-sized opaque buffer) keeps the stack allocation exactly as
-    // large as libc's definition, no silent corruption if a libc ever
-    // grows the type.
-    const pthread = @cImport(@cInclude("pthread.h"));
-
-    /// Re-initialises this condition variable to use CLOCK_MONOTONIC as its
-    /// clock, so that a subsequent `timedWait` can use a monotonic deadline
-    /// (immune to wall-clock adjustments). Must be called once before any
-    /// `timedWait` call; safe to call on a freshly zero-initialised instance,
-    /// and safe to call again later (e.g. on every config reload) as long as
-    /// no thread is currently blocked in `wait`/`timedWait` on it.
-    pub fn initMonotonic(cv: *Condition) void {
-        var attr: pthread.pthread_condattr_t = undefined;
-        if (pthread.pthread_condattr_init(&attr) != 0) return;
-        defer _ = pthread.pthread_condattr_destroy(&attr);
-        _ = pthread.pthread_condattr_setclock(&attr, @intFromEnum(std.os.linux.CLOCK.MONOTONIC));
-        _ = pthread.pthread_cond_init(@ptrCast(&cv.inner), &attr);
-    }
-
-    /// Waits up to `timeout_ns` nanoseconds; returns error.Timeout on expiry.
-    /// Uses a CLOCK_MONOTONIC absolute deadline; requires that `initMonotonic()`
-    /// was called on this instance at startup.
-    pub fn timedWait(c: *Condition, m: *Mutex, timeout_ns: u64) error{Timeout}!void {
-        const deadline_ns = monotonicNs() +| timeout_ns;
-        var ts: std.os.linux.timespec = .{
-            .sec = @intCast(deadline_ns / std.time.ns_per_s),
-            .nsec = @intCast(deadline_ns % std.time.ns_per_s),
-        };
-        const rc = std.c.pthread_cond_timedwait(&c.inner, &m.inner, @ptrCast(&ts));
-        if (rc == std.posix.E.TIMEDOUT) return error.Timeout;
-    }
-
-    pub fn signal(c: *Condition) void {
-        _ = std.c.pthread_cond_signal(&c.inner);
-    }
-};
-
-/// Owns the mutex/condvar/quit-flag/thread quartet used by the bar's
-/// background threads (clock, carousel). `start` spawns `f` with `self` as
-/// its only argument; `stop` signals and joins.
-pub const CondThread = struct {
-    mutex: Mutex = .{},
-    cond: Condition = .{},
-    quit: bool = false,
-    thread: ?std.Thread = null,
-
-    pub fn start(self: *CondThread, comptime f: anytype, args: anytype) !void {
-        self.cond.initMonotonic();
-        self.quit = false;
-        self.thread = try std.Thread.spawn(.{}, f, args);
-    }
-
-    pub fn stop(self: *CondThread) void {
-        self.mutex.lock();
-        self.quit = true;
-        self.cond.signal();
-        self.mutex.unlock();
-        if (self.thread) |t| {
-            t.join();
-            self.thread = null;
-        }
-    }
-};
-
-// Bounded collections
-//
-// Shared shape used by window.zig's caches, minimize.zig's minimized-window
-// record, and input.zig's pending-spawn table: a fixed-capacity array plus
-// a length, with linear-scan find, append, and remove-and-compact.
-
-/// Generic fixed-capacity, allocation-free collection backed by a plain
-/// array. Linear scan is the right tool at the counts these call sites deal
-/// with (tens to low hundreds of entries): cache-local, branch-predictor-
-/// friendly, no allocator, no OOM error surface.
-pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
-    return struct {
-        items: [capacity]T = undefined,
-        len: usize = 0,
-
-        const Self = @This();
-
-        pub fn slice(self: *Self) []T {
-            return self.items[0..self.len];
-        }
-
-        pub fn constSlice(self: *const Self) []const T {
-            return self.items[0..self.len];
-        }
-
-        /// Returns the index of the first item for which `match(context, item)`
-        /// is true, or null if none matches. `context` is typically the search
-        /// key (e.g. a window ID) and `match` a plain (non-closure) function,
-        /// the same context+comptime-predicate shape `std.sort.pdq` uses.
-        pub fn indexOf(self: *const Self, context: anytype, comptime match: fn (@TypeOf(context), T) bool) ?usize {
-            for (self.items[0..self.len], 0..) |item, i| {
-                if (match(context, item)) return i;
-            }
-            return null;
-        }
-
-        /// Returns the index of the first item whose `.id` field equals `id`,
-        /// or null. For element types keyed by a single `id` field.
-        pub fn indexOfById(self: *const Self, id: u32) ?usize {
-            return self.indexOf(id, struct {
-                fn match(i: u32, item: T) bool {
-                    return item.id == i;
-                }
-            }.match);
-        }
-
-        /// Returns the index of the first item equal to `scalar`, or null.
-        /// For scalar element types (e.g. u32 window-ID lists).
-        pub fn indexOfScalar(self: *const Self, scalar: T) ?usize {
-            return self.indexOf(scalar, struct {
-                fn match(s: T, item: T) bool {
-                    return item == s;
-                }
-            }.match);
-        }
-
-        /// Appends `item` if there's room. Returns false and leaves the
-        /// collection untouched if full; callers decide whether a full
-        /// collection is worth a warning or a silent fallback.
-        pub fn append(self: *Self, item: T) bool {
-            if (self.len >= capacity) return false;
-            self.items[self.len] = item;
-            self.len += 1;
-            return true;
-        }
-
-        /// O(1) removal that does *not* preserve the relative order of the
-        /// remaining elements: the slot at `i` is filled with the current
-        /// last element. Use when ordering carries no meaning (caches, sets).
-        pub fn swapRemove(self: *Self, i: usize) void {
-            self.len -= 1;
-            self.items[i] = self.items[self.len];
-        }
-
-        /// O(n) removal that preserves the relative order of the remaining
-        /// elements. Use when insertion order is meaningful, e.g. LIFO/FIFO
-        /// replay.
-        pub fn orderedRemove(self: *Self, i: usize) void {
-            self.len -= 1;
-            std.mem.copyForwards(T, self.items[i..self.len], self.items[i + 1 .. self.len + 1]);
-        }
-
-        /// Resets to empty without touching capacity or contents of unused slots.
-        pub fn clear(self: *Self) void {
-            self.len = 0;
-        }
-    };
-}
-
-/// Fetches an 8-bit X11 window property into the caller-supplied `buffer`.
-/// Returns a slice into `buffer`, or null if the property is absent, empty,
-/// not 8-bit encoded, the reply's type doesn't match the requested
-/// `atom_type`, or the value exceeds the buffer length.
-pub fn fetchPropertyToBuffer(
-    conn: core.Connection,
-    window: u32,
-    atom: u32,
-    atom_type: u32,
-    buffer: []u8,
-) !?[]const u8 {
-    const reply = pollPropertyReply(
-        conn,
-        xcb.xcb_get_property(conn, property_no_delete, window, atom, atom_type, 0, max_property_length),
-    ) orelse return null;
-    defer std.c.free(reply);
-    const r = reply.*;
-    if (r.format != 8 or r.value_len == 0 or r.type != atom_type) return null;
-    if (r.value_len == max_property_length)
-        debug.warn("Property atom {x} on window {x} exceeds the {}-byte fetch cap; value truncated", .{ atom, window, max_property_length });
-
-    const len: usize = @intCast(r.value_len);
-    if (len > buffer.len) return null;
-    const value_ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
-    @memcpy(buffer[0..len], value_ptr[0..len]);
-    return buffer[0..len];
-}
-
-/// Collect the reply for a fired `xcb_get_property` request without a blocking
-/// wait when the reply is already buffered (see `bench.pollReply`). In a
-/// non-bench build this reduces to a single blocking reply call.
-fn pollPropertyReply(
-    conn: core.Connection,
-    cookie: xcb.xcb_get_property_cookie_t,
-) ?*xcb.xcb_get_property_reply_t {
-    if (bench.pollReply(conn, cookie.sequence)) |rep|
-        return @ptrCast(@alignCast(rep));
-    return xcb.xcb_get_property_reply(conn, cookie, null);
-}

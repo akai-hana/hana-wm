@@ -18,7 +18,7 @@ const std = @import("std");
 // scattered as inline literals.
 
 const source_root = "src/";
-const entry_point_path = source_root ++ "core/main.zig";
+const entry_point_path = source_root ++ "main.zig";
 const fallback_toml_path = "config/fallback.toml";
 const max_fallback_toml_bytes = 1024 * 1024; // Memory limit just in case.
 
@@ -53,9 +53,9 @@ pub fn build(b: *std.Build) !void {
 
     // Optional module detection
     const has_bar = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar");
-    const has_tiling = pathExists(b.build_root.handle, b.graph.io, source_root ++ "window/modules/tiling");
-    const has_floating = pathExists(b.build_root.handle, b.graph.io, source_root ++ "window/modules/floating.zig");
-    const has_vim = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/modules/prompt/vim.zig");
+    const has_tiling = pathExists(b.build_root.handle, b.graph.io, source_root ++ "tiling");
+    const has_floating = pathExists(b.build_root.handle, b.graph.io, source_root ++ "window/behaviors/floating.zig");
+    const has_vim = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/segments/prompt/vim.zig");
 
     build_opts.addOption(bool, "has_bar", has_bar);
     build_opts.addOption(bool, "has_tiling", has_tiling);
@@ -64,11 +64,10 @@ pub fn build(b: *std.Build) !void {
 
     // Module discovery
     var discovery = try Module.DiscoveryContext.run(b, target, optimize, source_root, entry_point_path);
-
     // Register null vim fallback when vim.zig is absent but bar is present.
     // When bar itself is removed, prompt is also gone so no vim stub is needed.
     if (has_bar and !has_vim) {
-        const null_vim_path = source_root ++ "bar/modules/prompt/null_vim.zig";
+        const null_vim_path = source_root ++ "bar/segments/prompt/null_vim.zig";
         const owned_name = try b.allocator.dupe(u8, "vim");
         try discovery.source_paths.put(owned_name, null_vim_path);
         try discovery.modules.put(owned_name, b.createModule(.{
@@ -111,9 +110,10 @@ pub fn build(b: *std.Build) !void {
         mod.*.addIncludePath(.{ .cwd_relative = "/usr/include" });
     }
 
-    // Unit tests for the reworked architecture layers: every discovered
-    // module named *_test.zig becomes a `zig build test` run. Discovered
-    // modules are cross-wired with all others, so a test file's named imports
+    // Unit tests for the reworked architecture layers (src/test/*.zig):
+    // every discovered module named *_test.zig becomes a `zig build test`
+    // run. Discovered modules are cross-wired with all others, so a test
+    // file's named imports
     // (e.g. model, utils) resolve exactly as they do in production builds --
     // standalone `zig test <file>` cannot resolve them (module-root escape),
     // which is why tests go through the build system.
@@ -139,7 +139,7 @@ pub fn build(b: *std.Build) !void {
     // type-checks AND enforces the sync-owned wire rules.
     const check_step = b.step("check", "Type-check + layer guards");
     check_step.dependOn(&exe.step);
-    const layers = b.addSystemCommand(&.{ "./scripts/check-layers.sh" });
+    const layers = b.addSystemCommand(&.{ "./src/test/check-layers.sh" });
     layers.step.dependOn(&exe.step);
     check_step.dependOn(&layers.step);
 }

@@ -199,15 +199,11 @@ pub fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t) void {
     if (build_options.has_floating and floating.isDragging()) floating.stopDrag();
 }
 
-/// Forwards motion to the drag engine, clears focus suppression, and re-arms POINTER_MOTION_HINT.
+/// Forwards motion to the drag engine and clears focus suppression.
+/// Raw PointerMotion is coalesced upstream (events.handleXcbEvents collapses
+/// runs to the last event), so this runs at most once per poll wakeup.
 pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
     focus.setLastEventTime(event.time);
-
-    // POINTER_MOTION_HINT delivers one event per gesture; re-arm with a
-    // fire-and-discard QueryPointer. Must run on EVERY path here, including
-    // while dragging, or the drag is starved of motion events after the first.
-    const cs = core.getState();
-    xcb.xcb_discard_reply(cs.conn, xcb.xcb_query_pointer(cs.conn, cs.root).sequence);
 
     if (build_options.has_floating and floating.isDragging()) {
         floating.updateDrag(event.root_x, event.root_y);
@@ -643,12 +639,18 @@ fn dumpState() void {
     debug.info("Suppress focus: {s}", .{@tagName(focus.getSuppressReason())});
     debug.info("Drag active:    {}", .{build_options.has_floating and floating.isDragging()});
 
-    fullscreen.forEachFullscreen(struct {
-        fn cb(ws: core.WorkspaceId, info: fullscreen.FullscreenInfo) void {
-            debug.info("Fullscreen on workspace {}: {x}", .{ ws.index, info.window });
+    // Fullscreen truth: scan the model store (the legacy record store is gone).
+    {
+        const m = pipeline.model();
+        var any_fs = false;
+        for (0..m.store.count()) |i| {
+            const it = m.store.at(i);
+            if (it.val.mode != .fullscreen) continue;
+            any_fs = true;
+            debug.info("Fullscreen on workspace {}: {x}", .{ it.val.mode.fullscreen.ws, it.key });
         }
-    }.cb);
-    if (!fullscreen.hasAnyFullscreen()) debug.info("Fullscreen: none", .{});
+        if (!any_fs) debug.info("Fullscreen: none", .{});
+    }
 
     if (workspaces.getState()) |ws_state| {
         // Live source (tracking is dual-written by switchTo); the legacy

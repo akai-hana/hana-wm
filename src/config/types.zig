@@ -484,16 +484,6 @@ pub const BarConfig = struct {
 
     transparency: f32 = 1.0,
 
-    /// Carousel scroll settings, staged here so they reach the carousel's
-    /// live globals only after a config has been validated and swapped in
-    /// (config.applyCarouselSettings), writing them at parse time (the old
-    /// behaviour) leaked them into effect for a rejected config.
-    carousel_enabled: bool = true,
-    /// Scroll speed in px/s (config `scroll_speed`, min 1).
-    scroll_speed: u16 = 125,
-    /// Refresh-rate override in Hz (config `carousel_refresh_rate`); 0 = auto.
-    carousel_refresh_rate: u16 = 0,
-
     pub fn deinit(self: *BarConfig, allocator: std.mem.Allocator) void {
         freeStrings(&self.workspace_icons, allocator, false);
         freeStrings(&self.fonts, allocator, false);

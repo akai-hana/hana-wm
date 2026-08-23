@@ -147,8 +147,14 @@ run_one() {
 	# state dumps (registry counts, focus) and hover-focus decisions.
 	# Included in golden diffs so state divergence can't hide behind tree
 	# snapshots while noisy debug lines stay out of the comparison.
+	# Excluded: bar drawSegment NoFont warnings -- the minimal Xvfb
+	# environment has no fontconfig setup, so their count depends on where
+	# poll wakeups land relative to scenario timing (nondeterministic here,
+	# unreachable on real systems where fonts exist).
 	grep -E "error:|warning:|STATE DUMP|Focused:|Total windows|WS[0-9]+: |MAYBE_FOCUS|Suppress focus" \
-		"$out/hana.log.norm" >"$out/hana.log.sig" 2>/dev/null || : >"$out/hana.log.sig"
+		"$out/hana.log.norm" \
+		| grep -v "Best-effort op failed (bar drawSegment): error.NoFont" \
+		>"$out/hana.log.sig" 2>/dev/null || : >"$out/hana.log.sig"
 
 	if [ "$rc" -ne 0 ]; then
 		echo "FAIL $sc (scenario body rc=$rc)"

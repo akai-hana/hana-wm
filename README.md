@@ -38,7 +38,7 @@ In particular, hana's main offerings are the following:
 
 hana counts with a modular codebase architecture, split into single-responsibility code files, written with the goal of making the codebase tidy and easily modifiable by any user. Any file or directory that isn't essential to this WM working/booting up can be just removed, and hana will recompile just fine. 
 
-Don't want hana's bar? Simply remove `src/bar/` and recompile. Don't want tiling/floating? Remove `src/window/modules/tiling/` or `src/window/modules/floating`. Want the bar's inline command prompt, but without vim motions? Keep `src/bar/modules/prompt/prompt.zig` and remove `src/bar/modules/prompt/vim.zig`.
+Don't want hana's bar? Simply remove `src/bar/` and recompile. Don't want tiling/floating? Remove `src/tiling/` (or only its `tiling.zig`) or `src/window/behaviors/floating`. Want the bar's inline command prompt, but without vim motions? Keep `src/bar/segments/prompt/prompt.zig` and remove `src/bar/segments/prompt/vim.zig`.
 
 By default, hana's codebase is categorized into directories and sub-directories, although these are purely decorative; the user is free to re-organize the files in any way and hierarchy they prefer.
 
@@ -55,9 +55,9 @@ src
 
 `core/`, `window/`, `config/` are hana's main directories. `bar/` contains the code for hana's bar, which is optional to compilation, so it can be removed if the user wants to use another bar, or none at all. `TODO: improve support with external bars`
 
-By default, hana's codebase is organized so that any optional code which extends a particular sub-system is located inside a `modules/` directory, modularly coded so that each individual addition has its own file, or set of files if needed (e.g. `src/bar/title/<title.zig/carousel.zig>`). This is to make a clear hierarchy, as to which files are mandatory and which ones are optional, and what does every module add onto.
+By default, hana's codebase is organized so that any optional code which extends a particular sub-system lives beside its peers (e.g. `src/bar/segments/`, `src/window/behaviors/`), modularly coded so that each individual addition has its own file, or set of files if needed (e.g. `src/bar/segments/title/<title.zig/carousel.zig>`). This is to make a clear hierarchy, as to which files are mandatory and which ones are optional, and what does every module add onto.
 
-`tiling/` and `floating/` can be found inside `window/modules`. Both are included by default, making hana a dynamic window manager. At minimum, either one of them must be included in order to compile hana. 
+`tiling/` lives at `src/tiling/`; `floating` inside `window/behaviors`. Both are included by default, making hana a dynamic window manager. At minimum, either one of them must be included in order to compile hana. 
 
 `TODO: mention codebase encapsulation`
 

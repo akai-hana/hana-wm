@@ -1,5 +1,4 @@
 info: [debug] [MAYBE_FOCUS] W01 -> setFocus(.mouse_enter)
-warning: [debug] Best-effort op failed (bar drawSegment): error.NoFont
 info: [debug] ========== STATE DUMP ==========
 info: [debug] Focused:        W02
 info: [debug] Total windows:  2

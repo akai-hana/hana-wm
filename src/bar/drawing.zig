@@ -38,7 +38,15 @@ pub const FontState = struct {
         if (self.current_font_desc) |desc| c.pango_font_description_free(desc);
     }
 
-    pub fn loadFont(self: *FontState, font_name: []const u8) !void {
+    /// Unified entry point shared with MeasureContext so callers need no font-count branch.
+    pub fn loadFonts(self: *FontState, font_names: []const []const u8) !void {
+        if (font_names.len == 0) return self.loadFont(fallbackFont);
+        const font_list = try std.mem.join(self.allocator, ",", font_names);
+        defer self.allocator.free(font_list);
+        try self.loadFont(font_list);
+    }
+
+    fn loadFont(self: *FontState, font_name: []const u8) !void {
         if (self.current_font_desc) |desc| c.pango_font_description_free(desc);
         const pango_name_z = try self.allocator.dupeZ(u8, try convertFontName(self.allocator, font_name));
         defer self.allocator.free(pango_name_z);
@@ -49,14 +57,8 @@ pub const FontState = struct {
         }
         c.pango_layout_set_font_description(self.pango_layout, self.current_font_desc);
         self.cached_metrics = null;
-    }
-
-    /// Unified entry point shared with MeasureContext so callers need no font-count branch.
-    pub fn loadFonts(self: *FontState, font_names: []const []const u8) !void {
-        if (font_names.len == 0) return self.loadFont(fallbackFont);
-        const font_list = try std.mem.join(self.allocator, ",", font_names);
-        defer self.allocator.free(font_list);
-        try self.loadFont(font_list);
+        // D4: any font change invalidates every memoized pixel width.
+        invalidateMeasureCache();
     }
 
     /// Returns (ascent, descent) in pixels; cached per font description, invalidated by loadFont.
@@ -74,6 +76,87 @@ pub const FontState = struct {
         return .{ ascent, descent };
     }
 };
+
+// ---------------------------------------------------------------------------
+// D4: shared text-measurement cache + prefix-fitting primitives.
+//
+// One memoization story for every segment (title/tags/clock/prompt), replacing
+// four ad-hoc schemes. INVARIANT (inherited from title's TitleWidthCache
+// contract): an eviction or miss degrades to a re-measure, NEVER to a wrong
+// width; and any font load invalidates the whole cache wholesale.
+//
+// Keying: (pointer, len) + a 64-bit content hash. A false hit would require
+// allocator reuse at the same address with the same length AND a 2^-64 hash
+// collision — treated as impossible; the font-load invalidation removes the
+// other staleness axis entirely.
+//
+// Eviction policy: direct-mapped (single slot per index, no probe chain).
+// Bounded at measure_cache_slots; a collision overwrites in place and costs
+// one Pango re-measure on the next lookup of the displaced string.
+const measure_cache_slots = 256;
+
+const MeasureEntry = struct {
+    ptr: usize = 0,
+    len: usize = 0,
+    hash: u64 = 0,
+    width: u16 = 0,
+};
+
+var measure_cache: [measure_cache_slots]MeasureEntry = @splat(.{});
+
+fn contentHash(text: []const u8) u64 {
+    return std.hash.Wyhash.hash(0, text);
+}
+
+/// Wholesale invalidation; called from FontState.loadFont/loadFonts so a
+/// font change can never serve stale widths.
+pub fn invalidateMeasureCache() void {
+    measure_cache = @splat(.{});
+}
+
+inline fn measureCacheLookup(dc: *DrawContext, text: []const u8) u16 {
+    if (text.len == 0) return 0;
+    const idx: usize = @intCast((@intFromPtr(text.ptr) >> 4) % measure_cache_slots);
+    const slot = &measure_cache[idx];
+    if (slot.ptr == @intFromPtr(text.ptr) and slot.len == text.len and slot.hash == contentHash(text)) {
+        return slot.width;
+    }
+    const w = dc.measureTextWidth(text);
+    slot.* = .{ .ptr = @intFromPtr(text.ptr), .len = text.len, .hash = contentHash(text), .width = w };
+    return w;
+}
+
+/// Binary search: first byte offset where `measureTextWidth(text[0..offset])
+/// >= target_px`. Returns `text.len` when the whole string is narrower.
+/// Maps a pixel scroll offset back to a character boundary (moved up from
+/// prompt.textOffsetAtPx — the single measurement/fitting implementation).
+pub fn offsetAtPx(dc: *DrawContext, text: []const u8, target_px: u16) usize {
+    var lo: usize = 0;
+    var hi: usize = text.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (dc.cachedTextWidth(text[0..mid]) < target_px) lo = mid + 1 else hi = mid;
+    }
+    return lo;
+}
+
+/// Return the longest prefix of `text` whose pixel width is <= `max_px`.
+/// Fast path: full slice when the text already fits (`known_w` skips the
+/// initial full-text measurement when the caller already has it — moved up
+/// from prompt.textPrefixFit/textPrefixFitKnownW).
+pub fn fitPrefix(dc: *DrawContext, text: []const u8, max_px: u16, known_w: ?u16) []const u8 {
+    const w = known_w orelse dc.cachedTextWidth(text);
+    if (w <= max_px) return text;
+    var lo: usize = 0;
+    var hi: usize = text.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo + 1) / 2; // round up to avoid infinite loop
+        if (dc.cachedTextWidth(text[0..mid]) <= max_px) lo = mid else hi = mid - 1;
+    }
+    return text[0..lo];
+}
+
+// ---------------------------------------------------------------------------
 
 /// Set the Cairo source color from a packed 0xRRGGBB u32 at full opacity.
 inline fn setCairoColor(ctx: *c.cairo_t, color: u32) void {
@@ -341,6 +424,13 @@ pub const DrawContext = struct {
         var width: c_int = undefined;
         c.pango_layout_get_pixel_size(self.font.pango_layout, &width, null);
         return @intCast(width);
+    }
+
+    /// D4: memoized variant of `measureTextWidth`. Identical result for
+    /// identical (font state, string) inputs; a cache miss or eviction costs
+    /// a re-measure, never a stale width.
+    pub inline fn cachedTextWidth(self: *DrawContext, text: []const u8) u16 {
+        return measureCacheLookup(self, text);
     }
 
     inline fn xcbCopyArea(self: *DrawContext, src_x: u16, dst_x: u16, w: u16) void {
