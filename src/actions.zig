@@ -605,6 +605,9 @@ pub fn switchTo(ctx: *Ctx, ws_idx: u8) void {
 
     // Dual-write legacy tracking while both paths coexist.
     tracking.setCurrentWorkspace(core.WorkspaceId.fromIndex(ws_idx));
+    // Bar segments and the state dump read workspaces.State.current (WP6
+    // rewrite orphaned this field once; without it indicators/titles freeze).
+    @import("workspaces").setCurrent(ws_idx);
     m.current = ws_idx;
 
     if (target) |t| {

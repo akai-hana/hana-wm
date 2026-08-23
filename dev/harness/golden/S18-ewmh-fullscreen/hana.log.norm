@@ -2,18 +2,20 @@ info: [debug] Calculated DPI: X=95.9, Y=95.8, Average=95.9
 info: [debug] Using geometry-calculated DPI: 95.9
 info: [debug] Merged: /home/akai/eudaimonia/hana/dev/harness/out/S18-ewmh-fullscreen/config-home/hana/config.toml
 info: [debug] Loaded config from dir: /home/akai/eudaimonia/hana/dev/harness/out/S18-ewmh-fullscreen/config-home/hana (1 file(s))
+info: [debug] Bar transparency: disabled (opaque)
+info: [debug] Clock thread started
 info: [debug] hana booted up successfully!
-warning: [debug] Unchecked XCB request failed: code=2 major=53 minor=0 resource=0
-warning: [debug] Unchecked XCB request failed: code=4 major=54 minor=0 resource=W01
+info: [debug] [ENTER] win=W01 mode=0 detail=0 root_x=640 root_y=400
+info: [debug] [MAYBE_FOCUS] W01 -> setFocus(.mouse_enter)
+warning: [debug] Best-effort op failed (bar drawSegment): error.NoFont
+info: [debug] [ENTER] win=0x3a0 mode=0 detail=2 root_x=640 root_y=400
+info: [debug] Bar hidden (hide_fullscreen)
 info: [debug] [ENTER] win=W02 mode=0 detail=0 root_x=640 root_y=400
 info: [debug] [MAYBE_FOCUS] W02 -> setFocus(.mouse_enter)
-info: [debug] [ENTER] win=0x3a0 mode=0 detail=2 root_x=640 root_y=400
-info: [debug] [ENTER] win=W03 mode=0 detail=0 root_x=640 root_y=400
-info: [debug] [MAYBE_FOCUS] W03 -> setFocus(.mouse_enter)
 info: [debug] [KEY] keycode=24 state=0x40 mods=0x40 keysym=0x71
 info: [debug] [KEY] action=dump_state
 info: [debug] ========== STATE DUMP ==========
-info: [debug] Focused:        W04
+info: [debug] Focused:        W03
 info: [debug] Total windows:  2
 info: [debug] Suppress focus: none
 info: [debug] Drag active:    false
@@ -27,11 +29,15 @@ info: [debug] Tiling enabled: true
 info: [debug] Tiling layout:  master
 info: [debug] Tiled windows:  1
 info: [debug] ================================
+warning: [debug] Best-effort op failed (bar drawSegment): error.NoFont
+info: [debug] Bar shown (show_fullscreen)
 info: [debug] [ENTER] win=0x3a0 mode=0 detail=2 root_x=640 root_y=400
+warning: [debug] Best-effort op failed (bar drawSegment): error.NoFont
+warning: [debug] Best-effort op failed (bar drawSegment): error.NoFont
 info: [debug] [KEY] keycode=24 state=0x40 mods=0x40 keysym=0x71
 info: [debug] [KEY] action=dump_state
 info: [debug] ========== STATE DUMP ==========
-info: [debug] Focused:        W04
+info: [debug] Focused:        W03
 info: [debug] Total windows:  2
 info: [debug] Suppress focus: none
 info: [debug] Drag active:    false
@@ -48,7 +54,7 @@ info: [debug] ================================
 info: [debug] [KEY] keycode=24 state=0x40 mods=0x40 keysym=0x71
 info: [debug] [KEY] action=dump_state
 info: [debug] ========== STATE DUMP ==========
-info: [debug] Focused:        W04
+info: [debug] Focused:        W03
 info: [debug] Total windows:  2
 info: [debug] Suppress focus: none
 info: [debug] Drag active:    false

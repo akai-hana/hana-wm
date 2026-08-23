@@ -651,7 +651,10 @@ fn dumpState() void {
     if (!fullscreen.hasAnyFullscreen()) debug.info("Fullscreen: none", .{});
 
     if (workspaces.getState()) |ws_state| {
-        debug.info("Current workspace: {}", .{ws_state.current + 1});
+        // Live source (tracking is dual-written by switchTo); the legacy
+        // workspaces.State.current mirror lags when read mid-switch.
+        const cur_ws = tracking.getCurrentWorkspace() orelse 0;
+        debug.info("Current workspace: {}", .{cur_ws + 1});
         for (ws_state.workspaces, 0..) |_, i|
             debug.info("  WS{}: {} windows", .{ i + 1, tracking.countWindowsOnWorkspace(core.WorkspaceId.fromIndex(@intCast(i))) });
     }

@@ -3,21 +3,24 @@ info: [debug] Using geometry-calculated DPI: 95.9
 info: [debug] Merged: /home/akai/eudaimonia/hana/dev/harness/out/S13-reload/config-home/hana/config.toml
 info: [debug] Loaded config from dir: /home/akai/eudaimonia/hana/dev/harness/out/S13-reload/config-home/hana (1 file(s))
 Fontconfig warning: using without calling FcInit()
+info: [debug] Bar transparency: disabled (opaque)
+info: [debug] Clock thread started
 info: [debug] hana booted up successfully!
-warning: [debug] Unchecked XCB request failed: code=2 major=53 minor=0 resource=0
-warning: [debug] Unchecked XCB request failed: code=4 major=54 minor=0 resource=200004
 info: [debug] [ENTER] win=0x400001 mode=0 detail=0 root_x=640 root_y=400
 info: [debug] [MAYBE_FOCUS] 0x400001 -> setFocus(.mouse_enter)
+warning: [debug] Best-effort op failed (bar drawSegment): error.NoFont
 info: [debug] [ENTER] win=0x3a0 mode=0 detail=2 root_x=640 root_y=400
 info: [debug] [KEY] keycode=29 state=0x41 mods=0x41 keysym=0x79
 info: [debug] [KEY] action=reload_config
 info: [debug] Reload requested
 info: [debug] Merged: /home/akai/eudaimonia/hana/dev/harness/out/S13-reload/config-home/hana/config.toml
 info: [debug] Loaded config from dir: /home/akai/eudaimonia/hana/dev/harness/out/S13-reload/config-home/hana (1 file(s))
-error: [debug] Bar init failed: error.GCCreationFailed
+info: [debug] Bar transparency: disabled (opaque)
+info: [debug] Clock thread stopped
+info: [debug] Clock thread started
+warning: [debug] Best-effort op failed (bar drawSegment): error.NoFont
 info: [debug] Reload complete
-warning: [debug] Unchecked XCB request failed: code=2 major=53 minor=0 resource=0
-warning: [debug] Unchecked XCB request failed: code=4 major=54 minor=0 resource=200008
+warning: [debug] Best-effort op failed (bar drawSegment): error.NoFont
 info: [debug] [ENTER] win=0x400001 mode=0 detail=0 root_x=640 root_y=400
 info: [debug] [MAYBE_FOCUS] 0x400001 -> setFocus(.mouse_enter)
 info: [debug] [ENTER] win=0x3a0 mode=0 detail=2 root_x=640 root_y=400
@@ -58,10 +61,10 @@ info: [debug] ================================
 info: [debug] Shutting down gracefully...
 info: [debug] Clock thread stopped
 General protection exception (no address available)
-/home/akai/eudaimonia/hana/src/config/types.zig:56:9: 0x13e4e56 in deinit (types.zig)
+/home/akai/eudaimonia/hana/src/config/types.zig:56:9: 0x13e4ff6 in deinit (types.zig)
         switch (self.*) {
         ^
-/home/akai/eudaimonia/hana/src/config/types.zig:608:60: 0x13f284d in deinit (types.zig)
+/home/akai/eudaimonia/hana/src/config/types.zig:608:60: 0x13f29ed in deinit (types.zig)
         for (self.keybindings.items) |*kb| kb.action.deinit(a);
                                                            ^
 /home/akai/eudaimonia/hana/src/core/main.zig:54:32: 0x124e95d in main (main.zig)
@@ -70,6 +73,6 @@ General protection exception (no address available)
 /home/akai/.zvm/0.16.0/lib/std/start.zig:698:59: 0x124f195 in callMain (std.zig)
     if (fn_info.params.len == 0) return wrapMain(root.main());
                                                           ^
-???:?:?: 0x71e9ec003fac in ??? (/lib/ld-musl-x86_64.so.1)
-Unwind error at address `/lib/ld-musl-x86_64.so.1:0x71e9ec003fac` (unwind info unavailable), remaining frames may be incorrect
-???:?:?: 0x1441155 in ??? (/home/akai/eudaimonia/hana/zig-out/bin/hana)
+???:?:?: 0x7bfd962fcfac in ??? (/lib/ld-musl-x86_64.so.1)
+Unwind error at address `/lib/ld-musl-x86_64.so.1:0x7bfd962fcfac` (unwind info unavailable), remaining frames may be incorrect
+???:?:?: 0x14412f5 in ??? (/home/akai/eudaimonia/hana/zig-out/bin/hana)
