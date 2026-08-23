@@ -4,7 +4,6 @@ info: [debug] Merged: /home/akai/eudaimonia/hana/dev/harness/out/S13-reload/conf
 info: [debug] Loaded config from dir: /home/akai/eudaimonia/hana/dev/harness/out/S13-reload/config-home/hana (1 file(s))
 Fontconfig warning: using without calling FcInit()
 info: [debug] Bar transparency: disabled (opaque)
-info: [debug] Clock thread started
 info: [debug] hana booted up successfully!
 info: [debug] [ENTER] win=0x400001 mode=0 detail=0 root_x=640 root_y=400
 info: [debug] [MAYBE_FOCUS] 0x400001 -> setFocus(.mouse_enter)
@@ -16,8 +15,6 @@ info: [debug] Reload requested
 info: [debug] Merged: /home/akai/eudaimonia/hana/dev/harness/out/S13-reload/config-home/hana/config.toml
 info: [debug] Loaded config from dir: /home/akai/eudaimonia/hana/dev/harness/out/S13-reload/config-home/hana (1 file(s))
 info: [debug] Bar transparency: disabled (opaque)
-info: [debug] Clock thread stopped
-info: [debug] Clock thread started
 warning: [debug] Best-effort op failed (bar drawSegment): error.NoFont
 info: [debug] Reload complete
 warning: [debug] Best-effort op failed (bar drawSegment): error.NoFont
@@ -59,20 +56,19 @@ info: [debug] Tiling layout:  master
 info: [debug] Tiled windows:  2
 info: [debug] ================================
 info: [debug] Shutting down gracefully...
-info: [debug] Clock thread stopped
 General protection exception (no address available)
-/home/akai/eudaimonia/hana/src/config/types.zig:56:9: 0x13e4ff6 in deinit (types.zig)
+/home/akai/eudaimonia/hana/src/config/types.zig:56:9: 0x13dd496 in deinit (types.zig)
         switch (self.*) {
         ^
-/home/akai/eudaimonia/hana/src/config/types.zig:608:60: 0x13f29ed in deinit (types.zig)
+/home/akai/eudaimonia/hana/src/config/types.zig:608:60: 0x13eae8d in deinit (types.zig)
         for (self.keybindings.items) |*kb| kb.action.deinit(a);
                                                            ^
-/home/akai/eudaimonia/hana/src/core/main.zig:54:32: 0x124e95d in main (main.zig)
+/home/akai/eudaimonia/hana/src/main.zig:54:32: 0x124d80d in main (main.zig)
     defer initial_config.deinit(alloc);
                                ^
-/home/akai/.zvm/0.16.0/lib/std/start.zig:698:59: 0x124f195 in callMain (std.zig)
+/home/akai/.zvm/0.16.0/lib/std/start.zig:698:59: 0x124e045 in callMain (std.zig)
     if (fn_info.params.len == 0) return wrapMain(root.main());
                                                           ^
-???:?:?: 0x7bfd962fcfac in ??? (/lib/ld-musl-x86_64.so.1)
-Unwind error at address `/lib/ld-musl-x86_64.so.1:0x7bfd962fcfac` (unwind info unavailable), remaining frames may be incorrect
-???:?:?: 0x14412f5 in ??? (/home/akai/eudaimonia/hana/zig-out/bin/hana)
+???:?:?: 0x7f4419e4bfac in ??? (/lib/ld-musl-x86_64.so.1)
+Unwind error at address `/lib/ld-musl-x86_64.so.1:0x7f4419e4bfac` (unwind info unavailable), remaining frames may be incorrect
+???:?:?: 0x1439795 in ??? (/home/akai/eudaimonia/hana/zig-out/bin/hana)

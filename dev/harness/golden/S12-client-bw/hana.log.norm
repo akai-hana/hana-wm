@@ -3,11 +3,9 @@ info: [debug] Using geometry-calculated DPI: 95.9
 info: [debug] Merged: /home/akai/eudaimonia/hana/dev/harness/out/S12-client-bw/config-home/hana/config.toml
 info: [debug] Loaded config from dir: /home/akai/eudaimonia/hana/dev/harness/out/S12-client-bw/config-home/hana (1 file(s))
 info: [debug] Bar transparency: disabled (opaque)
-info: [debug] Clock thread started
 info: [debug] hana booted up successfully!
 info: [debug] [ENTER] win=W01 mode=0 detail=0 root_x=640 root_y=400
 info: [debug] [MAYBE_FOCUS] W01 -> setFocus(.mouse_enter)
-warning: [debug] Best-effort op failed (bar drawSegment): error.NoFont
 info: [debug] [ENTER] win=0x3a0 mode=0 detail=2 root_x=640 root_y=400
 info: [debug] [KEY] keycode=25 state=0x40 mods=0x40 keysym=0x77
 info: [debug] [KEY] action=swap_master
@@ -46,4 +44,3 @@ info: [debug] Tiling layout:  master
 info: [debug] Tiled windows:  2
 info: [debug] ================================
 info: [debug] Shutting down gracefully...
-info: [debug] Clock thread stopped

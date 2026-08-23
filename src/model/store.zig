@@ -1,5 +1,11 @@
 //! Bounded window store. INVARIANT(I8): a full-store put refuses BEFORE any
-//! mutation. Iteration order = insertion order (decision C-D5).
+//! mutation.
+//!
+//! Iteration order = SLOT order (decision C-D5): `remove` swap-removes, so
+//! the last live element moves into the freed slot and the tail slot is
+//! inherited by the moved element. Deterministic but not insertion-ordered;
+//! consumers that need a meaningful tie-break (e.g. sync's "first fullscreen"
+//! scan) must not rely on slot position for semantics.
 const std = @import("std");
 
 pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type {
@@ -9,8 +15,6 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
 
         keys: [capacity]K = undefined,
         vals: [capacity]V = undefined,
-        /// slot indices in insertion sequence; order[i] < len for i < len.
-        order: [capacity]usize = undefined,
         len: usize = 0,
 
         pub fn getPtr(self: *Self, k: K) ?*V {
@@ -46,26 +50,18 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
             const s = self.len;
             self.keys[s] = k;
             self.vals[s] = v;
-            self.order[s] = s;
             self.len += 1;
             return &self.vals[s];
         }
 
-        /// Swap-remove keeping order[] consistent: when the last live element
-        /// moves into the freed slot, its index inside order[] is rewritten.
+        /// Swap-remove: the last live element moves into the freed slot
+        /// (C-D5). O(1); iteration order after removal is slot order.
         pub fn remove(self: *Self, k: K) bool {
             var i: usize = 0;
             while (i < self.len) : (i += 1) {
                 if (self.keys[i] == k) {
                     const last = self.len - 1;
                     if (i != last) {
-                        var p: usize = 0;
-                        while (p <= last) : (p += 1) {
-                            if (self.order[p] == last) {
-                                self.order[p] = i;
-                                break;
-                            }
-                        }
                         self.keys[i] = self.keys[last];
                         self.vals[i] = self.vals[last];
                     }
@@ -78,10 +74,9 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
 
         pub const Item = struct { key: K, val: *const V };
 
-        /// seq must be < count(). Iterates in insertion order.
+        /// seq must be < count(). Iterates in slot order (C-D5).
         pub fn at(self: *const Self, seq: usize) Item {
-            const s = self.order[seq];
-            return .{ .key = self.keys[s], .val = &self.vals[s] };
+            return .{ .key = self.keys[seq], .val = &self.vals[seq] };
         }
 
         pub fn count(self: *const Self) usize {

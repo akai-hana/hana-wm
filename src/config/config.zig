@@ -132,9 +132,6 @@ fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *types.Config) !void 
 const max_file_bytes = 1024 * 1024;
 
 const default_tiling_layout = (types.TilingConfig{}).layout;
-const default_carousel_enabled = (types.BarConfig{}).carousel_enabled;
-const default_scroll_speed = (types.BarConfig{}).scroll_speed;
-const default_carousel_refresh_rate = (types.BarConfig{}).carousel_refresh_rate;
 
 /// Reads `path` into a freshly allocated caller-owned slice;
 /// `error.FileTooLarge` when it exceeds `max_file_bytes`. Allocates the full
@@ -468,53 +465,48 @@ fn mouseButtonFromName(name: []const u8) ?u8 {
     };
 }
 
-const action_map = std.StaticStringMap(types.Action).initComptime(.{
-    .{ "close", .close_window },
-    .{ "close_window", .close_window },
-    .{ "kill", .close_window },
-    .{ "reload", .reload_config },
-    .{ "reload_config", .reload_config },
-    .{ "toggle_layout", .toggle_layout },
-    .{ "toggle_layout_reverse", .toggle_layout_reverse },
-    .{ "toggle_bar_visibility", .toggle_bar_visibility },
-    .{ "toggle_bar_position", .toggle_bar_position },
-    .{ "increase_master", .increase_master },
-    .{ "decrease_master", .decrease_master },
-    .{ "increase_master_count", .increase_master_count },
-    .{ "decrease_master_count", .decrease_master_count },
-    .{ "grow_stack_top", .grow_stack_top },
-    .{ "stack_top", .grow_stack_top }, // short alias
-    .{ "grow_stack_bottom", .grow_stack_bottom },
-    .{ "stack_bottom", .grow_stack_bottom }, // short alias
-    .{ "toggle_floating_window", .toggle_floating_window },
-    .{ "toggle_fullscreen", .toggle_fullscreen },
-    .{ "fullscreen", .toggle_fullscreen },
-    .{ "swap_master", .swap_master },
-    .{ "swap_master_focus_swap", .swap_master_focus_swap },
-    .{ "dump_state", .dump_state },
-    .{ "minimize_window", .minimize_window },
-    .{ "minimize", .minimize_window },
-    .{ "unminimize_lifo", .unminimize_lifo },
-    .{ "unminimize_fifo", .unminimize_fifo },
-    .{ "unminimize_all", .unminimize_all },
-    .{ "cycle_layout_variants", .cycle_layout_variants },
-    .{ "cycle_variants", .cycle_layout_variants },
-    .{ "toggle_prompt", .toggle_prompt },
-    .{ "prompt", .toggle_prompt },
-    .{ "all_workspaces", .all_workspaces },
-    .{ "move_to_all_workspaces", .move_to_all_workspaces },
-    .{ "toggle_tag_all", .toggle_tag_all },
-    .{ "focus_next_window", .focus_next_window },
-    .{ "focus_next", .focus_next_window },
-    .{ "focus_prev_window", .focus_prev_window },
-    .{ "focus_prev", .focus_prev_window },
-    .{ "move_window_next", .move_window_next },
-    .{ "move_window_prev", .move_window_prev },
-    .{ "scroll_view_left", .scroll_view_left },
-    .{ "scroll_view_right", .scroll_view_right },
-    .{ "scroll_left", .scroll_view_left }, // short alias
-    .{ "scroll_right", .scroll_view_right }, // short alias
-});
+/// D7: mechanically derived from `types.Action`'s tag names — every action
+/// is addressable by its own tag name without a hand-maintained entry. Only
+/// genuine ALIASES are listed by hand. Adding an Action union member now
+/// requires exactly one edit (the union); forgetting an intended alias fails
+/// the parser's unknown-action typo detection instead of silently unparsable.
+const action_aliases = [_]struct { key: []const u8, tag: std.meta.Tag(types.Action) }{
+    .{ .key = "close", .tag = .close_window },
+    .{ .key = "kill", .tag = .close_window },
+    .{ .key = "reload", .tag = .reload_config },
+    .{ .key = "stack_top", .tag = .grow_stack_top },
+    .{ .key = "stack_bottom", .tag = .grow_stack_bottom },
+    .{ .key = "fullscreen", .tag = .toggle_fullscreen },
+    .{ .key = "minimize", .tag = .minimize_window },
+    .{ .key = "cycle_variants", .tag = .cycle_layout_variants },
+    .{ .key = "prompt", .tag = .toggle_prompt },
+    .{ .key = "focus_next", .tag = .focus_next_window },
+    .{ .key = "focus_prev", .tag = .focus_prev_window },
+    .{ .key = "scroll_left", .tag = .scroll_view_left },
+    .{ .key = "scroll_right", .tag = .scroll_view_right },
+};
+
+const action_map: std.StaticStringMap(types.Action) = blk: {
+    @setEvalBranchQuota(10000);
+    const fields = @typeInfo(types.Action).@"union".fields;
+    var kvs: [fields.len + action_aliases.len]struct { []const u8, types.Action } = undefined;
+    var n: usize = 0;
+    // Tag names first; aliases must not shadow them (checked below).
+    for (fields) |f| {
+        if (f.type == void) {
+            kvs[n] = .{ f.name, @field(types.Action, f.name) };
+            n += 1;
+        }
+    }
+    for (action_aliases) |a| {
+        for (kvs[0..n]) |kv| {
+            if (std.mem.eql(u8, kv[0], a.key)) @compileError("alias shadows an Action tag name: " ++ a.key);
+        }
+        kvs[n] = .{ a.key, @field(types.Action, @tagName(a.tag)) };
+        n += 1;
+    }
+    break :blk .initComptime(kvs[0..n]);
+};
 
 const GlobEntry = struct {
     key: []const u8,
@@ -844,20 +836,7 @@ pub fn load(allocator: std.mem.Allocator, screen: core.Screen, xkb_state: *xkbco
     try validate(&cfg);
     cfg.keybind_resolver.build(cfg.keybindings.items, xkb_state, allocator);
     finalizeConfig(&cfg, screen);
-    applyCarouselSettings(&cfg);
     return cfg;
-}
-
-/// Pushes the config's staged carousel settings onto the carousel's live
-/// globals. Called only from load(), at startup and, via handleConfigReload,
-/// after the validated config has been swapped in, so settings from a
-/// rejected config can never leak into effect.
-pub fn applyCarouselSettings(cfg: *const types.Config) void {
-    if (build_options.has_bar) {
-        bar.carouselSetEnabled(cfg.bar.carousel_enabled);
-        bar.carouselSetScrollSpeed(@as(f64, @floatFromInt(cfg.bar.scroll_speed)));
-        bar.carouselSetRefreshRateOverride(@as(f64, @floatFromInt(cfg.bar.carousel_refresh_rate)));
-    }
 }
 
 fn parseDrag(doc: *parser.Document, cfg: *types.Config) void {
@@ -1211,8 +1190,29 @@ fn parseBarColors(doc: *parser.Document, cfg: *types.Config) !void {
 
 fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
     const section = doc.getSection("bar") orelse return;
-    cfg.bar.enabled = getInRange(bool, section, "enabled", cfg.bar.enabled, null, null);
-    cfg.bar.vim_mode = getInRange(bool, section, "vim_mode", cfg.bar.vim_mode, null, null);
+    // D7: declarative scalar-field table — each key/field pair is stated once
+    // instead of once per hand-written assignment line. Bespoke fields
+    // (height auto-sentinel, position enum, fonts array, strings, colors,
+    // indicator mirroring) keep their explicit handling below.
+    const ScalarKind = enum { boolean, scalable };
+    const BarScalar = struct { key: []const u8, field: []const u8, kind: ScalarKind };
+    const bar_scalars = [_]BarScalar{
+        .{ .key = "enabled", .field = "enabled", .kind = .boolean },
+        .{ .key = "vim_mode", .field = "vim_mode", .kind = .boolean },
+        .{ .key = "font_size", .field = "font_size", .kind = .scalable },
+        .{ .key = "segment_spacing", .field = "spacing", .kind = .scalable },
+        .{ .key = "indicator_size", .field = "indicator_size", .kind = .scalable },
+        .{ .key = "workspace_tag_width", .field = "workspace_tag_width", .kind = .scalable },
+    };
+    inline for (bar_scalars) |e| {
+        switch (e.kind) {
+            .boolean => @field(cfg.bar, e.field) = getInRange(bool, section, e.key, @field(cfg.bar, e.field), null, null),
+            // Reads the already-initialised value as default so the struct
+            // default in types.zig can't drift; also rejects negatives like
+            // the other ScalableValue fields.
+            .scalable => @field(cfg.bar, e.field) = getScalableInRange(section, e.key, @field(cfg.bar, e.field), 0.0),
+        }
+    }
     if (section.getString("position")) |pos_str|
         cfg.bar.bar_position = std.meta.stringToEnum(types.BarScreenPosition, pos_str) orelse .top;
     // height: null = auto-calculate from font metrics alone. A negative
@@ -1232,17 +1232,10 @@ fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Con
             try cfg.bar.fonts.append(allocator, try allocator.dupe(u8, name));
         debug.info("Loaded {} fonts for bar", .{cfg.bar.fonts.items.len});
     }
-    cfg.bar.font_size = getScalableInRange(section, "font_size", cfg.bar.font_size, 0.0);
-    cfg.bar.spacing = getScalableInRange(section, "segment_spacing", cfg.bar.spacing, 0.0);
     inline for (bar_color_fields) |field_name|
         @field(cfg.bar, field_name) = getColor(section, field_name, @field(cfg.bar, field_name));
     try assignStrKey(allocator, section, "clock_format", &cfg.bar.clock_format);
     try assignStrKey(allocator, section, "drun_prompt", &cfg.bar.drun_prompt);
-    // Reads the already-initialised value as default so the struct default in
-    // types.zig can't drift; also rejects negative values like the other
-    // ScalableValue fields.
-    cfg.bar.indicator_size = getScalableInRange(section, "indicator_size", cfg.bar.indicator_size, 0.0);
-    cfg.bar.workspace_tag_width = getScalableInRange(section, "workspace_tag_width", cfg.bar.workspace_tag_width, 0.0);
     if (section.getString("indicator_location")) |loc_str| {
         cfg.bar.indicator_location = types.IndicatorLocation.fromString(loc_str) orelse blk: {
             debug.warn("Unknown indicator_location '{s}', using default 'up-left'", .{loc_str});
@@ -1265,12 +1258,6 @@ fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Con
     try parseWorkspaceIcons(allocator, section, cfg);
     try parseBarLayout(allocator, doc, cfg);
     try parseBarColors(doc, cfg);
-    // Carousel: enabled flag, scroll_speed (px/s, min 1), refresh rate
-    // (Hz, 0 = auto). Pushed to live globals only after a validated config
-    // is swapped in, so a rejected reload can't leak them into effect.
-    cfg.bar.carousel_enabled = getInRange(bool, section, "carousel_enabled", default_carousel_enabled, null, null);
-    cfg.bar.scroll_speed = getInRange(u16, section, "scroll_speed", default_scroll_speed, 1, null);
-    cfg.bar.carousel_refresh_rate = getInRange(u16, section, "carousel_refresh_rate", default_carousel_refresh_rate, null, null);
 }
 
 fn parseWorkspaceIcons(allocator: std.mem.Allocator, section: *parser.Section, cfg: *types.Config) !void {

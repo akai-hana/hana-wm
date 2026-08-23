@@ -98,40 +98,11 @@ pub inline fn getStateOpt() ?*State {
 // minimize/restore. Owned by wincache.zig, the single source of truth for both
 // tiled and floating windows.
 
-/// Save `rect` as the last-known geometry for `win`. Delegates to wincache,
-/// which owns the one geometry cache shared by tiled and floating windows alike.
-pub fn saveWindowGeom(win: u32, rect: utils.Rect) void {
-    wincache.saveWindowGeom(win, rect);
-}
-
 /// Screen-space position of a window's top-left corner.
 /// X11 coordinates are signed (windows may be partially off-screen or on a
 /// monitor to the left/above the primary), so both fields use i16 to match
 /// the XCB wire type for X/Y configure values.
 const Pos = struct { x: i16, y: i16 };
-
-pub fn floatDefaultPos() Pos {
-    const screen = core.getState().screen;
-    return .{
-        .x = @intCast(@min(screen.width_in_pixels / 4, std.math.maxInt(i16))),
-        .y = @intCast(@min(screen.height_in_pixels / 4, std.math.maxInt(i16))),
-    };
-}
-
-/// Restore `win` to its saved geometry, or move it to the float default
-/// position when no geometry has been saved. Only X/Y are updated in the
-/// fallback case; the window keeps whatever size the server already knows.
-///
-/// This is the shared implementation of the "restore floating window"
-/// pattern that appears in minimize, workspaces, and fullscreen modules.
-pub fn restoreFloatGeom(win: u32) void {
-    const conn = core.getState().conn;
-    if (wincache.getWindowGeom(win)) |rect| {
-        utils.configureWindow(conn, win, rect);
-    } else {
-        moveFloatToDefaultPos(win);
-    }
-}
 
 /// Moves, resizes, and sets border_width atomically,
 /// preventing a one-frame flash on fullscreen enter/exit or workspace switch.
@@ -155,35 +126,15 @@ pub fn configureWindowGeom(conn: core.Connection, win: u32, geom: utils.Rect) vo
     );
 }
 
-/// Flush border geometry for every floating window while the server grab is
-/// held, then clear the pending-flush flag so the next loop tick doesn't
-/// re-sweep. The bar is NOT redrawn here: redrawInsideGrab performed a full
-/// bar render (captureStateIntoSlot + batchFetchWindowInfosInto + Pango draw)
-/// for every window that mapped, causing O(N²) property queries and Pango
-/// renders inside server grabs during rapid window opening. The bar's
-/// post_batch hook (updateIfDirty) handles the redraw after the entire event
-/// batch is processed. Callers must be inside a grab.
-pub fn flushGrabBorders() void {
-    updateFloatingWindowBorders();
-    markBordersFlushed();
-}
-
 pub fn markBordersFlushed() void {
     state.?.borders_flushed_this_batch = true;
-}
-
-/// Shared by restoreFloatGeom and fullscreen.restoreFloatingWindows.
-pub fn moveFloatToDefaultPos(win: u32) void {
-    const conn = core.getState().conn;
-    const pos = floatDefaultPos();
-    _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{ utils.toXcbCoord(pos.x), utils.toXcbCoord(pos.y) });
 }
 
 /// Returns null if the window does not exist or is not yet mapped.
 pub fn getGeometry(conn: core.Connection, win: u32) ?utils.Rect {
     const reply = xcb.xcb_get_geometry_reply(conn, xcb.xcb_get_geometry(conn, win), null) orelse return null;
     defer std.c.free(reply);
-    return utils.Rect.fromXcb(reply);
+    return utils.rectFromXcb(reply);
 }
 
 // ICCCM focus property cache
@@ -830,32 +781,6 @@ pub fn registerSpawn(workspace: core.WorkspaceId, pid: u32) void {
     };
 }
 
-// Pointer snapshot for spawn-crossing suppression.
-//
-// mapWindowToScreen fires+drains xcb_query_pointer synchronously (MapRequest
-// is once-per-window, so the round trip isn't perceptible). Don't reach for
-// prefetch/caching here, that's for genuinely hot paths like dragging and
-// retiling.
-
-/// Record the cursor position from a drained pointer reply for later
-/// spawn-crossing suppression checks. The caller owns the reply memory;
-/// this function only reads from it.
-///
-/// When `ptr_reply` is null, the suppression flag is cleared rather than
-/// leaving `state.spawn_cursor` at its previous value (which could be {0,0}
-/// on startup and cause false suppression for windows at the screen origin).
-fn snapshotSpawnCursorFromReply(ptr_reply: ?*xcb.xcb_query_pointer_reply_t, suppress_reason: core.FocusSuppressReason) void {
-    if (suppress_reason != .window_spawn) return;
-    const ptr = ptr_reply orelse {
-        // No valid cursor position: disable suppression so the stale
-        // state.spawn_cursor cannot block legitimate focus events.
-        focus.setSuppressReason(.none);
-        return;
-    };
-    state.?.spawn_cursor.x = ptr.*.root_x;
-    state.?.spawn_cursor.y = ptr.*.root_y;
-}
-
 /// Handles a MapRequest by querying the properties it needs one at a time:
 /// fire the request, then immediately drain the reply, rather than batching
 /// every cookie up front the way a hot path (dragging, retiling) would.
@@ -914,9 +839,8 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
 }
 
 fn unmanageWindow(win: u32) void {
-    const fs_ws = fullscreen.workspaceFor(win);
-    if (fs_ws) |ws| fullscreen.removeForWorkspace(ws);
-
+    // Fullscreen truth is model-side (actions.unmanage reads it); no legacy
+    // record-store bookkeeping remains.
     if (state.?.cache_ready) {
         if (state.?.cache_slots.indexOfById(win)) |i| state.?.cache_slots.swapRemove(i);
     }
@@ -1015,12 +939,13 @@ pub fn geometryFromXcbReply(reply: *xcb.xcb_get_geometry_reply_t) utils.Rect {
 ///
 /// Returns null when even the fallback fails (window gone).
 fn resolveConfigureGeometry(win: u32) ?utils.Rect {
-    if (wincache.getWindowGeom(win)) |rect| {
+    // Path 1 (A5): model/sync truth — floating base or last-sent ledger rect.
+    if (@import("sync").truthRect(pipeline.model(), win)) |rect| {
         const border: u16 = (if (build_options.has_tiling) tiling.getBorderWidth() else 0);
         return .{ .x = rect.x, .y = rect.y, .width = rect.width, .height = rect.height, .border_width = border };
     }
 
-    if (fullscreen.isFullscreen(win)) {
+    if (actions.isFullscreenMode(win)) {
         const screen = core.getState().screen;
         return .{
             .x = 0,
@@ -1055,19 +980,13 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
     const mask = event.value_mask & geometry_mask;
     if (mask == 0) return;
 
-    const is_tiled = tilingActive() and build_options.has_tiling and tracking.isTiledMode(win);
-    const is_fullscreen = fullscreen.isFullscreen(win);
-    if (is_tiled or is_fullscreen) {
-        sendSyntheticConfigureNotify(win);
-        return;
-    }
-
     // Deny min-size ConfigureRequests from the window being drag-resized. When
     // the WM sizes a floating window below its WM_NORMAL_HINTS minimum, the
     // client fires a ConfigureRequest back with its minimum dimensions;
     // honouring it races the next MotionNotify and causes visible flicker.
     // Echo the geometry the WM already applied so the client settles without
-    // fighting the drag.
+    // fighting the drag. (Protocol-side guard: must run before the model
+    // decision, which has no view of in-flight drags.)
     if (build_options.has_floating and floating.isResizingWindow(win)) {
         const last = floating.getDragLastRect();
         if (last.width != 0) {
@@ -1078,6 +997,36 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
             sendSyntheticConfigureNotify(win);
         }
         return;
+    }
+
+    // DECISION goes through the model's single tested procedure (T13):
+    // tiled/fullscreen/minimized ⇒ deny+echo; floating ⇒ apply into the
+    // model rect (which also stops reconcile snap-backs after a client
+    // self-move); unknown windows stay honored (unmanaged clients are not
+    // the WM's to override). Wire sends + cache recording remain here per
+    // the check-layers allowlist — only the decision is centralized.
+    const managed = pipeline.initialized and tracking.isManaged(win);
+    if (managed) {
+        const req: @import("model").ConfigureReq = .{
+            .x = if (mask & xcb.XCB_CONFIG_WINDOW_X != 0) event.x else null,
+            .y = if (mask & xcb.XCB_CONFIG_WINDOW_Y != 0) event.y else null,
+            .width = if (mask & xcb.XCB_CONFIG_WINDOW_WIDTH != 0) event.width else null,
+            .height = if (mask & xcb.XCB_CONFIG_WINDOW_HEIGHT != 0) event.height else null,
+            .border_width = if (mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0) event.border_width else null,
+        };
+        switch (@import("model").honorConfigureRequest(pipeline.model(), win, req)) {
+            .geometry_applied, .border_only => {},
+            .ignored => {
+                sendSyntheticConfigureNotify(win);
+                return;
+            },
+        }
+        // A border-width component rides along with any honored request;
+        // record it so borders.applyWidth's dedup compares against what the
+        // server now has.
+        if (build_options.has_tiling and mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0)
+            _ = wincache.cacheBorderWidth(win, event.border_width);
+        if (mask == xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH) return;
     }
 
     var values: [5]u32 = undefined;
@@ -1103,26 +1052,6 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
         n += 1;
     }
     _ = xcb.xcb_configure_window(core.getState().conn, win, mask, &values);
-
-    // A client-initiated border-width change bypasses borders.applyWidth;
-    // record it so later dedups compare against what the server now has.
-    if (build_options.has_tiling and mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0)
-        _ = wincache.cacheBorderWidth(win, event.border_width);
-
-    // Record the granted geometry so a later restoreFloatGeom/minimize-restore
-    // replays what the client actually has instead of snapping back to a stale
-    // pre-request rect. Fields the request didn't mention keep their cached
-    // values; with no cache entry there is nothing to merge into (and fetching
-    // it would cost this hot path a round trip), so those keep the old
-    // behavior of leaving the cache untouched.
-    if (wincache.getWindowGeom(win)) |base| {
-        saveWindowGeom(win, .{
-            .x = if (mask & xcb.XCB_CONFIG_WINDOW_X != 0) event.x else base.x,
-            .y = if (mask & xcb.XCB_CONFIG_WINDOW_Y != 0) event.y else base.y,
-            .width = if (mask & xcb.XCB_CONFIG_WINDOW_WIDTH != 0) event.width else base.width,
-            .height = if (mask & xcb.XCB_CONFIG_WINDOW_HEIGHT != 0) event.height else base.height,
-        });
-    }
 }
 
 inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
@@ -1294,22 +1223,26 @@ fn parseSizeHintsIntoCache(
         if (max_y > 0) max_aspect = @as(f32, @floatFromInt(max_x)) / @as(f32, @floatFromInt(max_y));
     }
 
-    wincache.cacheSizeHints(win, .{
+    // P1: the MODEL copy of size hints must never go stale — layouts read
+    // Entry.size_hints via engine.HintsView. The wincache entry is only the
+    // pre-registration staging area (actions.mapRequest bridges it into the
+    // freshly created model entry); once registered, this write IS the truth.
+    const hints: @import("model").SizeHints = .{
         .max_width = max_pair.width,
         .max_height = max_pair.height,
         .inc_width = inc_pair.width,
         .inc_height = inc_pair.height,
         .min_aspect = min_aspect,
         .max_aspect = max_aspect,
-    });
+    };
+    wincache.cacheSizeHints(win, hints);
+    if (pipeline.initialized) {
+        if (pipeline.model().store.getPtr(win)) |e| e.size_hints = hints;
+    }
 }
 
 pub inline fn getBorderWidth() u16 {
     return borders.width();
-}
-
-fn applyBorderWidth(win: u32) void {
-    borders.applyWidth(core.getState().conn, win);
 }
 
 pub fn applyBorder(win: u32) void {

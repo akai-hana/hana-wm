@@ -97,9 +97,10 @@ pub const EventMasks = struct {
     //
     // Three deliberate deviations, all because this WM differs from DWM:
     //  - KEY_PRESS: our keybinding grabs land on root via xcb_grab_key.
-    //  - POINTER_MOTION_HINT instead of POINTER_MOTION: the server coalesces
-    //    motion and we re-arm with xcb_query_pointer (see drag/suppression in
-    //    input.zig).
+    //  - POINTER_MOTION (raw): the server reports every pointer move; raw
+    //    volume is bounded by motion coalescing in events.handleXcbEvents,
+    //    which collapses runs to the last event per poll wakeup (replaces
+    //    the old POINTER_MOTION_HINT + per-tick QueryPointer re-arm).
     //  - BUTTON_RELEASE: DWM's drags run their own blocking XGrabPointer +
     //    XMaskEvent loop, so root never needs it. Ours are async; the
     //    Super+Button grab from input.setupGrabs stays engaged for the whole
@@ -112,7 +113,7 @@ pub const EventMasks = struct {
         xcb.XCB_EVENT_MASK_KEY_PRESS |
         xcb.XCB_EVENT_MASK_BUTTON_PRESS |
         xcb.XCB_EVENT_MASK_BUTTON_RELEASE |
-        xcb.XCB_EVENT_MASK_POINTER_MOTION_HINT | // DWM: PointerMotionMask
+        xcb.XCB_EVENT_MASK_POINTER_MOTION |
         xcb.XCB_EVENT_MASK_ENTER_WINDOW |
         xcb.XCB_EVENT_MASK_LEAVE_WINDOW |
         xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY | // DWM: StructureNotifyMask

@@ -3,24 +3,18 @@ info: [debug] Using geometry-calculated DPI: 95.9
 info: [debug] Merged: /home/akai/eudaimonia/hana/dev/harness/out/S08-all-view/config-home/hana/config.toml
 info: [debug] Loaded config from dir: /home/akai/eudaimonia/hana/dev/harness/out/S08-all-view/config-home/hana (1 file(s))
 info: [debug] Bar transparency: disabled (opaque)
-info: [debug] Clock thread started
 info: [debug] hana booted up successfully!
 info: [debug] [ENTER] win=W01 mode=0 detail=0 root_x=640 root_y=400
 info: [debug] [MAYBE_FOCUS] W01 -> setFocus(.mouse_enter)
-warning: [debug] Best-effort op failed (bar drawSegment): error.NoFont
 info: [debug] [KEY] keycode=11 state=0x41 mods=0x41 keysym=0x32
 info: [debug] [KEY] action=move_to_workspace
-warning: [debug] Best-effort op failed (bar drawSegment): error.NoFont
 info: [debug] [ENTER] win=0x3a0 mode=0 detail=2 root_x=640 root_y=400
 info: [debug] [ENTER] win=W02 mode=0 detail=0 root_x=640 root_y=400
 info: [debug] [MAYBE_FOCUS] W02 -> setFocus(.mouse_enter)
-warning: [debug] Best-effort op failed (bar drawSegment): error.NoFont
 info: [debug] [KEY] keycode=38 state=0x40 mods=0x40 keysym=0x61
 info: [debug] [KEY] action=all_workspaces
-warning: [debug] Best-effort op failed (bar drawSegment): error.NoFont
 info: [debug] [KEY] keycode=38 state=0x40 mods=0x40 keysym=0x61
 info: [debug] [KEY] action=all_workspaces
-warning: [debug] Best-effort op failed (bar drawSegment): error.NoFont
 info: [debug] [KEY] keycode=24 state=0x40 mods=0x40 keysym=0x71
 info: [debug] [KEY] action=dump_state
 info: [debug] ========== STATE DUMP ==========
@@ -56,4 +50,3 @@ info: [debug] Tiling layout:  master
 info: [debug] Tiled windows:  1
 info: [debug] ================================
 info: [debug] Shutting down gracefully...
-info: [debug] Clock thread stopped

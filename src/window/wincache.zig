@@ -1,9 +1,10 @@
-//! Per-window geometry/border/hints cache (re-homed out of modules/tiling).
+//! Per-window border/hints cache (re-homed out of modules/tiling).
 //!
 //! This is shared WM infrastructure, not tiling state: border-color and
-//! BORDER_WIDTH dedup for sync, last-sent rects for floating restore and
-//! fullscreen handback, and WM_NORMAL_HINTS bridged into the model at
-//! registration. One open-addressing table keyed by X window id; entries
+//! BORDER_WIDTH dedup for sync, and WM_NORMAL_HINTS bridged into the model
+//! at registration. Geometry is NOT cached here (A5): truth lives in the
+//! model (floating base) and the sync sent-ledger (last-sent rects) — see
+//! sync.truthRect. One open-addressing table keyed by X window id; entries
 //! are evicted in window.zig's unmanage path.
 
 const std = @import("std");
@@ -17,13 +18,7 @@ const model_mod = @import("model");
 /// entries directly, so the actions.mapRequest bridge needs no conversion.
 pub const SizeHints = model_mod.SizeHints;
 
-/// Sentinel zero rect used to mark a cache entry as stale.
-pub const zero_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
-
 pub const WindowData = struct {
-    /// Zeroed rect = stale / not yet computed. The layout engine never
-    /// produces a real 0x0 rect, so this sentinel is unambiguous.
-    rect: utils.Rect = zero_rect,
     border: u32 = 0,
     hints: SizeHints = .{},
     /// Last BORDER_WIDTH value sent for this window; null until first sent.
@@ -32,10 +27,6 @@ pub const WindowData = struct {
     /// "never sent" as 0 could skip the first send and leave a client-created
     /// non-zero width standing.
     applied_border_width: ?u16 = null,
-
-    pub fn hasValidRect(self: WindowData) bool {
-        return self.rect.width != 0 and self.rect.height != 0;
-    }
 };
 
 pub const CacheMap = std.AutoHashMap(u32, WindowData);
@@ -115,30 +106,6 @@ pub fn cacheBorderWidth(win: u32, w: u16) bool {
 /// embedded WM_NORMAL_HINTS in one operation. No-op when never cached.
 pub fn removeWindow(window_id: u32) void {
     _ = live().remove(window_id);
-}
-
-/// Save geometry for any window (tiled or floating) into the cache.
-pub fn saveWindowGeom(window_id: u32, rect: utils.Rect) void {
-    const wd = getOrPutDefault(window_id) catch return;
-    wd.rect = rect;
-}
-
-/// Return the cached geometry for any window. Returns null when no entry exists
-/// or the entry has been invalidated (zeroed rect).
-pub fn getWindowGeom(window_id: u32) ?utils.Rect {
-    const c = getOpt() orelse return null;
-    const wd = c.getPtr(window_id) orelse return null;
-    if (!wd.hasValidRect()) return null;
-    return wd.rect;
-}
-
-/// Evict a window's rect from the cache. Call whenever a window's position is
-/// changed outside the normal layout path (e.g. pushed offscreen during
-/// fullscreen). The border entry is preserved.
-pub fn invalidateGeomCache(window_id: u32) void {
-    if (getOpt()) |c| {
-        if (c.getPtr(window_id)) |wd| wd.rect = zero_rect;
-    }
 }
 
 fn updateBorderColor(conn: core.Connection, win: u32, color: u32, comptime create_if_missing: bool) bool {

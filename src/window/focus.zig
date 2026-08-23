@@ -21,7 +21,10 @@ const tiling = if (build_options.has_tiling) @import("tiling") else null;
 // multi-context support.
 
 const State = struct {
-    focused_window: ?u32 = null,
+    /// A3/P1: focus TRUTH is `model.focused`; this is a private protocol-side
+    /// cache of the last window we APPLIED X input focus to (dedupe + grab
+    /// bookkeeping). Not a second store — readers go through getFocused().
+    last_applied: ?u32 = null,
     suppress_reason: core.FocusSuppressReason = .none,
 
     // Most recent X event timestamp, maintained for external consumers that
@@ -86,8 +89,15 @@ pub fn deinit() void {
     state = .{};
 }
 
+/// Focus truth (A3/P1): reads model.focused; falls back to the protocol
+/// cache only before pipeline.init (boot).
 pub inline fn getFocused() ?u32 {
-    return state.?.focused_window;
+    const pl = @import("pipeline");
+    if (pl.initialized) {
+        if (pl.model().focused) |w| return @intCast(w);
+        return null;
+    }
+    return state.?.last_applied;
 }
 
 pub inline fn getSuppressReason() core.FocusSuppressReason {
@@ -252,7 +262,7 @@ const CommitFlags = struct {
 /// Preconditions (enforced by callers): `win` is a valid managed window,
 /// `win` != focused_window, and any stale confirm cookie has been cancelled.
 fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
-    state.?.focused_window = win;
+    state.?.last_applied = win;
     state.?.suppress_reason = flags.new_suppress;
 
     grabButtons(win, true);
@@ -292,7 +302,6 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
 
     // WP6: legacy pool focus bookkeeping (updateWindowFocus) deleted — the
     // model owns window state; nothing reads the pool anymore.
-    if (build_options.has_bar) bar.carouselNotifyFocusChanged(win);
     if (flags.schedule_bar) if (build_options.has_bar) bar.scheduleFocusRedraw(win);
 
     advertiseActiveWindow(win);
@@ -316,7 +325,7 @@ pub fn isWindowMapped(conn: core.Connection, win: u32) bool {
 
 pub fn setFocus(win: u32, reason: Reason) void {
     if (window.isInvalidWindow(win)) return;
-    if (state.?.focused_window == win) return;
+    if (state.?.last_applied == win) return;
 
     const conn = core.getState().conn;
 
@@ -370,7 +379,7 @@ fn focusWithModelImpl(
     known_take_focus: ?bool,
 ) void {
     if (window.isInvalidWindow(win)) return;
-    if (state.?.focused_window == win) return;
+    if (state.?.last_applied == win) return;
     if (input_model == .no_input) return;
 
     // Invariant: focused_window must be null or on the current workspace;
@@ -401,7 +410,7 @@ fn focusWithModelImpl(
 
     cancelPendingConfirm();
 
-    const old = state.?.focused_window;
+    const old = state.?.last_applied;
     commitFocusTransition(old, win, .{
         .set_input_focus = input_model != .globally_active,
         .raise = shouldRaise(reason, win),
@@ -527,7 +536,7 @@ pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
     const is_offscreen_steal = !window.isInvalidWindow(event.event) and
         !tracking.isOnCurrentWorkspace(event.event);
 
-    const prev = state.?.focused_window orelse {
+    const prev = state.?.last_applied orelse {
         if (is_offscreen_steal) {
             focusNow(cs.conn, cs.root);
             advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
@@ -564,23 +573,21 @@ pub fn findBestAvailable(visible: *const fn (u32) bool) ?u32 {
     return null;
 }
 
-/// Focus the first available window on the current workspace. Fallback for
-/// callers that just cleared focus. No-op if the workspace is empty.
-pub fn focusBestAvailable() void {
-    if (findBestAvailable(tracking.isOnCurrentWorkspaceAndVisible)) |win|
-        setFocus(win, .tiling_operation);
-}
-
 pub fn clearFocus() void {
-    if (state.?.focused_window) |old_win| {
+    // A3/P1: model is truth — clear it here so every clearFocus caller gets
+    // one-store semantics without a separate model call.
+    {
+        const pl = @import("pipeline");
+        if (pl.initialized) @import("model").clearFocus(pl.model());
+    }
+    if (state.?.last_applied) |old_win| {
         grabButtons(old_win, false);
     }
     cancelPendingConfirm();
-    state.?.focused_window = null;
+    state.?.last_applied = null;
     state.?.suppress_reason = .none;
     const cs = core.getState();
     focusNow(cs.conn, cs.root);
-    if (build_options.has_bar) bar.carouselNotifyFocusChanged(null);
     if (build_options.has_bar) bar.scheduleFocusRedraw(null);
     advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
 }
@@ -769,7 +776,7 @@ fn focusCycle(comptime forward: bool) void {
     // When the focused window isn't in the visible list, wrap so the very next
     // step lands on wins[0] (forward) or wins[len-1] (backward).
     const sentinel: usize = if (comptime forward) len - 1 else 0;
-    const idx = if (state.?.focused_window) |w|
+    const idx = if (getFocused()) |w|
         std.mem.indexOfScalar(u32, wins, w) orelse sentinel
     else
         sentinel;

@@ -4,7 +4,6 @@ info: [debug] Merged: /home/akai/eudaimonia/hana/dev/harness/out/S15-monocle-foc
 info: [debug] Loaded config from dir: /home/akai/eudaimonia/hana/dev/harness/out/S15-monocle-focus/config-home/hana (1 file(s))
 Fontconfig warning: using without calling FcInit()
 info: [debug] Bar transparency: disabled (opaque)
-info: [debug] Clock thread started
 info: [debug] hana booted up successfully!
 info: [debug] [ENTER] win=0x400001 mode=0 detail=0 root_x=640 root_y=400
 info: [debug] [MAYBE_FOCUS] 0x400001 -> setFocus(.mouse_enter)
@@ -69,4 +68,3 @@ info: [debug] Tiling layout:  master
 info: [debug] Tiled windows:  2
 info: [debug] ================================
 info: [debug] Shutting down gracefully...
-info: [debug] Clock thread stopped
