@@ -45,6 +45,15 @@ pub inline fn getState() ?*State {
     return if (g_state) |*s| s else null;
 }
 
+/// Strangler bridge: keep State.current in sync with switches. The model and
+/// tracking are updated by actions.switchTo; this legacy mirror feeds the bar
+/// (workspace indicators, per-ws title lists) and input's state dump.
+pub fn setCurrent(idx: u8) void {
+    if (g_state) |*s| {
+        if (idx < s.workspaces.len) s.current = idx;
+    }
+}
+
 /// Resolved layout + variant override for a single workspace, keyed by
 /// workspace index in the flat lookup table built here.
 const OverrideLookup = struct {

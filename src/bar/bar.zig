@@ -669,15 +669,19 @@ fn captureMinimizedSet(snap: *BarSnapshot, allocator: std.mem.Allocator) !void {
 /// OR-accumulates all window masks in a single pass, then derives per-workspace
 /// occupancy from the combined bitmask in O(workspace_count).
 fn captureWorkspaceState(snap: *BarSnapshot, allocator: std.mem.Allocator) !void {
+    // PIPELINE: the model owns the live current-workspace value; the legacy
+    // mirror below is kept for workspace_count and updated via
+    // workspaces.setCurrent, but the model is authoritative.
     const ws_state = workspaces.getState() orelse return;
+    const m = pipeline.model();
     snap.workspace_count = @intCast(ws_state.workspaces.len);
-    snap.current_workspace = ws_state.current;
-    snap.is_all_view_active = pipeline.model().all_view_active;
+    snap.current_workspace = @intCast(m.current);
+    snap.is_all_view_active = m.all_view_active;
     try snap.workspace_has_windows.resize(allocator, snap.workspace_count);
     @memset(snap.workspace_has_windows.items, false);
     snap.title_data.workspace_windows.clearRetainingCapacity();
-    const cur_bit: u64 = if (ws_state.current < ws_state.workspaces.len)
-        tracking.workspaceBit(ws_state.current)
+    const cur_bit: u64 = if (snap.current_workspace < snap.workspace_count)
+        tracking.workspaceBit(snap.current_workspace)
     else
         0;
     var combined_mask: u64 = 0;

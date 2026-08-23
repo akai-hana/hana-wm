@@ -176,7 +176,10 @@ pub const DrawContext = struct {
 
         const visual_type = try resolveVisualType(conn, screen, visual_id);
 
-        const depth: u8 = if (is_argb) 32 else core.xcb.XCB_COPY_FROM_PARENT;
+        // CreatePixmap requires a concrete depth: XCB_COPY_FROM_PARENT (0) is
+        // only valid for CreateWindow and fails here with BadValue, which
+        // silently killed opaque-bar init (default transparency = 1.0).
+        const depth: u8 = if (is_argb) 32 else screen.*.root_depth;
 
         const pixmap = createXcbPixmap(conn, depth, window, width, height);
         errdefer _ = core.xcb.xcb_free_pixmap(conn, pixmap);
