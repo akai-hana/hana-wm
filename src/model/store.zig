@@ -76,6 +76,7 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
 
         /// seq must be < count(). Iterates in slot order (C-D5).
         pub fn at(self: *const Self, seq: usize) Item {
+            std.debug.assert(seq < self.len);
             return .{ .key = self.keys[seq], .val = &self.vals[seq] };
         }
 

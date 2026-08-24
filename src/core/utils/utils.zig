@@ -5,7 +5,6 @@
 //! so existing `utils.X` call sites are unchanged:
 //!
 //!   bounded.zig   BoundedList                       (xcb-free)
-//!   threading.zig Mutex/Condition/CondThread        (xcb-free)
 //!   proc.zig      lifecycle flags, wake pipe, pipes  (xcb-free)
 //!   time.zig      clock helpers                      (xcb-free)
 //!   x11wire.zig   atoms/EWMH/properties/grab/configure shims (xcb-DEPENDENT)
@@ -19,7 +18,6 @@ const constants = @import("constants");
 
 const proc = @import("proc.zig");
 const time = @import("time.zig");
-const threading = @import("threading.zig");
 const bounded = @import("bounded.zig");
 const x11wire = @import("x11wire.zig");
 
@@ -37,11 +35,6 @@ pub const clockNs = time.clockNs;
 pub const monotonicNs = time.monotonicNs;
 pub const realtimeNs = time.realtimeNs;
 
-// --- threading (re-exports) ------------------------------------------------
-pub const Mutex = threading.Mutex;
-pub const Condition = threading.Condition;
-pub const CondThread = threading.CondThread;
-
 // --- bounded collections (re-exports) ---------------------------------------
 pub const BoundedList = bounded.BoundedList;
 
@@ -53,16 +46,11 @@ pub const advertiseEwmhSupport = x11wire.advertiseEwmhSupport;
 pub const fetchPropertyToBuffer = x11wire.fetchPropertyToBuffer;
 pub const configureWindow = x11wire.configureWindow;
 pub const raiseWindow = x11wire.raiseWindow;
-pub const pushWindowOffscreen = x11wire.pushWindowOffscreen;
-pub const pushWindowOffscreenAndLower = x11wire.pushWindowOffscreenAndLower;
 pub const setBorderPixel = x11wire.setBorderPixel;
-pub const grab_active = x11wire.grab_active;
-pub const isGrabActive = x11wire.isGrabActive;
 pub const grabServer = x11wire.grabServer;
 pub const ungrabServer = x11wire.ungrabServer;
 pub const ungrabAndFlush = x11wire.ungrabAndFlush;
 pub const rectFromXcb = x11wire.rectFromXcb;
-pub const isOffscreenGeomReply = x11wire.isOffscreenGeomReply;
 
 // ---------------------------------------------------------------------------
 // Pure geometry & scaling (xcb-free; safe for model/tiling)

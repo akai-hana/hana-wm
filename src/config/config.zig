@@ -129,7 +129,7 @@ fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *types.Config) !void 
     }
 }
 
-const max_file_bytes = 1024 * 1024;
+pub const max_file_bytes = 1024 * 1024;
 
 const default_tiling_layout = (types.TilingConfig{}).layout;
 
@@ -137,40 +137,48 @@ const default_tiling_layout = (types.TilingConfig{}).layout;
 /// `error.FileTooLarge` when it exceeds `max_file_bytes`. Allocates the full
 /// ceiling up front and reallocs down; loading is startup/reload-only, so a
 /// stat-then-allocate dance (and its TOCTOU re-check) isn't worth it.
-fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+pub fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const io = std.Options.debug_io;
     const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| {
         if (err == error.FileNotFound) debug.info("Not found: {s}", .{path});
         return err;
     };
     defer file.close(io);
-    const stat = file.stat(io) catch {
-        // stat failed: fall back to a smaller initial buffer with growth.
-        var buf = try allocator.alloc(u8, 64 * 1024);
+    // A successful stat reporting size 0 is as untrustworthy as a failed one:
+    // procfs/sysfs/pipes report 0 while carrying content, so they take the
+    // same read-with-growth path (pinned by C5 in src/test/config_test.zig).
+    const stat: ?std.Io.File.Stat = file.stat(io) catch null;
+    const known_size: usize = if (stat) |st| size: {
+        if (st.size > max_file_bytes) return error.FileTooLarge;
+        if (st.size == 0) break :size 0;
+        break :size @intCast(st.size);
+    } else 0;
+
+    if (stat != null and known_size > 0) {
+        // Direct path: allocate the reported size, read, hand ownership to
+        // the caller.
+        const buf = try allocator.alloc(u8, known_size);
         errdefer allocator.free(buf);
-        var total: usize = 0;
-        while (true) {
-            const n = try file.readPositionalAll(io, buf[total..], total);
-            total = n;
-            if (n < buf.len) break;
-            if (n > max_file_bytes) {
-                allocator.free(buf);
-                return error.FileTooLarge;
-            }
-            const new_buf = try allocator.realloc(buf, buf.len * 2);
-            buf = new_buf;
-        }
-        return allocator.realloc(buf, total) catch buf[0..total];
-    };
-    if (stat.size > max_file_bytes) return error.FileTooLarge;
-    const buf = try allocator.alloc(u8, stat.size);
-    errdefer allocator.free(buf);
-    const n = try file.readPositionalAll(io, buf, 0);
-    if (n > max_file_bytes) {
-        allocator.free(buf);
-        return error.FileTooLarge;
+        const n = try file.readPositionalAll(io, buf, 0);
+        return if (n == buf.len) buf else (allocator.realloc(buf, n) catch buf[0..n]);
     }
-    return if (n == buf.len) buf else (allocator.realloc(buf, n) catch buf[0..n]);
+    // Growth path (stat failed or reported zero). Single ownership throughout
+    // — the armed errdefer frees the whole buffer exactly once on every error
+    // path, and the success path hands ownership to the caller.
+    var buf = try allocator.alloc(u8, 64 * 1024);
+    errdefer allocator.free(buf);
+    var total: usize = 0;
+    while (true) {
+        if (total == buf.len) {
+            if (buf.len > max_file_bytes) return error.FileTooLarge;
+            buf = try allocator.realloc(buf, buf.len * 2);
+        }
+        const n = try file.readPositionalAll(io, buf[total..], total);
+        if (n == 0) break; // EOF
+        total += n;
+    }
+    if (total > max_file_bytes) return error.FileTooLarge;
+    return allocator.realloc(buf, total) catch buf[0..total];
 }
 
 /// Reads and parses the .toml at `path`, returning null for an empty file.

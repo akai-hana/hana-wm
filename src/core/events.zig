@@ -302,8 +302,12 @@ fn handleXcbEvents() void {
     while (dispatched < max_events_per_batch) : (dispatched += 1) {
         var event = takeEvent(&pending, conn) orelse break;
         defer std.c.free(event);
+        var coalesced: usize = 0;
         if (isMotion(event)) {
-            while (true) {
+            // Coalesce the run, but charge every drained motion against the
+            // batch budget: an endless motion stream must not starve the
+            // signal pipe and timer paths the cap exists to protect.
+            while (dispatched + coalesced < max_events_per_batch) {
                 const next = xcb.xcb_poll_for_event(conn) orelse break;
                 if (!isMotion(next)) {
                     pending = next; // dispatched on a later iteration
@@ -311,10 +315,18 @@ fn handleXcbEvents() void {
                 }
                 std.c.free(event);
                 event = next; // keep only the newest motion of the run
+                coalesced += 1;
             }
+            dispatched += coalesced;
         }
         dispatch(@as(*u8, @ptrCast(event)).*, event);
     }
+
+    // A cap exit can leave a non-motion event held in `pending` (stashed
+    // during motion coalescing). It was already skipped this batch, so
+    // freeing it changes no drop-vs-dispatch semantics — it just stops the
+    // leak. On the normal (socket-empty) exit path `pending` is always null.
+    if (pending) |p| std.c.free(p);
 
     // Drain any spawn pipes that became readable during this event batch.
     // This catches the common case where SIGCHLD and the MapRequest arrive in
@@ -347,10 +359,10 @@ pub fn run() !void {
     };
 
     while (utils.running.load(.acquire)) {
-        // No built-in deadline: with no timer hooks registered the loop
-        // blocks until an X event or signal arrives. Timer sources (clock
-        // segment, prompt cursor blink) contribute deadlines exclusively
-        // through plugin.poll_timeout_ms.
+        // No built-in deadline: with no timer sources the loop blocks until
+        // an X event or signal arrives. Timer sources (clock segment, prompt
+        // cursor blink, carousel marquee) contribute deadlines exclusively
+        // through bar.pollTimeoutMs().
         var poll_timeout_ms: i32 = -1;
         var cursor_is_blinking = false;
         if (build_options.has_bar) {
@@ -371,6 +383,14 @@ pub fn run() !void {
             },
         };
 
+        // The reload flag is also set directly by the reload_config keybinding
+        // (which writes a wake byte to the pipe, but the byte can be dropped if
+        // the pipe is full). Consume it every iteration, BEFORE the ready split:
+        // confining it to the ready>0 branch let a flag-only request stall on
+        // timeout wakeups until unrelated X traffic arrived.
+        if (utils.consumeReload())
+            handleConfigReload() catch |err| debug.err("Reload failed: {}", .{err});
+
         if (ready == 0) {
             if (cursor_is_blinking) {
                 if (build_options.has_bar) bar.onPollWakeup();
@@ -384,13 +404,6 @@ pub fn run() !void {
 
             if ((fds[fd_signal].revents & std.posix.POLL.IN) != 0)
                 signals.drainAndDispatch(signal_fd);
-
-            // The reload flag is also set directly by the reload_config keybinding
-            // (which writes a wake byte to the pipe, but the byte can be dropped if
-            // the pipe is full). Consume it every iteration so that path can never
-            // be lost; a flag-only request is picked up on the next poll timeout.
-            if (utils.consumeReload())
-                handleConfigReload() catch |err| debug.err("Reload failed: {}", .{err});
         }
 
         if (build_options.has_bar) _ = bar.updateClock(); // return value reserved, currently unused

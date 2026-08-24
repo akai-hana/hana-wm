@@ -126,10 +126,6 @@ pub fn setWorkspaceCount(count: usize) void {
 /// Called by workspaces.switchTo so getCurrentWorkspace() stays correct even
 /// when code queries tracking directly. Also mirrored into the model by
 /// actions.switchTo (dual-write until tracking's storage is fully deleted).
-pub inline fn getStateOpt() ?*@TypeOf(state) {
-    return if (state.initialized) &state else null;
-}
-
 /// Single source of truth is `model.current` (A4): read-through facade,
 /// null before pipeline.init (callers default to workspace 0).
 pub inline fn getCurrentWorkspace() ?u8 {

@@ -1,12 +1,11 @@
 //! Production request sink for sync.zig — the ONLY file under src/sync/
 //! allowed to contain raw `xcb_` calls (P3 acceptance gate). Every shim
 //! wraps an existing legacy pattern 1:1:
-//!   geom          ≙ window.zig configureWindowGeom minus the BW field
-//!                   (sync sends border width as its own diffed request)
-//!                 / layouts.configureWithHintsImpl's atomic raise variant
+//!   geom          ≙ utils.configureWindow (plus the atomic raise variant
+//!                   that merges a stack mode into the same request)
 //!   borderWidth   ≙ borders.applyWidth's send (dedup lives in LastSent)
 //!   borderPixel   ≙ utils.setBorderPixel
-//!   park          ≙ utils.pushWindowOffscreenAndLower (X + BELOW merged)
+//!   park          ≙ X-offscreen + BELOW merged into one request (§7.4 step 7)
 //!   stackOnly     ≙ utils.raiseWindow and its BELOW sibling
 //!   flush/grab    ≙ conn.flush / utils.grabServer / ungrabAndFlush
 

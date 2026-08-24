@@ -20,9 +20,6 @@ state_dump            # focused should now be the window under (640,400)
 # Then onto the other half of the split to prove the transition flips back.
 _alt=$(client_id B)
 [ -n "$_alt" ] || { echo "S17: cannot resolve client B" >&2; exit 1; }
-case "$_id" in
-	"$(_id)") : ;; # no-op, keeps shellcheck quiet
-esac
 
 DISPLAY="$HW_DISPLAY" xdotool mousemove 200 400
 state_dump

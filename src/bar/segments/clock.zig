@@ -1,12 +1,13 @@
 //! Clock bar segment.
 //!
 //! Renders wall-clock time and schedules its own repaints: the event loop
-//! receives the ms-to-next-boundary deadline through the plugin
-//! `poll_timeout_ms` hook and wakes exactly at whole-second boundaries;
-//! `bar.updateClock` then redraws this segment when its on-screen content
-//! has gone stale (second rolled over, or a config reload changed the
-//! format). Single-threaded by construction -- all state lives on the main
-//! thread, so there are no locks, flags, or drain races (docs/clock-plan.md).
+//! asks bar.pollTimeoutMs() for the nearest timer deadline (this segment
+//! contributes the ms-to-next-boundary value) and wakes exactly at
+//! whole-second boundaries; `bar.updateClock` then redraws this segment when
+//! its on-screen content has gone stale (second rolled over, or a config
+//! reload changed the format). Single-threaded by construction -- all state
+//! lives on the main thread, so there are no locks, flags, or drain races
+//! (docs/clock-plan.md).
 
 const std = @import("std");
 const types = @import("types");
@@ -53,8 +54,7 @@ pub fn deadlineFromMs(now_ms: i64) i32 {
     return @intCast(1000 - @mod(now_ms, 1000));
 }
 
-/// ms until the next whole-second boundary, contributed via the plugin
-/// `poll_timeout_ms` hook.
+/// ms until the next whole-second boundary, contributed via bar.pollTimeoutMs().
 pub fn tickDeadlineMs() i32 {
     return deadlineFromMs(realtimeMs());
 }

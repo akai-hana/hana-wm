@@ -9,6 +9,9 @@ const List = engine.List;
 
 pub fn compute(v: View, out: *List) void {
     const n = v.order.len;
+    // Empty workspace: calcGridShape(0) yields rows == 0, which would divide
+    // by zero below. Emit nothing instead (ND-2).
+    if (n == 0) return;
 
     const m = v.env.margins;
     const grid = calcGridShape(n);

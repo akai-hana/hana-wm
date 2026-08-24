@@ -33,38 +33,45 @@ const max_reasonable_dpi: f32 = 300.0;
 /// sufficient for the common case.
 const resource_manager_max_len: u32 = 1024;
 
+/// Fetches RESOURCE_MANAGER (up to `max_len` u32 words) and parses Xft.dpi
+/// from it. `.got_string` is true when a structurally valid, non-empty
+/// string came back — regardless of whether it contained an entry — so the
+/// caller can distinguish "entry not in this window" (a bigger fetch can
+/// help) from "property unreadable" (it cannot).
+const XftProbe = struct { got_string: bool = false, dpi: ?f32 = null };
+
+fn probeXftDpi(conn: core.Connection, root: xcb.xcb_window_t, atom: u32, max_len: u32) XftProbe {
+    const prop_cookie = xcb.xcb_get_property(conn, 0, root, atom, xcb.XCB_ATOM_STRING, 0, max_len);
+    const prop_reply = xcb.xcb_get_property_reply(conn, prop_cookie, null) orelse return .{};
+    defer std.c.free(prop_reply);
+
+    if (prop_reply.*.format != 8 or prop_reply.*.type != xcb.XCB_ATOM_STRING) return .{};
+
+    const value_len = xcb.xcb_get_property_value_length(prop_reply);
+    if (value_len == 0) return .{};
+
+    const value_ptr = xcb.xcb_get_property_value(prop_reply);
+    const resource_str = @as([*]const u8, @ptrCast(value_ptr))[0..@intCast(value_len)];
+    return .{ .got_string = true, .dpi = parseXftDpi(resource_str) };
+}
+
 /// Reads the Xft.dpi value from the X RESOURCE_MANAGER property, if present.
 /// Returns null when the property is absent, empty, or does not contain an Xft.dpi entry.
 fn readXftDpi(conn: core.Connection, screen: core.Screen) ?f32 {
     // Resolve the atom from the shared cache; a property request with atom 0
     // just comes back empty, so a cache miss reads as "no Xft.dpi".
     const atom = utils.getAtomCached("RESOURCE_MANAGER") catch 0;
+    const root = screen.*.root;
 
-    const prop_cookie = xcb.xcb_get_property(conn, 0, screen.*.root, atom, xcb.XCB_ATOM_STRING, 0, resource_manager_max_len);
-    const prop_reply = xcb.xcb_get_property_reply(conn, prop_cookie, null) orelse return null;
-    defer std.c.free(prop_reply);
+    // Xft.dpi is almost always near the start; a smaller first fetch is
+    // faster and sufficient for the common case.
+    const first = probeXftDpi(conn, root, atom, resource_manager_max_len);
+    if (first.dpi) |dpi| return dpi;
 
-    if (prop_reply.*.format != 8 or prop_reply.*.type != xcb.XCB_ATOM_STRING) return null;
-
-    const value_len = xcb.xcb_get_property_value_length(prop_reply);
-    if (value_len == 0) return null;
-
-    const value_ptr = xcb.xcb_get_property_value(prop_reply);
-    const resource_str = @as([*]const u8, @ptrCast(value_ptr))[0..@intCast(value_len)];
-
-    return parseXftDpi(resource_str) orelse blk: {
-        // Xft.dpi was not in the first resource_manager_max_len bytes;
-        // retry with a larger fetch.
-        const big_cookie = xcb.xcb_get_property(conn, 0, screen.*.root, atom, xcb.XCB_ATOM_STRING, 0, 4096);
-        const big_reply = xcb.xcb_get_property_reply(conn, big_cookie, null) orelse return null;
-        defer std.c.free(big_reply);
-        if (big_reply.*.format != 8 or big_reply.*.type != xcb.XCB_ATOM_STRING) return null;
-        const big_len = xcb.xcb_get_property_value_length(big_reply);
-        if (big_len == 0) return null;
-        const big_ptr = xcb.xcb_get_property_value(big_reply);
-        const big_str = @as([*]const u8, @ptrCast(big_ptr))[0..@intCast(big_len)];
-        break :blk parseXftDpi(big_str);
-    };
+    // Xft.dpi was not in the first resource_manager_max_len bytes; retry with
+    // a larger fetch — but only when the first reply was actually a string.
+    if (!first.got_string) return null;
+    return probeXftDpi(conn, root, atom, 4096).dpi;
 }
 
 /// Finds and parses the Xft.dpi value within a raw RESOURCE_MANAGER string.

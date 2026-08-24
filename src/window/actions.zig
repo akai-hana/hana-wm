@@ -14,6 +14,7 @@ const pipeline = @import("pipeline");
 const sync = @import("sync");
 const focus = @import("focus");
 const build_options = @import("build_options");
+const debug = @import("debug");
 
 pub const Ctx = struct {
     focused_window_id: ?model_mod.WindowId = null,
@@ -146,11 +147,11 @@ fn isMinimizedOnAnyWs(m: *const model_mod.Model, win: model_mod.WindowId) bool {
 ///
 /// Legacy wire parity notes (fullscreen.zig full read, train-b precondition):
 ///  - winner: screen rect, bw=0, pixel=0, ABOVE merged — ≙ applyFullscreenGeometry
-///  - everyone else parked X+offscreen — ≙ the pushWindowOffscreen loop; the
-///    switch case's intermediate "restore A then re-park A" round of requests
-///    collapses away (same end state, fewer requests)
+///  - everyone else parked X+offscreen — the switch case's intermediate
+///    "restore A then re-park A" round of requests collapses away (same end
+///    state, fewer requests)
 ///  - floating exit geometry: base.floating rect replays via LastSent diff —
-///    ≙ configureWindowGeom(saved)+saveWindowGeom
+///    ≙ replay saved rect + saveWindowGeom
 ///  - tiled exit: engine placements — ≙ retileCurrentWorkspace
 /// Bar hide/show deferral and EWMH stay protocol-side (R2), driven through
 /// fullscreen.zig's pending machinery so events.zig's ConfigureNotify handler
@@ -376,7 +377,11 @@ pub fn adjustMasterCount(ctx: *Ctx, delta: i32) void {
     const m = pipeline.model();
     const p = &m.ws[m.current].params;
     const next = @as(i32, p.master_count) + delta;
-    p.master_count = @intCast(@max(1, next));
+    // Upper clamp (ND-22): layouts clamp downstream per-tile, but the model
+    // param itself used to drift unbounded, desyncing bar/inspect state.
+    // store_capacity/4 keeps the bound proportional to the window budget.
+    const max_count: i32 = @max(1, model_mod.store_capacity / 4);
+    p.master_count = @intCast(std.math.clamp(next, 1, max_count));
     pipeline.reconcileUnderGrabNow(.{});
 }
 
@@ -488,11 +493,14 @@ fn tiledCountOnCurrent(m: *const model_mod.Model) usize {
 
 // ------------------------------------------------- config reload (train g)
 
-/// Re-seeds every workspace's model params from the NEW config after a
-/// reload, mirroring workspaces.applyWorkspaceOverrides semantics: per-ws
-/// layout/variant/master-count overrides, global defaults otherwise;
-/// runtime-only master_width/stack_balance reset (legacy nulls).
-pub fn applyConfigReload() void {
+/// Seeds every workspace's model params from the CURRENT config. Shared by
+/// boot-time initialization (ND-1: without this the config's tiling
+/// params/workspace overrides stay inert until the first explicit reload)
+/// and post-reload re-seeding; mirrors workspaces.applyWorkspaceOverrides
+/// semantics: per-ws layout/variant/master-count overrides, global defaults
+/// otherwise; runtime-only master_width/stack_balance reset (legacy nulls).
+/// No reconcile: callers decide when to push state to X.
+pub fn seedParamsFromConfig() void {
     const types = @import("types");
     const constants = @import("constants");
     const tiling = @import("tiling");
@@ -526,6 +534,19 @@ pub fn applyConfigReload() void {
             }
         }
         s.params.kind = layoutKindFromConfig(layout);
+        // SW-10 (S13F10): a variant override that doesn't belong to the
+        // workspace's active layout is silently dropped by variantIdx — say
+        // so once per affected workspace instead of failing invisibly.
+        if (variant) |v| {
+            const applies = switch (s.params.kind) {
+                .master => v == .master,
+                .monocle => v == .monocle,
+                .grid => v == .grid,
+                else => false,
+            };
+            if (!applies)
+                debug.warn("Config: workspace {d} layout variant ignored — not a variant of the active layout", .{i});
+        }
         s.params.variant_idx = variantIdx(variant, s.params.kind);
         s.params.master_count = if (id < max_ws)
             (count_lookup[id] orelse cfg.master_count)
@@ -534,6 +555,10 @@ pub fn applyConfigReload() void {
         s.params.master_width = 0.5; // runtime-only in legacy too (null reset)
         s.params.stack_balance = 0;
     }
+}
+
+pub fn applyConfigReload() void {
+    seedParamsFromConfig();
     pipeline.reconcileUnderGrabNow(.{});
 }
 
@@ -709,21 +734,18 @@ pub fn mapRequest(ctx: *Ctx, win: model_mod.WindowId, target_ws: u8, on_current:
 pub fn unmanage(ctx: *Ctx, win: model_mod.WindowId) void {
     _ = ctx;
     const m = pipeline.model();
-    const was_focused = m.focused == win;
     const was_fs_current = isFullscreenOnWs(m, win, m.current);
 
+    // Focus policy (ND-9): the only caller (window.unmanageWindow) already
+    // ran workspaces.removeWindow → model.unregister before this point,
+    // which cleared m.focused when the withdrawn window held focus. There
+    // is deliberately NO tiered fallback here: the workspace stays
+    // unfocused and the next pointer enter / click re-focuses via the
+    // MAYBE_FOCUS path. The old pickFallback branch was unreachable from
+    // this entry point (was_focused was always false by the time it ran).
     model_mod.unregister(m, win);
     sync.forget(win); // X ids recycle; stale LastSent must not survive (fix P0-4)
 
-    if (was_focused) {
-        if (pickFallback(m)) |t| {
-            model_mod.setFocus(m, t);
-            focus.setFocus(t, .tiling_operation);
-        } else {
-            model_mod.clearFocus(m);
-            focus.clearFocus();
-        }
-    }
     if (was_fs_current and build_options.has_bar) @import("bar").setBarState(.show_fullscreen);
 
     pipeline.reconcileUnderGrabNow(.{ .force_restack = true });

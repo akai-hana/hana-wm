@@ -30,25 +30,36 @@ pub inline fn reportTitleCapture(ns: u64, windows: usize) void {
 /// Non-blocking check for whether the reply to `sequence` is already in
 /// xcb's read buffer.
 ///
-/// Returns the heap-allocated reply pointer and counts zero round-trips
-/// when the reply is available. The caller owns the pointer and must free
-/// it with `std.c.free`. Having consumed the cookie the caller must NOT
-/// call the corresponding blocking `xcb_*_reply` function.
-///
-/// Returns null and counts one round-trip when the reply is not yet
-/// available, signaling the caller to fall through to its normal blocking
-/// reply call. Also returns null when the request completed with an error;
-/// the subsequent blocking call then resolves to the same failure the
-/// non-bench build would have seen, so behavior is unchanged.
-///
-/// When the probe is disabled the function always returns null and counts
-/// one round-trip, making every call site execute its normal blocking
-/// path, identical to a non-bench build.
-pub inline fn pollReply(conn: *xcb.xcb_connection_t, sequence: u32) ?*anyopaque {
-    if (comptime !enabled) return null;
+/// Tri-state (ND-18): `xcb_poll_for_reply` consumes the cookie on BOTH
+/// success and error, so a plain "null means block" contract was unsound —
+/// blocking on a consumed-error cookie has undefined XCB semantics. Callers
+/// must treat `.error_consumed` as a terminal failure, never fall through to
+/// `xcb_*_reply`.
+pub const PollOutcome = union(enum) {
+    /// Reply available; caller owns the pointer and must free it with
+    /// `std.c.free`. The cookie is consumed — do NOT block on it.
+    ready: *anyopaque,
+    /// Reply not yet buffered; the cookie was NOT consumed. Fall through to
+    /// the normal blocking reply call.
+    pending,
+    /// The request completed with an X error, which the poll consumed
+    /// (freed here). Skip straight to the caller's error path.
+    error_consumed,
+};
+
+/// When the probe is disabled the function always returns `.pending`,
+/// making every call site execute its normal blocking path, identical to a
+/// non-bench build (the round-trip counter still ticks for parity).
+pub inline fn pollReply(conn: *xcb.xcb_connection_t, sequence: u32) PollOutcome {
+    if (comptime !enabled) return .pending;
     var reply: ?*anyopaque = null;
-    _ = xcb.xcb_poll_for_reply(conn, sequence, &reply, null);
-    if (reply) |r| return r;
+    var err: ?*xcb.xcb_generic_error_t = null;
+    _ = xcb.xcb_poll_for_reply(conn, sequence, &reply, &err);
+    if (reply) |r| return .{ .ready = r };
     _ = title_round_trips.fetchAdd(1, .monotonic);
-    return null;
+    if (err) |e| {
+        std.c.free(e);
+        return .error_consumed;
+    }
+    return .pending;
 }

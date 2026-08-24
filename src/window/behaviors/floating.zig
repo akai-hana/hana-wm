@@ -15,8 +15,6 @@ const build_options = @import("build_options");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
 const bar = if (build_options.has_bar) @import("bar") else null;
-const tiling = if (build_options.has_tiling) @import("tiling") else null;
-const fullscreen = @import("fullscreen");
 
 // Geometry cookies are all issued before any reply is awaited; one round-trip
 // per batch instead of one per window. 64 covers a typical workspace.

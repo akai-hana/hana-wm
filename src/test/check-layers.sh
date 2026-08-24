@@ -25,10 +25,11 @@ code_lines() { # strip comment-only lines from grep output on stdin
 wire_allowed() {
     case "$1" in
         # Bar's OWN window lifecycle: map on show, Y-reposition on height
-        # change, raise-above-others, map/unmap in setBarState. Sync only
-        # raises bar_win via the force_restack hook; bar self-management
-        # stays local to avoid a bar<->sync import cycle.
-        src/bar/bar.zig|src/bar/drawing.zig) ;;
+        # change, raise-above-others, map/unmap in setBarState; win.zig holds
+        # create/destroy of the bar window + colormap (same lifecycle, split
+        # into its own file). Sync only raises bar_win via the force_restack
+        # hook; bar self-management stays local to avoid a bar<->sync cycle.
+        src/bar/bar.zig|src/bar/drawing.zig|src/bar/win.zig) ;;
 
         # ConfigureRequest compliance (BC03/BC04/BC05): client-requested
         # geometry is honored for floating windows and BW recorded for tiled
@@ -81,7 +82,11 @@ grab_allowed() {
 }
 
 # Rule 1: wire-mutating XCB requests only under src/sync/ (+ allowlist).
-pat1='xcb_configure_window|XCB_CONFIG_WINDOW_|xcb_map_window|xcb_change_window_attributes'
+# ND-23 widening: the original pattern missed unmap/destroy/circulate and
+# set_input_focus — all wire-mutating requests that belong behind the sync
+# boundary exactly like configure/map. Widening only makes violations FAIL
+# where they previously passed.
+pat1='xcb_configure_window|XCB_CONFIG_WINDOW_|xcb_map_window|xcb_unmap_window|xcb_destroy_window|xcb_circulate_window|XCB_CIRCULATE_|xcb_set_input_focus|xcb_change_window_attributes'
 while IFS= read -r line; do
     f=${line%%:*}
     wire_allowed "$f" && continue

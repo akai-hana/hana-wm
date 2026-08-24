@@ -21,12 +21,8 @@ pub const Workspace = struct {
     id: u8,
     /// Per-workspace layout-variant override from config; null = global default.
     variants: ?types.LayoutVariantOverride = null,
-    /// Master-width override for master-stack layout; null = global default.
-    master_width: ?f32 = null,
     /// Master-count override for master-stack layout; null = global default.
     master_count: ?u8 = null,
-    /// Master-stack top/bottom balance override; null = even split (0).
-    stack_balance: ?f32 = null,
 
     pub fn init(id: u8) Workspace {
         return .{ .id = id };
@@ -44,17 +40,11 @@ pub inline fn getState() ?*State {
     return if (g_state) |*s| s else null;
 }
 
-/// Resolved layout + variant override for a single workspace, keyed by
-/// workspace index in the flat lookup table built here.
-const OverrideLookup = struct {
-    variant: ?types.LayoutVariantOverride,
-};
-
 /// Applies per-workspace master-count/variant overrides from `cfg_tiling`.
 ///
-/// `master_width` and `stack_balance` always reset to their global defaults
-/// (null): neither has a config-file representation; they're pure runtime
-/// state and genuinely should reset on reload.
+/// `master_width` and `stack_balance` have no config-file representation;
+/// they are pure runtime state living only in the model's per-ws params, so
+/// nothing here touches them.
 pub fn applyWorkspaceOverrides(
     wss: []Workspace,
     cfg_tiling: *const types.TilingConfig,
@@ -73,17 +63,20 @@ pub fn applyWorkspaceOverrides(
             (if (lookupVariant(cfg_tiling, id)) |v| v else null)
         else
             null;
-        ws.master_width = null;
-        ws.stack_balance = null;
         ws.master_count = if (id < max_ws) master_count_lookup[id] else null;
     }
 }
 
+/// Last matching override wins (ND-10): duplicate entries for one workspace
+/// now resolve identically across ALL per-ws fields — this lookup, the
+/// master-count loop below, and actions.seedParamsFromConfig's layout lookup
+/// all use loop-overwrite (last-wins), matching TOML parser intuition.
 fn lookupVariant(cfg_tiling: *const types.TilingConfig, id: u8) ?types.LayoutVariantOverride {
+    var found: ?types.LayoutVariantOverride = null;
     for (cfg_tiling.workspace_layout_overrides.items) |o| {
-        if (o.workspace_idx == id) return o.variant;
+        if (o.workspace_idx == id) found = o.variant;
     }
-    return null;
+    return found;
 }
 
 /// Initializes global workspace state. Workspaces-disabled collapses to a

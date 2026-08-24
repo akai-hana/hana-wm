@@ -120,8 +120,11 @@ run_one() {
 	settle 300
 
 	# Run the scenario body in this shell.
-	HW_DISPLAY="$HW_DISPLAY" HW_OUT="$out" HW_LOG="$out/hana.log" HARNESS_ROOT="$HARNESS_ROOT" \
-		. "$sc_file"
+	# ND-24: EXPORT the harness vars — a VAR=val prefix on the `.` command
+	# expires when sourcing returns, so helpers called afterwards
+	# (state_dump_final -> dump/state_dump) saw unbound HW_OUT/HW_LOG.
+	export HW_DISPLAY HW_OUT="$out" HW_LOG="$out/hana.log" HARNESS_ROOT="$HARNESS_ROOT"
+	. "$sc_file"
 	rc=$?
 
 	state_dump_final() { state_dump; dump final; }
@@ -167,10 +170,10 @@ run_one() {
 		if [ ! -d "$gold" ]; then
 			echo "NOCOMPARE $sc (no goldens)"
 		else
-			if diff -ru "$gold" "$out" --exclude=config-home --exclude='*.raw' --exclude=xvfb.log --exclude=hana.log --exclude=clients.log >/tmp/opencode/diff-$sc.txt 2>&1; then
+			if diff -ru "$gold" "$out" --exclude=config-home --exclude='*.raw' --exclude=xvfb.log --exclude=hana.log --exclude=clients.log >${TMPDIR:-/tmp}/hana-diff-$sc.txt 2>&1; then
 				echo "PASS $sc (parity)"
 			else
-				echo "DIFF $sc (see /tmp/opencode/diff-$sc.txt)"
+				echo "DIFF $sc (see ${TMPDIR:-/tmp}/hana-diff-$sc.txt)"
 				failures="$failures $sc"
 			fi
 		fi

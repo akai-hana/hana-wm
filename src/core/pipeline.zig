@@ -103,8 +103,9 @@ pub inline fn postDispatch() void {
     // dispatch tail owns the flush (I2).
     if (sync.takeScheduled()) {
         preReconcileDuties();
-        sync.reconcile(&instance, ctx(), .{});
-        ctx().sink.flush();
+        const c = ctx(); // built once; reconcile and flush share it
+        sync.reconcile(&instance, c, .{});
+        c.sink.flush();
     }
 }
 

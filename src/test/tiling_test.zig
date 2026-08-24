@@ -354,3 +354,94 @@ test "T30 deterministic and non-mutating" {
     try testing.expectEqual(focus_before, fx.m.focused);
     try testing.expectEqual(store_count_before, fx.m.store.count());
 }
+
+// T31 — empty order is a supported input for every layout (ND-2): each
+// compute must emit nothing and must not trap. Grid previously divided by
+// calcGridShape(0).rows == 0 and monocle indexed order[len - 1].
+test "T31 n=0 emits nothing across all layouts" {
+    var fx: Fixture = undefined;
+    fx.init(&.{}, stdWa());
+    defer fx.deinit();
+
+    const kinds = [_]model.LayoutKind{ .master, .monocle, .fibonacci, .grid, .leaf, .scroll };
+    for (kinds) |kind| {
+        var out: List = .{};
+        engine.compute(kind, tuned(&fx), &out);
+        try testing.expectEqual(@as(usize, 0), out.len);
+    }
+}
+
+// T32 — scroll orphan keep-last invariant (S3F8). The algorithm trusts the
+// caller (pipeline.preReconcileDuties) to pre-clamp scroll_offset to
+// maxOffset(n). Both sides of that contract are pinned here:
+//   - a stale over-max offset orphans the strip: EVERY window parks,
+//     including the last (the hazard the caller-side clamp prevents);
+//   - after the documented clamp, the last window stays visible;
+//   - the shrink case (n drops, old offset exceeds the new max) clamps to 0.
+test "T32 scroll orphan keep-last invariant" {
+    var fx: Fixture = undefined;
+    fx.init(&.{ 11, 12, 13, 14 }, stdWa());
+    defer fx.deinit();
+
+    const slot_w = scroll_algo.slotWidth(800);
+    const params = &fx.m.ws[0].params;
+
+    // (1) Unclamped stale offset (from a hypothetical n=9 strip): all parked.
+    const stale_off = scroll_algo.maxOffset(9, slot_w, 800);
+    try testing.expect(stale_off > scroll_algo.maxOffset(4, slot_w, 800));
+    params.scroll_offset = stale_off;
+    params.scroll_prev_count = 4;
+    var out_orphan: List = .{};
+    engine.compute(.scroll, tuned(&fx), &out_orphan);
+    for (out_orphan.constSlice()) |p| try testing.expect(!p.visible);
+
+    // (2) Clamped per duty 2: the last window is at least flush-visible at
+    // max offset (its slot's right edge reaches the screen edge).
+    params.scroll_offset = @min(stale_off, scroll_algo.maxOffset(4, slot_w, 800));
+    var out_last: List = .{};
+    engine.compute(.scroll, tuned(&fx), &out_last);
+    try testing.expect(out_last.constSlice()[3].visible);
+
+    // (3) Shrink 4 -> 2: maxOffset(2) == 0 forces offset 0; both visible.
+    params.scroll_offset = @min(stale_off, scroll_algo.maxOffset(2, slot_w, 800));
+    var fx2: Fixture = undefined;
+    fx2.init(&.{ 11, 12 }, stdWa());
+    defer fx2.deinit();
+    const params2 = &fx2.m.ws[0].params;
+    params2.scroll_offset = 0;
+    params2.scroll_prev_count = 2;
+    var out_shrunk: List = .{};
+    engine.compute(.scroll, tuned(&fx2), &out_shrunk);
+    try testing.expect(out_shrunk.constSlice()[0].visible);
+    try testing.expect(out_shrunk.constSlice()[1].visible);
+}
+
+// T33 — emission-order pin across all layouts with a shared non-empty
+// fixture (companion to T31's empty-input pin for ND-2): count and win-id
+// sequence are frozen so any guard/reorder drift fails loudly. Geometry is
+// already pinned per-layout by T19-T28.
+test "T33 emission order pin across layouts" {
+    var fx: Fixture = undefined;
+    fx.init(&.{ 11, 12, 13 }, stdWa());
+    defer fx.deinit();
+    model.setFocus(&fx.m, 12);
+
+    // Every input-order layout emits exactly the tiled_order sequence.
+    const in_order_kinds = [_]model.LayoutKind{ .master, .fibonacci, .grid, .leaf, .scroll };
+    for (in_order_kinds) |kind| {
+        var out: List = .{};
+        engine.compute(kind, tuned(&fx), &out);
+        try testing.expectEqual(@as(usize, 3), out.len);
+        try testing.expectEqual(@as(model.WindowId, 11), out.constSlice()[0].win);
+        try testing.expectEqual(@as(model.WindowId, 12), out.constSlice()[1].win);
+        try testing.expectEqual(@as(model.WindowId, 13), out.constSlice()[2].win);
+    }
+
+    // Monocle emits the focused window first, then hidden in list order.
+    var out_mono: List = .{};
+    engine.compute(.monocle, tuned(&fx), &out_mono);
+    try testing.expectEqual(@as(usize, 3), out_mono.len);
+    try testing.expectEqual(@as(model.WindowId, 12), out_mono.constSlice()[0].win);
+    try testing.expectEqual(@as(model.WindowId, 11), out_mono.constSlice()[1].win);
+    try testing.expectEqual(@as(model.WindowId, 13), out_mono.constSlice()[2].win);
+}
