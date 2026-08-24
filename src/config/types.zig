@@ -474,6 +474,12 @@ pub const BarConfig = struct {
 
     clock_format: ?[]const u8 = null,
 
+    /// Scroll the focused window's title through its slot when it overflows
+    /// (marquee) instead of truncating it with an ellipsis.
+    carousel_enabled: bool = true,
+    /// Marquee scroll speed in pixels per second.
+    carousel_speed_px_s: u16 = 125,
+
     // drun segment colors and prompt; all nullable, falling back to bar-wide defaults.
     drun_bg: ?Color = null, // Background; falls back to bg
     drun_fg: ?Color = null, // Typed text color; falls back to fg

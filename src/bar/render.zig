@@ -43,6 +43,12 @@ pub extern fn cairo_destroy(cr: *cairo_t) void;
 pub extern fn cairo_set_source_rgba(cr: *cairo_t, red: f64, green: f64, blue: f64, alpha: f64) void;
 pub extern fn cairo_move_to(cr: *cairo_t, x: f64, y: f64) void;
 
+// Clipping, for region-scoped text (title marquee).
+pub extern fn cairo_save(cr: *cairo_t) void;
+pub extern fn cairo_restore(cr: *cairo_t) void;
+pub extern fn cairo_rectangle(cr: *cairo_t, x: f64, y: f64, width: f64, height: f64) void;
+pub extern fn cairo_clip(cr: *cairo_t) void;
+
 // Pango
 
 pub const PangoLayout = opaque {};
