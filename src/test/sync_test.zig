@@ -307,6 +307,83 @@ test "minimize parks; restore replays original slot geometry" {
     try fx.rec.expectGeom(4, 402, 404, 8, 384, 580, null);
 }
 
+// -- Fullscreen -> minimize -> restore -> un-fullscreen (user bug report) ----
+//
+// The model used to DROP the fullscreen-prev window's saved slot on restore
+// (BC08 violation), so the final exit-fullscreen left it base-tiled but
+// home-less: sync's orphan branch kept it at its stale screen-sized geometry
+// while the remaining window retook master — an untileable, engine-invisible
+// window. With the slot re-added, the same sequence must end fully tiled.
+test "fs->min->restore->unfs retiles instead of stranding an orphan" {
+    var fx: Fixture = undefined;
+    fx.init(stdScreen(), stdWa());
+    defer fx.deinit();
+
+    model.register(&fx.m, 601, null) catch unreachable;
+    model.register(&fx.m, 602, null) catch unreachable;
+    model.setFocus(&fx.m, 601);
+    fx.reconcile(.{}); // baseline tiled: both placed
+
+    // Enter fullscreen: 601 takes the screen, 602 parks.
+    _ = model.toggleFullscreen(&fx.m, 601);
+    fx.rec.clear();
+    fx.reconcile(.{ .force_restack = true });
+    try fx.rec.expectLen(5);
+    try fx.rec.expectMap(0, 601);
+    try fx.rec.expectPixel(1, 601, 0);
+    try fx.rec.expectBw(2, 601, 0);
+    try fx.rec.expectGeom(3, 601, 0, 0, 800, 600, .above);
+    try fx.rec.expectPark(4, 602);
+
+    // Minimize FROM fullscreen: 601 parks (its fullscreen record is stored
+    // inside prev). 602 — parked by the fullscreen enter — UNPARKS into the
+    // full master slot as the fallback winner (m.focused is still 601, but
+    // its desire is parked): unpark transition => map+pixel+bw+geom replay,
+    // raise merged because the rect moved.
+    try model.minimize(&fx.m, 601);
+    fx.rec.clear();
+    fx.reconcile(.{});
+    try fx.rec.expectLen(5);
+    try fx.rec.expectPark(0, 601);
+    try fx.rec.expectMap(1, 602);
+    try fx.rec.expectPixel(2, 602, unfocused_pixel);
+    try fx.rec.expectBw(3, 602, cfg_bw);
+    try fx.rec.expectGeom(4, 602, 8, 8, 780, 580, .above);
+
+    // Restore: BC08 straight back into fullscreen. 601 replays
+    // map+bw+pixel+geom riding its unpark transition; 602 — unparked by the
+    // minimize step — parks AGAIN behind the returning fullscreen occupant.
+    model.restore(&fx.m, 601);
+    fx.rec.clear();
+    fx.reconcile(.{});
+    try fx.rec.expectLen(5);
+    try fx.rec.expectMap(0, 601);
+    try fx.rec.expectPixel(1, 601, 0);
+    try fx.rec.expectBw(2, 601, 0);
+    try fx.rec.expectGeom(3, 601, 0, 0, 800, 600, .above);
+    try fx.rec.expectPark(4, 602);
+
+    // THE REGRESSION GATE — leave fullscreen. 601 must come back TILED at
+    // its master slot (384x580 @ 8,8, winner ABOVE with pixel+bw replay,
+    // no map). 602 unparks into its surviving stack slot with the full
+    // map+appearance+geometry replay (stack null: not the winner).
+    // Pre-fix this emitted NO geometry for 601 at all: the orphan branch
+    // kept the stale 800x600 fullscreen rect while 602 wrongly kept the
+    // full-width master rect — an engine-invisible, untileable window.
+    _ = model.toggleFullscreen(&fx.m, 601);
+    fx.rec.clear();
+    fx.reconcile(.{});
+    try testing.expectEqual(@as(model.WSId, 0), model.findHome(&fx.m, 601).?);
+    try fx.rec.expectLen(7);
+    try fx.rec.expectPixel(0, 601, focused_pixel);
+    try fx.rec.expectBw(1, 601, cfg_bw);
+    try fx.rec.expectGeom(2, 601, 8, 8, 384, 580, .above);
+    try fx.rec.expectMap(3, 602);
+    try fx.rec.expectPixel(4, 602, unfocused_pixel);
+    try fx.rec.expectBw(5, 602, cfg_bw);
+    try fx.rec.expectGeom(6, 602, 404, 8, 384, 580, null);
+}
+
 // -- Workspace switch (train c wire shape) -----------------------------------
 
 test "workspace switch: leavers park, arrivers map + place ABOVE; return unpark raises" {

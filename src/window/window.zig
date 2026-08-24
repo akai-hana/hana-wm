@@ -822,13 +822,22 @@ fn unmanageWindow(win: u32) void {
     // post-close focus target be resolved against win-free tracking state,
     // with its input model queried BEFORE the grab.
     wincache.removeWindow(win);
+
+    // Capture the fullscreen record BEFORE workspaces.removeWindow drops the
+    // model entry (removeWindow → unregister): after that, actions.unmanage's
+    // store query could only ever see "not fullscreen", so closing or
+    // minimizing-away the current workspace's fullscreen occupant never
+    // restored the bar. The action layer consumes it via ctx.
+    var actx: actions.Ctx = .{
+        .focused_window_id = focus.getFocused(),
+        .withdrawn_fullscreen_ws = if (pipeline.initialized) actions.fullscreenWsOf(win) else null,
+    };
     workspaces.removeWindow(win);
 
     // PIPELINE (train d / fix P0-1): drop the MODEL entry, resolve the
     // post-close focus target (BC06 tiers) and reconcile under one grab.
     // Idempotent: a window withdrawn via unmap+destroy runs this once per
     // event; unregister/fallback no-op on the second pass.
-    var actx: actions.Ctx = .{ .focused_window_id = focus.getFocused() };
     actions.unmanage(&actx, win);
 }
 

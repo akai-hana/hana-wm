@@ -697,3 +697,111 @@ test "T32: latestMinimizedBase skips fullscreen-prev and other workspaces" {
     try model.minimize(&m, 21); // fullscreen-prev, newer — excluded from BC09 focus
     try testing.expectEqual(@as(?model.WindowId, 20), model.latestMinimizedBase(&m, 0));
 }
+
+// T33 (user bug report): fullscreen -> minimize -> restore -> un-fullscreen
+// used to strand the window base-tiled but HOME-LESS: restore() only
+// re-entered the slot for base-tiled prevs, so the fullscreen-prev window's
+// saved slot was dropped. After the later exit-fullscreen it was invisible to
+// the engine (stale geometry) and untileable via toggle_floating_window.
+// BC08 pins the correct behavior: "slot re-added THEN fullscreen re-entered".
+test "T33: fullscreen-prev restore re-adds slot; exit-fullscreen retiles" {
+    var m = makeModel();
+    defer deinitModel(&m);
+    regCur(&m, 1);
+    regCur(&m, 2);
+    _ = model.toggleFullscreen(&m, 1);
+    try expectOrder(&m, 0, &.{ 1, 2 }); // fullscreen windows keep their slot
+    try model.minimize(&m, 1);
+    try testing.expect(m.store.get(1).?.mode == .minimized);
+    try expectOrder(&m, 0, &.{2}); // slot freed while hidden
+
+    model.restore(&m, 1); // BC08: straight back into fullscreen ...
+    const e = m.store.get(1).?;
+    try testing.expect(e.mode == .fullscreen);
+    try testing.expectEqual(@as(WSId, 0), e.mode.fullscreen.ws);
+    // ... AND the saved slot must be re-added (THE FIX under test).
+    try expectOrder(&m, 0, &.{ 1, 2 });
+    try assertSingleMembership(&m);
+
+    // The reported final step: leaving fullscreen must return a TILEABLE,
+    // engine-placed window — not a home-less base.tiled orphan.
+    try testing.expect(model.toggleFullscreen(&m, 1));
+    const back = m.store.get(1).?;
+    try testing.expect(back.mode == .base and back.mode.base == .tiled);
+    try expectOrder(&m, 0, &.{ 1, 2 });
+    try assertSingleMembership(&m);
+}
+
+// T33b: floating-base fullscreen round trip stays home-free (C-D1 / fix
+// P2-7) — the wants_home refinement must not regress T06's exact contract.
+test "T33b: floating-base fullscreen minimize/restore never joins a list" {
+    var m = makeModel();
+    defer deinitModel(&m);
+    regCur(&m, 5);
+    const r: utils.Rect = .{ .x = 3, .y = 4, .width = 100, .height = 80 };
+    _ = m.store.put(6, .{
+        .mask = model.bit(0),
+        .mode = .{ .base = .{ .floating = r } },
+    }) catch unreachable;
+    _ = model.toggleFullscreen(&m, 6);
+    try model.minimize(&m, 6);
+    model.restore(&m, 6);
+    const e = m.store.get(6).?;
+    try testing.expect(e.mode == .fullscreen);
+    try testing.expect(r.eql(e.mode.fullscreen.base.floating));
+    for (&m.ws) |*s| try testing.expect(model.findInOrder(&s.tiled_order, 6) == null);
+}
+
+// T34 (user bug report): minimizing one of two windows must fall back to the
+// PREVIOUSLY focused window. The candidate policy lives in the model layer;
+// actions.pickFallback delegates to it verbatim. Tier checks:
+// MRU newest-first (minimized skipped even though still listed in MRU),
+// then reversed tiled_order, then floating, then null.
+test "T34: fallbackFocusCandidate tiers pick the previous focus" {
+    var m = makeModel();
+    defer deinitModel(&m);
+    regCur(&m, 10);
+    regCur(&m, 11); // tiled_order [10, 11]
+    model.setFocus(&m, 11); // user focused 11 first...
+    model.setFocus(&m, 10); // ...then 10; MRU now [10, 11]
+    try testing.expectEqual(@as(?WindowId, 10), model.fallbackFocusCandidate(&m, 0));
+
+    // Minimizing the FOCUSED window (10): the previous focus (11) wins via
+    // the MRU tier even though 10 is still newest in the MRU list — visibleOn
+    // rejects minimized entries.
+    try model.minimize(&m, 10);
+    try testing.expectEqual(@as(?WindowId, 11), model.fallbackFocusCandidate(&m, 0));
+
+    // Both hidden: reversed tiled_order tier is exhausted by visibility too,
+    // a floating window becomes the candidate, and an empty ws yields null.
+    try model.minimize(&m, 11);
+    _ = m.store.put(12, .{
+        .mask = model.bit(0),
+        .mode = .{ .base = .{ .floating = .{ .x = 0, .y = 0, .width = 50, .height = 50 } } },
+    }) catch unreachable;
+    try testing.expectEqual(@as(?WindowId, 12), model.fallbackFocusCandidate(&m, 0));
+
+    model.unregister(&m, 12);
+    try testing.expectEqual(@as(?WindowId, null), model.fallbackFocusCandidate(&m, 0));
+}
+
+// T35: fullscreenWsOf is the pre-removal read primitive for unmanage paths
+// (bug: closing/minimizing away a fullscreened window never restored the bar
+// because the query ran after the store entry was already gone).
+test "T35: fullscreenWsOf reports the record and null otherwise" {
+    var m = makeModel();
+    defer deinitModel(&m);
+    regCur(&m, 30);
+    regCur(&m, 31);
+    try testing.expectEqual(@as(?WSId, null), model.fullscreenWsOf(&m, 30));
+    try testing.expectEqual(@as(?WSId, null), model.fullscreenWsOf(&m, 999)); // unknown
+
+    _ = model.toggleFullscreen(&m, 30);
+    try testing.expectEqual(@as(?WSId, 0), model.fullscreenWsOf(&m, 30));
+    try testing.expectEqual(@as(?WSId, null), model.fullscreenWsOf(&m, 31)); // not fullscreen
+
+    // After minimize-from-fullscreen the record is GONE (parked inside
+    // prev) — callers must capture before dropping/removal, never after.
+    try model.minimize(&m, 30);
+    try testing.expectEqual(@as(?WSId, null), model.fullscreenWsOf(&m, 30));
+}

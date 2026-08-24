@@ -210,10 +210,23 @@ pub fn restore(m: *Model, win: WindowId) void {
     const e = m.store.getPtr(win) orelse return;
     if (e.mode != .minimized) return;
     const mm = e.mode.minimized;
-    // Only tiled-prev windows re-enter a home list (fix P2-7): floating-prev
-    // restores to its saved rect directly; appending it would create a
-    // phantom layout member that shifts every other window's slot.
-    if (mm.prev == .base and mm.prev.base == .tiled) {
+    // Which previous states re-enter a home list?
+    //   - base-tiled prev: was listed before minimization, must be re-listed.
+    //   - floating-prev: restores to its saved rect directly (fix P2-7);
+    //     appending it would create a phantom layout member that shifts
+    //     every other window's slot.
+    //   - fullscreen-prev whose inner base is tiled: WAS listed when
+    //     minimized (toggleFullscreen keeps the slot; minimize removed it),
+    //     so BC08 ("slot re-added THEN fullscreen re-entered w/ saved rect")
+    //     requires re-adding it here too. Skipping that stranded the window:
+    //     after a later exit-fullscreen it was base-tiled but home-less —
+    //     invisible to the engine (sync's orphan branch kept stale geometry)
+    //     and untileable via toggleFloating, which never inserts into lists.
+    const wants_home = switch (mm.prev) {
+        .base => |b| b == .tiled,
+        .fullscreen => |f| f.base == .tiled,
+    };
+    if (wants_home) {
         const h: WSId = lowestBit(e.mask); // follows tag-moves made while hidden (BC12)
         const list = &m.ws[h].tiled_order;
         // I8: refuse-before-mutate — a full home list leaves the window
@@ -537,4 +550,56 @@ pub fn visibleOn(m: *const Model, win: WindowId, ws: WSId) bool {
     if (e.mode == .minimized) return false;
     if (m.all_view_active) return true;
     return e.mask & bit(ws) != 0;
+}
+
+/// Fullscreen workspace record of `win`, null unless its current mode is
+/// fullscreen. Callers about to DROP the store entry (unmanage paths) must
+/// read this BEFORE removal — afterwards it is always null.
+pub fn fullscreenWsOf(m: *const Model, win: WindowId) ?WSId {
+    const e = m.store.get(win) orelse return null;
+    return switch (e.mode) {
+        .fullscreen => |f| f.ws,
+        else => null,
+    };
+}
+
+/// BC06 minimize-fallback target policy, extracted verbatim from
+/// actions.pickFallback so tests exercise the same logic without linking the
+/// protocol layers. Tier order on workspace `ws`:
+///   1. focus MRU, newest first,
+///   2. reversed tiled_order,
+///   3. any visible floating-base window not in tiled_order.
+/// First visibleOn(ws) candidate wins; null when nothing qualifies.
+pub fn fallbackFocusCandidate(m: *const Model, ws: WSId) ?WindowId {
+    // 1. focus MRU, NEWEST first: mru[0] is the MOST RECENT focus (T15),
+    //    so minimizing the focused window falls back to the previously
+    //    focused one. visibleOn rejects minimized entries, including the
+    //    just-minimized window itself. (The pre-extraction actions copy
+    //    scanned this list backwards — oldest-first — contradicting both
+    //    its own comment and WsState's; caught by T34.)
+    const mru = &m.ws[ws].focus_mru;
+    for (mru.items[0..mru.len]) |cand| {
+        if (visibleOn(m, cand, ws)) return cand;
+    }
+    // 2. reversed tiled_order of the workspace.
+    const order = &m.ws[ws].tiled_order;
+    var j = order.items.len;
+    while (j > 0) {
+        j -= 1;
+        const cand = order.items[j];
+        if (visibleOn(m, cand, ws)) return cand;
+    }
+    // 3. any floating window on ws (base mode, not in tiled_order).
+    for (0..m.store.count()) |k| {
+        const it = m.store.at(k);
+        if (it.val.mode != .base) continue;
+        if (!visibleOn(m, it.key, ws)) continue;
+        var tiled = false;
+        for (order.items) |t| if (t == it.key) {
+            tiled = true;
+            break;
+        };
+        if (!tiled) return it.key;
+    }
+    return null;
 }
