@@ -1235,6 +1235,8 @@ fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Con
     inline for (bar_color_fields) |field_name|
         @field(cfg.bar, field_name) = getColor(section, field_name, @field(cfg.bar, field_name));
     try assignStrKey(allocator, section, "clock_format", &cfg.bar.clock_format);
+    cfg.bar.carousel_enabled = getInRange(bool, section, "carousel_enabled", cfg.bar.carousel_enabled, null, null);
+    cfg.bar.carousel_speed_px_s = getInRange(u16, section, "carousel_speed_px_s", cfg.bar.carousel_speed_px_s, 1, 1000);
     try assignStrKey(allocator, section, "drun_prompt", &cfg.bar.drun_prompt);
     if (section.getString("indicator_location")) |loc_str| {
         cfg.bar.indicator_location = types.IndicatorLocation.fromString(loc_str) orelse blk: {

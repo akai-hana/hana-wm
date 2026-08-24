@@ -34,6 +34,7 @@ const barwin = @import("win");
 const clock = @import("clock");
 const layout = @import("layout");
 const title = @import("title");
+const carousel = @import("carousel");
 const variants = @import("variants");
 const tags = @import("tags");
 
@@ -49,8 +50,21 @@ pub fn onPollWakeup() void {
 pub fn pollTimeoutMs() i32 {
     const blink = prompt.blinkPollTimeoutMs();
     const tick = clock.tickDeadlineMs();
-    if (blink < 0) return tick;
-    return @min(blink, tick);
+    var timeout = if (blink < 0) tick else @min(blink, tick);
+    // Marquee frames: the carousel asks for wakes only while actually
+    // scrolling, paced to the detected monitor refresh rate (see
+    // carousel.pollDeadlineMs).
+    const scroll = carousel.pollDeadlineMs(
+        monotonicMs(),
+        core.getState().config.bar.carousel_enabled,
+        refresh_rate.detectedHz(),
+    );
+    if (scroll >= 0) timeout = @min(timeout, scroll);
+    return timeout;
+}
+
+fn monotonicMs() i64 {
+    return @intCast(utils.monotonicNs() / std.time.ns_per_ms);
 }
 
 pub fn promptHandleKeypress(event: *const xcb.xcb_key_press_event_t, matched: ?*const types.Action) bool {
@@ -318,6 +332,9 @@ const State = struct {
     /// Returns true when `seg` should be skipped because its data has not changed
     /// since the last frame and a full redraw is not required.
     inline fn shouldSkipSegment(snap: *const sn.BarSnapshot, seg: types.BarSegment) bool {
+        // Marquee frames repaint moving pixels whose data hasn't changed, so
+        // the title's clean diff must not suppress them while scrolling.
+        if (seg == .title and carousel.scrollingActive()) return false;
         return segmod.shouldSkip(snap, seg);
     }
 
