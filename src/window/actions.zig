@@ -18,6 +18,11 @@ const debug = @import("debug");
 
 pub const Ctx = struct {
     focused_window_id: ?model_mod.WindowId = null,
+    /// Fullscreen workspace record of the window being withdrawn, captured
+    /// by unmanageWindow BEFORE workspaces.removeWindow drops the model
+    /// entry (after which no store query could recover it). Null for every
+    /// other entry point.
+    withdrawn_fullscreen_ws: ?model_mod.WSId = null,
 };
 
 /// Shared no-op context for internal fallback calls that don't need one.
@@ -31,11 +36,35 @@ pub inline fn currentWs() model_mod.WSId {
 // ---------------------------------------------------------------- minimize
 
 /// BC06 atomicity: minimize + fallback-focus + retile land under one grab.
+///
+/// Focus policy reads MODEL truth (`m.focused`), not ctx.focused_window_id:
+/// entry points dispatch through shared contexts that don't maintain that
+/// field per keypress, so the old comparison silently never fired and
+/// minimizing left m.focused pointing at the hidden window (stale title
+/// segment, stale border colors until the next unrelated focus event).
+///
+/// Minimizing THE fullscreen occupant also frees the bar-hide reason: the
+/// bar comes back (setBarState re-derives occupancy itself and no-ops when
+/// another occupant remains or the user toggled the bar off). It runs BEFORE
+/// the reconcile because workAreaRect() depends on bar visibility.
 pub fn minimize(ctx: *Ctx, focused: ?model_mod.WindowId) void {
     const win = focused orelse return;
     const m = pipeline.model();
+    const was_focused = m.focused == win;
+    const fs_ws_before = model_mod.fullscreenWsOf(m, win);
+
     model_mod.minimize(m, win) catch return; // BC26 pre-refusal (CapacityFull)
-    if (ctx.focused_window_id == win) focusFallback(m, ctx);
+
+    if (was_focused) focusFallback(m, ctx);
+
+    if (build_options.has_bar) {
+        const bar = @import("bar");
+        if (fs_ws_before) |fs_ws| {
+            if (fs_ws == m.current) bar.setBarState(.show_fullscreen);
+        }
+        bar.scheduleRedraw(); // minimization itself refreshes the title segment
+    }
+
     pipeline.reconcileUnderGrabNow(.{ .force_restack = true }); // BC06 atomicity
 }
 
@@ -57,37 +86,9 @@ pub fn focusFallback(m: *const model_mod.Model, ctx: *Ctx) void {
 }
 
 fn pickFallback(m: *const model_mod.Model) ?model_mod.WindowId {
-    const ws = m.current;
-    // 1. current-ws focus MRU, newest first, skipping the minimized window
-    //    (it is already mode=.minimized here so visibleOn would skip it too).
-    const mru = &m.ws[ws].focus_mru;
-    var i = mru.items.len;
-    while (i > 0) {
-        i -= 1;
-        const cand = mru.items[i];
-        if (model_mod.visibleOn(m, cand, ws)) return cand;
-    }
-    // 2. reversed tiled_order of the current workspace.
-    const order = &m.ws[ws].tiled_order;
-    var j = order.items.len;
-    while (j > 0) {
-        j -= 1;
-        const cand = order.items[j];
-        if (model_mod.visibleOn(m, cand, ws)) return cand;
-    }
-    // 3. any floating window on ws (base mode, not in tiled_order).
-    for (0..m.store.count()) |k| {
-        const it = m.store.at(k);
-        if (it.val.mode != .base) continue;
-        if (!model_mod.visibleOn(m, it.key, ws)) continue;
-        var tiled = false;
-        for (order.items) |t| if (t == it.key) {
-            tiled = true;
-            break;
-        };
-        if (!tiled) return it.key;
-    }
-    return null;
+    // Tier policy lives in the model layer so tests can exercise it without
+    // linking the protocol side (see model.fallbackFocusCandidate).
+    return model_mod.fallbackFocusCandidate(m, m.current);
 }
 
 // ----------------------------------------------------------------- restore
@@ -97,10 +98,22 @@ pub fn restore(ctx: *Ctx, win: model_mod.WindowId) void {
     _ = ctx;
     const m = pipeline.model();
     if (!isMinimizedOnAnyWs(m, win)) return;
+    // A pre-existing fullscreen occupant means sync will park the restored
+    // window's fullscreen record anyway; only an unoccupied slot may defer
+    // a bar hide (win itself is minimized here, so any occupant is "other").
+    const had_occupant_before = fsOccupantOnWs(m, m.current) != null;
     model_mod.restore(m, win);
     model_mod.setFocus(m, win);
     focus.setFocus(win, .window_spawn); // protocol untouched until train f
     pipeline.reconcileUnderGrabNow(.{ .force_restack = true });
+    // BC08 straight-back-into-fullscreen: defer the bar hide to the window's
+    // ConfigureNotify confirmation — exactly like an enter-fullscreen toggle
+    // (arming the hide also clears leftover pending-show state).
+    if (build_options.has_bar and !had_occupant_before and
+        isFullscreenOnWs(pipeline.model(), win, pipeline.model().current))
+    {
+        @import("fullscreen").armPendingBarHide(win);
+    }
 }
 
 pub fn restoreLifo(ctx: *Ctx) void {
@@ -115,10 +128,16 @@ fn restoreOrdered(ctx: *Ctx, order: model_mod.RestoreOrder) void {
     _ = ctx;
     const m = pipeline.model();
     const win = model_mod.restoreCandidate(m, currentWs(), order) orelse return;
+    const had_occupant_before = fsOccupantOnWs(m, m.current) != null;
     model_mod.restore(m, win);
     model_mod.setFocus(m, win);
     focus.setFocus(win, .window_spawn);
     pipeline.reconcileUnderGrabNow(.{ .force_restack = true });
+    if (build_options.has_bar and !had_occupant_before and
+        isFullscreenOnWs(pipeline.model(), win, pipeline.model().current))
+    {
+        @import("fullscreen").armPendingBarHide(win);
+    }
 }
 
 /// BC09: slot-ordered bulk restore of the current workspace. Focus target is
@@ -130,10 +149,14 @@ pub fn restoreAll(ctx: *Ctx) void {
     const m = pipeline.model();
     const ws = currentWs();
     const target = model_mod.latestMinimizedBase(m, ws) orelse return;
+    const had_occupant_before = fsOccupantOnWs(m, ws) != null;
     model_mod.restoreAllOnWs(m, ws);
     model_mod.setFocus(m, target);
     focus.setFocus(target, .window_spawn);
     pipeline.reconcileUnderGrabNow(.{ .force_restack = true });
+    if (build_options.has_bar and !had_occupant_before) {
+        if (fsOccupantOnWs(m, ws)) |occ| @import("fullscreen").armPendingBarHide(occ);
+    }
 }
 
 fn isMinimizedOnAnyWs(m: *const model_mod.Model, win: model_mod.WindowId) bool {
@@ -168,6 +191,13 @@ pub fn isFullscreenMode(win: model_mod.WindowId) bool {
     const m = pipeline.model();
     const e = m.store.get(win) orelse return false;
     return e.mode == .fullscreen;
+}
+
+/// Fullscreen workspace record of `win`, or null. Entry points about to drop
+/// the model entry MUST call this first and pass the result through
+/// Ctx.withdrawn_fullscreen_ws (see actions.unmanage).
+pub fn fullscreenWsOf(win: model_mod.WindowId) ?model_mod.WSId {
+    return model_mod.fullscreenWsOf(pipeline.model(), win);
 }
 
 /// Whether any window occupies the fullscreen slot on `ws` (model truth;
@@ -312,7 +342,18 @@ pub fn toggleFloating(ctx: *Ctx, win: model_mod.WindowId) void {
                 const r = sync.lastRectFor(win) orelse return;
                 e.mode = .{ .base = .{ .floating = r } };
             },
-            .floating => e.mode = .{ .base = .tiled },
+            .floating => {
+                e.mode = .{ .base = .tiled };
+                // Defense in depth (the stranded-slot bug class): a
+                // tiled-mode window must ALWAYS have a home-list entry
+                // (single-membership invariant). Repair legacy-stranded
+                // state instead of leaving an engine-invisible window that
+                // this very toggle could never fix again.
+                if (model_mod.findHome(m, win) == null) {
+                    const h: model_mod.WSId = model_mod.lowestBit(e.mask);
+                    _ = m.ws[h].tiled_order.append(win);
+                }
+            },
         },
         else => return,
     }
@@ -732,9 +773,13 @@ pub fn mapRequest(ctx: *Ctx, win: model_mod.WindowId, target_ws: u8, on_current:
 /// Inactive-workspace geometry repairs ride the same global LastSent diff —
 /// legacy's separate retileInactiveWorkspace call disappears.
 pub fn unmanage(ctx: *Ctx, win: model_mod.WindowId) void {
-    _ = ctx;
     const m = pipeline.model();
-    const was_fs_current = isFullscreenOnWs(m, win, m.current);
+    // Fullscreen truth arrives via ctx: the sole caller (window.unmanage-
+    // Window) removes the model entry (workspaces.removeWindow → unregister)
+    // BEFORE this action runs, so reading the store here always yielded null
+    // and closing/minimizing-away the fullscreen occupant never restored
+    // the bar.
+    const was_fs_current = if (ctx.withdrawn_fullscreen_ws) |ws| ws == m.current else false;
 
     // Focus policy (ND-9): the only caller (window.unmanageWindow) already
     // ran workspaces.removeWindow → model.unregister before this point,
@@ -746,7 +791,11 @@ pub fn unmanage(ctx: *Ctx, win: model_mod.WindowId) void {
     model_mod.unregister(m, win);
     sync.forget(win); // X ids recycle; stale LastSent must not survive (fix P0-4)
 
-    if (was_fs_current and build_options.has_bar) @import("bar").setBarState(.show_fullscreen);
+    if (build_options.has_bar) {
+        const bar = @import("bar");
+        if (was_fs_current) bar.setBarState(.show_fullscreen); // before reconcile: workAreaRect() depends on visibility
+        bar.scheduleRedraw(); // title segment drops the closed window
+    }
 
     pipeline.reconcileUnderGrabNow(.{ .force_restack = true });
 }
