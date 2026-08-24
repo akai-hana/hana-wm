@@ -17,21 +17,24 @@ pub const XKB_KEY_NoSymbol: u32 = xkb.XKB_KEY_NoSymbol;
 pub const xkb_keysym_from_name = xkb.xkb_keysym_from_name;
 const xkb_context = xkb.struct_xkb_context;
 const xkb_keymap = xkb.struct_xkb_keymap;
-const xkb_state = xkb.struct_xkb_state;
 
 const max_attempts: u8 = 3;
 
 pub const XkbState = struct {
     context: *xkb_context,
-    keymap: *xkb_keymap,
-    state: *xkb_state,
     /// Flat keycode->keysym table for the standard X11 range (indices 0..255).
     /// Populated at init time; entries outside 8..255 hold XKB_KEY_NoSymbol.
     /// No allocator needed; 256 x 4 bytes = 1 KiB, lives inside XkbState.
     keysym_by_keycode: [256]u32,
 
-    /// Initialises an XKB context, keymap, and state from the live X connection.
-    /// Retries up to max_attempts times to handle early-startup races.
+    /// Initialises an XKB context and builds the keysym table from the live
+    /// X connection. Retries up to max_attempts times to handle early-startup
+    /// races.
+    ///
+    /// ND-26 (S8F5): no xkb_state/keymap handles are retained — nothing ever
+    /// read them (dispatch resolves from the flat table by design, so CapsLock
+    /// at startup cannot pin shifted symbols); they were write+unref-only
+    /// lifecycle weight. The keymap is used transiently here and released.
     pub fn init(xcb_conn: *anyopaque) !XkbState {
         const ctx = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS) orelse
             return error.XkbContextFailed;
@@ -42,29 +45,23 @@ pub const XkbState = struct {
         const device_id = try retryDeviceId(xcb_conn);
 
         const km = try retryKeymap(ctx, xcb_conn, device_id);
-        errdefer xkb.xkb_keymap_unref(km);
-
-        const st = xkb.xkb_state_new(km) orelse return error.XkbStateFailed;
+        defer xkb.xkb_keymap_unref(km);
 
         return XkbState{
             .context = ctx,
-            .keymap = km,
-            .state = st,
             .keysym_by_keycode = buildKeysymTable(km),
         };
     }
 
-    /// Releases the XKB state, keymap, and context in reverse-init order.
+    /// Releases the XKB context.
     pub fn deinit(self: *XkbState) void {
-        xkb.xkb_state_unref(self.state);
-        xkb.xkb_keymap_unref(self.keymap);
         xkb.xkb_context_unref(self.context);
     }
 
-    /// Rebuilds the keymap, state, and keysym table after a server-side mapping
-    /// change (setxkbmap/xmodmap -> XCB_MAPPING_NOTIFY). Dispatch resolves keysyms
-    /// from the table, so it must track the new mapping or bindings silently stop
-    /// matching; on failure the old mapping is kept.
+    /// Rebuilds the keysym table after a server-side mapping change
+    /// (setxkbmap/xmodmap -> XCB_MAPPING_NOTIFY). Dispatch resolves keysyms
+    /// from the table, so it must track the new mapping or bindings silently
+    /// stop matching; on failure the old mapping is kept.
     pub fn rebuild(self: *XkbState, xcb_conn: *anyopaque) void {
         const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
         if (device_id == -1) return;
@@ -72,18 +69,10 @@ pub const XkbState = struct {
             debug.warn("XKB: keymap rebuild failed after mapping change; keeping old mapping", .{});
             return;
         };
-        const st = xkb.xkb_state_new(km) orelse {
-            xkb.xkb_keymap_unref(km);
-            debug.warn("XKB: state rebuild failed after mapping change; keeping old mapping", .{});
-            return;
-        };
-
-        const new_table = buildKeysymTable(km);
-        xkb.xkb_state_unref(self.state);
-        xkb.xkb_keymap_unref(self.keymap);
-        self.state = st;
-        self.keymap = km;
-        self.keysym_by_keycode = new_table;
+        defer xkb.xkb_keymap_unref(km);
+        // Table swapped only after the new keymap built successfully, so a
+        // failed rebuild leaves dispatch fully functional on the old mapping.
+        self.keysym_by_keycode = buildKeysymTable(km);
     }
 
     /// Returns the level-0 keysym for `keycode`, unaffected by lock modifiers
@@ -107,9 +96,9 @@ pub const XkbState = struct {
 };
 
 /// Base (level-0) symbol for `kc`, independent of lock state; reads the
-/// keymap's level-0 entry directly rather than the live xkb_state, whose
-/// `get_one_sym` resolves under current locks (a CapsLock held at startup
-/// would pin the table to shifted symbols and break lowercase bindings).
+/// keymap's level-0 entry directly. A lock-sensitive resolve (xkb_state's
+/// `get_one_sym`) would apply current locks: a CapsLock held at startup
+/// would pin the table to shifted symbols and break lowercase bindings.
 inline fn baseSymbol(km: *xkb_keymap, kc: u8) u32 {
     var syms: [*c]const u32 = null;
     const n = xkb.xkb_keymap_key_get_syms_by_level(km, @intCast(kc), 0, 0, &syms);

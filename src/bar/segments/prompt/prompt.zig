@@ -11,6 +11,7 @@ const types = @import("types");
 
 const drawing = @import("drawing");
 const title = @import("title");
+const carousel = @import("carousel");
 const vim = @import("vim");
 
 const debug = @import("debug");
@@ -96,12 +97,23 @@ const PromptState = struct {
     cached_caret_w: u16 = 0,
     cached_scroll_x: u16 = 0,
     cached_height: u16 = 0,
-    cached_pre_cursor: usize = 0,
-    cached_pre_len: usize = 0,
     layout_dirty: bool = true,
 };
 
 var g: PromptState = .{};
+
+/// Invalidates every cache derived from config/font metrics or bar height.
+/// Called from bar.applyReload: these module globals are built against the
+/// OLD config's fonts and bar height, and a reload can change both — without
+/// this the prompt renders with stale widths/geometry until its next full
+/// cycle (the old "constant between reloads" assumption was wrong).
+pub fn invalidateReloadCaches() void {
+    g.cached_prompt_w = null;
+    g.cached_mode_w = .{null} ** num_modes;
+    g.cached_caret_top = null;
+    g.cached_caret_h = null;
+    g.layout_dirty = true;
+}
 
 fn vimModeEnabled() bool {
     return core.getState().config.bar.vim_mode;
@@ -121,8 +133,8 @@ pub fn isActive() bool {
 
 /// Milliseconds until the next blink toggle, or -1 when the blink animation
 /// isn't running.  Pass this (with the clock timeout) to poll() so the loop
-/// wakes exactly when a redraw is needed.  Non-negative only in insert or
-/// colon-command mode.
+/// wakes exactly when a redraw is needed.  Non-negative only while the
+/// prompt is active in insert mode.
 pub fn blinkPollTimeoutMs() i32 {
     if (!g.is_active) return -1;
     if (g.vim_state.mode == .insert)
@@ -307,6 +319,10 @@ pub fn draw(
     title_invalidated: bool,
 ) !u16 {
     if (!g.is_active) return title.draw(ctx, snap, allocator, title_invalidated);
+    // The prompt covers the whole title segment, so no title.draw (and thus
+    // no carousel.offsetFor) runs while it's open; drop the marquee's
+    // active-scroll latch so the poll loop stops repainting hidden pixels.
+    carousel.deactivate();
     return drawActive(ctx.dc, ctx.config, ctx.height, ctx.start_x, ctx.width);
 }
 
@@ -604,18 +620,38 @@ fn histParseLine(line: []const u8, out: []u8) usize {
 
 /// Splits `text` into lines, recording each [start, end) range (exclusive of
 /// the trailing '\n') into the parallel `line_starts`/`line_ends` arrays.
-/// Returns the number of lines (capped at `line_starts.len`).
+/// Returns the number of lines recorded. When the text holds more lines than
+/// the arrays fit, the LAST `line_starts.len` lines win: history consumers
+/// walk the result back-to-front for newest-first priority, so dropping the
+/// head keeps the freshest entries visible once the file outgrows the window.
 fn collectLines(text: []const u8, line_starts: []usize, line_ends: []usize) usize {
-    var n_lines: usize = 0;
+    const cap = line_starts.len;
+
+    // Pass 1: count lines so the head-skip is known up front.
+    var total: usize = 0;
     var pos: usize = 0;
-    while (pos < text.len and n_lines < line_starts.len) {
+    while (pos < text.len) {
+        while (pos < text.len and text[pos] != '\n') : (pos += 1) {}
+        if (pos < text.len) pos += 1;
+        total += 1;
+    }
+
+    // Pass 2: record only the trailing `cap` lines.
+    const skip = total -| cap;
+    var n_lines: usize = 0;
+    var seen: usize = 0;
+    pos = 0;
+    while (pos < text.len) {
         const line_start = pos;
         while (pos < text.len and text[pos] != '\n') : (pos += 1) {}
         const line_end = pos;
         if (pos < text.len) pos += 1;
-        line_starts[n_lines] = line_start;
-        line_ends[n_lines] = line_end;
-        n_lines += 1;
+        if (seen >= skip) {
+            line_starts[n_lines] = line_start;
+            line_ends[n_lines] = line_end;
+            n_lines += 1;
+        }
+        seen += 1;
     }
     return n_lines;
 }
@@ -630,9 +666,30 @@ fn histLoadFile(fp: *c.FILE) void {
     };
     defer c.free(file_buf.ptr);
 
-    const n_read = c.fread(file_buf.ptr, 1, file_buf_size - 1, fp);
+    // History semantics want the NEWEST entries, which live at the file's
+    // tail. Position the read window at EOF - window so an overgrown file
+    // can't push recent entries out of the fixed 256 KiB read (ND-7); a
+    // partial line at the window head is dropped below.
+    _ = c.fseek(fp, 0, c.SEEK_END);
+    const fsize = c.ftell(fp);
+    const window = file_buf_size - 1;
+    const from_tail = fsize > @as(c_long, @intCast(window));
+    if (from_tail) {
+        _ = c.fseek(fp, -@as(c_long, @intCast(window)), c.SEEK_END);
+    } else {
+        _ = c.fseek(fp, 0, c.SEEK_SET);
+    }
+
+    const n_read = c.fread(file_buf.ptr, 1, window, fp);
     if (n_read == 0) return;
-    const text = file_buf[0..n_read];
+    var text = file_buf[0..n_read];
+    if (from_tail) {
+        // Drop the cut-mid-line fragment at the window start; its real
+        // content lives in the unread region before the window.
+        if (std.mem.indexOfScalar(u8, text, '\n')) |nl| {
+            text = text[nl + 1 ..];
+        } else return;
+    }
 
     const max_lines_cap = max_history * 2;
     const lines_raw = c.malloc(@sizeOf(usize) * max_lines_cap * 2) orelse return;
@@ -700,8 +757,8 @@ fn spawnCommand(cmd: []const u8) void {
     histPrepend(cmd);
     histAppendToFile(cmd);
 
-    // cmd.len <= vim.default_max_input - 1 (enforced by insertChar), so buf
-    // always has room for the null terminator.
+    // cmd.len <= vim.default_max_input - 1 (enforced by the vim buffer
+    // insert clamp), so buf always has room for the null terminator.
     var buf: [vim.default_max_input]u8 = undefined;
     @memcpy(buf[0..cmd.len], cmd);
     buf[cmd.len] = 0;
@@ -829,16 +886,13 @@ const CursorStyle = struct {
     height: u16,
     accent: u32,
     bg: u32,
-    fg: u32,
 };
 
 /// Draw a filled block cursor over `buf[lo..hi]` and advance `px.*` past it.
 ///
 /// Shared by visual selection highlighting and the normal/replace character
-/// cursor: "highlight a byte range with an accent block and inverse text",
-/// differing only in range width and whether `text_only` suppresses the fill
-/// (colon-command mode: the caret lives in the pill, so the character shows as
-/// plain text).  `lo == hi` draws an empty space-sized block (end-of-line).
+/// cursor: "highlight a byte range with an accent block and inverse text".
+/// `lo == hi` draws an empty space-sized block (end-of-line).
 inline fn drawBlockCursor(
     dc: *drawing.DrawContext,
     px: *i32,
@@ -847,16 +901,14 @@ inline fn drawBlockCursor(
     lo: usize,
     hi: usize,
     text_w: ?u16,
-    text_only: bool,
 ) !void {
     const block_text = if (hi > lo) buf[lo..hi] else " ";
     const block_w = @max(text_w orelse dc.measureTextWidth(block_text), min_cursor_px);
 
     if (cursorBlockGeom(px.*, block_w, style.text_left_x, style.scroll_end_x)) |block| {
-        if (!text_only)
-            dc.fillRect(block.draw_x, cursor_v_pad, block.vis_w, style.height -| cursor_v_pad * 2, style.accent);
+        dc.fillRect(block.draw_x, cursor_v_pad, block.vis_w, style.height -| cursor_v_pad * 2, style.accent);
         if (hi > lo)
-            try dc.drawText(block.draw_x, style.baseline, block_text, if (text_only) style.fg else style.bg);
+            try dc.drawText(block.draw_x, style.baseline, block_text, style.bg);
     }
     px.* += @intCast(block_w);
 }
@@ -902,11 +954,9 @@ fn refreshLayoutCache(
     if (g.layout_dirty) {
         // Full remeasure on dirty flag (keypress changed text/cursor/mode).
         g.cached_pre_w = dc.measureTextWidth(pre_cur_text);
-        g.cached_pre_cursor = pre_cur_text.len;
-        g.cached_pre_len = pre_cur_text.len;
     }
     // When !layout_dirty: only height changed; text and cursor are unchanged,
-    // so cached_pre_w / cached_pre_cursor / cached_pre_len remain valid.
+    // so cached_pre_w remains valid.
     g.cached_caret_w = if (g.vim_state.mode == .insert)
         cursor_width
     else
@@ -942,8 +992,8 @@ fn refreshLayoutCache(
 
 /// Right-pinned mode widget: a filled pill (accent bg, white text) with
 /// `pill_h_pad` on both sides so the text never touches the pill edge and
-/// there's a gap to the scrollable region.  In colon-command mode the label is
-/// replaced by ":typed_chars" plus a blinking block cursor.
+/// there's a gap to the scrollable region. The label is the active vim mode's
+/// label (empty in the null-vim build, which skips the pill entirely).
 ///
 /// Returns the scrollable region's right edge (the pill's left edge), or null
 /// when no room remains for text; callers return immediately.
@@ -1040,7 +1090,7 @@ fn drawNormalMode(
     if (pre_text.len > 0)
         try drawSpan(dc, px, text_left_x, scroll_end_x, baseline, pre_text, g.cached_pre_w, fg);
 
-    try drawBlockCursor(dc, px, .{ .text_left_x = text_left_x, .scroll_end_x = scroll_end_x, .baseline = baseline, .height = height, .accent = accent, .bg = bg, .fg = fg }, g.vim_state.buf, g.vim_state.cursor, cur_hi, g.cached_caret_w, false);
+    try drawBlockCursor(dc, px, .{ .text_left_x = text_left_x, .scroll_end_x = scroll_end_x, .baseline = baseline, .height = height, .accent = accent, .bg = bg }, g.vim_state.buf, g.vim_state.cursor, cur_hi, g.cached_caret_w);
 
     const post_text: []const u8 = if (g.vim_state.cursor < g.vim_state.len)
         g.vim_state.buf[g.vim_state.cursor + 1 .. g.vim_state.len]

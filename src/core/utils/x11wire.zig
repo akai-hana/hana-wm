@@ -26,19 +26,10 @@ pub inline fn rectFromXcb(geom: *const xcb.xcb_get_geometry_reply_t) utils.Rect 
     return .{ .x = geom.x, .y = geom.y, .width = geom.width, .height = geom.height, .border_width = geom.border_width };
 }
 
-/// True when a get_geometry reply reports the window parked at (or past) the
-/// off-screen sentinel position written by `pushWindowOffscreen`. Shared by
-/// every call site that live-fetches geometry and must not cache that
-/// parking spot as if it were the window's real, restorable position.
-pub inline fn isOffscreenGeomReply(r: *const xcb.xcb_get_geometry_reply_t) bool {
-    return r.x < constants.offscreen_sentinel_min or r.y < constants.offscreen_sentinel_min;
-}
-
 // ---------------------------------------------------------------------------
 // Configure/raise/park primitives
 
 /// Moves and resizes `win` without touching border_width.
-/// Use `window.configureWindowGeom` when border_width must change atomically.
 pub inline fn configureWindow(conn: core.Connection, win: u32, rect: utils.Rect) void {
     _ = xcb.xcb_configure_window(
         conn,
@@ -53,57 +44,24 @@ pub inline fn raiseWindow(conn: core.Connection, win: u32) void {
     _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 }
 
-pub inline fn pushWindowOffscreen(conn: core.Connection, win: u32) void {
-    _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_X, &[_]u32{@bitCast(@as(i32, constants.offscreen_x_position))});
-}
-
-/// Like `pushWindowOffscreen`, but also drops `win` to the bottom of the
-/// global stacking order in the same request. Use this for any window whose
-/// hidden state must be defended even if something upstream raised it.
-pub inline fn pushWindowOffscreenAndLower(conn: core.Connection, win: u32) void {
-    _ = xcb.xcb_configure_window(
-        conn,
-        win,
-        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_STACK_MODE,
-        &[_]u32{
-            @bitCast(@as(i32, constants.offscreen_x_position)),
-            xcb.XCB_STACK_MODE_BELOW,
-        },
-    );
-}
-
 pub inline fn setBorderPixel(conn: core.Connection, win: u32, pixel: u32) void {
     _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{pixel});
 }
 
 // X server grab state
 //
-// The grab body runs on the main WM thread, but the shared xcb output buffer
-// is flushed by ANY thread (a bar render thread calls xcb_flush
-// up to ~refresh-rate times per second). A foreign flush while the main
-// thread holds xcb_grab_server would release the queued grab-batch requests to
-// the server before xcb_ungrab_server, letting the compositor present an
-// intermediate frame; exactly what the grab is meant to prevent.
-//
-// grab_active lets the bar thread detect that window and skip its flush.
-
-/// True while the main WM thread holds the X server grab.
-pub var grab_active = std.atomic.Value(bool).init(false);
-
-pub inline fn isGrabActive() bool {
-    return grab_active.load(.monotonic);
-}
+// The grab body runs on the main WM thread; grabServer/ungrabServer bracket
+// every reconcile batch so the queued request run reaches the server
+// atomically (BC24 zero-round-trip rule).
 
 /// Always pair with ungrabServer()/ungrabAndFlush().
 pub inline fn grabServer(conn: core.Connection) void {
-    grab_active.store(true, .release);
     _ = xcb.xcb_grab_server(conn);
 }
 
 /// Releases the X server grab without flushing pending requests.
 pub inline fn ungrabServer(conn: core.Connection) void {
     _ = xcb.xcb_ungrab_server(conn);
-    grab_active.store(false, .release);
 }
 
 /// Defined here so every module can share one copy.
@@ -218,6 +176,24 @@ const supported_atoms = [_][]const u8{
     "_NET_WM_STRUT_PARTIAL",
 };
 
+/// Known gaps between `_NET_SUPPORTED` and full behaviour (ND-19 decision:
+/// document, don't narrow — external tools key on the listed hints, and the
+/// list above is what keeps GLFW/Qt/Chromium out of their broken fallback
+/// paths; removing entries would regress those clients more than partial
+/// handling does):
+///
+/// - The only client messages answered are `_NET_WM_STATE` with the
+///   fullscreen atom (ADD/REMOVE/TOGGLE). `_NET_ACTIVE_WINDOW`,
+///   `_NET_CLOSE_WINDOW`, `_NET_CURRENT_DESKTOP`, and `_NET_WM_DESKTOP`
+///   requests are ignored.
+/// - `_NET_ACTIVE_WINDOW` is written (root property tracks our focus) but
+///   never read or requested via client message.
+/// - `_NET_CLIENT_LIST`/`_NET_CLIENT_LIST_STACKING` are not maintained;
+///   pagers cannot enumerate clients.
+/// - `_NET_WM_STATE_HIDDEN`/`_NET_WM_STATE_DEMANDS_ATTENTION` are neither
+///   advertised nor answered; minimize is internal-only (no state property).
+/// - `_NET_WORKAREA` is absent; clients wanting dock-safe geometry must use
+///   `_NET_STRUT_PARTIAL` feedback instead.
 /// Publishes hana's EWMH conformance on the root window: per the spec a
 /// conformant WM creates a small identity ("check") window, tags it and the
 /// root with `_NET_SUPPORTING_WM_CHECK`, gives it a `_NET_WM_NAME`, and lists
@@ -310,7 +286,12 @@ fn pollPropertyReply(
     conn: core.Connection,
     cookie: xcb.xcb_get_property_cookie_t,
 ) ?*xcb.xcb_get_property_reply_t {
-    if (bench.pollReply(conn, cookie.sequence)) |rep|
-        return @ptrCast(@alignCast(rep));
+    switch (bench.pollReply(conn, cookie.sequence)) {
+        .ready => |rep| return @ptrCast(@alignCast(rep)),
+        // The poll consumed an X error; blocking on the cookie now would be
+        // undefined (ND-18).
+        .error_consumed => return null,
+        .pending => {},
+    }
     return xcb.xcb_get_property_reply(conn, cookie, null);
 }

@@ -12,7 +12,7 @@ info: [debug] [ENTER] win=0x3a0 mode=0 detail=2 root_x=640 root_y=400
 info: [debug] [KEY] keycode=24 state=0x40 mods=0x40 keysym=0x71
 info: [debug] [KEY] action=dump_state
 info: [debug] ========== STATE DUMP ==========
-info: [debug] Focused:        600001
+info: [debug] Focused:        800001
 info: [debug] Total windows:  3
 info: [debug] Suppress focus: window_spawn
 info: [debug] Drag active:    false
@@ -29,7 +29,7 @@ info: [debug] ================================
 info: [debug] [KEY] keycode=24 state=0x40 mods=0x40 keysym=0x71
 info: [debug] [KEY] action=dump_state
 info: [debug] ========== STATE DUMP ==========
-info: [debug] Focused:        600001
+info: [debug] Focused:        800001
 info: [debug] Total windows:  3
 info: [debug] Suppress focus: window_spawn
 info: [debug] Drag active:    false

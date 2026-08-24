@@ -258,6 +258,15 @@ inline fn focusedId() ?u32 {
     return focus.getFocused();
 }
 
+/// Shared trap for an action tag that reached a dispatcher class that does
+/// not handle it. Config validation rejects unknown mappings long before
+/// dispatch, so this documents an internal dispatch-table gap rather than
+/// bad user input; the tagged message makes the culprit class obvious in a
+/// crash log (consolidated from per-switch `unreachable`s).
+noinline fn unhandledAction(class: []const u8) noreturn {
+    std.debug.panic("{s} action dispatcher received an unhandled action", .{class});
+}
+
 /// Top-level action dispatcher. Routes each action tag to the appropriate
 /// domain helper. Errors are handled internally.
 fn executeAction(action: *const types.Action) void {
@@ -366,7 +375,7 @@ fn executeTilingAction(action: *const types.Action) void {
         .scroll_view_left => actions.scrollStep(&action_ctx, -1),
         .scroll_view_right => actions.scrollStep(&action_ctx, 1),
 
-        else => unreachable,
+        else => unhandledAction("tiling"),
     }
 }
 
@@ -380,7 +389,7 @@ fn executeWorkspaceAction(action: *const types.Action) void {
         .toggle_tag => |ws| if (focusedId()) |wid| actions.tagToggle(&action_ctx, wid, ws, true), // WP6
         .all_workspaces => actions.allViewToggle(&action_ctx), // WP6
         .move_to_all_workspaces, .toggle_tag_all => if (focusedId()) |wid| actions.pinToggle(&action_ctx, wid), // WP6
-        else => unreachable,
+        else => unhandledAction("workspace"),
     }
 }
 

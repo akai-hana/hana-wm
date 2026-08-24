@@ -84,13 +84,12 @@ const WindowInfo = struct {
 };
 
 /// Stable per-call rendering context: geometry, draw state, connection, and
-/// (on the `draw()` path) the bar slot's title cache.
+/// the bar slot's title cache.
 ///
-/// Constructed once per bar frame and shared between `draw()` and
-/// `drawCached()`. `cached_title`/`cached_title_window` stay null on the
-/// `drawCached()` path, which never updates the cache; only `draw()` passes
-/// them. Folding the cache fields in avoids a separate `TitleCache` struct
-/// every caller would otherwise have to construct and pass.
+/// Constructed once per bar frame and shared by every draw entry point
+/// (`draw()`, `hitTest()`). Folding the cache fields in avoids a separate
+/// `TitleCache` struct every caller would otherwise have to construct and
+/// pass.
 pub const TitleRenderContext = struct {
     dc: *drawing.DrawContext,
     config: types.BarConfig,
@@ -100,8 +99,7 @@ pub const TitleRenderContext = struct {
     conn: core.Connection,
 
     /// Backing buffer updated by `draw()` on each full render; the bar passes
-    /// its contents as `snapshot.focused_title` in subsequent `drawCached()`
-    /// calls. Null on the `drawCached()` path (read-only; no cache update).
+    /// its contents as `snapshot.focused_title` on subsequent frames.
     cached_title: ?*std.ArrayListUnmanaged(u8) = null,
     /// Window ID `cached_title` was fetched for; used to detect when
     /// `focused_title` belongs to a new window. Null alongside `cached_title`.
@@ -115,7 +113,7 @@ pub const TitleRenderContext = struct {
 /// issues X11 property fetches.
 ///
 /// `minimized_title` is used only in the single-window-minimized case; pass an
-/// empty slice when that case can't occur (e.g. the `drawCached` fast path).
+/// empty slice when that case can't occur.
 pub const TitleSnapshot = struct {
     focused_window: ?u32,
     focused_title: []const u8,
@@ -125,23 +123,22 @@ pub const TitleSnapshot = struct {
 
     /// Pre-fetched window titles, indexed parallel to `current_ws_wins`
     /// (`titles[i]` is the title of `current_ws_wins[i]`). Empty when no
-    /// pre-fetched data is available (e.g. the drawCached fast path before the
-    /// title cache has multi-window data).
+    /// pre-fetched data is available (e.g. before the title cache has
+    /// multi-window data).
     titles: []const []const u8 = &.{},
 
     /// Pre-fetched window geometry (see `batchFetchWindowInfosInto`), indexed like
     /// `titles`. Non-blocking fallback for windows the geometry cache doesn't
-    /// cover (e.g. floating), so the drawCached fast path never issues an
-    /// xcb_get_geometry round-trip. Empty means no pre-fetched data; fall back
-    /// to live.
+    /// cover (e.g. floating), so drawing never issues an xcb_get_geometry
+    /// round-trip for them. Empty means no pre-fetched data; fall back to live.
     geoms: []const utils.Rect = &.{},
 };
 
 /// Bounded cache of measured title text widths, indexed by window ID.
 ///
 /// `drawSegmentedTitles` used to re-measure every visible segment on every
-/// call, including the `drawCached()` fast path; but most segments' text
-/// doesn't change between frames, so that was wasted Pango/cairo work.
+/// call; but most segments' text doesn't change between frames, so that was
+/// wasted Pango/cairo work.
 /// Mirrors the text width recovery pattern, generalised to the N-window
 /// split view.
 ///
@@ -192,8 +189,7 @@ fn gatherAndSortWindowInfos(
     return window_infos;
 }
 
-/// Shared body for draw() and drawCached(). `ctx.cached_title` is non-null
-/// only on the draw() path, so this works unmodified for both callers.
+/// Shared body of all draw entry points.
 fn drawInner(
     ctx: TitleRenderContext,
     snapshot: TitleSnapshot,
@@ -208,7 +204,7 @@ fn drawInner(
     if (window_count == 1) {
         try drawSingleWindow(ctx, snapshot, allocator, title_invalidated);
     } else {
-        try drawSegmentedTitles(ctx, snapshot, allocator, title_invalidated);
+        try drawSegmentedTitles(ctx, snapshot, allocator);
     }
 
     return ctx.start_x + ctx.width;
@@ -216,10 +212,10 @@ fn drawInner(
 
 /// Draw the title segment.
 ///
-/// Updates `ctx.cached_title`/`ctx.cached_title_window` so `drawCached()` has
-/// a valid slice next tick; caller must set both non-null (see
-/// `TitleRenderContext`). `title_invalidated` must be true when the focused
-/// window's title changed since the last draw.
+/// Updates `ctx.cached_title`/`ctx.cached_title_window` so the next frame has
+/// a valid slice; caller must set both non-null (see `TitleRenderContext`).
+/// `title_invalidated` must be true when the focused window's title changed
+/// since the last draw.
 pub fn draw(
     ctx: TitleRenderContext,
     snapshot: TitleSnapshot,
@@ -227,26 +223,6 @@ pub fn draw(
     title_invalidated: bool,
 ) !u16 {
     return drawInner(ctx, snapshot, allocator, title_invalidated);
-}
-
-/// Draw the title segment using already-cached state.
-///
-/// Called from a fast-path redraw (focus-only) on the main thread,
-/// serialized by the main event loop. Unlike `draw()`, this function:
-///   - uses `snapshot.focused_title` as a read-only slice (the caller passes
-///     the bar slot's cached buffer contents).
-///   - never updates the title cache: `ctx.cached_title`/`cached_title_window`
-///     must be left null (`draw()` keeps the cache current).
-///   - always passes `title_invalidated = false`; it only re-renders existing
-///     state.
-///   - passes `minimized_title = ""` (the minimized title isn't cached by the
-///     bar slot; the full `draw()` path handles it).
-pub fn drawCached(
-    ctx: TitleRenderContext,
-    snapshot: TitleSnapshot,
-    allocator: std.mem.Allocator,
-) !u16 {
-    return drawInner(ctx, snapshot, allocator, false);
 }
 
 /// A window resolved from a click inside the title segment, along with
@@ -263,10 +239,9 @@ pub const ClickTarget = struct {
 /// Handles both single-window and split-view layouts: split-view replicates
 /// the exact sort order and pixel-perfect tiling `drawSegmentedTitles` uses,
 /// so the click resolves to whichever window's title is visually under the
-/// cursor. Built from the bar's cached title state like `drawCached`,
-/// this makes no blocking X11 round-trip when the cache is
-/// populated; a miss falls back to the same live calls `drawSegmentedTitles`
-/// would make.
+/// cursor. Built from the bar's cached title state like the draw path,
+/// this makes no blocking X11 round-trip when the cache is populated; a miss
+/// falls back to the same live calls `drawSegmentedTitles` would make.
 ///
 /// Returns null when the segment shows no window (empty workspace); callers
 /// distinguish "clicked an empty title segment" from "clicked a window's".
@@ -346,10 +321,16 @@ pub fn fetchWindowTitleInto(
 /// non-bench build this reduces to a single blocking reply call. Returns the
 /// geometry, or null when the reply can't be read.
 fn tryCollectGeometryReply(conn: core.Connection, cookie: xcb.xcb_get_geometry_cookie_t) ?utils.Rect {
-    if (bench.pollReply(conn, cookie.sequence)) |rep| {
-        const r: *xcb.xcb_get_geometry_reply_t = @ptrCast(@alignCast(rep));
-        defer std.c.free(r);
-        return geometryFromReply(r);
+    switch (bench.pollReply(conn, cookie.sequence)) {
+        .ready => |rep| {
+            const r: *xcb.xcb_get_geometry_reply_t = @ptrCast(@alignCast(rep));
+            defer std.c.free(r);
+            return geometryFromReply(r);
+        },
+        // The poll consumed an X error; blocking on the cookie now would be
+        // undefined (ND-18).
+        .error_consumed => return null,
+        .pending => {},
     }
     const r = xcb.xcb_get_geometry_reply(conn, cookie, null) orelse return null;
     defer std.c.free(r);
@@ -538,10 +519,16 @@ fn collectPropertyReply(
     cookie: xcb.xcb_get_property_cookie_t,
     allocator: std.mem.Allocator,
 ) ?[]const u8 {
-    if (bench.pollReply(conn, cookie.sequence)) |rep| {
-        const r: *xcb.xcb_get_property_reply_t = @ptrCast(@alignCast(rep));
-        defer std.c.free(r);
-        return extractPropertyString(r, allocator) catch null;
+    switch (bench.pollReply(conn, cookie.sequence)) {
+        .ready => |rep| {
+            const r: *xcb.xcb_get_property_reply_t = @ptrCast(@alignCast(rep));
+            defer std.c.free(r);
+            return extractPropertyString(r, allocator) catch null;
+        },
+        // The poll consumed an X error; blocking on the cookie now would be
+        // undefined (ND-18).
+        .error_consumed => return null,
+        .pending => {},
     }
     const r = xcb.xcb_get_property_reply(conn, cookie, null) orelse return null;
     defer std.c.free(r);
@@ -557,11 +544,10 @@ inline fn emptyWorkspace(ctx: TitleRenderContext, count: usize) ?u16 {
     return ctx.start_x + ctx.width;
 }
 
-/// Shared rendering logic for both `draw()` and `drawCached()`.
+/// Shared rendering logic for the single-window case.
 ///
-/// `ctx.cached_title` is non-null only on the `draw()` path (updated as a
-/// side-effect); null on `drawCached()` (read-only). `title_invalidated` is
-/// always false on the `drawCached()` path.
+/// `ctx.cached_title` is non-null on the bar's normal draw path (updated as a
+/// side-effect); null callers are read-only.
 fn drawSingleWindow(
     ctx: TitleRenderContext,
     snapshot: TitleSnapshot,
@@ -596,8 +582,8 @@ fn drawSingleWindow(
 
     if (snapshot.focused_title.len == 0) return;
 
-    // Update the bar slot's title cache for the next drawCached() tick.
-    // Only the draw() path passes non-null cache fields.
+    // Update the bar slot's title cache for the next frame.
+    // Only callers with cache fields set participate.
     if (ctx.cached_title) |buf| {
         const window_slot = ctx.cached_title_window.?;
         if (title_invalidated or window_slot.* != snapshot.focused_window) {
@@ -698,13 +684,9 @@ fn drawSegmentTitle(
     text_w: u16,
     window: u32,
     title: []const u8,
-    accent: u32,
     text_fg: u32,
     is_focused: bool,
-    title_invalidated: bool,
 ) !void {
-    _ = accent;
-    _ = title_invalidated;
     if (text_w <= geom.avail_w)
         try ctx.dc.drawText(geom.text_x, baseline_y, title, text_fg)
     else if (is_focused)
@@ -719,7 +701,6 @@ fn drawSegmentedTitles(
     ctx: TitleRenderContext,
     snapshot: TitleSnapshot,
     allocator: std.mem.Allocator,
-    title_invalidated: bool,
 ) !void {
     const windows = snapshot.current_ws_wins;
     if (windows.len > max_visible_windows)
@@ -745,6 +726,8 @@ fn drawSegmentedTitles(
 
     const window_count: u32 = @intCast(window_infos.len);
     const baseline_y = ctx.dc.baselineY(ctx.height);
+    // Loop-invariant: same config/height every iteration.
+    const min_cell_w = ctx.config.scaledSegmentPadding(ctx.height) *| 2;
 
     for (window_infos, 0..) |info, i| {
         const bounds = segmentBounds(ctx.width, i, window_count);
@@ -755,7 +738,7 @@ fn drawSegmentedTitles(
         const accent = accentFor(ctx.config, is_focused_win, info.minimized);
         ctx.dc.fillRect(segment_x, 0, bounds.w, ctx.height, accent);
 
-        if (info.title.len == 0 or bounds.w <= ctx.config.scaledSegmentPadding(ctx.height) *| 2) continue;
+        if (info.title.len == 0 or bounds.w <= min_cell_w) continue;
 
         const text_fg = if (is_focused_win) ctx.config.selected_fg else ctx.config.fg;
         try drawSegmentTitle(
@@ -765,10 +748,8 @@ fn drawSegmentedTitles(
             ctx.dc.cachedTextWidth(info.title),
             info.window,
             info.title,
-            accent,
             text_fg,
             is_focused_win,
-            title_invalidated,
         );
     }
 }

@@ -119,7 +119,7 @@ pub fn draw(
 
         const label = getLabel(i, config);
         const label_w = label_widths[i];
-        const text_x = x + (ws_width - label_w) / 2;
+        const text_x = x + (ws_width -| label_w) / 2;
         try dc.drawText(text_x, baseline_y, label, fg);
 
         if (has_windows) {

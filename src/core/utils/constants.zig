@@ -55,11 +55,6 @@ pub const xkb_retry_delay_ms: u64 = 20;
 // the INT16 floor.
 pub const offscreen_x_position: i32 = -30000;
 
-/// Lower bound for detecting whether a window is parked offscreen.
-/// A fixed upper bound is intentionally absent: multi-monitor desktops can
-/// exceed 10 000 px, so only the sentinel minimum is safe to check against.
-pub const offscreen_sentinel_min: i32 = -1000;
-
 /// Maximum depth when walking the X11 window tree in findManagedWindow.
 pub const max_window_tree_depth: usize = 10;
 

@@ -1,0 +1,11 @@
+
+xwininfo: Window id: 0x3a0 (the root window) (has no name)
+
+  Root window id: 0x3a0 (the root window) (has no name)
+  Parent window id: 0x0 (none)
+     4 children:
+     0x200003 (has no name): ()  1280x20+0+780  +0+780
+     0x600001 "B": ("XClient" "XClient")  1280x800+0+0  +0+0
+     0x200002 "hana": ()  1x1+-1+-1  +-1+-1
+     0x400001 "A": ("XClient" "XClient")  300x200+-30000+286  +-30000+286
+

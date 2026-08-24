@@ -107,9 +107,6 @@ inline fn emitParked(out: *List, win: model.WindowId) void {
     _ = out.append(.{ .win = win, .rect = parked_rect, .visible = false });
 }
 
-// Re-exported for algo modules so they share exactly one emit path.
-pub const emitPlacement = emit;
-
 pub fn compute(kind: model.LayoutKind, v: View, out: *List) void {
     out.clear();
     switch (kind) {

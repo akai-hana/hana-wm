@@ -41,8 +41,11 @@ pub fn applyHints(rect: utils.Rect, h: model.SizeHints) utils.Rect {
     }
 
     // Centre the (possibly shrunk) window inside its allocated slot.
-    const dx: i16 = @intCast((rect.width - w) / 2);
-    const dy: i16 = @intCast((rect.height - ht) / 2);
+    // Saturating: every clamp above only shrinks, but a future path that
+    // lets w exceed the slot must degrade to dx=0, not panic in release-safe
+    // (identical for all current flows).
+    const dx: i16 = @intCast((rect.width -| w) / 2);
+    const dy: i16 = @intCast((rect.height -| ht) / 2);
     return .{ .x = rect.x + dx, .y = rect.y + dy, .width = w, .height = ht };
 }
 

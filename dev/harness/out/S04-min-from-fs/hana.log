@@ -21,7 +21,7 @@ info: [debug] Focused:        600001
 info: [debug] Total windows:  2
 info: [debug] Suppress focus: none
 info: [debug] Drag active:    false
-info: [debug] Fullscreen: none
+info: [debug] Fullscreen on workspace 0: 600001
 info: [debug] Current workspace: 1
 info: [debug]   WS1: 2 windows
 info: [debug]   WS2: 0 windows
@@ -47,7 +47,7 @@ info: [debug] Focused:        600001
 info: [debug] Total windows:  2
 info: [debug] Suppress focus: none
 info: [debug] Drag active:    false
-info: [debug] Fullscreen: none
+info: [debug] Fullscreen on workspace 0: 600001
 info: [debug] Current workspace: 1
 info: [debug]   WS1: 2 windows
 info: [debug]   WS2: 0 windows
@@ -64,7 +64,7 @@ info: [debug] Focused:        600001
 info: [debug] Total windows:  2
 info: [debug] Suppress focus: none
 info: [debug] Drag active:    false
-info: [debug] Fullscreen: none
+info: [debug] Fullscreen on workspace 0: 600001
 info: [debug] Current workspace: 1
 info: [debug]   WS1: 2 windows
 info: [debug]   WS2: 0 windows

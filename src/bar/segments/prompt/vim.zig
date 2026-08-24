@@ -226,7 +226,7 @@ fn execNormalKey(vs: *VimState, sym: xcb.xcb_keysym_t, cnt: u32) Action {
         },
 
         'x', 'X', 'D', 'C', 's' => {
-            _ = execDirectSym(vs, @truncate(sym), cnt);
+            execDirectSym(vs, @truncate(sym), cnt);
         },
 
         'p', 'P' => if (vs.yank_len > 0) {
@@ -266,10 +266,6 @@ fn execNormalKey(vs: *VimState, sym: xcb.xcb_keysym_t, cnt: u32) Action {
 }
 
 pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
-    switch (vs.pending.awaiting) {
-        .none, .find_char, .g_prefix => {},
-    }
-
     if (resolveMotionKey(vs, sym)) |res| {
         if (res.mr) |mr| {
             if (res.op == 0) {
@@ -500,7 +496,7 @@ fn applyOperator(vs: *VimState, op: u8, mr: MotionResult) void {
     }
 }
 
-fn execDirectSym(vs: *VimState, sym: u8, cnt: u32) u8 {
+fn execDirectSym(vs: *VimState, sym: u8, cnt: u32) void {
     const op: u8 = if (sym == 'x' or sym == 'X' or sym == 'D') 'd' else 'c';
     const pos: usize = switch (sym) {
         'X' => vs.cursor -| @as(usize, cnt),
@@ -508,7 +504,6 @@ fn execDirectSym(vs: *VimState, sym: u8, cnt: u32) u8 {
         else => @min(vs.cursor + @as(usize, cnt), vs.len),
     };
     applyOperator(vs, op, .{ .pos = pos });
-    return op;
 }
 
 /// Treat a count of 0 as 1 (vim convention: no count = repeat once).
@@ -517,7 +512,10 @@ inline fn resolveCount(n: u32) u32 {
 }
 
 fn effectiveCount(vs: *VimState) u32 {
-    return resolveCount(vs.pending.count) * resolveCount(vs.pending.op_count);
+    // Saturating multiply: chained count prefixes can push the product past
+    // u32 max (1e6 x 1e6); consumers clamp against buffer bounds anyway, so
+    // saturate instead of overflowing.
+    return resolveCount(vs.pending.count) *| resolveCount(vs.pending.op_count);
 }
 
 inline fn isWordChar(ch: u8) bool {

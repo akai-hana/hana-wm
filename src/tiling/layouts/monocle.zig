@@ -9,6 +9,10 @@ const View = engine.View;
 const List = engine.List;
 
 pub fn compute(v: View, out: *List) void {
+    // Empty workspace: the top-window pick indexes order[len - 1], which
+    // would underflow. Emit nothing instead (ND-2).
+    if (v.order.len == 0) return;
+
     const m = v.env.margins;
     // Variant resolved by the caller (legacy: layout_variants.monocle == .gaps).
     const inset: u16 = if (v.env.monocle_gaps) m.gap else 0;

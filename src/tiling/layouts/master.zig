@@ -36,8 +36,11 @@ pub const StackBoost = struct {
 
 /// Tile `windows` into the master-stack layout using the given work area.
 pub fn compute(v: View, out: *List) void {
-    // Windows list is guaranteed non-empty by the compute dispatcher's caller
-    // (sync guards the empty workspace before running a layout).
+    // Empty workspace emits nothing; callers may run layouts on an empty
+    // order (e.g. sync's per-reconcile compute), so this is a supported
+    // input, not a precondition violation.
+    if (v.order.len == 0) return;
+
     const windows = v.order;
     const n = windows.len;
     const min_dim = v.env.min_dim;

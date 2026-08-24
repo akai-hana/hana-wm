@@ -17,8 +17,8 @@ const build_options = @import("build_options");
 const bar = if (build_options.has_bar) @import("bar") else null;
 const input = @import("input");
 const window = @import("window");
+const actions = @import("actions");
 const pipeline = @import("pipeline");
-const plugins = @import("plugins");
 
 pub fn main() !void {
     const x = try connectToX();
@@ -52,8 +52,13 @@ pub fn main() !void {
     // Config.deinit tears the keybind_resolver down internally, before
     // freeing the keybindings whose Actions it points into; so a single
     // defer on the config pointer suffices (see KeybindResolver in types.zig).
+    //
+    // The guard matters: a config reload swaps cs.config and the reload path
+    // (events.handleConfigReload) deinits the displaced boot config itself.
+    // Without the identity check this defer would free it a second time at
+    // shutdown — the GP fault seen in reload-then-quit runs.
     const initial_config = core.getState().config;
-    defer initial_config.deinit(alloc);
+    defer if (core.getState().config == initial_config) initial_config.deinit(alloc);
 
     utils.advertiseEwmhSupport(x.conn, x.screen, x.root);
 
@@ -65,6 +70,12 @@ pub fn main() !void {
     defer window.deinit();
 
     pipeline.init(alloc); // PIPELINE: dual-path dispatch (E.7); flag OFF ⇒ legacy only
+
+    // ND-1: boot-time config seeding. Without this the config's layout kind,
+    // variants, master count, and per-workspace overrides stay inert until
+    // the first explicit reload. No reconcile here: nothing is managed yet,
+    // so there is no X state to push.
+    actions.seedParamsFromConfig();
 
     // D8: direct subsystem init (the plugin registry was deleted — only bar
     // ever registered hooks).

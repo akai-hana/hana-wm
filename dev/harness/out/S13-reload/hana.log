@@ -56,19 +56,3 @@ info: [debug] Tiling layout:  master
 info: [debug] Tiled windows:  2
 info: [debug] ================================
 info: [debug] Shutting down gracefully...
-General protection exception (no address available)
-/home/akai/eudaimonia/hana/src/config/types.zig:56:9: 0x13dd496 in deinit (types.zig)
-        switch (self.*) {
-        ^
-/home/akai/eudaimonia/hana/src/config/types.zig:608:60: 0x13eae8d in deinit (types.zig)
-        for (self.keybindings.items) |*kb| kb.action.deinit(a);
-                                                           ^
-/home/akai/eudaimonia/hana/src/main.zig:54:32: 0x124d80d in main (main.zig)
-    defer initial_config.deinit(alloc);
-                               ^
-/home/akai/.zvm/0.16.0/lib/std/start.zig:698:59: 0x124e045 in callMain (std.zig)
-    if (fn_info.params.len == 0) return wrapMain(root.main());
-                                                          ^
-???:?:?: 0x7f4419e4bfac in ??? (/lib/ld-musl-x86_64.so.1)
-Unwind error at address `/lib/ld-musl-x86_64.so.1:0x7f4419e4bfac` (unwind info unavailable), remaining frames may be incorrect
-???:?:?: 0x1439795 in ??? (/home/akai/eudaimonia/hana/zig-out/bin/hana)

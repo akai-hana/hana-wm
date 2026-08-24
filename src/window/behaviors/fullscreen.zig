@@ -126,9 +126,11 @@ pub fn armPendingBarShow(win: u32) void {
 }
 
 /// Called when a window is destroyed; clears its pending deferred bar op so
-/// the bar doesn't stay hidden. The hide case is already cleaned by
-/// exitFullscreenCommit; this exists for the show case, where the window can
-/// be destroyed after exitFullscreen returns but before ConfigureNotify.
+/// the bar doesn't stay stuck. Both cases need it (ND-21): show (window dies
+/// between exit and its ConfigureNotify) AND hide (window dies between
+/// armPendingBarHide and its ConfigureNotify — nothing else would ever
+/// resolve the hide, leaving the bar hidden for good).
 pub fn onWindowGone(win: u32) void {
     if (g_pending_bar_show_win == win) resolvePendingBarShow();
+    if (g_pending_bar_hide_win == win) g_pending_bar_hide_win = 0;
 }

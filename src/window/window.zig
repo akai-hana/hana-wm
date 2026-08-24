@@ -63,8 +63,6 @@ const State = struct {
 
     spawn_queue: std.ArrayListUnmanaged(SpawnEntry) = .empty,
 
-    spawn_cursor: struct { x: i16 = 0, y: i16 = 0 } = .{},
-
     // Workspace-rule fast-lookup map: WM_CLASS name -> target workspace,
     // rebuilt from config.workspaces.rules at init and on every reload.
     // Keys borrow slices from the config, valid until the next rebuild.
@@ -90,41 +88,9 @@ pub inline fn getState() *State {
     @panic("window: getState() called before init()");
 }
 
-pub inline fn getStateOpt() ?*State {
-    return if (state) |*s| s else null;
-}
-
 // Geometry cache: last-known window geometry for workspace-switch and
 // minimize/restore. Owned by wincache.zig, the single source of truth for both
 // tiled and floating windows.
-
-/// Screen-space position of a window's top-left corner.
-/// X11 coordinates are signed (windows may be partially off-screen or on a
-/// monitor to the left/above the primary), so both fields use i16 to match
-/// the XCB wire type for X/Y configure values.
-const Pos = struct { x: i16, y: i16 };
-
-/// Moves, resizes, and sets border_width atomically,
-/// preventing a one-frame flash on fullscreen enter/exit or workspace switch.
-pub fn configureWindowGeom(conn: core.Connection, win: u32, geom: utils.Rect) void {
-    // Raw BORDER_WIDTH send bypassing borders.applyWidth; keep the dedup
-    // cache truthful about what the server now holds.
-    _ = wincache.cacheBorderWidth(win, geom.border_width);
-    _ = xcb.xcb_configure_window(
-        conn,
-        win,
-        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
-            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
-            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
-        &[_]u32{
-            utils.toXcbCoord(geom.x),
-            utils.toXcbCoord(geom.y),
-            geom.width,
-            geom.height,
-            geom.border_width,
-        },
-    );
-}
 
 pub fn markBordersFlushed() void {
     state.?.borders_flushed_this_batch = true;
@@ -618,11 +584,10 @@ pub fn deinit() void {
     state.?.cache_ready = false;
     focus.deinit();
     tracking.deinit();
-    // Reset every remaining field (spawn_cursor, child_cache,
-    // borders_flushed_this_batch, and the now-freed spawn_queue/rules_map/
-    // alloc) to its zero value in one place, so nothing is left stale for
-    // the next init() the way spawn_cursor and borders_flushed_this_batch
-    // previously were.
+    // Reset every remaining field (child_cache, borders_flushed_this_batch,
+    // and the now-freed spawn_queue/rules_map/alloc) to its zero value in one
+    // place, so nothing is left stale for the next init() the way
+    // borders_flushed_this_batch previously was.
     state = .{};
 }
 
@@ -1015,20 +980,38 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
             .border_width = if (mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0) event.border_width else null,
         };
         switch (@import("model").honorConfigureRequest(pipeline.model(), win, req)) {
-            .geometry_applied, .border_only => {},
+            .geometry_applied => {
+                // Floating: the model stored exactly these values, so the
+                // wire send mirrors the request verbatim. BW rides along and
+                // is cached so dedup compares against server truth.
+                if (build_options.has_tiling and mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0)
+                    _ = wincache.cacheBorderWidth(win, event.border_width);
+                if (mask == xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH) return;
+                sendRequestedConfigure(win, event, mask);
+            },
+            .border_only => {
+                // Tiled: geometry DENIED, BW honored. Cache + forward the
+                // border width ONLY — the old fall-through forwarded the
+                // whole mixed mask, moving denied-geometry windows until the
+                // next reconcile repaired them (ND-14 / S4F7b, pinned by S19).
+                if (build_options.has_tiling)
+                    _ = wincache.cacheBorderWidth(win, event.border_width);
+                if (mask != xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH)
+                    _ = xcb.xcb_configure_window(core.getState().conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{event.border_width});
+            },
             .ignored => {
                 sendSyntheticConfigureNotify(win);
-                return;
             },
         }
-        // A border-width component rides along with any honored request;
-        // record it so borders.applyWidth's dedup compares against what the
-        // server now has.
-        if (build_options.has_tiling and mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0)
-            _ = wincache.cacheBorderWidth(win, event.border_width);
-        if (mask == xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH) return;
+        return;
     }
 
+    sendRequestedConfigure(win, event, mask);
+}
+
+/// Builds the value list from `event` in XCB_CONFIG_WINDOW_* bit order and
+/// issues the ConfigureWindow request.
+fn sendRequestedConfigure(win: u32, event: *const xcb.xcb_configure_request_event_t, mask: u16) void {
     var values: [5]u32 = undefined;
     var n: usize = 0;
     if (mask & xcb.XCB_CONFIG_WINDOW_X != 0) {
@@ -1061,7 +1044,10 @@ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
     // only when the cursor had moved would instead suppress all future
     // hover-focus events if the cursor stayed at the exact spawn pixel.
     focus.setSuppressReason(.none);
-    return root_x == state.?.spawn_cursor.x and root_y == state.?.spawn_cursor.y;
+    // Legacy compared against a spawn_cursor record that was never written
+    // (always {0,0}); the observable predicate is therefore "cursor parked at
+    // the exact screen origin", kept as-is.
+    return root_x == 0 and root_y == 0;
 }
 
 /// Attempt to focus `win` via the hover (EnterNotify) path.
@@ -1265,17 +1251,14 @@ fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
     for (tracking.allWindows()) |entry| {
         const win = entry.win;
         if (entry.mask & cur_bit == 0) continue;
-        const color = borders.color(win);
         if (comptime skip_tiled) {
             if (build_options.has_tiling and tilingActive() and tracking.isTiledMode(win)) continue;
-            // Same CacheMap dedup as the tiled sweep: floating windows with a
-            // cache entry skip the XCB call when their color is unchanged;
-            // uncached ones get an entry created and colored in one step.
-            if (wincache.sendBorderColorIfChanged(win, color)) continue;
-        } else {
-            // Dedup via the tiling CacheMap: skip the XCB call when unchanged.
-            if (wincache.sendBorderColorIfChanged(win, color)) continue;
         }
+        const color = borders.color(win);
+        // Same CacheMap dedup in both sweep variants: windows with a cache
+        // entry skip the XCB call when their color is unchanged; uncached
+        // ones get an entry created and colored in one step.
+        if (wincache.sendBorderColorIfChanged(win, color)) continue;
         utils.setBorderPixel(conn, win, color);
     }
 }
@@ -1306,8 +1289,25 @@ pub fn updateWorkspaceBordersIfNeeded() void {
 
 // ClientMessage: EWMH fullscreen requests from applications
 
+/// Warn-once latches for SW-10 client-message diagnostics (see
+/// handleClientMessage): pager loops would otherwise flood the log.
+var warned_active_unimplemented = false;
+var warned_state_unmanaged = false;
+
 pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     if (event.format != 32) return;
+
+    // SW-10 diagnostics (S6F9/S6F10 family): pager-driven requests that we
+    // cannot honor are dropped silently otherwise. Both warns fire once per
+    // process — a looping pager must not flood the log.
+    const net_active = utils.getAtomOrZero("_NET_ACTIVE_WINDOW");
+    if (net_active != 0 and event.type == net_active) {
+        if (!warned_active_unimplemented) {
+            warned_active_unimplemented = true;
+            debug.warn("Ignoring _NET_ACTIVE_WINDOW request for 0x{x}: EWMH activation is not implemented", .{event.window});
+        }
+        return;
+    }
 
     const net_wm_state = utils.getAtomOrZero("_NET_WM_STATE");
     if (net_wm_state == 0 or event.type != net_wm_state) return;
@@ -1319,7 +1319,13 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     if (prop1 != fs_atom and prop2 != fs_atom) return;
 
     const win = event.window;
-    if (!isValidManagedWindow(win)) return;
+    if (!isValidManagedWindow(win)) {
+        if (!warned_state_unmanaged) {
+            warned_state_unmanaged = true;
+            debug.warn("Ignoring _NET_WM_STATE request for unmanaged window 0x{x}", .{win});
+        }
+        return;
+    }
 
     const action = event.data.data32[0];
     const is_fs = actions.isFullscreenMode(win);

@@ -4,9 +4,9 @@
 //! libxcb symbols may appear only inside its send shims (WP3 acceptance gate).
 //!
 //! Shims wrap EXISTING xcb patterns — do not invent new ones:
-//!   Sink.geom        ≙ window.zig configureWindowGeom / layouts.configureWithHintsImpl
+//!   Sink.geom        ≙ utils.configureWindow (+ merged stack-mode variant)
 //!   Sink.border_*    ≙ borders.applyWidth + borders.apply + setBorderPixel
-//!   Sink.park        ≙ pushWindowOffscreenAndLower (X-offscreen + BELOW in ONE request)
+//!   Sink.park        ≙ X-offscreen + BELOW configure_window in ONE request
 //!   Sink.stack_only  ≙ utils.raiseWindow / restack helpers used today
 //!   Sink.flush       ≙ conn.flush()  (caller owns timing, I2)
 //!
@@ -127,11 +127,11 @@ pub const Ctx = struct {
 
 pub const ReconcileOpts = struct { force_restack: bool = false };
 
-/// Sentinel meaning "no visible geometry ever sent to this window".
-const never_sent: utils.Rect = engine.parked_rect;
-
 /// What we last sent per window — the skip cache AND the trigger source
 /// (see header):
+///   - has_rect: whether a visible geometry was EVER sent (an explicit flag,
+///     not a sentinel rect: a legitimately placed zero-size window at the
+///     origin would collide with a "never sent" marker value);
 ///   - rect: the last VISIBLE geometry sent (survives parks — an all-view
 ///     orphan with history resurfaces at its old slot, per legacy);
 ///   - parked: whether the latest pass parked it (an unparking winner
@@ -139,6 +139,7 @@ const never_sent: utils.Rect = engine.parked_rect;
 ///   - bw/pixel: the last appearance sent (skips redundant border traffic).
 const SentEntry = struct {
     rect: utils.Rect = engine.parked_rect,
+    has_rect: bool = false,
     parked: bool = false,
     bw: u16 = 0,
     pixel: u32 = 0,
@@ -154,12 +155,9 @@ pub const State = struct {
     gpa: std.mem.Allocator = undefined,
     /// Reconciles since the last unconditional sweep.
     since_full_sweep: u64 = 0,
-    bench_cfg: usize = 0,
-    bench_border: usize = 0,
-    bench_park: usize = 0,
 };
 
-/// Owned by the compositor process; reset() on reconnect.
+/// Owned by the compositor process; re-init() on reconnect.
 pub var st: State = .{};
 
 pub fn init(gpa: std.mem.Allocator) void {
@@ -171,14 +169,6 @@ pub fn deinit() void {
     st = .{};
 }
 
-/// Reset on reconnect WITHOUT releasing the map's backing memory. Correct by
-/// construction: a cleared ledger makes every window look unsent, so the next
-/// reconcile remaps and reconfigures everything — exactly what an unknown
-/// server state needs.
-pub fn reset() void {
-    st.sent.clearRetainingCapacity();
-}
-
 /// Drop a window's ledger record (X ids recycle: after a destroy, a new
 /// client can appear with the same id, and a stale record would feed the
 /// orphan keep-last branch geometry belonging to the previous incarnation).
@@ -188,13 +178,9 @@ pub fn forget(win: model.WindowId) void {
 }
 
 /// Coalesced end-of-dispatch reconcile flag (§7.6 scheduling table:
-/// focus-change class). Consumed by pipeline.postDispatch in WP5.
+/// focus-change class). Set by pipeline.postDispatch callers; consumed by
+/// pipeline.postDispatch in WP5.
 pub var scheduled: bool = false;
-
-pub fn schedule(_ctx: *Ctx) void {
-    _ = _ctx;
-    scheduled = true;
-}
 
 /// Consume-and-clear for pipeline.postDispatch (fix P1-4).
 pub fn takeScheduled() bool {
@@ -259,7 +245,9 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
             .focused = m.focused,
             .env = ctx.env,
         };
-        engine.compute(params.kind, view, &placements);
+        // n == 0 leaves placements empty (no layout owns a window); layouts
+        // are also individually n==0-safe, this just skips the work.
+        if (n > 0) engine.compute(params.kind, view, &placements);
     }
 
     // STEP 4: desired map over ALL store entries (store seq order).
@@ -312,7 +300,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
                         // Park only when nothing was ever sent (first sight /
                         // registered offscreen).
                         const prev = st.sent.get(win) orelse SentEntry{};
-                        if (prev.rect.eql(never_sent)) {
+                        if (!prev.has_rect) {
                             desired_buf[i] = .{ .rect = engine.parked_rect, .bw = 0, .pixel = 0, .parked = true };
                         } else {
                             desired_buf[i] = .{ .rect = prev.rect, .bw = ctx.cfg_bw, .pixel = ctx.color_of(win, m), .parked = false };
@@ -382,18 +370,14 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
             // all-view orphan resurfaces at its old slot.
             if (full_sweep or !last.parked) {
                 ctx.sink.park(win);
-                if (build_options.bench) {
-                    st.bench_cfg += 1;
-                    st.bench_park += 1;
-                }
             }
             gop.value_ptr.parked = true;
             continue;
         }
 
         const unpark_transition = last.parked;
-        const first_send = last.rect.eql(never_sent);
-        const moved = !last.rect.eql(want.rect); // first send: sentinel differs
+        const first_send = !last.has_rect;
+        const moved = first_send or !last.rect.eql(want.rect);
         const pixel_changed = last.pixel != want.pixel;
         const bw_changed = last.bw != want.bw;
         const raise_winner = is_winner and (moved or unpark_transition or opts.force_restack);
@@ -405,11 +389,9 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         if (need_map) ctx.sink.map(win);
         if (need_map or pixel_changed) {
             ctx.sink.borderPixel(win, want.pixel);
-            if (build_options.bench) st.bench_border += 1;
         }
         if (need_map or bw_changed) {
             ctx.sink.borderWidth(win, want.bw);
-            if (build_options.bench) st.bench_border += 1;
         }
 
         // Geometry goes out when something moved, when an unpark must bring
@@ -417,11 +399,10 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         // needs its raise merged, or under a full sweep.
         if (full_sweep or moved or unpark_transition or raise_winner) {
             ctx.sink.geom(win, want.rect, if (raise_winner) .above else null);
-            if (build_options.bench) st.bench_cfg += 1;
         }
 
         // Ledger write: record what we sent.
-        gop.value_ptr.* = .{ .rect = want.rect, .parked = false, .bw = want.bw, .pixel = want.pixel };
+        gop.value_ptr.* = .{ .rect = want.rect, .has_rect = true, .parked = false, .bw = want.bw, .pixel = want.pixel };
     }
 
     // STEP 5 (I4 hook): force_restack additionally raises bar/top.
@@ -438,7 +419,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
 pub fn lastRectFor(win: model.WindowId) ?utils.Rect {
     const e = st.sent.get(win) orelse return null;
     if (e.parked) return null;
-    if (e.rect.eql(never_sent)) return null;
+    if (!e.has_rect) return null;
     return e.rect;
 }
 

@@ -135,11 +135,6 @@ fn removeValue(list: anytype, win: WindowId) void {
     if (list.indexOfScalar(win)) |i| list.orderedRemove(i);
 }
 
-/// Public remove-by-value for facades (tracking focus-MRU purge paths).
-pub fn removeValuePub(list: *Order, win: WindowId) void {
-    removeValue(list, win);
-}
-
 /// The workspace whose tiled_order holds win (single-membership invariant).
 pub fn findHome(m: *const Model, win: WindowId) ?WSId {
     for (&m.ws, 0..) |*s, i| {
@@ -432,8 +427,10 @@ pub fn cycleLayout(m: *Model, dir: i32) void {
     const p = &m.ws[m.current].params;
     const n: i32 = @typeInfo(LayoutKind).@"enum".fields.len;
     const cur: i32 = @intCast(@intFromEnum(p.kind));
-    var next = @mod(cur + dir, n);
-    if (next < 0) next += n;
+    // @mod's result carries the divisor's sign; with n > 0 it is already in
+    // [0, n), so no negative correction is needed (the old `if (next < 0)`
+    // was unreachable).
+    const next = @mod(cur + dir, n);
     p.kind = @enumFromInt(@as(u3, @intCast(next)));
     p.variant_idx = 0;
 }

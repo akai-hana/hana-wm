@@ -81,9 +81,9 @@ pub const FontState = struct {
 // D4: shared text-measurement cache + prefix-fitting primitives.
 //
 // One memoization story for every segment (title/tags/clock/prompt), replacing
-// four ad-hoc schemes. INVARIANT (inherited from title's TitleWidthCache
-// contract): an eviction or miss degrades to a re-measure, NEVER to a wrong
-// width; and any font load invalidates the whole cache wholesale.
+// four ad-hoc schemes. INVARIANT (the shared-cache contract): an eviction or
+// miss degrades to a re-measure, NEVER to a wrong width; and any font load
+// invalidates the whole cache wholesale.
 //
 // Keying: (pointer, len) + a 64-bit content hash. A false hit would require
 // allocator reuse at the same address with the same length AND a 2^-64 hash
@@ -116,13 +116,15 @@ pub fn invalidateMeasureCache() void {
 
 inline fn measureCacheLookup(dc: *DrawContext, text: []const u8) u16 {
     if (text.len == 0) return 0;
-    const idx: usize = @intCast((@intFromPtr(text.ptr) >> 4) % measure_cache_slots);
+    const ptr_val = @intFromPtr(text.ptr);
+    const idx: usize = @intCast((ptr_val >> 4) % measure_cache_slots);
     const slot = &measure_cache[idx];
-    if (slot.ptr == @intFromPtr(text.ptr) and slot.len == text.len and slot.hash == contentHash(text)) {
+    const hash = contentHash(text); // computed once for both hit and miss
+    if (slot.ptr == ptr_val and slot.len == text.len and slot.hash == hash) {
         return slot.width;
     }
     const w = dc.measureTextWidth(text);
-    slot.* = .{ .ptr = @intFromPtr(text.ptr), .len = text.len, .hash = contentHash(text), .width = w };
+    slot.* = .{ .ptr = ptr_val, .len = text.len, .hash = hash, .width = w };
     return w;
 }
 
@@ -235,8 +237,6 @@ pub const DrawContext = struct {
     /// drawTextSized can skip the set/restore pair when reusing the same sized font.
     layout_font: ?*c.PangoFontDescription = null,
 
-    /// Stored for legacy callers; no longer used by any drawing path.
-    visual_type: ?*core.xcb.xcb_visualtype_t = null,
     /// Actual pixel depth of the offscreen pixmap: 32 for ARGB, screen root_depth otherwise.
     depth: u8 = 24,
 
@@ -257,12 +257,12 @@ pub const DrawContext = struct {
         const setup = core.xcb.xcb_get_setup(conn);
         const screen = core.xcb.xcb_setup_roots_iterator(setup).data;
 
-        const visual_type = try resolveVisualType(conn, screen, visual_id);
-
         // CreatePixmap requires a concrete depth: XCB_COPY_FROM_PARENT (0) is
         // only valid for CreateWindow and fails here with BadValue, which
         // silently killed opaque-bar init (default transparency = 1.0).
         const depth: u8 = if (is_argb) 32 else screen.*.root_depth;
+
+        const visual_type = try resolveVisualType(conn, screen, visual_id, depth);
 
         const pixmap = createXcbPixmap(conn, depth, window, width, height);
         errdefer _ = core.xcb.xcb_free_pixmap(conn, pixmap);
@@ -298,14 +298,17 @@ pub const DrawContext = struct {
                 @intFromFloat(@round(std.math.clamp(transparency, 0.0, 1.0) * 255.0))
             else
                 0xFF,
-            .visual_type = visual_type,
             .depth = if (is_argb) 32 else screen.*.root_depth,
         };
 
         // Fire both GC-create requests before blocking on either reply so both
-        // land in the same TCP segment.
+        // land in the same TCP segment. Each GC gets an errdefer so a failure
+        // on the second create doesn't leak the first (on success these don't
+        // fire; deinit owns the resources).
         dc.gc = try createCheckedGC(conn, pixmap);
+        errdefer _ = core.xcb.xcb_free_gc(conn, dc.gc);
         dc.copy_gc = try createCheckedGC(conn, window);
+        errdefer _ = core.xcb.xcb_free_gc(conn, dc.copy_gc);
 
         return dc;
     }
@@ -567,13 +570,18 @@ fn resolveVisualType(
     conn: core.Connection,
     screen: core.Screen,
     visual_id: ?u32,
+    depth: u8,
 ) !*core.xcb.xcb_visualtype_t {
     if (visual_id) |vid| {
         if (findVisualById(conn, vid)) |vt| return vt;
     }
-    // Fall back to the first available visual on screen; error if there are none.
+    // Fallback (ND-20): return a visual matching the PIXMAP depth. The
+    // surface pairs visual+drawable, so the old take-first-visual-of-any-
+    // depth choice handed cairo e.g. a 24-bit visual for a 32-bit ARGB
+    // pixmap — a guaranteed BadMatch at first render on multi-depth roots.
     var di = core.xcb.xcb_screen_allowed_depths_iterator(screen);
     while (di.rem > 0) : (core.xcb.xcb_depth_next(&di)) {
+        if (di.data.*.depth != depth) continue;
         const vi = core.xcb.xcb_depth_visuals_iterator(di.data);
         if (vi.rem > 0) return vi.data;
     }
@@ -634,9 +642,12 @@ fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const 
     }
 
     const converted = try result.toOwnedSlice(allocator);
+    errdefer allocator.free(converted);
     const owned_key = try allocator.dupe(u8, xft_name);
     errdefer allocator.free(owned_key);
-    font_conversion_cache.?.put(owned_key, converted) catch {};
+    // Propagate put failure: swallowing it would leak both owned_key and
+    // converted (the errdefers above don't fire on a swallowed error).
+    try font_conversion_cache.?.put(owned_key, converted);
     return converted;
 }
 

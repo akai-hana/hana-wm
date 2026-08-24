@@ -40,6 +40,16 @@ pub fn scrollingActive() bool {
     return scrolling;
 }
 
+/// Drops the active-scroll latch WITHOUT rendering a frame. The prompt
+/// covers the whole title segment (title.draw never runs while it's open),
+/// so a marquee left mid-scroll by the last pre-prompt frame would keep
+/// polling at one deadline per display period and force a full repaint of
+/// pixels nobody can see. Call once per covered frame; the next real
+/// offsetFor() re-arms everything.
+pub fn deactivate() void {
+    scrolling = false;
+}
+
 /// Advances the marquee by the time elapsed since the previous call and
 /// returns the SUB-PIXEL pixel offset the text should be drawn at (0 is the
 /// cell's left edge; grows unbounded only within one wrap cycle). Returns 0

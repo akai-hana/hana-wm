@@ -2,10 +2,17 @@
 
 const std = @import("std");
 
-// Uses the VDSO-accelerated clock_gettime on supported kernels.
+// Uses the VDSO-accelerated clock_gettime on supported kernels. A failure
+// here would leave `ts` undefined and poison every deadline computed from it,
+// so the alternate VDSO clock is tried before giving up on a defined value.
 inline fn clockTs(clock_id: std.os.linux.clockid_t) std.os.linux.timespec {
     var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(clock_id, &ts);
+    if (std.os.linux.clock_gettime(clock_id, &ts) != 0) {
+        const fallback_id: std.os.linux.clockid_t =
+            if (clock_id == .MONOTONIC) .REALTIME else .MONOTONIC;
+        if (std.os.linux.clock_gettime(fallback_id, &ts) != 0)
+            ts = .{ .sec = 0, .nsec = 0 };
+    }
     return ts;
 }
 

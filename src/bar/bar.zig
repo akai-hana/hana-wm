@@ -16,11 +16,9 @@ const types = @import("types");
 
 const tracking = @import("tracking");
 const focus = @import("focus");
-const fullscreen = @import("fullscreen");
 const minimize = @import("minimize");
 const pipeline = @import("pipeline"); // PIPELINE: train a
 const actions = @import("actions"); // PIPELINE: train a
-const workspaces = @import("workspaces");
 
 const window = @import("window");
 
@@ -199,6 +197,16 @@ const State = struct {
                 .clock_width = dc.cachedTextWidth(clock.clock_measure_string) + 2 * config.scaledSegmentPadding(height),
             },
         };
+        // Partial-failure mirror of deinit(), minus the X resources: the
+        // caller's createBar errdefers own the window+colormap and the dc.
+        // Safe to arm here — every fallible step below runs after all owned
+        // sub-resources are initialized (WindowTitles.init is infallible; a
+        // default .{} TitleData would carry an undefined arena).
+        errdefer {
+            s.title_cache.deinit(s.render.allocator);
+            for (&s.snapshots) |*snap| snap.deinit(s.render.allocator);
+            s.render.allocator.destroy(s);
+        }
         for (&s.snapshots) |*snap| snap.title_data.window_titles = sn.WindowTitles.init(allocator);
         s.title_cache.title_data.window_titles = sn.WindowTitles.init(allocator);
         try s.title_cache.title_data.focused_title.ensureTotalCapacity(allocator, 256);
@@ -433,13 +441,21 @@ const State = struct {
 
     fn drawClockOnly(self: *State) void {
         const clock_x = self.layout_cache.clock_x orelse return;
-        _ = clock.draw(self.render.dc, self.render.config, self.render.height, clock_x) catch |e|
+        const drawn_end = clock.draw(self.render.dc, self.render.config, self.render.height, clock_x) catch |e| {
             debug.warnOnErr(e, "drawClockOnly");
+            return;
+        };
         // renderOnly() flushes Cairo to the pixmap; blitAndFlush() copies only the
         // clock region to the window and calls xcb_flush, avoiding a full-window
         // blit plus a separate main-thread xcb_flush.
         self.render.dc.renderOnly();
-        self.render.dc.blitAndFlush(clock_x, self.layout_cache.clock_width);
+        // Blit at least what was PAINTED (drawn_end can exceed the layout-time
+        // reservation after font fallback or digit-width drift — blitting only
+        // the cached width would clip digits) while keeping the full reserved
+        // slot covered so stale pixels from a wider earlier frame still get
+        // overwritten with the clean background the last full frame left.
+        const drawn_w: u16 = drawn_end -| clock_x;
+        self.render.dc.blitAndFlush(clock_x, @max(self.layout_cache.clock_width, drawn_w));
     }
 
     /// Replacements are built before the swap so a failed allocation leaves the cache
@@ -610,6 +626,11 @@ pub fn reload() void {
 
 fn applyReload(old: *State, height: u16) !void {
     const cs = core.getState();
+    // Prompt caches (font widths, caret geometry) are built against the old
+    // config; the new one is live from here on either way, so drop them up
+    // front — including on the failure path below, where the surviving bar
+    // re-points at the NEW live config too.
+    prompt.invalidateReloadCaches();
     const new_bar = createBar(height, barwin.calcBarYPos(height)) catch |err| {
         // The caller has already swapped cs.config to the new config and frees
         // the OLD config when this returns. The old bar survives this failed
