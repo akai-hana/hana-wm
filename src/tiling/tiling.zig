@@ -1,4 +1,4 @@
-//! Layout config mapping (WP6 residue, stateless).
+//! Layout config mapping (stateless).
 //!
 //! The legacy retile engine and its per-window caches are gone: placement is
 //! computed by src/layout/ over the model, sync owns the wire, and the shared
@@ -49,9 +49,9 @@ pub inline fn getBorderWidth() u16 {
 }
 
 pub inline fn getCurrentLayout() Layout {
-    // PIPELINE (fix P1-5): keybinds mutate per-ws MODEL params now; reading
-    // static config here left the bar icon stale after cycle_layout /
-    // step_variant / per-ws overrides. Fall back to config pre-init only.
+    // Keybinds mutate per-ws MODEL params now; reading static config here
+    // left the bar icon stale after cycle_layout / step_variant / per-ws
+    // overrides. Fall back to config pre-init only.
     if (build_options.has_tiling) {
         const pipeline = @import("pipeline");
         if (pipeline.initialized) {

@@ -18,7 +18,6 @@ const utils = @import("utils");
 
 const types = @import("types");
 const drawing = @import("drawing");
-const metrics = @import("metrics");
 
 /// All atoms needed to declare the bar window as a dock to the compositor.
 pub const BarAtoms = struct {
@@ -133,6 +132,6 @@ pub fn createDrawContext(setup: BarWindowSetup, height: u16) !*drawing.DrawConte
         cs.config.bar.transparency,
     );
     errdefer dc.deinit();
-    try metrics.loadBarFonts(dc, null);
+    try drawing.loadBarFonts(dc, null);
     return dc;
 }

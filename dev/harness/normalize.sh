@@ -25,7 +25,6 @@ for f in "$@"; do
 			next if /Best-effort op failed \(bar drawSegment\): error\.NoFont/;
 			s/(_NET_WM_PID\(CARDINAL\) = )\d+/${1}PID/g;
 			s/\b\d{1,2}:\d{2}(?::\d{2})?\b/TIME/g;
-			s/(bench: title capture: .*), \d+ us/$1, T us/g;
 			# Window ids: 0x-prefixed (xwininfo/xprop) AND bare >=6-hex-digit
 			# forms — including PURE DECIMAL ones, because dump_state prints
 			# its Focused:/window ids in decimal ({d}, e.g. 800001). Verified

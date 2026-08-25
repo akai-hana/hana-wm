@@ -2,8 +2,8 @@
 //!
 //! This is shared WM infrastructure, not tiling state: border-color and
 //! BORDER_WIDTH dedup for sync, and WM_NORMAL_HINTS bridged into the model
-//! at registration. Geometry is NOT cached here (A5): truth lives in the
-//! model (floating base) and the sync sent-ledger (last-sent rects) — see
+//! at registration. Geometry is NOT cached here: truth lives in the model
+//! (floating base) and the sync sent-ledger (last-sent rects) — see
 //! sync.truthRect. One open-addressing table keyed by X window id; entries
 //! are evicted in window.zig's unmanage path.
 

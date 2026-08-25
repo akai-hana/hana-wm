@@ -41,7 +41,7 @@ pub fn getCachedWorkspaceWidth() u16 {
 fn ensureCache(dc: *drawing.DrawContext, config: types.BarConfig, height: u16) void {
     if (cache_valid) return;
     const count = @min(tracking.getWorkspaceCount(), label_widths.len);
-    for (label_widths[0..count], 0..) |*w, i| w.* = dc.cachedTextWidth(getLabel(i, config));
+    for (label_widths[0..count], 0..) |*w, i| w.* = dc.measureTextWidth(getLabel(i, config));
     ws_width = config.scaledWorkspaceWidth(height);
     cache_valid = true;
 

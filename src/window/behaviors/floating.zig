@@ -126,7 +126,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     if (build_options.has_bar and bar.isBarWindow(win)) return;
     if (actions.isFullscreenMode(win)) return; // fullscreen geometry must not be touched
 
-    // A5: model/sync truth (floating base or last-sent rect) over a live XCB
+    // Model/sync truth (floating base or last-sent rect) over a live XCB
     // round-trip; fall back to a live query when never placed.
     const geom = blk: {
         if (@import("sync").truthRect(pipeline.model(), win)) |g| break :blk g;
@@ -155,8 +155,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
         },
         // A base-tiled window detaches to floating on first motion (see
         // updateDrag); move also skips snap on that first event so the
-        // window doesn't appear frozen at a tiled edge. Model truth, not
-        // the legacy pool (WP6): the pool list is never fed anymore.
+        // window doesn't appear frozen at a tiled edge.
         .pending_float = tracking.isTiledMode(win),
     };
     focus.setFocus(win, .user_command);
@@ -226,7 +225,7 @@ pub fn updateDrag(x: i16, y: i16) void {
     const drag = &g_state.drag;
 
     const was_pending_float = g_state.pending_float;
-    if (g_state.pending_float) { // WP6 — model-side detach only
+    if (g_state.pending_float) {
         g_state.pending_float = false;
         actions.detachToFloating(drag.window);
     }
@@ -240,12 +239,12 @@ pub fn updateDrag(x: i16, y: i16) void {
         .resize => computeResizeRect(drag.*, dx, dy, wa),
     };
     drag.last_rect = rect;
-    actions.dragRect(drag.window, rect); // WP6 — sync owns the wire
+    actions.dragRect(drag.window, rect);
 }
 
 /// Ends the active drag. The model floating rect already holds the final
 /// position (actions.dragRect ran on every tick); nothing else to record —
-/// the sync ledger is the wire truth (A5: no second geometry store).
+/// the sync ledger is the wire truth.
 pub fn stopDrag() void {
     g_state = .{};
 }

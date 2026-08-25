@@ -1,7 +1,7 @@
 //! Unit tests for the clock segment's pure deadline arithmetic.
 //! Everything else in clock.zig is main-thread rendering against the live
 //! wall clock; deadlineFromMs is the only piece with input-independent
-//! behavior worth pinning down (docs/clock-plan.md §5.4).
+//! behavior worth pinning down.
 
 const std = @import("std");
 const clock = @import("clock");

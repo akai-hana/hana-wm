@@ -3,12 +3,6 @@
 
 const std = @import("std");
 
-// libc bindings for fork/exec/wait (no Zig stdlib wrappers exist for these low-level syscalls)
-const c = @cImport({
-    @cInclude("unistd.h");
-    @cInclude("sys/wait.h");
-});
-
 const core = @import("core");
 const xcb = core.xcb;
 const types = @import("types");
@@ -26,6 +20,7 @@ const xkbcommon = @import("xkbcommon");
 const build_options = @import("build_options");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
+const spawn = @import("spawn");
 const bar = if (build_options.has_bar) @import("bar") else null;
 const tiling = if (build_options.has_tiling) @import("tiling") else null;
 const floating = if (build_options.has_floating) @import("floating") else null;
@@ -131,15 +126,13 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     if (build_options.has_bar) if (bar.promptHandleKeypress(event, matched)) return;
 
     if (matched) |action| {
-        debug.info("[KEY] keycode={} state=0x{x} mods=0x{x} keysym=0x{x}", .{ event.detail, event.state, mods, keysym });
-        debug.info("[KEY] action={s}", .{@tagName(action.*)});
+        debug.info("[KEY] mods=0x{x} keysym=0x{x} action={s}", .{ mods, keysym, @tagName(action.*) });
         executeAction(action);
     } else if (mods == 0 and keysym >= 0xffe1 and keysym <= 0xffee) {
         // Bare modifier press (Shift/Ctrl/Alt/Super/Hyper L/R): can never
         // match a binding; staying silent keeps logs free of keystroke noise.
     } else {
-        debug.info("[KEY] keycode={} state=0x{x} mods=0x{x} keysym=0x{x}", .{ event.detail, event.state, mods, keysym });
-        debug.info("[KEY] no binding", .{});
+        debug.info("[KEY] mods=0x{x} keysym=0x{x} no binding", .{ mods, keysym });
     }
 }
 
@@ -250,10 +243,6 @@ fn closeWindow(win: u32) void {
 
 // Action dispatch
 
-/// PIPELINE: per-dispatch action context for the new path (train a+).
-var action_ctx: actions.Ctx = .{};
-var mouse_ctx: actions.Ctx = .{};
-
 inline fn focusedId() ?u32 {
     return focus.getFocused();
 }
@@ -275,11 +264,14 @@ fn executeAction(action: *const types.Action) void {
         .close_window => if (focus.getFocused()) |win| closeWindow(win),
         .reload_config => utils.reload(),
         .dump_state => dumpState(),
-        .exec => |cmd| executeShellCommand(cmd) catch |err| debug.err("exec failed: {}", .{err}),
+        .exec => |cmd| spawn.executeShellCommand(cmd) catch |err| debug.err("exec failed: {}", .{err}),
         .sequence => |acts| for (acts) |*a| executeAction(a),
 
-        // Fullscreen
-        .toggle_fullscreen => actions.fullscreenToggle(&action_ctx), // WP6
+        // Fullscreen: keybind path resolves the focused window, then shares
+        // the EWMH/title-click transition.
+        .toggle_fullscreen => {
+            if (pipeline.model().focused) |win| actions.fullscreenToggleWindow(win);
+        },
 
         // Tiling, delegated to executeTilingAction
         .toggle_floating_window,
@@ -305,10 +297,10 @@ fn executeAction(action: *const types.Action) void {
         .toggle_bar_position => if (build_options.has_bar) bar.toggleBarSegmentAnchor(),
 
         // Minimize
-        .minimize_window => actions.minimize(&action_ctx, focusedId()), // WP6
-        .unminimize_lifo => actions.restoreLifo(&action_ctx), // WP6
-        .unminimize_fifo => actions.restoreFifo(&action_ctx), // WP6
-        .unminimize_all => actions.restoreAll(&action_ctx), // WP6
+        .minimize_window => actions.minimize(focusedId()),
+        .unminimize_lifo => actions.restoreOrdered(.lifo),
+        .unminimize_fifo => actions.restoreOrdered(.fifo),
+        .unminimize_all => actions.restoreAll(),
 
         // Workspaces, delegated to executeWorkspaceAction
         .switch_workspace,
@@ -327,11 +319,11 @@ fn executeAction(action: *const types.Action) void {
         // it is off-screen. The server grab prevents a partial retile frame.
         .focus_next_window => {
             focus.focusNext();
-            actions.snapScrollToFocused(&action_ctx); // PIPELINE: WP6
+            actions.snapScrollToFocused();
         },
         .focus_prev_window => {
             focus.focusPrev();
-            actions.snapScrollToFocused(&action_ctx); // PIPELINE: WP6
+            actions.snapScrollToFocused();
         },
     }
 }
@@ -342,38 +334,38 @@ fn executeTilingAction(action: *const types.Action) void {
     switch (action.*) {
         .toggle_floating_window => if (focus.getFocused()) |win| {
             focus.setSuppressReason(.tiling_operation);
-            actions.toggleFloating(&action_ctx, win);
+            actions.toggleFloating(win);
             focus.beginTilingOpSettle();
         },
         .toggle_layout => {
             focus.setSuppressReason(.tiling_operation);
-            actions.cycleLayoutKind(&action_ctx, 1);
+            actions.cycleLayoutKind(1);
             focus.beginTilingOpSettle();
         },
         .toggle_layout_reverse => {
             focus.setSuppressReason(.tiling_operation);
-            actions.cycleLayoutKind(&action_ctx, -1);
+            actions.cycleLayoutKind(-1);
             focus.beginTilingOpSettle();
         },
         .cycle_layout_variants => {
             focus.setSuppressReason(.tiling_operation);
-            actions.stepVariant(&action_ctx);
+            actions.stepVariantDir(1);
             focus.beginTilingOpSettle();
         },
-        .increase_master => actions.adjustMasterWidthAction(&action_ctx, 0.025),
-        .decrease_master => actions.adjustMasterWidthAction(&action_ctx, -0.025),
-        .increase_master_count => actions.adjustMasterCount(&action_ctx, 1),
-        .decrease_master_count => actions.adjustMasterCount(&action_ctx, -1),
-        .grow_stack_top => actions.adjustStackBalance(&action_ctx, 0.5),
-        .grow_stack_bottom => actions.adjustStackBalance(&action_ctx, -0.5),
+        .increase_master => actions.adjustMasterWidthAction(0.025),
+        .decrease_master => actions.adjustMasterWidthAction(-0.025),
+        .increase_master_count => actions.adjustMasterCount(1),
+        .decrease_master_count => actions.adjustMasterCount(-1),
+        .grow_stack_top => actions.adjustStackBalance(0.5),
+        .grow_stack_bottom => actions.adjustStackBalance(-0.5),
 
-        .swap_master, .swap_master_focus_swap => actions.swapMasterAction(&action_ctx, action.* == .swap_master_focus_swap),
+        .swap_master, .swap_master_focus_swap => actions.swapMasterAction(action.* == .swap_master_focus_swap),
 
-        .move_window_next => actions.moveFocused(&action_ctx, 1),
-        .move_window_prev => actions.moveFocused(&action_ctx, -1),
+        .move_window_next => actions.moveFocused(1),
+        .move_window_prev => actions.moveFocused(-1),
 
-        .scroll_view_left => actions.scrollStep(&action_ctx, -1),
-        .scroll_view_right => actions.scrollStep(&action_ctx, 1),
+        .scroll_view_left => actions.scrollStep(-1),
+        .scroll_view_right => actions.scrollStep(1),
 
         else => unhandledAction("tiling"),
     }
@@ -384,11 +376,11 @@ fn executeTilingAction(action: *const types.Action) void {
 /// is false, so these calls are always valid regardless of that setting.
 fn executeWorkspaceAction(action: *const types.Action) void {
     switch (action.*) {
-        .switch_workspace => |ws| actions.switchTo(&action_ctx, ws), // WP6
-        .move_to_workspace => |ws| if (focusedId()) |wid| actions.moveWindowTo(&action_ctx, wid, ws), // WP6
-        .toggle_tag => |ws| if (focusedId()) |wid| actions.tagToggle(&action_ctx, wid, ws, true), // WP6
-        .all_workspaces => actions.allViewToggle(&action_ctx), // WP6
-        .move_to_all_workspaces, .toggle_tag_all => if (focusedId()) |wid| actions.pinToggle(&action_ctx, wid), // WP6
+        .switch_workspace => |ws| actions.switchTo(ws),
+        .move_to_workspace => |ws| if (focusedId()) |wid| actions.moveWindowTo(wid, ws),
+        .toggle_tag => |ws| if (focusedId()) |wid| actions.tagToggle(wid, ws, true),
+        .all_workspaces => actions.allViewToggle(),
+        .move_to_all_workspaces, .toggle_tag_all => if (focusedId()) |wid| actions.pinToggle(wid),
         else => unhandledAction("workspace"),
     }
 }
@@ -397,244 +389,12 @@ fn executeWorkspaceAction(action: *const types.Action) void {
 /// keyboard-focused one, so e.g. toggle_floating_window affects what was clicked.
 fn executeMouseAction(action: *const types.Action, clicked_win: u32) void {
     switch (action.*) {
-        .toggle_floating_window => { // WP6
+        .toggle_floating_window => {
             focus.setSuppressReason(.tiling_operation);
-            actions.toggleFloating(&mouse_ctx, clicked_win);
+            actions.toggleFloating(clicked_win);
             focus.beginTilingOpSettle();
         },
         else => executeAction(action),
-    }
-}
-
-// Shell execution
-//
-// Double-fork so the grandchild re-parents to init and the WM never
-// accumulates zombies. A single O_CLOEXEC pipe carries the outcome: success
-// closes its copy automatically; otherwise the intermediate child writes
-// tag_pid and the grandchild writes tag_failed only if execvp() fails; two
-// independently-scheduled writers, so messages can arrive in either order
-// (finishSpawn() handles both). EOF ends the conversation; entries resolve via
-// drainPendingSpawns() (every event batch) or reapPendingChildren() (SIGCHLD).
-
-/// Tags for the two possible messages written onto the spawn pipe. Sent as
-/// a leading byte so the reader can tell them apart no matter which order
-/// they arrive in (see finishSpawn()).
-const tag_pid: u8 = 0;
-const tag_failed: u8 = 1;
-
-/// Byte length of a tag_pid message: the tag plus a raw c_int.
-const pid_msg_len: usize = 1 + @sizeOf(c_int);
-
-/// Grandchild: detaches from the session and execs the command.
-/// On execvp failure, writes a tag_failed byte to pipe_write before exiting.
-/// On success this function never returns far enough to write anything;
-/// pipe_write's O_CLOEXEC copy closes itself as part of the exec.
-fn execAsGrandchild(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
-    _ = c.setsid();
-    _ = c.execvp("/bin/sh", @ptrCast(&[_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z, null }));
-    const msg = [1]u8{tag_failed};
-    _ = c.write(pipe_write, &msg, msg.len);
-    std.process.exit(1);
-}
-
-/// Intermediate child: forks the grandchild, forwards its PID over the
-/// spawn pipe tagged as tag_pid, then exits so the grandchild is
-/// re-parented to init.
-fn forkIntermediate(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
-    const grandchild_pid = c.fork();
-    if (grandchild_pid < 0) {
-        debug.err("Second fork failed", .{});
-        std.process.exit(1);
-    }
-    if (grandchild_pid == 0) {
-        // Grandchild: keep pipe_write open rather than closing it up front.
-        // Its copy is O_CLOEXEC, so a successful execvp() closes it for us;
-        // execAsGrandchild only writes to it explicitly if exec fails.
-        execAsGrandchild(pipe_write, cmd_z);
-    }
-
-    const gp: c_int = grandchild_pid;
-    var msg: [pid_msg_len]u8 = undefined;
-    msg[0] = tag_pid;
-    @memcpy(msg[1..], std.mem.asBytes(&gp));
-    _ = c.write(pipe_write, &msg, msg.len);
-    _ = c.close(pipe_write);
-    std.process.exit(0);
-}
-
-// Pending spawn table
-//
-// 16 execs within the ~100 ms before /bin/sh execs would be inhuman speed.
-
-const max_pending_spawns: usize = 16;
-
-/// Largest possible spawn-pipe conversation: a tag_pid message plus an
-/// optional trailing (or leading) tag_failed byte.
-const spawn_msg_max: usize = pid_msg_len + 1;
-
-/// Lifecycle state for a single double-fork spawn.
-const PendingSpawn = struct {
-    pid: c_int, // PID of intermediate child; used for targeted waitpid.
-    spawn_fd: c_int, // Read end of the spawn pipe (O_NONBLOCK). -1 once done.
-    buf: [spawn_msg_max]u8 = undefined, // Accumulates bytes until the conversation ends.
-    len: usize = 0, // Valid bytes accumulated in buf so far.
-    spawn_ws: ?u8, // Target workspace for window.registerSpawn.
-};
-
-// std.BoundedArray was removed in the Zig 0.16 toolchain; utils.BoundedList
-// is the shared fixed-buffer-plus-length stand-in used everywhere this shape
-// is needed.
-var g_pending: utils.BoundedList(PendingSpawn, max_pending_spawns) = .{};
-
-/// Spawns `cmd` as a detached grandchild (double-fork). Returns immediately;
-/// lifecycle is tracked in g_pending and resolved by drainPendingSpawns() /
-/// reapPendingChildren() without blocking the event loop.
-fn executeShellCommand(cmd: []const u8) !void {
-    // Snapshot the workspace now; correct for sequence actions of the form
-    // [exec, switch_workspace] where a later action mutates g_current.
-    const spawn_ws = tracking.getCurrentWorkspace();
-
-    var cmd_buf: [256]u8 = undefined;
-    var heap_cmd_z: ?[:0]const u8 = null;
-    defer if (heap_cmd_z) |h| core.getState().alloc.free(h);
-    const cmd_z: [*:0]const u8 = if (cmd.len < cmd_buf.len) blk: {
-        @memcpy(cmd_buf[0..cmd.len], cmd);
-        cmd_buf[cmd.len] = 0;
-        break :blk @ptrCast(&cmd_buf[0]);
-    } else blk: {
-        const owned = try core.getState().alloc.dupeZ(u8, cmd);
-        heap_cmd_z = owned;
-        break :blk owned.ptr;
-    };
-
-    if (g_pending.len >= max_pending_spawns)
-        debug.warn("spawn: pending table full, spawning '{s}' without workspace routing", .{cmd});
-
-    const pipe_fds = utils.makePipe() catch {
-        debug.err("pipe2() failed (spawn pipe): {s}", .{cmd});
-        return error.PipeFailed;
-    };
-
-    const pid = c.fork();
-    if (pid < 0) {
-        _ = c.close(pipe_fds[0]);
-        _ = c.close(pipe_fds[1]);
-        debug.err("First fork failed: {s}", .{cmd});
-        return error.ForkFailed;
-    }
-
-    if (pid == 0) {
-        _ = c.close(pipe_fds[0]);
-        forkIntermediate(pipe_fds[1], cmd_z);
-    }
-
-    // Parent: close the write end so our read end eventually sees EOF.
-    _ = c.close(pipe_fds[1]);
-
-    // Cursor position for spawn-crossing suppression is queried synchronously
-    // in mapWindowToScreen when the MapRequest arrives; MapRequest is
-    // one-time per window, so the round-trip isn't worth pipelining here.
-
-    const queued = g_pending.append(.{
-        .pid = pid,
-        .spawn_fd = pipe_fds[0],
-        .spawn_ws = spawn_ws,
-    });
-    if (!queued) {
-        // Table full: close the read end we won't track; reap `pid`
-        // synchronously; it exits almost instantly and isn't tracked (no zombie).
-        _ = c.close(pipe_fds[0]);
-        _ = c.waitpid(pid, null, 0);
-    }
-}
-
-/// Drains pending spawn entries non-blockingly (every event batch and on
-/// SIGCHLD), until EOF or a full buffer; a full buffer already holds both
-/// possible messages, so EOF needn't be awaited. finishSpawn() classifies.
-pub fn drainPendingSpawns() void {
-    if (g_pending.len == 0) return;
-    var i: usize = 0;
-    while (i < g_pending.len) {
-        const entry = &g_pending.slice()[i];
-
-        if (entry.spawn_fd >= 0) {
-            const n = c.read(entry.spawn_fd, &entry.buf[entry.len], entry.buf.len - entry.len);
-            if (n > 0) {
-                entry.len += @intCast(n);
-                if (entry.len == entry.buf.len) {
-                    // Buffer full: both possible messages have necessarily
-                    // arrived already; no need to wait for EOF too.
-                    _ = c.close(entry.spawn_fd);
-                    entry.spawn_fd = -1;
-                }
-            } else if (n < 0 and std.posix.errno(n) == .AGAIN) {
-                // Not ready yet; retry on the next call.
-            } else {
-                // EOF (n == 0) or a hard read error: conversation is over.
-                _ = c.close(entry.spawn_fd);
-                entry.spawn_fd = -1;
-            }
-        }
-
-        if (entry.spawn_fd >= 0) {
-            i += 1;
-            continue;
-        }
-
-        finishSpawn(entry);
-        g_pending.swapRemove(i);
-    }
-}
-
-/// Classifies a fully-drained spawn-pipe conversation and, on success,
-/// registers the spawn for workspace routing.
-///
-/// Both writes are under PIPE_BUF, so neither is torn or interleaved: a
-/// tag_failed byte anywhere is a reliable failure signal in any arrival
-/// order; an empty buffer means the second fork() never ran.
-fn finishSpawn(entry: *PendingSpawn) void {
-    const data = entry.buf[0..entry.len];
-
-    var grandchild: c_int = -1;
-    var failed = data.len == 0;
-
-    var idx: usize = 0;
-    while (idx < data.len) {
-        switch (data[idx]) {
-            tag_pid => {
-                if (idx + pid_msg_len > data.len) {
-                    failed = true;
-                    break;
-                }
-                grandchild = std.mem.bytesToValue(c_int, data[idx + 1 ..][0..@sizeOf(c_int)]);
-                idx += pid_msg_len;
-            },
-            tag_failed => {
-                failed = true;
-                idx += 1;
-            },
-            else => {
-                failed = true;
-                break;
-            },
-        }
-    }
-
-    if (!failed) {
-        if (entry.spawn_ws) |ws| {
-            const pid_u32: u32 = if (grandchild > 0) @intCast(grandchild) else 0;
-            window.registerSpawn(core.WorkspaceId.fromIndex(ws), pid_u32);
-        }
-    }
-}
-
-/// Reaps zombie intermediate children without blocking. Called from the
-/// SIGCHLD handler; the spawn-pipe drain stays in signals.zig so it doesn't
-/// run twice per SIGCHLD.
-pub fn reapPendingChildren() void {
-    for (g_pending.slice()) |*entry| {
-        if (entry.pid > 0 and c.waitpid(entry.pid, null, c.WNOHANG) > 0)
-            entry.pid = -1;
     }
 }
 
@@ -646,26 +406,8 @@ fn dumpState() void {
     debug.info("Focused:        {?x}", .{focus.getFocused()});
     debug.info("Total windows:  {}", .{tracking.windowCount()});
     debug.info("Suppress focus: {s}", .{@tagName(focus.getSuppressReason())});
-    debug.info("Drag active:    {}", .{build_options.has_floating and floating.isDragging()});
-
-    // Fullscreen truth: scan the model store (the legacy record store is gone).
-    {
-        const m = pipeline.model();
-        var any_fs = false;
-        for (0..m.store.count()) |i| {
-            const it = m.store.at(i);
-            if (it.val.mode != .fullscreen) continue;
-            any_fs = true;
-            debug.info("Fullscreen on workspace {}: {x}", .{ it.val.mode.fullscreen.ws, it.key });
-        }
-        if (!any_fs) debug.info("Fullscreen: none", .{});
-    }
 
     if (workspaces.getState()) |ws_state| {
-        // Live source (tracking is dual-written by switchTo); the legacy
-        // workspaces.State.current mirror lags when read mid-switch.
-        const cur_ws = tracking.getCurrentWorkspace() orelse 0;
-        debug.info("Current workspace: {}", .{cur_ws + 1});
         for (ws_state.workspaces, 0..) |_, i|
             debug.info("  WS{}: {} windows", .{ i + 1, tracking.countWindowsOnWorkspace(core.WorkspaceId.fromIndex(@intCast(i))) });
     }
@@ -673,8 +415,6 @@ fn dumpState() void {
     if (build_options.has_tiling and tiling.isEnabled()) {
         debug.info("Tiling enabled: true", .{});
         debug.info("Tiling layout:  {s}", .{@tagName(tiling.getCurrentLayout())});
-        // Count from the model (WP5 truth), not the legacy pool: the pool is
-        // no longer fed on the model spawn path, so its length would read 0.
         debug.info("Tiled windows:  {}", .{tracking.tiledCountOnCurrent()});
     }
 

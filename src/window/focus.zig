@@ -11,7 +11,6 @@ const window = @import("window");
 const tracking = @import("tracking");
 const build_options = @import("build_options");
 const bar = if (build_options.has_bar) @import("bar") else null;
-const tiling = if (build_options.has_tiling) @import("tiling") else null;
 
 // Module state
 //
@@ -21,7 +20,7 @@ const tiling = if (build_options.has_tiling) @import("tiling") else null;
 // multi-context support.
 
 const State = struct {
-    /// A3/P1: focus TRUTH is `model.focused`; this is a private protocol-side
+    /// Focus TRUTH is `model.focused`; this is a private protocol-side
     /// cache of the last window we APPLIED X input focus to (dedupe + grab
     /// bookkeeping). Not a second store — readers go through getFocused().
     last_applied: ?u32 = null,
@@ -58,11 +57,6 @@ const State = struct {
 
 var state: ?State = null;
 
-pub inline fn getState() *State {
-    if (state) |*s| return s;
-    @panic("focus: getState() called before init()");
-}
-
 pub fn init() void {
     // Reset every field so a deinit()+init() cycle starts from a clean slate.
     state = .{};
@@ -85,7 +79,7 @@ pub fn deinit() void {
     state = .{};
 }
 
-/// Focus truth (A3/P1): reads model.focused; falls back to the protocol
+/// Focus truth: reads model.focused; falls back to the protocol
 /// cache only before pipeline.init (boot).
 pub inline fn getFocused() ?u32 {
     const pl = @import("pipeline");
@@ -296,7 +290,7 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
         state.?.confirm_win = win;
     }
 
-    // WP6: legacy pool focus bookkeeping (updateWindowFocus) deleted — the
+    // Legacy pool focus bookkeeping (updateWindowFocus) deleted — the
     // model owns window state; nothing reads the pool anymore.
     if (flags.schedule_bar) if (build_options.has_bar) bar.scheduleFocusRedraw(win);
 
@@ -305,7 +299,7 @@ fn commitFocusTransition(old: ?u32, win: u32, flags: CommitFlags) void {
 
 /// True if `win` currently has map_state == Viewable. Guards destroy/unmap
 /// races on paths that can't guarantee the window is still alive.
-pub fn isWindowMapped(conn: core.Connection, win: u32) bool {
+inline fn isWindowMapped(conn: core.Connection, win: u32) bool {
     const reply = xcb.xcb_get_window_attributes_reply(
         conn,
         xcb.xcb_get_window_attributes(conn, win),
@@ -334,34 +328,7 @@ pub fn setFocus(win: u32, reason: Reason) void {
     const resolved = window.getInputModelResolved(conn, win);
     if (resolved.model == .no_input) return;
 
-    setFocusResolved(win, reason, resolved.model, resolved.take_focus);
-}
-
-/// Focus `win` using a caller-resolved input model, skipping the two blocking
-/// round trips setFocus performs (the isWindowMapped liveness guard and
-/// getInputModel's WM_PROTOCOLS query).
-///
-/// Intended for server-grab-held callers: they resolve the window and its
-/// input model BEFORE xcb_grab_server so the grab body stays fire-and-forget;
-/// a blocking reply wait inside the grab would implicitly flush the queued
-/// configure/set_input_focus batch to the compositor mid-grab, breaking the
-/// grab's atomicity. The caller must already have validated the window's
-/// liveness for .mouse_click/.user_command/.pointer_sync; setFocus's guard is
-/// deliberately NOT repeated here.
-pub fn setFocusWithModel(win: u32, reason: Reason, input_model: window.InputModel) void {
-    focusWithModelImpl(win, reason, input_model, null);
-}
-
-/// Like setFocusWithModel, but dispatches WM_TAKE_FOCUS from a known
-/// advertisement instead of firing the pipelined protocol cookie. Used by
-/// setFocus, which already holds the answer from its own live query.
-pub fn setFocusResolved(
-    win: u32,
-    reason: Reason,
-    input_model: window.InputModel,
-    take_focus: bool,
-) void {
-    focusWithModelImpl(win, reason, input_model, take_focus);
+    focusWithModelImpl(win, reason, resolved.model, resolved.take_focus);
 }
 
 fn focusWithModelImpl(
@@ -413,12 +380,12 @@ fn focusWithModelImpl(
         .new_suppress = suppressionFor(reason, state.?.suppress_reason),
     });
 
-    // PIPELINE (fix P1-4): focus transitions change the border color. Legacy
+    // PIPELINE: focus transitions change the border color. Legacy
     // swept borders here; the model path diffs colors in sync — schedule a
     // coalesced end-of-dispatch reconcile so hover/click refocuses repaint
     // borders without an action-driven retile.
     //
-    // Also mirror the transition INTO the model (fix P2-8 companion): every
+    // Also mirror the transition INTO the model: every
     // focus source — hover, click, EWMH — lands here, so m.focused and the
     // per-workspace MRU stay true single-source-of-truth state. Idempotent
     // when actions already called setFocus for this transition.
@@ -548,25 +515,8 @@ pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
     sendFocusProtocol(prev);
 }
 
-/// Returns the first window satisfying `visible`, walking the tracking list.
-/// Pure, no side effects, so grab-held callers can resolve the target and
-/// pre-query its input model before xcb_grab_server, keeping the grab body
-/// fire-and-forget (see setFocusWithModel).
-///
-/// This is the resolver behind the dwm focus(NULL) idiom; callers that need to
-/// focus "whatever is best after X happened" use this instead of rolling their
-/// own scan + setFocus sequence. The `visible` predicate decouples workspace
-/// visibility from focus mechanics (e.g. pass
-/// tracking.isOnCurrentWorkspaceAndVisible for normal post-action re-focus).
-pub fn findBestAvailable(visible: *const fn (u32) bool) ?u32 {
-    for (tracking.allWindows()) |entry| {
-        if (visible(entry.win)) return entry.win;
-    }
-    return null;
-}
-
 pub fn clearFocus() void {
-    // A3/P1: model is truth — clear it here so every clearFocus caller gets
+    // Model is truth — clear it here so every clearFocus caller gets
     // one-store semantics without a separate model call.
     {
         const pl = @import("pipeline");
@@ -583,37 +533,6 @@ pub fn clearFocus() void {
     if (build_options.has_bar) bar.scheduleFocusRedraw(null);
     advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
 }
-
-/// Focus `target` with `model` when both are present, else clear focus when
-/// `target` is null. `target` non-null with a null `model` is a no-op (the
-/// caller decided not to focus, mirroring the inline `if (model) |m|` pattern
-/// it replaces).
-pub fn focusOrClear(target: ?u32, model: ?window.InputModel, reason: Reason) void {
-    if (target) |t| {
-        if (model) |m| setFocusWithModel(t, reason, m);
-        return;
-    }
-    clearFocus();
-}
-
-/// Pre-grab focus resolution: bundles a window target with its input
-/// model, resolved before `xcb_grab_server` so the grab body stays
-/// fire-and-forget. Use with `focusOrClear` to apply in one call.
-pub const FocusContext = struct {
-    target: ?u32,
-    model: ?window.InputModel,
-
-    pub fn resolve(target: ?u32) FocusContext {
-        return .{
-            .target = target,
-            .model = if (target) |t| window.getInputModel(core.getState().conn, t) else null,
-        };
-    }
-
-    pub fn apply(self: FocusContext, reason: Reason) void {
-        focusOrClear(self.target, self.model, reason);
-    }
-};
 
 /// Write `_NET_ACTIVE_WINDOW` to the root window so EWMH clients stay in sync.
 /// No-ops when the atom was not resolved at init time.
@@ -743,7 +662,7 @@ inline fn appendVisible(w: u32, len: *usize) void {
 
 /// Build an ordered list of currently-visible windows for cycling.
 ///
-/// All visible windows in tracking-table order (WP6: the legacy tiling-pool
+/// All visible windows in tracking-table order (the legacy tiling-pool
 /// branch is gone — the pool list is never fed). Emits only windows that are
 /// on the current workspace and not minimized. Returns the count written into
 /// `cycle_buf`, or 0 if none.

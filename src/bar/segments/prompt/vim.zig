@@ -19,7 +19,7 @@ const xk_end = @intFromEnum(XK.End);
 
 pub const default_max_input: usize = 512;
 
-pub const Action = enum { none, deactivate, spawn, spawn_keep };
+pub const Action = enum { none, deactivate, spawn };
 
 /// The integer value is the index into the cached mode-width array in prompt.zig.
 pub const Mode = enum(u2) {
@@ -53,8 +53,6 @@ const PendingCmd = struct {
     awaiting: Awaiting = .none,
 };
 
-const buf_fields = .{ "buf", "yank_buf" };
-
 /// All state for the vim editing engine.
 pub const VimState = struct {
     allocator: std.mem.Allocator = undefined,
@@ -74,21 +72,17 @@ pub const VimState = struct {
     yank_len: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, max_input: usize) !VimState {
-        var vs = VimState{
+        return .{
             .allocator = allocator,
             .max_input = max_input,
+            .buf = try allocator.alloc(u8, max_input),
+            .yank_buf = try allocator.alloc(u8, max_input),
         };
-        inline for (buf_fields) |field| {
-            @field(vs, field) = try allocator.alloc(u8, max_input);
-        }
-        return vs;
     }
 
     pub fn reset(vs: *VimState) void {
-        var saved_bufs: [buf_fields.len][]u8 = undefined;
-        inline for (buf_fields, 0..) |field, i| {
-            saved_bufs[i] = @field(vs, field);
-        }
+        const saved_buf = vs.buf;
+        const saved_yank_buf = vs.yank_buf;
         const saved_allocator = vs.allocator;
         const saved_max_input = vs.max_input;
 
@@ -96,26 +90,19 @@ pub const VimState = struct {
 
         vs.allocator = saved_allocator;
         vs.max_input = saved_max_input;
-        inline for (buf_fields, 0..) |field, i| {
-            @field(vs, field) = saved_bufs[i];
-        }
+        vs.buf = saved_buf;
+        vs.yank_buf = saved_yank_buf;
     }
 
     pub fn deinit(vs: *VimState) void {
-        inline for (buf_fields) |field| {
-            vs.allocator.free(@field(vs, field));
-        }
+        vs.allocator.free(vs.buf);
+        vs.allocator.free(vs.yank_buf);
         vs.* = .{};
     }
 };
 
 fn resetPendingCmd(vs: *VimState) void {
     vs.pending = .{};
-}
-
-inline fn pendingDone(vs: *VimState) Action {
-    resetPendingCmd(vs);
-    return .none;
 }
 
 pub fn onDeactivate(vs: *VimState) void {
@@ -137,7 +124,7 @@ pub fn insertSlice(vs: *VimState, slice: []const u8) void {
     vs.cursor += n;
 }
 
-pub inline fn isPrintableAscii(sym: xcb.xcb_keysym_t) bool {
+inline fn isPrintableAscii(sym: xcb.xcb_keysym_t) bool {
     return sym >= 0x20 and sym <= 0x7e;
 }
 

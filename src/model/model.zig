@@ -1,4 +1,4 @@
-//! INVARIANT(P1): single source of truth for management state.
+//! Single source of truth for management state.
 //! Layer rule: imports are std + utils + constants ONLY. No X11 access.
 const std = @import("std");
 const utils = @import("utils");
@@ -6,7 +6,7 @@ const constants = @import("constants");
 
 pub const WindowId = u32;
 /// Local alias so model never imports core. Convert core.WorkspaceId via
-/// `.index` at entry points (refines decision C-D6).
+/// `.index` at entry points.
 pub const WSId = u16;
 pub const Mask = u64;
 
@@ -29,7 +29,7 @@ pub const ALL_MASK: Mask = blk: {
 };
 
 /// STRANGLER COPY: duplicate of layouts.SizeHints. Field-for-field identical;
-/// pipeline converts between the two during migration (E.7). Do NOT import
+/// pipeline converts between the two during migration. Do NOT import
 /// layouts from here (layer rule).
 pub const SizeHints = struct {
     max_width: u16 = 0, // PMaxSize
@@ -48,11 +48,9 @@ pub const LayoutParams = struct {
     master_width: f32 = 0.5,
     master_count: u8 = 1,
     stack_balance: f32 = 0,
-    scroll_prev: ?WindowId = null, // decision C-D2
-    /// Scroll viewport state (changelog 2026-08-22): model-owned so the
-    /// layout engine stays pure. Legacy scroll.zig mutated its runtime state
-    /// inside the retile; the snap-right-on-new-window and clamp duties now
-    /// belong to callers (actions/sync, train steps e/f).
+    /// Scroll viewport state: model-owned so the layout engine stays pure.
+    /// The snap-right-on-new-window and clamp duties belong to callers
+    /// (actions/sync).
     scroll_offset: i32 = 0,
     scroll_prev_count: u32 = 0,
 };
@@ -65,16 +63,13 @@ pub const BaseMode = union(enum) {
     floating: utils.Rect,
 };
 
-/// Contract refinement vs §7.2 (changelog 2026-08-21): minimized stores the
-/// ENTIRE previous mode plus its tiled slot, which preserves BC08 exactly
-/// (restore pops straight back into fullscreen when that was prior).
+/// Minimized stores the ENTIRE previous mode plus its tiled slot, which
+/// preserves restore-exactly-into-fullscreen behavior.
 pub const FullscreenPayload = struct { ws: WSId, base: BaseMode };
 
-/// Previous-mode payload of minimized. Flattened one level (approved
-/// 2026-08-22): a by-value recursive `prev: Mode` cannot compile, and the
-/// recursion depth is provably <= 1 because minimize() only accepts
-/// base/fullscreen states. Same information content as the spec's recursive
-/// field; BC08 semantics unchanged.
+/// Previous-mode payload of minimized. Flattened one level: a by-value
+/// recursive `prev: Mode` cannot compile, and the recursion depth is
+/// provably <= 1 because minimize() only accepts base/fullscreen states.
 pub const PrevMode = union(enum) {
     base: BaseMode,
     fullscreen: FullscreenPayload,
@@ -102,7 +97,7 @@ pub const WsState = struct {
 
 pub const store_capacity = 512;
 pub const mru_capacity = 16;
-/// Bounded per-workspace tiled membership list (I8: defined capacity,
+/// Bounded per-workspace tiled membership list (defined capacity,
 /// total operations — transitions never allocate, so no OOM rollback paths).
 pub const max_tiled_per_ws = constants.Limits.max_tiled_windows;
 pub const OrderList = utils.BoundedList(WindowId, max_tiled_per_ws);
@@ -158,9 +153,8 @@ fn removeFromMruAll(m: *Model, win: WindowId) void {
 pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) error{CapacityFull}!void {
     if (m.store.has(win)) return;
     const target: WSId = hint_ws orelse m.current;
-    // INVARIANT(I8): defined-capacity refusal with rollback, BEFORE any
-    // observable state change. No allocation anywhere: the only failure
-    // modes are the store bound and the per-ws tiled-list bound.
+    // Defined-capacity refusal with rollback, BEFORE any
+    // observable state change.
     _ = m.store.put(win, .{
         .mask = bit(target),
         .mode = .{ .base = .tiled },
@@ -170,17 +164,13 @@ pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) error{CapacityFull}!vo
         return error.CapacityFull;
     }
     // NOTE: master-fifo spawn placement lives in actions.mapRequest — this
-    // primitive is a dumb membership insert so non-spawn callers never get
-    // windows silently reordered.
+    // primitive is a dumb membership insert.
 }
 
 pub fn unregister(m: *Model, win: WindowId) void {
     _ = m.store.getPtr(win) orelse return;
     if (findHome(m, win)) |h| removeValue(&m.ws[h].tiled_order, win);
     removeFromMruAll(m, win);
-    for (&m.ws) |*s| {
-        if (s.params.scroll_prev == win) s.params.scroll_prev = null;
-    }
     if (m.focused == win) m.focused = null;
     _ = m.store.remove(win);
 }
@@ -190,7 +180,7 @@ pub const MinimizeError = error{CapacityFull};
 pub fn minimize(m: *Model, win: WindowId) MinimizeError!void {
     const e = m.store.getPtr(win) orelse return;
     if (e.mode == .minimized) return;
-    // INVARIANT(I8): capacity check BEFORE any mutation (T17).
+    // Capacity check BEFORE any mutation (T17).
     if (countMinimized(m) >= MAX_MINIMIZED) return error.CapacityFull;
     var slot: ?usize = null;
     if (findHome(m, win)) |h| {
@@ -211,27 +201,21 @@ pub fn restore(m: *Model, win: WindowId) void {
     if (e.mode != .minimized) return;
     const mm = e.mode.minimized;
     // Which previous states re-enter a home list?
-    //   - base-tiled prev: was listed before minimization, must be re-listed.
-    //   - floating-prev: restores to its saved rect directly (fix P2-7);
-    //     appending it would create a phantom layout member that shifts
-    //     every other window's slot.
-    //   - fullscreen-prev whose inner base is tiled: WAS listed when
-    //     minimized (toggleFullscreen keeps the slot; minimize removed it),
-    //     so BC08 ("slot re-added THEN fullscreen re-entered w/ saved rect")
-    //     requires re-adding it here too. Skipping that stranded the window:
-    //     after a later exit-fullscreen it was base-tiled but home-less —
-    //     invisible to the engine (sync's orphan branch kept stale geometry)
-    //     and untileable via toggleFloating, which never inserts into lists.
+    //   - base-tiled prev: must be re-listed.
+    //   - floating-prev: restores to its saved rect directly; appending it
+    //     would create a phantom layout member.
+    //   - fullscreen-prev whose inner base is tiled: slot was removed on
+    //     minimize so it must be re-added here too. Skipping stranded the
+    //     window: after exit-fullscreen it was base-tiled but home-less.
     const wants_home = switch (mm.prev) {
         .base => |b| b == .tiled,
         .fullscreen => |f| f.base == .tiled,
     };
     if (wants_home) {
-        const h: WSId = lowestBit(e.mask); // follows tag-moves made while hidden (BC12)
+        const h: WSId = lowestBit(e.mask); // follows tag-moves made while hidden
         const list = &m.ws[h].tiled_order;
-        // I8: refuse-before-mutate — a full home list leaves the window
-        // minimized rather than half-restoring it. Bounded lists make this
-        // the ONLY failure mode; there is no allocation to fail.
+        // Refuse-before-mutate: a full home list leaves the window
+        // minimized rather than half-restoring it.
         if (!list.append(win)) return;
         if (mm.slot) |s| {
             const last = list.len - 1;
@@ -253,7 +237,7 @@ fn slotLess(a: ?usize, b: ?usize) bool {
     return a.? < b.?;
 }
 
-/// Restore-order target selection over minimized windows on `ws` (BC06/BC07):
+/// Restore-order target selection over minimized windows on `ws`:
 /// `.fifo` = oldest minimize seq, `.lifo` = newest. Returns null when nothing
 /// on `ws` is minimized.
 pub fn restoreCandidate(m: *const Model, ws: WSId, order: RestoreOrder) ?WindowId {
@@ -278,8 +262,7 @@ pub fn restoreCandidate(m: *const Model, ws: WSId, order: RestoreOrder) ?WindowI
 
 pub const RestoreOrder = enum { lifo, fifo };
 
-/// Most recently minimized PLAIN window on `ws` (BC09 focus target: legacy
-/// focuses plain_wins[last]; fullscreen-prev windows are excluded).
+/// Most recently minimized PLAIN window on `ws` (fullscreen-prev excluded).
 pub fn latestMinimizedBase(m: *const Model, ws: WSId) ?WindowId {
     var best: ?WindowId = null;
     var best_seq: u32 = 0;
@@ -308,7 +291,7 @@ pub fn restoreAllOnWs(m: *Model, ws: WSId) void {
             n += 1;
         }
     }
-    // insertion sort by slot ascending, nulls last (BC09)
+    // insertion sort by slot ascending, nulls last
     for (1..n) |a| {
         const w = wins[a];
         const s = slots[a];
@@ -346,7 +329,7 @@ pub fn moveWindowToWs(m: *Model, win: WindowId, ws: WSId) void {
     const e = m.store.getPtr(win) orelse return;
     if (e.mask == ALL_MASK) return; // pinned stays everywhere-visible
     if (e.mode == .minimized) {
-        e.mask = bit(ws); // BC12: record follows the move
+        e.mask = bit(ws); // record follows the move
         return;
     }
     // Fullscreen record follows the move (legacy transferFullscreenRecord);
@@ -367,7 +350,7 @@ pub fn moveWindowToWs(m: *Model, win: WindowId, ws: WSId) void {
     e.mask = bit(ws);
     if (findHome(m, win)) |h| {
         if (h != ws) {
-            // I8 refuse-before-mutate: a full destination list cancels the
+            // Refuse-before-mutate: a full destination list cancels the
             // move instead of stranding the window home-less.
             if (m.ws[ws].tiled_order.len >= max_tiled_per_ws) {
                 e.mask = bit(h);
@@ -448,9 +431,9 @@ pub fn cycleLayout(m: *Model, dir: i32) void {
     p.variant_idx = 0;
 }
 
-/// Variant count per layout kind (caller-side variant resolution, §7.4
-/// step 3): master lifo/fifo, monocle gapless/gaps, grid rigid/relaxed;
-/// the rest have exactly one.
+/// Variant count per layout kind (caller-side variant resolution): master
+/// lifo/fifo, monocle gapless/gaps, grid rigid/relaxed; the rest have
+/// exactly one.
 pub fn variantCount(kind: LayoutKind) u8 {
     return switch (kind) {
         .master, .monocle, .grid => 2,
@@ -499,7 +482,7 @@ pub fn honorConfigureRequest(m: *Model, win: WindowId, req: ConfigureReq) HonorD
                 return .geometry_applied;
             },
             .tiled => {
-                // Geometry denied. BW honored; recording is SYNC's job (P5/I5).
+                // Geometry denied. BW honored; recording is SYNC's job.
                 if (req.border_width != null) return .border_only;
                 return .ignored;
             },
@@ -511,14 +494,12 @@ pub fn honorConfigureRequest(m: *Model, win: WindowId, req: ConfigureReq) HonorD
 
 pub fn applyConfigReload(m: *Model, tpl: LayoutParams) void {
     for (&m.ws) |*s| {
-        const keep_prev = s.params.scroll_prev;
         // Scroll viewport state is RUNTIME state, not config: preserving it
         // prevents a spurious snap-right (n > prev_count fires when the
         // counter resets) on an unrelated reload while scroll is active.
         const keep_offset = s.params.scroll_offset;
         const keep_prev_count = s.params.scroll_prev_count;
         s.params = tpl;
-        s.params.scroll_prev = keep_prev;
         s.params.scroll_offset = keep_offset;
         s.params.scroll_prev_count = keep_prev_count;
     }
@@ -534,9 +515,6 @@ pub fn setFocus(m: *Model, win: WindowId) void {
     if (!list.insert(0, win)) {
         list.orderedRemove(list.len - 1);
         _ = list.insert(0, win);
-    }
-    if (m.ws[m.current].params.kind == .scroll) {
-        m.ws[m.current].params.scroll_prev = win; // decision C-D2
     }
 }
 
@@ -563,8 +541,40 @@ pub fn fullscreenWsOf(m: *const Model, win: WindowId) ?WSId {
     };
 }
 
-/// BC06 minimize-fallback target policy, extracted verbatim from
-/// actions.pickFallback so tests exercise the same logic without linking the
+/// MODEL-mode fullscreen query (single source of truth; replaces the legacy
+/// fullscreen-record lookup for EWMH and client-message paths): true when
+/// `win`'s current mode is fullscreen, regardless of which workspace its
+/// record targets.
+pub fn isFullscreenMode(m: *const Model, win: WindowId) bool {
+    const e = m.store.get(win) orelse return false;
+    return e.mode == .fullscreen;
+}
+
+/// Whether `win` is fullscreen AND its record targets workspace `ws`.
+/// Unlike fullscreenOccupantOnWs this does NOT consult visibility — callers
+/// use it for pre-toggle classification and was-fullscreen captures.
+pub fn isFullscreenOnWs(m: *const Model, win: WindowId, ws: WSId) bool {
+    const e = m.store.get(win) orelse return false;
+    return e.mode == .fullscreen and e.mode.fullscreen.ws == ws;
+}
+
+/// The window occupying the visible fullscreen slot on `ws`, if any. Model
+/// guarantees at most one visible fullscreen per ws (sync parks the rest).
+/// Replaces the deleted legacy fullscreen.zig record store for bar
+/// visibility decisions and enter/exit classification.
+pub fn fullscreenOccupantOnWs(m: *const Model, ws: WSId) ?WindowId {
+    for (0..m.store.count()) |i| {
+        const it = m.store.at(i);
+        if (it.val.mode != .fullscreen) continue;
+        if (it.val.mode.fullscreen.ws != ws) continue;
+        if (!visibleOn(m, it.key, ws)) continue;
+        return it.key;
+    }
+    return null;
+}
+
+/// Minimize-fallback target policy. The window layer's focusFallback
+/// delegates here, and tests exercise the same logic without linking the
 /// protocol layers. Tier order on workspace `ws`:
 ///   1. focus MRU, newest first,
 ///   2. reversed tiled_order,
@@ -574,9 +584,7 @@ pub fn fallbackFocusCandidate(m: *const Model, ws: WSId) ?WindowId {
     // 1. focus MRU, NEWEST first: mru[0] is the MOST RECENT focus (T15),
     //    so minimizing the focused window falls back to the previously
     //    focused one. visibleOn rejects minimized entries, including the
-    //    just-minimized window itself. (The pre-extraction actions copy
-    //    scanned this list backwards — oldest-first — contradicting both
-    //    its own comment and WsState's; caught by T34.)
+    //    just-minimized window itself.
     const mru = &m.ws[ws].focus_mru;
     for (mru.items[0..mru.len]) |cand| {
         if (visibleOn(m, cand, ws)) return cand;

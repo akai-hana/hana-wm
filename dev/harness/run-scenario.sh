@@ -4,7 +4,8 @@
 # Usage:
 #   ./run-scenario.sh S01-spawn-tiled [S02-close ...]   run scenarios
 #   --golden  capture results into golden/ instead of only out/
-#   --compare diff each scenario's normalized output against golden/ after running
+#   --compare compare each scenario against golden/ (semantic: geometry + EWMH + STATE DUMP)
+#   --compare-raw  byte-exact diff of all normalized artifacts (old behavior)
 #   --keep    keep Xvfb/hana alive after the last scenario (interactive debugging)
 #
 # Env:
@@ -24,15 +25,16 @@ HARNESS_ROOT="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$HARNESS_ROOT/../.." && pwd)"
 HANA_BIN="${HANA_BIN:-$REPO_ROOT/zig-out/bin/hana}"
 HW_DISPLAY="${HARNESS_DISPLAY:-:99}"
-GOLDEN=0; COMPARE=0; KEEP=0
+GOLDEN=0; COMPARE=0; COMPARE_RAW=0; KEEP=0
 
 while [ $# -gt 0 ]; do
 	case "$1" in
-		--golden)  GOLDEN=1 ;;
-		--compare) COMPARE=1 ;;
-		--keep)    KEEP=1 ;;
-		-*)        echo "unknown flag: $1" >&2; exit 2 ;;
-		*)         break ;;
+		--golden)       GOLDEN=1 ;;
+		--compare)      COMPARE=1 ;;
+		--compare-raw)  COMPARE_RAW=1 ;;
+		--keep)         KEEP=1 ;;
+		-*)             echo "unknown flag: $1" >&2; exit 2 ;;
+		*)              break ;;
 	esac
 	shift
 done
@@ -143,8 +145,6 @@ run_one() {
 	# Normalize everything volatile.
 	HW_KEEP_RAW=1 "$HARNESS_ROOT/normalize.sh" "$out"/snap-*.tree.raw "$out"/snap-*.props.raw "$out/hana.log"
 
-	grep -h "bench:" "$out/hana.log.norm" >"$out/bench.txt" 2>/dev/null || : >"$out/bench.txt"
-
 	# Signal log (harness hardening): the WM-internal-truth subset of
 	# hana's log — warnings/errors (dropped requests, BadWindow probes),
 	# state dumps (registry counts, focus) and hover-focus decisions.
@@ -165,16 +165,63 @@ run_one() {
 		return 1
 	fi
 
-	if [ "$COMPARE" = "1" ]; then
+	if [ "$COMPARE" = "1" ] || [ "$COMPARE_RAW" = "1" ]; then
 		gold="$HARNESS_ROOT/golden/$sc"
 		if [ ! -d "$gold" ]; then
 			echo "NOCOMPARE $sc (no goldens)"
 		else
-			if diff -ru "$gold" "$out" --exclude=config-home --exclude='*.raw' --exclude=xvfb.log --exclude=hana.log --exclude=clients.log >${TMPDIR:-/tmp}/hana-diff-$sc.txt 2>&1; then
-				echo "PASS $sc (parity)"
+			diff_file="${TMPDIR:-/tmp}/hana-diff-$sc.txt"
+			> "$diff_file"
+			fail=0
+
+			if [ "$COMPARE_RAW" = "1" ]; then
+				# Raw mode: byte-exact diff of all normalized artifacts
+				if diff -ru "$gold" "$out" --exclude=config-home --exclude='*.raw' --exclude=xvfb.log --exclude=hana.log --exclude=clients.log >>"$diff_file" 2>&1; then
+					echo "PASS $sc (parity)"
+				else
+					echo "DIFF $sc (see $diff_file)"
+					failures="$failures $sc"
+				fi
 			else
-				echo "DIFF $sc (see ${TMPDIR:-/tmp}/hana-diff-$sc.txt)"
-				failures="$failures $sc"
+				# Semantic mode: compare only structural invariants.
+				# Geometry trees + EWMH props: byte-exact (core correctness)
+				for f in "$gold"/snap-*.tree.norm "$gold"/snap-*.props.norm; do
+					[ -f "$f" ] || continue
+					bn=$(basename "$f")
+					if ! diff -q "$f" "$out/$bn" >/dev/null 2>&1; then
+						echo "  DIFF $bn" >> "$diff_file"
+						diff -u "$f" "$out/$bn" >> "$diff_file" 2>&1
+						fail=1
+					fi
+				done
+
+				# S13 borders assertion (explicit BW invariant)
+				if [ -f "$gold/borders-after-reload.norm" ]; then
+					if ! diff -q "$gold/borders-after-reload.norm" "$out/borders-after-reload.norm" >/dev/null 2>&1; then
+						echo "  DIFF borders-after-reload.norm" >> "$diff_file"
+						diff -u "$gold/borders-after-reload.norm" "$out/borders-after-reload.norm" >> "$diff_file" 2>&1
+						fail=1
+					fi
+				fi
+
+				# STATE DUMP fields: compare last occurrence per field from hana.log.sig
+				for field in "Focused:" "Total windows:" "Suppress focus:" "WS[0-9]+:" "Tiling enabled:" "Tiling layout:" "Tiled windows:"; do
+					gold_val=$(grep -E "$field" "$gold/hana.log.sig" 2>/dev/null | tail -1)
+					out_val=$(grep -E "$field" "$out/hana.log.sig" 2>/dev/null | tail -1)
+					if [ "$gold_val" != "$out_val" ]; then
+						echo "  DIFF $field" >> "$diff_file"
+						printf "  - gold: %s\n" "$gold_val" >> "$diff_file"
+						printf "  + out:  %s\n" "$out_val" >> "$diff_file"
+						fail=1
+					fi
+				done
+
+				if [ "$fail" = "0" ]; then
+					echo "PASS $sc (parity)"
+				else
+					echo "DIFF $sc (see $diff_file)"
+					failures="$failures $sc"
+				fi
 			fi
 		fi
 	else
@@ -184,7 +231,7 @@ run_one() {
 	if [ "$GOLDEN" = "1" ]; then
 		gold="$HARNESS_ROOT/golden/$sc"
 		rm -rf "$gold"; mkdir -p "$gold"
-		find "$out" -maxdepth 1 \( -name '*.norm' -o -name 'bench.txt' -o -name 'hana.log.sig' \) -exec cp {} "$gold/" \;
+		find "$out" -maxdepth 1 \( -name '*.norm' ! -name 'hana.log.norm' -o -name 'hana.log.sig' \) -exec cp {} "$gold/" \;
 		echo "GOLDEN $sc captured -> ${gold#$REPO_ROOT/}"
 	fi
 

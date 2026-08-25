@@ -588,7 +588,6 @@ pub const Config = struct {
     /// Each subsystem is always fully compiled in; these flags just gate
     /// whether its behavior (and keybindings/actions that drive it) is active.
     fullscreen_enabled: bool = true,
-    minimize_enabled: bool = true,
     drag_enabled: bool = true,
 
     /// How close (in px or %) a window edge must be to a monitor/bar boundary

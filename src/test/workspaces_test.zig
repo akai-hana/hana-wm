@@ -1,6 +1,6 @@
-//! Unit tests for per-workspace config-override resolution (ND-10):
-//! duplicate entries for one workspace must resolve LAST-WINS uniformly
-//! across variant and master-count lookups.
+//! Unit tests for per-workspace config-override resolution: duplicate
+//! entries for one workspace must resolve LAST-WINS uniformly across
+//! variant and master-count lookups.
 
 const std = @import("std");
 const testing = std.testing;

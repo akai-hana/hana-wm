@@ -45,11 +45,6 @@ pub fn build(b: *std.Build) !void {
     const build_opts = b.addOptions();
     build_opts.addOption(bool, "enable_debug_logging", optimize == .Debug);
     build_opts.addOption(bool, "has_fallback_toml", fallback_toml != null);
-    build_opts.addOption(
-        bool,
-        "bench",
-        b.option(bool, "bench", "Enable opt-in performance probe counters (default: off)") orelse false,
-    );
 
     // Optional module detection
     const has_bar = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar");
@@ -64,6 +59,14 @@ pub fn build(b: *std.Build) !void {
 
     // Module discovery
     var discovery = try Module.DiscoveryContext.run(b, target, optimize, source_root, entry_point_path);
+    // schema_test drives the full load pipeline (config.loadConfig), which
+    // reaches fallback.zig's terminal detection -> std.c.getenv and the
+    // keybind parser's xkb_keysym_from_name; give that test module libc and
+    // the same system libraries as the root module.
+    if (discovery.modules.get("schema_test")) |m| {
+        m.link_libc = true;
+        SystemLibraries.link(m);
+    }
     // Register null vim fallback when vim.zig is absent but bar is present.
     // When bar itself is removed, prompt is also gone so no vim stub is needed.
     if (has_bar and !has_vim) {

@@ -1,11 +1,11 @@
 //! Production request sink for sync.zig — the ONLY file under src/sync/
-//! allowed to contain raw `xcb_` calls (P3 acceptance gate). Every shim
-//! wraps an existing legacy pattern 1:1:
+//! allowed to contain raw `xcb_` calls. Every shim wraps an existing
+//! legacy pattern 1:1:
 //!   geom          ≙ utils.configureWindow (plus the atomic raise variant
 //!                   that merges a stack mode into the same request)
 //!   borderWidth   ≙ borders.applyWidth's send (dedup lives in LastSent)
 //!   borderPixel   ≙ utils.setBorderPixel
-//!   park          ≙ X-offscreen + BELOW merged into one request (§7.4 step 7)
+//!   park          ≙ X-offscreen + BELOW merged into one request
 //!   stackOnly     ≙ utils.raiseWindow and its BELOW sibling
 //!   flush/grab    ≙ conn.flush / utils.grabServer / ungrabAndFlush
 
@@ -61,7 +61,7 @@ pub const XcbSink = struct {
         utils.setBorderPixel(self.conn, win, pixel);
     }
 
-    /// Park = offscreen X + stack BELOW in ONE configure_window (§7.4 step 7).
+    /// Park = offscreen X + stack BELOW in ONE configure_window.
     fn parkShim(ptr: *anyopaque, win: u32) void {
         const self: *XcbSink = @ptrCast(@alignCast(ptr));
         _ = xcb.xcb_configure_window(

@@ -1,4 +1,4 @@
-//! Workspace state (WP6 residue).
+//! Workspace state holder.
 //!
 //! Switching, tagging, moving and all-view live in the model
 //! (`actions.switchTo/tagToggle/moveWindowTo/allViewToggle` + sync); the
@@ -67,10 +67,10 @@ pub fn applyWorkspaceOverrides(
     }
 }
 
-/// Last matching override wins (ND-10): duplicate entries for one workspace
-/// now resolve identically across ALL per-ws fields — this lookup, the
+/// Last matching override wins: duplicate entries for one workspace now
+/// resolve identically across ALL per-ws fields — this lookup, the
 /// master-count loop below, and actions.seedParamsFromConfig's layout lookup
-/// all use loop-overwrite (last-wins), matching TOML parser intuition.
+/// all use loop-overwrite (last-wins).
 fn lookupVariant(cfg_tiling: *const types.TilingConfig, id: u8) ?types.LayoutVariantOverride {
     var found: ?types.LayoutVariantOverride = null;
     for (cfg_tiling.workspace_layout_overrides.items) |o| {
@@ -110,7 +110,6 @@ pub fn deinit() void {
 }
 
 /// Clears per-workspace bookkeeping hooks for a window being unmanaged.
-/// WP6: only the tracking/model removal remains meaningful.
 pub fn removeWindow(win: u32) void {
     tracking.removeWindow(win);
 }

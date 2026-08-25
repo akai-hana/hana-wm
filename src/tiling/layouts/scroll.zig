@@ -8,9 +8,8 @@ const engine = @import("engine");
 const View = engine.View;
 const List = engine.List;
 
-// CALLER DUTIES (changelog 2026-08-22; legacy did these inside its retile):
-// before compute(), the caller must replicate on params.scroll_offset /
-// params.scroll_prev_count:
+// CALLER DUTIES: before compute(), the caller must replicate on
+// params.scroll_offset / params.scroll_prev_count:
 //   1. if (n > scroll_prev_count) scroll_offset = maxOffset(n, slotWidth(wa.w), wa.w);
 //   2. scroll_offset = clamp(scroll_offset, 0, maxOffset(...));
 //   3. scroll_prev_count = n;
@@ -45,7 +44,7 @@ pub fn compute(v: View, out: *List) void {
 
     const sw_i32: i32 = @intCast(screen_w);
 
-    // Caller pre-clamped (see header); consumed read-only per P2.
+    // Caller pre-clamped (see header); consumed read-only.
     const scroll: i32 = v.params.scroll_offset;
 
     const content_h: u16 = engine.shrinkClamped(screen_h, m.gap *| 2 +| m.border *| 2, v.env.min_dim);

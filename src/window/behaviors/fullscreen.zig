@@ -1,14 +1,11 @@
-//! Fullscreen protocol-side residue (WP6 end-state).
+//! Fullscreen protocol-side residue.
 //!
-//! Fullscreen TRUTH lives in the model (`Entry.mode == .fullscreen`, P1);
+//! Fullscreen TRUTH lives in the model (`Entry.mode == .fullscreen`);
 //! query it through actions.isFullscreenMode / actions.fullscreenOccupiedOnWs.
 //! This module owns only what is genuinely protocol-side:
 //!   - deferred bar hide/show armed around a fullscreen transition and
 //!     resolved on ConfigureNotify confirmation,
 //!   - EWMH _NET_WM_STATE_FULLSCREEN advertisement.
-//! The legacy per-workspace record store (g_slots) is deleted: its writers
-//! were unreachable after WP6 while five modules still read it — every read
-//! silently evaluated to "not fullscreen" (the strangler failure mode).
 
 const std = @import("std");
 
@@ -58,8 +55,8 @@ pub fn deinit() void {
 
 // Set or clear the EWMH _NET_WM_STATE_FULLSCREEN property on `win`.
 // Guards on both atoms being valid before touching the property.
-// PIPELINE: pub for actions.fullscreenToggle (train b) — EWMH advertisement
-// stays protocol-side, exactly like the focus layer until train f.
+// Pub for actions.fullscreenToggle — EWMH advertisement stays
+// protocol-side.
 pub fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
     if (g_net_wm_state == xcb.XCB_ATOM_NONE or
         g_net_wm_state_fullscreen == xcb.XCB_ATOM_NONE) return;
@@ -76,10 +73,9 @@ pub fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
     );
 }
 
-// WP6 note: the legacy commit helpers (enterFullscreenCommit /
-// exitFullscreenCommit / applyFullscreenGeometry) are deleted — they had zero
-// reachable callers after actions.fullscreenToggleWindow became the sole
-// fullscreen path; sync.reconcile derives their wire traffic from the model.
+// The legacy commit helpers (enterFullscreenCommit / exitFullscreenCommit /
+// applyFullscreenGeometry) are deleted — sync.reconcile derives their wire
+// traffic from the model.
 
 /// Called from the ConfigureNotify handler in events.zig. Drives both deferred
 /// bar transitions: hide on confirmed fullscreen dimensions (enter), show on
@@ -111,22 +107,21 @@ fn resolvePendingBarShow() void {
     if (build_options.has_bar) bar.setBarState(.show_fullscreen);
 }
 
-/// PIPELINE (train b): arm the deferred bar-hide from the new path's
-/// fullscreenToggle. Same contract as enterFullscreenCommit's tail.
+/// Arm the deferred bar-hide from the fullscreenToggle path.
 pub fn armPendingBarHide(win: u32) void {
     g_pending_bar_show_win = 0;
     g_pending_bar_hide_win = win;
 }
 
-/// PIPELINE (train b): arm the deferred bar-show after an exit reconcile.
-/// Same contract as exitFullscreen's tail (armed AFTER geometry settles).
+/// Arm the deferred bar-show after an exit reconcile (armed AFTER geometry
+/// settles).
 pub fn armPendingBarShow(win: u32) void {
     g_pending_bar_hide_win = 0;
     g_pending_bar_show_win = win;
 }
 
 /// Called when a window is destroyed; clears its pending deferred bar op so
-/// the bar doesn't stay stuck. Both cases need it (ND-21): show (window dies
+/// the bar doesn't stay stuck. Both cases need it: show (window dies
 /// between exit and its ConfigureNotify) AND hide (window dies between
 /// armPendingBarHide and its ConfigureNotify — nothing else would ever
 /// resolve the hide, leaving the bar hidden for good).

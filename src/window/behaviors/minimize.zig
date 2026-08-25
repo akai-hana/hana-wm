@@ -1,9 +1,7 @@
-//! Window minimization — model-backed queries (WP6).
+//! Window minimization — model-backed queries.
 //!
-//! Minimize state lives in the model (`Entry.mode == .minimized`); the legacy
-//! side buffer this module once owned was orphaned when actions.minimize took
-//! over the entry path and is gone. What remains are read-side helpers for
-//! the bar and focus/fullscreen predicates.
+//! Minimize state lives in the model (`Entry.mode == .minimized`). What
+//! remains are read-side helpers for the bar and focus/fullscreen predicates.
 
 const std = @import("std");
 const pipeline = @import("pipeline");

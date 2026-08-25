@@ -1,7 +1,7 @@
-//! Config reader tests (ND-3 / S13F9 pairing): readFileAlloc round-trip
-//! exactness across size boundaries, the cap enforcement, and the stat-less
-//! growth path. The growth path is exercised via /proc (stat.size == 0 but
-//! non-empty content) — linux-only by nature, like the WM itself.
+//! Config reader tests: readFileAlloc round-trip exactness across size
+//! boundaries, the cap enforcement, and the stat-less growth path. The
+//! growth path is exercised via /proc (stat.size == 0 but non-empty
+//! content) — linux-only by nature, like the WM itself.
 //!
 //! Scratch files live under /tmp/opencode (pre-approved temp area); each
 //! test uses a unique name and cleans up after itself.
@@ -95,7 +95,7 @@ test "C4 readFileAlloc returns empty slice for empty file" {
 test "C5 readFileAlloc growth path handles stat-less files (/proc)" {
     const alloc = testing.allocator;
     // /proc/self/status reports stat.size == 0 with real content: forces the
-    // fallback read-with-growth loop (ND-3's rewritten path).
+    // fallback read-with-growth loop.
     const got = try config.readFileAlloc(alloc, "/proc/self/status");
     defer alloc.free(got);
     try testing.expect(got.len > 0);
