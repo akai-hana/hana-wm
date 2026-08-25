@@ -87,6 +87,11 @@ pub const Entry = struct {
     mask: Mask,
     mode: Mode,
     size_hints: SizeHints = .{},
+    /// Cached workspace whose tiled_order holds this window (single-membership
+    /// invariant). Updated by every transition that mutates tiled_order:
+    /// register, unregister, minimize, restore, moveWindowToWs, toggleFloating.
+    /// Null when the window has no tiled slot (floating or minimized-from-floating).
+    home_ws: ?WSId = null,
 };
 
 pub const WsState = struct {
@@ -131,7 +136,12 @@ fn removeValue(list: anytype, win: WindowId) void {
 }
 
 /// The workspace whose tiled_order holds win (single-membership invariant).
+/// Uses the cached home_ws when available; falls back to scan for
+/// backwards-compat with code that hasn't migrated yet.
 pub fn findHome(m: *const Model, win: WindowId) ?WSId {
+    if (m.store.get(win)) |e| {
+        if (e.home_ws) |h| return h;
+    }
     for (&m.ws, 0..) |*s, i| {
         if (findInOrder(&s.tiled_order, win) != null) return @intCast(i);
     }
@@ -155,7 +165,7 @@ pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) error{CapacityFull}!vo
     const target: WSId = hint_ws orelse m.current;
     // Defined-capacity refusal with rollback, BEFORE any
     // observable state change.
-    _ = m.store.put(win, .{
+    const ptr = m.store.put(win, .{
         .mask = bit(target),
         .mode = .{ .base = .tiled },
     }) catch return error.CapacityFull;
@@ -163,6 +173,9 @@ pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) error{CapacityFull}!vo
         _ = m.store.remove(win);
         return error.CapacityFull;
     }
+    // home_ws cache: set AFTER tiled_order append succeeds so the cache
+    // is only valid when the window actually has a tiled slot.
+    ptr.home_ws = target;
     // NOTE: master-fifo spawn placement lives in actions.mapRequest — this
     // primitive is a dumb membership insert.
 }
@@ -193,6 +206,7 @@ pub fn minimize(m: *Model, win: WindowId) MinimizeError!void {
         .minimized => return, // guarded above; unreachable in practice
     };
     e.mode = .{ .minimized = .{ .prev = prev, .slot = slot, .seq = m.next_seq } };
+    e.home_ws = null; // no longer in any tiled_order
     m.next_seq += 1;
 }
 
@@ -224,6 +238,7 @@ pub fn restore(m: *Model, win: WindowId) void {
                 _ = list.insert(s, win); // cannot fail: len < capacity here
             }
         }
+        e.home_ws = h;
     }
     e.mode = switch (mm.prev) {
         .base => |b| .{ .base = b },
@@ -348,16 +363,18 @@ pub fn moveWindowToWs(m: *Model, win: WindowId, ws: WSId) void {
         }
     }
     e.mask = bit(ws);
-    if (findHome(m, win)) |h| {
-        if (h != ws) {
+    const h: ?WSId = e.home_ws;
+    if (h) |old_h| {
+        if (old_h != ws) {
             // Refuse-before-mutate: a full destination list cancels the
             // move instead of stranding the window home-less.
             if (m.ws[ws].tiled_order.len >= max_tiled_per_ws) {
-                e.mask = bit(h);
+                e.mask = bit(old_h);
                 return;
             }
-            removeValue(&m.ws[h].tiled_order, win);
+            removeValue(&m.ws[old_h].tiled_order, win);
             _ = m.ws[ws].tiled_order.append(win);
+            e.home_ws = ws;
         }
     }
 }

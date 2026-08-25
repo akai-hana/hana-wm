@@ -240,6 +240,135 @@ const CommitFlags = struct {
     new_suppress: core.FocusSuppressReason,
 };
 
+// Two-phase focus protocol (Gap 1 atomicity fix)
+//
+// Some actions need focus protocol + geometry to land under one server grab.
+// The existing `setFocus`/`clearFocus` path does round trips (input-model
+// resolve) that cannot run inside a grab. Split into two phases:
+//
+//   Phase 1 (outside grab): prepareFocus / prepareClearFocus
+//     - Round trips: isWindowMapped, getInputModelResolved
+//     - Returns a FocusTransition descriptor (no X traffic)
+//
+//   Phase 2 (inside grab): applyPendingFocus
+//     - Fire-and-forget XCB only: set_input_focus, grab_buttons, raise,
+//       WM_TAKE_FOCUS, _NET_ACTIVE_WINDOW, bar dirty flag
+//     - No round trips, no model updates, no scheduleReconcile
+//
+// The caller owns the model update (model.setFocus / model.clearFocus)
+// and does it BEFORE the grab, so the model is consistent when the
+// reconcile runs inside the grab.
+
+pub const SetFocusIntent = struct {
+    win: u32,
+    old: ?u32,
+    flags: CommitFlags,
+};
+
+pub const ClearFocusIntent = struct {
+    old: ?u32,
+};
+
+pub const FocusTransition = union(enum) {
+    set: SetFocusIntent,
+    clear: ClearFocusIntent,
+    none: void,
+};
+
+/// Phase 1: resolve input model via round trips (outside grab).
+/// Returns a FocusTransition that can be committed inside the grab.
+/// Returns .none when focus should not change (invalid window, same window,
+/// unmapped liveness guard, or no_input model).
+pub fn prepareFocus(win: u32, reason: Reason) FocusTransition {
+    if (window.isInvalidWindow(win)) return .none;
+    if (state.?.last_applied == win) return .none;
+
+    const conn = core.getState().conn;
+
+    // Liveness guard: same as setFocus (mouse_click/user_command/pointer_sync
+    // must not focus a destroyed window).
+    if ((reason == .mouse_click or reason == .user_command or reason == .pointer_sync) and
+        !isWindowMapped(conn, win)) return .none;
+
+    const resolved = window.getInputModelResolved(conn, win);
+    if (resolved.model == .no_input) return .none;
+
+    // Cancel any stale confirm cookie (client-side, no round trip).
+    cancelPendingConfirm();
+
+    // Discard any stale pre-protocols cookie.
+    discardOptCookie(state.?.pre_protocols_cookie);
+    state.?.pre_protocols_cookie = null;
+
+    const old = state.?.last_applied;
+    return .{ .set = .{
+        .win = win,
+        .old = old,
+        .flags = .{
+            .set_input_focus = resolved.model != .globally_active,
+            .raise = shouldRaise(reason, win),
+            .send_wm_take_focus = true,
+            .take_focus_known = resolved.take_focus,
+            .arm_confirm = reason == .pointer_sync,
+            .schedule_bar = true,
+            .new_suppress = suppressionFor(reason, state.?.suppress_reason),
+        },
+    } };
+}
+
+/// Phase 1: prepare a focus-clear transition (outside grab).
+/// Returns .none when there is no X focus to clear.
+pub fn prepareClearFocus() FocusTransition {
+    if (state.?.last_applied == null) return .none;
+    cancelPendingConfirm();
+    return .{ .clear = .{ .old = state.?.last_applied } };
+}
+
+/// Phase 2: apply a prepared focus transition with fire-and-forget XCB only.
+/// Safe to call inside a server grab (no round trips, no model updates,
+/// no scheduleReconcile).
+pub fn applyPendingFocus(t: FocusTransition) void {
+    switch (t) {
+        .set => |intent| {
+            state.?.last_applied = intent.win;
+            state.?.suppress_reason = intent.flags.new_suppress;
+
+            grabButtons(intent.win, true);
+            if (intent.old) |o| grabButtons(o, false);
+
+            const conn = core.getState().conn;
+
+            if (intent.flags.set_input_focus) focusNow(conn, intent.win);
+            if (intent.flags.raise) utils.raiseWindow(conn, intent.win);
+
+            if (intent.flags.send_wm_take_focus) {
+                if (intent.flags.take_focus_known) |advertises| {
+                    window.sendWMTakeFocusKnown(conn, intent.win, 0, advertises);
+                }
+            }
+
+            if (intent.flags.arm_confirm) {
+                state.?.confirm_cookie = xcb.xcb_get_input_focus(conn);
+                state.?.confirm_win = intent.win;
+            }
+
+            if (intent.flags.schedule_bar) if (build_options.has_bar) bar.scheduleFocusRedraw(intent.win);
+
+            advertiseActiveWindow(intent.win);
+        },
+        .clear => |intent| {
+            if (intent.old) |old_win| grabButtons(old_win, false);
+            state.?.last_applied = null;
+            state.?.suppress_reason = .none;
+            const cs = core.getState();
+            focusNow(cs.conn, cs.root);
+            if (build_options.has_bar) bar.scheduleFocusRedraw(null);
+            advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
+        },
+        .none => {},
+    }
+}
+
 /// Core focus-transition implementation shared by all focus paths.
 /// NOTE: handleFocusIn does NOT call this; it delegates to
 /// sendFocusProtocol, which operates on different invariants (no grab
@@ -465,20 +594,20 @@ fn cancelPendingConfirm() void {
 /// so EWMH clients stay in sync.
 fn sendFocusProtocol(win: u32) void {
     const conn = core.getState().conn;
-    // take_focus is checked live twice here (getInputModel, then again inside
-    // sendWMTakeFocus); same "not worth entangling to save one round trip"
-    // reasoning as setFocus, just unpipelined since this path fires on focus
-    // steals, not on every event.
-    const model = window.getInputModel(conn, win);
-    if (model == .no_input) return;
-    if (model != .globally_active) {
+    // Single round trip: getInputModelResolved answers both the input model
+    // and the take_focus advertisement from one WM_PROTOCOLS query, so
+    // sendWMTakeFocusKnown can dispatch the ClientMessage without a second
+    // round trip.
+    const resolved = window.getInputModelResolved(conn, win);
+    if (resolved.model == .no_input) return;
+    if (resolved.model != .globally_active) {
         focusNow(conn, win);
     }
     // Always advertise the active window, regardless of input model.
     // Without this, a globally_active window that has stolen focus would leave
     // _NET_ACTIVE_WINDOW pointing at the thief even after we re-assert `win`.
     advertiseActiveWindow(win);
-    window.sendWMTakeFocus(conn, win, 0);
+    window.sendWMTakeFocusKnown(conn, win, 0, resolved.take_focus);
 }
 
 /// DWM's focusin: translated exactly. No mode/detail/managed filtering.
