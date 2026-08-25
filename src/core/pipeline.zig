@@ -147,6 +147,63 @@ pub inline fn reconcileUnderGrabNow(o: sync.ReconcileOpts) void {
     sync.reconcileUnderGrab(&instance, ctx(), o);
 }
 
+/// Grab server → commit focus transition → reconcile → ungrabAndFlush,
+/// atomically. Focus lands BEFORE geometry:适用于 most actions where the
+/// target window is already mapped and focus must precede the retile so
+/// border colors and stacking are correct on the first frame.
+pub inline fn reconcileUnderGrabNowWithFocus(o: sync.ReconcileOpts, t: focus.FocusTransition) void {
+    preReconcileDuties();
+    const c = ctx();
+    c.sink.grabServer();
+    defer c.sink.ungrabAndFlush();
+    focus.applyPendingFocus(t);
+    sync.reconcile(&instance, c, o);
+}
+
+/// Grab server → reconcile → commit focus transition → ungrabAndFlush,
+/// atomically. Focus lands AFTER geometry: for mapRequest where the window
+/// must be mapped (by reconcile) before xcb_set_input_focus can target it
+/// without BadMatch. Both map+focus under one grab eliminates the atomicity
+/// gap where a client could observe the mapped-but-unfocused window.
+pub inline fn reconcileUnderGrabNowWithFocusAfter(o: sync.ReconcileOpts, t: focus.FocusTransition) void {
+    preReconcileDuties();
+    const c = ctx();
+    c.sink.grabServer();
+    defer c.sink.ungrabAndFlush();
+    sync.reconcile(&instance, c, o);
+    focus.applyPendingFocus(t);
+}
+
+/// Grab server → reconcile → EWMH + bar arming → ungrabAndFlush, atomically.
+/// Specialised for the fullscreen toggle path where EWMH writes and deferred
+/// bar state must land inside the same grab as geometry (Gap 2 atomicity).
+pub inline fn reconcileUnderGrabNowFullscreen(
+    o: sync.ReconcileOpts,
+    win: model_mod.WindowId,
+    prev_fs_win: ?model_mod.WindowId,
+    was_exit: bool,
+    was_switch: bool,
+) void {
+    preReconcileDuties();
+    const c = ctx();
+    c.sink.grabServer();
+    defer c.sink.ungrabAndFlush();
+    sync.reconcile(&instance, c, o);
+    // EWMH advertisement inside the grab: clear for whoever left
+    // fullscreen, set for entrant. All fire-and-forget (xcb_change_property).
+    const fullscreen = @import("fullscreen");
+    if (was_switch) {
+        if (prev_fs_win) |old| fullscreen.setEwmhFullscreenState(old, false);
+    }
+    fullscreen.setEwmhFullscreenState(win, !was_exit);
+    // Deferred bar state inside the grab: pure flag sets, no X traffic.
+    if (!was_exit) {
+        fullscreen.armPendingBarHide(win);
+    } else if (instance.focused) |w| {
+        fullscreen.armPendingBarShow(w);
+    }
+}
+
 /// Flushless reconcile against the current ctx (drag tick path).
 pub inline fn reconcileNow() void {
     preReconcileDuties();
@@ -158,4 +215,13 @@ pub inline fn reconcileNow() void {
 pub inline fn reconcileInGrab() void {
     preReconcileDuties();
     sync.reconcile(&instance, ctx(), .{});
+}
+
+/// Run pre-reconcile duties and return the pipeline context for the caller
+/// to manage a manual server grab. The caller MUST call
+/// ctx.sink.ungrabAndFlush() when done (typically via defer). Used by
+/// switchTo where a pointer query must land inside the grab body.
+pub fn grabCtx() *sync.Ctx {
+    preReconcileDuties();
+    return ctx();
 }

@@ -45,6 +45,15 @@ fn retileAndNotify(restack: bool, full_redraw: bool) void {
     pipeline.reconcileUnderGrabNow(if (restack) .{ .force_restack = true } else .{});
 }
 
+/// Same as retileAndNotify but commits a focus transition inside the grab.
+fn retileAndNotifyWithFocus(restack: bool, full_redraw: bool, ft: focus.FocusTransition) void {
+    if (build_options.has_bar) {
+        const bar = @import("bar");
+        if (full_redraw) bar.scheduleFullRedraw() else bar.scheduleRedraw();
+    }
+    pipeline.reconcileUnderGrabNowWithFocus(if (restack) .{ .force_restack = true } else .{}, ft);
+}
+
 // ---------------------------------------------------------------- minimize
 
 /// Atomicity: minimize + fallback-focus + retile land under one grab.
@@ -66,7 +75,7 @@ pub fn minimize(focused: ?model_mod.WindowId) void {
 
     model_mod.minimize(m, win) catch return; // Pre-refusal (CapacityFull)
 
-    if (was_focused) focusFallback(m);
+    const ft: focus.FocusTransition = if (was_focused) focusFallback(m) else .none;
 
     if (build_options.has_bar) {
         const bar = @import("bar");
@@ -76,24 +85,23 @@ pub fn minimize(focused: ?model_mod.WindowId) void {
         bar.scheduleRedraw(); // minimization itself refreshes the title segment
     }
 
-    pipeline.reconcileUnderGrabNow(.{ .force_restack = true }); // Atomicity
+    pipeline.reconcileUnderGrabNowWithFocus(.{ .force_restack = true }, ft); // Atomicity
 }
 
 /// Fallback: own-workspace scope only. Order: current ws focus_mru ->
 /// reversed tiled_order -> any floating on ws. First visibleOn(current) wins.
-/// Protocol layer untouched until train f (R2): winner goes through the
-/// legacy take-focus dispatch; null winner clears focus. Model and protocol
-/// focus are updated together so sync's color/winner pass sees one truth.
-/// (focus.clearFocus already clears the model — the one-store seam —
-/// so the null branch needs no separate model write.)
-fn focusFallback(m: *model_mod.Model) void {
+/// Returns a FocusTransition for the caller to commit inside its server grab.
+/// Model and protocol focus are updated together: the model update runs
+/// before the grab, the protocol commit runs inside it.
+fn focusFallback(m: *model_mod.Model) focus.FocusTransition {
     // Tier policy lives in the model layer so tests can exercise it without
     // linking the protocol side (see model.fallbackFocusCandidate).
     if (model_mod.fallbackFocusCandidate(m, m.current)) |winner| {
         model_mod.setFocus(m, winner);
-        focus.setFocus(winner, .tiling_operation);
+        return focus.prepareFocus(winner, .tiling_operation);
     } else {
-        focus.clearFocus();
+        model_mod.clearFocus(m);
+        return focus.prepareClearFocus();
     }
 }
 
@@ -109,8 +117,8 @@ pub fn restore(win: model_mod.WindowId) void {
     const had_occupant_before = model_mod.fullscreenOccupantOnWs(m, m.current) != null;
     model_mod.restore(m, win);
     model_mod.setFocus(m, win);
-    focus.setFocus(win, .window_spawn); // protocol untouched until train f
-    pipeline.reconcileUnderGrabNow(.{ .force_restack = true });
+    const ft = focus.prepareFocus(win, .window_spawn);
+    pipeline.reconcileUnderGrabNowWithFocus(.{ .force_restack = true }, ft);
     // Straight-back-into-fullscreen: defer the bar hide to the window's
     // ConfigureNotify confirmation — exactly like an enter-fullscreen toggle
     // (arming the hide also clears leftover pending-show state).
@@ -128,8 +136,8 @@ pub fn restoreOrdered(order: model_mod.RestoreOrder) void {
     const had_occupant_before = model_mod.fullscreenOccupantOnWs(m, m.current) != null;
     model_mod.restore(m, win);
     model_mod.setFocus(m, win);
-    focus.setFocus(win, .window_spawn);
-    pipeline.reconcileUnderGrabNow(.{ .force_restack = true });
+    const ft = focus.prepareFocus(win, .window_spawn);
+    pipeline.reconcileUnderGrabNowWithFocus(.{ .force_restack = true }, ft);
     if (build_options.has_bar and !had_occupant_before and
         model_mod.isFullscreenOnWs(pipeline.model(), win, pipeline.model().current))
     {
@@ -148,8 +156,8 @@ pub fn restoreAll() void {
     const had_occupant_before = model_mod.fullscreenOccupantOnWs(m, ws) != null;
     model_mod.restoreAllOnWs(m, ws);
     model_mod.setFocus(m, target);
-    focus.setFocus(target, .window_spawn);
-    pipeline.reconcileUnderGrabNow(.{ .force_restack = true });
+    const ft = focus.prepareFocus(target, .window_spawn);
+    pipeline.reconcileUnderGrabNowWithFocus(.{ .force_restack = true }, ft);
     if (build_options.has_bar and !had_occupant_before) {
         if (model_mod.fullscreenOccupantOnWs(m, ws)) |occ| @import("fullscreen").armPendingBarHide(occ);
     }
@@ -198,7 +206,6 @@ pub fn fullscreenOccupiedOnWs(ws: model_mod.WSId) bool {
 pub fn fullscreenToggleWindow(win: model_mod.WindowId) void {
     const core = @import("core");
     if (!core.getState().config.fullscreen_enabled) return;
-    const fullscreen = @import("fullscreen");
 
     const m = pipeline.model();
     // Defense-in-depth parity with legacy toggle(): never fullscreen a window
@@ -206,30 +213,26 @@ pub fn fullscreenToggleWindow(win: model_mod.WindowId) void {
     if (!model_mod.visibleOn(m, win, m.current)) return;
 
     // Classify BEFORE toggling so bar deferrals match legacy timing exactly.
+    // Cache the occupant scan — both the classification and prev_fs_win need
+    // the same result, saving one full store scan.
+    const prev_fs_win = model_mod.fullscreenOccupantOnWs(m, m.current);
     const kind: enum { enter, exit, switch_ } = blk: {
         if (model_mod.isFullscreenOnWs(m, win, m.current)) break :blk .exit;
-        if (model_mod.fullscreenOccupantOnWs(m, m.current) != null) break :blk .switch_;
+        if (prev_fs_win != null) break :blk .switch_;
         break :blk .enter;
     };
-    const prev_fs_win = model_mod.fullscreenOccupantOnWs(m, m.current);
 
     if (!model_mod.toggleFullscreen(m, win)) return;
 
-    pipeline.reconcileUnderGrabNow(.{ .force_restack = true });
-
-    // EWMH advertisement: clear for whoever left fullscreen, set for entrant.
-    if (kind == .switch_) {
-        if (prev_fs_win) |old| fullscreen.setEwmhFullscreenState(old, false);
-    }
-    const now_fullscreen = model_mod.isFullscreenOnWs(pipeline.model(), win, pipeline.model().current);
-    fullscreen.setEwmhFullscreenState(win, now_fullscreen);
-
-    switch (kind) {
-        .enter, .switch_ => fullscreen.armPendingBarHide(win),
-        .exit => {
-            if (pipeline.model().focused) |w| fullscreen.armPendingBarShow(w);
-        },
-    }
+    // EWMH writes + bar arming land inside the same grab as geometry
+    // (Gap 2 atomicity fix). All fire-and-forget or pure state.
+    pipeline.reconcileUnderGrabNowFullscreen(
+        .{ .force_restack = true },
+        win,
+        prev_fs_win,
+        kind == .exit,
+        kind == .switch_,
+    );
 }
 
 // ------------------------------------------------- tag-move / pin / all-view
@@ -248,11 +251,12 @@ pub fn moveWindowTo(win: model_mod.WindowId, ws_idx: u8) void {
     model_mod.moveWindowToWs(m, win, ws_idx);
     if (m.store.get(win) == null) return; // unknown window parity
 
+    var ft: focus.FocusTransition = .none;
     if (ws_idx != m.current) {
-        if (was_focused) focusFallback(m);
+        if (was_focused) ft = focusFallback(m);
         if (was_fs_current and build_options.has_bar) @import("bar").setBarState(.show_fullscreen);
     }
-    retileAndNotify(false, false);
+    retileAndNotifyWithFocus(false, false, ft);
 }
 
 /// toggle_tag (Mod+Alt+N). Focus is left unchanged on add (multi-tag gesture);
@@ -268,16 +272,17 @@ pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) voi
     const had_bit = e.mask & model_mod.bit(ws_idx) != 0;
     const removing_current = ws_idx == m.current;
 
+    var ft: focus.FocusTransition = .none;
     if (had_bit) {
         if (!model_mod.tagRemove(m, win, ws_idx)) return; // last tag protected
-        if (removing_current and m.focused == win) focusFallback(m);
+        if (removing_current and m.focused == win) ft = focusFallback(m);
     } else {
         model_mod.tagAdd(m, win, ws_idx, protect_current);
     }
 
     if (removing_current or (!had_bit and ws_idx == m.current)) {
         // Visible-set changed on the shown workspace: atomic evict/map+retile.
-        pipeline.reconcileUnderGrabNow(.{});
+        pipeline.reconcileUnderGrabNowWithFocus(.{}, ft);
     }
     if (!removing_current) {
         // Off-workspace change: just stale-mark that workspace's bar segment.
@@ -299,10 +304,11 @@ pub fn pinToggle(win: model_mod.WindowId) void {
 pub fn allViewToggle() void {
     const m = pipeline.model();
     const entering = model_mod.allViewToggle(m);
+    var ft: focus.FocusTransition = .none;
     if (!entering and m.focused != null and !model_mod.visibleOn(m, m.focused.?, m.current)) {
-        focusFallback(m);
+        ft = focusFallback(m);
     }
-    retileAndNotify(true, false);
+    retileAndNotifyWithFocus(true, false, ft);
 }
 
 // --------------------------------------------- tiling ops / drag (train f)
@@ -318,6 +324,7 @@ pub fn toggleFloating(win: model_mod.WindowId) void {
             .tiled => {
                 const r = sync.lastRectFor(win) orelse return;
                 e.mode = .{ .base = .{ .floating = r } };
+                e.home_ws = null; // no longer in tiled_order
             },
             .floating => {
                 e.mode = .{ .base = .tiled };
@@ -329,6 +336,7 @@ pub fn toggleFloating(win: model_mod.WindowId) void {
                 if (model_mod.findHome(m, win) == null) {
                     const h: model_mod.WSId = model_mod.lowestBit(e.mask);
                     _ = m.ws[h].tiled_order.append(win);
+                    e.home_ws = h;
                 }
             },
         },
@@ -355,6 +363,7 @@ pub fn detachToFloating(win: model_mod.WindowId) void {
     if (e.mode != .base or e.mode.base != .tiled) return;
     const r = sync.lastRectFor(win) orelse return;
     e.mode = .{ .base = .{ .floating = r } };
+    e.home_ws = null;
     pipeline.reconcileUnderGrabNow(.{});
 }
 
@@ -409,13 +418,14 @@ pub fn swapMasterAction(focus_swap: bool) void {
     if (list.items.len < 2) return;
     const displaced = list.items[0];
     model_mod.swapMaster(m);
+    var ft: focus.FocusTransition = .none;
     if (focus_swap) {
         if (m.focused != null and m.focused.? != displaced) {
             model_mod.setFocus(m, displaced);
-            focus.setFocus(displaced, .tiling_operation);
+            ft = focus.prepareFocus(displaced, .tiling_operation);
         }
     }
-    pipeline.reconcileUnderGrabNow(.{});
+    pipeline.reconcileUnderGrabNowWithFocus(.{}, ft);
 }
 
 pub fn moveFocused(delta: i32) void {
@@ -612,16 +622,44 @@ pub fn switchTo(ws_idx: u8) void {
     focus_mod.setSuppressReason(.none);
     focus_mod.cancelPointerSync();
 
-    // Pointer query BEFORE the grab (round trips can't run inside one).
-    // B3/R2 note: this is a deliberate, sanctioned protocol-side duty inside
-    // an action — hover-follows-switch needs the pointer position at switch
-    // time, and moving the query to every entry-point caller would just
-    // duplicate it. Like the EWMH writes below, it is wire traffic that
-    // answers the CLIENT/pointer, not layout; the layer allowlist covers it.
-    const target = blk: {
+    // Fire the pointer query BEFORE the grab so the round trip (client-side
+    // _xcb_conn_wait / poll) happens outside the grab window. The cookie is
+    // consumed INSIDE the grab — by then the reply is already in the XCB
+    // receive buffer (the server processed it between queue and flush), so
+    // consumption is a zero-latency buffer read.
+    const pointer_cookie = xcb.xcb_query_pointer(core.getState().conn, core.getState().root);
+
+    // All-view exit is a flag flip (emerges from visibility); temp-window
+    // masks do not exist in the model.
+    m.all_view_active = false;
+
+    // model.current is the ONLY store for the current workspace; the
+    // tracking/workspaces mirrors are deleted (read-through facades now).
+    m.current = ws_idx;
+
+    // Bar visibility follows the NEW workspace's fullscreen occupant
+    // (legacy executeSwitch line ~685), applied before the reconcile batch.
+    if (build_options.has_bar) {
+        const bar = @import("bar");
+        bar.setBarState(if (model_mod.fullscreenOccupantOnWs(m, ws_idx) != null) .hide_fullscreen else .show_fullscreen);
+        // The workspace indicator always changes on switch. prepareClearFocus
+        // returns .none when last_applied is null (empty→empty switch), so
+        // applyPendingFocus won't mark the bar dirty. Unconditionally schedule
+        // a redraw here so the indicator updates at end-of-batch.
+        bar.scheduleRedraw();
+    }
+
+    // Inline the server grab so pointer resolution, model focus, protocol
+    // focus, and geometry all land atomically (Gap 4 atomicity fix).
+    const c = pipeline.grabCtx();
+    c.sink.grabServer();
+    defer c.sink.ungrabAndFlush();
+
+    // Consume the pipelined pointer cookie INSIDE the grab. The round trip
+    // already completed before the grab; this is just a buffer read.
+    const target: ?model_mod.WindowId = blk: {
         const cs = core.getState();
-        const cookie = xcb.xcb_query_pointer(cs.conn, cs.root);
-        const reply = xcb.xcb_query_pointer_reply(cs.conn, cookie, null);
+        const reply = xcb.xcb_query_pointer_reply(cs.conn, pointer_cookie, null);
         defer if (reply) |r| std.c.free(r);
         if (reply) |r| {
             const child = r.*.child;
@@ -632,32 +670,20 @@ pub fn switchTo(ws_idx: u8) void {
         break :blk fallbackFocusOnWs(m, ws_idx);
     };
 
-    // All-view exit is a flag flip (emerges from visibility); temp-window
-    // masks do not exist in the model.
-    m.all_view_active = false;
+    const ft: focus.FocusTransition = blk: {
+        if (target) |t| {
+            model_mod.setFocus(m, t);
+            break :blk focus_mod.prepareFocus(t, .workspace_switch);
+        } else {
+            model_mod.clearFocus(m);
+            break :blk focus_mod.prepareClearFocus();
+        }
+    };
 
-    // model.current is the ONLY store for the current workspace; the
-    // tracking/workspaces mirrors are deleted (read-through facades now).
-    m.current = ws_idx;
-
-    if (target) |t| {
-        model_mod.setFocus(m, t);
-        focus_mod.setFocus(t, .workspace_switch);
-    } else {
-        // focus.clearFocus clears the model first (one-store seam) — no
-        // separate model write needed here.
-        focus_mod.clearFocus();
-    }
-
-    // Bar visibility follows the NEW workspace's fullscreen occupant
-    // (legacy executeSwitch line ~685), applied before the reconcile batch.
-    if (build_options.has_bar) {
-        const bar = @import("bar");
-        bar.setBarState(if (model_mod.fullscreenOccupantOnWs(m, ws_idx) != null) .hide_fullscreen else .show_fullscreen);
-    }
+    focus_mod.applyPendingFocus(ft);
 
     // force_restack raises the bar window.
-    pipeline.reconcileUnderGrabNow(.{ .force_restack = true });
+    sync.reconcile(m, c, .{ .force_restack = true });
 }
 
 /// Post-switch focus fallback: newest-first focus_mru of `ws`, then first
@@ -715,11 +741,12 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool) void
     if (!on_current) return;
 
     // Model focus first so the reconcile below colors/stacks with the new
-    // focus; X input focus afterwards, once the window is actually viewable
-    // (focusing an unmapped window is a BadMatch).
+    // focus. X input focus AFTER reconcile (inside the same grab): the
+    // window must be mapped before xcb_set_input_focus, and the map happens
+    // during reconcile. Both map+focus land under one grab (Gap 3 fix).
     model_mod.setFocus(m, win);
-    pipeline.reconcileUnderGrabNow(.{});
-    focus.setFocus(win, .window_spawn);
+    const ft = focus.prepareFocus(win, .window_spawn);
+    pipeline.reconcileUnderGrabNowWithFocusAfter(.{}, ft);
 }
 
 /// Unmanage tail (train d): close/destroy/unmap of a managed window. Legacy
@@ -743,13 +770,9 @@ pub fn unmanage(ctx: *Ctx, win: model_mod.WindowId) void {
     // Close fallback (parity with minimize): when the withdrawn window
     // held focus, hand it to the previously focused window on this ws
     // (MRU newest-first -> reversed tiled_order -> floating); with no
-    // candidate left, focus clears. Runs BEFORE the reconcile so border
-    // colors and the winner raise are derived from the new focus, and
-    // OUTSIDE the grab like every other focusFallback call site.
-    // (Supersedes the old stay-unfocused policy per user request:
-    // with the pointer parked away from windows, nothing re-focused the
-    // workspace after a close.)
-    if (was_focused) focusFallback(m);
+    // candidate left, focus clears. Model update runs before the grab;
+    // protocol commit runs inside the grab (Gap 1 atomicity fix).
+    const ft: focus.FocusTransition = if (was_focused) focusFallback(m) else .none;
 
     if (build_options.has_bar) {
         const bar = @import("bar");
@@ -757,5 +780,5 @@ pub fn unmanage(ctx: *Ctx, win: model_mod.WindowId) void {
         bar.scheduleRedraw(); // title segment drops the closed window
     }
 
-    pipeline.reconcileUnderGrabNow(.{ .force_restack = true });
+    pipeline.reconcileUnderGrabNowWithFocus(.{ .force_restack = true }, ft);
 }
