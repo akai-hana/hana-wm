@@ -1,21 +1,10 @@
-//! Null vim fallback (ND-25 / OQ-6).
-//!
-//! build.zig registers this module as "vim" when bar/ exists but
-//! prompt/vim.zig does not, so the bar-without-vim combination is a
-//! supported build. The API mirrors vim.zig's public surface exactly; the
-//! editing model collapses to a single always-insert plain editor:
-//!   - one Mode (label "" so the mode pill collapses away)
-//!   - Esc dismisses the prompt (matches handleInsertBasic)
-//!   - no normal mode, operators, counts, yank/paste, Ctrl-W/Ctrl-U
-//!
-//! Keep in sync with prompt.zig's usage only — nothing else imports "vim".
+//! Null-vim stub: minimal editor when prompt/vim.zig is absent.
 const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 
 pub const XK = core.XK;
 
-// Switch arms need integer constants to match against raw xcb_keysym_t values.
 const xk_back_space = @intFromEnum(XK.BackSpace);
 const xk_return = @intFromEnum(XK.Return);
 const xk_escape = @intFromEnum(XK.Escape);
@@ -27,17 +16,14 @@ const xk_end = @intFromEnum(XK.End);
 
 pub const default_max_input: usize = 512;
 
-pub const Action = enum { none, deactivate, spawn, spawn_keep };
+pub const Action = enum { none, deactivate, spawn };
 
 pub const Mode = enum {
     insert,
-    // Present only so prompt.zig's mode switches stay exhaustive; never
-    // entered (every handler pins .insert).
     normal,
 
     pub fn label(self: Mode) []const u8 {
         _ = self;
-        // Empty label: the caller skips rendering the mode pill entirely.
         return "";
     }
 };
@@ -90,18 +76,14 @@ pub fn insertSlice(vs: *VimState, slice: []const u8) void {
     vs.cursor += n;
 }
 
-inline fn isPrintableAscii(sym: xcb.xcb_keysym_t) bool {
-    return sym >= 0x20 and sym <= 0x7e;
-}
-
-/// Ctrl+C dismisses the prompt; other Ctrl chords are unbound here.
 pub fn handleCtrl(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     _ = vs;
     if (sym == 'c') return .deactivate;
     return .none;
 }
 
-fn insertKey(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
+pub fn handleInsertBasic(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
+    if (sym == xk_escape) return .deactivate;
     switch (sym) {
         xk_return => return .spawn,
         xk_back_space => {
@@ -117,15 +99,11 @@ fn insertKey(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
                 vs.len -= 1;
             }
         },
-        xk_left => {
-            if (vs.cursor > 0) vs.cursor -= 1;
-        },
-        xk_right => {
-            if (vs.cursor < vs.len) vs.cursor += 1;
-        },
+        xk_left => if (vs.cursor > 0) vs.cursor -= 1,
+        xk_right => if (vs.cursor < vs.len) vs.cursor += 1,
         xk_home => vs.cursor = 0,
         xk_end => vs.cursor = vs.len,
-        else => if (isPrintableAscii(sym)) {
+        else => if (sym >= 0x20 and sym <= 0x7e) {
             const ch: u8 = @truncate(sym);
             insertSlice(vs, &[1]u8{ch});
         },
@@ -133,18 +111,8 @@ fn insertKey(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
-pub fn handleInsertBasic(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
-    if (sym == xk_escape) return .deactivate;
-    return insertKey(vs, sym);
-}
+pub const handleInsert = handleInsertBasic;
 
-/// Single-mode build: identical to the basic editor.
-pub fn handleInsert(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
-    return handleInsertBasic(vs, sym);
-}
-
-/// Unreachable in the single-mode build (mode is always .insert);
-/// defensive no-op for the dispatch switch's exhaustiveness.
 pub fn handleNormal(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
     _ = vs;
     _ = sym;

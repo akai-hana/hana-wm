@@ -1,6 +1,5 @@
 //! ICCCM WM_NORMAL_HINTS geometry constraints applied to layout rects.
-//! Moved verbatim from the legacy tiling layouts module (WP2 step 2);
-//! only the hints type now comes from the model's strangler copy.
+//! Only the hints type now comes from the model's strangler copy.
 
 const utils = @import("utils");
 const model = @import("model");

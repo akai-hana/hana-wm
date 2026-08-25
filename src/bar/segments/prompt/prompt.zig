@@ -91,7 +91,7 @@ const PromptState = struct {
     // Layout cache: pixel width of the pre-caret text, the block-caret width,
     // and the scroll offset keeping the caret visible.  Recomputed in
     // `drawActive` only when `layout_dirty` is set (keypress, activate,
-    // spawn_keep, or bar-height change): the caret-blink redraws an identical
+    // or bar-height change): the caret-blink redraws an identical
     // frame each blink, so ticks reuse these instead of ~20 Pango shape passes.
     cached_pre_w: u16 = 0,
     cached_caret_w: u16 = 0,
@@ -337,7 +337,7 @@ fn applyAction(action: vim.Action) void {
 }
 
 /// Dispatches a vim.Action returned by a mode handler: executes/closes on spawn,
-/// resets and keeps open on spawn_keep, deactivates on deactivate, no-ops on none.
+/// deactivates on deactivate, no-ops on none.
 fn handleAction(action: vim.Action) void {
     switch (action) {
         .none => {},
@@ -345,13 +345,6 @@ fn handleAction(action: vim.Action) void {
         .spawn => {
             runPromptCommand();
             deactivate();
-        },
-        // :w: execute the command but keep the prompt open for the next one.
-        // Clears the buffer and resets to INSERT like activate(), minus the
-        // keyboard-grab overhead (the grab is already held).
-        .spawn_keep => {
-            runPromptCommand();
-            resetPromptEditing();
         },
     }
 }
@@ -618,87 +611,55 @@ fn histParseLine(line: []const u8, out: []u8) usize {
     return cmd.len;
 }
 
-/// Splits `text` into lines, recording each [start, end) range (exclusive of
-/// the trailing '\n') into the parallel `line_starts`/`line_ends` arrays.
-/// Returns the number of lines recorded. When the text holds more lines than
-/// the arrays fit, the LAST `line_starts.len` lines win: history consumers
-/// walk the result back-to-front for newest-first priority, so dropping the
-/// head keeps the freshest entries visible once the file outgrows the window.
-fn collectLines(text: []const u8, line_starts: []usize, line_ends: []usize) usize {
-    const cap = line_starts.len;
+/// Fixed byte window read from a history file's tail: an overgrown
+/// file must not push its newest entries out of reach of one bounded read.
+const hist_read_window: usize = 256 * 1024 - 1;
 
-    // Pass 1: count lines so the head-skip is known up front.
-    var total: usize = 0;
-    var pos: usize = 0;
-    while (pos < text.len) {
-        while (pos < text.len and text[pos] != '\n') : (pos += 1) {}
-        if (pos < text.len) pos += 1;
-        total += 1;
-    }
-
-    // Pass 2: record only the trailing `cap` lines.
-    const skip = total -| cap;
-    var n_lines: usize = 0;
-    var seen: usize = 0;
-    pos = 0;
-    while (pos < text.len) {
-        const line_start = pos;
-        while (pos < text.len and text[pos] != '\n') : (pos += 1) {}
-        const line_end = pos;
-        if (pos < text.len) pos += 1;
-        if (seen >= skip) {
-            line_starts[n_lines] = line_start;
-            line_ends[n_lines] = line_end;
-            n_lines += 1;
-        }
-        seen += 1;
-    }
-    return n_lines;
-}
-
-/// Load history from a file, processing lines in reverse so the newest entry
-/// ends up at index 0.
-fn histLoadFile(fp: *c.FILE) void {
-    const file_buf_size = 256 * 1024;
-    const file_buf: []u8 = blk: {
-        const ptr = c.malloc(file_buf_size) orelse return;
-        break :blk @as([*]u8, @ptrCast(ptr))[0..file_buf_size];
-    };
-    defer c.free(file_buf.ptr);
+/// Load history from `path` into the in-memory ring, processing lines in
+/// reverse so the newest entry ends up at index 0.
+fn histLoadFile(path: []const u8) void {
+    const io = std.Options.debug_io;
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return;
+    defer file.close(io);
 
     // History semantics want the NEWEST entries, which live at the file's
     // tail. Position the read window at EOF - window so an overgrown file
-    // can't push recent entries out of the fixed 256 KiB read (ND-7); a
-    // partial line at the window head is dropped below.
-    _ = c.fseek(fp, 0, c.SEEK_END);
-    const fsize = c.ftell(fp);
-    const window = file_buf_size - 1;
-    const from_tail = fsize > @as(c_long, @intCast(window));
-    if (from_tail) {
-        _ = c.fseek(fp, -@as(c_long, @intCast(window)), c.SEEK_END);
-    } else {
-        _ = c.fseek(fp, 0, c.SEEK_SET);
-    }
+    // can't push recent entries out of the fixed read; a partial
+    // line at the window head is dropped below.
+    const fsize: u64 = if (file.stat(io) catch null) |st| st.size else 0;
+    const from_tail = fsize > hist_read_window;
+    const read_off: u64 = if (from_tail) fsize - hist_read_window else 0;
 
-    const n_read = c.fread(file_buf.ptr, 1, window, fp);
+    const file_buf = g.allocator.alloc(u8, hist_read_window) catch return;
+    defer g.allocator.free(file_buf);
+    const n_read = file.readPositionalAll(io, file_buf, read_off) catch return;
     if (n_read == 0) return;
     var text = file_buf[0..n_read];
     if (from_tail) {
         // Drop the cut-mid-line fragment at the window start; its real
         // content lives in the unread region before the window.
-        if (std.mem.indexOfScalar(u8, text, '\n')) |nl| {
-            text = text[nl + 1 ..];
-        } else return;
+        const nl = std.mem.indexOfScalar(u8, text, '\n') orelse return;
+        text = text[nl + 1 ..];
     }
 
-    const max_lines_cap = max_history * 2;
-    const lines_raw = c.malloc(@sizeOf(usize) * max_lines_cap * 2) orelse return;
-    defer c.free(lines_raw);
-    const lines_buf = @as([*]usize, @ptrCast(@alignCast(lines_raw)));
-    const line_starts = lines_buf[0..max_lines_cap];
-    const line_ends = lines_buf[max_lines_cap .. max_lines_cap * 2];
+    // Only the trailing max_lines lines are eligible: history consumers walk
+    // them back-to-front for newest-first priority, so dropping the head of
+    // an overgrown file keeps the freshest entries visible once it outgrows
+    // the window. The ranges live in a ring indexed modulo max_lines, so the
+    // scan only ever remembers the LAST max_lines lines.
+    const max_lines = max_history * 2;
+    var line_starts: [max_lines]usize = undefined;
+    var line_ends: [max_lines]usize = undefined;
+    var total: usize = 0;
 
-    const n_lines = collectLines(text, line_starts, line_ends);
+    var pos: usize = 0;
+    while (pos < text.len) {
+        const end = std.mem.indexOfScalarPos(u8, text, pos, '\n') orelse text.len;
+        line_starts[total % max_lines] = pos;
+        line_ends[total % max_lines] = end;
+        total += 1;
+        pos = end + 1;
+    }
 
     var out_line: [max_history_line]u8 = undefined;
 
@@ -711,11 +672,12 @@ fn histLoadFile(fp: *c.FILE) void {
         seen.put(g.allocator, std.hash.Wyhash.hash(0, histEntry(di)), {}) catch {};
     }
 
-    var li: usize = n_lines;
-    while (li > 0) {
-        li -= 1;
+    // Walk the kept lines back-to-front so the newest entry ends up at index 0.
+    var li: usize = 0;
+    while (li < @min(total, max_lines)) : (li += 1) {
         if (g.hist_count >= max_history) break;
-        const line = text[line_starts[li]..line_ends[li]];
+        const ri = (total - 1 - li) % max_lines;
+        const line = text[line_starts[ri]..line_ends[ri]];
         const len = histParseLine(line, &out_line);
         if (len == 0) continue;
         const h = std.hash.Wyhash.hash(0, out_line[0..len]);
@@ -734,23 +696,16 @@ fn loadHistory() void {
     var path_buf: [512]u8 = undefined;
     const home = std.mem.span(c.getenv("HOME") orelse return);
 
-    const history_fmts = [_][]const u8{
-        "{s}/.local/share/drun/history",
-        "{s}/.bash_history",
-        "{s}/.zsh_history",
-        "{s}/.local/share/fish/fish_history",
+    const history_suffixes = [_][]const u8{
+        ".local/share/drun/history",
+        ".bash_history",
+        ".zsh_history",
+        ".local/share/fish/fish_history",
     };
-    inline for (history_fmts) |fmt| {
-        if (tryOpenHistoryFile(&path_buf, fmt, .{home})) |fp| {
-            defer _ = c.fclose(fp);
-            histLoadFile(fp);
-        }
+    for (history_suffixes) |suffix| {
+        const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ home, suffix }) catch continue;
+        histLoadFile(path);
     }
-}
-
-fn tryOpenHistoryFile(buf: []u8, comptime fmt: []const u8, args: anytype) ?*c.FILE {
-    _ = std.fmt.bufPrintZ(buf, fmt, args) catch return null;
-    return c.fopen(@ptrCast(buf.ptr), "r");
 }
 
 fn spawnCommand(cmd: []const u8) void {
@@ -781,18 +736,34 @@ fn spawnCommand(cmd: []const u8) void {
     }
 }
 
-/// D4: thin wrappers over the single implementations in drawing.zig
-/// (shared MeasureCache makes the binary searches cheap on repeat).
-fn textOffsetAtPx(dc: *drawing.DrawContext, text: []const u8, target_px: u16) usize {
-    return drawing.offsetAtPx(dc, text, target_px);
+/// Binary search: first byte offset where `measureTextWidth(text[0..offset])
+/// >= target_px`. Returns `text.len` when the whole string is narrower.
+/// Maps a pixel scroll offset back to a character boundary (moved here from
+/// drawing.zig — prompt is its only consumer).
+fn offsetAtPx(dc: *drawing.DrawContext, text: []const u8, target_px: u16) usize {
+    var lo: usize = 0;
+    var hi: usize = text.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (dc.measureTextWidth(text[0..mid]) < target_px) lo = mid + 1 else hi = mid;
+    }
+    return lo;
 }
 
-fn textPrefixFit(dc: *drawing.DrawContext, text: []const u8, max_px: u16) []const u8 {
-    return drawing.fitPrefix(dc, text, max_px, null);
-}
-
-inline fn textPrefixFitKnownW(dc: *drawing.DrawContext, text: []const u8, max_px: u16, known_w: u16) []const u8 {
-    return drawing.fitPrefix(dc, text, max_px, known_w);
+/// Return the longest prefix of `text` whose pixel width is <= `max_px`.
+/// Fast path: full slice when the text already fits (`known_w` skips the
+/// initial full-text measurement when the caller already has it — moved
+/// here from drawing.zig; prompt is its only consumer).
+fn fitPrefix(dc: *drawing.DrawContext, text: []const u8, max_px: u16, known_w: ?u16) []const u8 {
+    const w = known_w orelse dc.measureTextWidth(text);
+    if (w <= max_px) return text;
+    var lo: usize = 0;
+    var hi: usize = text.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo + 1) / 2; // round up to avoid infinite loop
+        if (dc.measureTextWidth(text[0..mid]) <= max_px) lo = mid else hi = mid - 1;
+    }
+    return text[0..lo];
 }
 
 /// Draw `text` with hard pixel clipping to `[text_left_x, scroll_end_x)`.
@@ -828,7 +799,7 @@ inline fn drawSpan(
 
     // Skip the prefix that lies off-screen to the left.
     const start: usize = if (px.* < tl)
-        textOffsetAtPx(dc, text, @intCast(tl - px.*))
+        offsetAtPx(dc, text, @intCast(tl - px.*))
     else
         0;
 
@@ -837,11 +808,11 @@ inline fn drawSpan(
 
     // Clip the visible suffix to the available width on the right.  When no
     // left clip occurred, `w` is already the full width, so pass it to
-    // textPrefixFitKnownW to avoid a redundant full-text Pango measurement.
+    // fitPrefix known_w to avoid a redundant full-text Pango measurement.
     const visible = if (start == 0)
-        (if (w <= available) text else textPrefixFitKnownW(dc, text, available, w))
+        (if (w <= available) text else fitPrefix(dc, text, available, w))
     else
-        textPrefixFit(dc, text[start..], available);
+        fitPrefix(dc, text[start..], available, null);
     if (visible.len > 0)
         try dc.drawText(draw_x, baseline, visible, color);
 }
@@ -977,11 +948,11 @@ fn refreshLayoutCache(
         // character begins past it in virtual space: a phantom gap next to the
         // caret.
         if (min_scroll <= prompt_w) {
-            const idx = textOffsetAtPx(dc, prompt, min_scroll);
+            const idx = offsetAtPx(dc, prompt, min_scroll);
             scroll_x = dc.measureTextWidth(prompt[0..idx]);
         } else {
             const min_in_pre: u16 = min_scroll - prompt_w;
-            const idx = textOffsetAtPx(dc, pre_cur_text, min_in_pre);
+            const idx = offsetAtPx(dc, pre_cur_text, min_in_pre);
             scroll_x = prompt_w + dc.measureTextWidth(pre_cur_text[0..idx]);
         }
     }
@@ -1053,10 +1024,6 @@ fn drawInsertMode(
     accent: u32,
     fg: u32,
 ) !void {
-    const pre_cur_text = g.vim_state.buf[0..g.vim_state.cursor];
-    if (pre_cur_text.len > 0)
-        try drawSpan(dc, px, text_left_x, scroll_end_x, baseline, pre_cur_text, g.cached_pre_w, fg);
-
     // Caret geometry was pre-computed in ensureCaretGeom.
     const caret_top = g.cached_caret_top.?;
     const caret_h = g.cached_caret_h.?;
@@ -1084,11 +1051,7 @@ fn drawNormalMode(
     bg: u32,
     fg: u32,
 ) !void {
-    const pre_text = g.vim_state.buf[0..g.vim_state.cursor];
     const cur_hi = @min(g.vim_state.cursor + 1, g.vim_state.len);
-
-    if (pre_text.len > 0)
-        try drawSpan(dc, px, text_left_x, scroll_end_x, baseline, pre_text, g.cached_pre_w, fg);
 
     try drawBlockCursor(dc, px, .{ .text_left_x = text_left_x, .scroll_end_x = scroll_end_x, .baseline = baseline, .height = height, .accent = accent, .bg = bg }, g.vim_state.buf, g.vim_state.cursor, cur_hi, g.cached_caret_w);
 
@@ -1147,12 +1110,17 @@ fn drawActive(
     var px: i32 = @as(i32, text_left_x) - @as(i32, scroll_x);
     try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, prompt, prompt_w, accent);
 
+    // Pre-cursor span: rendered identically as the first step of BOTH modes,
+    // so it's hoisted here and the branch bodies carry only what differs.
+    if (pre_cur_text.len > 0)
+        try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, pre_cur_text, g.cached_pre_w, fg);
+
     // Mode-specific text rendering.
     switch (g.vim_state.mode) {
         .insert => try drawInsertMode(dc, baseline, text_left_x, scroll_end_x, ellipsis_end_x, &px, accent, fg),
         else => try drawNormalMode(dc, height, baseline, text_left_x, scroll_end_x, ellipsis_end_x, &px, accent, bg, fg),
     }
 
-    dc.blitAndFlush(start_x, width);
+    dc.blitRegion(start_x, width);
     return end_x;
 }

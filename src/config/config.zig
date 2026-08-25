@@ -8,91 +8,10 @@ const constants = @import("constants");
 const debug = @import("debug");
 const xkbcommon = @import("xkbcommon");
 const parser = @import("parser");
+const schema = @import("schema");
 const build_options = @import("build_options");
 const bar = if (build_options.has_bar) @import("bar") else null;
 const utils = @import("utils");
-
-/// Warn-and-return-default for an out-of-range value, shared by getInRange and
-/// getScalableInRange so the warning wording (and its boilerplate) lives once.
-fn reject(
-    comptime T: type,
-    key: []const u8,
-    value: T,
-    comptime verb: []const u8,
-    bound: T,
-    default: anytype,
-) @TypeOf(default) {
-    debug.warn("Value for '{s}' ({any}) " ++ verb ++ " ({any}), using default", .{ key, value, bound });
-    return default;
-}
-
-/// Returns `default` when the key is absent, the wrong type, or out of range
-/// (values are warn-and-revert, not clamped).
-fn getInRange(
-    comptime T: type,
-    section: *parser.Section,
-    key: []const u8,
-    default: T,
-    comptime min: ?T,
-    comptime max: ?T,
-) T {
-    const value = switch (T) {
-        bool => section.getBool(key) orelse return default,
-        []const u8 => section.getString(key) orelse return default,
-        u8, u16, u32, usize => blk: {
-            const i = section.getInt(key) orelse return default;
-            // A negative int would trap on the @intCast below; warn-and-default
-            // it here so the out-of-range contract holds for negatives too.
-            if (i < 0) return reject(i64, key, i, "below minimum", 0, default);
-            // Guard the type's own range before the cast: an int larger than T
-            // can hold would trap on @intCast even when no explicit max is set.
-            // (For u64/usize the comparison is comptime-folded away.)
-            if (std.math.maxInt(T) < std.math.maxInt(i64) and i > std.math.maxInt(T))
-                return reject(i64, key, i, "above maximum", std.math.maxInt(T), default);
-            break :blk @as(T, @intCast(i));
-        },
-        else => @compileError("Unsupported type"),
-    };
-    if (comptime min) |m| if (value < m) return reject(T, key, value, "below minimum", m, default);
-    if (comptime max) |m| if (value > m) return reject(T, key, value, "above maximum", m, default);
-    return value;
-}
-
-/// Resolves a color from a pre-fetched Value, accepting `#RRGGBB`, `0xRRGGBB`, or an integer.
-/// Split from `getColor` so callers that already have the Value avoid a redundant hashmap lookup.
-fn getColorFromValue(key: []const u8, value: parser.Value, default: u32) u32 {
-    if (value.asColor()) |c| return c;
-    if (value.asString()) |s| return parser.parseColor(s) catch {
-        debug.warn("Invalid color for {s}: '{s}'", .{ key, s });
-        return default;
-    };
-    if (value.asInt()) |i| if (i >= 0 and i <= 0xFFFFFF) return @intCast(i);
-    return default;
-}
-
-/// Resolves a color from a section key, accepting `#RRGGBB`, `0xRRGGBB`, or an integer.
-fn getColor(section: *parser.Section, key: []const u8, default: u32) u32 {
-    const value = section.get(key) orelse return default;
-    return getColorFromValue(key, value, default);
-}
-
-/// Like getInRange, but for ScalableValue fields. Only enforces a lower bound
-/// on the raw `.value` (percentages and absolute pixels share no meaningful
-/// ceiling): enough to reject a negative like `gap_width = -50`. Returns
-/// `default` unclamped, with a warning, matching getInRange.
-fn getScalableInRange(
-    section: *parser.Section,
-    key: []const u8,
-    default: parser.ScalableValue,
-    comptime min: f32,
-) parser.ScalableValue {
-    const value = section.getScalable(key) orelse return default;
-    if (value.value < min) {
-        debug.warn("Value for '{s}' ({d}) below minimum ({d}), using default", .{ key, value.value, min });
-        return default;
-    }
-    return value;
-}
 
 /// Validates a 1-based workspace number, warn-and-skip when outside 1..255 or
 /// exceeding `max` (the workspace count, or constants.max_workspaces, the
@@ -400,13 +319,17 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !types.Config {
     return cfg;
 }
 
-/// Builds the built-in default Config: heap-dup'd strings so deinit can free
-/// every owned field unconditionally, plus one `layouts` entry so the layout
-/// cycle always has something to rotate. OOM propagates; the errdefer tears
-/// down the partial Config, never leaving string literals for deinit to free.
+/// Builds the built-in default Config: every scalar knob comes from
+/// schema.applyDefaults (the one table; schema_test.zig pins it to
+/// types.Config's field initializers), plus heap-dup'd non-scalar seed data
+/// so deinit can free every owned field unconditionally, and one `layouts`
+/// entry so the layout cycle always has something to rotate. OOM propagates;
+/// the errdefer tears down the partial Config, never leaving string literals
+/// for deinit to free.
 fn getDefaultConfig(allocator: std.mem.Allocator) !types.Config {
     var cfg: types.Config = .{};
     errdefer cfg.deinit(allocator);
+    schema.applyDefaults(&cfg);
     // Canonical layout_table name (the .master entry), so the default resolves
     // via layoutFromString in workspaces.zig and stringToEnum in tiling.zig;
     // the old "master_left" matched neither and worked only via `orelse`.
@@ -427,14 +350,15 @@ fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *parser.Document) !type
     // half-applied section doesn't leak. Only armed after getDefaultConfig
     // succeeded, so its own errdefer handled the earlier failure.
     errdefer cfg.deinit(allocator);
-    parseWorkspaces(doc, &cfg);
     try parseKeybindings(allocator, doc, &cfg);
-    try parseTiling(allocator, doc, &cfg);
+    try parseTilingStructures(allocator, doc, &cfg);
+    // Every scalar knob ([drag], [fullscreen], [workspaces], [tiling]
+    // flags/aesthetics/master trio, all of [bar] incl. [bar.colors]) in one
+    // table-driven pass; must precede parseBar so icon padding sees the
+    // freshly parsed workspaces.count.
+    try schema.applyAll(doc, allocator, &cfg);
     try parseBar(allocator, doc, &cfg);
     try parseRules(allocator, doc, &cfg);
-    parseDrag(doc, &cfg);
-    parseEnabledFlag(doc, "fullscreen", &cfg.fullscreen_enabled);
-    parseEnabledFlag(doc, "minimize", &cfg.minimize_enabled);
     warnUnconsumedSections(doc);
     return cfg;
 }
@@ -847,37 +771,13 @@ pub fn load(allocator: std.mem.Allocator, screen: core.Screen, xkb_state: *xkbco
     return cfg;
 }
 
-fn parseDrag(doc: *parser.Document, cfg: *types.Config) void {
-    const section = doc.getSection("drag") orelse return;
-    cfg.drag_enabled = getInRange(bool, section, "enabled", cfg.drag_enabled, null, null);
-    // Reading the current value as the default avoids duplicating the struct
-    // default from types.zig; getScalableInRange also rejects a negative
-    // snap_distance.
-    cfg.snap_distance = getScalableInRange(section, "snap_distance", cfg.snap_distance, 0.0);
-}
-
-fn parseWorkspaces(doc: *parser.Document, cfg: *types.Config) void {
-    const section = doc.getSection("bar.modules.workspaces") orelse doc.getSection("workspaces") orelse return;
-    cfg.workspaces.enabled = getInRange(bool, section, "enabled", cfg.workspaces.enabled, null, null);
-    // Cap at max_workspaces: the u64 workspace bitmask and fixed-size
-    // override/fullscreen tables can't represent more, and setWorkspaceCount
-    // asserts the same ceiling: a larger count would assert/index OOB.
-    cfg.workspaces.count = getInRange(u8, section, "count", cfg.workspaces.count, 1, @intCast(constants.max_workspaces));
-}
-
-/// Reads `section_name.enabled` (default true) into `field`. Used for
-/// subsystems that are always compiled in and only toggled on/off, like
-/// [fullscreen] and [minimize].
-fn parseEnabledFlag(doc: *parser.Document, section_name: []const u8, field: *bool) void {
-    const section = doc.getSection(section_name) orelse return;
-    // Read the already-initialised value back as the default so this helper
-    // can't drift out of sync with the field's default in types.zig.
-    field.* = getInRange(bool, section, "enabled", field.*, null, null);
-}
-
-fn parseTiling(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
+/// Tiling's NON-scalar structures: the layouts array (cycle order +
+/// per-workspace overrides), per-layout variant preferences, and
+/// master-stack counts. Every tiling SCALAR ([tiling] flags, aesthetics,
+/// master trio) is driven by schema.applyAll; like parseTiling always did,
+/// all of it stays gated on the [tiling] section existing.
+fn parseTilingStructures(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
     const section = doc.getSection("tiling") orelse return;
-    cfg.tiling.enabled = getInRange(bool, section, "enabled", cfg.tiling.enabled, null, null);
     types.freeStrings(&cfg.tiling.layouts, allocator, true);
     cfg.tiling.workspace_layout_overrides.clearRetainingCapacity();
     if (section.getArray("layouts")) |arr| {
@@ -888,31 +788,11 @@ fn parseTiling(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.
         // fallback is (types.TilingConfig{}).layout, NOT cfg.tiling.layout:
         // that aliases layouts.items[0], freed below, so using it would read
         // freed memory when the key is absent.
-        const layout_str = getInRange([]const u8, section, "layout", default_tiling_layout, null, null);
+        const layout_str = schema.getInRange([]const u8, section, "layout", default_tiling_layout, null, null);
         try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, layout_str));
         cfg.tiling.layout = cfg.tiling.layouts.items[0];
     }
-
-    const aesthetic_src = doc.getSection("tiling.aesthetics") orelse section;
-
-    // ScalableValue fields: getScalableInRange rejects a bare negative like
-    // `gap_width = -50`. Safe to read the current value as default here,
-    // unlike the "layout" string above, nothing frees it first.
-    cfg.tiling.gap_width = getScalableInRange(aesthetic_src, "gap_width", cfg.tiling.gap_width, 0.0);
-    cfg.tiling.border_width = getScalableInRange(aesthetic_src, "border_width", cfg.tiling.border_width, 0.0);
-    cfg.tiling.border_focused = getColor(aesthetic_src, "border_focused", cfg.tiling.border_focused);
-    cfg.tiling.border_unfocused = getColor(aesthetic_src, "border_unfocused", cfg.tiling.border_unfocused);
-    cfg.tiling.min_window_dim = getInRange(u16, section, "min_window_dim", cfg.tiling.min_window_dim, 1, null);
-    const master_src = doc.getSection("tiling.layouts.master-stack") orelse section;
-    const dedicated = master_src != section; // true when [tiling.layouts.master-stack] exists
-    cfg.tiling.master_count = getInRange(u8, master_src, if (dedicated) "count" else "master_count", cfg.tiling.master_count, 1, null);
-    if (master_src.getString(if (dedicated) "side" else "master_side")) |s| cfg.tiling.master_side = types.MasterSide.fromString(s) orelse .left;
-    // master_width has its own ratio check in validate(); only leave-alone-
-    // when-absent is needed here, not getScalableInRange.
-    if (master_src.getScalable(if (dedicated) "width" else "master_width")) |v| cfg.tiling.master_width = v;
     parseTilingVariants(doc, cfg);
-    cfg.tiling.global_layout = getInRange(bool, section, "global_layout", cfg.tiling.global_layout, null, null);
-
     try parseMasterStackCounts(allocator, doc, cfg);
 }
 
@@ -1112,162 +992,29 @@ fn parseLayoutsArray(
     }
 }
 
-// Field names only, no duplicated default literal; getColor's default is
-// the already-initialised cfg.bar value (leave-alone semantics), so types.zig
-// stays the single place each default is written.
-const bar_color_fields = [_][]const u8{
-    "bg", "fg", "selected_bg", "selected_fg", "accent_color",
-};
-
-/// Parses `section.key` into a [0.0, 1.0] ratio, falling back to `default`
-/// when the key is absent or out of range. Bare integers are always
-/// percentages (0-100, `= 1` resolving to 1% with a warning); decimals and
-/// `%`-suffixed values are ratios directly; quoted values fall to the
-/// default, warned. Off asInt()/asScalable() since the parser already
-/// recognises bare decimals.
-fn getRatio(section: *parser.Section, key: []const u8, default: f32) f32 {
-    const value = section.get(key) orelse return default;
-    if (value.asInt()) |i| {
-        if (i == 0) return 0.0;
-        if (i >= 2 and i <= 100) return @as(f32, @floatFromInt(i)) / 100.0;
-        if (i == 1) {
-            // `= 1` is ambiguous (1% or 1.0); per the "bare integers are
-            // percentages" rule it resolves to 1%, but we warn so a user who
-            // meant the full value writes `1.0` or `100%`.
-            debug.warn("{s} value 1 is ambiguous (1% or 1.0 ratio?); " ++
-                "treating as 1%. Use '1.0' or '100%' for 100%.", .{key});
-            return 0.01;
-        } else {
-            debug.warn("Invalid {s} value {} (must be 0-100), using default", .{ key, i });
-        }
-        return default;
-    }
-    if (value.asScalable()) |s| {
-        const f = utils.scaling.asRatio(s);
-        if (f < 0.0 or f > 1.0) {
-            debug.warn("Invalid {s} value {d} (must be 0.0-1.0 or 0-100%), using default", .{ key, f });
-            return default;
-        }
-        return f;
-    }
-    if (value.asString()) |str|
-        debug.warn("{s} value '{s}' is quoted; write it unquoted (e.g. {s} = 0.5), using default", .{ key, str, key });
-    return default;
-}
-
-/// Dupes `val` into `*view`, freeing the previous value first. `*view` must
-/// already hold a heap allocation (getDefaultConfig dupes the defaults), so
-/// Config.deinit frees every BarConfig string unconditionally. The dupe comes
-/// BEFORE the free because the key-absent fallback passes `view.*` as `val`.
-fn assignStr(a: std.mem.Allocator, view: *?[]const u8, val: []const u8) !void {
-    const copy = try a.dupe(u8, val);
-    if (view.*) |old| a.free(old);
-    view.* = copy;
-}
-
-/// Reads `section.key` and assigns the result into `view` via assignStr.
-/// If the key is absent, `view` is left unchanged (null = use type default).
-fn assignStrKey(a: std.mem.Allocator, section: *parser.Section, key: []const u8, view: *?[]const u8) !void {
-    if (section.getString(key)) |val| {
-        try assignStr(a, view, val);
-    }
-}
-
-fn parseBarColors(doc: *parser.Document, cfg: *types.Config) !void {
-    const colors = doc.getSection("bar.colors");
-    const accent_fields = [_]struct { field: []const u8, key: []const u8, fallback: []const u8 }{
-        .{ .field = "title_accent_color", .key = "title", .fallback = "accent_color" },
-        .{ .field = "title_unfocused_accent", .key = "title_unfocused", .fallback = "bg" },
-        .{ .field = "title_minimized_accent", .key = "title_minimized", .fallback = "accent_color" },
-    };
-    inline for (accent_fields) |f|
-        @field(cfg.bar, f.field) = if (colors) |c|
-            getColor(c, f.key, @field(cfg.bar, f.fallback))
-        else
-            @field(cfg.bar, f.fallback);
-    if (colors) |c| {
-        const drun_color_fields = [_]struct { key: []const u8, fallback: []const u8 }{
-            .{ .key = "drun_bg", .fallback = "bg" },
-            .{ .key = "drun_fg", .fallback = "fg" },
-            .{ .key = "drun_prompt_color", .fallback = "accent_color" },
-        };
-        inline for (drun_color_fields) |f|
-            @field(cfg.bar, f.key) = getColor(c, f.key, @field(cfg.bar, f.fallback));
-    }
-}
-
+/// Bar's NON-scalar structures: fonts, indicator glyph mirroring, workspace
+/// icons, and the bar columns. Every bar SCALAR (flags, scalables, height,
+/// colors incl. the [bar.colors] fallback chains, strings, enums, ratios)
+/// is driven by schema.applyAll; like parseBar always did, everything here
+/// stays gated on the [bar] section existing.
 fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
     const section = doc.getSection("bar") orelse return;
-    // D7: declarative scalar-field table — each key/field pair is stated once
-    // instead of once per hand-written assignment line. Bespoke fields
-    // (height auto-sentinel, position enum, fonts array, strings, colors,
-    // indicator mirroring) keep their explicit handling below.
-    const ScalarKind = enum { boolean, scalable };
-    const BarScalar = struct { key: []const u8, field: []const u8, kind: ScalarKind };
-    const bar_scalars = [_]BarScalar{
-        .{ .key = "enabled", .field = "enabled", .kind = .boolean },
-        .{ .key = "vim_mode", .field = "vim_mode", .kind = .boolean },
-        .{ .key = "font_size", .field = "font_size", .kind = .scalable },
-        .{ .key = "segment_spacing", .field = "spacing", .kind = .scalable },
-        .{ .key = "indicator_size", .field = "indicator_size", .kind = .scalable },
-        .{ .key = "workspace_tag_width", .field = "workspace_tag_width", .kind = .scalable },
-    };
-    inline for (bar_scalars) |e| {
-        switch (e.kind) {
-            .boolean => @field(cfg.bar, e.field) = getInRange(bool, section, e.key, @field(cfg.bar, e.field), null, null),
-            // Reads the already-initialised value as default so the struct
-            // default in types.zig can't drift; also rejects negatives like
-            // the other ScalableValue fields.
-            .scalable => @field(cfg.bar, e.field) = getScalableInRange(section, e.key, @field(cfg.bar, e.field), 0.0),
-        }
-    }
-    if (section.getString("position")) |pos_str|
-        cfg.bar.bar_position = std.meta.stringToEnum(types.BarScreenPosition, pos_str) orelse .top;
-    // height: null = auto-calculate from font metrics alone. A negative
-    // explicit height is likewise rejected (with a warning) back to auto
-    // rather than passed through to rendering code.
-    cfg.bar.height = height_blk: {
-        const h = section.getScalable("height") orelse break :height_blk null;
-        if (h.value < 0.0) {
-            debug.warn("Value for 'height' ({d}) below minimum (0), using auto", .{h.value});
-            break :height_blk null;
-        }
-        break :height_blk h;
-    };
     if (section.getArray("fonts")) |arr| {
         types.freeStrings(&cfg.bar.fonts, allocator, true);
         for (arr) |item| if (item.asString()) |name|
             try cfg.bar.fonts.append(allocator, try allocator.dupe(u8, name));
         debug.info("Loaded {} fonts for bar", .{cfg.bar.fonts.items.len});
     }
-    inline for (bar_color_fields) |field_name|
-        @field(cfg.bar, field_name) = getColor(section, field_name, @field(cfg.bar, field_name));
-    try assignStrKey(allocator, section, "clock_format", &cfg.bar.clock_format);
-    cfg.bar.carousel_enabled = getInRange(bool, section, "carousel_enabled", cfg.bar.carousel_enabled, null, null);
-    cfg.bar.carousel_speed_px_s = getInRange(u16, section, "carousel_speed_px_s", cfg.bar.carousel_speed_px_s, 1, 1000);
-    try assignStrKey(allocator, section, "drun_prompt", &cfg.bar.drun_prompt);
-    if (section.getString("indicator_location")) |loc_str| {
-        cfg.bar.indicator_location = types.IndicatorLocation.fromString(loc_str) orelse blk: {
-            debug.warn("Unknown indicator_location '{s}', using default 'up-left'", .{loc_str});
-            break :blk .up_left;
-        };
-    }
-
-    cfg.bar.indicator_padding = getRatio(section, "indicator_padding", cfg.bar.indicator_padding);
     // indicator_focused/unfocused: if only one is set, the other mirrors it.
+    // A pair interaction, so it stays bespoke rather than joining the table.
     const raw_focused = section.getString("indicator_focused");
     const raw_unfocused = section.getString("indicator_unfocused");
     const focused_val = raw_focused orelse raw_unfocused;
     const unfocused_val = raw_unfocused orelse raw_focused;
-    if (focused_val) |v| try assignStr(allocator, &cfg.bar.indicator_focused, v);
-    if (unfocused_val) |v| try assignStr(allocator, &cfg.bar.indicator_unfocused, v);
-
-    if (section.get("indicator_color")) |value|
-        cfg.bar.indicator_color = getColorFromValue("indicator_color", value, cfg.bar.fg);
-    cfg.bar.transparency = getRatio(section, "transparency", cfg.bar.transparency);
+    if (focused_val) |v| try schema.assignStr(allocator, &cfg.bar.indicator_focused, v);
+    if (unfocused_val) |v| try schema.assignStr(allocator, &cfg.bar.indicator_unfocused, v);
     try parseWorkspaceIcons(allocator, section, cfg);
     try parseBarLayout(allocator, doc, cfg);
-    try parseBarColors(doc, cfg);
 }
 
 fn parseWorkspaceIcons(allocator: std.mem.Allocator, section: *parser.Section, cfg: *types.Config) !void {

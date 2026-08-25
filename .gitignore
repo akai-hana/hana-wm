@@ -17,3 +17,7 @@ zig-out/
 
 # other garbage directories
 .*
+
+# harness run artifacts (regenerated locally; only golden/ is tracked)
+dev/harness/out/
+dev/harness/.cache/

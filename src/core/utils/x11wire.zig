@@ -10,7 +10,6 @@ const core = @import("core");
 const xcb = core.xcb;
 const constants = @import("constants");
 const debug = @import("debug");
-const bench = @import("bench");
 const utils = @import("utils.zig");
 
 const max_property_length = constants.property_max_length;
@@ -52,7 +51,7 @@ pub inline fn setBorderPixel(conn: core.Connection, win: u32, pixel: u32) void {
 //
 // The grab body runs on the main WM thread; grabServer/ungrabServer bracket
 // every reconcile batch so the queued request run reaches the server
-// atomically (BC24 zero-round-trip rule).
+// atomically (zero-round-trip rule).
 
 /// Always pair with ungrabServer()/ungrabAndFlush().
 pub inline fn grabServer(conn: core.Connection) void {
@@ -176,11 +175,9 @@ const supported_atoms = [_][]const u8{
     "_NET_WM_STRUT_PARTIAL",
 };
 
-/// Known gaps between `_NET_SUPPORTED` and full behaviour (ND-19 decision:
-/// document, don't narrow — external tools key on the listed hints, and the
-/// list above is what keeps GLFW/Qt/Chromium out of their broken fallback
-/// paths; removing entries would regress those clients more than partial
-/// handling does):
+/// Known gaps between `_NET_SUPPORTED` and full behaviour: document, don't
+/// narrow — external tools key on the listed hints, and the list above is
+/// what keeps GLFW/Qt/Chromium out of their broken fallback paths.
 ///
 /// - The only client messages answered are `_NET_WM_STATE` with the
 ///   fullscreen atom (ADD/REMOVE/TOGGLE). `_NET_ACTIVE_WINDOW`,
@@ -249,6 +246,68 @@ pub fn advertiseEwmhSupport(conn: core.Connection, screen: core.Screen, root: u3
 }
 
 // ---------------------------------------------------------------------------
+// Reply collection (poll-first)
+
+/// Collects the reply for an already-fired request, trying a non-blocking
+/// poll first and falling back to the typed blocking collector only when the
+/// reply isn't buffered yet. One entry point for every request kind: each
+/// `xcb_*_cookie_t` wraps just a sequence number, so the poll works off
+/// `cookie.sequence` and the original cookie object flows to the blocking
+/// call unchanged.
+///
+/// Poll semantics: `xcb_poll_for_reply` consumes the cookie on BOTH success
+/// and error, so a plain "null means block" contract is unsound — blocking
+/// on a consumed-error cookie has undefined XCB semantics. An X error seen
+/// here is freed and reported as plain failure; after it, the cookie must
+/// never be touched again.
+///
+/// `blockingReply` issues the request's blocking reply call (passing null for
+/// the error out-param, exactly like every pre-absorption call site) and
+/// returns the owned reply pointer or null. Typed wrappers below cast the
+/// result back so callers never see `*anyopaque`.
+fn collectReply(
+    conn: core.Connection,
+    cookie: anytype,
+    comptime blockingReply: anytype,
+) ?*anyopaque {
+    var reply: ?*anyopaque = null;
+    var err: ?*xcb.xcb_generic_error_t = null;
+    _ = xcb.xcb_poll_for_reply(conn, cookie.sequence, &reply, &err);
+    if (reply) |r| return r;
+    if (err) |e| {
+        std.c.free(e);
+        return null;
+    }
+    return blockingReply(conn, cookie);
+}
+
+fn blockingPropertyReply(conn: core.Connection, cookie: xcb.xcb_get_property_cookie_t) ?*anyopaque {
+    return @ptrCast(xcb.xcb_get_property_reply(conn, cookie, null));
+}
+
+fn blockingGeometryReply(conn: core.Connection, cookie: xcb.xcb_get_geometry_cookie_t) ?*anyopaque {
+    return @ptrCast(xcb.xcb_get_geometry_reply(conn, cookie, null));
+}
+
+/// Property-flavored collectReply: an owned `xcb_get_property_reply_t`, or
+/// null when neither the poll nor the blocking fallback produced one.
+pub fn collectPropertyReply(
+    conn: core.Connection,
+    cookie: xcb.xcb_get_property_cookie_t,
+) ?*xcb.xcb_get_property_reply_t {
+    return @ptrCast(@alignCast(collectReply(conn, cookie, blockingPropertyReply)));
+}
+
+/// Geometry-flavored collectReply: an owned `xcb_get_geometry_reply_t`, or
+/// null under the same contract.
+pub fn collectGeometryReply(
+    conn: core.Connection,
+    cookie: xcb.xcb_get_geometry_cookie_t,
+) ?*xcb.xcb_get_geometry_reply_t {
+    return @ptrCast(@alignCast(collectReply(conn, cookie, blockingGeometryReply)));
+}
+
+// ---------------------------------------------------------------------------
 // Property fetchers
 
 /// Fetches an 8-bit X11 window property into the caller-supplied `buffer`.
@@ -262,7 +321,7 @@ pub fn fetchPropertyToBuffer(
     atom_type: u32,
     buffer: []u8,
 ) !?[]const u8 {
-    const reply = pollPropertyReply(
+    const reply = collectPropertyReply(
         conn,
         xcb.xcb_get_property(conn, property_no_delete, window, atom, atom_type, 0, max_property_length),
     ) orelse return null;
@@ -277,21 +336,4 @@ pub fn fetchPropertyToBuffer(
     const value_ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
     @memcpy(buffer[0..len], value_ptr[0..len]);
     return buffer[0..len];
-}
-
-/// Collect the reply for a fired `xcb_get_property` request without a blocking
-/// wait when the reply is already buffered (see `bench.pollReply`). In a
-/// non-bench build this reduces to a single blocking reply call.
-fn pollPropertyReply(
-    conn: core.Connection,
-    cookie: xcb.xcb_get_property_cookie_t,
-) ?*xcb.xcb_get_property_reply_t {
-    switch (bench.pollReply(conn, cookie.sequence)) {
-        .ready => |rep| return @ptrCast(@alignCast(rep)),
-        // The poll consumed an X error; blocking on the cookie now would be
-        // undefined (ND-18).
-        .error_consumed => return null,
-        .pending => {},
-    }
-    return xcb.xcb_get_property_reply(conn, cookie, null);
 }

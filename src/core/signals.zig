@@ -4,7 +4,7 @@
 const std = @import("std");
 
 const utils = @import("utils");
-const input = @import("input");
+const spawn = @import("spawn");
 
 // End indices of the self-pipe: signal handlers write to pipe_write; the
 // event loop polls pipe_read.
@@ -59,8 +59,8 @@ fn dispatchSignal(byte: u8) void {
         // Reap it with WNOHANG, then immediately drain the spawn pipes so
         // registerSpawn fires without waiting for the next XCB event batch.
         .CHLD => {
-            input.reapPendingChildren();
-            input.drainPendingSpawns();
+            spawn.reapPendingChildren();
+            spawn.drainPendingSpawns();
         },
         else => {},
     }

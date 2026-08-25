@@ -1,5 +1,5 @@
-//! Monocle tiling layout (pure port of modules/monocle.zig, WP2 calibration).
-//! Stacks all windows fullscreen, showing only the topmost one, with optional gap insets.
+//! Monocle tiling layout. Stacks all windows fullscreen, showing only the
+//! topmost one, with optional gap insets.
 
 const utils = @import("utils");
 const model = @import("model");
@@ -10,7 +10,7 @@ const List = engine.List;
 
 pub fn compute(v: View, out: *List) void {
     // Empty workspace: the top-window pick indexes order[len - 1], which
-    // would underflow. Emit nothing instead (ND-2).
+    // would underflow. Emit nothing instead.
     if (v.order.len == 0) return;
 
     const m = v.env.margins;

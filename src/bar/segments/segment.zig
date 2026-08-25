@@ -3,18 +3,16 @@
 //! ONE dispatch point per segment concern; adding a segment touches this
 //! file plus its own module instead of six switches across bar.zig:
 //!
-//!   naturalWidth(seg, snap, clock_w)  — reserved row width
-//!   draw(seg, env, x, width, ...)     — render at x, return advanced x
-//!   isClickable(seg)                  — comptime participation table
-//!   shouldSkip(snap, seg)             — dirty-diff skip
+//!   naturalWidth(seg, frame, clock_w) — reserved row width
+//!   draw(seg, env, x, frame)          — render at x, return advanced x
 //!   onClick(seg, offset, left, redraw)- action dispatch for recorded bounds
 //!
-//! Title/prompt keep their richer internal machinery behind the thin
-//! adapters here (DrawEnv.tctx/.tsnap); their complexity does not leak into
-//! the orchestrator. Width policy constants moved INTO their owning segments
+//! Rendering is immediate-mode: bar.zig collects a fresh Frame of live state
+//! every draw and all segments repaint; there is no per-segment dirty-diff
+//! skip. Title/prompt keep their richer internal machinery behind the thin
+//! adapter in draw()'s `.title` arm; their complexity does not leak into the
+//! orchestrator. Width policy constants moved INTO their owning segments
 //! (tags.fallback_width, layout.natural_width, title.min_width).
-
-const std = @import("std");
 
 const drawing = @import("drawing");
 const types = @import("types");
@@ -26,7 +24,14 @@ const variants = @import("variants");
 const title = @import("title");
 const prompt = @import("prompt");
 
-const snapshot = @import("snapshot");
+/// Live workspace state for one bar frame, collected fresh by bar.zig
+/// every draw. The only segment-visible slice of WM state.
+pub const Frame = struct {
+    workspace_count: u32 = 0,
+    current_workspace: u8 = 0,
+    is_all_view_active: bool = false,
+    workspace_has_windows: []const bool = &.{},
+};
 
 /// Render environment shared by every segment's draw call.
 pub const Env = struct {
@@ -35,21 +40,12 @@ pub const Env = struct {
     height: u16,
 };
 
-/// Extra inputs only the title adapter consumes (built by bar.zig's
-/// titleCtx / makeTitleSnapshot; ignored by every other arm).
-pub const TitleInputs = struct {
-    ctx: title.TitleRenderContext,
-    tsnap: title.TitleSnapshot,
-    allocator: std.mem.Allocator,
-    invalidated: bool,
-};
-
 // -- Width ------------------------------------------------------------------
 
-pub fn naturalWidth(seg: types.BarSegment, snap: *const snapshot.BarSnapshot, clock_width: u16) u16 {
+pub fn naturalWidth(seg: types.BarSegment, frame: *const Frame, clock_width: u16) u16 {
     return switch (seg) {
-        .workspaces => if (snap.workspace_count > 0)
-            @intCast(snap.workspace_count * tags.getCachedWorkspaceWidth())
+        .workspaces => if (frame.workspace_count > 0)
+            @intCast(frame.workspace_count * tags.getCachedWorkspaceWidth())
         else
             tags.fallback_width,
         .layout, .variants => layout_seg.natural_width,
@@ -58,55 +54,33 @@ pub fn naturalWidth(seg: types.BarSegment, snap: *const snapshot.BarSnapshot, cl
     };
 }
 
-// -- Skip logic ---------------------------------------------------------------
-
-/// Returns true when `seg` should be skipped because its data has not changed
-/// since the last frame and a full redraw is not required.
-pub fn shouldSkip(snap: *const snapshot.BarSnapshot, seg: types.BarSegment) bool {
-    if (snap.is_full_redraw) return false;
-    return switch (seg) {
-        .workspaces => !snap.is_workspace_dirty,
-        .title => !snap.is_title_dirty,
-        else => false,
-    };
-}
-
-// -- Clickability -------------------------------------------------------------
-
-/// Comptime participation table: which segments record hit-test bounds and
-/// route clicks. Adding a clickable segment means an entry here plus an
-/// onClick arm — nothing else.
-pub fn isClickable(seg: types.BarSegment) bool {
-    return switch (seg) {
-        .workspaces, .layout, .variants, .title => true,
-        .clock => false,
-    };
-}
-
 // -- Draw ---------------------------------------------------------------------
 
-/// Draws `seg` at `x`. `width` is the reserved width (title center layout);
-/// other arms ignore it and use their own measured width. Returns the new x
-/// ("drew nothing" is signalled by returning x unchanged, per drawRowSegment).
+/// Draws `seg` at `x`. Returns the new x ("drew nothing" is signalled by
+/// returning x unchanged, per drawRowSegment).
 pub fn draw(
     seg: types.BarSegment,
     env: Env,
     x: u16,
-    width: u16,
-    snap: *const snapshot.BarSnapshot,
-    ti: TitleInputs,
+    frame: *const Frame,
 ) !u16 {
-    _ = width;
-    _ = ti;
     switch (seg) {
-        .workspaces => return try tags.draw(env.dc, env.config, env.height, x, snap.current_workspace, snap.workspace_has_windows.items, snap.is_all_view_active),
+        .workspaces => return try tags.draw(env.dc, env.config, env.height, x, frame.current_workspace, frame.workspace_has_windows, frame.is_all_view_active),
         .layout => return try layout_seg.draw(env.dc, env.config, env.height, x),
         .variants => return try variants.draw(env.dc, env.config, env.height, x),
         .clock => return try clock.draw(env.dc, env.config, env.height, x),
-        // Routed through bar.zig's title/prompt adapter instead: prompt.draw
-        // needs caller-owned title-cache pointers that live on bar.State.
-        // Threading four extra optionals through every arm for exactly one
-        // caller would tax all segments for the sake of one.
+        // Routed through bar.zig's title/prompt adapter instead of being a
+        // normal arm. Three contract violations keep it out, and threading
+        // them through every arm would tax all segments for one:
+        //   1. Width: the title takes the row's REMAINDER after the fixed
+        //      segments, not a naturalWidth — the uniform width rule cannot
+        //      express it.
+        //   2. Draw purity: title rendering needs the bar's mutable fetch
+        //      scratch (batched X11 replies, focused-title cache) plus
+        //      post-draw cache updates; Env is a value type shared by arms
+        //      that are otherwise pure draws.
+        //   3. Clicks: hit-testing goes through title.hitTest against that
+        //      same scratch, not segmod.onClick's offset arithmetic.
         .title => unreachable,
     }
 }
@@ -130,12 +104,11 @@ pub fn onClick(
     switch (seg) {
         .workspaces => {
             const idx = resolveWorkspaceClick(offset) orelse return true;
-            var actx = makeActionCtx();
             if (left) {
-                actions.switchTo(&actx, @intCast(idx));
+                actions.switchTo(@intCast(idx));
             } else if (right) {
                 const win = focus.getFocused() orelse return true;
-                actions.moveWindowTo(&actx, win, @intCast(idx));
+                actions.moveWindowTo(win, @intCast(idx));
             }
             return true;
         },
@@ -148,23 +121,17 @@ pub fn onClick(
             return true;
         },
         .layout => {
-            var actx = makeActionCtx();
-            actions.cycleLayoutKind(&actx, if (left) 1 else -1);
+            actions.cycleLayoutKind(if (left) 1 else -1);
             redraw();
             return true;
         },
         .variants => {
-            var actx = makeActionCtx();
-            actions.stepVariantDir(&actx, if (left) 1 else -1);
+            actions.stepVariantDir(if (left) 1 else -1);
             redraw();
             return true;
         },
         .clock => return false,
     }
-}
-
-fn makeActionCtx() actions.Ctx {
-    return .{ .focused_window_id = focus.getFocused() };
 }
 
 const actions = @import("actions");

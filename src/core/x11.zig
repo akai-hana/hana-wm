@@ -3,7 +3,7 @@
 
 pub const xcb = @cImport({
     @cInclude("xcb/xcb.h");
-    // Provides xcb_poll_for_reply, used by the bench probe in src/test/bench.zig.
+    // Provides xcb_poll_for_reply, used by x11wire.zig's poll-first reply collection.
     @cInclude("xcb/xcbext.h");
     // Provides randr refresh-rate detection used by scale.zig and bar pacing.
     @cInclude("xcb/randr.h");

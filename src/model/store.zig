@@ -1,11 +1,8 @@
-//! Bounded window store. INVARIANT(I8): a full-store put refuses BEFORE any
-//! mutation.
+//! Bounded window store. A full-store put refuses BEFORE any mutation.
 //!
-//! Iteration order = SLOT order (decision C-D5): `remove` swap-removes, so
-//! the last live element moves into the freed slot and the tail slot is
-//! inherited by the moved element. Deterministic but not insertion-ordered;
-//! consumers that need a meaningful tie-break (e.g. sync's "first fullscreen"
-//! scan) must not rely on slot position for semantics.
+//! Iteration order = SLOT order: `remove` swap-removes, so the last live
+//! element moves into the freed slot. Deterministic but not
+//! insertion-ordered.
 const std = @import("std");
 
 pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type {
@@ -54,8 +51,8 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
             return &self.vals[s];
         }
 
-        /// Swap-remove: the last live element moves into the freed slot
-        /// (C-D5). O(1); iteration order after removal is slot order.
+        /// Swap-remove: the last live element moves into the freed slot.
+        /// O(1); iteration order after removal is slot order.
         pub fn remove(self: *Self, k: K) bool {
             var i: usize = 0;
             while (i < self.len) : (i += 1) {
@@ -74,7 +71,7 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
 
         pub const Item = struct { key: K, val: *const V };
 
-        /// seq must be < count(). Iterates in slot order (C-D5).
+        /// seq must be < count(). Iterates in slot order.
         pub fn at(self: *const Self, seq: usize) Item {
             std.debug.assert(seq < self.len);
             return .{ .key = self.keys[seq], .val = &self.vals[seq] };

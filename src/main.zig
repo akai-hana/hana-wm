@@ -69,9 +69,9 @@ pub fn main() !void {
     try window.init(alloc);
     defer window.deinit();
 
-    pipeline.init(alloc); // PIPELINE: dual-path dispatch (E.7); flag OFF ⇒ legacy only
+    pipeline.init(alloc); // owns the model; the model path IS the path
 
-    // ND-1: boot-time config seeding. Without this the config's layout kind,
+    // Boot-time config seeding. Without this the config's layout kind,
     // variants, master count, and per-workspace overrides stay inert until
     // the first explicit reload. No reconcile here: nothing is managed yet,
     // so there is no X state to push.

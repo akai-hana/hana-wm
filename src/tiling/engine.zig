@@ -1,4 +1,4 @@
-//! INVARIANT(P2): pure. Reads model types; emits Placements. No xcb.
+//! Pure. Reads model types; emits Placements. No xcb.
 const std = @import("std");
 const utils = @import("utils");
 const model = @import("model");
@@ -16,11 +16,9 @@ pub const Placement = struct {
 /// sync layer derives parked geometry from its own policy, never from this.
 pub const parked_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
 
-/// Frozen size-hint snapshot aligned index-for-index with View.order
-/// (B5/F6 fix: the old shape held `*const model.Model`, letting any algo
-/// observe live state through the "frozen" View and making every lookup an
-/// O(store) scan). The caller materializes one hint per ordered window;
-/// lookup is a scan over the (small) order slice only.
+/// Frozen size-hint snapshot aligned index-for-index with View.order.
+/// The caller materializes one hint per ordered window; lookup is a scan
+/// over the (small) order slice only.
 pub const HintsView = struct {
     order: []const model.WindowId,
     hints: []const model.SizeHints,
@@ -35,9 +33,9 @@ pub const HintsView = struct {
     }
 };
 
-/// Caller-resolved environment (F7: one bundled field instead of five
-/// per-layout booleans/params that each new layout would grow). Resolved
-/// from config by sync's caller; sync.Env aliases this type.
+/// Caller-resolved environment (one bundled field instead of five per-layout
+/// booleans/params that each new layout would grow). Resolved from config by
+/// sync's caller; sync.Env aliases this type.
 pub const Env = struct {
     margins: utils.Margins = .{ .gap = 0, .border = 0 },
     min_dim: u16 = 0,
@@ -52,8 +50,7 @@ pub const View = struct {
     workarea: utils.Rect,
     hints: *const HintsView,
     focused: ?model.WindowId,
-    // Environment resolved by the CALLER from config (changelog 2026-08-22;
-    // §7.4 step 3 keeps layout/variant resolution caller-side).
+    // Environment resolved by the CALLER from config.
     env: Env = .{},
 };
 

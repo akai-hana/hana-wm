@@ -1,7 +1,7 @@
-//! Layout engine tests (T19–T30, REARCHITECTURE_PLAN.md §7.4 step 5).
+//! Layout engine tests (T19–T30).
 //!
 //! Golden-value tests: expected rects are hand-computed from the legacy
-//! algorithms' formulas (modules/*.zig), so any drift from BC parity fails
+//! algorithms' formulas (modules/*.zig), so any drift from parity fails
 //! loudly. Fixture: windows registered on workspace 0 via model.register.
 
 const std = @import("std");
@@ -355,7 +355,7 @@ test "T30 deterministic and non-mutating" {
     try testing.expectEqual(store_count_before, fx.m.store.count());
 }
 
-// T31 — empty order is a supported input for every layout (ND-2): each
+// T31 — empty order is a supported input for every layout: each
 // compute must emit nothing and must not trap. Grid previously divided by
 // calcGridShape(0).rows == 0 and monocle indexed order[len - 1].
 test "T31 n=0 emits nothing across all layouts" {
@@ -371,7 +371,7 @@ test "T31 n=0 emits nothing across all layouts" {
     }
 }
 
-// T32 — scroll orphan keep-last invariant (S3F8). The algorithm trusts the
+// T32 — scroll orphan keep-last invariant. The algorithm trusts the
 // caller (pipeline.preReconcileDuties) to pre-clamp scroll_offset to
 // maxOffset(n). Both sides of that contract are pinned here:
 //   - a stale over-max offset orphans the strip: EVERY window parks,
@@ -417,7 +417,7 @@ test "T32 scroll orphan keep-last invariant" {
 }
 
 // T33 — emission-order pin across all layouts with a shared non-empty
-// fixture (companion to T31's empty-input pin for ND-2): count and win-id
+// fixture (companion to T31's empty-input pin): count and win-id
 // sequence are frozen so any guard/reorder drift fails loudly. Geometry is
 // already pinned per-layout by T19-T28.
 test "T33 emission order pin across layouts" {

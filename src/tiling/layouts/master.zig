@@ -86,7 +86,7 @@ pub fn compute(v: View, out: *List) void {
 /// gap and the column always fills `h`.
 ///
 /// Legacy configured swap_master's window last via defer_win; placement ORDER
-/// carries that duty now (sync emits/raises in placement order — BC23).
+/// carries that duty now (sync emits/raises in placement order).
 /// `boost` is zero for the master column, which reduces the split to plain even.
 fn tileColumn(
     v: *const View,

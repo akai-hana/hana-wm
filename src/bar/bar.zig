@@ -1,5 +1,11 @@
 //! Status bar
 //! Creates and manages the WM status bar, rendering all configured segments.
+//!
+//! Rendering is IMMEDIATE-MODE: every draw collects live WM state (model,
+//! tracking, focus, minimize — all plain reads), clears the off-screen
+//! pixmap, repaints every segment, and issues one xcb_copy_area blit.
+//! There is no captured-snapshot diffing anymore; coalescing happens purely
+//! through the dirty-mark scheduling (scheduleRedraw & friends).
 
 const std = @import("std");
 
@@ -10,7 +16,6 @@ const refresh_rate = @import("refresh_rate");
 const scale = @import("scale");
 const constants = @import("constants");
 const debug = @import("debug");
-const bench = @import("bench");
 
 const types = @import("types");
 
@@ -19,26 +24,75 @@ const focus = @import("focus");
 const minimize = @import("minimize");
 const pipeline = @import("pipeline"); // PIPELINE: train a
 const actions = @import("actions"); // PIPELINE: train a
+const workspaces = @import("workspaces");
 
 const window = @import("window");
 
 const drawing = @import("drawing");
 const prompt = @import("prompt");
-const sn = @import("snapshot");
 const segmod = @import("segment");
-const metrics = @import("metrics");
 const barwin = @import("win");
+const tags = @import("tags");
 
 const clock = @import("clock");
-const layout = @import("layout");
 const title = @import("title");
 const carousel = @import("carousel");
-const variants = @import("variants");
-const tags = @import("tags");
 
 const build_options = @import("build_options");
 const tiling = if (build_options.has_tiling) @import("tiling") else null;
 const floating = if (build_options.has_floating) @import("floating") else null;
+
+// ---------------------------------------------------------------------------
+// Bar height / font-size resolution (folded from metrics.zig).
+//
+// Owns everything needed to decide the bar's pixel height and effective font
+// size from config + font metrics, including the percentage-font-size probe
+// (which measures through drawing.probeFontMetrics' throwaway surface — no
+// live DrawContext is touched). The documented config write in
+// calcBarHeightAndFontSize (scaled_font_size is runtime state that happens
+// to live on BarConfig) is the only side effect.
+
+const min_bar_height: u32 = scale.bar_min_height_px;
+const max_bar_height: u32 = 200;
+const default_bar_height: u32 = 24;
+
+fn measureFontMetrics() ?struct { asc: i32, desc: i32 } {
+    const cs = core.getState();
+    const sized = drawing.buildSizedFontList(cs.alloc, null) catch return null;
+    defer drawing.freeSizedFontList(cs.alloc, sized);
+    const m = drawing.probeFontMetrics(cs.alloc, core.dpi_info.load(.acquire), sized) orelse return null;
+    return .{ .asc = m.ascent, .desc = m.descent };
+}
+
+fn resolvePercentageFontSize(bar_height: u16) ?u16 {
+    // Probe metrics at a trial point size via the override parameter —
+    // no save/mutate/restore round on cs.config.
+    const trial_pt: u16 = 100;
+    const cs = core.getState();
+    const sized = drawing.buildSizedFontList(cs.alloc, trial_pt) catch return null;
+    defer drawing.freeSizedFontList(cs.alloc, sized);
+    const m = drawing.probeFontMetrics(cs.alloc, core.dpi_info.load(.acquire), sized) orelse return null;
+    const px_per_pt: f32 = @as(f32, @floatFromInt(@max(1, m.ascent + m.descent))) / @as(f32, @floatFromInt(trial_pt));
+    const max_size_pt = @as(f32, @floatFromInt(bar_height)) / px_per_pt;
+    const cfg_pct = cs.config.bar.font_size.value / 100.0;
+    return @max(1, @as(u16, @intFromFloat(@round(max_size_pt * cfg_pct))));
+}
+
+fn calcBarHeightAndFontSize() !u16 {
+    const cs = core.getState();
+    if (cs.config.bar.height) |h| {
+        const height = scale.scaleBarHeight(h, cs.screen.height_in_pixels);
+        if (cs.config.bar.font_size.is_percentage) {
+            if (resolvePercentageFontSize(height)) |sz|
+                cs.config.bar.scaled_font_size = sz;
+        }
+        return height;
+    }
+    const m = measureFontMetrics() orelse return default_bar_height;
+    return @intCast(std.math.clamp(@as(u32, @intCast(m.asc + m.desc)), min_bar_height, max_bar_height));
+}
+
+// ---------------------------------------------------------------------------
 
 pub fn onPollWakeup() void {
     submitDraw();
@@ -75,17 +129,15 @@ pub fn promptToggle() void {
 
 pub const Action = enum { toggle, hide_fullscreen, show_fullscreen };
 
-/// Owns all live bar state.
+/// Global bar coordination flags. Read and written exclusively on the main
+/// thread; no mutex protection required.
 const Bar = struct {
     state: ?*State = null,
-    /// Forces a full bar redraw on the next submitDraw (expose, reload, position toggle, show).
-    /// Read and written exclusively on the main thread; does not require mutex protection.
-    pending_force_full_redraw: bool = false,
-    /// Forces the next capture to re-fetch the title segment's per-window data
-    /// (titles + geometry) even though focus / window-set / minimized state
-    /// haven't changed, without a full bar clear (see scheduleTitleRedraw).
-    /// Read and written exclusively on the main thread.
-    pending_force_title_redraw: bool = false,
+    /// Forces the next draw to re-fetch title data (per-window titles +
+    /// geometries, focused title) even when the cheap change-detection keys
+    /// say nothing changed. Set by expose/reload/show/property-notify paths;
+    /// normal ticks just redraw from live state. Consumed by every draw.
+    force: bool = false,
     /// True when presentForPrompt() had to map an otherwise-hidden bar (e.g.
     /// hidden by a fullscreen window, or by the user toggling it off) purely
     /// so the inline prompt would be visible. dismissAfterPrompt() checks this
@@ -115,58 +167,84 @@ const RenderCtx = struct {
     allocator: std.mem.Allocator,
 };
 
-/// On-screen hit-test bounds of a clickable segment, recorded by
-/// recordClickBounds during the last full layout pass.
-const SegBounds = struct {
-    x: u16 = 0,
-    w: u16 = 0,
-    has: bool = false,
+/// Per-frame window-count bound for the title scratch buffers. Matches
+/// title.zig's batch scratch limit (constants.Limits.max_tiled_windows).
+const max_frame_windows: usize = constants.Limits.max_tiled_windows;
 
-    inline fn contains(self: SegBounds, px: u16) bool {
-        return self.has and px >= self.x and px < self.x + self.w;
+/// Upper bound on recorded click bounds: one slot per clickable segment in
+/// the configured layout. Configs with more clickable segments than this
+/// simply lose clickability on the extras (rendering is unaffected).
+const max_click_bounds: usize = 8;
+
+/// On-screen hit-test bound of one segment, recorded by recordClickBound
+/// during the layout pass. THE click-bound storage: hit-testing iterates
+/// these in recorded order (first match wins).
+const SegBound = struct {
+    seg: types.BarSegment,
+    x: u16,
+    w: u16,
+
+    inline fn contains(self: SegBound, px: u16) bool {
+        return px >= self.x and px < self.x + self.w;
     }
 };
 
-/// Per-draw layout geometry; invalidated when workspace_count changes or the
-/// clock position is reset.
-const LayoutCache = struct {
-    clock_width: u16 = 0,
-    clock_x: ?u16 = null,
-    right_section_width: u16 = 0,
-    cached_workspace_count: u32 = std.math.maxInt(u32),
-
-    /// On-screen bounds of the workspaces segment, refreshed on every full
-    /// layout pass (drawAllInner always walks the whole configured layout,
-    /// regardless of dirty flags): see recordClickBounds. Used by
-    /// handleButtonPress to hit-test workspace-icon clicks.
-    workspaces_bounds: SegBounds = .{},
-
-    /// On-screen bounds of the layout (tiling indicator) segment. Same
-    /// refresh contract as workspaces_bounds above.
-    layout_bounds: SegBounds = .{},
-
-    /// On-screen bounds of the layout variants segment. Same refresh
-    /// contract as workspaces_bounds above.
-    variants_bounds: SegBounds = .{},
-};
-
+/// All live bar state. The title-data scratch below is refetched only when
+/// its tiny change-detection key (window ids + minimized flags) changes or a
+/// draw is forced; every other field is recomputed per frame.
 const State = struct {
     win: WindowCtx,
     render: RenderCtx,
-    layout_cache: LayoutCache = .{},
-    title_cache: sn.TitleCache = .{},
+
     is_visible: bool = true,
     is_globally_visible: bool = true,
     is_dirty: bool = false,
-    /// Title geometry captured by drawAllInner; consumed by drawAll
-    /// to call syncTitleCache after the flush decision.
-    title_cache_pending_x: ?u16 = null,
-    title_cache_pending_w: u16 = 0,
-    /// Ping-ponged snapshot pair used to diff this frame's state against the
-    /// last one (see captureStateIntoSlot). snap_idx names the "current" slot;
-    /// `1 - snap_idx` is "previous". Flipped after every draw.
-    snapshots: [2]sn.BarSnapshot = .{ .{}, .{} },
-    snap_idx: u1 = 0,
+
+    /// Reserved width of the clock segment (measure string + padding).
+    clock_width: u16 = 0,
+    /// Left edge of the clock from the last layout pass; enables the
+    /// region-scoped clock blit in drawClockOnly.
+    clock_x: ?u16 = null,
+
+    /// Click bounds recorded by the last layout pass, in record order.
+    bounds: [max_click_bounds]SegBound = undefined,
+    bounds_len: usize = 0,
+
+    // -- Live frame state (recollected on every draw; see scanLiveFrame) --
+
+    ws_count: u32 = 0,
+    current_ws: u8 = 0,
+    all_view: bool = false,
+    ws_has_windows: [constants.max_workspaces]bool = @splat(false),
+    wins: [max_frame_windows]u32 = undefined,
+    wins_len: usize = 0,
+
+    // -- Title data scratch --
+
+    /// Change-detection key for the batched prefetch: the current
+    /// workspace's window ids plus their minimized membership. Compared
+    /// against the previous frame's key; a mismatch is what triggers the
+    /// (blocking) X11 batch refetch.
+    fetch_key_ids: [max_frame_windows]u32 = undefined,
+    fetch_key_minimized: [max_frame_windows]bool = undefined,
+    fetch_key_len: usize = 0,
+    fetch_key_valid: bool = false,
+    /// Set by scanLiveFrame when the key changed since the stored key.
+    fetch_dirty: bool = false,
+
+    minimized: std.AutoHashMapUnmanaged(u32, void) = .{},
+    /// Title-string arena: every slice in `titles_buf` points into it, so a
+    /// refetch reclaims all strings with one reset (capacity retained).
+    titles_arena: std.heap.ArenaAllocator = undefined,
+    /// Batched per-window prefetch scratch (see title.fetchTitlesAndGeoms),
+    /// valid in [0, fetched_len) until the next refetch. Failed geometry
+    /// replies are padded with the off-screen sentinel at refetch time.
+    titles_buf: [max_frame_windows][]const u8 = undefined,
+    geoms_buf: [max_frame_windows]?utils.Rect = undefined,
+    fetched_len: usize = 0,
+    focused_title: std.ArrayListUnmanaged(u8) = .empty,
+    /// Window the focused_title buffer was fetched for (null = never/stale).
+    focused_title_window: ?u32 = null,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -193,72 +271,57 @@ const State = struct {
                 .height = height,
                 .allocator = allocator,
             },
-            .layout_cache = .{
-                .clock_width = dc.cachedTextWidth(clock.clock_measure_string) + 2 * config.scaledSegmentPadding(height),
-            },
+            .clock_width = dc.measureTextWidth(clock.clock_measure_string) + 2 * config.scaledSegmentPadding(height),
         };
-        // Partial-failure mirror of deinit(), minus the X resources: the
-        // caller's createBar errdefers own the window+colormap and the dc.
-        // Safe to arm here — every fallible step below runs after all owned
-        // sub-resources are initialized (WindowTitles.init is infallible; a
-        // default .{} TitleData would carry an undefined arena).
+        s.titles_arena = std.heap.ArenaAllocator.init(allocator);
+        // Partial-failure mirror of deinit(); the caller's errdefers own the
+        // window+colormap and the dc.
         errdefer {
-            s.title_cache.deinit(s.render.allocator);
-            for (&s.snapshots) |*snap| snap.deinit(s.render.allocator);
-            s.render.allocator.destroy(s);
+            s.minimized.deinit(allocator);
+            s.focused_title.deinit(allocator);
+            s.titles_arena.deinit();
+            allocator.destroy(s);
         }
-        for (&s.snapshots) |*snap| snap.title_data.window_titles = sn.WindowTitles.init(allocator);
-        s.title_cache.title_data.window_titles = sn.WindowTitles.init(allocator);
-        try s.title_cache.title_data.focused_title.ensureTotalCapacity(allocator, 256);
+        try s.focused_title.ensureTotalCapacity(allocator, 256);
         tags.invalidate();
         return s;
     }
 
     fn deinit(self: *State) void {
         self.win.deinit();
-        self.title_cache.deinit(self.render.allocator);
-        for (&self.snapshots) |*snap| snap.deinit(self.render.allocator);
-        self.render.allocator.destroy(self);
+        const alloc = self.render.allocator;
+        self.minimized.deinit(alloc);
+        self.focused_title.deinit(alloc);
+        self.titles_arena.deinit();
+        alloc.destroy(self);
     }
 
     fn markDirty(self: *State) void {
         self.is_dirty = true;
     }
 
-    fn invalidateLayoutCache(self: *State) void {
-        self.is_dirty = true;
-        self.layout_cache.clock_x = null;
-    }
-
-    /// Records the on-screen bounds of a clickable segment as drawAllInner
+    /// Records the on-screen bounds of a clickable segment as the layout pass
     /// positions it, so handleButtonPress can hit-test against them without
-    /// redoing the layout pass. Called unconditionally, even for segments
-    /// shouldSkipSegment skips; since the reserved screen position is stable
-    /// whether or not the pixels were repainted. No-op for non-clickable kinds.
-    fn recordClickBounds(self: *State, seg: types.BarSegment, x: u16, w: u16) void {
-        // D3: which segments are clickable is the contract's table
-        // (segment.isClickable). Only bound STORAGE stays here; title's
-        // bounds keep their post-draw recording path (title_cache_pending_*),
-        // so they are not touched in this switch.
-        const b: ?*SegBounds = switch (seg) {
-            .workspaces => &self.layout_cache.workspaces_bounds,
-            .layout => &self.layout_cache.layout_bounds,
-            .variants => &self.layout_cache.variants_bounds,
-            else => null,
-        };
-        const bb = b orelse return;
-        bb.x = x;
-        bb.w = w;
-        bb.has = true;
+    /// redoing the layout. Called unconditionally for every clickable kind;
+    /// the clock is absent from the participation table (onClick rejects it).
+    fn recordClickBound(self: *State, seg: types.BarSegment, x: u16, w: u16) void {
+        if (seg == .clock) return;
+        if (self.bounds_len >= max_click_bounds) return;
+        self.bounds[self.bounds_len] = .{ .seg = seg, .x = x, .w = w };
+        self.bounds_len += 1;
     }
 
-    fn measureSegmentWidth(self: *State, snap: *const sn.BarSnapshot, segment: types.BarSegment) u16 {
-        return segmod.naturalWidth(segment, snap, self.layout_cache.clock_width);
+    fn recordedBound(self: *const State, seg: types.BarSegment) ?SegBound {
+        for (self.bounds[0..self.bounds_len]) |b| if (b.seg == seg) return b;
+        return null;
     }
 
-    /// Stable per-call title rendering context; `cached_title`/`cached_title_window`
-    /// are the bar slot's title cache on the `draw()` path, null elsewhere.
-    fn titleCtx(self: *State, x: u16, w: u16, cached_title: ?*std.ArrayListUnmanaged(u8), cached_title_window: ?*?u32) title.TitleRenderContext {
+    fn measureSegmentWidth(self: *State, frame: *const segmod.Frame, segment: types.BarSegment) u16 {
+        return segmod.naturalWidth(segment, frame, self.clock_width);
+    }
+
+    /// Stable per-call title rendering context for the title/prompt adapter.
+    fn titleCtx(self: *const State, x: u16, w: u16) title.TitleRenderContext {
         return .{
             .dc = self.render.dc,
             .config = self.render.config,
@@ -266,59 +329,157 @@ const State = struct {
             .start_x = x,
             .width = w,
             .conn = self.win.conn,
-            .cached_title = cached_title,
-            .cached_title_window = cached_title_window,
         };
     }
 
-    fn drawSegment(self: *State, snap: *const sn.BarSnapshot, segment: types.BarSegment, x: u16, width: ?u16) !u16 {
-        const r = &self.render;
-        switch (segment) {
-            // Title adapter (see segment.zig draw()): needs caller-owned
-            // title-cache pointers from State; stays local for now.
-            .title => return prompt.draw(
-                self.titleCtx(x, width orelse title.min_width, &self.title_cache.title_data.focused_title, &self.title_cache.title_window),
-                sn.makeTitleSnapshot(
-                    snap.title_data.focused_window,
-                    snap.title_data.focused_title.items,
-                    snap.title_data.workspace_windows.items,
-                    &snap.title_data.minimized_windows,
-                    snap.title_data.window_titles.list.items,
-                    snap.title_data.window_geoms.items,
-                ),
-                r.allocator,
-                snap.is_title_invalidated,
-            ),
-            else => {},
-        }
-        return segmod.draw(
-            segment,
-            .{ .dc = r.dc, .config = r.config, .height = r.height },
-            x,
-            width orelse 0,
-            snap,
-            undefined,
-        );
+    /// Builds the title segment's view of the live frame from scratch state.
+    /// All backing memory lives on State (titles arena, focused-title buffer),
+    /// valid for the rest of the frame AND for post-draw click handling.
+    fn titleSnapshot(self: *const State) title.TitleSnapshot {
+        const wins_slice = self.wins[0..self.wins_len];
+        // Title of the minimized window, used in the single-window title case.
+        var minimized_title: []const u8 = "";
+        if (wins_slice.len > 0 and self.minimized.contains(wins_slice[0]) and self.fetched_len > 0)
+            minimized_title = self.titles_buf[0];
+        return .{
+            .focused_window = focus.getFocused(),
+            .focused_title = self.focused_title.items,
+            .minimized_title = minimized_title,
+            .current_ws_wins = wins_slice,
+            .minimized_set = &self.minimized,
+            .titles = self.titles_buf[0..self.fetched_len],
+            .geoms = self.geoms_buf[0..self.fetched_len],
+        };
     }
+
+    // -- Live-state collection ------------------------------------------------
+
+    /// Reads workspace/window state into the frame fields and diffs the
+    /// batch-refetch key against the stored one. Pure model reads: no X11.
+    /// Returns true when the key changed (batch refetch needed).
+    fn scanLiveFrame(self: *State) bool {
+        const m = pipeline.model();
+        if (workspaces.getState()) |ws_state| {
+            self.ws_count = @intCast(ws_state.workspaces.len);
+            self.current_ws = @intCast(m.current);
+            self.all_view = m.all_view_active;
+            @memset(&self.ws_has_windows, false);
+            self.wins_len = 0;
+            const cur_bit: u64 = if (self.current_ws < self.ws_count)
+                tracking.workspaceBit(self.current_ws)
+            else
+                0;
+            // OR-accumulate all window masks in a single pass, collecting the
+            // current workspace's windows on the way.
+            var combined_mask: u64 = 0;
+            for (tracking.allWindows()) |entry| {
+                combined_mask |= entry.mask;
+                if (cur_bit != 0 and entry.mask & cur_bit != 0 and self.wins_len < max_frame_windows) {
+                    self.wins[self.wins_len] = entry.win;
+                    self.wins_len += 1;
+                }
+            }
+            for (0..self.ws_count) |i| {
+                self.ws_has_windows[i] = combined_mask & tracking.workspaceBit(@as(u8, @intCast(i))) != 0;
+            }
+        }
+
+        // Diff the fetch key: ids plus minimized membership (a minimize flips
+        // the window's title-view geometry to the off-screen sentinel, which
+        // demotes it in the split-view sort — that IS a data change).
+        var changed = !self.fetch_key_valid or self.fetch_key_len != self.wins_len;
+        for (0..self.wins_len) |i| {
+            const minf = minimize.isMinimized(self.wins[i]);
+            if (!changed and (self.fetch_key_ids[i] != self.wins[i] or self.fetch_key_minimized[i] != minf))
+                changed = true;
+            self.fetch_key_ids[i] = self.wins[i];
+            self.fetch_key_minimized[i] = minf;
+        }
+        self.fetch_key_len = self.wins_len;
+        self.fetch_key_valid = true;
+        return changed;
+    }
+
+    /// Refreshes title data: the focused window's title (one buffered
+    /// property read, only when focus moved or forced) and the batched
+    /// per-window titles/geometries (only when the fetch key changed or
+    /// forced). Everything else reuses the scratch from the last fetch.
+    fn refreshTitleData(self: *State) void {
+        const alloc = self.render.allocator;
+
+        const fw = focus.getFocused();
+        if (fw != self.focused_title_window or gBar.force) {
+            self.focused_title.clearRetainingCapacity();
+            if (fw) |w| title.fetchWindowTitleInto(self.win.conn, w, &self.focused_title, alloc) catch {};
+            self.focused_title_window = fw;
+        }
+
+        if (gBar.force or self.fetch_dirty) self.refetchBatchedTitleData();
+        self.fetch_dirty = false;
+    }
+
+    /// Re-runs the batched title/geometry prefetch into the scratch buffers.
+    /// One dupe per title, ~2 round-trips total, zero blocking waits beyond
+    /// those replies themselves (see title.fetchTitlesAndGeoms).
+    fn refetchBatchedTitleData(self: *State) void {
+        _ = self.titles_arena.reset(.retain_capacity);
+        title.fetchTitlesAndGeoms(
+            self.win.conn,
+            self.wins[0..self.wins_len],
+            &self.minimized,
+            .{},
+            .{
+                .titles = self.titles_buf[0..self.wins_len],
+                .geoms = self.geoms_buf[0..self.wins_len],
+            },
+            self.titles_arena.allocator(),
+        );
+        self.fetched_len = self.wins_len;
+        // Pad failed live geometry replies with the off-screen sentinel so a
+        // dead window sorts last instead of vanishing from the split view.
+        for (self.geoms_buf[0..self.fetched_len]) |*g| {
+            if (g.* == null) g.* = title.offscreen_rect;
+        }
+    }
+
+    // -- Drawing ---------------------------------------------------------------
 
     /// Draws `segment`, catching and logging errors instead of propagating them.
     /// On failure returns `x` unchanged (the "drew nothing" signal) so a broken
     /// segment can't corrupt the surrounding layout or leave the off-screen
     /// pixmap partially drawn and never blitted.
-    fn drawSegmentSafe(self: *State, snap: *const sn.BarSnapshot, segment: types.BarSegment, x: u16, width: ?u16) u16 {
-        return self.drawSegment(snap, segment, x, width) catch |e| {
+    fn drawSegmentSafe(self: *State, frame: *const segmod.Frame, segment: types.BarSegment, x: u16, width: ?u16) u16 {
+        return self.drawSegment(frame, segment, x, width) catch |e| {
             debug.warnOnErr(e, "bar drawSegment");
             return x;
         };
     }
 
+    fn drawSegment(self: *State, frame: *const segmod.Frame, segment: types.BarSegment, x: u16, width: ?u16) !u16 {
+        // Title adapter (see segment.zig draw()): needs caller-owned title
+        // data from State; stays local for now.
+        if (segment == .title)
+            return prompt.draw(
+                self.titleCtx(x, width orelse title.min_width),
+                self.titleSnapshot(),
+                self.render.allocator,
+                false,
+            );
+        return segmod.draw(
+            segment,
+            .{ .dc = self.render.dc, .config = self.render.config, .height = self.render.height },
+            x,
+            frame,
+        );
+    }
+
     /// Draws one segment of a left-to-right row, painting the inter-segment gap
-    /// and advancing `x`. `w` is the reserved width (also used when the segment
-    /// is skipped); `omit_gap_after_title` suppresses the gap after a title so
-    /// the next segment sits flush (center layout). Returns the new `x`.
+    /// and advancing `x`. `w` is the reserved width; `omit_gap_after_title`
+    /// suppresses the gap after a title so the next segment sits flush (center
+    /// layout). Returns the new `x`.
     fn drawRowSegment(
         self: *State,
-        snap: *const sn.BarSnapshot,
+        frame: *const segmod.Frame,
         seg: types.BarSegment,
         x: u16,
         w: u16,
@@ -326,10 +487,8 @@ const State = struct {
         scaled_spacing: u16,
     ) u16 {
         const omit_gap = omit_gap_after_title and seg == .title;
-        if (shouldSkipSegment(snap, seg)) return x + w + (if (omit_gap) 0 else scaled_spacing);
-
         const x_before = x;
-        const drawn_x = self.drawSegmentSafe(snap, seg, x, w);
+        const drawn_x = self.drawSegmentSafe(frame, seg, x, w);
         if (!omit_gap and drawn_x != x_before) {
             self.paintGap(drawn_x, scaled_spacing);
             return drawn_x + scaled_spacing;
@@ -337,39 +496,25 @@ const State = struct {
         return drawn_x;
     }
 
-    /// Returns true when `seg` should be skipped because its data has not changed
-    /// since the last frame and a full redraw is not required.
-    inline fn shouldSkipSegment(snap: *const sn.BarSnapshot, seg: types.BarSegment) bool {
-        // Marquee frames repaint moving pixels whose data hasn't changed, so
-        // the title's clean diff must not suppress them while scrolling.
-        if (seg == .title and carousel.scrollingActive()) return false;
-        return segmod.shouldSkip(snap, seg);
-    }
-
     fn paintGap(self: *State, gap_x: u16, scaled_spacing: u16) void {
         self.render.dc.fillRect(gap_x, 0, scaled_spacing, self.render.height, self.render.config.bg);
     }
 
-    fn drawRightSegments(self: *State, snap: *const sn.BarSnapshot, segments: []const types.BarSegment) void {
+    fn drawRightSegments(self: *State, frame: *const segmod.Frame, segments: []const types.BarSegment) void {
         const scaled_spacing = self.render.config.scaledSpacing(self.render.height);
         var right_x = self.render.width;
         var pending_gap = false;
         var i = segments.len;
         while (i > 0) {
             i -= 1;
-            const seg_w = self.measureSegmentWidth(snap, segments[i]);
+            const seg_w = self.measureSegmentWidth(frame, segments[i]);
             right_x -= seg_w;
             if (pending_gap) right_x -= scaled_spacing;
 
-            if (segments[i] == .clock) self.layout_cache.clock_x = right_x;
-            self.recordClickBounds(segments[i], right_x, seg_w);
+            if (segments[i] == .clock) self.clock_x = right_x;
+            self.recordClickBound(segments[i], right_x, seg_w);
 
-            if (shouldSkipSegment(snap, segments[i])) {
-                pending_gap = false;
-                continue;
-            }
-
-            const drew = self.drawSegmentSafe(snap, segments[i], right_x, null) != right_x;
+            const drew = self.drawSegmentSafe(frame, segments[i], right_x, null) != right_x;
             if (drew) {
                 if (pending_gap) self.paintGap(right_x + seg_w, scaled_spacing);
             } else {
@@ -380,167 +525,88 @@ const State = struct {
         }
     }
 
-    /// When `flush` is true, blits the off-screen pixmap to the window (event-loop path).
-    /// When false, only flushes Cairo to the pixmap: safe inside xcb_grab_server.
-    fn drawAll(self: *State, snap: *const sn.BarSnapshot, flush: bool) void {
-        self.drawAllInner(snap);
-        if (flush) self.render.dc.blit() else self.render.dc.renderOnly();
-        if (self.title_cache_pending_x) |x|
-            self.syncTitleCache(snap, x, self.title_cache_pending_w);
-        self.title_cache_pending_x = null;
-    }
+    /// Repaints the whole bar into the off-screen pixmap: background clear,
+    /// then every configured segment in layout order. No dirty-diff skip —
+    /// immediate mode repaints moving pixels (marquee) and unchanged pixels
+    /// alike, and correctness no longer depends on flag bookkeeping.
+    fn drawAllInner(self: *State, frame: *const segmod.Frame) void {
+        const r = &self.render;
+        r.dc.fillRect(0, 0, r.width, r.height, r.config.bg);
 
-    /// Core drawing logic shared by the flush and grab-safe draw paths; does not flush.
-    fn drawAllInner(self: *State, snap: *const sn.BarSnapshot) void {
-        if (snap.is_title_invalidated) self.title_cache.title_window = null;
-        if (snap.is_full_redraw) self.render.dc.fillRect(0, 0, self.render.width, self.render.height, self.render.config.bg);
+        const scaled_spacing = r.config.scaledSpacing(r.height);
 
-        const scaled_spacing = self.render.config.scaledSpacing(self.render.height);
-
-        // Recompute right_section_width only when workspace_count changes.
-        if (snap.workspace_count != self.layout_cache.cached_workspace_count) {
-            var right_total: u16 = 0;
-            for (self.render.config.layout.items) |lay| {
-                if (lay.position != .right) continue;
-                for (lay.segments.items) |seg| right_total += self.measureSegmentWidth(snap, seg) + scaled_spacing;
-                if (lay.segments.items.len > 0) right_total -= scaled_spacing;
-            }
-            self.layout_cache.right_section_width = right_total;
-            self.layout_cache.cached_workspace_count = snap.workspace_count;
+        var right_total: u16 = 0;
+        for (r.config.layout.items) |lay| {
+            if (lay.position != .right) continue;
+            for (lay.segments.items) |seg| right_total += self.measureSegmentWidth(frame, seg) + scaled_spacing;
+            if (lay.segments.items.len > 0) right_total -= scaled_spacing;
         }
 
-        const right_total = self.layout_cache.right_section_width;
-        var title_seg_x: u16 = 0;
-        var title_seg_w: u16 = 0;
+        self.bounds_len = 0;
         var x: u16 = 0;
-
-        for (self.render.config.layout.items) |lay| {
+        for (r.config.layout.items) |lay| {
             switch (lay.position) {
                 .left, .center => {
                     const remaining = if (lay.position == .center)
-                        @max(title.min_width, self.render.width -| x -| right_total -| scaled_spacing)
+                        @max(title.min_width, r.width -| x -| right_total -| scaled_spacing)
                     else
                         0;
                     for (lay.segments.items) |seg| {
-                        const w = if (seg == .title and lay.position == .center) remaining else self.measureSegmentWidth(snap, seg);
-                        if (seg == .title) {
-                            title_seg_x = x;
-                            title_seg_w = w;
-                        }
-                        self.recordClickBounds(seg, x, w);
-                        x = self.drawRowSegment(snap, seg, x, w, lay.position == .center, scaled_spacing);
+                        const w = if (seg == .title and lay.position == .center) remaining else self.measureSegmentWidth(frame, seg);
+                        self.recordClickBound(seg, x, w);
+                        x = self.drawRowSegment(frame, seg, x, w, lay.position == .center, scaled_spacing);
                     }
                 },
-                .right => self.drawRightSegments(snap, lay.segments.items),
+                .right => self.drawRightSegments(frame, lay.segments.items),
             }
         }
-
-        self.title_cache_pending_x = if (title_seg_w > 0) title_seg_x else null;
-        self.title_cache_pending_w = title_seg_w;
     }
 
     fn drawClockOnly(self: *State) void {
-        const clock_x = self.layout_cache.clock_x orelse return;
+        const clock_x = self.clock_x orelse return;
         const drawn_end = clock.draw(self.render.dc, self.render.config, self.render.height, clock_x) catch |e| {
             debug.warnOnErr(e, "drawClockOnly");
             return;
         };
-        // renderOnly() flushes Cairo to the pixmap; blitAndFlush() copies only the
-        // clock region to the window and calls xcb_flush, avoiding a full-window
-        // blit plus a separate main-thread xcb_flush.
-        self.render.dc.renderOnly();
-        // Blit at least what was PAINTED (drawn_end can exceed the layout-time
-        // reservation after font fallback or digit-width drift — blitting only
-        // the cached width would clip digits) while keeping the full reserved
-        // slot covered so stale pixels from a wider earlier frame still get
-        // overwritten with the clean background the last full frame left.
+        // Region-scoped blit: copies only the clock region and flushes (this
+        // is a timer-driven path; no event-loop flush is coming). Blit at
+        // least what was PAINTED (drawn_end can exceed the layout-time
+        // reservation after font fallback or digit-width drift — blitting
+        // only the cached width would clip digits) while keeping the full
+        // reserved slot covered so stale pixels from a wider earlier frame
+        // still get overwritten with the clean background the last full
+        // frame left.
         const drawn_w: u16 = drawn_end -| clock_x;
-        self.render.dc.blitAndFlush(clock_x, @max(self.layout_cache.clock_width, drawn_w));
-    }
-
-    /// Replacements are built before the swap so a failed allocation leaves the cache
-    /// showing stale data rather than going silently empty.
-    fn syncTitleCache(self: *State, snap: *const sn.BarSnapshot, x: u16, w: u16) void {
-        const alloc = self.render.allocator;
-
-        // Re-sync per-window data only when the capture re-fetched it
-        // (snap.title_list_refreshed). Unchanged frames relay the same lists
-        // between ping-pong slots, so the cache already matches; re-duping
-        // every title was an O(window count) alloc+free pass for no-op data.
-        if (snap.title_list_refreshed) {
-            sn.swapAlloc(u32, &self.title_cache.title_data.workspace_windows, alloc, snap.title_data.workspace_windows.items);
-
-            if (snap.title_data.minimized_windows.clone(alloc)) |new_set| {
-                self.title_cache.title_data.minimized_windows.deinit(alloc);
-                self.title_cache.title_data.minimized_windows = new_set;
-            } else |_| {
-                // minimized_windows left stale rather than cleared.
-            }
-
-            // Keep cached titles in sync for fast-path redraws.
-            // replaceWith frees the old owned strings before duping the new ones,
-            // so a failed dupe simply truncates the cache rather than desyncing it.
-            self.title_cache.title_data.window_titles.replaceWith(alloc, snap.title_data.window_titles.list.items);
-
-            // Keep cached geometry in sync for fast-path redraws. Rect is
-            // POD, so, like workspace_windows above, build the replacement before
-            // swapping it in: a failed allocation leaves the cache untouched.
-            sn.swapAlloc(utils.Rect, &self.title_cache.title_data.window_geoms, alloc, snap.title_data.window_geoms.items);
-
-            self.title_cache.title_data.focused_window = snap.title_data.focused_window;
-        }
-
-        self.title_cache.title_x = x;
-        self.title_cache.title_width = w;
-        self.title_cache.is_layout_valid = true;
+        self.render.dc.blitRegion(clock_x, @max(self.clock_width, drawn_w));
     }
 };
 
 // Draw submission
 
-/// Returns true on success, false if the bar is not visible or capture failed.
-/// Captures into whichever snapshot slot is currently "current" (s.snap_idx),
-/// diffing against the other slot ("previous").
-fn prepareSnapshot(s: *State) bool {
-    if (!s.is_visible) return false;
-    const idx = s.snap_idx;
-    const forced = gBar.pending_force_full_redraw;
-    gBar.pending_force_full_redraw = false;
-    const pending_title = gBar.pending_force_title_redraw;
-    gBar.pending_force_title_redraw = false;
-    sn.captureStateIntoSlot(
-        s.render.allocator,
-        &s.title_cache,
-        &s.snapshots[idx],
-        &s.snapshots[1 - idx],
-        forced,
-        pending_title,
-    ) catch |e| {
-        debug.warnOnErr(e, "bar captureStateIntoSlot");
-        return false;
-    };
-    return true;
-}
-
-/// Captures a fresh snapshot and draws synchronously. `flush` selects
-/// whether the result is blitted to the window (normal path) or only rendered
-/// to the off-screen pixmap (grab-safe path: see redrawInsideGrab).
-fn performDraw(flush: bool) void {
+/// Collects live state, repaints every segment into the off-screen pixmap,
+/// and queues the single xcb_copy_area blit (cairo_surface_flush included,
+/// xcb_flush NOT: the caller's context flushes — event-loop end-of-batch on
+/// normal paths, ungrabAndFlush inside grabs).
+fn performDraw() void {
     const s = gBar.state orelse return;
-    if (!prepareSnapshot(s)) return;
-    s.drawAll(&s.snapshots[s.snap_idx], flush);
-    s.snap_idx ^= 1;
+    if (!s.is_visible) return;
+    minimize.collectMinimizedIntoSet(&s.minimized, s.render.allocator) catch {};
+    s.fetch_dirty = s.scanLiveFrame();
+    s.refreshTitleData();
+    const frame = segmod.Frame{
+        .workspace_count = s.ws_count,
+        .current_workspace = s.current_ws,
+        .is_all_view_active = s.all_view,
+        .workspace_has_windows = s.ws_has_windows[0..s.ws_count],
+    };
+    s.drawAllInner(&frame);
+    s.render.dc.queueBlit();
+    gBar.force = false;
 }
 
 fn submitDrawBlockingFull() void {
-    gBar.pending_force_full_redraw = true;
-    performDraw(true);
-}
-
-/// Invalidates the title cache and triggers a full redraw.
-fn submitFullRedrawWithTitleReset(s: *State) void {
-    s.title_cache.is_invalidated = true;
-    submitDrawBlockingFull();
+    gBar.force = true;
+    performDraw();
 }
 
 inline fn ungrabAndFlush() void {
@@ -550,13 +616,7 @@ inline fn ungrabAndFlush() void {
 /// Draws and blits to the window. Drawing always happens inline on the
 /// calling thread.
 pub fn submitDraw() void {
-    performDraw(true);
-}
-
-/// Renders only: no xcb_copy_area, no xcb_flush.
-/// Use INSIDE xcb_grab_server; pair with dc.blitQueued() + ungrabAndFlush().
-fn submitRenderBlocking() void {
-    performDraw(false);
+    performDraw();
 }
 
 /// Everything a fully-initialised bar owns; returned by createBar.
@@ -587,7 +647,7 @@ pub fn init() !void {
     std.debug.assert(cs.config.bar.enabled);
     barwin.initAtoms();
     refresh_rate.ensureRefreshRateDetected(cs.conn);
-    const height = try metrics.calcBarHeightAndFontSize();
+    const height = try calcBarHeightAndFontSize();
     const bar = try createBar(height, barwin.calcBarYPos(height));
     gBar.state = bar.state;
     submitDraw();
@@ -601,7 +661,6 @@ pub fn deinit() void {
     if (gBar.state) |s| {
         _ = xcb.xcb_destroy_window(s.win.conn, s.win.win_id);
         s.render.dc.deinit();
-        drawing.deinitFontCache(s.render.allocator);
         s.deinit();
         gBar.state = null;
     }
@@ -618,7 +677,7 @@ pub fn reload() void {
         deinit();
         return;
     }
-    const height = metrics.calcBarHeightAndFontSize() catch metrics.default_bar_height;
+    const height = calcBarHeightAndFontSize() catch default_bar_height;
     applyReload(old, height) catch |err| {
         debug.err("Bar reload failed ({s}), keeping old bar", .{@errorName(err)});
     };
@@ -663,8 +722,9 @@ pub fn toggleBarSegmentAnchor() void {
     };
     const new_y = barwin.calcBarYPos(s.render.height);
     barwin.setWindowProperties(s.win.win_id, s.render.height);
-    gBar.pending_force_full_redraw = true;
-    s.invalidateLayoutCache();
+    gBar.force = true;
+    s.markDirty();
+    s.clock_x = null;
     utils.grabServer(cs.conn);
     _ = xcb.xcb_configure_window(cs.conn, s.win.win_id, xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{utils.toXcbCoord(new_y)});
     const current_ws = tracking.getCurrentWorkspace() orelse {
@@ -674,8 +734,8 @@ pub fn toggleBarSegmentAnchor() void {
         return;
     };
     const no_fullscreen = !actions.fullscreenOccupiedOnWs(@intCast(current_ws));
-    // WP6: the work area changed with the bar's new edge; one model
-    // reconcile re-derives every placement from it (legacy retile deleted).
+    // The work area changed with the bar's new edge; one model reconcile
+    // re-derives every placement from it.
     if (no_fullscreen) pipeline.reconcileInGrab();
     window.updateFloatingWindowBorders();
     window.markBordersFlushed();
@@ -688,7 +748,7 @@ pub fn scheduleFocusRedraw(_: ?u32) void {
     const s = gBar.state orelse return;
     if (!s.is_visible or s.is_dirty) return;
     // markDirty ensures a full redraw follows at end-of-batch via
-    // updateIfDirty, which re-captures window state and renders the
+    // updateIfDirty, which re-reads live window state and renders the
     // entire bar. A per-frame redraw during rapid window opening would
     // produce O(N²) property queries and Pango renders. Skipping the
     // early draw lets the post-batch hook do one full redraw instead.
@@ -723,13 +783,14 @@ pub fn scheduleRedraw() void {
     if (gBar.state) |s| if (s.is_visible) s.markDirty();
 }
 
-/// Like scheduleRedraw but forces a full bar clear+redraw regardless of dirty flags.
+/// Like scheduleRedraw but also forces a title-data refetch on the next draw.
 ///
-/// Use when a segment's presence or width changes (e.g. layout switch) so stale
-/// pixels from the previous render are guaranteed to be erased.
+/// Use when a segment's presence or width may change (e.g. layout switch) or
+/// when cached title data must be re-read from X11 despite an unchanged
+/// fetch key; stale pixels are erased by the unconditional background clear.
 pub fn scheduleFullRedraw() void {
     if (gBar.state) |s| if (s.is_visible) {
-        gBar.pending_force_full_redraw = true;
+        gBar.force = true;
         s.markDirty();
     };
 }
@@ -739,11 +800,10 @@ pub fn scheduleFullRedraw() void {
 ///
 /// Use when window positions change but focus and the window-ID set don't
 /// (e.g. a master swap): the segmented title view sorts by position, so its
-/// segment order is stale. Cheaper than scheduleFullRedraw; no background
-/// clear, and the other segments skip via shouldSkipSegment.
+/// segment order is stale.
 pub fn scheduleTitleRedraw() void {
     if (gBar.state) |s| if (s.is_visible) {
-        gBar.pending_force_title_redraw = true;
+        gBar.force = true;
         s.markDirty();
     };
 }
@@ -754,34 +814,30 @@ pub fn isVisible() bool {
 
 /// Synchronous bar update safe to call inside xcb_grab_server.
 ///
-/// Phase 1 (inside grab): render to the off-screen pixmap: cairo_surface_flush
-/// only, no xcb_copy_area/flush, so the compositor sees no intermediate frame.
-/// Phase 2: blitQueued() enqueues xcb_copy_area without flushing; the caller's
-/// ungrabAndFlush() sends configure_window + copy_area + ungrab in one flush,
-/// producing exactly one compositor frame.
+/// Phase 1 (inside grab): render to the off-screen pixmap; queueBlit does
+/// cairo_surface_flush and ENQUEUES xcb_copy_area without flushing, so the
+/// compositor sees no intermediate frame.
+/// Phase 2: the caller's ungrabAndFlush() sends configure_window +
+/// copy_area + ungrab in one flush, producing exactly one compositor frame.
 ///
-/// Frames whose diff says title data changed are DEFERRED instead of rendered:
-/// their recapture runs blocking property round trips under this grab --
-/// every client stalls until the replies arrive, and each reply's implicit
-/// flush tears the caller's queued configure/map batch apart mid-operation,
-/// exactly what the grab exists to prevent (see the O(N²)-in-grab note in
-/// window.zig). Those frames fall back to the coalesced post-batch redraw;
-/// cheap frames (unchanged focus/window set) still render inline as before.
+/// Frames whose refresh would run blocking property round trips under this
+/// grab are DEFERRED instead of rendered: every client stalls until the
+/// replies arrive, and each reply's implicit flush tears the caller's queued
+/// configure/map batch apart mid-operation, exactly what the grab exists to
+/// prevent (see the O(N²)-in-grab note in window.zig). Those frames fall
+/// back to the coalesced post-batch redraw; cheap frames still render inline.
 pub fn redrawInsideGrab() void {
     const s = gBar.state orelse return;
     if (!s.is_visible) return;
-    if (sn.snapshotNeedsRefetch(
-        gBar.pending_force_title_redraw,
-        &s.snapshots[1 - s.snap_idx],
-        s.title_cache.is_invalidated,
-    )) {
+    if (gBar.force or
+        s.focused_title_window != focus.getFocused() or
+        s.scanLiveFrame())
+    {
         s.markDirty();
         return;
     }
-    // Phase 1: render to pixmap without any XCB flush.
-    submitRenderBlocking();
-    // Phase 2: queue the blit; will be sent with ungrabAndFlush().
-    s.render.dc.blitQueued();
+    // Phase 1+2a: render to pixmap, queue the blit; sent with ungrabAndFlush().
+    performDraw();
     s.is_dirty = false;
 }
 
@@ -807,7 +863,7 @@ pub fn presentForPrompt() void {
         // never shows a blank or stale bar for a frame.
         gBar.prompt_forced_visible = true;
         s.is_visible = true;
-        submitFullRedrawWithTitleReset(s);
+        submitDrawBlockingFull();
         _ = xcb.xcb_map_window(s.win.conn, s.win.win_id);
     }
     raiseBar();
@@ -847,17 +903,17 @@ pub fn setBarState(action: Action) void {
     const should_be_visible = !bar_forced_hidden_by_fullscreen and s.is_globally_visible and action != .hide_fullscreen;
     if (s.is_visible == should_be_visible and action != .toggle) return;
     s.is_visible = should_be_visible;
-    if (should_be_visible) submitFullRedrawWithTitleReset(s);
+    if (should_be_visible) submitDrawBlockingFull();
 
     const conn = core.getState().conn;
     const grabbed = action == .toggle;
     if (grabbed) utils.grabServer(conn);
     if (should_be_visible) _ = xcb.xcb_map_window(conn, s.win.win_id) else _ = xcb.xcb_unmap_window(conn, s.win.win_id);
-    if (grabbed) { // PIPELINE: WP6 — legacy retileAllWorkspaces deleted
+    if (grabbed) {
         pipeline.reconcileInGrab();
         ungrabAndFlush();
     } else {
-        pipeline.reconcileNow(); // PIPELINE: WP6
+        pipeline.reconcileNow();
     }
     debug.info("Bar {s} ({s})", .{ if (should_be_visible) "shown" else "hidden", @tagName(action) });
 }
@@ -866,7 +922,7 @@ pub fn updateIfDirty() !void {
     const s = gBar.state orelse return;
     if (!s.is_visible) return;
     if (prompt.consumeRedrawRequest()) {
-        gBar.pending_force_full_redraw = true;
+        gBar.force = true;
         s.is_dirty = true;
     }
     if (s.is_dirty) {
@@ -893,7 +949,7 @@ fn cs_configClockFormat() []const u8 {
 
 pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {
     if (gBar.state) |s| if (event.window == s.win.win_id and event.count == 0) {
-        gBar.pending_force_full_redraw = true;
+        gBar.force = true;
         const dragging = if (build_options.has_floating) floating.isDragging() else false;
         if (dragging) s.is_dirty = true else submitDraw();
     };
@@ -905,7 +961,9 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
     if (event.window != focused_win) return;
     const net_wm_name = s.win.net_wm_name_atom;
     if (event.atom == xcb.XCB_ATOM_WM_NAME or (net_wm_name != 0 and event.atom == net_wm_name)) {
-        s.title_cache.is_invalidated = true;
+        // Renamed focused window: force the title data refetch on the next
+        // draw (the fetch key alone wouldn't notice a text-only change).
+        gBar.force = true;
         s.markDirty();
     }
 }
@@ -916,6 +974,10 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
 /// Called from input.zig before its managed-window click path: the bar is
 /// never a managed window, so that path would just replay and swallow it.
 ///
+/// Hit-testing walks the bounds RECORDED DURING THE LAST LAYOUT PASS in
+/// record order (first containing bound wins), then delegates behavior to
+/// the segment contract's single onClick dispatch.
+///
 /// Left-clicking a workspace icon switches to it; right-clicking one sends
 /// the currently focused window to it. Right-clicking anywhere in the title
 /// segment (empty or over any window's title, regardless of that window's
@@ -924,7 +986,6 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
 /// Left/right-clicking the layout indicator cycles the tiling layout
 /// forward/backward; left/right-clicking the layout variants indicator
 /// cycles the current layout's variant forward/backward the same way.
-///
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     const s = gBar.state orelse return;
     if (!s.is_visible) return;
@@ -935,64 +996,42 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     const right = event.detail == constants.mouse_button_right;
     if (!left and !right) return;
 
-    // D3: hit-test against the recorded segment bounds (same evaluation
-    // ORDER as the pre-refactor chain), then delegate behavior to the
-    // segment contract's single onClick dispatch.
-    const Hit = struct { seg: types.BarSegment, offset: u16 };
-    const hit: ?Hit = blk: {
-        const lb = &s.layout_cache;
-        if (lb.workspaces_bounds.contains(x))
-            break :blk Hit{ .seg = .workspaces, .offset = x - lb.workspaces_bounds.x };
-        if (s.title_cache.is_layout_valid and
-            x >= s.title_cache.title_x and x < s.title_cache.title_x + s.title_cache.title_width)
-            break :blk Hit{ .seg = .title, .offset = x - s.title_cache.title_x };
-        if (lb.layout_bounds.contains(x))
-            break :blk Hit{ .seg = .layout, .offset = 0 };
-        if (lb.variants_bounds.contains(x))
-            break :blk Hit{ .seg = .variants, .offset = 0 };
+    const hit: ?SegBound = blk: {
+        for (s.bounds[0..s.bounds_len]) |b| {
+            if (b.contains(x)) break :blk b;
+        }
         break :blk null;
     };
     const h = hit orelse return;
-    _ = segmod.onClick(h.seg, h.offset, left, right, s, titleClickTrampoline, redrawInsideGrab);
+    _ = segmod.onClick(h.seg, x - h.x, left, right, s, titleClickTrampoline, redrawInsideGrab);
 }
 
 /// `offset` is the click position relative to the title segment's start.
-/// Resolves which window is under the click via the per-window title/geometry
-/// data `syncTitleCache` cached on the last full draw, then:
+/// Resolves which window is under the click via the title scratch data
+/// (populated by the last draw; hitTest makes no X11 round-trips when the
+/// prefetched lists cover the window set), then:
 ///   - no window under the click -> no-op (empty title is handled by the
 ///     right-click prompt path in `handleButtonPress`, before this is called)
 ///   - the window is minimized -> unminimizes that window
 ///   - the window is already focused -> minimizes it
 ///   - otherwise -> focuses it
 fn handleTitleClick(s: *State, offset: u16) void {
-    if (s.title_cache.title_data.workspace_windows.items.len == 0) return;
+    if (s.wins_len == 0) return;
+    const tb = s.recordedBound(.title) orelse return;
 
-    const ctx = s.titleCtx(s.title_cache.title_x, s.title_cache.title_width, null, null);
-    const snapshot = sn.makeTitleSnapshot(
-        s.title_cache.title_data.focused_window,
-        "",
-        s.title_cache.title_data.workspace_windows.items,
-        &s.title_cache.title_data.minimized_windows,
-        s.title_cache.title_data.window_titles.list.items,
-        s.title_cache.title_data.window_geoms.items,
-    );
-
-    const target = (title.hitTest(ctx, snapshot, s.render.allocator, offset) catch |e| {
+    const target = (title.hitTest(s.titleCtx(tb.x, tb.w), s.titleSnapshot(), s.render.allocator, offset) catch |e| {
         debug.warnOnErr(e, "bar title click hitTest");
         return;
     }) orelse return;
 
-    if (minimize.isMinimized(target.window)) { // WP6 — pipeline-only
-        actions.restore(&action_ctx, target.window);
+    if (minimize.isMinimized(target.window)) {
+        actions.restore(target.window);
     } else if (focus.getFocused() == target.window) {
-        actions.minimize(&action_ctx, target.window);
+        actions.minimize(target.window);
     } else {
         focus.setFocus(target.window, .mouse_click);
     }
 }
-
-/// WP6 — shared bar action context for title-click actions.
-var action_ctx: actions.Ctx = .{};
 
 fn titleClickTrampoline(ptr: *anyopaque, offset: u16) void {
     const s: *State = @ptrCast(@alignCast(ptr));
