@@ -5,13 +5,17 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
+const utils = @import("utils");
 
 const bar = @import("bar");
 const types = @import("types");
 
 const drawing = @import("drawing");
-const title = @import("title");
-const carousel = @import("carousel");
+const build_options = @import("build_options");
+const title = if (build_options.has_seg_title) @import("title") else @import("title_stub");
+const carousel = if (build_options.has_seg_carousel) @import("carousel") else struct {
+    pub fn deactivate() void {}
+};
 const vim = @import("vim");
 
 const debug = @import("debug");
@@ -45,9 +49,9 @@ const num_modes = @typeInfo(vim.Mode).@"enum".fields.len;
 
 const cursor_width: u16 = 1;
 const cursor_v_pad: u16 = 2;
-const max_completions: usize = 4096;
+const max_completions: usize = 1024;
 const max_completion_len: usize = 64;
-const max_history: usize = 512;
+const max_history: usize = 128;
 const max_history_line: usize = vim.default_max_input;
 
 const PromptState = struct {

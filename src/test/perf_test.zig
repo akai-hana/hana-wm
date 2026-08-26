@@ -241,18 +241,19 @@ test "bench: fallbackFocusCandidate (50 wins)" {
     std.debug.print("[bench] fallbackFocusCandidate (50 wins): {d:.1} ns/call\n", .{per_call_ns});
 }
 
-test "bench: store.get linear scan (100 wins, worst case)" {
+test "bench: store.get linear scan (max_tiled_windows, worst case)" {
     var m = makeModel();
-    for (0..100) |i| {
+    const n = constants.Limits.max_tiled_windows;
+    for (0..n) |i| {
         model.register(&m, @intCast(i + 1), 0) catch unreachable;
     }
 
     const iterations: usize = 50_000;
     const t0 = nowNs();
     for (0..iterations) |_| {
-        _ = m.store.get(100);
+        _ = m.store.get(@intCast(n));
     }
     const elapsed_ns = nowNs() - t0;
     const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
-    std.debug.print("[bench] store.get (100 wins, worst case): {d:.1} ns/call\n", .{per_call_ns});
+    std.debug.print("[bench] store.get ({d} wins, worst case): {d:.1} ns/call\n", .{ n, per_call_ns });
 }

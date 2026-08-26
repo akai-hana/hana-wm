@@ -69,6 +69,9 @@ pub inline fn windowCount() usize {
     return mm.store.count();
 }
 
+/// NOTE(I-3): rebuild-per-call is correct for correctness; a dirty flag
+/// would need mutation hooks to track when the model store changes.
+///
 /// Read-only SNAPSHOT of the model registry, rebuilt per call (bounded by the
 /// store capacity; call sites are redraw/focus-scan paths, not hot loops).
 /// Do not retain across mutations.

@@ -62,7 +62,12 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         /// collection untouched if full; callers decide whether a full
         /// collection is worth a warning or a silent fallback.
         pub fn append(self: *Self, item: T) bool {
-            if (self.len >= capacity) return false;
+            if (self.len >= capacity) {
+                if (std.debug.runtime_safety) {
+                    std.log.warn("BoundedList overflow: capacity={d}", .{capacity});
+                }
+                return false;
+            }
             self.items[self.len] = item;
             self.len += 1;
             return true;

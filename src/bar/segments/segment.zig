@@ -16,13 +16,32 @@
 
 const drawing = @import("drawing");
 const types = @import("types");
+const actions = @import("actions");
+const focus = @import("focus");
+const build_options = @import("build_options");
 
-const tags = @import("tags");
-const clock = @import("clock");
-const layout_seg = @import("layout");
-const variants = @import("variants");
-const title = @import("title");
-const prompt = @import("prompt");
+const tags = if (build_options.has_seg_tags) @import("tags") else struct {
+    pub fn getCachedWorkspaceWidth() u16 { return 0; }
+    pub const fallback_width: u16 = 0;
+    pub fn draw(_: anytype, _: anytype, _: anytype, x: u16, _: anytype, _: anytype, _: anytype) !u16 { return x; }
+};
+const clock = if (build_options.has_seg_clock) @import("clock") else struct {
+    pub fn draw(_: anytype, _: anytype, _: anytype, x: u16) !u16 { return x; }
+};
+const layout_seg = if (build_options.has_seg_layout) @import("layout") else struct {
+    pub const natural_width: u16 = 0;
+    pub fn draw(_: anytype, _: anytype, _: anytype, x: u16) !u16 { return x; }
+};
+const variants = if (build_options.has_seg_variants) @import("variants") else struct {
+    pub fn draw(_: anytype, _: anytype, _: anytype, x: u16) !u16 { return x; }
+};
+const title = if (build_options.has_seg_title) @import("title") else struct {
+    pub const min_width: u16 = 0;
+};
+const prompt = if (build_options.has_seg_prompt) @import("prompt") else struct {
+    pub fn isActive() bool { return false; }
+    pub fn toggle() void {}
+};
 
 /// Live workspace state for one bar frame, collected fresh by bar.zig
 /// every draw. The only segment-visible slice of WM state.
@@ -44,10 +63,12 @@ pub const Env = struct {
 
 pub fn naturalWidth(seg: types.BarSegment, frame: *const Frame, clock_width: u16) u16 {
     return switch (seg) {
-        .workspaces => if (frame.workspace_count > 0)
+        .workspaces => if (build_options.has_seg_tags and frame.workspace_count > 0)
             @intCast(frame.workspace_count * tags.getCachedWorkspaceWidth())
+        else if (build_options.has_seg_tags)
+            tags.fallback_width
         else
-            tags.fallback_width,
+            0,
         .layout, .variants => layout_seg.natural_width,
         .title => title.min_width,
         .clock => clock_width,
@@ -93,6 +114,7 @@ pub fn onClick(
 ) bool {
     switch (seg) {
         .workspaces => {
+            if (!build_options.has_seg_tags) return false;
             const idx = resolveWorkspaceClick(offset) orelse return true;
             if (left) {
                 actions.switchTo(@intCast(idx));
@@ -124,12 +146,11 @@ pub fn onClick(
     }
 }
 
-const actions = @import("actions");
-const focus = @import("focus");
-
 fn resolveWorkspaceClick(offset: u16) ?usize {
+    if (!build_options.has_seg_tags) return null;
     const cell_w = tags.getCachedWorkspaceWidth();
     if (cell_w == 0) return null;
+    if (!build_options.has_workspaces) return null;
     const ws_state = @import("workspaces").getState() orelse return null;
     const idx: usize = @intCast(offset / cell_w);
     if (idx >= ws_state.workspaces.len) return null;

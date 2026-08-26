@@ -17,7 +17,7 @@ const xk_right = @intFromEnum(XK.Right);
 const xk_home = @intFromEnum(XK.Home);
 const xk_end = @intFromEnum(XK.End);
 
-pub const default_max_input: usize = 512;
+pub const default_max_input: usize = 256;
 
 pub const Action = enum { none, deactivate, spawn };
 

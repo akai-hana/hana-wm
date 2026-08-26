@@ -41,7 +41,39 @@ const utils = @import("utils");
 const constants = @import("constants");
 const build_options = @import("build_options");
 const model = @import("model");
-const engine = @import("engine");
+
+/// When tiling is absent, provide stub types/constants so the rest of sync
+/// compiles.  The reconcile path still runs (park/map/stack), but the layout
+/// computation block is skipped and findPlacement always returns null.
+const engine = if (build_options.has_tiling) @import("engine") else struct {
+    pub const Env = struct {
+        margins: utils.Margins = .{ .gap = 0, .border = 0 },
+        min_dim: u16 = 0,
+        master_on_right: bool = false,
+        grid_relaxed: bool = false,
+        monocle_gaps: bool = false,
+    };
+    pub const parked_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+    pub const Placement = struct {
+        win: model.WindowId = 0,
+        rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+        visible: bool = false,
+    };
+    pub const List = utils.BoundedList(Placement, model.store_capacity);
+    pub const HintsView = struct {
+        order: []const model.WindowId = &.{},
+        hints: []const model.SizeHints = &.{},
+    };
+    pub const View = struct {
+        order: []const model.WindowId = &.{},
+        params: *const model.LayoutParams = undefined,
+        workarea: utils.Rect = .{},
+        hints: *const HintsView = undefined,
+        focused: ?model.WindowId = null,
+        env: Env = .{},
+    };
+    pub fn compute(_: anytype, _: anytype, _: anytype) void {}
+};
 
 pub const Stack = enum { above };
 
@@ -93,10 +125,6 @@ pub const Sink = struct {
     }
 };
 
-/// Caller-resolved environment (config-derived); resolved once per retile by
-/// the pipeline. Single definition lives in engine.
-pub const Env = engine.Env;
-
 pub const Ctx = struct {
     sink: Sink,
     /// Full screen rect (fullscreen branch geometry).
@@ -106,7 +134,7 @@ pub const Ctx = struct {
     workarea: utils.Rect,
     /// cfgBW(): config.tiling.border_width, already scaled at load.
     cfg_bw: u16,
-    env: Env = .{},
+    env: engine.Env = .{},
     /// colorFn(win, m): focus/mode color — ported from borders.color minus
     /// its fullscreen check (fullscreen zeroes via bw/pixel policy instead).
     color_of: *const fn (model.WindowId, *const model.Model) u32,
@@ -222,7 +250,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     var order_buf: [model.store_capacity]model.WindowId = undefined;
     var hints_buf: [model.store_capacity]model.SizeHints = undefined;
     var placements: engine.List = .{};
-    if (fs_win == null) {
+    if (build_options.has_tiling and fs_win == null) {
         var n: usize = 0;
         const tiled = &m.ws[m.current].tiled_order;
         for (tiled.constSlice()) |w| {

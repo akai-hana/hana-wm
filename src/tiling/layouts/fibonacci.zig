@@ -21,6 +21,8 @@ const SpiralDirection = enum(u2) {
 /// stripped first; each split halves the remaining dimension with one gap
 /// at the seam. Spiral direction cycles right→down→left→up. Dimensions are
 /// u16, integer-halved; border subtracted at placement time.
+// View is small enough to pass by value; helpers take pointer to avoid
+// copies in the recursive path.
 pub fn compute(v: engine.View, out: *engine.List) void {
     const m = v.env.margins;
     const border2 = utils.doubledBorder(m);

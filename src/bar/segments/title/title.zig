@@ -437,11 +437,11 @@ const WindowDataBatch = struct {
             self.tiling_geoms[i] = null;
             if (!minimized.contains(win)) {
                 // LAYERING NOTE: The title segment queries sync.truthRect() to get the
-            // canonical geometry for window sorting. This is a deliberate layering
-            // inversion — bar segments are read-path UI but need write-path truth data.
-            // The alternative (passing geometry through the bar's frame snapshot) would
-            // require plumbing geometry through 3 abstraction layers for no benefit.
-            self.tiling_geoms[i] = sync.truthRect(pipeline.model(), win);
+                // canonical geometry for window sorting. This is a deliberate layering
+                // inversion — bar segments are read-path UI but need write-path truth data.
+                // The alternative (passing geometry through the bar's frame snapshot) would
+                // require plumbing geometry through 3 abstraction layers for no benefit.
+                self.tiling_geoms[i] = sync.truthRect(pipeline.model(), win);
                 if (self.tiling_geoms[i] == null and !has_prefetched_geoms) {
                     self.geom_cookies[i] = xcb.xcb_get_geometry(self.conn, win);
                     self.needs_xcb_geometry[i] = true;

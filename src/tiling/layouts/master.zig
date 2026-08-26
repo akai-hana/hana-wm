@@ -381,5 +381,3 @@ inline fn windowY(i: u16, count: u16, available: u16, y_offset: u16, m: utils.Ma
     const cum: u32 = @as(u32, i) * @as(u32, available) / @as(u32, count);
     return y_offset +| m.gap +| @as(u16, @intCast(cum)) +| i *| (m.gap +| 2 *| m.border);
 }
-
-

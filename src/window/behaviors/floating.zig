@@ -68,7 +68,7 @@ fn workArea() WorkArea {
     const cs = core.getState();
     const sw: i32 = cs.screen.width_in_pixels;
     const bw2: i32 = @as(i32, borders.width()) * 2;
-    const work = if (build_options.has_bar) bar.workAreaRect() else .{ .x = 0, .y = 0, .width = core.screen.width, .height = core.screen.height };
+    const work = if (build_options.has_bar) bar.workAreaRect() else .{ .x = 0, .y = 0, .width = cs.screen.width_in_pixels, .height = cs.screen.height_in_pixels };
     return .{
         .left = 0,
         .right = sw - bw2,

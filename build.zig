@@ -47,15 +47,58 @@ pub fn build(b: *std.Build) !void {
     build_opts.addOption(bool, "has_fallback_toml", fallback_toml != null);
 
     // Optional module detection
-    const has_bar = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar");
+    const has_bar_dir = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar");
     const has_tiling = pathExists(b.build_root.handle, b.graph.io, source_root ++ "tiling");
     const has_floating = pathExists(b.build_root.handle, b.graph.io, source_root ++ "window/behaviors/floating.zig");
+    const has_fullscreen = pathExists(b.build_root.handle, b.graph.io, source_root ++ "window/behaviors/fullscreen.zig");
+    const has_minimize = pathExists(b.build_root.handle, b.graph.io, source_root ++ "window/behaviors/minimize.zig");
+    const has_workspaces = pathExists(b.build_root.handle, b.graph.io, source_root ++ "window/behaviors/workspaces.zig");
     const has_vim = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/segments/prompt/vim.zig");
+
+    // Tier 5: bar internals — if any core internal is missing, forfeit the entire bar.
+    const has_drawing = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/drawing.zig");
+    const has_bar_render = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/render.zig");
+    const has_bar_win = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/win.zig");
+    const has_bar_segment = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/segments/segment.zig");
+    const has_bar = has_bar_dir and has_drawing and has_bar_render and has_bar_win and has_bar_segment;
+
+    // Tier 3: individual tiling layout modules
+    const has_layout_master = pathExists(b.build_root.handle, b.graph.io, source_root ++ "tiling/layouts/master.zig");
+    const has_layout_monocle = pathExists(b.build_root.handle, b.graph.io, source_root ++ "tiling/layouts/monocle.zig");
+    const has_layout_fibonacci = pathExists(b.build_root.handle, b.graph.io, source_root ++ "tiling/layouts/fibonacci.zig");
+    const has_layout_grid = pathExists(b.build_root.handle, b.graph.io, source_root ++ "tiling/layouts/grid.zig");
+    const has_layout_leaf = pathExists(b.build_root.handle, b.graph.io, source_root ++ "tiling/layouts/leaf.zig");
+    const has_layout_scroll = pathExists(b.build_root.handle, b.graph.io, source_root ++ "tiling/layouts/scroll.zig");
+
+    // Tier 4: individual bar segment modules
+    const has_seg_clock = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/segments/clock.zig");
+    const has_seg_tags = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/segments/tags.zig");
+    const has_seg_layout = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/segments/layout/layout.zig");
+    const has_seg_title = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/segments/title/title.zig");
+    const has_seg_prompt = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/segments/prompt/prompt.zig");
+    const has_seg_carousel = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/segments/title/carousel.zig");
+    const has_seg_variants = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/segments/layout/variants.zig");
 
     build_opts.addOption(bool, "has_bar", has_bar);
     build_opts.addOption(bool, "has_tiling", has_tiling);
     build_opts.addOption(bool, "has_floating", has_floating);
+    build_opts.addOption(bool, "has_fullscreen", has_fullscreen);
+    build_opts.addOption(bool, "has_minimize", has_minimize);
+    build_opts.addOption(bool, "has_workspaces", has_workspaces);
     build_opts.addOption(bool, "has_vim", has_vim);
+    build_opts.addOption(bool, "has_layout_master", has_layout_master);
+    build_opts.addOption(bool, "has_layout_monocle", has_layout_monocle);
+    build_opts.addOption(bool, "has_layout_fibonacci", has_layout_fibonacci);
+    build_opts.addOption(bool, "has_layout_grid", has_layout_grid);
+    build_opts.addOption(bool, "has_layout_leaf", has_layout_leaf);
+    build_opts.addOption(bool, "has_layout_scroll", has_layout_scroll);
+    build_opts.addOption(bool, "has_seg_clock", has_seg_clock);
+    build_opts.addOption(bool, "has_seg_tags", has_seg_tags);
+    build_opts.addOption(bool, "has_seg_layout", has_seg_layout);
+    build_opts.addOption(bool, "has_seg_title", has_seg_title);
+    build_opts.addOption(bool, "has_seg_prompt", has_seg_prompt);
+    build_opts.addOption(bool, "has_seg_carousel", has_seg_carousel);
+    build_opts.addOption(bool, "has_seg_variants", has_seg_variants);
 
     // Module discovery
     var discovery = try Module.DiscoveryContext.run(b, target, optimize, source_root, entry_point_path);
@@ -69,8 +112,10 @@ pub fn build(b: *std.Build) !void {
     }
     // Register null vim fallback when vim.zig is absent but bar is present.
     // When bar itself is removed, prompt is also gone so no vim stub is needed.
-    if (has_bar and !has_vim) {
-        const null_vim_path = source_root ++ "bar/segments/prompt/null_vim.zig";
+    // When the prompt directory is removed, null_vim.zig is also gone.
+    const null_vim_path = source_root ++ "bar/segments/prompt/null_vim.zig";
+    const has_null_vim_file = pathExists(b.build_root.handle, b.graph.io, null_vim_path);
+    if (has_bar and !has_vim and has_null_vim_file) {
         const owned_name = try b.allocator.dupe(u8, "vim");
         try discovery.source_paths.put(owned_name, null_vim_path);
         try discovery.modules.put(owned_name, b.createModule(.{
@@ -388,6 +433,11 @@ const Module = struct {
         all: *std.StringHashMap(*std.Build.Module),
         ctx: SharedBuildContext,
     ) void {
+        // NOTE(I-1): Cross-wiring is blanket O(n²). Layer purity (model/tiling
+        // xcb-free, sync sole wire writer) is enforced by src/test/check-layers.sh
+        // at zig build check time, NOT at the module level. If a module accidentally
+        // imports a forbidden dependency, the build succeeds but check-layers catches
+        // the xcb leak. Future improvement: add per-layer import assertions.
         injectShared(root, ctx);
 
         var outer = all.iterator();

@@ -371,12 +371,12 @@ test "T31 n=0 emits nothing across all layouts" {
     }
 }
 
-// T32 — scroll orphan keep-last invariant. The algorithm trusts the
-// caller (pipeline.preReconcileDuties) to pre-clamp scroll_offset to
-// maxOffset(n). Both sides of that contract are pinned here:
-//   - a stale over-max offset orphans the strip: EVERY window parks,
-//     including the last (the hazard the caller-side clamp prevents);
-//   - after the documented clamp, the last window stays visible;
+// T32 — scroll orphan keep-last invariant. compute() now clamps
+// scroll_offset internally, so even a stale over-max offset is safe: the
+// last window stays visible without requiring caller-side clamping.
+//   - a stale over-max offset is clamped, last window stays visible;
+//   - the documented caller clamp (pipeline.preReconcileDuties) is still
+//     correct but no longer required for correctness;
 //   - the shrink case (n drops, old offset exceeds the new max) clamps to 0.
 test "T32 scroll orphan keep-last invariant" {
     var fx: Fixture = undefined;
@@ -386,14 +386,15 @@ test "T32 scroll orphan keep-last invariant" {
     const slot_w = scroll_algo.slotWidth(800);
     const params = &fx.m.ws[0].params;
 
-    // (1) Unclamped stale offset (from a hypothetical n=9 strip): all parked.
+    // (1) Stale offset (from a hypothetical n=9 strip): clamped internally,
+    // so the last window is visible (not all parked).
     const stale_off = scroll_algo.maxOffset(9, slot_w, 800);
     try testing.expect(stale_off > scroll_algo.maxOffset(4, slot_w, 800));
     params.scroll_offset = stale_off;
     params.scroll_prev_count = 4;
     var out_orphan: List = .{};
     engine.compute(.scroll, tuned(&fx), &out_orphan);
-    for (out_orphan.constSlice()) |p| try testing.expect(!p.visible);
+    try testing.expect(out_orphan.constSlice()[3].visible);
 
     // (2) Clamped per duty 2: the last window is at least flush-visible at
     // max offset (its slot's right edge reaches the screen edge).

@@ -45,9 +45,14 @@ pub fn compute(v: engine.View, out: *engine.List) void {
 
     const sw_i32: i32 = @intCast(screen_w);
 
-    // Caller pre-clamped (see header); consumed read-only.
-    const scroll: i32 = v.params.scroll_offset;
+    // Clamp internally so compute is self-contained; callers that pre-clamp
+    // (pipeline.preReconcileDuties) are still correct but no longer required.
+    const scroll: i32 = @max(0, @min(v.params.scroll_offset, maxOffset(windows.len, slot_w, screen_w)));
 
+    // Border is subtracted here (once) from the full screen height. emitView
+    // calls applyHints which only applies ICCCM constraints (inc snap,
+    // max-size clamp, aspect ratio) — it does NOT touch border, so there is
+    // no double-subtraction.
     const content_h: u16 = engine.shrinkClamped(screen_h, m.gap *| 2 +| m.border *| 2, v.env.min_dim);
     const win_y: i32 = @as(i32, @intCast(engine.waY(&v))) + @as(i32, @intCast(m.gap));
 

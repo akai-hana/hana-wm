@@ -1,7 +1,6 @@
-//! Model-pipeline entry glue. The strangler flag is gone: the model path IS
-//! the path. This module owns the global Model instance, builds the
-//! per-reconcile sync.Ctx from live state, and exposes the reconcile slots
-//! entry points call.
+//! Model-pipeline entry glue. This module owns the global Model instance,
+//! builds the per-reconcile sync.Ctx from live state, and exposes the
+//! reconcile slots entry points call.
 //!
 //! Call sites (all marked `// PIPELINE:`):
 //!   src/main.zig    startup        → init(alloc)
@@ -32,6 +31,9 @@ pub fn init(_: std.mem.Allocator) void {
     sync.init();
 }
 pub inline fn model() *model_mod.Model {
+    if (std.debug.runtime_safety) {
+        std.debug.assert(initialized);
+    }
     return &instance;
 }
 
@@ -106,6 +108,8 @@ pub inline fn dragTick() void {
 /// point: snap right when the visible count grew since the last retile
 /// (spawn/restore/tag-add), then clamp to content.
 fn preReconcileDuties() void {
+    if (!build_options.has_tiling) return;
+    if (!build_options.has_layout_scroll) return;
     const algo_scroll = @import("scroll");
     const m = model();
     const p = &m.ws[m.current].params;
@@ -180,16 +184,18 @@ pub inline fn reconcileUnderGrabNowFullscreen(
     sync.reconcile(&instance, c, o);
     // EWMH advertisement inside the grab: clear for whoever left
     // fullscreen, set for entrant. All fire-and-forget (xcb_change_property).
-    const fullscreen = @import("fullscreen");
-    if (was_switch) {
-        if (prev_fs_win) |old| fullscreen.setEwmhFullscreenState(old, false);
-    }
-    fullscreen.setEwmhFullscreenState(win, !was_exit);
-    // Deferred bar state inside the grab: pure flag sets, no X traffic.
-    if (!was_exit) {
-        fullscreen.armPendingBarHide(win);
-    } else if (instance.focused) |w| {
-        fullscreen.armPendingBarShow(w);
+    if (build_options.has_fullscreen) {
+        const fullscreen = @import("fullscreen");
+        if (was_switch) {
+            if (prev_fs_win) |old| fullscreen.setEwmhFullscreenState(old, false);
+        }
+        fullscreen.setEwmhFullscreenState(win, !was_exit);
+        // Deferred bar state inside the grab: pure flag sets, no X traffic.
+        if (!was_exit) {
+            fullscreen.armPendingBarHide(win);
+        } else if (instance.focused) |w| {
+            fullscreen.armPendingBarShow(w);
+        }
     }
 }
 

@@ -114,11 +114,7 @@ pub fn restore(win: model_mod.WindowId) void {
     const had_occupant_before = model_mod.fullscreenOccupantOnWs(m, m.current) != null;
     model_mod.restore(m, win);
     restoreAndFocus(m, win);
-    if (build_options.has_bar and !had_occupant_before and
-        model_mod.isFullscreenOnWs(pipeline.model(), win, pipeline.model().current))
-    {
-        @import("fullscreen").armPendingBarHide(win);
-    }
+    armFullscreenBarHideIfNeeded(m, win, had_occupant_before);
 }
 
 /// Slot-ordered single restore (LIFO/FIFO keybind paths).
@@ -128,11 +124,7 @@ pub fn restoreOrdered(order: model_mod.RestoreOrder) void {
     const had_occupant_before = model_mod.fullscreenOccupantOnWs(m, m.current) != null;
     model_mod.restore(m, win);
     restoreAndFocus(m, win);
-    if (build_options.has_bar and !had_occupant_before and
-        model_mod.isFullscreenOnWs(pipeline.model(), win, pipeline.model().current))
-    {
-        @import("fullscreen").armPendingBarHide(win);
-    }
+    armFullscreenBarHideIfNeeded(m, win, had_occupant_before);
 }
 
 /// Slot-ordered bulk restore of the current workspace. Focus target is
@@ -146,8 +138,14 @@ pub fn restoreAll() void {
     const had_occupant_before = model_mod.fullscreenOccupantOnWs(m, ws) != null;
     model_mod.restoreAllOnWs(m, ws);
     restoreAndFocus(m, target);
-    if (build_options.has_bar and !had_occupant_before) {
-        if (model_mod.fullscreenOccupantOnWs(m, ws)) |occ| @import("fullscreen").armPendingBarHide(occ);
+    if (model_mod.fullscreenOccupantOnWs(m, ws)) |occ| armFullscreenBarHideIfNeeded(m, occ, had_occupant_before);
+}
+
+fn armFullscreenBarHideIfNeeded(m: *const model_mod.Model, win: model_mod.WindowId, had_occupant_before: bool) void {
+    if (build_options.has_bar and build_options.has_fullscreen and !had_occupant_before and
+        model_mod.isFullscreenOnWs(m, win, m.current))
+    {
+        @import("fullscreen").armPendingBarHide(win);
     }
 }
 
@@ -426,6 +424,7 @@ pub fn moveFocused(delta: i32) void {
 /// scroll_view_left/right: one slot per step, clamped to content. The spawn
 /// snap-right duty lives in preReconcileDuties (pipeline choke point).
 pub fn scrollStep(dir: i32) void {
+    if (!build_options.has_tiling) return;
     const m = pipeline.model();
     const p = &m.ws[m.current].params;
     if (p.kind != .scroll) return;
@@ -440,6 +439,7 @@ pub fn scrollStep(dir: i32) void {
 /// Focus-change scroll snap (port of tiling.snapScrollToFocused): shift
 /// the viewport minimally so the focused window's slot is fully on-screen.
 pub fn snapScrollToFocused() void {
+    if (!build_options.has_tiling) return;
     const m = pipeline.model();
     const p = &m.ws[m.current].params;
     if (p.kind != .scroll) return;
@@ -487,6 +487,8 @@ const ScrollContext = struct {
 };
 
 fn scrollContext(m: *const model_mod.Model) ScrollContext {
+    if (!build_options.has_tiling) return .{ .tiled_count = 0, .slot_w = 0, .max_off = 0 };
+    if (!build_options.has_layout_scroll) return .{ .tiled_count = 0, .slot_w = 0, .max_off = 0 };
     const algo_scroll = @import("scroll");
     const n = tiledCountOnCurrent(m);
     const wa = @import("bar").workAreaRect();
@@ -505,6 +507,7 @@ fn scrollContext(m: *const model_mod.Model) ScrollContext {
 /// otherwise; runtime-only master_width/stack_balance reset (legacy nulls).
 /// No reconcile: callers decide when to push state to X.
 pub fn seedParamsFromConfig() void {
+    if (!build_options.has_tiling) return;
     const types = @import("types");
     const constants = @import("constants");
     const tiling = @import("tiling");

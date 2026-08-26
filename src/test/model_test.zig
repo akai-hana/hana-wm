@@ -922,3 +922,72 @@ test "home_ws: detachToFloating clears cache" {
     e.home_ws = null;
     try testing.expectEqual(@as(?WSId, null), e.home_ws);
 }
+
+// I-2: restoreAllOnWs unit test (BC09: restore-all with slot-sorted reinsert).
+test "restoreAllOnWs restores in slot order" {
+    var m = makeModel();
+    defer deinitModel(&m);
+    // Register 3 windows on workspace 0
+    model.register(&m, 10, 0) catch unreachable;
+    model.register(&m, 20, 0) catch unreachable;
+    model.register(&m, 30, 0) catch unreachable;
+    // Minimize all three
+    try model.minimize(&m, 10);
+    try model.minimize(&m, 20);
+    try model.minimize(&m, 30);
+    // Restore all on ws 0
+    model.restoreAllOnWs(&m, 0);
+    // Verify all are restored and in tiled_order
+    const e10 = m.store.get(10) orelse unreachable;
+    const e20 = m.store.get(20) orelse unreachable;
+    const e30 = m.store.get(30) orelse unreachable;
+    try testing.expect(e10.mode != .minimized);
+    try testing.expect(e20.mode != .minimized);
+    try testing.expect(e30.mode != .minimized);
+}
+
+// I-3: cycleLayout wraps around all LayoutKind variants.
+test "cycleLayout wraps around" {
+    var m = makeModel();
+    defer deinitModel(&m);
+    model.switchTo(&m, 0);
+    const start_kind = m.ws[0].params.kind;
+    const Count = @typeInfo(model.LayoutKind).@"enum".fields.len;
+    // Cycle forward through all layouts -> should wrap back to start
+    for (0..Count) |_| model.cycleLayout(&m, 1);
+    try testing.expectEqual(start_kind, m.ws[0].params.kind);
+    // Cycle backward 1 from start -> should wrap to last variant
+    model.cycleLayout(&m, -1);
+    try testing.expect(m.ws[0].params.kind != start_kind);
+    // Cycle forward 1 -> back to start
+    model.cycleLayout(&m, 1);
+    try testing.expectEqual(start_kind, m.ws[0].params.kind);
+}
+
+// I-3: adjustMasterWidth clamps to [0.05, 0.95].
+test "adjustMasterWidth clamps" {
+    var m = makeModel();
+    defer deinitModel(&m);
+    model.switchTo(&m, 0);
+    model.adjustMasterWidth(&m, 10.0); // Way over
+    try testing.expect(m.ws[0].params.master_width <= 0.95);
+    model.adjustMasterWidth(&m, -10.0); // Way under
+    try testing.expect(m.ws[0].params.master_width >= 0.05);
+}
+
+// I-3: setFloatingRect updates floating geometry, no-ops for tiled/unknown.
+test "setFloatingRect updates floating window geometry" {
+    var m = makeModel();
+    defer deinitModel(&m);
+    const r: utils.Rect = .{ .x = 10, .y = 20, .width = 300, .height = 200 };
+    _ = m.store.put(5, .{ .mask = model.bit(0), .mode = .{ .base = .{ .floating = r } } }) catch unreachable;
+    const new_r: utils.Rect = .{ .x = 50, .y = 60, .width = 400, .height = 300 };
+    model.setFloatingRect(&m, 5, new_r);
+    try testing.expect(new_r.eql(m.store.get(5).?.mode.base.floating));
+    // Tiled window: no-op
+    model.register(&m, 6, 0) catch unreachable;
+    model.setFloatingRect(&m, 6, new_r);
+    try testing.expect(m.store.get(6).?.mode.base == .tiled);
+    // Unknown window: no-op (should not crash)
+    model.setFloatingRect(&m, 999, new_r);
+}
