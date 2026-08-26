@@ -11,6 +11,7 @@ const signals = @import("signals");
 const config = @import("config");
 const types = @import("types");
 const constants = @import("constants");
+const x11_masks = @import("x11_masks");
 const scale = @import("scale");
 const debug = @import("debug");
 const build_options = @import("build_options");
@@ -111,7 +112,7 @@ fn connectToX() !X {
         conn,
         screen.*.root,
         xcb.XCB_CW_EVENT_MASK,
-        &[_]u32{constants.EventMasks.root_window},
+        &[_]u32{x11_masks.EventMasks.root_window},
     );
     if (xcb.xcb_request_check(conn, cookie)) |err| {
         debug.err("Another window manager is already running: {*}", .{err});

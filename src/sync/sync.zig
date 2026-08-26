@@ -43,7 +43,7 @@ const build_options = @import("build_options");
 const model = @import("model");
 const engine = @import("engine");
 
-pub const Stack = enum { above, below };
+pub const Stack = enum { above };
 
 /// Request sink. Production wires XcbSink; tests wire a recorder. One batch
 /// = everything queued between caller flushes (xcb buffers requests; the
@@ -116,6 +116,12 @@ pub const Ctx = struct {
 
 pub const ReconcileOpts = struct { force_restack: bool = false };
 
+// DESIGN NOTE: The sent ledger uses inline parallel arrays instead of
+// model.Store because (1) it needs no iteration-order guarantees,
+// (2) the heap allocation of Store's backing memory is undesirable in
+// the hot reconcile path, and (3) the API surface needed is minimal
+// (get, put, remove, clear).
+
 /// What we last sent per window — WRITE-ONLY bookkeeping whose three
 /// contract reads are documented in the header:
 ///   - has_rect: whether a visible geometry was EVER sent (an explicit flag,
@@ -131,20 +137,53 @@ const SentEntry = struct {
 
 pub const State = struct {
     /// Ledger of sent state (see SentEntry).
-    sent: std.AutoArrayHashMapUnmanaged(model.WindowId, SentEntry) = .empty,
-    gpa: std.mem.Allocator = undefined,
+    sent_keys: [model.store_capacity]model.WindowId = undefined,
+    sent_vals: [model.store_capacity]SentEntry = undefined,
+    sent_count: usize = 0,
 };
 
 /// Owned by the compositor process; re-init() on reconnect.
 pub var st: State = .{};
 
-pub fn init(gpa: std.mem.Allocator) void {
-    st = .{ .gpa = gpa };
+pub fn init() void {
+    st = .{};
 }
 
 pub fn deinit() void {
-    st.sent.deinit(st.gpa);
     st = .{};
+}
+
+pub fn sentGet(win: model.WindowId) ?SentEntry {
+    for (0..st.sent_count) |i| {
+        if (st.sent_keys[i] == win) return st.sent_vals[i];
+    }
+    return null;
+}
+
+pub fn sentGetOrPut(win: model.WindowId) !struct {
+    found_existing: bool,
+    value_ptr: *SentEntry,
+} {
+    for (0..st.sent_count) |i| {
+        if (st.sent_keys[i] == win) return .{ .found_existing = true, .value_ptr = &st.sent_vals[i] };
+    }
+    if (st.sent_count >= model.store_capacity) return error.SentLedgerFull;
+    const idx = st.sent_count;
+    st.sent_count += 1;
+    st.sent_keys[idx] = win;
+    st.sent_vals[idx] = .{};
+    return .{ .found_existing = false, .value_ptr = &st.sent_vals[idx] };
+}
+
+pub fn sentSwapRemove(win: model.WindowId) void {
+    for (0..st.sent_count) |i| {
+        if (st.sent_keys[i] == win) {
+            st.sent_count -= 1;
+            st.sent_keys[i] = st.sent_keys[st.sent_count];
+            st.sent_vals[i] = st.sent_vals[st.sent_count];
+            return;
+        }
+    }
 }
 
 /// Drop a window's ledger record (X ids recycle: after a destroy, a new
@@ -152,18 +191,7 @@ pub fn deinit() void {
 /// orphan keep-last branch geometry belonging to the previous incarnation).
 /// Called from actions.unmanage.
 pub fn forget(win: model.WindowId) void {
-    _ = st.sent.swapRemove(win);
-}
-
-/// Coalesced end-of-dispatch reconcile flag. Set by pipeline.postDispatch
-/// callers; consumed by pipeline.postDispatch.
-pub var scheduled: bool = false;
-
-/// Consume-and-clear for pipeline.postDispatch.
-pub fn takeScheduled() bool {
-    const s = scheduled;
-    scheduled = false;
-    return s;
+    sentSwapRemove(win);
 }
 
 pub fn reconcileUnderGrab(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
@@ -216,7 +244,15 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         };
         // n == 0 leaves placements empty (no layout owns a window); layouts
         // are also individually n==0-safe, this just skips the work.
-        if (n > 0) engine.compute(params.kind, view, &placements);
+        if (n > 0) {
+            engine.compute(params.kind, view, &placements);
+            // Sort by window ID once after compute for O(log n) binary search.
+            std.sort.pdq(engine.Placement, placements.slice(), {}, struct {
+                fn lessThan(_: void, a: engine.Placement, b: engine.Placement) bool {
+                    return a.win < b.win;
+                }
+            }.lessThan);
+        }
     }
 
     // Winner seed (STEP 5): fullscreen winner outright; else the focused
@@ -299,7 +335,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
                         // precisely the ledger's record of what we last sent.
                         // Park only when nothing was ever sent (first sight /
                         // registered offscreen).
-                        const prev = st.sent.get(win) orelse SentEntry{};
+                        const prev = sentGet(win) orelse SentEntry{};
                         if (!prev.has_rect) {
                             bw = 0;
                             pixel = 0;
@@ -332,7 +368,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
             // Raise triggers derive from the ledger (header read 2): the
             // winner rides .above exactly when its geometry moved, when it
             // unparked, or under restack pressure — never on mere presence.
-            const last = st.sent.get(win) orelse SentEntry{};
+            const last = sentGet(win) orelse SentEntry{};
             const first_send = !last.has_rect;
             const moved = first_send or !last.rect.eql(rect);
             const unpark_transition = last.parked;
@@ -346,11 +382,11 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
 
         // Ledger write: record what we actually sent. A park preserves the
         // previous record's rect/has_rect; an unpark overwrites wholesale.
-        // Written AFTER the sends: under OOM the pass still applied (sends
+        // Written AFTER the sends: under SentLedgerFull the pass still applied (sends
         // never depend on the ledger) and only the record is lost until the
         // next successful write — no half-applied batch can exist.
-        const gop = st.sent.getOrPut(st.gpa, win) catch {
-            std.log.err("sync.reconcile: ledger allocation failed; sends applied, record lost", .{});
+        const gop = sentGetOrPut(win) catch {
+            std.log.err("sync.reconcile: ledger full; sends applied, record lost", .{});
             continue;
         };
         if (!gop.found_existing) gop.value_ptr.* = .{};
@@ -372,7 +408,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
 /// Pipeline: last visible geometry we sent to `win`, or null when never sent
 /// / currently parked.
 pub fn lastRectFor(win: model.WindowId) ?utils.Rect {
-    const e = st.sent.get(win) orelse return null;
+    const e = sentGet(win) orelse return null;
     if (e.parked) return null;
     if (!e.has_rect) return null;
     return e.rect;
@@ -388,8 +424,11 @@ pub fn truthRect(m: *const model.Model, win: model.WindowId) ?utils.Rect {
 }
 
 fn findPlacement(placements: *const engine.List, win: model.WindowId) ?engine.Placement {
-    for (placements.constSlice()) |p| {
-        if (p.win == win) return p;
-    }
-    return null;
+    const slice = placements.constSlice();
+    const idx = std.sort.binarySearch(engine.Placement, slice, win, struct {
+        fn cmp(w: model.WindowId, p: engine.Placement) std.math.Order {
+            return std.math.order(w, p.win);
+        }
+    }.cmp) orelse return null;
+    return slice[idx];
 }

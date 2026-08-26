@@ -5,7 +5,6 @@
 //!
 //! Call sites (all marked `// PIPELINE:`):
 //!   src/main.zig    startup        → init(alloc)
-//!   events.zig      dispatch tail  → postDispatch() (scheduled reconciles)
 //!   input.zig       finishTilingOp → tilingOpFinished()
 //!   floating.zig    updateDrag     → dragTick()
 //!   window.zig      unmanage/EWMH  → actions.unmanage / fullscreenToggleWindow
@@ -27,10 +26,10 @@ const bar = if (build_options.has_bar) @import("bar") else null;
 pub var initialized: bool = false;
 
 var instance: model_mod.Model = undefined;
-pub fn init(gpa: std.mem.Allocator) void {
+pub fn init(_: std.mem.Allocator) void {
     instance = .{}; // bounded lists: no allocator inside the model
     initialized = true;
-    sync.init(gpa);
+    sync.init();
 }
 pub inline fn model() *model_mod.Model {
     return &instance;
@@ -96,22 +95,6 @@ fn colorOf(win: model_mod.WindowId, m: *const model_mod.Model) u32 {
     return if (m.focused == win) cfg.border_focused else cfg.border_unfocused;
 }
 
-pub inline fn postDispatch() void {
-    // Consume the focus-change-class flag: one flushless diff against
-    // LastSent sends only stale border pixels/geometry, then the dispatch
-    // tail owns the flush.
-    if (sync.takeScheduled()) {
-        preReconcileDuties();
-        const c = ctx(); // built once; reconcile and flush share it
-        sync.reconcile(&instance, c, .{});
-        c.sink.flush();
-    }
-}
-
-/// Schedule a coalesced end-of-dispatch reconcile (focus-color class).
-pub inline fn scheduleReconcile() void {
-    sync.scheduled = true;
-}
 pub inline fn tilingOpFinished() void {
     reconcileUnderGrabNow(.{});
 }
@@ -147,17 +130,28 @@ pub inline fn reconcileUnderGrabNow(o: sync.ReconcileOpts) void {
     sync.reconcileUnderGrab(&instance, ctx(), o);
 }
 
+/// Grab server → focus transition → reconcile → ungrabAndFlush (or the
+/// reverse order) atomically. When `focus_before` is true, focus lands
+/// BEFORE geometry — most actions where the target window is already
+/// mapped and focus must precede the retile. When false, focus lands
+/// AFTER geometry — mapRequest where the window must be mapped (by
+/// reconcile) before xcb_set_input_focus can target it without BadMatch.
+pub inline fn reconcileGrabFocus(o: sync.ReconcileOpts, t: focus.FocusTransition, focus_before: bool) void {
+    preReconcileDuties();
+    const c = ctx();
+    c.sink.grabServer();
+    defer c.sink.ungrabAndFlush();
+    if (focus_before) focus.applyPendingFocus(t);
+    sync.reconcile(&instance, c, o);
+    if (!focus_before) focus.applyPendingFocus(t);
+}
+
 /// Grab server → commit focus transition → reconcile → ungrabAndFlush,
 /// atomically. Focus lands BEFORE geometry:适用于 most actions where the
 /// target window is already mapped and focus must precede the retile so
 /// border colors and stacking are correct on the first frame.
 pub inline fn reconcileUnderGrabNowWithFocus(o: sync.ReconcileOpts, t: focus.FocusTransition) void {
-    preReconcileDuties();
-    const c = ctx();
-    c.sink.grabServer();
-    defer c.sink.ungrabAndFlush();
-    focus.applyPendingFocus(t);
-    sync.reconcile(&instance, c, o);
+    reconcileGrabFocus(o, t, true);
 }
 
 /// Grab server → reconcile → commit focus transition → ungrabAndFlush,
@@ -166,12 +160,7 @@ pub inline fn reconcileUnderGrabNowWithFocus(o: sync.ReconcileOpts, t: focus.Foc
 /// without BadMatch. Both map+focus under one grab eliminates the atomicity
 /// gap where a client could observe the mapped-but-unfocused window.
 pub inline fn reconcileUnderGrabNowWithFocusAfter(o: sync.ReconcileOpts, t: focus.FocusTransition) void {
-    preReconcileDuties();
-    const c = ctx();
-    c.sink.grabServer();
-    defer c.sink.ungrabAndFlush();
-    sync.reconcile(&instance, c, o);
-    focus.applyPendingFocus(t);
+    reconcileGrabFocus(o, t, false);
 }
 
 /// Grab server → reconcile → EWMH + bar arming → ungrabAndFlush, atomically.
@@ -206,13 +195,6 @@ pub inline fn reconcileUnderGrabNowFullscreen(
 
 /// Flushless reconcile against the current ctx (drag tick path).
 pub inline fn reconcileNow() void {
-    preReconcileDuties();
-    sync.reconcile(&instance, ctx(), .{});
-}
-
-/// Reconcile while the CALLER holds the server grab and owns the flush
-/// (bar show/hide path). No grab, no flush here.
-pub inline fn reconcileInGrab() void {
     preReconcileDuties();
     sync.reconcile(&instance, ctx(), .{});
 }

@@ -1,10 +1,23 @@
 //! Single source of truth for management state.
+//!
 //! Layer rule: imports are std + utils + constants ONLY. No X11 access.
+//!
+//! Threading model: the Model is single-threaded — it is accessed only from
+//! the event-loop thread.  All mutations happen sequentially, so no locks or
+//! atomics are needed on Model fields.
+//!
+//! Strangler pattern: some legacy bookkeeping (e.g. fullscreen records, tiled
+//! order lists) is still updated alongside Model mutations for backward
+//! compatibility with subsystems that have not yet migrated to pure Model
+//! queries.  These dual-writes will be removed as the migration completes.
 const std = @import("std");
 const utils = @import("utils");
 const constants = @import("constants");
 
 pub const WindowId = u32;
+// TYPE NOTE: WorkspaceId (core.zig) is the canonical type for workspace
+// identifiers. Model code uses raw integers for internal array indexing.
+// The conversion happens at the entry-point boundary.
 /// Local alias so model never imports core. Convert core.WorkspaceId via
 /// `.index` at entry points.
 pub const WSId = u16;
@@ -22,11 +35,7 @@ const MAX_WS = constants.max_workspaces;
 /// legacy minimize.zig (`max_minimized`).
 const MAX_MINIMIZED = constants.max_minimized;
 
-pub const ALL_MASK: Mask = blk: {
-    var m: Mask = 0;
-    for (0..MAX_WS) |i| m |= @as(Mask, 1) << @intCast(i);
-    break :blk m;
-};
+pub const ALL_MASK: Mask = ~@as(Mask, 0);
 
 /// STRANGLER COPY: duplicate of layouts.SizeHints. Field-for-field identical;
 /// pipeline converts between the two during migration. Do NOT import
@@ -40,7 +49,7 @@ pub const SizeHints = struct {
     max_aspect: f32 = 0.0,
 };
 
-pub const LayoutKind = enum { master, monocle, fibonacci, grid, leaf, scroll };
+pub const LayoutKind = enum { master, monocle, grid, fibonacci, leaf, scroll };
 
 pub const LayoutParams = struct {
     kind: LayoutKind = .master,
@@ -122,13 +131,9 @@ pub const Model = struct {
     /// Monotonic minimize counter; stamps MinimizedPayload.seq so actions can
     /// pick LIFO/FIFO restore targets without a side buffer.
     next_seq: u32 = 0,
+    /// Incremental counter for minimized windows — avoids O(n) scan.
+    count_minimized: u32 = 0,
 };
-
-const Order = OrderList;
-
-pub fn findInOrder(list: *const Order, win: WindowId) ?usize {
-    return list.indexOfScalar(win);
-}
 
 fn removeValue(list: anytype, win: WindowId) void {
     // anytype: shared by OrderList and MruList (different capacities).
@@ -143,17 +148,9 @@ pub fn findHome(m: *const Model, win: WindowId) ?WSId {
         if (e.home_ws) |h| return h;
     }
     for (&m.ws, 0..) |*s, i| {
-        if (findInOrder(&s.tiled_order, win) != null) return @intCast(i);
+        if (s.tiled_order.indexOfScalar(win) != null) return @intCast(i);
     }
     return null;
-}
-
-fn countMinimized(m: *const Model) usize {
-    var n: usize = 0;
-    for (0..m.store.count()) |i| {
-        if (m.store.at(i).val.mode == .minimized) n += 1;
-    }
-    return n;
 }
 
 fn removeFromMruAll(m: *Model, win: WindowId) void {
@@ -181,11 +178,13 @@ pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) error{CapacityFull}!vo
 }
 
 pub fn unregister(m: *Model, win: WindowId) void {
-    _ = m.store.getPtr(win) orelse return;
+    const e = m.store.getPtr(win) orelse return;
+    const was_minimized = e.mode == .minimized;
     if (findHome(m, win)) |h| removeValue(&m.ws[h].tiled_order, win);
     removeFromMruAll(m, win);
     if (m.focused == win) m.focused = null;
     _ = m.store.remove(win);
+    if (was_minimized) m.count_minimized -= 1;
 }
 
 pub const MinimizeError = error{CapacityFull};
@@ -194,10 +193,10 @@ pub fn minimize(m: *Model, win: WindowId) MinimizeError!void {
     const e = m.store.getPtr(win) orelse return;
     if (e.mode == .minimized) return;
     // Capacity check BEFORE any mutation (T17).
-    if (countMinimized(m) >= MAX_MINIMIZED) return error.CapacityFull;
+    if (m.count_minimized >= MAX_MINIMIZED) return error.CapacityFull;
     var slot: ?usize = null;
     if (findHome(m, win)) |h| {
-        slot = findInOrder(&m.ws[h].tiled_order, win);
+        slot = m.ws[h].tiled_order.indexOfScalar(win);
         removeValue(&m.ws[h].tiled_order, win);
     }
     const prev: PrevMode = switch (e.mode) {
@@ -208,6 +207,7 @@ pub fn minimize(m: *Model, win: WindowId) MinimizeError!void {
     e.mode = .{ .minimized = .{ .prev = prev, .slot = slot, .seq = m.next_seq } };
     e.home_ws = null; // no longer in any tiled_order
     m.next_seq += 1;
+    m.count_minimized += 1;
 }
 
 pub fn restore(m: *Model, win: WindowId) void {
@@ -244,6 +244,7 @@ pub fn restore(m: *Model, win: WindowId) void {
         .base => |b| .{ .base = b },
         .fullscreen => |f| .{ .fullscreen = f },
     };
+    m.count_minimized -= 1;
 }
 
 fn slotLess(a: ?usize, b: ?usize) bool {
@@ -252,16 +253,25 @@ fn slotLess(a: ?usize, b: ?usize) bool {
     return a.? < b.?;
 }
 
+fn minimizedOnWs(m: *const Model, ws: WSId, pos: *usize) ?StoreT.Item {
+    while (pos.* < m.store.count()) {
+        const it = m.store.at(pos.*);
+        pos.* += 1;
+        if (it.val.mode != .minimized) continue;
+        if (it.val.mask & bit(ws) == 0) continue;
+        return it;
+    }
+    return null;
+}
+
 /// Restore-order target selection over minimized windows on `ws`:
 /// `.fifo` = oldest minimize seq, `.lifo` = newest. Returns null when nothing
 /// on `ws` is minimized.
 pub fn restoreCandidate(m: *const Model, ws: WSId, order: RestoreOrder) ?WindowId {
     var best: ?WindowId = null;
     var best_seq: u32 = 0;
-    for (0..m.store.count()) |i| {
-        const it = m.store.at(i);
-        if (it.val.mode != .minimized) continue;
-        if (it.val.mask & bit(ws) == 0) continue;
+    var pos: usize = 0;
+    while (minimizedOnWs(m, ws, &pos)) |it| {
         const seq = it.val.mode.minimized.seq;
         const better = switch (order) {
             .fifo => best == null or seq < best_seq,
@@ -281,10 +291,8 @@ pub const RestoreOrder = enum { lifo, fifo };
 pub fn latestMinimizedBase(m: *const Model, ws: WSId) ?WindowId {
     var best: ?WindowId = null;
     var best_seq: u32 = 0;
-    for (0..m.store.count()) |i| {
-        const it = m.store.at(i);
-        if (it.val.mode != .minimized) continue;
-        if (it.val.mask & bit(ws) == 0) continue;
+    var pos: usize = 0;
+    while (minimizedOnWs(m, ws, &pos)) |it| {
         if (it.val.mode.minimized.prev != .base) continue;
         if (best == null or it.val.mode.minimized.seq > best_seq) {
             best = it.key;
@@ -298,13 +306,11 @@ pub fn restoreAllOnWs(m: *Model, ws: WSId) void {
     var wins: [MAX_MINIMIZED]WindowId = undefined;
     var slots: [MAX_MINIMIZED]?usize = undefined;
     var n: usize = 0;
-    for (0..m.store.count()) |i| {
-        const it = m.store.at(i);
-        if (it.val.mode == .minimized and it.val.mask & bit(ws) != 0) {
-            wins[n] = it.key;
-            slots[n] = it.val.mode.minimized.slot;
-            n += 1;
-        }
+    var pos: usize = 0;
+    while (minimizedOnWs(m, ws, &pos)) |it| {
+        wins[n] = it.key;
+        slots[n] = it.val.mode.minimized.slot;
+        n += 1;
     }
     // insertion sort by slot ascending, nulls last
     for (1..n) |a| {
@@ -340,6 +346,15 @@ pub fn switchTo(m: *Model, ws: WSId) void {
     m.current = ws;
 }
 
+fn fullscreenOccupied(m: *const Model, exclude: WindowId, ws: WSId) bool {
+    for (0..m.store.count()) |i| {
+        const it = m.store.at(i);
+        if (it.key == exclude) continue;
+        if (it.val.mode == .fullscreen and it.val.mode.fullscreen.ws == ws) return true;
+    }
+    return false;
+}
+
 pub fn moveWindowToWs(m: *Model, win: WindowId, ws: WSId) void {
     const e = m.store.getPtr(win) orelse return;
     if (e.mask == ALL_MASK) return; // pinned stays everywhere-visible
@@ -350,13 +365,7 @@ pub fn moveWindowToWs(m: *Model, win: WindowId, ws: WSId) void {
     // Fullscreen record follows the move (legacy transferFullscreenRecord);
     // destination occupied ⇒ drop this one rather than clobber the resident.
     if (e.mode == .fullscreen and e.mode.fullscreen.ws != ws) {
-        var occupied = false;
-        for (0..m.store.count()) |i| {
-            const it = m.store.at(i);
-            if (it.key == win) continue;
-            if (it.val.mode == .fullscreen and it.val.mode.fullscreen.ws == ws) occupied = true;
-        }
-        if (occupied) {
+        if (fullscreenOccupied(m, win, ws)) {
             e.mode = .{ .base = e.mode.fullscreen.base };
         } else {
             e.mode.fullscreen.ws = ws;
@@ -388,13 +397,7 @@ pub fn tagRemove(m: *Model, win: WindowId, ws: WSId) bool {
     e.mask &= ~bit(ws);
     if (e.mode == .fullscreen and e.mode.fullscreen.ws == ws) {
         const dest = lowestBit(e.mask);
-        var occupied = false;
-        for (0..m.store.count()) |i| {
-            const it = m.store.at(i);
-            if (it.key == win) continue;
-            if (it.val.mode == .fullscreen and it.val.mode.fullscreen.ws == dest) occupied = true;
-        }
-        if (occupied) {
+        if (fullscreenOccupied(m, win, dest)) {
             e.mode = .{ .base = e.mode.fullscreen.base };
         } else {
             e.mode.fullscreen.ws = dest;
@@ -422,7 +425,7 @@ pub fn allViewToggle(m: *Model) bool {
 pub fn reorderTiled(m: *Model, win: WindowId, idx_in: usize) void {
     const h = findHome(m, win) orelse return;
     const list = &m.ws[h].tiled_order;
-    const from = findInOrder(list, win) orelse return;
+    const from = list.indexOfScalar(win) orelse return;
     const idx = @min(idx_in, list.len - 1);
     list.orderedRemove(from);
     _ = list.insert(idx, win); // cannot fail: removal freed a slot
@@ -615,16 +618,23 @@ pub fn fallbackFocusCandidate(m: *const Model, ws: WSId) ?WindowId {
         if (visibleOn(m, cand, ws)) return cand;
     }
     // 3. any floating window on ws (base mode, not in tiled_order).
+    // Build a sorted buffer of tiled IDs for O(log m) membership checks.
+    var tiled_buf: [max_tiled_per_ws]WindowId = undefined;
+    var tiled_len: usize = 0;
+    for (order.items[0..order.len]) |id| {
+        tiled_buf[tiled_len] = id;
+        tiled_len += 1;
+    }
+    std.mem.sort(WindowId, tiled_buf[0..tiled_len], {}, std.sort.asc(WindowId));
     for (0..m.store.count()) |k| {
         const it = m.store.at(k);
         if (it.val.mode != .base) continue;
         if (!visibleOn(m, it.key, ws)) continue;
-        var tiled = false;
-        for (order.items) |t| if (t == it.key) {
-            tiled = true;
-            break;
-        };
-        if (!tiled) return it.key;
+        if (std.sort.binarySearch(WindowId, tiled_buf[0..tiled_len], it.key, struct {
+            fn cmp(target: WindowId, id: WindowId) std.math.Order {
+                return std.math.order(target, id);
+            }
+        }.cmp) == null) return it.key;
     }
     return null;
 }

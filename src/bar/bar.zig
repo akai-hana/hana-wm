@@ -1,11 +1,11 @@
 //! Status bar
 //! Creates and manages the WM status bar, rendering all configured segments.
 //!
-//! Rendering is IMMEDIATE-MODE: every draw collects live WM state (model,
-//! tracking, focus, minimize — all plain reads), clears the off-screen
-//! pixmap, repaints every segment, and issues one xcb_copy_area blit.
-//! There is no captured-snapshot diffing anymore; coalescing happens purely
-//! through the dirty-mark scheduling (scheduleRedraw & friends).
+//! Rendering uses per-segment dirty tracking: each segment has a dirty bit
+//! in State.segment_dirty; only dirty segments are repainted on each draw.
+//! The global force flag or a full dirty set triggers a complete background
+//! clear + repaint. Coalescing happens through the dirty-mark scheduling
+//! (scheduleRedraw & friends).
 
 const std = @import("std");
 
@@ -24,6 +24,7 @@ const focus = @import("focus");
 const minimize = @import("minimize");
 const pipeline = @import("pipeline"); // PIPELINE: train a
 const actions = @import("actions"); // PIPELINE: train a
+const model = @import("model");
 const workspaces = @import("workspaces");
 
 const window = @import("window");
@@ -143,8 +144,18 @@ const Bar = struct {
     /// so the inline prompt would be visible. dismissAfterPrompt() checks this
     /// to know whether hiding the bar again is part of "returning to normal".
     prompt_forced_visible: bool = false,
+    /// When set, the next draw skips the title-data refetch (focused title
+    /// + batched titles/geometries) and uses whatever was last cached. Set
+    /// by the bar-toggle show path so the initial frame avoids blocking on
+    /// XCB property reads; cleared after the first draw so the next event
+    /// batch picks up fresh titles.
+    skip_title_refetch: bool = false,
 };
 
+// PATTERN: Module-global state with explicit init/deinit lifecycle.
+// This avoids allocator threading through every function call.
+// The init/deinit pair is called from main.zig's startup/shutdown sequence.
+// All functions operate on `g` directly — no passing state as parameters.
 var gBar: Bar = .{};
 
 /// X11 connection and window handle; stable for the bar's lifetime.
@@ -199,6 +210,10 @@ const State = struct {
     is_visible: bool = true,
     is_globally_visible: bool = true,
     is_dirty: bool = false,
+    /// Per-segment dirty bitfield. Bit i corresponds to
+    /// @intFromEnum(types.BarSegment) variant i. When set, the segment is
+    /// repainted on the next draw; cleared after painting.
+    segment_dirty: u5 = 0b11111,
 
     /// Reserved width of the clock segment (measure string + padding).
     clock_width: u16 = 0,
@@ -298,6 +313,24 @@ const State = struct {
 
     fn markDirty(self: *State) void {
         self.is_dirty = true;
+        self.markAllSegmentsDirty();
+    }
+
+    fn markSegmentDirty(self: *State, seg: types.BarSegment) void {
+        self.is_dirty = true;
+        self.segment_dirty |= @as(u5, 1) << @intFromEnum(seg);
+    }
+
+    fn clearSegmentDirty(self: *State, seg: types.BarSegment) void {
+        self.segment_dirty &= ~(@as(u5, 1) << @intFromEnum(seg));
+    }
+
+    fn isSegmentDirty(self: *const State, seg: types.BarSegment) bool {
+        return self.segment_dirty & (@as(u5, 1) << @intFromEnum(seg)) != 0;
+    }
+
+    fn markAllSegmentsDirty(self: *State) void {
+        self.segment_dirty = 0b11111;
     }
 
     /// Records the on-screen bounds of a clickable segment as the layout pass
@@ -405,6 +438,11 @@ const State = struct {
     /// per-window titles/geometries (only when the fetch key changed or
     /// forced). Everything else reuses the scratch from the last fetch.
     fn refreshTitleData(self: *State) void {
+        if (gBar.skip_title_refetch) {
+            gBar.skip_title_refetch = false;
+            return;
+        }
+
         const alloc = self.render.allocator;
 
         const fw = focus.getFocused();
@@ -500,7 +538,7 @@ const State = struct {
         self.render.dc.fillRect(gap_x, 0, scaled_spacing, self.render.height, self.render.config.bg);
     }
 
-    fn drawRightSegments(self: *State, frame: *const segmod.Frame, segments: []const types.BarSegment) void {
+    fn drawRightSegments(self: *State, frame: *const segmod.Frame, segments: []const types.BarSegment, is_full_redraw: bool) void {
         const scaled_spacing = self.render.config.scaledSpacing(self.render.height);
         var right_x = self.render.width;
         var pending_gap = false;
@@ -514,26 +552,37 @@ const State = struct {
             if (segments[i] == .clock) self.clock_x = right_x;
             self.recordClickBound(segments[i], right_x, seg_w);
 
-            const drew = self.drawSegmentSafe(frame, segments[i], right_x, null) != right_x;
-            if (drew) {
-                if (pending_gap) self.paintGap(right_x + seg_w, scaled_spacing);
+            if (self.isSegmentDirty(segments[i])) {
+                if (!is_full_redraw) {
+                    self.render.dc.fillRect(right_x, 0, seg_w, self.render.height, self.render.config.bg);
+                }
+                const drew = self.drawSegmentSafe(frame, segments[i], right_x, null) != right_x;
+                if (drew) {
+                    if (pending_gap) self.paintGap(right_x + seg_w, scaled_spacing);
+                } else {
+                    right_x += seg_w;
+                    if (pending_gap) right_x += scaled_spacing;
+                }
+                pending_gap = drew;
+                self.clearSegmentDirty(segments[i]);
             } else {
-                right_x += seg_w;
-                if (pending_gap) right_x += scaled_spacing;
+                pending_gap = true;
             }
-            pending_gap = drew;
         }
     }
 
-    /// Repaints the whole bar into the off-screen pixmap: background clear,
-    /// then every configured segment in layout order. No dirty-diff skip —
-    /// immediate mode repaints moving pixels (marquee) and unchanged pixels
-    /// alike, and correctness no longer depends on flag bookkeeping.
+    /// Repaints the bar into the off-screen pixmap. When every segment is
+    /// dirty (full redraw / force) the whole background is cleared once;
+    /// otherwise only the dirty segments' regions are repainted, leaving
+    /// unchanged pixels from the previous frame untouched.
     fn drawAllInner(self: *State, frame: *const segmod.Frame) void {
         const r = &self.render;
-        r.dc.fillRect(0, 0, r.width, r.height, r.config.bg);
-
         const scaled_spacing = r.config.scaledSpacing(r.height);
+        const is_full_redraw = self.segment_dirty == 0b11111;
+
+        if (is_full_redraw) {
+            r.dc.fillRect(0, 0, r.width, r.height, r.config.bg);
+        }
 
         var right_total: u16 = 0;
         for (r.config.layout.items) |lay| {
@@ -554,10 +603,22 @@ const State = struct {
                     for (lay.segments.items) |seg| {
                         const w = if (seg == .title and lay.position == .center) remaining else self.measureSegmentWidth(frame, seg);
                         self.recordClickBound(seg, x, w);
-                        x = self.drawRowSegment(frame, seg, x, w, lay.position == .center, scaled_spacing);
+                        if (self.isSegmentDirty(seg)) {
+                            if (!is_full_redraw) {
+                                const omit_gap = (lay.position == .center) and seg == .title;
+                                const clear_w = if (omit_gap) w else w + scaled_spacing;
+                                r.dc.fillRect(x, 0, clear_w, r.height, r.config.bg);
+                            }
+                            x = self.drawRowSegment(frame, seg, x, w, lay.position == .center, scaled_spacing);
+                            self.clearSegmentDirty(seg);
+                        } else {
+                            const omit_gap = (lay.position == .center) and seg == .title;
+                            x += w;
+                            if (!omit_gap) x += scaled_spacing;
+                        }
                     }
                 },
-                .right => self.drawRightSegments(frame, lay.segments.items),
+                .right => self.drawRightSegments(frame, lay.segments.items, is_full_redraw),
             }
         }
     }
@@ -578,6 +639,7 @@ const State = struct {
         // frame left.
         const drawn_w: u16 = drawn_end -| clock_x;
         self.render.dc.blitRegion(clock_x, @max(self.clock_width, drawn_w));
+        self.clearSegmentDirty(.clock);
     }
 };
 
@@ -590,6 +652,7 @@ const State = struct {
 fn performDraw() void {
     const s = gBar.state orelse return;
     if (!s.is_visible) return;
+    if (gBar.force) s.markAllSegmentsDirty();
     minimize.collectMinimizedIntoSet(&s.minimized, s.render.allocator) catch {};
     s.fetch_dirty = s.scanLiveFrame();
     s.refreshTitleData();
@@ -733,10 +796,14 @@ pub fn toggleBarSegmentAnchor() void {
         ungrabAndFlush();
         return;
     };
-    const no_fullscreen = !actions.fullscreenOccupiedOnWs(@intCast(current_ws));
+    const no_fullscreen = model.fullscreenOccupantOnWs(pipeline.model(), @intCast(current_ws)) == null;
     // The work area changed with the bar's new edge; one model reconcile
     // re-derives every placement from it.
-    if (no_fullscreen) pipeline.reconcileInGrab();
+    // LAYERING NOTE: The bar triggers reconciliation after visibility/position
+    // changes because the work area geometry changed, affecting all window
+    // placements. This is a write-path side effect from a rendering module —
+    // documented in the check-layers.sh allowlist.
+    if (no_fullscreen) pipeline.reconcileNow();
     window.updateFloatingWindowBorders();
     window.markBordersFlushed();
     ungrabAndFlush();
@@ -747,12 +814,12 @@ pub fn toggleBarSegmentAnchor() void {
 pub fn scheduleFocusRedraw(_: ?u32) void {
     const s = gBar.state orelse return;
     if (!s.is_visible or s.is_dirty) return;
-    // markDirty ensures a full redraw follows at end-of-batch via
-    // updateIfDirty, which re-reads live window state and renders the
-    // entire bar. A per-frame redraw during rapid window opening would
-    // produce O(N²) property queries and Pango renders. Skipping the
-    // early draw lets the post-batch hook do one full redraw instead.
-    s.markDirty();
+    // Only the title segment needs repainting on a focus change; mark it
+    // dirty without forcing a full-bar redraw. A per-frame redraw during
+    // rapid window opening would produce O(N²) property queries and Pango
+    // renders — skipping the early draw lets the post-batch hook do one
+    // coalesced redraw instead.
+    s.markSegmentDirty(.title);
 }
 
 pub fn isBarWindow(win: u32) bool {
@@ -795,19 +862,6 @@ pub fn scheduleFullRedraw() void {
     };
 }
 
-/// Schedules a redraw that re-captures the title segment's per-window data
-/// (re-running the batched pre-fetch) without clearing the whole bar.
-///
-/// Use when window positions change but focus and the window-ID set don't
-/// (e.g. a master swap): the segmented title view sorts by position, so its
-/// segment order is stale.
-pub fn scheduleTitleRedraw() void {
-    if (gBar.state) |s| if (s.is_visible) {
-        gBar.force = true;
-        s.markDirty();
-    };
-}
-
 pub fn isVisible() bool {
     return if (gBar.state) |s| s.is_visible else false;
 }
@@ -829,11 +883,18 @@ pub fn isVisible() bool {
 pub fn redrawInsideGrab() void {
     const s = gBar.state orelse return;
     if (!s.is_visible) return;
-    if (gBar.force or
-        s.focused_title_window != focus.getFocused() or
-        s.scanLiveFrame())
-    {
+    if (gBar.force) {
         s.markDirty();
+        return;
+    }
+    const focus_changed = s.focused_title_window != focus.getFocused();
+    const frame_changed = s.scanLiveFrame();
+    if (focus_changed or frame_changed) {
+        if (focus_changed) s.markSegmentDirty(.title);
+        if (frame_changed) {
+            s.markSegmentDirty(.workspaces);
+            s.markSegmentDirty(.title);
+        }
         return;
     }
     // Phase 1+2a: render to pixmap, queue the blit; sent with ungrabAndFlush().
@@ -886,8 +947,7 @@ pub fn dismissAfterPrompt() void {
     if (!gBar.prompt_forced_visible) return;
     gBar.prompt_forced_visible = false;
     const current_ws = tracking.getCurrentWorkspace() orelse 0;
-    const is_fullscreen = actions.fullscreenOccupiedOnWs(@intCast(current_ws));
-    const should_show = !is_fullscreen and s.is_globally_visible;
+    const should_show = model.fullscreenOccupantOnWs(pipeline.model(), @intCast(current_ws)) == null and s.is_globally_visible;
     if (should_show) return; // conditions changed while the prompt was open; stay visible
     s.is_visible = false;
     _ = xcb.xcb_unmap_window(s.win.conn, s.win.win_id);
@@ -899,22 +959,24 @@ pub fn setBarState(action: Action) void {
     if (action == .toggle) s.is_globally_visible = !s.is_globally_visible;
     const current_ws = tracking.getCurrentWorkspace() orelse 0;
     const bar_forced_hidden_by_fullscreen = action != .hide_fullscreen and
-        actions.fullscreenOccupiedOnWs(@intCast(current_ws));
+        model.fullscreenOccupantOnWs(pipeline.model(), @intCast(current_ws)) != null;
     const should_be_visible = !bar_forced_hidden_by_fullscreen and s.is_globally_visible and action != .hide_fullscreen;
     if (s.is_visible == should_be_visible and action != .toggle) return;
     s.is_visible = should_be_visible;
-    if (should_be_visible) submitDrawBlockingFull();
+    if (should_be_visible) {
+        gBar.skip_title_refetch = true;
+        submitDrawBlockingFull();
+    }
 
     const conn = core.getState().conn;
-    const grabbed = action == .toggle;
-    if (grabbed) utils.grabServer(conn);
+    utils.grabServer(conn);
     if (should_be_visible) _ = xcb.xcb_map_window(conn, s.win.win_id) else _ = xcb.xcb_unmap_window(conn, s.win.win_id);
-    if (grabbed) {
-        pipeline.reconcileInGrab();
-        ungrabAndFlush();
-    } else {
-        pipeline.reconcileNow();
-    }
+    // LAYERING NOTE: The bar triggers reconciliation after visibility/position
+    // changes because the work area geometry changed, affecting all window
+    // placements. This is a write-path side effect from a rendering module —
+    // documented in the check-layers.sh allowlist.
+    pipeline.reconcileNow();
+    ungrabAndFlush();
     debug.info("Bar {s} ({s})", .{ if (should_be_visible) "shown" else "hidden", @tagName(action) });
 }
 
@@ -951,7 +1013,10 @@ pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {
     if (gBar.state) |s| if (event.window == s.win.win_id and event.count == 0) {
         gBar.force = true;
         const dragging = if (build_options.has_floating) floating.isDragging() else false;
-        if (dragging) s.is_dirty = true else submitDraw();
+        if (dragging) {
+            s.is_dirty = true;
+            s.markAllSegmentsDirty();
+        } else submitDraw();
     };
 }
 
@@ -964,7 +1029,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
         // Renamed focused window: force the title data refetch on the next
         // draw (the fetch key alone wouldn't notice a text-only change).
         gBar.force = true;
-        s.markDirty();
+        s.markSegmentDirty(.title);
     }
 }
 
@@ -1029,7 +1094,7 @@ fn handleTitleClick(s: *State, offset: u16) void {
     } else if (focus.getFocused() == target.window) {
         actions.minimize(target.window);
     } else {
-        focus.setFocus(target.window, .mouse_click);
+        focus.grabFocus(target.window, .mouse_click);
     }
 }
 

@@ -65,7 +65,7 @@ fn isCommandAvailable(command: []const u8) bool {
 // as a raw syscall. It checks existence and executability in one syscall;
 // openFileAbsolute checks readability only, so a non-executable file named
 // like a terminal is not reported "available" and fails later with EACCES.
-inline fn checkPath(buf: []u8, dir: []const u8, command: []const u8) bool {
+fn checkPath(buf: []u8, dir: []const u8, command: []const u8) bool {
     const full_path = std.fmt.bufPrintZ(buf, "{s}/{s}", .{ dir, command }) catch return false;
     const rc: isize = @bitCast(std.os.linux.faccessat(std.os.linux.AT.FDCWD, full_path, std.posix.X_OK, 0));
     return rc == 0;
@@ -76,7 +76,7 @@ inline fn checkPath(buf: []u8, dir: []const u8, command: []const u8) bool {
 ///
 /// The `fallback_toml` module (injected by build.zig's injectShared) always
 /// exists; an empty `content` slice is the only "missing" signal.
-pub inline fn getFallbackToml() ?[]const u8 {
+pub fn getFallbackToml() ?[]const u8 {
     const content = @import("fallback_toml").content;
     return if (content.len == 0) null else content;
 }

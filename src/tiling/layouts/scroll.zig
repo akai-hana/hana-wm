@@ -5,9 +5,6 @@ const utils = @import("utils");
 const model = @import("model");
 const engine = @import("engine");
 
-const View = engine.View;
-const List = engine.List;
-
 // CALLER DUTIES: before compute(), the caller must replicate on
 // params.scroll_offset / params.scroll_prev_count:
 //   1. if (n > scroll_prev_count) scroll_offset = maxOffset(n, slotWidth(wa.w), wa.w);
@@ -32,7 +29,11 @@ pub inline fn maxOffset(n: usize, slot_w: i32, screen_w: u16) i32 {
     return @max(0, n_i32 * slot_w - sw_i32);
 }
 
-pub fn compute(v: View, out: *List) void {
+/// Compute scroll layout. Origin top-left, y-down. Each slot is half the
+/// screen width; full gap at screen edges, half-gap at interior slot
+/// boundaries. Off-viewport slots are hidden. Scroll offset is
+/// caller-managed. All dims u16, clamped to min_dim.
+pub fn compute(v: engine.View, out: *engine.List) void {
     const windows = v.order;
 
     const m = v.env.margins;

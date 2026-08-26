@@ -5,6 +5,7 @@ const std = @import("std");
 const core = @import("core");
 const types = @import("types");
 const constants = @import("constants");
+const x11_masks = @import("x11_masks");
 const debug = @import("debug");
 const xkbcommon = @import("xkbcommon");
 const parser = @import("parser");
@@ -224,15 +225,12 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator) !types.Config {
         std.mem.span(ch)
     else
         try std.fmt.allocPrint(allocator, "{s}/.config", .{home});
-    defer if (xdg_config_home == null) allocator.free(config_home);
     const xdg_dir = try std.fs.path.join(allocator, &.{ config_home, "hana" });
-    defer allocator.free(xdg_dir);
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     _ = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.CurrentWorkingDirectoryUnlinked;
     const cwd = std.mem.sliceTo(&cwd_buf, 0);
     const local_dir = try std.fs.path.join(allocator, &.{ cwd, "config" });
-    defer allocator.free(local_dir);
 
     // Try directories first (contain multiple .toml files), then single files.
     // `else |_| {}` intentionally swallows errors: FileNotFound/NotDir are
@@ -245,9 +243,7 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator) !types.Config {
     }
 
     const xdg_path = try std.fs.path.join(allocator, &.{ xdg_dir, "config.toml" });
-    defer allocator.free(xdg_path);
     const local = try std.fs.path.join(allocator, &.{ cwd, "config.toml" });
-    defer allocator.free(local);
     const file_attempts = [_][]const u8{ xdg_path, local };
     for (file_attempts) |path| {
         if (tryLoadConfig(allocator, path)) |cfg| return cfg;
@@ -373,13 +369,13 @@ fn warnUnconsumedSections(doc: *parser.Document) void {
 }
 
 const mod_map = std.StaticStringMap(u16).initComptime(.{
-    .{ "super", constants.mod_super },
-    .{ "mod4", constants.mod_super },
-    .{ "alt", constants.mod_alt },
-    .{ "mod1", constants.mod_alt },
-    .{ "control", constants.mod_control },
-    .{ "ctrl", constants.mod_control },
-    .{ "shift", constants.mod_shift },
+    .{ "super", x11_masks.mod_super },
+    .{ "mod4", x11_masks.mod_super },
+    .{ "alt", x11_masks.mod_alt },
+    .{ "mod1", x11_masks.mod_alt },
+    .{ "control", x11_masks.mod_control },
+    .{ "ctrl", x11_masks.mod_control },
+    .{ "shift", x11_masks.mod_shift },
 });
 
 const mouse_button_map = std.StaticStringMap(u8).initComptime(.{
@@ -472,36 +468,15 @@ fn expandGlobKeys(allocator: std.mem.Allocator, key_pattern: []const u8) ![]Glob
     const prefix = key_pattern[0..lbrace];
     const suffix = key_pattern[rbrace + 1 ..];
     const inner = key_pattern[lbrace + 1 .. rbrace];
-    // Pass 1: count the total number of expanded keys.
-    var count: usize = 0;
-    {
-        var it = std.mem.splitScalar(u8, inner, ',');
-        while (it.next()) |token| {
-            const t = std.mem.trim(u8, token, " \t");
-            if (t.len == 0) continue;
-            if (t.len == 3 and t[1] == '-') {
-                const ch = t[0];
-                const end = t[2];
-                if (ch > end) continue;
-                count += @intCast(end - ch + 1);
-            } else {
-                count += 1;
-            }
-        }
-    }
-    if (count == 0) return singleGlobEntry(allocator, key_pattern);
-    if (count > max_glob_expansion) count = max_glob_expansion;
 
-    // Pass 2: allocate and fill directly.
-    const entries = try allocator.alloc(GlobEntry, count);
+    var entries: std.ArrayList(GlobEntry) = .empty;
     errdefer {
-        for (entries) |e| if (e.owned) allocator.free(e.key);
-        allocator.free(entries);
+        for (entries.items) |e| if (e.owned) allocator.free(e.key);
+        entries.deinit(allocator);
     }
 
-    var idx: usize = 0;
     var it = std.mem.splitScalar(u8, inner, ',');
-    outer: while (it.next()) |token| {
+    while (it.next()) |token| {
         const t = std.mem.trim(u8, token, " \t");
         if (t.len == 0) continue;
         if (t.len == 3 and t[1] == '-') {
@@ -512,25 +487,27 @@ fn expandGlobKeys(allocator: std.mem.Allocator, key_pattern: []const u8) ![]Glob
                 continue;
             }
             while (ch <= end) : (ch += 1) {
-                if (idx >= count) break :outer;
-                entries[idx] = .{
+                if (entries.items.len >= max_glob_expansion) break;
+                try entries.append(allocator, .{
                     .key = try std.fmt.allocPrint(allocator, "{s}{c}{s}", .{ prefix, ch, suffix }),
-                    .ws_idx = @intCast(idx + 1),
+                    .ws_idx = @intCast(entries.items.len + 1),
                     .owned = true,
-                };
-                idx += 1;
+                });
             }
         } else {
-            if (idx >= count) break :outer;
-            entries[idx] = .{
+            if (entries.items.len >= max_glob_expansion) break;
+            try entries.append(allocator, .{
                 .key = try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ prefix, t, suffix }),
-                .ws_idx = @intCast(idx + 1),
+                .ws_idx = @intCast(entries.items.len + 1),
                 .owned = true,
-            };
-            idx += 1;
+            });
         }
     }
-    return entries[0..idx];
+    if (entries.items.len == 0) {
+        entries.deinit(allocator);
+        return singleGlobEntry(allocator, key_pattern);
+    }
+    return try entries.toOwnedSlice(allocator);
 }
 
 const workspace_action_bases = std.StaticStringMap(void).initComptime(.{
@@ -748,7 +725,7 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !types.Action {
 }
 
 /// Scales font size and other DPI-dependent fields. Call once the screen is available.
-pub inline fn finalizeConfig(cfg: *types.Config, screen: core.Screen) void {
+pub fn finalizeConfig(cfg: *types.Config, screen: core.Screen) void {
     const scale_module = @import("scale");
     cfg.bar.scaled_font_size = scale_module.scaleFontSize(cfg.bar.font_size, screen);
 }

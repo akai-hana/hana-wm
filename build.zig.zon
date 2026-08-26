@@ -1,0 +1,7 @@
+.{
+    .name = .hana,
+    .fingerprint = 0x5708b600455b58f3,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .paths = .{""},
+}

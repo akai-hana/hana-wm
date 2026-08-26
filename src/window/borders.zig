@@ -7,7 +7,8 @@ const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
 const focus = @import("focus");
-const actions = @import("actions");
+const pipeline = @import("pipeline");
+const model_mod = @import("model");
 const build_options = @import("build_options");
 const tiling = if (build_options.has_tiling) @import("tiling") else null;
 const wincache = @import("wincache");
@@ -17,7 +18,7 @@ const wincache = @import("wincache");
 pub inline fn color(win: u32) u32 {
     // Fullscreen windows render borderless via the bw=0/pixel=0 policy in
     // sync; this predicate covers callers outside reconcile.
-    if (actions.isFullscreenMode(win)) return 0;
+    if (model_mod.isFullscreenMode(pipeline.model(), win)) return 0;
     const cfg = &core.getState().config.tiling;
     return if (focus.getFocused() == win) cfg.border_focused else cfg.border_unfocused;
 }

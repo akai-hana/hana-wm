@@ -57,14 +57,7 @@ pub inline fn getCurrentLayout() Layout {
         if (pipeline.initialized) {
             const mm = pipeline.model();
             const p = &mm.ws[mm.current].params;
-            return switch (p.kind) {
-                .master => .master,
-                .monocle => .monocle,
-                .fibonacci => .fibonacci,
-                .grid => .grid,
-                .leaf => .leaf,
-                .scroll => .scroll,
-            };
+            return @enumFromInt(@intFromEnum(p.kind));
         }
     }
     const cs = core.getState();

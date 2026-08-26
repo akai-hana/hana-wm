@@ -31,7 +31,8 @@ pub fn setSignalWriteFd(fd: std.posix.fd_t) void {
     signal_write_fd = fd;
 }
 
-pub inline fn quit() void {
+/// Gracefully stop the main event loop.
+pub fn quit() void {
     running.store(false, .release);
 }
 
@@ -41,7 +42,7 @@ pub inline fn quit() void {
 /// pipe is full (or not yet registered) the write is dropped; the event loop
 /// also polls the flag itself every iteration, so a lost byte only delays the
 /// reload by one poll timeout at worst.
-pub inline fn reload() void {
+pub fn reload() void {
     if (!should_reload.swap(true, .acq_rel)) {
         if (signal_write_fd >= 0)
             _ = std.os.linux.write(signal_write_fd, &[_]u8{wake_byte}, 1);
@@ -50,7 +51,7 @@ pub inline fn reload() void {
 
 /// Atomically consumes the reload flag.
 /// Returns true exactly once per request, whichever call path checks first wins.
-pub inline fn consumeReload() bool {
+pub fn consumeReload() bool {
     return should_reload.swap(false, .acq_rel);
 }
 

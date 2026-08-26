@@ -100,6 +100,10 @@ const PromptState = struct {
     layout_dirty: bool = true,
 };
 
+// PATTERN: Module-global state with explicit init/deinit lifecycle.
+// This avoids allocator threading through every function call.
+// The init/deinit pair is called from main.zig's startup/shutdown sequence.
+// All functions operate on `g` directly — no passing state as parameters.
 var g: PromptState = .{};
 
 /// Invalidates every cache derived from config/font metrics or bar height.
@@ -142,6 +146,7 @@ pub fn blinkPollTimeoutMs() i32 {
     return -1;
 }
 
+/// Toggle cursor blink visibility; called by the bar's blink timer.
 pub fn blinkTick() void {
     g.is_blink_visible = !g.is_blink_visible;
 }
@@ -154,20 +159,33 @@ pub fn consumeRedrawRequest() bool {
     return pending;
 }
 
-/// Initialises all prompt state: vim engine, key-symbol table, completions,
-/// and history buffers.  No-op if already initialised (idempotent).
+/// Initialises prompt state that is needed regardless of whether the prompt
+/// is ever opened: vim engine and key-symbol table.  Completion / history
+/// buffers are deferred to `ensureAlloc` (~512 KB total) and allocated lazily
+/// on the first activation.
 pub fn init(allocator: std.mem.Allocator, conn: core.Connection) !void {
     if (g.vim_state.buf.len != 0) return; // already initialised
     g.allocator = allocator;
     g.vim_state = try vim.VimState.init(allocator, vim.default_max_input);
-    g.comp_names = try allocator.alloc(u8, (max_completion_len + 1) * max_completions);
-    g.ghost_buf = try allocator.alloc(u8, max_completion_len);
-    g.hist_entries = try allocator.alloc(u8, (max_history_line + 1) * max_history);
     g.key_syms = xcb_key_symbols_alloc(conn);
     if (g.key_syms == null)
         debug.warn("prompt: xcb_key_symbols_alloc failed: key input will not work", .{});
 }
 
+/// Lazily allocate the completion, ghost-text and history buffers on first
+/// activation.  Each sub-allocation is independently guarded so a partial
+/// OOM on a previous attempt is retried.  ~512 KB total.
+fn ensureAlloc() void {
+    if (g.comp_names.len == 0)
+        g.comp_names = g.allocator.alloc(u8, (max_completion_len + 1) * max_completions) catch return;
+    if (g.ghost_buf.len == 0)
+        g.ghost_buf = g.allocator.alloc(u8, max_completion_len) catch return;
+    if (g.hist_entries.len == 0)
+        g.hist_entries = g.allocator.alloc(u8, (max_history_line + 1) * max_history) catch return;
+}
+
+/// Releases all prompt resources including the keyboard grab, vim state,
+/// completion and history buffers.
 pub fn deinit() void {
     if (g.key_syms) |ks| {
         xcb_key_symbols_free(ks);
@@ -180,6 +198,7 @@ pub fn deinit() void {
     g = .{};
 }
 
+/// Open the prompt if closed, or close it if open.
 pub fn toggle() void {
     if (g.is_active) deactivate() else activate();
 }
@@ -312,6 +331,8 @@ fn acceptGhost() bool {
     return finishKeyPress(.none, true);
 }
 
+/// Draw the title segment, delegating to the active prompt UI when open
+/// or to the normal title renderer otherwise. Returns the right edge.
 pub fn draw(
     ctx: title.TitleRenderContext,
     snap: title.TitleSnapshot,
@@ -361,13 +382,14 @@ fn resetPromptEditing() void {
     g.layout_dirty = true;
 }
 
-/// Loads completions and history on first activation, acquires the keyboard
-/// grab, and marks the prompt active.
+/// Acquires the keyboard grab and marks the prompt active.  Completion and
+/// history buffers are allocated on first activation via `ensureAlloc`.
 fn activate() void {
+    ensureAlloc();
     resetPromptEditing();
     // Load completions and history on first activation.
-    if (g.comp_count == 0) loadCompletions();
-    if (!g.is_hist_loaded) loadHistory();
+    if (g.comp_count == 0 and g.comp_names.len > 0) loadCompletions();
+    if (!g.is_hist_loaded and g.hist_entries.len > 0) loadHistory();
     g.is_blink_visible = true;
 
     const cs = core.getState();
@@ -418,6 +440,7 @@ fn deactivate() void {
 /// completion table.  Called once on first activation.
 fn loadCompletions() void {
     g.comp_count = 0;
+    if (g.comp_names.len == 0) return; // ensureAlloc failed
     const path_env_ptr = c.getenv("PATH") orelse return;
     const path_env = std.mem.span(path_env_ptr);
 
@@ -692,6 +715,7 @@ fn histLoadFile(path: []const u8) void {
 /// suggestion priority in `updateGhost`.
 fn loadHistory() void {
     g.is_hist_loaded = true;
+    if (g.hist_entries.len == 0) return; // ensureAlloc failed
 
     var path_buf: [512]u8 = undefined;
     const home = std.mem.span(c.getenv("HOME") orelse return);

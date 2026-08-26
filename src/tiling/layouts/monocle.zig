@@ -5,10 +5,10 @@ const utils = @import("utils");
 const model = @import("model");
 const engine = @import("engine");
 
-const View = engine.View;
-const List = engine.List;
-
-pub fn compute(v: View, out: *List) void {
+/// Compute monocle layout. Origin top-left, y-down. Gaps: full gap on each
+/// screen edge when gaps enabled, else zero. All dimensions are u16 and
+/// shrunk via shrinkClamped (floor clamped to min_dim).
+pub fn compute(v: engine.View, out: *engine.List) void {
     // Empty workspace: the top-window pick indexes order[len - 1], which
     // would underflow. Emit nothing instead.
     if (v.order.len == 0) return;

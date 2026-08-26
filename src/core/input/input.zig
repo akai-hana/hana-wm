@@ -8,6 +8,7 @@ const xcb = core.xcb;
 const types = @import("types");
 const utils = @import("utils");
 const constants = @import("constants");
+const x11_masks = @import("x11_masks");
 const debug = @import("debug");
 const config = @import("config");
 const window = @import("window");
@@ -85,7 +86,7 @@ pub fn setup(conn: core.Connection, screen: core.Screen, root: u32) void {
 /// ScrollLock, and their combinations).
 fn setupGrabs(conn: core.Connection, root: u32) void {
     for (mouse_buttons) |button| {
-        for (constants.lock_modifiers) |lock| {
+        for (x11_masks.lock_modifiers) |lock| {
             _ = xcb.xcb_grab_button(
                 conn,
                 0,
@@ -98,7 +99,7 @@ fn setupGrabs(conn: core.Connection, root: u32) void {
                 root,
                 xcb.XCB_NONE,
                 button,
-                @intCast(constants.mod_super | lock),
+                @intCast(x11_masks.mod_super | lock),
             );
         }
     }
@@ -142,7 +143,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
 
     const cs = core.getState();
     const clicked_window = if (event.child != 0) event.child else event.event;
-    const super_held = (event.state & constants.mod_super) != 0;
+    const super_held = (event.state & x11_masks.mod_super) != 0;
     const mods = utils.normalizeModifiers(event.state);
 
     // The bar selects BUTTON_PRESS directly (not via the Super+Button grab),
@@ -171,8 +172,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     }
 
     if (!super_held) {
-        _ = xcb.xcb_configure_window(cs.conn, managed_window, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
-        focus.setFocus(managed_window, .mouse_click);
+        focus.grabFocus(managed_window, .mouse_click);
         releaseGrab(event.time);
         return;
     }
@@ -243,10 +243,6 @@ fn closeWindow(win: u32) void {
 
 // Action dispatch
 
-inline fn focusedId() ?u32 {
-    return focus.getFocused();
-}
-
 /// Shared trap for an action tag that reached a dispatcher class that does
 /// not handle it. Config validation rejects unknown mappings long before
 /// dispatch, so this documents an internal dispatch-table gap rather than
@@ -292,15 +288,18 @@ fn executeAction(action: *const types.Action) void {
         .scroll_view_right,
         => executeTilingAction(action),
 
-        // Bar
-        .toggle_bar_visibility => if (build_options.has_bar) bar.setBarState(.toggle),
-        .toggle_bar_position => if (build_options.has_bar) bar.toggleBarSegmentAnchor(),
+        // Bar, delegated to executeBarAction
+        .toggle_bar_visibility,
+        .toggle_bar_position,
+        .toggle_prompt,
+        => executeBarAction(action),
 
-        // Minimize
-        .minimize_window => actions.minimize(focusedId()),
-        .unminimize_lifo => actions.restoreOrdered(.lifo),
-        .unminimize_fifo => actions.restoreOrdered(.fifo),
-        .unminimize_all => actions.restoreAll(),
+        // Minimize, delegated to executeMinimizeAction
+        .minimize_window,
+        .unminimize_lifo,
+        .unminimize_fifo,
+        .unminimize_all,
+        => executeMinimizeAction(action),
 
         // Workspaces, delegated to executeWorkspaceAction
         .switch_workspace,
@@ -311,20 +310,10 @@ fn executeAction(action: *const types.Action) void {
         .toggle_tag_all,
         => executeWorkspaceAction(action),
 
-        // Prompt
-        .toggle_prompt => if (build_options.has_bar) bar.promptToggle(),
-
-        // Window focus cycling (dwm-style Mod+k / Mod+j).
-        // Snaps the scroll-layout viewport to the newly focused window when
-        // it is off-screen. The server grab prevents a partial retile frame.
-        .focus_next_window => {
-            focus.focusNext();
-            actions.snapScrollToFocused();
-        },
-        .focus_prev_window => {
-            focus.focusPrev();
-            actions.snapScrollToFocused();
-        },
+        // Window focus, delegated to executeWindowAction
+        .focus_next_window,
+        .focus_prev_window,
+        => executeWindowAction(action),
     }
 }
 
@@ -377,11 +366,51 @@ fn executeTilingAction(action: *const types.Action) void {
 fn executeWorkspaceAction(action: *const types.Action) void {
     switch (action.*) {
         .switch_workspace => |ws| actions.switchTo(ws),
-        .move_to_workspace => |ws| if (focusedId()) |wid| actions.moveWindowTo(wid, ws),
-        .toggle_tag => |ws| if (focusedId()) |wid| actions.tagToggle(wid, ws, true),
+        .move_to_workspace => |ws| if (focus.getFocused()) |wid| actions.moveWindowTo(wid, ws),
+        .toggle_tag => |ws| if (focus.getFocused()) |wid| actions.tagToggle(wid, ws, true),
         .all_workspaces => actions.allViewToggle(),
-        .move_to_all_workspaces, .toggle_tag_all => if (focusedId()) |wid| actions.pinToggle(wid),
+        .move_to_all_workspaces, .toggle_tag_all => if (focus.getFocused()) |wid| actions.pinToggle(wid),
         else => unhandledAction("workspace"),
+    }
+}
+
+/// Dispatches bar-related actions: visibility toggle, position toggle,
+/// and prompt toggle.
+fn executeBarAction(action: *const types.Action) void {
+    switch (action.*) {
+        .toggle_bar_visibility => if (build_options.has_bar) bar.setBarState(.toggle),
+        .toggle_bar_position => if (build_options.has_bar) bar.toggleBarSegmentAnchor(),
+        .toggle_prompt => if (build_options.has_bar) bar.promptToggle(),
+        else => unhandledAction("bar"),
+    }
+}
+
+/// Dispatches minimize-related actions: minimize, unminimize (LIFO/FIFO),
+/// and restore all.
+fn executeMinimizeAction(action: *const types.Action) void {
+    switch (action.*) {
+        .minimize_window => actions.minimize(focus.getFocused()),
+        .unminimize_lifo => actions.restoreOrdered(.lifo),
+        .unminimize_fifo => actions.restoreOrdered(.fifo),
+        .unminimize_all => actions.restoreAll(),
+        else => unhandledAction("minimize"),
+    }
+}
+
+/// Dispatches window focus cycling (dwm-style Mod+k / Mod+j).
+/// Snaps the scroll-layout viewport to the newly focused window when
+/// it is off-screen. The server grab prevents a partial retile frame.
+fn executeWindowAction(action: *const types.Action) void {
+    switch (action.*) {
+        .focus_next_window => {
+            focus.focusNext();
+            actions.snapScrollToFocused();
+        },
+        .focus_prev_window => {
+            focus.focusPrev();
+            actions.snapScrollToFocused();
+        },
+        else => unhandledAction("window"),
     }
 }
 

@@ -1,4 +1,20 @@
-//! Null-vim stub: minimal editor when prompt/vim.zig is absent.
+//! No-op stub for the vim-mode editing engine.
+//!
+//! Compiled when the `has_vim` build option is false.  Provides the same
+//! public API as `vim.zig` but with empty or trivial implementations so
+//! the prompt subsystem can compile and link without pulling in the full
+//! vim editing engine.
+//!
+//! DUPLICATION NOTE: VimState, insertSlice, and the keysym constants are
+//! intentionally duplicated from vim.zig. null_vim.zig must NOT import
+//! vim.zig (it is compiled when vim mode is disabled, so vim.zig may not
+//! exist). To keep them in sync:
+//!   - If you add/remove a field in VimState in vim.zig, mirror the
+//!     corresponding change here (the shared subset: allocator, max_input,
+//!     buf, len, cursor, mode).
+//!   - If insertSlice logic changes in vim.zig, apply the same change here.
+//!   - The Mode enum values must stay identical (insert=0, normal=1) because
+//!     prompt.zig indexes into a mode-width cache by enum ordinal.
 const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;

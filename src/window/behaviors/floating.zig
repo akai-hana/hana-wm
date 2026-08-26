@@ -8,6 +8,7 @@ const xcb = core.xcb;
 const utils = @import("utils");
 
 const window = @import("window");
+const borders = @import("borders");
 const focus = @import("focus");
 const tracking = @import("tracking");
 
@@ -66,7 +67,7 @@ fn snapDistance() i32 {
 fn workArea() WorkArea {
     const cs = core.getState();
     const sw: i32 = cs.screen.width_in_pixels;
-    const bw2: i32 = @as(i32, window.getBorderWidth()) * 2;
+    const bw2: i32 = @as(i32, borders.width()) * 2;
     const work = if (build_options.has_bar) bar.workAreaRect() else .{ .x = 0, .y = 0, .width = core.screen.width, .height = core.screen.height };
     return .{
         .left = 0,
@@ -75,6 +76,9 @@ fn workArea() WorkArea {
         .bottom = work.y + @as(i32, work.height) - bw2,
     };
 }
+
+/// Which sides of the window the grabbed corner anchors to (left/top = the
+pub const ResizeDirection = enum { none, n, s, e, w, ne, nw, se, sw };
 
 /// Which sides of the window the grabbed corner anchors to (left/top = the
 /// corner is a left or top edge). Collapses the four per-axis corner switches
@@ -108,13 +112,52 @@ const State = struct {
 
 var g_state: State = .{};
 
+/// Determines the resize direction from a cursor point relative to a window
+/// rectangle and border width. Returns the 8-directional direction the cursor
+/// is closest to (n, s, e, w, ne, nw, se, sw), or none if the point is well
+/// inside the window far from any edge.
+pub fn resizeDirectionFromPoint(cursor_x: i32, cursor_y: i32, rect: utils.Rect, border_width: u32) ResizeDirection {
+    const left: i32 = rect.x;
+    const top: i32 = rect.y;
+    const right: i32 = rect.x + @as(i32, rect.width);
+    const bottom: i32 = rect.y + @as(i32, rect.height);
+    const bw: i32 = @intCast(border_width);
+
+    const near_left = @abs(cursor_x - left) <= bw;
+    const near_right = @abs(cursor_x - right) <= bw;
+    const near_top = @abs(cursor_y - top) <= bw;
+    const near_bottom = @abs(cursor_y - bottom) <= bw;
+
+    if (near_left and near_top) return .nw;
+    if (near_right and near_top) return .ne;
+    if (near_left and near_bottom) return .sw;
+    if (near_right and near_bottom) return .se;
+    if (near_top) return .n;
+    if (near_bottom) return .s;
+    if (near_left) return .w;
+    if (near_right) return .e;
+    return .none;
+}
+
+/// Maps an 8-directional ResizeDirection to the 4-corner ResizeCorner used by
+/// the resize engine. For cardinal directions the choice of corner is arbitrary
+/// (e.g. n and s both anchor at bottom/top respectively) since only one axis
+/// is constrained.
+fn directionToCorner(dir: ResizeDirection) ResizeCorner {
+    return switch (dir) {
+        .nw => .top_left,
+        .ne => .top_right,
+        .sw => .bottom_left,
+        .se => .bottom_right,
+        .n, .w => .top_left,
+        .s, .e => .bottom_right,
+        .none => .bottom_right,
+    };
+}
+
 fn nearestCorner(x: i16, y: i16, geom: utils.Rect) ResizeCorner {
-    const cx: i32 = @as(i32, geom.x) + @divTrunc(@as(i32, geom.width), 2);
-    const cy: i32 = @as(i32, geom.y) + @divTrunc(@as(i32, geom.height), 2);
-    if (x < cx and y < cy) return .top_left;
-    if (x >= cx and y < cy) return .top_right;
-    if (x < cx and y >= cy) return .bottom_left;
-    return .bottom_right;
+    const dir = resizeDirectionFromPoint(x, y, geom, 0);
+    return directionToCorner(dir);
 }
 
 /// Begins a move (button 1) or resize (button 3) drag on `win` at (x, y).
@@ -124,7 +167,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     if (!cs.config.drag_enabled) return;
     if (g_state.drag.active) return;
     if (build_options.has_bar and bar.isBarWindow(win)) return;
-    if (actions.isFullscreenMode(win)) return; // fullscreen geometry must not be touched
+    if (@import("model").isFullscreenMode(pipeline.model(), win)) return; // fullscreen geometry must not be touched
 
     // Model/sync truth (floating base or last-sent rect) over a live XCB
     // round-trip; fall back to a live query when never placed.
@@ -158,7 +201,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
         // window doesn't appear frozen at a tiled edge.
         .pending_float = tracking.isTiledMode(win),
     };
-    focus.setFocus(win, .user_command);
+    focus.grabFocus(win, .user_command);
     utils.raiseWindow(cs.conn, win);
     _ = xcb.xcb_flush(cs.conn);
 }

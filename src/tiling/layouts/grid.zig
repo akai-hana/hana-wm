@@ -4,10 +4,11 @@
 const utils = @import("utils");
 const engine = @import("engine");
 
-const View = engine.View;
-const List = engine.List;
-
-pub fn compute(v: View, out: *List) void {
+/// Compute grid layout. Origin top-left, y-down. Gaps: full gap between cells
+/// and at screen edges (`gap * (cols+1)` / `gap * (rows+1)` subtracted from
+/// screen dims). Cell dimensions are u16, integer-divided; last partial row
+/// may be wider in relaxed mode. All dims clamped to min_dim.
+pub fn compute(v: engine.View, out: *engine.List) void {
     const n = v.order.len;
     // Empty workspace: calcGridShape(0) yields rows == 0, which would divide
     // by zero below. Emit nothing instead.

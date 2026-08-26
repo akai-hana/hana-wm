@@ -29,6 +29,9 @@ pub const Screen = *xcb.xcb_screen_t;
 /// Equivalent to xcb_window_t (uint32_t).
 pub const WindowId = u32;
 
+// TYPE NOTE: WorkspaceId (core.zig) is the canonical type for workspace
+// identifiers. Model code uses raw integers for internal array indexing.
+// The conversion happens at the entry-point boundary.
 /// Workspace index wrapper. Prevents confusing workspace indices with
 /// unrelated u8 values (counts, layout indices, etc.) at call sites.
 pub const WorkspaceId = struct {
@@ -38,16 +41,8 @@ pub const WorkspaceId = struct {
         return .{ .index = i };
     }
 
-    pub fn toIndex(self: WorkspaceId) u8 {
-        return self.index;
-    }
-
     pub fn eql(self: WorkspaceId, other: WorkspaceId) bool {
         return self.index == other.index;
-    }
-
-    pub fn order(self: WorkspaceId, other: WorkspaceId) std.math.Order {
-        return std.math.order(u8, self.index, other.index);
     }
 };
 

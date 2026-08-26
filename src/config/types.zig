@@ -25,8 +25,10 @@ pub const Action = union(enum) {
     decrease_master,
     increase_master_count,
     decrease_master_count,
-    grow_stack_top, // grow the topmost stack slave's share of the column, shrinking the rest evenly (mod+n)
-    grow_stack_bottom, // grow the bottommost stack slave's share of the column, shrinking the rest evenly (mod+o)
+    /// Grow the topmost stack slave's share of the column, shrinking the rest evenly (mod+n).
+    grow_stack_top,
+    /// Grow the bottommost stack slave's share of the column, shrinking the rest evenly (mod+o).
+    grow_stack_bottom,
     toggle_floating_window,
     toggle_fullscreen,
     swap_master,
@@ -34,7 +36,8 @@ pub const Action = union(enum) {
     switch_workspace: u8,
     move_to_workspace: u8,
     toggle_tag: u8,
-    sequence: []Action, // ordered list of actions executed left-to-right (owned slice)
+    /// Ordered list of actions executed left-to-right (owned slice).
+    sequence: []Action,
     dump_state,
     minimize_window,
     unminimize_lifo,
@@ -42,15 +45,24 @@ pub const Action = union(enum) {
     unminimize_all,
     cycle_layout_variants,
     toggle_prompt,
-    all_workspaces, // shows all windows from every workspace at once; toggled on/off
-    move_to_all_workspaces, // pin focused window to every workspace
-    toggle_tag_all, // flip between pinned-to-all and current-workspace-only
-    focus_next_window, // cycle focus forward / right
-    focus_prev_window, // cycle focus backward / left
-    move_window_next, // move focused window forward
-    move_window_prev, // move focused window backward
-    scroll_view_left, // shift scroll-layout viewport left by one slot
-    scroll_view_right, // shift scroll-layout viewport right by one slot
+    /// Shows all windows from every workspace at once; toggled on/off.
+    all_workspaces,
+    /// Pin focused window to every workspace.
+    move_to_all_workspaces,
+    /// Flip between pinned-to-all and current-workspace-only.
+    toggle_tag_all,
+    /// Cycle focus forward / right.
+    focus_next_window,
+    /// Cycle focus backward / left.
+    focus_prev_window,
+    /// Move focused window forward.
+    move_window_next,
+    /// Move focused window backward.
+    move_window_prev,
+    /// Shift scroll-layout viewport left by one slot.
+    scroll_view_left,
+    /// Shift scroll-layout viewport right by one slot.
+    scroll_view_right,
 
     pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -205,18 +217,24 @@ pub const MasterSide = enum {
 /// Defined here and not in tiling.zig so that config.zig
 /// can parse it without creating a circular import.
 pub const MasterVariant = enum {
-    lifo, // new window -> stack, existing master stays (default)
-    fifo, // new window -> master, existing master -> stack
+    /// New window goes to stack, existing master stays (default).
+    lifo,
+    /// New window goes to master, existing master moves to stack.
+    fifo,
 };
 
 pub const MonocleVariant = enum {
-    gapless, // true fullscreen; ignore gap settings (default)
-    gaps, // honor gap settings like every other layout
+    /// True fullscreen; ignore gap settings (default).
+    gapless,
+    /// Honor gap settings like every other layout.
+    gaps,
 };
 
 pub const GridVariant = enum {
-    rigid, // strict grid: leave empty cells in incomplete last row (default)
-    relaxed, // last window in incomplete row expands to fill the row
+    /// Strict grid: leave empty cells in incomplete last row (default).
+    rigid,
+    /// Last window in incomplete row expands to fill the row.
+    relaxed,
 };
 
 /// Combined layout variant state, matching the per-layout defaults.
@@ -355,29 +373,42 @@ pub const IndicatorLocation = enum {
     down_right,
 
     // Accepts hyphens or underscores and both orderings of diagonal names (e.g. "left-up" == "up-left").
-    // StaticStringMap.initComptime is a compile-time perfect hash, O(1), no runtime cost.
-    const string_map = std.StaticStringMap(IndicatorLocation).initComptime(.{
-        .{ "up", .up },
-        .{ "down", .down },
-        .{ "left", .left },
-        .{ "right", .right },
-        .{ "up-left", .up_left },
-        .{ "up_left", .up_left },
-        .{ "left-up", .up_left },
-        .{ "left_up", .up_left },
-        .{ "up-right", .up_right },
-        .{ "up_right", .up_right },
-        .{ "right-up", .up_right },
-        .{ "right_up", .up_right },
-        .{ "down-left", .down_left },
-        .{ "down_left", .down_left },
-        .{ "left-down", .down_left },
-        .{ "left_down", .down_left },
-        .{ "down-right", .down_right },
-        .{ "down_right", .down_right },
-        .{ "right-down", .down_right },
-        .{ "right_down", .down_right },
-    });
+    // Cardinal entries + diagonal entries generated at comptime from a compact table.
+    const string_map = blk: {
+        @setEvalBranchQuota(2000);
+        const cardinals = [_]struct { []const u8, IndicatorLocation }{
+            .{ "up", .up },
+            .{ "down", .down },
+            .{ "left", .left },
+            .{ "right", .right },
+        };
+        const diags = [_]struct { []const u8, []const u8, IndicatorLocation }{
+            .{ "up", "left", .up_left },
+            .{ "up", "right", .up_right },
+            .{ "down", "left", .down_left },
+            .{ "down", "right", .down_right },
+        };
+        var kvs: [cardinals.len + diags.len * 4]struct { []const u8, IndicatorLocation } = undefined;
+        var n: usize = 0;
+        for (cardinals) |c| {
+            kvs[n] = c;
+            n += 1;
+        }
+        for (diags) |d| {
+            const a = d[0];
+            const b = d[1];
+            const v = d[2];
+            kvs[n] = .{ a ++ "-" ++ b, v };
+            n += 1;
+            kvs[n] = .{ a ++ "_" ++ b, v };
+            n += 1;
+            kvs[n] = .{ b ++ "-" ++ a, v };
+            n += 1;
+            kvs[n] = .{ b ++ "_" ++ a, v };
+            n += 1;
+        }
+        break :blk std.StaticStringMap(IndicatorLocation).initComptime(kvs[0..n]);
+    };
     /// Case-insensitive parse. Returns null if str exceeds 32 bytes or is unrecognized.
     pub inline fn fromString(str: []const u8) ?IndicatorLocation {
         return fromStringCI(IndicatorLocation, str);
