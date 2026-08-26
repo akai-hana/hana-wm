@@ -74,10 +74,14 @@ pub fn build(b: *std.Build) !void {
         const owned_name = try b.allocator.dupe(u8, "vim");
         try discovery.source_paths.put(owned_name, null_vim_path);
         try discovery.modules.put(owned_name, b.createModule(.{
-            .root_source_file = b.path(null_vim_path),
-            .target = target,
-            .optimize = optimize,
-        }));
+                .root_source_file = b.path(null_vim_path),
+                .target = target,
+                .optimize = optimize,
+            }));
+        // Prevent null_vim.zig from also being registered as "null_vim"
+        // via auto-discovery — it's only needed as the "vim" stub here.
+        _ = discovery.modules.remove("null_vim");
+        _ = discovery.source_paths.remove("null_vim");
     }
 
     // Root module

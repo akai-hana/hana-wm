@@ -1,8 +1,16 @@
-//! Bounded window store. A full-store put refuses BEFORE any mutation.
+//! Bounded, stack-allocated key-value collection with sorted-key binary search.
 //!
-//! Iteration order = SLOT order: `remove` swap-removes, so the last live
-//! element moves into the freed slot. Deterministic but not
-//! insertion-ordered.
+//! The Store is parameterised by key type, value type, and a hard capacity
+//! ceiling (stack-allocated arrays, no heap allocation).  Keys are kept in
+//! sorted order at all times: lookups (get, getPtr, has) use O(log n) binary
+//! search; put and remove use binary search for the position and then shift
+//! arrays to maintain sorted order.
+//!
+//! Threading model: single-threaded, no locking needed — all access occurs
+//! on the event-loop thread.
+//!
+//! When the capacity is reached, put returns error.StoreFull; there is no
+//! eviction or overflow — the ceiling is absolute.
 const std = @import("std");
 
 pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type {
@@ -14,64 +22,72 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
         vals: [capacity]V = undefined,
         len: usize = 0,
 
-        pub fn getPtr(self: *Self, k: K) ?*V {
-            var i: usize = 0;
-            while (i < self.len) : (i += 1) {
-                if (self.keys[i] == k) return &self.vals[i];
+        fn binarySearch(self: *const Self, comptime mode: enum { exact, lower_bound }, k: K) if (mode == .exact) ?usize else usize {
+            var lo: usize = 0;
+            var hi: usize = self.len;
+            while (lo < hi) {
+                const mid = lo + (hi - lo) / 2;
+                if (mode == .exact and self.keys[mid] == k) return mid;
+                if (self.keys[mid] < k) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
             }
+            if (mode == .exact) return null else return lo;
+        }
+
+        pub fn getPtr(self: *Self, k: K) ?*V {
+            if (self.binarySearch(.exact, k)) |i| return &self.vals[i];
             return null;
         }
 
         pub fn get(self: *const Self, k: K) ?V {
-            var i: usize = 0;
-            while (i < self.len) : (i += 1) {
-                if (self.keys[i] == k) return self.vals[i];
-            }
+            if (self.binarySearch(.exact, k)) |i| return self.vals[i];
             return null;
         }
 
         pub fn has(self: *const Self, k: K) bool {
-            var i: usize = 0;
-            while (i < self.len) : (i += 1) {
-                if (self.keys[i] == k) return true;
-            }
-            return false;
+            return self.binarySearch(.exact, k) != null;
         }
 
         pub fn put(self: *Self, k: K, v: V) Error!*V {
-            if (self.getPtr(k)) |slot| {
-                slot.* = v;
-                return slot;
+            if (self.binarySearch(.exact, k)) |i| {
+                self.vals[i] = v;
+                return &self.vals[i];
             }
             if (self.len == capacity) return Error.StoreFull;
-            const s = self.len;
-            self.keys[s] = k;
-            self.vals[s] = v;
+            const pos = self.binarySearch(.lower_bound, k);
+            var i = self.len;
+            while (i > pos) : (i -= 1) {
+                self.keys[i] = self.keys[i - 1];
+                self.vals[i] = self.vals[i - 1];
+            }
+            self.keys[pos] = k;
+            self.vals[pos] = v;
             self.len += 1;
-            return &self.vals[s];
+            return &self.vals[pos];
         }
 
-        /// Swap-remove: the last live element moves into the freed slot.
-        /// O(1); iteration order after removal is slot order.
+        /// Sorted-shift-remove: elements after `i` shift left to fill the gap.
+        /// O(n); iteration order stays sorted-by-key.
         pub fn remove(self: *Self, k: K) bool {
-            var i: usize = 0;
-            while (i < self.len) : (i += 1) {
-                if (self.keys[i] == k) {
-                    const last = self.len - 1;
-                    if (i != last) {
-                        self.keys[i] = self.keys[last];
-                        self.vals[i] = self.vals[last];
-                    }
-                    self.len = last;
-                    return true;
+            if (self.binarySearch(.exact, k)) |i| {
+                const last = self.len - 1;
+                var j = i;
+                while (j < last) : (j += 1) {
+                    self.keys[j] = self.keys[j + 1];
+                    self.vals[j] = self.vals[j + 1];
                 }
+                self.len = last;
+                return true;
             }
             return false;
         }
 
         pub const Item = struct { key: K, val: *const V };
 
-        /// seq must be < count(). Iterates in slot order.
+        /// seq must be < count(). Iterates in sorted-key order.
         pub fn at(self: *const Self, seq: usize) Item {
             std.debug.assert(seq < self.len);
             return .{ .key = self.keys[seq], .val = &self.vals[seq] };
@@ -79,6 +95,10 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
 
         pub fn count(self: *const Self) usize {
             return self.len;
+        }
+
+        pub fn clear(self: *Self) void {
+            self.len = 0;
         }
     };
 }

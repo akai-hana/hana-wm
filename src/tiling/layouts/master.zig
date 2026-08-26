@@ -6,9 +6,6 @@ const constants = @import("constants");
 const model = @import("model");
 const engine = @import("engine");
 
-const View = engine.View;
-const List = engine.List;
-
 /// The two adjustable stack-column weights derived from the signed
 /// `stack_balance` scalar (see LayoutParams.stack_balance). Bundled so
 /// tileColumn/tileStack thread one extra parameter through.
@@ -34,8 +31,12 @@ pub const StackBoost = struct {
     }
 };
 
-/// Tile `windows` into the master-stack layout using the given work area.
-pub fn compute(v: View, out: *List) void {
+/// Compute master-stack layout. Origin top-left, y-down. Gaps: full gap on
+/// screen edges, half-gap between master and stack columns (each side
+/// contributes half). Master width is a rounded fraction of screen width;
+/// heights distributed via cumulative integer division (±1 px). All dims u16,
+/// clamped to min_dim via shrinkClamped.
+pub fn compute(v: engine.View, out: *engine.List) void {
     // Empty workspace emits nothing; callers may run layouts on an empty
     // order (e.g. sync's per-reconcile compute), so this is a supported
     // input, not a precondition violation.
@@ -89,8 +90,8 @@ pub fn compute(v: View, out: *List) void {
 /// carries that duty now (sync emits/raises in placement order).
 /// `boost` is zero for the master column, which reduces the split to plain even.
 fn tileColumn(
-    v: *const View,
-    out: *List,
+    v: *const engine.View,
+    out: *engine.List,
     windows: []const model.WindowId,
     x: u16,
     y_offset: u16,
@@ -120,7 +121,7 @@ fn tileColumn(
             .width = inner_w,
             .height = heights[i],
         };
-        emit(v, out, win, rect);
+        engine.emitView(v, out, win, rect, true);
         y = y +| heights[i] +| m.gap +| 2 *| m.border;
     }
 }
@@ -139,7 +140,7 @@ const CapResult = struct {
 /// below their current fair share, redistributing their pixels to the rest.
 /// Stops when no new window gets pinned (bounded by `windows.len` passes).
 fn findCappedWindows(
-    v: *const View,
+    v: *const engine.View,
     windows: []const model.WindowId,
     avail: u16,
     boost: StackBoost,
@@ -239,7 +240,7 @@ inline fn bitSet(bits: []u8, i: usize) void {
 /// windowHeight/windowY, so output stays bit-identical to the historical even
 /// split. Non-zero boost uses the telescoping rounded cumulative sum
 /// (`cum`/`prev_px`) so fractional weights land on the right pixel.
-fn distributeStackHeightsWeighted(v: *const View, windows: []const model.WindowId, avail: u16, boost: StackBoost, min_dim: u16, out: []u16) u32 {
+fn distributeStackHeightsWeighted(v: *const engine.View, windows: []const model.WindowId, avail: u16, boost: StackBoost, min_dim: u16, out: []u16) u32 {
     const n: u16 = @intCast(windows.len);
 
     var capped_buf: [constants.Limits.max_tiled_windows / 8]u8 = undefined;
@@ -277,7 +278,7 @@ inline fn windowWeight(i: u16, count: u16, boost: StackBoost) f32 {
 /// Declared WM_NORMAL_HINTS max_height for `win`, or 0 when it declared none:
 /// 0 doubles as "unconstrained", so callers needn't special-case a missing
 /// hints entry.
-inline fn windowMaxHeight(v: *const View, win: model.WindowId) u16 {
+inline fn windowMaxHeight(v: *const engine.View, win: model.WindowId) u16 {
     return v.hints.forWin(win).max_height;
 }
 
@@ -286,8 +287,8 @@ inline fn windowMaxHeight(v: *const View, win: model.WindowId) u16 {
 ///
 /// `boost` only affects the single-column path, see tileStackExtra for why.
 fn tileStack(
-    v: *const View,
-    out: *List,
+    v: *const engine.View,
+    out: *engine.List,
     windows: []const model.WindowId,
     x: u16,
     y_offset: u16,
@@ -319,8 +320,8 @@ fn tileStack(
 /// row) nor the stack boost ("topmost"/"bottommost" lose meaning once the
 /// stack wraps into multiple columns).
 fn tileStackExtra(
-    v: *const View,
-    out: *List,
+    v: *const engine.View,
+    out: *engine.List,
     windows: []const model.WindowId,
     x: u16,
     y_offset: u16,
@@ -354,7 +355,7 @@ fn tileStackExtra(
                 .width = col_inner_w,
                 .height = row_h,
             };
-            emit(v, out, windows[win_idx], rect);
+            engine.emitView(v, out, windows[win_idx], rect, true);
         }
     }
 }
@@ -381,7 +382,4 @@ inline fn windowY(i: u16, count: u16, available: u16, y_offset: u16, m: utils.Ma
     return y_offset +| m.gap +| @as(u16, @intCast(cum)) +| i *| (m.gap +| 2 *| m.border);
 }
 
-/// All master placements are visible; hints applied centrally by emitView.
-inline fn emit(v: *const View, out: *List, win: model.WindowId, rect: utils.Rect) void {
-    engine.emitView(v, out, win, rect, true);
-}
+

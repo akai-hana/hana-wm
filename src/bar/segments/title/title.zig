@@ -436,7 +436,12 @@ const WindowDataBatch = struct {
             self.needs_xcb_geometry[i] = false;
             self.tiling_geoms[i] = null;
             if (!minimized.contains(win)) {
-                self.tiling_geoms[i] = sync.truthRect(pipeline.model(), win);
+                // LAYERING NOTE: The title segment queries sync.truthRect() to get the
+            // canonical geometry for window sorting. This is a deliberate layering
+            // inversion — bar segments are read-path UI but need write-path truth data.
+            // The alternative (passing geometry through the bar's frame snapshot) would
+            // require plumbing geometry through 3 abstraction layers for no benefit.
+            self.tiling_geoms[i] = sync.truthRect(pipeline.model(), win);
                 if (self.tiling_geoms[i] == null and !has_prefetched_geoms) {
                     self.geom_cookies[i] = xcb.xcb_get_geometry(self.conn, win);
                     self.needs_xcb_geometry[i] = true;
@@ -807,15 +812,10 @@ fn drawSegmentedTitles(
 /// the snapshot carries a title/geometry entry for every window (the bar's
 /// refetch ran this frame), that call issues no requests at all.
 ///
-/// Title strings end up in `out_data.titles`: borrowed from the snapshot
-/// when it covered them, otherwise dupes from `allocator` (or "" where none
-/// was read). The caller frees the non-borrowed entries once done reading
-/// `out_infos`; until then they must stay alive, which is why `out_data` is
-/// caller-owned (see `gatherAndSortWindowInfos`).
-///
-/// Kept separate from drawSegmentedTitles so its scratch arrays (XCB cookies,
-/// per-window bool flags, several KB) leave the stack as soon as it returns,
-/// rather than coexisting with drawSegmentedTitles' locals for the whole call.
+/// Builds per-window render info from XCB replies. Title strings are borrowed
+/// from the snapshot when available, otherwise duped from `allocator` — the
+/// caller frees non-borrowed entries once done with `out_infos`. Separated
+/// from drawSegmentedTitles to keep scratch arrays off the draw path.
 fn gatherWindowInfos(
     ctx: TitleRenderContext,
     snapshot: TitleSnapshot,

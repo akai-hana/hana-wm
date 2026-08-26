@@ -22,15 +22,18 @@ pub const XcbSink = struct {
         return .{ .ptr = self, .vt = &.{ .map = mapShim, .geom = geomShim, .border_width = borderWidthShim, .border_pixel = borderPixelShim, .park = parkShim, .stack_only = stackOnlyShim, .flush = flushShim, .grab_server = grabShim, .ungrab_and_flush = ungrabAndFlushShim } };
     }
 
+    inline fn fromPtr(ptr: *anyopaque) *XcbSink {
+        return @ptrCast(@alignCast(ptr));
+    }
+
     fn mapShim(ptr: *anyopaque, win: u32) void {
-        const self: *XcbSink = @ptrCast(@alignCast(ptr));
-        _ = xcb.xcb_map_window(self.conn, win);
+        _ = xcb.xcb_map_window(XcbSink.fromPtr(ptr).conn, win);
     }
 
     /// Configure X|Y|W|H, merging a stack mode into the SAME request when
     /// one is requested (never a separate round of requests for geometry+raise).
     fn geomShim(ptr: *anyopaque, win: u32, rect: utils.Rect, stack: ?sync.Stack) void {
-        const self: *XcbSink = @ptrCast(@alignCast(ptr));
+        const self = XcbSink.fromPtr(ptr);
         if (stack) |s| {
             _ = xcb.xcb_configure_window(
                 self.conn,
@@ -52,20 +55,17 @@ pub const XcbSink = struct {
     }
 
     fn borderWidthShim(ptr: *anyopaque, win: u32, bw: u16) void {
-        const self: *XcbSink = @ptrCast(@alignCast(ptr));
-        _ = xcb.xcb_configure_window(self.conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{bw});
+        _ = xcb.xcb_configure_window(XcbSink.fromPtr(ptr).conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{bw});
     }
 
     fn borderPixelShim(ptr: *anyopaque, win: u32, pixel: u32) void {
-        const self: *XcbSink = @ptrCast(@alignCast(ptr));
-        utils.setBorderPixel(self.conn, win, pixel);
+        utils.setBorderPixel(XcbSink.fromPtr(ptr).conn, win, pixel);
     }
 
     /// Park = offscreen X + stack BELOW in ONE configure_window.
     fn parkShim(ptr: *anyopaque, win: u32) void {
-        const self: *XcbSink = @ptrCast(@alignCast(ptr));
         _ = xcb.xcb_configure_window(
-            self.conn,
+            XcbSink.fromPtr(ptr).conn,
             win,
             xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_STACK_MODE,
             &[_]u32{
@@ -76,29 +76,24 @@ pub const XcbSink = struct {
     }
 
     fn stackOnlyShim(ptr: *anyopaque, win: u32, s: sync.Stack) void {
-        const self: *XcbSink = @ptrCast(@alignCast(ptr));
-        _ = xcb.xcb_configure_window(self.conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{stackMode(s)});
+        _ = xcb.xcb_configure_window(XcbSink.fromPtr(ptr).conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{stackMode(s)});
     }
 
     fn flushShim(ptr: *anyopaque) void {
-        const self: *XcbSink = @ptrCast(@alignCast(ptr));
-        _ = xcb.xcb_flush(self.conn);
+        _ = xcb.xcb_flush(XcbSink.fromPtr(ptr).conn);
     }
 
     fn grabShim(ptr: *anyopaque) void {
-        const self: *XcbSink = @ptrCast(@alignCast(ptr));
-        utils.grabServer(self.conn);
+        utils.grabServer(XcbSink.fromPtr(ptr).conn);
     }
 
     fn ungrabAndFlushShim(ptr: *anyopaque) void {
-        const self: *XcbSink = @ptrCast(@alignCast(ptr));
-        utils.ungrabAndFlush(self.conn);
+        utils.ungrabAndFlush(XcbSink.fromPtr(ptr).conn);
     }
 };
 
 inline fn stackMode(s: sync.Stack) u32 {
     return switch (s) {
         .above => xcb.XCB_STACK_MODE_ABOVE,
-        .below => xcb.XCB_STACK_MODE_BELOW,
     };
 }

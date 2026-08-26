@@ -185,7 +185,7 @@ test "bench: reconcile pass (50 windows)" {
     var recorder = BenchRecorder{};
     const screen: utils.Rect = .{ .x = 0, .y = 0, .width = 1920, .height = 1080 };
 
-    sync.init(testing.allocator);
+    sync.init();
     defer sync.deinit();
 
     var ctx: sync.Ctx = .{

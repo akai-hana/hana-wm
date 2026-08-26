@@ -1,12 +1,10 @@
-//! Core utilities — FACADE (D6 split).
+//! Core utilities — FACADE.
 //!
-//! The former grab-bag is split into focused siblings; this file keeps only
-//! pure, xcb-free geometry/scaling helpers and re-exports every public decl
+//! Pure, xcb-free geometry/scaling helpers and re-exports every public decl
 //! so existing `utils.X` call sites are unchanged:
 //!
 //!   bounded.zig   BoundedList                       (xcb-free)
 //!   proc.zig      lifecycle flags, wake pipe, pipes  (xcb-free)
-//!   time.zig      clock helpers                      (xcb-free)
 //!   x11wire.zig   atoms/EWMH/properties/grab/configure shims (xcb-DEPENDENT)
 //!
 //! Layer note: model/tiling reference only the xcb-free decls here and in
@@ -15,9 +13,9 @@
 
 const std = @import("std");
 const constants = @import("constants");
+const x11_masks = @import("x11_masks");
 
 const proc = @import("proc.zig");
-const time = @import("time.zig");
 const bounded = @import("bounded.zig");
 const x11wire = @import("x11wire.zig");
 
@@ -30,10 +28,30 @@ pub const reload = proc.reload;
 pub const consumeReload = proc.consumeReload;
 pub const makePipe = proc.makePipe;
 
-// --- time (re-exports) ----------------------------------------------------
-pub const clockNs = time.clockNs;
-pub const monotonicNs = time.monotonicNs;
-pub const realtimeNs = time.realtimeNs;
+// --- time (inlined from former time.zig) ----------------------------------
+inline fn clockTs(clock_id: std.os.linux.clockid_t) std.os.linux.timespec {
+    var ts: std.os.linux.timespec = undefined;
+    if (std.os.linux.clock_gettime(clock_id, &ts) != 0) {
+        const fallback_id: std.os.linux.clockid_t =
+            if (clock_id == .MONOTONIC) .REALTIME else .MONOTONIC;
+        if (std.os.linux.clock_gettime(fallback_id, &ts) != 0)
+            ts = .{ .sec = 0, .nsec = 0 };
+    }
+    return ts;
+}
+
+pub fn clockNs(clock_id: std.os.linux.clockid_t) u64 {
+    const ts = clockTs(clock_id);
+    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+}
+
+pub inline fn monotonicNs() u64 {
+    return clockNs(.MONOTONIC);
+}
+
+pub inline fn realtimeNs() u64 {
+    return clockNs(.REALTIME);
+}
 
 // --- bounded collections (re-exports) ---------------------------------------
 pub const BoundedList = bounded.BoundedList;
@@ -90,7 +108,7 @@ pub inline fn toXcbCoord(v: i16) u32 {
 /// Strips lock-key and pointer-button bits from a raw event modifier state,
 /// leaving only the modifier bits the WM uses for keybinding matching.
 pub inline fn normalizeModifiers(state: u16) u16 {
-    return state & constants.mod_mask_binding;
+    return state & x11_masks.mod_mask_binding;
 }
 
 // Canonical scaling formulas: pure functions of a ScalableValue, no DPI

@@ -5,12 +5,11 @@ const utils = @import("utils");
 const model = @import("model");
 const engine = @import("engine");
 
-const View = engine.View;
-const List = engine.List;
-
-/// Tile `windows` into a balanced BSP layout using the given work area.
-/// Strips the outer gap margin, then delegates to the recursive `tileRegion` splitter.
-pub fn compute(v: View, out: *List) void {
+/// Compute BSP (binary space partition) layout. Origin top-left, y-down.
+/// Outer gap stripped first; each recursive split halves the longer axis
+/// 50/50 with one gap at the seam. Ties (w == h) favour vertical split.
+/// Border subtracted at leaf nodes only. All dims u16, clamped to min_dim.
+pub fn compute(v: engine.View, out: *engine.List) void {
     const m = v.env.margins;
 
     // Strip the outer gap; each recursive split inserts one gap at its seam
@@ -32,8 +31,8 @@ inline fn halveWithMin(dim: u16, gap: u16, min_dim: u16) struct { first: u16, se
 /// Splits the longer axis 50/50, inserting one gap at each seam; border subtracted at leaf nodes only.
 /// Ties (w == h) favour a vertical split.
 fn tileRegion(
-    v: *const View,
-    out: *List,
+    v: *const engine.View,
+    out: *engine.List,
     windows: []const model.WindowId,
     m: utils.Margins,
     min_dim: u16,

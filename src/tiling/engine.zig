@@ -4,7 +4,7 @@ const utils = @import("utils");
 const model = @import("model");
 
 pub const hints = @import("hints");
-pub const applyHints = hints.applyHints;
+const applyHints = hints.applyHints;
 
 pub const Placement = struct {
     win: model.WindowId,
@@ -19,6 +19,16 @@ pub const parked_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 }
 /// Frozen size-hint snapshot aligned index-for-index with View.order.
 /// The caller materializes one hint per ordered window; lookup is a scan
 /// over the (small) order slice only.
+///
+/// Why not a sorted/binary-search or hash-map optimization:
+///   - The order slice is bounded by `max_tiled_windows` (200), making the
+///     worst-case O(n²) across all emit() calls 40 K comparisons — negligible.
+///   - HintsView is rebuilt from stack-allocated buffers each layout pass
+///     (sync.zig), so there is no persistent data to index.
+///   - The struct uses only slices (no allocator); adding a map would break
+///     the zero-allocation compute() path.
+///   - `forWin` is only called from emit() and master.zig:windowMaxHeight,
+///     both per-window within a single layout pass.
 pub const HintsView = struct {
     order: []const model.WindowId,
     hints: []const model.SizeHints,

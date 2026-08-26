@@ -1,7 +1,7 @@
 //! Fullscreen protocol-side residue.
 //!
 //! Fullscreen TRUTH lives in the model (`Entry.mode == .fullscreen`);
-//! query it through actions.isFullscreenMode / actions.fullscreenOccupiedOnWs.
+//! query it through model.isFullscreenMode / model.fullscreenOccupantOnWs.
 //! This module owns only what is genuinely protocol-side:
 //!   - deferred bar hide/show armed around a fullscreen transition and
 //!     resolved on ConfigureNotify confirmation,

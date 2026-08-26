@@ -7,11 +7,11 @@
 //!   draw(seg, env, x, frame)          — render at x, return advanced x
 //!   onClick(seg, offset, left, redraw)- action dispatch for recorded bounds
 //!
-//! Rendering is immediate-mode: bar.zig collects a fresh Frame of live state
-//! every draw and all segments repaint; there is no per-segment dirty-diff
-//! skip. Title/prompt keep their richer internal machinery behind the thin
-//! adapter in draw()'s `.title` arm; their complexity does not leak into the
-//! orchestrator. Width policy constants moved INTO their owning segments
+//! Rendering uses per-segment dirty tracking: only segments whose dirty bit
+//! is set get repainted on each frame. Title/prompt keep their richer
+//! internal machinery behind the thin adapter in draw()'s `.title` arm;
+//! their complexity does not leak into the orchestrator. Width policy
+//! constants moved INTO their owning segments
 //! (tags.fallback_width, layout.natural_width, title.min_width).
 
 const drawing = @import("drawing");
@@ -69,18 +69,8 @@ pub fn draw(
         .layout => return try layout_seg.draw(env.dc, env.config, env.height, x),
         .variants => return try variants.draw(env.dc, env.config, env.height, x),
         .clock => return try clock.draw(env.dc, env.config, env.height, x),
-        // Routed through bar.zig's title/prompt adapter instead of being a
-        // normal arm. Three contract violations keep it out, and threading
-        // them through every arm would tax all segments for one:
-        //   1. Width: the title takes the row's REMAINDER after the fixed
-        //      segments, not a naturalWidth — the uniform width rule cannot
-        //      express it.
-        //   2. Draw purity: title rendering needs the bar's mutable fetch
-        //      scratch (batched X11 replies, focused-title cache) plus
-        //      post-draw cache updates; Env is a value type shared by arms
-        //      that are otherwise pure draws.
-        //   3. Clicks: hit-testing goes through title.hitTest against that
-        //      same scratch, not segmod.onClick's offset arithmetic.
+        // Title is handled by bar.zig's adapter: it needs the bar's mutable
+        // scratch and doesn't fit the normal width/draw/click contracts.
         .title => unreachable,
     }
 }

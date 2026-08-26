@@ -149,7 +149,7 @@ const Fixture = struct {
             .rec = .{},
             .ctx = undefined,
         };
-        sync.init(testing.allocator);
+        sync.init();
         self.ctx = .{
             .sink = self.rec.sink(),
             .screen = screen,

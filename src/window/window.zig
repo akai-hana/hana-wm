@@ -7,6 +7,7 @@ const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
 const constants = @import("constants");
+const x11_masks = @import("x11_masks");
 const debug = @import("debug");
 const tracking = @import("tracking");
 const focus = @import("focus");
@@ -193,7 +194,7 @@ fn fireWMProtocolsQuery(
 /// Drains the WM_HINTS cookie and returns the ICCCM input flag. Returns true
 /// when absent, when the flag is unset, or when the field is explicitly True,
 /// matching ICCCM §4.1.2.4 defaults.
-inline fn extractWMHintsInput(
+fn extractWMHintsInput(
     conn: core.Connection,
     hints_cookie: xcb.xcb_get_property_cookie_t,
 ) bool {
@@ -267,18 +268,7 @@ pub fn supportsWMDeleteCached(conn: core.Connection, win: u32) bool {
     return getOrQueryCachedProps(conn, win).wm_delete;
 }
 
-/// Used by focus.zig to overlap the round-trip latency of the WM_TAKE_FOCUS
-/// check with local focus-transition bookkeeping.
-/// Returns null when the WM_PROTOCOLS atom is not yet interned.
-pub fn fireTakeFocusCookie(
-    conn: core.Connection,
-    win: u32,
-) ?xcb.xcb_get_property_cookie_t {
-    return fireWMProtocolsQuery(conn, win);
-}
-
-/// Called by both `sendWMTakeFocusWithCookie` (pre-fired cookie path) and
-/// `sendWMTakeFocus` (live round-trip path) to keep the send logic in one place.
+/// Called by `sendWMTakeFocus` (live round-trip path) to keep the send logic in one place.
 fn dispatchTakeFocusMessage(
     conn: core.Connection,
     win: u32,
@@ -316,8 +306,8 @@ fn sendTakeFocusEvent(
 
 /// Dispatches WM_TAKE_FOCUS from an already-known advertisement bit — the one
 /// returned by `getInputModelResolved` alongside the input model. Skips the
-/// WM_PROTOCOLS round trip entirely; used by focus.setFocus so a keyboard
-/// focus change costs one protocol query instead of two.
+/// WM_PROTOCOLS round trip entirely; used by the grab-wrapped focus path so a
+/// keyboard focus change costs one protocol query instead of two.
 pub fn sendWMTakeFocusKnown(
     conn: core.Connection,
     win: u32,
@@ -358,27 +348,13 @@ fn dispatchTakeFocus(
     dispatchTakeFocusMessage(conn, win, time, protocols_atom, take_focus_atom, u32Values(proto_reply)[0..@intCast(proto_reply.*.value_len)]);
 }
 
-/// The X server has been processing the property request since before
-/// commitFocusTransition ran its bookkeeping, so by the time this is called
-/// the reply is typically already in the XCB receive buffer.
-pub fn sendWMTakeFocusWithCookie(
-    conn: core.Connection,
-    win: u32,
-    time: u32,
-    cookie: xcb.xcb_get_property_cookie_t,
-) void {
-    dispatchTakeFocus(conn, win, time, cookie);
-}
-
 /// Sends a WM_TAKE_FOCUS client message (ICCCM §4.1.7) iff `win` advertises
 /// WM_TAKE_FOCUS in WM_PROTOCOLS. Checked live on every call, matching dwm's
 /// sendevent(), this one flag is never cached (see the "ICCCM focus property
 /// cache" note: Electron/GTK apps can set WM_PROTOCOLS before we subscribe to
 /// PropertyNotify, permanently staling a cached value).
 ///
-/// Hot paths (setFocus) use fireTakeFocusCookie / sendWMTakeFocusWithCookie to
-/// pipeline the round trip; this is the fallback for callers that don't
-/// pre-fire the cookie (drainPendingConfirm).
+/// Fallback for callers that don't pre-fire the cookie (drainPendingConfirm).
 pub fn sendWMTakeFocus(conn: core.Connection, win: u32, time: u32) void {
     dispatchTakeFocus(conn, win, time, null);
 }
@@ -387,7 +363,7 @@ pub fn sendWMTakeFocus(conn: core.Connection, win: u32, time: u32) void {
 
 /// See ICCCM §4.1.7: the matrix of (accepts_input x supports_take_focus)
 /// determines which focus delivery mechanism the WM must use.
-inline fn inputModelFrom(supports_take_focus: bool, accepts_input: bool) InputModel {
+fn inputModelFrom(supports_take_focus: bool, accepts_input: bool) InputModel {
     return if (supports_take_focus)
         (if (accepts_input) .locally_active else .globally_active)
     else
@@ -398,7 +374,7 @@ const WMProtocolsProps = struct { take_focus: bool = false, wm_delete: bool = fa
 
 /// Shared by queryWMProtocolsProps (live query) and populateFocusCacheFromCookies
 /// (cookie path).
-inline fn scanProtocolAtoms(protocol_atoms: []const u32, take_focus_atom: u32, wm_delete_atom: u32) WMProtocolsProps {
+fn scanProtocolAtoms(protocol_atoms: []const u32, take_focus_atom: u32, wm_delete_atom: u32) WMProtocolsProps {
     var props: WMProtocolsProps = .{};
     for (protocol_atoms) |atom| {
         if (atom == take_focus_atom) props.take_focus = true;
@@ -409,13 +385,13 @@ inline fn scanProtocolAtoms(protocol_atoms: []const u32, take_focus_atom: u32, w
 }
 
 /// Alignment-cast to the u32 value array of a format-32 get_property reply.
-inline fn u32Values(r: *xcb.xcb_get_property_reply_t) [*]const u32 {
+fn u32Values(r: *xcb.xcb_get_property_reply_t) [*]const u32 {
     return @ptrCast(@alignCast(xcb.xcb_get_property_value(r)));
 }
 
 /// Shared by queryWMProtocolsProps (live query) and populateFocusCacheFromCookies
 /// (cookie path); the caller owns `reply`'s memory.
-inline fn protocolPropsFromReply(
+fn protocolPropsFromReply(
     reply: *xcb.xcb_get_property_reply_t,
     take_focus_atom: u32,
     wm_delete_atom: u32,
@@ -697,23 +673,16 @@ fn findSpawnQueueWorkspace(
     return ws;
 }
 
-/// Queries are fire-then-drain, not pipelined (see handleMapRequest below for
-/// why), and WM_CLASS / _NET_WM_PID are only fired when actually needed, so
-/// there's nothing to discard on paths that skip them.
-fn resolveTargetWorkspace(win: u32, current_ws: core.WorkspaceId) core.WorkspaceId {
+/// Drains pre-fired WM_CLASS / _NET_WM_PID cookies to resolve the target
+/// workspace. Cookies are fired by the caller (handleMapRequest) together with
+/// the other three property queries so the X server can process all five in
+/// parallel; this function only drains the two workspace-resolution replies.
+fn resolveTargetWorkspace(
+    current_ws: core.WorkspaceId,
+    c_wm_class: ?xcb.xcb_get_property_cookie_t,
+    c_net_wm_pid: ?xcb.xcb_get_property_cookie_t,
+) core.WorkspaceId {
     const cs = core.getState();
-
-    // Pipeline: fire both property requests before draining either reply.
-    // The server processes them in parallel while we check conditions below.
-    var c_wm_class: ?xcb.xcb_get_property_cookie_t = null;
-    if (cs.config.workspaces.rules.items.len > 0 and utils.getAtomOrZero("WM_CLASS") != 0) {
-        c_wm_class = xcb.xcb_get_property(cs.conn, property_no_delete, win, utils.getAtomOrZero("WM_CLASS"), xcb.XCB_ATOM_STRING, 0, constants.property_max_length);
-    }
-
-    var c_net_wm_pid: ?xcb.xcb_get_property_cookie_t = null;
-    if (state.?.spawn_queue.items.len > 0) {
-        c_net_wm_pid = xcb.xcb_get_property(cs.conn, property_no_delete, win, utils.getAtomOrZero("_NET_WM_PID"), xcb.XCB_ATOM_CARDINAL, 0, 1);
-    }
 
     // Drain replies: WM_CLASS first, then _NET_WM_PID.
     if (c_wm_class) |cookie| {
@@ -744,16 +713,14 @@ pub fn registerSpawn(workspace: core.WorkspaceId, pid: u32) void {
     };
 }
 
-/// Handles a MapRequest by querying the properties it needs one at a time:
-/// fire the request, then immediately drain the reply, rather than batching
-/// every cookie up front the way a hot path (dragging, retiling) would.
-/// MapRequest happens once per window creation, so the extra round trips
-/// aren't perceptible, and querying only once the window is confirmed to
-/// belong on some workspace means there's nothing to discard on the
-/// early-return error path below.
+/// Handles a MapRequest by firing ALL property query cookies up-front, then
+/// draining replies sequentially. Firing all five cookies before draining any
+/// lets the X server process them in parallel, saving 2-3 blocking round trips
+/// compared to the previous fire-then-drain-per-property approach.
 pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const win = event.window;
     const conn = core.getState().conn;
+    const cs = core.getState();
 
     // Double-manage guard: a window can send multiple MapRequest events (e.g.
     // an unmap+remap race while the first is still processing); without it,
@@ -768,13 +735,25 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
         conn,
         win,
         xcb.XCB_CW_EVENT_MASK,
-        &[_]u32{constants.EventMasks.managed_window},
+        &[_]u32{x11_masks.EventMasks.managed_window},
     );
 
-    const target_ws = resolveTargetWorkspace(win, current_ws);
-    const on_current = target_ws.eql(current_ws);
+    // ── Fire ALL property cookies before draining any reply ──────────
+    // The server processes all five requests in parallel while we do pure
+    // local bookkeeping below.
 
-    // Same pipelined property queries the legacy tail ran.
+    // Workspace resolution cookies (conditional).
+    var c_wm_class: ?xcb.xcb_get_property_cookie_t = null;
+    if (cs.config.workspaces.rules.items.len > 0 and utils.getAtomOrZero("WM_CLASS") != 0) {
+        c_wm_class = xcb.xcb_get_property(conn, property_no_delete, win, utils.getAtomOrZero("WM_CLASS"), xcb.XCB_ATOM_STRING, 0, constants.property_max_length);
+    }
+
+    var c_net_wm_pid: ?xcb.xcb_get_property_cookie_t = null;
+    if (state.?.spawn_queue.items.len > 0) {
+        c_net_wm_pid = xcb.xcb_get_property(conn, property_no_delete, win, utils.getAtomOrZero("_NET_WM_PID"), xcb.XCB_ATOM_CARDINAL, 0, 1);
+    }
+
+    // Property cookies (always fired).
     const normal_hints_cookie = xcb.xcb_get_property(
         conn,
         property_no_delete,
@@ -795,8 +774,22 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
         0,
         wm_hints_long_length,
     );
+
+    // ── Drain replies sequentially ───────────────────────────────────
+    const target_ws = resolveTargetWorkspace(current_ws, c_wm_class, c_net_wm_pid);
+    const on_current = target_ws.eql(current_ws);
+
     parseSizeHintsIntoCache(win, normal_hints_cookie);
     populateFocusCacheFromCookies(conn, win, protocols_cookie, hints_cookie);
+
+    // Proactively cache the child → parent mapping so findManagedWindow
+    // can skip the X11 tree walk for this window's sub-windows.  The
+    // parent is known from the MapRequest event; if it is a managed
+    // toplevel, future EnterNotify/ButtonNotify events on children of
+    // this window resolve in O(1) instead of O(depth) blocking round
+    // trips.
+    cacheChildWindow(event.window, event.parent);
+
     actions.mapRequest(win, target_ws.index, on_current);
 }
 
@@ -947,7 +940,7 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
     if (build_options.has_floating and floating.isResizingWindow(win)) {
         const last = floating.getDragLastRect();
         if (last.width != 0) {
-            sendConfigureNotify(win, .{ .x = last.x, .y = last.y, .width = last.width, .height = last.height, .border_width = getBorderWidth() });
+            sendConfigureNotify(win, .{ .x = last.x, .y = last.y, .width = last.width, .height = last.height, .border_width = borders.width() });
         } else {
             // No motion event yet in this drag, get_geometry round-trip so we
             // echo an accurate current size.
@@ -1045,12 +1038,12 @@ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
 /// Attempt to focus `win` via the hover (EnterNotify) path.
 ///
 /// Guards against workspace membership and minimize state before calling
-/// focus.setFocus(.mouse_enter). The .mouse_enter reason is the direct
+/// focus.grabFocus(.mouse_enter). The .mouse_enter reason is the direct
 /// EnterNotify path: lightweight, no raise, no confirm.
 inline fn maybeFocusWindow(win: u32) void {
     if (!isOnCurrentWorkspace(win) or minimize.isMinimized(win)) return;
     debug.info("[MAYBE_FOCUS] 0x{x}", .{win});
-    focus.setFocus(win, .mouse_enter);
+    focus.grabFocus(win, .mouse_enter);
 }
 
 pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t) void {
@@ -1122,7 +1115,7 @@ inline fn clampToU16(v: u32) u16 {
 // share the same 2-field pattern.
 const SizePair = struct { width: u16, height: u16 };
 
-inline fn extractFieldPair(fields: [*]const u32, field_count: u32, want: bool, comptime off: usize) SizePair {
+fn extractFieldPair(fields: [*]const u32, field_count: u32, want: bool, comptime off: usize) SizePair {
     if (want and field_count >= off + 2) return .{ .width = clampToU16(fields[off]), .height = clampToU16(fields[off + 1]) };
     return .{ .width = 0, .height = 0 };
 }
@@ -1203,14 +1196,6 @@ fn parseSizeHintsIntoCache(
     if (pipeline.initialized) {
         if (pipeline.model().store.getPtr(win)) |e| e.size_hints = hints;
     }
-}
-
-pub inline fn getBorderWidth() u16 {
-    return borders.width();
-}
-
-pub fn applyBorder(win: u32) void {
-    borders.apply(core.getState().conn, win);
 }
 
 /// Refresh border colors for all windows on the current workspace. Shared
@@ -1321,5 +1306,5 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
 
 /// Called on config reload.
 pub fn reloadBorders() void {
-    for (tracking.allWindows()) |entry| applyBorder(entry.win);
+    for (tracking.allWindows()) |entry| borders.apply(core.getState().conn, entry.win);
 }

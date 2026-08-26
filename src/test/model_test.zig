@@ -97,7 +97,7 @@ fn assertSingleMembership(m: *const Model) !void {
         if (!tiled) continue;
         var homes: usize = 0;
         for (&m.ws) |*s| {
-            if (model.findInOrder(&s.tiled_order, it.key) != null) homes += 1;
+            if (s.tiled_order.indexOfScalar(it.key) != null) homes += 1;
         }
         try testing.expectEqual(@as(usize, 1), homes);
     }
@@ -204,7 +204,7 @@ test "T05: minimize/restore floating preserves rect" {
     try testing.expect(back.mode.base == .floating);
     try testing.expect(r.eql(back.mode.base.floating));
     // Floating-prev restore must NOT join any tiled_order.
-    for (&m.ws) |*s| try testing.expect(model.findInOrder(&s.tiled_order, 7) == null);
+    for (&m.ws) |*s| try testing.expect(s.tiled_order.indexOfScalar(7) == null);
 }
 
 // T06: toggleFullscreen round trips; minimize-from-fullscreen preserved.
@@ -518,9 +518,8 @@ test "T15: focus MRU ordering and cap" {
     try testing.expectEqual(@as(?WindowId, wins[10]), m.focused);
 }
 
-// T16: store remove-swap keeps iteration deterministic (+ single-membership).
-// Swap-remove semantics: the tail element inherits the freed slot, so it
-// takes over the removed element's position in the iteration sequence.
+// T16: store iteration stays deterministic across removals.
+// Sorted-key store: removals shift elements left, iteration stays sorted.
 test "T16: store iteration stays deterministic across removals" {
     var m = makeModel();
     defer deinitModel(&m);
@@ -530,11 +529,11 @@ test "T16: store iteration stays deterministic across removals" {
         try testing.expectEqual(w, m.store.at(i).key);
     }
     try testing.expect(m.store.remove(2));
-    inline for (.{ @as(WindowId, 1), @as(WindowId, 4), @as(WindowId, 3) }, 0..) |w, i| {
+    inline for (.{ @as(WindowId, 1), @as(WindowId, 3), @as(WindowId, 4) }, 0..) |w, i| {
         try testing.expectEqual(w, m.store.at(i).key);
     }
     _ = m.store.put(5, .{ .mask = model.bit(0), .mode = .{ .base = .tiled } }) catch unreachable;
-    inline for (.{ @as(WindowId, 1), @as(WindowId, 4), @as(WindowId, 3), @as(WindowId, 5) }, 0..) |w, i| {
+    inline for (.{ @as(WindowId, 1), @as(WindowId, 3), @as(WindowId, 4), @as(WindowId, 5) }, 0..) |w, i| {
         try testing.expectEqual(w, m.store.at(i).key);
     }
     try testing.expect(m.store.remove(1)); // head
@@ -732,7 +731,7 @@ test "T33b: floating-base fullscreen minimize/restore never joins a list" {
     const e = m.store.get(6).?;
     try testing.expect(e.mode == .fullscreen);
     try testing.expect(r.eql(e.mode.fullscreen.base.floating));
-    for (&m.ws) |*s| try testing.expect(model.findInOrder(&s.tiled_order, 6) == null);
+    for (&m.ws) |*s| try testing.expect(s.tiled_order.indexOfScalar(6) == null);
 }
 
 // T34 (user bug report): minimizing one of two windows must fall back to the

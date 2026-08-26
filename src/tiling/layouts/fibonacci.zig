@@ -5,9 +5,6 @@ const utils = @import("utils");
 const model = @import("model");
 const engine = @import("engine");
 
-const View = engine.View;
-const List = engine.List;
-
 // Counter-clockwise spiral direction for the next window split.
 const SpiralDirection = enum(u2) {
     right, // Split vertically:   window on left,   remainder on right.
@@ -20,8 +17,11 @@ const SpiralDirection = enum(u2) {
     }
 };
 
-/// Tile `windows` into a Fibonacci spiral using the given work area.
-pub fn compute(v: View, out: *List) void {
+/// Compute Fibonacci spiral layout. Origin top-left, y-down. Outer gap
+/// stripped first; each split halves the remaining dimension with one gap
+/// at the seam. Spiral direction cycles right→down→left→up. Dimensions are
+/// u16, integer-halved; border subtracted at placement time.
+pub fn compute(v: engine.View, out: *engine.List) void {
     const m = v.env.margins;
     const border2 = utils.doubledBorder(m);
 
@@ -89,8 +89,8 @@ const Cursor = struct {
 };
 
 inline fn splitAndAdvance(
-    v: *const View,
-    out: *List,
+    v: *const engine.View,
+    out: *engine.List,
     win: model.WindowId,
     dir: SpiralDirection,
     border2: u16,

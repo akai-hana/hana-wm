@@ -31,6 +31,12 @@ pub const WindowData = struct {
 
 pub const CacheMap = std.AutoHashMap(u32, WindowData);
 
+/// Hard upper bound on cached windows.  A normal desktop never exceeds a
+/// few dozen managed windows; 512 is a generous ceiling that prevents
+/// unbounded heap growth from a runaway client without impacting
+/// legitimate use.
+const max_entries = 512;
+
 // Module-level singleton
 
 // Null before init(), non-null for the rest of the process lifetime.
@@ -59,9 +65,13 @@ pub fn deinit() void {
 }
 
 /// Centralizes the get-or-put-with-default pattern for writers that don't
-/// distinguish "existing" from "new".
+/// distinguish "existing" from "new".  Returns `error.CacheFull` when the
+/// cache has reached `max_entries`, which callers treat like OOM (skip the
+/// update gracefully).
 fn getOrPutDefault(win: u32) !*WindowData {
-    const gop = try live().getOrPut(win);
+    const c = live();
+    if (c.count() >= max_entries) return error.CacheFull;
+    const gop = try c.getOrPut(win);
     if (!gop.found_existing) gop.value_ptr.* = .{};
     return gop.value_ptr;
 }

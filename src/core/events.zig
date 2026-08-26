@@ -7,6 +7,7 @@ const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
 const constants = @import("constants");
+const x11_masks = @import("x11_masks");
 
 const debug = @import("debug");
 const config = @import("config");
@@ -147,7 +148,7 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
     // memory-safety bug; cheap insurance.
     if (idx >= dispatch_table.len) return;
     if (dispatch_table[idx]) |handler| handler(event);
-    pipeline.postDispatch(); // PIPELINE:
+
 }
 
 const CookieEntry = struct { cookie: xcb.xcb_void_cookie_t, keycode: u8 };
@@ -160,12 +161,12 @@ fn fillGrabCookies(cookies: []CookieEntry) usize {
 
         // Check once per keybinding that the full lock-modifier set fits.
         // Avoids a per-lock branch and prevents partial grabs if the buffer is nearly full.
-        if (n + constants.lock_modifiers.len > cookies.len) {
+        if (n + x11_masks.lock_modifiers.len > cookies.len) {
             debug.warn("Too many keybindings. Increase max_keybind_cookies (currently {})", .{constants.Limits.max_keybind_cookies});
             break;
         }
 
-        for (constants.lock_modifiers) |lock| {
+        for (x11_masks.lock_modifiers) |lock| {
             cookies[n] = .{
                 .cookie = xcb.xcb_grab_key_checked(
                     cs.conn,

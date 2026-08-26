@@ -99,7 +99,7 @@ pub const XkbState = struct {
 /// keymap's level-0 entry directly. A lock-sensitive resolve (xkb_state's
 /// `get_one_sym`) would apply current locks: a CapsLock held at startup
 /// would pin the table to shifted symbols and break lowercase bindings.
-inline fn baseSymbol(km: *xkb_keymap, kc: u8) u32 {
+fn baseSymbol(km: *xkb_keymap, kc: u8) u32 {
     var syms: [*c]const u32 = null;
     const n = xkb.xkb_keymap_key_get_syms_by_level(km, @intCast(kc), 0, 0, &syms);
     if (n > 0 and syms != null) return syms[0];
@@ -131,7 +131,7 @@ const xkb_retry_delay_ms = constants.xkb_retry_delay_ms;
 /// directly; std.time.sleep is absent in this Zig build. Resumes on EINTR
 /// (the WM's SIGCHLD handler can interrupt the sleep) so a signal doesn't
 /// shorten the delay.
-inline fn retryDelay(attempt: u8) void {
+fn retryDelay(attempt: u8) void {
     if (attempt >= max_attempts - 1) return;
     const ns = xkb_retry_delay_ms * std.time.ns_per_ms;
     var req = std.os.linux.timespec{ .sec = @intCast(ns / std.time.ns_per_s), .nsec = @intCast(ns % std.time.ns_per_s) };

@@ -111,17 +111,9 @@ fn focusFallback(m: *model_mod.Model) focus.FocusTransition {
 pub fn restore(win: model_mod.WindowId) void {
     const m = pipeline.model();
     if (!isMinimizedOnAnyWs(m, win)) return;
-    // A pre-existing fullscreen occupant means sync will park the restored
-    // window's fullscreen record anyway; only an unoccupied slot may defer
-    // a bar hide (win itself is minimized here, so any occupant is "other").
     const had_occupant_before = model_mod.fullscreenOccupantOnWs(m, m.current) != null;
     model_mod.restore(m, win);
-    model_mod.setFocus(m, win);
-    const ft = focus.prepareFocus(win, .window_spawn);
-    pipeline.reconcileUnderGrabNowWithFocus(.{ .force_restack = true }, ft);
-    // Straight-back-into-fullscreen: defer the bar hide to the window's
-    // ConfigureNotify confirmation — exactly like an enter-fullscreen toggle
-    // (arming the hide also clears leftover pending-show state).
+    restoreAndFocus(m, win);
     if (build_options.has_bar and !had_occupant_before and
         model_mod.isFullscreenOnWs(pipeline.model(), win, pipeline.model().current))
     {
@@ -135,9 +127,7 @@ pub fn restoreOrdered(order: model_mod.RestoreOrder) void {
     const win = model_mod.restoreCandidate(m, m.current, order) orelse return;
     const had_occupant_before = model_mod.fullscreenOccupantOnWs(m, m.current) != null;
     model_mod.restore(m, win);
-    model_mod.setFocus(m, win);
-    const ft = focus.prepareFocus(win, .window_spawn);
-    pipeline.reconcileUnderGrabNowWithFocus(.{ .force_restack = true }, ft);
+    restoreAndFocus(m, win);
     if (build_options.has_bar and !had_occupant_before and
         model_mod.isFullscreenOnWs(pipeline.model(), win, pipeline.model().current))
     {
@@ -155,9 +145,7 @@ pub fn restoreAll() void {
     const target = model_mod.latestMinimizedBase(m, ws) orelse return;
     const had_occupant_before = model_mod.fullscreenOccupantOnWs(m, ws) != null;
     model_mod.restoreAllOnWs(m, ws);
-    model_mod.setFocus(m, target);
-    const ft = focus.prepareFocus(target, .window_spawn);
-    pipeline.reconcileUnderGrabNowWithFocus(.{ .force_restack = true }, ft);
+    restoreAndFocus(m, target);
     if (build_options.has_bar and !had_occupant_before) {
         if (model_mod.fullscreenOccupantOnWs(m, ws)) |occ| @import("fullscreen").armPendingBarHide(occ);
     }
@@ -166,6 +154,12 @@ pub fn restoreAll() void {
 fn isMinimizedOnAnyWs(m: *const model_mod.Model, win: model_mod.WindowId) bool {
     const e = m.store.get(win) orelse return false;
     return e.mode == .minimized;
+}
+
+fn restoreAndFocus(m: *model_mod.Model, win: model_mod.WindowId) void {
+    model_mod.setFocus(m, win);
+    const ft = focus.prepareFocus(win, .window_spawn);
+    pipeline.reconcileUnderGrabNowWithFocus(.{ .force_restack = true }, ft);
 }
 
 // -------------------------------------------------------------- fullscreen
@@ -189,17 +183,7 @@ fn isMinimizedOnAnyWs(m: *const model_mod.Model, win: model_mod.WindowId) bool {
 /// Retained as a one-line model delegation: protocol-side callers outside
 /// this layer's scope (borders.color, floating drag guards) hold no model
 /// handle of their own and ask through here.
-pub fn isFullscreenMode(win: model_mod.WindowId) bool {
-    return model_mod.isFullscreenMode(pipeline.model(), win);
-}
-
-/// Whether any window occupies the fullscreen slot on `ws` (model truth;
-/// replaces the deleted legacy fullscreen.zig record store for bar
-/// visibility decisions). Retained for the bar's out-of-layer callers.
-pub fn fullscreenOccupiedOnWs(ws: model_mod.WSId) bool {
-    return model_mod.fullscreenOccupantOnWs(pipeline.model(), ws) != null;
-}
-
+///
 /// Fullscreen transition for an ARBITRARY window (EWMH _NET_WM_STATE path,
 /// title-bar clicks). The keybind path resolves the focused window at the
 /// dispatch site and lands here too.
@@ -432,7 +416,7 @@ pub fn moveFocused(delta: i32) void {
     const m = pipeline.model();
     const win = m.focused orelse return;
     const h = model_mod.findHome(m, win) orelse return;
-    const idx = model_mod.findInOrder(&m.ws[h].tiled_order, win) orelse return;
+    const idx = m.ws[h].tiled_order.indexOfScalar(win) orelse return;
     const next_i = @as(i64, @intCast(idx)) + delta;
     if (next_i < 0 or next_i >= m.ws[h].tiled_order.len) return;
     model_mod.reorderTiled(m, win, @intCast(next_i));
@@ -442,26 +426,20 @@ pub fn moveFocused(delta: i32) void {
 /// scroll_view_left/right: one slot per step, clamped to content. The spawn
 /// snap-right duty lives in preReconcileDuties (pipeline choke point).
 pub fn scrollStep(dir: i32) void {
-    const algo_scroll = @import("scroll");
     const m = pipeline.model();
     const p = &m.ws[m.current].params;
     if (p.kind != .scroll) return;
     if (!build_options.has_bar) return;
-    const n = tiledCountOnCurrent(m);
-    const wa = @import("bar").workAreaRect();
-    const slot_w = algo_scroll.slotWidth(wa.width);
-    const max_off = algo_scroll.maxOffset(n, slot_w, wa.width);
-    p.scroll_offset += dir * slot_w;
-    p.scroll_offset = std.math.clamp(p.scroll_offset, 0, max_off);
-    p.scroll_prev_count = @intCast(n);
+    const sc = scrollContext(m);
+    p.scroll_offset += dir * sc.slot_w;
+    p.scroll_offset = std.math.clamp(p.scroll_offset, 0, sc.max_off);
+    p.scroll_prev_count = @intCast(sc.tiled_count);
     pipeline.reconcileUnderGrabNow(.{});
 }
 
 /// Focus-change scroll snap (port of tiling.snapScrollToFocused): shift
 /// the viewport minimally so the focused window's slot is fully on-screen.
 pub fn snapScrollToFocused() void {
-    const algo_scroll = @import("scroll");
-
     const m = pipeline.model();
     const p = &m.ws[m.current].params;
     if (p.kind != .scroll) return;
@@ -478,17 +456,16 @@ pub fn snapScrollToFocused() void {
     }
     const i = idx orelse return;
 
+    const sc = scrollContext(m);
     const wa = @import("bar").workAreaRect();
-    const slot_w = algo_scroll.slotWidth(wa.width);
-    const max_off = algo_scroll.maxOffset(n, slot_w, wa.width);
-    const i64_slot_w: i64 = slot_w;
+    const i64_slot_w: i64 = sc.slot_w;
     const slot_left = @as(i64, @intCast(i)) * i64_slot_w - p.scroll_offset;
     const slot_right = slot_left + i64_slot_w;
     if (slot_left < 0)
         p.scroll_offset = @intCast(@as(i64, @intCast(i)) * i64_slot_w)
     else if (slot_right > wa.width)
         p.scroll_offset = @intCast(@as(i64, @intCast(i)) * i64_slot_w + i64_slot_w - @as(i64, wa.width));
-    p.scroll_offset = std.math.clamp(p.scroll_offset, 0, max_off);
+    p.scroll_offset = std.math.clamp(p.scroll_offset, 0, sc.max_off);
     p.scroll_prev_count = @intCast(n);
     pipeline.reconcileUnderGrabNow(.{});
 }
@@ -501,6 +478,21 @@ fn tiledCountOnCurrent(m: *const model_mod.Model) usize {
         n += 1;
     }
     return n;
+}
+
+const ScrollContext = struct {
+    tiled_count: usize,
+    slot_w: i32,
+    max_off: i32,
+};
+
+fn scrollContext(m: *const model_mod.Model) ScrollContext {
+    const algo_scroll = @import("scroll");
+    const n = tiledCountOnCurrent(m);
+    const wa = @import("bar").workAreaRect();
+    const slot_w = algo_scroll.slotWidth(wa.width);
+    const max_off = algo_scroll.maxOffset(n, slot_w, wa.width);
+    return .{ .tiled_count = n, .slot_w = slot_w, .max_off = max_off };
 }
 
 // ------------------------------------------------- config reload (train g)

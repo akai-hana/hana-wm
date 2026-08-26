@@ -38,29 +38,46 @@ pub const Value = union(enum) {
             else => self,
         };
     }
-    pub fn asInt(self: Value) ?i64 {
-        return switch (self.lastScalar() orelse return null) {
-            .integer => |i| i,
-            else => null,
+    // Generic scalar accessor: dispatches to the matching variant tag via
+    // comptime. Handles `asScalable`'s integer-widening as a comptime branch.
+    pub fn asScalar(self: Value, comptime T: type) ?T {
+        const scalar = self.lastScalar() orelse return null;
+        return switch (T) {
+            i64 => switch (scalar) {
+                .integer => |i| i,
+                else => null,
+            },
+            bool => switch (scalar) {
+                .boolean => |b| b,
+                else => null,
+            },
+            []const u8 => switch (scalar) {
+                .string => |s| s,
+                else => null,
+            },
+            u32 => switch (scalar) {
+                .color => |c| c,
+                else => null,
+            },
+            ScalableValue => switch (scalar) {
+                .scalable => |s| s,
+                .integer => |i| ScalableValue.absolute(@floatFromInt(i)),
+                else => null,
+            },
+            else => @compileError("asScalar: unsupported type " ++ @typeName(T)),
         };
+    }
+    pub fn asInt(self: Value) ?i64 {
+        return self.asScalar(i64);
     }
     pub fn asBool(self: Value) ?bool {
-        return switch (self.lastScalar() orelse return null) {
-            .boolean => |b| b,
-            else => null,
-        };
+        return self.asScalar(bool);
     }
     pub fn asString(self: Value) ?[]const u8 {
-        return switch (self.lastScalar() orelse return null) {
-            .string => |s| s,
-            else => null,
-        };
+        return self.asScalar([]const u8);
     }
     pub fn asColor(self: Value) ?u32 {
-        return switch (self.lastScalar() orelse return null) {
-            .color => |c| c,
-            else => null,
-        };
+        return self.asScalar(u32);
     }
     pub inline fn asArray(self: Value) ?[]const Value {
         return switch (self) {
@@ -68,16 +85,8 @@ pub const Value = union(enum) {
             else => null,
         };
     }
-    // Both whole-number and decimal absolutes arrive here as `.scalable`
-    // (parseValue converts any bare literal containing a `.` too, not just
-    // `%`-suffixed ones). `.integer` is retained for callers needing a true
-    // integer (workspace/master counts) and widened losslessly here.
     pub fn asScalable(self: Value) ?ScalableValue {
-        return switch (self.lastScalar() orelse return null) {
-            .scalable => |s| s,
-            .integer => |i| ScalableValue.absolute(@floatFromInt(i)),
-            else => null,
-        };
+        return self.asScalar(ScalableValue);
     }
 
     pub fn deinit(self: *Value, allocator: std.mem.Allocator) void {
@@ -598,18 +607,12 @@ const Parser = struct {
         // default for lacking a '%'. Whole numbers stay integers so
         // asInt()/asBool() consumers are unaffected.
         if (looksLikeDecimal(raw)) {
-            const f = std.fmt.parseFloat(f32, raw) catch unreachable;
+            const f = std.fmt.parseFloat(f32, raw) catch return ParseError.InvalidValue;
             if (std.math.isFinite(f)) return .{ .scalable = ScalableValue.absolute(f) };
         }
 
-        // Bare colors require an explicit '#' or '0x' prefix: the old
-        // hex-only sniffing parsed all-a-f identifiers ("dead", "cafe") as
-        // `.color` instead of `.string`, breaking asString()/action_map
-        // lookups for layout/variant/segment names. A leading '#' marks the
-        // token as a color, not a comment; if it does not form a valid color
-        // the line is invalid: the same outcome as a bare '#' after '='
-        // always produced before. An invalid `0x...` instead falls through
-        // to the string fallback below.
+        // Colors require '#' or '0x' prefix: bare all-hex identifiers
+        // (e.g. "dead", "cafe") must parse as strings, not colors.
         if (hexPrefixLen(raw) != null) {
             if (parseColor(raw)) |color| return .{ .color = color } else |_| {}
             if (raw[0] == '#') return ParseError.InvalidValue;
