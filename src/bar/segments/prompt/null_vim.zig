@@ -115,8 +115,12 @@ pub fn handleInsertBasic(vs: *VimState, sym: xcb.xcb_keysym_t) Action {
                 vs.len -= 1;
             }
         },
-        xk_left => if (vs.cursor > 0) vs.cursor -= 1,
-        xk_right => if (vs.cursor < vs.len) vs.cursor += 1,
+        xk_left => {
+            if (vs.cursor > 0) vs.cursor -= 1;
+        },
+        xk_right => {
+            if (vs.cursor < vs.len) vs.cursor += 1;
+        },
         xk_home => vs.cursor = 0,
         xk_end => vs.cursor = vs.len,
         else => if (sym >= 0x20 and sym <= 0x7e) {

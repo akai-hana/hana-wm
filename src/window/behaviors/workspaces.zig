@@ -110,6 +110,7 @@ pub fn deinit() void {
 }
 
 /// Clears per-workspace bookkeeping hooks for a window being unmanaged.
+/// Facade kept for module boundary; inlined would be equivalent.
 pub fn removeWindow(win: u32) void {
     tracking.removeWindow(win);
 }

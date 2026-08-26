@@ -15,7 +15,7 @@ const input = @import("input");
 const window = @import("window");
 const focus = @import("focus");
 
-const fullscreen = @import("fullscreen");
+const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else null;
 const refresh_rate = @import("refresh_rate");
 const signals = @import("signals");
 const pipeline = @import("pipeline");
@@ -69,7 +69,7 @@ fn handlePropertyNotify(event: *anyopaque) void {
 // Routes ConfigureNotify to the fullscreen deferred-bar-hide/show logic.
 fn handleConfigureNotify(event: *anyopaque) void {
     const e = eventCast(*xcb.xcb_configure_notify_event_t, event);
-    fullscreen.notifyConfigureIfPending(e.window, e.width, e.height);
+    if (build_options.has_fullscreen) fullscreen.notifyConfigureIfPending(e.window, e.width, e.height);
 }
 
 // Notifies fullscreen of the destroyed window before delegating to window.zig.
@@ -77,7 +77,7 @@ fn handleConfigureNotify(event: *anyopaque) void {
 // and is then destroyed before it can send a ConfigureNotify.
 fn handleDestroyNotify(event: *anyopaque) void {
     const e = eventCast(*xcb.xcb_destroy_notify_event_t, event);
-    fullscreen.onWindowGone(e.window);
+    if (build_options.has_fullscreen) fullscreen.onWindowGone(e.window);
     window.handleDestroyNotify(e);
 }
 
@@ -148,7 +148,6 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
     // memory-safety bug; cheap insurance.
     if (idx >= dispatch_table.len) return;
     if (dispatch_table[idx]) |handler| handler(event);
-
 }
 
 const CookieEntry = struct { cookie: xcb.xcb_void_cookie_t, keycode: u8 };

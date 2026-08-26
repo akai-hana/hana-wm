@@ -212,7 +212,7 @@ pub const Reason = enum {
     workspace_switch,
 };
 
-    // CommitFlags: controls which side effects applyPendingFocus applies.
+// CommitFlags: controls which side effects applyPendingFocus applies.
 // All fields are non-defaulted so every call site must be explicit; an
 // accidental zero-flags call fails to compile, preventing silent
 // no-protocol transitions that are hard to debug.
@@ -428,8 +428,10 @@ pub fn drainPendingConfirm() void {
 
     if (!window.isValidManagedWindow(win)) return;
 
-    // Live take_focus check, same as setFocus above; see getInputModel's
-    // doc comment in window.zig.
+    // Live re-query of input model: the take_focus state may have changed
+    // since prepareFocus/applyPendingFocus resolved it (the client could
+    // modify WM_PROTOCOLS between our first query and now), so we must
+    // re-query rather than reuse the CommitFlags snapshot.
     const input_model = window.getInputModel(conn, win);
     if (input_model == .no_input) return;
 

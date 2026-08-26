@@ -109,7 +109,7 @@ pub const WsState = struct {
     params: LayoutParams = .{},
 };
 
-pub const store_capacity = 512;
+pub const store_capacity = 128;
 pub const mru_capacity = 16;
 /// Bounded per-workspace tiled membership list (defined capacity,
 /// total operations — transitions never allocate, so no OOM rollback paths).
@@ -166,6 +166,7 @@ pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) error{CapacityFull}!vo
         .mask = bit(target),
         .mode = .{ .base = .tiled },
     }) catch return error.CapacityFull;
+    // Defensive: BoundedList.append returns bool, catch path is for future allocator-backed lists
     if (!m.ws[target].tiled_order.append(win)) {
         _ = m.store.remove(win);
         return error.CapacityFull;
@@ -618,23 +619,13 @@ pub fn fallbackFocusCandidate(m: *const Model, ws: WSId) ?WindowId {
         if (visibleOn(m, cand, ws)) return cand;
     }
     // 3. any floating window on ws (base mode, not in tiled_order).
-    // Build a sorted buffer of tiled IDs for O(log m) membership checks.
-    var tiled_buf: [max_tiled_per_ws]WindowId = undefined;
-    var tiled_len: usize = 0;
-    for (order.items[0..order.len]) |id| {
-        tiled_buf[tiled_len] = id;
-        tiled_len += 1;
-    }
-    std.mem.sort(WindowId, tiled_buf[0..tiled_len], {}, std.sort.asc(WindowId));
+    // Linear membership check per floating entry against tiled_order;
+    // adequate for <50 windows.
     for (0..m.store.count()) |k| {
         const it = m.store.at(k);
         if (it.val.mode != .base) continue;
         if (!visibleOn(m, it.key, ws)) continue;
-        if (std.sort.binarySearch(WindowId, tiled_buf[0..tiled_len], it.key, struct {
-            fn cmp(target: WindowId, id: WindowId) std.math.Order {
-                return std.math.order(target, id);
-            }
-        }.cmp) == null) return it.key;
+        if (order.indexOfScalar(it.key) == null) return it.key;
     }
     return null;
 }

@@ -521,6 +521,9 @@ pub const BarConfig = struct {
 
     transparency: f32 = 1.0,
 
+    // NOTE(I-4): indicator_focused/unfocused are always independently owned
+    // (each set via schema.assignStr which always dupes). If one mirrors
+    // the other, both point to separate allocations. Do not bypass assignStr.
     pub fn deinit(self: *BarConfig, allocator: std.mem.Allocator) void {
         freeStrings(&self.workspace_icons, allocator, false);
         freeStrings(&self.fonts, allocator, false);

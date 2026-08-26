@@ -2,6 +2,7 @@
 const std = @import("std");
 const utils = @import("utils");
 const model = @import("model");
+const build_options = @import("build_options");
 
 pub const hints = @import("hints");
 const applyHints = hints.applyHints;
@@ -82,13 +83,19 @@ pub inline fn shrinkClamped(dim: u16, margin: u16, min_dim: u16) u16 {
     return if (dim > margin) dim - margin else min_dim;
 }
 
+/// Clamp a signed y coordinate to a non-negative u16 (legacy y_offset
+/// threading: every layout positions windows relative to screen top).
+inline fn clampYToU16(y: i32) u16 {
+    return @intCast(@max(y, 0));
+}
+
 /// Work-area rect inset by the outer gap (verbatim port of layouts.outerArea).
 /// x/y are i32 (some tiling layouts thread i32 coords through their recursion),
 /// w/h u16.
 pub inline fn outerArea(wa: utils.Rect, gap: u16) struct { x: i32, y: i32, w: u16, h: u16 } {
     return .{
         .x = @intCast(gap),
-        .y = @intCast(@as(u16, @intCast(@max(wa.y, 0))) +| gap),
+        .y = clampYToU16(wa.y) +| gap,
         .w = wa.width -| gap *| 2,
         .h = wa.height -| gap *| 2,
     };
@@ -97,32 +104,38 @@ pub inline fn outerArea(wa: utils.Rect, gap: u16) struct { x: i32, y: i32, w: u1
 /// Work-area origin y clamped to >= 0, as u16 (legacy `y_offset` threading:
 /// every layout positioned windows relative to the screen top, not the root).
 pub inline fn waY(v: *const View) u16 {
-    return @intCast(@max(v.workarea.y, 0));
+    return clampYToU16(v.workarea.y);
 }
 
 /// Emit a placement with the window's size hints applied to `rect`.
 inline fn emit(v: *const View, out: *List, win: model.WindowId, rect: utils.Rect, visible: bool) void {
-    _ = out.append(.{
+    const ok = out.append(.{
         .win = win,
         .rect = if (visible) applyHints(rect, v.hints.forWin(win)) else parked_rect,
         .visible = visible,
     });
+    if (std.debug.runtime_safety) {
+        std.debug.assert(ok);
+    }
 }
 
 /// Emit a parked placement (≙ pushWindowOffscreenAndInvalidate transform).
 inline fn emitParked(out: *List, win: model.WindowId) void {
-    _ = out.append(.{ .win = win, .rect = parked_rect, .visible = false });
+    const ok = out.append(.{ .win = win, .rect = parked_rect, .visible = false });
+    if (std.debug.runtime_safety) {
+        std.debug.assert(ok);
+    }
 }
 
 pub fn compute(kind: model.LayoutKind, v: View, out: *List) void {
     out.clear();
     switch (kind) {
-        .master => @import("master").compute(v, out),
-        .monocle => @import("monocle").compute(v, out),
-        .fibonacci => @import("fibonacci").compute(v, out),
-        .grid => @import("grid").compute(v, out),
-        .leaf => @import("leaf").compute(v, out),
-        .scroll => @import("scroll").compute(v, out),
+        .master => if (build_options.has_layout_master) @import("master").compute(v, out),
+        .monocle => if (build_options.has_layout_monocle) @import("monocle").compute(v, out),
+        .fibonacci => if (build_options.has_layout_fibonacci) @import("fibonacci").compute(v, out),
+        .grid => if (build_options.has_layout_grid) @import("grid").compute(v, out),
+        .leaf => if (build_options.has_layout_leaf) @import("leaf").compute(v, out),
+        .scroll => if (build_options.has_layout_scroll) @import("scroll").compute(v, out),
     }
 }
 

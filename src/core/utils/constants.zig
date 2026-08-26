@@ -84,5 +84,5 @@ pub const Limits = struct {
     /// not per workspace. Buffers sized from this are indexed by usize/u16,
     /// so raising it only costs memory; keep it a compile-time bound so
     /// stack buffers stay stack buffers.
-    pub const max_tiled_windows = 200;
+    pub const max_tiled_windows = 64;
 };

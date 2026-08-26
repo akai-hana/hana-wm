@@ -11,9 +11,9 @@ const x11_masks = @import("x11_masks");
 const debug = @import("debug");
 const tracking = @import("tracking");
 const focus = @import("focus");
-const fullscreen = @import("fullscreen");
-const minimize = @import("minimize");
-const workspaces = @import("workspaces");
+const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else null;
+const minimize = if (build_options.has_minimize) @import("minimize") else null;
+const workspaces = if (build_options.has_workspaces) @import("workspaces") else null;
 const build_options = @import("build_options");
 const bar = if (build_options.has_bar) @import("bar") else null;
 const tiling = if (build_options.has_tiling) @import("tiling") else null;
@@ -521,9 +521,9 @@ pub fn init(alloc: std.mem.Allocator) !void {
     tracking.init(alloc);
     focus.init();
     wincache.init(alloc);
-    fullscreen.init();
-    try workspaces.init();
-    minimize.init();
+    if (build_options.has_fullscreen) fullscreen.init();
+    if (build_options.has_workspaces) try workspaces.init();
+    if (build_options.has_minimize) minimize.init();
     // Pre-allocate spawn queue capacity for the common case (a handful of
     // concurrent spawns). Failure is non-fatal; the list grows on demand.
     state.?.spawn_queue.ensureTotalCapacity(alloc, 16) catch |err| {
@@ -540,9 +540,9 @@ pub fn deinit() void {
     // managed windows and must not encounter a partially-valid cache), then
     // the remaining subsystems in reverse-init order.
     wincache.deinit();
-    fullscreen.deinit();
-    workspaces.deinit();
-    minimize.deinit();
+    if (build_options.has_fullscreen) fullscreen.deinit();
+    if (build_options.has_workspaces) workspaces.deinit();
+    if (build_options.has_minimize) minimize.deinit();
     // Free heap-backed state before the reset below wipes the struct: a
     // bare `state = .{}` would leak the spawn queue's and rules map's
     // backing memory rather than freeing it.
@@ -824,7 +824,7 @@ fn unmanageWindow(win: u32) void {
         .withdrawn_fullscreen_ws = if (pipeline.initialized) @import("model").fullscreenWsOf(pipeline.model(), win) else null,
         .withdrawn_was_focused = pipeline.initialized and pipeline.model().focused == win,
     };
-    workspaces.removeWindow(win);
+    if (build_options.has_workspaces) workspaces.removeWindow(win);
 
     // PIPELINE (train d): drop the MODEL entry, resolve the
     // post-close focus target (fallback tiers) and reconcile under one grab.
@@ -1029,9 +1029,11 @@ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
     // only when the cursor had moved would instead suppress all future
     // hover-focus events if the cursor stayed at the exact spawn pixel.
     focus.setSuppressReason(.none);
-    // Legacy compared against a spawn_cursor record that was never written
-    // (always {0,0}); the observable predicate is therefore "cursor parked at
-    // the exact screen origin", kept as-is.
+    // Legacy artifact: `spawn_cursor` was originally a {x,y} record written at
+    // spawn time so the first crossing at that position could be suppressed,
+    // but the record was never implemented — spawn_cursor was never written.
+    // The comparison against (0,0) therefore only fires when the cursor is
+    // parked at the exact screen origin. Kept as-is (harness-pinned: S16).
     return root_x == 0 and root_y == 0;
 }
 
@@ -1041,7 +1043,7 @@ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
 /// focus.grabFocus(.mouse_enter). The .mouse_enter reason is the direct
 /// EnterNotify path: lightweight, no raise, no confirm.
 inline fn maybeFocusWindow(win: u32) void {
-    if (!isOnCurrentWorkspace(win) or minimize.isMinimized(win)) return;
+    if (!isOnCurrentWorkspace(win) or (build_options.has_minimize and minimize.isMinimized(win))) return;
     debug.info("[MAYBE_FOCUS] 0x{x}", .{win});
     focus.grabFocus(win, .mouse_enter);
 }
@@ -1072,6 +1074,35 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t) void {
     maybeFocusWindow(findManagedWindow(core.getState().conn, event.child, tracking.isManaged));
 }
 
+/// Refresh one half of CachedProps after a PropertyNotify, keeping the other
+/// half from cache to avoid a redundant round-trip.  When the old half is not
+/// cached (window not yet in the cache), both halves are queried live — the
+/// fallback is correct at the cost of one extra XCB call, which only happens
+/// once per window before populateFocusCacheFromCookies seeds the cache.
+fn refreshCachedPropHalf(conn: core.Connection, win: u32, atom: u32) void {
+    const is_protocols = atom == utils.getAtomOrZero("WM_PROTOCOLS");
+
+    const existing: ?CachedProps = if (!state.?.cache_ready) null else blk: {
+        break :blk if (state.?.cache_slots.indexOfById(win)) |i| state.?.cache_slots.items[i].props else null;
+    };
+
+    const wm_delete = if (is_protocols)
+        queryWMProtocolsProps(conn, win).wm_delete
+    else if (existing) |p|
+        p.wm_delete
+    else
+        queryWMProtocolsProps(conn, win).wm_delete;
+
+    const accepts_input = if (!is_protocols)
+        queryWMHintsAcceptsInput(conn, win)
+    else if (existing) |p|
+        p.accepts_input
+    else
+        queryWMHintsAcceptsInput(conn, win);
+
+    putCachedProps(win, .{ .accepts_input = accepts_input, .wm_delete = wm_delete });
+}
+
 pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void {
     if (!isValidManagedWindow(event.window)) return;
     const conn = core.getState().conn;
@@ -1086,23 +1117,9 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
     }
 
     if (event.atom == utils.getAtomOrZero("WM_PROTOCOLS")) {
-        // Only WM_PROTOCOLS changed: re-query wm_delete, keep accepts_input
-        // from cache to avoid a redundant WM_HINTS round-trip.
-        const existing: ?CachedProps = if (!state.?.cache_ready) null else blk: {
-            break :blk if (state.?.cache_slots.indexOfById(event.window)) |i| state.?.cache_slots.items[i].props else null;
-        };
-        const wm_delete = queryWMProtocolsProps(conn, event.window).wm_delete;
-        const accepts_input = if (existing) |p| p.accepts_input else queryWMHintsAcceptsInput(conn, event.window);
-        putCachedProps(event.window, .{ .accepts_input = accepts_input, .wm_delete = wm_delete });
+        refreshCachedPropHalf(conn, event.window, event.atom);
     } else if (event.atom == xcb.XCB_ATOM_WM_HINTS) {
-        // Only WM_HINTS changed: re-query accepts_input, keep wm_delete
-        // from cache to avoid a redundant WM_PROTOCOLS round-trip.
-        const existing: ?CachedProps = if (!state.?.cache_ready) null else blk: {
-            break :blk if (state.?.cache_slots.indexOfById(event.window)) |i| state.?.cache_slots.items[i].props else null;
-        };
-        const accepts_input = queryWMHintsAcceptsInput(conn, event.window);
-        const wm_delete = if (existing) |p| p.wm_delete else queryWMProtocolsProps(conn, event.window).wm_delete;
-        putCachedProps(event.window, .{ .accepts_input = accepts_input, .wm_delete = wm_delete });
+        refreshCachedPropHalf(conn, event.window, event.atom);
     }
 }
 
