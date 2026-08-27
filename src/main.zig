@@ -20,6 +20,9 @@ const input = @import("input");
 const window = @import("window");
 const actions = @import("actions");
 const pipeline = @import("pipeline");
+const restart = @import("restart");
+const restart_state = @import("restart_state");
+const focus = @import("focus");
 
 pub fn main() !void {
     const x = try connectToX();
@@ -49,6 +52,11 @@ pub fn main() !void {
     // core.init() takes ownership of config_ptr; must run before any
     // core.getState() call.
     core.init(x.conn, x.screen, x.root, alloc, config_ptr);
+
+    // Arm the unified reload: capture the running image's identity before any
+    // reload/reexec request can arrive. Binary-change detection is a no-op
+    // (config-reload fallback always taken) until this runs.
+    restart.init(alloc, null);
 
     // Config.deinit tears the keybind_resolver down internally, before
     // freeing the keybindings whose Actions it points into; so a single
@@ -85,6 +93,35 @@ pub fn main() !void {
 
     _ = xcb.xcb_flush(x.conn);
     debug.info("hana booted up successfully!", .{});
+
+    // Re-exec session hand-off (restart.execNext sets HANA_RESTORE before
+    // execv; a plain boot has no such var). The session's windows survive a
+    // re-exec because hana never reparents — clients are direct root
+    // children — so the successor adopts them, re-applies the persisted
+    // model level, then runs ONE reconcile that places everything exactly
+    // as it was. Adoption runs AFTER bar.init() so bar.winId() and the
+    // bar-aware workarea are live.
+    if (std.c.getenv("HANA_RESTORE")) |restore_path_z| {
+        const restore_path = std.mem.span(restore_path_z);
+        if (try restart_state.loadToGlobal(alloc, restore_path)) {
+            const n = window.adoptRootWindows() catch |err| blk: {
+                debug.err("Window adoption failed: {}", .{err});
+                break :blk 0;
+            };
+            if (n > 0) {
+                restart_state.applyModelLevel(pipeline.model());
+                // Restore X input focus on the session's focused window —
+                // the mapRequest path uses the same focus-after-geometry
+                // entry (the adopted window is already mapped).
+                if (pipeline.model().focused) |focused| {
+                    const ft = focus.prepareFocus(focused, .window_spawn);
+                    pipeline.reconcileUnderGrabNowWithFocusAfter(.{}, ft);
+                } else {
+                    pipeline.reconcileUnderGrabNow(.{});
+                }
+            }
+        }
+    }
 
     try events.run();
     debug.info("Shutting down gracefully...", .{});

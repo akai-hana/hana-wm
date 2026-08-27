@@ -39,8 +39,12 @@ const title = if (build_options.has_seg_title) @import("title") else struct {
     pub const ClickTarget = struct { window: u32, minimized: bool };
     pub fn fetchWindowTitleInto(_: anytype, _: anytype, _: anytype, _: anytype) !void {}
     pub fn fetchTitlesAndGeoms(_: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype) void {}
-    pub fn hitTest(_: anytype, _: anytype, _: anytype, _: anytype) !?ClickTarget { return null; }
-    pub fn draw(_: anytype, _: anytype, _: anytype, _: anytype) !u16 { return 0; }
+    pub fn hitTest(_: anytype, _: anytype, _: anytype, _: anytype) !?ClickTarget {
+        return null;
+    }
+    pub fn draw(_: anytype, _: anytype, _: anytype, _: anytype) !u16 {
+        return 0;
+    }
 };
 const carousel = if (build_options.has_seg_carousel) @import("carousel") else struct {
     pub fn deactivate() void {}

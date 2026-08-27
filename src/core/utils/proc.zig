@@ -49,6 +49,17 @@ pub fn reload() void {
     }
 }
 
+/// Wakes the event loop out of poll by writing the wake byte, without
+/// touching any flag. The narrow version of `reload()`: restart.zig uses it so
+/// its re-exec request (a separate flag, consumed by `consumeReexec`) is
+/// noticed immediately instead of waiting for an unrelated signal. Same
+/// lossy-write tolerance as `reload()`: the event loop polls its flags every
+/// iteration, so a dropped byte only delays the action by one poll timeout.
+pub fn wake() void {
+    if (signal_write_fd >= 0)
+        _ = std.os.linux.write(signal_write_fd, &[_]u8{wake_byte}, 1);
+}
+
 /// Atomically consumes the reload flag.
 /// Returns true exactly once per request, whichever call path checks first wins.
 pub fn consumeReload() bool {

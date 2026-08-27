@@ -5,6 +5,7 @@ const std = @import("std");
 
 const utils = @import("utils");
 const spawn = @import("spawn");
+const restart = @import("restart");
 
 // End indices of the self-pipe: signal handlers write to pipe_write; the
 // event loop polls pipe_read.
@@ -31,7 +32,7 @@ pub fn setup() !void {
     };
 
     // SIGCHLD is reaped in dispatchSignal; the rest control the event loop.
-    inline for (.{ std.posix.SIG.HUP, std.posix.SIG.TERM, std.posix.SIG.INT, std.posix.SIG.CHLD }) |sig|
+    inline for (.{ std.posix.SIG.HUP, std.posix.SIG.TERM, std.posix.SIG.INT, std.posix.SIG.CHLD, std.posix.SIG.USR1 }) |sig|
         std.posix.sigaction(sig, &sa, null);
 }
 
@@ -54,6 +55,11 @@ pub fn readFd() std.posix.fd_t {
 fn dispatchSignal(byte: u8) void {
     switch (@as(std.posix.SIG, @enumFromInt(byte))) {
         .HUP => utils.reload(),
+        // Unified reload trigger, same semantics as the reload keybind:
+        // re-exec the current binary if it changed since boot, else hot-reload
+        // the config (restart.requestReload decides). Dispatch runs on the
+        // event loop, NOT in the signal handler, so statx/flag work is safe.
+        .USR1 => restart.requestReload(),
         .TERM, .INT => utils.quit(),
         // SIGCHLD: an intermediate double-fork child has exited.
         // Reap it with WNOHANG, then immediately drain the spawn pipes so

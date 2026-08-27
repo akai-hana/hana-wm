@@ -20,6 +20,8 @@ const refresh_rate = @import("refresh_rate");
 const signals = @import("signals");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
+const restart = @import("restart");
+const restart_state = @import("restart_state");
 const build_options = @import("build_options");
 const tiling = if (build_options.has_tiling) @import("tiling") else null;
 const bar = if (build_options.has_bar) @import("bar") else null;
@@ -267,6 +269,27 @@ fn handleConfigReload() !void {
     debug.info("Reload complete", .{});
 }
 
+// Re-exec hand-off, driven by restart.consumeReexec() in run(). The sequence
+// is fixed: resolve the exec path, persist the live session FIRST (a failed
+// save aborts the hand-off and the WM keeps running on its live connection),
+// then drop the X connection so the successor cannot inherit a live
+// connection holding the root SubstructureRedirect grab, then execNext —
+// which never returns (parent exits immediately, child execs).
+fn handleReexec() !void {
+    const cs = core.getState();
+    const self_path = restart.selfPath() orelse {
+        debug.err("Re-exec aborted: executable path unknown", .{});
+        return error.ExecutablePathUnknown;
+    };
+    debug.info("Re-executing new binary", .{});
+
+    const path = try restart_state.defaultStatePath(cs.alloc);
+    try restart_state.save(cs.alloc, pipeline.model(), path);
+
+    xcb.xcb_disconnect(cs.conn);
+    restart.execNext(self_path, path);
+}
+
 // Drains pending XCB events for this batch, then runs post-batch housekeeping.
 fn handleXcbEvents() void {
     const conn = core.getState().conn;
@@ -388,6 +411,14 @@ pub fn run() !void {
         // the pipe is full). Consume it every iteration, BEFORE the ready split:
         // confining it to the ready>0 branch let a flag-only request stall on
         // timeout wakeups until unrelated X traffic arrived.
+        //
+        // Re-exec supersedes config reload: consumed first so a request that
+        // decided "binary changed" turns into the process hand-off instead of
+        // a config-only reload (the request paths are mutually exclusive, but
+        // a hand-off must never be deferred behind an in-flight reload).
+        if (restart.consumeReexec())
+            handleReexec() catch |err| debug.err("Re-exec failed: {}", .{err});
+
         if (utils.consumeReload())
             handleConfigReload() catch |err| debug.err("Reload failed: {}", .{err});
 
