@@ -5,7 +5,8 @@
 const std = @import("std");
 const testing = std.testing;
 const types = @import("types");
-const workspaces = @import("workspaces");
+const build_options = @import("build_options");
+const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
 
 test "duplicate master-count overrides: last wins" {
     var cfg = types.TilingConfig{};

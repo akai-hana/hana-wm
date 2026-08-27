@@ -43,13 +43,15 @@ pub fn build(b: *std.Build) !void {
 
     // Build options
     const build_opts = b.addOptions();
-    build_opts.addOption(bool, "enable_debug_logging", optimize == .Debug);
     build_opts.addOption(bool, "has_fallback_toml", fallback_toml != null);
 
     // Optional module detection
     const has_bar_dir = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar");
     const has_tiling = pathExists(b.build_root.handle, b.graph.io, source_root ++ "tiling");
     const has_floating = pathExists(b.build_root.handle, b.graph.io, source_root ++ "window/behaviors/floating.zig");
+    if (!has_tiling and !has_floating) {
+        @panic("hana requires at least one windowing paradigm: src/tiling/ or src/window/behaviors/floating.zig");
+    }
     const has_fullscreen = pathExists(b.build_root.handle, b.graph.io, source_root ++ "window/behaviors/fullscreen.zig");
     const has_minimize = pathExists(b.build_root.handle, b.graph.io, source_root ++ "window/behaviors/minimize.zig");
     const has_workspaces = pathExists(b.build_root.handle, b.graph.io, source_root ++ "window/behaviors/workspaces.zig");
@@ -109,24 +111,6 @@ pub fn build(b: *std.Build) !void {
     if (discovery.modules.get("schema_test")) |m| {
         m.link_libc = true;
         SystemLibraries.link(m);
-    }
-    // Register null vim fallback when vim.zig is absent but bar is present.
-    // When bar itself is removed, prompt is also gone so no vim stub is needed.
-    // When the prompt directory is removed, null_vim.zig is also gone.
-    const null_vim_path = source_root ++ "bar/segments/prompt/null_vim.zig";
-    const has_null_vim_file = pathExists(b.build_root.handle, b.graph.io, null_vim_path);
-    if (has_bar and !has_vim and has_null_vim_file) {
-        const owned_name = try b.allocator.dupe(u8, "vim");
-        try discovery.source_paths.put(owned_name, null_vim_path);
-        try discovery.modules.put(owned_name, b.createModule(.{
-                .root_source_file = b.path(null_vim_path),
-                .target = target,
-                .optimize = optimize,
-            }));
-        // Prevent null_vim.zig from also being registered as "null_vim"
-        // via auto-discovery — it's only needed as the "vim" stub here.
-        _ = discovery.modules.remove("null_vim");
-        _ = discovery.source_paths.remove("null_vim");
     }
 
     // Root module
@@ -191,7 +175,7 @@ pub fn build(b: *std.Build) !void {
     // type-checks AND enforces the sync-owned wire rules.
     const check_step = b.step("check", "Type-check + layer guards");
     check_step.dependOn(&exe.step);
-    const layers = b.addSystemCommand(&.{ "./src/test/check-layers.sh" });
+    const layers = b.addSystemCommand(&.{ "./dev/scripts/check-layers.sh" });
     layers.step.dependOn(&exe.step);
     check_step.dependOn(&layers.step);
 }
@@ -434,7 +418,7 @@ const Module = struct {
         ctx: SharedBuildContext,
     ) void {
         // NOTE(I-1): Cross-wiring is blanket O(n²). Layer purity (model/tiling
-        // xcb-free, sync sole wire writer) is enforced by src/test/check-layers.sh
+        // xcb-free, sync sole wire writer) is enforced by dev/scripts/check-layers.sh
         // at zig build check time, NOT at the module level. If a module accidentally
         // imports a forbidden dependency, the build succeeds but check-layers catches
         // the xcb leak. Future improvement: add per-layer import assertions.

@@ -23,7 +23,7 @@ const wincache = @import("wincache");
 const sync = @import("sync");
 const pipeline = @import("pipeline");
 
-/// D3: minimum reserved row width for the title segment (moved here from
+/// Minimum reserved row width for the title segment (moved here from
 /// bar.zig — width policy belongs to the segment that owns the pixels).
 pub const min_width: u16 = 100;
 

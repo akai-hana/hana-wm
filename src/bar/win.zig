@@ -5,7 +5,7 @@
 //! This is protocol-side traffic that answers the COMPOSITOR/EWMH contract
 //! (dock strut, window type, state hints), not layout policy — hence it
 //! lives outside sync, same rationale as the rest of bar's allowlisted
-//! self-window traffic in src/test/check-layers.sh.
+//! self-window traffic in dev/scripts/check-layers.sh.
 //!
 //! No behavior changes vs the pre-split code; functions moved verbatim with
 //! atom storage re-homed from bar's `gBar.atoms` to this module's `atoms`.
