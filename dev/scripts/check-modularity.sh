@@ -176,7 +176,7 @@ run_scenarios() {
         "src/window/behaviors/floating.zig"
 
     run_scenario \
-        "vim (null_vim fallback)" \
+        "vim (removable)" \
         "src/bar/segments/prompt/vim.zig"
 
     run_scenario \
@@ -264,12 +264,7 @@ run_scenarios() {
     run_scenario \
         "bar segment: -prompt (no vim)" \
         "src/bar/segments/prompt/prompt.zig" \
-        "src/bar/segments/prompt/vim.zig" \
-        "src/bar/segments/prompt/null_vim.zig"
-
-    run_scenario \
-        "bar segment: -prompt (keep vim)" \
-        "src/bar/segments/prompt/prompt.zig"
+        "src/bar/segments/prompt/vim.zig"
 
     run_scenario \
         "bar segment: all segments removed" \
@@ -280,8 +275,7 @@ run_scenarios() {
         "src/bar/segments/title/title.zig" \
         "src/bar/segments/title/carousel.zig" \
         "src/bar/segments/prompt/prompt.zig" \
-        "src/bar/segments/prompt/vim.zig" \
-        "src/bar/segments/prompt/null_vim.zig"
+        "src/bar/segments/prompt/vim.zig"
 
     # ── Tier 5: Bar internals ───────────────────────────────────────────
     echo ""
@@ -302,55 +296,6 @@ run_scenarios() {
     run_scenario \
         "bar internal: -segment dispatch" \
         "src/bar/segments/segment.zig"
-
-    # ── Tier 6: Config ──────────────────────────────────────────────────
-    echo ""
-    echo "${CYAN}Tier 6 — config${RESET}"
-
-    run_scenario \
-        "config (entire directory)" \
-        "src/config"
-
-    run_scenario \
-        "config: parser only" \
-        "src/config/parser.zig"
-
-    run_scenario \
-        "config: schema only" \
-        "src/config/schema.zig" \
-        "src/config/schema_test.zig"
-
-    run_scenario \
-        "config: types only" \
-        "src/config/types.zig"
-
-    # ── Tier 7: Core subsystems ─────────────────────────────────────────
-    echo ""
-    echo "${CYAN}Tier 7 — core subsystems${RESET}"
-
-    run_scenario \
-        "core: input subsystem" \
-        "src/core/input"
-
-    run_scenario \
-        "core: utils" \
-        "src/core/utils"
-
-    # ── Tier 8: Model & sync (should NOT be removable) ──────────────────
-    echo ""
-    echo "${CYAN}Tier 8 — required subsystems (expect FAIL)${RESET}"
-
-    run_scenario \
-        "model (required — expect fail)" \
-        "src/model"
-
-    run_scenario \
-        "sync (required — expect fail)" \
-        "src/sync"
-
-    run_scenario \
-        "main.zig (required — expect fail)" \
-        "src/main.zig"
 }
 
 # ── report ───────────────────────────────────────────────────────────────

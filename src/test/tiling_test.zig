@@ -10,8 +10,9 @@ const testing = std.testing;
 const utils = @import("utils");
 const model = @import("model");
 
-const engine = @import("engine");
-const scroll_algo = @import("scroll");
+const build_options = @import("build_options");
+const engine = if (build_options.has_tiling) @import("engine") else struct {};
+const scroll_algo = if (build_options.has_layout_scroll) @import("scroll") else struct {};
 
 const List = engine.List;
 const Placement = engine.Placement;

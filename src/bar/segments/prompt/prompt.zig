@@ -12,11 +12,175 @@ const types = @import("types");
 
 const drawing = @import("drawing");
 const build_options = @import("build_options");
-const title = if (build_options.has_seg_title) @import("title") else @import("title_stub");
+const title = if (build_options.has_seg_title) @import("title") else struct {
+    const u = @import("utils");
+    const t = @import("types");
+    const d = @import("drawing");
+    const co = @import("core");
+    pub const min_width: u16 = 0;
+    pub const offscreen_rect: u.Rect = .{ .x = std.math.maxInt(i16), .y = std.math.maxInt(i16), .width = 0, .height = 0 };
+    pub const TitleRenderContext = struct {
+        dc: *d.DrawContext,
+        config: t.BarConfig,
+        height: u16,
+        start_x: u16,
+        width: u16,
+        conn: co.Connection,
+    };
+    pub const TitleSnapshot = struct {
+        focused_window: ?u32,
+        focused_title: []const u8,
+        minimized_title: []const u8,
+        current_ws_wins: []const u32,
+        minimized_set: *const std.AutoHashMapUnmanaged(u32, void),
+        titles: []const []const u8 = &.{},
+        geoms: []const ?u.Rect = &.{},
+    };
+    pub const ClickTarget = struct { window: u32, minimized: bool };
+    pub fn fetchWindowTitleInto(_: anytype, _: anytype, _: anytype, _: anytype) !void {}
+    pub fn fetchTitlesAndGeoms(_: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype) void {}
+    pub fn hitTest(_: anytype, _: anytype, _: anytype, _: anytype) !?ClickTarget { return null; }
+    pub fn draw(_: anytype, _: anytype, _: anytype, _: anytype) !u16 { return 0; }
+};
 const carousel = if (build_options.has_seg_carousel) @import("carousel") else struct {
     pub fn deactivate() void {}
 };
-const vim = @import("vim");
+pub const XK = core.XK;
+const xk_back_space = @intFromEnum(XK.BackSpace);
+const xk_return = @intFromEnum(XK.Return);
+const xk_escape = @intFromEnum(XK.Escape);
+const xk_delete = @intFromEnum(XK.Delete);
+const xk_left = @intFromEnum(XK.Left);
+const xk_right = @intFromEnum(XK.Right);
+const xk_home = @intFromEnum(XK.Home);
+const xk_end = @intFromEnum(XK.End);
+
+pub const default_max_input: usize = 256;
+pub const Action = enum { none, deactivate, spawn };
+
+pub const Mode = enum(u2) {
+    insert = 0,
+    normal = 1,
+    pub fn label(self: Mode) []const u8 {
+        return mode_label_fn(self);
+    }
+};
+
+var mode_label_fn: *const fn (Mode) []const u8 = struct {
+    fn f(_: Mode) []const u8 {
+        return "";
+    }
+}.f;
+
+pub const EditorState = struct {
+    allocator: std.mem.Allocator = undefined,
+    max_input: usize = 0,
+    buf: []u8 = &.{},
+    len: usize = 0,
+    cursor: usize = 0,
+    mode: Mode = .insert,
+
+    pub fn init(allocator: std.mem.Allocator, max_input: usize) !EditorState {
+        return .{
+            .allocator = allocator,
+            .max_input = max_input,
+            .buf = try allocator.alloc(u8, max_input),
+        };
+    }
+    pub fn reset(es: *EditorState) void {
+        const saved_buf = es.buf;
+        const saved_allocator = es.allocator;
+        const saved_max_input = es.max_input;
+        es.* = .{};
+        es.allocator = saved_allocator;
+        es.max_input = saved_max_input;
+        es.buf = saved_buf;
+    }
+    pub fn deinit(es: *EditorState) void {
+        es.allocator.free(es.buf);
+        es.* = .{};
+    }
+};
+
+pub fn onDeactivate(_: *EditorState) void {}
+pub fn insertSlice(es: *EditorState, slice: []const u8) void {
+    if (es.max_input == 0 or es.len + 1 >= es.max_input) return;
+    const n = @min(slice.len, es.max_input - 1 - es.len);
+    if (n == 0) return;
+    if (es.cursor < es.len) {
+        std.mem.copyBackwards(u8, es.buf[es.cursor + n .. es.len + n], es.buf[es.cursor..es.len]);
+    }
+    @memcpy(es.buf[es.cursor .. es.cursor + n], slice[0..n]);
+    es.len += n;
+    es.cursor += n;
+}
+
+inline fn isPrintableAscii(sym: xcb.xcb_keysym_t) bool {
+    return sym >= 0x20 and sym <= 0x7e;
+}
+
+pub fn handleCtrl(_: *EditorState, sym: xcb.xcb_keysym_t) Action {
+    if (sym == 'c') return .deactivate;
+    return .none;
+}
+
+pub fn handleInsertBasic(es: *EditorState, sym: xcb.xcb_keysym_t) Action {
+    if (sym == xk_escape) return .deactivate;
+    switch (sym) {
+        xk_return => return .spawn,
+        xk_back_space => {
+            if (es.cursor > 0) {
+                std.mem.copyForwards(u8, es.buf[es.cursor - 1 .. es.len - 1], es.buf[es.cursor..es.len]);
+                es.cursor -= 1;
+                es.len -= 1;
+            }
+        },
+        xk_delete => {
+            if (es.cursor < es.len) {
+                std.mem.copyForwards(u8, es.buf[es.cursor .. es.len - 1], es.buf[es.cursor + 1 .. es.len]);
+                es.len -= 1;
+            }
+        },
+        xk_left => {
+            if (es.cursor > 0) es.cursor -= 1;
+        },
+        xk_right => {
+            if (es.cursor < es.len) es.cursor += 1;
+        },
+        xk_home => es.cursor = 0,
+        xk_end => es.cursor = es.len,
+        else => if (isPrintableAscii(sym)) {
+            const ch: u8 = @truncate(sym);
+            insertSlice(es, &[1]u8{ch});
+        },
+    }
+    return .none;
+}
+
+pub var handle_insert: *const fn (*EditorState, xcb.xcb_keysym_t) Action = handleInsertBasic;
+pub var handle_normal: *const fn (*EditorState, xcb.xcb_keysym_t) Action = struct {
+    fn f(_: *EditorState, _: xcb.xcb_keysym_t) Action {
+        return .none;
+    }
+}.f;
+pub var handle_ctrl: *const fn (*EditorState, xcb.xcb_keysym_t) Action = handleCtrl;
+pub var on_deactivate: *const fn (*EditorState) void = onDeactivate;
+
+pub const Handlers = struct {
+    handle_insert: *const fn (*EditorState, xcb.xcb_keysym_t) Action,
+    handle_normal: *const fn (*EditorState, xcb.xcb_keysym_t) Action,
+    handle_ctrl: *const fn (*EditorState, xcb.xcb_keysym_t) Action,
+    on_deactivate: *const fn (*EditorState) void,
+    mode_label: *const fn (Mode) []const u8,
+};
+
+pub fn registerHandlers(h: Handlers) void {
+    handle_insert = h.handle_insert;
+    handle_normal = h.handle_normal;
+    handle_ctrl = h.handle_ctrl;
+    on_deactivate = h.on_deactivate;
+    mode_label_fn = h.mode_label;
+}
 
 const debug = @import("debug");
 
@@ -45,18 +209,18 @@ const min_cursor_px: u16 = 8;
 // invisible for the same duration.
 const cursor_blink_ms: u64 = 300;
 // Number of editing modes (derived from vim.Mode at comptime).
-const num_modes = @typeInfo(vim.Mode).@"enum".fields.len;
+const num_modes = @typeInfo(Mode).@"enum".fields.len;
 
 const cursor_width: u16 = 1;
 const cursor_v_pad: u16 = 2;
 const max_completions: usize = 1024;
 const max_completion_len: usize = 64;
 const max_history: usize = 128;
-const max_history_line: usize = vim.default_max_input;
+const max_history_line: usize = default_max_input;
 
 const PromptState = struct {
     is_active: bool = false,
-    vim_state: vim.VimState = .{},
+    vim_state: EditorState = .{},
 
     allocator: std.mem.Allocator = undefined,
 
@@ -170,7 +334,7 @@ pub fn consumeRedrawRequest() bool {
 pub fn init(allocator: std.mem.Allocator, conn: core.Connection) !void {
     if (g.vim_state.buf.len != 0) return; // already initialised
     g.allocator = allocator;
-    g.vim_state = try vim.VimState.init(allocator, vim.default_max_input);
+    g.vim_state = try EditorState.init(allocator, default_max_input);
     g.key_syms = xcb_key_symbols_alloc(conn);
     if (g.key_syms == null)
         debug.warn("prompt: xcb_key_symbols_alloc failed: key input will not work", .{});
@@ -289,22 +453,22 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
 
     // Ctrl-modified keys
     if (ctrl_held) {
-        const action = if (vim_mode) vim.handleCtrl(&g.vim_state, sym) else .none;
+        const action = if (vim_mode) handle_ctrl(&g.vim_state, sym) else .none;
         // handleCtrl may have deleted text (Ctrl-W / Ctrl-U), so the ghost is
         // recomputed in the shared tail.  The blink phase is left untouched.
         return finishKeyPress(action, false);
     }
 
     // Tab: accept ghost completion
-    if (sym == @intFromEnum(vim.XK.Tab) and g.vim_state.mode == .insert) {
+    if (sym == @intFromEnum(XK.Tab) and g.vim_state.mode == .insert) {
         return acceptGhost();
     }
 
     const action = if (!vim_mode and g.vim_state.mode == .insert)
-        vim.handleInsertBasic(&g.vim_state, sym)
+        handleInsertBasic(&g.vim_state, sym)
     else switch (g.vim_state.mode) {
-        .insert => vim.handleInsert(&g.vim_state, sym),
-        .normal => vim.handleNormal(&g.vim_state, sym),
+        .insert => handle_insert(&g.vim_state, sym),
+        .normal => handle_normal(&g.vim_state, sym),
     };
     return finishKeyPress(action, true);
 }
@@ -312,7 +476,7 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
 /// Shared tail for every key that edited the buffer: run the action, recompute
 /// the ghost suggestion (a mode handler may have deleted or inserted text),
 /// and schedule a redraw.  Returns true (event consumed).
-fn finishKeyPress(action: vim.Action, refresh_blink: bool) bool {
+fn finishKeyPress(action: Action, refresh_blink: bool) bool {
     applyAction(action);
     updateGhost();
     if (refresh_blink) g.is_blink_visible = true;
@@ -330,7 +494,7 @@ fn acceptGhost() bool {
     else
         0;
     if (n_ghost > 0) {
-        vim.insertSlice(&g.vim_state, g.ghost_buf[0..n_ghost]);
+        insertSlice(&g.vim_state, g.ghost_buf[0..n_ghost]);
     }
     return finishKeyPress(.none, true);
 }
@@ -354,7 +518,7 @@ pub fn draw(
 /// Runs `action` through handleAction, then resyncs g.has_space if the buffer
 /// length changed.  Shared by the Ctrl-key and normal-key paths in
 /// handleKeyPress, which otherwise duplicated this exact sequence.
-fn applyAction(action: vim.Action) void {
+fn applyAction(action: Action) void {
     const prev_len = g.vim_state.len;
     handleAction(action);
     if (g.vim_state.len != prev_len)
@@ -363,7 +527,7 @@ fn applyAction(action: vim.Action) void {
 
 /// Dispatches a vim.Action returned by a mode handler: executes/closes on spawn,
 /// deactivates on deactivate, no-ops on none.
-fn handleAction(action: vim.Action) void {
+fn handleAction(action: Action) void {
     switch (action) {
         .none => {},
         .deactivate => deactivate(),
@@ -429,7 +593,7 @@ fn activate() void {
 
 fn deactivate() void {
     g.is_active = false;
-    if (vimModeEnabled()) vim.onDeactivate(&g.vim_state);
+    if (vimModeEnabled()) on_deactivate(&g.vim_state);
     const conn = core.getState().conn;
     _ = xcb.xcb_ungrab_keyboard(conn, xcb.XCB_CURRENT_TIME);
     _ = xcb.xcb_flush(conn);
@@ -740,9 +904,9 @@ fn spawnCommand(cmd: []const u8) void {
     histPrepend(cmd);
     histAppendToFile(cmd);
 
-    // cmd.len <= vim.default_max_input - 1 (enforced by the vim buffer
+    // cmd.len <= default_max_input - 1 (enforced by the vim buffer
     // insert clamp), so buf always has room for the null terminator.
-    var buf: [vim.default_max_input]u8 = undefined;
+    var buf: [default_max_input]u8 = undefined;
     @memcpy(buf[0..cmd.len], cmd);
     buf[cmd.len] = 0;
     const cmd_z: [*:0]const u8 = buf[0..cmd.len :0];

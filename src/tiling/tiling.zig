@@ -12,7 +12,6 @@ const std = @import("std");
 const core = @import("core");
 const types = @import("types");
 const utils = @import("utils");
-const build_options = @import("build_options");
 
 /// Defined in types.zig (see its doc comment for why) so config.zig and
 /// workspaces.zig can resolve layout names without a circular import;
@@ -46,25 +45,6 @@ pub inline fn isEnabled() bool {
 pub inline fn getBorderWidth() u16 {
     const cs = core.getState();
     return utils.scaling.scaleBorderWidth(cs.config.tiling.border_width, cs.screen.height_in_pixels);
-}
-
-pub inline fn getCurrentLayout() Layout {
-    // Keybinds mutate per-ws MODEL params now; reading static config here
-    // left the bar icon stale after cycle_layout / step_variant / per-ws
-    // overrides. Fall back to config pre-init only.
-    if (build_options.has_tiling) {
-        const pipeline = @import("pipeline");
-        if (pipeline.initialized) {
-            const mm = pipeline.model();
-            const p = &mm.ws[mm.current].params;
-            return @enumFromInt(@intFromEnum(p.kind));
-        }
-    }
-    const cs = core.getState();
-    // stringToEnum (not layoutFromString) so the scalar config key
-    // `tiling.layout = "floating"` resolves: layoutFromString is scoped
-    // to layout_table, which deliberately excludes .floating.
-    return std.meta.stringToEnum(Layout, cs.config.tiling.layout) orelse defaultLayout();
 }
 
 pub inline fn getLayoutVariants() LayoutVariants {

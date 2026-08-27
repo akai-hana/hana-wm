@@ -11,12 +11,12 @@
 const std = @import("std");
 const model_mod = @import("model");
 const sync = @import("sync");
-const layouts = @import("layouts");
 const core = @import("core");
 const utils = @import("utils");
 const borders = @import("borders");
 const focus = @import("focus");
 const xcb_sink = @import("wire");
+const types = @import("types");
 const build_options = @import("build_options");
 const bar = if (build_options.has_bar) @import("bar") else null;
 
@@ -35,6 +35,18 @@ pub inline fn model() *model_mod.Model {
         std.debug.assert(initialized);
     }
     return &instance;
+}
+
+/// Returns the current tiling layout from the live model state.
+/// Falls back to config pre-init.
+pub inline fn getCurrentLayout() types.Layout {
+    if (initialized) {
+        const mm = model();
+        const p = &mm.ws[mm.current].params;
+        return @enumFromInt(@intFromEnum(p.kind));
+    }
+    const cs = core.getState();
+    return std.meta.stringToEnum(types.Layout, cs.config.tiling.layout) orelse types.layout_table[0].tag;
 }
 
 var g_sink: ?xcb_sink.XcbSink = null;

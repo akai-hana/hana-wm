@@ -1,4 +1,4 @@
-//! Uniform segment contract (D3).
+//! Uniform segment contract
 //!
 //! ONE dispatch point per segment concern; adding a segment touches this
 //! file plus its own module instead of six switches across bar.zig:
@@ -12,7 +12,9 @@
 //! internal machinery behind the thin adapter in draw()'s `.title` arm;
 //! their complexity does not leak into the orchestrator. Width policy
 //! constants moved INTO their owning segments
-//! (tags.fallback_width, layout.natural_width, title.min_width).
+//! (tags.fallback_width, title.min_width); layout/variants reserve their
+//! last-measured drawn width (getCachedWidth) so non-dirty advances match
+//! what was actually painted.
 
 const drawing = @import("drawing");
 const types = @import("types");
@@ -29,10 +31,13 @@ const clock = if (build_options.has_seg_clock) @import("clock") else struct {
     pub fn draw(_: anytype, _: anytype, _: anytype, x: u16) !u16 { return x; }
 };
 const layout_seg = if (build_options.has_seg_layout) @import("layout") else struct {
-    pub const natural_width: u16 = 0;
+    pub fn getCachedWidth() u16 { return 0; }
+    pub fn invalidate() void {}
     pub fn draw(_: anytype, _: anytype, _: anytype, x: u16) !u16 { return x; }
 };
 const variants = if (build_options.has_seg_variants) @import("variants") else struct {
+    pub fn getCachedWidth() u16 { return 0; }
+    pub fn invalidate() void {}
     pub fn draw(_: anytype, _: anytype, _: anytype, x: u16) !u16 { return x; }
 };
 const title = if (build_options.has_seg_title) @import("title") else struct {
@@ -61,6 +66,14 @@ pub const Env = struct {
 
 // -- Width ------------------------------------------------------------------
 
+/// Resets segments whose reserved width is measured-and-cached (font/config
+/// metrics may have changed). Called on bar (re)creation alongside
+/// tags.invalidate().
+pub fn invalidateCachedWidths() void {
+    layout_seg.invalidate();
+    variants.invalidate();
+}
+
 pub fn naturalWidth(seg: types.BarSegment, frame: *const Frame, clock_width: u16) u16 {
     return switch (seg) {
         .workspaces => if (build_options.has_seg_tags and frame.workspace_count > 0)
@@ -69,7 +82,8 @@ pub fn naturalWidth(seg: types.BarSegment, frame: *const Frame, clock_width: u16
             tags.fallback_width
         else
             0,
-        .layout, .variants => layout_seg.natural_width,
+        .layout => layout_seg.getCachedWidth(),
+        .variants => variants.getCachedWidth(),
         .title => title.min_width,
         .clock => clock_width,
     };

@@ -489,7 +489,7 @@ const ScrollContext = struct {
 fn scrollContext(m: *const model_mod.Model) ScrollContext {
     if (!build_options.has_tiling) return .{ .tiled_count = 0, .slot_w = 0, .max_off = 0 };
     if (!build_options.has_layout_scroll) return .{ .tiled_count = 0, .slot_w = 0, .max_off = 0 };
-    const algo_scroll = @import("scroll");
+    const algo_scroll = if (build_options.has_layout_scroll) @import("scroll") else return .{ .tiled_count = 0, .slot_w = 0, .max_off = 0 };
     const n = tiledCountOnCurrent(m);
     const wa = @import("bar").workAreaRect();
     const slot_w = algo_scroll.slotWidth(wa.width);
@@ -510,7 +510,7 @@ pub fn seedParamsFromConfig() void {
     if (!build_options.has_tiling) return;
     const types = @import("types");
     const constants = @import("constants");
-    const tiling = @import("tiling");
+    const tiling = if (build_options.has_tiling) @import("tiling") else return;
     const cs = @import("core").getState();
     const cfg = &cs.config.tiling;
     const max_ws = constants.max_workspaces;

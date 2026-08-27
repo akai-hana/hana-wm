@@ -445,7 +445,7 @@ fn dumpState() void {
 
     if (build_options.has_tiling and tiling.isEnabled()) {
         debug.info("Tiling enabled: true", .{});
-        debug.info("Tiling layout:  {s}", .{@tagName(tiling.getCurrentLayout())});
+        debug.info("Tiling layout:  {s}", .{@tagName(pipeline.getCurrentLayout())});
         debug.info("Tiled windows:  {}", .{tracking.tiledCountOnCurrent()});
     }
 

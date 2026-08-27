@@ -5,7 +5,7 @@ const types = @import("types");
 const drawing = @import("drawing");
 const tracking = @import("tracking");
 
-/// D3: reserved row width when no workspaces are configured (moved here from
+/// Reserved row width when no workspaces are configured (moved here from
 /// bar.zig — width policy belongs to the segment that owns the pixels).
 pub const fallback_width: u16 = 270;
 

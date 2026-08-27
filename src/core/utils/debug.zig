@@ -2,7 +2,6 @@
 //! User-facing diagnostics and verbose tracing, routed through std.log.
 
 const std = @import("std");
-const build = @import("build_options");
 
 // Extracts the bare filename without ".zig" extension so the module tag is
 // short enough for log lines like "[module] message".
@@ -12,10 +11,6 @@ inline fn moduleFromSrc(src: std.builtin.SourceLocation) []const u8 {
         basename[0 .. basename.len - 4]
     else
         basename;
-}
-
-inline fn infoEnabled() bool {
-    return build.enable_debug_logging;
 }
 
 // Routed through std.log (rather than std.debug.print with hardcoded ANSI
@@ -32,7 +27,6 @@ pub inline fn warn(comptime fmt: []const u8, args: anytype) void {
     log(std.log.warn, fmt, moduleFromSrc(@src()), args);
 }
 pub inline fn info(comptime fmt: []const u8, args: anytype) void {
-    if (!infoEnabled()) return;
     log(std.log.info, fmt, moduleFromSrc(@src()), args);
 }
 

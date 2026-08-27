@@ -43,6 +43,7 @@ const prompt = if (build_options.has_seg_prompt) @import("prompt") else struct {
     pub fn draw(_: anytype, _: anytype, _: anytype, _: anytype) !u16 { return 0; }
     pub fn isActive() bool { return false; }
 };
+const vim = if (build_options.has_vim) @import("vim") else struct {};
 const segmod = @import("segment");
 const barwin = @import("win");
 const tags = if (build_options.has_seg_tags) @import("tags") else struct {
@@ -55,7 +56,36 @@ const clock = if (build_options.has_seg_clock) @import("clock") else struct {
     pub fn draw(_: anytype, _: anytype, _: anytype, x: u16) !u16 { return x; }
     pub fn secondElapsed(_: anytype) bool { return false; }
 };
-const title = if (build_options.has_seg_title) @import("title") else @import("title_stub");
+const title = if (build_options.has_seg_title) @import("title") else struct {
+    const u = @import("utils");
+    const t = @import("types");
+    const d = @import("drawing");
+    const c = @import("core");
+    pub const min_width: u16 = 0;
+    pub const offscreen_rect: u.Rect = .{ .x = std.math.maxInt(i16), .y = std.math.maxInt(i16), .width = 0, .height = 0 };
+    pub const TitleRenderContext = struct {
+        dc: *d.DrawContext,
+        config: t.BarConfig,
+        height: u16,
+        start_x: u16,
+        width: u16,
+        conn: c.Connection,
+    };
+    pub const TitleSnapshot = struct {
+        focused_window: ?u32,
+        focused_title: []const u8,
+        minimized_title: []const u8,
+        current_ws_wins: []const u32,
+        minimized_set: *const std.AutoHashMapUnmanaged(u32, void),
+        titles: []const []const u8 = &.{},
+        geoms: []const ?u.Rect = &.{},
+    };
+    pub const ClickTarget = struct { window: u32, minimized: bool };
+    pub fn fetchWindowTitleInto(_: anytype, _: anytype, _: anytype, _: anytype) !void {}
+    pub fn fetchTitlesAndGeoms(_: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype) void {}
+    pub fn hitTest(_: anytype, _: anytype, _: anytype, _: anytype) !?ClickTarget { return null; }
+    pub fn draw(_: anytype, _: anytype, _: anytype, _: anytype) !u16 { return 0; }
+};
 const carousel = if (build_options.has_seg_carousel) @import("carousel") else struct {
     pub fn scrollingActive() bool { return false; }
     pub fn pollDeadlineMs(_: anytype, _: anytype, _: anytype) i32 { return -1; }
@@ -330,6 +360,7 @@ const State = struct {
         }
         try s.focused_title.ensureTotalCapacity(allocator, 256);
         tags.invalidate();
+        if (build_options.has_seg_layout) segmod.invalidateCachedWidths();
         return s;
     }
 
@@ -749,11 +780,16 @@ pub fn init() !void {
     submitDraw();
     _ = xcb.xcb_map_window(cs.conn, bar.setup.win_id);
     _ = xcb.xcb_flush(cs.conn);
+    if (build_options.has_vim) {
+        vim.register();
+        try vim.init(cs.alloc, prompt.default_max_input);
+    }
     try prompt.init(cs.alloc, cs.conn);
 }
 
 pub fn deinit() void {
     prompt.deinit();
+    if (build_options.has_vim) vim.deinit(core.getState().alloc);
     if (gBar.state) |s| {
         _ = xcb.xcb_destroy_window(s.win.conn, s.win.win_id);
         s.render.dc.deinit();
