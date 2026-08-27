@@ -406,6 +406,16 @@ pub fn run() !void {
             },
         };
 
+        // Drain signals BEFORE the reload/reexec flags are consumed below. A
+        // signal byte (SIGUSR1/SIGHUP) dispatches requestReload, which sets a
+        // flag AND writes a wake byte into this same pipe; consuming flags
+        // first let the byte be drained-and-discarded in the same poll
+        // iteration, leaving the flag set but nothing to wake the loop again
+        // (poll sleeps until unrelated X traffic or a timer). Draining first
+        // makes the consumption below see the flag it just set.
+        if ((fds[fd_signal].revents & std.posix.POLL.IN) != 0)
+            signals.drainAndDispatch(signal_fd);
+
         // The reload flag is also set directly by the reload_config keybinding
         // (which writes a wake byte to the pipe, but the byte can be dropped if
         // the pipe is full). Consume it every iteration, BEFORE the ready split:
@@ -430,11 +440,8 @@ pub fn run() !void {
         } else if ((fds[fd_xcb].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
             debug.err("X11 connection error, shutting down", .{});
             break;
-        } else {
-            if ((fds[fd_xcb].revents & std.posix.POLL.IN) != 0) handleXcbEvents();
-
-            if ((fds[fd_signal].revents & std.posix.POLL.IN) != 0)
-                signals.drainAndDispatch(signal_fd);
+        } else if ((fds[fd_xcb].revents & std.posix.POLL.IN) != 0) {
+            handleXcbEvents();
         }
 
         if (build_options.has_bar) _ = bar.updateClock(); // return value reserved, currently unused

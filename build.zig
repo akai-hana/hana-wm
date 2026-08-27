@@ -158,6 +158,9 @@ pub fn build(b: *std.Build) !void {
         var test_it = discovery.modules.iterator();
         while (test_it.next()) |entry| {
             if (!std.mem.endsWith(u8, entry.key_ptr.*, "_test")) continue;
+            // clock_test imports the `clock` module, which only exists when
+            // src/bar/segments/clock.zig is present (has_seg_clock).
+            if (!has_seg_clock and std.mem.eql(u8, entry.key_ptr.*, "clock_test")) continue;
             const t = b.addTest(.{ .root_module = entry.value_ptr.* });
             unit_test_step.dependOn(&b.addRunArtifact(t).step);
         }
@@ -175,7 +178,7 @@ pub fn build(b: *std.Build) !void {
     // type-checks AND enforces the sync-owned wire rules.
     const check_step = b.step("check", "Type-check + layer guards");
     check_step.dependOn(&exe.step);
-    const layers = b.addSystemCommand(&.{ "./dev/scripts/check-layers.sh" });
+    const layers = b.addSystemCommand(&.{"./dev/scripts/check-layers.sh"});
     layers.step.dependOn(&exe.step);
     check_step.dependOn(&layers.step);
 }
