@@ -199,4 +199,23 @@ pub fn applyModelLevel(m: *model.Model) void {
             _ = s.focus_mru.append(w);
         }
     }
+
+    // Membership repair: the adoption pass registered every surviving window
+    // as a base-tiled member of its home workspace (which also appended it to
+    // tiled_order), but the loop above clears and rebuilds tiled_order from a
+    // file that may not record everything — a record-less first restore, or a
+    // window whose tiled slot was dropped before the file was written. Without
+    // a tiled slot the window has no placement and the reconcile parks it
+    // offscreen indefinitely. Re-append any base-tiled member that the file
+    // did not list (in store order, appended to the list tail).
+    for (0..m.store.count()) |i| {
+        const it = m.store.at(i);
+        const e = it.val;
+        if (e.mode != .base) continue;
+        if (e.mode.base != .tiled) continue;
+        const home = e.home_ws orelse continue;
+        if (m.ws[home].tiled_order.indexOfScalar(it.key) != null) continue;
+        if (m.ws[home].tiled_order.len >= model.max_tiled_per_ws) continue;
+        _ = m.ws[home].tiled_order.append(it.key);
+    }
 }
