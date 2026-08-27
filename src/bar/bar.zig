@@ -33,15 +33,25 @@ const window = @import("window");
 const drawing = @import("drawing");
 const prompt = if (build_options.has_seg_prompt) @import("prompt") else struct {
     pub fn blinkTick() void {}
-    pub fn blinkPollTimeoutMs() i32 { return std.math.maxInt(i32); }
-    pub fn handlePromptKeypress(_: anytype, _: anytype) bool { return false; }
+    pub fn blinkPollTimeoutMs() i32 {
+        return std.math.maxInt(i32);
+    }
+    pub fn handlePromptKeypress(_: anytype, _: anytype) bool {
+        return false;
+    }
     pub fn toggle() void {}
     pub fn init(_: anytype, _: anytype) !void {}
     pub fn deinit() void {}
     pub fn invalidateReloadCaches() void {}
-    pub fn consumeRedrawRequest() bool { return false; }
-    pub fn draw(_: anytype, _: anytype, _: anytype, _: anytype) !u16 { return 0; }
-    pub fn isActive() bool { return false; }
+    pub fn consumeRedrawRequest() bool {
+        return false;
+    }
+    pub fn draw(_: anytype, _: anytype, _: anytype, _: anytype) !u16 {
+        return 0;
+    }
+    pub fn isActive() bool {
+        return false;
+    }
 };
 const vim = if (build_options.has_vim) @import("vim") else struct {};
 const segmod = @import("segment");
@@ -52,9 +62,15 @@ const tags = if (build_options.has_seg_tags) @import("tags") else struct {
 
 const clock = if (build_options.has_seg_clock) @import("clock") else struct {
     pub const clock_measure_string = "";
-    pub fn tickDeadlineMs() i32 { return std.math.maxInt(i32); }
-    pub fn draw(_: anytype, _: anytype, _: anytype, x: u16) !u16 { return x; }
-    pub fn secondElapsed(_: anytype) bool { return false; }
+    pub fn tickDeadlineMs() i32 {
+        return std.math.maxInt(i32);
+    }
+    pub fn draw(_: anytype, _: anytype, _: anytype, x: u16) !u16 {
+        return x;
+    }
+    pub fn secondElapsed(_: anytype) bool {
+        return false;
+    }
 };
 const title = if (build_options.has_seg_title) @import("title") else struct {
     const u = @import("utils");
@@ -83,12 +99,20 @@ const title = if (build_options.has_seg_title) @import("title") else struct {
     pub const ClickTarget = struct { window: u32, minimized: bool };
     pub fn fetchWindowTitleInto(_: anytype, _: anytype, _: anytype, _: anytype) !void {}
     pub fn fetchTitlesAndGeoms(_: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype) void {}
-    pub fn hitTest(_: anytype, _: anytype, _: anytype, _: anytype) !?ClickTarget { return null; }
-    pub fn draw(_: anytype, _: anytype, _: anytype, _: anytype) !u16 { return 0; }
+    pub fn hitTest(_: anytype, _: anytype, _: anytype, _: anytype) !?ClickTarget {
+        return null;
+    }
+    pub fn draw(_: anytype, _: anytype, _: anytype, _: anytype) !u16 {
+        return 0;
+    }
 };
 const carousel = if (build_options.has_seg_carousel) @import("carousel") else struct {
-    pub fn scrollingActive() bool { return false; }
-    pub fn pollDeadlineMs(_: anytype, _: anytype, _: anytype) i32 { return -1; }
+    pub fn scrollingActive() bool {
+        return false;
+    }
+    pub fn pollDeadlineMs(_: anytype, _: anytype, _: anytype) i32 {
+        return -1;
+    }
 };
 
 const all_dirty: u5 = blk: {
@@ -902,6 +926,12 @@ pub fn getBarHeight() u16 {
 }
 
 /// Screen area not covered by the bar, as a Rect (x=0, y=bar inset or 0).
+/// Window id of the bar, or null before init(). Lets the boot-time
+/// window adoption skip the WM's own window.
+pub fn winId() ?u32 {
+    return if (gBar.state) |s| s.win.win_id else null;
+}
+
 pub fn workAreaRect() utils.Rect {
     const cs = core.getState();
     const bar_height: u16 = if (isVisible()) getBarHeight() else 0;

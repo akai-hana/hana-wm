@@ -7,6 +7,7 @@ const core = @import("core");
 const xcb = core.xcb;
 const types = @import("types");
 const utils = @import("utils");
+const restart = @import("restart");
 const constants = @import("constants");
 const x11_masks = @import("x11_masks");
 const debug = @import("debug");
@@ -258,7 +259,8 @@ fn executeAction(action: *const types.Action) void {
     switch (action.*) {
         // Core
         .close_window => if (focus.getFocused()) |win| closeWindow(win),
-        .reload_config => utils.reload(),
+        .reload_config => restart.requestReload(),
+        .reload_hana => restart.requestReexec(),
         .dump_state => dumpState(),
         .exec => |cmd| spawn.executeShellCommand(cmd) catch |err| debug.err("exec failed: {}", .{err}),
         .sequence => |acts| for (acts) |*a| executeAction(a),

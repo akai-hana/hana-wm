@@ -22,6 +22,7 @@ const floating = if (build_options.has_floating) @import("floating") else null;
 const borders = @import("borders");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
+const restart_state = @import("restart_state");
 
 // XSizeHints flags (ICCCM §4.1.2.3)
 const p_max_size: u32 = 0x20;
@@ -782,15 +783,236 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     parseSizeHintsIntoCache(win, normal_hints_cookie);
     populateFocusCacheFromCookies(conn, win, protocols_cookie, hints_cookie);
 
-    // Proactively cache the child → parent mapping so findManagedWindow
-    // can skip the X11 tree walk for this window's sub-windows.  The
-    // parent is known from the MapRequest event; if it is a managed
-    // toplevel, future EnterNotify/ButtonNotify events on children of
-    // this window resolve in O(1) instead of O(depth) blocking round
-    // trips.
-    cacheChildWindow(event.window, event.parent);
+    // Shared admission policy (MapRequest path). The cookie firing above is
+    // specific to the MapRequest event source; everything from here on (the
+    // model registration + grabs + child-cache seeding) is identical to the
+    // boot-time adoption path, so it lives in admitWindow.
+    admitWindow(win, target_ws.index, on_current);
+}
 
-    actions.mapRequest(win, target_ws.index, on_current);
+/// Admission policy shared by the MapRequest path (handleMapRequest) and the
+/// boot-time adoption path (adoptRootWindows). Both sources fire and drain
+/// their property cookies and resolve the target workspace BEFORE calling
+/// here; this is the single place where a window is registered with the model
+/// and its keyboard grabs seeded. One map-request path, one adoption path, one
+/// admission policy.
+///
+/// `cacheChildWindow` maps the window to root: for a MapRequest toplevel its
+/// parent IS root, and for adoption root is the only meaningful parent (there
+/// is no map-request event), so both paths funnel through the same cache write
+/// — an entry keyed on the (now-managed) toplevel itself, which
+/// findManagedWindow's direct `is_managed` hit short-circuits anyway.
+fn admitWindow(win: u32, target_ws: u8, on_current: bool) void {
+    const cs = core.getState();
+    actions.mapRequest(win, target_ws, on_current);
+    cacheChildWindow(win, cs.root);
+}
+
+/// Linear scan for a window's restore record. Restore files are small
+/// (bounded by the model's store_capacity), so a flat scan is cache-local and
+/// avoids allocating a lookup map just for adoption.
+fn findWindowRecord(windows: []const restart_state.WindowRecord, win: u32) ?*const restart_state.WindowRecord {
+    for (windows) |*r| {
+        if (r.win == win) return r;
+    }
+    return null;
+}
+
+/// Target workspace for an adopted window: the restore record's home
+/// workspace (lowest set bit of its mask) when present, else the currently
+/// active workspace. Deliberately NOT the spawn-queue/rules resolution —
+/// those describe brand-new spawns, not pre-existing windows.
+fn restoredOrCurrent(record: ?*const restart_state.WindowRecord) u8 {
+    if (record) |r| {
+        if (r.mask != 0) return @intCast(@import("model").lowestBit(r.mask));
+    }
+    return tracking.getCurrentWorkspace() orelse 0;
+}
+
+/// Re-applies a restore record's mask and mode onto an already-registered
+/// model entry. Registration (admitWindow → actions.mapRequest) creates the
+/// entry as a base-tiled window on its target workspace; this overwrites the
+/// per-window state that survived the re-exec so the caller's reconcile can
+/// place it exactly as before. Mode bookkeeping that would otherwise drift
+/// (tiled_order membership, count_minimized) is routed through the model's own
+/// transitions rather than patched by hand.
+fn applyRestoredRecord(win: u32, record: *const restart_state.WindowRecord) void {
+    const model = pipeline.model();
+    const e = model.store.getPtr(win) orelse return;
+
+    e.mask = record.mask;
+
+    switch (record.mode) {
+        .base => |b| switch (b) {
+            .tiled => {
+                // Registration already created a base-tiled entry with its
+                // home_ws populated; nothing further to patch.
+            },
+            .floating => |rect| {
+                // Mirror toggleFloating's floating storage: mode + home_ws
+                // null (a floating window has no tiled slot). The caller's
+                // reconcile sizes the window from this rect.
+                e.mode = .{ .base = .{ .floating = rect } };
+                e.home_ws = null;
+            },
+        },
+        .fullscreen => {
+            // Fullscreen truth is model-side; sync places the fullscreen
+            // winner from this mode alone, so no wire action is needed here.
+            e.mode = record.mode;
+        },
+        .minimized => |restored| {
+            // Call the model's minimize to keep count_minimized and home_ws
+            // bookkeeping consistent, then patch in the restored payload
+            // (which carries the pre-minimize mode and tiled slot). The window
+            // stays hidden: minimize removes it from tiled_order and the
+            // caller's reconcile parks it. On a store-full minimize refusal we
+            // leave the window base-tiled (it maps) rather than corrupting the
+            // minimize count.
+            @import("model").minimize(model, win) catch return;
+            if (model.store.getPtr(win)) |me| {
+                me.mode = .{ .minimized = restored };
+                me.home_ws = null;
+            }
+        },
+    }
+}
+
+/// Adopts top-level windows that pre-existed the WM's (re)start as direct
+/// root children (hana never reparents — clients are root children, borders
+/// via the client's own X border), so after a re-exec the fresh process takes
+/// over the old session's windows instead of waiting for new maps.
+///
+/// Per-window policy:
+///   - skip already-managed windows, the WM's own bar window, and
+///     override-redirect popups (never manage those);
+///   - unmapped windows are adopted ONLY when the restore file records them
+///     as minimized (a surviving minimized window must stay hidden); other
+///     unmapped windows are likely withdrawn toplevels and are skipped;
+///   - each admitted window registers through the shared admitWindow path on
+///     its restored-or-current workspace;
+///   - a restore record (if any) then re-applies the window's mask and mode
+///     directly on the model entry.
+///
+/// CALLING CONTRACT: this does NOT reconcile. Placement derives from
+/// tiled_order / focus_mru, which are rebuilt by restart_state.applyModelLevel
+/// AFTER this returns; a reconcile here would place pre-restore state. The
+/// caller (main) therefore runs:
+///     adoptRootWindows() → restart_state.applyModelLevel(m) → one reconcile.
+/// Returns the number of windows admitted (restored-minimized ones included).
+pub fn adoptRootWindows() !usize {
+    // Defensive boot-order guard: adoption expects the window module's state
+    // (child cache, spawn queue) to be initialized; if window.init hasn't run
+    // yet, there is nothing safe to touch.
+    if (state == null) return 0;
+
+    const cs = core.getState();
+    const conn = cs.conn;
+
+    const tree_reply = xcb.xcb_query_tree_reply(conn, xcb.xcb_query_tree(conn, cs.root), null) orelse return 0;
+    defer std.c.free(tree_reply);
+    const children = xcb.xcb_query_tree_children(tree_reply);
+    const child_count: usize = @intCast(xcb.xcb_query_tree_children_length(tree_reply));
+
+    const loaded = restart_state.loaded();
+
+    var adopted: usize = 0;
+    for (children[0..child_count]) |win| {
+        // Double-manage guard (parity with handleMapRequest): never re-admit a
+        // window another path already manages.
+        if (tracking.isManaged(win)) continue;
+
+        // The WM's own bar window is a root child we created; leave it alone.
+        if (build_options.has_bar) {
+            if (bar.winId()) |bar_win| {
+                if (bar_win == win) continue;
+            }
+        }
+
+        const attr_reply = xcb.xcb_get_window_attributes_reply(
+            conn,
+            xcb.xcb_get_window_attributes(conn, win),
+            null,
+        ) orelse continue;
+        const override_redirect = attr_reply.*.override_redirect != 0;
+        const map_state = attr_reply.*.map_state;
+        std.c.free(attr_reply);
+
+        // Override-redirect windows are transient/popup — never manage.
+        if (override_redirect) continue;
+
+        // Visibility gate: adopt mapped windows; adopt unmapped ONLY when the
+        // restore file says they were minimized (they must stay hidden).
+        const record = if (loaded) |f| findWindowRecord(f.windows, win) else null;
+        if (map_state != xcb.XCB_MAP_STATE_VIEWABLE) {
+            if (record == null or record.?.mode != .minimized) continue;
+        }
+
+        // Claim the management event mask so the adopted window delivers the
+        // PropertyNotify/StructureNotify/FocusChange events managed windows
+        // rely on (mirror of handleMapRequest's preamble).
+        _ = xcb.xcb_change_window_attributes(
+            conn,
+            win,
+            xcb.XCB_CW_EVENT_MASK,
+            &[_]u32{x11_masks.EventMasks.managed_window},
+        );
+
+        // ── Fire the same property cookies the MapRequest path fires ──
+        var c_wm_class: ?xcb.xcb_get_property_cookie_t = null;
+        if (cs.config.workspaces.rules.items.len > 0 and utils.getAtomOrZero("WM_CLASS") != 0) {
+            c_wm_class = xcb.xcb_get_property(conn, property_no_delete, win, utils.getAtomOrZero("WM_CLASS"), xcb.XCB_ATOM_STRING, 0, constants.property_max_length);
+        }
+
+        var c_net_wm_pid: ?xcb.xcb_get_property_cookie_t = null;
+        if (state.?.spawn_queue.items.len > 0) {
+            c_net_wm_pid = xcb.xcb_get_property(conn, property_no_delete, win, utils.getAtomOrZero("_NET_WM_PID"), xcb.XCB_ATOM_CARDINAL, 0, 1);
+        }
+
+        const normal_hints_cookie = xcb.xcb_get_property(
+            conn,
+            property_no_delete,
+            win,
+            xcb.XCB_ATOM_WM_NORMAL_HINTS,
+            xcb.XCB_ATOM_WM_SIZE_HINTS,
+            0,
+            wm_normal_hints_long_length,
+        );
+        const protocols_cookie = fireWMProtocolsQuery(conn, win) orelse
+            xcb.xcb_get_property(conn, property_no_delete, win, 0, xcb.XCB_ATOM_ATOM, 0, max_property_length);
+        const hints_cookie = xcb.xcb_get_property(
+            conn,
+            property_no_delete,
+            win,
+            xcb.XCB_ATOM_WM_HINTS,
+            xcb.XCB_ATOM_WM_HINTS,
+            0,
+            wm_hints_long_length,
+        );
+
+        // Adoption never resolves the target workspace from these cookies
+        // (restored-or-current wins, not spawn rules), so discard the two
+        // conditionally-fired replies to keep the XCB queue from accumulating
+        // unconsumed results.
+        if (c_wm_class) |c| xcb.xcb_discard_reply(conn, c.sequence);
+        if (c_net_wm_pid) |c| xcb.xcb_discard_reply(conn, c.sequence);
+
+        parseSizeHintsIntoCache(win, normal_hints_cookie);
+        populateFocusCacheFromCookies(conn, win, protocols_cookie, hints_cookie);
+
+        // Register on the restored-or-current workspace. on_current=false so
+        // actions.mapRequest does NOT reconcile per-window (the caller owns
+        // the single end-of-adoption reconcile) or steal model focus before
+        // applyModelLevel restores the session's focus.
+        admitWindow(win, restoredOrCurrent(record), false);
+
+        if (record) |r| applyRestoredRecord(win, r);
+
+        adopted += 1;
+    }
+
+    debug.info("Adopted {d} pre-existing windows", .{adopted});
+    return adopted;
 }
 
 fn unmanageWindow(win: u32) void {

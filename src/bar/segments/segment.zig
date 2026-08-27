@@ -23,28 +23,44 @@ const focus = @import("focus");
 const build_options = @import("build_options");
 
 const tags = if (build_options.has_seg_tags) @import("tags") else struct {
-    pub fn getCachedWorkspaceWidth() u16 { return 0; }
+    pub fn getCachedWorkspaceWidth() u16 {
+        return 0;
+    }
     pub const fallback_width: u16 = 0;
-    pub fn draw(_: anytype, _: anytype, _: anytype, x: u16, _: anytype, _: anytype, _: anytype) !u16 { return x; }
+    pub fn draw(_: anytype, _: anytype, _: anytype, x: u16, _: anytype, _: anytype, _: anytype) !u16 {
+        return x;
+    }
 };
 const clock = if (build_options.has_seg_clock) @import("clock") else struct {
-    pub fn draw(_: anytype, _: anytype, _: anytype, x: u16) !u16 { return x; }
+    pub fn draw(_: anytype, _: anytype, _: anytype, x: u16) !u16 {
+        return x;
+    }
 };
 const layout_seg = if (build_options.has_seg_layout) @import("layout") else struct {
-    pub fn getCachedWidth() u16 { return 0; }
+    pub fn getCachedWidth() u16 {
+        return 0;
+    }
     pub fn invalidate() void {}
-    pub fn draw(_: anytype, _: anytype, _: anytype, x: u16) !u16 { return x; }
+    pub fn draw(_: anytype, _: anytype, _: anytype, x: u16) !u16 {
+        return x;
+    }
 };
 const variants = if (build_options.has_seg_variants) @import("variants") else struct {
-    pub fn getCachedWidth() u16 { return 0; }
+    pub fn getCachedWidth() u16 {
+        return 0;
+    }
     pub fn invalidate() void {}
-    pub fn draw(_: anytype, _: anytype, _: anytype, x: u16) !u16 { return x; }
+    pub fn draw(_: anytype, _: anytype, _: anytype, x: u16) !u16 {
+        return x;
+    }
 };
 const title = if (build_options.has_seg_title) @import("title") else struct {
     pub const min_width: u16 = 0;
 };
 const prompt = if (build_options.has_seg_prompt) @import("prompt") else struct {
-    pub fn isActive() bool { return false; }
+    pub fn isActive() bool {
+        return false;
+    }
     pub fn toggle() void {}
 };
 

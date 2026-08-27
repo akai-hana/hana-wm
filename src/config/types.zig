@@ -16,7 +16,12 @@ pub const Color = u32;
 pub const Action = union(enum) {
     exec: []const u8,
     close_window,
+    /// Unified reload: re-exec the current binary if it changed since boot,
+    /// otherwise hot-reload the config (see restart.requestReload).
     reload_config,
+    /// Unconditionally re-exec hana (replaces the running binary with the
+    /// one at the resolved executable path), regardless of whether it changed.
+    reload_hana,
     toggle_layout,
     toggle_layout_reverse,
     toggle_bar_visibility,

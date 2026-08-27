@@ -25,6 +25,7 @@ pub const wake_byte = proc.wake_byte;
 pub const setSignalWriteFd = proc.setSignalWriteFd;
 pub const quit = proc.quit;
 pub const reload = proc.reload;
+pub const wake = proc.wake;
 pub const consumeReload = proc.consumeReload;
 pub const makePipe = proc.makePipe;
 
