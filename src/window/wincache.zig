@@ -119,15 +119,19 @@ pub fn removeWindow(window_id: u32) void {
 }
 
 fn updateBorderColor(conn: core.Connection, win: u32, color: u32, comptime create_if_missing: bool) bool {
-    const gop = live().getOrPut(win) catch return false;
-    if (!gop.found_existing) {
-        if (!create_if_missing) return false;
-        gop.value_ptr.* = .{ .border = color };
+    if (create_if_missing) {
+        // Bounded by max_entries like every other writer: refuse to grow past
+        // the ceiling so WM-churn of distinct windows can't bloat the cache
+        // (the caller falls back to an unconditional send in that case).
+        const wd = getOrPutDefault(win) catch return false;
+        if (wd.border == color) return true;
+        wd.border = color;
         utils.setBorderPixel(conn, win, color);
         return true;
     }
-    if (gop.value_ptr.border == color) return true;
-    gop.value_ptr.border = color;
+    const wd = live().getPtr(win) orelse return false;
+    if (wd.border == color) return true;
+    wd.border = color;
     utils.setBorderPixel(conn, win, color);
     return true;
 }

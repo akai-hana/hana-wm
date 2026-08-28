@@ -303,8 +303,12 @@ fn accumulate(allocator: std.mem.Allocator, old_val: *Value, incoming: Value, co
         }
         inc.array.deinit(allocator);
     } else {
-        const v = if (do_copy) try deepCopyValue(allocator, incoming) else incoming;
-        try old_val.array.append(allocator, v);
+        // do_copy=true: `incoming` is already a fresh deep copy owned by the
+        // caller (freed by its errdefer on error), so take it by ownership
+        // rather than copying again -- re-copying leaked the original for the
+        // scalar duplicate-key path. do_copy=false transfers the parser's own
+        // value the same way.
+        try old_val.array.append(allocator, incoming);
     }
 }
 

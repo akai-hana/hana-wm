@@ -66,8 +66,10 @@ wire_allowed() {
     return 0
 }
 
-# Rule 2 allowlist (same §13): files permitted to call xcb_grab_server
+# Rule 2 allowlist (same §13): files permitted to grab the server
 # outside src/sync/. Per plan this list starts non-empty and shrinks.
+# Note: grab_allowed covers BOTH the raw xcb.xcb_grab_server call and the
+# utils.grabServer wrapper (Rule 2 matches both; see pat2 below).
 grab_allowed() {
     case "$1" in
         # x11wire.zig hosts the shared grab/ungrabAndFlush PRIMITIVES
@@ -75,6 +77,13 @@ grab_allowed() {
         # these; the primitive home is not itself a policy violation, but
         # grep cannot tell call from definition.
         src/core/utils/x11wire.zig) ;;
+
+        # Bar's OWN window lifecycle, the counterpart of its Rule 1 entry:
+        # position toggle (Y-reposition) and show/hide (map/unmap) bracket
+        # their config/visibility changes with a server grab and issue the
+        # wire reconfig before reconcile. Already documented in wire_allowed;
+        # the grab is the same policy boundary.
+        src/bar/bar.zig) ;;
 
         *) return 1 ;;
     esac
@@ -94,8 +103,12 @@ while IFS= read -r line; do
 done < <(grep -rnE "$pat1" src/ --include='*.zig' | grep -v '^src/sync/' | code_lines)
 
 # Rule 2: server grab only under src/sync/ (+ allowlist). Comment mentions of
-# xcb_grab_server are stripped so documentation doesn't trip the guard.
-pat2='xcb\.xcb_grab_server'
+# xcb_grab_server are stripped so documentation doesn't trip the guard. Match
+# BOTH the raw XCB primitive and the utils.grabServer/ungrabServer wrappers —
+# siblings like sync.zig route grabs through the Sink vtable (sink.grabServer,
+# never literally `utils.grabServer`), so a wrapper match isolates files that
+# grab the server directly, which is exactly the policy being enforced.
+pat2='xcb\.xcb_grab_server|utils\.grabServer|utils\.ungrabServer'
 while IFS= read -r line; do
     f=${line%%:*}
     grab_allowed "$f" && continue

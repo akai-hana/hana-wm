@@ -4,4 +4,11 @@
     .version = "0.1.0",
     .minimum_zig_version = "0.16.0",
     .paths = .{""},
+    .links = .{
+        "xcb-keysyms",
+        "xkbcommon-x11",
+        "xcb-cursor",
+        "xcb-randr",
+        "pangocairo-1.0",
+    },
 }

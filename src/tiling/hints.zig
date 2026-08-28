@@ -29,12 +29,16 @@ pub fn applyHints(rect: utils.Rect, h: model.SizeHints) utils.Rect {
         const fw: f32 = @floatFromInt(w);
         const fh: f32 = @floatFromInt(ht);
         if (fw > fh * h.max_aspect) {
-            w = @intFromFloat(@round(fh * h.max_aspect));
-            w = snapDimToIncrement(w, 0, h.inc_width);
+            // Clamp the float-derived dimension to the u16 range before the
+            // narrowing cast: a misbehaving client can declare a huge
+            // max_aspect (e.g. 1e6), and @intFromFloat out of range would
+            // panic/UB instead of being capped by the later max_width min.
+            const aspect_w: u16 = @intFromFloat(@min(@round(fh * h.max_aspect), @as(f32, 65535)));
+            w = snapDimToIncrement(aspect_w, 0, h.inc_width);
             if (h.max_width > 0) w = @min(w, h.max_width);
         } else if (fh > fw * h.min_aspect) {
-            ht = @intFromFloat(@round(fw * h.min_aspect));
-            ht = snapDimToIncrement(ht, 0, h.inc_height);
+            const aspect_h: u16 = @intFromFloat(@min(@round(fw * h.min_aspect), @as(f32, 65535)));
+            ht = snapDimToIncrement(aspect_h, 0, h.inc_height);
             if (h.max_height > 0) ht = @min(ht, h.max_height);
         }
     }

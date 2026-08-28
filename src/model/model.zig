@@ -448,7 +448,10 @@ pub fn cycleLayout(m: *Model, dir: i32) void {
     // [0, n), so no negative correction is needed (the old `if (next < 0)`
     // was unreachable).
     const next = @mod(cur + dir, n);
-    p.kind = @enumFromInt(@as(u3, @intCast(next)));
+    // Cast to LayoutKind's tag type (inferred via std.meta.Tag), so the
+    // width follows automatically if the enum ever grows past 8 variants
+    // (no hardcoded u3 that would silently truncate).
+    p.kind = @enumFromInt(@as(std.meta.Tag(LayoutKind), @intCast(next)));
     p.variant_idx = 0;
 }
 

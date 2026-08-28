@@ -31,9 +31,7 @@ pub fn init(_: std.mem.Allocator) void {
     sync.init();
 }
 pub inline fn model() *model_mod.Model {
-    if (std.debug.runtime_safety) {
-        std.debug.assert(initialized);
-    }
+    if (!initialized) @panic("pipeline.model() called before init()");
     return &instance;
 }
 
@@ -163,9 +161,9 @@ pub inline fn reconcileGrabFocus(o: sync.ReconcileOpts, t: focus.FocusTransition
 }
 
 /// Grab server → commit focus transition → reconcile → ungrabAndFlush,
-/// atomically. Focus lands BEFORE geometry:适用于 most actions where the
-/// target window is already mapped and focus must precede the retile so
-/// border colors and stacking are correct on the first frame.
+/// atomically. Focus lands BEFORE geometry: for most actions where the target
+/// window is already mapped and focus must precede the retile so border colors
+/// and stacking are correct on the first frame.
 pub inline fn reconcileUnderGrabNowWithFocus(o: sync.ReconcileOpts, t: focus.FocusTransition) void {
     reconcileGrabFocus(o, t, true);
 }

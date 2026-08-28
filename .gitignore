@@ -15,8 +15,8 @@ zig-out/
 # other garbage
 *.xml
 
-# other garbage directories
-.*
+# local development tooling state (opencode goals, node_modules, package files)
+.opencode/
 
 # harness run artifacts (regenerated locally; only golden/ is tracked)
 dev/harness/out/

@@ -227,7 +227,7 @@ fn tryLoadConfig(allocator: std.mem.Allocator, path: []const u8) ?types.Config {
 /// Loads config in priority order: (1) ~/.config/hana/, (2) ./config/, (3) ~/.config/hana/config.toml,
 /// (4) ./config.toml, (5) embedded fallback.
 pub fn loadConfigDefault(allocator: std.mem.Allocator) !types.Config {
-    const home = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "./config";
+    const home = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "/";
     const xdg_config_home = std.c.getenv("XDG_CONFIG_HOME");
     var config_home_owned: bool = false;
     const config_home = if (xdg_config_home) |ch|
