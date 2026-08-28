@@ -17,7 +17,29 @@ var signal_pipe: [2]std.posix.fd_t = .{ -1, -1 };
 // Async-signal-safe handler: writes the signal number as a byte to the pipe.
 fn signalHandler(signo: std.posix.SIG) callconv(.c) void {
     const byte: u8 = @intCast(@intFromEnum(signo));
-    _ = std.os.linux.write(signal_pipe[pipe_write], &[_]u8{byte}, 1);
+    writeSignalByte(byte);
+}
+
+/// Async-signal-safe, non-blocking write of one signal byte to the self-pipe,
+/// with full-pipe recovery. When the pipe is full (EAGAIN) the queued backlog
+/// is drained and the write retried so THIS signal byte is never silently
+/// dropped. Drained backlog bytes are safe to discard: the event loop polls
+/// the TERM/INT/reload flags independently of the pipe, and SIGCHLD reaping is
+/// poll-driven too, so a drained byte only defers an already-queued wake.
+fn writeSignalByte(byte: u8) void {
+    const rfd = signal_pipe[pipe_read];
+    const wfd = signal_pipe[pipe_write];
+    while (true) {
+        const rc: isize = @bitCast(std.os.linux.write(wfd, &[_]u8{byte}, 1));
+        if (rc > 0) return; // landed
+        const err: usize = @intCast(-rc);
+        if (err == @intFromEnum(std.posix.E.AGAIN) and rfd >= 0) {
+            var buf: [16]u8 = undefined;
+            while (@as(isize, @bitCast(std.os.linux.read(rfd, &buf, buf.len))) > 0) {}
+            continue;
+        }
+        return; // other error or closed fd: give up (lossy, as before)
+    }
 }
 
 // Re-entry guard for the SIGUSR2 backtrace dump: the unwind is NOT

@@ -131,10 +131,10 @@ pub fn build(b: *std.Build) !void {
 
     // Some hosts (e.g. musl-based distros) report an empty default system
     // include/library search path, so headers and libraries under /usr aren't
-    // found. Point at them explicitly; the extra paths are harmless elsewhere.
-    root_mod.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
-    root_mod.addIncludePath(.{ .cwd_relative = "/usr/include" });
-
+    // found. Point at them explicitly when they exist; the extra paths are
+    // harmless elsewhere and absent on non-FHS distros (NixOS, Guix) whose
+    // toolchains already provide the real locations.
+    addSystemDirs(root_mod, b);
     // Wire & link
     Module.wireAll(root_mod, &discovery.modules, shared_ctx);
     SystemLibraries.link(root_mod);
@@ -142,8 +142,7 @@ pub fn build(b: *std.Build) !void {
     // give each one the same system paths for its @cImport / link work.
     var mod_it = discovery.modules.valueIterator();
     while (mod_it.next()) |mod| {
-        mod.*.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
-        mod.*.addIncludePath(.{ .cwd_relative = "/usr/include" });
+        addSystemDirs(mod.*, b);
     }
 
     // Unit tests for the reworked architecture layers (src/test/*.zig):
@@ -281,6 +280,18 @@ fn pathExists(root: std.Io.Dir, io: anytype, rel_path: []const u8) bool {
         return true;
     } else |_| {}
     return false;
+}
+
+/// Conditionally points a module's system include/library search path at
+/// /usr/include and /usr/lib. These are only helpful on FHS-style hosts that
+/// report an empty default search path (e.g. some musl distros); on non-FHS
+/// distros (NixOS, Guix) the directories don't exist and adding them would be
+/// noise, so gate on presence.
+fn addSystemDirs(mod: *std.Build.Module, b: *std.Build) void {
+    const io = b.graph.io;
+    const root = b.build_root.handle;
+    if (pathExists(root, io, "/usr/lib")) mod.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+    if (pathExists(root, io, "/usr/include")) mod.addIncludePath(.{ .cwd_relative = "/usr/include" });
 }
 
 // Module namespace discovery & wiring

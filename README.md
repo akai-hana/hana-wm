@@ -106,7 +106,7 @@ zig build
 ```
 
 ## Dependencies
-- Zig (master branch)
+- Zig 0.16.0 (`build.zig.zon` pins `minimum_zig_version = "0.16.0"`)
 - X server (xorg/xlibre)
 - libxcb (for, well, everything)
 - xcb-util-cursor (for custom cursor support)

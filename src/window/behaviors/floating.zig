@@ -212,9 +212,14 @@ fn computeMoveRect(drag: DragState, dx: i16, dy: i16, wa: WorkArea, was_pending_
     const raw_y: i32 = @as(i32, drag.start_win_y) + @as(i32, dy);
     const win_w: i32 = drag.start_win_width;
     const win_h: i32 = drag.start_win_height;
+    // Raw drag coords are unbounded i32; pin down to the i16 wire range
+    // before the narrowing cast so a window dragged beyond ±32767 (or into
+    // negative X11 coords) can't UB in ReleaseFast.
+    const mx: i32 = std.math.clamp(if (was_pending_float) raw_x else snapAxis(raw_x, win_w, wa.left, wa.right, snap), std.math.minInt(i16), std.math.maxInt(i16));
+    const my: i32 = std.math.clamp(if (was_pending_float) raw_y else snapAxis(raw_y, win_h, wa.top, wa.bottom, snap), std.math.minInt(i16), std.math.maxInt(i16));
     return .{
-        .x = @intCast(if (was_pending_float) raw_x else snapAxis(raw_x, win_w, wa.left, wa.right, snap)),
-        .y = @intCast(if (was_pending_float) raw_y else snapAxis(raw_y, win_h, wa.top, wa.bottom, snap)),
+        .x = @intCast(mx),
+        .y = @intCast(my),
         .width = drag.start_win_width,
         .height = drag.start_win_height,
     };
@@ -255,8 +260,8 @@ fn computeResizeRect(drag: DragState, dx: i16, dy: i16, wa: WorkArea) utils.Rect
     const pinned_y: i32 = if (moving_y < anchor_y) anchor_y - clamped_h else new_top;
 
     return .{
-        .x = @intCast(pinned_x),
-        .y = @intCast(pinned_y),
+        .x = @intCast(std.math.clamp(pinned_x, std.math.minInt(i16), std.math.maxInt(i16))),
+        .y = @intCast(std.math.clamp(pinned_y, std.math.minInt(i16), std.math.maxInt(i16))),
         .width = @intCast(clamped_w),
         .height = @intCast(clamped_h),
     };

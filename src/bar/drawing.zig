@@ -364,7 +364,10 @@ pub const DrawContext = struct {
         self.setPangoText(text);
         var width: c_int = undefined;
         c.pango_layout_get_pixel_size(self.font.pango_layout, &width, null);
-        return @intCast(width);
+        // Pango returns signed pixels; clamp to the u16 range so an
+        // unexpected negative or >65535 measurement can't panic/UB the cast.
+        const w: c_int = std.math.clamp(width, 0, @as(c_int, std.math.maxInt(u16)));
+        return @intCast(w);
     }
 
     /// Shared blit body: cairo_surface_flush + xcb_copy_area of [x, x+w),

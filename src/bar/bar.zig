@@ -416,7 +416,7 @@ const State = struct {
     }
 
     fn markAllSegmentsDirty(self: *State) void {
-        self.segment_dirty = 0b11111;
+        self.segment_dirty = all_dirty;
     }
 
     /// Records the on-screen bounds of a clickable segment as the layout pass
@@ -651,7 +651,12 @@ const State = struct {
                     right_x += seg_w;
                     if (pending_gap) right_x += scaled_spacing;
                 }
-                pending_gap = drew;
+                // A failed draw still occupies its reserved slot as empty
+                // (background) space, so the next segment leftward gets the
+                // same inter-segment gap the layout pass computed. Keeping the
+                // bookkeeping uniform here prevents desyncing downstream
+                // placement on the next frame.
+                pending_gap = true;
                 self.clearSegmentDirty(segments[i]);
             } else {
                 pending_gap = true;
@@ -684,8 +689,14 @@ const State = struct {
         for (r.config.layout.items) |lay| {
             switch (lay.position) {
                 .left, .center => {
+                    // Available horizontal space before the right cluster.
+                    const avail = r.width -| x -| right_total;
                     const remaining = if (lay.position == .center)
-                        @max(title.min_width, r.width -| x -| right_total -| scaled_spacing)
+                        // Clamp the reserved title width to the space actually
+                        // available so a tight right+left row can't overflow the
+                        // title into the right-segment area (min_width is a floor
+                        // only when the space exists; otherwise it shrinks).
+                        @min(@max(title.min_width, avail -| scaled_spacing), avail)
                     else
                         0;
                     for (lay.segments.items) |seg| {

@@ -162,7 +162,7 @@ fn connectToX() !X {
         &[_]u32{x11_masks.EventMasks.root_window},
     );
     if (xcb.xcb_request_check(conn, cookie)) |err| {
-        debug.err("Another window manager is already running: {*}", .{err});
+        debug.err("Another window manager is already running (error_code={d}, type={d})", .{ err.*.error_code, err.*.response_type });
         std.c.free(err);
         return error.AnotherWMRunning;
     }
