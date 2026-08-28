@@ -24,6 +24,16 @@ const restart = @import("restart");
 const restart_state = @import("restart_state");
 const focus = @import("focus");
 
+// Always keep Zig's crash handler armed, even though this project defaults to
+// the release profile (ReleaseFast strips DWARF and disables runtime safety,
+// so an uncaught SIGSEGV/SIGBUS would otherwise abort with zero trace — the
+// "silent death" misdiagnosed as a hang). With the handler, the fault address
+// lands in ~/hana-crash.log (and full symbolized stacks in Debug builds).
+pub const std_options: std.Options = .{
+    .enable_segfault_handler = true,
+    .allow_stack_tracing = true,
+};
+
 pub fn main() !void {
     const x = try connectToX();
     defer xcb.xcb_disconnect(x.conn);

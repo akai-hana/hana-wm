@@ -20,6 +20,58 @@ fn signalHandler(signo: std.posix.SIG) callconv(.c) void {
     _ = std.os.linux.write(signal_pipe[pipe_write], &[_]u8{byte}, 1);
 }
 
+// Re-entry guard for the SIGUSR2 backtrace dump: the unwind is NOT
+// async-signal-safe (it allocates while symbolizing), so a second USR2
+// arriving mid-dump must be dropped rather than deadlock the dump.
+var backtrace_in_progress: std.atomic.Value(bool) = .init(false);
+
+// SIGUSR2: live diagnostic. Dumps the stack of the INTERRUPTED main thread —
+// the exact spot hana is stuck in when it freezes — straight to stderr
+// (-> ~/hana-crash.log via .xinitrc). Trigger with: kill -USR2 <pid>
+//
+// Unlike SIGUSR1, no byte is written to the self-pipe: the point is to work
+// when the event loop itself is wedged and would never dispatch a pipe byte.
+// Using the kernel-provided ucontext makes the trace show the pre-signal
+// frame (the hang site), not this handler.
+fn handleBacktraceRequest(
+    sig: std.posix.SIG,
+    info: *const std.posix.siginfo_t,
+    ctx_ptr: ?*anyopaque,
+) callconv(.c) void {
+    _ = sig;
+    _ = info;
+    if (backtrace_in_progress.swap(true, .acq_rel)) return;
+    defer backtrace_in_progress.store(false, .release);
+
+    const stderr = std.debug.lockStderr(&.{}).terminal();
+    defer std.debug.unlockStderr();
+    stderr.writer.print("hana: SIGUSR2 backtrace of interrupted main thread:\n", .{}) catch return;
+
+    const opt_ctx: ?std.debug.cpu_context.Native = std.debug.cpu_context.fromPosixSignalContext(ctx_ptr);
+    if (opt_ctx) |*ctx| {
+        // allow_unsafe_unwind: the process is wedged anyway, so frame-pointer
+        // heuristics are acceptable. On stripped ReleaseFast builds the trace
+        // prints raw return addresses; Debug builds show source locations.
+        std.debug.writeCurrentStackTrace(.{ .context = ctx, .allow_unsafe_unwind = true }, stderr) catch {};
+    } else {
+        // No ucontext available (unexpected); fall back to a synchronous
+        // top-of-stack capture, which at least shows the handler's callers.
+        var addr_buf: [96]usize = undefined;
+        const trace = std.debug.captureCurrentStackTrace(.{}, &addr_buf);
+        std.debug.dumpStackTrace(&trace);
+    }
+}
+
+// Replaces the default SIGUSR2 disposition with the live backtrace dump.
+fn setupBacktraceHandler() void {
+    const sa: std.posix.Sigaction = .{
+        .handler = .{ .sigaction = handleBacktraceRequest },
+        .mask = std.posix.sigemptyset(),
+        .flags = std.posix.SA.SIGINFO | std.posix.SA.RESTART | std.posix.SA.ONSTACK,
+    };
+    std.posix.sigaction(std.posix.SIG.USR2, &sa, null);
+}
+
 /// Creates the signal self-pipe and installs handlers for SIGHUP/SIGTERM/SIGINT/SIGCHLD.
 pub fn setup() !void {
     signal_pipe = try utils.makePipe();
@@ -34,6 +86,8 @@ pub fn setup() !void {
     // SIGCHLD is reaped in dispatchSignal; the rest control the event loop.
     inline for (.{ std.posix.SIG.HUP, std.posix.SIG.TERM, std.posix.SIG.INT, std.posix.SIG.CHLD, std.posix.SIG.USR1 }) |sig|
         std.posix.sigaction(sig, &sa, null);
+
+    setupBacktraceHandler();
 }
 
 // Closes both ends of the signal pipe.
