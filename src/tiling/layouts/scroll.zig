@@ -1,21 +1,21 @@
-//! Scroll tiling layout (pure port of modules/scroll.zig, viewport state model-owned).
-//! Half-screen slots in a scrollable horizontal strip with viewport management.
+//! Scroll tiling layout.
+//! Places windows in half-screen slots along a scrollable horizontal strip.
 
 const utils = @import("utils");
 const model = @import("model");
 const engine = @import("engine");
 
-// CALLER DUTIES: before compute(), the caller must replicate on
-// params.scroll_offset / params.scroll_prev_count:
+// CALLER DUTIES: the viewport bookkeeping on params.scroll_offset /
+// params.scroll_prev_count. Offset clamping is internal to compute(), so only
+// the snap-right-on-grow and the count update are required
+// (pipeline.preReconcileDuties):
 //   1. if (n > scroll_prev_count) scroll_offset = maxOffset(n, slotWidth(wa.w), wa.w);
-//   2. scroll_offset = clamp(scroll_offset, 0, maxOffset(...));
-//   3. scroll_prev_count = n;
-// This module exposes slotWidth/maxOffset as the single source of truth for
-// those adjustments (mirrors legacy exports consumed by actions/tiling.zig).
+//   2. scroll_prev_count = n;
+// slotWidth/maxOffset are the single source of truth for these adjustments
+// and are also consumed directly by window/actions.zig.
 
 /// Pixel width of one scroll slot: exactly half the screen width. Single
-/// source of truth; step, snapOffsetToWindow, and compute all derive
-/// their geometry from it.
+/// source of truth; maxOffset and compute derive their geometry from it.
 pub inline fn slotWidth(screen_w: u16) i32 {
     return @intCast(screen_w / 2);
 }
@@ -31,8 +31,8 @@ pub inline fn maxOffset(n: usize, slot_w: i32, screen_w: u16) i32 {
 
 /// Compute scroll layout. Origin top-left, y-down. Each slot is half the
 /// screen width; full gap at screen edges, half-gap at interior slot
-/// boundaries. Off-viewport slots are hidden. Scroll offset is
-/// caller-managed. All dims u16, clamped to min_dim.
+/// boundaries. Off-viewport slots are hidden. Scroll offset is caller-set;
+/// compute clamps it internally. All dims u16, clamped to min_dim.
 pub fn compute(v: engine.View, out: *engine.List) void {
     const windows = v.order;
 
@@ -51,7 +51,7 @@ pub fn compute(v: engine.View, out: *engine.List) void {
 
     // Border is subtracted here (once) from the full screen height. emitView
     // calls applyHints which only applies ICCCM constraints (inc snap,
-    // max-size clamp, aspect ratio) — it does NOT touch border, so there is
+    // max-size clamp, aspect ratio). It does NOT touch border, so there is
     // no double-subtraction.
     const content_h: u16 = engine.shrinkClamped(screen_h, m.gap *| 2 +| m.border *| 2, v.env.min_dim);
     const win_y: i32 = @as(i32, @intCast(engine.waY(&v))) + @as(i32, @intCast(m.gap));

@@ -1,5 +1,5 @@
-//! Grid tiling layout (pure port of modules/grid.zig).
-//! Arranges windows in an evenly divided grid, with rigid or relaxed row sizing.
+//! Grid tiling layout.
+//! Splits the work area into equal cells, rigid or relaxed per the variant.
 
 const utils = @import("utils");
 const engine = @import("engine");
@@ -26,6 +26,7 @@ pub fn compute(v: engine.View, out: *engine.List) void {
     const cell_h = (screen_h -| (grid.rows + 1) *| m.gap) / grid.rows;
     const win_h = engine.shrinkClamped(cell_h, bm, v.env.min_dim);
     const win_w = engine.shrinkClamped(cell_w, bm, v.env.min_dim);
+    const wa_y = engine.waY(&v);
 
     // In relaxed mode a partial last row shares the full screen width
     // rather than a narrower grid-column width, so fewer columns means
@@ -34,7 +35,7 @@ pub fn compute(v: engine.View, out: *engine.List) void {
     const last_row_count = n % grid.cols;
     const partial_win_w: u16 = if (v.env.grid_relaxed and last_row_count != 0) blk: {
         const count: u16 = @intCast(last_row_count);
-        const partial_cell_w = (screen_w -| (count + 1) * m.gap) / count;
+        const partial_cell_w = (screen_w -| (count + 1) *| m.gap) / count;
         break :blk engine.shrinkClamped(partial_cell_w, bm, v.env.min_dim);
     } else win_w;
 
@@ -45,7 +46,7 @@ pub fn compute(v: engine.View, out: *engine.List) void {
 
         const rect = utils.Rect{
             .x = @intCast(m.gap +| col *| (cell_w + m.gap)),
-            .y = @intCast(engine.waY(&v) +| m.gap +| row *| (cell_h + m.gap)),
+            .y = @intCast(wa_y +| m.gap +| row *| (cell_h + m.gap)),
             .width = if (is_partial_row) partial_win_w else win_w,
             .height = win_h,
         };
@@ -61,7 +62,8 @@ pub fn compute(v: engine.View, out: *engine.List) void {
 
 /// Returns the column/row counts of the smallest square grid holding `n`
 /// windows. Special-cases `n == 3` to use a 1x3 layout instead of 2x2 with
-/// a dead cell. Uses integer ceiling-sqrt; at most 6 iterations for n <= 64.
+/// a dead cell. Uses an integer ceiling-sqrt loop; at most 7 iterations
+/// for n <= 64.
 inline fn calcGridShape(n: usize) struct { cols: u16, rows: u16 } {
     if (n == 3) return .{ .cols = 3, .rows = 1 };
     var cols: u16 = 1;

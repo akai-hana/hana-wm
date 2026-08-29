@@ -1,4 +1,4 @@
-//! Core utilities — FACADE.
+//! Core utilities: FACADE.
 //!
 //! Pure, xcb-free geometry/scaling helpers and re-exports every public decl
 //! so existing `utils.X` call sites are unchanged:
@@ -126,7 +126,8 @@ pub const scaling = struct {
     pub inline fn scaleToPixels(value: anytype, reference: f32) f32 {
         return if (value.is_percentage) reference * (value.value / 100.0) else value.value;
     }
-    /// reference dimension, matching the two-sided inset a border represents.
+    /// Resolves a border-width ScalableValue: `v%` becomes half the reference
+    /// dimension (a border insets two sides), an absolute value stays as-is.
     pub fn scaleBorderWidth(value: anytype, reference_dimension: u16) u16 {
         const v: f32 = if (value.is_percentage)
             (value.value / 100.0) * 0.5 * @as(f32, @floatFromInt(reference_dimension))

@@ -10,6 +10,10 @@ const constants = @import("constants");
 const utils = @import("utils");
 const sync = @import("sync");
 const linux = std.os.linux;
+const build_options = @import("build_options");
+const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
+const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
+const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
 
 const Model = model.Model;
 const WindowId = model.WindowId;
@@ -37,7 +41,7 @@ test "bench: findHome scan (100 wins, 10 ws)" {
             regCur(&m, win_id);
             // Override home to target the specific workspace
             if (win_id != 1) {
-                model.moveWindowToWs(&m, win_id, @intCast(ws));
+                workspaces.moveWindowToWs(&m, win_id, @intCast(ws));
             }
             win_id += 1;
         }
@@ -66,12 +70,12 @@ test "bench: fullscreenOccupantOnWs store scan (50 wins)" {
     for (0..50) |i| {
         regCur(&m, @intCast(i + 1));
     }
-    _ = model.toggleFullscreen(&m, 25);
+    _ = fullscreen.toggleFullscreen(&m, 25);
 
     const iterations: usize = 10_000;
     const t0 = nowNs();
     for (0..iterations) |_| {
-        _ = model.fullscreenOccupantOnWs(&m, 0);
+        _ = fullscreen.fullscreenOccupantOnWs(&m, 0);
     }
     const elapsed_ns = nowNs() - t0;
     const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
@@ -88,10 +92,10 @@ test "bench: moveWindowToWs round-trip (50 wins)" {
     const t0 = nowNs();
     for (0..iterations) |_| {
         for (0..50) |i| {
-            model.moveWindowToWs(&m, @intCast(i + 1), 1);
+            workspaces.moveWindowToWs(&m, @intCast(i + 1), 1);
         }
         for (0..50) |i| {
-            model.moveWindowToWs(&m, @intCast(i + 1), 0);
+            workspaces.moveWindowToWs(&m, @intCast(i + 1), 0);
         }
     }
     const elapsed_ns = nowNs() - t0;
@@ -101,6 +105,8 @@ test "bench: moveWindowToWs round-trip (50 wins)" {
 
 test "bench: minimize/restore cycle (32 wins, max budget)" {
     var m = makeModel();
+    try minimize.init();
+    defer minimize.deinit();
     for (0..32) |i| {
         model.register(&m, @intCast(i + 1), 0) catch unreachable;
     }
@@ -109,10 +115,10 @@ test "bench: minimize/restore cycle (32 wins, max budget)" {
     const t0 = nowNs();
     for (0..iterations) |_| {
         for (0..32) |i| {
-            model.minimize(&m, @intCast(i + 1)) catch unreachable;
+            minimize.minimize(&m, @intCast(i + 1)) catch unreachable;
         }
         for (0..32) |i| {
-            model.restore(&m, @intCast(i + 1));
+            minimize.restore(&m, @intCast(i + 1));
         }
     }
     const elapsed_ns = nowNs() - t0;

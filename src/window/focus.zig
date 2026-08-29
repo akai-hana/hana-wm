@@ -9,8 +9,6 @@ const constants = @import("constants");
 const utils = @import("utils");
 const window = @import("window");
 const tracking = @import("tracking");
-const build_options = @import("build_options");
-const bar = if (build_options.has_bar) @import("bar") else null;
 
 // Module state
 //
@@ -22,7 +20,7 @@ const bar = if (build_options.has_bar) @import("bar") else null;
 const State = struct {
     /// Focus TRUTH is `model.focused`; this is a private protocol-side
     /// cache of the last window we APPLIED X input focus to (dedupe + grab
-    /// bookkeeping). Not a second store — readers go through getFocused().
+    /// bookkeeping). Not a second store; readers go through getFocused().
     last_applied: ?u32 = null,
     suppress_reason: core.FocusSuppressReason = .none,
 
@@ -55,10 +53,10 @@ const State = struct {
     pre_protocols_cookie: ?xcb.xcb_get_property_cookie_t = null,
 };
 
-// PATTERN: Module-global state with explicit init/deinit lifecycle.
-// This avoids allocator threading through every function call.
-// The init/deinit pair is called from main.zig's startup/shutdown sequence.
-// All functions operate on `g` directly — no passing state as parameters.
+// PATTERN: module-global state with explicit init/deinit lifecycle (called
+// from main.zig); avoids allocator threading through every function call.
+// All functions operate on `state` directly rather than passing it as a
+// parameter.
 var state: ?State = null;
 
 pub fn init() void {
@@ -83,7 +81,7 @@ pub fn deinit() void {
     state = .{};
 }
 
-// ── Query API (pure reads) ──────────────────────────────────────────────
+// ---- Query API (pure reads) ----
 
 /// Focus truth: reads model.focused; falls back to the protocol
 /// cache only before pipeline.init (boot).
@@ -115,7 +113,7 @@ pub inline fn getLastEventTime() u32 {
     return state.?.last_event_time;
 }
 
-// ── Mutation API (side effects) ────────────────────────────────────────
+// ---- Mutation API (side effects) ----
 
 /// Update the X11 event timestamp.  Called by the EnterNotify and
 /// LeaveNotify handlers before they call into focus logic.
@@ -153,7 +151,7 @@ pub inline fn setSuppressReason(r: core.FocusSuppressReason) void {
 //
 // Owned here rather than in window.zig because grabs are a focus-protocol
 // concern, acquired/released only during focus transitions. The sole
-// non-transition call site is window.zig's registerWindowOffscreen, served by
+// non-transition call site is actions.mapRequest (spawn admission), served by
 // the public initWindowGrabs shim below.
 
 /// Unconditionally release all button grabs on `win`, then, if `focused` is
@@ -213,12 +211,12 @@ pub const Reason = enum {
 };
 
 // CommitFlags: controls which side effects applyPendingFocus applies.
-// All fields are non-defaulted so every call site must be explicit; an
-// accidental zero-flags call fails to compile, preventing silent
-// no-protocol transitions that are hard to debug.
+// All fields are non-defaulted (except take_focus_known, see below) so every
+// call site must be explicit; an accidental zero-flags call fails to compile,
+// preventing silent no-protocol transitions that are hard to debug.
 const CommitFlags = struct {
     /// Send xcb_set_input_focus. False for no_input (never receives focus
-    /// protocol) and globally_active (manages its own focus, ICCCM §4.1.7).
+    /// protocol) and globally_active (manages its own focus, ICCCM 4.1.7).
     set_input_focus: bool,
 
     /// Raise to the top of the stack. True for click/command (user-driven)
@@ -239,8 +237,9 @@ const CommitFlags = struct {
     /// Used by pointer_sync for windows that may silently drop focus.
     arm_confirm: bool,
 
-    /// Call bar.scheduleFocusRedraw. False only inside a server grab; the
-    /// caller then calls bar.redrawInsideGrab() instead.
+    /// Bump the core focus fact so focus-consuming surfaces (e.g. the bar's
+    /// title segment) redraw. False only inside a server grab; the caller
+    /// triggers the synchronous in-grab redraw (bar.redrawInsideGrab) instead.
     schedule_bar: bool,
 
     /// New suppress_reason. setFocus derives it via suppressionFor(); direct
@@ -362,7 +361,7 @@ pub fn applyPendingFocus(t: FocusTransition) void {
                 state.?.confirm_win = intent.win;
             }
 
-            if (intent.flags.schedule_bar) if (build_options.has_bar) bar.scheduleFocusRedraw(intent.win);
+            if (intent.flags.schedule_bar) core.bumpFocus();
 
             advertiseActiveWindow(intent.win);
         },
@@ -372,7 +371,7 @@ pub fn applyPendingFocus(t: FocusTransition) void {
             state.?.suppress_reason = .none;
             const cs = core.getState();
             focusNow(cs.conn, cs.root);
-            if (build_options.has_bar) bar.scheduleFocusRedraw(null);
+            core.bumpFocus();
             advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
         },
         .none => {},
@@ -411,11 +410,11 @@ pub fn drainPendingConfirm() void {
     _ = xcb.xcb_poll_for_reply(conn, cookie.sequence, &reply, &err);
 
     if (reply == null and err == null) {
-        // Not ready yet — keep cookie alive for next batch
+        // Not ready yet; keep the cookie alive for next batch
         return;
     }
 
-    // Reply ready or error — consume and clear state
+    // Reply ready or error: consume and clear state
     clearConfirmState();
 
     if (err) |e| {
@@ -489,7 +488,7 @@ pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
 }
 
 pub fn clearFocus() void {
-    // Model is truth — clear it here so every clearFocus caller gets
+    // Model is truth; clear it here so every clearFocus caller gets
     // one-store semantics without a separate model call.
     {
         const pl = @import("pipeline");
@@ -503,7 +502,7 @@ pub fn clearFocus() void {
     state.?.suppress_reason = .none;
     const cs = core.getState();
     focusNow(cs.conn, cs.root);
-    if (build_options.has_bar) bar.scheduleFocusRedraw(null);
+    core.bumpFocus();
     advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
 }
 
@@ -565,7 +564,7 @@ pub fn grabFocusClear() void {
     @import("model").clearFocus(pl.model());
     const ft = prepareClearFocus();
     if (ft == .none) {
-        // last_applied already null — no X focus to clear, but still
+        // last_applied already null: no X focus to clear, but still
         // reconcile so borders/stacking reflect the no-focus state.
         pl.reconcileUnderGrabNow(.{});
         return;
@@ -641,7 +640,7 @@ pub fn drainPointerSync() void {
     _ = xcb.xcb_poll_for_reply(cs.conn, cookie.sequence, &reply, &err);
 
     if (reply == null and err == null) {
-        // Not ready yet — keep cookie alive for next batch
+        // Not ready yet; keep the cookie alive for next batch
         return;
     }
 
@@ -657,11 +656,13 @@ pub fn drainPointerSync() void {
 
     const p = pointer_reply orelse return;
     const child = p.*.child;
-    if (child == 0 or child == cs.root or !window.isValidManagedWindow(child)) return;
-    // A stale reply may reference a window from a workspace that is no longer
-    // current (e.g. after a workspace switch); discard it rather than
-    // redirecting focus to an offscreen window.
-    if (!tracking.isOnCurrentWorkspace(child)) return;
+    if (child == 0 or child == cs.root) return;
+    // Same ownership predicate as a workspace switch's pointer pick: the
+    // window must be visible on the CURRENT workspace (managed + tagged +
+    // not minimized). A stale reply referencing an off-workspace or
+    // unmanaged window is discarded rather than redirecting focus.
+    const pl = @import("pipeline");
+    if (!@import("model").visibleOn(pl.model(), child, pl.model().current)) return;
     grabFocus(child, .pointer_sync);
 }
 
@@ -700,7 +701,7 @@ pub fn drainTilingOpSettle() void {
     _ = xcb.xcb_poll_for_reply(cs.conn, cookie.sequence, &reply, &err);
 
     if (reply == null and err == null) {
-        // Not ready yet — keep cookie alive for next batch
+        // Not ready yet; keep the cookie alive for next batch
         return;
     }
 
@@ -737,7 +738,7 @@ inline fn appendVisible(w: u32, len: *usize) void {
 /// Build an ordered list of currently-visible windows for cycling.
 ///
 /// All visible windows in tracking-table order (the legacy tiling-pool
-/// branch is gone — the pool list is never fed). Emits only windows that are
+/// branch is gone; the pool list is never fed). Emits only windows that are
 /// on the current workspace and not minimized. Returns the count written into
 /// `cycle_buf`, or 0 if none.
 fn collectVisibleWindows() usize {

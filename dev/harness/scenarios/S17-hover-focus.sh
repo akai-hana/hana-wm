@@ -1,4 +1,4 @@
-# S17 — hover focus: EnterNotify over a window must focus it.
+# S17 - hover focus: EnterNotify over a window must focus it.
 #
 # Regression gate for fix P0-2 (the managed-window registry was empty, so
 # findManagedWindow never resolved and hover focus silently died).

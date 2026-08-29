@@ -15,7 +15,11 @@ const x11_masks = @import("x11_masks");
 const scale = @import("scale");
 const debug = @import("debug");
 const build_options = @import("build_options");
-const bar = if (build_options.has_bar) @import("bar") else null;
+// The optional chrome surface's boot lifecycle (init/deinit) is invoked
+// through the core-owned `surfaces` composition root, never by importing the
+// bar module here. When the bar is absent `surfaces` is the comptime `null`
+// type and the guarded calls below compile away.
+const surfaces = @import("plugins").Surfaces;
 const input = @import("input");
 const window = @import("window");
 const actions = @import("actions");
@@ -26,7 +30,7 @@ const focus = @import("focus");
 
 // Always keep Zig's crash handler armed, even though this project defaults to
 // the release profile (ReleaseFast strips DWARF and disables runtime safety,
-// so an uncaught SIGSEGV/SIGBUS would otherwise abort with zero trace — the
+// so an uncaught SIGSEGV/SIGBUS would otherwise abort with zero trace, the
 // "silent death" misdiagnosed as a hang). With the handler, the fault address
 // lands in ~/hana-crash.log (and full symbolized stacks in Debug builds).
 pub const std_options: std.Options = .{
@@ -75,7 +79,7 @@ pub fn main() !void {
     // The guard matters: a config reload swaps cs.config and the reload path
     // (events.handleConfigReload) deinits the displaced boot config itself.
     // Without the identity check this defer would free it a second time at
-    // shutdown — the GP fault seen in reload-then-quit runs.
+    // shutdown, the GP fault seen in reload-then-quit runs.
     const initial_config = core.getState().config;
     defer if (core.getState().config == initial_config) initial_config.deinit(alloc);
 
@@ -96,18 +100,18 @@ pub fn main() !void {
     // so there is no X state to push.
     actions.seedParamsFromConfig();
 
-    // D8: direct subsystem init (the plugin registry was deleted — only bar
+    // D8: direct subsystem init (the plugin registry was deleted; only bar
     // ever registered hooks).
-    if (build_options.has_bar) bar.init() catch |err| debug.err("bar init failed: {}", .{err});
-    defer if (build_options.has_bar) bar.deinit();
+    if (build_options.has_bar) surfaces.init() catch |err| debug.err("bar init failed: {}", .{err});
+    defer if (build_options.has_bar) surfaces.deinit();
 
     _ = xcb.xcb_flush(x.conn);
     debug.info("hana booted up successfully!", .{});
 
     // Re-exec session hand-off (restart.execNext sets HANA_RESTORE before
     // execv; a plain boot has no such var). The session's windows survive a
-    // re-exec because hana never reparents — clients are direct root
-    // children — so the successor adopts them, re-applies the persisted
+    // re-exec because hana never reparents: clients are direct root
+    // children, so the successor adopts them, re-applies the persisted
     // model level, then runs ONE reconcile that places everything exactly
     // as it was. Adoption runs AFTER bar.init() so bar.winId() and the
     // bar-aware workarea are live.
@@ -120,7 +124,7 @@ pub fn main() !void {
             };
             if (n > 0) {
                 restart_state.applyModelLevel(pipeline.model());
-                // Restore X input focus on the session's focused window —
+                // Restore X input focus on the session's focused window;
                 // the mapRequest path uses the same focus-after-geometry
                 // entry (the adopted window is already mapped).
                 if (pipeline.model().focused) |focused| {

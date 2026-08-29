@@ -1,4 +1,4 @@
-# S03 — min-restore: minimize parks + refocuses; restore returns to same slot.
+# S03 - min-restore: minimize parks + refocuses; restore returns to same slot.
 spawn_client A
 spawn_client B
 dump before-min

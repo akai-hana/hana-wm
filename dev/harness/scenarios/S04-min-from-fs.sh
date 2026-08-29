@@ -1,4 +1,4 @@
-# S04 — min-from-fs: minimize while fullscreen, restore re-enters fullscreen
+# S04 - min-from-fs: minimize while fullscreen, restore re-enters fullscreen
 # with the saved rect (BC08).
 spawn_client A
 spawn_client B

@@ -1,5 +1,5 @@
-//! BSP tiling layout (pure port of modules/leaf.zig).
-//! Recursively bisects the screen and window list along the longer axis to produce balanced leaf regions.
+//! BSP (leaf) tiling layout.
+//! Recursively bisects the screen along the longer axis to produce balanced regions.
 
 const utils = @import("utils");
 const model = @import("model");
@@ -44,14 +44,14 @@ fn tileRegion(
     const n = windows.len;
     if (n == 0) return;
 
-    const b2: u16 = utils.doubledBorder(m);
+    const border2: u16 = utils.doubledBorder(m);
 
     if (n == 1) {
         const rect = utils.Rect{
             .x = @intCast(x),
             .y = @intCast(y),
-            .width = engine.shrinkClamped(w, b2, min_dim),
-            .height = engine.shrinkClamped(h, b2, min_dim),
+            .width = engine.shrinkClamped(w, border2, min_dim),
+            .height = engine.shrinkClamped(h, border2, min_dim),
         };
         // All leaf placements are visible; hints applied by engine.emitView.
         engine.emitView(v, out, windows[0], rect, true);

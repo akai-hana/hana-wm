@@ -262,14 +262,14 @@ pub const Layout = enum {
     /// Windows keep their current positions. Configurable via
     /// `tiling.layout = "floating"` (resolved via stringToEnum, not
     /// layout_table) but never cyclable: excluded from layout_table, so
-    /// toggleLayout can't select it and the cycle skips it.
+    /// the layout cycle (model.cycleLayout) skips it.
     floating,
 };
 
 /// One entry per cyclable layout: every `Layout` tag except `.floating`.
 /// Single source of truth for the name<->tag mapping used across tiling.zig,
-/// workspaces.zig, and config.zig. Table order is also cycle order for
-/// toggleLayout/toggleLayoutReverse.
+/// workspaces.zig, and config.zig. Table order (== model.LayoutKind order) is
+/// also the cycle order traversed by model.cycleLayout / actions.cycleLayoutKind.
 pub const LayoutInfo = struct {
     tag: Layout,
     /// Canonical name: what gets stored in cfg.tiling.layouts and shown in
@@ -633,21 +633,21 @@ pub const Config = struct {
     /// before it snaps. Set to 0 to disable. Percentage is relative to screen width.
     snap_distance: parser.ScalableValue = parser.ScalableValue.absolute(8.0),
 
-    pub fn deinit(self: *Config, a: std.mem.Allocator) void {
-        // Must precede `self.keybindings.deinit(a)`: the map holds `*const
-        // Action` pointers borrowed from self.keybindings' elements, so it
-        // must be torn down before those Actions are freed.
-        self.keybind_resolver.deinit(a);
+    pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
+        // Must precede `self.keybindings.deinit(allocator)`: the map holds
+        // `*const Action` pointers borrowed from self.keybindings' elements,
+        // so it must be torn down before those Actions are freed.
+        self.keybind_resolver.deinit(allocator);
 
-        for (self.keybindings.items) |*kb| kb.action.deinit(a);
-        self.keybindings.deinit(a);
+        for (self.keybindings.items) |*kb| kb.action.deinit(allocator);
+        self.keybindings.deinit(allocator);
 
-        for (self.mouse_bindings.items) |*mb| mb.action.deinit(a);
-        self.mouse_bindings.deinit(a);
+        for (self.mouse_bindings.items) |*mb| mb.action.deinit(allocator);
+        self.mouse_bindings.deinit(allocator);
 
-        self.workspaces.deinit(a);
+        self.workspaces.deinit(allocator);
 
-        self.bar.deinit(a);
-        self.tiling.deinit(a);
+        self.bar.deinit(allocator);
+        self.tiling.deinit(allocator);
     }
 };

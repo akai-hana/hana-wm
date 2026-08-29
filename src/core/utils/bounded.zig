@@ -1,10 +1,10 @@
 //! Bounded collections (D6 split from utils.zig).
 //!
 //! Shared shape used by window.zig's caches, minimize.zig's minimized-window
-//! record, and input.zig's pending-spawn table: a fixed-capacity array plus
+//! record, and spawn.zig's pending-spawn table: a fixed-capacity array plus
 //! a length, with linear-scan find, append, and remove-and-compact.
 //!
-//! Layer note: xcb-free by construction — safe for model/tiling to import.
+//! Layer note: xcb-free by construction, safe for model/tiling to import.
 
 const std = @import("std");
 
@@ -90,7 +90,7 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         }
 
         /// Inserts `item` at index `i` (clamped to len), shifting the tail
-        /// right. Returns false (untouched) when full; total otherwise.
+        /// right. Returns false (untouched) when full; true otherwise.
         pub fn insert(self: *Self, i: usize, item: T) bool {
             if (self.len >= capacity) return false;
             const idx = @min(i, self.len);

@@ -1,4 +1,4 @@
-# S12 — client-bw: a client-set border width is recorded and survives retiles
+# S12 - client-bw: a client-set border width is recorded and survives retiles
 # (BC05). Uses tools/setbw.c (compiled on demand) which drives the
 # ConfigureRequest BW path.
 spawn_client A

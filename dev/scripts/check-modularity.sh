@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check-modularity.sh — verify feature-gated modularity
+# check-modularity.sh - verify feature-gated modularity
 #
 # Tests that hana compiles cleanly when optional subsystems are removed.
 # For each scenario, a fresh copy of the project is built with specific
@@ -22,7 +22,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TEMP_BASE="/tmp/hana-modularity-test"
 RESULT_FILE=""
 
-# ── colours ──────────────────────────────────────────────────────────────
+# colours
 if [[ -t 1 ]]; then
     RED=$'\033[0;31m'  GREEN=$'\033[0;32m'  YELLOW=$'\033[0;33m'
     CYAN=$'\033[0;36m' BOLD=$'\033[1m'      RESET=$'\033[0m'
@@ -30,7 +30,7 @@ else
     RED=""  GREEN=""  YELLOW=""  CYAN=""  BOLD=""  RESET=""
 fi
 
-# ── options ──────────────────────────────────────────────────────────────
+# options
 VERBOSE=0
 KEEP_ON_FAILURE=0
 PATTERN=""
@@ -50,7 +50,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# ── setup ────────────────────────────────────────────────────────────────
+# setup
 mkdir -p "$TEMP_BASE"
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -58,7 +58,7 @@ SKIP_COUNT=0
 declare -a FAILED_SCENARIOS=()
 declare -a PASSED_SCENARIOS=()
 
-# ── helpers ──────────────────────────────────────────────────────────────
+# helpers
 
 # Copy project to a temp directory. Excludes .git, build caches, and this
 # script's own output to keep copies small and fast.
@@ -75,7 +75,7 @@ setup_copy() {
 }
 
 # Remove paths (files or directories) relative to a project copy.
-# Paths starting with ! are expects — if the file doesn't exist, skip.
+# Paths starting with ! are expects; if the file doesn't exist, skip.
 remove_paths() {
     local root="$1"
     shift
@@ -146,7 +146,7 @@ run_scenario() {
     fi
 }
 
-# ── test scenarios ───────────────────────────────────────────────────────
+# test scenarios
 #
 # Each call:  run_scenario "name"  path1  path2  ...
 #
@@ -157,11 +157,11 @@ run_scenario() {
 run_scenarios() {
     echo ""
     echo "${BOLD}Feature-gated modularity tests${RESET}"
-    echo "──────────────────────────────"
+    echo "--------------------------------"
 
-    # ── Tier 1: Major subsystem removal ─────────────────────────────────
+    # Tier 1: Major subsystem removal
     echo ""
-    echo "${CYAN}Tier 1 — major subsystems${RESET}"
+    echo "${CYAN}Tier 1: major subsystems${RESET}"
 
     run_scenario \
         "bar (entire subsystem)" \
@@ -173,7 +173,7 @@ run_scenarios() {
 
     run_scenario \
         "floating (behavior module)" \
-        "src/window/behaviors/floating.zig"
+        "src/window/modules/floating.zig"
 
     run_scenario \
         "vim (removable)" \
@@ -187,45 +187,45 @@ run_scenarios() {
     run_scenario \
         "bar + floating" \
         "src/bar" \
-        "src/window/behaviors/floating.zig"
+        "src/window/modules/floating.zig"
 
     run_scenario \
         "tiling + floating" \
         "src/tiling" \
-        "src/window/behaviors/floating.zig"
+        "src/window/modules/floating.zig"
 
     run_scenario \
         "everything optional (bar+tiling+floating)" \
         "src/bar" \
         "src/tiling" \
-        "src/window/behaviors/floating.zig"
+        "src/window/modules/floating.zig"
 
-    # ── Tier 2: Window behaviors ────────────────────────────────────────
+    # Tier 2: Window behaviors
     echo ""
-    echo "${CYAN}Tier 2 — window behaviors${RESET}"
+    echo "${CYAN}Tier 2: window behaviors${RESET}"
 
     run_scenario \
         "fullscreen (behavior module)" \
-        "src/window/behaviors/fullscreen.zig"
+        "src/window/modules/fullscreen.zig"
 
     run_scenario \
         "minimize (behavior module)" \
-        "src/window/behaviors/minimize.zig"
+        "src/window/modules/minimize.zig"
 
     run_scenario \
         "workspaces (behavior module)" \
-        "src/window/behaviors/workspaces.zig"
+        "src/window/modules/workspaces.zig"
 
     run_scenario \
         "all behaviors" \
-        "src/window/behaviors/floating.zig" \
-        "src/window/behaviors/fullscreen.zig" \
-        "src/window/behaviors/minimize.zig" \
-        "src/window/behaviors/workspaces.zig"
+        "src/window/modules/floating.zig" \
+        "src/window/modules/fullscreen.zig" \
+        "src/window/modules/minimize.zig" \
+        "src/window/modules/workspaces.zig"
 
-    # ── Tier 3: Individual tiling layouts ───────────────────────────────
+    # Tier 3: Individual tiling layouts
     echo ""
-    echo "${CYAN}Tier 3 — tiling layouts (individual removal)${RESET}"
+    echo "${CYAN}Tier 3: tiling layouts (individual removal)${RESET}"
 
     local layouts=(master monocle fibonacci grid leaf scroll)
     for layout in "${layouts[@]}"; do
@@ -239,9 +239,9 @@ run_scenarios() {
         "src/tiling/layouts/master.zig" \
         "src/tiling/layouts/monocle.zig"
 
-    # ── Tier 4: Bar segments (individual removal) ───────────────────────
+    # Tier 4: Bar segments (individual removal)
     echo ""
-    echo "${CYAN}Tier 4 — bar segments (individual removal)${RESET}"
+    echo "${CYAN}Tier 4: bar segments (individual removal)${RESET}"
 
     run_scenario \
         "bar segment: -clock" \
@@ -277,9 +277,9 @@ run_scenarios() {
         "src/bar/segments/prompt/prompt.zig" \
         "src/bar/segments/prompt/vim.zig"
 
-    # ── Tier 5: Bar internals ───────────────────────────────────────────
+    # Tier 5: Bar internals
     echo ""
-    echo "${CYAN}Tier 5 — bar internals${RESET}"
+    echo "${CYAN}Tier 5: bar internals${RESET}"
 
     run_scenario \
         "bar internal: -drawing" \
@@ -298,13 +298,13 @@ run_scenarios() {
         "src/bar/segments/segment.zig"
 }
 
-# ── report ───────────────────────────────────────────────────────────────
+# report
 
 print_report() {
     local total=$((PASS_COUNT + FAIL_COUNT + SKIP_COUNT))
 
     echo ""
-    echo "──────────────────────────────"
+    echo "--------------------------------"
     echo "${BOLD}Results${RESET}: ${GREEN}${PASS_COUNT} passed${RESET}, ${RED}${FAIL_COUNT} failed${RESET}, ${SKIP_COUNT} skipped (${total} total)"
     echo ""
 
@@ -325,7 +325,7 @@ print_report() {
     fi
 }
 
-# ── main ─────────────────────────────────────────────────────────────────
+# main
 
 cd "$PROJECT_ROOT"
 

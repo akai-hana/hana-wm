@@ -7,6 +7,13 @@
 //! applyModelLevel() restores model-level fields (current/ws params/orders/
 //! focused). home_ws and count_minimized are derived and NOT serialized.
 //!
+//! Tier 1 seam: each WindowRecord now carries `presence` (model.Presence) and
+//! an opaque `ext` blob. Only `presence` and the identity/mode survive in the
+//! model; `ext` is feature-owned bytes carried verbatim and handed back to
+//! the owning module (via the window_modules registry) during adoption/wire
+//! deserialize. The raw bytes are serialized with std.json as a []const u8
+//! (an array of numbers; ~8 bytes/window, deterministic round-trip).
+//!
 //! Wire format: std.json over the shadow records below, which mirror the
 //! model types field-for-field. Floats round-trip exactly: std.json prints an
 //! f32 as its exact f64 widening and the parse narrows back to the same bits
@@ -19,14 +26,23 @@ const std = @import("std");
 const model = @import("model");
 const debug = @import("debug");
 const constants = @import("constants");
+// The per-feature serialization hooks live on the build-generated
+// `window_modules` registry (never by naming a sub-system module here): a
+// tree without a feature simply has no module providing serializeWindow, so
+// the loop below no-ops for it.
+const window_mods = @import("window_modules").modules;
 
 const MAX_WS = constants.max_workspaces;
 
 /// Per-window record: identity + mode, matched by XID during adoption.
+/// `presence` restores visibility semantics across the re-exec; `ext` is the
+/// opaque feature-owned serialized blob (null when no feature claimed it).
 pub const WindowRecord = struct {
     win: u32,
     mask: model.Mask,
     mode: model.Mode,
+    presence: model.Presence = .present,
+    ext: ?[]const u8 = null,
 };
 
 /// Per-workspace record: layout params + membership lists (ids, not entries).
@@ -38,19 +54,53 @@ pub const WsRecord = struct {
 
 /// Top-level serialized state file.
 pub const StateFile = struct {
+    version: u32 = 2,
+    current: u8,
+    focused: ?u32,
+    all_view_active: bool,
+    workspaces: [MAX_WS]WsRecord,
+    windows: []const WindowRecord,
+};
+
+/// Legacy version-1 window mode: old files may contain a `.minimized` variant
+/// that the new two-variant model.Mode cannot hold. The payload is absorbed
+/// as an empty struct (lenient parse) and conversion re-homes it visible.
+const ModeV1 = union(enum) {
+    base: model.BaseMode,
+    fullscreen: model.FullscreenPayload,
+    minimized: struct {},
+};
+
+/// Legacy version-1 window record (win/mask/mode only; no presence/ext).
+const WindowRecordV1 = struct {
+    win: u32,
+    mask: model.Mask,
+    mode: ModeV1,
+};
+
+/// Legacy version-1 state file (kept only for upgrade tolerance).
+const StateFileV1 = struct {
     version: u32 = 1,
     current: u8,
     focused: ?u32,
     all_view_active: bool,
     next_seq: u32,
     workspaces: [MAX_WS]WsRecord,
-    windows: []const WindowRecord,
+    windows: []const WindowRecordV1,
 };
 
 /// Parsed restore file, if loadToGlobal succeeded. Module-owned: its arena
 /// holds every slice the records reference; freed and replaced by the next
 /// loadToGlobal call. Single-threaded (event-loop thread), like the model.
 var loaded_parsed: ?std.json.Parsed(StateFile) = null;
+
+/// Legacy (v1) upgrade path storage: the converted records and the v1 arena
+/// that owns their workspace slices. Both are module-owneds and kept for the
+/// process lifetime (or until the next loadToGlobal replaces them).
+var g_legacy_active: bool = false;
+var g_legacy_state: StateFile = undefined;
+var g_legacy_windows: [model.store_capacity]WindowRecord = undefined;
+var g_legacy_v1: ?std.json.Parsed(StateFileV1) = null;
 
 /// Default restore path: XDG_RUNTIME_DIR is already per-user, so
 /// `$XDG_RUNTIME_DIR/hana-restore.json` needs no uid suffix; the /tmp
@@ -77,7 +127,25 @@ pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u
     defer allocator.free(windows);
     for (0..n) |i| {
         const item = m.store.at(i);
-        windows[i] = .{ .win = item.key, .mask = item.val.mask, .mode = item.val.mode };
+        // Opaque feature blob: ask each module in registry order whether it
+        // owns this window; the first module that returns bytes claims it.
+        // `blob` memory is allocator-owned and freed by the caller (below).
+        var blob: ?[]const u8 = null;
+        for (window_mods) |mod| {
+            if (mod.serializeWindow) |f| {
+                if (f(item.key, allocator)) |b| {
+                    blob = b;
+                    break;
+                }
+            }
+        }
+        windows[i] = .{
+            .win = item.key,
+            .mask = item.val.mask,
+            .mode = item.val.mode,
+            .presence = item.val.presence,
+            .ext = blob,
+        };
     }
 
     // Workspaces: every slot, ids copied out of the bounded lists. On a
@@ -98,11 +166,10 @@ pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u
     }
 
     const state = StateFile{
-        .version = 1,
+        .version = 2,
         .current = @intCast(m.current),
         .focused = m.focused,
         .all_view_active = m.all_view_active,
-        .next_seq = m.next_seq,
         .workspaces = workspaces,
         .windows = windows,
     };
@@ -139,18 +206,22 @@ pub fn loadToGlobal(allocator: std.mem.Allocator, path: []const u8) !bool {
     };
     defer allocator.free(raw);
 
-    var parsed = std.json.parseFromSlice(StateFile, allocator, raw, .{}) catch |err| {
-        debug.warn("restart_state: restore file unparseable ({s}); booting fresh", .{@errorName(err)});
-        return false;
+    var parsed = std.json.parseFromSlice(StateFile, allocator, raw, .{}) catch {
+        // Legacy-format tolerance: a version-1 file written by a pre-Tier-1
+        // build may carry `.minimized` window modes (and `next_seq`) that the
+        // current two-variant Mode cannot hold. Parse it against the v1
+        // shadow records and convert; minimized windows re-home visible (the
+        // old payload has no module-blob equivalent).
+        return try loadLegacy(allocator, raw);
     };
-    if (parsed.value.version != 1) {
-        debug.warn("restart_state: unsupported restore version {}; booting fresh", .{parsed.value.version});
+    if (parsed.value.version != 2) {
         parsed.deinit();
-        return false;
+        return try loadLegacy(allocator, raw);
     }
 
     if (loaded_parsed) |old| old.deinit();
     loaded_parsed = parsed;
+    g_legacy_active = false;
     debug.info("restart_state: loaded session state ({} windows, {d} workspaces)", .{
         loaded_parsed.?.value.windows.len,
         loaded_parsed.?.value.workspaces.len,
@@ -158,21 +229,68 @@ pub fn loadToGlobal(allocator: std.mem.Allocator, path: []const u8) !bool {
     return true;
 }
 
+/// Parses a legacy version-1 restore file and converts it into a v2
+/// StateFile. The converted windows array is copied into static storage
+/// (model store capacity); the workspace slices alias the v1 parse arena and
+/// are kept alive by `g_legacy_v1`. Minimized v1 windows re-home visible.
+fn loadLegacy(allocator: std.mem.Allocator, raw: []const u8) !bool {
+    if (g_legacy_v1) |old| old.deinit();
+    var v1 = std.json.parseFromSlice(StateFileV1, allocator, raw, .{}) catch |err| {
+        debug.warn("restart_state: restore file unparseable ({s}); booting fresh", .{@errorName(err)});
+        return false;
+    };
+    if (v1.value.version != 1) {
+        debug.warn("restart_state: unsupported restore version {}; booting fresh", .{v1.value.version});
+        v1.deinit();
+        return false;
+    }
+    const f = v1.value;
+    const n = @min(f.windows.len, g_legacy_windows.len);
+    for (f.windows[0..n], 0..) |r, i| {
+        g_legacy_windows[i] = .{
+            .win = r.win,
+            .mask = r.mask,
+            .mode = switch (r.mode) {
+                .base => |b| .{ .base = b },
+                .fullscreen => |fs| .{ .fullscreen = fs },
+                .minimized => .{ .base = .tiled },
+            },
+            .presence = .present,
+            .ext = null,
+        };
+    }
+    g_legacy_state = .{
+        .version = 2,
+        .current = f.current,
+        .focused = f.focused,
+        .all_view_active = f.all_view_active,
+        .workspaces = f.workspaces,
+        .windows = g_legacy_windows[0..n],
+    };
+    g_legacy_v1 = v1;
+    g_legacy_active = true;
+    debug.info("restart_state: loaded legacy session state ({} windows, {d} workspaces)", .{
+        n,
+        f.workspaces.len,
+    });
+    return true;
+}
+
 /// The parsed restore file, if loadToGlobal succeeded.
 pub fn loaded() ?*const StateFile {
+    if (g_legacy_active) return &g_legacy_state;
     if (loaded_parsed) |*p| return &p.value;
     return null;
 }
 
-/// Restores model-level fields into the model: current/focused/all_view/
-/// next_seq, per-ws params, tiled_order and focus_mru — pruned to windows
-/// that are actually registered (closed or never adopted ones are dropped).
-/// Call AFTER the adoption pass registered the surviving windows.
+/// Restores model-level fields into the model: current/focused/all_view,
+/// per-ws params, tiled_order and focus_mru (pruned to windows that are
+/// actually registered (closed or never adopted ones are dropped). Call AFTER
+/// the adoption pass registered the surviving windows.
 ///
-/// count_minimized is intentionally NOT touched here: the adoption pass
-/// re-minimizes each restored-minimized window through model.minimize, which
-/// maintains the counter and next_seq, so this pass only re-lists tiled
-/// membership and copies scalars.
+/// No feature counters live here anymore: extensions own all of their state
+/// (minimize maintains its sequence internally), so this pass only re-lists
+/// tiled membership and copies scalars.
 pub fn applyModelLevel(m: *model.Model) void {
     const f = &(loaded_parsed orelse return).value;
 
@@ -181,7 +299,6 @@ pub fn applyModelLevel(m: *model.Model) void {
     if (f.focused) |w| {
         if (m.store.has(w)) m.focused = w;
     }
-    if (f.next_seq > m.next_seq) m.next_seq = f.next_seq;
 
     for (&m.ws, 0..) |*s, i| {
         const r = &f.workspaces[i];
@@ -203,7 +320,7 @@ pub fn applyModelLevel(m: *model.Model) void {
     // Membership repair: the adoption pass registered every surviving window
     // as a base-tiled member of its home workspace (which also appended it to
     // tiled_order), but the loop above clears and rebuilds tiled_order from a
-    // file that may not record everything — a record-less first restore, or a
+    // file that may not record everything (a record-less first restore, or a
     // window whose tiled slot was dropped before the file was written. Without
     // a tiled slot the window has no placement and the reconcile parks it
     // offscreen indefinitely. Re-append any base-tiled member that the file

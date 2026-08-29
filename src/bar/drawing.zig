@@ -522,13 +522,13 @@ fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const 
 
     while (parts.next()) |part| {
         if (std.mem.startsWith(u8, part, "size="))
-            size = part[5..]
+            size = part["size=".len..]
         else if (std.mem.startsWith(u8, part, "pixelsize="))
-            size = part[10..]
+            size = part["pixelsize=".len..]
         else if (std.mem.startsWith(u8, part, "weight="))
-            weight = part[7..]
+            weight = part["weight=".len..]
         else if (std.mem.startsWith(u8, part, "slant="))
-            slant = part[6..];
+            slant = part["slant=".len..];
     }
 
     const slant_token: []const u8 = if (slant) |s|

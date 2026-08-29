@@ -31,7 +31,7 @@ pub const XkbState = struct {
     /// X connection. Retries up to max_attempts times to handle early-startup
     /// races.
     ///
-    /// No xkb_state/keymap handles are retained — nothing ever read them
+    /// No xkb_state/keymap handles are retained; nothing ever read them
     /// (dispatch resolves from the flat table by design, so CapsLock at
     /// startup cannot pin shifted symbols); they were write+unref-only
     /// lifecycle weight. The keymap is used transiently here and released.

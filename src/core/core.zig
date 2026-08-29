@@ -5,6 +5,7 @@ const std = @import("std");
 
 const types = @import("types");
 const constants = @import("constants");
+const utils = @import("utils");
 
 // Centralized here to avoid repeated @cImport translation across compilation units.
 pub const xcb = @import("x11").xcb;
@@ -64,7 +65,111 @@ pub const State = struct {
     root: WindowId,
     alloc: std.mem.Allocator,
     config: *types.Config,
+    /// Monotonic fact revisions. Bumped by the module that owns each fact
+    /// (focus, window/workspace state, layout) whenever that fact changes.
+    /// Consumers (e.g. the bar, over its draw poll) diff these revisions
+    /// against their last-seen value to decide what to redraw, instead of
+    /// being poked by name. Non-core modules never mutate core's facts;
+    /// they bump the revision of the fact they changed.
+    facts: Facts = .{},
 };
+
+/// Revisions for the facts core publishes. Each counter increments when its
+/// owning module changes the corresponding fact set. Consumers compare the
+/// current value to their cached one to detect "something I render changed".
+pub const Facts = struct {
+    /// Bumped when keyboard/window focus changes (bar: title segment).
+    focus_rev: u32 = 0,
+    /// Bumped when window/workspace state changes (arrange, minimize, tag,
+    /// admit, remove) that re-derive placements (bar: all segments).
+    window_rev: u32 = 0,
+    /// Bumped when the fullscreen occupancy of the current workspace changes
+    /// (a window enters or exits fullscreen, or workspaces switch). Surfaces
+    /// that must hide/show to share the screen (the bar) react to this.
+    fullscreen_rev: u32 = 0,
+    /// Bumped when the tiling/layout kind or variants change (bar: full
+    /// redraw, including a title-data refetch).
+    layout_rev: u32 = 0,
+};
+
+/// Current focus fact revision.
+pub inline fn focusRev() u32 {
+    return getState().facts.focus_rev;
+}
+/// Bumps the focus fact revision. Called by the module that owns focus.
+pub inline fn bumpFocus() void {
+    getState().facts.focus_rev +%= 1;
+}
+/// Current window/workspace fact revision.
+pub inline fn windowRev() u32 {
+    return getState().facts.window_rev;
+}
+/// Bumps the window/workspace fact revision.
+pub inline fn bumpWindow() void {
+    getState().facts.window_rev +%= 1;
+}
+/// Current fullscreen-occupancy fact revision.
+pub inline fn fullscreenRev() u32 {
+    return getState().facts.fullscreen_rev;
+}
+/// Bumps the fullscreen-occupancy fact revision. Called by the module that
+/// establishes or clears a fullscreen occupant on the current workspace.
+pub inline fn bumpFullscreen() void {
+    getState().facts.fullscreen_rev +%= 1;
+}
+/// Current layout fact revision.
+pub inline fn layoutRev() u32 {
+    return getState().facts.layout_rev;
+}
+/// Bumps the layout fact revision.
+pub inline fn bumpLayout() void {
+    getState().facts.layout_rev +%= 1;
+}
+
+// ---------------------------------------------------------------------------
+// Config-derived windowing facts (owned by core).
+// These are the only facts other modules need about the tiling subsystem:
+// callers read them here instead of importing the tiling module, so that
+// `tiling` is a true plugin. The implementations are thin config reads; the
+// layout name<->tag mapping lives in `types.layout_table`. None of these name
+// any tiling module; they are just "can this WM tile, how wide are borders,
+// what is the active layout" questions core can answer from its config.
+
+/// Whether the tiling windowing paradigm is enabled (config fact).
+pub inline fn tilingEnabled() bool {
+    return getState().config.tiling.enabled;
+}
+
+/// Scaled tiling border width in pixels (config fact).
+pub inline fn borderWidth() u16 {
+    const cs = getState();
+    return utils.scaling.scaleBorderWidth(cs.config.tiling.border_width, cs.screen.height_in_pixels);
+}
+
+/// Per-layout variant flags from config (monocle/grid/master variants).
+pub inline fn layoutVariants() types.LayoutVariants {
+    const cfg_tiling = getState().config.tiling;
+    return .{
+        .master = cfg_tiling.master_variant,
+        .monocle = cfg_tiling.monocle_variant,
+        .grid = cfg_tiling.grid_variant,
+    };
+}
+
+/// Resolves a config-file layout name (canonical or alias) to its `Layout`
+/// tag; null for unknown names. Pure mapping over `types.layout_table`.
+pub inline fn layoutFromString(name: []const u8) ?types.Layout {
+    for (types.layout_table) |entry| {
+        if (std.mem.eql(u8, name, entry.name)) return entry.tag;
+        for (entry.aliases) |alias| if (std.mem.eql(u8, name, alias)) return entry.tag;
+    }
+    return null;
+}
+
+/// First canonical layout; fallback for unknown/missing config names.
+pub inline fn defaultLayout() types.Layout {
+    return types.layout_table[0].tag;
+}
 
 var state: ?State = null;
 

@@ -74,6 +74,11 @@ fn forkIntermediate(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
 
 const max_pending_spawns: usize = 16;
 
+/// Commands shorter than this are null-terminated on the stack; longer ones
+/// are copied to the heap so executeShellCommand stays allocation-free for
+/// the common short-command case.
+const stack_cmd_capacity: usize = 256;
+
 /// Largest possible spawn-pipe conversation: a tag_pid message plus an
 /// optional trailing (or leading) tag_failed byte.
 const spawn_msg_max: usize = pid_msg_len + 1;
@@ -100,7 +105,7 @@ pub fn executeShellCommand(cmd: []const u8) !void {
     // [exec, switch_workspace] where a later action mutates g_current.
     const spawn_ws = tracking.getCurrentWorkspace();
 
-    var cmd_buf: [256]u8 = undefined;
+    var cmd_buf: [stack_cmd_capacity]u8 = undefined;
     var heap_cmd_z: ?[:0]const u8 = null;
     defer if (heap_cmd_z) |h| core.getState().alloc.free(h);
     const cmd_z: [*:0]const u8 = if (cmd.len < cmd_buf.len) blk: {
@@ -138,8 +143,8 @@ pub fn executeShellCommand(cmd: []const u8) !void {
     _ = c.close(pipe_fds[1]);
 
     // Cursor position for spawn-crossing suppression is queried synchronously
-    // in mapWindowToScreen when the MapRequest arrives; MapRequest is
-    // one-time per window, so the round-trip isn't worth pipelining here.
+    // in window.handleMapRequest when the MapRequest arrives; MapRequest fires
+    // once per window, so the round-trip isn't worth pipelining here.
 
     const queued = g_pending.append(.{
         .pid = pid,

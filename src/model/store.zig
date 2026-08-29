@@ -6,11 +6,11 @@
 //! search; put and remove use binary search for the position and then shift
 //! arrays to maintain sorted order.
 //!
-//! Threading model: single-threaded, no locking needed — all access occurs
+//! Threading model: single-threaded, no locking needed; all access occurs
 //! on the event-loop thread.
 //!
 //! When the capacity is reached, put returns error.StoreFull; there is no
-//! eviction or overflow — the ceiling is absolute.
+//! eviction or overflow, the ceiling is absolute.
 const std = @import("std");
 
 pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type {

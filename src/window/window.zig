@@ -11,25 +11,27 @@ const x11_masks = @import("x11_masks");
 const debug = @import("debug");
 const tracking = @import("tracking");
 const focus = @import("focus");
-const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else null;
-const minimize = if (build_options.has_minimize) @import("minimize") else null;
-const workspaces = if (build_options.has_workspaces) @import("workspaces") else null;
 const build_options = @import("build_options");
-const bar = if (build_options.has_bar) @import("bar") else null;
-const tiling = if (build_options.has_tiling) @import("tiling") else null;
+// Optional window sub-systems are reached through the build-generated
+// `window_modules` registry, never by naming an optional module here.
+// `window_mods` is the auto-discovered `[N]WindowModule` array in
+// deterministic filesystem scan order; the lifecycle dispatch below runs
+// each present module's init/deinit, and absent modules are simply not in
+// the array.
+const window_mods = @import("window_modules").modules;
+const screen_mod = @import("screen");
 const wincache = @import("wincache");
-const floating = if (build_options.has_floating) @import("floating") else null;
 const borders = @import("borders");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
 const restart_state = @import("restart_state");
 
-// XSizeHints flags (ICCCM §4.1.2.3)
+// XSizeHints flags (ICCCM 4.1.2.3)
 const p_max_size: u32 = 0x20;
 const p_resize_inc: u32 = 0x40;
 const p_aspect: u32 = 0x80;
 
-// WM_HINTS constants (ICCCM §4.1.2.4)
+// WM_HINTS constants (ICCCM 4.1.2.4)
 const wm_hints_input_flag: u32 = 1 << 0;
 const wm_hints_flags_field: usize = 0;
 const wm_hints_input_field: usize = 1;
@@ -118,7 +120,7 @@ pub fn getGeometry(conn: core.Connection, win: u32) ?utils.Rect {
 // our event mask was in place, wedging a window at a stale verdict for life. A
 // value that's never cached can't go stale.
 
-/// The four ICCCM focus delivery modes (§4.1.7), determined by the combination of
+/// The four ICCCM focus delivery modes (4.1.7), determined by the combination of
 /// WM_HINTS.input and WM_TAKE_FOCUS presence in WM_PROTOCOLS.
 pub const InputModel = enum {
     no_input, // input=False, no WM_TAKE_FOCUS: window doesn't want focus
@@ -194,7 +196,7 @@ fn fireWMProtocolsQuery(
 
 /// Drains the WM_HINTS cookie and returns the ICCCM input flag. Returns true
 /// when absent, when the flag is unset, or when the field is explicitly True,
-/// matching ICCCM §4.1.2.4 defaults.
+/// matching ICCCM 4.1.2.4 defaults.
 fn extractWMHintsInput(
     conn: core.Connection,
     hints_cookie: xcb.xcb_get_property_cookie_t,
@@ -239,7 +241,7 @@ fn getOrQueryCachedProps(conn: core.Connection, win: u32) CachedProps {
     return props;
 }
 
-/// Resolves the ICCCM §4.1.7 focus-delivery model for `win` together with the
+/// Resolves the ICCCM 4.1.7 focus-delivery model for `win` together with the
 /// take_focus answer from the SAME live WM_PROTOCOLS reply, so callers can
 /// dispatch WM_TAKE_FOCUS without firing a second protocol query.
 pub const InputModelResolution = struct {
@@ -257,7 +259,7 @@ pub fn getInputModelResolved(conn: core.Connection, win: u32) InputModelResoluti
     return .{ .model = inputModelFrom(supports_take_focus, accepts_input), .take_focus = supports_take_focus };
 }
 
-/// Resolves the ICCCM §4.1.7 focus-delivery model for `win`: accepts_input
+/// Resolves the ICCCM 4.1.7 focus-delivery model for `win`: accepts_input
 /// comes from the cache above (live query on a miss); supports_take_focus is
 /// always queried live, see the "ICCCM focus property cache" note for why.
 pub fn getInputModel(conn: core.Connection, win: u32) InputModel {
@@ -305,7 +307,7 @@ fn sendTakeFocusEvent(
     _ = xcb.xcb_send_event(conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
 }
 
-/// Dispatches WM_TAKE_FOCUS from an already-known advertisement bit — the one
+/// Dispatches WM_TAKE_FOCUS from an already-known advertisement bit, the one
 /// returned by `getInputModelResolved` alongside the input model. Skips the
 /// WM_PROTOCOLS round trip entirely; used by the grab-wrapped focus path so a
 /// keyboard focus change costs one protocol query instead of two.
@@ -324,7 +326,7 @@ pub fn sendWMTakeFocusKnown(
 /// Shared body of sendWMTakeFocus and sendWMTakeFocusWithCookie: resolves the
 /// WM_PROTOCOLS and WM_TAKE_FOCUS atoms, drains the WM_PROTOCOLS reply (from the
 /// pre-fired `cookie` when present, else a fresh round-trip), and dispatches the
-/// WM_TAKE_FOCUS ClientMessage iff `win` advertises the protocol (ICCCM §4.1.7).
+/// WM_TAKE_FOCUS ClientMessage iff `win` advertises the protocol (ICCCM 4.1.7).
 /// When the cookie cannot be consumed (atom resolution fails), it is discarded
 /// so the XCB queue drains.
 fn dispatchTakeFocus(
@@ -349,7 +351,7 @@ fn dispatchTakeFocus(
     dispatchTakeFocusMessage(conn, win, time, protocols_atom, take_focus_atom, u32Values(proto_reply)[0..@intCast(proto_reply.*.value_len)]);
 }
 
-/// Sends a WM_TAKE_FOCUS client message (ICCCM §4.1.7) iff `win` advertises
+/// Sends a WM_TAKE_FOCUS client message (ICCCM 4.1.7) iff `win` advertises
 /// WM_TAKE_FOCUS in WM_PROTOCOLS. Checked live on every call, matching dwm's
 /// sendevent(), this one flag is never cached (see the "ICCCM focus property
 /// cache" note: Electron/GTK apps can set WM_PROTOCOLS before we subscribe to
@@ -362,7 +364,7 @@ pub fn sendWMTakeFocus(conn: core.Connection, win: u32, time: u32) void {
 
 // Private ICCCM helpers
 
-/// See ICCCM §4.1.7: the matrix of (accepts_input x supports_take_focus)
+/// See ICCCM 4.1.7: the matrix of (accepts_input x supports_take_focus)
 /// determines which focus delivery mechanism the WM must use.
 fn inputModelFrom(supports_take_focus: bool, accepts_input: bool) InputModel {
     return if (supports_take_focus)
@@ -522,9 +524,9 @@ pub fn init(alloc: std.mem.Allocator) !void {
     tracking.init(alloc);
     focus.init();
     wincache.init(alloc);
-    if (build_options.has_fullscreen) fullscreen.init();
-    if (build_options.has_workspaces) try workspaces.init();
-    if (build_options.has_minimize) minimize.init();
+    // Uniform lifecycle dispatch: each compiled-in sub-system's init runs,
+    // absent modules aren't in the array, so nothing else needs a has_* guard.
+    for (window_mods) |m| if (m.init) |init_fn| try init_fn();
     // Pre-allocate spawn queue capacity for the common case (a handful of
     // concurrent spawns). Failure is non-fatal; the list grows on demand.
     state.?.spawn_queue.ensureTotalCapacity(alloc, 16) catch |err| {
@@ -536,33 +538,25 @@ pub fn init(alloc: std.mem.Allocator) !void {
 }
 
 pub fn deinit() void {
-    // Teardown order: heap-backed state freed before the struct reset below,
-    // then InputModelCache torn down before focus and tracking (they may sweep
-    // managed windows and must not encounter a partially-valid cache), then
-    // the remaining subsystems in reverse-init order.
     wincache.deinit();
-    if (build_options.has_fullscreen) fullscreen.deinit();
-    if (build_options.has_workspaces) workspaces.deinit();
-    if (build_options.has_minimize) minimize.deinit();
-    // Free heap-backed state before the reset below wipes the struct: a
-    // bare `state = .{}` would leak the spawn queue's and rules map's
-    // backing memory rather than freeing it.
+    // Uniform lifecycle dispatch: every compiled-in sub-system's deinit runs,
+    // absent modules aren't in the array.
+    for (window_mods) |m| if (m.deinit) |deinit_fn| deinit_fn();
+    // Free heap-backed state before the reset below wipes the struct; a bare
+    // `state = .{}` would leak the spawn queue's and rules map's backing memory.
     if (state.?.alloc) |a| {
         state.?.spawn_queue.deinit(a);
         state.?.rules_map.deinit(a);
     }
-    // InputModel cache must be torn down before focus and tracking, mirroring
-    // the init order where the cache clear + ready=true follows focus.init().
-    // focus.deinit() and tracking.deinit() may sweep managed windows and
-    // must not encounter a partially-valid cache.
+    // Clear the focus-property cache before focus/tracking deinit, whose
+    // managed-window sweeps must not encounter a partially-valid cache.
     state.?.cache_slots.clear();
     state.?.cache_ready = false;
     focus.deinit();
     tracking.deinit();
     // Reset every remaining field (child_cache, borders_flushed_this_batch,
-    // and the now-freed spawn_queue/rules_map/alloc) to its zero value in one
-    // place, so nothing is left stale for the next init() the way
-    // borders_flushed_this_batch previously was.
+    // and the now-freed spawn_queue/rules_map/alloc) so nothing is left stale
+    // for the next init()/deinit() cycle.
     state = .{};
 }
 
@@ -574,7 +568,7 @@ inline fn tilingActive() bool {
 
 /// True for the null window, the root, or the bar, never valid focus/manage targets.
 pub inline fn isInvalidWindow(win: u32) bool {
-    return win == 0 or win == core.getState().root or (build_options.has_bar and bar.isBarWindow(win));
+    return win == 0 or win == core.getState().root or screen_mod.isSurfaceWindow(win);
 }
 
 pub inline fn isValidManagedWindow(win: u32) bool {
@@ -739,7 +733,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
         &[_]u32{x11_masks.EventMasks.managed_window},
     );
 
-    // ── Fire ALL property cookies before draining any reply ──────────
+    // ----- Fire ALL property cookies before draining any reply -----
     // The server processes all five requests in parallel while we do pure
     // local bookkeeping below.
 
@@ -776,7 +770,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
         wm_hints_long_length,
     );
 
-    // ── Drain replies sequentially ───────────────────────────────────
+    // ----- Drain replies sequentially -----
     const target_ws = resolveTargetWorkspace(current_ws, c_wm_class, c_net_wm_pid);
     const on_current = target_ws.eql(current_ws);
 
@@ -799,8 +793,8 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
 ///
 /// `cacheChildWindow` maps the window to root: for a MapRequest toplevel its
 /// parent IS root, and for adoption root is the only meaningful parent (there
-/// is no map-request event), so both paths funnel through the same cache write
-/// — an entry keyed on the (now-managed) toplevel itself, which
+/// is no map-request event), so both paths funnel through the same cache write,
+/// an entry keyed on the (now-managed) toplevel itself, which
 /// findManagedWindow's direct `is_managed` hit short-circuits anyway.
 fn admitWindow(win: u32, target_ws: u8, on_current: bool) void {
     const cs = core.getState();
@@ -820,8 +814,8 @@ fn findWindowRecord(windows: []const restart_state.WindowRecord, win: u32) ?*con
 
 /// Target workspace for an adopted window: the restore record's home
 /// workspace (lowest set bit of its mask) when present, else the currently
-/// active workspace. Deliberately NOT the spawn-queue/rules resolution —
-/// those describe brand-new spawns, not pre-existing windows.
+/// active workspace. Deliberately NOT the spawn-queue/rules resolution, which
+/// describes brand-new spawns rather than pre-existing windows.
 fn restoredOrCurrent(record: ?*const restart_state.WindowRecord) u8 {
     if (record) |r| {
         if (r.mask != 0) return @intCast(@import("model").lowestBit(r.mask));
@@ -829,13 +823,13 @@ fn restoredOrCurrent(record: ?*const restart_state.WindowRecord) u8 {
     return tracking.getCurrentWorkspace() orelse 0;
 }
 
-/// Re-applies a restore record's mask and mode onto an already-registered
-/// model entry. Registration (admitWindow → actions.mapRequest) creates the
-/// entry as a base-tiled window on its target workspace; this overwrites the
-/// per-window state that survived the re-exec so the caller's reconcile can
-/// place it exactly as before. Mode bookkeeping that would otherwise drift
-/// (tiled_order membership, count_minimized) is routed through the model's own
-/// transitions rather than patched by hand.
+/// Re-applies a restore record's mask, mode, and presence onto an
+/// already-registered model entry. Registration (admitWindow ->
+/// actions.mapRequest) creates the entry as a present base-tiled window on its
+/// target workspace; this overwrites the per-window state that survived the
+/// re-exec so the caller's reconcile can place it exactly as before. Presence
+/// bookkeeping that would otherwise drift is routed through the owning window
+/// module's deserialize hook rather than patched by hand.
 fn applyRestoredRecord(win: u32, record: *const restart_state.WindowRecord) void {
     const model = pipeline.model();
     const e = model.store.getPtr(win) orelse return;
@@ -861,25 +855,26 @@ fn applyRestoredRecord(win: u32, record: *const restart_state.WindowRecord) void
             // winner from this mode alone, so no wire action is needed here.
             e.mode = record.mode;
         },
-        .minimized => |restored| {
-            // Call the model's minimize to keep count_minimized and home_ws
-            // bookkeeping consistent, then patch in the restored payload
-            // (which carries the pre-minimize mode and tiled slot). The window
-            // stays hidden: minimize removes it from tiled_order and the
-            // caller's reconcile parks it. On a store-full minimize refusal we
-            // leave the window base-tiled (it maps) rather than corrupting the
-            // minimize count.
-            @import("model").minimize(model, win) catch return;
-            if (model.store.getPtr(win)) |me| {
-                me.mode = .{ .minimized = restored };
-                me.home_ws = null;
-            }
-        },
+    }
+
+    // A window that was parked (hidden by an extension) at save time is
+    // re-parked through the window-module registry's deserialize hook: the
+    // module that claims the opaque ext blob re-asserts presence == .parked
+    // and restores its private record. When no module claims the blob (the
+    // feature was stripped, or the record carried no ext), the entry stays
+    // present and reconciles on-screen -- the graceful degrade.
+    if (record.presence == .parked) {
+        if (record.ext) |blob| {
+            const m_ptr: *anyopaque = @ptrCast(model);
+            for (window_mods) |mod| if (mod.deserializeWindow) |f| {
+                if (f(win, blob, m_ptr)) break; // claimed
+            };
+        }
     }
 }
 
 /// Adopts top-level windows that pre-existed the WM's (re)start as direct
-/// root children (hana never reparents — clients are root children, borders
+/// root children (hana never reparents: clients are root children, borders
 /// via the client's own X border), so after a re-exec the fresh process takes
 /// over the old session's windows instead of waiting for new maps.
 ///
@@ -887,19 +882,19 @@ fn applyRestoredRecord(win: u32, record: *const restart_state.WindowRecord) void
 ///   - skip already-managed windows, the WM's own bar window, and
 ///     override-redirect popups (never manage those);
 ///   - unmapped windows are adopted ONLY when the restore file records them
-///     as minimized (a surviving minimized window must stay hidden); other
-///     unmapped windows are likely withdrawn toplevels and are skipped;
+///     as parked (a surviving hidden window must stay hidden); other unmapped
+///     windows are likely withdrawn toplevels and are skipped;
 ///   - each admitted window registers through the shared admitWindow path on
 ///     its restored-or-current workspace;
-///   - a restore record (if any) then re-applies the window's mask and mode
-///     directly on the model entry.
+///   - a restore record (if any) then re-applies the window's mask, mode, and
+///     presence directly on the model entry.
 ///
 /// CALLING CONTRACT: this does NOT reconcile. Placement derives from
 /// tiled_order / focus_mru, which are rebuilt by restart_state.applyModelLevel
 /// AFTER this returns; a reconcile here would place pre-restore state. The
 /// caller (main) therefore runs:
-///     adoptRootWindows() → restart_state.applyModelLevel(m) → one reconcile.
-/// Returns the number of windows admitted (restored-minimized ones included).
+///     adoptRootWindows(); restart_state.applyModelLevel(m); one reconcile.
+/// Returns the number of windows admitted (restored-parked ones included).
 pub fn adoptRootWindows() !usize {
     // Defensive boot-order guard: adoption expects the window module's state
     // (child cache, spawn queue) to be initialized; if window.init hasn't run
@@ -923,10 +918,8 @@ pub fn adoptRootWindows() !usize {
         if (tracking.isManaged(win)) continue;
 
         // The WM's own bar window is a root child we created; leave it alone.
-        if (build_options.has_bar) {
-            if (bar.winId()) |bar_win| {
-                if (bar_win == win) continue;
-            }
+        if (screen_mod.surfaceWindow()) |bar_win| {
+            if (bar_win == win) continue;
         }
 
         const attr_reply = xcb.xcb_get_window_attributes_reply(
@@ -938,14 +931,16 @@ pub fn adoptRootWindows() !usize {
         const map_state = attr_reply.*.map_state;
         std.c.free(attr_reply);
 
-        // Override-redirect windows are transient/popup — never manage.
+        // Override-redirect windows are transient/popup, never manage.
         if (override_redirect) continue;
 
         // Visibility gate: adopt mapped windows; adopt unmapped ONLY when the
-        // restore file says they were minimized (they must stay hidden).
+        // restore file records them as parked (a surviving hidden window must
+        // stay hidden). Other unmapped windows are likely withdrawn toplevels
+        // and are skipped.
         const record = if (loaded) |f| findWindowRecord(f.windows, win) else null;
         if (map_state != xcb.XCB_MAP_STATE_VIEWABLE) {
-            if (record == null or record.?.mode != .minimized) continue;
+            if (record == null or record.?.presence != .parked) continue;
         }
 
         // Claim the management event mask so the adopted window delivers the
@@ -958,7 +953,7 @@ pub fn adoptRootWindows() !usize {
             &[_]u32{x11_masks.EventMasks.managed_window},
         );
 
-        // ── Fire the same property cookies the MapRequest path fires ──
+        // ----- Fire the same property cookies the MapRequest path fires -----
         var c_wm_class: ?xcb.xcb_get_property_cookie_t = null;
         if (cs.config.workspaces.rules.items.len > 0 and utils.getAtomOrZero("WM_CLASS") != 0) {
             c_wm_class = xcb.xcb_get_property(conn, property_no_delete, win, utils.getAtomOrZero("WM_CLASS"), xcb.XCB_ATOM_STRING, 0, constants.property_max_length);
@@ -1036,17 +1031,25 @@ fn unmanageWindow(win: u32) void {
     wincache.removeWindow(win);
 
     // Capture the fullscreen record and focus ownership BEFORE
-    // workspaces.removeWindow drops the model entry (removeWindow →
-    // unregister): after that, actions.unmanage could never know that the
+    // tracking.removeWindow (the workspaces.removeWindow facade -> unregister)
+    // drops the model entry: after that, actions.unmanage could never know that the
     // closed window held focus (m.focused is already cleared), so closing a
     // window left the workspace unfocused until a pointer event re-focused
     // it. Both facts ride ctx into actions.unmanage, which runs the same
     // close fallback as minimize.
     var actx: actions.Ctx = .{
-        .withdrawn_fullscreen_ws = if (pipeline.initialized) @import("model").fullscreenWsOf(pipeline.model(), win) else null,
+        .withdrawn_fullscreen_ws = if (pipeline.initialized) (if (build_options.has_fullscreen) @import("fullscreen").fullscreenWsOf(pipeline.model(), win) else null) else null,
         .withdrawn_was_focused = pipeline.initialized and pipeline.model().focused == win,
     };
-    if (build_options.has_workspaces) workspaces.removeWindow(win);
+    // Module cleanup on window drop: each compiled-in window module's
+    // onWindowGone fires before the model entry is unregistered below, so
+    // per-window bookkeeping (e.g. minimize's parked record) is dropped with
+    // the window. This is the ONLY fire on the withdraw route (UnmapNotify /
+    // wm_close, XID still alive); a DestroyNotify already fired it from
+    // events.zig first, and every hook is idempotent (find-then-clear), so
+    // the repeat for the same window is harmless.
+    for (window_mods) |mod| if (mod.onWindowGone) |f| f(win);
+    if (build_options.has_workspaces) tracking.removeWindow(win);
 
     // PIPELINE (train d): drop the MODEL entry, resolve the
     // post-close focus target (fallback tiers) and reconcile under one grab.
@@ -1060,7 +1063,7 @@ pub fn handleUnmapNotify(event: *const xcb.xcb_unmap_notify_event_t) void {
 }
 
 pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t) void {
-    if (build_options.has_floating) floating.cancelDragForWindow(event.window);
+    if (build_options.has_floating) actions.cancelDragForWindow(event.window);
     if (isValidManagedWindow(event.window)) unmanageWindow(event.window);
 }
 
@@ -1111,21 +1114,23 @@ pub fn geometryFromXcbReply(reply: *xcb.xcb_get_geometry_reply_t) utils.Rect {
 ///
 /// Returns null when even the fallback fails (window gone).
 fn resolveConfigureGeometry(win: u32) ?utils.Rect {
-    // Model/sync truth — floating base or last-sent ledger rect.
+    // Model/sync truth: floating base or last-sent ledger rect.
     if (@import("sync").truthRect(pipeline.model(), win)) |rect| {
-        const border: u16 = (if (build_options.has_tiling) tiling.getBorderWidth() else 0);
+        const border: u16 = (if (build_options.has_tiling) @import("core").borderWidth() else 0);
         return .{ .x = rect.x, .y = rect.y, .width = rect.width, .height = rect.height, .border_width = border };
     }
 
-    if (@import("model").isFullscreenMode(pipeline.model(), win)) {
-        const screen = core.getState().screen;
-        return .{
-            .x = 0,
-            .y = 0,
-            .width = @intCast(screen.width_in_pixels),
-            .height = @intCast(screen.height_in_pixels),
-            .border_width = 0,
-        };
+    if (build_options.has_fullscreen) {
+        if (@import("fullscreen").isFullscreenMode(pipeline.model(), win)) {
+            const screen = core.getState().screen;
+            return .{
+                .x = 0,
+                .y = 0,
+                .width = @intCast(screen.width_in_pixels),
+                .height = @intCast(screen.height_in_pixels),
+                .border_width = 0,
+            };
+        }
     }
 
     const conn = core.getState().conn;
@@ -1159,8 +1164,8 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
     // Echo the geometry the WM already applied so the client settles without
     // fighting the drag. (Protocol-side guard: must run before the model
     // decision, which has no view of in-flight drags.)
-    if (build_options.has_floating and floating.isResizingWindow(win)) {
-        const last = floating.getDragLastRect();
+    if (build_options.has_floating and actions.isResizingWindow(win)) {
+        const last = actions.getDragLastRect();
         if (last.width != 0) {
             sendConfigureNotify(win, .{ .x = last.x, .y = last.y, .width = last.width, .height = last.height, .border_width = borders.width() });
         } else {
@@ -1172,11 +1177,11 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
     }
 
     // DECISION goes through the model's single tested procedure (T13):
-    // tiled/fullscreen/minimized ⇒ deny+echo; floating ⇒ apply into the
+    // tiled/fullscreen/parked -> deny+echo; floating -> apply into the
     // model rect (which also stops reconcile snap-backs after a client
     // self-move); unknown windows stay honored (unmanaged clients are not
     // the WM's to override). Wire sends + cache recording remain here per
-    // the check-layers allowlist — only the decision is centralized.
+    // the check-layers allowlist; only the decision is centralized.
     const managed = pipeline.initialized and tracking.isManaged(win);
     if (managed) {
         const req: @import("model").ConfigureReq = .{
@@ -1186,29 +1191,31 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
             .height = if (mask & xcb.XCB_CONFIG_WINDOW_HEIGHT != 0) event.height else null,
             .border_width = if (mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0) event.border_width else null,
         };
-        switch (@import("model").honorConfigureRequest(pipeline.model(), win, req)) {
-            .geometry_applied => {
-                // Floating: the model stored exactly these values, so the
-                // wire send mirrors the request verbatim. BW rides along and
-                // is cached so dedup compares against server truth.
-                if (build_options.has_tiling and mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0)
-                    _ = wincache.cacheBorderWidth(win, event.border_width);
-                if (mask == xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH) return;
-                sendRequestedConfigure(win, event, mask);
-            },
-            .border_only => {
-                // Tiled: geometry DENIED, BW honored. Cache + forward the
-                // border width ONLY — the old fall-through forwarded the
-                // whole mixed mask, moving denied-geometry windows until the
-                // next reconcile repaired them.
-                if (build_options.has_tiling)
-                    _ = wincache.cacheBorderWidth(win, event.border_width);
-                if (mask != xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH)
-                    _ = xcb.xcb_configure_window(core.getState().conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{event.border_width});
-            },
-            .ignored => {
-                sendSyntheticConfigureNotify(win);
-            },
+        if (build_options.has_floating) {
+            switch (@import("floating").honorConfigureRequest(pipeline.model(), win, req)) {
+                .geometry_applied => {
+                    // Floating: the model stored exactly these values, so the
+                    // wire send mirrors the request verbatim. BW rides along and
+                    // is cached so dedup compares against server truth.
+                    if (build_options.has_tiling and mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0)
+                        _ = wincache.cacheBorderWidth(win, event.border_width);
+                    if (mask == xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH) return;
+                    sendRequestedConfigure(win, event, mask);
+                },
+                .border_only => {
+                    // Tiled: geometry DENIED, BW honored. Cache + forward the
+                    // border width ONLY; the old fall-through forwarded the
+                    // whole mixed mask, moving denied-geometry windows until the
+                    // next reconcile repaired them.
+                    if (build_options.has_tiling)
+                        _ = wincache.cacheBorderWidth(win, event.border_width);
+                    if (mask != xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH)
+                        _ = xcb.xcb_configure_window(core.getState().conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{event.border_width});
+                },
+                .ignored => {
+                    sendSyntheticConfigureNotify(win);
+                },
+            }
         }
         return;
     }
@@ -1251,11 +1258,10 @@ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
     // only when the cursor had moved would instead suppress all future
     // hover-focus events if the cursor stayed at the exact spawn pixel.
     focus.setSuppressReason(.none);
-    // Legacy artifact: `spawn_cursor` was originally a {x,y} record written at
-    // spawn time so the first crossing at that position could be suppressed,
-    // but the record was never implemented — spawn_cursor was never written.
-    // The comparison against (0,0) therefore only fires when the cursor is
-    // parked at the exact screen origin. Kept as-is (harness-pinned: S16).
+    // Legacy artifact: `spawn_cursor` was intended to record the spawn
+    // position but was never implemented, so the (0,0) comparison only fires
+    // when the cursor is parked at the screen origin. Kept verbatim
+    // (harness-pinned: S16).
     return root_x == 0 and root_y == 0;
 }
 
@@ -1265,7 +1271,10 @@ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
 /// focus.grabFocus(.mouse_enter). The .mouse_enter reason is the direct
 /// EnterNotify path: lightweight, no raise, no confirm.
 inline fn maybeFocusWindow(win: u32) void {
-    if (!isOnCurrentWorkspace(win) or (build_options.has_minimize and minimize.isMinimized(win))) return;
+    if (!isOnCurrentWorkspace(win)) return;
+    if (build_options.has_minimize) {
+        if (@import("minimize").isMinimized(pipeline.model(), win)) return;
+    }
     debug.info("[MAYBE_FOCUS] 0x{x}", .{win});
     focus.grabFocus(win, .mouse_enter);
 }
@@ -1275,7 +1284,7 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t) void {
     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL or
         event.detail == xcb.XCB_NOTIFY_DETAIL_INFERIOR)
         return;
-    if (build_options.has_floating and floating.isDragging()) return;
+    if (build_options.has_floating and actions.isDragging()) return;
     if (suppressSpawnCrossing(event.root_x, event.root_y)) return;
     if (focus.shouldSuppressEnterNotify()) return;
     maybeFocusWindow(findManagedWindow(core.getState().conn, event.event, tracking.isManaged));
@@ -1285,7 +1294,7 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t) void {
     focus.setLastEventTime(event.time);
     if (event.event != core.getState().root) return;
     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL) return;
-    if (build_options.has_floating and floating.isDragging()) return;
+    if (build_options.has_floating and actions.isDragging()) return;
     if (suppressSpawnCrossing(event.root_x, event.root_y)) return;
     // When child is zero the pointer left to an area not covered by any window.
     if (event.child == 0) return;
@@ -1297,10 +1306,9 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t) void {
 }
 
 /// Refresh one half of CachedProps after a PropertyNotify, keeping the other
-/// half from cache to avoid a redundant round-trip.  When the old half is not
-/// cached (window not yet in the cache), both halves are queried live — the
-/// fallback is correct at the cost of one extra XCB call, which only happens
-/// once per window before populateFocusCacheFromCookies seeds the cache.
+/// half from cache to avoid a redundant round-trip. When the old half is not
+/// cached, both halves are queried live; this fallback costs one extra XCB
+/// call per window until populateFocusCacheFromCookies seeds the cache.
 fn refreshCachedPropHalf(conn: core.Connection, win: u32, atom: u32) void {
     const is_protocols = atom == utils.getAtomOrZero("WM_PROTOCOLS");
 
@@ -1338,9 +1346,9 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
         return;
     }
 
-    if (event.atom == utils.getAtomOrZero("WM_PROTOCOLS")) {
-        refreshCachedPropHalf(conn, event.window, event.atom);
-    } else if (event.atom == xcb.XCB_ATOM_WM_HINTS) {
+    if (event.atom == utils.getAtomOrZero("WM_PROTOCOLS") or
+        event.atom == xcb.XCB_ATOM_WM_HINTS)
+    {
         refreshCachedPropHalf(conn, event.window, event.atom);
     }
 }
@@ -1419,10 +1427,10 @@ fn parseSizeHintsIntoCache(
         if (max_y > 0) max_aspect = @as(f32, @floatFromInt(max_x)) / @as(f32, @floatFromInt(max_y));
     }
 
-    // The MODEL copy of size hints must never go stale — layouts read
+    // The MODEL copy of size hints must never go stale, since layouts read
     // Entry.size_hints via engine.HintsView. The wincache entry is only the
     // pre-registration staging area (actions.mapRequest bridges it into the
-    // freshly created model entry); once registered, this write IS the truth.
+    // freshly created model entry); once registered, this write is the truth.
     const hints: @import("model").SizeHints = .{
         .max_width = max_pair.width,
         .max_height = max_pair.height,
@@ -1499,9 +1507,8 @@ var warned_state_unmanaged = false;
 pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     if (event.format != 32) return;
 
-    // Pager-driven requests that we cannot honor are dropped silently
-    // otherwise. Both warns fire once per
-    // process — a looping pager must not flood the log.
+    // Unhonorable pager requests are dropped silently otherwise; both warns
+    // fire once per process so a looping pager cannot flood the log.
     const net_active = utils.getAtomOrZero("_NET_ACTIVE_WINDOW");
     if (net_active != 0 and event.type == net_active) {
         if (!warned_active_unimplemented) {
@@ -1530,7 +1537,7 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     }
 
     const action = event.data.data32[0];
-    const is_fs = @import("model").isFullscreenMode(pipeline.model(), win);
+    const is_fs = if (build_options.has_fullscreen) @import("fullscreen").isFullscreenMode(pipeline.model(), win) else false;
     const should_enter = switch (action) {
         1 => true, // _NET_WM_STATE_ADD
         0 => false, // _NET_WM_STATE_REMOVE
@@ -1538,7 +1545,7 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
         else => return,
     };
     if (should_enter == is_fs) return;
-    // PIPELINE: model-path transition — the legacy enter/exit
+    // PIPELINE: model-path transition; the legacy enter/exit
     // fullscreen machinery bypassed (and fought) the single source of truth.
     actions.fullscreenToggleWindow(win);
 }

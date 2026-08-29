@@ -1,4 +1,4 @@
-# S21 — hints-resize: a fixed-size client (min=max) must keep its hinted
+# S21 - hints-resize: a fixed-size client (min=max) must keep its hinted
 # geometry across layouts, focus changes, and a fullscreen round-trip
 # (additive yardstick, SW-9 / S14F10; exercises hint clamping in emitView).
 spawn_client A --fixed --w 300 --h 200

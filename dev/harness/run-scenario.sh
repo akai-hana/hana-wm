@@ -122,7 +122,7 @@ run_one() {
 	settle 300
 
 	# Run the scenario body in this shell.
-	# ND-24: EXPORT the harness vars — a VAR=val prefix on the `.` command
+	# ND-24: EXPORT the harness vars. A VAR=val prefix on the `.` command
 	# expires when sourcing returns, so helpers called afterwards
 	# (state_dump_final -> dump/state_dump) saw unbound HW_OUT/HW_LOG.
 	export HW_DISPLAY HW_OUT="$out" HW_LOG="$out/hana.log" HARNESS_ROOT="$HARNESS_ROOT"
@@ -146,7 +146,7 @@ run_one() {
 	HW_KEEP_RAW=1 "$HARNESS_ROOT/normalize.sh" "$out"/snap-*.tree.raw "$out"/snap-*.props.raw "$out/hana.log"
 
 	# Signal log (harness hardening): the WM-internal-truth subset of
-	# hana's log — warnings/errors (dropped requests, BadWindow probes),
+	# hana's log. Warnings/errors (dropped requests, BadWindow probes),
 	# state dumps (registry counts, focus) and hover-focus decisions.
 	# Included in golden diffs so state divergence can't hide behind tree
 	# snapshots while noisy debug lines stay out of the comparison.

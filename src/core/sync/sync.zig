@@ -1,25 +1,25 @@
 //! ONLY this module (via its wire sink) sends geometry/border/map/stack
 //! requests. Pure orchestration lives here; every raw XCB request lives in
-//! the sink file (src/sync/wire.zig) — the sanctioned boundary; raw
+//! the sink file (src/core/sync/wire.zig), the sanctioned boundary. Raw
 //! libxcb symbols may appear only inside its send shims.
 //!
-//! Shims wrap EXISTING xcb patterns — do not invent new ones:
-//!   Sink.geom        ≙ utils.configureWindow (+ merged stack-mode variant)
-//!   Sink.border_*    ≙ borders.applyWidth + borders.apply + setBorderPixel
-//!   Sink.park        ≙ X-offscreen + BELOW configure_window in ONE request
-//!   Sink.stack_only  ≙ utils.raiseWindow / restack helpers used today
-//!   Sink.flush       ≙ conn.flush()  (caller owns timing)
+//! Shims wrap EXISTING xcb patterns; do not invent new ones:
+//!   Sink.geom        ~ utils.configureWindow (+ merged stack-mode variant)
+//!   Sink.border_*    ~ borders.applyWidth + borders.apply + setBorderPixel
+//!   Sink.park        ~ X-offscreen + BELOW configure_window in ONE request
+//!   Sink.stack_only  ~ utils.raiseWindow / restack helpers used today
+//!   Sink.flush       ~ conn.flush() (caller owns timing)
 //!
-//! Scroll viewport caller duties: snap-right-on-new, clamp, prev_count
-//! update happen in ACTIONS before they call reconcile; this module never
-//! mutates model params (m is const).
+//! Scroll viewport caller duties (snap-right-on-new, clamp, prev_count update)
+//! happen in ACTIONS before they call reconcile; this module never mutates
+//! model params (m is const).
 //!
-//! RECONCILE ALGORITHM — UNCONDITIONAL APPLY. Every pass computes the desired
+//! RECONCILE ALGORITHM - UNCONDITIONAL APPLY. Every pass computes the desired
 //! state for every stored window and SENDS it: parked windows get ONE merged
 //! park request; visible windows replay map -> pixel -> bw -> geometry in
 //! order, with any stacking mode merged into the geometry request itself.
 //! X configure/map requests are idempotent, so replaying full desired state
-//! is drift-proof by construction — a client that mutated its own geometry
+//! is drift-proof by construction: a client that mutated its own geometry
 //! behind our back is repaired on the very next pass. No diff cache, no sweep
 //! counter, no staging buffer.
 //!
@@ -30,7 +30,7 @@
 //!      rather than parking. A history-less orphan parks (first sight /
 //!      registered offscreen).
 //!   2. Winner-raise derivation: rides .above ONLY when geometry moved,
-//!      when it unparked, or under force_restack — derived by comparing the
+//!      when it unparked, or under force_restack, derived by comparing the
 //!      new rect against the ledger and reading its parked flag.
 //!   3. Floating-detach / title prefetch (actions.lastRectFor,
 //!      sync.truthRect): the live rect as the new floating base, null while
@@ -129,14 +129,14 @@ pub const Ctx = struct {
     sink: Sink,
     /// Full screen rect (fullscreen branch geometry).
     screen: utils.Rect,
-    /// Screen minus bar — workArea(ctx); computed by the caller with the
-    /// existing bar-offset helper.
+    /// Screen minus bar; computed by the caller with the existing
+    /// bar-offset helper (workArea(ctx)). Used for tiled geometry.
     workarea: utils.Rect,
-    /// cfgBW(): config.tiling.border_width, already scaled at load.
+    /// config.tiling.border_width, already scaled at load.
     cfg_bw: u16,
     env: engine.Env = .{},
-    /// colorFn(win, m): focus/mode color — ported from borders.color minus
-    /// its fullscreen check (fullscreen zeroes via bw/pixel policy instead).
+    /// Focus/mode border color; ported from borders.color minus its
+    /// fullscreen check (fullscreen zeroes via bw/pixel policy instead).
     color_of: *const fn (model.WindowId, *const model.Model) u32,
     /// Bar/top window raised by force_restack; null when no bar.
     bar_win: ?model.WindowId = null,
@@ -145,13 +145,12 @@ pub const Ctx = struct {
 pub const ReconcileOpts = struct { force_restack: bool = false };
 
 // DESIGN NOTE: The sent ledger uses inline parallel arrays instead of
-// model.Store because (1) it needs no iteration-order guarantees,
-// (2) the heap allocation of Store's backing memory is undesirable in
-// the hot reconcile path, and (3) the API surface needed is minimal
-// (get, put, remove, clear).
+// model.Store because (1) it needs no iteration-order guarantees (unlike the
+// model, whose sorted-key order reconcile walks), and (2) the API surface
+// needed is minimal (get, put, remove, clear).
 
-/// What we last sent per window — WRITE-ONLY bookkeeping whose three
-/// contract reads are documented in the header:
+/// What we last sent per window; WRITE-ONLY bookkeeping whose three contract
+/// reads are documented in the header:
 ///   - has_rect: whether a visible geometry was EVER sent (an explicit flag,
 ///     not a sentinel rect: a legitimately placed zero-size window at the
 ///     origin would collide with a "never sent" marker value);
@@ -234,11 +233,14 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     // STEP 1: wa := workArea(ctx) (screen minus bar).
     const wa = ctx.workarea;
 
-    // STEP 2: fullscreen winner scan.
+    // STEP 2: fullscreen winner scan. Parked windows (presence != present)
+    // are hidden: their retained fullscreen record must NOT claim the screen
+    // (minimize-from-fullscreen re-parks the record, so it is not an occupant).
     var fs_win: ?model.WindowId = null;
     for (0..m.store.count()) |i| {
         const it = m.store.at(i);
         if (it.val.mode != .fullscreen) continue;
+        if (it.val.presence != .present) continue;
         const f = it.val.mode.fullscreen;
         if (model.visibleOn(m, it.key, m.current) or f.ws == m.current) {
             fs_win = it.key;
@@ -271,7 +273,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
             .env = ctx.env,
         };
         // n == 0 leaves placements empty (no layout owns a window); layouts
-        // are also individually n==0-safe, this just skips the work.
+        // are individually n==0-safe too, this only skips the work.
         if (n > 0) {
             engine.compute(params.kind, view, &placements);
             // Sort by window ID once after compute for O(log n) binary search.
@@ -304,7 +306,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     }
 
     // STEPS 4..8 fused into ONE pass: compute the desire for a store entry,
-    // then SEND it immediately — unconditionally. Send order per window:
+    // then SEND it immediately, unconditionally. Send order per window:
     // map -> pixel -> bw -> geometry (stack merged into that request);
     // parked windows emit ONE merged park request instead (offscreen X +
     // BELOW). Map precedes geometry so a first-show/unparking client
@@ -321,13 +323,29 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         const win = it.key;
         const e: *const model.Entry = it.val;
 
-        // -- desire, computed inline ------------------------------------------
+        // ONE ledger get-or-create per window: the same record backs the
+        // pre-send contract reads (orphan keep-last, raise rule) AND the
+        // post-send write, so a visible window costs a single scan instead of
+        // two (three in the legacy multi-tag branch). The record is read
+        // before any send and only written after, so raises still derive from
+        // what we last sent, never from this pass's sends. When the ledger is
+        // full and `win` has no record yet, `gop` is null: reads see a fresh
+        // blank entry and the write is logged+lost after the sends, exactly as
+        // before (sends never depend on the ledger).
+        const gop = sentGetOrPut(win) catch null;
+        const ledger = (if (gop) |g| g.value_ptr.* else SentEntry{});
+
+        // Desire, computed inline below.
         var rect: utils.Rect = engine.parked_rect;
         var bw: u16 = ctx.cfg_bw;
         var pixel: u32 = ctx.color_of(win, m);
         var parked = false;
 
-        if (fs_win != null) {
+        if (e.presence == .parked) {
+            bw = 0;
+            pixel = 0;
+            parked = true;
+        } else if (fs_win != null) {
             if (win == fs_win.?) {
                 rect = ctx.screen;
                 bw = 0;
@@ -337,11 +355,6 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
                 parked = true;
             }
         } else switch (e.mode) {
-            .minimized => {
-                bw = 0;
-                pixel = 0;
-                parked = true;
-            },
             .fullscreen => {
                 bw = 0;
                 pixel = 0;
@@ -359,11 +372,11 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
                     } else if (model.visibleOn(m, win, m.current)) {
                         // Multi-tagged window whose home list isn't the shown
                         // ws: legacy never hides it and no layout owns it here,
-                        // so it stays at its previous real geometry — which is
+                        // so it stays at its previous real geometry, which is
                         // precisely the ledger's record of what we last sent.
                         // Park only when nothing was ever sent (first sight /
                         // registered offscreen).
-                        const prev = sentGet(win) orelse SentEntry{};
+                        const prev = ledger;
                         if (!prev.has_rect) {
                             bw = 0;
                             pixel = 0;
@@ -395,8 +408,8 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         } else {
             // Raise triggers derive from the ledger (header read 2): the
             // winner rides .above exactly when its geometry moved, when it
-            // unparked, or under restack pressure — never on mere presence.
-            const last = sentGet(win) orelse SentEntry{};
+            // unparked, or under restack pressure, never on mere presence.
+            const last = ledger;
             const first_send = !last.has_rect;
             const moved = first_send or !last.rect.eql(rect);
             const unpark_transition = last.parked;
@@ -410,18 +423,19 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
 
         // Ledger write: record what we actually sent. A park preserves the
         // previous record's rect/has_rect; an unpark overwrites wholesale.
-        // Written AFTER the sends: under SentLedgerFull the pass still applied (sends
-        // never depend on the ledger) and only the record is lost until the
-        // next successful write — no half-applied batch can exist.
-        const gop = sentGetOrPut(win) catch {
+        // Written AFTER the sends: under SentLedgerFull the pass still
+        // applied (sends never depend on the ledger) and only the record is
+        // lost until the next successful write, so no half-applied batch
+        // can exist.
+        const g = gop orelse {
             std.log.err("sync.reconcile: ledger full; sends applied, record lost", .{});
             continue;
         };
-        if (!gop.found_existing) gop.value_ptr.* = .{};
+        if (!g.found_existing) g.value_ptr.* = .{};
         if (parked) {
-            gop.value_ptr.parked = true;
+            g.value_ptr.parked = true;
         } else {
-            gop.value_ptr.* = .{ .rect = rect, .has_rect = true, .parked = false };
+            g.value_ptr.* = .{ .rect = rect, .has_rect = true, .parked = false };
         }
     }
 
@@ -447,7 +461,7 @@ pub fn lastRectFor(win: model.WindowId) ?utils.Rect {
 ///   2. else the last visible geometry we sent (null while parked/unsent).
 pub fn truthRect(m: *const model.Model, win: model.WindowId) ?utils.Rect {
     const e = m.store.get(win) orelse return null;
-    if (e.mode == .base and e.mode.base == .floating) return e.mode.base.floating;
+    if (e.presence == .present and e.mode == .base and e.mode.base == .floating) return e.mode.base.floating;
     return lastRectFor(win);
 }
 

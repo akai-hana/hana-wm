@@ -15,7 +15,6 @@ const input = @import("input");
 const window = @import("window");
 const focus = @import("focus");
 
-const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else null;
 const refresh_rate = @import("refresh_rate");
 const signals = @import("signals");
 const pipeline = @import("pipeline");
@@ -23,8 +22,20 @@ const actions = @import("actions");
 const restart = @import("restart");
 const restart_state = @import("restart_state");
 const build_options = @import("build_options");
-const tiling = if (build_options.has_tiling) @import("tiling") else null;
-const bar = if (build_options.has_bar) @import("bar") else null;
+// Core's reach into the compiled-in chrome surface (the bar) lives in the
+// `surfaces` composition root, not here. `surfaces` is the bar's hook set
+// when present, and the comptime `null` type when absent, so every
+// `if (build_options.has_bar)` call below compiles away. This file never
+// names the bar module directly. The `build_options` import stays for the
+// `has_bar` compile-time guards used below.
+const surfaces = @import("plugins").Surfaces;
+// Window sub-system event hooks (pending bar hide/show, destroy handling)
+// are reached through the build-generated `window_modules` registry (never
+// by naming a sub-system module directly), the same seam discipline as
+// `surfaces` above. `window_mods` is the auto-discovered `[N]WindowModule`
+// array; absent modules aren't in it, so the uniform loops below no-op for a
+// tree without a given sub-system.
+const window_mods = @import("window_modules").modules;
 
 const fd_xcb = 0;
 const fd_signal = 1;
@@ -57,21 +68,19 @@ inline fn eventCast(comptime T: type, event: *anyopaque) T {
 
 fn handleExpose(event: *anyopaque) void {
     const e = eventCast(*xcb.xcb_expose_event_t, event);
-    // D8: the plugin registry is gone (two compile-time-known "plugins",
-    // only bar ever hooked anything); direct dispatch behind build flags.
-    if (build_options.has_bar) bar.handleExpose(e);
+    if (build_options.has_bar) surfaces.handleExpose(e);
 }
 
 fn handlePropertyNotify(event: *anyopaque) void {
     const e = eventCast(*xcb.xcb_property_notify_event_t, event);
-    if (build_options.has_bar) bar.handlePropertyNotify(e);
+    if (build_options.has_bar) surfaces.handlePropertyNotify(e);
     window.handlePropertyNotify(e);
 }
 
 // Routes ConfigureNotify to the fullscreen deferred-bar-hide/show logic.
 fn handleConfigureNotify(event: *anyopaque) void {
     const e = eventCast(*xcb.xcb_configure_notify_event_t, event);
-    if (build_options.has_fullscreen) fullscreen.notifyConfigureIfPending(e.window, e.width, e.height);
+    for (window_mods) |m| if (m.notifyConfigureIfPending) |f| f(e.window, e.width, e.height);
 }
 
 // Notifies fullscreen of the destroyed window before delegating to window.zig.
@@ -79,7 +88,7 @@ fn handleConfigureNotify(event: *anyopaque) void {
 // and is then destroyed before it can send a ConfigureNotify.
 fn handleDestroyNotify(event: *anyopaque) void {
     const e = eventCast(*xcb.xcb_destroy_notify_event_t, event);
-    if (build_options.has_fullscreen) fullscreen.onWindowGone(e.window);
+    for (window_mods) |m| if (m.onWindowGone) |f| f(e.window);
     window.handleDestroyNotify(e);
 }
 
@@ -221,7 +230,7 @@ pub fn grabKeybindings() void {
 // Ordering is load-bearing:
 //   1. Keybind resolution and DPI scaling run pre-swap on the new config.
 //   2. The swap precedes subsystem reloads (reloadBorders / reloadConfig /
-//      bar.reload) so they rebuild from the NEW config. (The old ordering kept
+//      surfaces.onReload) so they rebuild from the NEW config. (The old ordering kept
 //      stale settings, then freed string slices the new bar had shallow-copied;
 //      a use-after-free on the next draw.)
 //   3. grabKeybindings() runs post-swap because fillGrabCookies() reads the
@@ -250,7 +259,7 @@ fn handleConfigReload() !void {
     const old_ptr = cs.config;
     cs.config = new_ptr;
 
-    if (build_options.has_bar) bar.reload();
+    if (build_options.has_bar) surfaces.onReload();
     actions.applyConfigReload();
     // Borders sweep AFTER applyConfigReload: its reconcile rebuilds geometry,
     // and sweeping first would send every border twice -- once here, once
@@ -273,8 +282,8 @@ fn handleConfigReload() !void {
 // is fixed: resolve the exec path, persist the live session FIRST (a failed
 // save aborts the hand-off and the WM keeps running on its live connection),
 // then drop the X connection so the successor cannot inherit a live
-// connection holding the root SubstructureRedirect grab, then execNext —
-// which never returns (parent exits immediately, child execs).
+// connection holding the root SubstructureRedirect grab, then execNext
+// (which never returns: parent exits immediately, child execs).
 fn handleReexec() !void {
     const cs = core.getState();
     const self_path = restart.selfPath() orelse {
@@ -290,6 +299,21 @@ fn handleReexec() !void {
     restart.execNext(self_path, path);
 }
 
+// Returns a pending stashed event if one exists, otherwise polls for the next
+// XCB event. `pending` holds the non-motion event stashed during motion
+// coalescing so ordering is preserved across batch iterations.
+fn takeEvent(pending: *?*xcb.xcb_generic_event_t, conn: core.Connection) ?*xcb.xcb_generic_event_t {
+    if (pending.*) |p| {
+        pending.* = null;
+        return p;
+    }
+    return xcb.xcb_poll_for_event(conn);
+}
+
+fn isMotion(e: *xcb.xcb_generic_event_t) bool {
+    return (@as(*u8, @ptrCast(e)).* & 0x7f) == xcb.XCB_MOTION_NOTIFY;
+}
+
 // Drains pending XCB events for this batch, then runs post-batch housekeeping.
 fn handleXcbEvents() void {
     const conn = core.getState().conn;
@@ -301,25 +325,11 @@ fn handleXcbEvents() void {
     // poll round.
     //
     // Motion coalescing: a run of MotionNotify events collapses to its LAST
-    // member before dispatch — drag paths only need the freshest pointer
-    // position, and every extra dispatched motion costs a reconcile. The
+    // member before dispatch (drag paths only need the freshest pointer
+    // position, and every extra dispatched motion costs a reconcile). The
     // first non-motion event is held in `pending` (it counts against the
     // batch cap via takeEvent) so ordering is preserved.
     var pending: ?*xcb.xcb_generic_event_t = null;
-    const takeEvent = struct {
-        fn take(buf: *?*xcb.xcb_generic_event_t, c: core.Connection) ?*xcb.xcb_generic_event_t {
-            if (buf.*) |p| {
-                buf.* = null;
-                return p;
-            }
-            return xcb.xcb_poll_for_event(c);
-        }
-    }.take;
-    const isMotion = struct {
-        fn f(e: *xcb.xcb_generic_event_t) bool {
-            return (@as(*u8, @ptrCast(e)).* & 0x7f) == xcb.XCB_MOTION_NOTIFY;
-        }
-    }.f;
 
     var dispatched: usize = 0;
     while (dispatched < max_events_per_batch) : (dispatched += 1) {
@@ -347,7 +357,7 @@ fn handleXcbEvents() void {
 
     // A cap exit can leave a non-motion event held in `pending` (stashed
     // during motion coalescing). It was already skipped this batch, so
-    // freeing it changes no drop-vs-dispatch semantics — it just stops the
+    // freeing it changes no drop-vs-dispatch semantics; it just stops the
     // leak. On the normal (socket-empty) exit path `pending` is always null.
     if (pending) |p| std.c.free(p);
 
@@ -358,7 +368,7 @@ fn handleXcbEvents() void {
     // spawn queue entry.
     @import("spawn").drainPendingSpawns();
 
-    if (build_options.has_bar) bar.updateIfDirty() catch |err| debug.err("Bar post-batch update failed: {}", .{err});
+    if (build_options.has_bar) surfaces.updateIfDirty() catch |err| debug.err("Bar post-batch update failed: {}", .{err});
     focus.drainPendingConfirm();
     focus.drainPointerSync();
     // Must run after the event-draining loop above: any EnterNotify a tiling
@@ -385,11 +395,11 @@ pub fn run() !void {
         // No built-in deadline: with no timer sources the loop blocks until
         // an X event or signal arrives. Timer sources (clock segment, prompt
         // cursor blink, carousel marquee) contribute deadlines exclusively
-        // through bar.pollTimeoutMs().
+        // through surfaces.pollTimeoutMs().
         var poll_timeout_ms: i32 = -1;
         var cursor_is_blinking = false;
         if (build_options.has_bar) {
-            const ms = bar.pollTimeoutMs();
+            const ms = surfaces.pollTimeoutMs();
             if (ms >= 0) {
                 cursor_is_blinking = true;
                 poll_timeout_ms = ms;
@@ -432,11 +442,9 @@ pub fn run() !void {
         if (utils.consumeReload())
             handleConfigReload() catch |err| debug.err("Reload failed: {}", .{err});
 
-        if (ready == 0) {
-            if (cursor_is_blinking) {
-                if (build_options.has_bar) bar.onPollWakeup();
-                _ = xcb.xcb_flush(cs.conn);
-            }
+        if (ready == 0 and cursor_is_blinking) {
+            if (build_options.has_bar) surfaces.onPollWakeup();
+            _ = xcb.xcb_flush(cs.conn);
         } else if ((fds[fd_xcb].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
             debug.err("X11 connection error, shutting down", .{});
             break;
@@ -444,6 +452,6 @@ pub fn run() !void {
             handleXcbEvents();
         }
 
-        if (build_options.has_bar) _ = bar.updateClock(); // return value reserved, currently unused
+        if (build_options.has_bar) _ = surfaces.updateClock(); // return value reserved, currently unused
     }
 }

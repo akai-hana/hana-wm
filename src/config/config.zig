@@ -11,7 +11,6 @@ const xkbcommon = @import("xkbcommon");
 const parser = @import("parser");
 const schema = @import("schema");
 const build_options = @import("build_options");
-const bar = if (build_options.has_bar) @import("bar") else null;
 const utils = @import("utils");
 
 /// Validates a 1-based workspace number, warn-and-skip when outside 1..255 or
@@ -61,7 +60,7 @@ const default_tiling_layout = (types.TilingConfig{}).layout;
 /// Dual-path rationale (C1): the stat-known-size path is a fast optimization
 /// for regular files where stat reliably reports a positive size, avoiding the
 /// amortised doubling/realloc of the growth loop. The growth path (stat fails
-/// or reports zero) handles edge cases — procfs/sysfs/pipe file descriptors
+/// or reports zero) handles edge cases like procfs/sysfs/pipe file descriptors
 /// where stat returns 0 despite carrying content, and fds where stat itself
 /// errors. Collapsing to a single growth path would penalise the common case
 /// (normal config files) for no functional gain.
@@ -90,8 +89,8 @@ pub fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
         const n = try file.readPositionalAll(io, buf, 0);
         return if (n == buf.len) buf else (allocator.realloc(buf, n) catch buf[0..n]);
     }
-    // Growth path (stat failed or reported zero). Single ownership throughout
-    // — the armed errdefer frees the whole buffer exactly once on every error
+    // Growth path (stat failed or reported zero). Single ownership throughout:
+    // the armed errdefer frees the whole buffer exactly once on every error
     // path, and the success path hands ownership to the caller.
     var buf = try allocator.alloc(u8, 64 * 1024);
     errdefer allocator.free(buf);
@@ -408,7 +407,7 @@ fn mouseButtonFromName(name: []const u8) ?u8 {
     };
 }
 
-/// D7: mechanically derived from `types.Action`'s tag names — every action
+/// D7: mechanically derived from `types.Action`'s tag names, so every action
 /// is addressable by its own tag name without a hand-maintained entry. Only
 /// genuine ALIASES are listed by hand. Adding an Action union member now
 /// requires exactly one edit (the union); forgetting an intended alias fails

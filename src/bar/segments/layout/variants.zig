@@ -7,7 +7,6 @@ const types = @import("types");
 const drawing = @import("drawing");
 const pipeline = @import("pipeline");
 const build_options = @import("build_options");
-const tiling = if (build_options.has_tiling) @import("tiling") else null;
 
 // Last-measured drawn width, read by segment.naturalWidth for the row
 // reservation (see the matching note in layout.zig). 0 when the segment
@@ -33,7 +32,7 @@ pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, star
         return start_x;
     }
     const layout_val = if (build_options.has_tiling) pipeline.getCurrentLayout() else .master;
-    const variants = if (build_options.has_tiling) tiling.getLayoutVariants() else types.LayoutVariants{};
+    const variants = if (build_options.has_tiling) @import("core").layoutVariants() else types.LayoutVariants{};
     const indicator = getIndicator(layout_val, &variants);
     if (indicator.len == 0) {
         cached_width = 0;

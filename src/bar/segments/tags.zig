@@ -6,7 +6,7 @@ const drawing = @import("drawing");
 const tracking = @import("tracking");
 
 /// Reserved row width when no workspaces are configured (moved here from
-/// bar.zig — width policy belongs to the segment that owns the pixels).
+/// bar.zig: width policy belongs to the segment that owns the pixels).
 pub const fallback_width: u16 = 270;
 
 // Sized to workspace_labels, the largest label source.

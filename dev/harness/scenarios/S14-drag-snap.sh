@@ -1,4 +1,4 @@
-# S14 — drag-snap: scripted Super+Button1 drag of a floating window with
+# S14 - drag-snap: scripted Super+Button1 drag of a floating window with
 # edge snapping and live updates (BC21).
 spawn_client A
 key super+s          # float it

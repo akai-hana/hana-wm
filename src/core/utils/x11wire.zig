@@ -20,7 +20,7 @@ const property_no_delete = constants.property_no_delete;
 // Geometry <-> wire conversions
 
 /// Builds a Rect from a get_geometry reply (moved out of Rect so the pure
-/// geometry type in utils.zig stays xcb-free — D6 layer boundary).
+/// geometry type in utils.zig stays xcb-free (D6 layer boundary).
 pub inline fn rectFromXcb(geom: *const xcb.xcb_get_geometry_reply_t) utils.Rect {
     return .{ .x = geom.x, .y = geom.y, .width = geom.width, .height = geom.height, .border_width = geom.border_width };
 }
@@ -175,8 +175,19 @@ const supported_atoms = [_][]const u8{
     "_NET_WM_STRUT_PARTIAL",
 };
 
+/// Publishes hana's EWMH conformance on the root window: per the spec a
+/// conformant WM creates a small identity ("check") window, tags it and the
+/// root with `_NET_SUPPORTING_WM_CHECK`, gives it a `_NET_WM_NAME`, and lists
+/// every honour-able hint in `_NET_SUPPORTED`. Clients (GLFW, Qt, Chromium, ...)
+/// probe this once at startup; without it they assume a bare ICCCM-only WM and
+/// take more conservative, in GLFW's case broken, code paths (see
+/// `supported_atoms`).
+///
+/// Must run once at startup, after initAtomCache() and before any client can
+/// map a window.
+///
 /// Known gaps between `_NET_SUPPORTED` and full behaviour: document, don't
-/// narrow — external tools key on the listed hints, and the list above is
+/// narrow; external tools key on the listed hints, and the list above is
 /// what keeps GLFW/Qt/Chromium out of their broken fallback paths.
 ///
 /// - The only client messages answered are `_NET_WM_STATE` with the
@@ -191,16 +202,6 @@ const supported_atoms = [_][]const u8{
 ///   advertised nor answered; minimize is internal-only (no state property).
 /// - `_NET_WORKAREA` is absent; clients wanting dock-safe geometry must use
 ///   `_NET_STRUT_PARTIAL` feedback instead.
-/// Publishes hana's EWMH conformance on the root window: per the spec a
-/// conformant WM creates a small identity ("check") window, tags it and the
-/// root with `_NET_SUPPORTING_WM_CHECK`, gives it a `_NET_WM_NAME`, and lists
-/// every honour-able hint in `_NET_SUPPORTED`. Clients (GLFW, Qt, Chromium, ...)
-/// probe this once at startup; without it they assume a bare ICCCM-only WM and
-/// take more conservative, in GLFW's case broken, code paths (see
-/// `supported_atoms`).
-///
-/// Must run once at startup, after initAtomCache() and before any client can
-/// map a window.
 pub fn advertiseEwmhSupport(conn: core.Connection, screen: core.Screen, root: u32) void {
     const supporting_wm_check = getAtomCached("_NET_SUPPORTING_WM_CHECK") catch return;
     const net_wm_name = getAtomCached("_NET_WM_NAME") catch return;
@@ -256,7 +257,7 @@ pub fn advertiseEwmhSupport(conn: core.Connection, screen: core.Screen, root: u3
 /// call unchanged.
 ///
 /// Poll semantics: `xcb_poll_for_reply` consumes the cookie on BOTH success
-/// and error, so a plain "null means block" contract is unsound — blocking
+/// and error, so a plain "null means block" contract is unsound; blocking
 /// on a consumed-error cookie has undefined XCB semantics. An X error seen
 /// here is freed and reported as plain failure; after it, the cookie must
 /// never be touched again.

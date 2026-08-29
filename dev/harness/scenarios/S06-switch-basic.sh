@@ -1,4 +1,4 @@
-# S06 — switch-basic: geometry stable across switch-away/switch-back.
+# S06 - switch-basic: geometry stable across switch-away/switch-back.
 spawn_client A
 spawn_client B       # both on ws1
 key super+shift+2    # move focused to ws2

@@ -1,6 +1,6 @@
 //! Unified WM reload coordinator.
 //!
-//! Owns the *decision* (binary changed since boot? → re-exec, else config
+//! Owns the *decision* (binary changed since boot? then re-exec, else config
 //! reload) and the *process hand-off* (in-place exec of the new binary).
 //! xcb-free and model-free: it never touches the X connection or the model.
 //! The event loop performs the actual re-exec sequence (save state, close the
@@ -12,7 +12,7 @@
 //! always resolves to the ORIGINAL file the running image was exec'd from,
 //! even after the filesystem path has been replaced. So the check compares
 //! the running image (captured at init) against the current file at the
-//! resolved exec path — an atomic `mv new bin` shows up as an inode/device
+//! resolved exec path (an atomic `mv new bin` shows up as an inode/device
 //! change, a truncate-plus-rewrite-in-place shows up as an mtime/size change.
 
 const std = @import("std");
@@ -23,7 +23,7 @@ const debug = @import("debug");
 // libc bindings for execv/setenv (no Zig stdlib wrappers exist for them, and
 // the executable links libc, so mirroring spawn.zig's pattern is the honest
 // route). execv (not execvp) is deliberate: we hand it the absolute self
-// path, so there is no PATH lookup — and as the variadic execv it inherits
+// path, so there is no PATH lookup; and as the variadic execv it inherits
 // the process environ, which carries DISPLAY and HANA_RESTORE forward.
 const c = @cImport({
     @cInclude("unistd.h");
@@ -32,9 +32,9 @@ const c = @cImport({
 
 /// What the unified `reload` trigger decided to do.
 pub const Decision = enum {
-    /// Binary file unchanged since boot → in-place config hot-reload.
+    /// Binary file unchanged since boot, so: in-place config hot-reload.
     config_reload,
-    /// Binary file differs from the running image → full re-exec, which
+    /// Binary file differs from the running image; full re-exec, which
     /// loads a fresh config as a side effect.
     reexec,
 };
@@ -127,7 +127,7 @@ pub fn init(alloc: std.mem.Allocator, binary_path_override: ?[]const u8) void {
 /// truncate-and-rewrite-in-place (mtime/size change).
 ///
 /// If the boot capture or the stat of the current path fails (file missing),
-/// returns false: never re-exec into nothing — the config-reload fallback
+/// returns false: never re-exec into nothing; the config-reload fallback
 /// still runs.
 pub fn binaryChanged() bool {
     const boot = boot_identity orelse return false;
@@ -142,7 +142,7 @@ pub fn binaryChanged() bool {
 }
 
 /// The unified entry: everything the `reload` keybind (and SIGUSR1) means.
-/// If the binary changed → request re-exec; otherwise fall back to the
+/// If the binary changed, request re-exec; otherwise fall back to the
 /// existing config-reload path (proc flag + wake byte).
 pub fn requestReload() void {
     if (binaryChanged()) {
@@ -177,14 +177,14 @@ pub fn selfPath() ?[]const u8 {
 
 /// Execs `self_path` IN PLACE, inheriting environ/DISPLAY. Never returns.
 /// MUST be called only after the X connection is closed (handleReexec does):
-/// a live inherited fd would keep the old client — and its root
-/// SubstructureRedirect grab — alive while the fresh connection tries to
+/// a live inherited fd would keep the old client (and its root
+/// SubstructureRedirect grab) alive while the fresh connection tries to
 /// claim the same grab, and the server would reject the newcomer with
 /// BadAccess.
 ///
-/// Deliberately NO fork: the process identity — pid and parent — survives
+/// Deliberately NO fork: the process identity (pid and parent) survives
 /// the hand-off. Under startx the display lives exactly as long as the
-/// session client (xinit → Xsession → .xinitrc → this process); replacing
+/// session client (xinit -> Xsession -> .xinitrc -> this process); replacing
 /// the image in place keeps that chain unbroken, so the successor boots into
 /// a live server and the session only ends when the new WM actually exits.
 /// (The original fork-then-exit design killed every supervised re-exec:

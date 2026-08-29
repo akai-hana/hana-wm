@@ -3,15 +3,15 @@
 //! ONE dispatch point per segment concern; adding a segment touches this
 //! file plus its own module instead of six switches across bar.zig:
 //!
-//!   naturalWidth(seg, frame, clock_w) — reserved row width
-//!   draw(seg, env, x, frame)          — render at x, return advanced x
+//!   naturalWidth(seg, frame, clock_w) : reserved row width
+//!   draw(seg, env, x, frame)          : render at x, return advanced x
 //!   onClick(seg, offset, left, redraw)- action dispatch for recorded bounds
 //!
 //! Rendering uses per-segment dirty tracking: only segments whose dirty bit
-//! is set get repainted on each frame. Title/prompt keep their richer
-//! internal machinery behind the thin adapter in draw()'s `.title` arm;
-//! their complexity does not leak into the orchestrator. Width policy
-//! constants moved INTO their owning segments
+//! is set get repainted on each frame. The title segment keeps its richer
+//! machinery behind bar.zig's own adapter (prompt.draw), so it never flows
+//! through this module's dispatch; its complexity does not leak into the
+//! orchestrator. Width policy constants moved INTO their owning segments
 //! (tags.fallback_width, title.min_width); layout/variants reserve their
 //! last-measured drawn width (getCachedWidth) so non-dirty advances match
 //! what was actually painted.
@@ -20,6 +20,7 @@ const drawing = @import("drawing");
 const types = @import("types");
 const actions = @import("actions");
 const focus = @import("focus");
+const tracking = @import("tracking");
 const build_options = @import("build_options");
 
 const tags = if (build_options.has_seg_tags) @import("tags") else struct {
@@ -181,8 +182,7 @@ fn resolveWorkspaceClick(offset: u16) ?usize {
     const cell_w = tags.getCachedWorkspaceWidth();
     if (cell_w == 0) return null;
     if (!build_options.has_workspaces) return null;
-    const ws_state = @import("workspaces").getState() orelse return null;
     const idx: usize = @intCast(offset / cell_w);
-    if (idx >= ws_state.workspaces.len) return null;
+    if (idx >= tracking.getWorkspaceCount()) return null;
     return idx;
 }
