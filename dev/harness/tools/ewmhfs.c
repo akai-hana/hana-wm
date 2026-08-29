@@ -1,4 +1,4 @@
-/* ewmhfs <win> <add|remove|toggle> — send a _NET_WM_STATE ClientMessage
+/* ewmhfs <win> <add|remove|toggle> - send a _NET_WM_STATE ClientMessage
  * (ICCCM/EWMH fullscreen request) so harness scenarios exercise the WM's
  * client-message path exactly like a real client would.
  *

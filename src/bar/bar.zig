@@ -13,6 +13,7 @@ const build_options = @import("build_options");
 const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
+const screen = @import("screen");
 const refresh_rate = @import("refresh_rate");
 const scale = @import("scale");
 const constants = @import("constants");
@@ -22,11 +23,9 @@ const types = @import("types");
 
 const tracking = @import("tracking");
 const focus = @import("focus");
-const minimize = if (build_options.has_minimize) @import("minimize") else null;
-const pipeline = @import("pipeline"); // PIPELINE: train a
-const actions = @import("actions"); // PIPELINE: train a
+const pipeline = @import("pipeline");
+const actions = @import("actions");
 const model = @import("model");
-const workspaces = if (build_options.has_workspaces) @import("workspaces") else null;
 
 const window = @import("window");
 
@@ -121,15 +120,12 @@ const all_dirty: u5 = blk: {
     for (0..fields.len) |i| mask |= @as(u5, 1) << @intCast(i);
     break :blk mask;
 };
-const tiling = if (build_options.has_tiling) @import("tiling") else null;
-const floating = if (build_options.has_floating) @import("floating") else null;
-
 // ---------------------------------------------------------------------------
 // Bar height / font-size resolution (folded from metrics.zig).
 //
 // Owns everything needed to decide the bar's pixel height and effective font
 // size from config + font metrics, including the percentage-font-size probe
-// (which measures through drawing.probeFontMetrics' throwaway surface — no
+// (which measures through drawing.probeFontMetrics' throwaway surface, no
 // live DrawContext is touched). The documented config write in
 // calcBarHeightAndFontSize (scaled_font_size is runtime state that happens
 // to live on BarConfig) is the only side effect.
@@ -147,8 +143,8 @@ fn measureFontMetrics() ?struct { asc: i32, desc: i32 } {
 }
 
 fn resolvePercentageFontSize(bar_height: u16) ?u16 {
-    // Probe metrics at a trial point size via the override parameter —
-    // no save/mutate/restore round on cs.config.
+    // Probe metrics at a trial point size via the override parameter, so
+    // there is no save/mutate/restore round on cs.config.
     const trial_pt: u16 = 100;
     const cs = core.getState();
     const sized = drawing.buildSizedFontList(cs.alloc, trial_pt) catch return null;
@@ -213,8 +209,6 @@ pub fn promptToggle() void {
     prompt.toggle();
 }
 
-pub const Action = enum { toggle, hide_fullscreen, show_fullscreen };
-
 /// Global bar coordination flags. Read and written exclusively on the main
 /// thread; no mutex protection required.
 const Bar = struct {
@@ -240,7 +234,7 @@ const Bar = struct {
 // PATTERN: Module-global state with explicit init/deinit lifecycle.
 // This avoids allocator threading through every function call.
 // The init/deinit pair is called from main.zig's startup/shutdown sequence.
-// All functions operate on `g` directly — no passing state as parameters.
+// All functions operate on `g` directly, with no passing state as parameters.
 var gBar: Bar = .{};
 
 /// X11 connection and window handle; stable for the bar's lifetime.
@@ -271,6 +265,12 @@ const max_frame_windows: usize = constants.Limits.max_tiled_windows;
 /// the configured layout. Configs with more clickable segments than this
 /// simply lose clickability on the extras (rendering is unaffected).
 const max_click_bounds: usize = 8;
+
+/// Scratch bound for the per-draw right-cluster segment widths. Right segments
+/// are measured once into this buffer and reused for both the total-width
+/// calculation and the draw; a config with more than this many right segments
+/// falls back to re-measuring at draw time (layout math identical, no win).
+const max_right_segments: usize = 16;
 
 /// On-screen hit-test bound of one segment, recorded by recordClickBound
 /// during the layout pass. THE click-bound storage: hit-testing iterates
@@ -345,6 +345,22 @@ const State = struct {
     focused_title: std.ArrayListUnmanaged(u8) = .empty,
     /// Window the focused_title buffer was fetched for (null = never/stale).
     focused_title_window: ?u32 = null,
+
+    // -- Last-seen core fact revisions (see core.Facts) --
+
+    /// Last focus_rev we diffed in updateIfDirty. A change marks the title
+    /// segment dirty (cheap). Initialized sentinel so the first update draws.
+    last_focus_rev: u32 = std.math.maxInt(u32),
+    /// Last window_rev we diffed. A change marks all segments dirty (the
+    /// workspaces/title segments reflect window & workspace state).
+    last_window_rev: u32 = std.math.maxInt(u32),
+    /// Last layout_rev we diffed. A change forces a full redraw (all segments
+    /// + a title-data refetch).
+    last_layout_rev: u32 = std.math.maxInt(u32),
+    /// Last fullscreen_rev we diffed. A change means fullscreen occupancy of
+    /// the current workspace changed; the bar recomputes its forced hidden/
+    /// shown state (shared-screen reaction) from the core fact.
+    last_fullscreen_rev: u32 = std.math.maxInt(u32),
 
     fn init(
         allocator: std.mem.Allocator,
@@ -479,38 +495,36 @@ const State = struct {
     fn scanLiveFrame(self: *State) bool {
         const m = pipeline.model();
         if (build_options.has_workspaces) {
-            if (workspaces.getState()) |ws_state| {
-                self.ws_count = @intCast(ws_state.workspaces.len);
-                self.current_ws = @intCast(m.current);
-                self.all_view = m.all_view_active;
-                @memset(&self.ws_has_windows, false);
-                self.wins_len = 0;
-                const cur_bit: u64 = if (self.current_ws < self.ws_count)
-                    tracking.workspaceBit(self.current_ws)
-                else
-                    0;
-                // OR-accumulate all window masks in a single pass, collecting the
-                // current workspace's windows on the way.
-                var combined_mask: u64 = 0;
-                for (tracking.allWindows()) |entry| {
-                    combined_mask |= entry.mask;
-                    if (cur_bit != 0 and entry.mask & cur_bit != 0 and self.wins_len < max_frame_windows) {
-                        self.wins[self.wins_len] = entry.win;
-                        self.wins_len += 1;
-                    }
+            self.ws_count = @intCast(tracking.getWorkspaceCount());
+            self.current_ws = @intCast(m.current);
+            self.all_view = m.all_view_active;
+            @memset(&self.ws_has_windows, false);
+            self.wins_len = 0;
+            const cur_bit: u64 = if (self.current_ws < self.ws_count)
+                tracking.workspaceBit(self.current_ws)
+            else
+                0;
+            // OR-accumulate all window masks in a single pass, collecting the
+            // current workspace's windows on the way.
+            var combined_mask: u64 = 0;
+            for (tracking.allWindows()) |entry| {
+                combined_mask |= entry.mask;
+                if (cur_bit != 0 and entry.mask & cur_bit != 0 and self.wins_len < max_frame_windows) {
+                    self.wins[self.wins_len] = entry.win;
+                    self.wins_len += 1;
                 }
-                for (0..self.ws_count) |i| {
-                    self.ws_has_windows[i] = combined_mask & tracking.workspaceBit(@as(u8, @intCast(i))) != 0;
-                }
+            }
+            for (0..self.ws_count) |i| {
+                self.ws_has_windows[i] = combined_mask & tracking.workspaceBit(@as(u8, @intCast(i))) != 0;
             }
         }
 
         // Diff the fetch key: ids plus minimized membership (a minimize flips
         // the window's title-view geometry to the off-screen sentinel, which
-        // demotes it in the split-view sort — that IS a data change).
+        // demotes it in the split-view sort, and that IS a data change).
         var changed = !self.fetch_key_valid or self.fetch_key_len != self.wins_len;
         for (0..self.wins_len) |i| {
-            const minf = if (build_options.has_minimize) minimize.isMinimized(self.wins[i]) else false;
+            const minf = if (build_options.has_minimize) @import("minimize").isMinimized(pipeline.model(), self.wins[i]) else false;
             if (!changed and (self.fetch_key_ids[i] != self.wins[i] or self.fetch_key_minimized[i] != minf))
                 changed = true;
             self.fetch_key_ids[i] = self.wins[i];
@@ -583,14 +597,19 @@ const State = struct {
 
     fn drawSegment(self: *State, frame: *const segmod.Frame, segment: types.BarSegment, x: u16, width: ?u16) !u16 {
         // Title adapter (see segment.zig draw()): needs caller-owned title
-        // data from State; stays local for now.
-        if (segment == .title)
+        // data from State; stays local for now. The branch is comptime-eliminated
+        // when the title segment is absent (has_seg_title=false): without it
+        // there is no title variant any caller will pass, so the special-cased
+        // renderer's types (bar.title vs prompt.title) must not be compared.
+        if (segment == .title) {
+            if (!comptime build_options.has_seg_title) return error.DrewInvalidSegment;
             return prompt.draw(
                 self.titleCtx(x, width orelse title.min_width),
                 self.titleSnapshot(),
                 self.render.allocator,
                 false,
             );
+        }
         return segmod.draw(
             segment,
             .{ .dc = self.render.dc, .config = self.render.config, .height = self.render.height },
@@ -626,14 +645,17 @@ const State = struct {
         self.render.dc.fillRect(gap_x, 0, scaled_spacing, self.render.height, self.render.config.bg);
     }
 
-    fn drawRightSegments(self: *State, frame: *const segmod.Frame, segments: []const types.BarSegment, is_full_redraw: bool) void {
+    fn drawRightSegments(self: *State, frame: *const segmod.Frame, segments: []const types.BarSegment, widths: ?[]const u16, is_full_redraw: bool) void {
         const scaled_spacing = self.render.config.scaledSpacing(self.render.height);
         var right_x = self.render.width;
         var pending_gap = false;
         var i = segments.len;
         while (i > 0) {
             i -= 1;
-            const seg_w = self.measureSegmentWidth(frame, segments[i]);
+            // Widths measured once up front in drawAllInner (null only when the
+            // right cluster exceeds the scratch buffer, which falls back to the
+            // original measure-at-draw re-measurement below).
+            const seg_w = if (widths) |ws| ws[i] else self.measureSegmentWidth(frame, segments[i]);
             right_x -= seg_w;
             if (pending_gap) right_x -= scaled_spacing;
 
@@ -678,14 +700,26 @@ const State = struct {
         }
 
         var right_total: u16 = 0;
+        var right_widths: [max_right_segments]u16 = undefined;
+        var right_widx: usize = 0;
         for (r.config.layout.items) |lay| {
             if (lay.position != .right) continue;
-            for (lay.segments.items) |seg| right_total += self.measureSegmentWidth(frame, seg) + scaled_spacing;
+            for (lay.segments.items) |seg| {
+                // One measurement per right segment per draw; the reserved
+                // widths feed BOTH the right-cluster total (used by the
+                // left/center placement below) and the draw itself.
+                const w = self.measureSegmentWidth(frame, seg);
+                if (right_widx < max_right_segments) right_widths[right_widx] = w;
+                right_widx += 1;
+                right_total += w + scaled_spacing;
+            }
             if (lay.segments.items.len > 0) right_total -= scaled_spacing;
         }
+        const right_measured = right_widx <= max_right_segments;
 
         self.bounds_len = 0;
         var x: u16 = 0;
+        var right_ridx: usize = 0;
         for (r.config.layout.items) |lay| {
             switch (lay.position) {
                 .left, .center => {
@@ -700,24 +734,27 @@ const State = struct {
                     else
                         0;
                     for (lay.segments.items) |seg| {
+                        const omit_gap = (lay.position == .center) and seg == .title;
                         const w = if (seg == .title and lay.position == .center) remaining else self.measureSegmentWidth(frame, seg);
                         self.recordClickBound(seg, x, w);
                         if (self.isSegmentDirty(seg)) {
                             if (!is_full_redraw) {
-                                const omit_gap = (lay.position == .center) and seg == .title;
                                 const clear_w = if (omit_gap) w else w + scaled_spacing;
                                 r.dc.fillRect(x, 0, clear_w, r.height, r.config.bg);
                             }
                             x = self.drawRowSegment(frame, seg, x, w, lay.position == .center, scaled_spacing);
                             self.clearSegmentDirty(seg);
                         } else {
-                            const omit_gap = (lay.position == .center) and seg == .title;
                             x += w;
                             if (!omit_gap) x += scaled_spacing;
                         }
                     }
                 },
-                .right => self.drawRightSegments(frame, lay.segments.items, is_full_redraw),
+                .right => {
+                    const ws = if (right_measured) right_widths[right_ridx..][0..lay.segments.items.len] else null;
+                    self.drawRightSegments(frame, lay.segments.items, ws, is_full_redraw);
+                    right_ridx += lay.segments.items.len;
+                },
             }
         }
     }
@@ -731,7 +768,7 @@ const State = struct {
         // Region-scoped blit: copies only the clock region and flushes (this
         // is a timer-driven path; no event-loop flush is coming). Blit at
         // least what was PAINTED (drawn_end can exceed the layout-time
-        // reservation after font fallback or digit-width drift — blitting
+        // reservation after font fallback or digit-width drift: blitting
         // only the cached width would clip digits) while keeping the full
         // reserved slot covered so stale pixels from a wider earlier frame
         // still get overwritten with the clean background the last full
@@ -746,14 +783,21 @@ const State = struct {
 
 /// Collects live state, repaints every segment into the off-screen pixmap,
 /// and queues the single xcb_copy_area blit (cairo_surface_flush included,
-/// xcb_flush NOT: the caller's context flushes — event-loop end-of-batch on
+/// xcb_flush NOT: the caller's context flushes (event-loop end-of-batch on
 /// normal paths, ungrabAndFlush inside grabs).
 fn performDraw() void {
     const s = gBar.state orelse return;
     if (!s.is_visible) return;
     if (gBar.force) s.markAllSegmentsDirty();
-    if (build_options.has_minimize) minimize.collectMinimizedIntoSet(&s.minimized, s.render.allocator) catch {};
     s.fetch_dirty = s.scanLiveFrame();
+    // The minimized set feeds ONLY the title segment (its batch geometry
+    // prefetch and the title draw). Collect it lazily: only on frames where a
+    // refetch or a title repaint will actually read it, never on frames where
+    // the title is clean (the set is left untouched so the last refresh is
+    // reused verbatim).
+    if (build_options.has_minimize and (gBar.force or s.fetch_dirty or s.isSegmentDirty(.title))) {
+        @import("minimize").collectMinimizedIntoSet(pipeline.model(), &s.minimized, s.render.allocator) catch {};
+    }
     s.refreshTitleData();
     const frame = segmod.Frame{
         .workspace_count = s.ws_count,
@@ -812,6 +856,7 @@ pub fn init() !void {
     const height = try calcBarHeightAndFontSize();
     const bar = try createBar(height, barwin.calcBarYPos(height));
     gBar.state = bar.state;
+    screen.setSurfaceWindow(bar.setup.win_id);
     submitDraw();
     _ = xcb.xcb_map_window(cs.conn, bar.setup.win_id);
     _ = xcb.xcb_flush(cs.conn);
@@ -820,6 +865,7 @@ pub fn init() !void {
         try vim.init(cs.alloc, prompt.default_max_input);
     }
     try prompt.init(cs.alloc, cs.conn);
+    syncScreenClaim();
 }
 
 pub fn deinit() void {
@@ -831,6 +877,8 @@ pub fn deinit() void {
         s.deinit();
         gBar.state = null;
     }
+    screen.releaseClaim(screen.bar_id.?);
+    screen.clearSurfaceWindow();
 }
 
 pub fn reload() void {
@@ -854,7 +902,7 @@ fn applyReload(old: *State, height: u16) !void {
     const cs = core.getState();
     // Prompt caches (font widths, caret geometry) are built against the old
     // config; the new one is live from here on either way, so drop them up
-    // front — including on the failure path below, where the surviving bar
+    // front, including on the failure path below, where the surviving bar
     // re-points at the NEW live config too.
     prompt.invalidateReloadCaches();
     const new_bar = createBar(height, barwin.calcBarYPos(height)) catch |err| {
@@ -870,6 +918,8 @@ fn applyReload(old: *State, height: u16) !void {
     new_state.is_visible = old.is_visible;
     new_state.is_globally_visible = old.is_globally_visible;
     gBar.state = new_state;
+    screen.setSurfaceWindow(new_bar.setup.win_id);
+    syncScreenClaim();
     submitDrawBlockingFull();
     if (new_state.is_visible) _ = xcb.xcb_map_window(cs.conn, new_bar.setup.win_id);
     _ = xcb.xcb_destroy_window(cs.conn, old.win.win_id);
@@ -900,12 +950,15 @@ pub fn toggleBarSegmentAnchor() void {
         ungrabAndFlush();
         return;
     };
-    const no_fullscreen = model.fullscreenOccupantOnWs(pipeline.model(), @intCast(current_ws)) == null;
+    const no_fullscreen = if (build_options.has_fullscreen) @import("fullscreen").fullscreenOccupantOnWs(pipeline.model(), @intCast(current_ws)) == null else true;
+    // The bar's edge changed; update its claim so the reconcile below
+    // re-derives every placement from the new usable area.
+    syncScreenClaim();
     // The work area changed with the bar's new edge; one model reconcile
     // re-derives every placement from it.
     // LAYERING NOTE: The bar triggers reconciliation after visibility/position
     // changes because the work area geometry changed, affecting all window
-    // placements. This is a write-path side effect from a rendering module —
+    // placements. This is a write-path side effect from a rendering module,
     // documented in the check-layers.sh allowlist.
     if (no_fullscreen) pipeline.reconcileNow();
     window.updateFloatingWindowBorders();
@@ -914,66 +967,27 @@ pub fn toggleBarSegmentAnchor() void {
     debug.info("Bar position toggled to: {s}", .{@tagName(cs.config.bar.bar_position)});
 }
 
-/// Lightweight focus-only redraw; skipped when a full redraw is already pending.
-pub fn scheduleFocusRedraw(_: ?u32) void {
-    const s = gBar.state orelse return;
-    if (!s.is_visible or s.is_dirty) return;
-    // Only the title segment needs repainting on a focus change; mark it
-    // dirty without forcing a full-bar redraw. A per-frame redraw during
-    // rapid window opening would produce O(N²) property queries and Pango
-    // renders — skipping the early draw lets the post-batch hook do one
-    // coalesced redraw instead.
-    s.markSegmentDirty(.title);
-}
-
 pub fn isBarWindow(win: u32) bool {
     return if (gBar.state) |s| s.win.win_id == win else false;
 }
-pub fn getBarWindow() u32 {
-    return if (gBar.state) |s| s.win.win_id else 0;
-}
-pub fn getBarHeight() u16 {
-    return if (gBar.state) |s| s.render.height else 0;
+
+/// Pushes the bar's current screen-space claim to core.screen. Called at each
+/// point where the bar's occupancy of the screen changes (visibility toggle,
+/// edge/position change) immediately before the reconcile that re-derives
+/// window placement from the new usable area. Core owns the area math; the
+/// bar only contributes "I take this many pixels from this edge."
+fn syncScreenClaim() void {
+    const s = gBar.state orelse return;
+    const cs = core.getState();
+    const edge: screen.Edge = if (cs.config.bar.bar_position == .bottom) .bottom else .top;
+    const px: u16 = if (s.is_visible) s.render.height else 0;
+    screen.setClaim(screen.bar_id.?, edge, px);
 }
 
-/// Screen area not covered by the bar, as a Rect (x=0, y=bar inset or 0).
 /// Window id of the bar, or null before init(). Lets the boot-time
 /// window adoption skip the WM's own window.
 pub fn winId() ?u32 {
     return if (gBar.state) |s| s.win.win_id else null;
-}
-
-pub fn workAreaRect() utils.Rect {
-    const cs = core.getState();
-    const bar_height: u16 = if (isVisible()) getBarHeight() else 0;
-    const at_bottom = cs.config.bar.bar_position == .bottom;
-    return .{
-        .x = 0,
-        .y = if (at_bottom) 0 else @intCast(bar_height),
-        .width = cs.screen.width_in_pixels,
-        .height = cs.screen.height_in_pixels -| bar_height,
-    };
-}
-
-/// Schedules a full bar redraw, coalesced via updateIfDirty. Zero X11 I/O on the caller.
-pub fn scheduleRedraw() void {
-    if (gBar.state) |s| if (s.is_visible) s.markDirty();
-}
-
-/// Like scheduleRedraw but also forces a title-data refetch on the next draw.
-///
-/// Use when a segment's presence or width may change (e.g. layout switch) or
-/// when cached title data must be re-read from X11 despite an unchanged
-/// fetch key; stale pixels are erased by the unconditional background clear.
-pub fn scheduleFullRedraw() void {
-    if (gBar.state) |s| if (s.is_visible) {
-        gBar.force = true;
-        s.markDirty();
-    };
-}
-
-pub fn isVisible() bool {
-    return if (gBar.state) |s| s.is_visible else false;
 }
 
 /// Synchronous bar update safe to call inside xcb_grab_server.
@@ -988,7 +1002,7 @@ pub fn isVisible() bool {
 /// grab are DEFERRED instead of rendered: every client stalls until the
 /// replies arrive, and each reply's implicit flush tears the caller's queued
 /// configure/map batch apart mid-operation, exactly what the grab exists to
-/// prevent (see the O(N²)-in-grab note in window.zig). Those frames fall
+/// prevent (see the O(N*N)-in-grab note in window.zig). Those frames fall
 /// back to the coalesced post-batch redraw; cheap frames still render inline.
 pub fn redrawInsideGrab() void {
     const s = gBar.state orelse return;
@@ -1057,21 +1071,37 @@ pub fn dismissAfterPrompt() void {
     if (!gBar.prompt_forced_visible) return;
     gBar.prompt_forced_visible = false;
     const current_ws = tracking.getCurrentWorkspace() orelse 0;
-    const should_show = model.fullscreenOccupantOnWs(pipeline.model(), @intCast(current_ws)) == null and s.is_globally_visible;
+    const no_fullscreen = if (build_options.has_fullscreen) @import("fullscreen").fullscreenOccupantOnWs(pipeline.model(), @intCast(current_ws)) == null else true;
+    const should_show = no_fullscreen and s.is_globally_visible;
     if (should_show) return; // conditions changed while the prompt was open; stay visible
     s.is_visible = false;
     _ = xcb.xcb_unmap_window(s.win.conn, s.win.win_id);
     _ = xcb.xcb_flush(s.win.conn);
 }
 
-pub fn setBarState(action: Action) void {
+/// Sets the bar's user-level visibility state. Only the user toggle path
+/// arrives here (keybind / config action). Fullscreen-driven hide/show is NOT
+/// a named call: the bar derives it reactively from the core fullscreen fact
+/// revision in `applyFullscreenVisibility`, so no subsystem pokes the bar.
+pub fn setBarState(action: types.Action) void {
     const s = gBar.state orelse return;
-    if (action == .toggle) s.is_globally_visible = !s.is_globally_visible;
+    if (action == .toggle_bar_visibility) s.is_globally_visible = !s.is_globally_visible;
+    applyFullscreenVisibility();
+}
+
+/// Reacts to a change in core's fullscreen-occupancy fact: recomputes whether
+/// the bar must be hidden to share the screen with a fullscreen window on the
+/// current workspace, then maps/unmaps and updates the screen claim. Core owns
+/// the fact revision; the bar merely reads the model & screen facts it already
+/// consumes. Calls `reconcileNow` after a visibility claim change because the
+/// usable area geometry changed (a write-path side effect from a rendering
+/// module: documented in the check-layers.sh allowlist).
+pub fn applyFullscreenVisibility() void {
+    const s = gBar.state orelse return;
     const current_ws = tracking.getCurrentWorkspace() orelse 0;
-    const bar_forced_hidden_by_fullscreen = action != .hide_fullscreen and
-        model.fullscreenOccupantOnWs(pipeline.model(), @intCast(current_ws)) != null;
-    const should_be_visible = !bar_forced_hidden_by_fullscreen and s.is_globally_visible and action != .hide_fullscreen;
-    if (s.is_visible == should_be_visible and action != .toggle) return;
+    const bar_forced_hidden_by_fullscreen = if (build_options.has_fullscreen) @import("fullscreen").fullscreenOccupantOnWs(pipeline.model(), @intCast(current_ws)) != null else false;
+    const should_be_visible = !bar_forced_hidden_by_fullscreen and s.is_globally_visible;
+    if (s.is_visible == should_be_visible) return;
     s.is_visible = should_be_visible;
     if (should_be_visible) {
         gBar.skip_title_refetch = true;
@@ -1081,18 +1111,43 @@ pub fn setBarState(action: Action) void {
     const conn = core.getState().conn;
     utils.grabServer(conn);
     if (should_be_visible) _ = xcb.xcb_map_window(conn, s.win.win_id) else _ = xcb.xcb_unmap_window(conn, s.win.win_id);
-    // LAYERING NOTE: The bar triggers reconciliation after visibility/position
-    // changes because the work area geometry changed, affecting all window
-    // placements. This is a write-path side effect from a rendering module —
-    // documented in the check-layers.sh allowlist.
+    // The bar's screen occupancy changed with its visibility; update the
+    // claim so the reconcile below re-derives placement from the new area.
+    syncScreenClaim();
     pipeline.reconcileNow();
     ungrabAndFlush();
-    debug.info("Bar {s} ({s})", .{ if (should_be_visible) "shown" else "hidden", @tagName(action) });
+    debug.info("Bar {s} due to fullscreen-occupancy fact change", .{if (should_be_visible) "shown" else "hidden"});
 }
 
 pub fn updateIfDirty() !void {
     const s = gBar.state orelse return;
+
+    // Fullscreen-occupancy reaction runs even when the bar is currently hidden
+    // (it may need to become visible again on fullscreen exit). Diff the core
+    // fact revision; when changed, we recompute shared-screen visibility. Core
+    // owns the fact; we react over a one-way signal rather than being poked.
+    const fullscreen_rev = core.fullscreenRev();
+    if (s.last_fullscreen_rev != fullscreen_rev) {
+        s.last_fullscreen_rev = fullscreen_rev;
+        applyFullscreenVisibility();
+    }
     if (!s.is_visible) return;
+
+    // Diff core's fact revisions against what we last drew. Core owns these
+    // facts; we react over a one-way signal (revision counters) rather than
+    // being poked by name. Layout changes force a full redraw (title-data
+    // refetch); window/workspace changes repaint all segments; focus changes
+    // cheaply mark only the title.
+    if (s.last_focus_rev != core.focusRev()) s.markSegmentDirty(.title);
+    if (s.last_window_rev != core.windowRev()) s.markDirty();
+    if (s.last_layout_rev != core.layoutRev()) {
+        gBar.force = true;
+        s.markDirty();
+    }
+    s.last_focus_rev = core.focusRev();
+    s.last_window_rev = core.windowRev();
+    s.last_layout_rev = core.layoutRev();
+
     if (prompt.consumeRedrawRequest()) {
         gBar.force = true;
         s.is_dirty = true;
@@ -1122,7 +1177,7 @@ fn cs_configClockFormat() []const u8 {
 pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {
     if (gBar.state) |s| if (event.window == s.win.win_id and event.count == 0) {
         gBar.force = true;
-        const dragging = if (build_options.has_floating) floating.isDragging() else false;
+        const dragging = if (build_options.has_floating) actions.isDragging() else false;
         if (dragging) {
             s.is_dirty = true;
             s.markAllSegmentsDirty();
@@ -1171,13 +1226,9 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     const right = event.detail == constants.mouse_button_right;
     if (!left and !right) return;
 
-    const hit: ?SegBound = blk: {
-        for (s.bounds[0..s.bounds_len]) |b| {
-            if (b.contains(x)) break :blk b;
-        }
-        break :blk null;
-    };
-    const h = hit orelse return;
+    const h = for (s.bounds[0..s.bounds_len]) |b| {
+        if (b.contains(x)) break b;
+    } else return;
     _ = segmod.onClick(h.seg, x - h.x, left, right, s, titleClickTrampoline, redrawInsideGrab);
 }
 
@@ -1199,7 +1250,8 @@ fn handleTitleClick(s: *State, offset: u16) void {
         return;
     }) orelse return;
 
-    if (build_options.has_minimize and minimize.isMinimized(target.window)) {
+    const is_minimized = if (build_options.has_minimize) @import("minimize").isMinimized(pipeline.model(), target.window) else false;
+    if (is_minimized) {
         actions.restore(target.window);
     } else if (focus.getFocused() == target.window) {
         actions.minimize(target.window);
@@ -1212,3 +1264,28 @@ fn titleClickTrampoline(ptr: *anyopaque, offset: u16) void {
     const s: *State = @ptrCast(@alignCast(ptr));
     handleTitleClick(s, offset);
 }
+
+/// Comptime-registered UI-surface hooks for core's event loop (comptime
+/// reference point: the one place the loop knows the bar exists). Core calls
+/// these through a single `plugins.Surfaces` alias; when the bar is absent the
+/// whole set is `null` and every such call site compiles away. The emitter
+/// lives in this module, so detaching the bar detaches its handlers. The hook
+/// types themselves live in the core-owned `plugin` interface contract, not
+/// here: this module only binds its functions to that contract.
+pub const surfaces = @import("plugin").Surfaces{
+    .init = init,
+    .deinit = deinit,
+    .handleExpose = handleExpose,
+    .handlePropertyNotify = handlePropertyNotify,
+    .updateIfDirty = updateIfDirty,
+    .pollTimeoutMs = pollTimeoutMs,
+    .onPollWakeup = onPollWakeup,
+    .updateClock = updateClock,
+    .onReload = reload,
+    .promptHandleKeypress = promptHandleKeypress,
+    .isBarWindow = isBarWindow,
+    .handleButtonPress = handleButtonPress,
+    .setBarState = setBarState,
+    .toggleBarSegmentAnchor = toggleBarSegmentAnchor,
+    .promptToggle = promptToggle,
+};

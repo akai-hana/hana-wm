@@ -1,13 +1,13 @@
-//! Production request sink for sync.zig — the ONLY file under src/sync/
+//! Production request sink for sync.zig, the ONLY file under src/core/sync/
 //! allowed to contain raw `xcb_` calls. Every shim wraps an existing
 //! legacy pattern 1:1:
-//!   geom          ≙ utils.configureWindow (plus the atomic raise variant
+//!   geom          ~ utils.configureWindow (plus the atomic raise variant
 //!                   that merges a stack mode into the same request)
-//!   borderWidth   ≙ borders.applyWidth's send (dedup lives in LastSent)
-//!   borderPixel   ≙ utils.setBorderPixel
-//!   park          ≙ X-offscreen + BELOW merged into one request
-//!   stackOnly     ≙ utils.raiseWindow and its BELOW sibling
-//!   flush/grab    ≙ conn.flush / utils.grabServer / ungrabAndFlush
+//!   borderWidth   ~ borders.applyWidth's send (dedup lives in LastSent)
+//!   borderPixel   ~ utils.setBorderPixel
+//!   park          ~ X-offscreen + BELOW merged into one request
+//!   stackOnly     ~ utils.raiseWindow and its BELOW sibling
+//!   flush/grab    ~ conn.flush / utils.grabServer / ungrabAndFlush
 
 const core = @import("core");
 const xcb = core.xcb;

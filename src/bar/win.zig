@@ -3,7 +3,7 @@
 //! Owns the bar's X11 window as a CLIENT: creation, dock/EWMH properties,
 //! atom resolution, visual/colormap selection, and the draw-context wiring.
 //! This is protocol-side traffic that answers the COMPOSITOR/EWMH contract
-//! (dock strut, window type, state hints), not layout policy — hence it
+//! (dock strut, window type, state hints), not layout policy: hence it
 //! lives outside sync, same rationale as the rest of bar's allowlisted
 //! self-window traffic in dev/scripts/check-layers.sh.
 //!

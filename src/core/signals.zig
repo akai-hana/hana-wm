@@ -12,6 +12,10 @@ const restart = @import("restart");
 const pipe_read = 0;
 const pipe_write = 1;
 
+/// Bytes drained per read from the self-pipe: draining a burst in one syscall
+/// rather than one per byte keeps the signal handler and the event loop cheap.
+const drain_buf_size: usize = 16;
+
 var signal_pipe: [2]std.posix.fd_t = .{ -1, -1 };
 
 // Async-signal-safe handler: writes the signal number as a byte to the pipe.
@@ -34,7 +38,7 @@ fn writeSignalByte(byte: u8) void {
         if (rc > 0) return; // landed
         const err: usize = @intCast(-rc);
         if (err == @intFromEnum(std.posix.E.AGAIN) and rfd >= 0) {
-            var buf: [16]u8 = undefined;
+            var buf: [drain_buf_size]u8 = undefined;
             while (@as(isize, @bitCast(std.os.linux.read(rfd, &buf, buf.len))) > 0) {}
             continue;
         }
@@ -47,8 +51,8 @@ fn writeSignalByte(byte: u8) void {
 // arriving mid-dump must be dropped rather than deadlock the dump.
 var backtrace_in_progress: std.atomic.Value(bool) = .init(false);
 
-// SIGUSR2: live diagnostic. Dumps the stack of the INTERRUPTED main thread —
-// the exact spot hana is stuck in when it freezes — straight to stderr
+// SIGUSR2: live diagnostic. Dumps the stack of the INTERRUPTED main thread
+// (the exact spot hana is stuck in when it freezes) straight to stderr
 // (-> ~/hana-crash.log via .xinitrc). Trigger with: kill -USR2 <pid>
 //
 // Unlike SIGUSR1, no byte is written to the self-pipe: the point is to work
@@ -147,17 +151,13 @@ fn dispatchSignal(byte: u8) void {
         else => {},
     }
 }
-
-// Drain a burst in one syscall rather than one per byte.
-const signal_drain_buf = 16;
-
 /// Drains the non-blocking signal pipe and dispatches each signal.
 ///
 /// std.os.linux.read returns usize; a kernel error wraps a negative value into
 /// a huge unsigned number an unsigned comparison would never catch. Bitcast to
 /// isize and stop on any non-positive result (error, EOF, or empty).
 pub fn drainAndDispatch(fd: std.posix.fd_t) void {
-    var buf: [signal_drain_buf]u8 = undefined;
+    var buf: [drain_buf_size]u8 = undefined;
     while (true) {
         const rc: isize = @bitCast(std.os.linux.read(fd, &buf, buf.len));
         if (rc <= 0) break; // 0 = EOF on write-end close, negative = error/EAGAIN

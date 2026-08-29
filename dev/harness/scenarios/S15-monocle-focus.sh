@@ -1,4 +1,4 @@
-# S15 — monocle-focus: in monocle the shown window is the focused override on
+# S15 - monocle-focus: in monocle the shown window is the focused override on
 # restore (BC07/BC22). Runs with scenarios/S15-monocle-focus.config.toml.
 spawn_client A
 spawn_client B       # newest on top; older hidden by layout (visible=false)

@@ -1,4 +1,6 @@
-//! Pure. Reads model types; emits Placements. No xcb.
+//! Pure tiling placement engine.
+//! Reads model types and emits placements; no XCB and no allocation.
+
 const std = @import("std");
 const utils = @import("utils");
 const model = @import("model");
@@ -13,7 +15,7 @@ pub const Placement = struct {
     visible: bool,
 };
 
-/// Sentinel rect for parked placements (≙ legacy layouts.zero_rect). The
+/// Sentinel rect for parked placements (formerly layouts.zero_rect). The
 /// sync layer derives parked geometry from its own policy, never from this.
 pub const parked_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
 
@@ -22,8 +24,9 @@ pub const parked_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 }
 /// over the (small) order slice only.
 ///
 /// Why not a sorted/binary-search or hash-map optimization:
-///   - The order slice is bounded by `max_tiled_windows` (200), making the
-///     worst-case O(n²) across all emit() calls 40 K comparisons — negligible.
+///   - The order slice is bounded by `model.max_tiled_per_ws` (64 windows),
+///     so the worst-case n^2 across all emit() calls is 4096 comparisons,
+///     negligible.
 ///   - HintsView is rebuilt from stack-allocated buffers each layout pass
 ///     (sync.zig), so there is no persistent data to index.
 ///   - The struct uses only slices (no allocator); adding a map would break
@@ -44,9 +47,9 @@ pub const HintsView = struct {
     }
 };
 
-/// Caller-resolved environment (one bundled field instead of five per-layout
+/// Caller-resolved environment (one bundled field instead of per-layout
 /// booleans/params that each new layout would grow). Resolved from config by
-/// sync's caller; sync.Env aliases this type.
+/// sync's caller.
 pub const Env = struct {
     margins: utils.Margins = .{ .gap = 0, .border = 0 },
     min_dim: u16 = 0,
@@ -65,9 +68,8 @@ pub const View = struct {
     env: Env = .{},
 };
 
-/// Zero-allocation placement buffer (std.ArrayList lost its managed form in
-/// Zig 0.16 and an allocator parameter would break the frozen compute()
-/// signature / P2 purity). Capacity bounds one placement per stored window.
+/// Zero-allocation placement buffer (an allocator parameter would break the
+/// pure compute() path). Capacity bounds one placement per stored window.
 pub const List = utils.BoundedList(Placement, model.store_capacity);
 
 /// Prefer `v.focused` when it appears in `windows`, else `fallback`
@@ -119,7 +121,7 @@ inline fn emit(v: *const View, out: *List, win: model.WindowId, rect: utils.Rect
     }
 }
 
-/// Emit a parked placement (≙ pushWindowOffscreenAndInvalidate transform).
+/// Emit a parked placement (the pushWindowOffscreenAndInvalidate transform).
 inline fn emitParked(out: *List, win: model.WindowId) void {
     const ok = out.append(.{ .win = win, .rect = parked_rect, .visible = false });
     if (std.debug.runtime_safety) {
@@ -127,6 +129,11 @@ inline fn emitParked(out: *List, win: model.WindowId) void {
     }
 }
 
+/// Compute `kind`'s layout into `out` (cleared first). Each layout module
+/// implements `pub fn compute(v: View, out: *List) void` and must append
+/// exactly one placement per window in `v.order` (off-viewport/hidden windows
+/// are parked via emitHidden). The caller sorts afterwards, so layout
+/// emission order is only pinned by tests, not by sync.
 pub fn compute(kind: model.LayoutKind, v: View, out: *List) void {
     out.clear();
     switch (kind) {

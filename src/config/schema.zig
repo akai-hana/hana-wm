@@ -1,33 +1,5 @@
-//! Comptime config schema: every scalar knob declared exactly once.
-//!
-//! `knobs` below is the single source of truth for hana's scalar
-//! configuration: where each knob lives (section + key-spelling
-//! alternatives), what kind of value it accepts, its default, and its valid
-//! range. Three consumers are driven from that one table:
-//!
-//!   * `applyDefaults` — seeds a fresh Config with every table default
-//!     (getDefaultConfig no longer restates scalar defaults by hand).
-//!   * `applyAll`      — config.zig's interpretation layer: reads, warns,
-//!     and reverts each knob from a parsed Document, replacing the
-//!     per-section hand-written interpreters.
-//!   * tests           — schema_test.zig pins the table defaults to
-//!     types.Config's field initializers and proves alias parity.
-//!
-//! Non-scalar structures ([binds], the layouts array, rules, bar columns,
-//! workspace overrides) keep their interpreters in config.zig; this table
-//! targets scalars only.
-//!
-//! Behavioral contract (all preserved verbatim from the pre-schema
-//! interpreters):
-//!   * Section choice: placements are probed in order; the FIRST section
-//!     PRESENT in the document wins, and only its paired key spelling is
-//!     probed. Presence of `[tiling.layouts.master-stack]` therefore makes
-//!     flat `[tiling] master_count` an unrecognized key, exactly as the old
-//!     `orelse` chains did.
-//!   * Absent key, wrong type, out of range -> warn-and-REVERT (never
-//!     clamp) to the previous/default value.
-//!   * Bare integers are percentages for ratio fields (`= 1` resolves to
-//!     1% with the ambiguity warning); getRatio owns that wording.
+//! Comptime config schema.
+//! Declares each scalar knob once, driving defaults, interpretation, and the schema tests.
 
 const std = @import("std");
 const parser = @import("parser");
@@ -338,9 +310,8 @@ fn getRatio(section: *parser.Section, key: []const u8, default: f32) f32 {
             debug.warn("{s} value 1 is ambiguous (1% or 1.0 ratio?); " ++
                 "treating as 1%. Use '1.0' or '100%' for 100%.", .{key});
             return 0.01;
-        } else {
-            debug.warn("Invalid {s} value {} (must be 0-100), using default", .{ key, i });
         }
+        debug.warn("Invalid {s} value {} (must be 0-100), using default", .{ key, i });
         return default;
     }
     if (val.asScalable()) |s| {
@@ -371,9 +342,9 @@ fn autoScalable(section: *parser.Section, key: []const u8) ?parser.ScalableValue
 /// already hold a heap allocation (or null), so Config.deinit frees every
 /// owned string unconditionally. The dupe comes BEFORE the free because the
 /// key-absent fallback passes `view.*` as `val`.
-pub fn assignStr(a: std.mem.Allocator, view: *?[]const u8, val: []const u8) !void {
-    const copy = try a.dupe(u8, val);
-    if (view.*) |old| a.free(old);
+pub fn assignStr(allocator: std.mem.Allocator, view: *?[]const u8, val: []const u8) !void {
+    const copy = try allocator.dupe(u8, val);
+    if (view.*) |old| allocator.free(old);
     view.* = copy;
 }
 
@@ -403,6 +374,10 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
         if (comptime k.requires.len > 0) {
             if (doc.getSection(k.requires) == null) break :knob;
         }
+        // Places probe in order; the FIRST section present in the document
+        // wins and only its paired key spelling is read. Presence of
+        // `[tiling.layouts.master-stack]` therefore makes flat `[tiling]
+        // master_count` unrecognized, matching the old orelse chains.
         var hit: ?struct { sec: *parser.Section, key: []const u8 } = null;
         inline for (k.places) |pl| {
             if (hit == null) {

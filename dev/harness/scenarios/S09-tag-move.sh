@@ -1,4 +1,4 @@
-# S09 — tag-move: moving the active window refocuses atomically, no hole (BC18).
+# S09 - tag-move: moving the active window refocuses atomically, no hole (BC18).
 spawn_client A
 spawn_client B
 spawn_client C

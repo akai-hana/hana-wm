@@ -6,6 +6,7 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
+const debug = @import("debug");
 
 const bar = @import("bar");
 const types = @import("types");
@@ -186,8 +187,6 @@ pub fn registerHandlers(h: Handlers) void {
     mode_label_fn = h.mode_label;
 }
 
-const debug = @import("debug");
-
 const c = @cImport({
     @cInclude("unistd.h");
     @cInclude("stdlib.h");
@@ -275,12 +274,12 @@ const PromptState = struct {
 // PATTERN: Module-global state with explicit init/deinit lifecycle.
 // This avoids allocator threading through every function call.
 // The init/deinit pair is called from main.zig's startup/shutdown sequence.
-// All functions operate on `g` directly — no passing state as parameters.
+// All functions operate on `g` directly, with no passing state as parameters.
 var g: PromptState = .{};
 
 /// Invalidates every cache derived from config/font metrics or bar height.
 /// Called from bar.applyReload: these module globals are built against the
-/// OLD config's fonts and bar height, and a reload can change both — without
+/// OLD config's fonts and bar height, and a reload can change both. Without
 /// this the prompt renders with stale widths/geometry until its next full
 /// cycle (the old "constant between reloads" assumption was wrong).
 pub fn invalidateReloadCaches() void {
@@ -452,7 +451,8 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     // falls through to resetPendingCmd(), clearing any pending operator/count:
     // why d$, d^, c$, y^, visual 3W, etc. silently become bare cursor moves.
     //
-    // Modifier keysyms occupy 0xFFE1-0xFFEE, a band with no valid editing key.
+    // Modifier keysyms occupy 0xFFE1-0xFFEE; the check widens that band by
+    // one key on each side, none of which are valid editing keys.
     if (sym >= 0xFFE0 and sym <= 0xFFEF) return true;
 
     // Ctrl-modified keys
@@ -489,9 +489,9 @@ fn finishKeyPress(action: Action, refresh_blink: bool) bool {
     return true;
 }
 
-/// Accepts the ghost completion on Tab: inserts as much of the suggestion as
-/// fits (clamped to the input limit), clears it, and schedules a redraw.
-/// Returns true (event consumed).
+/// Inserts as much of the ghost completion as fits (clamped to the input
+/// limit), then finishes the key press, which recomputes the ghost for the
+/// new buffer. Returns true (event consumed).
 fn acceptGhost() bool {
     const n_ghost: usize = if (g.ghost_len > 0 and g.vim_state.cursor == g.vim_state.len)
         @min(g.ghost_len, g.vim_state.max_input - 1 - g.vim_state.len)
@@ -935,7 +935,7 @@ fn spawnCommand(cmd: []const u8) void {
 /// Binary search: first byte offset where `measureTextWidth(text[0..offset])
 /// >= target_px`. Returns `text.len` when the whole string is narrower.
 /// Maps a pixel scroll offset back to a character boundary (moved here from
-/// drawing.zig — prompt is its only consumer).
+/// drawing.zig: prompt is its only consumer).
 fn offsetAtPx(dc: *drawing.DrawContext, text: []const u8, target_px: u16) usize {
     var lo: usize = 0;
     var hi: usize = text.len;
@@ -948,7 +948,7 @@ fn offsetAtPx(dc: *drawing.DrawContext, text: []const u8, target_px: u16) usize 
 
 /// Return the longest prefix of `text` whose pixel width is <= `max_px`.
 /// Fast path: full slice when the text already fits (`known_w` skips the
-/// initial full-text measurement when the caller already has it — moved
+/// initial full-text measurement when the caller already has it: moved
 /// here from drawing.zig; prompt is its only consumer).
 fn fitPrefix(dc: *drawing.DrawContext, text: []const u8, max_px: u16, known_w: ?u16) []const u8 {
     const w = known_w orelse dc.measureTextWidth(text);

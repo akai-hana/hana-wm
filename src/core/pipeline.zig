@@ -3,10 +3,10 @@
 //! reconcile slots entry points call.
 //!
 //! Call sites (all marked `// PIPELINE:`):
-//!   src/main.zig    startup        → init(alloc)
-//!   input.zig       finishTilingOp → tilingOpFinished()
-//!   floating.zig    updateDrag     → dragTick()
-//!   window.zig      unmanage/EWMH  → actions.unmanage / fullscreenToggleWindow
+//!   src/main.zig    startup calls init(alloc)
+//!   input.zig       finishTilingOp calls tilingOpFinished()
+//!   floating.zig    updateDrag calls dragTick()
+//!   window.zig      unmanage/EWMH call actions.unmanage / fullscreenToggleWindow
 
 const std = @import("std");
 const model_mod = @import("model");
@@ -16,9 +16,15 @@ const utils = @import("utils");
 const borders = @import("borders");
 const focus = @import("focus");
 const xcb_sink = @import("wire");
+const screen = @import("screen");
 const types = @import("types");
 const build_options = @import("build_options");
-const bar = if (build_options.has_bar) @import("bar") else null;
+// The fullscreen EWMH/bar-arming hooks are reached through the build-generated
+// `window_modules` registry (never by naming a sub-system module here),
+// mirroring the surfaces seam. `window_mods` is the auto-discovered
+// `[N]WindowModule` array; a tree without fullscreen simply has no module
+// providing these hooks, so the uniform loop below no-ops for it.
+const window_mods = @import("window_modules").modules;
 
 /// True after init(); tracking's facade gates every model access on this so
 /// boot order never touches the undefined global instance.
@@ -65,12 +71,7 @@ fn ctx() *sync.Ctx {
             .width = cs.screen.width_in_pixels,
             .height = screen_h,
         },
-        .workarea = if (build_options.has_bar) bar.workAreaRect() else .{
-            .x = 0,
-            .y = 0,
-            .width = cs.screen.width_in_pixels,
-            .height = screen_h,
-        },
+        .workarea = screen.workArea(cs.screen),
         .cfg_bw = borders.width(),
         .env = .{
             .margins = .{
@@ -86,7 +87,7 @@ fn ctx() *sync.Ctx {
             .monocle_gaps = variantBool(.monocle),
         },
         .color_of = colorOf,
-        .bar_win = if (build_options.has_bar and bar.isVisible()) bar.getBarWindow() else null,
+        .bar_win = screen.mappedSurfaceWindow(),
     };
     return &g_ctx;
 }
@@ -100,7 +101,7 @@ fn variantBool(comptime kind: model_mod.LayoutKind) bool {
 
 /// Ported from borders.color minus its fullscreen check: fullscreen windows
 /// get bw=0/pixel=0 through the fullscreen branch policy in sync instead.
-/// Reads MODEL focus — focus.zig mirrors every transition into m.focused,
+/// Reads MODEL focus; focus.zig mirrors every transition into m.focused,
 /// so this is the same single source of truth.
 fn colorOf(win: model_mod.WindowId, m: *const model_mod.Model) u32 {
     const cfg = &core.getState().config.tiling;
@@ -130,7 +131,7 @@ fn preReconcileDuties() void {
         if (e.mask & @import("model").bit(m.current) == 0) continue;
         n += 1;
     }
-    const wa = if (build_options.has_bar) bar.workAreaRect() else return;
+    const wa = screen.workArea(core.getState().screen);
     const slot_w = algo_scroll.slotWidth(wa.width);
     const max_off = algo_scroll.maxOffset(n, slot_w, wa.width);
     if (n > p.scroll_prev_count) p.scroll_offset = max_off;
@@ -138,17 +139,17 @@ fn preReconcileDuties() void {
     p.scroll_prev_count = @intCast(n);
 }
 
-/// Grab server → reconcile → ungrabAndFlush, atomically.
+/// Grab server, reconcile, then ungrabAndFlush, atomically.
 pub inline fn reconcileUnderGrabNow(o: sync.ReconcileOpts) void {
     preReconcileDuties();
     sync.reconcileUnderGrab(&instance, ctx(), o);
 }
 
-/// Grab server → focus transition → reconcile → ungrabAndFlush (or the
-/// reverse order) atomically. When `focus_before` is true, focus lands
-/// BEFORE geometry — most actions where the target window is already
+/// Grab server, run the focus transition, reconcile, then ungrabAndFlush (or
+/// the reverse order) atomically. When `focus_before` is true, focus lands
+/// BEFORE geometry, which most actions want when the target window is already
 /// mapped and focus must precede the retile. When false, focus lands
-/// AFTER geometry — mapRequest where the window must be mapped (by
+/// AFTER geometry; used on mapRequest where the window must be mapped (by
 /// reconcile) before xcb_set_input_focus can target it without BadMatch.
 pub inline fn reconcileGrabFocus(o: sync.ReconcileOpts, t: focus.FocusTransition, focus_before: bool) void {
     preReconcileDuties();
@@ -160,7 +161,7 @@ pub inline fn reconcileGrabFocus(o: sync.ReconcileOpts, t: focus.FocusTransition
     if (!focus_before) focus.applyPendingFocus(t);
 }
 
-/// Grab server → commit focus transition → reconcile → ungrabAndFlush,
+/// Grab server, commit focus transition, reconcile, then ungrabAndFlush,
 /// atomically. Focus lands BEFORE geometry: for most actions where the target
 /// window is already mapped and focus must precede the retile so border colors
 /// and stacking are correct on the first frame.
@@ -168,7 +169,7 @@ pub inline fn reconcileUnderGrabNowWithFocus(o: sync.ReconcileOpts, t: focus.Foc
     reconcileGrabFocus(o, t, true);
 }
 
-/// Grab server → reconcile → commit focus transition → ungrabAndFlush,
+/// Grab server, reconcile, commit focus transition, then ungrabAndFlush,
 /// atomically. Focus lands AFTER geometry: for mapRequest where the window
 /// must be mapped (by reconcile) before xcb_set_input_focus can target it
 /// without BadMatch. Both map+focus under one grab eliminates the atomicity
@@ -177,7 +178,7 @@ pub inline fn reconcileUnderGrabNowWithFocusAfter(o: sync.ReconcileOpts, t: focu
     reconcileGrabFocus(o, t, false);
 }
 
-/// Grab server → reconcile → EWMH + bar arming → ungrabAndFlush, atomically.
+/// Grab server, reconcile, do EWMH + bar arming, then ungrabAndFlush, atomically.
 /// Specialised for the fullscreen toggle path where EWMH writes and deferred
 /// bar state must land inside the same grab as geometry (Gap 2 atomicity).
 pub inline fn reconcileUnderGrabNowFullscreen(
@@ -194,17 +195,28 @@ pub inline fn reconcileUnderGrabNowFullscreen(
     sync.reconcile(&instance, c, o);
     // EWMH advertisement inside the grab: clear for whoever left
     // fullscreen, set for entrant. All fire-and-forget (xcb_change_property).
-    if (build_options.has_fullscreen) {
-        const fullscreen = @import("fullscreen");
-        if (was_switch) {
-            if (prev_fs_win) |old| fullscreen.setEwmhFullscreenState(old, false);
+    // Uniform loop over the sub-system set: each module that provides the
+    // hook runs it. In practice only fullscreen does, preserving the old
+    // gated single hook call exactly; the loop just makes the dispatch
+    // mechanism uniform rather than a merged struct. Ordering and
+    // the was_switch/was_exit/instance.focused logic are unchanged.
+    for (window_mods) |m| {
+        if (m.setEwmhFullscreenState) |f| {
+            if (was_switch) {
+                if (prev_fs_win) |old| f(old, false);
+            }
+            f(win, !was_exit);
         }
-        fullscreen.setEwmhFullscreenState(win, !was_exit);
-        // Deferred bar state inside the grab: pure flag sets, no X traffic.
-        if (!was_exit) {
-            fullscreen.armPendingBarHide(win);
-        } else if (instance.focused) |w| {
-            fullscreen.armPendingBarShow(w);
+    }
+    // Deferred bar state inside the grab: pure flag sets, no X traffic.
+    // was_exit is binary, so each module runs at most one of the two arms,
+    // preserving the original if/else-if exclusion per module.
+    for (window_mods) |m| {
+        if (m.armPendingBarHide) |f| {
+            if (!was_exit) f(win);
+        }
+        if (m.armPendingBarShow) |show| {
+            if (was_exit) if (instance.focused) |w| show(w);
         }
     }
 }

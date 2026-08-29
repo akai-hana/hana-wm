@@ -1,4 +1,4 @@
-//! Fibonacci (spiral) tiling layout (pure port of modules/fibonacci.zig).
+//! Fibonacci (spiral) tiling layout.
 //! Arranges windows in a counter-clockwise spiral, each taking half the remaining screen area.
 
 const utils = @import("utils");
@@ -7,20 +7,21 @@ const engine = @import("engine");
 
 // Counter-clockwise spiral direction for the next window split.
 const SpiralDirection = enum(u2) {
-    right, // Split vertically:   window on left,   remainder on right.
-    down, // Split horizontally: window on top,    remainder below.
-    left, // Split vertically:   window on right,  remainder on left.
+    right, // Split vertically: window on left, remainder on right.
+    down, // Split horizontally: window on top, remainder below.
+    left, // Split vertically: window on right, remainder on left.
     up, // Split horizontally: window on bottom, remainder above.
 
     inline fn next(self: SpiralDirection) SpiralDirection {
-        return @enumFromInt(@intFromEnum(self) +% 1); // 2-bit wrapping; 4 variants
+        // Increments by one, wrapping past `up` via the 2-bit representation.
+        return @enumFromInt(@intFromEnum(self) +% 1);
     }
 };
 
 /// Compute Fibonacci spiral layout. Origin top-left, y-down. Outer gap
 /// stripped first; each split halves the remaining dimension with one gap
-/// at the seam. Spiral direction cycles right→down→left→up. Dimensions are
-/// u16, integer-halved; border subtracted at placement time.
+/// at the seam. Spiral direction cycles right, down, left, up. Dimensions are
+/// u16, integer-halved; border is subtracted at placement time.
 // View is small enough to pass by value; helpers take pointer to avoid
 // copies in the recursive path.
 pub fn compute(v: engine.View, out: *engine.List) void {
@@ -100,12 +101,17 @@ inline fn splitAndAdvance(
     cur: *Cursor,
 ) void {
     const split_x = dir == .right or dir == .left;
+    const forward = dir == .right or dir == .down;
+    // `forward` (right/down) places the window at the leading edge, leaving
+    // the remainder ahead of it. For backward directions (left/up) the window
+    // sits at the trailing edge, the origin stays put, and only the remaining
+    // dimension shrinks.
     const dim: u16 = if (split_x) cur.w else cur.h;
     const win_dim = (dim -| gap) / 2;
-    const off: u16 = if (dir == .right or dir == .down) 0 else dim - win_dim;
+    const off: u16 = if (forward) 0 else dim - win_dim;
     const off_x: i32 = if (split_x) @intCast(off) else 0;
     const off_y: i32 = if (split_x) 0 else @intCast(off);
-    const advance: i32 = if (dir == .right or dir == .down) @intCast(win_dim + gap) else 0;
+    const advance: i32 = if (forward) @intCast(win_dim + gap) else 0;
 
     const rect = utils.Rect{
         .x = @intCast(cur.x + off_x),
@@ -114,9 +120,6 @@ inline fn splitAndAdvance(
         .height = (if (split_x) cur.h else win_dim) -| border2,
     };
     engine.emitView(v, out, win, rect, true);
-    // Positional advance only when the remainder lies ahead of the placed
-    // window (right/down); for left/up the origin stays and only the
-    // dimension shrinks. The shrink applies in every direction.
     if (dir == .right) cur.x += advance;
     if (dir == .down) cur.y += advance;
     if (split_x) {

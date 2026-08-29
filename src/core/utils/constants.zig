@@ -72,7 +72,9 @@ pub const mouse_button_right: u8 = 3;
 pub const baseline_dpi: f32 = 96.0;
 
 pub const Limits = struct {
-    /// Dispatch table size, covers all X11 event types up to XCB_FOCUS_OUT=10.
+    /// Dispatch table size. Must index every XCB core event code hana
+    /// dispatches; the highest is MappingNotify (34), so 36 leaves headroom.
+    /// The table lookup is guarded by this bound (events.zig dispatch()).
     pub const event_dispatch_table = 36;
 
     /// Upper bound for the XCB cookie scratch buffer in grabKeybindings

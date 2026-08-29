@@ -17,14 +17,41 @@ const constants = @import("constants");
 const types = @import("types");
 
 const drawing = @import("drawing");
-const carousel = @import("carousel");
 const build_options = @import("build_options");
+// The carousel is the title segment's optional marquee-width scroll helper.
+// When the carousel module is absent (has_seg_carousel), the corresponding
+// config flag (carousel_enabled) is also absent/always-false, so an inert
+// stub with no scrolling and zero offset is the correct degenerate behavior.
+const carousel = if (build_options.has_seg_carousel) @import("carousel") else struct {
+    pub const gap_px: u16 = 0;
+    pub fn scrollingActive() bool {
+        return false;
+    }
+    pub fn offsetFor(
+        win: u32,
+        title: []const u8,
+        text_w: u16,
+        avail_w: u16,
+        enabled: bool,
+        speed_px_s: u16,
+        now_ms: i64,
+    ) f32 {
+        _ = win;
+        _ = title;
+        _ = text_w;
+        _ = avail_w;
+        _ = enabled;
+        _ = speed_px_s;
+        _ = now_ms;
+        return 0;
+    }
+};
 const wincache = @import("wincache");
 const sync = @import("sync");
 const pipeline = @import("pipeline");
 
 /// Minimum reserved row width for the title segment (moved here from
-/// bar.zig — width policy belongs to the segment that owns the pixels).
+/// bar.zig: width policy belongs to the segment that owns the pixels).
 pub const min_width: u16 = 100;
 
 const SegmentGeometry = struct {
@@ -46,7 +73,7 @@ const title_lead_px: u16 = 4;
 const max_visible_windows: usize = 128;
 
 /// Maximum windows addressed by the batch pre-fetch scratch arrays at once.
-/// `bar.captureStateIntoSlot` hands over the full workspace list, bounded by
+/// The bar's refetch hands over the full workspace window list, bounded by
 /// `constants.Limits.max_tiled_windows`, larger than `max_visible_windows`,
 /// as the snapshot carries a title/geometry entry per window regardless.
 const max_batch_windows: usize = constants.Limits.max_tiled_windows;
@@ -137,19 +164,7 @@ pub const TitleSnapshot = struct {
     geoms: []const ?utils.Rect = &.{},
 };
 
-/// Bounded cache of measured title text widths, indexed by window ID.
-///
-/// `drawSegmentedTitles` used to re-measure every visible segment on every
-/// call; but most segments' text doesn't change between frames, so that was
-/// wasted Pango/cairo work.
-/// Mirrors the text width recovery pattern, generalised to the N-window
-/// split view.
-///
-/// A hit requires both the window ID and the title slice's identity (pointer +
-/// length) to match what was measured; anything else falls back to a fresh
-/// measurement, so a stale entry costs an extra measurement, never a wrong
-/// width.
-/// Extract a UTF-8 string from an XCB get_property reply and dupe it into
+/// Extracts a UTF-8 string from an XCB get_property reply and dupes it into
 /// `allocator`. Returns null when the reply carries no bytes. Shared by
 /// Phase 2 and Phase 3 of drawSegmentedTitles instead of duplicating an
 /// identical three-line extract-and-dupe block in each.
@@ -310,13 +325,11 @@ pub fn hitTest(
     defer scratch.freeBorrowedTitles(snapshot, win_count, allocator);
     const sorted = (try scratch.gather(ctx, snapshot, allocator, windows, win_count)) orelse return null;
 
-    const window_infos = sorted;
-
-    const n: u32 = @intCast(window_infos.len);
+    const n: u32 = @intCast(sorted.len);
     // Inverse of the pixel-perfect tiling formula drawSegmentedTitles uses
     // (x0(i) = floor(i*W/n)): floor(offset*n/W) lands in the same segment.
     const idx: usize = @intCast(@min(n - 1, @divFloor(@as(u32, offset_x) * n, @as(u32, ctx.width))));
-    const info = window_infos[idx];
+    const info = sorted[idx];
     return .{ .window = info.window, .minimized = info.minimized };
 }
 
@@ -438,7 +451,7 @@ const WindowDataBatch = struct {
             if (!minimized.contains(win)) {
                 // LAYERING NOTE: The title segment queries sync.truthRect() to get the
                 // canonical geometry for window sorting. This is a deliberate layering
-                // inversion — bar segments are read-path UI but need write-path truth data.
+                // inversion: bar segments are read-path UI but need write-path truth data.
                 // The alternative (passing geometry through the bar's frame snapshot) would
                 // require plumbing geometry through 3 abstraction layers for no benefit.
                 self.tiling_geoms[i] = sync.truthRect(pipeline.model(), win);
@@ -726,7 +739,7 @@ fn titleTextGeom(ctx: TitleRenderContext, seg_x: u16, seg_w: u16) SegmentGeometr
 
 /// Shared fit-or-truncate text placement, used by both draw entry points:
 /// draws statically when the text fits; otherwise the focused cell scrolls
-/// (marquee, when enabled — `scroll_enabled`) and every other cell truncates
+/// (marquee, when enabled, via `scroll_enabled`) and every other cell truncates
 /// with an ellipsis.
 fn drawFittedTitle(
     ctx: TitleRenderContext,
@@ -770,14 +783,12 @@ fn drawSegmentedTitles(
     defer scratch.freeBorrowedTitles(snapshot, win_count, allocator);
     const sorted = (try scratch.gather(ctx, snapshot, allocator, windows, win_count)) orelse return;
 
-    const window_infos = sorted;
-
-    const window_count: u32 = @intCast(window_infos.len);
+    const window_count: u32 = @intCast(sorted.len);
     const baseline_y = ctx.dc.baselineY(ctx.height);
     // Loop-invariant: same config/height every iteration.
     const min_cell_w = ctx.config.scaledSegmentPadding(ctx.height) *| 2;
 
-    for (window_infos, 0..) |info, i| {
+    for (sorted, 0..) |info, i| {
         const bounds = segmentBounds(ctx.width, i, window_count);
         if (bounds.w == 0) continue;
         const segment_x = ctx.start_x + bounds.x;
@@ -813,7 +824,7 @@ fn drawSegmentedTitles(
 /// refetch ran this frame), that call issues no requests at all.
 ///
 /// Builds per-window render info from XCB replies. Title strings are borrowed
-/// from the snapshot when available, otherwise duped from `allocator` — the
+/// from the snapshot when available, otherwise duped from `allocator`; the
 /// caller frees non-borrowed entries once done with `out_infos`. Separated
 /// from drawSegmentedTitles to keep scratch arrays off the draw path.
 fn gatherWindowInfos(

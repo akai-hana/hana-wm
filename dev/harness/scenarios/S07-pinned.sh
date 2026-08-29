@@ -1,4 +1,4 @@
-# S07 — pinned: a pinned window stays visible across switches (BC16).
+# S07 - pinned: a pinned window stays visible across switches (BC16).
 spawn_client A
 spawn_client B
 key super+p          # pin focused (newest) to every workspace

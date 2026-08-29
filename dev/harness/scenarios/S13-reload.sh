@@ -1,4 +1,4 @@
-# S13 — reload: border_width change sweeps once with correct widths (BC20).
+# S13 - reload: border_width change sweeps once with correct widths (BC20).
 spawn_client A
 spawn_client B
 dump before-reload

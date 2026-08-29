@@ -1,6 +1,5 @@
 //! Fallback configuration.
-//! Provides a terminal auto-detection heuristic and an embedded TOML
-//! default used when no user config is present.
+//! Provides terminal auto-detection and the embedded default TOML.
 
 const std = @import("std");
 const debug = @import("debug");
@@ -37,16 +36,19 @@ pub fn detectTerminal() []const u8 {
     return "xterm";
 }
 
-const common_paths = std.StaticStringMap(void).initComptime(.{
-    .{ "/usr/bin", {} },
-    .{ "/usr/local/bin", {} },
-    .{ "/bin", {} },
+// The common dirs are checked first, then the rest of PATH; `common_paths`
+// (the membership set used to skip re-checking a common dir inside PATH)
+// is derived from `common_dirs` so the two stay in sync.
+const common_dirs = [_][]const u8{ "/usr/bin", "/usr/local/bin", "/bin" };
+const common_paths = std.StaticStringMap(void).initComptime(blk: {
+    var kvs: [common_dirs.len]struct { []const u8, void } = undefined;
+    for (common_dirs, 0..) |dir, i| kvs[i] = .{ dir, {} };
+    break :blk kvs;
 });
 
 fn isCommandAvailable(command: []const u8) bool {
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
-    const common_dirs = [_][]const u8{ "/usr/bin", "/usr/local/bin", "/bin" };
     inline for (common_dirs) |path| {
         if (checkPath(&buf, path, command)) return true;
     }

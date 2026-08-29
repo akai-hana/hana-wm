@@ -1,5 +1,5 @@
-//! Master-stack tiling layout (pure port of modules/master.zig).
-//! Divides the screen into a master pane and a stack pane, with overflow handling for extra windows.
+//! Master-stack tiling layout.
+//! Divides the screen into a master pane and a stack pane, spilling overflow into a column-major grid.
 
 const utils = @import("utils");
 const constants = @import("constants");
@@ -34,7 +34,7 @@ pub const StackBoost = struct {
 /// Compute master-stack layout. Origin top-left, y-down. Gaps: full gap on
 /// screen edges, half-gap between master and stack columns (each side
 /// contributes half). Master width is a rounded fraction of screen width;
-/// heights distributed via cumulative integer division (±1 px). All dims u16,
+/// heights distributed via cumulative integer division. All dims u16,
 /// clamped to min_dim via shrinkClamped.
 pub fn compute(v: engine.View, out: *engine.List) void {
     // Empty workspace emits nothing; callers may run layouts on an empty
@@ -61,10 +61,11 @@ pub fn compute(v: engine.View, out: *engine.List) void {
     const is_master_on_right = v.env.master_on_right;
     const master_x: u16 = if (is_master_on_right) screen_w -| master_w else 0;
 
-    // Master column: full gap on its screen edge, half-gap toward the stack
-    // (the stack's own half-gap completes the shared gap); with no stack both
-    // edges carry a full gap. Borders are then subtracted from the width.
-    const edge_inset: u16 = if (stack_n > 0) m.gap + m.gap / 2 else m.gap * 2;
+    // The master column gets a full gap on its screen edge and a half-gap
+    // toward the stack (the stack's own half-gap completes the shared gap);
+    // with no stack both edges carry a full gap. Borders are then subtracted
+    // from the width.
+    const edge_inset: u16 = if (stack_n > 0) m.gap +| m.gap / 2 else m.gap *| 2;
     const master_inner_w = engine.shrinkClamped(master_w, edge_inset + utils.doubledBorder(m), min_dim);
 
     // The master column never uses the stack boost; it isn't a "slave"
@@ -126,11 +127,9 @@ fn tileColumn(
     }
 }
 
-/// Result of the water-filling pass: which windows are capped (pinned to their
-/// max_height) and the leftover budget after removing their pixels.
+/// Leftover budget after the water-filling pass: the pixels, total weight,
+/// and count of windows that were NOT capped.
 const CapResult = struct {
-    capped: []u8,
-    capped_len: usize,
     remaining_avail: u16,
     remaining_weight: f32,
     remaining_count: u16,
@@ -181,10 +180,6 @@ fn findCappedWindows(
     }
 
     return .{
-        .capped = capped,
-        // Byte length of the bitset, NOT the window count: consumers slice
-        // with this and index bits via bitIsSet(i), which reads bits[i / 8].
-        .capped_len = capped.len,
         .remaining_avail = remaining_avail,
         .remaining_weight = remaining_weight,
         .remaining_count = remaining_count,
@@ -202,7 +197,8 @@ fn distributeEven(windows: []const model.WindowId, capped: []u8, remaining_count
 }
 
 /// Assigns heights to uncapped windows using weighted cumulative division.
-fn distributeWeighted(windows: []const model.WindowId, n: u16, boost: StackBoost, capped: []u8, remaining_weight: f32, remaining_avail: u16, min_dim: u16, out: []u16) void {
+fn distributeWeighted(windows: []const model.WindowId, boost: StackBoost, capped: []u8, remaining_weight: f32, remaining_avail: u16, min_dim: u16, out: []u16) void {
+    const n: u16 = @intCast(windows.len);
     var cum: f32 = 0;
     var prev_px: f32 = 0;
     for (windows, 0..) |_, i| {
@@ -241,17 +237,15 @@ inline fn bitSet(bits: []u8, i: usize) void {
 /// split. Non-zero boost uses the telescoping rounded cumulative sum
 /// (`cum`/`prev_px`) so fractional weights land on the right pixel.
 fn distributeStackHeightsWeighted(v: *const engine.View, windows: []const model.WindowId, avail: u16, boost: StackBoost, min_dim: u16, out: []u16) u32 {
-    const n: u16 = @intCast(windows.len);
-
     var capped_buf: [constants.Limits.max_tiled_windows / 8]u8 = undefined;
     const capped = capped_buf[0 .. (windows.len + 7) / 8];
 
     const cap = findCappedWindows(v, windows, avail, boost, min_dim, out, capped);
 
     if (boost.isZero()) {
-        distributeEven(windows, cap.capped[0..cap.capped_len], cap.remaining_count, cap.remaining_avail, min_dim, out);
+        distributeEven(windows, capped, cap.remaining_count, cap.remaining_avail, min_dim, out);
     } else {
-        distributeWeighted(windows, n, boost, cap.capped[0..cap.capped_len], cap.remaining_weight, cap.remaining_avail, min_dim, out);
+        distributeWeighted(windows, boost, capped, cap.remaining_weight, cap.remaining_avail, min_dim, out);
     }
 
     // Return the total so the caller avoids a redundant summation pass.

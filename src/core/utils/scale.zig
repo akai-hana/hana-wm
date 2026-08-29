@@ -33,9 +33,12 @@ const max_reasonable_dpi: f32 = 300.0;
 /// sufficient for the common case.
 const resource_manager_max_len: u32 = 1024;
 
+/// Larger retry fetch (16 KB) used when Xft.dpi is not in the first probe.
+const resource_manager_retry_len: u32 = 4096;
+
 /// Fetches RESOURCE_MANAGER (up to `max_len` u32 words) and parses Xft.dpi
 /// from it. `.got_string` is true when a structurally valid, non-empty
-/// string came back — regardless of whether it contained an entry — so the
+/// string came back, regardless of whether it contained an entry, so the
 /// caller can distinguish "entry not in this window" (a bigger fetch can
 /// help) from "property unreadable" (it cannot).
 const XftProbe = struct { got_string: bool = false, dpi: ?f32 = null };
@@ -69,9 +72,9 @@ fn readXftDpi(conn: core.Connection, screen: core.Screen) ?f32 {
     if (first.dpi) |dpi| return dpi;
 
     // Xft.dpi was not in the first resource_manager_max_len bytes; retry with
-    // a larger fetch — but only when the first reply was actually a string.
+    // a larger fetch, but only when the first reply was actually a string.
     if (!first.got_string) return null;
-    return probeXftDpi(conn, root, atom, 4096).dpi;
+    return probeXftDpi(conn, root, atom, resource_manager_retry_len).dpi;
 }
 
 /// Finds and parses the Xft.dpi value within a raw RESOURCE_MANAGER string.

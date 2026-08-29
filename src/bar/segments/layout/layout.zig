@@ -7,7 +7,7 @@ const drawing = @import("drawing");
 const pipeline = @import("pipeline");
 const build_options = @import("build_options");
 
-// Reserved row width (moved here from bar.zig — width policy belongs to
+// Reserved row width (moved here from bar.zig: width policy belongs to
 // the segment that owns the pixels).
 //
 // This is the ACTUAL drawn width from the last render, not a constant:

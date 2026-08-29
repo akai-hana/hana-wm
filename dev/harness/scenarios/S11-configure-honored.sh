@@ -1,4 +1,4 @@
-# S11 — configure-honored: a floating client's requested rect persists across
+# S11 - configure-honored: a floating client's requested rect persists across
 # minimize/restore (BC03). xdotool windowsize issues XResizeWindow, which the
 # WM sees as an honored ConfigureRequest while the window floats.
 spawn_client A

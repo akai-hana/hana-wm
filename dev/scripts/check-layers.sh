@@ -37,21 +37,22 @@ wire_allowed() {
         # restoreFloatGeom / moveFloatToDefaultPos / applyBorder ride along.
         src/window/window.zig|src/window/borders.zig) ;;
 
-        # Click-raise of floating windows and focus-flag raises: single
-        # restack request tied to the X11 focus protocol (R2 keeps protocol
-        # in window.*).
-        src/window/focus.zig|src/window/behaviors/floating.zig) ;;
+        # Click-raise and focus-flag restack requests tied to the X11 focus
+        # protocol (R2 keeps protocol in window.*). The floating behavior
+        # moved to window/modules and now holds zero wire traffic (restores
+        # route through sync), so it dropped off this allowlist entirely.
+        src/window/focus.zig) ;;
 
-        # (allowlist shrunk: minimize.zig/fullscreen.zig now hold zero XCB
-        # traffic — fullscreen truth is model-side, its protocol residue is
-        # pending-bar/EWMH only, and actions.restore is the sole restore path.)
-        # Config reload BW sweep inside reloadConfig's server grab.
-        src/tiling/tiling.zig|src/window/behaviors/workspaces.zig) ;;
+        # (allowlist shrunk: minimize/fullscreen/floating/workspaces moved to
+        # window/modules and now hold zero XCB traffic. Fullscreen truth is
+        # model-side, its protocol residue is pending-bar/EWMH only, and
+        # actions.restore is the sole restore path.)
+        src/tiling/tiling.zig) ;;
 
         # Root-window keygrab installation at startup and click-focus
         # stack-mode: startup is pre-WM-loop; the restack routes through
         # sync force_restack in a later cleanup.
-        src/main.zig|src/core/input/input.zig) ;;
+        src/main.zig|src/input/input.zig) ;;
 
         # Wire PRIMITIVES: sync/wire.zig dispatches through
         # x11wire.configureWindow / raiseWindow / setBorderPixel /
@@ -92,7 +93,7 @@ grab_allowed() {
 
 # Rule 1: wire-mutating XCB requests only under src/sync/ (+ allowlist).
 # ND-23 widening: the original pattern missed unmap/destroy/circulate and
-# set_input_focus — all wire-mutating requests that belong behind the sync
+# set_input_focus, all wire-mutating requests that belong behind the sync
 # boundary exactly like configure/map. Widening only makes violations FAIL
 # where they previously passed.
 pat1='xcb_configure_window|XCB_CONFIG_WINDOW_|xcb_map_window|xcb_unmap_window|xcb_destroy_window|xcb_circulate_window|XCB_CIRCULATE_|xcb_set_input_focus|xcb_change_window_attributes'
@@ -100,12 +101,12 @@ while IFS= read -r line; do
     f=${line%%:*}
     wire_allowed "$f" && continue
     viol "rule 1 ($f outside src/sync/ and allowlist)"; printf '%s\n' "$line" >&2
-done < <(grep -rnE "$pat1" src/ --include='*.zig' | grep -v '^src/sync/' | code_lines)
+done < <(grep -rnE "$pat1" src/ --include='*.zig' | grep -v '^src/core/sync/' | code_lines)
 
 # Rule 2: server grab only under src/sync/ (+ allowlist). Comment mentions of
 # xcb_grab_server are stripped so documentation doesn't trip the guard. Match
-# BOTH the raw XCB primitive and the utils.grabServer/ungrabServer wrappers —
-# siblings like sync.zig route grabs through the Sink vtable (sink.grabServer,
+# BOTH the raw XCB primitive and the utils.grabServer/ungrabServer wrappers.
+# Siblings like sync.zig route grabs through the Sink vtable (sink.grabServer,
 # never literally `utils.grabServer`), so a wrapper match isolates files that
 # grab the server directly, which is exactly the policy being enforced.
 pat2='xcb\.xcb_grab_server|utils\.grabServer|utils\.ungrabServer'
@@ -113,7 +114,7 @@ while IFS= read -r line; do
     f=${line%%:*}
     grab_allowed "$f" && continue
     viol "rule 2 ($f outside src/sync/ and allowlist)"; printf '%s\n' "$line" >&2
-done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/sync/' | code_lines)
+done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/sync/' | code_lines)
 
 # Rule 3: no xcb imports/references in model/ or tiling/.
 hits=$(grep -rn 'xcb' src/model/ src/tiling/ --include='*.zig' | grep -v '^\s*//' | grep -v ':\s*//' || true)

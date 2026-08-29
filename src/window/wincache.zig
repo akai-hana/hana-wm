@@ -1,11 +1,5 @@
-//! Per-window border/hints cache (re-homed out of modules/tiling).
-//!
-//! This is shared WM infrastructure, not tiling state: border-color and
-//! BORDER_WIDTH dedup for sync, and WM_NORMAL_HINTS bridged into the model
-//! at registration. Geometry is NOT cached here: truth lives in the model
-//! (floating base) and the sync sent-ledger (last-sent rects) — see
-//! sync.truthRect. One open-addressing table keyed by X window id; entries
-//! are evicted in window.zig's unmanage path.
+//! Per-window border/hints cache.
+//! Dedupes border color/width for sync and bridges WM_NORMAL_HINTS into the model; geometry lives in the model/sync ledger instead.
 
 const std = @import("std");
 

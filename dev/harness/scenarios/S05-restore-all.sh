@@ -1,4 +1,4 @@
-# S05 — restore-all: three minimized, then unminimize_all partition/LIFO focus.
+# S05 - restore-all: three minimized, then unminimize_all partition/LIFO focus.
 spawn_client A
 spawn_client B
 spawn_client C

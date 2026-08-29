@@ -1,4 +1,4 @@
-# S02 — close: closing the stack window relayouts without holes.
+# S02 - close: closing the stack window relayouts without holes.
 spawn_client A
 spawn_client B
 spawn_client C

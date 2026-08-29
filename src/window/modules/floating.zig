@@ -1,5 +1,7 @@
 //! Floating window subsystem.
-//! Manages placement, dragging, and per-corner resizing of floating windows.
+//! A self-contained plugin over the model: placement, dragging, and
+//! per-corner resizing of floating windows, plus floating geometry honoring
+//! (configure requests update the model's floating rect).
 
 const std = @import("std");
 
@@ -12,14 +14,12 @@ const borders = @import("borders");
 const focus = @import("focus");
 const tracking = @import("tracking");
 
-const build_options = @import("build_options");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
-const bar = if (build_options.has_bar) @import("bar") else null;
+const screen = @import("screen");
 
-// Geometry cookies are all issued before any reply is awaited; one round-trip
-// per batch instead of one per window. 64 covers a typical workspace.
-const batch = 64;
+const model = @import("model");
+const build_options = @import("build_options");
 
 pub const DragMode = enum { move, resize };
 
@@ -42,7 +42,8 @@ pub const DragState = struct {
     start_win_width: u16 = 0,
     start_win_height: u16 = 0,
     /// Geometry from the last updateDrag call. Zero means no motion event
-    /// arrived; saved to the geometry cache by stopDrag on exit.
+    /// arrived; consumed by the resize ConfigureRequest deny while the
+    /// drag is active.
     last_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
     /// Resolved once at drag start: snap distance in pixels (0 = disabled) and
     /// the work-area edges used for snapping. Both are constant for the whole
@@ -68,7 +69,7 @@ fn workArea() WorkArea {
     const cs = core.getState();
     const sw: i32 = cs.screen.width_in_pixels;
     const bw2: i32 = @as(i32, borders.width()) * 2;
-    const work = if (build_options.has_bar) bar.workAreaRect() else .{ .x = 0, .y = 0, .width = cs.screen.width_in_pixels, .height = cs.screen.height_in_pixels };
+    const work = screen.workArea(cs.screen);
     return .{
         .left = 0,
         .right = sw - bw2,
@@ -77,7 +78,7 @@ fn workArea() WorkArea {
     };
 }
 
-/// Which sides of the window the grabbed corner anchors to (left/top = the
+/// 8-directional resize direction nearest the cursor at a given point.
 pub const ResizeDirection = enum { none, n, s, e, w, ne, nw, se, sw };
 
 /// Which sides of the window the grabbed corner anchors to (left/top = the
@@ -155,8 +156,8 @@ fn directionToCorner(dir: ResizeDirection) ResizeCorner {
     };
 }
 
-fn nearestCorner(x: i16, y: i16, geom: utils.Rect) ResizeCorner {
-    const dir = resizeDirectionFromPoint(x, y, geom, 0);
+fn nearestCorner(x: i16, y: i16, geom: utils.Rect, border_width: u32) ResizeCorner {
+    const dir = resizeDirectionFromPoint(x, y, geom, border_width);
     return directionToCorner(dir);
 }
 
@@ -166,8 +167,10 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     const cs = core.getState();
     if (!cs.config.drag_enabled) return;
     if (g_state.drag.active) return;
-    if (build_options.has_bar and bar.isBarWindow(win)) return;
-    if (@import("model").isFullscreenMode(pipeline.model(), win)) return; // fullscreen geometry must not be touched
+    if (screen.isSurfaceWindow(win)) return;
+    if (build_options.has_fullscreen) {
+        if (@import("fullscreen").isFullscreenMode(pipeline.model(), win)) return; // fullscreen geometry must not be touched
+    }
 
     // Model/sync truth (floating base or last-sent rect) over a live XCB
     // round-trip; fall back to a live query when never placed.
@@ -176,7 +179,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
         break :blk window.getGeometry(cs.conn, win) orelse return;
     };
 
-    const resize_corner: ResizeCorner = if (button == 1) .bottom_right else nearestCorner(x, y, geom);
+    const resize_corner: ResizeCorner = if (button == 1) .bottom_right else nearestCorner(x, y, geom, core.borderWidth());
 
     // Snap distance and work area are resolved here so updateDrag's per-event
     // path only does arithmetic. They are constant for the duration of a drag.
@@ -213,7 +216,7 @@ fn computeMoveRect(drag: DragState, dx: i16, dy: i16, wa: WorkArea, was_pending_
     const win_w: i32 = drag.start_win_width;
     const win_h: i32 = drag.start_win_height;
     // Raw drag coords are unbounded i32; pin down to the i16 wire range
-    // before the narrowing cast so a window dragged beyond ±32767 (or into
+    // before the narrowing cast so a window dragged beyond +/-32767 (or into
     // negative X11 coords) can't UB in ReleaseFast.
     const mx: i32 = std.math.clamp(if (was_pending_float) raw_x else snapAxis(raw_x, win_w, wa.left, wa.right, snap), std.math.minInt(i16), std.math.maxInt(i16));
     const my: i32 = std.math.clamp(if (was_pending_float) raw_y else snapAxis(raw_y, win_h, wa.top, wa.bottom, snap), std.math.minInt(i16), std.math.maxInt(i16));
@@ -291,7 +294,7 @@ pub fn updateDrag(x: i16, y: i16) void {
 }
 
 /// Ends the active drag. The model floating rect already holds the final
-/// position (actions.dragRect ran on every tick); nothing else to record —
+/// position (actions.dragRect ran on every tick); nothing else to record;
 /// the sync ledger is the wire truth.
 pub fn stopDrag() void {
     g_state = .{};
@@ -320,3 +323,55 @@ pub fn isResizingWindow(win: u32) bool {
 pub fn getDragLastRect() utils.Rect {
     return g_state.drag.last_rect;
 }
+
+/// Updates a floating window's rect on the model, no-op for tiled/unknown.
+pub fn setFloatingRect(m: *model.Model, win: model.WindowId, r: utils.Rect) void {
+    const e = m.store.getPtr(win) orelse return;
+    switch (e.mode) {
+        .base => |*bm| switch (bm.*) {
+            .floating => |*fr| fr.* = r,
+            .tiled => {},
+        },
+        else => {},
+    }
+}
+
+/// Honors a configure request against a floating window record on the model.
+pub fn honorConfigureRequest(m: *model.Model, win: model.WindowId, req: model.ConfigureReq) model.HonorDecision {
+    if (build_options.has_minimize) {
+        if (@import("minimize").isMinimized(m, win)) return .ignored;
+    }
+    const e = m.store.getPtr(win) orelse return .ignored;
+    switch (e.mode) {
+        .base => |*bm| switch (bm.*) {
+            .floating => |*r| {
+                if (req.x) |v| r.x = v;
+                if (req.y) |v| r.y = v;
+                if (req.width) |v| r.width = v;
+                if (req.height) |v| r.height = v;
+                // NOTE: a requested border_width is not stored here (the
+                // floating rect has no bw field); the entry point sends and
+                // caches it alongside the geometry it applies.
+                return .geometry_applied;
+            },
+            .tiled => {
+                // Geometry denied. BW honored; recording is SYNC's job.
+                if (req.border_width != null) return .border_only;
+                return .ignored;
+            },
+        },
+        .fullscreen => return .ignored,
+    }
+}
+
+/// This module's window sub-system contribution: the floating drag/resize
+/// commands floating owns.
+pub const module: @import("plugin").WindowModule = .{
+    .startDrag = startDrag,
+    .stopDrag = stopDrag,
+    .updateDrag = updateDrag,
+    .isDragging = isDragging,
+    .isResizingWindow = isResizingWindow,
+    .getDragLastRect = getDragLastRect,
+    .cancelDragForWindow = cancelDragForWindow,
+};

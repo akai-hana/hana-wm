@@ -68,7 +68,7 @@ pub fn consumeReload() bool {
 
 /// Creates a pipe with O_NONBLOCK | O_CLOEXEC on both ends via pipe2(2).
 ///
-/// Shared by input.zig (double-fork spawn plumbing) and signals.zig (signal
+/// Shared by spawn.zig (double-fork spawn plumbing) and signals.zig (signal
 /// self-pipe), avoiding byte-equivalent copies of this in each.
 pub fn makePipe() ![2]std.posix.fd_t {
     var fds: [2]std.posix.fd_t = undefined;

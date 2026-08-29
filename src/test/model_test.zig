@@ -4,6 +4,11 @@ const testing = std.testing;
 const model = @import("model");
 const constants = @import("constants");
 const utils = @import("utils");
+const build_options = @import("build_options");
+const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
+const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
+const floating = if (build_options.has_floating) @import("floating") else struct {};
+const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
 
 const Model = model.Model;
 const WindowId = model.WindowId;
@@ -36,27 +41,16 @@ fn eqBase(a: model.BaseMode, b: model.BaseMode) bool {
     };
 }
 
-fn eqPrev(a: model.PrevMode, b: model.PrevMode) bool {
-    if (@intFromEnum(a) != @intFromEnum(b)) return false;
-    return switch (a) {
-        .base => return eqBase(a.base, b.base),
-        .fullscreen => |fa| return fa.ws == b.fullscreen.ws and eqBase(fa.base, b.fullscreen.base),
-    };
-}
-
 fn eqMode(a: model.Mode, b: model.Mode) bool {
     if (@intFromEnum(a) != @intFromEnum(b)) return false;
     switch (a) {
         .base => return eqBase(a.base, b.base),
         .fullscreen => |fa| return fa.ws == b.fullscreen.ws and eqBase(fa.base, b.fullscreen.base),
-        .minimized => |ma| {
-            return ma.slot == b.minimized.slot and eqPrev(ma.prev, b.minimized.prev);
-        },
     }
 }
 
 fn eqEntry(a: *const model.Entry, b: *const model.Entry) bool {
-    return a.mask == b.mask and eqMode(a.mode, b.mode);
+    return a.mask == b.mask and a.presence == b.presence and eqMode(a.mode, b.mode);
 }
 
 fn eqModel(a: *const Model, b: *const Model) bool {
@@ -82,18 +76,18 @@ fn eqModel(a: *const Model, b: *const Model) bool {
     return true;
 }
 
-/// Every window whose effective base is tiled appears in EXACTLY ONE ws
-/// list; every listed id exists in the store (single-membership invariant).
-/// Floating and minimized windows are legitimately home-free.
+/// Every window whose effective base is tiled AND present appears in EXACTLY
+/// ONE ws list; every listed id exists in the store (single-membership
+/// invariant). Floating and parked (minimized) windows are home-free.
 fn assertSingleMembership(m: *const Model) !void {
     for (0..m.store.count()) |i| {
         const it = m.store.at(i);
         const base: ?model.BaseMode = switch (it.val.mode) {
-            .minimized => null, // parked: no tiled slot by design
             .base => |b| b,
             .fullscreen => |f| f.base,
         };
-        const tiled = if (base) |b| b == .tiled else false;
+        // A parked window keeps its mode but has no tiled slot by design.
+        const tiled = if (base) |b| (b == .tiled and it.val.presence == .present) else false;
         if (!tiled) continue;
         var homes: usize = 0;
         for (&m.ws) |*s| {
@@ -137,48 +131,62 @@ test "T02: register honors hinted workspace" {
     try testing.expectEqual(@as(WSId, 3), model.findHome(&m, 2).?);
 }
 
-// T03: minimize tiled -> prev==base(.tiled); removed from tiled_order;
-// CapacityFull when store's minimized budget is exhausted (pre-refused, T17).
+// T03: minimize tiled -> parked, removed from tiled_order; capacity refuses
+// once the module's (fixed, MAX_MINIMIZED) minimized budget is exhausted.
 test "T03: minimize tiled removes from order; capacity refuses" {
     var m = makeModel();
     defer deinitModel(&m);
+    try minimize.init();
+    defer minimize.deinit();
     var wins: [max_minimized + 1]WindowId = undefined;
     for (&wins, 0..) |*w, i| {
         w.* = @intCast(100 + i);
         regCur(&m, w.*);
     }
     try expectOrder(&m, 0, &wins);
-    model.minimize(&m, 102) catch unreachable;
+    minimize.minimize(&m, 102) catch unreachable;
+    try testing.expect(minimize.isMinimized(&m, 102));
     const e = m.store.get(102).?;
-    try testing.expect(e.mode == .minimized);
-    try testing.expect(e.mode.minimized.prev == .base);
-    try testing.expect(e.mode.minimized.prev.base == .tiled);
-    try testing.expectEqual(@as(?usize, 2), e.mode.minimized.slot);
+    try testing.expect(e.presence == .parked);
+    // Mode is UNCHANGED while parked (was base-tiled).
+    try testing.expect(e.mode == .base);
+    try testing.expect(e.mode.base == .tiled);
+    try testing.expectEqual(@as(?usize, 2), minimize.slotOf(&m, 102));
+    try testing.expectEqual(@as(?WSId, null), e.home_ws);
     var expected: [max_minimized]WindowId = undefined;
     _ = std.mem.replace(WindowId, &wins, &.{102}, &.{}, expected[0 .. wins.len - 1]);
     try expectOrder(&m, 0, expected[0 .. wins.len - 1]);
 
     // Fill the remaining budget, then the next minimize must be refused
     // without mutating anything (full no-mutation proof in T17).
-    for (wins[0 .. wins.len - 1]) |w| model.minimize(&m, w) catch unreachable;
-    try testing.expectError(error.CapacityFull, model.minimize(&m, wins[wins.len - 1]));
+    for (wins[0 .. wins.len - 1]) |w| minimize.minimize(&m, w) catch unreachable;
+    try testing.expectEqual(@as(u32, max_minimized), minimize.count(&m));
+    try testing.expectError(error.CapacityFull, minimize.minimize(&m, wins[wins.len - 1]));
+    // The refused window is unchanged: still present, not minimized.
+    try testing.expect(!minimize.isMinimized(&m, wins[wins.len - 1]));
+    try testing.expect(m.store.get(wins[wins.len - 1]).?.presence == .present);
 }
 
 // T04: restore tiled -> back at ORIGINAL index.
 test "T04: restore reinserts at original slot" {
     var m = makeModel();
     defer deinitModel(&m);
+    try minimize.init();
+    defer minimize.deinit();
     for ([_]WindowId{ 10, 11, 12, 13, 14 }) |w| regCur(&m, w);
-    model.minimize(&m, 12) catch unreachable;
-    model.minimize(&m, 11) catch unreachable;
+    minimize.minimize(&m, 12) catch unreachable;
+    minimize.minimize(&m, 11) catch unreachable;
+    try testing.expect(m.store.get(12).?.presence == .parked);
+    try testing.expect(m.store.get(11).?.presence == .parked);
     try expectOrder(&m, 0, &.{ 10, 13, 14 });
-    model.restore(&m, 12);
+    minimize.restore(&m, 12);
+    try testing.expect(m.store.get(12).?.presence == .present);
     try expectOrder(&m, 0, &.{ 10, 13, 12, 14 });
-    model.restore(&m, 11);
+    minimize.restore(&m, 11);
     try expectOrder(&m, 0, &.{ 10, 11, 13, 12, 14 });
     // Restoring a live or unknown window is a no-op.
-    model.restore(&m, 10);
-    model.restore(&m, 999);
+    minimize.restore(&m, 10);
+    minimize.restore(&m, 999);
     try expectOrder(&m, 0, &.{ 10, 11, 13, 12, 14 });
 }
 
@@ -186,39 +194,48 @@ test "T04: restore reinserts at original slot" {
 test "T05: minimize/restore floating preserves rect" {
     var m = makeModel();
     defer deinitModel(&m);
+    try minimize.init();
+    defer minimize.deinit();
     const r: utils.Rect = .{ .x = 10, .y = 20, .width = 300, .height = 200 };
     _ = m.store.put(7, .{
         .mask = model.bit(0),
         .mode = .{ .base = .{ .floating = r } },
     }) catch unreachable;
-    model.minimize(&m, 7) catch unreachable;
+    minimize.minimize(&m, 7) catch unreachable;
+    try testing.expect(minimize.isMinimized(&m, 7));
     const e = m.store.get(7).?;
-    try testing.expect(e.mode == .minimized);
-    try testing.expect(e.mode.minimized.prev == .base);
-    try testing.expect(e.mode.minimized.prev.base == .floating);
-    try testing.expect(r.eql(e.mode.minimized.prev.base.floating));
-    try testing.expectEqual(@as(?usize, null), e.mode.minimized.slot);
-    model.restore(&m, 7);
+    try testing.expect(e.presence == .parked);
+    // Mode UNCHANGED while parked (floating base with the rect intact).
+    try testing.expect(e.mode == .base);
+    try testing.expect(e.mode.base == .floating);
+    try testing.expect(r.eql(e.mode.base.floating));
+    try testing.expectEqual(@as(?usize, null), minimize.slotOf(&m, 7));
+    minimize.restore(&m, 7);
     const back = m.store.get(7).?;
+    try testing.expect(back.presence == .present);
+    try testing.expect(!minimize.isMinimized(&m, 7));
     try testing.expect(back.mode == .base);
     try testing.expect(back.mode.base == .floating);
     try testing.expect(r.eql(back.mode.base.floating));
-    // Floating-prev restore must NOT join any tiled_order.
+    // Floating restore must NOT join any tiled_order.
     for (&m.ws) |*s| try testing.expect(s.tiled_order.indexOfScalar(7) == null);
 }
 
-// T06: toggleFullscreen round trips; minimize-from-fullscreen preserved.
+// T06: toggleFullscreen round trips; minimize-from-fullscreen keeps its mode
+// (parked) and restore returns straight back to fullscreen.
 test "T06: fullscreen toggling and minimize-from-fullscreen" {
     var m = makeModel();
     defer deinitModel(&m);
+    try minimize.init();
+    defer minimize.deinit();
     // Tiled round trip.
     regCur(&m, 1);
-    try testing.expect(model.toggleFullscreen(&m, 1));
+    try testing.expect(fullscreen.toggleFullscreen(&m, 1));
     var e = m.store.get(1).?;
     try testing.expect(e.mode == .fullscreen);
     try testing.expectEqual(@as(WSId, 0), e.mode.fullscreen.ws);
     try testing.expect(e.mode.fullscreen.base == .tiled);
-    try testing.expect(model.toggleFullscreen(&m, 1));
+    try testing.expect(fullscreen.toggleFullscreen(&m, 1));
     e = m.store.get(1).?;
     try testing.expect(e.mode == .base);
     try testing.expect(e.mode.base == .tiled);
@@ -229,29 +246,31 @@ test "T06: fullscreen toggling and minimize-from-fullscreen" {
         .mask = model.bit(0),
         .mode = .{ .base = .{ .floating = r } },
     }) catch unreachable;
-    _ = model.toggleFullscreen(&m, 2);
-    model.minimize(&m, 2) catch unreachable;
+    _ = fullscreen.toggleFullscreen(&m, 2);
+    minimize.minimize(&m, 2) catch unreachable;
+    try testing.expect(minimize.isMinimized(&m, 2));
     e = m.store.get(2).?;
-    try testing.expect(e.mode == .minimized);
-    try testing.expect(eqPrev(
-        .{ .fullscreen = .{ .ws = 0, .base = .{ .floating = r } } },
-        e.mode.minimized.prev,
-    ));
-    model.restore(&m, 2);
+    try testing.expect(e.presence == .parked);
+    // Mode is UNCHANGED while parked: still fullscreen.
+    try testing.expect(e.mode == .fullscreen);
+    try testing.expectEqual(@as(WSId, 0), e.mode.fullscreen.ws);
+    try testing.expect(r.eql(e.mode.fullscreen.base.floating));
+    // Ghost fullscreen record STILL reports the ws while parked.
+    try testing.expectEqual(@as(?WSId, 0), fullscreen.fullscreenWsOf(&m, 2));
+    minimize.restore(&m, 2);
     e = m.store.get(2).?;
+    try testing.expect(e.presence == .present);
+    try testing.expect(!minimize.isMinimized(&m, 2));
     try testing.expect(e.mode == .fullscreen);
     try testing.expect(r.eql(e.mode.fullscreen.base.floating));
-
-    // Fullscreen toggle on a minimized window is refused.
-    model.minimize(&m, 1) catch unreachable;
-    try testing.expect(!model.toggleFullscreen(&m, 1));
-    try testing.expect(m.store.get(1).?.mode == .minimized);
 }
 
 // T07: switchTo updates current; visible-set helper correctness.
 test "T07: switchTo and visibleOn" {
     var m = makeModel();
     defer deinitModel(&m);
+    try minimize.init();
+    defer minimize.deinit();
     regCur(&m, 1);
     // Give window 1 a second tag.
     m.store.getPtr(1).?.mask |= model.bit(1);
@@ -262,14 +281,14 @@ test "T07: switchTo and visibleOn" {
     try testing.expect(model.visibleOn(&m, 2, 0));
     try testing.expect(!model.visibleOn(&m, 2, 1));
 
-    model.switchTo(&m, 1);
+    workspaces.switchTo(&m, 1);
     try testing.expectEqual(@as(WSId, 1), m.current);
 
     // Minimized windows are invisible regardless of tags/all-view.
-    model.minimize(&m, 1) catch unreachable;
+    minimize.minimize(&m, 1) catch unreachable;
     try testing.expect(!model.visibleOn(&m, 1, 0));
     try testing.expect(!model.visibleOn(&m, 1, 1));
-    _ = model.allViewToggle(&m);
+    _ = workspaces.allViewToggle(&m);
     try testing.expect(model.visibleOn(&m, 2, 1)); // untagged, all-view on
     try testing.expect(!model.visibleOn(&m, 1, 1)); // still minimized
     // Unknown windows are never visible.
@@ -280,29 +299,31 @@ test "T07: switchTo and visibleOn" {
 test "T08: moveWindowToWs for tiled, minimized, and pinned" {
     var m = makeModel();
     defer deinitModel(&m);
+    try minimize.init();
+    defer minimize.deinit();
     regCur(&m, 1);
     regCur(&m, 2);
     regCur(&m, 3);
-    model.moveWindowToWs(&m, 1, 2);
+    workspaces.moveWindowToWs(&m, 1, 2);
     try testing.expectEqual(model.bit(2), m.store.get(1).?.mask);
     try expectOrder(&m, 0, &.{ 2, 3 });
     try expectOrder(&m, 2, &.{1});
     try testing.expectEqual(@as(WSId, 2), model.findHome(&m, 1).?);
 
     // Minimized: only the record moves; restore lands on the new ws.
-    model.restore(&m, 1);
-    model.moveWindowToWs(&m, 1, 2);
-    model.minimize(&m, 1) catch unreachable;
-    model.moveWindowToWs(&m, 1, 3);
+    minimize.restore(&m, 1);
+    workspaces.moveWindowToWs(&m, 1, 2);
+    minimize.minimize(&m, 1) catch unreachable;
+    workspaces.moveWindowToWs(&m, 1, 3);
     try testing.expectEqual(model.bit(3), m.store.get(1).?.mask);
-    model.restore(&m, 1);
+    minimize.restore(&m, 1);
     try expectOrder(&m, 3, &.{1});
     try expectOrder(&m, 2, &.{});
 
     // Pinned windows ignore tag-moves entirely.
-    model.pinToggle(&m, 1);
+    workspaces.pinToggle(&m, 1);
     try testing.expectEqual(model.ALL_MASK, m.store.get(1).?.mask);
-    model.moveWindowToWs(&m, 1, 4);
+    workspaces.moveWindowToWs(&m, 1, 4);
     try testing.expectEqual(model.ALL_MASK, m.store.get(1).?.mask);
 }
 
@@ -310,24 +331,27 @@ test "T08: moveWindowToWs for tiled, minimized, and pinned" {
 test "T09: pinToggle across all modes" {
     var m = makeModel();
     defer deinitModel(&m);
+    try minimize.init();
+    defer minimize.deinit();
     regCur(&m, 1); // tiled
     const r: utils.Rect = .{ .x = 0, .y = 0, .width = 100, .height = 100 };
     _ = m.store.put(2, .{ .mask = model.bit(0), .mode = .{ .base = .{ .floating = r } } }) catch unreachable; // floating
     regCur(&m, 3);
-    _ = model.toggleFullscreen(&m, 3); // fullscreen
+    _ = fullscreen.toggleFullscreen(&m, 3); // fullscreen
     regCur(&m, 4);
-    model.minimize(&m, 4) catch unreachable; // minimized
+    minimize.minimize(&m, 4) catch unreachable; // minimized
 
     const wins = [_]WindowId{ 1, 2, 3, 4 };
     for (wins) |w| {
-        model.pinToggle(&m, w);
+        workspaces.pinToggle(&m, w);
         try testing.expectEqual(model.ALL_MASK, m.store.get(w).?.mask);
-        model.pinToggle(&m, w);
+        workspaces.pinToggle(&m, w);
         try testing.expectEqual(model.bit(m.current), m.store.get(w).?.mask);
     }
-    // Modes were untouched by pinning.
+    // Modes were untouched by pinning; the minimized window is still parked.
     try testing.expect(m.store.get(3).?.mode == .fullscreen);
-    try testing.expect(m.store.get(4).?.mode == .minimized);
+    try testing.expect(minimize.isMinimized(&m, 4));
+    try testing.expect(m.store.get(4).?.presence == .parked);
 }
 
 // T10: allViewToggle round trip; visibility parity with legacy.
@@ -339,13 +363,13 @@ test "T10: all-view flag drives visibility for every stored window" {
     try testing.expect(!model.visibleOn(&m, 1, 1));
     try testing.expect(!model.visibleOn(&m, 2, 0));
 
-    try testing.expect(model.allViewToggle(&m)); // -> active
+    try testing.expect(workspaces.allViewToggle(&m)); // -> active
     try testing.expect(m.all_view_active);
     try testing.expect(model.visibleOn(&m, 1, 1));
     try testing.expect(model.visibleOn(&m, 2, 0));
     try testing.expect(model.visibleOn(&m, 2, 5));
 
-    try testing.expect(!model.allViewToggle(&m)); // -> inactive
+    try testing.expect(!workspaces.allViewToggle(&m)); // -> inactive
     try testing.expect(!m.all_view_active);
     try testing.expect(!model.visibleOn(&m, 1, 1));
     try testing.expect(!model.visibleOn(&m, 2, 0));
@@ -389,12 +413,14 @@ test "T11: reorder and swapMaster" {
 test "T12: unregister cleans all references" {
     var m = makeModel();
     defer deinitModel(&m);
+    try minimize.init();
+    defer minimize.deinit();
     regCur(&m, 1);
     regCur(&m, 2);
     model.setFocus(&m, 1);
-    model.minimize(&m, 2) catch unreachable;
+    minimize.minimize(&m, 2) catch unreachable;
     regCur(&m, 3);
-    _ = model.toggleFullscreen(&m, 3);
+    _ = fullscreen.toggleFullscreen(&m, 3);
 
     model.unregister(&m, 1);
     try testing.expect(!m.store.has(1));
@@ -406,9 +432,18 @@ test "T12: unregister cleans all references" {
     try testing.expect(m.focused != 1);
 
     // Destroying a minimized window clears its only ref (the store entry).
+    try testing.expectEqual(@as(u32, 1), minimize.count(&m)); // window 2 minimized
+    try testing.expect(minimize.isMinimized(&m, 2));
     model.unregister(&m, 2);
     try testing.expect(!m.store.has(2));
     try testing.expectEqual(@as(usize, 1), m.store.count());
+    // model.unregister is FEATURE-FREE: it does not (and may not) touch the
+    // module's bookkeeping. The WIRE layer (not the model) fires
+    // onWindowGone to drop the module's per-window record + counter; we
+    // simulate that dispatch here, then assert the module is clean.
+    minimize.onWindowGone(2);
+    try testing.expectEqual(@as(u32, 0), minimize.count(&m));
+    try testing.expect(!minimize.isMinimized(&m, 2));
 
     // Destroying a fullscreen window leaves no dangling refs either.
     model.unregister(&m, 3);
@@ -424,18 +459,20 @@ test "T12: unregister cleans all references" {
 test "T13: ConfigureRequest honoring per mode" {
     var m = makeModel();
     defer deinitModel(&m);
+    try minimize.init();
+    defer minimize.deinit();
     regCur(&m, 1); // tiled
     const r0: utils.Rect = .{ .x = 10, .y = 20, .width = 300, .height = 200 };
     _ = m.store.put(2, .{ .mask = model.bit(0), .mode = .{ .base = .{ .floating = r0 } } }) catch unreachable;
     regCur(&m, 3);
-    _ = model.toggleFullscreen(&m, 3);
+    _ = fullscreen.toggleFullscreen(&m, 3);
     regCur(&m, 4);
-    model.minimize(&m, 4) catch unreachable;
+    minimize.minimize(&m, 4) catch unreachable;
 
     // Floating: geometry accepted and recorded in the model.
     try testing.expectEqual(
         model.HonorDecision.geometry_applied,
-        model.honorConfigureRequest(&m, 2, .{ .x = 50, .y = 60, .width = 320, .height = 240 }),
+        floating.honorConfigureRequest(&m, 2, .{ .x = 50, .y = 60, .width = 320, .height = 240 }),
     );
     try testing.expectEqual(@as(i16, 50), m.store.get(2).?.mode.base.floating.x);
     try testing.expectEqual(@as(i16, 60), m.store.get(2).?.mode.base.floating.y);
@@ -445,29 +482,29 @@ test "T13: ConfigureRequest honoring per mode" {
     // Tiled: geometry denied; BW honored (recording is sync's job).
     try testing.expectEqual(
         model.HonorDecision.ignored,
-        model.honorConfigureRequest(&m, 1, .{ .x = 1, .y = 1 }),
+        floating.honorConfigureRequest(&m, 1, .{ .x = 1, .y = 1 }),
     );
     try testing.expectEqual(
         model.HonorDecision.border_only,
-        model.honorConfigureRequest(&m, 1, .{ .border_width = 3 }),
+        floating.honorConfigureRequest(&m, 1, .{ .border_width = 3 }),
     );
     try testing.expectEqual(
         model.HonorDecision.border_only,
-        model.honorConfigureRequest(&m, 1, .{ .x = 1, .border_width = 3 }),
+        floating.honorConfigureRequest(&m, 1, .{ .x = 1, .border_width = 3 }),
     );
 
     // Fullscreen/minimized/unknown: denied outright.
     try testing.expectEqual(
         model.HonorDecision.ignored,
-        model.honorConfigureRequest(&m, 3, .{ .x = 1, .border_width = 3 }),
+        floating.honorConfigureRequest(&m, 3, .{ .x = 1, .border_width = 3 }),
     );
     try testing.expectEqual(
         model.HonorDecision.ignored,
-        model.honorConfigureRequest(&m, 4, .{ .border_width = 3 }),
+        floating.honorConfigureRequest(&m, 4, .{ .border_width = 3 }),
     );
     try testing.expectEqual(
         model.HonorDecision.ignored,
-        model.honorConfigureRequest(&m, 999, .{ .x = 1 }),
+        floating.honorConfigureRequest(&m, 999, .{ .x = 1 }),
     );
 }
 
@@ -523,6 +560,8 @@ test "T15: focus MRU ordering and cap" {
 test "T16: store iteration stays deterministic across removals" {
     var m = makeModel();
     defer deinitModel(&m);
+    try minimize.init();
+    defer minimize.deinit();
     for ([_]WindowId{ 1, 2, 3, 4 }) |w| _ = m.store.put(w, .{ .mask = model.bit(0), .mode = .{ .base = .tiled } }) catch unreachable;
 
     inline for (.{ @as(WindowId, 1), @as(WindowId, 2), @as(WindowId, 3), @as(WindowId, 4) }, 0..) |w, i| {
@@ -549,8 +588,8 @@ test "T16: store iteration stays deterministic across removals" {
     _ = m.store.remove(3);
     _ = m.store.remove(4);
     for ([_]WindowId{ 30, 31, 32 }) |w| regCur(&m, w);
-    model.moveWindowToWs(&m, 31, 1);
-    model.minimize(&m, 32) catch unreachable;
+    workspaces.moveWindowToWs(&m, 31, 1);
+    minimize.minimize(&m, 32) catch unreachable;
     try assertSingleMembership(&m);
 }
 
@@ -570,6 +609,11 @@ test "T17: capacity refusals happen before any mutation" {
     try testing.expectEqual(@as(u8, 11), small.get(1).?);
 
     // Model minimize: refused call leaves the entire model byte-identical.
+    // Minimized state now lives in the module's static store (copy semantics):
+    // equality still holds because the capacity guard runs BEFORE any mutation
+    // (or module bookkeeping), so the refused call changes nothing observable.
+    try minimize.init();
+    defer minimize.deinit();
     var m = makeModel();
     defer deinitModel(&m);
     var wins: [max_minimized + 1]WindowId = undefined;
@@ -577,22 +621,31 @@ test "T17: capacity refusals happen before any mutation" {
         w.* = @intCast(200 + i);
         regCur(&m, w.*);
     }
-    for (wins[0 .. wins.len - 1]) |w| model.minimize(&m, w) catch unreachable;
+    for (wins[0 .. wins.len - 1]) |w| minimize.minimize(&m, w) catch unreachable;
     model.setFocus(&m, wins[wins.len - 1]);
-    try testing.expectError(error.CapacityFull, model.minimize(&m, wins[wins.len - 1]));
+    try testing.expectError(error.CapacityFull, minimize.minimize(&m, wins[wins.len - 1]));
 
+    // The module's minimized store is process-global (not per-model), so the
+    // replay fixture below needs a clean module lifetime: without this reset
+    // the prefix minimizes would hit the idempotent no-op path and never park.
+    minimize.deinit();
+    try minimize.init();
+    defer minimize.deinit();
     var ref = makeModel();
     defer deinitModel(&ref);
     for (&wins, 0..) |*w, i| {
         w.* = @intCast(200 + i);
         model.register(&ref, w.*, if (i == wins.len - 1) null else 0) catch unreachable;
-        if (i < wins.len - 1) model.minimize(&ref, w.*) catch unreachable;
+        if (i < wins.len - 1) minimize.minimize(&ref, w.*) catch unreachable;
     }
     model.setFocus(&ref, wins[wins.len - 1]);
     // The refused model equals a pristine replay of the accepted prefix...
     try testing.expect(eqModel(&m, &ref));
-    // ...and specifically, the attempted window was NOT minimized.
+    // ...and specifically, the attempted window was NOT parked/minimized:
+    // still present (tiled base), not in the module's minimized set.
     try testing.expect(m.store.get(wins[wins.len - 1]).?.mode == .base);
+    try testing.expect(m.store.get(wins[wins.len - 1]).?.presence == .present);
+    try testing.expect(!minimize.isMinimized(&m, wins[wins.len - 1]));
 
     // register refusal: a full home-list bound refuses BEFORE mutation and
     // undoes the store insert (bounded lists have no OOM path; the bound IS
@@ -608,28 +661,30 @@ test "T17: capacity refusals happen before any mutation" {
 
 // T18: determinism -- same op sequence => identical model state, twice.
 test "T18: identical operation sequences produce identical models" {
+    try minimize.init();
+    defer minimize.deinit();
     const seq = struct {
         fn run(m: *Model) void {
             for ([_]WindowId{ 1, 2, 3, 4, 5 }) |w| model.register(m, w, null) catch unreachable;
             model.register(m, 6, 2) catch unreachable;
-            model.switchTo(m, 1);
+            workspaces.switchTo(m, 1);
             model.register(m, 7, null) catch unreachable;
-            model.switchTo(m, 0);
+            workspaces.switchTo(m, 0);
             model.reorderTiled(m, 3, 0);
             model.swapMaster(m);
-            model.minimize(m, 4) catch unreachable;
-            model.restore(m, 4);
-            model.minimize(m, 5) catch unreachable;
-            _ = model.toggleFullscreen(m, 2);
-            model.setFloatingRect(m, 6, .{ .x = 1, .y = 2, .width = 30, .height = 40 });
-            model.pinToggle(m, 1);
-            model.moveWindowToWs(m, 7, 1);
+            minimize.minimize(m, 4) catch unreachable;
+            minimize.restore(m, 4);
+            minimize.minimize(m, 5) catch unreachable;
+            _ = fullscreen.toggleFullscreen(m, 2);
+            floating.setFloatingRect(m, 6, .{ .x = 1, .y = 2, .width = 30, .height = 40 });
+            workspaces.pinToggle(m, 1);
+            workspaces.moveWindowToWs(m, 7, 1);
             model.cycleLayout(m, 1);
             model.adjustMasterWidth(m, 0.1);
             model.setFocus(m, 3);
             model.setFocus(m, 1);
-            _ = model.allViewToggle(m);
-            _ = model.allViewToggle(m);
+            _ = workspaces.allViewToggle(m);
+            _ = workspaces.allViewToggle(m);
             model.unregister(m, 5);
             model.applyConfigReload(m, .{ .kind = .leaf });
         }
@@ -654,35 +709,45 @@ test "T18: identical operation sequences produce identical models" {
 test "T31: minimize seq stamps drive LIFO/FIFO restore candidates" {
     var m = makeModel();
     defer deinitModel(&m);
+    try minimize.init();
+    defer minimize.deinit();
     model.register(&m, 10, 0) catch unreachable; // ws 0
     model.register(&m, 11, 0) catch unreachable;
     model.register(&m, 12, 1) catch unreachable; // ws 1: must never win on ws 0
-    try model.minimize(&m, 10); // seq 0 (oldest)
-    try model.minimize(&m, 11); // seq 1 (newest)
-    try testing.expectEqual(@as(u32, 2), m.next_seq);
+    try minimize.minimize(&m, 10); // seq 0 (oldest)
+    try minimize.minimize(&m, 11); // seq 1 (newest)
+    try testing.expectEqual(@as(u32, 2), minimize.peekSeq(&m));
+    try testing.expectEqual(@as(u32, 2), minimize.count(&m));
+    try testing.expectEqual(@as(?u32, 0), minimize.seqOf(&m, 10));
+    try testing.expectEqual(@as(?u32, 1), minimize.seqOf(&m, 11));
 
-    try testing.expectEqual(@as(?model.WindowId, 10), model.restoreCandidate(&m, 0, .fifo));
-    try testing.expectEqual(@as(?model.WindowId, 11), model.restoreCandidate(&m, 0, .lifo));
+    try testing.expectEqual(@as(?model.WindowId, 10), minimize.restoreCandidate(&m, 0, .fifo));
+    try testing.expectEqual(@as(?model.WindowId, 11), minimize.restoreCandidate(&m, 0, .lifo));
     // Cross-workspace isolation.
-    try testing.expectEqual(@as(?model.WindowId, null), model.restoreCandidate(&m, 1, .fifo));
+    try testing.expectEqual(@as(?model.WindowId, null), minimize.restoreCandidate(&m, 1, .fifo));
 
     // Re-minimize 10: newest seq flips the LIFO answer; FIFO unchanged.
-    model.restore(&m, 10);
-    try model.minimize(&m, 10); // seq 2
-    try testing.expectEqual(@as(?model.WindowId, 10), model.restoreCandidate(&m, 0, .lifo));
-    try testing.expectEqual(@as(?model.WindowId, 11), model.restoreCandidate(&m, 0, .fifo));
+    minimize.restore(&m, 10);
+    try minimize.minimize(&m, 10); // seq 2
+    try testing.expectEqual(@as(?u32, 2), minimize.seqOf(&m, 10));
+    try testing.expectEqual(@as(?model.WindowId, 10), minimize.restoreCandidate(&m, 0, .lifo));
+    try testing.expectEqual(@as(?model.WindowId, 11), minimize.restoreCandidate(&m, 0, .fifo));
     try assertSingleMembership(&m);
 }
 
-test "T32: latestMinimizedBase skips fullscreen-prev and other workspaces" {
+test "T32: latestMinimizedBase skips fullscreen-current and other workspaces" {
     var m = makeModel();
     defer deinitModel(&m);
+    try minimize.init();
+    defer minimize.deinit();
     model.register(&m, 20, 0) catch unreachable;
     model.register(&m, 21, 0) catch unreachable;
-    _ = model.toggleFullscreen(&m, 21);
-    try model.minimize(&m, 20); // plain base, older
-    try model.minimize(&m, 21); // fullscreen-prev, newer
-    try testing.expectEqual(@as(?model.WindowId, 20), model.latestMinimizedBase(&m, 0));
+    _ = fullscreen.toggleFullscreen(&m, 21);
+    try minimize.minimize(&m, 20); // plain base, older
+    try minimize.minimize(&m, 21); // fullscreen, newer
+    // 21's CURRENT mode is still .fullscreen while parked, so it is skipped
+    // (the equivalent of the old prev != .base exclusion).
+    try testing.expectEqual(@as(?model.WindowId, 20), minimize.latestMinimizedBase(&m, 0));
 }
 
 // T33 (user bug report): fullscreen -> minimize -> restore -> un-fullscreen
@@ -690,16 +755,21 @@ test "T32: latestMinimizedBase skips fullscreen-prev and other workspaces" {
 test "T33: fullscreen-prev restore re-adds slot; exit-fullscreen retiles" {
     var m = makeModel();
     defer deinitModel(&m);
+    try minimize.init();
+    defer minimize.deinit();
     regCur(&m, 1);
     regCur(&m, 2);
-    _ = model.toggleFullscreen(&m, 1);
+    _ = fullscreen.toggleFullscreen(&m, 1);
     try expectOrder(&m, 0, &.{ 1, 2 }); // fullscreen windows keep their slot
-    try model.minimize(&m, 1);
-    try testing.expect(m.store.get(1).?.mode == .minimized);
+    try minimize.minimize(&m, 1);
+    try testing.expect(minimize.isMinimized(&m, 1));
+    try testing.expect(m.store.get(1).?.presence == .parked);
+    try testing.expect(m.store.get(1).?.mode == .fullscreen); // mode RETAINED
     try expectOrder(&m, 0, &.{2}); // slot freed while hidden
 
-    model.restore(&m, 1); // straight back into fullscreen ...
+    minimize.restore(&m, 1); // straight back into fullscreen ...
     const e = m.store.get(1).?;
+    try testing.expect(e.presence == .present);
     try testing.expect(e.mode == .fullscreen);
     try testing.expectEqual(@as(WSId, 0), e.mode.fullscreen.ws);
     // ... AND the saved slot must be re-added (THE FIX under test).
@@ -707,8 +777,8 @@ test "T33: fullscreen-prev restore re-adds slot; exit-fullscreen retiles" {
     try assertSingleMembership(&m);
 
     // The reported final step: leaving fullscreen must return a TILEABLE,
-    // engine-placed window — not a home-less base.tiled orphan.
-    try testing.expect(model.toggleFullscreen(&m, 1));
+    // engine-placed window - not a home-less base.tiled orphan.
+    try testing.expect(fullscreen.toggleFullscreen(&m, 1));
     const back = m.store.get(1).?;
     try testing.expect(back.mode == .base and back.mode.base == .tiled);
     try expectOrder(&m, 0, &.{ 1, 2 });
@@ -719,16 +789,20 @@ test "T33: fullscreen-prev restore re-adds slot; exit-fullscreen retiles" {
 test "T33b: floating-base fullscreen minimize/restore never joins a list" {
     var m = makeModel();
     defer deinitModel(&m);
+    try minimize.init();
+    defer minimize.deinit();
     regCur(&m, 5);
     const r: utils.Rect = .{ .x = 3, .y = 4, .width = 100, .height = 80 };
     _ = m.store.put(6, .{
         .mask = model.bit(0),
         .mode = .{ .base = .{ .floating = r } },
     }) catch unreachable;
-    _ = model.toggleFullscreen(&m, 6);
-    try model.minimize(&m, 6);
-    model.restore(&m, 6);
+    _ = fullscreen.toggleFullscreen(&m, 6);
+    try minimize.minimize(&m, 6);
+    try testing.expect(m.store.get(6).?.presence == .parked);
+    minimize.restore(&m, 6);
     const e = m.store.get(6).?;
+    try testing.expect(e.presence == .present);
     try testing.expect(e.mode == .fullscreen);
     try testing.expect(r.eql(e.mode.fullscreen.base.floating));
     for (&m.ws) |*s| try testing.expect(s.tiled_order.indexOfScalar(6) == null);
@@ -742,6 +816,8 @@ test "T33b: floating-base fullscreen minimize/restore never joins a list" {
 test "T34: fallbackFocusCandidate tiers pick the previous focus" {
     var m = makeModel();
     defer deinitModel(&m);
+    try minimize.init();
+    defer minimize.deinit();
     regCur(&m, 10);
     regCur(&m, 11); // tiled_order [10, 11]
     model.setFocus(&m, 11); // user focused 11 first...
@@ -749,14 +825,14 @@ test "T34: fallbackFocusCandidate tiers pick the previous focus" {
     try testing.expectEqual(@as(?WindowId, 10), model.fallbackFocusCandidate(&m, 0));
 
     // Minimizing the FOCUSED window (10): the previous focus (11) wins via
-    // the MRU tier even though 10 is still newest in the MRU list — visibleOn
+    // the MRU tier even though 10 is still newest in the MRU list - visibleOn
     // rejects minimized entries.
-    try model.minimize(&m, 10);
+    try minimize.minimize(&m, 10);
     try testing.expectEqual(@as(?WindowId, 11), model.fallbackFocusCandidate(&m, 0));
 
     // Both hidden: reversed tiled_order tier is exhausted by visibility too,
     // a floating window becomes the candidate, and an empty ws yields null.
-    try model.minimize(&m, 11);
+    try minimize.minimize(&m, 11);
     _ = m.store.put(12, .{
         .mask = model.bit(0),
         .mode = .{ .base = .{ .floating = .{ .x = 0, .y = 0, .width = 50, .height = 50 } } },
@@ -767,25 +843,33 @@ test "T34: fallbackFocusCandidate tiers pick the previous focus" {
     try testing.expectEqual(@as(?WindowId, null), model.fallbackFocusCandidate(&m, 0));
 }
 
-// T35: fullscreenWsOf is the pre-removal read primitive for unmanage paths
-// (bug: closing/minimizing away a fullscreened window never restored the bar
-// because the query ran after the store entry was already gone).
-test "T35: fullscreenWsOf reports the record and null otherwise" {
+// T35: fullscreenWsOf is the pre-removal read primitive for unmanage paths.
+// NEW CONTRACT: minimizing-from-fullscreen KEEPS the window's mode, so the
+// ghost fullscreen record STILL reports the ws while parked - but visibleOn
+// is false because presence is parked. Callers must gate on visibility (via
+// the coverage/occupancy query), not on the raw mode.
+test "T35: fullscreenWsOf keeps the ws while minimized-from-fullscreen" {
     var m = makeModel();
     defer deinitModel(&m);
+    try minimize.init();
+    defer minimize.deinit();
     regCur(&m, 30);
     regCur(&m, 31);
-    try testing.expectEqual(@as(?WSId, null), model.fullscreenWsOf(&m, 30));
-    try testing.expectEqual(@as(?WSId, null), model.fullscreenWsOf(&m, 999)); // unknown
+    try testing.expectEqual(@as(?WSId, null), fullscreen.fullscreenWsOf(&m, 30));
+    try testing.expectEqual(@as(?WSId, null), fullscreen.fullscreenWsOf(&m, 999)); // unknown
 
-    _ = model.toggleFullscreen(&m, 30);
-    try testing.expectEqual(@as(?WSId, 0), model.fullscreenWsOf(&m, 30));
-    try testing.expectEqual(@as(?WSId, null), model.fullscreenWsOf(&m, 31)); // not fullscreen
+    _ = fullscreen.toggleFullscreen(&m, 30);
+    try testing.expectEqual(@as(?WSId, 0), fullscreen.fullscreenWsOf(&m, 30));
+    try testing.expectEqual(@as(?WSId, null), fullscreen.fullscreenWsOf(&m, 31)); // not fullscreen
 
-    // After minimize-from-fullscreen the record is GONE (parked inside
-    // prev) — callers must capture before dropping/removal, never after.
-    try model.minimize(&m, 30);
-    try testing.expectEqual(@as(?WSId, null), model.fullscreenWsOf(&m, 30));
+    // Minimize-from-fullscreen: the MODE is retained, so the ghost record
+    // still reports the ws - but the window is parked, hence not visible and
+    // not an occupant anywhere.
+    try minimize.minimize(&m, 30);
+    try testing.expectEqual(@as(?WSId, 0), fullscreen.fullscreenWsOf(&m, 30));
+    try testing.expect(m.store.get(30).?.presence == .parked);
+    try testing.expect(!model.visibleOn(&m, 30, 0));
+    try testing.expectEqual(@as(?WindowId, null), fullscreen.fullscreenOccupantOnWs(&m, 0));
 }
 
 // T36 (user bug report): closing the focused window must hand focus to the
@@ -820,34 +904,41 @@ test "T36: close-fallback candidate after unregister is the previous focus" {
 test "FSQ: model fullscreen queries (mode / on-ws / visible occupant)" {
     var m = makeModel();
     defer deinitModel(&m);
+    try minimize.init();
+    defer minimize.deinit();
 
     regCur(&m, 50);
-    try testing.expect(!model.isFullscreenMode(&m, 50));
-    try testing.expect(!model.isFullscreenOnWs(&m, 50, 0));
-    try testing.expect(!model.isFullscreenMode(&m, 999)); // unknown id
-    try testing.expect(!model.isFullscreenOnWs(&m, 999, 0)); // unknown id
-    try testing.expectEqual(@as(?WindowId, null), model.fullscreenOccupantOnWs(&m, 0));
+    try testing.expect(!fullscreen.isFullscreenMode(&m, 50));
+    try testing.expect(!fullscreen.isFullscreenOnWs(&m, 50, 0));
+    try testing.expect(!fullscreen.isFullscreenMode(&m, 999)); // unknown id
+    try testing.expect(!fullscreen.isFullscreenOnWs(&m, 999, 0)); // unknown id
+    try testing.expectEqual(@as(?WindowId, null), fullscreen.fullscreenOccupantOnWs(&m, 0));
 
-    _ = model.toggleFullscreen(&m, 50); // record targets current ws (0)
-    try testing.expect(model.isFullscreenMode(&m, 50));
-    try testing.expect(model.isFullscreenOnWs(&m, 50, 0));
-    try testing.expect(!model.isFullscreenOnWs(&m, 50, 1)); // other-ws record
-    try testing.expectEqual(@as(?WindowId, 50), model.fullscreenOccupantOnWs(&m, 0));
+    _ = fullscreen.toggleFullscreen(&m, 50); // record targets current ws (0)
+    try testing.expect(fullscreen.isFullscreenMode(&m, 50));
+    try testing.expect(fullscreen.isFullscreenOnWs(&m, 50, 0));
+    try testing.expect(!fullscreen.isFullscreenOnWs(&m, 50, 1)); // other-ws record
+    try testing.expectEqual(@as(?WindowId, 50), fullscreen.fullscreenOccupantOnWs(&m, 0));
 
     // A fullscreen RECORD targeting a workspace the window is not tagged to
     // is NOT an occupant: occupancy requires visibility (sync parks such
     // strays instead of letting them claim the slot).
     try model.register(&m, 51, 1); // tagged to ws1 only
-    _ = model.toggleFullscreen(&m, 51); // record ws = current (0)
-    try testing.expect(model.isFullscreenMode(&m, 51));
-    try testing.expect(model.isFullscreenOnWs(&m, 51, 0));
-    try testing.expectEqual(@as(?WSId, 0), model.fullscreenWsOf(&m, 51));
-    try testing.expectEqual(@as(?WindowId, 50), model.fullscreenOccupantOnWs(&m, 0));
+    _ = fullscreen.toggleFullscreen(&m, 51); // record ws = current (0)
+    try testing.expect(fullscreen.isFullscreenMode(&m, 51));
+    try testing.expect(fullscreen.isFullscreenOnWs(&m, 51, 0));
+    try testing.expectEqual(@as(?WSId, 0), fullscreen.fullscreenWsOf(&m, 51));
+    try testing.expectEqual(@as(?WindowId, 50), fullscreen.fullscreenOccupantOnWs(&m, 0));
 
-    // Minimize-from-fullscreen parks the record inside prev (see T35).
-    try model.minimize(&m, 50);
-    try testing.expect(!model.isFullscreenMode(&m, 50));
-    try testing.expectEqual(@as(?WindowId, null), model.fullscreenOccupantOnWs(&m, 0));
+    // Minimize-from-fullscreen: MODE is retained (still fullscreen mode), but
+    // parked => NOT a visible occupant anywhere (occupancy requires
+    // visibility; see T35).
+    try minimize.minimize(&m, 50);
+    try testing.expect(fullscreen.isFullscreenMode(&m, 50));
+    try testing.expect(fullscreen.isFullscreenOnWs(&m, 50, 0));
+    try testing.expectEqual(@as(?WSId, 0), fullscreen.fullscreenWsOf(&m, 50));
+    try testing.expect(!model.visibleOn(&m, 50, 0));
+    try testing.expectEqual(@as(?WindowId, null), fullscreen.fullscreenOccupantOnWs(&m, 0));
 }
 
 // home_ws cache invariants
@@ -868,44 +959,50 @@ test "home_ws: findHome uses cache" {
     var m = makeModel();
     regCur(&m, 1);
     try testing.expectEqual(@as(?WSId, 0), m.store.get(1).?.home_ws);
-    // findHome should return the cached value
+    // findHome reads the cached home.
     try testing.expectEqual(@as(?WSId, 0), model.findHome(&m, 1));
 }
 
 test "home_ws: findHome scan fallback when cache is null" {
     var m = makeModel();
     regCur(&m, 1);
-    // Clear the cache to simulate a legacy entry
+    // A null cache simulates a legacy entry with no recorded home.
     m.store.getPtr(1).?.home_ws = null;
-    // findHome should scan tiled_order and still return the correct home
+    // findHome scans tiled_order and recovers the correct home.
     try testing.expectEqual(@as(?WSId, 0), model.findHome(&m, 1));
 }
 
 test "home_ws: minimize clears cache" {
     var m = makeModel();
+    try minimize.init();
+    defer minimize.deinit();
     regCur(&m, 1);
     try testing.expectEqual(@as(?WSId, 0), m.store.get(1).?.home_ws);
-    try model.minimize(&m, 1);
+    try minimize.minimize(&m, 1);
     try testing.expectEqual(@as(?WSId, null), m.store.get(1).?.home_ws);
+    try testing.expect(m.store.get(1).?.presence == .parked);
 }
 
 test "home_ws: restore sets cache after re-add" {
     var m = makeModel();
+    try minimize.init();
+    defer minimize.deinit();
     regCur(&m, 1);
-    try model.minimize(&m, 1);
+    try minimize.minimize(&m, 1);
     try testing.expectEqual(@as(?WSId, null), m.store.get(1).?.home_ws);
-    model.restore(&m, 1);
+    minimize.restore(&m, 1);
     try testing.expectEqual(@as(?WSId, 0), m.store.get(1).?.home_ws);
+    try testing.expect(m.store.get(1).?.presence == .present);
 }
 
 test "home_ws: moveWindowToWs uses cache" {
     var m = makeModel();
     regCur(&m, 1);
     try testing.expectEqual(@as(?WSId, 0), m.store.get(1).?.home_ws);
-    // moveWindowToWs should use the cached home_ws, not scan
-    model.moveWindowToWs(&m, 1, 5);
-    // Window is now on ws 5; home_ws should still be the original home
-    // (home_ws tracks original home, not current ws)
+    // moveWindowToWs reads the cached home rather than scanning.
+    workspaces.moveWindowToWs(&m, 1, 5);
+    // home_ws tracks the original home, not the current workspace, so it
+    // stays 0 while the window lands on ws 5.
     try expectOrder(&m, 5, &.{1});
 }
 
@@ -913,10 +1010,9 @@ test "home_ws: detachToFloating clears cache" {
     var m = makeModel();
     regCur(&m, 1);
     try testing.expectEqual(@as(?WSId, 0), m.store.get(1).?.home_ws);
-    // We can't call actions.detachToFloating from model tests (no X11),
-    // but we can verify the model-level behavior by checking the Entry.
-    // The actions code does: e.home_ws = null after detach.
-    // Here we test that a floating window's home_ws is null.
+    // The window-layer detach path (actions) clears home_ws; model tests
+    // have no X11, so verify the resulting state directly: a floating entry
+    // carries a null home_ws.
     const e = m.store.getPtr(1).?;
     e.mode = .{ .base = .{ .floating = .{ .x = 0, .y = 0, .width = 100, .height = 100 } } };
     e.home_ws = null;
@@ -927,39 +1023,44 @@ test "home_ws: detachToFloating clears cache" {
 test "restoreAllOnWs restores in slot order" {
     var m = makeModel();
     defer deinitModel(&m);
-    // Register 3 windows on workspace 0
+    try minimize.init();
+    defer minimize.deinit();
+    // Minimize every window on ws 0, then restore them all in one call.
     model.register(&m, 10, 0) catch unreachable;
     model.register(&m, 20, 0) catch unreachable;
     model.register(&m, 30, 0) catch unreachable;
-    // Minimize all three
-    try model.minimize(&m, 10);
-    try model.minimize(&m, 20);
-    try model.minimize(&m, 30);
-    // Restore all on ws 0
-    model.restoreAllOnWs(&m, 0);
-    // Verify all are restored and in tiled_order
+    try minimize.minimize(&m, 10);
+    try minimize.minimize(&m, 20);
+    try minimize.minimize(&m, 30);
+    try testing.expectEqual(@as(u32, 3), minimize.count(&m));
+    minimize.restoreAllOnWs(&m, 0);
+    // No window may stay parked/minimized after the restore.
+    try testing.expectEqual(@as(u32, 0), minimize.count(&m));
     const e10 = m.store.get(10) orelse unreachable;
     const e20 = m.store.get(20) orelse unreachable;
     const e30 = m.store.get(30) orelse unreachable;
-    try testing.expect(e10.mode != .minimized);
-    try testing.expect(e20.mode != .minimized);
-    try testing.expect(e30.mode != .minimized);
+    try testing.expect(e10.presence == .present);
+    try testing.expect(e20.presence == .present);
+    try testing.expect(e30.presence == .present);
+    try testing.expect(!minimize.isMinimized(&m, 10));
+    try testing.expect(!minimize.isMinimized(&m, 20));
+    try testing.expect(!minimize.isMinimized(&m, 30));
 }
 
 // I-3: cycleLayout wraps around all LayoutKind variants.
 test "cycleLayout wraps around" {
     var m = makeModel();
     defer deinitModel(&m);
-    model.switchTo(&m, 0);
+    workspaces.switchTo(&m, 0);
     const start_kind = m.ws[0].params.kind;
     const Count = @typeInfo(model.LayoutKind).@"enum".fields.len;
-    // Cycle forward through all layouts -> should wrap back to start
+    // One full cycle forward returns to the starting layout.
     for (0..Count) |_| model.cycleLayout(&m, 1);
     try testing.expectEqual(start_kind, m.ws[0].params.kind);
-    // Cycle backward 1 from start -> should wrap to last variant
+    // A single backward step leaves the start layout (wraps to the last).
     model.cycleLayout(&m, -1);
     try testing.expect(m.ws[0].params.kind != start_kind);
-    // Cycle forward 1 -> back to start
+    // One forward step recovers the start layout.
     model.cycleLayout(&m, 1);
     try testing.expectEqual(start_kind, m.ws[0].params.kind);
 }
@@ -968,10 +1069,10 @@ test "cycleLayout wraps around" {
 test "adjustMasterWidth clamps" {
     var m = makeModel();
     defer deinitModel(&m);
-    model.switchTo(&m, 0);
-    model.adjustMasterWidth(&m, 10.0); // Way over
+    workspaces.switchTo(&m, 0);
+    model.adjustMasterWidth(&m, 10.0); // far above the ceiling
     try testing.expect(m.ws[0].params.master_width <= 0.95);
-    model.adjustMasterWidth(&m, -10.0); // Way under
+    model.adjustMasterWidth(&m, -10.0); // far below the floor
     try testing.expect(m.ws[0].params.master_width >= 0.05);
 }
 
@@ -982,12 +1083,12 @@ test "setFloatingRect updates floating window geometry" {
     const r: utils.Rect = .{ .x = 10, .y = 20, .width = 300, .height = 200 };
     _ = m.store.put(5, .{ .mask = model.bit(0), .mode = .{ .base = .{ .floating = r } } }) catch unreachable;
     const new_r: utils.Rect = .{ .x = 50, .y = 60, .width = 400, .height = 300 };
-    model.setFloatingRect(&m, 5, new_r);
+    floating.setFloatingRect(&m, 5, new_r);
     try testing.expect(new_r.eql(m.store.get(5).?.mode.base.floating));
-    // Tiled window: no-op
+    // A tiled window is untouched by geometry updates.
     model.register(&m, 6, 0) catch unreachable;
-    model.setFloatingRect(&m, 6, new_r);
+    floating.setFloatingRect(&m, 6, new_r);
     try testing.expect(m.store.get(6).?.mode.base == .tiled);
-    // Unknown window: no-op (should not crash)
-    model.setFloatingRect(&m, 999, new_r);
+    // An unknown window is ignored without crashing.
+    floating.setFloatingRect(&m, 999, new_r);
 }

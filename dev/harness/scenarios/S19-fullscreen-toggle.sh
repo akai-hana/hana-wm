@@ -1,4 +1,4 @@
-# S19 — fullscreen-toggle: golden-first gate for the ConfigureRequest
+# S19 - fullscreen-toggle: golden-first gate for the ConfigureRequest
 # decision paths around fullscreen (ND-14): deny+echo while a window is
 # fullscreen, border-only and mixed-mask routing, then exit restores slots.
 # Window ids are resolved BEFORE the fullscreen enter: the parked sibling

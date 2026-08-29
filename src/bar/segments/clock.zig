@@ -84,7 +84,7 @@ fn currentEpochSeconds() i64 {
 }
 
 fn realtimeMs() i64 {
-    return @intCast(utils.realtimeNs() / 1_000_000);
+    return @intCast(utils.realtimeNs() / std.time.ns_per_ms);
 }
 
 /// Formats `sec` (seconds since the Unix epoch) into `buf` using `fmt` as a

@@ -1,7 +1,7 @@
 //! Config reader tests: readFileAlloc round-trip exactness across size
 //! boundaries, the cap enforcement, and the stat-less growth path. The
 //! growth path is exercised via /proc (stat.size == 0 but non-empty
-//! content) — linux-only by nature, like the WM itself.
+//! content) - linux-only by nature, like the WM itself.
 //!
 //! Scratch files live under /tmp/opencode (pre-approved temp area); each
 //! test uses a unique name and cleans up after itself.

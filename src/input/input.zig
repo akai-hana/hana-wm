@@ -15,17 +15,20 @@ const config = @import("config");
 const window = @import("window");
 const tracking = @import("tracking");
 const focus = @import("focus");
-const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else null;
-const minimize = if (build_options.has_minimize) @import("minimize") else null;
-const workspaces = if (build_options.has_workspaces) @import("workspaces") else null;
 const xkbcommon = @import("xkbcommon");
 const build_options = @import("build_options");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
 const spawn = @import("spawn");
-const bar = if (build_options.has_bar) @import("bar") else null;
-const tiling = if (build_options.has_tiling) @import("tiling") else null;
-const floating = if (build_options.has_floating) @import("floating") else null;
+// The bar's hook set is reached through the core-owned `surfaces` composition
+// root, never by importing the bar module here. When the bar is absent it is
+// the comptime `null` type, so every `if (build_options.has_bar)` call below
+// compiles away.
+const surfaces = @import("plugins").Surfaces;
+// Floating drag commands are reached through actions (single command layer),
+// not by naming the floating module here, keeping the loop layer free of
+// the optional module import. The drag state (model-backed) is queried via
+// the same action wrappers.
 
 // Constants
 
@@ -37,8 +40,6 @@ const mouse_buttons = [_]u8{
     constants.mouse_button_left, mouse_button_middle,      constants.mouse_button_right,
     mouse_button_scroll_up,      mouse_button_scroll_down,
 };
-
-// Named adapter functions for tiling actions that need argument forwarding.
 
 // XKB state
 
@@ -125,7 +126,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     const matched: ?*const types.Action = config.lookupKeybinding(mods, keysym);
 
     // The prompt owns all key input while active; routing is handled inside it.
-    if (build_options.has_bar) if (bar.promptHandleKeypress(event, matched)) return;
+    if (build_options.has_bar) if (surfaces.promptHandleKeypress(event, matched)) return;
 
     if (matched) |action| {
         debug.info("[KEY] mods=0x{x} keysym=0x{x} action={s}", .{ mods, keysym, @tagName(action.*) });
@@ -152,8 +153,8 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     // managed-window/replay-pointer machinery built for the synchronous grab
     // a client-window click goes through. Super-held clicks fall through to
     // the normal mouse-binding/drag path.
-    if (!super_held and build_options.has_bar and bar.isBarWindow(clicked_window)) {
-        bar.handleButtonPress(event);
+    if (!super_held and build_options.has_bar and surfaces.isBarWindow(clicked_window)) {
+        surfaces.handleButtonPress(event);
         return;
     }
 
@@ -181,7 +182,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     if (tryConfigMouseBind(mods, event.detail, managed_window, event.time)) return;
 
     if (event.detail == constants.mouse_button_left or event.detail == constants.mouse_button_right) {
-        if (build_options.has_floating) floating.startDrag(managed_window, event.detail, event.root_x, event.root_y);
+        if (build_options.has_floating) actions.startDrag(managed_window, event.detail, event.root_x, event.root_y);
         keepDragGrab(event.time);
         return;
     }
@@ -190,7 +191,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
 /// Stops any active drag and updates the last event timestamp.
 pub fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t) void {
     focus.setLastEventTime(event.time);
-    if (build_options.has_floating and floating.isDragging()) floating.stopDrag();
+    if (build_options.has_floating and actions.isDragging()) actions.stopDrag();
 }
 
 /// Forwards motion to the drag engine and clears focus suppression.
@@ -199,8 +200,8 @@ pub fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t) void {
 pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
     focus.setLastEventTime(event.time);
 
-    if (build_options.has_floating and floating.isDragging()) {
-        floating.updateDrag(event.root_x, event.root_y);
+    if (build_options.has_floating and actions.isDragging()) {
+        actions.updateDrag(event.root_x, event.root_y);
         return;
     }
 
@@ -380,9 +381,9 @@ fn executeWorkspaceAction(action: *const types.Action) void {
 /// and prompt toggle.
 fn executeBarAction(action: *const types.Action) void {
     switch (action.*) {
-        .toggle_bar_visibility => if (build_options.has_bar) bar.setBarState(.toggle),
-        .toggle_bar_position => if (build_options.has_bar) bar.toggleBarSegmentAnchor(),
-        .toggle_prompt => if (build_options.has_bar) bar.promptToggle(),
+        .toggle_bar_visibility => if (build_options.has_bar) surfaces.setBarState(.toggle_bar_visibility),
+        .toggle_bar_position => if (build_options.has_bar) surfaces.toggleBarSegmentAnchor(),
+        .toggle_prompt => if (build_options.has_bar) surfaces.promptToggle(),
         else => unhandledAction("bar"),
     }
 }
@@ -439,16 +440,15 @@ fn dumpState() void {
     debug.info("Suppress focus: {s}", .{@tagName(focus.getSuppressReason())});
 
     if (build_options.has_workspaces) {
-        if (workspaces.getState()) |ws_state| {
-            for (ws_state.workspaces, 0..) |_, i|
-                debug.info("  WS{}: {} windows", .{ i + 1, tracking.countWindowsOnWorkspace(core.WorkspaceId.fromIndex(@intCast(i))) });
-        }
+        const ws_count = tracking.getWorkspaceCount();
+        for (0..ws_count) |i|
+            debug.info("  WS{}: {} windows", .{ i + 1, tracking.countWindowsOnWorkspace(core.WorkspaceId.fromIndex(@intCast(i))) });
     }
 
-    if (build_options.has_tiling and tiling.isEnabled()) {
+    if (build_options.has_tiling and @import("core").tilingEnabled()) {
         debug.info("Tiling enabled: true", .{});
         debug.info("Tiling layout:  {s}", .{@tagName(pipeline.getCurrentLayout())});
-        debug.info("Tiled windows:  {}", .{tracking.tiledCountOnCurrent()});
+        debug.info("Tiled windows:  {}", .{@import("model").tiledCountOnWs(pipeline.model(), pipeline.model().current)});
     }
 
     debug.info("================================", .{});
@@ -470,7 +470,6 @@ fn tryConfigMouseBind(mods: u16, button: u8, win: u32, time: u32) bool {
     return false;
 }
 
-/// Runs `op` inside an xcb server grab, then sweeps borders, redraws the
 /// Replays a frozen pointer event without releasing the keyboard grab.
 /// Always pass event.time, never XCB_CURRENT_TIME.
 inline fn replayPointer(time: u32) void {
