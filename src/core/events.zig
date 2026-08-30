@@ -7,7 +7,7 @@ const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
 const constants = @import("constants");
-const x11_masks = @import("x11_masks");
+const masks = @import("masks");
 
 const debug = @import("debug");
 const config = @import("config");
@@ -15,12 +15,12 @@ const input = @import("input");
 const window = @import("window");
 const focus = @import("focus");
 
-const refresh_rate = @import("refresh_rate");
+const refresh = @import("refresh");
 const signals = @import("signals");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
 const restart = @import("restart");
-const restart_state = @import("restart_state");
+const persist = @import("persist");
 const build_options = @import("build_options");
 // Core's reach into the compiled-in chrome surface (the bar) lives in the
 // `surfaces` composition root, not here. `surfaces` is the bar's hook set
@@ -147,9 +147,9 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
     // re-configuration, so any of them triggers re-detection. Extension events
     // sit above the fixed dispatch table and would otherwise be dropped by the
     // bounds guard below.
-    const randr_first = refresh_rate.randrFirstEvent();
+    const randr_first = refresh.randrFirstEvent();
     if (randr_first != 0 and idx >= randr_first and idx <= randr_first + 1) {
-        refresh_rate.handleRandrNotifyEvent(core.getState().conn);
+        refresh.handleRandrNotifyEvent(core.getState().conn);
         return;
     }
 
@@ -171,12 +171,12 @@ fn fillGrabCookies(cookies: []CookieEntry) usize {
 
         // Check once per keybinding that the full lock-modifier set fits.
         // Avoids a per-lock branch and prevents partial grabs if the buffer is nearly full.
-        if (n + x11_masks.lock_modifiers.len > cookies.len) {
+        if (n + masks.lock_modifiers.len > cookies.len) {
             debug.warn("Too many keybindings. Increase max_keybind_cookies (currently {})", .{constants.Limits.max_keybind_cookies});
             break;
         }
 
-        for (x11_masks.lock_modifiers) |lock| {
+        for (masks.lock_modifiers) |lock| {
             cookies[n] = .{
                 .cookie = xcb.xcb_grab_key_checked(
                     cs.conn,
@@ -292,8 +292,8 @@ fn handleReexec() !void {
     };
     debug.info("Re-executing new binary", .{});
 
-    const path = try restart_state.defaultStatePath(cs.alloc);
-    try restart_state.save(cs.alloc, pipeline.model(), path);
+    const path = try persist.defaultStatePath(cs.alloc);
+    try persist.save(cs.alloc, pipeline.model(), path);
 
     xcb.xcb_disconnect(cs.conn);
     restart.execNext(self_path, path);

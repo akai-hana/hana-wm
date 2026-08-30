@@ -3,7 +3,7 @@
 
 const utils = @import("utils");
 const model = @import("model");
-const engine = @import("engine");
+const tiling = @import("tiling");
 
 // Counter-clockwise spiral direction for the next window split.
 const SpiralDirection = enum(u2) {
@@ -24,11 +24,11 @@ const SpiralDirection = enum(u2) {
 /// u16, integer-halved; border is subtracted at placement time.
 // View is small enough to pass by value; helpers take pointer to avoid
 // copies in the recursive path.
-pub fn compute(v: engine.View, out: *engine.List) void {
+pub fn compute(v: tiling.View, out: *tiling.List) void {
     const m = v.env.margins;
     const border2 = utils.doubledBorder(m);
 
-    const outer = engine.outerArea(v.workarea, m.gap);
+    const outer = tiling.outerArea(v.workarea, m.gap);
     var cur = Cursor{
         .x = outer.x,
         .y = outer.y,
@@ -50,19 +50,19 @@ pub fn compute(v: engine.View, out: *engine.List) void {
             const top_rect = utils.Rect{
                 .x = @intCast(cur.x),
                 .y = @intCast(cur.y),
-                .width = engine.shrinkClamped(cur.w, border2, v.env.min_dim),
-                .height = engine.shrinkClamped(cur.h, border2, v.env.min_dim),
+                .width = tiling.shrinkClamped(cur.w, border2, v.env.min_dim),
+                .height = tiling.shrinkClamped(cur.h, border2, v.env.min_dim),
             };
             // Find the focused window among the overflow set; fall back to the
             // first window if no focused window is present here. Same reasoning
             // as monocle: never raise on a background retile; there's no viewer
             // to show it to, and raising would leave it first in the global
             // stacking order. (Background handling is sync's stacking policy.)
-            const top = engine.focusedElse(&v, windows[i..], windows[i]);
-            engine.emitView(&v, out, top, top_rect, true);
+            const top = tiling.focusedElse(&v, windows[i..], windows[i]);
+            tiling.emitView(&v, out, top, top_rect, true);
             for (windows[i..]) |w| {
                 if (w == top) continue;
-                engine.emitHidden(out, w);
+                tiling.emitHidden(out, w);
             }
             return;
         }
@@ -74,7 +74,7 @@ pub fn compute(v: engine.View, out: *engine.List) void {
                 .width = cur.w -| border2,
                 .height = cur.h -| border2,
             };
-            engine.emitView(&v, out, win, rect, true);
+            tiling.emitView(&v, out, win, rect, true);
             return;
         }
 
@@ -92,8 +92,8 @@ const Cursor = struct {
 };
 
 inline fn splitAndAdvance(
-    v: *const engine.View,
-    out: *engine.List,
+    v: *const tiling.View,
+    out: *tiling.List,
     win: model.WindowId,
     dir: SpiralDirection,
     border2: u16,
@@ -119,7 +119,7 @@ inline fn splitAndAdvance(
         .width = (if (split_x) win_dim else cur.w) -| border2,
         .height = (if (split_x) cur.h else win_dim) -| border2,
     };
-    engine.emitView(v, out, win, rect, true);
+    tiling.emitView(v, out, win, rect, true);
     if (dir == .right) cur.x += advance;
     if (dir == .down) cur.y += advance;
     if (split_x) {
@@ -128,3 +128,18 @@ inline fn splitAndAdvance(
         cur.h = cur.h -| (win_dim + gap);
     }
 }
+
+/// Cast shim: plugin's type-free seam -> compute's typed params.
+fn computeHook(view: *const anyopaque, out: *anyopaque) void {
+    const v: *const tiling.View = @ptrCast(@alignCast(view));
+    const o: *tiling.List = @ptrCast(@alignCast(out));
+    compute(v.*, o);
+}
+
+/// This layout's registry contribution: metadata plus the dispatch hook.
+pub const module: @import("plugin").Layout = .{
+    .name = "fibonacci",
+    .compute = computeHook,
+    .variant_count = 1,
+    .icon = "[@]",
+};

@@ -3,18 +3,18 @@
 
 const utils = @import("utils");
 const model = @import("model");
-const engine = @import("engine");
+const tiling = @import("tiling");
 
 /// Compute BSP (binary space partition) layout. Origin top-left, y-down.
 /// Outer gap stripped first; each recursive split halves the longer axis
 /// 50/50 with one gap at the seam. Ties (w == h) favour vertical split.
 /// Border subtracted at leaf nodes only. All dims u16, clamped to min_dim.
-pub fn compute(v: engine.View, out: *engine.List) void {
+pub fn compute(v: tiling.View, out: *tiling.List) void {
     const m = v.env.margins;
 
     // Strip the outer gap; each recursive split inserts one gap at its seam
     // (adjacent windows stay one gap_width apart).
-    const area = engine.outerArea(v.workarea, m.gap);
+    const area = tiling.outerArea(v.workarea, m.gap);
     tileRegion(&v, out, v.order, m, v.env.min_dim, area.x, area.y, area.w, area.h);
 }
 
@@ -31,8 +31,8 @@ inline fn halveWithMin(dim: u16, gap: u16, min_dim: u16) struct { first: u16, se
 /// Splits the longer axis 50/50, inserting one gap at each seam; border subtracted at leaf nodes only.
 /// Ties (w == h) favour a vertical split.
 fn tileRegion(
-    v: *const engine.View,
-    out: *engine.List,
+    v: *const tiling.View,
+    out: *tiling.List,
     windows: []const model.WindowId,
     m: utils.Margins,
     min_dim: u16,
@@ -50,11 +50,11 @@ fn tileRegion(
         const rect = utils.Rect{
             .x = @intCast(x),
             .y = @intCast(y),
-            .width = engine.shrinkClamped(w, border2, min_dim),
-            .height = engine.shrinkClamped(h, border2, min_dim),
+            .width = tiling.shrinkClamped(w, border2, min_dim),
+            .height = tiling.shrinkClamped(h, border2, min_dim),
         };
-        // All leaf placements are visible; hints applied by engine.emitView.
-        engine.emitView(v, out, windows[0], rect, true);
+        // All leaf placements are visible; hints applied by tiling.emitView.
+        tiling.emitView(v, out, windows[0], rect, true);
         return;
     }
 
@@ -73,3 +73,18 @@ fn tileRegion(
         tileRegion(v, out, windows[n_left..], m, min_dim, x, bottom_y, w, split.second);
     }
 }
+
+/// Cast shim: plugin's type-free seam -> compute's typed params.
+fn computeHook(view: *const anyopaque, out: *anyopaque) void {
+    const v: *const tiling.View = @ptrCast(@alignCast(view));
+    const o: *tiling.List = @ptrCast(@alignCast(out));
+    compute(v.*, o);
+}
+
+/// This layout's registry contribution: metadata plus the dispatch hook.
+pub const module: @import("plugin").Layout = .{
+    .name = "leaf",
+    .compute = computeHook,
+    .variant_count = 1,
+    .icon = "BSP",
+};

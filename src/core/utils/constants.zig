@@ -2,23 +2,21 @@
 //! Defines shared constants used across multiple modules.
 //!
 //! Layer note: this file is XCB-free. Modifier masks, event masks, and other
-//! XCB-dependent values live in x11_masks.zig.
+//! XCB-dependent values live in core/x11/masks.zig.
 
 // Window constraints
 pub const min_window_dim: u16 = 50;
 pub const min_master_width: f32 = 0.05;
-/// Master pane width is capped at 95% so the stack column always keeps some
-/// screen. Single-sourced: config validation, the runtime pixel->ratio
-/// conversion, and the increase_master_width action all clamp to this same
+/// Primary-column width is capped at 95% so the secondary column always keeps
+/// some screen. Single-sourced: config validation, the runtime pixel->ratio
+/// conversion, and the primary-width adjustment action all clamp to this same
 /// bound (tiling.zig's local `max_master_width_ratio` used to duplicate it).
 pub const max_master_width: f32 = 0.95;
 
 /// Maximum number of concurrently minimized windows.
 ///
-/// Sourced from legacy minimize.zig's `max_minimized`, which read
-/// build_options.max_minimized_windows -- a build option build.zig never
-/// defines, so the effective value has always been this fallback of 32.
-/// Hoisted here so the model layer can reach it without importing
+/// Sourced from the minimize module's `max_minimized`; the effective value is
+/// this fallback of 32. Hoisted here so the model layer can reach it without importing
 /// build_options (model layer rule: std + utils + constants ONLY).
 /// Intentionally distinct from Limits.max_tiled_windows: this bounds the
 /// concurrently-minimized buffer, not the tiled-window pool.

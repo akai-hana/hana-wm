@@ -54,33 +54,33 @@ pub fn build(b: *std.Build) !void {
     const has_minimize = hasPathOption(b, build_opts, "has_minimize", source_root ++ "window/modules/minimize.zig");
     const has_fullscreen = hasPathOption(b, build_opts, "has_fullscreen", source_root ++ "window/modules/fullscreen.zig");
     const has_workspaces = hasPathOption(b, build_opts, "has_workspaces", source_root ++ "window/modules/workspaces.zig");
-    _ = hasPathOption(b, build_opts, "has_vim", source_root ++ "bar/segments/prompt/vim.zig");
+    _ = hasPathOption(b, build_opts, "has_vim", source_root ++ "bar/modules/prompt/vim.zig");
 
     // Tier 5: bar internals; if any core internal is missing, forfeit the entire bar.
     const has_drawing = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/drawing.zig");
     const has_bar_render = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/render.zig");
     const has_bar_win = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/win.zig");
-    const has_bar_segment = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/segments/segment.zig");
+    const has_bar_segment = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/segment.zig");
     const has_bar_dir = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar");
     const has_bar = has_bar_dir and has_drawing and has_bar_render and has_bar_win and has_bar_segment;
     build_opts.addOption(bool, "has_bar", has_bar);
 
     // Tier 3: individual tiling layout modules
-    _ = hasPathOption(b, build_opts, "has_layout_master", source_root ++ "tiling/layouts/master.zig");
-    _ = hasPathOption(b, build_opts, "has_layout_monocle", source_root ++ "tiling/layouts/monocle.zig");
-    _ = hasPathOption(b, build_opts, "has_layout_fibonacci", source_root ++ "tiling/layouts/fibonacci.zig");
-    _ = hasPathOption(b, build_opts, "has_layout_grid", source_root ++ "tiling/layouts/grid.zig");
-    _ = hasPathOption(b, build_opts, "has_layout_leaf", source_root ++ "tiling/layouts/leaf.zig");
-    _ = hasPathOption(b, build_opts, "has_layout_scroll", source_root ++ "tiling/layouts/scroll.zig");
+    _ = hasPathOption(b, build_opts, "has_layout_master", source_root ++ "tiling/modules/master.zig");
+    _ = hasPathOption(b, build_opts, "has_layout_monocle", source_root ++ "tiling/modules/monocle.zig");
+    _ = hasPathOption(b, build_opts, "has_layout_fibonacci", source_root ++ "tiling/modules/fibonacci.zig");
+    _ = hasPathOption(b, build_opts, "has_layout_grid", source_root ++ "tiling/modules/grid.zig");
+    _ = hasPathOption(b, build_opts, "has_layout_leaf", source_root ++ "tiling/modules/leaf.zig");
+    _ = hasPathOption(b, build_opts, "has_layout_scroll", source_root ++ "tiling/modules/scroll.zig");
 
     // Tier 4: individual bar segment modules
-    const has_seg_clock = hasPathOption(b, build_opts, "has_seg_clock", source_root ++ "bar/segments/clock.zig");
-    _ = hasPathOption(b, build_opts, "has_seg_tags", source_root ++ "bar/segments/tags.zig");
-    _ = hasPathOption(b, build_opts, "has_seg_layout", source_root ++ "bar/segments/layout/layout.zig");
-    _ = hasPathOption(b, build_opts, "has_seg_title", source_root ++ "bar/segments/title/title.zig");
-    _ = hasPathOption(b, build_opts, "has_seg_prompt", source_root ++ "bar/segments/prompt/prompt.zig");
-    const has_seg_carousel = hasPathOption(b, build_opts, "has_seg_carousel", source_root ++ "bar/segments/title/carousel.zig");
-    _ = hasPathOption(b, build_opts, "has_seg_variants", source_root ++ "bar/segments/layout/variants.zig");
+    const has_seg_clock = hasPathOption(b, build_opts, "has_seg_clock", source_root ++ "bar/modules/clock.zig");
+    _ = hasPathOption(b, build_opts, "has_seg_tags", source_root ++ "bar/modules/tags.zig");
+    _ = hasPathOption(b, build_opts, "has_seg_layout", source_root ++ "bar/modules/layout.zig");
+    _ = hasPathOption(b, build_opts, "has_seg_title", source_root ++ "bar/modules/title/title.zig");
+    _ = hasPathOption(b, build_opts, "has_seg_prompt", source_root ++ "bar/modules/prompt/prompt.zig");
+    const has_seg_carousel = hasPathOption(b, build_opts, "has_seg_carousel", source_root ++ "bar/modules/title/carousel.zig");
+    _ = hasPathOption(b, build_opts, "has_seg_variants", source_root ++ "bar/modules/variants.zig");
 
     // Module discovery
     var discovery = try Module.DiscoveryContext.run(b, target, optimize, source_root, entry_point_path);
@@ -106,10 +106,13 @@ pub fn build(b: *std.Build) !void {
 
     // Directory-scan discovery of `modules/` dirs under src/: every `.zig`
     // under a `modules/` dir registers into a generated `<owner>_modules`
-    // registry (this round: `src/window/modules/` becomes `window_modules`). The
-    // scan also validates the generated registry names don't collide with a
-    // discovered file's stem (a src-side `<owner>_modules.zig` would shadow
-    // the injected import and corrupt every module's import table).
+    // registry (`src/window/modules/` becomes `window_modules`,
+    // `src/bar/modules/` becomes `bar_modules`, `src/tiling/modules/`
+    // becomes `tiling_modules`; each owner gets its contract type via
+    // `ownerContractName`). The scan also validates the generated registry
+    // names don't collide with a discovered file's stem (a src-side
+    // `<owner>_modules.zig` would shadow the injected import and corrupt
+    // every module's import table).
     var registry = try OwnerRegistry.run(b, source_root);
     try validateRegistryNames(b, &registry, &discovery.modules);
     const owner_modules = try buildOwnerRegistries(b, &discovery.modules, build_opts_mod, fallback_toml_mod, target, optimize, &registry);
@@ -166,10 +169,10 @@ pub fn build(b: *std.Build) !void {
         while (test_it.next()) |entry| {
             if (!std.mem.endsWith(u8, entry.key_ptr.*, "_test")) continue;
             // clock_test imports the `clock` module, which only exists when
-            // src/bar/segments/clock.zig is present (has_seg_clock).
+            // src/bar/modules/clock.zig is present (has_seg_clock).
             if (!has_seg_clock and std.mem.eql(u8, entry.key_ptr.*, "clock_test")) continue;
             // carousel_test imports the `carousel` module, which only exists
-            // when src/bar/segments/title/carousel.zig is present.
+            // when src/bar/modules/title/carousel.zig is present.
             if (!has_seg_carousel and std.mem.eql(u8, entry.key_ptr.*, "carousel_test")) continue;
             // model_test exercises all four window feature modules
             // (minimize/fullscreen/floating/workspaces), so every one must be present.
@@ -354,15 +357,14 @@ fn buildPluginsModule(
 /// The `modules/` discovery convention: every directory named exactly
 /// `modules` found anywhere under `src/` is a set of pluggable sub-systems
 /// for the core system that owns it, where the owner is the immediate parent
-/// directory. Each `.zig` file under a `modules/` tree (recursively, nested
-/// subdirectories like the bar segments style are included) is a sub-system
-/// module registered by stem. The build emits one synthesized `<owner>_modules`
-/// registry per found directory; core source iterates it with uniform
-/// dispatch loops. Dropping a `.zig` into an owner's `modules/` dir
-/// auto-registers it; deleting it auto-deregisters (a rebuild regenerates).
-/// This round only `src/window/modules/` exists (owner `window`, so
-/// `window_modules`), but the scan is generic so any future `*/modules/` is
-/// handled by the same machinery.
+/// directory. Each `.zig` file under a `modules/` tree (recursively; nested
+/// subdirectories are included) is a sub-system module registered by stem.
+/// The build emits one synthesized `<owner>_modules` registry per found
+/// directory, typed by the owner's contract (`window` -> `WindowModule`,
+/// `bar` -> `Segment`, `tiling` -> `Layout`, see `ownerContractName`); core
+/// source iterates it with uniform dispatch loops. Dropping a `.zig` into an
+/// owner's `modules/` dir auto-registers it; deleting it auto-deregisters
+/// (a rebuild regenerates). Current owners: `window`, `bar`, `tiling`.
 const OwnerRegistry = struct {
     /// owner name (parent dir basename) maps to sorted, deduped `.zig` stems under
     /// that owner's `modules/` tree. All strings are dup'd into b.allocator
@@ -424,7 +426,7 @@ const OwnerRegistry = struct {
                     const dup_owner = try b.allocator.dupe(u8, owner);
                     const gop = try ctx.owner_registry.owners.getOrPut(b.allocator, dup_owner);
                     if (!gop.found_existing) gop.value_ptr.* = .empty;
-                    try ctx.collectStems(sub_path, &gop.value_ptr.*);
+                    try ctx.collectStems(sub_path, true, &gop.value_ptr.*);
                 } else {
                     const dup_path = try b.allocator.dupe(u8, sub_path);
                     try ctx.walkForOwnerDirs(dup_path);
@@ -432,11 +434,23 @@ const OwnerRegistry = struct {
             }
         }
 
-        /// Recursively collects the `.zig` stems directly-or-nestedly under a
-        /// `modules/` tree (path-independent, so `modules/foo/bar.zig` lands
-        /// in the same owner registry as `modules/baz.zig`).
-        fn collectStems(ctx: *ScanCtx, dir_path: []const u8, stems: *std.ArrayListUnmanaged([]const u8)) !void {
+        /// Recursively collects the `<owner>_modules` registry stems under a
+        /// `modules/` tree.
+        ///
+        /// Convention: at the owner root (`is_root`), every direct `.zig` file
+        /// is a segment module. Inside a nested segment directory, ONLY the
+        /// file whose stem equals the directory's name (the eponymous segment
+        /// file) is a registry member; sibling files there are that segment's
+        /// private helpers and stay out of the registry (they remain
+        /// importable by name via the separate greedy module discovery).
+        fn collectStems(
+            ctx: *ScanCtx,
+            dir_path: []const u8,
+            is_root: bool,
+            stems: *std.ArrayListUnmanaged([]const u8),
+        ) !void {
             const b = ctx.b;
+            const dir_name = std.fs.path.basename(dir_path);
             var dir = try b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true });
             defer dir.close(b.graph.io);
 
@@ -448,7 +462,7 @@ const OwnerRegistry = struct {
                         if (Module.isHiddenDirectory(entry.name)) continue;
                         const sub_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name });
                         const dup_path = try b.allocator.dupe(u8, sub_path);
-                        try ctx.collectStems(dup_path, stems);
+                        try ctx.collectStems(dup_path, false, stems);
                     },
                     .file => {
                         if (!Module.isZigSource(entry.name)) continue;
@@ -456,6 +470,11 @@ const OwnerRegistry = struct {
                         if (Module.isEntryPointPath(rel_path, ctx.entry_point_path)) continue;
 
                         const stem = try b.allocator.dupe(u8, std.fs.path.stem(entry.name));
+                        // In a nested segment directory, keep only the
+                        // eponymous file (stem == containing dir name) as a
+                        // segment; helpers simply are not registered.
+                        if (!is_root and !std.mem.eql(u8, stem, dir_name)) continue;
+
                         // Dedup-guard against doubles scored from nested
                         // `modules/` trees: names must be unique per owner, so
                         // a hit here would be a developer error the generated
@@ -508,6 +527,22 @@ fn validateRegistryNames(
     }
 }
 
+/// The registry element type per owner: each <owner>/modules/ tree binds its
+/// addons to the matching contract in plugin.zig. Unknown owners are a
+/// developer error (a brand-new modules/ dir must pick its contract here or
+/// the generated registry would mis-type every module's `module` value).
+fn ownerContractName(owner: []const u8) []const u8 {
+    if (std.mem.eql(u8, owner, "window")) return "WindowModule";
+    if (std.mem.eql(u8, owner, "bar")) return "Segment";
+    if (std.mem.eql(u8, owner, "tiling")) return "Layout";
+    std.debug.print(
+        "Error: modules/ dir found under unknown owner '{s}'; " ++
+            "add its contract to ownerContractName in build.zig.\n",
+        .{owner},
+    );
+    return "WindowModule";
+}
+
 /// Generates one synthesized `<owner>_modules` registry module per discovered
 /// `modules/` dir and returns them keyed by their injectable import name.
 /// Each registry source lists, in deterministic scan order, every discovered
@@ -536,6 +571,7 @@ fn buildOwnerRegistries(
             target,
             optimize,
             name,
+            ownerContractName(entry.key_ptr.*),
             entry.value_ptr.*.items,
         );
         try out.put(b.allocator, name, mod);
@@ -558,6 +594,7 @@ fn buildOwnerRegistryModule(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     name: []const u8,
+    contract: []const u8,
     stems: []const []const u8,
 ) !*std.Build.Module {
     const write = b.addWriteFiles();
@@ -567,7 +604,7 @@ fn buildOwnerRegistryModule(
     try src.print(b.allocator, "/// The auto-discovered `{s}` sub-system modules, in deterministic\n", .{name});
     try src.print(b.allocator, "/// filesystem scan order (dispatch order == this array's order).\n", .{});
     try src.print(b.allocator, "/// Generated by build.zig; never committed.\n", .{});
-    try src.print(b.allocator, "pub const modules = [_]plugin.WindowModule{{\n", .{});
+    try src.print(b.allocator, "pub const modules = [_]plugin.{s}{{\n", .{contract});
     for (stems) |stem| {
         try src.print(b.allocator, "    @import(\"{s}\").module,\n", .{stem});
     }

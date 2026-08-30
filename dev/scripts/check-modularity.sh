@@ -177,7 +177,7 @@ run_scenarios() {
 
     run_scenario \
         "vim (removable)" \
-        "src/bar/segments/prompt/vim.zig"
+        "src/bar/modules/prompt/vim.zig"
 
     run_scenario \
         "bar + tiling (both)" \
@@ -231,13 +231,13 @@ run_scenarios() {
     for layout in "${layouts[@]}"; do
         run_scenario \
             "tiling layout: -$layout" \
-            "src/tiling/layouts/${layout}.zig"
+            "src/tiling/modules/${layout}.zig"
     done
 
     run_scenario \
         "tiling layouts: -master -monocle" \
-        "src/tiling/layouts/master.zig" \
-        "src/tiling/layouts/monocle.zig"
+        "src/tiling/modules/master.zig" \
+        "src/tiling/modules/monocle.zig"
 
     # Tier 4: Bar segments (individual removal)
     echo ""
@@ -245,37 +245,37 @@ run_scenarios() {
 
     run_scenario \
         "bar segment: -clock" \
-        "src/bar/segments/clock.zig"
+        "src/bar/modules/clock.zig"
 
     run_scenario \
         "bar segment: -tags" \
-        "src/bar/segments/tags.zig"
+        "src/bar/modules/tags.zig"
 
     run_scenario \
         "bar segment: -layout+variants" \
-        "src/bar/segments/layout/layout.zig" \
-        "src/bar/segments/layout/variants.zig"
+        "src/bar/modules/layout.zig" \
+        "src/bar/modules/variants.zig"
 
     run_scenario \
         "bar segment: -title+carousel" \
-        "src/bar/segments/title/title.zig" \
-        "src/bar/segments/title/carousel.zig"
+        "src/bar/modules/title/title.zig" \
+        "src/bar/modules/title/carousel.zig"
 
     run_scenario \
         "bar segment: -prompt (no vim)" \
-        "src/bar/segments/prompt/prompt.zig" \
-        "src/bar/segments/prompt/vim.zig"
+        "src/bar/modules/prompt/prompt.zig" \
+        "src/bar/modules/prompt/vim.zig"
 
     run_scenario \
         "bar segment: all segments removed" \
-        "src/bar/segments/clock.zig" \
-        "src/bar/segments/tags.zig" \
-        "src/bar/segments/layout/layout.zig" \
-        "src/bar/segments/layout/variants.zig" \
-        "src/bar/segments/title/title.zig" \
-        "src/bar/segments/title/carousel.zig" \
-        "src/bar/segments/prompt/prompt.zig" \
-        "src/bar/segments/prompt/vim.zig"
+        "src/bar/modules/clock.zig" \
+        "src/bar/modules/tags.zig" \
+        "src/bar/modules/layout.zig" \
+        "src/bar/modules/variants.zig" \
+        "src/bar/modules/title/title.zig" \
+        "src/bar/modules/title/carousel.zig" \
+        "src/bar/modules/prompt/prompt.zig" \
+        "src/bar/modules/prompt/vim.zig"
 
     # Tier 5: Bar internals
     echo ""
@@ -295,7 +295,7 @@ run_scenarios() {
 
     run_scenario \
         "bar internal: -segment dispatch" \
-        "src/bar/segments/segment.zig"
+        "src/bar/segment.zig"
 }
 
 # report

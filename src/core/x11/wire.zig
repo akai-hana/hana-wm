@@ -10,7 +10,7 @@ const core = @import("core");
 const xcb = core.xcb;
 const constants = @import("constants");
 const debug = @import("debug");
-const utils = @import("utils.zig");
+const utils = @import("utils");
 
 const max_property_length = constants.property_max_length;
 /// Passed as the `delete` argument to xcb_get_property; 0 means do not consume the property.
@@ -101,7 +101,7 @@ const AtomCache = struct {
     _NET_WM_PID: u32,
     // Root-window focus advertisement: read by focus.zig's setFocus path.
     _NET_ACTIVE_WINDOW: u32,
-    // Legacy X resource-database atom: read by scale.zig for Xft.dpi.
+    // X resource-database atom: read by scale.zig for Xft.dpi.
     RESOURCE_MANAGER: u32,
 };
 

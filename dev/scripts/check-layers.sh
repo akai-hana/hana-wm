@@ -54,13 +54,13 @@ wire_allowed() {
         # sync force_restack in a later cleanup.
         src/main.zig|src/input/input.zig) ;;
 
-        # Wire PRIMITIVES: sync/wire.zig dispatches through
-        # x11wire.configureWindow / raiseWindow / setBorderPixel /
+        # Wire PRIMITIVES: sync/sink.zig dispatches through
+        # core/x11/wire.zig's configureWindow / raiseWindow / setBorderPixel /
         # pushWindowOffscreen*. Primitive home is not a policy violation --
         # grep cannot distinguish definition from rogue send. D6 moved these
-        # definitions out of utils.zig into x11wire.zig so the model/tiling
-        # layer only ever sees xcb-free utils decls.
-        src/core/utils/x11wire.zig) ;;
+        # definitions out of utils.zig into core/x11/wire.zig so the
+        # model/tiling layer only ever sees xcb-free utils decls.
+        src/core/x11/wire.zig) ;;
 
         *) return 1 ;;
     esac
@@ -73,11 +73,11 @@ wire_allowed() {
 # utils.grabServer wrapper (Rule 2 matches both; see pat2 below).
 grab_allowed() {
     case "$1" in
-        # x11wire.zig hosts the shared grab/ungrabAndFlush PRIMITIVES
+        # core/x11/wire.zig hosts the shared grab/ungrabAndFlush PRIMITIVES
         # (D6 move from utils.zig). sync.zig's reconcileUnderGrab calls
         # these; the primitive home is not itself a policy violation, but
         # grep cannot tell call from definition.
-        src/core/utils/x11wire.zig) ;;
+        src/core/x11/wire.zig) ;;
 
         # Bar's OWN window lifecycle, the counterpart of its Rule 1 entry:
         # position toggle (Y-reposition) and show/hide (map/unmap) bracket

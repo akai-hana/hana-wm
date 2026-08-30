@@ -427,7 +427,7 @@ test "fs->min->restore->unfs retiles instead of stranding an orphan" {
     try fx.rec.expectGeom(7, 602, 404, 8, 384, 580, null);
 }
 
-// -- Workspace switch (train c wire shape) -----------------------------------
+// -- Workspace switch (wire shape) -------------------------------------------
 
 test "workspace switch: leavers park, arrivers map + place ABOVE; return unpark raises" {
     var fx: Fixture = undefined;
@@ -489,7 +489,7 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     fx.reconcile(.{});
 
     // Orphan pass: ws 1's home list is empty so no placement owns 701, but
-    // the mask shows it here - legacy keeps it at its previous REAL geometry
+    // the mask shows it here - kept at its previous REAL geometry
     // (never parks a window with sent history). Even though it is the
     // fallback winner, the raise stays suppressed: same rect, no transition,
     // no restack (winner-raise only-on-change, ledger read #2).
@@ -531,12 +531,12 @@ test "forget clears the sent ledger; next pass treats the window as first sight"
     fx.reconcile(.{});
     try testing.expect(sync.lastRectFor(801) != null);
 
-    // truthRect prefers the floating base once the model says floating
+    // truthRect prefers the floating anchor once the model says floating
     // (ledger read #3 contract: actions' detach base).
     const float_rect: utils.Rect = .{ .x = 42, .y = 43, .width = 300, .height = 200 };
-    fx.m.store.getPtr(801).?.mode = .{ .base = .{ .floating = float_rect } };
+    fx.m.store.getPtr(801).?.anchor = .{ .floating = float_rect };
     try testing.expectEqual(@as(?utils.Rect, float_rect), sync.truthRect(&fx.m, 801));
-    fx.m.store.getPtr(801).?.mode = .{ .base = .tiled };
+    fx.m.store.getPtr(801).?.anchor = .tiled;
 
     sync.forget(801);
     try testing.expectEqual(@as(?utils.Rect, null), sync.lastRectFor(801));

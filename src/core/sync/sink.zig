@@ -1,6 +1,6 @@
 //! Production request sink for sync.zig, the ONLY file under src/core/sync/
-//! allowed to contain raw `xcb_` calls. Every shim wraps an existing
-//! legacy pattern 1:1:
+//! allowed to contain raw `xcb_` calls. Every shim wraps the exact request
+//! pattern it consolidates here:
 //!   geom          ~ utils.configureWindow (plus the atomic raise variant
 //!                   that merges a stack mode into the same request)
 //!   borderWidth   ~ borders.applyWidth's send (dedup lives in LastSent)

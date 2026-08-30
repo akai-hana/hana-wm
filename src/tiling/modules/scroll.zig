@@ -3,27 +3,28 @@
 
 const utils = @import("utils");
 const model = @import("model");
-const engine = @import("engine");
+const tiling = @import("tiling");
+const std = @import("std");
 
-// CALLER DUTIES: the viewport bookkeeping on params.scroll_offset /
-// params.scroll_prev_count. Offset clamping is internal to compute(), so only
+// CALLER DUTIES: the viewport bookkeeping on params.viewport_offset /
+// params.viewport_prev_count. Offset clamping is internal to compute(), so only
 // the snap-right-on-grow and the count update are required
 // (pipeline.preReconcileDuties):
-//   1. if (n > scroll_prev_count) scroll_offset = maxOffset(n, slotWidth(wa.w), wa.w);
-//   2. scroll_prev_count = n;
+//   1. if (n > viewport_prev_count) viewport_offset = maxOffset(n, slotWidth(wa.w), wa.w);
+//   2. viewport_prev_count = n;
 // slotWidth/maxOffset are the single source of truth for these adjustments
 // and are also consumed directly by window/actions.zig.
 
 /// Pixel width of one scroll slot: exactly half the screen width. Single
 /// source of truth; maxOffset and compute derive their geometry from it.
-pub inline fn slotWidth(screen_w: u16) i32 {
+pub fn slotWidth(screen_w: u16) i32 {
     return @intCast(screen_w / 2);
 }
 
 /// Maximum scroll offset: reached when the last of `n` windows' right edge
 /// is flush with the screen's right edge. Zero (nothing to scroll) when the
 /// strip is no wider than the screen.
-pub inline fn maxOffset(n: usize, slot_w: i32, screen_w: u16) i32 {
+pub fn maxOffset(n: usize, slot_w: i32, screen_w: u16) i32 {
     const n_i32: i32 = @intCast(n);
     const sw_i32: i32 = @intCast(screen_w);
     return @max(0, n_i32 * slot_w - sw_i32);
@@ -33,7 +34,7 @@ pub inline fn maxOffset(n: usize, slot_w: i32, screen_w: u16) i32 {
 /// screen width; full gap at screen edges, half-gap at interior slot
 /// boundaries. Off-viewport slots are hidden. Scroll offset is caller-set;
 /// compute clamps it internally. All dims u16, clamped to min_dim.
-pub fn compute(v: engine.View, out: *engine.List) void {
+pub fn compute(v: tiling.View, out: *tiling.List) void {
     const windows = v.order;
 
     const m = v.env.margins;
@@ -47,14 +48,14 @@ pub fn compute(v: engine.View, out: *engine.List) void {
 
     // Clamp internally so compute is self-contained; callers that pre-clamp
     // (pipeline.preReconcileDuties) are still correct but no longer required.
-    const scroll: i32 = @max(0, @min(v.params.scroll_offset, maxOffset(windows.len, slot_w, screen_w)));
+    const scroll: i32 = @max(0, @min(v.params.viewport_offset, maxOffset(windows.len, slot_w, screen_w)));
 
     // Border is subtracted here (once) from the full screen height. emitView
     // calls applyHints which only applies ICCCM constraints (inc snap,
     // max-size clamp, aspect ratio). It does NOT touch border, so there is
     // no double-subtraction.
-    const content_h: u16 = engine.shrinkClamped(screen_h, m.gap *| 2 +| m.border *| 2, v.env.min_dim);
-    const win_y: i32 = @as(i32, @intCast(engine.waY(&v))) + @as(i32, @intCast(m.gap));
+    const content_h: u16 = tiling.shrinkClamped(screen_h, m.gap *| 2 +| m.border *| 2, v.env.min_dim);
+    const win_y: i32 = @as(i32, @intCast(tiling.waY(&v))) + @as(i32, @intCast(m.gap));
 
     // Full gap at screen edges; half-gap at interior slot boundaries so that
     // adjacent windows together share exactly one full gap.
@@ -84,7 +85,7 @@ pub fn compute(v: engine.View, out: *engine.List) void {
         // (visibility modeled; sync owns the actual parking geometry).
         // The computed x can exceed i16 range, hence this check BEFORE casting.
         if (x >= sw_i32 or right <= 0) {
-            engine.emitHidden(out, win);
+            tiling.emitHidden(out, win);
             continue;
         }
         const rect = utils.Rect{
@@ -93,6 +94,36 @@ pub fn compute(v: engine.View, out: *engine.List) void {
             .width = content_w,
             .height = content_h,
         };
-        engine.emitView(&v, out, win, rect, true);
+        tiling.emitView(&v, out, win, rect, true);
     }
 }
+
+/// Cast shim: plugin's type-free seam -> compute's typed params.
+fn computeHook(view: *const anyopaque, out: *anyopaque) void {
+    const v: *const tiling.View = @ptrCast(@alignCast(view));
+    const o: *tiling.List = @ptrCast(@alignCast(out));
+    compute(v.*, o);
+}
+
+/// Pre-reconcile duty, exactly the former pipeline.preReconcileDuties body:
+/// snap right when the visible count grew (spawn/restore/tag-add), then
+/// clamp to content. `p` is `*model.LayoutParams`.
+fn preReconcileHook(p: *anyopaque, n: usize, wa_width: u16) void {
+    const lp: *model.LayoutParams = @ptrCast(@alignCast(p));
+    const slot_w = slotWidth(wa_width);
+    const max_off = maxOffset(n, slot_w, wa_width);
+    if (n > lp.viewport_prev_count) lp.viewport_offset = max_off;
+    lp.viewport_offset = std.math.clamp(lp.viewport_offset, 0, max_off);
+    lp.viewport_prev_count = @intCast(n);
+}
+
+/// This layout's registry contribution: metadata plus the dispatch hooks.
+pub const module: @import("plugin").Layout = .{
+    .name = "scroll",
+    .compute = computeHook,
+    .variant_count = 1,
+    .slotWidth = slotWidth,
+    .maxOffset = maxOffset,
+    .preReconcile = preReconcileHook,
+    .icon = "[|]",
+};

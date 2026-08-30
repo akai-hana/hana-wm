@@ -15,9 +15,10 @@ const core = @import("core");
 const utils = @import("utils");
 const borders = @import("borders");
 const focus = @import("focus");
-const xcb_sink = @import("wire");
+const xcb_sink = @import("sink");
 const screen = @import("screen");
 const types = @import("types");
+const debug = @import("debug");
 const build_options = @import("build_options");
 // The fullscreen EWMH/bar-arming hooks are reached through the build-generated
 // `window_modules` registry (never by naming a sub-system module here),
@@ -25,6 +26,12 @@ const build_options = @import("build_options");
 // `[N]WindowModule` array; a tree without fullscreen simply has no module
 // providing these hooks, so the uniform loop below no-ops for it.
 const window_mods = @import("window_modules").modules;
+
+/// Layout registry (build-generated); the active layout is a `u8` index into
+/// it (see model.LayoutParams.kind). Empty when the tiling subsystem is
+/// absent. Gated on has_tiling so tree variants without tiling compile.
+const tiling_mods = if (build_options.has_tiling) @import("tiling_modules").modules else &[_]@import("plugin").Layout{};
+const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
 
 /// True after init(); tracking's facade gates every model access on this so
 /// boot order never touches the undefined global instance.
@@ -41,16 +48,21 @@ pub inline fn model() *model_mod.Model {
     return &instance;
 }
 
-/// Returns the current tiling layout from the live model state.
-/// Falls back to config pre-init.
-pub inline fn getCurrentLayout() types.Layout {
-    if (initialized) {
-        const mm = model();
-        const p = &mm.ws[mm.current].params;
-        return @enumFromInt(@intFromEnum(p.kind));
-    }
+/// Returns the current tiling layout (a registry index, see
+/// model.LayoutParams.kind) from the live model state. Falls back to config
+/// name resolution pre-init. An unresolvable config name (removed module,
+/// unknown spelling) is loud, never silent.
+pub inline fn getCurrentLayout() u8 {
+    if (initialized) return model().ws[model().current].params.kind;
     const cs = core.getState();
-    return std.meta.stringToEnum(types.Layout, cs.config.tiling.layout) orelse types.layout_table[0].tag;
+    if (!build_options.has_tiling) return 0;
+    return @intCast(tiling.layoutByName(cs.config.tiling.layout) orelse blk: {
+        debug.warn("Config: layout name '{s}' did not resolve to a registered layout; using default layout '{s}'", .{
+            cs.config.tiling.layout,
+            tiling.moduleName(tiling.defaultKind()),
+        });
+        break :blk tiling.defaultKind();
+    });
 }
 
 var g_sink: ?xcb_sink.XcbSink = null;
@@ -63,6 +75,7 @@ fn ctx() *sync.Ctx {
     const cs = core.getState();
     if (g_sink == null) g_sink = .{ .conn = cs.conn };
     const screen_h = cs.screen.height_in_pixels;
+    const p = &model().ws[model().current].params;
     g_ctx = .{
         .sink = (&g_sink.?).sink(),
         .screen = .{
@@ -79,24 +92,18 @@ fn ctx() *sync.Ctx {
                 .border = utils.scaling.scaleBorderWidth(cs.config.tiling.border_width, screen_h),
             },
             .min_dim = cs.config.tiling.min_window_dim,
-            .master_on_right = cs.config.tiling.master_side == .right,
-            // Variant booleans resolve from the CURRENT workspace's model
-            // params: per-ws overrides and stepVariant must reach the engine,
-            // which takes booleans caller-side.
-            .grid_relaxed = variantBool(.grid),
-            .monocle_gaps = variantBool(.monocle),
+            .primary_on_right = cs.config.tiling.master_side == .right,
+            // The model already stores the variant index for the current
+            // workspace's layout params; pass it through generically. Each
+            // layout MODULE translates this index to its own behavior
+            // (e.g. monocle.gap_variant, grid.relax_variant) inside its own
+            // file — the core carries no layout-feature booleans.
+            .variant_idx = p.variant_idx,
         },
         .color_of = colorOf,
         .bar_win = screen.mappedSurfaceWindow(),
     };
     return &g_ctx;
-}
-
-/// Variant boolean for the current workspace's params: the engine takes
-/// resolved booleans caller-side.
-fn variantBool(comptime kind: model_mod.LayoutKind) bool {
-    const p = &model().ws[model().current].params;
-    return p.kind == kind and p.variant_idx == 1;
 }
 
 /// Ported from borders.color minus its fullscreen check: fullscreen windows
@@ -116,15 +123,16 @@ pub inline fn dragTick() void {
 }
 
 /// Scroll viewport caller duties applied at the single reconcile choke
-/// point: snap right when the visible count grew since the last retile
-/// (spawn/restore/tag-add), then clamp to content.
+/// point, dispatched through the active layout module's preReconcile hook
+/// (the scroll addon registers snap-right-on-growth + clamp; a layout that
+/// provides no hook has no pre-reconcile duty).
 fn preReconcileDuties() void {
     if (!build_options.has_tiling) return;
-    if (!build_options.has_layout_scroll) return;
-    const algo_scroll = @import("scroll");
     const m = model();
     const p = &m.ws[m.current].params;
-    if (p.kind != .scroll) return;
+    if (p.kind >= tiling_mods.len) return;
+    const md = tiling_mods[p.kind];
+    if (md.preReconcile == null) return;
     var n: usize = 0;
     for (m.ws[m.current].tiled_order.constSlice()) |w| {
         const e = m.store.get(w) orelse continue;
@@ -132,11 +140,7 @@ fn preReconcileDuties() void {
         n += 1;
     }
     const wa = screen.workArea(core.getState().screen);
-    const slot_w = algo_scroll.slotWidth(wa.width);
-    const max_off = algo_scroll.maxOffset(n, slot_w, wa.width);
-    if (n > p.scroll_prev_count) p.scroll_offset = max_off;
-    p.scroll_offset = std.math.clamp(p.scroll_offset, 0, max_off);
-    p.scroll_prev_count = @intCast(n);
+    md.preReconcile.?(@ptrCast(p), n, wa.width);
 }
 
 /// Grab server, reconcile, then ungrabAndFlush, atomically.

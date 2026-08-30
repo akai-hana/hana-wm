@@ -15,6 +15,7 @@ const std = @import("std");
 const constants = @import("constants");
 const utils = @import("utils");
 const model = @import("model");
+const build_options = @import("build_options");
 
 pub fn init() anyerror!void {
     // Reset the static store so tests get isolation (and production re-init
@@ -28,8 +29,7 @@ pub fn deinit() void {
     g_seq = 0;
 }
 
-/// Ceiling on concurrently minimized windows, sourced from constants (the
-/// build option referenced by the legacy record store never existed).
+/// Ceiling on concurrently minimized windows, sourced from constants.
 const MAX_MINIMIZED = constants.max_minimized;
 
 pub const MinimizeError = error{CapacityFull};
@@ -76,13 +76,14 @@ pub fn restore(m: *model.Model, win: model.WindowId) void {
     const idx = findRec(win) orelse return;
     const rec = g_recs.slice()[idx];
     const e = m.store.getPtr(win) orelse return;
-    // Which current modes re-enter a home list? Derived from the CURRENT mode
-    // (left untouched by minimize): tiled-base and tiled-inside-fullscreen
-    // windows must be re-listed; floating-originated ones restore to their
-    // saved rect directly and are never appended (a phantom layout member).
-    const wants_home = switch (e.mode) {
-        .base => |b| b == .tiled,
-        .fullscreen => |f| f.base == .tiled,
+    // Which current anchors re-enter a home list? Derived from the CURRENT
+    // anchor (left untouched by minimize): tiled-anchor windows must be
+    // re-listed; floating-anchored ones restore to their saved rect directly
+    // and are never appended (a phantom layout member). A covering (fullscreen)
+    // window keeps its anchor, so re-listing also applies to fullscreen-tiled.
+    const wants_home = switch (e.anchor) {
+        .tiled => true,
+        .floating => false,
     };
     if (wants_home) {
         const h: model.WSId = model.lowestBit(e.mask); // follows tag-moves made while hidden
@@ -133,17 +134,17 @@ pub fn restoreCandidate(m: *const model.Model, ws: model.WSId, order: model.Rest
     return best;
 }
 
-/// Most recently minimized PLAIN window on `ws` (fullscreen-prev excluded).
-/// With minimize leaving `mode` untouched, a minimized-from-fullscreen window
-/// still reads `.fullscreen` here, which is exactly the old `prev != .base`
-/// exclusion.
+/// Most recently minimized PLAIN window on `ws` (fullscreen-carrying cars
+/// excluded, matching the old prev != .base exclusion).
 pub fn latestMinimizedBase(m: *const model.Model, ws: model.WSId) ?model.WindowId {
     var best: ?model.WindowId = null;
     var best_seq: u32 = 0;
     for (g_recs.constSlice()) |rec| {
         const e = m.store.get(rec.win) orelse continue;
-        if (e.mode != .base) continue;
         if (e.presence != .parked) continue;
+        if (build_options.has_fullscreen) {
+            if (@import("fullscreen").isFullscreenMode(m, rec.win)) continue;
+        }
         if (e.mask & model.bit(ws) == 0) continue;
         if (best == null or rec.seq > best_seq) {
             best = rec.win;
@@ -226,16 +227,24 @@ pub fn collectMinimizedIntoSet(
 }
 
 /// Persistence seam (plugin.WindowModule.serializeWindow): marshals this
-/// window's parked record as an opaque 8-byte blob (`[2]u32` = {slot-or-maxInt,
-/// seq}). Returns null when the window has no minimized record. The returned
-/// slice is allocator-owned; restart_state frees it after writing.
-pub fn serializeWindow(win: u32, alloc: std.mem.Allocator) ?[]const u8 {
+/// window's parked record as an opaque 9-byte blob ([0]=0x5A 'Z' magic,
+/// {slot-or-maxInt:u32, seq:u32}). The magic lets the registry deserialize
+/// loop self-identify (minimize claims only parked windows). Returns null
+/// when the window has no minimized record OR the model presence is not
+/// parked (a covering window is fullscreen's blob). The returned slice is
+/// allocator-owned; persist frees it after writing.
+pub fn serializeWindow(model_ptr: *anyopaque, win: u32, alloc: std.mem.Allocator) ?[]const u8 {
     const idx = findRec(win) orelse return null;
+    const m: *const model.Model = @ptrCast(@alignCast(model_ptr));
+    const e = m.store.get(win) orelse return null;
+    if (e.presence != .parked) return null;
     const rec = g_recs.slice()[idx];
-    const held = alloc.alloc(u32, 2) catch return null;
-    held[0] = @intCast(rec.slot orelse std.math.maxInt(u32));
-    held[1] = rec.seq;
-    return std.mem.sliceAsBytes(held);
+    const held = alloc.alloc(u8, 9) catch return null;
+    held[0] = 0x5A;
+    const raw = std.mem.bytesAsSlice(u32, held[1..9]);
+    raw[0] = @intCast(rec.slot orelse std.math.maxInt(u32));
+    raw[1] = rec.seq;
+    return held;
 }
 
 /// Persistence seam (plugin.WindowModule.deserializeWindow): adopts the blob
@@ -243,13 +252,14 @@ pub fn serializeWindow(win: u32, alloc: std.mem.Allocator) ?[]const u8 {
 /// the wire layer passes in as `*anyopaque` (keeps the core seam signature
 /// free of model types; the reverse cast happens on this side).
 pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
-    if (bytes.len != 8) return false;
+    if (bytes.len != 9) return false;
+    if (bytes[0] != 0x5A) return false; // not our blob; let the loop continue
     if (findRec(win) != null) return true; // already adopted; idempotent
     if (g_recs.len >= MAX_MINIMIZED) return false;
-    // Slice the blob back into two native-endian u32s via an aligned copy
-    // (restart_state buffers are byte-aligned; u32 loads need 4-byte align).
+    // Slice the payload back into two native-endian u32s via an aligned copy
+    // (persist buffers are byte-aligned; u32 loads need 4-byte align).
     var buf: [8]u8 align(@alignOf(u32)) = [_]u8{0} ** 8;
-    @memcpy(&buf, bytes[0..8]);
+    @memcpy(&buf, bytes[1..9]);
     const raw = std.mem.bytesAsSlice(u32, buf[0..]);
     const slot: ?usize = if (raw[0] == std.math.maxInt(u32)) null else raw[0];
     const seq = raw[1];
@@ -271,6 +281,23 @@ pub fn onWindowGone(win: u32) void {
     if (findRec(win)) |i| _ = g_recs.orderedRemove(i);
 }
 
+/// Adapter for the hide seam: widens the module's `MinimizeError!void`
+/// return set to the contract's uniform `anyerror!void` (the error set
+/// coerces; this wrapper keeps the binding explicit).
+pub fn hideWindow(m: *model.Model, win: model.WindowId) anyerror!void {
+    return minimize(m, win);
+}
+
+/// collectHiddenSet adapter: widens the internal `anyerror!void` synthesis to
+/// the contract's infallible `void` (the bar swallows allocation failures).
+pub fn collectHiddenSet(
+    m: *const model.Model,
+    set: *std.AutoHashMapUnmanaged(model.WindowId, void),
+    allocator: std.mem.Allocator,
+) void {
+    collectMinimizedIntoSet(m, set, allocator) catch {};
+}
+
 /// This module's window sub-system contribution: lifecycle + persistence
 /// seam + record cleanup for torn-down windows.
 pub const module: @import("plugin").WindowModule = .{
@@ -279,4 +306,11 @@ pub const module: @import("plugin").WindowModule = .{
     .onWindowGone = onWindowGone,
     .serializeWindow = serializeWindow,
     .deserializeWindow = deserializeWindow,
+    .hideWindow = hideWindow,
+    .restoreWindow = restore,
+    .restoreCandidateOn = restoreCandidate,
+    .restoreOnWs = restoreAllOnWs,
+    .latestHiddenOnWs = latestMinimizedBase,
+    .isWindowHidden = isMinimized,
+    .collectHiddenSet = collectHiddenSet,
 };

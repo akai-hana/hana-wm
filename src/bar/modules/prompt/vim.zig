@@ -11,14 +11,16 @@ const Action = prompt.Action;
 const Mode = prompt.Mode;
 const EditorState = prompt.EditorState;
 
-const xk_back_space = @intFromEnum(XK.BackSpace);
-const xk_return = @intFromEnum(XK.Return);
-const xk_escape = @intFromEnum(XK.Escape);
-const xk_delete = @intFromEnum(XK.Delete);
-const xk_left = @intFromEnum(XK.Left);
-const xk_right = @intFromEnum(XK.Right);
-const xk_home = @intFromEnum(XK.Home);
-const xk_end = @intFromEnum(XK.End);
+// Keysym payloads are owned by prompt (the one place they're derived from
+// core.XK); vim re-aliases them so it never re-derives the same constants.
+const xk_back_space = prompt.xk_back_space;
+const xk_return = prompt.xk_return;
+const xk_escape = prompt.xk_escape;
+const xk_delete = prompt.xk_delete;
+const xk_left = prompt.xk_left;
+const xk_right = prompt.xk_right;
+const xk_home = prompt.xk_home;
+const xk_end = prompt.xk_end;
 
 const Awaiting = union(enum) {
     none,

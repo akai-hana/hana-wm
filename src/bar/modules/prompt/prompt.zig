@@ -8,57 +8,27 @@ const xcb = core.xcb;
 const utils = @import("utils");
 const debug = @import("debug");
 
-const bar = @import("bar");
 const types = @import("types");
 
 const drawing = @import("drawing");
 const build_options = @import("build_options");
-const title = if (build_options.has_seg_title) @import("title") else struct {
-    const u = @import("utils");
-    const t = @import("types");
-    const d = @import("drawing");
-    const co = @import("core");
-    pub const min_width: u16 = 0;
-    pub const offscreen_rect: u.Rect = .{ .x = std.math.maxInt(i16), .y = std.math.maxInt(i16), .width = 0, .height = 0 };
-    pub const TitleRenderContext = struct {
-        dc: *d.DrawContext,
-        config: t.BarConfig,
-        height: u16,
-        start_x: u16,
-        width: u16,
-        conn: co.Connection,
-    };
-    pub const TitleSnapshot = struct {
-        focused_window: ?u32,
-        focused_title: []const u8,
-        minimized_title: []const u8,
-        current_ws_wins: []const u32,
-        minimized_set: *const std.AutoHashMapUnmanaged(u32, void),
-        titles: []const []const u8 = &.{},
-        geoms: []const ?u.Rect = &.{},
-    };
-    pub const ClickTarget = struct { window: u32, minimized: bool };
-    pub fn fetchWindowTitleInto(_: anytype, _: anytype, _: anytype, _: anytype) !void {}
-    pub fn fetchTitlesAndGeoms(_: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype) void {}
-    pub fn hitTest(_: anytype, _: anytype, _: anytype, _: anytype) !?ClickTarget {
-        return null;
-    }
-    pub fn draw(_: anytype, _: anytype, _: anytype, _: anytype) !u16 {
-        return 0;
-    }
-};
-const carousel = if (build_options.has_seg_carousel) @import("carousel") else struct {
-    pub fn deactivate() void {}
+const segmod = @import("segment");
+// The vim modal-editing engine registers its handlers into this module on
+// init (D11): the vim lifecycle lives here, gated on has_vim.
+const vim = if (build_options.has_vim) @import("vim") else struct {
+    pub fn register() void {}
+    pub fn init(_: std.mem.Allocator, _: usize) !void {}
+    pub fn deinit(_: std.mem.Allocator) void {}
 };
 pub const XK = core.XK;
-const xk_back_space = @intFromEnum(XK.BackSpace);
-const xk_return = @intFromEnum(XK.Return);
-const xk_escape = @intFromEnum(XK.Escape);
-const xk_delete = @intFromEnum(XK.Delete);
-const xk_left = @intFromEnum(XK.Left);
-const xk_right = @intFromEnum(XK.Right);
-const xk_home = @intFromEnum(XK.Home);
-const xk_end = @intFromEnum(XK.End);
+pub const xk_back_space = @intFromEnum(XK.BackSpace);
+pub const xk_return = @intFromEnum(XK.Return);
+pub const xk_escape = @intFromEnum(XK.Escape);
+pub const xk_delete = @intFromEnum(XK.Delete);
+pub const xk_left = @intFromEnum(XK.Left);
+pub const xk_right = @intFromEnum(XK.Right);
+pub const xk_home = @intFromEnum(XK.Home);
+pub const xk_end = @intFromEnum(XK.End);
 
 pub const default_max_input: usize = 256;
 pub const Action = enum { none, deactivate, spawn };
@@ -227,6 +197,10 @@ const PromptState = struct {
 
     allocator: std.mem.Allocator = undefined,
 
+    /// Bar-provided service handles (present/dismiss/isBarWindow), set at init
+    /// (D10): prompt never imports the bar orchestrator.
+    handlers: ?*const segmod.BarHandlers = null,
+
     key_syms: ?*xcb_key_symbols_t = null,
     cached_prompt_w: ?u16 = null,
     // Cached pixel width of each mode label, indexed by `vim.Mode` integer value.
@@ -331,16 +305,20 @@ pub fn consumeRedrawRequest() bool {
 }
 
 /// Initialises prompt state that is needed regardless of whether the prompt
-/// is ever opened: vim engine and key-symbol table.  Completion / history
-/// buffers are deferred to `ensureAlloc` (~512 KB total) and allocated lazily
-/// on the first activation.
-pub fn init(allocator: std.mem.Allocator, conn: core.Connection) !void {
+/// is ever opened: the bar service handles, vim engine, and key-symbol table.
+/// Completion / history buffers are deferred to `ensureAlloc` (~512 KB total)
+/// and allocated lazily on the first activation.
+pub fn init(allocator: std.mem.Allocator, conn: core.Connection, bar_handlers: ?*const anyopaque) !void {
     if (g.vim_state.buf.len != 0) return; // already initialised
+    g.handlers = @ptrCast(@alignCast(bar_handlers));
     g.allocator = allocator;
     g.vim_state = try EditorState.init(allocator, default_max_input);
     g.key_syms = xcb_key_symbols_alloc(conn);
     if (g.key_syms == null)
         debug.warn("prompt: xcb_key_symbols_alloc failed: key input will not work", .{});
+    // The vim engine is a prompt addon (D11): its lifecycle lives here.
+    vim.register();
+    try vim.init(allocator, default_max_input);
 }
 
 /// Lazily allocate the completion, ghost-text and history buffers on first
@@ -357,7 +335,8 @@ fn ensureAlloc() void {
 
 /// Releases all prompt resources including the keyboard grab, vim state,
 /// completion and history buffers.
-pub fn deinit() void {
+pub fn deinit(allocator: std.mem.Allocator) void {
+    vim.deinit(allocator);
     if (g.key_syms) |ks| {
         xcb_key_symbols_free(ks);
         g.key_syms = null;
@@ -385,9 +364,11 @@ fn closeWindowOrPromptUnderCursor() bool {
 
     const child: u32 = if (ptr_reply) |r| r.*.child else 0;
 
-    if (bar.isBarWindow(child)) {
-        deactivate();
-        return true;
+    if (g.handlers) |h| {
+        if (h.isBarWindow(child)) {
+            deactivate();
+            return true;
+        }
     }
     if (child == 0 or child == cs.root) {
         return true;
@@ -503,20 +484,13 @@ fn acceptGhost() bool {
     return finishKeyPress(.none, true);
 }
 
-/// Draw the title segment, delegating to the active prompt UI when open
-/// or to the normal title renderer otherwise. Returns the right edge.
-pub fn draw(
-    ctx: title.TitleRenderContext,
-    snap: title.TitleSnapshot,
-    allocator: std.mem.Allocator,
-    title_invalidated: bool,
-) !u16 {
-    if (!g.is_active) return title.draw(ctx, snap, allocator, title_invalidated);
-    // The prompt covers the whole title segment, so no title.draw (and thus
-    // no carousel.offsetFor) runs while it's open; drop the marquee's
-    // active-scroll latch so the poll loop stops repainting hidden pixels.
-    carousel.deactivate();
-    return drawActive(ctx.dc, ctx.config, ctx.height, ctx.start_x, ctx.width);
+/// Draw the title segment's content when the prompt is active, covering the
+/// whole title slot. Returns the right edge (start_x + width). Only invoked by
+/// the title segment's draw delegation while the prompt is open.
+pub fn draw(ctx: *segmod.DrawCtx, x: u16) !u16 {
+    // While covered, title's pollTimeoutMsHook contributes no marquee wakeup
+    // (title owns that decision), so no explicit carousel pause is needed here.
+    return drawActive(ctx.dc, ctx.config, ctx.height, x, ctx.width);
 }
 
 /// Runs `action` through handleAction, then resyncs g.has_space if the buffer
@@ -588,7 +562,7 @@ fn activate() void {
     g.redraw_pending = true;
     // Force the bar to the absolute top for the prompt's duration so it's
     // always visible/reachable; reversed in deactivate() via dismissAfterPrompt().
-    bar.presentForPrompt();
+    if (g.handlers) |h| h.presentForPrompt();
     // No xcb_flush: xcb_grab_keyboard_reply already drained the output buffer
     // and presentForPrompt() flushes its own requests; nothing is pending
     // here.  Contrast with deactivate(), where xcb_ungrab_keyboard must arrive
@@ -605,7 +579,7 @@ fn deactivate() void {
     // Return the bar to whatever state it was actually in before the prompt
     // forced it to the top (e.g. re-hide it if a fullscreen window is still
     // active): see the comment on presentForPrompt() in activate().
-    bar.dismissAfterPrompt();
+    if (g.handlers) |h| h.dismissAfterPrompt();
 }
 
 /// Scan every directory in $PATH and collect executable names into the static
@@ -1320,3 +1294,25 @@ fn drawActive(
     dc.blitRegion(start_x, width);
     return end_x;
 }
+
+/// This module's bar-segment contribution. The prompt is a runtime overlay
+/// on the title slot: it is NOT configurable from config (configurable =
+/// false) but still joins the bar's uniform lifecycle/poll loops.
+fn drawHook(ctx: *anyopaque, x: u16) !u16 {
+    const dc: *segmod.DrawCtx = @ptrCast(@alignCast(ctx));
+    return draw(dc, x);
+}
+
+pub const module: @import("plugin").Segment = .{
+    .name = "prompt",
+    .configurable = false,
+    .init = init,
+    .deinit = deinit,
+    .pollTimeoutMs = blinkPollTimeoutMs,
+    .onPollWakeup = blinkTick,
+    .draw = drawHook,
+    .handleKeypress = handlePromptKeypress,
+    .isActive = isActive,
+    .consumeRedrawRequest = consumeRedrawRequest,
+    .invalidateReloadCaches = invalidateReloadCaches,
+};

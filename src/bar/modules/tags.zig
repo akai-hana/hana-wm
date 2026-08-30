@@ -4,6 +4,10 @@
 const types = @import("types");
 const drawing = @import("drawing");
 const tracking = @import("tracking");
+const actions = @import("actions");
+const focus = @import("focus");
+const build_options = @import("build_options");
+const segmod = @import("segment");
 
 /// Reserved row width when no workspaces are configured (moved here from
 /// bar.zig: width policy belongs to the segment that owns the pixels).
@@ -136,3 +140,45 @@ pub fn draw(
     }
     return x;
 }
+
+/// This module's bar-segment contribution (registry binding).
+fn naturalWidthHook(frame: *const anyopaque, _: u16) u16 {
+    const f: *const segmod.Frame = @ptrCast(@alignCast(frame));
+    if (f.workspace_count > 0)
+        return @intCast(f.workspace_count * getCachedWorkspaceWidth());
+    return fallback_width;
+}
+
+fn drawHook(ctx: *anyopaque, x: u16) !u16 {
+    const c: *segmod.DrawCtx = @ptrCast(@alignCast(ctx));
+    return draw(c.dc, c.config, c.height, x, c.frame.current_workspace, c.frame.workspace_has_windows, c.frame.is_all_view_active);
+}
+
+fn resolveWorkspaceClick(offset: u16) ?usize {
+    const cell_w = getCachedWorkspaceWidth();
+    if (cell_w == 0) return null;
+    if (!build_options.has_workspaces) return null;
+    const idx: usize = @intCast(offset / cell_w);
+    if (idx >= tracking.getWorkspaceCount()) return null;
+    return idx;
+}
+
+fn onClickHook(offset: u16, left: bool, right: bool, _: *anyopaque, _: *const fn (*anyopaque, u16) void, _: *const fn () void) bool {
+    const idx = resolveWorkspaceClick(offset) orelse return true;
+    if (left) {
+        actions.switchTo(@intCast(idx));
+    } else if (right) {
+        const win = focus.getFocused() orelse return true;
+        actions.moveWindowTo(win, @intCast(idx));
+    }
+    return true;
+}
+
+pub const module: @import("plugin").Segment = .{
+    .name = "workspaces",
+    .dirty_sources = .{ .frame = true },
+    .invalidate = invalidate,
+    .naturalWidth = naturalWidthHook,
+    .draw = drawHook,
+    .onClick = onClickHook,
+};
