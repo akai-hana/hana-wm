@@ -26,7 +26,7 @@
 //! The SENT LEDGER is a WRITE-ONLY record of what was actually sent
 //! ({rect, has_rect, parked} per window; a park flips `parked` and preserves
 //! rect/has_rect). Exactly three reads of it are behavioral contract:
-//!   1. Multi-tag orphans: legacy keeps them at their previous real geometry
+//!   1. Multi-tag orphans: kept at their previous real geometry
 //!      rather than parking. A history-less orphan parks (first sight /
 //!      registered offscreen).
 //!   2. Winner-raise derivation: rides .above ONLY when geometry moved,
@@ -41,37 +41,25 @@ const utils = @import("utils");
 const constants = @import("constants");
 const build_options = @import("build_options");
 const model = @import("model");
+// The per-module coverage seam (who owns the screen per ws) is iterated via
+// the build-generated registry: a tree without a coverage module simply has
+// no entry, so the loop below no-ops.
+const window_mods = @import("window_modules").modules;
 
-/// When tiling is absent, provide stub types/constants so the rest of sync
-/// compiles.  The reconcile path still runs (park/map/stack), but the layout
-/// computation block is skipped and findPlacement always returns null.
-const engine = if (build_options.has_tiling) @import("engine") else struct {
-    pub const Env = struct {
-        margins: utils.Margins = .{ .gap = 0, .border = 0 },
-        min_dim: u16 = 0,
-        master_on_right: bool = false,
-        grid_relaxed: bool = false,
-        monocle_gaps: bool = false,
-    };
-    pub const parked_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
-    pub const Placement = struct {
-        win: model.WindowId = 0,
-        rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
-        visible: bool = false,
-    };
-    pub const List = utils.BoundedList(Placement, model.store_capacity);
-    pub const HintsView = struct {
-        order: []const model.WindowId = &.{},
-        hints: []const model.SizeHints = &.{},
-    };
-    pub const View = struct {
-        order: []const model.WindowId = &.{},
-        params: *const model.LayoutParams = undefined,
-        workarea: utils.Rect = .{},
-        hints: *const HintsView = undefined,
-        focused: ?model.WindowId = null,
-        env: Env = .{},
-    };
+/// When tiling is absent, provide a compute stub so the rest of sync
+/// compiles. The interchange TYPES (View/List/Placement/Env/HintsView/
+/// parked_rect) come from the tiling contract (plugin.zig), which both the
+/// tiling and this reconciler reference — so there is no mirrored duplicate
+/// to keep in lockstep. The reconcile path still runs (park/map/stack), but
+/// the layout computation block is skipped and findPlacement is null.
+const plugin = @import("plugin");
+const tiling = if (build_options.has_tiling) @import("tiling") else struct {
+    pub const Env = plugin.Env;
+    pub const parked_rect = plugin.parked_rect;
+    pub const Placement = plugin.Placement;
+    pub const List = plugin.List;
+    pub const HintsView = plugin.HintsView;
+    pub const View = plugin.View;
     pub fn compute(_: anytype, _: anytype, _: anytype) void {}
 };
 
@@ -134,7 +122,7 @@ pub const Ctx = struct {
     workarea: utils.Rect,
     /// config.tiling.border_width, already scaled at load.
     cfg_bw: u16,
-    env: engine.Env = .{},
+    env: tiling.Env = .{},
     /// Focus/mode border color; ported from borders.color minus its
     /// fullscreen check (fullscreen zeroes via bw/pixel policy instead).
     color_of: *const fn (model.WindowId, *const model.Model) u32,
@@ -157,7 +145,7 @@ pub const ReconcileOpts = struct { force_restack: bool = false };
 ///   - rect: the last VISIBLE geometry sent (survives parks);
 ///   - parked: whether the latest pass parked it.
 const SentEntry = struct {
-    rect: utils.Rect = engine.parked_rect,
+    rect: utils.Rect = tiling.parked_rect,
     has_rect: bool = false,
     parked: bool = false,
 };
@@ -233,25 +221,24 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     // STEP 1: wa := workArea(ctx) (screen minus bar).
     const wa = ctx.workarea;
 
-    // STEP 2: fullscreen winner scan. Parked windows (presence != present)
-    // are hidden: their retained fullscreen record must NOT claim the screen
-    // (minimize-from-fullscreen re-parks the record, so it is not an occupant).
+    // STEP 2: coverage winner scan. Delegate to the module registry's coverageOn
+    // seam (fullscreen owns the screen claim): parked windows are excluded by
+    // the modules themselves (minimize-from-fullscreen re-parks the record, so
+    // it is not an occupant). At most one module claims per workspace.
     var fs_win: ?model.WindowId = null;
-    for (0..m.store.count()) |i| {
-        const it = m.store.at(i);
-        if (it.val.mode != .fullscreen) continue;
-        if (it.val.presence != .present) continue;
-        const f = it.val.mode.fullscreen;
-        if (model.visibleOn(m, it.key, m.current) or f.ws == m.current) {
-            fs_win = it.key;
-            break;
+    for (window_mods) |mod| {
+        if (mod.coverageOn) |f| {
+            if (f(m, m.current)) |w| {
+                fs_win = w;
+                break;
+            }
         }
     }
 
     // STEP 3 (else branch): run layout.compute over the shown workspace.
     var order_buf: [model.store_capacity]model.WindowId = undefined;
     var hints_buf: [model.store_capacity]model.SizeHints = undefined;
-    var placements: engine.List = .{};
+    var placements: tiling.List = .{};
     if (build_options.has_tiling and fs_win == null) {
         var n: usize = 0;
         const tiled = &m.ws[m.current].tiled_order;
@@ -262,9 +249,9 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
             hints_buf[n] = e.size_hints;
             n += 1;
         }
-        const hv = engine.HintsView{ .order = order_buf[0..n], .hints = hints_buf[0..n] };
+        const hv = tiling.HintsView{ .order = order_buf[0..n], .hints = hints_buf[0..n] };
         const params = &m.ws[m.current].params;
-        const view = engine.View{
+        const view = tiling.View{
             .order = order_buf[0..n],
             .params = params,
             .workarea = wa,
@@ -275,10 +262,10 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         // n == 0 leaves placements empty (no layout owns a window); layouts
         // are individually n==0-safe too, this only skips the work.
         if (n > 0) {
-            engine.compute(params.kind, view, &placements);
+            tiling.compute(params.kind, view, &placements);
             // Sort by window ID once after compute for O(log n) binary search.
-            std.sort.pdq(engine.Placement, placements.slice(), {}, struct {
-                fn lessThan(_: void, a: engine.Placement, b: engine.Placement) bool {
+            std.sort.pdq(tiling.Placement, placements.slice(), {}, struct {
+                fn lessThan(_: void, a: tiling.Placement, b: tiling.Placement) bool {
                     return a.win < b.win;
                 }
             }.lessThan);
@@ -293,8 +280,8 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     if (winner == null) {
         if (m.focused) |f| {
             if (m.store.get(f)) |fe| {
-                if (fe.mode == .base and model.visibleOn(m, f, m.current)) {
-                    switch (fe.mode.base) {
+                if (fe.presence == .present and model.visibleOn(m, f, m.current)) {
+                    switch (fe.anchor) {
                         .floating => winner = f,
                         .tiled => if (findPlacement(&placements, f)) |p| {
                             if (p.visible) winner = f;
@@ -323,10 +310,10 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         const win = it.key;
         const e: *const model.Entry = it.val;
 
-        // ONE ledger get-or-create per window: the same record backs the
-        // pre-send contract reads (orphan keep-last, raise rule) AND the
-        // post-send write, so a visible window costs a single scan instead of
-        // two (three in the legacy multi-tag branch). The record is read
+        //         one ledger get-or-create per window: the same record backs the
+        //         pre-send contract reads (orphan keep-last, raise rule) AND the
+        //         post-send write, so a visible window costs a single scan instead of
+        //         two. The record is read
         // before any send and only written after, so raises still derive from
         // what we last sent, never from this pass's sends. When the ledger is
         // full and `win` has no record yet, `gop` is null: reads see a fresh
@@ -336,7 +323,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         const ledger = (if (gop) |g| g.value_ptr.* else SentEntry{});
 
         // Desire, computed inline below.
-        var rect: utils.Rect = engine.parked_rect;
+        var rect: utils.Rect = tiling.parked_rect;
         var bw: u16 = ctx.cfg_bw;
         var pixel: u32 = ctx.color_of(win, m);
         var parked = false;
@@ -354,42 +341,43 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
                 // Parked: rect irrelevant.
                 parked = true;
             }
-        } else switch (e.mode) {
-            .fullscreen => {
-                bw = 0;
-                pixel = 0;
-                parked = true;
+        } else if (e.presence == .covering) {
+            // Fullscreen-carrying window NOT claimed by the coverage module
+            // for this workspace (its base isn't visible / its rec targets
+            // another ws): parked, matching the coverage scan that skipped it
+            // and the covering-parked model arm.
+            bw = 0;
+            pixel = 0;
+            parked = true;
+        } else switch (e.anchor) {
+            .floating => |r| {
+                rect = r;
+                parked = !model.visibleOn(m, win, m.current);
             },
-            .base => |b| switch (b) {
-                .floating => |r| {
-                    rect = r;
-                    parked = !model.visibleOn(m, win, m.current);
-                },
-                .tiled => {
-                    if (findPlacement(&placements, win)) |p| {
-                        rect = p.rect;
-                        parked = !p.visible;
-                    } else if (model.visibleOn(m, win, m.current)) {
-                        // Multi-tagged window whose home list isn't the shown
-                        // ws: legacy never hides it and no layout owns it here,
-                        // so it stays at its previous real geometry, which is
-                        // precisely the ledger's record of what we last sent.
-                        // Park only when nothing was ever sent (first sight /
-                        // registered offscreen).
-                        const prev = ledger;
-                        if (!prev.has_rect) {
-                            bw = 0;
-                            pixel = 0;
-                            parked = true;
-                        } else {
-                            rect = prev.rect;
-                        }
-                    } else {
+            .tiled => {
+                if (findPlacement(&placements, win)) |p| {
+                    rect = p.rect;
+                    parked = !p.visible;
+                } else if (model.visibleOn(m, win, m.current)) {
+                    // Multi-tagged window whose home list isn't the shown
+                    // ws: never hidden (no layout owns it here), so it stays
+                    // at its previous real geometry, which is precisely the
+                    // ledger's record of what we last sent.
+                    // Park only when nothing was ever sent (first sight /
+                    // registered offscreen).
+                    const prev = ledger;
+                    if (!prev.has_rect) {
                         bw = 0;
                         pixel = 0;
                         parked = true;
+                    } else {
+                        rect = prev.rect;
                     }
-                },
+                } else {
+                    bw = 0;
+                    pixel = 0;
+                    parked = true;
+                }
             },
         }
         // Off-ws windows are parked by construction above (no placement /
@@ -461,14 +449,14 @@ pub fn lastRectFor(win: model.WindowId) ?utils.Rect {
 ///   2. else the last visible geometry we sent (null while parked/unsent).
 pub fn truthRect(m: *const model.Model, win: model.WindowId) ?utils.Rect {
     const e = m.store.get(win) orelse return null;
-    if (e.presence == .present and e.mode == .base and e.mode.base == .floating) return e.mode.base.floating;
+    if (e.presence == .present and e.anchor == .floating) return e.anchor.floating;
     return lastRectFor(win);
 }
 
-fn findPlacement(placements: *const engine.List, win: model.WindowId) ?engine.Placement {
+fn findPlacement(placements: *const tiling.List, win: model.WindowId) ?tiling.Placement {
     const slice = placements.constSlice();
-    const idx = std.sort.binarySearch(engine.Placement, slice, win, struct {
-        fn cmp(w: model.WindowId, p: engine.Placement) std.math.Order {
+    const idx = std.sort.binarySearch(tiling.Placement, slice, win, struct {
+        fn cmp(w: model.WindowId, p: tiling.Placement) std.math.Order {
             return std.math.order(w, p.win);
         }
     }.cmp) orelse return null;

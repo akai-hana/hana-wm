@@ -13,8 +13,9 @@ const utils = @import("utils");
 const default_hz: f64 = 60.0;
 
 /// Bar render pacing uses 1e9/rate; a value outside this band would
-/// either spin the wake loop (huge rates) or starve the scroll (tiny rates),
-/// so such readings are rejected rather than fed into the interval math.
+/// either spin the wake loop (huge rates) or starve the refresh cadence
+/// (tiny rates), so such readings are rejected rather than fed into the
+/// interval math.
 const min_sane_hz: f64 = 10.0;
 const max_sane_hz: f64 = 1000.0;
 

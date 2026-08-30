@@ -22,7 +22,7 @@ const std = @import("std");
 pub const gap_px: u16 = 48;
 
 /// Frame cadence follows the detected monitor refresh rate (see
-/// refresh_rate.detectedHz), so each frame advances by one display period
+/// refresh.detectedHz), so each frame advances by one display period
 /// and motion is locked to the monitor's scanout. Motion itself is
 /// sub-pixel: the fractional offset is handed straight to cairo, so at
 /// high refresh rates frames differ by less than a pixel and scrolling
@@ -38,16 +38,6 @@ var scrolling: bool = false;
 /// marquee frames repaint moving pixels whose data hasn't changed.
 pub fn scrollingActive() bool {
     return scrolling;
-}
-
-/// Drops the active-scroll latch WITHOUT rendering a frame. The prompt
-/// covers the whole title segment (title.draw never runs while it's open),
-/// so a marquee left mid-scroll by the last pre-prompt frame would keep
-/// polling at one deadline per display period and force a full repaint of
-/// pixels nobody can see. Call once per covered frame; the next real
-/// offsetFor() re-arms everything.
-pub fn deactivate() void {
-    scrolling = false;
 }
 
 /// Advances the marquee by the time elapsed since the previous call and

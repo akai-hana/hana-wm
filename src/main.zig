@@ -11,7 +11,7 @@ const signals = @import("signals");
 const config = @import("config");
 const types = @import("types");
 const constants = @import("constants");
-const x11_masks = @import("x11_masks");
+const masks = @import("masks");
 const scale = @import("scale");
 const debug = @import("debug");
 const build_options = @import("build_options");
@@ -25,7 +25,7 @@ const window = @import("window");
 const actions = @import("actions");
 const pipeline = @import("pipeline");
 const restart = @import("restart");
-const restart_state = @import("restart_state");
+const persist = @import("persist");
 const focus = @import("focus");
 
 // Always keep Zig's crash handler armed, even though this project defaults to
@@ -117,13 +117,13 @@ pub fn main() !void {
     // bar-aware workarea are live.
     if (std.c.getenv("HANA_RESTORE")) |restore_path_z| {
         const restore_path = std.mem.span(restore_path_z);
-        if (try restart_state.loadToGlobal(alloc, restore_path)) {
+        if (try persist.loadToGlobal(alloc, restore_path)) {
             const n = window.adoptRootWindows() catch |err| blk: {
                 debug.err("Window adoption failed: {}", .{err});
                 break :blk 0;
             };
             if (n > 0) {
-                restart_state.applyModelLevel(pipeline.model());
+                persist.applyModelLevel(pipeline.model());
                 // Restore X input focus on the session's focused window;
                 // the mapRequest path uses the same focus-after-geometry
                 // entry (the adopted window is already mapped).
@@ -163,7 +163,7 @@ fn connectToX() !X {
         conn,
         screen.*.root,
         xcb.XCB_CW_EVENT_MASK,
-        &[_]u32{x11_masks.EventMasks.root_window},
+        &[_]u32{masks.EventMasks.root_window},
     );
     if (xcb.xcb_request_check(conn, cookie)) |err| {
         debug.err("Another window manager is already running (error_code={d}, type={d})", .{ err.*.error_code, err.*.response_type });

@@ -16,8 +16,9 @@ const build_options = @import("build_options");
 
 pub const Workspace = struct {
     id: u8,
-    /// Per-workspace layout-variant override from config; null = global default.
-    variants: ?types.LayoutVariantOverride = null,
+    /// Per-workspace layout-variant value-string override from config;
+    /// null = global default. Borrows the owning config override's dupe.
+    variants: ?[]const u8 = null,
     /// Master-count override for master-stack layout; null = global default.
     master_count: ?u8 = null,
 
@@ -39,7 +40,7 @@ pub inline fn getState() ?*State {
 
 /// Applies per-workspace master-count/variant overrides from `cfg_tiling`.
 ///
-/// `master_width` and `stack_balance` have no config-file representation;
+/// `primary_width` and `secondary_balance` have no config-file representation;
 /// they are pure runtime state living only in the model's per-ws params, so
 /// nothing here touches them.
 pub fn applyWorkspaceOverrides(
@@ -68,8 +69,8 @@ pub fn applyWorkspaceOverrides(
 /// resolve identically across ALL per-ws fields; this lookup, the
 /// master-count loop below, and actions.seedParamsFromConfig's layout lookup
 /// all use loop-overwrite (last-wins).
-fn lookupVariant(cfg_tiling: *const types.TilingConfig, id: u8) ?types.LayoutVariantOverride {
-    var found: ?types.LayoutVariantOverride = null;
+fn lookupVariant(cfg_tiling: *const types.TilingConfig, id: u8) ?[]const u8 {
+    var found: ?[]const u8 = null;
     for (cfg_tiling.workspace_layout_overrides.items) |o| {
         if (o.workspace_idx == id) found = o.variant;
     }
@@ -125,17 +126,21 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
             return;
         }
     }
-    // Fullscreen record follows the move (legacy transferFullscreenRecord);
-    // a destination owner drops this one rather than clobbering the resident.
-    if (e.mode == .fullscreen and e.mode.fullscreen.ws != ws) {
-        if (build_options.has_fullscreen) {
-            if (@import("fullscreen").fullscreenOccupied(m, win, ws)) {
-                e.mode = .{ .base = e.mode.fullscreen.base };
-            } else {
-                e.mode.fullscreen.ws = ws;
+    // Fullscreen record follows the move; a destination owner drops this one
+    // into de-fullscreen (toggle OFF) rather than clobbering the resident.
+    // Ghost records (minimized-from-fullscreen) move their ws too, following
+    // the parked window's mask.
+    if (build_options.has_fullscreen) {
+        const fmod = @import("fullscreen");
+        if (fmod.isFullscreenMode(m, win)) {
+            const fws = fmod.fullscreenWsOf(m, win).?;
+            if (fws != ws) {
+                if (fmod.fullscreenOccupied(m, win, ws)) {
+                    _ = fmod.toggleFullscreen(m, win);
+                } else {
+                    fmod.moveFullscreenTo(m, win, ws);
+                }
             }
-        } else {
-            e.mode.fullscreen.ws = ws;
         }
     }
     e.mask = model.bit(ws);
@@ -157,21 +162,20 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
 
 /// Remove tag `ws`; the last remaining tag is protected (returns false).
 /// Fullscreen-on-removed-ws transfers to the lowest remaining bit, or drops
-/// when that destination is occupied (legacy transferFullscreenRecord).
+/// into de-fullscreen when that destination is occupied.
 pub fn tagRemove(m: *model.Model, win: model.WindowId, ws: model.WSId) bool {
     const e = m.store.getPtr(win) orelse return false;
     if (@popCount(e.mask) <= 1) return false;
     e.mask &= ~model.bit(ws);
-    if (e.mode == .fullscreen and e.mode.fullscreen.ws == ws) {
-        const dest = model.lowestBit(e.mask);
-        if (build_options.has_fullscreen) {
-            if (@import("fullscreen").fullscreenOccupied(m, win, dest)) {
-                e.mode = .{ .base = e.mode.fullscreen.base };
+    if (build_options.has_fullscreen) {
+        const fmod = @import("fullscreen");
+        if (fmod.isFullscreenOnWs(m, win, ws)) {
+            const dest = model.lowestBit(e.mask);
+            if (fmod.fullscreenOccupied(m, win, dest)) {
+                _ = fmod.toggleFullscreen(m, win);
             } else {
-                e.mode.fullscreen.ws = dest;
+                fmod.moveFullscreenTo(m, win, dest);
             }
-        } else {
-            e.mode.fullscreen.ws = dest;
         }
     }
     return true;
@@ -198,4 +202,9 @@ pub fn allViewToggle(m: *model.Model) bool {
 pub const module: @import("plugin").WindowModule = .{
     .init = init,
     .deinit = deinit,
+    .sendToWs = moveWindowToWs,
+    .addToWs = tagAdd,
+    .removeFromWs = tagRemove,
+    .togglePin = pinToggle,
+    .toggleAllView = allViewToggle,
 };

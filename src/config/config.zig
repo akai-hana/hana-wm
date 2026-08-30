@@ -5,7 +5,7 @@ const std = @import("std");
 const core = @import("core");
 const types = @import("types");
 const constants = @import("constants");
-const x11_masks = @import("x11_masks");
+const masks = @import("masks");
 const debug = @import("debug");
 const xkbcommon = @import("xkbcommon");
 const parser = @import("parser");
@@ -36,14 +36,14 @@ fn addRule(allocator: std.mem.Allocator, cfg: *types.Config, class_name: []const
 }
 
 fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *types.Config) !void {
-    const defaults = [_]struct { pos: types.BarSegmentAnchor, seg: types.BarSegment }{
-        .{ .pos = .left, .seg = .workspaces },
-        .{ .pos = .center, .seg = .title },
-        .{ .pos = .right, .seg = .clock },
+    const defaults = [_]struct { pos: types.BarSegmentAnchor, seg: []const u8 }{
+        .{ .pos = .left, .seg = "workspaces" },
+        .{ .pos = .center, .seg = "title" },
+        .{ .pos = .right, .seg = "clock" },
     };
     for (defaults) |d| {
         var layout = types.BarLayout{ .position = d.pos, .segments = .empty };
-        try layout.segments.append(allocator, d.seg);
+        try layout.segments.append(allocator, try allocator.dupe(u8, d.seg));
         try cfg.bar.layout.append(allocator, layout);
     }
 }
@@ -340,10 +340,9 @@ fn getDefaultConfig(allocator: std.mem.Allocator) !types.Config {
     var cfg: types.Config = .{};
     errdefer cfg.deinit(allocator);
     schema.applyDefaults(&cfg);
-    // Canonical layout_table name (the .master entry), so the default resolves
-    // via layoutFromString in workspaces.zig and stringToEnum in tiling.zig;
-    // the old "master_left" matched neither and worked only via `orelse`.
-    const default_layout = try allocator.dupe(u8, "master-stack");
+    // Canonical default name: it resolves to the "master" module at seed
+    // time; every stored name is canonical.
+    const default_layout = try allocator.dupe(u8, "master");
     try cfg.tiling.layouts.append(allocator, default_layout);
     cfg.tiling.layout = cfg.tiling.layouts.items[0];
     const default_icons = [_][]const u8{ "1", "2", "3", "4", "5", "6", "7", "8", "9" };
@@ -383,13 +382,13 @@ fn warnUnconsumedSections(doc: *parser.Document) void {
 }
 
 const mod_map = std.StaticStringMap(u16).initComptime(.{
-    .{ "super", x11_masks.mod_super },
-    .{ "mod4", x11_masks.mod_super },
-    .{ "alt", x11_masks.mod_alt },
-    .{ "mod1", x11_masks.mod_alt },
-    .{ "control", x11_masks.mod_control },
-    .{ "ctrl", x11_masks.mod_control },
-    .{ "shift", x11_masks.mod_shift },
+    .{ "super", masks.mod_super },
+    .{ "mod4", masks.mod_super },
+    .{ "alt", masks.mod_alt },
+    .{ "mod1", masks.mod_alt },
+    .{ "control", masks.mod_control },
+    .{ "ctrl", masks.mod_control },
+    .{ "shift", masks.mod_shift },
 });
 
 const mouse_button_map = std.StaticStringMap(u8).initComptime(.{
@@ -762,6 +761,19 @@ pub fn load(allocator: std.mem.Allocator, screen: core.Screen, xkb_state: *xkbco
     return cfg;
 }
 
+/// Canonicalizes the layout-name aliases accepted from config: "master-stack"
+/// and "master_stack" (any case) fold onto the registry module's canonical
+/// name "master". Every config-sourced layout name passes through here so
+/// downstream resolution (engine.layoutByName,
+/// which is exact-on-canonical) needs no alias handling. Returns `name`
+/// unchanged otherwise; never allocates, and the returned slice aliases the
+/// input whenever it is not the canonical literal.
+pub fn canonicalLayoutName(name: []const u8) []const u8 {
+    if (std.ascii.eqlIgnoreCase(name, "master-stack") or std.ascii.eqlIgnoreCase(name, "master_stack"))
+        return "master";
+    return name;
+}
+
 /// Tiling's NON-scalar structures: the layouts array (cycle order +
 /// per-workspace overrides), per-layout variant preferences, and
 /// master-stack counts. Every tiling SCALAR ([tiling] flags, aesthetics,
@@ -771,6 +783,7 @@ fn parseTilingStructures(allocator: std.mem.Allocator, doc: *parser.Document, cf
     const section = doc.getSection("tiling") orelse return;
     types.freeStrings(&cfg.tiling.layouts, allocator, true);
     cfg.tiling.workspace_layout_overrides.clearRetainingCapacity();
+    clearTilingVariants(allocator, cfg);
     if (section.getArray("layouts")) |arr| {
         try parseLayoutsArray(allocator, arr, cfg);
         if (cfg.tiling.layouts.items.len > 0) cfg.tiling.layout = cfg.tiling.layouts.items[0];
@@ -780,61 +793,123 @@ fn parseTilingStructures(allocator: std.mem.Allocator, doc: *parser.Document, cf
         // that aliases layouts.items[0], freed below, so using it would read
         // freed memory when the key is absent.
         const layout_str = schema.getInRange([]const u8, section, "layout", default_tiling_layout, null, null);
-        try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, layout_str));
+        try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, canonicalLayoutName(layout_str)));
         cfg.tiling.layout = cfg.tiling.layouts.items[0];
     }
-    parseTilingVariants(doc, cfg);
+    try parseTilingVariants(allocator, doc, cfg);
     try parseMasterStackCounts(allocator, doc, cfg);
 }
 
 /// Per-workspace master count overrides: [tiling.layouts.master-stack.counts]
 /// workspace_number (1-based) = count. Only meaningful when global_layout = false.
+/// The sub-table key is canonicalized (config.canonicalLayoutName) so the
+/// "master-stack"/"master_stack" spellings resolve the same table.
 fn parseMasterStackCounts(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
-    const counts_sec = doc.getSection("tiling.layouts.master-stack.counts") orelse return;
-    cfg.tiling.workspace_master_count_overrides.clearRetainingCapacity();
-    var iter = counts_sec.orderedIterator();
+    const prefix = "tiling.layouts.";
+    const suffix = ".counts";
+    var iter = doc.sections.iterator();
     while (iter.next()) |entry| {
-        counts_sec.markConsumed(entry.key);
-        const ws_1based = std.fmt.parseInt(usize, entry.key, 10) catch {
-            debug.warn("master-stack.counts: invalid workspace key '{s}', skipping", .{entry.key});
-            continue;
-        };
-        if (!checkWorkspaceBound(ws_1based, "master-stack.counts", constants.max_workspaces)) continue;
-        const count_val = entry.value.asInt() orelse {
-            debug.warn("master-stack.counts: non-integer count for workspace {}, skipping", .{ws_1based});
-            continue;
-        };
-        if (count_val < 0 or count_val > 10) {
-            debug.warn("master-stack.counts: count {} for workspace {} out of range [0,10], skipping", .{ count_val, ws_1based });
-            continue;
+        const sec_name = entry.key_ptr.*;
+        if (!std.mem.startsWith(u8, sec_name, prefix) or !std.mem.endsWith(u8, sec_name, suffix)) continue;
+        const seg = sec_name[prefix.len .. sec_name.len - suffix.len];
+        // Only direct "tiling.layouts.<name>.counts" tables qualify (no
+        // deeper nesting), and only the master family can carry counts.
+        if (seg.len == 0 or std.mem.indexOfScalar(u8, seg, '.') != null) continue;
+        const canon = canonicalLayoutName(seg);
+        if (!std.mem.eql(u8, canon, "master")) continue;
+
+        const counts_sec = entry.value_ptr;
+        cfg.tiling.workspace_master_count_overrides.clearRetainingCapacity();
+        var inner = counts_sec.orderedIterator();
+        while (inner.next()) |p| {
+            counts_sec.markConsumed(p.key);
+            const ws_1based = std.fmt.parseInt(usize, p.key, 10) catch {
+                debug.warn("master-stack.counts: invalid workspace key '{s}', skipping", .{p.key});
+                continue;
+            };
+            if (!checkWorkspaceBound(ws_1based, "master-stack.counts", constants.max_workspaces)) continue;
+            const count_val = p.value.asInt() orelse {
+                debug.warn("master-stack.counts: non-integer count for workspace {}, skipping", .{ws_1based});
+                continue;
+            };
+            if (count_val < 0 or count_val > 10) {
+                debug.warn("master-stack.counts: count {} for workspace {} out of range [0,10], skipping", .{ count_val, ws_1based });
+                continue;
+            }
+            try cfg.tiling.workspace_master_count_overrides.append(allocator, .{
+                .workspace_idx = @intCast(ws_1based - 1),
+                .count = @intCast(count_val),
+            });
         }
-        try cfg.tiling.workspace_master_count_overrides.append(allocator, .{
-            .workspace_idx = @intCast(ws_1based - 1),
-            .count = @intCast(count_val),
-        });
     }
 }
 
-/// Reads `variants` from `section` into `field`; warns on unknown values.
-fn tryParseVariant(
-    comptime T: type,
-    section: *parser.Section,
-    layout_name: []const u8,
-    field: *T,
-) void {
-    const v = section.getString("variants") orelse return;
-    field.* = std.meta.stringToEnum(T, v) orelse {
-        debug.warn("Unknown {s} variants '{s}', using default", .{ layout_name, v });
-        return;
-    };
+/// Frees every owned entry in tiling.variants (keys and values) while
+/// retaining the map's backing storage, so a config reload re-parses a clean
+/// map. See setTilingVariant for why both are heap-dup'd.
+fn clearTilingVariants(allocator: std.mem.Allocator, cfg: *types.Config) void {
+    var it = cfg.tiling.variants.iterator();
+    while (it.next()) |e| {
+        allocator.free(e.key_ptr.*);
+        allocator.free(e.value_ptr.*);
+    }
+    cfg.tiling.variants.clearRetainingCapacity();
 }
 
-fn parseTilingVariants(doc: *parser.Document, cfg: *types.Config) void {
-    inline for (types.variant_layouts) |e| {
-        const section_name = "tiling.layouts." ++ e.name;
-        if (doc.getSection(section_name)) |ms| {
-            tryParseVariant(e.variant, ms, e.name, &@field(cfg.tiling, e.field));
+/// The flat `[tiling] master_variant/monocle_variant/grid_variant` keys
+/// map onto their canonical layout names.
+const flat_variant_keys = [_]struct { key: []const u8, canon: []const u8 }{
+    .{ .key = "master_variant", .canon = "master" },
+    .{ .key = "monocle_variant", .canon = "monocle" },
+    .{ .key = "grid_variant", .canon = "grid" },
+};
+
+/// Stores `value` into tiling.variants under canonical key `canon`, duping
+/// both so the map owns its storage independent of the parsed document (which
+/// is freed after buildConfigFromDoc). Last override wins: any prior value
+/// for the same key is freed first.
+fn setTilingVariant(allocator: std.mem.Allocator, cfg: *types.Config, canon: []const u8, value: []const u8) !void {
+    if (cfg.tiling.variants.fetchRemove(canon)) |kv| {
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
+    const key = try allocator.dupe(u8, canon);
+    errdefer allocator.free(key);
+    const val = try allocator.dupe(u8, value);
+    try cfg.tiling.variants.put(allocator, key, val);
+}
+
+/// Records per-layout variant value-strings into `cfg.tiling.variants`,
+/// keyed by the canonical layout name. Two sources, both generic (no typed
+/// per-layout enums):
+///   - flat `[tiling] master_variant/monocle_variant/grid_variant`
+///     keys -> canonical names "master"/"monocle"/"grid";
+///   - `[tiling.layouts.<name>] variants = "..."` sub-tables (the table key
+///     canonicalized so the master alias spellings hit the same entry).
+/// No validity check happens here: a value-string's meaning is owned by the
+/// layout module's `variant_parse` hook, resolved at seed time.
+fn parseTilingVariants(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
+    if (doc.getSection("tiling")) |sec| {
+        for (flat_variant_keys) |fk| {
+            if (sec.getString(fk.key)) |v|
+                try setTilingVariant(allocator, cfg, fk.canon, v);
         }
+    }
+
+    const prefix = "tiling.layouts.";
+    var iter = doc.sections.iterator();
+    while (iter.next()) |entry| {
+        const sec_name = entry.key_ptr.*;
+        if (!std.mem.startsWith(u8, sec_name, prefix)) continue;
+        // Only direct "tiling.layouts.<name>" sub-table keys qualify; deeper
+        // ones ("<name>.counts") are handled by parseMasterStackCounts. The
+        // key is canonicalized so the master alias spellings resolve the
+        // same variant entry.
+        const tail = sec_name[prefix.len..];
+        const seg = if (std.mem.indexOfScalar(u8, tail, '.')) |_| continue else tail;
+        const canon = canonicalLayoutName(seg);
+        if (entry.value_ptr.getString("variants")) |v|
+            try setTilingVariant(allocator, cfg, canon, v);
     }
 }
 
@@ -851,56 +926,57 @@ fn isWorkspaceList(s: []const u8) bool {
     return has_digit;
 }
 
-/// Canonicalises a layout name via types.layout_table's aliases (e.g. "master"
-/// -> "master-stack"), case-insensitively. Returns null for names that are
-/// overlong or match no entry; the caller distinguishes the two for its warning.
-fn canonicalLayout(name: []const u8) ?[]const u8 {
+/// Known layout-name spellings, used ONLY to disambiguate the `layouts`
+/// array grammar at parse time: a following token that names a layout starts
+/// a new group rather than being consumed as a variants word. This is
+/// grammar, not an authoritative registry — layout names resolve to
+/// `tiling_modules` registry indices at seed time (engine.layoutByName), and
+/// unknown names pass through so third-party addon layouts keep working.
+const layout_name_grammar = [_][]const u8{
+    "master",  "master-stack", "master_stack",
+    "monocle", "grid",         "fibonacci",
+    "leaf",    "scroll",
+};
+
+/// Whether `name` is one of the known layout-name spellings (grammar test).
+fn isLayoutName(name: []const u8) bool {
     const lowered = switch (types.lowerStringCI(32, name)) {
-        .too_long => return null,
+        .too_long => return false,
         .ok => |r| r.slice(),
     };
-    for (types.layout_table) |entry| {
-        if (std.mem.eql(u8, lowered, entry.name)) return entry.name;
-        for (entry.aliases) |alias| {
-            if (std.mem.eql(u8, lowered, alias)) return entry.name;
-        }
+    for (layout_name_grammar) |known| {
+        if (std.mem.eql(u8, lowered, known)) return true;
     }
-    return null;
+    return false;
 }
 
-/// Parses a variants string for the given layout name into a LayoutVariantOverride.
-/// Returns null and emits a warning when the string is not valid for that layout.
-fn parseLayoutVariant(layout_name: []const u8, variants_str: []const u8) ?types.LayoutVariantOverride {
-    // A named local (not a switch-arm capture) so `lowered.ok.buf` outlives
-    // the expression: lower_layout borrows from it later in this function.
+/// Handles a layouts-array "variants word" for the given layout. The
+/// value-string is stored into `cfg.tiling.variants` under the canonical
+/// layout name (registry-driven: no typed per-layout enums, no enum fold), and
+/// returned for per-workspace overrides (see parseWorkspaceListInto). Validity
+/// of the string is checked against the active module's `variant_parse` at
+/// seed time, not here.
+fn parseLayoutVariant(allocator: std.mem.Allocator, cfg: *types.Config, layout_name: []const u8, variants_str: []const u8) !?[]const u8 {
     const lowered = types.lowerStringCI(32, layout_name);
     if (lowered == .too_long) {
-        // Distinguished from "unknown layout" below so a genuinely overlong
-        // name gets a message pointing at the real problem, not a plain typo.
         debug.warn("layouts array: layout name '{s}' too long to match against a variant type, ignoring variants '{s}'", .{ layout_name, variants_str });
         return null;
     }
-    const lower_layout = lowered.ok.slice();
-    inline for (types.variant_layouts) |entry| {
-        if (std.mem.eql(u8, lower_layout, entry.name)) {
-            const v = std.meta.stringToEnum(entry.variant, variants_str) orelse {
-                debug.warn("Unknown {s} variants '{s}' in layouts array, ignoring", .{ entry.name, variants_str });
-                return null;
-            };
-            return @unionInit(types.LayoutVariantOverride, entry.tag, v);
-        }
-    }
-    return null;
+    const canon = canonicalLayoutName(lowered.ok.slice());
+    try setTilingVariant(allocator, cfg, canon, variants_str);
+    return variants_str;
 }
 
 /// Parses a comma-separated workspace list string (e.g. "1,3,5") and appends
-/// one WorkspaceLayoutOverride per valid workspace to `overrides`.
+/// one WorkspaceLayoutOverride per valid workspace to `overrides`. Each
+/// override owns a heap-dupe of the (possibly null) variant value-string, so
+/// it outlives the parsed document.
 fn parseWorkspaceListInto(
     allocator: std.mem.Allocator,
     ws_str: []const u8,
     layout_name: []const u8,
     layout_idx: u8,
-    variant: ?types.LayoutVariantOverride,
+    variant: ?[]const u8,
     overrides: *std.ArrayList(types.WorkspaceLayoutOverride),
 ) !void {
     var ws_iter = std.mem.splitScalar(u8, ws_str, ',');
@@ -911,18 +987,22 @@ fn parseWorkspaceListInto(
             continue;
         };
         if (!checkWorkspaceBound(ws_1based, "layouts array", constants.max_workspaces)) continue;
+        const variant_copy: ?[]const u8 = if (variant) |v| try allocator.dupe(u8, v) else null;
         try overrides.append(allocator, .{
             .workspace_idx = @intCast(ws_1based - 1),
             .layout_idx = layout_idx,
-            .variant = variant,
+            .variant = variant_copy,
         });
     }
 }
 
-/// Parses the `layouts` TOML array.  A known layout name starts a new group; the
-/// optional next element is a variants word or a workspace list ("1,3,5"); a third
-/// may follow as a workspace list when the second was a variants.
-/// Plain single-name format ("master-stack") is fully backward-compatible.
+/// Parses the `layouts` TOML array. A layout name (any string; registry
+/// resolution happens at seed time) starts a new group; the optional next
+/// element is a variants word or a workspace list ("1,3,5"); a third may
+/// follow as a workspace list when the second was a variants. Plain
+/// single-name format ("master-stack") is fully backward-compatible. Names
+/// are stored lowercased and de-duplicated case-insensitively; an overlong
+/// name is skipped with a warning (resolution, not spelling, is authoritative).
 fn parseLayoutsArray(
     allocator: std.mem.Allocator,
     arr: []const parser.Value,
@@ -934,29 +1014,31 @@ fn parseLayoutsArray(
             debug.warn("layouts array: expected a string at index {}, skipping", .{i});
             continue;
         };
-        const canonical = canonicalLayout(name_str) orelse {
-            if (name_str.len > 32) {
+        const name_lower = switch (types.lowerStringCI(32, name_str)) {
+            .too_long => {
                 debug.warn("layouts array: layout name '{s}' at index {} is longer than the 32-byte limit, skipping", .{ name_str, i });
-            } else {
-                debug.warn("layouts array: unknown layout name '{s}' at index {}, skipping", .{ name_str, i });
-            }
-            continue;
+                continue;
+            },
+            .ok => |r| r.slice(),
         };
         var already_present = false;
         for (cfg.tiling.layouts.items) |existing| {
-            if (std.mem.eql(u8, existing, canonical)) {
+            if (std.mem.eql(u8, existing, name_lower)) {
                 already_present = true;
                 break;
             }
         }
         if (already_present) {
-            debug.warn("layouts array: duplicate layout '{s}' at index {}, skipping", .{ canonical, i });
+            debug.warn("layouts array: duplicate layout '{s}' at index {}, skipping", .{ name_lower, i });
             continue;
         }
         const layout_idx: u8 = @intCast(cfg.tiling.layouts.items.len);
-        try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, canonical));
+        // Stored canonical (config.canonicalLayoutName), so every downstream
+        // resolution -- the global default, per-workspace overrides, and the
+        // cycle ring -- sees the registry's canonical spelling.
+        try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, canonicalLayoutName(name_lower)));
 
-        var variants: ?types.LayoutVariantOverride = null;
+        var variants: ?[]const u8 = null;
         var ws_list_str: ?[]const u8 = null;
         if (i + 1 >= arr.len) continue;
         const peek = arr[i + 1].asString() orelse continue;
@@ -964,8 +1046,12 @@ fn parseLayoutsArray(
         if (isWorkspaceList(peek)) {
             ws_list_str = peek;
             i += 1;
-        } else if (canonicalLayout(peek) == null) {
-            variants = parseLayoutVariant(canonical, peek);
+        } else if (!isLayoutName(peek)) {
+            // A variants word feeds BOTH the per-layout map (so it becomes the
+            // default for every workspace on that layout) and, when a workspace
+            // list follows, the per-workspace overrides. Last override wins in
+            // the map (setTilingVariant frees the prior value).
+            variants = (try parseLayoutVariant(allocator, cfg, name_lower, peek)) orelse continue;
             i += 1;
             if (i + 1 < arr.len) {
                 if (arr[i + 1].asString()) |peek2| {
@@ -978,7 +1064,7 @@ fn parseLayoutsArray(
         }
 
         if (ws_list_str) |ws_str| {
-            try parseWorkspaceListInto(allocator, ws_str, canonical, layout_idx, variants, &cfg.tiling.workspace_layout_overrides);
+            try parseWorkspaceListInto(allocator, ws_str, name_lower, layout_idx, variants, &cfg.tiling.workspace_layout_overrides);
         }
     }
 }
@@ -1047,11 +1133,12 @@ fn parseBarLayout(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *typ
         const layout_section = doc.getSection(p.name) orelse continue;
         var bar_layout = types.BarLayout{ .position = p.pos, .segments = .empty };
         if (layout_section.getArray("segments")) |seg_arr|
-            for (seg_arr) |item| if (item.asString()) |s|
-                if (std.meta.stringToEnum(types.BarSegment, s)) |segment|
-                    try bar_layout.segments.append(allocator, segment)
+            for (seg_arr) |item| {
+                if (item.asString()) |s|
+                    try bar_layout.segments.append(allocator, try allocator.dupe(u8, s))
                 else
-                    debug.warn("Unknown bar segment '{s}', skipping", .{s});
+                    debug.warn("Non-string entry in bar segment list, skipping", .{});
+            };
         if (bar_layout.segments.items.len > 0) {
             try cfg.bar.layout.append(allocator, bar_layout);
         } else {

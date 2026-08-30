@@ -1,13 +1,14 @@
 //! Master-stack tiling layout.
 //! Divides the screen into a master pane and a stack pane, spilling overflow into a column-major grid.
 
+const std = @import("std");
 const utils = @import("utils");
 const constants = @import("constants");
 const model = @import("model");
-const engine = @import("engine");
+const tiling = @import("tiling");
 
 /// The two adjustable stack-column weights derived from the signed
-/// `stack_balance` scalar (see LayoutParams.stack_balance). Bundled so
+/// `secondary_balance` scalar (see LayoutParams.secondary_balance). Bundled so
 /// tileColumn/tileStack thread one extra parameter through.
 ///
 /// Every slot starts at 1.0 (the historical even split); `top`/`bottom` add
@@ -23,7 +24,7 @@ pub const StackBoost = struct {
         return self.top == 0 and self.bottom == 0;
     }
 
-    /// `balance` is LayoutParams.stack_balance: positive boosts the top slot,
+    /// `balance` is LayoutParams.secondary_balance: positive boosts the top slot,
     /// negative boosts the bottom slot, and the two are mutually exclusive by
     /// construction; exactly one of `top`/`bottom` is ever nonzero.
     pub inline fn fromBalance(balance: f32) StackBoost {
@@ -36,7 +37,7 @@ pub const StackBoost = struct {
 /// contributes half). Master width is a rounded fraction of screen width;
 /// heights distributed via cumulative integer division. All dims u16,
 /// clamped to min_dim via shrinkClamped.
-pub fn compute(v: engine.View, out: *engine.List) void {
+pub fn compute(v: tiling.View, out: *tiling.List) void {
     // Empty workspace emits nothing; callers may run layouts on an empty
     // order (e.g. sync's per-reconcile compute), so this is a supported
     // input, not a precondition violation.
@@ -49,33 +50,33 @@ pub fn compute(v: engine.View, out: *engine.List) void {
     const m = v.env.margins;
     const screen_w = v.workarea.width;
     const screen_h = v.workarea.height;
-    const master_n: u16 = @intCast(@min(v.params.master_count, n));
+    const master_n: u16 = @intCast(@min(v.params.primary_count, n));
     const stack_n: u16 = @intCast(n - master_n);
 
     // When no stack exists the master pane takes the full width.
     const master_w: u16 = if (stack_n > 0)
-        @intFromFloat(@round(@as(f32, @floatFromInt(screen_w)) * v.params.master_width))
+        @intFromFloat(@round(@as(f32, @floatFromInt(screen_w)) * v.params.primary_width))
     else
         screen_w;
 
-    const is_master_on_right = v.env.master_on_right;
-    const master_x: u16 = if (is_master_on_right) screen_w -| master_w else 0;
+    const is_primary_on_right = v.env.primary_on_right;
+    const master_x: u16 = if (is_primary_on_right) screen_w -| master_w else 0;
 
     // The master column gets a full gap on its screen edge and a half-gap
     // toward the stack (the stack's own half-gap completes the shared gap);
     // with no stack both edges carry a full gap. Borders are then subtracted
     // from the width.
     const edge_inset: u16 = if (stack_n > 0) m.gap +| m.gap / 2 else m.gap *| 2;
-    const master_inner_w = engine.shrinkClamped(master_w, edge_inset + utils.doubledBorder(m), min_dim);
+    const master_inner_w = tiling.shrinkClamped(master_w, edge_inset + utils.doubledBorder(m), min_dim);
 
     // The master column never uses the stack boost; it isn't a "slave"
     // column, so mod+n/mod+o have no effect on it.
-    tileColumn(&v, out, windows[0..master_n], master_x +| m.gap, engine.waY(&v), screen_h, master_inner_w, m, .{}, min_dim);
+    tileColumn(&v, out, windows[0..master_n], master_x +| m.gap, tiling.waY(&v), screen_h, master_inner_w, m, .{}, min_dim);
 
     if (stack_n == 0) return;
 
-    const stack_x: u16 = if (is_master_on_right) 0 else master_w;
-    tileStack(&v, out, windows[master_n..], stack_x, engine.waY(&v), screen_w -| master_w, screen_h, m, StackBoost.fromBalance(v.params.stack_balance), min_dim);
+    const stack_x: u16 = if (is_primary_on_right) 0 else master_w;
+    tileStack(&v, out, windows[master_n..], stack_x, tiling.waY(&v), screen_w -| master_w, screen_h, m, StackBoost.fromBalance(v.params.secondary_balance), min_dim);
 }
 
 /// Tile a vertical column of `windows` at a fixed x with a fixed content
@@ -87,12 +88,12 @@ pub fn compute(v: engine.View, out: *engine.List) void {
 /// short fixed-height window (PiP pane, PMaxSize dialog) never leaves a dead
 /// gap and the column always fills `h`.
 ///
-/// Legacy configured swap_master's window last via defer_win; placement ORDER
-/// carries that duty now (sync emits/raises in placement order).
+/// The swap_master variant places its chosen window last via placement
+/// ORDER (sync emits/raises in placement order).
 /// `boost` is zero for the master column, which reduces the split to plain even.
 fn tileColumn(
-    v: *const engine.View,
-    out: *engine.List,
+    v: *const tiling.View,
+    out: *tiling.List,
     windows: []const model.WindowId,
     x: u16,
     y_offset: u16,
@@ -122,7 +123,7 @@ fn tileColumn(
             .width = inner_w,
             .height = heights[i],
         };
-        engine.emitView(v, out, win, rect, true);
+        tiling.emitView(v, out, win, rect, true);
         y = y +| heights[i] +| m.gap +| 2 *| m.border;
     }
 }
@@ -139,7 +140,7 @@ const CapResult = struct {
 /// below their current fair share, redistributing their pixels to the rest.
 /// Stops when no new window gets pinned (bounded by `windows.len` passes).
 fn findCappedWindows(
-    v: *const engine.View,
+    v: *const tiling.View,
     windows: []const model.WindowId,
     avail: u16,
     boost: StackBoost,
@@ -236,7 +237,7 @@ inline fn bitSet(bits: []u8, i: usize) void {
 /// windowHeight/windowY, so output stays bit-identical to the historical even
 /// split. Non-zero boost uses the telescoping rounded cumulative sum
 /// (`cum`/`prev_px`) so fractional weights land on the right pixel.
-fn distributeStackHeightsWeighted(v: *const engine.View, windows: []const model.WindowId, avail: u16, boost: StackBoost, min_dim: u16, out: []u16) u32 {
+fn distributeStackHeightsWeighted(v: *const tiling.View, windows: []const model.WindowId, avail: u16, boost: StackBoost, min_dim: u16, out: []u16) u32 {
     var capped_buf: [constants.Limits.max_tiled_windows / 8]u8 = undefined;
     const capped = capped_buf[0 .. (windows.len + 7) / 8];
 
@@ -272,7 +273,7 @@ inline fn windowWeight(i: u16, count: u16, boost: StackBoost) f32 {
 /// Declared WM_NORMAL_HINTS max_height for `win`, or 0 when it declared none:
 /// 0 doubles as "unconstrained", so callers needn't special-case a missing
 /// hints entry.
-inline fn windowMaxHeight(v: *const engine.View, win: model.WindowId) u16 {
+inline fn windowMaxHeight(v: *const tiling.View, win: model.WindowId) u16 {
     return v.hints.forWin(win).max_height;
 }
 
@@ -281,8 +282,8 @@ inline fn windowMaxHeight(v: *const engine.View, win: model.WindowId) u16 {
 ///
 /// `boost` only affects the single-column path, see tileStackExtra for why.
 fn tileStack(
-    v: *const engine.View,
-    out: *engine.List,
+    v: *const tiling.View,
+    out: *tiling.List,
     windows: []const model.WindowId,
     x: u16,
     y_offset: u16,
@@ -299,7 +300,7 @@ fn tileStack(
     const max_fit: u16 = @intCast(@max(1, available / space_per_window));
 
     if (stack_n <= max_fit) {
-        const stack_inner_w = engine.shrinkClamped(w, m.gap / 2 + (m.gap + 2 * m.border), min_dim);
+        const stack_inner_w = tiling.shrinkClamped(w, m.gap / 2 + (m.gap + 2 * m.border), min_dim);
         tileColumn(v, out, windows, x +| m.gap / 2, y_offset, h, stack_inner_w, m, boost, min_dim);
         return;
     }
@@ -314,8 +315,8 @@ fn tileStack(
 /// row) nor the stack boost ("topmost"/"bottommost" lose meaning once the
 /// stack wraps into multiple columns).
 fn tileStackExtra(
-    v: *const engine.View,
-    out: *engine.List,
+    v: *const tiling.View,
+    out: *tiling.List,
     windows: []const model.WindowId,
     x: u16,
     y_offset: u16,
@@ -335,7 +336,7 @@ fn tileStackExtra(
         const gaps_in_row = m.gap / 2 +| m.gap *| cols_in_row;
         const row_total_w = if (w > gaps_in_row) w - gaps_in_row else cols_in_row * min_dim;
         const col_w = row_total_w / cols_in_row;
-        const col_inner_w = engine.shrinkClamped(col_w, 2 * m.border, min_dim);
+        const col_inner_w = tiling.shrinkClamped(col_w, 2 * m.border, min_dim);
 
         const y_pos = windowY(row, max_fit, row_avail, y_offset, m);
         const row_h = windowHeight(row, max_fit, row_avail, min_dim);
@@ -349,7 +350,7 @@ fn tileStackExtra(
                 .width = col_inner_w,
                 .height = row_h,
             };
-            engine.emitView(v, out, windows[win_idx], rect, true);
+            tiling.emitView(v, out, windows[win_idx], rect, true);
         }
     }
 }
@@ -375,3 +376,31 @@ inline fn windowY(i: u16, count: u16, available: u16, y_offset: u16, m: utils.Ma
     const cum: u32 = @as(u32, i) * @as(u32, available) / @as(u32, count);
     return y_offset +| m.gap +| @as(u16, @intCast(cum)) +| i *| (m.gap +| 2 *| m.border);
 }
+
+/// Cast shim: plugin's type-free seam -> compute's typed params.
+fn computeHook(view: *const anyopaque, out: *anyopaque) void {
+    const v: *const tiling.View = @ptrCast(@alignCast(view));
+    const o: *tiling.List = @ptrCast(@alignCast(out));
+    compute(v.*, o);
+}
+
+/// Parses a master variant VALUE-STRING into its variant index, mapping the
+/// accepted variant spellings to their ordinal slots (lifo=0, fifo=1),
+/// exact-case. null for any other string.
+fn variantParse(str: []const u8) ?u8 {
+    if (std.mem.eql(u8, str, "lifo")) return 0;
+    if (std.mem.eql(u8, str, "fifo")) return 1;
+    return null;
+}
+
+/// This layout's registry contribution: metadata plus the dispatch hook.
+pub const module: @import("plugin").Layout = .{
+    .name = "master",
+    .compute = computeHook,
+    .variant_count = 2,
+    .has_variants = true,
+    .fifo_variant = 1,
+    .variant_parse = variantParse,
+    .icon = "[]=",
+    .indicators = &.{ "[N]", "=N=" },
+};

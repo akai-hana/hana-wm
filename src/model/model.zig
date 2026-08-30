@@ -10,18 +10,18 @@
 //! atomics are needed on Model fields.
 //!
 //! Architecture (plugins over the model): per-feature state transitions
-//! (minimize/fullscreen/floating rects/workspaces-tags) live in the wire-side
-//! plugin modules under src/window/modules/, one file per feature. Those
-//! plugins import this model one-way and draw on its types/helpers. THIS file
-//! stays the pure core and exports only:
+//! (parking, screen coverage, floating geometry, tag sets) live in the
+//! wire-side plugin modules under src/window/modules/, one file per feature.
+//! Those plugins import this model one-way and draw on its types/helpers.
+//! THIS file stays the pure core and exports only:
 //!   - shared vocabulary types (Entry/WsState/RestoreOrder/ConfigureReq/
 //!     HonorDecision/...),
 //!   - the substrate + reuse helpers (register/unregister/findHome/removeValue/
 //!     removeFromMruAll),
 //!   - shared queries (visibleOn/tiledCountOnWs),
 //!   - the core intrinsics that only touch focus and tiling params
-//!     (setFocus/clearFocus/fallbackFocusCandidate and reorderTiled/swapMaster/
-//!     cycleLayout/variantCount/adjustMasterWidth/applyConfigReload).
+//!     (setFocus/clearFocus/fallbackFocusCandidate and reorderTiled/swapPrimary/
+//!     cycleLayout/variantCount/adjustPrimaryWidth/applyConfigReload).
 //! The model contains no feature transition LOGIC.
 const std = @import("std");
 const utils = @import("utils");
@@ -39,7 +39,7 @@ pub inline fn bit(ws: WSId) Mask {
 }
 
 /// Alias for the workspace count ceiling; the canonical value lives in
-/// constants so config plumbing and legacy code share one source.
+/// constants so config plumbing shares one source.
 const MAX_WS = constants.max_workspaces;
 
 pub const ALL_MASK: Mask = ~@as(Mask, 0);
@@ -56,18 +56,20 @@ pub const SizeHints = struct {
     max_aspect: f32 = 0.0,
 };
 
-pub const LayoutKind = enum { master, monocle, grid, fibonacci, leaf, scroll };
-
 pub const LayoutParams = struct {
-    kind: LayoutKind = .master,
+    /// Index into the build-generated `tiling_modules` registry (dispatch
+    /// order == deterministic scan order). Resolved from config at seed time;
+    /// out-of-range values are disambiguated by the registry layer (default
+    /// layout fallback). The model stays registry-free: it is a bare index here.
+    kind: u8 = 0,
     variant_idx: u8 = 0,
-    master_width: f32 = 0.5,
-    master_count: u8 = 1,
-    stack_balance: f32 = 0,
-    /// Scroll viewport state: model-owned so the layout engine stays pure.
-    /// The snap-right-on-new-window and clamp duties belong to callers (actions/sync).
-    scroll_offset: i32 = 0,
-    scroll_prev_count: u32 = 0,
+    primary_width: f32 = 0.5,
+    primary_count: u8 = 1,
+    secondary_balance: f32 = 0,
+    /// Viewport state: model-owned so the layout engine stays pure. The
+    /// snap-right-on-new-window and clamp duties belong to callers (actions/sync).
+    viewport_offset: i32 = 0,
+    viewport_prev_count: u32 = 0,
 };
 
 pub const BaseMode = union(enum) {
@@ -168,8 +170,8 @@ pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) error{CapacityFull}!vo
     // home_ws cache: set AFTER tiled_order append succeeds so the cache
     // is only valid when the window actually has a tiled slot.
     ptr.home_ws = target;
-    // Master-fifo spawn placement lives in actions.mapRequest; this
-    // primitive is a dumb membership insert.
+    // Fifo spawn placement lives in actions.mapRequest; this primitive is a
+    // dumb membership insert.
 }
 
 pub fn unregister(m: *Model, win: WindowId) void {
@@ -188,10 +190,10 @@ pub fn visibleOn(m: *const Model, win: WindowId, ws: WSId) bool {
 }
 
 /// Number of windows placed in tiled slots of `ws`: entries of `ws`'s
-/// tiled_order whose tag mask includes `ws`. Scroll slot math (actions) and
-/// diagnostics (input dump_state) share this single model read; the legacy
-/// tracking/actions duplicates computed their own counts from store-wide
-/// base-tiled entries and disagreed on multi-tagged windows.
+/// tiled_order whose tag mask includes `ws`. Viewport slot math (actions) and
+/// diagnostics (input dump_state) share this single model read; recomputing
+/// the count from store-wide base-tiled entries would disagree on multi-tagged
+/// windows.
 pub fn tiledCountOnWs(m: *const Model, ws: WSId) usize {
     var n: usize = 0;
     for (m.ws[ws].tiled_order.constSlice()) |w| {
@@ -238,7 +240,7 @@ pub fn setFocus(m: *Model, win: WindowId) void {
     const list = &m.ws[m.current].focus_mru;
     removeValue(list, win);
     // Newest-first insert; when at capacity, drop the OLDEST (tail) entry so
-    // the newest mru_capacity wins are retained (legacy shrink semantics).
+    // the newest mru_capacity wins are retained.
     if (!list.insert(0, win)) {
         list.orderedRemove(list.len - 1);
         _ = list.insert(0, win);
@@ -295,7 +297,10 @@ pub fn reorderTiled(m: *Model, win: WindowId, idx_in: usize) void {
     _ = list.insert(idx, win); // cannot fail: removal freed a slot
 }
 
-pub fn swapMaster(m: *Model) void {
+/// Slot swap: exchanges the first two tiled slots of the current workspace
+/// (primary head and the following slot). No-op with fewer than two tiled
+/// windows.
+pub fn swapPrimary(m: *Model) void {
     const list = &m.ws[m.current].tiled_order;
     if (list.len < 2) return;
     const tmp = list.items[0];
@@ -303,45 +308,22 @@ pub fn swapMaster(m: *Model) void {
     list.items[1] = tmp;
 }
 
-pub fn cycleLayout(m: *Model, dir: i32) void {
+/// Steps the current workspace's primary-column width fraction by `delta`,
+/// clamped to [0.05, 0.95].
+pub fn adjustPrimaryWidth(m: *Model, delta: f32) void {
     const p = &m.ws[m.current].params;
-    const n: i32 = @typeInfo(LayoutKind).@"enum".fields.len;
-    const cur: i32 = @intCast(@intFromEnum(p.kind));
-    // @mod's result carries the divisor's sign; with n > 0 it is already in
-    // [0, n), so no negative correction is needed (the old `if (next < 0)`
-    // was unreachable).
-    const next = @mod(cur + dir, n);
-    // Cast to LayoutKind's tag type (inferred via std.meta.Tag), so the
-    // width follows automatically if the enum ever grows past 8 variants
-    // (no hardcoded u3 that would silently truncate).
-    p.kind = @enumFromInt(@as(std.meta.Tag(LayoutKind), @intCast(next)));
-    p.variant_idx = 0;
-}
-
-/// Variant count per layout kind (caller-side variant resolution): master
-/// lifo/fifo, monocle gapless/gaps, grid rigid/relaxed; the rest have
-/// exactly one.
-pub fn variantCount(kind: LayoutKind) u8 {
-    return switch (kind) {
-        .master, .monocle, .grid => 2,
-        else => 1,
-    };
-}
-
-pub fn adjustMasterWidth(m: *Model, delta: f32) void {
-    const p = &m.ws[m.current].params;
-    p.master_width = std.math.clamp(p.master_width + delta, 0.05, 0.95);
+    p.primary_width = std.math.clamp(p.primary_width + delta, 0.05, 0.95);
 }
 
 pub fn applyConfigReload(m: *Model, tpl: LayoutParams) void {
     for (&m.ws) |*s| {
-        // Scroll viewport state is RUNTIME state, not config: preserving it
-        // prevents a spurious snap-right (n > prev_count fires when the
-        // counter resets) on an unrelated reload while scroll is active.
-        const keep_offset = s.params.scroll_offset;
-        const keep_prev_count = s.params.scroll_prev_count;
+        // Viewport state is RUNTIME state, not config: preserving it prevents
+        // a spurious snap-right (n > prev_count fires when the counter resets)
+        // on an unrelated reload while the viewport layout is active.
+        const keep_offset = s.params.viewport_offset;
+        const keep_prev_count = s.params.viewport_prev_count;
         s.params = tpl;
-        s.params.scroll_offset = keep_offset;
-        s.params.scroll_prev_count = keep_prev_count;
+        s.params.viewport_offset = keep_offset;
+        s.params.viewport_prev_count = keep_prev_count;
     }
 }

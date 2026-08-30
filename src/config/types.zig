@@ -217,100 +217,18 @@ pub const MasterSide = enum {
     }
 };
 
-/// Window placement policy for the master-stack layout.
-///
-/// Defined here and not in tiling.zig so that config.zig
-/// can parse it without creating a circular import.
-pub const MasterVariant = enum {
-    /// New window goes to stack, existing master stays (default).
-    lifo,
-    /// New window goes to master, existing master moves to stack.
-    fifo,
-};
-
-pub const MonocleVariant = enum {
-    /// True fullscreen; ignore gap settings (default).
-    gapless,
-    /// Honor gap settings like every other layout.
-    gaps,
-};
-
-pub const GridVariant = enum {
-    /// Strict grid: leave empty cells in incomplete last row (default).
-    rigid,
-    /// Last window in incomplete row expands to fill the row.
-    relaxed,
-};
-
-/// Combined layout variant state, matching the per-layout defaults.
-pub const LayoutVariants = struct {
-    master: MasterVariant = .lifo,
-    monocle: MonocleVariant = .gapless,
-    grid: GridVariant = .rigid,
-};
-
-/// The tiling layout algorithm.
-/// Defined here (not tiling.zig) to avoid a circular import; tiling.zig
-/// re-exports this as `tiling.Layout`.
-pub const Layout = enum {
-    master,
-    monocle,
-    grid,
-    fibonacci,
-    leaf,
-    scroll,
-    /// Windows keep their current positions. Configurable via
-    /// `tiling.layout = "floating"` (resolved via stringToEnum, not
-    /// layout_table) but never cyclable: excluded from layout_table, so
-    /// the layout cycle (model.cycleLayout) skips it.
-    floating,
-};
-
-/// One entry per cyclable layout: every `Layout` tag except `.floating`.
-/// Single source of truth for the name<->tag mapping used across tiling.zig,
-/// workspaces.zig, and config.zig. Table order (== model.LayoutKind order) is
-/// also the cycle order traversed by model.cycleLayout / actions.cycleLayoutKind.
-pub const LayoutInfo = struct {
-    tag: Layout,
-    /// Canonical name: what gets stored in cfg.tiling.layouts and shown in
-    /// the bar's layout indicator.
-    name: []const u8,
-    /// Alternate spellings accepted when parsing config, folded to `name`
-    /// before storage/comparison.
-    aliases: []const []const u8 = &.{},
-};
-
-pub const layout_table = [_]LayoutInfo{
-    .{ .tag = .master, .name = "master-stack", .aliases = &.{ "master", "master_stack" } },
-    .{ .tag = .monocle, .name = "monocle" },
-    .{ .tag = .grid, .name = "grid" },
-    .{ .tag = .fibonacci, .name = "fibonacci" },
-    .{ .tag = .leaf, .name = "leaf" },
-    .{ .tag = .scroll, .name = "scroll" },
-};
-
-/// Tagged union pairing a variant value with its owning layout type.
-pub const LayoutVariantOverride = union(enum) {
-    master: MasterVariant,
-    monocle: MonocleVariant,
-    grid: GridVariant,
-};
-
-/// Single source of truth mapping a variant-owning layout's config name to
-/// its variant enum type, the `LayoutVariantOverride` tag, and the field on
-/// `TilingConfig` that stores the parsed value.
-pub const variant_layouts = [_]struct { name: []const u8, variant: type, tag: []const u8, field: []const u8 }{
-    .{ .name = "master-stack", .variant = MasterVariant, .tag = "master", .field = "master_variant" },
-    .{ .name = "monocle", .variant = MonocleVariant, .tag = "monocle", .field = "monocle_variant" },
-    .{ .name = "grid", .variant = GridVariant, .tag = "grid", .field = "grid_variant" },
-};
-
+/// Window placement policy for the master-stack layout is now expressed as
+/// VALUE-STRINGS in the registry-driven `variants` map (see TilingConfig).
+/// Each layout module binds its own `variant_parse` to interpret those
+/// strings; there are no closed per-layout variant enums here anymore (the
+/// former MasterVariant/MonocleVariant/GridVariant and the
+/// LayoutVariantOverride union were deleted in Stage 3).
 /// Per-workspace startup layout assignment, overriding the global default.
-/// variant is null -> use the per-layout section default.
+/// variant is null -> use the per-layout map default ([tiling].variants).
 pub const WorkspaceLayoutOverride = struct {
     workspace_idx: u8, // 0-indexed workspace number
     layout_idx: u8, // index into TilingConfig.layouts
-    variant: ?LayoutVariantOverride, // null = use per-layout section default
+    variant: ?[]const u8, // null = use per-layout variants-map default
 };
 
 /// Per-workspace master count override, parsed from [tiling.layouts.master-stack.counts].
@@ -321,7 +239,11 @@ pub const WorkspaceMasterCountOverride = struct {
 
 pub const TilingConfig = struct {
     enabled: bool = true,
-    layout: []const u8 = "master-stack",
+    /// Canonical default layout name (resolved at seed time against the
+    /// `tiling_modules` registry). The "master-stack"/"master_stack" alias
+    /// spellings in config are canonicalized onto "master" by the config
+    /// boundary, so the stored value is always canonical.
+    layout: []const u8 = "master",
     layouts: std.ArrayList([]const u8) = .empty, // Available layouts in cycle order
     master_side: MasterSide = .left,
     master_width: parser.ScalableValue = parser.ScalableValue.percentage(50.0),
@@ -334,11 +256,11 @@ pub const TilingConfig = struct {
     /// resize) is allowed to reach, in pixels.
     min_window_dim: u16 = constants.min_window_dim,
 
-    // Per-layout variant preferences, stored as parsed enums (not raw
-    // strings) to avoid dangling slices after the config document is freed.
-    master_variant: MasterVariant = .lifo,
-    monocle_variant: MonocleVariant = .gapless,
-    grid_variant: GridVariant = .rigid,
+    // Per-layout variant preferences, stored generically as a canonical
+    // layout-name -> VALUE-STRING map. The value-strings are never freed here
+    // (they alias strings parsed by the `parser` Document, or literals), so
+    // deinit only releases the hashmap storage itself.
+    variants: std.StringHashMapUnmanaged([]const u8) = .empty,
 
     /// Per-workspace layout assignments parsed from the layouts array.
     workspace_layout_overrides: std.ArrayList(WorkspaceLayoutOverride) = .empty,
@@ -354,6 +276,17 @@ pub const TilingConfig = struct {
     pub fn deinit(self: *TilingConfig, allocator: std.mem.Allocator) void {
         for (self.layouts.items) |layout| allocator.free(layout);
         self.layouts.deinit(allocator);
+        {
+            var it = self.variants.iterator();
+            while (it.next()) |e| {
+                allocator.free(e.key_ptr.*);
+                allocator.free(e.value_ptr.*);
+            }
+            self.variants.deinit(allocator);
+        }
+        for (self.workspace_layout_overrides.items) |o| {
+            if (o.variant) |v| allocator.free(v);
+        }
         self.workspace_layout_overrides.deinit(allocator);
         self.workspace_master_count_overrides.deinit(allocator);
     }
@@ -420,15 +353,6 @@ pub const IndicatorLocation = enum {
     }
 };
 
-// Content segments that can be placed into a BarLayout column.
-pub const BarSegment = enum {
-    workspaces,
-    title,
-    clock,
-    layout,
-    variants,
-};
-
 /// Vertical placement of the bar on screen: top or bottom edge.
 pub const BarScreenPosition = enum {
     top,
@@ -442,12 +366,16 @@ pub const BarSegmentAnchor = enum {
     right,
 };
 
-/// One column of the bar: an anchor position and an ordered list of segments to display.
+/// One column of the bar: an anchor position and an ordered list of segment
+/// names (registry names) to display. Names are resolved against the generated
+/// `bar_modules` registry at layout time; unknown/removed names draw nothing
+/// (D7).
 pub const BarLayout = struct {
     position: BarSegmentAnchor,
-    segments: std.ArrayList(BarSegment),
+    segments: std.ArrayList([]const u8),
 
     pub inline fn deinit(self: *BarLayout, allocator: std.mem.Allocator) void {
+        for (self.segments.items) |s| allocator.free(s);
         self.segments.deinit(allocator);
     }
 };

@@ -9,7 +9,7 @@ const types = @import("types");
 const utils = @import("utils");
 const restart = @import("restart");
 const constants = @import("constants");
-const x11_masks = @import("x11_masks");
+const masks = @import("masks");
 const debug = @import("debug");
 const config = @import("config");
 const window = @import("window");
@@ -20,6 +20,9 @@ const build_options = @import("build_options");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
 const spawn = @import("spawn");
+// Layout-name resolution for diagnostics (registry-driven; gated so a
+// tiling-less build still compiles).
+const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
 // The bar's hook set is reached through the core-owned `surfaces` composition
 // root, never by importing the bar module here. When the bar is absent it is
 // the comptime `null` type, so every `if (build_options.has_bar)` call below
@@ -88,7 +91,7 @@ pub fn setup(conn: core.Connection, screen: core.Screen, root: u32) void {
 /// ScrollLock, and their combinations).
 fn setupGrabs(conn: core.Connection, root: u32) void {
     for (mouse_buttons) |button| {
-        for (x11_masks.lock_modifiers) |lock| {
+        for (masks.lock_modifiers) |lock| {
             _ = xcb.xcb_grab_button(
                 conn,
                 0,
@@ -101,7 +104,7 @@ fn setupGrabs(conn: core.Connection, root: u32) void {
                 root,
                 xcb.XCB_NONE,
                 button,
-                @intCast(x11_masks.mod_super | lock),
+                @intCast(masks.mod_super | lock),
             );
         }
     }
@@ -125,8 +128,9 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     // config.resolveKeybindings.
     const matched: ?*const types.Action = config.lookupKeybinding(mods, keysym);
 
-    // The prompt owns all key input while active; routing is handled inside it.
-    if (build_options.has_bar) if (surfaces.promptHandleKeypress(event, matched)) return;
+    // The chrome overlay owns all key input while active; routing is handled
+    // inside it (input flows in, true = consumed, before keybinding dispatch).
+    if (build_options.has_bar) if (surfaces.chromeHandleKeypress(event, matched)) return;
 
     if (matched) |action| {
         debug.info("[KEY] mods=0x{x} keysym=0x{x} action={s}", .{ mods, keysym, @tagName(action.*) });
@@ -145,7 +149,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
 
     const cs = core.getState();
     const clicked_window = if (event.child != 0) event.child else event.event;
-    const super_held = (event.state & x11_masks.mod_super) != 0;
+    const super_held = (event.state & masks.mod_super) != 0;
     const mods = utils.normalizeModifiers(event.state);
 
     // The bar selects BUTTON_PRESS directly (not via the Super+Button grab),
@@ -267,7 +271,7 @@ fn executeAction(action: *const types.Action) void {
         .sequence => |acts| for (acts) |*a| executeAction(a),
 
         // Fullscreen: keybind path resolves the focused window, then shares
-        // the EWMH/title-click transition.
+        // the chrome-click transition.
         .toggle_fullscreen => {
             if (pipeline.model().focused) |win| actions.fullscreenToggleWindow(win);
         },
@@ -344,20 +348,20 @@ fn executeTilingAction(action: *const types.Action) void {
             actions.stepVariantDir(1);
             focus.beginTilingOpSettle();
         },
-        .increase_master => actions.adjustMasterWidthAction(0.025),
-        .decrease_master => actions.adjustMasterWidthAction(-0.025),
-        .increase_master_count => actions.adjustMasterCount(1),
-        .decrease_master_count => actions.adjustMasterCount(-1),
-        .grow_stack_top => actions.adjustStackBalance(0.5),
-        .grow_stack_bottom => actions.adjustStackBalance(-0.5),
+        .increase_master => actions.adjustPrimaryWidthAction(0.025),
+        .decrease_master => actions.adjustPrimaryWidthAction(-0.025),
+        .increase_master_count => actions.adjustPrimaryCount(1),
+        .decrease_master_count => actions.adjustPrimaryCount(-1),
+        .grow_stack_top => actions.adjustSecondaryBalance(0.5),
+        .grow_stack_bottom => actions.adjustSecondaryBalance(-0.5),
 
-        .swap_master, .swap_master_focus_swap => actions.swapMasterAction(action.* == .swap_master_focus_swap),
+        .swap_master, .swap_master_focus_swap => actions.swapPrimaryAction(action.* == .swap_master_focus_swap),
 
         .move_window_next => actions.moveFocused(1),
         .move_window_prev => actions.moveFocused(-1),
 
-        .scroll_view_left => actions.scrollStep(-1),
-        .scroll_view_right => actions.scrollStep(1),
+        .scroll_view_left => actions.viewportStep(-1),
+        .scroll_view_right => actions.viewportStep(1),
 
         else => unhandledAction("tiling"),
     }
@@ -378,12 +382,12 @@ fn executeWorkspaceAction(action: *const types.Action) void {
 }
 
 /// Dispatches bar-related actions: visibility toggle, position toggle,
-/// and prompt toggle.
+/// and chrome-overlay toggle.
 fn executeBarAction(action: *const types.Action) void {
     switch (action.*) {
         .toggle_bar_visibility => if (build_options.has_bar) surfaces.setBarState(.toggle_bar_visibility),
         .toggle_bar_position => if (build_options.has_bar) surfaces.toggleBarSegmentAnchor(),
-        .toggle_prompt => if (build_options.has_bar) surfaces.promptToggle(),
+        .toggle_prompt => if (build_options.has_bar) surfaces.chromeToggleOverlay(),
         else => unhandledAction("bar"),
     }
 }
@@ -401,17 +405,16 @@ fn executeMinimizeAction(action: *const types.Action) void {
 }
 
 /// Dispatches window focus cycling (dwm-style Mod+k / Mod+j).
-/// Snaps the scroll-layout viewport to the newly focused window when
-/// it is off-screen. The server grab prevents a partial retile frame.
+/// Snaps the viewport to the newly focused window when it is off-screen. The server grab prevents a partial retile frame.
 fn executeWindowAction(action: *const types.Action) void {
     switch (action.*) {
         .focus_next_window => {
             focus.focusNext();
-            actions.snapScrollToFocused();
+            actions.snapViewportToFocused();
         },
         .focus_prev_window => {
             focus.focusPrev();
-            actions.snapScrollToFocused();
+            actions.snapViewportToFocused();
         },
         else => unhandledAction("window"),
     }
@@ -447,7 +450,7 @@ fn dumpState() void {
 
     if (build_options.has_tiling and @import("core").tilingEnabled()) {
         debug.info("Tiling enabled: true", .{});
-        debug.info("Tiling layout:  {s}", .{@tagName(pipeline.getCurrentLayout())});
+        debug.info("Tiling layout:  {s}", .{tiling.moduleName(pipeline.getCurrentLayout())});
         debug.info("Tiled windows:  {}", .{@import("model").tiledCountOnWs(pipeline.model(), pipeline.model().current)});
     }
 

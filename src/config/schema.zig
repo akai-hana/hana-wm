@@ -129,8 +129,8 @@ pub const knobs = [_]Knob{
     .{ .places = &.{ place("tiling.aesthetics", "border_unfocused"), place("tiling", "border_unfocused") }, .target = "tiling.border_unfocused", .kind = .color, .def = .{ .int = 0x383C4A }, .requires = "tiling" },
 
     // Master-stack trio: the dedicated section's shorter spellings win;
-    // flat [tiling] uses the legacy names. Section presence -- not key
-    // presence -- picks the spelling, matching the old orelse chain.
+    // flat [tiling] keeps the flat spellings. Section presence -- not key
+    // presence -- picks the spelling.
     .{ .places = &.{ place("tiling.layouts.master-stack", "count"), place("tiling", "master_count") }, .target = "tiling.master_count", .kind = .{ .int = .{ .T = u8, .min = 1 } }, .def = .{ .int = 1 }, .requires = "tiling" },
     .{ .places = &.{ place("tiling.layouts.master-stack", "side"), place("tiling", "master_side") }, .target = "tiling.master_side", .kind = .{ .enum_read = .{ .T = types.MasterSide, .ci = true } }, .def = .{ .enum_val = .{ .T = types.MasterSide, .name = "left" } }, .requires = "tiling" },
     // No local bound: validate() owns master_width's ratio/negative policy.

@@ -7,7 +7,7 @@ const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
 const constants = @import("constants");
-const x11_masks = @import("x11_masks");
+const masks = @import("masks");
 const debug = @import("debug");
 const tracking = @import("tracking");
 const focus = @import("focus");
@@ -19,12 +19,18 @@ const build_options = @import("build_options");
 // each present module's init/deinit, and absent modules are simply not in
 // the array.
 const window_mods = @import("window_modules").modules;
+
+/// Registry lookup for the hook `field`; the canonical scan lives in
+/// `plugin.zig` (see `plugin.providerOf`). Null when no module binds it.
+fn providerOf(comptime field: std.meta.FieldEnum(@import("plugin").WindowModule)) ?@import("plugin").WindowModule {
+    return @import("plugin").providerOf(window_mods[0..], field);
+}
 const screen_mod = @import("screen");
 const wincache = @import("wincache");
 const borders = @import("borders");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
-const restart_state = @import("restart_state");
+const persist = @import("persist");
 
 // XSizeHints flags (ICCCM 4.1.2.3)
 const p_max_size: u32 = 0x20;
@@ -730,7 +736,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
         conn,
         win,
         xcb.XCB_CW_EVENT_MASK,
-        &[_]u32{x11_masks.EventMasks.managed_window},
+        &[_]u32{masks.EventMasks.managed_window},
     );
 
     // ----- Fire ALL property cookies before draining any reply -----
@@ -805,7 +811,7 @@ fn admitWindow(win: u32, target_ws: u8, on_current: bool) void {
 /// Linear scan for a window's restore record. Restore files are small
 /// (bounded by the model's store_capacity), so a flat scan is cache-local and
 /// avoids allocating a lookup map just for adoption.
-fn findWindowRecord(windows: []const restart_state.WindowRecord, win: u32) ?*const restart_state.WindowRecord {
+fn findWindowRecord(windows: []const persist.WindowRecord, win: u32) ?*const persist.WindowRecord {
     for (windows) |*r| {
         if (r.win == win) return r;
     }
@@ -816,60 +822,54 @@ fn findWindowRecord(windows: []const restart_state.WindowRecord, win: u32) ?*con
 /// workspace (lowest set bit of its mask) when present, else the currently
 /// active workspace. Deliberately NOT the spawn-queue/rules resolution, which
 /// describes brand-new spawns rather than pre-existing windows.
-fn restoredOrCurrent(record: ?*const restart_state.WindowRecord) u8 {
+fn restoredOrCurrent(record: ?*const persist.WindowRecord) u8 {
     if (record) |r| {
         if (r.mask != 0) return @intCast(@import("model").lowestBit(r.mask));
     }
     return tracking.getCurrentWorkspace() orelse 0;
 }
 
-/// Re-applies a restore record's mask, mode, and presence onto an
+/// Re-applies a restore record's mask, anchor, and presence onto an
 /// already-registered model entry. Registration (admitWindow ->
-/// actions.mapRequest) creates the entry as a present base-tiled window on its
-/// target workspace; this overwrites the per-window state that survived the
-/// re-exec so the caller's reconcile can place it exactly as before. Presence
-/// bookkeeping that would otherwise drift is routed through the owning window
-/// module's deserialize hook rather than patched by hand.
-fn applyRestoredRecord(win: u32, record: *const restart_state.WindowRecord) void {
+/// actions.mapRequest) creates the entry as a present tiled-anchored window on
+/// its target workspace; this overwrites the per-window state that survived
+/// the re-exec so the caller's reconcile can place it exactly as before.
+/// Presence bookkeeping that would otherwise drift is routed through the owning
+/// window module's deserialize hook rather than patched by hand.
+fn applyRestoredRecord(win: u32, record: *const persist.WindowRecord) void {
     const model = pipeline.model();
     const e = model.store.getPtr(win) orelse return;
 
     e.mask = record.mask;
 
-    switch (record.mode) {
-        .base => |b| switch (b) {
-            .tiled => {
-                // Registration already created a base-tiled entry with its
-                // home_ws populated; nothing further to patch.
-            },
-            .floating => |rect| {
-                // Mirror toggleFloating's floating storage: mode + home_ws
-                // null (a floating window has no tiled slot). The caller's
-                // reconcile sizes the window from this rect.
-                e.mode = .{ .base = .{ .floating = rect } };
-                e.home_ws = null;
-            },
+    switch (record.anchor) {
+        .tiled => {
+            // Registration already created a tiled-anchored entry with its
+            // home_ws populated; nothing further to patch.
         },
-        .fullscreen => {
-            // Fullscreen truth is model-side; sync places the fullscreen
-            // winner from this mode alone, so no wire action is needed here.
-            e.mode = record.mode;
+        .floating => |rect| {
+            // Mirror toggleFloating's floating storage: anchor + home_ws null
+            // (a floating window has no tiled slot). The caller's reconcile
+            // sizes the window from this rect.
+            e.anchor = .{ .floating = rect };
+            e.home_ws = null;
         },
     }
 
-    // A window that was parked (hidden by an extension) at save time is
-    // re-parked through the window-module registry's deserialize hook: the
-    // module that claims the opaque ext blob re-asserts presence == .parked
-    // and restores its private record. When no module claims the blob (the
-    // feature was stripped, or the record carried no ext), the entry stays
-    // present and reconciles on-screen -- the graceful degrade.
-    if (record.presence == .parked) {
-        if (record.ext) |blob| {
-            const m_ptr: *anyopaque = @ptrCast(model);
-            for (window_mods) |mod| if (mod.deserializeWindow) |f| {
-                if (f(win, blob, m_ptr)) break; // claimed
-            };
-        }
+    // Presence that was non-present at save time is re-asserted through the
+    // window-module registry's deserialize hook: the module that claims the
+    // opaque ext blob re-parks the window / resumes its coverage and restores
+    // its private record. Dispatch happens for ANY non-null ext (not only
+    // parked records): a covering (fullscreen) window advertises presence
+    // .covering + a fullscreen blob, and must route through the module in the
+    // same pass. When no module claims the blob (the feature was stripped, or
+    // the record carried no ext), the entry stays present and reconciles
+    // on-screen -- the graceful degrade.
+    if (record.ext) |blob| {
+        const m_ptr: *anyopaque = @ptrCast(model);
+        for (window_mods) |mod| if (mod.deserializeWindow) |f| {
+            if (f(win, blob, m_ptr)) break; // claimed
+        };
     }
 }
 
@@ -890,10 +890,10 @@ fn applyRestoredRecord(win: u32, record: *const restart_state.WindowRecord) void
 ///     presence directly on the model entry.
 ///
 /// CALLING CONTRACT: this does NOT reconcile. Placement derives from
-/// tiled_order / focus_mru, which are rebuilt by restart_state.applyModelLevel
+/// tiled_order / focus_mru, which are rebuilt by persist.applyModelLevel
 /// AFTER this returns; a reconcile here would place pre-restore state. The
 /// caller (main) therefore runs:
-///     adoptRootWindows(); restart_state.applyModelLevel(m); one reconcile.
+///     adoptRootWindows(); persist.applyModelLevel(m); one reconcile.
 /// Returns the number of windows admitted (restored-parked ones included).
 pub fn adoptRootWindows() !usize {
     // Defensive boot-order guard: adoption expects the window module's state
@@ -909,7 +909,7 @@ pub fn adoptRootWindows() !usize {
     const children = xcb.xcb_query_tree_children(tree_reply);
     const child_count: usize = @intCast(xcb.xcb_query_tree_children_length(tree_reply));
 
-    const loaded = restart_state.loaded();
+    const loaded = persist.loaded();
 
     var adopted: usize = 0;
     for (children[0..child_count]) |win| {
@@ -950,7 +950,7 @@ pub fn adoptRootWindows() !usize {
             conn,
             win,
             xcb.XCB_CW_EVENT_MASK,
-            &[_]u32{x11_masks.EventMasks.managed_window},
+            &[_]u32{masks.EventMasks.managed_window},
         );
 
         // ----- Fire the same property cookies the MapRequest path fires -----
@@ -1011,8 +1011,8 @@ pub fn adoptRootWindows() !usize {
 }
 
 fn unmanageWindow(win: u32) void {
-    // Fullscreen truth is model-side (actions.unmanage reads it); no legacy
-    // record-store bookkeeping remains.
+    // Covering truth is model-side (actions.unmanage reads it); the module
+    // store is queried through the registry below.
     if (state.?.cache_ready) {
         if (state.?.cache_slots.indexOfById(win)) |i| state.?.cache_slots.swapRemove(i);
     }
@@ -1030,31 +1030,31 @@ fn unmanageWindow(win: u32) void {
     // with its input model queried BEFORE the grab.
     wincache.removeWindow(win);
 
-    // Capture the fullscreen record and focus ownership BEFORE
-    // tracking.removeWindow (the workspaces.removeWindow facade -> unregister)
-    // drops the model entry: after that, actions.unmanage could never know that the
-    // closed window held focus (m.focused is already cleared), so closing a
-    // window left the workspace unfocused until a pointer event re-focused
-    // it. Both facts ride ctx into actions.unmanage, which runs the same
-    // close fallback as minimize.
+    // Capture the covering record and focus ownership BEFORE
+    // tracking.removeWindow (the workspace layer's removeWindow facade ->
+    // unregister) drops the model entry: after that, actions.unmanage could
+    // never know that the closed window held focus (m.focused is already
+    // cleared), so closing a window left the workspace unfocused until a
+    // pointer event re-focused it. Both facts ride ctx into
+    // actions.unmanage, which runs the same close fallback as the hide path.
     var actx: actions.Ctx = .{
-        .withdrawn_fullscreen_ws = if (pipeline.initialized) (if (build_options.has_fullscreen) @import("fullscreen").fullscreenWsOf(pipeline.model(), win) else null) else null,
+        .withdrawn_fullscreen_ws = if (pipeline.initialized) (if (providerOf(.coveringWsOf)) |wm| wm.coveringWsOf.?(pipeline.model(), win) else null) else null,
         .withdrawn_was_focused = pipeline.initialized and pipeline.model().focused == win,
     };
     // Module cleanup on window drop: each compiled-in window module's
     // onWindowGone fires before the model entry is unregistered below, so
-    // per-window bookkeeping (e.g. minimize's parked record) is dropped with
-    // the window. This is the ONLY fire on the withdraw route (UnmapNotify /
-    // wm_close, XID still alive); a DestroyNotify already fired it from
-    // events.zig first, and every hook is idempotent (find-then-clear), so
-    // the repeat for the same window is harmless.
+    // per-window bookkeeping (e.g. the hide module's parked record) is
+    // dropped with the window. This is the ONLY fire on the withdraw route
+    // (UnmapNotify / wm_close, XID still alive); a DestroyNotify already
+    // fired it from events.zig first, and every hook is idempotent
+    // (find-then-clear), so the repeat for the same window is harmless.
     for (window_mods) |mod| if (mod.onWindowGone) |f| f(win);
     if (build_options.has_workspaces) tracking.removeWindow(win);
 
-    // PIPELINE (train d): drop the MODEL entry, resolve the
-    // post-close focus target (fallback tiers) and reconcile under one grab.
-    // Idempotent: a window withdrawn via unmap+destroy runs this once per
-    // event; unregister/fallback no-op on the second pass.
+    // Drop the MODEL entry, resolve the post-close focus target (fallback
+    // tiers) and reconcile under one grab. Idempotent: a window withdrawn
+    // via unmap+destroy runs this once per event; unregister/fallback no-op
+    // on the second pass.
     actions.unmanage(&actx, win);
 }
 
@@ -1104,10 +1104,10 @@ pub fn geometryFromXcbReply(reply: *xcb.xcb_get_geometry_reply_t) utils.Rect {
 /// Resolve the window's current geometry, cheapest source first:
 ///
 ///   1. Tiling cache: zero round-trips (always current after a retile).
-///   2. Fullscreen: geometry is fixed at (0, 0, screen_w, screen_h, bw=0);
-///      enterFullscreen writes exactly this and invalidates the tiling cache
-///      entry so the window misses path 1 while fullscreen. Handling it here
-///      avoids a blocking xcb_get_geometry per ConfigureRequest, which matters
+///   2. Covering: geometry is pinned to the screen rect (0, 0, screen_w,
+///      screen_h, bw=0) -- sync seeds the covering winner with `ctx.screen` --
+///      so the fixed value is returned directly. Handling it here avoids a
+///      blocking xcb_get_geometry per ConfigureRequest, which matters
 ///      for video players that poll their size continuously.
 ///   3. True cache miss: one blocking xcb_get_geometry. Floating windows
 ///      never retiled; a fallback, not a hot path.
@@ -1120,8 +1120,8 @@ fn resolveConfigureGeometry(win: u32) ?utils.Rect {
         return .{ .x = rect.x, .y = rect.y, .width = rect.width, .height = rect.height, .border_width = border };
     }
 
-    if (build_options.has_fullscreen) {
-        if (@import("fullscreen").isFullscreenMode(pipeline.model(), win)) {
+    if (providerOf(.isCoveringMode)) |wm| {
+        if (wm.isCoveringMode.?(pipeline.model(), win)) {
             const screen = core.getState().screen;
             return .{
                 .x = 0,
@@ -1191,8 +1191,8 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
             .height = if (mask & xcb.XCB_CONFIG_WINDOW_HEIGHT != 0) event.height else null,
             .border_width = if (mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0) event.border_width else null,
         };
-        if (build_options.has_floating) {
-            switch (@import("floating").honorConfigureRequest(pipeline.model(), win, req)) {
+        if (providerOf(.honorConfigureRequest)) |wm| {
+            switch (wm.honorConfigureRequest.?(pipeline.model(), win, req)) {
                 .geometry_applied => {
                     // Floating: the model stored exactly these values, so the
                     // wire send mirrors the request verbatim. BW rides along and
@@ -1258,7 +1258,7 @@ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
     // only when the cursor had moved would instead suppress all future
     // hover-focus events if the cursor stayed at the exact spawn pixel.
     focus.setSuppressReason(.none);
-    // Legacy artifact: `spawn_cursor` was intended to record the spawn
+    // `spawn_cursor` was intended to record the spawn
     // position but was never implemented, so the (0,0) comparison only fires
     // when the cursor is parked at the screen origin. Kept verbatim
     // (harness-pinned: S16).
@@ -1267,13 +1267,13 @@ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
 
 /// Attempt to focus `win` via the hover (EnterNotify) path.
 ///
-/// Guards against workspace membership and minimize state before calling
+/// Guards against workspace membership and hidden state before calling
 /// focus.grabFocus(.mouse_enter). The .mouse_enter reason is the direct
 /// EnterNotify path: lightweight, no raise, no confirm.
 inline fn maybeFocusWindow(win: u32) void {
     if (!isOnCurrentWorkspace(win)) return;
-    if (build_options.has_minimize) {
-        if (@import("minimize").isMinimized(pipeline.model(), win)) return;
+    if (providerOf(.isWindowHidden)) |wm| {
+        if (wm.isWindowHidden.?(pipeline.model(), win)) return;
     }
     debug.info("[MAYBE_FOCUS] 0x{x}", .{win});
     focus.grabFocus(win, .mouse_enter);
@@ -1537,7 +1537,7 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     }
 
     const action = event.data.data32[0];
-    const is_fs = if (build_options.has_fullscreen) @import("fullscreen").isFullscreenMode(pipeline.model(), win) else false;
+    const is_fs = if (providerOf(.isCoveringMode)) |wm| wm.isCoveringMode.?(pipeline.model(), win) else false;
     const should_enter = switch (action) {
         1 => true, // _NET_WM_STATE_ADD
         0 => false, // _NET_WM_STATE_REMOVE
@@ -1545,8 +1545,8 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
         else => return,
     };
     if (should_enter == is_fs) return;
-    // PIPELINE: model-path transition; the legacy enter/exit
-    // fullscreen machinery bypassed (and fought) the single source of truth.
+    // PIPELINE: model-path transition; the transition stays on the single
+    // source of truth.
     actions.fullscreenToggleWindow(win);
 }
 

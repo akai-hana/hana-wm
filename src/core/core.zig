@@ -131,9 +131,10 @@ pub inline fn bumpLayout() void {
 // These are the only facts other modules need about the tiling subsystem:
 // callers read them here instead of importing the tiling module, so that
 // `tiling` is a true plugin. The implementations are thin config reads; the
-// layout name<->tag mapping lives in `types.layout_table`. None of these name
-// any tiling module; they are just "can this WM tile, how wide are borders,
-// what is the active layout" questions core can answer from its config.
+// active-layout name resolves to a registry id at seed time in the tiling
+// layer (engine.layoutByName), never here. None of these name any tiling
+// module; they are just "can this WM tile, how wide are borders" questions
+// core can answer from its config.
 
 /// Whether the tiling windowing paradigm is enabled (config fact).
 pub inline fn tilingEnabled() bool {
@@ -144,31 +145,6 @@ pub inline fn tilingEnabled() bool {
 pub inline fn borderWidth() u16 {
     const cs = getState();
     return utils.scaling.scaleBorderWidth(cs.config.tiling.border_width, cs.screen.height_in_pixels);
-}
-
-/// Per-layout variant flags from config (monocle/grid/master variants).
-pub inline fn layoutVariants() types.LayoutVariants {
-    const cfg_tiling = getState().config.tiling;
-    return .{
-        .master = cfg_tiling.master_variant,
-        .monocle = cfg_tiling.monocle_variant,
-        .grid = cfg_tiling.grid_variant,
-    };
-}
-
-/// Resolves a config-file layout name (canonical or alias) to its `Layout`
-/// tag; null for unknown names. Pure mapping over `types.layout_table`.
-pub inline fn layoutFromString(name: []const u8) ?types.Layout {
-    for (types.layout_table) |entry| {
-        if (std.mem.eql(u8, name, entry.name)) return entry.tag;
-        for (entry.aliases) |alias| if (std.mem.eql(u8, name, alias)) return entry.tag;
-    }
-    return null;
-}
-
-/// First canonical layout; fallback for unknown/missing config names.
-pub inline fn defaultLayout() types.Layout {
-    return types.layout_table[0].tag;
 }
 
 var state: ?State = null;

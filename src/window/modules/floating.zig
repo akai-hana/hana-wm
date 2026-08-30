@@ -327,12 +327,9 @@ pub fn getDragLastRect() utils.Rect {
 /// Updates a floating window's rect on the model, no-op for tiled/unknown.
 pub fn setFloatingRect(m: *model.Model, win: model.WindowId, r: utils.Rect) void {
     const e = m.store.getPtr(win) orelse return;
-    switch (e.mode) {
-        .base => |*bm| switch (bm.*) {
-            .floating => |*fr| fr.* = r,
-            .tiled => {},
-        },
-        else => {},
+    if (e.presence == .covering) return; // fullscreen owns geometry
+    if (e.anchor == .floating) {
+        e.anchor.floating = r;
     }
 }
 
@@ -342,25 +339,23 @@ pub fn honorConfigureRequest(m: *model.Model, win: model.WindowId, req: model.Co
         if (@import("minimize").isMinimized(m, win)) return .ignored;
     }
     const e = m.store.getPtr(win) orelse return .ignored;
-    switch (e.mode) {
-        .base => |*bm| switch (bm.*) {
-            .floating => |*r| {
-                if (req.x) |v| r.x = v;
-                if (req.y) |v| r.y = v;
-                if (req.width) |v| r.width = v;
-                if (req.height) |v| r.height = v;
-                // NOTE: a requested border_width is not stored here (the
-                // floating rect has no bw field); the entry point sends and
-                // caches it alongside the geometry it applies.
-                return .geometry_applied;
-            },
-            .tiled => {
-                // Geometry denied. BW honored; recording is SYNC's job.
-                if (req.border_width != null) return .border_only;
-                return .ignored;
-            },
+    if (e.presence == .covering) return .ignored; // fullscreen owns geometry
+    switch (e.anchor) {
+        .floating => |*r| {
+            if (req.x) |v| r.x = v;
+            if (req.y) |v| r.y = v;
+            if (req.width) |v| r.width = v;
+            if (req.height) |v| r.height = v;
+            // NOTE: a requested border_width is not stored here (the
+            // floating rect has no bw field); the entry point sends and
+            // caches it alongside the geometry it applies.
+            return .geometry_applied;
         },
-        .fullscreen => return .ignored,
+        .tiled => {
+            // Geometry denied. BW honored; recording is SYNC's job.
+            if (req.border_width != null) return .border_only;
+            return .ignored;
+        },
     }
 }
 
@@ -374,4 +369,6 @@ pub const module: @import("plugin").WindowModule = .{
     .isResizingWindow = isResizingWindow,
     .getDragLastRect = getDragLastRect,
     .cancelDragForWindow = cancelDragForWindow,
+    .setFloatingRect = setFloatingRect,
+    .honorConfigureRequest = honorConfigureRequest,
 };

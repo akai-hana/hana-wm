@@ -103,7 +103,7 @@ pub inline fn getSuppressReason() core.FocusSuppressReason {
 /// Centralises suppression policy here so window.handleEnterNotify doesn't need
 /// to know specific Reason values. NOTE: window_spawn suppression is handled in
 /// window.zig's suppressSpawnCrossing, which inspects the crossing's own
-/// coordinates (legacy origin-parked predicate, kept verbatim); any reason
+/// coordinates (the origin-parked predicate); any reason
 /// that doesn't need coordinate disambiguation belongs here.
 pub inline fn shouldSuppressEnterNotify() bool {
     return state.?.suppress_reason == .tiling_operation;
@@ -737,8 +737,7 @@ inline fn appendVisible(w: u32, len: *usize) void {
 
 /// Build an ordered list of currently-visible windows for cycling.
 ///
-/// All visible windows in tracking-table order (the legacy tiling-pool
-/// branch is gone; the pool list is never fed). Emits only windows that are
+/// All visible windows in tracking-table order; the pool list is never fed. Emits only windows that are
 /// on the current workspace and not minimized. Returns the count written into
 /// `cycle_buf`, or 0 if none.
 fn collectVisibleWindows() usize {

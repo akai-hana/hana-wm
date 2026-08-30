@@ -1,23 +1,23 @@
 //! Core utilities: FACADE.
 //!
-//! Pure, xcb-free geometry/scaling helpers and re-exports every public decl
-//! so existing `utils.X` call sites are unchanged:
+//! Purely xcb-free: geometry/scaling helpers plus re-exports of every public
+//! decl from the modules below so existing `utils.X` call sites are unchanged:
 //!
 //!   bounded.zig   BoundedList                       (xcb-free)
 //!   proc.zig      lifecycle flags, wake pipe, pipes  (xcb-free)
-//!   x11wire.zig   atoms/EWMH/properties/grab/configure shims (xcb-DEPENDENT)
 //!
 //! Layer note: model/tiling reference only the xcb-free decls here and in
-//! this file's own pure section. x11wire exists so the wire primitives have
-//! one honest home (check-layers' "wire primitives" allowlist entry).
+//! this file's own pure section. The xcb-dependent halves (X11 wire
+//! primitives and masks) live under core/x11/ and are re-exported here so
+//! window/bar/core call sites stay unchanged.
 
 const std = @import("std");
 const constants = @import("constants");
-const x11_masks = @import("x11_masks");
+const masks = @import("masks");
 
 const proc = @import("proc.zig");
 const bounded = @import("bounded.zig");
-const x11wire = @import("x11wire.zig");
+const x11wire = @import("wire");
 
 // --- process lifecycle (re-exports) --------------------------------------
 pub const running = &proc.running;
@@ -57,7 +57,7 @@ pub inline fn realtimeNs() u64 {
 // --- bounded collections (re-exports) ---------------------------------------
 pub const BoundedList = bounded.BoundedList;
 
-// --- X11 wire primitives (re-exports; xcb-dependent live in x11wire.zig) ---
+// --- X11 wire primitives (re-exports; xcb-dependent live in core/x11/wire.zig) ---
 pub const initAtomCache = x11wire.initAtomCache;
 pub const getAtomCached = x11wire.getAtomCached;
 pub const getAtomOrZero = x11wire.getAtomOrZero;
@@ -109,7 +109,7 @@ pub inline fn toXcbCoord(v: i16) u32 {
 /// Strips lock-key and pointer-button bits from a raw event modifier state,
 /// leaving only the modifier bits the WM uses for keybinding matching.
 pub inline fn normalizeModifiers(state: u16) u16 {
-    return state & x11_masks.mod_mask_binding;
+    return state & masks.mod_mask_binding;
 }
 
 // Canonical scaling formulas: pure functions of a ScalableValue, no DPI

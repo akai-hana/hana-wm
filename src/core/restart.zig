@@ -30,15 +30,6 @@ const c = @cImport({
     @cInclude("stdlib.h");
 });
 
-/// What the unified `reload` trigger decided to do.
-pub const Decision = enum {
-    /// Binary file unchanged since boot, so: in-place config hot-reload.
-    config_reload,
-    /// Binary file differs from the running image; full re-exec, which
-    /// loads a fresh config as a side effect.
-    reexec,
-};
-
 /// Identity tuple of a stat'd binary: enough to tell "same file" from
 /// "different file or rewritten file" across a filesystem.
 const FileIdentity = struct {

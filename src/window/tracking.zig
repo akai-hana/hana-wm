@@ -168,13 +168,12 @@ pub inline fn isWindowOnWorkspace(win: u32, ws_idx: core.WorkspaceId) bool {
     return mask & workspaceBit(ws_idx.index) != 0;
 }
 
-/// True when `win` sits in the model's base-tiled mode (not floating,
-/// fullscreen or minimized). Replaces the legacy tiling pool's
-/// isWindowTiled/isWindowActiveTiled, which read a list nothing feeds.
+/// True when `win` has a tiled anchor (not floating, covering or
+/// minimized); reads the model entry directly.
 pub fn isTiledMode(win: u32) bool {
     const mm = m() orelse return false;
     const e = mm.store.get(win) orelse return false;
-    return e.mode == .base and e.mode.base == .tiled;
+    return e.anchor == .tiled;
 }
 
 pub inline fn isOnCurrentWorkspace(win: u32) bool {

@@ -10,8 +10,8 @@
 //!
 //! A fullscreen record is a *ghost* while its window is minimized: minimize
 //! parks the model entry (`presence == .parked`) but does NOT touch the rec,
-//! so `fullscreenWsOf` still reports the ws (Tier-1 parity T35) and the rec
-//! resumes coverage on restore.
+//! so `fullscreenWsOf` still reports the ws and the rec resumes coverage on
+//! restore.
 //!
 //! The deserialize hook receives the wire layer's `*model.Model` as a
 //! `*anyopaque` (see plugin.WindowModule) so the seam's signature stays free
@@ -135,7 +135,7 @@ pub fn isFullscreenMode(m: *const model.Model, win: model.WindowId) bool {
 /// The workspace `win` is fullscreen on, per its module record. GHOST: still
 /// reports the ws even while the model presence is parked (minimized-from-
 /// fullscreen), so callers classifying drops/withdraw-without-destroy can read
-/// the true target before teardown (Tier-1 parity T35).
+/// the true target before teardown.
 pub fn fullscreenWsOf(m: *const model.Model, win: model.WindowId) ?model.WSId {
     _ = m;
     const idx = findRec(win) orelse return null;
@@ -151,35 +151,50 @@ pub fn isFullscreenOnWs(m: *const model.Model, win: model.WindowId, ws: model.WS
     return g_recs.slice()[idx].ws == ws;
 }
 
-/// The first record on `ws` whose window is non-null in the store and NOT
-/// parked (minimized). Ghost records whose window is parked return null
-/// (Tier-1 parity T35) — the slot looks free to the bar even though the rec
-/// still exists on-disk. At most one visible fullscreen per ws is guaranteed
-/// by sync (others parked).
+/// The first record on `ws` whose window exists, is present-not-parked AND
+/// visible on `ws` (a stray record targeting `ws` whose base is tagged
+/// elsewhere never counts as an occupant -- sync parks such strays instead of
+/// letting them claim the slot). Ghost records whose window is parked
+/// (minimized) return null -- the slot looks free to the bar even though the
+/// rec still exists on-disk. At most one
+/// visible fullscreen per ws is guaranteed by sync (others parked).
 pub fn fullscreenOccupantOnWs(m: *const model.Model, ws: model.WSId) ?model.WindowId {
     for (g_recs.constSlice()) |rec| {
         if (rec.ws != ws) continue;
         const e = m.store.get(rec.win) orelse continue;
         if (e.presence == .parked) continue;
+        if (!model.visibleOn(m, rec.win, ws)) continue;
         return rec.win;
     }
     return null;
 }
 
-/// True iff some OTHER window's record covers `dest`: a rec with `r.win != win`
-/// and `r.ws == dest`, whose window is present-not-parked (same visibility rule
-/// as the occupant query). Shared with the workspaces move/tag slice:
-/// fullscreen transfer-on-move drops the mover rather than clobbering a
-/// resident.
+/// True iff some OTHER window's record covers `dest`: a rec with `r.win != win`,
+/// `r.ws == dest`, whose window is present-not-parked AND visible on `dest`
+/// (same visibility rule as the occupant query). Shared with the workspaces
+/// move/tag slice: fullscreen transfer-on-move drops the mover rather than
+/// clobbering a resident.
 pub fn fullscreenOccupied(m: *const model.Model, win: model.WindowId, dest: model.WSId) bool {
     for (g_recs.constSlice()) |rec| {
         if (rec.win == win) continue;
         if (rec.ws != dest) continue;
         const e = m.store.get(rec.win) orelse continue;
         if (e.presence == .parked) continue;
+        if (!model.visibleOn(m, rec.win, dest)) continue;
         return true;
     }
     return false;
+}
+
+/// Seam for the workspaces module's move/tag slice: retargets `win`'s record
+/// to `ws` WITHOUT
+/// touching the model entry (a covering window stays covering; a ghost record
+/// of a minimized window follows the mask). The caller has already confirmed
+/// the destination is not occupied.
+pub fn moveFullscreenTo(m: *const model.Model, win: model.WindowId, ws: model.WSId) void {
+    _ = m;
+    const idx = findRec(win) orelse return;
+    g_recs.slice()[idx].ws = ws;
 }
 
 /// The coverage seam body (plugin.WindowModule.coverageOn) consumed by sync's
@@ -217,20 +232,14 @@ const TAG_FLOATING: u8 = 2;
 const BLOB_LEN_TILED: usize = 3;
 const BLOB_LEN_FLOATING: usize = 17;
 
-fn writeU32LE(buf: []u8, off: usize, v: u32) void {
-    std.mem.writeInt(u32, buf[off..][0..4], v, .little);
+// Native-little-endian slot writes/reads at an offset. Width comes from the
+// comptime `T`, so one helper each covers the u16/u32 fields in the blob.
+fn writeLE(comptime T: type, buf: []u8, off: usize, v: T) void {
+    std.mem.writeInt(T, buf[off..][0..@sizeOf(T)], v, .little);
 }
 
-fn readU32LE(bytes: []const u8, off: usize) u32 {
-    return std.mem.readInt(u32, bytes[off..][0..4], .little);
-}
-
-fn writeU16LE(buf: []u8, off: usize, v: u16) void {
-    std.mem.writeInt(u16, buf[off..][0..2], v, .little);
-}
-
-fn readU16LE(bytes: []const u8, off: usize) u16 {
-    return std.mem.readInt(u16, bytes[off..][0..2], .little);
+fn readLE(comptime T: type, bytes: []const u8, off: usize) T {
+    return std.mem.readInt(T, bytes[off..][0..@sizeOf(T)], .little);
 }
 
 /// Persistence seam (plugin.WindowModule.serializeWindow): marshals this
@@ -239,7 +248,7 @@ fn readU16LE(bytes: []const u8, off: usize) u16 {
 /// parked. When the window is parked (minimized), the fullscreen rec is a
 /// ghost and the single `ext` slot belongs to minimize — return null so the
 /// minimized blob wins (design §6). The returned slice is allocator-owned;
-/// restart_state frees it after writing.
+/// persist frees it after writing.
 pub fn serializeWindow(model_ptr: *anyopaque, win: u32, alloc: std.mem.Allocator) ?[]const u8 {
     const m: *const model.Model = @ptrCast(@alignCast(model_ptr));
     const idx = findRec(win) orelse return null;
@@ -260,11 +269,11 @@ pub fn serializeWindow(model_ptr: *anyopaque, win: u32, alloc: std.mem.Allocator
         .floating => |r| {
             buf[2] = TAG_FLOATING;
             // Sign-preserving: i16 -> i32 -> u32, so decode via @truncate to i16.
-            writeU32LE(buf, 3, @as(u32, @bitCast(@as(i32, r.x))));
-            writeU32LE(buf, 7, @as(u32, @bitCast(@as(i32, r.y))));
-            writeU16LE(buf, 11, r.width);
-            writeU16LE(buf, 13, r.height);
-            writeU16LE(buf, 15, r.border_width);
+            writeLE(u32, buf, 3, @as(u32, @bitCast(@as(i32, r.x))));
+            writeLE(u32, buf, 7, @as(u32, @bitCast(@as(i32, r.y))));
+            writeLE(u16, buf, 11, r.width);
+            writeLE(u16, buf, 13, r.height);
+            writeLE(u16, buf, 15, r.border_width);
         },
     }
     return buf;
@@ -293,11 +302,11 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
         TAG_FLOATING => {
             if (bytes.len != BLOB_LEN_FLOATING) return false;
             const rect = utils.Rect{
-                .x = @as(i16, @truncate(@as(i32, @bitCast(readU32LE(bytes, 3))))),
-                .y = @as(i16, @truncate(@as(i32, @bitCast(readU32LE(bytes, 7))))),
-                .width = readU16LE(bytes, 11),
-                .height = readU16LE(bytes, 13),
-                .border_width = readU16LE(bytes, 15),
+                .x = @as(i16, @truncate(@as(i32, @bitCast(readLE(u32, bytes, 3))))),
+                .y = @as(i16, @truncate(@as(i32, @bitCast(readLE(u32, bytes, 7))))),
+                .width = readLE(u16, bytes, 11),
+                .height = readLE(u16, bytes, 13),
+                .border_width = readLE(u16, bytes, 15),
             };
             anchor = .{ .floating = rect };
             // The blob restores the pre-fullscreen floating rect: the model
@@ -338,9 +347,8 @@ pub fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
     );
 }
 
-// The legacy commit helpers (enterFullscreenCommit / exitFullscreenCommit /
-// applyFullscreenGeometry) are deleted; sync.reconcile derives their wire
-// traffic from the model.
+// The protocol-side geometry commit helpers are gone: sync.reconcile derives
+// their wire traffic from the model.
 
 /// Called from the ConfigureNotify handler in events.zig. Drives both deferred
 /// bar transitions: hide on confirmed fullscreen dimensions (enter), show on
@@ -409,4 +417,9 @@ pub const module: @import("plugin").WindowModule = .{
     .armPendingBarHide = armPendingBarHide,
     .armPendingBarShow = armPendingBarShow,
     .coverageOn = coverageOn,
+    .toggleCovering = toggleFullscreen,
+    .isCoveringMode = isFullscreenMode,
+    .coveringWsOf = fullscreenWsOf,
+    .isCoveringOnWs = isFullscreenOnWs,
+    .coveringOccupantOnWs = fullscreenOccupantOnWs,
 };

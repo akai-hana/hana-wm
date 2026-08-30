@@ -26,24 +26,25 @@ test "duplicate layout overrides: last variant wins" {
     var cfg = types.TilingConfig{};
     defer cfg.deinit(testing.allocator);
 
-    // Two override rows for ws 0: the second (monocle/gaps) must win.
+    // Two override rows for ws 0: the second (a "gaps" value-string) must win,
+    // matching the old typed union's last-wins semantics. Value-strings must be
+    // dup'd (they are freed by TilingConfig.deinit).
     try cfg.workspace_layout_overrides.append(testing.allocator, .{
         .workspace_idx = 0,
         .layout_idx = 0,
-        .variant = .{ .master = .fifo },
+        .variant = try testing.allocator.dupe(u8, "fifo"),
     });
     try cfg.workspace_layout_overrides.append(testing.allocator, .{
         .workspace_idx = 0,
         .layout_idx = 0,
-        .variant = .{ .monocle = .gaps },
+        .variant = try testing.allocator.dupe(u8, "gaps"),
     });
 
     var wss = [_]workspaces.Workspace{workspaces.Workspace.init(0)};
     workspaces.applyWorkspaceOverrides(&wss, &cfg);
 
     const v = wss[0].variants orelse return error.TestUnexpectedNull;
-    try testing.expect(v == .monocle);
-    try testing.expectEqual(types.MonocleVariant.gaps, v.monocle);
+    try testing.expectEqualStrings("gaps", v);
 }
 
 test "out-of-range workspace indices are ignored" {
@@ -57,5 +58,5 @@ test "out-of-range workspace indices are ignored" {
     workspaces.applyWorkspaceOverrides(&wss, &cfg);
 
     try testing.expectEqual(@as(?u8, null), wss[0].master_count);
-    try testing.expectEqual(@as(?types.LayoutVariantOverride, null), wss[0].variants);
+    try testing.expectEqual(@as(?[]const u8, null), wss[0].variants);
 }

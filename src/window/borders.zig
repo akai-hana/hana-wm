@@ -1,22 +1,32 @@
 //! Shared border helpers.
 //! Resolves border color and width and applies them atomically across tiled and floating paths.
 
+const std = @import("std");
+
 const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
 const focus = @import("focus");
 const pipeline = @import("pipeline");
-const model_mod = @import("model");
 const build_options = @import("build_options");
 const wincache = @import("wincache");
+// The window sub-system registry: the screen-covering predicate is reached
+// through the compiled-in module's hook, never by naming a module here.
+const window_mods = @import("window_modules").modules;
 
-/// Returns the border color for `win`: 0 for fullscreen windows,
+/// Registry lookup for the hook `field`; the canonical scan lives in
+/// `plugin.zig` (see `plugin.providerOf`). Null when no module binds it.
+fn providerOf(comptime field: std.meta.FieldEnum(@import("plugin").WindowModule)) ?@import("plugin").WindowModule {
+    return @import("plugin").providerOf(window_mods[0..], field);
+}
+
+/// Returns the border color for `win`: 0 for screen-covering windows,
 /// focused or unfocused color otherwise.
 pub fn color(win: u32) u32 {
-    // Fullscreen windows render borderless via the bw=0/pixel=0 policy in
+    // Covering windows render borderless via the bw=0/pixel=0 policy in
     // sync; this predicate covers callers outside reconcile.
-    if (build_options.has_fullscreen) {
-        if (@import("fullscreen").isFullscreenMode(pipeline.model(), win)) return 0;
+    if (providerOf(.isCoveringMode)) |wm| {
+        if (wm.isCoveringMode.?(pipeline.model(), win)) return 0;
     }
     const cfg = &core.getState().config.tiling;
     return if (focus.getFocused() == win) cfg.border_focused else cfg.border_unfocused;

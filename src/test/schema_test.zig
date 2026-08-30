@@ -80,17 +80,17 @@ test "key-less config file loads pure table defaults end-to-end" {
 
     // Non-scalar seed data from getDefaultConfig.
     try testing.expectEqual(@as(usize, 1), cfg.tiling.layouts.items.len);
-    try testing.expectEqualStrings("master-stack", cfg.tiling.layouts.items[0]);
-    try testing.expectEqualStrings("master-stack", cfg.tiling.layout);
+    try testing.expectEqualStrings("master", cfg.tiling.layouts.items[0]);
+    try testing.expectEqualStrings("master", cfg.tiling.layout);
     try testing.expectEqual(@as(usize, 9), cfg.bar.workspace_icons.items.len);
     try testing.expectEqualStrings("9", cfg.bar.workspace_icons.items[8]);
     try testing.expectEqual(@as(usize, 3), cfg.bar.layout.items.len);
     try testing.expectEqual(types.BarSegmentAnchor.left, cfg.bar.layout.items[0].position);
-    try testing.expectEqual(types.BarSegment.workspaces, cfg.bar.layout.items[0].segments.items[0]);
+    try testing.expectEqualStrings("workspaces", cfg.bar.layout.items[0].segments.items[0]);
     try testing.expectEqual(types.BarSegmentAnchor.center, cfg.bar.layout.items[1].position);
-    try testing.expectEqual(types.BarSegment.title, cfg.bar.layout.items[1].segments.items[0]);
+    try testing.expectEqualStrings("title", cfg.bar.layout.items[1].segments.items[0]);
     try testing.expectEqual(types.BarSegmentAnchor.right, cfg.bar.layout.items[2].position);
-    try testing.expectEqual(types.BarSegment.clock, cfg.bar.layout.items[2].segments.items[0]);
+    try testing.expectEqualStrings("clock", cfg.bar.layout.items[2].segments.items[0]);
 }
 
 // Alias parity: both spellings must land on identical configs.
@@ -104,7 +104,7 @@ fn expectConfigsEqual(a: *const types.Config, b: *const types.Config) !void {
     }
 }
 
-test "master trio: legacy flat [tiling] names match dedicated section" {
+test "master trio: flat [tiling] names match dedicated section" {
     var flat = try loadToml(testing.allocator, "master-flat",
         \\[tiling]
         \\master_count = 3
@@ -170,13 +170,13 @@ test "[tiling.aesthetics] and flat [tiling] gap/border reads agree" {
 }
 
 test "[bar.modules.workspaces] and [workspaces] agree on count/enabled" {
-    var legacy = try loadToml(testing.allocator, "ws-legacy",
+    var flat_ws = try loadToml(testing.allocator, "ws-flat",
         \\[workspaces]
         \\count = 5
         \\enabled = false
         \\
     );
-    defer legacy.deinit(testing.allocator);
+    defer flat_ws.deinit(testing.allocator);
     var nested = try loadToml(testing.allocator, "ws-nested",
         \\[bar.modules.workspaces]
         \\count = 5
@@ -184,7 +184,7 @@ test "[bar.modules.workspaces] and [workspaces] agree on count/enabled" {
         \\
     );
     defer nested.deinit(testing.allocator);
-    try expectConfigsEqual(&legacy, &nested);
+    try expectConfigsEqual(&flat_ws, &nested);
     try testing.expectEqual(@as(u8, 5), nested.workspaces.count);
     try testing.expect(!nested.workspaces.enabled);
 }
