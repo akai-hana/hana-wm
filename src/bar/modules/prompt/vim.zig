@@ -89,13 +89,6 @@ pub fn handleInsert(vs: *EditorState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
-pub fn handleInsertBasic(vs: *EditorState, sym: xcb.xcb_keysym_t) Action {
-    switch (sym) {
-        xk_escape => return .deactivate,
-        else => return insertKey(vs, sym),
-    }
-}
-
 fn insertKey(vs: *EditorState, sym: xcb.xcb_keysym_t) Action {
     switch (sym) {
         xk_return => return .spawn,

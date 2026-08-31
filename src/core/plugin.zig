@@ -253,6 +253,14 @@ pub const Segment = struct {
     /// Which core fact-revisions repaint this segment (title: focus+frame;
     /// workspaces/tags: frame; everything else: none).
     dirty_sources: DirtySources = .{},
+    /// Runtime "repaint me on every draw" query. A segment whose content
+    /// advances on its own cadence (e.g. a scrolling title marquee) claims
+    /// this hook and returns true while that motion is active: the bar then
+    /// repaints the segment on every draw submission even when change
+    /// detection says nothing changed, because the motion only advances while
+    /// the segment's draw runs. Name-free: the segment owns the query's
+    /// state; the bar merely honours the declared capability.
+    needsRepaint: ?*const fn () bool = null,
     /// Whether the segment participates in click-hit bounds (the clock does
     /// not).
     clickable: bool = true,

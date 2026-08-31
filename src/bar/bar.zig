@@ -190,6 +190,15 @@ const Bar = struct {
 // All functions operate on `g` directly, with no passing state as parameters.
 var gBar: Bar = .{};
 
+/// Bar-provided service handles for mechanism segments (the prompt), owned for
+/// the whole bar lifetime. MUST NOT be a stack local in `init()`: the registry
+/// init loop hands `&g_bar_handlers` to each segment, and the prompt retains
+/// that pointer past init() to call back on every toggle/keystroke. A local
+/// would dangle the moment init() returns and crash on the first prompt toggle
+/// (use-after-return). The three handlers are stateless bar functions, so the
+/// value is assigned once at init and never changes.
+var g_bar_handlers: segmod.BarHandlers = undefined;
+
 /// X11 connection and window handle; stable for the bar's lifetime.
 const WindowCtx = struct {
     conn: core.Connection,
@@ -387,12 +396,6 @@ const State = struct {
         self.markAllSegmentsDirty();
     }
 
-    fn markSegmentDirty(self: *State, name: []const u8) void {
-        self.is_dirty = true;
-        if (comptime registry_empty) return;
-        if (segId(name)) |id| self.segment_dirty[id] = true;
-    }
-
     fn clearSegmentDirty(self: *State, name: []const u8) void {
         if (comptime registry_empty) return;
         if (segId(name)) |id| self.segment_dirty[id] = false;
@@ -409,11 +412,16 @@ const State = struct {
         }
     }
 
-    fn isSegmentDirty(self: *const State, name: []const u8) bool {
+    /// True when the segment must be repainted on this draw: its dirty bit
+    /// is set, or it declares the self-animated repaint capability and its
+    /// runtime query reports active (e.g. a scrolling marquee: the motion
+    /// only advances while the segment is drawn, so change detection must
+    /// not skip it). Uniform: resolved by registry, never by segment name.
+    fn isSegmentRepaintable(self: *const State, name: []const u8) bool {
         if (comptime registry_empty) return false;
-        if (segId(name)) |id| {
-            if (self.segment_dirty[id]) return true;
-        }
+        const id = segId(name) orelse return false;
+        if (self.segment_dirty[id]) return true;
+        if (bar_mods[id].needsRepaint) |q| return q();
         return false;
     }
 
@@ -716,7 +724,7 @@ const State = struct {
             if (self.isSelfTicking(names[i])) self.clock_x = right_x;
             self.recordClickBound(names[i], right_x, seg_w);
 
-            if (self.isSegmentDirty(names[i])) {
+            if (self.isSegmentRepaintable(names[i])) {
                 if (!is_full_redraw) {
                     self.render.dc.fillRect(right_x, 0, seg_w, self.render.height, self.render.config.bg);
                 }
@@ -793,7 +801,7 @@ const State = struct {
                         const omit_gap = (lay.position == .center) and is_center;
                         const w = if (is_center) remaining else self.measureSegmentWidth(frame, seg);
                         self.recordClickBound(seg, x, w);
-                        if (self.isSegmentDirty(seg)) {
+                        if (self.isSegmentRepaintable(seg)) {
                             if (!is_full_redraw) {
                                 const clear_w = if (omit_gap) w else w + scaled_spacing;
                                 r.dc.fillRect(x, 0, clear_w, r.height, r.config.bg);
@@ -929,14 +937,17 @@ pub fn init() !void {
     _ = xcb.xcb_flush(cs.conn);
     // Uniform lifecycle: every registered mechanism segment (incl. the prompt,
     // whose init owns the vim addon lifecycle, D11) is initialised with the
-    // bar's one-way service handles (D10).
-    var bar_handlers = segmod.BarHandlers{
+    // bar's one-way service handles (D10). The handles live in the file-scope
+    // g_bar_handlers (bar-lifetime storage); a pointer to a stack local would
+    // dangle as soon as this init returns, and the prompt calls back through
+    // it on the first toggle.
+    g_bar_handlers = .{
         .presentForPrompt = presentForPrompt,
         .dismissAfterPrompt = dismissAfterPrompt,
         .isBarWindow = isBarWindow,
     };
     for (bar_mods) |m| {
-        if (m.init) |h| try h(cs.alloc, cs.conn, &bar_handlers);
+        if (m.init) |h| try h(cs.alloc, cs.conn, &g_bar_handlers);
     }
     syncScreenClaim();
 }

@@ -1430,7 +1430,8 @@ fn parseSizeHintsIntoCache(
     // The MODEL copy of size hints must never go stale, since layouts read
     // Entry.size_hints via engine.HintsView. The wincache entry is only the
     // pre-registration staging area (actions.mapRequest bridges it into the
-    // freshly created model entry); once registered, this write is the truth.
+    // freshly created model entry); once registered, the model write below is
+    // the only truth and the wincache copy is never read again.
     const hints: @import("model").SizeHints = .{
         .max_width = max_pair.width,
         .max_height = max_pair.height,
@@ -1439,10 +1440,13 @@ fn parseSizeHintsIntoCache(
         .min_aspect = min_aspect,
         .max_aspect = max_aspect,
     };
-    wincache.cacheSizeHints(win, hints);
     if (pipeline.initialized) {
-        if (pipeline.model().store.getPtr(win)) |e| e.size_hints = hints;
+        if (pipeline.model().store.getPtr(win)) |e| {
+            e.size_hints = hints;
+            return;
+        }
     }
+    wincache.cacheSizeHints(win, hints); // pre-registration staging bridge only
 }
 
 /// Refresh border colors for all windows on the current workspace. Shared

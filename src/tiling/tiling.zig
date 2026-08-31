@@ -170,3 +170,30 @@ pub fn compute(kind: u8, v: View, out: *List) void {
 // Algo modules share this file's private emit helpers via pub re-exports.
 pub const emitView = emit;
 pub const emitHidden = emitParked;
+
+/// Builds a type-free `compute` hook that casts the opaque plugin seam to
+/// `View`/`List` and calls the given layout's typed `compute`. Shared by every
+/// layout module, which binds `.compute = tiling.computeHook(compute)`.
+pub fn computeHook(comptime F: anytype) fn (*const anyopaque, *anyopaque) void {
+    return struct {
+        fn hook(view: *const anyopaque, out: *anyopaque) void {
+            const v: *const View = @ptrCast(@alignCast(view));
+            const o: *List = @ptrCast(@alignCast(out));
+            F(v.*, o);
+        }
+    }.hook;
+}
+
+/// Parses a layout variant VALUE-STRING into its ordinal slot: the index of
+/// the first exact-case match in `names`, or null when unmatched. Shared by
+/// every layout module that exposes named variants.
+pub fn variantParse(comptime names: []const []const u8) fn ([]const u8) ?u8 {
+    return struct {
+        fn parse(str: []const u8) ?u8 {
+            for (names, 0..) |name, i| {
+                if (std.mem.eql(u8, str, name)) return @intCast(i);
+            }
+            return null;
+        }
+    }.parse;
+}

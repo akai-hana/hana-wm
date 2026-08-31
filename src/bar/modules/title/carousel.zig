@@ -33,17 +33,20 @@ var active_win: u32 = 0;
 var active_hash: u64 = 0;
 var scrolling: bool = false;
 
-/// True while the last offsetFor() call produced an active scroll. bar.zig
-/// consults this to keep the title segment out of the snapshot-diff skip:
-/// marquee frames repaint moving pixels whose data hasn't changed.
+/// True while the last offsetFor() call produced an active scroll. The title
+/// segment forwards this through its Segment needsRepaint hook, which the
+/// bar consults on every draw to keep the title segment out of the
+/// snapshot-diff skip: marquee frames repaint moving pixels whose data
+/// hasn't changed.
 pub fn scrollingActive() bool {
     return scrolling;
 }
 
 /// Advances the marquee by the time elapsed since the previous call and
 /// returns the SUB-PIXEL pixel offset the text should be drawn at (0 is the
-/// cell's left edge; grows unbounded only within one wrap cycle). Returns 0
-/// and deactivates when disabled or the text fits its slot.
+/// title's head at its resting position, which the title segment anchors at
+/// the padded text start; grows unbounded only within one wrap cycle). Returns
+/// 0 and deactivates when disabled or the text fits its slot.
 ///
 /// Call at most once per rendered frame for the focused cell (the split-view
 /// path calls it only for the focused window's segment). `now_ms` is any

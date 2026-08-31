@@ -377,30 +377,14 @@ inline fn windowY(i: u16, count: u16, available: u16, y_offset: u16, m: utils.Ma
     return y_offset +| m.gap +| @as(u16, @intCast(cum)) +| i *| (m.gap +| 2 *| m.border);
 }
 
-/// Cast shim: plugin's type-free seam -> compute's typed params.
-fn computeHook(view: *const anyopaque, out: *anyopaque) void {
-    const v: *const tiling.View = @ptrCast(@alignCast(view));
-    const o: *tiling.List = @ptrCast(@alignCast(out));
-    compute(v.*, o);
-}
-
-/// Parses a master variant VALUE-STRING into its variant index, mapping the
-/// accepted variant spellings to their ordinal slots (lifo=0, fifo=1),
-/// exact-case. null for any other string.
-fn variantParse(str: []const u8) ?u8 {
-    if (std.mem.eql(u8, str, "lifo")) return 0;
-    if (std.mem.eql(u8, str, "fifo")) return 1;
-    return null;
-}
-
 /// This layout's registry contribution: metadata plus the dispatch hook.
 pub const module: @import("plugin").Layout = .{
     .name = "master",
-    .compute = computeHook,
+    .compute = tiling.computeHook(compute),
     .variant_count = 2,
     .has_variants = true,
     .fifo_variant = 1,
-    .variant_parse = variantParse,
+    .variant_parse = tiling.variantParse(&.{ "lifo", "fifo" }),
     .icon = "[]=",
     .indicators = &.{ "[N]", "=N=" },
 };

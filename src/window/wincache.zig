@@ -70,15 +70,9 @@ fn getOrPutDefault(win: u32) !*WindowData {
     return gop.value_ptr;
 }
 
-fn isEmptySizeHints(hints: SizeHints) bool {
-    return hints.max_width == 0 and hints.max_height == 0 and
-        hints.inc_width == 0 and hints.inc_height == 0 and
-        hints.min_aspect == 0.0 and hints.max_aspect == 0.0;
-}
-
 /// No-op if every field is zero (nothing declared).
 pub fn cacheSizeHints(win: u32, hints: SizeHints) void {
-    if (isEmptySizeHints(hints)) return;
+    if (hints.isEmpty()) return;
     const wd = getOrPutDefault(win) catch return; // OOM: leave hints uncached.
     wd.hints = hints;
 }
