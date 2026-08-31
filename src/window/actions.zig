@@ -702,9 +702,9 @@ pub fn applyConfigReload() void {
 /// diff parks leavers once and maps+places arrivers (see sync_test's switch
 /// scenario).
 ///
-/// Kept protocol-side (R2): pointer-hover query, focus suppression reset,
-/// and the workspace-switch focus reason. Dual-writes tracking's current
-/// workspace while the strangler runs (bar segments and other modules read it).
+/// Kept protocol-side (R2): pointer-hover query and focus suppression reset.
+/// model.current is the single store; tracking's getCurrentWorkspace is a
+/// read-through facade over it.
 pub fn switchTo(ws_idx: u8) void {
     const core = @import("core");
     const constants = @import("constants");

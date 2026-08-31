@@ -34,10 +34,6 @@ pub const State = struct {
 
 var g_state: ?State = null;
 
-pub inline fn getState() ?*State {
-    return if (g_state) |*s| s else null;
-}
-
 /// Applies per-workspace master-count/variant overrides from `cfg_tiling`.
 ///
 /// `primary_width` and `secondary_balance` have no config-file representation;
@@ -105,12 +101,6 @@ pub fn deinit() void {
     }
     g_state = null;
     tracking.setWorkspaceCount(0);
-}
-
-/// Clears per-workspace bookkeeping hooks for a window being unmanaged.
-/// Facade kept for module boundary; inlined would be equivalent.
-pub fn removeWindow(win: u32) void {
-    tracking.removeWindow(win);
 }
 
 pub fn switchTo(m: *model.Model, ws: model.WSId) void {

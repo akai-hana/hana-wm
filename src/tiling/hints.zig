@@ -10,7 +10,7 @@ const model = @import("model");
 /// Declared minimums are intentionally NOT enforced; tiling owns window size,
 /// and honouring them would pin the rect and block mod_h/mod_l resizing.
 pub fn applyHints(rect: utils.Rect, h: model.SizeHints) utils.Rect {
-    if (isEmptySizeHints(h)) return rect;
+    if (h.isEmpty()) return rect;
     var width: u16 = rect.width;
     var height: u16 = rect.height;
 
@@ -58,10 +58,4 @@ inline fn snapDimToIncrement(dim: u16, base: u16, inc: u16) u16 {
     if (inc == 0 or dim <= base) return dim;
     const excess = dim - base;
     return base + (excess / inc) * inc;
-}
-
-inline fn isEmptySizeHints(h: model.SizeHints) bool {
-    return h.max_width == 0 and h.max_height == 0 and
-        h.inc_width == 0 and h.inc_height == 0 and
-        h.min_aspect == 0.0 and h.max_aspect == 0.0;
 }

@@ -389,7 +389,7 @@ fn resumableDefaultKind() u8 {
 /// (minimize maintains its sequence internally), so this pass only re-lists
 /// tiled membership and copies scalars.
 pub fn applyModelLevel(m: *model.Model) void {
-    const f = &(loaded_parsed orelse return).value;
+    const f = loaded() orelse return;
 
     if (f.current < MAX_WS) m.current = f.current;
     m.all_view_active = f.all_view_active;

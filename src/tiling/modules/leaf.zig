@@ -74,17 +74,10 @@ fn tileRegion(
     }
 }
 
-/// Cast shim: plugin's type-free seam -> compute's typed params.
-fn computeHook(view: *const anyopaque, out: *anyopaque) void {
-    const v: *const tiling.View = @ptrCast(@alignCast(view));
-    const o: *tiling.List = @ptrCast(@alignCast(out));
-    compute(v.*, o);
-}
-
 /// This layout's registry contribution: metadata plus the dispatch hook.
 pub const module: @import("plugin").Layout = .{
     .name = "leaf",
-    .compute = computeHook,
+    .compute = tiling.computeHook(compute),
     .variant_count = 1,
     .icon = "BSP",
 };

@@ -44,9 +44,8 @@ const MAX_WS = constants.max_workspaces;
 
 pub const ALL_MASK: Mask = ~@as(Mask, 0);
 
-/// STRANGLER COPY: duplicate of layouts.SizeHints. Field-for-field identical;
-/// pipeline converts between the two during migration.
-/// Do NOT import layouts from here (layer rule).
+/// Single canonical size-hints record (the former layouts.SizeHints copy and
+/// its migration bridge are gone). Do NOT import layouts from here (layer rule).
 pub const SizeHints = struct {
     max_width: u16 = 0, // PMaxSize limit
     max_height: u16 = 0,
@@ -54,6 +53,13 @@ pub const SizeHints = struct {
     inc_height: u16 = 0,
     min_aspect: f32 = 0.0, // PAspect (dwm convention)
     max_aspect: f32 = 0.0,
+
+    /// True when every field is zero (no constraints declared).
+    pub fn isEmpty(self: SizeHints) bool {
+        return self.max_width == 0 and self.max_height == 0 and
+            self.inc_width == 0 and self.inc_height == 0 and
+            self.min_aspect == 0.0 and self.max_aspect == 0.0;
+    }
 };
 
 pub const LayoutParams = struct {
@@ -141,8 +147,8 @@ fn removeFromMruAll(m: *Model, win: WindowId) void {
 }
 
 /// The workspace whose tiled_order holds win (single-membership invariant).
-/// Uses the cached home_ws when available; falls back to scan for
-/// backwards-compat with code that hasn't migrated yet.
+/// Uses the cached home_ws when available; falls back to scanning when the
+/// cache is null (e.g. a freshly adopted window not yet home-assigned).
 pub fn findHome(m: *const Model, win: WindowId) ?WSId {
     if (m.store.get(win)) |e| {
         if (e.home_ws) |h| return h;

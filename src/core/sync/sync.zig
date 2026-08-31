@@ -310,15 +310,15 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         const win = it.key;
         const e: *const model.Entry = it.val;
 
-        //         one ledger get-or-create per window: the same record backs the
-        //         pre-send contract reads (orphan keep-last, raise rule) AND the
-        //         post-send write, so a visible window costs a single scan instead of
-        //         two. The record is read
-        // before any send and only written after, so raises still derive from
-        // what we last sent, never from this pass's sends. When the ledger is
-        // full and `win` has no record yet, `gop` is null: reads see a fresh
-        // blank entry and the write is logged+lost after the sends, exactly as
-        // before (sends never depend on the ledger).
+        // One ledger get-or-create per window: the same record backs the
+        // pre-send contract reads (orphan keep-last, raise rule) AND the
+        // post-send write, so a visible window costs a single scan instead
+        // of two. The record is read before any send and only written after,
+        // so raises still derive from what we last sent, never from this
+        // pass's sends. When the ledger is full and `win` has no record yet,
+        // `gop` is null: reads see a fresh blank entry and the write is
+        // logged+lost after the sends, exactly as before (sends never depend
+        // on the ledger).
         const gop = sentGetOrPut(win) catch null;
         const ledger = (if (gop) |g| g.value_ptr.* else SentEntry{});
 

@@ -166,6 +166,7 @@ fn drawMarqueeCell(
     txt: []const u8,
     text_w: u16,
     fg: u32,
+    now: i64,
 ) !void {
     const off = carousel.offsetFor(
         win,
@@ -174,14 +175,16 @@ fn drawMarqueeCell(
         geom.avail_w,
         ctx.config.carousel_enabled,
         ctx.config.carousel_speed_px_s,
-        nowMs(),
+        now,
     );
     if (!carousel.scrollingActive()) {
         try ctx.dc.drawTextEllipsis(geom.text_x, baseline_y, txt, geom.avail_w, fg);
         return;
     }
     const cycle: f32 = @as(f32, @floatFromInt(text_w)) + @as(f32, carousel.gap_px);
-    const x0: f64 = @as(f64, @floatFromInt(geom.seg_x)) - off;
+    // Anchor the scroll at the padded text start (same spot static mode uses),
+    // so enabling the carousel continues seamlessly from where the head sat.
+    const x0: f64 = @as(f64, @floatFromInt(geom.text_x)) - off;
     try ctx.dc.drawTextScrolled(geom.seg_x, geom.seg_w, baseline_y, .{ x0, x0 + cycle }, txt, fg);
 }
 
@@ -227,10 +230,19 @@ fn drawFittedTitle(
     text_fg: u32,
     scroll_enabled: bool,
 ) !void {
-    if (text_w <= geom.avail_w)
-        try ctx.dc.drawText(geom.text_x, baseline_y, title, text_fg)
-    else if (scroll_enabled)
-        try drawMarqueeCell(ctx, baseline_y, geom, window, title, text_w, text_fg)
+    const now = nowMs();
+    if (text_w <= geom.avail_w) {
+        // Focused cell that no longer overflows: retire any active scroll so
+        // the carousel state machine (and with it the poll deadline and the
+        // needsRepaint query) stops requesting frames for a static cell.
+        // Unfocused cells never touch the carousel: it tracks exactly one
+        // cell per frame, the focused one.
+        if (scroll_enabled) {
+            _ = carousel.offsetFor(window, title, text_w, geom.avail_w, false, 0, now);
+        }
+        try ctx.dc.drawText(geom.text_x, baseline_y, title, text_fg);
+    } else if (scroll_enabled)
+        try drawMarqueeCell(ctx, baseline_y, geom, window, title, text_w, text_fg, now)
     else
         try ctx.dc.drawTextEllipsis(geom.text_x, baseline_y, title, geom.avail_w, text_fg);
 }
@@ -334,11 +346,24 @@ fn pollTimeoutMsHook() i32 {
     );
 }
 
+/// Marquee repaint query for the bar's uniform frame loop (the Segment
+/// needsRepaint capability): while the carousel is actively scrolling its
+/// motion only advances while the title draw runs, so the bar must repaint
+/// this segment on every draw submission even when change detection marks
+/// nothing dirty. The prompt covers the whole slot while open, so it reports
+/// inactive then (the overlay owns the repaint; the draw delegation already
+/// routes around the carousel).
+fn needsRepaintHook() bool {
+    if (prompt.isActive()) return false;
+    return carousel.scrollingActive();
+}
+
 /// This module's bar-segment contribution (registry binding).
 pub const module: @import("plugin").Segment = .{
     .name = "title",
     .center_slot = true,
     .dirty_sources = .{ .focus = true, .frame = true },
+    .needsRepaint = needsRepaintHook,
     .pollTimeoutMs = pollTimeoutMsHook,
     .naturalWidth = naturalWidthHook,
     .draw = drawHook,

@@ -25,7 +25,7 @@ const max_fallback_toml_bytes = 1024 * 1024; // Memory limit just in case.
 // Entry point
 
 pub fn build(b: *std.Build) !void {
-    const target = b.standardTargetOptions(.{});
+    const target = b.standardTargetOptions(.{ .default_target = .{ .cpu_model = .native } });
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast });
 
     if (target.result.os.tag != .linux) {
