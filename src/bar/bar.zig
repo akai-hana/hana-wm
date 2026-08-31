@@ -1215,6 +1215,31 @@ pub fn setBarState(action: types.Action) void {
     applyFullscreenVisibility();
 }
 
+/// Pre-computes and applies the bar's visibility state for `ws` (X11
+/// map/unmap + screen claim) WITHOUT triggering a reconcile. Used by the
+/// workspace-switch path so the bar's screen claim (and thus the workarea
+/// used by the FIRST reconcile on the new workspace) is correct from the
+/// start, preventing the two-reconcile flicker caused by a deferred
+/// visibility update. The reconcile comes from the caller's own switch
+/// reconcile; the bar merely updates its occupancy state here.
+pub fn updateBarVisibilityForWorkspace(ws: u8) void {
+    const s = gBar.state orelse return;
+    const bar_forced_hidden_by_fullscreen = if (build_options.has_fullscreen) fullscreenScreenClaimer(ws) != null else false;
+    const should_be_visible = !bar_forced_hidden_by_fullscreen and s.is_globally_visible;
+    if (s.is_visible == should_be_visible) return;
+    s.is_visible = should_be_visible;
+    if (should_be_visible) {
+        gBar.skip_title_refetch = true;
+        submitDrawBlockingFull();
+    }
+    const conn = core.getState().conn;
+    if (should_be_visible) _ = xcb.xcb_map_window(conn, s.win.win_id) else _ = xcb.xcb_unmap_window(conn, s.win.win_id);
+    // The bar's screen occupancy changed with its visibility; update the claim
+    // so the caller's switch reconcile re-derives placement from the new area.
+    syncScreenClaim();
+    debug.info("Bar {s} for workspace {}", .{ if (should_be_visible) "shown" else "hidden", ws });
+}
+
 /// Reacts to a change in core's fullscreen-occupancy fact: recomputes whether
 /// the bar must be hidden to share the screen with a fullscreen window on the
 /// current workspace, then maps/unmaps and updates the screen claim. Core owns
@@ -1438,6 +1463,7 @@ pub const surfaces = @import("plugin").Surfaces{
     .isBarWindow = isBarWindow,
     .handleButtonPress = handleButtonPress,
     .setBarState = setBarState,
+    .updateBarVisibilityForWorkspace = updateBarVisibilityForWorkspace,
     .toggleBarSegmentAnchor = toggleBarSegmentAnchor,
     .chromeToggleOverlay = chromeToggleOverlay,
 };

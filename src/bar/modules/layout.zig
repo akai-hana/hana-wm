@@ -13,7 +13,7 @@ const segmod = @import("segment");
 // it, and each module carries its own bar icon metadata. Empty (and
 // unreachable: the icon falls back to "><>") when the tiling subsystem is
 // absent.
-const tiling_mods = if (build_options.has_tiling) @import("tiling_modules").modules else &[_]@import("plugin").Layout{};
+const tiling_mods = @import("plugin").tiling_mods;
 
 // Reserved row width (moved here from bar.zig: width policy belongs to
 // the segment that owns the pixels).

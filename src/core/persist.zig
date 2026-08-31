@@ -37,7 +37,7 @@ const window_mods = @import("window_modules").modules;
 /// it (see model.LayoutParams.kind). Empty when the tiling subsystem is
 /// absent. Gated on has_tiling so tree variants without tiling compile (the
 /// scenario matrix removes src/tiling entirely).
-const tiling_mods = if (build_options.has_tiling) @import("tiling_modules").modules else &[_]@import("plugin").Layout{};
+const tiling_mods = @import("plugin").tiling_mods;
 const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
 
 const MAX_WS = constants.max_workspaces;

@@ -12,7 +12,7 @@ const segmod = @import("segment");
 
 // Layout registry (build-generated); each module carries its own variant
 // indicator list. Empty when the tiling subsystem is absent.
-const tiling_mods = if (build_options.has_tiling) @import("tiling_modules").modules else &[_]@import("plugin").Layout{};
+const tiling_mods = @import("plugin").tiling_mods;
 
 // Last-measured drawn width, read by segment.naturalWidth for the row
 // reservation (see the matching note in layout.zig). 0 when the segment
