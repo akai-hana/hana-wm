@@ -1091,7 +1091,7 @@ fn sendConfigureNotify(win: u32, geom: utils.Rect) void {
     _ = xcb.xcb_send_event(core.getState().conn, 0, win, xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY, @ptrCast(&ev));
 }
 
-pub fn geometryFromXcbReply(reply: *xcb.xcb_get_geometry_reply_t) utils.Rect {
+fn geometryFromXcbReply(reply: *xcb.xcb_get_geometry_reply_t) utils.Rect {
     return .{
         .x = reply.*.x,
         .y = reply.*.y,

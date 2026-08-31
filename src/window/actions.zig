@@ -23,9 +23,20 @@ fn providerOf(comptime field: std.meta.FieldEnum(@import("plugin").WindowModule)
     return @import("plugin").providerOf(window_mods[0..], field);
 }
 
+/// Convenience: returns the current workspace's covering occupant, or null.
+fn currentCoveringOccupant(m: *const model_mod.Model) ?model_mod.WindowId {
+    return if (providerOf(.coveringOccupantOnWs)) |prov| prov.coveringOccupantOnWs.?(m, m.current) else null;
+}
+
+/// Convenience: true when `win` is the covering (fullscreen) occupant on its
+/// workspace.
+fn isCoveringOnWs(m: *const model_mod.Model, win: model_mod.WindowId) bool {
+    return if (providerOf(.isCoveringOnWs)) |wm| wm.isCoveringOnWs.?(m, win, m.current) else false;
+}
+
 /// Layout registry (build-generated); the active layout is a `u8` index into
 /// it, never a closed enum. Empty when the tiling subsystem is absent.
-const tiling_mods = if (build_options.has_tiling) @import("tiling_modules").modules else &[_]@import("plugin").Layout{};
+const tiling_mods = @import("plugin").tiling_mods;
 const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
 
 /// Withdrawal facts for actions.unmanage. The sole caller (window.
@@ -125,7 +136,7 @@ fn focusFallback(m: *model_mod.Model) focus.FocusTransition {
 pub fn restore(win: model_mod.WindowId) void {
     const m = pipeline.model();
     if (!isMinimizedOnAnyWs(m, win)) return;
-    const had_occupant_before = if (providerOf(.coveringOccupantOnWs)) |prov| prov.coveringOccupantOnWs.?(m, m.current) != null else false;
+    const had_occupant_before = currentCoveringOccupant(m) != null;
     if (providerOf(.restoreWindow)) |wm| wm.restoreWindow.?(m, win);
     restoreAndFocus(m, win);
     armFullscreenBarHideIfNeeded(m, win, had_occupant_before);
@@ -135,7 +146,7 @@ pub fn restore(win: model_mod.WindowId) void {
 pub fn restoreOrdered(order: model_mod.RestoreOrder) void {
     const m = pipeline.model();
     const win = (if (providerOf(.restoreCandidateOn)) |wm| wm.restoreCandidateOn.?(m, m.current, order) else null) orelse return;
-    const had_occupant_before = if (providerOf(.coveringOccupantOnWs)) |prov| prov.coveringOccupantOnWs.?(m, m.current) != null else false;
+    const had_occupant_before = currentCoveringOccupant(m) != null;
     if (providerOf(.restoreWindow)) |wm| wm.restoreWindow.?(m, win);
     restoreAndFocus(m, win);
     armFullscreenBarHideIfNeeded(m, win, had_occupant_before);
@@ -150,18 +161,15 @@ pub fn restoreAll() void {
     if (providerOf(.latestHiddenOnWs)) |wm| {
         const ws = m.current;
         const target = (wm.latestHiddenOnWs.?(m, ws) orelse return);
-        const had_occupant_before = if (providerOf(.coveringOccupantOnWs)) |prov| prov.coveringOccupantOnWs.?(m, ws) != null else false;
+        const had_occupant_before = currentCoveringOccupant(m) != null;
         if (providerOf(.restoreOnWs)) |rp| rp.restoreOnWs.?(m, ws);
         restoreAndFocus(m, target);
-        if (providerOf(.coveringOccupantOnWs)) |occp| {
-            if (occp.coveringOccupantOnWs.?(m, ws)) |occ| armFullscreenBarHideIfNeeded(m, occ, had_occupant_before);
-        }
+        if (currentCoveringOccupant(m)) |occ| armFullscreenBarHideIfNeeded(m, occ, had_occupant_before);
     }
 }
 
 fn armFullscreenBarHideIfNeeded(m: *const model_mod.Model, win: model_mod.WindowId, had_occupant_before: bool) void {
-    const is_fs = if (providerOf(.isCoveringOnWs)) |wm| wm.isCoveringOnWs.?(m, win, m.current) else false;
-    if (build_options.has_bar and !had_occupant_before and is_fs) {
+    if (build_options.has_bar and !had_occupant_before and isCoveringOnWs(m, win)) {
         for (window_mods) |wm| if (wm.armPendingBarHide) |f| f(win);
     }
 }
@@ -203,11 +211,9 @@ pub fn fullscreenToggleWindow(win: model_mod.WindowId) void {
         // Classify BEFORE toggling so bar deferrals keep the occupant
         // scan in one place; both the classification and prev_fs_win need
         // the same result, saving one full store scan.
-        const prev_fs_win = if (providerOf(.coveringOccupantOnWs)) |prov| prov.coveringOccupantOnWs.?(m, m.current) else null;
+        const prev_fs_win = currentCoveringOccupant(m);
         const kind: enum { enter, exit, switch_ } = blk: {
-            if (providerOf(.isCoveringOnWs)) |prov| {
-                if (prov.isCoveringOnWs.?(m, win, m.current)) break :blk .exit;
-            }
+            if (isCoveringOnWs(m, win)) break :blk .exit;
             if (prev_fs_win != null) break :blk .switch_;
             break :blk .enter;
         };
@@ -237,7 +243,7 @@ pub fn moveWindowTo(win: model_mod.WindowId, ws_idx: u8) void {
 
         const m = pipeline.model();
         const was_focused = m.focused == win;
-        const was_fs_current = if (providerOf(.isCoveringOnWs)) |prov| prov.isCoveringOnWs.?(m, win, m.current) else false;
+        const was_fs_current = isCoveringOnWs(m, win);
 
         wm.sendToWs.?(m, win, ws_idx);
         if (m.store.get(win) == null) return; // unknown window: no-op
@@ -580,16 +586,18 @@ const ViewportContext = struct {
     max_off: i32,
 };
 
+const viewport_inactive: ViewportContext = .{ .active = false, .tiled_count = 0, .slot_w = 0, .max_off = 0 };
+
 /// Viewport context for the active layout, resolved through the layout
 /// metadata: a layout "has a viewport" iff it registers the slotWidth/
 /// maxOffset hooks. Returns inactive for layouts without a viewport or an
 /// out-of-range kind.
 fn viewportContext(m: *const model_mod.Model) ViewportContext {
-    if (!build_options.has_tiling) return .{ .active = false, .tiled_count = 0, .slot_w = 0, .max_off = 0 };
+    if (!build_options.has_tiling) return viewport_inactive;
     const p = &m.ws[m.current].params;
     const mod: ?@import("plugin").Layout = if (p.kind < tiling_mods.len) tiling_mods[p.kind] else null;
-    const md = mod orelse return .{ .active = false, .tiled_count = 0, .slot_w = 0, .max_off = 0 };
-    if (md.slotWidth == null or md.maxOffset == null) return .{ .active = false, .tiled_count = 0, .slot_w = 0, .max_off = 0 };
+    const md = mod orelse return viewport_inactive;
+    if (md.slotWidth == null or md.maxOffset == null) return viewport_inactive;
     const n = model_mod.tiledCountOnWs(m, m.current);
     const wa = screen.workArea(@import("core").getState().screen);
     const slot_w = md.slotWidth.?(wa.width);
@@ -739,10 +747,15 @@ pub fn switchTo(ws_idx: u8) void {
     // switch), so the focus fact alone can't guarantee a redraw; bumping the
     // window fact here makes the bar redraw at end-of-batch.
     @import("core").bumpWindow();
-    // Bar visibility follows the NEW workspace's fullscreen occupant. Bump the
-    // core fullscreen fact; the bar reacts and re-derives its claim. (Applied
-    // before the reconcile batch below so the bar's drop of its claim is
-    // visible to the placement that follows.)
+    // Bar visibility follows the NEW workspace's fullscreen occupant. Apply it
+    // NOW (X-free, no reconcile) so the FIRST reconcile below already reads the
+    // correct screen claim / workarea for this workspace. Otherwise the bar's
+    // deferred visibility update would require a SECOND reconcile on this
+    // workspace, retiling Discord's geometry twice and causing a flicker.
+    if (build_options.has_bar) @import("plugins").Surfaces.updateBarVisibilityForWorkspace(@intCast(ws_idx));
+    // Bump the core fullscreen fact; the bar's reactive path in updateIfDirty
+    // will no-op since the claim is already applied, but keeping the fact in
+    // sync avoids any stale-revision edge.
     @import("core").bumpFullscreen();
 
     // Inline the server grab so pointer resolution, model focus, protocol

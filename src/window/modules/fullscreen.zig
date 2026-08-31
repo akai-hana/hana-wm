@@ -79,11 +79,7 @@ pub fn deinit() void {
 }
 
 fn findRec(win: model.WindowId) ?usize {
-    return g_recs.indexOf(win, struct {
-        fn match(w: model.WindowId, rec: Rec) bool {
-            return rec.win == w;
-        }
-    }.match);
+    return g_recs.indexOfByIdField(.win, win);
 }
 
 /// Toggle `win`'s fullscreen capture of the current workspace.

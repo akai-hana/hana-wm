@@ -293,6 +293,52 @@ test "fullscreen enter: winner fullscreened (rect=screen, bw=0), others parked; 
     try fx.rec.expectGeom(7, 302, 404, 8, 384, 580, null);
 }
 
+test "fullscreen enter keeps sibling geometry, only repositions it off-screen" {
+    var fx: Fixture = undefined;
+    fx.init(stdScreen(), stdWa());
+    defer fx.deinit();
+
+    model.register(&fx.m, 501, null) catch unreachable;
+    model.register(&fx.m, 502, null) catch unreachable;
+    model.setFocus(&fx.m, 501);
+    fx.reconcile(.{}); // baseline tiled
+
+    // Baseline geometry (master 501 / stack 502) that the sibling must
+    // preserve unchanged across the fullscreen session.
+    try fx.rec.expectGeom(3, 501, 8, 8, 384, 580, .above);
+    try fx.rec.expectGeom(7, 502, 404, 8, 384, 580, null);
+
+    _ = fullscreen.toggleFullscreen(&fx.m, 501);
+    fx.rec.clear();
+    fx.reconcile(.{ .force_restack = true });
+
+    // 501 owns the screen. 502 receives ONLY the single merged park request —
+    // NO width/height/pixel/bw replay: the sibling's geometry (size + Y) is
+    // preserved, only its X is pushed off-screen by park. This is the
+    // "keep geometry, positioned off-screen" fullscreen behavior.
+    try fx.rec.expectLen(5);
+    try fx.rec.expectMap(0, 501);
+    try fx.rec.expectPixel(1, 501, 0);
+    try fx.rec.expectBw(2, 501, 0);
+    try fx.rec.expectGeom(3, 501, 0, 0, 800, 600, .above);
+    try fx.rec.expectPark(4, 502);
+
+    // Exiting fullscreen replays 502 at its ORIGINAL geometry — identical
+    // size and position, so the sibling never visibly resizes.
+    _ = fullscreen.toggleFullscreen(&fx.m, 501);
+    fx.rec.clear();
+    fx.reconcile(.{});
+    try fx.rec.expectLen(8);
+    try fx.rec.expectMap(0, 501);
+    try fx.rec.expectPixel(1, 501, focused_pixel);
+    try fx.rec.expectBw(2, 501, cfg_bw);
+    try fx.rec.expectGeom(3, 501, 8, 8, 384, 580, .above);
+    try fx.rec.expectMap(4, 502);
+    try fx.rec.expectPixel(5, 502, unfocused_pixel);
+    try fx.rec.expectBw(6, 502, cfg_bw);
+    try fx.rec.expectGeom(7, 502, 404, 8, 384, 580, null);
+}
+
 // -- Park / unpark ------------------------------------------------------------
 
 test "minimize parks every pass; restore replays original slot geometry" {

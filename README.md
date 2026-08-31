@@ -113,13 +113,14 @@ zig build
 - X server (xorg/xlibre)
 - libxcb (for, well, everything)
 - xcb-util-cursor (for custom cursor support)
-- xkbcommon (keyboard input handling library)
-
-`TODO: maybe i missed some dependency. will revise later`
+- xkbcommon + xkbcommon-x11 (keyboard input handling)
+- xcb-keysyms (prompt key handling)
+- xcb-randr (monitor detection)
+- cairo + pango (bar rendering)
 
 ### Ubuntu/Debian-based
 ```sh
-apt install libgtk-3-dev xorg-dev libxcb-cursor-dev libxcb-keysyms1-dev libxkbcommon-x11-dev
+apt install libxcb1-dev libxcb-cursor-dev libxcb-keysyms1-dev libxkbcommon-dev libxkbcommon-x11-dev libcairo2-dev libpango1.0-dev libxrandr-dev
 ```
 
 *more distros later :)*

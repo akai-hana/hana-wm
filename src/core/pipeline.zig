@@ -30,7 +30,7 @@ const window_mods = @import("window_modules").modules;
 /// Layout registry (build-generated); the active layout is a `u8` index into
 /// it (see model.LayoutParams.kind). Empty when the tiling subsystem is
 /// absent. Gated on has_tiling so tree variants without tiling compile.
-const tiling_mods = if (build_options.has_tiling) @import("tiling_modules").modules else &[_]@import("plugin").Layout{};
+const tiling_mods = @import("plugin").tiling_mods;
 const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
 
 /// True after init(); tracking's facade gates every model access on this so

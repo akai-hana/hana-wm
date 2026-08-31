@@ -42,6 +42,11 @@ const types = @import("types");
 const utils = @import("utils");
 const model = @import("model");
 
+/// The tiling registry (build-generated). Re-exported here so consumers share
+/// one conditional-import definition instead of copy-pasting the
+/// `has_tiling` guard across files. Empty when the tiling subsystem is absent.
+pub const tiling_mods = if (@import("build_options").has_tiling) @import("tiling_modules").modules else &[_]Layout{};
+
 /// The chrome-surface hook set a surface module binds to. The bar binds its
 /// `surfaces` value to this; when no surface is compiled in, core's
 /// generated `plugins.Surfaces` is the comptime `null` type and every
@@ -66,6 +71,10 @@ pub const Surfaces = struct {
     isBarWindow: *const fn (u32) bool,
     handleButtonPress: *const fn (*const xcb.xcb_button_press_event_t) void,
     setBarState: *const fn (types.Action) void,
+    /// Pre-computes and applies bar visibility for `ws` (X-free, no
+    /// reconcile) so the workspace-switch path gets the correct workarea on
+    /// the first reconcile.
+    updateBarVisibilityForWorkspace: *const fn (u8) void,
     toggleBarSegmentAnchor: *const fn () void,
     chromeToggleOverlay: *const fn () void,
 };

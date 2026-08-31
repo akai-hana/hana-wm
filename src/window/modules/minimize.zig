@@ -48,11 +48,7 @@ var g_recs: utils.BoundedList(Rec, MAX_MINIMIZED) = .{};
 var g_seq: u32 = 0;
 
 fn findRec(win: model.WindowId) ?usize {
-    return g_recs.indexOf(win, struct {
-        fn match(w: model.WindowId, rec: Rec) bool {
-            return rec.win == w;
-        }
-    }.match);
+    return g_recs.indexOfByIdField(.win, win);
 }
 
 pub fn minimize(m: *model.Model, win: model.WindowId) MinimizeError!void {

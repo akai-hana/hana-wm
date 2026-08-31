@@ -79,7 +79,7 @@ fn workArea() WorkArea {
 }
 
 /// 8-directional resize direction nearest the cursor at a given point.
-pub const ResizeDirection = enum { none, n, s, e, w, ne, nw, se, sw };
+const ResizeDirection = enum { none, n, s, e, w, ne, nw, se, sw };
 
 /// Which sides of the window the grabbed corner anchors to (left/top = the
 /// corner is a left or top edge). Collapses the four per-axis corner switches
@@ -117,7 +117,7 @@ var g_state: State = .{};
 /// rectangle and border width. Returns the 8-directional direction the cursor
 /// is closest to (n, s, e, w, ne, nw, se, sw), or none if the point is well
 /// inside the window far from any edge.
-pub fn resizeDirectionFromPoint(cursor_x: i32, cursor_y: i32, rect: utils.Rect, border_width: u32) ResizeDirection {
+fn resizeDirectionFromPoint(cursor_x: i32, cursor_y: i32, rect: utils.Rect, border_width: u32) ResizeDirection {
     const left: i32 = rect.x;
     const top: i32 = rect.y;
     const right: i32 = rect.x + @as(i32, rect.width);
