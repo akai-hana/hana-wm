@@ -295,7 +295,7 @@ fn tileStack(
 ) void {
     const stack_n: u16 = @intCast(windows.len);
 
-    const space_per_window: u32 = min_dim + 2 * @as(u32, m.border) + @as(u32, m.gap);
+    const space_per_window: u32 = @max(1, @as(u32, min_dim) + 2 * @as(u32, m.border) + @as(u32, m.gap));
     const available: u32 = @as(u32, h) -| @as(u32, m.gap);
     const max_fit: u16 = @intCast(@max(1, available / space_per_window));
 
@@ -334,7 +334,7 @@ fn tileStackExtra(
         const cols_in_row: u16 = (stack_n - row + max_fit - 1) / max_fit;
 
         const gaps_in_row = m.gap / 2 +| m.gap *| cols_in_row;
-        const row_total_w = if (w > gaps_in_row) w - gaps_in_row else cols_in_row * min_dim;
+        const row_total_w = if (w > gaps_in_row) w - gaps_in_row else cols_in_row *| min_dim;
         const col_w = row_total_w / cols_in_row;
         const col_inner_w = tiling.shrinkClamped(col_w, 2 * m.border, min_dim);
 
@@ -359,7 +359,7 @@ fn tileStackExtra(
 /// Falls back to count * min_dim when margins exceed total_h.
 inline fn calcAvailableHeight(total_h: u16, count: u16, m: utils.Margins, min_dim: u16) u16 {
     const overhead = m.gap *| (count + 1) +| m.border *| 2 *| count;
-    return if (total_h > overhead) total_h - overhead else count * min_dim;
+    return if (total_h > overhead) total_h - overhead else count *| min_dim;
 }
 
 /// Height of window `i` out of `count`, distributing `available` pixels via

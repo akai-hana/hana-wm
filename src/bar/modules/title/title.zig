@@ -305,7 +305,7 @@ fn monotonicMs() i64 {
 // -- Segment hooks -----------------------------------------------------------
 
 fn drawHook(ctx: *anyopaque, x: u16) !u16 {
-    const c: *segmod.DrawCtx = @ptrCast(@alignCast(ctx));
+    const c = segmod.castDraw(ctx);
     if (prompt.isActive()) return prompt.draw(c, x);
     return renderTitle(c, x);
 }

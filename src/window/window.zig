@@ -714,45 +714,37 @@ pub fn registerSpawn(workspace: core.WorkspaceId, pid: u32) void {
     };
 }
 
-/// Handles a MapRequest by firing ALL property query cookies up-front, then
-/// draining replies sequentially. Firing all five cookies before draining any
-/// lets the X server process them in parallel, saving 2-3 blocking round trips
-/// compared to the previous fire-then-drain-per-property approach.
-pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
-    const win = event.window;
-    const conn = core.getState().conn;
+/// The five property-query cookies fired for an admitted window. All are
+/// fired up-front (before any reply is drained) so the X server processes
+/// them in parallel; the callers differ only in how they drain the two
+/// workspace-resolution cookies (rules/spawn resolution vs. discard).
+const AdmissionCookies = struct {
+    c_wm_class: ?xcb.xcb_get_property_cookie_t,
+    c_net_wm_pid: ?xcb.xcb_get_property_cookie_t,
+    normal_hints_cookie: xcb.xcb_get_property_cookie_t,
+    protocols_cookie: xcb.xcb_get_property_cookie_t,
+    hints_cookie: xcb.xcb_get_property_cookie_t,
+};
+
+/// Fires all property-query cookies for an admitted window (WM_CLASS,
+/// _NET_WM_PID, WM_NORMAL_HINTS, WM_PROTOCOLS, WM_HINTS) before any reply is
+/// drained. Shared by handleMapRequest and adoptRootWindows; both are preceded
+/// by the change_window_attributes preamble and followed by the size-hints and
+/// focus-cache drains, but route the two conditional workspace cookies
+/// differently, so only the firing lives here.
+fn fireAdmissionCookies(conn: core.Connection, win: u32) AdmissionCookies {
     const cs = core.getState();
 
-    // Double-manage guard: a window can send multiple MapRequest events (e.g.
-    // an unmap+remap race while the first is still processing); without it,
-    // the model registration and property queries below would fire twice.
-    if (tracking.isManaged(win)) return;
-
-    // getCurrentWorkspace() returns ?u8; the value is already bounded to [0,255]
-    // by the u8 return type, so no further clamping is needed.
-    const current_ws = core.WorkspaceId.fromIndex(tracking.getCurrentWorkspace() orelse 0);
-
-    _ = xcb.xcb_change_window_attributes(
-        conn,
-        win,
-        xcb.XCB_CW_EVENT_MASK,
-        &[_]u32{masks.EventMasks.managed_window},
-    );
-
-    // ----- Fire ALL property cookies before draining any reply -----
-    // The server processes all five requests in parallel while we do pure
-    // local bookkeeping below.
-
     // Workspace resolution cookies (conditional).
-    var c_wm_class: ?xcb.xcb_get_property_cookie_t = null;
-    if (cs.config.workspaces.rules.items.len > 0 and utils.getAtomOrZero("WM_CLASS") != 0) {
-        c_wm_class = xcb.xcb_get_property(conn, property_no_delete, win, utils.getAtomOrZero("WM_CLASS"), xcb.XCB_ATOM_STRING, 0, constants.property_max_length);
-    }
+    const c_wm_class: ?xcb.xcb_get_property_cookie_t = if (cs.config.workspaces.rules.items.len > 0 and utils.getAtomOrZero("WM_CLASS") != 0)
+        xcb.xcb_get_property(conn, property_no_delete, win, utils.getAtomOrZero("WM_CLASS"), xcb.XCB_ATOM_STRING, 0, constants.property_max_length)
+    else
+        null;
 
-    var c_net_wm_pid: ?xcb.xcb_get_property_cookie_t = null;
-    if (state.?.spawn_queue.items.len > 0) {
-        c_net_wm_pid = xcb.xcb_get_property(conn, property_no_delete, win, utils.getAtomOrZero("_NET_WM_PID"), xcb.XCB_ATOM_CARDINAL, 0, 1);
-    }
+    const c_net_wm_pid: ?xcb.xcb_get_property_cookie_t = if (state.?.spawn_queue.items.len > 0)
+        xcb.xcb_get_property(conn, property_no_delete, win, utils.getAtomOrZero("_NET_WM_PID"), xcb.XCB_ATOM_CARDINAL, 0, 1)
+    else
+        null;
 
     // Property cookies (always fired).
     const normal_hints_cookie = xcb.xcb_get_property(
@@ -776,12 +768,50 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
         wm_hints_long_length,
     );
 
+    return .{
+        .c_wm_class = c_wm_class,
+        .c_net_wm_pid = c_net_wm_pid,
+        .normal_hints_cookie = normal_hints_cookie,
+        .protocols_cookie = protocols_cookie,
+        .hints_cookie = hints_cookie,
+    };
+}
+
+/// Handles a MapRequest by firing ALL property query cookies up-front, then
+/// draining replies sequentially. Firing all five cookies before draining any
+/// lets the X server process them in parallel, saving 2-3 blocking round trips
+/// compared to the previous fire-then-drain-per-property approach.
+pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
+    const win = event.window;
+    const conn = core.getState().conn;
+
+    // Double-manage guard: a window can send multiple MapRequest events (e.g.
+    // an unmap+remap race while the first is still processing); without it,
+    // the model registration and property queries below would fire twice.
+    if (tracking.isManaged(win)) return;
+
+    // getCurrentWorkspace() returns ?u8; the value is already bounded to [0,255]
+    // by the u8 return type, so no further clamping is needed.
+    const current_ws = core.WorkspaceId.fromIndex(tracking.getCurrentWorkspace() orelse 0);
+
+    _ = xcb.xcb_change_window_attributes(
+        conn,
+        win,
+        xcb.XCB_CW_EVENT_MASK,
+        &[_]u32{masks.EventMasks.managed_window},
+    );
+
+    // ----- Fire ALL property cookies before draining any reply -----
+    // The server processes all five requests in parallel while we do pure
+    // local bookkeeping below.
+    const cookies = fireAdmissionCookies(conn, win);
+
     // ----- Drain replies sequentially -----
-    const target_ws = resolveTargetWorkspace(current_ws, c_wm_class, c_net_wm_pid);
+    const target_ws = resolveTargetWorkspace(current_ws, cookies.c_wm_class, cookies.c_net_wm_pid);
     const on_current = target_ws.eql(current_ws);
 
-    parseSizeHintsIntoCache(win, normal_hints_cookie);
-    populateFocusCacheFromCookies(conn, win, protocols_cookie, hints_cookie);
+    parseSizeHintsIntoCache(win, cookies.normal_hints_cookie);
+    populateFocusCacheFromCookies(conn, win, cookies.protocols_cookie, cookies.hints_cookie);
 
     // Shared admission policy (MapRequest path). The cookie firing above is
     // specific to the MapRequest event source; everything from here on (the
@@ -954,46 +984,17 @@ pub fn adoptRootWindows() !usize {
         );
 
         // ----- Fire the same property cookies the MapRequest path fires -----
-        var c_wm_class: ?xcb.xcb_get_property_cookie_t = null;
-        if (cs.config.workspaces.rules.items.len > 0 and utils.getAtomOrZero("WM_CLASS") != 0) {
-            c_wm_class = xcb.xcb_get_property(conn, property_no_delete, win, utils.getAtomOrZero("WM_CLASS"), xcb.XCB_ATOM_STRING, 0, constants.property_max_length);
-        }
-
-        var c_net_wm_pid: ?xcb.xcb_get_property_cookie_t = null;
-        if (state.?.spawn_queue.items.len > 0) {
-            c_net_wm_pid = xcb.xcb_get_property(conn, property_no_delete, win, utils.getAtomOrZero("_NET_WM_PID"), xcb.XCB_ATOM_CARDINAL, 0, 1);
-        }
-
-        const normal_hints_cookie = xcb.xcb_get_property(
-            conn,
-            property_no_delete,
-            win,
-            xcb.XCB_ATOM_WM_NORMAL_HINTS,
-            xcb.XCB_ATOM_WM_SIZE_HINTS,
-            0,
-            wm_normal_hints_long_length,
-        );
-        const protocols_cookie = fireWMProtocolsQuery(conn, win) orelse
-            xcb.xcb_get_property(conn, property_no_delete, win, 0, xcb.XCB_ATOM_ATOM, 0, max_property_length);
-        const hints_cookie = xcb.xcb_get_property(
-            conn,
-            property_no_delete,
-            win,
-            xcb.XCB_ATOM_WM_HINTS,
-            xcb.XCB_ATOM_WM_HINTS,
-            0,
-            wm_hints_long_length,
-        );
+        const cookies = fireAdmissionCookies(conn, win);
 
         // Adoption never resolves the target workspace from these cookies
         // (restored-or-current wins, not spawn rules), so discard the two
         // conditionally-fired replies to keep the XCB queue from accumulating
         // unconsumed results.
-        if (c_wm_class) |c| xcb.xcb_discard_reply(conn, c.sequence);
-        if (c_net_wm_pid) |c| xcb.xcb_discard_reply(conn, c.sequence);
+        if (cookies.c_wm_class) |c| xcb.xcb_discard_reply(conn, c.sequence);
+        if (cookies.c_net_wm_pid) |c| xcb.xcb_discard_reply(conn, c.sequence);
 
-        parseSizeHintsIntoCache(win, normal_hints_cookie);
-        populateFocusCacheFromCookies(conn, win, protocols_cookie, hints_cookie);
+        parseSizeHintsIntoCache(win, cookies.normal_hints_cookie);
+        populateFocusCacheFromCookies(conn, win, cookies.protocols_cookie, cookies.hints_cookie);
 
         // Register on the restored-or-current workspace. on_current=false so
         // actions.mapRequest does NOT reconcile per-window (the caller owns

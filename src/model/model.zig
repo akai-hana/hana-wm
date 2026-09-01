@@ -106,6 +106,14 @@ pub const Entry = struct {
     /// when the window has no tiled slot (floating or parked).
     home_ws: ?WSId = null,
     presence: Presence = .present,
+    /// Core covering intent: the workspace this window's screen-covering
+    /// capture anchors to, present iff `presence == .covering`. This is a
+    /// PATTERN intent, not a feature: a covering window owns the screen on a
+    /// workspace, and the target is authoritative here so core (sync, bar,
+    /// persistence) can answer "who owns the screen on ws" without naming any
+    /// optional subsystem. The owning extension writes it when it claims and
+    /// clears it when it releases. Null when the window is not covering.
+    covering_ws: ?WSId = null,
 };
 
 pub const WsState = struct {
@@ -208,6 +216,23 @@ pub fn tiledCountOnWs(m: *const Model, ws: WSId) usize {
         n += 1;
     }
     return n;
+}
+
+/// The covering occupant owning the screen on `ws`, if any: a covering entry
+/// whose capture anchors to `ws`, OR a covering entry visible on `ws`
+/// (multi-tag). Pure core computation -- no feature import -- so core layers
+/// (sync, bar) can resolve the screen owner against only the model's core
+/// intent, never by enumerating optional subsystems. A covering window is
+/// never `.parked` (minimize remaps it to `.parked`), so walked-ghosts are
+/// excluded by construction. At most one covering occupant per ws is guaranteed
+/// by the reconciler.
+pub fn coveringOccupantOnWs(m: *const Model, ws: WSId) ?WindowId {
+    for (0..m.store.count()) |k| {
+        const it = m.store.at(k);
+        if (it.val.presence != .covering) continue;
+        if (it.val.covering_ws == ws or visibleOn(m, it.key, ws)) return it.key;
+    }
+    return null;
 }
 
 // ---------------------------------------------------------------------------

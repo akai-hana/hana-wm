@@ -452,6 +452,11 @@ pub fn run() !void {
             handleXcbEvents();
         }
 
+        // Run any refresh-rate re-detection deferred by handleRandrNotifyEvent.
+        // It performs synchronous XCB round-trips, so it must run here, outside
+        // event dispatch, never mid-batch.
+        refresh.runPendingRedetect(cs.conn);
+
         if (build_options.has_bar) _ = surfaces.updateClock(); // return value reserved, currently unused
     }
 }

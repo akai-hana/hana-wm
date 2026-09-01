@@ -150,7 +150,7 @@ fn naturalWidthHook(frame: *const anyopaque, _: u16) u16 {
 }
 
 fn drawHook(ctx: *anyopaque, x: u16) !u16 {
-    const c: *segmod.DrawCtx = @ptrCast(@alignCast(ctx));
+    const c = segmod.castDraw(ctx);
     return draw(c.dc, c.config, c.height, x, c.frame.current_workspace, c.frame.workspace_has_windows, c.frame.is_all_view_active);
 }
 

@@ -155,6 +155,7 @@ const BenchRecorder = struct {
         self.count += 1;
     }
     fn stackShim(_: *anyopaque, _: model.WindowId, _: sync.Stack) void {}
+    fn ewmhShim(_: *anyopaque, _: model.WindowId, _: u32, _: u32, _: bool) void {}
     fn flushShim(_: *anyopaque) void {}
     fn grabShim(_: *anyopaque) void {}
     fn ungrabShim(_: *anyopaque) void {}
@@ -169,6 +170,7 @@ const BenchRecorder = struct {
                 .border_pixel = pixelShim,
                 .park = parkShim,
                 .stack_only = stackShim,
+                .set_ewmh_fullscreen = ewmhShim,
                 .flush = flushShim,
                 .grab_server = grabShim,
                 .ungrab_and_flush = ungrabShim,

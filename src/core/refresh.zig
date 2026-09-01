@@ -63,13 +63,31 @@ pub fn randrFirstEvent() u8 {
     return randr_first_event;
 }
 
+/// Deferred re-detection flag, set by handleRandrNotifyEvent and consumed by
+/// runPendingRedetect. The actual detection makes several synchronous XCB
+/// round-trips, so it is never run from inside event dispatch.
+var redetect_pending: bool = false;
+
 /// Called by the event loop on any RandR extension event (screen change, CRTC
-/// change, output change). Re-detects the active refresh rate so bar pacing
-/// cadence tracks monitor re-configuration. Main thread only.
+/// change, output change). Rate-limits and flags a re-detection rather than
+/// querying inline: detectRefreshRate performs synchronous XCB round-trips that
+/// would stall the event-dispatch loop mid-batch, so the query is deferred to
+/// runPendingRedetect at a controlled point in the loop. Main thread only.
 pub fn handleRandrNotifyEvent(conn: core.Connection) void {
+    _ = conn;
     const now = utils.monotonicNs();
     if (now -| last_redetect_ns < min_redetect_interval_ns) return;
     last_redetect_ns = now;
+    redetect_pending = true;
+}
+
+/// Runs the deferred re-detection, if one is pending. Called once per event
+/// loop batch from run(), after all events in the batch have been dispatched,
+/// so the synchronous RandR round-trips can't stall the handling of the other
+/// events (e.g. MapRequest) the same batch carried. Main thread only.
+pub fn runPendingRedetect(conn: core.Connection) void {
+    if (!redetect_pending) return;
+    redetect_pending = false;
     detectRefreshRate(conn, core.getState().root);
 }
 

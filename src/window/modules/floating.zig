@@ -6,7 +6,6 @@
 const std = @import("std");
 
 const core = @import("core");
-const xcb = core.xcb;
 const utils = @import("utils");
 
 const window = @import("window");
@@ -205,8 +204,11 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
         .pending_float = tracking.isTiledMode(win),
     };
     focus.grabFocus(win, .user_command);
-    utils.raiseWindow(cs.conn, win);
-    _ = xcb.xcb_flush(cs.conn);
+    // Raise the dragged window immediately outside any server grab (grabFocus
+    // has already ungrabAndFlush'd); routed through sync's sanctioned stack
+    // primitive + flush so wire stays in sync. Drag ticks keep going flushless
+    // via reconcileNow.
+    @import("sync").raiseNow(@import("pipeline").grabCtx(), win);
 }
 
 fn computeMoveRect(drag: DragState, dx: i16, dy: i16, wa: WorkArea, was_pending_float: bool) utils.Rect {

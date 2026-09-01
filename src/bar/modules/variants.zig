@@ -3,7 +3,6 @@
 
 const core = @import("core");
 const types = @import("types");
-
 const drawing = @import("drawing");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
@@ -63,7 +62,7 @@ fn naturalWidthHook(_: *const anyopaque, _: u16) u16 {
 }
 
 fn drawHook(ctx: *anyopaque, x: u16) !u16 {
-    const c: *segmod.DrawCtx = @ptrCast(@alignCast(ctx));
+    const c = segmod.castDraw(ctx);
     return draw(c.dc, c.config, c.height, x);
 }
 

@@ -85,12 +85,13 @@ const Recorder = struct {
         const self: *Recorder = @ptrCast(@alignCast(ptr));
         self.ops.append(testing.allocator, .{ .stack = .{ .win = win, .s = s } }) catch unreachable;
     }
+    fn ewmhShim(_: *anyopaque, _: model.WindowId, _: u32, _: u32, _: bool) void {}
     fn flushShim(_: *anyopaque) void {}
     fn grabShim(_: *anyopaque) void {}
     fn ungrabShim(_: *anyopaque) void {}
 
     fn sink(self: *Recorder) sync.Sink {
-        return .{ .ptr = self, .vt = &.{ .map = mapShim, .geom = geomShim, .border_width = bwShim, .border_pixel = pixelShim, .park = parkShim, .stack_only = stackShim, .flush = flushShim, .grab_server = grabShim, .ungrab_and_flush = ungrabShim } };
+        return .{ .ptr = self, .vt = &.{ .map = mapShim, .geom = geomShim, .border_width = bwShim, .border_pixel = pixelShim, .park = parkShim, .stack_only = stackShim, .set_ewmh_fullscreen = ewmhShim, .flush = flushShim, .grab_server = grabShim, .ungrab_and_flush = ungrabShim } };
     }
     // ---------------------------------------------------------------------
 
