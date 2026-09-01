@@ -8,6 +8,7 @@
 //!   Sink.border_*    ~ borders.applyWidth + borders.apply + setBorderPixel
 //!   Sink.park        ~ X-offscreen + BELOW configure_window in ONE request
 //!   Sink.stack_only  ~ utils.raiseWindow / restack helpers used today
+//!   Sink.set_ewmh_fullscreen ~ xcb_change_property for _NET_WM_STATE_FULLSCREEN
 //!   Sink.flush       ~ conn.flush() (caller owns timing)
 //!
 //! Scroll viewport caller duties (snap-right-on-new, clamp, prev_count update)
@@ -41,10 +42,6 @@ const utils = @import("utils");
 const constants = @import("constants");
 const build_options = @import("build_options");
 const model = @import("model");
-// The per-module coverage seam (who owns the screen per ws) is iterated via
-// the build-generated registry: a tree without a coverage module simply has
-// no entry, so the loop below no-ops.
-const window_mods = @import("window_modules").modules;
 
 /// When tiling is absent, provide a compute stub so the rest of sync
 /// compiles. The interchange TYPES (View/List/Placement/Env/HintsView/
@@ -79,6 +76,7 @@ pub const Sink = struct {
         border_pixel: *const fn (*anyopaque, model.WindowId, u32) void,
         park: *const fn (*anyopaque, model.WindowId) void,
         stack_only: *const fn (*anyopaque, model.WindowId, Stack) void,
+        set_ewmh_fullscreen: *const fn (*anyopaque, model.WindowId, u32, u32, bool) void,
         flush: *const fn (*anyopaque) void,
         grab_server: *const fn (*anyopaque) void,
         ungrab_and_flush: *const fn (*anyopaque) void,
@@ -101,6 +99,9 @@ pub const Sink = struct {
     }
     pub inline fn stackOnly(self: Sink, win: model.WindowId, s: Stack) void {
         self.vt.stack_only(self.ptr, win, s);
+    }
+    pub inline fn setEwmhFullscreen(self: Sink, win: model.WindowId, state_atom: u32, fs_atom: u32, is_fullscreen: bool) void {
+        self.vt.set_ewmh_fullscreen(self.ptr, win, state_atom, fs_atom, is_fullscreen);
     }
     pub inline fn flush(self: Sink) void {
         self.vt.flush(self.ptr);
@@ -136,6 +137,14 @@ pub const ReconcileOpts = struct { force_restack: bool = false };
 // model.Store because (1) it needs no iteration-order guarantees (unlike the
 // model, whose sorted-key order reconcile walks), and (2) the API surface
 // needed is minimal (get, put, remove, clear).
+//
+// The ledger's hottest operation is reconcile's one get-or-create per window
+// (every pass). A bare linear scan over the compact array is O(N) per window
+// = O(N^2) per pass, the dominant hot path. So sent_keys/sent_vals are backed
+// by a parallel open-addressing hash index (sent_index) mapping window-id ->
+// slot, giving amortized O(1) get/get-or-create. The compact arrays remain
+// the source of truth for iteration and swap-remove; sent_index is kept
+// consistent on every insert and every swap-remove (see sentSwapRemove).
 
 /// What we last sent per window; WRITE-ONLY bookkeeping whose three contract
 /// reads are documented in the header:
@@ -150,11 +159,20 @@ const SentEntry = struct {
     parked: bool = false,
 };
 
+const empty_mark: usize = std.math.maxInt(usize);
+const tomb_mark: usize = empty_mark - 1;
+
 pub const State = struct {
     /// Ledger of sent state (see SentEntry).
     sent_keys: [model.store_capacity]model.WindowId = undefined,
     sent_vals: [model.store_capacity]SentEntry = undefined,
     sent_count: usize = 0,
+    /// O(1) lookup index over the compact ledger: open-addressed hash (linear
+    /// probing) from window-id -> slot into sent_keys/sent_vals. A bucket is
+    /// EMPTY_MARK when free, TOMB_MARK after a removal (re-usable on insert),
+    /// otherwise the slot holding that window. Kept consistent with the
+    /// compact arrays on every insert and swap-remove.
+    sent_index: [model.store_capacity]usize = [_]usize{empty_mark} ** model.store_capacity,
 };
 
 /// Owned by the compositor process; re-init() on reconnect.
@@ -168,37 +186,102 @@ pub fn deinit() void {
     st = .{};
 }
 
-pub fn sentGet(win: model.WindowId) ?SentEntry {
-    for (0..st.sent_count) |i| {
-        if (st.sent_keys[i] == win) return st.sent_vals[i];
+fn bucketOf(win: model.WindowId) usize {
+    return @intCast(win % model.store_capacity);
+}
+
+/// Slot holding `win` in the compact arrays, or null when absent.
+fn sentFind(win: model.WindowId) ?usize {
+    const cap = model.store_capacity;
+    var h = bucketOf(win);
+    for (0..cap) |_| {
+        const v = st.sent_index[h];
+        if (v == empty_mark) return null;
+        if (v != tomb_mark and st.sent_keys[v] == win) return v;
+        h = (h + 1) % cap;
     }
     return null;
+}
+
+/// Record that `slot` now holds `win`. Call only when `win` has no entry.
+fn sentIndexInsert(win: model.WindowId, slot: usize) void {
+    const cap = model.store_capacity;
+    var h = bucketOf(win);
+    for (0..cap) |_| {
+        const v = st.sent_index[h];
+        if (v == empty_mark or v == tomb_mark) {
+            st.sent_index[h] = slot;
+            return;
+        }
+        h = (h + 1) % cap;
+    }
+    unreachable; // sentIndexInsert only runs below capacity; a bucket is free.
+}
+
+/// Tombstone the index bucket mapping `win` to `slot`.
+fn sentIndexRemove(win: model.WindowId, slot: usize) void {
+    const cap = model.store_capacity;
+    var h = bucketOf(win);
+    for (0..cap) |_| {
+        const v = st.sent_index[h];
+        if (v == empty_mark or v == tomb_mark) return;
+        if (v == slot and st.sent_keys[slot] == win) {
+            st.sent_index[h] = tomb_mark;
+            return;
+        }
+        h = (h + 1) % cap;
+    }
+}
+
+/// After a swap-remove relocated `win` from `old_slot` to `new_slot`, re-point
+/// its index bucket so lookups still land on the (now moved) compact entry.
+fn sentIndexMove(win: model.WindowId, old_slot: usize, new_slot: usize) void {
+    const cap = model.store_capacity;
+    var h = bucketOf(win);
+    for (0..cap) |_| {
+        const v = st.sent_index[h];
+        if (v == empty_mark or v == tomb_mark) unreachable;
+        if (v == old_slot and st.sent_keys[old_slot] == win) {
+            st.sent_index[h] = new_slot;
+            return;
+        }
+        h = (h + 1) % cap;
+    }
+    unreachable;
+}
+
+pub fn sentGet(win: model.WindowId) ?SentEntry {
+    const slot = sentFind(win) orelse return null;
+    return st.sent_vals[slot];
 }
 
 pub fn sentGetOrPut(win: model.WindowId) !struct {
     found_existing: bool,
     value_ptr: *SentEntry,
 } {
-    for (0..st.sent_count) |i| {
-        if (st.sent_keys[i] == win) return .{ .found_existing = true, .value_ptr = &st.sent_vals[i] };
+    if (sentFind(win)) |slot| {
+        return .{ .found_existing = true, .value_ptr = &st.sent_vals[slot] };
     }
     if (st.sent_count >= model.store_capacity) return error.SentLedgerFull;
     const idx = st.sent_count;
     st.sent_count += 1;
     st.sent_keys[idx] = win;
     st.sent_vals[idx] = .{};
+    sentIndexInsert(win, idx);
     return .{ .found_existing = false, .value_ptr = &st.sent_vals[idx] };
 }
 
 pub fn sentSwapRemove(win: model.WindowId) void {
-    for (0..st.sent_count) |i| {
-        if (st.sent_keys[i] == win) {
-            st.sent_count -= 1;
-            st.sent_keys[i] = st.sent_keys[st.sent_count];
-            st.sent_vals[i] = st.sent_vals[st.sent_count];
-            return;
-        }
+    const slot = sentFind(win) orelse return;
+    const last = st.sent_count - 1;
+    sentIndexRemove(win, slot);
+    if (slot != last) {
+        const moved = st.sent_keys[last];
+        st.sent_keys[slot] = moved;
+        st.sent_vals[slot] = st.sent_vals[last];
+        sentIndexMove(moved, last, slot);
     }
+    st.sent_count = last;
 }
 
 /// Drop a window's ledger record (X ids recycle: after a destroy, a new
@@ -221,19 +304,10 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     // STEP 1: wa := workArea(ctx) (screen minus bar).
     const wa = ctx.workarea;
 
-    // STEP 2: coverage winner scan. Delegate to the module registry's coverageOn
-    // seam (fullscreen owns the screen claim): parked windows are excluded by
-    // the modules themselves (minimize-from-fullscreen re-parks the record, so
-    // it is not an occupant). At most one module claims per workspace.
-    var fs_win: ?model.WindowId = null;
-    for (window_mods) |mod| {
-        if (mod.coverageOn) |f| {
-            if (f(m, m.current)) |w| {
-                fs_win = w;
-                break;
-            }
-        }
-    }
+    // STEP 2: coverage winner scan. The core model helper (coveringOccupantOnWs)
+    // resolves which covering window owns the screen on the current workspace,
+    // replacing the former per-module registry enumeration.
+    const fs_win: ?model.WindowId = model.coveringOccupantOnWs(m, m.current);
 
     // STEP 3 (else branch): run layout.compute over the shown workspace.
     var order_buf: [model.store_capacity]model.WindowId = undefined;
@@ -322,70 +396,12 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         const gop = sentGetOrPut(win) catch null;
         const ledger = (if (gop) |g| g.value_ptr.* else SentEntry{});
 
-        // Desire, computed inline below.
-        var rect: utils.Rect = tiling.parked_rect;
-        var bw: u16 = ctx.cfg_bw;
-        var pixel: u32 = ctx.color_of(win, m);
-        var parked = false;
-
-        if (e.presence == .parked) {
-            bw = 0;
-            pixel = 0;
-            parked = true;
-        } else if (fs_win != null) {
-            if (win == fs_win.?) {
-                rect = ctx.screen;
-                bw = 0;
-                pixel = 0;
-            } else {
-                // Parked: rect irrelevant.
-                parked = true;
-            }
-        } else if (e.presence == .covering) {
-            // Fullscreen-carrying window NOT claimed by the coverage module
-            // for this workspace (its base isn't visible / its rec targets
-            // another ws): parked, matching the coverage scan that skipped it
-            // and the covering-parked model arm.
-            bw = 0;
-            pixel = 0;
-            parked = true;
-        } else switch (e.anchor) {
-            .floating => |r| {
-                rect = r;
-                parked = !model.visibleOn(m, win, m.current);
-            },
-            .tiled => {
-                if (findPlacement(&placements, win)) |p| {
-                    rect = p.rect;
-                    parked = !p.visible;
-                } else if (model.visibleOn(m, win, m.current)) {
-                    // Multi-tagged window whose home list isn't the shown
-                    // ws: never hidden (no layout owns it here), so it stays
-                    // at its previous real geometry, which is precisely the
-                    // ledger's record of what we last sent.
-                    // Park only when nothing was ever sent (first sight /
-                    // registered offscreen).
-                    const prev = ledger;
-                    if (!prev.has_rect) {
-                        bw = 0;
-                        pixel = 0;
-                        parked = true;
-                    } else {
-                        rect = prev.rect;
-                    }
-                } else {
-                    bw = 0;
-                    pixel = 0;
-                    parked = true;
-                }
-            },
-        }
-        // Off-ws windows are parked by construction above (no placement /
-        // visibleOn false), which is exactly "mask lacks bit(shown)".
-
-        // Fallback winner: first non-parked desire in store order.
-        if (winner == null and !parked) winner = win;
-        const is_winner = winner != null and winner.? == win;
+        const desire = computeDesire(m, ctx, e, win, fs_win, &placements, &winner, ledger);
+        const rect = desire.rect;
+        const bw = desire.bw;
+        const pixel = desire.pixel;
+        const parked = desire.parked;
+        const is_winner = desire.is_winner;
 
         if (parked) {
             // ONE merged request (X-offscreen + BELOW). Idempotent by nature,
@@ -435,6 +451,24 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     // DO NOT FLUSH HERE. Caller owns flushing.
 }
 
+/// Raise `win` to the top of the stack immediately, then flush. Used by
+/// floating drag-start, where the raise must be visible right away. The caller
+/// owns this invoke OUTSIDE any server grab (a flush under a grab would break
+/// batch atomicity); drag ticks afterward stay flushless (reconcileNow).
+pub fn raiseNow(ctx: *Ctx, win: model.WindowId) void {
+    ctx.sink.stackOnly(win, .above);
+    ctx.sink.flush();
+}
+
+/// Set or clear the EWMH _NET_WM_STATE_FULLSCREEN property on `win` via the
+/// sink. Queued only (no flush here): fullscreenToggle callers invoke this
+/// inside the enclosing grab, whose ungrabAndFlush lands it atomically with
+/// geometry. The EWMH atoms are resolved by the fullscreen module and passed
+/// through; the fullscreen module's XCB_ATOM_NONE guard already ran.
+pub fn setEwmhFullscreen(ctx: *Ctx, win: model.WindowId, state_atom: u32, fs_atom: u32, is_fullscreen: bool) void {
+    ctx.sink.setEwmhFullscreen(win, state_atom, fs_atom, is_fullscreen);
+}
+
 /// Pipeline: last visible geometry we sent to `win`, or null when never sent
 /// / currently parked.
 pub fn lastRectFor(win: model.WindowId) ?utils.Rect {
@@ -451,6 +485,99 @@ pub fn truthRect(m: *const model.Model, win: model.WindowId) ?utils.Rect {
     const e = m.store.get(win) orelse return null;
     if (e.presence == .present and e.anchor == .floating) return e.anchor.floating;
     return lastRectFor(win);
+}
+
+const Desire = struct {
+    rect: utils.Rect,
+    bw: u16,
+    pixel: u32,
+    parked: bool,
+    is_winner: bool,
+};
+
+/// Compute the desired state for a single store entry. The `winner` pointer
+/// is mutated when this is the first non-parked entry in store order (fallback
+/// winner election). `ledger` is the pre-send record for orphan keep-last.
+fn computeDesire(
+    m: *const model.Model,
+    ctx: *Ctx,
+    e: *const model.Entry,
+    win: model.WindowId,
+    fs_win: ?model.WindowId,
+    placements: *const tiling.List,
+    winner: *?model.WindowId,
+    ledger: SentEntry,
+) Desire {
+    var rect: utils.Rect = tiling.parked_rect;
+    var bw: u16 = ctx.cfg_bw;
+    var pixel: u32 = ctx.color_of(win, m);
+    var parked = false;
+
+    if (e.presence == .parked) {
+        bw = 0;
+        pixel = 0;
+        parked = true;
+    } else if (fs_win != null) {
+        if (win == fs_win.?) {
+            rect = ctx.screen;
+            bw = 0;
+            pixel = 0;
+        } else {
+            // Parked: rect irrelevant.
+            parked = true;
+        }
+    } else if (e.presence == .covering) {
+        // Fullscreen-carrying window NOT claimed by the coverage module
+        // for this workspace (its base isn't visible / its rec targets
+        // another ws): parked, matching the coverage scan that skipped it
+        // and the covering-parked model arm.
+        bw = 0;
+        pixel = 0;
+        parked = true;
+    } else switch (e.anchor) {
+        .floating => |r| {
+            rect = r;
+            parked = !model.visibleOn(m, win, m.current);
+        },
+        .tiled => {
+            if (findPlacement(placements, win)) |p| {
+                rect = p.rect;
+                parked = !p.visible;
+            } else if (model.visibleOn(m, win, m.current)) {
+                // Multi-tagged window whose home list isn't the shown
+                // ws: never hidden (no layout owns it here), so it stays
+                // at its previous real geometry, which is precisely the
+                // ledger's record of what we last sent.
+                // Park only when nothing was ever sent (first sight /
+                // registered offscreen).
+                if (!ledger.has_rect) {
+                    bw = 0;
+                    pixel = 0;
+                    parked = true;
+                } else {
+                    rect = ledger.rect;
+                }
+            } else {
+                bw = 0;
+                pixel = 0;
+                parked = true;
+            }
+        },
+    }
+    // Off-ws windows are parked by construction above (no placement /
+    // visibleOn false), which is exactly "mask lacks bit(shown)".
+
+    // Fallback winner: first non-parked desire in store order.
+    if (winner.* == null and !parked) winner.* = win;
+    const is_winner = winner.* != null and winner.*.? == win;
+
+    return .{
+        .rect = rect,
+        .bw = bw,
+        .pixel = pixel,
+        .parked = parked,
+        .is_winner = is_winner,
+    };
 }
 
 fn findPlacement(placements: *const tiling.List, win: model.WindowId) ?tiling.Placement {

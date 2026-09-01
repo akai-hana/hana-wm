@@ -7,6 +7,7 @@
 //!   borderPixel   ~ utils.setBorderPixel
 //!   park          ~ X-offscreen + BELOW merged into one request
 //!   stackOnly     ~ utils.raiseWindow and its BELOW sibling
+//!   setEwmhFullscreen ~ xcb_change_property (_NET_WM_STATE_FULLSCREEN)
 //!   flush/grab    ~ conn.flush / utils.grabServer / ungrabAndFlush
 
 const core = @import("core");
@@ -19,7 +20,7 @@ pub const XcbSink = struct {
     conn: core.Connection,
 
     pub fn sink(self: *XcbSink) sync.Sink {
-        return .{ .ptr = self, .vt = &.{ .map = mapShim, .geom = geomShim, .border_width = borderWidthShim, .border_pixel = borderPixelShim, .park = parkShim, .stack_only = stackOnlyShim, .flush = flushShim, .grab_server = grabShim, .ungrab_and_flush = ungrabAndFlushShim } };
+        return .{ .ptr = self, .vt = &.{ .map = mapShim, .geom = geomShim, .border_width = borderWidthShim, .border_pixel = borderPixelShim, .park = parkShim, .stack_only = stackOnlyShim, .set_ewmh_fullscreen = setEwmhFullscreenShim, .flush = flushShim, .grab_server = grabShim, .ungrab_and_flush = ungrabAndFlushShim } };
     }
 
     inline fn fromPtr(ptr: *anyopaque) *XcbSink {
@@ -77,6 +78,24 @@ pub const XcbSink = struct {
 
     fn stackOnlyShim(ptr: *anyopaque, win: u32, s: sync.Stack) void {
         _ = xcb.xcb_configure_window(XcbSink.fromPtr(ptr).conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{stackMode(s)});
+    }
+
+    /// Set/clear an EWMH atom property (used for _NET_WM_STATE_FULLSCREEN).
+    /// state_atom is the property (e.g. _NET_WM_STATE), fs_atom the value
+    /// (e.g. _NET_WM_STATE_FULLSCREEN); `is_fullscreen` selects REPLACE with
+    /// that value or an empty one.
+    fn setEwmhFullscreenShim(ptr: *anyopaque, win: u32, state_atom: u32, fs_atom: u32, is_fullscreen: bool) void {
+        const count: u32 = if (is_fullscreen) 1 else 0;
+        _ = xcb.xcb_change_property(
+            XcbSink.fromPtr(ptr).conn,
+            xcb.XCB_PROP_MODE_REPLACE,
+            win,
+            state_atom,
+            xcb.XCB_ATOM_ATOM,
+            32,
+            count,
+            if (is_fullscreen) &fs_atom else null,
+        );
     }
 
     fn flushShim(ptr: *anyopaque) void {

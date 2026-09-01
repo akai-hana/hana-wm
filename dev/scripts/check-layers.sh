@@ -38,16 +38,10 @@ wire_allowed() {
         src/window/window.zig|src/window/borders.zig) ;;
 
         # Click-raise and focus-flag restack requests tied to the X11 focus
-        # protocol (R2 keeps protocol in window.*). The floating behavior
-        # moved to window/modules and now holds zero wire traffic (restores
-        # route through sync), so it dropped off this allowlist entirely.
+        # protocol (R2 keeps protocol in window.*). focus.zig rides the
+        # allowlist for that protocol duty (set_input_focus / raise / the
+        # _NET_ACTIVE_WINDOW property write).
         src/window/focus.zig) ;;
-
-        # (allowlist shrunk: minimize/fullscreen/floating/workspaces moved to
-        # window/modules and now hold zero XCB traffic. Fullscreen truth is
-        # model-side, its protocol residue is pending-bar/EWMH only, and
-        # actions.restore is the sole restore path.)
-        src/tiling/tiling.zig) ;;
 
         # Root-window keygrab installation at startup and click-focus
         # stack-mode: startup is pre-WM-loop; the restack routes through
@@ -61,6 +55,19 @@ wire_allowed() {
         # definitions out of utils.zig into core/x11/wire.zig so the
         # model/tiling layer only ever sees xcb-free utils decls.
         src/core/x11/wire.zig) ;;
+
+        # Re-export DECLARATIONS only: utils.zig's `pub const raiseWindow =
+        # x11wire.raiseWindow;` is an xcb-free forwarding decl, not a send (the
+        # actual primitive lives in wire.zig, allowlisted above). Grep matches
+        # the wrapper NAME here, so this is the same definition-vs-call caveat.
+        src/core/utils/utils.zig) ;;
+
+        # Bare output-buffer flushes that match the widened symbol set but send
+        # NO geometry/border/map mutation (flush pushes the shared connection
+        # buffer after others' queued requests). refresh.zig/events.zig are core
+        # event-loop/DRR-detection flushes; prompt.zig is the bar's keyboard
+        # grab-drop flush. These are documented non-mutations, not Rule-1 sends.
+        src/core/refresh.zig|src/core/events.zig|src/bar/modules/prompt/prompt.zig) ;;
 
         *) return 1 ;;
     esac
@@ -96,7 +103,7 @@ grab_allowed() {
 # set_input_focus, all wire-mutating requests that belong behind the sync
 # boundary exactly like configure/map. Widening only makes violations FAIL
 # where they previously passed.
-pat1='xcb_configure_window|XCB_CONFIG_WINDOW_|xcb_map_window|xcb_unmap_window|xcb_destroy_window|xcb_circulate_window|XCB_CIRCULATE_|xcb_set_input_focus|xcb_change_window_attributes'
+pat1='xcb_configure_window|XCB_CONFIG_WINDOW_|xcb_map_window|xcb_unmap_window|xcb_destroy_window|xcb_circulate_window|XCB_CIRCULATE_|xcb_set_input_focus|xcb_change_window_attributes|xcb_change_property|xcb_flush|raiseWindow'
 while IFS= read -r line; do
     f=${line%%:*}
     wire_allowed "$f" && continue
@@ -117,7 +124,27 @@ while IFS= read -r line; do
 done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/sync/' | code_lines)
 
 # Rule 3: no xcb imports/references in model/ or tiling/.
-hits=$(grep -rn 'xcb' src/model/ src/tiling/ --include='*.zig' | grep -v '^\s*//' | grep -v ':\s*//' || true)
+# Comments are stripped first so `/* ... */` (incl. multi-line) and `//`
+# commentary that merely names an xcb symbol does not trip the guard. The awk
+# strips comments while preserving each physical line (and its number), so
+# real code references still match and report at their true location.
+hits=$(
+    while IFS= read -r f; do
+        awk '
+            { line=$0; code=0
+              while(1){
+                s=index(line,"/*"); e=index(line,"*/")
+                if(s>0 && e==0){ if(s>1) code=1; line=substr(line,1,s-1); inb=1; break }
+                if(s>0 && e>s){ line=substr(line,1,s-1) substr(line,e+2); continue }
+                if(e>0 && inb){ line=substr(line,e+2); inb=0; continue }
+                break
+              }
+              if(inb==1 && code==0) line=""
+              sub(/\/\/.*$/,"",line)
+              if (line ~ /xcb/) print FILENAME ":" NR ":" line
+            }' "$f"
+    done < <(find src/model src/tiling -name '*.zig') || true
+)
 if [ -n "$hits" ]; then
     while IFS= read -r line; do
         f=${line%%:*}

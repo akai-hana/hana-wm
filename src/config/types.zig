@@ -273,6 +273,21 @@ pub const TilingConfig = struct {
     /// of per workspace.
     global_layout: bool = false,
 
+    /// Resolves the per-workspace master-count overrides into a fixed-size,
+    /// workspace-indexed lookup with last-wins semantics (a duplicate entry
+    /// for one workspace overrides its predecessor). `null` at an index means
+    /// no override for that workspace (use the global default). Shared by the
+    /// core seed path (actions.seedParamsFromConfig) and the workspaces addon
+    /// (applyWorkspaceOverrides) so the last-wins rule lives in one place.
+    pub fn masterCountLookup(self: *const TilingConfig) [constants.max_workspaces]?u8 {
+        var lookup: [constants.max_workspaces]?u8 = .{null} ** constants.max_workspaces;
+        for (self.workspace_master_count_overrides.items) |o| {
+            if (o.workspace_idx < constants.max_workspaces)
+                lookup[o.workspace_idx] = o.count;
+        }
+        return lookup;
+    }
+
     pub fn deinit(self: *TilingConfig, allocator: std.mem.Allocator) void {
         for (self.layouts.items) |layout| allocator.free(layout);
         self.layouts.deinit(allocator);

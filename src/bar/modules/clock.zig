@@ -118,7 +118,7 @@ fn naturalWidthHook(_: *const anyopaque, clock_width: u16) u16 {
 }
 
 fn drawHook(ctx: *anyopaque, x: u16) !u16 {
-    const dc: *segmod.DrawCtx = @ptrCast(@alignCast(ctx));
+    const dc = segmod.castDraw(ctx);
     return draw(dc.dc, dc.config, dc.height, x);
 }
 

@@ -98,7 +98,13 @@ pub fn restore(m: *model.Model, win: model.WindowId) void {
     } else {
         e.home_ws = null; // floating restores, stays home-free
     }
-    e.presence = .present;
+    // Restore the window's presence pattern. A fullscreen-carrying window
+    // restores back into covering (its `covering_ws` core intent was preserved
+    // through the minimize — minimize only remapped presence to `.parked`), so
+    // core's model-based coverage read (`coveringOccupantOnWs`) recognizes it
+    // again as the screen owner. Plain windows restore to `.present`.
+    e.presence = if (build_options.has_fullscreen and
+        @import("fullscreen").isFullscreenMode(m, win)) .covering else .present;
     _ = g_recs.orderedRemove(idx);
 }
 
@@ -187,26 +193,6 @@ pub fn isMinimized(m: *const model.Model, win: model.WindowId) bool {
 pub fn count(m: *const model.Model) u32 {
     _ = m;
     return @intCast(g_recs.len);
-}
-
-/// Saved tiled slot of a minimized window (null = floating-originated).
-pub fn slotOf(m: *const model.Model, win: model.WindowId) ?usize {
-    _ = m;
-    const idx = findRec(win) orelse return null;
-    return g_recs.slice()[idx].slot;
-}
-
-/// Monotonic sequence stamp of a minimized window.
-pub fn seqOf(m: *const model.Model, win: model.WindowId) ?u32 {
-    _ = m;
-    const idx = findRec(win) orelse return null;
-    return g_recs.slice()[idx].seq;
-}
-
-/// Next value the monotonic counter will hand out (test/bar introspection).
-pub fn peekSeq(m: *const model.Model) u32 {
-    _ = m;
-    return g_seq;
 }
 
 /// Fills `set` with every currently minimized window ID, replacing any prior

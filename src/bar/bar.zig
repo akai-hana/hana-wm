@@ -1047,16 +1047,10 @@ fn minimizedCollect(m: *const anyopaque, set: *std.AutoHashMapUnmanaged(u32, voi
 }
 
 /// Whether a window module (the fullscreen addon) claims the screen on `ws`
-/// via the registry coverageOn seam (D12). Non-null means the bar must hide to
-/// share the screen. When no module provides coverageOn (dir lacks modules) the
-/// loop is degenerate and this returns null -- the "no owner -> empty" fallback.
+/// via the core model helper (coveringOccupantOnWs). Non-null means the bar
+/// must hide to share the screen.
 fn fullscreenScreenClaimer(ws: u8) ?u32 {
-    for (window_mods) |mod| {
-        if (mod.coverageOn) |f| {
-            if (f(pipeline.model(), @intCast(ws))) |w| return w;
-        }
-    }
-    return null;
+    return model.coveringOccupantOnWs(pipeline.model(), @intCast(ws));
 }
 
 pub fn toggleBarSegmentAnchor() void {

@@ -1299,7 +1299,7 @@ fn drawActive(
 /// on the title slot: it is NOT configurable from config (configurable =
 /// false) but still joins the bar's uniform lifecycle/poll loops.
 fn drawHook(ctx: *anyopaque, x: u16) !u16 {
-    const dc: *segmod.DrawCtx = @ptrCast(@alignCast(ctx));
+    const dc = segmod.castDraw(ctx);
     return draw(dc, x);
 }
 

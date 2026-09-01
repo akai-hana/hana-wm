@@ -107,6 +107,7 @@ pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
         // OFF: leave fullscreen; restore the pre-fullscreen anchor to the model.
         _ = g_recs.orderedRemove(findRec(win).?);
         e.presence = .present;
+        e.covering_ws = null; // release the core covering intent
         return true;
     }
     // ON: capacity guard BEFORE any mutation — a full store refuses the
@@ -118,24 +119,32 @@ pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
     };
     _ = g_recs.append(.{ .win = win, .ws = m.current, .anchor = anchor });
     e.presence = .covering;
+    e.covering_ws = m.current; // model stays the authority on the capture target
     return true;
 }
 
-/// True when `win` holds a fullscreen record in the module store (regardless
-/// of model presence — ghost state while minimized).
+/// True when `win` holds a covering (fullscreen) capture, derived from the
+/// MODEL's core `covering_ws` intent (the module's `g_recs` is kept in
+/// lockstep but the model is the single authoritative reader). Reports true
+/// even while the model presence is parked — a minimized-from-fullscreen
+/// window keeps `covering_ws` set — so the ghost state (the record survives
+/// while hidden) is preserved. Reading the model here keeps this predicate
+/// consistent with `fullscreenWsOf` and the core `coveringOccupantOnWs`,
+/// avoiding a split authority where the module and model disagree.
 pub fn isFullscreenMode(m: *const model.Model, win: model.WindowId) bool {
-    _ = m;
-    return findRec(win) != null;
+    const e = m.store.get(win) orelse return false;
+    return e.covering_ws != null;
 }
 
-/// The workspace `win` is fullscreen on, per its module record. GHOST: still
-/// reports the ws even while the model presence is parked (minimized-from-
-/// fullscreen), so callers classifying drops/withdraw-without-destroy can read
-/// the true target before teardown.
+/// The workspace `win`'s covering capture anchors to, per the MODEL's core
+/// `covering_ws` intent (the module's `g_recs[].ws` is kept in lockstep with
+/// it, but the model is the single authoritative reader). GHOST: still reports
+/// the ws even while the model presence is parked (minimized-from-fullscreen:
+/// minimize leaves `covering_ws` set), so callers classifying drops/withdraw-
+/// without-destroy can read the true target before teardown.
 pub fn fullscreenWsOf(m: *const model.Model, win: model.WindowId) ?model.WSId {
-    _ = m;
-    const idx = findRec(win) orelse return null;
-    return g_recs.slice()[idx].ws;
+    const e = m.store.get(win) orelse return null;
+    return e.covering_ws;
 }
 
 /// Whether `win` has a fullscreen record targeting `ws`. Unlike
@@ -183,14 +192,16 @@ pub fn fullscreenOccupied(m: *const model.Model, win: model.WindowId, dest: mode
 }
 
 /// Seam for the workspaces module's move/tag slice: retargets `win`'s record
-/// to `ws` WITHOUT
-/// touching the model entry (a covering window stays covering; a ghost record
-/// of a minimized window follows the mask). The caller has already confirmed
-/// the destination is not occupied.
+/// to `ws`. This now SYNCS the model's core `covering_ws` intent alongside the
+/// module record (a covering window stays covering; a ghost record of a
+/// minimized window follows the mask) so the model stays the single authority
+/// on the capture target and the module never diverges from it. The caller has
+/// already confirmed the destination is not occupied.
 pub fn moveFullscreenTo(m: *const model.Model, win: model.WindowId, ws: model.WSId) void {
-    _ = m;
     const idx = findRec(win) orelse return;
+    const eptr = @constCast(m).store.getPtr(win) orelse return;
     g_recs.slice()[idx].ws = ws;
+    eptr.covering_ws = ws;
 }
 
 /// The coverage seam body (plugin.WindowModule.coverageOn) consumed by sync's
@@ -317,6 +328,7 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
     if (g_recs.len >= MAX_FULLSCREEN) return false;
     _ = g_recs.append(.{ .win = win, .ws = ws, .anchor = anchor });
     e.presence = .covering;
+    e.covering_ws = ws; // sync the model's core covering intent with the record
     return true;
 }
 
@@ -324,22 +336,21 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
 // Protocol hooks (EWMH advertisement + deferred bar hide/show).
 // ---------------------------------------------------------------------------
 
-// Sets or clears the EWMH _NET_WM_STATE_FULLSCREEN property on `win`.
-// Guards on both EWMH atoms being valid; pub for actions.fullscreenToggleWindow,
-// keeping the advertisement protocol-side.
+// Sets or clears the EWMH _NET_WM_STATE_FULLSCREEN property on `win`. The
+// actual change_property write is routed through sync's sink (the ONLY writer
+// to X); the EWMH atoms stay resolved here and the write is queued inside the
+// enclosing grab (reconcileUnderGrabNowFullscreen), whose ungrabAndFlush lands
+// it atomically with geometry. Guards on both EWMH atoms being valid; pub for
+// actions.fullscreenToggleWindow, keeping the advertisement protocol-side.
 pub fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
     if (g_net_wm_state == xcb.XCB_ATOM_NONE or
         g_net_wm_state_fullscreen == xcb.XCB_ATOM_NONE) return;
-    const count: u32 = if (is_fullscreen) 1 else 0;
-    _ = xcb.xcb_change_property(
-        core.getState().conn,
-        xcb.XCB_PROP_MODE_REPLACE,
+    @import("sync").setEwmhFullscreen(
+        @import("pipeline").grabCtx(),
         win,
         g_net_wm_state,
-        xcb.XCB_ATOM_ATOM,
-        32,
-        count,
-        if (is_fullscreen) &g_net_wm_state_fullscreen else null,
+        g_net_wm_state_fullscreen,
+        is_fullscreen,
     );
 }
 

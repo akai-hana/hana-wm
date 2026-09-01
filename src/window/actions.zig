@@ -639,10 +639,8 @@ pub fn seedParamsFromConfig() void {
     for (cfg.workspace_layout_overrides.items, 0..) |o, oi| {
         if (o.workspace_idx < max_ws) layout_lookup[o.workspace_idx] = oi;
     }
-    var count_lookup: [max_ws]?u8 = .{null} ** max_ws;
-    for (cfg.workspace_master_count_overrides.items) |o| {
-        if (o.workspace_idx < max_ws) count_lookup[o.workspace_idx] = o.count;
-    }
+    // Last-wins master-count lookup (shared rule on TilingConfig).
+    const count_lookup = cfg.masterCountLookup();
 
     const m = pipeline.model();
     for (&m.ws, 0..) |*s, i| {

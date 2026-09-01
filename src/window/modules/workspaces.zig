@@ -45,11 +45,9 @@ pub fn applyWorkspaceOverrides(
 ) void {
     const max_ws = constants.max_workspaces;
 
-    var master_count_lookup: [max_ws]?u8 = .{null} ** max_ws;
-    for (cfg_tiling.workspace_master_count_overrides.items) |o| {
-        if (o.workspace_idx < max_ws)
-            master_count_lookup[o.workspace_idx] = o.count;
-    }
+    // Last-wins (loop-overwrite) master-count lookup (shared with the core
+    // seed path; the rule lives on TilingConfig.masterCountLookup).
+    const master_count_lookup = cfg_tiling.masterCountLookup();
 
     for (wss) |*ws| {
         const id = ws.id;
@@ -113,7 +111,6 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
     if (build_options.has_minimize) {
         if (@import("minimize").isMinimized(m, win)) {
             e.mask = model.bit(ws); // record follows the move
-            return;
         }
     }
     // Fullscreen record follows the move; a destination owner drops this one

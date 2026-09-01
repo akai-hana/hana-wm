@@ -28,6 +28,11 @@ const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
 // the comptime `null` type, so every `if (build_options.has_bar)` call below
 // compiles away.
 const surfaces = @import("plugins").Surfaces;
+// `grabKeybindings` lives in the event layer (it owns the X connection and
+// reads the live config). events.zig also imports this module, so the two
+// share a mutual runtime-only dependency; no comptime cycle is formed because
+// both references are plain runtime function calls.
+const events = @import("events");
 // Floating drag commands are reached through actions (single command layer),
 // not by naming the floating module here, keeping the loop layer free of
 // the optional module import. The drag state (model-backed) is queried via
@@ -72,10 +77,23 @@ pub fn getXkbState() *xkbcommon.XkbState {
 /// Rebuilds the keymap/keysym table after the server changes the keyboard
 /// mapping (setxkbmap/xmodmap). Keybinding resolution is keysym-indexed, so
 /// rebuilding the flat keycode->keysym table keeps existing bindings working
-/// under the new layout.
+/// under the new layout. However, the per-binding keycodes the key grabs were
+/// made with were resolved against the old layout and go stale; re-resolve
+/// them from the rebuilt table and re-grab (ungrab existing, then grab new)
+/// so keybindings keep firing after the mapping change.
 pub fn handleMappingNotify() void {
     const cs = core.getState();
-    if (xkb_state) |*s| s.rebuild(cs.conn);
+    const state = if (xkb_state) |*s| s else return;
+    state.rebuild(cs.conn);
+
+    // The dispatch map is keyed on keysym (unaffected by the rebuild), but
+    // `grabKeybindings` grabs the keycodes stored on each binding. Refresh
+    // those keycodes from the new table, then let grabKeybindings() atomically
+    // ungrab all and re-grab the updated set, avoiding duplicate/leaked grabs.
+    for (cs.config.keybindings.items) |*kb| {
+        kb.keycode = state.keysymToKeycode(kb.keysym);
+    }
+    events.grabKeybindings();
 }
 
 // Grab setup

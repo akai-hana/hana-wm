@@ -65,6 +65,16 @@ pub const MinimizedApi = struct {
     collect: ?*const fn (m: *const anyopaque, set: *std.AutoHashMapUnmanaged(u32, void), allocator: std.mem.Allocator) void = null,
 };
 
+/// Type-free cast of the bar-built `*anyopaque` handed to a segment's
+/// `draw` hook back into the concrete `*DrawCtx`. Every segment's draw adapter
+/// performs this identical cast, so it lives here once (laying in the segment
+/// vocabulary layer, never in the core orchestrator) instead of being
+/// copy-pasted per module. Segments keep their own thin `drawHook` that calls
+/// `draw(castDraw(ctx), ...)`.
+pub inline fn castDraw(ctx: *anyopaque) *DrawCtx {
+    return @ptrCast(@alignCast(ctx));
+}
+
 /// Per-frame scratch shared by every segment's `draw(ctx, x)` call. Built once
 /// per frame by the bar; `width` is the segment's reserved row width, set by
 /// the bar immediately before invoking each segment's draw hook (needed by the
