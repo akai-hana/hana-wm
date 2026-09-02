@@ -224,7 +224,12 @@ fn sentIndexRemove(win: model.WindowId, slot: usize) void {
     var h = bucketOf(win);
     for (0..cap) |_| {
         const v = st.sent_index[h];
-        if (v == empty_mark or v == tomb_mark) return;
+        // Skip tombstones: a tombstone between `win`'s home and its entry is
+        // legitimate (a removal of an interleaved window whose bucket falls
+        // earlier in the probe chain). Stopping on one here would miss `win`'s
+        // bucket entirely and leave a stale slot pointer that shadows the
+        // swap-remove that follows. An EMPTY bucket is the true chain end.
+        if (v == empty_mark) return;
         if (v == slot and st.sent_keys[slot] == win) {
             st.sent_index[h] = tomb_mark;
             return;
@@ -240,14 +245,18 @@ fn sentIndexMove(win: model.WindowId, old_slot: usize, new_slot: usize) void {
     var h = bucketOf(win);
     for (0..cap) |_| {
         const v = st.sent_index[h];
-        if (v == empty_mark or v == tomb_mark) unreachable;
+        // Skip tombstones for the same reason as sentIndexRemove: two windows
+        // can share a home bucket (they differ only mod capacity > cap), and
+        // a removal between them leaves a tombstone that the probe for the
+        // other one must step over. Only an empty bucket is a stop.
+        if (v == empty_mark) break;
         if (v == old_slot and st.sent_keys[old_slot] == win) {
             st.sent_index[h] = new_slot;
             return;
         }
         h = (h + 1) % cap;
     }
-    unreachable;
+    unreachable; // reached only when sentIndexMove runs for a window absent from the index
 }
 
 pub fn sentGet(win: model.WindowId) ?SentEntry {

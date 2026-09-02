@@ -108,6 +108,19 @@ pub fn switchTo(m: *model.Model, ws: model.WSId) void {
 pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void {
     const e = m.store.getPtr(win) orelse return;
     if (e.mask == model.ALL_MASK) return; // pinned stays everywhere-visible
+
+    // Refuse-before-mutate: a full destination list cancels the move instead
+    // of stranding the window home-less. Checked BEFORE any record field is
+    // written so there is nothing to roll back. The move is taken as a whole
+    // or not at all (the mask, minimized ws, fullscreen ws and home all move
+    // together below).
+    const h: ?model.WSId = e.home_ws;
+    if (h) |old_h| {
+        if (old_h != ws and m.ws[ws].tiled_order.len >= model.max_tiled_per_ws) {
+            return;
+        }
+    }
+
     if (build_options.has_minimize) {
         if (@import("minimize").isMinimized(m, win)) {
             e.mask = model.bit(ws); // record follows the move
@@ -131,15 +144,8 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
         }
     }
     e.mask = model.bit(ws);
-    const h: ?model.WSId = e.home_ws;
     if (h) |old_h| {
         if (old_h != ws) {
-            // Refuse-before-mutate: a full destination list cancels the
-            // move instead of stranding the window home-less.
-            if (m.ws[ws].tiled_order.len >= model.max_tiled_per_ws) {
-                e.mask = model.bit(old_h);
-                return;
-            }
             model.removeValue(&m.ws[old_h].tiled_order, win);
             _ = m.ws[ws].tiled_order.append(win);
             e.home_ws = ws;
@@ -157,7 +163,7 @@ pub fn tagRemove(m: *model.Model, win: model.WindowId, ws: model.WSId) bool {
     if (build_options.has_fullscreen) {
         const fmod = @import("fullscreen");
         if (fmod.isFullscreenOnWs(m, win, ws)) {
-            const dest = model.lowestBit(e.mask);
+            const dest = model.lowestBit(e.mask) orelse unreachable;
             if (fmod.fullscreenOccupied(m, win, dest)) {
                 _ = fmod.toggleFullscreen(m, win);
             } else {

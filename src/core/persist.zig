@@ -248,6 +248,10 @@ pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u
     };
     defer file.close(io);
     try file.writeStreamingAll(io, al.items);
+    // fsync the temp file before renaming it into place so its content is
+    // flushed to disk. Otherwise the directory entry can point at unflushed
+    // page-cache data, and a power-loss can leave a truncated restore file.
+    try file.sync(io);
     // POSIX rename replaces the name while the fd stays open; the defer's
     // close lands after the rename moved the temp into place.
     try std.Io.Dir.renameAbsolute(tmp, path, io);
@@ -310,8 +314,8 @@ pub fn loadToGlobal(allocator: std.mem.Allocator, path: []const u8) !bool {
 /// capacity); the workspace slices alias the parse arena and are kept
 /// alive by `g_legacy_v1`/`g_legacy_v2`.
 fn loadLegacy(allocator: std.mem.Allocator, raw: []const u8) !bool {
-    if (g_legacy_v1) |old| old.deinit();
-    if (g_legacy_v2) |old| old.deinit();
+    if (g_legacy_v1) |old| { old.deinit(); g_legacy_v1 = null; }
+    if (g_legacy_v2) |old| { old.deinit(); g_legacy_v2 = null; }
     var v1 = std.json.parseFromSlice(StateFileV1, allocator, raw, .{}) catch null;
     if (v1) |*p| {
         if (p.value.version == 1) {

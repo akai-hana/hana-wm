@@ -69,8 +69,8 @@ pub const FontState = struct {
             null,
         );
         defer c.pango_font_metrics_unref(metrics);
-        const ascent: i16 = @intCast(@divTrunc(c.pango_font_metrics_get_ascent(metrics), c.pango_scale));
-        const descent: i16 = @intCast(@divTrunc(c.pango_font_metrics_get_descent(metrics), c.pango_scale));
+        const ascent: i16 = @intCast(std.math.clamp(@divTrunc(c.pango_font_metrics_get_ascent(metrics), c.pango_scale), std.math.minInt(i16), std.math.maxInt(i16)));
+        const descent: i16 = @intCast(std.math.clamp(@divTrunc(c.pango_font_metrics_get_descent(metrics), c.pango_scale), std.math.minInt(i16), std.math.maxInt(i16)));
         self.cached_metrics = .{ .ascent = ascent, .descent = descent };
         return .{ ascent, descent };
     }

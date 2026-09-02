@@ -221,23 +221,22 @@ pub fn coverageOn(m: *const model.Model, ws: model.WSId) ?model.WindowId {
 // ---------------------------------------------------------------------------
 // Persistence seam. Blob byte layout (self-identifying, < 32 bytes):
 //     [0]      = 0x46 ('F')         magic / format tag
-//     [1]      = ws : u8            fullscreen workspace id (WSId is u16 but
-//                                   real ws ids are < 256 in practice)
-//     [2]      = anchor tag : u8    { 1 = tiled, 2 = floating }
+//     [1..3]   = ws : u16 LE        fullscreen workspace id
+//     [3]      = anchor tag : u8    { 1 = tiled, 2 = floating }
 //     if floating (tag == 2), the anchor's rect follows as native little-endian:
-//     [3..7]   = x  : u32 (sign-preserving: Rect.x i16 bit-cast to i32 then u32)
-//     [7..11]  = y  : u32 (same sign-preserving treatment)
-//     [11..13] = width        : u16
-//     [13..15] = height       : u16
-//     [15..17] = border_width : u16
-//     total: 3 bytes for tiled, 17 bytes for floating.
+//     [4..8]   = x  : u32 (sign-preserving: Rect.x i16 bit-cast to i32 then u32)
+//     [8..12]  = y  : u32 (same sign-preserving treatment)
+//     [12..14] = width        : u16
+//     [14..16] = height       : u16
+//     [16..18] = border_width : u16
+//     total: 4 bytes for tiled, 18 bytes for floating.
 // ---------------------------------------------------------------------------
 
 const FS_MAGIC: u8 = 0x46;
 const TAG_TILED: u8 = 1;
 const TAG_FLOATING: u8 = 2;
-const BLOB_LEN_TILED: usize = 3;
-const BLOB_LEN_FLOATING: usize = 17;
+const BLOB_LEN_TILED: usize = 4;
+const BLOB_LEN_FLOATING: usize = 18;
 
 // Native-little-endian slot writes/reads at an offset. Width comes from the
 // comptime `T`, so one helper each covers the u16/u32 fields in the blob.
@@ -268,19 +267,19 @@ pub fn serializeWindow(model_ptr: *anyopaque, win: u32, alloc: std.mem.Allocator
     };
     const buf = alloc.alloc(u8, len) catch return null;
     buf[0] = FS_MAGIC;
-    buf[1] = @intCast(rec.ws);
+    writeLE(u16, buf, 1, rec.ws);
     switch (rec.anchor) {
         .tiled => {
-            buf[2] = TAG_TILED;
+            buf[3] = TAG_TILED;
         },
         .floating => |r| {
-            buf[2] = TAG_FLOATING;
+            buf[3] = TAG_FLOATING;
             // Sign-preserving: i16 -> i32 -> u32, so decode via @truncate to i16.
-            writeLE(u32, buf, 3, @as(u32, @bitCast(@as(i32, r.x))));
-            writeLE(u32, buf, 7, @as(u32, @bitCast(@as(i32, r.y))));
-            writeLE(u16, buf, 11, r.width);
-            writeLE(u16, buf, 13, r.height);
-            writeLE(u16, buf, 15, r.border_width);
+            writeLE(u32, buf, 4, @as(u32, @bitCast(@as(i32, r.x))));
+            writeLE(u32, buf, 8, @as(u32, @bitCast(@as(i32, r.y))));
+            writeLE(u16, buf, 12, r.width);
+            writeLE(u16, buf, 14, r.height);
+            writeLE(u16, buf, 16, r.border_width);
         },
     }
     return buf;
@@ -297,9 +296,9 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
     if (findRec(win) != null) return true; // already adopted; idempotent
     const m: *model.Model = @ptrCast(@alignCast(ptr));
     const e = m.store.getPtr(win) orelse return false;
-    if (bytes.len < 3) return false;
-    const ws: model.WSId = @intCast(bytes[1]);
-    const tag = bytes[2];
+    if (bytes.len < 4) return false;
+    const ws: model.WSId = readLE(u16, bytes, 1);
+    const tag = bytes[3];
     var anchor: model.BaseMode = undefined;
     switch (tag) {
         TAG_TILED => {
@@ -309,11 +308,11 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
         TAG_FLOATING => {
             if (bytes.len != BLOB_LEN_FLOATING) return false;
             const rect = utils.Rect{
-                .x = @as(i16, @truncate(@as(i32, @bitCast(readLE(u32, bytes, 3))))),
-                .y = @as(i16, @truncate(@as(i32, @bitCast(readLE(u32, bytes, 7))))),
-                .width = readLE(u16, bytes, 11),
-                .height = readLE(u16, bytes, 13),
-                .border_width = readLE(u16, bytes, 15),
+                .x = @as(i16, @truncate(@as(i32, @bitCast(readLE(u32, bytes, 4))))),
+                .y = @as(i16, @truncate(@as(i32, @bitCast(readLE(u32, bytes, 8))))),
+                .width = readLE(u16, bytes, 12),
+                .height = readLE(u16, bytes, 14),
+                .border_width = readLE(u16, bytes, 16),
             };
             anchor = .{ .floating = rect };
             // The blob restores the pre-fullscreen floating rect: the model

@@ -82,7 +82,7 @@ pub fn restore(m: *model.Model, win: model.WindowId) void {
         .floating => false,
     };
     if (wants_home) {
-        const h: model.WSId = model.lowestBit(e.mask); // follows tag-moves made while hidden
+        const h = model.lowestBit(e.mask) orelse return; // follows tag-moves made while hidden
         const list = &m.ws[h].tiled_order;
         // Refuse-before-mutate: a full home list leaves the window parked
         // rather than half-restoring it.

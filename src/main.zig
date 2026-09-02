@@ -55,7 +55,13 @@ pub fn main() !void {
     try input.initXkb(x.conn);
     defer input.deinitXkb();
 
-    const loaded_config = try config.load(alloc, x.screen, input.getXkbState());
+    // initXkb runs above, so the state is expected to be present; guard
+    // defensively rather than crash on the (unexpected) null case.
+    const xkb_state = input.getXkbState() orelse {
+        debug.warn("XKB state unavailable before config load; aborting", .{});
+        return error.XkbStateUnavailable;
+    };
+    const loaded_config = try config.load(alloc, x.screen, xkb_state);
 
     // Heap-allocate config so core.State holds a pointer; this allows
     // atomic pointer-swap on reload instead of by-value copy aliasing.

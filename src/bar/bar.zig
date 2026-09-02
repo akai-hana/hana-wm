@@ -108,7 +108,7 @@ fn calcBarHeightAndFontSize() !u16 {
         return height;
     }
     const m = measureFontMetrics() orelse return default_bar_height;
-    return @intCast(std.math.clamp(@as(u32, @intCast(m.asc + m.desc)), min_bar_height, max_bar_height));
+    return @intCast(std.math.clamp(@max(1, m.asc + m.desc), @as(i32, @intCast(min_bar_height)), @as(i32, @intCast(max_bar_height))));
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +120,12 @@ pub fn onPollWakeup() void {
     for (bar_mods) |m| {
         if (m.onPollWakeup) |h| h();
     }
+    // A module's poll hook (e.g. the prompt's caret-blink toggle) must reach
+    // the draw's repaint gate: fold any queued module redraw request into the
+    // force flag, exactly as the X-batch update path (updateIfDirty) does, so
+    // the animation is visible even when the loop is waking only on the poll
+    // timer with no X traffic to trigger that path.
+    if (barModsConsumeRedrawRequest()) gBar.force = true;
     submitDraw();
 }
 
@@ -128,6 +134,15 @@ pub fn onPollWakeup() void {
 /// "no wake needed" and are ignored; when every module returns negative the
 /// bar sleeps without polling.
 pub fn pollTimeoutMs() i32 {
+    // A hidden bar paints nothing, so no per-frame deadline (clock tick,
+    // caret blink, carousel scroll) can make progress: the modules would
+    // re-arm polling forever without ever being drawn to, spinning the event
+    // loop at the frame rate in the background (notably the title carousel,
+    // whose offset only advances inside a draw). Suppress all deadlines while
+    // hidden; the next visibility transition re-arms them.
+    if (gBar.state) |s| {
+        if (!s.is_visible) return -1;
+    }
     var timeout: i32 = -1;
     for (bar_mods) |m| {
         if (m.pollTimeoutMs) |h| {
@@ -689,9 +704,20 @@ const State = struct {
         const omit_gap = omit_gap_after_title and self.isCenterSlot(name);
         const x_before = x;
         const drawn_x = self.drawSegmentSafe(ctx, name, x, w);
-        if (!omit_gap and drawn_x != x_before) {
-            self.paintGap(drawn_x, scaled_spacing);
-            return drawn_x + scaled_spacing;
+        const drew = drawn_x != x_before;
+        if (!omit_gap) {
+            // On success advance past the drawn text plus the trailing gap.
+            if (drew) {
+                self.paintGap(drawn_x, scaled_spacing);
+                return drawn_x + scaled_spacing;
+            }
+            // On failure drawSegmentSafe returns x unchanged ("drew nothing").
+            // Still consume the full reserved slot + gap so the NEXT segment
+            // leftward starts where the layout pass expects; returning the
+            // unchanged x would let that segment paint over this failed slot
+            // (and, on the follow-up frame, desync the whole cluster). Matches
+            // drawRightSegments' failed-draw handling.
+            return x + w + scaled_spacing;
         }
         return drawn_x;
     }
@@ -801,6 +827,10 @@ const State = struct {
                         const omit_gap = (lay.position == .center) and is_center;
                         const w = if (is_center) remaining else self.measureSegmentWidth(frame, seg);
                         self.recordClickBound(seg, x, w);
+                        // clock_x must be recorded for a self-ticking segment
+                        // in ANY cluster (not just right): drawClockOnly relies
+                        // on it regardless of where the clock is laid out.
+                        if (self.isSelfTicking(seg)) self.clock_x = x;
                         if (self.isSegmentRepaintable(seg)) {
                             if (!is_full_redraw) {
                                 const clear_w = if (omit_gap) w else w + scaled_spacing;

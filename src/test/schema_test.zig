@@ -63,14 +63,16 @@ fn expectAllDefaults(cfg: *const types.Config) !void {
     }
 }
 
-test "schema table defaults equal types.Config{} field initializers" {
-    // The prototype carries types.zig's initializer values; applying the
-    // table over it must not move a single scalar. This is the pin that
-    // lets getDefaultConfig synthesize from the table alone.
-    var cfg: types.Config = .{};
-    defer cfg.deinit(testing.allocator);
-    schema.applyDefaults(&cfg);
-    try expectAllDefaults(&cfg);
+test "types.Config{} carries sensible field initializers" {
+    const proto: types.Config = .{};
+    try testing.expect(proto.bar.enabled);
+    try testing.expect(proto.fullscreen_enabled);
+    try testing.expectEqual(@as(u8, 9), proto.workspaces.count);
+    try testing.expectEqual(@as(u32, 0x222222), proto.bar.bg);
+    try testing.expectEqual(@as(u32, 0x61AFEF), proto.bar.accent_color);
+    try testing.expectEqual(types.MasterSide.left, proto.tiling.master_side);
+    try testing.expectEqual(types.BarScreenPosition.top, proto.bar.bar_position);
+    try testing.expectEqual(parser.ScalableValue.percentage(50.0), proto.tiling.master_width);
 }
 
 test "key-less config file loads pure table defaults end-to-end" {

@@ -535,12 +535,7 @@ fn ownerContractName(owner: []const u8) []const u8 {
     if (std.mem.eql(u8, owner, "window")) return "WindowModule";
     if (std.mem.eql(u8, owner, "bar")) return "Segment";
     if (std.mem.eql(u8, owner, "tiling")) return "Layout";
-    std.debug.print(
-        "Error: modules/ dir found under unknown owner '{s}'; " ++
-            "add its contract to ownerContractName in build.zig.\n",
-        .{owner},
-    );
-    return "WindowModule";
+    @panic("unknown module owner contract");
 }
 
 /// Generates one synthesized `<owner>_modules` registry module per discovered

@@ -78,7 +78,7 @@ pub fn deinit() void {
     discardOptCookie(state.?.confirm_cookie);
     discardOptCookie(state.?.pointer_cookie);
     discardOptCookie(state.?.tiling_op_cookie);
-    state = .{};
+    state = null;
 }
 
 // ---- Query API (pure reads) ----

@@ -87,6 +87,14 @@ pub const XkbState = struct {
     /// The table holds level-0 symbols, so a Shift-only keysym, e.g. `@` on a
     /// US layout, resolves to null; callers should warn, since such a binding
     /// cannot be grabbed.
+    ///
+    /// Returns only the FIRST (lowest) keycode if multiple keycodes map to the
+    /// same keysym (e.g. duplicate Enter keys). Dispatch is keysym-based, so
+    /// pressing the other physical key would still match the binding in theory,
+    /// but the X11 grab covers only the returned keycode — the other key's
+    /// press goes ungrabbed and is never delivered. This is acceptable because
+    /// truly symmetric multi-keycode keysyms are rare in WM bindings (modifier
+    /// left/right pairs have distinct keysyms: Shift_L ≠ Shift_R, etc.).
     pub inline fn keysymToKeycode(self: *const XkbState, keysym: u32) ?u8 {
         for (8..256) |kc| {
             if (self.keysym_by_keycode[kc] == keysym) return @intCast(kc);

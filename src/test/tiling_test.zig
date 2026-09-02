@@ -143,8 +143,10 @@ test "T21 master on right" {
     try testing.expectEqual(@as(usize, 2), out.len);
     // master_x = 800 - 400 = 400; x = 408
     try expectP(&out, 0, 11, 408, 8, 384, 580, true);
-    // stack_x = 0; x = 4
-    try expectP(&out, 1, 12, 4, 8, 384, 580, true);
+    // Mirrored stack: x = gap + gap/2 = 12 (exact mirror of T20's stack at
+    // [404,388] -> 800-404-384 = 12); a 0 pane origin would leave only a
+    // half-gap at the left screen edge.
+    try expectP(&out, 1, 12, 12, 8, 384, 580, true);
 }
 
 // T22 - grid 2x2.
@@ -164,8 +166,10 @@ test "T22 grid 2x2" {
     try expectP(&out, 3, 14, 404, 304, 384, 284, true);
 }
 
-// T23 - grid relaxed widens the partial last row (verbatim quirk:
-// x spacing stays column-based, so wide partial cells overlap their row).
+// T23 - grid relaxed widens the partial last row: cells share the full
+// screen width AND the partial row is column-spaced by that wider cell, so
+// the wide relaxed cells do not overlap (previously the partial row kept the
+// narrow column stride, making neighbouring wide cells overlap each other).
 test "T23 grid relaxed partial row" {
     var fx: Fixture = undefined;
     fx.init(&.{ 11, 12, 13, 14, 15 }, stdWa());
@@ -182,9 +186,10 @@ test "T23 grid relaxed partial row" {
     try expectP(&out, 0, 11, 8, 8, 252, 284, true);
     try expectP(&out, 1, 12, 272, 8, 252, 284, true);
     try expectP(&out, 2, 13, 536, 8, 252, 284, true);
-    // last row: count=2 -> partial_cell_w = (800-24)/2 = 388 -> 384
+    // last row: count=2 -> partial_cell_w = (800-24)/2 = 388 -> 384, spaced
+    // by the partial cell stride (388+8): x = 8 and 404 (no overlap).
     try expectP(&out, 3, 14, 8, 304, 384, 284, true);
-    try expectP(&out, 4, 15, 272, 304, 384, 284, true);
+    try expectP(&out, 4, 15, 404, 304, 384, 284, true);
 
     // Rigid mode keeps the column width in the partial row.
     var outr: List = .{};
@@ -342,6 +347,34 @@ test "T29 hints applied at emit" {
     // Raw master rect is {8,8,780,580}; snapped down to 700x500 and centred
     // back into its slot: dx = (780-700)/2 = 40, dy = 40.
     try expectP(&out, 0, 11, 48, 48, 700, 500, true);
+}
+
+// T29b - horizontal geometry enforcement on the master-slave axis: a slave
+// that declares a small max_width (e.g. a dialog) shrinks the stack column to
+// its natural width and the master absorbs the freed horizontal space, so the
+// dialog no longer leaves a dead gap beside it. Mirrors tileColumn's vertical
+// max_height capping, on the width axis.
+test "T29b master swallows freed space from a narrow dialog slave" {
+    var fx: Fixture = undefined;
+    fx.init(&.{ 11, 12 }, stdWa());
+    defer fx.deinit();
+
+    // Window 12 (the stack slave) declares a small max_width. Re-materialize
+    // the hint snapshot into the buffer, exactly as sync does per retile.
+    fx.m.store.getPtr(12).?.size_hints = .{ .max_width = 200 };
+    fx.hint_buf[1] = fx.m.store.getPtr(12).?.size_hints;
+
+    var out: List = .{};
+    tiling.compute(K_MASTER, tuned(&fx), &out);
+
+    try testing.expectEqual(@as(usize, 2), out.len);
+    // Raw stack pane = 800 - (0.5*800 = 400) = 400; natural width for the
+    // 200-wide dialog = 200 + (gap/2 4 + gap 8 + 2*border 4 = 16) = 216,
+    // which is < 400, so the stack shrinks to 216 and master grows to 584.
+    // master: x=8, inner=shrink(584, 12+4=16)=568, h=580.
+    try expectP(&out, 0, 11, 8, 8, 568, 580, true);
+    // stack_x = master_w = 584; x=584+4=588, inner=shrink(216,16)=200.
+    try expectP(&out, 1, 12, 588, 8, 200, 580, true);
 }
 
 // T30 - purity: compute twice yields identical output and mutates nothing.

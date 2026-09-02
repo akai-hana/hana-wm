@@ -14,7 +14,7 @@ min_window_dim   = 50
 border_focused   = "#005577"
 border_unfocused = "#444444"
 
-[Keybindings]
+[binds]
 Mod = "Super"
 
 # Terminal (will be auto-detected)
@@ -66,7 +66,7 @@ Mod+Shift+T = "reload"
 [bar]
 position = "bottom"
 font_size = 12
-spacing = 6
+segment_spacing = 6
 
 bg          = "#222222"
 fg          = "#bbbbbb"

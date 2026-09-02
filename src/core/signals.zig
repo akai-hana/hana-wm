@@ -2,6 +2,7 @@
 //! Routes POSIX signals through a self-pipe so the event loop can dispatch them safely.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const utils = @import("utils");
 const spawn = @import("spawn");
@@ -46,9 +47,8 @@ fn writeSignalByte(byte: u8) void {
     }
 }
 
-// Re-entry guard for the SIGUSR2 backtrace dump: the unwind is NOT
-// async-signal-safe (it allocates while symbolizing), so a second USR2
-// arriving mid-dump must be dropped rather than deadlock the dump.
+// Re-entry guard for the SIGUSR2 backtrace dump: a second USR2 arriving
+// mid-dump must be dropped rather than re-enter the write path.
 var backtrace_in_progress: std.atomic.Value(bool) = .init(false);
 
 // SIGUSR2: live diagnostic. Dumps the stack of the INTERRUPTED main thread
@@ -59,6 +59,14 @@ var backtrace_in_progress: std.atomic.Value(bool) = .init(false);
 // when the event loop itself is wedged and would never dispatch a pipe byte.
 // Using the kernel-provided ucontext makes the trace show the pre-signal
 // frame (the hang site), not this handler.
+//
+// ASYNC-SIGNAL-SAFETY: this handler runs in the signal context, so it only
+// performs raw write(2) on stack buffers and reads the interrupted thread's
+// own frame chain, bounded to its stack window. It must NOT use locks, the
+// allocator, or std.debug symbolization: those re-enter exclusive state the
+// interrupted main thread may hold (GPA lock, io lock), which would hang the
+// dump exactly when it is most needed. Frames print as raw return addresses;
+// resolve them offline with e.g. `addr2line -e hana -f -C`.
 fn handleBacktraceRequest(
     sig: std.posix.SIG,
     info: *const std.posix.siginfo_t,
@@ -69,23 +77,75 @@ fn handleBacktraceRequest(
     if (backtrace_in_progress.swap(true, .acq_rel)) return;
     defer backtrace_in_progress.store(false, .release);
 
-    const stderr = std.debug.lockStderr(&.{}).terminal();
-    defer std.debug.unlockStderr();
-    stderr.writer.print("hana: SIGUSR2 backtrace of interrupted main thread:\n", .{}) catch return;
+    const fd = std.posix.STDERR_FILENO;
+    writeLiteral(fd, "hana: SIGUSR2 backtrace of interrupted main thread (raw addresses):\n");
 
     const opt_ctx: ?std.debug.cpu_context.Native = std.debug.cpu_context.fromPosixSignalContext(ctx_ptr);
     if (opt_ctx) |*ctx| {
-        // allow_unsafe_unwind: the process is wedged anyway, so frame-pointer
-        // heuristics are acceptable. On stripped ReleaseFast builds the trace
-        // prints raw return addresses; Debug builds show source locations.
-        std.debug.writeCurrentStackTrace(.{ .context = ctx, .allow_unsafe_unwind = true }, stderr) catch {};
+        writePcLine(fd, 0, ctx.getPc());
+        if (builtin.cpu.arch == .x86_64) {
+            // Frame-pointer walk over the interrupted thread's stack. Stacks
+            // grow down, so every frame pointer is >= the interrupted rsp and
+            // the chain strictly increases; bound reads to rsp..rsp+span (the
+            // main thread's default 8 MiB stack mapping) so a corrupted chain
+            // can never dereference unrelated memory.
+            const span: usize = 8 << 20;
+            const lo = ctx.gprs.get(.rsp);
+            const hi = lo + span;
+            var rbp = ctx.getFp();
+            var depth: usize = 0;
+            while (rbp >= lo and rbp + 16 <= hi and (rbp & 7) == 0 and depth < 96) {
+                const next: usize = @as(*align(8) const usize, @ptrFromInt(rbp)).*;
+                const ret: usize = @as(*align(8) const usize, @ptrFromInt(rbp + 8)).*;
+                if (!(next > rbp and next + 16 <= hi and (next & 7) == 0)) break;
+                rbp = next;
+                depth += 1;
+                writePcLine(fd, depth, ret);
+            }
+        } else {
+            writeLiteral(fd, "  (frame-pointer walk not implemented for this architecture)\n");
+        }
     } else {
-        // No ucontext available (unexpected); fall back to a synchronous
-        // top-of-stack capture, which at least shows the handler's callers.
-        var addr_buf: [96]usize = undefined;
-        const trace = std.debug.captureCurrentStackTrace(.{}, &addr_buf);
-        std.debug.dumpStackTrace(&trace);
+        writeLiteral(fd, "  (no ucontext available; interrupted frames unrecoverable)\n");
     }
+}
+
+// Async-signal-safe literal write: raw write(2), no buffers, no locks.
+fn writeLiteral(fd: std.posix.fd_t, s: []const u8) void {
+    _ = std.os.linux.write(fd, s.ptr, s.len);
+}
+
+/// Async-signal-safe single-frame line: "  #<depth> 0x<16 hex>\n". Purely
+/// stack-local formatting plus one raw write(2); symbols are resolved offline.
+fn writePcLine(fd: std.posix.fd_t, depth: usize, addr: usize) void {
+    var buf: [4 + 2 + 2 + 1 + 16 + 1]u8 = undefined;
+    var n: usize = 0;
+    buf[n] = ' ';
+    n += 1;
+    buf[n] = ' ';
+    n += 1;
+    buf[n] = '#';
+    n += 1;
+    buf[n] = @as(u8, '0') + @as(u8, @intCast(depth / 10));
+    n += 1;
+    buf[n] = @as(u8, '0') + @as(u8, @intCast(depth % 10));
+    n += 1;
+    buf[n] = ' ';
+    n += 1;
+    buf[n] = '0';
+    n += 1;
+    buf[n] = 'x';
+    n += 1;
+    var rest = addr;
+    var i = n + 15;
+    while (i >= n) : (i -= 1) {
+        buf[i] = "0123456789abcdef"[rest & 0xf];
+        rest >>= 4;
+    }
+    n += 16;
+    buf[n] = '\n';
+    n += 1;
+    _ = std.os.linux.write(fd, &buf, buf.len);
 }
 
 // Replaces the default SIGUSR2 disposition with the live backtrace dump.

@@ -110,7 +110,7 @@ pub fn markBordersFlushed() void {
 pub fn getGeometry(conn: core.Connection, win: u32) ?utils.Rect {
     const reply = xcb.xcb_get_geometry_reply(conn, xcb.xcb_get_geometry(conn, win), null) orelse return null;
     defer std.c.free(reply);
-    return utils.rectFromXcb(reply);
+    return utils.rectFromXcb(reply, true);
 }
 
 // ICCCM focus property cache
@@ -560,10 +560,10 @@ pub fn deinit() void {
     state.?.cache_ready = false;
     focus.deinit();
     tracking.deinit();
-    // Reset every remaining field (child_cache, borders_flushed_this_batch,
-    // and the now-freed spawn_queue/rules_map/alloc) so nothing is left stale
-    // for the next init()/deinit() cycle.
-    state = .{};
+    // Set to null so any accidental post-deinit access hits a panic (via
+    // getState()) or null-deref instead of silently reading freed state.
+    // init() restores it to .{} unconditionally.
+    state = null;
 }
 
 inline fn tilingActive() bool {
@@ -854,7 +854,7 @@ fn findWindowRecord(windows: []const persist.WindowRecord, win: u32) ?*const per
 /// describes brand-new spawns rather than pre-existing windows.
 fn restoredOrCurrent(record: ?*const persist.WindowRecord) u8 {
     if (record) |r| {
-        if (r.mask != 0) return @intCast(@import("model").lowestBit(r.mask));
+        if (r.mask != 0) return @intCast(@import("model").lowestBit(r.mask) orelse unreachable);
     }
     return tracking.getCurrentWorkspace() orelse 0;
 }
@@ -1092,16 +1092,6 @@ fn sendConfigureNotify(win: u32, geom: utils.Rect) void {
     _ = xcb.xcb_send_event(core.getState().conn, 0, win, xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY, @ptrCast(&ev));
 }
 
-fn geometryFromXcbReply(reply: *xcb.xcb_get_geometry_reply_t) utils.Rect {
-    return .{
-        .x = reply.*.x,
-        .y = reply.*.y,
-        .width = reply.*.width,
-        .height = reply.*.height,
-        .border_width = reply.*.border_width,
-    };
-}
-
 /// Resolve the window's current geometry, cheapest source first:
 ///
 ///   1. Tiling cache: zero round-trips (always current after a retile).
@@ -1141,7 +1131,7 @@ fn resolveConfigureGeometry(win: u32) ?utils.Rect {
         null,
     ) orelse return null;
     defer std.c.free(reply);
-    return geometryFromXcbReply(reply);
+    return utils.rectFromXcb(reply, true);
 }
 
 fn sendSyntheticConfigureNotify(win: u32) void {
@@ -1200,7 +1190,19 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
                     // is cached so dedup compares against server truth.
                     if (build_options.has_tiling and mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0)
                         _ = wincache.cacheBorderWidth(win, event.border_width);
-                    if (mask == xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH) return;
+                    if (mask == xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH) {
+                        // Border-width-only request: the underlying space
+                        // (x/y/w/h, per the model store) is unchanged, so a
+                        // sendRequestedConfigure would be a pointless no-op that
+                        // leaves the client without the ICCCM 4.1.5 synthetic
+                        // ConfigureNotify it needs to learn the new border
+                        // width. That width isn't reflected in any real
+                        // ConfigureNotify it could observe on its own, so echo
+                        // the whole geometry once. (Mirrors the tiled
+                        // .border_only arm below.)
+                        sendSyntheticConfigureNotify(win);
+                        return;
+                    }
                     sendRequestedConfigure(win, event, mask);
                 },
                 .border_only => {
@@ -1212,6 +1214,12 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
                         _ = wincache.cacheBorderWidth(win, event.border_width);
                     if (mask != xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH)
                         _ = xcb.xcb_configure_window(core.getState().conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{event.border_width});
+                    // ICCCM 4.1.5: after honoring a ConfigureRequest, report a
+                    // synthetic ConfigureNotify so the client observes the new
+                    // border width even though its geometry was denied. Without
+                    // this the client believes its cached geometry is still
+                    // in sync and can paint stale padding.
+                    sendSyntheticConfigureNotify(win);
                 },
                 .ignored => {
                     sendSyntheticConfigureNotify(win);

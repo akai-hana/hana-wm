@@ -20,9 +20,16 @@ const property_no_delete = constants.property_no_delete;
 // Geometry <-> wire conversions
 
 /// Builds a Rect from a get_geometry reply (moved out of Rect so the pure
-/// geometry type in utils.zig stays xcb-free (D6 layer boundary).
-pub inline fn rectFromXcb(geom: *const xcb.xcb_get_geometry_reply_t) utils.Rect {
-    return .{ .x = geom.x, .y = geom.y, .width = geom.width, .height = geom.height, .border_width = geom.border_width };
+/// geometry type in utils.zig stays xcb-free (D6 layer boundary). `include_border`
+/// selects whether the wire border_width feeds the Rect's border_width.
+pub inline fn rectFromXcb(geom: *const xcb.xcb_get_geometry_reply_t, include_border: bool) utils.Rect {
+    return .{
+        .x = geom.x,
+        .y = geom.y,
+        .width = geom.width,
+        .height = geom.height,
+        .border_width = if (include_border) geom.border_width else 0,
+    };
 }
 
 // ---------------------------------------------------------------------------

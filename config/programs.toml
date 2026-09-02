@@ -1,0 +1,40 @@
+### Personal program binds ###
+# This file is auto-loaded alongside config.toml; keys merge into the
+# same [binds] table.
+#
+# To disable a bind, comment it out with #.
+
+[binds]
+
+# -- Web browsers --
+Mod+A       = "MOZ_USE_XINPUT2=1 firefox"
+Mod+Shift+A = "~/.local/bin/firefox-sync.sh xpmraevm.default-default; {kill} firefox"
+
+# -- Chat / Socials --
+Mod+S       = "nixGL equibop"
+Mod+Shift+S = "{kill} electron"
+
+# -- Terminal --
+Mod+D       = "ghostty"
+Mod+Shift+D = "{kill} ghostty"
+Mod+I       = "xeyes"
+
+# -- Games --
+Mod+Z       = "nixGL prismlauncher"
+Mod+Shift+Z = "distrobox enter aur -- ~/Games/factorio-vanilla"
+Mod+X       = "nixVulkanIntel TaterClient-DDNet"
+Mod+Shift+X = "nixGL nixVulkanIntel etterna"
+Mod+C       = "nixGL nixVulkanIntel steam steam://rungameid/1229490"
+Mod+Shift+C = "nixGL nixVulkanIntel steam"
+
+# -- Media --
+Mod+V       = "nixGL pear-desktop"
+Mod+Shift+V = "distrobox enter aur -- stremio-enhanced"
+
+# -- File manager --
+Mod+Y       = "thunar"
+Mod+Alt+Y   = "{kill} thunar"
+
+# -- Wallpaper --
+Mod+G       = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-switch.sh"
+Mod+Shift+G = "~/eudaimonia/shader-wallpaper/shadow/scripts/shader-stop.sh"

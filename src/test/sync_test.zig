@@ -601,6 +601,46 @@ test "forget clears the sent ledger; next pass treats the window as first sight"
     try fx.rec.expectGeom(3, 801, 8, 8, 780, 580, .above);
 }
 
+// -- Ledger index tombstone collision (hash-table probe chain) ----------------
+//
+// The sent ledger's open-addressing index used to treat a TOMBSTONE bucket as
+// the end of the probe chain. Two real X ids can share a home bucket (they
+// differ only by a multiple of the table capacity), so removing a window that
+// sits between them in the inserts tombstones a bucket that the surviving
+// window's probe MUST step over; swap-removing that surviving window then
+// walked the tombstone and hit `unreachable` (WM crash in Debug, UB in
+// ReleaseFast). sentIndexRemove had the same asymmetry: it could return before
+// tombstoning the target when a tombstone preceded it in the chain, leaving a
+// stale bucket that never gets cleaned.
+test "ledger index: swap-remove across a shared home bucket does not hit tombstones" {
+    var fx: Fixture = undefined;
+    fx.init(stdScreen(), stdWa());
+    defer fx.deinit();
+
+    // x and z differ by exactly the index capacity, so bucketOf(x) ==
+    // bucketOf(z); y occupies the next bucket. Reconcile inserts the ledger in
+    // store (ascending id) order: x@0, y@1, z@2, with z's index bucket parked
+    // at home+2 behind x and y.
+    const base: model.WindowId = 1000;
+    const x = base;
+    const y = base + 1;
+    const z = base + model.store_capacity;
+    model.register(&fx.m, x, null) catch unreachable;
+    model.register(&fx.m, y, null) catch unreachable;
+    model.register(&fx.m, z, null) catch unreachable;
+    model.setFocus(&fx.m, x);
+    fx.reconcile(.{});
+
+    // Removing y tombstones bucket home+1, then swap-moves z (compact last)
+    // into y's slot; re-pointing z's index probes home (x's bucket) then home+1
+    // (the tombstone). Pre-fix this hit `unreachable` inside sentIndexMove.
+    sync.forget(y);
+
+    // Neither surviving ledger record is lost by the index surgery.
+    try testing.expect(sync.sentGet(x) != null);
+    try testing.expect(sync.sentGet(z) != null);
+}
+
 // -- Park wire shape ----------------------------------------------------------
 
 test "park: offscreen-X constant, ONE merged request per parked window per pass" {

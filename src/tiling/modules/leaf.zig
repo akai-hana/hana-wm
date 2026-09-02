@@ -21,9 +21,15 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
 // Splits `dim` into two halves separated by `gap`, clamping each half to
 // `min_dim` when `dim` is too small. `first + gap + second ~= dim` for
 // normal inputs; recursive calls never produce zero-size regions.
+//
+// When `dim < 2*min_dim + gap` the two min-dim halves cannot both fit, so the
+// pair overflows the parent region (the far half is pushed past the outer
+// edge). That degrades more gracefully than shrinking below min_dim: the leaf
+// then clamps the window UP to min_dim, and two sub-min_dim halves would each
+// render wider than their allocated slot and overlap each other in the seam.
 inline fn halveWithMin(dim: u16, gap: u16, min_dim: u16) struct { first: u16, second: u16 } {
-    const first: u16 = if (dim > gap) (dim - gap) / 2 else min_dim;
-    const second: u16 = if (dim > first +| gap) dim - first - gap else min_dim;
+    const first: u16 = @max(min_dim, if (dim > gap) (dim - gap) / 2 else 0);
+    const second: u16 = @max(min_dim, if (dim > first +| gap) dim - first - gap else 0);
     return .{ .first = first, .second = second };
 }
 

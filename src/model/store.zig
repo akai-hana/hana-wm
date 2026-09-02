@@ -54,6 +54,14 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
             return null;
         }
 
+        // Pointer-relocation contract: the Store is a contiguous array, so a
+        // *V returned by getPtr/put remains valid across get/put/remove of
+        // OTHER keys (those shift slots but never reallocate). It is
+        // invalidated ONLY by put(k) on a different entry, remove(k), or
+        // clear() -- each of which may move the slot that k occupies -- or by
+        // a reload into self.keys/self.vals wholesale. Callers must not cache
+        // a *V across such an operation on its own key.
+
         pub fn get(self: *const Self, k: K) ?V {
             if (self.binarySearch(.exact, k)) |i| return self.vals[i];
             return null;

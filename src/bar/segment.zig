@@ -401,16 +401,7 @@ pub fn fetchWindowTitleInto(
 fn tryCollectGeometryReply(conn: core.Connection, cookie: xcb.xcb_get_geometry_cookie_t) ?utils.Rect {
     const r = utils.collectGeometryReply(conn, cookie) orelse return null;
     defer std.c.free(r);
-    return geometryFromReply(r);
-}
-
-fn geometryFromReply(r: *xcb.xcb_get_geometry_reply_t) utils.Rect {
-    return .{
-        .x = @intCast(r.*.x),
-        .y = @intCast(r.*.y),
-        .width = r.*.width,
-        .height = r.*.height,
-    };
+    return utils.rectFromXcb(r, false);
 }
 
 const WindowDataBatch = struct {
