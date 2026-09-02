@@ -17,7 +17,7 @@ const utils = @import("utils");
 /// exceeding `max` (the workspace count, or constants.max_workspaces, the
 /// hard ceiling behind workspaces.zig's fixed-size tables) at parse time.
 fn checkWorkspaceBound(ws_1based: usize, context: []const u8, max: usize) bool {
-    if (ws_1based < 1 or ws_1based > 255) {
+    if (ws_1based < 1 or ws_1based > constants.max_workspace_number_1based) {
         debug.warn("{s}: workspace {} out of range, skipping", .{ context, ws_1based });
         return false;
     }
@@ -49,6 +49,10 @@ fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *types.Config) !void 
 }
 
 pub const max_file_bytes = 1024 * 1024;
+
+/// Initial allocation for the read-with-growth path (stat failed or reported
+/// zero, e.g. procfs/sysfs/pipes). Doubles until the whole file is read.
+const read_growth_initial_bytes = 64 * 1024;
 
 const default_tiling_layout = (types.TilingConfig{}).layout;
 
@@ -99,7 +103,7 @@ pub fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     // Growth path (stat failed or reported zero). Single ownership throughout:
     // the armed errdefer frees the whole buffer exactly once on every error
     // path, and the success path hands ownership to the caller.
-    var buf = try allocator.alloc(u8, 64 * 1024);
+    var buf = try allocator.alloc(u8, read_growth_initial_bytes);
     errdefer allocator.free(buf);
     var total: usize = 0;
     while (true) {
@@ -711,7 +715,7 @@ fn keyNameToKeysym(name: []const u8) !u32 {
 fn tryParseWorkspace(command: []const u8, prefix: []const u8) ?u8 {
     if (!std.mem.startsWith(u8, command, prefix)) return null;
     const num = std.fmt.parseInt(usize, command[prefix.len..], 10) catch return null;
-    if (num < 1 or num > 256) return null;
+    if (num < 1 or num > constants.max_workspace_command_1based) return null;
     return @intCast(num - 1);
 }
 

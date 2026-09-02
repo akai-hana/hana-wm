@@ -250,8 +250,8 @@ pub const TilingConfig = struct {
     master_count: u8 = 1,
     gap_width: parser.ScalableValue = parser.ScalableValue.absolute(10.0),
     border_width: parser.ScalableValue = parser.ScalableValue.absolute(2.0),
-    border_focused: Color = 0x5294E2,
-    border_unfocused: Color = 0x383C4A,
+    border_focused: Color = default_focused_border,
+    border_unfocused: Color = default_unfocused_border,
     /// Smallest on-screen width/height a tiled window (and floating drag
     /// resize) is allowed to reach, in pixels.
     min_window_dim: u16 = constants.min_window_dim,
@@ -309,10 +309,21 @@ pub const TilingConfig = struct {
 
 // Bar types
 
+// Default color scheme for the focused/unfocused tiling borders.
+const default_focused_border: Color = 0x5294E2;
+const default_unfocused_border: Color = 0x383C4A;
+
 /// Default accent color used by several BarConfig fields.
 /// Declared once here so every field referencing it has a single source of truth;
 /// changing the theme default is a one-line edit.
 const default_accent: Color = 0x61AFEF;
+
+// Default bar background/foreground scheme. Kept in one place so the bar's
+// color defaults read as a palette rather than scattered hex literals.
+const default_bar_bg: Color = 0x222222;
+const default_bar_fg: Color = 0xBBBBBB;
+const default_bar_selected_bg: Color = 0x005577;
+const default_bar_selected_fg: Color = 0xEEEEEE;
 
 /// Where in the workspace cell the activity indicator is drawn.
 pub const IndicatorLocation = enum {
@@ -431,14 +442,14 @@ pub const BarConfig = struct {
     spacing: parser.ScalableValue = parser.ScalableValue.absolute(12.0),
 
     // Bar color scheme; all values are 0xRRGGBB (see Color type alias).
-    bg: Color = 0x222222,
-    fg: Color = 0xBBBBBB,
-    selected_bg: Color = 0x005577,
-    selected_fg: Color = 0xEEEEEE,
+    bg: Color = default_bar_bg,
+    fg: Color = default_bar_fg,
+    selected_bg: Color = default_bar_selected_bg,
+    selected_fg: Color = default_bar_selected_fg,
 
     accent_color: Color = default_accent,
     title_accent_color: Color = default_accent,
-    title_unfocused_accent: Color = 0x222222,
+    title_unfocused_accent: Color = default_bar_bg,
     title_minimized_accent: Color = default_accent,
 
     workspace_icons: std.ArrayList([]const u8) = .empty,

@@ -20,6 +20,13 @@ pub const mod_super: u16 = xcb.XCB_MOD_MASK_4;
 // those are handled separately via lock_modifiers grabs.
 pub const mod_mask_binding: u16 = mod_shift | mod_control | mod_alt | mod_super;
 
+// Modifier keysym band. X11 reserves XK_Shift_L..XK_Hyper_R (0xFFE1..0xFFEE)
+// for modifier keys; the check widens that band by one key on each side (none
+// of which are valid editing/navigation keys) so bare modifier presses can be
+// dropped without logging noise. Shared by input.zig and the prompt.
+pub const modifier_keysym_lo: u32 = 0xFFE0;
+pub const modifier_keysym_hi: u32 = 0xFFEF;
+
 /// Lock key combinations grabbed alongside every keybinding so binds work
 /// regardless of NumLock / CapsLock / ScrollLock state. All 2^3 subsets of
 /// the three lock modifiers.

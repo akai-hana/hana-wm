@@ -6,8 +6,13 @@
 
 const std = @import("std");
 
-const core = @import("core");
-const xcb = core.xcb;
+// Imported from the leaf x11 hub (pure @cImport) rather than from `core`,
+// so this layer stays a DAG root: core imports utils which imports wire, and
+// wire must not reach back into core (that was the core -> utils -> wire ->
+// core cycle). The type aliases mirror Connection / Screen.
+const xcb = @import("x11").xcb;
+const Connection = *xcb.xcb_connection_t;
+const Screen = *xcb.xcb_screen_t;
 const constants = @import("constants");
 const debug = @import("debug");
 const utils = @import("utils");
@@ -36,7 +41,7 @@ pub inline fn rectFromXcb(geom: *const xcb.xcb_get_geometry_reply_t, include_bor
 // Configure/raise/park primitives
 
 /// Moves and resizes `win` without touching border_width.
-pub inline fn configureWindow(conn: core.Connection, win: u32, rect: utils.Rect) void {
+pub inline fn configureWindow(conn: Connection, win: u32, rect: utils.Rect) void {
     _ = xcb.xcb_configure_window(
         conn,
         win,
@@ -46,11 +51,11 @@ pub inline fn configureWindow(conn: core.Connection, win: u32, rect: utils.Rect)
     );
 }
 
-pub inline fn raiseWindow(conn: core.Connection, win: u32) void {
+pub inline fn raiseWindow(conn: Connection, win: u32) void {
     _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 }
 
-pub inline fn setBorderPixel(conn: core.Connection, win: u32, pixel: u32) void {
+pub inline fn setBorderPixel(conn: Connection, win: u32, pixel: u32) void {
     _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{pixel});
 }
 
@@ -61,17 +66,17 @@ pub inline fn setBorderPixel(conn: core.Connection, win: u32, pixel: u32) void {
 // atomically (zero-round-trip rule).
 
 /// Always pair with ungrabServer()/ungrabAndFlush().
-pub inline fn grabServer(conn: core.Connection) void {
+pub inline fn grabServer(conn: Connection) void {
     _ = xcb.xcb_grab_server(conn);
 }
 
 /// Releases the X server grab without flushing pending requests.
-pub inline fn ungrabServer(conn: core.Connection) void {
+pub inline fn ungrabServer(conn: Connection) void {
     _ = xcb.xcb_ungrab_server(conn);
 }
 
 /// Defined here so every module can share one copy.
-pub inline fn ungrabAndFlush(conn: core.Connection) void {
+pub inline fn ungrabAndFlush(conn: Connection) void {
     ungrabServer(conn);
     _ = xcb.xcb_flush(conn);
 }
@@ -117,7 +122,7 @@ var atom_cache: ?AtomCache = null;
 /// Interns all atoms in a single round-trip batch. Atom names come from
 /// `AtomCache`'s field names at comptime, so adding a field is the only
 /// change required, no parallel array, no index-order mismatch risk.
-pub fn initAtomCache(conn: core.Connection) !void {
+pub fn initAtomCache(conn: Connection) !void {
     const fields = std.meta.fields(AtomCache);
     var cookies: [fields.len]xcb.xcb_intern_atom_cookie_t = undefined;
 
@@ -209,7 +214,7 @@ const supported_atoms = [_][]const u8{
 ///   advertised nor answered; minimize is internal-only (no state property).
 /// - `_NET_WORKAREA` is absent; clients wanting dock-safe geometry must use
 ///   `_NET_STRUT_PARTIAL` feedback instead.
-pub fn advertiseEwmhSupport(conn: core.Connection, screen: core.Screen, root: u32) void {
+pub fn advertiseEwmhSupport(conn: Connection, screen: Screen, root: u32) void {
     const supporting_wm_check = getAtomCached("_NET_SUPPORTING_WM_CHECK") catch return;
     const net_wm_name = getAtomCached("_NET_WM_NAME") catch return;
     const utf8_string = getAtomCached("UTF8_STRING") catch return;
@@ -274,7 +279,7 @@ pub fn advertiseEwmhSupport(conn: core.Connection, screen: core.Screen, root: u3
 /// returns the owned reply pointer or null. Typed wrappers below cast the
 /// result back so callers never see `*anyopaque`.
 fn collectReply(
-    conn: core.Connection,
+    conn: Connection,
     cookie: anytype,
     comptime blockingReply: anytype,
 ) ?*anyopaque {
@@ -289,18 +294,18 @@ fn collectReply(
     return blockingReply(conn, cookie);
 }
 
-fn blockingPropertyReply(conn: core.Connection, cookie: xcb.xcb_get_property_cookie_t) ?*anyopaque {
+fn blockingPropertyReply(conn: Connection, cookie: xcb.xcb_get_property_cookie_t) ?*anyopaque {
     return @ptrCast(xcb.xcb_get_property_reply(conn, cookie, null));
 }
 
-fn blockingGeometryReply(conn: core.Connection, cookie: xcb.xcb_get_geometry_cookie_t) ?*anyopaque {
+fn blockingGeometryReply(conn: Connection, cookie: xcb.xcb_get_geometry_cookie_t) ?*anyopaque {
     return @ptrCast(xcb.xcb_get_geometry_reply(conn, cookie, null));
 }
 
 /// Property-flavored collectReply: an owned `xcb_get_property_reply_t`, or
 /// null when neither the poll nor the blocking fallback produced one.
 pub fn collectPropertyReply(
-    conn: core.Connection,
+    conn: Connection,
     cookie: xcb.xcb_get_property_cookie_t,
 ) ?*xcb.xcb_get_property_reply_t {
     return @ptrCast(@alignCast(collectReply(conn, cookie, blockingPropertyReply)));
@@ -309,7 +314,7 @@ pub fn collectPropertyReply(
 /// Geometry-flavored collectReply: an owned `xcb_get_geometry_reply_t`, or
 /// null under the same contract.
 pub fn collectGeometryReply(
-    conn: core.Connection,
+    conn: Connection,
     cookie: xcb.xcb_get_geometry_cookie_t,
 ) ?*xcb.xcb_get_geometry_reply_t {
     return @ptrCast(@alignCast(collectReply(conn, cookie, blockingGeometryReply)));
@@ -323,7 +328,7 @@ pub fn collectGeometryReply(
 /// not 8-bit encoded, the reply's type doesn't match the requested
 /// `atom_type`, or the value exceeds the buffer length.
 pub fn fetchPropertyToBuffer(
-    conn: core.Connection,
+    conn: Connection,
     window: u32,
     atom: u32,
     atom_type: u32,
