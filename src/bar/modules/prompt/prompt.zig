@@ -12,6 +12,7 @@ const types = @import("types");
 
 const drawing = @import("drawing");
 const build_options = @import("build_options");
+const masks = @import("masks");
 const segmod = @import("segment");
 // The vim modal-editing engine registers its handlers into this module on
 // init (D11): the vim lifecycle lives here, gated on has_vim.
@@ -439,7 +440,7 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     //
     // Modifier keysyms occupy 0xFFE1-0xFFEE; the check widens that band by
     // one key on each side, none of which are valid editing keys.
-    if (sym >= 0xFFE0 and sym <= 0xFFEF) return true;
+    if (sym >= masks.modifier_keysym_lo and sym <= masks.modifier_keysym_hi) return true;
 
     // Ctrl-modified keys
     if (ctrl_held) {

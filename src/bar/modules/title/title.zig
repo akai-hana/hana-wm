@@ -254,9 +254,9 @@ fn drawSegmentedTitles(
     allocator: std.mem.Allocator,
 ) !void {
     const windows = snapshot.current_ws_wins;
-    if (windows.len > 128)
-        debug.warn("Workspace has {} windows; only the first 128 are rendered in split-view", .{windows.len});
-    const win_count = @min(windows.len, 128);
+    if (windows.len > constants.max_rendered_title_windows)
+        debug.warn("Workspace has {} windows; only the first {} are rendered in split-view", .{ windows.len, constants.max_rendered_title_windows });
+    const win_count = @min(windows.len, constants.max_rendered_title_windows);
 
     var scratch: segmod.GatherScratch = .{};
     defer scratch.freeBorrowedTitles(snapshot, win_count, allocator);

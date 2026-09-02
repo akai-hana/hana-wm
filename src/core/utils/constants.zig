@@ -54,6 +54,22 @@ pub const max_window_tree_depth: usize = 10;
 /// lookup tables.
 pub const max_workspaces: usize = 64;
 
+/// Largest 1-based workspace number accepted when parsing a workspace
+/// reference from config. 1-based values range 1..=255 (matching a u8
+/// workspace index of 0..=254 in normal use); the parse helper is slightly
+/// more lenient, tolerating 256 before subtracting 1 to reach index 255.
+pub const max_workspace_number_1based: usize = 255;
+
+/// Largest 1-based workspace number tolerated by the action/command parser
+/// before subtracting 1. Distinct from max_workspace_number_1based: command
+/// parsing is intentionally one more lenient so `workspace_N` verbs map
+/// cleanly onto the top 1-based index (255 -> index 255 via 256 - 1).
+pub const max_workspace_command_1based: usize = 256;
+
+/// Ceiling on how many concurrently shown windows the split-view title
+/// segment renders; beyond this it warns and truncates.
+pub const max_rendered_title_windows: usize = 128;
+
 // XCB property helpers
 /// Maximum number of 32-bit words to request when fetching an XCB window property.
 /// 256 words = 1 KiB, sufficient for all fixed-size properties the WM reads.

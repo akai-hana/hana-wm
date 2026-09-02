@@ -90,14 +90,21 @@ fn handleBacktraceRequest(
             // main thread's default 8 MiB stack mapping) so a corrupted chain
             // can never dereference unrelated memory.
             const span: usize = 8 << 20;
+            // Each saved frame straddles rbp and rbp+8 (saved rbp then return
+            // address); +16 bounds the chain strictly within the span.
+            const frame_stride: usize = 16;
+            // A real frame pointer is 8-aligned; unaligned pointers are a
+            // corrupted chain.
+            const frame_alignment: usize = 8;
+            const max_depth: usize = 96;
             const lo = ctx.gprs.get(.rsp);
             const hi = lo + span;
             var rbp = ctx.getFp();
             var depth: usize = 0;
-            while (rbp >= lo and rbp + 16 <= hi and (rbp & 7) == 0 and depth < 96) {
+            while (rbp >= lo and rbp + frame_stride <= hi and (rbp & (frame_alignment - 1)) == 0 and depth < max_depth) {
                 const next: usize = @as(*align(8) const usize, @ptrFromInt(rbp)).*;
                 const ret: usize = @as(*align(8) const usize, @ptrFromInt(rbp + 8)).*;
-                if (!(next > rbp and next + 16 <= hi and (next & 7) == 0)) break;
+                if (!(next > rbp and next + frame_stride <= hi and (next & (frame_alignment - 1)) == 0)) break;
                 rbp = next;
                 depth += 1;
                 writePcLine(fd, depth, ret);
