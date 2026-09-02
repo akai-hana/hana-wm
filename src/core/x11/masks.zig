@@ -52,9 +52,14 @@ pub const EventMasks = struct {
     //    what lets the release reach input.handleButtonRelease and clear
     //    drag.active. Without it, drag.active sticks true and handleEnterNotify
     //    drops every hover-focus EnterNotify until the WM restarts.
+    //  - KEY_RELEASE: paired with KEY_PRESS so input.zig can track held
+    //    binding keys and suppress autorepeat re-fires of toggle/action binds
+    //    (a passive grab reports the release to the grab window, but the root
+    //    mask, not the grab, decides which events the WM actually receives).
     pub const root_window = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
         xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
         xcb.XCB_EVENT_MASK_KEY_PRESS |
+        xcb.XCB_EVENT_MASK_KEY_RELEASE |
         xcb.XCB_EVENT_MASK_BUTTON_PRESS |
         xcb.XCB_EVENT_MASK_BUTTON_RELEASE |
         xcb.XCB_EVENT_MASK_POINTER_MOTION |

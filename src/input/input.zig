@@ -53,6 +53,49 @@ const mouse_buttons = [_]u8{
 
 var xkb_state: ?xkbcommon.XkbState = null;
 
+// Held binding-key ledger. A passive grab returns a bound key's KeyRelease to
+// the grabbing window only if the mask selects it; handleKeyRelease removes
+// the (mods,keycode) combo stamped on the originating press, letting a later
+// press of the same key be recognized as a genuine new gesture rather than an
+// autorepeat. Keycode | mods narrows the table to one entry per binding.
+const held_key_capacity = 32;
+var held_keys: [held_key_capacity]u32 = undefined;
+var held_key_count: usize = 0;
+
+inline fn heldKey(mods: u16, keycode: u8) u32 {
+    return (@as(u32, mods) << 8) | keycode;
+}
+
+fn keyHeld(mods: u16, keycode: u8) bool {
+    const key = heldKey(mods, keycode);
+    for (held_keys[0..held_key_count]) |held| if (held == key) return true;
+    return false;
+}
+
+fn setKeyHeld(mods: u16, keycode: u8) void {
+    if (held_key_count == held_keys.len) return; // saturate; releases still clear
+    held_keys[held_key_count] = heldKey(mods, keycode);
+    held_key_count += 1;
+}
+
+fn clearKeyHeld(mods: u16, keycode: u8) void {
+    const key = heldKey(mods, keycode);
+    var i: usize = 0;
+    while (i < held_key_count) : (i += 1) {
+        if (held_keys[i] == key) {
+            held_keys[i] = held_keys[held_key_count - 1];
+            held_key_count -= 1;
+            return;
+        }
+    }
+}
+
+/// Drops the ledger; used when the keymap is rebuilt mid-hold (a keycode kept
+/// in memory may no longer correspond to the same key, so tracking is stale).
+fn clearHeldKeys() void {
+    held_key_count = 0;
+}
+
 /// Initialises the XKB context, keymap, and key state
 /// from the server's current keyboard configuration.
 pub fn initXkb(conn: core.Connection) !void {
@@ -65,13 +108,14 @@ pub fn deinitXkb() void {
     xkb_state = null;
 }
 
-/// Returns a pointer to the module-owned XkbState,
-/// used by events.zig during config reloads.
+/// Returns a pointer to the module-owned XkbState, used by events.zig during
+/// config reloads, or null before initXkb has run or after deinitXkb (e.g.
+/// during a config reload's deinit/init window).
 ///
 /// The returned pointer is invalidated by deinitXkb/initXkb (e.g. during a
 /// config reload); callers must not cache it across those calls.
-pub fn getXkbState() *xkbcommon.XkbState {
-    return &xkb_state.?;
+pub fn getXkbState() ?*xkbcommon.XkbState {
+    return if (xkb_state) |*s| s else null;
 }
 
 /// Rebuilds the keymap/keysym table after the server changes the keyboard
@@ -85,6 +129,7 @@ pub fn handleMappingNotify() void {
     const cs = core.getState();
     const state = if (xkb_state) |*s| s else return;
     state.rebuild(cs.conn);
+    clearHeldKeys(); // keycodes may no longer map to the same keys post-rebuild
 
     // The dispatch map is keyed on keysym (unaffected by the rebuild), but
     // `grabKeybindings` grabs the keycodes stored on each binding. Refresh
@@ -92,6 +137,14 @@ pub fn handleMappingNotify() void {
     // ungrab all and re-grab the updated set, avoiding duplicate/leaked grabs.
     for (cs.config.keybindings.items) |*kb| {
         kb.keycode = state.keysymToKeycode(kb.keysym);
+        if (kb.keycode == null) {
+            // The keysym is absent from the rebuilt keymap (keyboard layout
+            // change, e.g. a dead key or a non-Latin group). The binding goes
+            // dead with no feedback otherwise, which looks like a config bug.
+            var name_buf: [64]u8 = undefined;
+            const name = xkbcommon.keysymGetName(kb.keysym, &name_buf);
+            debug.warn("Keybinding mods=0x{x:0>4} keysym={s} (0x{x}) has no keycode in the NEW keymap and was disabled; bindings are re-resolved on MappingNotify", .{ kb.modifiers, name, kb.keysym });
+        }
     }
     events.grabKeybindings();
 }
@@ -150,6 +203,14 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     // inside it (input flows in, true = consumed, before keybinding dispatch).
     if (build_options.has_bar) if (surfaces.chromeHandleKeypress(event, matched)) return;
 
+    // A held binding key makes the server replay KeyPress (autorepeat). The
+    // release WAS captured by the passive grab, but without tracking we would
+    // re-fire toggle actions on every repeat. Suppress re-dispatch while the
+    // exact (mods,keycode) combo is already held. Only keycodes this WM's
+    // grabs intercepted ever reach here, so the set stays small.
+    if (keyHeld(mods, event.detail)) return;
+    setKeyHeld(mods, event.detail);
+
     if (matched) |action| {
         debug.info("[KEY] mods=0x{x} keysym=0x{x} action={s}", .{ mods, keysym, @tagName(action.*) });
         executeAction(action);
@@ -159,6 +220,14 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     } else {
         debug.info("[KEY] mods=0x{x} keysym=0x{x} no binding", .{ mods, keysym });
     }
+}
+
+/// Clears the held-key ledger on KeyRelease; the server reports a grabbed
+/// key's release to the grabbing window, so this is what lets a repeat of the
+/// same binding later be recognized as a genuine new press.
+pub fn handleKeyRelease(event: *const xcb.xcb_key_release_event_t) void {
+    focus.setLastEventTime(event.time);
+    clearKeyHeld(event.state, event.detail);
 }
 
 /// Dispatches a priority-ordered button-press event.
@@ -208,6 +277,12 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
         keepDragGrab(event.time);
         return;
     }
+
+    // Unbound Super+button on a managed window (e.g. Super+Middle when no
+    // binding matches): no drag, no action — but the grab's activation FROZE
+    // both devices. Replay the pointer as a plain click and thaw the keyboard;
+    // returning without an allow_events would leave both frozen indefinitely.
+    replayPointer(event.time);
 }
 
 /// Stops any active drag and updates the last event timestamp.
@@ -491,11 +566,16 @@ fn tryConfigMouseBind(mods: u16, button: u8, win: u32, time: u32) bool {
     return false;
 }
 
-/// Replays a frozen pointer event without releasing the keyboard grab.
+/// Replays a frozen pointer event (letting the click reach the app under the
+/// cursor) AND thaws the keyboard. The Super+Button passive grab runs
+/// XCB_GRAB_MODE_SYNC for BOTH devices, so its activation freezes keyboard
+/// delivery too; ALLOW_REPLAY_POINTER alone leaves the keyboard frozen in the
+/// server until the next grabbed Super gesture — a silent input freeze.
 /// Always pass event.time, never XCB_CURRENT_TIME.
 inline fn replayPointer(time: u32) void {
     const conn = core.getState().conn;
     _ = xcb.xcb_allow_events(conn, xcb.XCB_ALLOW_REPLAY_POINTER, time);
+    _ = xcb.xcb_allow_events(conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, time);
     _ = xcb.xcb_flush(conn);
 }
 

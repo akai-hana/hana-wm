@@ -291,9 +291,14 @@ pub fn blinkPollTimeoutMs() i32 {
     return -1;
 }
 
-/// Toggle cursor blink visibility; called by the bar's blink timer.
+/// Toggle cursor blink visibility; called by the bar's blink timer.  Flags a
+/// redraw as well: while the prompt covers the title slot, the title's
+/// needsRepaint hook reports inactive, so the toggled caret would otherwise
+/// never reach the screen (the overlay owns its repaints, as documented on
+/// the title module).
 pub fn blinkTick() void {
     g.is_blink_visible = !g.is_blink_visible;
+    g.redraw_pending = true;
 }
 
 /// Returns true and clears the flag if a prompt-driven redraw is outstanding.
@@ -1291,7 +1296,13 @@ fn drawActive(
         else => try drawNormalMode(dc, height, baseline, text_left_x, scroll_end_x, ellipsis_end_x, &px, accent, bg, fg),
     }
 
-    dc.blitRegion(start_x, width);
+    // No blitRegion here: the prompt draws as a segment inside performDraw,
+    // whose end-of-batch queueBlit copies the whole frame (and the caller
+    // flushes it). A mid-frame region copy+flush here would (a) enqueue a
+    // redundant second copy_area + flush per prompt frame and, worse, (b)
+    // snapshot the off-screen pixmap BEFORE sibling segments in the same
+    // batch are painted, briefly showing stale neighbors. Let the batch-end
+    // full blit win.
     return end_x;
 }
 

@@ -211,9 +211,9 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     @import("sync").raiseNow(@import("pipeline").grabCtx(), win);
 }
 
-fn computeMoveRect(drag: DragState, dx: i16, dy: i16, wa: WorkArea, was_pending_float: bool) utils.Rect {
+fn computeMoveRect(drag: DragState, dx: i32, dy: i32, wa: WorkArea, was_pending_float: bool) utils.Rect {
     const snap = drag.snap_px;
-    const raw_x: i32 = @as(i32, drag.start_win_x) + @as(i32, dx);
+    const raw_x: i32 = @as(i32, drag.start_win_x) + dx;
     const raw_y: i32 = @as(i32, drag.start_win_y) + @as(i32, dy);
     const win_w: i32 = drag.start_win_width;
     const win_h: i32 = drag.start_win_height;
@@ -230,7 +230,7 @@ fn computeMoveRect(drag: DragState, dx: i16, dy: i16, wa: WorkArea, was_pending_
     };
 }
 
-fn computeResizeRect(drag: DragState, dx: i16, dy: i16, wa: WorkArea) utils.Rect {
+fn computeResizeRect(drag: DragState, dx: i32, dy: i32, wa: WorkArea) utils.Rect {
     const snap = drag.snap_px;
     // Anchor = corner opposite the grabbed one, fixed; the moving
     // corner follows the cursor. min/max(anchor, moving) per axis
@@ -246,8 +246,8 @@ fn computeResizeRect(drag: DragState, dx: i16, dy: i16, wa: WorkArea) utils.Rect
     const moving_x0: i32 = start_x + @as(i32, if (axes.left) 0 else start_w);
     const moving_y0: i32 = start_y + @as(i32, if (axes.top) 0 else start_h);
 
-    const raw_moving_x: i32 = moving_x0 + @as(i32, dx);
-    const raw_moving_y: i32 = moving_y0 + @as(i32, dy);
+    const raw_moving_x: i32 = moving_x0 + dx;
+    const raw_moving_y: i32 = moving_y0 + dy;
     const moving_x: i32 = snapEdge(snapEdge(raw_moving_x, wa.left, snap), wa.right, snap);
     const moving_y: i32 = snapEdge(snapEdge(raw_moving_y, wa.top, snap), wa.bottom, snap);
 
@@ -283,8 +283,13 @@ pub fn updateDrag(x: i16, y: i16) void {
         actions.detachToFloating(drag.window);
     }
 
-    const dx = x - drag.start_x;
-    const dy = y - drag.start_y;
+    // Widen BEFORE subtracting: start_x/start_y and x/y are i16, and a drag
+    // spanning >32767px on a large (or multi-monitor) virtual desktop would
+    // wrap the i16 difference, teleporting the window across the screen.
+    // Promote to i32 (used throughout computeMoveRect/computeResizeRect) so
+    // the delta is computed in the wider type.
+    const dx: i32 = @as(i32, x) - @as(i32, drag.start_x);
+    const dy: i32 = @as(i32, y) - @as(i32, drag.start_y);
     const wa = drag.work_area;
 
     const rect = switch (drag.mode) {

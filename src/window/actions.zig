@@ -351,9 +351,10 @@ pub fn toggleFloating(win: model_mod.WindowId) void {
             // tiling-invisible window that this very toggle could never fix
             // again.
             if (model_mod.findHome(m, win) == null) {
-                const h: model_mod.WSId = model_mod.lowestBit(e.mask);
-                _ = m.ws[h].tiled_order.append(win);
-                e.home_ws = h;
+                if (model_mod.lowestBit(e.mask)) |h| {
+                    _ = m.ws[h].tiled_order.append(win);
+                    e.home_ws = h;
+                }
             }
         },
     }

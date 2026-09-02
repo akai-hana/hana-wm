@@ -294,7 +294,18 @@ fn accumulate(allocator: std.mem.Allocator, old_val: *Value, incoming: Value, co
         for (inc.array.items) |item| {
             const v = if (do_copy) try deepCopyValue(allocator, item) else item;
             old_val.array.append(allocator, v) catch |err| {
+                // OOM mid-merge: release everything this call acquired so a
+                // failed accumulate leaks nothing on either path. `tail` is
+                // the deep copies already appended (do_copy only; captured as
+                // a slice header BEFORE the shrink, since the shrink resets
+                // items.len and would make re-indexing stale), and `inc` owns
+                // all its elements in both modes (transferred values on
+                // do_copy=false, source values on do_copy=true).
+                const tail = old_val.array.items[start..];
+                for (tail) |*owned| if (do_copy) owned.deinit(allocator);
                 old_val.array.shrinkRetainingCapacity(start);
+                for (inc.array.items) |*owned| owned.deinit(allocator);
+                inc.array.deinit(allocator);
                 return err;
             };
         }
@@ -763,6 +774,15 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
         }
 
         if (c == '[') {
+            // TOML array-of-tables headers ([[name]]) are unsupported. Reject
+            // them with a clear warning instead of silently treating them as a
+            // plain [name] section and then misparsing the trailing ']' as a
+            // key (parseSection consumes just one '[').
+            if (p.pos + 1 < p.content.len and p.content[p.pos + 1] == '[') {
+                debug.warn("Array-of-tables header '[[...]]' unsupported at line {}", .{p.line});
+                p.skipToNewline();
+                continue;
+            }
             const section_name = p.parseSection() catch |err| {
                 debug.warn("Invalid section at line {}: {}", .{ p.line, err });
                 p.skipToNewline();

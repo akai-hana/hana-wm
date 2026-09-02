@@ -72,26 +72,12 @@ pub const Kind = union(enum) {
     enum_read: EnumRead,
 };
 
-/// A knob's default value, written once here and kept in lockstep with
-/// types.Config's field initializers by schema_test.zig.
-pub const Def = union(enum) {
-    b: bool,
-    int: comptime_int,
-    float: comptime_float,
-    sv: parser.ScalableValue,
-    /// Optional fields whose default is null (?ScalableValue, ?Color,
-    /// ?[]const u8 alike).
-    none,
-    enum_val: struct { T: type, name: []const u8 },
-};
-
 pub const Knob = struct {
     /// Accepted locations, first-present-wins.
     places: []const Placement,
     /// Dotted path from types.Config to the field this knob feeds.
     target: []const u8,
     kind: Kind,
-    def: Def,
     /// When non-empty the whole knob is skipped unless this section exists
     /// (the [bar]-colors gates mirror parseBar's old early return; the
     /// tiling family mirrors parseTiling's).
@@ -105,79 +91,79 @@ pub const Knob = struct {
 /// colors precede the color_from chain that borrows them as fallbacks.
 pub const knobs = [_]Knob{
     // [drag]
-    .{ .places = &.{place("drag", "enabled")}, .target = "drag_enabled", .kind = .b, .def = .{ .b = true } },
-    .{ .places = &.{place("drag", "snap_distance")}, .target = "snap_distance", .kind = .{ .scalable = 0.0 }, .def = .{ .sv = parser.ScalableValue.absolute(8.0) } },
+    .{ .places = &.{place("drag", "enabled")}, .target = "drag_enabled", .kind = .b },
+    .{ .places = &.{place("drag", "snap_distance")}, .target = "snap_distance", .kind = .{ .scalable = 0.0 } },
 
     // [fullscreen]
-    .{ .places = &.{place("fullscreen", "enabled")}, .target = "fullscreen_enabled", .kind = .b, .def = .{ .b = true } },
+    .{ .places = &.{place("fullscreen", "enabled")}, .target = "fullscreen_enabled", .kind = .b },
 
     // [bar.modules.workspaces] | [workspaces]
-    .{ .places = &.{ place("bar.modules.workspaces", "count"), place("workspaces", "count") }, .target = "workspaces.count", .kind = .{ .int = .{ .T = u8, .min = 1, .max = constants.max_workspaces } }, .def = .{ .int = 9 } },
-    .{ .places = &.{ place("bar.modules.workspaces", "enabled"), place("workspaces", "enabled") }, .target = "workspaces.enabled", .kind = .b, .def = .{ .b = true } },
+    .{ .places = &.{ place("bar.modules.workspaces", "count"), place("workspaces", "count") }, .target = "workspaces.count", .kind = .{ .int = .{ .T = u8, .min = 1, .max = constants.max_workspaces } } },
+    .{ .places = &.{ place("bar.modules.workspaces", "enabled"), place("workspaces", "enabled") }, .target = "workspaces.enabled", .kind = .b },
 
     // [tiling]: gated on the section exactly as parseTiling always was --
     // a lone [tiling.aesthetics] without [tiling] never fed these knobs.
-    .{ .places = &.{place("tiling", "enabled")}, .target = "tiling.enabled", .kind = .b, .def = .{ .b = true }, .requires = "tiling" },
-    .{ .places = &.{place("tiling", "global_layout")}, .target = "tiling.global_layout", .kind = .b, .def = .{ .b = false }, .requires = "tiling" },
-    .{ .places = &.{place("tiling", "min_window_dim")}, .target = "tiling.min_window_dim", .kind = .{ .int = .{ .T = u16, .min = 1 } }, .def = .{ .int = constants.min_window_dim }, .requires = "tiling" },
+    .{ .places = &.{place("tiling", "enabled")}, .target = "tiling.enabled", .kind = .b, .requires = "tiling" },
+    .{ .places = &.{place("tiling", "global_layout")}, .target = "tiling.global_layout", .kind = .b, .requires = "tiling" },
+    .{ .places = &.{place("tiling", "min_window_dim")}, .target = "tiling.min_window_dim", .kind = .{ .int = .{ .T = u16, .min = 1 } }, .requires = "tiling" },
 
     // Aesthetics quartet: [tiling.aesthetics] preferred, flat [tiling]
     // fallback (same key spellings in both).
-    .{ .places = &.{ place("tiling.aesthetics", "gap_width"), place("tiling", "gap_width") }, .target = "tiling.gap_width", .kind = .{ .scalable = 0.0 }, .def = .{ .sv = parser.ScalableValue.absolute(10.0) }, .requires = "tiling" },
-    .{ .places = &.{ place("tiling.aesthetics", "border_width"), place("tiling", "border_width") }, .target = "tiling.border_width", .kind = .{ .scalable = 0.0 }, .def = .{ .sv = parser.ScalableValue.absolute(2.0) }, .requires = "tiling" },
-    .{ .places = &.{ place("tiling.aesthetics", "border_focused"), place("tiling", "border_focused") }, .target = "tiling.border_focused", .kind = .color, .def = .{ .int = 0x5294E2 }, .requires = "tiling" },
-    .{ .places = &.{ place("tiling.aesthetics", "border_unfocused"), place("tiling", "border_unfocused") }, .target = "tiling.border_unfocused", .kind = .color, .def = .{ .int = 0x383C4A }, .requires = "tiling" },
+    .{ .places = &.{ place("tiling.aesthetics", "gap_width"), place("tiling", "gap_width") }, .target = "tiling.gap_width", .kind = .{ .scalable = 0.0 }, .requires = "tiling" },
+    .{ .places = &.{ place("tiling.aesthetics", "border_width"), place("tiling", "border_width") }, .target = "tiling.border_width", .kind = .{ .scalable = 0.0 }, .requires = "tiling" },
+    .{ .places = &.{ place("tiling.aesthetics", "border_focused"), place("tiling", "border_focused") }, .target = "tiling.border_focused", .kind = .color, .requires = "tiling" },
+    .{ .places = &.{ place("tiling.aesthetics", "border_unfocused"), place("tiling", "border_unfocused") }, .target = "tiling.border_unfocused", .kind = .color, .requires = "tiling" },
 
     // Master-stack trio: the dedicated section's shorter spellings win;
     // flat [tiling] keeps the flat spellings. Section presence -- not key
     // presence -- picks the spelling.
-    .{ .places = &.{ place("tiling.layouts.master-stack", "count"), place("tiling", "master_count") }, .target = "tiling.master_count", .kind = .{ .int = .{ .T = u8, .min = 1 } }, .def = .{ .int = 1 }, .requires = "tiling" },
-    .{ .places = &.{ place("tiling.layouts.master-stack", "side"), place("tiling", "master_side") }, .target = "tiling.master_side", .kind = .{ .enum_read = .{ .T = types.MasterSide, .ci = true } }, .def = .{ .enum_val = .{ .T = types.MasterSide, .name = "left" } }, .requires = "tiling" },
+    .{ .places = &.{ place("tiling.layouts.master-stack", "count"), place("tiling", "master_count") }, .target = "tiling.master_count", .kind = .{ .int = .{ .T = u8, .min = 1 } }, .requires = "tiling" },
+    .{ .places = &.{ place("tiling.layouts.master-stack", "side"), place("tiling", "master_side") }, .target = "tiling.master_side", .kind = .{ .enum_read = .{ .T = types.MasterSide, .ci = true } }, .requires = "tiling" },
     // No local bound: validate() owns master_width's ratio/negative policy.
-    .{ .places = &.{ place("tiling.layouts.master-stack", "width"), place("tiling", "master_width") }, .target = "tiling.master_width", .kind = .scalable_free, .def = .{ .sv = parser.ScalableValue.percentage(50.0) }, .requires = "tiling" },
+    .{ .places = &.{ place("tiling.layouts.master-stack", "width"), place("tiling", "master_width") }, .target = "tiling.master_width", .kind = .scalable_free, .requires = "tiling" },
 
     // [bar]
-    .{ .places = &.{place("bar", "enabled")}, .target = "bar.enabled", .kind = .b, .def = .{ .b = true } },
-    .{ .places = &.{place("bar", "vim_mode")}, .target = "bar.vim_mode", .kind = .b, .def = .{ .b = true } },
-    .{ .places = &.{place("bar", "carousel_enabled")}, .target = "bar.carousel_enabled", .kind = .b, .def = .{ .b = true } },
-    .{ .places = &.{place("bar", "font_size")}, .target = "bar.font_size", .kind = .{ .scalable = 0.0 }, .def = .{ .sv = parser.ScalableValue.percentage(10.0) } },
+    .{ .places = &.{place("bar", "enabled")}, .target = "bar.enabled", .kind = .b },
+    .{ .places = &.{place("bar", "vim_mode")}, .target = "bar.vim_mode", .kind = .b },
+    .{ .places = &.{place("bar", "carousel_enabled")}, .target = "bar.carousel_enabled", .kind = .b },
+    .{ .places = &.{place("bar", "font_size")}, .target = "bar.font_size", .kind = .{ .scalable = 0.0 } },
     // segment_spacing feeds BarConfig.spacing.
-    .{ .places = &.{place("bar", "segment_spacing")}, .target = "bar.spacing", .kind = .{ .scalable = 0.0 }, .def = .{ .sv = parser.ScalableValue.absolute(12.0) } },
-    .{ .places = &.{place("bar", "indicator_size")}, .target = "bar.indicator_size", .kind = .{ .scalable = 0.0 }, .def = .{ .sv = parser.ScalableValue.percentage(30.0) } },
-    .{ .places = &.{place("bar", "workspace_tag_width")}, .target = "bar.workspace_tag_width", .kind = .{ .scalable = 0.0 }, .def = .{ .sv = parser.ScalableValue.percentage(100.0) } },
+    .{ .places = &.{place("bar", "segment_spacing")}, .target = "bar.spacing", .kind = .{ .scalable = 0.0 } },
+    .{ .places = &.{place("bar", "indicator_size")}, .target = "bar.indicator_size", .kind = .{ .scalable = 0.0 } },
+    .{ .places = &.{place("bar", "workspace_tag_width")}, .target = "bar.workspace_tag_width", .kind = .{ .scalable = 0.0 } },
     // height: null = auto-calculate from font metrics alone.
-    .{ .places = &.{place("bar", "height")}, .target = "bar.height", .kind = .auto_scalable, .def = .none },
+    .{ .places = &.{place("bar", "height")}, .target = "bar.height", .kind = .auto_scalable },
     // Exact-case enum; an unrecognized spelling silently keeps .top.
-    .{ .places = &.{place("bar", "position")}, .target = "bar.bar_position", .kind = .{ .enum_read = .{ .T = types.BarScreenPosition } }, .def = .{ .enum_val = .{ .T = types.BarScreenPosition, .name = "top" } } },
-    .{ .places = &.{place("bar", "carousel_speed_px_s")}, .target = "bar.carousel_speed_px_s", .kind = .{ .int = .{ .T = u16, .min = 1, .max = 1000 } }, .def = .{ .int = 125 } },
+    .{ .places = &.{place("bar", "position")}, .target = "bar.bar_position", .kind = .{ .enum_read = .{ .T = types.BarScreenPosition } } },
+    .{ .places = &.{place("bar", "carousel_speed_px_s")}, .target = "bar.carousel_speed_px_s", .kind = .{ .int = .{ .T = u16, .min = 1, .max = 1000 } } },
 
     // Base palette: read before every color_from consumer below.
-    .{ .places = &.{place("bar", "bg")}, .target = "bar.bg", .kind = .color, .def = .{ .int = 0x222222 } },
-    .{ .places = &.{place("bar", "fg")}, .target = "bar.fg", .kind = .color, .def = .{ .int = 0xBBBBBB } },
-    .{ .places = &.{place("bar", "selected_bg")}, .target = "bar.selected_bg", .kind = .color, .def = .{ .int = 0x005577 } },
-    .{ .places = &.{place("bar", "selected_fg")}, .target = "bar.selected_fg", .kind = .color, .def = .{ .int = 0xEEEEEE } },
-    .{ .places = &.{place("bar", "accent_color")}, .target = "bar.accent_color", .kind = .color, .def = .{ .int = 0x61AFEF } },
+    .{ .places = &.{place("bar", "bg")}, .target = "bar.bg", .kind = .color },
+    .{ .places = &.{place("bar", "fg")}, .target = "bar.fg", .kind = .color },
+    .{ .places = &.{place("bar", "selected_bg")}, .target = "bar.selected_bg", .kind = .color },
+    .{ .places = &.{place("bar", "selected_fg")}, .target = "bar.selected_fg", .kind = .color },
+    .{ .places = &.{place("bar", "accent_color")}, .target = "bar.accent_color", .kind = .color },
 
-    .{ .places = &.{place("bar", "clock_format")}, .target = "bar.clock_format", .kind = .str, .def = .none },
-    .{ .places = &.{place("bar", "drun_prompt")}, .target = "bar.drun_prompt", .kind = .str, .def = .none },
-    .{ .places = &.{place("bar", "indicator_location")}, .target = "bar.indicator_location", .kind = .{ .enum_read = .{ .T = types.IndicatorLocation, .ci = true, .warn = true, .default_label = "up-left" } }, .def = .{ .enum_val = .{ .T = types.IndicatorLocation, .name = "up_left" } } },
-    .{ .places = &.{place("bar", "indicator_padding")}, .target = "bar.indicator_padding", .kind = .ratio, .def = .{ .float = 0.1 } },
-    .{ .places = &.{place("bar", "transparency")}, .target = "bar.transparency", .kind = .ratio, .def = .{ .float = 1.0 } },
+    .{ .places = &.{place("bar", "clock_format")}, .target = "bar.clock_format", .kind = .str },
+    .{ .places = &.{place("bar", "drun_prompt")}, .target = "bar.drun_prompt", .kind = .str },
+    .{ .places = &.{place("bar", "indicator_location")}, .target = "bar.indicator_location", .kind = .{ .enum_read = .{ .T = types.IndicatorLocation, .ci = true, .warn = true, .default_label = "up-left" } } },
+    .{ .places = &.{place("bar", "indicator_padding")}, .target = "bar.indicator_padding", .kind = .ratio },
+    .{ .places = &.{place("bar", "transparency")}, .target = "bar.transparency", .kind = .ratio },
     // Falls back to the bar-wide fg (its historical default) -- but only
     // when the key is present; absent keeps the field null.
-    .{ .places = &.{place("bar", "indicator_color")}, .target = "bar.indicator_color", .kind = .{ .color_opt = "fg" }, .def = .none },
+    .{ .places = &.{place("bar", "indicator_color")}, .target = "bar.indicator_color", .kind = .{ .color_opt = "fg" } },
 
     // [bar.colors] chain. Gated on [bar] because parseBar always returned
     // before reaching these when the section was missing entirely. The
     // title accents additionally COPY their fallback when [bar.colors] is
     // absent (they were unconditionally assigned); the drun trio stay null
     // so the read-time fallbacks in BarConfig apply.
-    .{ .places = &.{place("bar.colors", "title")}, .target = "bar.title_accent_color", .kind = .{ .color_from = "accent_color" }, .def = .{ .int = 0x61AFEF }, .requires = "bar", .copy_when_absent = true },
-    .{ .places = &.{place("bar.colors", "title_unfocused")}, .target = "bar.title_unfocused_accent", .kind = .{ .color_from = "bg" }, .def = .{ .int = 0x222222 }, .requires = "bar", .copy_when_absent = true },
-    .{ .places = &.{place("bar.colors", "title_minimized")}, .target = "bar.title_minimized_accent", .kind = .{ .color_from = "accent_color" }, .def = .{ .int = 0x61AFEF }, .requires = "bar", .copy_when_absent = true },
-    .{ .places = &.{place("bar.colors", "drun_bg")}, .target = "bar.drun_bg", .kind = .{ .color_from = "bg" }, .def = .none, .requires = "bar" },
-    .{ .places = &.{place("bar.colors", "drun_fg")}, .target = "bar.drun_fg", .kind = .{ .color_from = "fg" }, .def = .none, .requires = "bar" },
-    .{ .places = &.{place("bar.colors", "drun_prompt_color")}, .target = "bar.drun_prompt_color", .kind = .{ .color_from = "accent_color" }, .def = .none, .requires = "bar" },
+    .{ .places = &.{place("bar.colors", "title")}, .target = "bar.title_accent_color", .kind = .{ .color_from = "accent_color" }, .requires = "bar", .copy_when_absent = true },
+    .{ .places = &.{place("bar.colors", "title_unfocused")}, .target = "bar.title_unfocused_accent", .kind = .{ .color_from = "bg" }, .requires = "bar", .copy_when_absent = true },
+    .{ .places = &.{place("bar.colors", "title_minimized")}, .target = "bar.title_minimized_accent", .kind = .{ .color_from = "accent_color" }, .requires = "bar", .copy_when_absent = true },
+    .{ .places = &.{place("bar.colors", "drun_bg")}, .target = "bar.drun_bg", .kind = .{ .color_from = "bg" }, .requires = "bar" },
+    .{ .places = &.{place("bar.colors", "drun_fg")}, .target = "bar.drun_fg", .kind = .{ .color_from = "fg" }, .requires = "bar" },
+    .{ .places = &.{place("bar.colors", "drun_prompt_color")}, .target = "bar.drun_prompt_color", .kind = .{ .color_from = "accent_color" }, .requires = "bar" },
 };
 
 // Type-level access into Config by dotted path.
@@ -346,22 +332,6 @@ pub fn assignStr(allocator: std.mem.Allocator, view: *?[]const u8, val: []const 
     const copy = try allocator.dupe(u8, val);
     if (view.*) |old| allocator.free(old);
     view.* = copy;
-}
-
-/// Seeds every scalar knob with its table default. Called on a fresh
-/// Config; the non-scalar seed data (layouts cycle, workspace icons, bar
-/// columns) stays in config.zig's getDefaultConfig.
-pub fn applyDefaults(cfg: *types.Config) void {
-    inline for (knobs) |k| {
-        switch (k.def) {
-            .b => |d| ptr(cfg, k.target).* = d,
-            .int => |d| ptr(cfg, k.target).* = d,
-            .float => |d| ptr(cfg, k.target).* = d,
-            .sv => |d| ptr(cfg, k.target).* = d,
-            .none => ptr(cfg, k.target).* = null,
-            .enum_val => |ev| ptr(cfg, k.target).* = @field(ev.T, ev.name),
-        }
-    }
 }
 
 /// Applies every knob from a parsed Document: the schema-driven replacement

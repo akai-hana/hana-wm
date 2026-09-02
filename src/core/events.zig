@@ -44,6 +44,16 @@ const fd_signal = 1;
 // signal pipe and timer paths get fair scheduling against a chatty client.
 const max_events_per_batch: usize = 128;
 
+// Module-level carry for the non-motion event stashed while coalescing the
+// LAST batch's motions but not yet dispatched when the batch cap hit. It is
+// owned here (NOT in a stack-local `pending`) so it survives the gap between
+// one handleXcbEvents return and the next poll round; a stack-local `pending`
+// would have to free it at cap exit, silently DROPPING a real event (e.g. a
+// KeyPress or ConfigureNotify) that had already been charged against—and
+// skipped within—that batch. Sizing is exact: at most one event is ever
+// stashed (motion coalescing holds only the newest motion and one non-motion).
+var stashed_event: ?*xcb.xcb_generic_event_t = null;
+
 const EventHandler = *const fn (event: *anyopaque) void;
 
 // Casts a `fn(*T) void` event handler to the generic `EventHandler` pointer
@@ -114,6 +124,7 @@ const dispatch_table = blk: {
     table[xcb.XCB_CLIENT_MESSAGE] = asHandler(window.handleClientMessage);
 
     table[xcb.XCB_KEY_PRESS] = asHandler(input.handleKeyPress);
+    table[xcb.XCB_KEY_RELEASE] = asHandler(input.handleKeyRelease);
     table[xcb.XCB_MAPPING_NOTIFY] = asHandler(handleMappingNotify);
     table[xcb.XCB_BUTTON_PRESS] = asHandler(input.handleButtonPress);
     table[xcb.XCB_BUTTON_RELEASE] = asHandler(input.handleButtonRelease);
@@ -140,18 +151,26 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
         });
         return;
     }
-    const idx = event_type & 0x7F; // strip XCB synthetic-event bit
 
     // RandR extension events (base and base+1): screen/CRTC/output change
     // notifications. Bar render pacing must track monitor
     // re-configuration, so any of them triggers re-detection. Extension events
     // sit above the fixed dispatch table and would otherwise be dropped by the
     // bounds guard below.
+    //
+    // The range test uses the RAW type byte, BEFORE the 0x7F mask below: the
+    // synthetic-event bit is only meaningful for core events, and an extension
+    // base can legitimately be >= 0x80 (the server allocates bases at/after
+    // 0x80 precisely to leave bit 7 free for SendEvent on core codes). Masking
+    // first would alias such a base onto a low core code and break the test,
+    // silently disabling refresh re-detection (and misrouting the event).
     const randr_first = refresh.randrFirstEvent();
-    if (randr_first != 0 and idx >= randr_first and idx <= randr_first + 1) {
+    if (randr_first != 0 and event_type >= randr_first and event_type <= randr_first + 1) {
         refresh.handleRandrNotifyEvent(core.getState().conn);
         return;
     }
+
+    const idx = event_type & 0x7F; // strip XCB synthetic-event bit
 
     // Guard the fixed-size table: extension events live above XCB_GE_GENERIC
     // and would index out of bounds. hana only selects core events today, but
@@ -252,7 +271,16 @@ fn handleConfigReload() !void {
     errdefer new_ptr.deinit(cs.alloc);
 
     try config.validate(new_ptr);
-    new_ptr.keybind_resolver.build(new_ptr.keybindings.items, input.getXkbState(), cs.alloc);
+    const xkb_state = input.getXkbState() orelse {
+        // XKB was torn down (deinit/init window during a reload); reusing the
+        // old config here prevents the rebuilt keybind resolver / finalize
+        // from running on stale XKB. Free the not-yet-live allocation that
+        // the errdefer above owned.
+        debug.warn("Config reload before XKB init; keeping old config", .{});
+        new_ptr.deinit(cs.alloc);
+        return;
+    };
+    new_ptr.keybind_resolver.build(new_ptr.keybindings.items, xkb_state, cs.alloc);
     config.finalizeConfig(new_ptr, cs.screen);
 
     // Swap pointers: new config becomes live, old config is isolated.
@@ -307,11 +335,24 @@ fn takeEvent(pending: *?*xcb.xcb_generic_event_t, conn: core.Connection) ?*xcb.x
         pending.* = null;
         return p;
     }
+    // Carry from a prior cap-exit batch first, so a stashed event that was
+    // charged against the previous batch's budget is not lost.
+    if (stashed_event) |p| {
+        stashed_event = null;
+        return p;
+    }
     return xcb.xcb_poll_for_event(conn);
 }
 
 fn isMotion(e: *xcb.xcb_generic_event_t) bool {
-    return (@as(*u8, @ptrCast(e)).* & 0x7f) == xcb.XCB_MOTION_NOTIFY;
+    const t = @as(*u8, @ptrCast(e)).*;
+    // Same masking hazard as dispatch: a RandR extension base >= 0x80
+    // (e.g. 0x85 -> 0x85 & 0x7f == 5) would alias onto MOTION_NOTIFY and some
+    // RandR event would be reclassified as a coalesceable motion. Exclude the
+    // RandR window (raw compare) before stripping the send_event bit.
+    const r = refresh.randrFirstEvent();
+    if (r != 0 and t >= r and t <= r + 1) return false;
+    return (t & 0x7f) == xcb.XCB_MOTION_NOTIFY;
 }
 
 // Drains pending XCB events for this batch, then runs post-batch housekeeping.
@@ -356,10 +397,12 @@ fn handleXcbEvents() void {
     }
 
     // A cap exit can leave a non-motion event held in `pending` (stashed
-    // during motion coalescing). It was already skipped this batch, so
-    // freeing it changes no drop-vs-dispatch semantics; it just stops the
-    // leak. On the normal (socket-empty) exit path `pending` is always null.
-    if (pending) |p| std.c.free(p);
+    // during motion coalescing). It was already skipped this batch, so carry
+    // it to the next batch's `takeEvent` rather than dropping it — it's a
+    // real event that the batch budget had already accounted for. On the
+    // normal (socket-empty) exit path `pending` is always null and nothing is
+    // carried.
+    if (pending) |p| stashed_event = p;
 
     // Drain any spawn pipes that became readable during this event batch.
     // This catches the common case where SIGCHLD and the MapRequest arrive in
@@ -412,7 +455,7 @@ pub fn run() !void {
             .INTR => continue,
             else => |err| {
                 debug.err("poll error: {s}", .{@errorName(std.posix.unexpectedErrno(err))});
-                break;
+                continue;
             },
         };
 

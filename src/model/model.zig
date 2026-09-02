@@ -131,7 +131,10 @@ pub const OrderList = utils.BoundedList(WindowId, max_tiled_per_ws);
 pub const MruList = utils.BoundedList(WindowId, mru_capacity);
 pub const StoreT = @import("store").Store(WindowId, Entry, store_capacity);
 
-pub fn lowestBit(m: Mask) WSId {
+/// Index (workspace id) of the lowest set bit in `m`. Returns null when `m`
+/// is zero (`@ctz(0)` = 64 is out of the [0, MAX_WS) index range).
+pub fn lowestBit(m: Mask) ?WSId {
+    if (m == 0) return null;
     return @intCast(@ctz(m));
 }
 

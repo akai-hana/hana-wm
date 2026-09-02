@@ -39,19 +39,23 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
     // "relaxed"). Mirrors the pipeline's former caller-side relaxed flag.
     const relax_variant: u8 = 1;
     const last_row_count = n % grid.cols;
-    const partial_win_w: u16 = if (v.env.variant_idx == relax_variant and last_row_count != 0) blk: {
+    const partial_cell_w: u16 = if (v.env.variant_idx == relax_variant and last_row_count != 0) blk: {
         const count: u16 = @intCast(last_row_count);
-        const partial_cell_w = (screen_w -| (count + 1) *| m.gap) / count;
-        break :blk tiling.shrinkClamped(partial_cell_w, bm, v.env.min_dim);
-    } else win_w;
+        break :blk (screen_w -| (count + 1) *| m.gap) / count;
+    } else cell_w;
+    const partial_win_w: u16 = tiling.shrinkClamped(partial_cell_w, bm, v.env.min_dim);
 
     var col: u16 = 0;
     var row: u16 = 0;
     for (v.order) |win| {
         const is_partial_row = last_row_count != 0 and row == grid.rows - 1;
+        // In the partial row the columns are ALSO spaced by the partial cell
+        // width. Striding them by the narrow full-row cell_w would overlap the
+        // wide relaxed cells (they span a whole slot plus its gap).
+        const cell_w_here: u16 = if (is_partial_row) partial_cell_w else cell_w;
 
         const rect = utils.Rect{
-            .x = @intCast(m.gap +| col *| (cell_w + m.gap)),
+            .x = @intCast(m.gap +| col *| (cell_w_here +| m.gap)),
             .y = @intCast(wa_y +| m.gap +| row *| (cell_h + m.gap)),
             .width = if (is_partial_row) partial_win_w else win_w,
             .height = win_h,
