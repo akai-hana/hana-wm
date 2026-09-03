@@ -55,34 +55,36 @@ var xkb_state: ?xkbcommon.XkbState = null;
 
 // Held binding-key ledger. A passive grab returns a bound key's KeyRelease to
 // the grabbing window only if the mask selects it; handleKeyRelease removes
-// the (mods,keycode) combo stamped on the originating press, letting a later
-// press of the same key be recognized as a genuine new gesture rather than an
-// autorepeat. Keycode | mods narrows the table to one entry per binding.
+// the keycode stamped on the originating press, letting a later press of the
+// same key be recognized as a genuine new gesture rather than an autorepeat.
+//
+// The ledger is keyed on the raw KEYCODE only, not mods|keycode. Keying on the
+// full (mods,keycode) combo poisons an entry when a user lifts the modifier
+// before the bound key: the release's modifier state then differs from the
+// press's, so clearKeyHeld never matches and keyHeld suppresses every later
+// press of that binding (e.g. the kill/close_window key silently dies after
+// opening and closing a few windows). A keycode is stable across a gesture
+// regardless of modifier release order, so it both suppresses autorepeat and
+// always clears on release.
 const held_key_capacity = 32;
-var held_keys: [held_key_capacity]u32 = undefined;
+var held_keys: [held_key_capacity]u8 = undefined;
 var held_key_count: usize = 0;
 
-inline fn heldKey(mods: u16, keycode: u8) u32 {
-    return (@as(u32, mods) << 8) | keycode;
-}
-
-fn keyHeld(mods: u16, keycode: u8) bool {
-    const key = heldKey(mods, keycode);
-    for (held_keys[0..held_key_count]) |held| if (held == key) return true;
+fn keyHeld(keycode: u8) bool {
+    for (held_keys[0..held_key_count]) |kc| if (kc == keycode) return true;
     return false;
 }
 
-fn setKeyHeld(mods: u16, keycode: u8) void {
+fn setKeyHeld(keycode: u8) void {
     if (held_key_count == held_keys.len) return; // saturate; releases still clear
-    held_keys[held_key_count] = heldKey(mods, keycode);
+    held_keys[held_key_count] = keycode;
     held_key_count += 1;
 }
 
-fn clearKeyHeld(mods: u16, keycode: u8) void {
-    const key = heldKey(mods, keycode);
+fn clearKeyHeld(keycode: u8) void {
     var i: usize = 0;
     while (i < held_key_count) : (i += 1) {
-        if (held_keys[i] == key) {
+        if (held_keys[i] == keycode) {
             held_keys[i] = held_keys[held_key_count - 1];
             held_key_count -= 1;
             return;
@@ -206,10 +208,10 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     // A held binding key makes the server replay KeyPress (autorepeat). The
     // release WAS captured by the passive grab, but without tracking we would
     // re-fire toggle actions on every repeat. Suppress re-dispatch while the
-    // exact (mods,keycode) combo is already held. Only keycodes this WM's
-    // grabs intercepted ever reach here, so the set stays small.
-    if (keyHeld(mods, event.detail)) return;
-    setKeyHeld(mods, event.detail);
+    // keycode is already held. Only keycodes this WM's grabs intercepted ever
+    // reach here, so the set stays small.
+    if (keyHeld(event.detail)) return;
+    setKeyHeld(event.detail);
 
     if (matched) |action| {
         debug.info("[KEY] mods=0x{x} keysym=0x{x} action={s}", .{ mods, keysym, @tagName(action.*) });
@@ -227,7 +229,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
 /// same binding later be recognized as a genuine new press.
 pub fn handleKeyRelease(event: *const xcb.xcb_key_release_event_t) void {
     focus.setLastEventTime(event.time);
-    clearKeyHeld(utils.normalizeModifiers(event.state), event.detail);
+    clearKeyHeld(event.detail);
 }
 
 /// Dispatches a priority-ordered button-press event.
@@ -374,6 +376,7 @@ fn executeAction(action: *const types.Action) void {
         .toggle_layout,
         .toggle_layout_reverse,
         .cycle_layout_variants,
+        .cycle_layout_variants_reverse,
         .increase_master,
         .decrease_master,
         .increase_master_count,
@@ -439,6 +442,11 @@ fn executeTilingAction(action: *const types.Action) void {
         .cycle_layout_variants => {
             focus.setSuppressReason(.tiling_operation);
             actions.stepVariantDir(1);
+            focus.beginTilingOpSettle();
+        },
+        .cycle_layout_variants_reverse => {
+            focus.setSuppressReason(.tiling_operation);
+            actions.stepVariantDir(-1);
             focus.beginTilingOpSettle();
         },
         .increase_master => actions.adjustPrimaryWidthAction(0.025),

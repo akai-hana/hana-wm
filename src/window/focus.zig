@@ -136,6 +136,21 @@ pub inline fn setLastEventTime(t: u32) void {
 
 /// Sets X input focus to `win`, always with CurrentTime (0), see
 /// "Timestamp handling" above.
+///
+/// A plain xcb_set_input_focus is all that is required here. An earlier
+/// revision wrapped this call in a momentary xcb_grab_keyboard/ungrab_keyboard
+/// hoping to break active keyboard grabs held by other clients (e.g. SDL
+/// fullscreen). That was ineffective — XGrabKeyboard returns AlreadyGrabbed
+/// when another client holds the grab, so it never actually steals input — and
+/// it was actively harmful: the transient active grab re-routes every key
+/// event away from our passive key grabs and, when released while the shortcut
+/// key is still physically held, the server drops the pending KeyRelease of
+/// that key (X11 drops KeyRelease events pending at grab deactivation). The
+/// miss then leaves the held-key ledger in input.zig marked as "held", so the
+/// binding's next press is silently suppressed — the "every second keybind
+/// doesn't respond" symptom. Setting input focus alone never interferes with
+/// passive key grabs, so the KeyRelease reliably reaches handleKeyRelease and
+/// the ledger clears correctly.
 inline fn focusNow(conn: core.Connection, win: u32) void {
     _ = xcb.xcb_set_input_focus(conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, 0);
 }
@@ -286,11 +301,25 @@ pub const FocusTransition = union(enum) {
 /// Returns a FocusTransition that can be committed inside the grab.
 /// Returns .none when focus should not change (invalid window, same window,
 /// unmapped liveness guard, or no_input model).
-pub fn prepareFocus(win: u32, reason: Reason) FocusTransition {
-    if (window.isInvalidWindow(win)) return .none;
-    if (state.?.last_applied == win) return .none;
-
+///
+/// `pre_protocols_cookie` is an optional already-fired WM_PROTOCOLS query for
+/// `win` (pipelined focus prep — see switchTo). When provided it is consumed
+/// for the input-model resolve or discarded on an early return, so ownership
+/// is fully transferred here regardless of the outcome.
+pub fn prepareFocus(
+    win: u32,
+    reason: Reason,
+    pre_protocols_cookie: ?xcb.xcb_get_property_cookie_t,
+) FocusTransition {
     const conn = core.getState().conn;
+    if (window.isInvalidWindow(win)) {
+        window.discardProtocolCookie(conn, pre_protocols_cookie);
+        return .none;
+    }
+    if (state.?.last_applied == win) {
+        window.discardProtocolCookie(conn, pre_protocols_cookie);
+        return .none;
+    }
 
     // Liveness guard: same as setFocus (mouse_click/user_command/pointer_sync
     // must not focus a destroyed window).
@@ -298,9 +327,13 @@ pub fn prepareFocus(win: u32, reason: Reason) FocusTransition {
     // window is on the current workspace and visible, so the blocking
     // xcb_get_window_attributes round-trip is redundant.
     if ((reason == .mouse_click or reason == .pointer_sync) and
-        !isWindowMapped(conn, win)) return .none;
+        !isWindowMapped(conn, win))
+    {
+        window.discardProtocolCookie(conn, pre_protocols_cookie);
+        return .none;
+    }
 
-    const resolved = window.getInputModelResolved(conn, win);
+    const resolved = window.getInputModelResolvedConsume(conn, win, pre_protocols_cookie);
     if (resolved.model == .no_input) return .none;
 
     // Cancel any stale confirm cookie (client-side, no round trip).
@@ -550,7 +583,7 @@ inline fn suppressionFor(reason: Reason, current: core.FocusSuppressReason) core
 /// happen outside the grab; focus protocol, borders, and geometry land
 /// inside one grab+reconcile+flush. Drop-in for the old setFocus path.
 pub fn grabFocus(win: u32, reason: Reason) void {
-    const ft = prepareFocus(win, reason);
+    const ft = prepareFocus(win, reason, null);
     if (ft == .none) return;
     const pl = @import("pipeline");
     @import("model").setFocus(pl.model(), win);

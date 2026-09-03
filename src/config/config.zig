@@ -440,6 +440,7 @@ const action_aliases = [_]struct { key: []const u8, tag: std.meta.Tag(types.Acti
     .{ .key = "fullscreen", .tag = .toggle_fullscreen },
     .{ .key = "minimize", .tag = .minimize_window },
     .{ .key = "cycle_variants", .tag = .cycle_layout_variants },
+    .{ .key = "cycle_variants_reverse", .tag = .cycle_layout_variants_reverse },
     .{ .key = "prompt", .tag = .toggle_prompt },
     .{ .key = "focus_next", .tag = .focus_next_window },
     .{ .key = "focus_prev", .tag = .focus_prev_window },
