@@ -168,7 +168,8 @@ Mod+Shift+Alt+T = "unminimize_all"
 # -- Tiling --
 Mod+space        = "toggle_layout"          # Cycle layouts forward
 Mod+Shift+space  = "toggle_layout_reverse"  # Cycle layouts backward
-Mod+Alt+space    = "cycle_layout_variants"  # Cycle current layout's variants
+Mod+Alt+space         = "cycle_layout_variants"          # Cycle current layout's variants
+Mod+Alt+Shift+space   = "cycle_layout_variants_reverse"  # Cycle current layout's variants backwards
 Mod+Tab          = "swap_master_focus_swap" # Swap position of current and previous windows
 Mod+Shift+Tab    = "swap_master"            # Swap positions and focus of current and previous windows
 Mod+grave        = "toggle_prompt"

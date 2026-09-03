@@ -1323,13 +1323,21 @@ pub fn updateIfDirty() !void {
     s.last_window_rev = core.windowRev();
     s.last_layout_rev = core.layoutRev();
 
-    if (barModsConsumeRedrawRequest()) {
-        gBar.force = true;
-        s.is_dirty = true;
-    }
-    if (s.is_dirty) {
-        submitDraw();
+    // Fold any module redraw request into the force flag (as the poll
+    // wakeup path does), then draw. Loop: a module may queue another request
+    // while drawing (the variants segment collapses to zero width on a layout
+    // switch and must re-lay the row in the SAME batch, before the
+    // end-of-batch flush, so the gap closes seamlessly rather than waiting on
+    // the next unrelated event). Each iteration clears the request it
+    // consumed, so the loop terminates unless a module genuinely re-requests.
+    while (true) {
+        if (barModsConsumeRedrawRequest()) {
+            gBar.force = true;
+            s.is_dirty = true;
+        }
+        if (!s.is_dirty) break;
         s.is_dirty = false;
+        submitDraw();
     }
 }
 

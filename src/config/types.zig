@@ -49,6 +49,7 @@ pub const Action = union(enum) {
     unminimize_fifo,
     unminimize_all,
     cycle_layout_variants,
+    cycle_layout_variants_reverse,
     toggle_prompt,
     /// Shows all windows from every workspace at once; toggled on/off.
     all_workspaces,

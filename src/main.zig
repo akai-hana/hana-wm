@@ -134,7 +134,7 @@ pub fn main() !void {
                 // the mapRequest path uses the same focus-after-geometry
                 // entry (the adopted window is already mapped).
                 if (pipeline.model().focused) |focused| {
-                    const ft = focus.prepareFocus(focused, .window_spawn);
+                    const ft = focus.prepareFocus(focused, .window_spawn, null);
                     pipeline.reconcileUnderGrabNowWithFocusAfter(.{}, ft);
                 } else {
                     pipeline.reconcileUnderGrabNow(.{});

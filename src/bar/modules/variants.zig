@@ -20,6 +20,14 @@ const tiling_mods = @import("plugin").tiling_mods;
 // layouts.
 var cached_width: u16 = 0;
 
+// Set when draw() collapses the segment to zero width (active layout has no
+// variants), so the bar re-measures the row the same batch. Without this the
+// reservation only shrinks on the next unrelated redraw, leaving a
+// background-colored gap where the indicator used to be until then. Consumed
+// (read + cleared) by `consumeRedrawRequest`, mirroring the prompt module to
+// avoid a circular import between variants <-> bar.
+var redraw_pending: bool = false;
+
 pub fn getCachedWidth() u16 {
     return cached_width;
 }
@@ -27,6 +35,14 @@ pub fn getCachedWidth() u16 {
 /// Drops the measured width; next draw() re-measures (config reload path).
 pub fn invalidate() void {
     cached_width = 0;
+}
+
+/// Returns true and clears the flag if a variant-collapse redraw is
+/// outstanding. Call once per event-loop iteration from `bar.updateIfDirty`.
+pub fn consumeRedrawRequest() bool {
+    const pending = redraw_pending;
+    redraw_pending = false;
+    return pending;
 }
 
 /// Resolves the active layout's variant indicator from metadata, by the
@@ -47,12 +63,19 @@ fn getIndicator() []const u8 {
 /// start_x when tiling is disabled or no indicator is available.
 pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
     const indicator = getIndicator();
-    if (indicator.len == 0) {
-        cached_width = 0;
-        return start_x;
+    var end_x = start_x;
+    if (indicator.len != 0) {
+        end_x = try dc.drawSegment(start_x, height, indicator, config.scaledSegmentPadding(height), config.bg, config.fg);
     }
-    const end_x = try dc.drawSegment(start_x, height, indicator, config.scaledSegmentPadding(height), config.bg, config.fg);
-    cached_width = end_x - start_x;
+    const new_width = end_x - start_x;
+    // The row is laid out with the PREVIOUS frame's reservation; if this draw
+    // changed the reserved width (collapse to zero on a no-variant layout, or
+    // reappear on a layout that has variants again), request an immediate
+    // re-lay. Otherwise the neighbouring segments keep sitting on the stale
+    // offset (a gap on collapse, an overlap on reappear) until some unrelated
+    // update triggers a redraw.
+    if (new_width != cached_width) redraw_pending = true;
+    cached_width = new_width;
     return end_x;
 }
 
@@ -76,6 +99,7 @@ pub const module: @import("plugin").Segment = .{
     .name = "variants",
     .invalidate = invalidate,
     .naturalWidth = naturalWidthHook,
+    .consumeRedrawRequest = consumeRedrawRequest,
     .draw = drawHook,
     .onClick = onClickHook,
 };
