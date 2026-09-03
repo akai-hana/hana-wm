@@ -75,6 +75,11 @@ pub const Surfaces = struct {
     /// reconcile) so the workspace-switch path gets the correct workarea on
     /// the first reconcile.
     updateBarVisibilityForWorkspace: *const fn (u8) void,
+    /// Immediately unmaps the bar and updates the screen claim, without a
+    /// separate reconcile. Called from the fullscreen-enter grab so the bar
+    /// disappears atomically with the fullscreen geometry — no deferred
+    /// ConfigureNotify wait. No-ops when the bar is already hidden.
+    hideBarForFullscreen: *const fn () void,
     toggleBarSegmentAnchor: *const fn () void,
     chromeToggleOverlay: *const fn () void,
 };

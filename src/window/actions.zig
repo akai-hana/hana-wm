@@ -10,6 +10,7 @@ const window = @import("window");
 const screen = @import("screen");
 const build_options = @import("build_options");
 const debug = @import("debug");
+const utils = @import("utils");
 // The build-generated window sub-system registry: the auto-discovered
 // `[N]WindowModule` array (dispatch order == deterministic filesystem scan
 // order). Core tiers reach compiled-in sub-systems through this array, never
@@ -202,6 +203,13 @@ fn restoreAndFocus(m: *model_mod.Model, win: model_mod.WindowId) void {
 /// the dispatch site and lands here too.
 pub fn fullscreenToggleWindow(win: model_mod.WindowId) void {
     const core = @import("core");
+    // Timing: wall-clock from action entry (keybind/EWMH resolve) to the
+    // synchronous completion of the fullscreen transition INCLUDING the bar
+    // hide and the ungrabAndFlush of the enclosing grab — i.e. the point at
+    // which the bar is gone and the window is sized, all visible on the next
+    // compositor frame. Runs in every Debug build (harness runs Debug);
+    // `debug.info` is compiled out under ReleaseFast via the log level.
+    const fs_t0: u64 = utils.monotonicNs();
     if (providerOf(.toggleCovering)) |wm| {
         if (!core.getState().config.fullscreen_enabled) return;
         const m = pipeline.model();
@@ -230,6 +238,16 @@ pub fn fullscreenToggleWindow(win: model_mod.WindowId) void {
             kind == .exit,
             kind == .switch_,
         );
+
+        // Completion of the transition is synchronous: run time elapsed
+        // already covers the reconcile + immediate bar hide (enter) and the
+        // ungrabAndFlush, i.e. the visual-completion point.
+        {
+            const dt = utils.monotonicNs() - fs_t0;
+            debug.info("[FSPROF] win={d} kind={s} done {d}ns", .{
+                win, @tagName(kind), dt,
+            });
+        }
     }
 }
 
@@ -362,15 +380,14 @@ pub fn toggleFloating(win: model_mod.WindowId) void {
     retileAndNotify(true, false);
 }
 
-/// Drag tick (no grab; E.6): model rect is the single source of truth; sync
-/// applies it conditionally against the sent ledger (only the dragged
-/// window's geometry actually differs). Called from the drag provider's
-/// updateDrag on every motion event.
+/// Drag tick (no grab; E.6): targeted reconcile — sends ONLY the dragged
+/// window's geometry (1 XCB call) instead of replaying all windows. Called
+/// from the drag provider's updateDrag on every motion event.
 pub fn dragRect(win: model_mod.WindowId, r: @import("utils").Rect) void {
     if (providerOf(.setFloatingRect)) |wm| {
         const m = pipeline.model();
         wm.setFloatingRect.?(m, win, r);
-        pipeline.reconcileNow();
+        pipeline.dragTick(win);
     }
 }
 
@@ -548,7 +565,13 @@ pub fn viewportStep(dir: i32) void {
 }
 
 /// Focus-change viewport snap: shift the viewport minimally so the focused
-/// window's slot is fully on-screen.
+/// window's slot is fully on-screen. When the focused window is already fully
+/// on-screen (the common case during focus cycling), the desired viewport
+/// offset and tiled count are unchanged, so the reconcile is skipped entirely:
+/// the focus transition's own grab-reconcile already handled borders, and an
+/// unchanged viewport needs no geometry reposition. This avoids a second
+/// full grab+reconcile+flush per Mod+k/Mod+j when nothing about the viewport
+/// actually moved.
 pub fn snapViewportToFocused() void {
     if (!build_options.has_tiling) return;
     if (!build_options.has_bar) return;
@@ -572,12 +595,15 @@ pub fn snapViewportToFocused() void {
     const i64_slot_w: i64 = sc.slot_w;
     const slot_left = @as(i64, @intCast(i)) * i64_slot_w - p.viewport_offset;
     const slot_right = slot_left + i64_slot_w;
+    const old_offset = p.viewport_offset;
     if (slot_left < 0)
         p.viewport_offset = @intCast(@as(i64, @intCast(i)) * i64_slot_w)
     else if (slot_right > wa.width)
         p.viewport_offset = @intCast(@as(i64, @intCast(i)) * i64_slot_w + i64_slot_w - @as(i64, wa.width));
     p.viewport_offset = std.math.clamp(p.viewport_offset, 0, sc.max_off);
+    const old_count = p.viewport_prev_count;
     p.viewport_prev_count = @intCast(n);
+    if (p.viewport_offset == old_offset and p.viewport_prev_count == old_count) return;
     pipeline.reconcileUnderGrabNow(.{});
 }
 
@@ -716,11 +742,12 @@ pub fn applyConfigReload() void {
 pub fn switchTo(ws_idx: u8) void {
     const core = @import("core");
     const constants = @import("constants");
-    const xcb = core.xcb;
 
     const m = pipeline.model();
     if (ws_idx >= constants.max_workspaces) return;
     if (m.current == ws_idx) return;
+
+    const t0 = utils.monotonicNs();
 
     // Suppression/pointer-sync state first, then the switch transition.
     const focus_mod = @import("focus");
@@ -751,73 +778,47 @@ pub fn switchTo(ws_idx: u8) void {
     // sync avoids any stale-revision edge.
     @import("core").bumpFullscreen();
 
-    // ALL blocking round trips run BEFORE the server grab. Earlier revisions
-    // grabbed the server first and then consumed the pointer reply and ran
-    // prepareFocus/prepareClearFocus (which round-trip input-model resolve).
-    // Every blocking wait while the server is grabbed freezes all input; a
-    // rapid successive keypress (e.g. an immediate switch to the next
-    // workspace) frozen in that window is dropped when the grab releases,
-    // which is exactly the "quick workspace switches sometimes don't register"
-    // symptom. Resolve everything outside the grab so the grab body is pure
-    // fire-and-forget XCB and is held for the minimum possible time.
-    //
-    // The pointer query and the focus-prep WM_PROTOCOLS query are further
-    // PIPELINED: both are fired before either reply is drained, so the server
-    // processes them in parallel and the switch costs ONE round trip instead of
-    // two (see rtt benchmark: ~45% lower blocking latency). The focus target is
-    // only known after the pointer reply, but the per-window WM_PROTOCOLS query
-    // only ever needs to be pre-fired for the fallback candidate (the common
-    // keyboard-driven case); if the pointer then overrides that candidate we
-    // discard the pre-fired cookie and prepareFocus re-queries for the actual
-    // target, which is no worse than before this change.
+    const t1 = utils.monotonicNs();
+
+    // The server grab body below is pure fire-and-forget XCB (focus
+    // transition + reconcile), so no blocking wait ever freezes input while
+    // the grab is held. All decision work — focus-candidate selection and
+    // the FocusTransition prep — runs here, model-local or cache-backed,
+    // BEFORE grabServer so a fast-following keypress is never starved by this
+    // switch (the drop-safety fix).
     const cs = core.getState();
 
-    // X-free model lookup first. take_focus is now cached (see window.zig's
-    // "ICCCM focus property cache" note), so a focus-prep for the fallback
-    // usually needs no round trip at all; only on a rare cache miss do we
-    // pre-fire its WM_PROTOCOLS query so it overlaps the pointer round trip
-    // below, keeping the miss case at a single round trip too.
-    const fallback = model_mod.fallbackFocusCandidate(m, ws_idx);
+    // Keyboard-triggered switch focuses the model's tiered fallback
+    // (newest-first MRU, then reversed tiled_order, then floating) — NO pointer
+    // query. Querying what's under the cursor costs a synchronous round trip
+    // that stalls the single-threaded event loop; a fast-following keypress
+    // (Super+2 immediately after Super+1) waits behind that stall, which is
+    // exactly the "quick workspace switches sometimes don't register" symptom.
+    // A keyboard switch has no pointer gesture to honor, so focus is decided
+    // purely from the model with zero X round trips.
+    const target: ?model_mod.WindowId = model_mod.fallbackFocusCandidate(m, ws_idx);
 
-    // Fire both queries up-front, before draining either (pre-fire only on a
-    // cache miss; the common path is already cached so nothing is wasted).
-    const pointer_cookie = xcb.xcb_query_pointer(cs.conn, cs.root);
-    const pre_protocols_cookie = if (fallback) |fb|
-        (if (window.isInputModelCached(fb)) null else window.fireWMProtocolsQuery(cs.conn, fb))
+    // Pre-fire the fallback's WM_PROTOCOLS query only on a take_focus cache
+    // miss; the common path is cache-backed (see window.zig's "ICCCM focus
+    // property cache" note) so nothing is wasted, and the miss case overlaps
+    // the FocusTransition prep below instead of blocking inline.
+    const pre_protocols_cookie = if (target) |t|
+        (if (window.isInputModelCached(t)) null else window.fireWMProtocolsQuery(cs.conn, t))
     else
         null;
 
-    // Drain the pointer reply, which doubles as the flush that lets the server
-    // process the (parallel) WM_PROTOCOLS query above.
-    const target: ?model_mod.WindowId = blk: {
-        const reply = xcb.xcb_query_pointer_reply(cs.conn, pointer_cookie, null);
-        defer if (reply) |r| std.c.free(r);
-        if (reply) |r| {
-            const child = r.*.child;
-            if (child != 0 and child != cs.root and model_mod.visibleOn(m, child, ws_idx)) {
-                break :blk @as(?model_mod.WindowId, child);
-            }
-        }
-        // Delegate to the model's tiered fallback (newest-first MRU, then
-        // reversed tiled_order, then floating) — same policy as focusFallback.
-        break :blk fallback;
-    };
-
-    // Hand the pre-fired cookie to prepareFocus only when it targets the window
-    // the cookie was fired for; otherwise discard it and let prepareFocus do its
-    // own live query (identical to the pre-pipelining behaviour).
-    const use_prefired = (target != null and target.? == fallback);
     const ft: focus.FocusTransition = blk: {
         if (target) |t| {
             model_mod.setFocus(m, t);
-            break :blk focus_mod.prepareFocus(t, .workspace_switch, if (use_prefired) pre_protocols_cookie else null);
+            break :blk focus_mod.prepareFocus(t, .workspace_switch, pre_protocols_cookie);
         } else {
             window.discardProtocolCookie(cs.conn, pre_protocols_cookie);
             model_mod.clearFocus(m);
             break :blk focus_mod.prepareClearFocus();
         }
     };
-    if (!use_prefired and target != null) window.discardProtocolCookie(cs.conn, pre_protocols_cookie);
+
+    const t2 = utils.monotonicNs();
 
     // Inline the server grab so protocol focus and geometry land atomically
     // (Gap 4 atomicity fix). Only fire-and-forget XCB runs below, so the grab
@@ -830,6 +831,15 @@ pub fn switchTo(ws_idx: u8) void {
 
     // force_restack raises the bar window.
     sync.reconcile(m, c, .{ .force_restack = true });
+
+    const t3 = utils.monotonicNs();
+    debug.info("[TIMING] switchTo ws={}: model={d}us rt_prep={d}us grab_body={d}us total={d}us", .{
+        ws_idx,
+        @as(u64, @intCast(t1 - t0)) / 1000,
+        @as(u64, @intCast(t2 - t1)) / 1000,
+        @as(u64, @intCast(t3 - t2)) / 1000,
+        @as(u64, @intCast(t3 - t0)) / 1000,
+    });
 }
 
 // ------------------------------------------------------- spawn/map lifecycle

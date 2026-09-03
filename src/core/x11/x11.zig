@@ -7,4 +7,8 @@ pub const xcb = @cImport({
     @cInclude("xcb/xcbext.h");
     // Provides randr refresh-rate detection used by scale.zig and bar pacing.
     @cInclude("xcb/randr.h");
+    // Provides xcb_xkb_id for the XKB extension opcode lookup, used to send
+    // XkbSetDetectableAutoRepeat so a held key's autorepeat stops emitting
+    // interleaved KeyRelease (see XkbState.init).
+    @cInclude("xcb/xkb.h");
 });

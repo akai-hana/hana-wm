@@ -207,7 +207,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     // Raise the dragged window immediately outside any server grab (grabFocus
     // has already ungrabAndFlush'd); routed through sync's sanctioned stack
     // primitive + flush so wire stays in sync. Drag ticks keep going flushless
-    // via reconcileNow.
+    // via the targeted dragTick (1 configure, no grab).
     @import("sync").raiseNow(@import("pipeline").grabCtx(), win);
 }
 

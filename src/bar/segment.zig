@@ -511,12 +511,29 @@ pub fn fetchTitlesAndGeoms(
     const has_titles = if (prefetch.titles) |p| p.len >= win_count else false;
     const has_geoms = if (prefetch.geoms) |p| p.len >= win_count else false;
 
+    // Timing instrumentation (title prefetch): separates the async request
+    // fire phase from the blocking reply-collection phases so we can see
+    // where the draw-blocking time actually goes.
+    const bench_fire_start = utils.monotonicNs();
     var batch = WindowDataBatch.init(conn, title_allocator);
     batch.fire(wins, minimized, has_titles, has_geoms);
+    const bench_fire_ns = utils.monotonicNs() - bench_fire_start;
 
     var owned: [max_batch_windows]?[]const u8 = undefined;
+    const bench_collect_start = utils.monotonicNs();
     if (!has_titles)
         batch.fetchTitles(wins, owned[0..win_count]);
+    const bench_collect_ns = utils.monotonicNs() - bench_collect_start;
+
+    std.debug.print(
+        "[titleprefetch] win_count={d} fire={d}us title_collect={d}us total={d}us\n",
+        .{
+            win_count,
+            bench_fire_ns / std.time.ns_per_us,
+            bench_collect_ns / std.time.ns_per_us,
+            (bench_fire_ns + bench_collect_ns) / std.time.ns_per_us,
+        },
+    );
 
     for (wins, 0..) |win, i| {
         out.titles[i] = if (has_titles)
@@ -540,6 +557,159 @@ fn collectPropertyReply(
     defer std.c.free(r);
     return extractPropertyString(r, allocator) catch null;
 }
+
+/// Non-blocking property-reply fetch: polls for the reply and returns it only
+/// if it has ALREADY arrived; otherwise returns null WITHOUT consuming the
+/// cookie (the caller may retry on a later event-loop pass). Uses
+/// xcb_poll_for_reply, which consumes a cookie only when a reply or error was
+/// actually produced, so a null return leaves the request outstanding.
+fn tryPollPropertyReply(conn: core.Connection, cookie: xcb.xcb_get_property_cookie_t) ?*xcb.xcb_get_property_reply_t {
+    var reply: ?*anyopaque = null;
+    var err: ?*xcb.xcb_generic_error_t = null;
+    _ = xcb.xcb_poll_for_reply(conn, cookie.sequence, &reply, &err);
+    if (reply) |r| return @ptrCast(@alignCast(r));
+    if (err) |e| {
+        std.c.free(e);
+        return null;
+    }
+    return null;
+}
+
+/// An asynchronously-fired title/geometry prefetch batch. `fire` issues all
+/// property (+ geometry where the in-process truth cache has no entry) requests
+/// for a window set and flushes them, WITHOUT blocking on any reply, so the
+/// caller can draw the current frame with stale data. `tryCollect` then pulls
+/// the replies on a later event-loop pass once they've arrived.
+///
+/// Readiness gate: X11 delivers one flush batch's replies in request order, so
+/// if the FIRST net_wm reply is available, the rest of the batch (subsequent
+/// net_wm replies and every geometry reply) is already buffered. `tryCollect`
+/// therefore polls the first cookie; only when it is ready does it drain the
+/// whole batch (all non-blocking). A null return leaves the batch untouched
+/// for the next pass.
+pub const PendingPrefetch = struct {
+    conn: core.Connection,
+    allocator: std.mem.Allocator,
+    net_atom: ?u32,
+    utf_type: u32,
+    win_count: usize = 0,
+    net_wm_cookies: [max_batch_windows]xcb.xcb_get_property_cookie_t = undefined,
+    geom_cookies: [max_batch_windows]xcb.xcb_get_geometry_cookie_t = undefined,
+    needs_xcb_geometry: [max_batch_windows]bool = undefined,
+    tiling_geoms: [max_batch_windows]?utils.Rect = undefined,
+
+    pub fn init(conn: core.Connection, allocator: std.mem.Allocator) PendingPrefetch {
+        atoms.ensureResolved();
+        return .{
+            .conn = conn,
+            .allocator = allocator,
+            .net_atom = atoms.net_wm_name,
+            .utf_type = atoms.utf8AtomType(),
+        };
+    }
+
+    /// Fires property (+ fallback geometry) requests for `wins` and flushes so
+    /// the server can reply in the background. The caller renders the frame
+    /// with stale data and calls `tryCollect` on a later pass.
+    pub fn fire(
+        self: *PendingPrefetch,
+        windows: []const u32,
+        minimized: *const std.AutoHashMapUnmanaged(u32, void),
+    ) void {
+        self.win_count = windows.len;
+        for (windows, 0..) |win, i| {
+            self.net_wm_cookies[i] = undefined;
+            if (self.net_atom) |na| {
+                self.net_wm_cookies[i] = xcb.xcb_get_property(self.conn, 0, win, na, self.utf_type, 0, 8192);
+            }
+            self.needs_xcb_geometry[i] = false;
+            self.tiling_geoms[i] = null;
+            if (!minimized.contains(win)) {
+                // LAYERING NOTE: mirrors WindowDataBatch.fire -- reuse the
+                // in-process write-path truth when available; only fall back
+                // to a wire geometry round-trip otherwise.
+                self.tiling_geoms[i] = sync.truthRect(pipeline.model(), win);
+                if (self.tiling_geoms[i] == null) {
+                    self.geom_cookies[i] = xcb.xcb_get_geometry(self.conn, win);
+                    self.needs_xcb_geometry[i] = true;
+                }
+            }
+        }
+        // No explicit flush: the property/geometry requests are sent by the
+        // caller's end-of-event-batch flush right after this bar pass, so the
+        // replies arrive while the WM is back in its event loop (see the
+        // deferred-hydrate flow in bar.refreshTitleData). Issuing xcb_flush
+        // here would trip the bar's no-explicit-flush layering rule.
+    }
+
+    /// Collects the batch into `out`. In `blocking` mode this waits for every
+    /// reply (used on reload/prompt paths that need fresh data immediately);
+    /// otherwise it is non-blocking and returns false (batch untouched, retry
+    /// on a later event-loop pass) until the replies have arrived. Title
+    /// strings are duped into `titles_arena` (the caller's title arena), which
+    /// is reset only on the commit path so stale strings survive a
+    /// not-yet-ready non-blocking return. `minimized` resolves minimized
+    /// windows to the off-screen sentinel.
+    pub fn collect(
+        self: *PendingPrefetch,
+        windows: []const u32,
+        minimized: *const std.AutoHashMapUnmanaged(u32, void),
+        out: FetchedWindows,
+        titles_arena: *std.heap.ArenaAllocator,
+        blocking: bool,
+    ) bool {
+        const win_count = windows.len;
+        std.debug.assert(win_count <= max_batch_windows);
+        std.debug.assert(out.titles.len >= win_count and out.geoms.len >= win_count);
+        const allocator = titles_arena.allocator();
+
+        // Readiness gate (non-blocking only): poll the first net_wm reply
+        // without consuming on a miss. Missing net_atom means no property
+        // request was fired -- nothing to wait on; proceed for geometry only
+        // (mostly the in-process truth cache). Once the gate succeeds the whole
+        // batch is buffered (in-order delivery), so we are committed: only now
+        // reset the arena (freeing stale strings) and re-dup fresh ones.
+        var gate_reply: ?*xcb.xcb_get_property_reply_t = null;
+        if (!blocking and self.net_atom != null and self.win_count > 0) {
+            gate_reply = tryPollPropertyReply(self.conn, self.net_wm_cookies[0]) orelse return false;
+        }
+        defer if (gate_reply) |g| std.c.free(g);
+        _ = titles_arena.reset(.retain_capacity);
+
+        var owned: [max_batch_windows]?[]const u8 = undefined;
+        for (windows, 0..) |win, i| {
+            owned[i] = null;
+            if (self.net_atom != null) {
+                if (i == 0) {
+                    if (gate_reply) |g| {
+                        owned[0] = extractPropertyString(g, allocator) catch null;
+                    }
+                } else if (blocking) {
+                    owned[i] = collectPropertyReply(self.conn, self.net_wm_cookies[i], allocator);
+                } else if (tryPollPropertyReply(self.conn, self.net_wm_cookies[i])) |r| {
+                    defer std.c.free(r);
+                    owned[i] = extractPropertyString(r, allocator) catch null;
+                }
+            }
+            // Rare fallback: a window presenting only the legacy WM_NAME
+            // property. Resolved synchronously regardless of mode (uncommon).
+            if (owned[i] == null and self.net_atom != null) {
+                const fb_cookie = xcb.xcb_get_property(self.conn, 0, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, 0, 8192);
+                owned[i] = collectPropertyReply(self.conn, fb_cookie, allocator);
+            }
+            out.titles[i] = owned[i] orelse "";
+            out.geoms[i] = self.geometryFor(i, minimized.contains(win));
+        }
+        return true;
+    }
+
+    fn geometryFor(self: *const PendingPrefetch, i: usize, minimized: bool) ?utils.Rect {
+        if (minimized) return offscreen_rect;
+        if (self.tiling_geoms[i]) |cached| return cached;
+        if (self.needs_xcb_geometry[i]) return tryCollectGeometryReply(self.conn, self.geom_cookies[i]);
+        return null;
+    }
+};
 
 inline fn titlesNeedFree(snapshot: TitleSnapshot, win_count: usize) bool {
     return snapshot.titles.len < win_count;

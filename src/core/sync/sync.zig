@@ -15,14 +15,19 @@
 //! happen in ACTIONS before they call reconcile; this module never mutates
 //! model params (m is const).
 //!
-//! RECONCILE ALGORITHM - UNCONDITIONAL APPLY. Every pass computes the desired
-//! state for every stored window and SENDS it: parked windows get ONE merged
-//! park request; visible windows replay map -> pixel -> bw -> geometry in
-//! order, with any stacking mode merged into the geometry request itself.
-//! X configure/map requests are idempotent, so replaying full desired state
-//! is drift-proof by construction: a client that mutated its own geometry
-//! behind our back is repaired on the very next pass. No diff cache, no sweep
-//! counter, no staging buffer.
+//! RECONCILE ALGORITHM - UNCONDITIONAL COMPUTE, DELTA SEND. Every pass
+//! computes the desired state for EVERY stored window (so a client that
+//! mutated its own geometry/border behind our back is repaired on the very
+//! next pass -- drift-proof by construction, no diff cache, no sweep counter,
+//! no staging buffer). The SEND is then diffed against the sent ledger: a
+//! request whose desired value matches the last one sent is elided, because
+//! resending an idempotent configure/map/park request is a pure no-op the X
+//! server would discard. Parked windows get ONE merged park request only on
+//! the park transition; visible windows send only the map/pixel/bw/geometry
+//! requests that actually changed, in the order map -> pixel -> bw -> geometry
+//! (stacking mode merged into the geometry request). Sending full desired
+//! state on change is still drift-proofing; we only avoid replaying what the
+//! server already has.
 //!
 //! The SENT LEDGER is a WRITE-ONLY record of what was actually sent
 //! ({rect, has_rect, parked} per window; a park flips `parked` and preserves
@@ -152,11 +157,15 @@ pub const ReconcileOpts = struct { force_restack: bool = false };
 ///     not a sentinel rect: a legitimately placed zero-size window at the
 ///     origin would collide with a "never sent" marker value);
 ///   - rect: the last VISIBLE geometry sent (survives parks);
-///   - parked: whether the latest pass parked it.
+///   - parked: whether the latest pass parked it;
+///   - bw: the last border width sent for a visible window (0 while parked/never);
+///   - pixel: the last border pixel sent for a visible window (0 while parked/never).
 const SentEntry = struct {
     rect: utils.Rect = tiling.parked_rect,
     has_rect: bool = false,
     parked: bool = false,
+    bw: u16 = 0,
+    pixel: u32 = 0,
 };
 
 const empty_mark: usize = std.math.maxInt(usize);
@@ -301,12 +310,75 @@ pub fn forget(win: model.WindowId) void {
     sentSwapRemove(win);
 }
 
+/// Opt-in retile latency instrumentation (RETILE_PROF). Measures the wall
+/// clock held by each server-grab retile -- the exact latency a user feels
+/// across a tiling op -- plus how many store entries were walked (all of
+/// them, since reconcile replays every window's desire each pass). Gated by
+/// `build_options.profile_key` (the same flag as the key-dispatch path) so
+/// release WMs compile it out.
+const retile_prof = struct {
+    const enabled = build_options.profile_key;
+    var count: u64 = 0;
+    var total_ns: i128 = 0;
+    var min_ns: i128 = std.math.maxInt(i128);
+    var max_ns: i128 = 0;
+    const window_size: u64 = 200;
+
+    fn note(ns: i128) void {
+        if (ns < min_ns) min_ns = ns;
+        if (ns > max_ns) max_ns = ns;
+        total_ns += ns;
+        count += 1;
+        if (count >= window_size) flush();
+    }
+
+    fn flush() void {
+        const avg: f64 = @as(f64, @floatFromInt(total_ns)) / @as(f64, @floatFromInt(count));
+        std.log.info("[RETILE_PROF] last {} grab-retiles: avg={d:.0}ns min={d}ns max={d}ns", .{ count, avg, min_ns, max_ns });
+        count = 0;
+        total_ns = 0;
+        min_ns = std.math.maxInt(i128);
+        max_ns = 0;
+    }
+};
+
 pub fn reconcileUnderGrab(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     // grab_server -> reconcile(opts) -> optional top/bar restack ->
     // ungrabAndFlush. Zero round trips inside.
+    const t0: i128 = if (retile_prof.enabled) utils.monotonicNs() else 0;
     ctx.sink.grabServer();
-    defer ctx.sink.ungrabAndFlush();
+    defer {
+        ctx.sink.ungrabAndFlush();
+        if (retile_prof.enabled) retile_prof.note(utils.monotonicNs() - t0);
+    }
     reconcile(m, ctx, opts);
+}
+
+/// Fast-path reconcile for drag ticks: sends ONLY geometry for the dragged
+/// window, skipping all other windows, the tiling compute, and border/map
+/// requests. Safe during a drag because:
+///   - No windows appear/disappear (no map/unmap transitions)
+///   - No focus changes (border color stays the same)
+///   - No tiling layout changes (the dragged window is floating)
+///   - No fullscreen transitions
+///   - The dragged window is already mapped with the correct border
+/// Reduces XCB calls from 4×N (full reconcile) to 1 per tick.
+/// Takes just the Sink (not the full Ctx) because it only sends the dragged
+/// window's geometry — the workarea/env/color machinery is never consulted.
+pub fn reconcileDragTick(m: *const model.Model, sink: Sink, win: model.WindowId) void {
+    const e = m.store.get(win) orelse return;
+    if (e.presence != .present) return;
+    const rect: utils.Rect = switch (e.anchor) {
+        .floating => |r| r,
+        .tiled => return,
+    };
+
+    sink.geom(win, rect, null);
+
+    // Update sent ledger so lastRectFor / toggleFloating see the live position.
+    const gop = sentGetOrPut(win) catch return;
+    if (!gop.found_existing) gop.value_ptr.* = .{};
+    gop.value_ptr.* = .{ .rect = rect, .has_rect = true, .parked = false };
 }
 
 pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
@@ -405,6 +477,24 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         const gop = sentGetOrPut(win) catch null;
         const ledger = (if (gop) |g| g.value_ptr.* else SentEntry{});
 
+        // OFF-WORKSPACE FAST PATH. A window whose desire is PROVABLY parked and
+        // which is ALREADY parked in the sent ledger needs no recompute and no
+        // send this pass: its record is unchanged, and parked windows (offscreen)
+        // have no geometry/border drift to repair, so unconditional compute is
+        // preserved for every window that could actually be visible.
+        //
+        // Every NON-parked desire satisfies `presence == .parked` false AND
+        // `all_view_active or mask has current ws` -- except the fullscreen/covering
+        // winner (fs_win), whose screen ownership can carry it without a current-ws
+        // mask bit. So skipping when those all fail AND it isn't fs_win AND it's
+        // already parked is identity-safe: the full path would derive parked,
+        // elide the park resend (ledger.parked already true), never be a fallback
+        // winner (parked), and rewrite the ledger to the same parked=true.
+        const is_fs = fs_win != null and win == fs_win.?;
+        const on_current = m.all_view_active or (e.mask & model.bit(m.current)) != 0;
+        const definitely_parked_desire = e.presence == .parked or !on_current;
+        if (!is_fs and definitely_parked_desire and ledger.parked) continue;
+
         const desire = computeDesire(m, ctx, e, win, fs_win, &placements, &winner, ledger);
         const rect = desire.rect;
         const bw = desire.bw;
@@ -417,7 +507,12 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
             // so replaying every pass is safe. The ledger's rect deliberately
             // SURVIVES the park so a later all-view orphan resurfaces at its
             // old slot.
-            ctx.sink.park(win);
+            //
+            // Skip the park entirely when the previous pass already parked
+            // this window: the offscreen X + BELOW request is idempotent and
+            // a repeated park is a pure no-op, so dropping it shrinks the
+            // grab's request run without losing any state.
+            if (!ledger.parked) ctx.sink.park(win);
         } else {
             // Raise triggers derive from the ledger (header read 2): the
             // winner rides .above exactly when its geometry moved, when it
@@ -428,10 +523,38 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
             const unpark_transition = last.parked;
             const raise_winner = is_winner and (moved or unpark_transition or opts.force_restack);
 
-            ctx.sink.map(win);
-            ctx.sink.borderPixel(win, pixel);
-            ctx.sink.borderWidth(win, bw);
-            ctx.sink.geom(win, rect, if (raise_winner) .above else null);
+            // Delta-apply: skip any request whose desired value is byte-equal
+            // to the last one SENT (from the ledger). UNCONDITIONAL COMPUTE is
+            // preserved -- every window's desire is still re-derived every
+            // pass, so drift (a client that mutated its own geometry/border
+            // behind our back) is repaired exactly as before, and any request
+            // we DO send is still full desired state. We only elide resends
+            // of a request the server has already seen, which is the dominant
+            // cost of a retile grab (each queued configure/map/property request
+            // the server must process). The skip is never a correctness risk:
+            // an unchanged desire sent again would have been an idempotent
+            // no-op anyway.
+            //
+            // map: needed on first show / on unpark (a parked window's map may
+            // have been withdrawn); skipping it for a window that has stayed
+            // visible in the same rect drops a redundant XMapWindow per pass.
+            // border width/pixel: window attributes that persist on the client;
+            // only resend when the desired value differs from the last sent.
+            // geometry: resend only when the rect changed, it is a first send,
+            // or a raise is owed (raise merges the stack mode into this one
+            // request). Other-wise keep the previous geometry.
+            const need_map = first_send or unpark_transition;
+            const need_bw = !last.has_rect or last.bw != bw;
+            const need_pixel = !last.has_rect or last.pixel != pixel;
+            const need_geom = moved or unpark_transition or raise_winner;
+
+            // Send order preserved from the unconditional path: map -> pixel
+            // -> bw -> geometry (stack merged into that request), so a
+            // first-show/unparking client exposes at its final rect.
+            if (need_map) ctx.sink.map(win);
+            if (need_pixel) ctx.sink.borderPixel(win, pixel);
+            if (need_bw) ctx.sink.borderWidth(win, bw);
+            if (need_geom) ctx.sink.geom(win, rect, if (raise_winner) .above else null);
         }
 
         // Ledger write: record what we actually sent. A park preserves the
@@ -448,7 +571,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         if (parked) {
             g.value_ptr.parked = true;
         } else {
-            g.value_ptr.* = .{ .rect = rect, .has_rect = true, .parked = false };
+            g.value_ptr.* = .{ .rect = rect, .has_rect = true, .parked = false, .bw = bw, .pixel = pixel };
         }
     }
 
@@ -463,7 +586,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
 /// Raise `win` to the top of the stack immediately, then flush. Used by
 /// floating drag-start, where the raise must be visible right away. The caller
 /// owns this invoke OUTSIDE any server grab (a flush under a grab would break
-/// batch atomicity); drag ticks afterward stay flushless (reconcileNow).
+/// batch atomicity); drag ticks afterward stay flushless (reconcileDragTick).
 pub fn raiseNow(ctx: *Ctx, win: model.WindowId) void {
     ctx.sink.stackOnly(win, .above);
     ctx.sink.flush();

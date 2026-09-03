@@ -187,6 +187,10 @@ fn setupGrabs(conn: core.Connection, root: u32) void {
 // Event handlers
 
 pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
+    // Timing: wall-clock from event receipt to the bound action's dispatch.
+    // Compiled out when `build_options.profile_key` is false.
+    const key_t0: i128 = if (key_profile.enabled) utils.monotonicNs() else 0;
+
     focus.setLastEventTime(event.time);
 
     const state = xkb_state orelse {
@@ -214,15 +218,49 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     setKeyHeld(event.detail);
 
     if (matched) |action| {
-        debug.info("[KEY] mods=0x{x} keysym=0x{x} action={s}", .{ mods, keysym, @tagName(action.*) });
+        // Per-key dispatch logs are `.debug` so release WMs (default log
+        // level `.info`) compile them out of the hot path; folding them into
+        // a summary keeps tracing available without per-key formatting+write.
+        debug.debug("[KEY] mods=0x{x} keysym=0x{x} action={s}", .{ mods, keysym, @tagName(action.*) });
+        if (key_profile.enabled) key_profile.note(utils.monotonicNs() - key_t0);
         executeAction(action);
     } else if (mods == 0 and keysym >= masks.modifier_keysym_lo and keysym <= masks.modifier_keysym_hi) {
         // Bare modifier press (Shift/Ctrl/Alt/Super/Hyper L/R): can never
         // match a binding; staying silent keeps logs free of keystroke noise.
     } else {
-        debug.info("[KEY] mods=0x{x} keysym=0x{x} no binding", .{ mods, keysym });
+        debug.debug("[KEY] mods=0x{x} keysym=0x{x} no binding", .{ mods, keysym });
     }
 }
+
+// Key-dispatch latency instrumentation. Measures the wall-clock time from
+// event receipt (entry to handleKeyPress) to the bound action's dispatch,
+// accumulated over a window so a periodic summary can be logged. Gated by
+// `build_options.profile_key` so release WMs compile it out entirely.
+const key_profile = struct {
+    const enabled = build_options.profile_key;
+    var count: u64 = 0;
+    var total_ns: i128 = 0;
+    var min_ns: i128 = std.math.maxInt(i128);
+    var max_ns: i128 = 0;
+    const window_size: u64 = 200;
+
+    fn note(ns: i128) void {
+        if (ns < min_ns) min_ns = ns;
+        if (ns > max_ns) max_ns = ns;
+        total_ns += ns;
+        count += 1;
+        if (count >= window_size) flush();
+    }
+
+    fn flush() void {
+        const avg: f64 = @as(f64, @floatFromInt(total_ns)) / @as(f64, @floatFromInt(count));
+        debug.info("[KPROF] receive->action last {} keys: avg={d:.0}ns min={d}ns max={d}ns", .{ count, avg, min_ns, max_ns });
+        count = 0;
+        total_ns = 0;
+        min_ns = std.math.maxInt(i128);
+        max_ns = 0;
+    }
+};
 
 /// Clears the held-key ledger on KeyRelease; the server reports a grabbed
 /// key's release to the grabbing window, so this is what lets a repeat of the

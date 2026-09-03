@@ -859,9 +859,16 @@ fn fireAdmissionCookies(conn: core.Connection, win: u32) AdmissionCookies {
 /// draining replies sequentially. Firing all five cookies before draining any
 /// lets the X server process them in parallel, saving 2-3 blocking round trips
 /// compared to the previous fire-then-drain-per-property approach.
+///
+/// TIMING (gated by `-Dprofile-key`, mirroring actions.switchTo): measures
+/// MapRequest receipt -> the map queued by the reconcile inside admitWindow.
+/// `drain_us` is the dominant X round-trip (the reply to the first of the
+/// pipelined batch); `after_drain_us` is pure local work (workspace resolve,
+/// model register, reconcile/map). Both are logged once per spawn.
 pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const win = event.window;
     const conn = core.getState().conn;
+    const t0: u64 = if (build_options.profile_key) utils.monotonicNs() else 0;
 
     // Double-manage guard: a window can send multiple MapRequest events (e.g.
     // an unmap+remap race while the first is still processing); without it,
@@ -883,6 +890,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     // The server processes all five requests in parallel while we do pure
     // local bookkeeping below.
     const cookies = fireAdmissionCookies(conn, win);
+    const t_fire: u64 = if (build_options.profile_key) utils.monotonicNs() else 0;
 
     // ----- Drain replies sequentially -----
     const target_ws = resolveTargetWorkspace(current_ws, cookies.c_wm_class, cookies.c_net_wm_pid);
@@ -890,12 +898,24 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
 
     parseSizeHintsIntoCache(win, cookies.normal_hints_cookie);
     populateFocusCacheFromCookies(conn, win, cookies.protocols_cookie, cookies.hints_cookie);
+    const t_drain: u64 = if (build_options.profile_key) utils.monotonicNs() else 0;
 
     // Shared admission policy (MapRequest path). The cookie firing above is
     // specific to the MapRequest event source; everything from here on (the
     // model registration + grabs + child-cache seeding) is identical to the
     // boot-time adoption path, so it lives in admitWindow.
     admitWindow(win, target_ws.index, on_current);
+
+    if (build_options.profile_key) {
+        const t_map = utils.monotonicNs();
+        debug.info("[TIMING] spawn 0x{x}: local={d}us drain={d}us after_drain={d}us total={d}us", .{
+            win,
+            @as(u64, @intCast(t_fire - t0)) / 1000,
+            @as(u64, @intCast(t_drain - t_fire)) / 1000,
+            @as(u64, @intCast(t_map - t_drain)) / 1000,
+            @as(u64, @intCast(t_map - t0)) / 1000,
+        });
+    }
 }
 
 /// Admission policy shared by the MapRequest path (handleMapRequest) and the

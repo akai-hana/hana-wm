@@ -180,7 +180,7 @@ const Fixture = struct {
 
 // -- Spawn -----------------------------------------------------------------
 
-test "spawn: first show replays map/pixel/bw/geom ABOVE; steady state re-sends without raising" {
+test "spawn: first show replays map/pixel/bw/geom ABOVE; steady state delta-sends nothing" {
     var fx: Fixture = undefined;
     fx.init(.{ .x = 0, .y = 0, .width = 800, .height = 600 }, .{ .x = 0, .y = 0, .width = 800, .height = 600 });
     defer fx.deinit();
@@ -199,30 +199,26 @@ test "spawn: first show replays map/pixel/bw/geom ABOVE; steady state re-sends w
     try fx.rec.expectBw(2, 101, cfg_bw);
     try fx.rec.expectGeom(3, 101, 8, 8, 780, 580, .above);
 
-    // Steady state: UNCONDITIONAL replay - same configure every pass, but
-    // NO raise: the winner did not move, did not unpark, no restack pressure
-    // (raising on mere presence re-creates a crossing-event storm).
+    // Steady state: DELTA-send - nothing changed (same rect, bw, pixel, no
+    // raise), so the pass elides the map/pixel/bw/geom resend entirely: the
+    // server already holds this exact desired state. Drift-proofing is
+    // untouched because the desire is still re-computed every pass.
     fx.rec.clear();
     fx.reconcile(.{});
-    try fx.rec.expectLen(4);
-    try fx.rec.expectMap(0, 101);
-    try fx.rec.expectPixel(1, 101, focused_pixel);
-    try fx.rec.expectBw(2, 101, cfg_bw);
-    try fx.rec.expectGeom(3, 101, 8, 8, 780, 580, null);
+    try fx.rec.expectLen(0);
 
-    // force_restack: replay carries the explicit winner raise again.
+    // force_restack: the winner's raise is the ONLY thing that changed, so
+    // just the geometry request carrying the merged ABOVE stack mode is sent
+    // (no redundant map/pixel/bw).
     fx.rec.clear();
     fx.reconcile(.{ .force_restack = true });
-    try fx.rec.expectLen(4);
-    try fx.rec.expectMap(0, 101);
-    try fx.rec.expectPixel(1, 101, focused_pixel);
-    try fx.rec.expectBw(2, 101, cfg_bw);
-    try fx.rec.expectGeom(3, 101, 8, 8, 780, 580, .above);
+    try fx.rec.expectLen(1);
+    try fx.rec.expectGeom(0, 101, 8, 8, 780, 580, .above);
 }
 
 // -- Focus color flip --------------------------------------------------------
 
-test "focus change: both windows fully replayed, only pixels differ, no raise" {
+test "focus change: delta-sends ONLY the two border pixels, no raise" {
     var fx: Fixture = undefined;
     fx.init(stdScreen(), stdWa());
     defer fx.deinit();
@@ -236,18 +232,13 @@ test "focus change: both windows fully replayed, only pixels differ, no raise" {
     fx.rec.clear();
     fx.reconcile(.{});
 
-    // Unconditional apply: BOTH windows replay all four requests in store
-    // order; only the two pixels differ from last pass. No raise on either
-    // window: no motion, no transitions, no restack.
-    try fx.rec.expectLen(8);
-    try fx.rec.expectMap(0, 201);
-    try fx.rec.expectPixel(1, 201, unfocused_pixel);
-    try fx.rec.expectBw(2, 201, cfg_bw);
-    try fx.rec.expectGeom(3, 201, 8, 8, 384, 580, null);
-    try fx.rec.expectMap(4, 202);
-    try fx.rec.expectPixel(5, 202, focused_pixel);
-    try fx.rec.expectBw(6, 202, cfg_bw);
-    try fx.rec.expectGeom(7, 202, 404, 8, 384, 580, null);
+    // Delta-apply: the focus flip only changes the two border PIXELs. Both
+    // windows' rect, border width, and map state are unchanged, so those
+    // requests are elided (resending them would be idempotent no-ops). No
+    // raise on either window: no motion, no transitions, no restack.
+    try fx.rec.expectLen(2);
+    try fx.rec.expectPixel(0, 201, unfocused_pixel);
+    try fx.rec.expectPixel(1, 202, focused_pixel);
 }
 
 // -- Fullscreen enter/exit ---------------------------------------------------
@@ -267,31 +258,30 @@ test "fullscreen enter: winner fullscreened (rect=screen, bw=0), others parked; 
     fx.reconcile(.{ .force_restack = true });
 
     // 301: fullscreen branch -> full-screen rect, bw=0, pixel=0, ABOVE
-    // (force_restack). 302: ONE merged park request.
-    try fx.rec.expectLen(5);
-    try fx.rec.expectMap(0, 301);
-    try fx.rec.expectPixel(1, 301, 0);
-    try fx.rec.expectBw(2, 301, 0);
-    try fx.rec.expectGeom(3, 301, 0, 0, 800, 600, .above);
-    try fx.rec.expectPark(4, 302);
+    // (force_restack). It was visible (not parked) so no map is needed, only
+    // the three changed attributes (pixel, bw, geom+raise). 302: ONE merged
+    // park request on the park transition.
+    try fx.rec.expectLen(4);
+    try fx.rec.expectPixel(0, 301, 0);
+    try fx.rec.expectBw(1, 301, 0);
+    try fx.rec.expectGeom(2, 301, 0, 0, 800, 600, .above);
+    try fx.rec.expectPark(3, 302);
 
     _ = fullscreen.toggleFullscreen(&fx.m, 301);
     fx.rec.clear();
     fx.reconcile(.{});
 
-    // Exit restores width AND pixel. 301: moved off the
-    // screen-sized fullscreen slot => winner raise merged. 302: unparked =>
-    // map + appearance + geometry replay at its surviving slot (stack null:
-    // not moved, not the winner).
-    try fx.rec.expectLen(8);
-    try fx.rec.expectMap(0, 301);
-    try fx.rec.expectPixel(1, 301, focused_pixel);
-    try fx.rec.expectBw(2, 301, cfg_bw);
-    try fx.rec.expectGeom(3, 301, 8, 8, 384, 580, .above);
-    try fx.rec.expectMap(4, 302);
-    try fx.rec.expectPixel(5, 302, unfocused_pixel);
-    try fx.rec.expectBw(6, 302, cfg_bw);
-    try fx.rec.expectGeom(7, 302, 404, 8, 384, 580, null);
+    // Exit restores width AND pixel. 301: moved off the screen-sized
+    // fullscreen slot => pixel + bw + geom with the winner raise merged (no
+    // map: it was never parked). 302: unparked => map + geometry replay at
+    // its surviving slot (stack null: not moved, not the winner; its pixel/bw
+    // were preserved across the park, so only map+geom are needed).
+    try fx.rec.expectLen(5);
+    try fx.rec.expectPixel(0, 301, focused_pixel);
+    try fx.rec.expectBw(1, 301, cfg_bw);
+    try fx.rec.expectGeom(2, 301, 8, 8, 384, 580, .above);
+    try fx.rec.expectMap(3, 302);
+    try fx.rec.expectGeom(4, 302, 404, 8, 384, 580, null);
 }
 
 test "fullscreen enter keeps sibling geometry, only repositions it off-screen" {
@@ -316,28 +306,25 @@ test "fullscreen enter keeps sibling geometry, only repositions it off-screen" {
     // 501 owns the screen. 502 receives ONLY the single merged park request —
     // NO width/height/pixel/bw replay: the sibling's geometry (size + Y) is
     // preserved, only its X is pushed off-screen by park. This is the
-    // "keep geometry, positioned off-screen" fullscreen behavior.
-    try fx.rec.expectLen(5);
-    try fx.rec.expectMap(0, 501);
-    try fx.rec.expectPixel(1, 501, 0);
-    try fx.rec.expectBw(2, 501, 0);
-    try fx.rec.expectGeom(3, 501, 0, 0, 800, 600, .above);
-    try fx.rec.expectPark(4, 502);
+    // "keep geometry, positioned off-screen" fullscreen behavior. 501 (was
+    // visible, not parked) sends only its three changed attributes.
+    try fx.rec.expectLen(4);
+    try fx.rec.expectPixel(0, 501, 0);
+    try fx.rec.expectBw(1, 501, 0);
+    try fx.rec.expectGeom(2, 501, 0, 0, 800, 600, .above);
+    try fx.rec.expectPark(3, 502);
 
     // Exiting fullscreen replays 502 at its ORIGINAL geometry — identical
     // size and position, so the sibling never visibly resizes.
     _ = fullscreen.toggleFullscreen(&fx.m, 501);
     fx.rec.clear();
     fx.reconcile(.{});
-    try fx.rec.expectLen(8);
-    try fx.rec.expectMap(0, 501);
-    try fx.rec.expectPixel(1, 501, focused_pixel);
-    try fx.rec.expectBw(2, 501, cfg_bw);
-    try fx.rec.expectGeom(3, 501, 8, 8, 384, 580, .above);
-    try fx.rec.expectMap(4, 502);
-    try fx.rec.expectPixel(5, 502, unfocused_pixel);
-    try fx.rec.expectBw(6, 502, cfg_bw);
-    try fx.rec.expectGeom(7, 502, 404, 8, 384, 580, null);
+    try fx.rec.expectLen(5);
+    try fx.rec.expectPixel(0, 501, focused_pixel);
+    try fx.rec.expectBw(1, 501, cfg_bw);
+    try fx.rec.expectGeom(2, 501, 8, 8, 384, 580, .above);
+    try fx.rec.expectMap(3, 502);
+    try fx.rec.expectGeom(4, 502, 404, 8, 384, 580, null);
 }
 
 // -- Park / unpark ------------------------------------------------------------
@@ -354,43 +341,34 @@ test "minimize parks every pass; restore replays original slot geometry" {
 
     minimize.minimize(&fx.m, 402) catch unreachable;
     // Minimizing the stack window also grows 401 to full master width
-    // (moved => winner ABOVE); 402 emits ONE merged park request.
+    // (moved => winner ABOVE); 402 emits ONE merged park request. 401 (was
+    // visible, not parked) sends only its changed geometry+raise; its
+    // map/pixel/bw are unchanged so those are elided.
     fx.rec.clear();
     fx.reconcile(.{});
-    try fx.rec.expectLen(5);
-    try fx.rec.expectMap(0, 401);
-    try fx.rec.expectPixel(1, 401, focused_pixel);
-    try fx.rec.expectBw(2, 401, cfg_bw);
-    try fx.rec.expectGeom(3, 401, 8, 8, 780, 580, .above);
-    try fx.rec.expectPark(4, 402);
+    try fx.rec.expectLen(2);
+    try fx.rec.expectGeom(0, 401, 8, 8, 780, 580, .above);
+    try fx.rec.expectPark(1, 402);
 
-    // Idempotent pass while minimized: 401 replays unchanged (no raise),
-    // 402's park REPLAYS too (unconditional apply; a park request is just an
-    // idempotent configure, so re-sending it is safe and repairs drift).
+    // Idempotent pass while minimized: 401 is byte-identical to the last
+    // sent state (delta-sends nothing), and 402 is already parked so its park
+    // transition request is also elided. The pass emits ZERO wire requests but
+    // still re-computes every desire (drift-proofing preserved).
     fx.rec.clear();
     fx.reconcile(.{});
-    try fx.rec.expectLen(5);
-    try fx.rec.expectMap(0, 401);
-    try fx.rec.expectPixel(1, 401, focused_pixel);
-    try fx.rec.expectBw(2, 401, cfg_bw);
-    try fx.rec.expectGeom(3, 401, 8, 8, 780, 580, null);
-    try fx.rec.expectPark(4, 402);
+    try fx.rec.expectLen(0);
 
-    // Restore: 401 shrinks back (moved => winner ABOVE); 402 unparks: map +
-    // appearance + geometry at its surviving slot rect (not winner, rect did
-    // not move => no raise, stack null).
+    // Restore: 401 shrinks back (moved => winner ABOVE, geometry-only send);
+    // 402 unparks: map + geometry at its surviving slot rect (pixel/bw were
+    // preserved across the park, so only map+geom are needed; not winner,
+    // rect did not move => no raise, stack null).
     minimize.restore(&fx.m, 402);
     fx.rec.clear();
     fx.reconcile(.{});
-    try fx.rec.expectLen(8);
-    try fx.rec.expectMap(0, 401);
-    try fx.rec.expectPixel(1, 401, focused_pixel);
-    try fx.rec.expectBw(2, 401, cfg_bw);
-    try fx.rec.expectGeom(3, 401, 8, 8, 384, 580, .above);
-    try fx.rec.expectMap(4, 402);
-    try fx.rec.expectPixel(5, 402, unfocused_pixel);
-    try fx.rec.expectBw(6, 402, cfg_bw);
-    try fx.rec.expectGeom(7, 402, 404, 8, 384, 580, null);
+    try fx.rec.expectLen(3);
+    try fx.rec.expectGeom(0, 401, 8, 8, 384, 580, .above);
+    try fx.rec.expectMap(1, 402);
+    try fx.rec.expectGeom(2, 402, 404, 8, 384, 580, null);
 }
 
 // -- Fullscreen -> minimize -> restore -> un-fullscreen (user bug report) ----
@@ -411,51 +389,47 @@ test "fs->min->restore->unfs retiles instead of stranding an orphan" {
     fx.reconcile(.{}); // baseline tiled: both placed
 
     // Enter fullscreen: 601 takes the screen (rect=screen, bw=0, pixel=0,
-    // ABOVE under force_restack), 602 parks.
+    // ABOVE under force_restack), 602 parks. 601 (was visible, not parked)
+    // sends only its three changed attributes.
     _ = fullscreen.toggleFullscreen(&fx.m, 601);
     fx.rec.clear();
     fx.reconcile(.{ .force_restack = true });
-    try fx.rec.expectLen(5);
-    try fx.rec.expectMap(0, 601);
-    try fx.rec.expectPixel(1, 601, 0);
-    try fx.rec.expectBw(2, 601, 0);
-    try fx.rec.expectGeom(3, 601, 0, 0, 800, 600, .above);
-    try fx.rec.expectPark(4, 602);
+    try fx.rec.expectLen(4);
+    try fx.rec.expectPixel(0, 601, 0);
+    try fx.rec.expectBw(1, 601, 0);
+    try fx.rec.expectGeom(2, 601, 0, 0, 800, 600, .above);
+    try fx.rec.expectPark(3, 602);
 
     // Minimize FROM fullscreen: 601 parks (its fullscreen record is stored
-    // inside prev) - parked windows emit ONLY the one merged park request.
+    // inside prev) - the park transition emits ONE merged park request.
     // 602 - parked by the fullscreen enter - UNPARKS into the full master
     // slot as the fallback winner (m.focused is still 601, but its desire is
-    // parked): unpark transition => map+appearance+geometry replay, raise
-    // merged (the rect moved too).
+    // parked): unpark transition => map + geometry (raise merged: the rect
+    // moved too); its pixel/bw were preserved across the park.
     try minimize.minimize(&fx.m, 601);
     fx.rec.clear();
     fx.reconcile(.{});
-    try fx.rec.expectLen(5);
+    try fx.rec.expectLen(3);
     try fx.rec.expectPark(0, 601);
     try fx.rec.expectMap(1, 602);
-    try fx.rec.expectPixel(2, 602, unfocused_pixel);
-    try fx.rec.expectBw(3, 602, cfg_bw);
-    try fx.rec.expectGeom(4, 602, 8, 8, 780, 580, .above);
+    try fx.rec.expectGeom(2, 602, 8, 8, 780, 580, .above);
 
     // Restore: straight back into fullscreen. 601 replays the
-    // fullscreen branch riding its unpark transition (.above); 602 -
-    // unparked by the minimize step - parks AGAIN behind the returning
-    // fullscreen occupant.
+    // fullscreen branch riding its unpark transition (map + geom with .above
+    // merged; bw/pixel were already 0 from before). 602 - unparked by the
+    // minimize step - parks AGAIN behind the returning fullscreen occupant.
     minimize.restore(&fx.m, 601);
     fx.rec.clear();
     fx.reconcile(.{});
-    try fx.rec.expectLen(5);
+    try fx.rec.expectLen(3);
     try fx.rec.expectMap(0, 601);
-    try fx.rec.expectPixel(1, 601, 0);
-    try fx.rec.expectBw(2, 601, 0);
-    try fx.rec.expectGeom(3, 601, 0, 0, 800, 600, .above);
-    try fx.rec.expectPark(4, 602);
+    try fx.rec.expectGeom(1, 601, 0, 0, 800, 600, .above);
+    try fx.rec.expectPark(2, 602);
 
     // THE REGRESSION GATE - leave fullscreen. 601 must come back TILED at
     // its master slot (384x580 @ 8,8, winner ABOVE: moved off the screen
-    // rect). 602 unparks into its surviving stack slot with the full
-    // map+appearance+geometry replay (stack null: not the winner).
+    // rect). 602 unparks into its surviving stack slot (map + geometry; the
+    // pixel/bw were preserved across the park).
     // Pre-fix this emitted NO geometry for 601 at all: the orphan branch
     // kept the stale 800x600 fullscreen rect while 602 wrongly kept the
     // full-width master rect - an engine-invisible, untileable window.
@@ -463,15 +437,12 @@ test "fs->min->restore->unfs retiles instead of stranding an orphan" {
     fx.rec.clear();
     fx.reconcile(.{});
     try testing.expectEqual(@as(model.WSId, 0), model.findHome(&fx.m, 601).?);
-    try fx.rec.expectLen(8);
-    try fx.rec.expectMap(0, 601);
-    try fx.rec.expectPixel(1, 601, focused_pixel);
-    try fx.rec.expectBw(2, 601, cfg_bw);
-    try fx.rec.expectGeom(3, 601, 8, 8, 384, 580, .above);
-    try fx.rec.expectMap(4, 602);
-    try fx.rec.expectPixel(5, 602, unfocused_pixel);
-    try fx.rec.expectBw(6, 602, cfg_bw);
-    try fx.rec.expectGeom(7, 602, 404, 8, 384, 580, null);
+    try fx.rec.expectLen(5);
+    try fx.rec.expectPixel(0, 601, focused_pixel);
+    try fx.rec.expectBw(1, 601, cfg_bw);
+    try fx.rec.expectGeom(2, 601, 8, 8, 384, 580, .above);
+    try fx.rec.expectMap(3, 602);
+    try fx.rec.expectGeom(4, 602, 404, 8, 384, 580, null);
 }
 
 // -- Workspace switch (wire shape) -------------------------------------------
