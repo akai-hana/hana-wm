@@ -216,6 +216,78 @@ test "bench: reconcile pass (50 windows)" {
     std.debug.print("[bench] reconcile (50 wins): {d:.1} ns/pass\n", .{per_pass_ns});
 }
 
+test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
+    // Compares the per-motion-event latency of the drag path BEFORE (a full
+    // reconcile over every window) vs AFTER (a targeted reconcileDragTick that
+    // sends only the dragged window's geometry).
+    var m = makeModel();
+    for (0..50) |i| {
+        model.register(&m, @intCast(i + 1), 0) catch unreachable;
+    }
+    model.setFocus(&m, 25);
+
+    // Float window 50 so it participates in the drag fast path.
+    const dragged: WindowId = 50;
+    const e = m.store.getPtr(dragged).?;
+    e.anchor = .{ .floating = .{ .x = 100, .y = 100, .width = 300, .height = 200 } };
+
+    sync.init();
+    defer sync.deinit();
+
+    var recorder = BenchRecorder{};
+    const screen: utils.Rect = .{ .x = 0, .y = 0, .width = 1920, .height = 1080 };
+    var ctx: sync.Ctx = .{
+        .sink = recorder.sink(),
+        .screen = screen,
+        .workarea = screen,
+        .cfg_bw = 2,
+        .color_of = testColor,
+        .env = .{ .margins = .{ .gap = 8, .border = 2 }, .min_dim = 50 },
+    };
+
+    // Warm once so the sent ledger is seeded (steady-state drag).
+    sync.reconcile(&m, &ctx, .{});
+
+    const iterations: usize = 100_000;
+
+    // AFTER: targeted reconcileDragTick
+    const t2 = nowNs();
+    for (0..iterations) |_| {
+        const e2 = m.store.getPtr(dragged).?;
+        switch (e2.anchor) {
+            .floating => |*r| {
+                r.x +%= 1;
+                r.y +%= 1;
+            },
+            .tiled => unreachable,
+        }
+        sync.reconcileDragTick(&m, recorder.sink(), dragged);
+    }
+    const elapsed2 = nowNs() - t2;
+    const per_tick_ns = @as(f64, @floatFromInt(elapsed2)) / @as(f64, @floatFromInt(iterations));
+
+    // BEFORE: full reconcile (what reconcileNow did on every drag tick)
+    const t1 = nowNs();
+    for (0..iterations) |_| {
+        const e1 = m.store.getPtr(dragged).?;
+        switch (e1.anchor) {
+            .floating => |*r| {
+                r.x +%= 1;
+                r.y +%= 1;
+            },
+            .tiled => unreachable,
+        }
+        sync.reconcile(&m, &ctx, .{});
+    }
+    const elapsed1 = nowNs() - t1;
+    const per_full_ns = @as(f64, @floatFromInt(elapsed1)) / @as(f64, @floatFromInt(iterations));
+
+    std.debug.print(
+        "[drag] full reconcile (50 wins): {d:.1} ns/tick; targeted reconcileDragTick: {d:.1} ns/tick; speedup {d:.1}x\n",
+        .{ per_full_ns, per_tick_ns, per_full_ns / per_tick_ns },
+    );
+}
+
 test "bench: register (50 wins, home_ws cache setup)" {
     const iterations: usize = 10_000;
     const t0 = nowNs();

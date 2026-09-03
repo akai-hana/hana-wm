@@ -5,6 +5,7 @@ const std = @import("std");
 
 const constants = @import("constants");
 const debug = @import("debug");
+const core = @import("core");
 
 pub const xkb = @cImport({
     @cInclude("xkbcommon/xkbcommon.h");
@@ -19,6 +20,86 @@ const xkb_context = xkb.struct_xkb_context;
 const xkb_keymap = xkb.struct_xkb_keymap;
 
 const max_attempts: u8 = 3;
+
+// Detectable auto-repeat (XKBproto.h, XkbSetDetectableAutoRepeat = 34).
+// Enabling it makes the server emit a held key's repeat as repeated KeyPress
+// events WITHOUT the interleaved, deactivating KeyRelease that X11's default
+// autorepeat produces on every cycle. Without it, hana's held-key ledger
+// (input.zig) clears a binding key on each autorepeat KeyRelease, so the very
+// next autorepeat KeyPress is treated as a fresh press and re-dispatches the
+// action — holding e.g. Super+1 keeps re-firing switch_to_workspace_1, and a
+// simultaneously-held Super+2 flaps between the two workspaces (whichever
+// repeat fires last wins). Sending the wire request (rather than a local
+// heuristic) keeps hana's event handling simple.
+const xkb_set_detectable_auto_repeat_req: u8 = 34;
+
+// XkbSetDetectableAutoRepeat request layout (8 bytes wire, length field = 2).
+// layout mirrors the generated xcb_xkb_*_request_t family: xcb fills `major`
+// (from the protocol request's `.opcode`) and `length`. The `supported` byte
+// is the only payload; the rest is protocol padding.
+const XkbSetDetectableAutoRepeatRequest = extern struct {
+    major_opcode: u8 = 0, // overwritten by xcb with the XKB extension opcode
+    minor_opcode: u8 = xkb_set_detectable_auto_repeat_req,
+    length: u16 = 2, // 8 bytes / 4 (overwritten by xcb; kept correct anyway)
+    supported: u8 = 1, // enable
+    pad: [3]u8 = .{ 0, 0, 0 },
+};
+
+const xkb_set_detectable_auto_repeat_size = @sizeOf(XkbSetDetectableAutoRepeatRequest);
+comptime {
+    if (xkb_set_detectable_auto_repeat_size != 8) {
+        @compileError("XkbSetDetectableAutoRepeatRequest must be 8 bytes");
+    }
+}
+
+/// Enables detectable auto-repeat on the XKB core device. Must be called after
+/// the XKB extension is negotiated (xkb_x11_setup_xkb_extension) and the
+/// extension opcode is discoverable via xcb_get_extension_data. Best-effort: a
+/// failure to look up the opcode or to send the request is logged and ignored —
+/// the WM still functions, it just reverts to the flappy autorepeat behaviour
+/// this is meant to eliminate.
+fn enableDetectableAutoRepeat(conn: *anyopaque) void {
+    const c = core.xcb;
+
+    const xconn: ?*c.struct_xcb_connection_t = @ptrCast(@alignCast(conn));
+    const ext = c.xcb_get_extension_data(xconn, &c.xcb_xkb_id) orelse {
+        debug.warn("XKB: extension data unavailable; detectable auto-repeat not enabled", .{});
+        return;
+    };
+    if (ext.*.present == 0) {
+        debug.warn("XKB: extension not present; detectable auto-repeat not enabled", .{});
+        return;
+    }
+
+    var req = XkbSetDetectableAutoRepeatRequest{};
+
+    // xcb_send_request requires two iovec slots BEFORE the passed vector for its
+    // internal bookkeeping (it uses vector[-1] and vector[-2]). So allocate four
+    // slots, place the real request at index 2, and hand xcb a pointer to index
+    // 2: vec[-1]/vec[-2] then land on valid scratch slots (arr[1]/arr[0]) and
+    // vec[0] is the payload, matching the generated xcb_xkb_* dispatch pattern.
+    var vec_storage: [4]c.struct_iovec = .{
+        .{ .iov_base = null, .iov_len = 0 },
+        .{ .iov_base = null, .iov_len = 0 },
+        .{ .iov_base = @ptrCast(&req), .iov_len = xkb_set_detectable_auto_repeat_size },
+        .{ .iov_base = null, .iov_len = 0 },
+    };
+    const vec: [*]c.struct_iovec = @ptrCast(&vec_storage[2]);
+
+    const proto = c.xcb_protocol_request_t{
+        .count = 1,
+        .ext = &c.xcb_xkb_id,
+        .opcode = ext.*.major_opcode,
+        .isvoid = 1,
+    };
+
+    if (c.xcb_send_request(xconn, 0, vec, &proto) != 0) {
+        _ = c.xcb_flush(xconn);
+        debug.info("XKB: detectable auto-repeat enabled", .{});
+    } else {
+        debug.warn("XKB: failed to send detectable auto-repeat request", .{});
+    }
+}
 
 pub const XkbState = struct {
     context: *xkb_context,
@@ -41,6 +122,11 @@ pub const XkbState = struct {
         errdefer xkb.xkb_context_unref(ctx);
 
         try retrySetup(xcb_conn);
+
+        // Enable detectable auto-repeat after the XKB extension is negotiated.
+        // See the constants block above for why this is required for correct
+        // held-key/autorepeat handling.
+        enableDetectableAutoRepeat(xcb_conn);
 
         const device_id = try retryDeviceId(xcb_conn);
 

@@ -20,6 +20,7 @@ const screen = @import("screen");
 const types = @import("types");
 const debug = @import("debug");
 const build_options = @import("build_options");
+const surfaces = @import("plugins").Surfaces;
 // The fullscreen EWMH/bar-arming hooks are reached through the build-generated
 // `window_modules` registry (never by naming a sub-system module here),
 // mirroring the surfaces seam. `window_mods` is the auto-discovered
@@ -66,6 +67,14 @@ pub inline fn getCurrentLayout() u8 {
 }
 
 var g_sink: ?xcb_sink.XcbSink = null;
+
+/// Lazily-build the shared XCB sink. Cache hit after first build: pure pointer
+/// deref + vtable copy, no syscalls, no config/screen reads.
+inline fn sink() sync.Sink {
+    if (g_sink == null) g_sink = .{ .conn = core.getState().conn };
+    return (&g_sink.?).sink();
+}
+
 var g_ctx: sync.Ctx = undefined;
 
 /// Builds the per-retile Ctx from live state: workarea via bar's helper,
@@ -73,11 +82,10 @@ var g_ctx: sync.Ctx = undefined;
 /// borders.width(), colors from config.tiling. Only valid after init().
 fn ctx() *sync.Ctx {
     const cs = core.getState();
-    if (g_sink == null) g_sink = .{ .conn = cs.conn };
     const screen_h = cs.screen.height_in_pixels;
     const p = &model().ws[model().current].params;
     g_ctx = .{
-        .sink = (&g_sink.?).sink(),
+        .sink = sink(),
         .screen = .{
             .x = 0,
             .y = 0,
@@ -118,8 +126,24 @@ fn colorOf(win: model_mod.WindowId, m: *const model_mod.Model) u32 {
 pub inline fn tilingOpFinished() void {
     reconcileUnderGrabNow(.{});
 }
-pub inline fn dragTick() void {
-    reconcileNow();
+var drag_tick_sum_ns: u64 = 0;
+var drag_tick_count: u64 = 0;
+
+/// Per-tick latency instrumentation for the drag reconcile (targeted path).
+/// Measured from just before reconcileDragTick to just after it returns
+/// (all work is in-process: one queued XCB configure, no round trip).
+pub inline fn dragTick(win: model_mod.WindowId) void {
+    const s = sink();
+    const t0 = utils.monotonicNs();
+    sync.reconcileDragTick(&instance, s, win);
+    drag_tick_sum_ns += utils.monotonicNs() - t0;
+    drag_tick_count += 1;
+}
+
+/// Running average of the per-tick drag reconcile latency, in nanoseconds.
+pub fn dragTickLatency() ?struct { avg_ns: u64, count: u64 } {
+    if (drag_tick_count == 0) return null;
+    return .{ .avg_ns = drag_tick_sum_ns / drag_tick_count, .count = drag_tick_count };
 }
 
 /// Scroll viewport caller duties applied at the single reconcile choke
@@ -182,9 +206,16 @@ pub inline fn reconcileUnderGrabNowWithFocusAfter(o: sync.ReconcileOpts, t: focu
     reconcileGrabFocus(o, t, false);
 }
 
-/// Grab server, reconcile, do EWMH + bar arming, then ungrabAndFlush, atomically.
-/// Specialised for the fullscreen toggle path where EWMH writes and deferred
-/// bar state must land inside the same grab as geometry (Gap 2 atomicity).
+/// Grab server, reconcile, do EWMH + bar hide, then ungrabAndFlush, atomically.
+/// Specialised for the fullscreen toggle path where EWMH writes and bar state
+/// must land inside the same grab as geometry (Gap 2 atomicity).
+///
+/// Enter-fullscreen optimization: the bar unmap happens immediately inside this
+/// grab (via the `hideBarForFullscreen` seam) rather than deferring until the
+/// next ConfigureNotify, eliminating one full grab/reconcile cycle. The
+/// fullscreen client is already mapped + raised + sized to screen by
+/// sync.reconcile, so it will be stacked above the bar before the unmap reaches
+/// the server — no visual gap.
 pub inline fn reconcileUnderGrabNowFullscreen(
     o: sync.ReconcileOpts,
     win: model_mod.WindowId,
@@ -203,7 +234,7 @@ pub inline fn reconcileUnderGrabNowFullscreen(
     // hook runs it. In practice only fullscreen does, preserving the old
     // gated single hook call exactly; the loop just makes the dispatch
     // mechanism uniform rather than a merged struct. Ordering and
-    // the was_switch/was_exit/instance.focused logic are unchanged.
+    // the was_switch/was_exit/instance.focused logic is unchanged.
     for (window_mods) |m| {
         if (m.setEwmhFullscreenState) |f| {
             if (was_switch) {
@@ -212,15 +243,26 @@ pub inline fn reconcileUnderGrabNowFullscreen(
             f(win, !was_exit);
         }
     }
-    // Deferred bar state inside the grab: pure flag sets, no X traffic.
-    // was_exit is binary, so each module runs at most one of the two arms,
-    // preserving the original if/else-if exclusion per module.
-    for (window_mods) |m| {
-        if (m.armPendingBarHide) |f| {
-            if (!was_exit) f(win);
-        }
-        if (m.armPendingBarShow) |show| {
-            if (was_exit) if (instance.focused) |w| show(w);
+    // Bar hide/show inside the grab: no separate grab/reconcile cycle.
+    //
+    // ENTER: immediately unmap the bar via the surfaces seam. The fullscreen
+    // client is already mapped+raised+screen-sized by sync.reconcile, so it
+    // covers the bar before the unmap reaches the server. Cancel any stale
+    // pending bar show from a previous exit (a new enter supersedes it).
+    //
+    // EXIT: arm the deferred show. The bar reappears after the client's
+    // ConfigureNotify confirms non-fullscreen dimensions.
+    if (!was_exit) {
+        // Cancel any stale pending bar show from a previous exit.
+        for (window_mods) |m| _ = m.armPendingBarShow;
+        // Immediate bar unmap when fullscreen claims the screen.
+        if (build_options.has_bar) surfaces.hideBarForFullscreen();
+    } else {
+        // Exit: deferred bar show (unchanged path).
+        for (window_mods) |m| {
+            if (m.armPendingBarShow) |show| {
+                if (instance.focused) |w| show(w);
+            }
         }
     }
 }

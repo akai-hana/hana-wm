@@ -69,6 +69,14 @@ wire_allowed() {
         # grab-drop flush. These are documented non-mutations, not Rule-1 sends.
         src/core/refresh.zig|src/core/events.zig|src/bar/modules/prompt/prompt.zig) ;;
 
+        # One-shot XKB detectable-autorepeat enablement at startup.
+        # xkbcommon.zig queues the XkbSetDetectableAutoRepeat request (an XKB
+        # control, once, at init -- not a per-window geometry/border/map
+        # mutation) and does a bare xcb_flush to push it out. The flush matched
+        # by pat1 is the only symbol in this file that trips the guard, and it
+        # is exactly the documented non-mutation flush category.
+        src/input/xkbcommon.zig) ;;
+
         *) return 1 ;;
     esac
     return 0

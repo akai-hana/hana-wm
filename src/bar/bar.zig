@@ -197,6 +197,12 @@ const Bar = struct {
     /// XCB property reads; cleared after the first draw so the next event
     /// batch picks up fresh titles.
     skip_title_refetch: bool = false,
+    /// Set when title text data has actually changed (property-notify on the
+    /// focused window). The batched title/geometry refetch is only needed
+    /// when the WINDOW SET changed (fetch_dirty) or title data changed
+    /// (this flag), not on every `force` redraw. Expose-only redraws are
+    /// pixel-only and skip the blocking XCB property reads.
+    title_data_changed: bool = false,
 };
 
 // PATTERN: Module-global state with explicit init/deinit lifecycle.
@@ -325,6 +331,12 @@ const State = struct {
     titles_buf: [max_frame_windows][]const u8 = undefined,
     geoms_buf: [max_frame_windows]?utils.Rect = undefined,
     fetched_len: usize = 0,
+    /// An in-flight asynchronously-fired title/geometry prefetch. When set,
+    /// the current frame is drawn with the last-fetched (stale) titles/geoms
+    /// and the batch's replies are collected on a later event-loop pass (see
+    /// refreshTitleData/commitPendingPrefetch). Null when no fetch is
+    /// outstanding.
+    pending_prefetch: ?segmod.PendingPrefetch = null,
     focused_title: std.ArrayListUnmanaged(u8) = .empty,
     /// Window the focused_title buffer was fetched for (null = never/stale).
     focused_title_window: ?u32 = null,
@@ -618,30 +630,140 @@ const State = struct {
         return changed;
     }
 
-    /// Refreshes title data: the focused window's title (one buffered
-    /// property read, only when focus moved or forced) and the batched
-    /// per-window titles/geometries (only when the fetch key changed or
-    /// forced). Everything else reuses the scratch from the last fetch.
-    fn refreshTitleData(self: *State) void {
+    /// Refreshes title data: the focused window's title and the batched
+    /// per-window titles/geometries (only when the window set changed).
+    /// The batch refetch is async on the normal draw path: `fireAsyncPrefetch`
+    /// sends the property/geometry requests and flushes without blocking, so
+    /// the frame that follows a window-set change draws with the previous
+    /// (stale) data and hydrates one event-loop pass later (when the replies
+    /// have arrived). `force` (reload/prompt) instead blocks for fresh data
+    /// synchronously. When the focused window is part of the current
+    /// workspace's window set, its title is reused from the batch instead of a
+    /// standalone fetch (saves 1-2 blocking round-trips); a standalone property
+    /// read is only used when focus is on another workspace or the window is
+    /// not batched.
+    fn refreshTitleData(self: *State, force: bool) void {
         if (gBar.skip_title_refetch) {
             gBar.skip_title_refetch = false;
             return;
         }
 
         const alloc = self.render.allocator;
+        const bench_start = utils.monotonicNs();
 
-        const fw = focus.getFocused();
-        if (fw != self.focused_title_window or gBar.force) {
-            self.focused_title.clearRetainingCapacity();
-            if (fw) |w| segmod.fetchWindowTitleInto(self.win.conn, w, &self.focused_title, alloc) catch {};
-            self.focused_title_window = fw;
+        // Commit any in-flight async prefetch whose replies have arrived
+        // (non-blocking on the normal path; forced on reload/prompt paths).
+        if (self.pending_prefetch != null) self.commitPendingPrefetch(force);
+
+        // Start a fetch when the window set changed and none is in flight.
+        if (self.fetch_dirty and self.pending_prefetch == null) {
+            if (force) {
+                self.refetchBatchedTitleData();
+            } else {
+                _ = self.fireAsyncPrefetch();
+            }
+        }
+        self.fetch_dirty = false;
+
+        // Focused-title resolution is deferred while the batched prefetch is
+        // still in flight: on the fire frame the batch's replies have not
+        // landed (and that frame is not rendered anyway), and on the commit
+        // frame the fresh batch covers the newly-focused window, so the title
+        // is taken from the batch instead of a standalone blocking round-trip.
+        // `title_data_changed` is preserved so a rename isn't dropped while a
+        // fetch is outstanding; it's cleared once we actually resolve.
+        if (self.pending_prefetch == null) {
+            const fw = focus.getFocused();
+            if (fw) |f| {
+                if (!(fw == self.focused_title_window and !gBar.title_data_changed)) {
+                    // Focused title data is stale (focus moved or renamed): resolve.
+                    var resolved = false;
+                    if (self.fetched_len > 0) {
+                        for (self.wins[0..self.wins_len], 0..) |w, i| {
+                            if (w == f and i < self.fetched_len) {
+                                // Reuse the batched title for this window (already
+                                // fetched for this or a prior frame): no redundant
+                                // standalone property round-trip.
+                                self.focused_title.clearRetainingCapacity();
+                                self.focused_title.appendSlice(alloc, self.titles_buf[i]) catch {};
+                                self.focused_title_window = fw;
+                                resolved = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!resolved) {
+                        self.focused_title.clearRetainingCapacity();
+                        segmod.fetchWindowTitleInto(self.win.conn, f, &self.focused_title, alloc) catch {};
+                        self.focused_title_window = fw;
+                    }
+                }
+            } else {
+                self.focused_title_window = null;
+            }
+            gBar.title_data_changed = false;
         }
 
-        if (gBar.force or self.fetch_dirty) self.refetchBatchedTitleData();
-        self.fetch_dirty = false;
+        const bench_ns = utils.monotonicNs() - bench_start;
+        if (bench_ns > 0) {
+            std.debug.print(
+                "[titleprefetch] refreshTitleData={d}us wins={d} force={} pending={}\n",
+                .{ bench_ns / std.time.ns_per_us, self.wins_len, force, self.pending_prefetch != null },
+            );
+        }
     }
 
-    /// Re-runs the batched title/geometry prefetch into the scratch buffers.
+    /// Fires the batched title/geometry prefetch asynchronously: issues all
+    /// property (+ missing-truth geometry) requests, flushes them, and records
+    /// the batch on `pending_prefetch` WITHOUT waiting for any reply. The
+    /// current frame keeps the previous (stale) titles/geoms; `commitPendingPrefetch`
+    /// hydrates them once the replies arrive. Returns true when a batch was
+    /// fired, false when there was nothing to prefetch (empty window set).
+    fn fireAsyncPrefetch(self: *State) bool {
+        if (self.wins_len == 0) {
+            self.fetched_len = 0;
+            return false;
+        }
+        var pb = segmod.PendingPrefetch.init(self.win.conn, self.render.allocator);
+        pb.fire(self.wins[0..self.wins_len], &self.minimized);
+        self.pending_prefetch = pb;
+        return true;
+    }
+
+    /// Collects the outstanding async prefetch into the scratch buffers. On
+    /// the normal path this is non-blocking -- if the replies have not arrived
+    /// yet the batch stays in flight and the frame keeps stale data; on the
+    /// force path it blocks until the replies arrive (reload/prompt need fresh
+    /// data immediately). On a successful commit, `fetched_len` advances,
+    /// `pending_prefetch` clears, and the bar is flagged dirty so the next
+    /// updateIfDirty pass renders with the fresh data.
+    fn commitPendingPrefetch(self: *State, force: bool) void {
+        const pb = &self.pending_prefetch.?;
+        if (pb.collect(
+            self.wins[0..self.wins_len],
+            &self.minimized,
+            .{
+                .titles = self.titles_buf[0..self.wins_len],
+                .geoms = self.geoms_buf[0..self.wins_len],
+            },
+            &self.titles_arena,
+            force,
+        )) {
+            self.fetched_len = self.wins_len;
+            self.pending_prefetch = null;
+            // Pad failed live geometry replies with the off-screen sentinel so
+            // a dead window sorts last instead of vanishing from the split view.
+            for (self.geoms_buf[0..self.fetched_len]) |*g| {
+                if (g.* == null) g.* = segmod.offscreen_rect;
+            }
+            // A normal-path commit happened outside a render: schedule the
+            // fresh frame (the current render was deferred on fire).
+            if (!force) self.is_dirty = true;
+        }
+    }
+
+    /// Re-runs the batched title/geometry prefetch into the scratch buffers,
+    /// blocking for the replies (used on the reload/prompt force paths).
     /// One dupe per title, ~2 round-trips total, zero blocking waits beyond
     /// those replies themselves (see segmod.fetchTitlesAndGeoms).
     fn refetchBatchedTitleData(self: *State) void {
@@ -896,7 +1018,22 @@ fn performDraw() void {
     if (!s.is_visible) return;
     if (gBar.force) s.markAllSegmentsDirty();
     s.fetch_dirty = s.scanLiveFrame();
-    s.refreshTitleData();
+    s.refreshTitleData(gBar.force);
+
+    // Async title/geometry prefetch deferral: when a window-set change fired a
+    // fetch just now (pending_prefetch set, not a force/reload path), the
+    // freshly-needed data does not exist yet -- the title/geometry batch is in
+    // flight across the wire. Rather than render a stale frame (which would
+    // force the title segment's gather to block on a synchronous refetch of
+    // the very requests still outstanding), skip this frame's render entirely.
+    // The replies arrive on the socket, the event loop wakes, the following
+    // updateIfDirty pass commits the prefetch (see commitPendingPrefetch,
+    // which flags is_dirty) and renders one fresh frame. The bar simply holds
+    // its previous pixels for one event batch -- no blocking, no stale titles.
+    if (s.pending_prefetch != null and !gBar.force) {
+        return;
+    }
+
     var ctx = segmod.DrawCtx{
         .dc = s.render.dc,
         .config = s.render.config,
@@ -1264,6 +1401,19 @@ pub fn updateBarVisibilityForWorkspace(ws: u8) void {
     debug.info("Bar {s} for workspace {}", .{ if (should_be_visible) "shown" else "hidden", ws });
 }
 
+/// Immediately unmaps the bar and updates the screen claim, without a
+/// separate reconcile. Called from the fullscreen-enter grab so the bar
+/// disappears atomically with the fullscreen geometry. No-ops when the bar
+/// is already hidden or not initialised.
+pub fn hideBarForFullscreen() void {
+    const s = gBar.state orelse return;
+    if (!s.is_visible) return;
+    s.is_visible = false;
+    const conn = core.getState().conn;
+    _ = xcb.xcb_unmap_window(conn, s.win.win_id);
+    syncScreenClaim();
+}
+
 /// Reacts to a change in core's fullscreen-occupancy fact: recomputes whether
 /// the bar must be hidden to share the screen with a fullscreen window on the
 /// current workspace, then maps/unmaps and updates the screen claim. Core owns
@@ -1296,6 +1446,13 @@ pub fn applyFullscreenVisibility() void {
 
 pub fn updateIfDirty() !void {
     const s = gBar.state orelse return;
+
+    // Commit any in-flight async title/geometry prefetch before deciding
+    // whether to draw. This runs on every socket-readable wake, so the moment
+    // the batch's replies land, the fresh data is committed and flagged dirty
+    // (see commitPendingPrefetch) -- no blocking, and independent of whether a
+    // revision also changed.
+    if (s.pending_prefetch != null) s.commitPendingPrefetch(false);
 
     // Fullscreen-occupancy reaction runs even when the bar is currently hidden
     // (it may need to become visible again on fullscreen exit). Diff the core
@@ -1397,6 +1554,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
         // Renamed focused window: force the title data refetch on the next
         // draw (the fetch key alone wouldn't notice a text-only change).
         gBar.force = true;
+        gBar.title_data_changed = true;
         s.markDirtySource(.focus);
     }
 }
@@ -1495,6 +1653,7 @@ pub const surfaces = @import("plugin").Surfaces{
     .isBarWindow = isBarWindow,
     .handleButtonPress = handleButtonPress,
     .setBarState = setBarState,
+    .hideBarForFullscreen = hideBarForFullscreen,
     .updateBarVisibilityForWorkspace = updateBarVisibilityForWorkspace,
     .toggleBarSegmentAnchor = toggleBarSegmentAnchor,
     .chromeToggleOverlay = chromeToggleOverlay,

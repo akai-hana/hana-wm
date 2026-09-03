@@ -29,6 +29,11 @@ pub inline fn warn(comptime fmt: []const u8, args: anytype) void {
 pub inline fn info(comptime fmt: []const u8, args: anytype) void {
     log(std.log.info, fmt, moduleFromSrc(@src()), args);
 }
+/// Compile-out-gated verbose trace: empty under the default `.info` log level
+/// (ReleaseFast), so hot-path per-event logging costs nothing in production.
+pub inline fn debug(comptime fmt: []const u8, args: anytype) void {
+    log(std.log.debug, fmt, moduleFromSrc(@src()), args);
+}
 
 /// Log a structured error with an optional window ID for context.
 /// Use this as the canonical pattern for operation failures:
