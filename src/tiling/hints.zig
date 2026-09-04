@@ -22,35 +22,34 @@ pub fn applyHints(rect: utils.Rect, h: model.SizeHints) utils.Rect {
 
     // min_aspect = h/w lower bound, max_aspect = w/h upper bound (dwm
     // convention); cross-multiplied to avoid FP division per retile.
-    //
-    // The aspect clamp recomputes from scratch and can land off the increment
-    // grid (e.g. PResizeInc + PAspect on a terminal); re-snapping afterward
-    // floors to the grid without exceeding max_width/height.
     if (h.min_aspect > 0.0 and h.max_aspect > 0.0) {
         const fw: f32 = @floatFromInt(width);
         const fh: f32 = @floatFromInt(height);
         if (fw > fh * h.max_aspect) {
-            // Clamp the float-derived dimension to u16 range before the
-            // narrowing cast: a misbehaving client can declare a huge
-            // max_aspect (e.g. 1e6), and @intFromFloat out of range would
-            // panic/UB instead of being capped by the later max_width min.
-            const aspect_w: u16 = @intFromFloat(@min(@round(fh * h.max_aspect), @as(f32, std.math.maxInt(u16))));
+            // Clamp to u16 range before narrowing so a huge max_aspect caps.
+            const aspect_w: u16 = @intFromFloat(
+                @min(@round(fh * h.max_aspect), @as(f32, std.math.maxInt(u16))),
+            );
             width = snapDimToIncrement(aspect_w, 0, h.inc_width);
             if (h.max_width > 0) width = @min(width, h.max_width);
         } else if (fh > fw * h.min_aspect) {
-            const aspect_h: u16 = @intFromFloat(@min(@round(fw * h.min_aspect), @as(f32, std.math.maxInt(u16))));
+            const aspect_h: u16 = @intFromFloat(
+                @min(@round(fw * h.min_aspect), @as(f32, std.math.maxInt(u16))),
+            );
             height = snapDimToIncrement(aspect_h, 0, h.inc_height);
             if (h.max_height > 0) height = @min(height, h.max_height);
         }
     }
 
     // Centre the (possibly shrunk) window inside its allocated slot.
-    // Saturating: every clamp above only shrinks, but a future path that
-    // lets w exceed the slot must degrade to dx=0, not panic in release-safe
-    // (identical for all current flows).
     const dx: i16 = @intCast((rect.width -| width) / 2);
     const dy: i16 = @intCast((rect.height -| height) / 2);
-    return .{ .x = rect.x + dx, .y = rect.y + dy, .width = width, .height = height };
+    return .{
+        .x = rect.x + dx,
+        .y = rect.y + dy,
+        .width = width,
+        .height = height,
+    };
 }
 
 /// Snap `dim` down to the nearest multiple of `inc` above `base`.

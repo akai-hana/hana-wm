@@ -13,13 +13,11 @@ pub const min_master_width: f32 = 0.05;
 /// bound (tiling.zig's local `max_master_width_ratio` used to duplicate it).
 pub const max_master_width: f32 = 0.95;
 
-/// Maximum number of concurrently minimized windows.
-///
-/// Sourced from the minimize module's `max_minimized`; the effective value is
-/// this fallback of 32. Hoisted here so the model layer can reach it without importing
-/// build_options (model layer rule: std + utils + constants ONLY).
-/// Intentionally distinct from Limits.max_tiled_windows: this bounds the
-/// concurrently-minimized buffer, not the tiled-window pool.
+/// Maximum number of concurrently minimized windows. Hoisted from the minimize
+/// module's `max_minimized` so the model layer (which may import only std +
+/// utils + constants) can reach it without build_options. Distinct from
+/// Limits.max_tiled_windows: this bounds the minimized-window buffer, not the
+/// tiled-window pool.
 pub const max_minimized: usize = 32;
 
 // XKB retry parameters

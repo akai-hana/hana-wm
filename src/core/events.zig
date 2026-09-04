@@ -22,19 +22,13 @@ const actions = @import("actions");
 const restart = @import("restart");
 const persist = @import("persist");
 const build_options = @import("build_options");
-// Core's reach into the compiled-in chrome surface (the bar) lives in the
-// `surfaces` composition root, not here. `surfaces` is the bar's hook set
-// when present, and the comptime `null` type when absent, so every
-// `if (build_options.has_bar)` call below compiles away. This file never
-// names the bar module directly. The `build_options` import stays for the
-// `has_bar` compile-time guards used below.
+// The bar's hook set lives in the `surfaces` composition root (comptime `null`
+// when absent), so every `if (build_options.has_bar)` call below compiles away.
 const surfaces = @import("plugins").Surfaces;
-// Window sub-system event hooks (pending bar hide/show, destroy handling)
-// are reached through the build-generated `window_modules` registry (never
-// by naming a sub-system module directly), the same seam discipline as
-// `surfaces` above. `window_mods` is the auto-discovered `[N]WindowModule`
-// array; absent modules aren't in it, so the uniform loops below no-op for a
-// tree without a given sub-system.
+// Window sub-system event hooks are reached through the build-generated
+// `window_modules` registry; `window_mods` is the auto-discovered
+// `[N]WindowModule` array, and the uniform loops below no-op for a tree
+// without a given sub-system.
 const window_mods = @import("window_modules").modules;
 
 const fd_xcb = 0;
@@ -64,9 +58,15 @@ const EventHandler = *const fn (event: *anyopaque) void;
 inline fn asHandler(comptime f: anytype) EventHandler {
     const info = @typeInfo(@TypeOf(f)).@"fn";
     if (info.params.len != 1)
-        @compileError("event handler must take exactly one parameter, got " ++ @typeName(@TypeOf(f)));
+        @compileError(
+            "event handler must take exactly one parameter, got " ++
+                @typeName(@TypeOf(f)),
+        );
     if (info.params[0].type == null or @typeInfo(info.params[0].type.?) != .pointer)
-        @compileError("event handler's parameter must be a single-item pointer, got " ++ @typeName(@TypeOf(f)));
+        @compileError(
+            "event handler's parameter must be a single-item pointer, got " ++
+                @typeName(@TypeOf(f)),
+        );
     if (info.return_type != void)
         @compileError("event handler must return void, got " ++ @typeName(@TypeOf(f)));
     return @ptrCast(&f);
@@ -191,7 +191,10 @@ fn fillGrabCookies(cookies: []CookieEntry) usize {
         // Check once per keybinding that the full lock-modifier set fits.
         // Avoids a per-lock branch and prevents partial grabs if the buffer is nearly full.
         if (n + masks.lock_modifiers.len > cookies.len) {
-            debug.warn("Too many keybindings. Increase max_keybind_cookies (currently {})", .{constants.Limits.max_keybind_cookies});
+            debug.warn(
+                "Too many keybindings. Increase max_keybind_cookies (currently {})",
+                .{constants.Limits.max_keybind_cookies},
+            );
             break;
         }
 
@@ -411,7 +414,8 @@ fn handleXcbEvents() void {
     // spawn queue entry.
     @import("spawn").drainPendingSpawns();
 
-    if (build_options.has_bar) surfaces.updateIfDirty() catch |err| debug.err("Bar post-batch update failed: {}", .{err});
+    if (build_options.has_bar)
+        surfaces.updateIfDirty() catch |err| debug.err("Bar post-batch update failed: {}", .{err});
     focus.drainPendingConfirm();
     focus.drainPointerSync();
     // Must run after the event-draining loop above: any EnterNotify a tiling
@@ -500,6 +504,7 @@ pub fn run() !void {
         // event dispatch, never mid-batch.
         refresh.runPendingRedetect(cs.conn);
 
-        if (build_options.has_bar) _ = surfaces.updateClock(); // return value reserved, currently unused
+        // Return value reserved, currently unused.
+        if (build_options.has_bar) _ = surfaces.updateClock();
     }
 }

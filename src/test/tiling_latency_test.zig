@@ -1,7 +1,7 @@
 //! Timing/instrumentation for the TILING LAYOUT OPERATION path (retile).
 //!
 //! Question: when a tiling action runs (layout switch, variant change, width
-//! adjust, swap master, focus next/prev), how much latency does the 
+//! adjust, swap master, focus next/prev), how much latency does the
 //! server-grab reconcile add, and how does it scale with window count?
 //!
 //! Every tiling op routes through actions -> pipeline.reconcileUnderGrabNow

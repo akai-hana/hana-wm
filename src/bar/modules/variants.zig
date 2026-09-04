@@ -61,11 +61,23 @@ fn getIndicator() []const u8 {
 
 /// Returns the updated x position after drawing the segment, or the original
 /// start_x when tiling is disabled or no indicator is available.
-pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
+pub fn draw(
+    dc: *drawing.DrawContext,
+    config: types.BarConfig,
+    height: u16,
+    start_x: u16,
+) !u16 {
     const indicator = getIndicator();
     var end_x = start_x;
     if (indicator.len != 0) {
-        end_x = try dc.drawSegment(start_x, height, indicator, config.scaledSegmentPadding(height), config.bg, config.fg);
+        end_x = try dc.drawSegment(
+            start_x,
+            height,
+            indicator,
+            config.scaledSegmentPadding(height),
+            config.bg,
+            config.fg,
+        );
     }
     const new_width = end_x - start_x;
     // The row is laid out with the PREVIOUS frame's reservation; if this draw
@@ -89,7 +101,14 @@ fn drawHook(ctx: *anyopaque, x: u16) !u16 {
     return draw(c.dc, c.config, c.height, x);
 }
 
-fn onClickHook(_: u16, left: bool, _: bool, _: *anyopaque, _: *const fn (*anyopaque, u16) void, redraw: *const fn () void) bool {
+fn onClickHook(
+    _: u16,
+    left: bool,
+    _: bool,
+    _: *anyopaque,
+    _: *const fn (*anyopaque, u16) void,
+    redraw: *const fn () void,
+) bool {
     actions.stepVariantDir(if (left) 1 else -1);
     redraw();
     return true;

@@ -2,33 +2,40 @@
 //! Loads, parses, and validates TOML config files.
 
 const std = @import("std");
-const core = @import("core");
-const types = @import("types");
+const build_options = @import("build_options");
 const constants = @import("constants");
-const masks = @import("masks");
+const core = @import("core");
 const debug = @import("debug");
-const xkbcommon = @import("xkbcommon");
+const masks = @import("masks");
 const parser = @import("parser");
 const schema = @import("schema");
-const build_options = @import("build_options");
+const types = @import("types");
 const utils = @import("utils");
+const xkbcommon = @import("xkbcommon");
 
 /// Validates a 1-based workspace number, warn-and-skip when outside 1..255 or
-/// exceeding `max` (the workspace count, or constants.max_workspaces, the
-/// hard ceiling behind workspaces.zig's fixed-size tables) at parse time.
+/// exceeding `max` (the workspace count / constants.max_workspaces ceiling).
 fn checkWorkspaceBound(ws_1based: usize, context: []const u8, max: usize) bool {
     if (ws_1based < 1 or ws_1based > constants.max_workspace_number_1based) {
         debug.warn("{s}: workspace {} out of range, skipping", .{ context, ws_1based });
         return false;
     }
     if (ws_1based > max) {
-        debug.warn("{s}: workspace {} exceeds the {}-workspace limit, skipping", .{ context, ws_1based, max });
+        debug.warn(
+            "{s}: workspace {} exceeds the {}-workspace limit, skipping",
+            .{ context, ws_1based, max },
+        );
         return false;
     }
     return true;
 }
 
-fn addRule(allocator: std.mem.Allocator, cfg: *types.Config, class_name: []const u8, ws_num: usize) !void {
+fn addRule(
+    allocator: std.mem.Allocator,
+    cfg: *types.Config,
+    class_name: []const u8,
+    ws_num: usize,
+) !void {
     try cfg.workspaces.rules.append(allocator, .{
         .class_name = try allocator.dupe(u8, class_name),
         .workspace = @intCast(ws_num - 1),
@@ -145,11 +152,17 @@ fn tryParseTomlFile(allocator: std.mem.Allocator, path: []const u8) ?parser.Docu
     return doc;
 }
 
-/// Merges files listed in `include = [...]` from `src_doc` into `dst`; `dir_path` is the base for relative paths.
-/// Includes resolve one level deep only: an included file's own `include` is
-/// skipped, keeping the graph cycle-free by construction (no cycle-detection
-/// machinery) at the cost of no chained includes.
-fn processIncludes(allocator: std.mem.Allocator, dst: *parser.Document, src_doc: *parser.Document, dir_path: []const u8) !void {
+/// Merges files listed in `include = [...]` from `src_doc` into `dst`;
+/// `dir_path` is the base for relative paths. Includes resolve one level deep
+/// only: an included file's own `include` is skipped, keeping the graph
+/// cycle-free by construction (no cycle-detection machinery) at the cost of
+/// no chained includes.
+fn processIncludes(
+    allocator: std.mem.Allocator,
+    dst: *parser.Document,
+    src_doc: *parser.Document,
+    dir_path: []const u8,
+) !void {
     // The `include` key is copied into `dst` by mergeDocumentsInto, so mark it
     // consumed there as well: otherwise warnUnconsumed would flag it as a typo.
     dst.root.markConsumed("include");
@@ -240,8 +253,8 @@ fn tryLoadConfig(allocator: std.mem.Allocator, path: []const u8) ?types.Config {
     };
 }
 
-/// Loads config in priority order: (1) ~/.config/hana/, (2) ./config/, (3) ~/.config/hana/config.toml,
-/// (4) ./config.toml, (5) embedded fallback.
+/// Loads config in priority order: (1) ~/.config/hana/, (2) ./config/,
+/// (3) ~/.config/hana/config.toml, (4) ./config.toml, (5) embedded fallback.
 pub fn loadConfigDefault(allocator: std.mem.Allocator) !types.Config {
     const home = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "/";
     const xdg_config_home = std.c.getenv("XDG_CONFIG_HOME");
@@ -267,7 +280,7 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator) !types.Config {
     for (dir_attempts) |dir| {
         if (loadConfigFromDir(allocator, dir)) |cfg| return cfg else |err| switch (err) {
             error.FileNotFound, error.NotDir => {}, // Expected: missing or directory
-            else => std.log.warn("Config load error from {s}: {}", .{ dir, err }),
+            else => debug.warn("Config load error from {s}: {}", .{ dir, err }),
         }
     }
 
@@ -298,7 +311,15 @@ pub fn validate(cfg: *const types.Config) !void {
     if (mw.is_percentage) {
         const mw_ratio: f32 = utils.scaling.asRatio(mw);
         if (mw_ratio < constants.min_master_width or mw_ratio > constants.max_master_width) {
-            debug.err("Invalid config: master_width {d:.0}% out of [{d:.0}%, {d:.0}%], keeping old", .{ mw_ratio * 100.0, constants.min_master_width * 100.0, constants.max_master_width * 100.0 });
+            debug.err(
+                "Invalid config: master_width {d:.0}% out of " ++
+                    "[{d:.0}%, {d:.0}%], keeping old",
+                .{
+                    mw_ratio * 100.0,
+                    constants.min_master_width * 100.0,
+                    constants.max_master_width * 100.0,
+                },
+            );
             return error.InvalidConfig;
         }
     } else if (mw.value < 0.0) {
@@ -462,7 +483,8 @@ const action_map: std.StaticStringMap(types.Action) = blk: {
     }
     for (action_aliases) |a| {
         for (kvs[0..n]) |kv| {
-            if (std.mem.eql(u8, kv[0], a.key)) @compileError("alias shadows an Action tag name: " ++ a.key);
+            if (std.mem.eql(u8, kv[0], a.key))
+                @compileError("alias shadows an Action tag name: " ++ a.key);
         }
         kvs[n] = .{ a.key, @field(types.Action, @tagName(a.tag)) };
         n += 1;
@@ -489,14 +511,65 @@ fn singleGlobEntry(allocator: std.mem.Allocator, key: []const u8) ![]GlobEntry {
     return e;
 }
 
+/// Appends one expanded entry for a plain (non-range) comma token, enforcing
+/// `max_glob_expansion`. The token is substituted verbatim into the key.
+fn appendExpandedEntry(
+    allocator: std.mem.Allocator,
+    entries: *std.ArrayList(GlobEntry),
+    prefix: []const u8,
+    suffix: []const u8,
+    token: []const u8,
+) !void {
+    if (entries.items.len >= max_glob_expansion) return;
+    try entries.append(allocator, .{
+        .key = try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ prefix, token, suffix }),
+        .ws_idx = @intCast(entries.items.len + 1),
+        .owned = true,
+    });
+}
+
+/// Expands a single-char range token (e.g. "1-4"), appending one entry per
+/// char, enforcing `max_glob_expansion`. A descending range is skipped with a
+/// warning rather than expanded.
+fn expandRangeToken(
+    allocator: std.mem.Allocator,
+    entries: *std.ArrayList(GlobEntry),
+    key_pattern: []const u8,
+    prefix: []const u8,
+    suffix: []const u8,
+    t: []const u8,
+) !void {
+    var ch = t[0];
+    const end = t[2];
+    if (ch > end) {
+        debug.warn(
+            "Keybind glob '{s}': descending range '{c}-{c}', skipping",
+            .{ key_pattern, ch, end },
+        );
+        return;
+    }
+    while (ch <= end) : (ch += 1) {
+        if (entries.items.len >= max_glob_expansion) break;
+        try entries.append(allocator, .{
+            .key = try std.fmt.allocPrint(allocator, "{s}{c}{s}", .{ prefix, ch, suffix }),
+            .ws_idx = @intCast(entries.items.len + 1),
+            .owned = true,
+        });
+    }
+}
+
 /// Expands `{...}` glob patterns in a keybind key (e.g. `Mod+{1-4,Q}` -> 5 entries,
 /// comma-separated tokens and single-char ranges supported).  Workspace actions get a
 /// 1-based index appended; other actions are replicated unchanged.
 /// Returns a single unowned entry when no glob is present.
 fn expandGlobKeys(allocator: std.mem.Allocator, key_pattern: []const u8) ![]GlobEntry {
-    const lbrace = std.mem.indexOfScalar(u8, key_pattern, '{') orelse return singleGlobEntry(allocator, key_pattern);
+    const lbrace = std.mem.indexOfScalar(u8, key_pattern, '{') orelse
+        return singleGlobEntry(allocator, key_pattern);
     const rbrace = std.mem.indexOfScalarPos(u8, key_pattern, lbrace + 1, '}') orelse {
-        debug.warn("Keybind glob missing closing '}}\' in '{s}', treating as literal", .{key_pattern});
+        debug.warn(
+            "Keybind glob missing closing '}}\' in '{s}', treating as literal",
+            .{key_pattern},
+        );
         return singleGlobEntry(allocator, key_pattern);
     };
     const prefix = key_pattern[0..lbrace];
@@ -514,27 +587,9 @@ fn expandGlobKeys(allocator: std.mem.Allocator, key_pattern: []const u8) ![]Glob
         const t = std.mem.trim(u8, token, " \t");
         if (t.len == 0) continue;
         if (t.len == 3 and t[1] == '-') {
-            var ch = t[0];
-            const end = t[2];
-            if (ch > end) {
-                debug.warn("Keybind glob '{s}': descending range '{c}-{c}', skipping", .{ key_pattern, ch, end });
-                continue;
-            }
-            while (ch <= end) : (ch += 1) {
-                if (entries.items.len >= max_glob_expansion) break;
-                try entries.append(allocator, .{
-                    .key = try std.fmt.allocPrint(allocator, "{s}{c}{s}", .{ prefix, ch, suffix }),
-                    .ws_idx = @intCast(entries.items.len + 1),
-                    .owned = true,
-                });
-            }
+            try expandRangeToken(allocator, &entries, key_pattern, prefix, suffix, t);
         } else {
-            if (entries.items.len >= max_glob_expansion) break;
-            try entries.append(allocator, .{
-                .key = try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ prefix, t, suffix }),
-                .ws_idx = @intCast(entries.items.len + 1),
-                .owned = true,
-            });
+            try appendExpandedEntry(allocator, &entries, prefix, suffix, t);
         }
     }
     if (entries.items.len == 0) {
@@ -548,7 +603,12 @@ const workspace_action_bases = std.StaticStringMap(void).initComptime(.{
     .{ "workspace", {} }, .{ "move_to_workspace", {} }, .{ "toggle_tag", {} },
 });
 
-fn resolveAndParseAction(allocator: std.mem.Allocator, cmd: []const u8, ws_idx: u16, kill_placeholder: ?[]const u8) !types.Action {
+fn resolveAndParseAction(
+    allocator: std.mem.Allocator,
+    cmd: []const u8,
+    ws_idx: u16,
+    kill_placeholder: ?[]const u8,
+) !types.Action {
     const ws_str: ?[]u8 = if (ws_idx > 0 and workspace_action_bases.has(cmd))
         try std.fmt.allocPrint(allocator, "{s}_{d}", .{ cmd, ws_idx })
     else
@@ -610,7 +670,11 @@ fn actionFromValue(
 /// Resolves the `Mod+` placeholder in a keybind key: when `mod_placeholder` is
 /// set and the key starts with `mod+` (case-insensitive), substitutes the real
 /// modifier. Otherwise returns the key unchanged (no allocation).
-fn resolveModPlaceholder(allocator: std.mem.Allocator, key: []const u8, mod_placeholder: ?[]const u8) ![]const u8 {
+fn resolveModPlaceholder(
+    allocator: std.mem.Allocator,
+    key: []const u8,
+    mod_placeholder: ?[]const u8,
+) ![]const u8 {
     if (mod_placeholder) |mod| {
         if (std.ascii.startsWithIgnoreCase(key, "mod+")) {
             return try std.fmt.allocPrint(allocator, "{s}+{s}", .{ mod, key["mod+".len..] });
@@ -642,9 +706,15 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *t
             allocator.free(glob_entries);
         }
         for (glob_entries) |ge| {
-            const keybind_str: []const u8 = try resolveModPlaceholder(allocator, ge.key, mod_placeholder);
+            const keybind_str: []const u8 =
+                try resolveModPlaceholder(allocator, ge.key, mod_placeholder);
             defer if (keybind_str.ptr != ge.key.ptr) allocator.free(keybind_str);
-            const action = try actionFromValue(allocator, entry.value, ge.ws_idx, kill_placeholder) orelse continue;
+            const action = try actionFromValue(
+                allocator,
+                entry.value,
+                ge.ws_idx,
+                kill_placeholder,
+            ) orelse continue;
             const bind = parseBindString(keybind_str) catch |err| {
                 debug.warn("Failed to parse keybind '{s}': {}", .{ keybind_str, err });
                 continue;
@@ -701,7 +771,10 @@ fn parseBindString(str: []const u8) !BindResult {
         if (keysym != null) return error.AmbiguousBinding;
         return .{ .mouse = .{ .modifiers = modifiers, .button = b } };
     }
-    return .{ .keyboard = .{ .modifiers = modifiers, .keysym = keysym orelse return error.NoKeysym } };
+    return .{ .keyboard = .{
+        .modifiers = modifiers,
+        .keysym = keysym orelse return error.NoKeysym,
+    } };
 }
 
 fn keyNameToKeysym(name: []const u8) !u32 {
@@ -709,7 +782,10 @@ fn keyNameToKeysym(name: []const u8) !u32 {
     var buf: [64]u8 = undefined;
     @memcpy(buf[0..name.len], name);
     buf[name.len] = 0;
-    const keysym = xkbcommon.xkb_keysym_from_name(@ptrCast(&buf), xkbcommon.xkb_keysym_case_insensitive);
+    const keysym = xkbcommon.xkb_keysym_from_name(
+        @ptrCast(&buf),
+        xkbcommon.xkb_keysym_case_insensitive,
+    );
     return if (keysym == xkbcommon.XKB_KEY_NoSymbol) error.UnknownKeyName else keysym;
 }
 
@@ -754,7 +830,8 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !types.Action {
     // resembling a built-in action is almost always a typo, and running it as
     // an exec (which fails or does nothing) hides the mistake, so warn.
     if (looksLikeActionWord(cmd))
-        debug.warn("Unrecognized action '{s}': running it as an exec command: check the spelling (action names are matched exactly)", .{cmd});
+        debug.warn("Unrecognized action '{s}': running it as an exec command: " ++
+            "check the spelling (action names are matched exactly)", .{cmd});
     return .{ .exec = try allocator.dupe(u8, cmd) };
 }
 
@@ -773,7 +850,11 @@ pub inline fn lookupKeybinding(mods: u16, keysym: u32) ?*const types.Action {
 }
 
 /// Canonical startup/reload entry point: load, validate, resolve keybindings, finalize.
-pub fn load(allocator: std.mem.Allocator, screen: core.Screen, xkb_state: *xkbcommon.XkbState) !types.Config {
+pub fn load(
+    allocator: std.mem.Allocator,
+    screen: core.Screen,
+    xkb_state: *xkbcommon.XkbState,
+) !types.Config {
     var cfg = try loadConfigDefault(allocator);
     errdefer cfg.deinit(allocator);
     try validate(&cfg);
@@ -790,7 +871,8 @@ pub fn load(allocator: std.mem.Allocator, screen: core.Screen, xkb_state: *xkbco
 /// unchanged otherwise; never allocates, and the returned slice aliases the
 /// input whenever it is not the canonical literal.
 pub fn canonicalLayoutName(name: []const u8) []const u8 {
-    if (std.ascii.eqlIgnoreCase(name, "master-stack") or std.ascii.eqlIgnoreCase(name, "master_stack"))
+    if (std.ascii.eqlIgnoreCase(name, "master-stack") or
+        std.ascii.eqlIgnoreCase(name, "master_stack"))
         return "master";
     return name;
 }
@@ -800,7 +882,11 @@ pub fn canonicalLayoutName(name: []const u8) []const u8 {
 /// master-stack counts. Every tiling SCALAR ([tiling] flags, aesthetics,
 /// master trio) is driven by schema.applyAll; like parseTiling always did,
 /// all of it stays gated on the [tiling] section existing.
-fn parseTilingStructures(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
+fn parseTilingStructures(
+    allocator: std.mem.Allocator,
+    doc: *parser.Document,
+    cfg: *types.Config,
+) !void {
     const section = doc.getSection("tiling") orelse return;
     types.freeStrings(&cfg.tiling.layouts, allocator, true);
     cfg.tiling.workspace_layout_overrides.clearRetainingCapacity();
@@ -813,8 +899,18 @@ fn parseTilingStructures(allocator: std.mem.Allocator, doc: *parser.Document, cf
         // fallback is (types.TilingConfig{}).layout, NOT cfg.tiling.layout:
         // that aliases layouts.items[0], freed below, so using it would read
         // freed memory when the key is absent.
-        const layout_str = schema.getInRange([]const u8, section, "layout", default_tiling_layout, null, null);
-        try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, canonicalLayoutName(layout_str)));
+        const layout_str = schema.getInRange(
+            []const u8,
+            section,
+            "layout",
+            default_tiling_layout,
+            null,
+            null,
+        );
+        try cfg.tiling.layouts.append(
+            allocator,
+            try allocator.dupe(u8, canonicalLayoutName(layout_str)),
+        );
         cfg.tiling.layout = cfg.tiling.layouts.items[0];
     }
     try parseTilingVariants(allocator, doc, cfg);
@@ -825,13 +921,18 @@ fn parseTilingStructures(allocator: std.mem.Allocator, doc: *parser.Document, cf
 /// workspace_number (1-based) = count. Only meaningful when global_layout = false.
 /// The sub-table key is canonicalized (config.canonicalLayoutName) so the
 /// "master-stack"/"master_stack" spellings resolve the same table.
-fn parseMasterStackCounts(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
+fn parseMasterStackCounts(
+    allocator: std.mem.Allocator,
+    doc: *parser.Document,
+    cfg: *types.Config,
+) !void {
     const prefix = "tiling.layouts.";
     const suffix = ".counts";
     var iter = doc.sections.iterator();
     while (iter.next()) |entry| {
         const sec_name = entry.key_ptr.*;
-        if (!std.mem.startsWith(u8, sec_name, prefix) or !std.mem.endsWith(u8, sec_name, suffix)) continue;
+        if (!std.mem.startsWith(u8, sec_name, prefix) or
+            !std.mem.endsWith(u8, sec_name, suffix)) continue;
         const seg = sec_name[prefix.len .. sec_name.len - suffix.len];
         // Only direct "tiling.layouts.<name>.counts" tables qualify (no
         // deeper nesting), and only the master family can carry counts.
@@ -848,13 +949,23 @@ fn parseMasterStackCounts(allocator: std.mem.Allocator, doc: *parser.Document, c
                 debug.warn("master-stack.counts: invalid workspace key '{s}', skipping", .{p.key});
                 continue;
             };
-            if (!checkWorkspaceBound(ws_1based, "master-stack.counts", constants.max_workspaces)) continue;
+            if (!checkWorkspaceBound(
+                ws_1based,
+                "master-stack.counts",
+                constants.max_workspaces,
+            )) continue;
             const count_val = p.value.asInt() orelse {
-                debug.warn("master-stack.counts: non-integer count for workspace {}, skipping", .{ws_1based});
+                debug.warn(
+                    "master-stack.counts: non-integer count for workspace {}, skipping",
+                    .{ws_1based},
+                );
                 continue;
             };
             if (count_val < 0 or count_val > 10) {
-                debug.warn("master-stack.counts: count {} for workspace {} out of range [0,10], skipping", .{ count_val, ws_1based });
+                debug.warn(
+                    "master-stack.counts: count {} for workspace {} out of range [0,10], skipping",
+                    .{ count_val, ws_1based },
+                );
                 continue;
             }
             try cfg.tiling.workspace_master_count_overrides.append(allocator, .{
@@ -889,7 +1000,12 @@ const flat_variant_keys = [_]struct { key: []const u8, canon: []const u8 }{
 /// both so the map owns its storage independent of the parsed document (which
 /// is freed after buildConfigFromDoc). Last override wins: any prior value
 /// for the same key is freed first.
-fn setTilingVariant(allocator: std.mem.Allocator, cfg: *types.Config, canon: []const u8, value: []const u8) !void {
+fn setTilingVariant(
+    allocator: std.mem.Allocator,
+    cfg: *types.Config,
+    canon: []const u8,
+    value: []const u8,
+) !void {
     if (cfg.tiling.variants.fetchRemove(canon)) |kv| {
         allocator.free(kv.key);
         allocator.free(kv.value);
@@ -909,7 +1025,11 @@ fn setTilingVariant(allocator: std.mem.Allocator, cfg: *types.Config, canon: []c
 ///     canonicalized so the master alias spellings hit the same entry).
 /// No validity check happens here: a value-string's meaning is owned by the
 /// layout module's `variant_parse` hook, resolved at seed time.
-fn parseTilingVariants(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
+fn parseTilingVariants(
+    allocator: std.mem.Allocator,
+    doc: *parser.Document,
+    cfg: *types.Config,
+) !void {
     if (doc.getSection("tiling")) |sec| {
         for (flat_variant_keys) |fk| {
             if (sec.getString(fk.key)) |v|
@@ -977,10 +1097,16 @@ fn isLayoutName(name: []const u8) bool {
 /// returned for per-workspace overrides (see parseWorkspaceListInto). Validity
 /// of the string is checked against the active module's `variant_parse` at
 /// seed time, not here.
-fn parseLayoutVariant(allocator: std.mem.Allocator, cfg: *types.Config, layout_name: []const u8, variants_str: []const u8) !?[]const u8 {
+fn parseLayoutVariant(
+    allocator: std.mem.Allocator,
+    cfg: *types.Config,
+    layout_name: []const u8,
+    variants_str: []const u8,
+) !?[]const u8 {
     const lowered = types.lowerStringCI(32, layout_name);
     if (lowered == .too_long) {
-        debug.warn("layouts array: layout name '{s}' too long to match against a variant type, ignoring variants '{s}'", .{ layout_name, variants_str });
+        debug.warn("layouts array: layout name '{s}' too long to match against a " ++
+            "variant type, ignoring variants '{s}'", .{ layout_name, variants_str });
         return null;
     }
     const canon = canonicalLayoutName(lowered.ok.slice());
@@ -1004,7 +1130,10 @@ fn parseWorkspaceListInto(
     while (ws_iter.next()) |ws_tok| {
         const trimmed = std.mem.trim(u8, ws_tok, " \t");
         const ws_1based = std.fmt.parseInt(usize, trimmed, 10) catch {
-            debug.warn("layouts array: invalid workspace number '{s}' for layout '{s}', skipping", .{ trimmed, layout_name });
+            debug.warn(
+                "layouts array: invalid workspace number '{s}' for layout '{s}', skipping",
+                .{ trimmed, layout_name },
+            );
             continue;
         };
         if (!checkWorkspaceBound(ws_1based, "layouts array", constants.max_workspaces)) continue;
@@ -1037,7 +1166,11 @@ fn parseLayoutsArray(
         };
         const name_lower = switch (types.lowerStringCI(32, name_str)) {
             .too_long => {
-                debug.warn("layouts array: layout name '{s}' at index {} is longer than the 32-byte limit, skipping", .{ name_str, i });
+                debug.warn(
+                    "layouts array: layout name '{s}' at index {} is longer than the " ++
+                        "32-byte limit, skipping",
+                    .{ name_str, i },
+                );
                 continue;
             },
             .ok => |r| r.slice(),
@@ -1050,14 +1183,20 @@ fn parseLayoutsArray(
             }
         }
         if (already_present) {
-            debug.warn("layouts array: duplicate layout '{s}' at index {}, skipping", .{ name_lower, i });
+            debug.warn(
+                "layouts array: duplicate layout '{s}' at index {}, skipping",
+                .{ name_lower, i },
+            );
             continue;
         }
         const layout_idx: u8 = @intCast(cfg.tiling.layouts.items.len);
         // Stored canonical (config.canonicalLayoutName), so every downstream
         // resolution -- the global default, per-workspace overrides, and the
         // cycle ring -- sees the registry's canonical spelling.
-        try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, canonicalLayoutName(name_lower)));
+        try cfg.tiling.layouts.append(
+            allocator,
+            try allocator.dupe(u8, canonicalLayoutName(name_lower)),
+        );
 
         var variants: ?[]const u8 = null;
         var ws_list_str: ?[]const u8 = null;
@@ -1085,7 +1224,14 @@ fn parseLayoutsArray(
         }
 
         if (ws_list_str) |ws_str| {
-            try parseWorkspaceListInto(allocator, ws_str, name_lower, layout_idx, variants, &cfg.tiling.workspace_layout_overrides);
+            try parseWorkspaceListInto(
+                allocator,
+                ws_str,
+                name_lower,
+                layout_idx,
+                variants,
+                &cfg.tiling.workspace_layout_overrides,
+            );
         }
     }
 }
@@ -1115,7 +1261,11 @@ fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Con
     try parseBarLayout(allocator, doc, cfg);
 }
 
-fn parseWorkspaceIcons(allocator: std.mem.Allocator, section: *parser.Section, cfg: *types.Config) !void {
+fn parseWorkspaceIcons(
+    allocator: std.mem.Allocator,
+    section: *parser.Section,
+    cfg: *types.Config,
+) !void {
     types.freeStrings(&cfg.bar.workspace_icons, allocator, true);
     if (section.getArray("icons")) |arr| {
         for (arr) |item| {
@@ -1137,7 +1287,11 @@ fn parseWorkspaceIcons(allocator: std.mem.Allocator, section: *parser.Section, c
 
     while (cfg.bar.workspace_icons.items.len < cfg.workspaces.count) {
         var num_buf: [3]u8 = undefined;
-        const s = std.fmt.bufPrint(&num_buf, "{}", .{cfg.bar.workspace_icons.items.len + 1}) catch break;
+        const s = std.fmt.bufPrint(
+            &num_buf,
+            "{}",
+            .{cfg.bar.workspace_icons.items.len + 1},
+        ) catch break;
         try cfg.bar.workspace_icons.append(allocator, try allocator.dupe(u8, s));
     }
 }
@@ -1219,13 +1373,21 @@ fn parseNumberedRuleSections(
 /// Parses `value` as a workspace int and, if valid, adds a rule mapping
 /// `class_name` to that workspace. Shared by the class-keyed direction of
 /// [workspace.rules] and by [rules], which is always class-keyed.
-fn tryAddClassRule(allocator: std.mem.Allocator, cfg: *types.Config, class_name: []const u8, value: parser.Value) !void {
+fn tryAddClassRule(
+    allocator: std.mem.Allocator,
+    cfg: *types.Config,
+    class_name: []const u8,
+    value: parser.Value,
+) !void {
     const ws_num = value.asInt() orelse {
         debug.warn("Rule for '{s}' has non-integer value, skipping", .{class_name});
         return;
     };
     if (ws_num < 1) {
-        debug.warn("Rule workspace {d} for '{s}' below minimum 1, skipping", .{ ws_num, class_name });
+        debug.warn(
+            "Rule workspace {d} for '{s}' below minimum 1, skipping",
+            .{ ws_num, class_name },
+        );
         return;
     }
     const ws: usize = @intCast(ws_num);

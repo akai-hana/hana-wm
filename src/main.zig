@@ -161,7 +161,9 @@ fn connectToX() !X {
         return error.X11ConnectionFailed;
     }
 
-    const screen = xcb.xcb_setup_roots_iterator(xcb.xcb_get_setup(conn)).data orelse return error.X11ScreenFailed;
+    const screen = xcb.xcb_setup_roots_iterator(
+        xcb.xcb_get_setup(conn),
+    ).data orelse return error.X11ScreenFailed;
 
     // Claim SubstructureRedirectMask on the root window to become the WM;
     // the X server rejects this if another WM already holds it.
@@ -172,7 +174,10 @@ fn connectToX() !X {
         &[_]u32{masks.EventMasks.root_window},
     );
     if (xcb.xcb_request_check(conn, cookie)) |err| {
-        debug.err("Another window manager is already running (error_code={d}, type={d})", .{ err.*.error_code, err.*.response_type });
+        debug.err(
+            "Another window manager is already running (error_code={d}, type={d})",
+            .{ err.*.error_code, err.*.response_type },
+        );
         std.c.free(err);
         return error.AnotherWMRunning;
     }

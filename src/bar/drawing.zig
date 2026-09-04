@@ -69,8 +69,16 @@ pub const FontState = struct {
             null,
         );
         defer c.pango_font_metrics_unref(metrics);
-        const ascent: i16 = @intCast(std.math.clamp(@divTrunc(c.pango_font_metrics_get_ascent(metrics), c.pango_scale), std.math.minInt(i16), std.math.maxInt(i16)));
-        const descent: i16 = @intCast(std.math.clamp(@divTrunc(c.pango_font_metrics_get_descent(metrics), c.pango_scale), std.math.minInt(i16), std.math.maxInt(i16)));
+        const ascent: i16 = @intCast(std.math.clamp(
+            @divTrunc(c.pango_font_metrics_get_ascent(metrics), c.pango_scale),
+            std.math.minInt(i16),
+            std.math.maxInt(i16),
+        ));
+        const descent: i16 = @intCast(std.math.clamp(
+            @divTrunc(c.pango_font_metrics_get_descent(metrics), c.pango_scale),
+            std.math.minInt(i16),
+            std.math.maxInt(i16),
+        ));
         self.cached_metrics = .{ .ascent = ascent, .descent = descent };
         return .{ ascent, descent };
     }
@@ -109,10 +117,14 @@ inline fn createCheckedGC(conn: core.Connection, drawable: u32) !u32 {
     return gc;
 }
 
-/// Positions `layout` at sub-pixel `x` on `baseline` and renders it.
-/// Accounts for the layout's own baseline; font fallback can shift it per-run.
-inline fn showLayoutAtBaseline(ctx: *c.cairo_t, layout: *c.PangoLayout, x: f64, baseline: u16) void {
-    c.cairo_move_to(ctx, x, @as(f64, @floatFromInt(baseline)) - pangoToF64(c.pango_layout_get_baseline(layout)));
+inline fn showLayoutAtBaseline(
+    ctx: *c.cairo_t,
+    layout: *c.PangoLayout,
+    x: f64,
+    baseline: u16,
+) void {
+    const baseline_f: f64 = @floatFromInt(baseline);
+    c.cairo_move_to(ctx, x, baseline_f - pangoToF64(c.pango_layout_get_baseline(layout)));
     c.pango_cairo_show_layout(ctx, layout);
 }
 
@@ -233,7 +245,8 @@ pub const DrawContext = struct {
         c.cairo_destroy(self.ctx);
         // Destroy surface before pixmap: Cairo holds a reference to the pixmap.
         c.cairo_surface_destroy(self.surface);
-        if (self.offscreen_pixmap != 0) _ = core.xcb.xcb_free_pixmap(self.conn, self.offscreen_pixmap);
+        if (self.offscreen_pixmap != 0)
+            _ = core.xcb.xcb_free_pixmap(self.conn, self.offscreen_pixmap);
         self.font.allocator.destroy(self);
     }
 
@@ -247,9 +260,9 @@ pub const DrawContext = struct {
         c.pango_layout_set_text(self.font.pango_layout, text.ptr, @intCast(text.len));
     }
 
-    /// Colors the context and renders the layout's CURRENT text at (x, y
-    /// baseline). Shared tail of the baseline-anchored draw variants
-    /// (`drawText`, `drawTextEllipsis`, `drawSegment`).
+    /// Colors the context and renders the layout's CURRENT text at the
+    /// (x, y-baseline) position. Shared tail of the baseline-anchored draw
+    /// variants (`drawText`, `drawTextEllipsis`, `drawSegment`).
     inline fn paintText(self: *DrawContext, x: u16, y: u16, color: u32) void {
         self.setColor(color);
         showLayoutAtBaseline(self.ctx, self.font.pango_layout, @floatFromInt(x), y);
@@ -259,9 +272,17 @@ pub const DrawContext = struct {
     /// Cairo's XRender backend writes premultiplied). `last_gc_color` skips xcb_change_gc
     /// when the color is unchanged, which is the common case for adjacent same-background segments.
     pub fn fillRect(self: *DrawContext, x: u16, y: u16, width: u16, height: u16, color: u32) void {
-        const packed_color: u32 = if (self.is_argb) (@as(u32, self.alpha_u8) << 24) | (color & 0x00FFFFFF) else color;
+        const packed_color: u32 = if (self.is_argb)
+            (@as(u32, self.alpha_u8) << 24) | (color & 0x00FFFFFF)
+        else
+            color;
         if (self.last_gc_color != packed_color) {
-            _ = core.xcb.xcb_change_gc(self.conn, self.gc, core.xcb.XCB_GC_FOREGROUND, &[_]u32{packed_color});
+            _ = core.xcb.xcb_change_gc(
+                self.conn,
+                self.gc,
+                core.xcb.XCB_GC_FOREGROUND,
+                &[_]u32{packed_color},
+            );
             self.last_gc_color = packed_color;
         }
         const rect = core.xcb.xcb_rectangle_t{
@@ -276,12 +297,20 @@ pub const DrawContext = struct {
     /// Cached sized font description; rebuilt whenever `size_px` changes.
     /// Derived from font.current_font_desc, so it is stale after a font reload;
     /// DrawContexts are created fresh per reload, which keeps it consistent today.
-    pub fn drawTextSized(self: *DrawContext, x: u16, y_top: u16, text: []const u8, size_px: u16, color: u32) !void {
+    pub fn drawTextSized(
+        self: *DrawContext,
+        x: u16,
+        y_top: u16,
+        text: []const u8,
+        size_px: u16,
+        color: u32,
+    ) !void {
         const desc = self.font.current_font_desc orelse return error.NoFont;
 
         if (self.sized_font_desc == null or self.sized_font_px != size_px) {
             if (self.sized_font_desc) |old| c.pango_font_description_free(old);
-            const temp = c.pango_font_description_copy(desc) orelse return error.PangoDescCopyFailed;
+            const temp = c.pango_font_description_copy(desc) orelse
+                return error.PangoDescCopyFailed;
             c.pango_font_description_set_absolute_size(temp, pxToPango(size_px));
             self.sized_font_desc = temp;
             self.sized_font_px = size_px;
@@ -304,7 +333,11 @@ pub const DrawContext = struct {
         c.pango_layout_get_extents(self.font.pango_layout, &ink_rect, null);
 
         self.setColor(color);
-        c.cairo_move_to(self.ctx, @floatFromInt(x), @as(f64, @floatFromInt(y_top)) - pangoToF64(ink_rect.y));
+        c.cairo_move_to(
+            self.ctx,
+            @floatFromInt(x),
+            @as(f64, @floatFromInt(y_top)) - pangoToF64(ink_rect.y),
+        );
         c.pango_cairo_show_layout(self.ctx, self.font.pango_layout);
     }
 
@@ -312,8 +345,9 @@ pub const DrawContext = struct {
         try self.drawTextImpl(x, y, text, null, color);
     }
 
-    /// Draws `text` at each x position in `x_positions`, clipped to [clip_x, clip_x + clip_w).
-    /// The title marquee passes two positions one cycle apart so the copies tile into a seamless wrap.
+    /// Draws `text` at each x position in `x_positions`, clipped to
+    /// [clip_x, clip_x + clip_w). The title marquee passes two positions one
+    /// cycle apart so the copies tile into a seamless wrap.
     pub fn drawTextScrolled(
         self: *DrawContext,
         clip_x: u16,
@@ -327,7 +361,13 @@ pub const DrawContext = struct {
         self.setPangoText(text);
         c.cairo_save(self.ctx);
         defer c.cairo_restore(self.ctx);
-        c.cairo_rectangle(self.ctx, @floatFromInt(clip_x), 0, @floatFromInt(clip_w), @floatFromInt(self.height));
+        c.cairo_rectangle(
+            self.ctx,
+            @floatFromInt(clip_x),
+            0,
+            @floatFromInt(clip_w),
+            @floatFromInt(self.height),
+        );
         c.cairo_clip(self.ctx);
         for (x_positions) |x|
             showLayoutAtBaseline(self.ctx, self.font.pango_layout, x, y);
@@ -347,7 +387,14 @@ pub const DrawContext = struct {
 
     /// Shared text rendering: set pango text, optionally ellipsize to
     /// `max_width`, and paint at baseline.
-    inline fn drawTextImpl(self: *DrawContext, x: u16, y: u16, text: []const u8, max_width: ?u16, color: u32) !void {
+    inline fn drawTextImpl(
+        self: *DrawContext,
+        x: u16,
+        y: u16,
+        text: []const u8,
+        max_width: ?u16,
+        color: u32,
+    ) !void {
         self.setPangoText(text);
         if (max_width) |w| {
             c.pango_layout_set_width(self.font.pango_layout, @as(i32, w) * c.pango_scale);
@@ -377,7 +424,18 @@ pub const DrawContext = struct {
     inline fn blitImpl(self: *DrawContext, x: u16, w: u16, comptime flush: bool) void {
         c.cairo_surface_flush(self.surface);
         if (self.copy_gc == 0) return;
-        _ = core.xcb.xcb_copy_area(self.conn, self.offscreen_pixmap, self.window, self.copy_gc, @intCast(x), 0, @intCast(x), 0, w, self.height);
+        _ = core.xcb.xcb_copy_area(
+            self.conn,
+            self.offscreen_pixmap,
+            self.window,
+            self.copy_gc,
+            @intCast(x),
+            0,
+            @intCast(x),
+            0,
+            w,
+            self.height,
+        );
         if (flush) _ = core.xcb.xcb_flush(self.conn);
     }
 
@@ -387,7 +445,8 @@ pub const DrawContext = struct {
         self.blitImpl(0, self.width, false);
     }
 
-    /// Region copy with immediate xcb_flush. Used on timer-driven paths (clock tick, prompt caret blink).
+    /// Region copy with immediate xcb_flush. Used on timer-driven paths
+    /// (clock tick, prompt caret blink).
     pub fn blitRegion(self: *DrawContext, x: u16, w: u16) void {
         self.blitImpl(x, w, true);
     }
@@ -398,7 +457,8 @@ pub const DrawContext = struct {
         return @intCast(top_pad + asc);
     }
 
-    /// Fill background, draw text at baseline, return x + width. Sets pango text once for both measure and render.
+    /// Fill background, draw text at baseline, return x + width.
+    /// Sets pango text once for both measure and render.
     pub fn drawSegment(
         self: *DrawContext,
         x: u16,
@@ -469,7 +529,7 @@ pub fn loadBarFonts(dc: *DrawContext, size_override: ?u16) !void {
     const cs = core.getState();
     const sized = try buildSizedFontList(cs.alloc, size_override);
     defer freeSizedFontList(cs.alloc, sized);
-    if (sized.len == 0) return; // keep Pango default, matching probeFontMetrics' unconfigured behavior
+    if (sized.len == 0) return; // keep Pango default, matching probeFontMetrics
     try dc.font.loadFonts(sized);
     if (sized.len > 1) debug.info("Loaded {} fonts with fallback support", .{sized.len});
 }

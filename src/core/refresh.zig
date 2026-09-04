@@ -104,7 +104,8 @@ fn setupRandr(conn: core.Connection, root: xcb.xcb_window_t) bool {
 
 fn detectRefreshRate(conn: core.Connection, root: xcb.xcb_window_t) void {
     const res_cookie = xcb.xcb_randr_get_screen_resources_current(conn, root);
-    const res = xcb.xcb_randr_get_screen_resources_current_reply(conn, res_cookie, null) orelse return;
+    const res = xcb.xcb_randr_get_screen_resources_current_reply(conn, res_cookie, null) orelse
+        return;
     defer std.c.free(res);
 
     if (refreshRateFromOutputs(conn, root, res)) |rate| publishDetectedRate(rate);
@@ -127,7 +128,9 @@ fn refreshRateFromOutputs(
     if (primary != 0) if (refreshRateFromOutput(conn, primary, res)) |rate| return rate;
 
     const outputs = xcb.xcb_randr_get_screen_resources_current_outputs(res);
-    const output_count: usize = @intCast(xcb.xcb_randr_get_screen_resources_current_outputs_length(res));
+    const output_count: usize = @intCast(
+        xcb.xcb_randr_get_screen_resources_current_outputs_length(res),
+    );
     for (outputs[0..output_count]) |output| {
         if (output == primary) continue;
         if (refreshRateFromOutput(conn, output, res)) |rate| return rate;
@@ -166,7 +169,9 @@ fn refreshRateFromOutput(
     if (mode_id == 0) return null;
 
     const modes = xcb.xcb_randr_get_screen_resources_current_modes(res);
-    const mode_count: usize = @intCast(xcb.xcb_randr_get_screen_resources_current_modes_length(res));
+    const mode_count: usize = @intCast(
+        xcb.xcb_randr_get_screen_resources_current_modes_length(res),
+    );
     return findModeRate(modes[0..mode_count], mode_id);
 }
 

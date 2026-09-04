@@ -2,10 +2,10 @@
 //! Defines all types used to represent the WM configuration schema.
 
 const std = @import("std");
+const constants = @import("constants");
+const debug = @import("debug");
 const parser = @import("parser");
 const xkbcommon = @import("xkbcommon");
-const debug = @import("debug");
-const constants = @import("constants");
 
 /// X11 color value packed as 0x00RRGGBB into 32 bits.
 /// The high byte is unused; values match what XCB expects for pixel/color fields.
@@ -113,13 +113,23 @@ pub const KeybindResolver = struct {
     /// rebuilds the dispatch map (see rebuildDispatchMap). Call once at
     /// startup (config.load) and again on every config reload
     /// (events.applyConfig).
-    pub fn build(self: *KeybindResolver, keybindings: []Keybind, xkb_state: *xkbcommon.XkbState, allocator: std.mem.Allocator) void {
+    pub fn build(
+        self: *KeybindResolver,
+        keybindings: []Keybind,
+        xkb_state: *xkbcommon.XkbState,
+        allocator: std.mem.Allocator,
+    ) void {
         for (keybindings) |*kb| {
             kb.keycode = xkb_state.keysymToKeycode(kb.keysym);
             if (kb.keycode == null) {
                 var name_buf: [64]u8 = undefined;
                 const name = xkbcommon.keysymGetName(kb.keysym, &name_buf);
-                debug.warn("Keybinding mods=0x{x:0>4} keysym={s} (0x{x}) resolves to no base keycode and will NOT be grabbed, shifted symbols such as \"@\" must be bound via their unshifted key name (e.g. \"2\")", .{ kb.modifiers, name, kb.keysym });
+                debug.warn(
+                    "Keybinding mods=0x{x:0>4} keysym={s} (0x{x}) resolves to no base " ++
+                        "keycode and will NOT be grabbed, shifted symbols such as \"@\" " ++
+                        "must be bound via their unshifted key name (e.g. \"2\")",
+                    .{ kb.modifiers, name, kb.keysym },
+                );
             }
         }
         self.rebuildDispatchMap(keybindings, allocator);
@@ -129,17 +139,26 @@ pub const KeybindResolver = struct {
     /// is keyed on) and rebuilds the dispatch map from scratch. Split out
     /// from `build` so it can be exercised without a live XkbState/X
     /// connection.
-    pub fn rebuildDispatchMap(self: *KeybindResolver, keybindings: []Keybind, allocator: std.mem.Allocator) void {
+    pub fn rebuildDispatchMap(
+        self: *KeybindResolver,
+        keybindings: []Keybind,
+        allocator: std.mem.Allocator,
+    ) void {
         self.map.clearRetainingCapacity();
         self.seen.clearRetainingCapacity();
         for (keybindings, 0..) |*kb, i| {
             const key = dispatchKey(kb.modifiers, kb.keysym);
             if (self.seen.get(key)) |first_idx| {
-                debug.warn("Keybinding conflict: #{} and #{} share mods=0x{x:0>4} keysym=0x{x}, second wins", .{ first_idx + 1, i + 1, kb.modifiers, kb.keysym });
+                debug.warn(
+                    "Keybinding conflict: #{} and #{} share mods=0x{x:0>4} " ++
+                        "keysym=0x{x}, second wins",
+                    .{ first_idx + 1, i + 1, kb.modifiers, kb.keysym },
+                );
             } else {
                 self.seen.put(allocator, key, i) catch {};
             }
-            self.map.put(allocator, key, &kb.action) catch |e| debug.warnOnErr(e, "keybind map build");
+            self.map.put(allocator, key, &kb.action) catch |e|
+                debug.warnOnErr(e, "keybind map build");
         }
     }
 
@@ -337,8 +356,9 @@ pub const IndicatorLocation = enum {
     down_left,
     down_right,
 
-    // Accepts hyphens or underscores and both orderings of diagonal names (e.g. "left-up" == "up-left").
-    // Cardinal entries + diagonal entries generated at comptime from a compact table.
+    // Accepts hyphens or underscores and both orderings of diagonal names
+    // (e.g. "left-up" == "up-left"). Cardinal entries + diagonal entries are
+    // generated at comptime from a compact table.
     const string_map = blk: {
         @setEvalBranchQuota(2000);
         const cardinals = [_]struct { []const u8, IndicatorLocation }{
@@ -353,7 +373,10 @@ pub const IndicatorLocation = enum {
             .{ "down", "left", .down_left },
             .{ "down", "right", .down_right },
         };
-        var kvs: [cardinals.len + diags.len * 4]struct { []const u8, IndicatorLocation } = undefined;
+        var kvs: [cardinals.len + diags.len * 4]struct {
+            []const u8,
+            IndicatorLocation,
+        } = undefined;
         var n: usize = 0;
         for (cardinals) |c| {
             kvs[n] = c;
@@ -417,7 +440,11 @@ pub const default_indicator_unfocused: []const u8 = "□";
 /// Frees every owned string in `list`, then either deinits or clears the
 /// list depending on `retain_capacity`. Shared by `BarConfig.deinit`
 /// (full teardown) and config reload (reuse backing storage).
-pub inline fn freeStrings(list: *std.ArrayList([]const u8), allocator: std.mem.Allocator, retain_capacity: bool) void {
+pub inline fn freeStrings(
+    list: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    retain_capacity: bool,
+) void {
     for (list.items) |s| allocator.free(s);
     if (retain_capacity) list.clearRetainingCapacity() else list.deinit(allocator);
 }

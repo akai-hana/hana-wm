@@ -16,7 +16,9 @@ const window_mods = @import("window_modules").modules;
 
 /// Registry lookup for the hook `field`; the canonical scan lives in
 /// `plugin.zig` (see `plugin.providerOf`). Null when no module binds it.
-fn providerOf(comptime field: std.meta.FieldEnum(@import("plugin").WindowModule)) ?@import("plugin").WindowModule {
+fn providerOf(
+    comptime field: std.meta.FieldEnum(@import("plugin").WindowModule),
+) ?@import("plugin").WindowModule {
     return @import("plugin").providerOf(window_mods[0..], field);
 }
 

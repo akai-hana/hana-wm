@@ -1,14 +1,5 @@
-//! Golden-sequence tests for the sync layer.
-//! A recording sink captures every queued request; each scenario asserts the
-//! EXACT op sequence under UNCONDITIONAL APPLY: every reconcile pass replays
-//! park/map/pixel/bw/geometry for every stored window (X configure/map
-//! requests are idempotent, so full replay is drift-proof by construction).
-//! Parks are ONE merged request per parked window per pass; map precedes
-//! geometry so a first-show/unparking client exposes at its final rect.
-//! The winner rides .above ONLY when its geometry moved, when it unparked,
-//! or under restack pressure - derived from the sent ledger ({rect,
-//! has_rect, parked}), never remembered separately; the ledger is otherwise
-//! write-only bookkeeping.
+//! Golden-sequence tests for the sync layer: a recording sink captures every
+//! queued request; each scenario asserts the exact op sequence.
 
 const std = @import("std");
 const testing = std.testing;
@@ -67,7 +58,9 @@ const Recorder = struct {
     }
     fn geomShim(ptr: *anyopaque, win: model.WindowId, rect: utils.Rect, stack: ?sync.Stack) void {
         const self: *Recorder = @ptrCast(@alignCast(ptr));
-        self.ops.append(testing.allocator, .{ .geom = .{ .win = win, .rect = rect, .stack = stack } }) catch unreachable;
+        self.ops.append(testing.allocator, .{
+            .geom = .{ .win = win, .rect = rect, .stack = stack },
+        }) catch unreachable;
     }
     fn bwShim(ptr: *anyopaque, win: model.WindowId, w: u16) void {
         const self: *Recorder = @ptrCast(@alignCast(ptr));
@@ -91,7 +84,21 @@ const Recorder = struct {
     fn ungrabShim(_: *anyopaque) void {}
 
     fn sink(self: *Recorder) sync.Sink {
-        return .{ .ptr = self, .vt = &.{ .map = mapShim, .geom = geomShim, .border_width = bwShim, .border_pixel = pixelShim, .park = parkShim, .stack_only = stackShim, .set_ewmh_fullscreen = ewmhShim, .flush = flushShim, .grab_server = grabShim, .ungrab_and_flush = ungrabShim } };
+        return .{
+            .ptr = self,
+            .vt = &.{
+                .map = mapShim,
+                .geom = geomShim,
+                .border_width = bwShim,
+                .border_pixel = pixelShim,
+                .park = parkShim,
+                .stack_only = stackShim,
+                .set_ewmh_fullscreen = ewmhShim,
+                .flush = flushShim,
+                .grab_server = grabShim,
+                .ungrab_and_flush = ungrabShim,
+            },
+        };
     }
     // ---------------------------------------------------------------------
 
@@ -99,7 +106,16 @@ const Recorder = struct {
         try testing.expectEqual(n, self.ops.items.len);
     }
 
-    fn expectGeom(self: *const Recorder, i: usize, win: model.WindowId, x: i32, y: i32, w: u16, h: u16, stack: ?sync.Stack) !void {
+    fn expectGeom(
+        self: *const Recorder,
+        i: usize,
+        win: model.WindowId,
+        x: i32,
+        y: i32,
+        w: u16,
+        h: u16,
+        stack: ?sync.Stack,
+    ) !void {
         const op = self.ops.items[i];
         try testing.expect(op == .geom);
         try testing.expectEqual(win, op.geom.win);
@@ -182,7 +198,10 @@ const Fixture = struct {
 
 test "spawn: first show replays map/pixel/bw/geom ABOVE; steady state delta-sends nothing" {
     var fx: Fixture = undefined;
-    fx.init(.{ .x = 0, .y = 0, .width = 800, .height = 600 }, .{ .x = 0, .y = 0, .width = 800, .height = 600 });
+    fx.init(
+        .{ .x = 0, .y = 0, .width = 800, .height = 600 },
+        .{ .x = 0, .y = 0, .width = 800, .height = 600 },
+    );
     defer fx.deinit();
 
     model.register(&fx.m, 101, null) catch unreachable;
@@ -190,26 +209,22 @@ test "spawn: first show replays map/pixel/bw/geom ABOVE; steady state delta-send
 
     fx.reconcile(.{});
 
-    // Master layout single window on 800x600 with gap 8 / border 2.
-    // First send: ledger holds nothing => "moved" => winner rides ABOVE.
-    // map precedes geometry so the client exposes at its final rect.
+    // First send on 800x600 (gap 8 / border 2): ledger empty => "moved" =>
+    // winner rides ABOVE; map precedes geometry.
     try fx.rec.expectLen(4);
     try fx.rec.expectMap(0, 101);
     try fx.rec.expectPixel(1, 101, focused_pixel);
     try fx.rec.expectBw(2, 101, cfg_bw);
     try fx.rec.expectGeom(3, 101, 8, 8, 780, 580, .above);
 
-    // Steady state: DELTA-send - nothing changed (same rect, bw, pixel, no
-    // raise), so the pass elides the map/pixel/bw/geom resend entirely: the
-    // server already holds this exact desired state. Drift-proofing is
-    // untouched because the desire is still re-computed every pass.
+    // Steady state: delta-send elides unchanged map/pixel/bw/geom; the server
+    // already holds this exact desired state (still re-computed each pass).
     fx.rec.clear();
     fx.reconcile(.{});
     try fx.rec.expectLen(0);
 
-    // force_restack: the winner's raise is the ONLY thing that changed, so
-    // just the geometry request carrying the merged ABOVE stack mode is sent
-    // (no redundant map/pixel/bw).
+    // force_restack: only the winner's raise changed, so just the geometry
+    // request carrying the merged ABOVE is sent.
     fx.rec.clear();
     fx.reconcile(.{ .force_restack = true });
     try fx.rec.expectLen(1);
@@ -232,10 +247,8 @@ test "focus change: delta-sends ONLY the two border pixels, no raise" {
     fx.rec.clear();
     fx.reconcile(.{});
 
-    // Delta-apply: the focus flip only changes the two border PIXELs. Both
-    // windows' rect, border width, and map state are unchanged, so those
-    // requests are elided (resending them would be idempotent no-ops). No
-    // raise on either window: no motion, no transitions, no restack.
+    // Delta-apply: the focus flip only changes the two border PIXELs; rect,
+    // border width, and map are unchanged (elided). No raise: no motion.
     try fx.rec.expectLen(2);
     try fx.rec.expectPixel(0, 201, unfocused_pixel);
     try fx.rec.expectPixel(1, 202, focused_pixel);
@@ -257,10 +270,8 @@ test "fullscreen enter: winner fullscreened (rect=screen, bw=0), others parked; 
     fx.rec.clear();
     fx.reconcile(.{ .force_restack = true });
 
-    // 301: fullscreen branch -> full-screen rect, bw=0, pixel=0, ABOVE
-    // (force_restack). It was visible (not parked) so no map is needed, only
-    // the three changed attributes (pixel, bw, geom+raise). 302: ONE merged
-    // park request on the park transition.
+    // 301: full-screen rect, bw=0, pixel=0, ABOVE (visible, not parked, so
+    // only pixel/bw/geom sent). 302: ONE merged park request.
     try fx.rec.expectLen(4);
     try fx.rec.expectPixel(0, 301, 0);
     try fx.rec.expectBw(1, 301, 0);
@@ -271,11 +282,8 @@ test "fullscreen enter: winner fullscreened (rect=screen, bw=0), others parked; 
     fx.rec.clear();
     fx.reconcile(.{});
 
-    // Exit restores width AND pixel. 301: moved off the screen-sized
-    // fullscreen slot => pixel + bw + geom with the winner raise merged (no
-    // map: it was never parked). 302: unparked => map + geometry replay at
-    // its surviving slot (stack null: not moved, not the winner; its pixel/bw
-    // were preserved across the park, so only map+geom are needed).
+    // Exit restores width AND pixel: 301 moved off the full-screen slot =>
+    // pixel+bw+geom (no map: never parked); 302 unparkers => map+geom.
     try fx.rec.expectLen(5);
     try fx.rec.expectPixel(0, 301, focused_pixel);
     try fx.rec.expectBw(1, 301, cfg_bw);
@@ -303,11 +311,8 @@ test "fullscreen enter keeps sibling geometry, only repositions it off-screen" {
     fx.rec.clear();
     fx.reconcile(.{ .force_restack = true });
 
-    // 501 owns the screen. 502 receives ONLY the single merged park request —
-    // NO width/height/pixel/bw replay: the sibling's geometry (size + Y) is
-    // preserved, only its X is pushed off-screen by park. This is the
-    // "keep geometry, positioned off-screen" fullscreen behavior. 501 (was
-    // visible, not parked) sends only its three changed attributes.
+    // 501 owns the screen. 502 gets ONLY the merged park: its size+Y are
+    // preserved (X pushed off-screen); 501 sends only its three changed attrs.
     try fx.rec.expectLen(4);
     try fx.rec.expectPixel(0, 501, 0);
     try fx.rec.expectBw(1, 501, 0);
@@ -340,28 +345,22 @@ test "minimize parks every pass; restore replays original slot geometry" {
     fx.reconcile(.{}); // baseline
 
     minimize.minimize(&fx.m, 402) catch unreachable;
-    // Minimizing the stack window also grows 401 to full master width
-    // (moved => winner ABOVE); 402 emits ONE merged park request. 401 (was
-    // visible, not parked) sends only its changed geometry+raise; its
-    // map/pixel/bw are unchanged so those are elided.
+    // Minimizing the stack window grows 401 to full master width (moved =>
+    // winner ABOVE); 402 emits ONE merged park request.
     fx.rec.clear();
     fx.reconcile(.{});
     try fx.rec.expectLen(2);
     try fx.rec.expectGeom(0, 401, 8, 8, 780, 580, .above);
     try fx.rec.expectPark(1, 402);
 
-    // Idempotent pass while minimized: 401 is byte-identical to the last
-    // sent state (delta-sends nothing), and 402 is already parked so its park
-    // transition request is also elided. The pass emits ZERO wire requests but
-    // still re-computes every desire (drift-proofing preserved).
+    // Idempotent pass while minimized: delta-sends nothing (401 unchanged,
+    // 402 already parked), though every desire is still re-computed.
     fx.rec.clear();
     fx.reconcile(.{});
     try fx.rec.expectLen(0);
 
-    // Restore: 401 shrinks back (moved => winner ABOVE, geometry-only send);
-    // 402 unparks: map + geometry at its surviving slot rect (pixel/bw were
-    // preserved across the park, so only map+geom are needed; not winner,
-    // rect did not move => no raise, stack null).
+    // Restore: 401 shrinks back (moved => winner ABOVE); 402 unparks with
+    // map + geometry (pixel/bw preserved across the park).
     minimize.restore(&fx.m, 402);
     fx.rec.clear();
     fx.reconcile(.{});
@@ -372,12 +371,7 @@ test "minimize parks every pass; restore replays original slot geometry" {
 }
 
 // -- Fullscreen -> minimize -> restore -> un-fullscreen (user bug report) ----
-//
-// The model used to DROP the fullscreen-prev window's saved slot on restore,
-// so the final exit-fullscreen left it base-tiled but home-less: sync's
-// orphan branch kept it at its stale screen-sized geometry while the
-// remaining window retook master - an untileable, engine-invisible window.
-// With the slot re-added, the same sequence must end fully tiled.
+// The fullscreen-prev window's saved slot must survive restore, ending fully tiled.
 test "fs->min->restore->unfs retiles instead of stranding an orphan" {
     var fx: Fixture = undefined;
     fx.init(stdScreen(), stdWa());
@@ -388,9 +382,8 @@ test "fs->min->restore->unfs retiles instead of stranding an orphan" {
     model.setFocus(&fx.m, 601);
     fx.reconcile(.{}); // baseline tiled: both placed
 
-    // Enter fullscreen: 601 takes the screen (rect=screen, bw=0, pixel=0,
-    // ABOVE under force_restack), 602 parks. 601 (was visible, not parked)
-    // sends only its three changed attributes.
+    // Enter fullscreen: 601 takes the screen (bw=0, pixel=0, ABOVE), 602
+    // parks; 601 (visible, not parked) sends only pixel/bw/geom.
     _ = fullscreen.toggleFullscreen(&fx.m, 601);
     fx.rec.clear();
     fx.reconcile(.{ .force_restack = true });
@@ -426,13 +419,8 @@ test "fs->min->restore->unfs retiles instead of stranding an orphan" {
     try fx.rec.expectGeom(1, 601, 0, 0, 800, 600, .above);
     try fx.rec.expectPark(2, 602);
 
-    // THE REGRESSION GATE - leave fullscreen. 601 must come back TILED at
-    // its master slot (384x580 @ 8,8, winner ABOVE: moved off the screen
-    // rect). 602 unparks into its surviving stack slot (map + geometry; the
-    // pixel/bw were preserved across the park).
-    // Pre-fix this emitted NO geometry for 601 at all: the orphan branch
-    // kept the stale 800x600 fullscreen rect while 602 wrongly kept the
-    // full-width master rect - an engine-invisible, untileable window.
+    // THE REGRESSION GATE - leave fullscreen: 601 returns TILED at its master
+    // slot, 602 unparks into its surviving stack slot.
     _ = fullscreen.toggleFullscreen(&fx.m, 601);
     fx.rec.clear();
     fx.reconcile(.{});
@@ -573,25 +561,15 @@ test "forget clears the sent ledger; next pass treats the window as first sight"
 }
 
 // -- Ledger index tombstone collision (hash-table probe chain) ----------------
-//
-// The sent ledger's open-addressing index used to treat a TOMBSTONE bucket as
-// the end of the probe chain. Two real X ids can share a home bucket (they
-// differ only by a multiple of the table capacity), so removing a window that
-// sits between them in the inserts tombstones a bucket that the surviving
-// window's probe MUST step over; swap-removing that surviving window then
-// walked the tombstone and hit `unreachable` (WM crash in Debug, UB in
-// ReleaseFast). sentIndexRemove had the same asymmetry: it could return before
-// tombstoning the target when a tombstone preceded it in the chain, leaving a
-// stale bucket that never gets cleaned.
+// A tombstone bucket was mistaken for the end of the probe chain, crashing
+// when a shared-home-bucket survivor was swap-removed.
 test "ledger index: swap-remove across a shared home bucket does not hit tombstones" {
     var fx: Fixture = undefined;
     fx.init(stdScreen(), stdWa());
     defer fx.deinit();
 
-    // x and z differ by exactly the index capacity, so bucketOf(x) ==
-    // bucketOf(z); y occupies the next bucket. Reconcile inserts the ledger in
-    // store (ascending id) order: x@0, y@1, z@2, with z's index bucket parked
-    // at home+2 behind x and y.
+    // x and z differ by the index capacity, so they share a home bucket;
+    // y sits beside them. Reconcile inserts in ascending-id order.
     const base: model.WindowId = 1000;
     const x = base;
     const y = base + 1;
@@ -602,9 +580,8 @@ test "ledger index: swap-remove across a shared home bucket does not hit tombsto
     model.setFocus(&fx.m, x);
     fx.reconcile(.{});
 
-    // Removing y tombstones bucket home+1, then swap-moves z (compact last)
-    // into y's slot; re-pointing z's index probes home (x's bucket) then home+1
-    // (the tombstone). Pre-fix this hit `unreachable` inside sentIndexMove.
+    // Removing y tombstones its bucket; swap-moving z re-points its probe
+    // across that tombstone (pre-fix: `unreachable` in sentIndexMove).
     sync.forget(y);
 
     // Neither surviving ledger record is lost by the index surgery.

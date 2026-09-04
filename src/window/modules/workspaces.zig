@@ -34,6 +34,16 @@ pub const State = struct {
 
 var g_state: ?State = null;
 
+/// Last matching override wins: duplicate entries for one workspace now
+/// resolve identically across ALL per-ws fields.
+fn lookupVariant(cfg_tiling: *const types.TilingConfig, id: u8) ?[]const u8 {
+    var found: ?[]const u8 = null;
+    for (cfg_tiling.workspace_layout_overrides.items) |o| {
+        if (o.workspace_idx == id) found = o.variant;
+    }
+    return found;
+}
+
 /// Applies per-workspace master-count/variant overrides from `cfg_tiling`.
 ///
 /// `primary_width` and `secondary_balance` have no config-file representation;
@@ -57,18 +67,6 @@ pub fn applyWorkspaceOverrides(
             null;
         ws.master_count = if (id < max_ws) master_count_lookup[id] else null;
     }
-}
-
-/// Last matching override wins: duplicate entries for one workspace now
-/// resolve identically across ALL per-ws fields; this lookup, the
-/// master-count loop below, and actions.seedParamsFromConfig's layout lookup
-/// all use loop-overwrite (last-wins).
-fn lookupVariant(cfg_tiling: *const types.TilingConfig, id: u8) ?[]const u8 {
-    var found: ?[]const u8 = null;
-    for (cfg_tiling.workspace_layout_overrides.items) |o| {
-        if (o.workspace_idx == id) found = o.variant;
-    }
-    return found;
 }
 
 /// Initializes global workspace state. Workspaces-disabled collapses to a
@@ -109,11 +107,7 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
     const e = m.store.getPtr(win) orelse return;
     if (e.mask == model.ALL_MASK) return; // pinned stays everywhere-visible
 
-    // Refuse-before-mutate: a full destination list cancels the move instead
-    // of stranding the window home-less. Checked BEFORE any record field is
-    // written so there is nothing to roll back. The move is taken as a whole
-    // or not at all (the mask, minimized ws, fullscreen ws and home all move
-    // together below).
+    // Refuse-before-mutate: full destination list cancels the move.
     const h: ?model.WSId = e.home_ws;
     if (h) |old_h| {
         if (old_h != ws and m.ws[ws].tiled_order.len >= model.max_tiled_per_ws) {
@@ -126,23 +120,7 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
             e.mask = model.bit(ws); // record follows the move
         }
     }
-    // Fullscreen record follows the move; a destination owner drops this one
-    // into de-fullscreen (toggle OFF) rather than clobbering the resident.
-    // Ghost records (minimized-from-fullscreen) move their ws too, following
-    // the parked window's mask.
-    if (build_options.has_fullscreen) {
-        const fmod = @import("fullscreen");
-        if (fmod.isFullscreenMode(m, win)) {
-            const fws = fmod.fullscreenWsOf(m, win).?;
-            if (fws != ws) {
-                if (fmod.fullscreenOccupied(m, win, ws)) {
-                    _ = fmod.toggleFullscreen(m, win);
-                } else {
-                    fmod.moveFullscreenTo(m, win, ws);
-                }
-            }
-        }
-    }
+    transferFullscreenOnMove(m, win, ws);
     e.mask = model.bit(ws);
     if (h) |old_h| {
         if (old_h != ws) {
@@ -150,6 +128,22 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
             _ = m.ws[ws].tiled_order.append(win);
             e.home_ws = ws;
         }
+    }
+}
+
+/// Fullscreen record follows the move; a destination owner drops the mover
+/// into de-fullscreen rather than clobbering the resident. Ghost records
+/// (minimized-from-fullscreen) move their ws too, following the parked mask.
+fn transferFullscreenOnMove(m: *model.Model, win: model.WindowId, ws: model.WSId) void {
+    if (!build_options.has_fullscreen) return;
+    const fmod = @import("fullscreen");
+    if (!fmod.isFullscreenMode(m, win)) return;
+    const fws = fmod.fullscreenWsOf(m, win).?;
+    if (fws == ws) return;
+    if (fmod.fullscreenOccupied(m, win, ws)) {
+        _ = fmod.toggleFullscreen(m, win);
+    } else {
+        fmod.moveFullscreenTo(m, win, ws);
     }
 }
 

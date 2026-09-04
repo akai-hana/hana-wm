@@ -107,7 +107,10 @@ pub fn init(alloc: std.mem.Allocator, binary_path_override: ?[]const u8) void {
     switch (std.posix.errno(n)) {
         .SUCCESS => exec_path_z = alloc.dupeZ(u8, buf[0..n]) catch null,
         else => {
-            debug.warn("restart: readlink /proc/self/exe failed; binary-change re-exec disabled", .{});
+            debug.warn(
+                "restart: readlink /proc/self/exe failed; binary-change re-exec disabled",
+                .{},
+            );
             exec_path_z = null;
         },
     }

@@ -80,7 +80,8 @@ fn handleBacktraceRequest(
     const fd = std.posix.STDERR_FILENO;
     writeLiteral(fd, "hana: SIGUSR2 backtrace of interrupted main thread (raw addresses):\n");
 
-    const opt_ctx: ?std.debug.cpu_context.Native = std.debug.cpu_context.fromPosixSignalContext(ctx_ptr);
+    const opt_ctx: ?std.debug.cpu_context.Native =
+        std.debug.cpu_context.fromPosixSignalContext(ctx_ptr);
     if (opt_ctx) |*ctx| {
         writePcLine(fd, 0, ctx.getPc());
         if (builtin.cpu.arch == .x86_64) {
@@ -101,10 +102,16 @@ fn handleBacktraceRequest(
             const hi = lo + span;
             var rbp = ctx.getFp();
             var depth: usize = 0;
-            while (rbp >= lo and rbp + frame_stride <= hi and (rbp & (frame_alignment - 1)) == 0 and depth < max_depth) {
+            while (rbp >= lo and
+                rbp + frame_stride <= hi and
+                (rbp & (frame_alignment - 1)) == 0 and
+                depth < max_depth)
+            {
                 const next: usize = @as(*align(8) const usize, @ptrFromInt(rbp)).*;
                 const ret: usize = @as(*align(8) const usize, @ptrFromInt(rbp + 8)).*;
-                if (!(next > rbp and next + frame_stride <= hi and (next & (frame_alignment - 1)) == 0)) break;
+                if (!(next > rbp and
+                    next + frame_stride <= hi and
+                    (next & (frame_alignment - 1)) == 0)) break;
                 rbp = next;
                 depth += 1;
                 writePcLine(fd, depth, ret);
@@ -177,8 +184,15 @@ pub fn setup() !void {
     };
 
     // SIGCHLD is reaped in dispatchSignal; the rest control the event loop.
-    inline for (.{ std.posix.SIG.HUP, std.posix.SIG.TERM, std.posix.SIG.INT, std.posix.SIG.CHLD, std.posix.SIG.USR1 }) |sig|
+    inline for (.{
+        std.posix.SIG.HUP,
+        std.posix.SIG.TERM,
+        std.posix.SIG.INT,
+        std.posix.SIG.CHLD,
+        std.posix.SIG.USR1,
+    }) |sig| {
         std.posix.sigaction(sig, &sa, null);
+    }
 
     setupBacktraceHandler();
 }

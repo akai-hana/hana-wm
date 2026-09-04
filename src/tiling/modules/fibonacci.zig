@@ -18,12 +18,9 @@ const SpiralDirection = enum(u2) {
     }
 };
 
-/// Compute Fibonacci spiral layout. Origin top-left, y-down. Outer gap
-/// stripped first; each split halves the remaining dimension with one gap
-/// at the seam. Spiral direction cycles right, down, left, up. Dimensions are
-/// u16, integer-halved; border is subtracted at placement time.
-// View is small enough to pass by value; helpers take pointer to avoid
-// copies in the recursive path.
+/// Compute Fibonacci spiral layout. Outer gap stripped first; each split
+/// halves the remaining dimension with one gap at the seam. Drawn by value;
+/// helpers take a pointer to avoid copies in the recursive path.
 pub fn compute(v: tiling.View, out: *tiling.List) void {
     const m = v.env.margins;
     const border2 = utils.doubledBorder(m);
@@ -37,15 +34,12 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
     };
     var dir: SpiralDirection = .right;
 
-    // Minimum remaining dimension to place a window (gap on each side + border
-    // on each side). Loop-invariant: hoisted to avoid redundant arithmetic.
+    // Minimum remaining dimension for a window (gap + border on each side).
     const min_area = m.gap * 2 + border2;
 
     const windows = v.order;
     for (windows, 0..) |win, i| {
-        // Remaining area too small to split: raise the focused window (or the
-        // first overflow window as fallback) and push the rest offscreen so the
-        // user at least sees one window rather than a stack of identical rects.
+        // Too small to split: raise a window and push the rest offscreen.
         if (cur.w < min_area or cur.h < min_area) {
             const top_rect = utils.Rect{
                 .x = @intCast(cur.x),
@@ -53,11 +47,7 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
                 .width = tiling.shrinkClamped(cur.w, border2, v.env.min_dim),
                 .height = tiling.shrinkClamped(cur.h, border2, v.env.min_dim),
             };
-            // Find the focused window among the overflow set; fall back to the
-            // first window if no focused window is present here. Same reasoning
-            // as monocle: never raise on a background retile; there's no viewer
-            // to show it to, and raising would leave it first in the global
-            // stacking order. (Background handling is sync's stacking policy.)
+            // Raise focusedElse's pick among the overflow set and park the rest.
             const top = tiling.focusedElse(&v, windows[i..], windows[i]);
             tiling.emitView(&v, out, top, top_rect, true);
             for (windows[i..]) |w| {
@@ -102,10 +92,8 @@ inline fn splitAndAdvance(
 ) void {
     const split_x = dir == .right or dir == .left;
     const forward = dir == .right or dir == .down;
-    // `forward` (right/down) places the window at the leading edge, leaving
-    // the remainder ahead of it. For backward directions (left/up) the window
-    // sits at the trailing edge, the origin stays put, and only the remaining
-    // dimension shrinks.
+    // forward (right/down) places the window at the leading edge; backward
+    // (left/up) keeps the origin put and only shrinks the remaining dimension.
     const dim: u16 = if (split_x) cur.w else cur.h;
     const win_dim = (dim -| gap) / 2;
     const off: u16 = if (forward) 0 else dim - win_dim;

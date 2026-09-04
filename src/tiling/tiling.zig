@@ -22,9 +22,14 @@ pub const List = plugin.List;
 
 /// Prefer `v.focused` when it appears in `windows`, else `fallback`
 /// (verbatim port of layouts.focusedElse).
-pub fn focusedElse(v: *const View, windows: []const model.WindowId, fallback: model.WindowId) model.WindowId {
-    if (v.focused) |f| if (std.mem.indexOfScalar(model.WindowId, windows, f) != null) return f;
-    return fallback;
+pub fn focusedElse(
+    v: *const View,
+    windows: []const model.WindowId,
+    fallback: model.WindowId,
+) model.WindowId {
+    const f = v.focused orelse return fallback;
+    if (std.mem.indexOfScalar(model.WindowId, windows, f) == null) return fallback;
+    return f;
 }
 
 /// Shrinks `dim` by `margin` (gap/border), floored to `min_dim` so a layout
@@ -33,15 +38,13 @@ pub inline fn shrinkClamped(dim: u16, margin: u16, min_dim: u16) u16 {
     return if (dim > margin) dim - margin else min_dim;
 }
 
-/// Clamp a signed y coordinate to a non-negative u16 (y_offset
-/// threading: every layout positions windows relative to screen top).
+/// Clamp a signed y coordinate to a non-negative u16.
 inline fn clampYToU16(y: i32) u16 {
     return @intCast(@max(y, 0));
 }
 
-/// Work-area rect inset by the outer gap (verbatim port of layouts.outerArea).
-/// x/y are i32 (some tiling layouts thread i32 coords through their recursion),
-/// w/h u16.
+/// Work-area rect inset by the outer gap; x/y are i32, w/h u16
+/// (threaded through some layouts' recursion).
 pub inline fn outerArea(wa: utils.Rect, gap: u16) struct { x: i32, y: i32, w: u16, h: u16 } {
     return .{
         .x = @intCast(gap),
@@ -51,14 +54,19 @@ pub inline fn outerArea(wa: utils.Rect, gap: u16) struct { x: i32, y: i32, w: u1
     };
 }
 
-/// Work-area origin y clamped to >= 0, as u16 (`y_offset` threading:
-/// every layout positions windows relative to the screen top, not the root).
+/// Work-area origin y clamped to >= 0, as u16.
 pub inline fn waY(v: *const View) u16 {
     return clampYToU16(v.workarea.y);
 }
 
 /// Emit a placement with the window's size hints applied to `rect`.
-inline fn emit(v: *const View, out: *List, win: model.WindowId, rect: utils.Rect, visible: bool) void {
+inline fn emit(
+    v: *const View,
+    out: *List,
+    win: model.WindowId,
+    rect: utils.Rect,
+    visible: bool,
+) void {
     const ok = out.append(.{
         .win = win,
         .rect = if (visible) applyHints(rect, v.hints.forWin(win)) else parked_rect,
@@ -90,10 +98,8 @@ fn indexOfName(lower: []const u8) ?usize {
 }
 
 /// Resolve a config layout name (case-insensitive) to its registry index.
-/// Config-parsed names are canonicalized at the config boundary
-/// (config.canonicalLayoutName), so this is an exact lowercased match on
-/// module names; the "master-stack"/"master_stack" alias spellings never
-/// reach the engine.
+/// Names are canonicalized at the config boundary, so this is an exact
+/// lowercased match on module names.
 pub fn layoutByName(name: []const u8) ?usize {
     if (name.len > 64) return null;
     var buf: [64]u8 = undefined;
@@ -147,13 +153,10 @@ pub fn cycleKind(cur: u8, dir: i32, names: []const []const u8) u8 {
             break;
         }
     }
-    const next: usize = if (found)
-        @intCast(@mod(@as(i32, @intCast(pos)) + dir, @as(i32, @intCast(n))))
-    else if (dir >= 0)
-        0
-    else
-        n - 1;
-    return indices[next];
+    if (found) {
+        return indices[@intCast(@mod(@as(i32, @intCast(pos)) + dir, @as(i32, @intCast(n))))];
+    }
+    return indices[if (dir >= 0) 0 else n - 1];
 }
 
 /// Compute `kind`'s layout into `out` (cleared first). Each layout module

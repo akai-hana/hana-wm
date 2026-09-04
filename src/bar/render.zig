@@ -1,5 +1,6 @@
 //! Cairo, Pango, and GLib C bindings for bar rendering.
-//! Declared as `pub extern fn` because library headers may not be present in all build environments.
+//! Declared as `pub extern fn` because library headers may not be present in
+//! all build environments.
 
 const core = @import("core");
 const xcb = core.xcb;
@@ -76,10 +77,17 @@ pub extern fn pango_cairo_show_layout(cr: *cairo_t, layout: *PangoLayout) void;
 pub extern fn pango_cairo_context_set_resolution(context: *PangoContext, dpi: f64) void;
 
 pub extern fn pango_layout_set_text(layout: *PangoLayout, text: [*]const u8, length: c_int) void;
-pub extern fn pango_layout_set_font_description(layout: *PangoLayout, desc: ?*PangoFontDescription) void;
+pub extern fn pango_layout_set_font_description(
+    layout: *PangoLayout,
+    desc: ?*PangoFontDescription,
+) void;
 pub extern fn pango_layout_get_context(layout: *PangoLayout) *PangoContext;
 /// Pass null for either dimension if not needed.
-pub extern fn pango_layout_get_pixel_size(layout: *PangoLayout, width: ?*c_int, height: ?*c_int) void;
+pub extern fn pango_layout_get_pixel_size(
+    layout: *PangoLayout,
+    width: ?*c_int,
+    height: ?*c_int,
+) void;
 pub extern fn pango_layout_set_width(layout: *PangoLayout, width: c_int) void;
 pub extern fn pango_layout_set_ellipsize(layout: *PangoLayout, ellipsize: PangoEllipsizeMode) void;
 pub extern fn pango_layout_get_baseline(layout: *PangoLayout) c_int;
@@ -110,5 +118,6 @@ pub extern fn pango_font_metrics_unref(metrics: *PangoFontMetrics) void;
 
 // GLib / GObject
 
-/// Decrements the reference count. All GObject-based types in this file must be freed through this function.
+/// Decrements the reference count. All GObject-based types in this file must
+/// be freed through this function.
 pub extern fn g_object_unref(object: *anyopaque) void;

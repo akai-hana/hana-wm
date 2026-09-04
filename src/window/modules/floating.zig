@@ -116,7 +116,12 @@ var g_state: State = .{};
 /// rectangle and border width. Returns the 8-directional direction the cursor
 /// is closest to (n, s, e, w, ne, nw, se, sw), or none if the point is well
 /// inside the window far from any edge.
-fn resizeDirectionFromPoint(cursor_x: i32, cursor_y: i32, rect: utils.Rect, border_width: u32) ResizeDirection {
+fn resizeDirectionFromPoint(
+    cursor_x: i32,
+    cursor_y: i32,
+    rect: utils.Rect,
+    border_width: u32,
+) ResizeDirection {
     const left: i32 = rect.x;
     const top: i32 = rect.y;
     const right: i32 = rect.x + @as(i32, rect.width);
@@ -168,7 +173,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     if (g_state.drag.active) return;
     if (screen.isSurfaceWindow(win)) return;
     if (build_options.has_fullscreen) {
-        if (@import("fullscreen").isFullscreenMode(pipeline.model(), win)) return; // fullscreen geometry must not be touched
+        if (@import("fullscreen").isFullscreenMode(pipeline.model(), win)) return;
     }
 
     // Model/sync truth (floating base or last-sent rect) over a live XCB
@@ -178,7 +183,10 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
         break :blk window.getGeometry(cs.conn, win) orelse return;
     };
 
-    const resize_corner: ResizeCorner = if (button == 1) .bottom_right else nearestCorner(x, y, geom, core.borderWidth());
+    const resize_corner: ResizeCorner = if (button == 1)
+        .bottom_right
+    else
+        nearestCorner(x, y, geom, core.borderWidth());
 
     // Snap distance and work area are resolved here so updateDrag's per-event
     // path only does arithmetic. They are constant for the duration of a drag.
@@ -196,7 +204,10 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
             .start_win_width = geom.width,
             .start_win_height = geom.height,
             .snap_px = snap_px,
-            .work_area = if (snap_px > 0) workArea() else .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
+            .work_area = if (snap_px > 0)
+                workArea()
+            else
+                .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
         },
         // A base-tiled window detaches to floating on first motion (see
         // updateDrag); move also skips snap on that first event so the
@@ -211,7 +222,13 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     @import("sync").raiseNow(@import("pipeline").grabCtx(), win);
 }
 
-fn computeMoveRect(drag: DragState, dx: i32, dy: i32, wa: WorkArea, was_pending_float: bool) utils.Rect {
+fn computeMoveRect(
+    drag: DragState,
+    dx: i32,
+    dy: i32,
+    wa: WorkArea,
+    was_pending_float: bool,
+) utils.Rect {
     const snap = drag.snap_px;
     const raw_x: i32 = @as(i32, drag.start_win_x) + dx;
     const raw_y: i32 = @as(i32, drag.start_win_y) + @as(i32, dy);
@@ -220,8 +237,22 @@ fn computeMoveRect(drag: DragState, dx: i32, dy: i32, wa: WorkArea, was_pending_
     // Raw drag coords are unbounded i32; pin down to the i16 wire range
     // before the narrowing cast so a window dragged beyond +/-32767 (or into
     // negative X11 coords) can't UB in ReleaseFast.
-    const mx: i32 = std.math.clamp(if (was_pending_float) raw_x else snapAxis(raw_x, win_w, wa.left, wa.right, snap), std.math.minInt(i16), std.math.maxInt(i16));
-    const my: i32 = std.math.clamp(if (was_pending_float) raw_y else snapAxis(raw_y, win_h, wa.top, wa.bottom, snap), std.math.minInt(i16), std.math.maxInt(i16));
+    const mx: i32 = std.math.clamp(
+        if (was_pending_float)
+            raw_x
+        else
+            snapAxis(raw_x, win_w, wa.left, wa.right, snap),
+        std.math.minInt(i16),
+        std.math.maxInt(i16),
+    );
+    const my: i32 = std.math.clamp(
+        if (was_pending_float)
+            raw_y
+        else
+            snapAxis(raw_y, win_h, wa.top, wa.bottom, snap),
+        std.math.minInt(i16),
+        std.math.maxInt(i16),
+    );
     return .{
         .x = @intCast(mx),
         .y = @intCast(my),
@@ -245,7 +276,6 @@ fn computeResizeRect(drag: DragState, dx: i32, dy: i32, wa: WorkArea) utils.Rect
     const anchor_y: i32 = start_y + @as(i32, if (axes.top) start_h else 0);
     const moving_x0: i32 = start_x + @as(i32, if (axes.left) 0 else start_w);
     const moving_y0: i32 = start_y + @as(i32, if (axes.top) 0 else start_h);
-
     const raw_moving_x: i32 = moving_x0 + dx;
     const raw_moving_y: i32 = moving_y0 + dy;
     const moving_x: i32 = snapEdge(snapEdge(raw_moving_x, wa.left, snap), wa.right, snap);
@@ -341,7 +371,11 @@ pub fn setFloatingRect(m: *model.Model, win: model.WindowId, r: utils.Rect) void
 }
 
 /// Honors a configure request against a floating window record on the model.
-pub fn honorConfigureRequest(m: *model.Model, win: model.WindowId, req: model.ConfigureReq) model.HonorDecision {
+pub fn honorConfigureRequest(
+    m: *model.Model,
+    win: model.WindowId,
+    req: model.ConfigureReq,
+) model.HonorDecision {
     if (build_options.has_minimize) {
         if (@import("minimize").isMinimized(m, win)) return .ignored;
     }

@@ -101,6 +101,27 @@ fn enableDetectableAutoRepeat(conn: *anyopaque) void {
     }
 }
 
+/// Base (level-0) symbol for `kc`, independent of lock state; reads the
+/// keymap's level-0 entry directly. A lock-sensitive resolve (xkb_state's
+/// `get_one_sym`) would apply current locks: a CapsLock held at startup
+/// would pin the table to shifted symbols and break lowercase bindings.
+fn baseSymbol(km: *xkb_keymap, kc: u8) u32 {
+    var syms: [*c]const u32 = null;
+    const n = xkb.xkb_keymap_key_get_syms_by_level(km, @intCast(kc), 0, 0, &syms);
+    if (n > 0 and syms != null) return syms[0];
+    return xkb.XKB_KEY_NoSymbol;
+}
+
+/// Builds the flat keycode->keysym table from level-0 symbols.
+/// Keycodes below 8 are reserved by X11 and produce no real keysym.
+fn buildKeysymTable(km: *xkb_keymap) [256]u32 {
+    var table: [256]u32 = [_]u32{xkb.XKB_KEY_NoSymbol} ** 256;
+    for (8..256) |kc| {
+        table[kc] = baseSymbol(km, @intCast(kc));
+    }
+    return table;
+}
+
 pub const XkbState = struct {
     context: *xkb_context,
     /// Flat keycode->keysym table for the standard X11 range (indices 0..255).
@@ -189,27 +210,6 @@ pub const XkbState = struct {
     }
 };
 
-/// Base (level-0) symbol for `kc`, independent of lock state; reads the
-/// keymap's level-0 entry directly. A lock-sensitive resolve (xkb_state's
-/// `get_one_sym`) would apply current locks: a CapsLock held at startup
-/// would pin the table to shifted symbols and break lowercase bindings.
-fn baseSymbol(km: *xkb_keymap, kc: u8) u32 {
-    var syms: [*c]const u32 = null;
-    const n = xkb.xkb_keymap_key_get_syms_by_level(km, @intCast(kc), 0, 0, &syms);
-    if (n > 0 and syms != null) return syms[0];
-    return xkb.XKB_KEY_NoSymbol;
-}
-
-/// Builds the flat keycode->keysym table from level-0 symbols.
-/// Keycodes below 8 are reserved by X11 and produce no real keysym.
-fn buildKeysymTable(km: *xkb_keymap) [256]u32 {
-    var table: [256]u32 = [_]u32{xkb.XKB_KEY_NoSymbol} ** 256;
-    for (8..256) |kc| {
-        table[kc] = baseSymbol(km, @intCast(kc));
-    }
-    return table;
-}
-
 /// Renders a keysym to its XKB name (e.g. XKB_KEY_at -> "at") into `buf`,
 /// returning a slice of `buf` holding the name. Used for diagnostic messages.
 pub fn keysymGetName(keysym: u32, buf: []u8) []const u8 {
@@ -228,7 +228,10 @@ const xkb_retry_delay_ms = constants.xkb_retry_delay_ms;
 fn retryDelay(attempt: u8) void {
     if (attempt >= max_attempts - 1) return;
     const ns = xkb_retry_delay_ms * std.time.ns_per_ms;
-    var req = std.os.linux.timespec{ .sec = @intCast(ns / std.time.ns_per_s), .nsec = @intCast(ns % std.time.ns_per_s) };
+    var req = std.os.linux.timespec{
+        .sec = @intCast(ns / std.time.ns_per_s),
+        .nsec = @intCast(ns % std.time.ns_per_s),
+    };
     var rem = std.os.linux.timespec{ .sec = 0, .nsec = 0 };
     while (true) {
         const rc = std.os.linux.nanosleep(&req, &rem);

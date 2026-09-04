@@ -68,9 +68,7 @@ fn forkIntermediate(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
     std.process.exit(0);
 }
 
-// Pending spawn table
-//
-// 16 execs within the ~100 ms before /bin/sh execs would be inhuman speed.
+// Pending spawn table (max 16 in-flight double-forks).
 
 const max_pending_spawns: usize = 16;
 

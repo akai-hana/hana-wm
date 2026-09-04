@@ -5,10 +5,8 @@ const std = @import("std");
 const utils = @import("utils");
 const tiling = @import("tiling");
 
-/// Compute grid layout. Origin top-left, y-down. Gaps: full gap between cells
-/// and at screen edges (`gap * (cols+1)` / `gap * (rows+1)` subtracted from
-/// screen dims). Cell dimensions are u16, integer-divided; last partial row
-/// may be wider in relaxed mode. All dims clamped to min_dim.
+/// Compute grid layout. Full gap between cells and at screen edges; u16
+/// integer-divided cells, last partial row wider in relaxed mode.
 pub fn compute(v: tiling.View, out: *tiling.List) void {
     const n = v.order.len;
     // Empty workspace: calcGridShape(0) yields rows == 0, which would divide
@@ -29,29 +27,22 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
     const win_w = tiling.shrinkClamped(cell_w, bm, v.env.min_dim);
     const wa_y = tiling.waY(&v);
 
-    // In relaxed mode a partial last row shares the full screen width
-    // rather than a narrower grid-column width, so fewer columns means
-    // less wasted horizontal space. Gated on the caller-resolved flag so
-    // the division is skipped entirely on the default rigid path.
-    // Module-owned translation of the generic core variant index: the relaxed
-    // mode is active when the index equals relax_variant, which MUST equal
-    // this module's plugin.Layout.relax_mode / variant_parse target (both 1 =
-    // "relaxed"). Mirrors the pipeline's former caller-side relaxed flag.
+    // In relaxed mode a partial last row shares the full screen width.
+    // Core variant index -> relaxed (must equal plugin.relax_mode = 1).
     const relax_variant: u8 = 1;
     const last_row_count = n % grid.cols;
-    const partial_cell_w: u16 = if (v.env.variant_idx == relax_variant and last_row_count != 0) blk: {
-        const count: u16 = @intCast(last_row_count);
-        break :blk (screen_w -| (count + 1) *| m.gap) / count;
-    } else cell_w;
+    const partial_cell_w: u16 = if (v.env.variant_idx == relax_variant and last_row_count != 0)
+        widenedLastRowCellWidth(screen_w, last_row_count, m.gap)
+    else
+        cell_w;
     const partial_win_w: u16 = tiling.shrinkClamped(partial_cell_w, bm, v.env.min_dim);
 
     var col: u16 = 0;
     var row: u16 = 0;
     for (v.order) |win| {
         const is_partial_row = last_row_count != 0 and row == grid.rows - 1;
-        // In the partial row the columns are ALSO spaced by the partial cell
-        // width. Striding them by the narrow full-row cell_w would overlap the
-        // wide relaxed cells (they span a whole slot plus its gap).
+        // Partial-row columns are spaced by the wider partial cell so the
+        // relaxed cells don't overlap each other.
         const cell_w_here: u16 = if (is_partial_row) partial_cell_w else cell_w;
 
         const rect = utils.Rect{
@@ -70,10 +61,15 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
     }
 }
 
-/// Returns the column/row counts of the smallest square grid holding `n`
-/// windows. Special-cases `n == 3` to use a 1x3 layout instead of 2x2 with
-/// a dead cell. Uses an integer ceiling-sqrt loop; at most 7 iterations
-/// for n <= 64.
+/// Width of a widened (relaxed) last row's cell, sharing `screen_w` across
+/// `count` windows with full gaps on each side.
+inline fn widenedLastRowCellWidth(screen_w: u16, count: usize, gap: u16) u16 {
+    const c: u16 = @intCast(count);
+    return (screen_w -| (c + 1) *| gap) / c;
+}
+
+/// Column/row counts of the smallest square grid holding `n` windows; uses
+/// a 1x3 layout for `n == 3`. Integer ceiling-sqrt loop.
 inline fn calcGridShape(n: usize) struct { cols: u16, rows: u16 } {
     if (n == 3) return .{ .cols = 3, .rows = 1 };
     var cols: u16 = 1;

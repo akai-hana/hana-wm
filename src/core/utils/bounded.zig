@@ -31,7 +31,11 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         /// is true, or null if none matches. `context` is typically the search
         /// key (e.g. a window ID) and `match` a plain (non-closure) function,
         /// the same context+comptime-predicate shape `std.sort.pdq` uses.
-        pub fn indexOf(self: *const Self, context: anytype, comptime match: fn (@TypeOf(context), T) bool) ?usize {
+        pub fn indexOf(
+            self: *const Self,
+            context: anytype,
+            comptime match: fn (@TypeOf(context), T) bool,
+        ) ?usize {
             for (self.items[0..self.len], 0..) |item, i| {
                 if (match(context, item)) return i;
             }
@@ -46,7 +50,11 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
 
         /// Returns the index of the first item whose field named `field_name`
         /// equals `id`, or null. Generic over the key field name.
-        pub fn indexOfByIdField(self: *const Self, comptime field_name: std.meta.FieldEnum(T), id: u32) ?usize {
+        pub fn indexOfByIdField(
+            self: *const Self,
+            comptime field_name: std.meta.FieldEnum(T),
+            id: u32,
+        ) ?usize {
             return self.indexOf(id, struct {
                 fn match(i: u32, item: T) bool {
                     return @field(item, @tagName(field_name)) == i;
@@ -101,7 +109,11 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
             if (self.len >= capacity) return false;
             const idx = @min(i, self.len);
             self.len += 1;
-            std.mem.copyBackwards(T, self.items[idx + 1 .. self.len], self.items[idx .. self.len - 1]);
+            std.mem.copyBackwards(
+                T,
+                self.items[idx + 1 .. self.len],
+                self.items[idx .. self.len - 1],
+            );
             self.items[idx] = item;
             return true;
         }
