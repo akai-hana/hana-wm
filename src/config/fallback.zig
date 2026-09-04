@@ -69,7 +69,12 @@ fn isCommandAvailable(command: []const u8) bool {
 // like a terminal is not reported "available" and fails later with EACCES.
 fn checkPath(buf: []u8, dir: []const u8, command: []const u8) bool {
     const full_path = std.fmt.bufPrintZ(buf, "{s}/{s}", .{ dir, command }) catch return false;
-    const rc: isize = @bitCast(std.os.linux.faccessat(std.os.linux.AT.FDCWD, full_path, std.posix.X_OK, 0));
+    const rc: isize = @bitCast(std.os.linux.faccessat(
+        std.os.linux.AT.FDCWD,
+        full_path,
+        std.posix.X_OK,
+        0,
+    ));
     return rc == 0;
 }
 

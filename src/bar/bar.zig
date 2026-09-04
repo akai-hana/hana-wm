@@ -79,7 +79,11 @@ fn measureFontMetrics() ?struct { asc: i32, desc: i32 } {
     const cs = core.getState();
     const sized = drawing.buildSizedFontList(cs.alloc, null) catch return null;
     defer drawing.freeSizedFontList(cs.alloc, sized);
-    const m = drawing.probeFontMetrics(cs.alloc, core.dpi_info.load(.acquire), sized) orelse return null;
+    const m = drawing.probeFontMetrics(
+        cs.alloc,
+        core.dpi_info.load(.acquire),
+        sized,
+    ) orelse return null;
     return .{ .asc = m.ascent, .desc = m.descent };
 }
 
@@ -90,8 +94,13 @@ fn resolvePercentageFontSize(bar_height: u16) ?u16 {
     const cs = core.getState();
     const sized = drawing.buildSizedFontList(cs.alloc, trial_pt) catch return null;
     defer drawing.freeSizedFontList(cs.alloc, sized);
-    const m = drawing.probeFontMetrics(cs.alloc, core.dpi_info.load(.acquire), sized) orelse return null;
-    const px_per_pt: f32 = @as(f32, @floatFromInt(@max(1, m.ascent + m.descent))) / @as(f32, @floatFromInt(trial_pt));
+    const m = drawing.probeFontMetrics(
+        cs.alloc,
+        core.dpi_info.load(.acquire),
+        sized,
+    ) orelse return null;
+    const px_per_pt: f32 = @as(f32, @floatFromInt(@max(1, m.ascent + m.descent))) /
+        @as(f32, @floatFromInt(trial_pt));
     const max_size_pt = @as(f32, @floatFromInt(bar_height)) / px_per_pt;
     const cfg_pct = cs.config.bar.font_size.value / 100.0;
     return @max(1, @as(u16, @intFromFloat(@round(max_size_pt * cfg_pct))));
@@ -108,7 +117,11 @@ fn calcBarHeightAndFontSize() !u16 {
         return height;
     }
     const m = measureFontMetrics() orelse return default_bar_height;
-    return @intCast(std.math.clamp(@max(1, m.asc + m.desc), @as(i32, @intCast(min_bar_height)), @as(i32, @intCast(max_bar_height))));
+    return @intCast(std.math.clamp(
+        @max(1, m.asc + m.desc),
+        @as(i32, @intCast(min_bar_height)),
+        @as(i32, @intCast(max_bar_height)),
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -159,7 +172,10 @@ fn monotonicMs() i64 {
 
 /// Routes a keypress through every module that consumes one (the chrome
 /// overlay segment).
-pub fn chromeHandleKeypress(event: *const xcb.xcb_key_press_event_t, matched: ?*const types.Action) bool {
+pub fn chromeHandleKeypress(
+    event: *const xcb.xcb_key_press_event_t,
+    matched: ?*const types.Action,
+) bool {
     for (bar_mods) |m| {
         if (m.handleKeypress) |h| if (h(event, matched)) return true;
     }
@@ -205,10 +221,6 @@ const Bar = struct {
     title_data_changed: bool = false,
 };
 
-// PATTERN: Module-global state with explicit init/deinit lifecycle.
-// This avoids allocator threading through every function call.
-// The init/deinit pair is called from main.zig's startup/shutdown sequence.
-// All functions operate on `g` directly, with no passing state as parameters.
 var gBar: Bar = .{};
 
 /// Bar-provided service handles for mechanism segments (the prompt), owned for
@@ -601,13 +613,16 @@ const State = struct {
             var combined_mask: u64 = 0;
             for (tracking.allWindows()) |entry| {
                 combined_mask |= entry.mask;
-                if (cur_bit != 0 and entry.mask & cur_bit != 0 and self.wins_len < max_frame_windows) {
+                if (cur_bit != 0 and entry.mask & cur_bit != 0 and
+                    self.wins_len < max_frame_windows)
+                {
                     self.wins[self.wins_len] = entry.win;
                     self.wins_len += 1;
                 }
             }
             for (0..self.ws_count) |i| {
-                self.ws_has_windows[i] = combined_mask & tracking.workspaceBit(@as(u8, @intCast(i))) != 0;
+                self.ws_has_windows[i] = combined_mask &
+                    tracking.workspaceBit(@as(u8, @intCast(i))) != 0;
             }
         }
 
@@ -620,8 +635,11 @@ const State = struct {
                 (if (self.minimized_api.is_minimized) |f| f(m, self.wins[i]) else false)
             else
                 false;
-            if (!changed and (self.fetch_key_ids[i] != self.wins[i] or self.fetch_key_minimized[i] != minf))
+            if (!changed and (self.fetch_key_ids[i] != self.wins[i] or
+                self.fetch_key_minimized[i] != minf))
+            {
                 changed = true;
+            }
             self.fetch_key_ids[i] = self.wins[i];
             self.fetch_key_minimized[i] = minf;
         }
@@ -649,7 +667,6 @@ const State = struct {
         }
 
         const alloc = self.render.allocator;
-        const bench_start = utils.monotonicNs();
 
         // Commit any in-flight async prefetch whose replies have arrived
         // (non-blocking on the normal path; forced on reload/prompt paths).
@@ -694,7 +711,12 @@ const State = struct {
                     }
                     if (!resolved) {
                         self.focused_title.clearRetainingCapacity();
-                        segmod.fetchWindowTitleInto(self.win.conn, f, &self.focused_title, alloc) catch {};
+                        segmod.fetchWindowTitleInto(
+                            self.win.conn,
+                            f,
+                            &self.focused_title,
+                            alloc,
+                        ) catch {};
                         self.focused_title_window = fw;
                     }
                 }
@@ -702,14 +724,6 @@ const State = struct {
                 self.focused_title_window = null;
             }
             gBar.title_data_changed = false;
-        }
-
-        const bench_ns = utils.monotonicNs() - bench_start;
-        if (bench_ns > 0) {
-            std.debug.print(
-                "[titleprefetch] refreshTitleData={d}us wins={d} force={} pending={}\n",
-                .{ bench_ns / std.time.ns_per_us, self.wins_len, force, self.pending_prefetch != null },
-            );
         }
     }
 
@@ -792,7 +806,13 @@ const State = struct {
     /// Draws a segment by registry dispatch, catching and logging errors
     /// instead of propagating them. On failure returns `x` unchanged (the
     /// "drew nothing" signal) so a broken segment can't corrupt the layout.
-    fn drawSegmentSafe(self: *State, ctx: *segmod.DrawCtx, name: []const u8, x: u16, width: ?u16) u16 {
+    fn drawSegmentSafe(
+        self: *State,
+        ctx: *segmod.DrawCtx,
+        name: []const u8,
+        x: u16,
+        width: ?u16,
+    ) u16 {
         return self.drawSegment(ctx, name, x, width) catch |e| {
             debug.warnOnErr(e, "bar drawSegment");
             return x;
@@ -845,7 +865,13 @@ const State = struct {
     }
 
     fn paintGap(self: *State, gap_x: u16, scaled_spacing: u16) void {
-        self.render.dc.fillRect(gap_x, 0, scaled_spacing, self.render.height, self.render.config.bg);
+        self.render.dc.fillRect(
+            gap_x,
+            0,
+            scaled_spacing,
+            self.render.height,
+            self.render.config.bg,
+        );
     }
 
     fn drawRightSegments(
@@ -874,7 +900,13 @@ const State = struct {
 
             if (self.isSegmentRepaintable(names[i])) {
                 if (!is_full_redraw) {
-                    self.render.dc.fillRect(right_x, 0, seg_w, self.render.height, self.render.config.bg);
+                    self.render.dc.fillRect(
+                        right_x,
+                        0,
+                        seg_w,
+                        self.render.height,
+                        self.render.config.bg,
+                    );
                 }
                 const drew = self.drawSegmentSafe(ctx, names[i], right_x, null) != right_x;
                 if (drew) {
@@ -937,17 +969,21 @@ const State = struct {
                     // Available horizontal space before the right cluster.
                     const avail = r.width -| x -| right_total;
                     const remaining = if (lay.position == .center)
-                        // Clamp the reserved title width to the space actually
-                        // available so a tight right+left row can't overflow the
-                        // title into the right-segment area (min_width is a floor
-                        // only when the space exists; otherwise it shrinks).
-                        @min(@max(segmod.title_min_width, avail -| scaled_spacing), avail)
+                        // Clamp to available space so a tight right+left row
+                        // can't overflow into the right-segment area.
+                        @min(
+                            @max(segmod.title_min_width, avail -| scaled_spacing),
+                            avail,
+                        )
                     else
                         0;
                     for (lay.segments.items) |seg| {
                         const is_center = self.isCenterSlot(seg);
                         const omit_gap = (lay.position == .center) and is_center;
-                        const w = if (is_center) remaining else self.measureSegmentWidth(frame, seg);
+                        const w = if (is_center)
+                            remaining
+                        else
+                            self.measureSegmentWidth(frame, seg);
                         self.recordClickBound(seg, x, w);
                         // clock_x must be recorded for a self-ticking segment
                         // in ANY cluster (not just right): drawClockOnly relies
@@ -958,7 +994,14 @@ const State = struct {
                                 const clear_w = if (omit_gap) w else w + scaled_spacing;
                                 r.dc.fillRect(x, 0, clear_w, r.height, r.config.bg);
                             }
-                            x = self.drawRowSegment(ctx, seg, x, w, lay.position == .center, scaled_spacing);
+                            x = self.drawRowSegment(
+                                ctx,
+                                seg,
+                                x,
+                                w,
+                                lay.position == .center,
+                                scaled_spacing,
+                            );
                             self.clearSegmentDirty(seg);
                         } else {
                             x += w;
@@ -967,7 +1010,10 @@ const State = struct {
                     }
                 },
                 .right => {
-                    const ws = if (right_measured) right_widths[right_ridx..][0..lay.segments.items.len] else null;
+                    const ws = if (right_measured)
+                        right_widths[right_ridx..][0..lay.segments.items.len]
+                    else
+                        null;
                     self.drawRightSegments(ctx, lay.segments.items, ws, is_full_redraw);
                     right_ridx += lay.segments.items.len;
                 },
@@ -1083,8 +1129,20 @@ fn createBar(height: u16, y_pos: i16) !BarSetup {
     barwin.setWindowProperties(setup.win_id, height);
     const dc = try barwin.createDrawContext(setup, height);
     errdefer dc.deinit();
-    debug.info("Bar transparency: {s}", .{if (setup.has_argb) "enabled (ARGB)" else "disabled (opaque)"});
-    const state = try State.init(cs.alloc, cs.conn, setup.win_id, setup.colormap, cs.screen.width_in_pixels, height, dc, cs.config.bar);
+    debug.info(
+        "Bar transparency: {s}",
+        .{if (setup.has_argb) "enabled (ARGB)" else "disabled (opaque)"},
+    );
+    const state = try State.init(
+        cs.alloc,
+        cs.conn,
+        setup.win_id,
+        setup.colormap,
+        cs.screen.width_in_pixels,
+        height,
+        dc,
+        cs.config.bar,
+    );
     return .{ .setup = setup, .dc = dc, .state = state };
 }
 
@@ -1192,8 +1250,10 @@ fn applyReload(old: *State, height: u16) !void {
 /// the empty api, so the bar's synthesis loops no-op.
 fn minimizedApiFromRegistry() segmod.MinimizedApi {
     var api: segmod.MinimizedApi = .{};
-    if (@import("plugin").providerOf(window_mods[0..], .isWindowHidden) != null) api.is_minimized = minimizedIsHidden;
-    if (@import("plugin").providerOf(window_mods[0..], .collectHiddenSet) != null) api.collect = minimizedCollect;
+    if (@import("plugin").providerOf(window_mods[0..], .isWindowHidden) != null)
+        api.is_minimized = minimizedIsHidden;
+    if (@import("plugin").providerOf(window_mods[0..], .collectHiddenSet) != null)
+        api.collect = minimizedCollect;
     return api;
 }
 
@@ -1202,15 +1262,21 @@ fn minimizedApiFromRegistry() segmod.MinimizedApi {
 /// `*const anyopaque` (type-free seam, D3).
 fn minimizedIsHidden(m: *const anyopaque, win: u32) bool {
     const mm: *const model.Model = @ptrCast(@alignCast(m));
-    if (@import("plugin").providerOf(window_mods[0..], .isWindowHidden)) |wm| return wm.isWindowHidden.?(mm, @intCast(win));
+    if (@import("plugin").providerOf(window_mods[0..], .isWindowHidden)) |wm|
+        return wm.isWindowHidden.?(mm, @intCast(win));
     return false;
 }
 
 /// Full hidden-set synthesis forwarded to the hide-family provider
 /// (DrawCtx api signature, D12).
-fn minimizedCollect(m: *const anyopaque, set: *std.AutoHashMapUnmanaged(u32, void), allocator: std.mem.Allocator) void {
+fn minimizedCollect(
+    m: *const anyopaque,
+    set: *std.AutoHashMapUnmanaged(u32, void),
+    allocator: std.mem.Allocator,
+) void {
     const mm: *const model.Model = @ptrCast(@alignCast(m));
-    if (@import("plugin").providerOf(window_mods[0..], .collectHiddenSet)) |wm| wm.collectHiddenSet.?(mm, set, allocator);
+    if (@import("plugin").providerOf(window_mods[0..], .collectHiddenSet)) |wm|
+        wm.collectHiddenSet.?(mm, set, allocator);
 }
 
 /// Whether a window module (the fullscreen addon) claims the screen on `ws`
@@ -1233,14 +1299,22 @@ pub fn toggleBarSegmentAnchor() void {
     s.markDirty();
     s.clock_x = null;
     utils.grabServer(cs.conn);
-    _ = xcb.xcb_configure_window(cs.conn, s.win.win_id, xcb.XCB_CONFIG_WINDOW_Y, &[_]u32{utils.toXcbCoord(new_y)});
+    _ = xcb.xcb_configure_window(
+        cs.conn,
+        s.win.win_id,
+        xcb.XCB_CONFIG_WINDOW_Y,
+        &[_]u32{utils.toXcbCoord(new_y)},
+    );
     const current_ws = tracking.getCurrentWorkspace() orelse {
         window.updateWorkspaceBorders();
         window.markBordersFlushed();
         ungrabAndFlush();
         return;
     };
-    const no_fullscreen = if (build_options.has_fullscreen) fullscreenScreenClaimer(current_ws) == null else true;
+    const no_fullscreen = if (build_options.has_fullscreen)
+        fullscreenScreenClaimer(current_ws) == null
+    else
+        true;
     // The bar's edge changed; update its claim so the reconcile below
     // re-derives every placement from the new usable area.
     syncScreenClaim();
@@ -1315,7 +1389,12 @@ pub fn redrawInsideGrab() void {
 
 pub fn raiseBar() void {
     if (gBar.state) |s|
-        _ = xcb.xcb_configure_window(s.win.conn, s.win.win_id, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+        _ = xcb.xcb_configure_window(
+            s.win.conn,
+            s.win.win_id,
+            xcb.XCB_CONFIG_WINDOW_STACK_MODE,
+            &[_]u32{xcb.XCB_STACK_MODE_ABOVE},
+        );
 }
 
 /// Forces the bar to the absolute top of the stacking order and guarantees it
@@ -1358,7 +1437,10 @@ pub fn dismissAfterPrompt() void {
     if (!gBar.prompt_forced_visible) return;
     gBar.prompt_forced_visible = false;
     const current_ws = tracking.getCurrentWorkspace() orelse 0;
-    const no_fullscreen = if (build_options.has_fullscreen) fullscreenScreenClaimer(current_ws) == null else true;
+    const no_fullscreen = if (build_options.has_fullscreen)
+        fullscreenScreenClaimer(current_ws) == null
+    else
+        true;
     const should_show = no_fullscreen and s.is_globally_visible;
     if (should_show) return; // conditions changed while the prompt was open; stay visible
     s.is_visible = false;
@@ -1385,7 +1467,10 @@ pub fn setBarState(action: types.Action) void {
 /// reconcile; the bar merely updates its occupancy state here.
 pub fn updateBarVisibilityForWorkspace(ws: u8) void {
     const s = gBar.state orelse return;
-    const bar_forced_hidden_by_fullscreen = if (build_options.has_fullscreen) fullscreenScreenClaimer(ws) != null else false;
+    const bar_forced_hidden_by_fullscreen = if (build_options.has_fullscreen)
+        fullscreenScreenClaimer(ws) != null
+    else
+        false;
     const should_be_visible = !bar_forced_hidden_by_fullscreen and s.is_globally_visible;
     if (s.is_visible == should_be_visible) return;
     s.is_visible = should_be_visible;
@@ -1394,7 +1479,10 @@ pub fn updateBarVisibilityForWorkspace(ws: u8) void {
         submitDrawBlockingFull();
     }
     const conn = core.getState().conn;
-    if (should_be_visible) _ = xcb.xcb_map_window(conn, s.win.win_id) else _ = xcb.xcb_unmap_window(conn, s.win.win_id);
+    if (should_be_visible)
+        _ = xcb.xcb_map_window(conn, s.win.win_id)
+    else
+        _ = xcb.xcb_unmap_window(conn, s.win.win_id);
     // The bar's screen occupancy changed with its visibility; update the claim
     // so the caller's switch reconcile re-derives placement from the new area.
     syncScreenClaim();
@@ -1424,7 +1512,10 @@ pub fn hideBarForFullscreen() void {
 pub fn applyFullscreenVisibility() void {
     const s = gBar.state orelse return;
     const current_ws = tracking.getCurrentWorkspace() orelse 0;
-    const bar_forced_hidden_by_fullscreen = if (build_options.has_fullscreen) fullscreenScreenClaimer(current_ws) != null else false;
+    const bar_forced_hidden_by_fullscreen = if (build_options.has_fullscreen)
+        fullscreenScreenClaimer(current_ws) != null
+    else
+        false;
     const should_be_visible = !bar_forced_hidden_by_fullscreen and s.is_globally_visible;
     if (s.is_visible == should_be_visible) return;
     s.is_visible = should_be_visible;
@@ -1435,13 +1526,19 @@ pub fn applyFullscreenVisibility() void {
 
     const conn = core.getState().conn;
     utils.grabServer(conn);
-    if (should_be_visible) _ = xcb.xcb_map_window(conn, s.win.win_id) else _ = xcb.xcb_unmap_window(conn, s.win.win_id);
+    if (should_be_visible)
+        _ = xcb.xcb_map_window(conn, s.win.win_id)
+    else
+        _ = xcb.xcb_unmap_window(conn, s.win.win_id);
     // The bar's screen occupancy changed with its visibility; update the
     // claim so the reconcile below re-derives placement from the new area.
     syncScreenClaim();
     pipeline.reconcileNow();
     ungrabAndFlush();
-    debug.info("Bar {s} due to fullscreen-occupancy fact change", .{if (should_be_visible) "shown" else "hidden"});
+    debug.info(
+        "Bar {s} due to fullscreen-occupancy fact change",
+        .{if (should_be_visible) "shown" else "hidden"},
+    );
 }
 
 pub fn updateIfDirty() !void {
@@ -1507,6 +1604,11 @@ fn barModsConsumeRedrawRequest() bool {
     return false;
 }
 
+fn cs_configClockFormat() []const u8 {
+    const cs = core.getState();
+    return cs.config.bar.clock_format orelse types.default_clock_format;
+}
+
 /// Redraws just the clock segment when its on-screen content is stale
 /// (second rolled over, or config reload changed the format). Cheap to call
 /// on every event batch: it no-ops unless staleness is detected.
@@ -1527,11 +1629,6 @@ pub fn updateClock() bool {
     if (!redraw_clock) return false;
     s.drawClockOnly();
     return true;
-}
-
-fn cs_configClockFormat() []const u8 {
-    const cs = core.getState();
-    return cs.config.bar.clock_format orelse types.default_clock_format;
 }
 
 pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {
@@ -1611,7 +1708,12 @@ fn handleTitleClick(s: *State, offset: u16) void {
     const center_id = center_slot_role orelse return;
     const tb = s.recordedBound(bar_mods[center_id].name) orelse return;
 
-    const target = (segmod.hitTest(s.titleCtx(tb.x, tb.w), s.titleSnapshot(), s.render.allocator, offset) catch |e| {
+    const target = (segmod.hitTest(
+        s.titleCtx(tb.x, tb.w),
+        s.titleSnapshot(),
+        s.render.allocator,
+        offset,
+    ) catch |e| {
         debug.warnOnErr(e, "bar title click hitTest");
         return;
     }) orelse return;

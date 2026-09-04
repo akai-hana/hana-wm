@@ -34,7 +34,10 @@ pub const Value = union(enum) {
     // last-element descent.
     fn lastScalar(self: Value) ?Value {
         return switch (self) {
-            .array => |arr| if (arr.items.len > 0) arr.items[arr.items.len - 1].lastScalar() else null,
+            .array => |arr| if (arr.items.len > 0)
+                arr.items[arr.items.len - 1].lastScalar()
+            else
+                null,
             else => self,
         };
     }
@@ -160,7 +163,10 @@ pub const Section = struct {
         var iter = self.pairs.iterator();
         while (iter.next()) |entry| {
             if (!self.consumed.contains(entry.key_ptr.*)) {
-                debug.warn("Unrecognized key '{s}' in section [{s}]; ignoring", .{ entry.key_ptr.*, section_name });
+                debug.warn(
+                    "Unrecognized key '{s}' in section [{s}]; ignoring",
+                    .{ entry.key_ptr.*, section_name },
+                );
             }
         }
     }
@@ -286,7 +292,12 @@ fn ensureArray(allocator: std.mem.Allocator, old_val: *Value) !void {
 // flattened. Scalar getters resolve to the LAST element (later files win);
 // asArray sees the full accumulation so keybinds, `include`, `layouts`, etc.
 // chain.
-fn accumulate(allocator: std.mem.Allocator, old_val: *Value, incoming: Value, comptime do_copy: bool) !void {
+fn accumulate(
+    allocator: std.mem.Allocator,
+    old_val: *Value,
+    incoming: Value,
+    comptime do_copy: bool,
+) !void {
     try ensureArray(allocator, old_val);
     if (incoming == .array) {
         var inc = incoming;
@@ -355,7 +366,11 @@ fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Se
 // overwriting, equivalent to writing all pairs in one file. Scalar reads
 // resolve to the last element (later files win); array reads see every
 // declaration.
-pub fn mergeDocumentsInto(allocator: std.mem.Allocator, dst: *Document, src: *const Document) !void {
+pub fn mergeDocumentsInto(
+    allocator: std.mem.Allocator,
+    dst: *Document,
+    src: *const Document,
+) !void {
     try mergeSectionsInto(allocator, &dst.root, &src.root);
 
     var iter = src.sections.iterator();
@@ -495,7 +510,10 @@ const Parser = struct {
 
     fn parseString(self: *Parser) ParseError![]const u8 {
         const quote = self.consume().?;
-        var result = std.ArrayList(u8).initCapacity(self.allocator, 32) catch return ParseError.OutOfMemory;
+        var result = std.ArrayList(u8).initCapacity(
+            self.allocator,
+            32,
+        ) catch return ParseError.OutOfMemory;
         errdefer result.deinit(self.allocator);
         while (self.peek()) |c| {
             if (c == quote) {
@@ -529,7 +547,10 @@ const Parser = struct {
         self.array_depth += 1;
         defer self.array_depth -= 1;
         if (self.array_depth > max_array_depth) {
-            debug.warn("Array nesting too deep (> {}) at line {}, treating as invalid", .{ max_array_depth, self.line });
+            debug.warn(
+                "Array nesting too deep (> {}) at line {}, treating as invalid",
+                .{ max_array_depth, self.line },
+            );
             return ParseError.InvalidValue;
         }
 
@@ -612,7 +633,10 @@ const Parser = struct {
         if (boolean_keywords.get(raw)) |b| return .{ .boolean = b };
 
         if (raw.len > 1 and raw[raw.len - 1] == '%') {
-            const f = std.fmt.parseFloat(f32, raw[0 .. raw.len - 1]) catch return ParseError.InvalidValue;
+            const f = std.fmt.parseFloat(
+                f32,
+                raw[0 .. raw.len - 1],
+            ) catch return ParseError.InvalidValue;
             if (!std.math.isFinite(f)) return ParseError.InvalidValue;
             return .{ .scalable = ScalableValue.percentage(f) };
         }
@@ -742,18 +766,25 @@ const Parser = struct {
             }
 
             self.skipWhitespace();
-            const next = self.peek();
-            if (next == ';') _ = self.consume();
-            self.skipWhitespace();
-            const trail = self.peek();
-            if (trail == '\n' or trail == '#' or trail == null) {
-                self.skipLineEnd(trail);
-                break;
-            }
-            debug.warn("Unexpected character at line {}", .{self.line});
-            self.skipToNewline();
-            break;
+            if (!self.advanceAfterPair()) break;
         }
+    }
+
+    // Advances past the end of one pair: an optional ';' terminator, trailing
+    // whitespace, and any line-end comment or newline. Returns false (stop
+    // the pair loop) on a terminator or an unexpected trailing character.
+    fn advanceAfterPair(self: *Parser) bool {
+        const next = self.peek();
+        if (next == ';') _ = self.consume();
+        self.skipWhitespace();
+        const trail = self.peek();
+        if (trail == '\n' or trail == '#' or trail == null) {
+            self.skipLineEnd(trail);
+            return false;
+        }
+        debug.warn("Unexpected character at line {}", .{self.line});
+        self.skipToNewline();
+        return false;
     }
 };
 

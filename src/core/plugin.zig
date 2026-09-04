@@ -45,7 +45,8 @@ const model = @import("model");
 /// The tiling registry (build-generated). Re-exported here so consumers share
 /// one conditional-import definition instead of copy-pasting the
 /// `has_tiling` guard across files. Empty when the tiling subsystem is absent.
-pub const tiling_mods = if (@import("build_options").has_tiling) @import("tiling_modules").modules else &[_]Layout{};
+pub const tiling_mods =
+    if (@import("build_options").has_tiling) @import("tiling_modules").modules else &[_]Layout{};
 
 /// The chrome-surface hook set a surface module binds to. The bar binds its
 /// `surfaces` value to this; when no surface is compiled in, core's
@@ -130,7 +131,11 @@ pub const WindowModule = struct {
     restoreWindow: ?*const fn (*model.Model, model.WindowId) void = null,
     /// Select the next restore candidate on `ws` in the given order
     /// (LIFO/FIFO). Returns null when nothing on ws is hidden.
-    restoreCandidateOn: ?*const fn (*const model.Model, model.WSId, model.RestoreOrder) ?model.WindowId = null,
+    restoreCandidateOn: ?*const fn (
+        *const model.Model,
+        model.WSId,
+        model.RestoreOrder,
+    ) ?model.WindowId = null,
     /// Bulk-restore every hidden window on `ws`. At most one module binds
     /// this.
     restoreOnWs: ?*const fn (*model.Model, model.WSId) void = null,
@@ -143,7 +148,11 @@ pub const WindowModule = struct {
     /// `set` (clearing it first). At most one module binds this; the bar
     /// consumes it through the cached DrawCtx api so it never names the
     /// window addon.
-    collectHiddenSet: ?*const fn (*const model.Model, *std.AutoHashMapUnmanaged(model.WindowId, void), std.mem.Allocator) void = null,
+    collectHiddenSet: ?*const fn (
+        *const model.Model,
+        *std.AutoHashMapUnmanaged(model.WindowId, void),
+        std.mem.Allocator,
+    ) void = null,
 
     // ----------------------------------------------------------------
     // Screen-covering family (bound by the fullscreen module; contract
@@ -197,7 +206,11 @@ pub const WindowModule = struct {
     /// Honor a configure request against a floating window record on the
     /// model. Returns the decision (geometry_applied / border_only /
     /// ignored).
-    honorConfigureRequest: ?*const fn (*model.Model, model.WindowId, model.ConfigureReq) model.HonorDecision = null,
+    honorConfigureRequest: ?*const fn (
+        *model.Model,
+        model.WindowId,
+        model.ConfigureReq,
+    ) model.HonorDecision = null,
 
     // Floating drag/resize commands.
     startDrag: ?*const fn (u32, u8, i16, i16) void = null,
@@ -301,7 +314,14 @@ pub const Segment = struct {
     draw: ?*const fn (*anyopaque, u16) anyerror!u16 = null,
     /// Click dispatch for recorded bounds; mirrors the chrome-surface input
     /// routing (state/title_click/redraw are bar-provided fn pointers).
-    onClick: ?*const fn (u16, bool, bool, *anyopaque, *const fn (*anyopaque, u16) void, *const fn () void) bool = null,
+    onClick: ?*const fn (
+        u16,
+        bool,
+        bool,
+        *anyopaque,
+        *const fn (*anyopaque, u16) void,
+        *const fn () void,
+    ) bool = null,
     // Chrome-overlay extras (bound into the chrome `Surfaces` hooks and polled
     // uniformly; the overlay segment is the only one that sets them).
     handleKeypress: ?*const fn (*const xcb.xcb_key_press_event_t, ?*const types.Action) bool = null,

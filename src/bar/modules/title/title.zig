@@ -1,5 +1,6 @@
 //! Title bar segment
-//! Displays the focused window title on the status bar, with a split view when minimized windows are present.
+//! Displays the focused window title on the status bar, with a split view
+//! when minimized windows are present.
 //!
 //! The title render/snapshot machinery and the `DrawCtx`/`Frame` vocabulary
 //! live in `segment.zig` (shared across bar segments); this module only owns
@@ -93,7 +94,12 @@ fn drawInner(
 /// Render the title slot at `x` (its reserved width is in `ctx.width`),
 /// delegating to the active prompt overlay when open.
 fn renderTitle(ctx: *segmod.DrawCtx, x: u16) !u16 {
-    return drawInner(ctx.titleRenderContext(x, ctx.width), ctx.titleSnapshot(), ctx.allocator, false);
+    return drawInner(
+        ctx.titleRenderContext(x, ctx.width),
+        ctx.titleSnapshot(),
+        ctx.allocator,
+        false,
+    );
 }
 
 /// Draw a window resolved via DrawCtx as the single-window case.
@@ -185,7 +191,14 @@ fn drawMarqueeCell(
     // Anchor the scroll at the padded text start (same spot static mode uses),
     // so enabling the carousel continues seamlessly from where the head sat.
     const x0: f64 = @as(f64, @floatFromInt(geom.text_x)) - off;
-    try ctx.dc.drawTextScrolled(geom.seg_x, geom.seg_w, baseline_y, .{ x0, x0 + cycle }, txt, fg);
+    try ctx.dc.drawTextScrolled(
+        geom.seg_x,
+        geom.seg_w,
+        baseline_y,
+        .{ x0, x0 + cycle },
+        txt,
+        fg,
+    );
 }
 
 fn nowMs() i64 {
@@ -255,7 +268,10 @@ fn drawSegmentedTitles(
 ) !void {
     const windows = snapshot.current_ws_wins;
     if (windows.len > constants.max_rendered_title_windows)
-        debug.warn("Workspace has {} windows; only the first {} are rendered in split-view", .{ windows.len, constants.max_rendered_title_windows });
+        debug.warn(
+            "Workspace has {} windows; only the first {} are rendered in split-view",
+            .{ windows.len, constants.max_rendered_title_windows },
+        );
     const win_count = @min(windows.len, constants.max_rendered_title_windows);
 
     var scratch: segmod.GatherScratch = .{};

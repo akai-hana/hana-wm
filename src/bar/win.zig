@@ -64,8 +64,23 @@ pub fn calcBarYPos(height: u16) i16 {
 pub const BarWindowSetup = struct { win_id: u32, visual_id: u32, has_argb: bool, colormap: u32 };
 
 /// Set an EWMH atom property on the bar window.
-fn setAtomProperty(conn: core.Connection, win_id: u32, prop: u32, atom_type: u32, values: anytype) void {
-    _ = xcb.xcb_change_property(conn, xcb.XCB_PROP_MODE_REPLACE, win_id, prop, atom_type, 32, @intCast(values.len), values.ptr);
+fn setAtomProperty(
+    conn: core.Connection,
+    win_id: u32,
+    prop: u32,
+    atom_type: u32,
+    values: anytype,
+) void {
+    _ = xcb.xcb_change_property(
+        conn,
+        xcb.XCB_PROP_MODE_REPLACE,
+        win_id,
+        prop,
+        atom_type,
+        32,
+        @intCast(values.len),
+        values.ptr,
+    );
 }
 
 pub fn setWindowProperties(win_id: u32, height: u16) void {
@@ -79,14 +94,18 @@ pub fn setWindowProperties(win_id: u32, height: u16) void {
         .{ "strut_partial", xcb.XCB_ATOM_CARDINAL, &strut },
         .{ "window_type", xcb.XCB_ATOM_ATOM, &[_]u32{atoms.window_type_dock} },
         .{ "wm_state", xcb.XCB_ATOM_ATOM, &[_]u32{ atoms.state_above, atoms.state_sticky } },
-        .{ "allowed_actions", xcb.XCB_ATOM_ATOM, &[_]u32{ atoms.action_close, atoms.action_above, atoms.action_stick } },
+        .{
+            "allowed_actions",
+            xcb.XCB_ATOM_ATOM,
+            &[_]u32{ atoms.action_close, atoms.action_above, atoms.action_stick },
+        },
     };
     inline for (entries) |e| {
         const atom = @field(atoms, e[0]);
-        if (atom != 0) setAtomProperty(cs.conn, win_id, atom, e[1], e[2]);
+        if (atom != 0)
+            setAtomProperty(cs.conn, win_id, atom, e[1], e[2]);
     }
 }
-
 pub fn destroyBarWindow(conn: core.Connection, win_id: u32, colormap: u32) void {
     _ = xcb.xcb_destroy_window(conn, win_id);
     if (colormap != 0) _ = xcb.xcb_free_colormap(conn, colormap);
@@ -102,7 +121,13 @@ pub fn createBarWindow(height: u16, y_pos: i16) BarWindowSetup {
     const depth: u8 = if (want_transparency) 32 else xcb.XCB_COPY_FROM_PARENT;
     const colormap: u32 = if (want_transparency) blk: {
         const cmap = xcb.xcb_generate_id(cs.conn);
-        _ = xcb.xcb_create_colormap(cs.conn, xcb.XCB_COLORMAP_ALLOC_NONE, cmap, cs.screen.root, visual_id);
+        _ = xcb.xcb_create_colormap(
+            cs.conn,
+            xcb.XCB_COLORMAP_ALLOC_NONE,
+            cmap,
+            cs.screen.root,
+            visual_id,
+        );
         break :blk cmap;
     } else 0;
     const win_id = xcb.xcb_generate_id(cs.conn);
@@ -110,12 +135,29 @@ pub fn createBarWindow(height: u16, y_pos: i16) BarWindowSetup {
         xcb.XCB_CW_OVERRIDE_REDIRECT | xcb.XCB_CW_EVENT_MASK |
         if (want_transparency) xcb.XCB_CW_COLORMAP else 0;
     const base_events = xcb.XCB_EVENT_MASK_EXPOSURE | xcb.XCB_EVENT_MASK_BUTTON_PRESS;
-    // Positional slots, in the same order as the CW_* bits above:
-    // [0]=BACK_PIXEL, [1]=BORDER_PIXEL, [2]=OVERRIDE_REDIRECT,
-    // [3]=EVENT_MASK, [4]=COLORMAP.
+    // value_list slot order must match the CW_* bit order in value_mask above.
     const value_list = [5]u32{ 0, 0, 1, base_events, colormap };
-    _ = xcb.xcb_create_window(cs.conn, depth, win_id, cs.screen.root, 0, y_pos, cs.screen.width_in_pixels, height, 0, xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, visual_id, @intCast(value_mask), &value_list);
-    return .{ .win_id = win_id, .visual_id = visual_id, .has_argb = want_transparency, .colormap = colormap };
+    _ = xcb.xcb_create_window(
+        cs.conn,
+        depth,
+        win_id,
+        cs.screen.root,
+        0,
+        y_pos,
+        cs.screen.width_in_pixels,
+        height,
+        0,
+        xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT,
+        visual_id,
+        @intCast(value_mask),
+        &value_list,
+    );
+    return .{
+        .win_id = win_id,
+        .visual_id = visual_id,
+        .has_argb = want_transparency,
+        .colormap = colormap,
+    };
 }
 
 pub fn createDrawContext(setup: BarWindowSetup, height: u16) !*drawing.DrawContext {

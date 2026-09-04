@@ -15,18 +15,13 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
     if (v.order.len == 0) return;
 
     const m = v.env.margins;
-    // Module-owned translation of the generic core variant index: the gaps
-    // variant is active when the index equals gap_variant, which MUST equal
-    // this module's plugin.Layout.gap_mode / variant_parse target (both 1 =
-    // "gaps"). Mirrors the pipeline's former caller-side gaps flag.
+    // Core variant index -> gaps-enabled (must equal plugin.gap_mode = 1).
     const gap_variant: u8 = 1;
     const inset: u16 = if (v.env.variant_idx == gap_variant) m.gap else 0;
     const total_margin = utils.doubledBorder(m) + inset * 2;
 
-    // Pick the top (visible) window: prefer the focused window, else the list
-    // tail, so the last-focused window resurfaces on close. A focus change
-    // alone doesn't retile (monocle hides via offscreen positioning, not stack
-    // order); snapScrollToFocused / mapWindowToScreen handle the retiles.
+    // Pick the top (visible) window: prefer the focused window, else the
+    // list tail, so the last-focused window resurfaces on close.
     const top_win = tiling.focusedElse(&v, v.order, v.order[v.order.len - 1]);
 
     const top_rect = utils.Rect{

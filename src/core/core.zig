@@ -30,11 +30,10 @@ pub const Screen = *xcb.xcb_screen_t;
 /// Equivalent to xcb_window_t (uint32_t).
 pub const WindowId = u32;
 
-// TYPE NOTE: WorkspaceId (core.zig) is the canonical type for workspace
-// identifiers. Model code uses raw integers for internal array indexing.
-// The conversion happens at the entry-point boundary.
-/// Workspace index wrapper. Prevents confusing workspace indices with
-/// unrelated u8 values (counts, layout indices, etc.) at call sites.
+/// Workspace index wrapper. The canonical type for workspace identifiers;
+/// model code uses raw integers for internal indexing, converted at the
+/// entry-point boundary. Prevents confusing indices with unrelated u8
+/// values (counts, layout indices, etc.) at call sites.
 pub const WorkspaceId = struct {
     index: u8,
 
@@ -128,13 +127,9 @@ pub inline fn bumpLayout() void {
 
 // ---------------------------------------------------------------------------
 // Config-derived windowing facts (owned by core).
-// These are the only facts other modules need about the tiling subsystem:
-// callers read them here instead of importing the tiling module, so that
-// `tiling` is a true plugin. The implementations are thin config reads; the
-// active-layout name resolves to a registry id at seed time in the tiling
-// layer (engine.layoutByName), never here. None of these name any tiling
-// module; they are just "can this WM tile, how wide are borders" questions
-// core can answer from its config.
+// These are the only tiling facts other modules need; they read them here
+// instead of importing `tiling`, so `tiling` stays a true plugin. They are
+// thin config reads core can answer from its own config.
 
 /// Whether the tiling windowing paradigm is enabled (config fact).
 pub inline fn tilingEnabled() bool {
@@ -144,7 +139,10 @@ pub inline fn tilingEnabled() bool {
 /// Scaled tiling border width in pixels (config fact).
 pub inline fn borderWidth() u16 {
     const cs = getState();
-    return utils.scaling.scaleBorderWidth(cs.config.tiling.border_width, cs.screen.height_in_pixels);
+    return utils.scaling.scaleBorderWidth(
+        cs.config.tiling.border_width,
+        cs.screen.height_in_pixels,
+    );
 }
 
 var state: ?State = null;
@@ -159,7 +157,13 @@ pub inline fn getState() *State {
 /// after the X connection is open and config is loaded, before any
 /// other module calls getState(). Takes ownership of the config pointer;
 /// the caller must not free it.
-pub fn init(conn: Connection, screen: Screen, root: WindowId, alloc: std.mem.Allocator, config: *types.Config) void {
+pub fn init(
+    conn: Connection,
+    screen: Screen,
+    root: WindowId,
+    alloc: std.mem.Allocator,
+    config: *types.Config,
+) void {
     state = .{ .conn = conn, .screen = screen, .root = root, .alloc = alloc, .config = config };
 }
 

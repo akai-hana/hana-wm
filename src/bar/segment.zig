@@ -62,15 +62,16 @@ pub const MinimizedApi = struct {
     /// Live per-window minimized query (bar's fetch-key diff + click routing).
     is_minimized: ?*const fn (m: *const anyopaque, win: u32) bool = null,
     /// Synthesize the full minimized-window set into `set` (bar's title shot).
-    collect: ?*const fn (m: *const anyopaque, set: *std.AutoHashMapUnmanaged(u32, void), allocator: std.mem.Allocator) void = null,
+    collect: ?*const fn (
+        m: *const anyopaque,
+        set: *std.AutoHashMapUnmanaged(u32, void),
+        allocator: std.mem.Allocator,
+    ) void = null,
 };
 
-/// Type-free cast of the bar-built `*anyopaque` handed to a segment's
-/// `draw` hook back into the concrete `*DrawCtx`. Every segment's draw adapter
-/// performs this identical cast, so it lives here once (laying in the segment
-/// vocabulary layer, never in the core orchestrator) instead of being
-/// copy-pasted per module. Segments keep their own thin `drawHook` that calls
-/// `draw(castDraw(ctx), ...)`.
+/// Type-free cast of the bar-built `*anyopaque` back into `*DrawCtx`.
+/// Every segment's draw adapter performs this identical cast, so it lives
+/// here once instead of being copy-pasted per module.
 pub inline fn castDraw(ctx: *anyopaque) *DrawCtx {
     return @ptrCast(@alignCast(ctx));
 }
@@ -147,9 +148,13 @@ const max_visible_windows: usize = 128;
 /// Maximum windows addressed by the batch pre-fetch scratch arrays at once.
 const max_batch_windows: usize = constants.Limits.max_tiled_windows;
 
-/// Off-screen sentinel geometry for minimized or otherwise unresolvable
-/// windows: position sorting places it last, and drawing is skipped.
-pub const offscreen_rect: utils.Rect = .{ .x = std.math.maxInt(i16), .y = std.math.maxInt(i16), .width = 0, .height = 0 };
+/// Off-screen sentinel: sorts last in position, drawing is skipped.
+pub const offscreen_rect: utils.Rect = .{
+    .x = std.math.maxInt(i16),
+    .y = std.math.maxInt(i16),
+    .width = 0,
+    .height = 0,
+};
 
 const Atoms = struct {
     /// null until successfully resolved, to avoid XCB_ATOM_NONE's sentinel (0).
@@ -232,7 +237,15 @@ fn gatherAndSortWindowInfos(
     out_window_info_buf: *[max_visible_windows]WindowInfo,
     out_data: FetchedWindows,
 ) !?[]WindowInfo {
-    const info_count = try gatherWindowInfos(ctx, snapshot, allocator, windows, win_count, out_window_info_buf, out_data);
+    const info_count = try gatherWindowInfos(
+        ctx,
+        snapshot,
+        allocator,
+        windows,
+        win_count,
+        out_window_info_buf,
+        out_data,
+    );
     if (info_count == 0) return null;
     const window_infos = out_window_info_buf[0..info_count];
     std.mem.sort(WindowInfo, window_infos, {}, compareWindows);
@@ -326,7 +339,12 @@ pub const GatherScratch = struct {
         );
     }
 
-    pub fn freeBorrowedTitles(self: *GatherScratch, snapshot: TitleSnapshot, win_count: usize, allocator: std.mem.Allocator) void {
+    pub fn freeBorrowedTitles(
+        self: *GatherScratch,
+        snapshot: TitleSnapshot,
+        win_count: usize,
+        allocator: std.mem.Allocator,
+    ) void {
         if (!titlesNeedFree(snapshot, win_count)) return;
         for (self.titles[0..win_count]) |t| allocator.free(t);
     }
@@ -359,10 +377,14 @@ pub fn hitTest(
 
     var scratch: GatherScratch = .{};
     defer scratch.freeBorrowedTitles(snapshot, win_count, allocator);
-    const sorted = (try scratch.gather(ctx, snapshot, allocator, windows, win_count)) orelse return null;
+    const sorted = (try scratch.gather(ctx, snapshot, allocator, windows, win_count)) orelse
+        return null;
 
     const n: u32 = @intCast(sorted.len);
-    const idx: usize = @intCast(@min(n - 1, @divFloor(@as(u32, offset_x) * n, @as(u32, ctx.width))));
+    const idx: usize = @intCast(@min(
+        n - 1,
+        @divFloor(@as(u32, offset_x) * n, @as(u32, ctx.width)),
+    ));
     const info = sorted[idx];
     return .{ .window = info.window, .minimized = info.minimized };
 }
@@ -398,7 +420,10 @@ pub fn fetchWindowTitleInto(
     }
 }
 
-fn tryCollectGeometryReply(conn: core.Connection, cookie: xcb.xcb_get_geometry_cookie_t) ?utils.Rect {
+fn tryCollectGeometryReply(
+    conn: core.Connection,
+    cookie: xcb.xcb_get_geometry_cookie_t,
+) ?utils.Rect {
     const r = utils.collectGeometryReply(conn, cookie) orelse return null;
     defer std.c.free(r);
     return utils.rectFromXcb(r, false);
@@ -437,7 +462,15 @@ const WindowDataBatch = struct {
         for (windows, 0..) |win, i| {
             if (!has_prefetched_titles) {
                 if (self.net_atom) |na| {
-                    self.net_wm_cookies[i] = xcb.xcb_get_property(self.conn, 0, win, na, self.utf_type, 0, 8192);
+                    self.net_wm_cookies[i] = xcb.xcb_get_property(
+                        self.conn,
+                        0,
+                        win,
+                        na,
+                        self.utf_type,
+                        0,
+                        8192,
+                    );
                 }
             }
 
@@ -465,23 +498,45 @@ const WindowDataBatch = struct {
             owned_titles[i] = null;
             self.needs_fallback[i] = false;
             if (self.net_atom != null)
-                owned_titles[i] = collectPropertyReply(self.conn, self.net_wm_cookies[i], self.allocator);
+                owned_titles[i] = collectPropertyReply(
+                    self.conn,
+                    self.net_wm_cookies[i],
+                    self.allocator,
+                );
             if (owned_titles[i] == null) {
-                self.fallback_cookies[i] = xcb.xcb_get_property(self.conn, 0, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, 0, 8192);
+                self.fallback_cookies[i] = xcb.xcb_get_property(
+                    self.conn,
+                    0,
+                    win,
+                    xcb.XCB_ATOM_WM_NAME,
+                    xcb.XCB_ATOM_STRING,
+                    0,
+                    8192,
+                );
                 self.needs_fallback[i] = true;
             }
         }
 
         for (windows, 0..) |_, i| {
             if (!self.needs_fallback[i]) continue;
-            owned_titles[i] = collectPropertyReply(self.conn, self.fallback_cookies[i], self.allocator);
+            owned_titles[i] = collectPropertyReply(
+                self.conn,
+                self.fallback_cookies[i],
+                self.allocator,
+            );
         }
     }
 
-    fn geometryFor(self: *WindowDataBatch, i: usize, minimized: bool, prefetched: ?utils.Rect) ?utils.Rect {
+    fn geometryFor(
+        self: *WindowDataBatch,
+        i: usize,
+        minimized: bool,
+        prefetched: ?utils.Rect,
+    ) ?utils.Rect {
         if (minimized) return offscreen_rect;
         if (self.tiling_geoms[i]) |cached| return cached;
-        if (self.needs_xcb_geometry[i]) return tryCollectGeometryReply(self.conn, self.geom_cookies[i]);
+        if (self.needs_xcb_geometry[i])
+            return tryCollectGeometryReply(self.conn, self.geom_cookies[i]);
         return prefetched orelse offscreen_rect;
     }
 };
@@ -511,29 +566,12 @@ pub fn fetchTitlesAndGeoms(
     const has_titles = if (prefetch.titles) |p| p.len >= win_count else false;
     const has_geoms = if (prefetch.geoms) |p| p.len >= win_count else false;
 
-    // Timing instrumentation (title prefetch): separates the async request
-    // fire phase from the blocking reply-collection phases so we can see
-    // where the draw-blocking time actually goes.
-    const bench_fire_start = utils.monotonicNs();
     var batch = WindowDataBatch.init(conn, title_allocator);
     batch.fire(wins, minimized, has_titles, has_geoms);
-    const bench_fire_ns = utils.monotonicNs() - bench_fire_start;
 
     var owned: [max_batch_windows]?[]const u8 = undefined;
-    const bench_collect_start = utils.monotonicNs();
     if (!has_titles)
         batch.fetchTitles(wins, owned[0..win_count]);
-    const bench_collect_ns = utils.monotonicNs() - bench_collect_start;
-
-    std.debug.print(
-        "[titleprefetch] win_count={d} fire={d}us title_collect={d}us total={d}us\n",
-        .{
-            win_count,
-            bench_fire_ns / std.time.ns_per_us,
-            bench_collect_ns / std.time.ns_per_us,
-            (bench_fire_ns + bench_collect_ns) / std.time.ns_per_us,
-        },
-    );
 
     for (wins, 0..) |win, i| {
         out.titles[i] = if (has_titles)
@@ -563,7 +601,10 @@ fn collectPropertyReply(
 /// cookie (the caller may retry on a later event-loop pass). Uses
 /// xcb_poll_for_reply, which consumes a cookie only when a reply or error was
 /// actually produced, so a null return leaves the request outstanding.
-fn tryPollPropertyReply(conn: core.Connection, cookie: xcb.xcb_get_property_cookie_t) ?*xcb.xcb_get_property_reply_t {
+fn tryPollPropertyReply(
+    conn: core.Connection,
+    cookie: xcb.xcb_get_property_cookie_t,
+) ?*xcb.xcb_get_property_reply_t {
     var reply: ?*anyopaque = null;
     var err: ?*xcb.xcb_generic_error_t = null;
     _ = xcb.xcb_poll_for_reply(conn, cookie.sequence, &reply, &err);
@@ -620,7 +661,15 @@ pub const PendingPrefetch = struct {
         for (windows, 0..) |win, i| {
             self.net_wm_cookies[i] = undefined;
             if (self.net_atom) |na| {
-                self.net_wm_cookies[i] = xcb.xcb_get_property(self.conn, 0, win, na, self.utf_type, 0, 8192);
+                self.net_wm_cookies[i] = xcb.xcb_get_property(
+                    self.conn,
+                    0,
+                    win,
+                    na,
+                    self.utf_type,
+                    0,
+                    8192,
+                );
             }
             self.needs_xcb_geometry[i] = false;
             self.tiling_geoms[i] = null;
@@ -667,12 +716,12 @@ pub const PendingPrefetch = struct {
         // without consuming on a miss. Missing net_atom means no property
         // request was fired -- nothing to wait on; proceed for geometry only
         // (mostly the in-process truth cache). Once the gate succeeds the whole
-        // batch is buffered (in-order delivery), so we are committed: only now
-        // reset the arena (freeing stale strings) and re-dup fresh ones.
+        // batch is buffered (in-order delivery), so we reset the arena and
+        // re-dup fresh strings.
         var gate_reply: ?*xcb.xcb_get_property_reply_t = null;
-        if (!blocking and self.net_atom != null and self.win_count > 0) {
-            gate_reply = tryPollPropertyReply(self.conn, self.net_wm_cookies[0]) orelse return false;
-        }
+        if (!blocking and self.net_atom != null and self.win_count > 0)
+            gate_reply = tryPollPropertyReply(self.conn, self.net_wm_cookies[0]) orelse
+                return false;
         defer if (gate_reply) |g| std.c.free(g);
         _ = titles_arena.reset(.retain_capacity);
 
@@ -685,7 +734,11 @@ pub const PendingPrefetch = struct {
                         owned[0] = extractPropertyString(g, allocator) catch null;
                     }
                 } else if (blocking) {
-                    owned[i] = collectPropertyReply(self.conn, self.net_wm_cookies[i], allocator);
+                    owned[i] = collectPropertyReply(
+                        self.conn,
+                        self.net_wm_cookies[i],
+                        allocator,
+                    );
                 } else if (tryPollPropertyReply(self.conn, self.net_wm_cookies[i])) |r| {
                     defer std.c.free(r);
                     owned[i] = extractPropertyString(r, allocator) catch null;
@@ -694,7 +747,15 @@ pub const PendingPrefetch = struct {
             // Rare fallback: a window presenting only the legacy WM_NAME
             // property. Resolved synchronously regardless of mode (uncommon).
             if (owned[i] == null and self.net_atom != null) {
-                const fb_cookie = xcb.xcb_get_property(self.conn, 0, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, 0, 8192);
+                const fb_cookie = xcb.xcb_get_property(
+                    self.conn,
+                    0,
+                    win,
+                    xcb.XCB_ATOM_WM_NAME,
+                    xcb.XCB_ATOM_STRING,
+                    0,
+                    8192,
+                );
                 owned[i] = collectPropertyReply(self.conn, fb_cookie, allocator);
             }
             out.titles[i] = owned[i] orelse "";
@@ -706,7 +767,8 @@ pub const PendingPrefetch = struct {
     fn geometryFor(self: *const PendingPrefetch, i: usize, minimized: bool) ?utils.Rect {
         if (minimized) return offscreen_rect;
         if (self.tiling_geoms[i]) |cached| return cached;
-        if (self.needs_xcb_geometry[i]) return tryCollectGeometryReply(self.conn, self.geom_cookies[i]);
+        if (self.needs_xcb_geometry[i])
+            return tryCollectGeometryReply(self.conn, self.geom_cookies[i]);
         return null;
     }
 };
@@ -744,7 +806,10 @@ pub fn idByName(modules: []const @import("plugin").Segment, name: []const u8) ?u
 /// locate role-bearing segments without naming them. Comptime-friendly: the
 /// returned index can feed `const` role ids so role-null guards
 /// dead-code-eliminate, just like the `registry_empty` comptime pattern.
-pub fn findByCapability(modules: []const @import("plugin").Segment, comptime check: anytype) ?usize {
+pub fn findByCapability(
+    modules: []const @import("plugin").Segment,
+    comptime check: anytype,
+) ?usize {
     for (modules, 0..) |m, i| {
         if (matchCapabilities(m, check)) return i;
     }

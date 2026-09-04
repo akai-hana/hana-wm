@@ -22,7 +22,11 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
         vals: [capacity]V = undefined,
         len: usize = 0,
 
-        fn binarySearch(self: *const Self, comptime mode: enum { exact, lower_bound }, k: K) if (mode == .exact) ?usize else usize {
+        fn binarySearch(
+            self: *const Self,
+            comptime mode: enum { exact, lower_bound },
+            k: K,
+        ) if (mode == .exact) ?usize else usize {
             var lo: usize = 0;
             var hi: usize = self.len;
             if (mode == .exact) {

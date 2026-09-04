@@ -13,8 +13,9 @@ const segmod = @import("segment");
 /// bar.zig: width policy belongs to the segment that owns the pixels).
 pub const fallback_width: u16 = 270;
 
-// Sized to workspace_labels, the largest label source.
-// Every workspace index is bounded by tracking.getWorkspaceCount() (<= max_workspaces), so no fallback path.
+// Sized to workspace_labels, the largest label source. Every workspace index
+// is bounded by tracking.getWorkspaceCount() (<= max_workspaces), so no
+// fallback path exists.
 var label_widths: [tracking.workspace_labels.len]u16 = [_]u16{0} ** tracking.workspace_labels.len;
 var ws_width: u16 = 0;
 var cache_valid: bool = false;
@@ -52,7 +53,14 @@ fn ensureCache(dc: *drawing.DrawContext, config: types.BarConfig, height: u16) v
     // All geometry inputs are constant between reloads, so the indicator
     // position holds until the next invalidate() + ensureCache() cycle.
     const ind_size = config.scaledIndicatorSize(height);
-    const pos = indicatorPos(ws_width, height, ind_size, ind_size, config.indicator_location, config.indicator_padding);
+    const pos = indicatorPos(
+        ws_width,
+        height,
+        ind_size,
+        ind_size,
+        config.indicator_location,
+        config.indicator_padding,
+    );
     // pos.x is already the intra-cell offset (computed without a cell_x base).
     cached_ind_x_off = pos.x;
     cached_ind_y = pos.y;
@@ -151,7 +159,15 @@ fn naturalWidthHook(frame: *const anyopaque, _: u16) u16 {
 
 fn drawHook(ctx: *anyopaque, x: u16) !u16 {
     const c = segmod.castDraw(ctx);
-    return draw(c.dc, c.config, c.height, x, c.frame.current_workspace, c.frame.workspace_has_windows, c.frame.is_all_view_active);
+    return draw(
+        c.dc,
+        c.config,
+        c.height,
+        x,
+        c.frame.current_workspace,
+        c.frame.workspace_has_windows,
+        c.frame.is_all_view_active,
+    );
 }
 
 fn resolveWorkspaceClick(offset: u16) ?usize {
@@ -163,7 +179,14 @@ fn resolveWorkspaceClick(offset: u16) ?usize {
     return idx;
 }
 
-fn onClickHook(offset: u16, left: bool, right: bool, _: *anyopaque, _: *const fn (*anyopaque, u16) void, _: *const fn () void) bool {
+fn onClickHook(
+    offset: u16,
+    left: bool,
+    right: bool,
+    _: *anyopaque,
+    _: *const fn (*anyopaque, u16) void,
+    _: *const fn () void,
+) bool {
     const idx = resolveWorkspaceClick(offset) orelse return true;
     if (left) {
         actions.switchTo(@intCast(idx));

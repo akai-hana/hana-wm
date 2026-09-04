@@ -36,13 +36,25 @@ const resource_manager_max_len: u32 = 1024;
 /// Larger retry fetch (16 KB) used when Xft.dpi is not in the first probe.
 const resource_manager_retry_len: u32 = 4096;
 
-/// Fetches RESOURCE_MANAGER (up to `max_len` u32 words) and parses Xft.dpi
-/// from it. `.got_string` is true when a structurally valid, non-empty
-/// string came back, regardless of whether it contained an entry, so the
-/// caller can distinguish "entry not in this window" (a bigger fetch can
-/// help) from "property unreadable" (it cannot).
+/// Result of probing RESOURCE_MANAGER. `.got_string` is true when a
+/// structurally valid string came back (regardless of whether it held an
+/// entry), so callers can tell "entry not in this window" from "unreadable".
 const XftProbe = struct { got_string: bool = false, dpi: ?f32 = null };
 
+/// Finds and parses the Xft.dpi value within a raw RESOURCE_MANAGER string.
+fn parseXftDpi(resource_str: []const u8) ?f32 {
+    const prefix = "Xft.dpi:";
+    const idx = std.mem.indexOf(u8, resource_str, prefix) orelse return null;
+    const rest_raw = resource_str[idx + prefix.len ..];
+    const rest = std.mem.trim(u8, rest_raw, " \t");
+    // The value ends at the next newline or end of string.
+    const end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+    const value = std.mem.trim(u8, rest[0..end], " \t\r");
+    return std.fmt.parseFloat(f32, value) catch null;
+}
+
+/// Fetches RESOURCE_MANAGER (up to `max_len` u32 words) and parses Xft.dpi
+/// from it.
 fn probeXftDpi(conn: core.Connection, root: xcb.xcb_window_t, atom: u32, max_len: u32) XftProbe {
     const prop_cookie = xcb.xcb_get_property(conn, 0, root, atom, xcb.XCB_ATOM_STRING, 0, max_len);
     const prop_reply = xcb.xcb_get_property_reply(conn, prop_cookie, null) orelse return .{};
@@ -77,18 +89,6 @@ fn readXftDpi(conn: core.Connection, screen: core.Screen) ?f32 {
     return probeXftDpi(conn, root, atom, resource_manager_retry_len).dpi;
 }
 
-/// Finds and parses the Xft.dpi value within a raw RESOURCE_MANAGER string.
-fn parseXftDpi(resource_str: []const u8) ?f32 {
-    const prefix = "Xft.dpi:";
-    const idx = std.mem.indexOf(u8, resource_str, prefix) orelse return null;
-    const rest_raw = resource_str[idx + prefix.len ..];
-    const rest = std.mem.trim(u8, rest_raw, " \t");
-    // The value ends at the next newline or end of string.
-    const end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
-    const value = std.mem.trim(u8, rest[0..end], " \t\r");
-    return std.fmt.parseFloat(f32, value) catch null;
-}
-
 /// Computes DPI from the screen's physical dimensions reported by X.
 /// Returns baseline_dpi if the screen reports 0mm dimensions (e.g. virtual displays).
 fn calcDpiFromGeometry(screen: core.Screen) f32 {
@@ -105,6 +105,10 @@ fn calcDpiFromGeometry(screen: core.Screen) f32 {
     const avg_dpi = (dpi_x + dpi_y) / 2.0;
     debug.info("Calculated DPI: X={d:.1}, Y={d:.1}, Average={d:.1}", .{ dpi_x, dpi_y, avg_dpi });
     return avg_dpi;
+}
+
+fn isReasonableDpi(dpi: f32) bool {
+    return std.math.isFinite(dpi) and dpi >= min_reasonable_dpi and dpi <= max_reasonable_dpi;
 }
 
 /// Detect DPI: Xft.dpi from X resources -> geometry calculation -> baseline_dpi (96).
@@ -127,16 +131,15 @@ pub fn detectDpi(conn: core.Connection, screen: core.Screen) f32 {
     return geometry_dpi;
 }
 
-fn isReasonableDpi(dpi: f32) bool {
-    return std.math.isFinite(dpi) and dpi >= min_reasonable_dpi and dpi <= max_reasonable_dpi;
-}
-
 /// Scales a font size value against the screen height, clamped to a minimum of 1px.
 /// Percentage values are relative to font_baseline_height (1080px) rather than the
 /// screen baseline, so font sizes degrade more gracefully on smaller screens.
 pub fn scaleFontSize(value: parser.ScalableValue, screen: core.Screen) u16 {
     const screen_height: f32 = @floatFromInt(screen.height_in_pixels);
-    const raw = if (value.is_percentage) value.value * (screen_height / font_baseline_height) else value.value;
+    const raw = if (value.is_percentage)
+        value.value * (screen_height / font_baseline_height)
+    else
+        value.value;
     return utils.scaling.roundToU16(raw, 1.0);
 }
 

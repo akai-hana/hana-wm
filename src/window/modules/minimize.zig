@@ -117,7 +117,11 @@ fn slotLess(a: ?usize, b: ?usize) bool {
 /// Restore-order target selection over minimized windows on `ws`:
 /// `.fifo` = oldest minimize seq, `.lifo` = newest. Returns null when nothing
 /// on `ws` is minimized.
-pub fn restoreCandidate(m: *const model.Model, ws: model.WSId, order: model.RestoreOrder) ?model.WindowId {
+pub fn restoreCandidate(
+    m: *const model.Model,
+    ws: model.WSId,
+    order: model.RestoreOrder,
+) ?model.WindowId {
     var best: ?model.WindowId = null;
     var best_seq: u32 = 0;
     for (g_recs.constSlice()) |rec| {

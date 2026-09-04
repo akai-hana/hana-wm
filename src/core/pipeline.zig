@@ -21,11 +21,9 @@ const types = @import("types");
 const debug = @import("debug");
 const build_options = @import("build_options");
 const surfaces = @import("plugins").Surfaces;
-// The fullscreen EWMH/bar-arming hooks are reached through the build-generated
-// `window_modules` registry (never by naming a sub-system module here),
-// mirroring the surfaces seam. `window_mods` is the auto-discovered
-// `[N]WindowModule` array; a tree without fullscreen simply has no module
-// providing these hooks, so the uniform loop below no-ops for it.
+// Fullscreen EWMH/bar-arming hooks are reached through the build-generated
+// `window_modules` registry; `window_mods` is the auto-discovered
+// `[N]WindowModule` array, and the uniform loop below no-ops without fullscreen.
 const window_mods = @import("window_modules").modules;
 
 /// Layout registry (build-generated); the active layout is a `u8` index into
@@ -58,10 +56,14 @@ pub inline fn getCurrentLayout() u8 {
     const cs = core.getState();
     if (!build_options.has_tiling) return 0;
     return @intCast(tiling.layoutByName(cs.config.tiling.layout) orelse blk: {
-        debug.warn("Config: layout name '{s}' did not resolve to a registered layout; using default layout '{s}'", .{
-            cs.config.tiling.layout,
-            tiling.moduleName(tiling.defaultKind()),
-        });
+        debug.warn(
+            "Config: layout name '{s}' did not resolve to a registered " ++
+                "layout; using default layout '{s}'",
+            .{
+                cs.config.tiling.layout,
+                tiling.moduleName(tiling.defaultKind()),
+            },
+        );
         break :blk tiling.defaultKind();
     });
 }
@@ -175,11 +177,13 @@ pub inline fn reconcileUnderGrabNow(o: sync.ReconcileOpts) void {
 
 /// Grab server, run the focus transition, reconcile, then ungrabAndFlush (or
 /// the reverse order) atomically. When `focus_before` is true, focus lands
-/// BEFORE geometry, which most actions want when the target window is already
-/// mapped and focus must precede the retile. When false, focus lands
-/// AFTER geometry; used on mapRequest where the window must be mapped (by
-/// reconcile) before xcb_set_input_focus can target it without BadMatch.
-pub inline fn reconcileGrabFocus(o: sync.ReconcileOpts, t: focus.FocusTransition, focus_before: bool) void {
+/// before geometry (most actions); when false it lands after (mapRequest,
+/// where the window must be mapped before xcb_set_input_focus targets it).
+pub inline fn reconcileGrabFocus(
+    o: sync.ReconcileOpts,
+    t: focus.FocusTransition,
+    focus_before: bool,
+) void {
     preReconcileDuties();
     const c = ctx();
     c.sink.grabServer();
@@ -189,33 +193,28 @@ pub inline fn reconcileGrabFocus(o: sync.ReconcileOpts, t: focus.FocusTransition
     if (!focus_before) focus.applyPendingFocus(t);
 }
 
-/// Grab server, commit focus transition, reconcile, then ungrabAndFlush,
-/// atomically. Focus lands BEFORE geometry: for most actions where the target
-/// window is already mapped and focus must precede the retile so border colors
-/// and stacking are correct on the first frame.
+/// Grab server, commit focus transition, reconcile, then ungrabAndFlush
+/// atomically. Focus lands before geometry so border colors and stacking are
+/// correct on the first frame.
 pub inline fn reconcileUnderGrabNowWithFocus(o: sync.ReconcileOpts, t: focus.FocusTransition) void {
     reconcileGrabFocus(o, t, true);
 }
 
-/// Grab server, reconcile, commit focus transition, then ungrabAndFlush,
-/// atomically. Focus lands AFTER geometry: for mapRequest where the window
-/// must be mapped (by reconcile) before xcb_set_input_focus can target it
-/// without BadMatch. Both map+focus under one grab eliminates the atomicity
-/// gap where a client could observe the mapped-but-unfocused window.
-pub inline fn reconcileUnderGrabNowWithFocusAfter(o: sync.ReconcileOpts, t: focus.FocusTransition) void {
+/// Focus lands after geometry, for mapRequest: the window must be mapped (by
+/// reconcile) before xcb_set_input_focus can target it without BadMatch.
+/// Both map+focus under one grab eliminates the atomicity gap where a client
+/// could observe the mapped-but-unfocused window.
+pub inline fn reconcileUnderGrabNowWithFocusAfter(
+    o: sync.ReconcileOpts,
+    t: focus.FocusTransition,
+) void {
     reconcileGrabFocus(o, t, false);
 }
 
 /// Grab server, reconcile, do EWMH + bar hide, then ungrabAndFlush, atomically.
-/// Specialised for the fullscreen toggle path where EWMH writes and bar state
-/// must land inside the same grab as geometry (Gap 2 atomicity).
-///
-/// Enter-fullscreen optimization: the bar unmap happens immediately inside this
-/// grab (via the `hideBarForFullscreen` seam) rather than deferring until the
-/// next ConfigureNotify, eliminating one full grab/reconcile cycle. The
-/// fullscreen client is already mapped + raised + sized to screen by
-/// sync.reconcile, so it will be stacked above the bar before the unmap reaches
-/// the server — no visual gap.
+/// Specialised for the fullscreen toggle path so EWMH writes and the bar
+/// unmap/hide land inside the same grab as geometry (Gap 2 atomicity); the
+/// enter path unmaps the bar immediately rather than deferring to ConfigureNotify.
 pub inline fn reconcileUnderGrabNowFullscreen(
     o: sync.ReconcileOpts,
     win: model_mod.WindowId,

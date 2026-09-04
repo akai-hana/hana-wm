@@ -2,6 +2,8 @@
 //! Model state, wire requests, and focus protocol live in model, sync, and focus.
 
 const std = @import("std");
+const core = @import("core");
+const constants = @import("constants");
 const model_mod = @import("model");
 const pipeline = @import("pipeline");
 const sync = @import("sync");
@@ -11,23 +13,24 @@ const screen = @import("screen");
 const build_options = @import("build_options");
 const debug = @import("debug");
 const utils = @import("utils");
-// The build-generated window sub-system registry: the auto-discovered
-// `[N]WindowModule` array (dispatch order == deterministic filesystem scan
-// order). Core tiers reach compiled-in sub-systems through this array, never
-// by naming a sub-system module here.
 const window_mods = @import("window_modules").modules;
 
 /// Registry lookup for the hook `field`; the canonical scan lives in
 /// `plugin.zig` (see `plugin.providerOf`). Call sites check the provider and
 /// call the hook through it, so a build without the module keeps the same
 /// early-return shape as the previous feature guards.
-fn providerOf(comptime field: std.meta.FieldEnum(@import("plugin").WindowModule)) ?@import("plugin").WindowModule {
+fn providerOf(
+    comptime field: std.meta.FieldEnum(@import("plugin").WindowModule),
+) ?@import("plugin").WindowModule {
     return @import("plugin").providerOf(window_mods[0..], field);
 }
 
 /// Convenience: returns the current workspace's covering occupant, or null.
 fn currentCoveringOccupant(m: *const model_mod.Model) ?model_mod.WindowId {
-    return if (providerOf(.coveringOccupantOnWs)) |prov| prov.coveringOccupantOnWs.?(m, m.current) else null;
+    return if (providerOf(.coveringOccupantOnWs)) |prov|
+        prov.coveringOccupantOnWs.?(m, m.current)
+    else
+        null;
 }
 
 /// Convenience: true when `win` is the covering (fullscreen) occupant on its
@@ -68,13 +71,13 @@ pub const Ctx = struct {
 fn retileAndNotify(restack: bool, full_redraw: bool) void {
     // Bump core's fact revision for the arrange; the bar (a consumer of the
     // fact) redraws from its own poll. Core is never informed of "the bar".
-    if (full_redraw) @import("core").bumpLayout() else @import("core").bumpWindow();
+    if (full_redraw) core.bumpLayout() else core.bumpWindow();
     pipeline.reconcileUnderGrabNow(if (restack) .{ .force_restack = true } else .{});
 }
 
 /// Same as retileAndNotify but commits a focus transition inside the grab.
 fn retileAndNotifyWithFocus(restack: bool, full_redraw: bool, ft: focus.FocusTransition) void {
-    if (full_redraw) @import("core").bumpLayout() else @import("core").bumpWindow();
+    if (full_redraw) core.bumpLayout() else core.bumpWindow();
     pipeline.reconcileUnderGrabNowWithFocus(if (restack) .{ .force_restack = true } else .{}, ft);
 }
 
@@ -97,18 +100,19 @@ pub fn minimize(focused: ?model_mod.WindowId) void {
         const win = focused orelse return;
         const m = pipeline.model();
         const was_focused = m.focused == win;
-        const fs_ws_before = if (providerOf(.coveringWsOf)) |prov| prov.coveringWsOf.?(m, win) else null;
+        const fs_ws_before =
+            if (providerOf(.coveringWsOf)) |prov| prov.coveringWsOf.?(m, win) else null;
 
         wm.hideWindow.?(m, win) catch return; // Pre-refusal (CapacityFull)
 
         const ft: focus.FocusTransition = if (was_focused) focusFallback(m) else .none;
 
-        @import("core").bumpWindow(); // hiding refreshes the title segment
+        core.bumpWindow(); // hiding refreshes the title segment
         // If the hidden window was the current workspace's screen-covering
         // occupant, its removal changed occupancy: bump the core fact and let
         // the bar (a consumer) react, instead of poking it by name.
         if (fs_ws_before) |fs_ws| {
-            if (fs_ws == m.current) @import("core").bumpFullscreen();
+            if (fs_ws == m.current) core.bumpFullscreen();
         }
 
         pipeline.reconcileUnderGrabNowWithFocus(.{ .force_restack = true }, ft); // Atomicity
@@ -134,6 +138,26 @@ fn focusFallback(m: *model_mod.Model) focus.FocusTransition {
 
 // --------------------------------------------------------- restore (unpark)
 
+fn isMinimizedOnAnyWs(m: *const model_mod.Model, win: model_mod.WindowId) bool {
+    return if (providerOf(.isWindowHidden)) |wm| wm.isWindowHidden.?(m, win) else false;
+}
+
+fn restoreAndFocus(m: *model_mod.Model, win: model_mod.WindowId) void {
+    model_mod.setFocus(m, win);
+    const ft = focus.prepareFocus(win, .window_spawn, null);
+    pipeline.reconcileUnderGrabNowWithFocus(.{ .force_restack = true }, ft);
+}
+
+fn armFullscreenBarHideIfNeeded(
+    m: *const model_mod.Model,
+    win: model_mod.WindowId,
+    had_occupant_before: bool,
+) void {
+    if (build_options.has_bar and !had_occupant_before and isCoveringOnWs(m, win)) {
+        for (window_mods) |wm| if (wm.armPendingBarHide) |f| f(win);
+    }
+}
+
 /// Restores a specific hidden window (title-bar click path).
 pub fn restore(win: model_mod.WindowId) void {
     const m = pipeline.model();
@@ -147,7 +171,10 @@ pub fn restore(win: model_mod.WindowId) void {
 /// Slot-ordered single restore (LIFO/FIFO keybind paths).
 pub fn restoreOrdered(order: model_mod.RestoreOrder) void {
     const m = pipeline.model();
-    const win = (if (providerOf(.restoreCandidateOn)) |wm| wm.restoreCandidateOn.?(m, m.current, order) else null) orelse return;
+    const win = (if (providerOf(.restoreCandidateOn)) |wm|
+        wm.restoreCandidateOn.?(m, m.current, order)
+    else
+        null) orelse return;
     const had_occupant_before = currentCoveringOccupant(m) != null;
     if (providerOf(.restoreWindow)) |wm| wm.restoreWindow.?(m, win);
     restoreAndFocus(m, win);
@@ -166,24 +193,9 @@ pub fn restoreAll() void {
         const had_occupant_before = currentCoveringOccupant(m) != null;
         if (providerOf(.restoreOnWs)) |rp| rp.restoreOnWs.?(m, ws);
         restoreAndFocus(m, target);
-        if (currentCoveringOccupant(m)) |occ| armFullscreenBarHideIfNeeded(m, occ, had_occupant_before);
+        if (currentCoveringOccupant(m)) |occ|
+            armFullscreenBarHideIfNeeded(m, occ, had_occupant_before);
     }
-}
-
-fn armFullscreenBarHideIfNeeded(m: *const model_mod.Model, win: model_mod.WindowId, had_occupant_before: bool) void {
-    if (build_options.has_bar and !had_occupant_before and isCoveringOnWs(m, win)) {
-        for (window_mods) |wm| if (wm.armPendingBarHide) |f| f(win);
-    }
-}
-
-fn isMinimizedOnAnyWs(m: *const model_mod.Model, win: model_mod.WindowId) bool {
-    return if (providerOf(.isWindowHidden)) |wm| wm.isWindowHidden.?(m, win) else false;
-}
-
-fn restoreAndFocus(m: *model_mod.Model, win: model_mod.WindowId) void {
-    model_mod.setFocus(m, win);
-    const ft = focus.prepareFocus(win, .window_spawn, null);
-    pipeline.reconcileUnderGrabNowWithFocus(.{ .force_restack = true }, ft);
 }
 
 // ------------------------------------------------------- covering (screen claim)
@@ -202,7 +214,6 @@ fn restoreAndFocus(m: *model_mod.Model, win: model_mod.WindowId) void {
 /// handler works unchanged. The keybind path resolves the focused window at
 /// the dispatch site and lands here too.
 pub fn fullscreenToggleWindow(win: model_mod.WindowId) void {
-    const core = @import("core");
     // Timing: wall-clock from action entry (keybind/EWMH resolve) to the
     // synchronous completion of the fullscreen transition INCLUDING the bar
     // hide and the ungrabAndFlush of the enclosing grab — i.e. the point at
@@ -256,7 +267,6 @@ pub fn fullscreenToggleWindow(win: model_mod.WindowId) void {
 /// move_to_workspace. Model moves mask + home list + covering record in one
 /// call; the reconcile's diff parks/repairs geometry globally.
 pub fn moveWindowTo(win: model_mod.WindowId, ws_idx: u8) void {
-    const constants = @import("constants");
     if (providerOf(.sendToWs)) |wm| {
         if (ws_idx >= constants.max_workspaces) return;
 
@@ -272,7 +282,7 @@ pub fn moveWindowTo(win: model_mod.WindowId, ws_idx: u8) void {
             if (was_focused) ft = focusFallback(m);
             // Moving the current workspace's covering window away changes the
             // workspace's covering occupancy: bump the core fact; bar reacts.
-            if (was_fs_current) @import("core").bumpFullscreen();
+            if (was_fs_current) core.bumpFullscreen();
         }
         retileAndNotifyWithFocus(false, false, ft);
     }
@@ -281,7 +291,6 @@ pub fn moveWindowTo(win: model_mod.WindowId, ws_idx: u8) void {
 /// toggle_tag (Mod+Alt+N). Focus is left unchanged on add (multi-tag gesture);
 /// removing the CURRENT tag evicts the window and re-focuses.
 pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) void {
-    const constants = @import("constants");
     if (providerOf(.sendToWs) == null) return;
     if (ws_idx >= constants.max_workspaces) return;
 
@@ -311,7 +320,7 @@ pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) voi
     if (!removing_current) {
         // Off-workspace change: the tag set changed; bump the fact so the
         // workspace-aware consumers redraw.
-        @import("core").bumpWindow();
+        core.bumpWindow();
     }
 }
 
@@ -363,21 +372,21 @@ pub fn toggleFloating(win: model_mod.WindowId) void {
         },
         .floating => {
             e.anchor = .tiled;
-            // Defense in depth (the stranded-slot bug class): a
-            // tiled-anchored window must ALWAYS have a home-list entry
-            // (single-membership invariant). Repair a tiled-anchored window
-            // that has no home-list entry instead of leaving an
-            // tiling-invisible window that this very toggle could never fix
-            // again.
-            if (model_mod.findHome(m, win) == null) {
-                if (model_mod.lowestBit(e.mask)) |h| {
-                    _ = m.ws[h].tiled_order.append(win);
-                    e.home_ws = h;
-                }
-            }
+            repairStrandedHome(m, e, win);
         },
     }
     retileAndNotify(true, false);
+}
+
+/// Defense in depth (the stranded-slot bug class): repair a tiled-anchored
+/// window that has no home-list entry instead of leaving it a
+/// tiling-invisible window this toggle could never fix again.
+fn repairStrandedHome(m: *model_mod.Model, e: *model_mod.Entry, win: model_mod.WindowId) void {
+    if (model_mod.findHome(m, win) != null) return;
+    if (model_mod.lowestBit(e.mask)) |h| {
+        _ = m.ws[h].tiled_order.append(win);
+        e.home_ws = h;
+    }
 }
 
 /// Drag tick (no grab; E.6): targeted reconcile — sends ONLY the dragged
@@ -476,7 +485,7 @@ pub fn cycleLayoutKind(dir: i32) void {
 /// come from config names, so the active kind is always resolvable.
 fn cycleActiveLayout(m: *model_mod.Model, dir: i32) void {
     if (!build_options.has_tiling) return;
-    const cfg = &@import("core").getState().config.tiling;
+    const cfg = &core.getState().config.tiling;
     const p = &m.ws[m.current].params;
     p.kind = tiling.cycleKind(p.kind, dir, cfg.layouts.items);
     p.variant_idx = 0;
@@ -591,7 +600,7 @@ pub fn snapViewportToFocused() void {
     }
     const i = idx orelse return;
 
-    const wa = screen.workArea(@import("core").getState().screen);
+    const wa = screen.workArea(core.getState().screen);
     const i64_slot_w: i64 = sc.slot_w;
     const slot_left = @as(i64, @intCast(i)) * i64_slot_w - p.viewport_offset;
     const slot_right = slot_left + i64_slot_w;
@@ -599,7 +608,9 @@ pub fn snapViewportToFocused() void {
     if (slot_left < 0)
         p.viewport_offset = @intCast(@as(i64, @intCast(i)) * i64_slot_w)
     else if (slot_right > wa.width)
-        p.viewport_offset = @intCast(@as(i64, @intCast(i)) * i64_slot_w + i64_slot_w - @as(i64, wa.width));
+        p.viewport_offset = @intCast(
+            @as(i64, @intCast(i)) * i64_slot_w + i64_slot_w - @as(i64, wa.width),
+        );
     p.viewport_offset = std.math.clamp(p.viewport_offset, 0, sc.max_off);
     const old_count = p.viewport_prev_count;
     p.viewport_prev_count = @intCast(n);
@@ -614,7 +625,8 @@ const ViewportContext = struct {
     max_off: i32,
 };
 
-const viewport_inactive: ViewportContext = .{ .active = false, .tiled_count = 0, .slot_w = 0, .max_off = 0 };
+const viewport_inactive: ViewportContext =
+    .{ .active = false, .tiled_count = 0, .slot_w = 0, .max_off = 0 };
 
 /// Viewport context for the active layout, resolved through the layout
 /// metadata: a layout "has a viewport" iff it registers the slotWidth/
@@ -623,11 +635,12 @@ const viewport_inactive: ViewportContext = .{ .active = false, .tiled_count = 0,
 fn viewportContext(m: *const model_mod.Model) ViewportContext {
     if (!build_options.has_tiling) return viewport_inactive;
     const p = &m.ws[m.current].params;
-    const mod: ?@import("plugin").Layout = if (p.kind < tiling_mods.len) tiling_mods[p.kind] else null;
+    const mod: ?@import("plugin").Layout =
+        if (p.kind < tiling_mods.len) tiling_mods[p.kind] else null;
     const md = mod orelse return viewport_inactive;
     if (md.slotWidth == null or md.maxOffset == null) return viewport_inactive;
     const n = model_mod.tiledCountOnWs(m, m.current);
-    const wa = screen.workArea(@import("core").getState().screen);
+    const wa = screen.workArea(core.getState().screen);
     const slot_w = md.slotWidth.?(wa.width);
     const max_off = md.maxOffset.?(n, slot_w, wa.width);
     return .{ .active = true, .tiled_count = n, .slot_w = slot_w, .max_off = max_off };
@@ -645,8 +658,7 @@ fn viewportContext(m: *const model_mod.Model) ViewportContext {
 /// No reconcile: callers decide when to push state to X.
 pub fn seedParamsFromConfig() void {
     if (!build_options.has_tiling) return;
-    const constants = @import("constants");
-    const cs = @import("core").getState();
+    const cs = core.getState();
     const cfg = &cs.config.tiling;
     const max_ws = constants.max_workspaces;
 
@@ -655,10 +667,11 @@ pub fn seedParamsFromConfig() void {
     // silent: report it and the fallback used.
     const default_kind: u8 = blk: {
         if (tiling.layoutByName(cfg.layout)) |k| break :blk @intCast(k);
-        debug.warn("Config: layout name '{s}' did not resolve to a registered layout; using default layout '{s}'", .{
-            cfg.layout,
-            tiling.moduleName(tiling.defaultKind()),
-        });
+        debug.warn(
+            "Config: layout name '{s}' did not resolve to a registered layout; " ++
+                "using default layout '{s}'",
+            .{ cfg.layout, tiling.moduleName(tiling.defaultKind()) },
+        );
         break :blk tiling.defaultKind();
     };
 
@@ -679,14 +692,20 @@ pub fn seedParamsFromConfig() void {
             if (layout_lookup[id]) |oi| {
                 const o = cfg.workspace_layout_overrides.items[oi];
                 if (o.layout_idx < cfg.layouts.items.len)
-                    kind = @intCast(tiling.layoutByName(cfg.layouts.items[o.layout_idx]) orelse blk: {
-                        debug.warn("Config: workspace {} layout name '{s}' did not resolve to a registered layout; using layout '{s}'", .{
-                            i,
-                            cfg.layouts.items[o.layout_idx],
-                            tiling.moduleName(default_kind),
-                        });
-                        break :blk default_kind;
-                    });
+                    kind = @intCast(
+                        tiling.layoutByName(cfg.layouts.items[o.layout_idx]) orelse blk: {
+                            debug.warn(
+                                "Config: workspace {} layout name '{s}' did not resolve to a " ++
+                                    "registered layout; using layout '{s}'",
+                                .{
+                                    i,
+                                    cfg.layouts.items[o.layout_idx],
+                                    tiling.moduleName(default_kind),
+                                },
+                            );
+                            break :blk default_kind;
+                        },
+                    );
                 override_variant = o.variant;
             }
         }
@@ -697,7 +716,8 @@ pub fn seedParamsFromConfig() void {
         // name. The module's own variant_parse hook interprets the string;
         // an unparseable/unknown string warns (Stage-1 style) and uses 0.
         var value_string: ?[]const u8 = override_variant;
-        const active_mod: ?@import("plugin").Layout = if (kind < tiling_mods.len) tiling_mods[kind] else null;
+        const active_mod: ?@import("plugin").Layout =
+            if (kind < tiling_mods.len) tiling_mods[kind] else null;
         var v_idx: u8 = 0;
         if (active_mod) |md| {
             if (value_string == null) value_string = cfg.variants.get(md.name);
@@ -706,12 +726,20 @@ pub fn seedParamsFromConfig() void {
                     if (vp(vs)) |parsed| {
                         v_idx = parsed;
                     } else if (override_variant != null) {
-                        debug.warn("Config: workspace {d} layout variant '{s}' ignored — not a variant of the active layout", .{ i, vs });
+                        debug.warn(
+                            "Config: workspace {d} layout variant '{s}' ignored — not a variant " ++
+                                "of the active layout",
+                            .{ i, vs },
+                        );
                     } else {
                         debug.warn("Unknown {s} variants '{s}', using default", .{ md.name, vs });
                     }
                 } else if (override_variant != null) {
-                    debug.warn("Config: workspace {d} layout variant ignored — not a variant of the active layout", .{i});
+                    debug.warn(
+                        "Config: workspace {d} layout variant ignored — not a variant " ++
+                            "of the active layout",
+                        .{i},
+                    );
                 }
             }
         }
@@ -740,9 +768,6 @@ pub fn applyConfigReload() void {
 /// model.current is the single store; tracking's getCurrentWorkspace is a
 /// read-through facade over it.
 pub fn switchTo(ws_idx: u8) void {
-    const core = @import("core");
-    const constants = @import("constants");
-
     const m = pipeline.model();
     if (ws_idx >= constants.max_workspaces) return;
     if (m.current == ws_idx) return;
@@ -766,17 +791,18 @@ pub fn switchTo(ws_idx: u8) void {
     // prepareClearFocus returns .none when last_applied is null (empty-to-empty
     // switch), so the focus fact alone can't guarantee a redraw; bumping the
     // window fact here makes the bar redraw at end-of-batch.
-    @import("core").bumpWindow();
+    core.bumpWindow();
     // Bar visibility follows the NEW workspace's fullscreen occupant. Apply it
     // NOW (X-free, no reconcile) so the FIRST reconcile below already reads the
     // correct screen claim / workarea for this workspace. Otherwise the bar's
     // deferred visibility update would require a SECOND reconcile on this
     // workspace, retiling Discord's geometry twice and causing a flicker.
-    if (build_options.has_bar) @import("plugins").Surfaces.updateBarVisibilityForWorkspace(@intCast(ws_idx));
+    if (build_options.has_bar)
+        @import("plugins").Surfaces.updateBarVisibilityForWorkspace(@intCast(ws_idx));
     // Bump the core fullscreen fact; the bar's reactive path in updateIfDirty
     // will no-op since the claim is already applied, but keeping the fact in
     // sync avoids any stale-revision edge.
-    @import("core").bumpFullscreen();
+    core.bumpFullscreen();
 
     const t1 = utils.monotonicNs();
 
@@ -881,7 +907,7 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool) void
         }
     }
     focus.initWindowGrabs(win); // protocol-side keygrabs, both paths did this
-    @import("core").bumpWindow(); // a window was admitted
+    core.bumpWindow(); // a window was admitted
 
     if (!on_current) return;
 
@@ -919,11 +945,11 @@ pub fn unmanage(ctx: *Ctx, win: model_mod.WindowId) void {
     // protocol commit runs inside the grab (Gap 1 atomicity fix).
     const ft: focus.FocusTransition = if (was_focused) focusFallback(m) else .none;
 
-    @import("core").bumpWindow(); // window removed; title segment drops it
+    core.bumpWindow(); // window removed; title segment drops it
     // Closing the current workspace's covering occupant releases the area:
     // bump the core fact (bar reacts, re-derives its claim before the reconcile
     // below reads the work area).
-    if (was_fs_current) @import("core").bumpFullscreen();
+    if (was_fs_current) core.bumpFullscreen();
 
     pipeline.reconcileUnderGrabNowWithFocus(.{ .force_restack = true }, ft);
 }

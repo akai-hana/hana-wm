@@ -9,14 +9,17 @@ const minimize = if (build_options.has_minimize) @import("minimize") else struct
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const floating = if (build_options.has_floating) @import("floating") else struct {};
 const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
-// The model's kind is an opaque u8; we step it through a representative
-// config name list, matching the registry's cycle (no-op when the tiling
-// subsystem is absent).
+// The model's kind is an opaque u8 stepped through a representative config
+// name list (no-op when the tiling subsystem is absent).
 const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
 const test_cycle_names = [_][]const u8{ "master", "monocle", "grid", "fibonacci" };
 fn stepCycle(m: *Model, dir: i32) void {
     if (!build_options.has_tiling) return;
-    m.ws[m.current].params.kind = tiling.cycleKind(m.ws[m.current].params.kind, dir, &test_cycle_names);
+    m.ws[m.current].params.kind = tiling.cycleKind(
+        m.ws[m.current].params.kind,
+        dir,
+        &test_cycle_names,
+    );
     m.ws[m.current].params.variant_idx = 0;
 }
 
@@ -67,8 +70,10 @@ fn eqModel(a: *const Model, b: *const Model) bool {
     if (a.focused != b.focused) return false;
     if (a.all_view_active != b.all_view_active) return false;
     for (&a.ws, &b.ws) |*sa, *sb| {
-        if (!std.mem.eql(WindowId, sa.tiled_order.constSlice(), sb.tiled_order.constSlice())) return false;
-        if (!std.mem.eql(WindowId, sa.focus_mru.constSlice(), sb.focus_mru.constSlice())) return false;
+        if (!std.mem.eql(WindowId, sa.tiled_order.constSlice(), sb.tiled_order.constSlice()))
+            return false;
+        if (!std.mem.eql(WindowId, sa.focus_mru.constSlice(), sb.focus_mru.constSlice()))
+            return false;
         if (sa.params.kind != sb.params.kind) return false;
         if (sa.params.variant_idx != sb.params.variant_idx) return false;
         if (sa.params.primary_width != sb.params.primary_width) return false;
@@ -129,7 +134,7 @@ test "T02: register honors hinted workspace" {
 }
 
 // T03: minimize tiled -> parked, removed from tiled_order; capacity refuses
-// once the module's (fixed, MAX_MINIMIZED) minimized budget is exhausted.
+// once the minimized budget (MAX_MINIMIZED) is exhausted.
 test "T03: minimize tiled removes from order; capacity refuses" {
     var m = makeModel();
     defer deinitModel(&m);
@@ -259,9 +264,8 @@ test "T06: fullscreen toggling and minimize-from-fullscreen" {
     try testing.expectEqual(@as(?WSId, 0), fullscreen.fullscreenWsOf(&m, 2));
     minimize.restore(&m, 2);
     e = m.store.get(2).?;
-    // Restoring a fullscreen-carrying window returns it to covering (the model
-    // is the single authority for the covering intent; the window re-claims
-    // the screen immediately, matching the runtime wire behavior).
+    // Restoring a fullscreen-carrying window returns it to covering (the
+    // model is the single authority; the window re-claims the screen).
     try testing.expect(e.presence == .covering);
     try testing.expect(!minimize.isMinimized(&m, 2));
     try testing.expect(fullscreen.isFullscreenMode(&m, 2));
@@ -340,7 +344,8 @@ test "T09: pinToggle across all modes" {
     defer minimize.deinit();
     regCur(&m, 1); // tiled
     const r: utils.Rect = .{ .x = 0, .y = 0, .width = 100, .height = 100 };
-    _ = m.store.put(2, .{ .mask = model.bit(0), .anchor = .{ .floating = r } }) catch unreachable; // floating
+    _ = m.store.put(2, .{ .mask = model.bit(0), .anchor = .{ .floating = r } }) catch
+        unreachable; // floating
     regCur(&m, 3);
     _ = fullscreen.toggleFullscreen(&m, 3); // fullscreen
     regCur(&m, 4);
@@ -398,7 +403,10 @@ test "T11: reorder and swapPrimary" {
     try expectOrder(&m, 0, &.{ 3, 1, 2, 4 });
 
     // Floating/unknown windows have no home; reordering is a no-op.
-    _ = m.store.put(9, .{ .mask = model.bit(0), .anchor = .{ .floating = .{ .x = 0, .y = 0, .width = 1, .height = 1 } } }) catch unreachable;
+    _ = m.store.put(9, .{
+        .mask = model.bit(0),
+        .anchor = .{ .floating = .{ .x = 0, .y = 0, .width = 1, .height = 1 } },
+    }) catch unreachable;
     model.reorderTiled(&m, 9, 0);
     model.reorderTiled(&m, 42, 0);
     try expectOrder(&m, 0, &.{ 3, 1, 2, 4 });
@@ -447,10 +455,8 @@ test "T12: unregister cleans all references" {
     model.unregister(&m, 2);
     try testing.expect(!m.store.has(2));
     try testing.expectEqual(@as(usize, 1), m.store.count());
-    // model.unregister is FEATURE-FREE: it does not (and may not) touch the
-    // module's bookkeeping. The WIRE layer (not the model) fires
-    // onWindowGone to drop the module's per-window record + counter; we
-    // simulate that dispatch here, then assert the module is clean.
+    // model.unregister never touches module bookkeeping; the WIRE layer fires
+    // onWindowGone (simulated here), then the module must be clean.
     minimize.onWindowGone(2);
     try testing.expectEqual(@as(u32, 0), minimize.count(&m));
     try testing.expect(!minimize.isMinimized(&m, 2));
@@ -574,17 +580,27 @@ test "T16: store iteration stays deterministic across removals" {
     defer deinitModel(&m);
     try minimize.init();
     defer minimize.deinit();
-    for ([_]WindowId{ 1, 2, 3, 4 }) |w| _ = m.store.put(w, .{ .mask = model.bit(0), .anchor = .tiled }) catch unreachable;
+    for ([_]WindowId{ 1, 2, 3, 4 }) |w|
+        _ = m.store.put(w, .{ .mask = model.bit(0), .anchor = .tiled }) catch unreachable;
 
-    inline for (.{ @as(WindowId, 1), @as(WindowId, 2), @as(WindowId, 3), @as(WindowId, 4) }, 0..) |w, i| {
+    inline for (
+        .{ @as(WindowId, 1), @as(WindowId, 2), @as(WindowId, 3), @as(WindowId, 4) },
+        0..,
+    ) |w, i| {
         try testing.expectEqual(w, m.store.at(i).key);
     }
     try testing.expect(m.store.remove(2));
-    inline for (.{ @as(WindowId, 1), @as(WindowId, 3), @as(WindowId, 4) }, 0..) |w, i| {
+    inline for (
+        .{ @as(WindowId, 1), @as(WindowId, 3), @as(WindowId, 4) },
+        0..,
+    ) |w, i| {
         try testing.expectEqual(w, m.store.at(i).key);
     }
     _ = m.store.put(5, .{ .mask = model.bit(0), .anchor = .tiled }) catch unreachable;
-    inline for (.{ @as(WindowId, 1), @as(WindowId, 3), @as(WindowId, 4), @as(WindowId, 5) }, 0..) |w, i| {
+    inline for (
+        .{ @as(WindowId, 1), @as(WindowId, 3), @as(WindowId, 4), @as(WindowId, 5) },
+        0..,
+    ) |w, i| {
         try testing.expectEqual(w, m.store.at(i).key);
     }
     try testing.expect(m.store.remove(1)); // head
@@ -594,9 +610,8 @@ test "T16: store iteration stays deterministic across removals" {
     }
     try testing.expect(!m.store.remove(77));
 
-    // Model-level single-membership invariant holds alongside the raw store.
-    // Clear the raw-store fixtures above so every remaining entry is one the
-    // transitions placed themselves.
+    // Model-level single-membership holds alongside the raw store: clear the
+    // raw-store fixtures so every remaining entry was transitioned in.
     _ = m.store.remove(3);
     _ = m.store.remove(4);
     for ([_]WindowId{ 30, 31, 32 }) |w| regCur(&m, w);
@@ -620,10 +635,8 @@ test "T17: capacity refusals happen before any mutation" {
     _ = small.put(1, 11) catch unreachable;
     try testing.expectEqual(@as(u8, 11), small.get(1).?);
 
-    // Model minimize: refused call leaves the entire model byte-identical.
-    // Minimized state now lives in the module's static store (copy semantics):
-    // equality still holds because the capacity guard runs BEFORE any mutation
-    // (or module bookkeeping), so the refused call changes nothing observable.
+    // Model minimize: the refused call leaves the model byte-identical
+    // because the capacity guard runs before any mutation.
     try minimize.init();
     defer minimize.deinit();
     var m = makeModel();
@@ -637,9 +650,8 @@ test "T17: capacity refusals happen before any mutation" {
     model.setFocus(&m, wins[wins.len - 1]);
     try testing.expectError(error.CapacityFull, minimize.minimize(&m, wins[wins.len - 1]));
 
-    // The module's minimized store is process-global (not per-model), so the
-    // replay fixture below needs a clean module lifetime: without this reset
-    // the prefix minimizes would hit the idempotent no-op path and never park.
+    // The module's minimized store is process-global, so the replay fixture
+    // needs a clean module lifetime (else the prefix minimizes no-op).
     minimize.deinit();
     try minimize.init();
     defer minimize.deinit();
@@ -659,9 +671,8 @@ test "T17: capacity refusals happen before any mutation" {
     try testing.expect(m.store.get(wins[wins.len - 1]).?.presence == .present);
     try testing.expect(!minimize.isMinimized(&m, wins[wins.len - 1]));
 
-    // register refusal: a full home-list bound refuses BEFORE mutation and
-    // undoes the store insert (bounded lists have no OOM path; the bound IS
-    // the defined overflow). Fill ws 0's tiled list to capacity.
+    // register refusal: the home-list bound is the defined overflow and
+    // refuses before mutation. Fill ws 0's tiled list to capacity.
     var fm = Model{};
     var i: WindowId = 500;
     while (fm.ws[0].tiled_order.len < model.max_tiled_per_ws) : (i += 1) {
@@ -708,10 +719,8 @@ test "T18: identical operation sequences produce identical models" {
     var b = makeModel();
     defer deinitModel(&b);
     seq.run(&a);
-    // The minimize/fullscreen stores are process-global (not per-model), so
-    // the replay below needs clean module lifetimes (same discipline as T17):
-    // without this reset the second toggleFullscreen would see the first
-    // run's record and turn OFF instead of ON.
+    // The module stores are process-global, so the replay needs clean
+    // lifetimes (else the second toggleFullscreen turns OFF instead of ON).
     minimize.deinit();
     fullscreen.deinit();
     try minimize.init();
@@ -868,11 +877,9 @@ test "T34: fallbackFocusCandidate tiers pick the previous focus" {
     try testing.expectEqual(@as(?WindowId, null), model.fallbackFocusCandidate(&m, 0));
 }
 
-// T35: fullscreenWsOf is the pre-removal read primitive for unmanage paths.
-// NEW CONTRACT: minimizing-from-fullscreen KEEPS the window's mode, so the
-// ghost fullscreen record STILL reports the ws while parked - but visibleOn
-// is false because presence is parked. Callers must gate on visibility (via
-// the coverage/occupancy query), not on the raw mode.
+// T35: minimizing-from-fullscreen KEEPS the mode, so the ghost record still
+// reports the ws while parked, but visibleOn is false. Callers must gate on
+// visibility (coverage/occupancy query), not the raw mode.
 test "T35: fullscreenWsOf keeps the ws while minimized-from-fullscreen" {
     var m = makeModel();
     defer deinitModel(&m);
@@ -889,9 +896,8 @@ test "T35: fullscreenWsOf keeps the ws while minimized-from-fullscreen" {
     try testing.expectEqual(@as(?WSId, 0), fullscreen.fullscreenWsOf(&m, 30));
     try testing.expectEqual(@as(?WSId, null), fullscreen.fullscreenWsOf(&m, 31)); // not fullscreen
 
-    // Minimize-from-fullscreen: the MODE is retained, so the ghost record
-    // still reports the ws - but the window is parked, hence not visible and
-    // not an occupant anywhere.
+    // Minimize-from-fullscreen: the MODE is retained, but the parked window
+    // is neither visible nor an occupant.
     try minimize.minimize(&m, 30);
     try testing.expectEqual(@as(?WSId, 0), fullscreen.fullscreenWsOf(&m, 30));
     try testing.expect(m.store.get(30).?.presence == .parked);
@@ -924,10 +930,8 @@ test "T36: close-fallback candidate after unregister is the previous focus" {
     try testing.expectEqual(@as(?WindowId, null), model.fallbackFocusCandidate(&m, 0));
 }
 
-// FSQ: the fullscreen state resolution moved INTO the model (from the
-// window-layer wrappers) must keep its exact semantics: mode query ignores
-// visibility, on-ws query checks the RECORD's workspace only, and occupancy
-// additionally requires visibility on the scanned ws.
+// FSQ: model fullscreen semantics: mode ignores visibility, on-ws checks the
+// RECORD's workspace only, and occupancy also requires visibility.
 test "FSQ: model fullscreen queries (mode / on-ws / visible occupant)" {
     var m = makeModel();
     defer deinitModel(&m);
@@ -949,9 +953,8 @@ test "FSQ: model fullscreen queries (mode / on-ws / visible occupant)" {
     try testing.expect(!fullscreen.isFullscreenOnWs(&m, 50, 1)); // other-ws record
     try testing.expectEqual(@as(?WindowId, 50), fullscreen.fullscreenOccupantOnWs(&m, 0));
 
-    // A fullscreen RECORD targeting a workspace the window is not tagged to
-    // is NOT an occupant: occupancy requires visibility (sync parks such
-    // strays instead of letting them claim the slot).
+    // A record for a workspace the window isn't tagged to is NOT an occupant:
+    // occupancy requires visibility (sync parks such strays).
     try model.register(&m, 51, 1); // tagged to ws1 only
     _ = fullscreen.toggleFullscreen(&m, 51); // record ws = current (0)
     try testing.expect(fullscreen.isFullscreenMode(&m, 51));
@@ -959,9 +962,7 @@ test "FSQ: model fullscreen queries (mode / on-ws / visible occupant)" {
     try testing.expectEqual(@as(?WSId, 0), fullscreen.fullscreenWsOf(&m, 51));
     try testing.expectEqual(@as(?WindowId, 50), fullscreen.fullscreenOccupantOnWs(&m, 0));
 
-    // Minimize-from-fullscreen: MODE is retained (still fullscreen mode), but
-    // parked => NOT a visible occupant anywhere (occupancy requires
-    // visibility; see T35).
+    // Minimize-from-fullscreen: MODE retained, but parked => not an occupant.
     try minimize.minimize(&m, 50);
     try testing.expect(fullscreen.isFullscreenMode(&m, 50));
     try testing.expect(fullscreen.isFullscreenOnWs(&m, 50, 0));
@@ -1039,9 +1040,8 @@ test "home_ws: detachToFloating clears cache" {
     var m = makeModel();
     regCur(&m, 1);
     try testing.expectEqual(@as(?WSId, 0), m.store.get(1).?.home_ws);
-    // The window-layer detach path (actions) clears home_ws; model tests
-    // have no X11, so verify the resulting state directly: a floating entry
-    // carries a null home_ws.
+    // The window-layer detach path clears home_ws; verify the result state
+    // (a floating entry carries null home_ws).
     const e = m.store.getPtr(1).?;
     e.anchor = .{ .floating = .{ .x = 0, .y = 0, .width = 100, .height = 100 } };
     e.home_ws = null;
@@ -1143,7 +1143,7 @@ test "T2E-2: minimize serialize/deserialize round-trip" {
     try minimize.init();
     defer minimize.deinit();
     regCur(&m, 70);
-    // Not parked => no blob (only minimalize owns the parked slot).
+    // Not parked => no blob (only the minimize module owns the parked slot).
     try testing.expect(minimize.serializeWindow(@ptrCast(&m), 70, testing.allocator) == null);
     try minimize.minimize(&m, 70);
     const blob = minimize.serializeWindow(@ptrCast(&m), 70, testing.allocator) orelse
@@ -1228,9 +1228,8 @@ test "H8-1: toggleFullscreen writes covering_ws core intent" {
     try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOnWs(&m, 0));
 }
 
-// H8-2: coveringOccupantOnWs mirrors coverageOn's parked-ghost exclusion (a
-// minimized-from-fullscreen window is not an occupant) and agrees with the
-// module's own coverage seam.
+// H8-2: coveringOccupantOnWs mirrors coverageOn's parked-ghost exclusion and
+// agrees with the module's coverage seam.
 test "H8-2: model.coveringOccupantOnWs excludes parked ghosts" {
     var m = makeModel();
     defer deinitModel(&m);
@@ -1252,10 +1251,8 @@ test "H8-2: model.coveringOccupantOnWs excludes parked ghosts" {
     try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOnWs(&m, 0));
     try testing.expectEqual(@as(?WindowId, null), fullscreen.coverageOn(&m, 0));
 
-    // Restore re-surfaces the window: a fullscreen-carrying window re-enters
-    // covering -- the model's covering intent is the single authority, so the
-    // window now re-claims the screen (matching the runtime wire behavior
-    // where the restored fullscreen occupant renders edge-to-edge).
+    // Restore re-surfaces the window: it re-enters covering (the model's
+    // covering intent is the single authority for re-claiming the screen).
     minimize.restore(&m, 91);
     try testing.expect(m.store.get(91).?.presence == .covering);
     try testing.expect(fullscreen.isFullscreenMode(&m, 91));
@@ -1313,12 +1310,8 @@ test "H8-4: move/tag retarget tracks covering_ws to the new ws" {
 
 // -- Audited behavioral contracts (BC01/05/10/12) ----------------------------
 
-// BC01 (spawn path): on-current spawn admission mirrors actions.mapRequest's
-// model mutations -- register the window tiled+present on the current ws, then
-// focus it. An off-current spawn registers tiled on its TARGET ws but does NOT
-// take focus (mapRequest returns before the setFocus step). This covers the
-// model-side admission policy headlessly; the X-cookie admission (MapRequest
-// event) itself is wire-only.
+// BC01 (spawn path): on-current spawn tiles+focuses; off-current spawn tiles
+// on its target ws but does NOT take focus (mirrors actions.mapRequest).
 test "BC01: spawn admission tiles (on-current focused; off-current target-only)" {
     var m = makeModel();
     defer deinitModel(&m);
@@ -1346,13 +1339,8 @@ test "BC01: spawn admission tiles (on-current focused; off-current target-only)"
     try assertSingleMembership(&m);
 }
 
-// BC05 (client border-width decision): honoring a border_width-only configure
-// request on a TILED window returns border_only and must not disturb the
-// window's tiling membership -- it stays tiled/present in its slot, so a
-// subsequent retile still finds it. The model does not itself store the
-// width VALUE (wincache tracks the applied server width; sync re-applies
-// cfg_bw), so the value-survival half is not model-representable; this covers
-// the model transition that gate-keeps it.
+// BC05: a border_width-only honor on a TILED window (border_only) must not
+// disturb tiling membership; it stays tiled/present for the next retile.
 test "BC05: border-width honor leaves tiled membership intact across a retile" {
     var m = makeModel();
     defer deinitModel(&m);

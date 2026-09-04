@@ -105,7 +105,13 @@ pub const Sink = struct {
     pub inline fn stackOnly(self: Sink, win: model.WindowId, s: Stack) void {
         self.vt.stack_only(self.ptr, win, s);
     }
-    pub inline fn setEwmhFullscreen(self: Sink, win: model.WindowId, state_atom: u32, fs_atom: u32, is_fullscreen: bool) void {
+    pub inline fn setEwmhFullscreen(
+        self: Sink,
+        win: model.WindowId,
+        state_atom: u32,
+        fs_atom: u32,
+        is_fullscreen: bool,
+    ) void {
         self.vt.set_ewmh_fullscreen(self.ptr, win, state_atom, fs_atom, is_fullscreen);
     }
     pub inline fn flush(self: Sink) void {
@@ -138,18 +144,11 @@ pub const Ctx = struct {
 
 pub const ReconcileOpts = struct { force_restack: bool = false };
 
-// DESIGN NOTE: The sent ledger uses inline parallel arrays instead of
-// model.Store because (1) it needs no iteration-order guarantees (unlike the
-// model, whose sorted-key order reconcile walks), and (2) the API surface
-// needed is minimal (get, put, remove, clear).
-//
-// The ledger's hottest operation is reconcile's one get-or-create per window
-// (every pass). A bare linear scan over the compact array is O(N) per window
-// = O(N^2) per pass, the dominant hot path. So sent_keys/sent_vals are backed
-// by a parallel open-addressing hash index (sent_index) mapping window-id ->
-// slot, giving amortized O(1) get/get-or-create. The compact arrays remain
-// the source of truth for iteration and swap-remove; sent_index is kept
-// consistent on every insert and every swap-remove (see sentSwapRemove).
+// The sent ledger uses compact parallel arrays (only get/put/remove/clear; no
+// iteration-order needs, unlike model.Store) backed by an open-addressing hash
+// index, sent_index (window-id -> slot), so reconcile's per-window ledger
+// access is amortized O(1); the arrays stay the source of truth and sent_index
+// tracks every insert and swap-remove.
 
 /// What we last sent per window; WRITE-ONLY bookkeeping whose three contract
 /// reads are documented in the header:
@@ -334,7 +333,10 @@ const retile_prof = struct {
 
     fn flush() void {
         const avg: f64 = @as(f64, @floatFromInt(total_ns)) / @as(f64, @floatFromInt(count));
-        std.log.info("[RETILE_PROF] last {} grab-retiles: avg={d:.0}ns min={d}ns max={d}ns", .{ count, avg, min_ns, max_ns });
+        std.log.info(
+            "[RETILE_PROF] last {} grab-retiles: avg={d:.0}ns min={d}ns max={d}ns",
+            .{ count, avg, min_ns, max_ns },
+        );
         count = 0;
         total_ns = 0;
         min_ns = std.math.maxInt(i128);
@@ -571,7 +573,13 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         if (parked) {
             g.value_ptr.parked = true;
         } else {
-            g.value_ptr.* = .{ .rect = rect, .has_rect = true, .parked = false, .bw = bw, .pixel = pixel };
+            g.value_ptr.* = .{
+                .rect = rect,
+                .has_rect = true,
+                .parked = false,
+                .bw = bw,
+                .pixel = pixel,
+            };
         }
     }
 
@@ -597,7 +605,13 @@ pub fn raiseNow(ctx: *Ctx, win: model.WindowId) void {
 /// inside the enclosing grab, whose ungrabAndFlush lands it atomically with
 /// geometry. The EWMH atoms are resolved by the fullscreen module and passed
 /// through; the fullscreen module's XCB_ATOM_NONE guard already ran.
-pub fn setEwmhFullscreen(ctx: *Ctx, win: model.WindowId, state_atom: u32, fs_atom: u32, is_fullscreen: bool) void {
+pub fn setEwmhFullscreen(
+    ctx: *Ctx,
+    win: model.WindowId,
+    state_atom: u32,
+    fs_atom: u32,
+    is_fullscreen: bool,
+) void {
     ctx.sink.setEwmhFullscreen(win, state_atom, fs_atom, is_fullscreen);
 }
 

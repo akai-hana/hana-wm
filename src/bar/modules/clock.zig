@@ -80,7 +80,14 @@ pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, star
     // one extra second, exactly as the cadence design intends.
     rendered_sec = sec;
     rendered_fmt = fmt;
-    return dc.drawSegment(start_x, height, str, config.scaledSegmentPadding(height), config.bg, config.fg);
+    return dc.drawSegment(
+        start_x,
+        height,
+        str,
+        config.scaledSegmentPadding(height),
+        config.bg,
+        config.fg,
+    );
 }
 
 fn currentEpochSeconds() i64 {

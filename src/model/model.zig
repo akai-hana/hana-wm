@@ -1,28 +1,7 @@
 //! Single source of truth for management state.
-//!
-//! Layer rule (pure core): imports are std + utils + constants ONLY. No X11
-//! access and NO feature-specific imports -- the model depends on nothing
-//! feature-related and is never affected by adding/removing feature plugin
-//! files.
-//!
-//! Threading model: the Model is single-threaded, accessed only from the
-//! event-loop thread. All mutations happen sequentially, so no locks or
-//! atomics are needed on Model fields.
-//!
-//! Architecture (plugins over the model): per-feature state transitions
-//! (parking, screen coverage, floating geometry, tag sets) live in the
-//! wire-side plugin modules under src/window/modules/, one file per feature.
-//! Those plugins import this model one-way and draw on its types/helpers.
-//! THIS file stays the pure core and exports only:
-//!   - shared vocabulary types (Entry/WsState/RestoreOrder/ConfigureReq/
-//!     HonorDecision/...),
-//!   - the substrate + reuse helpers (register/unregister/findHome/removeValue/
-//!     removeFromMruAll),
-//!   - shared queries (visibleOn/tiledCountOnWs),
-//!   - the core intrinsics that only touch focus and tiling params
-//!     (setFocus/clearFocus/fallbackFocusCandidate and reorderTiled/swapPrimary/
-//!     cycleLayout/variantCount/adjustPrimaryWidth/applyConfigReload).
-//! The model contains no feature transition LOGIC.
+//! Layer rule: pure core (no X11, no feature imports). Single-threaded.
+//! Feature transitions live in src/window/modules/; this file exports only
+//! shared vocabulary types, queries, and core focus/tiling intrinsics.
 const std = @import("std");
 const utils = @import("utils");
 const constants = @import("constants");
@@ -44,8 +23,7 @@ const MAX_WS = constants.max_workspaces;
 
 pub const ALL_MASK: Mask = ~@as(Mask, 0);
 
-/// Single canonical size-hints record (the former layouts.SizeHints copy and
-/// its migration bridge are gone). Do NOT import layouts from here (layer rule).
+/// Single canonical size-hints record. Do NOT import layouts from here (layer rule).
 pub const SizeHints = struct {
     max_width: u16 = 0, // PMaxSize limit
     max_height: u16 = 0,
@@ -86,15 +64,9 @@ pub const BaseMode = union(enum) {
     floating: utils.Rect,
 };
 
-/// Open visibility pattern the model names:
-///   `present`  -- visible/layoutable window,
-///   `parked`   -- hidden by an extension (e.g. minimized),
-///   `covering` -- owns the screen on some workspace (e.g. fullscreen); the
-///                 layout layer parks everyone else while a covering window
-///                 holds the screen.
-/// This enumerates PATTERNS, not features: the model never names a feature,
-/// so a parked or covering window keeps its `anchor` and `mask` unchanged and
-/// the owning extension decides how it behaves once restored.
+/// Open visibility pattern: `present` (visible/layoutable), `parked` (hidden
+/// by an extension), `covering` (owns the screen on a workspace). Enumerates
+/// PATTERNS, not features; a parked/covering window keeps its `anchor`/`mask`.
 pub const Presence = enum { present, parked, covering };
 
 pub const Entry = struct {
@@ -102,17 +74,12 @@ pub const Entry = struct {
     anchor: BaseMode,
     size_hints: SizeHints = .{},
     /// Cached workspace whose tiled_order holds this window (single-membership
-    /// invariant). Updated by every transition that mutates tiled_order. Null
-    /// when the window has no tiled slot (floating or parked).
+    /// invariant); null when the window has no tiled slot.
     home_ws: ?WSId = null,
     presence: Presence = .present,
-    /// Core covering intent: the workspace this window's screen-covering
-    /// capture anchors to, present iff `presence == .covering`. This is a
-    /// PATTERN intent, not a feature: a covering window owns the screen on a
-    /// workspace, and the target is authoritative here so core (sync, bar,
-    /// persistence) can answer "who owns the screen on ws" without naming any
-    /// optional subsystem. The owning extension writes it when it claims and
-    /// clears it when it releases. Null when the window is not covering.
+    /// Core covering intent: the workspace this window's coverage anchors to,
+    /// present iff `presence == .covering`. The owning extension writes and
+    /// clears it; core reads it without naming any optional subsystem.
     covering_ws: ?WSId = null,
 };
 
@@ -221,14 +188,11 @@ pub fn tiledCountOnWs(m: *const Model, ws: WSId) usize {
     return n;
 }
 
-/// The covering occupant owning the screen on `ws`, if any: a covering entry
-/// whose capture anchors to `ws`, OR a covering entry visible on `ws`
-/// (multi-tag). Pure core computation -- no feature import -- so core layers
-/// (sync, bar) can resolve the screen owner against only the model's core
-/// intent, never by enumerating optional subsystems. A covering window is
-/// never `.parked` (minimize remaps it to `.parked`), so walked-ghosts are
-/// excluded by construction. At most one covering occupant per ws is guaranteed
-/// by the reconciler.
+/// The covering occupant owning the screen on `ws`: a covering entry whose
+/// capture anchors to `ws`, or a covering entry visible on `ws` (multi-tag).
+/// Pure core computation, so sync/bar resolve the screen owner without
+/// enumerating optional subsystems. At most one occupant per ws by the
+/// reconciler.
 pub fn coveringOccupantOnWs(m: *const Model, ws: WSId) ?WindowId {
     for (0..m.store.count()) |k| {
         const it = m.store.at(k);

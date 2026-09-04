@@ -12,25 +12,19 @@ const debug = @import("debug");
 const tracking = @import("tracking");
 const focus = @import("focus");
 const build_options = @import("build_options");
-// Optional window sub-systems are reached through the build-generated
-// `window_modules` registry, never by naming an optional module here.
-// `window_mods` is the auto-discovered `[N]WindowModule` array in
-// deterministic filesystem scan order; the lifecycle dispatch below runs
-// each present module's init/deinit, and absent modules are simply not in
-// the array.
 const window_mods = @import("window_modules").modules;
-
-/// Registry lookup for the hook `field`; the canonical scan lives in
-/// `plugin.zig` (see `plugin.providerOf`). Null when no module binds it.
-fn providerOf(comptime field: std.meta.FieldEnum(@import("plugin").WindowModule)) ?@import("plugin").WindowModule {
-    return @import("plugin").providerOf(window_mods[0..], field);
-}
 const screen_mod = @import("screen");
 const wincache = @import("wincache");
 const borders = @import("borders");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
 const persist = @import("persist");
+
+fn providerOf(
+    comptime field: std.meta.FieldEnum(@import("plugin").WindowModule),
+) ?@import("plugin").WindowModule {
+    return @import("plugin").providerOf(window_mods[0..], field);
+}
 
 // XSizeHints flags (ICCCM 4.1.2.3)
 const p_max_size: u32 = 0x20;
@@ -108,29 +102,17 @@ pub fn markBordersFlushed() void {
 
 /// Returns null if the window does not exist or is not yet mapped.
 pub fn getGeometry(conn: core.Connection, win: u32) ?utils.Rect {
-    const reply = xcb.xcb_get_geometry_reply(conn, xcb.xcb_get_geometry(conn, win), null) orelse return null;
+    const reply = xcb.xcb_get_geometry_reply(conn, xcb.xcb_get_geometry(conn, win), null) orelse
+        return null;
     defer std.c.free(reply);
     return utils.rectFromXcb(reply, true);
 }
 
-// ICCCM focus property cache
-//
-// Keyed by window ID; populated at map time via `populateFocusCacheFromCookies`,
+// ICCCM focus property cache: keyed by window ID, populated at map time,
 // invalidated on WM_PROTOCOLS/WM_HINTS PropertyNotify and on destruction.
-// Caches the full ICCCM focus-delivery split:
-//   accepts_input: WM_HINTS.input, mirrors dwm's `c->neverfocus`.
-//   wm_delete     : WM_DELETE_WINDOW support, for the close-window path.
-//   take_focus    : WM_TAKE_FOCUS presence in WM_PROTOCOLS (ICCCM 4.1.7).
-//
-// take_focus is safe to cache because the management event mask (which includes
-// PropertyChange) is installed BEFORE the cache is seeded in both map paths
-// (handleMapRequest and adoptRootWindows install the mask, then fire the
-// admission cookies that populate this cache). The server processes the
-// change_window_attributes request before the get_property request, so once the
-// cache is seeded no WM_PROTOCOLS change can occur without a PropertyNotify that
-// refreshCachedPropHalf observes — a cached value therefore can't stale. The old
-// "never cache WM_TAKE_FOCUS" rule assumed the mask might not be in place yet;
-// the mask-first map ordering makes that precondition unreachable.
+// Caches accepts_input (WM_HINTS.input), wm_delete (WM_DELETE_WINDOW), and
+// take_focus (WM_TAKE_FOCUS in WM_PROTOCOLS). Safe because the mask-first
+// map ordering guarantees PropertyNotify before any post-seed change can stale.
 
 /// The four ICCCM focus delivery modes (4.1.7), determined by the combination of
 /// WM_HINTS.input and WM_TAKE_FOCUS presence in WM_PROTOCOLS.
@@ -141,11 +123,9 @@ pub const InputModel = enum {
     globally_active, // input=False, WM_TAKE_FOCUS:    only send protocol
 };
 
-/// Per-window properties cached from WM_HINTS and WM_PROTOCOLS.
-///
-/// All three fields are kept in sync via PropertyNotify and rarely change
-/// post-map; take_focus is safe to cache because the mask-first map ordering
-/// guarantees it cannot stale (see the section comment above).
+/// Per-window properties cached from WM_HINTS and WM_PROTOCOLS. Kept in
+/// sync via PropertyNotify; take_focus is safe to cache because the mask-first
+/// map ordering guarantees it cannot stale.
 const CachedProps = struct {
     accepts_input: bool,
     wm_delete: bool,
@@ -188,7 +168,8 @@ fn populateFocusCacheFromCookies(
     // Scan WM_PROTOCOLS once for both protocols atoms (no second round-trip);
     // wm_delete and take_focus both get cached below.
     const protocols_result = protocols: {
-        const r = xcb.xcb_get_property_reply(conn, protocols_cookie, null) orelse break :protocols WMProtocolsProps{};
+        const r = xcb.xcb_get_property_reply(conn, protocols_cookie, null) orelse
+            break :protocols WMProtocolsProps{};
         defer std.c.free(r);
         break :protocols protocolPropsFromReply(r, take_focus_atom, wm_delete_atom);
     };
@@ -210,7 +191,15 @@ pub fn fireWMProtocolsQuery(
     win: u32,
 ) ?xcb.xcb_get_property_cookie_t {
     const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch return null;
-    return xcb.xcb_get_property(conn, property_no_delete, win, protocols_atom, xcb.XCB_ATOM_ATOM, 0, max_property_length);
+    return xcb.xcb_get_property(
+        conn,
+        property_no_delete,
+        win,
+        protocols_atom,
+        xcb.XCB_ATOM_ATOM,
+        0,
+        max_property_length,
+    );
 }
 
 /// Drains the WM_HINTS cookie and returns the ICCCM input flag. Returns true
@@ -282,7 +271,10 @@ pub const InputModelResolution = struct {
 
 pub fn getInputModelResolved(conn: core.Connection, win: u32) InputModelResolution {
     const props = getOrQueryCachedProps(conn, win);
-    return .{ .model = inputModelFrom(props.take_focus, props.accepts_input), .take_focus = props.take_focus };
+    return .{
+        .model = inputModelFrom(props.take_focus, props.accepts_input),
+        .take_focus = props.take_focus,
+    };
 }
 
 /// Resolves the input model from the focus-property cache only, consuming a
@@ -298,7 +290,10 @@ pub fn getInputModelResolvedConsume(
 ) InputModelResolution {
     if (peekCachedProps(win)) |props| {
         discardProtocolCookie(conn, pre_protocols_cookie);
-        return .{ .model = inputModelFrom(props.take_focus, props.accepts_input), .take_focus = props.take_focus };
+        return .{
+            .model = inputModelFrom(props.take_focus, props.accepts_input),
+            .take_focus = props.take_focus,
+        };
     }
     const protocols = if (pre_protocols_cookie) |ck|
         queryWMProtocolsPropsConsume(conn, ck)
@@ -310,7 +305,10 @@ pub fn getInputModelResolvedConsume(
         .wm_delete = protocols.wm_delete,
         .take_focus = protocols.take_focus,
     });
-    return .{ .model = inputModelFrom(protocols.take_focus, accepts_input), .take_focus = protocols.take_focus };
+    return .{
+        .model = inputModelFrom(protocols.take_focus, accepts_input),
+        .take_focus = protocols.take_focus,
+    };
 }
 
 /// Resolves the ICCCM 4.1.7 focus-delivery model for `win`. Both accepts_input
@@ -409,7 +407,14 @@ fn dispatchTakeFocus(
     const proto_reply = xcb.xcb_get_property_reply(conn, proto_cookie, null) orelse return;
     defer std.c.free(proto_reply);
     if (proto_reply.*.format != 32 or proto_reply.*.value_len == 0) return;
-    dispatchTakeFocusMessage(conn, win, time, protocols_atom, take_focus_atom, u32Values(proto_reply)[0..@intCast(proto_reply.*.value_len)]);
+    dispatchTakeFocusMessage(
+        conn,
+        win,
+        time,
+        protocols_atom,
+        take_focus_atom,
+        u32Values(proto_reply)[0..@intCast(proto_reply.*.value_len)],
+    );
 }
 
 /// Sends a WM_TAKE_FOCUS client message (ICCCM 4.1.7) iff `win` advertises
@@ -441,7 +446,11 @@ const WMProtocolsProps = struct { take_focus: bool = false, wm_delete: bool = fa
 
 /// Shared by queryWMProtocolsProps (live query) and populateFocusCacheFromCookies
 /// (cookie path).
-fn scanProtocolAtoms(protocol_atoms: []const u32, take_focus_atom: u32, wm_delete_atom: u32) WMProtocolsProps {
+fn scanProtocolAtoms(
+    protocol_atoms: []const u32,
+    take_focus_atom: u32,
+    wm_delete_atom: u32,
+) WMProtocolsProps {
     var props: WMProtocolsProps = .{};
     for (protocol_atoms) |atom| {
         if (atom == take_focus_atom) props.take_focus = true;
@@ -464,7 +473,11 @@ fn protocolPropsFromReply(
     wm_delete_atom: u32,
 ) WMProtocolsProps {
     if (reply.*.format != 32 or reply.*.value_len == 0) return .{};
-    return scanProtocolAtoms(u32Values(reply)[0..@intCast(reply.*.value_len)], take_focus_atom, wm_delete_atom);
+    return scanProtocolAtoms(
+        u32Values(reply)[0..@intCast(reply.*.value_len)],
+        take_focus_atom,
+        wm_delete_atom,
+    );
 }
 
 fn queryWMProtocolsProps(conn: core.Connection, win: u32) WMProtocolsProps {
@@ -474,7 +487,15 @@ fn queryWMProtocolsProps(conn: core.Connection, win: u32) WMProtocolsProps {
 
     const reply = xcb.xcb_get_property_reply(
         conn,
-        xcb.xcb_get_property(conn, property_no_delete, win, protocols_atom, xcb.XCB_ATOM_ATOM, 0, max_property_length),
+        xcb.xcb_get_property(
+            conn,
+            property_no_delete,
+            win,
+            protocols_atom,
+            xcb.XCB_ATOM_ATOM,
+            0,
+            max_property_length,
+        ),
         null,
     ) orelse return .{};
     defer std.c.free(reply);
@@ -485,7 +506,10 @@ fn queryWMProtocolsProps(conn: core.Connection, win: u32) WMProtocolsProps {
 /// the scan identical to queryWMProtocolsProps so the pipelined path yields the
 /// exact same verdict; the caller fired the query BEFORE the pointer round trip
 /// so its reply is typically already buffered by the time this is reached.
-fn queryWMProtocolsPropsConsume(conn: core.Connection, cookie: xcb.xcb_get_property_cookie_t) WMProtocolsProps {
+fn queryWMProtocolsPropsConsume(
+    conn: core.Connection,
+    cookie: xcb.xcb_get_property_cookie_t,
+) WMProtocolsProps {
     const take_focus_atom = utils.getAtomCached("WM_TAKE_FOCUS") catch return .{};
     const wm_delete_atom = utils.getAtomCached("WM_DELETE_WINDOW") catch return .{};
 
@@ -614,7 +638,10 @@ pub fn init(alloc: std.mem.Allocator) !void {
     // Pre-allocate spawn queue capacity for the common case (a handful of
     // concurrent spawns). Failure is non-fatal; the list grows on demand.
     state.?.spawn_queue.ensureTotalCapacity(alloc, 16) catch |err| {
-        std.log.warn("window: spawn queue pre-allocation failed ({s}); will grow on demand", .{@errorName(err)});
+        std.log.warn(
+            "window: spawn queue pre-allocation failed ({s}); will grow on demand",
+            .{@errorName(err)},
+        );
     };
     state.?.cache_slots.clear();
     state.?.cache_ready = true;
@@ -668,7 +695,10 @@ inline fn isOnCurrentWorkspace(win: u32) bool {
 // Off-workspace windows that need initial grab setup call focus.initWindowGrabs.
 
 inline fn clampToValidWorkspace(target: u8, fallback: core.WorkspaceId) core.WorkspaceId {
-    return if (target < tracking.getWorkspaceCount()) core.WorkspaceId.fromIndex(target) else fallback;
+    return if (target < tracking.getWorkspaceCount())
+        core.WorkspaceId.fromIndex(target)
+    else
+        fallback;
 }
 
 /// Resolves a pre-fired WM_CLASS property cookie against workspace rules.
@@ -713,7 +743,11 @@ fn findSpawnQueueWorkspace(
     c_net_wm_pid: xcb.xcb_get_property_cookie_t,
 ) ?u8 {
     const win_pid: u32 = pid: {
-        const pid_reply = xcb.xcb_get_property_reply(core.getState().conn, c_net_wm_pid, null) orelse break :pid 0;
+        const pid_reply = xcb.xcb_get_property_reply(
+            core.getState().conn,
+            c_net_wm_pid,
+            null,
+        ) orelse break :pid 0;
         defer std.c.free(pid_reply);
         if (pid_reply.*.format != 32 or pid_reply.*.value_len < 1) break :pid 0;
         break :pid u32Values(pid_reply)[0];
@@ -738,7 +772,7 @@ fn findSpawnQueueWorkspace(
     // workspace, so return null and let handleMapRequest fall back to current_ws.
     if (state.?.spawn_queue.items.len != 1) {
         std.log.debug(
-            "spawn: no exact PID match for pid={d}, {d} entries pending; ambiguous, routing to current workspace",
+            "spawn: no exact PID match for pid={d}, {d} pending; ambiguous, routing to current ws",
             .{ win_pid, state.?.spawn_queue.items.len },
         );
         return null;
@@ -784,7 +818,10 @@ fn resolveTargetWorkspace(
 pub fn registerSpawn(workspace: core.WorkspaceId, pid: u32) void {
     const alloc = state.?.alloc orelse return;
     if (state.?.spawn_queue.items.len >= spawn_queue_cap) {
-        debug.warn("registerSpawn: spawn queue full ({d} entries); entry dropped", .{spawn_queue_cap});
+        debug.warn(
+            "registerSpawn: spawn queue full ({d} entries); entry dropped",
+            .{spawn_queue_cap},
+        );
         return;
     }
     state.?.spawn_queue.append(alloc, .{ .workspace = workspace.index, .pid = pid }) catch |err| {
@@ -814,15 +851,33 @@ fn fireAdmissionCookies(conn: core.Connection, win: u32) AdmissionCookies {
     const cs = core.getState();
 
     // Workspace resolution cookies (conditional).
-    const c_wm_class: ?xcb.xcb_get_property_cookie_t = if (cs.config.workspaces.rules.items.len > 0 and utils.getAtomOrZero("WM_CLASS") != 0)
-        xcb.xcb_get_property(conn, property_no_delete, win, utils.getAtomOrZero("WM_CLASS"), xcb.XCB_ATOM_STRING, 0, constants.property_max_length)
-    else
-        null;
+    const c_wm_class: ?xcb.xcb_get_property_cookie_t =
+        if (cs.config.workspaces.rules.items.len > 0 and utils.getAtomOrZero("WM_CLASS") != 0)
+            xcb.xcb_get_property(
+                conn,
+                property_no_delete,
+                win,
+                utils.getAtomOrZero("WM_CLASS"),
+                xcb.XCB_ATOM_STRING,
+                0,
+                constants.property_max_length,
+            )
+        else
+            null;
 
-    const c_net_wm_pid: ?xcb.xcb_get_property_cookie_t = if (state.?.spawn_queue.items.len > 0)
-        xcb.xcb_get_property(conn, property_no_delete, win, utils.getAtomOrZero("_NET_WM_PID"), xcb.XCB_ATOM_CARDINAL, 0, 1)
-    else
-        null;
+    const c_net_wm_pid: ?xcb.xcb_get_property_cookie_t =
+        if (state.?.spawn_queue.items.len > 0)
+            xcb.xcb_get_property(
+                conn,
+                property_no_delete,
+                win,
+                utils.getAtomOrZero("_NET_WM_PID"),
+                xcb.XCB_ATOM_CARDINAL,
+                0,
+                1,
+            )
+        else
+            null;
 
     // Property cookies (always fired).
     const normal_hints_cookie = xcb.xcb_get_property(
@@ -835,7 +890,15 @@ fn fireAdmissionCookies(conn: core.Connection, win: u32) AdmissionCookies {
         wm_normal_hints_long_length,
     );
     const protocols_cookie = fireWMProtocolsQuery(conn, win) orelse
-        xcb.xcb_get_property(conn, property_no_delete, win, 0, xcb.XCB_ATOM_ATOM, 0, max_property_length);
+        xcb.xcb_get_property(
+            conn,
+            property_no_delete,
+            win,
+            0,
+            xcb.XCB_ATOM_ATOM,
+            0,
+            max_property_length,
+        );
     const hints_cookie = xcb.xcb_get_property(
         conn,
         property_no_delete,
@@ -1032,7 +1095,11 @@ pub fn adoptRootWindows() !usize {
     const cs = core.getState();
     const conn = cs.conn;
 
-    const tree_reply = xcb.xcb_query_tree_reply(conn, xcb.xcb_query_tree(conn, cs.root), null) orelse return 0;
+    const tree_reply = xcb.xcb_query_tree_reply(
+        conn,
+        xcb.xcb_query_tree(conn, cs.root),
+        null,
+    ) orelse return 0;
     defer std.c.free(tree_reply);
     const children = xcb.xcb_query_tree_children(tree_reply);
     const child_count: usize = @intCast(xcb.xcb_query_tree_children_length(tree_reply));
@@ -1137,7 +1204,13 @@ fn unmanageWindow(win: u32) void {
     // pointer event re-focused it. Both facts ride ctx into
     // actions.unmanage, which runs the same close fallback as the hide path.
     var actx: actions.Ctx = .{
-        .withdrawn_fullscreen_ws = if (pipeline.initialized) (if (providerOf(.coveringWsOf)) |wm| wm.coveringWsOf.?(pipeline.model(), win) else null) else null,
+        .withdrawn_fullscreen_ws = if (pipeline.initialized)
+            if (providerOf(.coveringWsOf)) |wm|
+                wm.coveringWsOf.?(pipeline.model(), win)
+            else
+                null
+        else
+            null,
         .withdrawn_was_focused = pipeline.initialized and pipeline.model().focused == win,
     };
     // Module cleanup on window drop: each compiled-in window module's
@@ -1187,7 +1260,13 @@ fn sendConfigureNotify(win: u32, geom: utils.Rect) void {
         .override_redirect = 0,
         .pad1 = 0,
     };
-    _ = xcb.xcb_send_event(core.getState().conn, 0, win, xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY, @ptrCast(&ev));
+    _ = xcb.xcb_send_event(
+        core.getState().conn,
+        0,
+        win,
+        xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY,
+        @ptrCast(&ev),
+    );
 }
 
 /// Resolve the window's current geometry, cheapest source first:
@@ -1206,7 +1285,13 @@ fn resolveConfigureGeometry(win: u32) ?utils.Rect {
     // Model/sync truth: floating base or last-sent ledger rect.
     if (@import("sync").truthRect(pipeline.model(), win)) |rect| {
         const border: u16 = (if (build_options.has_tiling) @import("core").borderWidth() else 0);
-        return .{ .x = rect.x, .y = rect.y, .width = rect.width, .height = rect.height, .border_width = border };
+        return .{
+            .x = rect.x,
+            .y = rect.y,
+            .width = rect.width,
+            .height = rect.height,
+            .border_width = border,
+        };
     }
 
     if (providerOf(.isCoveringMode)) |wm| {
@@ -1237,93 +1322,81 @@ fn sendSyntheticConfigureNotify(win: u32) void {
     sendConfigureNotify(win, geom);
 }
 
+fn handleManagedConfigureRequest(
+    win: u32,
+    event: *const xcb.xcb_configure_request_event_t,
+    mask: u16,
+) void {
+    const req: @import("model").ConfigureReq = .{
+        .x = if (mask & xcb.XCB_CONFIG_WINDOW_X != 0) event.x else null,
+        .y = if (mask & xcb.XCB_CONFIG_WINDOW_Y != 0) event.y else null,
+        .width = if (mask & xcb.XCB_CONFIG_WINDOW_WIDTH != 0) event.width else null,
+        .height = if (mask & xcb.XCB_CONFIG_WINDOW_HEIGHT != 0) event.height else null,
+        .border_width = if (mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0)
+            event.border_width
+        else
+            null,
+    };
+    const wm = providerOf(.honorConfigureRequest) orelse return;
+    switch (wm.honorConfigureRequest.?(pipeline.model(), win, req)) {
+        .geometry_applied => {
+            if (build_options.has_tiling and mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0)
+                _ = wincache.cacheBorderWidth(win, event.border_width);
+            // ICCCM 4.1.5: a border-width-only request needs the synthetic
+            // ConfigureNotify (the width isn't otherwise observable).
+            if (mask == xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH) {
+                sendSyntheticConfigureNotify(win);
+                return;
+            }
+            sendRequestedConfigure(win, event, mask);
+        },
+        .border_only => {
+            if (build_options.has_tiling)
+                _ = wincache.cacheBorderWidth(win, event.border_width);
+            if (mask != xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH)
+                _ = xcb.xcb_configure_window(
+                    core.getState().conn,
+                    win,
+                    xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
+                    &[_]u32{event.border_width},
+                );
+            // ICCCM 4.1.5: echo a synthetic ConfigureNotify so the client
+            // observes its denied geometry / new border width.
+            sendSyntheticConfigureNotify(win);
+        },
+        .ignored => {
+            sendSyntheticConfigureNotify(win);
+        },
+    }
+}
+
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) void {
     const win = event.window;
 
-    // Fast exit: no geometry fields requested, nothing for the WM to act on.
-    // Checked before the tiling/fullscreen predicates to skip two hash probes
-    // on stacking-order-only requests (compositors, override-redirect games).
+    // Fast exit: no geometry fields requested, so skip the managed predicates
+    // (stacking-order-only requests from compositors/override-redirect).
     const mask = event.value_mask & geometry_mask;
     if (mask == 0) return;
 
-    // Deny min-size ConfigureRequests from the window being drag-resized. When
-    // the WM sizes a floating window below its WM_NORMAL_HINTS minimum, the
-    // client fires a ConfigureRequest back with its minimum dimensions;
-    // honouring it races the next MotionNotify and causes visible flicker.
-    // Echo the geometry the WM already applied so the client settles without
-    // fighting the drag. (Protocol-side guard: must run before the model
-    // decision, which has no view of in-flight drags.)
+    // Deny min-size ConfigureRequests from the window being drag-resized.
     if (build_options.has_floating and actions.isResizingWindow(win)) {
         const last = actions.getDragLastRect();
         if (last.width != 0) {
-            sendConfigureNotify(win, .{ .x = last.x, .y = last.y, .width = last.width, .height = last.height, .border_width = borders.width() });
+            sendConfigureNotify(win, .{
+                .x = last.x,
+                .y = last.y,
+                .width = last.width,
+                .height = last.height,
+                .border_width = borders.width(),
+            });
         } else {
-            // No motion event yet in this drag, get_geometry round-trip so we
-            // echo an accurate current size.
             sendSyntheticConfigureNotify(win);
         }
         return;
     }
 
-    // DECISION goes through the model's single tested procedure (T13):
-    // tiled/fullscreen/parked -> deny+echo; floating -> apply into the
-    // model rect (which also stops reconcile snap-backs after a client
-    // self-move); unknown windows stay honored (unmanaged clients are not
-    // the WM's to override). Wire sends + cache recording remain here per
-    // the check-layers allowlist; only the decision is centralized.
-    const managed = pipeline.initialized and tracking.isManaged(win);
-    if (managed) {
-        const req: @import("model").ConfigureReq = .{
-            .x = if (mask & xcb.XCB_CONFIG_WINDOW_X != 0) event.x else null,
-            .y = if (mask & xcb.XCB_CONFIG_WINDOW_Y != 0) event.y else null,
-            .width = if (mask & xcb.XCB_CONFIG_WINDOW_WIDTH != 0) event.width else null,
-            .height = if (mask & xcb.XCB_CONFIG_WINDOW_HEIGHT != 0) event.height else null,
-            .border_width = if (mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0) event.border_width else null,
-        };
-        if (providerOf(.honorConfigureRequest)) |wm| {
-            switch (wm.honorConfigureRequest.?(pipeline.model(), win, req)) {
-                .geometry_applied => {
-                    // Floating: the model stored exactly these values, so the
-                    // wire send mirrors the request verbatim. BW rides along and
-                    // is cached so dedup compares against server truth.
-                    if (build_options.has_tiling and mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0)
-                        _ = wincache.cacheBorderWidth(win, event.border_width);
-                    if (mask == xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH) {
-                        // Border-width-only request: the underlying space
-                        // (x/y/w/h, per the model store) is unchanged, so a
-                        // sendRequestedConfigure would be a pointless no-op that
-                        // leaves the client without the ICCCM 4.1.5 synthetic
-                        // ConfigureNotify it needs to learn the new border
-                        // width. That width isn't reflected in any real
-                        // ConfigureNotify it could observe on its own, so echo
-                        // the whole geometry once. (Mirrors the tiled
-                        // .border_only arm below.)
-                        sendSyntheticConfigureNotify(win);
-                        return;
-                    }
-                    sendRequestedConfigure(win, event, mask);
-                },
-                .border_only => {
-                    // Tiled: geometry DENIED, BW honored. Cache + forward the
-                    // border width ONLY; the old fall-through forwarded the
-                    // whole mixed mask, moving denied-geometry windows until the
-                    // next reconcile repaired them.
-                    if (build_options.has_tiling)
-                        _ = wincache.cacheBorderWidth(win, event.border_width);
-                    if (mask != xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH)
-                        _ = xcb.xcb_configure_window(core.getState().conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{event.border_width});
-                    // ICCCM 4.1.5: after honoring a ConfigureRequest, report a
-                    // synthetic ConfigureNotify so the client observes the new
-                    // border width even though its geometry was denied. Without
-                    // this the client believes its cached geometry is still
-                    // in sync and can paint stale padding.
-                    sendSyntheticConfigureNotify(win);
-                },
-                .ignored => {
-                    sendSyntheticConfigureNotify(win);
-                },
-            }
-        }
+    if (pipeline.initialized and tracking.isManaged(win)) {
+        handleManagedConfigureRequest(win, event, mask);
         return;
     }
 
@@ -1332,7 +1405,11 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
 
 /// Builds the value list from `event` in XCB_CONFIG_WINDOW_* bit order and
 /// issues the ConfigureWindow request.
-fn sendRequestedConfigure(win: u32, event: *const xcb.xcb_configure_request_event_t, mask: u16) void {
+fn sendRequestedConfigure(
+    win: u32,
+    event: *const xcb.xcb_configure_request_event_t,
+    mask: u16,
+) void {
     var values: [5]u32 = undefined;
     var n: usize = 0;
     if (mask & xcb.XCB_CONFIG_WINDOW_X != 0) {
@@ -1382,7 +1459,6 @@ inline fn maybeFocusWindow(win: u32) void {
     if (providerOf(.isWindowHidden)) |wm| {
         if (wm.isWindowHidden.?(pipeline.model(), win)) return;
     }
-    debug.info("[MAYBE_FOCUS] 0x{x}", .{win});
     focus.grabFocus(win, .mouse_enter);
 }
 
@@ -1474,8 +1550,16 @@ inline fn clampToU16(v: u32) u16 {
 // share the same 2-field pattern.
 const SizePair = struct { width: u16, height: u16 };
 
-fn extractFieldPair(fields: [*]const u32, field_count: u32, want: bool, comptime off: usize) SizePair {
-    if (want and field_count >= off + 2) return .{ .width = clampToU16(fields[off]), .height = clampToU16(fields[off + 1]) };
+fn extractFieldPair(
+    fields: [*]const u32,
+    field_count: u32,
+    want: bool,
+    comptime off: usize,
+) SizePair {
+    if (want and field_count >= off + 2) return .{
+        .width = clampToU16(fields[off]),
+        .height = clampToU16(fields[off + 1]),
+    };
     return .{ .width = 0, .height = 0 };
 }
 
@@ -1629,7 +1713,10 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     if (net_active != 0 and event.type == net_active) {
         if (!warned_active_unimplemented) {
             warned_active_unimplemented = true;
-            debug.warn("Ignoring _NET_ACTIVE_WINDOW request for 0x{x}: EWMH activation is not implemented", .{event.window});
+            debug.warn(
+                "Ignoring _NET_ACTIVE_WINDOW request for 0x{x}: EWMH activation is not implemented",
+                .{event.window},
+            );
         }
         return;
     }
@@ -1653,7 +1740,10 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     }
 
     const action = event.data.data32[0];
-    const is_fs = if (providerOf(.isCoveringMode)) |wm| wm.isCoveringMode.?(pipeline.model(), win) else false;
+    const is_fs = if (providerOf(.isCoveringMode)) |wm|
+        wm.isCoveringMode.?(pipeline.model(), win)
+    else
+        false;
     const should_enter = switch (action) {
         1 => true, // _NET_WM_STATE_ADD
         0 => false, // _NET_WM_STATE_REMOVE

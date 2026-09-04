@@ -1,5 +1,6 @@
 //! Single xcb C header translation.
-//! Shared by all modules to avoid duplicate @cImport translations, including modules outside core's dependency chain.
+//! Shared by all modules to avoid duplicate @cImport translations, including
+//! modules outside core's dependency chain.
 
 pub const xcb = @cImport({
     @cInclude("xcb/xcb.h");

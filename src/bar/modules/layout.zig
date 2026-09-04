@@ -53,7 +53,14 @@ fn getIcon() []const u8 {
 /// Returns the x coordinate immediately after the drawn segment.
 pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
     const icon = getIcon();
-    const end_x = try dc.drawSegment(start_x, height, icon, config.scaledSegmentPadding(height), config.bg, config.fg);
+    const end_x = try dc.drawSegment(
+        start_x,
+        height,
+        icon,
+        config.scaledSegmentPadding(height),
+        config.bg,
+        config.fg,
+    );
     cached_width = end_x - start_x;
     return end_x;
 }
@@ -68,7 +75,14 @@ fn drawHook(ctx: *anyopaque, x: u16) !u16 {
     return draw(c.dc, c.config, c.height, x);
 }
 
-fn onClickHook(_: u16, left: bool, _: bool, _: *anyopaque, _: *const fn (*anyopaque, u16) void, redraw: *const fn () void) bool {
+fn onClickHook(
+    _: u16,
+    left: bool,
+    _: bool,
+    _: *anyopaque,
+    _: *const fn (*anyopaque, u16) void,
+    redraw: *const fn () void,
+) bool {
     actions.cycleLayoutKind(if (left) 1 else -1);
     redraw();
     return true;

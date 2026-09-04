@@ -7,7 +7,7 @@
 //! applyModelLevel() restores model-level fields (current/ws params/orders/
 //! focused). home_ws and count_minimized are derived and NOT serialized.
 //!
-//! Tier 1 seam: each WindowRecord now carries `presence` (model.Presence) and
+//! Seam: each WindowRecord carries `presence` (model.Presence) and
 //! an opaque `ext` blob. Only `presence` and the identity/mode survive in the
 //! model; `ext` is feature-owned bytes carried verbatim and handed back to
 //! the owning module (via the window_modules registry) during adoption/wire
@@ -23,22 +23,21 @@
 //! workspace that was never saved.
 
 const std = @import("std");
-const model = @import("model");
-const debug = @import("debug");
-const constants = @import("constants");
 const build_options = @import("build_options");
 const config_mod = @import("config");
-// The per-feature serialization hooks live on the build-generated
-// `window_modules` registry (never by naming a sub-system module here): a
-// tree without a feature simply has no module providing serializeWindow, so
-// the loop below no-ops for it.
-const window_mods = @import("window_modules").modules;
+const constants = @import("constants");
+const debug = @import("debug");
+const model = @import("model");
 /// Layout registry (build-generated); the active layout is a `u8` index into
 /// it (see model.LayoutParams.kind). Empty when the tiling subsystem is
 /// absent. Gated on has_tiling so tree variants without tiling compile (the
 /// scenario matrix removes src/tiling entirely).
 const tiling_mods = @import("plugin").tiling_mods;
 const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
+// Per-feature serialization hooks live on the build-generated `window_modules`
+// registry; a tree without a feature has no serializeWindow provider, so the
+// loop below no-ops for it.
+const window_mods = @import("window_modules").modules;
 
 const MAX_WS = constants.max_workspaces;
 
@@ -106,8 +105,8 @@ const StateFileV1 = struct {
     windows: []const WindowRecordV1,
 };
 
-/// Version-2 (Tier-1 dev-only intermediate): `mode` field instead of
-/// `anchor`. Tolerated so a mid-refactor session file never bricks the boot.
+/// Version-2 (pre-anchor transition): `mode` field instead of `anchor`.
+/// Tolerated so a mid-refactor session file never bricks the boot.
 const ModeV2 = union(enum) {
     base: model.BaseMode,
     fullscreen: struct { ws: u8, base: model.BaseMode },
@@ -140,11 +139,11 @@ var loaded_parsed: ?std.json.Parsed(StateFile) = null;
 /// (v1/v2) upgrade path storage: the converted records and the
 /// arena that owns their workspace slices. Both are module-owned and kept for
 /// the process lifetime (or until the next loadToGlobal replaces them).
-var g_legacy_active: bool = false;
-var g_legacy_state: StateFile = undefined;
-var g_legacy_windows: [model.store_capacity]WindowRecord = undefined;
-var g_legacy_v1: ?std.json.Parsed(StateFileV1) = null;
-var g_legacy_v2: ?std.json.Parsed(StateFileV2) = null;
+var legacy_active: bool = false;
+var legacy_state: StateFile = undefined;
+var legacy_windows: [model.store_capacity]WindowRecord = undefined;
+var legacy_v1: ?std.json.Parsed(StateFileV1) = null;
+var legacy_v2: ?std.json.Parsed(StateFileV2) = null;
 
 /// Default restore path: XDG_RUNTIME_DIR is already per-user, so
 /// `$XDG_RUNTIME_DIR/hana-restore.json` needs no uid suffix; the /tmp
@@ -279,11 +278,10 @@ pub fn loadToGlobal(allocator: std.mem.Allocator, path: []const u8) !bool {
     defer allocator.free(raw);
 
     var parsed = std.json.parseFromSlice(StateFile, allocator, raw, .{}) catch {
-        // Format tolerance: a version-1 file written by a pre-Tier-1
-        // build may carry `.minimized` window modes (and `next_seq`) that the
-        // current anchor-based record cannot hold, and a version-2 (Tier-1
-        // dev-only intermediate) file may carry a `.mode` field instead of
-        // `.anchor`. Parse them against the appropriate shadow records and
+        // Format tolerance: an older version-1 file may carry `.minimized`
+        // window modes (and `next_seq`) that the current anchor-based record
+        // cannot hold, and a version-2 file may carry a `.mode` field instead
+        // of `.anchor`. Parse them against the appropriate shadow records and
         // convert (see loadLegacy).
         return try loadLegacy(allocator, raw);
     };
@@ -294,7 +292,7 @@ pub fn loadToGlobal(allocator: std.mem.Allocator, path: []const u8) !bool {
 
     if (loaded_parsed) |old| old.deinit();
     loaded_parsed = parsed;
-    g_legacy_active = false;
+    legacy_active = false;
     debug.info("persist: loaded session state ({} windows, {d} workspaces)", .{
         loaded_parsed.?.value.windows.len,
         loaded_parsed.?.value.workspaces.len,
@@ -304,25 +302,31 @@ pub fn loadToGlobal(allocator: std.mem.Allocator, path: []const u8) !bool {
 
 /// Parses a version-1/version-2 restore file and converts it into the
 /// current (v3) StateFile shape. Two older formats are tolerated:
-///   - v1 (pre-Tier-1): `.minimized` modes + `next_seq`; converted with
+///   - v1 (legacy): `.minimized` modes + `next_seq`; converted with
 ///     presence = .present and minimized windows re-homed visible (the old
 ///     payload has no module-blob equivalent).
-///   - v2 (Tier-1 dev-only intermediate): a `.mode` field instead of
-///     `.anchor`; presence/ext are carried through verbatim so the module
-///     blobs replay their re-park/cover exactly as a fresh v3 file would.
+///   - v2 (previous format): a `.mode` field instead of `.anchor`; presence/ext
+///     are carried through verbatim so the module blobs replay their
+///     re-park/cover exactly as a fresh v3 file would.
 /// The converted windows array is copied into static storage (model store
 /// capacity); the workspace slices alias the parse arena and are kept
-/// alive by `g_legacy_v1`/`g_legacy_v2`.
+/// alive by `legacy_v1`/`legacy_v2`.
 fn loadLegacy(allocator: std.mem.Allocator, raw: []const u8) !bool {
-    if (g_legacy_v1) |old| { old.deinit(); g_legacy_v1 = null; }
-    if (g_legacy_v2) |old| { old.deinit(); g_legacy_v2 = null; }
+    if (legacy_v1) |old| {
+        old.deinit();
+        legacy_v1 = null;
+    }
+    if (legacy_v2) |old| {
+        old.deinit();
+        legacy_v2 = null;
+    }
     var v1 = std.json.parseFromSlice(StateFileV1, allocator, raw, .{}) catch null;
     if (v1) |*p| {
         if (p.value.version == 1) {
             const f = p.value;
-            const n = @min(f.windows.len, g_legacy_windows.len);
+            const n = @min(f.windows.len, legacy_windows.len);
             for (f.windows[0..n], 0..) |r, i| {
-                g_legacy_windows[i] = .{
+                legacy_windows[i] = .{
                     .win = r.win,
                     .mask = r.mask,
                     .anchor = switch (r.mode) {
@@ -334,16 +338,16 @@ fn loadLegacy(allocator: std.mem.Allocator, raw: []const u8) !bool {
                     .ext = null,
                 };
             }
-            g_legacy_state = .{
+            legacy_state = .{
                 .version = 4,
                 .current = f.current,
                 .focused = f.focused,
                 .all_view_active = f.all_view_active,
                 .workspaces = f.workspaces,
-                .windows = g_legacy_windows[0..n],
+                .windows = legacy_windows[0..n],
             };
-            g_legacy_v1 = v1;
-            g_legacy_active = true;
+            legacy_v1 = v1;
+            legacy_active = true;
             debug.info("persist: loaded v1 session state ({} windows, {d} workspaces)", .{
                 n,
                 f.workspaces.len,
@@ -363,9 +367,9 @@ fn loadLegacy(allocator: std.mem.Allocator, raw: []const u8) !bool {
         return false;
     }
     const g = v2.value;
-    const n2 = @min(g.windows.len, g_legacy_windows.len);
+    const n2 = @min(g.windows.len, legacy_windows.len);
     for (g.windows[0..n2], 0..) |r, i| {
-        g_legacy_windows[i] = .{
+        legacy_windows[i] = .{
             .win = r.win,
             .mask = r.mask,
             .anchor = switch (r.mode) {
@@ -376,16 +380,16 @@ fn loadLegacy(allocator: std.mem.Allocator, raw: []const u8) !bool {
             .ext = r.ext,
         };
     }
-    g_legacy_state = .{
+    legacy_state = .{
         .version = 4,
         .current = g.current,
         .focused = g.focused,
         .all_view_active = g.all_view_active,
         .workspaces = g.workspaces,
-        .windows = g_legacy_windows[0..n2],
+        .windows = legacy_windows[0..n2],
     };
-    g_legacy_v2 = v2;
-    g_legacy_active = true;
+    legacy_v2 = v2;
+    legacy_active = true;
     debug.info("persist: loaded v2 session state ({} windows, {d} workspaces)", .{
         n2,
         g.workspaces.len,
@@ -395,7 +399,7 @@ fn loadLegacy(allocator: std.mem.Allocator, raw: []const u8) !bool {
 
 /// The parsed restore file, if loadToGlobal succeeded.
 pub fn loaded() ?*const StateFile {
-    if (g_legacy_active) return &g_legacy_state;
+    if (legacy_active) return &legacy_state;
     if (loaded_parsed) |*p| return &p.value;
     return null;
 }
@@ -423,16 +427,10 @@ pub fn applyModelLevel(m: *model.Model) void {
     const f = loaded() orelse return;
 
     // Restore the model-authoritative covering intent (presence + covering_ws)
-    // from the window records, independent of module blobs. The covering
-    // window's fullscreen blob is absent whenever it was parked at save time
-    // (parked ⇒ minimize owns the slot, so the fullscreen module refused to
-    // serialize and the module did not reconstruct its record during adoption).
-    // Persisting `covering_ws` directly on the model makes the covering
-    // identity survive that gap: the model entry stays the single authority on
-    // the capture target even when no module blob existed. Idempotent with what
-    // the fullscreen module's deserializeWindow already applied (same values);
-    // a `.parked` record that still carries covering_ws (minimized-from-
-    // fullscreen) keeps presence intact while restoring the capture target.
+    // from the window records, independent of module blobs. A `.parked` record
+    // that still carries covering_ws (minimized-from-fullscreen) keeps presence
+    // intact while restoring the capture target. Idempotent with what the
+    // fullscreen module's deserializeWindow already applied.
     for (f.windows) |r| {
         if (r.covering_ws == null and r.presence != .covering) continue;
         const e = m.store.getPtr(r.win) orelse continue;
@@ -449,19 +447,18 @@ pub fn applyModelLevel(m: *model.Model) void {
     for (&m.ws, 0..) |*s, i| {
         const r = &f.workspaces[i];
         s.params = r.params;
-        // Registry-driven layout kind (D8): a persisted index that no longer
-        // resolves (a layout module was removed between runs) falls back to
-        // the config-driven default layout (the canonical default name
-        // resolved by name, index 0 as the neutral last resort) instead of
-        // leaving the workspace with an unresolvable dispatch id. Loud:
-        // the degraded path must not replace a layout silently.
+        // Registry-driven layout kind: a persisted index that no longer
+        // resolves (a layout module was removed between runs) falls back to the
+        // config default kind (index 0 as the neutral last resort) instead of
+        // leaving an unresolvable dispatch id. Loud, so the degradation is never
+        // silent.
         if (s.params.kind >= tiling_mods.len and tiling_mods.len > 0) {
             const fallback = resumableDefaultKind();
-            debug.warn("persist: restoring persisted layout kind {} which no longer resolves ({} registered layouts); using default layout kind {}", .{
-                s.params.kind,
-                tiling_mods.len,
-                fallback,
-            });
+            debug.warn(
+                "persist: restoring persisted layout kind {} which no " ++
+                    "longer resolves ({} registered); using default kind {}",
+                .{ s.params.kind, tiling_mods.len, fallback },
+            );
             s.params.kind = fallback;
             s.params.variant_idx = 0;
         }

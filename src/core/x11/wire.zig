@@ -25,9 +25,13 @@ const property_no_delete = constants.property_no_delete;
 // Geometry <-> wire conversions
 
 /// Builds a Rect from a get_geometry reply (moved out of Rect so the pure
-/// geometry type in utils.zig stays xcb-free (D6 layer boundary). `include_border`
-/// selects whether the wire border_width feeds the Rect's border_width.
-pub inline fn rectFromXcb(geom: *const xcb.xcb_get_geometry_reply_t, include_border: bool) utils.Rect {
+/// geometry type in utils.zig stays xcb-free (D6 layer boundary)).
+/// `include_border` selects whether the wire border_width feeds the Rect's
+/// border_width.
+pub inline fn rectFromXcb(
+    geom: *const xcb.xcb_get_geometry_reply_t,
+    include_border: bool,
+) utils.Rect {
     return .{
         .x = geom.x,
         .y = geom.y,
@@ -52,7 +56,12 @@ pub inline fn configureWindow(conn: Connection, win: u32, rect: utils.Rect) void
 }
 
 pub inline fn raiseWindow(conn: Connection, win: u32) void {
-    _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+    _ = xcb.xcb_configure_window(
+        conn,
+        win,
+        xcb.XCB_CONFIG_WINDOW_STACK_MODE,
+        &[_]u32{xcb.XCB_STACK_MODE_ABOVE},
+    );
 }
 
 pub inline fn setBorderPixel(conn: Connection, win: u32, pixel: u32) void {
@@ -246,16 +255,52 @@ pub fn advertiseEwmhSupport(conn: Connection, screen: Screen, root: u32) void {
     // itself, and the root points at the check window. Clients compare the
     // two `_NET_SUPPORTING_WM_CHECK` values to tell a live WM from a stale
     // property a crashed WM left behind.
-    _ = xcb.xcb_change_property(conn, xcb.XCB_PROP_MODE_REPLACE, check_win, supporting_wm_check, xcb.XCB_ATOM_WINDOW, 32, 1, &check_win);
-    _ = xcb.xcb_change_property(conn, xcb.XCB_PROP_MODE_REPLACE, root, supporting_wm_check, xcb.XCB_ATOM_WINDOW, 32, 1, &check_win);
+    _ = xcb.xcb_change_property(
+        conn,
+        xcb.XCB_PROP_MODE_REPLACE,
+        check_win,
+        supporting_wm_check,
+        xcb.XCB_ATOM_WINDOW,
+        32,
+        1,
+        &check_win,
+    );
+    _ = xcb.xcb_change_property(
+        conn,
+        xcb.XCB_PROP_MODE_REPLACE,
+        root,
+        supporting_wm_check,
+        xcb.XCB_ATOM_WINDOW,
+        32,
+        1,
+        &check_win,
+    );
 
     const wm_name = "hana";
-    _ = xcb.xcb_change_property(conn, xcb.XCB_PROP_MODE_REPLACE, check_win, net_wm_name, utf8_string, 8, @intCast(wm_name.len), wm_name.ptr);
+    _ = xcb.xcb_change_property(
+        conn,
+        xcb.XCB_PROP_MODE_REPLACE,
+        check_win,
+        net_wm_name,
+        utf8_string,
+        8,
+        @intCast(wm_name.len),
+        wm_name.ptr,
+    );
 
     var supported: [supported_atoms.len]xcb.xcb_atom_t = undefined;
     inline for (supported_atoms, 0..) |name, i|
         supported[i] = getAtomCached(name) catch xcb.XCB_ATOM_NONE;
-    _ = xcb.xcb_change_property(conn, xcb.XCB_PROP_MODE_REPLACE, root, net_supported, xcb.XCB_ATOM_ATOM, 32, @intCast(supported.len), &supported);
+    _ = xcb.xcb_change_property(
+        conn,
+        xcb.XCB_PROP_MODE_REPLACE,
+        root,
+        net_supported,
+        xcb.XCB_ATOM_ATOM,
+        32,
+        @intCast(supported.len),
+        &supported,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -336,13 +381,24 @@ pub fn fetchPropertyToBuffer(
 ) !?[]const u8 {
     const reply = collectPropertyReply(
         conn,
-        xcb.xcb_get_property(conn, property_no_delete, window, atom, atom_type, 0, max_property_length),
+        xcb.xcb_get_property(
+            conn,
+            property_no_delete,
+            window,
+            atom,
+            atom_type,
+            0,
+            max_property_length,
+        ),
     ) orelse return null;
     defer std.c.free(reply);
     const r = reply.*;
     if (r.format != 8 or r.value_len == 0 or r.type != atom_type) return null;
     if (r.value_len == max_property_length)
-        debug.warn("Property atom {x} on window {x} exceeds the {}-byte fetch cap; value truncated", .{ atom, window, max_property_length });
+        debug.warn(
+            "Property atom {x} on window {x} exceeds the {}-byte fetch cap; value truncated",
+            .{ atom, window, max_property_length },
+        );
 
     const len: usize = @intCast(r.value_len);
     if (len > buffer.len) return null;

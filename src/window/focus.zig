@@ -137,20 +137,10 @@ pub inline fn setLastEventTime(t: u32) void {
 /// Sets X input focus to `win`, always with CurrentTime (0), see
 /// "Timestamp handling" above.
 ///
-/// A plain xcb_set_input_focus is all that is required here. An earlier
-/// revision wrapped this call in a momentary xcb_grab_keyboard/ungrab_keyboard
-/// hoping to break active keyboard grabs held by other clients (e.g. SDL
-/// fullscreen). That was ineffective — XGrabKeyboard returns AlreadyGrabbed
-/// when another client holds the grab, so it never actually steals input — and
-/// it was actively harmful: the transient active grab re-routes every key
-/// event away from our passive key grabs and, when released while the shortcut
-/// key is still physically held, the server drops the pending KeyRelease of
-/// that key (X11 drops KeyRelease events pending at grab deactivation). The
-/// miss then leaves the held-key ledger in input.zig marked as "held", so the
-/// binding's next press is silently suppressed — the "every second keybind
-/// doesn't respond" symptom. Setting input focus alone never interferes with
-/// passive key grabs, so the KeyRelease reliably reaches handleKeyRelease and
-/// the ledger clears correctly.
+/// A plain xcb_set_input_focus is sufficient; an earlier momentary
+/// xcb_grab_keyboard wrapper was both ineffective (XGrabKeyboard returns
+/// AlreadyGrabbed) and harmful (the transient grab re-routes keys and drops
+/// the held key's KeyRelease, so the next press is silently suppressed).
 inline fn focusNow(conn: core.Connection, win: u32) void {
     _ = xcb.xcb_set_input_focus(conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, win, 0);
 }
@@ -297,6 +287,20 @@ pub const FocusTransition = union(enum) {
     none: void,
 };
 
+/// Clear the paired confirm cookie and window together.
+fn clearConfirmState() void {
+    state.?.confirm_cookie = null;
+    state.?.confirm_win = null;
+}
+
+/// Discard a pending confirm reply without acting on it, using the
+/// non-blocking xcb_discard_reply. Safe to call when no confirm is pending.
+fn cancelPendingConfirm() void {
+    const cookie = state.?.confirm_cookie orelse return;
+    clearConfirmState();
+    xcb.xcb_discard_reply(core.getState().conn, cookie.sequence);
+}
+
 /// Phase 1: resolve input model via round trips (outside grab).
 /// Returns a FocusTransition that can be committed inside the grab.
 /// Returns .none when focus should not change (invalid window, same window,
@@ -424,15 +428,11 @@ inline fn isWindowMapped(conn: core.Connection, win: u32) bool {
 }
 
 /// Drain the deferred focus-confirm reply, if one is pending. Must be called
-/// from the event loop before processing the next event; in the common case
-/// (focus landed, compliant client, already topmost) it completes in
-/// microseconds.
-///
-/// If focus did not land on `confirm_win`, retry xcb_set_input_focus with
-/// CurrentTime and re-send WM_TAKE_FOCUS, without raising (a raise generates
-/// synthetic FocusOut/FocusIn pairs that reset Electron's internal focus
-/// state). ONE-SHOT: the retry fires once and never re-arms; an infinite retry
-/// loop would thrash the X server. Safe to call when nothing is pending.
+/// from the event loop before the next event; the common case completes in
+/// microseconds. If focus did not land on `confirm_win`, retry
+/// xcb_set_input_focus + WM_TAKE_FOCUS once without raising (a raise generates
+/// synthetic FocusOut/In pairs that reset Electron's internal focus state).
+/// ONE-SHOT: never re-arms. Safe when nothing is pending.
 pub fn drainPendingConfirm() void {
     const cookie = state.?.confirm_cookie orelse return;
     const win = state.?.confirm_win.?; // invariant: always set/cleared together with confirm_cookie
@@ -455,7 +455,10 @@ pub fn drainPendingConfirm() void {
         return;
     }
 
-    const focus_reply: ?*xcb.xcb_get_input_focus_reply_t = if (reply) |r| @ptrCast(@alignCast(r)) else null;
+    const focus_reply: ?*xcb.xcb_get_input_focus_reply_t = if (reply) |r|
+        @ptrCast(@alignCast(r))
+    else
+        null;
     defer if (focus_reply) |r| std.c.free(r);
 
     if (!window.isValidManagedWindow(win)) return;
@@ -477,24 +480,13 @@ pub fn drainPendingConfirm() void {
 
     // Log the retry so failed confirmations are visible in debug sessions
     // rather than silently degrading into an unresponsive window.
-    std.log.debug("focus: confirm retry for 0x{x}: focus={} (expected > 1), retrying once", .{ win, c.*.focus });
+    std.log.debug(
+        "focus: confirm retry for 0x{x}: focus={} (expected > 1), retrying once",
+        .{ win, c.*.focus },
+    );
 
     focusNow(conn, win);
     window.sendWMTakeFocus(conn, win, 0);
-}
-
-/// Clear the paired confirm cookie and window together.
-fn clearConfirmState() void {
-    state.?.confirm_cookie = null;
-    state.?.confirm_win = null;
-}
-
-/// Discard a pending confirm reply without acting on it, using the
-/// non-blocking xcb_discard_reply. Safe to call when no confirm is pending.
-fn cancelPendingConfirm() void {
-    const cookie = state.?.confirm_cookie orelse return;
-    clearConfirmState();
-    xcb.xcb_discard_reply(core.getState().conn, cookie.sequence);
 }
 
 /// DWM's focusin: translated exactly. No mode/detail/managed filtering.
@@ -544,7 +536,16 @@ pub fn clearFocus() void {
 fn advertiseActiveWindow(win: u32) void {
     if (state.?.net_active_window == xcb.XCB_ATOM_NONE) return;
     const cs = core.getState();
-    _ = xcb.xcb_change_property(cs.conn, xcb.XCB_PROP_MODE_REPLACE, cs.root, state.?.net_active_window, xcb.XCB_ATOM_WINDOW, 32, 1, &win);
+    _ = xcb.xcb_change_property(
+        cs.conn,
+        xcb.XCB_PROP_MODE_REPLACE,
+        cs.root,
+        state.?.net_active_window,
+        xcb.XCB_ATOM_WINDOW,
+        32,
+        1,
+        &win,
+    );
 }
 
 /// True when `reason` should raise `win` to the top of the stacking order.
@@ -563,7 +564,10 @@ inline fn shouldRaise(reason: Reason, win: u32) bool {
     };
 }
 
-inline fn suppressionFor(reason: Reason, current: core.FocusSuppressReason) core.FocusSuppressReason {
+inline fn suppressionFor(
+    reason: Reason,
+    current: core.FocusSuppressReason,
+) core.FocusSuppressReason {
     return switch (reason) {
         // workspace_switch clears too: crossing events generated by windows
         // mapping/unmapping during the switch must not be masked.
@@ -684,7 +688,8 @@ pub fn drainPointerSync() void {
         return;
     }
 
-    const pointer_reply: ?*xcb.xcb_query_pointer_reply_t = if (reply) |r| @ptrCast(@alignCast(r)) else null;
+    const pointer_reply: ?*xcb.xcb_query_pointer_reply_t =
+        if (reply) |r| @ptrCast(@alignCast(r)) else null;
     defer if (pointer_reply) |r| std.c.free(r);
 
     const p = pointer_reply orelse return;
@@ -700,20 +705,10 @@ pub fn drainPointerSync() void {
 }
 
 /// Fire an async "has the server caught up" round trip that defers lifting
-/// EnterNotify suppression until any crossing events generated by a tiling
-/// reflow have been delivered and filtered.
-///
-/// Used by tiling operations that must NOT re-sync focus to wherever the
-/// pointer ends up afterward (e.g. toggle_floating_window via
-/// withTilingGrabKeepFocus); unlike beginPointerSync, this never calls
-/// setFocus itself. The reflow's configure_window calls flush only at the
-/// caller's ungrabAndFlush, so windows that slid under a stationary cursor can
-/// generate real EnterNotify events afterward; cleared suppression would let
-/// those crossings silently reassign keyboard focus. xcb_get_input_focus is
-/// queued in the same flush as the reflow, and X delivers any event generated
-/// by a request before the reply to a later request; so when
-/// drainTilingOpSettle() consumes this reply, the crossings are already
-/// drained and filtered (suppression is still active).
+/// EnterNotify suppression until crossing events from the tiling reflow have
+/// been delivered and filtered. Used by tiling ops that must NOT re-sync
+/// focus to wherever the pointer ends up; unlike beginPointerSync it never
+/// calls setFocus itself. The reflow's events precede this reply in XCB order.
 pub fn beginTilingOpSettle() void {
     discardOptCookie(state.?.tiling_op_cookie);
     const cs = core.getState();
@@ -770,9 +765,9 @@ inline fn appendVisible(w: u32, len: *usize) void {
 
 /// Build an ordered list of currently-visible windows for cycling.
 ///
-/// All visible windows in tracking-table order; the pool list is never fed. Emits only windows that are
-/// on the current workspace and not minimized. Returns the count written into
-/// `cycle_buf`, or 0 if none.
+/// All visible windows in tracking-table order; the pool list is never fed.
+/// Emits only windows that are on the current workspace and not minimized.
+/// Returns the count written into `cycle_buf`, or 0 if none.
 fn collectVisibleWindows() usize {
     var len: usize = 0;
     for (tracking.allWindows()) |entry| appendVisible(entry.win, &len);
