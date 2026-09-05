@@ -171,9 +171,8 @@ pub const KeybindResolver = struct {
     /// Releases the dispatch map. Called from Config.deinit, before the
     /// keybindings whose Actions this map's entries point into are freed.
     pub fn deinit(self: *KeybindResolver, allocator: std.mem.Allocator) void {
-        self.map.deinit(allocator);
+        inline for (.{ &self.map, &self.seen }) |m| m.deinit(allocator);
         self.map = .empty;
-        self.seen.deinit(allocator);
         self.seen = .empty;
     }
 };
@@ -208,15 +207,21 @@ pub fn lowerStringCI(comptime max_len: usize, str: []const u8) LowerResult(max_l
     return result;
 }
 
+/// Inlined so the lowercased buffer lives in the caller's frame: use the
+/// result immediately (null when `str` is too long).
+pub inline fn lowerSlice(comptime max_len: usize, str: []const u8) ?[]const u8 {
+    return switch (lowerStringCI(max_len, str)) {
+        .too_long => null,
+        .ok => |r| r.slice(),
+    };
+}
+
 /// Case-insensitive enum lookup shared by enums that expose a `string_map` decl.
 /// Lowercases `str` into a 32-byte stack buffer and probes the map.
 /// Returns null when `str` exceeds the buffer or the key is not found.
-fn fromStringCI(comptime T: type, str: []const u8) ?T {
+pub fn enumFromString(comptime T: type, str: []const u8) ?T {
     const map = T.string_map;
-    return switch (lowerStringCI(32, str)) {
-        .too_long => null,
-        .ok => |r| map.get(r.slice()),
-    };
+    return map.get(lowerSlice(32, str) orelse return null);
 }
 
 pub const MasterSide = enum {
@@ -229,12 +234,6 @@ pub const MasterSide = enum {
         .{ "r", .right },
         .{ "right", .right },
     });
-
-    /// Lowercases str into a stack buffer and looks it up in string_map.
-    /// Returns null if str exceeds 32 bytes or is unrecognized.
-    pub inline fn fromString(str: []const u8) ?MasterSide {
-        return fromStringCI(MasterSide, str);
-    }
 };
 
 /// Window placement policy for the master-stack layout is now expressed as
@@ -311,14 +310,7 @@ pub const TilingConfig = struct {
     pub fn deinit(self: *TilingConfig, allocator: std.mem.Allocator) void {
         for (self.layouts.items) |layout| allocator.free(layout);
         self.layouts.deinit(allocator);
-        {
-            var it = self.variants.iterator();
-            while (it.next()) |e| {
-                allocator.free(e.key_ptr.*);
-                allocator.free(e.value_ptr.*);
-            }
-            self.variants.deinit(allocator);
-        }
+        freeStringMap(&self.variants, allocator, false);
         for (self.workspace_layout_overrides.items) |o| {
             if (o.variant) |v| allocator.free(v);
         }
@@ -397,10 +389,6 @@ pub const IndicatorLocation = enum {
         }
         break :blk std.StaticStringMap(IndicatorLocation).initComptime(kvs[0..n]);
     };
-    /// Case-insensitive parse. Returns null if str exceeds 32 bytes or is unrecognized.
-    pub inline fn fromString(str: []const u8) ?IndicatorLocation {
-        return fromStringCI(IndicatorLocation, str);
-    }
 };
 
 /// Vertical placement of the bar on screen: top or bottom edge.
@@ -447,6 +435,25 @@ pub inline fn freeStrings(
 ) void {
     for (list.items) |s| allocator.free(s);
     if (retain_capacity) list.clearRetainingCapacity() else list.deinit(allocator);
+}
+
+/// Frees one heap-dup'd key/value pair, shared by every tiling.variants
+/// teardown path.
+pub inline fn freeStringPair(allocator: std.mem.Allocator, key: []const u8, value: []const u8) void {
+    allocator.free(key);
+    allocator.free(value);
+}
+
+/// Frees every heap-dup'd key/value in a tiling.variants-style string map,
+/// then either deinits or clears it depending on `retain_capacity`.
+pub fn freeStringMap(
+    map: *std.StringHashMapUnmanaged([]const u8),
+    allocator: std.mem.Allocator,
+    retain_capacity: bool,
+) void {
+    var it = map.iterator();
+    while (it.next()) |e| freeStringPair(allocator, e.key_ptr.*, e.value_ptr.*);
+    if (retain_capacity) map.clearRetainingCapacity() else map.deinit(allocator);
 }
 
 pub const BarConfig = struct {

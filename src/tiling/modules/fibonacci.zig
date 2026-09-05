@@ -41,19 +41,11 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
     for (windows, 0..) |win, i| {
         // Too small to split: raise a window and push the rest offscreen.
         if (cur.w < min_area or cur.h < min_area) {
-            const top_rect = utils.Rect{
-                .x = @intCast(cur.x),
-                .y = @intCast(cur.y),
-                .width = tiling.shrinkClamped(cur.w, border2, v.env.min_dim),
-                .height = tiling.shrinkClamped(cur.h, border2, v.env.min_dim),
-            };
+            const top_rect = tiling.insetRect(cur.x, cur.y, cur.w, cur.h, border2, v.env.min_dim);
             // Raise focusedElse's pick among the overflow set and park the rest.
             const top = tiling.focusedElse(&v, windows[i..], windows[i]);
             tiling.emitView(&v, out, top, top_rect, true);
-            for (windows[i..]) |w| {
-                if (w == top) continue;
-                tiling.emitHidden(out, w);
-            }
+            tiling.showOneHideRest(out, windows[i..], top);
             return;
         }
 
@@ -121,6 +113,5 @@ inline fn splitAndAdvance(
 pub const module: @import("plugin").Layout = .{
     .name = "fibonacci",
     .compute = tiling.computeHook(compute),
-    .variant_count = 1,
     .icon = "[@]",
 };

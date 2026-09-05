@@ -26,11 +26,10 @@ const K_FIB: u8 = @intCast(tiling.layoutByName("fibonacci") orelse 0);
 const K_LEAF: u8 = @intCast(tiling.layoutByName("leaf") orelse 0);
 const K_SCROLL: u8 = @intCast(tiling.layoutByName("scroll") orelse 0);
 
-// Variant indexes owned by each module (pulled from its registry Layout decl
-// so tests and modules stay aligned): grid.relax_mode / monocle.gap_mode.
-const tiling_mods = @import("tiling_modules").modules;
-const GRID_RELAX_VARIANT: u8 = tiling_mods[K_GRID].relax_mode orelse 0;
-const MONOCLE_GAP_VARIANT: u8 = tiling_mods[K_MONOCLE].gap_mode orelse 0;
+// Variant indexes owned by each module: grid's "relaxed" is variant 1 of
+// {"rigid","relaxed"}; monocle's "gaps" is variant 1 of {"gapless","gaps"}.
+const GRID_RELAX_VARIANT: u8 = 1;
+const MONOCLE_GAP_VARIANT: u8 = 1;
 
 /// Standard test margins/min_dim used by most cases.
 const gap = 8;

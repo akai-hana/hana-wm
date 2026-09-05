@@ -113,17 +113,13 @@ fn updateBorderColor(
     color: u32,
     comptime create_if_missing: bool,
 ) bool {
-    if (create_if_missing) {
+    const wd = if (create_if_missing)
         // Bounded by max_entries like every other writer: refuse to grow past
         // the ceiling so WM-churn of distinct windows can't bloat the cache
         // (the caller falls back to an unconditional send in that case).
-        const wd = getOrPutDefault(win) catch return false;
-        if (wd.border == color) return true;
-        wd.border = color;
-        utils.setBorderPixel(conn, win, color);
-        return true;
-    }
-    const wd = live().getPtr(win) orelse return false;
+        getOrPutDefault(win) catch return false
+    else
+        live().getPtr(win) orelse return false;
     if (wd.border == color) return true;
     wd.border = color;
     utils.setBorderPixel(conn, win, color);

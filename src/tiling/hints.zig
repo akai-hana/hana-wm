@@ -25,19 +25,11 @@ pub fn applyHints(rect: utils.Rect, h: model.SizeHints) utils.Rect {
     if (h.min_aspect > 0.0 and h.max_aspect > 0.0) {
         const fw: f32 = @floatFromInt(width);
         const fh: f32 = @floatFromInt(height);
+        // Clamp to u16 range before narrowing so a huge aspect ratio caps.
         if (fw > fh * h.max_aspect) {
-            // Clamp to u16 range before narrowing so a huge max_aspect caps.
-            const aspect_w: u16 = @intFromFloat(
-                @min(@round(fh * h.max_aspect), @as(f32, std.math.maxInt(u16))),
-            );
-            width = snapDimToIncrement(aspect_w, 0, h.inc_width);
-            if (h.max_width > 0) width = @min(width, h.max_width);
+            width = clampAspectDim(fh, h.max_aspect, h.inc_width, h.max_width);
         } else if (fh > fw * h.min_aspect) {
-            const aspect_h: u16 = @intFromFloat(
-                @min(@round(fw * h.min_aspect), @as(f32, std.math.maxInt(u16))),
-            );
-            height = snapDimToIncrement(aspect_h, 0, h.inc_height);
-            if (h.max_height > 0) height = @min(height, h.max_height);
+            height = clampAspectDim(fw, h.min_aspect, h.inc_height, h.max_height);
         }
     }
 
@@ -50,6 +42,17 @@ pub fn applyHints(rect: utils.Rect, h: model.SizeHints) utils.Rect {
         .width = width,
         .height = height,
     };
+}
+
+/// Clamp `other * ratio` (a cross-multiplied aspect product) into u16 range,
+/// snap down to the increment, then cap at `max_dim`.
+inline fn clampAspectDim(other: f32, ratio: f32, inc: u16, max_dim: u16) u16 {
+    const aspect: u16 = @intFromFloat(
+        @min(@round(other * ratio), @as(f32, std.math.maxInt(u16))),
+    );
+    var dim = snapDimToIncrement(aspect, 0, inc);
+    if (max_dim > 0) dim = @min(dim, max_dim);
+    return dim;
 }
 
 /// Snap `dim` down to the nearest multiple of `inc` above `base`.

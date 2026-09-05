@@ -76,74 +76,10 @@ pub const StateFile = struct {
     windows: []const WindowRecord,
 };
 
-/// Version-1 window mode: old files may contain a `.minimized` variant
-/// that the current anchor-based record cannot hold. The payload is absorbed
-/// as an empty struct (lenient parse) and conversion re-homes it visible.
-/// `fullscreen` is shadowed as a plain struct; the payload maps to the
-/// underlying anchor.
-const ModeV1 = union(enum) {
-    base: model.BaseMode,
-    fullscreen: struct { ws: u8, base: model.BaseMode },
-    minimized: struct {},
-};
-
-/// Version-1 window record (win/mask/mode only; no presence/ext).
-const WindowRecordV1 = struct {
-    win: u32,
-    mask: model.Mask,
-    mode: ModeV1,
-};
-
-/// Version-1 state file (kept only for upgrade tolerance).
-const StateFileV1 = struct {
-    version: u32 = 1,
-    current: u8,
-    focused: ?u32,
-    all_view_active: bool,
-    next_seq: u32,
-    workspaces: [MAX_WS]WsRecord,
-    windows: []const WindowRecordV1,
-};
-
-/// Version-2 (pre-anchor transition): `mode` field instead of `anchor`.
-/// Tolerated so a mid-refactor session file never bricks the boot.
-const ModeV2 = union(enum) {
-    base: model.BaseMode,
-    fullscreen: struct { ws: u8, base: model.BaseMode },
-};
-
-/// Version-2 window record (win/mask/mode/presence/ext).
-const WindowRecordV2 = struct {
-    win: u32,
-    mask: model.Mask,
-    mode: ModeV2,
-    presence: model.Presence = .present,
-    ext: ?[]const u8 = null,
-};
-
-/// Version-2 state file.
-const StateFileV2 = struct {
-    version: u32 = 2,
-    current: u8,
-    focused: ?u32,
-    all_view_active: bool,
-    workspaces: [MAX_WS]WsRecord,
-    windows: []const WindowRecordV2,
-};
-
 /// Parsed restore file, if loadToGlobal succeeded. Module-owned: its arena
 /// holds every slice the records reference; freed and replaced by the next
 /// loadToGlobal call. Single-threaded (event-loop thread), like the model.
 var loaded_parsed: ?std.json.Parsed(StateFile) = null;
-
-/// (v1/v2) upgrade path storage: the converted records and the
-/// arena that owns their workspace slices. Both are module-owned and kept for
-/// the process lifetime (or until the next loadToGlobal replaces them).
-var legacy_active: bool = false;
-var legacy_state: StateFile = undefined;
-var legacy_windows: [model.store_capacity]WindowRecord = undefined;
-var legacy_v1: ?std.json.Parsed(StateFileV1) = null;
-var legacy_v2: ?std.json.Parsed(StateFileV2) = null;
 
 /// Default restore path: XDG_RUNTIME_DIR is already per-user, so
 /// `$XDG_RUNTIME_DIR/hana-restore.json` needs no uid suffix; the /tmp
@@ -278,21 +214,18 @@ pub fn loadToGlobal(allocator: std.mem.Allocator, path: []const u8) !bool {
     defer allocator.free(raw);
 
     var parsed = std.json.parseFromSlice(StateFile, allocator, raw, .{}) catch {
-        // Format tolerance: an older version-1 file may carry `.minimized`
-        // window modes (and `next_seq`) that the current anchor-based record
-        // cannot hold, and a version-2 file may carry a `.mode` field instead
-        // of `.anchor`. Parse them against the appropriate shadow records and
-        // convert (see loadLegacy).
-        return try loadLegacy(allocator, raw);
+        debug.warn("persist: restore file unparseable; booting fresh", .{});
+        return false;
     };
     if (parsed.value.version != 4) {
+        const ver = parsed.value.version;
         parsed.deinit();
-        return try loadLegacy(allocator, raw);
+        debug.warn("persist: unsupported restore version {}; booting fresh", .{ver});
+        return false;
     }
 
     if (loaded_parsed) |old| old.deinit();
     loaded_parsed = parsed;
-    legacy_active = false;
     debug.info("persist: loaded session state ({} windows, {d} workspaces)", .{
         loaded_parsed.?.value.windows.len,
         loaded_parsed.?.value.workspaces.len,
@@ -300,106 +233,8 @@ pub fn loadToGlobal(allocator: std.mem.Allocator, path: []const u8) !bool {
     return true;
 }
 
-/// Parses a version-1/version-2 restore file and converts it into the
-/// current (v3) StateFile shape. Two older formats are tolerated:
-///   - v1 (legacy): `.minimized` modes + `next_seq`; converted with
-///     presence = .present and minimized windows re-homed visible (the old
-///     payload has no module-blob equivalent).
-///   - v2 (previous format): a `.mode` field instead of `.anchor`; presence/ext
-///     are carried through verbatim so the module blobs replay their
-///     re-park/cover exactly as a fresh v3 file would.
-/// The converted windows array is copied into static storage (model store
-/// capacity); the workspace slices alias the parse arena and are kept
-/// alive by `legacy_v1`/`legacy_v2`.
-fn loadLegacy(allocator: std.mem.Allocator, raw: []const u8) !bool {
-    if (legacy_v1) |old| {
-        old.deinit();
-        legacy_v1 = null;
-    }
-    if (legacy_v2) |old| {
-        old.deinit();
-        legacy_v2 = null;
-    }
-    var v1 = std.json.parseFromSlice(StateFileV1, allocator, raw, .{}) catch null;
-    if (v1) |*p| {
-        if (p.value.version == 1) {
-            const f = p.value;
-            const n = @min(f.windows.len, legacy_windows.len);
-            for (f.windows[0..n], 0..) |r, i| {
-                legacy_windows[i] = .{
-                    .win = r.win,
-                    .mask = r.mask,
-                    .anchor = switch (r.mode) {
-                        .base => |b| b,
-                        .fullscreen => |fs| fs.base,
-                        .minimized => .tiled,
-                    },
-                    .presence = .present,
-                    .ext = null,
-                };
-            }
-            legacy_state = .{
-                .version = 4,
-                .current = f.current,
-                .focused = f.focused,
-                .all_view_active = f.all_view_active,
-                .workspaces = f.workspaces,
-                .windows = legacy_windows[0..n],
-            };
-            legacy_v1 = v1;
-            legacy_active = true;
-            debug.info("persist: loaded v1 session state ({} windows, {d} workspaces)", .{
-                n,
-                f.workspaces.len,
-            });
-            return true;
-        }
-        p.deinit();
-    }
-
-    var v2 = std.json.parseFromSlice(StateFileV2, allocator, raw, .{}) catch |err| {
-        debug.warn("persist: restore file unparseable ({s}); booting fresh", .{@errorName(err)});
-        return false;
-    };
-    if (v2.value.version != 2) {
-        debug.warn("persist: unsupported restore version {}; booting fresh", .{v2.value.version});
-        v2.deinit();
-        return false;
-    }
-    const g = v2.value;
-    const n2 = @min(g.windows.len, legacy_windows.len);
-    for (g.windows[0..n2], 0..) |r, i| {
-        legacy_windows[i] = .{
-            .win = r.win,
-            .mask = r.mask,
-            .anchor = switch (r.mode) {
-                .base => |b| b,
-                .fullscreen => |fs| fs.base,
-            },
-            .presence = r.presence,
-            .ext = r.ext,
-        };
-    }
-    legacy_state = .{
-        .version = 4,
-        .current = g.current,
-        .focused = g.focused,
-        .all_view_active = g.all_view_active,
-        .workspaces = g.workspaces,
-        .windows = legacy_windows[0..n2],
-    };
-    legacy_v2 = v2;
-    legacy_active = true;
-    debug.info("persist: loaded v2 session state ({} windows, {d} workspaces)", .{
-        n2,
-        g.workspaces.len,
-    });
-    return true;
-}
-
 /// The parsed restore file, if loadToGlobal succeeded.
 pub fn loaded() ?*const StateFile {
-    if (legacy_active) return &legacy_state;
     if (loaded_parsed) |*p| return &p.value;
     return null;
 }

@@ -29,28 +29,16 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
         ) if (mode == .exact) ?usize else usize {
             var lo: usize = 0;
             var hi: usize = self.len;
-            if (mode == .exact) {
-                while (lo < hi) {
-                    const mid = lo + (hi - lo) / 2;
-                    if (self.keys[mid] == k) return mid;
-                    if (self.keys[mid] < k) {
-                        lo = mid + 1;
-                    } else {
-                        hi = mid;
-                    }
+            while (lo < hi) {
+                const mid = lo + (hi - lo) / 2;
+                if (mode == .exact and self.keys[mid] == k) return mid;
+                if (self.keys[mid] < k) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
                 }
-                return null;
-            } else {
-                while (lo < hi) {
-                    const mid = lo + (hi - lo) / 2;
-                    if (self.keys[mid] < k) {
-                        lo = mid + 1;
-                    } else {
-                        hi = mid;
-                    }
-                }
-                return lo;
             }
+            return if (mode == .exact) null else lo;
         }
 
         pub fn getPtr(self: *Self, k: K) ?*V {

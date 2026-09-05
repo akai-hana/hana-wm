@@ -3,8 +3,8 @@
 //! module's OWN static store (g_recs), and the model only ever sees the generic
 //! `.covering` presence pattern (or `.parked` while minimized). The module owns
 //! the record (toggle + ws/anchor queries), the persistence seam
-//! (serialize/deserialize), the coverage seam consumed by sync (`coverageOn`),
-//! record cleanup for torn-down windows (`onWindowGone`), and the
+//! (serialize/deserialize), record cleanup for torn-down windows
+//! (`onWindowGone`), and the
 //! protocol-side EWMH `_NET_WM_STATE_FULLSCREEN` advertisement plus the
 //! deferred bar hide/show. The core never names fullscreen.
 //!
@@ -156,6 +156,14 @@ pub fn isFullscreenOnWs(m: *const model.Model, win: model.WindowId, ws: model.WS
     return g_recs.slice()[idx].ws == ws;
 }
 
+/// Occupant-eligibility predicate: the window exists, is present-not-parked,
+/// and visible on `ws`.
+fn presentAndVisible(m: *const model.Model, rec: Rec, ws: model.WSId) bool {
+    const e = m.store.get(rec.win) orelse return false;
+    if (e.presence == .parked) return false;
+    return model.visibleOn(m, rec.win, ws);
+}
+
 /// The first record on `ws` whose window exists, is present-not-parked AND
 /// visible on `ws` (a stray record targeting `ws` whose base is tagged
 /// elsewhere never counts as an occupant -- sync parks such strays instead of
@@ -166,9 +174,7 @@ pub fn isFullscreenOnWs(m: *const model.Model, win: model.WindowId, ws: model.WS
 pub fn fullscreenOccupantOnWs(m: *const model.Model, ws: model.WSId) ?model.WindowId {
     for (g_recs.constSlice()) |rec| {
         if (rec.ws != ws) continue;
-        const e = m.store.get(rec.win) orelse continue;
-        if (e.presence == .parked) continue;
-        if (!model.visibleOn(m, rec.win, ws)) continue;
+        if (!presentAndVisible(m, rec, ws)) continue;
         return rec.win;
     }
     return null;
@@ -183,9 +189,7 @@ pub fn fullscreenOccupied(m: *const model.Model, win: model.WindowId, dest: mode
     for (g_recs.constSlice()) |rec| {
         if (rec.win == win) continue;
         if (rec.ws != dest) continue;
-        const e = m.store.get(rec.win) orelse continue;
-        if (e.presence == .parked) continue;
-        if (!model.visibleOn(m, rec.win, dest)) continue;
+        if (!presentAndVisible(m, rec, dest)) continue;
         return true;
     }
     return false;
@@ -204,11 +208,10 @@ pub fn moveFullscreenTo(m: *const model.Model, win: model.WindowId, ws: model.WS
     eptr.covering_ws = ws;
 }
 
-/// The coverage seam body (plugin.WindowModule.coverageOn) consumed by sync's
-/// reconcile: the first record whose store entry exists, is present-not-parked,
-/// and either targets `ws` directly or is visible on `ws`. This is a faithful
-/// migration of the Tier-1 sync fs-scan into the module: sync asks once per
-/// reconcile and parks everyone else while a covering winner holds the screen.
+/// The first record whose store entry exists, is present-not-parked,
+/// and either targets `ws` directly or is visible on `ws`. A faithful
+/// migration of the old Tier-1 sync fs-scan; kept as a direct helper
+/// (model.coveringOccupantOnWs is the sync-facing query).
 pub fn coverageOn(m: *const model.Model, ws: model.WSId) ?model.WindowId {
     for (g_recs.constSlice()) |rec| {
         const e = m.store.get(rec.win) orelse continue;
@@ -422,7 +425,6 @@ pub const module: @import("plugin").WindowModule = .{
     .setEwmhFullscreenState = setEwmhFullscreenState,
     .armPendingBarHide = armPendingBarHide,
     .armPendingBarShow = armPendingBarShow,
-    .coverageOn = coverageOn,
     .toggleCovering = toggleFullscreen,
     .isCoveringMode = isFullscreenMode,
     .coveringWsOf = fullscreenWsOf,

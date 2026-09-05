@@ -310,20 +310,47 @@ fn cancelPendingConfirm() void {
 /// `win` (pipelined focus prep — see switchTo). When provided it is consumed
 /// for the input-model resolve or discarded on an early return, so ownership
 /// is fully transferred here regardless of the outcome.
+/// Discard an optional pre-fired WM_PROTOCOLS cookie and return a no-op
+/// transition. Shared early-exit tail of prepareFocus.
+fn noneWithDiscard(
+    conn: core.Connection,
+    cookie: ?xcb.xcb_get_property_cookie_t,
+) FocusTransition {
+    window.discardProtocolCookie(conn, cookie);
+    return .none;
+}
+
+/// Build a `.set` FocusTransition from a resolved input model.
+/// Shares the flags-construction boilerplate between prepareFocus and
+/// grabFocusReassert; `opts` carries the per-call-site differences.
+fn setIntent(win: u32, old: ?u32, resolved: anytype, opts: struct {
+    raise: bool,
+    arm_confirm: bool,
+    new_suppress: core.FocusSuppressReason,
+}) FocusTransition {
+    return .{ .set = .{
+        .win = win,
+        .old = old,
+        .flags = .{
+            .set_input_focus = resolved.model != .globally_active,
+            .raise = opts.raise,
+            .send_wm_take_focus = true,
+            .take_focus_known = resolved.take_focus,
+            .arm_confirm = opts.arm_confirm,
+            .schedule_bar = true,
+            .new_suppress = opts.new_suppress,
+        },
+    } };
+}
+
 pub fn prepareFocus(
     win: u32,
     reason: Reason,
     pre_protocols_cookie: ?xcb.xcb_get_property_cookie_t,
 ) FocusTransition {
     const conn = core.getState().conn;
-    if (window.isInvalidWindow(win)) {
-        window.discardProtocolCookie(conn, pre_protocols_cookie);
-        return .none;
-    }
-    if (state.?.last_applied == win) {
-        window.discardProtocolCookie(conn, pre_protocols_cookie);
-        return .none;
-    }
+    if (window.isInvalidWindow(win)) return noneWithDiscard(conn, pre_protocols_cookie);
+    if (state.?.last_applied == win) return noneWithDiscard(conn, pre_protocols_cookie);
 
     // Liveness guard: same as setFocus (mouse_click/user_command/pointer_sync
     // must not focus a destroyed window).
@@ -332,10 +359,7 @@ pub fn prepareFocus(
     // xcb_get_window_attributes round-trip is redundant.
     if ((reason == .mouse_click or reason == .pointer_sync) and
         !isWindowMapped(conn, win))
-    {
-        window.discardProtocolCookie(conn, pre_protocols_cookie);
-        return .none;
-    }
+        return noneWithDiscard(conn, pre_protocols_cookie);
 
     const resolved = window.getInputModelResolvedConsume(conn, win, pre_protocols_cookie);
     if (resolved.model == .no_input) return .none;
@@ -347,20 +371,11 @@ pub fn prepareFocus(
     discardOptCookie(state.?.pre_protocols_cookie);
     state.?.pre_protocols_cookie = null;
 
-    const old = state.?.last_applied;
-    return .{ .set = .{
-        .win = win,
-        .old = old,
-        .flags = .{
-            .set_input_focus = resolved.model != .globally_active,
-            .raise = shouldRaise(reason, win),
-            .send_wm_take_focus = true,
-            .take_focus_known = resolved.take_focus,
-            .arm_confirm = reason == .pointer_sync,
-            .schedule_bar = true,
-            .new_suppress = suppressionFor(reason, state.?.suppress_reason),
-        },
-    } };
+    return setIntent(win, state.?.last_applied, resolved, .{
+        .raise = shouldRaise(reason, win),
+        .arm_confirm = reason == .pointer_sync,
+        .new_suppress = suppressionFor(reason, state.?.suppress_reason),
+    });
 }
 
 /// Phase 1: prepare a focus-clear transition (outside grab).
@@ -369,6 +384,17 @@ pub fn prepareClearFocus() FocusTransition {
     if (state.?.last_applied == null) return .none;
     cancelPendingConfirm();
     return .{ .clear = .{ .old = state.?.last_applied } };
+}
+
+/// Shared shutdown tail of the focus-clear paths (applyPendingFocus's `.clear`
+/// limb and clearFocus): drop applied focus, reset suppression, refocus root.
+fn clearTail() void {
+    state.?.last_applied = null;
+    state.?.suppress_reason = .none;
+    const cs = core.getState();
+    focusNow(cs.conn, cs.root);
+    core.bumpFocus();
+    advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
 }
 
 /// Phase 2: apply a prepared focus transition with fire-and-forget XCB only.
@@ -404,12 +430,7 @@ pub fn applyPendingFocus(t: FocusTransition) void {
         },
         .clear => |intent| {
             if (intent.old) |old_win| grabButtons(old_win, false);
-            state.?.last_applied = null;
-            state.?.suppress_reason = .none;
-            const cs = core.getState();
-            focusNow(cs.conn, cs.root);
-            core.bumpFocus();
-            advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
+            clearTail();
         },
         .none => {},
     }
@@ -427,6 +448,49 @@ inline fn isWindowMapped(conn: core.Connection, win: u32) bool {
     return reply.*.map_state == xcb.XCB_MAP_STATE_VIEWABLE;
 }
 
+/// Non-blocking cookie poll shared by the deferred async drains. Returns:
+///  - `.pending` reply not ready; cookie kept alive for the next batch
+///  - `.error`   request failed; the error was already freed, cookie consumed
+///  - `.raw`     a ready reply (heap), cookie consumed; the caller must free it
+const PollResult = struct {
+    pending: bool = true,
+    errored: bool = false,
+    raw: ?*anyopaque = null,
+};
+
+/// Non-blocking cookie poll. Never blocks; `pending` keeps the cookie alive.
+fn pollCookie(conn: core.Connection, seq: u32) PollResult {
+    var reply: ?*anyopaque = null;
+    var err: ?*xcb.xcb_generic_error_t = null;
+    _ = xcb.xcb_poll_for_reply(conn, seq, &reply, &err);
+    if (reply == null and err == null) return .{};
+    if (err) |e| {
+        std.c.free(e);
+        return .{ .pending = false, .errored = true };
+    }
+    return .{ .pending = false, .raw = reply };
+}
+
+/// Typed, defer-freed accessor for a ready poll reply.
+fn typedReply(comptime T: type, res: PollResult) ?*T {
+    const r = res.raw orelse return null;
+    const t: *T = @ptrCast(@alignCast(r));
+    defer std.c.free(t);
+    return t;
+}
+
+/// Shared drain preamble for the deferred async reply fields. Polls the
+/// cookie in `field`; on a ready/errored reply clears the field (the cookie
+/// is then consumed) and returns the outcome. When nothing is pending or the
+/// reply hasn't arrived, `pending` is set and the cookie stays in flight.
+fn drainCookie(comptime T: type, field: *?T) PollResult {
+    const cookie = field.* orelse return .{ .pending = true, .errored = true };
+    const res = pollCookie(core.getState().conn, cookie.sequence);
+    if (res.pending) return res;
+    field.* = null;
+    return res;
+}
+
 /// Drain the deferred focus-confirm reply, if one is pending. Must be called
 /// from the event loop before the next event; the common case completes in
 /// microseconds. If focus did not land on `confirm_win`, retry
@@ -434,32 +498,14 @@ inline fn isWindowMapped(conn: core.Connection, win: u32) bool {
 /// synthetic FocusOut/In pairs that reset Electron's internal focus state).
 /// ONE-SHOT: never re-arms. Safe when nothing is pending.
 pub fn drainPendingConfirm() void {
-    const cookie = state.?.confirm_cookie orelse return;
-    const win = state.?.confirm_win.?; // invariant: always set/cleared together with confirm_cookie
+    const win = state.?.confirm_win orelse return; // invariant: set/cleared with confirm_cookie
+    const res = drainCookie(xcb.xcb_get_input_focus_cookie_t, &state.?.confirm_cookie);
+    if (res.pending) return;
 
     const conn = core.getState().conn;
-    var reply: ?*anyopaque = null;
-    var err: ?*xcb.xcb_generic_error_t = null;
-    _ = xcb.xcb_poll_for_reply(conn, cookie.sequence, &reply, &err);
-
-    if (reply == null and err == null) {
-        // Not ready yet; keep the cookie alive for next batch
-        return;
-    }
-
     // Reply ready or error: consume and clear state
-    clearConfirmState();
-
-    if (err) |e| {
-        std.c.free(e);
-        return;
-    }
-
-    const focus_reply: ?*xcb.xcb_get_input_focus_reply_t = if (reply) |r|
-        @ptrCast(@alignCast(r))
-    else
-        null;
-    defer if (focus_reply) |r| std.c.free(r);
+    state.?.confirm_win = null;
+    if (res.errored) return;
 
     if (!window.isValidManagedWindow(win)) return;
 
@@ -470,7 +516,7 @@ pub fn drainPendingConfirm() void {
     const input_model = window.getInputModel(conn, win);
     if (input_model == .no_input) return;
 
-    const c = focus_reply orelse return;
+    const c = typedReply(xcb.xcb_get_input_focus_reply_t, res) orelse return;
 
     // Consider focus landed if ANY real window has it (focus > 1): Electron/Qt
     // respond to WM_TAKE_FOCUS by focusing an internal child widget, so
@@ -519,16 +565,12 @@ pub fn clearFocus() void {
         const pl = @import("pipeline");
         if (pl.initialized) @import("model").clearFocus(pl.model());
     }
-    if (state.?.last_applied) |old_win| {
-        grabButtons(old_win, false);
+    const ft = prepareClearFocus();
+    if (ft == .none) {
+        clearTail();
+        return;
     }
-    cancelPendingConfirm();
-    state.?.last_applied = null;
-    state.?.suppress_reason = .none;
-    const cs = core.getState();
-    focusNow(cs.conn, cs.root);
-    core.bumpFocus();
-    advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
+    applyPendingFocus(ft);
 }
 
 /// Write `_NET_ACTIVE_WINDOW` to the root window so EWMH clients stay in sync.
@@ -631,19 +673,11 @@ pub fn grabFocusReassert(prev: u32, is_offscreen_steal: bool) void {
     discardOptCookie(state.?.pre_protocols_cookie);
     state.?.pre_protocols_cookie = null;
 
-    const ft: FocusTransition = .{ .set = .{
-        .win = prev,
-        .old = state.?.last_applied,
-        .flags = .{
-            .set_input_focus = resolved.model != .globally_active,
-            .raise = false,
-            .send_wm_take_focus = true,
-            .take_focus_known = resolved.take_focus,
-            .arm_confirm = false,
-            .schedule_bar = true,
-            .new_suppress = .none,
-        },
-    } };
+    const ft = setIntent(prev, state.?.last_applied, resolved, .{
+        .raise = false,
+        .arm_confirm = false,
+        .new_suppress = .none,
+    });
 
     const pl = @import("pipeline");
     @import("model").setFocus(pl.model(), prev);
@@ -669,30 +703,12 @@ pub fn cancelPointerSync() void {
 /// managed window is currently under the pointer. Called from the event loop;
 /// safe to call when no query is pending.
 pub fn drainPointerSync() void {
-    const cookie = state.?.pointer_cookie orelse return;
-
     const cs = core.getState();
-    var reply: ?*anyopaque = null;
-    var err: ?*xcb.xcb_generic_error_t = null;
-    _ = xcb.xcb_poll_for_reply(cs.conn, cookie.sequence, &reply, &err);
+    const res = drainCookie(xcb.xcb_query_pointer_cookie_t, &state.?.pointer_cookie);
+    if (res.pending) return;
+    if (res.errored) return;
 
-    if (reply == null and err == null) {
-        // Not ready yet; keep the cookie alive for next batch
-        return;
-    }
-
-    state.?.pointer_cookie = null;
-
-    if (err) |e| {
-        std.c.free(e);
-        return;
-    }
-
-    const pointer_reply: ?*xcb.xcb_query_pointer_reply_t =
-        if (reply) |r| @ptrCast(@alignCast(r)) else null;
-    defer if (pointer_reply) |r| std.c.free(r);
-
-    const p = pointer_reply orelse return;
+    const p = typedReply(xcb.xcb_query_pointer_reply_t, res) orelse return;
     const child = p.*.child;
     if (child == 0 or child == cs.root) return;
     // Same ownership predicate as a workspace switch's pointer pick: the
@@ -721,28 +737,14 @@ pub fn beginTilingOpSettle() void {
 /// Only clears suppression while it is still .tiling_operation, so a different
 /// reason set meanwhile (e.g. window_spawn) is never clobbered.
 pub fn drainTilingOpSettle() void {
-    const cookie = state.?.tiling_op_cookie orelse return;
-
-    const cs = core.getState();
-    var reply: ?*anyopaque = null;
-    var err: ?*xcb.xcb_generic_error_t = null;
-    _ = xcb.xcb_poll_for_reply(cs.conn, cookie.sequence, &reply, &err);
-
-    if (reply == null and err == null) {
-        // Not ready yet; keep the cookie alive for next batch
-        return;
-    }
-
-    state.?.tiling_op_cookie = null;
+    const res = drainCookie(xcb.xcb_get_input_focus_cookie_t, &state.?.tiling_op_cookie);
+    if (res.pending) return;
+    if (res.errored) return;
 
     // The reply's content is unused; only its arrival signals that the server
     // has processed everything queued before it. It must be consumed to drain
     // the XCB queue.
-    if (reply) |r| std.c.free(r);
-    if (err) |e| {
-        std.c.free(e);
-        return;
-    }
+    if (res.raw) |r| std.c.free(r);
     if (state.?.suppress_reason == .tiling_operation) state.?.suppress_reason = .none;
 }
 

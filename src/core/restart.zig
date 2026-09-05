@@ -39,6 +39,10 @@ const FileIdentity = struct {
     mtime_sec: i64,
     mtime_nsec: u32,
     size: u64,
+    /// Whether two captures describe the same file.
+    pub fn eql(a: FileIdentity, b: FileIdentity) bool {
+        return std.meta.eql(a, b);
+    }
 };
 
 /// Boot-time identity of the running image (stat of `/proc/self/exe`).
@@ -127,12 +131,7 @@ pub fn binaryChanged() bool {
     const boot = boot_identity orelse return false;
     const exec_path = exec_path_z orelse return false;
     const now = statIdentity(exec_path) orelse return false;
-    return !(now.dev_major == boot.dev_major and
-        now.dev_minor == boot.dev_minor and
-        now.ino == boot.ino and
-        now.mtime_sec == boot.mtime_sec and
-        now.mtime_nsec == boot.mtime_nsec and
-        now.size == boot.size);
+    return !now.eql(boot);
 }
 
 /// The unified entry: everything the `reload` keybind (and SIGUSR1) means.

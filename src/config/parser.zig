@@ -18,6 +18,14 @@ pub const ScalableValue = struct {
     }
 };
 
+/// Frees every owned value in `arr` (its elements' strings/arrays) and then
+/// the array's backing storage, in that order. Shared by Value.deinit and the
+/// errdefer teardown of the partially built arrays in merging and parsing.
+pub fn deinitValues(arr: *std.ArrayList(Value), allocator: std.mem.Allocator) void {
+    for (arr.items) |*item| item.deinit(allocator);
+    arr.deinit(allocator);
+}
+
 pub const Value = union(enum) {
     integer: i64,
     boolean: bool,
@@ -70,35 +78,17 @@ pub const Value = union(enum) {
             else => @compileError("asScalar: unsupported type " ++ @typeName(T)),
         };
     }
-    pub fn asInt(self: Value) ?i64 {
-        return self.asScalar(i64);
-    }
-    pub fn asBool(self: Value) ?bool {
-        return self.asScalar(bool);
-    }
-    pub fn asString(self: Value) ?[]const u8 {
-        return self.asScalar([]const u8);
-    }
-    pub fn asColor(self: Value) ?u32 {
-        return self.asScalar(u32);
-    }
     pub inline fn asArray(self: Value) ?[]const Value {
         return switch (self) {
             .array => |arr| arr.items,
             else => null,
         };
     }
-    pub fn asScalable(self: Value) ?ScalableValue {
-        return self.asScalar(ScalableValue);
-    }
 
     pub fn deinit(self: *Value, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .string => |s| allocator.free(s),
-            .array => |*arr| {
-                for (arr.items) |*item| item.deinit(allocator);
-                arr.deinit(allocator);
-            },
+            .array => |*arr| deinitValues(arr, allocator),
             else => {},
         }
     }
@@ -176,35 +166,18 @@ pub const Section = struct {
         return self.pairs.get(key);
     }
 
-    // Generic typed getter: dispatches to the matching `Value.asXxx()` accessor
-    // for the requested type. All five typed getters below are thin wrappers
-    // around this single function so the dispatch logic lives in one place.
+    // Generic typed getter: dispatches to the matching `Value.asScalar`
+    // accessor for the requested type.
     pub fn getAs(self: *Section, comptime T: type, key: []const u8) ?T {
         const v = self.get(key) orelse return null;
         return switch (T) {
-            i64 => v.asInt(),
-            bool => v.asBool(),
-            []const u8 => v.asString(),
+            i64 => v.asScalar(i64),
+            bool => v.asScalar(bool),
+            []const u8 => v.asScalar([]const u8),
             []const Value => v.asArray(),
-            ScalableValue => v.asScalable(),
+            ScalableValue => v.asScalar(ScalableValue),
             else => @compileError("Section.getAs: unsupported type " ++ @typeName(T)),
         };
-    }
-
-    pub fn getInt(self: *Section, key: []const u8) ?i64 {
-        return self.getAs(i64, key);
-    }
-    pub fn getBool(self: *Section, key: []const u8) ?bool {
-        return self.getAs(bool, key);
-    }
-    pub fn getString(self: *Section, key: []const u8) ?[]const u8 {
-        return self.getAs([]const u8, key);
-    }
-    pub fn getArray(self: *Section, key: []const u8) ?[]const Value {
-        return self.getAs([]const Value, key);
-    }
-    pub fn getScalable(self: *Section, key: []const u8) ?ScalableValue {
-        return self.getAs(ScalableValue, key);
     }
 };
 
@@ -262,10 +235,7 @@ fn deepCopyValue(allocator: std.mem.Allocator, val: Value) std.mem.Allocator.Err
         .string => |s| .{ .string = try allocator.dupe(u8, s) },
         .array => |arr| blk: {
             var new_arr = try std.ArrayList(Value).initCapacity(allocator, arr.items.len);
-            errdefer {
-                for (new_arr.items) |*item| item.deinit(allocator);
-                new_arr.deinit(allocator);
-            }
+            errdefer deinitValues(&new_arr, allocator);
             for (arr.items) |item| new_arr.appendAssumeCapacity(try deepCopyValue(allocator, item));
             break :blk .{ .array = new_arr };
         },
@@ -278,10 +248,7 @@ fn deepCopyValue(allocator: std.mem.Allocator, val: Value) std.mem.Allocator.Err
 fn ensureArray(allocator: std.mem.Allocator, old_val: *Value) !void {
     if (old_val.* == .array) return;
     var arr = try std.ArrayList(Value).initCapacity(allocator, 1);
-    errdefer {
-        for (arr.items) |*item| item.deinit(allocator);
-        arr.deinit(allocator);
-    }
+    errdefer deinitValues(&arr, allocator);
     arr.appendAssumeCapacity(old_val.*);
     old_val.* = .{ .array = arr };
 }
@@ -559,10 +526,7 @@ const Parser = struct {
 
         _ = self.consume();
         var array = try std.ArrayList(Value).initCapacity(self.allocator, 8);
-        errdefer {
-            for (array.items) |*item| item.deinit(self.allocator);
-            array.deinit(self.allocator);
-        }
+        errdefer deinitValues(&array, self.allocator);
 
         while (true) {
             self.skipWhitespaceAndNewlines();
@@ -671,10 +635,7 @@ const Parser = struct {
     // belong to parseArray); semicolons are likewise left to the pair parser.
     fn parseBareValues(self: *Parser) ParseError!Value {
         var items: std.ArrayList(Value) = .empty;
-        errdefer {
-            for (items.items) |*v| v.deinit(self.allocator);
-            items.deinit(self.allocator);
-        }
+        errdefer deinitValues(&items, self.allocator);
 
         while (true) {
             self.skipWhitespace();

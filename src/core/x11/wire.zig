@@ -165,6 +165,30 @@ pub inline fn getAtomOrZero(comptime name: []const u8) u32 {
     return getAtomCached(name) catch 0;
 }
 
+/// Fires a replace-mode xcb_change_property for `value` typed `[]const T`.
+/// `atom_type` is the X11 type atom; the format byte is derived from `T` (8
+/// for u8, 32 for xcb_atom_t/u32). No-op when `value` is empty.
+inline fn changeProperty(
+    conn: Connection,
+    win: u32,
+    atom: u32,
+    comptime T: type,
+    atom_type: u32,
+    value: []const T,
+) void {
+    if (value.len == 0) return;
+    _ = xcb.xcb_change_property(
+        conn,
+        xcb.XCB_PROP_MODE_REPLACE,
+        win,
+        atom,
+        atom_type,
+        @intCast(8 * @sizeOf(T)),
+        @intCast(value.len),
+        value.ptr,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // EWMH root window advertisement
 
@@ -255,52 +279,16 @@ pub fn advertiseEwmhSupport(conn: Connection, screen: Screen, root: u32) void {
     // itself, and the root points at the check window. Clients compare the
     // two `_NET_SUPPORTING_WM_CHECK` values to tell a live WM from a stale
     // property a crashed WM left behind.
-    _ = xcb.xcb_change_property(
-        conn,
-        xcb.XCB_PROP_MODE_REPLACE,
-        check_win,
-        supporting_wm_check,
-        xcb.XCB_ATOM_WINDOW,
-        32,
-        1,
-        &check_win,
-    );
-    _ = xcb.xcb_change_property(
-        conn,
-        xcb.XCB_PROP_MODE_REPLACE,
-        root,
-        supporting_wm_check,
-        xcb.XCB_ATOM_WINDOW,
-        32,
-        1,
-        &check_win,
-    );
+    changeProperty(conn, check_win, supporting_wm_check, xcb.xcb_atom_t, xcb.XCB_ATOM_WINDOW, &[_]xcb.xcb_atom_t{check_win});
+    changeProperty(conn, root, supporting_wm_check, xcb.xcb_atom_t, xcb.XCB_ATOM_WINDOW, &[_]xcb.xcb_atom_t{check_win});
 
     const wm_name = "hana";
-    _ = xcb.xcb_change_property(
-        conn,
-        xcb.XCB_PROP_MODE_REPLACE,
-        check_win,
-        net_wm_name,
-        utf8_string,
-        8,
-        @intCast(wm_name.len),
-        wm_name.ptr,
-    );
+    changeProperty(conn, check_win, net_wm_name, u8, utf8_string, wm_name);
 
     var supported: [supported_atoms.len]xcb.xcb_atom_t = undefined;
     inline for (supported_atoms, 0..) |name, i|
         supported[i] = getAtomCached(name) catch xcb.XCB_ATOM_NONE;
-    _ = xcb.xcb_change_property(
-        conn,
-        xcb.XCB_PROP_MODE_REPLACE,
-        root,
-        net_supported,
-        xcb.XCB_ATOM_ATOM,
-        32,
-        @intCast(supported.len),
-        &supported,
-    );
+    changeProperty(conn, root, net_supported, xcb.xcb_atom_t, xcb.XCB_ATOM_ATOM, &supported);
 }
 
 // ---------------------------------------------------------------------------
@@ -339,31 +327,36 @@ fn collectReply(
     return blockingReply(conn, cookie);
 }
 
-fn blockingPropertyReply(conn: Connection, cookie: xcb.xcb_get_property_cookie_t) ?*anyopaque {
-    return @ptrCast(xcb.xcb_get_property_reply(conn, cookie, null));
+/// Generates a typed reply-collector family over the shared poll-first
+/// `collectReply`. `T` is the reply record type (e.g. xcb_get_property_reply_t),
+/// `CookieT` the request's cookie type, and `blockingFn` the xcb blocking reply
+/// call (taking conn + cookie, returning the typed reply pointer or null).
+fn ReplyCollector(comptime T: type, comptime CookieT: type, comptime blockingFn: anytype) type {
+    return struct {
+        fn blockingReply(conn: Connection, cookie: CookieT) ?*anyopaque {
+            return @ptrCast(blockingFn(conn, cookie, null));
+        }
+        /// An owned `*T` reply, or null when neither the poll nor the blocking
+        /// fallback produced one.
+        pub fn collect(conn: Connection, cookie: CookieT) ?*T {
+            return @ptrCast(@alignCast(collectReply(conn, cookie, blockingReply)));
+        }
+    };
 }
 
-fn blockingGeometryReply(conn: Connection, cookie: xcb.xcb_get_geometry_cookie_t) ?*anyopaque {
-    return @ptrCast(xcb.xcb_get_geometry_reply(conn, cookie, null));
-}
+const PropertyCollector = ReplyCollector(
+    xcb.xcb_get_property_reply_t,
+    xcb.xcb_get_property_cookie_t,
+    xcb.xcb_get_property_reply,
+);
+pub const collectPropertyReply = PropertyCollector.collect;
 
-/// Property-flavored collectReply: an owned `xcb_get_property_reply_t`, or
-/// null when neither the poll nor the blocking fallback produced one.
-pub fn collectPropertyReply(
-    conn: Connection,
-    cookie: xcb.xcb_get_property_cookie_t,
-) ?*xcb.xcb_get_property_reply_t {
-    return @ptrCast(@alignCast(collectReply(conn, cookie, blockingPropertyReply)));
-}
-
-/// Geometry-flavored collectReply: an owned `xcb_get_geometry_reply_t`, or
-/// null under the same contract.
-pub fn collectGeometryReply(
-    conn: Connection,
-    cookie: xcb.xcb_get_geometry_cookie_t,
-) ?*xcb.xcb_get_geometry_reply_t {
-    return @ptrCast(@alignCast(collectReply(conn, cookie, blockingGeometryReply)));
-}
+const GeometryCollector = ReplyCollector(
+    xcb.xcb_get_geometry_reply_t,
+    xcb.xcb_get_geometry_cookie_t,
+    xcb.xcb_get_geometry_reply,
+);
+pub const collectGeometryReply = GeometryCollector.collect;
 
 // ---------------------------------------------------------------------------
 // Property fetchers

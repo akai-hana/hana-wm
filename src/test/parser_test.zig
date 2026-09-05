@@ -24,18 +24,18 @@ test "P1 parses root + named sections into a flat Document" {
     defer doc.deinit();
 
     // Root-level keys land on the root section.
-    try testing.expectEqualStrings("hello", doc.root.get("str_key").?.asString().?);
-    try testing.expectEqual(@as(i64, 42), doc.root.get("num").?.asInt().?);
-    try testing.expectEqual(true, doc.root.get("flag").?.asBool().?);
+    try testing.expectEqualStrings("hello", doc.root.get("str_key").?.asScalar([]const u8).?);
+    try testing.expectEqual(@as(i64, 42), doc.root.get("num").?.asScalar(i64).?);
+    try testing.expectEqual(true, doc.root.get("flag").?.asScalar(bool).?);
 
     // Named sections, including duplicate headers collapsing into one.
     const general = doc.sections.getPtr("general").?;
-    try testing.expectEqual(@as(i64, 800), general.get("width").?.asInt().?);
-    try testing.expectEqualStrings("hana", general.get("name").?.asString().?);
+    try testing.expectEqual(@as(i64, 800), general.get("width").?.asScalar(i64).?);
+    try testing.expectEqualStrings("hana", general.get("name").?.asScalar([]const u8).?);
     // Bare decimals parse as absolute ScalableValues, not strings.
     const extra = general.get("extra").?;
-    try testing.expectEqual(@as(f32, 1.5), extra.asScalable().?.value);
-    try testing.expect(!extra.asScalable().?.is_percentage);
+    try testing.expectEqual(@as(f32, 1.5), extra.asScalar(parser.ScalableValue).?.value);
+    try testing.expect(!extra.asScalar(parser.ScalableValue).?.is_percentage);
 }
 
 test "P2 double-quoted strings resolve escapes; single-quoted pass through" {
@@ -44,9 +44,9 @@ test "P2 double-quoted strings resolve escapes; single-quoted pass through" {
     var doc = try parser.parse(alloc, src);
     defer doc.deinit();
 
-    try testing.expectEqualStrings("line1\nline2\ttab", doc.root.get("a").?.asString().?);
+    try testing.expectEqualStrings("line1\nline2\ttab", doc.root.get("a").?.asScalar([]const u8).?);
     // TOML literal strings keep backslashes verbatim.
-    try testing.expectEqualStrings("raw\\nnot-an-escape", doc.root.get("b").?.asString().?);
+    try testing.expectEqualStrings("raw\\nnot-an-escape", doc.root.get("b").?.asScalar([]const u8).?);
 }
 
 test "P3 missing key / missing section yield absent, not panic" {
@@ -77,9 +77,9 @@ test "P5 mergeDocumentsInto: later document wins for scalars" {
 
     try parser.mergeDocumentsInto(alloc, &base, &overlay);
 
-    try testing.expectEqualStrings("light", base.root.get("theme").?.asString().?);
+    try testing.expectEqualStrings("light", base.root.get("theme").?.asScalar([]const u8).?);
     const bar = base.sections.getPtr("bar").?;
-    try testing.expectEqual(@as(i64, 32), bar.get("height").?.asInt().?);
+    try testing.expectEqual(@as(i64, 32), bar.get("height").?.asScalar(i64).?);
 }
 
 test "P6 malformed lines are skipped without aborting the parse" {
@@ -95,7 +95,7 @@ test "P6 malformed lines are skipped without aborting the parse" {
     var doc = try parser.parse(alloc, src);
     defer doc.deinit();
 
-    try testing.expectEqualStrings("value", doc.root.get("good").?.asString().?);
+    try testing.expectEqualStrings("value", doc.root.get("good").?.asScalar([]const u8).?);
     const sane = doc.sections.getPtr("sane").?;
-    try testing.expectEqual(@as(i64, 7), sane.get("kept").?.asInt().?);
+    try testing.expectEqual(@as(i64, 7), sane.get("kept").?.asScalar(i64).?);
 }

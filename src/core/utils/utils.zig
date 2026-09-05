@@ -50,8 +50,51 @@ pub inline fn monotonicNs() u64 {
     return clockNs(.MONOTONIC);
 }
 
+/// Monotonic milliseconds (wall-independent; for deltas and deadlines).
+pub inline fn monotonicMs() i64 {
+    return @intCast(monotonicNs() / std.time.ns_per_ms);
+}
+
 pub inline fn realtimeNs() u64 {
     return clockNs(.REALTIME);
+}
+
+/// Rolling windowed latency profiler sharing one shape across the key-dispatch
+/// and retile paths: accumulates `ns` samples up to `window_size`, then logs a
+/// summary via `logFn(fmt, .{ count, avg_ns, min_ns, max_ns })`. Compiles out
+/// entirely when `enabled` is false (callers still reference `.enabled`).
+pub fn WindowedProfiler(
+    comptime enabled_flag: bool,
+    comptime tag: []const u8,
+    comptime fmt: []const u8,
+    comptime logFn: anytype,
+) type {
+    _ = tag;
+    return struct {
+        pub const enabled = enabled_flag;
+        var count: u64 = 0;
+        var total_ns: i128 = 0;
+        var min_ns: i128 = std.math.maxInt(i128);
+        var max_ns: i128 = 0;
+        const window_size: u64 = 200;
+
+        fn note(ns: i128) void {
+            if (ns < min_ns) min_ns = ns;
+            if (ns > max_ns) max_ns = ns;
+            total_ns += ns;
+            count += 1;
+            if (count >= window_size) flush();
+        }
+
+        fn flush() void {
+            const avg: f64 = @as(f64, @floatFromInt(total_ns)) / @as(f64, @floatFromInt(count));
+            logFn(fmt, .{ count, avg, min_ns, max_ns });
+            count = 0;
+            total_ns = 0;
+            min_ns = std.math.maxInt(i128);
+            max_ns = 0;
+        }
+    };
 }
 
 // --- bounded collections (re-exports) ---------------------------------------

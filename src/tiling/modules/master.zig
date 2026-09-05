@@ -27,10 +27,6 @@ pub const StackBoost = struct {
 /// half-gap between panes. Heights via cumulative integer division with
 /// max_height capping (water-filling).
 pub fn compute(v: tiling.View, out: *tiling.List) void {
-    // Empty workspace emits nothing; callers may run layouts on an empty
-    // order (e.g. sync's per-reconcile compute), so it is a supported input.
-    if (v.order.len == 0) return;
-
     const windows = v.order;
     const n = windows.len;
     const min_dim = v.env.min_dim;
@@ -430,7 +426,6 @@ pub const module: @import("plugin").Layout = .{
     .name = "master",
     .compute = tiling.computeHook(compute),
     .variant_count = 2,
-    .has_variants = true,
     .fifo_variant = 1,
     .variant_parse = tiling.variantParse(&.{ "lifo", "fifo" }),
     .icon = "[]=",
