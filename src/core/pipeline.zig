@@ -252,8 +252,6 @@ pub inline fn reconcileUnderGrabNowFullscreen(
     // EXIT: arm the deferred show. The bar reappears after the client's
     // ConfigureNotify confirms non-fullscreen dimensions.
     if (!was_exit) {
-        // Cancel any stale pending bar show from a previous exit.
-        for (window_mods) |m| _ = m.armPendingBarShow;
         // Immediate bar unmap when fullscreen claims the screen.
         if (build_options.has_bar) surfaces.hideBarForFullscreen();
     } else {

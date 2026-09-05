@@ -22,9 +22,6 @@
 //! `null` for hooks a module doesn't own.
 //!
 //! Key seams:
-//!   - `coverageOn(m, ws)` -- who owns the screen on a workspace, if anyone
-//!     (fullscreen). Called once per sync reconcile; `null` when no module
-//!     claims the ws.
 //!   - `serializeWindow(m-as-*anyopaque, win, alloc)` -- returns an opaque
 //!     per-window blob for restart persistence, or null. The model is passed
 //!     as `*anyopaque` so the seam stays free of a model type dependency;
@@ -101,10 +98,6 @@ pub const WindowModule = struct {
     // Fullscreen protocol-side (deferred bar hide/show, EWMH).
     notifyConfigureIfPending: ?*const fn (u32, u16, u16) void = null,
     onWindowGone: ?*const fn (u32) void = null,
-    // Coverage seam: for a given workspace, which window owns the screen?
-    // sync calls this once per reconcile (through the registry) instead of
-    // scanning a store for fullscreen state. null => no module claims the ws.
-    coverageOn: ?*const fn (*const model.Model, model.WSId) ?model.WindowId = null,
     // Session persistence seam: modules marshal/unmarshal their per-window
     // state as an opaque blob; persist carries `[]u8` bytes and the
     // wire layer dispatches. `serializeWindow` null => nothing persisted.
@@ -173,8 +166,7 @@ pub const WindowModule = struct {
     /// consult visibility).
     isCoveringOnWs: ?*const fn (*const model.Model, model.WindowId, model.WSId) bool = null,
     /// The first covering occupant on `ws`: rec.ws == ws AND
-    /// present-not-parked AND visibleOn. DISTINCT from `coverageOn`
-    /// which also matches cross-ws visibility. At most one module binds
+    /// present-not-parked AND visibleOn. At most one module binds
     /// this.
     coveringOccupantOnWs: ?*const fn (*const model.Model, model.WSId) ?model.WindowId = null,
 
@@ -325,7 +317,6 @@ pub const Segment = struct {
     // Chrome-overlay extras (bound into the chrome `Surfaces` hooks and polled
     // uniformly; the overlay segment is the only one that sets them).
     handleKeypress: ?*const fn (*const xcb.xcb_key_press_event_t, ?*const types.Action) bool = null,
-    isActive: ?*const fn () bool = null,
     consumeRedrawRequest: ?*const fn () bool = null,
     invalidateReloadCaches: ?*const fn () void = null,
 };
@@ -350,8 +341,6 @@ pub const Layout = struct {
     compute: ?*const fn (*const anyopaque, *anyopaque) void = null,
     /// Number of variants this layout exposes for cycle_variant actions.
     variant_count: u8 = 1,
-    /// True when config may declare variants for this layout.
-    has_variants: bool = false,
     /// Variant index that toggles "fifo" spawn behavior (master-stack), if any.
     fifo_variant: ?u8 = null,
     /// Parses a config VALUE-STRING (e.g. "lifo", "fifo", "gaps", "gapless",
@@ -362,17 +351,6 @@ pub const Layout = struct {
     /// the variant tables are fully registry-driven. null = this layout does
     /// not accept per-variant value strings.
     variant_parse: ?*const fn ([]const u8) ?u8 = null,
-    /// The variant index at which this layout honours window gaps (see
-    /// monocle's "gaps" variant). pipeline computes gap flags from the ACTIVE
-    /// module's metadata (gap_mode) instead of matching on layout names, so a
-    /// layout that varies gap behavior pins the index here. null = no variant
-    /// toggles gaps for this layout.
-    gap_mode: ?u8 = null,
-    /// The variant index at which this layout switches to its relaxed mode
-    /// (see grid's "relaxed" variant). The engine's per-layout "relaxed" hint
-    /// derives from this, name-free, like gap_mode. null = no variant toggles
-    /// a relaxed mode for this layout.
-    relax_mode: ?u8 = null,
     // Scroll viewport addon hooks (only the scroll layout registers them;
     // "is scroll in use" == "the active layout provides these hooks").
     slotWidth: ?*const fn (u16) i32 = null,

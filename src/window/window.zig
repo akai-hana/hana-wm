@@ -20,10 +20,19 @@ const pipeline = @import("pipeline");
 const actions = @import("actions");
 const persist = @import("persist");
 
-fn providerOf(
+/// Registry lookup for the hook `field` (see `plugin.providerOf`), null when
+/// no module binds it; shared by the window layer (actions/borders alias this).
+pub fn providerOf(
     comptime field: std.meta.FieldEnum(@import("plugin").WindowModule),
 ) ?@import("plugin").WindowModule {
     return @import("plugin").providerOf(window_mods[0..], field);
+}
+
+/// True when `win` is currently screen-covering via a covering-mode module
+/// (fullscreen). Shared by the configure-resolution and client-message paths.
+fn isCovering(win: u32) bool {
+    const model = pipeline.model();
+    return if (providerOf(.isCoveringMode)) |wm| wm.isCoveringMode.?(model, win) else false;
 }
 
 // XSizeHints flags (ICCCM 4.1.2.3)
@@ -482,40 +491,39 @@ fn protocolPropsFromReply(
 
 fn queryWMProtocolsProps(conn: core.Connection, win: u32) WMProtocolsProps {
     const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch return .{};
-    const take_focus_atom = utils.getAtomCached("WM_TAKE_FOCUS") catch return .{};
-    const wm_delete_atom = utils.getAtomCached("WM_DELETE_WINDOW") catch return .{};
-
-    const reply = xcb.xcb_get_property_reply(
+    return drainWMProtocolsReply(conn, xcb.xcb_get_property(
         conn,
-        xcb.xcb_get_property(
-            conn,
-            property_no_delete,
-            win,
-            protocols_atom,
-            xcb.XCB_ATOM_ATOM,
-            0,
-            max_property_length,
-        ),
-        null,
-    ) orelse return .{};
-    defer std.c.free(reply);
-    return protocolPropsFromReply(reply, take_focus_atom, wm_delete_atom);
+        property_no_delete,
+        win,
+        protocols_atom,
+        xcb.XCB_ATOM_ATOM,
+        0,
+        max_property_length,
+    ));
 }
 
-/// Drains a caller-supplied (pre-fired, pipelined) WM_PROTOCOLS reply. Keeps
-/// the scan identical to queryWMProtocolsProps so the pipelined path yields the
-/// exact same verdict; the caller fired the query BEFORE the pointer round trip
-/// so its reply is typically already buffered by the time this is reached.
+/// Drains a WM_PROTOCOLS reply (the pipelined cookie of
+/// queryWMProtocolsPropsConsume, or the one fired by queryWMProtocolsProps
+/// above) into take_focus/wm_delete. Sharing one drain keeps the pipelined
+/// verdict byte-identical to the live one; the caller fired the query BEFORE
+/// the pointer round trip so its reply is typically already buffered by the
+/// time this is reached. An un-consumable atom cache scans against 0 (which
+/// never matches), so the reply still drains cleanly.
+fn drainWMProtocolsReply(conn: core.Connection, cookie: xcb.xcb_get_property_cookie_t) WMProtocolsProps {
+    const reply = xcb.xcb_get_property_reply(conn, cookie, null) orelse return .{};
+    defer std.c.free(reply);
+    return protocolPropsFromReply(
+        reply,
+        utils.getAtomOrZero("WM_TAKE_FOCUS"),
+        utils.getAtomOrZero("WM_DELETE_WINDOW"),
+    );
+}
+
 fn queryWMProtocolsPropsConsume(
     conn: core.Connection,
     cookie: xcb.xcb_get_property_cookie_t,
 ) WMProtocolsProps {
-    const take_focus_atom = utils.getAtomCached("WM_TAKE_FOCUS") catch return .{};
-    const wm_delete_atom = utils.getAtomCached("WM_DELETE_WINDOW") catch return .{};
-
-    const reply = xcb.xcb_get_property_reply(conn, cookie, null) orelse return .{};
-    defer std.c.free(reply);
-    return protocolPropsFromReply(reply, take_focus_atom, wm_delete_atom);
+    return drainWMProtocolsReply(conn, cookie);
 }
 
 /// Discards a pre-fired WM_PROTOCOLS cookie without draining it. Used when a
@@ -918,6 +926,30 @@ fn fireAdmissionCookies(conn: core.Connection, win: u32) AdmissionCookies {
     };
 }
 
+/// Claims the management event mask so `win` delivers PropertyNotify/
+/// StructureNotify/FocusChange events (shared MapRequest/adoption preamble).
+fn claimManagedEventMask(conn: core.Connection, win: u32) void {
+    _ = xcb.xcb_change_window_attributes(
+        conn,
+        win,
+        xcb.XCB_CW_EVENT_MASK,
+        &[_]u32{masks.EventMasks.managed_window},
+    );
+}
+
+/// Drains the three unconditionally-fired admission cookies; with
+/// `discard_workspace` the two conditional workspace-resolution replies are
+/// discarded instead (adoption never resolves from them; the MapRequest path
+/// has already drained them via resolveTargetWorkspace).
+fn drainAdmissionCookies(conn: core.Connection, win: u32, cookies: AdmissionCookies, comptime discard_workspace: bool) void {
+    if (comptime discard_workspace) {
+        if (cookies.c_wm_class) |c| xcb.xcb_discard_reply(conn, c.sequence);
+        if (cookies.c_net_wm_pid) |c| xcb.xcb_discard_reply(conn, c.sequence);
+    }
+    parseSizeHintsIntoCache(win, cookies.normal_hints_cookie);
+    populateFocusCacheFromCookies(conn, win, cookies.protocols_cookie, cookies.hints_cookie);
+}
+
 /// Handles a MapRequest by firing ALL property query cookies up-front, then
 /// draining replies sequentially. Firing all five cookies before draining any
 /// lets the X server process them in parallel, saving 2-3 blocking round trips
@@ -942,12 +974,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     // by the u8 return type, so no further clamping is needed.
     const current_ws = core.WorkspaceId.fromIndex(tracking.getCurrentWorkspace() orelse 0);
 
-    _ = xcb.xcb_change_window_attributes(
-        conn,
-        win,
-        xcb.XCB_CW_EVENT_MASK,
-        &[_]u32{masks.EventMasks.managed_window},
-    );
+    claimManagedEventMask(conn, win);
 
     // ----- Fire ALL property cookies before draining any reply -----
     // The server processes all five requests in parallel while we do pure
@@ -959,8 +986,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const target_ws = resolveTargetWorkspace(current_ws, cookies.c_wm_class, cookies.c_net_wm_pid);
     const on_current = target_ws.eql(current_ws);
 
-    parseSizeHintsIntoCache(win, cookies.normal_hints_cookie);
-    populateFocusCacheFromCookies(conn, win, cookies.protocols_cookie, cookies.hints_cookie);
+    drainAdmissionCookies(conn, win, cookies, false);
     const t_drain: u64 = if (build_options.profile_key) utils.monotonicNs() else 0;
 
     // Shared admission policy (MapRequest path). The cookie firing above is
@@ -1141,25 +1167,16 @@ pub fn adoptRootWindows() !usize {
         // Claim the management event mask so the adopted window delivers the
         // PropertyNotify/StructureNotify/FocusChange events managed windows
         // rely on (mirror of handleMapRequest's preamble).
-        _ = xcb.xcb_change_window_attributes(
-            conn,
-            win,
-            xcb.XCB_CW_EVENT_MASK,
-            &[_]u32{masks.EventMasks.managed_window},
-        );
+        claimManagedEventMask(conn, win);
 
         // ----- Fire the same property cookies the MapRequest path fires -----
         const cookies = fireAdmissionCookies(conn, win);
 
         // Adoption never resolves the target workspace from these cookies
-        // (restored-or-current wins, not spawn rules), so discard the two
-        // conditionally-fired replies to keep the XCB queue from accumulating
-        // unconsumed results.
-        if (cookies.c_wm_class) |c| xcb.xcb_discard_reply(conn, c.sequence);
-        if (cookies.c_net_wm_pid) |c| xcb.xcb_discard_reply(conn, c.sequence);
-
-        parseSizeHintsIntoCache(win, cookies.normal_hints_cookie);
-        populateFocusCacheFromCookies(conn, win, cookies.protocols_cookie, cookies.hints_cookie);
+        // (restored-or-current wins, not spawn rules), so the two
+        // conditionally-fired replies are discarded to keep the XCB queue
+        // from accumulating unconsumed results.
+        drainAdmissionCookies(conn, win, cookies, true);
 
         // Register on the restored-or-current workspace. on_current=false so
         // actions.mapRequest does NOT reconcile per-window (the caller owns
@@ -1179,9 +1196,7 @@ pub fn adoptRootWindows() !usize {
 fn unmanageWindow(win: u32) void {
     // Covering truth is model-side (actions.unmanage reads it); the module
     // store is queried through the registry below.
-    if (state.?.cache_ready) {
-        if (state.?.cache_slots.indexOfById(win)) |i| state.?.cache_slots.swapRemove(i);
-    }
+    if (state.?.cache_slots.indexOfById(win)) |i| state.?.cache_slots.swapRemove(i);
 
     // Evict child-cache entries pointing at this toplevel, so a new window
     // reusing the same XID can't be mis-identified as its child on the next
@@ -1294,17 +1309,15 @@ fn resolveConfigureGeometry(win: u32) ?utils.Rect {
         };
     }
 
-    if (providerOf(.isCoveringMode)) |wm| {
-        if (wm.isCoveringMode.?(pipeline.model(), win)) {
-            const screen = core.getState().screen;
-            return .{
-                .x = 0,
-                .y = 0,
-                .width = @intCast(screen.width_in_pixels),
-                .height = @intCast(screen.height_in_pixels),
-                .border_width = 0,
-            };
-        }
+    if (isCovering(win)) {
+        const screen = core.getState().screen;
+        return .{
+            .x = 0,
+            .y = 0,
+            .width = @intCast(screen.width_in_pixels),
+            .height = @intCast(screen.height_in_pixels),
+            .border_width = 0,
+        };
     }
 
     const conn = core.getState().conn;
@@ -1740,10 +1753,7 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     }
 
     const action = event.data.data32[0];
-    const is_fs = if (providerOf(.isCoveringMode)) |wm|
-        wm.isCoveringMode.?(pipeline.model(), win)
-    else
-        false;
+    const is_fs = isCovering(win);
     const should_enter = switch (action) {
         1 => true, // _NET_WM_STATE_ADD
         0 => false, // _NET_WM_STATE_REMOVE

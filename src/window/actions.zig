@@ -15,15 +15,9 @@ const debug = @import("debug");
 const utils = @import("utils");
 const window_mods = @import("window_modules").modules;
 
-/// Registry lookup for the hook `field`; the canonical scan lives in
-/// `plugin.zig` (see `plugin.providerOf`). Call sites check the provider and
-/// call the hook through it, so a build without the module keeps the same
-/// early-return shape as the previous feature guards.
-fn providerOf(
-    comptime field: std.meta.FieldEnum(@import("plugin").WindowModule),
-) ?@import("plugin").WindowModule {
-    return @import("plugin").providerOf(window_mods[0..], field);
-}
+/// Registry lookup for the hook `field` (see `plugin.providerOf`), null when
+/// no module binds it; canonical scan lives in window.providerOf.
+const providerOf = window.providerOf;
 
 /// Convenience: returns the current workspace's covering occupant, or null.
 fn currentCoveringOccupant(m: *const model_mod.Model) ?model_mod.WindowId {
@@ -37,6 +31,13 @@ fn currentCoveringOccupant(m: *const model_mod.Model) ?model_mod.WindowId {
 /// workspace.
 fn isCoveringOnWs(m: *const model_mod.Model, win: model_mod.WindowId) bool {
     return if (providerOf(.isCoveringOnWs)) |wm| wm.isCoveringOnWs.?(m, win, m.current) else false;
+}
+
+/// Shared change guard for the tag/pin actions: the window must be present in
+/// the model and not hidden.
+fn canTagChange(m: *const model_mod.Model, win: model_mod.WindowId) bool {
+    if (m.store.get(win) == null) return false;
+    return !isMinimizedOnAnyWs(m, win);
 }
 
 /// Layout registry (build-generated); the active layout is a `u8` index into
@@ -158,14 +159,20 @@ fn armFullscreenBarHideIfNeeded(
     }
 }
 
-/// Restores a specific hidden window (title-bar click path).
-pub fn restore(win: model_mod.WindowId) void {
-    const m = pipeline.model();
-    if (!isMinimizedOnAnyWs(m, win)) return;
+/// Restores `win` via the hide module's `restoreWindow` hook, re-focuses it,
+/// and arms the deferred bar-hide when the restore opened a fresh claim.
+fn restoreTarget(m: *model_mod.Model, win: model_mod.WindowId) void {
     const had_occupant_before = currentCoveringOccupant(m) != null;
     if (providerOf(.restoreWindow)) |wm| wm.restoreWindow.?(m, win);
     restoreAndFocus(m, win);
     armFullscreenBarHideIfNeeded(m, win, had_occupant_before);
+}
+
+/// Restores a specific hidden window (title-bar click path).
+pub fn restore(win: model_mod.WindowId) void {
+    const m = pipeline.model();
+    if (!isMinimizedOnAnyWs(m, win)) return;
+    restoreTarget(m, win);
 }
 
 /// Slot-ordered single restore (LIFO/FIFO keybind paths).
@@ -175,10 +182,7 @@ pub fn restoreOrdered(order: model_mod.RestoreOrder) void {
         wm.restoreCandidateOn.?(m, m.current, order)
     else
         null) orelse return;
-    const had_occupant_before = currentCoveringOccupant(m) != null;
-    if (providerOf(.restoreWindow)) |wm| wm.restoreWindow.?(m, win);
-    restoreAndFocus(m, win);
-    armFullscreenBarHideIfNeeded(m, win, had_occupant_before);
+    restoreTarget(m, win);
 }
 
 /// Slot-ordered bulk restore of the current workspace. Focus target is
@@ -295,10 +299,8 @@ pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) voi
     if (ws_idx >= constants.max_workspaces) return;
 
     const m = pipeline.model();
-    const e = m.store.get(win) orelse return;
-    if (providerOf(.isWindowHidden)) |hp| {
-        if (hp.isWindowHidden.?(m, win)) return;
-    }
+    if (!canTagChange(m, win)) return;
+    const e = m.store.get(win).?;
 
     const had_bit = e.mask & model_mod.bit(ws_idx) != 0;
     const removing_current = ws_idx == m.current;
@@ -328,10 +330,7 @@ pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) voi
 pub fn pinToggle(win: model_mod.WindowId) void {
     if (providerOf(.togglePin) == null) return;
     const m = pipeline.model();
-    if (m.store.get(win) == null) return; // unknown window: no-op
-    if (providerOf(.isWindowHidden)) |hp| {
-        if (hp.isWindowHidden.?(m, win)) return;
-    }
+    if (!canTagChange(m, win)) return;
     if (providerOf(.togglePin)) |wm| wm.togglePin.?(m, win);
     retileAndNotify(false, false);
 }
@@ -351,6 +350,15 @@ pub fn allViewToggle() void {
 
 // ------------------------------------------------------------ tiling ops / drag
 
+/// Shared tiled->floating detach (toggleFloating/detachToFloating): seeds the
+/// floating anchor from LastSent geometry and drops the home-list membership.
+fn detachTiledToFloating(e: *model_mod.Entry, win: model_mod.WindowId) bool {
+    const r = sync.lastRectFor(win) orelse return false;
+    e.anchor = .{ .floating = r };
+    e.home_ws = null; // no longer in tiled_order
+    return true;
+}
+
 /// toggle_floating_window. Tiled->floating seeds the rect from the window's
 /// current on-screen geometry (LastSent); floating->tiled re-enters the home
 /// list at the primary-column head via the ordinary tiling order.
@@ -366,9 +374,7 @@ pub fn toggleFloating(win: model_mod.WindowId) void {
     }
     switch (e.anchor) {
         .tiled => {
-            const r = sync.lastRectFor(win) orelse return;
-            e.anchor = .{ .floating = r };
-            e.home_ws = null; // no longer in tiled_order
+            if (!detachTiledToFloating(e, win)) return;
         },
         .floating => {
             e.anchor = .tiled;
@@ -409,9 +415,7 @@ pub fn detachToFloating(win: model_mod.WindowId) void {
         if (wm.isCoveringMode.?(m, win)) return;
     }
     if (e.anchor != .tiled) return;
-    const r = sync.lastRectFor(win) orelse return;
-    e.anchor = .{ .floating = r };
-    e.home_ws = null;
+    if (!detachTiledToFloating(e, win)) return;
     pipeline.reconcileUnderGrabNow(.{});
 }
 
@@ -550,11 +554,9 @@ pub fn swapPrimaryAction(focus_swap: bool) void {
 pub fn moveFocused(delta: i32) void {
     const m = pipeline.model();
     const win = m.focused orelse return;
-    const h = model_mod.findHome(m, win) orelse return;
-    const idx = m.ws[h].tiled_order.indexOfScalar(win) orelse return;
-    const next_i = @as(i64, @intCast(idx)) + delta;
-    if (next_i < 0 or next_i >= m.ws[h].tiled_order.len) return;
-    model_mod.reorderTiled(m, win, @intCast(next_i));
+    // Modulo wrap (dwm stack rotate): stepping past either edge of the home
+    // list's tiled order cycles back around, matching the focus-step parity.
+    model_mod.stepTiled(m, win, delta);
     pipeline.reconcileUnderGrabNow(.{});
 }
 

@@ -109,7 +109,6 @@ fn preReconcileHook(p: *anyopaque, n: usize, wa_width: u16) void {
 pub const module: @import("plugin").Layout = .{
     .name = "scroll",
     .compute = tiling.computeHook(compute),
-    .variant_count = 1,
     .slotWidth = slotWidth,
     .maxOffset = maxOffset,
     .preReconcile = preReconcileHook,

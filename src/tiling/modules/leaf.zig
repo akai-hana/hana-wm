@@ -45,12 +45,7 @@ fn tileRegion(
     const border2: u16 = utils.doubledBorder(m);
 
     if (n == 1) {
-        const rect = utils.Rect{
-            .x = @intCast(x),
-            .y = @intCast(y),
-            .width = tiling.shrinkClamped(w, border2, min_dim),
-            .height = tiling.shrinkClamped(h, border2, min_dim),
-        };
+        const rect = tiling.insetRect(x, y, w, h, border2, min_dim);
         // All leaf placements are visible; hints applied by tiling.emitView.
         tiling.emitView(v, out, windows[0], rect, true);
         return;
@@ -59,23 +54,19 @@ fn tileRegion(
     const n_left: usize = n / 2;
     const gap = m.gap;
 
-    if (w >= h) {
-        const split = halveWithMin(w, gap, min_dim);
-        const right_x: i32 = x + @as(i32, @intCast(split.first +| gap));
-        tileRegion(v, out, windows[0..n_left], m, min_dim, x, y, split.first, h);
-        tileRegion(v, out, windows[n_left..], m, min_dim, right_x, y, split.second, h);
-    } else {
-        const split = halveWithMin(h, gap, min_dim);
-        const bottom_y: i32 = y + @as(i32, @intCast(split.first +| gap));
-        tileRegion(v, out, windows[0..n_left], m, min_dim, x, y, w, split.first);
-        tileRegion(v, out, windows[n_left..], m, min_dim, x, bottom_y, w, split.second);
-    }
+    const horizontal = w >= h;
+    const split = halveWithMin(if (horizontal) w else h, gap, min_dim);
+    const split_offset: i32 = @as(i32, @intCast(split.first +| gap));
+    const second_x: i32 = if (horizontal) x + split_offset else x;
+    const second_y: i32 = if (horizontal) y else y + split_offset;
+
+    tileRegion(v, out, windows[0..n_left], m, min_dim, x, y, if (horizontal) split.first else w, if (horizontal) h else split.first);
+    tileRegion(v, out, windows[n_left..], m, min_dim, second_x, second_y, if (horizontal) split.second else w, if (horizontal) h else split.second);
 }
 
 /// This layout's registry contribution: metadata plus the dispatch hook.
 pub const module: @import("plugin").Layout = .{
     .name = "leaf",
     .compute = tiling.computeHook(compute),
-    .variant_count = 1,
     .icon = "BSP",
 };

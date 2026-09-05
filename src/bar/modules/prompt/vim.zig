@@ -59,10 +59,6 @@ fn enterInsert(vs: *EditorState) void {
     vs.mode = .insert;
 }
 
-inline fn isPrintableAscii(sym: xcb.xcb_keysym_t) bool {
-    return sym >= 0x20 and sym <= 0x7e;
-}
-
 /// Handle a Ctrl-modified key.  Returns `.deactivate` for Ctrl+C.
 pub fn handleCtrl(vs: *EditorState, sym: xcb.xcb_keysym_t) Action {
     switch (sym) {
@@ -102,7 +98,7 @@ fn insertKey(vs: *EditorState, sym: xcb.xcb_keysym_t) Action {
         },
         xk_home => vs.cursor = 0,
         xk_end => vs.cursor = vs.len,
-        else => if (isPrintableAscii(sym)) {
+        else => if (prompt.isPrintableAscii(sym)) {
             const ch: u8 = @truncate(sym);
             prompt.insertSlice(vs, &[1]u8{ch});
         },
@@ -278,7 +274,7 @@ fn resolveMotionKey(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
 }
 
 fn resolvePendingFindChar(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
-    if (!isPrintableAscii(sym)) {
+    if (!prompt.isPrintableAscii(sym)) {
         resetPendingCmd(vs);
         return .{};
     }

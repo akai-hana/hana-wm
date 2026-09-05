@@ -425,6 +425,40 @@ test "T11: reorder and swapPrimary" {
     try expectOrder(&small, 0, &.{7});
 }
 
+// T11b: stepTiled (dwm stack rotate) wraps around the tiled_order edges,
+// mirroring the modulo wrap of the focus cycle; middle slots move by one.
+test "T11b: stepTiled wraps at both ends" {
+    var m = makeModel();
+    defer deinitModel(&m);
+    for ([_]WindowId{ 1, 2, 3, 4 }) |w| regCur(&m, w);
+
+    // Forward from the last slot wraps to the head.
+    model.stepTiled(&m, 4, 1);
+    try expectOrder(&m, 0, &.{ 4, 1, 2, 3 });
+    // Backward from the head wraps to the tail.
+    model.stepTiled(&m, 4, -1);
+    try expectOrder(&m, 0, &.{ 1, 2, 3, 4 });
+
+    // Middle slots step by one without touching the edges.
+    model.stepTiled(&m, 2, 1);
+    try expectOrder(&m, 0, &.{ 1, 3, 2, 4 });
+    model.stepTiled(&m, 2, -1);
+    try expectOrder(&m, 0, &.{ 1, 2, 3, 4 });
+
+    // Repeated forward steps rotate the window completely around the ring.
+    for (0..4) |_| model.stepTiled(&m, 4, 1);
+    try expectOrder(&m, 0, &.{ 1, 2, 3, 4 });
+
+    // Lone tiled windows and unknown windows are no-ops.
+    var lone = makeModel();
+    defer deinitModel(&lone);
+    regCur(&lone, 7);
+    model.stepTiled(&lone, 7, 1);
+    try expectOrder(&lone, 0, &.{7});
+    model.stepTiled(&m, 99, 1);
+    try expectOrder(&m, 0, &.{ 1, 2, 3, 4 });
+}
+
 // T12: unregister cleans tiled_order/MRU/minimized/fs refs everywhere.
 test "T12: unregister cleans all references" {
     var m = makeModel();

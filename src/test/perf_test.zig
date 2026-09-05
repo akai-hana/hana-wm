@@ -337,3 +337,39 @@ test "bench: store.get linear scan (max_tiled_windows, worst case)" {
     const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
     std.debug.print("[bench] store.get ({d} wins, worst case): {d:.1} ns/call\n", .{ n, per_call_ns });
 }
+
+test "bench: sent ledger (64 wins: cold fill + warm hit sweep)" {
+    // The sync sent-ledger access pattern, isolated: reconcile touches the
+    // ledger with exactly one get-or-put per window per pass (see sync.reconcile).
+    // COLD = fresh ledger first-touch (post-boot pass); WARM = already-seeded
+    // ledger, hit-only sweep (steady-state pass; model.Store iterates sorted-key
+    // order, so the sweep walks ascending window ids).
+    sync.init();
+    defer sync.deinit();
+
+    const n: usize = 64;
+
+    const it_cold: usize = 20_000;
+    const t0 = nowNs();
+    for (0..it_cold) |_| {
+        sync.init();
+        for (0..n) |i| _ = sync.sentGetOrPut(@intCast(i + 1)) catch unreachable;
+    }
+    const cold_ns = nowNs() - t0;
+    const per_cold_ns = @as(f64, @floatFromInt(cold_ns)) / @as(f64, @floatFromInt(it_cold * n));
+
+    sync.init();
+    for (0..n) |i| _ = sync.sentGetOrPut(@intCast(i + 1001)) catch unreachable;
+    const it_warm: usize = 20_000;
+    const t1 = nowNs();
+    for (0..it_warm) |_| {
+        for (0..n) |i| _ = sync.sentGetOrPut(@intCast(i + 1001)) catch unreachable;
+    }
+    const warm_ns = nowNs() - t1;
+    const per_warm_ns = @as(f64, @floatFromInt(warm_ns)) / @as(f64, @floatFromInt(it_warm * n));
+
+    std.debug.print(
+        "[bench] sent ledger ({d} wins): cold {d:.1} ns/op; warm {d:.1} ns/op ({d:.2} us/sweep)\n",
+        .{ n, per_cold_ns, per_warm_ns, per_warm_ns * @as(f64, @floatFromInt(n)) / 1000.0 },
+    );
+}

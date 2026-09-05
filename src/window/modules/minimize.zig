@@ -114,6 +114,14 @@ fn slotLess(a: ?usize, b: ?usize) bool {
     return a.? < b.?;
 }
 
+/// Parked-on-ws predicate: the window exists, is parked (minimized), and its
+/// tag mask includes `ws`.
+fn parkedOnWs(m: *const model.Model, rec: Rec, ws: model.WSId) bool {
+    const e = m.store.get(rec.win) orelse return false;
+    if (e.presence != .parked) return false;
+    return e.mask & model.bit(ws) != 0;
+}
+
 /// Restore-order target selection over minimized windows on `ws`:
 /// `.fifo` = oldest minimize seq, `.lifo` = newest. Returns null when nothing
 /// on `ws` is minimized.
@@ -125,9 +133,7 @@ pub fn restoreCandidate(
     var best: ?model.WindowId = null;
     var best_seq: u32 = 0;
     for (g_recs.constSlice()) |rec| {
-        const e = m.store.get(rec.win) orelse continue;
-        if (e.presence != .parked) continue;
-        if (e.mask & model.bit(ws) == 0) continue;
+        if (!parkedOnWs(m, rec, ws)) continue;
         const better = switch (order) {
             .fifo => best == null or rec.seq < best_seq,
             .lifo => best == null or rec.seq > best_seq,
@@ -146,12 +152,10 @@ pub fn latestMinimizedBase(m: *const model.Model, ws: model.WSId) ?model.WindowI
     var best: ?model.WindowId = null;
     var best_seq: u32 = 0;
     for (g_recs.constSlice()) |rec| {
-        const e = m.store.get(rec.win) orelse continue;
-        if (e.presence != .parked) continue;
+        if (!parkedOnWs(m, rec, ws)) continue;
         if (build_options.has_fullscreen) {
             if (@import("fullscreen").isFullscreenMode(m, rec.win)) continue;
         }
-        if (e.mask & model.bit(ws) == 0) continue;
         if (best == null or rec.seq > best_seq) {
             best = rec.win;
             best_seq = rec.seq;
@@ -165,9 +169,7 @@ pub fn restoreAllOnWs(m: *model.Model, ws: model.WSId) void {
     var slots: [MAX_MINIMIZED]?usize = undefined;
     var n: usize = 0;
     for (g_recs.constSlice()) |rec| {
-        const e = m.store.get(rec.win) orelse continue;
-        if (e.presence != .parked) continue;
-        if (e.mask & model.bit(ws) == 0) continue;
+        if (!parkedOnWs(m, rec, ws)) continue;
         wins[n] = rec.win;
         slots[n] = rec.slot;
         n += 1;

@@ -295,6 +295,22 @@ pub fn reorderTiled(m: *Model, win: WindowId, idx_in: usize) void {
     _ = list.insert(idx, win); // cannot fail: removal freed a slot
 }
 
+/// Moves `win` one slot in `dir` within its home workspace's tiled order,
+/// wrapping around either edge (dwm-style stack rotate, mirroring the focus
+/// cycle's modulo wrap). Unknown windows and lone tiled windows are no-ops.
+pub fn stepTiled(m: *Model, win: WindowId, dir: i32) void {
+    const h = findHome(m, win) orelse return;
+    const list = &m.ws[h].tiled_order;
+    const len = list.len;
+    if (len < 2) return;
+    const idx = list.indexOfScalar(win) orelse return;
+    const next: usize = @intCast(@mod(
+        @as(i64, @intCast(idx)) + dir,
+        @as(i64, @intCast(len)),
+    ));
+    reorderTiled(m, win, next);
+}
+
 /// Slot swap: exchanges the first two tiled slots of the current workspace
 /// (primary head and the following slot). No-op with fewer than two tiled
 /// windows.

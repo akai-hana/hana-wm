@@ -82,7 +82,7 @@ pub fn setClaim(comptime id: u8, edge: Edge, px: u16) void {
 
 /// Releases surface `id`'s claim, returning usable area to full screen.
 pub fn releaseClaim(comptime id: u8) void {
-    claims[id] = .{ .edge = .top, .px = 0, .active = false };
+    setClaim(id, .top, 0);
 }
 
 /// The usable rectangular area: physical screen minus the pixels that active

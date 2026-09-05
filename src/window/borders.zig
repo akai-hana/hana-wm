@@ -1,8 +1,6 @@
 //! Shared border helpers.
 //! Resolves border color and width and applies them atomically across tiled and floating paths.
 
-const std = @import("std");
-
 const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
@@ -10,17 +8,11 @@ const focus = @import("focus");
 const pipeline = @import("pipeline");
 const build_options = @import("build_options");
 const wincache = @import("wincache");
-// The window sub-system registry: the screen-covering predicate is reached
-// through the compiled-in module's hook, never by naming a module here.
-const window_mods = @import("window_modules").modules;
+const window = @import("window");
 
-/// Registry lookup for the hook `field`; the canonical scan lives in
-/// `plugin.zig` (see `plugin.providerOf`). Null when no module binds it.
-fn providerOf(
-    comptime field: std.meta.FieldEnum(@import("plugin").WindowModule),
-) ?@import("plugin").WindowModule {
-    return @import("plugin").providerOf(window_mods[0..], field);
-}
+/// Registry lookup for the hook `field` (see `plugin.providerOf`), null when
+/// no module binds it; canonical scan lives in window.providerOf.
+const providerOf = window.providerOf;
 
 /// Returns the border color for `win`: 0 for screen-covering windows,
 /// focused or unfocused color otherwise.

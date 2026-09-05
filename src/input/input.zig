@@ -192,34 +192,12 @@ fn setupGrabs(conn: core.Connection, root: u32) void {
 // event receipt (entry to handleKeyPress) to the bound action's dispatch,
 // accumulated over a window so a periodic summary can be logged. Gated by
 // `build_options.profile_key` so release WMs compile it out entirely.
-const key_profile = struct {
-    const enabled = build_options.profile_key;
-    var count: u64 = 0;
-    var total_ns: i128 = 0;
-    var min_ns: i128 = std.math.maxInt(i128);
-    var max_ns: i128 = 0;
-    const window_size: u64 = 200;
-
-    fn note(ns: i128) void {
-        if (ns < min_ns) min_ns = ns;
-        if (ns > max_ns) max_ns = ns;
-        total_ns += ns;
-        count += 1;
-        if (count >= window_size) flush();
-    }
-
-    fn flush() void {
-        const avg: f64 = @as(f64, @floatFromInt(total_ns)) / @as(f64, @floatFromInt(count));
-        debug.info(
-            "[KPROF] receive->action last {} keys: avg={d:.0}ns min={d}ns max={d}ns",
-            .{ count, avg, min_ns, max_ns },
-        );
-        count = 0;
-        total_ns = 0;
-        min_ns = std.math.maxInt(i128);
-        max_ns = 0;
-    }
-};
+const key_profile = utils.WindowedProfiler(
+    build_options.profile_key,
+    "KPROF",
+    "[KPROF] receive->action last {} keys: avg={d:.0}ns min={d}ns max={d}ns",
+    debug.info,
+);
 
 // Event handlers
 
@@ -309,13 +287,13 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
             event.detail == mouse_button_scroll_down))
     {
         if (!tryConfigMouseBind(mods, event.detail, 0, event.time))
-            replayPointer(event.time);
+            releaseGrab(event.time);
         return;
     }
 
     const managed_window = window.findManagedWindow(cs.conn, clicked_window, tracking.isManaged);
     if (clicked_window == 0 or clicked_window == cs.root or managed_window == 0) {
-        replayPointer(event.time);
+        releaseGrab(event.time);
         return;
     }
 
@@ -340,7 +318,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     // binding matches): no drag, no action — but the grab's activation FROZE
     // both devices. Replay the pointer as a plain click and thaw the keyboard;
     // returning without an allow_events would leave both frozen indefinitely.
-    replayPointer(event.time);
+    releaseGrab(event.time);
 }
 
 /// Stops any active drag and updates the last event timestamp.
@@ -478,35 +456,25 @@ fn executeAction(action: *const types.Action) void {
     }
 }
 
+/// Runs a tiling op under the standard graft scaffolding shared by the
+/// cycle/step/toggle actions: suppress transient focus noise around the
+/// mutation, then re-settle tiling. `op` is an actions fn taking the arg type
+/// the action carries (step direction, or the floating toggle's window id).
+inline fn tilingOp(comptime op: anytype, arg: anytype) void {
+    focus.setSuppressReason(.tiling_operation);
+    op(arg);
+    focus.beginTilingOpSettle();
+}
+
 /// Dispatches tiling-related actions, each wrapped in a server grab so the
 /// compositor cannot render a partial retile frame.
 fn executeTilingAction(action: *const types.Action) void {
     switch (action.*) {
-        .toggle_floating_window => if (focus.getFocused()) |win| {
-            focus.setSuppressReason(.tiling_operation);
-            actions.toggleFloating(win);
-            focus.beginTilingOpSettle();
-        },
-        .toggle_layout => {
-            focus.setSuppressReason(.tiling_operation);
-            actions.cycleLayoutKind(1);
-            focus.beginTilingOpSettle();
-        },
-        .toggle_layout_reverse => {
-            focus.setSuppressReason(.tiling_operation);
-            actions.cycleLayoutKind(-1);
-            focus.beginTilingOpSettle();
-        },
-        .cycle_layout_variants => {
-            focus.setSuppressReason(.tiling_operation);
-            actions.stepVariantDir(1);
-            focus.beginTilingOpSettle();
-        },
-        .cycle_layout_variants_reverse => {
-            focus.setSuppressReason(.tiling_operation);
-            actions.stepVariantDir(-1);
-            focus.beginTilingOpSettle();
-        },
+        .toggle_floating_window => if (focus.getFocused()) |win| tilingOp(actions.toggleFloating, win),
+        .toggle_layout => tilingOp(actions.cycleLayoutKind, 1),
+        .toggle_layout_reverse => tilingOp(actions.cycleLayoutKind, -1),
+        .cycle_layout_variants => tilingOp(actions.stepVariantDir, 1),
+        .cycle_layout_variants_reverse => tilingOp(actions.stepVariantDir, -1),
         .increase_master => actions.adjustPrimaryWidthAction(0.025),
         .decrease_master => actions.adjustPrimaryWidthAction(-0.025),
         .increase_master_count => actions.adjustPrimaryCount(1),
@@ -640,19 +608,6 @@ fn tryConfigMouseBind(mods: u16, button: u8, win: u32, time: u32) bool {
         }
     }
     return false;
-}
-
-/// Replays a frozen pointer event (letting the click reach the app under the
-/// cursor) AND thaws the keyboard. The Super+Button passive grab runs
-/// XCB_GRAB_MODE_SYNC for BOTH devices, so its activation freezes keyboard
-/// delivery too; ALLOW_REPLAY_POINTER alone leaves the keyboard frozen in the
-/// server until the next grabbed Super gesture — a silent input freeze.
-/// Always pass event.time, never XCB_CURRENT_TIME.
-inline fn replayPointer(time: u32) void {
-    const conn = core.getState().conn;
-    _ = xcb.xcb_allow_events(conn, xcb.XCB_ALLOW_REPLAY_POINTER, time);
-    _ = xcb.xcb_allow_events(conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, time);
-    _ = xcb.xcb_flush(conn);
 }
 
 /// Shared tail for releasing grab sequences. The two callers differ only in
