@@ -41,6 +41,9 @@ const drawing = @import("drawing");
 const segmod = @import("segment");
 const barwin = @import("win");
 
+// Bar visibility subsystem (pure decisions only; bar.zig keeps the wire glue).
+const visibility = @import("visibility");
+
 // Window-addon registry (generated): the fullscreen-hide decision is routed
 // through the isWindowHidden/collectHiddenSet seams instead of naming the
 // minimize or fullscreen module directly (D12).
@@ -1268,13 +1271,6 @@ fn minimizedCollect(
         wm.collectHiddenSet.?(mm, set, allocator);
 }
 
-/// Whether a window module (the fullscreen addon) claims the screen on `ws`
-/// via the core model helper (coveringOccupantOnWs). Non-null means the bar
-/// must hide to share the screen.
-fn fullscreenScreenClaimer(ws: u8) ?u32 {
-    return model.coveringOccupantOnWs(pipeline.model(), @intCast(ws));
-}
-
 pub fn toggleBarSegmentAnchor() void {
     const s = gBar.state orelse return;
     const cs = core.getState();
@@ -1301,7 +1297,7 @@ pub fn toggleBarSegmentAnchor() void {
         return;
     };
     const no_fullscreen = if (build_options.has_fullscreen)
-        fullscreenScreenClaimer(current_ws) == null
+        visibility.fullscreenScreenClaimer(current_ws) == null
     else
         true;
     // The bar's edge changed; update its claim so the reconcile below
@@ -1397,7 +1393,7 @@ pub fn raiseBar() void {
 /// video. Pair with `dismissAfterPrompt` so the bar returns to its prior state.
 pub fn presentForPrompt() void {
     const s = gBar.state orelse return;
-    if (!s.is_visible) {
+    if (visibility.promptNeedsForcedShow(s.is_visible)) {
         // The bar is hidden; draw fresh content into it before mapping
         // (same ordering setBarState's show path uses) so the compositor
         // never shows a blank or stale bar for a frame.
@@ -1426,11 +1422,7 @@ pub fn dismissAfterPrompt() void {
     if (!gBar.prompt_forced_visible) return;
     gBar.prompt_forced_visible = false;
     const current_ws = tracking.getCurrentWorkspace() orelse 0;
-    const no_fullscreen = if (build_options.has_fullscreen)
-        fullscreenScreenClaimer(current_ws) == null
-    else
-        true;
-    const should_show = no_fullscreen and s.is_globally_visible;
+    const should_show = visibility.keepPromptOverride(current_ws, s.is_globally_visible);
     if (should_show) return; // conditions changed while the prompt was open; stay visible
     s.is_visible = false;
     _ = xcb.xcb_unmap_window(s.win.conn, s.win.win_id);
@@ -1456,26 +1448,22 @@ pub fn setBarState(action: types.Action) void {
 /// reconcile; the bar merely updates its occupancy state here.
 pub fn updateBarVisibilityForWorkspace(ws: u8) void {
     const s = gBar.state orelse return;
-    const bar_forced_hidden_by_fullscreen = if (build_options.has_fullscreen)
-        fullscreenScreenClaimer(ws) != null
-    else
-        false;
-    const should_be_visible = !bar_forced_hidden_by_fullscreen and s.is_globally_visible;
-    if (s.is_visible == should_be_visible) return;
-    s.is_visible = should_be_visible;
-    if (should_be_visible) {
+    const decision = visibility.desiredVisibility(ws, s.is_visible, s.is_globally_visible);
+    if (!decision.needs_change) return;
+    s.is_visible = decision.should_be_visible;
+    if (decision.should_be_visible) {
         gBar.skip_title_refetch = true;
         submitDrawBlockingFull();
     }
     const conn = core.getState().conn;
-    if (should_be_visible)
+    if (decision.should_be_visible)
         _ = xcb.xcb_map_window(conn, s.win.win_id)
     else
         _ = xcb.xcb_unmap_window(conn, s.win.win_id);
     // The bar's screen occupancy changed with its visibility; update the claim
     // so the caller's switch reconcile re-derives placement from the new area.
     syncScreenClaim();
-    debug.info("Bar {s} for workspace {}", .{ if (should_be_visible) "shown" else "hidden", ws });
+    debug.info("Bar {s} for workspace {}", .{ if (decision.should_be_visible) "shown" else "hidden", ws });
 }
 
 /// Immediately unmaps the bar and updates the screen claim, without a
@@ -1484,7 +1472,7 @@ pub fn updateBarVisibilityForWorkspace(ws: u8) void {
 /// is already hidden or not initialised.
 pub fn hideBarForFullscreen() void {
     const s = gBar.state orelse return;
-    if (!s.is_visible) return;
+    if (!visibility.barNeedsFullscreenHide(s.is_visible)) return;
     s.is_visible = false;
     const conn = core.getState().conn;
     _ = xcb.xcb_unmap_window(conn, s.win.win_id);
@@ -1501,21 +1489,17 @@ pub fn hideBarForFullscreen() void {
 pub fn applyFullscreenVisibility() void {
     const s = gBar.state orelse return;
     const current_ws = tracking.getCurrentWorkspace() orelse 0;
-    const bar_forced_hidden_by_fullscreen = if (build_options.has_fullscreen)
-        fullscreenScreenClaimer(current_ws) != null
-    else
-        false;
-    const should_be_visible = !bar_forced_hidden_by_fullscreen and s.is_globally_visible;
-    if (s.is_visible == should_be_visible) return;
-    s.is_visible = should_be_visible;
-    if (should_be_visible) {
+    const decision = visibility.desiredVisibility(current_ws, s.is_visible, s.is_globally_visible);
+    if (!decision.needs_change) return;
+    s.is_visible = decision.should_be_visible;
+    if (decision.should_be_visible) {
         gBar.skip_title_refetch = true;
         submitDrawBlockingFull();
     }
 
     const conn = core.getState().conn;
     utils.grabServer(conn);
-    if (should_be_visible)
+    if (decision.should_be_visible)
         _ = xcb.xcb_map_window(conn, s.win.win_id)
     else
         _ = xcb.xcb_unmap_window(conn, s.win.win_id);
@@ -1526,7 +1510,7 @@ pub fn applyFullscreenVisibility() void {
     ungrabAndFlush();
     debug.info(
         "Bar {s} due to fullscreen-occupancy fact change",
-        .{if (should_be_visible) "shown" else "hidden"},
+        .{if (decision.should_be_visible) "shown" else "hidden"},
     );
 }
 

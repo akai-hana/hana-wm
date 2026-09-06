@@ -33,13 +33,19 @@ const model = @import("model");
 /// absent. Gated on has_tiling so tree variants without tiling compile (the
 /// scenario matrix removes src/tiling entirely).
 const tiling_mods = @import("plugin").tiling_mods;
-const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
+/// Shared config-layout-name resolver (registry index or neutral default);
+/// see pipeline.defaultIndexForLayoutName.
+const pipeline_mod = @import("pipeline");
 // Per-feature serialization hooks live on the build-generated `window_modules`
 // registry; a tree without a feature has no serializeWindow provider, so the
 // loop below no-ops for it.
 const window_mods = @import("window_modules").modules;
 
 const MAX_WS = constants.max_workspaces;
+
+/// Wire-format revision of the restore file. Failed or older revisions are
+/// rejected in loadToGlobal rather than migrated.
+const persist_version: u32 = 4;
 
 /// Per-window record: identity + anchor, matched by XID during adoption.
 /// `presence` restores visibility semantics across the re-exec (parked /
@@ -68,7 +74,7 @@ pub const WsRecord = struct {
 
 /// Top-level serialized state file.
 pub const StateFile = struct {
-    version: u32 = 4,
+    version: u32 = persist_version,
     current: u8,
     focused: ?u32,
     all_view_active: bool,
@@ -148,7 +154,7 @@ pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u
     }
 
     const state = StateFile{
-        .version = 4,
+        .version = persist_version,
         .current = @intCast(m.current),
         .focused = m.focused,
         .all_view_active = m.all_view_active,
@@ -217,7 +223,7 @@ pub fn loadToGlobal(allocator: std.mem.Allocator, path: []const u8) !bool {
         debug.warn("persist: restore file unparseable; booting fresh", .{});
         return false;
     };
-    if (parsed.value.version != 4) {
+    if (parsed.value.version != persist_version) {
         const ver = parsed.value.version;
         parsed.deinit();
         debug.warn("persist: unsupported restore version {}; booting fresh", .{ver});
@@ -247,7 +253,7 @@ pub fn loaded() ?*const StateFile {
 fn resumableDefaultKind() u8 {
     if (!build_options.has_tiling) return 0;
     const layout_name = @import("core").getState().config.tiling.layout;
-    return @intCast(tiling.layoutByName(config_mod.canonicalLayoutName(layout_name)) orelse 0);
+    return pipeline_mod.defaultIndexForLayoutName(config_mod.canonicalLayoutName(layout_name));
 }
 
 /// Restores model-level fields into the model: current/focused/all_view,

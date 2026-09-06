@@ -139,6 +139,23 @@ const dispatch_table = blk: {
     break :blk table;
 };
 
+/// True for the RandR extension-event window (base and base+1): screen/CRTC/
+/// output change notifications. Bar render pacing must track monitor
+/// re-configuration, so any of them triggers re-detection.
+///
+/// The range test uses the RAW type byte, BEFORE the 0x7F mask (both callers
+/// strip send_event afterwards): the synthetic-event bit is only meaningful
+/// for core events, and an extension base can legitimately be >= 0x80 (the
+/// server allocates bases at/after 0x80 precisely to leave bit 7 free for
+/// SendEvent on core codes). Masking first would alias such a base onto a low
+/// core code (e.g. 0x85 -> 0x85 & 0x7f == 5) and break the test, silently
+/// disabling refresh re-detection, misrouting the event in dispatch, and
+/// reclassifying a RandR event as a coalesceable motion in isMotion.
+fn isRandrEvent(t: u8) bool {
+    const r = refresh.randrFirstEvent();
+    return (r != 0 and t >= r and t <= r + 1);
+}
+
 fn dispatch(event_type: u8, event: *anyopaque) void {
     // Type 0 is an X error pseudo-event produced for a failed *unchecked*
     // request. Nothing else in this codebase subscribes to type-0, so without
@@ -152,20 +169,10 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
         return;
     }
 
-    // RandR extension events (base and base+1): screen/CRTC/output change
-    // notifications. Bar render pacing must track monitor
-    // re-configuration, so any of them triggers re-detection. Extension events
-    // sit above the fixed dispatch table and would otherwise be dropped by the
-    // bounds guard below.
-    //
-    // The range test uses the RAW type byte, BEFORE the 0x7F mask below: the
-    // synthetic-event bit is only meaningful for core events, and an extension
-    // base can legitimately be >= 0x80 (the server allocates bases at/after
-    // 0x80 precisely to leave bit 7 free for SendEvent on core codes). Masking
-    // first would alias such a base onto a low core code and break the test,
-    // silently disabling refresh re-detection (and misrouting the event).
-    const randr_first = refresh.randrFirstEvent();
-    if (randr_first != 0 and event_type >= randr_first and event_type <= randr_first + 1) {
+    // RandR extension events (base and base+1) trigger refresh re-detection
+    // here; they sit above the fixed dispatch table and would otherwise be
+    // dropped by the bounds guard below.
+    if (isRandrEvent(event_type)) {
         refresh.handleRandrNotifyEvent(core.getState().conn);
         return;
     }
@@ -349,12 +356,9 @@ fn takeEvent(pending: *?*xcb.xcb_generic_event_t, conn: core.Connection) ?*xcb.x
 
 fn isMotion(e: *xcb.xcb_generic_event_t) bool {
     const t = @as(*u8, @ptrCast(e)).*;
-    // Same masking hazard as dispatch: a RandR extension base >= 0x80
-    // (e.g. 0x85 -> 0x85 & 0x7f == 5) would alias onto MOTION_NOTIFY and some
-    // RandR event would be reclassified as a coalesceable motion. Exclude the
-    // RandR window (raw compare) before stripping the send_event bit.
-    const r = refresh.randrFirstEvent();
-    if (r != 0 and t >= r and t <= r + 1) return false;
+    // Exclude the RandR window before stripping the send_event bit; see
+    // isRandrEvent for the raw-compare-before-mask rationale.
+    if (isRandrEvent(t)) return false;
     return (t & 0x7f) == xcb.XCB_MOTION_NOTIFY;
 }
 

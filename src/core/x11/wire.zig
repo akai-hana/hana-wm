@@ -6,11 +6,11 @@
 
 const std = @import("std");
 
-// Imported from the leaf x11 hub (pure @cImport) rather than from `core`,
+// Imported from the leaf xcb hub (pure @cImport) rather than from `core`,
 // so this layer stays a DAG root: core imports utils which imports wire, and
 // wire must not reach back into core (that was the core -> utils -> wire ->
 // core cycle). The type aliases mirror Connection / Screen.
-const xcb = @import("x11").xcb;
+const xcb = @import("xcb").xcb;
 const Connection = *xcb.xcb_connection_t;
 const Screen = *xcb.xcb_screen_t;
 const constants = @import("constants");
