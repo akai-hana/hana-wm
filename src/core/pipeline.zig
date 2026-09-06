@@ -13,7 +13,7 @@ const model_mod = @import("model");
 const sync = @import("sync");
 const core = @import("core");
 const utils = @import("utils");
-const borders = @import("borders");
+const wincache = @import("wincache");
 const focus = @import("focus");
 const xcb_sink = @import("sink");
 const screen = @import("screen");
@@ -55,14 +55,22 @@ pub inline fn getCurrentLayout() u8 {
     if (initialized) return model().ws[model().current].params.kind;
     const cs = core.getState();
     if (!build_options.has_tiling) return 0;
-    return @intCast(tiling.layoutByName(cs.config.tiling.layout) orelse blk: {
+    return defaultIndexForLayoutName(cs.config.tiling.layout);
+}
+
+/// Resolves a config layout name to a registry index (see
+/// model.LayoutParams.kind), collapsing to the neutral default (index 0) when
+/// the name does not resolve. Loud, never silent: an unresolvable/removed
+/// layout name is a config bug. Shared by getCurrentLayout (pre-init fallback)
+/// and persist's restored-layout degradation, so both site types resolve
+/// config names identically.
+pub fn defaultIndexForLayoutName(name: []const u8) u8 {
+    if (!build_options.has_tiling) return 0;
+    return @intCast(tiling.layoutByName(name) orelse blk: {
         debug.warn(
             "Config: layout name '{s}' did not resolve to a registered " ++
                 "layout; using default layout '{s}'",
-            .{
-                cs.config.tiling.layout,
-                tiling.moduleName(tiling.defaultKind()),
-            },
+            .{ name, tiling.moduleName(tiling.defaultKind()) },
         );
         break :blk tiling.defaultKind();
     });
@@ -81,7 +89,7 @@ var g_ctx: sync.Ctx = undefined;
 
 /// Builds the per-retile Ctx from live state: workarea via bar's helper,
 /// margins/min_dim and variant booleans from config, border width from
-/// borders.width(), colors from config.tiling. Only valid after init().
+/// wincache.width(), colors from config.tiling. Only valid after init().
 fn ctx() *sync.Ctx {
     const cs = core.getState();
     const screen_h = cs.screen.height_in_pixels;
@@ -95,7 +103,7 @@ fn ctx() *sync.Ctx {
             .height = screen_h,
         },
         .workarea = screen.workArea(cs.screen),
-        .cfg_bw = borders.width(),
+        .cfg_bw = wincache.width(),
         .env = .{
             .margins = .{
                 .gap = utils.scaling.scaleBorderWidth(cs.config.tiling.gap_width, screen_h),
@@ -116,7 +124,7 @@ fn ctx() *sync.Ctx {
     return &g_ctx;
 }
 
-/// Ported from borders.color minus its fullscreen check: fullscreen windows
+/// Ported from wincache.color minus its fullscreen check: fullscreen windows
 /// get bw=0/pixel=0 through the fullscreen branch policy in sync instead.
 /// Reads MODEL focus; focus.zig mirrors every transition into m.focused,
 /// so this is the same single source of truth.

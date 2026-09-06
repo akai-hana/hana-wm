@@ -35,7 +35,7 @@ wire_allowed() {
         # geometry is honored for floating windows and BW recorded for tiled
         # -- protocol duty that answers the CLIENT, not layout.
         # restoreFloatGeom / moveFloatToDefaultPos / applyBorder ride along.
-        src/window/window.zig|src/window/borders.zig) ;;
+        src/window/window.zig|src/window/wincache.zig) ;;
 
         # Click-raise and focus-flag restack requests tied to the X11 focus
         # protocol (R2 keeps protocol in window.*). focus.zig rides the

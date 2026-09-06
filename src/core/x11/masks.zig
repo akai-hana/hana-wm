@@ -3,7 +3,7 @@
 //! Separated from constants.zig to keep the model layer (which imports
 //! constants) free of transitive XCB dependencies.
 
-const xcb = @import("x11").xcb;
+const xcb = @import("xcb").xcb;
 
 // Modifier masks
 // Must be u16 as per XCB API
