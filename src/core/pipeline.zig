@@ -4,7 +4,6 @@
 //!
 //! Call sites (all marked `// PIPELINE:`):
 //!   src/main.zig    startup calls init(alloc)
-//!   input.zig       finishTilingOp calls tilingOpFinished()
 //!   floating.zig    updateDrag calls dragTick()
 //!   window.zig      unmanage/EWMH call actions.unmanage / fullscreenToggleWindow
 
@@ -133,9 +132,6 @@ fn colorOf(win: model_mod.WindowId, m: *const model_mod.Model) u32 {
     return if (m.focused == win) cfg.border_focused else cfg.border_unfocused;
 }
 
-pub inline fn tilingOpFinished() void {
-    reconcileUnderGrabNow(.{});
-}
 var drag_tick_sum_ns: u64 = 0;
 var drag_tick_count: u64 = 0;
 
@@ -167,12 +163,7 @@ fn preReconcileDuties() void {
     if (p.kind >= tiling_mods.len) return;
     const md = tiling_mods[p.kind];
     if (md.preReconcile == null) return;
-    var n: usize = 0;
-    for (m.ws[m.current].tiled_order.constSlice()) |w| {
-        const e = m.store.get(w) orelse continue;
-        if (e.mask & @import("model").bit(m.current) == 0) continue;
-        n += 1;
-    }
+    const n = model_mod.tiledCountOnWs(m, m.current);
     const wa = screen.workArea(core.getState().screen);
     md.preReconcile.?(@ptrCast(p), n, wa.width);
 }

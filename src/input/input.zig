@@ -44,28 +44,14 @@ const mouse_button_middle: u8 = 2;
 const mouse_button_scroll_up: u8 = 4;
 const mouse_button_scroll_down: u8 = 5;
 
-const mouse_buttons = [_]u8{
-    constants.mouse_button_left, mouse_button_middle,      constants.mouse_button_right,
-    mouse_button_scroll_up,      mouse_button_scroll_down,
-};
-
-// XKB state
+const mouse_buttons = [_]u8{ constants.mouse_button_left, mouse_button_middle, constants.mouse_button_right, mouse_button_scroll_up, mouse_button_scroll_down };
 
 var xkb_state: ?xkbcommon.XkbState = null;
 
-// Held binding-key ledger. A passive grab returns a bound key's KeyRelease to
-// the grabbing window only if the mask selects it; handleKeyRelease removes
-// the keycode stamped on the originating press, letting a later press of the
-// same key be recognized as a genuine new gesture rather than an autorepeat.
-//
-// The ledger is keyed on the raw KEYCODE only, not mods|keycode. Keying on the
-// full (mods,keycode) combo poisons an entry when a user lifts the modifier
-// before the bound key: the release's modifier state then differs from the
-// press's, so clearKeyHeld never matches and keyHeld suppresses every later
-// press of that binding (e.g. the kill/close_window key silently dies after
-// opening and closing a few windows). A keycode is stable across a gesture
-// regardless of modifier release order, so it both suppresses autorepeat and
-// always clears on release.
+// Held binding-key ledger. A passive grab returns a bound key's KeyRelease
+// to the grabbing window only if the mask selects it; keycodes are stable
+// across a gesture regardless of modifier release order, so keying on the
+// raw KEYCODE both suppresses autorepeat and always clears on release.
 const held_key_capacity = 32;
 var held_keys: [held_key_capacity]u8 = undefined;
 var held_key_count: usize = 0;
@@ -90,12 +76,6 @@ fn clearKeyHeld(keycode: u8) void {
             return;
         }
     }
-}
-
-/// Drops the ledger; used when the keymap is rebuilt mid-hold (a keycode kept
-/// in memory may no longer correspond to the same key, so tracking is stale).
-fn clearHeldKeys() void {
-    held_key_count = 0;
 }
 
 /// Initialises the XKB context, keymap, and key state
@@ -131,27 +111,13 @@ pub fn handleMappingNotify() void {
     const cs = core.getState();
     const state = if (xkb_state) |*s| s else return;
     state.rebuild(cs.conn);
-    clearHeldKeys(); // keycodes may no longer map to the same keys post-rebuild
+    held_key_count = 0; // keycodes may no longer map to the same keys post-rebuild
 
     // The dispatch map is keyed on keysym (unaffected by the rebuild), but
     // `grabKeybindings` grabs the keycodes stored on each binding. Refresh
     // those keycodes from the new table, then let grabKeybindings() atomically
     // ungrab all and re-grab the updated set, avoiding duplicate/leaked grabs.
-    for (cs.config.keybindings.items) |*kb| {
-        kb.keycode = state.keysymToKeycode(kb.keysym);
-        if (kb.keycode == null) {
-            // The keysym is absent from the rebuilt keymap (keyboard layout
-            // change, e.g. a dead key or a non-Latin group). The binding goes
-            // dead with no feedback otherwise, which looks like a config bug.
-            var name_buf: [64]u8 = undefined;
-            const name = xkbcommon.keysymGetName(kb.keysym, &name_buf);
-            debug.warn(
-                "Keybinding mods=0x{x:0>4} keysym={s} (0x{x}) has no keycode in the NEW " ++
-                    "keymap and was disabled; bindings are re-resolved on MappingNotify",
-                .{ kb.modifiers, name, kb.keysym },
-            );
-        }
-    }
+    types.resolveKeycodes(cs.config.keybindings.items, state);
     events.grabKeybindings();
 }
 
@@ -241,10 +207,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
         });
         if (key_profile.enabled) key_profile.note(utils.monotonicNs() - key_t0);
         executeAction(action);
-    } else if (mods == 0 and
-        keysym >= masks.modifier_keysym_lo and
-        keysym <= masks.modifier_keysym_hi)
-    {
+    } else if (mods == 0 and keysym >= masks.modifier_keysym_lo and keysym <= masks.modifier_keysym_hi) {
         // Bare modifier press (Shift/Ctrl/Alt/Super/Hyper L/R): can never
         // match a binding; staying silent keeps logs free of keystroke noise.
     } else {
@@ -282,20 +245,13 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     // Scroll-wheel binds (buttons 4/5) are viewport actions that don't target
     // a specific window, so they're checked before the managed-window guard
     // that would otherwise discard events fired over the desktop/bar.
-    if (super_held and
-        (event.detail == mouse_button_scroll_up or
-            event.detail == mouse_button_scroll_down))
-    {
-        if (!tryConfigMouseBind(mods, event.detail, 0, event.time))
-            releaseGrab(event.time);
+    if (super_held and (event.detail == mouse_button_scroll_up or event.detail == mouse_button_scroll_down)) {
+        if (!tryConfigMouseBind(mods, event.detail, 0, event.time)) releaseGrab(event.time);
         return;
     }
 
     const managed_window = window.findManagedWindow(cs.conn, clicked_window, tracking.isManaged);
-    if (clicked_window == 0 or clicked_window == cs.root or managed_window == 0) {
-        releaseGrab(event.time);
-        return;
-    }
+    if (clicked_window == 0 or clicked_window == cs.root or managed_window == 0) return releaseGrab(event.time);
 
     if (!super_held) {
         focus.grabFocus(managed_window, .mouse_click);
@@ -305,11 +261,8 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
 
     if (tryConfigMouseBind(mods, event.detail, managed_window, event.time)) return;
 
-    if (event.detail == constants.mouse_button_left or
-        event.detail == constants.mouse_button_right)
-    {
-        if (build_options.has_floating)
-            actions.startDrag(managed_window, event.detail, event.root_x, event.root_y);
+    if (event.detail == constants.mouse_button_left or event.detail == constants.mouse_button_right) {
+        if (build_options.has_floating) actions.startDrag(managed_window, event.detail, event.root_x, event.root_y);
         keepDragGrab(event.time);
         return;
     }
@@ -371,25 +324,15 @@ fn closeWindow(win: u32) void {
     }
 
     const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch return forceDestroy(conn, win);
-    const delete_atom =
-        utils.getAtomCached("WM_DELETE_WINDOW") catch return forceDestroy(conn, win);
+    const delete_atom = utils.getAtomCached("WM_DELETE_WINDOW") catch return forceDestroy(conn, win);
 
     sendWmDelete(conn, win, protocols_atom, delete_atom);
 }
 
 // Action dispatch
 
-/// Shared trap for an action tag that reached a dispatcher class that does
-/// not handle it. Config validation rejects unknown mappings long before
-/// dispatch, so this documents an internal dispatch-table gap rather than
-/// bad user input; the tagged message makes the culprit class obvious in a
-/// crash log (consolidated from per-switch `unreachable`s).
-noinline fn unhandledAction(class: []const u8) noreturn {
-    std.debug.panic("{s} action dispatcher received an unhandled action", .{class});
-}
-
-/// Top-level action dispatcher. Routes each action tag to the appropriate
-/// domain helper. Errors are handled internally.
+/// Top-level action dispatcher. Routes each action tag to its handler inline
+/// (single switch, no per-class delegates). Errors are handled internally.
 fn executeAction(action: *const types.Action) void {
     switch (action.*) {
         // Core
@@ -407,52 +350,50 @@ fn executeAction(action: *const types.Action) void {
             if (pipeline.model().focused) |win| actions.fullscreenToggleWindow(win);
         },
 
-        // Tiling, delegated to executeTilingAction
-        .toggle_floating_window,
-        .toggle_layout,
-        .toggle_layout_reverse,
-        .cycle_layout_variants,
-        .cycle_layout_variants_reverse,
-        .increase_master,
-        .decrease_master,
-        .increase_master_count,
-        .decrease_master_count,
-        .grow_stack_top,
-        .grow_stack_bottom,
-        .swap_master,
-        .swap_master_focus_swap,
-        .move_window_next,
-        .move_window_prev,
-        .scroll_view_left,
-        .scroll_view_right,
-        => executeTilingAction(action),
+        .toggle_floating_window => if (focus.getFocused()) |win| tilingOp(actions.toggleFloating, win),
+        .toggle_layout => tilingOp(actions.cycleLayoutKind, 1),
+        .toggle_layout_reverse => tilingOp(actions.cycleLayoutKind, -1),
+        .cycle_layout_variants => tilingOp(actions.stepVariantDir, 1),
+        .cycle_layout_variants_reverse => tilingOp(actions.stepVariantDir, -1),
+        .increase_master => actions.adjustPrimaryWidthAction(0.025),
+        .decrease_master => actions.adjustPrimaryWidthAction(-0.025),
+        .increase_master_count => actions.adjustPrimaryCount(1),
+        .decrease_master_count => actions.adjustPrimaryCount(-1),
+        .grow_stack_top => actions.adjustSecondaryBalance(0.5),
+        .grow_stack_bottom => actions.adjustSecondaryBalance(-0.5),
+        .swap_master, .swap_master_focus_swap => actions.swapPrimaryAction(action.* == .swap_master_focus_swap),
+        .move_window_next => actions.moveFocused(1),
+        .move_window_prev => actions.moveFocused(-1),
+        .scroll_view_left => actions.viewportStep(-1),
+        .scroll_view_right => actions.viewportStep(1),
 
-        // Bar, delegated to executeBarAction
-        .toggle_bar_visibility,
-        .toggle_bar_position,
-        .toggle_prompt,
-        => executeBarAction(action),
+        // Workspaces. workspaces.zig self-gates to a single implicit
+        // workspace when core.getState().config.workspaces.enabled is false,
+        // so these calls are always valid regardless of that setting.
+        .switch_workspace => |ws| actions.switchTo(ws),
+        .move_to_workspace => |ws| if (focus.getFocused()) |wid| actions.moveWindowTo(wid, ws),
+        .toggle_tag => |ws| if (focus.getFocused()) |wid| actions.tagToggle(wid, ws, true),
+        .all_workspaces => actions.allViewToggle(),
+        .move_to_all_workspaces, .toggle_tag_all => if (focus.getFocused()) |wid| actions.pinToggle(wid),
 
-        // Minimize, delegated to executeMinimizeAction
-        .minimize_window,
-        .unminimize_lifo,
-        .unminimize_fifo,
-        .unminimize_all,
-        => executeMinimizeAction(action),
+        // Bar: visibility toggle, position toggle, and chrome-overlay toggle.
+        .toggle_bar_visibility => if (build_options.has_bar) surfaces.setBarState(.toggle_bar_visibility),
+        .toggle_bar_position => if (build_options.has_bar) surfaces.toggleBarSegmentAnchor(),
+        .toggle_prompt => if (build_options.has_bar) surfaces.chromeToggleOverlay(),
 
-        // Workspaces, delegated to executeWorkspaceAction
-        .switch_workspace,
-        .move_to_workspace,
-        .toggle_tag,
-        .all_workspaces,
-        .move_to_all_workspaces,
-        .toggle_tag_all,
-        => executeWorkspaceAction(action),
+        // Minimize: minimize, unminimize (LIFO/FIFO), and restore all.
+        .minimize_window => actions.minimize(focus.getFocused()),
+        .unminimize_lifo => actions.restoreOrdered(.lifo),
+        .unminimize_fifo => actions.restoreOrdered(.fifo),
+        .unminimize_all => actions.restoreAll(),
 
-        // Window focus, delegated to executeWindowAction
-        .focus_next_window,
-        .focus_prev_window,
-        => executeWindowAction(action),
+        // Window focus cycling (dwm-style Mod+k / Mod+j). Snaps the viewport
+        // to the newly focused window when it is off-screen. The server grab
+        // prevents a partial retile frame.
+        .focus_next_window, .focus_prev_window => {
+            if (action.* == .focus_next_window) focus.focusNext() else focus.focusPrev();
+            actions.snapViewportToFocused();
+        },
     }
 }
 
@@ -466,97 +407,11 @@ inline fn tilingOp(comptime op: anytype, arg: anytype) void {
     focus.beginTilingOpSettle();
 }
 
-/// Dispatches tiling-related actions, each wrapped in a server grab so the
-/// compositor cannot render a partial retile frame.
-fn executeTilingAction(action: *const types.Action) void {
-    switch (action.*) {
-        .toggle_floating_window => if (focus.getFocused()) |win| tilingOp(actions.toggleFloating, win),
-        .toggle_layout => tilingOp(actions.cycleLayoutKind, 1),
-        .toggle_layout_reverse => tilingOp(actions.cycleLayoutKind, -1),
-        .cycle_layout_variants => tilingOp(actions.stepVariantDir, 1),
-        .cycle_layout_variants_reverse => tilingOp(actions.stepVariantDir, -1),
-        .increase_master => actions.adjustPrimaryWidthAction(0.025),
-        .decrease_master => actions.adjustPrimaryWidthAction(-0.025),
-        .increase_master_count => actions.adjustPrimaryCount(1),
-        .decrease_master_count => actions.adjustPrimaryCount(-1),
-        .grow_stack_top => actions.adjustSecondaryBalance(0.5),
-        .grow_stack_bottom => actions.adjustSecondaryBalance(-0.5),
-
-        .swap_master, .swap_master_focus_swap => actions.swapPrimaryAction(action.* == .swap_master_focus_swap),
-
-        .move_window_next => actions.moveFocused(1),
-        .move_window_prev => actions.moveFocused(-1),
-
-        .scroll_view_left => actions.viewportStep(-1),
-        .scroll_view_right => actions.viewportStep(1),
-
-        else => unhandledAction("tiling"),
-    }
-}
-
-/// Dispatches workspace-related actions. workspaces.zig self-gates to a
-/// single implicit workspace when core.getState().config.workspaces.enabled
-/// is false, so these calls are always valid regardless of that setting.
-fn executeWorkspaceAction(action: *const types.Action) void {
-    switch (action.*) {
-        .switch_workspace => |ws| actions.switchTo(ws),
-        .move_to_workspace => |ws| if (focus.getFocused()) |wid| actions.moveWindowTo(wid, ws),
-        .toggle_tag => |ws| if (focus.getFocused()) |wid| actions.tagToggle(wid, ws, true),
-        .all_workspaces => actions.allViewToggle(),
-        .move_to_all_workspaces, .toggle_tag_all => if (focus.getFocused()) |wid| actions.pinToggle(wid),
-        else => unhandledAction("workspace"),
-    }
-}
-
-/// Dispatches bar-related actions: visibility toggle, position toggle,
-/// and chrome-overlay toggle.
-fn executeBarAction(action: *const types.Action) void {
-    switch (action.*) {
-        .toggle_bar_visibility => if (build_options.has_bar) surfaces.setBarState(.toggle_bar_visibility),
-        .toggle_bar_position => if (build_options.has_bar) surfaces.toggleBarSegmentAnchor(),
-        .toggle_prompt => if (build_options.has_bar) surfaces.chromeToggleOverlay(),
-        else => unhandledAction("bar"),
-    }
-}
-
-/// Dispatches minimize-related actions: minimize, unminimize (LIFO/FIFO),
-/// and restore all.
-fn executeMinimizeAction(action: *const types.Action) void {
-    switch (action.*) {
-        .minimize_window => actions.minimize(focus.getFocused()),
-        .unminimize_lifo => actions.restoreOrdered(.lifo),
-        .unminimize_fifo => actions.restoreOrdered(.fifo),
-        .unminimize_all => actions.restoreAll(),
-        else => unhandledAction("minimize"),
-    }
-}
-
-/// Dispatches window focus cycling (dwm-style Mod+k / Mod+j). Snaps the
-/// viewport to the newly focused window when it is off-screen. The server grab
-/// prevents a partial retile frame.
-fn executeWindowAction(action: *const types.Action) void {
-    switch (action.*) {
-        .focus_next_window => {
-            focus.focusNext();
-            actions.snapViewportToFocused();
-        },
-        .focus_prev_window => {
-            focus.focusPrev();
-            actions.snapViewportToFocused();
-        },
-        else => unhandledAction("window"),
-    }
-}
-
 /// Like executeAction but acts on the clicked window rather than the
 /// keyboard-focused one, so e.g. toggle_floating_window affects what was clicked.
 fn executeMouseAction(action: *const types.Action, clicked_win: u32) void {
     switch (action.*) {
-        .toggle_floating_window => {
-            focus.setSuppressReason(.tiling_operation);
-            actions.toggleFloating(clicked_win);
-            focus.beginTilingOpSettle();
-        },
+        .toggle_floating_window => tilingOp(actions.toggleFloating, clicked_win),
         else => executeAction(action),
     }
 }
@@ -585,10 +440,7 @@ fn dumpState() void {
     if (build_options.has_tiling and @import("core").tilingEnabled()) {
         debug.info("Tiling enabled: true", .{});
         debug.info("Tiling layout:  {s}", .{tiling.moduleName(pipeline.getCurrentLayout())});
-        debug.info(
-            "Tiled windows:  {}",
-            .{@import("model").tiledCountOnWs(pipeline.model(), pipeline.model().current)},
-        );
+        debug.info("Tiled windows:  {}", .{@import("model").tiledCountOnWs(pipeline.model(), pipeline.model().current)});
     }
 
     debug.info("================================", .{});
@@ -600,13 +452,12 @@ fn dumpState() void {
 /// Returns true and releases the grab if a binding is found, false otherwise.
 fn tryConfigMouseBind(mods: u16, button: u8, win: u32, time: u32) bool {
     // Linear scan is intentional: mouse bindings are few (~5-10), hash overhead not worth it.
-    for (core.getState().config.mouse_bindings.items) |*mb| {
+    for (core.getState().config.mouse_bindings.items) |*mb|
         if (mb.modifiers == mods and mb.button == button) {
             executeMouseAction(&mb.action, win);
             releaseGrab(time);
             return true;
-        }
-    }
+        };
     return false;
 }
 

@@ -48,25 +48,12 @@ pub const XcbSink = struct {
     /// Configure X|Y|W|H, merging a stack mode into the SAME request when
     /// one is requested (never a separate round of requests for geometry+raise).
     fn geomShim(ptr: *anyopaque, win: u32, rect: utils.Rect, stack: ?sync.Stack) void {
-        const self = XcbSink.fromPtr(ptr);
-        if (stack) |s| {
-            _ = xcb.xcb_configure_window(
-                self.conn,
-                win,
-                xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
-                    xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
-                    xcb.XCB_CONFIG_WINDOW_STACK_MODE,
-                &[_]u32{
-                    utils.toXcbCoord(rect.x),
-                    utils.toXcbCoord(rect.y),
-                    rect.width,
-                    rect.height,
-                    stackMode(s),
-                },
-            );
-        } else {
-            utils.configureWindow(self.conn, win, rect);
-        }
+        utils.configureWindowStackMode(
+            XcbSink.fromPtr(ptr).conn,
+            win,
+            rect,
+            if (stack) |s| stackMode(s) else null,
+        );
     }
 
     fn borderWidthShim(ptr: *anyopaque, win: u32, bw: u16) void {
@@ -96,12 +83,8 @@ pub const XcbSink = struct {
     }
 
     fn stackOnlyShim(ptr: *anyopaque, win: u32, s: sync.Stack) void {
-        _ = xcb.xcb_configure_window(
-            XcbSink.fromPtr(ptr).conn,
-            win,
-            xcb.XCB_CONFIG_WINDOW_STACK_MODE,
-            &[_]u32{stackMode(s)},
-        );
+        _ = s;
+        utils.raiseWindow(XcbSink.fromPtr(ptr).conn, win);
     }
 
     /// Set/clear an EWMH atom property (used for _NET_WM_STATE_FULLSCREEN).

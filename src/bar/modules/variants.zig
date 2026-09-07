@@ -44,4 +44,4 @@ fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x:
     return end_x;
 }
 
-pub const module = segdraw.module("variants", draw, actions.stepVariantDir, true);
+pub const module = segdraw.module("variants", draw, actions.stepVariantDir, true, .{});

@@ -15,8 +15,8 @@ const std = @import("std");
 const constants = @import("constants");
 const masks = @import("masks");
 
-const proc = @import("proc.zig");
-const bounded = @import("bounded.zig");
+const proc = @import("proc");
+const bounded = @import("bounded");
 const x11wire = @import("wire");
 
 // --- process lifecycle (re-exports) --------------------------------------
@@ -53,6 +53,11 @@ pub inline fn monotonicNs() u64 {
 /// Monotonic milliseconds (wall-independent; for deltas and deadlines).
 pub inline fn monotonicMs() i64 {
     return @intCast(monotonicNs() / std.time.ns_per_ms);
+}
+
+/// Wall-clock milliseconds (for timestamps/expiry, not deltas).
+pub inline fn realtimeMs() i64 {
+    return @intCast(realtimeNs() / std.time.ns_per_ms);
 }
 
 pub inline fn realtimeNs() u64 {
@@ -109,6 +114,7 @@ pub const fetchPropertyToBuffer = x11wire.fetchPropertyToBuffer;
 pub const collectPropertyReply = x11wire.collectPropertyReply;
 pub const collectGeometryReply = x11wire.collectGeometryReply;
 pub const configureWindow = x11wire.configureWindow;
+pub const configureWindowStackMode = x11wire.configureWindowStackMode;
 pub const raiseWindow = x11wire.raiseWindow;
 pub const setBorderPixel = x11wire.setBorderPixel;
 pub const grabServer = x11wire.grabServer;
@@ -129,11 +135,8 @@ pub const Rect = struct {
     border_width: u16 = 0,
 
     pub inline fn eql(self: Rect, other: Rect) bool {
-        return self.x == other.x and
-            self.y == other.y and
-            self.width == other.width and
-            self.height == other.height and
-            self.border_width == other.border_width;
+        return self.x == other.x and self.y == other.y and self.width == other.width and
+            self.height == other.height and self.border_width == other.border_width;
     }
 };
 
@@ -187,5 +190,9 @@ pub const scaling = struct {
     pub inline fn roundToU16(v: f32, min: f32) u16 {
         const clamped = std.math.clamp(@round(v), min, @as(f32, std.math.maxInt(u16)));
         return @intFromFloat(clamped);
+    }
+    /// Clamps a u32 into the u16 range.
+    pub inline fn clampToU16(v: u32) u16 {
+        return @intCast(std.math.clamp(v, 0, std.math.maxInt(u16)));
     }
 };

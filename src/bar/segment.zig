@@ -237,30 +237,6 @@ fn gatherAndSortWindowInfos(
     out_window_info_buf: *[max_visible_windows]WindowInfo,
     out_data: FetchedWindows,
 ) !?[]WindowInfo {
-    const info_count = try gatherWindowInfos(
-        ctx,
-        snapshot,
-        allocator,
-        windows,
-        win_count,
-        out_window_info_buf,
-        out_data,
-    );
-    if (info_count == 0) return null;
-    const window_infos = out_window_info_buf[0..info_count];
-    std.mem.sort(WindowInfo, window_infos, {}, compareWindows);
-    return window_infos;
-}
-
-fn gatherWindowInfos(
-    ctx: TitleRenderContext,
-    snapshot: TitleSnapshot,
-    allocator: std.mem.Allocator,
-    windows: []const u32,
-    win_count: usize,
-    out_infos: *[max_visible_windows]WindowInfo,
-    out_data: FetchedWindows,
-) !usize {
     fetchTitlesAndGeoms(
         ctx.conn,
         windows[0..win_count],
@@ -275,7 +251,7 @@ fn gatherWindowInfos(
     var info_count: usize = 0;
     for (windows, 0..) |win, i| {
         const geom = out_data.geoms[i] orelse continue;
-        out_infos[info_count] = .{
+        out_window_info_buf[info_count] = .{
             .window = win,
             .x = geom.x,
             .y = geom.y,
@@ -284,8 +260,10 @@ fn gatherWindowInfos(
         };
         info_count += 1;
     }
-
-    return info_count;
+    if (info_count == 0) return null;
+    const window_infos = out_window_info_buf[0..info_count];
+    std.mem.sort(WindowInfo, window_infos, {}, compareWindows);
+    return window_infos;
 }
 
 /// Sort order for the split-view segment layout:
@@ -418,15 +396,6 @@ pub fn fetchWindowTitleInto(
         buf.clearRetainingCapacity();
         try buf.appendSlice(allocator, t);
     }
-}
-
-fn tryCollectGeometryReply(
-    conn: core.Connection,
-    cookie: xcb.xcb_get_geometry_cookie_t,
-) ?utils.Rect {
-    const r = utils.collectGeometryReply(conn, cookie) orelse return null;
-    defer std.c.free(r);
-    return utils.rectFromXcb(r, false);
 }
 
 /// One per-window title/geometry batch, shared by the synchronous
@@ -636,8 +605,11 @@ const WindowDataBatch = struct {
     ) ?utils.Rect {
         if (minimized) return offscreen_rect;
         if (self.tiling_geoms[i]) |cached| return cached;
-        if (self.needs_xcb_geometry[i])
-            return tryCollectGeometryReply(self.conn, self.geom_cookies[i]);
+        if (self.needs_xcb_geometry[i]) {
+            const r = utils.collectGeometryReply(self.conn, self.geom_cookies[i]) orelse return null;
+            defer std.c.free(r);
+            return utils.rectFromXcb(r, false);
+        }
         if (prefetched) |p| return p;
         return if (comptime pad) offscreen_rect else null;
     }

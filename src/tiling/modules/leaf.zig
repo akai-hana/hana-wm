@@ -45,9 +45,8 @@ fn tileRegion(
     const border2: u16 = utils.doubledBorder(m);
 
     if (n == 1) {
-        const rect = tiling.insetRect(x, y, w, h, border2, min_dim);
         // All leaf placements are visible; hints applied by tiling.emitView.
-        tiling.emitView(v, out, windows[0], rect, true);
+        tiling.emitView(v, out, windows[0], tiling.insetRect(x, y, w, h, border2, min_dim), true);
         return;
     }
 
@@ -65,8 +64,4 @@ fn tileRegion(
 }
 
 /// This layout's registry contribution: metadata plus the dispatch hook.
-pub const module: @import("plugin").Layout = .{
-    .name = "leaf",
-    .compute = tiling.computeHook(compute),
-    .icon = "BSP",
-};
+pub const module = tiling.layoutModule("leaf", "BSP", compute, .{});

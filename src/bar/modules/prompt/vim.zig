@@ -13,10 +13,8 @@ const EditorState = prompt.EditorState;
 
 // Keysym payloads are owned by prompt (the one place they're derived from
 // core.XK); vim re-aliases them so it never re-derives the same constants.
-const xk_back_space = prompt.xk_back_space;
 const xk_return = prompt.xk_return;
 const xk_escape = prompt.xk_escape;
-const xk_delete = prompt.xk_delete;
 const xk_left = prompt.xk_left;
 const xk_right = prompt.xk_right;
 const xk_home = prompt.xk_home;
@@ -61,49 +59,19 @@ fn enterInsert(vs: *EditorState) void {
 
 /// Handle a Ctrl-modified key.  Returns `.deactivate` for Ctrl+C.
 pub fn handleCtrl(vs: *EditorState, sym: xcb.xcb_keysym_t) Action {
-    switch (sym) {
-        'c' => return .deactivate,
-        'w' => if (vs.mode == .insert) ctrlW(vs),
-        else => {},
-    }
+    if (sym == 'c') return .deactivate;
+    if (sym == 'w' and vs.mode == .insert) ctrlW(vs);
     return .none;
-}
-
-inline fn exitToNormal(vs: *EditorState) void {
-    clampCursorForNormal(vs);
-    vs.mode = .normal;
 }
 
 pub fn handleInsert(vs: *EditorState, sym: xcb.xcb_keysym_t) Action {
-    switch (sym) {
-        xk_escape => {
-            exitToNormal(vs);
-            resetPendingCmd(vs);
-        },
-        else => return insertKey(vs, sym),
+    if (sym == xk_escape) {
+        clampCursorForNormal(vs);
+        vs.mode = .normal;
+        resetPendingCmd(vs);
+        return .none;
     }
-    return .none;
-}
-
-fn insertKey(vs: *EditorState, sym: xcb.xcb_keysym_t) Action {
-    switch (sym) {
-        xk_return => return .spawn,
-        xk_back_space => deleteBefore(vs),
-        xk_delete => deleteAfter(vs),
-        xk_left => if (vs.cursor > 0) {
-            vs.cursor -= 1;
-        },
-        xk_right => if (vs.cursor < vs.len) {
-            vs.cursor += 1;
-        },
-        xk_home => vs.cursor = 0,
-        xk_end => vs.cursor = vs.len,
-        else => if (prompt.isPrintableAscii(sym)) {
-            const ch: u8 = @truncate(sym);
-            prompt.insertSlice(vs, &[1]u8{ch});
-        },
-    }
-    return .none;
+    return prompt.insertChar(vs, sym);
 }
 
 /// Arms an operator (d/c/y) on the first press, or; on a doubled press
@@ -136,36 +104,18 @@ fn execNormalKey(vs: *EditorState, sym: xcb.xcb_keysym_t, cnt: u32) Action {
             return .spawn;
         },
 
-        'x', 'X', 'D', 'C', 's' => {
-            execDirectSym(vs, @truncate(sym), cnt);
+        'x', 'X', 'D', 'C', 's' => execDirectSym(vs, @truncate(sym), cnt),
+
+        'p', 'P' => if (yank_len > 0) for (0..cnt) |_| {
+            if (sym == 'p') pasteAfter(vs) else pasteBefore(vs);
         },
 
-        'p', 'P' => if (yank_len > 0) {
-            var i: u32 = 0;
-            if (sym == 'p') {
-                while (i < cnt) : (i += 1) pasteAfter(vs);
-            } else {
-                while (i < cnt) : (i += 1) pasteBefore(vs);
-            }
-        },
+        '~' => for (0..cnt) |_| toggleCaseOnce(vs),
 
-        '~' => {
-            var i: u32 = 0;
-            while (i < cnt) : (i += 1) toggleCaseOnce(vs);
-        },
-
-        'S' => {
-            clearAndYankAll(vs);
-            enterInsert(vs);
-        },
+        'S' => { clearAndYankAll(vs); enterInsert(vs); },
 
         'i', 'I', 'a', 'A' => {
-            vs.cursor = switch (sym) {
-                'I' => firstNonBlank(vs),
-                'a' => @min(vs.cursor + 1, vs.len),
-                'A' => vs.len,
-                else => vs.cursor,
-            };
+            vs.cursor = if (sym == 'I') firstNonBlank(vs) else if (sym == 'a') @min(vs.cursor + 1, vs.len) else if (sym == 'A') vs.len else vs.cursor;
             enterInsert(vs);
         },
 
@@ -199,16 +149,9 @@ inline fn clampCursorForNormal(vs: *EditorState) void {
 }
 
 fn tryAccumulateDigit(sym: xcb.xcb_keysym_t) bool {
-    if (sym >= '1' and sym <= '9') {
-        const next = pending.count *% 10 +% @as(u32, @truncate(sym - '0'));
-        pending.count = @min(next, 1_000_000);
-        return true;
-    }
-    if (sym == '0' and pending.count > 0) {
-        pending.count = @min(pending.count *% 10, 1_000_000);
-        return true;
-    }
-    return false;
+    const digit = if (sym >= '1' and sym <= '9') @as(u32, @truncate(sym - '0')) else if (sym == '0' and pending.count > 0) 0 else return false;
+    pending.count = @min(pending.count *% 10 +% digit, 1_000_000);
+    return true;
 }
 
 fn tryArmFindPrefix(sym: xcb.xcb_keysym_t) bool {
@@ -226,8 +169,8 @@ fn tryArmFindPrefix(sym: xcb.xcb_keysym_t) bool {
 /// Position resolver for g-prefix motions (ge, gE, gg, g0, g$).
 fn resolveGPrefixPos(vs: *EditorState, sym: xcb.xcb_keysym_t, cnt: u32) ?usize {
     return switch (sym) {
-        'e' => motionWordEndBackward(vs, false, cnt),
-        'E' => motionWordEndBackward(vs, true, cnt),
+        'e' => wordScanBwd(true, vs, false, cnt),
+        'E' => wordScanBwd(true, vs, true, cnt),
         'g', '0', xk_home => @as(usize, 0),
         '$', xk_end => vs.len,
         else => null,
@@ -257,8 +200,7 @@ fn resolveMotionKey(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
     if (sym == ';' or sym == ',') {
         if (last_find_kind != 0) {
             const kind = if (sym == ',') reverseFindKind(last_find_kind) else last_find_kind;
-            const mr = motionFind(vs, kind, last_find_ch, cnt);
-            return commitMotion(vs, mr);
+            return commitMotion(vs, motionFind(vs, kind, last_find_ch, cnt));
         }
         resetPendingCmd(vs);
         return .{};
@@ -299,12 +241,9 @@ fn resolveSimpleMotion(vs: *EditorState, sym: xcb.xcb_keysym_t, cnt: u32) ?Motio
     return switch (sym) {
         'h', xk_left => MotionResult{ .pos = vs.cursor -| @as(usize, cnt) },
         'l', xk_right => MotionResult{ .pos = @min(vs.cursor + @as(usize, cnt), vs.len) },
-        'w' => MotionResult{ .pos = motionWordNext(vs, false, cnt) },
-        'W' => MotionResult{ .pos = motionWordNext(vs, true, cnt) },
-        'b' => MotionResult{ .pos = motionWordPrev(vs, false, cnt) },
-        'B' => MotionResult{ .pos = motionWordPrev(vs, true, cnt) },
-        'e' => MotionResult{ .pos = motionWordEnd(vs, false, cnt), .inclusive = true },
-        'E' => MotionResult{ .pos = motionWordEnd(vs, true, cnt), .inclusive = true },
+        'w', 'W' => MotionResult{ .pos = wordScanFwd(false, vs, sym == 'W', cnt) },
+        'b', 'B' => MotionResult{ .pos = wordScanBwd(false, vs, sym == 'B', cnt) },
+        'e', 'E' => MotionResult{ .pos = wordScanFwd(true, vs, sym == 'E', cnt), .inclusive = true },
         '0', xk_home => MotionResult{ .pos = 0 },
         '^' => MotionResult{ .pos = firstNonBlank(vs) },
         '$', xk_end => MotionResult{ .pos = vs.len },
@@ -314,16 +253,6 @@ fn resolveSimpleMotion(vs: *EditorState, sym: xcb.xcb_keysym_t, cnt: u32) ?Motio
 
 fn setCursor(vs: *EditorState, mr: MotionResult) void {
     vs.cursor = @min(mr.pos, vs.len -| 1);
-}
-
-fn deleteBefore(vs: *EditorState) void {
-    if (vs.cursor == 0) return;
-    vs.cursor -= 1;
-    deleteAfter(vs);
-}
-
-fn deleteAfter(vs: *EditorState) void {
-    deleteRange(vs, vs.cursor, vs.cursor + 1);
 }
 
 fn deleteRange(vs: *EditorState, from: usize, to: usize) void {
@@ -366,9 +295,7 @@ fn pasteBefore(vs: *EditorState) void {
 }
 
 inline fn toggleCaseChar(ch: u8) u8 {
-    if (std.ascii.isLower(ch)) return std.ascii.toUpper(ch);
-    if (std.ascii.isUpper(ch)) return std.ascii.toLower(ch);
-    return ch;
+    return if (std.ascii.isLower(ch)) std.ascii.toUpper(ch) else if (std.ascii.isUpper(ch)) std.ascii.toLower(ch) else ch;
 }
 
 fn toggleCaseOnce(vs: *EditorState) void {
@@ -379,7 +306,7 @@ fn toggleCaseOnce(vs: *EditorState) void {
 
 fn ctrlW(vs: *EditorState) void {
     if (vs.cursor == 0) return;
-    deleteRange(vs, motionWordPrev(vs, false, 1), vs.cursor);
+    deleteRange(vs, wordScanBwd(false, vs, false, 1), vs.cursor);
 }
 
 fn applyOperator(vs: *EditorState, op: u8, mr: MotionResult) void {
@@ -395,14 +322,8 @@ fn applyOperator(vs: *EditorState, op: u8, mr: MotionResult) void {
     if (from >= to) return;
 
     switch (op) {
-        'd', 'c' => {
-            deleteAndYank(vs, from, to);
-            if (op == 'c') enterInsert(vs);
-        },
-        'y' => {
-            yankRange(vs, from, to);
-            vs.cursor = from;
-        },
+        'd', 'c' => { deleteAndYank(vs, from, to); if (op == 'c') enterInsert(vs); },
+        'y' => { yankRange(vs, from, to); vs.cursor = from; },
         else => {},
     }
 }
@@ -435,9 +356,7 @@ inline fn isWordChar(ch: u8) bool {
 
 /// Character class for word motions.  `big=true` collapses to space/non-space.
 inline fn charClass(big: bool, ch: u8) u2 {
-    if (ch == ' ') return 0;
-    if (big or isWordChar(ch)) return 1;
-    return 2;
+    return if (ch == ' ') 0 else @as(u2, @intFromBool(big or isWordChar(ch))) + 1;
 }
 
 fn firstNonBlank(vs: *EditorState) usize {
@@ -446,56 +365,46 @@ fn firstNonBlank(vs: *EditorState) usize {
     return p;
 }
 
-fn motionWordNext(vs: *EditorState, big: bool, cnt: u32) usize {
+fn wordScanFwd(comptime end: bool, vs: *EditorState, big: bool, cnt: u32) usize {
     var p = vs.cursor;
     for (0..cnt) |_| {
         if (p >= vs.len) break;
-        const cls = charClass(big, vs.buf[p]);
-        while (p < vs.len and charClass(big, vs.buf[p]) == cls) p += 1;
-        while (p < vs.len and vs.buf[p] == ' ') p += 1;
-    }
-    return p;
-}
-
-fn motionWordPrev(vs: *EditorState, big: bool, cnt: u32) usize {
-    var p = vs.cursor;
-    for (0..cnt) |_| {
-        if (p == 0) break;
-        while (p > 0 and vs.buf[p - 1] == ' ') p -= 1;
-        if (p == 0) break;
-        const cls = charClass(big, vs.buf[p - 1]);
-        while (p > 0 and charClass(big, vs.buf[p - 1]) == cls) p -= 1;
-    }
-    return p;
-}
-
-fn motionWordEnd(vs: *EditorState, big: bool, cnt: u32) usize {
-    var p = vs.cursor;
-    for (0..cnt) |_| {
-        if (p >= vs.len) break;
-        p += 1;
-        while (p < vs.len and vs.buf[p] == ' ') p += 1;
-        if (p >= vs.len) {
-            p = vs.len;
-            break;
+        if (comptime end) {
+            p += 1;
+            while (p < vs.len and vs.buf[p] == ' ') p += 1;
+            if (p >= vs.len) {
+                p = vs.len;
+                break;
+            }
+            const cls = charClass(big, vs.buf[p]);
+            while (p + 1 < vs.len and charClass(big, vs.buf[p + 1]) == cls) p += 1;
+        } else {
+            const cls = charClass(big, vs.buf[p]);
+            while (p < vs.len and charClass(big, vs.buf[p]) == cls) p += 1;
+            while (p < vs.len and vs.buf[p] == ' ') p += 1;
         }
-        const cls = charClass(big, vs.buf[p]);
-        while (p + 1 < vs.len and charClass(big, vs.buf[p + 1]) == cls) p += 1;
     }
-    return @min(p, vs.len -| 1);
+    return if (comptime end) @min(p, vs.len -| 1) else p;
 }
 
-fn motionWordEndBackward(vs: *EditorState, big: bool, cnt: u32) usize {
+fn wordScanBwd(comptime end: bool, vs: *EditorState, big: bool, cnt: u32) usize {
     var p = vs.cursor;
     for (0..cnt) |_| {
         if (p == 0) break;
-        const cls0 = charClass(big, vs.buf[p]);
-        if (cls0 != 0) {
-            while (p > 0 and charClass(big, vs.buf[p - 1]) == cls0) p -= 1;
+        if (comptime end) {
+            const cls0 = charClass(big, vs.buf[p]);
+            if (cls0 != 0) {
+                while (p > 0 and charClass(big, vs.buf[p - 1]) == cls0) p -= 1;
+            }
+            if (p == 0) break;
+            p -= 1;
+            while (p > 0 and vs.buf[p] == ' ') p -= 1;
+        } else {
+            while (p > 0 and vs.buf[p - 1] == ' ') p -= 1;
+            if (p == 0) break;
+            const cls = charClass(big, vs.buf[p - 1]);
+            while (p > 0 and charClass(big, vs.buf[p - 1]) == cls) p -= 1;
         }
-        if (p == 0) break;
-        p -= 1;
-        while (p > 0 and vs.buf[p] == ' ') p -= 1;
     }
     return p;
 }

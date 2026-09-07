@@ -25,9 +25,8 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
 
     // In relaxed mode a partial last row shares the full screen width.
     // Core variant index -> relaxed (variant 1 of "rigid"/"relaxed").
-    const relax_variant: u8 = 1;
     const last_row_count = n % grid.cols;
-    const partial_cell_w: u16 = if (v.env.variant_idx == relax_variant and last_row_count != 0)
+    const partial_cell_w: u16 = if (v.env.variant_idx == 1 and last_row_count != 0)
         widenedLastRowCellWidth(screen_w, last_row_count, m.gap)
     else
         cell_w;
@@ -41,19 +40,11 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
         // relaxed cells don't overlap each other.
         const cell_w_here: u16 = if (is_partial_row) partial_cell_w else cell_w;
 
-        const rect = utils.Rect{
-            .x = @intCast(m.gap +| col *| (cell_w_here +| m.gap)),
-            .y = @intCast(wa_y +| m.gap +| row *| (cell_h + m.gap)),
-            .width = if (is_partial_row) partial_win_w else win_w,
-            .height = win_h,
-        };
-        tiling.emitView(&v, out, win, rect, true);
+        tiling.emitView(&v, out, win, .{ .x = @intCast(m.gap +| col *| (cell_w_here +| m.gap)), .y = @intCast(wa_y +| m.gap +| row *| (cell_h + m.gap)),
+            .width = if (is_partial_row) partial_win_w else win_w, .height = win_h }, true);
 
         col += 1;
-        if (col == grid.cols) {
-            col = 0;
-            row += 1;
-        }
+        if (col == grid.cols) { col = 0; row += 1; }
     }
 }
 
@@ -74,11 +65,8 @@ inline fn calcGridShape(n: usize) struct { cols: u16, rows: u16 } {
 }
 
 /// This layout's registry contribution: metadata plus the dispatch hook.
-pub const module: @import("plugin").Layout = .{
-    .name = "grid",
-    .compute = tiling.computeHook(compute),
+pub const module = tiling.layoutModule("grid", "[+]", compute, .{
     .variant_count = 2,
     .variant_parse = tiling.variantParse(&.{ "rigid", "relaxed" }),
-    .icon = "[+]",
     .indicators = &.{ "[#]", "[~]" },
-};
+});

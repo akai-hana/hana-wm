@@ -13,7 +13,7 @@ const std = @import("std");
 const types = @import("types");
 const utils = @import("utils");
 const drawing = @import("drawing");
-const segmod = @import("segment");
+const segdraw = @import("segdraw");
 
 const c = @cImport(@cInclude("time.h"));
 
@@ -119,23 +119,18 @@ fn formatTime(buf: []u8, sec: i64, fmt: []const u8) ![]const u8 {
     return buf[0..n];
 }
 
-/// This module's bar-segment contribution (registry binding).
-fn naturalWidthHook(_: *const anyopaque, clock_width: u16) u16 {
-    return clock_width;
-}
-
-fn drawHook(ctx: *anyopaque, x: u16) !u16 {
-    const dc = segmod.castDraw(ctx);
-    return draw(dc.dc, dc.config, dc.height, x);
-}
-
-pub const module: @import("plugin").Segment = .{
-    .name = "clock",
-    .self_ticking = true,
-    .clickable = false,
-    .pollTimeoutMs = tickDeadlineMs,
-    .secondsElapsed = secondElapsed,
-    .measureString = measureString,
-    .naturalWidth = naturalWidthHook,
-    .draw = drawHook,
-};
+/// This module's bar-segment contribution (registry binding). Natural width is
+/// the measured clock width itself (the passthrough default, via measureString).
+pub const module = segdraw.module(
+    "clock",
+    draw,
+    null,
+    false,
+    .{
+        .self_ticking = true,
+        .clickable = false,
+        .pollTimeoutMs = tickDeadlineMs,
+        .secondsElapsed = secondElapsed,
+        .measureString = measureString,
+    },
+);

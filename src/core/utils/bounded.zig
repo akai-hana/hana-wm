@@ -87,6 +87,19 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
             return true;
         }
 
+        pub fn upsertById(
+            self: *Self,
+            comptime field_name: std.meta.FieldEnum(T),
+            key: u32,
+            item: T,
+        ) bool {
+            if (self.indexOfByIdField(field_name, key)) |i| {
+                self.items[i] = item;
+                return true;
+            }
+            return self.append(item);
+        }
+
         /// O(1) removal that does *not* preserve the relative order of the
         /// remaining elements: the slot at `i` is filled with the current
         /// last element. Use when ordering carries no meaning (caches, sets).
@@ -101,6 +114,36 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         pub fn orderedRemove(self: *Self, i: usize) void {
             self.len -= 1;
             std.mem.copyForwards(T, self.items[i..self.len], self.items[i + 1 .. self.len + 1]);
+        }
+
+        pub fn removeWhere(
+            self: *Self,
+            context: anytype,
+            comptime match: fn (@TypeOf(context), T) bool,
+        ) bool {
+            if (self.indexOf(context, match)) |i| {
+                self.orderedRemove(i);
+                return true;
+            }
+            return false;
+        }
+
+        pub fn removeAllWhere(
+            self: *Self,
+            context: anytype,
+            comptime match: fn (@TypeOf(context), T) bool,
+        ) usize {
+            var removed: usize = 0;
+            var i: usize = 0;
+            while (i < self.len) {
+                if (match(context, self.items[i])) {
+                    self.swapRemove(i);
+                    removed += 1;
+                } else {
+                    i += 1;
+                }
+            }
+            return removed;
         }
 
         /// Inserts `item` at index `i` (clamped to len), shifting the tail
@@ -121,6 +164,51 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         /// Resets to empty without touching capacity or contents of unused slots.
         pub fn clear(self: *Self) void {
             self.len = 0;
+        }
+    };
+}
+
+pub fn RecStore(comptime T: type, comptime capacity: usize) type {
+    return struct {
+        const List = BoundedList(T, capacity);
+        items: List = .{},
+
+        const Self = @This();
+
+        pub fn len(self: Self) usize {
+            return self.items.len;
+        }
+
+        pub fn reset(self: *Self) void {
+            self.items.clear();
+        }
+
+        pub fn append(self: *Self, item: T) bool {
+            return self.items.append(item);
+        }
+
+        pub fn slice(self: *Self) []T {
+            return self.items.slice();
+        }
+
+        pub fn constSlice(self: *const Self) []const T {
+            return self.items.constSlice();
+        }
+
+        pub fn orderedRemove(self: *Self, i: usize) void {
+            self.items.orderedRemove(i);
+        }
+
+        pub fn find(self: *const Self, id: u32) ?usize {
+            return self.items.indexOfByIdField(.win, id);
+        }
+
+        pub fn remove(self: *Self, id: u32) bool {
+            return self.items.removeWhere(id, struct {
+                fn match(key: u32, item: T) bool {
+                    return item.win == key;
+                }
+            }.match);
         }
     };
 }

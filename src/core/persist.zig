@@ -256,6 +256,17 @@ fn resumableDefaultKind() u8 {
     return pipeline_mod.defaultIndexForLayoutName(config_mod.canonicalLayoutName(layout_name));
 }
 
+/// Clears `list` and repopulates it from `src`, skipping unregistered windows
+/// and honoring `cap`. Shared by the tiled_order and focus_mru restore loops.
+fn restoreMembers(list: anytype, src: []const u32, m: *const model.Model, cap: usize) void {
+    list.clear();
+    for (src) |w| {
+        if (!m.store.has(w)) continue;
+        if (list.len >= cap) break;
+        _ = list.append(w);
+    }
+}
+
 /// Restores model-level fields into the model: current/focused/all_view,
 /// per-ws params, tiled_order and focus_mru (pruned to windows that are
 /// actually registered (closed or never adopted ones are dropped). Call AFTER
@@ -303,18 +314,8 @@ pub fn applyModelLevel(m: *model.Model) void {
             s.params.kind = fallback;
             s.params.variant_idx = 0;
         }
-        s.tiled_order.clear();
-        for (r.tiled) |w| {
-            if (!m.store.has(w)) continue;
-            if (s.tiled_order.len >= model.max_tiled_per_ws) break;
-            _ = s.tiled_order.append(w);
-        }
-        s.focus_mru.clear();
-        for (r.mru) |w| {
-            if (!m.store.has(w)) continue;
-            if (s.focus_mru.len >= model.mru_capacity) break;
-            _ = s.focus_mru.append(w);
-        }
+        restoreMembers(&s.tiled_order, r.tiled, m, model.max_tiled_per_ws);
+        restoreMembers(&s.focus_mru, r.mru, m, model.mru_capacity);
     }
 
     // Membership repair: the adoption pass registered every surviving window

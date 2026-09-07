@@ -8,6 +8,7 @@ const actions = @import("actions");
 const focus = @import("focus");
 const build_options = @import("build_options");
 const segmod = @import("segment");
+const segdraw = @import("segdraw");
 
 /// Reserved row width when no workspaces are configured (moved here from
 /// bar.zig: width policy belongs to the segment that owns the pixels).
@@ -157,19 +158,6 @@ fn naturalWidthHook(frame: *const anyopaque, _: u16) u16 {
     return fallback_width;
 }
 
-fn drawHook(ctx: *anyopaque, x: u16) !u16 {
-    const c = segmod.castDraw(ctx);
-    return draw(
-        c.dc,
-        c.config,
-        c.height,
-        x,
-        c.frame.current_workspace,
-        c.frame.workspace_has_windows,
-        c.frame.is_all_view_active,
-    );
-}
-
 fn resolveWorkspaceClick(offset: u16) ?usize {
     const cell_w = getCachedWorkspaceWidth();
     if (cell_w == 0) return null;
@@ -197,11 +185,16 @@ fn onClickHook(
     return true;
 }
 
-pub const module: @import("plugin").Segment = .{
-    .name = "workspaces",
-    .dirty_sources = .{ .frame = true },
-    .invalidate = invalidate,
-    .naturalWidth = naturalWidthHook,
-    .draw = drawHook,
-    .onClick = onClickHook,
-};
+pub const module = segdraw.module(
+    "workspaces",
+    draw,
+    null,
+    false,
+    .{
+        .dirty_sources = .{ .frame = true },
+        .invalidate = invalidate,
+        .natural_width = naturalWidthHook,
+        .on_click = onClickHook,
+        .frame_args = true,
+    },
+);

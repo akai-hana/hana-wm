@@ -80,20 +80,6 @@ fn workArea() WorkArea {
 /// 8-directional resize direction nearest the cursor at a given point.
 const ResizeDirection = enum { none, n, s, e, w, ne, nw, se, sw };
 
-/// Which sides of the window the grabbed corner anchors to (left/top = the
-/// corner is a left or top edge). Collapses the four per-axis corner switches
-/// in updateDrag into two booleans.
-const CornerAxes = struct { left: bool, top: bool };
-
-inline fn cornerAxes(corner: ResizeCorner) CornerAxes {
-    return switch (corner) {
-        .top_left => .{ .left = true, .top = true },
-        .top_right => .{ .left = false, .top = true },
-        .bottom_left => .{ .left = true, .top = false },
-        .bottom_right => .{ .left = false, .top = false },
-    };
-}
-
 inline fn snapAxis(pos: i32, dim: i32, near: i32, far: i32, snap: i32) i32 {
     if (@abs(pos - near) < snap) return near;
     if (@abs((pos + dim) - far) < snap) return far - dim;
@@ -103,6 +89,10 @@ inline fn snapAxis(pos: i32, dim: i32, near: i32, far: i32, snap: i32) i32 {
 inline fn snapEdge(edge: i32, boundary: i32, snap: i32) i32 {
     if (snap > 0 and @abs(edge - boundary) < snap) return boundary;
     return edge;
+}
+
+inline fn clampI16(v: i32) i32 {
+    return std.math.clamp(v, std.math.minInt(i16), std.math.maxInt(i16));
 }
 
 const State = struct {
@@ -144,12 +134,8 @@ fn resizeDirectionFromPoint(
     return .none;
 }
 
-/// Maps an 8-directional ResizeDirection to the 4-corner ResizeCorner used by
-/// the resize engine. For cardinal directions the choice of corner is arbitrary
-/// (e.g. n and s both anchor at bottom/top respectively) since only one axis
-/// is constrained.
-fn directionToCorner(dir: ResizeDirection) ResizeCorner {
-    return switch (dir) {
+fn nearestCorner(x: i16, y: i16, geom: utils.Rect, border_width: u32) ResizeCorner {
+    return switch (resizeDirectionFromPoint(x, y, geom, border_width)) {
         .nw => .top_left,
         .ne => .top_right,
         .sw => .bottom_left,
@@ -160,11 +146,6 @@ fn directionToCorner(dir: ResizeDirection) ResizeCorner {
     };
 }
 
-fn nearestCorner(x: i16, y: i16, geom: utils.Rect, border_width: u32) ResizeCorner {
-    const dir = resizeDirectionFromPoint(x, y, geom, border_width);
-    return directionToCorner(dir);
-}
-
 /// Begins a move (button 1) or resize (button 3) drag on `win` at (x, y).
 /// No-op if a drag is already active, or for bar/fullscreen windows.
 pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
@@ -172,9 +153,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     if (!cs.config.drag_enabled) return;
     if (g_state.drag.active) return;
     if (screen.isSurfaceWindow(win)) return;
-    if (build_options.has_fullscreen) {
-        if (@import("fullscreen").isFullscreenMode(pipeline.model(), win)) return;
-    }
+    if (build_options.has_fullscreen and @import("fullscreen").isFullscreenMode(pipeline.model(), win)) return;
 
     // Model/sync truth (floating base or last-sent rect) over a live XCB
     // round-trip; fall back to a live query when never placed.
@@ -219,7 +198,9 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     // has already ungrabAndFlush'd); routed through sync's sanctioned stack
     // primitive + flush so wire stays in sync. Drag ticks keep going flushless
     // via the targeted dragTick (1 configure, no grab).
-    @import("sync").raiseNow(@import("pipeline").grabCtx(), win);
+    const c = pipeline.grabCtx();
+    c.sink.stackOnly(win, .above);
+    c.sink.flush();
 }
 
 fn computeMoveRect(
@@ -237,22 +218,14 @@ fn computeMoveRect(
     // Raw drag coords are unbounded i32; pin down to the i16 wire range
     // before the narrowing cast so a window dragged beyond +/-32767 (or into
     // negative X11 coords) can't UB in ReleaseFast.
-    const mx: i32 = std.math.clamp(
-        if (was_pending_float)
-            raw_x
-        else
-            snapAxis(raw_x, win_w, wa.left, wa.right, snap),
-        std.math.minInt(i16),
-        std.math.maxInt(i16),
-    );
-    const my: i32 = std.math.clamp(
-        if (was_pending_float)
-            raw_y
-        else
-            snapAxis(raw_y, win_h, wa.top, wa.bottom, snap),
-        std.math.minInt(i16),
-        std.math.maxInt(i16),
-    );
+    const mx: i32 = clampI16(if (was_pending_float)
+        raw_x
+    else
+        snapAxis(raw_x, win_w, wa.left, wa.right, snap));
+    const my: i32 = clampI16(if (was_pending_float)
+        raw_y
+    else
+        snapAxis(raw_y, win_h, wa.top, wa.bottom, snap));
     return .{
         .x = @intCast(mx),
         .y = @intCast(my),
@@ -266,7 +239,12 @@ fn computeResizeRect(drag: DragState, dx: i32, dy: i32, wa: WorkArea) utils.Rect
     // Anchor = corner opposite the grabbed one, fixed; the moving
     // corner follows the cursor. min/max(anchor, moving) per axis
     // makes crossing the anchor flip growth automatically.
-    const axes = cornerAxes(drag.resize_corner);
+    const axes = switch (drag.resize_corner) {
+        .top_left => .{ .left = true, .top = true },
+        .top_right => .{ .left = false, .top = true },
+        .bottom_left => .{ .left = true, .top = false },
+        .bottom_right => .{ .left = false, .top = false },
+    };
     const start_x: i32 = drag.start_win_x;
     const start_y: i32 = drag.start_win_y;
     const start_w: i32 = drag.start_win_width;
@@ -295,8 +273,8 @@ fn computeResizeRect(drag: DragState, dx: i32, dy: i32, wa: WorkArea) utils.Rect
     const pinned_y: i32 = if (moving_y < anchor_y) anchor_y - clamped_h else new_top;
 
     return .{
-        .x = @intCast(std.math.clamp(pinned_x, std.math.minInt(i16), std.math.maxInt(i16))),
-        .y = @intCast(std.math.clamp(pinned_y, std.math.minInt(i16), std.math.maxInt(i16))),
+        .x = @intCast(clampI16(pinned_x)),
+        .y = @intCast(clampI16(pinned_y)),
         .width = @intCast(clamped_w),
         .height = @intCast(clamped_h),
     };
@@ -365,9 +343,7 @@ pub fn getDragLastRect() utils.Rect {
 pub fn setFloatingRect(m: *model.Model, win: model.WindowId, r: utils.Rect) void {
     const e = m.store.getPtr(win) orelse return;
     if (e.presence == .covering) return; // fullscreen owns geometry
-    if (e.anchor == .floating) {
-        e.anchor.floating = r;
-    }
+    if (e.anchor == .floating) e.anchor.floating = r;
 }
 
 /// Honors a configure request against a floating window record on the model.
@@ -392,11 +368,7 @@ pub fn honorConfigureRequest(
             // caches it alongside the geometry it applies.
             return .geometry_applied;
         },
-        .tiled => {
-            // Geometry denied. BW honored; recording is SYNC's job.
-            if (req.border_width != null) return .border_only;
-            return .ignored;
-        },
+        .tiled => return if (req.border_width != null) .border_only else .ignored, // Geometry denied; BW honored, recording is SYNC's job
     }
 }
 

@@ -10,8 +10,7 @@ const tiling = @import("tiling");
 pub fn compute(v: tiling.View, out: *tiling.List) void {
     const m = v.env.margins;
     // Core variant index -> gaps-enabled (variant 1 of "gapless"/"gaps").
-    const gap_variant: u8 = 1;
-    const inset: u16 = if (v.env.variant_idx == gap_variant) m.gap else 0;
+    const inset: u16 = if (v.env.variant_idx == 1) m.gap else 0;
     const total_margin = utils.doubledBorder(m) + inset * 2;
 
     // Pick the top (visible) window: prefer the focused window, else the
@@ -26,11 +25,8 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
 }
 
 /// This layout's registry contribution: metadata plus the dispatch hook.
-pub const module: @import("plugin").Layout = .{
-    .name = "monocle",
-    .compute = tiling.computeHook(compute),
+pub const module = tiling.layoutModule("monocle", "[M]", compute, .{
     .variant_count = 2,
     .variant_parse = tiling.variantParse(&.{ "gapless", "gaps" }),
-    .icon = "[M]",
     .indicators = &.{ "<->", ">-<" },
-};
+});

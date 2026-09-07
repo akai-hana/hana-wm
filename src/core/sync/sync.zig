@@ -105,13 +105,7 @@ pub const Sink = struct {
     pub inline fn stackOnly(self: Sink, win: model.WindowId, s: Stack) void {
         self.vt.stack_only(self.ptr, win, s);
     }
-    pub inline fn setEwmhFullscreen(
-        self: Sink,
-        win: model.WindowId,
-        state_atom: u32,
-        fs_atom: u32,
-        is_fullscreen: bool,
-    ) void {
+    pub inline fn setEwmhFullscreen(self: Sink, win: model.WindowId, state_atom: u32, fs_atom: u32, is_fullscreen: bool) void {
         self.vt.set_ewmh_fullscreen(self.ptr, win, state_atom, fs_atom, is_fullscreen);
     }
     pub inline fn flush(self: Sink) void {
@@ -197,10 +191,7 @@ pub fn sentGet(win: model.WindowId) ?SentEntry {
     return st.sent.items[slot];
 }
 
-pub fn sentGetOrPut(win: model.WindowId) !struct {
-    found_existing: bool,
-    value_ptr: *SentEntry,
-} {
+pub fn sentGetOrPut(win: model.WindowId) !struct { found_existing: bool, value_ptr: *SentEntry } {
     if (sentFind(win)) |slot| {
         return .{ .found_existing = true, .value_ptr = &st.sent.items[slot] };
     }
@@ -222,6 +213,12 @@ pub fn sentSwapRemove(win: model.WindowId) void {
 /// Called from actions.unmanage.
 pub fn forget(win: model.WindowId) void {
     sentSwapRemove(win);
+}
+
+/// Record a visible (non-parked) send in the ledger. Shared by the full
+/// reconcile (border width/pixel known) and the drag-tick fast path (0,0).
+fn markSentVisible(e: *SentEntry, win: model.WindowId, rect: utils.Rect, bw: u16, pixel: u32) void {
+    e.* = .{ .id = win, .rect = rect, .has_rect = true, .parked = false, .bw = bw, .pixel = pixel };
 }
 
 /// Opt-in retile latency instrumentation (RETILE_PROF). Measures the wall
@@ -272,7 +269,7 @@ pub fn reconcileDragTick(m: *const model.Model, sink: Sink, win: model.WindowId)
 
     // Update sent ledger so lastRectFor / toggleFloating see the live position.
     const gop = sentGetOrPut(win) catch return;
-    gop.value_ptr.* = .{ .id = win, .rect = rect, .has_rect = true, .parked = false };
+    markSentVisible(gop.value_ptr, win, rect, 0, 0);
 }
 
 pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
@@ -300,46 +297,29 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         }
         const hv = tiling.HintsView{ .order = order_buf[0..n], .hints = hints_buf[0..n] };
         const params = &m.ws[m.current].params;
-        const view = tiling.View{
-            .order = order_buf[0..n],
-            .params = params,
-            .workarea = wa,
-            .hints = &hv,
-            .focused = m.focused,
-            .env = ctx.env,
-        };
-        // n == 0 leaves placements empty (no layout owns a window); layouts
-        // are individually n==0-safe too, this only skips the work.
+        const view: plugin.View = .{ .order = order_buf[0..n], .params = params, .workarea = wa, .hints = &hv, .focused = m.focused, .env = ctx.env };
         if (n > 0) {
             tiling.compute(params.kind, view, &placements);
-            // Sort by window ID once after compute for O(log n) binary search.
-            std.sort.pdq(tiling.Placement, placements.slice(), {}, struct {
-                fn lessThan(_: void, a: tiling.Placement, b: tiling.Placement) bool {
-                    return a.win < b.win;
-                }
-            }.lessThan);
+            std.sort.pdq(tiling.Placement, placements.slice(), {}, (struct {
+                fn lessThan(_: void, a: tiling.Placement, b: tiling.Placement) bool { return a.win < b.win; }
+            }).lessThan);
         }
     }
 
-    // Winner seed (STEP 5): fullscreen winner outright; else the focused
-    // window when its desire below will be non-parked (checked here so no
-    // earlier store entry can shadow it); else the pass elects the first
-    // non-parked desire in store order as it goes.
+    // Winner seed: fullscreen winner outright; else the focused window when
+    // its desire will be non-parked (checked here so no earlier store entry
+    // can shadow it); else the pass elects the first non-parked desire.
     var winner: ?model.WindowId = fs_win;
-    if (winner == null) {
-        if (m.focused) |f| {
-            if (m.store.get(f)) |fe| {
-                if (fe.presence == .present and model.visibleOn(m, f, m.current)) {
-                    switch (fe.anchor) {
-                        .floating => winner = f,
-                        .tiled => if (findPlacement(&placements, f)) |p| {
-                            if (p.visible) winner = f;
-                        },
-                    }
-                }
+    if (winner == null) if (m.focused) |f| if (m.store.get(f)) |fe| {
+        if (fe.presence == .present and model.visibleOn(m, f, m.current)) {
+            switch (fe.anchor) {
+                .floating => winner = f,
+                .tiled => if (findPlacement(&placements, f)) |p| {
+                    if (p.visible) winner = f;
+                },
             }
         }
-    }
+    };
 
     // STEPS 4..8 fused into ONE pass: compute the desire for a store entry,
     // then SEND it immediately, unconditionally. Send order per window:
@@ -397,15 +377,6 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         const is_winner = desire.is_winner;
 
         if (parked) {
-            // ONE merged request (X-offscreen + BELOW). Idempotent by nature,
-            // so replaying every pass is safe. The ledger's rect deliberately
-            // SURVIVES the park so a later all-view orphan resurfaces at its
-            // old slot.
-            //
-            // Skip the park entirely when the previous pass already parked
-            // this window: the offscreen X + BELOW request is idempotent and
-            // a repeated park is a pure no-op, so dropping it shrinks the
-            // grab's request run without losing any state.
             if (!ledger.parked) ctx.sink.park(win);
         } else {
             // Raise triggers derive from the ledger (header read 2): the
@@ -417,34 +388,11 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
             const unpark_transition = last.parked;
             const raise_winner = is_winner and (moved or unpark_transition or opts.force_restack);
 
-            // Delta-apply: skip any request whose desired value is byte-equal
-            // to the last one SENT (from the ledger). UNCONDITIONAL COMPUTE is
-            // preserved -- every window's desire is still re-derived every
-            // pass, so drift (a client that mutated its own geometry/border
-            // behind our back) is repaired exactly as before, and any request
-            // we DO send is still full desired state. We only elide resends
-            // of a request the server has already seen, which is the dominant
-            // cost of a retile grab (each queued configure/map/property request
-            // the server must process). The skip is never a correctness risk:
-            // an unchanged desire sent again would have been an idempotent
-            // no-op anyway.
-            //
-            // map: needed on first show / on unpark (a parked window's map may
-            // have been withdrawn); skipping it for a window that has stayed
-            // visible in the same rect drops a redundant XMapWindow per pass.
-            // border width/pixel: window attributes that persist on the client;
-            // only resend when the desired value differs from the last sent.
-            // geometry: resend only when the rect changed, it is a first send,
-            // or a raise is owed (raise merges the stack mode into this one
-            // request). Other-wise keep the previous geometry.
             const need_map = first_send or unpark_transition;
             const need_bw = !last.has_rect or last.bw != bw;
             const need_pixel = !last.has_rect or last.pixel != pixel;
             const need_geom = moved or unpark_transition or raise_winner;
 
-            // Send order preserved from the unconditional path: map -> pixel
-            // -> bw -> geometry (stack merged into that request), so a
-            // first-show/unparking client exposes at its final rect.
             if (need_map) ctx.sink.map(win);
             if (need_pixel) ctx.sink.borderPixel(win, pixel);
             if (need_bw) ctx.sink.borderWidth(win, bw);
@@ -453,26 +401,10 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
 
         // Ledger write: record what we actually sent. A park preserves the
         // previous record's rect/has_rect; an unpark overwrites wholesale.
-        // Written AFTER the sends: under SentLedgerFull the pass still
-        // applied (sends never depend on the ledger) and only the record is
-        // lost until the next successful write, so no half-applied batch
-        // can exist.
-        const g = gop orelse {
-            std.log.err("sync.reconcile: ledger full; sends applied, record lost", .{});
-            continue;
-        };
-        if (parked) {
-            g.value_ptr.parked = true;
-        } else {
-            g.value_ptr.* = .{
-                .id = win,
-                .rect = rect,
-                .has_rect = true,
-                .parked = false,
-                .bw = bw,
-                .pixel = pixel,
-            };
-        }
+        if (gop) |g| {
+            if (parked) g.value_ptr.parked = true
+            else markSentVisible(g.value_ptr, win, rect, bw, pixel);
+        } else std.log.err("sync.reconcile: ledger full; sends applied, record lost", .{});
     }
 
     // force_restack additionally raises bar/top.
@@ -483,36 +415,11 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     // DO NOT FLUSH HERE. Caller owns flushing.
 }
 
-/// Raise `win` to the top of the stack immediately, then flush. Used by
-/// floating drag-start, where the raise must be visible right away. The caller
-/// owns this invoke OUTSIDE any server grab (a flush under a grab would break
-/// batch atomicity); drag ticks afterward stay flushless (reconcileDragTick).
-pub fn raiseNow(ctx: *Ctx, win: model.WindowId) void {
-    ctx.sink.stackOnly(win, .above);
-    ctx.sink.flush();
-}
-
-/// Set or clear the EWMH _NET_WM_STATE_FULLSCREEN property on `win` via the
-/// sink. Queued only (no flush here): fullscreenToggle callers invoke this
-/// inside the enclosing grab, whose ungrabAndFlush lands it atomically with
-/// geometry. The EWMH atoms are resolved by the fullscreen module and passed
-/// through; the fullscreen module's XCB_ATOM_NONE guard already ran.
-pub fn setEwmhFullscreen(
-    ctx: *Ctx,
-    win: model.WindowId,
-    state_atom: u32,
-    fs_atom: u32,
-    is_fullscreen: bool,
-) void {
-    ctx.sink.setEwmhFullscreen(win, state_atom, fs_atom, is_fullscreen);
-}
-
 /// Pipeline: last visible geometry we sent to `win`, or null when never sent
 /// / currently parked.
 pub fn lastRectFor(win: model.WindowId) ?utils.Rect {
     const e = sentGet(win) orelse return null;
-    if (e.parked) return null;
-    if (!e.has_rect) return null;
+    if (!e.has_rect or e.parked) return null;
     return e.rect;
 }
 
@@ -559,63 +466,34 @@ fn computeDesire(
     var pixel: u32 = ctx.color_of(win, m);
     var parked = false;
 
-    if (e.presence == .parked) {
+    if (e.presence == .parked or (e.presence == .covering and fs_win == null)) {
         markParked(&bw, &pixel, &parked);
     } else if (fs_win != null) {
         if (win == fs_win.?) {
             rect = ctx.screen;
             bw = 0;
             pixel = 0;
-        } else {
-            // Parked: rect irrelevant.
-            parked = true;
-        }
-    } else if (e.presence == .covering) {
-        // Fullscreen-carrying window NOT claimed by the coverage module
-        // for this workspace (its base isn't visible / its rec targets
-        // another ws): parked, matching the coverage scan that skipped it
-        // and the covering-parked model arm.
-        markParked(&bw, &pixel, &parked);
+        } else parked = true;
     } else switch (e.anchor) {
         .floating => |r| {
             rect = r;
             parked = !model.visibleOn(m, win, m.current);
         },
-        .tiled => {
-            if (findPlacement(placements, win)) |p| {
-                rect = p.rect;
-                parked = !p.visible;
-            } else if (model.visibleOn(m, win, m.current)) {
-                // Multi-tagged window whose home list isn't the shown
-                // ws: never hidden (no layout owns it here), so it stays
-                // at its previous real geometry, which is precisely the
-                // ledger's record of what we last sent.
-                // Park only when nothing was ever sent (first sight /
-                // registered offscreen).
-                if (!ledger.has_rect) {
-                    markParked(&bw, &pixel, &parked);
-                } else {
-                    rect = ledger.rect;
-                }
-            } else {
-                markParked(&bw, &pixel, &parked);
-            }
-        },
+        .tiled => if (findPlacement(placements, win)) |p| {
+            rect = p.rect;
+            parked = !p.visible;
+        } else if (model.visibleOn(m, win, m.current)) {
+            // Multi-tagged orphan never hidden; keep last-sent rect, park
+            // only when nothing was ever sent (first sight / offscreen).
+            if (!ledger.has_rect) markParked(&bw, &pixel, &parked)
+            else rect = ledger.rect;
+        } else markParked(&bw, &pixel, &parked),
     }
-    // Off-ws windows are parked by construction above (no placement /
-    // visibleOn false), which is exactly "mask lacks bit(shown)".
 
     // Fallback winner: first non-parked desire in store order.
     if (winner.* == null and !parked) winner.* = win;
     const is_winner = winner.* != null and winner.*.? == win;
-
-    return .{
-        .rect = rect,
-        .bw = bw,
-        .pixel = pixel,
-        .parked = parked,
-        .is_winner = is_winner,
-    };
+    return .{ .rect = rect, .bw = bw, .pixel = pixel, .parked = parked, .is_winner = is_winner };
 }
 
 fn findPlacement(placements: *const tiling.List, win: model.WindowId) ?tiling.Placement {

@@ -119,19 +119,7 @@ pub const KeybindResolver = struct {
         xkb_state: *xkbcommon.XkbState,
         allocator: std.mem.Allocator,
     ) void {
-        for (keybindings) |*kb| {
-            kb.keycode = xkb_state.keysymToKeycode(kb.keysym);
-            if (kb.keycode == null) {
-                var name_buf: [64]u8 = undefined;
-                const name = xkbcommon.keysymGetName(kb.keysym, &name_buf);
-                debug.warn(
-                    "Keybinding mods=0x{x:0>4} keysym={s} (0x{x}) resolves to no base " ++
-                        "keycode and will NOT be grabbed, shifted symbols such as \"@\" " ++
-                        "must be bound via their unshifted key name (e.g. \"2\")",
-                    .{ kb.modifiers, name, kb.keysym },
-                );
-            }
-        }
+        resolveKeycodes(keybindings, xkb_state);
         self.rebuildDispatchMap(keybindings, allocator);
     }
 
@@ -176,6 +164,22 @@ pub const KeybindResolver = struct {
         self.seen = .empty;
     }
 };
+
+pub fn resolveKeycodes(keybindings: []Keybind, state: *xkbcommon.XkbState) void {
+    for (keybindings) |*kb| {
+        kb.keycode = state.keysymToKeycode(kb.keysym);
+        if (kb.keycode == null) {
+            var name_buf: [64]u8 = undefined;
+            const name = xkbcommon.keysymGetName(kb.keysym, &name_buf);
+            debug.warn(
+                "Keybinding mods=0x{x:0>4} keysym={s} (0x{x}) resolves to no base " ++
+                    "keycode and will NOT be grabbed, shifted symbols such as \"@\" " ++
+                    "must be bound via their unshifted key name (e.g. \"2\")",
+                .{ kb.modifiers, name, kb.keysym },
+            );
+        }
+    }
+}
 
 // Tiling layout types
 
@@ -354,39 +358,24 @@ pub const IndicatorLocation = enum {
     const string_map = blk: {
         @setEvalBranchQuota(2000);
         const cardinals = [_]struct { []const u8, IndicatorLocation }{
-            .{ "up", .up },
-            .{ "down", .down },
-            .{ "left", .left },
-            .{ "right", .right },
+            .{ "up", .up }, .{ "down", .down }, .{ "left", .left }, .{ "right", .right },
         };
         const diags = [_]struct { []const u8, []const u8, IndicatorLocation }{
-            .{ "up", "left", .up_left },
-            .{ "up", "right", .up_right },
-            .{ "down", "left", .down_left },
-            .{ "down", "right", .down_right },
+            .{ "up", "left", .up_left }, .{ "up", "right", .up_right },
+            .{ "down", "left", .down_left }, .{ "down", "right", .down_right },
         };
-        var kvs: [cardinals.len + diags.len * 4]struct {
-            []const u8,
-            IndicatorLocation,
-        } = undefined;
+        var kvs: [cardinals.len + diags.len * 4]struct { []const u8, IndicatorLocation } = undefined;
         var n: usize = 0;
         for (cardinals) |c| {
             kvs[n] = c;
             n += 1;
         }
-        for (diags) |d| {
-            const a = d[0];
-            const b = d[1];
-            const v = d[2];
-            kvs[n] = .{ a ++ "-" ++ b, v };
+        for (diags) |d| for (.{ "-", "_" }) |sep| {
+            kvs[n] = .{ d[0] ++ sep ++ d[1], d[2] };
             n += 1;
-            kvs[n] = .{ a ++ "_" ++ b, v };
+            kvs[n] = .{ d[1] ++ sep ++ d[0], d[2] };
             n += 1;
-            kvs[n] = .{ b ++ "-" ++ a, v };
-            n += 1;
-            kvs[n] = .{ b ++ "_" ++ a, v };
-            n += 1;
-        }
+        };
         break :blk std.StaticStringMap(IndicatorLocation).initComptime(kvs[0..n]);
     };
 };
@@ -523,21 +512,17 @@ pub const BarConfig = struct {
         freeStrings(&self.fonts, allocator, false);
         for (self.layout.items) |*item| item.deinit(allocator);
         self.layout.deinit(allocator);
-        if (self.clock_format) |s| allocator.free(s);
-        if (self.drun_prompt) |s| allocator.free(s);
-        if (self.indicator_focused) |s| allocator.free(s);
-        if (self.indicator_unfocused) |s| allocator.free(s);
+        inline for (.{ &self.clock_format, &self.drun_prompt,
+            &self.indicator_focused, &self.indicator_unfocused }) |f| if (f.*) |s| allocator.free(s);
     }
 
-    pub inline fn drunBg(self: *const BarConfig) Color {
-        return self.drun_bg orelse self.bg;
+    fn drunColor(self: *const BarConfig, comptime color_field: []const u8, comptime fallback_field: []const u8) Color {
+        return @field(self, color_field) orelse @field(self, fallback_field);
     }
-    pub inline fn drunFg(self: *const BarConfig) Color {
-        return self.drun_fg orelse self.fg;
-    }
-    pub inline fn drunPromptColor(self: *const BarConfig) Color {
-        return self.drun_prompt_color orelse self.accent_color;
-    }
+
+    pub inline fn drunBg(self: *const BarConfig) Color { return self.drunColor("drun_bg", "bg"); }
+    pub inline fn drunFg(self: *const BarConfig) Color { return self.drunColor("drun_fg", "fg"); }
+    pub inline fn drunPromptColor(self: *const BarConfig) Color { return self.drunColor("drun_prompt_color", "accent_color"); }
 
     /// Derives horizontal segment padding from font_size.
     /// Percentage path: margin = (bar_height - font_height) / 2, scaled.

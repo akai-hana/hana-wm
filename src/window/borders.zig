@@ -29,13 +29,7 @@ pub fn color(win: u32) u32 {
 /// Returns the effective border width for tiled windows. Falls back to
 /// the scaled config value when tiling is disabled or not compiled in.
 pub fn width() u16 {
-    const bw: u16 = if (build_options.has_tiling) core.borderWidth() else 0;
-    if (bw != 0) return bw;
-    const cs = core.getState();
-    return utils.scaling.scaleBorderWidth(
-        cs.config.tiling.border_width,
-        cs.screen.height_in_pixels,
-    );
+    return core.borderWidth();
 }
 
 /// Applies the configured border width to `win`, skipping the configure
