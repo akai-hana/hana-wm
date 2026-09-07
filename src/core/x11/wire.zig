@@ -44,24 +44,30 @@ pub inline fn rectFromXcb(
 // ---------------------------------------------------------------------------
 // Configure/raise/park primitives
 
+/// Moves and resizes `win`, optionally merging a stack mode into the same
+/// request (XCB consumes value slots by mask bit; the extra slot is ignored
+/// when the stack-mode mask bit is clear).
+pub inline fn configureWindowStackMode(
+    conn: Connection,
+    win: u32,
+    rect: utils.Rect,
+    stack_mode: ?u32,
+) void {
+    if (stack_mode) |sm| {
+        const mask = xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
+            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
+            xcb.XCB_CONFIG_WINDOW_STACK_MODE;
+        _ = xcb.xcb_configure_window(conn, win, mask, &[_]u32{ utils.toXcbCoord(rect.x), utils.toXcbCoord(rect.y), rect.width, rect.height, sm });
+    } else configureWindow(conn, win, rect);
+}
+
 /// Moves and resizes `win` without touching border_width.
 pub inline fn configureWindow(conn: Connection, win: u32, rect: utils.Rect) void {
-    _ = xcb.xcb_configure_window(
-        conn,
-        win,
-        xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
-            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT,
-        &[_]u32{ utils.toXcbCoord(rect.x), utils.toXcbCoord(rect.y), rect.width, rect.height },
-    );
+    configureWindowStackMode(conn, win, rect, null);
 }
 
 pub inline fn raiseWindow(conn: Connection, win: u32) void {
-    _ = xcb.xcb_configure_window(
-        conn,
-        win,
-        xcb.XCB_CONFIG_WINDOW_STACK_MODE,
-        &[_]u32{xcb.XCB_STACK_MODE_ABOVE},
-    );
+    _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
 }
 
 pub inline fn setBorderPixel(conn: Connection, win: u32, pixel: u32) void {
@@ -256,24 +262,8 @@ pub fn advertiseEwmhSupport(conn: Connection, screen: Screen, root: u32) void {
     // A small, invisible identity window. Override-redirect so hana's own
     // SubstructureRedirect handling never tries to manage it as a client.
     const check_win = xcb.xcb_generate_id(conn);
-    const depth: u8 = xcb.XCB_COPY_FROM_PARENT;
-    const value_mask = xcb.XCB_CW_OVERRIDE_REDIRECT;
-    const value_list = [_]u32{1};
-    _ = xcb.xcb_create_window(
-        conn,
-        depth,
-        check_win,
-        root,
-        -1,
-        -1,
-        1,
-        1,
-        0,
-        xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT,
-        screen.root_visual,
-        @intCast(value_mask),
-        &value_list,
-    );
+    _ = xcb.xcb_create_window(conn, xcb.XCB_COPY_FROM_PARENT, check_win, root, -1, -1, 1, 1, 0,
+        xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, screen.root_visual, @intCast(xcb.XCB_CW_OVERRIDE_REDIRECT), &[_]u32{1});
 
     // Identity dance required by the spec: the check window points at
     // itself, and the root points at the check window. Clients compare the
@@ -388,10 +378,7 @@ pub fn fetchPropertyToBuffer(
     const r = reply.*;
     if (r.format != 8 or r.value_len == 0 or r.type != atom_type) return null;
     if (r.value_len == max_property_length)
-        debug.warn(
-            "Property atom {x} on window {x} exceeds the {}-byte fetch cap; value truncated",
-            .{ atom, window, max_property_length },
-        );
+        debug.warn("Property atom {x} on window {x} exceeds the {}-byte fetch cap; value truncated", .{ atom, window, max_property_length });
 
     const len: usize = @intCast(r.value_len);
     if (len > buffer.len) return null;

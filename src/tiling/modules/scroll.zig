@@ -45,11 +45,7 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
     const scroll: i32 = @max(0, @min(v.params.viewport_offset, max_off));
 
     // Border subtracted here (once); emitView's applyHints never touches it.
-    const content_h: u16 = tiling.shrinkClamped(
-        screen_h,
-        m.gap *| 2 +| m.border *| 2,
-        v.env.min_dim,
-    );
+    const content_h: u16 = tiling.shrinkClamped(screen_h, m.gap *| 2 +| m.border *| 2, v.env.min_dim);
     const win_y: i32 = @as(i32, @intCast(tiling.waY(&v))) + @as(i32, @intCast(m.gap));
 
     // Full gap at screen edges; half-gap at interior slot boundaries so that
@@ -69,27 +65,15 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
 
         const x: i32 = slot_left + left_inset;
         const avail: i32 = slot_w - left_inset - right_inset - border2;
-        const content_w: u16 = if (avail > v.env.min_dim)
-            @intCast(avail)
-        else
-            v.env.min_dim;
+        const content_w: u16 = if (avail > v.env.min_dim) @intCast(avail) else v.env.min_dim;
 
         const right: i32 = x + avail + border2;
 
         // Slots entirely off-viewport are parked by the algorithm itself
         // (visibility modeled; sync owns the actual parking geometry).
         // The computed x can exceed i16 range, hence this check BEFORE casting.
-        if (x >= sw_i32 or right <= 0) {
-            tiling.emitHidden(out, win);
-            continue;
-        }
-        const rect = utils.Rect{
-            .x = @intCast(x),
-            .y = @intCast(win_y),
-            .width = content_w,
-            .height = content_h,
-        };
-        tiling.emitView(&v, out, win, rect, true);
+        if (x >= sw_i32 or right <= 0) { tiling.emitHidden(out, win); continue; }
+        tiling.emitView(&v, out, win, .{ .x = @intCast(x), .y = @intCast(win_y), .width = content_w, .height = content_h }, true);
     }
 }
 
@@ -106,11 +90,8 @@ fn preReconcileHook(p: *anyopaque, n: usize, wa_width: u16) void {
 }
 
 /// This layout's registry contribution: metadata plus the dispatch hooks.
-pub const module: @import("plugin").Layout = .{
-    .name = "scroll",
-    .compute = tiling.computeHook(compute),
+pub const module = tiling.layoutModule("scroll", "[|]", compute, .{
     .slotWidth = slotWidth,
     .maxOffset = maxOffset,
     .preReconcile = preReconcileHook,
-    .icon = "[|]",
-};
+});

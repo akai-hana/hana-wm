@@ -98,46 +98,43 @@ pub inline fn isPrintableAscii(sym: xcb.xcb_keysym_t) bool {
 }
 
 pub fn handleCtrl(_: *EditorState, sym: xcb.xcb_keysym_t) Action {
-    if (sym == 'c') return .deactivate;
-    return .none;
+    return if (sym == 'c') .deactivate else .none;
 }
 
 pub fn handleInsertBasic(es: *EditorState, sym: xcb.xcb_keysym_t) Action {
-    if (sym == xk_escape) return .deactivate;
+    return if (sym == xk_escape) .deactivate else insertChar(es, sym);
+}
+
+/// Shared insert-mode editing for a printable/control key: text insertion and
+/// cursor navigation, returning .none. Escape is invisible here: callers add
+/// the escape exit themselves (handleInsertBasic deactivates, the vim overlay
+/// calls exitToNormal).
+pub fn insertChar(es: *EditorState, sym: xcb.xcb_keysym_t) Action {
     switch (sym) {
         xk_return => return .spawn,
-        xk_back_space => {
-            if (es.cursor > 0) {
-                std.mem.copyForwards(
-                    u8,
-                    es.buf[es.cursor - 1 .. es.len - 1],
-                    es.buf[es.cursor..es.len],
-                );
-                es.cursor -= 1;
-                es.len -= 1;
-            }
+        xk_back_space => if (es.cursor > 0) {
+            std.mem.copyForwards(
+                u8,
+                es.buf[es.cursor - 1 .. es.len - 1],
+                es.buf[es.cursor..es.len],
+            );
+            es.cursor -= 1;
+            es.len -= 1;
         },
-        xk_delete => {
-            if (es.cursor < es.len) {
-                std.mem.copyForwards(
-                    u8,
-                    es.buf[es.cursor .. es.len - 1],
-                    es.buf[es.cursor + 1 .. es.len],
-                );
-                es.len -= 1;
-            }
+        xk_delete => if (es.cursor < es.len) {
+            std.mem.copyForwards(
+                u8,
+                es.buf[es.cursor .. es.len - 1],
+                es.buf[es.cursor + 1 .. es.len],
+            );
+            es.len -= 1;
         },
-        xk_left => {
-            if (es.cursor > 0) es.cursor -= 1;
-        },
-        xk_right => {
-            if (es.cursor < es.len) es.cursor += 1;
-        },
+        xk_left => { if (es.cursor > 0) es.cursor -= 1; },
+        xk_right => { if (es.cursor < es.len) es.cursor += 1; },
         xk_home => es.cursor = 0,
         xk_end => es.cursor = es.len,
         else => if (isPrintableAscii(sym)) {
-            const ch: u8 = @truncate(sym);
-            insertSlice(es, &[1]u8{ch});
+            const ch: u8 = @truncate(sym); insertSlice(es, &[1]u8{ch});
         },
     }
     return .none;
@@ -296,10 +293,8 @@ pub fn isActive() bool {
 /// wakes exactly when a redraw is needed.  Non-negative only while the
 /// prompt is active in insert mode.
 pub fn blinkPollTimeoutMs() i32 {
-    if (!g.is_active) return -1;
-    if (g.vim_state.mode == .insert)
-        return cursor_blink_ms;
-    return -1;
+    if (!g.is_active or g.vim_state.mode != .insert) return -1;
+    return cursor_blink_ms;
 }
 
 /// Toggle cursor blink visibility; called by the bar's blink timer.  Flags a
@@ -365,9 +360,8 @@ pub fn deinit(allocator: std.mem.Allocator) void {
         g.key_syms = null;
     }
     if (g.vim_state.buf.len != 0) g.vim_state.deinit();
-    if (g.hist_entries.len != 0) g.allocator.free(g.hist_entries);
-    if (g.ghost_buf.len != 0) g.allocator.free(g.ghost_buf);
-    if (g.comp_names.len != 0) g.allocator.free(g.comp_names);
+    for ([_]*[]u8{ &g.hist_entries, &g.ghost_buf, &g.comp_names }) |p|
+        if (p.*.len != 0) g.allocator.free(p.*);
     g = .{};
 }
 
@@ -387,16 +381,11 @@ fn closeWindowOrPromptUnderCursor() bool {
 
     const child: u32 = if (ptr_reply) |r| r.*.child else 0;
 
-    if (g.handlers) |h| {
-        if (h.isBarWindow(child)) {
-            deactivate();
-            return true;
-        }
-    }
-    if (child == 0 or child == cs.root) {
+    if (g.handlers) |h| if (h.isBarWindow(child)) {
+        deactivate();
         return true;
-    }
-    return false;
+    };
+    return child == 0 or child == cs.root;
 }
 
 /// Complete key-event routing entry point called by `input.zig`.
@@ -485,7 +474,10 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
 /// the ghost suggestion (a mode handler may have deleted or inserted text),
 /// and schedule a redraw.  Returns true (event consumed).
 fn finishKeyPress(action: Action, refresh_blink: bool) bool {
-    applyAction(action);
+    const prev_len = g.vim_state.len;
+    handleAction(action);
+    if (g.vim_state.len != prev_len)
+        g.has_space = std.mem.indexOfScalar(u8, g.vim_state.buf[0..g.vim_state.len], ' ') != null;
     updateGhost();
     if (refresh_blink) g.is_blink_visible = true;
     g.layout_dirty = true;
@@ -501,9 +493,7 @@ fn acceptGhost() bool {
         @min(g.ghost_len, g.vim_state.max_input - 1 - g.vim_state.len)
     else
         0;
-    if (n_ghost > 0) {
-        insertSlice(&g.vim_state, g.ghost_buf[0..n_ghost]);
-    }
+    if (n_ghost > 0) insertSlice(&g.vim_state, g.ghost_buf[0..n_ghost]);
     return finishKeyPress(.none, true);
 }
 
@@ -514,16 +504,6 @@ pub fn draw(ctx: *segmod.DrawCtx, x: u16) !u16 {
     // While covered, title's pollTimeoutMsHook contributes no marquee wakeup
     // (title owns that decision), so no explicit carousel pause is needed here.
     return drawActive(ctx.dc, ctx.config, ctx.height, x, ctx.width);
-}
-
-/// Runs `action` through handleAction, then resyncs g.has_space if the buffer
-/// length changed.  Shared by the Ctrl-key and normal-key paths in
-/// handleKeyPress, which otherwise duplicated this exact sequence.
-fn applyAction(action: Action) void {
-    const prev_len = g.vim_state.len;
-    handleAction(action);
-    if (g.vim_state.len != prev_len)
-        g.has_space = std.mem.indexOfScalar(u8, g.vim_state.buf[0..g.vim_state.len], ' ') != null;
 }
 
 /// Dispatches a vim.Action returned by a mode handler: executes/closes on spawn,
@@ -671,7 +651,8 @@ fn offerCompletion(name: []const u8) bool {
 }
 
 /// Binary searches the sorted completion table for the first entry >= `prefix`.
-/// Returns the insertion index (0..comp_count); use with compExistsExact for lookup.
+/// Returns the insertion index (0..comp_count); existence is an eql() at the
+/// returned index, inlined at the call site.
 fn compLowerBound(prefix: []const u8) usize {
     var lo: usize = 0;
     var hi: usize = g.comp_count;
@@ -680,14 +661,6 @@ fn compLowerBound(prefix: []const u8) usize {
         if (std.mem.order(u8, compName(mid), prefix) == .lt) lo = mid + 1 else hi = mid;
     }
     return lo;
-}
-
-/// Returns true when `name` exists verbatim in the sorted completion table.
-/// Delegates to `compLowerBound` to avoid duplicating the binary-search logic.
-fn compExistsExact(name: []const u8) bool {
-    const idx = compLowerBound(name);
-    if (idx >= g.comp_count) return false;
-    return std.mem.eql(u8, compName(idx), name);
 }
 
 fn compName(i: usize) []const u8 {
@@ -714,9 +687,8 @@ inline fn setGhost(suffix: []const u8) void {
 fn updateGhost() void {
     g.ghost_len = 0;
 
-    if (g.vim_state.mode != .insert) return;
-    if (g.vim_state.len == 0 or g.vim_state.cursor != g.vim_state.len) return;
-    if (g.has_space) return;
+    if (g.vim_state.mode != .insert or g.vim_state.len == 0 or
+        g.vim_state.cursor != g.vim_state.len or g.has_space) return;
 
     const prefix = g.vim_state.buf[0..g.vim_state.len];
 
@@ -730,11 +702,10 @@ fn updateGhost() void {
         const cmd_end = std.mem.indexOfScalar(u8, entry, ' ') orelse entry.len;
         const cmd_tok = entry[0..cmd_end];
 
-        if (cmd_tok.len <= prefix.len) continue;
-        if (!std.mem.startsWith(u8, cmd_tok, prefix)) continue;
-        if (!compExistsExact(cmd_tok)) continue;
-
-        return setGhost(cmd_tok[prefix.len..]);
+        if (cmd_tok.len <= prefix.len or !std.mem.startsWith(u8, cmd_tok, prefix)) continue;
+        const idx = compLowerBound(cmd_tok);
+        if (idx < g.comp_count and std.mem.eql(u8, compName(idx), cmd_tok))
+            return setGhost(cmd_tok[prefix.len..]);
     }
 
     // 2. Fallback: shortest executable that starts with prefix.
@@ -826,15 +797,14 @@ fn histLoadFile(path: []const u8) void {
     // can't push recent entries out of the fixed read; a partial
     // line at the window head is dropped below.
     const fsize: u64 = if (file.stat(io) catch null) |st| st.size else 0;
-    const from_tail = fsize > hist_read_window;
-    const read_off: u64 = if (from_tail) fsize - hist_read_window else 0;
+    const read_off: u64 = if (fsize > hist_read_window) fsize - hist_read_window else 0;
 
     const file_buf = g.allocator.alloc(u8, hist_read_window) catch return;
     defer g.allocator.free(file_buf);
     const n_read = file.readPositionalAll(io, file_buf, read_off) catch return;
     if (n_read == 0) return;
     var text = file_buf[0..n_read];
-    if (from_tail) {
+    if (read_off > 0) {
         // Drop the cut-mid-line fragment at the window start; its real
         // content lives in the unread region before the window.
         const nl = std.mem.indexOfScalar(u8, text, '\n') orelse return;
@@ -937,48 +907,32 @@ fn spawnCommand(cmd: []const u8) void {
     }
 }
 
-/// Binary search: first byte offset where `measureTextWidth(text[0..offset])
-/// >= target_px`. Returns `text.len` when the whole string is narrower.
-/// Maps a pixel scroll offset back to a character boundary (moved here from
-/// drawing.zig: prompt is its only consumer).
-fn offsetAtPx(dc: *drawing.DrawContext, text: []const u8, target_px: u16) usize {
+const WidthRel = enum { ge, gt };
+
+/// Binary search: first byte offset where `measureTextWidth(text[0..offset])`
+/// is `>= t` (ge) or `> t` (gt). Returns `text.len` when no index satisfies
+/// it. Mapped a pixel scroll offset to a character boundary (ge) or finds the
+/// first index overflowing a width cap (gt); moved here from drawing.zig
+/// (prompt is its only consumer).
+fn measureBound(dc: *drawing.DrawContext, text: []const u8, t: u16, comptime rel: WidthRel) usize {
     var lo: usize = 0;
     var hi: usize = text.len;
     while (lo < hi) {
         const mid = lo + (hi - lo) / 2;
-        if (dc.measureTextWidth(text[0..mid]) < target_px) lo = mid + 1 else hi = mid;
+        const w = dc.measureTextWidth(text[0..mid]);
+        const past = if (rel == .ge) w >= t else w > t;
+        if (!past) lo = mid + 1 else hi = mid;
     }
     return lo;
 }
 
-/// Return the longest prefix of `text` whose pixel width is <= `max_px`.
-/// Fast path: full slice when the text already fits (`known_w` skips the
-/// initial full-text measurement when the caller already has it: moved
-/// here from drawing.zig; prompt is its only consumer).
-fn fitPrefix(dc: *drawing.DrawContext, text: []const u8, max_px: u16, known_w: ?u16) []const u8 {
-    const w = known_w orelse dc.measureTextWidth(text);
-    if (w <= max_px) return text;
-    var lo: usize = 0;
-    var hi: usize = text.len;
-    while (lo < hi) {
-        const mid = lo + (hi - lo + 1) / 2; // round up to avoid infinite loop
-        if (dc.measureTextWidth(text[0..mid]) <= max_px) lo = mid else hi = mid - 1;
-    }
-    return text[0..lo];
-}
-
-/// Draw `text` with hard pixel clipping to `[text_left_x, scroll_end_x)`.
-///
-/// `px` is the virtual pen position (scroll-space, may be negative), always
-/// advanced by the full text width whether or not anything is drawn; callers
-/// rely on this to keep the pen consistent.
-///
-/// Both edges clip without ellipsis: characters whose right edges fall before
-/// `text_left_x` are skipped; characters past `scroll_end_x` are dropped:
-/// correct for pre-cursor text, where the caret must sit right after the last
-/// visible character.  `text_w` is the caller's already-measured width (null to
-/// measure here), avoiding a second Pango pass.
-inline fn drawSpan(
+/// Draw `text` from the virtual pen `px` clipped to `[text_left_x, scroll_end_x)`.
+/// Non-post (`post=false`) is the pre-cursor span: hard-clips both edges without
+/// ellipsis and always advances `px.*` by the full text width, using the caller's
+/// measured `text_w` (null to measure here). Post (`post=true`) ellipsizes on
+/// overflow to the right edge and never advances the pen.
+inline fn drawScrollSpan(
+    comptime post: bool,
     dc: *drawing.DrawContext,
     px: *i32,
     text_left_x: u16,
@@ -988,6 +942,14 @@ inline fn drawSpan(
     text_w: ?u16,
     color: u32,
 ) !void {
+    if (post) {
+        if (text.len == 0 or px.* >= @as(i32, scroll_end_x)) return;
+        const draw_x: u16 = @intCast(@max(px.*, @as(i32, text_left_x)));
+        const remaining: u16 = scroll_end_x -| draw_x;
+        if (remaining > 0)
+            try dc.drawTextEllipsis(draw_x, baseline, text, remaining, color);
+        return;
+    }
     const w = text_w orelse dc.measureTextWidth(text);
     defer px.* += @intCast(w);
     if (w == 0) return;
@@ -999,56 +961,23 @@ inline fn drawSpan(
     if (px.* + @as(i32, w) <= tl or px.* >= se) return;
 
     // Skip the prefix that lies off-screen to the left.
-    const start: usize = if (px.* < tl)
-        offsetAtPx(dc, text, @intCast(tl - px.*))
-    else
-        0;
+    const start: usize = if (px.* < tl) measureBound(dc, text, @intCast(tl - px.*), .ge) else 0;
 
     const draw_x: u16 = @intCast(@max(px.*, tl));
     const available: u16 = @intCast(se - @as(i32, draw_x));
 
     // Clip the visible suffix to the available width on the right.  When no
-    // left clip occurred, `w` is already the full width, so pass it to
-    // fitPrefix known_w to avoid a redundant full-text Pango measurement.
-    const visible = if (start == 0)
-        (if (w <= available) text else fitPrefix(dc, text, available, w))
-    else
-        fitPrefix(dc, text[start..], available, null);
+    // left clip occurred and the full text fits, `w` (already measured) skips
+    // the binary-search pass entirely.
+    const suffix = text[start..];
+    const visible = if (start == 0 and w <= available)
+        text
+    else blk: {
+        const sb = measureBound(dc, suffix, available, .gt);
+        break :blk if (sb < suffix.len) suffix[0 .. sb - 1] else suffix;
+    };
     if (visible.len > 0)
         try dc.drawText(draw_x, baseline, visible, color);
-}
-
-/// Draw `text` from `px` to the right edge, ellipsizing on overflow.
-inline fn drawPostSpan(
-    dc: *drawing.DrawContext,
-    px: i32,
-    text_left_x: u16,
-    scroll_end_x: u16,
-    baseline: u16,
-    text: []const u8,
-    color: u32,
-) !void {
-    if (text.len == 0 or px >= @as(i32, scroll_end_x)) return;
-    const draw_x: u16 = @intCast(@max(px, @as(i32, text_left_x)));
-    const remaining: u16 = scroll_end_x -| draw_x;
-    if (remaining > 0)
-        try dc.drawTextEllipsis(draw_x, baseline, text, remaining, color);
-}
-
-/// Compute the clamped `draw_x` and `vis_w` for a block cursor or selection
-/// highlight.  Returns null when the block is entirely off-screen.
-inline fn cursorBlockGeom(
-    px: i32,
-    block_w: u16,
-    text_left_x: u16,
-    scroll_end_x: u16,
-) ?struct { draw_x: u16, vis_w: u16 } {
-    if (px + @as(i32, block_w) <= @as(i32, text_left_x) or px >= @as(i32, scroll_end_x))
-        return null;
-    const draw_x: u16 = @intCast(@max(px, @as(i32, text_left_x)));
-    const vis_w: u16 = @intCast(@min(@as(i32, block_w), @as(i32, scroll_end_x) - px));
-    if (vis_w == 0) return null;
-    return .{ .draw_x = draw_x, .vis_w = vis_w };
 }
 
 const CursorStyle = struct {
@@ -1077,16 +1006,20 @@ inline fn drawBlockCursor(
     const block_text = if (hi > lo) buf[lo..hi] else " ";
     const block_w = @max(text_w orelse dc.measureTextWidth(block_text), min_cursor_px);
 
-    if (cursorBlockGeom(px.*, block_w, style.text_left_x, style.scroll_end_x)) |block| {
-        dc.fillRect(
-            block.draw_x,
-            cursor_v_pad,
-            block.vis_w,
-            style.height -| cursor_v_pad * 2,
-            style.accent,
-        );
-        if (hi > lo)
-            try dc.drawText(block.draw_x, style.baseline, block_text, style.bg);
+    if (px.* + @as(i32, block_w) > @as(i32, style.text_left_x) and px.* < @as(i32, style.scroll_end_x)) {
+        const draw_x: u16 = @intCast(@max(px.*, @as(i32, style.text_left_x)));
+        const vis_w: u16 = @intCast(@min(@as(i32, block_w), @as(i32, style.scroll_end_x) - px.*));
+        if (vis_w > 0) {
+            dc.fillRect(
+                draw_x,
+                cursor_v_pad,
+                vis_w,
+                style.height -| cursor_v_pad * 2,
+                style.accent,
+            );
+            if (hi > lo)
+                try dc.drawText(draw_x, style.baseline, block_text, style.bg);
+        }
     }
     px.* += @intCast(block_w);
 }
@@ -1129,10 +1062,7 @@ fn refreshLayoutCache(
 ) void {
     if (!g.layout_dirty and height == g.cached_height) return;
 
-    if (g.layout_dirty) {
-        // Full remeasure on dirty flag (keypress changed text/cursor/mode).
-        g.cached_pre_w = dc.measureTextWidth(pre_cur_text);
-    }
+    if (g.layout_dirty) g.cached_pre_w = dc.measureTextWidth(pre_cur_text);
     // When !layout_dirty: only height changed; text and cursor are unchanged,
     // so cached_pre_w remains valid.
     g.cached_caret_w = if (g.vim_state.mode == .insert)
@@ -1155,11 +1085,11 @@ fn refreshLayoutCache(
         // character begins past it in virtual space: a phantom gap next to the
         // caret.
         if (min_scroll <= prompt_w) {
-            const idx = offsetAtPx(dc, prompt, min_scroll);
+            const idx = measureBound(dc, prompt, min_scroll, .ge);
             scroll_x = dc.measureTextWidth(prompt[0..idx]);
         } else {
             const min_in_pre: u16 = min_scroll - prompt_w;
-            const idx = offsetAtPx(dc, pre_cur_text, min_in_pre);
+            const idx = measureBound(dc, pre_cur_text, min_in_pre, .ge);
             scroll_x = prompt_w + dc.measureTextWidth(pre_cur_text[0..idx]);
         }
     }
@@ -1245,15 +1175,7 @@ fn drawInsertMode(
 
     // Ghost text (only when cursor is at end).
     if (g.ghost_len > 0 and g.vim_state.cursor == g.vim_state.len)
-        try drawPostSpan(
-            dc,
-            px.*,
-            text_left_x,
-            scroll_end_x,
-            baseline,
-            g.ghost_buf[0..g.ghost_len],
-            accent,
-        );
+        try drawScrollSpan(true, dc, px, text_left_x, scroll_end_x, baseline, g.ghost_buf[0..g.ghost_len], null, accent);
 }
 
 /// NORMAL: full-character block cursor. Post-cursor text is drawn by the
@@ -1268,16 +1190,10 @@ fn drawNormalMode(
     accent: u32,
     bg: u32,
 ) !void {
-    const cur_hi = @min(g.vim_state.cursor + 1, g.vim_state.len);
+    const cur_hi = @min(g.vim_state.cursor + @intFromBool(g.vim_state.mode != .insert), g.vim_state.len);
 
-    const style: CursorStyle = .{
-        .text_left_x = text_left_x,
-        .scroll_end_x = scroll_end_x,
-        .baseline = baseline,
-        .height = height,
-        .accent = accent,
-        .bg = bg,
-    };
+    const style: CursorStyle = .{ .text_left_x = text_left_x, .scroll_end_x = scroll_end_x,
+        .baseline = baseline, .height = height, .accent = accent, .bg = bg };
     try drawBlockCursor(
         dc,
         px,
@@ -1332,55 +1248,26 @@ fn drawActive(
     // full-character block.
     const pre_cur_text = g.vim_state.buf[0..g.vim_state.cursor];
     refreshLayoutCache(dc, height, prompt, prompt_w, pre_cur_text, max_scroll_px);
-    const scroll_x = g.cached_scroll_x;
 
     // Draw prompt.
-    var px: i32 = @as(i32, text_left_x) - @as(i32, scroll_x);
-    try drawSpan(dc, &px, text_left_x, scroll_end_x, baseline, prompt, prompt_w, accent);
+    var px: i32 = @as(i32, text_left_x) - @as(i32, g.cached_scroll_x);
+    try drawScrollSpan(false, dc, &px, text_left_x, scroll_end_x, baseline, prompt, prompt_w, accent);
 
     // Pre-cursor span: rendered identically as the first step of BOTH modes,
     // so it's hoisted here and the branch bodies carry only what differs.
     if (pre_cur_text.len > 0)
-        try drawSpan(
-            dc,
-            &px,
-            text_left_x,
-            scroll_end_x,
-            baseline,
-            pre_cur_text,
-            g.cached_pre_w,
-            fg,
-        );
+        try drawScrollSpan(false, dc, &px, text_left_x, scroll_end_x, baseline, pre_cur_text, g.cached_pre_w, fg);
 
     // Mode-specific caret/ghost rendering; post-cursor text is common to both
     // (the block cursor advances px past its own character in NORMAL, the
     // caret consumes none in INSERT), so it is drawn once below.
     switch (g.vim_state.mode) {
-        .insert => try drawInsertMode(
-            dc,
-            baseline,
-            text_left_x,
-            scroll_end_x,
-            &px,
-            accent,
-        ),
-        else => try drawNormalMode(
-            dc,
-            height,
-            baseline,
-            text_left_x,
-            scroll_end_x,
-            &px,
-            accent,
-            bg,
-        ),
+        .insert => try drawInsertMode(dc, baseline, text_left_x, scroll_end_x, &px, accent),
+        else => try drawNormalMode(dc, height, baseline, text_left_x, scroll_end_x, &px, accent, bg),
     }
 
-    const post_start = if (g.vim_state.mode == .insert)
-        g.vim_state.cursor
-    else
-        @min(g.vim_state.cursor + 1, g.vim_state.len);
-    try drawPostSpan(dc, px, text_left_x, ellipsis_end_x, baseline, g.vim_state.buf[post_start..g.vim_state.len], fg);
+    const post_start = @min(g.vim_state.cursor + @intFromBool(g.vim_state.mode != .insert), g.vim_state.len);
+    try drawScrollSpan(true, dc, &px, text_left_x, ellipsis_end_x, baseline, g.vim_state.buf[post_start..g.vim_state.len], null, fg);
 
     // No blitRegion here: the prompt draws as a segment inside performDraw,
     // whose end-of-batch queueBlit copies the whole frame (and the caller

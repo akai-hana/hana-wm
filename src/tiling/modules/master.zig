@@ -125,13 +125,7 @@ fn tileColumn(
 
     var y: u16 = y_offset +| m.gap +| pad_top;
     for (windows, 0..) |win, i| {
-        const rect = utils.Rect{
-            .x = @intCast(x),
-            .y = @intCast(y),
-            .width = inner_w,
-            .height = heights[i],
-        };
-        tiling.emitView(v, out, win, rect, true);
+        tiling.emitView(v, out, win, .{ .x = @intCast(x), .y = @intCast(y), .width = inner_w, .height = heights[i] }, true);
         y = y +| heights[i] +| m.gap +| 2 *| m.border;
     }
 }
@@ -139,10 +133,6 @@ fn tileColumn(
 /// Packed bit-bag test/set over the capped-window flags.
 inline fn bitIsSet(bits: []u8, i: usize) bool {
     return bits[i / 8] & (@as(u8, 1) << @intCast(i % 8)) != 0;
-}
-
-inline fn bitSet(bits: []u8, i: usize) void {
-    bits[i / 8] |= @as(u8, 1) << @intCast(i % 8);
 }
 
 /// Leftover budget after the water-filling pass: the pixels, total weight,
@@ -168,7 +158,7 @@ fn findCappedWindows(
     @memset(capped, 0);
 
     var remaining_avail = avail;
-    var remaining_weight: f32 = totalWeight(n, boost);
+    var remaining_weight: f32 = @as(f32, @floatFromInt(n)) + boost.top + boost.bottom;
     var remaining_count: u16 = n;
     const zero_boost = boost.isZero();
 
@@ -184,10 +174,10 @@ fn findCappedWindows(
                 @intFromFloat(@as(f32, @floatFromInt(remaining_avail)) * w_i / remaining_weight)
             else
                 0;
-            const max_h = windowMaxHeight(v, win);
+            const max_h = v.hints.forWin(win).max_height;
             if (max_h > 0 and max_h <= fair_share) {
                 out[i] = @max(min_dim, max_h);
-                bitSet(capped, i);
+                capped[i / 8] |= @as(u8, 1) << @intCast(i % 8);
                 remaining_avail = remaining_avail -| out[i];
                 remaining_weight -= w_i;
                 remaining_count -= 1;
@@ -203,29 +193,15 @@ fn findCappedWindows(
     };
 }
 
-/// Assigns heights to uncapped windows using plain even division (zero boost).
-fn distributeEven(
-    windows: []const model.WindowId,
-    capped: []u8,
-    remaining_count: u16,
-    remaining_avail: u16,
-    min_dim: u16,
-    out: []u16,
-) void {
-    var seen: u16 = 0;
-    for (windows, 0..) |_, i| {
-        if (bitIsSet(capped, i)) continue;
-        out[i] = windowHeight(seen, remaining_count, remaining_avail, min_dim);
-        seen += 1;
-    }
-}
-
-/// Assigns heights to uncapped windows using weighted cumulative division.
-fn distributeWeighted(
+/// Assigns heights to uncapped windows: even division (zero boost) when
+/// `weighted` is false, else weighted cumulative division.
+fn distributeHeights(
+    weighted: bool,
     windows: []const model.WindowId,
     boost: StackBoost,
     capped: []u8,
     remaining_weight: f32,
+    remaining_count: u16,
     remaining_avail: u16,
     min_dim: u16,
     out: []u16,
@@ -233,16 +209,21 @@ fn distributeWeighted(
     const n: u16 = @intCast(windows.len);
     var cum: f32 = 0;
     var prev_px: f32 = 0;
+    var seen: u16 = 0;
     for (windows, 0..) |_, i| {
         if (bitIsSet(capped, i)) continue;
-        cum += windowWeight(@intCast(i), n, boost);
-        const px: f32 = if (remaining_weight > 0)
-            @round(@as(f32, @floatFromInt(remaining_avail)) * cum / remaining_weight)
-        else
-            0;
-        const h: u16 = @intFromFloat(@max(@as(f32, 0), px - prev_px));
-        out[i] = @max(min_dim, h);
-        prev_px = px;
+        if (weighted) {
+            cum += windowWeight(@intCast(i), n, boost);
+            const px: f32 = if (remaining_weight > 0)
+                @round(@as(f32, @floatFromInt(remaining_avail)) * cum / remaining_weight)
+            else
+                0;
+            out[i] = @max(min_dim, @as(u16, @intFromFloat(@max(@as(f32, 0), px - prev_px))));
+            prev_px = px;
+        } else {
+            out[i] = windowHeight(seen, remaining_count, remaining_avail, min_dim);
+            seen += 1;
+        }
     }
 }
 
@@ -260,30 +241,12 @@ fn distributeStackHeightsWeighted(
     const capped = capped_buf[0 .. (windows.len + 7) / 8];
 
     const cap = findCappedWindows(v, windows, avail, boost, min_dim, out, capped);
-
-    if (boost.isZero()) {
-        distributeEven(windows, capped, cap.remaining_count, cap.remaining_avail, min_dim, out);
-    } else {
-        distributeWeighted(
-            windows,
-            boost,
-            capped,
-            cap.remaining_weight,
-            cap.remaining_avail,
-            min_dim,
-            out,
-        );
-    }
+    distributeHeights(!boost.isZero(), windows, boost, capped, cap.remaining_weight, cap.remaining_count, cap.remaining_avail, min_dim, out);
 
     // Return the total so the caller avoids a redundant summation pass.
     var total: u32 = 0;
     for (out) |h| total += h;
     return total;
-}
-
-/// Sum of every stack slot's weight (see windowWeight) before any capping.
-inline fn totalWeight(count: u16, boost: StackBoost) f32 {
-    return @as(f32, @floatFromInt(count)) + boost.top + boost.bottom;
 }
 
 /// Weight of stack slot `i`: 1.0 baseline plus `boost.top` (first slot) and
@@ -293,11 +256,6 @@ inline fn windowWeight(i: u16, count: u16, boost: StackBoost) f32 {
     if (i == 0) w += boost.top;
     if (count > 0 and i == count - 1) w += boost.bottom;
     return w;
-}
-
-/// Declared max_height for `win`, or 0 when it declared none (0 = unconstrained).
-inline fn windowMaxHeight(v: *const tiling.View, win: model.WindowId) u16 {
-    return v.hints.forWin(win).max_height;
 }
 
 /// Minimum stack-pane width: widest bounded slave's max_width (floored to
@@ -382,19 +340,16 @@ fn tileStackExtra(
         const col_w = row_total_w / cols_in_row;
         const col_inner_w = tiling.shrinkClamped(col_w, 2 * m.border, min_dim);
 
-        const y_pos = windowY(row, max_fit, row_avail, y_offset, m);
+        const y_pos = y_offset +| m.gap +|
+        @as(u16, @intCast(@as(u32, row) * @as(u32, row_avail) / @as(u32, max_fit))) +|
+        row *| (m.gap +| 2 *| m.border);
         const row_h = windowHeight(row, max_fit, row_avail, min_dim);
 
         var win_idx: u16 = row;
         while (win_idx < stack_n) : (win_idx += max_fit) {
             const col: u16 = (win_idx - row) / max_fit;
-            const rect = utils.Rect{
-                .x = @intCast(x +| m.gap / 2 +| col *| (col_w +| m.gap)),
-                .y = @intCast(y_pos),
-                .width = col_inner_w,
-                .height = row_h,
-            };
-            tiling.emitView(v, out, windows[win_idx], rect, true);
+            tiling.emitView(v, out, windows[win_idx], .{ .x = @intCast(x +| m.gap / 2 +| col *| (col_w +| m.gap)), .y = @intCast(y_pos),
+                .width = col_inner_w, .height = row_h }, true);
         }
     }
 }
@@ -414,20 +369,10 @@ inline fn windowHeight(i: u16, count: u16, available: u16, min_dim: u16) u16 {
     return @max(min_dim, @as(u16, @intCast(hi - lo)));
 }
 
-/// Y position of window `i`, derived from the same cumulative formula so that
-/// preceding windows' heights (which may vary by 1 px) are accounted for.
-inline fn windowY(i: u16, count: u16, available: u16, y_offset: u16, m: utils.Margins) u16 {
-    const cum: u32 = @as(u32, i) * @as(u32, available) / @as(u32, count);
-    return y_offset +| m.gap +| @as(u16, @intCast(cum)) +| i *| (m.gap +| 2 *| m.border);
-}
-
 /// This layout's registry contribution: metadata plus the dispatch hook.
-pub const module: @import("plugin").Layout = .{
-    .name = "master",
-    .compute = tiling.computeHook(compute),
+pub const module = tiling.layoutModule("master", "[]=", compute, .{
     .variant_count = 2,
     .fifo_variant = 1,
     .variant_parse = tiling.variantParse(&.{ "lifo", "fifo" }),
-    .icon = "[]=",
     .indicators = &.{ "[N]", "=N=" },
-};
+});

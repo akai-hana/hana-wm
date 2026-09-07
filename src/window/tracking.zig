@@ -42,16 +42,6 @@ pub fn removeWindow(win: u32) void {
     model_mod.unregister(mm, win);
 }
 
-pub fn setWindowMask(win: u32, mask: u64) void {
-    const mm = m() orelse return;
-    std.debug.assert(mask != 0);
-    const e = mm.store.getPtr(win) orelse {
-        std.log.err("tracking: setWindowMask called on unregistered window 0x{x}", .{win});
-        return;
-    };
-    e.mask = mask;
-}
-
 pub inline fn getWindowWorkspaceMask(win: u32) ?u64 {
     const mm = m() orelse return null;
     const e = mm.store.get(win) orelse return null;

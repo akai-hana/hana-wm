@@ -22,6 +22,7 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
+const bounded = @import("bounded");
 const utils = @import("utils");
 const model = @import("model");
 const build_options = @import("build_options");
@@ -38,7 +39,7 @@ const MAX_FULLSCREEN = model.store_capacity;
 
 /// Self-contained fullscreen store: static, allocation-free, linear scans.
 /// No model bookkeeping backs it (the model only mirrors `.covering`).
-var g_recs: utils.BoundedList(Rec, MAX_FULLSCREEN) = .{};
+var g_recs: bounded.RecStore(Rec, MAX_FULLSCREEN) = .{};
 
 /// Window configured fullscreen but awaiting ConfigureNotify confirmation.
 /// Zero when none pending. Set by armPendingBarHide; cleared in
@@ -58,7 +59,7 @@ var g_net_wm_state_fullscreen: xcb.xcb_atom_t = 0;
 
 // Shared reset sequence used by both init() and deinit() to keep them in sync.
 fn resetState() void {
-    g_recs.clear();
+    g_recs.reset();
     g_pending_bar_hide_win = 0;
     g_pending_bar_show_win = 0;
     g_net_wm_state = 0;
@@ -78,10 +79,6 @@ pub fn deinit() void {
     resetState();
 }
 
-fn findRec(win: model.WindowId) ?usize {
-    return g_recs.indexOfByIdField(.win, win);
-}
-
 /// Toggle `win`'s fullscreen capture of the current workspace.
 ///
 /// ON (no existing rec): records `{ win, ws = m.current, anchor = <<deep copy
@@ -96,23 +93,17 @@ fn findRec(win: model.WindowId) ?usize {
 /// BEFORE any mutation, so a full store refuses the toggle without side
 /// effects).
 pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
-    if (build_options.has_minimize) {
-        // Defensive feature->feature guard (the wire already pre-guards):
-        // keep it here so the module is safe standalone. Idempotent with the
-        // wire guard.
-        if (@import("minimize").isMinimized(m, win)) return false;
-    }
+    if (build_options.has_minimize and @import("minimize").isMinimized(m, win)) return false;
     const e = m.store.getPtr(win) orelse return false;
-    if (findRec(win) != null) {
+    if (g_recs.remove(win)) {
         // OFF: leave fullscreen; restore the pre-fullscreen anchor to the model.
-        _ = g_recs.orderedRemove(findRec(win).?);
         e.presence = .present;
         e.covering_ws = null; // release the core covering intent
         return true;
     }
     // ON: capacity guard BEFORE any mutation — a full store refuses the
     // toggle (returns false, model untouched).
-    if (g_recs.len >= MAX_FULLSCREEN) return false;
+    if (g_recs.len() >= MAX_FULLSCREEN) return false;
     const anchor = switch (e.anchor) {
         .tiled => model.BaseMode.tiled,
         .floating => |r| model.BaseMode{ .floating = r },
@@ -152,7 +143,7 @@ pub fn fullscreenWsOf(m: *const model.Model, win: model.WindowId) ?model.WSId {
 /// pre-toggle classification and was-fullscreen captures.
 pub fn isFullscreenOnWs(m: *const model.Model, win: model.WindowId, ws: model.WSId) bool {
     _ = m;
-    const idx = findRec(win) orelse return false;
+    const idx = g_recs.find(win) orelse return false;
     return g_recs.slice()[idx].ws == ws;
 }
 
@@ -202,7 +193,7 @@ pub fn fullscreenOccupied(m: *const model.Model, win: model.WindowId, dest: mode
 /// on the capture target and the module never diverges from it. The caller has
 /// already confirmed the destination is not occupied.
 pub fn moveFullscreenTo(m: *const model.Model, win: model.WindowId, ws: model.WSId) void {
-    const idx = findRec(win) orelse return;
+    const idx = g_recs.find(win) orelse return;
     const eptr = @constCast(m).store.getPtr(win) orelse return;
     g_recs.slice()[idx].ws = ws;
     eptr.covering_ws = ws;
@@ -258,12 +249,18 @@ fn readLE(comptime T: type, bytes: []const u8, off: usize) T {
 /// ghost and the single `ext` slot belongs to minimize — return null so the
 /// minimized blob wins (design §6). The returned slice is allocator-owned;
 /// persist frees it after writing.
-pub fn serializeWindow(model_ptr: *anyopaque, win: u32, alloc: std.mem.Allocator) ?[]const u8 {
+fn serializePreamble(model_ptr: *anyopaque, win: u32) ?struct { *const model.Model, *const Rec } {
     const m: *const model.Model = @ptrCast(@alignCast(model_ptr));
-    const idx = findRec(win) orelse return null;
-    const rec = g_recs.slice()[idx];
+    const idx = g_recs.find(win) orelse return null;
+    const rec = &g_recs.slice()[idx];
     const e = m.store.get(win) orelse return null;
     if (e.presence == .parked) return null; // parked window: minimize owns the blob
+    return .{ m, rec };
+}
+
+pub fn serializeWindow(model_ptr: *anyopaque, win: u32, alloc: std.mem.Allocator) ?[]const u8 {
+    const p = serializePreamble(model_ptr, win) orelse return null;
+    const rec = p[1];
     const len: usize = switch (rec.anchor) {
         .tiled => BLOB_LEN_TILED,
         .floating => BLOB_LEN_FLOATING,
@@ -272,9 +269,7 @@ pub fn serializeWindow(model_ptr: *anyopaque, win: u32, alloc: std.mem.Allocator
     buf[0] = FS_MAGIC;
     writeLE(u16, buf, 1, rec.ws);
     switch (rec.anchor) {
-        .tiled => {
-            buf[3] = TAG_TILED;
-        },
+        .tiled => buf[3] = TAG_TILED,
         .floating => |r| {
             buf[3] = TAG_FLOATING;
             // Sign-preserving: i16 -> i32 -> u32, so decode via @truncate to i16.
@@ -294,20 +289,23 @@ pub fn serializeWindow(model_ptr: *anyopaque, win: u32, alloc: std.mem.Allocator
 /// blob; false (magic mismatch, unknown window, wrong length) lets the
 /// registry loop continue to other modules. Idempotent when the rec already
 /// exists.
-pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
-    if (bytes.len < 1 or bytes[0] != FS_MAGIC) return false; // not ours
-    if (findRec(win) != null) return true; // already adopted; idempotent
+fn deserializePreamble(win: u32, bytes: []const u8, ptr: *anyopaque) ?struct { *model.Model, ?*model.Entry } {
+    if (bytes.len < 1 or bytes[0] != FS_MAGIC) return null; // not ours
     const m: *model.Model = @ptrCast(@alignCast(ptr));
-    const e = m.store.getPtr(win) orelse return false;
+    if (g_recs.find(win) != null) return .{ m, null }; // already adopted; idempotent
+    const e = m.store.getPtr(win) orelse return null;
+    return .{ m, e };
+}
+
+pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
+    const p = deserializePreamble(win, bytes, ptr) orelse return false;
+    const e = p[1] orelse return true;
     if (bytes.len < 4) return false;
     const ws: model.WSId = readLE(u16, bytes, 1);
     const tag = bytes[3];
     var anchor: model.BaseMode = undefined;
     switch (tag) {
-        TAG_TILED => {
-            if (bytes.len != BLOB_LEN_TILED) return false;
-            anchor = .tiled;
-        },
+        TAG_TILED => { if (bytes.len != BLOB_LEN_TILED) return false; anchor = .tiled; },
         TAG_FLOATING => {
             if (bytes.len != BLOB_LEN_FLOATING) return false;
             const rect = utils.Rect{
@@ -327,7 +325,7 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
     }
     // This hook is only dispatched for non-parked windows (fullscreen blob
     // only exists for non-parked), so we can safely mark the window covering.
-    if (g_recs.len >= MAX_FULLSCREEN) return false;
+    if (g_recs.len() >= MAX_FULLSCREEN) return false;
     _ = g_recs.append(.{ .win = win, .ws = ws, .anchor = anchor });
     e.presence = .covering;
     e.covering_ws = ws; // sync the model's core covering intent with the record
@@ -345,10 +343,8 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
 // it atomically with geometry. Guards on both EWMH atoms being valid; pub for
 // actions.fullscreenToggleWindow, keeping the advertisement protocol-side.
 pub fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
-    if (g_net_wm_state == xcb.XCB_ATOM_NONE or
-        g_net_wm_state_fullscreen == xcb.XCB_ATOM_NONE) return;
-    @import("sync").setEwmhFullscreen(
-        @import("pipeline").grabCtx(),
+    if (g_net_wm_state == xcb.XCB_ATOM_NONE or g_net_wm_state_fullscreen == xcb.XCB_ATOM_NONE) return;
+    @import("pipeline").grabCtx().sink.setEwmhFullscreen(
         win,
         g_net_wm_state,
         g_net_wm_state_fullscreen,
@@ -375,14 +371,9 @@ pub fn notifyConfigureIfPending(win: u32, width: u16, height: u16) void {
     // In both cases we only bump core's fullscreen-occupancy fact; the bar
     // (a consumer) derives its own hide/show from that fact.
     if (g_pending_bar_hide_win == win) {
-        if (width == screen_w and height == screen_h) {
-            g_pending_bar_hide_win = 0;
-            @import("core").bumpFullscreen();
-        }
+        if (width == screen_w and height == screen_h) { g_pending_bar_hide_win = 0; @import("core").bumpFullscreen(); }
     } else if (g_pending_bar_show_win == win) {
-        if (width != screen_w or height != screen_h) {
-            resolvePendingBarShow();
-        }
+        if (width != screen_w or height != screen_h) resolvePendingBarShow();
     }
 }
 
@@ -408,7 +399,7 @@ pub fn armPendingBarShow(win: u32) void {
 /// unmanage) after removing the store entry. Also clears any pending deferred
 /// bar op so the bar doesn't stay stuck (both show and hide cases).
 pub fn onWindowGone(win: u32) void {
-    if (findRec(win)) |i| _ = g_recs.orderedRemove(i);
+    _ = g_recs.remove(win);
     if (g_pending_bar_show_win == win) resolvePendingBarShow();
     if (g_pending_bar_hide_win == win) g_pending_bar_hide_win = 0;
 }

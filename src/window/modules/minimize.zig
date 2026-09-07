@@ -13,20 +13,21 @@
 
 const std = @import("std");
 const constants = @import("constants");
-const utils = @import("utils");
+const bounded = @import("bounded");
 const model = @import("model");
 const build_options = @import("build_options");
 
-pub fn init() anyerror!void {
-    // Reset the static store so tests get isolation (and production re-init
-    // after fatal-recovery restarts clean). The module owns all of its state.
-    g_recs.clear();
+fn resetState() void {
+    g_recs.reset();
     g_seq = 0;
 }
 
+pub fn init() anyerror!void {
+    resetState();
+}
+
 pub fn deinit() void {
-    g_recs.clear();
-    g_seq = 0;
+    resetState();
 }
 
 /// Ceiling on concurrently minimized windows, sourced from constants.
@@ -40,21 +41,17 @@ const Rec = struct { win: model.WindowId, slot: ?usize, seq: u32 };
 
 /// Self-contained minimized store: static, allocation-free, <= 32 entries,
 /// linear scans by design. No model bookkeeping backs it.
-var g_recs: utils.BoundedList(Rec, MAX_MINIMIZED) = .{};
+var g_recs: bounded.RecStore(Rec, MAX_MINIMIZED) = .{};
 
 /// Monotonic minimize counter; stamps `Rec.seq` across restores too (never
 /// reused) so actions can pick LIFO/FIFO restore targets without a side
 /// buffer.
 var g_seq: u32 = 0;
 
-fn findRec(win: model.WindowId) ?usize {
-    return g_recs.indexOfByIdField(.win, win);
-}
-
 pub fn minimize(m: *model.Model, win: model.WindowId) MinimizeError!void {
     if (isMinimized(m, win)) return; // idempotent
     // Capacity check BEFORE any mutation (T17).
-    if (g_recs.len >= MAX_MINIMIZED) return error.CapacityFull;
+    if (g_recs.len() >= MAX_MINIMIZED) return error.CapacityFull;
     var slot: ?usize = null;
     if (model.findHome(m, win)) |h| {
         slot = m.ws[h].tiled_order.indexOfScalar(win);
@@ -69,7 +66,7 @@ pub fn minimize(m: *model.Model, win: model.WindowId) MinimizeError!void {
 }
 
 pub fn restore(m: *model.Model, win: model.WindowId) void {
-    const idx = findRec(win) orelse return;
+    const idx = g_recs.find(win) orelse return;
     const rec = g_recs.slice()[idx];
     const e = m.store.getPtr(win) orelse return;
     // Which current anchors re-enter a home list? Derived from the CURRENT
@@ -77,11 +74,7 @@ pub fn restore(m: *model.Model, win: model.WindowId) void {
     // re-listed; floating-anchored ones restore to their saved rect directly
     // and are never appended (a phantom layout member). A covering (fullscreen)
     // window keeps its anchor, so re-listing also applies to fullscreen-tiled.
-    const wants_home = switch (e.anchor) {
-        .tiled => true,
-        .floating => false,
-    };
-    if (wants_home) {
+    if (switch (e.anchor) { .tiled => true, .floating => false }) {
         const h = model.lowestBit(e.mask) orelse return; // follows tag-moves made while hidden
         const list = &m.ws[h].tiled_order;
         // Refuse-before-mutate: a full home list leaves the window parked
@@ -103,15 +96,13 @@ pub fn restore(m: *model.Model, win: model.WindowId) void {
     // through the minimize — minimize only remapped presence to `.parked`), so
     // core's model-based coverage read (`coveringOccupantOnWs`) recognizes it
     // again as the screen owner. Plain windows restore to `.present`.
-    e.presence = if (build_options.has_fullscreen and
-        @import("fullscreen").isFullscreenMode(m, win)) .covering else .present;
+    e.presence = if (build_options.has_fullscreen and @import("fullscreen").isFullscreenMode(m, win)) .covering else .present;
     _ = g_recs.orderedRemove(idx);
 }
 
 fn slotLess(a: ?usize, b: ?usize) bool {
     if (a == null) return false;
-    if (b == null) return true;
-    return a.? < b.?;
+    return if (b == null) true else a.? < b.?;
 }
 
 /// Parked-on-ws predicate: the window exists, is parked (minimized), and its
@@ -125,43 +116,39 @@ fn parkedOnWs(m: *const model.Model, rec: Rec, ws: model.WSId) bool {
 /// Restore-order target selection over minimized windows on `ws`:
 /// `.fifo` = oldest minimize seq, `.lifo` = newest. Returns null when nothing
 /// on `ws` is minimized.
-pub fn restoreCandidate(
+fn bestSeq(
     m: *const model.Model,
     ws: model.WSId,
     order: model.RestoreOrder,
+    comptime skip_covering: bool,
 ) ?model.WindowId {
     var best: ?model.WindowId = null;
     var best_seq: u32 = 0;
     for (g_recs.constSlice()) |rec| {
         if (!parkedOnWs(m, rec, ws)) continue;
+        if (skip_covering and build_options.has_fullscreen and
+            @import("fullscreen").isFullscreenMode(m, rec.win)) continue;
         const better = switch (order) {
             .fifo => best == null or rec.seq < best_seq,
             .lifo => best == null or rec.seq > best_seq,
         };
-        if (better) {
-            best = rec.win;
-            best_seq = rec.seq;
-        }
+        if (better) { best = rec.win; best_seq = rec.seq; }
     }
     return best;
+}
+
+pub fn restoreCandidate(
+    m: *const model.Model,
+    ws: model.WSId,
+    order: model.RestoreOrder,
+) ?model.WindowId {
+    return bestSeq(m, ws, order, false);
 }
 
 /// Most recently minimized PLAIN window on `ws` (fullscreen-carrying cars
 /// excluded, matching the old prev != .base exclusion).
 pub fn latestMinimizedBase(m: *const model.Model, ws: model.WSId) ?model.WindowId {
-    var best: ?model.WindowId = null;
-    var best_seq: u32 = 0;
-    for (g_recs.constSlice()) |rec| {
-        if (!parkedOnWs(m, rec, ws)) continue;
-        if (build_options.has_fullscreen) {
-            if (@import("fullscreen").isFullscreenMode(m, rec.win)) continue;
-        }
-        if (best == null or rec.seq > best_seq) {
-            best = rec.win;
-            best_seq = rec.seq;
-        }
-    }
-    return best;
+    return bestSeq(m, ws, .lifo, true);
 }
 
 pub fn restoreAllOnWs(m: *model.Model, ws: model.WSId) void {
@@ -192,13 +179,13 @@ pub fn restoreAllOnWs(m: *model.Model, ws: model.WSId) void {
 /// True when `win` currently holds a minimized record in the module store.
 pub fn isMinimized(m: *const model.Model, win: model.WindowId) bool {
     _ = m;
-    return findRec(win) != null;
+    return g_recs.find(win) != null;
 }
 
 /// Number of concurrently minimized windows (the module's own count).
 pub fn count(m: *const model.Model) u32 {
     _ = m;
-    return @intCast(g_recs.len);
+    return @intCast(g_recs.len());
 }
 
 /// Fills `set` with every currently minimized window ID, replacing any prior
@@ -221,12 +208,17 @@ pub fn collectMinimizedIntoSet(
 /// when the window has no minimized record OR the model presence is not
 /// parked (a covering window is fullscreen's blob). The returned slice is
 /// allocator-owned; persist frees it after writing.
-pub fn serializeWindow(model_ptr: *anyopaque, win: u32, alloc: std.mem.Allocator) ?[]const u8 {
-    const idx = findRec(win) orelse return null;
+fn serializePreamble(model_ptr: *anyopaque, win: u32) ?struct { *const model.Model, Rec } {
     const m: *const model.Model = @ptrCast(@alignCast(model_ptr));
+    const idx = g_recs.find(win) orelse return null;
     const e = m.store.get(win) orelse return null;
     if (e.presence != .parked) return null;
-    const rec = g_recs.slice()[idx];
+    return .{ m, g_recs.slice()[idx] };
+}
+
+pub fn serializeWindow(model_ptr: *anyopaque, win: u32, alloc: std.mem.Allocator) ?[]const u8 {
+    const p = serializePreamble(model_ptr, win) orelse return null;
+    const rec = p[1];
     const held = alloc.alloc(u8, 9) catch return null;
     held[0] = 0x5A;
     const raw = std.mem.bytesAsSlice(u32, held[1..9]);
@@ -239,11 +231,19 @@ pub fn serializeWindow(model_ptr: *anyopaque, win: u32, alloc: std.mem.Allocator
 /// written by `serializeWindow` and replays the park on the live model, which
 /// the wire layer passes in as `*anyopaque` (keeps the core seam signature
 /// free of model types; the reverse cast happens on this side).
+fn deserializePreamble(win: u32, bytes: []const u8, ptr: *anyopaque) ?struct { *model.Model, ?*model.Entry } {
+    if (bytes.len != 9 or bytes[0] != 0x5A) return null; // not our blob; let the loop continue
+    const m: *model.Model = @ptrCast(@alignCast(ptr));
+    if (g_recs.find(win) != null) return .{ m, null }; // already adopted; idempotent
+    if (g_recs.len() >= MAX_MINIMIZED) return null;
+    const e = m.store.getPtr(win) orelse return null;
+    return .{ m, e };
+}
+
 pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
-    if (bytes.len != 9) return false;
-    if (bytes[0] != 0x5A) return false; // not our blob; let the loop continue
-    if (findRec(win) != null) return true; // already adopted; idempotent
-    if (g_recs.len >= MAX_MINIMIZED) return false;
+    const p = deserializePreamble(win, bytes, ptr) orelse return false;
+    const m = p[0];
+    const e = p[1] orelse return true;
     // Slice the payload back into two native-endian u32s via an aligned copy
     // (persist buffers are byte-aligned; u32 loads need 4-byte align).
     var buf: [8]u8 align(@alignOf(u32)) = [_]u8{0} ** 8;
@@ -251,8 +251,6 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
     const raw = std.mem.bytesAsSlice(u32, buf[0..]);
     const slot: ?usize = if (raw[0] == std.math.maxInt(u32)) null else raw[0];
     const seq = raw[1];
-    const m: *model.Model = @ptrCast(@alignCast(ptr));
-    const e = m.store.getPtr(win) orelse return false;
     // Replay the minimize park: drop the tiled slot, mark parked. `mode`
     // comes from the model (already persisted), the blob restores the rec.
     if (model.findHome(m, win)) |h| model.removeValue(&m.ws[h].tiled_order, win);
@@ -266,7 +264,7 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
 /// Record cleanup on window teardown; the wire layer fires this (events /
 /// unmanage) after removing the store entry.
 pub fn onWindowGone(win: u32) void {
-    if (findRec(win)) |i| _ = g_recs.orderedRemove(i);
+    _ = g_recs.remove(win);
 }
 
 /// Adapter for the hide seam: widens the module's `MinimizeError!void`

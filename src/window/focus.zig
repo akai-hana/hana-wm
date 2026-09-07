@@ -65,19 +65,13 @@ pub fn init() void {
     state.?.net_active_window = utils.getAtomCached("_NET_ACTIVE_WINDOW") catch 0;
 }
 
-/// Discard an optional XCB cookie without blocking.
-/// All XCB cookie types share a `.sequence` field, so anytype covers all of them.
-fn discardOptCookie(opt: anytype) void {
-    if (opt) |ck| xcb.xcb_discard_reply(core.getState().conn, ck.sequence);
-}
-
 pub fn deinit() void {
     // Discard pending cookies so they don't accumulate across a deinit()+init()
     // cycle; at process exit the connection close handles this implicitly.
-    discardOptCookie(state.?.pre_protocols_cookie);
-    discardOptCookie(state.?.confirm_cookie);
-    discardOptCookie(state.?.pointer_cookie);
-    discardOptCookie(state.?.tiling_op_cookie);
+    window.discardProtocolCookie(core.getState().conn, state.?.pre_protocols_cookie);
+    window.discardProtocolCookie(core.getState().conn, state.?.confirm_cookie);
+    window.discardProtocolCookie(core.getState().conn, state.?.pointer_cookie);
+    window.discardProtocolCookie(core.getState().conn, state.?.tiling_op_cookie);
     state = null;
 }
 
@@ -287,18 +281,18 @@ pub const FocusTransition = union(enum) {
     none: void,
 };
 
-/// Clear the paired confirm cookie and window together.
-fn clearConfirmState() void {
-    state.?.confirm_cookie = null;
-    state.?.confirm_win = null;
-}
-
 /// Discard a pending confirm reply without acting on it, using the
 /// non-blocking xcb_discard_reply. Safe to call when no confirm is pending.
 fn cancelPendingConfirm() void {
     const cookie = state.?.confirm_cookie orelse return;
-    clearConfirmState();
+    state.?.confirm_cookie = null;
+    state.?.confirm_win = null;
     xcb.xcb_discard_reply(core.getState().conn, cookie.sequence);
+}
+
+fn resetStaleProtocols() void {
+    window.discardProtocolCookie(core.getState().conn, state.?.pre_protocols_cookie);
+    state.?.pre_protocols_cookie = null;
 }
 
 /// Phase 1: resolve input model via round trips (outside grab).
@@ -357,8 +351,7 @@ pub fn prepareFocus(
     // .user_command is excluded: collectVisibleWindows already confirmed the
     // window is on the current workspace and visible, so the blocking
     // xcb_get_window_attributes round-trip is redundant.
-    if ((reason == .mouse_click or reason == .pointer_sync) and
-        !isWindowMapped(conn, win))
+    if ((reason == .mouse_click or reason == .pointer_sync) and !isWindowMapped(conn, win))
         return noneWithDiscard(conn, pre_protocols_cookie);
 
     const resolved = window.getInputModelResolvedConsume(conn, win, pre_protocols_cookie);
@@ -366,10 +359,7 @@ pub fn prepareFocus(
 
     // Cancel any stale confirm cookie (client-side, no round trip).
     cancelPendingConfirm();
-
-    // Discard any stale pre-protocols cookie.
-    discardOptCookie(state.?.pre_protocols_cookie);
-    state.?.pre_protocols_cookie = null;
+    resetStaleProtocols();
 
     return setIntent(win, state.?.last_applied, resolved, .{
         .raise = shouldRaise(reason, win),
@@ -414,10 +404,8 @@ pub fn applyPendingFocus(t: FocusTransition) void {
             if (intent.flags.raise) utils.raiseWindow(conn, intent.win);
 
             if (intent.flags.send_wm_take_focus) {
-                if (intent.flags.take_focus_known) |advertises| {
-                    window.sendWMTakeFocusKnown(conn, intent.win, 0, advertises);
-                }
-            }
+        if (intent.flags.take_focus_known) |advertises| window.sendWMTakeFocusKnown(conn, intent.win, 0, advertises);
+    }
 
             if (intent.flags.arm_confirm) {
                 state.?.confirm_cookie = xcb.xcb_get_input_focus(conn);
@@ -439,11 +427,7 @@ pub fn applyPendingFocus(t: FocusTransition) void {
 /// True if `win` currently has map_state == Viewable. Guards destroy/unmap
 /// races on paths that can't guarantee the window is still alive.
 inline fn isWindowMapped(conn: core.Connection, win: u32) bool {
-    const reply = xcb.xcb_get_window_attributes_reply(
-        conn,
-        xcb.xcb_get_window_attributes(conn, win),
-        null,
-    ) orelse return false;
+    const reply = xcb.xcb_get_window_attributes_reply(conn, xcb.xcb_get_window_attributes(conn, win), null) orelse return false;
     defer std.c.free(reply);
     return reply.*.map_state == xcb.XCB_MAP_STATE_VIEWABLE;
 }
@@ -542,11 +526,8 @@ pub fn drainPendingConfirm() void {
 /// never rejects it. Filtering mode/detail was incorrect: it allowed Electron's
 /// internal focus steals to slip through unchallenged.
 pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
-    if (state.?.confirm_win) |exp| {
-        if (event.event == exp) cancelPendingConfirm();
-    }
-    const is_offscreen_steal = !window.isInvalidWindow(event.event) and
-        !tracking.isOnCurrentWorkspace(event.event);
+    if (state.?.confirm_win) |exp| if (event.event == exp) cancelPendingConfirm();
+    const is_offscreen_steal = !window.isInvalidWindow(event.event) and !tracking.isOnCurrentWorkspace(event.event);
 
     const prev = state.?.last_applied orelse {
         if (is_offscreen_steal) grabFocusClear();
@@ -578,16 +559,7 @@ pub fn clearFocus() void {
 fn advertiseActiveWindow(win: u32) void {
     if (state.?.net_active_window == xcb.XCB_ATOM_NONE) return;
     const cs = core.getState();
-    _ = xcb.xcb_change_property(
-        cs.conn,
-        xcb.XCB_PROP_MODE_REPLACE,
-        cs.root,
-        state.?.net_active_window,
-        xcb.XCB_ATOM_WINDOW,
-        32,
-        1,
-        &win,
-    );
+    _ = xcb.xcb_change_property(cs.conn, xcb.XCB_PROP_MODE_REPLACE, cs.root, state.?.net_active_window, xcb.XCB_ATOM_WINDOW, 32, 1, &win);
 }
 
 /// True when `reason` should raise `win` to the top of the stacking order.
@@ -670,8 +642,7 @@ pub fn grabFocusReassert(prev: u32, is_offscreen_steal: bool) void {
     }
 
     cancelPendingConfirm();
-    discardOptCookie(state.?.pre_protocols_cookie);
-    state.?.pre_protocols_cookie = null;
+    resetStaleProtocols();
 
     const ft = setIntent(prev, state.?.last_applied, resolved, .{
         .raise = false,
@@ -695,7 +666,7 @@ pub fn grabFocusReassert(prev: u32, is_offscreen_steal: bool) void {
 /// workspace switches so a stale pre-switch pointer position cannot redirect
 /// focus back to an off-workspace window via drainPointerSync.
 pub fn cancelPointerSync() void {
-    discardOptCookie(state.?.pointer_cookie);
+    window.discardProtocolCookie(core.getState().conn, state.?.pointer_cookie);
     state.?.pointer_cookie = null;
 }
 
@@ -705,8 +676,7 @@ pub fn cancelPointerSync() void {
 pub fn drainPointerSync() void {
     const cs = core.getState();
     const res = drainCookie(xcb.xcb_query_pointer_cookie_t, &state.?.pointer_cookie);
-    if (res.pending) return;
-    if (res.errored) return;
+    if (res.pending or res.errored) return;
 
     const p = typedReply(xcb.xcb_query_pointer_reply_t, res) orelse return;
     const child = p.*.child;
@@ -726,7 +696,7 @@ pub fn drainPointerSync() void {
 /// focus to wherever the pointer ends up; unlike beginPointerSync it never
 /// calls setFocus itself. The reflow's events precede this reply in XCB order.
 pub fn beginTilingOpSettle() void {
-    discardOptCookie(state.?.tiling_op_cookie);
+    window.discardProtocolCookie(core.getState().conn, state.?.tiling_op_cookie);
     const cs = core.getState();
     state.?.tiling_op_cookie = xcb.xcb_get_input_focus(cs.conn);
 }
@@ -738,8 +708,7 @@ pub fn beginTilingOpSettle() void {
 /// reason set meanwhile (e.g. window_spawn) is never clobbered.
 pub fn drainTilingOpSettle() void {
     const res = drainCookie(xcb.xcb_get_input_focus_cookie_t, &state.?.tiling_op_cookie);
-    if (res.pending) return;
-    if (res.errored) return;
+    if (res.pending or res.errored) return;
 
     // The reply's content is unused; only its arrival signals that the server
     // has processed everything queued before it. It must be consumed to drain
@@ -778,19 +747,19 @@ fn collectVisibleWindows() usize {
 
 /// Returns the next (forward=true) or previous (forward=false) index in a
 /// circular list of `len` elements, starting from `idx`.
-inline fn cycleIndex(comptime forward: bool, idx: usize, len: usize) usize {
+inline fn cycleIndex(forward: bool, idx: usize, len: usize) usize {
     return if (forward) (idx + 1) % len else (idx + len - 1) % len;
 }
 
 /// Shared implementation for focus cycling.
 /// forward=true -> next (Mod+k, ascending), forward=false -> prev (Mod+j).
-fn focusCycle(comptime forward: bool) void {
+fn focusCycle(forward: bool) void {
     const len = collectVisibleWindows();
     if (len == 0) return;
     const wins = cycle_buf[0..len];
     // When the focused window isn't in the visible list, wrap so the very next
     // step lands on wins[0] (forward) or wins[len-1] (backward).
-    const sentinel: usize = if (comptime forward) len - 1 else 0;
+    const sentinel: usize = if (forward) len - 1 else 0;
     const idx = if (getFocused()) |w|
         std.mem.indexOfScalar(u32, wins, w) orelse sentinel
     else
@@ -798,11 +767,5 @@ fn focusCycle(comptime forward: bool) void {
     grabFocus(wins[cycleIndex(forward, idx, len)], .user_command);
 }
 
-/// Cycle focus to the next visible window (Mod+k, moves right/forward).
-pub fn focusNext() void {
-    focusCycle(true);
-}
-/// Cycle focus to the previous visible window (Mod+j, moves left/backward).
-pub fn focusPrev() void {
-    focusCycle(false);
-}
+pub fn focusNext() void { focusCycle(true); }
+pub fn focusPrev() void { focusCycle(false); }

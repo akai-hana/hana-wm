@@ -61,10 +61,7 @@ pub fn applyWorkspaceOverrides(
 
     for (wss) |*ws| {
         const id = ws.id;
-        ws.variants = if (id < max_ws)
-            (if (lookupVariant(cfg_tiling, id)) |v| v else null)
-        else
-            null;
+        ws.variants = if (id < max_ws) lookupVariant(cfg_tiling, id) else null;
         ws.master_count = if (id < max_ws) master_count_lookup[id] else null;
     }
 }
@@ -109,17 +106,9 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
 
     // Refuse-before-mutate: full destination list cancels the move.
     const h: ?model.WSId = e.home_ws;
-    if (h) |old_h| {
-        if (old_h != ws and m.ws[ws].tiled_order.len >= model.max_tiled_per_ws) {
-            return;
-        }
-    }
+    if (h) |old_h| if (old_h != ws and m.ws[ws].tiled_order.len >= model.max_tiled_per_ws) return;
 
-    if (build_options.has_minimize) {
-        if (@import("minimize").isMinimized(m, win)) {
-            e.mask = model.bit(ws); // record follows the move
-        }
-    }
+    if (build_options.has_minimize and @import("minimize").isMinimized(m, win)) e.mask = model.bit(ws); // record follows the move
     transferFullscreenOnMove(m, win, ws);
     e.mask = model.bit(ws);
     if (h) |old_h| {
@@ -128,6 +117,15 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
             _ = m.ws[ws].tiled_order.append(win);
             e.home_ws = ws;
         }
+    }
+}
+
+fn retargetOrDropFullscreen(m: *model.Model, win: model.WindowId, dest: model.WSId) void {
+    const fmod = @import("fullscreen");
+    if (fmod.fullscreenOccupied(m, win, dest)) {
+        _ = fmod.toggleFullscreen(m, win);
+    } else {
+        fmod.moveFullscreenTo(m, win, dest);
     }
 }
 
@@ -140,11 +138,7 @@ fn transferFullscreenOnMove(m: *model.Model, win: model.WindowId, ws: model.WSId
     if (!fmod.isFullscreenMode(m, win)) return;
     const fws = fmod.fullscreenWsOf(m, win).?;
     if (fws == ws) return;
-    if (fmod.fullscreenOccupied(m, win, ws)) {
-        _ = fmod.toggleFullscreen(m, win);
-    } else {
-        fmod.moveFullscreenTo(m, win, ws);
-    }
+    retargetOrDropFullscreen(m, win, ws);
 }
 
 /// Remove tag `ws`; the last remaining tag is protected (returns false).
@@ -154,16 +148,9 @@ pub fn tagRemove(m: *model.Model, win: model.WindowId, ws: model.WSId) bool {
     const e = m.store.getPtr(win) orelse return false;
     if (@popCount(e.mask) <= 1) return false;
     e.mask &= ~model.bit(ws);
-    if (build_options.has_fullscreen) {
-        const fmod = @import("fullscreen");
-        if (fmod.isFullscreenOnWs(m, win, ws)) {
-            const dest = model.lowestBit(e.mask) orelse unreachable;
-            if (fmod.fullscreenOccupied(m, win, dest)) {
-                _ = fmod.toggleFullscreen(m, win);
-            } else {
-                fmod.moveFullscreenTo(m, win, dest);
-            }
-        }
+    if (build_options.has_fullscreen and @import("fullscreen").isFullscreenOnWs(m, win, ws)) {
+        const dest = model.lowestBit(e.mask) orelse unreachable;
+        retargetOrDropFullscreen(m, win, dest);
     }
     return true;
 }

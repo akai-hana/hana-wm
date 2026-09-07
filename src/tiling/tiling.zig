@@ -110,14 +110,6 @@ pub inline fn showOneHideRest(out: *List, windows: []const model.WindowId, top: 
 /// is a `u8` index into this table; the engine never owns a closed enum.
 const tiling_mods = @import("tiling_modules").modules;
 
-/// Lowercased-name lookup over the registry (exact match on module names).
-fn indexOfName(lower: []const u8) ?usize {
-    for (tiling_mods, 0..) |m, i| {
-        if (std.mem.eql(u8, lower, m.name)) return i;
-    }
-    return null;
-}
-
 /// Resolve a config layout name (case-insensitive) to its registry index.
 /// Names are canonicalized at the config boundary, so this is an exact
 /// lowercased match on module names.
@@ -125,7 +117,8 @@ pub fn layoutByName(name: []const u8) ?usize {
     if (name.len > 64) return null;
     var buf: [64]u8 = undefined;
     const lower = std.ascii.lowerString(buf[0..name.len], name);
-    return indexOfName(lower);
+    for (tiling_mods, 0..) |m, i| if (std.mem.eql(u8, lower, m.name)) return i;
+    return null;
 }
 
 /// Neutral last-resort default layout: the first registered module (index 0).
@@ -156,27 +149,13 @@ pub fn variantCount(kind: u8) u8 {
 pub fn cycleKind(cur: u8, dir: i32, names: []const []const u8) u8 {
     var indices: [256]u8 = undefined;
     var n: usize = 0;
-    for (names) |nm| {
-        if (layoutByName(nm)) |idx| {
-            if (n < indices.len) {
-                indices[n] = @intCast(idx);
-                n += 1;
-            }
-        }
-    }
+    for (names) |nm| if (layoutByName(nm)) |idx| {
+        if (n < indices.len) { indices[n] = @intCast(idx); n += 1; }
+    };
     if (n == 0) return cur;
-    var pos: usize = 0;
-    var found = false;
-    for (indices[0..n], 0..) |idx, i| {
-        if (idx == cur) {
-            pos = i;
-            found = true;
-            break;
-        }
-    }
-    if (found) {
-        return indices[@intCast(@mod(@as(i32, @intCast(pos)) + dir, @as(i32, @intCast(n))))];
-    }
+    for (indices[0..n], 0..) |idx, i| if (idx == cur) {
+        return indices[@intCast(@mod(@as(i32, @intCast(i)) + dir, @as(i32, @intCast(n))))];
+    };
     return indices[if (dir >= 0) 0 else n - 1];
 }
 
@@ -225,4 +204,12 @@ pub fn variantParse(comptime names: []const []const u8) fn ([]const u8) ?u8 {
             return null;
         }
     }.parse;
+}
+
+pub fn layoutModule(comptime name: []const u8, comptime icon: []const u8, comptime f: anytype, comptime extra: plugin.Layout) plugin.Layout {
+    var m = extra;
+    m.name = name;
+    m.icon = icon;
+    m.compute = computeHook(f);
+    return m;
 }

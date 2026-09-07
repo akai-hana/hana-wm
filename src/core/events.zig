@@ -163,9 +163,7 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
     // X11 failures (bad grabs, stale window ids, wrong atoms) undiagnosable.
     if (event_type == 0) {
         const e = eventCast(*xcb.xcb_generic_error_t, event);
-        debug.warn("Unchecked XCB request failed: code={} major={} minor={} resource={x}", .{
-            e.error_code, e.major_code, e.minor_code, e.resource_id,
-        });
+        debug.warn("Unchecked XCB request failed: code={} major={} minor={} resource={x}", .{ e.error_code, e.major_code, e.minor_code, e.resource_id });
         return;
     }
 
@@ -390,10 +388,7 @@ fn handleXcbEvents() void {
             // signal pipe and timer paths the cap exists to protect.
             while (dispatched + coalesced < max_events_per_batch) {
                 const next = xcb.xcb_poll_for_event(conn) orelse break;
-                if (!isMotion(next)) {
-                    pending = next; // dispatched on a later iteration
-                    break;
-                }
+                if (!isMotion(next)) { pending = next; break; }
                 std.c.free(event);
                 event = next; // keep only the newest motion of the run
                 coalesced += 1;

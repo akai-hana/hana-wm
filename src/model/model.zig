@@ -34,9 +34,8 @@ pub const SizeHints = struct {
 
     /// True when every field is zero (no constraints declared).
     pub fn isEmpty(self: SizeHints) bool {
-        return self.max_width == 0 and self.max_height == 0 and
-            self.inc_width == 0 and self.inc_height == 0 and
-            self.min_aspect == 0.0 and self.max_aspect == 0.0;
+        return self.max_width == 0 and self.max_height == 0 and self.inc_width == 0 and
+            self.inc_height == 0 and self.min_aspect == 0.0 and self.max_aspect == 0.0;
     }
 };
 
@@ -120,17 +119,11 @@ pub fn removeValue(list: anytype, win: WindowId) void {
     if (list.indexOfScalar(win)) |i| list.orderedRemove(i);
 }
 
-fn removeFromMruAll(m: *Model, win: WindowId) void {
-    for (&m.ws) |*s| removeValue(&s.focus_mru, win);
-}
-
 /// The workspace whose tiled_order holds win (single-membership invariant).
 /// Uses the cached home_ws when available; falls back to scanning when the
 /// cache is null (e.g. a freshly adopted window not yet home-assigned).
 pub fn findHome(m: *const Model, win: WindowId) ?WSId {
-    if (m.store.get(win)) |e| {
-        if (e.home_ws) |h| return h;
-    }
+    if (m.store.get(win)) |e| if (e.home_ws) |h| return h;
     for (0..m.ws.len) |i| {
         if (m.ws[i].tiled_order.indexOfScalar(win) != null) return @intCast(i);
     }
@@ -141,16 +134,8 @@ pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) error{CapacityFull}!vo
     if (m.store.has(win)) return;
     const target: WSId = hint_ws orelse m.current;
     // Defined-capacity refusal with rollback, BEFORE any observable state change.
-    const ptr = m.store.put(win, .{
-        .mask = bit(target),
-        .anchor = .tiled,
-    }) catch return error.CapacityFull;
-    // Defensive: BoundedList.append returns a bool; the catch-style guard
-    // would only be needed for a future allocator-backed list.
-    if (!m.ws[target].tiled_order.append(win)) {
-        _ = m.store.remove(win);
-        return error.CapacityFull;
-    }
+    const ptr = m.store.put(win, .{ .mask = bit(target), .anchor = .tiled }) catch return error.CapacityFull;
+    if (!m.ws[target].tiled_order.append(win)) { _ = m.store.remove(win); return error.CapacityFull; }
     // home_ws cache: set AFTER tiled_order append succeeds so the cache
     // is only valid when the window actually has a tiled slot.
     ptr.home_ws = target;
@@ -161,7 +146,7 @@ pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) error{CapacityFull}!vo
 pub fn unregister(m: *Model, win: WindowId) void {
     if (m.store.getPtr(win) == null) return;
     if (findHome(m, win)) |h| removeValue(&m.ws[h].tiled_order, win);
-    removeFromMruAll(m, win);
+    for (&m.ws) |*s| removeValue(&s.focus_mru, win);
     if (m.focused == win) m.focused = null;
     _ = m.store.remove(win);
 }
@@ -186,6 +171,17 @@ pub fn tiledCountOnWs(m: *const Model, ws: WSId) usize {
         n += 1;
     }
     return n;
+}
+
+/// Index of `win` within `ws`'s mask-visible tiled placements, or null when
+/// it has no tiled slot on `ws`. Same mask-visible scan as tiledCountOnWs.
+pub fn tiledIndexOnWs(m: *const Model, ws: WSId, win: WindowId) ?usize {
+    for (m.ws[ws].tiled_order.constSlice(), 0..) |w, i| {
+        const e = m.store.get(w) orelse continue;
+        if (e.mask & bit(ws) == 0) continue;
+        if (w == win) return i;
+    }
+    return null;
 }
 
 /// The covering occupant owning the screen on `ws`: a covering entry whose

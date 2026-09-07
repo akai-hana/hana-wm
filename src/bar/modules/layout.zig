@@ -37,4 +37,4 @@ fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x:
     return end_x;
 }
 
-pub const module = segdraw.module("layout", draw, actions.cycleLayoutKind, false);
+pub const module = segdraw.module("layout", draw, actions.cycleLayoutKind, false, .{});
