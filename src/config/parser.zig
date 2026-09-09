@@ -542,10 +542,6 @@ const Parser = struct {
         return array;
     }
 
-    const boolean_keywords = std.StaticStringMap(bool).initComptime(.{
-        .{ "true", true }, .{ "false", false },
-    });
-
     // True when `raw` is an optionally-signed bare decimal literal: digits,
     // exactly one '.', at least one digit (e.g. "2.5", "-0.3"). Whole numbers
     // and malformed tokens return false, falling through to the existing
@@ -594,7 +590,8 @@ const Parser = struct {
     // token can take is handled here: boolean, percentage, decimal, color,
     // integer, with the unrecognised-token string fallback last.
     fn parseBareTokenValue(self: *Parser, raw: []const u8) ParseError!Value {
-        if (boolean_keywords.get(raw)) |b| return .{ .boolean = b };
+        if (std.mem.eql(u8, raw, "true")) return .{ .boolean = true };
+        if (std.mem.eql(u8, raw, "false")) return .{ .boolean = false };
 
         if (raw.len > 1 and raw[raw.len - 1] == '%') {
             const f = std.fmt.parseFloat(

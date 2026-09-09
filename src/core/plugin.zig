@@ -1,4 +1,4 @@
-//! core/plugin.zig: the plugin interface contract.
+//! The plugin interface contract.
 //!
 //! The pluggable-composition contract for the self-containment architecture.
 //! This file defines the TYPES that optional subsystems bind to; it names no
@@ -15,22 +15,26 @@
 //! `WindowModule` is the flat, all-optional-hook interface every module under
 //! a window-owner's `modules/` directory binds to (see build.zig's per-owner
 //! `modules` registry generation). Sub-system registration is build-time, not
-//! merged here: build.zig scans `src/<owner>/modules/` and emits an array of
+//! merged here: build.zig scans each owner's `modules/` and emits an array of
 //! every discovered module's `module` value in a generated `<owner>_modules`
 //! module, which core tiers iterate with uniform dispatch loops. No merged
 //! single struct, no per-sub-system partial types; just one hook set with
 //! `null` for hooks a module doesn't own.
 //!
 //! Key seams:
-//!   - `serializeWindow(m-as-*anyopaque, win, alloc)` -- returns an opaque
-//!     per-window blob for restart persistence, or null. The model is passed
-//!     as `*anyopaque` so the seam stays free of a model type dependency;
-//!     each module decides from the model state whether it owns the window's
-//!     blob (presence-driven), so at most one blob exists per window.
+//!   - `serializeWindow(m-const, win, alloc)` -- returns an opaque per-window
+//!     blob for restart persistence, or null. The model is passed as a
+//!     READ-ONLY `*const model.Model` (serialization never mutates; writing
+//!     through it is a compile error), cast from persist's const handle --
+//!     no `@constCast`. Each module decides from the model state whether it
+//!     owns the window's blob (presence-driven), so at most one blob exists
+//!     per window.
 //!   - `deserializeWindow(win, blob, m-as-*anyopaque)` -- returns a "claimed"
 //!     bool. Hooks self-identify via a format tag (magic byte) inside the
 //!     blob, so the registry adoption loop can't mis-claim another module's
-//!     blob; unclaimed blobs leave the window in its default state.
+//!     blob; unclaimed blobs leave the window in its default state. This seam
+//!     stays `*anyopaque` because adoption may WRITE model state; it is
+//!     dispatched only from the window layer's gate-holding restore path.
 
 const std = @import("std");
 const core = @import("core");
@@ -50,7 +54,7 @@ pub const tiling_mods =
 /// generated `plugins.Surfaces` is the comptime `null` type and every
 /// `if (build_options.has_bar)` call site compiles away.
 pub const Surfaces = struct {
-    // Boot lifecycle, invoked from main.zig through plugins.Surfaces so the
+    // Boot lifecycle, invoked from startup through plugins.Surfaces so the
     // boot sequence never needs to name the bar module directly.
     init: *const fn () anyerror!void,
     deinit: *const fn () void,
@@ -101,12 +105,14 @@ pub const WindowModule = struct {
     // Session persistence seam: modules marshal/unmarshal their per-window
     // state as an opaque blob; persist carries `[]u8` bytes and the
     // wire layer dispatches. `serializeWindow` null => nothing persisted.
-    // The model is passed as `*anyopaque` so this seam stays free of a model
-    // type dependency; each module decides from the model state whether it
-    // owns the window's blob (at most one module returns bytes per window).
-    // `deserializeWindow` returns whether this module claimed the blob; hooks
-    // self-identify via a format tag so the registry loop can't mis-claim.
-    serializeWindow: ?*const fn (*anyopaque, u32, std.mem.Allocator) ?[]const u8 = null,
+    // The model is handed across the WRITE side as a read-only `*const
+    // model.Model` (serialization never mutates; the caller holds the const
+    // handle and does NOT @constCast), and each module decides from that
+    // state whether it owns the window's blob (at most one module returns
+    // bytes per window). `deserializeWindow` returns whether this module
+    // claimed the blob; hooks self-identify via a format tag so the registry
+    // loop can't mis-claim.
+    serializeWindow: ?*const fn (*const model.Model, u32, std.mem.Allocator) ?[]const u8 = null,
     deserializeWindow: ?*const fn (u32, []const u8, *anyopaque) bool = null,
     setEwmhFullscreenState: ?*const fn (u32, bool) void = null,
     armPendingBarHide: ?*const fn (u32) void = null,
@@ -229,9 +235,9 @@ pub fn providerOf(
 }
 
 /// The bar-segment hook set. Every module under a bar-owner's `modules/`
-/// directory (today `src/bar/modules/`) binds its `pub const module` value to
+/// directory binds its `pub const module` value to
 /// this type, binding only the hooks it owns (everything else stays `null`).
-/// build.zig scans `src/bar/modules/` and emits a `bar_modules` registry array
+/// build.zig scans the bar's `modules/` and emits a `bar_modules` registry array
 /// of every discovered module's value (deterministic sorted-stem order); the
 /// bar orchestrator iterates it with uniform loops, so adding a segment is a
 /// drop-in file and removing one degrades to shorter loops. This is the
@@ -321,9 +327,9 @@ pub const Segment = struct {
     invalidateReloadCaches: ?*const fn () void = null,
 };
 
-/// The tiling-layout hook set. Every module under a tiling-owner's `modules/`
-/// directory (today `src/tiling/modules/`) binds its `pub const module` value
-/// to this type. build.zig scans `src/tiling/modules/` and emits a
+/// The tiling-layout hook set. Every module under the tiling owner's `modules/`
+/// directory binds its `pub const module` value
+/// to this type. build.zig scans the tiling `modules/` and emits a
 /// `tiling_modules` registry; the engine resolves the active layout (a
 /// `u8` registry index in `model.LayoutParams.kind`) and dispatches through
 /// this contract, so adding a layout is a drop-in file and removing one just
@@ -355,8 +361,11 @@ pub const Layout = struct {
     // "is scroll in use" == "the active layout provides these hooks").
     slotWidth: ?*const fn (u16) i32 = null,
     maxOffset: ?*const fn (usize, i32, u16) i32 = null,
-    /// Pre-reconcile duty (snap-right on count growth, clamp viewport).
-    preReconcile: ?*const fn (*anyopaque, usize, u16) void = null,
+    /// Pure pre-reconcile duty: takes the workspace's layout params BY VALUE
+    /// and returns the updated params (snap-right on count growth, viewport
+    /// clamp). The pipeline choke point applies the returned delta; layout
+    /// modules never receive a mutable pointer into the model.
+    preReconcile: ?*const fn (model.LayoutParams, usize, u16) model.LayoutParams = null,
     // Bar rendering metadata (layout/variants segments render generically).
     icon: ?[]const u8 = null,
     indicators: ?[]const []const u8 = null,

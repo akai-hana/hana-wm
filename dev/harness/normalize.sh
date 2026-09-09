@@ -28,7 +28,7 @@ for f in "$@"; do
 			# Window ids: 0x-prefixed (xwininfo/xprop) AND bare >=6-hex-digit
 			# forms, including PURE DECIMAL ones, because dump_state prints
 			# its Focused:/window ids in decimal ({d}, e.g. 800001). Verified
-			# ND-24: restricting this to hex-letter-bearing tokens broke every
+			# Restricting this to hex-letter-bearing tokens broke every
 			# golden (decimal ids stopped tokenizing); the ordering-dependence
 			# concern is neutralized by per-scenario determinism, so the
 			# original eat-decimals behavior is load-bearing and stays.

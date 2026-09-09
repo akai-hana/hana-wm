@@ -1,7 +1,7 @@
 # S20 - layout-storm: rapid layout cycling plus master-count extremes.
-# Additive yardstick (SW-9 / S14F10): every kind transition must keep all
+# Additive yardstick: every kind transition must keep all
 # windows mapped and the focused window unchanged; master count clamps at
-# both bounds (ND-22 upper clamp, lower bound 1).
+# both bounds (upper clamp, lower bound 1).
 spawn_client A
 spawn_client B
 spawn_client C

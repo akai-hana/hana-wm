@@ -22,7 +22,7 @@ const ns_per_s = std.time.ns_per_s;
 /// Measurement string used to pre-compute the clock segment width.
 pub const clock_measure_string: []const u8 = "0000-00-00 00:00:00";
 
-/// The clock's reserved-width probe (D14): the string the bar measures at
+/// The clock's reserved-width probe: the string the bar measures at
 /// layout width. At most one module provides a `measureString` hook.
 pub fn measureString() []const u8 {
     return clock_measure_string;

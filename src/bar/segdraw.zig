@@ -105,7 +105,8 @@ fn frameDrawHook(comptime draw: anytype) *const fn (*anyopaque, u16) anyerror!u1
 /// The icon modules' click action: step the integer direction, then force a
 /// redraw. Null action => no click binding (clock).
 fn clickHook(comptime action: anytype) ?OnClick {
-    if (action == null) return null;
+    // `null` is passed for modules with no click action (clock, workspaces).
+    if (comptime @TypeOf(action) == @TypeOf(null)) return null;
     return struct {
         fn f(_: u16, left: bool, _: bool, _: *anyopaque, _: *const fn (*anyopaque, u16) void, redraw: *const fn () void) bool {
             action(if (left) 1 else -1);

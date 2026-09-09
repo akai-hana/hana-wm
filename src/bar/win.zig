@@ -1,4 +1,4 @@
-//! Bar self-window lifecycle (D2 decomposition of bar.zig).
+//! Bar self-window lifecycle.
 //!
 //! Owns the bar's X11 window as a CLIENT: creation, dock/EWMH properties,
 //! atom resolution, visual/colormap selection, and the draw-context wiring.
@@ -7,8 +7,8 @@
 //! lives outside sync, same rationale as the rest of bar's allowlisted
 //! self-window traffic in dev/scripts/check-layers.sh.
 //!
-//! No behavior changes vs the pre-split code; functions moved verbatim with
-//! atom storage re-homed from bar's `gBar.atoms` to this module's `atoms`.
+//! Atom storage is owned on this module (resolved once in initAtoms), not by
+//! the bar orchestrator.
 
 const std = @import("std");
 
@@ -33,7 +33,7 @@ pub const BarAtoms = struct {
     action_stick: xcb.xcb_atom_t = 0,
 };
 
-/// Module-level atom storage (was gBar.atoms). Resolved once in initAtoms().
+/// Module-level atom storage. Resolved once in initAtoms().
 pub var atoms: BarAtoms = .{};
 
 pub fn initAtoms() void {

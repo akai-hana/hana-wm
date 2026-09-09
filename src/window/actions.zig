@@ -6,6 +6,7 @@ const core = @import("core");
 const constants = @import("constants");
 const model_mod = @import("model");
 const pipeline = @import("pipeline");
+const persist = @import("persist");
 const sync = @import("sync");
 const focus = @import("focus");
 const window = @import("window");
@@ -14,10 +15,32 @@ const build_options = @import("build_options");
 const debug = @import("debug");
 const utils = @import("utils");
 const window_mods = @import("window_modules").modules;
+const tracking = @import("tracking");
+
+const gate = tracking.gate;
 
 /// Registry lookup for the hook `field` (see `plugin.providerOf`), null when
 /// no module binds it; canonical scan lives in window.providerOf.
 const providerOf = window.providerOf;
+
+const callHook = window.callHook;
+const callHookBool = window.callHookBool;
+
+fn dispatchAll(comptime field: std.meta.FieldEnum(@import("plugin").WindowModule), args: anytype) void {
+    inline for (window_mods) |m| if (@field(m, @tagName(field))) |f| @call(.auto, f, args);
+}
+
+fn dispatchFirstTrue(comptime field: std.meta.FieldEnum(@import("plugin").WindowModule), args: anytype) bool {
+    inline for (window_mods) |m| if (@field(m, @tagName(field))) |f| {
+        if (@call(.auto, f, args)) return true;
+    };
+    return false;
+}
+
+fn callFirst(comptime field: std.meta.FieldEnum(@import("plugin").WindowModule), args: anytype) ?utils.Rect {
+    inline for (window_mods) |m| if (@field(m, @tagName(field))) |f| return @call(.auto, f, args);
+    return null;
+}
 
 /// Convenience: returns the current workspace's covering occupant, or null.
 fn currentCoveringOccupant(m: *const model_mod.Model) ?model_mod.WindowId {
@@ -30,7 +53,7 @@ fn currentCoveringOccupant(m: *const model_mod.Model) ?model_mod.WindowId {
 /// Convenience: true when `win` is the covering (fullscreen) occupant on its
 /// workspace.
 fn isCoveringOnWs(m: *const model_mod.Model, win: model_mod.WindowId) bool {
-    return if (providerOf(.isCoveringOnWs)) |wm| wm.isCoveringOnWs.?(m, win, m.current) else false;
+    return callHookBool(.isCoveringOnWs, .{ m, win, m.current });
 }
 
 /// Shared change guard for the tag/pin actions: the window must be present in
@@ -72,14 +95,13 @@ pub const Ctx = struct {
 fn retileAndNotify(restack: bool, full_redraw: bool, with_focus: bool, ft: ?focus.FocusTransition) void {
     // Bump core's fact revision for the arrange; the bar (a consumer of the
     // fact) redraws from its own poll. Core is never informed of "the bar".
-    if (full_redraw) core.bumpLayout() else core.bumpWindow();
-    if (with_focus) pipeline.reconcileUnderGrabNowWithFocus(if (restack) .{ .force_restack = true } else .{}, ft.?)
-    else pipeline.reconcileUnderGrabNow(if (restack) .{ .force_restack = true } else .{});
+    if (full_redraw) core.layout.bump() else core.window.bump();
+    if (with_focus) pipeline.reconcileUnderGrabNowWithFocus(if (restack) .{ .force_restack = true } else .{}, ft.?) else pipeline.reconcileUnderGrabNow(if (restack) .{ .force_restack = true } else .{});
 }
 
 fn retileWithFullscreenBump(ft: focus.FocusTransition, bump_fs: bool) void {
-    core.bumpWindow();
-    if (bump_fs) core.bumpFullscreen();
+    core.window.bump();
+    if (bump_fs) core.fullscreen.bump();
     pipeline.reconcileUnderGrabNowWithFocus(.{ .force_restack = true }, ft);
 }
 
@@ -100,7 +122,7 @@ fn retileWithFullscreenBump(ft: focus.FocusTransition, bump_fs: bool) void {
 pub fn minimize(focused: ?model_mod.WindowId) void {
     if (providerOf(.hideWindow)) |wm| {
         const win = focused orelse return;
-        const m = pipeline.model();
+        const m = pipeline.mut(&gate);
         const was_focused = m.focused == win;
         const fs_ws_before =
             if (providerOf(.coveringWsOf)) |prov| prov.coveringWsOf.?(m, win) else null;
@@ -136,7 +158,7 @@ fn focusFallback(m: *model_mod.Model) focus.FocusTransition {
 // --------------------------------------------------------- restore (unpark)
 
 fn isMinimizedOnAnyWs(m: *const model_mod.Model, win: model_mod.WindowId) bool {
-    return if (providerOf(.isWindowHidden)) |wm| wm.isWindowHidden.?(m, win) else false;
+    return callHookBool(.isWindowHidden, .{ m, win });
 }
 
 fn restoreAndFocus(m: *model_mod.Model, win: model_mod.WindowId) void {
@@ -151,7 +173,7 @@ fn armFullscreenBarHideIfNeeded(
     had_occupant_before: bool,
 ) void {
     if (build_options.has_bar and !had_occupant_before and isCoveringOnWs(m, win)) {
-        for (window_mods) |wm| if (wm.armPendingBarHide) |f| f(win);
+        dispatchAll(.armPendingBarHide, .{win});
     }
 }
 
@@ -159,21 +181,21 @@ fn armFullscreenBarHideIfNeeded(
 /// and arms the deferred bar-hide when the restore opened a fresh claim.
 fn restoreTarget(m: *model_mod.Model, win: model_mod.WindowId) void {
     const had_occupant_before = currentCoveringOccupant(m) != null;
-    if (providerOf(.restoreWindow)) |wm| wm.restoreWindow.?(m, win);
+    callHook(.restoreWindow, .{ m, win });
     restoreAndFocus(m, win);
     armFullscreenBarHideIfNeeded(m, win, had_occupant_before);
 }
 
 /// Restores a specific hidden window (title-bar click path).
 pub fn restore(win: model_mod.WindowId) void {
-    const m = pipeline.model();
+    const m = pipeline.mut(&gate);
     if (!isMinimizedOnAnyWs(m, win)) return;
     restoreTarget(m, win);
 }
 
 /// Slot-ordered single restore (LIFO/FIFO keybind paths).
 pub fn restoreOrdered(order: model_mod.RestoreOrder) void {
-    const m = pipeline.model();
+    const m = pipeline.mut(&gate);
     const win = (if (providerOf(.restoreCandidateOn)) |wm|
         wm.restoreCandidateOn.?(m, m.current, order)
     else
@@ -186,12 +208,12 @@ pub fn restoreOrdered(order: model_mod.RestoreOrder) void {
 /// through the same reconcile's covering branch, straight back into
 /// covering).
 pub fn restoreAll() void {
-    const m = pipeline.model();
+    const m = pipeline.mut(&gate);
     if (providerOf(.latestHiddenOnWs)) |wm| {
         const ws = m.current;
         const target = (wm.latestHiddenOnWs.?(m, ws) orelse return);
         const had_occupant_before = currentCoveringOccupant(m) != null;
-        if (providerOf(.restoreOnWs)) |rp| rp.restoreOnWs.?(m, ws);
+        callHook(.restoreOnWs, .{ m, ws });
         restoreAndFocus(m, target);
         if (currentCoveringOccupant(m)) |occ|
             armFullscreenBarHideIfNeeded(m, occ, had_occupant_before);
@@ -209,7 +231,7 @@ pub fn restoreAll() void {
 /// diff; tiled exit re-derives placements from the tiling engine, so the pre-exit
 /// "restore then re-park" request round collapses away.
 ///
-/// Bar hide/show deferral and EWMH stay protocol-side (R2), driven through the
+/// Bar hide/show deferral and EWMH stay protocol-side, driven through the
 /// window_modules registry's pending machinery so events.zig's ConfigureNotify
 /// handler works unchanged. The keybind path resolves the focused window at
 /// the dispatch site and lands here too.
@@ -223,7 +245,7 @@ pub fn fullscreenToggleWindow(win: model_mod.WindowId) void {
     const fs_t0: u64 = utils.monotonicNs();
     if (providerOf(.toggleCovering)) |wm| {
         if (!core.getState().config.fullscreen_enabled) return;
-        const m = pipeline.model();
+        const m = pipeline.mut(&gate);
         // Never cover a window off the viewed workspace: the covering
         // record binds the current ws and would claim it while hidden.
         if (!model_mod.visibleOn(m, win, m.current)) return;
@@ -267,7 +289,7 @@ pub fn moveWindowTo(win: model_mod.WindowId, ws_idx: u8) void {
     if (providerOf(.sendToWs)) |wm| {
         if (ws_idx >= constants.max_workspaces) return;
 
-        const m = pipeline.model();
+        const m = pipeline.mut(&gate);
         const was_focused = m.focused == win;
         const was_fs_current = isCoveringOnWs(m, win);
 
@@ -279,7 +301,7 @@ pub fn moveWindowTo(win: model_mod.WindowId, ws_idx: u8) void {
             if (was_focused) ft = focusFallback(m);
             // Moving the current workspace's covering window away changes the
             // workspace's covering occupancy: bump the core fact; bar reacts.
-            if (was_fs_current) core.bumpFullscreen();
+            if (was_fs_current) core.fullscreen.bump();
         }
         retileAndNotify(false, false, true, ft);
     }
@@ -291,7 +313,7 @@ pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) voi
     if (providerOf(.sendToWs) == null) return;
     if (ws_idx >= constants.max_workspaces) return;
 
-    const m = pipeline.model();
+    const m = pipeline.mut(&gate);
     if (!canTagChange(m, win)) return;
     const e = m.store.get(win).?;
 
@@ -305,7 +327,7 @@ pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) voi
         }
         if (removing_current and m.focused == win) ft = focusFallback(m);
     } else {
-        if (providerOf(.addToWs)) |ap| ap.addToWs.?(m, win, ws_idx, protect_current);
+        callHook(.addToWs, .{ m, win, ws_idx, protect_current });
     }
 
     if (removing_current or (!had_bit and ws_idx == m.current)) {
@@ -315,16 +337,16 @@ pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) voi
     if (!removing_current) {
         // Off-workspace change: the tag set changed; bump the fact so the
         // workspace-aware consumers redraw.
-        core.bumpWindow();
+        core.window.bump();
     }
 }
 
 /// move_to_all_workspaces / toggle_tag_all: pinned <-> current-only.
 pub fn pinToggle(win: model_mod.WindowId) void {
     if (providerOf(.togglePin) == null) return;
-    const m = pipeline.model();
+    const m = pipeline.mut(&gate);
     if (!canTagChange(m, win)) return;
-    if (providerOf(.togglePin)) |wm| wm.togglePin.?(m, win);
+    callHook(.togglePin, .{ m, win });
     retileAndNotify(false, false, false, null);
 }
 
@@ -332,7 +354,7 @@ pub fn pinToggle(win: model_mod.WindowId) void {
 /// parks them again on exit through the ordinary diff.
 pub fn allViewToggle() void {
     const wm = providerOf(.toggleAllView) orelse return;
-    const m = pipeline.model();
+    const m = pipeline.mut(&gate);
     const entering = wm.toggleAllView.?(m);
     var ft: focus.FocusTransition = .none;
     if (!entering and m.focused != null and !model_mod.visibleOn(m, m.focused.?, m.current)) {
@@ -356,7 +378,7 @@ fn detachTiledToFloating(e: *model_mod.Entry, win: model_mod.WindowId) bool {
 /// current on-screen geometry (LastSent); floating->tiled re-enters the home
 /// list at the primary-column head via the ordinary tiling order.
 pub fn toggleFloating(win: model_mod.WindowId) void {
-    const m = pipeline.model();
+    const m = pipeline.mut(&gate);
     const e = m.store.getPtr(win) orelse return;
     // A window carrying a covering record keeps its anchor: the record owns
     // the screen while covering, and a ghost (parked) record must survive
@@ -393,7 +415,7 @@ fn repairStrandedHome(m: *model_mod.Model, e: *model_mod.Entry, win: model_mod.W
 /// from the drag provider's updateDrag on every motion event.
 pub fn dragRect(win: model_mod.WindowId, r: @import("utils").Rect) void {
     if (providerOf(.setFloatingRect)) |wm| {
-        const m = pipeline.model();
+        const m = pipeline.mut(&gate);
         wm.setFloatingRect.?(m, win, r);
         pipeline.dragTick(win);
     }
@@ -402,7 +424,7 @@ pub fn dragRect(win: model_mod.WindowId, r: @import("utils").Rect) void {
 /// First motion of a drag on a tiled window detaches it to floating at its
 /// current geometry (pending-float detach + remove + retile).
 pub fn detachToFloating(win: model_mod.WindowId) void {
-    const m = pipeline.model();
+    const m = pipeline.mut(&gate);
     const e = m.store.getPtr(win) orelse return;
     if (providerOf(.isCoveringMode)) |wm| {
         if (wm.isCoveringMode.?(m, win)) return;
@@ -421,57 +443,44 @@ pub fn detachToFloating(win: model_mod.WindowId) void {
 
 /// Pointer-press drag begin.
 pub fn startDrag(win: model_mod.WindowId, button: u8, x: i16, y: i16) void {
-    for (window_mods) |m| if (m.startDrag) |f| f(win, button, x, y);
+    dispatchAll(.startDrag, .{ win, button, x, y });
 }
 
 /// Drag end: commits any in-flight detach/rect.
 pub fn stopDrag() void {
-    for (window_mods) |m| if (m.stopDrag) |f| f();
+    dispatchAll(.stopDrag, .{});
 }
 
 /// Motion tick during an active drag.
 pub fn updateDrag(x: i16, y: i16) void {
-    for (window_mods) |m| if (m.updateDrag) |f| f(x, y);
+    dispatchAll(.updateDrag, .{ x, y });
 }
 
 /// Whether a floating drag/resize is currently in flight. In practice only
 /// one module provides this hook, so the loop's first true wins.
 pub fn isDragging() bool {
-    for (window_mods) |m| {
-        if (m.isDragging) |f| {
-            if (f()) return true;
-        }
-    }
-    return false;
+    return dispatchFirstTrue(.isDragging, .{});
 }
 
 /// Whether `win` is the current resize target (drag guard).
 pub fn isResizingWindow(win: model_mod.WindowId) bool {
-    for (window_mods) |m| {
-        if (m.isResizingWindow) |f| {
-            if (f(win)) return true;
-        }
-    }
-    return false;
+    return dispatchFirstTrue(.isResizingWindow, .{win});
 }
 
 /// Last committed drag rect, for resize-path geometry replay. Zero rect
 /// fallback when no module provides the hook, matching the old no-floating
 /// default.
 pub fn getDragLastRect() @import("utils").Rect {
-    for (window_mods) |m| {
-        if (m.getDragLastRect) |f| return f();
-    }
-    return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+    return callFirst(.getDragLastRect, .{}) orelse .{ .x = 0, .y = 0, .width = 0, .height = 0 };
 }
 
 /// Cancels any active drag targeting `win` (unmanage path).
 pub fn cancelDragForWindow(win: model_mod.WindowId) void {
-    for (window_mods) |m| if (m.cancelDragForWindow) |f| f(win);
+    dispatchAll(.cancelDragForWindow, .{win});
 }
 
 pub fn cycleLayoutKind(dir: i32) void {
-    const m = pipeline.model();
+    const m = pipeline.mut(&gate);
     cycleActiveLayout(m, dir);
     retileAndNotify(false, true, false, null);
 }
@@ -490,7 +499,7 @@ fn cycleActiveLayout(m: *model_mod.Model, dir: i32) void {
 
 pub fn stepVariantDir(dir: i32) void {
     if (!build_options.has_tiling) return;
-    const m = pipeline.model();
+    const m = pipeline.mut(&gate);
     const p = &m.ws[m.current].params;
     const n = tiling.variantCount(p.kind);
     p.variant_idx = @intCast(@mod(@as(i32, @intCast(p.variant_idx)) + dir, @as(i32, @intCast(n))));
@@ -498,13 +507,13 @@ pub fn stepVariantDir(dir: i32) void {
 }
 
 pub fn adjustPrimaryWidthAction(delta: f32) void {
-    const m = pipeline.model();
+    const m = pipeline.mut(&gate);
     model_mod.adjustPrimaryWidth(m, delta);
     pipeline.reconcileUnderGrabNow(.{});
 }
 
 pub fn adjustPrimaryCount(delta: i32) void {
-    const m = pipeline.model();
+    const m = pipeline.mut(&gate);
     const p = &m.ws[m.current].params;
     p.primary_count = @intCast(std.math.clamp(@as(i32, p.primary_count) + delta, 1, @max(1, model_mod.store_capacity / 4)));
     pipeline.reconcileUnderGrabNow(.{});
@@ -512,7 +521,7 @@ pub fn adjustPrimaryCount(delta: i32) void {
 
 pub fn adjustSecondaryBalance(delta: f32) void {
     const max_balance: f32 = 6.0; // secondary-column swing cap (see StackBoost.fromBalance)
-    const m = pipeline.model();
+    const m = pipeline.mut(&gate);
     const p = &m.ws[m.current].params;
     p.secondary_balance = std.math.clamp(p.secondary_balance + delta, -max_balance, max_balance);
     pipeline.reconcileUnderGrabNow(.{});
@@ -522,7 +531,7 @@ pub fn adjustSecondaryBalance(delta: f32) void {
 /// variant moves focus to the displaced window BEFORE the reconcile so
 /// head-focused layouts render the right window on the first pass.
 pub fn swapPrimaryAction(focus_swap: bool) void {
-    const m = pipeline.model();
+    const m = pipeline.mut(&gate);
     const list = &m.ws[m.current].tiled_order;
     if (list.items.len < 2) return;
     const displaced = list.items[0];
@@ -536,7 +545,7 @@ pub fn swapPrimaryAction(focus_swap: bool) void {
 }
 
 pub fn moveFocused(delta: i32) void {
-    const m = pipeline.model();
+    const m = pipeline.mut(&gate);
     const win = m.focused orelse return;
     // Modulo wrap (dwm stack rotate): stepping past either edge of the home
     // list's tiled order cycles back around, matching the focus-step parity.
@@ -547,12 +556,9 @@ pub fn moveFocused(delta: i32) void {
 /// scroll_view_left/right: one slot per step, clamped to content. The spawn
 /// snap-right duty lives in preReconcileDuties (pipeline choke point).
 pub fn viewportStep(dir: i32) void {
-    if (!build_options.has_tiling) return;
-    if (!build_options.has_bar) return;
-    const m = pipeline.model();
-    const p = &m.ws[m.current].params;
-    const sc = viewportContext(m);
-    if (!sc.active) return;
+    const vp = activeViewport() orelse return;
+    const p = vp.p;
+    const sc = vp.sc;
     p.viewport_offset += dir * sc.slot_w;
     p.viewport_offset = std.math.clamp(p.viewport_offset, 0, sc.max_off);
     p.viewport_prev_count = @intCast(sc.tiled_count);
@@ -568,12 +574,10 @@ pub fn viewportStep(dir: i32) void {
 /// full grab+reconcile+flush per Mod+k/Mod+j when nothing about the viewport
 /// actually moved.
 pub fn snapViewportToFocused() void {
-    if (!build_options.has_tiling) return;
-    if (!build_options.has_bar) return;
-    const m = pipeline.model();
-    const p = &m.ws[m.current].params;
-    const sc = viewportContext(m);
-    if (!sc.active) return;
+    const vp = activeViewport() orelse return;
+    const m = vp.m;
+    const p = vp.p;
+    const sc = vp.sc;
     const win = m.focused orelse return;
 
     var idx: ?usize = null;
@@ -632,7 +636,31 @@ fn viewportContext(m: *const model_mod.Model) ViewportContext {
     return .{ .active = true, .tiled_count = n, .slot_w = slot_w, .max_off = max_off };
 }
 
+fn activeViewport() ?struct {
+    m: *model_mod.Model,
+    p: *model_mod.LayoutParams,
+    sc: ViewportContext,
+} {
+    if (!build_options.has_tiling) return null;
+    if (!build_options.has_bar) return null;
+    const m = pipeline.mut(&gate);
+    const p = &m.ws[m.current].params;
+    const sc = viewportContext(m);
+    if (!sc.active) return null;
+    return .{ .m = m, .p = p, .sc = sc };
+}
+
 // ---------------------------------------------------------- config reload
+
+/// Boot/restore seam: replay a persisted session's model level onto the
+/// live model. Sole authorized user is main.zig's re-exec restore path
+/// (persist.loadToGlobal + window.adoptRootWindows have already run);
+/// routing through this transition keeps the mutable handle out of boot code
+/// and inside the window layer. No reconcile: the caller reconciles once,
+/// placing every adopted window exactly as it was.
+pub fn applyRestoredLevel() void {
+    persist.applyModelLevel(pipeline.mut(&gate));
+}
 
 /// Seeds every workspace's model params from the CURRENT config. Shared by
 /// boot-time initialization (without this the config's tiling
@@ -646,7 +674,6 @@ pub fn seedParamsFromConfig() void {
     if (!build_options.has_tiling) return;
     const cs = core.getState();
     const cfg = &cs.config.tiling;
-    const max_ws = constants.max_workspaces;
 
     // Config layout names resolve to registry ids here, once per seed.
     // A name that fails to resolve (an unregistered module) must not be
@@ -661,15 +688,12 @@ pub fn seedParamsFromConfig() void {
         break :blk tiling.defaultKind();
     };
 
-    // Last override wins (loop-overwrite semantics).
-    var layout_lookup: [max_ws]?usize = .{null} ** max_ws;
-    for (cfg.workspace_layout_overrides.items, 0..) |o, oi| {
-        if (o.workspace_idx < max_ws) layout_lookup[o.workspace_idx] = oi;
-    }
+    // Last-wins override-index lookup (shared rule on TilingConfig).
+    const layout_lookup = cfg.workspaceLayoutLookup();
     // Last-wins master-count lookup (shared rule on TilingConfig).
     const count_lookup = cfg.masterCountLookup();
 
-    const m = pipeline.model();
+    const m = pipeline.mut(&gate);
     for (&m.ws, 0..) |*s, i| {
         const id: u8 = @intCast(i);
         var kind = default_kind;
@@ -737,11 +761,11 @@ pub fn applyConfigReload() void {
 /// diff parks leavers once and maps+places arrivers (see sync_test's switch
 /// scenario).
 ///
-/// Kept protocol-side (R2): pointer-hover query and focus suppression reset.
+/// Kept protocol-side: pointer-hover query and focus suppression reset.
 /// model.current is the single store; tracking's getCurrentWorkspace is a
 /// read-through facade over it.
 pub fn switchTo(ws_idx: u8) void {
-    const m = pipeline.model();
+    const m = pipeline.mut(&gate);
     if (ws_idx >= constants.max_workspaces) return;
     if (m.current == ws_idx) return;
 
@@ -764,7 +788,7 @@ pub fn switchTo(ws_idx: u8) void {
     // prepareClearFocus returns .none when last_applied is null (empty-to-empty
     // switch), so the focus fact alone can't guarantee a redraw; bumping the
     // window fact here makes the bar redraw at end-of-batch.
-    core.bumpWindow();
+    core.window.bump();
     // Bar visibility follows the NEW workspace's fullscreen occupant. Apply it
     // NOW (X-free, no reconcile) so the FIRST reconcile below already reads the
     // correct screen claim / workarea for this workspace. Otherwise the bar's
@@ -775,7 +799,7 @@ pub fn switchTo(ws_idx: u8) void {
     // Bump the core fullscreen fact; the bar's reactive path in updateIfDirty
     // will no-op since the claim is already applied, but keeping the fact in
     // sync avoids any stale-revision edge.
-    core.bumpFullscreen();
+    core.fullscreen.bump();
 
     const t1 = utils.monotonicNs();
 
@@ -850,7 +874,7 @@ pub fn switchTo(ws_idx: u8) void {
 pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool) void {
     const wincache = @import("wincache");
 
-    const m = pipeline.model();
+    const m = pipeline.mut(&gate);
     if (m.store.has(win)) return; // double-manage guard
 
     // A defined refusal (store or home-list full) leaves the window
@@ -878,7 +902,7 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool) void
         }
     }
     focus.initWindowGrabs(win); // protocol-side keygrabs, both paths did this
-    core.bumpWindow(); // a window was admitted
+    core.window.bump(); // a window was admitted
 
     if (!on_current) return;
 
@@ -896,7 +920,7 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool) void
 /// run; this drops the model entry and re-focuses. Inactive-workspace
 /// geometry repairs ride the same global LastSent diff.
 pub fn unmanage(ctx: *Ctx, win: model_mod.WindowId) void {
-    const m = pipeline.model();
+    const m = pipeline.mut(&gate);
     // Covering and focus truth arrive via ctx: the sole caller (window.
     // unmanageWindow) removes the model entry (the workspace layer's
     // removeWindow -> unregister) BEFORE this action runs, so reading the

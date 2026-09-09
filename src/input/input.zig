@@ -57,8 +57,7 @@ var held_keys: [held_key_capacity]u8 = undefined;
 var held_key_count: usize = 0;
 
 fn keyHeld(keycode: u8) bool {
-    for (held_keys[0..held_key_count]) |kc| if (kc == keycode) return true;
-    return false;
+    return std.mem.indexOfScalar(u8, held_keys[0..held_key_count], keycode) != null;
 }
 
 fn setKeyHeld(keycode: u8) void {
@@ -68,13 +67,10 @@ fn setKeyHeld(keycode: u8) void {
 }
 
 fn clearKeyHeld(keycode: u8) void {
-    var i: usize = 0;
-    while (i < held_key_count) : (i += 1) {
-        if (held_keys[i] == keycode) {
-            held_keys[i] = held_keys[held_key_count - 1];
-            held_key_count -= 1;
-            return;
-        }
+    const slice = held_keys[0..held_key_count];
+    if (std.mem.indexOfScalar(u8, slice, keycode)) |idx| {
+        held_keys[idx] = held_keys[held_key_count - 1];
+        held_key_count -= 1;
     }
 }
 

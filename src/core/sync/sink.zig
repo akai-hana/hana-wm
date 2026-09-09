@@ -1,5 +1,5 @@
-//! Production request sink for sync.zig, the ONLY file under src/core/sync/
-//! allowed to contain raw `xcb_` calls. Every shim wraps the exact request
+//! Production request sink for sync, the ONLY module allowed to contain raw
+//! `xcb_` calls. Every shim wraps the exact request
 //! pattern it consolidates here:
 //!   geom          ~ utils.configureWindow (plus the atomic raise variant
 //!                   that merges a stack mode into the same request)
@@ -48,7 +48,7 @@ pub const XcbSink = struct {
     /// Configure X|Y|W|H, merging a stack mode into the SAME request when
     /// one is requested (never a separate round of requests for geometry+raise).
     fn geomShim(ptr: *anyopaque, win: u32, rect: utils.Rect, stack: ?sync.Stack) void {
-        utils.configureWindowStackMode(
+        utils.configureWindow(
             XcbSink.fromPtr(ptr).conn,
             win,
             rect,

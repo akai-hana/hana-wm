@@ -1,4 +1,4 @@
-# S13 - reload: border_width change sweeps once with correct widths (BC20).
+# S13 - reload: border_width change sweeps once with correct widths.
 spawn_client A
 spawn_client B
 dump before-reload
@@ -9,7 +9,7 @@ settle 600
 dump after-reload    # every tiled border now 7; hana.log must show no double sends
 state_dump
 
-# BC20 hard assertion: query the SERVER for actual border widths. Golden log
+# Hard assertion: query the SERVER for actual border widths. Golden log
 # comparison alone missed a regression where the sweep silently kept the
 # pre-reload width (stale init-cached value).
 {

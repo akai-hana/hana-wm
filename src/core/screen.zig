@@ -1,4 +1,4 @@
-//! core/screen.zig: the usable-screen-area fact.
+//! The usable-screen-area fact.
 //!
 //! Core owns "how much of the screen is left for window placement after all
 //! surfaces that occupy screen space are accounted for." Any such surface (a

@@ -11,13 +11,18 @@ const utils = @import("utils");
 const pipeline = @import("pipeline");
 const model_mod = @import("model");
 
+// Transition-layer gate: the only way to obtain a MUTABLE model handle.
+// Declared here once and aliased by actions/window/focus, the other
+// transition-owning modules; every other access here is a read-only query.
+pub const gate: pipeline.Gate = .{};
+
 /// True once pipeline.init ran; every model access is gated on this so boot
 /// order never touches the undefined global instance.
 fn modelReady() bool {
     return pipeline.initialized;
 }
 
-fn m() ?*model_mod.Model {
+fn m() ?*const model_mod.Model {
     if (!modelReady()) return null;
     return pipeline.model();
 }
@@ -37,9 +42,11 @@ pub fn isManaged(win: u32) bool {
 }
 
 /// Idempotent with actions.unmanage (unregister early-returns when absent).
+/// The one entry-drop transition in this facade: unregisters the model entry
+/// (requires the transition-layer gate; all other tracking queries are reads).
 pub fn removeWindow(win: u32) void {
-    const mm = m() orelse return;
-    model_mod.unregister(mm, win);
+    if (!modelReady()) return;
+    model_mod.unregister(pipeline.mut(&gate), win);
 }
 
 pub inline fn getWindowWorkspaceMask(win: u32) ?u64 {
@@ -53,7 +60,7 @@ pub inline fn windowCount() usize {
     return mm.store.count();
 }
 
-/// NOTE(I-3): rebuild-per-call is correct for correctness; a dirty flag
+/// NOTE: rebuild-per-call is correct for correctness; a dirty flag
 /// would need mutation hooks to track when the model store changes.
 ///
 /// Read-only SNAPSHOT of the model registry, rebuilt per call (bounded by the
@@ -80,7 +87,8 @@ pub fn allWindows() []const Entry {
 // ---------------------------------------------------------------------------
 
 fn clearFocusMru() void {
-    const mm = m() orelse return;
+    if (!modelReady()) return;
+    const mm = pipeline.mut(&gate);
     for (&mm.ws) |*s| s.focus_mru.clear();
 }
 

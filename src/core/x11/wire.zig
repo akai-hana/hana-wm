@@ -1,4 +1,4 @@
-//! X11 wire primitives (D6 split from utils.zig): the ONLY xcb-dependent
+//! X11 wire primitives: the ONLY xcb-dependent
 //! half. Atom cache, EWMH root advertisement, property fetchers, and the
 //! configure/raise/grab/offscreen request shims that sync's sink and the
 //! allowlisted entry points call. Pure geometry (Rect/Margins/scaling)
@@ -25,7 +25,7 @@ const property_no_delete = constants.property_no_delete;
 // Geometry <-> wire conversions
 
 /// Builds a Rect from a get_geometry reply (moved out of Rect so the pure
-/// geometry type in utils.zig stays xcb-free (D6 layer boundary)).
+/// geometry type in utils.zig stays xcb-free).
 /// `include_border` selects whether the wire border_width feeds the Rect's
 /// border_width.
 pub inline fn rectFromXcb(
@@ -47,23 +47,26 @@ pub inline fn rectFromXcb(
 /// Moves and resizes `win`, optionally merging a stack mode into the same
 /// request (XCB consumes value slots by mask bit; the extra slot is ignored
 /// when the stack-mode mask bit is clear).
-pub inline fn configureWindowStackMode(
+pub fn configureWindow(
     conn: Connection,
     win: u32,
     rect: utils.Rect,
     stack_mode: ?u32,
 ) void {
+    var mask: u16 = xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
+        xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT;
+    var values = [_]u32{
+        utils.toXcbCoord(rect.x),
+        utils.toXcbCoord(rect.y),
+        rect.width,
+        rect.height,
+        0,
+    };
     if (stack_mode) |sm| {
-        const mask = xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
-            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
-            xcb.XCB_CONFIG_WINDOW_STACK_MODE;
-        _ = xcb.xcb_configure_window(conn, win, mask, &[_]u32{ utils.toXcbCoord(rect.x), utils.toXcbCoord(rect.y), rect.width, rect.height, sm });
-    } else configureWindow(conn, win, rect);
-}
-
-/// Moves and resizes `win` without touching border_width.
-pub inline fn configureWindow(conn: Connection, win: u32, rect: utils.Rect) void {
-    configureWindowStackMode(conn, win, rect, null);
+        mask |= xcb.XCB_CONFIG_WINDOW_STACK_MODE;
+        values[4] = sm;
+    }
+    _ = xcb.xcb_configure_window(conn, win, mask, &values);
 }
 
 pub inline fn raiseWindow(conn: Connection, win: u32) void {
@@ -262,8 +265,7 @@ pub fn advertiseEwmhSupport(conn: Connection, screen: Screen, root: u32) void {
     // A small, invisible identity window. Override-redirect so hana's own
     // SubstructureRedirect handling never tries to manage it as a client.
     const check_win = xcb.xcb_generate_id(conn);
-    _ = xcb.xcb_create_window(conn, xcb.XCB_COPY_FROM_PARENT, check_win, root, -1, -1, 1, 1, 0,
-        xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, screen.root_visual, @intCast(xcb.XCB_CW_OVERRIDE_REDIRECT), &[_]u32{1});
+    _ = xcb.xcb_create_window(conn, xcb.XCB_COPY_FROM_PARENT, check_win, root, -1, -1, 1, 1, 0, xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, screen.root_visual, @intCast(xcb.XCB_CW_OVERRIDE_REDIRECT), &[_]u32{1});
 
     // Identity dance required by the spec: the check window points at
     // itself, and the root points at the check window. Clients compare the

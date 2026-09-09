@@ -104,6 +104,30 @@ pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
     // ON: capacity guard BEFORE any mutation — a full store refuses the
     // toggle (returns false, model untouched).
     if (g_recs.len() >= MAX_FULLSCREEN) return false;
+
+    // Covering SWITCH: claiming the screen while another window already
+    // owns it on this workspace releases the previous occupant's claim
+    // first. sync's occupant scan (model.coveringOccupantOnWs) elects the
+    // covering winner by store order, so a stale second claim would keep
+    // the OLD window covering and park the entrant — the switch could never
+    // take effect. Exactly one covering intent per workspace. The release
+    // is gated on the ENTERING window being able to claim this workspace
+    // (present-not-parked and visible on it): a stray record targeting a
+    // ws the entrant is not on must not displace the resident owner.
+    const entrant_claims_ws = e.presence != .parked and model.visibleOn(m, win, m.current);
+    if (entrant_claims_ws) {
+        for (g_recs.slice()) |rec| {
+            if (rec.win == win) continue;
+            if (rec.ws != m.current) continue;
+            if (!presentAndVisible(m, rec, m.current)) continue;
+            _ = g_recs.remove(rec.win);
+            if (m.store.getPtr(rec.win)) |prev| {
+                prev.presence = .present;
+                prev.covering_ws = null; // release the core covering intent
+            }
+        }
+    }
+
     const anchor = switch (e.anchor) {
         .tiled => model.BaseMode.tiled,
         .floating => |r| model.BaseMode{ .floating = r },
@@ -249,8 +273,7 @@ fn readLE(comptime T: type, bytes: []const u8, off: usize) T {
 /// ghost and the single `ext` slot belongs to minimize — return null so the
 /// minimized blob wins (design §6). The returned slice is allocator-owned;
 /// persist frees it after writing.
-fn serializePreamble(model_ptr: *anyopaque, win: u32) ?struct { *const model.Model, *const Rec } {
-    const m: *const model.Model = @ptrCast(@alignCast(model_ptr));
+fn serializePreamble(m: *const model.Model, win: u32) ?struct { *const model.Model, *const Rec } {
     const idx = g_recs.find(win) orelse return null;
     const rec = &g_recs.slice()[idx];
     const e = m.store.get(win) orelse return null;
@@ -258,8 +281,8 @@ fn serializePreamble(model_ptr: *anyopaque, win: u32) ?struct { *const model.Mod
     return .{ m, rec };
 }
 
-pub fn serializeWindow(model_ptr: *anyopaque, win: u32, alloc: std.mem.Allocator) ?[]const u8 {
-    const p = serializePreamble(model_ptr, win) orelse return null;
+pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator) ?[]const u8 {
+    const p = serializePreamble(m, win) orelse return null;
     const rec = p[1];
     const len: usize = switch (rec.anchor) {
         .tiled => BLOB_LEN_TILED,
@@ -305,7 +328,10 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
     const tag = bytes[3];
     var anchor: model.BaseMode = undefined;
     switch (tag) {
-        TAG_TILED => { if (bytes.len != BLOB_LEN_TILED) return false; anchor = .tiled; },
+        TAG_TILED => {
+            if (bytes.len != BLOB_LEN_TILED) return false;
+            anchor = .tiled;
+        },
         TAG_FLOATING => {
             if (bytes.len != BLOB_LEN_FLOATING) return false;
             const rect = utils.Rect{
@@ -371,7 +397,10 @@ pub fn notifyConfigureIfPending(win: u32, width: u16, height: u16) void {
     // In both cases we only bump core's fullscreen-occupancy fact; the bar
     // (a consumer) derives its own hide/show from that fact.
     if (g_pending_bar_hide_win == win) {
-        if (width == screen_w and height == screen_h) { g_pending_bar_hide_win = 0; @import("core").bumpFullscreen(); }
+        if (width == screen_w and height == screen_h) {
+            g_pending_bar_hide_win = 0;
+            @import("core").fullscreen.bump();
+        }
     } else if (g_pending_bar_show_win == win) {
         if (width != screen_w or height != screen_h) resolvePendingBarShow();
     }
@@ -379,7 +408,7 @@ pub fn notifyConfigureIfPending(win: u32, width: u16, height: u16) void {
 
 fn resolvePendingBarShow() void {
     g_pending_bar_show_win = 0;
-    @import("core").bumpFullscreen();
+    @import("core").fullscreen.bump();
 }
 
 /// Arm the deferred bar-hide from the fullscreenToggle path.

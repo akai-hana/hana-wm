@@ -435,13 +435,14 @@ pub fn refreshCachedPropHalf(conn: core.Connection, win: u32, atom: u32) void {
     const is_protocols = atom == utils.getAtomOrZero("WM_PROTOCOLS");
     const existing: ?CachedProps = peekCachedProps(win);
 
-    const protocols: WMProtocolsProps = if (existing) |p| (if (is_protocols)
-        queryWMProtocolsProps(conn, win)
+    const protocols: WMProtocolsProps = if (existing) |p|
+        if (is_protocols) queryWMProtocolsProps(conn, win) else .{ .wm_delete = p.wm_delete, .take_focus = p.take_focus }
     else
-        WMProtocolsProps{ .wm_delete = p.wm_delete, .take_focus = p.take_focus })
-    else queryWMProtocolsProps(conn, win);
-    const accepts_input = if (existing) |p| (if (is_protocols) p.accepts_input else queryWMHintsAcceptsInput(conn, win))
-    else queryWMHintsAcceptsInput(conn, win);
+        queryWMProtocolsProps(conn, win);
+    const accepts_input: bool = if (existing) |p|
+        if (is_protocols) p.accepts_input else queryWMHintsAcceptsInput(conn, win)
+    else
+        queryWMHintsAcceptsInput(conn, win);
 
     putCachedProps(win, .{
         .accepts_input = accepts_input,

@@ -122,7 +122,7 @@ run_one() {
 	settle 300
 
 	# Run the scenario body in this shell.
-	# ND-24: EXPORT the harness vars. A VAR=val prefix on the `.` command
+	# EXPORT the harness vars. A VAR=val prefix on the `.` command
 	# expires when sourcing returns, so helpers called afterwards
 	# (state_dump_final -> dump/state_dump) saw unbound HW_OUT/HW_LOG.
 	export HW_DISPLAY HW_OUT="$out" HW_LOG="$out/hana.log" HARNESS_ROOT="$HARNESS_ROOT"

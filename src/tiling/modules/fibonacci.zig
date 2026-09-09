@@ -12,6 +12,22 @@ const SpiralDirection = enum(u2) {
     left, // Split vertically: window on right, remainder on left.
     up, // Split horizontally: window on bottom, remainder above.
 
+    const Step = struct {
+        split_x: bool,
+        forward: bool,
+    };
+
+    const steps = [_]Step{
+        .{ .split_x = true, .forward = true },
+        .{ .split_x = false, .forward = true },
+        .{ .split_x = true, .forward = false },
+        .{ .split_x = false, .forward = false },
+    };
+
+    inline fn step(self: SpiralDirection) Step {
+        return steps[@intFromEnum(self)];
+    }
+
     inline fn next(self: SpiralDirection) SpiralDirection {
         // Increments by one, wrapping past `up` via the 2-bit representation.
         return @enumFromInt(@intFromEnum(self) +% 1);
@@ -79,8 +95,9 @@ inline fn splitAndAdvance(
     gap: u16,
     cur: *Cursor,
 ) void {
-    const split_x = dir == .right or dir == .left;
-    const forward = dir == .right or dir == .down;
+    const step = dir.step();
+    const split_x = step.split_x;
+    const forward = step.forward;
     // forward (right/down) places the window at the leading edge; backward
     // (left/up) keeps the origin put and only shrinks the remaining dimension.
     const dim: u16 = if (split_x) cur.w else cur.h;
@@ -97,8 +114,8 @@ inline fn splitAndAdvance(
         .height = (if (split_x) cur.h else win_dim) -| border2,
     };
     tiling.emitView(v, out, win, rect, true);
-    if (dir == .right) cur.x += advance;
-    if (dir == .down) cur.y += advance;
+    if (forward and split_x) cur.x += advance;
+    if (forward and !split_x) cur.y += advance;
     if (split_x) {
         cur.w = cur.w -| (win_dim + gap);
     } else {

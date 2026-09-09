@@ -91,39 +91,21 @@ pub const Facts = struct {
     layout_rev: u32 = 0,
 };
 
-/// Current focus fact revision.
-pub inline fn focusRev() u32 {
-    return getState().facts.focus_rev;
+fn factAccessors(comptime field: []const u8) type {
+    return struct {
+        pub inline fn rev() u32 {
+            return @field(getState().facts, field);
+        }
+        pub inline fn bump() void {
+            @field(getState().facts, field) +%= 1;
+        }
+    };
 }
-/// Bumps the focus fact revision. Called by the module that owns focus.
-pub inline fn bumpFocus() void {
-    getState().facts.focus_rev +%= 1;
-}
-/// Current window/workspace fact revision.
-pub inline fn windowRev() u32 {
-    return getState().facts.window_rev;
-}
-/// Bumps the window/workspace fact revision.
-pub inline fn bumpWindow() void {
-    getState().facts.window_rev +%= 1;
-}
-/// Current fullscreen-occupancy fact revision.
-pub inline fn fullscreenRev() u32 {
-    return getState().facts.fullscreen_rev;
-}
-/// Bumps the fullscreen-occupancy fact revision. Called by the module that
-/// establishes or clears a fullscreen occupant on the current workspace.
-pub inline fn bumpFullscreen() void {
-    getState().facts.fullscreen_rev +%= 1;
-}
-/// Current layout fact revision.
-pub inline fn layoutRev() u32 {
-    return getState().facts.layout_rev;
-}
-/// Bumps the layout fact revision.
-pub inline fn bumpLayout() void {
-    getState().facts.layout_rev +%= 1;
-}
+
+pub const focus = factAccessors("focus_rev");
+pub const window = factAccessors("window_rev");
+pub const fullscreen = factAccessors("fullscreen_rev");
+pub const layout = factAccessors("layout_rev");
 
 // ---------------------------------------------------------------------------
 // Config-derived windowing facts (owned by core).

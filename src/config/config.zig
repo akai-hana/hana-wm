@@ -29,11 +29,9 @@ fn checkWorkspaceBound(ws_1based: usize, context: []const u8, max: usize) bool {
     return true;
 }
 
-fn tryParseWs1Based(tok: []const u8, max: usize, ctx: []const u8, comptime msg: ?[]const u8, comptime two_args: bool, arg2: ?[]const u8) ?usize {
+fn tryParseWs1Based(tok: []const u8, max: usize, ctx: []const u8, comptime fmt: ?[]const u8, args: anytype) ?usize {
     const ws_1based = std.fmt.parseInt(usize, tok, 10) catch {
-        if (comptime msg) |m| {
-            if (two_args) debug.warn(m, .{ tok, arg2.? }) else debug.warn(m, .{tok});
-        }
+        if (fmt) |f| debug.warn(f, args);
         return null;
     };
     if (!checkWorkspaceBound(ws_1based, ctx, max)) return null;
@@ -87,7 +85,7 @@ fn shrinkOwned(allocator: std.mem.Allocator, buf: []u8, len: usize) ![]u8 {
 /// ceiling up front and reallocs down; loading is startup/reload-only, so a
 /// stat-then-allocate dance (and its TOCTOU re-check) isn't worth it.
 ///
-/// Dual-path rationale (C1): the stat-known-size path is a fast optimization
+/// Dual-path rationale: the stat-known-size path is a fast optimization
 /// for regular files where stat reliably reports a positive size, avoiding the
 /// amortised doubling/realloc of the growth loop. The growth path (stat fails
 /// or reports zero) handles edge cases like procfs/sysfs/pipe file descriptors
@@ -103,7 +101,7 @@ pub fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     defer file.close(io);
     // A successful stat reporting size 0 is as untrustworthy as a failed one:
     // procfs/sysfs/pipes report 0 while carrying content, so they take the
-    // same read-with-growth path (pinned by C5 in src/test/config_test.zig).
+    // same read-with-growth path (pinned by C5 in the config test suite).
     const stat: ?std.Io.File.Stat = file.stat(io) catch null;
     const known_size: usize = if (stat) |st| size: {
         if (st.size > max_file_bytes) return error.FileTooLarge;
@@ -300,7 +298,7 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator) !types.Config {
 }
 
 /// Validates domain invariants on a freshly loaded config.
-fn invalid(comptime fmt: []const u8, args: anytype) error{ InvalidConfig } {
+fn invalid(comptime fmt: []const u8, args: anytype) error{InvalidConfig} {
     debug.err("Invalid config: " ++ fmt ++ ", keeping old", args);
     return error.InvalidConfig;
 }
@@ -423,7 +421,7 @@ const mouse_button_map = std.StaticStringMap(u8).initComptime(.{
     .{ "button5", 5 }, .{ "scroll_down", 5 },  .{ "scrolldown", 5 },
 });
 
-/// D7: mechanically derived from `types.Action`'s tag names, so every action
+/// Mechanically derived from `types.Action`'s tag names, so every action
 /// is addressable by its own tag name without a hand-maintained entry. Only
 /// genuine ALIASES are listed by hand. Adding an Action union member now
 /// requires exactly one edit (the union); forgetting an intended alias fails
@@ -514,8 +512,7 @@ fn expandRangeToken(
 ) !void {
     var ch = t[0];
     const end = t[2];
-    if (ch > end) debug.warn("Keybind glob '{s}': descending range '{c}-{c}', skipping", .{ key_pattern, ch, end }) else
-        while (ch <= end) : (ch += 1) try appendExpandedEntry(allocator, entries, prefix, suffix, &.{ch});
+    if (ch > end) debug.warn("Keybind glob '{s}': descending range '{c}-{c}', skipping", .{ key_pattern, ch, end }) else while (ch <= end) : (ch += 1) try appendExpandedEntry(allocator, entries, prefix, suffix, &.{ch});
 }
 
 /// Expands `{...}` glob patterns in a keybind key (e.g. `Mod+{1-4,Q}` -> 5 entries,
@@ -529,7 +526,9 @@ fn expandGlobKeys(allocator: std.mem.Allocator, key_pattern: []const u8) ![]Glob
         debug.warn("Keybind glob missing closing '}}' in '{s}', treating as literal", .{key_pattern});
         return singleGlobEntry(allocator, key_pattern);
     };
-    const prefix = key_pattern[0..lbrace]; const suffix = key_pattern[rbrace + 1 ..]; const inner = key_pattern[lbrace + 1 .. rbrace];
+    const prefix = key_pattern[0..lbrace];
+    const suffix = key_pattern[rbrace + 1 ..];
+    const inner = key_pattern[lbrace + 1 .. rbrace];
 
     var entries: std.ArrayList(GlobEntry) = .empty;
     errdefer {
@@ -541,8 +540,7 @@ fn expandGlobKeys(allocator: std.mem.Allocator, key_pattern: []const u8) ![]Glob
     while (it.next()) |token| {
         const t = std.mem.trim(u8, token, " \t");
         if (t.len == 0) continue;
-        if (t.len == 3 and t[1] == '-') try expandRangeToken(allocator, &entries, key_pattern, prefix, suffix, t) else
-            try appendExpandedEntry(allocator, &entries, prefix, suffix, t);
+        if (t.len == 3 and t[1] == '-') try expandRangeToken(allocator, &entries, key_pattern, prefix, suffix, t) else try appendExpandedEntry(allocator, &entries, prefix, suffix, t);
     }
     if (entries.items.len == 0) {
         entries.deinit(allocator);
@@ -818,7 +816,7 @@ fn parseTilingStructures(
     // fallback is (types.TilingConfig{}).layout, NOT cfg.tiling.layout (which
     // aliases layouts.items[0], freed below, so using it would read freed
     // memory when the key is absent).
-    if (section.getAs([]const parser.Value,"layouts")) |arr| try parseLayoutsArray(allocator, arr, cfg) else {
+    if (section.getAs([]const parser.Value, "layouts")) |arr| try parseLayoutsArray(allocator, arr, cfg) else {
         const layout_str = schema.getInRange([]const u8, section, "layout", default_tiling_layout, null, null);
         try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, canonicalLayoutName(layout_str)));
     }
@@ -865,7 +863,7 @@ fn parseTilingLayoutSubtables(
     cfg: *types.Config,
 ) !void {
     if (doc.getSection("tiling")) |sec| for (flat_variant_keys) |fk|
-        if (sec.getAs([]const u8,fk.key)) |v| try setTilingVariant(allocator, cfg, fk.canon, v);
+        if (sec.getAs([]const u8, fk.key)) |v| try setTilingVariant(allocator, cfg, fk.canon, v);
 
     const prefix = "tiling.layouts.";
     const suffix = ".counts";
@@ -885,15 +883,13 @@ fn parseTilingLayoutSubtables(
                 var inner = counts_sec.orderedIterator();
                 while (inner.next()) |p| {
                     counts_sec.markConsumed(p.key);
-                    if (tryParseWs1Based(p.key, constants.max_workspaces, "master-stack.counts",
-                        "master-stack.counts: invalid workspace key '{s}', skipping", false, null)) |ws_1based| {
+                    if (tryParseWs1Based(p.key, constants.max_workspaces, "master-stack.counts", "master-stack.counts: invalid workspace key '{s}', skipping", .{p.key})) |ws_1based| {
                         const count_val = p.value.asScalar(i64) orelse {
                             debug.warn("master-stack.counts: non-integer count for workspace {}, skipping", .{ws_1based});
                             continue;
                         };
                         if (count_val < 0 or count_val > 10)
-                            debug.warn("master-stack.counts: count {} for workspace {} out of range [0,10], skipping",
-                                .{ count_val, ws_1based })
+                            debug.warn("master-stack.counts: count {} for workspace {} out of range [0,10], skipping", .{ count_val, ws_1based })
                         else
                             try cfg.tiling.workspace_master_count_overrides.append(allocator, .{
                                 .workspace_idx = @intCast(ws_1based - 1),
@@ -905,7 +901,7 @@ fn parseTilingLayoutSubtables(
         } else if (std.mem.indexOfScalar(u8, tail, '.') == null) {
             // Direct "<prefix><name>" keys canonicalize so master alias
             // spellings resolve the same variant entry.
-            if (entry.value_ptr.getAs([]const u8,"variants")) |v|
+            if (entry.value_ptr.getAs([]const u8, "variants")) |v|
                 try setTilingVariant(allocator, cfg, canonicalLayoutName(tail), v);
         }
     }
@@ -930,19 +926,16 @@ fn isWorkspaceList(s: []const u8) bool {
 /// grammar, not an authoritative registry — layout names resolve to
 /// `tiling_modules` registry indices at seed time (engine.layoutByName), and
 /// unknown names pass through so third-party addon layouts keep working.
-const layout_name_grammar = [_][]const u8{
-    "master",  "master-stack", "master_stack",
-    "monocle", "grid",         "fibonacci",
-    "leaf",    "scroll",
-};
+const layout_name_grammar = std.StaticStringMap(void).initComptime(.{
+    .{ "master", {} },  .{ "master-stack", {} }, .{ "master_stack", {} },
+    .{ "monocle", {} }, .{ "grid", {} },         .{ "fibonacci", {} },
+    .{ "leaf", {} },    .{ "scroll", {} },
+});
 
 /// Whether `name` is one of the known layout-name spellings (grammar test).
 fn isLayoutName(name: []const u8) bool {
     const lowered = types.lowerSlice(32, name) orelse return false;
-    for (layout_name_grammar) |known| {
-        if (std.mem.eql(u8, lowered, known)) return true;
-    }
-    return false;
+    return layout_name_grammar.has(lowered);
 }
 
 /// Handles a layouts-array "variants word" for the given layout. The
@@ -982,8 +975,7 @@ fn parseWorkspaceListInto(
     var ws_iter = std.mem.splitScalar(u8, ws_str, ',');
     while (ws_iter.next()) |ws_tok| {
         const trimmed = std.mem.trim(u8, ws_tok, " \t");
-        const ws_1based = tryParseWs1Based(trimmed, constants.max_workspaces, "layouts array",
-            "layouts array: invalid workspace number '{s}' for layout '{s}', skipping", true, layout_name) orelse continue;
+        const ws_1based = tryParseWs1Based(trimmed, constants.max_workspaces, "layouts array", "layouts array: invalid workspace number '{s}' for layout '{s}', skipping", .{ trimmed, layout_name }) orelse continue;
         const variant_copy: ?[]const u8 = if (variant) |v| try allocator.dupe(u8, v) else null;
         try overrides.append(allocator, .{ .workspace_idx = @intCast(ws_1based - 1), .layout_idx = layout_idx, .variant = variant_copy });
     }
@@ -1045,8 +1037,7 @@ fn parseLayoutsArray(
                 }
             }
         }
-        if (ws_list_str) |ws_str| try parseWorkspaceListInto(allocator, ws_str, name_lower,
-            layout_idx, variants, &cfg.tiling.workspace_layout_overrides);
+        if (ws_list_str) |ws_str| try parseWorkspaceListInto(allocator, ws_str, name_lower, layout_idx, variants, &cfg.tiling.workspace_layout_overrides);
     }
 }
 
@@ -1074,15 +1065,15 @@ fn appendDupedStrings(
 /// stays gated on the [bar] section existing.
 fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
     const section = doc.getSection("bar") orelse return;
-    if (section.getAs([]const parser.Value,"fonts")) |arr| {
+    if (section.getAs([]const parser.Value, "fonts")) |arr| {
         types.freeStrings(&cfg.bar.fonts, allocator, true);
         try appendDupedStrings(allocator, arr, &cfg.bar.fonts, false);
         debug.info("Loaded {} fonts for bar", .{cfg.bar.fonts.items.len});
     }
     // indicator_focused/unfocused: if only one is set, the other mirrors it.
     // A pair interaction, so it stays bespoke rather than joining the table.
-    const raw_focused = section.getAs([]const u8,"indicator_focused");
-    const raw_unfocused = section.getAs([]const u8,"indicator_unfocused");
+    const raw_focused = section.getAs([]const u8, "indicator_focused");
+    const raw_unfocused = section.getAs([]const u8, "indicator_unfocused");
     const focused_val = raw_focused orelse raw_unfocused;
     const unfocused_val = raw_unfocused orelse raw_focused;
     if (focused_val) |v| try schema.assignStr(allocator, &cfg.bar.indicator_focused, v);
@@ -1105,7 +1096,7 @@ fn parseWorkspaceIcons(
     cfg: *types.Config,
 ) !void {
     types.freeStrings(&cfg.bar.workspace_icons, allocator, true);
-    if (section.getAs([]const parser.Value,"icons")) |arr| {
+    if (section.getAs([]const parser.Value, "icons")) |arr| {
         for (arr) |item| {
             if (item.asScalar([]const u8)) |s|
                 try cfg.bar.workspace_icons.append(allocator, try allocator.dupe(u8, s));
@@ -1115,7 +1106,7 @@ fn parseWorkspaceIcons(
                 try cfg.bar.workspace_icons.append(allocator, try allocator.dupe(u8, s));
             }
         }
-    } else if (section.getAs([]const u8,"icons")) |str| {
+    } else if (section.getAs([]const u8, "icons")) |str| {
         var ch_buf: [1]u8 = undefined;
         for (str) |ch| {
             ch_buf[0] = ch;
@@ -1137,7 +1128,7 @@ fn parseBarLayout(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *typ
     for (positions) |p| {
         const layout_section = doc.getSection(p.name) orelse continue;
         var bar_layout = types.BarLayout{ .position = p.pos, .segments = .empty };
-        if (layout_section.getAs([]const parser.Value,"segments")) |seg_arr|
+        if (layout_section.getAs([]const parser.Value, "segments")) |seg_arr|
             try appendDupedStrings(allocator, seg_arr, &bar_layout.segments, true);
         if (bar_layout.segments.items.len > 0) try cfg.bar.layout.append(allocator, bar_layout) else bar_layout.deinit(allocator);
     }
@@ -1171,9 +1162,8 @@ fn parseNumberedRuleSections(
     var section_iter = doc.sections.iterator();
     while (section_iter.next()) |entry| {
         const name = entry.key_ptr.*;
-        const suffix_len = if (std.mem.startsWith(u8, name, "workspace.rules.")) "workspace.rules.".len
-            else if (std.mem.startsWith(u8, name, "rules.")) "rules.".len else continue;
-        const ws_num = tryParseWs1Based(name[suffix_len..], cfg.workspaces.count, name, null, false, null) orelse continue;
+        const suffix_len = if (std.mem.startsWith(u8, name, "workspace.rules.")) "workspace.rules.".len else if (std.mem.startsWith(u8, name, "rules.")) "rules.".len else continue;
+        const ws_num = tryParseWs1Based(name[suffix_len..], cfg.workspaces.count, name, null, .{}) orelse continue;
         var iter = entry.value_ptr.orderedIterator();
         while (iter.next()) |class_entry| {
             entry.value_ptr.markConsumed(class_entry.key);
@@ -1215,4 +1205,152 @@ fn parseWorkspaceRuleSection(
             for (arr) |item|
                 if (item.asScalar([]const u8)) |class_name| try addRule(allocator, cfg, class_name, ws_num);
     }
+}
+
+// ── Per-subsystem change detection ──────────────────────────────────
+// Uses Wyhash to fingerprint each subsystem's relevant config fields so
+// handleConfigReload can skip teardown/rebuild work when a subsystem
+// didn't actually change (e.g. a bar color tweak should not regrab keys).
+
+const Hash = std.hash.Wyhash;
+
+fn hashVal(h: *Hash, val: anytype) void {
+    h.update(std.mem.asBytes(&val));
+}
+
+fn hashSlice(h: *Hash, s: []const u8) void {
+    h.update(s);
+}
+
+fn hashOptSlice(h: *Hash, s: ?[]const u8) void {
+    if (s) |str| {
+        hashVal(h, @as(u8, 1));
+        h.update(str);
+    } else {
+        hashVal(h, @as(u8, 0));
+    }
+}
+
+fn hashStringList(h: *Hash, list: anytype) void {
+    const items = list.items;
+    hashVal(h, @as(u32, @intCast(items.len)));
+    for (items) |item| hashSlice(h, item);
+}
+
+pub const ConfigChanges = struct {
+    bar: bool = false,
+    tiling: bool = false,
+    keys: bool = false,
+};
+
+/// Compares old and new configs at a coarse per-subsystem level, returning
+/// which subsystems changed. Gate each reload step on its flag so, e.g.,
+/// a color tweak doesn't regrab keybindings.
+pub fn detectChanges(old: *const types.Config, new: *const types.Config) ConfigChanges {
+    return .{
+        .bar = hashBarSubsystem(&old.bar) != hashBarSubsystem(&new.bar),
+        .tiling = hashTilingSubsystem(old) != hashTilingSubsystem(new),
+        .keys = hashKeysSubsystem(old) != hashKeysSubsystem(new),
+    };
+}
+
+fn hashBarSubsystem(bar: *const types.BarConfig) u64 {
+    var h = Hash.init(0x626172);
+    hashVal(&h, bar.enabled);
+    hashVal(&h, bar.vim_mode);
+    hashVal(&h, bar.bar_position);
+    hashVal(&h, bar.height);
+    hashVal(&h, bar.font_size);
+    hashVal(&h, bar.spacing);
+    hashVal(&h, bar.bg);
+    hashVal(&h, bar.fg);
+    hashVal(&h, bar.selected_bg);
+    hashVal(&h, bar.selected_fg);
+    hashVal(&h, bar.accent_color);
+    hashVal(&h, bar.title_accent_color);
+    hashVal(&h, bar.title_unfocused_accent);
+    hashVal(&h, bar.title_minimized_accent);
+    hashVal(&h, bar.indicator_size);
+    hashVal(&h, bar.workspace_tag_width);
+    hashVal(&h, bar.indicator_location);
+    hashVal(&h, bar.indicator_padding);
+    hashOptSlice(&h, bar.indicator_focused);
+    hashOptSlice(&h, bar.indicator_unfocused);
+    hashVal(&h, bar.indicator_color);
+    hashOptSlice(&h, bar.clock_format);
+    hashVal(&h, bar.carousel_enabled);
+    hashVal(&h, bar.carousel_speed_px_s);
+    hashVal(&h, bar.drun_bg);
+    hashVal(&h, bar.drun_fg);
+    hashVal(&h, bar.drun_prompt_color);
+    hashOptSlice(&h, bar.drun_prompt);
+    hashVal(&h, bar.transparency);
+    hashStringList(&h, bar.fonts);
+    hashStringList(&h, bar.workspace_icons);
+    hashVal(&h, @as(u32, @intCast(bar.layout.items.len)));
+    for (bar.layout.items) |*bl| {
+        hashVal(&h, bl.position);
+        hashStringList(&h, bl.segments);
+    }
+    return h.final();
+}
+
+fn hashTilingSubsystem(cfg: *const types.Config) u64 {
+    var h = Hash.init(0x74696c);
+    const t = &cfg.tiling;
+    hashVal(&h, t.enabled);
+    hashSlice(&h, t.layout);
+    hashStringList(&h, t.layouts);
+    hashVal(&h, t.master_side);
+    hashVal(&h, t.master_width);
+    hashVal(&h, t.master_count);
+    hashVal(&h, t.gap_width);
+    hashVal(&h, t.border_width);
+    hashVal(&h, t.border_focused);
+    hashVal(&h, t.border_unfocused);
+    hashVal(&h, t.min_window_dim);
+    hashVal(&h, t.global_layout);
+    hashVal(&h, @as(u32, @intCast(t.variants.count())));
+    var vit = t.variants.iterator();
+    while (vit.next()) |entry| {
+        hashSlice(&h, entry.key_ptr.*);
+        hashSlice(&h, entry.value_ptr.*);
+    }
+    hashVal(&h, @as(u32, @intCast(t.workspace_layout_overrides.items.len)));
+    for (t.workspace_layout_overrides.items) |o| {
+        hashVal(&h, o.workspace_idx);
+        hashVal(&h, o.layout_idx);
+        hashOptSlice(&h, o.variant);
+    }
+    hashVal(&h, @as(u32, @intCast(t.workspace_master_count_overrides.items.len)));
+    for (t.workspace_master_count_overrides.items) |o| {
+        hashVal(&h, o.workspace_idx);
+        hashVal(&h, o.count);
+    }
+    hashVal(&h, cfg.workspaces.enabled);
+    hashVal(&h, cfg.workspaces.count);
+    hashVal(&h, @as(u32, @intCast(cfg.workspaces.rules.items.len)));
+    for (cfg.workspaces.rules.items) |rule| {
+        hashSlice(&h, rule.class_name);
+        hashVal(&h, rule.workspace);
+    }
+    hashVal(&h, cfg.fullscreen_enabled);
+    hashVal(&h, cfg.drag_enabled);
+    hashVal(&h, cfg.snap_distance);
+    return h.final();
+}
+
+fn hashKeysSubsystem(cfg: *const types.Config) u64 {
+    var h = Hash.init(0x6b6579);
+    hashVal(&h, @as(u32, @intCast(cfg.keybindings.items.len)));
+    for (cfg.keybindings.items) |kb| {
+        hashVal(&h, kb.modifiers);
+        hashVal(&h, kb.keysym);
+    }
+    hashVal(&h, @as(u32, @intCast(cfg.mouse_bindings.items.len)));
+    for (cfg.mouse_bindings.items) |mb| {
+        hashVal(&h, mb.modifiers);
+        hashVal(&h, mb.button);
+    }
+    return h.final();
 }

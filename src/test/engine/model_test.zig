@@ -4,6 +4,7 @@ const testing = std.testing;
 const model = @import("model");
 const constants = @import("constants");
 const utils = @import("utils");
+const helpers = @import("helpers");
 const build_options = @import("build_options");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
@@ -27,11 +28,9 @@ const Model = model.Model;
 const WindowId = model.WindowId;
 const WSId = model.WSId;
 const max_minimized = constants.max_minimized;
-const SmallStore = @import("store").Store(u32, u8, 2);
+const SmallStore = model.Store(u32, u8, 2);
 
-fn makeModel() Model {
-    return .{}; // bounded lists: no allocator, no deinit
-}
+const makeModel = helpers.makeModel;
 
 fn deinitModel(m: *Model) void {
     _ = m;
@@ -41,10 +40,7 @@ fn expectOrder(m: *const Model, ws: WSId, expected: []const WindowId) !void {
     try testing.expectEqualSlices(WindowId, expected, m.ws[ws].tiled_order.constSlice());
 }
 
-/// Registers `win` tiled on the model's current workspace.
-fn regCur(m: *Model, win: WindowId) void {
-    model.register(m, win, null) catch unreachable;
-}
+const regCur = helpers.regCur;
 
 fn eqBase(a: model.BaseMode, b: model.BaseMode) bool {
     if (@intFromEnum(a) != @intFromEnum(b)) return false;
@@ -105,8 +101,8 @@ fn assertSingleMembership(m: *const Model) !void {
     }
 }
 
-// T01: register -> tiled in current ws order, mask set.
-test "T01: register tiles on current ws, sets mask, is idempotent" {
+// register -> tiled in current ws order, mask set.
+test "register tiles on current ws, sets mask, is idempotent" {
     var m = makeModel();
     defer deinitModel(&m);
     regCur(&m, 1);
@@ -121,8 +117,8 @@ test "T01: register tiles on current ws, sets mask, is idempotent" {
     try testing.expectEqual(@as(usize, 2), m.store.count());
 }
 
-// T02: register with hint_ws -> mask bit of hinted ws.
-test "T02: register honors hinted workspace" {
+// register with hint_ws -> mask bit of hinted ws.
+test "register honors hinted workspace" {
     var m = makeModel();
     defer deinitModel(&m);
     regCur(&m, 1);
@@ -133,9 +129,9 @@ test "T02: register honors hinted workspace" {
     try testing.expectEqual(@as(WSId, 3), model.findHome(&m, 2).?);
 }
 
-// T03: minimize tiled -> parked, removed from tiled_order; capacity refuses
+// minimize tiled -> parked, removed from tiled_order; capacity refuses
 // once the minimized budget (MAX_MINIMIZED) is exhausted.
-test "T03: minimize tiled removes from order; capacity refuses" {
+test "minimize tiled removes from order; capacity refuses" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -162,7 +158,7 @@ test "T03: minimize tiled removes from order; capacity refuses" {
     try expectOrder(&m, 0, expected[0 .. wins.len - 1]);
 
     // Fill the remaining budget, then the next minimize must be refused
-    // without mutating anything (full no-mutation proof in T17).
+    // without mutating anything (full no-mutation proof in the capacity-refusal tests).
     for (wins[0 .. wins.len - 1]) |w| minimize.minimize(&m, w) catch unreachable;
     try testing.expectEqual(@as(u32, max_minimized), minimize.count(&m));
     try testing.expectError(error.CapacityFull, minimize.minimize(&m, wins[wins.len - 1]));
@@ -171,8 +167,8 @@ test "T03: minimize tiled removes from order; capacity refuses" {
     try testing.expect(m.store.get(wins[wins.len - 1]).?.presence == .present);
 }
 
-// T04: restore tiled -> back at ORIGINAL index.
-test "T04: restore reinserts at original slot" {
+// restore tiled -> back at ORIGINAL index.
+test "restore reinserts at original slot" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -194,8 +190,8 @@ test "T04: restore reinserts at original slot" {
     try expectOrder(&m, 0, &.{ 10, 11, 13, 12, 14 });
 }
 
-// T05: minimize floating -> prev==floating(rect); restore returns the rect.
-test "T05: minimize/restore floating preserves rect" {
+// minimize floating -> prev==floating(rect); restore returns the rect.
+test "minimize/restore floating preserves rect" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -224,9 +220,9 @@ test "T05: minimize/restore floating preserves rect" {
     for (&m.ws) |*s| try testing.expect(s.tiled_order.indexOfScalar(7) == null);
 }
 
-// T06: toggleFullscreen round trips; minimize-from-fullscreen keeps its
+// toggleFullscreen round trips; minimize-from-fullscreen keeps its
 // record (parked) and restore returns straight back to fullscreen.
-test "T06: fullscreen toggling and minimize-from-fullscreen" {
+test "fullscreen toggling and minimize-from-fullscreen" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -272,8 +268,8 @@ test "T06: fullscreen toggling and minimize-from-fullscreen" {
     try testing.expect(r.eql(e.anchor.floating));
 }
 
-// T07: switchTo updates current; visible-set helper correctness.
-test "T07: switchTo and visibleOn" {
+// switchTo updates current; visible-set helper correctness.
+test "switchTo and visibleOn" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -302,8 +298,8 @@ test "T07: switchTo and visibleOn" {
     try testing.expect(!model.visibleOn(&m, 999, 0));
 }
 
-// T08: moveWindowToWs retargets mask; minimized record follows.
-test "T08: moveWindowToWs for tiled, minimized, and pinned" {
+// moveWindowToWs retargets mask; minimized record follows.
+test "moveWindowToWs for tiled, minimized, and pinned" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -334,8 +330,8 @@ test "T08: moveWindowToWs for tiled, minimized, and pinned" {
     try testing.expectEqual(model.ALL_MASK, m.store.get(1).?.mask);
 }
 
-// T09: pinToggle sets/clears all-bits; composes with every mode.
-test "T09: pinToggle across all modes" {
+// pinToggle sets/clears all-bits; composes with every mode.
+test "pinToggle across all modes" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -366,9 +362,9 @@ test "T09: pinToggle across all modes" {
     try testing.expect(m.store.get(4).?.presence == .parked);
 }
 
-// T10: allViewToggle round trip; the all-view flag drives per-window
+// allViewToggle round trip; the all-view flag drives per-window
 // visibility.
-test "T10: all-view flag drives visibility for every stored window" {
+test "all-view flag drives visibility for every stored window" {
     var m = makeModel();
     defer deinitModel(&m);
     regCur(&m, 1);
@@ -388,8 +384,8 @@ test "T10: all-view flag drives visibility for every stored window" {
     try testing.expect(!model.visibleOn(&m, 2, 0));
 }
 
-// T11: reorderTiled bounds-checked; swapPrimary primary/next-slot swap.
-test "T11: reorder and swapPrimary" {
+// reorderTiled bounds-checked; swapPrimary primary/next-slot swap.
+test "reorder and swapPrimary" {
     var m = makeModel();
     defer deinitModel(&m);
     for ([_]WindowId{ 1, 2, 3, 4 }) |w| regCur(&m, w);
@@ -425,9 +421,9 @@ test "T11: reorder and swapPrimary" {
     try expectOrder(&small, 0, &.{7});
 }
 
-// T11b: stepTiled (dwm stack rotate) wraps around the tiled_order edges,
+// stepTiled (dwm stack rotate) wraps around the tiled_order edges,
 // mirroring the modulo wrap of the focus cycle; middle slots move by one.
-test "T11b: stepTiled wraps at both ends" {
+test "stepTiled wraps at both ends" {
     var m = makeModel();
     defer deinitModel(&m);
     for ([_]WindowId{ 1, 2, 3, 4 }) |w| regCur(&m, w);
@@ -459,8 +455,8 @@ test "T11b: stepTiled wraps at both ends" {
     try expectOrder(&m, 0, &.{ 1, 2, 3, 4 });
 }
 
-// T12: unregister cleans tiled_order/MRU/minimized/fs refs everywhere.
-test "T12: unregister cleans all references" {
+// unregister cleans tiled_order/MRU/minimized/fs refs everywhere.
+test "unregister cleans all references" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -505,8 +501,8 @@ test "T12: unregister cleans all references" {
     model.unregister(&m, 999);
 }
 
-// T13: honorConfigureRequest decisions per anchor/presence.
-test "T13: ConfigureRequest honoring per mode" {
+// honorConfigureRequest decisions per anchor/presence.
+test "ConfigureRequest honoring per mode" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -560,9 +556,9 @@ test "T13: ConfigureRequest honoring per mode" {
     );
 }
 
-// T14: applyConfigReload replaces layout params but preserves scroll
+// applyConfigReload replaces layout params but preserves scroll
 // viewport runtime state.
-test "T14: config reload rescales params, keeps scroll viewport" {
+test "config reload rescales params, keeps scroll viewport" {
     var m = makeModel();
     defer deinitModel(&m);
     regCur(&m, 1);
@@ -583,8 +579,8 @@ test "T14: config reload rescales params, keeps scroll viewport" {
     try testing.expectEqual(@as(u32, 2), m.ws[0].params.viewport_prev_count);
 }
 
-// T15: setFocus updates focused+MRU; MRU capped (mru_capacity).
-test "T15: focus MRU ordering and cap" {
+// setFocus updates focused+MRU; MRU capped (mru_capacity).
+test "focus MRU ordering and cap" {
     var m = makeModel();
     defer deinitModel(&m);
     var wins: [model.mru_capacity + 4]WindowId = undefined;
@@ -607,9 +603,9 @@ test "T15: focus MRU ordering and cap" {
     try testing.expectEqual(@as(?WindowId, wins[10]), m.focused);
 }
 
-// T16: store iteration stays deterministic across removals.
+// store iteration stays deterministic across removals.
 // Sorted-key store: removals shift elements left, iteration stays sorted.
-test "T16: store iteration stays deterministic across removals" {
+test "store iteration stays deterministic across removals" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -654,8 +650,8 @@ test "T16: store iteration stays deterministic across removals" {
     try assertSingleMembership(&m);
 }
 
-// T17: no function mutates before its capacity check.
-test "T17: capacity refusals happen before any mutation" {
+// no function mutates before its capacity check.
+test "capacity refusals happen before any mutation" {
     // Raw store: full-store put refuses and leaves content untouched.
     var small: SmallStore = .{};
     _ = small.put(1, 10) catch unreachable;
@@ -716,8 +712,8 @@ test "T17: capacity refusals happen before any mutation" {
     try testing.expect(!fm.store.has(i));
 }
 
-// T18: determinism -- same op sequence => identical model state, twice.
-test "T18: identical operation sequences produce identical models" {
+// determinism -- same op sequence => identical model state, twice.
+test "identical operation sequences produce identical models" {
     try minimize.init();
     try fullscreen.init();
     defer fullscreen.deinit();
@@ -771,7 +767,7 @@ test "T18: identical operation sequences produce identical models" {
     try testing.expect(!eqModel(&a, &c));
 }
 
-test "T31: minimize seq stamps drive LIFO/FIFO restore candidates" {
+test "minimize seq stamps drive LIFO/FIFO restore candidates" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -797,7 +793,7 @@ test "T31: minimize seq stamps drive LIFO/FIFO restore candidates" {
     try assertSingleMembership(&m);
 }
 
-test "T32: latestMinimizedBase skips fullscreen-current and other workspaces" {
+test "latestMinimizedBase skips fullscreen-current and other workspaces" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -814,9 +810,9 @@ test "T32: latestMinimizedBase skips fullscreen-current and other workspaces" {
     try testing.expectEqual(@as(?model.WindowId, 20), minimize.latestMinimizedBase(&m, 0));
 }
 
-// T33 (user bug report): fullscreen -> minimize -> restore -> un-fullscreen
+// fullscreen -> minimize -> restore -> un-fullscreen
 // used to strand the window base-tiled but HOME-LESS.
-test "T33: fullscreen-prev restore re-adds slot; exit-fullscreen retiles" {
+test "fullscreen-prev restore re-adds slot; exit-fullscreen retiles" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -851,8 +847,8 @@ test "T33: fullscreen-prev restore re-adds slot; exit-fullscreen retiles" {
     try assertSingleMembership(&m);
 }
 
-// T33b: floating-base fullscreen round trip stays home-free.
-test "T33b: floating-base fullscreen minimize/restore never joins a list" {
+// Floating-base fullscreen round trip stays home-free.
+test "floating-base fullscreen minimize/restore never joins a list" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -876,12 +872,12 @@ test "T33b: floating-base fullscreen minimize/restore never joins a list" {
     for (&m.ws) |*s| try testing.expect(s.tiled_order.indexOfScalar(6) == null);
 }
 
-// T34 (user bug report): minimizing one of two windows must fall back to the
+// minimizing one of two windows must fall back to the
 // PREVIOUSLY focused window. The candidate policy lives in the model layer;
 // the window layer's focusFallback delegates to it. Tier checks:
 // MRU newest-first (minimized skipped even though still listed in MRU),
 // then reversed tiled_order, then floating, then null.
-test "T34: fallbackFocusCandidate tiers pick the previous focus" {
+test "fallbackFocusCandidate tiers pick the previous focus" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -911,10 +907,10 @@ test "T34: fallbackFocusCandidate tiers pick the previous focus" {
     try testing.expectEqual(@as(?WindowId, null), model.fallbackFocusCandidate(&m, 0));
 }
 
-// T35: minimizing-from-fullscreen KEEPS the mode, so the ghost record still
+// minimizing-from-fullscreen KEEPS the mode, so the ghost record still
 // reports the ws while parked, but visibleOn is false. Callers must gate on
 // visibility (coverage/occupancy query), not the raw mode.
-test "T35: fullscreenWsOf keeps the ws while minimized-from-fullscreen" {
+test "fullscreenWsOf keeps the ws while minimized-from-fullscreen" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -939,9 +935,9 @@ test "T35: fullscreenWsOf keeps the ws while minimized-from-fullscreen" {
     try testing.expectEqual(@as(?WindowId, null), fullscreen.fullscreenOccupantOnWs(&m, 0));
 }
 
-// T36 (user bug report): closing the focused window must hand focus to the
+// closing the focused window must hand focus to the
 // PREVIOUSLY focused window.
-test "T36: close-fallback candidate after unregister is the previous focus" {
+test "close-fallback candidate after unregister is the previous focus" {
     var m = makeModel();
     defer deinitModel(&m);
     regCur(&m, 40);
@@ -1082,7 +1078,7 @@ test "home_ws: detachToFloating clears cache" {
     try testing.expectEqual(@as(?WSId, null), e.home_ws);
 }
 
-// I-2: restoreAllOnWs unit test (BC09: restore-all with slot-sorted reinsert).
+// restoreAllOnWs restores every minimized window in slot order.
 test "restoreAllOnWs restores in slot order" {
     var m = makeModel();
     defer deinitModel(&m);
@@ -1110,7 +1106,7 @@ test "restoreAllOnWs restores in slot order" {
     try testing.expect(!minimize.isMinimized(&m, 30));
 }
 
-// I-3: adjustPrimaryWidth clamps to [0.05, 0.95].
+// adjustPrimaryWidth clamps to [0.05, 0.95].
 test "adjustPrimaryWidth clamps" {
     var m = makeModel();
     defer deinitModel(&m);
@@ -1121,7 +1117,7 @@ test "adjustPrimaryWidth clamps" {
     try testing.expect(m.ws[0].params.primary_width >= 0.05);
 }
 
-// I-3: setFloatingRect updates floating geometry, no-ops for tiled/unknown.
+// setFloatingRect updates floating geometry; no-ops for tiled/unknown.
 test "setFloatingRect updates floating window geometry" {
     var m = makeModel();
     defer deinitModel(&m);
@@ -1145,9 +1141,11 @@ test "setFloatingRect updates floating window geometry" {
     try testing.expect(m.store.get(6).?.anchor == .tiled);
 }
 
-// T2E-1: the coverage seam claims the covering winner per ws and excludes
-// parked ghosts (minimized-from-fullscreen windows never claim the screen).
-test "T2E-1: coverageOn winner resolution and parked-ghost exclusion" {
+// The coverage seam claims the covering winner per ws and excludes parked
+// ghosts (minimized-from-fullscreen windows never claim the screen). A
+// switch claim (new window covers while another owns the ws) releases the
+// previous occupant, so one ws never has two live covering claims.
+test "coverageOn winner resolution and parked-ghost exclusion" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -1158,20 +1156,21 @@ test "T2E-1: coverageOn winner resolution and parked-ghost exclusion" {
     regCur(&m, 61);
     try testing.expectEqual(@as(?model.WindowId, null), fullscreen.coverageOn(&m, 0));
     _ = fullscreen.toggleFullscreen(&m, 60); // rec on ws 0, covering
-    _ = fullscreen.toggleFullscreen(&m, 61); // second rec, also ws 0
     try testing.expectEqual(@as(?model.WindowId, 60), fullscreen.coverageOn(&m, 0));
+    _ = fullscreen.toggleFullscreen(&m, 61); // switch: 61 releases 60's claim
+    try testing.expectEqual(@as(?model.WindowId, 61), fullscreen.coverageOn(&m, 0));
     try testing.expectEqual(@as(?model.WindowId, null), fullscreen.coverageOn(&m, 1));
     // Parked ghost: the record survives but never claims the screen.
-    try minimize.minimize(&m, 60);
+    try minimize.minimize(&m, 61);
+    try testing.expectEqual(@as(?model.WindowId, null), fullscreen.coverageOn(&m, 0));
+    try testing.expectEqual(@as(?WSId, 0), fullscreen.fullscreenWsOf(&m, 61).?);
+    minimize.restore(&m, 61);
     try testing.expectEqual(@as(?model.WindowId, 61), fullscreen.coverageOn(&m, 0));
-    try testing.expectEqual(@as(?WSId, 0), fullscreen.fullscreenWsOf(&m, 60).?);
-    minimize.restore(&m, 60);
-    try testing.expectEqual(@as(?model.WindowId, 60), fullscreen.coverageOn(&m, 0));
 }
 
-// T2E-2: minimize blob round trip -- parked-only serialization, magic claim,
+// Minimize blob round trip -- parked-only serialization, magic claim,
 // and re-adoption through the deserialize seam.
-test "T2E-2: minimize serialize/deserialize round-trip" {
+test "minimize serialize/deserialize round-trip" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -1201,9 +1200,9 @@ test "T2E-2: minimize serialize/deserialize round-trip" {
     try testing.expect(minimize.serializeWindow(@ptrCast(&m), 70, testing.allocator) == null);
 }
 
-// T2E-3: fullscreen blob round trip -- non-parked serialization, anchor
+// Fullscreen blob round trip -- non-parked serialization, anchor
 // retention, and re-adoption through the deserialize seam.
-test "T2E-3: fullscreen serialize/deserialize round-trip" {
+test "fullscreen serialize/deserialize round-trip" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -1231,11 +1230,11 @@ test "T2E-3: fullscreen serialize/deserialize round-trip" {
     try testing.expect(!fullscreen.deserializeWindow(80, &.{ 0x00, 1, 2 }, @ptrCast(&m)));
 }
 
-// -- H8: core-intents (covering_ws is a model-authoritative core intent) -----
+// -- Core intents: covering_ws is a model-authoritative core intent -----
 
-// H8-1: toggleFullscreen drives the model's covering_ws core intent in lockstep
+// toggleFullscreen drives the model's covering_ws core intent in lockstep
 // with the covering presence: ON sets covering_ws, OFF clears it.
-test "H8-1: toggleFullscreen writes covering_ws core intent" {
+test "toggleFullscreen writes covering_ws core intent" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -1262,9 +1261,9 @@ test "H8-1: toggleFullscreen writes covering_ws core intent" {
     try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOnWs(&m, 0));
 }
 
-// H8-2: coveringOccupantOnWs mirrors coverageOn's parked-ghost exclusion and
+// coveringOccupantOnWs mirrors coverageOn's parked-ghost exclusion and
 // agrees with the module's coverage seam.
-test "H8-2: model.coveringOccupantOnWs excludes parked ghosts" {
+test "model.coveringOccupantOnWs excludes parked ghosts" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -1294,8 +1293,8 @@ test "H8-2: model.coveringOccupantOnWs excludes parked ghosts" {
     try testing.expectEqual(@as(?WindowId, 91), fullscreen.coverageOn(&m, 0));
 }
 
-// H8-3: deserializeWindow (re-adoption) restores covering_ws on the model.
-test "H8-3: fullscreen deserialize restores covering_ws" {
+// deserializeWindow (re-adoption) restores covering_ws on the model.
+test "fullscreen deserialize restores covering_ws" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -1319,9 +1318,9 @@ test "H8-3: fullscreen deserialize restores covering_ws" {
     try testing.expectEqual(@as(?WSId, 0), fullscreen.fullscreenWsOf(&m, 92));
 }
 
-// H8-4: a move/tag retarget (workspaces path) keeps the model's covering_ws in
+// A move/tag retarget (workspaces path) keeps the model's covering_ws in
 // lockstep with the retargeted module record.
-test "H8-4: move/tag retarget tracks covering_ws to the new ws" {
+test "move/tag retarget tracks covering_ws to the new ws" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -1342,11 +1341,11 @@ test "H8-4: move/tag retarget tracks covering_ws to the new ws" {
     try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOnWs(&m, 0));
 }
 
-// -- Audited behavioral contracts (BC01/05/10/12) ----------------------------
+// -- Behavioral contracts ------------------------------------------------------
 
-// BC01 (spawn path): on-current spawn tiles+focuses; off-current spawn tiles
+// Spawn path: on-current spawn tiles+focuses; off-current spawn tiles
 // on its target ws but does NOT take focus (mirrors actions.mapRequest).
-test "BC01: spawn admission tiles (on-current focused; off-current target-only)" {
+test "spawn admission tiles (on-current focused; off-current target-only)" {
     var m = makeModel();
     defer deinitModel(&m);
 
@@ -1373,9 +1372,9 @@ test "BC01: spawn admission tiles (on-current focused; off-current target-only)"
     try assertSingleMembership(&m);
 }
 
-// BC05: a border_width-only honor on a TILED window (border_only) must not
+// A border_width-only honor on a TILED window (border_only) must not
 // disturb tiling membership; it stays tiled/present for the next retile.
-test "BC05: border-width honor leaves tiled membership intact across a retile" {
+test "border-width honor leaves tiled membership intact across a retile" {
     var m = makeModel();
     defer deinitModel(&m);
     try fullscreen.init();
@@ -1384,7 +1383,7 @@ test "BC05: border-width honor leaves tiled membership intact across a retile" {
     regCur(&m, 2);
 
     // Tiled configure request carrying only border_width: geometry denied,
-    // width honored (T13's decision).
+    // width honored (the ConfigureRequest honoring path).
     try testing.expectEqual(
         model.HonorDecision.border_only,
         floating.honorConfigureRequest(&m, 1, .{ .border_width = 3 }),
@@ -1402,10 +1401,10 @@ test "BC05: border-width honor leaves tiled membership intact across a retile" {
     try assertSingleMembership(&m);
 }
 
-// BC10 (cross-workspace restore): restoring a minimized window to its HOME
+// Cross-workspace restore: restoring a minimized window to its HOME
 // workspace while the CURRENT workspace carries its own stack must not disturb
 // that stack.
-test "BC10: restore to home workspace leaves the current workspace's stack intact" {
+test "restore to home workspace leaves the current workspace's stack intact" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();
@@ -1435,11 +1434,11 @@ test "BC10: restore to home workspace leaves the current workspace's stack intac
     try assertSingleMembership(&m);
 }
 
-// BC12 (tag-move minimized record follows ws): moving a minimized window to
-// another workspace moves its parked record (the tag mask follows), so a later
+// Tag-move of a minimized window: the parked record (and tag mask) follows it,
+// so a later
 // restore lands on the NEW workspace while the old workspace's stack is left
 // undisturbed.
-test "BC12: tag-move of a minimized window moves the record; restore lands on the new ws" {
+test "tag-move of a minimized window moves the record; restore lands on the new ws" {
     var m = makeModel();
     defer deinitModel(&m);
     try minimize.init();

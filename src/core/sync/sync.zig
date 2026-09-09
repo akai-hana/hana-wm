@@ -1,7 +1,7 @@
 //! ONLY this module (via its wire sink) sends geometry/border/map/stack
 //! requests. Pure orchestration lives here; every raw XCB request lives in
-//! the sink file (src/core/sync/wire.zig), the sanctioned boundary. Raw
-//! libxcb symbols may appear only inside its send shims.
+//! the sink file, the sanctioned boundary. Raw libxcb symbols may appear only
+//! inside its send shims.
 //!
 //! Shims wrap EXISTING xcb patterns; do not invent new ones:
 //!   Sink.geom        ~ utils.configureWindow (+ merged stack-mode variant)
@@ -139,12 +139,15 @@ pub const Ctx = struct {
 pub const ReconcileOpts = struct { force_restack: bool = false };
 
 // The sent ledger is a compact parallel array (get/put/swap-remove/clear; no
-// iteration-order needs, unlike model.Store). Lookups are a linear scan over
-// the OCCUPIED prefix: the ledger is bounded at model.store_capacity (128) and
-// reconcile replays every window's desire (and thus one get-or-put) per pass,
-// so a hash index over a fixed 128-slot table costs more bookkeeping than it
-// saves. Latency-verified: perf_test "sent ledger" shows the scan is on par
-// with the removed open-addressing index at the realistic 64-window ceiling.
+// iteration-order needs, unlike model.Store). Lookups use a fixed-size
+// open-addressing hash index (id → slot) for O(1) amortized lookup instead of
+// a linear scan. The index table is the same size as store_capacity (128),
+// probing linearly on collision. Two sentinel values distinguish empty buckets
+// (probe stops) from tombstones (skip, keep probing) left by swap-removes.
+
+// Hash index sentinel values for open-addressing with linear probing.
+const idx_empty: u32 = std.math.maxInt(u32);
+const idx_tomb: u32 = std.math.maxInt(u32) - 1;
 
 /// What we last sent per window; WRITE-ONLY bookkeeping whose three contract
 /// reads are documented in the header:
@@ -167,6 +170,8 @@ const SentEntry = struct {
 pub const State = struct {
     /// Ledger of sent state (see SentEntry), keyed by `.id`.
     sent: utils.BoundedList(SentEntry, model.store_capacity) = .{},
+    /// Hash index: id_to_slot[id % capacity] → slot in sent, or idx_empty/idx_tomb.
+    id_to_slot: [model.store_capacity]u32 = .{idx_empty} ** model.store_capacity,
 };
 
 /// Owned by the compositor process; re-init() on reconnect.
@@ -180,10 +185,74 @@ pub fn deinit() void {
     init();
 }
 
-/// Slot holding `win` in the ledger, or null when absent. Linear scan over the
-/// occupied prefix (see header note on why a hash index is not worth it).
+/// Decoded state of an id_to_slot bucket during a probe.
+const Bucket = union(enum) {
+    empty,
+    tombstone,
+    occupied: u32,
+};
+
+fn probeBucket(probe: usize) Bucket {
+    const val = st.id_to_slot[probe];
+    return if (val == idx_empty)
+        .empty
+    else if (val == idx_tomb)
+        .tombstone
+    else
+        .{ .occupied = val };
+}
+
+/// Slot holding `win` in the ledger, or null when absent. O(1) amortized via
+/// open-addressing hash index with linear probing. Bounded by capacity so a
+/// fully-occupied table (no empty bucket) still terminates with a miss.
 fn sentFind(win: model.WindowId) ?usize {
-    return st.sent.indexOfById(win);
+    var probe = win % model.store_capacity;
+    var seen: u32 = 0;
+    while (seen < model.store_capacity) : (seen += 1) {
+        switch (probeBucket(probe)) {
+            .empty => return null,
+            .occupied => |slot| if (st.sent.items[slot].id == win) return slot,
+            .tombstone => {},
+        }
+        probe = (probe + 1) % model.store_capacity;
+    }
+    return null;
+}
+
+/// Insert an id→slot mapping into the hash index. Caller guarantees the id is
+/// not already present (caller checked via sentFind miss) and that the ledger
+/// has room (so at least one empty/tombstone bucket exists).
+fn sentIndexInsert(id: model.WindowId, slot: usize) void {
+    var probe = id % model.store_capacity;
+    var seen: u32 = 0;
+    while (seen < model.store_capacity) : (seen += 1) {
+        switch (probeBucket(probe)) {
+            .empty, .tombstone => {
+                st.id_to_slot[probe] = @intCast(slot);
+                return;
+            },
+            .occupied => {},
+        }
+        probe = (probe + 1) % model.store_capacity;
+    }
+    unreachable;
+}
+
+/// Remove the index entry for `id`, marking its bucket as a tombstone.
+fn sentIndexRemove(id: model.WindowId) void {
+    var probe = id % model.store_capacity;
+    var seen: u32 = 0;
+    while (seen < model.store_capacity) : (seen += 1) {
+        switch (probeBucket(probe)) {
+            .empty => return,
+            .occupied => |slot| if (st.sent.items[slot].id == id) {
+                st.id_to_slot[probe] = idx_tomb;
+                return;
+            },
+            .tombstone => {},
+        }
+        probe = (probe + 1) % model.store_capacity;
+    }
 }
 
 pub fn sentGet(win: model.WindowId) ?SentEntry {
@@ -199,12 +268,23 @@ pub fn sentGetOrPut(win: model.WindowId) !struct { found_existing: bool, value_p
     const idx = st.sent.len;
     st.sent.len += 1;
     st.sent.items[idx] = .{ .id = win };
+    sentIndexInsert(win, idx);
     return .{ .found_existing = false, .value_ptr = &st.sent.items[idx] };
 }
 
 pub fn sentSwapRemove(win: model.WindowId) void {
     const slot = sentFind(win) orelse return;
-    st.sent.swapRemove(slot);
+    const last_idx = st.sent.len - 1;
+    // Remove the target from the hash index.
+    sentIndexRemove(win);
+    if (slot < last_idx) {
+        // The last element moves into the vacated slot; update its index.
+        const moved_id = st.sent.items[last_idx].id;
+        sentIndexRemove(moved_id);
+        st.sent.items[slot] = st.sent.items[last_idx];
+        sentIndexInsert(moved_id, slot);
+    }
+    st.sent.len -= 1;
 }
 
 /// Drop a window's ledger record (X ids recycle: after a destroy, a new
@@ -301,7 +381,9 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         if (n > 0) {
             tiling.compute(params.kind, view, &placements);
             std.sort.pdq(tiling.Placement, placements.slice(), {}, (struct {
-                fn lessThan(_: void, a: tiling.Placement, b: tiling.Placement) bool { return a.win < b.win; }
+                fn lessThan(_: void, a: tiling.Placement, b: tiling.Placement) bool {
+                    return a.win < b.win;
+                }
             }).lessThan);
         }
     }
@@ -402,8 +484,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         // Ledger write: record what we actually sent. A park preserves the
         // previous record's rect/has_rect; an unpark overwrites wholesale.
         if (gop) |g| {
-            if (parked) g.value_ptr.parked = true
-            else markSentVisible(g.value_ptr, win, rect, bw, pixel);
+            if (parked) g.value_ptr.parked = true else markSentVisible(g.value_ptr, win, rect, bw, pixel);
         } else std.log.err("sync.reconcile: ledger full; sends applied, record lost", .{});
     }
 
@@ -485,8 +566,7 @@ fn computeDesire(
         } else if (model.visibleOn(m, win, m.current)) {
             // Multi-tagged orphan never hidden; keep last-sent rect, park
             // only when nothing was ever sent (first sight / offscreen).
-            if (!ledger.has_rect) markParked(&bw, &pixel, &parked)
-            else rect = ledger.rect;
+            if (!ledger.has_rect) markParked(&bw, &pixel, &parked) else rect = ledger.rect;
         } else markParked(&bw, &pixel, &parked),
     }
 

@@ -10,18 +10,14 @@ const build_options = @import("build_options");
 const wincache = @import("wincache");
 const window = @import("window");
 
-/// Registry lookup for the hook `field` (see `plugin.providerOf`), null when
-/// no module binds it; canonical scan lives in window.providerOf.
-const providerOf = window.providerOf;
+const callHookBool = window.callHookBool;
 
 /// Returns the border color for `win`: 0 for screen-covering windows,
 /// focused or unfocused color otherwise.
 pub fn color(win: u32) u32 {
     // Covering windows render borderless via the bw=0/pixel=0 policy in
     // sync; this predicate covers callers outside reconcile.
-    if (providerOf(.isCoveringMode)) |wm| {
-        if (wm.isCoveringMode.?(pipeline.model(), win)) return 0;
-    }
+    if (callHookBool(.isCoveringMode, .{ pipeline.model(), win })) return 0;
     const cfg = &core.getState().config.tiling;
     return if (focus.getFocused() == win) cfg.border_focused else cfg.border_unfocused;
 }

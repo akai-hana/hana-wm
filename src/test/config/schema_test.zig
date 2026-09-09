@@ -22,22 +22,12 @@ const config = @import("config");
 const parser = @import("parser");
 const schema = @import("schema");
 const types = @import("types");
-
-const io = std.Options.debug_io;
-const scratch_dir = "/tmp/opencode";
+const scratch = @import("scratch");
 
 fn scratchPath(alloc: std.mem.Allocator, name: []const u8) ![]u8 {
-    return std.fmt.allocPrint(alloc, "{s}/hana-schema-{s}.toml", .{ scratch_dir, name });
-}
-
-fn writeScratchFile(abs_path: []const u8, bytes: []const u8) !void {
-    const f = try std.Io.Dir.createFileAbsolute(io, abs_path, .{});
-    defer f.close(io);
-    try f.writePositionalAll(io, bytes, 0);
-}
-
-fn cleanupScratch(abs_path: []const u8) void {
-    std.Io.Dir.deleteFileAbsolute(io, abs_path) catch {};
+    const toml = try std.fmt.allocPrint(alloc, "{s}.toml", .{name});
+    defer alloc.free(toml);
+    return scratch.scratchPath(alloc, "hana-schema-", toml);
 }
 
 /// Loads a TOML string through the full production pipeline
@@ -45,8 +35,8 @@ fn cleanupScratch(abs_path: []const u8) void {
 fn loadToml(alloc: std.mem.Allocator, name: []const u8, content: []const u8) !types.Config {
     const path = try scratchPath(alloc, name);
     defer alloc.free(path);
-    try writeScratchFile(path, content);
-    defer cleanupScratch(path);
+    try scratch.writeScratchFile(path, content);
+    defer scratch.cleanupScratch(path);
     return try config.loadConfig(alloc, path);
 }
 

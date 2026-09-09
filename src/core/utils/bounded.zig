@@ -1,8 +1,9 @@
-//! Bounded collections (D6 split from utils.zig).
+//! Bounded collections.
 //!
-//! Shared shape used by window.zig's caches, minimize.zig's minimized-window
-//! record, and spawn.zig's pending-spawn table: a fixed-capacity array plus
-//! a length, with linear-scan find, append, and remove-and-compact.
+//! Shared shape used by the window module's caches, the minimize module's
+//! minimized-window record, and the spawn module's pending-spawn table: a
+//! fixed-capacity array plus a length, with linear-scan find, append, and
+//! remove-and-compact.
 //!
 //! Layer note: xcb-free by construction, safe for model/tiling to import.
 

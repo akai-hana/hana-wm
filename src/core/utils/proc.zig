@@ -1,4 +1,4 @@
-//! Process lifecycle signals + fd plumbing (D6 split from utils.zig). xcb-free.
+//! Process lifecycle signals + fd plumbing. xcb-free.
 //!
 //! Module-level atomics, not WM struct fields; this is process control
 //! state, not window-manager state. Signal handlers and keybind actions

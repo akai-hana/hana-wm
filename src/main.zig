@@ -106,8 +106,8 @@ pub fn main() !void {
     // so there is no X state to push.
     actions.seedParamsFromConfig();
 
-    // D8: direct subsystem init (the plugin registry was deleted; only bar
-    // ever registered hooks).
+    // Direct subsystem init: only the bar ever registered hooks (no plugin
+    // registry anymore).
     if (build_options.has_bar) surfaces.init() catch |err| debug.err("bar init failed: {}", .{err});
     defer if (build_options.has_bar) surfaces.deinit();
 
@@ -129,7 +129,7 @@ pub fn main() !void {
                 break :blk 0;
             };
             if (n > 0) {
-                persist.applyModelLevel(pipeline.model());
+                actions.applyRestoredLevel();
                 // Restore X input focus on the session's focused window;
                 // the mapRequest path uses the same focus-after-geometry
                 // entry (the adopted window is already mapped).

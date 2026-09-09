@@ -7,6 +7,7 @@
     .links = .{
         "xcb-keysyms",
         "xkbcommon-x11",
+        "xcb-xkb",
         "xcb-cursor",
         "xcb-randr",
         "pangocairo-1.0",

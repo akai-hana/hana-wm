@@ -6,7 +6,127 @@ const std = @import("std");
 const core = @import("core");
 const debug = @import("debug");
 
-const c = @import("render");
+const xcb = core.xcb;
+const xcb_connection_t = xcb.xcb_connection_t;
+const xcb_pixmap_t = xcb.xcb_pixmap_t;
+const xcb_visualtype_t = xcb.xcb_visualtype_t;
+
+// Cairo, Pango, and GLib C bindings for bar rendering.
+// Declared as `pub extern fn` because library headers may not be present in
+// all build environments.
+
+// Cairo
+
+pub const cairo_surface_t = opaque {};
+pub const cairo_t = opaque {};
+
+/// Numeric values match the C ABI; do not change them.
+pub const cairo_format_t = enum(c_int) {
+    ARGB32 = 0,
+};
+
+/// Pixmap must outlive the surface; destroy the surface before freeing the pixmap.
+pub extern fn cairo_xcb_surface_create(
+    connection: *xcb_connection_t,
+    pixmap: xcb_pixmap_t,
+    visual: *xcb_visualtype_t,
+    width: c_int,
+    height: c_int,
+) ?*cairo_surface_t;
+
+/// Used for font measurement without an X connection.
+pub extern fn cairo_image_surface_create(
+    format: cairo_format_t,
+    width: c_int,
+    height: c_int,
+) ?*cairo_surface_t;
+
+pub extern fn cairo_surface_destroy(surface: *cairo_surface_t) void;
+pub extern fn cairo_surface_flush(surface: *cairo_surface_t) void;
+
+pub extern fn cairo_create(surface: *cairo_surface_t) ?*cairo_t;
+pub extern fn cairo_destroy(cr: *cairo_t) void;
+
+pub extern fn cairo_set_source_rgba(cr: *cairo_t, red: f64, green: f64, blue: f64, alpha: f64) void;
+pub extern fn cairo_move_to(cr: *cairo_t, x: f64, y: f64) void;
+
+// Clipping, for region-scoped text (title marquee).
+pub extern fn cairo_save(cr: *cairo_t) void;
+pub extern fn cairo_restore(cr: *cairo_t) void;
+pub extern fn cairo_rectangle(cr: *cairo_t, x: f64, y: f64, width: f64, height: f64) void;
+pub extern fn cairo_clip(cr: *cairo_t) void;
+
+// Pango
+
+pub const PangoLayout = opaque {};
+pub const PangoContext = opaque {};
+pub const PangoFontDescription = opaque {};
+pub const PangoFontMetrics = opaque {};
+
+/// Divide Pango units by pango_scale to get pixels.
+pub const pango_scale: c_int = 1024;
+
+pub const PangoEllipsizeMode = enum(c_int) {
+    NONE = 0,
+    END = 3,
+};
+
+pub const PangoRectangle = extern struct {
+    x: c_int,
+    y: c_int,
+    width: c_int,
+    height: c_int,
+};
+
+pub extern fn pango_cairo_create_layout(cr: *cairo_t) ?*PangoLayout;
+pub extern fn pango_cairo_show_layout(cr: *cairo_t, layout: *PangoLayout) void;
+pub extern fn pango_cairo_context_set_resolution(context: *PangoContext, dpi: f64) void;
+
+pub extern fn pango_layout_set_text(layout: *PangoLayout, text: [*]const u8, length: c_int) void;
+pub extern fn pango_layout_set_font_description(
+    layout: *PangoLayout,
+    desc: ?*PangoFontDescription,
+) void;
+pub extern fn pango_layout_get_context(layout: *PangoLayout) *PangoContext;
+/// Pass null for either dimension if not needed.
+pub extern fn pango_layout_get_pixel_size(
+    layout: *PangoLayout,
+    width: ?*c_int,
+    height: ?*c_int,
+) void;
+pub extern fn pango_layout_set_width(layout: *PangoLayout, width: c_int) void;
+pub extern fn pango_layout_set_ellipsize(layout: *PangoLayout, ellipsize: PangoEllipsizeMode) void;
+pub extern fn pango_layout_get_baseline(layout: *PangoLayout) c_int;
+
+/// Accepts strings like `"Sans Bold 12"`.
+pub extern fn pango_font_description_from_string(str: [*:0]const u8) ?*PangoFontDescription;
+pub extern fn pango_font_description_copy(desc: *PangoFontDescription) ?*PangoFontDescription;
+pub extern fn pango_font_description_free(desc: *PangoFontDescription) void;
+pub extern fn pango_font_description_set_absolute_size(desc: *PangoFontDescription, size: f64) void;
+
+/// Returns Pango units. Pass null for either rect if not needed.
+pub extern fn pango_layout_get_extents(
+    layout: *PangoLayout,
+    ink_rect: ?*PangoRectangle,
+    logical_rect: ?*PangoRectangle,
+) void;
+
+/// Pass null for `language` to use the default language.
+pub extern fn pango_context_get_metrics(
+    context: *PangoContext,
+    desc: ?*PangoFontDescription,
+    language: ?*anyopaque,
+) *PangoFontMetrics;
+
+pub extern fn pango_font_metrics_get_ascent(metrics: *PangoFontMetrics) c_int;
+pub extern fn pango_font_metrics_get_descent(metrics: *PangoFontMetrics) c_int;
+pub extern fn pango_font_metrics_unref(metrics: *PangoFontMetrics) void;
+
+// GLib / GObject
+
+/// Decrements the reference count. All GObject-based types in this file must
+/// be freed through this function.
+pub extern fn g_object_unref(object: *anyopaque) void;
 
 /// First visual on `screen` matching `depth`, or null.
 fn firstVisualOfDepth(screen: core.Screen, depth: u8) ?*core.xcb.xcb_visualtype_t {
@@ -30,12 +150,12 @@ const fallbackFont = "monospace:size=10";
 
 pub const FontState = struct {
     allocator: std.mem.Allocator,
-    pango_layout: *c.PangoLayout,
-    current_font_desc: ?*c.PangoFontDescription = null,
+    pango_layout: *PangoLayout,
+    current_font_desc: ?*PangoFontDescription = null,
     cached_metrics: ?struct { ascent: i16, descent: i16 } = null,
 
     fn deinit(self: *FontState) void {
-        if (self.current_font_desc) |desc| c.pango_font_description_free(desc);
+        if (self.current_font_desc) |desc| pango_font_description_free(desc);
     }
 
     pub fn loadFonts(self: *FontState, font_names: []const []const u8) !void {
@@ -46,36 +166,36 @@ pub const FontState = struct {
     }
 
     fn loadFont(self: *FontState, font_name: []const u8) !void {
-        if (self.current_font_desc) |desc| c.pango_font_description_free(desc);
+        if (self.current_font_desc) |desc| pango_font_description_free(desc);
         const converted = try convertFontName(self.allocator, font_name);
         defer self.allocator.free(converted);
         const pango_name_z = try self.allocator.dupeZ(u8, converted);
         defer self.allocator.free(pango_name_z);
-        self.current_font_desc = c.pango_font_description_from_string(pango_name_z.ptr);
+        self.current_font_desc = pango_font_description_from_string(pango_name_z.ptr);
         if (self.current_font_desc == null) {
             debug.warn("Failed to load font '{s}', using default", .{font_name});
-            self.current_font_desc = c.pango_font_description_from_string(fallbackFont);
+            self.current_font_desc = pango_font_description_from_string(fallbackFont);
         }
-        c.pango_layout_set_font_description(self.pango_layout, self.current_font_desc);
+        pango_layout_set_font_description(self.pango_layout, self.current_font_desc);
         self.cached_metrics = null;
     }
 
     /// Returns (ascent, descent) in pixels; cached per font description, invalidated by loadFont.
     pub fn getMetrics(self: *FontState) struct { i16, i16 } {
         if (self.cached_metrics) |m| return .{ m.ascent, m.descent };
-        const metrics = c.pango_context_get_metrics(
-            c.pango_layout_get_context(self.pango_layout),
+        const metrics = pango_context_get_metrics(
+            pango_layout_get_context(self.pango_layout),
             self.current_font_desc,
             null,
         );
-        defer c.pango_font_metrics_unref(metrics);
+        defer pango_font_metrics_unref(metrics);
         const ascent: i16 = @intCast(std.math.clamp(
-            @divTrunc(c.pango_font_metrics_get_ascent(metrics), c.pango_scale),
+            @divTrunc(pango_font_metrics_get_ascent(metrics), pango_scale),
             std.math.minInt(i16),
             std.math.maxInt(i16),
         ));
         const descent: i16 = @intCast(std.math.clamp(
-            @divTrunc(c.pango_font_metrics_get_descent(metrics), c.pango_scale),
+            @divTrunc(pango_font_metrics_get_descent(metrics), pango_scale),
             std.math.minInt(i16),
             std.math.maxInt(i16),
         ));
@@ -86,19 +206,19 @@ pub const FontState = struct {
 
 // ---------------------------------------------------------------------------
 
-inline fn setCairoColor(ctx: *c.cairo_t, color: u32) void {
+inline fn setCairoColor(ctx: *cairo_t, color: u32) void {
     const r = @as(f64, @floatFromInt((color >> 16) & 0xFF)) / 255.0;
     const g = @as(f64, @floatFromInt((color >> 8) & 0xFF)) / 255.0;
     const b = @as(f64, @floatFromInt(color & 0xFF)) / 255.0;
-    c.cairo_set_source_rgba(ctx, r, g, b, 1.0);
+    cairo_set_source_rgba(ctx, r, g, b, 1.0);
 }
 
 inline fn pangoToF64(pango_units: c_int) f64 {
-    return @as(f64, @floatFromInt(pango_units)) / c.pango_scale;
+    return @as(f64, @floatFromInt(pango_units)) / pango_scale;
 }
 
 inline fn pxToPango(px: u16) f64 {
-    return @as(f64, @floatFromInt(px)) * c.pango_scale;
+    return @as(f64, @floatFromInt(px)) * pango_scale;
 }
 
 inline fn createXcbPixmap(conn: core.Connection, depth: u8, drawable: u32, w: u16, h: u16) u32 {
@@ -118,14 +238,14 @@ inline fn createCheckedGC(conn: core.Connection, drawable: u32) !u32 {
 }
 
 inline fn showLayoutAtBaseline(
-    ctx: *c.cairo_t,
-    layout: *c.PangoLayout,
+    ctx: *cairo_t,
+    layout: *PangoLayout,
     x: f64,
     baseline: u16,
 ) void {
     const baseline_f: f64 = @floatFromInt(baseline);
-    c.cairo_move_to(ctx, x, baseline_f - pangoToF64(c.pango_layout_get_baseline(layout)));
-    c.pango_cairo_show_layout(ctx, layout);
+    cairo_move_to(ctx, x, baseline_f - pangoToF64(pango_layout_get_baseline(layout)));
+    pango_cairo_show_layout(ctx, layout);
 }
 
 pub const DrawContext = struct {
@@ -138,8 +258,8 @@ pub const DrawContext = struct {
     width: u16,
     height: u16,
 
-    surface: *c.cairo_surface_t,
-    ctx: *c.cairo_t,
+    surface: *cairo_surface_t,
+    ctx: *cairo_t,
     /// GC used by fillRect (xcb_poly_fill_rectangle).
     gc: u32,
     /// Separate GC used exclusively for the xcb_copy_area blit in blit().
@@ -154,11 +274,11 @@ pub const DrawContext = struct {
 
     // drawTextSized cache: avoids copying the font description on every
     // indicator-glyph draw when the requested size matches the previous call.
-    sized_font_desc: ?*c.PangoFontDescription = null,
+    sized_font_desc: ?*PangoFontDescription = null,
     sized_font_px: u16 = 0,
     /// Tracks the font description currently set on the Pango layout so
     /// drawTextSized can skip the set/restore pair when reusing the same sized font.
-    layout_font: ?*c.PangoFontDescription = null,
+    layout_font: ?*PangoFontDescription = null,
 
     /// Actual pixel depth of the offscreen pixmap: 32 for ARGB, screen root_depth otherwise.
     depth: u8 = 24,
@@ -190,20 +310,20 @@ pub const DrawContext = struct {
         const pixmap = createXcbPixmap(conn, depth, window, width, height);
         errdefer _ = core.xcb.xcb_free_pixmap(conn, pixmap);
 
-        const surface = c.cairo_xcb_surface_create(
+        const surface = cairo_xcb_surface_create(
             conn,
             pixmap,
             visual_type,
             @intCast(width),
             @intCast(height),
         ) orelse return error.CairoSurfaceCreateFailed;
-        errdefer c.cairo_surface_destroy(surface);
+        errdefer cairo_surface_destroy(surface);
 
-        const ctx = c.cairo_create(surface) orelse return error.CairoCreateFailed;
-        errdefer c.cairo_destroy(ctx);
+        const ctx = cairo_create(surface) orelse return error.CairoCreateFailed;
+        errdefer cairo_destroy(ctx);
 
         const layout = try createPangoLayout(ctx, dpi);
-        errdefer c.g_object_unref(layout);
+        errdefer g_object_unref(layout);
 
         dc.* = .{
             .conn = conn,
@@ -238,13 +358,13 @@ pub const DrawContext = struct {
 
     pub fn deinit(self: *DrawContext) void {
         self.font.deinit();
-        if (self.sized_font_desc) |desc| c.pango_font_description_free(desc);
+        if (self.sized_font_desc) |desc| pango_font_description_free(desc);
         if (self.gc != 0) _ = core.xcb.xcb_free_gc(self.conn, self.gc);
         if (self.copy_gc != 0) _ = core.xcb.xcb_free_gc(self.conn, self.copy_gc);
-        c.g_object_unref(self.font.pango_layout);
-        c.cairo_destroy(self.ctx);
+        g_object_unref(self.font.pango_layout);
+        cairo_destroy(self.ctx);
         // Destroy surface before pixmap: Cairo holds a reference to the pixmap.
-        c.cairo_surface_destroy(self.surface);
+        cairo_surface_destroy(self.surface);
         if (self.offscreen_pixmap != 0)
             _ = core.xcb.xcb_free_pixmap(self.conn, self.offscreen_pixmap);
         self.font.allocator.destroy(self);
@@ -257,7 +377,7 @@ pub const DrawContext = struct {
     }
 
     inline fn setPangoText(self: *DrawContext, text: []const u8) void {
-        c.pango_layout_set_text(self.font.pango_layout, text.ptr, @intCast(text.len));
+        pango_layout_set_text(self.font.pango_layout, text.ptr, @intCast(text.len));
     }
 
     /// Colors the context and renders the layout's CURRENT text at the
@@ -308,10 +428,10 @@ pub const DrawContext = struct {
         const desc = self.font.current_font_desc orelse return error.NoFont;
 
         if (self.sized_font_desc == null or self.sized_font_px != size_px) {
-            if (self.sized_font_desc) |old| c.pango_font_description_free(old);
-            const temp = c.pango_font_description_copy(desc) orelse
+            if (self.sized_font_desc) |old| pango_font_description_free(old);
+            const temp = pango_font_description_copy(desc) orelse
                 return error.PangoDescCopyFailed;
-            c.pango_font_description_set_absolute_size(temp, pxToPango(size_px));
+            pango_font_description_set_absolute_size(temp, pxToPango(size_px));
             self.sized_font_desc = temp;
             self.sized_font_px = size_px;
         }
@@ -319,26 +439,26 @@ pub const DrawContext = struct {
 
         const already_set = self.layout_font == sized;
         if (!already_set) {
-            c.pango_layout_set_font_description(self.font.pango_layout, sized);
+            pango_layout_set_font_description(self.font.pango_layout, sized);
             self.layout_font = sized;
         }
         defer if (!already_set) {
-            c.pango_layout_set_font_description(self.font.pango_layout, desc);
+            pango_layout_set_font_description(self.font.pango_layout, desc);
             self.layout_font = desc;
         };
 
         self.setPangoText(text);
 
-        var ink_rect: c.PangoRectangle = undefined;
-        c.pango_layout_get_extents(self.font.pango_layout, &ink_rect, null);
+        var ink_rect: PangoRectangle = undefined;
+        pango_layout_get_extents(self.font.pango_layout, &ink_rect, null);
 
         self.setColor(color);
-        c.cairo_move_to(
+        cairo_move_to(
             self.ctx,
             @floatFromInt(x),
             @as(f64, @floatFromInt(y_top)) - pangoToF64(ink_rect.y),
         );
-        c.pango_cairo_show_layout(self.ctx, self.font.pango_layout);
+        pango_cairo_show_layout(self.ctx, self.font.pango_layout);
     }
 
     pub fn drawText(self: *DrawContext, x: u16, y: u16, text: []const u8, color: u32) !void {
@@ -359,16 +479,16 @@ pub const DrawContext = struct {
     ) !void {
         self.setColor(color);
         self.setPangoText(text);
-        c.cairo_save(self.ctx);
-        defer c.cairo_restore(self.ctx);
-        c.cairo_rectangle(
+        cairo_save(self.ctx);
+        defer cairo_restore(self.ctx);
+        cairo_rectangle(
             self.ctx,
             @floatFromInt(clip_x),
             0,
             @floatFromInt(clip_w),
             @floatFromInt(self.height),
         );
-        c.cairo_clip(self.ctx);
+        cairo_clip(self.ctx);
         for (x_positions) |x|
             showLayoutAtBaseline(self.ctx, self.font.pango_layout, x, y);
     }
@@ -397,12 +517,12 @@ pub const DrawContext = struct {
     ) !void {
         self.setPangoText(text);
         if (max_width) |w| {
-            c.pango_layout_set_width(self.font.pango_layout, @as(i32, w) * c.pango_scale);
-            c.pango_layout_set_ellipsize(self.font.pango_layout, c.PangoEllipsizeMode.END);
+            pango_layout_set_width(self.font.pango_layout, @as(i32, w) * pango_scale);
+            pango_layout_set_ellipsize(self.font.pango_layout, PangoEllipsizeMode.END);
         }
         defer if (max_width != null) {
-            c.pango_layout_set_width(self.font.pango_layout, -1);
-            c.pango_layout_set_ellipsize(self.font.pango_layout, c.PangoEllipsizeMode.NONE);
+            pango_layout_set_width(self.font.pango_layout, -1);
+            pango_layout_set_ellipsize(self.font.pango_layout, PangoEllipsizeMode.NONE);
         };
         self.paintText(x, y, color);
     }
@@ -410,7 +530,7 @@ pub const DrawContext = struct {
     pub fn measureTextWidth(self: *DrawContext, text: []const u8) u16 {
         self.setPangoText(text);
         var width: c_int = undefined;
-        c.pango_layout_get_pixel_size(self.font.pango_layout, &width, null);
+        pango_layout_get_pixel_size(self.font.pango_layout, &width, null);
         // Pango returns signed pixels; clamp to the u16 range so an
         // unexpected negative or >65535 measurement can't panic/UB the cast.
         const w: c_int = std.math.clamp(width, 0, @as(c_int, std.math.maxInt(u16)));
@@ -422,7 +542,7 @@ pub const DrawContext = struct {
     /// flush here: it is safe inside xcb_grab_server precisely because the
     /// copy is sent with the caller's batch end.
     inline fn blitImpl(self: *DrawContext, x: u16, w: u16, comptime flush: bool) void {
-        c.cairo_surface_flush(self.surface);
+        cairo_surface_flush(self.surface);
         if (self.copy_gc == 0) return;
         _ = core.xcb.xcb_copy_area(
             self.conn,
@@ -439,10 +559,11 @@ pub const DrawContext = struct {
         if (flush) _ = core.xcb.xcb_flush(self.conn);
     }
 
-    /// Full-width xcb_copy_area enqueued but not flushed.
-    /// Safe inside xcb_grab_server; flushed by ungrabAndFlush() or the event-loop's xcb_flush.
-    pub fn queueBlit(self: *DrawContext) void {
-        self.blitImpl(0, self.width, false);
+    /// Region xcb_copy_area enqueued but not flushed. Safe inside
+    /// xcb_grab_server; flushed by ungrabAndFlush() or the event-loop's xcb_flush.
+    pub fn queueBlit(self: *DrawContext, x: u16, w: u16) void {
+        if (w == 0) return;
+        self.blitImpl(x, w, false);
     }
 
     /// Region copy with immediate xcb_flush. Used on timer-driven paths
@@ -484,13 +605,13 @@ pub fn probeFontMetrics(
     dpi: f32,
     font_names: []const []const u8,
 ) ?struct { ascent: i16, descent: i16 } {
-    const surface = c.cairo_image_surface_create(.ARGB32, 1, 1) orelse return null;
-    defer c.cairo_surface_destroy(surface);
+    const surface = cairo_image_surface_create(.ARGB32, 1, 1) orelse return null;
+    defer cairo_surface_destroy(surface);
     // The cairo context exists only to obtain the Pango layout.
-    const ctx = c.cairo_create(surface) orelse return null;
-    defer c.cairo_destroy(ctx);
+    const ctx = cairo_create(surface) orelse return null;
+    defer cairo_destroy(ctx);
     const layout = createPangoLayout(ctx, dpi) catch return null;
-    defer c.g_object_unref(layout);
+    defer g_object_unref(layout);
 
     var font = FontState{ .allocator = allocator, .pango_layout = layout };
     if (font_names.len > 0) font.loadFonts(font_names) catch return null;
@@ -534,9 +655,9 @@ pub fn loadBarFonts(dc: *DrawContext, size_override: ?u16) !void {
     if (sized.len > 1) debug.info("Loaded {} fonts with fallback support", .{sized.len});
 }
 
-fn createPangoLayout(ctx: *c.cairo_t, dpi: f32) !*c.PangoLayout {
-    const layout = c.pango_cairo_create_layout(ctx) orelse return error.PangoLayoutCreateFailed;
-    c.pango_cairo_context_set_resolution(c.pango_layout_get_context(layout), @floatCast(dpi));
+fn createPangoLayout(ctx: *cairo_t, dpi: f32) !*PangoLayout {
+    const layout = pango_cairo_create_layout(ctx) orelse return error.PangoLayoutCreateFailed;
+    pango_cairo_context_set_resolution(pango_layout_get_context(layout), @floatCast(dpi));
     return layout;
 }
 

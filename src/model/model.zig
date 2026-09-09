@@ -1,7 +1,8 @@
 //! Single source of truth for management state.
 //! Layer rule: pure core (no X11, no feature imports). Single-threaded.
-//! Feature transitions live in src/window/modules/; this file exports only
-//! shared vocabulary types, queries, and core focus/tiling intrinsics.
+//! Feature transitions live in the window layer's optional modules; this file
+//! exports only shared vocabulary types, queries, and core focus/tiling
+//! intrinsics.
 const std = @import("std");
 const utils = @import("utils");
 const constants = @import("constants");
@@ -88,6 +89,115 @@ pub const WsState = struct {
     params: LayoutParams = .{},
 };
 
+/// Bounded, stack-allocated key-value collection with sorted-key binary search.
+///
+/// Parameterised by key type, value type, and a hard capacity ceiling
+/// (stack-allocated arrays, no heap allocation). Keys are kept in sorted
+/// order at all times: lookups (get, getPtr, has) use O(log n) binary search;
+/// put and remove use binary search for the position and then shift arrays to
+/// maintain sorted order.
+///
+/// Threading model: single-threaded, no locking needed; all access occurs
+/// on the event-loop thread.
+///
+/// When the capacity is reached, put returns error.StoreFull; there is no
+/// eviction or overflow, the ceiling is absolute.
+pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type {
+    return struct {
+        const Self = @This();
+        pub const Error = error{StoreFull};
+
+        keys: [capacity]K = undefined,
+        vals: [capacity]V = undefined,
+        len: usize = 0,
+
+        fn binarySearch(
+            self: *const Self,
+            comptime mode: enum { exact, lower_bound },
+            k: K,
+        ) if (mode == .exact) ?usize else usize {
+            var lo: usize = 0;
+            var hi: usize = self.len;
+            while (lo < hi) {
+                const mid = lo + (hi - lo) / 2;
+                if (mode == .exact and self.keys[mid] == k) return mid;
+                if (self.keys[mid] < k) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            return if (mode == .exact) null else lo;
+        }
+
+        pub fn getPtr(self: *Self, k: K) ?*V {
+            if (self.binarySearch(.exact, k)) |i| return &self.vals[i];
+            return null;
+        }
+
+        // Pointer-relocation contract: the Store is a contiguous array, so a
+        // *V returned by getPtr/put remains valid across get/put/remove of
+        // OTHER keys (those shift slots but never reallocate). It is
+        // invalidated ONLY by put(k) on a different entry, remove(k), or
+        // clear() -- each of which may move the slot that k occupies -- or by
+        // a reload into self.keys/self.vals wholesale. Callers must not cache
+        // a *V across such an operation on its own key.
+
+        pub fn get(self: *const Self, k: K) ?V {
+            if (self.binarySearch(.exact, k)) |i| return self.vals[i];
+            return null;
+        }
+
+        pub fn has(self: *const Self, k: K) bool {
+            return self.binarySearch(.exact, k) != null;
+        }
+
+        pub fn put(self: *Self, k: K, v: V) Error!*V {
+            if (self.binarySearch(.exact, k)) |i| {
+                self.vals[i] = v;
+                return &self.vals[i];
+            }
+            if (self.len == capacity) return Error.StoreFull;
+            const pos = self.binarySearch(.lower_bound, k);
+            std.mem.copyBackwards(K, self.keys[pos + 1 .. self.len + 1], self.keys[pos..self.len]);
+            std.mem.copyBackwards(V, self.vals[pos + 1 .. self.len + 1], self.vals[pos..self.len]);
+            self.keys[pos] = k;
+            self.vals[pos] = v;
+            self.len += 1;
+            return &self.vals[pos];
+        }
+
+        /// Sorted-shift-remove: elements after `i` shift left to fill the gap.
+        /// O(n); iteration order stays sorted-by-key.
+        pub fn remove(self: *Self, k: K) bool {
+            if (self.binarySearch(.exact, k)) |i| {
+                const last = self.len - 1;
+                std.mem.copyForwards(K, self.keys[i..last], self.keys[i + 1 .. self.len]);
+                std.mem.copyForwards(V, self.vals[i..last], self.vals[i + 1 .. self.len]);
+                self.len = last;
+                return true;
+            }
+            return false;
+        }
+
+        pub const Item = struct { key: K, val: *const V };
+
+        /// seq must be < count(). Iterates in sorted-key order.
+        pub fn at(self: *const Self, seq: usize) Item {
+            std.debug.assert(seq < self.len);
+            return .{ .key = self.keys[seq], .val = &self.vals[seq] };
+        }
+
+        pub fn count(self: *const Self) usize {
+            return self.len;
+        }
+
+        pub fn clear(self: *Self) void {
+            self.len = 0;
+        }
+    };
+}
+
 pub const store_capacity = 128;
 pub const mru_capacity = 16;
 /// Bounded per-workspace tiled membership list (defined capacity; total
@@ -95,7 +205,7 @@ pub const mru_capacity = 16;
 pub const max_tiled_per_ws = constants.Limits.max_tiled_windows;
 pub const OrderList = utils.BoundedList(WindowId, max_tiled_per_ws);
 pub const MruList = utils.BoundedList(WindowId, mru_capacity);
-pub const StoreT = @import("store").Store(WindowId, Entry, store_capacity);
+pub const StoreT = Store(WindowId, Entry, store_capacity);
 
 /// Index (workspace id) of the lowest set bit in `m`. Returns null when `m`
 /// is zero (`@ctz(0)` = 64 is out of the [0, MAX_WS) index range).
@@ -135,7 +245,10 @@ pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) error{CapacityFull}!vo
     const target: WSId = hint_ws orelse m.current;
     // Defined-capacity refusal with rollback, BEFORE any observable state change.
     const ptr = m.store.put(win, .{ .mask = bit(target), .anchor = .tiled }) catch return error.CapacityFull;
-    if (!m.ws[target].tiled_order.append(win)) { _ = m.store.remove(win); return error.CapacityFull; }
+    if (!m.ws[target].tiled_order.append(win)) {
+        _ = m.store.remove(win);
+        return error.CapacityFull;
+    }
     // home_ws cache: set AFTER tiled_order append succeeds so the cache
     // is only valid when the window actually has a tiled slot.
     ptr.home_ws = target;
@@ -225,7 +338,8 @@ pub const HonorDecision = enum { geometry_applied, border_only, ignored };
 // ---------------------------------------------------------------------------
 // Core intrinsics: focus (MRU + fallback) and tiling-param transitions. These
 // are pure model operations and are the ONLY transition logic that lives in
-// the core; every other feature transition lives in src/window/modules/.
+// the core; every other feature transition lives in the window layer's
+// optional modules.
 // ---------------------------------------------------------------------------
 
 pub fn setFocus(m: *Model, win: WindowId) void {
@@ -254,7 +368,7 @@ pub fn clearFocus(m: *Model) void {
 ///   3. any visible floating-base window not in tiled_order.
 /// First visibleOn(ws) candidate wins; null when nothing qualifies.
 pub fn fallbackFocusCandidate(m: *const Model, ws: WSId) ?WindowId {
-    // 1. focus MRU, NEWEST first: mru[0] is the MOST RECENT focus (T15),
+    // 1. focus MRU, NEWEST first: mru[0] is the MOST RECENT focus,
     //    so minimizing the focused window falls back to the previously
     //    focused one. visibleOn rejects parked entries, including the
     //    just-parked window itself.

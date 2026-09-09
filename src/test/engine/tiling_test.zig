@@ -1,4 +1,4 @@
-//! Layout engine tests (T19-T30).
+//! Layout engine tests.
 //!
 //! Golden-value tests: expected rects are hand-computed from the layout
 //! modules' formulas (modules/*.zig), so any drift fails loudly. Fixture: windows registered on workspace 0 via model.register.
@@ -53,7 +53,7 @@ const Fixture = struct {
             .wa = wa,
         };
         for (wins) |w| model.register(&self.m, w, null) catch unreachable;
-        // B5: materialize hints aligned index-for-index with the order slice.
+        // Materialize hints aligned index-for-index with the order slice.
         const s0 = &self.m.ws[0];
         for (s0.tiled_order.constSlice(), 0..) |w, i| {
             self.hint_buf[i] = if (self.m.store.get(w)) |e| e.size_hints else .{};
@@ -96,8 +96,8 @@ fn expectP(out: *const List, i: usize, win: model.WindowId, x: i32, y: i32, w: u
     try testing.expectEqual(h, p.rect.height);
 }
 
-// T19 - master, single window fills the work area minus gaps/borders.
-test "T19 master single window" {
+// master, single window fills the work area minus gaps/borders.
+test "master single window" {
     var fx: Fixture = undefined;
     fx.init(&.{11}, stdWa());
     defer fx.deinit();
@@ -111,8 +111,8 @@ test "T19 master single window" {
     try expectP(&out, 0, 11, 8, 8, 780, 580, true);
 }
 
-// T20 - master + stack, default 50/50 split.
-test "T20 master two windows" {
+// master + stack, default 50/50 split.
+test "master two windows" {
     var fx: Fixture = undefined;
     fx.init(&.{ 11, 12 }, stdWa());
     defer fx.deinit();
@@ -127,8 +127,8 @@ test "T20 master two windows" {
     try expectP(&out, 1, 12, 404, 8, 384, 580, true);
 }
 
-// T21 - primary_on_right mirrors the columns.
-test "T21 master on right" {
+// primary_on_right mirrors the columns.
+test "master on right" {
     var fx: Fixture = undefined;
     fx.init(&.{ 11, 12 }, stdWa());
     defer fx.deinit();
@@ -142,14 +142,14 @@ test "T21 master on right" {
     try testing.expectEqual(@as(usize, 2), out.len);
     // master_x = 800 - 400 = 400; x = 408
     try expectP(&out, 0, 11, 408, 8, 384, 580, true);
-    // Mirrored stack: x = gap + gap/2 = 12 (exact mirror of T20's stack at
+    // Mirrored stack: x = gap + gap/2 = 12 (exact mirror of the two-window stack at
     // [404,388] -> 800-404-384 = 12); a 0 pane origin would leave only a
     // half-gap at the left screen edge.
     try expectP(&out, 1, 12, 12, 8, 384, 580, true);
 }
 
-// T22 - grid 2x2.
-test "T22 grid 2x2" {
+// grid 2x2.
+test "grid 2x2" {
     var fx: Fixture = undefined;
     fx.init(&.{ 11, 12, 13, 14 }, stdWa());
     defer fx.deinit();
@@ -165,11 +165,11 @@ test "T22 grid 2x2" {
     try expectP(&out, 3, 14, 404, 304, 384, 284, true);
 }
 
-// T23 - grid relaxed widens the partial last row: cells share the full
+// grid relaxed widens the partial last row: cells share the full
 // screen width AND the partial row is column-spaced by that wider cell, so
 // the wide relaxed cells do not overlap (previously the partial row kept the
 // narrow column stride, making neighbouring wide cells overlap each other).
-test "T23 grid relaxed partial row" {
+test "grid relaxed partial row" {
     var fx: Fixture = undefined;
     fx.init(&.{ 11, 12, 13, 14, 15 }, stdWa());
     defer fx.deinit();
@@ -198,8 +198,8 @@ test "T23 grid relaxed partial row" {
     try expectP(&outr, 4, 15, 272, 304, 252, 284, true);
 }
 
-// T24 - fibonacci spiral of four, counter-clockwise from top-left.
-test "T24 fibonacci spiral" {
+// fibonacci spiral of four, counter-clockwise from top-left.
+test "fibonacci spiral" {
     var fx: Fixture = undefined;
     fx.init(&.{ 11, 12, 13, 14 }, stdWa());
     defer fx.deinit();
@@ -215,14 +215,14 @@ test "T24 fibonacci spiral" {
     try expectP(&out, 3, 14, 404, 304, 186, 284, true); // up, final rect
 }
 
-// T25 - fibonacci overflow: the spiral prefix stays on screen, the overflow
+// fibonacci overflow: the spiral prefix stays on screen, the overflow
 // tail is parked with focusedElse's pick raised in the leftover region.
 // Trace (200x200, gap 8, border 2): five spiral splits fit before BOTH
 // cursor dims must clear min_area (the branch checks both regardless of
 // split direction), so windows 41..45 are placed normally and the overflow
 // branch fires at index 5, raising focused window 75 into {128,104} 12x36
 // shrunk from the 16x40 remainder.
-test "T25 fibonacci overflow fallback" {
+test "fibonacci overflow fallback" {
     var wins: [40]model.WindowId = undefined;
     for (&wins, 0..) |*w, i| w.* = @intCast(41 + i);
     var fx: Fixture = undefined;
@@ -252,8 +252,8 @@ test "T25 fibonacci overflow fallback" {
     try expectP(&out, 5, 75, 128, 104, 12, 36, true);
 }
 
-// T26 - leaf BSP splits the longer axis first, ties favour vertical.
-test "T26 leaf balanced splits" {
+// leaf BSP splits the longer axis first, ties favour vertical.
+test "leaf balanced splits" {
     var fx: Fixture = undefined;
     fx.init(&.{ 11, 12, 13, 14 }, stdWa());
     defer fx.deinit();
@@ -270,8 +270,8 @@ test "T26 leaf balanced splits" {
     try expectP(&out, 3, 14, 404, 304, 384, 284, true);
 }
 
-// T27 - scroll strip: caller pre-clamps offset; off-viewport slots parked.
-test "T27 scroll strip and parking" {
+// scroll strip: caller pre-clamps offset; off-viewport slots parked.
+test "scroll strip and parking" {
     var fx: Fixture = undefined;
     fx.init(&.{ 11, 12, 13, 14, 15 }, stdWa());
     defer fx.deinit();
@@ -301,8 +301,8 @@ test "T27 scroll strip and parking" {
     try expectP(&out, 4, 15, 404, 8, 384, 580, true);
 }
 
-// T28 - monocle raises focusedElse's pick, parks the rest; gaps variant insets.
-test "T28 monocle gaps variant" {
+// monocle raises focusedElse's pick, parks the rest; gaps variant insets.
+test "monocle gaps variant" {
     var fx: Fixture = undefined;
     fx.init(&.{ 11, 12, 13 }, stdWa());
     defer fx.deinit();
@@ -328,14 +328,14 @@ test "T28 monocle gaps variant" {
     try expectP(&out2, 0, 12, 0, 0, 796, 596, true);
 }
 
-// T29 - size hints are applied centrally at emit time (inc snap + centring).
-test "T29 hints applied at emit" {
+// size hints are applied centrally at emit time (inc snap + centring).
+test "hints applied at emit" {
     var fx: Fixture = undefined;
     fx.init(&.{11}, stdWa());
     defer fx.deinit();
 
     // Mutate the model entry, then re-materialize the View's hint snapshot
-    // exactly as sync.reconcile does per retile (B5: hints are frozen INTO
+    // exactly as sync.reconcile does per retile (hints are frozen INTO
     // the View; a post-snapshot store change needs a fresh View).
     fx.m.store.getPtr(11).?.size_hints = .{ .inc_width = 100, .inc_height = 100 };
     fx.hint_buf[0] = fx.m.store.getPtr(11).?.size_hints;
@@ -348,12 +348,12 @@ test "T29 hints applied at emit" {
     try expectP(&out, 0, 11, 48, 48, 700, 500, true);
 }
 
-// T29b - horizontal geometry enforcement on the master-slave axis: a slave
+// Horizontal geometry enforcement on the master-slave axis: a slave
 // that declares a small max_width (e.g. a dialog) shrinks the stack column to
 // its natural width and the master absorbs the freed horizontal space, so the
 // dialog no longer leaves a dead gap beside it. Mirrors tileColumn's vertical
 // max_height capping, on the width axis.
-test "T29b master swallows freed space from a narrow dialog slave" {
+test "master swallows freed space from a narrow dialog slave" {
     var fx: Fixture = undefined;
     fx.init(&.{ 11, 12 }, stdWa());
     defer fx.deinit();
@@ -376,8 +376,8 @@ test "T29b master swallows freed space from a narrow dialog slave" {
     try expectP(&out, 1, 12, 588, 8, 200, 580, true);
 }
 
-// T30 - purity: compute twice yields identical output and mutates nothing.
-test "T30 deterministic and non-mutating" {
+// purity: compute twice yields identical output and mutates nothing.
+test "deterministic and non-mutating" {
     var fx: Fixture = undefined;
     fx.init(&.{ 11, 12, 13 }, stdWa());
     defer fx.deinit();
@@ -403,10 +403,10 @@ test "T30 deterministic and non-mutating" {
     try testing.expectEqual(store_count_before, fx.m.store.count());
 }
 
-// T31 - empty order is a supported input for every layout: each
+// empty order is a supported input for every layout: each
 // compute must emit nothing and must not trap. Grid previously divided by
 // calcGridShape(0).rows == 0 and monocle indexed order[len - 1].
-test "T31 n=0 emits nothing across all layouts" {
+test "n=0 emits nothing across all layouts" {
     var fx: Fixture = undefined;
     fx.init(&.{}, stdWa());
     defer fx.deinit();
@@ -419,14 +419,14 @@ test "T31 n=0 emits nothing across all layouts" {
     }
 }
 
-// T32 - scroll orphan keep-last invariant. compute() now clamps
+// scroll orphan keep-last invariant. compute() now clamps
 // viewport_offset internally, so even a stale over-max offset is safe: the
 // last window stays visible without requiring caller-side clamping.
 //   - a stale over-max offset is clamped, last window stays visible;
 //   - the documented caller clamp (pipeline.preReconcileDuties) is still
 //     correct but no longer required for correctness;
 //   - the shrink case (n drops, old offset exceeds the new max) clamps to 0.
-test "T32 scroll orphan keep-last invariant" {
+test "scroll orphan keep-last invariant" {
     var fx: Fixture = undefined;
     fx.init(&.{ 11, 12, 13, 14 }, stdWa());
     defer fx.deinit();
@@ -465,11 +465,11 @@ test "T32 scroll orphan keep-last invariant" {
     try testing.expect(out_shrunk.constSlice()[1].visible);
 }
 
-// T33 - emission-order pin across all layouts with a shared non-empty
-// fixture (companion to T31's empty-input pin): count and win-id
+// emission-order pin across all layouts with a shared non-empty
+// fixture (companion to the empty-input pin test): count and win-id
 // sequence are frozen so any guard/reorder drift fails loudly. Geometry is
-// already pinned per-layout by T19-T28.
-test "T33 emission order pin across layouts" {
+// already pinned per-layout above.
+test "emission order pin across layouts" {
     var fx: Fixture = undefined;
     fx.init(&.{ 11, 12, 13 }, stdWa());
     defer fx.deinit();
@@ -495,11 +495,11 @@ test "T33 emission order pin across layouts" {
     try testing.expectEqual(@as(model.WindowId, 13), out_mono.constSlice()[2].win);
 }
 
-// T34 - layout cycling is registry-driven and config-order (S20): the cycle
+// layout cycling is registry-driven and config-order: the cycle
 // ring is the config layout-name list resolved by name (unresolvable names
 // are skipped); stepping wraps modulo the list. Replaces the removed
 // model.cycleLayout (kind is now an opaque u8, resolved at seed time).
-test "T34 layout cycle is config-order and wraps" {
+test "layout cycle is config-order and wraps" {
     const names = [_][]const u8{ "master", "monocle", "grid", "fibonacci" };
     var ring: [8]u8 = undefined;
     var n: usize = 0;

@@ -239,7 +239,7 @@ fn computeResizeRect(drag: DragState, dx: i32, dy: i32, wa: WorkArea) utils.Rect
     // Anchor = corner opposite the grabbed one, fixed; the moving
     // corner follows the cursor. min/max(anchor, moving) per axis
     // makes crossing the anchor flip growth automatically.
-    const axes = switch (drag.resize_corner) {
+    const axes: struct { left: bool, top: bool } = switch (drag.resize_corner) {
         .top_left => .{ .left = true, .top = true },
         .top_right => .{ .left = false, .top = true },
         .bottom_left => .{ .left = true, .top = false },

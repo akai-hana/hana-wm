@@ -1,4 +1,9 @@
 #!/bin/bash
+# Destructive rewrite loop: each pass rewrites commit history with an LLM and
+# force-pushes it. Deliberately demands an explicit opt-in flag so a stray run
+# cannot clobber shared history.
+
+[ "$1" = "--yes-i-know" ] || { echo "Refusing: pass --yes-i-know to run this destructive force-push loop." >&2; exit 1; }
 
 max=250
 
